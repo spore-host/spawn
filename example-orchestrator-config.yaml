@@ -1,0 +1,69 @@
+# Spawn Orchestrator Configuration
+# Monitors queue depth and automatically bursts to AWS EC2
+
+# Job array to coordinate
+job_array_id: my-pipeline
+
+# SQS queue URL to monitor
+queue_url: https://sqs.us-east-1.amazonaws.com/123456789012/my-queue
+
+# AWS region
+region: us-east-1
+
+# Burst policy
+burst_policy:
+  # Mode: "manual" (no auto-burst), "auto" (automatic), "scheduled" (future)
+  mode: auto
+
+  # Burst if queue depth exceeds this threshold
+  queue_depth_threshold: 100
+
+  # Maximum local capacity (don't burst if local can handle it)
+  local_capacity: 4
+
+  # Maximum cloud instances to launch
+  max_cloud_instances: 50
+
+  # Minimum cloud instances to keep warm (0 = scale to zero)
+  min_cloud_instances: 0
+
+  # Maximum cost per hour ($) - stop bursting if exceeded
+  cost_budget: 10.0
+
+  # Wait this long before terminating idle instances
+  scale_down_delay: 5m
+
+  # How often to check queue depth
+  check_interval: 1m
+
+  # Instance configuration
+  instance_type: c5.4xlarge
+  ami: ami-0abcdef1234567890  # Your spawn AMI
+  spot: true                  # Use Spot instances for cost savings
+
+  # Optional: SSH key, networking
+  key_name: my-key
+  subnet_id: subnet-abc123
+  security_groups:
+    - sg-abc123
+
+# Example scenarios:
+#
+# High-throughput processing:
+#   queue_depth_threshold: 200
+#   max_cloud_instances: 100
+#   instance_type: c5.9xlarge
+#   spot: true
+#   cost_budget: 50.0
+#
+# Cost-optimized:
+#   queue_depth_threshold: 50
+#   max_cloud_instances: 20
+#   instance_type: t3.large
+#   spot: true
+#   cost_budget: 5.0
+#
+# Low-latency (keep warm pool):
+#   min_cloud_instances: 5
+#   queue_depth_threshold: 10
+#   scale_down_delay: 30m

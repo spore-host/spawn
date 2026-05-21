@@ -1,0 +1,93 @@
+groups:
+  - name: spawn_capacity
+    interval: 60s
+    rules:
+      - alert: HighFleetSize
+        expr: count(spawn_instance_uptime_seconds) > 100
+        for: 10m
+        labels:
+          severity: warning
+          component: spawn
+          category: capacity
+        annotations:
+          summary: "Fleet size {{ $value }} exceeds normal capacity"
+          description: "Total instance count of {{ $value }} is above normal. Review for unexpected scaling."
+          instance_count: "{{ $value }}"
+
+      - alert: LowSpotAvailability
+        expr: count(spawn_instance_spot == 0) / count(spawn_instance_uptime_seconds) < 0.2
+        for: 10m
+        labels:
+          severity: warning
+          component: spawn
+          category: capacity
+        annotations:
+          summary: "Spot instance usage at {{ $value | humanizePercentage }}"
+          description: "Less than 20% of instances are on-demand. Spot interruptions may impact capacity."
+          spot_ratio: "{{ $value }}"
+
+      - alert: RegionalCapacityImbalance
+        expr: |
+          (
+            max by (region) (count by (region) (spawn_instance_uptime_seconds))
+            /
+            avg(count by (region) (spawn_instance_uptime_seconds))
+          ) > 3
+        for: 15m
+        labels:
+          severity: info
+          component: spawn
+          category: capacity
+        annotations:
+          summary: "Region {{ $labels.region }} has {{ $value }}x average capacity"
+          description: "Region {{ $labels.region }} has significantly more instances than other regions. Consider rebalancing."
+          region: "{{ $labels.region }}"
+          ratio: "{{ $value }}"
+
+      - alert: JobArraySizeAnomaly
+        expr: spawn_job_array_size > 50
+        for: 10m
+        labels:
+          severity: warning
+          component: spawn
+          category: capacity
+        annotations:
+          summary: "Job array {{ $labels.job_array_name }} has {{ $value }} instances"
+          description: "Job array {{ $labels.job_array_name }} ({{ $labels.job_array_id }}) has {{ $value }} instances, which is unusually large."
+          job_array_id: "{{ $labels.job_array_id }}"
+          job_array_name: "{{ $labels.job_array_name }}"
+          size: "{{ $value }}"
+
+      - alert: FleetGrowthAnomaly
+        expr: |
+          (
+            count(spawn_instance_uptime_seconds)
+            /
+            (count(spawn_instance_uptime_seconds offset 1h) + 1)
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+          component: spawn
+          category: capacity
+        annotations:
+          summary: "Fleet grew {{ $value | humanizePercentage }} in 1 hour"
+          description: "Instance count doubled in the last hour. Verify this is expected scaling."
+          growth_ratio: "{{ $value }}"
+
+      - alert: ProviderImbalance
+        expr: |
+          (
+            count(spawn_instance_uptime_seconds{provider="ec2"})
+            /
+            (count(spawn_instance_uptime_seconds{provider="local"}) + 1)
+          ) > 10
+        for: 15m
+        labels:
+          severity: info
+          component: spawn
+          category: capacity
+        annotations:
+          summary: "EC2 instances {{ $value }}x local instances"
+          description: "Hybrid compute is heavily skewed toward EC2. Consider balancing workload."
+          ratio: "{{ $value }}"

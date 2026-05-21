@@ -1,0 +1,19 @@
+defaults:
+  region: us-east-1
+  ttl: 4h
+  spot: true
+
+params:
+  - instance_type: t3.micro
+    alpha: 0.1
+    beta: 0.5
+
+  - instance_type: t3.small
+    alpha: 0.2
+    beta: 0.6
+
+  - instance_type: t3.medium
+    alpha: 0.3
+    beta: 0.7
+    ttl: 6h
+    region: us-west-2

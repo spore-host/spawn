@@ -1,0 +1,69 @@
+{
+  "pipeline_id": "streaming-demo",
+  "pipeline_name": "Network Streaming Demo",
+  "stages": [
+    {
+      "stage_id": "producer",
+      "instance_type": "c5.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "ami": "ami-0c55b159cbfafe1f0",
+      "spot": true,
+      "timeout": "1h",
+      "command": "python3 /opt/spawn/examples/producer.py --port 50000",
+      "depends_on": [],
+      "data_output": {
+        "mode": "stream",
+        "protocol": "tcp",
+        "port": 50000
+      },
+      "env": {
+        "BATCH_SIZE": "1000",
+        "TOTAL_BATCHES": "100"
+      }
+    },
+    {
+      "stage_id": "processor",
+      "instance_type": "c5.xlarge",
+      "instance_count": 2,
+      "region": "us-east-1",
+      "spot": true,
+      "timeout": "1h",
+      "command": "python3 /opt/spawn/examples/processor.py",
+      "depends_on": ["producer"],
+      "data_input": {
+        "mode": "stream",
+        "source_stage": "producer",
+        "protocol": "tcp"
+      },
+      "data_output": {
+        "mode": "stream",
+        "protocol": "tcp",
+        "port": 50001
+      }
+    },
+    {
+      "stage_id": "consumer",
+      "instance_type": "c5.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "spot": true,
+      "timeout": "1h",
+      "command": "python3 /opt/spawn/examples/consumer.py --output /data/results.csv",
+      "depends_on": ["processor"],
+      "data_input": {
+        "mode": "stream",
+        "source_stage": "processor",
+        "protocol": "tcp"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/data/*.csv"]
+      }
+    }
+  ],
+  "s3_bucket": "my-pipeline-data",
+  "s3_prefix": "streaming-demo",
+  "on_failure": "stop",
+  "max_cost_usd": 5.0
+}

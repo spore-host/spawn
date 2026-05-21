@@ -1,0 +1,19 @@
+[Unit]
+Description=Spawn Orchestrator - Automatic cloud burst daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/spawn-orchestrator run /etc/spawn/orchestrator-config.yaml
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment="AWS_REGION=us-east-1"
+# Environment="AWS_PROFILE=default"  # Uncomment if using named profile
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,69 @@
+{
+  "pipeline_id": "ml-training-20260129",
+  "pipeline_name": "Distributed ML Training Pipeline",
+  "stages": [
+    {
+      "stage_id": "preprocess",
+      "instance_type": "c5.2xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "spot": true,
+      "timeout": "2h",
+      "command": "./preprocess.sh --input ${INPUT_PATH} --output /data/processed",
+      "depends_on": [],
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/data/processed/*"]
+      },
+      "env": {
+        "INPUT_PATH": "s3://my-data/raw/",
+        "BATCH_SIZE": "10000"
+      }
+    },
+    {
+      "stage_id": "train",
+      "instance_type": "p3.8xlarge",
+      "instance_count": 4,
+      "region": "us-east-1",
+      "placement_group": "auto",
+      "efa_enabled": true,
+      "timeout": "12h",
+      "command": "mpirun -np 4 --hostfile /etc/spawn/pipeline-peers.json python train.py",
+      "depends_on": ["preprocess"],
+      "data_input": {
+        "mode": "s3",
+        "source_stage": "preprocess",
+        "dest_path": "/data/input"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/models/*.h5", "/logs/training.log"]
+      }
+    },
+    {
+      "stage_id": "evaluate",
+      "instance_type": "m5.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "timeout": "1h",
+      "command": "python evaluate.py --model /models/best.h5",
+      "depends_on": ["train"],
+      "data_input": {
+        "mode": "s3",
+        "source_stage": "train",
+        "dest_path": "/models"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/results/*"]
+      }
+    }
+  ],
+  "s3_bucket": "my-pipeline-data",
+  "s3_prefix": "pipelines/ml-training",
+  "result_s3_bucket": "my-results",
+  "result_s3_prefix": "pipelines/results",
+  "on_failure": "stop",
+  "max_cost_usd": 100.0,
+  "notification_email": "user@example.com"
+}

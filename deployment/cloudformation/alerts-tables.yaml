@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DynamoDB tables and SNS topics for spawn alerting system'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - production
+      - staging
+      - development
+    Description: Environment name for resource tagging
+
+  KMSKeyArn:
+    Type: String
+    Description: >
+      Customer-managed KMS key ARN for SNS topic and DynamoDB encryption.
+      Create a key with: aws kms create-key --description "spawn-alerts"
+      then provide its ARN here. Using a CMK provides key rotation control,
+      CloudTrail audit logging of envelope key usage, and cross-account access control.
+
+Resources:
+  SpawnAlertsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spawn-alerts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: alert_id
+          AttributeType: S
+        - AttributeName: sweep_id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: alert_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: sweep_id-index
+          KeySchema:
+            - AttributeName: sweep_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: user_id-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: alerts
+
+  SpawnAlertHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spawn-alert-history
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: alert_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: alert_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: user_id-timestamp-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: alerts
+
+  # KMSKeyArn is a required deploy-time parameter — Trivy cannot resolve required
+  # parameters with no default, so it treats KmsMasterKeyId as absent (AVD-AWS-0095)
+  # or as not a CMK (AVD-AWS-0136). The actual deployment always uses a CMK.
+  # trivy:ignore:AVD-AWS-0095
+  # trivy:ignore:AVD-AWS-0136
+  SweepAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: spawn-sweep-alerts
+      DisplayName: Spawn Sweep Alerts
+      KmsMasterKeyId: !Ref KMSKeyArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: alerts
+
+  # trivy:ignore:AVD-AWS-0095 -- KMSKeyArn required parameter, cannot be resolved by Trivy
+  # trivy:ignore:AVD-AWS-0136
+  ScheduleAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: spawn-schedule-alerts
+      DisplayName: Spawn Schedule Alerts
+      KmsMasterKeyId: !Ref KMSKeyArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: alerts
+
+  # trivy:ignore:AVD-AWS-0095
+  # trivy:ignore:AVD-AWS-0136
+  CostAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: spawn-cost-alerts
+      DisplayName: Spawn Cost Alerts
+      KmsMasterKeyId: !Ref KMSKeyArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: alerts
+
+  SpawnCostHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spawn-cost-history
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: cost
+
+  SpawnAlertPreferencesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spawn-alert-preferences
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: alerts
+
+Outputs:
+  AlertsTableName:
+    Description: Name of the alerts table
+    Value: !Ref SpawnAlertsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-alerts-table'
+
+  AlertsTableArn:
+    Description: ARN of the alerts table
+    Value: !GetAtt SpawnAlertsTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-alerts-table-arn'
+
+  AlertHistoryTableName:
+    Description: Name of the alert history table
+    Value: !Ref SpawnAlertHistoryTable
+    Export:
+      Name: !Sub '${AWS::StackName}-alert-history-table'
+
+  AlertHistoryTableArn:
+    Description: ARN of the alert history table
+    Value: !GetAtt SpawnAlertHistoryTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-alert-history-table-arn'
+
+  SweepAlertsTopicArn:
+    Description: ARN of the sweep alerts SNS topic
+    Value: !Ref SweepAlertsTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-sweep-alerts-topic'
+
+  ScheduleAlertsTopicArn:
+    Description: ARN of the schedule alerts SNS topic
+    Value: !Ref ScheduleAlertsTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-schedule-alerts-topic'
+
+  CostAlertsTopicArn:
+    Description: ARN of the cost alerts SNS topic
+    Value: !Ref CostAlertsTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-cost-alerts-topic'

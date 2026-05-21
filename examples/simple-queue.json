@@ -1,0 +1,29 @@
+{
+  "queue_id": "simple-queue",
+  "queue_name": "simple-batch-job",
+  "jobs": [
+    {
+      "job_id": "setup",
+      "command": "mkdir -p /tmp/results && echo 'Starting batch job...'",
+      "timeout": "1m"
+    },
+    {
+      "job_id": "process",
+      "command": "for i in {1..10}; do echo \"Processing item $i\"; sleep 1; done > /tmp/results/output.txt",
+      "timeout": "5m",
+      "depends_on": ["setup"],
+      "result_paths": ["/tmp/results/output.txt"]
+    },
+    {
+      "job_id": "cleanup",
+      "command": "echo 'Batch job completed successfully' >> /tmp/results/output.txt",
+      "timeout": "1m",
+      "depends_on": ["process"],
+      "result_paths": ["/tmp/results/output.txt"]
+    }
+  ],
+  "global_timeout": "15m",
+  "on_failure": "stop",
+  "result_s3_bucket": "spawn-results-us-east-1",
+  "result_s3_prefix": "queues/simple-queue"
+}

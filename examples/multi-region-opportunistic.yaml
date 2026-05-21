@@ -1,0 +1,75 @@
+# Multi-region sweep with opportunistic distribution mode
+# Launches instances across multiple regions, prioritizing regions with proven capacity
+#
+# Usage:
+#   spawn sweep --file multi-region-opportunistic.yaml --mode opportunistic --detach
+#
+# This example is useful for:
+# - Maximizing successful launches when capacity is constrained
+# - Spot instance sweeps where availability varies by region
+# - GPU instance sweeps where capacity is limited
+# - Large-scale parameter sweeps that need high success rates
+
+defaults:
+  instance_type: c5.large
+  ttl: 2h
+  spot: true
+
+params:
+  # 100 instances across 5 US regions
+  # Opportunistic mode will launch in regions with best availability first
+  - region: us-east-1
+    name: test-useast1
+    alpha: 0.1
+
+  - region: us-east-2
+    name: test-useast2
+    alpha: 0.2
+
+  - region: us-west-1
+    name: test-uswest1
+    alpha: 0.3
+
+  - region: us-west-2
+    name: test-uswest2
+    alpha: 0.4
+
+  - region: us-east-1
+    name: test-useast1-2
+    alpha: 0.5
+
+  - region: us-east-2
+    name: test-useast2-2
+    alpha: 0.6
+
+  - region: us-west-1
+    name: test-uswest1-2
+    alpha: 0.7
+
+  - region: us-west-2
+    name: test-uswest2-2
+    alpha: 0.8
+
+  - region: us-east-1
+    name: test-useast1-3
+    alpha: 0.9
+
+  - region: us-east-2
+    name: test-useast2-3
+    alpha: 1.0
+
+# Opportunistic mode behavior:
+# 1. Collects availability stats for c5.large in all 5 regions
+# 2. Calculates availability score (80% success rate + 20% recency)
+# 3. Skips regions currently in exponential backoff
+# 4. Sorts regions by score (highest first)
+# 5. Launches instances using fair distribution in sorted order
+# 6. Tracks launch outcomes to update availability stats
+#
+# Balanced mode (default) behavior for comparison:
+# - Uses fair distribution across all regions equally
+# - Sorts regions alphabetically (deterministic)
+# - No availability awareness or backoff logic
+#
+# To view availability statistics:
+#   spawn availability --instance-type c5.large --regions us-east-1,us-east-2,us-west-1,us-west-2

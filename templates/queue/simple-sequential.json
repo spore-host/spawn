@@ -1,0 +1,27 @@
+{
+  "queue_id": "{{QUEUE_ID:simple-sequential}}",
+  "queue_name": "Simple Sequential Workflow",
+  "jobs": [
+    {
+      "job_id": "step1",
+      "command": "{{STEP1_COMMAND:echo 'Step 1'}}",
+      "timeout": "{{STEP1_TIMEOUT:5m}}"
+    },
+    {
+      "job_id": "step2",
+      "command": "{{STEP2_COMMAND:echo 'Step 2'}}",
+      "timeout": "{{STEP2_TIMEOUT:5m}}",
+      "depends_on": ["step1"]
+    },
+    {
+      "job_id": "step3",
+      "command": "{{STEP3_COMMAND:echo 'Step 3'}}",
+      "timeout": "{{STEP3_TIMEOUT:5m}}",
+      "depends_on": ["step2"]
+    }
+  ],
+  "global_timeout": "{{GLOBAL_TIMEOUT:30m}}",
+  "on_failure": "{{ON_FAILURE:stop}}",
+  "result_s3_bucket": "{{S3_BUCKET}}",
+  "result_s3_prefix": "{{S3_PREFIX:queues/simple}}"
+}

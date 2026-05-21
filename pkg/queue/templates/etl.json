@@ -1,0 +1,42 @@
+{
+  "queue_id": "{{QUEUE_ID:etl-pipeline}}",
+  "queue_name": "ETL Pipeline",
+  "jobs": [
+    {
+      "job_id": "extract",
+      "command": "python extract.py --source {{SOURCE}} --output /tmp/raw.csv",
+      "timeout": "{{EXTRACT_TIMEOUT:1h}}",
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "exponential"
+      }
+    },
+    {
+      "job_id": "transform",
+      "command": "python transform.py --input /tmp/raw.csv --output /tmp/transformed.parquet",
+      "timeout": "{{TRANSFORM_TIMEOUT:2h}}",
+      "depends_on": ["extract"]
+    },
+    {
+      "job_id": "load",
+      "command": "python load.py --input /tmp/transformed.parquet --destination {{DESTINATION}}",
+      "timeout": "{{LOAD_TIMEOUT:1h}}",
+      "depends_on": ["transform"],
+      "retry": {
+        "max_attempts": 5,
+        "backoff": "exponential"
+      }
+    },
+    {
+      "job_id": "validate",
+      "command": "python validate.py --source {{DESTINATION}} --output /tmp/validation.json",
+      "timeout": "{{VALIDATE_TIMEOUT:30m}}",
+      "depends_on": ["load"],
+      "result_paths": ["/tmp/validation.json"]
+    }
+  ],
+  "global_timeout": "{{GLOBAL_TIMEOUT:6h}}",
+  "on_failure": "stop",
+  "result_s3_bucket": "{{S3_BUCKET}}",
+  "result_s3_prefix": "{{S3_PREFIX:queues/etl}}"
+}

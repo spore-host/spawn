@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cross-account IAM role for autoscale orchestrator to manage EC2 instances
+
+Parameters:
+  OrchestratorAccountId:
+    Type: String
+    Default: '966362334030'
+    Description: AWS account ID of the spore-host-infra account where Lambda runs
+
+Resources:
+  AutoScaleEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: spawn-autoscale-ec2
+      Description: Allows autoscale orchestrator Lambda to manage EC2 instances
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${OrchestratorAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: spawn-autoscale-orchestrator
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+      Policies:
+        - PolicyName: EC2InstanceManagement
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - ec2:CreateTags
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: spore-host
+        - Key: Component
+          Value: spawn-autoscale
+
+Outputs:
+  RoleArn:
+    Description: ARN of the cross-account EC2 management role
+    Value: !GetAtt AutoScaleEC2Role.Arn
+    Export:
+      Name: spawn-autoscale-ec2-role-arn

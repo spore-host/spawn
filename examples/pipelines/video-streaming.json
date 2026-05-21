@@ -1,0 +1,59 @@
+{
+  "pipeline_id": "video-processing-stream",
+  "pipeline_name": "Real-time Video Processing Pipeline",
+  "stages": [
+    {
+      "stage_id": "capture",
+      "instance_type": "c5n.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "command": "./capture_stream.py --listen 50000",
+      "depends_on": [],
+      "data_output": {
+        "mode": "stream",
+        "protocol": "tcp",
+        "port": 50000
+      }
+    },
+    {
+      "stage_id": "process",
+      "instance_type": "g4dn.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "command": "./process_video.py --upstream ${UPSTREAM_CAPTURE} --listen 50001",
+      "depends_on": ["capture"],
+      "data_input": {
+        "mode": "stream",
+        "source_stage": "capture",
+        "protocol": "tcp"
+      },
+      "data_output": {
+        "mode": "stream",
+        "protocol": "tcp",
+        "port": 50001
+      }
+    },
+    {
+      "stage_id": "encode",
+      "instance_type": "c5.2xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "command": "./encode.py --upstream ${UPSTREAM_PROCESS}",
+      "depends_on": ["process"],
+      "data_input": {
+        "mode": "stream",
+        "source_stage": "process",
+        "protocol": "tcp"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/output/*.mp4"]
+      }
+    }
+  ],
+  "s3_bucket": "my-video-bucket",
+  "s3_prefix": "pipelines/video-processing",
+  "result_s3_bucket": "my-video-results",
+  "result_s3_prefix": "pipelines/results",
+  "on_failure": "stop"
+}

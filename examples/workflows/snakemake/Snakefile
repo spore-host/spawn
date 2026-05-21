@@ -1,0 +1,69 @@
+"""
+Snakemake workflow for spawn parameter sweep execution.
+"""
+
+# Configuration
+SWEEP_FILE = config.get("sweep_file", "config/sweep.yaml")
+SWEEP_TIMEOUT = config.get("sweep_timeout", "2h")
+
+rule all:
+    input:
+        "results/analysis_complete.txt"
+
+rule launch_sweep:
+    output:
+        sweep_id="outputs/sweep_id.txt"
+    log:
+        "logs/launch_sweep.log"
+    shell:
+        """
+        spawn launch \
+            --params {SWEEP_FILE} \
+            --detach \
+            --output-id {output.sweep_id} \
+            2>&1 | tee {log}
+        """
+
+rule wait_sweep:
+    input:
+        sweep_id="outputs/sweep_id.txt"
+    output:
+        status="outputs/sweep_status.json"
+    log:
+        "logs/wait_sweep.log"
+    shell:
+        """
+        SWEEP_ID=$(cat {input.sweep_id})
+        echo "Waiting for sweep: $SWEEP_ID" | tee -a {log}
+
+        # Wait for completion
+        spawn launch --params {SWEEP_FILE} --detach --wait --wait-timeout {SWEEP_TIMEOUT} 2>&1 | tee -a {log}
+
+        # Get final status
+        spawn status $SWEEP_ID --json > {output.status}
+        """
+
+rule analyze_results:
+    input:
+        status="outputs/sweep_status.json"
+    output:
+        analysis="results/analysis.txt"
+    log:
+        "logs/analyze.log"
+    shell:
+        """
+        echo "Analyzing sweep results..." | tee {log}
+        python scripts/analyze.py {input.status} > {output.analysis}
+        """
+
+rule generate_report:
+    input:
+        analysis="results/analysis.txt"
+    output:
+        report="results/analysis_complete.txt"
+    shell:
+        """
+        echo "Generating final report..." > {output.report}
+        cat {input.analysis} >> {output.report}
+        echo "Report generation complete!" >> {output.report}
+        """

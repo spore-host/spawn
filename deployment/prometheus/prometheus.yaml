@@ -1,0 +1,118 @@
+global:
+  scrape_interval: 60s
+  evaluation_interval: 60s
+  external_labels:
+    cluster: 'spawn'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - localhost:9093
+
+# Load alert rules
+rule_files:
+  - "alerts/instance-alerts.yaml"
+  - "alerts/cost-alerts.yaml"
+  - "alerts/capacity-alerts.yaml"
+  - "alerts/performance-alerts.yaml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Spawn instances (manual static configuration)
+  # Add your instances here:
+  # - job_name: 'spawn-instances'
+  #   static_configs:
+  #     - targets:
+  #         - 'instance-1.example.com:9090'
+  #         - 'instance-2.example.com:9090'
+  #       labels:
+  #         region: 'us-east-1'
+  #         provider: 'ec2'
+
+  # File-based service discovery (recommended)
+  # Generate target files dynamically from spawn inventory
+  - job_name: 'spawn-fleet'
+    file_sd_configs:
+      - files:
+          - 'targets/*.json'
+        refresh_interval: 60s
+
+  # EC2 service discovery (automatic instance discovery)
+  # Requires AWS credentials with ec2:DescribeInstances permission
+  - job_name: 'spawn-ec2'
+    ec2_sd_configs:
+      - region: us-east-1
+        port: 9090
+        filters:
+          - name: tag:spawn:metrics-enabled
+            values: ['true']
+          - name: instance-state-name
+            values: ['running']
+    relabel_configs:
+      # Use instance ID as instance label
+      - source_labels: [__meta_ec2_instance_id]
+        target_label: instance_id
+      # Add region label
+      - source_labels: [__meta_ec2_availability_zone]
+        regex: '([a-z]+-[a-z]+-[0-9]+)[a-z]'
+        target_label: region
+      # Add instance type label
+      - source_labels: [__meta_ec2_instance_type]
+        target_label: instance_type
+      # Add spot label
+      - source_labels: [__meta_ec2_instance_lifecycle]
+        regex: 'spot'
+        target_label: spot
+        replacement: 'true'
+      # Extract custom tags
+      - source_labels: [__meta_ec2_tag_Name]
+        target_label: instance_name
+      - source_labels: [__meta_ec2_tag_spawn_job_array_id]
+        target_label: job_array_id
+      - source_labels: [__meta_ec2_tag_spawn_job_array_name]
+        target_label: job_array_name
+      # Use private IP for scraping
+      - source_labels: [__meta_ec2_private_ip]
+        regex: '(.*)'
+        target_label: __address__
+        replacement: '${1}:9090'
+
+  # Additional regions (duplicate and modify as needed)
+  # - job_name: 'spawn-ec2-us-west-2'
+  #   ec2_sd_configs:
+  #     - region: us-west-2
+  #       port: 9090
+  #       filters:
+  #         - name: tag:spawn:metrics-enabled
+  #           values: ['true']
+  #         - name: instance-state-name
+  #           values: ['running']
+  #   relabel_configs:
+  #     # ... same relabel_configs as above
+
+# Storage configuration
+storage:
+  tsdb:
+    path: /var/lib/prometheus
+    retention:
+      time: 30d
+      size: 50GB
+
+# Remote write (optional - for long-term storage)
+# remote_write:
+#   - url: "https://your-remote-write-endpoint/api/v1/write"
+#     basic_auth:
+#       username: "your-username"
+#       password: "your-password"
+
+# Remote read (optional)
+# remote_read:
+#   - url: "https://your-remote-read-endpoint/api/v1/read"

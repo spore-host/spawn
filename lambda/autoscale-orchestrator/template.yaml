@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment
+
+  EC2RoleArn:
+    Type: String
+    Default: 'arn:aws:iam::435415984226:role/spawn-autoscale-ec2'
+    Description: ARN of the cross-account EC2 management role in spore-host-dev
+
+Resources:
+  AutoScaleOrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub spawn-autoscale-orchestrator-${Environment}
+      Runtime: provided.al2023
+      Architectures: [arm64]
+      Handler: bootstrap
+      CodeUri: .
+      MemorySize: 512
+      Timeout: 900
+      Environment:
+        Variables:
+          AUTOSCALE_GROUPS_TABLE: !Ref AutoScaleGroupsTable
+          HYBRID_REGISTRY_TABLE: spawn-hybrid-registry
+          EC2_ROLE_ARN: !Ref EC2RoleArn
+          EC2_EXTERNAL_ID: spawn-autoscale-orchestrator
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AutoScaleGroupsTable
+        - DynamoDBCrudPolicy:
+            TableName: spawn-hybrid-registry
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sts:AssumeRole
+              Resource: !Ref EC2RoleArn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:spawn-autoscale-orchestrator-${Environment}
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sqs:GetQueueAttributes
+              Resource: '*'
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:GetMetricStatistics
+              Resource: '*'
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            Enabled: true
+
+  AutoScaleGroupsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub spawn-autoscale-groups-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: autoscale_group_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: autoscale_group_id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: spore-host
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/spawn-autoscale-orchestrator-${Environment}
+      RetentionInDays: 30
+
+Outputs:
+  FunctionArn:
+    Description: ARN of the autoscale orchestrator Lambda function
+    Value: !GetAtt AutoScaleOrchestratorFunction.Arn
+    Export:
+      Name: !Sub ${Environment}-autoscale-orchestrator-arn
+
+  TableName:
+    Description: Name of the autoscale groups DynamoDB table
+    Value: !Ref AutoScaleGroupsTable
+    Export:
+      Name: !Sub ${Environment}-autoscale-groups-table

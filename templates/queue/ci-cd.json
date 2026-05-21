@@ -1,0 +1,48 @@
+{
+  "queue_id": "{{QUEUE_ID:ci-cd-pipeline}}",
+  "queue_name": "CI/CD Pipeline",
+  "jobs": [
+    {
+      "job_id": "checkout",
+      "command": "git clone {{REPO_URL}} /tmp/repo && cd /tmp/repo && git checkout {{BRANCH:main}}",
+      "timeout": "5m"
+    },
+    {
+      "job_id": "build",
+      "command": "cd /tmp/repo && make build",
+      "timeout": "{{BUILD_TIMEOUT:30m}}",
+      "depends_on": ["checkout"],
+      "retry": {
+        "max_attempts": 2,
+        "backoff": "fixed"
+      }
+    },
+    {
+      "job_id": "test",
+      "command": "cd /tmp/repo && make test",
+      "timeout": "{{TEST_TIMEOUT:20m}}",
+      "depends_on": ["build"],
+      "result_paths": ["/tmp/repo/test-results.xml"]
+    },
+    {
+      "job_id": "deploy",
+      "command": "cd /tmp/repo && make deploy ENV={{ENVIRONMENT:staging}}",
+      "timeout": "{{DEPLOY_TIMEOUT:15m}}",
+      "depends_on": ["test"]
+    },
+    {
+      "job_id": "smoke-test",
+      "command": "cd /tmp/repo && make smoke-test ENDPOINT={{ENDPOINT}}",
+      "timeout": "10m",
+      "depends_on": ["deploy"],
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "fixed"
+      }
+    }
+  ],
+  "global_timeout": "{{GLOBAL_TIMEOUT:2h}}",
+  "on_failure": "stop",
+  "result_s3_bucket": "{{S3_BUCKET}}",
+  "result_s3_prefix": "{{S3_PREFIX:queues/ci-cd}}"
+}

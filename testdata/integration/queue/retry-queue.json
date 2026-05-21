@@ -1,0 +1,19 @@
+{
+  "queue_id": "test-retry-queue",
+  "jobs": [
+    {
+      "job_id": "flaky-job",
+      "command": "test -f /tmp/success-flag || (echo 'attempt' >> /tmp/attempts.txt; [ $(wc -l < /tmp/attempts.txt) -ge 3 ] && touch /tmp/success-flag)",
+      "timeout": "30s",
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "fixed",
+        "delay": "1s"
+      }
+    }
+  ],
+  "global_timeout": "5m",
+  "on_failure": "stop",
+  "result_s3_bucket": "spawn-queue-results-test",
+  "result_s3_prefix": "test-retry-queue"
+}

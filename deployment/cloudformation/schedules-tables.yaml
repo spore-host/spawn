@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DynamoDB tables for spawn scheduled executions'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - production
+      - staging
+      - development
+    Description: Environment name for resource tagging
+
+Resources:
+  SpawnSchedulesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spawn-schedules
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: schedule_id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: next_execution_time
+          AttributeType: S
+      KeySchema:
+        - AttributeName: schedule_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: user_id-next_execution_time-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: next_execution_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: scheduler
+
+  SpawnScheduleHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spawn-schedule-history
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: schedule_id
+          AttributeType: S
+        - AttributeName: execution_time
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: schedule_id
+          KeyType: HASH
+        - AttributeName: execution_time
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: user_id-execution_time-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: execution_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: scheduler
+
+Outputs:
+  SchedulesTableName:
+    Description: Name of the schedules table
+    Value: !Ref SpawnSchedulesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-schedules-table'
+
+  SchedulesTableArn:
+    Description: ARN of the schedules table
+    Value: !GetAtt SpawnSchedulesTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-schedules-table-arn'
+
+  HistoryTableName:
+    Description: Name of the schedule history table
+    Value: !Ref SpawnScheduleHistoryTable
+    Export:
+      Name: !Sub '${AWS::StackName}-history-table'
+
+  HistoryTableArn:
+    Description: ARN of the schedule history table
+    Value: !GetAtt SpawnScheduleHistoryTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-history-table-arn'

@@ -1,0 +1,124 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: spawn-sweep-
+  labels:
+    workflows.argoproj.io/category: compute
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+    - name: sweep-file
+      value: "/config/sweep.yaml"
+    - name: sweep-timeout
+      value: "2h"
+
+  volumeClaimTemplates:
+  - metadata:
+      name: workdir
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+
+  volumes:
+  - name: aws-credentials
+    secret:
+      secretName: aws-credentials
+
+  templates:
+  - name: main
+    steps:
+    - - name: launch
+        template: launch-sweep
+    - - name: wait
+        template: wait-sweep
+        arguments:
+          parameters:
+          - name: sweep-id
+            value: "{{steps.launch.outputs.result}}"
+    - - name: process
+        template: process-results
+        arguments:
+          parameters:
+          - name: sweep-id
+            value: "{{steps.launch.outputs.result}}"
+
+  - name: launch-sweep
+    container:
+      image: scttfrdmn/spawn:latest
+      command: [sh, -c]
+      args:
+      - |
+        spawn launch \
+          --params {{workflow.parameters.sweep-file}} \
+          --detach \
+          --output-id /work/sweep_id.txt
+
+        cat /work/sweep_id.txt
+      volumeMounts:
+      - name: workdir
+        mountPath: /work
+      - name: aws-credentials
+        mountPath: /root/.aws
+        readOnly: true
+    outputs:
+      parameters:
+      - name: result
+        valueFrom:
+          path: /work/sweep_id.txt
+
+  - name: wait-sweep
+    inputs:
+      parameters:
+      - name: sweep-id
+    container:
+      image: scttfrdmn/spawn:latest
+      command: [sh, -c]
+      args:
+      - |
+        SWEEP_ID="{{inputs.parameters.sweep-id}}"
+        echo "Waiting for sweep: $SWEEP_ID"
+
+        # Poll for completion
+        while true; do
+          spawn status $SWEEP_ID --check-complete
+          EXIT_CODE=$?
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ Sweep completed!"
+            exit 0
+          elif [ $EXIT_CODE -eq 1 ]; then
+            echo "❌ Sweep failed!"
+            exit 1
+          elif [ $EXIT_CODE -eq 3 ]; then
+            echo "❌ Error querying status!"
+            exit 1
+          fi
+
+          echo "⏳ Still running..."
+          sleep 60
+        done
+      volumeMounts:
+      - name: aws-credentials
+        mountPath: /root/.aws
+        readOnly: true
+
+  - name: process-results
+    inputs:
+      parameters:
+      - name: sweep-id
+    container:
+      image: python:3.11
+      command: [sh, -c]
+      args:
+      - |
+        SWEEP_ID="{{inputs.parameters.sweep-id}}"
+        echo "Processing results from sweep: $SWEEP_ID"
+
+        # Add your processing logic here
+        python /scripts/process.py "$SWEEP_ID"
+      volumeMounts:
+      - name: workdir
+        mountPath: /work

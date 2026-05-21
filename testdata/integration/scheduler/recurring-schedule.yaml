@@ -1,0 +1,12 @@
+regions:
+  - us-east-1
+
+instance_type: t3.micro
+ami: auto
+capacity_type: spot
+
+count: 1
+
+tags:
+  spawn:test: "true"
+  spawn:test-type: "scheduler-recurring"

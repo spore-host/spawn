@@ -1,0 +1,82 @@
+groups:
+  - name: spawn_instance_lifecycle
+    interval: 60s
+    rules:
+      - alert: InstanceHighIdleTime
+        expr: spawn_idle_state == 1 and spawn_idle_duration_seconds > 1800
+        for: 5m
+        labels:
+          severity: warning
+          component: spawn
+          category: lifecycle
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} idle for {{ $value | humanizeDuration }}"
+          description: "Instance {{ $labels.instance_id }} in {{ $labels.region }} has been idle for more than 30 minutes. Consider terminating to save costs."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"
+          provider: "{{ $labels.provider }}"
+
+      - alert: InstanceTTLExpiringSoon
+        expr: spawn_ttl_remaining_seconds < 300 and spawn_ttl_remaining_seconds > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: spawn
+          category: lifecycle
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} TTL expiring in {{ $value | humanizeDuration }}"
+          description: "Instance {{ $labels.instance_id }} will terminate in less than 5 minutes due to TTL expiration."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"
+
+      - alert: InstanceIdleTimeoutExpiringSoon
+        expr: spawn_idle_timeout_remaining_seconds < 300 and spawn_idle_timeout_remaining_seconds > 0 and spawn_idle_state == 1
+        for: 1m
+        labels:
+          severity: warning
+          component: spawn
+          category: lifecycle
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} idle timeout in {{ $value | humanizeDuration }}"
+          description: "Instance {{ $labels.instance_id }} will terminate in less than 5 minutes due to idle timeout."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"
+
+      - alert: SpotInstanceInterruptionWarning
+        expr: spawn_instance_spot == 1
+        for: 2m
+        labels:
+          severity: critical
+          component: spawn
+          category: lifecycle
+        annotations:
+          summary: "Spot instance {{ $labels.instance_id }} may be interrupted"
+          description: "Spot instance {{ $labels.instance_id }} is subject to interruption. Monitor for interruption notices."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"
+
+      - alert: InstanceNoActivity
+        expr: spawn_idle_duration_seconds > 7200 and spawn_active_terminals == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: spawn
+          category: lifecycle
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} has no activity for 2+ hours"
+          description: "Instance {{ $labels.instance_id }} has been idle for over 2 hours with no active terminals. Consider terminating."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"
+
+      - alert: InstanceRecentlyStarted
+        expr: spawn_instance_uptime_seconds < 300
+        for: 1m
+        labels:
+          severity: info
+          component: spawn
+          category: lifecycle
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} recently started"
+          description: "Instance {{ $labels.instance_id }} started {{ $value | humanizeDuration }} ago."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"

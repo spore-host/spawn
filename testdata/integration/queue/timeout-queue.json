@@ -1,0 +1,14 @@
+{
+  "queue_id": "test-timeout-queue",
+  "jobs": [
+    {
+      "job_id": "timeout-job",
+      "command": "sleep 100",
+      "timeout": "5s"
+    }
+  ],
+  "global_timeout": "1m",
+  "on_failure": "stop",
+  "result_s3_bucket": "spawn-queue-results-test",
+  "result_s3_prefix": "test-timeout-queue"
+}

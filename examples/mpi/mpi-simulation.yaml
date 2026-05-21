@@ -1,0 +1,68 @@
+# MPI Simulation Example
+#
+# Large-scale MPI simulation with EFA for low latency
+
+sweep_name: mpi-simulation
+count: 16  # 16-node MPI job
+
+# Single region for MPI (low latency required)
+regions:
+  - us-east-1
+
+instance_type: c5n.18xlarge  # EFA-capable, high network
+spot: false  # Use on-demand for reliability
+
+# MPI configuration
+mpi: true
+mpi_processes_per_node: 36  # 36 vCPUs per c5n.18xlarge
+auto_placement_group: true  # Automatic cluster placement
+efa: true  # Enable Elastic Fabric Adapter
+
+ttl: 24h  # Long-running simulation
+
+base_command: |
+  #!/bin/bash
+  set -e
+
+  echo "MPI rank ${JOB_ARRAY_INDEX}/${JOB_ARRAY_SIZE}"
+
+  # Head node coordinates the job
+  if [ "${JOB_ARRAY_INDEX}" = "0" ]; then
+    echo "Head node: waiting for all nodes..."
+
+    # Wait for all nodes to be ready
+    while [ $(cat /tmp/mpi-hostfile | wc -l) -lt ${JOB_ARRAY_SIZE} ]; do
+      sleep 5
+    done
+
+    echo "All nodes ready. Starting MPI job..."
+
+    # Compile MPI program
+    mpicc -o simulation simulation.c
+
+    # Run MPI job across all nodes
+    # Total processes: 16 nodes × 36 processes/node = 576 processes
+    mpirun -np 576 \
+      --hostfile /tmp/mpi-hostfile \
+      --map-by node \
+      --bind-to core \
+      -x LD_LIBRARY_PATH \
+      ./simulation input.dat output.dat
+
+    echo "Simulation complete"
+
+    # Upload results
+    aws s3 cp output.dat s3://my-results/simulation-output.dat
+  else
+    # Worker nodes just wait
+    echo "Worker node: waiting for head node..."
+    tail -f /var/log/cloud-init-output.log
+  fi
+
+# Performance notes:
+# - EFA provides < 10μs latency between instances
+# - Placement groups ensure co-location in same network segment
+# - c5n.18xlarge has 100 Gbps network bandwidth
+#
+# Cost: 16 instances × 24h × $3.00/h = $1,152
+# vs. institutional cluster: Free but 2-week queue wait

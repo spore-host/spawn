@@ -1,0 +1,87 @@
+{
+  "_comment": "This pipeline uses AMD EPYC instances (c8a) for maximum performance. For best price/performance, use Graviton (c8g). For RDMA/EFA, use c7gn.",
+  "pipeline_id": "genomics-bams3-rdma",
+  "pipeline_name": "BAMS3 Genomics Pipeline - AMD EPYC Performance",
+  "stages": [
+    {
+      "stage_id": "bam-to-bams3",
+      "instance_type": "c8a.4xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "spot": true,
+      "timeout": "2h",
+      "command": "/opt/spawn/examples/genomics/convert_bam_to_bams3.py",
+      "depends_on": [],
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/data/bams3/*"]
+      },
+      "env": {
+        "INPUT_BAM": "s3://aws-open-data/1000genomes/phase3/HG00096.bam",
+        "OUTPUT_PREFIX": "s3://my-results/bams3/HG00096",
+        "CHUNK_SIZE_MB": "5"
+      }
+    },
+    {
+      "stage_id": "variant-calling",
+      "instance_type": "c8a.8xlarge",
+      "instance_count": 16,
+      "region": "us-east-1",
+      "placement_group": "auto",
+      "efa_enabled": false,
+      "spot": true,
+      "timeout": "4h",
+      "command": "/opt/spawn/examples/genomics/variant_calling_rdma.py",
+      "depends_on": ["bam-to-bams3"],
+      "data_input": {
+        "mode": "stream",
+        "source_stage": "bam-to-bams3",
+        "protocol": "zmq",
+        "pattern": "pull"
+      },
+      "data_output": {
+        "mode": "stream",
+        "protocol": "zmq",
+        "pattern": "push",
+        "port": 7501
+      },
+      "env": {
+        "REFERENCE": "s3://broad-references/hg38/v0/Homo_sapiens_assembly38.fasta",
+        "THREADS_PER_INSTANCE": "32",
+        "ZMQ_UPSTREAM_PORT": "7500",
+        "ZMQ_DOWNSTREAM_PORT": "7501"
+      }
+    },
+    {
+      "stage_id": "vcf-merge",
+      "instance_type": "c7a.2xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "spot": true,
+      "timeout": "1h",
+      "command": "/opt/spawn/examples/genomics/vcf_merge.py",
+      "depends_on": ["variant-calling"],
+      "data_input": {
+        "mode": "stream",
+        "source_stage": "variant-calling",
+        "protocol": "zmq",
+        "pattern": "pull"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/data/results/*.vcf.gz", "/data/results/*.vcf.gz.tbi"]
+      },
+      "env": {
+        "OUTPUT_VCF": "/data/results/HG00096_merged.vcf.gz",
+        "COMPRESS": "true"
+      }
+    }
+  ],
+  "s3_bucket": "my-genomics-pipeline",
+  "s3_prefix": "pipelines/bams3-rdma",
+  "result_s3_bucket": "my-genomics-results",
+  "result_s3_prefix": "bams3-pipeline-results",
+  "on_failure": "stop",
+  "max_cost_usd": 50.0,
+  "notification_email": "user@example.com"
+}

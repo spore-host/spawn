@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: 'Spawn Dashboards'
+    orgId: 1
+    folder: 'Spawn'
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/provisioning/dashboards/spawn

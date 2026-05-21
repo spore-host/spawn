@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'spore-bot — Slack/Teams chat interface for instance control (spore.host + prism)'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  LambdaCodeBucket:
+    Type: String
+    Default: ''
+    Description: S3 bucket containing Lambda zip (leave empty to skip Lambda deployment)
+
+  LambdaCodeKey:
+    Type: String
+    Default: ''
+
+Conditions:
+  DeployLambda: !Not [!Equals [!Ref LambdaCodeBucket, '']]
+
+Resources:
+
+  # ── DynamoDB: instance registry ──────────────────────────────────────────────
+
+  BotRegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spore-bot-registry
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_key
+          AttributeType: S
+        - AttributeName: nickname
+          AttributeType: S
+        - AttributeName: instance_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_key
+          KeyType: HASH
+        - AttributeName: nickname
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: instance_id-index
+          KeySchema:
+            - AttributeName: instance_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spore-bot
+
+  # ── DynamoDB: workspace OAuth tokens ─────────────────────────────────────────
+
+  BotWorkspacesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spore-bot-workspaces
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+      AttributeDefinitions:
+        - AttributeName: workspace_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: workspace_key
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spore-bot
+
+  # ── Audit Log Table ───────────────────────────────────────────────────────────
+
+  BotAuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spore-bot-audit
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: audit_id
+          AttributeType: S
+        - AttributeName: user_key
+          AttributeType: S
+        - AttributeName: ts
+          AttributeType: S
+      KeySchema:
+        - AttributeName: audit_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: user_key-ts-index
+          KeySchema:
+            - AttributeName: user_key
+              KeyType: HASH
+            - AttributeName: ts
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spore-bot
+        - Key: Component
+          Value: audit
+
+  # ── Lambda ────────────────────────────────────────────────────────────────────
+
+  SporeBotFunction:
+    Type: AWS::Serverless::Function
+    Condition: DeployLambda
+    Properties:
+      FunctionName: spore-bot
+      Runtime: provided.al2023
+      Architectures: [arm64]
+      Handler: bootstrap
+      Timeout: 120  # start command polls up to 90s for instance to reach running state
+      MemorySize: 256
+      CodeUri:
+        Bucket: !Ref LambdaCodeBucket
+        Key: !Ref LambdaCodeKey
+      Environment:
+        Variables:
+          BOT_REGISTRY_TABLE: !Ref BotRegistryTable
+          BOT_WORKSPACES_TABLE: !Ref BotWorkspacesTable
+          BOT_AUDIT_TABLE: !Ref BotAuditTable
+          BOT_CONNECT_CODE_TTL_HOURS: '24'  # platform default; workspace admins can lower per workspace
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BotRegistryTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BotWorkspacesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BotAuditTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sts:AssumeRole
+              Resource: 'arn:aws:iam::*:role/SpawnBotCrossAccount'
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:spore-bot'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/spore-bot*'
+      Tags:
+        Environment: !Ref Environment
+        Application: spore-bot
+
+  SporeBotFunctionUrl:
+    Type: AWS::Lambda::Url
+    Condition: DeployLambda
+    Properties:
+      # trivy:ignore:AVD-AWS-0066 -- AuthType NONE is intentional; Slack request
+      # authentication is handled via HMAC-SHA256 signature verification in Lambda.
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt SporeBotFunction.Arn
+      Cors:
+        AllowOrigins: ['*']
+        AllowMethods: [POST]
+
+  SporeBotFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Condition: DeployLambda
+    Properties:
+      FunctionName: !Ref SporeBotFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  # ── Admin API (AWS_IAM auth) ─────────────────────────────────────────────────
+  # Separate API Gateway HTTP API for /admin/* routes used by the prism CLI and
+  # spawn CLI. SigV4-signed requests only — AWS verifies the caller's IAM identity
+  # before the Lambda sees the request.
+
+  SporeBotAdminApi:
+    Type: AWS::ApiGatewayV2::Api
+    Condition: DeployLambda
+    Properties:
+      Name: !Sub '${AWS::StackName}-admin'
+      ProtocolType: HTTP
+      Description: 'spore-bot admin API — workspace and registration management (IAM auth)'
+
+  SporeBotAdminApiDefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Condition: DeployLambda
+    Properties:
+      ApiId: !Ref SporeBotAdminApi
+      StageName: '$default'
+      AutoDeploy: true
+
+  SporeBotAdminApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: DeployLambda
+    Properties:
+      ApiId: !Ref SporeBotAdminApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt SporeBotFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  SporeBotAdminApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: DeployLambda
+    Properties:
+      ApiId: !Ref SporeBotAdminApi
+      RouteKey: '$default'
+      AuthorizationType: AWS_IAM
+      Target: !Sub 'integrations/${SporeBotAdminApiIntegration}'
+
+  SporeBotAdminApiPermission:
+    Type: AWS::Lambda::Permission
+    Condition: DeployLambda
+    Properties:
+      FunctionName: !Ref SporeBotFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SporeBotAdminApi}/*/*'
+
+Outputs:
+  BotRegistryTableName:
+    Value: !Ref BotRegistryTable
+    Export:
+      Name: !Sub '${AWS::StackName}-registry-table'
+
+  BotWorkspacesTableName:
+    Value: !Ref BotWorkspacesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-workspaces-table'
+
+  BotAuditTableName:
+    Value: !Ref BotAuditTable
+    Export:
+      Name: !Sub '${AWS::StackName}-audit-table'
+
+  LambdaFunctionUrl:
+    Condition: DeployLambda
+    Value: !GetAtt SporeBotFunctionUrl.FunctionUrl
+    Description: 'Slack slash command Request URL — append /slack or /teams'
+    Export:
+      Name: !Sub '${AWS::StackName}-function-url'
+
+  AdminApiUrl:
+    Condition: DeployLambda
+    Value: !Sub 'https://${SporeBotAdminApi}.execute-api.${AWS::Region}.amazonaws.com'
+    Description: 'Admin API URL (AWS_IAM auth) — used by prism CLI and spawn bot commands'
+    Export:
+      Name: !Sub '${AWS::StackName}-admin-api-url'

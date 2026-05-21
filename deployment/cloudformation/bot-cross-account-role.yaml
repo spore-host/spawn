@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cross-account IAM role that allows the spore-bot Lambda (in spore-host-infra)
+  to perform EC2 operations on instances in this account.
+
+  Deploy this template in each AWS account that has instances you want to control
+  via the Slack/Teams bot. The RoleArn output goes into `spawn bot register --role-arn`.
+
+Parameters:
+  BotLambdaRoleArn:
+    Type: String
+    Description: >
+      ARN of the spore-bot Lambda execution role in spore-host-infra.
+      Example: arn:aws:iam::966362334030:role/spore-bot-lambda
+    AllowedPattern: 'arn:aws:iam::\d{12}:role/.+'
+    ConstraintDescription: Must be a valid IAM role ARN
+
+  TagPrefix:
+    Type: String
+    Default: spawn
+    AllowedValues:
+      - spawn
+      - prism
+    Description: >
+      Tag namespace for instances managed by this bot.
+      Use "spawn" for spore.host instances (spawn:managed=true),
+      or "prism" for prism instances (prism:managed=true).
+
+  RoleName:
+    Type: String
+    Default: SpawnBotCrossAccount
+    Description: Name of the cross-account IAM role to create
+
+Resources:
+
+  BotCrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: !Sub 'Allows spore-bot Lambda to control ${TagPrefix}-managed EC2 instances'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref BotLambdaRoleArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Sub '${TagPrefix}-bot'
+      Policies:
+        - PolicyName: BotEC2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read instance state and metadata (needed for status/url commands)
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                  - ec2:DescribeInstanceStatus
+                Resource: '*'
+              # Start/stop/hibernate — scoped to instances tagged as managed
+              # Note: the Condition key uses a literal string; deploy separate stacks
+              # for spawn vs prism tag prefix, or omit the condition and scope by
+              # instance IDs registered in spore-bot-registry instead.
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                # trivy:ignore:AVD-AWS-0057 -- Resource * is intentional; access control
+                # is enforced by spore-bot DynamoDB registry (enabled flag per registration).
+                Resource: '*'
+      Tags:
+        - Key: !Sub '${TagPrefix}:managed'
+          Value: 'false'
+        - Key: Purpose
+          Value: spore-bot-cross-account
+        - Key: BotLambdaRoleArn
+          Value: !Ref BotLambdaRoleArn
+
+Outputs:
+  RoleArn:
+    Description: >
+      Pass this ARN to `spawn bot register --role-arn` when registering instances
+      in this account with the spore-bot.
+    Value: !GetAtt BotCrossAccountRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-role-arn'
+
+  ExternalId:
+    Description: External ID required when assuming this role (hardcoded in the Lambda)
+    Value: !Sub '${TagPrefix}-bot'

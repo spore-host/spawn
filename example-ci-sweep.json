@@ -1,0 +1,26 @@
+{
+  "defaults": {
+    "region": "us-east-1",
+    "spot": true
+  },
+  "params": [
+    {
+      "suite": "unit",
+      "instance_type": "t3.micro",
+      "ttl": "10m",
+      "command": "echo 'Running unit tests: $PARAM_suite' && sleep 30"
+    },
+    {
+      "suite": "integration",
+      "instance_type": "t3.small",
+      "ttl": "20m",
+      "command": "echo 'Running integration tests: $PARAM_suite' && sleep 60"
+    },
+    {
+      "suite": "e2e",
+      "instance_type": "t3.medium",
+      "ttl": "30m",
+      "command": "echo 'Running e2e tests: $PARAM_suite' && sleep 90"
+    }
+  ]
+}

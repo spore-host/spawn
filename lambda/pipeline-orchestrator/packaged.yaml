@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Spawn Pipeline Orchestrator Lambda Function
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+    - production
+    - staging
+    - development
+    Description: Environment name
+Resources:
+  PipelineOrchestrationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spawn-pipeline-orchestration
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: pipeline_id
+        AttributeType: S
+      KeySchema:
+      - AttributeName: pipeline_id
+        KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+      - Key: Environment
+        Value:
+          Ref: Environment
+      - Key: Application
+        Value: spawn
+      - Key: Component
+        Value: pipeline-orchestrator
+  PipelineOrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: spawn-pipeline-orchestrator
+      Handler: bootstrap
+      Runtime: provided.al2023
+      Architectures:
+      - arm64
+      MemorySize: 512
+      Timeout: 900
+      Environment:
+        Variables:
+          SPAWN_PIPELINE_ORCHESTRATION_TABLE:
+            Ref: PipelineOrchestrationTable
+          ENVIRONMENT:
+            Ref: Environment
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: PipelineOrchestrationTable
+      - S3ReadPolicy:
+          BucketName: '*'
+      - S3CrudPolicy:
+          BucketName: '*'
+      - Statement:
+        - Effect: Allow
+          Action:
+          - ec2:RunInstances
+          - ec2:DescribeInstances
+          - ec2:DescribeInstanceStatus
+          - ec2:DescribeAvailabilityZones
+          - ec2:DescribeSecurityGroups
+          - ec2:CreateSecurityGroup
+          - ec2:DeleteSecurityGroup
+          - ec2:AuthorizeSecurityGroupIngress
+          - ec2:RevokeSecurityGroupIngress
+          - ec2:CreatePlacementGroup
+          - ec2:DeletePlacementGroup
+          - ec2:DescribePlacementGroups
+          - ec2:CreateTags
+          - ec2:TerminateInstances
+          Resource: '*'
+      - Statement:
+        - Effect: Allow
+          Action:
+          - iam:PassRole
+          Resource: arn:aws:iam::*:role/spawnd-role
+      - Statement:
+        - Effect: Allow
+          Action:
+          - lambda:InvokeFunction
+          Resource:
+            Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:spawn-pipeline-orchestrator*
+      Tags:
+        Environment:
+          Ref: Environment
+        Application: spawn
+        Component: pipeline-orchestrator
+      CodeUri: s3://spawn-pipelines-us-east-1/45e91af14a5ec3a062876f030fc2d549
+  PipelineOrchestratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/spawn-pipeline-orchestrator
+      RetentionInDays: 30
+Outputs:
+  PipelineOrchestratorFunctionArn:
+    Description: ARN of the Pipeline Orchestrator Lambda function
+    Value:
+      Fn::GetAtt:
+      - PipelineOrchestratorFunction
+      - Arn
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-FunctionArn
+  PipelineOrchestrationTableName:
+    Description: Name of the DynamoDB table for pipeline orchestration
+    Value:
+      Ref: PipelineOrchestrationTable
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-TableName
+  PipelineOrchestratorFunctionName:
+    Description: Name of the Pipeline Orchestrator Lambda function
+    Value:
+      Ref: PipelineOrchestratorFunction
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-FunctionName

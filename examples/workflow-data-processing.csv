@@ -1,0 +1,5 @@
+step,instance_type,command,ttl,region
+extract,t3.small,"aws s3 cp s3://data-lake/raw/ /data/raw/ --recursive && python3 /scripts/extract.py",2h,us-east-1
+transform,c5.xlarge,"python3 /scripts/transform.py --input /data/raw --output /data/clean && aws s3 cp /data/clean/ s3://data-lake/clean/ --recursive",3h,us-east-1
+load,r5.large,"python3 /scripts/load.py --input s3://data-lake/clean/ --database prod-db",1h,us-east-1
+validate,t3.medium,"python3 /scripts/validate.py --database prod-db && aws s3 cp /results/ s3://data-lake/validation/ --recursive",30m,us-east-1

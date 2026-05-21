@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM role for spawn scheduler-handler Lambda function'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    Description: Environment name
+
+Resources:
+  SchedulerHandlerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SpawnSchedulerHandlerExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SchedulerHandlerPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # DynamoDB - Read/Write to schedules and history tables
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/spawn-schedules'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/spawn-schedules/index/*'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/spawn-schedule-history'
+
+              # S3 - Read parameter files from spawn-schedules-* buckets
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::spawn-schedules-${AWS::Region}/schedules/*'
+
+              # Lambda - Invoke sweep-orchestrator Lambda
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:sweep-orchestrator'
+                  - !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:sweep-orchestrator'
+
+              # CloudWatch Logs - Create and write logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/scheduler-handler'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/scheduler-handler:*'
+
+      Tags:
+        - Key: Application
+          Value: spawn
+        - Key: Component
+          Value: scheduler
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  RoleArn:
+    Description: ARN of the scheduler-handler execution role
+    Value: !GetAtt SchedulerHandlerExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-role-arn'
+
+  RoleName:
+    Description: Name of the scheduler-handler execution role
+    Value: !Ref SchedulerHandlerExecutionRole
+    Export:
+      Name: !Sub '${AWS::StackName}-role-name'

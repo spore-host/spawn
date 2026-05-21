@@ -1,0 +1,113 @@
+groups:
+  - name: spawn_performance
+    interval: 60s
+    rules:
+      - alert: HighCPUUsage
+        expr: spawn_cpu_usage_percent > 95
+        for: 5m
+        labels:
+          severity: warning
+          component: spawn
+          category: performance
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} CPU at {{ $value }}%"
+          description: "Instance {{ $labels.instance_id }} has sustained high CPU usage of {{ $value }}% for 5 minutes."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"
+          cpu_percent: "{{ $value }}"
+
+      - alert: HighMemoryUsage
+        expr: (spawn_memory_used_bytes / spawn_memory_total_bytes * 100) > 90
+        for: 5m
+        labels:
+          severity: warning
+          component: spawn
+          category: performance
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} memory at {{ $value }}%"
+          description: "Instance {{ $labels.instance_id }} has sustained high memory usage of {{ $value }}% for 5 minutes."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"
+          memory_percent: "{{ $value }}"
+
+      - alert: GPUHighUtilization
+        expr: spawn_gpu_utilization_percent > 95
+        for: 10m
+        labels:
+          severity: info
+          component: spawn
+          category: performance
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} GPU {{ $labels.gpu_index }} at {{ $value }}%"
+          description: "GPU {{ $labels.gpu_index }} on instance {{ $labels.instance_id }} has sustained high utilization."
+          instance_id: "{{ $labels.instance_id }}"
+          gpu_index: "{{ $labels.gpu_index }}"
+          utilization: "{{ $value }}"
+
+      - alert: GPUHighTemperature
+        expr: spawn_gpu_temperature_celsius > 80
+        for: 5m
+        labels:
+          severity: warning
+          component: spawn
+          category: performance
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} GPU {{ $labels.gpu_index }} at {{ $value }}°C"
+          description: "GPU {{ $labels.gpu_index }} on instance {{ $labels.instance_id }} is running hot at {{ $value }}°C."
+          instance_id: "{{ $labels.instance_id }}"
+          gpu_index: "{{ $labels.gpu_index }}"
+          temperature: "{{ $value }}"
+
+      - alert: HighNetworkThroughput
+        expr: rate(spawn_network_bytes_total[5m]) > 100000000
+        for: 10m
+        labels:
+          severity: info
+          component: spawn
+          category: performance
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} network at {{ $value | humanize }}B/s"
+          description: "Instance {{ $labels.instance_id }} has sustained high network throughput."
+          instance_id: "{{ $labels.instance_id }}"
+          direction: "{{ $labels.direction }}"
+          throughput: "{{ $value }}"
+
+      - alert: HighDiskIO
+        expr: rate(spawn_disk_io_bytes_total[5m]) > 50000000
+        for: 10m
+        labels:
+          severity: info
+          component: spawn
+          category: performance
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} disk {{ $labels.operation }} at {{ $value | humanize }}B/s"
+          description: "Instance {{ $labels.instance_id }} has sustained high disk I/O activity."
+          instance_id: "{{ $labels.instance_id }}"
+          device: "{{ $labels.device }}"
+          operation: "{{ $labels.operation }}"
+          throughput: "{{ $value }}"
+
+      - alert: FleetAverageCPUHigh
+        expr: avg(spawn_cpu_usage_percent) > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: spawn
+          category: performance
+        annotations:
+          summary: "Fleet average CPU at {{ $value }}%"
+          description: "Fleet-wide average CPU usage is {{ $value }}%, indicating potential capacity constraints."
+          avg_cpu: "{{ $value }}"
+
+      - alert: RegionalPerformanceDegradation
+        expr: avg by (region) (spawn_cpu_usage_percent) > 90
+        for: 15m
+        labels:
+          severity: warning
+          component: spawn
+          category: performance
+        annotations:
+          summary: "Region {{ $labels.region }} average CPU at {{ $value }}%"
+          description: "Region {{ $labels.region }} has sustained high average CPU of {{ $value }}%."
+          region: "{{ $labels.region }}"
+          avg_cpu: "{{ $value }}"

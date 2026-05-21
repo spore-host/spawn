@@ -1,0 +1,62 @@
+# Workflow Example: CI/CD Pipeline
+# This example demonstrates a multi-step CI/CD pipeline using different instance types
+# for different test phases (unit, integration, e2e).
+#
+# Usage:
+#   spawn sweep --file workflow-ci-pipeline.yaml --detach
+
+defaults:
+  region: us-east-1
+  ttl: 1h
+  spot: true
+  # Common setup: clone repo
+  # Individual commands handle their specific test phase
+
+params:
+  # Step 1: Unit tests on small instance
+  - step: unit-tests
+    instance_type: t3.micro
+    command: |
+      git clone https://github.com/example/myapp.git /home/local/myapp
+      cd /home/local/myapp
+      npm install
+      npm run test:unit
+      # Upload results to S3
+      aws s3 cp test-results/ s3://my-results-bucket/unit-tests/ --recursive
+    timeout: 10m
+
+  # Step 2: Integration tests on medium instance
+  - step: integration-tests
+    instance_type: t3.small
+    command: |
+      git clone https://github.com/example/myapp.git /home/local/myapp
+      cd /home/local/myapp
+      npm install
+      docker-compose up -d  # Start test dependencies
+      npm run test:integration
+      aws s3 cp test-results/ s3://my-results-bucket/integration-tests/ --recursive
+    timeout: 20m
+
+  # Step 3: E2E tests on compute-optimized instance
+  - step: e2e-tests
+    instance_type: c5.large
+    command: |
+      git clone https://github.com/example/myapp.git /home/local/myapp
+      cd /home/local/myapp
+      npm install
+      npm run build
+      npm run test:e2e
+      aws s3 cp test-results/ s3://my-results-bucket/e2e-tests/ --recursive
+    timeout: 30m
+
+  # Step 4: Load tests on large instance
+  - step: load-tests
+    instance_type: c5.2xlarge
+    command: |
+      git clone https://github.com/example/myapp.git /home/local/myapp
+      cd /home/local/myapp
+      npm install
+      npm run build
+      npm run test:load
+      aws s3 cp test-results/ s3://my-results-bucket/load-tests/ --recursive
+    timeout: 1h

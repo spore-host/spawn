@@ -1,0 +1,65 @@
+# Genomics Analysis with Reference Genome Staging
+#
+# This example stages a 100GB reference genome for analysis
+# across 100 samples
+
+# Step 1: Stage reference genome
+# spawn stage upload hg38-reference.fasta \
+#   --regions us-east-1,us-west-2 \
+#   --dest /mnt/data/reference.fasta \
+#   --ttl 30  # Keep for 30 days
+
+# Step 2: Launch analysis sweep
+sweep_name: genome-analysis
+stage_id: stage-hg38-xyz789  # From step 1
+count: 100
+
+regions:
+  - us-east-1: 50
+  - us-west-2: 50
+
+instance_type: r5.2xlarge  # Memory-optimized
+spot: true
+
+# Custom IAM permissions for S3 access
+iam_policies:
+  - s3:GetObject
+  - s3:PutObject
+
+base_command: |
+  #!/bin/bash
+  set -e
+
+  # Reference genome at /mnt/data/reference.fasta (100GB)
+  REFERENCE="/mnt/data/reference.fasta"
+  SAMPLE_ID=$((SWEEP_INDEX + 1))
+
+  echo "Analyzing sample ${SAMPLE_ID}..."
+
+  # Download sample FASTQ from S3
+  aws s3 cp s3://my-samples/sample-${SAMPLE_ID}.fastq .
+
+  # Install BWA and samtools
+  sudo yum install -y bwa samtools
+
+  # Align
+  bwa mem -t 8 $REFERENCE sample-${SAMPLE_ID}.fastq > aligned.sam
+
+  # Convert and sort
+  samtools view -bS aligned.sam | samtools sort -o sorted.bam
+
+  # Call variants
+  samtools mpileup -uf $REFERENCE sorted.bam | bcftools call -mv > variants.vcf
+
+  # Upload results
+  aws s3 cp variants.vcf s3://my-results/sample-${SAMPLE_ID}.vcf
+
+  echo "Sample ${SAMPLE_ID} complete"
+
+# Cost analysis:
+# Without staging: 100GB × 100 samples × 1 region × $0.09/GB = $900
+# With staging: 100GB × 1 region × $0.02/GB = $2
+# Savings: $898 (99.8%)
+#
+# Instance cost: 100 × 4h × $0.10/h (spot) = $40
+# Total with staging: $42 vs $940 without = 95% total savings

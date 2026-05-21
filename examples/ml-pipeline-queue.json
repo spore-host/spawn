@@ -1,0 +1,70 @@
+{
+  "queue_id": "ml-pipeline-20260122-140530",
+  "queue_name": "ml-training-pipeline",
+  "jobs": [
+    {
+      "job_id": "preprocess",
+      "command": "python preprocess.py --input /data/raw --output /data/processed",
+      "timeout": "30m",
+      "env": {
+        "DATA_DIR": "/data",
+        "NUM_WORKERS": "4"
+      },
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "exponential"
+      },
+      "result_paths": [
+        "/data/processed/*.npy",
+        "/data/processed/metadata.json"
+      ]
+    },
+    {
+      "job_id": "train",
+      "command": "python train.py --data /data/processed --model /models/model.pt --epochs 100",
+      "timeout": "2h",
+      "depends_on": ["preprocess"],
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "BATCH_SIZE": "32"
+      },
+      "retry": {
+        "max_attempts": 2,
+        "backoff": "fixed"
+      },
+      "result_paths": [
+        "/models/model.pt",
+        "/models/checkpoints/*.ckpt",
+        "/logs/training_metrics.json"
+      ]
+    },
+    {
+      "job_id": "evaluate",
+      "command": "python evaluate.py --model /models/model.pt --test /data/test --output /results",
+      "timeout": "15m",
+      "depends_on": ["train"],
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0"
+      },
+      "result_paths": [
+        "/results/eval_metrics.json",
+        "/results/confusion_matrix.png",
+        "/results/predictions.csv"
+      ]
+    },
+    {
+      "job_id": "export",
+      "command": "python export_model.py --model /models/model.pt --format onnx --output /export",
+      "timeout": "10m",
+      "depends_on": ["evaluate"],
+      "result_paths": [
+        "/export/model.onnx",
+        "/export/model_metadata.json"
+      ]
+    }
+  ],
+  "global_timeout": "4h",
+  "on_failure": "stop",
+  "result_s3_bucket": "spawn-results-us-east-1",
+  "result_s3_prefix": "queues/ml-pipeline-20260122-140530"
+}

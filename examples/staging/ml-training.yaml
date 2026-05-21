@@ -1,0 +1,52 @@
+# Machine Learning Training with Data Staging
+#
+# This example demonstrates staging a large training dataset
+# across multiple regions for distributed training
+
+# Step 1: Stage training data
+# spawn stage upload imagenet-2012.tar.gz \
+#   --regions us-east-1,us-west-2,eu-west-1 \
+#   --dest /mnt/data/training.tar.gz
+
+# Step 2: Launch distributed training
+sweep_name: ml-training
+stage_id: stage-imagenet-abc123  # From step 1
+count: 30
+distribution: even  # 10 instances per region
+
+regions:
+  - us-east-1
+  - us-west-2
+  - eu-west-1
+
+instance_type: p3.2xlarge  # 1× V100 GPU
+spot: true
+
+base_command: |
+  #!/bin/bash
+  set -e
+
+  # Training data already downloaded to /mnt/data/training.tar.gz
+  echo "Extracting training data..."
+  cd /mnt/data
+  tar xzf training.tar.gz
+
+  # Install dependencies
+  pip3 install torch torchvision --quiet
+
+  # Distributed training with PyTorch
+  echo "Starting training (rank ${SWEEP_INDEX}/30)..."
+  python3 /opt/train_distributed.py \
+    --data /mnt/data/imagenet/ \
+    --rank ${SWEEP_INDEX} \
+    --world-size 30 \
+    --batch-size 256 \
+    --epochs 90 \
+    --output s3://my-results/models/rank-${SWEEP_INDEX}.pt
+
+  echo "Training complete"
+
+# Cost savings:
+# Without staging: 200GB × 30 instances × 2 regions × $0.09/GB = $1,080
+# With staging: 200GB × 2 regions × $0.02/GB = $8
+# Savings: $1,072 (99.3%)

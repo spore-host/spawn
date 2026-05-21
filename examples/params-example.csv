@@ -1,0 +1,4 @@
+instance_type,alpha,beta,ttl,region
+t3.micro,0.1,0.5,4h,us-east-1
+t3.small,0.2,0.6,4h,us-east-1
+t3.medium,0.3,0.7,6h,us-west-2

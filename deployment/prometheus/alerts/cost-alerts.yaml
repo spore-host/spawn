@@ -1,0 +1,85 @@
+groups:
+  - name: spawn_cost_management
+    interval: 60s
+    rules:
+      - alert: HighCostInstance
+        expr: spawn_cost_per_hour_dollars > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: spawn
+          category: cost
+        annotations:
+          summary: "Instance {{ $labels.instance_id }} costs ${{ $value }}/hour"
+          description: "Instance {{ $labels.instance_id }} has a high hourly cost of ${{ $value }}. Review if this is expected."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"
+          cost_per_hour: "{{ $value }}"
+
+      - alert: DailyCostBudgetExceeded
+        expr: sum(spawn_estimated_cost_dollars) > 200
+        for: 5m
+        labels:
+          severity: critical
+          component: spawn
+          category: cost
+        annotations:
+          summary: "Total running cost ${{ $value }} exceeds daily budget"
+          description: "Current total running cost of ${{ $value }} exceeds the daily budget of $200. Review instance usage."
+          total_cost: "{{ $value }}"
+
+      - alert: CostTrendingUp
+        expr: |
+          (
+            sum(spawn_estimated_cost_dollars)
+            /
+            (sum(spawn_estimated_cost_dollars offset 24h) + 1)
+          ) > 1.5
+        for: 10m
+        labels:
+          severity: warning
+          component: spawn
+          category: cost
+        annotations:
+          summary: "Cost trending up 50%+ vs 24h ago"
+          description: "Total running cost is {{ $value | humanizePercentage }} higher than 24 hours ago. Investigate unexpected instance growth."
+          ratio: "{{ $value }}"
+
+      - alert: HighRegionalCost
+        expr: sum by (region) (spawn_estimated_cost_dollars) > 50
+        for: 10m
+        labels:
+          severity: warning
+          component: spawn
+          category: cost
+        annotations:
+          summary: "Region {{ $labels.region }} cost exceeds ${{ $value }}"
+          description: "Region {{ $labels.region }} has accumulated costs of ${{ $value }}. Review instances in this region."
+          region: "{{ $labels.region }}"
+          cost: "{{ $value }}"
+
+      - alert: IdleHighCostInstance
+        expr: spawn_idle_state == 1 and spawn_cost_per_hour_dollars > 2
+        for: 30m
+        labels:
+          severity: warning
+          component: spawn
+          category: cost
+        annotations:
+          summary: "Idle instance {{ $labels.instance_id }} costs ${{ $value }}/hour"
+          description: "Instance {{ $labels.instance_id }} is idle but costs ${{ $value }}/hour. Terminate to save costs."
+          instance_id: "{{ $labels.instance_id }}"
+          region: "{{ $labels.region }}"
+          cost_per_hour: "{{ $value }}"
+
+      - alert: CostForecastExceeded
+        expr: predict_linear(sum(spawn_estimated_cost_dollars)[1h:], 86400) > 200
+        for: 10m
+        labels:
+          severity: warning
+          component: spawn
+          category: cost
+        annotations:
+          summary: "Forecasted daily cost ${{ $value }} exceeds budget"
+          description: "Based on current trends, daily cost will reach ${{ $value }}, exceeding the $200 budget."
+          forecasted_cost: "{{ $value }}"

@@ -1,0 +1,45 @@
+{
+  "queue_id": "{{QUEUE_ID:data-processing}}",
+  "queue_name": "Data Processing Pipeline",
+  "jobs": [
+    {
+      "job_id": "download",
+      "command": "aws s3 sync {{S3_SOURCE}} /tmp/data/",
+      "timeout": "{{DOWNLOAD_TIMEOUT:30m}}",
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "exponential"
+      }
+    },
+    {
+      "job_id": "process",
+      "command": "python process.py --input /tmp/data --output /tmp/processed --workers {{WORKERS:8}}",
+      "timeout": "{{PROCESS_TIMEOUT:4h}}",
+      "depends_on": ["download"],
+      "env": {
+        "NUM_WORKERS": "{{WORKERS:8}}"
+      }
+    },
+    {
+      "job_id": "aggregate",
+      "command": "python aggregate.py --input /tmp/processed --output /tmp/aggregated.csv",
+      "timeout": "{{AGGREGATE_TIMEOUT:1h}}",
+      "depends_on": ["process"]
+    },
+    {
+      "job_id": "upload",
+      "command": "aws s3 cp /tmp/aggregated.csv {{S3_DESTINATION}}",
+      "timeout": "30m",
+      "depends_on": ["aggregate"],
+      "retry": {
+        "max_attempts": 5,
+        "backoff": "exponential"
+      },
+      "result_paths": ["/tmp/aggregated.csv"]
+    }
+  ],
+  "global_timeout": "{{GLOBAL_TIMEOUT:8h}}",
+  "on_failure": "continue",
+  "result_s3_bucket": "{{S3_BUCKET}}",
+  "result_s3_prefix": "{{S3_PREFIX:queues/data-processing}}"
+}

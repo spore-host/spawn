@@ -1,0 +1,26 @@
+{
+  "queue_id": "test-dependency-queue",
+  "jobs": [
+    {
+      "job_id": "setup",
+      "command": "mkdir -p /tmp/test && echo 'base' > /tmp/test/base.txt",
+      "timeout": "30s"
+    },
+    {
+      "job_id": "process",
+      "command": "cat /tmp/test/base.txt | sed 's/base/processed/' > /tmp/test/processed.txt",
+      "timeout": "30s",
+      "depends_on": ["setup"]
+    },
+    {
+      "job_id": "verify",
+      "command": "test -f /tmp/test/processed.txt && grep -q 'processed' /tmp/test/processed.txt",
+      "timeout": "30s",
+      "depends_on": ["process"]
+    }
+  ],
+  "global_timeout": "5m",
+  "on_failure": "stop",
+  "result_s3_bucket": "spawn-queue-results-test",
+  "result_s3_prefix": "test-dependency-queue"
+}

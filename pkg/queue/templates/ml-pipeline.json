@@ -1,0 +1,45 @@
+{
+  "queue_id": "{{QUEUE_ID:ml-pipeline}}",
+  "queue_name": "ML Training Pipeline",
+  "jobs": [
+    {
+      "job_id": "preprocess",
+      "command": "python preprocess.py --input {{INPUT}} --output /tmp/processed.pkl",
+      "timeout": "{{PREPROCESS_TIMEOUT:30m}}",
+      "result_paths": ["/tmp/processed.pkl"]
+    },
+    {
+      "job_id": "train",
+      "command": "python train.py --data /tmp/processed.pkl --model {{MODEL:resnet50}} --output /tmp/model.h5",
+      "timeout": "{{TRAIN_TIMEOUT:2h}}",
+      "depends_on": ["preprocess"],
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "exponential"
+      },
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "{{GPU_DEVICES:0}}",
+        "TF_CPP_MIN_LOG_LEVEL": "2"
+      },
+      "result_paths": ["/tmp/model.h5", "/tmp/training.log"]
+    },
+    {
+      "job_id": "evaluate",
+      "command": "python evaluate.py --model /tmp/model.h5 --output /tmp/metrics.json",
+      "timeout": "{{EVAL_TIMEOUT:15m}}",
+      "depends_on": ["train"],
+      "result_paths": ["/tmp/metrics.json"]
+    },
+    {
+      "job_id": "export",
+      "command": "python export.py --model /tmp/model.h5 --format onnx --output /tmp/model.onnx",
+      "timeout": "{{EXPORT_TIMEOUT:10m}}",
+      "depends_on": ["evaluate"],
+      "result_paths": ["/tmp/model.onnx"]
+    }
+  ],
+  "global_timeout": "{{GLOBAL_TIMEOUT:4h}}",
+  "on_failure": "{{ON_FAILURE:stop}}",
+  "result_s3_bucket": "{{S3_BUCKET}}",
+  "result_s3_prefix": "{{S3_PREFIX:queues/ml-pipeline}}"
+}

@@ -1,0 +1,98 @@
+{
+  "pipeline_id": "data-processing-fanout",
+  "pipeline_name": "Parallel Data Processing with Aggregation",
+  "stages": [
+    {
+      "stage_id": "split",
+      "instance_type": "c5.large",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "command": "./split_data.sh --chunks 10",
+      "depends_on": [],
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/data/chunks/*"]
+      }
+    },
+    {
+      "stage_id": "process-chunk-1",
+      "instance_type": "m5.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "spot": true,
+      "command": "./process.py --chunk 1",
+      "depends_on": ["split"],
+      "data_input": {
+        "mode": "s3",
+        "source_stage": "split",
+        "pattern": "/data/chunks/chunk-1-*",
+        "dest_path": "/input"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/output/*"]
+      }
+    },
+    {
+      "stage_id": "process-chunk-2",
+      "instance_type": "m5.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "spot": true,
+      "command": "./process.py --chunk 2",
+      "depends_on": ["split"],
+      "data_input": {
+        "mode": "s3",
+        "source_stage": "split",
+        "pattern": "/data/chunks/chunk-2-*",
+        "dest_path": "/input"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/output/*"]
+      }
+    },
+    {
+      "stage_id": "process-chunk-3",
+      "instance_type": "m5.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "spot": true,
+      "command": "./process.py --chunk 3",
+      "depends_on": ["split"],
+      "data_input": {
+        "mode": "s3",
+        "source_stage": "split",
+        "pattern": "/data/chunks/chunk-3-*",
+        "dest_path": "/input"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/output/*"]
+      }
+    },
+    {
+      "stage_id": "aggregate",
+      "instance_type": "r5.2xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "command": "./aggregate.py",
+      "depends_on": ["process-chunk-1", "process-chunk-2", "process-chunk-3"],
+      "data_input": {
+        "mode": "s3",
+        "source_stages": ["process-chunk-1", "process-chunk-2", "process-chunk-3"],
+        "dest_path": "/data/processed"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/results/aggregated.csv"]
+      }
+    }
+  ],
+  "s3_bucket": "my-processing-bucket",
+  "s3_prefix": "pipelines/data-processing",
+  "result_s3_bucket": "my-results",
+  "result_s3_prefix": "pipelines/results",
+  "on_failure": "stop",
+  "max_cost_usd": 50.0
+}

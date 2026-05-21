@@ -1,0 +1,21 @@
+{
+  "sweep_name": "test-sweep",
+  "base_command": "python train.py",
+  "parameters": [
+    {
+      "learning_rate": 0.001,
+      "batch_size": 32,
+      "model": "resnet50"
+    },
+    {
+      "learning_rate": 0.01,
+      "batch_size": 64,
+      "model": "resnet50"
+    },
+    {
+      "learning_rate": 0.001,
+      "batch_size": 32,
+      "model": "efficientnet"
+    }
+  ]
+}

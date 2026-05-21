@@ -1,0 +1,21 @@
+# Simple parameter sweep example
+# Use with: spawn launch simple-params.yaml
+
+sweep_name: simple-experiment
+region: us-east-1
+instance_type: t3.medium
+ami: ami-0c55b159cbfafe1f0
+
+defaults:
+  dataset: mnist
+  epochs: 10
+
+params:
+  - learning_rate: 0.01
+    batch_size: 32
+
+  - learning_rate: 0.001
+    batch_size: 32
+
+  - learning_rate: 0.0001
+    batch_size: 32

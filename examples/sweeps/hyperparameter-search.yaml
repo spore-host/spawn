@@ -1,0 +1,68 @@
+# Hyperparameter Search Example
+#
+# Grid search over learning rates, batch sizes, and architectures
+
+sweep_name: hyperparam-search
+count: 48  # 4 × 3 × 4 combinations
+
+# Define parameter grid
+parameters:
+  - learning_rate: [0.001, 0.01, 0.1, 0.5]
+    batch_size: [32, 64, 128]
+    model: [resnet18, resnet34, resnet50, efficientnet]
+
+# Multi-region for faster completion
+regions:
+  - us-east-1
+  - us-west-2
+  - eu-west-1
+
+distribution: fair-share  # Distribute evenly
+instance_type: p3.2xlarge  # GPU for training
+spot: true
+ttl: 8h  # Max 8 hours per trial
+
+# Result collection
+result_bucket: s3://my-results/sweeps/
+result_file: metrics.json
+
+base_command: |
+  #!/bin/bash
+  set -e
+
+  # Parse parameters
+  LR=$(echo $SWEEP_PARAMS | jq -r '.learning_rate')
+  BS=$(echo $SWEEP_PARAMS | jq -r '.batch_size')
+  MODEL=$(echo $SWEEP_PARAMS | jq -r '.model')
+
+  echo "Trial ${SWEEP_INDEX}: lr=$LR, bs=$BS, model=$MODEL"
+
+  # Install PyTorch
+  pip3 install torch torchvision --quiet
+
+  # Download dataset (CIFAR-10)
+  python3 -c "
+  import torchvision
+  torchvision.datasets.CIFAR10(root='/tmp/data', train=True, download=True)
+  "
+
+  # Train model
+  python3 /opt/train.py \
+    --model $MODEL \
+    --lr $LR \
+    --batch-size $BS \
+    --epochs 50 \
+    --data /tmp/data \
+    --output-json /tmp/metrics.json
+
+  # Upload results
+  aws s3 cp /tmp/metrics.json \
+    s3://my-results/sweeps/${SWEEP_ID}/${SWEEP_INDEX}/metrics.json
+
+  echo "Trial complete"
+
+# After sweep completes, collect results:
+# spawn collect-results --sweep-id <sweep-id> \
+#   --metric accuracy \
+#   --best 5 \
+#   --output top5.csv

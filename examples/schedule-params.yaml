@@ -1,0 +1,72 @@
+# Example parameter file for scheduled sweeps
+# Use with: spawn schedule create schedule-params.yaml --cron "0 2 * * *"
+
+# Sweep configuration
+sweep_name: nightly-training
+region: us-east-1
+max_concurrent: 10
+launch_delay: 30s
+
+# Instance configuration
+instance_type: g5.xlarge
+ami: ami-0c55b159cbfafe1f0  # Deep Learning AMI
+disk_size: 100
+
+# Default parameters applied to all jobs
+defaults:
+  dataset: cifar10
+  optimizer: adam
+  epochs: 100
+  early_stopping: true
+
+# Parameter sweep configurations
+params:
+  # Experiment 1: Learning rate sweep
+  - learning_rate: 0.001
+    batch_size: 32
+    model: resnet18
+
+  - learning_rate: 0.0001
+    batch_size: 32
+    model: resnet18
+
+  - learning_rate: 0.00001
+    batch_size: 32
+    model: resnet18
+
+  # Experiment 2: Batch size sweep
+  - learning_rate: 0.001
+    batch_size: 16
+    model: resnet18
+
+  - learning_rate: 0.001
+    batch_size: 64
+    model: resnet18
+
+  - learning_rate: 0.001
+    batch_size: 128
+    model: resnet18
+
+  # Experiment 3: Model architecture sweep
+  - learning_rate: 0.001
+    batch_size: 32
+    model: resnet34
+
+  - learning_rate: 0.001
+    batch_size: 32
+    model: resnet50
+
+  - learning_rate: 0.001
+    batch_size: 32
+    model: efficientnet_b0
+
+  # Experiment 4: Optimizer comparison
+  - learning_rate: 0.001
+    batch_size: 32
+    model: resnet18
+    optimizer: sgd
+
+  - learning_rate: 0.001
+    batch_size: 32
+    model: resnet18
+    optimizer: adamw

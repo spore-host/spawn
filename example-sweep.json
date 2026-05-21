@@ -1,0 +1,24 @@
+{
+  "defaults": {
+    "instance_type": "t3.micro",
+    "ttl": "15m",
+    "spot": true,
+    "region": "us-east-1",
+    "command": "echo 'Parameter sweep test: alpha=$PARAM_alpha, beta=$PARAM_beta' && sleep 60"
+  },
+  "params": [
+    {
+      "alpha": 0.1,
+      "beta": 0.5
+    },
+    {
+      "alpha": 0.2,
+      "beta": 0.6
+    },
+    {
+      "alpha": 0.3,
+      "beta": 0.7,
+      "instance_type": "t3.small"
+    }
+  ]
+}

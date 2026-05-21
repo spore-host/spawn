@@ -1,0 +1,106 @@
+{
+  "Comment": "Spawn Parameter Sweep Workflow with AWS Step Functions",
+  "StartAt": "LaunchSweep",
+  "States": {
+    "LaunchSweep": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:spawn-launcher",
+      "ResultPath": "$.sweepId",
+      "Next": "WaitForSweep",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "HandleLaunchFailure"
+        }
+      ]
+    },
+
+    "WaitForSweep": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:spawn-status-checker",
+      "ResultPath": "$.status",
+      "Next": "CheckStatus",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ]
+    },
+
+    "CheckStatus": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.status.state",
+          "StringEquals": "COMPLETED",
+          "Next": "ProcessResults"
+        },
+        {
+          "Variable": "$.status.state",
+          "StringEquals": "RUNNING",
+          "Next": "WaitDelay"
+        },
+        {
+          "Variable": "$.status.state",
+          "StringEquals": "INITIALIZING",
+          "Next": "WaitDelay"
+        },
+        {
+          "Variable": "$.status.state",
+          "StringEquals": "FAILED",
+          "Next": "HandleSweepFailure"
+        },
+        {
+          "Variable": "$.status.state",
+          "StringEquals": "CANCELLED",
+          "Next": "HandleSweepCancelled"
+        }
+      ],
+      "Default": "HandleUnknownState"
+    },
+
+    "WaitDelay": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "WaitForSweep"
+    },
+
+    "ProcessResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:process-sweep-results",
+      "ResultPath": "$.results",
+      "Next": "Success"
+    },
+
+    "Success": {
+      "Type": "Succeed"
+    },
+
+    "HandleLaunchFailure": {
+      "Type": "Fail",
+      "Error": "LaunchFailed",
+      "Cause": "Failed to launch spawn parameter sweep"
+    },
+
+    "HandleSweepFailure": {
+      "Type": "Fail",
+      "Error": "SweepFailed",
+      "Cause": "Parameter sweep execution failed"
+    },
+
+    "HandleSweepCancelled": {
+      "Type": "Fail",
+      "Error": "SweepCancelled",
+      "Cause": "Parameter sweep was cancelled"
+    },
+
+    "HandleUnknownState": {
+      "Type": "Fail",
+      "Error": "UnknownState",
+      "Cause": "Sweep in unknown state"
+    }
+  }
+}

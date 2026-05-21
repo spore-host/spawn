@@ -1,0 +1,75 @@
+# Workflow Example: Machine Learning Pipeline
+# This example shows a typical ML workflow with data preprocessing, training, and evaluation
+# using different instance types optimized for each phase.
+#
+# Usage:
+#   spawn sweep --file workflow-ml-training.yaml --detach
+
+defaults:
+  region: us-west-2
+  ttl: 4h
+  spot: true
+
+params:
+  # Step 1: Data preprocessing on memory-optimized instance
+  - step: data-preprocessing
+    instance_type: r5.xlarge
+    command: |
+      aws s3 cp s3://my-ml-bucket/raw-data/ /data/raw/ --recursive
+      python3 /app/preprocess.py --input /data/raw --output /data/processed
+      aws s3 cp /data/processed/ s3://my-ml-bucket/processed-data/ --recursive
+    memory_gb: 32
+    description: "Preprocess 100GB dataset"
+
+  # Step 2: Model training on GPU instance
+  - step: model-training
+    instance_type: g4dn.xlarge
+    command: |
+      aws s3 cp s3://my-ml-bucket/processed-data/ /data/processed/ --recursive
+      python3 /app/train.py \
+        --data /data/processed \
+        --model /models/output \
+        --epochs 100 \
+        --batch-size 64
+      aws s3 cp /models/output/ s3://my-ml-bucket/models/$SWEEP_INDEX/ --recursive
+    gpu_count: 1
+    ttl: 8h
+    description: "Train ResNet-50 on ImageNet"
+
+  # Step 3: Hyperparameter tuning on multiple GPUs
+  - step: hyperparameter-tuning
+    instance_type: g4dn.12xlarge
+    command: |
+      aws s3 cp s3://my-ml-bucket/processed-data/ /data/processed/ --recursive
+      python3 /app/tune.py \
+        --data /data/processed \
+        --trials 100 \
+        --gpus 4
+      aws s3 cp /results/ s3://my-ml-bucket/tuning-results/$SWEEP_INDEX/ --recursive
+    gpu_count: 4
+    ttl: 12h
+    description: "Hyperparameter search with 100 trials"
+
+  # Step 4: Model evaluation on CPU instance
+  - step: model-evaluation
+    instance_type: c5.2xlarge
+    command: |
+      aws s3 cp s3://my-ml-bucket/models/ /models/ --recursive
+      aws s3 cp s3://my-ml-bucket/test-data/ /data/test/ --recursive
+      python3 /app/evaluate.py \
+        --models /models \
+        --test-data /data/test \
+        --output /results/metrics.json
+      aws s3 cp /results/ s3://my-ml-bucket/evaluation-results/ --recursive
+    description: "Evaluate all trained models"
+
+  # Step 5: Model deployment preparation
+  - step: model-deployment
+    instance_type: t3.medium
+    command: |
+      aws s3 cp s3://my-ml-bucket/models/best/ /models/ --recursive
+      docker build -t myapp-inference:latest /app/inference
+      docker tag myapp-inference:latest $AWS_ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/myapp:$SWEEP_INDEX
+      aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com
+      docker push $AWS_ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/myapp:$SWEEP_INDEX
+    description: "Build and push inference container"

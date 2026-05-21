@@ -1,0 +1,81 @@
+{
+  "_comment": "Pipeline for batch-converting BAMs to build a BAMS3 query library. Run this once, query forever!",
+  "pipeline_id": "bams3-library-builder",
+  "pipeline_name": "BAMS3 Query Library Builder",
+  "stages": [
+    {
+      "stage_id": "scan-input",
+      "instance_type": "c7a.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "spot": true,
+      "timeout": "30m",
+      "command": "/opt/spawn/examples/genomics/scan_bam_directory.py",
+      "depends_on": [],
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/data/conversion_manifest.json"]
+      },
+      "env": {
+        "INPUT_BUCKET": "my-raw-bams",
+        "INPUT_PREFIX": "samples/",
+        "OUTPUT_BUCKET": "my-bams3-library",
+        "OUTPUT_PREFIX": "bams3/"
+      }
+    },
+    {
+      "stage_id": "convert-batch",
+      "instance_type": "c8a.2xlarge",
+      "instance_count": 100,
+      "region": "us-east-1",
+      "spot": true,
+      "timeout": "2h",
+      "command": "/opt/spawn/examples/genomics/batch_convert_worker.py",
+      "depends_on": ["scan-input"],
+      "data_input": {
+        "mode": "s3",
+        "source_stage": "scan-input",
+        "dest_path": "/data"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/data/conversion_log.json"]
+      },
+      "env": {
+        "CHUNK_SIZE_MB": "5",
+        "COMPRESSION": "lz4",
+        "THREADS": "8"
+      }
+    },
+    {
+      "stage_id": "validate-library",
+      "instance_type": "c7a.xlarge",
+      "instance_count": 1,
+      "region": "us-east-1",
+      "spot": true,
+      "timeout": "1h",
+      "command": "/opt/spawn/examples/genomics/validate_library.py",
+      "depends_on": ["convert-batch"],
+      "data_input": {
+        "mode": "s3",
+        "source_stage": "convert-batch",
+        "dest_path": "/data/logs"
+      },
+      "data_output": {
+        "mode": "s3",
+        "paths": ["/data/library_catalog.json", "/data/validation_report.txt"]
+      },
+      "env": {
+        "VALIDATION_SAMPLES": "10",
+        "CHECK_INTEGRITY": "true"
+      }
+    }
+  ],
+  "s3_bucket": "my-pipeline-data",
+  "s3_prefix": "library-builder",
+  "result_s3_bucket": "my-bams3-library",
+  "result_s3_prefix": "metadata",
+  "on_failure": "continue",
+  "max_cost_usd": 100.0,
+  "notification_email": "bioinformatics@example.com"
+}

@@ -1,0 +1,19 @@
+{
+  "queue_id": "test-simple-queue",
+  "jobs": [
+    {
+      "job_id": "job1",
+      "command": "echo 'test1' > /tmp/test1.txt",
+      "timeout": "30s"
+    },
+    {
+      "job_id": "job2",
+      "command": "echo 'test2' > /tmp/test2.txt",
+      "timeout": "30s"
+    }
+  ],
+  "global_timeout": "5m",
+  "on_failure": "stop",
+  "result_s3_bucket": "spawn-queue-results-test",
+  "result_s3_prefix": "test-simple-queue"
+}
