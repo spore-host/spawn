@@ -87,7 +87,7 @@ var pluginInstallCmd = &cobra.Command{
 	Long: `Install a plugin on a running spore instance.
 
 Plugin ref formats:
-  name                  official registry (scttfrdmn/spore-plugins)
+  name                  official registry (spore-host/spore-plugins)
   name@v1.2.0           pinned to git tag
   github:user/repo/name custom GitHub repository
   ./path/to/plugin.yaml local file`,

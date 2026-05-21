@@ -6,7 +6,7 @@ baseCommand: [spawn, launch]
 
 requirements:
   DockerRequirement:
-    dockerPull: spore-host/spawn:latest
+    dockerPull: sporehost/spore-host:latest
 
 inputs:
   params_file:

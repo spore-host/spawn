@@ -13,11 +13,11 @@ func TestParseRef(t *testing.T) {
 	}{
 		{
 			ref:  "globus-personal-endpoint",
-			want: plugin.PluginRef{Host: "official", Owner: "scttfrdmn", Repo: "spore-plugins", Name: "globus-personal-endpoint"},
+			want: plugin.PluginRef{Host: "official", Owner: "spore-host", Repo: "spore-plugins", Name: "globus-personal-endpoint"},
 		},
 		{
 			ref:  "globus-personal-endpoint@v1.2.0",
-			want: plugin.PluginRef{Host: "official", Owner: "scttfrdmn", Repo: "spore-plugins", Name: "globus-personal-endpoint", Version: "v1.2.0"},
+			want: plugin.PluginRef{Host: "official", Owner: "spore-host", Repo: "spore-plugins", Name: "globus-personal-endpoint", Version: "v1.2.0"},
 		},
 		{
 			ref:  "github:user/repo/myplugin",

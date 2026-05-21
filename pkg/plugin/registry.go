@@ -36,7 +36,7 @@ type PluginRef struct {
 // ParseRef parses a plugin reference string into a PluginRef.
 //
 // Supported formats:
-//   - name                    official registry (scttfrdmn/spore-plugins)
+//   - name                    official registry (spore-host/spore-plugins)
 //   - name@v1.2.0             official registry, pinned to git tag
 //   - github:user/repo/name   custom GitHub repository
 //   - github:user/repo/name@v1.2.0  custom GitHub repository, pinned
@@ -69,7 +69,7 @@ func ParseRef(ref string) PluginRef {
 	}
 	return PluginRef{
 		Host:    "official",
-		Owner:   "scttfrdmn",
+		Owner:   "spore-host",
 		Repo:    "spore-plugins",
 		Name:    name,
 		Version: version,
@@ -97,7 +97,7 @@ func (r *compositeResolver) Resolve(ctx context.Context, ref string) (*PluginSpe
 
 // fetchGitHubSpec fetches a plugin.yaml from GitHub raw content.
 func fetchGitHubSpec(ctx context.Context, owner, repo, name, version string) (*PluginSpec, error) {
-	if owner != "scttfrdmn" {
+	if owner != "spore-host" {
 		log.Printf("warning: installing plugin from unverified source %s/%s — content is not signed or audited", owner, repo)
 	}
 
