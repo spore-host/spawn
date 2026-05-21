@@ -47,7 +47,7 @@ spec:
 
   - name: launch-sweep
     container:
-      image: scttfrdmn/spawn:latest
+      image: spore-host/spawn:latest
       command: [sh, -c]
       args:
       - |
@@ -74,7 +74,7 @@ spec:
       parameters:
       - name: sweep-id
     container:
-      image: scttfrdmn/spawn:latest
+      image: spore-host/spawn:latest
       command: [sh, -c]
       args:
       - |
