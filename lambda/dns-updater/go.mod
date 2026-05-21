@@ -1,6 +1,6 @@
 module github.com/spore-host/spawn/lambda/dns-updater
 
-go 1.22
+go 1.26
 
 require (
 	github.com/aws/aws-lambda-go v1.47.0

@@ -87,7 +87,7 @@ echo "Installing systemd service..."
 cat > /etc/systemd/system/spored.service <<'EOF'
 [Unit]
 Description=Spawn Agent - Instance self-monitoring
-Documentation=https://github.com/spore-host/spore-host
+Documentation=https://github.com/spore-host/spawn
 After=network-online.target
 Wants=network-online.target
 

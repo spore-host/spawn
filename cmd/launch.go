@@ -568,7 +568,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h to prevent zombie instances\n")
 		fmt.Fprintf(os.Stderr, "   Instance will terminate after 1 hour of inactivity.\n")
 		fmt.Fprintf(os.Stderr, "   Override with --ttl, --idle-timeout, or --no-timeout\n")
-		fmt.Fprintf(os.Stderr, "   See: https://github.com/spore-host/spore-host/blob/main/spawn/docs/lifecycle.md\n\n")
+		fmt.Fprintf(os.Stderr, "   See: https://github.com/spore-host/spawn/blob/main/docs/lifecycle.md\n\n")
 	} else if noTimeout {
 		// User explicitly disabled timeout - warn about zombie risk
 		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: --no-timeout specified\n")
@@ -585,7 +585,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h to prevent zombie instances\n")
 		fmt.Fprintf(os.Stderr, "   Instance will terminate after 1 hour of inactivity.\n")
 		fmt.Fprintf(os.Stderr, "   Override with --ttl, --idle-timeout, or --no-timeout\n")
-		fmt.Fprintf(os.Stderr, "   See: https://github.com/spore-host/spore-host/blob/main/spawn/docs/lifecycle.md\n\n")
+		fmt.Fprintf(os.Stderr, "   See: https://github.com/spore-host/spawn/blob/main/docs/lifecycle.md\n\n")
 	} else if noTimeout {
 		// User explicitly disabled timeout - warn about zombie risk
 		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: --no-timeout specified\n")
