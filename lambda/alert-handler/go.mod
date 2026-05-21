@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.3
 	github.com/aws/aws-sdk-go-v2/service/kms v1.51.1
 	github.com/aws/aws-sdk-go-v2/service/sns v1.39.17
-	github.com/spore-host/spawn v0.35.0
+	github.com/spore-host/spawn v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -30,3 +30,4 @@ require (
 	github.com/aws/smithy-go v1.25.1 // indirect
 )
 
+replace github.com/spore-host/spawn => ../..
