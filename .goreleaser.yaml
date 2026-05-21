@@ -1,0 +1,166 @@
+# GoReleaser configuration for spore-host/spawn
+version: 2
+
+builds:
+  - id: spawn
+    main: .
+    binary: spawn
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/spore-host/spawn/cmd.Version={{.Version}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+  - id: spored
+    main: ./cmd/spored
+    binary: spored
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: spawn-archive
+    ids:
+      - spawn
+    name_template: 'spawn_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE*
+
+  - id: spored-archive
+    ids:
+      - spored
+    name_template: 'spored_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - 'typo'
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+nfpms:
+  - id: spawn-pkg
+    package_name: spawn
+    ids:
+      - spawn
+    vendor: spore.host
+    homepage: https://spore.host
+    maintainer: "spore.host <hello@spore.host>"
+    description: "Launch ephemeral AWS EC2 instances effortlessly"
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/spawn/copyright
+        type: doc
+    rpm:
+      summary: "Launch ephemeral AWS EC2 instances effortlessly"
+
+  - id: spored-pkg
+    package_name: spored
+    ids:
+      - spored
+    vendor: spore.host
+    homepage: https://spore.host
+    maintainer: "spore.host <hello@spore.host>"
+    description: "Background monitoring daemon for spawn-managed EC2 instances"
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/spored/copyright
+        type: doc
+    rpm:
+      summary: "Background monitoring daemon for spawn-managed EC2 instances"
+
+brews:
+  - name: spawn
+    ids:
+      - spawn-archive
+    repository:
+      owner: spore-host
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/spore-host/spawn
+    description: "Launch ephemeral AWS EC2 instances effortlessly"
+    license: Apache-2.0
+    dependencies:
+      - name: spore-host/tap/truffle
+        type: runtime
+    test: |
+      system "#{bin}/spawn", "version"
+    install: |
+      bin.install "spawn"
+    post_install: |
+      system "#{bin}/spawn", "_register-install"
+
+scoops:
+  - name: spawn
+    ids:
+      - spawn-archive
+    repository:
+      owner: spore-host
+      name: scoop-bucket
+      branch: main
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
+    directory: bucket
+    homepage: https://github.com/spore-host/spawn
+    description: "Launch ephemeral AWS EC2 instances effortlessly"
+    license: Apache-2.0
+    depends:
+      - spore-host/truffle
+    post_install:
+      - "spawn _register-install"
+
+release:
+  github:
+    owner: spore-host
+    name: spawn
+  draft: false
+  prerelease: auto
+  mode: replace
+  name_template: "v{{.Version}}"
