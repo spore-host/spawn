@@ -5,3 +5,17 @@ spored
 lambda/*/bootstrap
 lambda/*/function.zip
 lambda/*.zip
+
+# Lambda compiled binaries (named after their function)
+lambda/alert-evaluator/alert-evaluator
+lambda/alert-handler/alert-handler
+lambda/cost-history-collector/cost-history-collector
+lambda/dashboard-api/dashboard-api
+lambda/dashboard-websocket/dashboard-websocket
+lambda/dashboard-websocket-processor/dashboard-websocket-processor
+lambda/dns-updater/dns-updater
+lambda/pipeline-orchestrator/pipeline-orchestrator
+lambda/scheduler-handler/scheduler-handler
+lambda/spore-bot/spore-bot
+lambda/spore-bot/prism-bot
+lambda/sweep-orchestrator/sweep-orchestrator
