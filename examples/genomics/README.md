@@ -679,6 +679,6 @@ If you use this pipeline in your research, please cite:
   author = {Freedman, Scott},
   title = {Spawn BAMS3 Genomics Pipeline},
   year = {2026},
-  url = {https://github.com/spore-host/spore-host/spawn/examples/genomics}
+  url = {https://github.com/spore-host/spawn/tree/main/examples/genomics}
 }
 ```

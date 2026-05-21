@@ -37,7 +37,7 @@ task spawn_sweep {
   }
 
   runtime {
-    docker: "scttfrdmn/spawn:latest"
+    docker: "spore-host/spawn:latest"
     memory: "~{memory_gb} GB"
     cpu: cpu
   }

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-EMAIL=${1:-scttfrdmn@gmail.com}
+EMAIL=${1:-user@example.com}
 PROFILE=${2:-spore-host-infra}
 TABLE_NAME="spawn-user-accounts"
 

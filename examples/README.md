@@ -306,7 +306,7 @@ spawn queue results <queue-id> --output ./results/
   - [SCHEDULED_EXECUTIONS_GUIDE.md](../SCHEDULED_EXECUTIONS_GUIDE.md) - Scheduled sweeps
   - [BATCH_QUEUE_GUIDE.md](../BATCH_QUEUE_GUIDE.md) - Sequential job queues
 - **Troubleshooting:** See [TROUBLESHOOTING.md](../TROUBLESHOOTING.md)
-- **Issues:** https://github.com/spore-host/spore-host/issues
+- **Issues:** https://github.com/spore-host/spawn/issues
 
 ## Contributing Examples
 
