@@ -1,2 +1,7 @@
 spawn
 spored
+
+# Lambda build artifacts
+lambda/*/bootstrap
+lambda/*/function.zip
+lambda/*.zip
