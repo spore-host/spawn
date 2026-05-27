@@ -117,43 +117,42 @@ nfpms:
     rpm:
       summary: "Background monitoring daemon for spawn-managed EC2 instances"
 
-# Temporarily disabled until GitHub tokens are configured
-# brews:
-#   - name: spawn
-#     ids:
-#       - spawn-archive
-#     repository:
-#       owner: spore-host
-#       name: homebrew-tap
-#       branch: main
-#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-#     directory: Formula
-#     homepage: https://github.com/spore-host/spawn
-#     description: "Launch ephemeral AWS EC2 instances effortlessly"
-#     license: Apache-2.0
-#     dependencies:
-#       - name: spore-host/tap/truffle
-#         type: runtime
-#     test: |
-#       system "#{bin}/spawn", "version"
-#     install: |
-#       bin.install "spawn"
+brews:
+  - name: spawn
+    ids:
+      - spawn-archive
+    repository:
+      owner: spore-host
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/spore-host/spawn
+    description: "Launch ephemeral AWS EC2 instances effortlessly"
+    license: Apache-2.0
+    dependencies:
+      - name: spore-host/tap/truffle
+        type: runtime
+    test: |
+      system "#{bin}/spawn", "version"
+    install: |
+      bin.install "spawn"
 
-# scoops:
-#   - name: spawn
-#     ids:
-#       - spawn-archive
-#     repository:
-#       owner: spore-host
-#       name: scoop-bucket
-#       branch: main
-#       token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
-#     directory: bucket
-#     homepage: https://github.com/spore-host/spawn
-#     description: "Launch ephemeral AWS EC2 instances effortlessly"
-#     license: Apache-2.0
-#     depends:
-#       - spore-host/truffle
+scoops:
+  - name: spawn
+    ids:
+      - spawn-archive
+    repository:
+      owner: spore-host
+      name: scoop-bucket
+      branch: main
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
+    directory: bucket
+    homepage: https://github.com/spore-host/spawn
+    description: "Launch ephemeral AWS EC2 instances effortlessly"
+    license: Apache-2.0
+    depends:
+      - spore-host/truffle
 
 release:
   github:
