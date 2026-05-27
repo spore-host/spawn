@@ -43,6 +43,10 @@ jobs:
 
       - name: Upload spored binaries to S3
         run: |
+          # Extract version from tag (v0.36.0 → 0.36.0)
+          VERSION=${GITHUB_REF_NAME#v}
+          PROJECT=spawn
+
           BUCKETS=(
             spawn-binaries-us-east-1
             spawn-binaries-us-east-2
@@ -53,15 +57,31 @@ jobs:
             spawn-binaries-eu-central-1
             spawn-binaries-ap-southeast-2
           )
+
           for arch in amd64 arm64; do
             if [ "$arch" = "amd64" ]; then
               src="dist/spored_linux_amd64_v1/spored"
             else
               src="dist/spored_linux_arm64_v8.0/spored"
             fi
+
+            # Generate SHA256 checksum
             sha256sum "$src" | awk '{print $1}' > "spored-linux-${arch}.sha256"
+
             for bucket in "${BUCKETS[@]}"; do
-              aws s3 cp "$src" "s3://${bucket}/spored-linux-${arch}"
-              aws s3 cp "spored-linux-${arch}.sha256" "s3://${bucket}/spored-linux-${arch}.sha256"
+              region="${bucket#spawn-binaries-}"
+
+              # Upload to project root (for install-spored.sh)
+              aws s3 cp "$src" "s3://${bucket}/${PROJECT}/spored-linux-${arch}" --region "$region"
+              aws s3 cp "spored-linux-${arch}.sha256" "s3://${bucket}/${PROJECT}/spored-linux-${arch}.sha256" --region "$region"
+
+              # Also upload without project prefix (for legacy launch.go/app.go scripts)
+              aws s3 cp "$src" "s3://${bucket}/spored-linux-${arch}" --region "$region"
+              aws s3 cp "spored-linux-${arch}.sha256" "s3://${bucket}/spored-linux-${arch}.sha256" --region "$region"
+
+              # Upload versioned copy
+              aws s3 cp "$src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}" --region "$region"
             done
           done
+
+          echo "✅ Uploaded spored ${VERSION} to ${#BUCKETS[@]} regions"

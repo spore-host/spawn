@@ -1952,20 +1952,29 @@ esac
 # Download from S3 (public buckets, regional for low latency)
 S3_BASE_URL="https://spawn-binaries-${REGION}.s3.amazonaws.com"
 FALLBACK_URL="https://spawn-binaries-us-east-1.s3.amazonaws.com"
+PROJECT="spawn"
 
 echo "Downloading spored binary..."
 
-# Try regional bucket first, fallback to us-east-1
-if curl -f -o /usr/local/bin/spored "${S3_BASE_URL}/${BINARY}" 2>/dev/null; then
-    CHECKSUM_URL="${S3_BASE_URL}/${BINARY}.sha256"
+# Try regional bucket with project prefix first, then without prefix (legacy), then fallback to us-east-1
+if curl -f -o /usr/local/bin/spored "${S3_BASE_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
+    CHECKSUM_URL="${S3_BASE_URL}/${PROJECT}/${BINARY}.sha256"
     echo "Downloaded from ${REGION}"
+elif curl -f -o /usr/local/bin/spored "${S3_BASE_URL}/${BINARY}" 2>/dev/null; then
+    CHECKSUM_URL="${S3_BASE_URL}/${BINARY}.sha256"
+    echo "Downloaded from ${REGION} (legacy path)"
 else
-    echo "Regional bucket unavailable, using us-east-1"
-    curl -f -o /usr/local/bin/spored "${FALLBACK_URL}/${BINARY}" || {
-        echo "Failed to download spored binary"
-        exit 1
-    }
-    CHECKSUM_URL="${FALLBACK_URL}/${BINARY}.sha256"
+    echo "Regional bucket unavailable, trying us-east-1..."
+    if curl -f -o /usr/local/bin/spored "${FALLBACK_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
+        CHECKSUM_URL="${FALLBACK_URL}/${PROJECT}/${BINARY}.sha256"
+    else
+        curl -f -o /usr/local/bin/spored "${FALLBACK_URL}/${BINARY}" || {
+            echo "Failed to download spored binary"
+            exit 1
+        }
+        CHECKSUM_URL="${FALLBACK_URL}/${BINARY}.sha256"
+    fi
+    echo "Downloaded from us-east-1"
 fi
 
 # Download and verify SHA256 checksum

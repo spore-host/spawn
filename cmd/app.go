@@ -345,8 +345,12 @@ REGION=$(curl -sf -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://16
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
 # Update spored from S3 to pick up the latest version (AMI may have an older copy).
-curl -fsSL "https://spawn-binaries-${REGION}.s3.amazonaws.com/spored-linux-${ARCH}" -o /tmp/spored-new && \
+# Try project-prefixed path first, then fall back to legacy path
+curl -fsSL "https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn/spored-linux-${ARCH}" -o /tmp/spored-new 2>/dev/null || \
+  curl -fsSL "https://spawn-binaries-${REGION}.s3.amazonaws.com/spored-linux-${ARCH}" -o /tmp/spored-new
+if [ -f /tmp/spored-new ]; then
   chmod +x /tmp/spored-new && mv /tmp/spored-new /usr/local/bin/spored || true
+fi
 
 # Install wildcard TLS cert for DCV before dcvserver starts (avoids restart race).
 # Cert is under s3://spawn-certs-<region>/<account-base36>/{cert,key}.pem
