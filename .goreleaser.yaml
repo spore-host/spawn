@@ -17,6 +17,8 @@ builds:
     ldflags:
       - -s -w
       - -X github.com/spore-host/spawn/cmd.Version={{.Version}}
+      - -X github.com/spore-host/spawn/cmd.GitCommit={{.Commit}}
+      - -X github.com/spore-host/spawn/cmd.BuildDate={{.Date}}
     mod_timestamp: '{{ .CommitTimestamp }}'
 
   - id: spored
@@ -135,8 +137,6 @@ brews:
       system "#{bin}/spawn", "version"
     install: |
       bin.install "spawn"
-    post_install: |
-      system "#{bin}/spawn", "_register-install"
 
 scoops:
   - name: spawn
@@ -153,8 +153,6 @@ scoops:
     license: Apache-2.0
     depends:
       - spore-host/truffle
-    post_install:
-      - "spawn _register-install"
 
 release:
   github:

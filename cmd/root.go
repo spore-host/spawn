@@ -24,8 +24,7 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:     "spawn",
-	Version: Version,
+	Use: "spawn",
 	// Short and Long descriptions will be set after i18n initialization
 }
 
