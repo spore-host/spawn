@@ -54,8 +54,11 @@ jobs:
             spawn-binaries-us-west-2
             spawn-binaries-ca-central-1
             spawn-binaries-eu-west-1
+            spawn-binaries-eu-west-2
             spawn-binaries-eu-central-1
+            spawn-binaries-ap-southeast-1
             spawn-binaries-ap-southeast-2
+            spawn-binaries-ap-northeast-1
           )
 
           for arch in amd64 arm64; do
