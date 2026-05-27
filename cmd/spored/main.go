@@ -16,14 +16,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/scttfrdmn/spore-host/pkg/i18n"
-	"github.com/scttfrdmn/spore-host/spawn/pkg/agent"
-	"github.com/scttfrdmn/spore-host/spawn/pkg/observability/metrics"
-	"github.com/scttfrdmn/spore-host/spawn/pkg/observability/tracing"
-	"github.com/scttfrdmn/spore-host/spawn/pkg/pipeline"
-	"github.com/scttfrdmn/spore-host/spawn/pkg/pluginruntime"
-	"github.com/scttfrdmn/spore-host/spawn/pkg/provider"
-	"github.com/scttfrdmn/spore-host/spawn/pkg/tagprefix"
+	"github.com/spore-host/libs/i18n"
+	"github.com/spore-host/spawn/pkg/agent"
+	"github.com/spore-host/spawn/pkg/observability/metrics"
+	"github.com/spore-host/spawn/pkg/observability/tracing"
+	"github.com/spore-host/spawn/pkg/pipeline"
+	"github.com/spore-host/spawn/pkg/pluginruntime"
+	"github.com/spore-host/spawn/pkg/provider"
+	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
 // detectLang reads the system locale from environment variables and returns a
