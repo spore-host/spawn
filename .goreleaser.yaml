@@ -21,6 +21,20 @@ builds:
       - -X github.com/spore-host/spawn/cmd.BuildDate={{.Date}}
     mod_timestamp: '{{ .CommitTimestamp }}'
 
+  - id: spored
+    main: ./cmd/spored
+    binary: spored
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
 
 archives:
   - id: spawn-archive
@@ -30,6 +44,12 @@ archives:
     files:
       - LICENSE*
 
+  - id: spored-archive
+    ids:
+      - spored
+    name_template: 'spored_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE*
 
 checksum:
   name_template: 'checksums.txt'
@@ -77,6 +97,25 @@ nfpms:
     rpm:
       summary: "Launch ephemeral AWS EC2 instances effortlessly"
 
+  - id: spored-pkg
+    package_name: spored
+    ids:
+      - spored
+    vendor: spore.host
+    homepage: https://spore.host
+    maintainer: "spore.host <hello@spore.host>"
+    description: "Background monitoring daemon for spawn-managed EC2 instances"
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/spored/copyright
+        type: doc
+    rpm:
+      summary: "Background monitoring daemon for spawn-managed EC2 instances"
 
 brews:
   - name: spawn
