@@ -1,5 +1,5 @@
 spawn
-spored
+/spored
 
 # Lambda build artifacts
 lambda/*/bootstrap
