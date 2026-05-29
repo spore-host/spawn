@@ -1103,6 +1103,32 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
       "Effect": "Allow",
       "Action": ["s3:GetObject"],
       "Resource": "arn:aws:s3:::dcv-license.*/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::spawn-schedules-*",
+        "arn:aws:s3:::spawn-schedules-*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::spawn-binaries-*",
+        "arn:aws:s3:::spawn-binaries-*/*"
+      ]
     }
   ]
 }`

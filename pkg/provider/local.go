@@ -152,6 +152,10 @@ func (p *LocalProvider) GetConfig(ctx context.Context) (*Config, error) {
 	return p.config, nil
 }
 
+func (p *LocalProvider) RefreshConfig(ctx context.Context) error {
+	return nil // local provider config doesn't change at runtime
+}
+
 func (p *LocalProvider) Terminate(ctx context.Context, reason string) error {
 	log.Printf("Local instance exiting (reason: %s)", reason)
 	// Local mode: just exit process

@@ -112,6 +112,7 @@ var (
 	// FSx Lustre
 	fsxCreate                bool
 	fsxID                    string
+	fsxSkipValidate          bool
 	fsxRecall                string
 	fsxStorageCapacity       int32
 	fsxThroughput            int32
@@ -264,6 +265,7 @@ func init() {
 	// FSx Lustre
 	launchCmd.Flags().BoolVar(&fsxCreate, "fsx-create", false, "Create new FSx Lustre filesystem with S3 backing")
 	launchCmd.Flags().StringVar(&fsxID, "fsx-id", "", "Existing FSx Lustre filesystem ID to mount (fs-xxx)")
+	launchCmd.Flags().BoolVar(&fsxSkipValidate, "fsx-skip-validate", false, "Skip FSx filesystem validation (for testing)")
 	launchCmd.Flags().StringVar(&fsxRecall, "fsx-recall", "", "Recall FSx filesystem by stack name (recreate from S3)")
 	launchCmd.Flags().Int32Var(&fsxStorageCapacity, "fsx-storage-capacity", 1200, "FSx storage capacity in GB (1200, 2400, or increments of 2400)")
 	launchCmd.Flags().Int32Var(&fsxThroughput, "fsx-throughput", 125, "FSx PERSISTENT_2 throughput in MB/s/TiB (125, 250, 500, or 1000; default: 125)")
@@ -375,6 +377,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check for batch queue mode FIRST
+	// Capture positional name argument early (before batch queue / sweep early returns)
+	if len(args) > 0 && name == "" {
+		name = args[0]
+	}
+
 	if batchQueueFile != "" || queueTemplate != "" {
 		return launchWithBatchQueue(ctx, plat, auditLog)
 	}
@@ -1290,7 +1297,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		prog.Complete("Creating FSx Lustre filesystem")
 		time.Sleep(300 * time.Millisecond)
 
-	} else if fsxID != "" {
+	} else if fsxID != "" && !fsxSkipValidate {
 		prog.Start("Getting FSx filesystem info")
 
 		fsxInfo, err = awsClient.GetFSxFilesystem(ctx, fsxID, config.Region)
@@ -1567,7 +1574,28 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		}
 	}
 
-	// Display success
+	// Output: JSON array or TUI depending on --output flag
+	if getOutputFormat() == "json" {
+		out := []map[string]interface{}{
+			{
+				"instance_id":   result.InstanceID,
+				"name":          config.Name,
+				"instance_type": config.InstanceType,
+				"region":        config.Region,
+				"public_ip":     result.PublicIP,
+				"state":         "running",
+				"dns":           dnsRecord,
+			},
+		}
+		jsonBytes, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal JSON: %w", err)
+		}
+		fmt.Println(string(jsonBytes))
+		return nil
+	}
+
+	// Display success (TUI mode)
 	sshCmd := plat.GetSSHCommand("ec2-user", result.PublicIP)
 	prog.DisplaySuccess(result.InstanceID, result.PublicIP, sshCmd, config)
 
@@ -2897,6 +2925,31 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 		fmt.Fprintf(os.Stderr, "⚠️  Failed to write job array ID to file: %v\n", err)
 	}
 
+	// JSON output mode — always an array, consistent with single-instance path
+	if getOutputFormat() == "json" {
+		out := make([]map[string]interface{}, len(launchedInstances))
+		for i, inst := range launchedInstances {
+			out[i] = map[string]interface{}{
+				"instance_id":     inst.InstanceID,
+				"name":            inst.Name,
+				"instance_type":   baseConfig.InstanceType,
+				"region":          baseConfig.Region,
+				"public_ip":       inst.PublicIP,
+				"state":           "running",
+				"job_array_name":  jobArrayName,
+				"job_array_id":    jobArrayID,
+				"job_array_index": i,
+				"job_array_size":  count,
+			}
+		}
+		jsonBytes, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal JSON: %w", err)
+		}
+		fmt.Println(string(jsonBytes))
+		return nil
+	}
+
 	// Display success for job array
 	fmt.Fprintf(os.Stderr, "\n✅ Job array launched successfully!\n\n")
 	fmt.Fprintf(os.Stderr, "Job Array: %s\n", jobArrayName)
@@ -3302,28 +3355,71 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 
 	// Upload to S3
 	stagingClient := staging.NewClient(devCfg, accountID)
-	s3Key, size, _, err := stagingClient.UploadScheduleParams(ctx, tmpFile.Name(), queueConfig.QueueID, queueRegion)
+	scheduleBucket, s3Key, size, _, err := stagingClient.UploadScheduleParams(ctx, tmpFile.Name(), queueConfig.QueueID, queueRegion)
 	if err != nil {
 		return fmt.Errorf("failed to upload queue config: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "✓ Uploaded: %s (%.2f KB)\n", s3Key, float64(size)/1024)
 
-	// Generate user-data with queue runner bootstrap
-	s3URL := fmt.Sprintf("s3://spawn-schedules-%s/%s", queueRegion, s3Key)
-	queueUserData := userdata.GenerateQueueRunnerUserData(s3URL, queueConfig.QueueID)
+	// Build combined user-data: standard spored installer + queue runner.
+	// The queue runner script waits for spored to be ready before executing jobs.
+	s3URL := fmt.Sprintf("s3://%s/%s", scheduleBucket, s3Key)
+	queueRunnerScript := userdata.GenerateQueueRunnerUserData(s3URL, queueConfig.QueueID)
 
-	// Build launch config
-	launchConfig := &aws.LaunchConfig{
+	// Build the standard spored userdata (SSH key setup + spored installer)
+	stdScript, buildErr := buildUserData(plat, &aws.LaunchConfig{
 		InstanceType: instanceType,
 		Region:       queueRegion,
-		AMI:          ami,
+	})
+	var combinedScript string
+	if buildErr == nil && stdScript != "" {
+		// Append queue runner after spored installer (strip duplicate #!/bin/bash header)
+		queuePart := queueRunnerScript
+		if len(queuePart) > 3 && queuePart[:2] == "#!" {
+			// Find end of first line to strip shebang
+			nl := 0
+			for i, c := range queuePart {
+				if c == '\n' {
+					nl = i + 1
+					break
+				}
+			}
+			queuePart = queuePart[nl:]
+		}
+		combinedScript = stdScript + "\n\n# === Batch queue runner ===\n" + queuePart
+	} else {
+		combinedScript = queueRunnerScript
+	}
+	queueUserData := encodeUserData(combinedScript)
+
+	// Auto-detect AMI if not specified
+	resolvedAMI := ami
+	if resolvedAMI == "" {
+		awsClientForAMI, amiErr := aws.NewClient(ctx)
+		if amiErr == nil {
+			if detected, amiErr2 := awsClientForAMI.GetRecommendedAMI(ctx, queueRegion, instanceType); amiErr2 == nil {
+				resolvedAMI = detected
+			}
+		}
+	}
+
+	// Build launch config
+	instanceName := name
+	if instanceName == "" {
+		instanceName = fmt.Sprintf("%s-%s", queueConfig.QueueName, queueConfig.QueueID)
+	}
+	launchConfig := &aws.LaunchConfig{
+		Name:         instanceName,
+		InstanceType: instanceType,
+		Region:       queueRegion,
+		AMI:          resolvedAMI,
 		KeyName:      keyPair,
 		UserData:     queueUserData,
 		Spot:         spot,
 		SpotMaxPrice: spotMaxPrice,
 		Hibernate:    hibernate,
 		TTL:          queueConfig.GlobalTimeout, // Use global timeout as TTL
-		DNSName:      fmt.Sprintf("%s-%s", queueConfig.QueueName, queueConfig.QueueID),
+		DNSName:      instanceName,
 	}
 
 	// Add IAM role if specified
@@ -3331,9 +3427,13 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		launchConfig.IamInstanceProfile = iamRole
 	}
 
-	// Add network config if specified
-	launchConfig.SecurityGroupIDs = []string{sgID}
-	launchConfig.SubnetID = subnetID
+	// Add network config if specified (sgID may be empty — let spawn auto-create)
+	if sgID != "" {
+		launchConfig.SecurityGroupIDs = []string{sgID}
+	}
+	if subnetID != "" {
+		launchConfig.SubnetID = subnetID
+	}
 
 	// CRITICAL SAFETY CHECK: Prevent zombie instances
 	// If neither TTL nor idle timeout are set, default to 1h idle timeout
@@ -3351,6 +3451,24 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 	awsClient, err := aws.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to initialize AWS client: %w", err)
+	}
+
+	// Set up SSH key pair if not specified
+	if launchConfig.KeyName == "" {
+		keyName, err := setupSSHKey(ctx, awsClient, queueRegion, plat)
+		if err != nil {
+			return fmt.Errorf("failed to setup SSH key: %w", err)
+		}
+		launchConfig.KeyName = keyName
+	}
+
+	// Set up IAM instance profile if not specified
+	if launchConfig.IamInstanceProfile == "" {
+		instanceProfile, err := awsClient.SetupSporedIAMRole(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to setup IAM role: %w", err)
+		}
+		launchConfig.IamInstanceProfile = instanceProfile
 	}
 
 	// Launch instance

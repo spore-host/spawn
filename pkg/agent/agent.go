@@ -255,6 +255,21 @@ func (a *Agent) Monitor(ctx context.Context) {
 }
 
 func (a *Agent) checkAndAct(ctx context.Context) {
+	// 0. Periodically refresh config from EC2 tags (every 5 ticks = 5 min).
+	// EC2 tag API has eventual consistency — tags set at launch may not be
+	// visible within the seconds before spored starts. Refreshing here ensures
+	// on-complete, pre-stop, and other lifecycle tags are eventually picked up.
+	configRefreshTick++
+	if configRefreshTick == 1 || configRefreshTick%5 == 0 {
+		if err := a.provider.RefreshConfig(ctx); err != nil {
+			log.Printf("Warning: failed to refresh config from tags: %v", err)
+		} else {
+			if fresh, err2 := a.provider.GetConfig(ctx); err2 == nil && fresh != nil {
+				a.config = fresh
+			}
+		}
+	}
+
 	// 0a. Keep spawn:logged-in-count tag current (throttled to 5/min).
 	a.writeSessionCountTag(ctx, countActiveSessions()+countActivePortConnections(a.config.ActivePorts))
 
@@ -1370,9 +1385,20 @@ func (a *Agent) terminate(ctx context.Context, reason string) {
 	}
 }
 
+// configRefreshTick counts monitoring cycles for periodic tag refresh.
+// Tags are re-read from EC2 every 5 minutes (5 × 1-minute ticks).
+// This handles eventual consistency: tags set at launch may not be
+// visible via DescribeTags within the few seconds before spored starts.
+var configRefreshTick int
+
 // Reload re-reads configuration from provider without restarting the daemon
 func (a *Agent) Reload(ctx context.Context) error {
 	log.Printf("Reloading configuration...")
+
+	// Refresh the provider's cached config from EC2 tags first
+	if err := a.provider.RefreshConfig(ctx); err != nil {
+		log.Printf("Warning: failed to refresh config from tags: %v", err)
+	}
 
 	// Re-read config from provider
 	newConfig, err := a.provider.GetConfig(ctx)

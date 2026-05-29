@@ -99,6 +99,10 @@ type Provider interface {
 	// GetConfig returns agent configuration (from tags or config file)
 	GetConfig(ctx context.Context) (*Config, error)
 
+	// RefreshConfig re-reads configuration from the source (EC2 tags or config file)
+	// and updates the cached config. Called periodically to pick up tag changes.
+	RefreshConfig(ctx context.Context) error
+
 	// Terminate shuts down the instance (EC2) or exits process (local)
 	Terminate(ctx context.Context, reason string) error
 

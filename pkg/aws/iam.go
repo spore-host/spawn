@@ -37,7 +37,8 @@ func GenerateScopedS3Policy(region, accountID string) string {
 				],
 				"Resource": [
 					"arn:aws:s3:::spawn-binaries-%s/*",
-					"arn:aws:s3:::spawn-binaries-*/*"
+					"arn:aws:s3:::spawn-binaries-*/*",
+					"arn:aws:s3:::spawn-schedules-*/*"
 				]
 			},
 			{
@@ -47,7 +48,8 @@ func GenerateScopedS3Policy(region, accountID string) string {
 					"s3:PutObjectAcl"
 				],
 				"Resource": [
-					"arn:aws:s3:::spawn-results-%s/*"
+					"arn:aws:s3:::spawn-results-%s/*",
+					"arn:aws:s3:::spawn-schedules-*/*"
 				]
 			},
 			{
@@ -58,7 +60,8 @@ func GenerateScopedS3Policy(region, accountID string) string {
 				],
 				"Resource": [
 					"arn:aws:s3:::spawn-binaries-%s",
-					"arn:aws:s3:::spawn-results-%s"
+					"arn:aws:s3:::spawn-results-%s",
+					"arn:aws:s3:::spawn-schedules-*"
 				]
 			}
 		]

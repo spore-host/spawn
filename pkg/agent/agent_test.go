@@ -23,6 +23,7 @@ func (s *stubProvider) GetIdentity(_ context.Context) (*provider.Identity, error
 func (s *stubProvider) GetConfig(_ context.Context) (*provider.Config, error) {
 	return s.config, nil
 }
+func (s *stubProvider) RefreshConfig(_ context.Context) error { return nil }
 func (s *stubProvider) Terminate(_ context.Context, _ string) error { return nil }
 func (s *stubProvider) Stop(_ context.Context, _ string) error      { return nil }
 func (s *stubProvider) Hibernate(_ context.Context) error           { return nil }

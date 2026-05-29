@@ -211,7 +211,7 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	// Upload parameter file to S3
 	fmt.Fprintf(os.Stderr, "📤 Uploading parameter file...\n")
 	stagingClient := staging.NewClient(cfg, accountID)
-	s3Key, size, sha256, err := stagingClient.UploadScheduleParams(ctx, paramsFile, scheduleID, scheduleRegion)
+	_, s3Key, size, sha256, err := stagingClient.UploadScheduleParams(ctx, paramsFile, scheduleID, scheduleRegion)
 	if err != nil {
 		return fmt.Errorf("failed to upload parameter file: %w", err)
 	}

@@ -124,6 +124,17 @@ func (p *EC2Provider) GetConfig(ctx context.Context) (*Config, error) {
 	return p.config, nil
 }
 
+// RefreshConfig re-reads configuration from EC2 tags and updates the cached config.
+// Called periodically by the agent to pick up tag changes (e.g. spawn extend).
+func (p *EC2Provider) RefreshConfig(ctx context.Context) error {
+	fresh, _, err := loadConfigFromEC2Tags(ctx, p.ec2Client, p.identity.InstanceID)
+	if err != nil {
+		return err
+	}
+	p.config = fresh
+	return nil
+}
+
 func (p *EC2Provider) Terminate(ctx context.Context, reason string) error {
 	log.Printf("Terminating EC2 instance %s (reason: %s)", p.identity.InstanceID, reason)
 

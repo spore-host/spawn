@@ -31,16 +31,27 @@ fi
 
 echo "Queue configuration downloaded successfully"
 
-# Wait for spored to be installed (from standard spawn launch process)
-# This user-data will be appended to standard spored setup
-# The spored binary should already be installed and configured
+# Wait for spored to be installed and running (downloaded from S3 during boot)
+echo "Waiting for spored to be installed..."
+MAX_WAIT=300  # 5 minutes
+WAITED=0
+while ! command -v spored &> /dev/null && [ $WAITED -lt $MAX_WAIT ]; do
+    sleep 5
+    WAITED=$((WAITED + 5))
+done
 
-# Check if spored is available
 if ! command -v spored &> /dev/null; then
-    echo "ERROR: spored command not found. This user-data expects spored to be pre-installed."
-    echo "Make sure this user-data is combined with standard spawn user-data."
+    echo "ERROR: spored not installed after ${MAX_WAIT}s. Check cloud-init logs."
     exit 1
 fi
+
+# Also wait for spored service to be active
+WAITED=0
+while ! systemctl is-active --quiet spored 2>/dev/null && [ $WAITED -lt $MAX_WAIT ]; do
+    sleep 5
+    WAITED=$((WAITED + 5))
+done
+echo "spored is ready"
 
 echo "Starting batch queue execution with spored..."
 

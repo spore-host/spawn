@@ -44,25 +44,25 @@ else
     echo "Region: $REGION"
 fi
 
-# S3 bucket name (regional) with project key prefix
+# S3 bucket name (regional). Try project-prefixed path first, then root path.
 S3_BUCKET="spawn-binaries-${REGION}"
-S3_PATH="s3://${S3_BUCKET}/${PROJECT}/${BINARY}"
+S3_PATH_PREFIX="s3://${S3_BUCKET}/${PROJECT}/${BINARY}"
+S3_PATH_ROOT="s3://${S3_BUCKET}/${BINARY}"
 
-echo "Downloading spored from ${S3_PATH}..."
+echo "Downloading spored..."
 
-# Try regional bucket first
-if aws s3 cp "$S3_PATH" /usr/local/bin/spored --region "$REGION" 2>/dev/null; then
-    echo "✅ Downloaded from regional bucket"
+# Try regional bucket with project prefix, then root, then us-east-1 fallbacks
+if aws s3 cp "$S3_PATH_PREFIX" /usr/local/bin/spored --region "$REGION" 2>/dev/null; then
+    echo "✅ Downloaded from regional bucket (${PROJECT}/ prefix)"
+elif aws s3 cp "$S3_PATH_ROOT" /usr/local/bin/spored --region "$REGION" 2>/dev/null; then
+    echo "✅ Downloaded from regional bucket (root)"
+elif aws s3 cp "s3://spawn-binaries-us-east-1/${PROJECT}/${BINARY}" /usr/local/bin/spored --region us-east-1 2>/dev/null; then
+    echo "✅ Downloaded from us-east-1 (${PROJECT}/ prefix)"
+elif aws s3 cp "s3://spawn-binaries-us-east-1/${BINARY}" /usr/local/bin/spored --region us-east-1 2>/dev/null; then
+    echo "✅ Downloaded from us-east-1 (root)"
 else
-    echo "⚠️  Regional bucket not available, trying us-east-1..."
-    # Fallback to us-east-1
-    aws s3 cp "s3://spawn-binaries-us-east-1/${PROJECT}/${BINARY}" /usr/local/bin/spored --region us-east-1
-    if [ $? -eq 0 ]; then
-        echo "✅ Downloaded from us-east-1"
-    else
-        echo "❌ Failed to download spored"
-        exit 1
-    fi
+    echo "❌ Failed to download spored from any location"
+    exit 1
 fi
 
 # Make executable

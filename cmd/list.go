@@ -85,6 +85,10 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(instances) == 0 {
+		if listJSON || getOutputFormat() == "json" {
+			fmt.Println("[]")
+			return nil
+		}
 		fmt.Printf("\n%s\n", i18n.T("spawn.list.no_instances"))
 		return nil
 	}
@@ -93,6 +97,10 @@ func runList(cmd *cobra.Command, args []string) error {
 	instances = filterInstances(instances)
 
 	if len(instances) == 0 {
+		if listJSON || getOutputFormat() == "json" {
+			fmt.Println("[]")
+			return nil
+		}
 		fmt.Printf("\n%s\n", i18n.T("spawn.list.no_instances_match"))
 		return nil
 	}
