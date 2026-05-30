@@ -1,5 +1,11 @@
 # spawn
 
+[![CI](https://github.com/spore-host/spawn/actions/workflows/ci.yml/badge.svg)](https://github.com/spore-host/spawn/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/spore-host/spawn)](https://goreportcard.com/report/github.com/spore-host/spawn)
+[![codecov](https://codecov.io/gh/spore-host/spawn/branch/main/graph/badge.svg)](https://codecov.io/gh/spore-host/spawn)
+[![Go Reference](https://pkg.go.dev/badge/github.com/spore-host/spawn.svg)](https://pkg.go.dev/github.com/spore-host/spawn)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 Launch and manage EC2 instances with automatic lifecycle management.
 
 Instances terminate themselves via TTL, idle detection, or completion signal — no forgotten bills.
