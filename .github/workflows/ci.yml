@@ -28,8 +28,8 @@ jobs:
       - name: Coverage gate
         env:
           # Ratchet floor — must not drop below this. Raise it as coverage
-          # improves; target is 60% (see CLAUDE.md). Current: ~24.7%.
-          MIN_COVERAGE: '22'
+          # improves; target is 60% (see CLAUDE.md). Current: ~25.7%.
+          MIN_COVERAGE: '24'
         run: |
           total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub(/%/,"",$3); print $3}')
           echo "Total coverage: ${total}% (floor: ${MIN_COVERAGE}%)"

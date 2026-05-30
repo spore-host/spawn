@@ -884,12 +884,21 @@ func (c *Client) listInstancesInRegion(ctx context.Context, region string, state
 
 		for _, reservation := range page.Reservations {
 			for _, instance := range reservation.Instances {
+				// State and Placement are pointers AWS may leave nil; guard both.
+				var state string
+				if instance.State != nil {
+					state = string(instance.State.Name)
+				}
+				var az string
+				if instance.Placement != nil {
+					az = valueOrEmpty(instance.Placement.AvailabilityZone)
+				}
 				info := InstanceInfo{
 					InstanceID:       valueOrEmpty(instance.InstanceId),
 					InstanceType:     string(instance.InstanceType),
-					State:            string(instance.State.Name),
+					State:            state,
 					Region:           region,
-					AvailabilityZone: valueOrEmpty(instance.Placement.AvailabilityZone),
+					AvailabilityZone: az,
 					PublicIP:         valueOrEmpty(instance.PublicIpAddress),
 					PrivateIP:        valueOrEmpty(instance.PrivateIpAddress),
 					KeyName:          valueOrEmpty(instance.KeyName),
