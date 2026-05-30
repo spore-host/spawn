@@ -7,6 +7,38 @@ import (
 	"github.com/spore-host/spawn/pkg/testutil"
 )
 
+// TestBuildLaunchConfig_VolumeSize verifies the --volume-size flag maps to
+// LaunchConfig.RootVolumeSizeGiB (regression for #11).
+func TestBuildLaunchConfig_VolumeSize(t *testing.T) {
+	// buildLaunchConfig reads package-level flag globals; save and restore.
+	prevVol, prevType := launchVolumeSize, instanceType
+	t.Cleanup(func() { launchVolumeSize, instanceType = prevVol, prevType })
+
+	instanceType = "c7g.4xlarge"
+
+	t.Run("set", func(t *testing.T) {
+		launchVolumeSize = 80
+		cfg, err := buildLaunchConfig(nil)
+		if err != nil {
+			t.Fatalf("buildLaunchConfig: %v", err)
+		}
+		if cfg.RootVolumeSizeGiB != 80 {
+			t.Errorf("RootVolumeSizeGiB = %d, want 80", cfg.RootVolumeSizeGiB)
+		}
+	})
+
+	t.Run("unset leaves default", func(t *testing.T) {
+		launchVolumeSize = 0
+		cfg, err := buildLaunchConfig(nil)
+		if err != nil {
+			t.Fatalf("buildLaunchConfig: %v", err)
+		}
+		if cfg.RootVolumeSizeGiB != 0 {
+			t.Errorf("RootVolumeSizeGiB = %d, want 0 (AMI default)", cfg.RootVolumeSizeGiB)
+		}
+	})
+}
+
 // TestParseTTL tests TTL duration parsing
 func TestParseTTL(t *testing.T) {
 	tests := []struct {
