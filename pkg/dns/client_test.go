@@ -1,0 +1,120 @@
+package dns
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestGetAccountSubdomain(t *testing.T) {
+	got := GetAccountSubdomain("123456789012", "spore.host")
+	// Encoded account + domain.
+	want := EncodeAccountID("123456789012") + ".spore.host"
+	if got != want {
+		t.Errorf("GetAccountSubdomain = %q, want %q", got, want)
+	}
+}
+
+func TestClientGetFQDN(t *testing.T) {
+	c := &Client{domain: "example.com"}
+	if got := c.GetFQDN("my-instance"); got != "my-instance.example.com" {
+		t.Errorf("Client.GetFQDN = %q, want my-instance.example.com", got)
+	}
+}
+
+func TestPackageGetFQDN(t *testing.T) {
+	if got := GetFQDN("my-instance"); got != "my-instance.spore.host" {
+		t.Errorf("GetFQDN = %q, want my-instance.spore.host", got)
+	}
+}
+
+func TestCallAPI_Success(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("expected application/json, got %q", ct)
+		}
+		// Echo back a success response.
+		_ = json.NewEncoder(w).Encode(DNSUpdateResponse{
+			Success:  true,
+			Message:  "ok",
+			Record:   "my-instance.spore.host",
+			ChangeID: "C123",
+		})
+	}))
+	defer ts.Close()
+
+	c := &Client{httpClient: ts.Client(), apiEndpoint: ts.URL, domain: "spore.host"}
+	resp, err := c.callAPI(context.Background(), DNSUpdateRequest{RecordName: "my-instance", Action: "UPSERT"})
+	if err != nil {
+		t.Fatalf("callAPI success: %v", err)
+	}
+	if !resp.Success || resp.ChangeID != "C123" {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+}
+
+func TestCallAPI_ServerError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(DNSUpdateResponse{
+			Success: false,
+			Error:   "record already exists",
+		})
+	}))
+	defer ts.Close()
+
+	c := &Client{httpClient: ts.Client(), apiEndpoint: ts.URL, domain: "spore.host"}
+	resp, err := c.callAPI(context.Background(), DNSUpdateRequest{RecordName: "x", Action: "UPSERT"})
+	if err == nil {
+		t.Fatal("expected error when Success=false")
+	}
+	if resp == nil || !strings.Contains(err.Error(), "record already exists") {
+		t.Errorf("expected API error surfaced, got resp=%+v err=%v", resp, err)
+	}
+}
+
+func TestCallAPI_MalformedResponse(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer ts.Close()
+
+	c := &Client{httpClient: ts.Client(), apiEndpoint: ts.URL, domain: "spore.host"}
+	if _, err := c.callAPI(context.Background(), DNSUpdateRequest{}); err == nil {
+		t.Error("expected parse error for malformed response")
+	}
+}
+
+func TestCallAPI_UnreachableEndpoint(t *testing.T) {
+	c := &Client{httpClient: http.DefaultClient, apiEndpoint: "http://127.0.0.1:0/invalid", domain: "spore.host"}
+	if _, err := c.callAPI(context.Background(), DNSUpdateRequest{}); err == nil {
+		t.Error("expected transport error for unreachable endpoint")
+	}
+}
+
+func TestRegisterDNS_InvalidName(t *testing.T) {
+	// Validation happens before any IMDS/HTTP call, so a nil imdsClient is fine.
+	// Note: names are lowercased before the regex, so "UPPER" becomes valid —
+	// only characters outside [a-z0-9-] reject. Use those.
+	c := &Client{domain: "spore.host"}
+	for _, bad := range []string{"has spaces", "under_score", "bad!char", "dot.ted", ""} {
+		if _, err := c.RegisterDNS(context.Background(), bad, "1.2.3.4"); err == nil {
+			t.Errorf("RegisterDNS(%q) should reject invalid name", bad)
+		}
+	}
+}
+
+func TestRegisterJobArrayDNS_InvalidName(t *testing.T) {
+	c := &Client{domain: "spore.host"}
+	// Job-array names allow dots but still reject spaces/underscores/bang.
+	for _, bad := range []string{"has spaces", "under_score", "bad!char"} {
+		if _, err := c.RegisterJobArrayDNS(context.Background(), bad, "1.2.3.4", "ja-1", "myarray"); err == nil {
+			t.Errorf("RegisterJobArrayDNS(%q) should reject invalid name", bad)
+		}
+	}
+}
