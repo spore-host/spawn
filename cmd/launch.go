@@ -110,16 +110,16 @@ var (
 	efsMountOptions string
 
 	// FSx Lustre
-	fsxCreate                bool
-	fsxID                    string
-	fsxSkipValidate          bool
-	fsxRecall                string
-	fsxStorageCapacity       int32
-	fsxThroughput            int32
-	fsxS3Bucket              string
-	fsxImportPath            string
-	fsxExportPath            string
-	fsxMountPoint            string
+	fsxCreate          bool
+	fsxID              string
+	fsxSkipValidate    bool
+	fsxRecall          string
+	fsxStorageCapacity int32
+	fsxThroughput      int32
+	fsxS3Bucket        string
+	fsxImportPath      string
+	fsxExportPath      string
+	fsxMountPoint      string
 
 	// Parameter sweep
 	paramFile              string
@@ -184,6 +184,9 @@ var (
 	strataFormation string
 	strataProfile   string
 	strataRegistry  string
+
+	// EBS root volume
+	launchVolumeSize int32
 )
 
 var launchCmd = &cobra.Command{
@@ -202,6 +205,7 @@ func init() {
 	launchCmd.Flags().StringVar(&region, "region", "", "AWS region")
 	launchCmd.Flags().StringVar(&az, "az", "", "Availability zone")
 	launchCmd.Flags().StringVar(&ami, "ami", "", "AMI ID (auto-detects AL2023)")
+	launchCmd.Flags().Int32Var(&launchVolumeSize, "volume-size", 0, "Root EBS volume size in GiB (0 = use AMI default)")
 
 	// Network
 	launchCmd.Flags().StringVar(&vpcID, "vpc", "", "VPC ID")
@@ -1665,6 +1669,9 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 	if ami != "" {
 		config.AMI = ami
+	}
+	if launchVolumeSize > 0 {
+		config.RootVolumeSizeGiB = launchVolumeSize
 	}
 	if keyPair != "" {
 		config.KeyName = keyPair
