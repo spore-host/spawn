@@ -23,7 +23,18 @@ jobs:
         run: go build ./...
 
       - name: Test
-        run: go test -short ./...
+        run: go test -short -coverprofile=coverage.out ./...
+
+      - name: Coverage gate
+        env:
+          # Ratchet floor — must not drop below this. Raise it as coverage
+          # improves; target is 60% (see CLAUDE.md). Current: ~24.7%.
+          MIN_COVERAGE: '22'
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub(/%/,"",$3); print $3}')
+          echo "Total coverage: ${total}% (floor: ${MIN_COVERAGE}%)"
+          awk -v t="$total" -v m="$MIN_COVERAGE" 'BEGIN { exit !(t+0 >= m+0) }' \
+            || { echo "::error::coverage ${total}% is below floor ${MIN_COVERAGE}%"; exit 1; }
 
       - name: Vet
         run: go vet ./...
