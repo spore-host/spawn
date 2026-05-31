@@ -742,8 +742,14 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		launchConfigs = append(launchConfigs, &config)
 	}
 
-	// Setup common resources (AMI, SSH key, IAM role) using first config as template
-	prog := progress.NewProgress()
+	// Setup common resources (AMI, SSH key, IAM role) using first config as template.
+	// In JSON mode, suppress the TUI so stdout carries only the JSON array (#21).
+	var prog *progress.Progress
+	if getOutputFormat() == "json" {
+		prog = progress.NewQuietProgress()
+	} else {
+		prog = progress.NewProgress()
+	}
 
 	firstConfig := launchConfigs[0]
 
@@ -1139,7 +1145,13 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 }
 
 func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, plat *platform.Platform, auditLog *audit.AuditLogger) error {
-	prog := progress.NewProgress()
+	// In JSON mode, suppress the TUI so stdout carries only the JSON object (#21).
+	var prog *progress.Progress
+	if getOutputFormat() == "json" {
+		prog = progress.NewQuietProgress()
+	} else {
+		prog = progress.NewProgress()
+	}
 
 	// Step 1: Detect AMI
 	prog.Start("Detecting AMI")
