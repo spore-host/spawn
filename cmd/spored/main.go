@@ -57,7 +57,7 @@ func main() {
 			fmt.Printf("spored version %s\n", Version)
 			os.Exit(0)
 		case "status":
-			handleStatus()
+			handleStatus(os.Args[2:])
 			os.Exit(0)
 		case "reload":
 			handleReload()
@@ -225,24 +225,43 @@ func handleRunQueue() {
 	}
 }
 
-func handleStatus() {
+func handleStatus(args []string) {
+	checkComplete := false
+	for _, a := range args {
+		if a == "--check-complete" {
+			checkComplete = true
+		}
+	}
+
 	// Create agent to get configuration and metrics
 	ctx := context.Background()
 
 	prov, err := provider.NewProvider(ctx)
 	if err != nil {
+		if checkComplete {
+			os.Exit(3) // error querying status
+		}
 		fmt.Fprintf(os.Stderr, "Error: Failed to initialize provider: %v\n", err)
 		os.Exit(1)
 	}
 
 	ag, err := agent.NewAgent(ctx, prov)
 	if err != nil {
+		if checkComplete {
+			os.Exit(3)
+		}
 		fmt.Fprintf(os.Stderr, "Error: Failed to initialize agent: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Get configuration
 	config := ag.GetConfig()
+
+	// --check-complete: report completion via standardized exit codes rather than
+	// the human-readable display (0=complete, 1=failed, 2=running, 3=error).
+	if checkComplete {
+		exitCheckComplete(config.CompletionFile)
+	}
 
 	// Get identity
 	identity := ag.GetIdentity()
@@ -421,6 +440,50 @@ func handleStatus() {
 		fmt.Printf("  Pre-stop hook:    %s\n", config.PreStop)
 	}
 	fmt.Println()
+}
+
+// exitCheckComplete inspects the completion file and exits with the standardized
+// codes used by `spawn status --check-complete`:
+//
+//	0 = complete   — file present (status not "failed")
+//	1 = failed     — file present with JSON {"status":"failed"} (or "error")
+//	2 = running    — file absent
+//	3 = error      — could not determine (e.g. no completion file configured)
+//
+// This is the single-instance counterpart to the sweep check; previously the
+// instance path always exited 0 (#26).
+func exitCheckComplete(completionFile string) {
+	os.Exit(checkCompleteCode(completionFile))
+}
+
+// checkCompleteCode returns the standardized exit code for --check-complete:
+// 0=complete, 1=failed, 2=running (file absent), 3=error. Pure (no os.Exit) so
+// it is unit-testable.
+func checkCompleteCode(completionFile string) int {
+	if completionFile == "" {
+		completionFile = "/tmp/SPAWN_COMPLETE"
+	}
+
+	data, err := os.ReadFile(completionFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 2 // still running — workload hasn't signaled completion
+		}
+		return 3 // unexpected error reading the file
+	}
+
+	// File present. If it carries JSON metadata with a failure status, report
+	// failed; otherwise treat its presence as completion.
+	var meta struct {
+		Status string `json:"status"`
+	}
+	if len(data) > 0 && json.Unmarshal(data, &meta) == nil {
+		switch strings.ToLower(meta.Status) {
+		case "failed", "failure", "error":
+			return 1
+		}
+	}
+	return 0
 }
 
 func handleReload() {

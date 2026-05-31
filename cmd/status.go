@@ -74,7 +74,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find SSH key: %w", err)
 	}
 
-	// Run spored status via SSH
+	// Build the remote spored command, forwarding --check-complete so spored
+	// reports completion via standardized exit codes (#26).
+	remoteCmd := "sudo /usr/local/bin/spored status 2>&1"
+	if statusCheckComplete {
+		remoteCmd = "sudo /usr/local/bin/spored status --check-complete"
+	}
+
 	sshArgs := []string{
 		"-i", keyPath,
 		"-o", "StrictHostKeyChecking=no",
@@ -82,10 +88,32 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		"-o", "ConnectTimeout=10",
 		"-o", "LogLevel=ERROR",
 		fmt.Sprintf("ec2-user@%s", instance.PublicIP),
-		"sudo /usr/local/bin/spored status 2>&1",
+		remoteCmd,
 	}
 
 	sshCmd := exec.Command("ssh", sshArgs...)
+
+	// In check-complete mode, propagate spored's exit code (0/1/2/3) as spawn's
+	// own exit code so callers can poll it. SSH passes through the remote exit
+	// status; SSH's own connection failures use 255, which we map to 3 (error).
+	if statusCheckComplete {
+		output, err := sshCmd.CombinedOutput()
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code := exitErr.ExitCode()
+				if code == 255 {
+					// SSH-level failure (couldn't reach the instance): error.
+					fmt.Fprintf(os.Stderr, "ssh: %s\n", string(output))
+					os.Exit(3)
+				}
+				os.Exit(code)
+			}
+			fmt.Fprintf(os.Stderr, "failed to run status: %v\n", err)
+			os.Exit(3)
+		}
+		os.Exit(0)
+	}
+
 	output, err := sshCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to get status: %w\nOutput: %s", err, string(output))

@@ -2006,20 +2006,27 @@ PROJECT="spawn"
 
 echo "Downloading spored binary..."
 
+# Download to a temp path, NOT directly over /usr/local/bin/spored. Writing in
+# place fails with "Text file busy" (ETXTBSY) if a spored is already running
+# (baked into the AMI or from a previous boot); we install via atomic rename
+# below, which the kernel allows even while the old binary executes (#27).
+SPORED_TMP="$(mktemp /tmp/spored.XXXXXX)"
+
 # Try regional bucket with project prefix first, then without prefix (legacy), then fallback to us-east-1
-if curl -f -o /usr/local/bin/spored "${S3_BASE_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
+if curl -f -o "$SPORED_TMP" "${S3_BASE_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
     CHECKSUM_URL="${S3_BASE_URL}/${PROJECT}/${BINARY}.sha256"
     echo "Downloaded from ${REGION}"
-elif curl -f -o /usr/local/bin/spored "${S3_BASE_URL}/${BINARY}" 2>/dev/null; then
+elif curl -f -o "$SPORED_TMP" "${S3_BASE_URL}/${BINARY}" 2>/dev/null; then
     CHECKSUM_URL="${S3_BASE_URL}/${BINARY}.sha256"
     echo "Downloaded from ${REGION} (legacy path)"
 else
     echo "Regional bucket unavailable, trying us-east-1..."
-    if curl -f -o /usr/local/bin/spored "${FALLBACK_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
+    if curl -f -o "$SPORED_TMP" "${FALLBACK_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
         CHECKSUM_URL="${FALLBACK_URL}/${PROJECT}/${BINARY}.sha256"
     else
-        curl -f -o /usr/local/bin/spored "${FALLBACK_URL}/${BINARY}" || {
+        curl -f -o "$SPORED_TMP" "${FALLBACK_URL}/${BINARY}" || {
             echo "Failed to download spored binary"
+            rm -f "$SPORED_TMP"
             exit 1
         }
         CHECKSUM_URL="${FALLBACK_URL}/${BINARY}.sha256"
@@ -2027,27 +2034,34 @@ else
     echo "Downloaded from us-east-1"
 fi
 
-# Download and verify SHA256 checksum
+# Download and verify SHA256 checksum (against the temp file).
 echo "Verifying checksum..."
 curl -f -o /tmp/spored.sha256 "${CHECKSUM_URL}" || {
     echo "Failed to download checksum"
+    rm -f "$SPORED_TMP"
     exit 1
 }
 
-cd /usr/local/bin
 EXPECTED_CHECKSUM=$(cat /tmp/spored.sha256)
-ACTUAL_CHECKSUM=$(sha256sum spored | awk '{print $1}')
+ACTUAL_CHECKSUM=$(sha256sum "$SPORED_TMP" | awk '{print $1}')
 
 if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
     echo "❌ Checksum verification failed!"
     echo "   Expected: $EXPECTED_CHECKSUM"
     echo "   Actual:   $ACTUAL_CHECKSUM"
-    rm -f /usr/local/bin/spored
+    rm -f "$SPORED_TMP"
     exit 1
 fi
 
 echo "✅ Checksum verified: $EXPECTED_CHECKSUM"
-chmod +x /usr/local/bin/spored
+chmod +x "$SPORED_TMP"
+
+# Stop any running spored so the rename doesn't leave a stale daemon, then
+# atomically move the verified binary into place. rename(2) over a busy binary
+# is permitted — the running process keeps the old (now-unlinked) inode — so
+# this never hits ETXTBSY.
+systemctl stop spored 2>/dev/null || true
+mv -f "$SPORED_TMP" /usr/local/bin/spored
 
 # Setup local user account
 echo "Setting up user: $LOCAL_USERNAME"
@@ -2404,7 +2418,13 @@ echo "Plugin declarations written: %d plugin(s)"
 	}
 
 	if customUserData != "" {
-		script += "\n# Custom user data\n"
+		// Run the user's script in its own section. The bootstrap above uses
+		// `set -e`, so without resetting it a non-fatal earlier failure would
+		// skip the user's script entirely and cloud-init would mark the whole
+		// user-data failed (#27). Disable -e here so the user's script runs and
+		// reports its own exit status; if the user wants strict mode they can
+		// re-enable `set -e` at the top of their script.
+		script += "\n# Custom user data (runs regardless of bootstrap warnings)\nset +e\n"
 		script += customUserData
 	}
 
