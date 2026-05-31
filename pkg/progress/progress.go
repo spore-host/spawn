@@ -12,6 +12,7 @@ import (
 type Progress struct {
 	steps       []Step
 	currentStep int
+	quiet       bool // when true, suppress all TUI output (e.g. for -o json)
 }
 
 // Step represents a single step in the spawn process
@@ -24,6 +25,22 @@ type Step struct {
 
 // NewProgress creates a new progress tracker
 func NewProgress() *Progress {
+	return newProgress(false)
+}
+
+// NewQuietProgress creates a progress tracker that suppresses all TUI output.
+// Use when stdout must stay clean for machine-readable output (e.g. -o json).
+func NewQuietProgress() *Progress {
+	return newProgress(true)
+}
+
+func newProgress(quiet bool) *Progress {
+	p := defaultProgress()
+	p.quiet = quiet
+	return p
+}
+
+func defaultProgress() *Progress {
 	return &Progress{
 		steps: []Step{
 			{Name: i18n.T("spawn.progress.detecting_ami"), Status: "pending"},
@@ -72,8 +89,10 @@ func (p *Progress) Error(stepName string, err error) {
 			p.steps[i].Status = "error"
 			p.steps[i].EndTime = time.Now()
 			p.display()
-			fmt.Println()
-			fmt.Printf("%s %s: %v\n", i18n.Symbol("error"), i18n.T("spawn.progress.error"), err)
+			if !p.quiet {
+				fmt.Println()
+				fmt.Printf("%s %s: %v\n", i18n.Symbol("error"), i18n.T("spawn.progress.error"), err)
+			}
 			return
 		}
 	}
@@ -92,6 +111,9 @@ func (p *Progress) Skip(stepName string) {
 
 // display shows the current progress
 func (p *Progress) display() {
+	if p.quiet {
+		return
+	}
 	// Clear screen and move cursor to top (skip in accessibility mode or when not a TTY)
 	if i18n.Global == nil || (!i18n.Global.AccessibilityMode() && runtime.GOOS != "windows") {
 		fmt.Print("\033[2J\033[H")
@@ -134,6 +156,9 @@ func (p *Progress) display() {
 
 // DisplaySuccess shows the final success message
 func (p *Progress) DisplaySuccess(instanceID, publicIP, sshCommand string, config interface{}) {
+	if p.quiet {
+		return
+	}
 	fmt.Println()
 	fmt.Println("╔════════════════════════════════════════════════════════╗")
 	fmt.Printf("║  %s %-48s║\n", i18n.Emoji("party"), i18n.T("spawn.progress.success.title"))
