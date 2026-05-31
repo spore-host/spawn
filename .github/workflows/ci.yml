@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Force bundled Node 20 actions (e.g. github-script inside
+# codecov-action@v5) onto Node 24 ahead of GitHub's 2026-06-16 cutover.
+# Belt-and-suspenders to the orion runner's /home/runner/.env (spore-host#345);
+# this also covers GitHub-hosted fallback runs.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     name: Test
