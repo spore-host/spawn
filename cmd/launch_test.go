@@ -39,6 +39,36 @@ func TestBuildLaunchConfig_VolumeSize(t *testing.T) {
 	})
 }
 
+// TestBuildLaunchConfig_AMIAuto verifies that --ami auto (and "AUTO") is treated
+// as auto-detect — left empty in the config so the downstream gate detects the
+// latest AL2023 AMI — rather than passed to EC2 as a literal "auto" (#15).
+func TestBuildLaunchConfig_AMIAuto(t *testing.T) {
+	prevAMI, prevType := ami, instanceType
+	t.Cleanup(func() { ami, instanceType = prevAMI, prevType })
+	instanceType = "c7g.4xlarge"
+
+	for _, v := range []string{"auto", "AUTO", "Auto"} {
+		ami = v
+		cfg, err := buildLaunchConfig(nil)
+		if err != nil {
+			t.Fatalf("buildLaunchConfig(ami=%q): %v", v, err)
+		}
+		if cfg.AMI != "" {
+			t.Errorf("ami=%q → config.AMI = %q, want empty (auto-detect)", v, cfg.AMI)
+		}
+	}
+
+	// A real AMI ID is preserved.
+	ami = "ami-0abc123"
+	cfg, err := buildLaunchConfig(nil)
+	if err != nil {
+		t.Fatalf("buildLaunchConfig(real ami): %v", err)
+	}
+	if cfg.AMI != "ami-0abc123" {
+		t.Errorf("real AMI not preserved: got %q", cfg.AMI)
+	}
+}
+
 // TestParseTTL tests TTL duration parsing
 func TestParseTTL(t *testing.T) {
 	tests := []struct {
