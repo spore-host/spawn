@@ -234,6 +234,41 @@ var pluginRemoveCmd = &cobra.Command{
 	},
 }
 
+// ── validate ──────────────────────────────────────────────────────────────────
+
+var pluginValidateCmd = &cobra.Command{
+	Use:   "validate <path>...",
+	Short: "Validate plugin.yaml spec files (offline)",
+	Long: `Statically validate one or more plugin.yaml files without contacting any
+instance. Checks schema, semver, known step/condition/config types, that the
+containing directory matches the plugin name, and that every {{ config.X }}
+template reference points at a declared config parameter.
+
+Examples:
+  spawn plugin validate ./plugins/tailscale/plugin.yaml
+  spawn plugin validate ./plugins/*/plugin.yaml`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		out := cmd.OutOrStdout()
+		var failed int
+		for _, path := range args {
+			if err := plugin.ValidateSpecFile(path); err != nil {
+				failed++
+				fmt.Fprintf(out, "✗ %s\n", path)
+				for _, line := range strings.Split(err.Error(), "\n") {
+					fmt.Fprintf(out, "    %s\n", line)
+				}
+				continue
+			}
+			fmt.Fprintf(out, "✓ %s\n", path)
+		}
+		if failed > 0 {
+			return fmt.Errorf("%d of %d plugin spec(s) failed validation", failed, len(args))
+		}
+		return nil
+	},
+}
+
 // ── push API helpers ──────────────────────────────────────────────────────────
 
 // pluginStateResponse mirrors plugin.PluginState for JSON decoding.
@@ -409,6 +444,7 @@ func init() {
 	pluginCmd.AddCommand(pluginInstallCmd)
 	pluginCmd.AddCommand(pluginStatusCmd)
 	pluginCmd.AddCommand(pluginRemoveCmd)
+	pluginCmd.AddCommand(pluginValidateCmd)
 
 	// Shared flags across all subcommands.
 	for _, sub := range []*cobra.Command{pluginListCmd, pluginInstallCmd, pluginStatusCmd, pluginRemoveCmd} {
