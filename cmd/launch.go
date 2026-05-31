@@ -204,7 +204,7 @@ func init() {
 	launchCmd.Flags().StringVar(&instanceType, "instance-type", "", "Instance type")
 	launchCmd.Flags().StringVar(&region, "region", "", "AWS region")
 	launchCmd.Flags().StringVar(&az, "az", "", "Availability zone")
-	launchCmd.Flags().StringVar(&ami, "ami", "", "AMI ID (auto-detects AL2023)")
+	launchCmd.Flags().StringVar(&ami, "ami", "", "AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023")
 	launchCmd.Flags().Int32Var(&launchVolumeSize, "volume-size", 0, "Root EBS volume size in GiB (0 = use AMI default)")
 
 	// Network
@@ -1143,7 +1143,8 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 
 	// Step 1: Detect AMI
 	prog.Start("Detecting AMI")
-	if config.AMI == "" {
+	// "" or "auto" both mean auto-detect the latest AL2023 AMI (#342).
+	if config.AMI == "" || strings.EqualFold(config.AMI, "auto") {
 		ami, err := awsClient.GetRecommendedAMI(ctx, config.Region, config.InstanceType)
 		if err != nil {
 			prog.Error("Detecting AMI", err)
@@ -1667,7 +1668,9 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if az != "" {
 		config.AvailabilityZone = az
 	}
-	if ami != "" {
+	// "auto" is an explicit synonym for "auto-detect" (empty); normalize so all
+	// downstream AMI gates auto-detect (#342).
+	if ami != "" && !strings.EqualFold(ami, "auto") {
 		config.AMI = ami
 	}
 	if launchVolumeSize > 0 {
