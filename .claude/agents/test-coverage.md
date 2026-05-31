@@ -51,6 +51,17 @@ need cobra execution + injected clients), pkg/pluginruntime, pkg/platform.
   aggregate; update the comment with the new %.
 - Branch + PR, never main. Commit: `test: ...`.
 
+## Hard rule: no 0%-coverage source files
+Every non-test `.go` source file in this module must have **>0%** test coverage —
+no file left entirely untested. After your work, check:
+```
+go test -coverprofile=/tmp/c.out ./... >/dev/null 2>&1
+go tool cover -func=/tmp/c.out | awk '$3=="0.0%"'   # functions still at 0
+```
+A file showing up entirely at 0% is the priority target — even one trivial
+table-driven test (constructor, pure helper, error branch) gets it off zero.
+This catches whole files that escape the aggregate floor.
+
 ## Memory
 Record per-package: substrate-testable vs needs-injection-seam, IMDS-dependent
 (test error branches only), and gotchas (PolicyTemplate keys use colons like
