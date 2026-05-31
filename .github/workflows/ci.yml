@@ -9,7 +9,9 @@ on:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
+    # Self-hosted runner on orion.local (Apple M4 Pro, arm64). To fall back to
+    # GitHub-hosted, change this line to: runs-on: ubuntu-latest
+    runs-on: [self-hosted, orion]
     steps:
       - uses: actions/checkout@v6
 
