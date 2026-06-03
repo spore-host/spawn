@@ -11,6 +11,10 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
 // truffleBin returns the path to the truffle binary.
@@ -211,7 +215,9 @@ func TestTier1_LagottoWatchLifecycle(t *testing.T) {
 	}
 	t.Logf("created watch: %s", watchID)
 	t.Cleanup(func() {
-		exec.Command(lagottoBin, "cancel", watchID).Run() //nolint:gosec // nosemgrep
+		// -y: cancel now prompts for confirmation (spawn#40); a closed stdin
+		// would otherwise read EOF→"no" and leak the watch.
+		exec.Command(lagottoBin, "cancel", watchID, "-y").Run() //nolint:gosec // nosemgrep
 	})
 
 	// Extend
@@ -229,12 +235,59 @@ func TestTier1_LagottoWatchLifecycle(t *testing.T) {
 		t.Errorf("expected watch ID in status output, got:\n%s", out)
 	}
 
-	// Cancel
-	out, err = exec.Command(lagottoBin, "cancel", watchID).CombinedOutput() //nolint:gosec // nosemgrep
+	// Cancel (-y skips the confirmation prompt added in spawn#40)
+	out, err = exec.Command(lagottoBin, "cancel", watchID, "-y").CombinedOutput() //nolint:gosec // nosemgrep
 	if err != nil {
 		t.Fatalf("lagotto cancel: %v\n%s", err, out)
 	}
 	t.Logf("watch lifecycle complete: %s", watchID)
+}
+
+// TestTier1_NoLeakedInstances is the cost-control guard (#47): it fails if any
+// e2e instance (Name "e2e-*") is older than the reaper threshold in any test
+// region. This turns silent instance leakage — the one failure mode an
+// ephemeral-infra project cannot tolerate — into a red build. It's API-only
+// (~$0). The reaper in TestMain will have already terminated true leaks; this
+// asserts that it worked and nothing slipped through.
+func TestTier1_NoLeakedInstances(t *testing.T) {
+	ctx := context.Background()
+	cutoff := time.Now().Add(-reapAgeThreshold)
+	var leaked []string
+
+	for _, region := range reapRegions {
+		cfg := loadAWSConfig(t)
+		cfg.Region = region
+		client := ec2.NewFromConfig(cfg)
+		out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+			Filters: []ec2types.Filter{
+				{Name: strptr("tag:Name"), Values: []string{"e2e-*"}},
+				{Name: strptr("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
+			},
+		})
+		if err != nil {
+			t.Fatalf("describe instances in %s: %v", region, err)
+		}
+		for _, r := range out.Reservations {
+			for _, inst := range r.Instances {
+				if inst.LaunchTime != nil && inst.LaunchTime.Before(cutoff) {
+					name := ""
+					for _, tag := range inst.Tags {
+						if *tag.Key == "Name" {
+							name = *tag.Value
+						}
+					}
+					leaked = append(leaked, region+"/"+*inst.InstanceId+" ("+name+", "+string(inst.State.Name)+")")
+				}
+			}
+		}
+	}
+
+	if len(leaked) > 0 {
+		t.Errorf("LEAKED e2e instances older than %s (cost bleed — investigate cleanup/reaper):\n  %s",
+			reapAgeThreshold, strings.Join(leaked, "\n  "))
+	} else {
+		t.Log("no leaked e2e instances — cost control intact")
+	}
 }
 
 // TestTier1_SpawnDefaults verifies spawn defaults set/get/unset round-trip.

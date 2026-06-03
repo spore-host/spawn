@@ -154,7 +154,9 @@ func launchInstance(t *testing.T, name string, extraArgs ...string) InstanceJSON
 	return waitForRunning(t, name, 10*time.Minute)
 }
 
-// terminateByName stops all instances with the given name.
+// terminateByName terminates (not stops) all non-terminated instances with the
+// given name, across whatever region each is in. Terminating — never stopping —
+// is the only correct cleanup for an ephemeral test instance (#47).
 func terminateByName(t *testing.T, name string) {
 	t.Helper()
 	out, err := spawnMayFail(t, "list", "--output", "json")
