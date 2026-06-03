@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
 	"github.com/scttfrdmn/strata/pkg/strata"
@@ -355,17 +354,20 @@ func init() {
 func runLaunch(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// Get user identity for audit logging
-	cfg, err := config.LoadDefaultConfig(ctx)
+	// Get the account ID for audit logging. This is best-effort and resilient:
+	// it uses the AWS client's GetAccountID, which falls back to IMDS if STS is
+	// unreachable (e.g. an STS VPC endpoint with private DNS this subnet can't
+	// route to, #33). A failure here must not block the launch — audit user_id
+	// is non-critical metadata.
+	identityClient, err := aws.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	userID, err := identityClient.GetAccountID(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get caller identity: %w", err)
+		userID = "unknown"
+		fmt.Fprintf(os.Stderr, "⚠️  Could not determine account ID (STS/IMDS unavailable); continuing with audit user=unknown\n")
 	}
-	userID := *identity.Account
 	correlationID := uuid.New().String()
 	auditLog := audit.NewLogger(os.Stderr, userID, correlationID)
 
@@ -411,27 +413,29 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 
 	var config *aws.LaunchConfig
 
-	// Determine mode: wizard, pipe, or flags
-	if interactive || (instanceType == "" && isTerminal(os.Stdin)) {
-		// Interactive wizard mode
+	// Determine mode: wizard, pipe, or flags. See launchMode for the rules — the
+	// key fix (#34): pipe mode requires no --instance-type, so explicit flags
+	// never read stdin even when invoked with a piped (non-TTY) stdin, e.g. from
+	// a Java/ProcessBuilder subprocess.
+	switch launchMode(interactive, instanceType, isTerminal(os.Stdin)) {
+	case modeWizard:
 		wiz := wizard.NewWizard(plat)
 		config, err = wiz.Run(ctx)
 		if err != nil {
 			return err
 		}
-	} else if !isTerminal(os.Stdin) {
-		// Pipe mode (from truffle)
+	case modePipe:
+		// Pipe mode (from truffle): no instance type given and stdin is piped.
 		truffleInput, err := input.ParseFromStdin()
 		if err != nil {
 			return i18n.Te("error.input_parse_failed", err)
 		}
-
 		config, err = buildLaunchConfig(truffleInput)
 		if err != nil {
 			return err
 		}
-	} else {
-		// Flags mode
+	default: // modeFlags
+		// Explicit --instance-type; stdin is ignored (TTY or pipe).
 		config, err = buildLaunchConfig(nil)
 		if err != nil {
 			return err
@@ -2460,6 +2464,35 @@ func isTerminal(f *os.File) bool {
 		return false
 	}
 	return (stat.Mode() & os.ModeCharDevice) != 0
+}
+
+// launchInputMode selects how `spawn launch` obtains its configuration.
+type launchInputMode int
+
+const (
+	modeFlags  launchInputMode = iota // explicit flags (--instance-type set)
+	modeWizard                        // interactive TTY wizard
+	modePipe                          // truffle JSON piped on stdin
+)
+
+// launchMode decides the input mode from the --interactive flag, whether
+// --instance-type was given, and whether stdin is a TTY.
+//
+//   - explicit --interactive, or no instance type on a TTY → wizard.
+//   - no instance type and stdin is a pipe → pipe (consume truffle JSON).
+//   - otherwise (instance type given) → flags, and stdin is NOT read.
+//
+// The last rule is the #34 fix: a caller that passes --instance-type with a
+// piped, non-TTY stdin (e.g. a Java/ProcessBuilder subprocess) must use flags
+// mode, not try to parse an empty stdin as JSON.
+func launchMode(interactive bool, instanceType string, stdinIsTTY bool) launchInputMode {
+	if interactive || (instanceType == "" && stdinIsTTY) {
+		return modeWizard
+	}
+	if instanceType == "" && !stdinIsTTY {
+		return modePipe
+	}
+	return modeFlags
 }
 
 func registerDNS(plat *platform.Platform, instanceID, publicIP, recordName, domain, apiEndpoint string) (string, error) {
