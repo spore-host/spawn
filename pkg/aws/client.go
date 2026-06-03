@@ -23,6 +23,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -1247,39 +1248,64 @@ func waitForInstanceProfile(ctx context.Context, iamClient *iam.Client, name str
 	}
 }
 
-// GetAccountID returns the AWS account ID of the current credentials
+// GetAccountID returns the AWS account ID of the current credentials, falling
+// back to EC2 instance metadata (IMDS) if STS is unreachable.
 func (c *Client) GetAccountID(ctx context.Context) (string, error) {
-	// Use STS GetCallerIdentity - most reliable method
 	stsClient := sts.NewFromConfig(c.cfg)
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err == nil && identity.Account != nil {
+		return *identity.Account, nil
+	}
+	// STS failed or returned no account — try IMDS (e.g. STS VPC endpoint with
+	// private DNS that this subnet can't route to, see #33).
+	if doc, derr := imdsIdentity(ctx); derr == nil && doc.AccountID != "" {
+		return doc.AccountID, nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to get caller identity: %w", err)
 	}
-
-	if identity.Account == nil {
-		return "", fmt.Errorf("account ID not returned by STS")
-	}
-
-	return *identity.Account, nil
+	return "", fmt.Errorf("account ID not returned by STS")
 }
 
-// GetCallerIdentityInfo returns account ID and user ARN for per-user isolation
+// GetCallerIdentityInfo returns account ID and user ARN for per-user isolation.
+// If STS is unreachable (e.g. an STS VPC endpoint with private DNS that this
+// subnet can't route to, #33), it falls back to EC2 instance metadata: IMDS
+// yields the account ID and a synthesized assumed-role ARN derived from the
+// instance profile — enough for the isolation tagging that consumes this.
 func (c *Client) GetCallerIdentityInfo(ctx context.Context) (accountID string, userARN string, err error) {
 	stsClient := sts.NewFromConfig(c.cfg)
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err == nil && identity.Account != nil && identity.Arn != nil {
+		return *identity.Account, *identity.Arn, nil
+	}
+	stsErr := err
+
+	// Fall back to IMDS.
+	doc, derr := imdsIdentity(ctx)
+	if derr != nil || doc.AccountID == "" {
+		if stsErr != nil {
+			return "", "", fmt.Errorf("failed to get caller identity (STS and IMDS both unavailable): %w", stsErr)
+		}
+		return "", "", fmt.Errorf("caller identity incomplete from STS and IMDS")
+	}
+	// IMDS gives the account ID but not a user ARN; synthesize a best-effort
+	// identity ARN so downstream tagging has a stable value.
+	arn := fmt.Sprintf("arn:aws:sts::%s:assumed-role/ec2-instance/%s", doc.AccountID, doc.InstanceID)
+	return doc.AccountID, arn, nil
+}
+
+// imdsIdentity fetches the EC2 instance identity document via IMDS (IMDSv2),
+// which provides the account ID and region without needing STS reachability.
+// A short client timeout keeps the fallback fast when not on EC2.
+func imdsIdentity(ctx context.Context) (imds.InstanceIdentityDocument, error) {
+	client := imds.New(imds.Options{})
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := client.GetInstanceIdentityDocument(ctx, &imds.GetInstanceIdentityDocumentInput{})
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get caller identity: %w", err)
+		return imds.InstanceIdentityDocument{}, err
 	}
-
-	if identity.Account == nil {
-		return "", "", fmt.Errorf("account ID not returned by STS")
-	}
-
-	if identity.Arn == nil {
-		return "", "", fmt.Errorf("user ARN not returned by STS")
-	}
-
-	return *identity.Account, *identity.Arn, nil
+	return out.InstanceIdentityDocument, nil
 }
 
 // intToBase36 converts a numeric string (AWS account ID) to base36
