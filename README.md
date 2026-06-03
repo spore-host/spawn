@@ -85,9 +85,22 @@ spawn list
 | `notify` | Chat notification (Slack/Teams) |
 | `slurm` | Convert Slurm sbatch scripts |
 
+### Conventions
+
+- **Structured output:** use the root `-o`/`--output` flag (`-o json`) on any
+  command. Per-command `--json` flags are deprecated aliases and will be
+  removed; prefer `-o json`.
+- **Destructive commands** (`cancel`, `terminate`, `delete`, `remove`) prompt
+  for confirmation and accept `-y`/`--yes` to skip it (required for
+  non-interactive use). A piped/non-interactive run without `--yes` aborts
+  rather than acting.
+
+See **[docs/flag-conventions.md](docs/flag-conventions.md)** for the full
+convention reference (shared across spawn, truffle, lagotto, and spored).
+
 ## spored
 
-spored is the lifecycle daemon that runs inside each instance as a systemd service. It handles TTL enforcement, idle detection, completion signals, and DNS registration. It is built and distributed alongside spawn.
+spored is the lifecycle daemon that runs inside each instance as a systemd service. It handles TTL enforcement, idle detection, completion signals, and DNS registration. It is built and distributed alongside spawn. As an on-instance CLI it follows the same flag conventions (subcommands `status`, `config get/set/list`, `reload`, `complete`, `version`).
 
 ## Go Library
 
