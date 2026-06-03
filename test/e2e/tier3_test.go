@@ -31,9 +31,10 @@ func TestTier3_JobArray(t *testing.T) {
 	)
 	t.Logf("launch output: %s", out)
 
-	// Cleanup: stop the job array (instances have unique names with rid)
+	// Cleanup: terminate the job array — stopping would leak EBS-charged
+	// instances indefinitely (#47). -y skips the confirmation prompt.
 	t.Cleanup(func() {
-		spawnMayFail(t, "stop", "--job-array-name", arrayName)
+		spawnMayFail(t, "terminate", "--job-array-name", arrayName, "-y")
 	})
 
 	// Both instances must reach running state (identified by job-array-name)
@@ -169,7 +170,7 @@ func TestTier3_MPI(t *testing.T) {
 		"--mpi",
 	)
 	t.Logf("MPI launch: %s", out)
-	t.Cleanup(func() { spawnMayFail(t, "stop", "--job-array-name", name) })
+	t.Cleanup(func() { spawnMayFail(t, "terminate", "--job-array-name", name, "-y") }) // terminate, not stop (#47)
 
 	// Wait for head node (index 0) to be running
 	head := waitForRunning(t, name+"-0", 4*time.Minute)
@@ -241,7 +242,7 @@ func TestTier3_QueueExecution(t *testing.T) {
 func TestTier3_MPI_PlacementGroupRegion(t *testing.T) {
 	rid := runID(t)
 	name := "e2e-pg-region-" + rid
-	t.Cleanup(func() { spawnMayFail(t, "stop", "--job-array-name", name) })
+	t.Cleanup(func() { spawnMayFail(t, "terminate", "--job-array-name", name, "-y") }) // terminate, not stop (#47)
 
 	out := spawn(t,
 		"launch", name+"-0",
