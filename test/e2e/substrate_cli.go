@@ -20,7 +20,10 @@ package e2e
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"os"
 	"os/exec"
@@ -29,6 +32,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/spore-host/spawn/pkg/testutil"
 )
 
@@ -36,16 +41,57 @@ import (
 // configured runner for the real spawn binary pointed at it.
 type spawnEnv struct {
 	*testutil.TestEnv
-	bin string
-	t   *testing.T
+	bin  string
+	home string // isolated HOME with a pre-seeded SSH key
+	t    *testing.T
 }
 
-// startSpawnSubstrate starts a Substrate server and locates/builds the spawn
-// binary, returning an env whose run() drives the binary against the emulator.
+// startSpawnSubstrate starts a Substrate server, locates/builds the spawn
+// binary, and prepares an isolated HOME with a pre-seeded SSH public key so the
+// launch path's setupSSHKey finds a key instead of shelling out to ssh-keygen
+// (which may be absent on CI runners). Returns an env whose run() drives the
+// binary against the emulator.
 func startSpawnSubstrate(t *testing.T) *spawnEnv {
 	t.Helper()
 	env := testutil.SubstrateServer(t)
-	return &spawnEnv{TestEnv: env, bin: tier0SpawnBin(t), t: t}
+	home := seedFakeHome(t)
+	return &spawnEnv{TestEnv: env, bin: tier0SpawnBin(t), home: home, t: t}
+}
+
+// seedFakeHome creates a temp HOME containing ~/.ssh/id_rsa(.pub) so spawn reads
+// an existing key rather than shelling out to ssh-keygen. The public key is a
+// real, freshly-generated ed25519 key in authorized-keys format, so spawn's
+// fingerprinting (ssh.ParseAuthorizedKey) and substrate's ImportKeyPair both
+// accept it. No key material is committed to the repo.
+func seedFakeHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+
+	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 key: %v", err)
+	}
+	sshPub, err := ssh.NewPublicKey(pubKey)
+	if err != nil {
+		t.Fatalf("ssh.NewPublicKey: %v", err)
+	}
+	authorized := ssh.MarshalAuthorizedKey(sshPub) // "ssh-ed25519 AAAA... \n"
+	if err := os.WriteFile(filepath.Join(sshDir, "id_rsa.pub"), authorized, 0o644); err != nil {
+		t.Fatalf("write id_rsa.pub: %v", err)
+	}
+
+	pemBlock, err := ssh.MarshalPrivateKey(privKey, "")
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "id_rsa"), pem.EncodeToMemory(pemBlock), 0o600); err != nil {
+		t.Fatalf("write id_rsa: %v", err)
+	}
+	return home
 }
 
 // tier0SpawnBin returns a path to the spawn binary, building it once if needed.
@@ -75,19 +121,24 @@ func fileExists(p string) bool {
 // run executes `spawn <args...>` against the Substrate server and returns
 // stdout, stderr, and the process exit code. The binary picks up Substrate via
 // AWS_ENDPOINT_URL; static test creds + region keep the SDK happy.
+//
+// The environment is built CLEAN (not inherited from os.Environ): a developer's
+// real AWS_PROFILE / SSO / AWS_CONFIG_FILE leaking in would make the SDK attempt
+// real credential/SSO resolution and hang for minutes even with AWS_ENDPOINT_URL
+// set. Passing only PATH + HOME + the test AWS vars keeps Tier 0 hermetic and
+// fast (a launch completes in ~1s).
 func (e *spawnEnv) run(args ...string) (stdout, stderr string, code int) {
 	e.t.Helper()
 	cmd := exec.Command(e.bin, args...)
-	cmd.Env = append(os.Environ(),
-		"AWS_ENDPOINT_URL="+e.URL,
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + e.home,
+		"AWS_ENDPOINT_URL=" + e.URL,
 		"AWS_ACCESS_KEY_ID=test",
 		"AWS_SECRET_ACCESS_KEY=test",
 		"AWS_REGION=us-east-1",
 		"AWS_DEFAULT_REGION=us-east-1",
-		// Make sure no developer profile leaks in and overrides the endpoint.
-		"AWS_PROFILE=",
-		"AWS_SDK_LOAD_CONFIG=0",
-	)
+	}
 	var so, se bytes.Buffer
 	cmd.Stdout = &so
 	cmd.Stderr = &se
