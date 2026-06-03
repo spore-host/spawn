@@ -235,8 +235,13 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// Build tags (including account and user tags for per-user isolation)
 	tags := buildTags(launchConfig, accountID, userARN)
 
-	// Build block device mappings
-	blockDevices := buildBlockDevices(launchConfig)
+	// Build block device mappings. The AMI's root snapshot sets a hard minimum:
+	// EC2 rejects a root volume smaller than the snapshot it was created from
+	// (InvalidBlockDeviceMapping). Look that minimum up so a custom AMI with a
+	// large baked root (common for data-science images) launches without the
+	// caller having to pass --volume-size (#25).
+	amiMinGiB := rootVolumeSizeFromAMI(ctx, ec2Client, launchConfig.AMI)
+	blockDevices := buildBlockDevices(launchConfig, amiMinGiB)
 
 	// Build run instances input
 	input := &ec2.RunInstancesInput{
@@ -546,7 +551,11 @@ func buildTags(config LaunchConfig, accountID string, userARN string) []types.Ta
 	return tags
 }
 
-func buildBlockDevices(config LaunchConfig) []types.BlockDeviceMapping {
+// buildBlockDevices constructs the root EBS mapping. amiMinGiB is the AMI root
+// snapshot's minimum size (0 if unknown); the final volume is never smaller
+// than that, so launches from custom AMIs with a large baked root don't fail
+// with InvalidBlockDeviceMapping (#25).
+func buildBlockDevices(config LaunchConfig, amiMinGiB int32) []types.BlockDeviceMapping {
 	// Calculate volume size
 	volumeSize := int32(20) // Default 20 GB
 
@@ -555,6 +564,12 @@ func buildBlockDevices(config LaunchConfig) []types.BlockDeviceMapping {
 	} else if config.Hibernate {
 		// For hibernation, need RAM + OS + buffer
 		volumeSize = estimateVolumeSize(config.InstanceType)
+	}
+
+	// Never request less than the AMI's root snapshot requires. This also
+	// rescues an explicit --volume-size that's smaller than the snapshot.
+	if amiMinGiB > volumeSize {
+		volumeSize = amiMinGiB
 	}
 
 	// Determine encryption settings
@@ -602,6 +617,50 @@ func estimateVolumeSize(instanceType string) int32 {
 	}
 
 	return 20 // Default
+}
+
+// rootVolumeSizeFromAMI returns the AMI's root EBS volume size in GiB — the
+// minimum a launch from this AMI may request. It is best-effort: any error
+// (AMI not found, no permission, malformed mapping) returns 0, leaving the
+// caller's chosen size unchanged. The root device is the mapping whose name
+// matches the image's RootDeviceName; if that can't be matched, the largest
+// EBS mapping is used as a safe floor.
+func rootVolumeSizeFromAMI(ctx context.Context, ec2Client *ec2.Client, amiID string) int32 {
+	if amiID == "" {
+		return 0
+	}
+	out, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
+		ImageIds: []string{amiID},
+	})
+	if err != nil || len(out.Images) == 0 {
+		return 0
+	}
+	img := out.Images[0]
+	return rootVolumeSizeFromMappings(aws.ToString(img.RootDeviceName), img.BlockDeviceMappings)
+}
+
+// rootVolumeSizeFromMappings picks the root volume size from an AMI's block
+// device mappings: the EBS mapping matching rootName, or — if none matches —
+// the largest EBS mapping as a safe floor. Returns 0 when there are no sized
+// EBS mappings. Pure, so the selection logic is unit-testable without AWS.
+func rootVolumeSizeFromMappings(rootName string, mappings []types.BlockDeviceMapping) int32 {
+	var rootSize, maxSize int32
+	for _, bdm := range mappings {
+		if bdm.Ebs == nil || bdm.Ebs.VolumeSize == nil {
+			continue
+		}
+		size := *bdm.Ebs.VolumeSize
+		if size > maxSize {
+			maxSize = size
+		}
+		if rootName != "" && aws.ToString(bdm.DeviceName) == rootName {
+			rootSize = size
+		}
+	}
+	if rootSize > 0 {
+		return rootSize
+	}
+	return maxSize
 }
 
 func valueOrEmpty(s *string) string {
