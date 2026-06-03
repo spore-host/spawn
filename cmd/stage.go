@@ -20,6 +20,7 @@ var (
 	estimateDataSizeGB int
 	estimateInstances  int
 	estimateRegions    string
+	stageDeleteYes     bool
 )
 
 // stageCmd represents the stage command
@@ -111,6 +112,7 @@ func init() {
 	stageCmd.AddCommand(stageListCmd)
 	stageCmd.AddCommand(stageEstimateCmd)
 	stageCmd.AddCommand(stageDeleteCmd)
+	stageDeleteCmd.Flags().BoolVarP(&stageDeleteYes, "yes", "y", false, "Skip the confirmation prompt")
 
 	// Upload flags
 	stageUploadCmd.Flags().StringVar(&stageRegions, "regions", "us-east-1,us-west-2",
@@ -320,6 +322,11 @@ func runStageEstimate(cmd *cobra.Command, args []string) error {
 func runStageDelete(cmd *cobra.Command, args []string) error {
 	stagingID := args[0]
 	ctx := context.Background()
+
+	if !confirmYes(stageDeleteYes, fmt.Sprintf("Delete staged data %s?", stagingID)) {
+		fmt.Println("Aborted.")
+		return nil
+	}
 
 	// Load AWS config (infra account for DynamoDB and S3 access)
 	awsConfig, err := spawnconfig.LoadInfraAWSConfig(ctx, "us-east-1")

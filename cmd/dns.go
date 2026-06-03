@@ -14,7 +14,8 @@ import (
 )
 
 var (
-	dnsListAll bool
+	dnsListAll   bool
+	dnsDeleteYes bool
 )
 
 // dnsCmd represents the dns command group
@@ -51,6 +52,7 @@ func init() {
 	dnsCmd.AddCommand(dnsListCmd)
 	dnsCmd.AddCommand(dnsRegisterCmd)
 	dnsCmd.AddCommand(dnsDeleteCmd)
+	dnsDeleteCmd.Flags().BoolVarP(&dnsDeleteYes, "yes", "y", false, "Skip the confirmation prompt")
 
 	// Flags
 	dnsCmd.PersistentFlags().StringVar(&dnsDomain, "domain", "", "DNS domain for record registration (default: spore.host)")
@@ -211,6 +213,11 @@ func runDNSRegister(cmd *cobra.Command, args []string) error {
 func runDNSDelete(cmd *cobra.Command, args []string) error {
 	instanceIdentifier := args[0]
 	ctx := context.Background()
+
+	if !confirmYes(dnsDeleteYes, fmt.Sprintf("Delete the DNS record for %s?", instanceIdentifier)) {
+		fmt.Println("Aborted.")
+		return nil
+	}
 
 	// Create AWS client
 	awsClient, err := aws.NewClient(ctx)

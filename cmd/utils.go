@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -8,6 +9,29 @@ import (
 
 	"github.com/spore-host/spawn/pkg/aws"
 )
+
+// confirmYes is the shared confirmation prompt for destructive commands
+// (spawn#40 convention). When skip is true (the command's --yes/-y flag) it
+// returns true without prompting. Otherwise it prompts on stderr and returns
+// true only on an explicit yes; a read error or non-interactive/piped stdin
+// (EOF) reads as "no", so an unattended invocation without --yes aborts rather
+// than performing the destructive action silently.
+func confirmYes(skip bool, prompt string) bool {
+	if skip {
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	default:
+		return false
+	}
+}
 
 // resolveInstance finds an instance by ID or name
 func resolveInstance(ctx context.Context, client *aws.Client, identifier string) (*aws.InstanceInfo, error) {

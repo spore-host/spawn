@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -165,19 +164,5 @@ func terminateJobArray(ctx context.Context) error {
 
 // confirmTerminate prompts for confirmation unless --yes was passed.
 func confirmTerminate(prompt string) bool {
-	if terminateYes {
-		return true
-	}
-	fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
-		return true
-	default:
-		return false
-	}
+	return confirmYes(terminateYes, prompt)
 }

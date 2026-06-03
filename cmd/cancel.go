@@ -16,7 +16,10 @@ import (
 	"github.com/spore-host/spawn/pkg/sweep"
 )
 
-var cancelSweepID string
+var (
+	cancelSweepID string
+	cancelYes     bool
+)
 
 var cancelCmd = &cobra.Command{
 	Use:   "cancel",
@@ -36,6 +39,7 @@ Examples:
 func init() {
 	cancelCmd.Flags().StringVar(&cancelSweepID, "sweep-id", "", "Sweep ID to cancel (required)")
 	_ = cancelCmd.MarkFlagRequired("sweep-id")
+	cancelCmd.Flags().BoolVarP(&cancelYes, "yes", "y", false, "Skip the confirmation prompt")
 
 	rootCmd.AddCommand(cancelCmd)
 }
@@ -120,6 +124,17 @@ func runCancel(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, " across %d regions", len(instancesByRegion))
 	}
 	fmt.Fprintf(os.Stderr, "\n\n")
+
+	// Confirm before terminating — cancel destroys live compute, so it must
+	// not proceed unattended without --yes (spawn#40).
+	if totalToTerminate > 0 {
+		prompt := fmt.Sprintf("Cancel sweep %s and terminate %d instance(s)? This cannot be undone.",
+			cancelSweepID, totalToTerminate)
+		if !confirmYes(cancelYes, prompt) {
+			fmt.Fprintln(os.Stderr, "Aborted.")
+			return nil
+		}
+	}
 
 	// Terminate instances if any
 	if totalToTerminate > 0 {

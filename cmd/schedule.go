@@ -16,14 +16,15 @@ import (
 )
 
 var (
-	scheduleAt       string
-	scheduleCron     string
-	scheduleTimezone string
-	scheduleName     string
-	scheduleMaxExec  int
-	scheduleEndAfter string
-	scheduleStatus   string
-	scheduleRegion   string
+	scheduleAt        string
+	scheduleCron      string
+	scheduleTimezone  string
+	scheduleName      string
+	scheduleMaxExec   int
+	scheduleEndAfter  string
+	scheduleStatus    string
+	scheduleRegion    string
+	scheduleCancelYes bool
 )
 
 var scheduleCmd = &cobra.Command{
@@ -165,6 +166,7 @@ func init() {
 	scheduleCmd.AddCommand(scheduleListCmd)
 	scheduleCmd.AddCommand(scheduleDescribeCmd)
 	scheduleCmd.AddCommand(scheduleCancelCmd)
+	scheduleCancelCmd.Flags().BoolVarP(&scheduleCancelYes, "yes", "y", false, "Skip the confirmation prompt")
 	scheduleCmd.AddCommand(schedulePauseCmd)
 	scheduleCmd.AddCommand(scheduleResumeCmd)
 
@@ -437,6 +439,11 @@ func runScheduleDescribe(cmd *cobra.Command, args []string) error {
 func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	scheduleID := args[0]
+
+	if !confirmYes(scheduleCancelYes, fmt.Sprintf("Cancel schedule %s?", scheduleID)) {
+		fmt.Println("Aborted.")
+		return nil
+	}
 
 	fmt.Fprintf(os.Stderr, "\n🛑 Cancelling Schedule\n")
 	fmt.Fprintf(os.Stderr, "   Schedule ID: %s\n\n", scheduleID)

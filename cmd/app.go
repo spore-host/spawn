@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	htmpl "html/template"
 	"net/http"
 	"os"
 	"os/exec"
@@ -13,7 +14,6 @@ import (
 	"runtime"
 	"strings"
 	"text/tabwriter"
-	htmpl "html/template"
 	"time"
 
 	"github.com/spf13/cobra"
