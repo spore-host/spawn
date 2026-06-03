@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -59,6 +60,18 @@ func TestClient_Terminate(t *testing.T) {
 
 	if err := c.Terminate(context.Background(), "us-east-1", id); err != nil {
 		t.Fatalf("Terminate: %v", err)
+	}
+}
+
+func TestClient_WaitForRunning(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	c := NewClientFromConfig(env.AWSConfig)
+	id := launchTestInstance(t, env)
+
+	// The instance is already running in the emulator, so the waiter returns
+	// promptly — verifying we use a real readiness wait instead of a fixed sleep.
+	if err := c.WaitForRunning(context.Background(), "us-east-1", id, 30*time.Second); err != nil {
+		t.Fatalf("WaitForRunning: %v", err)
 	}
 }
 
