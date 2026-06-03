@@ -65,18 +65,70 @@ func (e *spawnEnv) seedTeamTables() {
 		map[string]string{"member_arn-index": "member_arn"})
 }
 
-// seedScheduleTable provisions the table `spawn schedule` reads/writes.
+// seedScheduleTable provisions spawn-schedules with the composite GSI that
+// `spawn schedule list` queries (user_id hash + next_execution_time range).
 func (e *spawnEnv) seedScheduleTable() {
 	e.t.Helper()
-	seedDynamoTable(e.t, e.DynamoClient(), "spawn-schedules", "id", nil)
+	_, err := e.DynamoClient().CreateTable(context.Background(), &dynamodb.CreateTableInput{
+		TableName:   aws.String("spawn-schedules"),
+		BillingMode: ddbtypes.BillingModePayPerRequest,
+		AttributeDefinitions: []ddbtypes.AttributeDefinition{
+			{AttributeName: aws.String("schedule_id"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+			{AttributeName: aws.String("user_id"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+			{AttributeName: aws.String("next_execution_time"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+		},
+		KeySchema: []ddbtypes.KeySchemaElement{
+			{AttributeName: aws.String("schedule_id"), KeyType: ddbtypes.KeyTypeHash},
+		},
+		GlobalSecondaryIndexes: []ddbtypes.GlobalSecondaryIndex{{
+			IndexName: aws.String("user_id-next_execution_time-index"),
+			KeySchema: []ddbtypes.KeySchemaElement{
+				{AttributeName: aws.String("user_id"), KeyType: ddbtypes.KeyTypeHash},
+				{AttributeName: aws.String("next_execution_time"), KeyType: ddbtypes.KeyTypeRange},
+			},
+			Projection: &ddbtypes.Projection{ProjectionType: ddbtypes.ProjectionTypeAll},
+		}},
+	})
+	if err != nil {
+		e.t.Fatalf("seed spawn-schedules: %v", err)
+	}
 }
 
-// seedAlertTables provisions the tables `spawn alerts` reads/writes.
+// seedAlertTables provisions spawn-alerts (alert_id hash + user_id-index and
+// sweep_id-index GSIs that `spawn alerts list` queries) and spawn-alert-history.
 func (e *spawnEnv) seedAlertTables() {
 	e.t.Helper()
-	db := e.DynamoClient()
-	seedDynamoTable(e.t, db, "spawn-alerts", "id", nil)
-	seedDynamoTable(e.t, db, "spawn-alert-history", "id", nil)
+	_, err := e.DynamoClient().CreateTable(context.Background(), &dynamodb.CreateTableInput{
+		TableName:   aws.String("spawn-alerts"),
+		BillingMode: ddbtypes.BillingModePayPerRequest,
+		AttributeDefinitions: []ddbtypes.AttributeDefinition{
+			{AttributeName: aws.String("alert_id"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+			{AttributeName: aws.String("user_id"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+			{AttributeName: aws.String("sweep_id"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+		},
+		KeySchema: []ddbtypes.KeySchemaElement{
+			{AttributeName: aws.String("alert_id"), KeyType: ddbtypes.KeyTypeHash},
+		},
+		GlobalSecondaryIndexes: []ddbtypes.GlobalSecondaryIndex{
+			{
+				IndexName: aws.String("user_id-index"),
+				KeySchema: []ddbtypes.KeySchemaElement{
+					{AttributeName: aws.String("user_id"), KeyType: ddbtypes.KeyTypeHash},
+				},
+				Projection: &ddbtypes.Projection{ProjectionType: ddbtypes.ProjectionTypeAll},
+			},
+			{
+				IndexName: aws.String("sweep_id-index"),
+				KeySchema: []ddbtypes.KeySchemaElement{
+					{AttributeName: aws.String("sweep_id"), KeyType: ddbtypes.KeyTypeHash},
+				},
+				Projection: &ddbtypes.Projection{ProjectionType: ddbtypes.ProjectionTypeAll},
+			},
+		},
+	})
+	if err != nil {
+		e.t.Fatalf("seed spawn-alerts: %v", err)
+	}
 }
 
 // seedBucket creates an S3 bucket in the emulator.

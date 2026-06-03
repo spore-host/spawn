@@ -40,6 +40,15 @@ func TestTier0_Launch_JobArray(t *testing.T) {
 	if listed != 3 {
 		t.Errorf("list returned %d of the 3 job-array instances", listed)
 	}
+
+	// Each instance must actually carry the job-array tags in Substrate — not
+	// just be launched. A regression that dropped or mis-set these would pass a
+	// count-only check.
+	for id := range ids {
+		env.requireTag(id, "spawn:managed", "true")
+		env.requireTag(id, "spawn:job-array-name", "batch")
+		env.requireTag(id, "spawn:job-array-size", "3")
+	}
 }
 
 // TestTier0_Launch_Spot verifies a Spot launch succeeds and is reported.
@@ -50,6 +59,24 @@ func TestTier0_Launch_Spot(t *testing.T) {
 		t.Fatalf("spot launch returned %d instances", len(arr))
 	}
 	requireKeys(t, arr[0], "instance_id", "instance_type")
+}
+
+// TestTier0_Launch_LifecycleTags verifies the lifecycle flags spored relies on
+// (--ttl, --on-complete, --name) are written as the corresponding spawn: tags
+// in Substrate. A regression writing the wrong value or dropping a tag would be
+// invisible to an exit-code-only check.
+func TestTier0_Launch_LifecycleTags(t *testing.T) {
+	env := startSpawnSubstrate(t)
+	arr := env.launchOK("tagged", "--instance-type", "t3.small",
+		"--ttl", "8h", "--on-complete", "terminate")
+	id := arr[0]["instance_id"].(string)
+
+	env.requireTag(id, "spawn:managed", "true")
+	env.requireTag(id, "spawn:ttl", "8h")
+	env.requireTag(id, "spawn:on-complete", "terminate")
+	env.requireTag(id, "Name", "tagged")
+	// ttl-deadline is derived from --ttl; assert it was computed (non-empty).
+	env.requireTag(id, "spawn:ttl-deadline", "")
 }
 
 // TestTier0_Launch_VolumeSize verifies --volume-size is accepted and the launch
@@ -96,10 +123,16 @@ func TestTier0_StateTransitions(t *testing.T) {
 	env := startSpawnSubstrate(t)
 	arr := env.launchOK("life", "--instance-type", "t3.small")
 	id := arr[0]["instance_id"].(string)
+	env.requireState(id, "running")
 
 	env.runOK("stop", id)
+	env.requireState(id, "stopped")
+
 	env.runOK("start", id)
+	env.requireState(id, "running")
+
 	env.runOK("terminate", id, "-y")
+	env.requireState(id, "terminated")
 }
 
 // TestTier0_TerminateRemovesFromList verifies that terminating a freshly
