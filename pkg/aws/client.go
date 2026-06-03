@@ -358,19 +358,31 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		return nil, fmt.Errorf("no instances returned")
 	}
 
-	instance := result.Instances[0]
+	return newLaunchResult(result.Instances[0], launchConfig.Name, launchConfig.KeyName), nil
+}
 
-	launchResult := &LaunchResult{
-		InstanceID:       *instance.InstanceId,
-		Name:             launchConfig.Name,
+// newLaunchResult maps a RunInstances instance into a LaunchResult. Placement
+// and State are optional nested structs in the API response; guard against nil
+// so a response that omits them (some AWS-compatible endpoints do) doesn't
+// panic.
+func newLaunchResult(instance types.Instance, name, keyName string) *LaunchResult {
+	var az string
+	if instance.Placement != nil {
+		az = valueOrEmpty(instance.Placement.AvailabilityZone)
+	}
+	var state string
+	if instance.State != nil {
+		state = string(instance.State.Name)
+	}
+	return &LaunchResult{
+		InstanceID:       valueOrEmpty(instance.InstanceId),
+		Name:             name,
 		PrivateIP:        valueOrEmpty(instance.PrivateIpAddress),
 		PublicIP:         valueOrEmpty(instance.PublicIpAddress),
-		AvailabilityZone: valueOrEmpty(instance.Placement.AvailabilityZone),
-		State:            string(instance.State.Name),
-		KeyName:          launchConfig.KeyName,
+		AvailabilityZone: az,
+		State:            state,
+		KeyName:          keyName,
 	}
-
-	return launchResult, nil
 }
 
 func buildTags(config LaunchConfig, accountID string, userARN string) []types.Tag {
