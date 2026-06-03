@@ -719,6 +719,23 @@ func (c *Client) GetInstanceState(ctx context.Context, region, instanceID string
 	return string(instance.State.Name), nil
 }
 
+// WaitForRunning blocks until the instance reaches the "running" state or the
+// timeout elapses, using the SDK's instance-running waiter (poll with backoff,
+// returns as soon as it's running). Replaces fixed-duration sleeps.
+func (c *Client) WaitForRunning(ctx context.Context, region, instanceID string, timeout time.Duration) error {
+	cfg := c.cfg
+	cfg.Region = region
+	ec2Client := ec2.NewFromConfig(cfg)
+
+	waiter := ec2.NewInstanceRunningWaiter(ec2Client)
+	if err := waiter.Wait(ctx, &ec2.DescribeInstancesInput{
+		InstanceIds: []string{instanceID},
+	}, timeout); err != nil {
+		return fmt.Errorf("waiting for instance %s to run: %w", instanceID, err)
+	}
+	return nil
+}
+
 // Terminate terminates an EC2 instance
 func (c *Client) Terminate(ctx context.Context, region, instanceID string) error {
 	cfg := c.cfg
@@ -1191,12 +1208,43 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 		}
 	}
 
-	// If we created new resources, wait for IAM to propagate (eventual consistency)
+	// If we created new resources, wait for IAM to propagate (eventual
+	// consistency). Poll GetInstanceProfile until it's retrievable rather than
+	// sleeping a fixed 10s — returns immediately once consistent (instant
+	// against emulators), bounded so it can't hang.
 	if roleCreated || profileCreated {
-		time.Sleep(10 * time.Second)
+		waitForInstanceProfile(ctx, iamClient, instanceProfileName)
 	}
 
 	return instanceProfileName, nil
+}
+
+// waitForInstanceProfile polls until the instance profile is retrievable (IAM
+// is eventually consistent after creation), or a bounded deadline passes. It
+// returns as soon as the profile is readable — instantly against a strongly
+// consistent endpoint — instead of a blind fixed sleep. Best-effort: a timeout
+// is not fatal (the subsequent RunInstances will surface any real problem).
+func waitForInstanceProfile(ctx context.Context, iamClient *iam.Client, name string) {
+	const (
+		deadline = 30 * time.Second
+		interval = 500 * time.Millisecond
+	)
+	ctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
+			InstanceProfileName: aws.String(name),
+		}); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // GetAccountID returns the AWS account ID of the current credentials
