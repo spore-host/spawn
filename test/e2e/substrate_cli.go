@@ -138,6 +138,12 @@ func (e *spawnEnv) run(args ...string) (stdout, stderr string, code int) {
 		"AWS_SECRET_ACCESS_KEY=test",
 		"AWS_REGION=us-east-1",
 		"AWS_DEFAULT_REGION=us-east-1",
+		// spawn's infra/compute config loaders default to the spore-host-infra /
+		// spore-host-dev NAMED PROFILES (see pkg/config). Those don't exist in
+		// the hermetic test env, so force the ambient credential chain (our
+		// static test creds + AWS_ENDPOINT_URL → Substrate) by blanking them.
+		"SPAWN_INFRA_PROFILE=",
+		"SPAWN_COMPUTE_PROFILE=",
 	}
 	var so, se bytes.Buffer
 	cmd.Stdout = &so
