@@ -53,3 +53,25 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+  # Tier 0 E2E — the real spawn binary driven against the Substrate AWS
+  # emulator. No AWS account/credentials; exercises the full CLI surface
+  # (args → cobra → AWS client → Substrate) and asserts JSON, exit codes, and
+  # emulator state. Cheap and deterministic, so it runs on every push/PR.
+  e2e-tier0:
+    name: E2E Tier 0 (Substrate)
+    runs-on: [self-hosted, orion]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build spawn binary
+        run: go build -o bin/spawn .
+
+      - name: Tier 0 tests
+        run: go test -tags=e2e_tier0 -timeout 30m ./test/e2e/

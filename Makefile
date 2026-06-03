@@ -1,4 +1,4 @@
-.PHONY: all build build-spawn build-spored build-all clean install test test-coverage test-short test-integration test-integration-scheduler test-integration-queue test-e2e test-e2e-tier1 test-e2e-tier2 test-e2e-tier3 check vuln
+.PHONY: all build build-spawn build-spored build-all clean install test test-coverage test-short test-integration test-integration-scheduler test-integration-queue test-e2e test-e2e-tier0 test-e2e-tier1 test-e2e-tier2 test-e2e-tier3 check vuln
 
 # Version
 VERSION ?= 0.1.0
@@ -113,9 +113,17 @@ test-integration-queue:
 	@echo "Note: Requires AWS credentials (spore-host-dev profile)"
 	go test -v -tags=integration -run TestQueue -timeout 20m ./...
 
-# E2E test suite — three independently runnable tiers.
-# All tiers require: AWS credentials (AWS_PROFILE=spore-host-dev or env vars)
-# and a compiled spawn binary at ./bin/spawn (run 'make build' first).
+# E2E test suite — four independently runnable tiers.
+# Tier 0 needs NO AWS account (runs the real spawn binary against the Substrate
+# emulator). Tiers 1–3 require AWS credentials (AWS_PROFILE=spore-host-dev or env
+# vars) and a compiled spawn binary at ./bin/spawn (run 'make build' first).
+
+# Tier 0 — CLI against the Substrate emulator: no AWS account, deterministic,
+# safe for CI. Exercises the full command surface (args → cobra → AWS client →
+# Substrate) asserting JSON, exit codes, and emulator state.
+test-e2e-tier0: build
+	@echo "Running E2E tier 0 (CLI against Substrate, no AWS account)..."
+	go test -tags=e2e_tier0 -timeout 30m ./test/e2e/
 
 # Tier 1 — AWS API-only, no instances launched, ~free, ~5 min
 test-e2e-tier1: build
