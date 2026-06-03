@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/agent"
 	"github.com/spore-host/spawn/pkg/observability/metrics"
@@ -43,37 +44,59 @@ func detectLang() string {
 
 var Version = "0.1.0"
 
-func main() {
-	// Handle subcommands
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "run-queue":
-			handleRunQueue()
-			os.Exit(0)
-		case "run-pipeline-stage":
-			handleRunPipelineStage()
-			os.Exit(0)
-		case "version":
-			fmt.Printf("spored version %s\n", Version)
-			os.Exit(0)
-		case "status":
-			handleStatus(os.Args[2:])
-			os.Exit(0)
-		case "reload":
-			handleReload()
-			os.Exit(0)
-		case "config":
-			handleConfig(os.Args[2:])
-			os.Exit(0)
-		case "complete":
-			handleComplete(os.Args[2:])
-			os.Exit(0)
-		case "help", "--help", "-h":
-			printHelp()
-			os.Exit(0)
-		}
+// newRootCmd builds the spored command tree. The root command itself, run with
+// no subcommand, is the lifecycle daemon (systemd ExecStart=/usr/local/bin/spored).
+// Subcommand names, flags, and exit codes are load-bearing: spawn shells out to
+// `spored status --check-complete`, `spored config get/set/list`, `spored reload`,
+// and `spored complete --status/--message`, and the user-data bootstrap runs the
+// bare binary as the daemon — all must keep working unchanged.
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "spored",
+		Short:         "Spawn EC2 instance agent",
+		Long:          "spored monitors an instance's lifecycle (spot interruption, TTL, idle, completion) and is also the on-instance control CLI.",
+		Version:       Version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		// No subcommand → run as the lifecycle daemon.
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runDaemon()
+			return nil
+		},
 	}
+	root.SetVersionTemplate("spored version {{.Version}}\n")
 
+	root.AddCommand(
+		newRunQueueCmd(),
+		newRunPipelineStageCmd(),
+		newStatusCmd(),
+		newReloadCmd(),
+		newConfigCmd(),
+		newCompleteCmd(),
+		// Explicit `version` subcommand preserves the historical contract
+		// (`spored version` → "spored version X"); cobra's --version flag alone
+		// would break callers like scripts/install-spored.sh.
+		&cobra.Command{
+			Use:   "version",
+			Short: "Show version",
+			Args:  cobra.NoArgs,
+			Run: func(cmd *cobra.Command, args []string) {
+				fmt.Printf("spored version %s\n", Version)
+			},
+		},
+	)
+	return root
+}
+
+func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+}
+
+// runDaemon is the lifecycle-monitoring daemon (the bare `spored` invocation).
+func runDaemon() {
 	// Setup logging
 	logFile, err := os.OpenFile("/var/log/spored.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
@@ -203,36 +226,103 @@ func main() {
 	log.Printf("spored stopped")
 }
 
-func handleRunQueue() {
-	if len(os.Args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: spored run-queue <queue-file>\n")
-		os.Exit(1)
-	}
-
-	queueFile := os.Args[2]
-	ctx := context.Background()
-
-	runner, err := agent.NewQueueRunner(ctx, queueFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize queue runner: %v\n", err)
-		os.Exit(1)
-	}
-
-	err = runner.Run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Queue execution failed: %v\n", err)
-		os.Exit(1)
+func newRunQueueCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "run-queue <queue-file>",
+		Short: "Execute a batch job queue",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			runner, err := agent.NewQueueRunner(ctx, args[0])
+			if err != nil {
+				return fmt.Errorf("initialize queue runner: %w", err)
+			}
+			if err := runner.Run(); err != nil {
+				return fmt.Errorf("queue execution failed: %w", err)
+			}
+			return nil
+		},
 	}
 }
 
-func handleStatus(args []string) {
-	checkComplete := false
-	for _, a := range args {
-		if a == "--check-complete" {
-			checkComplete = true
-		}
+func newRunPipelineStageCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "run-pipeline-stage",
+		Short: "Run this instance's pipeline stage",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return runPipelineStage() },
 	}
+}
 
+func newReloadCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reload",
+		Short: "Reload configuration from EC2 tags",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return handleReload() },
+	}
+}
+
+func newStatusCmd() *cobra.Command {
+	var checkComplete bool
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show configuration and monitoring status",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return handleStatus(checkComplete)
+		},
+	}
+	cmd.Flags().BoolVar(&checkComplete, "check-complete", false,
+		"Exit with standardized codes: 0=complete 1=failed 2=running 3=error")
+	return cmd
+}
+
+func newConfigCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Manage configuration settings (get, set, list)",
+	}
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "get <key>",
+			Short: "Get a configuration value",
+			Args:  cobra.ExactArgs(1),
+			RunE:  func(cmd *cobra.Command, args []string) error { return handleConfigGet(args[0]) },
+		},
+		&cobra.Command{
+			Use:   "set <key> <value>",
+			Short: "Set a configuration value",
+			Args:  cobra.ExactArgs(2),
+			RunE:  func(cmd *cobra.Command, args []string) error { return handleConfigSet(args[0], args[1]) },
+		},
+		&cobra.Command{
+			Use:   "list",
+			Short: "List all configuration",
+			Args:  cobra.NoArgs,
+			RunE:  func(cmd *cobra.Command, args []string) error { return handleConfigList() },
+		},
+	)
+	return cmd
+}
+
+func newCompleteCmd() *cobra.Command {
+	var file, status, message string
+	cmd := &cobra.Command{
+		Use:   "complete",
+		Short: "Signal completion to trigger the on-complete action",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return handleComplete(file, status, message)
+		},
+	}
+	cmd.Flags().StringVarP(&file, "file", "f", "/tmp/SPAWN_COMPLETE", "Completion file path")
+	cmd.Flags().StringVarP(&status, "status", "s", "", "Optional status (e.g., success, failed)")
+	cmd.Flags().StringVarP(&message, "message", "m", "", "Optional message")
+	return cmd
+}
+
+func handleStatus(checkComplete bool) error {
 	// Create agent to get configuration and metrics
 	ctx := context.Background()
 
@@ -241,8 +331,7 @@ func handleStatus(args []string) {
 		if checkComplete {
 			os.Exit(3) // error querying status
 		}
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize provider: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize provider: %w", err)
 	}
 
 	ag, err := agent.NewAgent(ctx, prov)
@@ -250,8 +339,7 @@ func handleStatus(args []string) {
 		if checkComplete {
 			os.Exit(3)
 		}
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize agent: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize agent: %w", err)
 	}
 
 	// Get configuration
@@ -440,6 +528,7 @@ func handleStatus(args []string) {
 		fmt.Printf("  Pre-stop hook:    %s\n", config.PreStop)
 	}
 	fmt.Println()
+	return nil
 }
 
 // exitCheckComplete inspects the completion file and exits with the standardized
@@ -486,26 +575,23 @@ func checkCompleteCode(completionFile string) int {
 	return 0
 }
 
-func handleReload() {
+func handleReload() error {
 	ctx := context.Background()
 
 	prov, err := provider.NewProvider(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize provider: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize provider: %w", err)
 	}
 
 	ag, err := agent.NewAgent(ctx, prov)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize agent: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize agent: %w", err)
 	}
 
 	fmt.Println("Reloading configuration...")
 
 	if err := ag.Reload(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to reload configuration: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("reload configuration: %w", err)
 	}
 
 	fmt.Println("✓ Configuration reloaded successfully")
@@ -517,60 +603,20 @@ func handleReload() {
 	fmt.Printf("  Idle Timeout:     %v\n", config.IdleTimeout)
 	fmt.Printf("  On Complete:      %s\n", config.OnComplete)
 	fmt.Printf("  Hibernate:        %v\n", config.HibernateOnIdle)
+	return nil
 }
 
-func handleConfig(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: config subcommand requires an action (get, set, list)\n")
-		fmt.Fprintf(os.Stderr, "Usage:\n")
-		fmt.Fprintf(os.Stderr, "  spored config get <key>\n")
-		fmt.Fprintf(os.Stderr, "  spored config set <key> <value>\n")
-		fmt.Fprintf(os.Stderr, "  spored config list\n")
-		os.Exit(1)
-	}
-
-	action := args[0]
-	switch action {
-	case "get":
-		if len(args) < 2 {
-			fmt.Fprintf(os.Stderr, "Error: config get requires a key\n")
-			fmt.Fprintf(os.Stderr, "Usage: spored config get <key>\n")
-			fmt.Fprintf(os.Stderr, "Keys: ttl, idle-timeout, on-complete, hibernate, completion-file, completion-delay\n")
-			os.Exit(1)
-		}
-		handleConfigGet(args[1])
-
-	case "set":
-		if len(args) < 3 {
-			fmt.Fprintf(os.Stderr, "Error: config set requires a key and value\n")
-			fmt.Fprintf(os.Stderr, "Usage: spored config set <key> <value>\n")
-			os.Exit(1)
-		}
-		handleConfigSet(args[1], args[2])
-
-	case "list":
-		handleConfigList()
-
-	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown config action: %s\n", action)
-		fmt.Fprintf(os.Stderr, "Valid actions: get, set, list\n")
-		os.Exit(1)
-	}
-}
-
-func handleConfigGet(key string) {
+func handleConfigGet(key string) error {
 	ctx := context.Background()
 
 	prov, err := provider.NewProvider(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize provider: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize provider: %w", err)
 	}
 
 	ag, err := agent.NewAgent(ctx, prov)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize agent: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize agent: %w", err)
 	}
 
 	config := ag.GetConfig()
@@ -609,32 +655,27 @@ func handleConfigGet(key string) {
 			fmt.Println("0s")
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown config key: %s\n", key)
-		fmt.Fprintf(os.Stderr, "Valid keys: ttl, idle-timeout, on-complete, hibernate, completion-file, completion-delay\n")
-		os.Exit(1)
+		return fmt.Errorf("unknown config key: %s\nValid keys: ttl, idle-timeout, on-complete, hibernate, completion-file, completion-delay", key)
 	}
+	return nil
 }
 
-func handleConfigSet(key, value string) {
+func handleConfigSet(key, value string) error {
 	ctx := context.Background()
 
 	prov, err := provider.NewProvider(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize provider: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize provider: %w", err)
 	}
 
 	// Config set only works for EC2 instances
 	if prov.GetProviderType() != "ec2" {
-		fmt.Fprintf(os.Stderr, "Error: config set is only supported on EC2 instances\n")
-		fmt.Fprintf(os.Stderr, "For local instances, edit the config file: /etc/spawn/local.yaml\n")
-		os.Exit(1)
+		return fmt.Errorf("config set is only supported on EC2 instances\nFor local instances, edit the config file: /etc/spawn/local.yaml")
 	}
 
 	ag, err := agent.NewAgent(ctx, prov)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize agent: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize agent: %w", err)
 	}
 
 	identity := ag.GetIdentity()
@@ -646,46 +687,39 @@ func handleConfigSet(key, value string) {
 	case "ttl":
 		// Validate duration
 		if _, err := time.ParseDuration(value); err != nil && value != "0" {
-			fmt.Fprintf(os.Stderr, "Error: invalid duration: %s\n", value)
-			os.Exit(1)
+			return fmt.Errorf("invalid duration: %s", value)
 		}
 		tagKey = "spawn:ttl"
 	case "idle-timeout":
 		if _, err := time.ParseDuration(value); err != nil && value != "0" {
-			fmt.Fprintf(os.Stderr, "Error: invalid duration: %s\n", value)
-			os.Exit(1)
+			return fmt.Errorf("invalid duration: %s", value)
 		}
 		tagKey = "spawn:idle-timeout"
 	case "on-complete":
 		if value != "terminate" && value != "stop" && value != "hibernate" && value != "" {
-			fmt.Fprintf(os.Stderr, "Error: on-complete must be: terminate, stop, hibernate, or empty to disable\n")
-			os.Exit(1)
+			return fmt.Errorf("on-complete must be: terminate, stop, hibernate, or empty to disable")
 		}
 		tagKey = "spawn:on-complete"
 	case "hibernate":
 		if value != "true" && value != "false" {
-			fmt.Fprintf(os.Stderr, "Error: hibernate must be: true or false\n")
-			os.Exit(1)
+			return fmt.Errorf("hibernate must be: true or false")
 		}
 		tagKey = "spawn:hibernate-on-idle"
 	case "completion-file":
 		tagKey = "spawn:completion-file"
 	case "completion-delay":
 		if _, err := time.ParseDuration(value); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: invalid duration: %s\n", value)
-			os.Exit(1)
+			return fmt.Errorf("invalid duration: %s", value)
 		}
 		tagKey = "spawn:completion-delay"
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown config key: %s\n", key)
-		os.Exit(1)
+		return fmt.Errorf("unknown config key: %s", key)
 	}
 
 	// Get EC2 client
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to load AWS config: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("load AWS config: %w", err)
 	}
 	cfg.Region = region
 	ec2Client := ec2.NewFromConfig(cfg)
@@ -699,33 +733,30 @@ func handleConfigSet(key, value string) {
 		},
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to update tag: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("update tag: %w", err)
 	}
 
 	// Reload configuration
 	fmt.Println("Reloading configuration...")
 	if err := ag.Reload(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to reload configuration: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("reload configuration: %w", err)
 	}
 
 	fmt.Printf("✓ Configuration updated: %s = %s\n", key, value)
+	return nil
 }
 
-func handleConfigList() {
+func handleConfigList() error {
 	ctx := context.Background()
 
 	prov, err := provider.NewProvider(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize provider: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize provider: %w", err)
 	}
 
 	ag, err := agent.NewAgent(ctx, prov)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to initialize agent: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize agent: %w", err)
 	}
 
 	config := ag.GetConfig()
@@ -760,6 +791,7 @@ func handleConfigList() {
 	if config.CompletionDelay > 0 {
 		fmt.Printf("  completion-delay: %s\n", formatDuration(config.CompletionDelay))
 	}
+	return nil
 }
 
 func formatDuration(d time.Duration) string {
@@ -792,48 +824,7 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func handleComplete(args []string) {
-	// Default completion file
-	completionFile := "/tmp/SPAWN_COMPLETE"
-	var status, message string
-
-	// Simple flag parsing
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--file", "-f":
-			if i+1 < len(args) {
-				completionFile = args[i+1]
-				i++
-			}
-		case "--status", "-s":
-			if i+1 < len(args) {
-				status = args[i+1]
-				i++
-			}
-		case "--message", "-m":
-			if i+1 < len(args) {
-				message = args[i+1]
-				i++
-			}
-		case "--help", "-h":
-			fmt.Println("Usage: spored complete [options]")
-			fmt.Println()
-			fmt.Println("Signal completion to trigger on-complete action (terminate/stop/hibernate)")
-			fmt.Println()
-			fmt.Println("Options:")
-			fmt.Println("  -f, --file PATH      Completion file path (default: /tmp/SPAWN_COMPLETE)")
-			fmt.Println("  -s, --status STATUS  Optional status (e.g., 'success', 'failed')")
-			fmt.Println("  -m, --message MSG    Optional message")
-			fmt.Println("  -h, --help           Show this help")
-			fmt.Println()
-			fmt.Println("Examples:")
-			fmt.Println("  spored complete")
-			fmt.Println("  spored complete --status success")
-			fmt.Println("  spored complete --status success --message 'Job completed successfully'")
-			os.Exit(0)
-		}
-	}
-
+func handleComplete(completionFile, status, message string) error {
 	// Build metadata if provided
 	var content []byte
 	if status != "" || message != "" {
@@ -849,15 +840,13 @@ func handleComplete(args []string) {
 		var err error
 		content, err = json.MarshalIndent(metadata, "", "  ")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error encoding metadata: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("encode metadata: %w", err)
 		}
 	}
 
 	// Write completion file
 	if err := os.WriteFile(completionFile, content, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing completion file: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("write completion file: %w", err)
 	}
 
 	// Success message
@@ -868,55 +857,10 @@ func handleComplete(args []string) {
 	if message != "" {
 		fmt.Printf("  Message: %s\n", message)
 	}
+	return nil
 }
 
-func printHelp() {
-	fmt.Printf("spored v%s - Spawn EC2 instance agent\n\n", Version)
-	fmt.Println("Usage:")
-	fmt.Println("  spored                Run as daemon (monitors instance lifecycle)")
-	fmt.Println("  spored run-queue      Execute a batch job queue")
-	fmt.Println("  spored status         Show configuration and monitoring status")
-	fmt.Println("  spored reload         Reload configuration from EC2 tags")
-	fmt.Println("  spored config         Manage configuration settings")
-	fmt.Println("  spored complete       Signal completion to trigger on-complete action")
-	fmt.Println("  spored version        Show version")
-	fmt.Println("  spored help           Show this help")
-	fmt.Println()
-	fmt.Println("Config Commands:")
-	fmt.Println("  spored config get <key>         Get a configuration value")
-	fmt.Println("  spored config set <key> <value> Set a configuration value")
-	fmt.Println("  spored config list              List all configuration")
-	fmt.Println()
-	fmt.Println("Config Keys:")
-	fmt.Println("  ttl               Time-to-live (e.g., 24h, 2h30m)")
-	fmt.Println("  idle-timeout      Idle timeout duration")
-	fmt.Println("  on-complete       Action on completion (terminate|stop|hibernate)")
-	fmt.Println("  hibernate         Hibernate on idle (true|false)")
-	fmt.Println("  completion-file   Path to completion signal file")
-	fmt.Println("  completion-delay  Grace period before action")
-	fmt.Println()
-	fmt.Println("Daemon Mode:")
-	fmt.Println("  Runs as a systemd service and monitors:")
-	fmt.Println("  - Spot interruption warnings")
-	fmt.Println("  - Completion signals (file-based)")
-	fmt.Println("  - TTL (time-to-live) expiration")
-	fmt.Println("  - Idle timeout detection")
-	fmt.Println()
-	fmt.Println("  Configuration is loaded from EC2 instance tags (set by spawn launch).")
-	fmt.Println()
-	fmt.Println("Complete Subcommand:")
-	fmt.Println("  Signal that your workload has finished. If --on-complete was set during")
-	fmt.Println("  launch, the instance will terminate/stop/hibernate after a grace period.")
-	fmt.Println()
-	fmt.Println("  Examples:")
-	fmt.Println("    spored complete")
-	fmt.Println("    spored complete --status success")
-	fmt.Println("    spored complete --status success --message 'Job completed'")
-	fmt.Println()
-	fmt.Println("For more information: https://github.com/scttfrdmn/spore-host")
-}
-
-func handleRunPipelineStage() {
+func runPipelineStage() error {
 	ctx := context.Background()
 
 	log.Println("Checking if instance is part of a pipeline...")
@@ -924,13 +868,11 @@ func handleRunPipelineStage() {
 	// Check if this is a pipeline instance
 	isPipeline, err := pipeline.IsPipelineInstance(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error checking pipeline status: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("check pipeline status: %w", err)
 	}
 
 	if !isPipeline {
-		fmt.Fprintf(os.Stderr, "Error: This instance is not part of a pipeline\n")
-		os.Exit(1)
+		return fmt.Errorf("this instance is not part of a pipeline")
 	}
 
 	log.Println("Instance is part of a pipeline, initializing stage runner...")
@@ -938,17 +880,16 @@ func handleRunPipelineStage() {
 	// Create stage runner
 	runner, err := pipeline.NewStageRunner(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize stage runner: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize stage runner: %w", err)
 	}
 
 	log.Println("Running pipeline stage...")
 
 	// Run stage
 	if err := runner.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Pipeline stage execution failed: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("pipeline stage execution failed: %w", err)
 	}
 
 	log.Println("Pipeline stage completed successfully")
+	return nil
 }
