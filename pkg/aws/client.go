@@ -636,10 +636,16 @@ func rootVolumeSizeFromAMI(ctx context.Context, ec2Client *ec2.Client, amiID str
 		return 0
 	}
 	img := out.Images[0]
-	rootName := aws.ToString(img.RootDeviceName)
+	return rootVolumeSizeFromMappings(aws.ToString(img.RootDeviceName), img.BlockDeviceMappings)
+}
 
+// rootVolumeSizeFromMappings picks the root volume size from an AMI's block
+// device mappings: the EBS mapping matching rootName, or — if none matches —
+// the largest EBS mapping as a safe floor. Returns 0 when there are no sized
+// EBS mappings. Pure, so the selection logic is unit-testable without AWS.
+func rootVolumeSizeFromMappings(rootName string, mappings []types.BlockDeviceMapping) int32 {
 	var rootSize, maxSize int32
-	for _, bdm := range img.BlockDeviceMappings {
+	for _, bdm := range mappings {
 		if bdm.Ebs == nil || bdm.Ebs.VolumeSize == nil {
 			continue
 		}

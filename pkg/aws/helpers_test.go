@@ -3,6 +3,9 @@ package aws
 import (
 	"strings"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
 func TestDetectArchitecture(t *testing.T) {
@@ -118,6 +121,51 @@ func TestBuildBlockDevices(t *testing.T) {
 		bd := buildBlockDevices(LaunchConfig{InstanceType: "t4g.small", RootVolumeSizeGiB: 200}, 80)
 		if *bd[0].Ebs.VolumeSize != 200 {
 			t.Errorf("volume size = %d, want 200 (caller asked for more than the floor)", *bd[0].Ebs.VolumeSize)
+		}
+	})
+}
+
+func TestRootVolumeSizeFromMappings(t *testing.T) {
+	ebs := func(name string, size int32) types.BlockDeviceMapping {
+		return types.BlockDeviceMapping{
+			DeviceName: aws.String(name),
+			Ebs:        &types.EbsBlockDevice{VolumeSize: aws.Int32(size)},
+		}
+	}
+
+	t.Run("matches root device by name", func(t *testing.T) {
+		got := rootVolumeSizeFromMappings("/dev/xvda", []types.BlockDeviceMapping{
+			ebs("/dev/xvda", 80),
+			ebs("/dev/sdb", 500), // larger data volume must NOT win
+		})
+		if got != 80 {
+			t.Errorf("got %d, want 80 (root device)", got)
+		}
+	})
+
+	t.Run("falls back to largest when root name not matched", func(t *testing.T) {
+		got := rootVolumeSizeFromMappings("/dev/xvda", []types.BlockDeviceMapping{
+			ebs("/dev/sdf", 40),
+			ebs("/dev/sdg", 120),
+		})
+		if got != 120 {
+			t.Errorf("got %d, want 120 (largest fallback)", got)
+		}
+	})
+
+	t.Run("ignores mappings without sized EBS", func(t *testing.T) {
+		got := rootVolumeSizeFromMappings("", []types.BlockDeviceMapping{
+			{DeviceName: aws.String("/dev/sdh")}, // no Ebs
+			ebs("/dev/xvda", 30),
+		})
+		if got != 30 {
+			t.Errorf("got %d, want 30", got)
+		}
+	})
+
+	t.Run("no EBS mappings returns 0", func(t *testing.T) {
+		if got := rootVolumeSizeFromMappings("/dev/xvda", nil); got != 0 {
+			t.Errorf("got %d, want 0", got)
 		}
 	})
 }
