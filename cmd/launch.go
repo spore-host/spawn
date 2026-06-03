@@ -1165,7 +1165,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		config.AMI = ami
 	}
 	prog.Complete("Detecting AMI")
-	time.Sleep(300 * time.Millisecond)
 
 	// Step 2: Setup SSH key
 	prog.Start("Setting up SSH key")
@@ -1178,7 +1177,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		config.KeyName = keyName
 	}
 	prog.Complete("Setting up SSH key")
-	time.Sleep(300 * time.Millisecond)
 
 	// Step 3: Setup IAM instance profile
 	prog.Start("Setting up IAM role")
@@ -1219,7 +1217,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		}
 	}
 	prog.Complete("Setting up IAM role")
-	time.Sleep(300 * time.Millisecond)
 
 	// Step 4: Security group (create for MPI if needed)
 	if mpiEnabled {
@@ -1247,7 +1244,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				"region":            config.Region,
 			}, nil)
 		prog.Complete("Creating MPI security group")
-		time.Sleep(300 * time.Millisecond)
 	} else {
 		prog.Skip("Creating security group")
 	}
@@ -1312,7 +1308,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		}
 
 		prog.Complete("Creating FSx Lustre filesystem")
-		time.Sleep(300 * time.Millisecond)
 
 	} else if fsxID != "" && !fsxSkipValidate {
 		prog.Start("Getting FSx filesystem info")
@@ -1324,7 +1319,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		}
 
 		prog.Complete("Getting FSx filesystem info")
-		time.Sleep(300 * time.Millisecond)
 
 	} else if fsxRecall != "" {
 		prog.Start("Recalling FSx filesystem from S3")
@@ -1336,7 +1330,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		}
 
 		prog.Complete("Recalling FSx filesystem from S3")
-		time.Sleep(300 * time.Millisecond)
 	} else {
 		prog.Skip("FSx Lustre filesystem")
 	}
@@ -1368,16 +1361,13 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to check data locality: %v\n", err)
 			prog.Complete("Checking data locality")
-			time.Sleep(300 * time.Millisecond)
 		} else {
 			warning, err := locality.CheckDataLocality(ctx, awsCfg, config.Region, efsID, fsxIDForCheck)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to check data locality: %v\n", err)
 				prog.Complete("Checking data locality")
-				time.Sleep(300 * time.Millisecond)
 			} else if warning.HasMismatches {
 				prog.Complete("Checking data locality")
-				time.Sleep(300 * time.Millisecond)
 
 				// Display warning
 				fmt.Fprintf(os.Stderr, "%s", warning.FormatWarning())
@@ -1396,7 +1386,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				}
 			} else {
 				prog.Complete("Checking data locality")
-				time.Sleep(300 * time.Millisecond)
 			}
 		}
 	}
@@ -1530,26 +1519,24 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			"region":        config.Region,
 		}, nil)
 	prog.Complete("Launching instance")
-	time.Sleep(300 * time.Millisecond)
 
 	// Write instance ID to file for workflow integration
 	if err := writeOutputID(result.InstanceID, outputIDFile); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Failed to write instance ID to file: %v\n", err)
 	}
 
-	// Step 7: Installing spore agent
-	prog.Start("Installing spore agent")
-	time.Sleep(30 * time.Second) // Wait for user-data
-	prog.Complete("Installing spore agent")
-	time.Sleep(300 * time.Millisecond)
-
-	// Step 8: Wait for running
+	// Step 7: Wait for the instance to reach running. Use the SDK waiter
+	// (returns as soon as it's running) rather than a fixed sleep. Gated by
+	// --wait-for-running; the agent/user-data runs asynchronously on the
+	// instance and is observed via spored, not by blocking here.
 	prog.Start("Waiting for instance")
 	if waitForRunning {
-		time.Sleep(10 * time.Second) // Simplified
+		if err := awsClient.WaitForRunning(ctx, config.Region, result.InstanceID, 5*time.Minute); err != nil {
+			prog.Error("Waiting for instance", err)
+			return err
+		}
 	}
 	prog.Complete("Waiting for instance")
-	time.Sleep(300 * time.Millisecond)
 
 	// Step 9: Get public IP
 	prog.Start("Getting public IP")
@@ -1560,12 +1547,12 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	}
 	result.PublicIP = publicIP
 	prog.Complete("Getting public IP")
-	time.Sleep(300 * time.Millisecond)
 
-	// Step 10: Wait for SSH
+	// Step 10: Wait for SSH to become reachable. Probe the port rather than
+	// sleeping a fixed interval; gated by --wait-for-ssh.
 	prog.Start("Waiting for SSH")
-	if waitForSSH {
-		time.Sleep(5 * time.Second) // Simplified
+	if waitForSSH && result.PublicIP != "" {
+		waitForSSHReady(ctx, result.PublicIP, 2*time.Minute)
 	}
 	prog.Complete("Waiting for SSH")
 
@@ -1587,7 +1574,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				dnsRecord = fqdn
 				prog.Complete("Registering DNS")
 			}
-			time.Sleep(300 * time.Millisecond)
 		}
 	}
 
@@ -2894,7 +2880,6 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 		}, nil)
 
 	prog.Complete(fmt.Sprintf("Launching %d instances", count))
-	time.Sleep(300 * time.Millisecond)
 
 	// Sort instances by index for consistent display
 	sort.Slice(launchedInstances, func(i, j int) bool {
@@ -2941,7 +2926,6 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 	}
 
 	prog.Complete("Waiting for all instances")
-	time.Sleep(300 * time.Millisecond)
 
 	// Phase 3: Get public IPs for all instances
 	prog.Start("Getting public IPs")
@@ -2956,7 +2940,6 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 		}
 	}
 	prog.Complete("Getting public IPs")
-	time.Sleep(300 * time.Millisecond)
 
 	// Note: Peer discovery is handled dynamically by spored agent
 	// Each agent queries EC2 for all instances with the same spawn:job-array-id tag
@@ -3729,6 +3712,30 @@ func writeOutputID(id, filepath string) error {
 		return nil
 	}
 	return os.WriteFile(filepath, []byte(id+"\n"), 0644)
+}
+
+// waitForSSHReady polls TCP port 22 until it accepts a connection or the
+// deadline passes. This replaces a fixed sleep with an actual readiness probe:
+// it returns the instant SSH is reachable and is bounded so it can't hang.
+// Best-effort — a timeout is not fatal (the user can still connect later).
+func waitForSSHReady(ctx context.Context, host string, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	addr := net.JoinHostPort(host, "22")
+	for {
+		conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // waitForSweepCompletion polls sweep status until completion or timeout
