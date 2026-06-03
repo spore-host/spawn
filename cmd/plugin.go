@@ -24,9 +24,10 @@ import (
 // plugin-level flags shared across subcommands
 var (
 	pluginInstance    string
-	pluginJSONOutput  bool
+	pluginJSONOutput  bool // deprecated: use --output json
 	pluginKeyPath     string
 	pluginConfigPairs []string
+	pluginRemoveYes   bool
 )
 
 var pluginCmd = &cobra.Command{
@@ -59,7 +60,7 @@ var pluginListCmd = &cobra.Command{
 			return err
 		}
 
-		if pluginJSONOutput {
+		if pluginJSONOutput || getOutputFormat() == "json" {
 			return json.NewEncoder(os.Stdout).Encode(states)
 		}
 
@@ -165,7 +166,7 @@ var pluginStatusCmd = &cobra.Command{
 			return err
 		}
 
-		if pluginJSONOutput {
+		if pluginJSONOutput || getOutputFormat() == "json" {
 			return json.NewEncoder(os.Stdout).Encode(st)
 		}
 
@@ -194,6 +195,11 @@ var pluginRemoveCmd = &cobra.Command{
 			return fmt.Errorf("--instance is required")
 		}
 		name := args[0]
+
+		if !confirmYes(pluginRemoveYes, fmt.Sprintf("Remove plugin %s from %s?", name, pluginInstance)) {
+			fmt.Println("Aborted.")
+			return nil
+		}
 
 		fmt.Printf("Removing plugin %s from %s...\n", name, pluginInstance)
 
@@ -450,8 +456,11 @@ func init() {
 	for _, sub := range []*cobra.Command{pluginListCmd, pluginInstallCmd, pluginStatusCmd, pluginRemoveCmd} {
 		sub.Flags().StringVarP(&pluginInstance, "instance", "i", "", "Instance ID or hostname (required)")
 		sub.Flags().BoolVar(&pluginJSONOutput, "json", false, "JSON output")
+		_ = sub.Flags().MarkDeprecated("json", "use --output json instead")
 		sub.Flags().StringVar(&pluginKeyPath, "key", "", "Path to SSH private key")
 	}
+
+	pluginRemoveCmd.Flags().BoolVarP(&pluginRemoveYes, "yes", "y", false, "Skip the confirmation prompt")
 
 	// Install-only flags.
 	pluginInstallCmd.Flags().StringArrayVar(&pluginConfigPairs, "config", nil, "Config as key=value (repeatable)")

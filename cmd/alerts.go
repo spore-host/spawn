@@ -26,6 +26,7 @@ var (
 	alertInstanceFailed bool
 	alertSweepID        string
 	alertScheduleID     string
+	alertDeleteYes      bool
 )
 
 var alertsCmd = &cobra.Command{
@@ -139,6 +140,7 @@ func init() {
 	alertsCmd.AddCommand(alertsCreateCmd)
 	alertsCmd.AddCommand(alertsListCmd)
 	alertsCmd.AddCommand(alertsDeleteCmd)
+	alertsDeleteCmd.Flags().BoolVarP(&alertDeleteYes, "yes", "y", false, "Skip the confirmation prompt")
 	alertsCmd.AddCommand(alertsHistoryCmd)
 
 	// Create flags
@@ -340,6 +342,11 @@ func runAlertsList(cmd *cobra.Command, args []string) error {
 func runAlertsDelete(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	alertID := args[0]
+
+	if !confirmYes(alertDeleteYes, fmt.Sprintf("Delete alert %s?", alertID)) {
+		fmt.Println("Aborted.")
+		return nil
+	}
 
 	// Load AWS config
 	cfg, err := config.LoadDefaultConfig(ctx)

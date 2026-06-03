@@ -57,7 +57,7 @@ func init() {
 
 	// Delete command flags
 	fsxDeleteCmd.Flags().BoolVar(&fsxDeleteExportFirst, "export-first", false, "Export data to S3 before deleting")
-	fsxDeleteCmd.Flags().BoolVar(&fsxDeleteSkipConfirm, "yes", false, "Skip confirmation prompt")
+	fsxDeleteCmd.Flags().BoolVarP(&fsxDeleteSkipConfirm, "yes", "y", false, "Skip confirmation prompt")
 }
 
 func runFSxList(cmd *cobra.Command, args []string) error {

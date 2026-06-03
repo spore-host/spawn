@@ -29,6 +29,8 @@ var autoscaleCmd = &cobra.Command{
 }
 
 var (
+	autoscaleTerminateYes bool
+
 	// Launch flags
 	autoscaleName           string
 	autoscaleJobArrayID     string
@@ -189,6 +191,7 @@ func init() {
 	autoscaleCmd.AddCommand(autoscalePauseCmd)
 	autoscaleCmd.AddCommand(autoscaleResumeCmd)
 	autoscaleCmd.AddCommand(autoscaleTerminateCmd)
+	autoscaleTerminateCmd.Flags().BoolVarP(&autoscaleTerminateYes, "yes", "y", false, "Skip the confirmation prompt")
 	autoscaleCmd.AddCommand(autoscaleSetPolicyCmd)
 	autoscaleCmd.AddCommand(autoscaleScalingActivityCmd)
 	autoscaleCmd.AddCommand(autoscaleSetMetricPolicyCmd)
@@ -677,6 +680,11 @@ func runAutoscaleResume(cmd *cobra.Command, args []string) error {
 func runAutoscaleTerminate(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	groupName := args[0]
+
+	if !confirmYes(autoscaleTerminateYes, fmt.Sprintf("Terminate auto-scaling group %q and all its instances? This cannot be undone.", groupName)) {
+		fmt.Fprintln(os.Stderr, "Aborted.")
+		return nil
+	}
 
 	as, err := getAutoscaler(ctx)
 	if err != nil {

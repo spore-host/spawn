@@ -42,7 +42,7 @@ var (
 	botAllow           []string
 	botTagPrefix       string
 	botTable           string
-	botJSONOutput      bool
+	botJSONOutput      bool // deprecated: use --output json
 	botRoleARN         string
 	botConnectCode     string   // for --connect-code self-registration
 	botAllowedChannels []string // for --allowed-channels channel restriction
@@ -221,7 +221,7 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("write registration: %w", err)
 	}
 
-	if botJSONOutput {
+	if botJSONOutput || getOutputFormat() == "json" {
 		return json.NewEncoder(os.Stdout).Encode(reg)
 	}
 	fmt.Printf("Registered: %s → %s for %s/%s in %s/%s\n",
@@ -426,7 +426,7 @@ var botListCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("scan registrations: %w", err)
 		}
-		if botJSONOutput {
+		if botJSONOutput || getOutputFormat() == "json" {
 			var regs []botRegistration
 			for _, item := range result.Items {
 				var r botRegistration
@@ -543,7 +543,7 @@ Run this once after installing the Slack app in a workspace:
 		if err != nil {
 			return fmt.Errorf("write workspace: %w", err)
 		}
-		if botJSONOutput {
+		if botJSONOutput || getOutputFormat() == "json" {
 			return json.NewEncoder(os.Stdout).Encode(ws)
 		}
 		fmt.Printf("Registered workspace: %s/%s", botPlatform, botWorkspaceID)
@@ -611,7 +611,7 @@ var botWorkspaceListCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("scan workspaces: %w", err)
 		}
-		if botJSONOutput {
+		if botJSONOutput || getOutputFormat() == "json" {
 			var wss []botWorkspace
 			for _, item := range result.Items {
 				var ws botWorkspace
@@ -994,6 +994,7 @@ func init() {
 	for _, sub := range allSubs {
 		sub.Flags().StringVar(&botPlatform, "platform", "", "Chat platform: slack or teams")
 		sub.Flags().BoolVar(&botJSONOutput, "json", false, "Output as JSON")
+		_ = sub.Flags().MarkDeprecated("json", "use --output json instead")
 	}
 
 	// Registry table override (register/deregister/list)

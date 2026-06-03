@@ -45,6 +45,8 @@ type memberRecord struct {
 var (
 	teamName        string
 	teamDescription string
+	teamDeleteYes   bool
+	teamRemoveYes   bool
 )
 
 var teamCmd = &cobra.Command{
@@ -105,6 +107,9 @@ func init() {
 	teamCreateCmd.Flags().StringVar(&teamName, "name", "", "Team name (required)")
 	teamCreateCmd.Flags().StringVar(&teamDescription, "description", "", "Team description")
 	_ = teamCreateCmd.MarkFlagRequired("name")
+
+	teamDeleteCmd.Flags().BoolVarP(&teamDeleteYes, "yes", "y", false, "Skip the confirmation prompt")
+	teamRemoveCmd.Flags().BoolVarP(&teamRemoveYes, "yes", "y", false, "Skip the confirmation prompt")
 }
 
 // teamDDBClient returns a DynamoDB client using the default config.
@@ -371,6 +376,11 @@ func runTeamRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot remove yourself as owner")
 	}
 
+	if !confirmYes(teamRemoveYes, fmt.Sprintf("Remove %s from team %s?", memberARN, teamID)) {
+		fmt.Println("Aborted.")
+		return nil
+	}
+
 	if _, err := ddb.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 		TableName: aws.String(membershipTable),
 		Key: map[string]types.AttributeValue{
@@ -409,6 +419,11 @@ func runTeamDelete(cmd *cobra.Command, args []string) error {
 	role, err := resolveTeamMembership(ctx, ddb, teamID, callerARN)
 	if err != nil || role != "owner" {
 		return fmt.Errorf("only team owners can delete teams")
+	}
+
+	if !confirmYes(teamDeleteYes, fmt.Sprintf("Delete team %s and all its memberships? This cannot be undone.", teamID)) {
+		fmt.Println("Aborted.")
+		return nil
 	}
 
 	// Delete all memberships

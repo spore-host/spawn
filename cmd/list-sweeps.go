@@ -23,7 +23,7 @@ var (
 	listSweepsLast   int
 	listSweepsSince  string
 	listSweepsRegion string
-	listSweepsJSON   bool
+	listSweepsJSON   bool // deprecated: use --output json
 )
 
 var listSweepsCmd = &cobra.Command{
@@ -60,6 +60,7 @@ func init() {
 	listSweepsCmd.Flags().StringVar(&listSweepsSince, "since", "", "Show sweeps created after date (YYYY-MM-DD)")
 	listSweepsCmd.Flags().StringVar(&listSweepsRegion, "region", "", "Filter by region")
 	listSweepsCmd.Flags().BoolVar(&listSweepsJSON, "json", false, "Output as JSON")
+	_ = listSweepsCmd.Flags().MarkDeprecated("json", "use --output json instead")
 }
 
 type SweepSummary struct {
@@ -182,7 +183,7 @@ func runListSweeps(cmd *cobra.Command, args []string) error {
 	}
 
 	// Output
-	if listSweepsJSON {
+	if listSweepsJSON || getOutputFormat() == "json" {
 		data, err := json.MarshalIndent(sweeps, "", "  ")
 		if err != nil {
 			return fmt.Errorf("failed to marshal JSON: %w", err)

@@ -99,6 +99,10 @@ func init() {
 	sweepListCmd.Flags().StringVar(&listSweepsSince, "since", "", "Show sweeps created after date (YYYY-MM-DD)")
 	sweepListCmd.Flags().StringVar(&listSweepsRegion, "region", "", "Filter by region")
 
+	// sweep cancel shares the --yes confirmation with the top-level cancel (it
+	// delegates to runCancel, which honors cancelYes).
+	sweepCancelCmd.Flags().BoolVarP(&cancelYes, "yes", "y", false, "Skip the confirmation prompt")
+
 	// sweep status flags
 	sweepStatusCmd.Flags().BoolVar(&sweepStatusJSON, "json", false, "Output as JSON")
 	_ = sweepStatusCmd.Flags().MarkDeprecated("json", "use --output json instead")

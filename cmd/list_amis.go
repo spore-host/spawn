@@ -21,7 +21,7 @@ var (
 	listAMIsArch       string
 	listAMIsGPU        string
 	listAMIsDeprecated bool
-	listAMIsJSON       bool
+	listAMIsJSON       bool // deprecated: use --output json
 )
 
 var listAMIsCmd = &cobra.Command{
@@ -66,6 +66,7 @@ func init() {
 	listAMIsCmd.Flags().StringVar(&listAMIsGPU, "gpu", "", "Filter by GPU support (true or false)")
 	listAMIsCmd.Flags().BoolVar(&listAMIsDeprecated, "deprecated", false, "Show deprecated AMIs (default: hide deprecated)")
 	listAMIsCmd.Flags().BoolVar(&listAMIsJSON, "json", false, "Output as JSON")
+	_ = listAMIsCmd.Flags().MarkDeprecated("json", "use --output json instead")
 }
 
 func runListAMIs(cmd *cobra.Command, args []string) error {
@@ -141,7 +142,7 @@ func runListAMIs(cmd *cobra.Command, args []string) error {
 	})
 
 	// Output
-	if listAMIsJSON {
+	if listAMIsJSON || getOutputFormat() == "json" {
 		return outputAMIsJSON(spawnAMIs)
 	}
 

@@ -86,8 +86,8 @@ func TestTier0_Team(t *testing.T) {
 		t.Errorf("team show missing name:\n%s", out)
 	}
 
-	// team delete takes the ID only (no confirmation flag).
-	env.runOK("team", "delete", teamID)
+	// team delete now prompts for confirmation; -y skips it (spawn#40).
+	env.runOK("team", "delete", teamID, "-y")
 	// After deletion the team is gone from the list.
 	if out := env.runOK("team", "list"); strings.Contains(out, teamID) {
 		t.Errorf("deleted team %s still listed:\n%s", teamID, out)

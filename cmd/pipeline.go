@@ -124,13 +124,14 @@ terminate all running instances and mark the pipeline as CANCELLED.`,
 var (
 	flagSimpleGraph  bool
 	flagGraphStats   bool
-	flagJSONOutput   bool
+	flagJSONOutput   bool // deprecated: use --output json
 	flagDetached     bool
 	flagWait         bool
 	flagRegion       string
 	flagOutputDir    string
 	flagStage        string
 	flagStatusFilter string
+	flagCancelYes    bool
 )
 
 func init() {
@@ -142,11 +143,13 @@ func init() {
 	pipelineCmd.AddCommand(collectPipelineCmd)
 	pipelineCmd.AddCommand(listPipelineCmd)
 	pipelineCmd.AddCommand(cancelPipelineCmd)
+	cancelPipelineCmd.Flags().BoolVarP(&flagCancelYes, "yes", "y", false, "Skip the confirmation prompt")
 
 	// Graph command flags
 	graphPipelineCmd.Flags().BoolVar(&flagSimpleGraph, "simple", false, "Show simplified graph")
 	graphPipelineCmd.Flags().BoolVar(&flagGraphStats, "stats", false, "Show graph statistics")
 	graphPipelineCmd.Flags().BoolVar(&flagJSONOutput, "json", false, "Output as JSON")
+	_ = graphPipelineCmd.Flags().MarkDeprecated("json", "use --output json instead")
 
 	// Launch command flags
 	launchPipelineCmd.Flags().BoolVar(&flagDetached, "detached", false, "Launch and return immediately")
@@ -160,6 +163,7 @@ func init() {
 	// List command flags
 	listPipelineCmd.Flags().StringVar(&flagStatusFilter, "status", "", "Filter by status (INITIALIZING, RUNNING, COMPLETED, FAILED, CANCELLED)")
 	listPipelineCmd.Flags().BoolVar(&flagJSONOutput, "json", false, "Output as JSON")
+	_ = listPipelineCmd.Flags().MarkDeprecated("json", "use --output json instead")
 }
 
 func runValidatePipeline(cmd *cobra.Command, args []string) error {
@@ -227,7 +231,7 @@ func runGraphPipeline(cmd *cobra.Command, args []string) error {
 	}
 
 	// JSON output
-	if flagJSONOutput {
+	if flagJSONOutput || getOutputFormat() == "json" {
 		stats := p.GetGraphStats()
 		data, err := json.MarshalIndent(stats, "", "  ")
 		if err != nil {
@@ -718,7 +722,7 @@ func runListPipeline(cmd *cobra.Command, args []string) error {
 	}
 
 	// JSON output
-	if flagJSONOutput {
+	if flagJSONOutput || getOutputFormat() == "json" {
 		data, err := json.MarshalIndent(pipelines, "", "  ")
 		if err != nil {
 			return fmt.Errorf("marshal JSON: %w", err)
@@ -761,6 +765,11 @@ func runListPipeline(cmd *cobra.Command, args []string) error {
 func runCancelPipeline(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	pipelineID := args[0]
+
+	if !confirmYes(flagCancelYes, fmt.Sprintf("Cancel pipeline %s and terminate its instances? This cannot be undone.", pipelineID)) {
+		fmt.Fprintln(os.Stderr, "Aborted.")
+		return nil
+	}
 
 	fmt.Fprintf(os.Stderr, "⚠️  Cancelling pipeline: %s\n", pipelineID)
 
