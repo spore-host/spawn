@@ -32,6 +32,9 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"sweep":     "tier0_sweeps_test.go (list-sweeps query path)",
 		"status":    "output matrix (negative) + Tier 2 for SSH path",
 		"version":   "output matrix / smoke",
+		"schedule":  "tier0_statecmds2_test.go (list query path; create/cancel need EventBridge → Tier 3)",
+		"alerts":    "tier0_statecmds2_test.go (create→list→delete round-trip)",
+		"stage":     "tier0_statecmds2_test.go (list; upload/delete need multi-region S3 → Tier 2/3)",
 	}
 
 	// Commands deliberately deferred to Tier 2/3 (real instance / SSH / spored /
@@ -46,11 +49,8 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"pipeline":        "Tier 3: multi-stage orchestration over the queue",
 		"slurm":           "Tier 3: real Slurm submit/cluster",
 		"burst":           "Tier 3: cross-account burst needs real dev-account identity",
-		"stage":           "Tier 2/3: S3 data staging to/from a live run",
 		"autoscale":       "Tier 3: scaling decisions against a real ASG/fleet",
-		"alerts":          "Tier 1/3: Slack/SNS external delivery",
 		"notify":          "Tier 1/3: external notification delivery",
-		"schedule":        "Tier 3: EventBridge Scheduler end-to-end",
 		"dns":             "Tier 2: Route53 + live instance public IP",
 		"fsx":             "Tier 2/3: FSx lifecycle against a real filesystem",
 		"plugin":          "Tier 2: plugin install/status on a live instance",
