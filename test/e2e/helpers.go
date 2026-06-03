@@ -28,8 +28,8 @@ import (
 	"testing"
 	"time"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
@@ -37,10 +37,10 @@ import (
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 const (
-	testRegion      = "us-east-1"
+	testRegion       = "us-east-1"
 	testInstanceType = "t3.small" // cheap, available everywhere
-	testTagKey      = "spawn:e2e-test-run"
-	defaultTTL      = "15m"
+	testTagKey       = "spawn:e2e-test-run"
+	defaultTTL       = "15m"
 )
 
 // spawnBin returns the path to the spawn binary.
@@ -122,13 +122,13 @@ func spawnMayFail(t *testing.T, args ...string) (string, error) {
 
 // InstanceJSON is the minimal shape returned by spawn list --output json.
 type InstanceJSON struct {
-	InstanceID      string `json:"instance_id"`
-	Name            string `json:"name"`
-	InstanceType    string `json:"instance_type"`
-	State           string `json:"state"`
-	Region          string `json:"region"`
-	PublicIP        string `json:"public_ip"`
-	Tags            map[string]string `json:"tags"`
+	InstanceID   string            `json:"instance_id"`
+	Name         string            `json:"name"`
+	InstanceType string            `json:"instance_type"`
+	State        string            `json:"state"`
+	Region       string            `json:"region"`
+	PublicIP     string            `json:"public_ip"`
+	Tags         map[string]string `json:"tags"`
 }
 
 // launchInstance launches a single t3.small test instance and registers cleanup.
