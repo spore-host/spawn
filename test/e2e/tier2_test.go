@@ -480,24 +480,67 @@ func TestTier2_HibernateAndResume(t *testing.T) {
 	}
 }
 
-// TestTier2_ConnectAutoStart verifies spawn connect automatically starts a stopped
-// instance and connects to it.
+// TestTier2_ConnectWakesHibernated verifies the hibernate analog of auto-start:
+// connecting to a hibernated instance wakes it (no explicit start), restores
+// RAM state, and runs the command — proving the wake-via-connect path works for
+// hibernation, not just stop.
+func TestTier2_ConnectWakesHibernated(t *testing.T) {
+	t.Parallel()
+	name := "e2e-connect-hibernate-" + runID(t)
+	launchInstance(t, name, "--hibernate")
+
+	// Leave a RAM-resident marker, then hibernate.
+	sshExec(t, name, "echo WAKE_MARKER > /tmp/wake-test.txt")
+	spawn(t, "hibernate", name)
+	waitForState(t, name, "stopped", 4*time.Minute)
+	if st := instanceState(t, name); st != "stopped" {
+		t.Fatalf("precondition: instance state = %q, want stopped (hibernated) before connect", st)
+	}
+	t.Log("instance hibernated — now connecting (should auto-resume)")
+
+	// connect (not start) must wake it and run the command.
+	out := sshExec(t, name, "cat /tmp/wake-test.txt 2>/dev/null || echo MISSING")
+	if strings.Contains(out, "MISSING") || !strings.Contains(out, "WAKE_MARKER") {
+		t.Errorf("connect did not resume hibernated instance with RAM state intact: %s", out)
+	}
+	waitForState(t, name, "running", 4*time.Minute)
+	if st := instanceState(t, name); st != "running" {
+		t.Errorf("after connect, hibernated instance state = %q, want running", st)
+	}
+	t.Log("spawn connect resumed hibernated instance and connected with RAM state intact")
+}
+
+// TestTier2_ConnectAutoStart verifies spawn connect automatically wakes a
+// stopped instance and connects to it — the stop → connect → auto-start →
+// exec cycle. It asserts the instance was genuinely stopped first and is
+// genuinely running afterward, so a connect that somehow succeeded without
+// actually waking the instance (or against a never-stopped one) can't pass.
 func TestTier2_ConnectAutoStart(t *testing.T) {
 	t.Parallel()
 	name := "e2e-connect-autostart-" + runID(t)
 	launchInstance(t, name)
 
-	// Stop the instance
+	// Stop the instance and confirm it really reached stopped.
 	spawn(t, "stop", name)
 	waitForState(t, name, "stopped", 3*time.Minute)
+	if st := instanceState(t, name); st != "stopped" {
+		t.Fatalf("precondition: instance state = %q, want stopped before connect", st)
+	}
 	t.Log("instance stopped — now connecting (should auto-start)")
 
-	// Connect should auto-start and succeed
+	// Connect should auto-start the stopped instance and run the command.
 	out := sshExec(t, name, "echo AUTOSTART_OK")
 	if !strings.Contains(out, "AUTOSTART_OK") {
 		t.Errorf("connect after auto-start failed: %s", out)
 	}
-	t.Log("spawn connect auto-started stopped instance and connected")
+
+	// And the instance must now actually be running — proving connect woke it,
+	// not just that the exec happened to return.
+	waitForState(t, name, "running", 3*time.Minute)
+	if st := instanceState(t, name); st != "running" {
+		t.Errorf("after auto-start connect, instance state = %q, want running", st)
+	}
+	t.Log("spawn connect auto-started stopped instance, woke it to running, and connected")
 }
 
 func min(a, b int) int {

@@ -245,6 +245,27 @@ func waitForState(t *testing.T, name, state string, timeout time.Duration) {
 	t.Fatalf("instance %q did not reach state %q within %v", name, state, timeout)
 }
 
+// instanceState returns the current state of the named instance via spawn list,
+// or "" if it isn't found. Used for point-in-time state assertions (e.g. that
+// connect actually woke a stopped instance to running).
+func instanceState(t *testing.T, name string) string {
+	t.Helper()
+	out, err := spawnMayFail(t, "list", "--region", testRegion, "--output", "json")
+	if err != nil {
+		return ""
+	}
+	var instances []InstanceJSON
+	if json.Unmarshal([]byte(out), &instances) != nil {
+		return ""
+	}
+	for _, inst := range instances {
+		if inst.Name == name {
+			return inst.State
+		}
+	}
+	return ""
+}
+
 // sshExec runs a command on the instance via spawn connect one-shot mode.
 func sshExec(t *testing.T, name, cmd string) string {
 	t.Helper()
