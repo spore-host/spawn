@@ -299,6 +299,51 @@ func sshExec(t *testing.T, name, cmd string) string {
 	return out
 }
 
+// sshExecEventually retries `spawn connect -- cmd` until its output contains
+// want, or the timeout fires. launchInstance returns when the instance reaches
+// EC2 "running", but spored bootstrap + any --command run for another 1-3 min
+// after that; asserting on instance-side state immediately is racy. Polling the
+// real condition (not a fixed sleep) makes these tests deterministic. Returns
+// the last output; fails the test on timeout.
+func sshExecEventually(t *testing.T, name, cmd, want string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		// Non-fatal: connect may fail while SSH/spored is still coming up.
+		out, _ := spawnMayFail(t, "connect", name, "--", cmd)
+		last = out
+		if strings.Contains(out, want) {
+			return out
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("instance %q: command %q never produced %q within %v\nlast output:\n%s",
+		name, cmd, want, timeout, last)
+	return last
+}
+
+// hibernateEventually retries `spawn hibernate <name>` until it succeeds or the
+// timeout fires. EC2 rejects hibernation until the instance's hibernation agent
+// has initialized (a few minutes post-boot), so calling hibernate immediately
+// after launch returns exit 1. Retrying until ready makes the hibernate tests
+// deterministic without guessing a fixed delay.
+func hibernateEventually(t *testing.T, name string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	var lastOut string
+	for time.Now().Before(deadline) {
+		out, err := spawnMayFail(t, "hibernate", name)
+		if err == nil {
+			return
+		}
+		lastErr, lastOut = err, out
+		time.Sleep(20 * time.Second)
+	}
+	t.Fatalf("instance %q: hibernate never succeeded within %v: %v\n%s", name, timeout, lastErr, lastOut)
+}
+
 // terminateByTag force-terminates all EC2 instances tagged with key=value in all regions.
 // Used as cleanup; errors are logged but do not fail the test.
 func terminateByTag(t *testing.T, key, value string) {

@@ -48,13 +48,10 @@ func TestTier2_CommandExecution(t *testing.T) {
 	name := "e2e-command-" + runID(t)
 	launchInstance(t, name, "--command", "echo SPAWN_COMMAND_RAN > /tmp/cmd-ran.txt")
 
-	// Give the command a moment to execute after spored starts
-	time.Sleep(30 * time.Second)
-
-	out := sshExec(t, name, "cat /tmp/cmd-ran.txt")
-	if !strings.Contains(out, "SPAWN_COMMAND_RAN") {
-		t.Fatalf("--command did not execute on instance; /tmp/cmd-ran.txt: %q", out)
-	}
+	// --command runs after spored bootstrap, which finishes 1-3 min after the
+	// instance reaches "running" — poll until the file appears rather than
+	// guessing a fixed delay.
+	sshExecEventually(t, name, "cat /tmp/cmd-ran.txt 2>/dev/null", "SPAWN_COMMAND_RAN", 4*time.Minute)
 	t.Log("--command executed successfully")
 }
 
@@ -87,13 +84,15 @@ func TestTier2_PreStop(t *testing.T) {
 		"--pre-stop-timeout", "30s",
 	)
 
-	// Trigger completion
+	// Wait until spored is up and accepting the completion signal, then trigger it.
+	sshExecEventually(t, name, "sudo systemctl is-active spored 2>/dev/null || echo waiting", "active", 4*time.Minute)
 	sshExec(t, name, "touch /tmp/SPAWN_COMPLETE")
 
-	// Wait for pre-stop to run (before instance terminates)
-	time.Sleep(20 * time.Second)
-	out := sshExec(t, name, "test -f /tmp/prestop-ran.txt && echo YES || echo NO")
-	if !strings.Contains(out, "YES") {
+	// pre-stop runs between the completion signal and termination — poll for it
+	// (the instance may terminate shortly after, so accept either the marker or
+	// that the instance has already gone, which only happens after pre-stop ran).
+	out := sshExecEventually(t, name, "test -f /tmp/prestop-ran.txt && echo PRESTOP_YES || echo NO", "PRESTOP_YES", 90*time.Second)
+	if !strings.Contains(out, "PRESTOP_YES") {
 		t.Errorf("--pre-stop did not run: /tmp/prestop-ran.txt not found")
 	}
 
@@ -139,17 +138,27 @@ func TestTier2_IAMPolicyApplied(t *testing.T) {
 	name := "e2e-iam-policy-" + runID(t)
 	launchInstance(t, name, "--iam-policy", "s3:ReadOnly")
 
-	// The instance should be able to list S3 buckets (read permission applied)
-	out, err := spawnMayFail(t, "connect", name, "--",
-		"aws s3 ls 2>&1 | head -5 || echo S3_ACCESS_ATTEMPTED")
-	if err != nil {
-		t.Logf("s3 ls returned error (may be no buckets): %v", err)
+	// The instance should be able to list S3 (read permission applied). IAM
+	// instance-profile + policy attachment take time to propagate to the running
+	// instance after launch, so poll for a non-AccessDenied result. `aws s3 ls`
+	// prints "S3_OK" on success (even with zero buckets) and the AWS CLI prints
+	// AccessDenied to stderr+exit-nonzero when the policy isn't effective yet.
+	deadline := time.Now().Add(4 * time.Minute)
+	var lastOut string
+	granted := false
+	for time.Now().Before(deadline) {
+		out, _ := spawnMayFail(t, "connect", name, "--", "aws s3 ls >/dev/null 2>&1 && echo S3_OK || echo S3_DENIED")
+		lastOut = out
+		if strings.Contains(out, "S3_OK") {
+			granted = true
+			break
+		}
+		time.Sleep(15 * time.Second)
 	}
-	// If we get an explicit AccessDenied we know the policy wasn't applied
-	if strings.Contains(out, "AccessDenied") && !strings.Contains(out, "S3_ACCESS_ATTEMPTED") {
-		t.Errorf("--iam-policy s3:ReadOnly did not grant S3 access: %s", out)
+	if !granted {
+		t.Errorf("--iam-policy s3:ReadOnly did not grant S3 access within 4m; last:\n%s", lastOut)
 	}
-	t.Logf("IAM policy check: %s", strings.TrimSpace(out))
+	t.Log("IAM policy granted S3 access")
 }
 
 // TestTier2_SporedStatus verifies spored is running and reports TTL.
@@ -188,22 +197,26 @@ func TestTier2_CompoundSSHCommand(t *testing.T) {
 
 // TestTier2_FSxTagsWritten verifies spawn:fsx-id and spawn:fsx-mount-point
 // tags are written when --fsx-id is used (regression for #314).
+//
+// --fsx-id is validated against the real FSx API at launch (DescribeFileSystems),
+// so a fake id fails the launch outright — this test needs a real Lustre
+// filesystem, provided via E2E_FSX_ID. When unset it skips, because the
+// tag-writing logic itself is already covered without AWS by the buildTags unit
+// test (pkg/aws/tags_test.go, the actual #314 regression test).
 func TestTier2_FSxTagsWritten(t *testing.T) {
 	t.Parallel()
-	// Use a fake FSx ID — we're only testing that tags are written,
-	// not that the filesystem actually mounts.
+	fsxID := os.Getenv("E2E_FSX_ID")
+	if fsxID == "" {
+		t.Skip("E2E_FSX_ID not set — FSx tag-writing is unit-tested in pkg/aws/tags_test.go; " +
+			"set E2E_FSX_ID=fs-... to exercise it end-to-end against a real Lustre filesystem")
+	}
 	name := "e2e-fsx-tags-" + runID(t)
-	inst := launchInstance(t, name,
-		"--fsx-id", "fs-00000000000000000",
-		"--fsx-mount-point", "/fsx",
-	)
+	inst := launchInstance(t, name, "--fsx-id", fsxID, "--fsx-mount-point", "/fsx")
 
-	// Check the tags via AWS
 	cfg := loadAWSConfig(t)
 	out := describeInstanceTags(t, cfg, inst.InstanceID, testRegion)
-
-	if out["spawn:fsx-id"] != "fs-00000000000000000" {
-		t.Errorf("spawn:fsx-id = %q, want fs-00000000000000000 (regression #314)", out["spawn:fsx-id"])
+	if out["spawn:fsx-id"] != fsxID {
+		t.Errorf("spawn:fsx-id = %q, want %q (regression #314)", out["spawn:fsx-id"], fsxID)
 	}
 	if out["spawn:fsx-mount-point"] != "/fsx" {
 		t.Errorf("spawn:fsx-mount-point = %q, want /fsx (regression #314)", out["spawn:fsx-mount-point"])
@@ -394,11 +407,13 @@ func TestTier2_NameResolutionPrefersRunning(t *testing.T) {
 	inst2 := launchInstance(t, baseName, "--ttl", "15m")
 	t.Logf("second instance running: %s", inst2.InstanceID)
 
-	// connect by name should reach the running one (inst2), not fail with ambiguity
-	out := sshExec(t, baseName, "curl -s http://169.254.169.254/latest/meta-data/instance-id")
-	out = strings.TrimSpace(out)
-	if out != inst2.InstanceID {
-		t.Errorf("connect by name reached %q, expected running instance %s (regression #313)", out, inst2.InstanceID)
+	// connect by name should reach the running one (inst2), not the stopped
+	// dup. Poll (inst2's SSH may not be ready the instant it's "running"); the
+	// IMDSv2-free metadata call returns the instance id it actually connected to.
+	out := sshExecEventually(t, baseName,
+		"curl -s http://169.254.169.254/latest/meta-data/instance-id", inst2.InstanceID, 4*time.Minute)
+	if !strings.Contains(out, inst2.InstanceID) {
+		t.Errorf("connect by name reached %q, expected running instance %s (regression #313)", strings.TrimSpace(out), inst2.InstanceID)
 	}
 	t.Logf("name resolution correctly picked running instance %s", inst2.InstanceID)
 }
@@ -463,7 +478,9 @@ func TestTier2_HibernateAndResume(t *testing.T) {
 	// Write a marker file to verify state is preserved across hibernate/resume
 	sshExec(t, name, "echo HIBERNATE_MARKER > /tmp/hibernate-test.txt")
 
-	spawn(t, "hibernate", name)
+	// EC2 rejects hibernation until the hibernation agent has initialized
+	// (minutes post-boot), so retry until it's accepted.
+	hibernateEventually(t, name, 5*time.Minute)
 	waitForState(t, name, "stopped", 4*time.Minute)
 	t.Log("instance hibernated")
 
@@ -489,9 +506,10 @@ func TestTier2_ConnectWakesHibernated(t *testing.T) {
 	name := "e2e-connect-hibernate-" + runID(t)
 	launchInstance(t, name, "--hibernate")
 
-	// Leave a RAM-resident marker, then hibernate.
+	// Leave a RAM-resident marker, then hibernate (retry until the hibernation
+	// agent is ready — EC2 rejects hibernate too soon after boot).
 	sshExec(t, name, "echo WAKE_MARKER > /tmp/wake-test.txt")
-	spawn(t, "hibernate", name)
+	hibernateEventually(t, name, 5*time.Minute)
 	waitForState(t, name, "stopped", 4*time.Minute)
 	if st := instanceState(t, name); st != "stopped" {
 		t.Fatalf("precondition: instance state = %q, want stopped (hibernated) before connect", st)
