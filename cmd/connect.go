@@ -131,11 +131,16 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Build SSH command
+	// Build SSH command. ControlMaster=no / ControlPath=none keep spawn's SSH
+	// independent of the user's ~/.ssh/config connection multiplexing, so many
+	// concurrent `spawn connect` calls don't serialize on one shared control
+	// socket (#56).
 	sshArgs := []string{
 		"-i", keyPath,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
 		"-p", fmt.Sprintf("%d", connectPort),
 		fmt.Sprintf("%s@%s", user, instance.PublicIP),
 	}

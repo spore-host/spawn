@@ -17,6 +17,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -118,6 +119,20 @@ func spawnMayFail(t *testing.T, args ...string) (string, error) {
 	return string(out), err
 }
 
+// spawnStdout runs spawn and returns ONLY stdout (stderr discarded). Use this
+// for `-o json` calls: spawn writes progress/log noise (e.g. "Searching region
+// ...") to stderr, so CombinedOutput would prepend non-JSON text and break
+// json.Unmarshal — which silently stalled every waitForRunning/State poll (#56).
+func spawnStdout(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command(spawnBin(t), args...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	cmd.Env = os.Environ()
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	err := cmd.Run() // stderr goes to the child's /dev/null (not captured)
+	return stdout.String(), err
+}
+
 // ── Instance lifecycle helpers ────────────────────────────────────────────────
 
 // InstanceJSON is the minimal shape returned by spawn list --output json.
@@ -130,6 +145,14 @@ type InstanceJSON struct {
 	PublicIP     string            `json:"public_ip"`
 	Tags         map[string]string `json:"tags"`
 }
+
+// launchSem bounds how many `spawn launch` invocations run concurrently. With
+// ~22 t.Parallel() tests each launching, an unbounded burst overwhelms the
+// launch path and AWS API (a contributing factor in #56). Capping only the
+// launch burst — not go test -parallel — keeps the running/assertion phases
+// fully parallel while smoothing the launch storm. Cost control is unaffected
+// (TTL, reaper, t.Cleanup are untouched).
+var launchSem = make(chan struct{}, 6)
 
 // launchInstance launches a single t3.small test instance and registers cleanup.
 // Returns the launched InstanceJSON once the instance is running.
@@ -146,7 +169,10 @@ func launchInstance(t *testing.T, name string, extraArgs ...string) InstanceJSON
 	}
 	args = append(args, extraArgs...)
 
+	// Throttle the launch burst, then release before the (long) running phase.
+	launchSem <- struct{}{}
 	spawn(t, args...)
+	<-launchSem
 
 	// Register cleanup — terminate by name regardless of test outcome.
 	t.Cleanup(func() { terminateByName(t, name) })
@@ -159,7 +185,7 @@ func launchInstance(t *testing.T, name string, extraArgs ...string) InstanceJSON
 // is the only correct cleanup for an ephemeral test instance (#47).
 func terminateByName(t *testing.T, name string) {
 	t.Helper()
-	out, err := spawnMayFail(t, "list", "--output", "json")
+	out, err := spawnStdout(t, "list", "--output", "json")
 	if err != nil {
 		return
 	}
@@ -192,7 +218,7 @@ func waitForRunning(t *testing.T, name string, timeout time.Duration) InstanceJS
 	deadline := time.Now().Add(timeout)
 	var lastState string
 	for time.Now().Before(deadline) {
-		out, err := spawnMayFail(t, "list", "--region", testRegion, "--output", "json")
+		out, err := spawnStdout(t, "list", "--region", testRegion, "--output", "json")
 		if err == nil {
 			var instances []InstanceJSON
 			if json.Unmarshal([]byte(out), &instances) == nil {
@@ -225,7 +251,7 @@ func waitForState(t *testing.T, name, state string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		out, err := spawnMayFail(t, "list", "--region", testRegion, "--output", "json")
+		out, err := spawnStdout(t, "list", "--region", testRegion, "--output", "json")
 		if err == nil {
 			var instances []InstanceJSON
 			if json.Unmarshal([]byte(out), &instances) == nil {
@@ -250,7 +276,7 @@ func waitForState(t *testing.T, name, state string, timeout time.Duration) {
 // connect actually woke a stopped instance to running).
 func instanceState(t *testing.T, name string) string {
 	t.Helper()
-	out, err := spawnMayFail(t, "list", "--region", testRegion, "--output", "json")
+	out, err := spawnStdout(t, "list", "--region", testRegion, "--output", "json")
 	if err != nil {
 		return ""
 	}

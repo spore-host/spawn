@@ -1560,9 +1560,19 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	}
 	prog.Complete("Waiting for SSH")
 
-	// Step 11: Register DNS (if requested)
+	// Step 11: Register DNS (if requested).
+	//
+	// DNS registration is performed by SSHing into the instance, so it requires
+	// SSH to be confirmed ready. When --wait-for-ssh=false the caller explicitly
+	// declined to wait for SSH, so we cannot (and should not) register a record
+	// pointing at an instance whose reachability is unconfirmed — skip it rather
+	// than block on an SSH that may not yet be up (#56).
 	var dnsRecord string
-	if dnsName != "" {
+	if dnsName != "" && !waitForSSH {
+		fmt.Fprintf(os.Stderr, "ℹ️  Skipping DNS registration (--wait-for-ssh=false); register later with: spawn dns register %s %s\n",
+			result.InstanceID, dnsName)
+	}
+	if dnsName != "" && waitForSSH {
 		// Load DNS configuration with precedence
 		dnsConfig, err := spawnconfig.LoadDNSConfig(ctx, dnsDomain, dnsAPIEndpoint)
 		if err != nil {
@@ -2522,13 +2532,18 @@ curl -s -X POST %s \
 	sshKeyPath := plat.SSHKeyPath
 	username := plat.GetUsername()
 
-	// Build SSH command arguments
+	// Build SSH command arguments. ControlMaster=no / ControlPath=none ensure
+	// spawn's own SSH never piggybacks the user's ~/.ssh/config connection
+	// multiplexing — otherwise many concurrent launches/connects serialize on
+	// one shared control socket (#56).
 	sshArgs := []string{
 		"-i", sshKeyPath,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "ConnectTimeout=10",
 		"-o", "LogLevel=ERROR",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
 		fmt.Sprintf("%s@%s", username, publicIP),
 		sshScript,
 	}
