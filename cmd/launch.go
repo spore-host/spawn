@@ -2243,40 +2243,44 @@ EOFPARAMS
     chmod 644 /etc/profile.d/spawn-params.sh
 
     echo "✅ Parameter sweep environment configured (Index: $SWEEP_INDEX/$SWEEP_SIZE)"
+fi
 
-    # Execute workflow command if specified
-    WORKFLOW_COMMAND=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:command" \
-        --query 'Tags[0].Value' --output text 2>/dev/null || echo "None")
+# Execute the --command workload if specified. This runs for ANY instance
+# carrying a spawn:command tag, not just parameter-sweep instances. Previously
+# this block was nested inside the SWEEP_ID gate above, so a plain single
+# launch with --command silently never ran the command (#61).
+WORKFLOW_COMMAND=$(aws ec2 describe-tags --region $REGION \
+    --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:command" \
+    --query 'Tags[0].Value' --output text 2>/dev/null || echo "None")
 
-    if [ "$WORKFLOW_COMMAND" != "None" ] && [ -n "$WORKFLOW_COMMAND" ]; then
-        STEP_NAME=$(aws ec2 describe-tags --region $REGION \
-            --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:step" \
-            --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
+if [ "$WORKFLOW_COMMAND" != "None" ] && [ -n "$WORKFLOW_COMMAND" ]; then
+    STEP_NAME=$(aws ec2 describe-tags --region $REGION \
+        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:step" \
+        --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
 
-        if [ -n "$STEP_NAME" ]; then
-            echo "▶️  Executing workflow step: $STEP_NAME"
-        else
-            echo "▶️  Executing command from parameter sweep"
-        fi
+    if [ -n "$STEP_NAME" ]; then
+        echo "▶️  Executing workflow step: $STEP_NAME"
+    else
+        echo "▶️  Executing --command"
+    fi
 
-        # Source parameter environment before running command
-        source /etc/profile.d/spawn-params.sh
-
-        # Create command execution script
-        cat > /tmp/spawn-command.sh <<'EOFCMD'
+    # Create command execution script. Source the parameter-sweep env first if
+    # present (sweep instances), but don't require it (single instances).
+    cat > /tmp/spawn-command.sh <<'EOFCMD'
 #!/bin/bash
 set -e
+[ -f /etc/profile.d/spawn-params.sh ] && source /etc/profile.d/spawn-params.sh
 EOFCMD
-        echo "$WORKFLOW_COMMAND" >> /tmp/spawn-command.sh
-        chmod +x /tmp/spawn-command.sh
+    echo "$WORKFLOW_COMMAND" >> /tmp/spawn-command.sh
+    chmod +x /tmp/spawn-command.sh
 
-        # Execute command as local user in background
-        # Log output to both file and console
-        su - local -c '/tmp/spawn-command.sh' 2>&1 | tee /var/log/spawn-command.log &
+    # Execute command as the instance's primary user in the background.
+    # ($LOCAL_USERNAME is the user the bootstrap creates above; the previous
+    # hardcoded "local" user never exists, so the command silently failed — #61.)
+    # Log output to both file and console.
+    su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh' 2>&1 | tee /var/log/spawn-command.log &
 
-        echo "✅ Command execution started (logs: /var/log/spawn-command.log)"
-    fi
+    echo "✅ Command execution started (logs: /var/log/spawn-command.log)"
 fi
 
 # Create login banner (MOTD) with spore configuration

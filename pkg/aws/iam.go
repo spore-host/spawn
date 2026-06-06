@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,7 +13,78 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
+	smithy "github.com/aws/smithy-go"
 )
+
+// iamErrorCode returns the API error code for err, matching both the modeled
+// SDK error types and a generic smithy.APIError (which is what some emulators /
+// non-modeled responses surface). Falls back to substring matching on the
+// message as a last resort.
+func iamErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode()
+	}
+	return ""
+}
+
+// isAlreadyExists reports whether err is an IAM "entity already exists" error —
+// benign when multiple concurrent launches ensure the same shared role/profile
+// (#64). The instance-profile API also reports an already-attached role via
+// LimitExceededException (a profile holds at most one role), which is likewise
+// benign here.
+func isAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The SDK's modeled error codes drop the "Exception" suffix
+	// (EntityAlreadyExists, LimitExceeded) while some emulators keep it, so
+	// match on the prefix.
+	code := iamErrorCode(err)
+	if strings.HasPrefix(code, "EntityAlreadyExists") || strings.HasPrefix(code, "LimitExceeded") {
+		return true
+	}
+	// Fallback for non-modeled errors that only carry the code in the message.
+	msg := err.Error()
+	return strings.Contains(msg, "EntityAlreadyExists") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "already has a role")
+}
+
+// isThrottle reports whether err is a retryable IAM throttling error.
+func isThrottle(err error) bool {
+	if err == nil {
+		return false
+	}
+	code := iamErrorCode(err)
+	if strings.HasPrefix(code, "Throttling") || strings.HasPrefix(code, "RequestLimitExceeded") {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Throttling") || strings.Contains(msg, "RequestLimitExceeded")
+}
+
+// retryIAM runs fn, retrying on throttling with a short backoff. "Already
+// exists" is treated as success (the resource is present, which is the goal),
+// so concurrent launches racing to ensure the same shared role/profile converge
+// instead of failing (#64).
+func retryIAM(fn func() error) error {
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		err = fn()
+		if err == nil || isAlreadyExists(err) {
+			return nil
+		}
+		if !isThrottle(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+	}
+	return err
+}
 
 // IAMRoleConfig contains configuration for creating IAM roles
 type IAMRoleConfig struct {
@@ -308,19 +380,26 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 	}
 
 	if !profileExists {
-		// Create instance profile
-		_, err := iamClient.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
-			InstanceProfileName: aws.String(profileName),
-			Tags:                c.buildIAMTags(config.Tags),
+		// Create instance profile (idempotent under concurrency — #64).
+		err := retryIAM(func() error {
+			_, e := iamClient.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
+				InstanceProfileName: aws.String(profileName),
+				Tags:                c.buildIAMTags(config.Tags),
+			})
+			return e
 		})
 		if err != nil {
 			return "", fmt.Errorf("failed to create instance profile: %w", err)
 		}
 
-		// Attach role to profile
-		_, err = iamClient.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
-			InstanceProfileName: aws.String(profileName),
-			RoleName:            aws.String(roleName),
+		// Attach role to profile. If another launch already attached it, the
+		// API reports LimitExceeded (a profile holds one role) — benign here.
+		err = retryIAM(func() error {
+			_, e := iamClient.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
+				InstanceProfileName: aws.String(profileName),
+				RoleName:            aws.String(roleName),
+			})
+			return e
 		})
 		if err != nil {
 			return "", fmt.Errorf("failed to attach role to instance profile: %w", err)
@@ -381,12 +460,16 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 		return fmt.Errorf("failed to marshal trust policy: %w", err)
 	}
 
-	// Create role
-	_, err = iamClient.CreateRole(ctx, &iam.CreateRoleInput{
-		RoleName:                 aws.String(roleName),
-		AssumeRolePolicyDocument: aws.String(string(trustPolicyJSON)),
-		Description:              aws.String("Created by spawn for EC2 instance access"),
-		Tags:                     c.buildIAMTags(config.Tags),
+	// Create role. Idempotent under concurrency: if another launch already
+	// created the shared role, EntityAlreadyExists is treated as success (#64).
+	err = retryIAM(func() error {
+		_, e := iamClient.CreateRole(ctx, &iam.CreateRoleInput{
+			RoleName:                 aws.String(roleName),
+			AssumeRolePolicyDocument: aws.String(string(trustPolicyJSON)),
+			Description:              aws.String("Created by spawn for EC2 instance access"),
+			Tags:                     c.buildIAMTags(config.Tags),
+		})
+		return e
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create role: %w", err)
