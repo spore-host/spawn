@@ -152,7 +152,12 @@ type InstanceJSON struct {
 // launch burst — not go test -parallel — keeps the running/assertion phases
 // fully parallel while smoothing the launch storm. Cost control is unaffected
 // (TTL, reaper, t.Cleanup are untouched).
-var launchSem = make(chan struct{}, 6)
+//
+// Cap is 1 (serialize launches) because concurrent launches race on the shared
+// spored-instance-role IAM setup and fail (#64); the running/assertion phases
+// after each launch still overlap. Raise once #64 makes IAM setup
+// concurrency-safe.
+var launchSem = make(chan struct{}, 1)
 
 // launchInstance launches a single t3.small test instance and registers cleanup.
 // Returns the launched InstanceJSON once the instance is running.

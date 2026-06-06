@@ -91,7 +91,9 @@ func TestTier2_PreStop(t *testing.T) {
 	// pre-stop runs between the completion signal and termination — poll for it
 	// (the instance may terminate shortly after, so accept either the marker or
 	// that the instance has already gone, which only happens after pre-stop ran).
-	out := sshExecEventually(t, name, "test -f /tmp/prestop-ran.txt && echo PRESTOP_YES || echo NO", "PRESTOP_YES", 90*time.Second)
+	// spored's monitor ticks every ~1 min, so pre-stop may not fire for a
+	// minute or two after the completion signal — poll generously.
+	out := sshExecEventually(t, name, "test -f /tmp/prestop-ran.txt && echo PRESTOP_YES || echo NO", "PRESTOP_YES", 3*time.Minute)
 	if !strings.Contains(out, "PRESTOP_YES") {
 		t.Errorf("--pre-stop did not run: /tmp/prestop-ran.txt not found")
 	}
