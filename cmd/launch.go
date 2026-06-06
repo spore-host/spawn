@@ -2385,7 +2385,9 @@ TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 NoNewPrivileges=true
-PrivateTmp=true
+# Do NOT set PrivateTmp=true: spored must see the host /tmp/SPAWN_COMPLETE
+# completion file written by users / spawn connect / nf-spawn. PrivateTmp
+# isolates the daemon's /tmp and silently breaks --on-complete/--pre-stop (#66).
 
 [Install]
 WantedBy=multi-user.target

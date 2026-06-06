@@ -57,6 +57,10 @@ type Agent struct {
 	dcvTokensMu        sync.Mutex
 	dcvReadyURLWritten bool
 	ttlWarned          bool // send ttl_warning notification only once
+
+	// monitorInterval is the lifecycle ticker period. Zero means the production
+	// default (1 minute); tests set it small to exercise the loop quickly.
+	monitorInterval time.Duration
 }
 
 func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
@@ -217,30 +221,22 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 }
 
 func (a *Agent) Monitor(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Minute)
+	interval := a.monitorInterval
+	if interval <= 0 {
+		interval = 1 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	log.Printf("Monitoring started")
 
-	// Dedicated spot interruption monitor: polls every 5s independent of the
-	// main 1-minute lifecycle ticker, ensuring we detect the 2-minute AWS
-	// warning with maximum lead time.
-	if a.provider.IsSpotInstance(ctx) {
-		go func() {
-			spotTicker := time.NewTicker(5 * time.Second)
-			defer spotTicker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-spotTicker.C:
-					if a.checkSpotInterruption(ctx) {
-						return
-					}
-				}
-			}
-		}()
-	}
+	// Spot-interruption monitoring runs in its own goroutine and must NEVER gate
+	// the main lifecycle ticker below. Spot detection (IsSpotInstance) makes a
+	// blocking IMDS call; if that ever stalls, gating the ticker on it silently
+	// kills TTL/idle/on-complete/pre-stop enforcement — i.e. instances run
+	// forever (#65). So we start the lifecycle loop unconditionally and do the
+	// spot decision off the critical path.
+	go a.monitorSpotInterruptions(ctx)
 
 	for {
 		select {
@@ -254,7 +250,35 @@ func (a *Agent) Monitor(ctx context.Context) {
 	}
 }
 
+// monitorSpotInterruptions polls for the 2-minute Spot interruption notice
+// every 5s (independent of the 1-minute lifecycle ticker, for maximum lead
+// time). It first determines whether this is even a Spot instance; on-demand
+// instances return early. Runs in its own goroutine so neither the spot-type
+// detection nor the polling can block the main lifecycle loop (#65).
+func (a *Agent) monitorSpotInterruptions(ctx context.Context) {
+	if !a.provider.IsSpotInstance(ctx) {
+		return
+	}
+	spotTicker := time.NewTicker(5 * time.Second)
+	defer spotTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-spotTicker.C:
+			if a.checkSpotInterruption(ctx) {
+				return
+			}
+		}
+	}
+}
+
 func (a *Agent) checkAndAct(ctx context.Context) {
+	// Heartbeat: a single line per tick so "Monitoring started" followed by
+	// silence is immediately diagnosable from spored.log without a live repro
+	// (the failure mode in #65, where the loop never ran at all).
+	log.Printf("monitor tick %d", configRefreshTick+1)
+
 	// 0. Periodically refresh config from EC2 tags (every 5 ticks = 5 min).
 	// EC2 tag API has eventual consistency — tags set at launch may not be
 	// visible within the seconds before spored starts. Refreshing here ensures

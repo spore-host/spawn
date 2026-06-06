@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -259,11 +260,17 @@ func (p *EC2Provider) DiscoverPeers(ctx context.Context, jobArrayID string) ([]P
 }
 
 func (p *EC2Provider) IsSpotInstance(ctx context.Context) bool {
+	// Bound the IMDS call: a hung metadata endpoint must never block the caller.
+	// spored calls this on the monitor's startup path, so an unbounded stall here
+	// would silently kill TTL/idle/on-complete/pre-stop enforcement (#65).
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	result, err := p.imdsClient.GetMetadata(ctx, &imds.GetMetadataInput{
 		Path: "instance-life-cycle",
 	})
 	if err != nil {
-		return false
+		return false // assume on-demand if we can't tell
 	}
 
 	body, err := io.ReadAll(result.Content)
@@ -276,6 +283,10 @@ func (p *EC2Provider) IsSpotInstance(ctx context.Context) bool {
 }
 
 func (p *EC2Provider) CheckSpotInterruption(ctx context.Context) (*InterruptionInfo, error) {
+	// Bound the IMDS call so a hung endpoint can't stall the spot-monitor goroutine (#65).
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	result, err := p.imdsClient.GetMetadata(ctx, &imds.GetMetadataInput{
 		Path: "spot/instance-action",
 	})
@@ -283,6 +294,11 @@ func (p *EC2Provider) CheckSpotInterruption(ctx context.Context) (*InterruptionI
 	if err != nil {
 		// 404 means no interruption notice
 		if strings.Contains(err.Error(), "404") {
+			return nil, nil
+		}
+		// A timeout/cancellation is "couldn't tell" — treat as no interruption
+		// rather than erroring, so the 5s poll loop doesn't log-spam (#65).
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return nil, nil
 		}
 		return nil, err
