@@ -65,12 +65,25 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Resolve instance (by ID or name)
 	instance, err := resolveInstance(ctx, client, instanceIdentifier)
 	if err != nil {
+		// In --check-complete mode, "can't reach the instance yet" is exit 3
+		// (error/unknown), NOT a generic exit 1 — exit 1 means "task failed".
+		// A just-launched instance fails to resolve for ~1s (EC2 eventual
+		// consistency, InvalidInstanceID.NotFound); callers polling for
+		// completion must keep polling, not conclude failure (#31).
+		if statusCheckComplete {
+			fmt.Fprintf(os.Stderr, "status: %v\n", err)
+			os.Exit(3)
+		}
 		return err
 	}
 
 	// Find SSH key
 	keyPath, err := findSSHKey(instance.KeyName)
 	if err != nil {
+		if statusCheckComplete {
+			fmt.Fprintf(os.Stderr, "status: %v\n", err)
+			os.Exit(3)
+		}
 		return fmt.Errorf("failed to find SSH key: %w", err)
 	}
 

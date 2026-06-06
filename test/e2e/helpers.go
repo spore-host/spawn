@@ -153,11 +153,11 @@ type InstanceJSON struct {
 // fully parallel while smoothing the launch storm. Cost control is unaffected
 // (TTL, reaper, t.Cleanup are untouched).
 //
-// Cap is 1 (serialize launches) because concurrent launches race on the shared
-// spored-instance-role IAM setup and fail (#64); the running/assertion phases
-// after each launch still overlap. Raise once #64 makes IAM setup
-// concurrency-safe.
-var launchSem = make(chan struct{}, 1)
+// Cap is 4: IAM role/profile setup is now idempotent + concurrency-safe (#64),
+// so concurrent launches converge instead of racing. Bounding the burst (rather
+// than unbounded ~22) keeps AWS API pressure reasonable; running/assertion
+// phases stay fully parallel.
+var launchSem = make(chan struct{}, 4)
 
 // launchInstance launches a single t3.small test instance and registers cleanup.
 // Returns the launched InstanceJSON once the instance is running.

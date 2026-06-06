@@ -77,29 +77,38 @@ func TestTier2_OnComplete(t *testing.T) {
 func TestTier2_PreStop(t *testing.T) {
 	t.Parallel()
 	name := "e2e-prestop-" + runID(t)
+	// Use --on-complete stop (not terminate) so the instance SURVIVES after the
+	// pre-stop hook runs — otherwise it terminates ~seconds after pre-stop and
+	// the test can't SSH back in to verify the marker. pre-stop runs on stop too
+	// (agent.stop() → runPreStop).
+	//
+	// The marker MUST go to /var/tmp, not /tmp: the stop/start cycle is a reboot,
+	// and /tmp is wiped on boot (systemd-tmpfiles on AL2023). /var/tmp persists
+	// across reboot, so a marker written there before stop is still present after
+	// start — otherwise even a perfectly-working pre-stop would false-negative.
 	launchInstance(t, name,
-		"--on-complete", "terminate",
+		"--on-complete", "stop",
 		"--completion-delay", "5s",
-		"--pre-stop", "touch /tmp/prestop-ran.txt",
+		"--pre-stop", "touch /var/tmp/prestop-ran.txt",
 		"--pre-stop-timeout", "30s",
 	)
 
-	// Wait until spored is up and accepting the completion signal, then trigger it.
+	// Wait until spored is up, then signal completion.
 	sshExecEventually(t, name, "sudo systemctl is-active spored 2>/dev/null || echo waiting", "active", 4*time.Minute)
 	sshExec(t, name, "touch /tmp/SPAWN_COMPLETE")
 
-	// pre-stop runs between the completion signal and termination — poll for it
-	// (the instance may terminate shortly after, so accept either the marker or
-	// that the instance has already gone, which only happens after pre-stop ran).
-	// spored's monitor ticks every ~1 min, so pre-stop may not fire for a
-	// minute or two after the completion signal — poll generously.
-	out := sshExecEventually(t, name, "test -f /tmp/prestop-ran.txt && echo PRESTOP_YES || echo NO", "PRESTOP_YES", 3*time.Minute)
-	if !strings.Contains(out, "PRESTOP_YES") {
-		t.Errorf("--pre-stop did not run: /tmp/prestop-ran.txt not found")
-	}
+	// Completion → grace delay → pre-stop → stop. Wait for the instance to
+	// actually stop (proves the whole path ran), then start it back up and
+	// verify pre-stop wrote its (reboot-persistent) marker before the stop.
+	waitForState(t, name, "stopped", 4*time.Minute)
+	spawn(t, "start", name)
+	waitForState(t, name, "running", 4*time.Minute)
 
-	waitForState(t, name, "terminated", 2*time.Minute)
-	t.Log("--pre-stop ran before termination")
+	out := sshExecEventually(t, name, "test -f /var/tmp/prestop-ran.txt && echo PRESTOP_YES || echo NO", "PRESTOP_YES", 3*time.Minute)
+	if !strings.Contains(out, "PRESTOP_YES") {
+		t.Errorf("--pre-stop did not run: /var/tmp/prestop-ran.txt not found after stop/start")
+	}
+	t.Log("--pre-stop ran before stop")
 }
 
 // TestTier2_ExtendTTL verifies spawn extend pushes the TTL deadline.
