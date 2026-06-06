@@ -19,3 +19,6 @@ lambda/scheduler-handler/scheduler-handler
 lambda/spore-bot/spore-bot
 lambda/spore-bot/prism-bot
 lambda/sweep-orchestrator/sweep-orchestrator
+
+# Build artifacts
+bin/

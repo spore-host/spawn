@@ -104,7 +104,10 @@ StandardError=journal
 
 # Security hardening
 NoNewPrivileges=true
-PrivateTmp=true
+# NOTE: do NOT set PrivateTmp=true. spored watches the host-side completion
+# file (default /tmp/SPAWN_COMPLETE) written by users, `spawn connect`, and
+# nf-spawn. PrivateTmp gives the daemon an isolated /tmp where it can never
+# see that file, silently disabling --on-complete and --pre-stop (#66).
 
 [Install]
 WantedBy=multi-user.target

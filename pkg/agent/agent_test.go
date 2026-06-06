@@ -1,9 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,7 +27,7 @@ func (s *stubProvider) GetIdentity(_ context.Context) (*provider.Identity, error
 func (s *stubProvider) GetConfig(_ context.Context) (*provider.Config, error) {
 	return s.config, nil
 }
-func (s *stubProvider) RefreshConfig(_ context.Context) error { return nil }
+func (s *stubProvider) RefreshConfig(_ context.Context) error       { return nil }
 func (s *stubProvider) Terminate(_ context.Context, _ string) error { return nil }
 func (s *stubProvider) Stop(_ context.Context, _ string) error      { return nil }
 func (s *stubProvider) Hibernate(_ context.Context) error           { return nil }
@@ -279,4 +283,95 @@ func TestDCVIdleSource_ActiveClients(t *testing.T) {
 	if a.IsIdle() {
 		t.Error("IsIdle() = true when DCV has 2 active clients, want false")
 	}
+}
+
+// blockingSpotProvider is a stubProvider whose IsSpotInstance never returns,
+// reproducing the #65 failure mode: a hung IMDS spot-type check. The monitor
+// must NOT let this gate its lifecycle ticker.
+type blockingSpotProvider struct {
+	stubProvider
+	entered chan struct{} // closed once IsSpotInstance has been called
+	once    sync.Once
+}
+
+func (b *blockingSpotProvider) IsSpotInstance(ctx context.Context) bool {
+	b.once.Do(func() { close(b.entered) })
+	<-ctx.Done() // block until the monitor's context is cancelled
+	return false
+}
+
+// TestMonitor_SpotDetectionDoesNotGateTicker is the regression test for #65.
+// Before the fix, Monitor called IsSpotInstance synchronously before entering
+// the lifecycle ticker loop; a blocking IMDS call there meant the loop (and
+// thus TTL / idle / on-complete / pre-stop enforcement) never ran at all, so
+// instances ran forever. This asserts the ticker fires even while
+// IsSpotInstance is blocked.
+func TestMonitor_SpotDetectionDoesNotGateTicker(t *testing.T) {
+	// Capture log output so we can detect the per-tick heartbeat.
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prevOut := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&syncWriter{w: &buf, mu: &mu})
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	identity := &provider.Identity{InstanceID: "i-block", Region: "us-east-1", Provider: "stub"}
+	cfg := &provider.Config{} // no TTL/idle/on-complete → checkAndAct just heartbeats
+	bp := &blockingSpotProvider{
+		stubProvider: stubProvider{identity: identity, config: cfg, spot: true},
+		entered:      make(chan struct{}),
+	}
+	a := &Agent{
+		provider:         bp,
+		identity:         identity,
+		config:           cfg,
+		startTime:        time.Now(),
+		lastActivityTime: time.Now(),
+		monitorInterval:  10 * time.Millisecond, // fast ticker for the test
+		// Push tag-write throttles into the future so checkAndAct skips its
+		// (real-AWS) CreateTags calls and the test stays hermetic.
+		lastSessionTagWrite: time.Now().Add(time.Hour),
+		lastComputeTagWrite: time.Now().Add(time.Hour),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.Monitor(ctx)
+
+	// Confirm the spot check really is blocking (the #65 hazard is present)...
+	select {
+	case <-bp.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("IsSpotInstance was never called")
+	}
+
+	// ...yet the lifecycle ticker still fires. Poll the captured log for the
+	// heartbeat written at the top of checkAndAct.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := buf.String()
+		mu.Unlock()
+		if strings.Contains(got, "monitor tick") {
+			return // success: the loop ran despite the blocked spot check
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("monitor ticker never fired while IsSpotInstance was blocked (#65 regression)")
+}
+
+// syncWriter serializes writes to an underlying buffer for concurrent log use.
+type syncWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
