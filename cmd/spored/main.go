@@ -97,8 +97,8 @@ func main() {
 
 // runDaemon is the lifecycle-monitoring daemon (the bare `spored` invocation).
 func runDaemon() {
-	// Setup logging
-	logFile, err := os.OpenFile("/var/log/spored.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	// Setup logging (platform-specific path: /var/log on Unix, %PROGRAMDATA% on Windows).
+	logFile, err := os.OpenFile(sporedLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Printf("Warning: Could not open log file: %v", err)
 		log.SetOutput(os.Stderr)

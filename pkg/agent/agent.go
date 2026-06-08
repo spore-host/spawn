@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -405,82 +406,24 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	}
 }
 
-// countActivePortConnections checks /proc/net/tcp for ESTABLISHED connections
-// on the given ports. Used to detect browser-based app users (RStudio, Jupyter)
-// that don't appear in `who` because they connect via HTTP, not SSH.
-func countActivePortConnections(ports []int) int {
-	if len(ports) == 0 {
-		return 0
-	}
-	portSet := make(map[int]bool, len(ports))
-	for _, p := range ports {
-		portSet[p] = true
-	}
+// Sentinels for the OS CPU-times reader (sysReadCPUTimes).
+var (
+	errEmptyProcStat = fmt.Errorf("empty cpu stat")
+	errBadProcStat   = fmt.Errorf("unexpected cpu stat format")
+)
 
-	data, err := os.ReadFile("/proc/net/tcp")
-	if err != nil {
-		return 0
-	}
-	count := 0
-	for _, line := range strings.Split(string(data), "\n")[1:] {
-		fields := strings.Fields(line)
-		if len(fields) < 4 || fields[3] != "01" { // 01 = ESTABLISHED
-			continue
-		}
-		// local_address is hex ip:port e.g. "0F02000A:2253"
-		parts := strings.SplitN(fields[1], ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		port64, err := strconv.ParseInt(parts[1], 16, 32)
-		if err != nil {
-			continue
-		}
-		if portSet[int(port64)] {
-			count++
-		}
-	}
-	return count
+// countActivePortConnections counts ESTABLISHED connections on the given ports —
+// detects browser-based app users (RStudio, Jupyter) that don't appear in the
+// session list because they connect via HTTP, not SSH. OS-specific source.
+func countActivePortConnections(ports []int) int {
+	return sysCountActivePortConnections(ports)
 }
 
-// countActiveSessions returns the number of login sessions with recent keyboard activity.
-// Uses `w -h -s` (no header, short format) and checks the IDLE column.
-// A session must have had input within the last 5 minutes to count as active.
-// This prevents idle SSH connections (e.g. an admin checking in) from blocking
-// idle detection — only sessions where someone is actively typing count.
+// countActiveSessions returns the number of login sessions with recent keyboard
+// activity (input within the last 5 minutes), so idle SSH/RDP connections don't
+// block idle detection. OS-specific source.
 func countActiveSessions() int {
-	out, err := exec.Command("w", "-h", "-s").Output()
-	if err != nil {
-		// Fall back to who if w is not available
-		who, werr := exec.Command("who").Output()
-		if werr != nil {
-			return 0
-		}
-		count := 0
-		for _, line := range strings.Split(strings.TrimSpace(string(who)), "\n") {
-			if strings.TrimSpace(line) != "" {
-				count++
-			}
-		}
-		return count
-	}
-	active := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		// w -s output: USER TTY FROM IDLE WHAT
-		// IDLE format: Xdays, HH:MMm, MM:SS, or Xs (seconds)
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		idle := fields[3]
-		if isRecentActivity(idle, 5*time.Minute) {
-			active++
-		}
-	}
-	return active
+	return sysCountActiveSessions()
 }
 
 // isRecentActivity returns true if the idle duration string from `w` is less than maxIdle.
@@ -535,11 +478,11 @@ func isRecentActivity(idle string, maxIdle time.Duration) bool {
 	return true
 }
 
-// findActiveProcess returns the first configured process name that is currently running,
-// or "" if none are found. Uses pgrep for portable process lookup.
+// findActiveProcess returns the first configured process name that is currently
+// running, or "" if none are found. OS-specific source.
 func (a *Agent) findActiveProcess() string {
 	for _, name := range a.config.ActiveProcesses {
-		if err := exec.Command("pgrep", "-x", name).Run(); err == nil {
+		if sysIsProcessRunning(name) {
 			return name
 		}
 	}
@@ -910,7 +853,7 @@ func (a *Agent) isIdle() bool {
 }
 
 func (a *Agent) getCPUUsage() float64 {
-	idle, total, err := readProcStatCPU()
+	idle, total, err := sysReadCPUTimes()
 	if err != nil {
 		return 100.0 // Assume active if can't read
 	}
@@ -931,46 +874,12 @@ func (a *Agent) getCPUUsage() float64 {
 	return 100.0 - (float64(deltaIdle)/float64(deltaTotal))*100.0
 }
 
-func readProcStatCPU() (idle, total int64, err error) {
-	data, err := os.ReadFile("/proc/stat")
-	if err != nil {
-		return 0, 0, err
-	}
-	lines := strings.Split(string(data), "\n")
-	if len(lines) == 0 {
-		return 0, 0, fmt.Errorf("empty /proc/stat")
-	}
-	fields := strings.Fields(lines[0])
-	if len(fields) < 5 || fields[0] != "cpu" {
-		return 0, 0, fmt.Errorf("unexpected /proc/stat format")
-	}
-	// fields: cpu user nice system idle iowait irq softirq ...
-	idleVal, _ := strconv.ParseInt(fields[4], 10, 64)
-	var totalVal int64
-	for _, f := range fields[1:] {
-		v, _ := strconv.ParseInt(f, 10, 64)
-		totalVal += v
-	}
-	return idleVal, totalVal, nil
-}
-
 func (a *Agent) getNetworkBytes() int64 {
-	// Read /proc/net/dev — compute delta since last call, not cumulative since boot.
-	data, err := os.ReadFile("/proc/net/dev")
-	if err != nil {
-		return 1000000 // Assume active if can't read
-	}
-	var rx, tx int64
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, "eth0") || strings.Contains(line, "ens") {
-			fields := strings.Fields(line)
-			if len(fields) >= 10 {
-				r, _ := strconv.ParseInt(fields[1], 10, 64)
-				t, _ := strconv.ParseInt(fields[9], 10, 64)
-				rx += r
-				tx += t
-			}
-		}
+	// OS-specific cumulative counters; compute delta since last call rather than
+	// cumulative-since-boot. A negative reading means "unknown" → assume active.
+	rx, tx := sysReadNetworkBytes()
+	if rx < 0 || tx < 0 {
+		return 1000000 // can't read; assume active
 	}
 	prevRx, prevTx := a.prevNetRx, a.prevNetTx
 	a.prevNetRx, a.prevNetTx = rx, tx
@@ -981,42 +890,7 @@ func (a *Agent) getNetworkBytes() int64 {
 }
 
 func (a *Agent) getDiskIO() int64 {
-	// Read /proc/diskstats
-	// Format: major minor name reads ... sectors_read ... writes ... sectors_written ...
-	data, err := os.ReadFile("/proc/diskstats")
-	if err != nil {
-		return 0 // Assume no activity if can't read
-	}
-
-	lines := strings.Split(string(data), "\n")
-	var totalSectors int64
-
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) < 14 {
-			continue
-		}
-
-		// Check for main block devices (skip partitions)
-		deviceName := fields[2]
-		if strings.HasPrefix(deviceName, "xvd") || strings.HasPrefix(deviceName, "nvme") ||
-			strings.HasPrefix(deviceName, "sd") || strings.HasPrefix(deviceName, "vd") {
-			// Skip partition numbers (xvda1, nvme0n1p1, etc.)
-			if len(deviceName) > 4 && deviceName[len(deviceName)-1] >= '0' && deviceName[len(deviceName)-1] <= '9' {
-				// Check if it's a partition (has digit at end)
-				continue
-			}
-
-			// Fields: 0=major 1=minor 2=name 3=reads 4=reads_merged 5=sectors_read
-			// 6=time_reading 7=writes 8=writes_merged 9=sectors_written 10=time_writing
-			sectorsRead, _ := strconv.ParseInt(fields[5], 10, 64)
-			sectorsWritten, _ := strconv.ParseInt(fields[9], 10, 64)
-			totalSectors += sectorsRead + sectorsWritten
-		}
-	}
-
-	// Convert sectors to bytes (typically 512 bytes per sector)
-	return totalSectors * 512
+	return sysReadDiskIOBytes()
 }
 
 func (a *Agent) getGPUUtilization() float64 {
@@ -1072,61 +946,11 @@ func (a *Agent) hasLoggedInUsers() bool {
 }
 
 func (a *Agent) hasRecentUserActivity() bool {
-	// Check for recent activity in wtmp (last 5 minutes)
-	// Use 'last -s -5min' to check recent logins
-	cmd := exec.Command("last", "-s", "-5min", "-w")
-	output, err := cmd.Output()
-	if err != nil {
-		// If 'last' fails, check /var/log/wtmp modification time
-		fileInfo, err := os.Stat("/var/log/wtmp")
-		if err != nil {
-			return false
-		}
-		// If modified in last 5 minutes, there was activity
-		return time.Since(fileInfo.ModTime()) < 5*time.Minute
-	}
-
-	// Parse output - if there are login entries, there was recent activity
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	// Skip header lines and empty lines
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "wtmp") && !strings.HasPrefix(line, "reboot") {
-			// Check if it's a user login line (not system events)
-			if !strings.Contains(line, "system boot") && !strings.Contains(line, "down") {
-				return true
-			}
-		}
-	}
-
-	return false
+	return sysHasRecentUserActivity()
 }
 
 func (a *Agent) hasActiveTerminals() bool {
-	// Check for active pseudo-terminals in /dev/pts/
-	// This detects interactive SSH sessions or other terminal sessions
-	entries, err := os.ReadDir("/dev/pts")
-	if err != nil {
-		return false
-	}
-
-	// Count active PTYs (exclude ptmx which is the multiplexer)
-	activeCount := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		// Skip ptmx (the master pseudo-terminal multiplexer)
-		if name == "ptmx" {
-			continue
-		}
-
-		// Check if it's a number (active PTY)
-		if _, err := strconv.Atoi(name); err == nil {
-			activeCount++
-		}
-	}
-
-	// If there are active PTYs, terminals are present
-	return activeCount > 0
+	return sysHasActiveTerminals()
 }
 
 func (a *Agent) checkSpotInterruption(ctx context.Context) bool {
@@ -1178,8 +1002,8 @@ func (a *Agent) sendSpotInterruptionNotification(action, interruptTime string) {
 	// Log to spored logs (always)
 	log.Printf("📢 NOTIFICATION: Spot interruption detected - action=%s time=%s", action, interruptTime)
 
-	// Write to a file that can be picked up by external systems
-	notificationFile := "/tmp/spawn-spot-interruption.json"
+	// Write to a file that can be picked up by external systems (OS temp dir).
+	notificationFile := filepath.Join(os.TempDir(), "spawn-spot-interruption.json")
 	notification := fmt.Sprintf(`{
   "event": "spot-interruption",
   "instance_id": "%s",
@@ -1197,12 +1021,11 @@ func (a *Agent) sendSpotInterruptionNotification(action, interruptTime string) {
 }
 
 func (a *Agent) warnUsers(message string) {
-	// Write to all logged-in terminals
-	cmd := exec.Command("wall", message)
-	_ = cmd.Run()
+	// Broadcast to logged-in sessions (OS-specific: wall on Linux, msg on Windows).
+	sysWarnUsers(message)
 
-	// Also write to a warning file
-	_ = os.WriteFile("/tmp/SPAWN_WARNING", []byte(message+"\n"), 0600) // nosemgrep: go.lang.security.bad_tmp.bad-tmp-file-creation
+	// Also write a warning file in the OS temp dir for external pickup.
+	_ = os.WriteFile(filepath.Join(os.TempDir(), "SPAWN_WARNING"), []byte(message+"\n"), 0600) // nosemgrep: go.lang.security.bad_tmp.bad-tmp-file-creation
 
 	log.Printf("Warning sent to users: %s", message)
 }
@@ -1377,7 +1200,7 @@ func (a *Agent) runPreStop(spotMode bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", a.config.PreStop) // nosemgrep: dangerous-exec-command -- user-configured pre-stop hook runs on their own instance
+	cmd := sysShellCommand(ctx, a.config.PreStop)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
