@@ -106,6 +106,13 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		})
 	}
 
+	// Windows: no SSH-user/key model — fetch+decrypt the Administrator password,
+	// print RDP instructions, then open an SSM session (or run a one-shot command
+	// via SSM). Triggered by the spawn:os tag written at launch.
+	if instance.Tags["spawn:os"] == "windows" {
+		return connectWindows(ctx, client, instance, args[1:])
+	}
+
 	// Use Session Manager if requested or if no public IP
 	if connectSessionMgr || instance.PublicIP == "" {
 		return connectViaSessionManager(instance.InstanceID, instance.Region)
@@ -194,6 +201,78 @@ func connectViaSessionManager(instanceID, region string) error {
 	}
 
 	return nil
+}
+
+// connectWindows handles `spawn connect` for Windows instances. There is no
+// spored/SSH-user model on Windows yet (#77): the credential is the Administrator
+// password (decrypted from GetPasswordData with the RSA launch key), and the
+// transport is SSM. It prints RDP instructions + the password, then either opens
+// an interactive SSM PowerShell session or, for a one-shot `connect -- <cmd>`,
+// runs the command via SSM RunCommand.
+func connectWindows(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, command []string) error {
+	region := instance.Region
+	id := instance.InstanceID
+
+	// One-shot command mode → SSM RunCommand (PowerShell).
+	if len(command) > 0 {
+		ps := strings.Join(command, " ")
+		fmt.Fprintf(os.Stderr, "Running on %s via SSM (PowerShell)...\n", instance.Name)
+		res, err := client.RunPowerShell(ctx, region, id, ps, 5*time.Minute)
+		if err != nil {
+			return fmt.Errorf("ssm run-command: %w", err)
+		}
+		if res.Stdout != "" {
+			fmt.Print(res.Stdout)
+		}
+		if res.Stderr != "" {
+			fmt.Fprint(os.Stderr, res.Stderr)
+		}
+		if res.Status != "Success" {
+			return fmt.Errorf("remote command status: %s", res.Status)
+		}
+		return nil
+	}
+
+	// Interactive: fetch + decrypt the Administrator password, print RDP info,
+	// then drop into an SSM PowerShell session.
+	fmt.Fprintf(os.Stderr, "Retrieving Windows Administrator password (this can take a few minutes after launch)...\n")
+	blob, err := client.WaitForPasswordData(ctx, region, id, 10*time.Minute)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s could not get password data: %v\n", i18n.Symbol("warning"), err)
+	} else {
+		password := ""
+		keyPath, rerr := findSSHKey(instance.KeyName)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "%s could not locate the launch key %q to decrypt the password: %v\n",
+				i18n.Symbol("warning"), instance.KeyName, rerr)
+		} else if pw, derr := aws.DecryptWindowsPassword(blob, keyPath); derr != nil {
+			fmt.Fprintf(os.Stderr, "%s could not decrypt the Administrator password (need the RSA launch key): %v\n",
+				i18n.Symbol("warning"), derr)
+		} else {
+			password = pw
+		}
+
+		fmt.Println()
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Printf("  Windows instance %s\n", instance.Name)
+		fmt.Printf("  Administrator user:  Administrator\n")
+		if password != "" {
+			fmt.Printf("  Administrator pass:  %s\n", password)
+		}
+		if instance.PublicIP != "" {
+			fmt.Printf("  RDP:                 mstsc /v:%s   (or any RDP client → %s:3389)\n", instance.PublicIP, instance.PublicIP)
+		} else {
+			fmt.Printf("  RDP:                 no public IP — use SSM port forwarding:\n")
+			fmt.Printf("                       aws ssm start-session --target %s --region %s \\\n", id, region)
+			fmt.Printf("                         --document-name AWS-StartPortForwardingSession \\\n")
+			fmt.Printf("                         --parameters portNumber=3389,localPortNumber=13389\n")
+		}
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println()
+	}
+
+	fmt.Fprintf(os.Stderr, "Opening an SSM PowerShell session (Ctrl-D to exit)...\n\n")
+	return connectViaSessionManager(id, region)
 }
 
 // findSSHKey resolves a usable private key for an EC2 key name. It delegates to

@@ -188,6 +188,12 @@ type LaunchConfig struct {
 	// Metadata
 	Name string
 	Tags map[string]string
+
+	// TargetOS is the operating system of the instance ("windows" or "linux";
+	// "" = treated as linux). Set at launch from --os or AMI auto-detection
+	// (IsWindowsAMI) and written as the spawn:os tag so connect and the
+	// server-side reaper can branch on it without re-describing the AMI.
+	TargetOS string
 }
 
 // LaunchResult contains information about the launched instance returned by [Client.Launch].
@@ -414,6 +420,13 @@ func buildTags(config LaunchConfig, accountID string, userARN string) []types.Ta
 	// Record the absolute launch time once — survives stop/wake cycles.
 	launchTime := time.Now().UTC().Format(time.RFC3339)
 	tags = append(tags, types.Tag{Key: aws.String("spawn:launch-time"), Value: aws.String(launchTime)})
+
+	// Target OS — lets `spawn connect` choose the Windows (SSM + password) vs
+	// Linux (SSH) path without re-describing the AMI, and documents the OS for
+	// the reaper/dashboard.
+	if config.TargetOS != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:os"), Value: aws.String(config.TargetOS)})
+	}
 
 	if config.TTL != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:ttl"), Value: aws.String(config.TTL)})
