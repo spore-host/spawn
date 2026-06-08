@@ -236,7 +236,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 
 	// Setup SSH key
 	if firstConfig.KeyName == "" {
-		keyName, err := setupSSHKey(ctx, awsClient, firstConfig.Region, plat)
+		keyName, err := setupSSHKey(ctx, awsClient, firstConfig.Region, firstConfig.AMI, plat)
 		if err != nil {
 			return fmt.Errorf("failed to setup SSH key: %w", err)
 		}
