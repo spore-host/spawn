@@ -51,6 +51,7 @@ var (
 	region       string
 	az           string
 	ami          string
+	osFlag       string
 
 	// Network (empty = auto-create)
 	vpcID    string
@@ -205,6 +206,7 @@ func init() {
 	launchCmd.Flags().StringVar(&region, "region", "", "AWS region")
 	launchCmd.Flags().StringVar(&az, "az", "", "Availability zone")
 	launchCmd.Flags().StringVar(&ami, "ami", "", "AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023")
+	launchCmd.Flags().StringVar(&osFlag, "os", "", "Target OS: windows or linux. Omit to auto-detect from the AMI. Use to force the OS for a custom AMI whose platform metadata is unset.")
 	launchCmd.Flags().Int32Var(&launchVolumeSize, "volume-size", 0, "Root EBS volume size in GiB (0 = use AMI default)")
 
 	// Network
@@ -796,6 +798,16 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 	prog.Complete("Detecting AMI")
 
+	// Resolve target OS once and apply to every config in the sweep; enforce the
+	// Windows lifecycle guard before launching any.
+	targetOS := resolveTargetOS(ctx, awsClient, firstConfig.Region, firstConfig.AMI, osFlag)
+	for _, cfg := range launchConfigs {
+		cfg.TargetOS = targetOS
+	}
+	if err := windowsLifecycleGuard(firstConfig); err != nil {
+		return err
+	}
+
 	// Step 2: Setup SSH key
 	prog.Start("Setting up SSH key")
 	if firstConfig.KeyName == "" {
@@ -853,7 +865,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		if err != nil {
 			return fmt.Errorf("failed to build user data: %w", err)
 		}
-		cfg.UserData = encodeUserData(userDataScript)
+		cfg.UserData = encodeUserDataForOS(userDataScript, cfg.TargetOS)
 	}
 
 	// Launch instances with rolling queue or all at once
@@ -1171,6 +1183,13 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	}
 	prog.Complete("Detecting AMI")
 
+	// Step 1b: Resolve target OS (--os override, else auto-detect from the AMI)
+	// and enforce the Windows lifecycle guard before we spend on a launch.
+	config.TargetOS = resolveTargetOS(ctx, awsClient, config.Region, config.AMI, osFlag)
+	if err := windowsLifecycleGuard(config); err != nil {
+		return err
+	}
+
 	// Step 2: Setup SSH key
 	prog.Start("Setting up SSH key")
 	if config.KeyName == "" {
@@ -1401,8 +1420,10 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		return fmt.Errorf("failed to build user data: %w", err)
 	}
 
-	// Add storage mounting if EFS or FSx enabled (single instance)
-	if efsID != "" || fsxInfo != nil {
+	// Add storage mounting if EFS or FSx enabled (single instance). Skip on
+	// Windows: the storage user-data is Linux mount scripting and would corrupt
+	// the <powershell> block. EFS/FSx on Windows is out of Phase 1 scope (#55).
+	if (efsID != "" || fsxInfo != nil) && config.TargetOS != "windows" {
 		storageConfig := userdata.StorageConfig{}
 
 		// EFS configuration
@@ -1434,7 +1455,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		userDataScript += "\n" + storageScript
 	}
 
-	config.UserData = encodeUserData(userDataScript)
+	config.UserData = encodeUserDataForOS(userDataScript, config.TargetOS)
 
 	// Validate MPI requirements
 	if mpiEnabled {
@@ -1851,6 +1872,42 @@ func resolveStrataEnvironment(ctx context.Context, formation, profilePath, regis
 	return uri, nil
 }
 
+// resolveTargetOS decides the instance OS: an explicit --os flag wins (for
+// custom AMIs whose platform metadata is unset), otherwise auto-detect from the
+// AMI via IsWindowsAMI. Returns "windows" or "linux".
+func resolveTargetOS(ctx context.Context, awsClient *aws.Client, region, amiID, osFlag string) string {
+	switch strings.ToLower(strings.TrimSpace(osFlag)) {
+	case "windows":
+		return "windows"
+	case "linux":
+		return "linux"
+	}
+	if awsClient.IsWindowsAMI(ctx, region, amiID) {
+		return "windows"
+	}
+	return "linux"
+}
+
+// windowsLifecycleGuard enforces cost safety for Windows launches. Windows has
+// no in-instance spored yet (#77), so idle-timeout cannot work and the only
+// thing that will stop the instance is its TTL plus the server-side reaper
+// backstop (#70). We therefore REQUIRE --ttl for Windows and warn loudly that no
+// agent runs. Linux is unaffected.
+func windowsLifecycleGuard(config *aws.LaunchConfig) error {
+	if config.TargetOS != "windows" {
+		return nil
+	}
+	if config.TTL == "" {
+		return fmt.Errorf("Windows instances require --ttl: there is no in-instance agent on Windows yet (#77), " +
+			"so idle-timeout can't apply and only the TTL deadline (enforced by the server-side reaper) will stop it.\n" +
+			"  Re-run with e.g. --ttl 8h")
+	}
+	fmt.Fprintf(os.Stderr, "\n⚠️  Windows instance: no in-instance spawn agent runs (#77).\n")
+	fmt.Fprintf(os.Stderr, "   Idle-timeout and completion/pre-stop hooks do NOT apply.\n")
+	fmt.Fprintf(os.Stderr, "   The instance will be terminated at its TTL deadline (%s) by the server-side reaper.\n\n", config.TTL)
+	return nil
+}
+
 func setupSSHKey(ctx context.Context, awsClient *aws.Client, region, amiID string, plat *platform.Platform) (string, error) {
 	// Choose the keypair algorithm from the target OS. Windows requires RSA —
 	// the EC2 Administrator password (GetPasswordData) can only be decrypted with
@@ -1905,6 +1962,16 @@ func encodeUserData(script string) string {
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
+// encodeUserDataForOS picks the right encoding for the target OS. Windows
+// EC2Launch does NOT gzip-decompress user-data (only cloud-init does), so a
+// Windows <powershell> script must be plain base64, not gzip+base64.
+func encodeUserDataForOS(script, targetOS string) string {
+	if targetOS == "windows" {
+		return base64.StdEncoding.EncodeToString([]byte(script))
+	}
+	return encodeUserData(script)
+}
+
 // spawnPublicKeyForUserData returns the authorized_keys-format public key to
 // install on the instance, matching the keypair registered with EC2. It resolves
 // the private key for keyName via the shared resolver and reads its ".pub"; if
@@ -1925,16 +1992,66 @@ func spawnPublicKeyForUserData(plat *platform.Platform, keyName string) ([]byte,
 	return pub, nil
 }
 
+// buildWindowsUserData emits the minimal EC2Launch <powershell> bootstrap for a
+// Windows instance. Phase 1 scope (#55): NO spored (that's #77) — lifecycle is
+// the TTL deadline + the server-side reaper. The only setup is enabling OpenSSH
+// and trusting the spawn public key, so `spawn connect` can SSH-over-SSM in
+// addition to the Administrator-password/RDP path. The Administrator password is
+// retrieved out-of-band via GetPasswordData, so nothing secret is embedded here.
+func buildWindowsUserData(authorizedKey string) (string, error) {
+	// authorizedKey is an authorized_keys line (e.g. "ssh-rsa AAAA... spawn").
+	// Guard against breaking out of the PowerShell here-string.
+	if strings.Contains(authorizedKey, "\"@") || strings.Contains(authorizedKey, "@\"") {
+		return "", fmt.Errorf("invalid public key content for Windows user-data")
+	}
+	key := strings.TrimSpace(authorizedKey)
+
+	// EC2Launch v2 runs the <powershell> block on first boot. We:
+	//  1. install + enable the OpenSSH Server optional feature,
+	//  2. write the spawn public key to administrators_authorized_keys (the file
+	//     Windows OpenSSH uses for members of the Administrators group) with the
+	//     ACL it requires (Administrators + SYSTEM only),
+	//  3. set the default shell to PowerShell for nicer interactive sessions.
+	script := fmt.Sprintf(`<powershell>
+$ErrorActionPreference = "Stop"
+try {
+  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
+  Set-Service -Name sshd -StartupType Automatic
+  Start-Service sshd
+
+  $admins = "C:\ProgramData\ssh\administrators_authorized_keys"
+  Set-Content -Path $admins -Value "%s" -Encoding ascii
+  icacls $admins /inheritance:r | Out-Null
+  icacls $admins /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
+
+  New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name DefaultShell `+"`"+`
+    -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `+"`"+`
+    -PropertyType String -Force | Out-Null
+} catch {
+  Write-Output "spawn windows bootstrap warning: $_"
+}
+</powershell>
+<persist>false</persist>`, key)
+
+	return script, nil
+}
+
 func buildUserData(plat *platform.Platform, config *aws.LaunchConfig) (string, error) {
-	// Get local username and SSH public key.
-	username := plat.GetUsername()
 	// Inject the PUBLIC key of the same keypair we registered with EC2
 	// (config.KeyName), so the instance trusts the key `spawn connect` will use.
-	// Resolve the private key path via the shared resolver, then read its .pub.
 	publicKey, err := spawnPublicKeyForUserData(plat, config.KeyName)
 	if err != nil {
 		return "", err
 	}
+
+	// Windows uses a completely different bootstrap: EC2Launch runs a
+	// <powershell> block, not bash, and there is no spored yet (#77). Branch
+	// early to a minimal PowerShell script.
+	if config.TargetOS == "windows" {
+		return buildWindowsUserData(string(publicKey))
+	}
+
+	username := plat.GetUsername()
 	publicKeyBase64 := base64.StdEncoding.EncodeToString(publicKey)
 
 	// Validate username and public key before using in script
