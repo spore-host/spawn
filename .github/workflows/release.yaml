@@ -87,4 +87,17 @@ jobs:
             done
           done
 
-          echo "✅ Uploaded spored ${VERSION} to ${#BUCKETS[@]} regions"
+          # Windows spored (amd64 only) — same buckets/paths so install-spored.ps1
+          # downloads it exactly like install-spored.sh does for Linux (#77).
+          win_src="dist/spored_windows_amd64_v1/spored.exe"
+          sha256sum "$win_src" | awk '{print $1}' > "spored-windows-amd64.exe.sha256"
+          for bucket in "${BUCKETS[@]}"; do
+            region="${bucket#spawn-binaries-}"
+            aws s3 cp "$win_src" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe" --region "$region"
+            aws s3 cp "spored-windows-amd64.exe.sha256" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe.sha256" --region "$region"
+            aws s3 cp "$win_src" "s3://${bucket}/spored-windows-amd64.exe" --region "$region"
+            aws s3 cp "spored-windows-amd64.exe.sha256" "s3://${bucket}/spored-windows-amd64.exe.sha256" --region "$region"
+            aws s3 cp "$win_src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe" --region "$region"
+          done
+
+          echo "✅ Uploaded spored ${VERSION} (linux+windows) to ${#BUCKETS[@]} regions"
