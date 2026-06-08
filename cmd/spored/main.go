@@ -7,9 +7,7 @@ import (
 	"log"
 	"math"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -89,7 +87,14 @@ func newRootCmd() *cobra.Command {
 }
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	// On Windows, if the Service Control Manager launched us, run under the SCM
+	// (svc.Run → daemon) instead of the CLI. No-op on other platforms.
+	if runAsServiceIfManaged() {
+		return
+	}
+	root := newRootCmd()
+	registerPlatformCommands(root) // adds `service` subcommand on Windows
+	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
@@ -187,16 +192,15 @@ func runDaemon() {
 		}
 	}
 
-	// Handle signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
 	// Start monitoring
 	go agent.Monitor(ctx)
 
-	// Wait for signal
-	sig := <-sigChan
-	log.Printf("Received signal %v, shutting down...", sig)
+	// Block until a stop is requested. On Unix this is SIGINT/SIGTERM; on Windows
+	// it's the Service Control Manager stop/shutdown (or signals when run
+	// interactively). The platform-specific waitForShutdown returns when stop is
+	// requested, then we run graceful cleanup below.
+	waitForShutdown()
+	log.Printf("Shutting down...")
 
 	// Graceful shutdown - run cleanup tasks
 	cancel()
