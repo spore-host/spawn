@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
+	"github.com/spore-host/libs/update"
 )
 
 var Version = "0.20.0"
@@ -35,9 +36,21 @@ func Execute() {
 	_ = rootCmd.ParseFlags(os.Args[1:])
 	ensureI18nInitialized()
 
+	// Start async update check (non-blocking, respects SPORE_NO_UPDATE_CHECK)
+	updateCh := update.CheckAsync("spawn", Version)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+
+	// Print update notice after command completes (if available)
+	select {
+	case result := <-updateCh:
+		if result.HasUpdate() {
+			fmt.Fprintf(os.Stderr, "\n%s\n", result.Message())
+		}
+	default:
 	}
 }
 

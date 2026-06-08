@@ -36,7 +36,7 @@ require (
 	github.com/scttfrdmn/strata v0.22.0
 	github.com/scttfrdmn/substrate v0.68.0
 	github.com/spf13/cobra v1.10.2
-	github.com/spore-host/libs v0.35.0
+	github.com/spore-host/libs v0.36.0
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
