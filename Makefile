@@ -57,7 +57,7 @@ build-windows-amd64:
 	@echo "Building for Windows AMD64..."
 	@mkdir -p $(BUILD_DIR)
 	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/spawn-windows-amd64.exe main.go
-	# Note: spored is Linux-only (runs on instances)
+	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/spored-windows-amd64.exe cmd/spored/main.go
 
 # Install locally
 install: build

@@ -1897,14 +1897,15 @@ func windowsLifecycleGuard(config *aws.LaunchConfig) error {
 	if config.TargetOS != "windows" {
 		return nil
 	}
-	if config.TTL == "" {
-		return fmt.Errorf("Windows instances require --ttl: there is no in-instance agent on Windows yet (#77), " +
-			"so idle-timeout can't apply and only the TTL deadline (enforced by the server-side reaper) will stop it.\n" +
-			"  Re-run with e.g. --ttl 8h")
+	// spored now runs on Windows as a Service (#77), so idle-timeout, completion,
+	// and pre-stop work in-instance — same as Linux. We still require a timeout
+	// (TTL or idle) so a Windows box can't run unbounded if the agent fails to
+	// install; the server-side reaper (#70) backstops the TTL deadline regardless.
+	if config.TTL == "" && config.IdleTimeout == "" {
+		return fmt.Errorf("Windows instances require a timeout: set --ttl (hard deadline) " +
+			"and/or --idle-timeout. The in-instance agent enforces these and the server-side " +
+			"reaper backstops the TTL deadline.\n  Re-run with e.g. --ttl 8h")
 	}
-	fmt.Fprintf(os.Stderr, "\n⚠️  Windows instance: no in-instance spawn agent runs (#77).\n")
-	fmt.Fprintf(os.Stderr, "   Idle-timeout and completion/pre-stop hooks do NOT apply.\n")
-	fmt.Fprintf(os.Stderr, "   The instance will be terminated at its TTL deadline (%s) by the server-side reaper.\n\n", config.TTL)
 	return nil
 }
 
@@ -1992,12 +1993,12 @@ func spawnPublicKeyForUserData(plat *platform.Platform, keyName string) ([]byte,
 	return pub, nil
 }
 
-// buildWindowsUserData emits the minimal EC2Launch <powershell> bootstrap for a
-// Windows instance. Phase 1 scope (#55): NO spored (that's #77) — lifecycle is
-// the TTL deadline + the server-side reaper. The only setup is enabling OpenSSH
-// and trusting the spawn public key, so `spawn connect` can SSH-over-SSM in
-// addition to the Administrator-password/RDP path. The Administrator password is
-// retrieved out-of-band via GetPasswordData, so nothing secret is embedded here.
+// buildWindowsUserData emits the EC2Launch <powershell> bootstrap for a Windows
+// instance (#55/#77). It (1) enables OpenSSH and trusts the spawn public key so
+// `spawn connect` can SSH-over-SSM in addition to the Administrator-password/RDP
+// path, and (2) installs spored as a Windows Service from the regional S3 bucket
+// — the same buckets/binary the Linux bootstrap uses — so the instance enforces
+// TTL/idle/completion in-instance just like Linux.
 func buildWindowsUserData(authorizedKey string) (string, error) {
 	// authorizedKey is an authorized_keys line (e.g. "ssh-rsa AAAA... spawn").
 	// Guard against breaking out of the PowerShell here-string.
@@ -2011,9 +2012,13 @@ func buildWindowsUserData(authorizedKey string) (string, error) {
 	//  2. write the spawn public key to administrators_authorized_keys (the file
 	//     Windows OpenSSH uses for members of the Administrators group) with the
 	//     ACL it requires (Administrators + SYSTEM only),
-	//  3. set the default shell to PowerShell for nicer interactive sessions.
+	//  3. set the default shell to PowerShell for nicer interactive sessions,
+	//  4. download spored.exe from the regional spawn-binaries S3 bucket and
+	//     install it as an auto-start Windows Service (spored's own subcommand
+	//     sets recovery actions). The instance role carries S3 read access, the
+	//     same as Linux. Mirrors install-spored.ps1.
 	script := fmt.Sprintf(`<powershell>
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 try {
   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
   Set-Service -Name sshd -StartupType Automatic
@@ -2028,7 +2033,31 @@ try {
     -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `+"`"+`
     -PropertyType String -Force | Out-Null
 } catch {
-  Write-Output "spawn windows bootstrap warning: $_"
+  Write-Output "spawn windows ssh bootstrap warning: $_"
+}
+
+# Install spored as a Windows Service from the regional S3 bucket (#77).
+try {
+  $token = Invoke-RestMethod -Method Put -Uri 'http://169.254.169.254/latest/api/token' -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='21600'} -TimeoutSec 5
+  $region = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/region' -Headers @{'X-aws-ec2-metadata-token'=$token} -TimeoutSec 5
+  if (-not $region) { $region = 'us-east-1' }
+  $dir = Join-Path $env:ProgramFiles 'spored'
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $exe = Join-Path $dir 'spored.exe'
+  $bucket = "spawn-binaries-$region"
+  $ok = $false
+  foreach ($uri in @("s3://$bucket/spawn/spored-windows-amd64.exe","s3://$bucket/spored-windows-amd64.exe","s3://spawn-binaries-us-east-1/spawn/spored-windows-amd64.exe")) {
+    & aws s3 cp $uri $exe --region $region 2>$null
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $exe)) { $ok = $true; break }
+  }
+  if ($ok) {
+    & $exe service install $exe
+    & $exe service start
+  } else {
+    Write-Output "spawn: could not download spored.exe from S3"
+  }
+} catch {
+  Write-Output "spawn spored install warning: $_"
 }
 </powershell>
 <persist>false</persist>`, key)

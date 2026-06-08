@@ -34,13 +34,18 @@ func TestWindowsLifecycleGuard(t *testing.T) {
 	if err := windowsLifecycleGuard(&aws.LaunchConfig{TargetOS: "linux"}); err != nil {
 		t.Errorf("linux must not be guarded: %v", err)
 	}
-	// Windows without TTL must error.
+	// Windows with neither timeout must error.
 	if err := windowsLifecycleGuard(&aws.LaunchConfig{TargetOS: "windows"}); err == nil {
-		t.Error("windows without --ttl must error")
+		t.Error("windows without a timeout must error")
 	}
-	// Windows with TTL is allowed (warns to stderr, returns nil).
+	// Windows with --ttl is allowed.
 	if err := windowsLifecycleGuard(&aws.LaunchConfig{TargetOS: "windows", TTL: "8h"}); err != nil {
 		t.Errorf("windows with --ttl must be allowed: %v", err)
+	}
+	// Windows with --idle-timeout is now allowed too (spored enforces idle on
+	// Windows as of #77 Stage 3).
+	if err := windowsLifecycleGuard(&aws.LaunchConfig{TargetOS: "windows", IdleTimeout: "1h"}); err != nil {
+		t.Errorf("windows with --idle-timeout must be allowed: %v", err)
 	}
 }
 
