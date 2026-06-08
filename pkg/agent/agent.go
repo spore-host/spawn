@@ -321,6 +321,11 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 		}
 
 		if remaining <= 0 {
+			// INVARIANT (#72): TTL expiry ALWAYS terminates. Do not add a
+			// stop/hibernate branch here or honor a "ttl-action" tag — "stop" is
+			// not a terminal state (it bills EBS indefinitely and runs no daemon
+			// to re-check TTL, the #71 zombie). TTL is the unconditional
+			// backstop; only idle/on-complete may stop or hibernate.
 			log.Printf("TTL expired (deadline: %v)", a.config.TTLDeadline)
 			a.notifier.Notify(ctx, "ttl_expired", "")
 			a.terminate(ctx, "TTL expired")

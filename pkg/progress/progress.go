@@ -197,6 +197,11 @@ func (p *Progress) DisplaySuccess(instanceID, publicIP, sshCommand string, confi
 			fmt.Println()
 			fmt.Println(i18n.T("spawn.progress.success.monitoring.agent_active"))
 			fmt.Println(i18n.T("spawn.progress.success.monitoring.close_laptop"))
+			// Reassure the user the deadline is guaranteed even if the in-instance
+			// agent fails: a server-side reaper backstops it (spore-host/spawn#70).
+			// Literal (not i18n) to avoid a cross-repo libs release for one line;
+			// promote to an i18n key on the next libs bump.
+			fmt.Printf("   %s A server-side reaper enforces the deadline as a backstop, even if the agent fails.\n", i18n.Emoji("check"))
 			fmt.Println()
 		}
 	}

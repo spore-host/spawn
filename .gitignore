@@ -19,6 +19,10 @@ lambda/scheduler-handler/scheduler-handler
 lambda/spore-bot/spore-bot
 lambda/spore-bot/prism-bot
 lambda/sweep-orchestrator/sweep-orchestrator
+lambda/ttl-reaper/ttl-reaper
+
+# SAM build dirs
+lambda/*/.aws-sam/
 
 # Build artifacts
 bin/
