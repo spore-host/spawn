@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/queue"
 	"github.com/spore-host/spawn/pkg/sshkey"
@@ -203,18 +204,13 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	ec2Client := ec2.NewFromConfig(cfg)
-	result, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-		InstanceIds: []string{instanceID},
-	})
+	// Retry the post-launch InvalidInstanceID.NotFound eventual-consistency
+	// window (#78) — important on the nested-launch path where this runs right
+	// after RunInstances.
+	instance, err := spawnaws.DescribeInstanceWithRetry(ctx, ec2Client, instanceID)
 	if err != nil {
-		return fmt.Errorf("failed to describe instance: %w", err)
+		return err
 	}
-
-	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
-		return fmt.Errorf("instance not found: %s", instanceID)
-	}
-
-	instance := result.Reservations[0].Instances[0]
 	var connectAddr string
 	if instance.PublicIpAddress != nil {
 		connectAddr = *instance.PublicIpAddress
