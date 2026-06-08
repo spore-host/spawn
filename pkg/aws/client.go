@@ -15,6 +15,7 @@ package aws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -31,6 +32,7 @@ import (
 	awspricing "github.com/aws/aws-sdk-go-v2/service/pricing"
 	pricingtypes "github.com/aws/aws-sdk-go-v2/service/pricing/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	smithy "github.com/aws/smithy-go"
 	"github.com/spore-host/libs/pricing"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 )
@@ -750,26 +752,81 @@ func findSubstring(s, substr string) bool {
 	return false
 }
 
+// isInstanceNotFound reports whether err is EC2's InvalidInstanceID.NotFound —
+// which, right after a successful RunInstances, means EC2 hasn't yet propagated
+// the new instance ID across its internal systems (eventual consistency), NOT
+// that the instance is missing. See AWS query-api eventual-consistency docs.
+func isInstanceNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode() == "InvalidInstanceID.NotFound"
+	}
+	return strings.Contains(err.Error(), "InvalidInstanceID.NotFound")
+}
+
+// DescribeInstanceWithRetry fetches a single instance, retrying on the
+// post-launch InvalidInstanceID.NotFound eventual-consistency window with capped
+// backoff (1s, 2s, 4s, 8s, 8s… up to ~30s total). A genuinely missing instance
+// keeps returning NotFound and surfaces after the retries; any other error is
+// returned immediately. This is the fix for #78: a successful RunInstances
+// followed by an immediate DescribeInstances can race EC2 propagation and return
+// a 400 NotFound, which must not be treated as a fatal failure.
+//
+// Exported so callers holding their own *ec2.Client (e.g. the nested-launch /
+// queue path that loads a separate AWS config) can reuse the same retry.
+func DescribeInstanceWithRetry(ctx context.Context, ec2Client *ec2.Client, instanceID string) (*types.Instance, error) {
+	input := &ec2.DescribeInstancesInput{InstanceIds: []string{instanceID}}
+
+	backoff := time.Second
+	const maxTotal = 30 * time.Second
+	var waited time.Duration
+	for {
+		result, err := ec2Client.DescribeInstances(ctx, input)
+		switch {
+		case err != nil && isInstanceNotFound(err):
+			// transient propagation race — fall through to retry
+		case err != nil:
+			return nil, fmt.Errorf("failed to describe instance: %w", err)
+		case len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0:
+			// empty result is the same race as NotFound — retry it too
+		default:
+			inst := result.Reservations[0].Instances[0]
+			return &inst, nil
+		}
+
+		if waited >= maxTotal {
+			return nil, fmt.Errorf("instance %s not found after %s (eventual consistency window exceeded)", instanceID, maxTotal)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+		waited += backoff
+		if backoff < 8*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+// describeInstance is the method-bound convenience wrapper.
+func (c *Client) describeInstance(ctx context.Context, ec2Client *ec2.Client, instanceID string) (*types.Instance, error) {
+	return DescribeInstanceWithRetry(ctx, ec2Client, instanceID)
+}
+
 // GetInstancePublicIP queries an instance and returns its public IP
 func (c *Client) GetInstancePublicIP(ctx context.Context, region, instanceID string) (string, error) {
 	cfg := c.cfg
 	cfg.Region = region
 	ec2Client := ec2.NewFromConfig(cfg)
 
-	input := &ec2.DescribeInstancesInput{
-		InstanceIds: []string{instanceID},
-	}
-
-	result, err := ec2Client.DescribeInstances(ctx, input)
+	instance, err := c.describeInstance(ctx, ec2Client, instanceID)
 	if err != nil {
-		return "", fmt.Errorf("failed to describe instance: %w", err)
+		return "", err
 	}
-
-	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
-		return "", fmt.Errorf("instance not found")
-	}
-
-	instance := result.Reservations[0].Instances[0]
 	return valueOrEmpty(instance.PublicIpAddress), nil
 }
 
@@ -779,24 +836,13 @@ func (c *Client) GetInstanceState(ctx context.Context, region, instanceID string
 	cfg.Region = region
 	ec2Client := ec2.NewFromConfig(cfg)
 
-	input := &ec2.DescribeInstancesInput{
-		InstanceIds: []string{instanceID},
-	}
-
-	result, err := ec2Client.DescribeInstances(ctx, input)
+	instance, err := c.describeInstance(ctx, ec2Client, instanceID)
 	if err != nil {
-		return "", fmt.Errorf("failed to describe instance: %w", err)
+		return "", err
 	}
-
-	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
-		return "", fmt.Errorf("instance not found")
-	}
-
-	instance := result.Reservations[0].Instances[0]
 	if instance.State == nil || instance.State.Name == "" {
 		return "", fmt.Errorf("instance state unavailable")
 	}
-
 	return string(instance.State.Name), nil
 }
 
@@ -807,6 +853,15 @@ func (c *Client) WaitForRunning(ctx context.Context, region, instanceID string, 
 	cfg := c.cfg
 	cfg.Region = region
 	ec2Client := ec2.NewFromConfig(cfg)
+
+	// Absorb the post-RunInstances eventual-consistency window first (#78): the
+	// SDK's running-waiter does NOT retry an InvalidInstanceID.NotFound 400, so
+	// a freshly-launched instance the API hasn't propagated yet would fail the
+	// waiter immediately. describeInstance retries NotFound until the ID is
+	// visible; then the waiter handles the pending→running transition.
+	if _, err := c.describeInstance(ctx, ec2Client, instanceID); err != nil {
+		return fmt.Errorf("waiting for instance %s to run: %w", instanceID, err)
+	}
 
 	waiter := ec2.NewInstanceRunningWaiter(ec2Client)
 	if err := waiter.Wait(ctx, &ec2.DescribeInstancesInput{
