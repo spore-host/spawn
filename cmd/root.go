@@ -10,7 +10,7 @@ import (
 	"github.com/spore-host/libs/update"
 )
 
-var Version = "0.37.0"
+var Version = "0.37.1"
 
 // Global flags for i18n and accessibility
 var (
