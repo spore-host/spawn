@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/queue"
+	"github.com/spore-host/spawn/pkg/sshkey"
 )
 
 var (
@@ -386,24 +387,14 @@ func runQueueResults(cmd *cobra.Command, args []string) error {
 // sshReadFile reads a file from a remote instance via SSH.
 // Uses the same key-discovery logic as spawn connect.
 func sshReadFile(host, remotePath string) (string, error) {
-	// Try to find a usable SSH key
+	// Find a usable SSH key via the shared resolver (spawn-managed keys first,
+	// then ~/.ssh defaults). Best-effort: an empty keyPath falls back to the
+	// ssh client's own default key selection.
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home dir: %w", err)
 	}
-	sshDir := filepath.Join(homeDir, ".ssh")
-	candidates := []string{
-		filepath.Join(sshDir, "id_ed25519"),
-		filepath.Join(sshDir, "id_rsa"),
-		filepath.Join(sshDir, "id_ecdsa"),
-	}
-	var keyPath string
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			keyPath = p
-			break
-		}
-	}
+	keyPath, _ := sshkey.Resolve(homeDir, fmt.Sprintf("spawn-key-%s", os.Getenv("USER")))
 
 	args := []string{
 		"-o", "StrictHostKeyChecking=no",

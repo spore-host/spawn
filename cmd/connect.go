@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/sshkey"
 )
 
 var (
@@ -196,38 +196,25 @@ func connectViaSessionManager(instanceID, region string) error {
 	return nil
 }
 
+// findSSHKey resolves a usable private key for an EC2 key name. It delegates to
+// sshkey.Resolve — the single resolver shared by connect, status, and queue —
+// which checks spawn-managed keys (~/.spawn/keys) first, then falls back to the
+// user's ~/.ssh keys for back-compat.
 func findSSHKey(keyName string) (string, error) {
 	if keyName == "" {
 		return "", i18n.Te("spawn.connect.error.no_key_name", nil)
 	}
-
-	// Common SSH key locations and naming patterns
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-
-	sshDir := filepath.Join(homeDir, ".ssh")
-
-	// Try various common key names
-	keyPatterns := []string{
-		filepath.Join(sshDir, keyName),        // Exact name
-		filepath.Join(sshDir, keyName+".pem"), // With .pem
-		filepath.Join(sshDir, keyName+".key"), // With .key
-		filepath.Join(sshDir, "id_rsa"),       // Default RSA key
-		filepath.Join(sshDir, "id_ed25519"),   // Default Ed25519 key
-		filepath.Join(sshDir, "id_ecdsa"),     // Default ECDSA key
+	path, err := sshkey.Resolve(homeDir, keyName)
+	if err != nil {
+		return "", i18n.Te("spawn.connect.error.key_not_found_for_name", nil, map[string]interface{}{
+			"KeyName": keyName,
+		})
 	}
-
-	for _, path := range keyPatterns {
-		if _, err := os.Stat(path); err == nil {
-			return path, nil
-		}
-	}
-
-	return "", i18n.Te("spawn.connect.error.key_not_found_for_name", nil, map[string]interface{}{
-		"KeyName": keyName,
-	})
+	return path, nil
 }
 
 // ── DCV session connect ───────────────────────────────────────────────────────

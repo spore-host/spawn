@@ -36,6 +36,7 @@ import (
 	"github.com/spore-host/spawn/pkg/queue"
 	"github.com/spore-host/spawn/pkg/regions"
 	"github.com/spore-host/spawn/pkg/security"
+	"github.com/spore-host/spawn/pkg/sshkey"
 	"github.com/spore-host/spawn/pkg/staging"
 	"github.com/spore-host/spawn/pkg/storage"
 	"github.com/spore-host/spawn/pkg/sweep"
@@ -798,7 +799,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// Step 2: Setup SSH key
 	prog.Start("Setting up SSH key")
 	if firstConfig.KeyName == "" {
-		keyName, err := setupSSHKey(ctx, awsClient, firstConfig.Region, plat)
+		keyName, err := setupSSHKey(ctx, awsClient, firstConfig.Region, firstConfig.AMI, plat)
 		if err != nil {
 			prog.Error("Setting up SSH key", err)
 			return err
@@ -1173,7 +1174,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// Step 2: Setup SSH key
 	prog.Start("Setting up SSH key")
 	if config.KeyName == "" {
-		keyName, err := setupSSHKey(ctx, awsClient, config.Region, plat)
+		keyName, err := setupSSHKey(ctx, awsClient, config.Region, config.AMI, plat)
 		if err != nil {
 			prog.Error("Setting up SSH key", err)
 			return err
@@ -1579,7 +1580,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			fmt.Fprintf(os.Stderr, "\n⚠️  Failed to load DNS config: %v\n", err)
 		} else {
 			prog.Start("Registering DNS")
-			fqdn, err := registerDNS(plat, result.InstanceID, result.PublicIP, dnsName, dnsConfig.Domain, dnsConfig.APIEndpoint)
+			fqdn, err := registerDNS(plat, result.KeyName, result.InstanceID, result.PublicIP, dnsName, dnsConfig.Domain, dnsConfig.APIEndpoint)
 			if err != nil {
 				prog.Error("Registering DNS", err)
 				// Non-fatal: continue even if DNS registration fails
@@ -1850,57 +1851,46 @@ func resolveStrataEnvironment(ctx context.Context, formation, profilePath, regis
 	return uri, nil
 }
 
-func setupSSHKey(ctx context.Context, awsClient *aws.Client, region string, plat *platform.Platform) (string, error) {
-	// Check for local SSH key
-	if !plat.HasSSHKey() {
-		// Auto-create SSH key if running in a terminal
-		if isTerminal(os.Stdin) {
-			fmt.Fprintf(os.Stderr, "\n⚠️  No SSH key found at %s\n", plat.SSHKeyPath)
-			fmt.Fprintf(os.Stderr, "   Creating SSH key automatically...\n")
-
-			if err := plat.CreateSSHKey(); err != nil {
-				return "", fmt.Errorf("failed to create SSH key: %w", err)
-			}
-
-			fmt.Fprintf(os.Stderr, "✅ SSH key created: %s\n\n", plat.SSHKeyPath)
-		} else {
-			// Non-interactive stdin (piped input) - provide helpful error
-			return "", fmt.Errorf("no SSH key found at %s\n\nTo create one:\n  ssh-keygen -t rsa -b 4096 -f %s -N ''\n\nOr run spawn directly (not piped):\n  spawn launch --instance-type m7i.large --region us-east-1",
-				plat.SSHKeyPath, plat.SSHKeyPath)
-		}
+func setupSSHKey(ctx context.Context, awsClient *aws.Client, region, amiID string, plat *platform.Platform) (string, error) {
+	// Choose the keypair algorithm from the target OS. Windows requires RSA —
+	// the EC2 Administrator password (GetPasswordData) can only be decrypted with
+	// an RSA private key; ED25519 cannot. Everything else defaults to ED25519.
+	algo := sshkey.ED25519
+	if awsClient.IsWindowsAMI(ctx, region, amiID) {
+		algo = sshkey.RSA
 	}
 
-	// Get fingerprint of local key
-	fingerprint, err := plat.GetPublicKeyFingerprint()
+	// Find-or-create spawn's managed keypair under ~/.spawn/keys (separate from
+	// the user's personal ~/.ssh). Generated in-process — no ssh-keygen shell-out.
+	kp, err := sshkey.EnsureKey(plat.HomeDir, plat.GetUsername(), algo)
+	if err != nil {
+		return "", fmt.Errorf("failed to ensure spawn SSH key: %w", err)
+	}
+
+	// Reuse an already-imported EC2 key with the same fingerprint, so re-launches
+	// don't re-import.
+	fingerprint, err := sshkey.Fingerprint(kp.PublicKeyPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to get key fingerprint: %w", err)
 	}
-
-	// Check if this key already exists in AWS (by fingerprint)
 	existingKeyName, err := awsClient.FindKeyPairByFingerprint(ctx, region, fingerprint)
 	if err != nil {
 		return "", fmt.Errorf("failed to search for existing key: %w", err)
 	}
-
-	// If found, use the existing key
 	if existingKeyName != "" {
 		return existingKeyName, nil
 	}
 
-	// Key not found in AWS, upload it with generated name
-	keyName := fmt.Sprintf("spawn-key-%s", plat.GetUsername())
-
-	publicKey, err := plat.ReadPublicKey()
+	// Import under the algorithm-qualified name (spawn-key-<user> /
+	// spawn-key-<user>-rsa) so both can coexist in EC2.
+	publicKey, err := os.ReadFile(kp.PublicKeyPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read public key: %w", err)
 	}
-
-	err = awsClient.ImportKeyPair(ctx, region, keyName, publicKey)
-	if err != nil {
+	if err := awsClient.ImportKeyPair(ctx, region, kp.Name, publicKey); err != nil {
 		return "", fmt.Errorf("failed to import key pair: %w", err)
 	}
-
-	return keyName, nil
+	return kp.Name, nil
 }
 
 // encodeUserData gzip-compresses the script and base64-encodes the result.
@@ -1915,12 +1905,35 @@ func encodeUserData(script string) string {
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
-func buildUserData(plat *platform.Platform, config *aws.LaunchConfig) (string, error) {
-	// Get local username and SSH public key
-	username := plat.GetUsername()
-	publicKey, err := plat.ReadPublicKey()
+// spawnPublicKeyForUserData returns the authorized_keys-format public key to
+// install on the instance, matching the keypair registered with EC2. It resolves
+// the private key for keyName via the shared resolver and reads its ".pub"; if
+// that's unavailable (e.g. a user-supplied/legacy key only in ~/.ssh), it falls
+// back to the personal public key for back-compat.
+func spawnPublicKeyForUserData(plat *platform.Platform, keyName string) ([]byte, error) {
+	if keyName != "" {
+		if priv, err := sshkey.Resolve(plat.HomeDir, keyName); err == nil {
+			if pub, err := os.ReadFile(priv + ".pub"); err == nil {
+				return pub, nil
+			}
+		}
+	}
+	pub, err := plat.ReadPublicKey()
 	if err != nil {
-		return "", fmt.Errorf("failed to read SSH public key: %w", err)
+		return nil, fmt.Errorf("failed to read SSH public key: %w", err)
+	}
+	return pub, nil
+}
+
+func buildUserData(plat *platform.Platform, config *aws.LaunchConfig) (string, error) {
+	// Get local username and SSH public key.
+	username := plat.GetUsername()
+	// Inject the PUBLIC key of the same keypair we registered with EC2
+	// (config.KeyName), so the instance trusts the key `spawn connect` will use.
+	// Resolve the private key path via the shared resolver, then read its .pub.
+	publicKey, err := spawnPublicKeyForUserData(plat, config.KeyName)
+	if err != nil {
+		return "", err
 	}
 	publicKeyBase64 := base64.StdEncoding.EncodeToString(publicKey)
 
@@ -2511,7 +2524,7 @@ func launchMode(interactive bool, instanceType string, stdinIsTTY bool) launchIn
 	return modeFlags
 }
 
-func registerDNS(plat *platform.Platform, instanceID, publicIP, recordName, domain, apiEndpoint string) (string, error) {
+func registerDNS(plat *platform.Platform, keyName, instanceID, publicIP, recordName, domain, apiEndpoint string) (string, error) {
 	// Build SSH command to register DNS from within the instance
 	sshScript := fmt.Sprintf(`
 # Get IMDSv2 token
@@ -2534,8 +2547,12 @@ curl -s -X POST %s \
   }" 2>/dev/null || echo '{"success":false,"error":"DNS API call failed"}'
 `, apiEndpoint, recordName)
 
-	// Execute SSH command
-	sshKeyPath := plat.SSHKeyPath
+	// Execute SSH command using the same keypair registered with EC2 (resolved
+	// via the shared resolver: spawn-managed key first, then ~/.ssh fallback).
+	sshKeyPath, err := sshkey.Resolve(plat.HomeDir, keyName)
+	if err != nil {
+		sshKeyPath = plat.SSHKeyPath // back-compat last resort
+	}
 	username := plat.GetUsername()
 
 	// Build SSH command arguments. ControlMaster=no / ControlPath=none ensure
@@ -3534,7 +3551,7 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 
 	// Set up SSH key pair if not specified
 	if launchConfig.KeyName == "" {
-		keyName, err := setupSSHKey(ctx, awsClient, queueRegion, plat)
+		keyName, err := setupSSHKey(ctx, awsClient, queueRegion, launchConfig.AMI, plat)
 		if err != nil {
 			return fmt.Errorf("failed to setup SSH key: %w", err)
 		}

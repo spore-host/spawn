@@ -663,6 +663,27 @@ func rootVolumeSizeFromMappings(rootName string, mappings []types.BlockDeviceMap
 	return maxSize
 }
 
+// IsWindowsAMI reports whether the given AMI is a Windows image. Best-effort:
+// any error (AMI not found, no permission) returns false, so callers default to
+// the Linux/SSH path. Used at launch to choose an RSA keypair (Windows password
+// decryption needs RSA) vs the default ED25519.
+func (c *Client) IsWindowsAMI(ctx context.Context, region, amiID string) bool {
+	if amiID == "" {
+		return false
+	}
+	cfg := c.cfg.Copy()
+	cfg.Region = region
+	ec2Client := ec2.NewFromConfig(cfg)
+	out, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
+		ImageIds: []string{amiID},
+	})
+	if err != nil || len(out.Images) == 0 {
+		return false
+	}
+	// EC2 sets Platform to "windows" for Windows AMIs; it's empty for Linux.
+	return strings.EqualFold(string(out.Images[0].Platform), "windows")
+}
+
 func valueOrEmpty(s *string) string {
 	if s == nil {
 		return ""

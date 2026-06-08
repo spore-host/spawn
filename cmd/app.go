@@ -179,7 +179,7 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("detect platform: %w", err)
 	}
-	keyName, err := setupSSHKey(ctx, client, region, plat)
+	keyName, err := setupSSHKey(ctx, client, region, ami, plat)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  SSH key setup failed: %v — launching without key (DCV only)\n", err)
 		keyName = ""
