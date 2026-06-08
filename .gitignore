@@ -1,5 +1,7 @@
 spawn
 /spored
+/spored.exe
+/spawn.exe
 
 # Lambda build artifacts
 lambda/*/bootstrap
