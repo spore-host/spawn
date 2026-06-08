@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cross-account IAM role that allows the spawn TTL reaper Lambda (in
+  spore-host-infra) to describe and terminate spawn-managed EC2 instances in
+  this account.
+
+  Deploy this template in EVERY AWS account that spawn launches spores into
+  (spore-host-dev 435415984226 and any others — a spore lands in whatever account
+  the caller's credentials point at). Collect each stack's RoleArn output into
+  the reaper Lambda's REAPER_ROLE_ARNS (comma-separated). See spore-host/spawn#70.
+
+Parameters:
+  ReaperLambdaRoleArn:
+    Type: String
+    Description: >
+      ARN of the TTL reaper Lambda execution role in spore-host-infra.
+      Example: arn:aws:iam::966362334030:role/spawn-ttl-reaper-production-...
+      (the FunctionRoleArn output of the reaper SAM stack)
+    AllowedPattern: 'arn:aws:iam::\d{12}:role/.+'
+    ConstraintDescription: Must be a valid IAM role ARN
+
+  TagPrefix:
+    Type: String
+    Default: spawn
+    AllowedValues: [spawn, prism]
+    Description: Tag namespace for managed instances (spawn:managed=true).
+
+  RoleName:
+    Type: String
+    Default: spawn-ttl-reaper-ec2
+    Description: Name of the cross-account IAM role to create
+
+Resources:
+  TTLReaperCrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: !Sub 'Allows the spawn TTL reaper to terminate expired ${TagPrefix}-managed EC2 instances'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref ReaperLambdaRoleArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Sub '${TagPrefix}-ttl-reaper'
+      Policies:
+        - PolicyName: ReaperEC2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Describe across all regions to find expired instances.
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                Resource: '*'
+              # Terminate — scoped to managed instances only. The reaper never
+              # touches anything not tagged spawn:managed=true.
+              # NOTE: the condition key is a literal "spawn:managed" (hardcoded,
+              # matching pkg/aws/iam.go). CloudFormation !Sub substitutes scalar
+              # *values*, not map *keys*, so ${TagPrefix} cannot be interpolated
+              # here — a prism deployment needs its own stack with prism:managed.
+              - Effect: Allow
+                Action:
+                  - ec2:TerminateInstances
+                # trivy:ignore:AVD-AWS-0057 -- Resource * required (TerminateInstances
+                # has no resource-level ARN); access is constrained by the tag condition.
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ec2:ResourceTag/spawn:managed: 'true'
+      Tags:
+        - Key: !Sub '${TagPrefix}:managed'
+          Value: 'false'
+        - Key: Purpose
+          Value: spawn-ttl-reaper-cross-account
+
+Outputs:
+  RoleArn:
+    Description: Set this as EC2_ROLE_ARN on the reaper Lambda.
+    Value: !GetAtt TTLReaperCrossAccountRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-role-arn'
+  ExternalId:
+    Description: External ID required when assuming this role (set as EC2_EXTERNAL_ID on the Lambda).
+    Value: !Sub '${TagPrefix}-ttl-reaper'

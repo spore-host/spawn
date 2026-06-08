@@ -1,0 +1,165 @@
+package main
+
+import (
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/spawn/pkg/tagprefix"
+)
+
+func init() { tagprefix.Init() }
+
+func tag(k, v string) ec2types.Tag { return ec2types.Tag{Key: aws.String(k), Value: aws.String(v)} }
+
+func newReaper() *reaper { return &reaper{maxAge: 7 * 24 * time.Hour} }
+
+func TestEvaluate_PastDeadline_Reaped(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-past"),
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			tag("Name", "old-job"),
+			tag("spawn:ttl-deadline", now.Add(-30*time.Minute).Format(time.RFC3339)),
+		},
+	}
+	c, expired := newReaper().evaluate(inst, "us-east-1", now)
+	if !expired {
+		t.Fatal("instance past its ttl-deadline must be reaped")
+	}
+	if c.reason != "ttl-deadline" {
+		t.Errorf("reason = %q, want ttl-deadline", c.reason)
+	}
+	if c.name != "old-job" {
+		t.Errorf("name = %q, want old-job", c.name)
+	}
+}
+
+func TestEvaluate_WithinDeadline_Spared(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-fresh"),
+		// launch-time far in the past, but deadline is in the FUTURE: the
+		// honored deadline must win and max-age must NOT also fire.
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			tag("spawn:ttl-deadline", now.Add(2*time.Hour).Format(time.RFC3339)),
+			tag("spawn:launch-time", now.Add(-30*24*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	if _, expired := newReaper().evaluate(inst, "us-east-1", now); expired {
+		t.Fatal("instance within its ttl-deadline must be spared even if launch-time is old")
+	}
+}
+
+func TestEvaluate_NoDeadline_MaxAgeCeiling(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	// --no-timeout style: no ttl-deadline tag, but launch-time exceeds max-age.
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-nodeadline"),
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			tag("spawn:launch-time", now.Add(-8*24*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	c, expired := newReaper().evaluate(inst, "us-east-1", now)
+	if !expired {
+		t.Fatal("instance older than max-age must be reaped even with no deadline")
+	}
+	if c.reason != "max-age" {
+		t.Errorf("reason = %q, want max-age", c.reason)
+	}
+}
+
+func TestEvaluate_NoDeadline_YoungerThanMaxAge_Spared(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-young"),
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			tag("spawn:launch-time", now.Add(-1*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	if _, expired := newReaper().evaluate(inst, "us-east-1", now); expired {
+		t.Fatal("young instance with no deadline must be spared")
+	}
+}
+
+func TestEvaluate_UnparseableDeadline_FallsBackToMaxAge(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-garbage"),
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			tag("spawn:ttl-deadline", "not-a-timestamp"),
+			tag("spawn:launch-time", now.Add(-10*24*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	c, expired := newReaper().evaluate(inst, "us-east-1", now)
+	if !expired {
+		t.Fatal("unparseable deadline must fall back to max-age ceiling")
+	}
+	if c.reason != "max-age" {
+		t.Errorf("reason = %q, want max-age", c.reason)
+	}
+}
+
+func TestEvaluate_FallsBackToAPILaunchTimeWhenTagMissing(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	apiLaunch := now.Add(-9 * 24 * time.Hour)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-notag"),
+		LaunchTime: &apiLaunch,
+		Tags:       []ec2types.Tag{tag("spawn:managed", "true")},
+	}
+	c, expired := newReaper().evaluate(inst, "us-east-1", now)
+	if !expired || c.reason != "max-age" {
+		t.Fatalf("must reap via API LaunchTime fallback; got expired=%t reason=%q", expired, c.reason)
+	}
+}
+
+func TestParseRegions(t *testing.T) {
+	if got := parseRegions(""); len(got) != len(defaultRegions) {
+		t.Errorf("empty should yield defaults (%d), got %d", len(defaultRegions), len(got))
+	}
+	got := parseRegions("us-east-1, eu-west-1 ,")
+	if len(got) != 2 || got[0] != "us-east-1" || got[1] != "eu-west-1" {
+		t.Errorf("parseRegions trimming failed: %v", got)
+	}
+}
+
+func TestAccountIDFromRoleARN(t *testing.T) {
+	got := accountIDFromRoleARN("arn:aws:iam::435415984226:role/spawn-ttl-reaper-ec2")
+	if got != "435415984226" {
+		t.Errorf("account id = %q, want 435415984226", got)
+	}
+	// Non-ARN input returns the input unchanged (best-effort label).
+	if got := accountIDFromRoleARN("weird"); got != "weird" {
+		t.Errorf("non-ARN should pass through, got %q", got)
+	}
+}
+
+func TestParseListAndDedup(t *testing.T) {
+	got := parseList("a, b ,, a ")
+	if len(got) != 3 { // parseList keeps dupes; dedup removes them
+		t.Fatalf("parseList = %v, want 3 items", got)
+	}
+	d := dedup(got)
+	if len(d) != 2 || d[0] != "a" || d[1] != "b" {
+		t.Errorf("dedup = %v, want [a b]", d)
+	}
+}
+
+func TestParseMaxAge(t *testing.T) {
+	if got := parseMaxAge(""); got != defaultMaxAge {
+		t.Errorf("empty should be default %s, got %s", defaultMaxAge, got)
+	}
+	if got := parseMaxAge("2h"); got != 2*time.Hour {
+		t.Errorf("2h parse failed: %s", got)
+	}
+	if got := parseMaxAge("garbage"); got != defaultMaxAge {
+		t.Errorf("garbage should fall back to default, got %s", got)
+	}
+}

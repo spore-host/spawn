@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  spawn TTL reaper — out-of-band backstop that terminates spawn-managed EC2
+  instances past their spawn:ttl-deadline (or a hard max-age ceiling), even when
+  the in-instance spored daemon is dead. Backstop, NOT a replacement for spored.
+  See spore-host/spawn#70, #71.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment
+
+  RoleArns:
+    Type: CommaDelimitedList
+    Default: 'arn:aws:iam::435415984226:role/spawn-ttl-reaper-ec2'
+    Description: >
+      Cross-account EC2 reaper role ARNs — ONE PER ACCOUNT that spawn launches
+      spores into. A spore lands in whatever account the caller's credentials
+      point at, so list every such account's role here. Deploy
+      ttl-reaper-cross-account-role.yaml in each account to create these.
+
+  ScanSelf:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Also scan the Lambda's OWN account directly (no assume-role). Set true if
+      spores are launched in the infra account too.
+
+  Regions:
+    Type: String
+    Default: 'us-east-1,us-east-2,us-west-1,us-west-2,ca-central-1,eu-west-1,eu-west-2,eu-central-1,ap-southeast-1,ap-southeast-2,ap-northeast-1'
+    Description: Comma-separated regions to scan (defaults to the 11 release-bucket regions)
+
+  MaxAge:
+    Type: String
+    Default: '168h'
+    Description: Hard max-age ceiling (Go duration); reaps even --no-timeout/missing-deadline instances older than this
+
+  DryRun:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: When true, log "WOULD reap" + notify without terminating. Start true; flip to false after verifying.
+
+  NotifyUrl:
+    Type: String
+    Default: ''
+    Description: Slack-incoming-webhook URL for reap notifications (optional but recommended)
+
+  Schedule:
+    Type: String
+    Default: 'rate(10 minutes)'
+    Description: EventBridge schedule expression for the reaper
+
+Conditions:
+  ScanSelfEnabled: !Equals [!Ref ScanSelf, 'true']
+
+Resources:
+  TTLReaperFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub spawn-ttl-reaper-${Environment}
+      Runtime: provided.al2023
+      Architectures: [arm64]
+      Handler: bootstrap
+      CodeUri: .
+      MemorySize: 256
+      Timeout: 900
+      Environment:
+        Variables:
+          REAPER_ROLE_ARNS: !Join [',', !Ref RoleArns]
+          REAPER_SCAN_SELF: !Ref ScanSelf
+          EC2_EXTERNAL_ID: spawn-ttl-reaper
+          REAPER_REGIONS: !Ref Regions
+          REAPER_MAX_AGE: !Ref MaxAge
+          REAPER_DRY_RUN: !Ref DryRun
+          REAPER_NOTIFY_URL: !Ref NotifyUrl
+      Policies:
+        # Assume each per-account role that actually describes/terminates EC2.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sts:AssumeRole
+              Resource: !Ref RoleArns
+        # When scanning the Lambda's own account directly (ScanSelf=true), it
+        # needs describe/terminate locally too. Terminate is tag-scoped to
+        # spawn:managed=true so the reaper can never touch unmanaged instances.
+        - !If
+            - ScanSelfEnabled
+            - Statement:
+                - Effect: Allow
+                  Action:
+                    - ec2:DescribeInstances
+                    - ec2:DescribeTags
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - ec2:TerminateInstances
+                  Resource: '*'
+                  Condition:
+                    StringEquals:
+                      ec2:ResourceTag/spawn:managed: 'true'
+            - !Ref AWS::NoValue
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref Schedule
+            Enabled: true
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/spawn-ttl-reaper-${Environment}
+      RetentionInDays: 30
+
+Outputs:
+  FunctionArn:
+    Description: ARN of the TTL reaper Lambda function
+    Value: !GetAtt TTLReaperFunction.Arn
+    Export:
+      Name: !Sub ${Environment}-ttl-reaper-arn
+  FunctionRoleArn:
+    Description: Execution role ARN (trust this in the dev-account cross-account role)
+    Value: !GetAtt TTLReaperFunctionRole.Arn

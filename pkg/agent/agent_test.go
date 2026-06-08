@@ -19,6 +19,12 @@ type stubProvider struct {
 	identity *provider.Identity
 	config   *provider.Config
 	spot     bool
+
+	// terminated/stopped/hibernated record which lifecycle action the agent
+	// invoked, so tests can assert TTL always terminates (never stop/hibernate).
+	terminated bool
+	stopped    bool
+	hibernated bool
 }
 
 func (s *stubProvider) GetIdentity(_ context.Context) (*provider.Identity, error) {
@@ -28,9 +34,9 @@ func (s *stubProvider) GetConfig(_ context.Context) (*provider.Config, error) {
 	return s.config, nil
 }
 func (s *stubProvider) RefreshConfig(_ context.Context) error       { return nil }
-func (s *stubProvider) Terminate(_ context.Context, _ string) error { return nil }
-func (s *stubProvider) Stop(_ context.Context, _ string) error      { return nil }
-func (s *stubProvider) Hibernate(_ context.Context) error           { return nil }
+func (s *stubProvider) Terminate(_ context.Context, _ string) error { s.terminated = true; return nil }
+func (s *stubProvider) Stop(_ context.Context, _ string) error      { s.stopped = true; return nil }
+func (s *stubProvider) Hibernate(_ context.Context) error           { s.hibernated = true; return nil }
 func (s *stubProvider) IsSpotInstance(_ context.Context) bool       { return s.spot }
 func (s *stubProvider) CheckSpotInterruption(_ context.Context) (*provider.InterruptionInfo, error) {
 	return nil, nil
@@ -374,4 +380,41 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.w.Write(p)
+}
+
+// TestCheckAndAct_ExpiredTTL_AlwaysTerminates is the #72 guardrail: an expired
+// TTL must ALWAYS terminate — never stop or hibernate. "stop" is not terminal
+// (it bills EBS forever and runs no daemon to re-check TTL). This locks the
+// invariant so nobody can later redirect TTL expiry to a non-terminate action.
+func TestCheckAndAct_ExpiredTTL_AlwaysTerminates(t *testing.T) {
+	identity := &provider.Identity{InstanceID: "i-ttl", Region: "us-east-1", Provider: "stub"}
+	cfg := &provider.Config{
+		// Deadline already in the past → expired this tick.
+		TTLDeadline: time.Now().Add(-time.Minute),
+		// Set HibernateOnIdle to prove the TTL path ignores it (only idle honors it).
+		HibernateOnIdle: true,
+	}
+	sp := &stubProvider{identity: identity, config: cfg}
+	a := &Agent{
+		provider:         sp,
+		identity:         identity,
+		config:           cfg,
+		startTime:        time.Now().Add(-2 * time.Hour),
+		lastActivityTime: time.Now(),
+		// Keep checkAndAct hermetic: skip the (real-AWS) tag-write calls.
+		lastSessionTagWrite: time.Now().Add(time.Hour),
+		lastComputeTagWrite: time.Now().Add(time.Hour),
+	}
+
+	a.checkAndAct(context.Background())
+
+	if !sp.terminated {
+		t.Error("expired TTL must call Terminate")
+	}
+	if sp.stopped {
+		t.Error("expired TTL must NOT Stop (#72: TTL always terminates)")
+	}
+	if sp.hibernated {
+		t.Error("expired TTL must NOT Hibernate, even with HibernateOnIdle set (#72)")
+	}
 }
