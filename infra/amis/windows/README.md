@@ -99,23 +99,22 @@ formula under `$(brew --prefix)/share/qemu/`.
 
 ## Build steps
 
-1. **Build the answer ISO** carrying `Autounattend.xml` (macOS/Linux):
-   ```bash
-   xorriso -as mkisofs -o answer.iso -V UNATTEND -J -r Autounattend.xml
-   ```
-   (On a Windows host use the ADK's `oscdimg` instead.)
-
-2. **Build the VM image** (unattended install → provision → sysprep → export).
-   On **Apple Silicon** keep `accel=tcg` (default) and point `firmware` at the
-   brew qemu firmware; on **Intel macOS** pass `-var accel=hvf`:
+1. **Build the VM image** (unattended install → provision → sysprep → export).
+   The qemu builder attaches `Autounattend.xml` automatically via `cd_files` (a
+   second CD) — no manual answer-ISO step. On **Apple Silicon** keep `accel=tcg`
+   (default, pure emulation); on **Intel macOS** pass `-var accel=hvf`:
    ```bash
    packer init windows11.pkr.hcl
    packer validate windows11.pkr.hcl
    packer build \
      -var "iso_path=/Volumes/External HD/<your-windows>.iso" \
-     -var "firmware=$(brew --prefix)/share/qemu/edk2-x86_64-code.fd" \
+     -var "efi_code=$(brew --prefix)/share/qemu/edk2-x86_64-code.fd" \
+     -var "efi_vars=$(brew --prefix)/share/qemu/edk2-i386-vars.fd" \
      windows11.pkr.hcl
    ```
+   (Watch the install: `packer build` prints a VNC address — connect with any
+   VNC client to see the Windows Setup screen. The first boot sits at "Waiting
+   for WinRM" for the whole install; on Apple Silicon that's hours.)
    Output: `output-win11/win11.vmdk` (qemu emits qcow2; a post-processor
    converts it to stream-optimized VMDK for import). This runs the full Windows
    install + `provision.ps1` (EC2 components) + sysprep generalize/shutdown.

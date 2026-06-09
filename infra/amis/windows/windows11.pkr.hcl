@@ -43,9 +43,10 @@ variable "disk_size_mb" {
   default = 40960 // 40 GiB; import resizes/uses as the root volume
 }
 
-// Path to the secondary "answer" ISO carrying Autounattend.xml at its root.
-// Build it first (macOS/Linux): see README — `xorriso -as mkisofs -o answer.iso
-// -V UNATTEND -J -r Autounattend.xml`. (On Windows, oscdimg builds the same.)
+// Answer media: the qemu builder uses cd_files (below) to build the
+// Autounattend CD automatically — no prebuilt ISO needed. This var is only for
+// the Hyper-V alternative (commented at the bottom), which takes a prebuilt ISO
+// via secondary_iso_images (build it with oscdimg/xorriso; see README).
 variable "answer_iso" {
   type    = string
   default = "./answer.iso"
@@ -58,35 +59,67 @@ variable "accel" {
   default = "tcg"
 }
 
-// Path to the x86_64 UEFI firmware qemu ships (brew: $(brew --prefix)/share/qemu).
-variable "firmware" {
+// x86_64 UEFI firmware qemu ships (brew: $(brew --prefix)/share/qemu).
+// Win11 requires UEFI — these are attached as pflash via the plugin's efi_*
+// options (NOT -bios, which can't load the edk2 code blob).
+variable "efi_code" {
   type    = string
   default = "/opt/homebrew/share/qemu/edk2-x86_64-code.fd"
+}
+
+variable "efi_vars" {
+  type    = string
+  default = "/opt/homebrew/share/qemu/edk2-i386-vars.fd"
 }
 
 source "qemu" "win11" {
   iso_url      = var.iso_path
   iso_checksum = var.iso_checksum
 
-  // Attach the answer ISO as a second CD so Windows Setup auto-finds
-  // Autounattend.xml at its root.
-  cd_files = []
-  qemuargs = [
-    ["-drive", "file=${var.answer_iso},media=cdrom,index=2"],
+  // Carry Autounattend.xml on a CD that Packer attaches as the SECOND CD device
+  // (the install ISO is the first). Using cd_files — NOT qemuargs — is critical:
+  // qemuargs is a full override and would wipe Packer's default disk + install
+  // ISO + EFI pflash drives. Windows Setup auto-discovers Autounattend.xml on
+  // removable media. headless: no GUI; connect to the VNC port Packer prints to
+  // watch the install.
+  headless = true
+  cd_files = ["./Autounattend.xml"]
+  cd_label = "UNATTEND"
+
+  // Boot the install DVD. Windows media shows "Press any key to boot from CD or
+  // DVD..."; press Enter repeatedly to catch it. If the firmware instead drops
+  // to the UEFI Interactive Shell (common with edk2/OVMF when the prompt is
+  // missed), the follow-up navigates there: select the DVD filesystem and run
+  // its EFI bootloader (\EFI\BOOT\BOOTX64.EFI). boot_command keystrokes go over
+  // VNC (must stay enabled). After boot, Autounattend drives the rest hands-free.
+  boot_wait         = "2s"
+  boot_key_interval = "200ms"
+  boot_command = [
+    "<enter><wait2><enter><wait2><enter>",
+    // Fallback if we landed in the UEFI shell: try each FS handle, run the
+    // bootloader. Harmless if Windows is already booting (keys are ignored).
+    "<wait5>fs0:<enter><wait1>\\EFI\\BOOT\\BOOTX64.EFI<enter>",
+    "<wait5>fs1:<enter><wait1>\\EFI\\BOOT\\BOOTX64.EFI<enter>",
   ]
+
+  // UEFI boot via pflash (Win11 requirement). The plugin copies efi_firmware_vars
+  // to a writable per-build file. q35 is required for UEFI/Secure Boot.
+  efi_boot          = true
+  efi_firmware_code = var.efi_code
+  efi_firmware_vars = var.efi_vars
+  machine_type      = "q35"
 
   communicator   = "winrm"
   winrm_username = "Administrator"
   winrm_password = var.admin_password
   winrm_timeout  = "8h" // emulated install on Apple Silicon is slow
 
-  accelerator = var.accel
-  firmware    = var.firmware
-  cpus        = 4
-  memory      = 4096
-  disk_size   = var.disk_size_mb
-  format      = "qcow2" // qemu builder only emits qcow2/raw; converted to VMDK below
-  net_device  = "e1000"
+  accelerator    = var.accel
+  cpus           = 4
+  memory         = 4096
+  disk_size      = var.disk_size_mb
+  format         = "qcow2" // qemu builder only emits qcow2/raw; converted to VMDK below
+  net_device     = "e1000"
   disk_interface = "ide" // Windows Setup has no virtio driver by default
 
   shutdown_command = "shutdown /s /t 10 /f"
