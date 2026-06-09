@@ -20,7 +20,13 @@ whole thing.
 1. **Supported ISOs only.** Image Builder accepts **Windows 11 Enterprise
    23H2 / 24H2 / 25H2 (x64)**. It **rejects**: Evaluation images,
    Media-Creation-Tool ISOs, and LTSC. Get the ISO from the **Microsoft 365
-   admin center** (not the consumer Media Creation Tool).
+   admin center** (not the consumer Media Creation Tool). The business-editions
+   ISO from the M365 admin center *contains* Enterprise (typically image index
+   3, with Enterprise N at 4) alongside Education/Pro — only the Enterprise
+   index is supported here, so pass `--image-index`. Run `spawn image verify
+   <iso>` to see the editions and the right index without guessing. Education
+   and Pro editions, even though present, are **not** in the documented
+   supported set (and need their own licensing to run regardless).
 2. **BYOL.** Microsoft licensing is not included with the import — bring your own
    license. See the [AWS + Microsoft licensing FAQ](https://aws.amazon.com/windows/faq/#licensing-q).
    Don't distribute the resulting AMI.
@@ -43,12 +49,19 @@ sets the Amazon time server. The AMI runs **Sysprep Specialize** at first launch
 ## Quick start
 
 ```bash
+# 0. (Recommended) Verify the ISO is acceptable BEFORE spending a real build.
+#    Reads the ISO's install.wim locally — no mount, no AWS, no cost — and tells
+#    you which editions it holds and the --image-index to use.
+spawn image verify "/Volumes/External HD/Win11_Enterprise_25H2.iso"
+#    → "ACCEPTED: contains Windows 11 Enterprise (x64). Import with --image-index 3."
+
 # Local ISO → AMI. spawn uploads the ISO, self-provisions the IAM roles +
 # Image Builder infrastructure configuration, imports, polls, and tags the AMI.
 spawn image import \
-  --iso "/Volumes/External HD/Win11_25H2_Enterprise.iso" \
+  --iso "/Volumes/External HD/Win11_Enterprise_25H2.iso" \
   --bucket my-iso-bucket \
   --name win11-25h2 \
+  --image-index 3 \
   --version 1.0.0
 
 # ...prints the new AMI id. Launch it (Windows requires a lifetime — #72):
@@ -133,6 +146,7 @@ the `spawn:os=windows` tag covers it either way). spored installs itself at boot
 | File | Purpose |
 |------|---------|
 | `README.md` | This runbook |
+| (command) `spawn image verify <iso>` | `cmd/image.go` + `pkg/winiso` — local ISO edition check + accept/reject verdict (no AWS) |
 | (command) `spawn image import` | `cmd/image.go` + `pkg/aws/imagebuilder.go` — the import workflow |
 
 > **Legacy:** an earlier qemu/Packer build pipeline (a hand-rolled unattended

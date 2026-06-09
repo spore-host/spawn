@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/progress"
+	"github.com/spore-host/spawn/pkg/winiso"
 )
 
 // `spawn image import` flags.
@@ -64,6 +65,59 @@ Examples:
   spawn image import --iso s3://my-bucket/Win11_25H2_Enterprise.ISO \
     --name win11-25h2`,
 	RunE: runImageImport,
+}
+
+var imageVerifyCmd = &cobra.Command{
+	Use:   "verify <path-to.iso>",
+	Short: "Check whether a Windows ISO is acceptable to EC2 Image Builder",
+	Long: `Inspect a local Windows installation ISO and report which editions it
+contains and whether 'spawn image import' (EC2 Image Builder import-disk-image)
+will accept it — before you spend a real, paid build.
+
+import-disk-image accepts only Windows 11 Enterprise (23H2/24H2/25H2, x64),
+non-Evaluation. This reads the ISO's install.wim metadata directly (no mount, no
+external tools) and prints each edition with its image index, flags the one to
+use, and gives a clear ACCEPTED/REJECTED verdict.
+
+Examples:
+  spawn image verify "/Volumes/External HD/Win11_Enterprise_25H2.iso"
+  spawn image verify win11.iso -o json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runImageVerify,
+}
+
+func runImageVerify(cmd *cobra.Command, args []string) error {
+	path := args[0]
+	rep, err := winiso.InspectFile(path)
+	if err != nil {
+		return err
+	}
+
+	if getOutputFormat() == "json" {
+		return json.NewEncoder(os.Stdout).Encode(rep)
+	}
+
+	fmt.Printf("ISO: %s\n\n", path)
+	fmt.Printf("  %-3s  %-34s  %-6s  %-7s  %s\n", "IDX", "EDITION", "ARCH", "BUILD", "import-disk-image")
+	fmt.Printf("  %-3s  %-34s  %-6s  %-7s  %s\n", "---", "----------------------------------", "------", "-------", "----------------")
+	for _, e := range rep.Editions {
+		mark := "—"
+		if e.Supported {
+			mark = "✓ supported"
+		} else if e.Eval {
+			mark = "✗ Evaluation"
+		}
+		fmt.Printf("  %-3d  %-34s  %-6s  %-7s  %s\n", e.Index, e.Name, e.Arch, e.Build, mark)
+	}
+
+	fmt.Printf("\n%s\n", rep.Summary)
+	if rep.Acceptable {
+		fmt.Printf("\nNext:\n  spawn image import --iso %q --bucket <s3-bucket> \\\n    --name win11-25h2 --image-index %d\n",
+			path, rep.RecommendedIndex)
+		return nil
+	}
+	// Non-zero exit so scripts can gate on it.
+	return fmt.Errorf("ISO is not acceptable to import-disk-image")
 }
 
 // validateImageImportFlags checks the required/consistent flags before any AWS
@@ -220,6 +274,7 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 func init() {
 	rootCmd.AddCommand(imageCmd)
 	imageCmd.AddCommand(imageImportCmd)
+	imageCmd.AddCommand(imageVerifyCmd)
 
 	f := imageImportCmd.Flags()
 	f.StringVar(&imageImportISO, "iso", "", "Windows 11 ISO: local path or s3://bucket/key.ISO (required)")
