@@ -2041,13 +2041,24 @@ try {
   $token = Invoke-RestMethod -Method Put -Uri 'http://169.254.169.254/latest/api/token' -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='21600'} -TimeoutSec 5
   $region = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/region' -Headers @{'X-aws-ec2-metadata-token'=$token} -TimeoutSec 5
   if (-not $region) { $region = 'us-east-1' }
+
+  # The stock Windows Server AMI has no AWS CLI (unlike AL2023), so install it
+  # before pulling spored from S3. aws.exe lands in Program Files; call it by
+  # full path since the current session PATH won't yet include it.
+  $aws = "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe"
+  if (-not (Test-Path $aws)) {
+    $msi = "$env:TEMP\AWSCLIV2.msi"
+    Invoke-WebRequest -Uri 'https://awscli.amazonaws.com/AWSCLIV2.msi' -OutFile $msi -UseBasicParsing
+    Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
+  }
+
   $dir = Join-Path $env:ProgramFiles 'spored'
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
   $exe = Join-Path $dir 'spored.exe'
   $bucket = "spawn-binaries-$region"
   $ok = $false
   foreach ($uri in @("s3://$bucket/spawn/spored-windows-amd64.exe","s3://$bucket/spored-windows-amd64.exe","s3://spawn-binaries-us-east-1/spawn/spored-windows-amd64.exe")) {
-    & aws s3 cp $uri $exe --region $region 2>$null
+    & $aws s3 cp $uri $exe --region $region 2>$null
     if ($LASTEXITCODE -eq 0 -and (Test-Path $exe)) { $ok = $true; break }
   }
   if ($ok) {
