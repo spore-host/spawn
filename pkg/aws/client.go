@@ -1329,6 +1329,19 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to attach policy to role: %w", err)
 	}
 
+	// 2b. Attach AmazonSSMManagedInstanceCore so the instance registers with SSM.
+	// This is what `spawn connect` uses on Windows (Session Manager + RunCommand,
+	// since there's no SSH-user model) and is a useful no-public-IP fallback on
+	// Linux too. Idempotent; AccessDenied (e.g. restricted IAM) is non-fatal —
+	// the instance still works, connect just can't fall back to SSM.
+	_, err = iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
+		RoleName:  aws.String(roleName),
+		PolicyArn: aws.String("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"),
+	})
+	if err != nil {
+		log.Printf("Warning: could not attach AmazonSSMManagedInstanceCore to %s (SSM connect may be unavailable): %v", roleName, err)
+	}
+
 	// 3. Check if instance profile exists, create if not
 	_, err = iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
 		InstanceProfileName: aws.String(instanceProfileName),
