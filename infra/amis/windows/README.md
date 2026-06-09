@@ -54,12 +54,70 @@ partly manual** — read all of "Constraints" first.
 
 | Option | Pros | Cons |
 |--------|------|------|
-| **Windows host + Hyper-V** (primary) | Native Windows virtualization, most reliable unattended installs, native DISM/sysprep/ADK | Needs Hyper-V enabled (reboot); a personal box is intrusive for multi-hour builds |
-| **macOS/Linux + qemu** (fallback) | No reboot, runs on the dev Mac | Windows-on-qemu is finickier; slower |
-| **EC2 `*.metal` Windows builder** (best for repeatability) | Ephemeral, scriptable, no personal machine, fast | Costs a metal instance for the build window; more setup |
+| **EC2 c8i/m8i/r8i + nested virtualization** (recommended) | Hardware-accelerated KVM on a cheap *virtual* instance (~$0.70/hr, not ~$4/hr metal); ephemeral; scriptable; launch it with spawn itself | A few setup steps (below) |
+| **Windows host + Hyper-V** | Native Windows virtualization, reliable installs | Needs Hyper-V enabled (reboot); a personal box is intrusive |
+| **macOS/Linux + qemu (local)** | No EC2; runs on the dev box | **Apple Silicon: x86 emulation is many hours/flaky** (see prereqs note); Intel/Linux is fine |
 
-`import-image` and the licensing constraint are identical for all three — only
+`import-image` and the licensing constraint are identical for all of them — only
 the *VM build* step differs.
+
+---
+
+## Recommended: build on an EC2 nested-virtualization instance via spawn
+
+AWS supports nested virtualization (hardware-accelerated KVM inside a *virtual*
+instance) on **C8i/M8i/R8i** (Feb 2026, all regions, no extra cost) — so you can
+build at native speed without a bare-metal instance. spawn launches it directly:
+
+```bash
+# 1. Launch an Ubuntu c8i builder with nested virt + a big scratch volume + TTL.
+#    Ubuntu (NOT Amazon Linux 2023 — AL2023's repos ship only qemu-img, no full
+#    qemu-system). --nested-virtualization is validated against the instance type.
+UBUNTU=$(aws ssm get-parameters --region us-east-1 \
+  --names /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id \
+  --query 'Parameters[0].Value' --output text)
+spawn launch winami-builder \
+  --instance-type c8i.4xlarge --region us-east-1 \
+  --ami "$UBUNTU" --os linux \
+  --nested-virtualization \
+  --volume-size 200 --ttl 5h --wait-for-ssh=false
+
+# 2. SSH in (spawn injects your key for the local user). Confirm KVM:
+#    ls -la /dev/kvm   → present;  grep -c vmx /proc/cpuinfo → >0
+#
+# 3. The --volume-size 200 lands as a SEPARATE unformatted disk (the Ubuntu
+#    root is its own 8 GB device). Format + mount it as the build workspace:
+sudo mkfs.ext4 -F /dev/nvme1n1 && sudo mkdir -p /build && sudo mount /dev/nvme1n1 /build
+sudo chown "$USER:$USER" /build
+
+# 4. Install the toolchain (Ubuntu makes this easy):
+sudo apt-get update
+sudo apt-get install -y qemu-system-x86 qemu-utils ovmf xorriso rsync
+wget -qO- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+sudo apt-get update && sudo apt-get install -y packer
+sudo usermod -aG kvm "$USER"   # log out/in for the group to take effect
+#    Ubuntu OVMF firmware is /usr/share/OVMF/OVMF_CODE_4M.fd + OVMF_VARS_4M.fd.
+
+# 5. Copy templates + the ISO to /build. Use rsync for the multi-GB ISO so it
+#    resumes if the connection drops:
+rsync --partial --inplace --progress your-windows.iso scttfrdmn@<ip>:/build/windows.iso
+scp windows11.pkr.hcl Autounattend.xml provision.ps1 import.sh scttfrdmn@<ip>:/build/
+
+# 6. Build (accel=kvm — fast, native). On Ubuntu point efi_* at the 4M OVMF:
+cd /build && packer init windows11.pkr.hcl
+packer build \
+  -var "iso_path=/build/windows.iso" \
+  -var "accel=kvm" \
+  -var "efi_code=/usr/share/OVMF/OVMF_CODE_4M.fd" \
+  -var "efi_vars=/usr/share/OVMF/OVMF_VARS_4M.fd" \
+  windows11.pkr.hcl
+
+# 7. Import + tag from the builder (it has the instance role / aws cli):
+./import.sh /build/output-win11/win11.vmdk <s3-bucket> us-east-1
+
+# 8. The builder self-terminates at its TTL; or `spawn terminate winami-builder`.
+```
 
 ---
 
