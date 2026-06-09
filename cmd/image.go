@@ -1,0 +1,239 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/progress"
+)
+
+// `spawn image import` flags.
+var (
+	imageImportISO      string
+	imageImportBucket   string
+	imageImportRegion   string
+	imageImportInfraArn string
+	imageImportName     string
+	imageImportVersion  string
+	imageImportIndex    int64
+	imageImportNoSecure bool
+	imageImportExecRole string
+	imageImportS3Key    string
+	imageImportInstType string
+	imageImportSubnet   string
+	imageImportSGs      []string
+)
+
+var imageCmd = &cobra.Command{
+	Use:   "image",
+	Short: "Build and manage custom machine images",
+	Long: `Create custom AMIs that spawn can launch.
+
+Currently supports importing a Windows 11 ISO into an AMI via AWS EC2 Image
+Builder's managed import-disk-image workflow (drivers, EC2Launch, SSM agent and
+Defender are pre-staged automatically). See infra/amis/windows/README.md.`,
+}
+
+var imageImportCmd = &cobra.Command{
+	Use:   "import",
+	Short: "Import a Windows 11 ISO into an AMI via EC2 Image Builder",
+	Long: `Convert a Windows 11 ISO into an AMI using EC2 Image Builder's managed
+import-disk-image workflow, then tag it so 'spawn launch --os windows' can use it.
+
+The ISO must be a SUPPORTED, NON-evaluation Windows 11 Enterprise image
+(23H2 / 24H2 / 25H2 x64) obtained from the Microsoft 365 admin center. Evaluation,
+Media-Creation-Tool, and LTSC ISOs are rejected by the service. Bring your own
+Microsoft license (BYOL).
+
+The command self-provisions the IAM roles and Image Builder infrastructure
+configuration it needs (idempotent); pass --infra-config-arn only to reuse an
+existing/custom one. See infra/amis/windows/README.md.
+
+Examples:
+  # Local ISO — uploaded to --bucket, infra auto-provisioned:
+  spawn image import --iso ./Win11_25H2_Enterprise.iso --bucket my-bucket \
+    --name win11-25h2 --version 1.0.0
+
+  # ISO already in S3 (uppercase .ISO key required by the service):
+  spawn image import --iso s3://my-bucket/Win11_25H2_Enterprise.ISO \
+    --name win11-25h2`,
+	RunE: runImageImport,
+}
+
+// validateImageImportFlags checks the required/consistent flags before any AWS
+// call, so it's unit-testable without credentials. --infra-config-arn is
+// intentionally NOT required (it is self-provisioned when omitted).
+func validateImageImportFlags(iso, name, bucket string) error {
+	if iso == "" {
+		return fmt.Errorf("--iso is required (local path or s3://bucket/key.ISO)")
+	}
+	if name == "" {
+		return fmt.Errorf("--name is required (the Image Builder image resource name)")
+	}
+	if strings.HasPrefix(iso, "s3://") {
+		if !strings.HasSuffix(iso, ".ISO") {
+			return fmt.Errorf("the S3 object key must end in an uppercase .ISO extension; got %q", iso)
+		}
+	} else if bucket == "" {
+		return fmt.Errorf("--bucket is required when --iso is a local file (target for upload)")
+	}
+	return nil
+}
+
+func runImageImport(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := validateImageImportFlags(imageImportISO, imageImportName, imageImportBucket); err != nil {
+		return err
+	}
+
+	jsonOut := getOutputFormat() == "json"
+	var prog *progress.Progress
+	if jsonOut {
+		prog = progress.NewQuietProgress()
+	} else {
+		prog = progress.NewProgress()
+	}
+
+	awsClient, err := aws.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("init AWS client: %w", err)
+	}
+
+	// Resolve the S3 URI: either the ISO is already in S3, or we upload a local
+	// file to --bucket. import-disk-image requires an uppercase .ISO key.
+	var uri string
+	if strings.HasPrefix(imageImportISO, "s3://") {
+		uri = imageImportISO
+	} else {
+		key := imageImportS3Key
+		if key == "" {
+			base := filepath.Base(imageImportISO)
+			// Normalize the extension to uppercase .ISO regardless of input case.
+			key = strings.TrimSuffix(base, filepath.Ext(base)) + ".ISO"
+		}
+		prog.Start("Uploading ISO to S3")
+		if err := awsClient.UploadISOToS3(ctx, imageImportRegion, imageImportBucket, key, imageImportISO); err != nil {
+			prog.Error("Uploading ISO to S3", err)
+			return err
+		}
+		prog.Complete("Uploading ISO to S3")
+		uri = fmt.Sprintf("s3://%s/%s", imageImportBucket, key)
+	}
+
+	// Ensure the Image Builder service-linked execution role exists.
+	prog.Start("Ensuring Image Builder service role")
+	if err := awsClient.EnsureImageBuilderSLR(ctx); err != nil {
+		prog.Error("Ensuring Image Builder service role", err)
+		return err
+	}
+	prog.Complete("Ensuring Image Builder service role")
+
+	// Resolve the infrastructure configuration: use the provided ARN, or
+	// self-provision a default one (IAM role + instance profile + infra config).
+	infraArn := imageImportInfraArn
+	if infraArn == "" {
+		prog.Start("Ensuring import infrastructure")
+		infraArn, err = awsClient.EnsureImportInfrastructure(ctx, aws.EnsureImportInfrastructureInput{
+			Region:          imageImportRegion,
+			InstanceType:    imageImportInstType,
+			SubnetID:        imageImportSubnet,
+			SecurityGroupID: imageImportSGs,
+		})
+		if err != nil {
+			prog.Error("Ensuring import infrastructure", err)
+			return err
+		}
+		prog.Complete("Ensuring import infrastructure")
+	}
+
+	// Kick off the import.
+	in := aws.ImportWindowsISOInput{
+		Region:                         imageImportRegion,
+		Name:                           imageImportName,
+		SemanticVersion:                imageImportVersion,
+		URI:                            uri,
+		ExecutionRole:                  imageImportExecRole,
+		InfrastructureConfigurationArn: infraArn,
+	}
+	if cmd.Flags().Changed("image-index") {
+		idx := imageImportIndex
+		in.ImageIndex = &idx
+	}
+	if imageImportNoSecure {
+		secure := false
+		in.SecureBoot = &secure
+	}
+
+	prog.Start("Starting import-disk-image")
+	buildArn, err := awsClient.ImportWindowsISO(ctx, in)
+	if err != nil {
+		prog.Error("Starting import-disk-image", err)
+		return err
+	}
+	prog.Complete("Starting import-disk-image")
+
+	// Poll until the AMI is built. This is slow (the service installs Windows
+	// from the ISO, stages drivers, snapshots) — minutes to tens of minutes.
+	prog.Start("Building AMI (this can take 20-40 min)")
+	amiID, err := awsClient.WaitForImage(ctx, imageImportRegion, buildArn, func(status string) {
+		if !jsonOut {
+			fmt.Fprintf(os.Stderr, "  image status: %s\n", status)
+		}
+	})
+	if err != nil {
+		prog.Error("Building AMI (this can take 20-40 min)", err)
+		return err
+	}
+	prog.Complete("Building AMI (this can take 20-40 min)")
+
+	// Tag it so connect/launch treat it as Windows.
+	prog.Start("Tagging AMI spawn:os=windows")
+	if err := awsClient.TagAMIWindows(ctx, imageImportRegion, amiID); err != nil {
+		// Non-fatal: the AMI registers with Platform=windows anyway.
+		prog.Error("Tagging AMI spawn:os=windows", err)
+	} else {
+		prog.Complete("Tagging AMI spawn:os=windows")
+	}
+
+	if jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(map[string]string{
+			"ami":                  amiID,
+			"imageBuildVersionArn": buildArn,
+			"uri":                  uri,
+		})
+	}
+	fmt.Printf("\nImported AMI: %s\n", amiID)
+	fmt.Printf("Launch it with:\n  spawn launch <name> --ami %s --os windows --ttl 4h\n", amiID)
+	return nil
+}
+
+func init() {
+	rootCmd.AddCommand(imageCmd)
+	imageCmd.AddCommand(imageImportCmd)
+
+	f := imageImportCmd.Flags()
+	f.StringVar(&imageImportISO, "iso", "", "Windows 11 ISO: local path or s3://bucket/key.ISO (required)")
+	f.StringVar(&imageImportBucket, "bucket", "", "S3 bucket to upload a local ISO into (required for a local --iso)")
+	f.StringVar(&imageImportS3Key, "s3-key", "", "S3 object key for the uploaded ISO (default: derived from filename, .ISO)")
+	f.StringVar(&imageImportRegion, "region", "us-east-1", "AWS region for the import build")
+	f.StringVar(&imageImportInfraArn, "infra-config-arn", "", "Image Builder infrastructure configuration ARN (optional; self-provisioned if omitted)")
+	f.StringVar(&imageImportName, "name", "", "Image Builder image resource name (required)")
+	f.StringVar(&imageImportVersion, "version", "1.0.0", "Semantic version for the output image (major.minor.patch)")
+	f.Int64Var(&imageImportIndex, "image-index", 1, "1-based edition index in a multi-edition ISO")
+	f.BoolVar(&imageImportNoSecure, "no-secure-boot", false, "Disable Secure Boot on the output AMI")
+	f.StringVar(&imageImportExecRole, "execution-role", "AWSServiceRoleForImageBuilder", "IAM execution role name or ARN")
+	// Used only when --infra-config-arn is omitted (self-provisioning the build infra):
+	f.StringVar(&imageImportInstType, "instance-type", "m6i.large", "Build instance type (when self-provisioning infra)")
+	f.StringVar(&imageImportSubnet, "subnet-id", "", "Subnet for the build instance (when self-provisioning infra)")
+	f.StringArrayVar(&imageImportSGs, "security-group-id", nil, "Security group for the build instance, repeatable (when self-provisioning infra)")
+}
