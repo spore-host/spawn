@@ -83,24 +83,27 @@ source "qemu" "win11" {
   // removable media. headless: no GUI; connect to the VNC port Packer prints to
   // watch the install.
   headless = true
+  // Answer CD carries the unattended-install answer file, attached as the SECOND
+  // CD device (the install ISO is first). Using cd_files — NOT qemuargs — is
+  // critical: qemuargs is a full override and would wipe Packer's default disk +
+  // install ISO + EFI pflash drives. Windows Setup auto-discovers Autounattend.xml
+  // on removable media. headless: no GUI; connect to the VNC port Packer prints.
   cd_files = ["./Autounattend.xml"]
   cd_label = "UNATTEND"
 
-  // Boot the install DVD. Windows media shows "Press any key to boot from CD or
-  // DVD..."; press Enter repeatedly to catch it. If the firmware instead drops
-  // to the UEFI Interactive Shell (common with edk2/OVMF when the prompt is
-  // missed), the follow-up navigates there: select the DVD filesystem and run
-  // its EFI bootloader (\EFI\BOOT\BOOTX64.EFI). boot_command keystrokes go over
-  // VNC (must stay enabled). After boot, Autounattend drives the rest hands-free.
+  // No boot_command, by design. The stock Windows ISO boots via a "Press any key
+  // to boot from CD or DVD..." shim (its UEFI El Torito image, efisys.bin) that
+  // waits ~5s — and in a headless qemu build there is NO reliable way to land a
+  // keypress in that window (OVMF shows the prompt at a late, variable delay, then
+  // on timeout falls through to PXE and the UEFI shell; we burned a lot of build
+  // runs proving this via VNC screenshots). Rather than fight the timing, the ISO
+  // is pre-processed by remaster-noprompt.sh, which swaps the El Torito UEFI boot
+  // image for Microsoft's no-prompt variant (efisys_noprompt.bin, shipped on the
+  // same media) — so the DVD boots Windows Setup directly, deterministically, with
+  // no keypress at all. ALWAYS point iso_path at the remastered *-noprompt.iso.
+  // See README "Pre-process the ISO" + remaster-noprompt.sh for the full story.
   boot_wait         = "2s"
-  boot_key_interval = "200ms"
-  boot_command = [
-    "<enter><wait2><enter><wait2><enter>",
-    // Fallback if we landed in the UEFI shell: try each FS handle, run the
-    // bootloader. Harmless if Windows is already booting (keys are ignored).
-    "<wait5>fs0:<enter><wait1>\\EFI\\BOOT\\BOOTX64.EFI<enter>",
-    "<wait5>fs1:<enter><wait1>\\EFI\\BOOT\\BOOTX64.EFI<enter>",
-  ]
+  boot_command      = []
 
   // UEFI boot via pflash (Win11 requirement). The plugin copies efi_firmware_vars
   // to a writable per-build file. q35 is required for UEFI/Secure Boot.

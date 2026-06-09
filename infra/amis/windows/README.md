@@ -102,22 +102,60 @@ sudo usermod -aG kvm "$USER"   # log out/in for the group to take effect
 # 5. Copy templates + the ISO to /build. Use rsync for the multi-GB ISO so it
 #    resumes if the connection drops:
 rsync --partial --inplace --progress your-windows.iso scttfrdmn@<ip>:/build/windows.iso
-scp windows11.pkr.hcl Autounattend.xml provision.ps1 import.sh scttfrdmn@<ip>:/build/
+scp windows11.pkr.hcl Autounattend.xml provision.ps1 import.sh remaster-noprompt.sh scttfrdmn@<ip>:/build/
 
-# 6. Build (accel=kvm — fast, native). On Ubuntu point efi_* at the 4M OVMF:
+# 6. MANDATORY pre-process: remaster the ISO so it boots WITHOUT the "Press any
+#    key to boot from CD or DVD..." prompt. A headless qemu build can't land a
+#    keypress in that ~5s window, so the unmodified ISO never boots Setup (it
+#    times out → PXE → UEFI shell). remaster-noprompt.sh swaps the ISO's UEFI
+#    boot image for Microsoft's no-prompt variant. See "The boot prompt" below.
+./remaster-noprompt.sh /build/windows.iso /build/windows-noprompt.iso
+
+# 7. Build (accel=kvm — fast, native). Point iso_path at the *-noprompt* ISO and
+#    efi_* at Ubuntu's 4M OVMF:
 cd /build && packer init windows11.pkr.hcl
 packer build \
-  -var "iso_path=/build/windows.iso" \
+  -var "iso_path=/build/windows-noprompt.iso" \
   -var "accel=kvm" \
   -var "efi_code=/usr/share/OVMF/OVMF_CODE_4M.fd" \
   -var "efi_vars=/usr/share/OVMF/OVMF_VARS_4M.fd" \
   windows11.pkr.hcl
 
-# 7. Import + tag from the builder (it has the instance role / aws cli):
+# 8. Import + tag from the builder (it has the instance role / aws cli):
 ./import.sh /build/output-win11/win11.vmdk <s3-bucket> us-east-1
 
-# 8. The builder self-terminates at its TTL; or `spawn terminate winami-builder`.
+# 9. The builder self-terminates at its TTL; or `spawn terminate winami-builder`.
 ```
+
+### The boot prompt — why `remaster-noprompt.sh` is mandatory
+
+The single hardest part of an unattended Windows build is getting the installer
+to boot at all. The stock Windows ISO's UEFI boot image (`efisys.bin`, embedded
+as the El Torito UEFI entry) is the **"Press any key to boot from CD or
+DVD..."** shim: it waits ~5s for a keypress, then gives up. In a headless
+qemu/Packer build there is no reliable way to land a keypress in that window —
+OVMF shows the prompt at a *late and variable* delay after POST, and if the key
+misses, the firmware times the DVD out, wastes minutes on PXE (IPv4+IPv6), and
+drops to the UEFI Interactive Shell. (We confirmed every step of this by
+screenshotting the VM's VNC framebuffer: the install never started and the disk
+image never grew past its initial 384 KB. `boot_command` keystroke-spam, a
+`startup.nsh` that runs the DVD bootloader from the shell — all fragile or
+defeated by the prompt shim.)
+
+Microsoft ships a **no-prompt** boot image on the *same media*:
+`efi/microsoft/boot/efisys_noprompt.bin`, byte-for-byte the same size as
+`efisys.bin`. `remaster-noprompt.sh` copies the ISO and `dd`s the no-prompt
+image directly over the El Torito UEFI boot image (it first verifies the target
+region is exactly `efisys.bin`). Nothing else in the ISO changes — the UDF tree
+and the >4 GiB `install.wim` stay bit-identical — so the result boots Windows
+Setup **directly, with no keypress**. The healthy signal in the VNC console is
+`BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM"` with no "Time out" line, and
+qemu pinned at >100% CPU. The Packer template therefore needs **no
+`boot_command` at all**.
+
+> We can't simply rebuild the ISO from extracted files with this `xorriso` —
+> its `-as mkisofs` emulation lacks UDF write support, and `install.wim` exceeds
+> the 4 GiB ISO9660 file-size limit. The in-place boot-image patch sidesteps both.
 
 ---
 
@@ -157,15 +195,22 @@ formula under `$(brew --prefix)/share/qemu/`.
 
 ## Build steps
 
-1. **Build the VM image** (unattended install → provision → sysprep → export).
+1. **Remaster the ISO to remove the boot prompt** (mandatory — see "The boot
+   prompt" above). One-time per ISO:
+   ```bash
+   ./remaster-noprompt.sh <your-windows>.iso <your-windows>-noprompt.iso
+   ```
+
+2. **Build the VM image** (unattended install → provision → sysprep → export).
    The qemu builder attaches `Autounattend.xml` automatically via `cd_files` (a
-   second CD) — no manual answer-ISO step. On **Apple Silicon** keep `accel=tcg`
+   second CD) — no manual answer-ISO step, and **no `boot_command`** (the
+   remastered ISO boots Setup directly). On **Apple Silicon** keep `accel=tcg`
    (default, pure emulation); on **Intel macOS** pass `-var accel=hvf`:
    ```bash
    packer init windows11.pkr.hcl
    packer validate windows11.pkr.hcl
    packer build \
-     -var "iso_path=/Volumes/External HD/<your-windows>.iso" \
+     -var "iso_path=/Volumes/External HD/<your-windows>-noprompt.iso" \
      -var "efi_code=$(brew --prefix)/share/qemu/edk2-x86_64-code.fd" \
      -var "efi_vars=$(brew --prefix)/share/qemu/edk2-i386-vars.fd" \
      windows11.pkr.hcl
@@ -199,7 +244,8 @@ formula under `$(brew --prefix)/share/qemu/`.
 
 | File | Purpose |
 |------|---------|
-| `windows11.pkr.hcl` | Packer template — `hyperv-iso` builder (primary) + commented `qemu` fallback |
+| `windows11.pkr.hcl` | Packer template — active `qemu` builder (boots the remastered no-prompt ISO, no `boot_command`) + commented `hyperv-iso` block for Windows hosts |
+| `remaster-noprompt.sh` | Pre-process the ISO: swap the UEFI El Torito boot image for Microsoft's no-prompt `efisys_noprompt.bin` so the DVD boots Setup without the "press any key" prompt (mandatory for a headless build) |
 | `Autounattend.xml` | Unattended Windows install answer file (edition, partition, admin user, WinRM, Win11 TPM/SecureBoot bypass) |
 | `provision.ps1` | Guest provisioning over WinRM: EC2Launch v2 + AWS drivers + SSM agent + OpenSSH, then sysprep |
 | `import.sh` | Upload VHD to S3 + `ec2 import-image` + poll + tag the AMI |
