@@ -91,6 +91,19 @@ func TestValidateInstanceTypeForEFA_Substrate(t *testing.T) {
 	t.Logf("c5n.18xlarge EFA check result: %v", err)
 }
 
+// TestValidateInstanceTypeForNestedVirtualization_Substrate exercises the
+// nested-virtualization validation call path via a Substrate-backed client.
+// Like the EFA check it now calls DescribeInstanceTypes (reads
+// ProcessorInfo.SupportedFeatures); substrate may not model the field, so we
+// only verify the call path doesn't panic. Real behaviour is covered live.
+func TestValidateInstanceTypeForNestedVirtualization_Substrate(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	client := NewClientFromConfig(env.AWSConfig)
+	_ = client.ValidateInstanceTypeForNestedVirtualization // compile guard if renamed
+	err := client.ValidateInstanceTypeForNestedVirtualization(context.Background(), "c8i.4xlarge", "")
+	t.Logf("c8i.4xlarge nested-virt check result: %v", err)
+}
+
 // TestValidateInstanceTypeForEFA was originally a static-allowlist test.
 // EFA validation now calls DescribeInstanceTypes and requires real AWS or
 // a substrate server with full instance-type metadata. Covered by e2e tier1.

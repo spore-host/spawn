@@ -127,3 +127,36 @@ func (c *Client) ValidateInstanceTypeForEFAInRegion(ctx context.Context, instanc
 
 	return nil
 }
+
+// ValidateInstanceTypeForNestedVirtualization checks that the instance type
+// supports nested virtualization (running KVM/Hyper-V inside the instance),
+// queried in the launch region. Reads ProcessorInfo.SupportedFeatures rather
+// than hardcoding the supported families, so new families work automatically.
+func (c *Client) ValidateInstanceTypeForNestedVirtualization(ctx context.Context, instanceType, region string) error {
+	cfg := c.cfg.Copy()
+	if region != "" {
+		cfg.Region = region
+	}
+	ec2Client := ec2.NewFromConfig(cfg)
+
+	output, err := ec2Client.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{
+		InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)},
+	})
+	if err != nil {
+		return fmt.Errorf("describe instance type %s: %w", instanceType, err)
+	}
+	if len(output.InstanceTypes) == 0 {
+		return fmt.Errorf("instance type %s not found", instanceType)
+	}
+
+	info := output.InstanceTypes[0]
+	if info.ProcessorInfo != nil {
+		for _, f := range info.ProcessorInfo.SupportedFeatures {
+			if f == types.SupportedAdditionalProcessorFeatureNestedVirtualization {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("instance type %s does not support nested virtualization "+
+		"(supported on C8i/M8i/R8i and other types whose ProcessorInfo advertises it)", instanceType)
+}

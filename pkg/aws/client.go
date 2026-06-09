@@ -194,6 +194,12 @@ type LaunchConfig struct {
 	// (IsWindowsAMI) and written as the spawn:os tag so connect and the
 	// server-side reaper can branch on it without re-describing the AMI.
 	TargetOS string
+
+	// NestedVirtualization enables running a hypervisor (KVM/Hyper-V) inside the
+	// instance — i.e. hardware-accelerated nested VMs on a *virtual* instance,
+	// no bare-metal required. Only C8i/M8i/R8i support it (RunInstances rejects
+	// it otherwise). Used e.g. to build a Windows AMI with accelerated qemu/KVM.
+	NestedVirtualization bool
 }
 
 // LaunchResult contains information about the launched instance returned by [Client.Launch].
@@ -276,6 +282,14 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	if launchConfig.IamInstanceProfile != "" {
 		input.IamInstanceProfile = &types.IamInstanceProfileSpecification{
 			Name: aws.String(launchConfig.IamInstanceProfile),
+		}
+	}
+
+	// Enable nested virtualization (hypervisor-in-instance) when requested.
+	// Only C8i/M8i/R8i support it; RunInstances errors on other types.
+	if launchConfig.NestedVirtualization {
+		input.CpuOptions = &types.CpuOptionsRequest{
+			NestedVirtualization: types.NestedVirtualizationSpecificationEnabled,
 		}
 	}
 
