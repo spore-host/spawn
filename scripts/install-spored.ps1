@@ -43,6 +43,15 @@ if (-not $Region) {
 }
 Write-Output "Region: $Region"
 
+# The stock Windows Server AMI has no AWS CLI (unlike AL2023); install it first.
+$Aws = "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe"
+if (-not (Test-Path $Aws)) {
+    Write-Output "Installing AWS CLI v2 ..."
+    $msi = "$env:TEMP\AWSCLIV2.msi"
+    Invoke-WebRequest -Uri 'https://awscli.amazonaws.com/AWSCLIV2.msi' -OutFile $msi -UseBasicParsing
+    Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
+}
+
 $Bucket = "spawn-binaries-$Region"
 
 # Download spored.exe: regional project-prefixed → regional root → us-east-1
@@ -57,7 +66,7 @@ $sources = @(
 $downloaded = $false
 foreach ($s in $sources) {
     Write-Output "Trying $($s.Uri) ..."
-    & aws s3 cp $s.Uri $ExePath --region $s.Region 2>$null
+    & $Aws s3 cp $s.Uri $ExePath --region $s.Region 2>$null
     if ($LASTEXITCODE -eq 0 -and (Test-Path $ExePath)) {
         Write-Output "Downloaded from $($s.Uri)"
         $downloaded = $true
