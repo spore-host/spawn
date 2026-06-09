@@ -75,27 +75,51 @@ winget install HashiCorp.Packer
 winget install Microsoft.WindowsADK
 ```
 
-**qemu (macOS):**
+**macOS + qemu** (the local self-service path — most users have the ISO on
+their own machine):
 ```bash
-brew install packer qemu
+brew install packer qemu xorriso awscli
+# packer  — runs the build
+# qemu    — the hypervisor (qemu-system-x86_64) + qemu-img (disk convert)
+# xorriso — builds the secondary "answer" ISO carrying Autounattend.xml
+#           (macOS has no oscdimg; xorriso is the cross-platform equivalent)
+# awscli  — import.sh uploads the disk + runs ec2 import-image
 ```
+The qemu x86_64 UEFI firmware (`edk2-x86_64-code.fd`) ships with the qemu
+formula under `$(brew --prefix)/share/qemu/`.
+
+> **⚠️ Apple Silicon (arm64) note:** the Windows ISO is **x86_64**. On an
+> Apple-Silicon Mac, qemu must *fully emulate* x86_64 (`-accel tcg`, no `hvf`
+> cross-arch acceleration), so the unattended install runs **many hours** and
+> can be flaky. It works, but for anything beyond a one-off, build on an x86_64
+> host, a Windows host (Hyper-V), or an EC2 `*.metal` builder where the install
+> takes ~30-60 min. On an Intel Mac, qemu uses `-accel hvf` and is fast.
 
 ---
 
 ## Build steps
 
-1. **Stage the ISO** where the template can read it; set its path + checksum in
-   `windows11.pkr.hcl` vars (or pass `-var`).
+1. **Build the answer ISO** carrying `Autounattend.xml` (macOS/Linux):
+   ```bash
+   xorriso -as mkisofs -o answer.iso -V UNATTEND -J -r Autounattend.xml
+   ```
+   (On a Windows host use the ADK's `oscdimg` instead.)
 
-2. **Build the VM image** (unattended install → provision → sysprep → export):
+2. **Build the VM image** (unattended install → provision → sysprep → export).
+   On **Apple Silicon** keep `accel=tcg` (default) and point `firmware` at the
+   brew qemu firmware; on **Intel macOS** pass `-var accel=hvf`:
    ```bash
    packer init windows11.pkr.hcl
    packer validate windows11.pkr.hcl
-   packer build windows11.pkr.hcl
+   packer build \
+     -var "iso_path=/Volumes/External HD/<your-windows>.iso" \
+     -var "firmware=$(brew --prefix)/share/qemu/edk2-x86_64-code.fd" \
+     windows11.pkr.hcl
    ```
-   Output: an exported `output-*/*.vhd` (Hyper-V) or `*.vhdx`/`*.vmdk` (qemu).
-   This runs the full Windows install + `provision.ps1` (EC2 components) +
-   sysprep generalize/shutdown. Expect 30–60+ min.
+   Output: `output-win11/win11.vmdk` (qemu emits qcow2; a post-processor
+   converts it to stream-optimized VMDK for import). This runs the full Windows
+   install + `provision.ps1` (EC2 components) + sysprep generalize/shutdown.
+   **~30-60 min on Intel/Hyper-V; many hours emulated on Apple Silicon.**
 
 3. **Import to an AMI** (uploads the VHD to S3, runs `import-image`, tags the
    result). Requires the `vmimport` role (constraint #2):

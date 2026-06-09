@@ -10,19 +10,30 @@
 # can use it. See README.md.
 set -euo pipefail
 
-VHD="${1:?usage: import.sh <vhd> <s3-bucket> [region]}"
-BUCKET="${2:?usage: import.sh <vhd> <s3-bucket> [region]}"
+DISK="${1:?usage: import.sh <disk.vmdk|.vhd|.vhdx> <s3-bucket> [region]}"
+BUCKET="${2:?usage: import.sh <disk.vmdk|.vhd|.vhdx> <s3-bucket> [region]}"
 REGION="${3:-us-east-1}"
 
-[ -f "$VHD" ] || { echo "VHD not found: $VHD" >&2; exit 1; }
+[ -f "$DISK" ] || { echo "disk image not found: $DISK" >&2; exit 1; }
 
-key="ami-imports/$(basename "$VHD")"
-echo "Uploading $VHD → s3://$BUCKET/$key ..."
-aws s3 cp "$VHD" "s3://$BUCKET/$key" --region "$REGION"
+# import-image's Format is the file type. Infer it from the extension (qemu
+# outputs vmdk; Hyper-V vhd/vhdx — all are accepted by import-image).
+ext="${DISK##*.}"
+case "$ext" in
+  vmdk|VMDK) format="vmdk" ;;
+  vhd|VHD)   format="vhd" ;;
+  vhdx|VHDX) format="vhdx" ;;
+  raw|img)   format="raw" ;;
+  *) echo "unsupported disk format '.$ext' (expected vmdk/vhd/vhdx/raw)" >&2; exit 1 ;;
+esac
+
+key="ami-imports/$(basename "$DISK")"
+echo "Uploading $DISK ($format) → s3://$BUCKET/$key ..."
+aws s3 cp "$DISK" "s3://$BUCKET/$key" --region "$REGION"
 
 echo "Starting import-image..."
 containers=$(cat <<JSON
-[{"Description":"spore.host Windows 11 custom AMI","Format":"vhd","UserBucket":{"S3Bucket":"$BUCKET","S3Key":"$key"}}]
+[{"Description":"spore.host Windows 11 custom AMI","Format":"$format","UserBucket":{"S3Bucket":"$BUCKET","S3Key":"$key"}}]
 JSON
 )
 task=$(aws ec2 import-image \
