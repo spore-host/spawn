@@ -52,6 +52,7 @@ var (
 	az           string
 	ami          string
 	osFlag       string
+	nestedVirt   bool
 
 	// Network (empty = auto-create)
 	vpcID    string
@@ -207,6 +208,7 @@ func init() {
 	launchCmd.Flags().StringVar(&az, "az", "", "Availability zone")
 	launchCmd.Flags().StringVar(&ami, "ami", "", "AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023")
 	launchCmd.Flags().StringVar(&osFlag, "os", "", "Target OS: windows or linux. Omit to auto-detect from the AMI. Use to force the OS for a custom AMI whose platform metadata is unset.")
+	launchCmd.Flags().BoolVar(&nestedVirt, "nested-virtualization", false, "Enable nested virtualization (run KVM/Hyper-V inside the instance). Requires a C8i/M8i/R8i instance type.")
 	launchCmd.Flags().Int32Var(&launchVolumeSize, "volume-size", 0, "Root EBS volume size in GiB (0 = use AMI default)")
 
 	// Network
@@ -1190,6 +1192,14 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		return err
 	}
 
+	// Reject --nested-virtualization on an instance type that can't do it, before
+	// spending on a launch RunInstances would reject cryptically (#91).
+	if config.NestedVirtualization {
+		if err := awsClient.ValidateInstanceTypeForNestedVirtualization(ctx, config.InstanceType, config.Region); err != nil {
+			return err
+		}
+	}
+
 	// Step 2: Setup SSH key
 	prog.Start("Setting up SSH key")
 	if config.KeyName == "" {
@@ -1718,6 +1728,9 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 	if hibernate {
 		config.Hibernate = true
+	}
+	if nestedVirt {
+		config.NestedVirtualization = true
 	}
 	if ttl != "" {
 		config.TTL = ttl
