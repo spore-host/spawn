@@ -3,10 +3,12 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -30,6 +32,7 @@ var (
 	imageImportSubnet   string
 	imageImportSGs      []string
 	imageImportKeepISO  bool
+	imageImportWaitMin  int
 )
 
 var imageCmd = &cobra.Command{
@@ -85,6 +88,45 @@ Examples:
   spawn image verify win11.iso -o json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runImageVerify,
+}
+
+var imageStatusCmd = &cobra.Command{
+	Use:   "status <image-build-version-arn>",
+	Short: "Check the status of an in-progress image import",
+	Long: `Report the current state of an EC2 Image Builder image build started by
+'spawn image import' (without --wait). Prints PENDING/BUILDING/.../AVAILABLE/FAILED
+and, once available, the output AMI id.
+
+Example:
+  spawn image status arn:aws:imagebuilder:us-east-1:123456789012:image/win11-25h2/1.0.0/1`,
+	Args: cobra.ExactArgs(1),
+	RunE: runImageStatus,
+}
+
+func runImageStatus(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	awsClient, err := aws.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("init AWS client: %w", err)
+	}
+	st, err := awsClient.GetImageStatus(ctx, imageImportRegion, args[0])
+	if err != nil {
+		return err
+	}
+	if getOutputFormat() == "json" {
+		return json.NewEncoder(os.Stdout).Encode(st)
+	}
+	fmt.Printf("status: %s\n", st.Status)
+	if st.Reason != "" {
+		fmt.Printf("reason: %s\n", st.Reason)
+	}
+	if st.AMI != "" {
+		fmt.Printf("ami:    %s\n", st.AMI)
+	}
+	return nil
 }
 
 func runImageVerify(cmd *cobra.Command, args []string) error {
@@ -259,19 +301,59 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 	}
 	prog.Complete("Starting import-disk-image")
 
-	// Poll until the AMI is built. This is slow (the service installs Windows
-	// from the ISO, stages drivers, snapshots) — minutes to tens of minutes.
-	prog.Start("Building AMI (this can take 20-40 min)")
-	amiID, err := awsClient.WaitForImage(ctx, imageImportRegion, buildArn, func(status string) {
-		if !jsonOut {
-			fmt.Fprintf(os.Stderr, "  image status: %s\n", status)
+	// Async by default (like `spawn create-ami`): the build runs 20-40 min in
+	// Image Builder. Without --wait, return now with the build ARN and how to
+	// check on it; the staged ISO is left in place (cleanup needs the build to
+	// finish, which we're not waiting for).
+	if imageImportWaitMin <= 0 {
+		if jsonOut {
+			return json.NewEncoder(os.Stdout).Encode(map[string]string{
+				"imageBuildVersionArn": buildArn,
+				"uri":                  uri,
+				"status":               "building",
+			})
 		}
-	})
+		fmt.Printf("\nImport started (building, ~20-40 min). Not waiting (use --wait to block).\n")
+		fmt.Printf("  build:  %s\n", buildArn)
+		fmt.Printf("  check:  spawn image status %s\n", buildArn)
+		if stagedKey != "" {
+			fmt.Printf("  note:   staged ISO s3://%s/%s is kept; delete it after the AMI builds (or re-run with --wait to auto-clean).\n", stagedBucket, stagedKey)
+		}
+		return nil
+	}
+
+	// Poll until the AMI is built, up to the requested timeout. This is slow (the
+	// service installs Windows from the ISO, stages drivers, snapshots).
+	waitLabel := fmt.Sprintf("Building AMI (waiting up to %dm)", imageImportWaitMin)
+	prog.Start(waitLabel)
+	amiID, err := awsClient.WaitForImage(ctx, imageImportRegion, buildArn,
+		time.Duration(imageImportWaitMin)*time.Minute, func(status string) {
+			if !jsonOut {
+				fmt.Fprintf(os.Stderr, "  image status: %s\n", status)
+			}
+		})
 	if err != nil {
-		prog.Error("Building AMI (this can take 20-40 min)", err)
+		prog.Error(waitLabel, err)
+		// Timeout is not a build failure — the build is still running. Surface the
+		// async info and exit with a distinct, catchable error so scripts can tell
+		// "still building" from "failed".
+		if errors.Is(err, aws.ErrWaitTimeout) {
+			if jsonOut {
+				_ = json.NewEncoder(os.Stdout).Encode(map[string]string{
+					"imageBuildVersionArn": buildArn, "uri": uri, "status": "building",
+				})
+			} else {
+				fmt.Printf("\nStill building after %dm — not failed, just not done.\n", imageImportWaitMin)
+				fmt.Printf("  check: spawn image status %s\n", buildArn)
+				if stagedKey != "" {
+					fmt.Printf("  note:  staged ISO s3://%s/%s kept (build unfinished).\n", stagedBucket, stagedKey)
+				}
+			}
+			return fmt.Errorf("image build still in progress after %dm: %w", imageImportWaitMin, err)
+		}
 		return err
 	}
-	prog.Complete("Building AMI (this can take 20-40 min)")
+	prog.Complete(waitLabel)
 
 	// Tag it so connect/launch treat it as Windows.
 	prog.Start("Tagging AMI spawn:os=windows")
@@ -312,11 +394,19 @@ func init() {
 	rootCmd.AddCommand(imageCmd)
 	imageCmd.AddCommand(imageImportCmd)
 	imageCmd.AddCommand(imageVerifyCmd)
+	imageCmd.AddCommand(imageStatusCmd)
+	imageStatusCmd.Flags().StringVar(&imageImportRegion, "region", "us-east-1", "AWS region of the image build")
 
 	f := imageImportCmd.Flags()
 	f.StringVar(&imageImportISO, "iso", "", "Windows 11 ISO: local path or s3://bucket/key.ISO (required)")
 	f.StringVar(&imageImportBucket, "bucket", "", "S3 bucket to stage a local ISO in (default: managed spawn-iso-import-<account>-<region>, auto-created)")
-	f.BoolVar(&imageImportKeepISO, "keep-iso", false, "Keep the staged ISO (and managed bucket) after the AMI is built; by default they are deleted")
+	f.BoolVar(&imageImportKeepISO, "keep-iso", false, "Keep the staged ISO (and managed bucket) after the AMI is built; by default they are deleted (only applies with --wait)")
+	// --wait blocks until the AMI is built (then tags + cleans up). Bare --wait
+	// waits up to 60 min; --wait=N waits N minutes. On timeout the build keeps
+	// running and the command exits non-zero (distinct from success/failure) so
+	// scripts can branch on "still building".
+	f.IntVar(&imageImportWaitMin, "wait", 0, "Wait up to N minutes for the AMI (bare --wait = 60); 0 = return immediately (async)")
+	imageImportCmd.Flags().Lookup("wait").NoOptDefVal = "60"
 	f.StringVar(&imageImportS3Key, "s3-key", "", "S3 object key for the uploaded ISO (default: derived from filename, .ISO)")
 	f.StringVar(&imageImportRegion, "region", "us-east-1", "AWS region for the import build")
 	f.StringVar(&imageImportInfraArn, "infra-config-arn", "", "Image Builder infrastructure configuration ARN (optional; self-provisioned if omitted)")

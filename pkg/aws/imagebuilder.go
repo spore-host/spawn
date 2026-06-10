@@ -363,18 +363,23 @@ func (c *Client) ImportWindowsISO(ctx context.Context, in ImportWindowsISOInput)
 	return aws.ToString(out.ImageBuildVersionArn), nil
 }
 
+// ErrWaitTimeout is returned by WaitForImage when the build is still in
+// progress at the timeout. It's distinct from a build FAILURE so callers (and
+// scripts, via a dedicated exit code) can tell "still building" from "failed".
+var ErrWaitTimeout = errors.New("timed out waiting for image build")
+
 // WaitForImage polls GetImage on an image build version ARN until the image
-// reaches AVAILABLE (returning the output AMI id) or FAILED (returning the
-// failure reason). progressCb, if non-nil, is called with each observed status
-// string so callers can surface progress. The poll runs up to ~60 minutes.
-func (c *Client) WaitForImage(ctx context.Context, region, imageBuildVersionArn string, progressCb func(status string)) (string, error) {
+// reaches AVAILABLE (returning the output AMI id), FAILED (returning the failure
+// reason), or the timeout elapses (returning ErrWaitTimeout, build still
+// running). progressCb, if non-nil, is called with each observed status string.
+func (c *Client) WaitForImage(ctx context.Context, region, imageBuildVersionArn string, timeout time.Duration, progressCb func(status string)) (string, error) {
 	cfg := c.cfg.Copy()
 	if region != "" {
 		cfg.Region = region
 	}
 	ibClient := imagebuilder.NewFromConfig(cfg)
 
-	deadline := time.Now().Add(60 * time.Minute)
+	deadline := time.Now().Add(timeout)
 	var last string
 	for {
 		out, err := ibClient.GetImage(ctx, &imagebuilder.GetImageInput{
@@ -399,7 +404,7 @@ func (c *Client) WaitForImage(ctx context.Context, region, imageBuildVersionArn 
 			// PENDING / BUILDING / TESTING / etc. → keep polling.
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("image build %s did not become AVAILABLE within 60m (last status %q)", imageBuildVersionArn, last)
+			return "", fmt.Errorf("%w: %s (last status %q)", ErrWaitTimeout, imageBuildVersionArn, last)
 		}
 		select {
 		case <-ctx.Done():
@@ -407,6 +412,38 @@ func (c *Client) WaitForImage(ctx context.Context, region, imageBuildVersionArn 
 		case <-time.After(30 * time.Second):
 		}
 	}
+}
+
+// ImageStatus is a one-shot snapshot of an Image Builder image build.
+type ImageStatus struct {
+	Status string // PENDING/BUILDING/TESTING/AVAILABLE/FAILED/...
+	Reason string // failure reason, if any
+	AMI    string // output AMI id, once AVAILABLE
+}
+
+// GetImageStatus returns the current state of an image build version (one call,
+// no polling) — backs `spawn image status`.
+func (c *Client) GetImageStatus(ctx context.Context, region, imageBuildVersionArn string) (*ImageStatus, error) {
+	cfg := c.cfg.Copy()
+	if region != "" {
+		cfg.Region = region
+	}
+	ibClient := imagebuilder.NewFromConfig(cfg)
+	out, err := ibClient.GetImage(ctx, &imagebuilder.GetImageInput{
+		ImageBuildVersionArn: aws.String(imageBuildVersionArn),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get image %s: %w", imageBuildVersionArn, err)
+	}
+	st := &ImageStatus{}
+	if out.Image != nil && out.Image.State != nil {
+		st.Status = string(out.Image.State.Status)
+		st.Reason = aws.ToString(out.Image.State.Reason)
+	}
+	if out.Image != nil && out.Image.OutputResources != nil && len(out.Image.OutputResources.Amis) > 0 {
+		st.AMI = aws.ToString(out.Image.OutputResources.Amis[0].Image)
+	}
+	return st, nil
 }
 
 // TagAMIWindows tags an AMI with spawn:os=windows so spawn's connect/launch

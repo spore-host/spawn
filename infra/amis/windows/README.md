@@ -65,6 +65,16 @@ spawn image import \
   --version 1.0.0
 # (--bucket optional; defaults to a managed spawn-iso-import-<account>-<region>.)
 
+# By default the import is ASYNC (like `spawn create-ami`): it returns a build
+# ARN immediately. Check on it, or block until done:
+spawn image status <build-arn>          # one-shot: BUILDING / AVAILABLE / FAILED (+ ami)
+spawn image import ... --wait            # block up to 60 min
+spawn image import ... --wait=20         # block up to 20 min
+# On --wait, spawn tags the AMI spawn:os=windows and deletes the staged ISO
+# (and the managed bucket if empty) when the build finishes; --keep-iso opts out.
+# If --wait times out, the build keeps running and the command exits non-zero
+# (distinct from a build failure) so scripts can branch on "still building".
+
 # ...prints the new AMI id. Launch it (Windows requires a lifetime — #72):
 spawn launch winbox --ami <ami-id> --os windows --ttl 4h
 ```
