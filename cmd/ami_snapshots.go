@@ -55,7 +55,7 @@ func runAMISnapshots(cmd *cobra.Command, args []string) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer func() { _ = w.Flush() }()
-	_, _ = fmt.Fprintf(w, "SNAPSHOT\tSIZE\tSTATE\tENCRYPTED\tAGE\tSHARED WITH\n")
+	_, _ = fmt.Fprintf(w, "SNAPSHOT\tSIZE\tSTATE\tENCRYPTED\tAGE\tSHARED\n")
 	for _, s := range snaps {
 		shared := "exclusive"
 		if len(s.SharedWith) > 0 {
