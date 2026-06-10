@@ -25,14 +25,14 @@ type FSxInfo struct {
 
 // FSxConfig contains configuration for creating FSx Lustre filesystem
 type FSxConfig struct {
-	StackName        string
-	Region           string
-	StorageCapacity  int32
-	S3Bucket         string
-	ImportPath       string
-	ExportPath       string
-	AutoCreateBucket bool
-	SubnetID         string   // Optional: specify subnet, otherwise uses default VPC
+	StackName                string
+	Region                   string
+	StorageCapacity          int32
+	S3Bucket                 string
+	ImportPath               string
+	ExportPath               string
+	AutoCreateBucket         bool
+	SubnetID                 string   // Optional: specify subnet, otherwise uses default VPC
 	SecurityGroupIDs         []string // Security groups to associate with FSx; must allow port 988 (Lustre)
 	PerUnitStorageThroughput int32    // MB/s/TiB — required for PERSISTENT_2; valid values: 125, 250, 500, 1000
 }
@@ -176,9 +176,9 @@ func (c *Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig
 	// requires a separate CreateDataRepositoryAssociation call once the FS is AVAILABLE.
 	if importPath != "" || exportPath != "" {
 		dra := &fsx.CreateDataRepositoryAssociationInput{
-			FileSystemId:       aws.String(filesystemID),
-			FileSystemPath:     aws.String("/"),
-			DataRepositoryPath: aws.String(importPath),
+			FileSystemId:                aws.String(filesystemID),
+			FileSystemPath:              aws.String("/"),
+			DataRepositoryPath:          aws.String(importPath),
 			BatchImportMetaDataOnCreate: aws.Bool(true),
 			S3: &types.S3DataRepositoryConfiguration{
 				AutoImportPolicy: &types.AutoImportPolicy{

@@ -80,7 +80,7 @@ func TestBuildTags_EFSIDWritten(t *testing.T) {
 // never executed the command.
 func TestBuildTags_CommandWritten(t *testing.T) {
 	config := LaunchConfig{
-		Name:           "test-instance",
+		Name:            "test-instance",
 		JobArrayCommand: "python train.py --lr 0.001",
 	}
 
