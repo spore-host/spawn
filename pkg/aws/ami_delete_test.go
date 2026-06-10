@@ -97,3 +97,113 @@ func TestDeleteAMI_NonImageBuilder_NoIBCall(t *testing.T) {
 		t.Errorf("non-IB AMI must not attempt (or fail) IB deletion, got error %q", res.ImageBuilderError)
 	}
 }
+
+// TestDeleteAMI_RetainsSharedSnapshot is the end-to-end shared-snapshot path
+// (unblocked by substrate#322/#328 in v0.70.0): AMI-A owns a snapshot via
+// CreateImage; AMI-B is RegisterImage'd to share that same snapshot. Deleting
+// AMI-A must RETAIN the snapshot (still referenced by AMI-B), not delete it.
+func TestDeleteAMI_RetainsSharedSnapshot(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	client := NewClientFromConfig(env.AWSConfig)
+	ctx := context.Background()
+	ec2Client := ec2.NewFromConfig(env.AWSConfig)
+
+	run, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId: aws.String("ami-base"), InstanceType: ec2types.InstanceTypeT3Micro,
+		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
+	})
+	if err != nil || len(run.Instances) == 0 {
+		t.Skipf("substrate RunInstances unavailable: %v", err)
+	}
+	amiA, err := client.CreateAMI(ctx, "us-east-1", CreateAMIInput{
+		InstanceID: aws.ToString(run.Instances[0].InstanceId), Name: "shared-snap-A",
+	})
+	if err != nil {
+		t.Skipf("substrate CreateImage unavailable: %v", err)
+	}
+
+	// Resolve AMI-A's backing snapshot.
+	snaps, err := client.GetAMISnapshots(ctx, "us-east-1", amiA)
+	if err != nil || len(snaps) == 0 {
+		t.Skipf("substrate snapshot modeling unavailable: %v", err)
+	}
+	shared := snaps[0].SnapshotID
+
+	// Register AMI-B pointing at the SAME snapshot.
+	regB, err := ec2Client.RegisterImage(ctx, &ec2.RegisterImageInput{
+		Name:           aws.String("shared-snap-B"),
+		RootDeviceName: aws.String("/dev/sda1"),
+		BlockDeviceMappings: []ec2types.BlockDeviceMapping{{
+			DeviceName: aws.String("/dev/sda1"),
+			Ebs:        &ec2types.EbsBlockDevice{SnapshotId: aws.String(shared)},
+		}},
+	})
+	if err != nil {
+		t.Skipf("substrate RegisterImage unavailable: %v", err)
+	}
+	amiB := aws.ToString(regB.ImageId)
+
+	// Delete AMI-A: the shared snapshot must be RETAINED (AMI-B still uses it).
+	res, err := client.DeleteAMI(ctx, "us-east-1", amiA)
+	if err != nil {
+		t.Fatalf("DeleteAMI(A): %v (result=%+v)", err, res)
+	}
+	if sliceHas(res.DeletedSnapshots, shared) {
+		t.Errorf("shared snapshot %s was deleted; it must be retained (used by %s)", shared, amiB)
+	}
+	reason, retained := res.RetainedSnapshots[shared]
+	if !retained {
+		t.Fatalf("shared snapshot %s not recorded as retained; result=%+v", shared, res)
+	}
+	if !strings.Contains(reason, amiB) {
+		t.Errorf("retain reason %q should name the sharing AMI %s", reason, amiB)
+	}
+}
+
+// TestDeleteAMI_DeletesExclusiveSnapshot is the companion: a snapshot referenced
+// only by the AMI being deleted IS removed.
+func TestDeleteAMI_DeletesExclusiveSnapshot(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	client := NewClientFromConfig(env.AWSConfig)
+	ctx := context.Background()
+	ec2Client := ec2.NewFromConfig(env.AWSConfig)
+
+	run, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId: aws.String("ami-base"), InstanceType: ec2types.InstanceTypeT3Micro,
+		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
+	})
+	if err != nil || len(run.Instances) == 0 {
+		t.Skipf("substrate RunInstances unavailable: %v", err)
+	}
+	ami, err := client.CreateAMI(ctx, "us-east-1", CreateAMIInput{
+		InstanceID: aws.ToString(run.Instances[0].InstanceId), Name: "exclusive-snap",
+	})
+	if err != nil {
+		t.Skipf("substrate CreateImage unavailable: %v", err)
+	}
+	snaps, err := client.GetAMISnapshots(ctx, "us-east-1", ami)
+	if err != nil || len(snaps) == 0 {
+		t.Skipf("substrate snapshot modeling unavailable: %v", err)
+	}
+	exclusive := snaps[0].SnapshotID
+
+	res, err := client.DeleteAMI(ctx, "us-east-1", ami)
+	if err != nil {
+		t.Fatalf("DeleteAMI: %v (result=%+v)", err, res)
+	}
+	if !sliceHas(res.DeletedSnapshots, exclusive) {
+		t.Errorf("exclusive snapshot %s should have been deleted; result=%+v", exclusive, res)
+	}
+	if _, retained := res.RetainedSnapshots[exclusive]; retained {
+		t.Errorf("exclusive snapshot %s was retained; it should be deleted", exclusive)
+	}
+}
+
+func sliceHas(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
