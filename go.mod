@@ -35,7 +35,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/scttfrdmn/strata v0.22.0
-	github.com/scttfrdmn/substrate v0.68.0
+	github.com/scttfrdmn/substrate v0.69.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spore-host/libs v0.36.0
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
