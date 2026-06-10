@@ -57,6 +57,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"cost":            "Tier 1: real Cost Explorer / pricing data",
 		"availability":    "Tier 1: real instance-type offerings / quotas",
 		"ami":             "Tier 1/2: real AMI build/copy",
+		"image":           "Tier 1/2: real EC2 Image Builder ISO→AMI import (verify is local; pkg/winiso unit-tested)",
 		"validate":        "covered by pkg/infrastructure substrate tests (not CLI Tier 0)",
 
 		// cobra built-ins — no spawn behavior to cover.
