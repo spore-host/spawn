@@ -57,9 +57,9 @@ configuration it needs (idempotent); pass --infra-config-arn only to reuse an
 existing/custom one. See infra/amis/windows/README.md.
 
 Examples:
-  # Local ISO — uploaded to --bucket, infra auto-provisioned:
-  spawn image import --iso ./Win11_25H2_Enterprise.iso --bucket my-bucket \
-    --name win11-25h2 --version 1.0.0
+  # Local ISO — staging bucket + infra auto-provisioned, nothing to pre-create:
+  spawn image import --iso ./Win11_25H2_Enterprise.iso \
+    --name win11-25h2 --image-index 3
 
   # ISO already in S3 (uppercase .ISO key required by the service):
   spawn image import --iso s3://my-bucket/Win11_25H2_Enterprise.ISO \
@@ -130,13 +130,12 @@ func validateImageImportFlags(iso, name, bucket string) error {
 	if name == "" {
 		return fmt.Errorf("--name is required (the Image Builder image resource name)")
 	}
-	if strings.HasPrefix(iso, "s3://") {
-		if !strings.HasSuffix(iso, ".ISO") {
-			return fmt.Errorf("the S3 object key must end in an uppercase .ISO extension; got %q", iso)
-		}
-	} else if bucket == "" {
-		return fmt.Errorf("--bucket is required when --iso is a local file (target for upload)")
+	if strings.HasPrefix(iso, "s3://") && !strings.HasSuffix(iso, ".ISO") {
+		return fmt.Errorf("the S3 object key must end in an uppercase .ISO extension; got %q", iso)
 	}
+	// A local ISO needs no --bucket: a managed staging bucket is created if one
+	// isn't supplied.
+	_ = bucket
 	return nil
 }
 
@@ -164,11 +163,30 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Resolve the S3 URI: either the ISO is already in S3, or we upload a local
-	// file to --bucket. import-disk-image requires an uppercase .ISO key.
+	// file to a staging bucket. import-disk-image requires an uppercase .ISO key.
 	var uri string
 	if strings.HasPrefix(imageImportISO, "s3://") {
 		uri = imageImportISO
 	} else {
+		// Resolve the staging bucket. If --bucket was omitted, use (and create)
+		// a managed, account+region-scoped bucket so the user doesn't have to
+		// name or pre-create one — matching spawn's other managed buckets
+		// (e.g. spawn-schedules-<acct>-<region>).
+		bucket := imageImportBucket
+		if bucket == "" {
+			acct, aerr := awsClient.GetAccountID(ctx)
+			if aerr != nil {
+				return fmt.Errorf("resolve account id for the managed ISO bucket: %w", aerr)
+			}
+			bucket = fmt.Sprintf("spawn-iso-import-%s-%s", acct, imageImportRegion)
+		}
+		prog.Start("Preparing the ISO staging bucket")
+		if err := awsClient.CreateS3BucketIfNotExists(ctx, bucket, imageImportRegion); err != nil {
+			prog.Error("Preparing the ISO staging bucket", err)
+			return err
+		}
+		prog.Complete("Preparing the ISO staging bucket")
+
 		key := imageImportS3Key
 		if key == "" {
 			base := filepath.Base(imageImportISO)
@@ -176,12 +194,12 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 			key = strings.TrimSuffix(base, filepath.Ext(base)) + ".ISO"
 		}
 		prog.Start("Uploading ISO to S3")
-		if err := awsClient.UploadISOToS3(ctx, imageImportRegion, imageImportBucket, key, imageImportISO); err != nil {
+		if err := awsClient.UploadISOToS3(ctx, imageImportRegion, bucket, key, imageImportISO); err != nil {
 			prog.Error("Uploading ISO to S3", err)
 			return err
 		}
 		prog.Complete("Uploading ISO to S3")
-		uri = fmt.Sprintf("s3://%s/%s", imageImportBucket, key)
+		uri = fmt.Sprintf("s3://%s/%s", bucket, key)
 	}
 
 	// Ensure the Image Builder service-linked execution role exists.
@@ -278,7 +296,7 @@ func init() {
 
 	f := imageImportCmd.Flags()
 	f.StringVar(&imageImportISO, "iso", "", "Windows 11 ISO: local path or s3://bucket/key.ISO (required)")
-	f.StringVar(&imageImportBucket, "bucket", "", "S3 bucket to upload a local ISO into (required for a local --iso)")
+	f.StringVar(&imageImportBucket, "bucket", "", "S3 bucket to stage a local ISO in (default: managed spawn-iso-import-<account>-<region>, auto-created)")
 	f.StringVar(&imageImportS3Key, "s3-key", "", "S3 object key for the uploaded ISO (default: derived from filename, .ISO)")
 	f.StringVar(&imageImportRegion, "region", "us-east-1", "AWS region for the import build")
 	f.StringVar(&imageImportInfraArn, "infra-config-arn", "", "Image Builder infrastructure configuration ARN (optional; self-provisioned if omitted)")

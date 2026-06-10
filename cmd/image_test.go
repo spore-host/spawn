@@ -15,7 +15,7 @@ func TestValidateImageImportFlags(t *testing.T) {
 		{name: "missing name", iso: "s3://b/x.ISO", ami: "", buck: "", wantErrSub: "--name"},
 		{name: "s3 uri ok, no infra arn needed", iso: "s3://b/x.ISO", ami: "win11", buck: "", wantErrSub: ""},
 		{name: "s3 uri lowercase iso rejected", iso: "s3://b/x.iso", ami: "win11", buck: "", wantErrSub: ".ISO"},
-		{name: "local iso needs bucket", iso: "./win11.iso", ami: "win11", buck: "", wantErrSub: "--bucket"},
+		{name: "local iso without bucket ok (managed bucket)", iso: "./win11.iso", ami: "win11", buck: "", wantErrSub: ""},
 		{name: "local iso with bucket ok", iso: "./win11.iso", ami: "win11", buck: "my-bucket", wantErrSub: ""},
 	}
 	for _, tc := range cases {

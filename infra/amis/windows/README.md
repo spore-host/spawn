@@ -55,14 +55,15 @@ sets the Amazon time server. The AMI runs **Sysprep Specialize** at first launch
 spawn image verify "/Volumes/External HD/Win11_Enterprise_25H2.iso"
 #    → "ACCEPTED: contains Windows 11 Enterprise (x64). Import with --image-index 3."
 
-# Local ISO → AMI. spawn uploads the ISO, self-provisions the IAM roles +
-# Image Builder infrastructure configuration, imports, polls, and tags the AMI.
+# Local ISO → AMI. spawn creates the staging bucket, uploads the ISO,
+# self-provisions the IAM roles + Image Builder infrastructure configuration,
+# imports, polls, and tags the AMI. Nothing to pre-create.
 spawn image import \
   --iso "/Volumes/External HD/Win11_Enterprise_25H2.iso" \
-  --bucket my-iso-bucket \
   --name win11-25h2 \
   --image-index 3 \
   --version 1.0.0
+# (--bucket optional; defaults to a managed spawn-iso-import-<account>-<region>.)
 
 # ...prints the new AMI id. Launch it (Windows requires a lifetime — #72):
 spawn launch winbox --ami <ami-id> --os windows --ttl 4h
