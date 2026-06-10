@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -332,10 +334,15 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Poll until the AMI is built, up to the requested timeout. This is slow (the
-	// service installs Windows from the ISO, stages drivers, snapshots).
-	waitLabel := fmt.Sprintf("Building AMI (waiting up to %dm)", imageImportWaitMin)
+	// service installs Windows from the ISO, stages drivers, snapshots). The wait
+	// is interruptible: Ctrl-C is handled like a timeout — the build keeps running
+	// in Image Builder, so we detach cleanly (print how to resume) rather than
+	// leaving the user wondering, and exit non-zero so it's catchable.
+	waitCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	waitLabel := fmt.Sprintf("Building AMI (waiting up to %dm; Ctrl-C to detach)", imageImportWaitMin)
 	prog.Start(waitLabel)
-	amiID, err := awsClient.WaitForImage(ctx, imageImportRegion, buildArn,
+	amiID, err := awsClient.WaitForImage(waitCtx, imageImportRegion, buildArn,
 		time.Duration(imageImportWaitMin)*time.Minute, func(status string) {
 			if !jsonOut {
 				fmt.Fprintf(os.Stderr, "  image status: %s\n", status)
@@ -343,22 +350,28 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 		})
 	if err != nil {
 		prog.Error(waitLabel, err)
-		// Timeout is not a build failure — the build is still running. Surface the
-		// async info and exit with a distinct, catchable error so scripts can tell
-		// "still building" from "failed".
-		if errors.Is(err, aws.ErrWaitTimeout) {
+		// A timeout or a Ctrl-C/SIGTERM is NOT a build failure — the build keeps
+		// running in Image Builder. Surface the async info and exit with a distinct,
+		// catchable error so scripts (and humans) can tell "still building / detached"
+		// from "failed".
+		detached := errors.Is(err, aws.ErrWaitTimeout) || errors.Is(err, context.Canceled) || waitCtx.Err() != nil
+		if detached {
+			reason := fmt.Sprintf("still building after %dm", imageImportWaitMin)
+			if !errors.Is(err, aws.ErrWaitTimeout) {
+				reason = "detached (interrupted)"
+			}
 			if jsonOut {
 				_ = json.NewEncoder(os.Stdout).Encode(map[string]string{
 					"imageBuildVersionArn": buildArn, "uri": uri, "status": "building",
 				})
 			} else {
-				fmt.Printf("\nStill building after %dm — not failed, just not done.\n", imageImportWaitMin)
+				fmt.Printf("\nImage build %s — not failed, still running in Image Builder.\n", reason)
 				fmt.Printf("  check: spawn image status %s\n", buildArn)
 				if stagedKey != "" {
 					fmt.Printf("  note:  staged ISO s3://%s/%s kept (build unfinished).\n", stagedBucket, stagedKey)
 				}
 			}
-			return fmt.Errorf("image build still in progress after %dm: %w", imageImportWaitMin, err)
+			return fmt.Errorf("image build not finished (%s): %w", reason, err)
 		}
 		return err
 	}

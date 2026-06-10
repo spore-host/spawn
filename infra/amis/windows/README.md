@@ -72,8 +72,10 @@ spawn image import ... --wait            # block up to 60 min
 spawn image import ... --wait=20         # block up to 20 min
 # On --wait, spawn tags the AMI spawn:os=windows and deletes the staged ISO
 # (and the managed bucket if empty) when the build finishes; --keep-iso opts out.
-# If --wait times out, the build keeps running and the command exits non-zero
-# (distinct from a build failure) so scripts can branch on "still building".
+# If --wait times out OR you Ctrl-C, the build keeps running in Image Builder and
+# the command detaches: it prints the build ARN + `spawn image status` and exits
+# non-zero (distinct from a build failure) so scripts can branch on "still
+# building / detached".
 
 # ...prints the new AMI id. Launch it (Windows requires a lifetime — #72):
 spawn launch winbox --ami <ami-id> --os windows --ttl 4h
@@ -158,7 +160,8 @@ the `spawn:os=windows` tag covers it either way). spored installs itself at boot
 |------|---------|
 | `README.md` | This runbook |
 | (command) `spawn image verify <iso>` | `cmd/image.go` + `pkg/winiso` — local ISO edition check + accept/reject verdict (no AWS) |
-| (command) `spawn image import` | `cmd/image.go` + `pkg/aws/imagebuilder.go` — the import workflow |
+| (command) `spawn image import` | `cmd/image.go` + `pkg/aws/imagebuilder.go` — the import workflow (async; `--wait[=min]`; `spawn image status <arn>`) |
+| (command) `spawn ami list` / `spawn ami delete` | List spawn-managed AMIs (imported ones tagged `spawn:source=iso-import`); delete deregisters + removes snapshots + the Image Builder resource |
 
 > **Legacy:** an earlier qemu/Packer build pipeline (a hand-rolled unattended
 > install + `ec2 import-image`) was removed in favor of Image Builder. Its
