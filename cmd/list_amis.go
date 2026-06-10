@@ -177,7 +177,7 @@ func outputAMIsTable(amis []aws.AMIInfo) error {
 	defer func() { _ = w.Flush() }()
 
 	// Header
-	_, _ = fmt.Fprintf(w, "NAME\tAMI ID\tSTACK\tVERSION\tARCH\tSIZE\tAGE\tSTATUS\n")
+	_, _ = fmt.Fprintf(w, "NAME\tAMI ID\tSTACK\tVERSION\tARCH\tSIZE\tSNAPS\tAGE\tSTATUS\n")
 
 	hasWarnings := false
 
@@ -187,6 +187,9 @@ func outputAMIsTable(amis []aws.AMIInfo) error {
 
 		// Format size
 		size := fmt.Sprintf("%dGB", ami.Size)
+
+		// Snapshot count (see `spawn ami snapshots <id>` for details)
+		snaps := fmt.Sprintf("%d", len(ami.SnapshotIDs))
 
 		// Stack and version
 		stack := ami.Stack
@@ -222,13 +225,14 @@ func outputAMIsTable(amis []aws.AMIInfo) error {
 			}
 		}
 
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			ami.Name,
 			ami.AMIID,
 			stack,
 			version,
 			ami.Architecture,
 			size,
+			snaps,
 			age,
 			status,
 		)
@@ -261,7 +265,7 @@ func outputAMIsTableSimple(amis []aws.AMIInfo) error {
 	defer func() { _ = w.Flush() }()
 
 	// Header
-	_, _ = fmt.Fprintf(w, "NAME\tAMI ID\tSTACK\tVERSION\tARCH\tSIZE\tAGE\tSTATUS\n")
+	_, _ = fmt.Fprintf(w, "NAME\tAMI ID\tSTACK\tVERSION\tARCH\tSIZE\tSNAPS\tAGE\tSTATUS\n")
 
 	for _, ami := range amis {
 		// Format age
@@ -269,6 +273,9 @@ func outputAMIsTableSimple(amis []aws.AMIInfo) error {
 
 		// Format size
 		size := fmt.Sprintf("%dGB", ami.Size)
+
+		// Snapshot count
+		snaps := fmt.Sprintf("%d", len(ami.SnapshotIDs))
 
 		// Stack and version
 		stack := ami.Stack
@@ -292,13 +299,14 @@ func outputAMIsTableSimple(amis []aws.AMIInfo) error {
 			status += "[deprecated]"
 		}
 
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			ami.Name,
 			ami.AMIID,
 			stack,
 			version,
 			ami.Architecture,
 			size,
+			snaps,
 			age,
 			status,
 		)

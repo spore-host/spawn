@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -54,26 +55,35 @@ func runDeleteAMI(cmd *cobra.Command, args []string) error {
 	}
 
 	res, err := client.DeleteAMI(ctx, deleteAMIRegion, amiID)
-	if err != nil {
-		// res may be partially populated (e.g. deregistered but snapshot failed);
-		// surface it so the user knows what's left.
+
+	// JSON: always emit the full result (it details deleted/retained/errors),
+	// then return the error for a non-zero exit if cleanup was incomplete.
+	if getOutputFormat() == "json" {
 		if res != nil {
-			fmt.Fprintf(os.Stderr, "partial: deregistered=%s snapshots=%v\n", res.AMIID, res.SnapshotIDs)
+			_ = json.NewEncoder(os.Stdout).Encode(res)
 		}
 		return err
 	}
 
-	if getOutputFormat() == "json" {
-		return json.NewEncoder(os.Stdout).Encode(res)
+	if res != nil {
+		fmt.Printf("Deregistered AMI %s\n", res.AMIID)
+		if len(res.DeletedSnapshots) > 0 {
+			fmt.Printf("  deleted snapshots:  %s\n", strings.Join(res.DeletedSnapshots, ", "))
+		}
+		for snap, why := range res.RetainedSnapshots {
+			fmt.Printf("  retained snapshot:  %s (%s)\n", snap, why)
+		}
+		if res.ImageBuilderArn != "" && res.ImageBuilderError == "" {
+			fmt.Printf("  image builder resource deleted: %s\n", res.ImageBuilderArn)
+		}
+		for snap, msg := range res.SnapshotErrors {
+			fmt.Fprintf(os.Stderr, "  ⚠️  snapshot %s not deleted: %s\n", snap, msg)
+		}
+		if res.ImageBuilderError != "" {
+			fmt.Fprintf(os.Stderr, "  ⚠️  image builder resource %s not deleted: %s\n", res.ImageBuilderArn, res.ImageBuilderError)
+		}
 	}
-	fmt.Printf("Deleted AMI %s\n", res.AMIID)
-	if len(res.SnapshotIDs) > 0 {
-		fmt.Printf("  snapshots: %v\n", res.SnapshotIDs)
-	}
-	if res.ImageBuilderArn != "" {
-		fmt.Printf("  image builder resource: %s\n", res.ImageBuilderArn)
-	}
-	return nil
+	return err
 }
 
 func init() {
