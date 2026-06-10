@@ -67,29 +67,47 @@ type ImportWindowsISOInput struct {
 }
 
 // EnsureImageBuilderSLR creates the Image Builder service-linked role
-// (AWSServiceRoleForImageBuilder) if it does not already exist. import-disk-image
-// uses this role as the execution role by default. Idempotent: an existing role
-// is not an error.
-func (c *Client) EnsureImageBuilderSLR(ctx context.Context) error {
+// (AWSServiceRoleForImageBuilder) if it does not already exist and returns its
+// full ARN. import-disk-image uses this role as the execution role by default.
+// Returning the ARN matters: the SLR's real ARN is under the
+// aws-service-role/imagebuilder.amazonaws.com/ path, NOT a bare
+// role/AWSServiceRoleForImageBuilder — passing the bare name makes the service
+// resolve the wrong ARN and the build fails with "Unable to perform STS Assume
+// role". Idempotent: an existing role is not an error.
+func (c *Client) EnsureImageBuilderSLR(ctx context.Context) (string, error) {
 	iamClient := iam.NewFromConfig(c.cfg)
-	_, err := iamClient.CreateServiceLinkedRole(ctx, &iam.CreateServiceLinkedRoleInput{
+	out, err := iamClient.CreateServiceLinkedRole(ctx, &iam.CreateServiceLinkedRoleInput{
 		AWSServiceName: aws.String(imageBuilderServiceName),
 	})
 	if err == nil {
-		return nil
-	}
-	// "InvalidInput" with a "has been taken"/"already exists" body is returned
-	// when the SLR already exists — treat that as success.
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
-		code := apiErr.ErrorCode()
-		msg := strings.ToLower(apiErr.ErrorMessage())
-		if code == "InvalidInput" && (strings.Contains(msg, "has been taken") ||
-			strings.Contains(msg, "already exists")) {
-			return nil
+		// Wait briefly for the new role to propagate before it's used as an
+		// execution role (IAM is eventually consistent).
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(10 * time.Second):
+		}
+		if out.Role != nil {
+			return aws.ToString(out.Role.Arn), nil
+		}
+	} else {
+		// "InvalidInput" with a "has been taken"/"already exists" body is returned
+		// when the SLR already exists — treat that as success and look up its ARN.
+		var apiErr smithy.APIError
+		if !errors.As(err, &apiErr) || apiErr.ErrorCode() != "InvalidInput" ||
+			!(strings.Contains(strings.ToLower(apiErr.ErrorMessage()), "has been taken") ||
+				strings.Contains(strings.ToLower(apiErr.ErrorMessage()), "already exists")) {
+			return "", fmt.Errorf("create Image Builder service-linked role: %w", err)
 		}
 	}
-	return fmt.Errorf("create Image Builder service-linked role: %w", err)
+	// Look up the existing role's ARN.
+	got, gerr := iamClient.GetRole(ctx, &iam.GetRoleInput{
+		RoleName: aws.String("AWSServiceRoleForImageBuilder"),
+	})
+	if gerr != nil {
+		return "", fmt.Errorf("get Image Builder service-linked role ARN: %w", gerr)
+	}
+	return aws.ToString(got.Role.Arn), nil
 }
 
 // EnsureImportInfrastructure idempotently creates the IAM instance-profile role
@@ -446,10 +464,11 @@ func (c *Client) GetImageStatus(ctx context.Context, region, imageBuildVersionAr
 	return st, nil
 }
 
-// TagAMIWindows tags an AMI with spawn:os=windows so spawn's connect/launch
-// paths treat it as Windows. The Image Builder output AMI already registers with
-// Platform=windows (so IsWindowsAMI works), but the tag makes detection
-// explicit and matches how spawn-launched instances are tagged.
+// TagAMIWindows tags an imported AMI with the spawn metadata so it's discoverable
+// via `spawn ami list` and treated as Windows by connect/launch. The Image
+// Builder output AMI already registers with Platform=windows (so IsWindowsAMI
+// works), but the tags make detection explicit and let the AMI show up in
+// listings filterable by source/arch. x64 because import-disk-image is x64-only.
 func (c *Client) TagAMIWindows(ctx context.Context, region, amiID string) error {
 	cfg := c.cfg.Copy()
 	if region != "" {
@@ -461,6 +480,8 @@ func (c *Client) TagAMIWindows(ctx context.Context, region, amiID string) error 
 		Tags: []ec2types.Tag{
 			{Key: aws.String("spawn:os"), Value: aws.String("windows")},
 			{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+			{Key: aws.String("spawn:source"), Value: aws.String("iso-import")},
+			{Key: aws.String("spawn:arch"), Value: aws.String("x86_64")},
 		},
 	})
 	if err != nil {

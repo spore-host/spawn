@@ -249,13 +249,22 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 		stagedBucket, stagedKey = bucket, key
 	}
 
-	// Ensure the Image Builder service-linked execution role exists.
+	// Ensure the Image Builder service-linked execution role exists, and capture
+	// its full ARN. The SLR lives under aws-service-role/imagebuilder.amazonaws.com/,
+	// so the bare name "AWSServiceRoleForImageBuilder" resolves to the wrong ARN
+	// and the build fails with "Unable to perform STS Assume role" — use the ARN.
 	prog.Start("Ensuring Image Builder service role")
-	if err := awsClient.EnsureImageBuilderSLR(ctx); err != nil {
+	slrArn, err := awsClient.EnsureImageBuilderSLR(ctx)
+	if err != nil {
 		prog.Error("Ensuring Image Builder service role", err)
 		return err
 	}
 	prog.Complete("Ensuring Image Builder service role")
+	// Use the resolved SLR ARN unless the user supplied a custom execution role.
+	execRole := imageImportExecRole
+	if !cmd.Flags().Changed("execution-role") {
+		execRole = slrArn
+	}
 
 	// Resolve the infrastructure configuration: use the provided ARN, or
 	// self-provision a default one (IAM role + instance profile + infra config).
@@ -281,7 +290,7 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 		Name:                           imageImportName,
 		SemanticVersion:                imageImportVersion,
 		URI:                            uri,
-		ExecutionRole:                  imageImportExecRole,
+		ExecutionRole:                  execRole,
 		InfrastructureConfigurationArn: infraArn,
 	}
 	if cmd.Flags().Changed("image-index") {

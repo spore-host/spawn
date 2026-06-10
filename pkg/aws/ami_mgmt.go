@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/imagebuilder"
 )
 
 // AMIInfo represents information about an AMI
@@ -202,4 +203,79 @@ func (c *Client) ListAMIs(ctx context.Context, region string, filters map[string
 	}
 
 	return amis, nil
+}
+
+// DeleteAMIResult reports what DeleteAMI removed.
+type DeleteAMIResult struct {
+	AMIID            string
+	SnapshotIDs      []string // backing EBS snapshots deleted
+	ImageBuilderArn  string   // IB image resource deleted, if this AMI came from `image import`
+	DeregisteredOnly bool     // true if snapshots couldn't be resolved/deleted
+}
+
+// DeleteAMI deregisters an AMI and deletes its backing EBS snapshots. If the AMI
+// was produced by EC2 Image Builder (tagged Ec2ImageBuilderArn, e.g. from
+// `spawn image import`), the corresponding Image Builder image resource is also
+// deleted so the name/version is freed. Best-effort on snapshots/IB resource:
+// the deregister is the critical step; snapshot/IB errors are returned but the
+// AMI is already gone.
+func (c *Client) DeleteAMI(ctx context.Context, region, amiID string) (*DeleteAMIResult, error) {
+	cfg, err := c.getRegionalConfig(ctx, region)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get regional config: %w", err)
+	}
+	ec2Client := ec2.NewFromConfig(cfg)
+
+	// Describe first to capture backing snapshots + any Image Builder tag.
+	desc, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
+		ImageIds: []string{amiID},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describe AMI %s: %w", amiID, err)
+	}
+	if len(desc.Images) == 0 {
+		return nil, fmt.Errorf("AMI %s not found in %s", amiID, region)
+	}
+	img := desc.Images[0]
+
+	res := &DeleteAMIResult{AMIID: amiID}
+	for _, bdm := range img.BlockDeviceMappings {
+		if bdm.Ebs != nil && bdm.Ebs.SnapshotId != nil {
+			res.SnapshotIDs = append(res.SnapshotIDs, *bdm.Ebs.SnapshotId)
+		}
+	}
+	for _, tag := range img.Tags {
+		if tag.Key != nil && *tag.Key == "Ec2ImageBuilderArn" && tag.Value != nil {
+			res.ImageBuilderArn = *tag.Value
+		}
+	}
+
+	// Deregister the AMI (the critical, irreversible step).
+	if _, err := ec2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
+		ImageId: aws.String(amiID),
+	}); err != nil {
+		return nil, fmt.Errorf("deregister AMI %s: %w", amiID, err)
+	}
+
+	// Delete backing snapshots.
+	for _, snap := range res.SnapshotIDs {
+		if _, err := ec2Client.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{
+			SnapshotId: aws.String(snap),
+		}); err != nil {
+			res.DeregisteredOnly = true
+			return res, fmt.Errorf("AMI %s deregistered, but deleting snapshot %s failed: %w", amiID, snap, err)
+		}
+	}
+
+	// If it came from Image Builder, delete that image resource too. Best-effort.
+	if res.ImageBuilderArn != "" {
+		ibClient := imagebuilder.NewFromConfig(cfg)
+		if _, err := ibClient.DeleteImage(ctx, &imagebuilder.DeleteImageInput{
+			ImageBuildVersionArn: aws.String(res.ImageBuilderArn),
+		}); err != nil {
+			return res, fmt.Errorf("AMI %s + snapshots deleted, but deleting Image Builder resource %s failed: %w", amiID, res.ImageBuilderArn, err)
+		}
+	}
+
+	return res, nil
 }
