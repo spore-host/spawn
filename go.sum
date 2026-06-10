@@ -157,8 +157,8 @@ github.com/sagikazarmark/locafero v0.11.0 h1:1iurJgmM9G3PA/I+wWYIOw/5SyBtxapeHDc
 github.com/sagikazarmark/locafero v0.11.0/go.mod h1:nVIGvgyzw595SUSUE6tvCp3YYTeHs15MvlmU87WwIik=
 github.com/scttfrdmn/strata v0.22.0 h1:kROmZu6f3gs8NI2tH8DgbBSi3enwQZ4rDUhwC3Dc2CM=
 github.com/scttfrdmn/strata v0.22.0/go.mod h1:pH0yoiL8tF1lFPANkmV0tjNDXuN9agpZa4dH8dBFcJI=
-github.com/scttfrdmn/substrate v0.69.0 h1:QIzzsyD+pOR3/2Syz87W+ukv5G/Iht6rsffrr4CYWc0=
-github.com/scttfrdmn/substrate v0.69.0/go.mod h1:Xj4TSCDG2XOL72lQuP8qJXHtfVwGCwV94oW6aICdJ60=
+github.com/scttfrdmn/substrate v0.70.0 h1:CpB3kV5SLaR0aXLnOFsEiFjFyDL2hFsPb42uahbunxc=
+github.com/scttfrdmn/substrate v0.70.0/go.mod h1:Xj4TSCDG2XOL72lQuP8qJXHtfVwGCwV94oW6aICdJ60=
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 h1:+jumHNA0Wrelhe64i8F6HNlS8pkoyMv5sreGx2Ry5Rw=
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8/go.mod h1:3n1Cwaq1E1/1lhQhtRK2ts/ZwZEhjcQeJQ1RuC6Q/8U=
 github.com/spf13/afero v1.15.0 h1:b/YBCLWAJdFWJTN9cLhiXXcD7mzKn9Dm86dNnfyQw1I=
