@@ -27,6 +27,13 @@ var (
 var rootCmd = &cobra.Command{
 	Use: "spawn",
 	// Short and Long descriptions will be set after i18n initialization
+
+	// Execute() prints the error and exits non-zero itself, so let cobra not
+	// also print it (avoids the duplicate "Error: ..." line), and don't dump the
+	// usage wall on a runtime RunE failure — usage is for `--help`/misuse, not
+	// for "file not found". Both are inherited by every subcommand.
+	SilenceErrors: true,
+	SilenceUsage:  true,
 }
 
 var i18nInitialized = false
