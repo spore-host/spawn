@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -230,10 +231,11 @@ func ensureExists[T any](_ T, err error) error {
 	return err
 }
 
-// UploadISOToS3 streams a local ISO file to s3://bucket/key. import-disk-image
-// requires the object key to end in an uppercase ".ISO" extension, so callers
-// should pass such a key; this method enforces it. The bucket must already
-// exist (use CreateS3BucketIfNotExists first if needed).
+// UploadISOToS3 streams a local ISO file to s3://bucket/key using a multipart
+// upload (Windows ISOs are ~5-9 GB, well over S3's 5 GB single-PutObject limit).
+// import-disk-image requires the object key to end in an uppercase ".ISO"
+// extension, so callers should pass such a key; this method enforces it. The
+// bucket must already exist (use CreateS3BucketIfNotExists first if needed).
 func (c *Client) UploadISOToS3(ctx context.Context, region, bucket, key, localPath string) error {
 	if !strings.HasSuffix(key, ".ISO") {
 		return fmt.Errorf("s3 key %q must end in an uppercase .ISO extension (import-disk-image requirement)", key)
@@ -244,15 +246,76 @@ func (c *Client) UploadISOToS3(ctx context.Context, region, bucket, key, localPa
 	}
 	defer f.Close() //nolint:errcheck
 
+	localSize := int64(-1)
+	if fi, statErr := f.Stat(); statErr == nil {
+		localSize = fi.Size()
+	}
+
 	cfg := c.cfg.Copy()
 	cfg.Region = region
 	s3Client := s3.NewFromConfig(cfg)
-	if _, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
+
+	// Idempotency: if an object with the same key and byte size already exists,
+	// skip the (multi-GB, multi-minute) upload. A size match on a content-keyed
+	// ISO is a strong-enough signal; the import re-reads from S3 anyway.
+	if localSize >= 0 {
+		if head, herr := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		}); herr == nil && aws.ToInt64(head.ContentLength) == localSize {
+			return nil
+		}
+	}
+
+	uploader := manager.NewUploader(s3Client, func(u *manager.Uploader) {
+		u.PartSize = 64 * 1024 * 1024 // 64 MiB parts
+		u.Concurrency = 4
+	})
+	if _, err := uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 		Body:   f,
 	}); err != nil {
 		return fmt.Errorf("upload ISO to s3://%s/%s: %w", bucket, key, err)
+	}
+	return nil
+}
+
+// DeleteISOFromS3 removes the staged ISO object. If alsoBucketIfEmpty is true
+// and the bucket is now empty, it also deletes the bucket — used to clean up the
+// transient managed staging bucket once the AMI is built. Errors deleting the
+// bucket are returned, but a still-non-empty bucket is left intact (not an
+// error: the user may have put other objects there).
+func (c *Client) DeleteISOFromS3(ctx context.Context, region, bucket, key string, alsoBucketIfEmpty bool) error {
+	cfg := c.cfg.Copy()
+	cfg.Region = region
+	s3Client := s3.NewFromConfig(cfg)
+
+	if _, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}); err != nil {
+		return fmt.Errorf("delete s3://%s/%s: %w", bucket, key, err)
+	}
+	if !alsoBucketIfEmpty {
+		return nil
+	}
+
+	// Only remove the bucket if it's now empty.
+	list, err := s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(bucket),
+		MaxKeys: aws.Int32(1),
+	})
+	if err != nil {
+		return fmt.Errorf("list s3://%s: %w", bucket, err)
+	}
+	if aws.ToInt32(list.KeyCount) > 0 {
+		return nil // not empty — leave it
+	}
+	if _, err := s3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+		Bucket: aws.String(bucket),
+	}); err != nil {
+		return fmt.Errorf("delete bucket %s: %w", bucket, err)
 	}
 	return nil
 }

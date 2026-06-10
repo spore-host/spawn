@@ -29,6 +29,7 @@ var (
 	imageImportInstType string
 	imageImportSubnet   string
 	imageImportSGs      []string
+	imageImportKeepISO  bool
 )
 
 var imageCmd = &cobra.Command{
@@ -164,7 +165,9 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 
 	// Resolve the S3 URI: either the ISO is already in S3, or we upload a local
 	// file to a staging bucket. import-disk-image requires an uppercase .ISO key.
-	var uri string
+	// Track what we staged so we can clean it up after the AMI is built.
+	var uri, stagedBucket, stagedKey string
+	stagedBucketIsManaged := false
 	if strings.HasPrefix(imageImportISO, "s3://") {
 		uri = imageImportISO
 	} else {
@@ -179,6 +182,7 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("resolve account id for the managed ISO bucket: %w", aerr)
 			}
 			bucket = fmt.Sprintf("spawn-iso-import-%s-%s", acct, imageImportRegion)
+			stagedBucketIsManaged = true
 		}
 		prog.Start("Preparing the ISO staging bucket")
 		if err := awsClient.CreateS3BucketIfNotExists(ctx, bucket, imageImportRegion); err != nil {
@@ -200,6 +204,7 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 		}
 		prog.Complete("Uploading ISO to S3")
 		uri = fmt.Sprintf("s3://%s/%s", bucket, key)
+		stagedBucket, stagedKey = bucket, key
 	}
 
 	// Ensure the Image Builder service-linked execution role exists.
@@ -277,6 +282,20 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 		prog.Complete("Tagging AMI spawn:os=windows")
 	}
 
+	// Clean up the staged ISO now that the AMI exists — it's a transient artifact
+	// (the AMI is self-contained). Only for an ISO we uploaded this run, and only
+	// unless --keep-iso. If we created the managed bucket, remove it too when it's
+	// left empty.
+	if stagedKey != "" && !imageImportKeepISO {
+		prog.Start("Cleaning up the staged ISO")
+		if err := awsClient.DeleteISOFromS3(ctx, imageImportRegion, stagedBucket, stagedKey, stagedBucketIsManaged); err != nil {
+			// Non-fatal: the AMI is built; a leftover ISO is just cost, not breakage.
+			prog.Error("Cleaning up the staged ISO", err)
+		} else {
+			prog.Complete("Cleaning up the staged ISO")
+		}
+	}
+
 	if jsonOut {
 		return json.NewEncoder(os.Stdout).Encode(map[string]string{
 			"ami":                  amiID,
@@ -297,6 +316,7 @@ func init() {
 	f := imageImportCmd.Flags()
 	f.StringVar(&imageImportISO, "iso", "", "Windows 11 ISO: local path or s3://bucket/key.ISO (required)")
 	f.StringVar(&imageImportBucket, "bucket", "", "S3 bucket to stage a local ISO in (default: managed spawn-iso-import-<account>-<region>, auto-created)")
+	f.BoolVar(&imageImportKeepISO, "keep-iso", false, "Keep the staged ISO (and managed bucket) after the AMI is built; by default they are deleted")
 	f.StringVar(&imageImportS3Key, "s3-key", "", "S3 object key for the uploaded ISO (default: derived from filename, .ISO)")
 	f.StringVar(&imageImportRegion, "region", "us-east-1", "AWS region for the import build")
 	f.StringVar(&imageImportInfraArn, "infra-config-arn", "", "Image Builder infrastructure configuration ARN (optional; self-provisioned if omitted)")
