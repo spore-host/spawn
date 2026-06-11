@@ -115,6 +115,9 @@ inst, _ := client.LaunchInstance(ctx, config)
 
 Full reference at **[spore.host/docs](https://spore.host/docs/tools/spawn)**.
 
+- **[Windows beta guide](docs/windows-beta-guide.md)** — end-to-end: ISO → custom
+  AMI → launch → connect via RDP or SSH-over-SSM, with AWS SSO sign-in.
+
 ## License
 
 Apache 2.0 — Copyright 2025-2026 Scott Friedman.
