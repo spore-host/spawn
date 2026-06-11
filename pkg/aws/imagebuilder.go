@@ -489,3 +489,29 @@ func (c *Client) TagAMIWindows(ctx context.Context, region, amiID string) error 
 	}
 	return nil
 }
+
+// TagAMIWindowsWarm tags a "warm" AMI — one built from a seed launched off an
+// imported base AMI, after first boot finished (#98). Same Windows/managed/arch
+// tags as TagAMIWindows, but spawn:source=iso-import-warm and a
+// spawn:warm-parent pointer to the base AMI for lineage.
+func (c *Client) TagAMIWindowsWarm(ctx context.Context, region, amiID, parentAMI string) error {
+	cfg := c.cfg.Copy()
+	if region != "" {
+		cfg.Region = region
+	}
+	ec2Client := ec2.NewFromConfig(cfg)
+	_, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{amiID},
+		Tags: []ec2types.Tag{
+			{Key: aws.String("spawn:os"), Value: aws.String("windows")},
+			{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+			{Key: aws.String("spawn:source"), Value: aws.String("iso-import-warm")},
+			{Key: aws.String("spawn:arch"), Value: aws.String("x86_64")},
+			{Key: aws.String("spawn:warm-parent"), Value: aws.String(parentAMI)},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("tag warm AMI %s: %w", amiID, err)
+	}
+	return nil
+}

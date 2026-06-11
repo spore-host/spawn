@@ -76,3 +76,26 @@ func TestDefaultWindowsInstanceTypeNonBurstable(t *testing.T) {
 		t.Errorf("default Windows type %s must not be burstable", defaultWindowsInstanceType)
 	}
 }
+
+// TestWarmFlagDefaultsOn verifies --no-warm defaults to false (warm is on by
+// default) and --warm-instance-type defaults to a non-burstable type.
+func TestWarmFlagDefaultsOn(t *testing.T) {
+	nw := imageImportCmd.Flags().Lookup("no-warm")
+	if nw == nil {
+		t.Fatal("--no-warm flag not registered")
+	}
+	if nw.DefValue != "false" {
+		t.Errorf("--no-warm default = %q, want false (warm on by default)", nw.DefValue)
+	}
+	wt := imageImportCmd.Flags().Lookup("warm-instance-type")
+	if wt == nil {
+		t.Fatal("--warm-instance-type flag not registered")
+	}
+	if isBurstableInstanceType(wt.DefValue) {
+		t.Errorf("--warm-instance-type default %q must not be burstable", wt.DefValue)
+	}
+	// The default warm seed type must pass the Windows guard.
+	if err := guardWindowsInstanceType("windows", wt.DefValue); err != nil {
+		t.Errorf("default warm-instance-type %q rejected by Windows guard: %v", wt.DefValue, err)
+	}
+}
