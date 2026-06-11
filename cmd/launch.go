@@ -420,6 +420,15 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 
 	var config *aws.LaunchConfig
 
+	// Windows gets a non-burstable default instance type when --os windows is
+	// explicit and --instance-type was omitted (#95). Apply it BEFORE launchMode,
+	// which would otherwise treat an empty type as "go to the wizard/pipe" and
+	// never reach the flags path.
+	if instanceType == "" && strings.EqualFold(strings.TrimSpace(osFlag), "windows") {
+		instanceType = defaultWindowsInstanceType
+		fmt.Fprintf(os.Stderr, "ℹ️  No --instance-type given for Windows; defaulting to %s (non-burstable).\n", defaultWindowsInstanceType)
+	}
+
 	// Determine mode: wizard, pipe, or flags. See launchMode for the rules — the
 	// key fix (#34): pipe mode requires no --instance-type, so explicit flags
 	// never read stdin even when invoked with a piped (non-TTY) stdin, e.g. from
@@ -477,16 +486,9 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--name is required: give your spore a name (e.g. --name my-worker)")
 	}
 	if config.InstanceType == "" {
-		// Windows gets a sensible non-burstable default so the user isn't forced
-		// to know that t-instances are a trap for Sysprep first boot (#95). This
-		// only fires when --os windows is explicit; auto-detected Windows (custom
-		// AMI, no --os) is still guarded after OS resolution in launchWithProgress.
-		if strings.EqualFold(strings.TrimSpace(osFlag), "windows") {
-			config.InstanceType = defaultWindowsInstanceType
-			fmt.Fprintf(os.Stderr, "ℹ️  No --instance-type given for Windows; defaulting to %s (non-burstable).\n", defaultWindowsInstanceType)
-		} else {
-			return i18n.Te("error.instance_type_required", nil)
-		}
+		// Windows with --os windows is defaulted to m7i.xlarge earlier (before
+		// launchMode), so an empty type here is a genuine non-Windows omission.
+		return i18n.Te("error.instance_type_required", nil)
 	}
 
 	// Auto-detect region if not specified
