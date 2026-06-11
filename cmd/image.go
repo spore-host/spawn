@@ -524,21 +524,36 @@ func buildWarmAMI(ctx context.Context, awsClient *aws.Client, region, name, vers
 		}
 	}()
 
-	// The imported AMI's Sysprep first boot + EC2Launch user-data (which installs
-	// spored + ensures the SSM agent, #95) can take ~35-50 min; SSM registration
-	// is the long pole. Budget 75 min so we don't clip a still-progressing boot
-	// (a live run failed at a too-tight 40 min). Overridable via --warm-timeout.
-	waitLabel := "Waiting for seed first boot to finish (SSM Online; can take 35-50 min)"
+	// Readiness, by progress not by a hard clock. The reliable "first boot
+	// finished" signal is the Administrator password becoming available: EC2
+	// generates it during EC2Launch's specialize/oobe pass, after Sysprep — so a
+	// password means the OS is up and EC2Launch ran. We gate the warm image on
+	// THAT (reliable, ~12-20 min). SSM registration is a far flakier/slower signal
+	// (28 min in one test, >75 min and still not registered in another), so we do
+	// NOT hard-require it: we wait a bounded best-effort window for SSM to settle
+	// (nicer warm image if it's up), then image regardless — the SSM agent + spored
+	// are installed either way and register on the warm AMI's own next boot.
+	waitLabel := "Waiting for seed first boot (Administrator password ready)"
 	prog.Start(waitLabel)
 	if err := awsClient.WaitForRunning(ctx, region, seedID, 5*time.Minute); err != nil {
 		prog.Error(waitLabel, err)
 		return "", fmt.Errorf("warm seed never reached running: %w", err)
 	}
-	if err := awsClient.WaitForSSMOnline(ctx, region, seedID, time.Duration(imageImportWarmTimeout)*time.Minute); err != nil {
+	// Password-available is the gate. The timeout here is a safety net for a truly
+	// hung instance, not the normal path; default 30 min is generous vs ~12-20 observed.
+	if _, err := awsClient.WaitForPasswordData(ctx, region, seedID, time.Duration(imageImportWarmTimeout)*time.Minute); err != nil {
 		prog.Error(waitLabel, err)
-		return "", fmt.Errorf("warm seed never registered with SSM (first boot incomplete): %w", err)
+		return "", fmt.Errorf("warm seed never finished first boot (no Administrator password): %w", err)
 	}
 	prog.Complete(waitLabel)
+
+	// Best-effort: give the SSM agent + spored a short, bounded window to come
+	// online so the warm image captures a fully-settled machine. Never fatal.
+	prog.Start("Letting spored/SSM settle (best-effort)")
+	if err := awsClient.WaitForSSMOnline(ctx, region, seedID, 10*time.Minute); err != nil {
+		fmt.Fprintf(os.Stderr, "  note: SSM not Online yet on the seed; imaging anyway (the agent is installed and will register on the warm AMI's next boot).\n")
+	}
+	prog.Complete("Letting spored/SSM settle (best-effort)")
 
 	prog.Start("Creating warm AMI from seed")
 	warmName := fmt.Sprintf("%s-warm-%s", name, version)
@@ -597,5 +612,5 @@ func init() {
 	// so future launches skip the ~30 min Sysprep first boot.
 	f.BoolVar(&imageImportNoWarm, "no-warm", false, "Skip building the warm (fast-boot) AMI; produce only the raw imported base AMI")
 	f.StringVar(&imageImportWarmType, "warm-instance-type", "m7i.xlarge", "Instance type for the warm-build seed (non-burstable; Windows)")
-	f.IntVar(&imageImportWarmTimeout, "warm-timeout", 75, "Minutes to wait for the warm seed to finish first boot (SSM Online) before giving up")
+	f.IntVar(&imageImportWarmTimeout, "warm-timeout", 30, "Safety-net minutes to wait for the warm seed's first boot (Administrator password) before giving up")
 }
