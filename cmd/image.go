@@ -21,23 +21,24 @@ import (
 
 // `spawn image import` flags.
 var (
-	imageImportISO      string
-	imageImportBucket   string
-	imageImportRegion   string
-	imageImportInfraArn string
-	imageImportName     string
-	imageImportVersion  string
-	imageImportIndex    int64
-	imageImportNoSecure bool
-	imageImportExecRole string
-	imageImportS3Key    string
-	imageImportInstType string
-	imageImportSubnet   string
-	imageImportSGs      []string
-	imageImportKeepISO  bool
-	imageImportWaitMin  int
-	imageImportNoWarm   bool
-	imageImportWarmType string
+	imageImportISO         string
+	imageImportBucket      string
+	imageImportRegion      string
+	imageImportInfraArn    string
+	imageImportName        string
+	imageImportVersion     string
+	imageImportIndex       int64
+	imageImportNoSecure    bool
+	imageImportExecRole    string
+	imageImportS3Key       string
+	imageImportInstType    string
+	imageImportSubnet      string
+	imageImportSGs         []string
+	imageImportKeepISO     bool
+	imageImportWaitMin     int
+	imageImportNoWarm      bool
+	imageImportWarmType    string
+	imageImportWarmTimeout int
 )
 
 var imageCmd = &cobra.Command{
@@ -523,16 +524,21 @@ func buildWarmAMI(ctx context.Context, awsClient *aws.Client, region, name, vers
 		}
 	}()
 
-	prog.Start("Waiting for seed first boot to finish (SSM Online, ~20-35 min)")
+	// The imported AMI's Sysprep first boot + EC2Launch user-data (which installs
+	// spored + ensures the SSM agent, #95) can take ~35-50 min; SSM registration
+	// is the long pole. Budget 75 min so we don't clip a still-progressing boot
+	// (a live run failed at a too-tight 40 min). Overridable via --warm-timeout.
+	waitLabel := "Waiting for seed first boot to finish (SSM Online; can take 35-50 min)"
+	prog.Start(waitLabel)
 	if err := awsClient.WaitForRunning(ctx, region, seedID, 5*time.Minute); err != nil {
-		prog.Error("Waiting for seed first boot to finish (SSM Online, ~20-35 min)", err)
+		prog.Error(waitLabel, err)
 		return "", fmt.Errorf("warm seed never reached running: %w", err)
 	}
-	if err := awsClient.WaitForSSMOnline(ctx, region, seedID, 40*time.Minute); err != nil {
-		prog.Error("Waiting for seed first boot to finish (SSM Online, ~20-35 min)", err)
+	if err := awsClient.WaitForSSMOnline(ctx, region, seedID, time.Duration(imageImportWarmTimeout)*time.Minute); err != nil {
+		prog.Error(waitLabel, err)
 		return "", fmt.Errorf("warm seed never registered with SSM (first boot incomplete): %w", err)
 	}
-	prog.Complete("Waiting for seed first boot to finish (SSM Online, ~20-35 min)")
+	prog.Complete(waitLabel)
 
 	prog.Start("Creating warm AMI from seed")
 	warmName := fmt.Sprintf("%s-warm-%s", name, version)
@@ -591,4 +597,5 @@ func init() {
 	// so future launches skip the ~30 min Sysprep first boot.
 	f.BoolVar(&imageImportNoWarm, "no-warm", false, "Skip building the warm (fast-boot) AMI; produce only the raw imported base AMI")
 	f.StringVar(&imageImportWarmType, "warm-instance-type", "m7i.xlarge", "Instance type for the warm-build seed (non-burstable; Windows)")
+	f.IntVar(&imageImportWarmTimeout, "warm-timeout", 75, "Minutes to wait for the warm seed to finish first boot (SSM Online) before giving up")
 }
