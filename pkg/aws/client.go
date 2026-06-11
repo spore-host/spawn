@@ -1615,6 +1615,76 @@ func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID,
 	return sgID, nil
 }
 
+// CreateOrGetWindowsSecurityGroup creates or gets a security group for Windows
+// instances, opening 22 (SSH-over-SSM fallback / OpenSSH) and 3389 (RDP) to the
+// given CIDR. Without this, spawn-launched Windows instances fall back to the
+// default SG (which typically opens only 22, if anything), so RDP is impossible
+// (#95). allowCIDR defaults to 0.0.0.0/0 when empty (caller should warn).
+func (c *Client) CreateOrGetWindowsSecurityGroup(ctx context.Context, region, vpcID, groupName, allowCIDR string) (string, error) {
+	if allowCIDR == "" {
+		allowCIDR = "0.0.0.0/0"
+	}
+	cfg := c.cfg.Copy()
+	cfg.Region = region
+	ec2Client := ec2.NewFromConfig(cfg)
+
+	// Reuse an existing group of this name in the VPC (idempotent).
+	describeResult, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+		Filters: []types.Filter{
+			{Name: aws.String("group-name"), Values: []string{groupName}},
+			{Name: aws.String("vpc-id"), Values: []string{vpcID}},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to describe security groups: %w", err)
+	}
+	if len(describeResult.SecurityGroups) > 0 {
+		return *describeResult.SecurityGroups[0].GroupId, nil
+	}
+
+	createResult, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
+		GroupName:   aws.String(groupName),
+		Description: aws.String("Security group for spawn Windows instances (RDP + SSH)"),
+		VpcId:       aws.String(vpcID),
+		TagSpecifications: []types.TagSpecification{
+			{
+				ResourceType: types.ResourceTypeSecurityGroup,
+				Tags: []types.Tag{
+					{Key: aws.String("Name"), Value: aws.String(groupName)},
+					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+					{Key: aws.String("spawn:purpose"), Value: aws.String("windows")},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create security group: %w", err)
+	}
+	sgID := *createResult.GroupId
+
+	_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: aws.String(sgID),
+		IpPermissions: []types.IpPermission{
+			{
+				IpProtocol: aws.String("tcp"),
+				FromPort:   aws.Int32(22),
+				ToPort:     aws.Int32(22),
+				IpRanges:   []types.IpRange{{CidrIp: aws.String(allowCIDR), Description: aws.String("SSH access")}},
+			},
+			{
+				IpProtocol: aws.String("tcp"),
+				FromPort:   aws.Int32(3389),
+				ToPort:     aws.Int32(3389),
+				IpRanges:   []types.IpRange{{CidrIp: aws.String(allowCIDR), Description: aws.String("RDP access")}},
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to authorize Windows security group ingress: %w", err)
+	}
+	return sgID, nil
+}
+
 // EnsureLustrePorts adds self-referencing inbound rules for the Lustre protocol
 // to the specified security group if they are not already present.
 // Lustre requires port 988 (MGS/MDS/OSS) and 1018–1023 (dynamic OST traffic)

@@ -53,6 +53,7 @@ var (
 	ami          string
 	osFlag       string
 	nestedVirt   bool
+	allowCIDR    string
 
 	// Network (empty = auto-create)
 	vpcID    string
@@ -209,6 +210,7 @@ func init() {
 	launchCmd.Flags().StringVar(&ami, "ami", "", "AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023")
 	launchCmd.Flags().StringVar(&osFlag, "os", "", "Target OS: windows or linux. Omit to auto-detect from the AMI. Use to force the OS for a custom AMI whose platform metadata is unset.")
 	launchCmd.Flags().BoolVar(&nestedVirt, "nested-virtualization", false, "Enable nested virtualization (run KVM/Hyper-V inside the instance). Requires a C8i/M8i/R8i instance type.")
+	launchCmd.Flags().StringVar(&allowCIDR, "allow-cidr", "", "CIDR allowed to reach the managed Windows security group (RDP 3389 + SSH 22); default 0.0.0.0/0")
 	launchCmd.Flags().Int32Var(&launchVolumeSize, "volume-size", 0, "Root EBS volume size in GiB (0 = use AMI default)")
 
 	// Network
@@ -418,6 +420,15 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 
 	var config *aws.LaunchConfig
 
+	// Windows gets a non-burstable default instance type when --os windows is
+	// explicit and --instance-type was omitted (#95). Apply it BEFORE launchMode,
+	// which would otherwise treat an empty type as "go to the wizard/pipe" and
+	// never reach the flags path.
+	if instanceType == "" && strings.EqualFold(strings.TrimSpace(osFlag), "windows") {
+		instanceType = defaultWindowsInstanceType
+		fmt.Fprintf(os.Stderr, "ℹ️  No --instance-type given for Windows; defaulting to %s (non-burstable).\n", defaultWindowsInstanceType)
+	}
+
 	// Determine mode: wizard, pipe, or flags. See launchMode for the rules — the
 	// key fix (#34): pipe mode requires no --instance-type, so explicit flags
 	// never read stdin even when invoked with a piped (non-TTY) stdin, e.g. from
@@ -475,6 +486,8 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--name is required: give your spore a name (e.g. --name my-worker)")
 	}
 	if config.InstanceType == "" {
+		// Windows with --os windows is defaulted to m7i.xlarge earlier (before
+		// launchMode), so an empty type here is a genuine non-Windows omission.
 		return i18n.Te("error.instance_type_required", nil)
 	}
 
@@ -1191,6 +1204,11 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	if err := windowsLifecycleGuard(config); err != nil {
 		return err
 	}
+	// Reject burstable types for Windows (catches auto-detected Windows where the
+	// early --os default didn't apply); spend nothing on a launch that'd crawl (#95).
+	if err := guardWindowsInstanceType(config.TargetOS, config.InstanceType); err != nil {
+		return err
+	}
 
 	// Reject --nested-virtualization on an instance type that can't do it, before
 	// spending on a launch RunInstances would reject cryptically (#91).
@@ -1278,6 +1296,29 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				"region":            config.Region,
 			}, nil)
 		prog.Complete("Creating MPI security group")
+	} else if config.TargetOS == "windows" && len(config.SecurityGroupIDs) == 0 {
+		// Windows needs RDP (3389) + SSH (22); the default SG won't open 3389, so
+		// RDP would be impossible (#95). Create a managed Windows SG.
+		prog.Start("Creating Windows security group")
+		vpcID, err := awsClient.GetDefaultVPC(ctx, config.Region)
+		if err != nil {
+			prog.Error("Creating Windows security group", err)
+			return fmt.Errorf("failed to get default VPC: %w", err)
+		}
+		if allowCIDR == "" || allowCIDR == "0.0.0.0/0" {
+			fmt.Fprintf(os.Stderr, "⚠️  Opening RDP (3389) + SSH (22) to 0.0.0.0/0; restrict with --allow-cidr <your-ip>/32.\n")
+		}
+		sgName := fmt.Sprintf("spawn-windows-%s", config.Name)
+		sgID, err := awsClient.CreateOrGetWindowsSecurityGroup(ctx, config.Region, vpcID, sgName, allowCIDR)
+		if err != nil {
+			prog.Error("Creating Windows security group", err)
+			auditLog.LogOperationWithRegion("create_security_group", sgName, config.Region, "failed", err)
+			return fmt.Errorf("failed to create Windows security group: %w", err)
+		}
+		config.SecurityGroupIDs = []string{sgID}
+		auditLog.LogOperationWithData("create_security_group", sgName, "success",
+			map[string]interface{}{"security_group_id": sgID, "region": config.Region}, nil)
+		prog.Complete("Creating Windows security group")
 	} else {
 		prog.Skip("Creating security group")
 	}
@@ -1584,13 +1625,28 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	result.PublicIP = publicIP
 	prog.Complete("Getting public IP")
 
-	// Step 10: Wait for SSH to become reachable. Probe the port rather than
-	// sleeping a fixed interval; gated by --wait-for-ssh.
-	prog.Start("Waiting for SSH")
-	if waitForSSH && result.PublicIP != "" {
-		waitForSSHReady(ctx, result.PublicIP, 2*time.Minute)
+	// Step 10: Wait for the instance to be usable. For Windows, SSH (22) won't
+	// answer until late and the real "usable" signal is the Administrator password
+	// becoming available (after EC2Launch runs, post-Sysprep), so wait on that
+	// instead of probing port 22 (#95). For Linux, probe SSH as before.
+	if config.TargetOS == "windows" {
+		prog.Start("Waiting for Windows (password available)")
+		if waitForSSH {
+			// WaitForPasswordData polls GetPasswordData; it's the earliest reliable
+			// "Windows finished first boot" signal. Best-effort: don't fail the
+			// launch if it's slow — the instance is up and self-managing via spored.
+			if _, err := awsClient.WaitForPasswordData(ctx, config.Region, result.InstanceID, 12*time.Minute); err != nil {
+				fmt.Fprintf(os.Stderr, "\n⚠️  Windows is still finishing first boot (Sysprep). The instance is up; `spawn connect %s` will wait for the password.\n", config.Name)
+			}
+		}
+		prog.Complete("Waiting for Windows (password available)")
+	} else {
+		prog.Start("Waiting for SSH")
+		if waitForSSH && result.PublicIP != "" {
+			waitForSSHReady(ctx, result.PublicIP, 2*time.Minute)
+		}
+		prog.Complete("Waiting for SSH")
 	}
-	prog.Complete("Waiting for SSH")
 
 	// Step 11: Register DNS (if requested).
 	//
@@ -1644,14 +1700,25 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		return nil
 	}
 
-	// Display success (TUI mode)
-	sshCmd := plat.GetSSHCommand("ec2-user", result.PublicIP)
-	prog.DisplaySuccess(result.InstanceID, result.PublicIP, sshCmd, config)
+	// Display success (TUI mode). Windows has no `ssh ec2-user@` path — the
+	// connection is RDP or SSH-over-SSM via `spawn connect`, which fetches the
+	// Administrator password and (with --rdp) opens a desktop (#95).
+	var connectCmd string
+	if config.TargetOS == "windows" {
+		connectCmd = fmt.Sprintf("spawn connect %s --rdp     # or: spawn connect %s  (SSH-over-SSM)", config.Name, config.Name)
+	} else {
+		connectCmd = plat.GetSSHCommand("ec2-user", result.PublicIP)
+	}
+	prog.DisplaySuccess(result.InstanceID, result.PublicIP, connectCmd, config)
 
 	// Show DNS info if registered
 	if dnsRecord != "" {
 		_, _ = fmt.Fprintf(os.Stdout, "\n🌐 DNS: %s\n", dnsRecord)
-		_, _ = fmt.Fprintf(os.Stdout, "   Connect: ssh %s@%s\n", plat.GetUsername(), dnsRecord)
+		if config.TargetOS == "windows" {
+			_, _ = fmt.Fprintf(os.Stdout, "   Connect: spawn connect %s --rdp\n", config.Name)
+		} else {
+			_, _ = fmt.Fprintf(os.Stdout, "   Connect: ssh %s@%s\n", plat.GetUsername(), dnsRecord)
+		}
 	}
 
 	return nil
@@ -1901,6 +1968,32 @@ func resolveTargetOS(ctx context.Context, awsClient *aws.Client, region, amiID, 
 	return "linux"
 }
 
+// defaultWindowsInstanceType is the default for `--os windows` when the user
+// doesn't pass --instance-type. Windows must not default to a burstable type:
+// the Sysprep/OOBE first boot starves on CPU credits and takes ~20+ min (#95).
+const defaultWindowsInstanceType = "m7i.xlarge"
+
+// isBurstableInstanceType reports whether an instance type is a burstable
+// (t-family) type, e.g. "t3.large", "t4g.micro". Burstable CPU credits make
+// Windows first-boot painfully slow, so we reject them for Windows.
+func isBurstableInstanceType(instanceType string) bool {
+	return strings.HasPrefix(instanceType, "t") && strings.Contains(instanceType, ".") &&
+		(strings.HasPrefix(instanceType, "t2.") || strings.HasPrefix(instanceType, "t3.") ||
+			strings.HasPrefix(instanceType, "t3a.") || strings.HasPrefix(instanceType, "t4g."))
+}
+
+// guardWindowsInstanceType rejects burstable instance types for Windows, with a
+// clear, actionable error. Returns nil for non-Windows or acceptable types.
+func guardWindowsInstanceType(targetOS, instanceType string) error {
+	if targetOS != "windows" {
+		return nil
+	}
+	if isBurstableInstanceType(instanceType) {
+		return fmt.Errorf("instance type %q is burstable (t-family); Windows first boot starves on burst CPU credits and takes ~20+ min — choose a non-burstable type (default for Windows is %s)", instanceType, defaultWindowsInstanceType)
+	}
+	return nil
+}
+
 // windowsLifecycleGuard enforces cost safety for Windows launches. Windows has
 // no in-instance spored yet (#77), so idle-timeout cannot work and the only
 // thing that will stop the instance is its TTL plus the server-side reaper
@@ -2047,6 +2140,24 @@ try {
     -PropertyType String -Force | Out-Null
 } catch {
   Write-Output "spawn windows ssh bootstrap warning: $_"
+}
+
+# Ensure the SSM agent is installed, set to auto-start, and running (#95).
+# Stock Windows *Server* AMIs ship it running, but an imported Windows 11
+# *client* AMI (spawn image import) bakes the agent without it auto-starting
+# after Sysprep, so SSM never registers and SSH-over-SSM / RDP-over-SSM fail.
+# Don't assume the AMI did it — same posture as the AWS CLI install below.
+try {
+  $svc = Get-Service -Name AmazonSSMAgent -ErrorAction SilentlyContinue
+  if (-not $svc) {
+    $msi = "$env:TEMP\SSMAgent_latest.exe"
+    Invoke-WebRequest -Uri 'https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/windows_amd64/AmazonSSMAgentSetup.exe' -OutFile $msi -UseBasicParsing
+    Start-Process $msi -ArgumentList '/S' -Wait
+  }
+  Set-Service -Name AmazonSSMAgent -StartupType Automatic -ErrorAction SilentlyContinue
+  Restart-Service -Name AmazonSSMAgent -ErrorAction SilentlyContinue
+} catch {
+  Write-Output "spawn ssm-agent bootstrap warning: $_"
 }
 
 # Install spored as a Windows Service from the regional S3 bucket (#77).
