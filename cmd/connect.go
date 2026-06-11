@@ -21,6 +21,9 @@ var (
 	connectPort       int
 	connectSessionMgr bool
 	connectNoStart    bool
+	connectRDP        bool
+	connectViaSSM     bool
+	connectRDPPort    int
 )
 
 var connectCmd = &cobra.Command{
@@ -39,6 +42,9 @@ func init() {
 	connectCmd.Flags().IntVar(&connectPort, "port", 22, "SSH port")
 	connectCmd.Flags().BoolVar(&connectSessionMgr, "session-manager", false, "Use AWS Session Manager instead of SSH")
 	connectCmd.Flags().BoolVar(&connectNoStart, "no-start", false, "Do not automatically start a stopped/hibernated instance")
+	connectCmd.Flags().BoolVar(&connectRDP, "rdp", false, "Windows: open a Remote Desktop (RDP) connection (decrypts the Administrator password)")
+	connectCmd.Flags().BoolVar(&connectViaSSM, "via-ssm", false, "Windows --rdp: tunnel RDP over an SSM port-forwarding session instead of connecting to the public IP")
+	connectCmd.Flags().IntVar(&connectRDPPort, "rdp-port", 13389, "Windows --rdp --via-ssm: local port for the SSM RDP tunnel")
 
 	// Register completion for instance ID argument
 	connectCmd.ValidArgsFunction = completeInstanceID
@@ -233,6 +239,12 @@ func connectWindows(ctx context.Context, client *aws.Client, instance *aws.Insta
 		return nil
 	}
 
+	// --rdp: open a Remote Desktop connection (direct to the public IP, or over
+	// an SSM port-forward tunnel). Decrypts the Administrator password first.
+	if connectRDP {
+		return connectWindowsRDP(ctx, client, instance)
+	}
+
 	// Interactive: fetch + decrypt the Administrator password, print RDP info,
 	// then drop into an SSM PowerShell session.
 	fmt.Fprintf(os.Stderr, "Retrieving Windows Administrator password (this can take a few minutes after launch)...\n")
@@ -273,6 +285,107 @@ func connectWindows(ctx context.Context, client *aws.Client, instance *aws.Insta
 
 	fmt.Fprintf(os.Stderr, "Opening an SSM PowerShell session (Ctrl-D to exit)...\n\n")
 	return connectViaSessionManager(id, region)
+}
+
+// connectWindowsRDP opens a Remote Desktop connection to a Windows instance. It
+// decrypts the Administrator password, then connects either directly to the
+// public IP (default when one exists) or over an SSM port-forwarding tunnel
+// (--via-ssm, or automatically when there's no public IP). The decrypted
+// password is printed for the user to paste into the RDP login (RDP can't be
+// pre-seeded with a password cross-platform). (#95)
+func connectWindowsRDP(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo) error {
+	region, id := instance.Region, instance.InstanceID
+
+	fmt.Fprintf(os.Stderr, "Retrieving Windows Administrator password (this can take a few minutes after launch)...\n")
+	blob, err := client.WaitForPasswordData(ctx, region, id, 12*time.Minute)
+	if err != nil {
+		return fmt.Errorf("could not get Windows password data (instance may still be on first boot): %w", err)
+	}
+	keyPath, rerr := findSSHKey(instance.KeyName)
+	if rerr != nil {
+		return fmt.Errorf("could not locate the launch key %q to decrypt the password: %w", instance.KeyName, rerr)
+	}
+	password, derr := aws.DecryptWindowsPassword(blob, keyPath)
+	if derr != nil {
+		return fmt.Errorf("could not decrypt the Administrator password (need the RSA launch key): %w", derr)
+	}
+
+	// Decide transport: explicit --via-ssm, or no public IP → tunnel.
+	useSSM := connectViaSSM || instance.PublicIP == ""
+
+	host := instance.PublicIP
+	if useSSM {
+		host = fmt.Sprintf("localhost:%d", connectRDPPort)
+		fmt.Fprintf(os.Stderr, "Opening an SSM port-forward to RDP (3389) on local port %d...\n", connectRDPPort)
+		fmt.Fprintf(os.Stderr, "Leave this running; it forwards %s → %s:3389.\n", host, id)
+		// Start the tunnel in the background and open the RDP client against it.
+		go func() { _ = startRDPTunnel(id, region, connectRDPPort) }()
+		time.Sleep(3 * time.Second) // give the session a moment to establish
+	}
+
+	printRDPCredentials(instance.Name, host, password)
+	return launchRDPClient(host)
+}
+
+// startRDPTunnel shells out to the AWS CLI to open an SSM port-forwarding
+// session from localPort to the instance's RDP port (3389). Same AWS-CLI +
+// session-manager-plugin dependency as connectViaSessionManager.
+func startRDPTunnel(instanceID, region string, localPort int) error {
+	if _, err := exec.LookPath("aws"); err != nil {
+		return i18n.Te("spawn.connect.error.aws_cli_not_found", nil)
+	}
+	cmd := exec.Command("aws", "ssm", "start-session",
+		"--target", instanceID,
+		"--region", region,
+		"--document-name", "AWS-StartPortForwardingSession",
+		"--parameters", fmt.Sprintf("portNumber=3389,localPortNumber=%d", localPort),
+	)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stderr, os.Stderr
+	return cmd.Run()
+}
+
+// printRDPCredentials shows the connection target + Administrator password.
+func printRDPCredentials(name, host, password string) {
+	fmt.Println()
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Printf("  Windows instance %s — Remote Desktop\n", name)
+	fmt.Printf("  Host:                %s\n", host)
+	fmt.Printf("  User:                Administrator\n")
+	fmt.Printf("  Password:            %s\n", password)
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+}
+
+// rdpClientCommand returns the OS-appropriate command+args to open an RDP client
+// for the given host ("ip" or "localhost:port"). Pure/testable: no execution.
+func rdpClientCommand(goos, host string) (string, []string) {
+	switch goos {
+	case "windows":
+		// mstsc takes /v:host[:port]
+		return "mstsc", []string{"/v:" + host}
+	case "darwin":
+		// Microsoft Remote Desktop registers the rdp:// URL scheme; `open` hands off.
+		return "open", []string{"rdp://full%20address=s:" + host}
+	default:
+		// Linux: prefer xfreerdp if present (caller falls back to instructions).
+		return "xfreerdp", []string{"/v:" + host}
+	}
+}
+
+// launchRDPClient opens the platform RDP client for host; if it can't, it prints
+// manual instructions rather than failing (the credentials are already shown).
+func launchRDPClient(host string) error {
+	bin, args := rdpClientCommand(runtime.GOOS, host)
+	if _, err := exec.LookPath(bin); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not find an RDP client (%s). Connect manually to %s as Administrator with the password above.\n", bin, host)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Launching RDP client (%s) → %s ...\n", bin, host)
+	cmd := exec.Command(bin, args...)
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not launch %s: %v. Connect manually to %s.\n", bin, err, host)
+	}
+	return nil
 }
 
 // findSSHKey resolves a usable private key for an EC2 key name. It delegates to
