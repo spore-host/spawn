@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -44,6 +45,25 @@ func (c *Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConf
 
 	if err == nil {
 		// Bucket exists
+		return nil
+	}
+
+	// A bucket that exists in a DIFFERENT region answers HeadBucket with 301
+	// MovedPermanently / PermanentRedirect (not NotFound). The bucket exists —
+	// it's just elsewhere — so for an existence check, treat that as "exists,
+	// don't create" (#103). FSx itself validates cross-region S3 usability and
+	// returns a meaningful error if the bucket truly can't back the filesystem.
+	var redirErr smithy.APIError
+	if errors.As(err, &redirErr) {
+		switch redirErr.ErrorCode() {
+		case "PermanentRedirect", "MovedPermanently", "301":
+			return nil
+		}
+	}
+	// HeadBucket surfaces the redirect as a bare HTTP 301 with no error code on
+	// some SDK paths; catch that too.
+	var respErr *awshttp.ResponseError
+	if errors.As(err, &respErr) && respErr.HTTPStatusCode() == 301 {
 		return nil
 	}
 
