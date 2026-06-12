@@ -109,6 +109,7 @@ type LaunchConfig struct {
 	SecurityGroupIDs   []string // Security group IDs; a default spawn SG is created if empty
 	SubnetID           string   // VPC subnet ID; leave empty to use default subnet
 	UserData           string   // User-data script (plain text or base64); spored is injected automatically
+	ClientToken        string   // Optional RunInstances idempotency token; deterministic in (cluster,entity,generation) for callers like cohort (#108). Empty = today's behavior.
 	Spot               bool     // If true, launch as a Spot instance
 	SpotMaxPrice       string   // Optional Spot max price in $/hr, e.g. "0.50"; empty = on-demand cap
 	ReservationID      string   // On-Demand Capacity Reservation ID to target
@@ -213,6 +214,38 @@ type LaunchResult struct {
 	KeyName          string // EC2 key pair name used for SSH access
 }
 
+// LaunchError wraps a RunInstances failure with the verbatim AWS error code
+// extracted as a Go value, so callers can classify failures (capacity vs quota
+// vs config) on an explicit code rather than string-matching a wrapped message
+// (#108). Code is the AWS API error code (e.g. "InsufficientInstanceCapacity",
+// "RequestLimitExceeded", "Unsupported", "MaxSpotInstanceCountExceeded"), or ""
+// if the underlying error wasn't an AWS API error. The original error is
+// preserved via Unwrap, so errors.As(err, &smithyAPIErr) still works too.
+type LaunchError struct {
+	Code string
+	err  error
+}
+
+func (e *LaunchError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("failed to launch instance: %s: %v", e.Code, e.err)
+	}
+	return fmt.Sprintf("failed to launch instance: %v", e.err)
+}
+
+func (e *LaunchError) Unwrap() error { return e.err }
+
+// newLaunchError builds a LaunchError, extracting the verbatim AWS error code
+// from the smithy.APIError in the chain if present.
+func newLaunchError(err error) error {
+	le := &LaunchError{err: err}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		le.Code = apiErr.ErrorCode()
+	}
+	return le
+}
+
 // Launch starts a new EC2 instance as described by launchConfig and returns its
 // ID, IP addresses, and initial state. All spawn: lifecycle tags (TTL, idle
 // timeout, DNS name, cost limit, etc.) are applied at launch time so spored
@@ -276,6 +309,14 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 			},
 		},
 		BlockDeviceMappings: blockDevices,
+	}
+
+	// Idempotency token (optional). With it, a retry after a network timeout
+	// won't double-launch, and the caller can resolve the Ambiguous fault class
+	// ("did RunInstances succeed before the response was lost?"). Empty = today's
+	// behavior (no token). (#108)
+	if launchConfig.ClientToken != "" {
+		input.ClientToken = aws.String(launchConfig.ClientToken)
 	}
 
 	// Add IAM instance profile if specified
@@ -379,7 +420,7 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// Launch instance
 	result, err := ec2Client.RunInstances(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("failed to launch instance: %w", err)
+		return nil, newLaunchError(err)
 	}
 
 	if len(result.Instances) == 0 {

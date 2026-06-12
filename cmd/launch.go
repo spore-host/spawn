@@ -42,6 +42,7 @@ import (
 	"github.com/spore-host/spawn/pkg/sweep"
 	"github.com/spore-host/spawn/pkg/userdata"
 	"github.com/spore-host/spawn/pkg/wizard"
+	truffleaws "github.com/spore-host/truffle/pkg/aws"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1218,6 +1219,14 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		}
 	}
 
+	// Pre-flight: validate instance-type feature constraints (MPI placement group,
+	// EFA, hibernation) BEFORE creating any AWS resources (IAM role, security
+	// group), so an unsupported combination fails fast with an actionable message
+	// instead of cryptically after several API calls (#110).
+	if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, hibernate || hibernateOnIdle); err != nil {
+		return err
+	}
+
 	// Step 2: Setup SSH key
 	prog.Start("Setting up SSH key")
 	if config.KeyName == "" {
@@ -1517,19 +1526,41 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			return fmt.Errorf("--mpi requires --job-array-name")
 		}
 
-		// Validate instance type supports placement groups if enabled
-		if mpiAutoPlacementGroup || mpiPlacementGroup != "" {
-			if err := awsClient.ValidateInstanceTypeForPlacementGroup(ctx, config.InstanceType); err != nil {
+		// Decide on a cluster placement group. HPC instance types (hpc6a/hpc7a/
+		// hpc7g) don't support cluster placement groups — they get low-latency
+		// networking from AWS HPC infrastructure — so --auto-placement-group
+		// (on by default) must SKIP them gracefully rather than hard-fail (#104).
+		// An explicitly requested --placement-group still errors if unsupported.
+		tc := truffleaws.NewClientFromConfig(awsClient.Config())
+		clusterPG := func() (bool, error) {
+			caps, err := tc.GetCapabilities(ctx, config.InstanceType, config.Region)
+			if err != nil {
+				return false, err
+			}
+			return caps.ClusterPlacement, nil
+		}
+		if mpiPlacementGroup != "" {
+			// Explicit request: must be supported (authoritative capability check).
+			supported, err := clusterPG()
+			if err != nil {
 				return fmt.Errorf("placement group validation: %w", err)
 			}
-		}
-
-		// Create auto placement group if needed
-		if mpiAutoPlacementGroup && mpiPlacementGroup == "" {
-			mpiPlacementGroup = fmt.Sprintf("spawn-mpi-%s", jobArrayName)
-			fmt.Fprintf(os.Stderr, "Creating placement group: %s\n", mpiPlacementGroup)
-			if err := awsClient.CreatePlacementGroup(ctx, mpiPlacementGroup, config.Region); err != nil {
-				return fmt.Errorf("create placement group: %w", err)
+			if !supported {
+				return fmt.Errorf("instance type %s does not support cluster placement groups (required for --placement-group)", config.InstanceType)
+			}
+		} else if mpiAutoPlacementGroup {
+			supported, err := clusterPG()
+			if err != nil {
+				return fmt.Errorf("placement group validation: %w", err)
+			}
+			if supported {
+				mpiPlacementGroup = fmt.Sprintf("spawn-mpi-%s", jobArrayName)
+				fmt.Fprintf(os.Stderr, "Creating placement group: %s\n", mpiPlacementGroup)
+				if err := awsClient.CreatePlacementGroup(ctx, mpiPlacementGroup, config.Region); err != nil {
+					return fmt.Errorf("create placement group: %w", err)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "ℹ️  %s doesn't support cluster placement groups (HPC instance types use AWS HPC networking); skipping placement group.\n", config.InstanceType)
 			}
 		}
 
@@ -1992,6 +2023,74 @@ func guardWindowsInstanceType(targetOS, instanceType string) error {
 		return fmt.Errorf("instance type %q is burstable (t-family); Windows first boot starves on burst CPU credits and takes ~20+ min — choose a non-burstable type (default for Windows is %s)", instanceType, defaultWindowsInstanceType)
 	}
 	return nil
+}
+
+// preflightInstanceConstraints validates that the requested instance type
+// supports the requested features (MPI cluster placement group, EFA,
+// hibernation) BEFORE any AWS resources are created, with actionable errors
+// (#110). One DescribeInstanceTypes call backs all checks. HPC types are exempt
+// from the MPI/placement-group requirement — they use AWS HPC networking and
+// spawn skips the placement group for them (#104), so --mpi alone is fine.
+func preflightInstanceConstraints(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, wantMPI, wantEFA, wantHibernate bool) error {
+	if !wantMPI && !wantEFA && !wantHibernate {
+		return nil // nothing feature-specific to check
+	}
+	// truffle is the instance-type capability authority — consume it rather than
+	// re-querying EC2 from spawn. Build a truffle client from spawn's AWS config
+	// so creds/region match.
+	tc := truffleaws.NewClientFromConfig(awsClient.Config())
+	caps, err := tc.GetCapabilities(ctx, config.InstanceType, config.Region)
+	if err != nil {
+		return fmt.Errorf("pre-flight instance-type check: %w", err)
+	}
+	if !caps.Found {
+		return fmt.Errorf("instance type %q not found in region %s", config.InstanceType, config.Region)
+	}
+
+	// --efa: must support EFA.
+	if wantEFA && !caps.EFA {
+		return fmt.Errorf("instance type %q does not support EFA (required for --efa).\n       Find EFA-capable types: truffle find \"%s\" efa  (e.g. c5n.18xlarge, hpc6a.48xlarge)",
+			config.InstanceType, instanceFamilyHint(config.InstanceType))
+	}
+
+	// --hibernate / --hibernate-on-idle: must support hibernation.
+	if wantHibernate && !caps.Hibernation {
+		return fmt.Errorf("instance type %q does not support hibernation (required for --hibernate/--hibernate-on-idle).\n       Choose a hibernation-capable type, or drop the hibernation flag.", config.InstanceType)
+	}
+
+	// --mpi: needs a cluster placement group UNLESS it's an HPC type (which spawn
+	// skips the placement group for). So only block --mpi when neither holds.
+	if wantMPI && !caps.ClusterPlacement && !isHPCInstanceType(config.InstanceType) {
+		return fmt.Errorf("instance type %q does not support cluster placement groups (needed for --mpi).\n       Use an MPI-capable type (e.g. c5n.18xlarge, c6i.32xlarge) or an HPC type (hpc6a/hpc7a/hpc7g), or run: truffle find \"%s\" efa",
+			config.InstanceType, instanceFamilyHint(config.InstanceType))
+	}
+	return nil
+}
+
+// instanceFamilyHint returns a glob hint for the instance's family for use in
+// suggested truffle commands, e.g. "c5n.18xlarge" -> "c5n*".
+func instanceFamilyHint(instanceType string) string {
+	if i := strings.IndexByte(instanceType, '.'); i > 0 {
+		return instanceType[:i] + "*"
+	}
+	return instanceType
+}
+
+// isHPCInstanceType reports whether the type is in the AWS HPC family, which
+// gets low-latency networking from HPC infrastructure rather than placement
+// groups (so --mpi is valid without a cluster placement group). Detected by the
+// "hpc" family prefix rather than a hardcoded list, so new HPC families
+// (hpc6a/hpc6id/hpc7a/hpc7g/hpc8a/… as of June 2026, and future ones) are
+// covered automatically — the EC2 naming convention is the contract. A real
+// family is "hpc" followed by a generation digit (hpc6a, hpc7g…), so we require
+// the digit to avoid matching a stray "hpc.weird".
+func isHPCInstanceType(instanceType string) bool {
+	const p = "hpc"
+	if !strings.HasPrefix(instanceType, p) || len(instanceType) <= len(p) {
+		return false
+	}
+	c := instanceType[len(p)]
+	return c >= '0' && c <= '9'
 }
 
 // windowsLifecycleGuard enforces cost safety for Windows launches. Windows has

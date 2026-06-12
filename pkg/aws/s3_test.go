@@ -2,8 +2,13 @@ package aws
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"testing"
 
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/spore-host/spawn/pkg/testutil"
 )
 
@@ -70,6 +75,40 @@ func TestCreateS3BucketWithTags(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := client.CreateS3BucketWithTags(ctx, tt.config); err != nil {
 				t.Fatalf("CreateS3BucketWithTags: %v", err)
+			}
+		})
+	}
+}
+
+// TestIsCrossRegionRedirect covers the two shapes a cross-region HeadBucket
+// 301 takes (a coded smithy.APIError vs a bare HTTP-301 ResponseError), plus
+// the negatives, so a bucket that merely lives in another region is treated as
+// "exists, don't create" rather than a hard error (#103).
+func TestIsCrossRegionRedirect(t *testing.T) {
+	respErr301 := &awshttp.ResponseError{
+		ResponseError: &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: 301}},
+			Err:      errors.New("moved"),
+		},
+	}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"PermanentRedirect code", &fakeAPIError{code: "PermanentRedirect"}, true},
+		{"MovedPermanently code", &fakeAPIError{code: "MovedPermanently"}, true},
+		{"301 code", &fakeAPIError{code: "301"}, true},
+		{"bare http 301", respErr301, true},
+		{"wrapped http 301", fmt.Errorf("head bucket: %w", respErr301), true},
+		{"NotFound is not a redirect", &fakeAPIError{code: "NotFound"}, false},
+		{"plain error", errors.New("connection refused"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCrossRegionRedirect(tc.err); got != tc.want {
+				t.Errorf("isCrossRegionRedirect(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
