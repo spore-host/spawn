@@ -25,7 +25,7 @@ connect by **Remote Desktop (RDP)** or **SSH-over-SSM**.
 ## 0. Prerequisites
 
 > **Note:** spawn works with the **AWS CLI** — it uses your AWS CLI credentials
-> (you sign in with `aws sso login`) and the CLI's Session Manager support for the
+> (you sign in with `aws login`) and the CLI's Session Manager support for the
 > SSM connection paths. So a few steps below are `aws` commands; that's expected.
 
 1. **A computer** running macOS, Linux, or Windows with a terminal.
@@ -76,40 +76,27 @@ spawn version
 
 ---
 
-## 2. Sign in to your AWS account (SSO)
+## 2. Sign in to your AWS account
 
-spawn uses your normal AWS CLI credentials. The modern, recommended way is AWS
-IAM Identity Center (SSO) — you log in through a browser, no long-lived keys.
-
-**One-time setup** (`aws configure sso`):
+spawn uses your normal AWS CLI credentials. Sign in with `aws login` — it opens a
+browser, you log in to the AWS console as usual, and the CLI gets temporary
+credentials (and auto-refreshes them; no long-lived keys):
 ```bash
-aws configure sso
+aws login --profile sporehost
 ```
-You'll be prompted for:
-- **SSO session name** — anything memorable, e.g. `sporehost`.
-- **SSO start URL** — your org's AWS access portal URL, e.g.
-  `https://my-org.awsapps.com/start` (your IT/cloud admin has this).
-- **SSO region** — the region your Identity Center lives in, e.g. `us-east-1`.
-- **SSO registration scopes** — accept the default `sso:account:access`.
+- `--profile sporehost` — names a profile you'll reuse (any name; `sporehost`
+  here). Approve the request in the browser when it opens.
+- On a remote/SSH box with no browser, use `aws login --remote --profile sporehost`
+  — it prints a URL to open elsewhere and prompts for the code.
 
-The browser opens; approve the request. Back in the terminal, pick your
-**account** and **role** from the lists, then set:
-- **Default client Region** — `us-east-1` (recommended for the beta — it's the
-  simplest region for the ISO-import build; other regions need extra VPC
-  networking setup).
-- **CLI default output format** — `json`.
-- **Profile name** — e.g. `sporehost`.
-
-**Each working session**, refresh your login (credentials expire):
-```bash
-aws sso login --profile sporehost
-```
-
-Tell spawn (and the AWS CLI) which profile to use for the rest of this guide:
+Point spawn (and the AWS CLI) at that profile and region for the rest of this
+guide:
 ```bash
 export AWS_PROFILE=sporehost
 export AWS_REGION=us-east-1
 ```
+(`us-east-1` is recommended for the beta — it's the simplest region for the
+ISO-import build; other regions need extra VPC networking setup.)
 
 Confirm you're signed into the right account:
 ```bash
@@ -305,7 +292,7 @@ spawn ami delete ami-0123456789abcdef0   # the base AMI
 
 To sign out of AWS at the end of the day:
 ```bash
-aws sso logout
+aws logout --profile sporehost
 ```
 
 ---
@@ -314,7 +301,7 @@ aws sso logout
 
 | Step | Command |
 |------|---------|
-| Sign in | `aws sso login --profile sporehost` |
+| Sign in | `aws login --profile sporehost` |
 | Verify ISO | `spawn image verify <iso>` |
 | Build AMI (auto-warms) | `spawn image import --iso <iso> --name <n> --image-index <N>` |
 | Launch (use the **warm** AMI id) | `spawn launch <name> --ami <warm-id> --os windows --ttl 2h --yes` |
