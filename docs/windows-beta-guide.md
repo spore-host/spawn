@@ -9,11 +9,16 @@ connect by **Remote Desktop (RDP)** or **SSH-over-SSM**.
 > assumed. You *do* need an AWS account you can sign into, and a genuine Windows
 > 11 Enterprise ISO + license (see Prerequisites).
 
-> **Heads up on time + cost:** the one-time AMI build takes ~30–45 min, and the
-> **first launch of a freshly-imported Windows AMI is slow** (~30 min) because
-> Windows runs its full first-boot setup (Sysprep). This is expected — see
-> [§7](#7-why-the-first-boot-is-slow). You pay normal EC2 + EBS charges for any
-> instance you run, so **terminate instances when you're done**.
+> **Heads up on time + cost:** the one-time build takes **~45–75 min** end to
+> end. spawn does two things in that window: (1) imports your ISO into a base
+> AMI (~30–45 min), then (2) **pre-warms it** — launches a short-lived seed
+> instance, lets Windows finish its one-time Sysprep first boot, and images that
+> into a fast-boot "warm" AMI (see [§7](#7-the-build-pre-warms-your-ami)). The
+> payoff: every instance you launch from the **warm** AMI is ready in **~4 min**,
+> not ~30. spawn launches and **auto-terminates** the seed for you — but you pay
+> normal EC2 + EBS charges for it during the build, for any instance you run, and
+> a small ongoing storage charge for the two AMIs. **Terminate instances when
+> you're done** ([§9](#9-clean-up--important--avoid-surprise-charges)).
 
 ---
 
@@ -61,8 +66,8 @@ scoop install spawn
 **Or download a binary** from the latest release and put it on your `PATH`:
 <https://github.com/spore-host/spawn/releases/latest>
 
-Verify (you want **v0.40.0 or newer** — earlier versions don't have the Windows
-connect features):
+Verify (you want **v0.42.0 or newer** — earlier versions lack the pre-warmed
+AMI build and the latest connect features):
 ```bash
 spawn version
 ```
@@ -87,8 +92,10 @@ You'll be prompted for:
 
 The browser opens; approve the request. Back in the terminal, pick your
 **account** and **role** from the lists, then set:
-- **Default client Region** — `us-east-1` (recommended for the beta; it avoids
-  needing a NAT gateway during the AMI build — see [§7](#7-why-the-first-boot-is-slow)).
+- **Default client Region** — `us-east-1` (recommended for the beta: the ISO
+  import build reaches AWS services through the S3 gateway endpoint there, so it
+  doesn't need a NAT gateway. Other regions require NAT egress for the build
+  instance to download Windows drivers).
 - **CLI default output format** — `json`.
 - **Profile name** — e.g. `sporehost`.
 
@@ -139,38 +146,49 @@ ACCEPTED: contains Windows 11 Enterprise (x64). Import with --image-index 3.
 
 ## 5. Build the AMI from your ISO
 
-This converts the ISO into an AMI using AWS EC2 Image Builder. It uploads the
-ISO, provisions the needed IAM roles + build infrastructure automatically, runs
-the managed import, and cleans up the staged ISO afterward.
+This converts the ISO into an AMI using AWS EC2 Image Builder, then pre-warms it
+(§7). spawn uploads the ISO, provisions the needed IAM roles + build
+infrastructure automatically, runs the managed import, builds the warm AMI, and
+cleans up the staged ISO and the warm-build seed afterward.
 
 ```bash
 spawn image import \
   --iso "~/Downloads/Win11_Enterprise_25H2.iso" \
   --name win11-beta \
   --image-index 3 \
-  --version 1.0.0 \
-  --wait
+  --version 1.0.0
 ```
 - `--image-index 3` — use the number `spawn image verify` reported.
-- `--wait` — block until the AMI is built (~30–45 min), then print the AMI id.
-  Without `--wait` the command returns immediately and you check progress with
-  `spawn image status <build-arn>`.
-- If you Ctrl-C during `--wait`, the build keeps running in AWS; the command
-  tells you how to check on it.
+- **No `--wait` needed.** Because pre-warming is on by default, the command
+  blocks through the whole build (~45–75 min) and prints both AMI ids at the end.
+  (Pre-warming needs the base AMI to exist first, so the command waits for you.)
+- If you'd rather skip pre-warming and get just the base AMI back fast, add
+  `--no-warm` — then the build runs async and you check progress with
+  `spawn image status <build-arn>`. (You'll then pay the slow first boot on every
+  launch — not recommended.)
+- If you Ctrl-C during the build, it keeps running in AWS; the command tells you
+  how to check on it. (A warm build interrupted mid-way still auto-terminates its
+  seed instance.)
 
-When it finishes you'll see something like:
+When it finishes you'll see **two** AMI ids:
 ```
-Imported AMI: ami-0123456789abcdef0
+Imported base AMI: ami-0123456789abcdef0
+Warm AMI (fast boot, recommended): ami-0fedcba9876543210
+Launch it with:
+  spawn launch <name> --ami ami-0fedcba9876543210 --os windows --ttl 4h
 ```
-Copy that AMI id.
+Copy the **Warm AMI** id (the one spawn labels *recommended*) — that's the
+fast-booting one you'll launch in Step 6. The base AMI is kept too (it's the
+parent the warm one was built from).
 
 ---
 
 ## 6. Launch a Windows instance
 
+Use the **Warm AMI** id from Step 5 (the one labelled *recommended*):
 ```bash
 spawn launch win11-test \
-  --ami ami-0123456789abcdef0 \
+  --ami ami-0fedcba9876543210 \
   --os windows \
   --ttl 2h \
   --yes
@@ -197,18 +215,26 @@ spawn prints the instance id and, when ready, how to connect.
 
 ---
 
-## 7. Why the first boot is slow
+## 7. The build pre-warms your AMI (so launches are fast)
 
-The very first launch of a freshly-imported Windows AMI runs Windows **Sysprep
-Specialize + OOBE** ("Getting ready" screen) — this is normal Windows behavior
-and takes ~20–30 minutes, even on a fast instance. During this time RDP/SSM
-aren't available yet. Be patient on the **first** launch.
+A freshly-imported Windows AMI runs Windows **Sysprep Specialize + OOBE**
+("Getting ready" screen) on its first boot — normal Windows behavior, ~20–30
+minutes, during which RDP/SSM aren't available. **You don't pay this on every
+launch.** During the build (Step 5), spawn pays it **once** on your behalf:
 
-(A future spore.host improvement will produce a pre-warmed AMI so subsequent
-launches boot quickly — but for this beta, expect the slow first boot.)
+1. It launches a short-lived **seed** instance from the imported base AMI.
+2. It waits for that seed to finish its first boot (Administrator password
+   available; spored + SSM agent installed).
+3. It images the seed into a **warm AMI** and **terminates the seed**.
 
-You can watch progress in the AWS console: **EC2 → Instances → select it →
-Actions → Monitor and troubleshoot → Get system log / Get instance screenshot**.
+So the warm AMI you launch in Step 6 is already past Sysprep — it reaches
+RDP/SSM-ready in **~4 minutes**, like a normal Windows boot. The slow ~30-min
+first boot only happens if you launch the **base** AMI directly (or built with
+`--no-warm`).
+
+If you ever do launch the base AMI and want to watch the slow first boot, the
+AWS console shows it: **EC2 → Instances → select it → Actions → Monitor and
+troubleshoot → Get system log / Get instance screenshot**.
 
 ---
 
@@ -246,9 +272,9 @@ Run a single command and exit:
 spawn connect win11-test -- 'Get-ComputerInfo | Select-Object WindowsProductName, OsBuildNumber'
 ```
 
-> SSH-over-SSM needs the instance to have finished first boot and registered
-> with SSM (a few minutes after the desktop is up on the first boot). If
-> `connect` can't reach it yet, wait and retry.
+> SSH-over-SSM needs the instance to have registered with SSM. On the warm AMI
+> that's ~4 min after launch; if `connect` can't reach it yet, wait a moment and
+> retry. (On the base AMI it's only after the full ~30-min first boot — §7.)
 
 ---
 
@@ -266,11 +292,15 @@ To list anything still running:
 spawn list
 ```
 
-The custom AMI (and its EBS snapshot) persist until you remove them — they cost
-a little to store. To delete the AMI when you no longer need it:
+The build leaves **two** custom AMIs — the base and the warm one — each with an
+EBS snapshot that costs a little to store. List them and delete both when you no
+longer need them:
 ```bash
-spawn ami delete ami-0123456789abcdef0
+spawn ami list                       # shows spawn-managed AMIs (base + warm)
+spawn ami delete ami-0fedcba9876543210   # the warm AMI
+spawn ami delete ami-0123456789abcdef0   # the base AMI
 ```
+(`spawn ami delete` deregisters the AMI and removes its snapshot.)
 
 To sign out of AWS at the end of the day:
 ```bash
@@ -285,13 +315,14 @@ aws sso logout
 |------|---------|
 | Sign in | `aws sso login --profile sporehost` |
 | Verify ISO | `spawn image verify <iso>` |
-| Build AMI | `spawn image import --iso <iso> --name <n> --image-index <N> --wait` |
-| Launch | `spawn launch <name> --ami <id> --os windows --ttl 2h --yes` |
+| Build AMI (auto-warms) | `spawn image import --iso <iso> --name <n> --image-index <N>` |
+| Launch (use the **warm** AMI id) | `spawn launch <name> --ami <warm-id> --os windows --ttl 2h --yes` |
 | RDP | `spawn connect <name> --rdp` |
 | RDP via SSM | `spawn connect <name> --rdp --via-ssm` |
 | PowerShell (SSM) | `spawn connect <name>` |
 | Terminate | `spawn terminate <name>` |
-| Delete AMI | `spawn ami delete <ami-id>` |
+| List AMIs | `spawn ami list` |
+| Delete AMI (do both: base + warm) | `spawn ami delete <ami-id>` |
 
 ## When something goes wrong
 - **`spawn image verify` says REJECTED** — wrong ISO; get the Enterprise
