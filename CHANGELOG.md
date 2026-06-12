@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `client.Launch` omits `KeyName` from `RunInstances` when no key pair is set,
+  instead of sending an empty string. EC2 rejects `KeyName: ""` with "Invalid
+  value '' for keyPairNames"; omitting the field is the supported way to launch
+  with no key pair — the SSM-only headless path (lagotto `--action spawn`). Second
+  blocker, after #127, on the lagotto#19 watch→launch→run flow (#130).
+
 ## [0.44.1] - 2026-06-12
 
 ### Fixed
