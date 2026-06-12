@@ -24,10 +24,9 @@ connect by **Remote Desktop (RDP)** or **SSH-over-SSM**.
 
 ## 0. Prerequisites
 
-> **Note:** for now, spawn relies on the **AWS CLI** being installed and signed
-> in — it uses your AWS CLI credentials for sign-in and uses the CLI for the
-> Session Manager connection paths. So a couple of the steps below are `aws`
-> commands rather than `spawn`.
+> **Note:** spawn works with the **AWS CLI** — it uses your AWS CLI credentials
+> (you sign in with `aws sso login`) and the CLI's Session Manager support for the
+> SSM connection paths. So a few steps below are `aws` commands; that's expected.
 
 1. **A computer** running macOS, Linux, or Windows with a terminal.
 2. **An AWS account you can sign into** (your own, via your org's access portal).
