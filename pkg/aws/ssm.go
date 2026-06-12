@@ -68,6 +68,59 @@ func (c *Client) RunPowerShell(ctx context.Context, region, instanceID, command 
 	}
 }
 
+// RunShellScript runs a shell command on a Linux instance via SSM
+// (AWS-RunShellScript) and waits for it to finish. This is the Linux sibling of
+// RunPowerShell — used by `spawn connect` to inject an authorized key over SSM
+// when the caller doesn't hold the instance's launch key (e.g. instances
+// launched headlessly by lagotto, which has no SSH key on disk). The instance
+// must have the SSM agent online and an instance profile with SSM core
+// permissions (the spored role attaches AmazonSSMManagedInstanceCore).
+func (c *Client) RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error) {
+	cfg := c.cfg.Copy()
+	cfg.Region = region
+	ssmClient := ssm.NewFromConfig(cfg)
+
+	send, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
+		InstanceIds:  []string{instanceID},
+		DocumentName: aws.String("AWS-RunShellScript"),
+		Parameters:   map[string][]string{"commands": {command}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ssm send-command: %w", err)
+	}
+	commandID := aws.ToString(send.Command.CommandId)
+
+	// Poll for completion. SSM invocations are eventually consistent right after
+	// SendCommand, so tolerate the brief window before the invocation exists.
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+			CommandId:  aws.String(commandID),
+			InstanceId: aws.String(instanceID),
+		})
+		if err == nil {
+			status := string(out.Status)
+			switch status {
+			case "Success", "Failed", "Cancelled", "TimedOut":
+				return &SSMRunResult{
+					Status: status,
+					Stdout: aws.ToString(out.StandardOutputContent),
+					Stderr: aws.ToString(out.StandardErrorContent),
+				}, nil
+			}
+			// Pending / InProgress / Delayed → keep polling.
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("ssm command %s did not complete within %s", commandID, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
 // WaitForSSMOnline polls SSM until the instance is registered with PingStatus
 // "Online" (or the timeout elapses). This is the strongest "Windows finished
 // first boot" signal: the SSM agent registers only after EC2Launch has run the

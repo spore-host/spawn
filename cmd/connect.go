@@ -136,11 +136,22 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		// Try to find the key based on the instance key name
 		keyPath, err = findSSHKey(instance.KeyName)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %s: %v\n", i18n.Symbol("warning"), i18n.Tf("spawn.connect.key_not_found", map[string]interface{}{
-				"KeyName": instance.KeyName,
-			}), err)
-			fmt.Fprintf(os.Stderr, "%s\n\n", i18n.T("spawn.connect.fallback_session_manager"))
-			return connectViaSessionManager(instance.InstanceID, instance.Region)
+			// We don't hold the instance's launch key (or it has none — the
+			// keyless case for instances launched headlessly by lagotto/cohort,
+			// where the launcher had no SSH key on disk). Rather than drop
+			// straight to Session Manager, try to inject spawn's managed public
+			// key over SSM, then SSH with the matching private key. If injection
+			// isn't possible (no SSM, no managed key), fall back to SSM shell.
+			if injectedKey, ierr := injectSSHKeyViaSSM(ctx, client, instance, user); ierr == nil {
+				keyPath = injectedKey
+			} else {
+				fmt.Fprintf(os.Stderr, "%s: %s: %v\n", i18n.Symbol("warning"), i18n.Tf("spawn.connect.key_not_found", map[string]interface{}{
+					"KeyName": instance.KeyName,
+				}), err)
+				fmt.Fprintf(os.Stderr, "   key injection over SSM unavailable: %v\n", ierr)
+				fmt.Fprintf(os.Stderr, "%s\n\n", i18n.T("spawn.connect.fallback_session_manager"))
+				return connectViaSessionManager(instance.InstanceID, instance.Region)
+			}
 		}
 	}
 
@@ -392,6 +403,77 @@ func launchRDPClient(host string) error {
 // sshkey.Resolve — the single resolver shared by connect, status, and queue —
 // which checks spawn-managed keys (~/.spawn/keys) first, then falls back to the
 // user's ~/.ssh keys for back-compat.
+// injectSSHKeyViaSSM ensures spawn's managed keypair exists locally and appends
+// its public key to the instance's authorized_keys over SSM RunShellScript, so
+// `spawn connect` can SSH into an instance whose launch key we don't hold —
+// including keyless instances launched headlessly by lagotto/cohort. It returns
+// the local private key path to use with ssh. Errors (no SSM agent, no SSM
+// permissions, command failure) are returned so the caller can fall back to a
+// plain Session Manager shell.
+func injectSSHKeyViaSSM(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, user string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	// Use spawn's managed ED25519 key (created on demand, idempotent). The user
+	// here is the SSH login user, which is also how spawn names its key locally.
+	kp, err := sshkey.EnsureKey(homeDir, user, sshkey.ED25519)
+	if err != nil {
+		return "", fmt.Errorf("ensure managed key: %w", err)
+	}
+	pub, err := os.ReadFile(kp.PublicKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("read managed public key: %w", err)
+	}
+	pubLine := strings.TrimSpace(string(pub))
+	if pubLine == "" {
+		return "", fmt.Errorf("managed public key is empty")
+	}
+
+	script, err := authorizedKeyInjectionScript(user, pubLine)
+	if err != nil {
+		return "", err
+	}
+
+	fmt.Fprintf(os.Stderr, "%s no local key for this instance — injecting spawn's key over SSM...\n", i18n.Symbol("info"))
+	res, err := client.RunShellScript(ctx, instance.Region, instance.InstanceID, script, 90*time.Second)
+	if err != nil {
+		return "", err
+	}
+	if res.Status != "Success" {
+		return "", fmt.Errorf("key injection command %s: %s", res.Status, strings.TrimSpace(res.Stderr))
+	}
+	return kp.PrivateKeyPath, nil
+}
+
+// authorizedKeyInjectionScript builds the shell script that appends pubLine to
+// the login user's authorized_keys, idempotently and with correct ownership and
+// permissions. Pulled out as a pure function so the (security-sensitive) script
+// can be unit-tested without an SSM round-trip. pubLine must be a single SSH
+// public-key line; it's rejected if it contains a single quote (which the key
+// alphabet never does) so it can't break out of the single-quoted literal.
+func authorizedKeyInjectionScript(user, pubLine string) (string, error) {
+	if strings.ContainsAny(user, "'\"$`\\ \t\n") {
+		return "", fmt.Errorf("unsafe ssh user %q", user)
+	}
+	if strings.ContainsAny(pubLine, "'\n\r") {
+		return "", fmt.Errorf("unsafe public key content")
+	}
+	return fmt.Sprintf(`set -e
+u=%q
+home=$(getent passwd "$u" | cut -d: -f6)
+if [ -z "$home" ]; then echo "no home for user $u" >&2; exit 1; fi
+mkdir -p "$home/.ssh"
+chmod 700 "$home/.ssh"
+touch "$home/.ssh/authorized_keys"
+chmod 600 "$home/.ssh/authorized_keys"
+key='%s'
+grep -qF "$key" "$home/.ssh/authorized_keys" || echo "$key" >> "$home/.ssh/authorized_keys"
+chown -R "$u":"$u" "$home/.ssh"
+`, user, pubLine), nil
+}
+
 func findSSHKey(keyName string) (string, error) {
 	if keyName == "" {
 		return "", i18n.Te("spawn.connect.error.no_key_name", nil)
