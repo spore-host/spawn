@@ -202,6 +202,44 @@ func TestCheckCompletion_FilePresent(t *testing.T) {
 	_ = a.checkCompletion(ctx)
 }
 
+// TestCheckCompletion_StopFiresRegardlessOfJobOrigin is the #105 regression
+// guard. #105 reported that `--on-complete stop` didn't trigger when the
+// completion file was written by a job started via `spawn connect -- '... &'`
+// (vs. `--command` at launch). The root cause was the spored systemd unit
+// setting PrivateTmp=true, which hid the host /tmp/SPAWN_COMPLETE from the
+// daemon (#66, fixed in v0.36.12 via #67 — after the v0.34.13 #105 was filed
+// against). The completion logic itself is, and must stay, agnostic to how the
+// job was started: it only depends on OnComplete + the file's presence. This
+// test pins that — an instance with NO job-array/sweep/command tags (i.e. the
+// "connect --"-style launch) still stops when the file appears.
+func TestCheckCompletion_StopFiresRegardlessOfJobOrigin(t *testing.T) {
+	f := t.TempDir() + "/SPAWN_COMPLETE"
+	if err := os.WriteFile(f, []byte("done\n"), 0644); err != nil {
+		t.Fatalf("cannot create completion file: %v", err)
+	}
+
+	cfg := &provider.Config{
+		OnComplete:      "stop",
+		CompletionFile:  f,
+		CompletionDelay: 0,
+		// Deliberately no JobArrayID / JobArrayCommand / SweepID: this models an
+		// instance whose workload was started later via `spawn connect --`, not
+		// via `--command` at launch. The completion path must not care.
+	}
+	a := newTestAgent(t, cfg)
+	stub := a.provider.(*stubProvider)
+
+	if done := a.checkCompletion(context.Background()); !done {
+		t.Fatal("checkCompletion() = false with OnComplete=stop and file present, want true")
+	}
+	if !stub.stopped {
+		t.Error("provider.Stop was not called — --on-complete stop did not fire (#105)")
+	}
+	if stub.terminated || stub.hibernated {
+		t.Errorf("wrong action: terminated=%v hibernated=%v, want only stopped", stub.terminated, stub.hibernated)
+	}
+}
+
 // writeFakeDCV writes a fake `dcv` script to dir and prepends dir to PATH.
 // The script exits 0 and prints output if it receives args matching sessionID,
 // otherwise it exits 1 to simulate "not found / not ready".
