@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.2] - 2026-06-12
+
 ### Fixed
 - `client.Launch` omits `KeyName` from `RunInstances` when no key pair is set,
   instead of sending an empty string. EC2 rejects `KeyName: ""` with "Invalid
@@ -165,7 +167,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.44.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.44.2...HEAD
+[0.44.2]: https://github.com/spore-host/spawn/compare/v0.44.1...v0.44.2
 [0.44.1]: https://github.com/spore-host/spawn/compare/v0.44.0...v0.44.1
 [0.44.0]: https://github.com/spore-host/spawn/compare/v0.43.0...v0.44.0
 [0.43.0]: https://github.com/spore-host/spawn/compare/v0.42.0...v0.43.0
