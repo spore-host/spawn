@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-06-12
+
 ### Added
 - `spawn version` now reports whether a newer release is available (an explicit,
   on-demand check), instead of only surfacing updates incidentally on other
@@ -147,7 +149,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.43.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.44.0...HEAD
+[0.44.0]: https://github.com/spore-host/spawn/compare/v0.43.0...v0.44.0
 [0.43.0]: https://github.com/spore-host/spawn/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/spore-host/spawn/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/spore-host/spawn/compare/v0.40.0...v0.41.0
