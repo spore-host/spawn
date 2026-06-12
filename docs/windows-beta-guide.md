@@ -24,11 +24,14 @@ connect by **Remote Desktop (RDP)** or **SSH-over-SSM**.
 
 ## 0. Prerequisites
 
+> **Note:** for now, spawn relies on the **AWS CLI** being installed and signed
+> in — it uses your AWS CLI credentials for sign-in and uses the CLI for the
+> Session Manager connection paths. So a couple of the steps below are `aws`
+> commands rather than `spawn`.
+
 1. **A computer** running macOS, Linux, or Windows with a terminal.
-2. **An AWS account you can sign into** via your organization's AWS access portal
-   (IAM Identity Center / SSO). You'll need permission to launch EC2 instances,
-   create IAM roles, use EC2 Image Builder, and read/write S3 — `PowerUserAccess`
-   or an admin-style permission set is simplest for a beta.
+2. **An AWS account you can sign into** (your own, via your org's access portal).
+   `PowerUserAccess` or an admin-style permission set is simplest for a beta.
 3. **The AWS CLI v2** installed: <https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html>
    (`aws --version` should print `aws-cli/2.x`). Also install the **Session
    Manager plugin** (needed for SSH-over-SSM and RDP-over-SSM):
