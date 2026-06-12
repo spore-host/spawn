@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spawn version` now reports whether a newer release is available (an explicit,
+  on-demand check), instead of only surfacing updates incidentally on other
+  commands (#117).
+
 ### Documentation
 - Windows beta guide: bump the version floor to v0.43.0 (where `--ssh` shipped),
   so following the guide's SSH steps can't fail with "unknown flag" on v0.42.0.
