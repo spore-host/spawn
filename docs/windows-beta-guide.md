@@ -92,10 +92,9 @@ You'll be prompted for:
 
 The browser opens; approve the request. Back in the terminal, pick your
 **account** and **role** from the lists, then set:
-- **Default client Region** — `us-east-1` (recommended for the beta: the ISO
-  import build reaches AWS services through the S3 gateway endpoint there, so it
-  doesn't need a NAT gateway. Other regions require NAT egress for the build
-  instance to download Windows drivers).
+- **Default client Region** — `us-east-1` (recommended for the beta — it's the
+  simplest region for the ISO-import build; other regions need extra VPC
+  networking setup).
 - **CLI default output format** — `json`.
 - **Profile name** — e.g. `sporehost`.
 
