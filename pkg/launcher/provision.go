@@ -97,7 +97,10 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 		if err != nil {
 			return nil, fmt.Errorf("provision: build bootstrap: %w", err)
 		}
-		config.UserData = bootstrap
+		// RunInstances requires base64 user-data (cloud-init also gunzips it).
+		// Encode here — assigning the raw script makes RunInstances fail with
+		// "Invalid BASE64 encoding of user data" (#127).
+		config.UserData = EncodeLinuxUserData(bootstrap)
 	}
 
 	// 4. Launch.

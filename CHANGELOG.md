@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `launcher.Provision` now base64-encodes (gzip+base64) the bootstrap before
+  setting `LaunchConfig.UserData`. It was assigning the raw script, so every
+  headless launch (lagotto `--action spawn`) failed at `RunInstances` with
+  "Invalid BASE64 encoding of user data" — blocking the entire lagotto#19
+  watch→launch→run flow on its first real launch (#127).
+
 ## [0.44.0] - 2026-06-12
 
 ### Added
