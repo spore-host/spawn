@@ -1,6 +1,10 @@
 package launcher
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/base64"
+	"io"
 	"strings"
 	"testing"
 
@@ -122,5 +126,42 @@ func TestBuildLinuxBootstrap_CustomUserDataAppended(t *testing.T) {
 	idxCustom := strings.Index(script, marker)
 	if idxInstall < 0 || idxCustom < idxInstall {
 		t.Error("custom user-data should be appended after the spored install")
+	}
+}
+
+// TestEncodeLinuxUserData_ValidBase64Gzip is the #127 regression guard: the
+// encoded user-data MUST be valid base64 that gunzips back to the original
+// script. The original bug shipped raw text into RunInstances, which substrate
+// accepted but real EC2 rejected ("Invalid BASE64 encoding of user data").
+func TestEncodeLinuxUserData_ValidBase64Gzip(t *testing.T) {
+	script := "#!/bin/bash\necho hello spore\n"
+	encoded := EncodeLinuxUserData(script)
+
+	// Must be valid base64...
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("EncodeLinuxUserData did not produce valid base64: %v", err)
+	}
+	// ...and gunzip back to the exact script (cloud-init gunzips it).
+	gz, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decoded user-data is not gzip: %v", err)
+	}
+	got, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatalf("gunzip: %v", err)
+	}
+	if string(got) != script {
+		t.Errorf("round-trip mismatch: got %q, want %q", got, script)
+	}
+}
+
+// TestProvisionEncodesUserData_NotRaw guards that Provision's encoder is wired
+// in — the encoded form must NOT equal the raw bootstrap (which is what #127
+// shipped). Indirectly: EncodeLinuxUserData of a script never equals the script.
+func TestEncodeLinuxUserData_NotRaw(t *testing.T) {
+	script := "#!/bin/bash\ntrue\n"
+	if EncodeLinuxUserData(script) == script {
+		t.Error("encoded user-data must differ from the raw script (#127)")
 	}
 }

@@ -108,7 +108,7 @@ type LaunchConfig struct {
 	IamInstanceProfile string   // IAM instance profile name (not ARN); spored needs EC2/DynamoDB permissions
 	SecurityGroupIDs   []string // Security group IDs; a default spawn SG is created if empty
 	SubnetID           string   // VPC subnet ID; leave empty to use default subnet
-	UserData           string   // User-data script (plain text or base64); spored is injected automatically
+	UserData           string   // User-data, already base64-encoded (passed verbatim to RunInstances, which rejects non-base64 — #127). CLI uses encodeUserDataForOS; SDK callers use launcher.EncodeLinuxUserData.
 	ClientToken        string   // Optional RunInstances idempotency token; deterministic in (cluster,entity,generation) for callers like cohort (#108). Empty = today's behavior.
 	Spot               bool     // If true, launch as a Spot instance
 	SpotMaxPrice       string   // Optional Spot max price in $/hr, e.g. "0.50"; empty = on-demand cap

@@ -20,6 +20,8 @@
 package launcher
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -27,6 +29,20 @@ import (
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/security"
 )
+
+// EncodeLinuxUserData encodes a bootstrap script for EC2 RunInstances. EC2
+// requires the UserData field to be base64; cloud-init (AL2023/Ubuntu) also
+// transparently gunzips it, so we gzip+base64 to match what the `spawn launch`
+// CLI sends. Callers that build a script with BuildLinuxBootstrap MUST pass it
+// through here before assigning aws.LaunchConfig.UserData — RunInstances rejects
+// raw text with "Invalid BASE64 encoding of user data" (#127).
+func EncodeLinuxUserData(script string) string {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte(script))
+	_ = gz.Close()
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
 
 // BootstrapConfig parameterizes the Linux spored bootstrap. These are the ONLY
 // values baked into the script text; everything else is read from spawn:* tags
