@@ -14,27 +14,31 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/progress"
 	"github.com/spore-host/spawn/pkg/winiso"
 )
 
 // `spawn image import` flags.
 var (
-	imageImportISO      string
-	imageImportBucket   string
-	imageImportRegion   string
-	imageImportInfraArn string
-	imageImportName     string
-	imageImportVersion  string
-	imageImportIndex    int64
-	imageImportNoSecure bool
-	imageImportExecRole string
-	imageImportS3Key    string
-	imageImportInstType string
-	imageImportSubnet   string
-	imageImportSGs      []string
-	imageImportKeepISO  bool
-	imageImportWaitMin  int
+	imageImportISO         string
+	imageImportBucket      string
+	imageImportRegion      string
+	imageImportInfraArn    string
+	imageImportName        string
+	imageImportVersion     string
+	imageImportIndex       int64
+	imageImportNoSecure    bool
+	imageImportExecRole    string
+	imageImportS3Key       string
+	imageImportInstType    string
+	imageImportSubnet      string
+	imageImportSGs         []string
+	imageImportKeepISO     bool
+	imageImportWaitMin     int
+	imageImportNoWarm      bool
+	imageImportWarmType    string
+	imageImportWarmTimeout int
 )
 
 var imageCmd = &cobra.Command{
@@ -312,10 +316,18 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 	}
 	prog.Complete("Starting import-disk-image")
 
-	// Async by default (like `spawn create-ami`): the build runs 20-40 min in
-	// Image Builder. Without --wait, return now with the build ARN and how to
-	// check on it; the staged ISO is left in place (cleanup needs the build to
-	// finish, which we're not waiting for).
+	// The warm-AMI stage (#98) needs the base AMI to exist, so it requires
+	// waiting. When warm is enabled (the default) and the user didn't ask to
+	// wait, wait anyway with a generous default rather than returning async.
+	warm := !imageImportNoWarm
+	if warm && imageImportWaitMin <= 0 {
+		imageImportWaitMin = 60
+	}
+
+	// Async by default (like `spawn create-ami`) when warm is OFF: the build runs
+	// 20-40 min in Image Builder. Without --wait, return now with the build ARN
+	// and how to check on it; the staged ISO is left in place (cleanup needs the
+	// build to finish, which we're not waiting for).
 	if imageImportWaitMin <= 0 {
 		if jsonOut {
 			return json.NewEncoder(os.Stdout).Encode(map[string]string{
@@ -386,6 +398,20 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 		prog.Complete("Tagging AMI spawn:os=windows")
 	}
 
+	// Warm-AMI stage (#98): by default, build a "warm" AMI from the imported base
+	// so future launches skip the ~30 min Sysprep first boot. Launch a seed off
+	// the base, wait until it's fully booted + SSM-registered (so spored + the
+	// SSM agent are baked in), image it, then terminate the seed.
+	warmAMI := ""
+	if warm {
+		warmAMI, err = buildWarmAMI(ctx, awsClient, imageImportRegion, imageImportName, imageImportVersion, amiID, prog)
+		if err != nil {
+			// Non-fatal: the base AMI is built and usable; warn and continue so the
+			// user still gets the base AMI rather than losing the whole import.
+			fmt.Fprintf(os.Stderr, "\n⚠️  warm-AMI build failed: %v\n   The base AMI %s is still usable (it just boots slowly the first time).\n", err, amiID)
+		}
+	}
+
 	// Clean up the staged ISO now that the AMI exists — it's a transient artifact
 	// (the AMI is self-contained). Only for an ISO we uploaded this run, and only
 	// unless --keep-iso. If we created the managed bucket, remove it too when it's
@@ -400,16 +426,157 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// The AMI to recommend launching: the warm one if we built it, else the base.
+	launchAMI := amiID
+	if warmAMI != "" {
+		launchAMI = warmAMI
+	}
+
 	if jsonOut {
-		return json.NewEncoder(os.Stdout).Encode(map[string]string{
-			"ami":                  amiID,
+		out := map[string]string{
+			"ami":                  launchAMI,
+			"baseAmi":              amiID,
 			"imageBuildVersionArn": buildArn,
 			"uri":                  uri,
-		})
+		}
+		if warmAMI != "" {
+			out["warmAmi"] = warmAMI
+		}
+		return json.NewEncoder(os.Stdout).Encode(out)
 	}
-	fmt.Printf("\nImported AMI: %s\n", amiID)
-	fmt.Printf("Launch it with:\n  spawn launch <name> --ami %s --os windows --ttl 4h\n", amiID)
+	fmt.Printf("\nImported base AMI: %s\n", amiID)
+	if warmAMI != "" {
+		fmt.Printf("Warm AMI (fast boot, recommended): %s\n", warmAMI)
+	}
+	fmt.Printf("Launch it with:\n  spawn launch <name> --ami %s --os windows --ttl 4h\n", launchAMI)
 	return nil
+}
+
+// buildWarmAMI launches a seed instance from the imported base AMI, waits until
+// it has fully finished first boot (SSM Online — proves EC2Launch user-data ran
+// and spored + the SSM agent are installed/running), creates a new AMI from it,
+// tags it, and terminates the seed. The seed is always terminated, even on
+// error. Returns the warm AMI id. (#98)
+func buildWarmAMI(ctx context.Context, awsClient *aws.Client, region, name, version, baseAMI string, prog *progress.Progress) (string, error) {
+	seedType := imageImportWarmType
+	if err := guardWindowsInstanceType("windows", seedType); err != nil {
+		return "", err
+	}
+
+	plat, err := platform.Detect()
+	if err != nil {
+		return "", fmt.Errorf("detect platform: %w", err)
+	}
+
+	// RSA key (Windows) — reused/imported idempotently.
+	keyName, err := setupSSHKey(ctx, awsClient, region, baseAMI, plat)
+	if err != nil {
+		return "", fmt.Errorf("set up key for warm seed: %w", err)
+	}
+
+	// Windows SG (RDP+SSH); reuse the launch helper.
+	vpcID, err := awsClient.GetDefaultVPC(ctx, region)
+	if err != nil {
+		return "", fmt.Errorf("get default VPC: %w", err)
+	}
+	sgID, err := awsClient.CreateOrGetWindowsSecurityGroup(ctx, region, vpcID, fmt.Sprintf("spawn-windows-%s-warmseed", name), "")
+	if err != nil {
+		return "", fmt.Errorf("create warm-seed security group: %w", err)
+	}
+
+	// Windows user-data (installs spored + ensures SSM agent — baked into warm AMI).
+	pubKey, err := spawnPublicKeyForUserData(plat, keyName)
+	if err != nil {
+		return "", fmt.Errorf("read public key for warm-seed user-data: %w", err)
+	}
+	userDataScript, err := buildWindowsUserData(string(pubKey))
+	if err != nil {
+		return "", fmt.Errorf("build warm-seed user-data: %w", err)
+	}
+	// Launch() passes UserData straight to RunInstances, so encode it ourselves
+	// (the cobra launch path does this via encodeUserDataForOS too).
+	userData := encodeUserDataForOS(userDataScript, "windows")
+
+	prog.Start("Launching warm-build seed instance")
+	res, err := awsClient.Launch(ctx, aws.LaunchConfig{
+		InstanceType:     seedType,
+		Region:           region,
+		AMI:              baseAMI,
+		KeyName:          keyName,
+		SecurityGroupIDs: []string{sgID},
+		TargetOS:         "windows",
+		UserData:         userData,
+		Name:             name + "-warmseed",
+		TTL:              "3h", // safety backstop: reaper kills the seed if we crash
+		Tags:             map[string]string{"spawn:purpose": "warm-build-seed"},
+	})
+	if err != nil {
+		prog.Error("Launching warm-build seed instance", err)
+		return "", fmt.Errorf("launch warm seed: %w", err)
+	}
+	seedID := res.InstanceID
+	prog.Complete("Launching warm-build seed instance")
+
+	// Always terminate the seed, even on failure below.
+	defer func() {
+		if terr := awsClient.Terminate(context.Background(), region, seedID); terr != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  could not terminate warm-build seed %s: %v (terminate it manually)\n", seedID, terr)
+		}
+	}()
+
+	// Readiness, by progress not by a hard clock. The reliable "first boot
+	// finished" signal is the Administrator password becoming available: EC2
+	// generates it during EC2Launch's specialize/oobe pass, after Sysprep — so a
+	// password means the OS is up and EC2Launch ran. We gate the warm image on
+	// THAT (reliable, ~12-20 min). SSM registration is a far flakier/slower signal
+	// (28 min in one test, >75 min and still not registered in another), so we do
+	// NOT hard-require it: we wait a bounded best-effort window for SSM to settle
+	// (nicer warm image if it's up), then image regardless — the SSM agent + spored
+	// are installed either way and register on the warm AMI's own next boot.
+	waitLabel := "Waiting for seed first boot (Administrator password ready)"
+	prog.Start(waitLabel)
+	if err := awsClient.WaitForRunning(ctx, region, seedID, 5*time.Minute); err != nil {
+		prog.Error(waitLabel, err)
+		return "", fmt.Errorf("warm seed never reached running: %w", err)
+	}
+	// Password-available is the gate. The timeout here is a safety net for a truly
+	// hung instance, not the normal path; default 30 min is generous vs ~12-20 observed.
+	if _, err := awsClient.WaitForPasswordData(ctx, region, seedID, time.Duration(imageImportWarmTimeout)*time.Minute); err != nil {
+		prog.Error(waitLabel, err)
+		return "", fmt.Errorf("warm seed never finished first boot (no Administrator password): %w", err)
+	}
+	prog.Complete(waitLabel)
+
+	// Best-effort: give the SSM agent + spored a short, bounded window to come
+	// online so the warm image captures a fully-settled machine. Never fatal.
+	prog.Start("Letting spored/SSM settle (best-effort)")
+	if err := awsClient.WaitForSSMOnline(ctx, region, seedID, 10*time.Minute); err != nil {
+		fmt.Fprintf(os.Stderr, "  note: SSM not Online yet on the seed; imaging anyway (the agent is installed and will register on the warm AMI's next boot).\n")
+	}
+	prog.Complete("Letting spored/SSM settle (best-effort)")
+
+	prog.Start("Creating warm AMI from seed")
+	warmName := fmt.Sprintf("%s-warm-%s", name, version)
+	warmID, err := awsClient.CreateAMI(ctx, region, aws.CreateAMIInput{
+		InstanceID:  seedID,
+		Name:        warmName,
+		Description: fmt.Sprintf("spawn warm AMI from %s (fast-boot, first boot already done)", baseAMI),
+		NoReboot:    false, // let Windows flush cleanly for a consistent image
+	})
+	if err != nil {
+		prog.Error("Creating warm AMI from seed", err)
+		return "", fmt.Errorf("create warm AMI: %w", err)
+	}
+	if err := awsClient.WaitForAMI(ctx, region, warmID, 30*time.Minute); err != nil {
+		prog.Error("Creating warm AMI from seed", err)
+		return "", fmt.Errorf("warm AMI never became available: %w", err)
+	}
+	if err := awsClient.TagAMIWindowsWarm(ctx, region, warmID, baseAMI); err != nil {
+		// Non-fatal: the AMI exists; tags are best-effort.
+		fmt.Fprintf(os.Stderr, "⚠️  could not tag warm AMI %s: %v\n", warmID, err)
+	}
+	prog.Complete("Creating warm AMI from seed")
+	return warmID, nil
 }
 
 func init() {
@@ -441,4 +608,9 @@ func init() {
 	f.StringVar(&imageImportInstType, "instance-type", "m6i.large", "Build instance type (when self-provisioning infra)")
 	f.StringVar(&imageImportSubnet, "subnet-id", "", "Subnet for the build instance (when self-provisioning infra)")
 	f.StringArrayVar(&imageImportSGs, "security-group-id", nil, "Security group for the build instance, repeatable (when self-provisioning infra)")
+	// Warm-AMI stage (#98): on by default — build a fast-boot AMI from the import
+	// so future launches skip the ~30 min Sysprep first boot.
+	f.BoolVar(&imageImportNoWarm, "no-warm", false, "Skip building the warm (fast-boot) AMI; produce only the raw imported base AMI")
+	f.StringVar(&imageImportWarmType, "warm-instance-type", "m7i.xlarge", "Instance type for the warm-build seed (non-burstable; Windows)")
+	f.IntVar(&imageImportWarmTimeout, "warm-timeout", 30, "Safety-net minutes to wait for the warm seed's first boot (Administrator password) before giving up")
 }

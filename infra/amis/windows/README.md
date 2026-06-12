@@ -110,6 +110,17 @@ spawn image import --iso s3://my-iso-bucket/Win11_25H2_Enterprise.ISO --name win
 6. **Tags** the output AMI `spawn:os=windows` so `spawn connect`/`launch` treat
    it as Windows (belt-and-suspenders — the AMI also registers with
    `Platform=windows`).
+7. **Builds a "warm" AMI** (default; `--no-warm` to skip). The imported base AMI
+   runs Windows Sysprep Specialize on *every* first launch — ~28 min until it's
+   usable/SSM-registered (occasionally longer). To avoid paying that on each
+   launch, spawn launches a one-time seed from the base, waits until first boot
+   finishes (Administrator password available; spored + SSM agent installed),
+   images it into a **warm AMI**, and terminates the seed. Launching the warm
+   AMI reaches SSM-ready in **~4 min** instead of ~28. The warm AMI is tagged
+   `spawn:source=iso-import-warm` + `spawn:warm-parent=<base>`, and is the one
+   spawn recommends launching. (SSM registration on the seed is the slow,
+   variable part, so the warm gate is the reliable password signal, not SSM;
+   SSM is a best-effort settle. `--warm-instance-type`, `--warm-timeout` tune it.)
 
 ### Useful flags
 
