@@ -70,14 +70,16 @@ spawn list
 
 | Command | Description |
 |---------|-------------|
-| `launch` | Launch an EC2 instance |
-| `connect` | SSH to an instance by name (auto-starts if stopped) |
+| `launch` | Launch an EC2 instance (Linux or Windows) |
+| `connect` | Connect to an instance by name (auto-starts if stopped): SSH on Linux; RDP, PowerShell-over-SSM, or `--ssh` on Windows |
 | `list` | List all managed instances |
 | `status` | Instance status, TTL, cost |
 | `extend` | Extend TTL on a running instance |
 | `stop` / `start` | Stop or start an instance |
 | `hibernate` | Hibernate (saves RAM to disk) |
 | `cancel` | Terminate an instance |
+| `image` | Build a custom AMI from a Windows ISO (EC2 Image Builder; auto-warms for fast boot) |
+| `ami` | List / delete spawn-managed AMIs |
 | `queue` | Batch job queue management |
 | `schedule` | Scheduled execution |
 | `sweep` | Parameter sweeps |
@@ -104,19 +106,36 @@ spored is the lifecycle daemon that runs inside each instance as a systemd servi
 
 ## Go Library
 
+`pkg/launcher` is the recommended entry point — it provisions a fully-functional
+spore (auto-detects the AMI, sets up the spored IAM role, installs the spored
+bootstrap so the instance honors TTL / idle / on-complete), the same way the CLI
+does. SDK consumers like lagotto use it.
+
 ```go
-import "github.com/spore-host/spawn/pkg/aws"
+import (
+    "github.com/spore-host/spawn/pkg/aws"
+    "github.com/spore-host/spawn/pkg/launcher"
+)
 
 client, _ := aws.NewClient(ctx)
-inst, _ := client.LaunchInstance(ctx, config)
+result, _ := launcher.Provision(ctx, client, aws.LaunchConfig{
+    InstanceType: "c6a.xlarge",
+    Region:       "us-east-1",
+    TTL:          "4h",
+    OnComplete:   "terminate",
+}, launcher.Options{})
 ```
+
+For lower-level control, `client.Launch(ctx, config)` launches an instance
+without the bootstrap — but then the spore won't self-manage; prefer `Provision`.
 
 ## Documentation
 
 Full reference at **[spore.host/docs](https://spore.host/docs/tools/spawn)**.
 
-- **[Windows beta guide](docs/windows-beta-guide.md)** — end-to-end: ISO → custom
-  AMI → launch → connect via RDP or SSH-over-SSM, with AWS SSO sign-in.
+- **[Windows beta guide](docs/windows-beta-guide.md)** — end-to-end: Windows 11
+  ISO → custom (auto-warmed) AMI → launch → connect via RDP, PowerShell-over-SSM,
+  or SSH.
 
 ## License
 

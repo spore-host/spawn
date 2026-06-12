@@ -1,55 +1,52 @@
 # spore.host Windows beta — step-by-step guide
 
-A complete walkthrough for turning a **Windows 11 ISO** into a running, reachable
-EC2 instance using spore.host's `spawn` tool: install spawn, sign in to **your
-own AWS account**, build a custom Windows AMI from your ISO, launch it, and
-connect by **Remote Desktop (RDP)** or a **PowerShell session over SSM**.
+This guide takes you from a **Windows 11 ISO** to a running Windows machine in
+the cloud you can log into, using spore.host's `spawn` tool. You'll install
+spawn, sign in to **your own AWS account**, turn your ISO into a reusable machine
+image, launch a Windows instance from it, connect to it, and shut it down.
 
-> **Who this is for:** someone new to spore.host. No prior `spawn` experience
-> assumed. You *do* need an AWS account you can sign into, and a genuine Windows
-> 11 Enterprise ISO + license (see Prerequisites).
+> **Who this is for:** someone new to spore.host — no prior `spawn` experience
+> assumed. You need an AWS account you can sign into and a genuine Windows 11
+> Enterprise ISO + license (details in Prerequisites).
 
-> **Heads up on time + cost:** the one-time build takes **~45–75 min** end to
-> end. spawn does two things in that window: (1) imports your ISO into a base
-> AMI (~30–45 min), then (2) **pre-warms it** — launches a short-lived seed
-> instance, lets Windows finish its one-time Sysprep first boot, and images that
-> into a fast-boot "warm" AMI (see [§7](#7-the-build-pre-warms-your-ami)). The
-> payoff: every instance you launch from the **warm** AMI is ready in **~4 min**,
-> not ~30. spawn launches and **auto-terminates** the seed for you — but you pay
-> normal EC2 + EBS charges for it during the build, for any instance you run, and
-> a small ongoing storage charge for the two AMIs. **Terminate instances when
-> you're done** ([§9](#9-clean-up--important--avoid-surprise-charges)).
+> **What to expect on time and money:**
+> - The **first part is a one-time build** that takes **~45–75 minutes** mostly
+>   unattended. You do it once per ISO; the result is a reusable image.
+> - After that, **launching a machine takes ~4 minutes** and connecting is quick.
+> - You pay normal AWS charges for any instance while it runs, plus a small
+>   ongoing charge to store the image. **So: terminate instances when you're done**
+>   (the last step shows how). spawn also sets an automatic time limit as a
+>   backstop.
+
+The steps below are in order — just follow them top to bottom.
 
 ---
 
 ## 0. Prerequisites
 
-> **Note:** spawn works with the **AWS CLI** — it uses your AWS CLI credentials
-> (you sign in with `aws login`) and the CLI's Session Manager support for the
-> SSM connection paths. So a few steps below are `aws` commands; that's expected.
+> **A note on the AWS CLI.** spawn builds on the AWS command-line tool: it reuses
+> the credentials you sign in with there, and uses it for some connection
+> methods. That's why a couple of steps below are `aws ...` commands rather than
+> `spawn ...` — that's normal, not a detour.
+
+You'll need:
 
 1. **A computer** running macOS, Linux, or Windows with a terminal.
-2. **An AWS account you can sign into** (your own, via your org's access portal).
-   `PowerUserAccess` or an admin-style permission set is simplest for a beta.
-3. **The AWS CLI v2** installed: <https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html>
-   (`aws --version` should print `aws-cli/2.x`).
-   - *Optional:* the **Session Manager plugin** — only needed if you use the SSM
-     connection paths (an interactive `spawn connect` shell, or `--rdp --via-ssm`).
-     Plain `spawn connect <name> --rdp` to the public IP doesn't need it. Install
-     it if/when you want those:
-     <https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html>
-4. **An RDP client** (for the Remote Desktop step):
+2. **An AWS account you can sign into** (your own, via your organization's access
+   portal). A `PowerUserAccess` or admin-style permission set is simplest for a
+   beta.
+3. **The AWS CLI v2** — install it, then check `aws --version` prints
+   `aws-cli/2.x`: <https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html>
+4. **A Windows 11 Enterprise ISO + license (bring your own).** Download the
+   "business editions" ISO from the **Microsoft 365 admin center** — that's the
+   one that works. Consumer ISOs (from the Media Creation Tool), Evaluation ISOs,
+   and LTSC are **not** accepted. You must hold a Microsoft license for what you
+   run. (Step 4 checks your ISO for you before you spend anything, so you don't
+   have to guess.)
+5. **An RDP client** — only if you want the graphical Windows desktop (Step 7):
    - macOS: "Windows App" / "Microsoft Remote Desktop" from the App Store
    - Windows: built-in `mstsc`
    - Linux: `xfreerdp`
-5. **A supported Windows 11 ISO + license (BYOL).** EC2 Image Builder accepts
-   **Windows 11 Enterprise 23H2 / 24H2 / 25H2 (x64)**, downloaded from the
-   **Microsoft 365 admin center** (the "business editions" ISO). It does **not**
-   accept Evaluation ISOs, Media-Creation-Tool ISOs, or LTSC. You must hold a
-   Microsoft license for what you run.
-
-   You don't have to guess whether your ISO qualifies — `spawn image verify`
-   (Step 4) checks it locally before you spend anything.
 
 ---
 
@@ -71,8 +68,7 @@ scoop install spawn
 **Or download a binary** from the latest release and put it on your `PATH`:
 <https://github.com/spore-host/spawn/releases/latest>
 
-Verify (you want **v0.42.0 or newer** — earlier versions lack the pre-warmed
-AMI build and the latest connect features):
+Then check the version — you want **v0.42.0 or newer**:
 ```bash
 spawn version
 ```
@@ -81,102 +77,110 @@ spawn version
 
 ## 2. Sign in to your AWS account
 
-spawn uses your normal AWS CLI credentials. Sign in with `aws login` — it opens a
-browser, you log in to the AWS console as usual, and the CLI gets temporary
-credentials (and auto-refreshes them; no long-lived keys):
+Sign in with `aws login`. It opens a browser, you log into the AWS console as
+usual, and the CLI receives temporary credentials and keeps them fresh — no
+long-lived access keys to manage:
 ```bash
 aws login --profile sporehost
 ```
-- `--profile sporehost` — names a profile you'll reuse (any name; `sporehost`
-  here). Approve the request in the browser when it opens.
-- On a remote/SSH box with no browser, use `aws login --remote --profile sporehost`
-  — it prints a URL to open elsewhere and prompts for the code.
+- `--profile sporehost` names a reusable profile (any name works; this guide uses
+  `sporehost`). Approve the request in the browser when it opens.
+- On a remote machine with no browser (e.g. over SSH), use
+  `aws login --remote --profile sporehost` — it prints a URL to open elsewhere
+  and asks you to paste back the code.
 
-Point spawn (and the AWS CLI) at that profile and region for the rest of this
-guide:
+Now tell spawn and the AWS CLI which profile and region to use for the rest of
+this guide:
 ```bash
 export AWS_PROFILE=sporehost
 export AWS_REGION=us-east-1
 ```
-(`us-east-1` is recommended for the beta — it's the simplest region for the
-ISO-import build; other regions need extra VPC networking setup.)
+Use **`us-east-1`** for the beta — it's the simplest region for the image build
+(other regions need extra network setup).
 
-Confirm you're signed into the right account:
+Confirm it worked:
 ```bash
 aws sts get-caller-identity
 ```
+This should print your account number and the identity you signed in as.
 
 ---
 
-## 3. Put your Windows ISO somewhere spawn can reach it
+## 3. Have your Windows ISO ready
 
-You just need the ISO file on your local disk. `spawn image import` will upload
-it to S3 for you (into a managed bucket it creates), so you do **not** need to
-pre-create a bucket.
-
-Note the local path, e.g. `~/Downloads/Win11_Enterprise_25H2.iso`.
+Just have the ISO file on your local disk and note its path, e.g.
+`~/Downloads/Win11_Enterprise_25H2.iso`. You don't need to upload it anywhere —
+spawn handles that for you in Step 5.
 
 ---
 
-## 4. Verify the ISO is acceptable (free, local, no AWS)
+## 4. Check your ISO is the right one
 
-Before spending ~40 minutes on a build, check the ISO:
+This reads your ISO locally and tells you whether it'll work — **free, no AWS, no
+charges** — so you don't waste ~45 minutes on a build that would be rejected:
 ```bash
 spawn image verify "~/Downloads/Win11_Enterprise_25H2.iso"
 ```
-You'll get a table of the Windows editions inside it and a verdict. You want:
+A Windows ISO often bundles several editions (Home, Pro, Enterprise…). spawn
+lists them and gives a verdict:
 ```
 ACCEPTED: contains Windows 11 Enterprise (x64). Import with --image-index 3.
 ```
-- **ACCEPTED** → note the `--image-index` number it tells you (the Enterprise
-  edition's slot; often `3`).
-- **REJECTED** → it tells you why (Evaluation, consumer Home/Pro, etc.). Get the
-  Enterprise "business editions" ISO from the M365 admin center.
+- **ACCEPTED** → note the **`--image-index`** number it reports. That's which
+  edition inside the ISO to use (Enterprise's slot — often `3`); you'll pass it in
+  the next step.
+- **REJECTED** → it explains why. Get the Enterprise "business editions" ISO from
+  the Microsoft 365 admin center and try again.
 
 ---
 
-## 5. Build the AMI from your ISO
+## 5. Build your machine image (one time)
 
-This converts the ISO into an AMI using AWS EC2 Image Builder, then pre-warms it
-(§7). spawn uploads the ISO, provisions the needed IAM roles + build
-infrastructure automatically, runs the managed import, builds the warm AMI, and
-cleans up the staged ISO and the warm-build seed afterward.
+This is the long, mostly-unattended step. It turns your ISO into an **AMI** — an
+Amazon Machine Image, the reusable template you launch instances from. spawn does
+everything: uploads the ISO, sets up the AWS build resources, runs the import,
+and (see below) produces a fast-booting image — then cleans up after itself.
 
 ```bash
 spawn image import \
   --iso "~/Downloads/Win11_Enterprise_25H2.iso" \
   --name win11-beta \
-  --image-index 3 \
-  --version 1.0.0
+  --image-index 3
 ```
-- `--image-index 3` — use the number `spawn image verify` reported.
-- **No `--wait` needed.** Because pre-warming is on by default, the command
-  blocks through the whole build (~45–75 min) and prints both AMI ids at the end.
-  (Pre-warming needs the base AMI to exist first, so the command waits for you.)
-- If you'd rather skip pre-warming and get just the base AMI back fast, add
-  `--no-warm` — then the build runs async and you check progress with
-  `spawn image status <build-arn>`. (You'll then pay the slow first boot on every
-  launch — not recommended.)
-- If you Ctrl-C during the build, it keeps running in AWS; the command tells you
-  how to check on it. (A warm build interrupted mid-way still auto-terminates its
-  seed instance.)
+- `--image-index 3` — the number `spawn image verify` reported in Step 4.
+- The command **runs for ~45–75 minutes and blocks until it's done** — no extra
+  flags needed. Leave it running. (If you Ctrl-C, the build keeps going in AWS
+  and the command tells you how to check back on it.)
 
-When it finishes you'll see **two** AMI ids:
+### Why you get *two* images
+
+When it finishes, spawn prints **two** AMI ids:
 ```
 Imported base AMI: ami-0123456789abcdef0
 Warm AMI (fast boot, recommended): ami-0fedcba9876543210
 Launch it with:
   spawn launch <name> --ami ami-0fedcba9876543210 --os windows --ttl 4h
 ```
-Copy the **Warm AMI** id (the one spawn labels *recommended*) — that's the
-fast-booting one you'll launch in Step 6. The base AMI is kept too (it's the
-parent the warm one was built from).
+A freshly-imported Windows image is slow the *first* time it boots — Windows runs
+its one-time "Getting ready" setup (Sysprep), which takes ~20–30 minutes. To
+spare you that on every launch, spawn does it **once** during this build: it
+quietly boots a throwaway instance from the base image, lets Windows finish
+setup, snapshots the result into a second **"warm" image**, and discards the
+throwaway. (That extra instance is billed only for those few minutes of the
+build, and spawn shuts it down automatically.)
+
+**Copy the Warm AMI id** (the one marked *recommended*) — that's the
+fast-booting image you'll launch in the next step. The base image is kept too, as
+the warm one's parent; you'll delete both at the end.
+
+> Prefer just the base image and willing to wait through the slow first boot every
+> time? Add `--no-warm` to skip the warm step (not recommended for the beta).
 
 ---
 
 ## 6. Launch a Windows instance
 
-Use the **Warm AMI** id from Step 5 (the one labelled *recommended*):
+Launch from the **Warm AMI** id you copied in Step 5:
 ```bash
 spawn launch win11-test \
   --ami ami-0fedcba9876543210 \
@@ -184,114 +188,108 @@ spawn launch win11-test \
   --ttl 2h \
   --yes
 ```
-What each part does:
-- `win11-test` — a name for this instance (you'll use it to connect).
-- `--os windows` — tells spawn to treat it as Windows (RDP/SSM connect, Windows
-  defaults). spawn automatically:
-  - picks a non-burstable instance type (**m7i.xlarge**) — Windows first boot is
-    painfully slow on cheap "t" instances, so spawn refuses those;
-  - opens a security group for **RDP (3389)** and **SSH (22)**;
-  - waits until the Windows Administrator password is available before declaring
-    the instance ready.
-- `--ttl 2h` — **time-to-live**: the instance automatically terminates after 2
-  hours so you can't forget and leave it running. Always set this.
-- `--yes` — skip the interactive confirmation prompt.
+- `win11-test` — the name you'll use to connect to and manage this instance.
+- `--ami ...` — the warm image from Step 5.
+- `--os windows` — tells spawn this is Windows, so it picks Windows-appropriate
+  defaults: a non-burstable instance type (`m7i.xlarge` — cheap "t" instances
+  make Windows painfully slow, so spawn won't use them), opens the ports for
+  Remote Desktop (3389) and SSH (22), and waits for the Windows Administrator
+  password to be ready before calling the instance ready.
+- `--ttl 2h` — **time-to-live**: the instance terminates itself after 2 hours so
+  a forgotten machine can't run up a bill. Always set one.
+- `--yes` — skip the confirmation prompt.
 
-> **Restrict who can reach RDP** (recommended): add
-> `--allow-cidr <your-public-ip>/32` so only your network can reach 3389/22.
-> Find your IP at <https://checkip.amazonaws.com>. Without it, the ports are open
-> to the internet (spawn warns you).
+> **Lock down who can reach it (recommended):** add
+> `--allow-cidr <your-public-ip>/32` so only your network can reach the RDP/SSH
+> ports. Find your IP at <https://checkip.amazonaws.com>. Without it the ports are
+> open to the internet (spawn warns you when that happens).
 
-spawn prints the instance id and, when ready, how to connect.
-
----
-
-## 7. The build pre-warms your AMI (so launches are fast)
-
-A freshly-imported Windows AMI runs Windows **Sysprep Specialize + OOBE**
-("Getting ready" screen) on its first boot — normal Windows behavior, ~20–30
-minutes, during which RDP/SSM aren't available. **You don't pay this on every
-launch.** During the build (Step 5), spawn pays it **once** on your behalf:
-
-1. It launches a short-lived **seed** instance from the imported base AMI.
-2. It waits for that seed to finish its first boot (Administrator password
-   available; spored + SSM agent installed).
-3. It images the seed into a **warm AMI** and **terminates the seed**.
-
-So the warm AMI you launch in Step 6 is already past Sysprep — it reaches
-RDP/SSM-ready in **~4 minutes**, like a normal Windows boot. The slow ~30-min
-first boot only happens if you launch the **base** AMI directly (or built with
-`--no-warm`).
-
-If you ever do launch the base AMI and want to watch the slow first boot, the
-AWS console shows it: **EC2 → Instances → select it → Actions → Monitor and
-troubleshoot → Get system log / Get instance screenshot**.
+Because you launched the *warm* image, the instance is ready to connect in
+**~4 minutes**. spawn prints the instance id and how to connect.
 
 ---
 
-## 8. Connect
+## 7. Connect
 
-You have two ways in. Use the instance name from Step 6 (`win11-test`).
+Three ways in — pick whichever suits you. All use the instance **name** from
+Step 6 (`win11-test`).
 
-### A. Remote Desktop (RDP) — the graphical Windows desktop
+### A. Remote Desktop (RDP) — the full graphical Windows desktop
 
 ```bash
 spawn connect win11-test --rdp
 ```
-spawn fetches and **decrypts the Administrator password** (using the key it
-launched the instance with), prints the connection details, and opens your RDP
-client pointed at the instance. Log in as **Administrator** with the printed
-password.
+spawn fetches and **decrypts the Administrator password** for you, prints the
+connection details, and opens your RDP client pointed at the instance. Log in as
+**Administrator** with the printed password. (Needs an RDP client from
+Prerequisites.)
 
-If the instance has no public IP (or you prefer not to expose RDP), tunnel it
-over AWS Session Manager instead:
+Don't want to expose Remote Desktop to the internet (or the instance has no
+public IP)? Tunnel it privately instead:
 ```bash
 spawn connect win11-test --rdp --via-ssm
 ```
-This opens an encrypted tunnel and points your RDP client at `localhost:13389`
-— no inbound RDP from the internet needed. (Requires the Session Manager plugin
-from Step 0.)
+This opens an encrypted tunnel through AWS and points your RDP client at
+`localhost:13389` — nothing inbound from the internet. This route needs the AWS
+**Session Manager plugin** installed (one-time):
+<https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html>
 
-### B. PowerShell over SSM — a shell / one-off commands
+### B. A command-line session (no extra ports, no RDP client)
 
-Interactive PowerShell shell (no SSH keys or open ports needed; uses SSM):
+Open an interactive PowerShell session routed privately through AWS:
 ```bash
 spawn connect win11-test
 ```
-Run a single command and exit:
+Or run one command and exit:
 ```bash
 spawn connect win11-test -- 'Get-ComputerInfo | Select-Object WindowsProductName, OsBuildNumber'
 ```
+This route also uses AWS Session Manager, so it needs the **Session Manager
+plugin** (same link as above). The instance must have finished registering with
+AWS first — on the warm image that's ~4 min after launch; if `connect` can't
+reach it yet, wait a moment and retry.
 
-> PowerShell over SSM needs the instance to have registered with SSM. On the warm AMI
-> that's ~4 min after launch; if `connect` can't reach it yet, wait a moment and
-> retry. (On the base AMI it's only after the full ~30-min first boot — §7.)
+### C. Plain SSH (same as connecting to a Linux box)
+
+The Windows image runs an SSH server and trusts spawn's launch key, so you can
+SSH straight in — no Session Manager plugin needed. You log in as Administrator
+and land at a PowerShell prompt:
+```bash
+spawn connect win11-test --ssh
+```
+Or run one command and exit (it runs in PowerShell):
+```bash
+spawn connect win11-test --ssh -- 'Get-ComputerInfo | Select-Object WindowsProductName'
+```
+This connects over the public internet on port 22, so the instance's firewall
+must allow SSH from you — spawn opens it by default, and `--allow-cidr` at launch
+(Step 6) restricts it to your network. You also need spawn's launch key on this
+machine (it's there automatically if you launched from here).
 
 ---
 
-## 9. Clean up (important — avoid surprise charges)
+## 8. Clean up — important, avoid surprise charges
 
 When you're done, terminate the instance:
 ```bash
 spawn terminate win11-test
 ```
-The `--ttl` from Step 6 is a backstop that terminates it automatically, but
-don't rely on it — terminate explicitly when finished.
+The `--ttl` from Step 6 will terminate it eventually as a backstop, but don't
+rely on that — shut it down explicitly when you finish.
 
-To list anything still running:
+Check nothing is still running:
 ```bash
 spawn list
 ```
 
-The build leaves **two** custom AMIs — the base and the warm one — each with an
-EBS snapshot that costs a little to store. List them and delete both when you no
-longer need them:
+Finally, the build in Step 5 left **two images** (the base and the warm one),
+each with a stored snapshot that costs a little to keep. When you no longer need
+them, delete both:
 ```bash
-spawn ami list                       # shows spawn-managed AMIs (base + warm)
-spawn ami delete ami-0fedcba9876543210   # the warm AMI
-spawn ami delete ami-0123456789abcdef0   # the base AMI
+spawn ami list                            # shows your spawn-managed images
+spawn ami delete ami-0fedcba9876543210    # the warm image
+spawn ami delete ami-0123456789abcdef0    # the base image
 ```
-(`spawn ami delete` deregisters the AMI and removes its snapshot.)
 
 To sign out of AWS at the end of the day:
 ```bash
@@ -302,26 +300,35 @@ aws logout --profile sporehost
 
 ## Quick reference
 
-| Step | Command |
+| Task | Command |
 |------|---------|
 | Sign in | `aws login --profile sporehost` |
-| Verify ISO | `spawn image verify <iso>` |
-| Build AMI (auto-warms) | `spawn image import --iso <iso> --name <n> --image-index <N>` |
-| Launch (use the **warm** AMI id) | `spawn launch <name> --ami <warm-id> --os windows --ttl 2h --yes` |
-| RDP | `spawn connect <name> --rdp` |
-| RDP via SSM | `spawn connect <name> --rdp --via-ssm` |
-| PowerShell (SSM) | `spawn connect <name>` |
-| Terminate | `spawn terminate <name>` |
-| List AMIs | `spawn ami list` |
-| Delete AMI (do both: base + warm) | `spawn ami delete <ami-id>` |
+| Check an ISO | `spawn image verify <iso>` |
+| Build the image (one time) | `spawn image import --iso <iso> --name <n> --image-index <N>` |
+| Launch (use the **warm** image id) | `spawn launch <name> --ami <warm-id> --os windows --ttl 2h --yes` |
+| Connect — Remote Desktop | `spawn connect <name> --rdp` |
+| Connect — RDP, private tunnel | `spawn connect <name> --rdp --via-ssm` |
+| Connect — command-line (SSM) | `spawn connect <name>` |
+| Connect — SSH | `spawn connect <name> --ssh` |
+| Terminate the instance | `spawn terminate <name>` |
+| List your images | `spawn ami list` |
+| Delete an image (do both) | `spawn ami delete <ami-id>` |
+| Sign out | `aws logout --profile sporehost` |
+
+---
 
 ## When something goes wrong
-- **`spawn image verify` says REJECTED** — wrong ISO; get the Enterprise
-  business-editions ISO from the M365 admin center.
-- **Build fails** — check CloudWatch Logs group `/aws/imagebuilder/<name>`.
-- **`connect` can't reach the instance** — it may still be on first boot
-  (§7); check the instance screenshot in the EC2 console and retry in a few min.
-- **RDP/SSM commands fail with "session-manager-plugin not found"** — install
-  the plugin (Step 0).
-- **Anything else** — capture the exact command + output and send it back to the
-  spore.host team.
+
+- **`spawn image verify` says REJECTED** — wrong ISO. Get the Enterprise
+  "business editions" ISO from the Microsoft 365 admin center.
+- **The build fails** — check the AWS CloudWatch Logs group
+  `/aws/imagebuilder/<name>` (the `--name` you passed).
+- **`connect` can't reach the instance** — it may still be starting up; wait a
+  minute and retry. You can watch a Windows instance boot in the AWS console:
+  **EC2 → Instances → select it → Actions → Monitor and troubleshoot → Get
+  instance screenshot**.
+- **A connect command fails with "session-manager-plugin not found"** — install
+  the Session Manager plugin (linked in Step 7A), or use `--ssh` instead, which
+  doesn't need it.
+- **Anything else** — capture the exact command and its output, and send it to
+  the spore.host team.
