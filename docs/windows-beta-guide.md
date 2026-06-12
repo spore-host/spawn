@@ -3,7 +3,7 @@
 A complete walkthrough for turning a **Windows 11 ISO** into a running, reachable
 EC2 instance using spore.host's `spawn` tool: install spawn, sign in to **your
 own AWS account**, build a custom Windows AMI from your ISO, launch it, and
-connect by **Remote Desktop (RDP)** or **SSH-over-SSM**.
+connect by **Remote Desktop (RDP)** or a **PowerShell session over SSM**.
 
 > **Who this is for:** someone new to spore.host. No prior `spawn` experience
 > assumed. You *do* need an AWS account you can sign into, and a genuine Windows
@@ -252,7 +252,7 @@ This opens an encrypted tunnel and points your RDP client at `localhost:13389`
 — no inbound RDP from the internet needed. (Requires the Session Manager plugin
 from Step 0.)
 
-### B. SSH-over-SSM — a PowerShell session / one-off commands
+### B. PowerShell over SSM — a shell / one-off commands
 
 Interactive PowerShell shell (no SSH keys or open ports needed; uses SSM):
 ```bash
@@ -263,7 +263,7 @@ Run a single command and exit:
 spawn connect win11-test -- 'Get-ComputerInfo | Select-Object WindowsProductName, OsBuildNumber'
 ```
 
-> SSH-over-SSM needs the instance to have registered with SSM. On the warm AMI
+> PowerShell over SSM needs the instance to have registered with SSM. On the warm AMI
 > that's ~4 min after launch; if `connect` can't reach it yet, wait a moment and
 > retry. (On the base AMI it's only after the full ~30-min first boot — §7.)
 
