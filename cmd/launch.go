@@ -1732,12 +1732,12 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		return nil
 	}
 
-	// Display success (TUI mode). Windows has no `ssh ec2-user@` path — the
-	// connection is RDP or SSH-over-SSM via `spawn connect`, which fetches the
-	// Administrator password and (with --rdp) opens a desktop (#95).
+	// Display success (TUI mode). Windows has no `ssh ec2-user@` path — connect
+	// via `spawn connect`, which fetches the Administrator password and opens a
+	// desktop (--rdp), a PowerShell-over-SSM session (default), or SSH (--ssh).
 	var connectCmd string
 	if config.TargetOS == "windows" {
-		connectCmd = fmt.Sprintf("spawn connect %s --rdp     # or: spawn connect %s  (SSH-over-SSM)", config.Name, config.Name)
+		connectCmd = fmt.Sprintf("spawn connect %s --rdp     # graphical; or --ssh, or `spawn connect %s` (PowerShell over SSM)", config.Name, config.Name)
 	} else {
 		connectCmd = plat.GetSSHCommand("ec2-user", result.PublicIP)
 	}
@@ -2229,6 +2229,17 @@ try {
   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
   Set-Service -Name sshd -StartupType Automatic
   Start-Service sshd
+
+  # Open inbound TCP 22 for ALL firewall profiles. The OpenSSH feature only
+  # creates a Private-profile allow rule, but an EC2 instance's network is
+  # classified Public, so SSH-to-the-public-IP (spawn connect --ssh) is blocked
+  # by Windows Firewall even though sshd listens and the EC2 security group
+  # allows it. (Confirmed live: RDP worked, SSH didn't, until this rule.)
+  if (-not (Get-NetFirewallRule -Name spawn-sshd-22 -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name spawn-sshd-22 -DisplayName "spawn OpenSSH 22 (all profiles)" `+"`"+`
+      -Enabled True -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -Profile Any `+"`"+`
+      -ErrorAction SilentlyContinue | Out-Null
+  }
 
   $admins = "C:\ProgramData\ssh\administrators_authorized_keys"
   Set-Content -Path $admins -Value "%s" -Encoding ascii

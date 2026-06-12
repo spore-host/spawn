@@ -81,6 +81,13 @@ func TestBuildWindowsUserData(t *testing.T) {
 	if strings.Contains(out, "#!/bin/bash") {
 		t.Error("windows user-data must not contain bash")
 	}
+	// Regression guard: the OpenSSH feature only adds a Private-profile firewall
+	// rule, but an EC2 instance's network is classified Public, so SSH to the
+	// public IP (spawn connect --ssh) is blocked unless we open 22 for all
+	// profiles. Verified live: RDP worked, SSH didn't, until this rule.
+	if !strings.Contains(out, "New-NetFirewallRule") || !strings.Contains(out, "-Profile Any") {
+		t.Error("must open inbound 22 for all firewall profiles (EC2 network is Public; OpenSSH's own rule is Private-only) so --ssh works")
+	}
 }
 
 func TestBuildWindowsUserData_RejectsHerestringBreakout(t *testing.T) {
