@@ -68,7 +68,8 @@ scoop install spawn
 **Or download a binary** from the latest release and put it on your `PATH`:
 <https://github.com/spore-host/spawn/releases/latest>
 
-Then check the version — you want **v0.42.0 or newer**:
+Then check the version — you want **v0.43.0 or newer** (that's where Windows
+`--ssh` and the latest connect fixes landed):
 ```bash
 spawn version
 ```

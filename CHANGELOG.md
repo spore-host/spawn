@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Windows beta guide: bump the version floor to v0.43.0 (where `--ssh` shipped),
+  so following the guide's SSH steps can't fail with "unknown flag" on v0.42.0.
+
 ## [0.43.0] - 2026-06-12
 
 ### Added
