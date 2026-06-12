@@ -296,7 +296,6 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		ImageId:      aws.String(launchConfig.AMI),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
-		KeyName:      aws.String(launchConfig.KeyName),
 		UserData:     aws.String(launchConfig.UserData),
 		TagSpecifications: []types.TagSpecification{
 			{
@@ -310,6 +309,12 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		},
 		BlockDeviceMappings: blockDevices,
 	}
+
+	// Only set KeyName when one was provided. RunInstances rejects an empty-string
+	// KeyName ("Invalid value '' for keyPairNames"); omitting the field is the
+	// supported way to launch with no key pair — the headless / SSM-only case
+	// (lagotto launches without an SSH key and connects via SSM, #130).
+	input.KeyName = keyNameOrNil(launchConfig.KeyName)
 
 	// Idempotency token (optional). With it, a retry after a network timeout
 	// won't double-launch, and the caller can resolve the Ambiguous fault class
@@ -452,6 +457,17 @@ func newLaunchResult(instance types.Instance, name, keyName string) *LaunchResul
 		State:            state,
 		KeyName:          keyName,
 	}
+}
+
+// keyNameOrNil returns a *string for RunInstances.KeyName: the name when set,
+// or nil to omit the field entirely. An empty-string KeyName is rejected by EC2
+// ("Invalid value ” for keyPairNames"); nil means "launch with no key pair",
+// which is the SSM-only headless path (#130).
+func keyNameOrNil(keyName string) *string {
+	if keyName == "" {
+		return nil
+	}
+	return aws.String(keyName)
 }
 
 func buildTags(config LaunchConfig, accountID string, userARN string) []types.Tag {
