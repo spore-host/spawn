@@ -32,9 +32,12 @@ connect by **Remote Desktop (RDP)** or **SSH-over-SSM**.
 2. **An AWS account you can sign into** (your own, via your org's access portal).
    `PowerUserAccess` or an admin-style permission set is simplest for a beta.
 3. **The AWS CLI v2** installed: <https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html>
-   (`aws --version` should print `aws-cli/2.x`). Also install the **Session
-   Manager plugin** (needed for SSH-over-SSM and RDP-over-SSM):
-   <https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html>
+   (`aws --version` should print `aws-cli/2.x`).
+   - *Optional:* the **Session Manager plugin** — only needed if you use the SSM
+     connection paths (an interactive `spawn connect` shell, or `--rdp --via-ssm`).
+     Plain `spawn connect <name> --rdp` to the public IP doesn't need it. Install
+     it if/when you want those:
+     <https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html>
 4. **An RDP client** (for the Remote Desktop step):
    - macOS: "Windows App" / "Microsoft Remote Desktop" from the App Store
    - Windows: built-in `mstsc`
