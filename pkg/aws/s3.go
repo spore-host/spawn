@@ -53,17 +53,7 @@ func (c *Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConf
 	// it's just elsewhere — so for an existence check, treat that as "exists,
 	// don't create" (#103). FSx itself validates cross-region S3 usability and
 	// returns a meaningful error if the bucket truly can't back the filesystem.
-	var redirErr smithy.APIError
-	if errors.As(err, &redirErr) {
-		switch redirErr.ErrorCode() {
-		case "PermanentRedirect", "MovedPermanently", "301":
-			return nil
-		}
-	}
-	// HeadBucket surfaces the redirect as a bare HTTP 301 with no error code on
-	// some SDK paths; catch that too.
-	var respErr *awshttp.ResponseError
-	if errors.As(err, &respErr) && respErr.HTTPStatusCode() == 301 {
+	if isCrossRegionRedirect(err) {
 		return nil
 	}
 
@@ -143,6 +133,29 @@ func (c *Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConf
 
 	// Some other error occurred
 	return fmt.Errorf("failed to check if bucket exists: %w", err)
+}
+
+// isCrossRegionRedirect reports whether a HeadBucket error is the 301 redirect
+// AWS returns when the bucket exists but lives in another region. The SDK
+// surfaces this two ways depending on the code path: a smithy.APIError with a
+// PermanentRedirect/MovedPermanently/301 code, or a bare HTTP-301
+// awshttp.ResponseError with no error code. Detect both (#103).
+func isCrossRegionRedirect(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "PermanentRedirect", "MovedPermanently", "301":
+			return true
+		}
+	}
+	var respErr *awshttp.ResponseError
+	if errors.As(err, &respErr) && respErr.HTTPStatusCode() == 301 {
+		return true
+	}
+	return false
 }
 
 // GetFSxConfigFromS3Bucket retrieves FSx configuration from S3 bucket tags
