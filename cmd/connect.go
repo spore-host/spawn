@@ -24,6 +24,7 @@ var (
 	connectRDP        bool
 	connectViaSSM     bool
 	connectRDPPort    int
+	connectSSH        bool
 )
 
 var connectCmd = &cobra.Command{
@@ -43,6 +44,7 @@ func init() {
 	connectCmd.Flags().BoolVar(&connectSessionMgr, "session-manager", false, "Use AWS Session Manager instead of SSH")
 	connectCmd.Flags().BoolVar(&connectNoStart, "no-start", false, "Do not automatically start a stopped/hibernated instance")
 	connectCmd.Flags().BoolVar(&connectRDP, "rdp", false, "Windows: open a Remote Desktop (RDP) connection (decrypts the Administrator password)")
+	connectCmd.Flags().BoolVar(&connectSSH, "ssh", false, "Windows: SSH in (as Administrator, over OpenSSH) instead of opening a PowerShell-over-SSM session — same SSH path as Linux")
 	connectCmd.Flags().BoolVar(&connectViaSSM, "via-ssm", false, "Windows --rdp: tunnel RDP over an SSM port-forwarding session instead of connecting to the public IP")
 	connectCmd.Flags().IntVar(&connectRDPPort, "rdp-port", 13389, "Windows --rdp --via-ssm: local port for the SSM RDP tunnel")
 
@@ -155,42 +157,54 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Build SSH command. ControlMaster=no / ControlPath=none keep spawn's SSH
-	// independent of the user's ~/.ssh/config connection multiplexing, so many
-	// concurrent `spawn connect` calls don't serialize on one shared control
-	// socket (#56).
-	sshArgs := []string{
-		"-i", keyPath,
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ControlMaster=no",
-		"-o", "ControlPath=none",
-		"-p", fmt.Sprintf("%d", connectPort),
-		fmt.Sprintf("%s@%s", user, instance.PublicIP),
+	// One-shot mode: args[1:] (after --) form the remote command, wrapped in
+	// `bash -c` (Linux default shell).
+	var remoteCmd string
+	if len(args) > 1 {
+		remoteCmd = "bash -c '" + strings.ReplaceAll(strings.Join(args[1:], " "), "'", "'\\''") + "'"
 	}
 
-	// One-shot mode: args[1:] (after --) form the remote command.
-	// Wrap in `bash -c '...'` so the remote shell interprets operators (&&, ;,
-	// &, pipes) correctly and backgrounded processes (&) don't cause SSH to
-	// exit 255 (fixes #315). Interactive mode leaves sshArgs unchanged.
-	if len(args) > 1 {
-		remoteCmd := strings.Join(args[1:], " ")
-		// Escape any single quotes in the command before wrapping
-		remoteCmd = strings.ReplaceAll(remoteCmd, "'", "'\\''")
-		sshArgs = append(sshArgs, "bash -c '"+remoteCmd+"'")
-	}
+	return sshToInstance(user, instance.PublicIP, keyPath, connectPort, remoteCmd)
+}
+
+// sshToInstance runs the ssh client against host as user with keyPath, on the
+// given port. If remoteCmd is non-empty it's passed as the one-shot command;
+// otherwise ssh opens an interactive session. ControlMaster=no / ControlPath=none
+// keep spawn's SSH independent of the user's ~/.ssh/config connection
+// multiplexing, so many concurrent `spawn connect` calls don't serialize on one
+// shared control socket (#56). Shared by the Linux and Windows (--ssh) paths.
+func sshToInstance(user, host, keyPath string, port int, remoteCmd string) error {
+	sshArgs := buildSSHCommandArgs(user, host, keyPath, port, remoteCmd)
 
 	fmt.Fprintf(os.Stderr, "%s\n\n", i18n.Tf("spawn.connect.connecting_ssh", map[string]interface{}{
 		"Command": "ssh " + strings.Join(sshArgs, " "),
 	}))
 
-	// Execute SSH
 	sshCmd := exec.Command("ssh", sshArgs...)
 	sshCmd.Stdin = os.Stdin
 	sshCmd.Stdout = os.Stdout
 	sshCmd.Stderr = os.Stderr
-
 	return sshCmd.Run()
+}
+
+// buildSSHCommandArgs constructs the ssh argument vector. remoteCmd, if
+// non-empty, is appended verbatim as the one-shot command (the caller is
+// responsible for any shell wrapping — bash -c on Linux, none on Windows where
+// the remote shell is PowerShell). Pure/testable; no exec.
+func buildSSHCommandArgs(user, host, keyPath string, port int, remoteCmd string) []string {
+	args := []string{
+		"-i", keyPath,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
+		"-p", fmt.Sprintf("%d", port),
+		fmt.Sprintf("%s@%s", user, host),
+	}
+	if remoteCmd != "" {
+		args = append(args, remoteCmd)
+	}
+	return args
 }
 
 func connectViaSessionManager(instanceID, region string) error {
@@ -229,6 +243,31 @@ func connectViaSessionManager(instanceID, region string) error {
 func connectWindows(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, command []string) error {
 	region := instance.Region
 	id := instance.InstanceID
+
+	// --ssh: SSH straight in, the same way Linux connect does. The imported
+	// Windows AMI runs OpenSSH and trusts spawn's launch key for the
+	// Administrator account (see buildWindowsUserData), so this is plain ssh to
+	// the public IP — no SSM, no plugin. The remote shell is PowerShell (set as
+	// the OpenSSH DefaultShell), so a one-shot command runs as PowerShell.
+	if connectSSH {
+		if instance.PublicIP == "" {
+			return fmt.Errorf("--ssh needs a public IP; this instance has none (use plain `spawn connect %s` for a PowerShell-over-SSM session, or `--rdp --via-ssm`)", instance.Name)
+		}
+		user := connectUser
+		if user == "" {
+			user = "Administrator" // the account the Windows bootstrap trusts the key for
+		}
+		keyPath := connectKey
+		if keyPath == "" {
+			k, kerr := findSSHKey(instance.KeyName)
+			if kerr != nil {
+				return fmt.Errorf("--ssh needs the launch key %q to authenticate, and it isn't on this machine: %w", instance.KeyName, kerr)
+			}
+			keyPath = k
+		}
+		// The remote command (if any) runs in PowerShell — no bash -c wrap.
+		return sshToInstance(user, instance.PublicIP, keyPath, connectPort, strings.Join(command, " "))
+	}
 
 	// One-shot command mode → SSM RunCommand (PowerShell).
 	if len(command) > 0 {

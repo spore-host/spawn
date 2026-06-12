@@ -382,6 +382,9 @@ func TestConnectCommand_FlagExists(t *testing.T) {
 		"key",
 		"port",
 		"session-manager",
+		"rdp",
+		"ssh",
+		"via-ssm",
 	}
 
 	for _, flagName := range expectedFlags {
