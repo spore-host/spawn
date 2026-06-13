@@ -54,6 +54,21 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # The lambda/* directories are each their own Go module, so the root
+      # `go test ./...` above does NOT descend into them — their tests would
+      # otherwise never run in CI (#136). Build, vet, and test each one.
+      - name: Lambda modules (build + vet + test)
+        run: |
+          set -e
+          fail=0
+          for mod in $(find lambda -name go.mod -maxdepth 2 | sort); do
+            dir=$(dirname "$mod")
+            echo "::group::$dir"
+            ( cd "$dir" && go build ./... && go vet ./... && go test -short ./... ) || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
   # Tier 0 E2E — the real spawn binary driven against the Substrate AWS
   # emulator. No AWS account/credentials; exercises the full CLI surface
   # (args → cobra → AWS client → Substrate) and asserts JSON, exit codes, and
