@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spawn snapshot create --from` now accepts a **directory** or a
+  **`.tar`/`.tar.gz`/`.tgz` archive**, not just a raw image — the contents are
+  packed into an ext4 filesystem image in-process and streamed into the
+  snapshot. This is pure Go (no `mkfs`, no builder instance), so it stays
+  instance-free and works identically from macOS, Linux, and Windows hosts. The
+  ext4 filesystem is sized to the data and capped at `--size`. A raw disk image
+  is still streamed verbatim as before (#147 Part B / fs-builder).
+
 ## [0.47.0] - 2026-06-13
 
 ### Added
