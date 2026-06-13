@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the cost estimate — so it's a true dry-run. Previously it printed a cost
   estimate even for a config that couldn't launch (e.g. `--efa` on a non-EFA
   type), making it useless for validating a config without spending (#124).
+- `make build` / `make build-spored` now build the spored **package**
+  (`./cmd/spored/`) instead of `cmd/spored/main.go` alone, which failed on
+  symbols defined in spored's platform-split sibling files (`undefined:
+  runAsServiceIfManaged`, …). All Makefile build targets now build packages, not
+  single files (#141).
 
 ### Testing
 - CI now builds, vets, and tests each `lambda/*` module. They're separate Go
