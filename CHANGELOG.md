@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-06-13
+
 ### Added
 - `spawn snapshot create --from` now accepts a **directory** or a
   **`.tar`/`.tar.gz`/`.tgz` archive**, not just a raw image — the contents are
@@ -246,7 +248,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.47.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.48.0...HEAD
+[0.48.0]: https://github.com/spore-host/spawn/compare/v0.47.0...v0.48.0
 [0.47.0]: https://github.com/spore-host/spawn/compare/v0.46.0...v0.47.0
 [0.46.0]: https://github.com/spore-host/spawn/compare/v0.45.1...v0.46.0
 [0.45.1]: https://github.com/spore-host/spawn/compare/v0.45.0...v0.45.1
