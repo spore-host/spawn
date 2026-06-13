@@ -55,6 +55,7 @@ type Config struct {
 	SlackWorkspaceID string   // Slack workspace ID (e.g. "T03NE3GTY")
 	NotifyCommand    string   // Slash command for workspace config lookup (e.g. "/spore", "/prism")
 	AccountBase36    string   // base36-encoded account ID for full DNS FQDN (name.base36.spore.host)
+	AccountName      string   // DNS-safe slug of the account's friendly name; drives the alias FQDN name.account-name.spore.host (#121). Empty => base36 only.
 	ActivePorts      []int    // TCP ports to monitor for active connections (e.g. 8787 for RStudio)
 	ActiveProcesses  []string // Process names to check; if any running, instance is not idle (e.g. "rsession")
 

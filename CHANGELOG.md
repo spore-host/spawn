@@ -8,13 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Instances are now tagged with `spawn:account-name` — a DNS-safe slug of the
-  AWS account's friendly name (from `aws account put-account-name`), when set and
-  resolvable. This lets DNS surface a legible `{name}.{account-name}.spore.host`
-  instead of the opaque base36 segment. Best-effort: falls back silently to
-  base36 (still tagged, canonical) when the account has no name or the caller
-  lacks `account:GetAccountInformation` (#121). Consuming this in the DNS
-  records is tracked in spore-host/spore-host#357.
+- Friendly account-name DNS: instances are tagged with `spawn:account-name` — a
+  DNS-safe slug of the AWS account's friendly name (from `aws account
+  put-account-name`) — and the dns-updater registers a CNAME
+  `{name}.{account-name}.spore.host` → the canonical base36 A-record, so the
+  legible FQDN resolves. base36 stays authoritative (holds the IP); the name is a
+  true alias. Best-effort end to end: when the account has no name, the caller
+  lacks `account:GetAccountInformation`, or the slug isn't a valid DNS label, it
+  silently falls back to base36-only (unchanged). Spans the launch tag (#121),
+  spored's DNS registration, and the dns-updater Lambda (spore-host#357).
 
 ### Testing
 - Add a **Tier 2** e2e test (`-tags=e2e_tier2`) exercising `launcher.Provision`

@@ -31,6 +31,7 @@ type DNSUpdateRequest struct {
 	Domain                    string `json:"domain,omitempty"`
 	JobArrayID                string `json:"job_array_id,omitempty"`   // Optional: for group DNS
 	JobArrayName              string `json:"job_array_name,omitempty"` // Optional: for group DNS
+	AccountName               string `json:"account_name,omitempty"`   // Optional: DNS-safe account-name slug for the alias FQDN (#121)
 }
 
 // DNSUpdateResponse represents the response from the DNS API
@@ -49,7 +50,13 @@ type Client struct {
 	imdsClient  *imds.Client
 	domain      string
 	apiEndpoint string
+	accountName string // DNS-safe account-name slug; included in requests for the alias FQDN (#121)
 }
+
+// SetAccountName sets the account-name slug included in DNS requests so the
+// updater registers the friendly alias FQDN ({record}.{account-name}.{domain}).
+// Empty (the default) means base36 only.
+func (c *Client) SetAccountName(slug string) { c.accountName = slug }
 
 // NewClient creates a new DNS client with optional custom domain and API endpoint
 // If domain or apiEndpoint are empty, defaults are used
@@ -121,6 +128,7 @@ func (c *Client) RegisterDNS(ctx context.Context, recordName, ipAddress string) 
 		IPAddress:                 ipAddress,
 		Action:                    "UPSERT",
 		Domain:                    c.domain,
+		AccountName:               c.accountName,
 	}
 
 	return c.callAPI(ctx, req)
@@ -169,6 +177,7 @@ func (c *Client) RegisterJobArrayDNS(ctx context.Context, recordName, ipAddress,
 		IPAddress:                 ipAddress,
 		Action:                    "UPSERT",
 		Domain:                    c.domain,
+		AccountName:               c.accountName,
 		JobArrayID:                jobArrayID,
 		JobArrayName:              jobArrayName,
 	}
@@ -209,6 +218,7 @@ func (c *Client) DeleteJobArrayDNS(ctx context.Context, recordName, ipAddress, j
 		IPAddress:                 ipAddress,
 		Action:                    "DELETE",
 		Domain:                    c.domain,
+		AccountName:               c.accountName,
 		JobArrayID:                jobArrayID,
 		JobArrayName:              jobArrayName,
 	}
@@ -249,6 +259,7 @@ func (c *Client) DeleteDNS(ctx context.Context, recordName, ipAddress string) (*
 		IPAddress:                 ipAddress,
 		Action:                    "DELETE",
 		Domain:                    c.domain,
+		AccountName:               c.accountName,
 	}
 
 	return c.callAPI(ctx, req)

@@ -486,6 +486,8 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			config.DNSName = *tag.Value
 		case tagprefix.Tag("account-base36"):
 			config.AccountBase36 = *tag.Value
+		case tagprefix.Tag("account-name"):
+			config.AccountName = *tag.Value
 		case tagprefix.Tag("notify-url"):
 			config.NotifyURL = *tag.Value
 		case tagprefix.Tag("notify-command"):

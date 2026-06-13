@@ -167,3 +167,26 @@ func TestErrorResponseStructure(t *testing.T) {
 		t.Errorf("body %q does not contain success:false", resp.Body)
 	}
 }
+
+// TestAliasDNSName covers the #121 alias FQDN builder + its slug re-validation.
+// The Lambda must not splice a caller-supplied account-name into a record name
+// without re-checking it's a valid DNS label (defense in depth).
+func TestAliasDNSName(t *testing.T) {
+	cases := []struct {
+		record, account, dom, want string
+	}{
+		{"job", "mycelium-development", "spore.host", "job.mycelium-development.spore.host"},
+		{"job", "hpc7", "spore.host", "job.hpc7.spore.host"},
+		{"job", "", "spore.host", ""},            // no account name
+		{"job", "Bad Name", "spore.host", ""},    // space — not a valid label
+		{"job", "under_score", "spore.host", ""}, // underscore — invalid
+		{"job", "-leading", "spore.host", ""},    // leading hyphen — invalid
+		{"job", "trailing-", "spore.host", ""},   // trailing hyphen — invalid
+		{"job", "evil.com.", "spore.host", ""},   // dots — not a single label
+	}
+	for _, c := range cases {
+		if got := aliasDNSName(c.record, c.account, c.dom); got != c.want {
+			t.Errorf("aliasDNSName(%q,%q,%q) = %q, want %q", c.record, c.account, c.dom, got, c.want)
+		}
+	}
+}
