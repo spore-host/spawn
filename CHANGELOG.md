@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spawn launch --attach-volume snap-xxx:/mount/point[:ro|:rw]` attaches an
+  additional EBS data volume created from a snapshot, mounted at the given path
+  (read-only by default for shared reference data). Repeatable for multiple
+  volumes. The volume is created at launch with `DeleteOnTermination=true`, so it
+  dies with the ephemeral instance; the snapshot persists and is reused. This
+  lets large reference data (e.g. a Kraken2 database) live in a re-snapshottable
+  volume on a stock AMI instead of being baked into a custom AMI — root volumes
+  stay small, and a data update is a re-snapshot, not an AMI rebuild. Mounts are
+  NVMe-aware (the requested `/dev/sdf` is resolved to the live device on Nitro)
+  and snapshot-backed volumes are never reformatted (#144).
+
 ## [0.45.1] - 2026-06-12
 
 ### Fixed

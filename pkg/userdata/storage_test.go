@@ -211,6 +211,59 @@ func TestGenerateStorageUserData_NeitherEnabled(t *testing.T) {
 	}
 }
 
+// TestGenerateStorageUserData_AttachedVolumes verifies snapshot-backed EBS data
+// volumes are mounted read-only without mkfs, and the device is resolved (#144).
+func TestGenerateStorageUserData_AttachedVolumes(t *testing.T) {
+	config := StorageConfig{
+		AttachedVolumes: []AttachedVolume{
+			{DeviceName: "/dev/sdf", MountPoint: "/opt/databases/kraken2", ReadOnly: true},
+		},
+	}
+
+	script, err := GenerateStorageUserData(config)
+	if err != nil {
+		t.Fatalf("GenerateStorageUserData() error = %v", err)
+	}
+
+	if !strings.Contains(script, `spawn_resolve_dev "/dev/sdf"`) {
+		t.Error("script must resolve the live (NVMe) device for the requested device name")
+	}
+	if !strings.Contains(script, `mkdir -p "/opt/databases/kraken2"`) {
+		t.Error("script must create the mount point")
+	}
+	if !strings.Contains(script, "mount -o ro,noatime") {
+		t.Errorf("read-only volume must mount with ro,noatime; got:\n%s", script)
+	}
+	// Snapshot-backed volume already has a filesystem — must never reformat.
+	if strings.Contains(script, "mkfs") {
+		t.Error("snapshot-backed volume must not be mkfs'd")
+	}
+	if !strings.Contains(script, "nofail") {
+		t.Error("fstab entry should use nofail so a missing data volume doesn't wedge boot")
+	}
+}
+
+func TestGenerateStorageUserData_AttachedVolumesReadWrite(t *testing.T) {
+	config := StorageConfig{
+		AttachedVolumes: []AttachedVolume{
+			{DeviceName: "/dev/sdf", MountPoint: "/data", ReadOnly: false},
+		},
+	}
+	script, err := GenerateStorageUserData(config)
+	if err != nil {
+		t.Fatalf("GenerateStorageUserData() error = %v", err)
+	}
+	if strings.Contains(script, "mount -o ro,") {
+		t.Error("read-write volume must not mount read-only")
+	}
+	if !strings.Contains(script, "mount -o noatime /data") && !strings.Contains(script, "noatime\" /data") {
+		// device is resolved into $SPAWN_DEV, so just assert the rw mount has no ro
+		if !strings.Contains(script, "mount -o noatime") {
+			t.Errorf("read-write volume should mount with noatime (no ro); got:\n%s", script)
+		}
+	}
+}
+
 // TestGenerateStorageUserData_MountPointInjection verifies mount point is shell-escaped.
 func TestGenerateStorageUserData_MountPointInjection(t *testing.T) {
 	config := StorageConfig{

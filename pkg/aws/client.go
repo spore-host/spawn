@@ -96,6 +96,17 @@ func (c *Client) GetEnabledRegions(ctx context.Context) ([]string, error) {
 	return regions, nil
 }
 
+// AttachVolumeSpec describes one additional EBS data volume to create from a
+// snapshot and mount inside the instance (#144). The volume is created at launch
+// via a block-device mapping (DeleteOnTermination=true) and mounted by the
+// storage user-data.
+type AttachVolumeSpec struct {
+	SnapshotID string // EBS snapshot to create the volume from (snap-xxxx)
+	MountPoint string // Absolute path to mount the volume at, e.g. /opt/databases/kraken2
+	ReadOnly   bool   // Mount read-only (the common case for shared reference data)
+	SizeGiB    int32  // Optional volume size override; 0 = the snapshot's size
+}
+
 // LaunchConfig contains all settings for launching a spawn-managed EC2 instance.
 // Most fields are optional — at minimum, provide InstanceType, Region, and AMI.
 // The TTL field should always be set to prevent runaway instances.
@@ -183,6 +194,14 @@ type LaunchConfig struct {
 	DCVSessionID      string // NICE DCV session ID — activates DCV idle detection in spored (e.g. "console")
 	AppName           string // Catalog application name — informational tag (e.g. "paraview")
 	RootVolumeSizeGiB int32  // Override root EBS volume size in GiB (0 = use default 20 GiB)
+
+	// AttachVolumes attaches additional EBS data volumes created from snapshots,
+	// each mounted at a path inside the instance (optionally read-only) — so large
+	// reference data (e.g. a Kraken2 DB) lives in a re-snapshottable volume instead
+	// of being baked into a custom AMI (#144). Each volume is created from the
+	// snapshot at launch with DeleteOnTermination=true, so it dies with the
+	// ephemeral instance; the snapshot persists and is reused.
+	AttachVolumes []AttachVolumeSpec
 
 	// Pricing (populated at launch from AWS Pricing API)
 	PricePerHour float64 // actual on-demand rate; 0 means look it up
@@ -687,12 +706,48 @@ func buildBlockDevices(config LaunchConfig, amiMinGiB int32) []types.BlockDevice
 		ebs.KmsKeyId = aws.String(config.EBSKMSKeyID)
 	}
 
-	return []types.BlockDeviceMapping{
+	mappings := []types.BlockDeviceMapping{
 		{
 			DeviceName: aws.String("/dev/xvda"),
 			Ebs:        ebs,
 		},
 	}
+
+	// Append data volumes created from snapshots (#144). The requested device
+	// name (/dev/sdf, /dev/sdg, …) is only a hint on Nitro instances — they
+	// surface as NVMe devices in a non-deterministic order — so the user-data
+	// mount step resolves the real device by snapshot/volume, not by this name.
+	for i, v := range config.AttachVolumes {
+		dev := AttachDeviceName(i)
+		vol := &types.EbsBlockDevice{
+			SnapshotId:          aws.String(v.SnapshotID),
+			VolumeType:          types.VolumeTypeGp3,
+			DeleteOnTermination: aws.Bool(true),
+			Encrypted:           aws.Bool(encrypted),
+		}
+		if v.SizeGiB > 0 {
+			vol.VolumeSize = aws.Int32(v.SizeGiB)
+		}
+		if encrypted && config.EBSKMSKeyID != "" {
+			vol.KmsKeyId = aws.String(config.EBSKMSKeyID)
+		}
+		mappings = append(mappings, types.BlockDeviceMapping{
+			DeviceName: aws.String(dev),
+			Ebs:        vol,
+		})
+	}
+
+	return mappings
+}
+
+// AttachDeviceName returns the EC2 device name for the i-th attached data
+// volume: /dev/sdf, /dev/sdg, … (a..e are conventionally reserved). On Nitro
+// instances these are remapped to NVMe devices, so this is only the value EC2
+// records in the block-device mapping; the mount step resolves the live device.
+// The launch CLI uses the same scheme to tell the user-data which device each
+// mount maps to, so the two sides stay in sync.
+func AttachDeviceName(i int) string {
+	return "/dev/sd" + string(rune('f'+i))
 }
 
 func estimateVolumeSize(instanceType string) int32 {
