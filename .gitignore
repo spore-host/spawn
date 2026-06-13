@@ -3,6 +3,10 @@ spawn
 /spored.exe
 /spawn.exe
 
+# Cross-compiled spored release artifacts (binaries, checksums, tarballs)
+spored-linux-*
+spored_*.tar.gz
+
 # Lambda build artifacts
 lambda/*/bootstrap
 lambda/*/function.zip
