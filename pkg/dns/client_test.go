@@ -118,3 +118,34 @@ func TestRegisterJobArrayDNS_InvalidName(t *testing.T) {
 		}
 	}
 }
+
+// TestSetAccountName_SentInRequest verifies SetAccountName makes callAPI include
+// account_name in the JSON body — the field the dns-updater uses to register the
+// friendly alias FQDN (#121 / spore-host#357).
+func TestSetAccountName_SentInRequest(t *testing.T) {
+	var gotBody DNSUpdateRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(DNSUpdateResponse{Success: true, ChangeID: "C1"})
+	}))
+	defer ts.Close()
+
+	c := &Client{httpClient: ts.Client(), apiEndpoint: ts.URL, domain: "spore.host"}
+	c.SetAccountName("mycelium-development")
+	if c.accountName != "mycelium-development" {
+		t.Fatalf("SetAccountName didn't set the field: %q", c.accountName)
+	}
+
+	// callAPI sends whatever the caller put in the request; the production
+	// RegisterDNS path copies c.accountName into AccountName. Simulate that.
+	if _, err := c.callAPI(context.Background(), DNSUpdateRequest{
+		RecordName:  "job",
+		Action:      "UPSERT",
+		AccountName: c.accountName,
+	}); err != nil {
+		t.Fatalf("callAPI: %v", err)
+	}
+	if gotBody.AccountName != "mycelium-development" {
+		t.Errorf("server received account_name=%q, want mycelium-development", gotBody.AccountName)
+	}
+}

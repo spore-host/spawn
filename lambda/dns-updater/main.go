@@ -29,6 +29,11 @@ type DNSUpdateRequest struct {
 	IPAddress                 string `json:"ip_address"`
 	Action                    string `json:"action"` // UPSERT or DELETE
 	Domain                    string `json:"domain,omitempty"`
+	// AccountName is the DNS-safe slug of the account's friendly name
+	// (spawn:account-name tag, #121). When set, the updater also registers a
+	// CNAME {record}.{account-name}.{domain} -> the canonical base36 A-record, so
+	// the legible FQDN resolves. Empty => base36 only (unchanged behavior).
+	AccountName string `json:"account_name,omitempty"`
 }
 
 type InstanceIdentityDocument struct {
@@ -68,6 +73,21 @@ func encodeAccountID(accountID string) string {
 func getFullDNSName(recordName, accountID, dom string) string {
 	encoded := encodeAccountID(accountID)
 	return fmt.Sprintf("%s.%s.%s", recordName, encoded, dom)
+}
+
+// dnsLabelRe matches a valid RFC-1035 DNS label (the form spawn's
+// slugifyDNSLabel produces). The Lambda re-validates the caller-supplied
+// account-name slug before splicing it into a Route53 record name — never trust
+// it blindly even though it's signed-instance traffic.
+var dnsLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// aliasDNSName returns the friendly FQDN {record}.{account-name}.{domain}, or
+// "" if the account-name slug isn't a valid DNS label.
+func aliasDNSName(recordName, accountName, dom string) string {
+	if !dnsLabelRe.MatchString(accountName) {
+		return ""
+	}
+	return fmt.Sprintf("%s.%s.%s", recordName, accountName, dom)
 }
 
 func init() {
@@ -194,18 +214,36 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 	var changeID string
 	var message string
 
+	// Optional friendly alias: {record}.{account-name}.{domain} as a CNAME to the
+	// canonical base36 A-record (#121). base36 stays authoritative (holds the IP);
+	// the alias just points at it, so the IP is updated in one place.
+	alias := aliasDNSName(req.RecordName, req.AccountName, reqDomain)
+
 	if req.Action == "UPSERT" {
 		changeID, err = upsertDNSRecord(ctx, fqdn, req.IPAddress, zoneID)
 		if err != nil {
 			return errorResponse(500, fmt.Sprintf("Failed to update DNS: %v", err))
 		}
 		message = fmt.Sprintf("DNS record updated: %s -> %s", fqdn, req.IPAddress)
+		if alias != "" {
+			if _, aerr := upsertCNAMERecord(ctx, alias, fqdn, zoneID); aerr != nil {
+				// Non-fatal: the canonical A-record already succeeded. Log and go on.
+				fmt.Printf("warning: failed to upsert alias CNAME %s -> %s: %v\n", alias, fqdn, aerr)
+			} else {
+				message += fmt.Sprintf(" (alias %s)", alias)
+			}
+		}
 	} else {
 		changeID, err = deleteDNSRecord(ctx, fqdn, zoneID)
 		if err != nil {
 			return errorResponse(500, fmt.Sprintf("Failed to delete DNS: %v", err))
 		}
 		message = fmt.Sprintf("DNS record deleted: %s", fqdn)
+		if alias != "" {
+			if _, aerr := deleteCNAMERecord(ctx, alias, zoneID); aerr != nil {
+				fmt.Printf("warning: failed to delete alias CNAME %s: %v\n", alias, aerr)
+			}
+		}
 	}
 
 	// Success response
@@ -361,6 +399,77 @@ func deleteDNSRecord(ctx context.Context, fqdn, zoneID string) (string, error) {
 		return "", err
 	}
 
+	return aws.ToString(output.ChangeInfo.Id), nil
+}
+
+// upsertCNAMERecord points aliasFQDN at targetFQDN (the canonical base36 record)
+// via a CNAME, so the friendly account-name FQDN resolves to the same instance
+// without duplicating the IP (#121).
+func upsertCNAMERecord(ctx context.Context, aliasFQDN, targetFQDN, zoneID string) (string, error) {
+	comment := fmt.Sprintf("Alias upserted by spawn instance at %s", time.Now().UTC().Format(time.RFC3339))
+	output, err := route53Client.ChangeResourceRecordSets(ctx, &route53.ChangeResourceRecordSetsInput{
+		HostedZoneId: aws.String(zoneID),
+		ChangeBatch: &types.ChangeBatch{
+			Comment: aws.String(comment),
+			Changes: []types.Change{
+				{
+					Action: types.ChangeActionUpsert,
+					ResourceRecordSet: &types.ResourceRecordSet{
+						Name: aws.String(aliasFQDN),
+						Type: types.RRTypeCname,
+						TTL:  aws.Int64(defaultTTL),
+						ResourceRecords: []types.ResourceRecord{
+							{Value: aws.String(targetFQDN)},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return aws.ToString(output.ChangeInfo.Id), nil
+}
+
+// deleteCNAMERecord removes the alias CNAME. Best-effort: a missing record is
+// not an error (the canonical A-record delete is what matters).
+func deleteCNAMERecord(ctx context.Context, aliasFQDN, zoneID string) (string, error) {
+	listOutput, err := route53Client.ListResourceRecordSets(ctx, &route53.ListResourceRecordSetsInput{
+		HostedZoneId:    aws.String(zoneID),
+		StartRecordName: aws.String(aliasFQDN),
+		StartRecordType: types.RRTypeCname,
+		MaxItems:        aws.Int32(1),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to list alias records: %w", err)
+	}
+
+	var recordToDelete *types.ResourceRecordSet
+	for i := range listOutput.ResourceRecordSets {
+		rs := listOutput.ResourceRecordSets[i]
+		if strings.TrimSuffix(aws.ToString(rs.Name), ".") == aliasFQDN && rs.Type == types.RRTypeCname {
+			recordToDelete = &rs
+			break
+		}
+	}
+	if recordToDelete == nil {
+		return "", nil // already gone — fine
+	}
+
+	comment := fmt.Sprintf("Alias deleted by spawn instance at %s", time.Now().UTC().Format(time.RFC3339))
+	output, err := route53Client.ChangeResourceRecordSets(ctx, &route53.ChangeResourceRecordSetsInput{
+		HostedZoneId: aws.String(zoneID),
+		ChangeBatch: &types.ChangeBatch{
+			Comment: aws.String(comment),
+			Changes: []types.Change{
+				{Action: types.ChangeActionDelete, ResourceRecordSet: recordToDelete},
+			},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
 	return aws.ToString(output.ChangeInfo.Id), nil
 }
 

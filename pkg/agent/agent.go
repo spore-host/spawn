@@ -142,6 +142,11 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 		} else {
 			agent.dnsClient = dnsClient
 
+			// Pass the friendly account-name slug so the updater also registers
+			// the alias FQDN {name}.{account-name}.spore.host (#121). Empty when
+			// the account has no name — base36 only, unchanged.
+			dnsClient.SetAccountName(config.AccountName)
+
 			// Register DNS (use job array method if part of a job array)
 			if config.JobArrayID != "" && config.JobArrayName != "" {
 				log.Printf("Registering job array DNS: %s -> %s (array: %s)",
