@@ -629,8 +629,14 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "   This can result in unexpected costs from zombie instances.\n\n")
 	}
 
-	// --estimate-only: print a cost summary and exit without launching (fixes #305).
+	// --estimate-only: a true dry-run. Run the same pre-flight instance-type
+	// constraint validation a real launch does (#110), BEFORE the cost estimate,
+	// so a config that couldn't launch (e.g. --efa on a non-EFA type) surfaces the
+	// same actionable error instead of a misleading "estimate complete" (#124).
 	if estimateOnly {
+		if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, hibernate || hibernateOnIdle); err != nil {
+			return err
+		}
 		odPrice := pricing.GetEC2HourlyRate(config.Region, config.InstanceType)
 		if odPrice == 0 {
 			fmt.Fprintf(os.Stderr, "💰 Cost estimate: pricing data unavailable for %s in %s\n", config.InstanceType, config.Region)
