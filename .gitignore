@@ -28,3 +28,4 @@ lambda/*/.aws-sam/
 
 # Build artifacts
 bin/
+.DS_Store
