@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Testing
+- Add a real-AWS, env-gated (`SPAWN_LIVE_PROVISION_TEST=1`) smoke test for
+  `launcher.Provision` that launches a keyless/SSM-only instance and terminates
+  it. Substrate accepts malformed user-data and an empty KeyName, so it missed
+  both #127 and #130; this test exercises the real `RunInstances` contract that
+  catches that class of bug. Skipped by default (CI-safe).
+
 ## [0.44.2] - 2026-06-12
 
 ### Fixed
