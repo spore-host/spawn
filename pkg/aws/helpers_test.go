@@ -123,6 +123,64 @@ func TestBuildBlockDevices(t *testing.T) {
 			t.Errorf("volume size = %d, want 200 (caller asked for more than the floor)", *bd[0].Ebs.VolumeSize)
 		}
 	})
+
+	// #144: attached EBS data volumes from snapshots become extra block-device
+	// mappings on /dev/sdf, /dev/sdg, … with DeleteOnTermination so they die
+	// with the ephemeral instance.
+	t.Run("attached volumes append snapshot-backed mappings", func(t *testing.T) {
+		bd := buildBlockDevices(LaunchConfig{
+			InstanceType: "r7g.2xlarge",
+			AttachVolumes: []AttachVolumeSpec{
+				{SnapshotID: "snap-aaa", MountPoint: "/opt/databases/kraken2", ReadOnly: true},
+				{SnapshotID: "snap-bbb", MountPoint: "/data", SizeGiB: 200},
+			},
+		}, 0)
+		if len(bd) != 3 {
+			t.Fatalf("expected root + 2 attached = 3 mappings, got %d", len(bd))
+		}
+		if *bd[0].DeviceName != "/dev/xvda" {
+			t.Errorf("root device = %q, want /dev/xvda", *bd[0].DeviceName)
+		}
+		if *bd[1].DeviceName != "/dev/sdf" || *bd[2].DeviceName != "/dev/sdg" {
+			t.Errorf("attached device names = %q,%q, want /dev/sdf,/dev/sdg", *bd[1].DeviceName, *bd[2].DeviceName)
+		}
+		if bd[1].Ebs.SnapshotId == nil || *bd[1].Ebs.SnapshotId != "snap-aaa" {
+			t.Errorf("first attached snapshot = %v, want snap-aaa", bd[1].Ebs.SnapshotId)
+		}
+		if !*bd[1].Ebs.DeleteOnTermination {
+			t.Error("attached volume must set DeleteOnTermination so it dies with the instance")
+		}
+		if bd[1].Ebs.VolumeSize != nil {
+			t.Error("snapshot-backed volume without an explicit size should leave VolumeSize unset (use the snapshot size)")
+		}
+		if bd[2].Ebs.VolumeSize == nil || *bd[2].Ebs.VolumeSize != 200 {
+			t.Errorf("second attached size = %v, want 200", bd[2].Ebs.VolumeSize)
+		}
+	})
+
+	t.Run("attached volumes inherit EBS encryption + KMS key", func(t *testing.T) {
+		bd := buildBlockDevices(LaunchConfig{
+			InstanceType:  "m7i.large",
+			EBSEncrypted:  true,
+			EBSKMSKeyID:   "arn:aws:kms:us-east-1:1:key/abc",
+			AttachVolumes: []AttachVolumeSpec{{SnapshotID: "snap-ccc", MountPoint: "/ref"}},
+		}, 0)
+		if !*bd[1].Ebs.Encrypted {
+			t.Error("attached volume should be encrypted when EBSEncrypted is set")
+		}
+		if bd[1].Ebs.KmsKeyId == nil || *bd[1].Ebs.KmsKeyId == "" {
+			t.Error("attached volume should carry the KMS key")
+		}
+	})
+}
+
+func TestAttachDeviceName(t *testing.T) {
+	cases := map[int]string{0: "/dev/sdf", 1: "/dev/sdg", 4: "/dev/sdj"}
+	for i, want := range cases {
+		if got := AttachDeviceName(i); got != want {
+			t.Errorf("AttachDeviceName(%d) = %q, want %q", i, got, want)
+		}
+	}
 }
 
 func TestRootVolumeSizeFromMappings(t *testing.T) {

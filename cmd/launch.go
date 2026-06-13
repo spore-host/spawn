@@ -114,6 +114,9 @@ var (
 	efsProfile      string
 	efsMountOptions string
 
+	// Attached EBS data volumes from snapshots (#144)
+	attachVolumes []string
+
 	// FSx Lustre
 	fsxCreate          bool
 	fsxID              string
@@ -214,6 +217,7 @@ func init() {
 	launchCmd.Flags().BoolVar(&nestedVirt, "nested-virtualization", false, "Enable nested virtualization (run KVM/Hyper-V inside the instance). Requires a C8i/M8i/R8i instance type.")
 	launchCmd.Flags().StringVar(&allowCIDR, "allow-cidr", "", "CIDR allowed to reach the managed Windows security group (RDP 3389 + SSH 22); default 0.0.0.0/0")
 	launchCmd.Flags().Int32Var(&launchVolumeSize, "volume-size", 0, "Root EBS volume size in GiB (0 = use AMI default)")
+	launchCmd.Flags().StringArrayVar(&attachVolumes, "attach-volume", nil, "Attach an EBS volume from a snapshot, mounted at a path: snap-xxx:/mount/point[:ro]. Repeatable. Read-only is the common case for shared reference data.")
 
 	// Network
 	launchCmd.Flags().StringVar(&vpcID, "vpc", "", "VPC ID")
@@ -1490,7 +1494,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// Add storage mounting if EFS or FSx enabled (single instance). Skip on
 	// Windows: the storage user-data is Linux mount scripting and would corrupt
 	// the <powershell> block. EFS/FSx on Windows is out of Phase 1 scope (#55).
-	if (efsID != "" || fsxInfo != nil) && config.TargetOS != "windows" {
+	if (efsID != "" || fsxInfo != nil || len(config.AttachVolumes) > 0) && config.TargetOS != "windows" {
 		storageConfig := userdata.StorageConfig{}
 
 		// EFS configuration
@@ -1513,6 +1517,9 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			storageConfig.FSxMountName = fsxInfo.MountName
 			storageConfig.FSxMountPoint = fsxMountPoint
 		}
+
+		// Attached EBS data volumes from snapshots (#144)
+		storageConfig.AttachedVolumes = attachedVolumesUserData(config.AttachVolumes)
 
 		storageScript, err := userdata.GenerateStorageUserData(storageConfig)
 		if err != nil {
@@ -1762,6 +1769,64 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	return nil
 }
 
+// parseAttachVolumes turns repeated --attach-volume values of the form
+// "snap-xxx:/mount/point[:ro|:rw]" into AttachVolumeSpec. The mount point must
+// be an absolute path; the optional trailing :ro / :rw sets read-only (default
+// read-write). Mount paths don't contain ':' in practice, so we split on it (#144).
+func parseAttachVolumes(raw []string) ([]aws.AttachVolumeSpec, error) {
+	specs := make([]aws.AttachVolumeSpec, 0, len(raw))
+	for _, r := range raw {
+		parts := strings.Split(r, ":")
+		if len(parts) < 2 || len(parts) > 3 {
+			return nil, fmt.Errorf("invalid --attach-volume %q: expected snap-xxx:/mount/point[:ro]", r)
+		}
+		snap := strings.TrimSpace(parts[0])
+		mount := strings.TrimSpace(parts[1])
+		readOnly := false
+		if len(parts) == 3 {
+			switch strings.ToLower(strings.TrimSpace(parts[2])) {
+			case "ro":
+				readOnly = true
+			case "rw":
+				readOnly = false
+			default:
+				return nil, fmt.Errorf("invalid --attach-volume %q: mode must be 'ro' or 'rw', got %q", r, parts[2])
+			}
+		}
+		if !strings.HasPrefix(snap, "snap-") {
+			return nil, fmt.Errorf("invalid --attach-volume %q: snapshot must look like snap-xxxx", r)
+		}
+		if !strings.HasPrefix(mount, "/") {
+			return nil, fmt.Errorf("invalid --attach-volume %q: mount point must be an absolute path", r)
+		}
+		specs = append(specs, aws.AttachVolumeSpec{
+			SnapshotID: snap,
+			MountPoint: mount,
+			ReadOnly:   readOnly,
+		})
+	}
+	return specs, nil
+}
+
+// attachedVolumesUserData maps the launch config's attach-volume specs to the
+// storage user-data's mount list, assigning each the same EC2 device name the
+// block-device mapping used (aws.AttachDeviceName), so the mount resolves the
+// right device (#144).
+func attachedVolumesUserData(specs []aws.AttachVolumeSpec) []userdata.AttachedVolume {
+	if len(specs) == 0 {
+		return nil
+	}
+	vols := make([]userdata.AttachedVolume, 0, len(specs))
+	for i, s := range specs {
+		vols = append(vols, userdata.AttachedVolume{
+			DeviceName: aws.AttachDeviceName(i),
+			MountPoint: s.MountPoint,
+			ReadOnly:   s.ReadOnly,
+		})
+	}
+	return vols
+}
+
 func getEFSMountOptions() (string, error) {
 	// Custom mount options override profile
 	if efsMountOptions != "" {
@@ -1824,6 +1889,13 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 	if launchVolumeSize > 0 {
 		config.RootVolumeSizeGiB = launchVolumeSize
+	}
+	if len(attachVolumes) > 0 {
+		specs, err := parseAttachVolumes(attachVolumes)
+		if err != nil {
+			return nil, err
+		}
+		config.AttachVolumes = specs
 	}
 	if keyPair != "" {
 		config.KeyName = keyPair
@@ -2771,8 +2843,8 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 					combinedUserData += "\n" + mpiScript
 				}
 
-				// Add storage user-data if EFS or FSx enabled
-				if efsID != "" || fsxInfo != nil {
+				// Add storage user-data if EFS, FSx, or attached volumes enabled
+				if efsID != "" || fsxInfo != nil || len(baseConfig.AttachVolumes) > 0 {
 					storageConfig := userdata.StorageConfig{}
 
 					// EFS configuration
@@ -2799,6 +2871,9 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 						storageConfig.FSxMountName = fsxInfo.MountName
 						storageConfig.FSxMountPoint = fsxMountPoint
 					}
+
+					// Attached EBS data volumes from snapshots (#144)
+					storageConfig.AttachedVolumes = attachedVolumesUserData(baseConfig.AttachVolumes)
 
 					storageScript, err := userdata.GenerateStorageUserData(storageConfig)
 					if err != nil {
