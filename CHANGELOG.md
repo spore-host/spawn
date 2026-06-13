@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Testing
+- Add a **Tier 2** e2e test (`-tags=e2e_tier2`) exercising `launcher.Provision`
+  against real AWS — a keyless/SSM-only launch, the headless path lagotto takes.
+  Substrate (Tier 0) accepts malformed user-data and an empty KeyName, so it
+  missed both #127 and #130; only a real `RunInstances` catches that class. Uses
+  the existing tier cleanup (terminate-by-name + reaper + TTL).
+
 ## [0.44.2] - 2026-06-12
 
 ### Fixed
