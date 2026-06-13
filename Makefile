@@ -14,12 +14,12 @@ build: build-spawn build-spored
 build-spawn:
 	@echo "Building spawn..."
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/spawn main.go
+	go build -o $(BUILD_DIR)/spawn .
 
 build-spored:
 	@echo "Building spored..."
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/spored cmd/spored/main.go
+	go build -o $(BUILD_DIR)/spored ./cmd/spored/
 
 # Build for all platforms
 build-all: build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-arm64 build-windows-amd64
@@ -28,36 +28,36 @@ build-all: build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-a
 build-linux-amd64:
 	@echo "Building for Linux AMD64..."
 	@mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/spawn-linux-amd64 main.go
-	GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/spored-linux-amd64 cmd/spored/main.go
+	GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/spawn-linux-amd64 .
+	GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/spored-linux-amd64 ./cmd/spored/
 
 # Linux ARM64 (Graviton)
 build-linux-arm64:
 	@echo "Building for Linux ARM64 (Graviton)..."
 	@mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/spawn-linux-arm64 main.go
-	GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/spored-linux-arm64 cmd/spored/main.go
+	GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/spawn-linux-arm64 .
+	GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/spored-linux-arm64 ./cmd/spored/
 
 # macOS AMD64 (Intel)
 build-darwin-amd64:
 	@echo "Building for macOS AMD64..."
 	@mkdir -p $(BUILD_DIR)
-	GOOS=darwin GOARCH=amd64 go build -o $(BUILD_DIR)/spawn-darwin-amd64 main.go
-	GOOS=darwin GOARCH=amd64 go build -o $(BUILD_DIR)/spored-darwin-amd64 cmd/spored/main.go
+	GOOS=darwin GOARCH=amd64 go build -o $(BUILD_DIR)/spawn-darwin-amd64 .
+	GOOS=darwin GOARCH=amd64 go build -o $(BUILD_DIR)/spored-darwin-amd64 ./cmd/spored/
 
 # macOS ARM64 (M1/M2)
 build-darwin-arm64:
 	@echo "Building for macOS ARM64..."
 	@mkdir -p $(BUILD_DIR)
-	GOOS=darwin GOARCH=arm64 go build -o $(BUILD_DIR)/spawn-darwin-arm64 main.go
-	GOOS=darwin GOARCH=arm64 go build -o $(BUILD_DIR)/spored-darwin-arm64 cmd/spored/main.go
+	GOOS=darwin GOARCH=arm64 go build -o $(BUILD_DIR)/spawn-darwin-arm64 .
+	GOOS=darwin GOARCH=arm64 go build -o $(BUILD_DIR)/spored-darwin-arm64 ./cmd/spored/
 
 # Windows AMD64
 build-windows-amd64:
 	@echo "Building for Windows AMD64..."
 	@mkdir -p $(BUILD_DIR)
-	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/spawn-windows-amd64.exe main.go
-	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/spored-windows-amd64.exe cmd/spored/main.go
+	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/spawn-windows-amd64.exe .
+	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/spored-windows-amd64.exe ./cmd/spored/
 
 # Install locally
 install: build
