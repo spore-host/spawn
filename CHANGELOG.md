@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Testing
+- CI now builds, vets, and tests each `lambda/*` module. They're separate Go
+  modules, so the root `go test ./...` never descended into them — their tests
+  (incl. the dns-updater Substrate Route53 test) never ran in CI, and their code
+  was invisible to coverage (#136). This immediately surfaced stale go.mod/go.sum
+  in `sweep-orchestrator`, `ttl-reaper`, `alert-handler`, and
+  `autoscale-orchestrator` (would fail `go build` without `-mod=mod`); fixed via
+  `go mod tidy`.
+
 ## [0.45.0] - 2026-06-12
 
 ### Added
