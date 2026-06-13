@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spawn snapshot create --from <raw-image> --size <GiB>` builds an EBS snapshot
+  directly from a raw disk/filesystem image using the EBS direct APIs — **no EC2
+  instance and no attached volume**. The image source is a local path or an
+  `s3://bucket/key` URI; all-zero blocks are skipped (sparse upload). Pair it
+  with `--attach-volume` to get large reference data (a Kraken2 DB, BLAST index,
+  ML weights) onto spores without baking a custom AMI. The `--from` input must be
+  a raw block image, not an archive — building a filesystem image from a
+  directory/tarball for you is a planned follow-up (#147 Part A).
+
 ## [0.46.0] - 2026-06-13
 
 ### Added
