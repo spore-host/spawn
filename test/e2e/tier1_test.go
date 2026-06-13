@@ -151,6 +151,32 @@ func TestTier1_EFAValidationRegion(t *testing.T) {
 	}
 }
 
+// TestTier1_EstimateOnlyValidatesConstraints is the #124 regression: --estimate-only
+// must run the same instance-type constraint validation (#110) a real launch does,
+// so an impossible config (here --efa on a non-EFA type) fails the dry-run instead
+// of printing a misleading cost estimate.
+func TestTier1_EstimateOnlyValidatesConstraints(t *testing.T) {
+	t.Parallel()
+	name := "e2e-estimate-validate-" + runID(t)
+	out, err := spawnMayFail(t,
+		"launch", name,
+		"--instance-type", "t3.micro", // no EFA support
+		"--region", "us-west-2",
+		"--efa",
+		"--estimate-only",
+	)
+	if err == nil {
+		t.Fatalf("--estimate-only --efa on t3.micro should fail validation, but succeeded:\n%s", out)
+	}
+	if !strings.Contains(out, "does not support EFA") {
+		t.Errorf("expected an EFA-support validation error, got:\n%s", out)
+	}
+	// And it must NOT have printed a cost estimate as if the config were viable.
+	if strings.Contains(out, "Estimate complete") {
+		t.Errorf("estimate-only printed 'Estimate complete' for an invalid config (#124):\n%s", out)
+	}
+}
+
 // TestTier1_PlacementGroupRegion verifies --mpi uses the correct region for
 // placement group creation (regression for #317 — group was created in the
 // client's default region, not the launch region, so RunInstances in the

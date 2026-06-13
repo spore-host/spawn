@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `--estimate-only` now runs the same instance-type constraint validation
+  (EFA / hibernation / MPI / placement-group, #110) a real launch does, before
+  the cost estimate — so it's a true dry-run. Previously it printed a cost
+  estimate even for a config that couldn't launch (e.g. `--efa` on a non-EFA
+  type), making it useless for validating a config without spending (#124).
+
 ### Testing
 - CI now builds, vets, and tests each `lambda/*` module. They're separate Go
   modules, so the root `go test ./...` never descended into them — their tests
