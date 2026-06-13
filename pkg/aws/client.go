@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/account"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -279,8 +280,13 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		}
 	}
 
+	// Resolve the account's friendly name into a DNS-safe slug for a legible
+	// FQDN ({name}.{account-name}.spore.host). Best-effort: empty when unset or
+	// not permitted, in which case the DNS updater falls back to base36 (#121).
+	accountNameSlug := slugifyDNSLabel(c.GetAccountName(ctx))
+
 	// Build tags (including account and user tags for per-user isolation)
-	tags := buildTags(launchConfig, accountID, userARN)
+	tags := buildTags(launchConfig, accountID, userARN, accountNameSlug)
 
 	// Build block device mappings. The AMI's root snapshot sets a hard minimum:
 	// EC2 rejects a root volume smaller than the snapshot it was created from
@@ -470,7 +476,7 @@ func keyNameOrNil(keyName string) *string {
 	return aws.String(keyName)
 }
 
-func buildTags(config LaunchConfig, accountID string, userARN string) []types.Tag {
+func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) []types.Tag {
 	// Convert account ID to base36 for DNS namespace
 	accountBase36 := intToBase36(accountID)
 
@@ -482,6 +488,14 @@ func buildTags(config LaunchConfig, accountID string, userARN string) []types.Ta
 		{Key: aws.String("spawn:account-id"), Value: aws.String(accountID)},
 		{Key: aws.String("spawn:account-base36"), Value: aws.String(accountBase36)},
 		{Key: aws.String("spawn:iam-user"), Value: aws.String(userARN)}, // Per-user isolation
+	}
+
+	// Friendly account-name DNS segment, when the account has one and it
+	// slugifies to a valid DNS label (#121). base36 stays canonical (it's always
+	// valid and unique); the name is an alias the DNS updater can prefer for a
+	// legible FQDN — {name}.{account-name}.spore.host instead of {name}.{base36}.
+	if accountNameSlug != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:account-name"), Value: aws.String(accountNameSlug)})
 	}
 
 	if config.Name != "" {
@@ -1552,6 +1566,46 @@ func intToBase36(accountID string) string {
 
 	// Convert to base36 (lowercase)
 	return strconv.FormatUint(num, 36)
+}
+
+// GetAccountName returns the AWS account's friendly name (set via
+// `aws account put-account-name`), or "" if it isn't set or can't be read.
+// Reading a member account's name needs org-management / delegated-admin creds;
+// the calling account can read its own. This is best-effort — any error (no
+// permission, API unavailable) returns "" so the caller falls back to base36.
+func (c *Client) GetAccountName(ctx context.Context) string {
+	out, err := account.NewFromConfig(c.cfg).GetAccountInformation(ctx, &account.GetAccountInformationInput{})
+	if err != nil || out == nil {
+		return ""
+	}
+	return aws.ToString(out.AccountName)
+}
+
+// slugifyDNSLabel converts an account name into a single DNS label safe for use
+// as the FQDN segment {name}.{label}.spore.host, or "" if it can't produce a
+// valid label. Rules (RFC 1035 label): lowercase; [a-z0-9-]; collapse runs of
+// other chars to a single hyphen; no leading/trailing hyphen; 1–63 chars.
+func slugifyDNSLabel(name string) string {
+	var b strings.Builder
+	lastHyphen := false
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			lastHyphen = false
+		default:
+			// Map any other char (space, _, ., etc.) to a single hyphen.
+			if !lastHyphen && b.Len() > 0 {
+				b.WriteByte('-')
+				lastHyphen = true
+			}
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if len(slug) > 63 {
+		slug = strings.Trim(slug[:63], "-")
+	}
+	return slug
 }
 
 // GetConfig returns the AWS config

@@ -20,7 +20,7 @@ func TestBuildTags_FSxIDWritten(t *testing.T) {
 		FSxMountPoint: "/fsx",
 	}
 
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test")
+	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	fsxID := findTagValue(tags, "spawn:fsx-id")
 	if fsxID != "fs-0abc1234" {
@@ -46,7 +46,7 @@ func TestBuildTags_FSxMountPointDefault(t *testing.T) {
 		// FSxMountPoint intentionally empty
 	}
 
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test")
+	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	fsxMount := findTagValue(tags, "spawn:fsx-mount-point")
 	if fsxMount != "/fsx" {
@@ -62,7 +62,7 @@ func TestBuildTags_EFSIDWritten(t *testing.T) {
 		EFSMountPoint: "/efs",
 	}
 
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test")
+	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	efsID := findTagValue(tags, "spawn:efs-id")
 	if efsID != "fs-0def5678" {
@@ -84,7 +84,7 @@ func TestBuildTags_CommandWritten(t *testing.T) {
 		JobArrayCommand: "python train.py --lr 0.001",
 	}
 
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test")
+	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	cmd := findTagValue(tags, "spawn:command")
 	if cmd != "python train.py --lr 0.001" {
@@ -95,7 +95,7 @@ func TestBuildTags_CommandWritten(t *testing.T) {
 // TestBuildTags_NoFSxWhenNotSet verifies FSx tags are absent when not configured.
 func TestBuildTags_NoFSxWhenNotSet(t *testing.T) {
 	config := LaunchConfig{Name: "test-instance"}
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test")
+	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	if v := findTagValue(tags, "spawn:fsx-id"); v != "" {
 		t.Errorf("spawn:fsx-id should be absent when FSxLustreID is empty, got %q", v)
@@ -112,7 +112,7 @@ func TestBuildTags_NoFSxWhenNotSet(t *testing.T) {
 // fields that drive the network interface construction.
 func TestBuildTags_ManagedTagPresent(t *testing.T) {
 	config := LaunchConfig{Name: "test"}
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test")
+	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	managed := findTagValue(tags, "spawn:managed")
 	if managed != "true" {
@@ -128,4 +128,57 @@ func findTagValue(tags []ec2types.Tag, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestBuildTags_AccountName covers the #121 friendly-name DNS segment: when a
+// non-empty slug is passed, buildTags writes spawn:account-name; when empty
+// (no account name / not permitted), the tag is absent and base36 still stands.
+func TestBuildTags_AccountName(t *testing.T) {
+	config := LaunchConfig{Name: "job"}
+
+	withName := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "hpc-burst-prod")
+	if got := findTagValue(withName, "spawn:account-name"); got != "hpc-burst-prod" {
+		t.Errorf("spawn:account-name = %q, want hpc-burst-prod", got)
+	}
+	// base36 is always present regardless (canonical fallback).
+	if findTagValue(withName, "spawn:account-base36") == "" {
+		t.Error("spawn:account-base36 must always be present")
+	}
+
+	withoutName := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	if got := findTagValue(withoutName, "spawn:account-name"); got != "" {
+		t.Errorf("spawn:account-name should be absent when slug is empty, got %q", got)
+	}
+}
+
+func TestSlugifyDNSLabel(t *testing.T) {
+	cases := map[string]string{
+		"hpc-burst-prod":      "hpc-burst-prod",
+		"HPC Burst Prod":      "hpc-burst-prod", // lowercased, spaces -> hyphen
+		"acme_research.team":  "acme-research-team",
+		"  leading/trailing ": "leading-trailing", // trimmed, slash -> hyphen
+		"a--b___c":            "a-b-c",            // runs collapse to one hyphen
+		"Prod!!!":             "prod",             // trailing junk trimmed
+		"":                    "",                 // empty in, empty out
+		"!!!":                 "",                 // no valid chars -> empty
+		"-leading-hyphen-":    "leading-hyphen",
+	}
+	for in, want := range cases {
+		if got := slugifyDNSLabel(in); got != want {
+			t.Errorf("slugifyDNSLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestSlugifyDNSLabel_MaxLength caps at 63 chars (RFC 1035 label) with no
+// trailing hyphen.
+func TestSlugifyDNSLabel_MaxLength(t *testing.T) {
+	long := ""
+	for i := 0; i < 100; i++ {
+		long += "a"
+	}
+	got := slugifyDNSLabel(long)
+	if len(got) != 63 {
+		t.Errorf("len = %d, want 63 (DNS label max)", len(got))
+	}
 }
