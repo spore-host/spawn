@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   true alias. Best-effort end to end: when the account has no name, the caller
   lacks `account:GetAccountInformation`, or the slug isn't a valid DNS label, it
   silently falls back to base36-only (unchanged). Spans the launch tag (#121),
-  spored's DNS registration, and the dns-updater Lambda (spore-host#357).
+  spored's DNS registration, and the dns-updater Lambda (spore-host#357). The
+  CNAME upsert/delete is covered by a Substrate-emulator Route53 test.
 
 ### Testing
 - Add a **Tier 2** e2e test (`-tags=e2e_tier2`) exercising `launcher.Provision`
