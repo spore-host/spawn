@@ -32,24 +32,30 @@ into a custom AMI.`,
 var snapshotCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Build an EBS snapshot from a raw disk image (no instance)",
-	Long: `Populate a new EBS snapshot directly from a raw disk/filesystem image
-using the EBS direct APIs — no EC2 instance and no attached volume. The result
-is a snapshot you can attach with 'spawn launch --attach-volume snap-xxx:/mount'.
+	Long: `Populate a new EBS snapshot directly using the EBS direct APIs — no EC2
+instance and no attached volume. The result is a snapshot you can attach with
+'spawn launch --attach-volume snap-xxx:/mount'.
 
-IMPORTANT: --from must be a RAW block image (a filesystem image whose bytes are
-the block device verbatim), NOT an archive. A .tar.gz of files will be written
-to the snapshot byte-for-byte and will not mount. To turn a directory or tarball
-into a filesystem image you currently build the image yourself (e.g. on Linux:
-'truncate -s 20G img.raw && mkfs.ext4 -d <dir> img.raw'), then pass img.raw here.
-Building the filesystem for you is tracked as #147 Part B.
+--from accepts any of:
+  - a directory      → its contents are packed into an ext4 filesystem image
+  - a .tar/.tar.gz/.tgz archive → unpacked into an ext4 filesystem image
+  - a raw disk image → streamed verbatim (its bytes ARE the block device)
+
+Directories and tarballs are converted to ext4 in-process (pure Go — no mkfs and
+no builder instance), so this works the same from macOS, Linux, or Windows. The
+ext4 filesystem is sized to the data and capped at --size.
 
 Examples:
-  # From a local raw filesystem image:
-  spawn snapshot create --from ./kraken2.raw --size 20 --name kraken2-k2pluspf
+  # From a directory:
+  spawn snapshot create --from ./kraken2-db/ --size 20 --name kraken2-k2pluspf
 
-  # From a raw image already in S3:
-  spawn snapshot create --from s3://my-bucket/kraken2.raw --size 20 \
-    --name kraken2-k2pluspf --region us-east-1`,
+  # From a tarball (local or in S3):
+  spawn snapshot create --from ./k2_pluspf.tar.gz --size 20 --name kraken2
+  spawn snapshot create --from s3://genome-idx/k2_pluspf.tar.gz --size 20 \
+    --name kraken2 --region us-east-1
+
+  # From a raw filesystem image you already built:
+  spawn snapshot create --from ./kraken2.raw --size 20 --name kraken2`,
 	RunE: runSnapshotCreate,
 }
 
@@ -57,7 +63,7 @@ func init() {
 	rootCmd.AddCommand(snapshotCmd)
 	snapshotCmd.AddCommand(snapshotCreateCmd)
 
-	snapshotCreateCmd.Flags().StringVar(&snapshotFrom, "from", "", "Raw disk image source: a local path or s3://bucket/key (required)")
+	snapshotCreateCmd.Flags().StringVar(&snapshotFrom, "from", "", "Source: a directory, a .tar/.tar.gz/.tgz, or a raw disk image — local path or s3://bucket/key (required)")
 	snapshotCreateCmd.Flags().Int64Var(&snapshotSizeGiB, "size", 0, "Volume size in GiB the snapshot is built for; the image must fit (required)")
 	snapshotCreateCmd.Flags().StringVar(&snapshotName, "name", "", "Name tag for the snapshot (also sets spawn:snapshot-name)")
 	snapshotCreateCmd.Flags().StringVar(&snapshotDescription, "description", "", "Snapshot description")
@@ -101,11 +107,15 @@ func runSnapshotCreate(cmd *cobra.Command, _ []string) error {
 		tags["spawn:snapshot-name"] = snapshotName
 	}
 
-	src, err := awsClient.OpenImageSource(ctx, snapshotFrom, region)
+	// Resolve --from to a raw ext4-image reader: a raw image streams verbatim;
+	// a directory or tar/tar.gz is converted to an ext4 image in-process (no
+	// instance, no mkfs — pure Go) (#147). Cap the filesystem at the volume size.
+	maxBytes := snapshotSizeGiB * 1024 * 1024 * 1024
+	prepared, err := awsClient.PrepareSnapshotImage(ctx, snapshotFrom, region, maxBytes)
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer prepared.Cleanup()
 
 	if snapshotOutput != "json" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Building EBS snapshot from %s (%d GiB volume) in %s...\n", snapshotFrom, snapshotSizeGiB, region)
@@ -118,7 +128,7 @@ func runSnapshotCreate(cmd *cobra.Command, _ []string) error {
 		Tags:        tags,
 		Encrypted:   snapshotEncrypted,
 		KMSKeyARN:   snapshotKMSKeyARN,
-	}, src)
+	}, prepared.Reader)
 	if err != nil {
 		return err
 	}
