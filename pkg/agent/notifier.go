@@ -70,10 +70,14 @@ func NewNotifier(cfg *provider.Config, identity *provider.Identity) *Notifier {
 	if command == "" {
 		command = "/spore" // default for spawn CLI launches
 	}
+	platform := cfg.NotifyPlatform
+	if platform == "" {
+		platform = "slack" // back-compat default when no platform tag is set
+	}
 	return &Notifier{
 		notifyURL:    strings.TrimRight(cfg.NotifyURL, "/"),
 		workspaceID:  cfg.SlackWorkspaceID,
-		platform:     "slack",
+		platform:     platform,
 		command:      command,
 		instanceID:   identity.InstanceID,
 		instanceName: name,

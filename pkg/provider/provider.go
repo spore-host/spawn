@@ -54,6 +54,7 @@ type Config struct {
 	NotifyURL        string   // spore-bot Lambda Function URL for lifecycle notifications
 	SlackWorkspaceID string   // Slack workspace ID (e.g. "T03NE3GTY")
 	NotifyCommand    string   // Slash command for workspace config lookup (e.g. "/spore", "/prism")
+	NotifyPlatform   string   // Chat platform for notifications: "slack" (default), "teams", or "discord" (#2)
 	AccountBase36    string   // base36-encoded account ID for full DNS FQDN (name.base36.spore.host)
 	AccountName      string   // DNS-safe slug of the account's friendly name; drives the alias FQDN name.account-name.spore.host (#121). Empty => base36 only.
 	ActivePorts      []int    // TCP ports to monitor for active connections (e.g. 8787 for RStudio)

@@ -86,7 +86,7 @@ accepted as the target in slash commands once registered.`,
 
 func runBotRegister(cmd *cobra.Command, args []string) error {
 	if botPlatform == "" {
-		return fmt.Errorf("--platform is required (slack or teams)")
+		return fmt.Errorf("--platform is required (slack, teams, or discord)")
 	}
 	if botInstance == "" {
 		return fmt.Errorf("--instance is required")
@@ -466,6 +466,8 @@ var (
 	botWorkspaceName   string
 	botBotToken        string
 	botSigningSecret   string
+	botPublicKey       string // Discord application public key (Ed25519, hex) — #2
+	botWebhookURL      string // channel webhook URL (Discord; or manual Slack) — #2
 	botWorkspacesTable string
 )
 
@@ -479,6 +481,13 @@ type botWorkspace struct {
 	InstalledAt         string   `dynamodbav:"installed_at" json:"installed_at"`
 	AllowedChannels     []string `dynamodbav:"allowed_channels,omitempty" json:"allowed_channels,omitempty"`
 	ConnectCodeTTLHours int      `dynamodbav:"connect_code_ttl_hours,omitempty" json:"connect_code_ttl_hours,omitempty"`
+	// PublicKey is the Discord application's Ed25519 public key (hex), used by the
+	// spore-bot Lambda to verify inbound interaction requests. Discord has no
+	// signing secret (#2).
+	PublicKey string `dynamodbav:"public_key,omitempty" json:"public_key,omitempty"`
+	// IncomingWebhookURL is a channel webhook for notifications (Discord channel
+	// webhook, or a manually-supplied Slack incoming webhook).
+	IncomingWebhookURL string `dynamodbav:"incoming_webhook_url,omitempty" json:"incoming_webhook_url,omitempty"`
 	// Token rotation fields — managed automatically via OAuth; not set via CLI
 	RefreshToken   string `dynamodbav:"refresh_token,omitempty" json:"refresh_token,omitempty"`
 	TokenExpiresAt int64  `dynamodbav:"token_expires_at,omitempty" json:"token_expires_at,omitempty"`
@@ -503,7 +512,13 @@ Run this once after installing the Slack app in a workspace:
 		if botPlatform == "" || botWorkspaceID == "" {
 			return fmt.Errorf("--platform and --workspace-id are required")
 		}
-		if botSigningSecret == "" {
+		// Discord verifies interactions with an Ed25519 application public key, not
+		// a signing secret; Slack/Teams require the signing secret (#2).
+		if botPlatform == "discord" {
+			if botPublicKey == "" {
+				return fmt.Errorf("--public-key is required for discord (the application's Ed25519 public key)")
+			}
+		} else if botSigningSecret == "" {
 			return fmt.Errorf("--signing-secret is required")
 		}
 		ctx := context.Background()
@@ -520,6 +535,8 @@ Run this once after installing the Slack app in a workspace:
 			WorkspaceKey:        botPlatform + "#" + botWorkspaceID,
 			BotToken:            botBotToken,
 			SigningSecret:       botSigningSecret,
+			PublicKey:           botPublicKey,
+			IncomingWebhookURL:  botWebhookURL,
 			Platform:            botPlatform,
 			WorkspaceName:       botWorkspaceName,
 			InstalledBy:         *identity.Arn,
@@ -992,7 +1009,7 @@ func init() {
 		botWorkspaceDestroyCmd,
 	}
 	for _, sub := range allSubs {
-		sub.Flags().StringVar(&botPlatform, "platform", "", "Chat platform: slack or teams")
+		sub.Flags().StringVar(&botPlatform, "platform", "", "Chat platform: slack, teams, or discord")
 		sub.Flags().BoolVar(&botJSONOutput, "json", false, "Output as JSON")
 		_ = sub.Flags().MarkDeprecated("json", "use --output json instead")
 	}
@@ -1007,8 +1024,10 @@ func init() {
 		sub.Flags().StringVar(&botWorkspacesTable, "table", "", "Override DynamoDB workspaces table name")
 	}
 	botWorkspaceAddCmd.Flags().StringVar(&botWorkspaceName, "workspace-name", "", "Human-friendly workspace name")
-	botWorkspaceAddCmd.Flags().StringVar(&botBotToken, "bot-token", "", "Slack bot token (xoxb-...)")
-	botWorkspaceAddCmd.Flags().StringVar(&botSigningSecret, "signing-secret", "", "Slack signing secret (required)")
+	botWorkspaceAddCmd.Flags().StringVar(&botBotToken, "bot-token", "", "Bot token (Slack xoxb-..., or Discord bot token)")
+	botWorkspaceAddCmd.Flags().StringVar(&botSigningSecret, "signing-secret", "", "Slack/Teams signing secret (required for slack/teams)")
+	botWorkspaceAddCmd.Flags().StringVar(&botPublicKey, "public-key", "", "Discord application public key (Ed25519, hex; required for discord)")
+	botWorkspaceAddCmd.Flags().StringVar(&botWebhookURL, "webhook-url", "", "Channel webhook URL for notifications (Discord channel webhook, or manual Slack incoming webhook)")
 	botWorkspaceAddCmd.Flags().StringSliceVar(&botAllowedChannels, "allowed-channels", nil, "Restrict commands to specific channel IDs (e.g. C12345,C67890). Empty = all channels.")
 	botWorkspaceAddCmd.Flags().IntVar(&botConnectTTLHours, "connect-ttl", 0, "Max /spore connect code lifetime in hours (0 = use platform default, typically 24h). Can only lower the platform default.")
 

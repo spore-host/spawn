@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Discord lifecycle notifications (Phase 1 of #2). `spawn launch --notify-platform
+  discord` (also `slack`/`teams`) routes a spore's lifecycle events to Discord;
+  spored carries the choice via a new `spawn:notify-platform` tag (default
+  `slack`, so existing launches are unchanged). `spawn notify workspace-add
+  --platform discord --webhook-url … [--public-key …]` registers a Discord
+  server: Discord verifies with an Ed25519 public key, not a signing secret, so
+  `--signing-secret` isn't required for `discord` (a `--public-key` is, when you
+  later enable slash commands). The spore-bot service posts color-coded embeds to
+  the channel webhook. Discord slash commands are Phase 2.
+
 ## [0.51.1] - 2026-06-14
 
 ### Fixed
