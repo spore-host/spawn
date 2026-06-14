@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `--attach-volume` (and `--efs-id`/`--fsx-id`) storage is now mounted **before**
+  the `--user-data`/`--command` script runs, not after it. The mount script was
+  appended to the end of user-data, so a workload launched by user-data (e.g. an
+  nf-core pipeline that validates its DB mount paths exist) ran against
+  **unmounted** paths and failed; the volumes only mounted once the script had
+  already finished. The storage mount is now injected ahead of the user script in
+  the bootstrap, so the workload sees the volumes live. Fixes both the head node
+  and the per-task path on which nf-spawn's `ext.volumes` zero-copy DB workflow
+  depends (#166).
+
 ## [0.51.0] - 2026-06-14
 
 ### Added
