@@ -492,6 +492,8 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			config.NotifyURL = *tag.Value
 		case tagprefix.Tag("notify-command"):
 			config.NotifyCommand = *tag.Value
+		case tagprefix.Tag("notify-platform"):
+			config.NotifyPlatform = *tag.Value
 		case tagprefix.Tag("active-ports"):
 			for _, p := range strings.Split(*tag.Value, ",") {
 				p = strings.TrimSpace(p)

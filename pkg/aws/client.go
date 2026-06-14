@@ -187,6 +187,7 @@ type LaunchConfig struct {
 	SlackWorkspaceID   string // Slack workspace ID — injected as spawn:slack-workspace-id tag
 	NotifyURL          string // spore-bot Lambda Function URL — injected as spawn:notify-url tag
 	NotifyCommand      string // Slash command for workspace routing — injected as spawn:notify-command tag
+	NotifyPlatform     string // Chat platform: "slack"(default)/"teams"/"discord" — injected as spawn:notify-platform tag (#2)
 	ActivePortsRaw     string // comma-separated ports to monitor — injected as spawn:active-ports tag
 	ActiveProcessesRaw string // comma-separated process names — injected as spawn:active-processes tag
 
@@ -620,6 +621,9 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	}
 	if config.NotifyCommand != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:notify-command"), Value: aws.String(config.NotifyCommand)})
+	}
+	if config.NotifyPlatform != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:notify-platform"), Value: aws.String(config.NotifyPlatform)})
 	}
 	if config.ActivePortsRaw != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:active-ports"), Value: aws.String(config.ActivePortsRaw)})

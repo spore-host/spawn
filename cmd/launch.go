@@ -90,6 +90,7 @@ var (
 	dnsAPIEndpoint   string
 	noTimeout        bool
 	slackWorkspaceID string // for lifecycle notifications via spore-bot
+	notifyPlatform   string // chat platform for lifecycle notifications: slack (default) / teams / discord (#2)
 	activePorts      string // comma-separated ports to monitor for active connections (e.g. "8787,8888")
 	activeProcesses  string // comma-separated process names to monitor (e.g. "rsession,jupyter")
 
@@ -253,6 +254,7 @@ func init() {
 	launchCmd.Flags().StringVar(&userDataFile, "user-data-file", "", "User data file")
 	launchCmd.Flags().StringVar(&dnsName, "dns", "", "Override DNS name if different from --name (advanced)")
 	launchCmd.Flags().StringVar(&slackWorkspaceID, "slack-workspace", "", "Slack workspace ID for lifecycle notifications (e.g. T03NE3GTY)")
+	launchCmd.Flags().StringVar(&notifyPlatform, "notify-platform", "", "Chat platform for lifecycle notifications: slack (default), teams, or discord")
 	launchCmd.Flags().StringVar(&activePorts, "active-ports", "", "TCP ports to monitor for active connections, prevents idle termination (e.g. '8787' for RStudio, '8787,8888' for RStudio+Jupyter)")
 	launchCmd.Flags().StringVar(&activeProcesses, "active-processes", "", "Process names to monitor, prevents idle termination while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple)")
 	launchCmd.Flags().StringVar(&dnsDomain, "dns-domain", "", "Custom DNS domain (overrides default)")
@@ -1950,6 +1952,9 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 		notifyURL := spawnconfig.GetNotifyURL()
 		config.NotifyURL = notifyURL
 		config.NotifyCommand = "/spore" // routes notifications to spore-bot workspace config
+	}
+	if notifyPlatform != "" {
+		config.NotifyPlatform = notifyPlatform // slack (default) / teams / discord (#2)
 	}
 	if activePorts != "" {
 		config.ActivePortsRaw = activePorts
