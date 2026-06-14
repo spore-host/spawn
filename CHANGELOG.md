@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-06-14
+
 ### Added
 - Discord lifecycle notifications (Phase 1 of #2). `spawn launch --notify-platform
   discord` (also `slack`/`teams`) routes a spore's lifecycle events to Discord;
@@ -344,7 +346,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.51.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.52.0...HEAD
+[0.52.0]: https://github.com/spore-host/spawn/compare/v0.51.1...v0.52.0
 [0.51.1]: https://github.com/spore-host/spawn/compare/v0.51.0...v0.51.1
 [0.51.0]: https://github.com/spore-host/spawn/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/spore-host/spawn/compare/v0.49.0...v0.50.0
