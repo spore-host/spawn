@@ -905,9 +905,10 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		fmt.Fprintf(os.Stderr, "   Instances will run indefinitely until manually terminated.\n\n")
 	}
 
-	// Build user-data for each config
+	// Build user-data for each config. (Storage mounts aren't wired through this
+	// sweep path; attach-volume on sweeps would thread a storageScript here.)
 	for _, cfg := range launchConfigs {
-		userDataScript, err := buildUserData(plat, cfg)
+		userDataScript, err := buildUserData(plat, cfg, "")
 		if err != nil {
 			return fmt.Errorf("failed to build user data: %w", err)
 		}
@@ -1504,15 +1505,12 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		}
 	}
 
-	// Step 5: Build user data
-	userDataScript, err := buildUserData(plat, config)
-	if err != nil {
-		return fmt.Errorf("failed to build user data: %w", err)
-	}
-
-	// Add storage mounting if EFS or FSx enabled (single instance). Skip on
+	// Build the storage-mount script (EFS / FSx / attached EBS volumes) FIRST, so
+	// it can be injected BEFORE the user's script — the workload must see the
+	// mounts already live; mounting after it finishes is useless (#166). Skip on
 	// Windows: the storage user-data is Linux mount scripting and would corrupt
 	// the <powershell> block. EFS/FSx on Windows is out of Phase 1 scope (#55).
+	storageScript := ""
 	if (efsID != "" || fsxInfo != nil || len(config.AttachVolumes) > 0) && config.TargetOS != "windows" {
 		storageConfig := userdata.StorageConfig{}
 
@@ -1540,12 +1538,17 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		// Attached EBS data volumes from snapshots (#144)
 		storageConfig.AttachedVolumes = attachedVolumesUserData(config.AttachVolumes)
 
-		storageScript, err := userdata.GenerateStorageUserData(storageConfig)
+		storageScript, err = userdata.GenerateStorageUserData(storageConfig)
 		if err != nil {
 			return fmt.Errorf("failed to generate storage user-data: %w", err)
 		}
+	}
 
-		userDataScript += "\n" + storageScript
+	// Step 5: Build user data — the storage mount is injected before the user's
+	// script (inside the bootstrap), not appended after it (#166).
+	userDataScript, err := buildUserData(plat, config, storageScript)
+	if err != nil {
+		return fmt.Errorf("failed to build user data: %w", err)
 	}
 
 	config.UserData = encodeUserDataForOS(userDataScript, config.TargetOS)
@@ -2408,7 +2411,7 @@ try {
 	return script, nil
 }
 
-func buildUserData(plat *platform.Platform, config *aws.LaunchConfig) (string, error) {
+func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScript string) (string, error) {
 	// Inject the PUBLIC key of the same keypair we registered with EC2
 	// (config.KeyName), so the instance trusts the key `spawn connect` will use.
 	publicKey, err := spawnPublicKeyForUserData(plat, config.KeyName)
@@ -2463,6 +2466,7 @@ func buildUserData(plat *platform.Platform, config *aws.LaunchConfig) (string, e
 		Username:       username,
 		PublicKey:      publicKey,
 		Plugins:        collectPluginDeclarations(),
+		StorageScript:  storageScript,
 		CustomUserData: customUserData,
 	})
 }
@@ -2862,49 +2866,12 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 					combinedUserData += "\n" + mpiScript
 				}
 
-				// Add storage user-data if EFS, FSx, or attached volumes enabled
-				if efsID != "" || fsxInfo != nil || len(baseConfig.AttachVolumes) > 0 {
-					storageConfig := userdata.StorageConfig{}
-
-					// EFS configuration
-					if efsID != "" {
-						mountOptions, err := getEFSMountOptions()
-						if err != nil {
-							results <- launchResult{
-								index: index,
-								err:   fmt.Errorf("failed to get EFS mount options: %w", err),
-							}
-							return
-						}
-
-						storageConfig.EFSEnabled = true
-						storageConfig.EFSFilesystemDNS = aws.GetEFSDNSName(efsID, baseConfig.Region)
-						storageConfig.EFSMountPoint = efsMountPoint
-						storageConfig.EFSMountOptions = mountOptions
-					}
-
-					// FSx configuration
-					if fsxInfo != nil {
-						storageConfig.FSxLustreEnabled = true
-						storageConfig.FSxFilesystemDNS = fsxInfo.DNSName
-						storageConfig.FSxMountName = fsxInfo.MountName
-						storageConfig.FSxMountPoint = fsxMountPoint
-					}
-
-					// Attached EBS data volumes from snapshots (#144)
-					storageConfig.AttachedVolumes = attachedVolumesUserData(baseConfig.AttachVolumes)
-
-					storageScript, err := userdata.GenerateStorageUserData(storageConfig)
-					if err != nil {
-						results <- launchResult{
-							index: index,
-							err:   fmt.Errorf("failed to generate storage user-data: %w", err),
-						}
-						return
-					}
-
-					combinedUserData += "\n" + storageScript
-				}
+				// NOTE: storage mounts (EFS/FSx/attached EBS volumes) are NOT added
+				// here. They're already baked into baseConfig.UserData by
+				// buildUserData, injected BEFORE the user script so the workload
+				// sees them live (#166). Re-appending here would double-mount AND
+				// land the mount after the script again. MPI user-data above is the
+				// only per-instance addition the array path needs.
 
 				// Re-encode with gzip compression
 				instanceConfig.UserData = encodeUserData(combinedUserData)
@@ -3486,7 +3453,7 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 	stdScript, buildErr := buildUserData(plat, &aws.LaunchConfig{
 		InstanceType: instanceType,
 		Region:       queueRegion,
-	})
+	}, "")
 	var combinedScript string
 	if buildErr == nil && stdScript != "" {
 		// Append queue runner after spored installer (strip duplicate #!/bin/bash header)

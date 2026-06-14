@@ -129,6 +129,44 @@ func TestBuildLinuxBootstrap_CustomUserDataAppended(t *testing.T) {
 	}
 }
 
+// TestBuildLinuxBootstrap_StorageMountsBeforeUserScript is the #166 regression
+// guard: attached storage must be mounted BEFORE the user's script runs, so the
+// workload sees the volumes live. Mounting after the script (the old append bug)
+// meant a program in user-data validated an unmounted path and failed.
+func TestBuildLinuxBootstrap_StorageMountsBeforeUserScript(t *testing.T) {
+	storage := "echo STORAGE_MOUNT_MARKER"
+	user := "echo USER_SCRIPT_MARKER"
+	script, err := BuildLinuxBootstrap(BootstrapConfig{
+		Username:       "ec2-user",
+		StorageScript:  storage,
+		CustomUserData: user,
+	})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	idxStorage := strings.Index(script, "STORAGE_MOUNT_MARKER")
+	idxUser := strings.Index(script, "USER_SCRIPT_MARKER")
+	if idxStorage < 0 {
+		t.Fatal("storage script was not included")
+	}
+	if idxUser < 0 {
+		t.Fatal("user script was not included")
+	}
+	if idxStorage > idxUser {
+		t.Errorf("storage mount (%d) must come BEFORE the user script (%d) — #166", idxStorage, idxUser)
+	}
+}
+
+func TestBuildLinuxBootstrap_NoStorageScriptWhenEmpty(t *testing.T) {
+	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user", CustomUserData: "echo hi"})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	if strings.Contains(script, "Attached storage") {
+		t.Error("no storage section should appear when StorageScript is empty")
+	}
+}
+
 // TestEncodeLinuxUserData_ValidBase64Gzip is the #127 regression guard: the
 // encoded user-data MUST be valid base64 that gunzips back to the original
 // script. The original bug shipped raw text into RunInstances, which substrate
