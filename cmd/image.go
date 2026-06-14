@@ -457,6 +457,15 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 // and spored + the SSM agent are installed/running), creates a new AMI from it,
 // tags it, and terminates the seed. The seed is always terminated, even on
 // error. Returns the warm AMI id. (#98)
+// ec2LaunchRearmCommand re-arms EC2Launch v2's run-once tasks — chiefly
+// setAdminAccount, which generates the GetPasswordData-retrievable Administrator
+// password — so an AMI captured from an already-booted seed hands out a fresh
+// password on each launch. `reset -c` clears the run-once state and instance
+// logs WITHOUT generalizing (no Sysprep), keeping the warm AMI a non-generalized
+// single-instance image, and does not shut the instance down (#153).
+// $Env:ProgramFiles resolves to "C:\Program Files" regardless of localization.
+const ec2LaunchRearmCommand = `& "$Env:ProgramFiles\Amazon\EC2Launch\EC2Launch.exe" reset -c`
+
 func buildWarmAMI(ctx context.Context, awsClient *aws.Client, region, name, version, baseAMI string, prog *progress.Progress) (string, error) {
 	seedType := imageImportWarmType
 	if err := guardWindowsInstanceType("windows", seedType); err != nil {
@@ -547,13 +556,39 @@ func buildWarmAMI(ctx context.Context, awsClient *aws.Client, region, name, vers
 	}
 	prog.Complete(waitLabel)
 
-	// Best-effort: give the SSM agent + spored a short, bounded window to come
-	// online so the warm image captures a fully-settled machine. Never fatal.
-	prog.Start("Letting spored/SSM settle (best-effort)")
-	if err := awsClient.WaitForSSMOnline(ctx, region, seedID, 10*time.Minute); err != nil {
-		fmt.Fprintf(os.Stderr, "  note: SSM not Online yet on the seed; imaging anyway (the agent is installed and will register on the warm AMI's next boot).\n")
+	// SSM must come Online here: we use it to re-arm EC2Launch before imaging
+	// (below), and that step is required — a warm AMI built without it can't hand
+	// out an Administrator password (#153). SSM registration can be slow on
+	// Windows first boot, so the window is generous.
+	ssmLabel := "Waiting for SSM agent Online on seed (needed to re-arm EC2Launch)"
+	prog.Start(ssmLabel)
+	if err := awsClient.WaitForSSMOnline(ctx, region, seedID, time.Duration(imageImportWarmTimeout)*time.Minute); err != nil {
+		prog.Error(ssmLabel, err)
+		return "", fmt.Errorf("warm seed's SSM agent never came Online, so EC2Launch can't be re-armed for password generation: %w", err)
 	}
-	prog.Complete("Letting spored/SSM settle (best-effort)")
+	prog.Complete(ssmLabel)
+
+	// Re-arm EC2Launch v2 before imaging (#153). EC2Launch generates the
+	// retrievable Administrator password via its `setAdminAccount` task, which
+	// runs ONCE — on the seed's first boot it already ran, so an AMI captured as-is
+	// hands out no password ("Password is not available. The instance was launched
+	// from a custom AMI..."). `EC2Launch.exe reset -c` clears the run-once state so
+	// setAdminAccount runs again on the warm AMI's next boot, WITHOUT generalizing
+	// (we deliberately keep a non-generalized single-instance image, #98). reset
+	// stages state for next boot and does NOT shut the instance down, so we image
+	// immediately after — with NoReboot so the captured AMI keeps the armed state.
+	rearmLabel := "Re-arming EC2Launch for password generation (reset -c)"
+	prog.Start(rearmLabel)
+	res2, err := awsClient.RunPowerShell(ctx, region, seedID, ec2LaunchRearmCommand, 5*time.Minute)
+	if err != nil {
+		prog.Error(rearmLabel, err)
+		return "", fmt.Errorf("re-arm EC2Launch on warm seed: %w", err)
+	}
+	if res2.Status != "Success" {
+		prog.Error(rearmLabel, fmt.Errorf("status %s", res2.Status))
+		return "", fmt.Errorf("EC2Launch reset did not succeed on warm seed (status %s): %s\n%s", res2.Status, res2.Stdout, res2.Stderr)
+	}
+	prog.Complete(rearmLabel)
 
 	prog.Start("Creating warm AMI from seed")
 	warmName := fmt.Sprintf("%s-warm-%s", name, version)
@@ -561,7 +596,10 @@ func buildWarmAMI(ctx context.Context, awsClient *aws.Client, region, name, vers
 		InstanceID:  seedID,
 		Name:        warmName,
 		Description: fmt.Sprintf("spawn warm AMI from %s (fast-boot, first boot already done)", baseAMI),
-		NoReboot:    false, // let Windows flush cleanly for a consistent image
+		// NoReboot: a reboot here would let the just-re-armed EC2Launch
+		// setAdminAccount task run on the SEED, consuming the run-once state before
+		// the snapshot captures it — defeating the re-arm. Capture the armed state. (#153)
+		NoReboot: true,
 	})
 	if err != nil {
 		prog.Error("Creating warm AMI from seed", err)
