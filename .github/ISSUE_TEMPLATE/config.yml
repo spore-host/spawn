@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 Community chat (Discord)
+    url: https://discord.gg/2deGRFCW
+    about: Questions, help, and discussion — faster than an issue for usage questions.
+  - name: 📖 Documentation
+    url: https://spore.host/docs
+    about: Guides and reference for the spore.host tools.
+  - name: 🔒 Security issue
+    url: https://github.com/spore-host/spawn/security/advisories/new
+    about: Report a vulnerability privately, not as a public issue.

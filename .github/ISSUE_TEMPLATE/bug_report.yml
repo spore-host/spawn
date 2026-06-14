@@ -1,0 +1,42 @@
+name: Bug report
+description: Report something in spawn that isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug in **spawn** (launch & manage EC2 instances).
+        Please search existing issues first to avoid duplicates.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, and what went wrong?
+      placeholder: Describe the bug and the steps to reproduce it.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output / logs
+      description: Relevant command output, error messages, or logs. Redact credentials, webhook URLs, and private resource IDs.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of the tool's `version` command, or the release tag.
+      placeholder: "e.g. spawn v0.52.0"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "OS / arch / AWS region, e.g. macOS arm64, us-west-2"
