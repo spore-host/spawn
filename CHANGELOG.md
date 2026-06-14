@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Added a **Reference data volumes** guide (`docs/reference-data-volumes.md`)
+  covering `snapshot create` (dir/tarball/raw → EBS snapshot, no instance) →
+  `launch --attach-volume`, including the nf-spawn `ext.volumes` path. Added the
+  `snapshot` command to the README command table and linked the guide.
+- Documented the **local scratch-space** requirement for `snapshot create` from a
+  directory or tarball (the ext4 image is staged to a temp file ~the uncompressed
+  data size; a raw image streams with no scratch) — in both the command help and
+  the guide.
+- Noted in the Windows beta guide that the warm-AMI build waits for SSM on the
+  build instance (used to re-arm the Administrator password) and is bounded by
+  `--warm-timeout`.
+
 ## [0.48.1] - 2026-06-13
 
 ### Fixed

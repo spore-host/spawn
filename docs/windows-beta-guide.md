@@ -174,6 +174,12 @@ build, and spawn shuts it down automatically.)
 fast-booting image you'll launch in the next step. The base image is kept too, as
 the warm one's parent; you'll delete both at the end.
 
+During the warm build, spawn waits for the throwaway instance's SSM agent to come
+online (it uses SSM to prepare the image so each launch still gets its own
+retrievable Administrator password). That wait can run several minutes to ~30 on
+a Windows first boot; it's bounded by `--warm-timeout` (default 30 min). If it
+times out, the warm step fails loudly and the slow-but-usable base image is kept.
+
 > Prefer just the base image and willing to wait through the slow first boot every
 > time? Add `--no-warm` to skip the warm step (not recommended for the beta).
 

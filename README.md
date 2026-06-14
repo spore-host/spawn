@@ -80,6 +80,7 @@ spawn list
 | `cancel` | Terminate an instance |
 | `image` | Build a custom AMI from a Windows ISO (EC2 Image Builder; auto-warms for fast boot) |
 | `ami` | List / delete spawn-managed AMIs |
+| `snapshot` | Build an EBS data snapshot from a directory, tarball, or raw image (for `launch --attach-volume`) |
 | `queue` | Batch job queue management |
 | `schedule` | Scheduled execution |
 | `sweep` | Parameter sweeps |
@@ -136,6 +137,10 @@ Full reference at **[spore.host/docs](https://spore.host/docs/tools/spawn)**.
 - **[Windows beta guide](docs/windows-beta-guide.md)** — end-to-end: Windows 11
   ISO → custom (auto-warmed) AMI → launch → connect via RDP, PowerShell-over-SSM,
   or SSH.
+- **[Reference data volumes](docs/reference-data-volumes.md)** — get large
+  reference data (Kraken2 DB, BLAST index, model weights) onto spores without
+  baking it into an AMI: `snapshot create` from a dir/tarball/raw image →
+  `launch --attach-volume`.
 
 ## License
 
