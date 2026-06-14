@@ -43,16 +43,28 @@ no `mkfs`, no builder instance — so it works the same from macOS, Linux, and
 Windows. `--size` is the volume size the snapshot is built for; the filesystem is
 sized to the data and capped at `--size` (the data must fit).
 
-### Local scratch space
+### Local scratch space and memory
 
 When `--from` is a **directory or tarball**, spawn builds the ext4 image in a
-**local temporary file** before streaming it into the snapshot (the ext4 builder
-needs seekable scratch space). That temp file is roughly the size of the
-**uncompressed** data — e.g. a 16 GB Kraken2 DB needs ~16 GB of free space in the
-system temp directory while `snapshot create` runs. It's removed when the command
-finishes.
+**local temporary file** before uploading it (the ext4 builder needs seekable
+scratch space). That temp file is roughly the size of the **uncompressed** data
+— e.g. a 16 GB Kraken2 DB needs ~16 GB of free disk while `snapshot create` runs.
+It's removed when the command finishes.
 
-A **raw image** source needs no scratch: it streams source → snapshot directly.
+Use **`--temp-dir`** to put that scratch file somewhere other than the system
+temp directory — e.g. a roomy external disk:
+
+```bash
+spawn snapshot create --from ./k2_pluspf.tar.gz --size 20 --name kraken2 \
+  --temp-dir /Volumes/BigDisk/spawn-tmp
+```
+
+Memory stays low regardless of image size: the upload streams the image
+block-by-block (peak RAM is a small bounded buffer, not the image size), and the
+blocks are uploaded concurrently to fill the link.
+
+A **raw image** source needs no scratch at all: it streams source → snapshot
+directly.
 
 > Tip: if you rebuild from the same tarball often, convert it to a raw image once
 > (point `--from` at the resulting `.raw` thereafter) to skip the per-build
@@ -60,6 +72,16 @@ A **raw image** source needs no scratch: it streams source → snapshot directly
 
 The snapshot source read (including `s3://`) is streamed; only the
 directory/tarball → ext4 conversion stages to disk.
+
+### Build in-region for large uploads
+
+The snapshot upload sends the (uncompressed) image to AWS over your connection —
+e.g. ~12–16 GB for a Kraken2 DB. Over a home/office uplink that is bandwidth-bound
+and can take a long time regardless of the streaming/parallelism above. To avoid
+the round trip, run `spawn snapshot create` **from inside AWS** — AWS CloudShell
+or a small short-lived EC2 instance in the target region — where the upload is
+AWS-internal and fast. Build once there, then `--attach-volume` the snapshot from
+anywhere.
 
 ## Attach it to a spore
 

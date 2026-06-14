@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `spawn snapshot create` no longer holds the whole image in memory — it
+  previously split the entire (e.g. 16 GB) image into blocks in RAM before
+  uploading, so a large build's memory grew to the image size. It now streams the
+  image block-by-block straight into the upload; peak memory is a small bounded
+  buffer regardless of image size (#157).
+
+### Added
+- `spawn snapshot create --temp-dir <dir>` sets where the temporary ext4 image
+  (built from a directory/tarball source) is staged, so a large image can use a
+  roomier disk than the system temp dir (#157).
+
+### Changed
+- `spawn snapshot create` uploads snapshot blocks concurrently (bounded pool)
+  instead of one at a time, filling the uplink and reducing wall-clock on large
+  images (#157). For a large image over a slow connection, the command help and
+  guide now recommend building from AWS CloudShell or an in-region instance so the
+  upload is AWS-internal.
+
 ### Documentation
 - Added a **Reference data volumes** guide (`docs/reference-data-volumes.md`)
   covering `snapshot create` (dir/tarball/raw → EBS snapshot, no instance) →

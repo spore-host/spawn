@@ -4,14 +4,30 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"io"
 	"testing"
 )
 
-// planSnapshotBlocks is the pure correctness core of the EBS-direct snapshot
-// builder (#147 Part A): block splitting, sparse-zero skipping, final-block
+// scanSnapshotBlocks is the pure correctness core of the EBS-direct snapshot
+// builder (#147): block splitting, sparse-zero skipping, final-block
 // zero-padding, and the per-block + linear-aggregation checksums. The EBS
 // direct APIs aren't modeled by substrate, so this is where correctness is
-// pinned down without AWS.
+// pinned down without AWS. planSnapshotBlocks collects the streamed blocks into
+// a slice so these tests can assert on them (the real builder uploads each block
+// as it's scanned, never holding them all — #157).
+func planSnapshotBlocks(r io.Reader) (blocks []snapshotBlock, bytesRead int64, aggChecksum string, err error) {
+	bytesRead, aggChecksum, err = scanSnapshotBlocks(r, func(b snapshotBlock) error {
+		// Copy the block: the scanner reuses its read buffer across blocks, and
+		// the live uploader copies via bytes.Reader before the buffer is reused;
+		// the test must do the same to keep each block's bytes stable.
+		cp := make([]byte, len(b.data))
+		copy(cp, b.data)
+		b.data = cp
+		blocks = append(blocks, b)
+		return nil
+	})
+	return blocks, bytesRead, aggChecksum, err
+}
 
 func TestPlanSnapshotBlocks_SingleShortBlock(t *testing.T) {
 	data := []byte("hello kraken2 database")
@@ -118,6 +134,61 @@ func TestPlanSnapshotBlocks_AggregationIsDeterministic(t *testing.T) {
 	}
 	if agg != base64.StdEncoding.EncodeToString(h.Sum(nil)) {
 		t.Error("aggregation checksum does not match the linear SHA256-of-digests contract")
+	}
+}
+
+// TestScanSnapshotBlocks_EmitsInIndexOrderWithoutBuffering verifies the
+// streaming contract the parallel uploader relies on (#157): scanSnapshotBlocks
+// hands blocks to the callback in ascending index order, computing the
+// aggregation as it goes — so uploads can complete out of order — and never
+// retains them itself (peak memory is the caller's, not the whole image).
+func TestScanSnapshotBlocks_EmitsInIndexOrderWithoutBuffering(t *testing.T) {
+	// 5 non-zero blocks, interleaved with a zero block, plus a short tail.
+	img := bytes.Join([][]byte{
+		bytes.Repeat([]byte{0x1}, ebsBlockSize),
+		make([]byte, ebsBlockSize), // zero block (skipped, index still advances)
+		bytes.Repeat([]byte{0x2}, ebsBlockSize),
+		bytes.Repeat([]byte{0x3}, ebsBlockSize),
+		bytes.Repeat([]byte{0x4}, 200), // short tail
+	}, nil)
+
+	var indices []int32
+	_, agg, err := scanSnapshotBlocks(bytes.NewReader(img), func(b snapshotBlock) error {
+		indices = append(indices, b.index)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	want := []int32{0, 2, 3, 4} // index 1 (zero) skipped
+	if len(indices) != len(want) {
+		t.Fatalf("emitted indices %v, want %v", indices, want)
+	}
+	for i := range want {
+		if indices[i] != want[i] {
+			t.Errorf("emit order %v, want ascending %v", indices, want)
+			break
+		}
+	}
+	if agg == "" {
+		t.Error("aggregation checksum should be set")
+	}
+}
+
+// TestScanSnapshotBlocks_EmitErrorStopsScan ensures an upload-worker failure
+// (surfaced as an emit error) halts the scan promptly.
+func TestScanSnapshotBlocks_EmitErrorStopsScan(t *testing.T) {
+	img := bytes.Repeat([]byte{0x5}, ebsBlockSize*4)
+	calls := 0
+	_, _, err := scanSnapshotBlocks(bytes.NewReader(img), func(b snapshotBlock) error {
+		calls++
+		return io.ErrClosedPipe
+	})
+	if err == nil {
+		t.Fatal("expected the emit error to propagate")
+	}
+	if calls != 1 {
+		t.Errorf("scan should stop after the first emit error, got %d calls", calls)
 	}
 }
 

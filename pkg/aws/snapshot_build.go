@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -62,34 +64,43 @@ type snapshotBlock struct {
 	checksum string // base64 SHA256 of data
 }
 
-// planSnapshotBlocks reads an image stream and splits it into the non-zero
-// 512 KiB blocks to upload, in index order. The final block is zero-padded to
-// the full block size (EBS blocks are fixed-size). It returns the blocks, the
-// total bytes read, and the linear-aggregation checksum CompleteSnapshot needs
-// (the base64 SHA256 over the concatenation of every block's raw SHA256 digest,
-// in ascending block-index order — including zero blocks? no: only the blocks
-// actually written, in order). This is pure and fully unit-testable without AWS.
-func planSnapshotBlocks(r io.Reader) (blocks []snapshotBlock, bytesRead int64, aggChecksum string, err error) {
+// snapshotUploadConcurrency is how many PutSnapshotBlock calls run at once. The
+// EBS direct API allows generous concurrency; a handful fills a typical uplink
+// without overwhelming a home connection, and keeps memory to (concurrency × 512
+// KiB) rather than the whole image.
+const snapshotUploadConcurrency = 16
+
+// scanSnapshotBlocks reads an image stream sequentially and invokes emit for
+// each non-zero 512 KiB block, in ascending index order. The final block is
+// zero-padded to the fixed block size. It returns the total bytes read and the
+// linear-aggregation checksum CompleteSnapshot needs: base64(SHA256 over the
+// concatenation of every emitted block's raw SHA256 digest, in block-index
+// order). Computing the aggregation here — in read order, as we scan — lets the
+// actual uploads run concurrently and out of order without affecting it.
+//
+// emit receives ownership of the block slice for the duration of the call (it
+// may be reused after emit returns, so a concurrent uploader must copy or finish
+// with it); emit returning an error stops the scan.
+func scanSnapshotBlocks(r io.Reader, emit func(b snapshotBlock) error) (bytesRead int64, aggChecksum string, err error) {
 	buf := make([]byte, ebsBlockSize)
 	var index int32
-	// The aggregation hash is taken over the raw (not base64) per-block digests
-	// of the blocks we write, in block-index order.
 	agg := sha256.New()
 	for {
 		n, readErr := io.ReadFull(r, buf)
 		if n > 0 {
 			bytesRead += int64(n)
-			// Zero-pad a short final block to the fixed block size.
-			block := make([]byte, ebsBlockSize)
+			block := make([]byte, ebsBlockSize) // fresh: ownership passes to emit
 			copy(block, buf[:n])
 			if !isZeroBlock(block) {
 				rawSum := sha256.Sum256(block)
 				agg.Write(rawSum[:])
-				blocks = append(blocks, snapshotBlock{
+				if eerr := emit(snapshotBlock{
 					index:    index,
 					data:     block,
 					checksum: base64.StdEncoding.EncodeToString(rawSum[:]),
-				})
+				}); eerr != nil {
+					return 0, "", eerr
+				}
 			}
 			index++
 		}
@@ -97,11 +108,10 @@ func planSnapshotBlocks(r io.Reader) (blocks []snapshotBlock, bytesRead int64, a
 			break
 		}
 		if readErr != nil {
-			return nil, 0, "", fmt.Errorf("reading image: %w", readErr)
+			return 0, "", fmt.Errorf("reading image: %w", readErr)
 		}
 	}
-	aggChecksum = base64.StdEncoding.EncodeToString(agg.Sum(nil))
-	return blocks, bytesRead, aggChecksum, nil
+	return bytesRead, base64.StdEncoding.EncodeToString(agg.Sum(nil)), nil
 }
 
 // BuildSnapshotFromReader populates a new EBS snapshot directly from a raw
@@ -116,13 +126,6 @@ func planSnapshotBlocks(r io.Reader) (blocks []snapshotBlock, bytesRead int64, a
 func (c *Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotInput, image io.Reader) (*BuildSnapshotResult, error) {
 	if in.VolumeSize <= 0 {
 		return nil, fmt.Errorf("volume size must be > 0 GiB")
-	}
-	blocks, bytesRead, aggChecksum, err := planSnapshotBlocks(image)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(blocks))*ebsBlockSize > in.VolumeSize*1024*1024*1024 {
-		return nil, fmt.Errorf("image (%d bytes) does not fit in a %d GiB volume", bytesRead, in.VolumeSize)
 	}
 
 	cfg, err := c.getRegionalConfig(ctx, in.Region)
@@ -148,23 +151,82 @@ func (c *Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotIn
 	}
 	snapshotID := aws.ToString(started.SnapshotId)
 
-	for _, b := range blocks {
-		_, err := ebsClient.PutSnapshotBlock(ctx, &ebs.PutSnapshotBlockInput{
-			SnapshotId:        aws.String(snapshotID),
-			BlockIndex:        aws.Int32(b.index),
-			BlockData:         bytes.NewReader(b.data),
-			DataLength:        aws.Int32(ebsBlockSize),
-			Checksum:          aws.String(b.checksum),
-			ChecksumAlgorithm: ebstypes.ChecksumAlgorithmChecksumAlgorithmSha256,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("PutSnapshotBlock index %d (snapshot %s left incomplete): %w", b.index, snapshotID, err)
+	// Stream the image: scan it block-by-block and upload each block as it's
+	// read, through a bounded worker pool. We never hold the whole image in
+	// memory — peak usage is ~ (concurrency × 512 KiB), not the image size. The
+	// aggregation checksum is computed in read order by scanSnapshotBlocks, so
+	// uploads may complete out of order safely (#157).
+	maxBlocks := in.VolumeSize * 1024 * 1024 * 1024 / ebsBlockSize
+
+	gctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	work := make(chan snapshotBlock)
+	var (
+		wg        sync.WaitGroup
+		blocksPut int64
+		uploadMu  sync.Mutex
+		uploadErr error
+	)
+	fail := func(e error) {
+		uploadMu.Lock()
+		if uploadErr == nil {
+			uploadErr = e
+			cancel()
 		}
+		uploadMu.Unlock()
+	}
+	for i := 0; i < snapshotUploadConcurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for b := range work {
+				_, perr := ebsClient.PutSnapshotBlock(gctx, &ebs.PutSnapshotBlockInput{
+					SnapshotId:        aws.String(snapshotID),
+					BlockIndex:        aws.Int32(b.index),
+					BlockData:         bytes.NewReader(b.data),
+					DataLength:        aws.Int32(ebsBlockSize),
+					Checksum:          aws.String(b.checksum),
+					ChecksumAlgorithm: ebstypes.ChecksumAlgorithmChecksumAlgorithmSha256,
+				})
+				if perr != nil {
+					fail(fmt.Errorf("PutSnapshotBlock index %d (snapshot %s left incomplete): %w", b.index, snapshotID, perr))
+					return
+				}
+				atomic.AddInt64(&blocksPut, 1)
+			}
+		}()
+	}
+
+	bytesRead, aggChecksum, scanErr := scanSnapshotBlocks(image, func(b snapshotBlock) error {
+		if int64(b.index) >= maxBlocks {
+			return fmt.Errorf("image exceeds the %d GiB volume size (block %d past capacity)", in.VolumeSize, b.index)
+		}
+		select {
+		case work <- b:
+			return nil
+		case <-gctx.Done():
+			// An upload worker failed; stop scanning and surface its error.
+			uploadMu.Lock()
+			defer uploadMu.Unlock()
+			if uploadErr != nil {
+				return uploadErr
+			}
+			return gctx.Err()
+		}
+	})
+	close(work)
+	wg.Wait()
+
+	if uploadErr != nil {
+		return nil, uploadErr
+	}
+	if scanErr != nil {
+		return nil, scanErr
 	}
 
 	_, err = ebsClient.CompleteSnapshot(ctx, &ebs.CompleteSnapshotInput{
 		SnapshotId:                aws.String(snapshotID),
-		ChangedBlocksCount:        aws.Int32(int32(len(blocks))),
+		ChangedBlocksCount:        aws.Int32(int32(atomic.LoadInt64(&blocksPut))),
 		Checksum:                  aws.String(aggChecksum),
 		ChecksumAggregationMethod: ebstypes.ChecksumAggregationMethodChecksumAggregationLinear,
 		ChecksumAlgorithm:         ebstypes.ChecksumAlgorithmChecksumAlgorithmSha256,
@@ -180,7 +242,7 @@ func (c *Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotIn
 	return &BuildSnapshotResult{
 		SnapshotID: snapshotID,
 		BlockSize:  ebsBlockSize,
-		BlocksPut:  len(blocks),
+		BlocksPut:  int(atomic.LoadInt64(&blocksPut)),
 		BytesRead:  bytesRead,
 	}, nil
 }
