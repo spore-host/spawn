@@ -43,61 +43,70 @@ jobs:
 
       - name: Upload spored binaries to S3
         run: |
+          set -euo pipefail
           # Extract version from tag (v0.36.0 → 0.36.0)
           VERSION=${GITHUB_REF_NAME#v}
           PROJECT=spawn
 
+          # US regions only for now. Other regions fall back to us-east-1 at
+          # install time (see FALLBACK_URL in pkg/launcher/bootstrap.go), so
+          # spored still installs everywhere — just not from a same-region bucket.
+          # us-east-1 must stay in this list (it IS the fallback).
           BUCKETS=(
             spawn-binaries-us-east-1
             spawn-binaries-us-east-2
             spawn-binaries-us-west-1
             spawn-binaries-us-west-2
-            spawn-binaries-ca-central-1
-            spawn-binaries-eu-west-1
-            spawn-binaries-eu-west-2
-            spawn-binaries-eu-central-1
-            spawn-binaries-ap-southeast-1
-            spawn-binaries-ap-southeast-2
-            spawn-binaries-ap-northeast-1
           )
 
-          for arch in amd64 arm64; do
-            if [ "$arch" = "amd64" ]; then
-              src="dist/spored_linux_amd64_v1/spored"
-            else
-              src="dist/spored_linux_arm64_v8.0/spored"
-            fi
-
-            # Generate SHA256 checksum
-            sha256sum "$src" | awk '{print $1}' > "spored-linux-${arch}.sha256"
-
-            for bucket in "${BUCKETS[@]}"; do
-              region="${bucket#spawn-binaries-}"
-
-              # Upload to project root (for install-spored.sh)
-              aws s3 cp "$src" "s3://${bucket}/${PROJECT}/spored-linux-${arch}" --region "$region"
-              aws s3 cp "spored-linux-${arch}.sha256" "s3://${bucket}/${PROJECT}/spored-linux-${arch}.sha256" --region "$region"
-
-              # Also upload without project prefix (for legacy launch.go/app.go scripts)
-              aws s3 cp "$src" "s3://${bucket}/spored-linux-${arch}" --region "$region"
-              aws s3 cp "spored-linux-${arch}.sha256" "s3://${bucket}/spored-linux-${arch}.sha256" --region "$region"
-
-              # Upload versioned copy
-              aws s3 cp "$src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}" --region "$region"
-            done
-          done
-
-          # Windows spored (amd64 only) — same buckets/paths so install-spored.ps1
-          # downloads it exactly like install-spored.sh does for Linux (#77).
+          # Checksums (computed once).
+          amd_src="dist/spored_linux_amd64_v1/spored"
+          arm_src="dist/spored_linux_arm64_v8.0/spored"
           win_src="dist/spored_windows_amd64_v1/spored.exe"
-          sha256sum "$win_src" | awk '{print $1}' > "spored-windows-amd64.exe.sha256"
-          for bucket in "${BUCKETS[@]}"; do
-            region="${bucket#spawn-binaries-}"
-            aws s3 cp "$win_src" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe" --region "$region"
-            aws s3 cp "spored-windows-amd64.exe.sha256" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe.sha256" --region "$region"
-            aws s3 cp "$win_src" "s3://${bucket}/spored-windows-amd64.exe" --region "$region"
-            aws s3 cp "spored-windows-amd64.exe.sha256" "s3://${bucket}/spored-windows-amd64.exe.sha256" --region "$region"
-            aws s3 cp "$win_src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe" --region "$region"
-          done
+          sha256sum "$amd_src" | awk '{print $1}' > spored-linux-amd64.sha256
+          sha256sum "$arm_src" | awk '{print $1}' > spored-linux-arm64.sha256
+          sha256sum "$win_src" | awk '{print $1}' > spored-windows-amd64.exe.sha256
 
-          echo "✅ Uploaded spored ${VERSION} (linux+windows) to ${#BUCKETS[@]} regions"
+          # Emit every copy as a NUL-separated "src<NUL>dest" pair stream, then run
+          # them all through a bounded parallel pool. The copies are independent;
+          # serially they cost full latency each, in parallel ~seconds. xargs -0 -n2
+          # hands each pair to do_copy; any non-zero `aws cp` makes xargs exit
+          # non-zero, and `set -e` then fails the step (no silent partial upload).
+          # NUL separation is portable (GNU xargs) and safe regardless of paths.
+          emit_copies() {
+            for entry in \
+              "amd64:$amd_src:spored-linux-amd64.sha256" \
+              "arm64:$arm_src:spored-linux-arm64.sha256"; do
+              arch="${entry%%:*}"; rest="${entry#*:}"; src="${rest%%:*}"; sha="${rest#*:}"
+              for bucket in "${BUCKETS[@]}"; do
+                printf '%s\0%s\0' "$src" "s3://${bucket}/${PROJECT}/spored-linux-${arch}"
+                printf '%s\0%s\0' "$sha" "s3://${bucket}/${PROJECT}/spored-linux-${arch}.sha256"
+                printf '%s\0%s\0' "$src" "s3://${bucket}/spored-linux-${arch}"
+                printf '%s\0%s\0' "$sha" "s3://${bucket}/spored-linux-${arch}.sha256"
+                printf '%s\0%s\0' "$src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}"
+              done
+            done
+            # Windows spored (amd64 only) — same paths so install-spored.ps1 mirrors
+            # install-spored.sh (#77).
+            for bucket in "${BUCKETS[@]}"; do
+              printf '%s\0%s\0' "$win_src" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe"
+              printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe.sha256"
+              printf '%s\0%s\0' "$win_src" "s3://${bucket}/spored-windows-amd64.exe"
+              printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/spored-windows-amd64.exe.sha256"
+              printf '%s\0%s\0' "$win_src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe"
+            done
+          }
+
+          # One copy: dest's region is the segment after "spawn-binaries-" in the
+          # bucket name. Exported so xargs' subshells can call it.
+          do_copy() {
+            src="$1"; dest="$2"
+            bucket="${dest#s3://}"; bucket="${bucket%%/*}"
+            region="${bucket#spawn-binaries-}"
+            aws s3 cp "$src" "$dest" --region "$region" --only-show-errors
+          }
+          export -f do_copy
+
+          emit_copies | xargs -0 -P 16 -n 2 bash -c 'do_copy "$1" "$2"' _
+
+          echo "✅ Uploaded spored ${VERSION} (linux+windows) to ${#BUCKETS[@]} US regions (parallel)"
