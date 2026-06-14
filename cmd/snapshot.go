@@ -45,6 +45,11 @@ Directories and tarballs are converted to ext4 in-process (pure Go — no mkfs a
 no builder instance), so this works the same from macOS, Linux, or Windows. The
 ext4 filesystem is sized to the data and capped at --size.
 
+For a directory or tarball source, the ext4 image is built in a local temp file
+first (~the uncompressed data size — e.g. ~16 GB for a 16 GB DB) and removed when
+done; ensure that much free space in your temp directory. A raw image needs no
+scratch (it streams source → snapshot directly).
+
 Examples:
   # From a directory:
   spawn snapshot create --from ./kraken2-db/ --size 20 --name kraken2-k2pluspf
