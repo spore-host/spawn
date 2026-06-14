@@ -18,6 +18,7 @@ var (
 	snapshotEncrypted   bool
 	snapshotKMSKeyARN   string
 	snapshotOutput      string
+	snapshotTempDir     string
 )
 
 var snapshotCmd = &cobra.Command{
@@ -47,8 +48,14 @@ ext4 filesystem is sized to the data and capped at --size.
 
 For a directory or tarball source, the ext4 image is built in a local temp file
 first (~the uncompressed data size — e.g. ~16 GB for a 16 GB DB) and removed when
-done; ensure that much free space in your temp directory. A raw image needs no
-scratch (it streams source → snapshot directly).
+done; ensure that much free space, or use --temp-dir to point at a roomier disk.
+A raw image needs no scratch (it streams source → snapshot directly). Memory stays
+low regardless of size (the upload streams blocks concurrently, never buffering
+the whole image).
+
+The upload sends the uncompressed image to AWS over your connection; for a large
+DB over a slow uplink, run this from AWS CloudShell or a small in-region EC2
+instance so the upload is AWS-internal.
 
 Examples:
   # From a directory:
@@ -75,6 +82,7 @@ func init() {
 	snapshotCreateCmd.Flags().StringVar(&snapshotRegion, "region", "", "AWS region (default: the configured region)")
 	snapshotCreateCmd.Flags().BoolVar(&snapshotEncrypted, "encrypted", false, "Create an encrypted snapshot")
 	snapshotCreateCmd.Flags().StringVar(&snapshotKMSKeyARN, "kms-key", "", "Customer-managed KMS key ARN for encryption (implies --encrypted)")
+	snapshotCreateCmd.Flags().StringVar(&snapshotTempDir, "temp-dir", "", "Directory for the temporary ext4 image built from a dir/tarball source (default: system temp). Point at a roomy disk for large data.")
 	snapshotCreateCmd.Flags().StringVarP(&snapshotOutput, "output", "o", "text", "Output format: text or json")
 
 	_ = snapshotCreateCmd.MarkFlagRequired("from")
@@ -116,7 +124,7 @@ func runSnapshotCreate(cmd *cobra.Command, _ []string) error {
 	// a directory or tar/tar.gz is converted to an ext4 image in-process (no
 	// instance, no mkfs — pure Go) (#147). Cap the filesystem at the volume size.
 	maxBytes := snapshotSizeGiB * 1024 * 1024 * 1024
-	prepared, err := awsClient.PrepareSnapshotImage(ctx, snapshotFrom, region, maxBytes)
+	prepared, err := awsClient.PrepareSnapshotImage(ctx, snapshotFrom, region, maxBytes, snapshotTempDir)
 	if err != nil {
 		return err
 	}

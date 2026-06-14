@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -110,7 +111,7 @@ func TestPrepareSnapshotImage_DirectoryBuildsExt4(t *testing.T) {
 	}
 
 	c := &Client{}
-	prepared, err := c.PrepareSnapshotImage(context.Background(), dir, "us-east-1", 64*1024*1024)
+	prepared, err := c.PrepareSnapshotImage(context.Background(), dir, "us-east-1", 64*1024*1024, "")
 	if err != nil {
 		t.Fatalf("PrepareSnapshotImage(dir): %v", err)
 	}
@@ -154,7 +155,7 @@ func TestPrepareSnapshotImage_TarGzBuildsExt4(t *testing.T) {
 	gf.Close()
 
 	c := &Client{}
-	prepared, err := c.PrepareSnapshotImage(context.Background(), gzPath, "us-east-1", 64*1024*1024)
+	prepared, err := c.PrepareSnapshotImage(context.Background(), gzPath, "us-east-1", 64*1024*1024, "")
 	if err != nil {
 		t.Fatalf("PrepareSnapshotImage(tar.gz): %v", err)
 	}
@@ -181,7 +182,7 @@ func TestPrepareSnapshotImage_RawImagePassthrough(t *testing.T) {
 	}
 
 	c := &Client{}
-	prepared, err := c.PrepareSnapshotImage(context.Background(), raw, "us-east-1", 0)
+	prepared, err := c.PrepareSnapshotImage(context.Background(), raw, "us-east-1", 0, "")
 	if err != nil {
 		t.Fatalf("PrepareSnapshotImage(raw): %v", err)
 	}
@@ -193,5 +194,35 @@ func TestPrepareSnapshotImage_RawImagePassthrough(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("raw passthrough altered bytes: got %q want %q", got, want)
+	}
+}
+
+func TestPrepareSnapshotImage_TempDirIsHonored(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.bin"), bytes.Repeat([]byte{0x9}, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A dedicated temp dir; the staged ext4 image must land here, not in /tmp.
+	staging := t.TempDir()
+
+	c := &Client{}
+	prepared, err := c.PrepareSnapshotImage(context.Background(), dir, "us-east-1", 64*1024*1024, staging)
+	if err != nil {
+		t.Fatalf("PrepareSnapshotImage(tempDir): %v", err)
+	}
+	defer prepared.Cleanup()
+
+	entries, err := os.ReadDir(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "spawn-ext4-") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the staged ext4 image in %s, contents: %v", staging, entries)
 	}
 }

@@ -68,9 +68,10 @@ func classifySnapshotSource(path string, isDir bool) SnapshotSourceKind {
 //   - tar/tar.gz  → (gunzipped if needed and) converted to an ext4 image.
 //
 // maxBytes caps the ext4 filesystem at the target volume size. The ext4 image
-// is built compactly (sized to content, capped at maxBytes) into a temp file;
-// Cleanup removes it.
-func (c *Client) PrepareSnapshotImage(ctx context.Context, source, region string, maxBytes int64) (*PreparedImage, error) {
+// is built compactly (sized to content, capped at maxBytes) into a temp file in
+// tempDir (empty = the system temp dir); Cleanup removes it. tempDir lets the
+// caller stage the (potentially large) image on a roomier volume than /tmp.
+func (c *Client) PrepareSnapshotImage(ctx context.Context, source, region string, maxBytes int64, tempDir string) (*PreparedImage, error) {
 	// Local directory?
 	isDir := false
 	if !strings.HasPrefix(source, "s3://") {
@@ -120,10 +121,10 @@ func (c *Client) PrepareSnapshotImage(ctx context.Context, source, region string
 		}
 	}
 
-	img, err := os.CreateTemp("", "spawn-ext4-*.img")
+	img, err := os.CreateTemp(tempDir, "spawn-ext4-*.img")
 	if err != nil {
 		_ = closeSrc()
-		return nil, fmt.Errorf("create temp image: %w", err)
+		return nil, fmt.Errorf("create temp image in %q: %w", tempDirOrDefault(tempDir), err)
 	}
 	cleanup := func() {
 		img.Close()
@@ -149,6 +150,14 @@ func (c *Client) PrepareSnapshotImage(ctx context.Context, source, region string
 	}
 
 	return &PreparedImage{Reader: img, Cleanup: cleanup}, nil
+}
+
+// tempDirOrDefault renders tempDir for error messages (empty → the OS default).
+func tempDirOrDefault(tempDir string) string {
+	if tempDir == "" {
+		return os.TempDir()
+	}
+	return tempDir
 }
 
 // isGzipName reports whether a path looks gzip-compressed by extension.
