@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.48.0] - 2026-06-13
+### Fixed
+- Instances launched from a `spawn image import` **warm AMI** can now retrieve
+  their Administrator password again (`spawn connect --rdp` and the EC2 console's
+  "Get Windows password"). The warm-AMI build imaged the seed after EC2Launch had
+  already generated its one-time password, so every launch from the warm AMI
+  returned "Password is not available. The instance was launched from a custom
+  AMI…". The build now re-arms EC2Launch (`reset -c`) over SSM before imaging — so
+  a fresh password is generated on each launch — and captures the image with
+  `NoReboot` so the re-armed state is preserved. This keeps the warm AMI
+  non-generalized (no Sysprep). The warm build now requires the seed's SSM agent
+  to come Online (it was best-effort) and fails loudly otherwise (#153).
 
 ### Added
 - `spawn snapshot create --from` now accepts a **directory** or a

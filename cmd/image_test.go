@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+// TestEC2LaunchRearmCommand pins the re-arm the warm-AMI build runs before
+// imaging (#153): it must use EC2Launch's `reset` (re-enables setAdminAccount so
+// GetPasswordData works on launches from the warm AMI) and must NOT generalize
+// the image (no `sysprep`), since the warm AMI is a non-generalized
+// single-instance image (#98).
+func TestEC2LaunchRearmCommand(t *testing.T) {
+	cmd := ec2LaunchRearmCommand
+	if !strings.Contains(cmd, "EC2Launch.exe") {
+		t.Errorf("re-arm command should invoke EC2Launch.exe; got %q", cmd)
+	}
+	if !strings.Contains(cmd, " reset") {
+		t.Errorf("re-arm command must use `reset` to re-enable setAdminAccount; got %q", cmd)
+	}
+	if !strings.Contains(cmd, "-c") {
+		t.Errorf("re-arm command should pass -c to clear run-once state + logs; got %q", cmd)
+	}
+	if strings.Contains(cmd, "sysprep") {
+		t.Errorf("re-arm must NOT sysprep/generalize the warm AMI; got %q", cmd)
+	}
+	if !strings.Contains(cmd, `$Env:ProgramFiles\Amazon\EC2Launch`) {
+		t.Errorf("re-arm command should use the EC2Launch v2 install path; got %q", cmd)
+	}
+}
+
 func TestValidateImageImportFlags(t *testing.T) {
 	cases := []struct {
 		name           string
