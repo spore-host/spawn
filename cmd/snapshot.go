@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -20,6 +22,7 @@ var (
 	snapshotOutput      string
 	snapshotTempDir     string
 	snapshotTags        []string
+	snapshotMountRW     bool
 )
 
 var snapshotCmd = &cobra.Command{
@@ -72,9 +75,31 @@ Examples:
 	RunE: runSnapshotCreate,
 }
 
+var snapshotMountCmd = &cobra.Command{
+	Use:   "mount <snapshot-id> <mount-point>",
+	Short: "Create a volume from a snapshot and mount it on THIS EC2 instance",
+	Long: `Convenience for the head-node side of the reference-data-volume recipe:
+create an EBS volume from a snapshot, attach it to the instance this command runs
+on, and mount it (read-only by default) at <mount-point>.
+
+This only works when run ON an EC2 instance (it identifies itself via IMDS). It's
+the one-command equivalent of: aws ec2 create-volume --snapshot-id … &&
+aws ec2 attach-volume … && sudo mount -o ro …. Use it on a spawn head node (or
+any EC2 box running 'nextflow run') so an nf-core pipeline's head-side db_path
+validation finds the DB. Tasks don't need this — 'spawn launch --attach-volume'
+mounts the volume on each task automatically.
+
+Example:
+  sudo spawn snapshot mount snap-0abc123 /opt/databases/kraken2`,
+	Args: cobra.ExactArgs(2),
+	RunE: runSnapshotMount,
+}
+
 func init() {
 	rootCmd.AddCommand(snapshotCmd)
 	snapshotCmd.AddCommand(snapshotCreateCmd)
+	snapshotCmd.AddCommand(snapshotMountCmd)
+	snapshotMountCmd.Flags().BoolVar(&snapshotMountRW, "rw", false, "Mount read-write (default: read-only — the right choice for shared reference data)")
 
 	snapshotCreateCmd.Flags().StringVar(&snapshotFrom, "from", "", "Source: a directory, a .tar/.tar.gz/.tgz, or a raw disk image — local path or s3://bucket/key (required)")
 	snapshotCreateCmd.Flags().Int64Var(&snapshotSizeGiB, "size", 0, "Volume size in GiB the snapshot is built for; the image must fit (required)")
@@ -166,5 +191,54 @@ func runSnapshotCreate(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "✓ Created %s in %s (%d blocks, %d bytes)\n", res.SnapshotID, region, res.BlocksPut, res.BytesRead)
 	fmt.Fprintf(cmd.OutOrStdout(), "  Attach it:  spawn launch <name> --attach-volume %s:/mount/point:ro\n", res.SnapshotID)
+	return nil
+}
+
+func runSnapshotMount(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	snapshotID := args[0]
+	mountPoint := args[1]
+
+	awsClient, err := aws.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("init AWS client: %w", err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Creating a volume from %s and attaching it to this instance...\n", snapshotID)
+	res, err := awsClient.AttachSnapshotToSelf(ctx, snapshotID)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "  volume %s attached as %s on %s\n", res.VolumeID, res.DeviceName, res.InstanceID)
+
+	// Resolve the live device: on Nitro the requested /dev/sdf is remapped to an
+	// NVMe device. AL2023's ec2-utils udev rules create a /dev/sdf symlink; prefer
+	// it, falling back to the bare name. (Mirrors the launch-time mount logic.)
+	dev := res.DeviceName
+	if _, statErr := os.Stat(dev); statErr != nil {
+		// Symlink not present (older udev / different naming) — let mount try the
+		// requested name anyway; surface a clear hint if it fails.
+		fmt.Fprintf(cmd.OutOrStderr(), "  note: %s not present yet; the kernel may expose it as an NVMe device.\n", dev)
+	}
+
+	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
+		return fmt.Errorf("create mount point %s: %w", mountPoint, err)
+	}
+
+	// Snapshot-backed volume already has a filesystem — never reformat.
+	mountArgs := []string{"-o", "noatime"}
+	if !snapshotMountRW {
+		mountArgs = []string{"-o", "ro,noatime"}
+	}
+	mountArgs = append(mountArgs, dev, mountPoint)
+	mountCmd := exec.CommandContext(ctx, "mount", mountArgs...) // #nosec G204 -- dev/mountPoint are this command's own resolved values
+	if out, mErr := mountCmd.CombinedOutput(); mErr != nil {
+		return fmt.Errorf("mount %s at %s failed: %w\n%s\n(if %s isn't the live device, the Nitro NVMe remap may have moved it — check `lsblk`)", dev, mountPoint, mErr, string(out), dev)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ Mounted %s at %s (%s)\n", res.VolumeID, mountPoint, map[bool]string{true: "read-write", false: "read-only"}[snapshotMountRW])
 	return nil
 }
