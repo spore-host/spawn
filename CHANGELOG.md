@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spawn snapshot create --tag key=value` (repeatable) sets custom provenance
+  tags on the snapshot at creation, merged with the `spawn:*` baseline (which it
+  can't override) — no more post-hoc `aws ec2 create-tags` (#161).
+- `spawn launch --tag key=value` (repeatable) tags the instance and its created
+  volumes, so ephemeral spores and their `--attach-volume` data volumes are
+  attributable in Cost Explorer / cleanup scripts. The `spawn:` prefix is
+  reserved (#161).
+- `--attach-volume` now propagates the source snapshot's **custom** tags onto the
+  volume created from it (skipping the snapshot's `Name` / `spawn:*` baseline),
+  plus `spawn:from-snapshot=<snap-id>`, so an attached volume is traceable back
+  to its source DB (#161).
+
 ## [0.49.0] - 2026-06-13
 
 ### Fixed

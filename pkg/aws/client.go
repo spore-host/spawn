@@ -457,7 +457,73 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		return nil, fmt.Errorf("no instances returned")
 	}
 
+	// Best-effort: propagate each attached snapshot's custom tags onto the volume
+	// created from it, so a data volume is traceable back to its source DB (#161).
+	// RunInstances tags all volumes uniformly, so per-volume snapshot tags must be
+	// applied here. Never fatal — a tagging failure must not fail the launch.
+	if len(launchConfig.AttachVolumes) > 0 {
+		if err := c.propagateSnapshotTagsToVolumes(ctx, ec2Client, result.Instances[0], launchConfig.AttachVolumes); err != nil {
+			log.Printf("warning: could not propagate snapshot tags to attached volumes: %v", err)
+		}
+	}
+
 	return newLaunchResult(result.Instances[0], launchConfig.Name, launchConfig.KeyName), nil
+}
+
+// propagatableSnapshotTags filters a snapshot's tags down to the ones worth
+// copying onto a volume created from it (#161): everything EXCEPT the snapshot's
+// own Name and any spawn:* baseline, so the volume isn't stamped with the
+// snapshot's identity (which would confuse Cost Explorer / cleanup tooling).
+func propagatableSnapshotTags(snapTags []types.Tag) []types.Tag {
+	var out []types.Tag
+	for _, t := range snapTags {
+		k := aws.ToString(t.Key)
+		if k == "Name" || strings.HasPrefix(strings.ToLower(k), "spawn:") {
+			continue
+		}
+		out = append(out, types.Tag{Key: t.Key, Value: t.Value})
+	}
+	return out
+}
+
+// propagateSnapshotTagsToVolumes copies each attached snapshot's CUSTOM tags onto
+// the EBS volume created from it at launch, plus a spawn:from-snapshot=<snap>
+// provenance tag (#161). It deliberately skips the snapshot's own Name and any
+// spawn:* baseline tags, so a spore's data volume isn't stamped with the
+// snapshot's name (which would confuse Cost Explorer / cleanup tooling). The
+// attach specs map to device names via AttachDeviceName in the same order as
+// buildBlockDevices, so volume i is found at AttachDeviceName(i).
+func (c *Client) propagateSnapshotTagsToVolumes(ctx context.Context, ec2Client *ec2.Client, instance types.Instance, specs []AttachVolumeSpec) error {
+	// Map device name → created volume ID from the launch response.
+	volByDevice := map[string]string{}
+	for _, bdm := range instance.BlockDeviceMappings {
+		if bdm.Ebs != nil && bdm.Ebs.VolumeId != nil {
+			volByDevice[aws.ToString(bdm.DeviceName)] = aws.ToString(bdm.Ebs.VolumeId)
+		}
+	}
+	for i, spec := range specs {
+		volID := volByDevice[AttachDeviceName(i)]
+		if volID == "" {
+			continue // volume id not yet visible; skip rather than guess
+		}
+		tags := []types.Tag{{Key: aws.String("spawn:from-snapshot"), Value: aws.String(spec.SnapshotID)}}
+		// Read the source snapshot's custom tags.
+		desc, err := ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
+			SnapshotIds: []string{spec.SnapshotID},
+		})
+		if err == nil {
+			for _, s := range desc.Snapshots {
+				tags = append(tags, propagatableSnapshotTags(s.Tags)...)
+			}
+		}
+		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
+			Resources: []string{volID},
+			Tags:      tags,
+		}); err != nil {
+			return fmt.Errorf("tag volume %s: %w", volID, err)
+		}
+	}
+	return nil
 }
 
 // newLaunchResult maps a RunInstances instance into a LaunchResult. Placement

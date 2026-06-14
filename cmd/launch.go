@@ -183,6 +183,7 @@ var (
 
 	// Team sharing
 	launchTeamID string
+	launchTags   []string
 
 	// Plugin declarations
 	launchConfigFile string
@@ -345,6 +346,7 @@ func init() {
 
 	// Team sharing
 	launchCmd.Flags().StringVar(&launchTeamID, "team", "", "Team ID: tag instance with spawn:team-id for team-shared access")
+	launchCmd.Flags().StringArrayVar(&launchTags, "tag", nil, "Custom tag key=value on the instance and its created volumes (repeatable). The spawn: prefix is reserved.")
 
 	// Plugin declarations
 	launchCmd.Flags().StringVar(&launchConfigFile, "config", "", "Launch config YAML file (supports plugins: list)")
@@ -461,6 +463,23 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		config, err = buildLaunchConfig(nil)
 		if err != nil {
 			return err
+		}
+	}
+
+	// Apply custom --tag key=value tags to the instance + its created volumes,
+	// so ephemeral spores and their --attach-volume data volumes are attributable
+	// in Cost Explorer / cleanup scripts (#161). Set first so spawn-managed tags
+	// (team, strata, the buildTags baseline) take precedence over user tags.
+	if len(launchTags) > 0 {
+		userTags, err := parseKVTags(launchTags)
+		if err != nil {
+			return err
+		}
+		if config.Tags == nil {
+			config.Tags = make(map[string]string)
+		}
+		for k, v := range userTags {
+			config.Tags[k] = v
 		}
 	}
 

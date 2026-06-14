@@ -19,6 +19,7 @@ var (
 	snapshotKMSKeyARN   string
 	snapshotOutput      string
 	snapshotTempDir     string
+	snapshotTags        []string
 )
 
 var snapshotCmd = &cobra.Command{
@@ -83,6 +84,7 @@ func init() {
 	snapshotCreateCmd.Flags().BoolVar(&snapshotEncrypted, "encrypted", false, "Create an encrypted snapshot")
 	snapshotCreateCmd.Flags().StringVar(&snapshotKMSKeyARN, "kms-key", "", "Customer-managed KMS key ARN for encryption (implies --encrypted)")
 	snapshotCreateCmd.Flags().StringVar(&snapshotTempDir, "temp-dir", "", "Directory for the temporary ext4 image built from a dir/tarball source (default: system temp). Point at a roomy disk for large data.")
+	snapshotCreateCmd.Flags().StringArrayVar(&snapshotTags, "tag", nil, "Custom tag key=value to set on the snapshot (repeatable). Merged with the spawn:* baseline; cannot override a spawn: tag.")
 	snapshotCreateCmd.Flags().StringVarP(&snapshotOutput, "output", "o", "text", "Output format: text or json")
 
 	_ = snapshotCreateCmd.MarkFlagRequired("from")
@@ -111,10 +113,14 @@ func runSnapshotCreate(cmd *cobra.Command, _ []string) error {
 		region = awsClient.Config().Region
 	}
 
-	tags := map[string]string{
-		"spawn:managed": "true",
-		"spawn:source":  "ebs-direct",
+	// Custom provenance tags (#161), merged UNDER the spawn:* baseline so a user
+	// tag can't clobber spawn:managed / spawn:source etc.
+	tags, err := parseKVTags(snapshotTags)
+	if err != nil {
+		return err
 	}
+	tags["spawn:managed"] = "true"
+	tags["spawn:source"] = "ebs-direct"
 	if snapshotName != "" {
 		tags["Name"] = snapshotName
 		tags["spawn:snapshot-name"] = snapshotName

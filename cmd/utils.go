@@ -10,6 +10,30 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 )
 
+// parseKVTags parses repeated "key=value" flag values into a tag map (#161).
+// The value may itself contain '=' (split on the first only). Keys must be
+// non-empty and must not use the reserved "spawn:" prefix (those are managed by
+// spawn). Returns a fresh map; nil/empty input yields an empty map.
+func parseKVTags(pairs []string) (map[string]string, error) {
+	out := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		i := strings.IndexByte(p, '=')
+		if i <= 0 {
+			return nil, fmt.Errorf("invalid --tag %q: expected key=value", p)
+		}
+		key := strings.TrimSpace(p[:i])
+		val := p[i+1:]
+		if key == "" {
+			return nil, fmt.Errorf("invalid --tag %q: empty key", p)
+		}
+		if strings.HasPrefix(strings.ToLower(key), "spawn:") {
+			return nil, fmt.Errorf("invalid --tag %q: the spawn: prefix is reserved", p)
+		}
+		out[key] = val
+	}
+	return out, nil
+}
+
 // confirmYes is the shared confirmation prompt for destructive commands
 // (spawn#40 convention). When skip is true (the command's --yes/-y flag) it
 // returns true without prompting. Otherwise it prompts on stderr and returns
