@@ -83,6 +83,24 @@ or a small short-lived EC2 instance in the target region — where the upload is
 AWS-internal and fast. Build once there, then `--attach-volume` the snapshot from
 anywhere.
 
+### Provenance tags
+
+`snapshot create` auto-applies `Name`, `spawn:snapshot-name`, `spawn:managed`,
+and `spawn:source`. Add your own with repeatable `--tag key=value` so a
+long-lived reference snapshot records what it is months later:
+
+```bash
+spawn snapshot create --from s3://.../k2_pluspf_16_GB_20260226.tar.gz --size 24 \
+  --name kraken2-k2pluspf-16gb \
+  --tag project=aws-microbiome-demo \
+  --tag db-version=k2_pluspf_16_GB_20260226 \
+  --tag mount=/opt/databases/kraken2
+```
+
+Custom tags merge with the `spawn:*` baseline but cannot override it (the
+`spawn:` prefix is reserved). `spawn launch --tag key=value` does the same for an
+instance and its created volumes (Cost Explorer / cleanup attribution).
+
 ## Attach it to a spore
 
 ```bash
@@ -102,6 +120,9 @@ reference data; use `:rw` for a writable scratch volume.
   to the real device on Nitro instances, so the data lands at your mount point
   regardless of device renaming.
 - Snapshot-backed volumes are **never reformatted**.
+- The created volume inherits the source snapshot's **custom** tags (not its
+  `Name` / `spawn:*` baseline) plus `spawn:from-snapshot=<snap-id>`, so a volume
+  is traceable back to the DB it came from.
 
 A read-only reference volume fanned out across many instances means many EBS
 volumes created from one snapshot — that's expected, and is the cost you're

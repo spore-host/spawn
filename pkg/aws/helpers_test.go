@@ -342,3 +342,32 @@ func TestBuildIAMTags(t *testing.T) {
 		t.Errorf("expected spawn tags even for nil input, got %d", len(nilTags))
 	}
 }
+
+// TestPropagatableSnapshotTags verifies the #161 filter: a volume created from a
+// snapshot inherits the snapshot's CUSTOM tags but not its Name or spawn:* baseline.
+func TestPropagatableSnapshotTags(t *testing.T) {
+	in := []types.Tag{
+		{Key: aws.String("Name"), Value: aws.String("kraken2-k2pluspf")},
+		{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+		{Key: aws.String("spawn:source"), Value: aws.String("ebs-direct")},
+		{Key: aws.String("project"), Value: aws.String("aws-microbiome-demo")},
+		{Key: aws.String("db-version"), Value: aws.String("k2_20260226")},
+	}
+	out := propagatableSnapshotTags(in)
+	got := map[string]string{}
+	for _, tg := range out {
+		got[*tg.Key] = *tg.Value
+	}
+	if _, ok := got["Name"]; ok {
+		t.Error("Name must not propagate to the volume")
+	}
+	if _, ok := got["spawn:managed"]; ok {
+		t.Error("spawn:* baseline must not propagate")
+	}
+	if got["project"] != "aws-microbiome-demo" || got["db-version"] != "k2_20260226" {
+		t.Errorf("custom tags should propagate; got %v", got)
+	}
+	if len(got) != 2 {
+		t.Errorf("expected exactly the 2 custom tags, got %d: %v", len(got), got)
+	}
+}
