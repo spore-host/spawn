@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spawn snapshot mount <snapshot-id> <mount-point>` creates a volume from a
+  snapshot, attaches it to the EC2 instance the command runs on, and mounts it
+  (read-only by default) — the one-command equivalent of `create-volume` +
+  `attach-volume` + `mount`. Intended for the head node of the reference-data
+  workflow (so an nf-core pipeline's head-side `db_path` validation finds the DB);
+  tasks already auto-mount via `--attach-volume`. Only works on an EC2 instance
+  (identifies itself via IMDS) (#161 follow-up).
+
 ## [0.50.0] - 2026-06-13
 
 ### Added
