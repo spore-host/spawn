@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Bumped the `substrate` test dependency to v0.71.0, which models the SSM
+  dead-state (a running instance with no IAM instance profile is not listed by
+  `DescribeInstanceInformation`, and `DescribeInstances` echoes the profile —
+  substrate#331). Re-enabled the end-to-end `WaitForSSMOnline` dead-path test
+  (`ErrSSMUnreachable` fires fast for a no-profile instance) that had to be
+  unit-only while substrate couldn't represent it.
+
 ### Fixed
 - `spawn image import` warm-AMI build no longer fails after a 30-minute SSM
   timeout. The warm seed was launched **without an IAM instance profile**, so
