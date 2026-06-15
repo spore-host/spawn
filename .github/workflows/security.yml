@@ -84,7 +84,7 @@ jobs:
       image: semgrep/semgrep
     steps:
       - uses: actions/checkout@v6
-      # Report-only to start: surfaces findings in logs without blocking PRs.
-      # Flip to `--error` once the initial findings are triaged/annotated.
+      # Enforcing: fails the build on findings. Triaged false-positives are
+      # annotated inline with `# nosemgrep: <rule-id> -- <reason>` (#368).
       - name: Semgrep scan
-        run: semgrep scan --config=auto .
+        run: semgrep scan --config=auto --error .

@@ -431,6 +431,7 @@ func launchRDPClient(host string) error {
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "Launching RDP client (%s) → %s ...\n", bin, host)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- bin/args come from rdpClientCommand, which returns hardcoded client names (xfreerdp/open/mstsc) plus the host; exec.Command runs no shell, so there is no command injection.
 	cmd := exec.Command(bin, args...)
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Could not launch %s: %v. Connect manually to %s.\n", bin, err, host)
