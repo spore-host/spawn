@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `spawn image import` warm-AMI build no longer fails after a 30-minute SSM
+  timeout. The warm seed was launched **without an IAM instance profile**, so
+  the SSM agent could never register (`PingStatus=Online`) — the warm stage
+  waited out the full timeout on a structurally impossible condition. The seed
+  now launches with the spored instance profile (which includes
+  `AmazonSSMManagedInstanceCore`), and `WaitForSSMOnline` distinguishes **dead**
+  from **slow**: if an instance has no profile it fails fast with a clear cause
+  instead of waiting out the timeout, and a long-but-live wait prints a periodic
+  heartbeat so it doesn't look hung (#98).
 - `spawn extend` no longer risks setting a TTL deadline in the past. The new
   `spawn:ttl-deadline` is floored at `now + requested-duration`, so an
   already-expired deadline (or a stale launch anchor) can't terminate the

@@ -506,18 +506,30 @@ func buildWarmAMI(ctx context.Context, awsClient *aws.Client, region, name, vers
 	// (the cobra launch path does this via encodeUserDataForOS too).
 	userData := encodeUserDataForOS(userDataScript, "windows")
 
+	// The seed MUST carry the spored IAM instance profile, which includes
+	// AmazonSSMManagedInstanceCore. Without it the SSM agent can run forever but
+	// can never register (no permission to call UpdateInstanceInformation), so the
+	// WaitForSSMOnline below would be doomed from the start — exactly the 30-min
+	// "never came Online" failure seen in the field. The normal launch path sets
+	// this (cmd/launch.go); the warm seed previously did not.
+	instanceProfile, err := awsClient.SetupSporedIAMRole(ctx)
+	if err != nil {
+		return "", fmt.Errorf("set up IAM role for warm seed (needed for SSM): %w", err)
+	}
+
 	prog.Start("Launching warm-build seed instance")
 	res, err := awsClient.Launch(ctx, aws.LaunchConfig{
-		InstanceType:     seedType,
-		Region:           region,
-		AMI:              baseAMI,
-		KeyName:          keyName,
-		SecurityGroupIDs: []string{sgID},
-		TargetOS:         "windows",
-		UserData:         userData,
-		Name:             name + "-warmseed",
-		TTL:              "3h", // safety backstop: reaper kills the seed if we crash
-		Tags:             map[string]string{"spawn:purpose": "warm-build-seed"},
+		InstanceType:       seedType,
+		Region:             region,
+		AMI:                baseAMI,
+		KeyName:            keyName,
+		SecurityGroupIDs:   []string{sgID},
+		TargetOS:           "windows",
+		UserData:           userData,
+		IamInstanceProfile: instanceProfile,
+		Name:               name + "-warmseed",
+		TTL:                "3h", // safety backstop: reaper kills the seed if we crash
+		Tags:               map[string]string{"spawn:purpose": "warm-build-seed"},
 	})
 	if err != nil {
 		prog.Error("Launching warm-build seed instance", err)
@@ -562,9 +574,25 @@ func buildWarmAMI(ctx context.Context, awsClient *aws.Client, region, name, vers
 	// Windows first boot, so the window is generous.
 	ssmLabel := "Waiting for SSM agent Online on seed (needed to re-arm EC2Launch)"
 	prog.Start(ssmLabel)
-	if err := awsClient.WaitForSSMOnline(ctx, region, seedID, time.Duration(imageImportWarmTimeout)*time.Minute); err != nil {
+	// Heartbeat to stderr every ~2 min so a long-but-live wait doesn't look hung
+	// (the progress UI has no per-step live update). This is the "slow" signal;
+	// the "dead" signal is ErrSSMUnreachable below.
+	lastBeat := time.Duration(-1)
+	onProgress := func(elapsed time.Duration) {
+		if m := elapsed.Round(time.Minute); m >= 2*time.Minute && m != lastBeat && int(m.Minutes())%2 == 0 {
+			lastBeat = m
+			fmt.Fprintf(os.Stderr, "   still waiting for SSM Online on seed (%s elapsed, alive — instance profile attached)\n", m)
+		}
+	}
+	if err := awsClient.WaitForSSMOnlineProgress(ctx, region, seedID, time.Duration(imageImportWarmTimeout)*time.Minute, onProgress); err != nil {
 		prog.Error(ssmLabel, err)
-		return "", fmt.Errorf("warm seed's SSM agent never came Online, so EC2Launch can't be re-armed for password generation: %w", err)
+		if errors.Is(err, aws.ErrSSMUnreachable) {
+			// "Dead", not "slow": the seed structurally can't register with SSM
+			// (no instance profile). Say so plainly instead of implying it was a
+			// slow boot — the timeout wasn't the real problem.
+			return "", fmt.Errorf("warm seed cannot register with SSM (not a slow boot — a structural problem): %w", err)
+		}
+		return "", fmt.Errorf("warm seed's SSM agent never came Online within the timeout, so EC2Launch can't be re-armed for password generation: %w", err)
 	}
 	prog.Complete(ssmLabel)
 
