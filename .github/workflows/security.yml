@@ -1,0 +1,90 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 8 * * 1' # weekly Monday 08:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: Go Vulnerability Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Scan all modules
+        run: |
+          # govulncheck is per-module; scan the root and every nested go.mod
+          # (the Lambda submodules pin their own deps).
+          set -e
+          fail=0
+          for mod in $(find . -name go.mod -not -path '*/vendor/*' | sort); do
+            dir=$(dirname "$mod")
+            echo "::group::govulncheck $dir"
+            ( cd "$dir" && govulncheck ./... ) || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  gitleaks:
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history so leaked-then-removed secrets are caught
+      # Run the gitleaks BINARY directly (MIT-licensed, free for orgs). The
+      # gitleaks-action wrapper requires a paid license for GitHub organizations,
+      # which we don't use. `detect` scans full history; non-zero exit on leaks.
+      - name: Install gitleaks
+        run: |
+          VER=8.21.2
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: gitleaks detect
+        run: gitleaks detect --source . --redact --verbose --exit-code 1
+
+  trivy:
+    name: Trivy Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Trivy filesystem scan (vulns + secrets)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: 1
+      - name: Trivy config scan (IaC misconfig)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v6
+      # Report-only to start: surfaces findings in logs without blocking PRs.
+      # Flip to `--error` once the initial findings are triaged/annotated.
+      - name: Semgrep scan
+        run: semgrep scan --config=auto .

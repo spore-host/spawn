@@ -1,0 +1,15 @@
+# gitleaks configuration for spawn.
+# Extends the built-in default ruleset; adds an allowlist for known
+# false positives — documentation examples and security-test fixtures that
+# contain illustrative (fake) keys, not real credentials.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Docs examples and test fixtures contain placeholder secrets, not real ones"
+paths = [
+  '''SECURITY\.md''',
+  '''docs/.*\.md''',
+  '''.*_test\.go''',
+]
