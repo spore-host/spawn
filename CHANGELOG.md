@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Semgrep SAST is now **enforcing** in CI (`--config=auto --error`) instead of
+  report-only (#368). Triaged the existing findings: two `exec.Command` call
+  sites (the RDP-client launcher in `cmd/connect.go` and the e2e test runner) and
+  a test's ephemeral-port `net.Listen` are annotated inline as false positives
+  with `# nosemgrep: <rule-id> -- <reason>`; illustrative `examples/` are excluded
+  via `.semgrepignore` (they shell out / template parameters by design and aren't
+  shipped). No product-code findings remain.
+
 ## [0.52.0] - 2026-06-14
 
 ### Added

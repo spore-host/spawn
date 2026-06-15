@@ -129,6 +129,7 @@ func fileExists(p string) bool {
 // fast (a launch completes in ~1s).
 func (e *spawnEnv) run(args ...string) (stdout, stderr string, code int) {
 	e.t.Helper()
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- e.bin is the test harness's own built CLI path and args are test-controlled; this is the e2e runner invoking the binary under test, not user input.
 	cmd := exec.Command(e.bin, args...)
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),

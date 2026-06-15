@@ -1,0 +1,11 @@
+# Semgrep ignore list (spore-host/spawn).
+# See https://semgrep.dev/docs/ignoring-files-folders-code
+
+# Illustrative sample code, not shipped in the spawn/spored binaries. The Argo
+# workflow templates intentionally interpolate parameters into commands (that is
+# what a workflow template does), and the Python genomics/streaming samples bind
+# to 0.0.0.0 / shell out by design for the demo. Scanning product code only.
+examples/
+
+# Vendored / generated
+vendor/

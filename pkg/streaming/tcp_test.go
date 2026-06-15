@@ -11,6 +11,7 @@ import (
 // freePort asks the OS for an available TCP port.
 func freePort(t *testing.T) int {
 	t.Helper()
+	// nosemgrep: go.lang.security.audit.net.bind_all.avoid-bind-to-all-interfaces -- test helper grabbing a free ephemeral port (:0) for a local loopback test; not a real listener.
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatalf("freePort: %v", err)
