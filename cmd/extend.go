@@ -127,6 +127,12 @@ func runExtend(cmd *cobra.Command, args []string) error {
 			newDeadline = time.Now().Add(extendDuration)
 		}
 	}
+	// Safety floor: never set a deadline earlier than the requested duration from
+	// now. A past/expired existing spawn:ttl-deadline (or a stale launch anchor)
+	// must not reap the instance the moment the user asks to extend it.
+	if floor := time.Now().Add(extendDuration); newDeadline.Before(floor) {
+		newDeadline = floor
+	}
 	tags["spawn:ttl-deadline"] = newDeadline.UTC().Format(time.RFC3339)
 
 	fmt.Fprintf(os.Stderr, "Extending TTL deadline to %s...\n", newDeadline.UTC().Format("2006-01-02 15:04 UTC"))

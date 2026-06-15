@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `spawn extend` no longer risks setting a TTL deadline in the past. The new
+  `spawn:ttl-deadline` is floored at `now + requested-duration`, so an
+  already-expired deadline (or a stale launch anchor) can't terminate the
+  instance the moment you ask to extend it (spore-host#374).
 - `spawn snapshot create` (from a directory or tar) now builds the ext4
   filesystem with `lost+found` at mode `0755` instead of the writer's default
   root-only `0700`. A tool that walks a volume-mounted snapshot (e.g.
