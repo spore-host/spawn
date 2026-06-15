@@ -3,6 +3,7 @@ package aws
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -131,6 +132,13 @@ func (c *Client) PrepareSnapshotImage(ctx context.Context, source, region string
 		os.Remove(img.Name())
 	}
 
+	// Override the ext4 lost+found directory mode. The tar2ext4 writer creates
+	// lost+found as root-owned 0700 (hcsshim compactext4), which makes a tool
+	// that walks the volume (e.g. MetaPhlAn's `find -L <db>`) emit a harmless but
+	// noisy "Permission denied" on lost+found. Prepending a lost+found dir entry
+	// at 0755 re-sets the mode (the writer allows re-creating it as a directory).
+	tarReader = prependLostFound(tarReader)
+
 	opts := []tar2ext4.Option{}
 	if maxBytes > 0 {
 		opts = append(opts, tar2ext4.MaximumDiskSize(maxBytes))
@@ -164,6 +172,28 @@ func tempDirOrDefault(tempDir string) string {
 func isGzipName(path string) bool {
 	l := strings.ToLower(path)
 	return strings.HasSuffix(l, ".gz") || strings.HasSuffix(l, ".tgz")
+}
+
+// prependLostFound returns a reader that emits a single `lost+found` directory
+// tar entry (mode 0755) followed by the original tar stream. tar2ext4 processes
+// entries in order and re-applies the mode when a directory entry repeats, so
+// this overrides the writer's default root-only 0700 lost+found without
+// re-muxing the (possibly very large) source archive.
+//
+// Only a tar HEADER is written for the prepended entry — Flush (not Close) is
+// used so no end-of-archive zero blocks are emitted before the real stream.
+func prependLostFound(src io.Reader) io.Reader {
+	var hdrBuf bytes.Buffer
+	tw := tar.NewWriter(&hdrBuf)
+	// A directory entry: trailing slash + Typeflag dir. Size 0, so the header is
+	// self-contained and immediately followed by the next entry.
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "lost+found/",
+		Typeflag: tar.TypeDir,
+		Mode:     0o755,
+	})
+	_ = tw.Flush() // header only — do NOT Close (that appends the archive trailer)
+	return io.MultiReader(&hdrBuf, src)
 }
 
 // tarDirectory writes a tar stream of dir's contents (recursively, with paths
