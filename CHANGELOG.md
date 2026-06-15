@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `spawn snapshot create` (from a directory or tar) now builds the ext4
+  filesystem with `lost+found` at mode `0755` instead of the writer's default
+  root-only `0700`. A tool that walks a volume-mounted snapshot (e.g.
+  MetaPhlAn's `find -L <db>`) no longer emits a spurious
+  `find: '<db>/lost+found': Permission denied` to stderr (#177, nf-spawn#55).
+
 ### Security
 - Semgrep SAST is now **enforcing** in CI (`--config=auto --error`) instead of
   report-only (#368). Triaged the existing findings: two `exec.Command` call

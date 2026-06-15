@@ -101,6 +101,53 @@ func hasExt4Magic(t *testing.T, path string) bool {
 	return buf[0] == 0x53 && buf[1] == 0xEF
 }
 
+func TestPrependLostFound(t *testing.T) {
+	// Original stream has one regular file.
+	var srcBuf bytes.Buffer
+	tw := tar.NewWriter(&srcBuf)
+	body := []byte("hello")
+	_ = tw.WriteHeader(&tar.Header{Name: "ref/data.bin", Mode: 0o644, Size: int64(len(body))})
+	_, _ = tw.Write(body)
+	_ = tw.Close()
+
+	combined := prependLostFound(bytes.NewReader(srcBuf.Bytes()))
+
+	tr := tar.NewReader(combined)
+
+	// First entry must be the lost+found directory at 0755.
+	h, err := tr.Next()
+	if err != nil {
+		t.Fatalf("read first entry: %v", err)
+	}
+	if got := strings.TrimSuffix(h.Name, "/"); got != "lost+found" {
+		t.Errorf("first entry = %q, want lost+found", h.Name)
+	}
+	if h.Typeflag != tar.TypeDir {
+		t.Errorf("lost+found typeflag = %d, want dir (%d)", h.Typeflag, tar.TypeDir)
+	}
+	if h.FileInfo().Mode().Perm() != 0o755 {
+		t.Errorf("lost+found mode = %o, want 0755", h.FileInfo().Mode().Perm())
+	}
+
+	// Original entry must follow intact.
+	h, err = tr.Next()
+	if err != nil {
+		t.Fatalf("read second entry: %v", err)
+	}
+	if h.Name != "ref/data.bin" {
+		t.Errorf("second entry = %q, want ref/data.bin", h.Name)
+	}
+	got, _ := io.ReadAll(tr)
+	if string(got) != "hello" {
+		t.Errorf("second entry body = %q, want hello", got)
+	}
+
+	// Stream ends cleanly (no truncation/garbage).
+	if _, err := tr.Next(); err != io.EOF {
+		t.Errorf("expected EOF after entries, got %v", err)
+	}
+}
+
 func TestPrepareSnapshotImage_DirectoryBuildsExt4(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
