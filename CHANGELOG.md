@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The headless launcher (`launcher.Provision`, used by lagotto and SDK consumers)
+  now supports **ephemeral async FSx create** (#202) — previously FSx-create was
+  wired only in the CLI, so a headless caller's FSx fields were silently ignored.
+  `Provision` fires `CreateFileSystem` async, tags `spawn:fsx-pending`, and
+  returns fast; spored waits → DRA → mounts (#194). Enforces the #193 fail-closed
+  lifecycle contract: only `ephemeral` is valid headlessly (durable is a
+  deliberate up-front `spawn fsx create`, not a poller action); a create with no
+  bucket or a non-ephemeral lifecycle errors.
+
 ## [0.56.0] - 2026-06-16
 
 ### Added
