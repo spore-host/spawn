@@ -175,6 +175,8 @@ type LaunchConfig struct {
 
 	// FSx Lustre settings
 	FSxLustreCreate    bool   // Create new FSx Lustre filesystem
+	FSxLifecycle       string // "ephemeral" | "durable" — REQUIRED when FSxLustreCreate (#193). Lifetime is explicit, never inferred.
+	FSxTTL             string // Time-to-live for a durable FSx (e.g. "7d"); required when FSxLifecycle=="durable". Stamped as spawn:ttl-deadline for the reaper (#192).
 	FSxLustreID        string // Existing FSx filesystem ID to mount (fs-xxx)
 	FSxMountName       string // Per-filesystem Lustre mount name (e.g. "q5pdvb4v") — from FSx API
 	FSxLustreRecall    string // Recall FSx by stack name
