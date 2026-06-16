@@ -8,14 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- spored can now mount an **asynchronously-created FSx** at runtime (#194, part
-  1). When an instance is tagged `spawn:fsx-pending=<fs-id>`, spored polls the
-  FSx API off the lifecycle critical path until the filesystem is AVAILABLE,
-  mounts it (Lustre, Linux), and flips the tag to `spawn:fsx-id` so the reaper's
-  refcount (#192) sees the instance as a live user. Best-effort: a failed/slow
-  mount never terminates the instance or gates TTL/idle enforcement. This is the
-  agent half of the ephemeral-FSx path; the launch side that fires the async
-  create + tags follows in part 2.
+- **Ephemeral FSx is created asynchronously, with no blocking wait** (#194).
+  `spawn launch --fsx-create --fsx-lifecycle ephemeral` now fires
+  `CreateFileSystem` and returns in seconds, tagging the instance
+  `spawn:fsx-pending`; **spored** then waits (off the lifecycle critical path)
+  for the filesystem to become AVAILABLE, sets up the continuous S3 export
+  association, mounts it (Lustre, Linux), and flips the tag to `spawn:fsx-id` so
+  the reaper's refcount (#192) sees a live user. The FSx is reaped when the
+  instance terminates. Because neither the CLI nor a headless caller blocks on
+  the ~10-minute provisioning, this is the path the lagotto capacity-poller uses.
+  Best-effort throughout: a failed/slow mount or export-association never
+  terminates the instance or gates TTL/idle enforcement. (`durable` FSx stays a
+  blocking, up-front create.)
 - **`spawn launch --fsx-create` now requires an explicit `--fsx-lifecycle`**
   (`ephemeral` or `durable`), fail-closed (#193). An FSx Lustre filesystem is
   expensive and holds the only copy of results, so its lifetime is never inferred

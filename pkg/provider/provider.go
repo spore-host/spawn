@@ -49,6 +49,8 @@ type Config struct {
 	// tag to spawn:fsx-id (so the reaper's refcount, #192, sees a live user).
 	FSxPending    string // pending FSx filesystem id to mount once AVAILABLE (empty = nothing pending)
 	FSxMountPoint string // mount point for the pending FSx (default: /fsx)
+	FSxImportPath string // S3 import path for the pending FSx's data-repository association
+	FSxExportPath string // S3 export path for the pending FSx's data-repository association
 
 	// Completion signal settings
 	OnComplete      string        // Action: terminate, stop, hibernate, exit

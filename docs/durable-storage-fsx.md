@@ -29,10 +29,15 @@ accidentally create a filesystem that bills forever.
 
 ## 2. What each lifetime costs you
 
-- **`ephemeral`** ties the filesystem's cost to a single job. It's created in the
-  **same AZ as the instance** (no constraint on where the instance launches), and
-  is reclaimed automatically when the instance terminates. Best for hands-off,
-  one-shot jobs. **No TTL needed** — the instance *is* the lifetime.
+- **`ephemeral`** ties the filesystem's cost to a single job. It's created
+  **asynchronously** — `spawn launch` fires the create and returns in seconds; the
+  instance (via spored) waits for the filesystem to become AVAILABLE, sets up the
+  S3 export association, and mounts it (~10 min, overlapping boot/staging). It's
+  created in the **same AZ as the instance** (no constraint on where the instance
+  launches), and reclaimed automatically when the instance terminates. Best for
+  hands-off, one-shot jobs. **No TTL needed** — the instance *is* the lifetime.
+  Because the create is non-blocking, this is the path the lagotto capacity-poller
+  uses (it never blocks waiting on FSx).
 - **`durable`** keeps billing until its TTL, surviving crashes, idle periods, and
   "the job never ran." That's the point — but it also means a **forgotten durable
   FSx is a recurring bill**, which is why the TTL is mandatory. It also **pins

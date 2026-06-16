@@ -178,6 +178,7 @@ type LaunchConfig struct {
 	FSxLifecycle       string // "ephemeral" | "durable" — REQUIRED when FSxLustreCreate (#193). Lifetime is explicit, never inferred.
 	FSxTTL             string // Time-to-live for a durable FSx (e.g. "7d"); required when FSxLifecycle=="durable". Stamped as spawn:ttl-deadline for the reaper (#192).
 	FSxLustreID        string // Existing FSx filesystem ID to mount (fs-xxx)
+	FSxPending         string // Async-created FSx id, still CREATING — tagged spawn:fsx-pending for spored to wait/mount (#194 ephemeral)
 	FSxMountName       string // Per-filesystem Lustre mount name (e.g. "q5pdvb4v") — from FSx API
 	FSxLustreRecall    string // Recall FSx by stack name
 	FSxStorageCapacity int32  // Storage capacity in GB (1200, 2400, +2400)
@@ -661,6 +662,24 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		tags = append(tags, types.Tag{Key: aws.String("spawn:fsx-mount-point"), Value: aws.String(mp)})
 		if config.FSxMountName != "" {
 			tags = append(tags, types.Tag{Key: aws.String("spawn:fsx-mount-name"), Value: aws.String(config.FSxMountName)})
+		}
+	}
+	// Ephemeral async FSx (#194): the filesystem is still CREATING at launch, so
+	// instead of spawn:fsx-id we tag spawn:fsx-pending + the mount point and the
+	// import/export paths. spored polls until AVAILABLE, sets up the DRA, mounts,
+	// then flips the tag to spawn:fsx-id (reaper refcount, #192).
+	if config.FSxPending != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:fsx-pending"), Value: aws.String(config.FSxPending)})
+		mp := config.FSxMountPoint
+		if mp == "" {
+			mp = "/fsx"
+		}
+		tags = append(tags, types.Tag{Key: aws.String("spawn:fsx-mount-point"), Value: aws.String(mp)})
+		if config.FSxImportPath != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:fsx-s3-import-path"), Value: aws.String(config.FSxImportPath)})
+		}
+		if config.FSxExportPath != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:fsx-s3-export-path"), Value: aws.String(config.FSxExportPath)})
 		}
 	}
 	if config.EFSID != "" {

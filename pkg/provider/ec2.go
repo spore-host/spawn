@@ -523,6 +523,10 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			config.FSxPending = *tag.Value
 		case tagprefix.Tag("fsx-mount-point"):
 			config.FSxMountPoint = *tag.Value
+		case tagprefix.Tag("fsx-s3-import-path"):
+			config.FSxImportPath = *tag.Value
+		case tagprefix.Tag("fsx-s3-export-path"):
+			config.FSxExportPath = *tag.Value
 		case tagprefix.Tag("on-complete"):
 			config.OnComplete = *tag.Value
 		case tagprefix.Tag("completion-file"):

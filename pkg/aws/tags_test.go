@@ -56,6 +56,33 @@ func TestBuildTags_LocalUsername(t *testing.T) {
 	}
 }
 
+// TestBuildTags_FSxPending verifies the ephemeral async-FSx path (#194) tags the
+// instance with spawn:fsx-pending + mount-point + import/export paths (so spored
+// can wait, set up the DRA, and mount) — and NOT spawn:fsx-id (the FS isn't
+// AVAILABLE yet; spored flips the tag after mounting).
+func TestBuildTags_FSxPending(t *testing.T) {
+	tags := buildTags(LaunchConfig{
+		Name:          "t",
+		FSxPending:    "fs-0pending",
+		FSxMountPoint: "/fsx",
+		FSxImportPath: "s3://b/in/",
+		FSxExportPath: "s3://b/out/",
+	}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+
+	if got := findTagValue(tags, "spawn:fsx-pending"); got != "fs-0pending" {
+		t.Errorf("spawn:fsx-pending = %q, want fs-0pending", got)
+	}
+	if got := findTagValue(tags, "spawn:fsx-mount-point"); got != "/fsx" {
+		t.Errorf("spawn:fsx-mount-point = %q, want /fsx", got)
+	}
+	if got := findTagValue(tags, "spawn:fsx-s3-export-path"); got != "s3://b/out/" {
+		t.Errorf("spawn:fsx-s3-export-path = %q, want s3://b/out/", got)
+	}
+	if got := findTagValue(tags, "spawn:fsx-id"); got != "" {
+		t.Errorf("spawn:fsx-id should be empty for a pending FSx, got %q", got)
+	}
+}
+
 func TestBuildTags_FSxMountPointDefault(t *testing.T) {
 	config := LaunchConfig{
 		Name:        "test-instance",
