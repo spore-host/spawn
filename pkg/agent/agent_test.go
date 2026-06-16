@@ -456,3 +456,36 @@ func TestCheckAndAct_ExpiredTTL_AlwaysTerminates(t *testing.T) {
 		t.Error("expired TTL must NOT Hibernate, even with HibernateOnIdle set (#72)")
 	}
 }
+
+func TestTailBuffer_RetainsLastBytes(t *testing.T) {
+	tb := newTailBuffer(10)
+	// Write more than the cap across multiple writes (mimics stdout+stderr teeing).
+	tb.Write([]byte("hello "))
+	tb.Write([]byte("beautiful "))
+	tb.Write([]byte("world"))
+	got := tb.String()
+	if len(got) != 10 {
+		t.Errorf("tail buffer kept %d bytes, want exactly 10: %q", len(got), got)
+	}
+	// Must retain the TAIL (last 10 bytes of "hello beautiful world"), not the head.
+	if got != "iful world" {
+		t.Errorf("tail = %q, want %q", got, "iful world")
+	}
+}
+
+func TestTailBuffer_ShortInput(t *testing.T) {
+	tb := newTailBuffer(1024)
+	tb.Write([]byte("short"))
+	if tb.String() != "short" {
+		t.Errorf("tail = %q, want short", tb.String())
+	}
+}
+
+func TestPreStopDetail(t *testing.T) {
+	if got := preStopDetail("5m0s", ""); got != "5m0s" {
+		t.Errorf("empty tail: got %q, want 5m0s", got)
+	}
+	if got := preStopDetail("exit 1", "  fatal: no creds\n"); got != "exit 1 — fatal: no creds" {
+		t.Errorf("with tail: got %q", got)
+	}
+}

@@ -143,6 +143,12 @@ func BuildMessage(instanceName, eventType string, extra map[string]string) (stri
 	case "pre_stop_start":
 		fmt.Fprintf(&b, "%s is running its shutdown task before stopping.", instanceName)
 
+	case "pre_stop_failed":
+		fmt.Fprintf(&b, "⚠️ %s shutdown task FAILED — output may not have been saved. %s", instanceName, extra["detail"])
+
+	case "pre_stop_timeout":
+		fmt.Fprintf(&b, "⚠️ %s shutdown task TIMED OUT — output may be incomplete. %s", instanceName, extra["detail"])
+
 	default:
 		fmt.Fprintf(&b, "%s: %s", instanceName, eventType)
 	}
