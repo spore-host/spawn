@@ -43,6 +43,13 @@ type Config struct {
 	PreStopTimeout time.Duration // Max time to wait (default: 5m)
 	LocalUsername  string        // Instance's primary user; pre-stop runs as this user, not root (#63). Empty = run as root (older instances).
 
+	// Ephemeral FSx (#194): when an FSx is created asynchronously alongside the
+	// instance, the launch path tags spawn:fsx-pending=<fs-id> + spawn:fsx-mount-point.
+	// spored polls until the filesystem is AVAILABLE, mounts it, then flips the
+	// tag to spawn:fsx-id (so the reaper's refcount, #192, sees a live user).
+	FSxPending    string // pending FSx filesystem id to mount once AVAILABLE (empty = nothing pending)
+	FSxMountPoint string // mount point for the pending FSx (default: /fsx)
+
 	// Completion signal settings
 	OnComplete      string        // Action: terminate, stop, hibernate, exit
 	CompletionFile  string        // File path to watch

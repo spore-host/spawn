@@ -245,6 +245,11 @@ func (a *Agent) Monitor(ctx context.Context) {
 	// spot decision off the critical path.
 	go a.monitorSpotInterruptions(ctx)
 
+	// Mount a pending async-created FSx (#194), if any, off the critical path —
+	// the poll-until-AVAILABLE can block for minutes and must never gate the
+	// lifecycle ticker (same #65 discipline as spot monitoring above).
+	go a.mountPendingFSx(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
