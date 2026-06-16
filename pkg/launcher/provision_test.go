@@ -77,6 +77,55 @@ func TestProvision_EndToEnd(t *testing.T) {
 	}
 }
 
+// TestProvision_FSxLifecycleFailClosed verifies the headless FSx-create contract
+// (#202/#193): durable is rejected on this path, and a create with no/invalid
+// lifecycle errors — before any AWS call. AMI/profile/user-data are pre-set so we
+// reach the FSx step without earlier AWS lookups.
+func TestProvision_FSxLifecycleFailClosed(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	client := spawnaws.NewClientFromConfig(env.AWSConfig)
+	ctx := context.Background()
+
+	base := func() spawnaws.LaunchConfig {
+		return spawnaws.LaunchConfig{
+			InstanceType:       "m7i.large",
+			Region:             "us-east-1",
+			AMI:                "ami-caller",
+			IamInstanceProfile: "some-profile",
+			UserData:           "#!/bin/bash\ntrue",
+			FSxLustreCreate:    true,
+			FSxS3Bucket:        "b",
+		}
+	}
+
+	cases := map[string]string{
+		"durable": "durable", // rejected on headless path
+		"":        "",        // missing lifecycle
+		"forever": "forever", // invalid
+	}
+	for name, lc := range cases {
+		t.Run("rejects_"+name, func(t *testing.T) {
+			cfg := base()
+			cfg.FSxLifecycle = lc
+			if lc == "durable" {
+				cfg.FSxTTL = "30d"
+			}
+			if _, err := Provision(ctx, client, cfg, Options{}); err == nil {
+				t.Errorf("expected FSx lifecycle %q to be rejected on the headless path", lc)
+			}
+		})
+	}
+
+	t.Run("rejects_create_without_bucket", func(t *testing.T) {
+		cfg := base()
+		cfg.FSxLifecycle = "ephemeral"
+		cfg.FSxS3Bucket = ""
+		if _, err := Provision(ctx, client, cfg, Options{}); err == nil {
+			t.Error("ephemeral FSx create without an S3 bucket must error")
+		}
+	})
+}
+
 // TestProvision_PreservesCallerAMI confirms a caller-supplied AMI is NOT
 // overwritten by auto-detection.
 func TestProvision_PreservesCallerAMI(t *testing.T) {

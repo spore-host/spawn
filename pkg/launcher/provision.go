@@ -107,10 +107,87 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 		}
 	}
 
+	// 3.5. Ephemeral FSx (#194/#202): if the caller asked for an auto-created FSx,
+	// fire it async and tag the instance spawn:fsx-pending — spored waits, sets up
+	// the S3 export DRA, and mounts once AVAILABLE (so a headless/Lambda caller
+	// never blocks on the ~10-min provisioning). Reaped on terminate (#192).
+	if config.FSxLustreCreate {
+		if err := provisionEphemeralFSx(ctx, client, &config); err != nil {
+			return nil, err
+		}
+	}
+
 	// 4. Launch.
 	result, err := client.Launch(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("provision: launch: %w", err)
 	}
 	return result, nil
+}
+
+// provisionEphemeralFSx fires an async ephemeral FSx create and stamps the
+// pending-FSx fields on config, mirroring the CLI ephemeral branch (#194) so the
+// headless path supports it too (#202). It enforces the same fail-closed
+// lifecycle contract as the CLI (#193): only "ephemeral" is valid here — durable
+// is a deliberate, blocking up-front action (`spawn fsx create`, #195), not
+// something a capacity-poller should do inline.
+func provisionEphemeralFSx(ctx context.Context, client *aws.Client, config *aws.LaunchConfig) error {
+	switch config.FSxLifecycle {
+	case "ephemeral":
+		// ok
+	case "durable":
+		return fmt.Errorf("provision: durable FSx is not supported on the headless path — pre-create it (spawn fsx create) and mount by id/name instead")
+	case "":
+		return fmt.Errorf("provision: FSx create requires fsx lifecycle 'ephemeral' (durable is not supported headlessly)")
+	default:
+		return fmt.Errorf("provision: invalid fsx lifecycle %q (must be 'ephemeral')", config.FSxLifecycle)
+	}
+	if config.FSxS3Bucket == "" {
+		return fmt.Errorf("provision: FSx create requires an S3 bucket")
+	}
+
+	importPath := config.FSxImportPath
+	if importPath == "" {
+		importPath = fmt.Sprintf("s3://%s/", config.FSxS3Bucket)
+	}
+	exportPath := config.FSxExportPath
+	if exportPath == "" {
+		exportPath = fmt.Sprintf("s3://%s/", config.FSxS3Bucket)
+	}
+	capacity := config.FSxStorageCapacity
+	if capacity == 0 {
+		capacity = 1200 // PERSISTENT_2 minimum
+	}
+
+	fsID, err := client.CreateFSxLustreFilesystemAsync(ctx, aws.FSxConfig{
+		StackName:                config.Name,
+		Region:                   config.Region,
+		StorageCapacity:          capacity,
+		PerUnitStorageThroughput: 125, // PERSISTENT_2 minimum
+		S3Bucket:                 config.FSxS3Bucket,
+		ImportPath:               importPath,
+		ExportPath:               exportPath,
+		AutoCreateBucket:         true,
+		SubnetID:                 config.SubnetID, // co-locate with the instance's AZ when pinned
+		SecurityGroupIDs:         config.SecurityGroupIDs,
+		Lifecycle:                "ephemeral",
+	})
+	if err != nil {
+		return fmt.Errorf("provision: start ephemeral FSx create: %w", err)
+	}
+
+	config.FSxPending = fsID
+	config.FSxImportPath = importPath
+	config.FSxExportPath = exportPath
+	if config.FSxMountPoint == "" {
+		config.FSxMountPoint = "/fsx"
+	}
+	// Ensure Lustre ports on each SG used by both FSx and the instance (#316).
+	for _, sgID := range config.SecurityGroupIDs {
+		if err := client.EnsureLustrePorts(ctx, config.Region, sgID); err != nil {
+			// Non-fatal: log-less best-effort (matches the CLI), the mount may still work.
+			_ = err
+		}
+	}
+	return nil
 }
