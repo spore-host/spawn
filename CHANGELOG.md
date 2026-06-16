@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A failed or timed-out `--pre-stop` hook now emits a loud lifecycle
+  notification (`pre_stop_failed` / `pre_stop_timeout`) instead of looking
+  identical to success (#186). spored captures a tail of the hook's output and
+  includes it (e.g. an `aws s3 sync` credentials error), and broadcasts a
+  terminal warning to logged-in users. Pre-stop is still best-effort and never
+  blocks the lifecycle action — but a silent partial/no-op flush (the #184
+  data-loss shape) is no longer mistaken for a clean save. Formatting for the new
+  events ships in the spore-bot Slack/Teams/Discord/SMS notifier.
+
 ## [0.54.0] - 2026-06-16
 
 ### Fixed

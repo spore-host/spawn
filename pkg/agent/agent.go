@@ -1223,20 +1223,74 @@ func (a *Agent) runPreStop(spotMode bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	// Tee the hook's output to the local console AND a bounded tail buffer, so a
+	// failure/timeout notification can carry the last few lines of stderr (e.g.
+	// "fatal error: Unable to locate credentials", or an `aws s3 sync` summary) —
+	// otherwise a silently-failed flush looks identical to a successful one (#186).
+	tail := newTailBuffer(2048)
 	cmd := sysShellCommand(ctx, a.config.PreStop, runAsUser)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.MultiWriter(os.Stdout, tail)
+	cmd.Stderr = io.MultiWriter(os.Stderr, tail)
 
 	if err := cmd.Run(); err != nil {
+		// Either branch still proceeds with shutdown — pre-stop is best-effort and
+		// must never block the lifecycle action. But make the outcome LOUD: a
+		// terminal-state notification so a partial/no-op flush isn't mistaken for
+		// success (the #184 data-loss shape).
+		detail := tail.String()
 		if ctx.Err() == context.DeadlineExceeded {
 			log.Printf("Pre-stop hook timed out after %v — proceeding with shutdown", timeout)
+			a.warnUsers(fmt.Sprintf("⚠️ Pre-stop task timed out after %v and was killed — output may be incomplete.", timeout))
+			a.notifier.Notify(context.Background(), "pre_stop_timeout", preStopDetail(timeout.String(), detail))
 		} else {
 			log.Printf("Pre-stop hook exited with error: %v — proceeding with shutdown", err)
+			a.warnUsers(fmt.Sprintf("⚠️ Pre-stop task failed (%v) — output may not have been saved.", err))
+			a.notifier.Notify(context.Background(), "pre_stop_failed", preStopDetail(err.Error(), detail))
 		}
 		return
 	}
 
 	log.Printf("Pre-stop hook completed successfully")
+}
+
+// tailBuffer is a thread-safe io.Writer that retains only the last `max` bytes
+// written to it (a ring of sorts) — used to capture the tail of a pre-stop
+// hook's output for a failure notification without unbounded memory if the hook
+// is chatty. exec.Cmd writes stdout/stderr from separate goroutines, so the
+// mutex is required.
+type tailBuffer struct {
+	mu  sync.Mutex
+	max int
+	buf []byte
+}
+
+func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
+}
+
+// preStopDetail builds the notification detail for a failed/timed-out pre-stop:
+// the summary (timeout or error) plus a trimmed tail of the hook's output, so
+// the user can see WHY the flush didn't complete without digging into logs.
+func preStopDetail(summary, outputTail string) string {
+	outputTail = strings.TrimSpace(outputTail)
+	if outputTail == "" {
+		return summary
+	}
+	return summary + " — " + outputTail
 }
 
 func (a *Agent) terminate(ctx context.Context, reason string) {
