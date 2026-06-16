@@ -1412,31 +1412,55 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			SecurityGroupIDs:         config.SecurityGroupIDs,
 			Lifecycle:                fsxLifecycle,
 		}
-		// Durable filesystems get an explicit death clock (#193); ephemeral ones
-		// are reaped on refcount→0 (#192), so no deadline tag.
-		if fsxLifecycle == "durable" && fsxTTL != "" {
-			if d, derr := parseDuration(fsxTTL); derr == nil {
-				fsxConfig.TTLDeadline = time.Now().Add(d)
-			}
-		}
+		// Co-locate the FSx with the instance's AZ (#194): pass the instance's
+		// subnet when one is pinned, else startFSxCreate falls back to the default
+		// VPC subnet — the same default the instance uses.
+		fsxConfig.SubnetID = config.SubnetID
 
-		fsxInfo, err = awsClient.CreateFSxLustreFilesystem(ctx, fsxConfig)
-		if err != nil {
-			prog.Error("Creating FSx Lustre filesystem", err)
-			return fmt.Errorf("failed to create FSx filesystem: %w", err)
-		}
-
-		// Ensure Lustre ports (988, 1018–1023) are open self-referencing on each
-		// SG used by both FSx and instances. Without this, the MGS connection on
-		// 988 succeeds but the follow-on dynamic-port traffic is blocked, causing
-		// "client profile could not be read from MGS, rc=-22 EINVAL" (fixes #316).
+		// Ensure Lustre ports on each SG used by both FSx and instances, up front
+		// (needed by both the blocking and async paths). Without this the MGS
+		// connection on 988 succeeds but follow-on dynamic-port traffic is blocked
+		// ("client profile could not be read from MGS", #316).
 		for _, sgID := range config.SecurityGroupIDs {
 			if err := awsClient.EnsureLustrePorts(ctx, config.Region, sgID); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠️  Warning: could not ensure Lustre ports on %s: %v\n", sgID, err)
 			}
 		}
 
-		prog.Complete("Creating FSx Lustre filesystem")
+		if fsxLifecycle == "ephemeral" {
+			// Async: fire CreateFileSystem and return immediately. spored polls to
+			// AVAILABLE, sets up the DRA, and mounts (#194) — neither the CLI nor a
+			// lagotto Lambda blocks on the ~10-min provisioning. The instance is
+			// tagged spawn:fsx-pending; refcount-reaped on terminate (#192).
+			prog.Start("Creating FSx Lustre filesystem (async)")
+			fsID, cerr := awsClient.CreateFSxLustreFilesystemAsync(ctx, fsxConfig)
+			if cerr != nil {
+				prog.Error("Creating FSx Lustre filesystem (async)", cerr)
+				return fmt.Errorf("failed to start FSx filesystem creation: %w", cerr)
+			}
+			config.FSxPending = fsID
+			config.FSxImportPath = importPath
+			config.FSxExportPath = exportPath
+			if config.FSxMountPoint == "" {
+				config.FSxMountPoint = fsxMountPoint
+			}
+			prog.Complete("Creating FSx Lustre filesystem (async)")
+			fmt.Fprintf(os.Stderr, "   FSx %s is provisioning; the instance will mount it at %s once AVAILABLE (~10 min).\n", fsID, config.FSxMountPoint)
+		} else {
+			// durable: explicit death clock (#193), reaped on refcount-0 + TTL.
+			if fsxLifecycle == "durable" && fsxTTL != "" {
+				if d, derr := parseDuration(fsxTTL); derr == nil {
+					fsxConfig.TTLDeadline = time.Now().Add(d)
+				}
+			}
+			prog.Start("Creating FSx Lustre filesystem")
+			fsxInfo, err = awsClient.CreateFSxLustreFilesystem(ctx, fsxConfig)
+			if err != nil {
+				prog.Error("Creating FSx Lustre filesystem", err)
+				return fmt.Errorf("failed to create FSx filesystem: %w", err)
+			}
+			prog.Complete("Creating FSx Lustre filesystem")
+		}
 
 	} else if fsxID != "" && !fsxSkipValidate {
 		prog.Start("Getting FSx filesystem info")

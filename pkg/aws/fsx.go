@@ -45,69 +45,100 @@ type FSxConfig struct {
 	TTLDeadline time.Time
 }
 
-// CreateFSxLustreFilesystem creates an FSx for Lustre filesystem with S3 backing
-func (c *Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig) (*FSxInfo, error) {
+// startFSxCreate runs the shared creation steps (paths, bucket, subnet, the
+// CreateFileSystem call) and returns the new filesystem id plus a regional FSx
+// client and the resolved import/export paths. It does NOT wait for AVAILABLE or
+// create the data-repository association — callers choose: CreateFSxLustreFilesystem
+// blocks and sets up the DRA; CreateFSxLustreFilesystemAsync returns immediately
+// and leaves AVAILABLE-wait + DRA to spored (#194).
+func (c *Client) startFSxCreate(ctx context.Context, config FSxConfig) (filesystemID string, fsxClient *fsx.Client, importPath, exportPath string, err error) {
 	// 1. Construct import/export paths early (needed for S3 bucket tags)
-	importPath := config.ImportPath
+	importPath = config.ImportPath
 	if importPath == "" && config.S3Bucket != "" {
 		importPath = fmt.Sprintf("s3://%s/", config.S3Bucket)
 	}
-
-	exportPath := config.ExportPath
+	exportPath = config.ExportPath
 	if exportPath == "" && config.S3Bucket != "" {
 		exportPath = fmt.Sprintf("s3://%s/", config.S3Bucket)
 	}
 
 	// 2. Ensure S3 bucket exists with FSx configuration tags (auto-create if specified)
 	if config.AutoCreateBucket {
-		err := c.CreateS3BucketWithTags(ctx, S3BucketConfig{
+		if err = c.CreateS3BucketWithTags(ctx, S3BucketConfig{
 			BucketName:      config.S3Bucket,
 			Region:          config.Region,
 			StackName:       config.StackName,
 			StorageCapacity: config.StorageCapacity,
 			ImportPath:      importPath,
 			ExportPath:      exportPath,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create S3 bucket: %w", err)
+		}); err != nil {
+			return "", nil, "", "", fmt.Errorf("failed to create S3 bucket: %w", err)
 		}
 	}
 
-	// 3. Get subnet ID (use default VPC if not specified)
+	// 3. Get subnet ID (use default VPC if not specified). Co-location matters:
+	// the FSx must be in the SAME AZ as the instance that mounts it (#194), so
+	// callers that know the instance's subnet should pass it in config.SubnetID.
 	subnetID := config.SubnetID
 	if subnetID == "" {
-		vpcID, err := c.GetDefaultVPC(ctx, config.Region)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get default VPC: %w", err)
+		vpcID, verr := c.GetDefaultVPC(ctx, config.Region)
+		if verr != nil {
+			return "", nil, "", "", fmt.Errorf("failed to get default VPC: %w", verr)
 		}
-
-		subnets, err := c.GetSubnets(ctx, config.Region, vpcID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get subnets: %w", err)
+		subnets, serr := c.GetSubnets(ctx, config.Region, vpcID)
+		if serr != nil {
+			return "", nil, "", "", fmt.Errorf("failed to get subnets: %w", serr)
 		}
-
 		if len(subnets) == 0 {
-			return nil, fmt.Errorf("no subnets found in default VPC")
+			return "", nil, "", "", fmt.Errorf("no subnets found in default VPC")
 		}
-
 		subnetID = subnets[0]
 	}
 
-	// 4. Create FSx filesystem with DRA
 	cfg := c.cfg.Copy()
 	cfg.Region = config.Region
-	fsxClient := fsx.NewFromConfig(cfg)
+	fsxClient = fsx.NewFromConfig(cfg)
 
-	// Use PERSISTENT_2 — runs Lustre server 2.15, compatible with the AL2023
-	// lustre-client (2.15.x). SCRATCH_2 runs 2.10 which AL2023 clients reject
-	// with an incompatible-version error (fixes #310).
-	// NOTE: PERSISTENT_2 does not support inline ImportPath/ExportPath in
-	// CreateFileSystem — S3 integration requires a separate
-	// CreateDataRepositoryAssociation call after the filesystem is AVAILABLE.
+	input := buildFSxCreateInput(config, subnetID, importPath, exportPath)
+	result, cerr := fsxClient.CreateFileSystem(ctx, input)
+	if cerr != nil {
+		return "", nil, "", "", fmt.Errorf("failed to create FSx filesystem: %w", cerr)
+	}
+	return *result.FileSystem.FileSystemId, fsxClient, importPath, exportPath, nil
+}
+
+// CreateFSxLustreFilesystemAsync creates the filesystem and returns its id
+// immediately, without waiting for AVAILABLE or setting up the S3 DRA. Used by
+// the ephemeral launch path (#194): the instance is tagged spawn:fsx-pending and
+// spored does the wait → DRA → mount once it boots, so neither the CLI nor the
+// lagotto Lambda blocks on the ~10-minute provisioning.
+func (c *Client) CreateFSxLustreFilesystemAsync(ctx context.Context, config FSxConfig) (filesystemID string, err error) {
+	id, _, _, _, err := c.startFSxCreate(ctx, config)
+	return id, err
+}
+
+// CreateFSxLustreFilesystem creates an FSx for Lustre filesystem with S3 backing
+// and BLOCKS until it is AVAILABLE, then sets up the S3 data-repository
+// association. Used for synchronous/up-front provisioning (durable FSx, #195).
+func (c *Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig) (*FSxInfo, error) {
+	filesystemID, fsxClient, importPath, exportPath, err := c.startFSxCreate(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	return c.waitAndAssociateFSx(ctx, fsxClient, filesystemID, config, importPath, exportPath)
+}
+
+// buildFSxCreateInput assembles the CreateFileSystem input (PERSISTENT_2 +
+// spawn tags). Used by startFSxCreate for both the blocking and async paths.
+func buildFSxCreateInput(config FSxConfig, subnetID, importPath, exportPath string) *fsx.CreateFileSystemInput {
+	// PERSISTENT_2 — Lustre server 2.15, matches the AL2023 lustre-client
+	// (SCRATCH_2's 2.10 is rejected, #310). PERSISTENT_2 has no inline
+	// Import/ExportPath; S3 linking is a separate CreateDataRepositoryAssociation
+	// once AVAILABLE (the blocking path does it; async leaves it to spored).
 	input := &fsx.CreateFileSystemInput{
 		FileSystemType:   types.FileSystemTypeLustre,
 		StorageCapacity:  aws.Int32(config.StorageCapacity),
-		SubnetIds:        []string{subnetID}, // FSx Lustre requires single subnet
+		SubnetIds:        []string{subnetID}, // FSx Lustre requires a single subnet
 		SecurityGroupIds: config.SecurityGroupIDs,
 		LustreConfiguration: &types.CreateFileSystemLustreConfiguration{
 			DeploymentType:           types.LustreDeploymentTypePersistent2,
@@ -124,44 +155,28 @@ func (c *Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig
 			{Key: aws.String("spawn:fsx-created"), Value: aws.String(time.Now().UTC().Format(time.RFC3339))},
 		},
 	}
-
 	if importPath != "" {
-		input.Tags = append(input.Tags, types.Tag{
-			Key:   aws.String("spawn:fsx-s3-import-path"),
-			Value: aws.String(importPath),
-		})
+		input.Tags = append(input.Tags, types.Tag{Key: aws.String("spawn:fsx-s3-import-path"), Value: aws.String(importPath)})
 	}
 	if exportPath != "" {
-		input.Tags = append(input.Tags, types.Tag{
-			Key:   aws.String("spawn:fsx-s3-export-path"),
-			Value: aws.String(exportPath),
-		})
+		input.Tags = append(input.Tags, types.Tag{Key: aws.String("spawn:fsx-s3-export-path"), Value: aws.String(exportPath)})
 	}
 	// Lifecycle tags drive the reaper (#192/#193): durable filesystems carry an
 	// explicit spawn:ttl-deadline; ephemeral ones rely on refcount→0 instead.
 	if config.Lifecycle != "" {
-		input.Tags = append(input.Tags, types.Tag{
-			Key:   aws.String("spawn:fsx-lifecycle"),
-			Value: aws.String(config.Lifecycle),
-		})
+		input.Tags = append(input.Tags, types.Tag{Key: aws.String("spawn:fsx-lifecycle"), Value: aws.String(config.Lifecycle)})
 	}
 	if !config.TTLDeadline.IsZero() {
-		input.Tags = append(input.Tags, types.Tag{
-			Key:   aws.String("spawn:ttl-deadline"),
-			Value: aws.String(config.TTLDeadline.UTC().Format(time.RFC3339)),
-		})
+		input.Tags = append(input.Tags, types.Tag{Key: aws.String("spawn:ttl-deadline"), Value: aws.String(config.TTLDeadline.UTC().Format(time.RFC3339))})
 	}
+	return input
+}
 
-	result, err := fsxClient.CreateFileSystem(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create FSx filesystem: %w", err)
-	}
-
-	filesystemID := *result.FileSystem.FileSystemId
-
-	// 5. Wait for filesystem to be AVAILABLE. FSx Lustre takes 5-25 minutes.
-	// Use a 30-minute timeout (AWS documents up to 20 min; 30 gives headroom).
-	// On timeout, return the filesystem ID so the caller can retry with --fsx-id.
+// waitAndAssociateFSx blocks until the filesystem is AVAILABLE (FSx Lustre takes
+// 5–25 min; 30 min timeout), creates the S3 data-repository association if
+// import/export paths are set, and returns the filesystem info. This is the
+// synchronous tail shared by the blocking create path.
+func (c *Client) waitAndAssociateFSx(ctx context.Context, fsxClient *fsx.Client, filesystemID string, config FSxConfig, importPath, exportPath string) (*FSxInfo, error) {
 	maxWaitTime := 30 * time.Minute
 	startTime := time.Now()
 	for {
@@ -171,7 +186,6 @@ func (c *Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig
 		if err != nil {
 			return nil, fmt.Errorf("failed to describe FSx filesystem: %w", err)
 		}
-
 		if len(describeResult.FileSystems) > 0 {
 			fs := describeResult.FileSystems[0]
 			if fs.Lifecycle == types.FileSystemLifecycleAvailable {
@@ -181,7 +195,6 @@ func (c *Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig
 				return nil, fmt.Errorf("FSx filesystem %s creation failed", filesystemID)
 			}
 		}
-
 		if time.Since(startTime) > maxWaitTime {
 			return nil, fmt.Errorf(
 				"FSx filesystem creation timeout after %v (filesystem %s is still creating)\n"+
@@ -189,59 +202,25 @@ func (c *Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig
 				maxWaitTime, filesystemID, filesystemID,
 			)
 		}
-
 		time.Sleep(30 * time.Second)
 	}
 
-	// 6. Create Data Repository Association for S3 integration (PERSISTENT_2 only).
-	// PERSISTENT_2 does not support inline ImportPath/ExportPath; S3 linking
-	// requires a separate CreateDataRepositoryAssociation call once the FS is AVAILABLE.
 	if importPath != "" || exportPath != "" {
-		dra := &fsx.CreateDataRepositoryAssociationInput{
-			FileSystemId:                aws.String(filesystemID),
-			FileSystemPath:              aws.String("/"),
-			DataRepositoryPath:          aws.String(importPath),
-			BatchImportMetaDataOnCreate: aws.Bool(true),
-			S3: &types.S3DataRepositoryConfiguration{
-				AutoImportPolicy: &types.AutoImportPolicy{
-					Events: []types.EventType{
-						types.EventTypeNew,
-						types.EventTypeChanged,
-						types.EventTypeDeleted,
-					},
-				},
-				AutoExportPolicy: &types.AutoExportPolicy{
-					Events: []types.EventType{
-						types.EventTypeNew,
-						types.EventTypeChanged,
-						types.EventTypeDeleted,
-					},
-				},
-			},
-		}
-		if exportPath != "" {
-			dra.DataRepositoryPath = aws.String(exportPath)
-		}
-		if _, err := fsxClient.CreateDataRepositoryAssociation(ctx, dra); err != nil {
-			return nil, fmt.Errorf("create data repository association for %s: %w", filesystemID, err)
+		if err := c.associateFSxS3(ctx, fsxClient, filesystemID, importPath, exportPath); err != nil {
+			return nil, err
 		}
 	}
 
-	// 7. Get filesystem details
 	describeResult, err := fsxClient.DescribeFileSystems(ctx, &fsx.DescribeFileSystemsInput{
 		FileSystemIds: []string{filesystemID},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe FSx filesystem: %w", err)
 	}
-
 	if len(describeResult.FileSystems) == 0 {
 		return nil, fmt.Errorf("FSx filesystem not found after creation")
 	}
-
 	fs := describeResult.FileSystems[0]
-
-	// 8. Return filesystem info
 	return &FSxInfo{
 		FileSystemID:    *fs.FileSystemId,
 		DNSName:         *fs.DNSName,
@@ -251,6 +230,34 @@ func (c *Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig
 		S3ImportPath:    importPath,
 		S3ExportPath:    exportPath,
 	}, nil
+}
+
+// associateFSxS3 creates the continuous-export S3 data-repository association on
+// an AVAILABLE PERSISTENT_2 filesystem (NEW/CHANGED/DELETED auto-import+export,
+// so results mirror to S3 continuously — the #184 durability lesson). Shared by
+// the blocking create path and spored's async mount path (#194).
+func (c *Client) associateFSxS3(ctx context.Context, fsxClient *fsx.Client, filesystemID, importPath, exportPath string) error {
+	dra := &fsx.CreateDataRepositoryAssociationInput{
+		FileSystemId:                aws.String(filesystemID),
+		FileSystemPath:              aws.String("/"),
+		DataRepositoryPath:          aws.String(importPath),
+		BatchImportMetaDataOnCreate: aws.Bool(true),
+		S3: &types.S3DataRepositoryConfiguration{
+			AutoImportPolicy: &types.AutoImportPolicy{
+				Events: []types.EventType{types.EventTypeNew, types.EventTypeChanged, types.EventTypeDeleted},
+			},
+			AutoExportPolicy: &types.AutoExportPolicy{
+				Events: []types.EventType{types.EventTypeNew, types.EventTypeChanged, types.EventTypeDeleted},
+			},
+		},
+	}
+	if exportPath != "" {
+		dra.DataRepositoryPath = aws.String(exportPath)
+	}
+	if _, err := fsxClient.CreateDataRepositoryAssociation(ctx, dra); err != nil {
+		return fmt.Errorf("create data repository association for %s: %w", filesystemID, err)
+	}
+	return nil
 }
 
 // GetFSxFilesystem retrieves info for existing FSx filesystem

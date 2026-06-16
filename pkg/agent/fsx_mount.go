@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/fsx"
+	fsxtypes "github.com/aws/aws-sdk-go-v2/service/fsx/types"
 )
 
 // fsxPollInterval is how often spored re-checks a pending FSx's status.
@@ -55,6 +56,19 @@ func (a *Agent) mountPendingFSx(ctx context.Context) {
 		return // already logged
 	}
 
+	// Set up the S3 export DRA before mounting (#194): PERSISTENT_2 links S3 via a
+	// separate association once AVAILABLE, and continuous export is what makes
+	// results durable (the #184 lesson). Best-effort — a DRA failure is logged but
+	// we still mount, so the job can run (it just won't auto-mirror to S3).
+	if a.config.FSxImportPath != "" || a.config.FSxExportPath != "" {
+		if err := createFSxS3Association(ctx, fsxClient, fsxID, a.config.FSxImportPath, a.config.FSxExportPath); err != nil {
+			log.Printf("fsx: data-repository association for %s failed: %v — mounting anyway (results may not auto-export to S3)", fsxID, err)
+			a.notifier.Notify(context.Background(), "fsx_dra_failed", fsxID+": "+err.Error())
+		} else {
+			log.Printf("fsx: S3 export association created for %s", fsxID)
+		}
+	}
+
 	if err := sysMountLustre(ctx, dnsName, mountName, mountPoint); err != nil {
 		log.Printf("fsx: mount %s at %s failed: %v", fsxID, mountPoint, err)
 		a.notifier.Notify(context.Background(), "fsx_mount_failed", fsxID+": "+err.Error())
@@ -66,6 +80,32 @@ func (a *Agent) mountPendingFSx(ctx context.Context) {
 	// an active user of the filesystem (#192 refcount), and remove the pending
 	// marker so a spored restart doesn't re-mount.
 	a.tagFSxMounted(ctx, fsxID, mountPoint)
+}
+
+// createFSxS3Association sets up the continuous-export S3 data-repository
+// association on an AVAILABLE PERSISTENT_2 filesystem (NEW/CHANGED/DELETED
+// auto-import+export), mirroring pkg/aws.associateFSxS3 — done spored-side for
+// the async/ephemeral path so the launch never blocks (#194).
+func createFSxS3Association(ctx context.Context, fsxClient *fsx.Client, fsxID, importPath, exportPath string) error {
+	repoPath := importPath
+	if exportPath != "" {
+		repoPath = exportPath
+	}
+	_, err := fsxClient.CreateDataRepositoryAssociation(ctx, &fsx.CreateDataRepositoryAssociationInput{
+		FileSystemId:                aws.String(fsxID),
+		FileSystemPath:              aws.String("/"),
+		DataRepositoryPath:          aws.String(repoPath),
+		BatchImportMetaDataOnCreate: aws.Bool(true),
+		S3: &fsxtypes.S3DataRepositoryConfiguration{
+			AutoImportPolicy: &fsxtypes.AutoImportPolicy{
+				Events: []fsxtypes.EventType{fsxtypes.EventTypeNew, fsxtypes.EventTypeChanged, fsxtypes.EventTypeDeleted},
+			},
+			AutoExportPolicy: &fsxtypes.AutoExportPolicy{
+				Events: []fsxtypes.EventType{fsxtypes.EventTypeNew, fsxtypes.EventTypeChanged, fsxtypes.EventTypeDeleted},
+			},
+		},
+	})
+	return err
 }
 
 // waitForFSxAvailable polls until the filesystem is AVAILABLE and returns its
