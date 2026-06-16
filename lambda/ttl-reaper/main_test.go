@@ -163,3 +163,63 @@ func TestParseMaxAge(t *testing.T) {
 		t.Errorf("garbage should fall back to default, got %s", got)
 	}
 }
+
+func TestEvaluate_PopulatesGracefulFields(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-graceful"),
+		State:      &ec2types.InstanceState{Name: ec2types.InstanceStateNameRunning},
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			tag("spawn:ttl-deadline", now.Add(-1*time.Minute).Format(time.RFC3339)),
+			tag("spawn:pre-stop", "aws s3 sync ~/out s3://b/"),
+			tag("spawn:pre-stop-timeout", "3m"),
+			tag("spawn:local-username", "ec2-user"),
+		},
+	}
+	c, expired := newReaper().evaluate(inst, "us-east-1", now)
+	if !expired {
+		t.Fatal("expired instance should be a candidate")
+	}
+	if !c.running {
+		t.Error("running flag not set from InstanceState")
+	}
+	if c.preStop != "aws s3 sync ~/out s3://b/" {
+		t.Errorf("preStop = %q", c.preStop)
+	}
+	if c.preStopTimeout != 3*time.Minute {
+		t.Errorf("preStopTimeout = %v, want 3m", c.preStopTimeout)
+	}
+	if c.localUsername != "ec2-user" {
+		t.Errorf("localUsername = %q, want ec2-user", c.localUsername)
+	}
+}
+
+func TestEvaluate_StoppedInstanceNotRunning(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-stopped"),
+		State:      &ec2types.InstanceState{Name: ec2types.InstanceStateNameStopped},
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			tag("spawn:ttl-deadline", now.Add(-1*time.Minute).Format(time.RFC3339)),
+			tag("spawn:pre-stop", "echo hi"),
+		},
+	}
+	c, _ := newReaper().evaluate(inst, "us-east-1", now)
+	if c.running {
+		t.Error("stopped instance must not be marked running (graceful tier skips it — SSM RunCommand needs a running instance)")
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	cases := map[string]string{
+		"aws s3 sync ~/o s3://b/": `'aws s3 sync ~/o s3://b/'`,
+		"it's a test":             `'it'\''s a test'`,
+	}
+	for in, want := range cases {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
