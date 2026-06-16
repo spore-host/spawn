@@ -36,6 +36,13 @@ type FSxConfig struct {
 	SubnetID                 string   // Optional: specify subnet, otherwise uses default VPC
 	SecurityGroupIDs         []string // Security groups to associate with FSx; must allow port 988 (Lustre)
 	PerUnitStorageThroughput int32    // MB/s/TiB — required for PERSISTENT_2; valid values: 125, 250, 500, 1000
+
+	// Lifecycle (#193): tagged so the reaper (#192) can reclaim the filesystem.
+	// Lifecycle is "ephemeral" or "durable". TTLDeadline, when non-zero, is
+	// written as spawn:ttl-deadline (durable filesystems carry an explicit
+	// death clock; ephemeral ones are reaped on refcount→0 instead).
+	Lifecycle   string
+	TTLDeadline time.Time
 }
 
 // CreateFSxLustreFilesystem creates an FSx for Lustre filesystem with S3 backing
@@ -128,6 +135,20 @@ func (c *Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig
 		input.Tags = append(input.Tags, types.Tag{
 			Key:   aws.String("spawn:fsx-s3-export-path"),
 			Value: aws.String(exportPath),
+		})
+	}
+	// Lifecycle tags drive the reaper (#192/#193): durable filesystems carry an
+	// explicit spawn:ttl-deadline; ephemeral ones rely on refcount→0 instead.
+	if config.Lifecycle != "" {
+		input.Tags = append(input.Tags, types.Tag{
+			Key:   aws.String("spawn:fsx-lifecycle"),
+			Value: aws.String(config.Lifecycle),
+		})
+	}
+	if !config.TTLDeadline.IsZero() {
+		input.Tags = append(input.Tags, types.Tag{
+			Key:   aws.String("spawn:ttl-deadline"),
+			Value: aws.String(config.TTLDeadline.UTC().Format(time.RFC3339)),
 		})
 	}
 

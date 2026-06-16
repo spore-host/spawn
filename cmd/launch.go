@@ -120,6 +120,8 @@ var (
 
 	// FSx Lustre
 	fsxCreate          bool
+	fsxLifecycle       string // ephemeral | durable — REQUIRED with --fsx-create (#193)
+	fsxTTL             string // required when --fsx-lifecycle=durable
 	fsxID              string
 	fsxSkipValidate    bool
 	fsxRecall          string
@@ -282,7 +284,9 @@ func init() {
 	launchCmd.Flags().StringVar(&efsMountOptions, "efs-mount-options", "", "Custom EFS mount options (overrides profile)")
 
 	// FSx Lustre
-	launchCmd.Flags().BoolVar(&fsxCreate, "fsx-create", false, "Create new FSx Lustre filesystem with S3 backing")
+	launchCmd.Flags().BoolVar(&fsxCreate, "fsx-create", false, "Create new FSx Lustre filesystem with S3 backing (requires --fsx-lifecycle)")
+	launchCmd.Flags().StringVar(&fsxLifecycle, "fsx-lifecycle", "", "FSx lifetime (REQUIRED with --fsx-create): 'ephemeral' (reaped when this instance terminates) or 'durable' (persists; requires --fsx-ttl)")
+	launchCmd.Flags().StringVar(&fsxTTL, "fsx-ttl", "", "FSx time-to-live, required for --fsx-lifecycle=durable (e.g. 7d, 720h) — the filesystem is reaped this long after creation once no instance is using it")
 	launchCmd.Flags().StringVar(&fsxID, "fsx-id", "", "Existing FSx Lustre filesystem ID to mount (fs-xxx)")
 	launchCmd.Flags().BoolVar(&fsxSkipValidate, "fsx-skip-validate", false, "Skip FSx filesystem validation (for testing)")
 	launchCmd.Flags().StringVar(&fsxRecall, "fsx-recall", "", "Recall FSx filesystem by stack name (recreate from S3)")
@@ -1406,6 +1410,14 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			ExportPath:               exportPath,
 			AutoCreateBucket:         true,
 			SecurityGroupIDs:         config.SecurityGroupIDs,
+			Lifecycle:                fsxLifecycle,
+		}
+		// Durable filesystems get an explicit death clock (#193); ephemeral ones
+		// are reaped on refcount→0 (#192), so no deadline tag.
+		if fsxLifecycle == "durable" && fsxTTL != "" {
+			if d, derr := parseDuration(fsxTTL); derr == nil {
+				fsxConfig.TTLDeadline = time.Now().Add(d)
+			}
 		}
 
 		fsxInfo, err = awsClient.CreateFSxLustreFilesystem(ctx, fsxConfig)
@@ -2005,6 +2017,8 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 
 	// FSx Lustre flags
 	config.FSxLustreCreate = fsxCreate
+	config.FSxLifecycle = fsxLifecycle
+	config.FSxTTL = fsxTTL
 	if fsxID != "" {
 		config.FSxLustreID = fsxID
 	}
@@ -2046,6 +2060,33 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 	if fsxCreate && fsxS3Bucket == "" {
 		return nil, fmt.Errorf("--fsx-create requires --fsx-s3-bucket")
+	}
+
+	// Lifecycle contract (#193): an auto-created FSx is expensive and holds the
+	// only copy of results, so its lifetime must be stated explicitly — never
+	// inferred or defaulted. Fail closed if --fsx-create lacks a lifecycle, and
+	// require a TTL for durable so no death-clock-less filesystem can exist.
+	if fsxCreate {
+		switch fsxLifecycle {
+		case "ephemeral":
+			if fsxTTL != "" {
+				return nil, fmt.Errorf("--fsx-ttl is only valid with --fsx-lifecycle=durable (ephemeral FSx is reaped when the instance terminates)")
+			}
+		case "durable":
+			if fsxTTL == "" {
+				return nil, fmt.Errorf("--fsx-lifecycle=durable requires --fsx-ttl (e.g. 7d) — a durable FSx must have a death clock so it can't bill indefinitely")
+			}
+			if _, err := parseDuration(fsxTTL); err != nil {
+				return nil, fmt.Errorf("invalid --fsx-ttl %q: %w", fsxTTL, err)
+			}
+		case "":
+			return nil, fmt.Errorf("--fsx-create requires --fsx-lifecycle: 'ephemeral' (reaped with this instance) or 'durable' (persists; needs --fsx-ttl). An FSx costs money and holds your results — choose its lifetime explicitly")
+		default:
+			return nil, fmt.Errorf("invalid --fsx-lifecycle %q: must be 'ephemeral' or 'durable'", fsxLifecycle)
+		}
+	}
+	if !fsxCreate && (fsxLifecycle != "" || fsxTTL != "") {
+		return nil, fmt.Errorf("--fsx-lifecycle/--fsx-ttl only apply with --fsx-create")
 	}
 
 	// Validate storage capacity (must be 1200, 2400, or multiples of 2400)

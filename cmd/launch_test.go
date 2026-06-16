@@ -39,6 +39,80 @@ func TestBuildLaunchConfig_VolumeSize(t *testing.T) {
 	})
 }
 
+// TestBuildLaunchConfig_FSxLifecycleContract verifies the fail-closed lifecycle
+// contract for --fsx-create (#193): lifecycle is required, durable requires a
+// TTL, ephemeral rejects a TTL, and the fields are inert without --fsx-create.
+func TestBuildLaunchConfig_FSxLifecycleContract(t *testing.T) {
+	prev := struct {
+		create       bool
+		lifecycle    string
+		ttl, bucket  string
+		itype, idval string
+	}{fsxCreate, fsxLifecycle, fsxTTL, fsxS3Bucket, instanceType, fsxID}
+	t.Cleanup(func() {
+		fsxCreate, fsxLifecycle, fsxTTL, fsxS3Bucket, instanceType, fsxID =
+			prev.create, prev.lifecycle, prev.ttl, prev.bucket, prev.itype, prev.idval
+	})
+	instanceType = "c7g.4xlarge"
+	fsxID = ""
+
+	reset := func() { fsxCreate, fsxLifecycle, fsxTTL, fsxS3Bucket = false, "", "", "" }
+
+	t.Run("create without lifecycle errors", func(t *testing.T) {
+		reset()
+		fsxCreate, fsxS3Bucket = true, "b"
+		if _, err := buildLaunchConfig(nil); err == nil {
+			t.Error("--fsx-create with no --fsx-lifecycle must fail closed")
+		}
+	})
+	t.Run("durable without ttl errors", func(t *testing.T) {
+		reset()
+		fsxCreate, fsxS3Bucket, fsxLifecycle = true, "b", "durable"
+		if _, err := buildLaunchConfig(nil); err == nil {
+			t.Error("--fsx-lifecycle=durable with no --fsx-ttl must fail closed")
+		}
+	})
+	t.Run("durable with ttl ok", func(t *testing.T) {
+		reset()
+		fsxCreate, fsxS3Bucket, fsxLifecycle, fsxTTL = true, "b", "durable", "7d"
+		cfg, err := buildLaunchConfig(nil)
+		if err != nil {
+			t.Fatalf("durable+ttl should be valid: %v", err)
+		}
+		if cfg.FSxLifecycle != "durable" || cfg.FSxTTL != "7d" {
+			t.Errorf("lifecycle/ttl not threaded: %q/%q", cfg.FSxLifecycle, cfg.FSxTTL)
+		}
+	})
+	t.Run("ephemeral with ttl errors", func(t *testing.T) {
+		reset()
+		fsxCreate, fsxS3Bucket, fsxLifecycle, fsxTTL = true, "b", "ephemeral", "7d"
+		if _, err := buildLaunchConfig(nil); err == nil {
+			t.Error("ephemeral + --fsx-ttl is contradictory and must error")
+		}
+	})
+	t.Run("ephemeral ok", func(t *testing.T) {
+		reset()
+		fsxCreate, fsxS3Bucket, fsxLifecycle = true, "b", "ephemeral"
+		if _, err := buildLaunchConfig(nil); err != nil {
+			t.Fatalf("ephemeral should be valid: %v", err)
+		}
+	})
+	t.Run("invalid lifecycle errors", func(t *testing.T) {
+		reset()
+		fsxCreate, fsxS3Bucket, fsxLifecycle = true, "b", "forever"
+		if _, err := buildLaunchConfig(nil); err == nil {
+			t.Error("invalid --fsx-lifecycle must error")
+		}
+	})
+	t.Run("lifecycle without create errors", func(t *testing.T) {
+		reset()
+		fsxLifecycle = "ephemeral"
+		if _, err := buildLaunchConfig(nil); err == nil {
+			t.Error("--fsx-lifecycle without --fsx-create must error")
+		}
+	})
+}
+
 // TestBuildLaunchConfig_AMIAuto verifies that --ami auto (and "AUTO") is treated
 // as auto-detect — left empty in the config so the downstream gate detects the
 // latest AL2023 AMI — rather than passed to EC2 as a literal "auto" (#15).

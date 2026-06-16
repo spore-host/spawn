@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`spawn launch --fsx-create` now requires an explicit `--fsx-lifecycle`**
+  (`ephemeral` or `durable`), fail-closed (#193). An FSx Lustre filesystem is
+  expensive and holds the only copy of results, so its lifetime is never inferred
+  or defaulted: a create with no lifecycle is rejected, and `durable` requires
+  `--fsx-ttl` (no death-clock-less filesystem can exist). `ephemeral` is reaped
+  with the instance (refcount, #192); `durable` carries a `spawn:ttl-deadline`
+  tag. New canonical guide: `docs/durable-storage-fsx.md` (leads with the
+  lifetime decision + the cost of each).
 - The ttl-reaper now reclaims orphaned spawn-managed **FSx Lustre filesystems**
   (#192) — the cost backstop that gates any FSx auto-create feature. An FSx is
   reaped only when it is past its `spawn:ttl-deadline` (or, lacking one, older
