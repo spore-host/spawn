@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The ttl-reaper backstop can now run a doomed instance's `--pre-stop` hook via
+  SSM **before** the hard terminate (opt-in `REAPER_GRACEFUL=true`, #187).
+  Previously the out-of-band reaper called `TerminateInstances` directly, so when
+  spored was dead/wedged and never ran pre-stop, the user's flush was skipped
+  entirely. The reaper now (when enabled) runs the hook on a running, SSM-managed
+  instance as `spawn:local-username` (per #63), bounded by
+  `REAPER_GRACEFUL_MAX_WAIT` (default 2m), then terminates **regardless** of the
+  outcome — strictly best-effort, never weakening the hard-deadline guarantee.
 - A failed or timed-out `--pre-stop` hook now emits a loud lifecycle
   notification (`pre_stop_failed` / `pre_stop_timeout`) instead of looking
   identical to success (#186). spored captures a tail of the hook's output and

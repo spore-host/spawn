@@ -20,6 +20,14 @@
 //
 // Safety: REAPER_DRY_RUN=true logs "WOULD reap" without terminating. Every reap
 // (real or dry-run) is posted to REAPER_NOTIFY_URL so reaps are never silent.
+//
+// Graceful tier (#187, opt-in via REAPER_GRACEFUL=true): before the hard
+// terminate, the reaper can try to flush a running instance's --pre-stop hook
+// via SSM RunCommand (run as spawn:local-username, per #63), bounded by
+// REAPER_GRACEFUL_MAX_WAIT. This matters only when spored itself failed to run
+// pre-stop (dead/wedged) — when spored is healthy it already flushed. The
+// attempt is strictly best-effort and never blocks or prevents the terminate, so
+// the hard-deadline guarantee (#72) is preserved.
 package main
 
 import (
@@ -39,6 +47,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
@@ -56,23 +66,31 @@ var defaultRegions = []string{
 const defaultMaxAge = 7 * 24 * time.Hour
 
 // account is one spore-launching AWS account the reaper scans. label is for
-// logging; ec2For returns a regional EC2 client using that account's creds
-// (the Lambda's own creds for the local account, or assumed cross-account creds).
+// logging; ec2For/ssmFor return a regional EC2/SSM client using that account's
+// creds (the Lambda's own creds for the local account, or assumed cross-account
+// creds). ssmFor is used by the graceful pre-stop tier (#187).
 type account struct {
 	label  string
 	ec2For func(region string) *ec2.Client
+	ssmFor func(region string) *ssm.Client
 }
 
 // reaper holds resolved configuration. Spores can be launched into ANY account a
 // user points spawn at (the account is decided by the caller's credentials), so
 // the reaper scans a configured set of accounts × regions — not just one.
 type reaper struct {
-	accounts  []account
-	regions   []string
-	maxAge    time.Duration
-	dryRun    bool
-	notifyURL string
+	accounts     []account
+	regions      []string
+	maxAge       time.Duration
+	dryRun       bool
+	notifyURL    string
+	graceful     bool          // REAPER_GRACEFUL=true: attempt a pre-stop flush via SSM before terminate (#187)
+	gracefulWait time.Duration // hard cap on the per-instance graceful flush (REAPER_GRACEFUL_MAX_WAIT)
 }
+
+// defaultGracefulWait caps how long the reaper waits for a single instance's
+// pre-stop flush. The reaper is a backstop, not a babysitter — keep it short.
+const defaultGracefulWait = 2 * time.Minute
 
 var r *reaper
 
@@ -86,18 +104,20 @@ func init() {
 	}
 
 	r = &reaper{
-		accounts:  resolveAccounts(ctx, cfg),
-		regions:   parseRegions(os.Getenv("REAPER_REGIONS")),
-		maxAge:    parseMaxAge(os.Getenv("REAPER_MAX_AGE")),
-		dryRun:    strings.EqualFold(os.Getenv("REAPER_DRY_RUN"), "true"),
-		notifyURL: strings.TrimRight(os.Getenv("REAPER_NOTIFY_URL"), "/"),
+		accounts:     resolveAccounts(ctx, cfg),
+		regions:      parseRegions(os.Getenv("REAPER_REGIONS")),
+		maxAge:       parseMaxAge(os.Getenv("REAPER_MAX_AGE")),
+		dryRun:       strings.EqualFold(os.Getenv("REAPER_DRY_RUN"), "true"),
+		notifyURL:    strings.TrimRight(os.Getenv("REAPER_NOTIFY_URL"), "/"),
+		graceful:     strings.EqualFold(os.Getenv("REAPER_GRACEFUL"), "true"),
+		gracefulWait: parseGracefulWait(os.Getenv("REAPER_GRACEFUL_MAX_WAIT")),
 	}
 	labels := make([]string, len(r.accounts))
 	for i, a := range r.accounts {
 		labels[i] = a.label
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t)",
-		labels, r.regions, r.maxAge, r.dryRun)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -119,6 +139,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c := base.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
+			},
+			ssmFor: func(region string) *ssm.Client {
+				c := base.Copy()
+				c.Region = region
+				return ssm.NewFromConfig(c)
 			},
 		})
 	}
@@ -147,6 +172,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ec2.NewFromConfig(c)
 			},
+			ssmFor: func(region string) *ssm.Client {
+				c := acctCfg.Copy()
+				c.Region = region
+				return ssm.NewFromConfig(c)
+			},
 		})
 	}
 
@@ -160,6 +190,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c := base.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
+			},
+			ssmFor: func(region string) *ssm.Client {
+				c := base.Copy()
+				c.Region = region
+				return ssm.NewFromConfig(c)
 			},
 		})
 	}
@@ -226,6 +261,18 @@ func parseMaxAge(env string) time.Duration {
 	return d
 }
 
+func parseGracefulWait(env string) time.Duration {
+	if env == "" {
+		return defaultGracefulWait
+	}
+	d, err := time.ParseDuration(env)
+	if err != nil || d <= 0 {
+		log.Printf("invalid REAPER_GRACEFUL_MAX_WAIT %q, using default %s", env, defaultGracefulWait)
+		return defaultGracefulWait
+	}
+	return d
+}
+
 // Summary is returned to CloudWatch and is handy for assertions in tests.
 type Summary struct {
 	Accounts int `json:"accounts"`
@@ -245,6 +292,13 @@ type candidate struct {
 	reason   string // human-readable: "ttl-deadline" or "max-age"
 	deadline string // the deadline/launch-time that triggered it
 	age      time.Duration
+
+	// Graceful-tier inputs (#187): if the instance is running and has a pre-stop
+	// hook, the reaper tries to flush it via SSM before the hard terminate.
+	running        bool
+	preStop        string        // spawn:pre-stop hook command (empty = nothing to flush)
+	preStopTimeout time.Duration // spawn:pre-stop-timeout (0 = use default)
+	localUsername  string        // spawn:local-username (run the hook as this user, #63)
 }
 
 func handler(ctx context.Context) (Summary, error) {
@@ -270,6 +324,14 @@ func handler(ctx context.Context) (Summary, error) {
 					r.notify(c, true)
 					sum.Skipped++
 					continue
+				}
+				// Graceful tier (#187): when enabled, try to flush the instance's
+				// pre-stop hook via SSM before the hard kill — for instances spored
+				// failed to reap gracefully itself. Strictly best-effort and bounded;
+				// the terminate below ALWAYS runs regardless of the outcome, so the
+				// hard-deadline guarantee (#72) is preserved.
+				if r.graceful {
+					r.tryGracefulPreStop(ctx, acct, c)
 				}
 				if err := r.terminate(ctx, acct, c); err != nil {
 					log.Printf("account %s region %s: terminate %s failed: %v", acct.label, region, c.id, err)
@@ -332,14 +394,27 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 		name = tags[tagprefix.Tag("dns-name")]
 	}
 
+	// Base candidate carries the graceful-tier inputs (#187), shared by both the
+	// deadline and max-age branches.
+	base := candidate{
+		id: id, name: name, region: region,
+		running:       inst.State != nil && inst.State.Name == ec2types.InstanceStateNameRunning,
+		preStop:       tags[tagprefix.Tag("pre-stop")],
+		localUsername: tags[tagprefix.Tag("local-username")],
+	}
+	if pt := tags[tagprefix.Tag("pre-stop-timeout")]; pt != "" {
+		if d, err := time.ParseDuration(pt); err == nil {
+			base.preStopTimeout = d
+		}
+	}
+
 	// 1. spawn:ttl-deadline — the authoritative, launch-anchored deadline.
 	if dl := tags[tagprefix.Tag("ttl-deadline")]; dl != "" {
 		if deadline, err := time.Parse(time.RFC3339, dl); err == nil {
 			if now.After(deadline) {
-				return candidate{
-					id: id, name: name, region: region,
-					reason: "ttl-deadline", deadline: dl, age: now.Sub(deadline),
-				}, true
+				c := base
+				c.reason, c.deadline, c.age = "ttl-deadline", dl, now.Sub(deadline)
+				return c, true
 			}
 			// Within deadline — respect it; do NOT also apply max-age below
 			// (the deadline is the user's explicit, honored intent).
@@ -352,12 +427,95 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 	// deadlines. Anchored to spawn:launch-time, falling back to EC2 LaunchTime.
 	launch := launchTime(tags[tagprefix.Tag("launch-time")], inst.LaunchTime)
 	if !launch.IsZero() && now.Sub(launch) > r.maxAge {
-		return candidate{
-			id: id, name: name, region: region,
-			reason: "max-age", deadline: launch.UTC().Format(time.RFC3339), age: now.Sub(launch),
-		}, true
+		c := base
+		c.reason, c.deadline, c.age = "max-age", launch.UTC().Format(time.RFC3339), now.Sub(launch)
+		return c, true
 	}
 	return candidate{}, false
+}
+
+// tryGracefulPreStop attempts to run the instance's --pre-stop hook via SSM
+// RunCommand before the reaper hard-terminates it (#187). It exists for the case
+// spored is dead/wedged and never ran pre-stop itself — when spored is healthy,
+// the in-instance path already flushed and this is just a (harmless) no-op the
+// reaper rarely reaches.
+//
+// It is STRICTLY best-effort and bounded: it skips silently unless the instance
+// is running, has a pre-stop hook, and the account exposes an SSM client. Any
+// error (not SSM-managed, command failed, timed out) is logged and swallowed —
+// the caller terminates regardless, so the hard-deadline guarantee (#72) is
+// never weakened by a graceful attempt.
+func (r *reaper) tryGracefulPreStop(ctx context.Context, acct account, c candidate) {
+	if c.preStop == "" || !c.running || acct.ssmFor == nil {
+		return
+	}
+
+	// Bound the whole attempt: min(the hook's own timeout, the reaper's hard cap).
+	wait := r.gracefulWait
+	if c.preStopTimeout > 0 && c.preStopTimeout < wait {
+		wait = c.preStopTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+
+	// Run as the instance's user (#63), matching the in-instance pre-stop.
+	command := c.preStop
+	if c.localUsername != "" {
+		command = fmt.Sprintf("su - %s -c %s", c.localUsername, shellQuote(c.preStop))
+	}
+
+	ssmClient := acct.ssmFor(c.region)
+	send, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
+		InstanceIds:  []string{c.id},
+		DocumentName: aws.String("AWS-RunShellScript"),
+		Parameters: map[string][]string{
+			"commands":         {command},
+			"executionTimeout": {fmt.Sprintf("%d", int(wait.Seconds()))},
+		},
+	})
+	if err != nil {
+		// Most common: instance isn't SSM-managed (no agent / no role) →
+		// InvalidInstanceId. Nothing we can do; terminate proceeds.
+		log.Printf("graceful pre-stop: %s not reachable via SSM (%v) — terminating without flush", c.id, err)
+		return
+	}
+	cmdID := aws.ToString(send.Command.CommandId)
+	log.Printf("graceful pre-stop: running hook on %s (cmd %s, wait %s)", c.id, cmdID, wait)
+
+	// Poll for terminal status, bounded by ctx.
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("graceful pre-stop: %s did not finish within %s — terminating anyway", c.id, wait)
+			return
+		case <-ticker.C:
+			out, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+				CommandId:  aws.String(cmdID),
+				InstanceId: aws.String(c.id),
+			})
+			if err != nil {
+				continue // invocation may not be registered yet; keep polling until ctx expires
+			}
+			switch out.Status {
+			case ssmtypes.CommandInvocationStatusSuccess:
+				log.Printf("graceful pre-stop: hook succeeded on %s — terminating", c.id)
+				return
+			case ssmtypes.CommandInvocationStatusFailed,
+				ssmtypes.CommandInvocationStatusCancelled,
+				ssmtypes.CommandInvocationStatusTimedOut:
+				log.Printf("graceful pre-stop: hook %s on %s — terminating anyway", out.Status, c.id)
+				return
+			}
+		}
+	}
+}
+
+// shellQuote single-quotes a string for safe embedding in `su - user -c '<cmd>'`,
+// escaping any embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func (r *reaper) terminate(ctx context.Context, acct account, c candidate) error {
