@@ -216,3 +216,30 @@ func sysShellCommand(ctx context.Context, command, user string) *exec.Cmd {
 	}
 	return exec.CommandContext(ctx, "sh", "-c", command) // nosemgrep: dangerous-exec-command -- user-configured pre-stop hook runs on their own instance
 }
+
+// sysMountLustre mounts an FSx Lustre filesystem at runtime (#194), mirroring the
+// boot-time storage user-data: ensure the lustre client + module, then mount
+// <dnsName>@tcp:/<mountName> at mountPoint and add an fstab line. Used by spored
+// when a filesystem was created asynchronously and wasn't AVAILABLE at first boot.
+func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) error {
+	script := strings.Join([]string{
+		"set -e",
+		"command -v mount.lustre >/dev/null 2>&1 || dnf install -y lustre-client",
+		"modprobe lustre 2>/dev/null || true",
+		"mkdir -p " + shellQuoteArg(mountPoint),
+		// Idempotent: skip if already mounted (spored restart).
+		"mountpoint -q " + shellQuoteArg(mountPoint) + " && exit 0",
+		"mount -t lustre -o noatime,flock " + shellQuoteArg(dnsName+"@tcp:/"+mountName) + " " + shellQuoteArg(mountPoint),
+		"grep -q " + shellQuoteArg(mountPoint) + " /etc/fstab || echo " +
+			shellQuoteArg(dnsName+"@tcp:/"+mountName+" "+mountPoint+" lustre noatime,flock,_netdev 0 0") + " >> /etc/fstab",
+	}, "\n")
+	cmd := exec.CommandContext(ctx, "sh", "-c", script) // nosemgrep: dangerous-exec-command -- fixed mount script; inputs are FSx-API-provided DNS/mount-name + the configured mount point, shell-quoted
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// shellQuoteArg single-quotes an argument for safe embedding in the mount script.
+func shellQuoteArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}

@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -206,4 +207,12 @@ func sysWarnUsers(message string) {
 func sysShellCommand(ctx context.Context, command, user string) *exec.Cmd {
 	_ = user
 	return exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command) // nosemgrep: dangerous-exec-command
+}
+
+// sysMountLustre is unsupported on Windows — FSx Lustre is a Linux-only mount
+// path (#194). Windows instances don't use the ephemeral-FSx feature.
+func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) error {
+	_ = ctx
+	_, _, _ = dnsName, mountName, mountPoint
+	return fmt.Errorf("FSx Lustre mounting is not supported on Windows")
 }

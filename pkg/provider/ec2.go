@@ -519,6 +519,10 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			}
 		case tagprefix.Tag("local-username"):
 			config.LocalUsername = *tag.Value
+		case tagprefix.Tag("fsx-pending"):
+			config.FSxPending = *tag.Value
+		case tagprefix.Tag("fsx-mount-point"):
+			config.FSxMountPoint = *tag.Value
 		case tagprefix.Tag("on-complete"):
 			config.OnComplete = *tag.Value
 		case tagprefix.Tag("completion-file"):

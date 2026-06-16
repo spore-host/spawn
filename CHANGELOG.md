@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- spored can now mount an **asynchronously-created FSx** at runtime (#194, part
+  1). When an instance is tagged `spawn:fsx-pending=<fs-id>`, spored polls the
+  FSx API off the lifecycle critical path until the filesystem is AVAILABLE,
+  mounts it (Lustre, Linux), and flips the tag to `spawn:fsx-id` so the reaper's
+  refcount (#192) sees the instance as a live user. Best-effort: a failed/slow
+  mount never terminates the instance or gates TTL/idle enforcement. This is the
+  agent half of the ephemeral-FSx path; the launch side that fires the async
+  create + tags follows in part 2.
 - **`spawn launch --fsx-create` now requires an explicit `--fsx-lifecycle`**
   (`ephemeral` or `durable`), fail-closed (#193). An FSx Lustre filesystem is
   expensive and holds the only copy of results, so its lifetime is never inferred

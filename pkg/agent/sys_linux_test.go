@@ -42,3 +42,16 @@ func TestSysShellCommand_NoUserFallsBackToRoot(t *testing.T) {
 		}
 	}
 }
+
+func TestShellQuoteArg(t *testing.T) {
+	cases := map[string]string{
+		"/fsx": `'/fsx'`,
+		"fs-0abc.fsx.us-east-1.amazonaws.com@tcp:/q5pdvb4v": `'fs-0abc.fsx.us-east-1.amazonaws.com@tcp:/q5pdvb4v'`,
+		"a'b": `'a'\''b'`,
+	}
+	for in, want := range cases {
+		if got := shellQuoteArg(in); got != want {
+			t.Errorf("shellQuoteArg(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

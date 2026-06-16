@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 )
 
@@ -30,4 +31,12 @@ func sysShellCommand(ctx context.Context, command, user string) *exec.Cmd {
 		return exec.CommandContext(ctx, "su", "-", user, "-c", command) // nosemgrep: dangerous-exec-command -- pre-stop hook runs as the instance's own user
 	}
 	return exec.CommandContext(ctx, "sh", "-c", command) // nosemgrep: dangerous-exec-command
+}
+
+// sysMountLustre is a no-op on non-linux/non-windows (dev/darwin) builds — spored
+// only mounts FSx Lustre on Linux instances (#194).
+func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) error {
+	_ = ctx
+	_, _, _ = dnsName, mountName, mountPoint
+	return fmt.Errorf("FSx Lustre mounting is only supported on Linux")
 }
