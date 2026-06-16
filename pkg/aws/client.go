@@ -148,6 +148,13 @@ type LaunchConfig struct {
 	// Session management
 	SessionTimeout string // Auto-logout idle shells (default: 30m, 0 to disable)
 
+	// Username is the instance's primary Linux user (e.g. "ec2-user"). Tagged as
+	// spawn:local-username so spored can run the pre-stop hook as this user
+	// instead of root — otherwise ~/$HOME resolve to /root and a hook like
+	// `aws s3 sync ~/out s3://…` silently syncs the wrong dir (#63). Empty = older
+	// behavior (run as root).
+	Username string
+
 	// Job array settings
 	JobArrayID      string // Unique job array ID (e.g., "compute-20260113-abc123")
 	JobArrayName    string // User-friendly job array name (e.g., "compute")
@@ -690,6 +697,12 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		if config.PreStopTimeout != "" {
 			tags = append(tags, types.Tag{Key: aws.String("spawn:pre-stop-timeout"), Value: aws.String(config.PreStopTimeout)})
 		}
+	}
+
+	// Record the instance's primary user so spored can run the pre-stop hook as
+	// that user rather than root (#63). Tagged whenever known.
+	if config.Username != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:local-username"), Value: aws.String(config.Username)})
 	}
 
 	// Always tag the on-demand price — used by spored for effective cost calculation.

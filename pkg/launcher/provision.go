@@ -101,6 +101,10 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 		// Encode here — assigning the raw script makes RunInstances fail with
 		// "Invalid BASE64 encoding of user data" (#127).
 		config.UserData = EncodeLinuxUserData(bootstrap)
+		// Tag the primary user so spored runs the pre-stop hook as them, not root (#63).
+		if config.Username == "" {
+			config.Username = username
+		}
 	}
 
 	// 4. Launch.

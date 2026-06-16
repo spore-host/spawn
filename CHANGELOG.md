@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `--pre-stop` now runs as the instance's primary user (e.g. `ec2-user`), not
+  root (#63). spored is a root service, so the hook's `~`/`$HOME` previously
+  resolved to `/root` — a hook like `aws s3 sync ~/output s3://…` silently synced
+  the empty `/root/output` instead of the workload's real output and "succeeded"
+  copying nothing, losing data on ephemeral storage. The launcher now tags
+  `spawn:local-username` and spored runs the hook via `su - <user> -c` (login
+  shell, matching how the workload ran); the username is validated before use,
+  and an absent tag (older instances) falls back to the previous root shell.
+  Windows is unaffected (single user, no `su`).
+
 ## [0.53.0] - 2026-06-15
 
 ### Changed

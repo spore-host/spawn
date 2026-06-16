@@ -30,6 +30,7 @@ import (
 	"github.com/spore-host/spawn/pkg/pluginruntime"
 	"github.com/spore-host/spawn/pkg/provider"
 	"github.com/spore-host/spawn/pkg/registry"
+	"github.com/spore-host/spawn/pkg/security"
 )
 
 type Agent struct {
@@ -1196,7 +1197,24 @@ func (a *Agent) runPreStop(spotMode bool) {
 		timeout = 90 * time.Second // stay within the 2-min spot window
 	}
 
-	log.Printf("Running pre-stop hook (timeout: %v): %s", timeout, a.config.PreStop)
+	// Run the hook as the instance's primary user (not root) so ~/$HOME/PATH and
+	// credential resolution match how the workload ran (#63). The username comes
+	// from the spawn:local-username tag; validate it before handing it to `su`
+	// (defense-in-depth — never interpolate an untrusted tag into a shell user).
+	// An empty/invalid/missing username falls back to the legacy root shell.
+	runAsUser := a.config.LocalUsername
+	if runAsUser != "" {
+		if err := security.ValidateUsername(runAsUser); err != nil {
+			log.Printf("pre-stop: ignoring invalid spawn:local-username %q (%v) — running as root", runAsUser, err)
+			runAsUser = ""
+		}
+	}
+
+	if runAsUser != "" {
+		log.Printf("Running pre-stop hook as %s (timeout: %v): %s", runAsUser, timeout, a.config.PreStop)
+	} else {
+		log.Printf("Running pre-stop hook (timeout: %v): %s", timeout, a.config.PreStop)
+	}
 	a.warnUsers(i18n.Tf("spawn.agent.pre_stop_running", map[string]interface{}{
 		"Timeout": timeout,
 	}))
@@ -1205,7 +1223,7 @@ func (a *Agent) runPreStop(spotMode bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := sysShellCommand(ctx, a.config.PreStop)
+	cmd := sysShellCommand(ctx, a.config.PreStop, runAsUser)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

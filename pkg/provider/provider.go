@@ -41,6 +41,7 @@ type Config struct {
 	// Pre-stop hook
 	PreStop        string        // Shell command to run before any lifecycle-triggered stop
 	PreStopTimeout time.Duration // Max time to wait (default: 5m)
+	LocalUsername  string        // Instance's primary user; pre-stop runs as this user, not root (#63). Empty = run as root (older instances).
 
 	// Completion signal settings
 	OnComplete      string        // Action: terminate, stop, hibernate, exit

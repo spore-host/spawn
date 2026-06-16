@@ -1555,6 +1555,13 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 
 	config.UserData = encodeUserDataForOS(userDataScript, config.TargetOS)
 
+	// Record the instance's primary user (Linux) so spored can run the pre-stop
+	// hook as that user instead of root (#63). Windows has a single user and no
+	// `su`, so it's left unset there.
+	if config.TargetOS != "windows" {
+		config.Username = plat.GetUsername()
+	}
+
 	// Validate MPI requirements
 	if mpiEnabled {
 		if count <= 1 {

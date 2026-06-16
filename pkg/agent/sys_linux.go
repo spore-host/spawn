@@ -204,7 +204,15 @@ func sysWarnUsers(message string) {
 	_ = exec.Command("wall", message).Run()
 }
 
-// sysShellCommand builds the OS shell invocation for a user pre-stop hook.
-func sysShellCommand(ctx context.Context, command string) *exec.Cmd {
+// sysShellCommand builds the OS shell invocation for a user pre-stop hook. When
+// user is non-empty it runs the hook as that user via `su - <user> -c` (a login
+// shell, so $HOME/PATH/env match how the workload ran) instead of as root —
+// spored is a root service, and running the hook as root made ~/$HOME resolve to
+// /root, silently sending e.g. `aws s3 sync ~/out …` to the wrong directory (#63).
+// user is validated by the caller; if empty, falls back to the legacy root shell.
+func sysShellCommand(ctx context.Context, command, user string) *exec.Cmd {
+	if user != "" {
+		return exec.CommandContext(ctx, "su", "-", user, "-c", command) // nosemgrep: dangerous-exec-command -- user-configured pre-stop hook runs as the instance's own user on their own instance
+	}
 	return exec.CommandContext(ctx, "sh", "-c", command) // nosemgrep: dangerous-exec-command -- user-configured pre-stop hook runs on their own instance
 }
