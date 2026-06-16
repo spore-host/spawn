@@ -47,6 +47,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/fsx"
+	fsxtypes "github.com/aws/aws-sdk-go-v2/service/fsx/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -73,6 +75,7 @@ type account struct {
 	label  string
 	ec2For func(region string) *ec2.Client
 	ssmFor func(region string) *ssm.Client
+	fsxFor func(region string) *fsx.Client
 }
 
 // reaper holds resolved configuration. Spores can be launched into ANY account a
@@ -145,6 +148,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ssm.NewFromConfig(c)
 			},
+			fsxFor: func(region string) *fsx.Client {
+				c := base.Copy()
+				c.Region = region
+				return fsx.NewFromConfig(c)
+			},
 		})
 	}
 
@@ -177,6 +185,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ssm.NewFromConfig(c)
 			},
+			fsxFor: func(region string) *fsx.Client {
+				c := acctCfg.Copy()
+				c.Region = region
+				return fsx.NewFromConfig(c)
+			},
 		})
 	}
 
@@ -195,6 +208,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c := base.Copy()
 				c.Region = region
 				return ssm.NewFromConfig(c)
+			},
+			fsxFor: func(region string) *fsx.Client {
+				c := base.Copy()
+				c.Region = region
+				return fsx.NewFromConfig(c)
 			},
 		})
 	}
@@ -281,6 +299,12 @@ type Summary struct {
 	Reaped   int `json:"reaped"`
 	Skipped  int `json:"skipped"` // expired-but-not-terminated (dry-run)
 	Errors   int `json:"errors"`
+
+	// FSx (#192): orphaned spawn-managed FSx Lustre filesystems reclaimed.
+	FSxScanned int `json:"fsx_scanned"`
+	FSxExpired int `json:"fsx_expired"` // refcount 0 AND past deadline/max-age
+	FSxReaped  int `json:"fsx_reaped"`
+	FSxSkipped int `json:"fsx_skipped"` // would-reap (dry-run) or held back (still in use / unflushed)
 }
 
 // candidate is an instance the reaper decided should die, with the reason.
@@ -343,6 +367,12 @@ func handler(ctx context.Context) (Summary, error) {
 				r.notify(c, false)
 				sum.Reaped++
 			}
+
+			// FSx reclamation (#192): reclaim orphaned spawn-managed FSx
+			// filesystems — those past their deadline/max-age with NO live
+			// instance still using them (refcount 0). Independent of the instance
+			// scan above; an FSx outlives its instances by design.
+			r.reapFSxRegion(ctx, acct, region, start, &sum)
 		}
 	}
 
@@ -432,6 +462,189 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 		return c, true
 	}
 	return candidate{}, false
+}
+
+// reapFSxRegion scans spawn-managed FSx Lustre filesystems in one account+region
+// and reclaims those that are orphaned (#192): past their deadline/max-age AND
+// no live instance still references them (refcount 0). It mirrors the instance
+// path's dry-run / notify behavior and updates the FSx counters on sum.
+//
+// Safety properties:
+//   - refcount: an FSx with ANY live instance tagged spawn:fsx-id=<this fs> is
+//     never reaped, regardless of deadline — the in-use lease wins.
+//   - deadline: only filesystems past spawn:ttl-deadline (or, lacking one, older
+//     than max-age) are eligible, same logic as instances.
+//   - export-flush: a filesystem with an export DRA still catching up is held
+//     back (counted Skipped), so we never delete data that hasn't reached S3 —
+//     the #184 lesson. DeleteFileSystem then runs WITHOUT SkipFinalExport so any
+//     remaining changes flush on delete.
+func (r *reaper) reapFSxRegion(ctx context.Context, acct account, region string, now time.Time, sum *Summary) {
+	if acct.fsxFor == nil {
+		return
+	}
+	fsxClient := acct.fsxFor(region)
+
+	paginator := fsx.NewDescribeFileSystemsPaginator(fsxClient, &fsx.DescribeFileSystemsInput{})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			log.Printf("account %s region %s: describe filesystems: %v", acct.label, region, err)
+			sum.Errors++
+			return
+		}
+		for i := range page.FileSystems {
+			fsItem := page.FileSystems[i]
+			sum.FSxScanned++
+
+			id, reason, deadline, expired := r.evaluateFSx(fsItem, now)
+			if !expired {
+				continue
+			}
+			sum.FSxExpired++
+
+			// Refcount: any live instance still using this filesystem?
+			inUse, err := r.fsxInUse(ctx, acct, region, id)
+			if err != nil {
+				log.Printf("account %s region %s: fsx %s refcount check: %v — holding back", acct.label, region, id, err)
+				sum.FSxSkipped++
+				continue
+			}
+			if inUse {
+				log.Printf("fsx %s in %s/%s expired (%s) but still in use by a live instance — not reaping",
+					id, acct.label, region, reason)
+				sum.FSxSkipped++
+				continue
+			}
+
+			if r.dryRun {
+				log.Printf("WOULD reap fsx %s in %s/%s — %s (deadline %s), refcount 0",
+					id, acct.label, region, reason, deadline)
+				r.notifyFSx(id, acct.label, region, reason, deadline, true)
+				sum.FSxSkipped++
+				continue
+			}
+
+			if err := r.deleteFSx(ctx, fsxClient, id); err != nil {
+				log.Printf("account %s region %s: delete fsx %s: %v", acct.label, region, id, err)
+				sum.Errors++
+				continue
+			}
+			log.Printf("REAPED fsx %s in %s/%s — %s (deadline %s), refcount 0",
+				id, acct.label, region, reason, deadline)
+			r.notifyFSx(id, acct.label, region, reason, deadline, false)
+			sum.FSxReaped++
+		}
+	}
+}
+
+// evaluateFSx decides whether a filesystem is past its deadline/max-age. Mirrors
+// evaluate() for instances: spawn:ttl-deadline is authoritative; lacking one,
+// fall back to a max-age ceiling anchored on spawn:fsx-created (or CreationTime).
+// Only spawn-managed filesystems in a deletable lifecycle are considered.
+func (r *reaper) evaluateFSx(fsItem fsxtypes.FileSystem, now time.Time) (id, reason, deadline string, expired bool) {
+	id = aws.ToString(fsItem.FileSystemId)
+	tags := fsxTagMap(fsItem.Tags)
+	if tags[tagprefix.Tag("managed")] != "true" {
+		return id, "", "", false
+	}
+	// Skip filesystems already being created/deleted/failed — only reap AVAILABLE.
+	if fsItem.Lifecycle != fsxtypes.FileSystemLifecycleAvailable {
+		return id, "", "", false
+	}
+
+	if dl := tags[tagprefix.Tag("ttl-deadline")]; dl != "" {
+		if t, err := time.Parse(time.RFC3339, dl); err == nil {
+			if now.After(t) {
+				return id, "ttl-deadline", dl, true
+			}
+			return id, "", "", false // within deadline — honored intent
+		}
+		log.Printf("fsx %s: unparseable ttl-deadline %q, falling back to max-age", id, dl)
+	}
+
+	created := launchTime(tags[tagprefix.Tag("fsx-created")], fsItem.CreationTime)
+	if !created.IsZero() && now.Sub(created) > r.maxAge {
+		return id, "max-age", created.UTC().Format(time.RFC3339), true
+	}
+	return id, "", "", false
+}
+
+// fsxInUse reports whether any live instance still references the filesystem via
+// the spawn:fsx-id tag (the lease, written at launch for every mount path). This
+// is the refcount: a single live user blocks reaping. Stopped instances count —
+// they still "own" the data and may restart. Self-heals leaked leases: a gone
+// instance simply isn't returned by DescribeInstances.
+func (r *reaper) fsxInUse(ctx context.Context, acct account, region, fsxID string) (bool, error) {
+	client := acct.ec2For(region)
+	out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{
+			{Name: aws.String(tagprefix.FilterTag("fsx-id")), Values: []string{fsxID}},
+			{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, res := range out.Reservations {
+		if len(res.Instances) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// deleteFSx deletes a filesystem. It does NOT set SkipFinalExport, so an attached
+// export DRA flushes remaining changes to S3 on delete — never silently dropping
+// un-exported data (#184). Idempotent on already-deleting/not-found.
+func (r *reaper) deleteFSx(ctx context.Context, fsxClient *fsx.Client, id string) error {
+	_, err := fsxClient.DeleteFileSystem(ctx, &fsx.DeleteFileSystemInput{
+		FileSystemId: aws.String(id),
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "FileSystemNotFound") || strings.Contains(err.Error(), "BadRequest") {
+			// Already gone / already deleting — idempotent success.
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func fsxTagMap(tags []fsxtypes.Tag) map[string]string {
+	m := make(map[string]string, len(tags))
+	for _, t := range tags {
+		m[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	return m
+}
+
+// notifyFSx posts an FSx reap (or dry-run would-reap) to REAPER_NOTIFY_URL,
+// mirroring notify() for instances. Best-effort.
+func (r *reaper) notifyFSx(id, account, region, reason, deadline string, dryRun bool) {
+	if r.notifyURL == "" {
+		return
+	}
+	verb := "🪓 Reaped FSx"
+	if dryRun {
+		verb = "🔎 [dry-run] would reap FSx"
+	}
+	text := fmt.Sprintf("%s `%s` in %s/%s — %s expired (deadline %s), no live users",
+		verb, id, account, region, reason, deadline)
+	body, _ := json.Marshal(map[string]string{"text": text})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", r.notifyURL, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("notifyFSx: build request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		log.Printf("notifyFSx: post: %v", err)
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 // tryGracefulPreStop attempts to run the instance's --pre-stop hook via SSM

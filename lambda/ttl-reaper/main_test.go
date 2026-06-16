@@ -6,6 +6,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	fsxtypes "github.com/aws/aws-sdk-go-v2/service/fsx/types"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
@@ -221,5 +222,82 @@ func TestShellQuote(t *testing.T) {
 		if got := shellQuote(in); got != want {
 			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func fsxTag(k, v string) fsxtypes.Tag { return fsxtypes.Tag{Key: aws.String(k), Value: aws.String(v)} }
+
+func TestEvaluateFSx_PastDeadline_Expired(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	fsItem := fsxtypes.FileSystem{
+		FileSystemId: aws.String("fs-past"),
+		Lifecycle:    fsxtypes.FileSystemLifecycleAvailable,
+		Tags: []fsxtypes.Tag{
+			fsxTag("spawn:managed", "true"),
+			fsxTag("spawn:ttl-deadline", now.Add(-1*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	id, reason, _, expired := newReaper().evaluateFSx(fsItem, now)
+	if !expired || reason != "ttl-deadline" || id != "fs-past" {
+		t.Errorf("got id=%q reason=%q expired=%v, want fs-past/ttl-deadline/true", id, reason, expired)
+	}
+}
+
+func TestEvaluateFSx_WithinDeadline_Spared(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	fsItem := fsxtypes.FileSystem{
+		FileSystemId: aws.String("fs-future"),
+		Lifecycle:    fsxtypes.FileSystemLifecycleAvailable,
+		Tags: []fsxtypes.Tag{
+			fsxTag("spawn:managed", "true"),
+			fsxTag("spawn:ttl-deadline", now.Add(24*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	if _, _, _, expired := newReaper().evaluateFSx(fsItem, now); expired {
+		t.Error("filesystem within its deadline must not be expired")
+	}
+}
+
+func TestEvaluateFSx_NotManaged_Ignored(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	fsItem := fsxtypes.FileSystem{
+		FileSystemId: aws.String("fs-foreign"),
+		Lifecycle:    fsxtypes.FileSystemLifecycleAvailable,
+		Tags:         []fsxtypes.Tag{fsxTag("spawn:ttl-deadline", now.Add(-1*time.Hour).Format(time.RFC3339))},
+	}
+	if _, _, _, expired := newReaper().evaluateFSx(fsItem, now); expired {
+		t.Error("non-spawn-managed filesystem must never be reaped, even past a deadline tag")
+	}
+}
+
+func TestEvaluateFSx_MaxAgeFallback(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	fsItem := fsxtypes.FileSystem{
+		FileSystemId: aws.String("fs-old"),
+		Lifecycle:    fsxtypes.FileSystemLifecycleAvailable,
+		Tags: []fsxtypes.Tag{
+			fsxTag("spawn:managed", "true"),
+			// no ttl-deadline → max-age (default 7d) from spawn:fsx-created
+			fsxTag("spawn:fsx-created", now.Add(-8*24*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	_, reason, _, expired := newReaper().evaluateFSx(fsItem, now)
+	if !expired || reason != "max-age" {
+		t.Errorf("8-day-old FS with no deadline should expire via max-age, got reason=%q expired=%v", reason, expired)
+	}
+}
+
+func TestEvaluateFSx_NotAvailable_Skipped(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	fsItem := fsxtypes.FileSystem{
+		FileSystemId: aws.String("fs-creating"),
+		Lifecycle:    fsxtypes.FileSystemLifecycleCreating, // still provisioning
+		Tags: []fsxtypes.Tag{
+			fsxTag("spawn:managed", "true"),
+			fsxTag("spawn:ttl-deadline", now.Add(-1*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	if _, _, _, expired := newReaper().evaluateFSx(fsItem, now); expired {
+		t.Error("a CREATING filesystem must not be reaped (only AVAILABLE)")
 	}
 }

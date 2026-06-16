@@ -8,11 +8,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/fsx"
 	"github.com/aws/aws-sdk-go-v2/service/fsx/types"
 	"github.com/spf13/cobra"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 )
 
 var fsxCmd = &cobra.Command{
@@ -321,17 +321,12 @@ func runFSxDelete(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Delete the filesystem
-	regionalCfg := cfg.Copy()
-	regionalCfg.Region = foundRegion
-	fsxClient := fsx.NewFromConfig(regionalCfg)
-
+	// Delete the filesystem via the shared client method (no SkipFinalExport, so
+	// an attached export DRA flushes to S3 on delete — #184). Same code path the
+	// ttl-reaper uses (#192).
 	fmt.Printf("Deleting filesystem %s...\n", filesystemID)
 
-	_, err = fsxClient.DeleteFileSystem(ctx, &fsx.DeleteFileSystemInput{
-		FileSystemId: aws.String(filesystemID),
-	})
-	if err != nil {
+	if err := spawnaws.NewClientFromConfig(cfg).DeleteFSxFilesystem(ctx, filesystemID, foundRegion); err != nil {
 		return fmt.Errorf("failed to delete filesystem: %w", err)
 	}
 
