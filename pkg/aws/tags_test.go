@@ -39,6 +39,23 @@ func TestBuildTags_FSxIDWritten(t *testing.T) {
 }
 
 // TestBuildTags_FSxMountPointDefault verifies the default /fsx is used when unset.
+// TestBuildTags_LocalUsername verifies the instance's primary user is tagged as
+// spawn:local-username so spored runs the pre-stop hook as that user, not root
+// (#63). Absent when Username is empty (older behavior).
+func TestBuildTags_LocalUsername(t *testing.T) {
+	withUser := buildTags(LaunchConfig{Name: "t", Username: "ec2-user"},
+		"123456789012", "arn:aws:iam::123456789012:user/test", "")
+	if got := findTagValue(withUser, "spawn:local-username"); got != "ec2-user" {
+		t.Errorf("spawn:local-username = %q, want ec2-user", got)
+	}
+
+	withoutUser := buildTags(LaunchConfig{Name: "t"},
+		"123456789012", "arn:aws:iam::123456789012:user/test", "")
+	if got := findTagValue(withoutUser, "spawn:local-username"); got != "" {
+		t.Errorf("spawn:local-username = %q, want empty when Username unset", got)
+	}
+}
+
 func TestBuildTags_FSxMountPointDefault(t *testing.T) {
 	config := LaunchConfig{
 		Name:        "test-instance",

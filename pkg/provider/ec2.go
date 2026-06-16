@@ -517,6 +517,8 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			if duration, err := time.ParseDuration(*tag.Value); err == nil {
 				config.PreStopTimeout = duration
 			}
+		case tagprefix.Tag("local-username"):
+			config.LocalUsername = *tag.Value
 		case tagprefix.Tag("on-complete"):
 			config.OnComplete = *tag.Value
 		case tagprefix.Tag("completion-file"):

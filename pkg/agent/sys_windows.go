@@ -199,7 +199,11 @@ func sysWarnUsers(message string) {
 	_ = exec.Command("msg", "*", message).Run()
 }
 
-// sysShellCommand runs a user pre-stop hook through PowerShell on Windows.
-func sysShellCommand(ctx context.Context, command string) *exec.Cmd {
+// sysShellCommand runs a user pre-stop hook through PowerShell on Windows. The
+// user parameter (the Linux run-as-user, #63) is ignored: Windows instances run
+// as a single user and have no `su` equivalent, so the root/$HOME mismatch the
+// Linux path guards against doesn't arise here.
+func sysShellCommand(ctx context.Context, command, user string) *exec.Cmd {
+	_ = user
 	return exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command) // nosemgrep: dangerous-exec-command
 }
