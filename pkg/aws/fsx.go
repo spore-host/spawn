@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -274,6 +275,27 @@ func (c *Client) GetFSxFilesystem(ctx context.Context, filesystemID, region stri
 		S3ImportPath:    s3ImportPath,
 		S3ExportPath:    s3ExportPath,
 	}, nil
+}
+
+// DeleteFSxFilesystem deletes an FSx filesystem by id. It does NOT set
+// SkipFinalExport, so a filesystem with an attached export DRA flushes remaining
+// changes to S3 on delete rather than silently dropping un-exported data (#184).
+// Already-deleting / not-found is treated as success (idempotent).
+func (c *Client) DeleteFSxFilesystem(ctx context.Context, filesystemID, region string) error {
+	cfg := c.cfg.Copy()
+	cfg.Region = region
+	fsxClient := fsx.NewFromConfig(cfg)
+
+	_, err := fsxClient.DeleteFileSystem(ctx, &fsx.DeleteFileSystemInput{
+		FileSystemId: aws.String(filesystemID),
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "FileSystemNotFound") {
+			return nil
+		}
+		return fmt.Errorf("delete FSx filesystem %s: %w", filesystemID, err)
+	}
+	return nil
 }
 
 // RecallFSxFilesystem finds and recreates FSx filesystem by stack name

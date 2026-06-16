@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The ttl-reaper now reclaims orphaned spawn-managed **FSx Lustre filesystems**
+  (#192) — the cost backstop that gates any FSx auto-create feature. An FSx is
+  reaped only when it is past its `spawn:ttl-deadline` (or, lacking one, older
+  than the max-age ceiling) **and** has **no live instance** still using it
+  (refcount via the `spawn:fsx-id` tag already written at launch — a single live
+  user blocks the reap). Deletion does not skip the final export, so an attached
+  S3-export DRA flushes remaining data on delete rather than dropping it (#184).
+  Honors `REAPER_DRY_RUN` / `REAPER_NOTIFY_URL` like instance reaps. Filesystems
+  still creating/deleting are never touched.
+
+### Changed
+- FSx deletion is now a shared `Client.DeleteFSxFilesystem` (`pkg/aws/fsx.go`)
+  used by both `spawn fsx delete` and the reaper; it omits `SkipFinalExport` so
+  the export DRA flushes to S3 on delete.
+
 ## [0.55.0] - 2026-06-16
 
 ### Added
