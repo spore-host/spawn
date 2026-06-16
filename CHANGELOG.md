@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-06-16
+
 ### Added
 - The ttl-reaper backstop can now run a doomed instance's `--pre-stop` hook via
   SSM **before** the hard terminate (opt-in `REAPER_GRACEFUL=true`, #187).
@@ -416,7 +418,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.54.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.55.0...HEAD
+[0.55.0]: https://github.com/spore-host/spawn/compare/v0.54.0...v0.55.0
 [0.54.0]: https://github.com/spore-host/spawn/compare/v0.53.0...v0.54.0
 [0.53.0]: https://github.com/spore-host/spawn/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/spore-host/spawn/compare/v0.51.1...v0.52.0
