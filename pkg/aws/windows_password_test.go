@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -108,5 +109,116 @@ func TestParseRSAPrivateKey_AcceptsPKCS8RSA(t *testing.T) {
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
 	if _, err := parseRSAPrivateKey(pemBytes); err != nil {
 		t.Errorf("PKCS#8 RSA key should be accepted: %v", err)
+	}
+}
+
+// TestGenerateWindowsPassword_Complexity verifies the generated password meets
+// Windows' default complexity policy: ≥1 upper, lower, digit, and symbol, and is
+// at least the floor length (#201).
+func TestGenerateWindowsPassword_Complexity(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		pw, err := GenerateWindowsPassword(20)
+		if err != nil {
+			t.Fatalf("GenerateWindowsPassword: %v", err)
+		}
+		if len(pw) != 20 {
+			t.Fatalf("len = %d, want 20", len(pw))
+		}
+		var hasUpper, hasLower, hasDigit, hasSym bool
+		for _, r := range pw {
+			switch {
+			case strings.ContainsRune(windowsPasswordCharsets[0], r):
+				hasUpper = true
+			case strings.ContainsRune(windowsPasswordCharsets[1], r):
+				hasLower = true
+			case strings.ContainsRune(windowsPasswordCharsets[2], r):
+				hasDigit = true
+			case strings.ContainsRune(windowsPasswordCharsets[3], r):
+				hasSym = true
+			default:
+				t.Fatalf("password %q contains char %q outside the allowed sets", pw, r)
+			}
+		}
+		if !(hasUpper && hasLower && hasDigit && hasSym) {
+			t.Fatalf("password %q missing a required class (upper=%v lower=%v digit=%v sym=%v)",
+				pw, hasUpper, hasLower, hasDigit, hasSym)
+		}
+	}
+}
+
+// TestGenerateWindowsPassword_FloorLength enforces the 14-char minimum even when
+// a smaller length is requested.
+func TestGenerateWindowsPassword_FloorLength(t *testing.T) {
+	pw, err := GenerateWindowsPassword(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pw) < 14 {
+		t.Errorf("len = %d, want ≥ 14 (floor)", len(pw))
+	}
+}
+
+// TestGenerateWindowsPassword_PowerShellSafe ensures the generated password never
+// contains characters that would break the double-quoted PowerShell string it's
+// embedded in (" ` $ \) — the property that lets SetWindowsAdminPasswordViaSSM
+// interpolate it without escaping (#201).
+func TestGenerateWindowsPassword_PowerShellSafe(t *testing.T) {
+	const unsafe = "\"`$\\"
+	for i := 0; i < 200; i++ {
+		pw, err := GenerateWindowsPassword(20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsAny(pw, unsafe) {
+			t.Fatalf("password %q contains a PowerShell-unsafe char from %q", pw, unsafe)
+		}
+	}
+}
+
+// TestGenerateWindowsPassword_Random checks two successive passwords differ (a
+// crude but sufficient guard against a constant/degenerate generator).
+func TestGenerateWindowsPassword_Random(t *testing.T) {
+	a, err := GenerateWindowsPassword(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := GenerateWindowsPassword(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Errorf("two generated passwords were identical: %q", a)
+	}
+}
+
+// TestWindowsSetAdminPasswordScript embeds the password and sets the account up
+// for use (set password, never-expire, enable) (#201).
+func TestWindowsSetAdminPasswordScript(t *testing.T) {
+	script := windowsSetAdminPasswordScript("Abc123!def456GH")
+	for _, want := range []string{
+		`ConvertTo-SecureString "Abc123!def456GH" -AsPlainText -Force`,
+		"Set-LocalUser -Password $p",
+		"-PasswordNeverExpires $true",
+		"Enable-LocalUser -Name 'Administrator'",
+		"$ErrorActionPreference = 'Stop'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q\n--- script ---\n%s", want, script)
+		}
+	}
+}
+
+// TestSSMErrTail trims and prefixes stderr, and is empty when there's nothing.
+func TestSSMErrTail(t *testing.T) {
+	if got := ssmErrTail("  "); got != "" {
+		t.Errorf("blank stderr → %q, want empty", got)
+	}
+	if got := ssmErrTail("boom"); got != ": boom" {
+		t.Errorf("got %q, want %q", got, ": boom")
+	}
+	long := strings.Repeat("x", 400)
+	got := ssmErrTail(long)
+	if !strings.HasPrefix(got, ": ") || !strings.HasSuffix(got, "…") || len(got) > 310 {
+		t.Errorf("long stderr not truncated as expected: len=%d", len(got))
 	}
 }

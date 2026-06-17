@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Windows `spawn connect` / `--rdp` now obtains the Administrator password over
+  SSM** instead of depending on EC2's `GetPasswordData` (#201). EC2Launch's
+  `setAdminAccount` generates the retrievable password only on the first boot
+  after a Sysprep, then disables it — so an instance launched from a **warm AMI**
+  (re-imaged, never re-Sysprepped — #98) never produced a retrievable password and
+  `connect --rdp` timed out (`password data not available within 12m0s`). spawn now
+  owns the credential: when the SSM agent is Online it generates a strong random
+  password and sets it directly (`Set-LocalUser` over SSM RunCommand), working
+  uniformly on warm and base AMIs and keeping the warm AMI fast. It falls back to
+  the previous `GetPasswordData` + RSA-decrypt path when SSM is unreachable (a base
+  AMI with no instance profile). Needs `ssm:SendCommand` on the connecting
+  principal — the same dependency `spawn connect` already has on Windows.
+
 ## [0.57.0] - 2026-06-16
 
 ### Added
