@@ -72,6 +72,27 @@ Resources:
                 Condition:
                   StringEquals:
                     ec2:ResourceTag/spawn:managed: 'true'
+              # Describe FSx filesystems across all regions to find expired /
+              # orphaned ephemeral filesystems (#192/#210). DescribeFileSystems has
+              # no resource-level ARN, so it must be Resource '*'. Without this the
+              # reaper's entire FSx path silently AccessDenied-errors and no FSx is
+              # ever reaped — the gap that let #210 orphans persist.
+              - Effect: Allow
+                Action:
+                  - fsx:DescribeFileSystems
+                # trivy:ignore:AVD-AWS-0057 -- DescribeFileSystems has no resource-level ARN.
+                Resource: '*'
+              # Delete — scoped to managed filesystems only, mirroring the instance
+              # terminate guard. The reaper never deletes a filesystem not tagged
+              # spawn:managed=true (so a user's own FSx is untouchable).
+              - Effect: Allow
+                Action:
+                  - fsx:DeleteFileSystem
+                # trivy:ignore:AVD-AWS-0057 -- access constrained by the tag condition.
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/spawn:managed: 'true'
       Tags:
         - Key: !Sub '${TagPrefix}:managed'
           Value: 'false'
