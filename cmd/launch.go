@@ -70,6 +70,7 @@ var (
 	spotMaxPrice    string
 	useReservation  bool
 	reservationID   string
+	capacityBlock   bool
 	hibernate       bool
 	ttl             string
 	idleTimeout     string
@@ -235,7 +236,8 @@ func init() {
 	launchCmd.Flags().BoolVar(&spot, "spot", false, "Launch as Spot instance")
 	launchCmd.Flags().StringVar(&spotMaxPrice, "spot-max-price", "", "Max Spot price")
 	launchCmd.Flags().BoolVar(&useReservation, "use-reservation", false, "Use capacity reservation")
-	launchCmd.Flags().StringVar(&reservationID, "reservation-id", "", "Capacity reservation ID")
+	launchCmd.Flags().StringVar(&reservationID, "reservation-id", "", "Capacity Reservation / Capacity Block ID to launch into (fs-/cr-...) — instance must be in the reservation's AZ (#216)")
+	launchCmd.Flags().BoolVar(&capacityBlock, "capacity-block", false, "The --reservation-id is a Capacity Block for ML (sets MarketType=capacity-block); mutually exclusive with --spot (#216)")
 
 	// Behavior
 	launchCmd.Flags().BoolVar(&hibernate, "hibernate", false, "Enable hibernation")
@@ -2027,6 +2029,12 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 				config.SpotMaxPrice = fmt.Sprintf("%.4f", truffleInput.SpotPrice)
 			}
 		}
+		// Carry the reservation id from truffle input (#216). Previously dropped —
+		// only type/region/AZ/spot were copied, so a piped reservation never
+		// reached RunInstances (same silently-dropped-field class as lagotto#19).
+		if truffleInput.ReservationID != "" {
+			config.ReservationID = truffleInput.ReservationID
+		}
 	}
 
 	// Override with flags
@@ -2059,6 +2067,24 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 	if spot {
 		config.Spot = true
+	}
+	// Launch into a Capacity Reservation / Capacity Block (#216). The flag
+	// overrides any truffle-supplied id.
+	if reservationID != "" {
+		config.ReservationID = reservationID
+	}
+	if capacityBlock {
+		config.CapacityBlock = true
+	}
+	// A Capacity Block is consumed via MarketType=capacity-block, which is
+	// mutually exclusive with Spot's market options — reject the combination
+	// rather than silently dropping one.
+	if config.CapacityBlock && config.Spot {
+		return nil, fmt.Errorf("--capacity-block and --spot are mutually exclusive (a Capacity Block is not a Spot purchase)")
+	}
+	// --capacity-block only means something with a reservation to target.
+	if config.CapacityBlock && config.ReservationID == "" {
+		return nil, fmt.Errorf("--capacity-block requires --reservation-id (the Capacity Block id to launch into)")
 	}
 	if hibernate {
 		config.Hibernate = true
