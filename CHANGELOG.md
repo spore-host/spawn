@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--reservation-id` and is mutually exclusive with `--spot`. The instance must be
   in the reservation's AZ — pin `--az` to match. (Pairs with `truffle
   capacity-blocks` discovery and `spawn capacity-block purchase`.)
+- **`spawn capacity-block purchase <offering-id>`** — reserve a Capacity Block for
+  ML (#217). This is a **non-refundable up-front charge** (the most expensive
+  action spawn can take), so it is heavily gated: it re-validates the offering and
+  its price, then requires you to **type three confirmations** — the exact price,
+  `purchase <offering-id>`, and `I UNDERSTAND THIS IS NON-REFUNDABLE` — and
+  **refuses to run on a non-interactive terminal** (no `--yes` bypass). `--dry-run`
+  previews the price and terms without buying anything (no write API call). The
+  price is re-checked immediately before charging and the purchase aborts if it
+  moved. On success it prints the reservation id and the `spawn launch
+  --reservation-id … --capacity-block` command to use. Purchases are audit-logged.
 
 ### CI
 - Pin govulncheck to v1.3.0; v1.4.0 panics analyzing generics
