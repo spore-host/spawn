@@ -53,6 +53,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"notify":          "Tier 1/3: external notification delivery",
 		"dns":             "Tier 2: Route53 + live instance public IP",
 		"fsx":             "Tier 2/3: FSx lifecycle against a real filesystem",
+		"capacity-block":  "Tier 1/3: real DescribeCapacityBlockOfferings; purchase is a non-refundable write never run in CI (typed-gate logic unit-tested in cmd)",
 		"plugin":          "Tier 2: plugin install/status on a live instance",
 		"cost":            "Tier 1: real Cost Explorer / pricing data",
 		"availability":    "Tier 1: real instance-type offerings / quotas",
