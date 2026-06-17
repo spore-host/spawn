@@ -22,7 +22,11 @@ jobs:
         with:
           go-version: '1.26'
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        # Pinned: govulncheck v1.4.0 panics ("ForEachElement called on type
+        # containing *types.TypeParam") analyzing generics, so @latest crashes the
+        # scan (exit 1, not a vulnerability finding). v1.3.0 is the last release
+        # that handles generic code. Bump once the upstream regression is fixed.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
       - name: Scan all modules
         run: |
           # govulncheck is per-module; scan the root and every nested go.mod

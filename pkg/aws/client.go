@@ -124,7 +124,8 @@ type LaunchConfig struct {
 	ClientToken        string   // Optional RunInstances idempotency token; deterministic in (cluster,entity,generation) for callers like cohort (#108). Empty = today's behavior.
 	Spot               bool     // If true, launch as a Spot instance
 	SpotMaxPrice       string   // Optional Spot max price in $/hr, e.g. "0.50"; empty = on-demand cap
-	ReservationID      string   // On-Demand Capacity Reservation ID to target
+	ReservationID      string   // Capacity Reservation / Capacity Block ID to target (RunInstances CapacityReservationSpecification); #216
+	CapacityBlock      bool     // If true, consume a Capacity Block for ML (InstanceMarketOptions MarketType=capacity-block); requires ReservationID; #216
 	Hibernate          bool     // If true, configure the instance for hibernation support
 	PlacementGroup     string   // Cluster placement group name (MPI / EFA workloads)
 	EFAEnabled         bool     // If true, attach an Elastic Fabric Adapter network interface
@@ -441,6 +442,24 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 
 		if launchConfig.SpotMaxPrice != "" {
 			input.InstanceMarketOptions.SpotOptions.MaxPrice = aws.String(launchConfig.SpotMaxPrice)
+		}
+	}
+
+	// Target a Capacity Reservation / Capacity Block for ML (#216). When a
+	// reservation id is set, point RunInstances at it; the instance must be in the
+	// reservation's AZ (the caller pins --az to match). Consuming a Capacity Block
+	// additionally requires MarketType=capacity-block — and is mutually exclusive
+	// with Spot (the caller rejects that combination before reaching here).
+	if launchConfig.ReservationID != "" {
+		input.CapacityReservationSpecification = &types.CapacityReservationSpecification{
+			CapacityReservationTarget: &types.CapacityReservationTarget{
+				CapacityReservationId: aws.String(launchConfig.ReservationID),
+			},
+		}
+		if launchConfig.CapacityBlock {
+			input.InstanceMarketOptions = &types.InstanceMarketOptionsRequest{
+				MarketType: types.MarketTypeCapacityBlock,
+			}
 		}
 	}
 

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn launch` can target a Capacity Reservation or Capacity Block for ML**
+  (#216): `--reservation-id <id>` launches into an existing reservation
+  (`RunInstances` `CapacityReservationSpecification`), and `--capacity-block`
+  marks it as a Capacity Block consume (`MarketType=capacity-block`). The
+  reservation id also flows from truffle input (`reservation_id`), which was
+  previously parsed but silently dropped. `--capacity-block` requires
+  `--reservation-id` and is mutually exclusive with `--spot`. The instance must be
+  in the reservation's AZ — pin `--az` to match. (Pairs with `truffle
+  capacity-blocks` discovery and `spawn capacity-block purchase`.)
+
+### CI
+- Pin govulncheck to v1.3.0; v1.4.0 panics analyzing generics
+  (`ForEachElement called on type containing *types.TypeParam`), crashing the
+  scan rather than reporting a real vulnerability.
+
 ## [0.61.0] - 2026-06-17
 
 ### Changed

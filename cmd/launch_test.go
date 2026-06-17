@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spore-host/spawn/pkg/input"
 	"github.com/spore-host/spawn/pkg/testutil"
 )
 
@@ -111,6 +112,100 @@ func TestBuildLaunchConfig_FSxLifecycleContract(t *testing.T) {
 			t.Error("--fsx-lifecycle without --fsx-create must error")
 		}
 	})
+}
+
+// TestBuildLaunchConfig_Reservation verifies launch-into-reservation wiring
+// (#216): --reservation-id maps to config, --capacity-block sets the flag,
+// truffle input's reservation id is carried (not dropped), and the guards reject
+// spot+capacity-block and capacity-block-without-reservation.
+func TestBuildLaunchConfig_Reservation(t *testing.T) {
+	prev := struct {
+		resID string
+		cb    bool
+		sp    bool
+		itype string
+	}{reservationID, capacityBlock, spot, instanceType}
+	t.Cleanup(func() {
+		reservationID, capacityBlock, spot, instanceType = prev.resID, prev.cb, prev.sp, prev.itype
+	})
+	instanceType = "p5.48xlarge"
+
+	t.Run("reservation-id flows to config", func(t *testing.T) {
+		reservationID, capacityBlock, spot = "cr-0abc123", false, false
+		cfg, err := buildLaunchConfig(nil)
+		if err != nil {
+			t.Fatalf("buildLaunchConfig: %v", err)
+		}
+		if cfg.ReservationID != "cr-0abc123" {
+			t.Errorf("ReservationID = %q, want cr-0abc123", cfg.ReservationID)
+		}
+		if cfg.CapacityBlock {
+			t.Error("CapacityBlock should be false when --capacity-block not set")
+		}
+	})
+
+	t.Run("capacity-block sets flag", func(t *testing.T) {
+		reservationID, capacityBlock, spot = "cr-0abc123", true, false
+		cfg, err := buildLaunchConfig(nil)
+		if err != nil {
+			t.Fatalf("buildLaunchConfig: %v", err)
+		}
+		if !cfg.CapacityBlock {
+			t.Error("CapacityBlock = false, want true")
+		}
+	})
+
+	t.Run("rejects spot + capacity-block", func(t *testing.T) {
+		reservationID, capacityBlock, spot = "cr-0abc123", true, true
+		if _, err := buildLaunchConfig(nil); err == nil {
+			t.Error("expected --spot + --capacity-block to be rejected")
+		}
+	})
+
+	t.Run("rejects capacity-block without reservation-id", func(t *testing.T) {
+		reservationID, capacityBlock, spot = "", true, false
+		if _, err := buildLaunchConfig(nil); err == nil {
+			t.Error("expected --capacity-block without --reservation-id to be rejected")
+		}
+	})
+
+	t.Run("none set leaves config clean", func(t *testing.T) {
+		reservationID, capacityBlock, spot = "", false, false
+		cfg, err := buildLaunchConfig(nil)
+		if err != nil {
+			t.Fatalf("buildLaunchConfig: %v", err)
+		}
+		if cfg.ReservationID != "" || cfg.CapacityBlock {
+			t.Errorf("expected clean config, got ReservationID=%q CapacityBlock=%v", cfg.ReservationID, cfg.CapacityBlock)
+		}
+	})
+}
+
+// TestBuildLaunchConfig_TruffleReservationCopy is the #216 dropped-field
+// regression: a reservation id supplied via truffle input must be copied into
+// the config (previously only type/region/AZ/spot were copied — lagotto#19 class).
+func TestBuildLaunchConfig_TruffleReservationCopy(t *testing.T) {
+	prev := struct {
+		resID string
+		cb    bool
+		itype string
+	}{reservationID, capacityBlock, instanceType}
+	t.Cleanup(func() { reservationID, capacityBlock, instanceType = prev.resID, prev.cb, prev.itype })
+	reservationID, capacityBlock = "", false // no flag override
+	instanceType = ""
+
+	ti := &input.TruffleInput{
+		InstanceType:  "p5.48xlarge",
+		Region:        "us-east-1",
+		ReservationID: "cr-fromtruffle",
+	}
+	cfg, err := buildLaunchConfig(ti)
+	if err != nil {
+		t.Fatalf("buildLaunchConfig: %v", err)
+	}
+	if cfg.ReservationID != "cr-fromtruffle" {
+		t.Errorf("ReservationID = %q, want cr-fromtruffle (truffle-input copy dropped?)", cfg.ReservationID)
+	}
 }
 
 // TestBuildLaunchConfig_AMIAuto verifies that --ami auto (and "AUTO") is treated
