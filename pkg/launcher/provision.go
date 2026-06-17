@@ -107,51 +107,43 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 		}
 	}
 
-	// 3.5. Ephemeral FSx (#194/#202): if the caller asked for an auto-created FSx,
-	// fire it async and tag the instance spawn:fsx-pending — spored waits, sets up
-	// the S3 export DRA, and mounts once AVAILABLE (so a headless/Lambda caller
-	// never blocks on the ~10-min provisioning). Reaped on terminate (#192).
-	//
-	// The FSx is created BEFORE RunInstances, so if the launch fails (e.g.
-	// InsufficientInstanceCapacity — exactly the case lagotto retries on), the
-	// filesystem we just created has no instance to own it and the ttl-reaper —
-	// which keys ephemeral reclamation on instance termination — would never
-	// reclaim it. Left alone, every capacity-failed retry orphans a 1.2 TiB
-	// AVAILABLE filesystem, exhausting the PERSISTENT_2 quota and burning ~$175/mo
-	// each (#210). So we tear down the FSx if the launch fails — a compensating
-	// transaction that keeps the fail-closed lifecycle contract (#193): a failed
-	// launch leaves NO billable resource behind.
+	// 3.5. Ephemeral FSx — validate the request BEFORE launching (#213). The FSx
+	// itself is created AFTER RunInstances succeeds (step 5), so a capacity-failed
+	// launch never creates a filesystem at all — no orphan, no create/teardown
+	// churn on every retry (#210). But validation (fail-closed lifecycle, #193)
+	// runs up front so a bad config fails fast without launching an instance.
 	if config.FSxLustreCreate {
-		if err := provisionEphemeralFSx(ctx, client, &config); err != nil {
+		if err := validateEphemeralFSx(&config); err != nil {
 			return nil, err
 		}
 	}
 
-	// 4. Launch.
+	// 4. Launch. If this fails (e.g. InsufficientInstanceCapacity — the case
+	// lagotto retries on), we return immediately: no FSx was created, so there's
+	// nothing to clean up.
 	result, err := client.Launch(ctx, config)
 	if err != nil {
-		if config.FSxLustreCreate && config.FSxPending != "" {
-			// Compensating teardown (#210): the launch failed, so the ephemeral FSx
-			// we created above is orphaned (no instance will ever own it). Delete it
-			// so a capacity failure costs nothing. Best-effort: surface a delete
-			// failure in the returned error so a leaked filesystem is never silent.
-			if delErr := client.DeleteFSxFilesystem(ctx, config.FSxPending, config.Region); delErr != nil {
-				return nil, fmt.Errorf("provision: launch failed (%w) AND could not delete the orphaned ephemeral FSx %s — DELETE IT MANUALLY to avoid quota/cost leak: %v", err, config.FSxPending, delErr)
-			}
-			return nil, fmt.Errorf("provision: launch failed, deleted orphaned ephemeral FSx %s: %w", config.FSxPending, err)
-		}
 		return nil, fmt.Errorf("provision: launch: %w", err)
+	}
+
+	// 5. Now that we have compute, create the ephemeral FSx and tag the instance
+	// spawn:fsx-pending so spored waits → DRA → mounts it once AVAILABLE (#194).
+	// Created here (not before launch) so capacity failures cost nothing (#213).
+	if config.FSxLustreCreate {
+		if err := createAndAttachEphemeralFSx(ctx, client, &config, result.InstanceID); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }
 
-// provisionEphemeralFSx fires an async ephemeral FSx create and stamps the
-// pending-FSx fields on config, mirroring the CLI ephemeral branch (#194) so the
-// headless path supports it too (#202). It enforces the same fail-closed
-// lifecycle contract as the CLI (#193): only "ephemeral" is valid here — durable
-// is a deliberate, blocking up-front action (`spawn fsx create`, #195), not
-// something a capacity-poller should do inline.
-func provisionEphemeralFSx(ctx context.Context, client *aws.Client, config *aws.LaunchConfig) error {
+// validateEphemeralFSx enforces the fail-closed lifecycle contract (#193) for an
+// ephemeral FSx request BEFORE the instance launches, so a bad config fails fast
+// without billing an instance. Only "ephemeral" is valid on the headless path —
+// durable is a deliberate, blocking up-front action (`spawn fsx create`, #195),
+// not something a capacity-poller should do inline. The actual filesystem is
+// created later, only after RunInstances succeeds (#213).
+func validateEphemeralFSx(config *aws.LaunchConfig) error {
 	switch config.FSxLifecycle {
 	case "ephemeral":
 		// ok
@@ -165,7 +157,27 @@ func provisionEphemeralFSx(ctx context.Context, client *aws.Client, config *aws.
 	if config.FSxS3Bucket == "" {
 		return fmt.Errorf("provision: FSx create requires an S3 bucket")
 	}
+	return nil
+}
 
+// createAndAttachEphemeralFSx creates the ephemeral FSx AFTER a successful launch
+// (#213) and tags the now-running instance spawn:fsx-pending (+ mount point and
+// S3 import/export paths) so spored waits → DRA → mounts it once AVAILABLE (#194).
+//
+// Creating it here — not before RunInstances — means a capacity-failed launch
+// never creates a filesystem, eliminating both the orphan risk and the
+// create/teardown churn the pre-launch ordering incurred on every retry (#210).
+// The compensating teardown is kept ONLY as a backstop for the narrow window
+// where the create succeeds but the follow-on tagging fails: in that case the
+// instance won't carry the pending lease, so spored would never mount and the
+// reaper's refcount would never see it — so we delete the just-created FSx rather
+// than leak it. (The reaper ephemeral-orphan net, #210, is the outer backstop.)
+//
+// Tagging timing: RunInstances returns while the instance is still pending/booting
+// (tens of seconds before spored starts), so the post-launch CreateTags lands well
+// before spored reads its tags; spored's periodic config refresh covers any
+// eventual-consistency lag.
+func createAndAttachEphemeralFSx(ctx context.Context, client *aws.Client, config *aws.LaunchConfig, instanceID string) error {
 	importPath := config.FSxImportPath
 	if importPath == "" {
 		importPath = fmt.Sprintf("s3://%s/", config.FSxS3Bucket)
@@ -173,6 +185,10 @@ func provisionEphemeralFSx(ctx context.Context, client *aws.Client, config *aws.
 	exportPath := config.FSxExportPath
 	if exportPath == "" {
 		exportPath = fmt.Sprintf("s3://%s/", config.FSxS3Bucket)
+	}
+	mountPoint := config.FSxMountPoint
+	if mountPoint == "" {
+		mountPoint = "/fsx"
 	}
 	capacity := config.FSxStorageCapacity
 	if capacity == 0 {
@@ -211,18 +227,37 @@ func provisionEphemeralFSx(ctx context.Context, client *aws.Client, config *aws.
 		return fmt.Errorf("provision: start ephemeral FSx create: %w", err)
 	}
 
-	config.FSxPending = fsID
-	config.FSxImportPath = importPath
-	config.FSxExportPath = exportPath
-	if config.FSxMountPoint == "" {
-		config.FSxMountPoint = "/fsx"
-	}
 	// Ensure Lustre ports on each SG used by both FSx and the instance (#316).
 	for _, sgID := range config.SecurityGroupIDs {
 		if err := client.EnsureLustrePorts(ctx, config.Region, sgID); err != nil {
-			// Non-fatal: log-less best-effort (matches the CLI), the mount may still work.
+			// Non-fatal: best-effort (matches the CLI), the mount may still work.
 			_ = err
 		}
 	}
+
+	// Tag the running instance so spored picks up the pending FSx and mounts it.
+	// If this fails, the FSx has no owner (spored will never see it, reaper
+	// refcount never counts it) — so tear it down rather than leak it (#210 backstop).
+	tags := map[string]string{
+		"spawn:fsx-pending":     fsID,
+		"spawn:fsx-mount-point": mountPoint,
+	}
+	if importPath != "" {
+		tags["spawn:fsx-s3-import-path"] = importPath
+	}
+	if exportPath != "" {
+		tags["spawn:fsx-s3-export-path"] = exportPath
+	}
+	if err := client.UpdateInstanceTags(ctx, config.Region, instanceID, tags); err != nil {
+		if delErr := client.DeleteFSxFilesystem(ctx, fsID, config.Region); delErr != nil {
+			return fmt.Errorf("provision: tagged-instance FSx attach failed (%w) AND could not delete the now-orphaned FSx %s — DELETE IT MANUALLY to avoid quota/cost leak: %v", err, fsID, delErr)
+		}
+		return fmt.Errorf("provision: could not tag instance %s with pending FSx %s (deleted the FSx to avoid a leak): %w", instanceID, fsID, err)
+	}
+
+	config.FSxPending = fsID
+	config.FSxImportPath = importPath
+	config.FSxExportPath = exportPath
+	config.FSxMountPoint = mountPoint
 	return nil
 }

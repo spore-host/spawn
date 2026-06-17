@@ -126,6 +126,31 @@ func TestProvision_FSxLifecycleFailClosed(t *testing.T) {
 	})
 }
 
+// TestValidateEphemeralFSx is the #213 fail-fast guarantee: the ephemeral FSx
+// request is validated BEFORE the instance launches, so a bad config errors
+// without billing an instance (the actual filesystem is created post-launch).
+func TestValidateEphemeralFSx(t *testing.T) {
+	ok := spawnaws.LaunchConfig{FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}
+	if err := validateEphemeralFSx(&ok); err != nil {
+		t.Errorf("valid ephemeral config rejected: %v", err)
+	}
+
+	bad := map[string]spawnaws.LaunchConfig{
+		"durable rejected":    {FSxLifecycle: "durable", FSxS3Bucket: "b"},
+		"empty lifecycle":     {FSxLifecycle: "", FSxS3Bucket: "b"},
+		"invalid lifecycle":   {FSxLifecycle: "forever", FSxS3Bucket: "b"},
+		"ephemeral no bucket": {FSxLifecycle: "ephemeral", FSxS3Bucket: ""},
+	}
+	for name, cfg := range bad {
+		t.Run(name, func(t *testing.T) {
+			c := cfg
+			if err := validateEphemeralFSx(&c); err == nil {
+				t.Errorf("%s: expected validation error", name)
+			}
+		})
+	}
+}
+
 // TestProvision_PreservesCallerAMI confirms a caller-supplied AMI is NOT
 // overwritten by auto-detection.
 func TestProvision_PreservesCallerAMI(t *testing.T) {
