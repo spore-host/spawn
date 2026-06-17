@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-06-16
+
 ### Fixed
 - **`spawn launch --fsx-create` now honors `--az` when placing the filesystem**
   (#208). `--az` was applied to the EC2 instance but never to the FSx create,
@@ -500,7 +502,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.58.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.59.0...HEAD
+[0.59.0]: https://github.com/spore-host/spawn/compare/v0.58.0...v0.59.0
 [0.58.0]: https://github.com/spore-host/spawn/compare/v0.57.0...v0.58.0
 [0.57.0]: https://github.com/spore-host/spawn/compare/v0.56.0...v0.57.0
 [0.56.0]: https://github.com/spore-host/spawn/compare/v0.55.0...v0.56.0
