@@ -38,6 +38,32 @@ func createTestFSxFilesystem(t *testing.T, fsxClient *fsx.Client, stackName stri
 	return *out.FileSystem.FileSystemId
 }
 
+// TestNeedsAZSubnetResolution is the #208 regression: --fsx-create must resolve a
+// pinned --az to a subnet, so the filesystem co-locates with the instance instead
+// of landing in subnets[0] of the default VPC (an arbitrary AZ → unmountable
+// cross-AZ FSx, and on accounts whose subnets[0] AZ lacks PERSISTENT_2 a spurious
+// "not available in this availability zone" for every --az).
+func TestNeedsAZSubnetResolution(t *testing.T) {
+	cases := []struct {
+		name   string
+		subnet string
+		az     string
+		want   bool
+	}{
+		{"pinned AZ, no subnet → resolve", "", "us-east-1a", true},
+		{"explicit subnet wins → no resolve", "subnet-123", "us-east-1a", false},
+		{"no AZ, no subnet → fallback, no resolve", "", "", false},
+		{"explicit subnet, no AZ → no resolve", "subnet-123", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := NeedsAZSubnetResolution(c.subnet, c.az); got != c.want {
+				t.Errorf("NeedsAZSubnetResolution(%q, %q) = %v, want %v", c.subnet, c.az, got, c.want)
+			}
+		})
+	}
+}
+
 func TestFSxCreateAndDescribe(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	ctx := context.Background()

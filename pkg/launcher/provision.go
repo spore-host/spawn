@@ -159,6 +159,21 @@ func provisionEphemeralFSx(ctx context.Context, client *aws.Client, config *aws.
 		capacity = 1200 // PERSISTENT_2 minimum
 	}
 
+	// Co-locate the FSx with the instance's AZ (#194/#208): FSx Lustre is
+	// single-AZ and the mounting instance must share its AZ. Prefer an explicit
+	// subnet; else resolve a pinned --az to a subnet so the FSx doesn't fall back
+	// to subnets[0] (a different AZ → unmountable cross-AZ FSx, and on accounts
+	// whose subnets[0] AZ lacks PERSISTENT_2, a spurious "not available in this
+	// availability zone" for every AZ).
+	subnetID := config.SubnetID
+	if aws.NeedsAZSubnetResolution(subnetID, config.AvailabilityZone) {
+		s, serr := client.GetSubnetForAZ(ctx, config.Region, config.AvailabilityZone)
+		if serr != nil {
+			return fmt.Errorf("provision: could not find a subnet in az %s to co-locate the ephemeral FSx: %w", config.AvailabilityZone, serr)
+		}
+		subnetID = s
+	}
+
 	fsID, err := client.CreateFSxLustreFilesystemAsync(ctx, aws.FSxConfig{
 		StackName:                config.Name,
 		Region:                   config.Region,
@@ -168,7 +183,7 @@ func provisionEphemeralFSx(ctx context.Context, client *aws.Client, config *aws.
 		ImportPath:               importPath,
 		ExportPath:               exportPath,
 		AutoCreateBucket:         true,
-		SubnetID:                 config.SubnetID, // co-locate with the instance's AZ when pinned
+		SubnetID:                 subnetID,
 		SecurityGroupIDs:         config.SecurityGroupIDs,
 		Lifecycle:                "ephemeral",
 	})

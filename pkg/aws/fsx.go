@@ -422,3 +422,43 @@ func (c *Client) GetSubnets(ctx context.Context, region, vpcID string) ([]string
 
 	return subnetIDs, nil
 }
+
+// NeedsAZSubnetResolution reports whether an FSx-create needs to resolve an
+// availability zone to a subnet before creating the filesystem (#208). It is the
+// pure decision shared by the CLI and headless launch paths: resolve only when no
+// subnet is explicitly pinned AND an AZ is pinned. With an explicit subnet, that
+// wins; with neither, startFSxCreate's default-VPC fallback matches the
+// instance's own unpinned placement. Pulling this out keeps the (untestable
+// without AWS) DescribeSubnets call thin and the branching logic unit-tested.
+func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool {
+	return pinnedSubnetID == "" && pinnedAZ != ""
+}
+
+// GetSubnetForAZ returns the default-VPC subnet in the given availability zone
+// (e.g. "us-east-1a"). FSx for Lustre is single-AZ and a mounting instance must
+// be in the SAME AZ as the filesystem, so when a launch pins an AZ the FSx must
+// be created in a subnet of THAT AZ — not an arbitrary subnets[0] (#208). Returns
+// an error if the region has no default VPC or no subnet in that AZ.
+func (c *Client) GetSubnetForAZ(ctx context.Context, region, az string) (string, error) {
+	vpcID, err := c.GetDefaultVPC(ctx, region)
+	if err != nil {
+		return "", fmt.Errorf("failed to get default VPC: %w", err)
+	}
+	cfg := c.cfg.Copy()
+	cfg.Region = region
+	ec2Client := ec2.NewFromConfig(cfg)
+
+	result, err := ec2Client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+		Filters: []ec2types.Filter{
+			{Name: aws.String("vpc-id"), Values: []string{vpcID}},
+			{Name: aws.String("availability-zone"), Values: []string{az}},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to describe subnets in %s: %w", az, err)
+	}
+	if len(result.Subnets) == 0 {
+		return "", fmt.Errorf("no subnet in availability zone %s (default VPC %s)", az, vpcID)
+	}
+	return *result.Subnets[0].SubnetId, nil
+}
