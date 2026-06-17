@@ -1373,6 +1373,15 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	var fsxInfo *aws.FSxInfo
 	var err error
 
+	// For an EPHEMERAL --fsx-create, the filesystem is created AFTER the launch
+	// succeeds (#213) — a capacity-failed launch then never creates an FSx, so
+	// there's no orphan and no create/teardown churn on retries (#210). We prepare
+	// the resolved config here (validated up front) and carry it to the post-launch
+	// step. Durable FSx is still created up front below (a deliberate persisted
+	// resource). nil = no ephemeral FSx to create post-launch.
+	var pendingFSxConfig *aws.FSxConfig
+	var pendingFSxImportPath, pendingFSxExportPath, pendingFSxMountPoint string
+
 	if fsxCreate {
 		prog.Start("Creating FSx Lustre filesystem")
 
@@ -1445,11 +1454,26 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			}
 		}
 
-		if fsxLifecycle == "ephemeral" {
-			// Async: fire CreateFileSystem and return immediately. spored polls to
-			// AVAILABLE, sets up the DRA, and mounts (#194) — neither the CLI nor a
-			// lagotto Lambda blocks on the ~10-min provisioning. The instance is
-			// tagged spawn:fsx-pending; refcount-reaped on terminate (#192).
+		if fsxLifecycle == "ephemeral" && count <= 1 {
+			// Single-instance: DEFER creation until after the launch succeeds
+			// (#213). Stash the resolved config and create the FSx post-launch, so a
+			// capacity-failed launch never creates a filesystem (no orphan, no
+			// per-retry churn — #210). The config is fully resolved/validated here;
+			// only the CreateFileSystem call moves later. (Job arrays, count>1, keep
+			// creating up front below — N instances share the one filesystem and the
+			// array dispatch tags each via config.FSxPending, so it must exist before
+			// dispatch.)
+			cfgCopy := fsxConfig
+			pendingFSxConfig = &cfgCopy
+			pendingFSxImportPath = importPath
+			pendingFSxExportPath = exportPath
+			pendingFSxMountPoint = fsxMountPoint
+			prog.Skip("Creating FSx Lustre filesystem (deferred until after launch)")
+		} else if fsxLifecycle == "ephemeral" {
+			// Job array (count>1): the shared ephemeral FSx must exist before the
+			// array is dispatched (each instance is tagged spawn:fsx-pending from
+			// config). Create it up front. (This path keeps the pre-#213 ordering;
+			// the #210 reaper orphan-net is the backstop if the array dispatch fails.)
 			prog.Start("Creating FSx Lustre filesystem (async)")
 			fsID, cerr := awsClient.CreateFSxLustreFilesystemAsync(ctx, fsxConfig)
 			if cerr != nil {
@@ -1463,7 +1487,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				config.FSxMountPoint = fsxMountPoint
 			}
 			prog.Complete("Creating FSx Lustre filesystem (async)")
-			fmt.Fprintf(os.Stderr, "   FSx %s is provisioning; the instance will mount it at %s once AVAILABLE (~10 min).\n", fsID, config.FSxMountPoint)
+			fmt.Fprintf(os.Stderr, "   FSx %s is provisioning; array instances will mount it at %s once AVAILABLE (~10 min).\n", fsID, config.FSxMountPoint)
 		} else {
 			// durable: explicit death clock (#193), reaped on refcount-0 + TTL.
 			if fsxLifecycle == "durable" && fsxTTL != "" {
@@ -1718,21 +1742,10 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	if err != nil {
 		prog.Error("Launching instance", err)
 		auditLog.LogOperationWithRegion("launch_instance", "single", config.Region, "failed", err)
-		// Compensating teardown (#210): an ephemeral FSx is created BEFORE this
-		// launch. If the launch fails (e.g. InsufficientInstanceCapacity), the
-		// filesystem has no instance to own it and the ttl-reaper — which keys
-		// ephemeral reclamation on instance termination — never reclaims it, so it
-		// orphans as a billable 1.2 TiB AVAILABLE filesystem. Delete it here so a
-		// failed launch leaves no billable resource behind (the #193 fail-closed
-		// contract). Only ephemeral: a durable FSx (fsxInfo) is a deliberate
-		// persisted resource the user owns.
-		if fsxCreate && fsxLifecycle == "ephemeral" && config.FSxPending != "" {
-			if delErr := awsClient.DeleteFSxFilesystem(ctx, config.FSxPending, config.Region); delErr != nil {
-				fmt.Fprintf(os.Stderr, "🛑 launch failed AND could not delete the orphaned ephemeral FSx %s — DELETE IT MANUALLY (aws fsx delete-file-system --file-system-id %s) to avoid quota/cost leak: %v\n", config.FSxPending, config.FSxPending, delErr)
-			} else {
-				fmt.Fprintf(os.Stderr, "   Cleaned up orphaned ephemeral FSx %s (launch failed before it could be used).\n", config.FSxPending)
-			}
-		}
+		// No ephemeral-FSx teardown needed here (#213): the ephemeral FSx is now
+		// created AFTER this launch succeeds (below), so a failed launch never
+		// created one. A capacity failure leaves no billable resource by
+		// construction — no orphan, no create/teardown churn on retries (#210).
 		return err
 	}
 	auditLog.LogOperationWithData("launch_instance", result.InstanceID, "success",
@@ -1741,6 +1754,50 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			"region":        config.Region,
 		}, nil)
 	prog.Complete("Launching instance")
+
+	// Step 6.5: Now that the instance launched, create the ephemeral FSx and tag
+	// the instance spawn:fsx-pending so spored waits → DRA → mounts once AVAILABLE
+	// (#194). Created here (post-launch) so capacity failures cost nothing (#213).
+	// If the create-or-tag fails, the FSx is torn down rather than leaked (#210
+	// backstop); the reaper ephemeral-orphan net is the outer safety net.
+	if pendingFSxConfig != nil {
+		prog.Start("Creating FSx Lustre filesystem (async)")
+		fsID, cerr := awsClient.CreateFSxLustreFilesystemAsync(ctx, *pendingFSxConfig)
+		if cerr != nil {
+			prog.Error("Creating FSx Lustre filesystem (async)", cerr)
+			return fmt.Errorf("instance %s launched, but starting the ephemeral FSx failed: %w", result.InstanceID, cerr)
+		}
+		mountPoint := pendingFSxMountPoint
+		if mountPoint == "" {
+			mountPoint = "/fsx"
+		}
+		tags := map[string]string{
+			"spawn:fsx-pending":     fsID,
+			"spawn:fsx-mount-point": mountPoint,
+		}
+		if pendingFSxImportPath != "" {
+			tags["spawn:fsx-s3-import-path"] = pendingFSxImportPath
+		}
+		if pendingFSxExportPath != "" {
+			tags["spawn:fsx-s3-export-path"] = pendingFSxExportPath
+		}
+		if terr := awsClient.UpdateInstanceTags(ctx, config.Region, result.InstanceID, tags); terr != nil {
+			// Tagging failed → spored will never see the pending FSx and the reaper
+			// refcount will never count it, so delete it rather than leak it.
+			if delErr := awsClient.DeleteFSxFilesystem(ctx, fsID, config.Region); delErr != nil {
+				prog.Error("Creating FSx Lustre filesystem (async)", terr)
+				return fmt.Errorf("instance %s launched but tagging it with pending FSx %s failed (%w) AND deleting the FSx failed — DELETE IT MANUALLY (aws fsx delete-file-system --file-system-id %s): %v", result.InstanceID, fsID, terr, fsID, delErr)
+			}
+			prog.Error("Creating FSx Lustre filesystem (async)", terr)
+			return fmt.Errorf("instance %s launched but tagging it with pending FSx %s failed (deleted the FSx to avoid a leak): %w", result.InstanceID, fsID, terr)
+		}
+		config.FSxPending = fsID
+		config.FSxImportPath = pendingFSxImportPath
+		config.FSxExportPath = pendingFSxExportPath
+		config.FSxMountPoint = mountPoint
+		prog.Complete("Creating FSx Lustre filesystem (async)")
+		fmt.Fprintf(os.Stderr, "   FSx %s is provisioning; the instance will mount it at %s once AVAILABLE (~10 min).\n", fsID, mountPoint)
+	}
 
 	// Write instance ID to file for workflow integration
 	if err := writeOutputID(result.InstanceID, outputIDFile); err != nil {

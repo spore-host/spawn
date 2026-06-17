@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Ephemeral `--fsx-create` now creates the filesystem AFTER the instance
+  launches, not before** (#213). Previously the FSx was created up front and, on a
+  launch failure, torn down again (the #210 fix) — which under lagotto's
+  per-AZ/per-poll capacity-retry loop meant a create→fail→delete cycle on every
+  attempt. Now `RunInstances` runs first; only on success is the FSx created and
+  the instance tagged `spawn:fsx-pending` (spored then mounts it once AVAILABLE,
+  unchanged). A capacity-failed launch issues **zero** `CreateFileSystem` calls —
+  no orphan, no churn — by construction. The fail-closed lifecycle validation
+  still runs up front (a bad config fails fast without launching), and the
+  compensating teardown is retained as a backstop for the narrow window where the
+  FSx is created but tagging the instance fails. No user-visible latency change
+  (spored already mounts asynchronously). Job arrays (`--count > 1`) keep creating
+  the shared FSx before dispatch. Applies to both the CLI and the headless
+  launcher (`launcher.Provision`).
+
 ## [0.60.0] - 2026-06-17
 
 ### Fixed
