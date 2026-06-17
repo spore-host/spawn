@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **CRITICAL: a failed `--fsx-create` launch no longer orphans the ephemeral FSx
+  filesystem** (#210). The ephemeral FSx is created *before* `RunInstances`; if
+  the launch failed (e.g. `InsufficientInstanceCapacity`), the filesystem had no
+  instance to own it and the ttl-reaper — which keyed ephemeral reclamation on
+  instance *termination* — never reclaimed it. Under lagotto's retry-on-capacity
+  loop this orphaned ~3 × 1.2 TiB filesystems per poll, exhausting the account's
+  PERSISTENT_2 quota in ~35 min (~$14.6k/mo if left running). Two layers of
+  defense now: (1) **compensating teardown** — both the CLI and the headless
+  launcher (`launcher.Provision`) delete the just-created ephemeral FSx if the
+  launch fails, so a capacity failure leaves no billable resource (the #193
+  fail-closed contract); and (2) **reaper safety net** — the ttl-reaper now
+  reclaims any `spawn:fsx-lifecycle=ephemeral` filesystem that has had no
+  referencing instance (neither `spawn:fsx-id` nor `spawn:fsx-pending`) for longer
+  than a 30-minute orphan grace, covering the "instance never launched" case even
+  if the teardown itself is missed (crash, delete error). The refcount check now
+  also counts the `spawn:fsx-pending` provisioning lease, so a healthy FSx is
+  never reaped during its ~10-minute mount window.
+
 ## [0.59.0] - 2026-06-16
 
 ### Fixed

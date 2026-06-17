@@ -111,6 +111,16 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 	// fire it async and tag the instance spawn:fsx-pending — spored waits, sets up
 	// the S3 export DRA, and mounts once AVAILABLE (so a headless/Lambda caller
 	// never blocks on the ~10-min provisioning). Reaped on terminate (#192).
+	//
+	// The FSx is created BEFORE RunInstances, so if the launch fails (e.g.
+	// InsufficientInstanceCapacity — exactly the case lagotto retries on), the
+	// filesystem we just created has no instance to own it and the ttl-reaper —
+	// which keys ephemeral reclamation on instance termination — would never
+	// reclaim it. Left alone, every capacity-failed retry orphans a 1.2 TiB
+	// AVAILABLE filesystem, exhausting the PERSISTENT_2 quota and burning ~$175/mo
+	// each (#210). So we tear down the FSx if the launch fails — a compensating
+	// transaction that keeps the fail-closed lifecycle contract (#193): a failed
+	// launch leaves NO billable resource behind.
 	if config.FSxLustreCreate {
 		if err := provisionEphemeralFSx(ctx, client, &config); err != nil {
 			return nil, err
@@ -120,6 +130,16 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 	// 4. Launch.
 	result, err := client.Launch(ctx, config)
 	if err != nil {
+		if config.FSxLustreCreate && config.FSxPending != "" {
+			// Compensating teardown (#210): the launch failed, so the ephemeral FSx
+			// we created above is orphaned (no instance will ever own it). Delete it
+			// so a capacity failure costs nothing. Best-effort: surface a delete
+			// failure in the returned error so a leaked filesystem is never silent.
+			if delErr := client.DeleteFSxFilesystem(ctx, config.FSxPending, config.Region); delErr != nil {
+				return nil, fmt.Errorf("provision: launch failed (%w) AND could not delete the orphaned ephemeral FSx %s — DELETE IT MANUALLY to avoid quota/cost leak: %v", err, config.FSxPending, delErr)
+			}
+			return nil, fmt.Errorf("provision: launch failed, deleted orphaned ephemeral FSx %s: %w", config.FSxPending, err)
+		}
 		return nil, fmt.Errorf("provision: launch: %w", err)
 	}
 	return result, nil
