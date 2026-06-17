@@ -301,3 +301,61 @@ func TestEvaluateFSx_NotAvailable_Skipped(t *testing.T) {
 		t.Error("a CREATING filesystem must not be reaped (only AVAILABLE)")
 	}
 }
+
+// TestEvaluateFSx_EphemeralOrphan_PastGrace is the #210 safety net: an ephemeral
+// FSx (no ttl-deadline) older than the orphan grace is eligible — covers the
+// "launch never succeeded, no instance ever owned it" case. The refcount check in
+// reapFSxRegion still gates the actual delete.
+func TestEvaluateFSx_EphemeralOrphan_PastGrace(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	fsItem := fsxtypes.FileSystem{
+		FileSystemId: aws.String("fs-orphan"),
+		Lifecycle:    fsxtypes.FileSystemLifecycleAvailable,
+		Tags: []fsxtypes.Tag{
+			fsxTag("spawn:managed", "true"),
+			fsxTag("spawn:fsx-lifecycle", "ephemeral"),
+			fsxTag("spawn:fsx-created", now.Add(-(ephemeralOrphanGrace + time.Minute)).Format(time.RFC3339)),
+		},
+	}
+	_, reason, _, expired := newReaper().evaluateFSx(fsItem, now)
+	if !expired || reason != "ephemeral-orphan" {
+		t.Errorf("ephemeral FS past orphan grace should expire as ephemeral-orphan, got reason=%q expired=%v", reason, expired)
+	}
+}
+
+// TestEvaluateFSx_EphemeralOrphan_WithinGrace spares a freshly-created ephemeral
+// FS (its instance may still be launching / spored still mounting). The default
+// 7d max-age is far away, so it must NOT be expired within the grace window.
+func TestEvaluateFSx_EphemeralOrphan_WithinGrace(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	fsItem := fsxtypes.FileSystem{
+		FileSystemId: aws.String("fs-fresh"),
+		Lifecycle:    fsxtypes.FileSystemLifecycleAvailable,
+		Tags: []fsxtypes.Tag{
+			fsxTag("spawn:managed", "true"),
+			fsxTag("spawn:fsx-lifecycle", "ephemeral"),
+			fsxTag("spawn:fsx-created", now.Add(-2*time.Minute).Format(time.RFC3339)),
+		},
+	}
+	if _, _, _, expired := newReaper().evaluateFSx(fsItem, now); expired {
+		t.Error("an ephemeral FS within the orphan grace must not be reaped (instance may still be launching/mounting)")
+	}
+}
+
+// TestEvaluateFSx_DurableNoOrphanReap confirms the orphan net is ephemeral-only:
+// a durable FS with no deadline relies on max-age, not the short orphan grace.
+func TestEvaluateFSx_DurableNoOrphanReap(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	fsItem := fsxtypes.FileSystem{
+		FileSystemId: aws.String("fs-durable"),
+		Lifecycle:    fsxtypes.FileSystemLifecycleAvailable,
+		Tags: []fsxtypes.Tag{
+			fsxTag("spawn:managed", "true"),
+			fsxTag("spawn:fsx-lifecycle", "durable"),
+			fsxTag("spawn:fsx-created", now.Add(-(ephemeralOrphanGrace + time.Hour)).Format(time.RFC3339)),
+		},
+	}
+	if _, _, _, expired := newReaper().evaluateFSx(fsItem, now); expired {
+		t.Error("a durable FS must not be reaped via the ephemeral orphan grace (only max-age/deadline applies)")
+	}
+}

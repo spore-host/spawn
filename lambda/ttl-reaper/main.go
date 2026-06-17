@@ -95,6 +95,19 @@ type reaper struct {
 // pre-stop flush. The reaper is a backstop, not a babysitter — keep it short.
 const defaultGracefulWait = 2 * time.Minute
 
+// ephemeralOrphanGrace is how long an ephemeral FSx may exist with NO instance
+// referencing it (neither spawn:fsx-id nor spawn:fsx-pending) before the reaper
+// treats it as orphaned and reclaims it (#210). An ephemeral FSx is created
+// BEFORE its instance launches; if the launch fails (e.g. InsufficientInstance
+// Capacity, the case lagotto retries on) no instance ever owns it, so the
+// refcount→0 reclamation keyed on instance termination never fires and the
+// filesystem orphans as a billable 1.2 TiB resource. This grace covers that hole
+// while comfortably clearing the normal create→launch→tag window (RunInstances is
+// seconds; spored stamps spawn:fsx-pending immediately). Kept well under the FSx
+// AVAILABLE time (~10 min) so a healthy filesystem is always referenced before
+// the grace elapses.
+const ephemeralOrphanGrace = 30 * time.Minute
+
 var r *reaper
 
 func init() {
@@ -563,31 +576,54 @@ func (r *reaper) evaluateFSx(fsItem fsxtypes.FileSystem, now time.Time) (id, rea
 	}
 
 	created := launchTime(tags[tagprefix.Tag("fsx-created")], fsItem.CreationTime)
+
+	// Ephemeral-orphan safety net (#210): an ephemeral FSx carries no ttl-deadline
+	// (it relies on refcount→0 reclamation on instance termination). If its launch
+	// never succeeded, no instance ever references it and that reclamation never
+	// fires — so once it's older than the orphan grace it's eligible regardless of
+	// max-age. The refcount check in reapFSxRegion (which now also counts
+	// spawn:fsx-pending) still gates the actual delete, so a legitimately-
+	// provisioning filesystem inside its mount window is never reaped here.
+	if tags[tagprefix.Tag("fsx-lifecycle")] == "ephemeral" {
+		if !created.IsZero() && now.Sub(created) > ephemeralOrphanGrace {
+			return id, "ephemeral-orphan", created.UTC().Format(time.RFC3339), true
+		}
+	}
+
 	if !created.IsZero() && now.Sub(created) > r.maxAge {
 		return id, "max-age", created.UTC().Format(time.RFC3339), true
 	}
 	return id, "", "", false
 }
 
-// fsxInUse reports whether any live instance still references the filesystem via
-// the spawn:fsx-id tag (the lease, written at launch for every mount path). This
-// is the refcount: a single live user blocks reaping. Stopped instances count —
+// fsxInUse reports whether any live instance still references the filesystem.
+// Two leases count as in-use:
+//   - spawn:fsx-id=<fs> — the mounted lease, written once the filesystem is
+//     AVAILABLE and bound to the instance (the normal refcount).
+//   - spawn:fsx-pending=<fs> — the provisioning lease, written at launch while
+//     spored waits for the filesystem to reach AVAILABLE and mounts it (the ~10-
+//     min window). Counting this prevents the #210 orphan safety net from reaping
+//     a healthy ephemeral FSx during its legitimate provisioning window.
+//
+// A single live user (either lease) blocks reaping. Stopped instances count —
 // they still "own" the data and may restart. Self-heals leaked leases: a gone
 // instance simply isn't returned by DescribeInstances.
 func (r *reaper) fsxInUse(ctx context.Context, acct account, region, fsxID string) (bool, error) {
 	client := acct.ec2For(region)
-	out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-		Filters: []ec2types.Filter{
-			{Name: aws.String(tagprefix.FilterTag("fsx-id")), Values: []string{fsxID}},
-			{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
-		},
-	})
-	if err != nil {
-		return false, err
-	}
-	for _, res := range out.Reservations {
-		if len(res.Instances) > 0 {
-			return true, nil
+	for _, leaseTag := range []string{"fsx-id", "fsx-pending"} {
+		out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+			Filters: []ec2types.Filter{
+				{Name: aws.String(tagprefix.FilterTag(leaseTag)), Values: []string{fsxID}},
+				{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
+			},
+		})
+		if err != nil {
+			return false, err
+		}
+		for _, res := range out.Reservations {
+			if len(res.Instances) > 0 {
+				return true, nil
+			}
 		}
 	}
 	return false, nil

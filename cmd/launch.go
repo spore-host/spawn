@@ -1718,6 +1718,21 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	if err != nil {
 		prog.Error("Launching instance", err)
 		auditLog.LogOperationWithRegion("launch_instance", "single", config.Region, "failed", err)
+		// Compensating teardown (#210): an ephemeral FSx is created BEFORE this
+		// launch. If the launch fails (e.g. InsufficientInstanceCapacity), the
+		// filesystem has no instance to own it and the ttl-reaper — which keys
+		// ephemeral reclamation on instance termination — never reclaims it, so it
+		// orphans as a billable 1.2 TiB AVAILABLE filesystem. Delete it here so a
+		// failed launch leaves no billable resource behind (the #193 fail-closed
+		// contract). Only ephemeral: a durable FSx (fsxInfo) is a deliberate
+		// persisted resource the user owns.
+		if fsxCreate && fsxLifecycle == "ephemeral" && config.FSxPending != "" {
+			if delErr := awsClient.DeleteFSxFilesystem(ctx, config.FSxPending, config.Region); delErr != nil {
+				fmt.Fprintf(os.Stderr, "🛑 launch failed AND could not delete the orphaned ephemeral FSx %s — DELETE IT MANUALLY (aws fsx delete-file-system --file-system-id %s) to avoid quota/cost leak: %v\n", config.FSxPending, config.FSxPending, delErr)
+			} else {
+				fmt.Fprintf(os.Stderr, "   Cleaned up orphaned ephemeral FSx %s (launch failed before it could be used).\n", config.FSxPending)
+			}
+		}
 		return err
 	}
 	auditLog.LogOperationWithData("launch_instance", result.InstanceID, "success",
