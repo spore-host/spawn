@@ -1412,10 +1412,28 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			SecurityGroupIDs:         config.SecurityGroupIDs,
 			Lifecycle:                fsxLifecycle,
 		}
-		// Co-locate the FSx with the instance's AZ (#194): pass the instance's
-		// subnet when one is pinned, else startFSxCreate falls back to the default
-		// VPC subnet — the same default the instance uses.
+		// Co-locate the FSx with the instance's AZ (#194/#208). FSx Lustre is
+		// single-AZ and a mounting instance MUST be in the same AZ as the
+		// filesystem, so the FSx subnet has to match where the instance lands:
+		//   1. An explicitly-pinned subnet wins.
+		//   2. Else, if --az pinned the instance's AZ, resolve THAT AZ to a subnet
+		//      — otherwise startFSxCreate falls back to subnets[0] of the default
+		//      VPC, which silently ignores --az and can put the FSx in a different
+		//      AZ than the instance (an unmountable cross-AZ FSx), and on accounts
+		//      whose subnets[0] AZ doesn't offer PERSISTENT_2 makes every --az
+		//      value fail identically with "not available in this availability
+		//      zone" (#208).
+		//   3. Else leave it empty: startFSxCreate's default-VPC fallback matches
+		//      the instance's own unpinned placement.
 		fsxConfig.SubnetID = config.SubnetID
+		if aws.NeedsAZSubnetResolution(fsxConfig.SubnetID, config.AvailabilityZone) {
+			subnetID, serr := awsClient.GetSubnetForAZ(ctx, config.Region, config.AvailabilityZone)
+			if serr != nil {
+				prog.Error("Creating FSx Lustre filesystem", serr)
+				return fmt.Errorf("FSx create: could not find a subnet in --az %s to co-locate the filesystem with the instance: %w", config.AvailabilityZone, serr)
+			}
+			fsxConfig.SubnetID = subnetID
+		}
 
 		// Ensure Lustre ports on each SG used by both FSx and instances, up front
 		// (needed by both the blocking and async paths). Without this the MGS

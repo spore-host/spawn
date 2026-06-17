@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn launch --fsx-create` now honors `--az` when placing the filesystem**
+  (#208). `--az` was applied to the EC2 instance but never to the FSx create,
+  which fell back to `subnets[0]` of the default VPC regardless of `--az`. Two
+  consequences: (1) the FSx could land in a different AZ than the instance — an
+  **unmountable cross-AZ FSx** (FSx Lustre is single-AZ); and (2) on accounts
+  whose `subnets[0]` AZ doesn't offer PERSISTENT_2, **every** `--az` value failed
+  identically with `The requested Lustre configuration: PERSISTENT_2 is not
+  available in this availability zone` — a per-AZ-availability illusion that was
+  really the same wrong subnet each time. spawn now resolves the pinned AZ to a
+  default-VPC subnet (`GetSubnetForAZ`) so the filesystem co-locates with the
+  instance. Applies to both the CLI and the headless launcher
+  (`launcher.Provision`). An explicit pinned subnet still wins; with no AZ and no
+  subnet, the default-VPC fallback (matching the instance's own placement) is
+  unchanged.
+
 ## [0.58.0] - 2026-06-16
 
 ### Fixed
