@@ -57,6 +57,31 @@ func confirmYes(skip bool, prompt string) bool {
 	}
 }
 
+// stdinIsInteractive reports whether stdin is a terminal (a character device).
+// Used to refuse irreversible prompts (e.g. a Capacity Block purchase) on piped/
+// non-interactive stdin rather than reading an EOF as anything but "abort".
+func stdinIsInteractive() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// confirmTypedPhrase requires the user to type an EXACT phrase (trimmed of
+// surrounding whitespace) on stdin to proceed — a stronger gate than y/N, used
+// for irreversible high-cost actions like a Capacity Block purchase (#217).
+// Returns false on any mismatch, on a read error, or on non-interactive stdin
+// (there is no --yes bypass for these gates). The prompt is printed to stderr.
+func confirmTypedPhrase(reader *bufio.Reader, prompt, want string) bool {
+	fmt.Fprint(os.Stderr, prompt)
+	line, err := reader.ReadString('\n')
+	if err != nil && line == "" {
+		return false
+	}
+	return strings.TrimSpace(line) == want
+}
+
 // resolveInstance finds an instance by ID or name
 func resolveInstance(ctx context.Context, client *aws.Client, identifier string) (*aws.InstanceInfo, error) {
 	fmt.Fprintf(os.Stderr, "Looking up instance %s...\n", identifier)
