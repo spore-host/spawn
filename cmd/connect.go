@@ -295,69 +295,106 @@ func connectWindows(ctx context.Context, client *aws.Client, instance *aws.Insta
 		return connectWindowsRDP(ctx, client, instance)
 	}
 
-	// Interactive: fetch + decrypt the Administrator password, print RDP info,
-	// then drop into an SSM PowerShell session.
-	fmt.Fprintf(os.Stderr, "Retrieving Windows Administrator password (this can take a few minutes after launch)...\n")
-	blob, err := client.WaitForPasswordData(ctx, region, id, 10*time.Minute)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s could not get password data: %v\n", i18n.Symbol("warning"), err)
-	} else {
-		password := ""
-		keyPath, rerr := findSSHKey(instance.KeyName)
-		if rerr != nil {
-			fmt.Fprintf(os.Stderr, "%s could not locate the launch key %q to decrypt the password: %v\n",
-				i18n.Symbol("warning"), instance.KeyName, rerr)
-		} else if pw, derr := aws.DecryptWindowsPassword(blob, keyPath); derr != nil {
-			fmt.Fprintf(os.Stderr, "%s could not decrypt the Administrator password (need the RSA launch key): %v\n",
-				i18n.Symbol("warning"), derr)
-		} else {
-			password = pw
-		}
-
-		fmt.Println()
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Printf("  Windows instance %s\n", instance.Name)
-		fmt.Printf("  Administrator user:  Administrator\n")
-		if password != "" {
-			fmt.Printf("  Administrator pass:  %s\n", password)
-		}
-		if instance.PublicIP != "" {
-			fmt.Printf("  RDP:                 mstsc /v:%s   (or any RDP client → %s:3389)\n", instance.PublicIP, instance.PublicIP)
-		} else {
-			fmt.Printf("  RDP:                 no public IP — use SSM port forwarding:\n")
-			fmt.Printf("                       aws ssm start-session --target %s --region %s \\\n", id, region)
-			fmt.Printf("                         --document-name AWS-StartPortForwardingSession \\\n")
-			fmt.Printf("                         --parameters portNumber=3389,localPortNumber=13389\n")
-		}
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Println()
+	// Interactive: resolve the Administrator password (SSM-set, or GetPasswordData
+	// fallback), print RDP info, then drop into an SSM PowerShell session.
+	password, perr := resolveWindowsAdminPassword(ctx, client, instance)
+	if perr != nil {
+		fmt.Fprintf(os.Stderr, "%s %v\n", i18n.Symbol("warning"), perr)
 	}
+	fmt.Println()
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Printf("  Windows instance %s\n", instance.Name)
+	fmt.Printf("  Administrator user:  Administrator\n")
+	if password != "" {
+		fmt.Printf("  Administrator pass:  %s\n", password)
+	}
+	if instance.PublicIP != "" {
+		fmt.Printf("  RDP:                 mstsc /v:%s   (or any RDP client → %s:3389)\n", instance.PublicIP, instance.PublicIP)
+	} else {
+		fmt.Printf("  RDP:                 no public IP — use SSM port forwarding:\n")
+		fmt.Printf("                       aws ssm start-session --target %s --region %s \\\n", id, region)
+		fmt.Printf("                         --document-name AWS-StartPortForwardingSession \\\n")
+		fmt.Printf("                         --parameters portNumber=3389,localPortNumber=13389\n")
+	}
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
 
 	fmt.Fprintf(os.Stderr, "Opening an SSM PowerShell session (Ctrl-D to exit)...\n\n")
 	return connectViaSessionManager(id, region)
 }
 
-// connectWindowsRDP opens a Remote Desktop connection to a Windows instance. It
-// decrypts the Administrator password, then connects either directly to the
-// public IP (default when one exists) or over an SSM port-forwarding tunnel
-// (--via-ssm, or automatically when there's no public IP). The decrypted
-// password is printed for the user to paste into the RDP login (RDP can't be
-// pre-seeded with a password cross-platform). (#95)
-func connectWindowsRDP(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo) error {
+// resolveWindowsAdminPassword obtains a usable Administrator password for a
+// Windows instance, preferring spawn's SSM-set path and falling back to EC2's
+// GetPasswordData (#201).
+//
+// Why SSM-first: EC2Launch's `setAdminAccount` generates the GetPasswordData-
+// retrievable password only on the first boot after a Sysprep, then disables it.
+// An instance launched from a warm AMI (re-imaged, never re-Sysprepped — #98)
+// therefore never produces a retrievable password, so GetPasswordData times out
+// (the #201 field bug). Rather than depend on that, spawn owns the credential: if
+// the SSM agent is Online it sets a fresh random password directly. This works
+// uniformly on warm and base AMIs.
+//
+// The fallback to GetPasswordData (RSA-decrypted with the launch key) covers the
+// case where SSM isn't reachable (no instance profile, agent not up) but the
+// instance did generate a retrievable password — i.e. a base AMI without SSM.
+func resolveWindowsAdminPassword(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo) (string, error) {
 	region, id := instance.Region, instance.InstanceID
 
+	// Prefer SSM: wait a bounded time for the agent to come Online, then set the
+	// password. WaitForSSMOnline fails fast (ErrSSMUnreachable) when there's no
+	// instance profile, so a base AMI without SSM falls through to GetPasswordData
+	// quickly rather than burning the whole timeout.
+	fmt.Fprintf(os.Stderr, "Waiting for SSM to come online to set the Administrator password...\n")
+	if err := client.WaitForSSMOnlineProgress(ctx, region, id, 12*time.Minute, func(elapsed time.Duration) {
+		fmt.Fprintf(os.Stderr, "  still waiting for SSM (%s)...\n", elapsed.Round(time.Second))
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "%s SSM not available (%v); falling back to EC2 GetPasswordData.\n", i18n.Symbol("warning"), err)
+		return windowsPasswordViaGetPasswordData(ctx, client, instance)
+	}
+
+	fmt.Fprintf(os.Stderr, "Setting a fresh Administrator password over SSM...\n")
+	pw, err := client.SetWindowsAdminPasswordViaSSM(ctx, region, id, 5*time.Minute)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s could not set the password over SSM (%v); falling back to EC2 GetPasswordData.\n", i18n.Symbol("warning"), err)
+		return windowsPasswordViaGetPasswordData(ctx, client, instance)
+	}
+	return pw, nil
+}
+
+// windowsPasswordViaGetPasswordData is the legacy path: wait for EC2 to publish
+// the encrypted password blob, then RSA-decrypt it with the launch key. Used when
+// SSM is unavailable (#201 fallback).
+func windowsPasswordViaGetPasswordData(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo) (string, error) {
+	region, id := instance.Region, instance.InstanceID
 	fmt.Fprintf(os.Stderr, "Retrieving Windows Administrator password (this can take a few minutes after launch)...\n")
 	blob, err := client.WaitForPasswordData(ctx, region, id, 12*time.Minute)
 	if err != nil {
-		return fmt.Errorf("could not get Windows password data (instance may still be on first boot): %w", err)
+		return "", fmt.Errorf("could not get Windows password data (instance may still be on first boot): %w", err)
 	}
 	keyPath, rerr := findSSHKey(instance.KeyName)
 	if rerr != nil {
-		return fmt.Errorf("could not locate the launch key %q to decrypt the password: %w", instance.KeyName, rerr)
+		return "", fmt.Errorf("could not locate the launch key %q to decrypt the password: %w", instance.KeyName, rerr)
 	}
 	password, derr := aws.DecryptWindowsPassword(blob, keyPath)
 	if derr != nil {
-		return fmt.Errorf("could not decrypt the Administrator password (need the RSA launch key): %w", derr)
+		return "", fmt.Errorf("could not decrypt the Administrator password (need the RSA launch key): %w", derr)
+	}
+	return password, nil
+}
+
+// connectWindowsRDP opens a Remote Desktop connection to a Windows instance. It
+// resolves the Administrator password (SSM-set, or GetPasswordData fallback —
+// resolveWindowsAdminPassword), then connects either directly to the public IP
+// (default when one exists) or over an SSM port-forwarding tunnel (--via-ssm, or
+// automatically when there's no public IP). The password is printed for the user
+// to paste into the RDP login (RDP can't be pre-seeded cross-platform). (#95/#201)
+func connectWindowsRDP(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo) error {
+	region, id := instance.Region, instance.InstanceID
+
+	password, err := resolveWindowsAdminPassword(ctx, client, instance)
+	if err != nil {
+		return err
 	}
 
 	// Decide transport: explicit --via-ssm, or no public IP → tunnel.
