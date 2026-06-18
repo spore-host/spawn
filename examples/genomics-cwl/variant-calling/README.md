@@ -1,5 +1,12 @@
 # Variant Calling Pipeline (CWL)
 
+> ⚠️ **Work in progress — CWL is not yet a supported workflow integration.**
+> spawn's only first-class workflow engine today is **Nextflow** (via
+> [nf-spawn](https://github.com/spore-host/nf-spawn)). This example shows how you
+> *could* drive a CWL run on a spawned instance by hand, but there is no spawn CWL
+> executor and this pipeline is unverified end-to-end. Treat it as a design
+> sketch, not a turnkey path.
+
 Complete germline variant calling pipeline using Common Workflow Language (CWL) on spawn.
 
 **Pipeline:** BAM → VCF (GATK HaplotypeCaller + filtration)
@@ -188,6 +195,5 @@ spawn launch --params samples.yaml --array-size 3 --spot --ttl 4h
 
 ## See Also
 
-- [variant-calling.cwl](variant-calling.cwl) - Complete CWL workflow
-- [How-To: Genomics Workflows](../../../docs/how-to/genomics-workflows.md)
+- [Nextflow on spawn (nf-spawn)](../../genomics-nextflow/nf-core-sarek/) - the supported genomics-workflow path
 - [CWL Documentation](https://www.commonwl.org/)

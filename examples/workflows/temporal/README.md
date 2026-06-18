@@ -129,4 +129,4 @@ sweep_id = await workflow.execute_activity(launch_and_wait, params_file, timeout
 
 - [Temporal Documentation](https://docs.temporal.io/)
 - [Temporal Python SDK](https://github.com/temporalio/sdk-python)
-- [spawn WORKFLOW_INTEGRATION.md](../../../WORKFLOW_INTEGRATION.md)
+- [Workflow Integration Examples](../README.md)

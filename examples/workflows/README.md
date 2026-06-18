@@ -41,14 +41,16 @@ Kubernetes-native workflow engine for parallel jobs.
 - Kubernetes resource management
 - DAG-based execution
 
-### [Common Workflow Language (CWL)](cwl/)
+### [Common Workflow Language (CWL)](cwl/) — 🚧 work in progress
 Specification for describing command-line tools and workflows.
+- ⚠️ **Not yet supported.** Nextflow (via [nf-spawn](https://github.com/spore-host/nf-spawn)) is the only first-class workflow integration today; this CWL example is an unverified sketch.
 - Portable tool description
 - Docker-based execution
 - Wide tool compatibility
 
-### [Workflow Description Language (WDL)](wdl/)
+### [Workflow Description Language (WDL)](wdl/) — 🚧 work in progress
 Workflow language for genomic analysis pipelines.
+- ⚠️ **Not yet supported.** Nextflow (via [nf-spawn](https://github.com/spore-host/nf-spawn)) is the only first-class workflow integration today; this WDL example is an unverified sketch.
 - Task-based workflows
 - Runtime configuration
 - Cromwell execution engine
@@ -120,5 +122,4 @@ cd argo && kubectl apply -f workflows/spawn-sweep.yaml
 ## Support
 
 For issues or questions:
-- Main documentation: [WORKFLOW_INTEGRATION.md](../../WORKFLOW_INTEGRATION.md)
 - GitHub Issues: https://github.com/spore-host/spawn/issues

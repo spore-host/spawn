@@ -24,4 +24,4 @@ cwltool spawn_tool.cwl inputs.yml
 ## See Also
 
 - [CWL Documentation](https://www.commonwl.org/)
-- [spawn WORKFLOW_INTEGRATION.md](../../../WORKFLOW_INTEGRATION.md)
+- [Workflow Integration Examples](../README.md)

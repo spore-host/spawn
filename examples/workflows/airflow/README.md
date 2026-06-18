@@ -147,5 +147,5 @@ airflow dags list-runs -d spawn_parameter_sweep
 ## See Also
 
 - [Airflow Documentation](https://airflow.apache.org/docs/)
-- [spawn WORKFLOW_INTEGRATION.md](../../../WORKFLOW_INTEGRATION.md)
+- [Workflow Integration Examples](../README.md)
 - [spawn Parameter Sweeps](../../../docs/parameter-sweeps.md)

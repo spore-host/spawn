@@ -29,4 +29,4 @@ argo logs @latest
 ## See Also
 
 - [Argo Documentation](https://argoproj.github.io/workflows/)
-- [spawn WORKFLOW_INTEGRATION.md](../../../WORKFLOW_INTEGRATION.md)
+- [Workflow Integration Examples](../README.md)

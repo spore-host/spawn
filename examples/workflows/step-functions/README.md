@@ -65,4 +65,4 @@ aws stepfunctions describe-execution \
 ## See Also
 
 - [Step Functions Documentation](https://docs.aws.amazon.com/step-functions/)
-- [spawn WORKFLOW_INTEGRATION.md](../../../WORKFLOW_INTEGRATION.md)
+- [Workflow Integration Examples](../README.md)

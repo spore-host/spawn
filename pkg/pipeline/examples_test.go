@@ -14,8 +14,6 @@ func TestExamplePipelinesValid(t *testing.T) {
 		"../../examples/pipelines/video-streaming.json",
 		"../../examples/pipelines/fanout-fanin.json",
 		"../../examples/pipelines/streaming-demo.json",
-		"../../examples/genomics/pipeline.json",
-		"../../examples/genomics/build-library-pipeline.json",
 	}
 
 	for _, file := range exampleFiles {

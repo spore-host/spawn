@@ -1,5 +1,12 @@
 # GATK Germline Variant Calling Pipeline (WDL)
 
+> ⚠️ **Work in progress — WDL is not yet a supported workflow integration.**
+> spawn's only first-class workflow engine today is **Nextflow** (via
+> [nf-spawn](https://github.com/spore-host/nf-spawn)). This example shows how you
+> *could* drive a WDL/Cromwell run on a spawned instance by hand, but there is no
+> spawn WDL executor and this pipeline is unverified end-to-end. Treat it as a
+> design sketch, not a turnkey path.
+
 Complete GATK Best Practices germline variant calling pipeline for spawn.
 
 **Pipeline:** FASTQ → Aligned BAM → GVCF → VCF
@@ -382,6 +389,6 @@ runtime {
 ## See Also
 
 - [gatk-germline.wdl](gatk-germline.wdl) - Complete WDL workflow
-- [How-To: Genomics Workflows](../../../docs/how-to/genomics-workflows.md)
+- [Nextflow on spawn (nf-spawn)](../../genomics-nextflow/nf-core-sarek/) - the supported genomics-workflow path
 - [GATK Best Practices](https://gatk.broadinstitute.org/hc/en-us/articles/360035535932-Germline-short-variant-discovery-SNPs-Indels-)
 - [Cromwell Documentation](https://cromwell.readthedocs.io/)

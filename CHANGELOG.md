@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Reworked the Nextflow examples (`examples/workflows/nextflow/`,
+  `examples/genomics-nextflow/nf-core-sarek/`) to use the current **nf-spawn**
+  executor plugin instead of the obsolete "run Nextflow inside one spawned box"
+  pattern.
+- Marked the WDL and CWL examples as **work in progress** — Nextflow (via
+  nf-spawn) is the only first-class workflow integration today.
+- Removed the `examples/genomics/` BAMS3 example (depended on the external
+  `aws-direct-s3` project).
+- Fixed dead doc links across `examples/` (the missing `WORKFLOW_INTEGRATION.md`
+  and `docs/how-to/genomics-workflows.md`) and the stale `scttfrdmn/spore-host`
+  URL in `scripts/spored.service`.
+
 ## [0.62.0] - 2026-06-17
 
 ### Added

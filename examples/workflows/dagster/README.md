@@ -67,4 +67,4 @@ Alternative approach using ops for more imperative workflows.
 ## See Also
 
 - [Dagster Documentation](https://docs.dagster.io/)
-- [spawn WORKFLOW_INTEGRATION.md](../../../WORKFLOW_INTEGRATION.md)
+- [Workflow Integration Examples](../README.md)

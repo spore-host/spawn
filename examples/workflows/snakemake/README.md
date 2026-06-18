@@ -29,4 +29,4 @@ snakemake --use-conda --cores 1
 ## See Also
 
 - [Snakemake Documentation](https://snakemake.readthedocs.io/)
-- [spawn WORKFLOW_INTEGRATION.md](../../../WORKFLOW_INTEGRATION.md)
+- [Workflow Integration Examples](../README.md)

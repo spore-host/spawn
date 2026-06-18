@@ -1,6 +1,6 @@
 [Unit]
 Description=Spored Agent - Instance self-monitoring and auto-termination
-Documentation=https://github.com/scttfrdmn/spore-host
+Documentation=https://github.com/spore-host/spawn
 After=network-online.target
 Wants=network-online.target
 

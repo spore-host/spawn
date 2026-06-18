@@ -25,4 +25,4 @@ java -jar cromwell.jar run spawn_task.wdl --inputs inputs.json
 ## See Also
 
 - [WDL Documentation](https://openwdl.org/)
-- [spawn WORKFLOW_INTEGRATION.md](../../../WORKFLOW_INTEGRATION.md)
+- [Workflow Integration Examples](../README.md)
