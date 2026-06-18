@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed dead doc links across `examples/` (the missing `WORKFLOW_INTEGRATION.md`
   and `docs/how-to/genomics-workflows.md`) and the stale `scttfrdmn/spore-host`
   URL in `scripts/spored.service`.
+- README command table: `cancel` is correctly described as cancelling a
+  parameter sweep (not terminating an instance), and the missing `terminate`
+  command was added.
 
 ## [0.62.0] - 2026-06-17
 

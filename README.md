@@ -77,13 +77,14 @@ spawn list
 | `extend` | Extend TTL on a running instance |
 | `stop` / `start` | Stop or start an instance |
 | `hibernate` | Hibernate (saves RAM to disk) |
-| `cancel` | Terminate an instance |
+| `terminate` | Terminate an instance (permanent — destroys the instance) |
 | `image` | Build a custom AMI from a Windows ISO (EC2 Image Builder; auto-warms for fast boot) |
 | `ami` | List / delete spawn-managed AMIs |
 | `snapshot` | Build an EBS data snapshot from a directory, tarball, or raw image (for `launch --attach-volume`) |
 | `queue` | Batch job queue management |
 | `schedule` | Scheduled execution |
 | `sweep` | Parameter sweeps |
+| `cancel` | Cancel a running parameter sweep (`--sweep-id`) |
 | `stage` | Data staging to/from S3 |
 | `notify` | Chat notification (Slack/Teams) |
 | `slurm` | Convert Slurm sbatch scripts |
