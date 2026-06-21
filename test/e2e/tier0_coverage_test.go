@@ -35,6 +35,9 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"schedule":  "tier0_statecmds2_test.go (list query path; create/cancel need EventBridge → Tier 3)",
 		"alerts":    "tier0_statecmds2_test.go (create→list→delete round-trip)",
 		"stage":     "tier0_statecmds2_test.go (list; upload/delete need multi-region S3 → Tier 2/3)",
+		"resources": "tier0_cleanup_test.go (lists a launched instance via the tagging API)",
+		"orphans":   "tier0_cleanup_test.go (runs clean against a fresh account)",
+		"cleanup":   "tier0_cleanup_test.go (dry-run previews, deletes nothing; --force needs real resources → Tier 2/3)",
 	}
 
 	// Commands deliberately deferred to Tier 2/3 (real instance / SSH / spored /
