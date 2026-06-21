@@ -51,6 +51,47 @@ func TestTier0_Launch_JobArray(t *testing.T) {
 	}
 }
 
+// TestTier0_Launch_JobArray_Cohort is the cohort-engine twin of
+// TestTier0_Launch_JobArray: with --reconciler cohort the job array is launched
+// as an all-or-nothing cohort through the reconciler instead of the hand-rolled
+// goroutine loop. The user-visible contract must be identical — 3 distinct
+// instances, all discoverable via list, all carrying the job-array tags.
+func TestTier0_Launch_JobArray_Cohort(t *testing.T) {
+	env := startSpawnSubstrate(t)
+	arr := env.launchOK("carr", "--instance-type", "t3.small", "--count", "3",
+		"--job-array-name", "cbatch", "--reconciler", "cohort")
+	if len(arr) != 3 {
+		t.Fatalf("--count 3 (cohort) launched %d instances, want 3", len(arr))
+	}
+	ids := map[string]bool{}
+	for _, inst := range arr {
+		id, _ := inst["instance_id"].(string)
+		if !strings.HasPrefix(id, "i-") {
+			t.Errorf("bad instance_id %q", id)
+		}
+		ids[id] = true
+	}
+	if len(ids) != 3 {
+		t.Errorf("expected 3 distinct instance IDs, got %d", len(ids))
+	}
+	listed := 0
+	for _, inst := range mustJSONArray(t, env.runOK("list", "-o", "json")) {
+		if id, _ := inst["instance_id"].(string); ids[id] {
+			listed++
+		}
+	}
+	if listed != 3 {
+		t.Errorf("list returned %d of the 3 cohort job-array instances", listed)
+	}
+	// Same tag contract as the legacy path — the cohort engine must not change
+	// what gets written to Substrate.
+	for id := range ids {
+		env.requireTag(id, "spawn:managed", "true")
+		env.requireTag(id, "spawn:job-array-name", "cbatch")
+		env.requireTag(id, "spawn:job-array-size", "3")
+	}
+}
+
 // TestTier0_Launch_Spot verifies a Spot launch succeeds and is reported.
 func TestTier0_Launch_Spot(t *testing.T) {
 	env := startSpawnSubstrate(t)

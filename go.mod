@@ -41,6 +41,7 @@ require (
 	github.com/scttfrdmn/strata v0.22.0
 	github.com/scttfrdmn/substrate v0.71.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spore-host/cohort v0.1.1-0.20260621055325-1ba8b9daaae0
 	github.com/spore-host/libs v0.37.0
 	github.com/spore-host/truffle v0.38.1
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
@@ -109,6 +110,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260401024825-9d38bb4040a9 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260401024825-9d38bb4040a9 // indirect
