@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure summaries. Peer discovery stays self-organizing on-instance and there
   is no capacity fallback yet (single placement rung), so the user-visible
   outcome matches the default `legacy` engine. Default remains `legacy`; pass
-  `--reconciler cohort` to opt in.
+  `--reconciler cohort` to opt in. Depends on
+  [cohort v0.2.0](https://github.com/spore-host/cohort/releases/tag/v0.2.0).
 - **`spawn resources`** — lists every AWS resource spore.host created in an
   account/region (found by the `spawn:managed` tag via the Resource Groups
   Tagging API). Defaults to resources you created; `--all` includes other
