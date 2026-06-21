@@ -41,7 +41,7 @@ require (
 	github.com/scttfrdmn/strata v0.22.0
 	github.com/scttfrdmn/substrate v0.71.0
 	github.com/spf13/cobra v1.10.2
-	github.com/spore-host/cohort v0.1.1-0.20260621055325-1ba8b9daaae0
+	github.com/spore-host/cohort v0.2.0
 	github.com/spore-host/libs v0.37.0
 	github.com/spore-host/truffle v0.38.1
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
