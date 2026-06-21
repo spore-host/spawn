@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Fixed a data race on the spored agent's config (#175). The monitor loop
+  periodically replaces `Agent.config` (tag refresh) while the FSx-mount and
+  spot-monitor goroutines read it; access now goes through a mutex-guarded
+  snapshot (`cfg()`/`setConfig()`), and the agent tests run under `-race`. Also
+  removed a redundant, racy write of the EBS hourly cost from a startup goroutine
+  (the value already propagates via the instance tag + the periodic refresh).
+
+### Changed
+- Removed a byte-identical duplicated zombie-prevention block in `launch` that
+  emitted the `--no-timeout` warning twice (#175).
+- `configRefreshTick` is now a per-Agent field instead of a package global (#175).
+
 ### Documentation
 - Reworked the Nextflow examples (`examples/workflows/nextflow/`,
   `examples/genomics-nextflow/nf-core-sarek/`) to use the current **nf-spawn**

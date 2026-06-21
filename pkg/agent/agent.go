@@ -34,9 +34,14 @@ import (
 )
 
 type Agent struct {
-	provider            provider.Provider
-	identity            *provider.Identity
+	provider provider.Provider
+	identity *provider.Identity
+	// config is replaced wholesale by the monitor loop's periodic tag refresh
+	// while other goroutines (FSx mount, spot monitor) read it concurrently, so
+	// access goes through cfg()/setConfig() under configMu (#175). Don't read the
+	// field directly from code that can run off the monitor goroutine.
 	config              *provider.Config
+	configMu            sync.RWMutex
 	dnsClient           *dns.Client
 	dnsDomain           string // DNS domain (e.g. "spore.host" or "prismcloud.host")
 	registry            *registry.PeerRegistry
@@ -63,6 +68,28 @@ type Agent struct {
 	// monitorInterval is the lifecycle ticker period. Zero means the production
 	// default (1 minute); tests set it small to exercise the loop quickly.
 	monitorInterval time.Duration
+
+	// configRefreshTick counts monitoring cycles for the periodic tag refresh
+	// (tags are re-read every 5 ticks). Per-Agent rather than a package global so
+	// it isn't shared across agents and resets cleanly per instance (#175).
+	configRefreshTick int
+}
+
+// cfg returns the current config under a read lock. Callers get a stable pointer
+// to an immutable snapshot — setConfig swaps in a new pointer rather than
+// mutating in place, so the returned value stays safe to read after the lock is
+// released.
+func (a *Agent) cfg() *provider.Config {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+	return a.config
+}
+
+// setConfig swaps in a freshly-loaded config pointer under a write lock.
+func (a *Agent) setConfig(c *provider.Config) {
+	a.configMu.Lock()
+	a.config = c
+	a.configMu.Unlock()
 }
 
 func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
@@ -102,12 +129,16 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 	log.Printf("Config: TTL=%v, IdleTimeout=%v, Hibernate=%v",
 		config.TTL, config.IdleTimeout, config.HibernateOnIdle)
 
-	// Look up actual EBS volume cost on first start; caches result in spawn:ebs-hourly-cost tag.
+	// Look up actual EBS volume cost on first start; caches result in the
+	// spawn:ebs-hourly-cost tag. Do NOT write agent.config here: this goroutine
+	// would race the monitor loop, which both reads agent.config fields and
+	// replaces the whole pointer on its periodic tag refresh (#175). The cost is
+	// persisted to the tag (and the provider's config) by LookupAndTagEBSCost, so
+	// the monitor's next config refresh (≤5 min) picks it up without a shared
+	// write from here.
 	if identity.Provider == "ec2" && config.EBSHourlyCost == 0 {
 		go func() {
-			ebsCost := prov.LookupAndTagEBSCost(context.Background())
-			if ebsCost > 0 {
-				agent.config.EBSHourlyCost = ebsCost
+			if ebsCost := prov.LookupAndTagEBSCost(context.Background()); ebsCost > 0 {
 				log.Printf("EBS hourly cost: $%.4f/hr", ebsCost)
 			}
 		}()
@@ -289,19 +320,19 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// Heartbeat: a single line per tick so "Monitoring started" followed by
 	// silence is immediately diagnosable from spored.log without a live repro
 	// (the failure mode in #65, where the loop never ran at all).
-	log.Printf("monitor tick %d", configRefreshTick+1)
+	log.Printf("monitor tick %d", a.configRefreshTick+1)
 
 	// 0. Periodically refresh config from EC2 tags (every 5 ticks = 5 min).
 	// EC2 tag API has eventual consistency — tags set at launch may not be
 	// visible within the seconds before spored starts. Refreshing here ensures
 	// on-complete, pre-stop, and other lifecycle tags are eventually picked up.
-	configRefreshTick++
-	if configRefreshTick == 1 || configRefreshTick%5 == 0 {
+	a.configRefreshTick++
+	if a.configRefreshTick == 1 || a.configRefreshTick%5 == 0 {
 		if err := a.provider.RefreshConfig(ctx); err != nil {
 			log.Printf("Warning: failed to refresh config from tags: %v", err)
 		} else {
 			if fresh, err2 := a.provider.GetConfig(ctx); err2 == nil && fresh != nil {
-				a.config = fresh
+				a.setConfig(fresh)
 			}
 		}
 	}
@@ -1319,11 +1350,6 @@ func (a *Agent) terminate(ctx context.Context, reason string) {
 	}
 }
 
-// configRefreshTick counts monitoring cycles for periodic tag refresh.
-// Tags are re-read from EC2 every 5 minutes (5 × 1-minute ticks).
-// This handles eventual consistency: tags set at launch may not be
-// visible via DescribeTags within the few seconds before spored starts.
-var configRefreshTick int
 
 // Reload re-reads configuration from provider without restarting the daemon
 func (a *Agent) Reload(ctx context.Context) error {

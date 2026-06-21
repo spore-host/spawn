@@ -629,23 +629,9 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// CRITICAL SAFETY CHECK: Prevent zombie instances
 	// If neither --ttl nor --idle-timeout are set, default to 1h idle timeout
 	// This prevents instances from running indefinitely if CLI disconnects
-	if config.TTL == "" && config.IdleTimeout == "" && !noTimeout {
-		config.IdleTimeout = "1h"
-		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h to prevent zombie instances\n")
-		fmt.Fprintf(os.Stderr, "   Instance will terminate after 1 hour of inactivity.\n")
-		fmt.Fprintf(os.Stderr, "   Override with --ttl, --idle-timeout, or --no-timeout\n")
-		fmt.Fprintf(os.Stderr, "   See: https://github.com/spore-host/spawn/blob/main/docs/lifecycle.md\n\n")
-	} else if noTimeout {
-		// User explicitly disabled timeout - warn about zombie risk
-		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: --no-timeout specified\n")
-		fmt.Fprintf(os.Stderr, "   Instance will run indefinitely until manually terminated.\n")
-		fmt.Fprintf(os.Stderr, "   If CLI disconnects, you must track and terminate manually.\n")
-		fmt.Fprintf(os.Stderr, "   This can result in unexpected costs from zombie instances.\n\n")
-	}
-
-	// CRITICAL SAFETY CHECK: Prevent zombie instances
-	// If neither --ttl nor --idle-timeout are set, default to 1h idle timeout
-	// This prevents instances from running indefinitely if CLI disconnects
+	// CRITICAL SAFETY CHECK: Prevent zombie instances.
+	// If neither --ttl nor --idle-timeout are set, default to 1h idle timeout so
+	// an instance can't run indefinitely if the CLI disconnects.
 	if config.TTL == "" && config.IdleTimeout == "" && !noTimeout {
 		config.IdleTimeout = "1h"
 		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h to prevent zombie instances\n")

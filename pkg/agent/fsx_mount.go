@@ -33,11 +33,15 @@ const fsxMountTimeout = 25 * time.Minute
 // enforcement (#65). Best-effort: any failure leaves the instance running and is
 // logged; we do not terminate over a failed mount.
 func (a *Agent) mountPendingFSx(ctx context.Context) {
-	fsxID := a.config.FSxPending
+	// Snapshot the config: this runs in its own goroutine, concurrently with the
+	// monitor loop that periodically swaps a.config (#175). cfg() returns an
+	// immutable snapshot, so reads below are race-free.
+	cfgSnap := a.cfg()
+	fsxID := cfgSnap.FSxPending
 	if fsxID == "" {
 		return
 	}
-	mountPoint := a.config.FSxMountPoint
+	mountPoint := cfgSnap.FSxMountPoint
 	if mountPoint == "" {
 		mountPoint = "/fsx"
 	}
@@ -60,8 +64,8 @@ func (a *Agent) mountPendingFSx(ctx context.Context) {
 	// separate association once AVAILABLE, and continuous export is what makes
 	// results durable (the #184 lesson). Best-effort — a DRA failure is logged but
 	// we still mount, so the job can run (it just won't auto-mirror to S3).
-	if a.config.FSxImportPath != "" || a.config.FSxExportPath != "" {
-		if err := createFSxS3Association(ctx, fsxClient, fsxID, a.config.FSxImportPath, a.config.FSxExportPath); err != nil {
+	if cfgSnap.FSxImportPath != "" || cfgSnap.FSxExportPath != "" {
+		if err := createFSxS3Association(ctx, fsxClient, fsxID, cfgSnap.FSxImportPath, cfgSnap.FSxExportPath); err != nil {
 			log.Printf("fsx: data-repository association for %s failed: %v — mounting anyway (results may not auto-export to S3)", fsxID, err)
 			a.notifier.Notify(context.Background(), "fsx_dra_failed", fsxID+": "+err.Error())
 		} else {
