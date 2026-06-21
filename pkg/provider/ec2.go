@@ -55,6 +55,7 @@ func NewEC2Provider(ctx context.Context) (*EC2Provider, error) {
 	instanceID := idDoc.InstanceID
 	region := idDoc.Region
 	accountID := idDoc.AccountID
+	availabilityZone := idDoc.AvailabilityZone
 
 	// Get public IP from metadata
 	publicIPResult, err := imdsClient.GetMetadata(ctx, &imds.GetMetadataInput{
@@ -77,12 +78,13 @@ func NewEC2Provider(ctx context.Context) (*EC2Provider, error) {
 	}
 
 	identity := &Identity{
-		InstanceID: instanceID,
-		Region:     region,
-		AccountID:  accountID,
-		PublicIP:   publicIP,
-		PrivateIP:  privateIP,
-		Provider:   "ec2",
+		InstanceID:       instanceID,
+		Region:           region,
+		AvailabilityZone: availabilityZone,
+		AccountID:        accountID,
+		PublicIP:         publicIP,
+		PrivateIP:        privateIP,
+		Provider:         "ec2",
 	}
 
 	// Update config with region
@@ -541,6 +543,14 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 		case tagprefix.Tag("pre-stop-timeout"):
 			if duration, err := time.ParseDuration(*tag.Value); err == nil {
 				config.PreStopTimeout = duration
+			}
+		case tagprefix.Tag("spot-webhook-url"):
+			config.SpotWebhookURL = *tag.Value
+		case tagprefix.Tag("webhook-correlation"):
+			config.WebhookCorrelation = *tag.Value
+		case tagprefix.Tag("webhook-timeout"):
+			if duration, err := time.ParseDuration(*tag.Value); err == nil {
+				config.WebhookTimeout = duration
 			}
 		case tagprefix.Tag("local-username"):
 			config.LocalUsername = *tag.Value

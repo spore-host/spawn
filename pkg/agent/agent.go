@@ -50,6 +50,7 @@ type Agent struct {
 	startTime           time.Time
 	lastActivityTime    time.Time
 	preStopDone         bool      // guards against running pre-stop hook more than once
+	spotWebhookFired    bool      // fire-once guard for the spot-interruption webhook (#228); the spot monitor re-enters every 5s
 	prevCPUIdle         int64     // /proc/stat idle jiffies at last getCPUUsage call
 	prevCPUTotal        int64     // /proc/stat total jiffies at last getCPUUsage call
 	lastSessionTagWrite time.Time // throttle spawn:logged-in-count tag writes
@@ -1038,11 +1039,102 @@ func (a *Agent) checkSpotInterruption(ctx context.Context) bool {
 	// Send file-based notifications (legacy)
 	a.sendSpotInterruptionNotification(info.Action, info.Time.Format(time.RFC3339))
 
+	// Fire the optional off-node webhook LAST and time-boxed, so a slow or dead
+	// endpoint can never delay the survival work above (#228, same #65 discipline
+	// that keeps the spot monitor off the critical path). Fire-once: the monitor
+	// re-enters this handler every 5s until the node dies.
+	if !a.spotWebhookFired {
+		a.spotWebhookFired = true
+		a.emitSpotInterruptionWebhook(info)
+	}
+
 	// Log for posterity
 	log.Printf("Spot interruption: action=%s, time=%s", info.Action, info.Time.Format(time.RFC3339))
 
 	// Continue monitoring for remaining time
 	return false // Return false to allow normal monitoring to continue
+}
+
+// spotWebhookPayload is the fixed, stable on-node fact-struct spored POSTs on a
+// spot interruption (#228). Every field is a projection of knowledge the node
+// already holds mid-reclamation — there is no caller-supplied "include X" field
+// except Correlation, which is echoed verbatim and never parsed. A consumer
+// takes the fields it cares about and ignores the rest; correlation back to the
+// consumer's own entity/record rides on Correlation (NOT the RunInstances
+// ClientToken, which the node cannot see — see issue #228).
+type spotWebhookPayload struct {
+	Event                string `json:"event"`                 // always "spot_interruption"
+	InstanceID           string `json:"instance_id"`           //
+	Region               string `json:"region"`                //
+	AZ                   string `json:"az,omitempty"`          //
+	Action               string `json:"action"`                // AWS verbatim: "terminate" or "stop"
+	InterruptionDeadline string `json:"interruption_deadline"` // AWS-provided window end (RFC3339)
+	NameTag              string `json:"name_tag,omitempty"`    // spawn:name
+	ComputeSeconds       int64  `json:"compute_seconds"`       // accumulated compute time
+	LastActivityTime     string `json:"last_activity_time"`    // RFC3339
+	Correlation          string `json:"correlation,omitempty"` // opaque caller blob, verbatim
+	EmittedAt            string `json:"emitted_at"`            // RFC3339, when spored sent this
+}
+
+// emitSpotInterruptionWebhook POSTs the fixed payload to the launch-configured
+// URL exactly once, best-effort, time-boxed by WebhookTimeout (default 2s). Any
+// failure — disabled, timeout, DNS, non-2xx — is logged at most and dropped: a
+// node mid-reclamation must never block on this any more than on a tag write.
+// The durable source of truth remains the EC2 state + spawn:* tags; this is the
+// in-window upgrade over poll-and-infer, not a delivery guarantee.
+func (a *Agent) emitSpotInterruptionWebhook(info *provider.InterruptionInfo) {
+	cfg := a.cfg()
+	if cfg == nil || cfg.SpotWebhookURL == "" {
+		return // opt-in; empty URL = today's behavior
+	}
+
+	timeout := cfg.WebhookTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+
+	payload := spotWebhookPayload{
+		Event:                "spot_interruption",
+		InstanceID:           a.identity.InstanceID,
+		Region:               a.identity.Region,
+		AZ:                   a.identity.AvailabilityZone,
+		Action:               info.Action,
+		InterruptionDeadline: info.Time.UTC().Format(time.RFC3339),
+		NameTag:              a.identity.Name,
+		ComputeSeconds:       a.TotalComputeSeconds(),
+		LastActivityTime:     a.lastActivityTime.UTC().Format(time.RFC3339),
+		Correlation:          cfg.WebhookCorrelation,
+		EmittedAt:            time.Now().UTC().Format(time.RFC3339),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Spot webhook: marshal failed, dropping: %v", err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.SpotWebhookURL, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("Spot webhook: request build failed, dropping: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Spot webhook: POST to %s failed, dropping (best-effort): %v", cfg.SpotWebhookURL, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		log.Printf("Spot webhook: endpoint %s returned %d, dropping (best-effort)", cfg.SpotWebhookURL, resp.StatusCode)
+		return
+	}
+	log.Printf("Spot webhook: notice POSTed to %s (action=%s)", cfg.SpotWebhookURL, info.Action)
 }
 
 func (a *Agent) sendSpotInterruptionNotification(action, interruptTime string) {
@@ -1389,7 +1481,6 @@ func (a *Agent) checkRegionVacated(ctx context.Context) {
 	log.Printf("region-vacated: no spawn-managed instances remain in %s", region)
 	a.notifier.Notify(ctx, "region_vacated", region)
 }
-
 
 // Reload re-reads configuration from provider without restarting the daemon
 func (a *Agent) Reload(ctx context.Context) error {

@@ -141,6 +141,14 @@ type LaunchConfig struct {
 	PreStop        string // Shell command to run before stopping (e.g., "aws s3 sync /results s3://bucket/")
 	PreStopTimeout string // Max time to wait for pre-stop command (default: 5m)
 
+	// Spot-interruption webhook (#228): an optional, fire-once best-effort POST
+	// spored emits when an AWS spot interruption notice arrives, so an off-node
+	// consumer learns about the reclamation inside the ~2-minute window. Opt-in;
+	// empty URL = today's behavior. spored never awaits or retries it.
+	SpotInterruptionWebhookURL string // POST target; empty disables the webhook
+	WebhookCorrelation         string // opaque caller blob, echoed verbatim in the payload, never parsed
+	WebhookTimeout             string // hard cap on the POST (default 2s) so it can't eat the window
+
 	// Completion signal settings
 	OnComplete      string // Action: terminate, stop, hibernate
 	CompletionFile  string // File path to watch (default: /tmp/SPAWN_COMPLETE)
@@ -736,6 +744,18 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		tags = append(tags, types.Tag{Key: aws.String("spawn:pre-stop"), Value: aws.String(config.PreStop)})
 		if config.PreStopTimeout != "" {
 			tags = append(tags, types.Tag{Key: aws.String("spawn:pre-stop-timeout"), Value: aws.String(config.PreStopTimeout)})
+		}
+	}
+
+	// Spot-interruption webhook (#228): only tagged when a URL is set (opt-in).
+	// The correlation blob and timeout are companions, meaningful only with a URL.
+	if config.SpotInterruptionWebhookURL != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:spot-webhook-url"), Value: aws.String(config.SpotInterruptionWebhookURL)})
+		if config.WebhookCorrelation != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-correlation"), Value: aws.String(config.WebhookCorrelation)})
+		}
+		if config.WebhookTimeout != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-timeout"), Value: aws.String(config.WebhookTimeout)})
 		}
 	}
 
