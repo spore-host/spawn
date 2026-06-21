@@ -10,13 +10,14 @@ import (
 
 // Identity represents the instance's identity information
 type Identity struct {
-	InstanceID string // EC2 instance ID or local hostname
-	Name       string // EC2 Name tag / local config name
-	Region     string // AWS region or "local"
-	AccountID  string // AWS account ID or organization name
-	PublicIP   string // Public IP address
-	PrivateIP  string // Private IP address
-	Provider   string // "ec2" or "local"
+	InstanceID       string // EC2 instance ID or local hostname
+	Name             string // EC2 Name tag / local config name
+	Region           string // AWS region or "local"
+	AvailabilityZone string // EC2 AZ (e.g. "us-east-1a"); empty for local
+	AccountID        string // AWS account ID or organization name
+	PublicIP         string // Public IP address
+	PrivateIP        string // Private IP address
+	Provider         string // "ec2" or "local"
 }
 
 // PluginDeclaration references a plugin to install at instance startup.
@@ -42,6 +43,13 @@ type Config struct {
 	PreStop        string        // Shell command to run before any lifecycle-triggered stop
 	PreStopTimeout time.Duration // Max time to wait (default: 5m)
 	LocalUsername  string        // Instance's primary user; pre-stop runs as this user, not root (#63). Empty = run as root (older instances).
+
+	// Spot-interruption webhook (#228): a fire-once, best-effort POST spored emits
+	// when a spot interruption notice arrives, so an off-node consumer learns about
+	// the reclamation inside the ~2-minute window. All populated from spawn:* tags.
+	SpotWebhookURL     string        // POST target; empty = disabled (today's behavior)
+	WebhookCorrelation string        // opaque caller blob, echoed verbatim, never parsed
+	WebhookTimeout     time.Duration // hard cap on the POST; zero = default (2s)
 
 	// Ephemeral FSx (#194): when an FSx is created asynchronously alongside the
 	// instance, the launch path tags spawn:fsx-pending=<fs-id> + spawn:fsx-mount-point.

@@ -68,21 +68,24 @@ var (
 	keyPair string
 
 	// Behavior
-	spot            bool
-	spotMaxPrice    string
-	useReservation  bool
-	reservationID   string
-	capacityBlock   bool
-	hibernate       bool
-	ttl             string
-	idleTimeout     string
-	hibernateOnIdle bool
-	preStop         string
-	preStopTimeout  string
-	onComplete      string
-	completionFile  string
-	completionDelay string
-	sessionTimeout  string
+	spot               bool
+	spotMaxPrice       string
+	useReservation     bool
+	reservationID      string
+	capacityBlock      bool
+	hibernate          bool
+	ttl                string
+	idleTimeout        string
+	hibernateOnIdle    bool
+	preStop            string
+	preStopTimeout     string
+	spotWebhookURL     string
+	webhookCorrelation string
+	webhookTimeout     string
+	onComplete         string
+	completionFile     string
+	completionDelay    string
+	sessionTimeout     string
 
 	// Meta
 	name             string
@@ -250,6 +253,9 @@ func init() {
 	launchCmd.Flags().BoolVar(&hibernateOnIdle, "hibernate-on-idle", false, "Hibernate instead of terminate when idle")
 	launchCmd.Flags().StringVar(&preStop, "pre-stop", "", "Shell command to run on the instance before any lifecycle-triggered stop/terminate (e.g., \"aws s3 sync /results s3://bucket/\")")
 	launchCmd.Flags().StringVar(&preStopTimeout, "pre-stop-timeout", "", "Max time to wait for --pre-stop command (default: 5m, spot: 90s)")
+	launchCmd.Flags().StringVar(&spotWebhookURL, "spot-webhook-url", "", "On spot interruption, spored POSTs a fire-once, best-effort notice to this URL within the ~2-min window (off-node consumers; empty = disabled)")
+	launchCmd.Flags().StringVar(&webhookCorrelation, "webhook-correlation", "", "Opaque blob echoed verbatim in the spot-webhook payload so a consumer can correlate the event to its own record (never parsed by spawn)")
+	launchCmd.Flags().StringVar(&webhookTimeout, "webhook-timeout", "", "Hard cap on the spot-webhook POST so it can't eat the reclamation window (default: 2s)")
 	launchCmd.Flags().StringVar(&onComplete, "on-complete", "", "Action when workload signals completion: terminate, stop, hibernate")
 	launchCmd.Flags().StringVar(&completionFile, "completion-file", "/tmp/SPAWN_COMPLETE", "File to watch for completion signal")
 	launchCmd.Flags().StringVar(&completionDelay, "completion-delay", "30s", "Grace period after completion signal")
@@ -2133,6 +2139,11 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 	if preStopTimeout != "" {
 		config.PreStopTimeout = preStopTimeout
+	}
+	if spotWebhookURL != "" {
+		config.SpotInterruptionWebhookURL = spotWebhookURL
+		config.WebhookCorrelation = webhookCorrelation
+		config.WebhookTimeout = webhookTimeout
 	}
 	if onComplete != "" {
 		config.OnComplete = onComplete

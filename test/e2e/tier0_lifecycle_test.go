@@ -120,6 +120,22 @@ func TestTier0_Launch_LifecycleTags(t *testing.T) {
 	env.requireTag(id, "spawn:ttl-deadline", "")
 }
 
+// TestTier0_Launch_SpotWebhookTags verifies the spot-interruption webhook flags
+// (#228) round-trip to spawn:* tags so spored picks them up on-node: --spot-webhook-url,
+// --webhook-correlation (opaque, echoed verbatim later), and --webhook-timeout.
+func TestTier0_Launch_SpotWebhookTags(t *testing.T) {
+	env := startSpawnSubstrate(t)
+	arr := env.launchOK("hooked", "--instance-type", "t3.small",
+		"--spot-webhook-url", "https://example.test/hook",
+		"--webhook-correlation", "entity-7",
+		"--webhook-timeout", "3s")
+	id := arr[0]["instance_id"].(string)
+
+	env.requireTag(id, "spawn:spot-webhook-url", "https://example.test/hook")
+	env.requireTag(id, "spawn:webhook-correlation", "entity-7")
+	env.requireTag(id, "spawn:webhook-timeout", "3s")
+}
+
 // TestTier0_Launch_VolumeSize verifies --volume-size is accepted and the launch
 // succeeds (regression for #11).
 func TestTier0_Launch_VolumeSize(t *testing.T) {

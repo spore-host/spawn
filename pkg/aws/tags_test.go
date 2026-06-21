@@ -83,6 +83,41 @@ func TestBuildTags_FSxPending(t *testing.T) {
 	}
 }
 
+// TestBuildTags_SpotWebhook verifies the spot-interruption webhook fields (#228)
+// are tagged only when a URL is set (opt-in): the URL, the opaque correlation
+// blob, and the timeout all become spawn:* tags; with no URL, none appear (the
+// correlation/timeout are companions meaningful only alongside a URL).
+func TestBuildTags_SpotWebhook(t *testing.T) {
+	withURL := buildTags(LaunchConfig{
+		Name:                       "t",
+		SpotInterruptionWebhookURL: "https://example.test/hook",
+		WebhookCorrelation:         "opaque-blob-42",
+		WebhookTimeout:             "3s",
+	}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+
+	if got := findTagValue(withURL, "spawn:spot-webhook-url"); got != "https://example.test/hook" {
+		t.Errorf("spawn:spot-webhook-url = %q, want the URL", got)
+	}
+	if got := findTagValue(withURL, "spawn:webhook-correlation"); got != "opaque-blob-42" {
+		t.Errorf("spawn:webhook-correlation = %q, want the verbatim blob", got)
+	}
+	if got := findTagValue(withURL, "spawn:webhook-timeout"); got != "3s" {
+		t.Errorf("spawn:webhook-timeout = %q, want 3s", got)
+	}
+
+	// No URL → none of the three tags are written (opt-in; today's behavior).
+	without := buildTags(LaunchConfig{
+		Name:               "t",
+		WebhookCorrelation: "orphan", // present but URL-less → must be dropped
+		WebhookTimeout:     "3s",
+	}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	for _, k := range []string{"spawn:spot-webhook-url", "spawn:webhook-correlation", "spawn:webhook-timeout"} {
+		if got := findTagValue(without, k); got != "" {
+			t.Errorf("%s = %q, want empty when no webhook URL is set", k, got)
+		}
+	}
+}
+
 func TestBuildTags_FSxMountPointDefault(t *testing.T) {
 	config := LaunchConfig{
 		Name:        "test-instance",

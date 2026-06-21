@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Optional spot-interruption webhook** (#228) — `spawn launch
+  --spot-webhook-url <url>` makes `spored` fire a single, best-effort `POST` when
+  an AWS spot interruption notice arrives, so an off-node consumer learns about
+  the reclamation **inside the ~2-minute warning window** (which the tag-and-poll
+  surface structurally can't deliver). The JSON payload is a fixed projection of
+  on-node facts (instance/region/az, the AWS `action`, the interruption deadline,
+  accumulated compute-seconds, last-activity time) plus `--webhook-correlation`,
+  an opaque blob echoed back verbatim so a consumer can correlate the event to
+  its own record. `--webhook-timeout` (default 2s) hard-caps the POST so it can
+  never eat the window. Fire-once, no retry, never awaited, fired last — a slow
+  or dead endpoint cannot delay the node's survival work; the EC2 state + `spawn:*`
+  tags remain the durable source of truth. Opt-in; empty URL = today's behavior.
 - **`spawn launch --reconciler cohort`** (experimental, hidden) — routes
   job-array / MPI launches (`--count > 1`) through the
   [cohort](https://github.com/spore-host/cohort) reconciler instead of the
