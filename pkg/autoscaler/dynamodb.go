@@ -151,6 +151,13 @@ func (c *Client) EnsureTable(ctx context.Context) error {
 				KeyType:       types.KeyTypeHash,
 			},
 		},
+		// Tag so `spawn cleanup`/`resources` can find it (#258).
+		Tags: []types.Tag{
+			{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+			{Key: aws.String("spawn:created-by"), Value: aws.String("spawn")},
+			{Key: aws.String("spawn:created-at"), Value: aws.String(time.Now().UTC().Format(time.RFC3339))},
+			{Key: aws.String("spawn:purpose"), Value: aws.String("autoscale-groups")},
+		},
 	})
 
 	if err != nil {

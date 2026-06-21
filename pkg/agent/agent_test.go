@@ -25,6 +25,14 @@ type stubProvider struct {
 	terminated bool
 	stopped    bool
 	hibernated bool
+
+	// region-vacated check (#260): otherInstances is the count returned by
+	// CountOtherManagedInstances; reportVacated=true makes a 0 mean "really 0"
+	// rather than the default "unknown" (-1). countCalls records how many times
+	// the count was queried (1 = early return; 2 = settle path reached).
+	otherInstances int
+	reportVacated  bool
+	countCalls     int
 }
 
 func (s *stubProvider) GetIdentity(_ context.Context) (*provider.Identity, error) {
@@ -46,6 +54,16 @@ func (s *stubProvider) DiscoverPeers(_ context.Context, _ string) ([]provider.Pe
 }
 func (s *stubProvider) GetProviderType() string                       { return "stub" }
 func (s *stubProvider) LookupAndTagEBSCost(_ context.Context) float64 { return 0 }
+
+// otherInstances controls the region-vacated check; -1 (unknown) by default so
+// existing tests don't trigger the 60s settle path.
+func (s *stubProvider) CountOtherManagedInstances(_ context.Context) int {
+	s.countCalls++
+	if s.otherInstances == 0 && !s.reportVacated {
+		return -1
+	}
+	return s.otherInstances
+}
 
 func newTestAgent(t *testing.T, cfg *provider.Config) *Agent {
 	t.Helper()
@@ -488,4 +506,51 @@ func TestPreStopDetail(t *testing.T) {
 	if got := preStopDetail("exit 1", "  fatal: no creds\n"); got != "exit 1 — fatal: no creds" {
 		t.Errorf("with tail: got %q", got)
 	}
+}
+
+func TestCheckRegionVacated(t *testing.T) {
+	mkAgent := func(sp *stubProvider) *Agent {
+		return &Agent{
+			provider:            sp,
+			identity:            &provider.Identity{InstanceID: "i-test123", Region: "us-east-1"},
+			config:              &provider.Config{},
+			regionVacatedSettle: time.Millisecond, // keep the settle window tiny
+		}
+	}
+
+	t.Run("others remain: returns immediately, no settle re-check", func(t *testing.T) {
+		sp := &stubProvider{otherInstances: 2}
+		mkAgent(sp).checkRegionVacated(context.Background())
+		if sp.countCalls != 1 {
+			t.Errorf("expected 1 count call (early return), got %d", sp.countCalls)
+		}
+	})
+
+	t.Run("unknown count: returns immediately", func(t *testing.T) {
+		sp := &stubProvider{otherInstances: 0, reportVacated: false} // -1 unknown
+		mkAgent(sp).checkRegionVacated(context.Background())
+		if sp.countCalls != 1 {
+			t.Errorf("expected 1 count call (unknown → not vacated), got %d", sp.countCalls)
+		}
+	})
+
+	t.Run("vacated: settles then re-checks", func(t *testing.T) {
+		sp := &stubProvider{otherInstances: 0, reportVacated: true}
+		mkAgent(sp).checkRegionVacated(context.Background())
+		if sp.countCalls != 2 {
+			t.Errorf("expected 2 count calls (initial + settle re-check), got %d", sp.countCalls)
+		}
+	})
+
+	t.Run("cancelled context during settle: no re-check", func(t *testing.T) {
+		sp := &stubProvider{otherInstances: 0, reportVacated: true}
+		a := mkAgent(sp)
+		a.regionVacatedSettle = time.Hour // long, so cancellation wins
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		a.checkRegionVacated(ctx)
+		if sp.countCalls != 1 {
+			t.Errorf("expected 1 count call (cancelled before settle), got %d", sp.countCalls)
+		}
+	})
 }

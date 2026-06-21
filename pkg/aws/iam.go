@@ -656,9 +656,13 @@ func (c *Client) buildIAMTags(tags map[string]string) []types.Tag {
 		tags = make(map[string]string)
 	}
 
-	// Add spawn tags
+	// Add spawn tags. spawn:created-at is the canonical creation-timestamp tag
+	// across all resource types (#258); spawn:created is kept for back-compat
+	// with anything already keying on it.
 	tags["spawn:managed"] = "true"
-	tags["spawn:created"] = time.Now().UTC().Format(time.RFC3339)
+	tags["spawn:created-by"] = "spawn"
+	tags["spawn:created-at"] = time.Now().UTC().Format(time.RFC3339)
+	tags["spawn:created"] = tags["spawn:created-at"]
 
 	iamTags := make([]types.Tag, 0, len(tags))
 	for key, value := range tags {

@@ -353,6 +353,31 @@ func ebsPricePerGBMonth(volumeType string) float64 {
 	}
 }
 
+// CountOtherManagedInstances counts spawn:managed instances in this region that
+// are running or pending, excluding this instance (#260).
+func (p *EC2Provider) CountOtherManagedInstances(ctx context.Context) int {
+	out, err := p.ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		Filters: []types.Filter{
+			{Name: aws.String("tag:spawn:managed"), Values: []string{"true"}},
+			{Name: aws.String("instance-state-name"), Values: []string{"running", "pending"}},
+		},
+	})
+	if err != nil {
+		log.Printf("region-vacated check: DescribeInstances failed: %v", err)
+		return -1
+	}
+	count := 0
+	for _, res := range out.Reservations {
+		for _, inst := range res.Instances {
+			if aws.ToString(inst.InstanceId) == p.identity.InstanceID {
+				continue // don't count ourselves
+			}
+			count++
+		}
+	}
+	return count
+}
+
 // LookupAndTagEBSCost queries the instance's attached volumes, calculates the hourly
 // EBS storage cost, and stores it as spawn:ebs-hourly-cost. Called once at first
 // spored start; subsequent starts read the tag instead of re-querying.

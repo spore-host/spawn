@@ -139,6 +139,12 @@ type Provider interface {
 	// LookupAndTagEBSCost returns the hourly EBS storage cost, querying AWS if
 	// not already cached in the spawn:ebs-hourly-cost tag.
 	LookupAndTagEBSCost(ctx context.Context) float64
+
+	// CountOtherManagedInstances returns the number of spawn:managed instances in
+	// this instance's region that are running or pending, EXCLUDING this one.
+	// Used for the last-instance "region vacated" check (#260). Returns -1 if the
+	// count can't be determined (treat as "unknown", not zero).
+	CountOtherManagedInstances(ctx context.Context) int
 }
 
 // NewProvider creates a provider based on the environment

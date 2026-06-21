@@ -73,6 +73,11 @@ type Agent struct {
 	// (tags are re-read every 5 ticks). Per-Agent rather than a package global so
 	// it isn't shared across agents and resets cleanly per instance (#175).
 	configRefreshTick int
+
+	// regionVacatedSettle is how long the last-instance check waits before
+	// re-confirming the region is empty (#260). Zero means the production default
+	// (60s); tests set it small.
+	regionVacatedSettle time.Duration
 }
 
 // cfg returns the current config under a read lock. Callers get a stable pointer
@@ -1344,10 +1349,45 @@ func (a *Agent) terminate(ctx context.Context, reason string) {
 	// Wait a moment for users to see warning
 	time.Sleep(5 * time.Second)
 
+	// Last-instance check: if no other spawn-managed instances remain running in
+	// this region, notify that the region is vacated (#260). Notify-only by
+	// default; auto-cleanup is a separate opt-in handled control-plane side.
+	a.checkRegionVacated(ctx)
+
 	err := a.provider.Terminate(ctx, reason)
 	if err != nil {
 		log.Printf("Failed to terminate: %v", err)
 	}
+}
+
+// checkRegionVacated fires a region_vacated notification when this is the last
+// spawn-managed instance running in the region. It re-checks after 60s to avoid
+// a false alarm during a rapid relaunch (e.g. a job array rolling). Best-effort:
+// an unknown count (-1) is treated as "not vacated" so we never cry wolf (#260).
+func (a *Agent) checkRegionVacated(ctx context.Context) {
+	if n := a.provider.CountOtherManagedInstances(ctx); n != 0 {
+		return // others remain, or the count is unknown (-1)
+	}
+
+	// Confirm the region is still empty after a short settle window — a rapid
+	// relaunch (another instance coming up) means it isn't really vacated.
+	settle := a.regionVacatedSettle
+	if settle == 0 {
+		settle = 60 * time.Second
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(settle):
+	}
+	if n := a.provider.CountOtherManagedInstances(ctx); n != 0 {
+		log.Printf("region-vacated: re-check found %d other instance(s); not vacated", n)
+		return
+	}
+
+	region := a.identity.Region
+	log.Printf("region-vacated: no spawn-managed instances remain in %s", region)
+	a.notifier.Notify(ctx, "region_vacated", region)
 }
 
 

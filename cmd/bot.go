@@ -266,6 +266,13 @@ func ensureCrossAccountRole(ctx context.Context, cfg aws.Config) (string, error)
 		RoleName:                 aws.String(botCrossAccountRoleName),
 		AssumeRolePolicyDocument: aws.String(trustPolicy),
 		Description:              aws.String("Allows spore-bot Lambda to control EC2 instances in this account via Slack/Teams commands"),
+		// Tag so `spawn cleanup`/`resources` can find and attribute it (#258).
+		Tags: []iamtypes.Tag{
+			{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+			{Key: aws.String("spawn:created-by"), Value: aws.String("spawn")},
+			{Key: aws.String("spawn:created-at"), Value: aws.String(time.Now().UTC().Format(time.RFC3339))},
+			{Key: aws.String("spawn:purpose"), Value: aws.String("bot-cross-account")},
+		},
 	})
 	if err != nil {
 		return "", fmt.Errorf("create role: %w", err)

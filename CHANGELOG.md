@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn resources`** — lists every AWS resource spore.host created in an
+  account/region (found by the `spawn:managed` tag via the Resource Groups
+  Tagging API). Defaults to resources you created; `--all` includes other
+  principals; `--all-regions` sweeps every enabled region (#259).
+- **`spawn cleanup`** — removes spawn-managed shared infrastructure (security
+  groups, key pairs, IAM role/profile, orphaned volumes, log groups, tables) in
+  dependency order. Dry-run by default; `--force` to delete. **Never removes
+  running instances** — it refuses and exits if any are still running. Writes a
+  log to `~/.spawn/cleanup-<timestamp>.log` (#259).
+- **`spawn orphans`** — read-only report of resources that look abandoned
+  (available EBS volumes; shared infra when no instances remain) (#259).
+- spored fires a **`region_vacated`** notification when it terminates the last
+  spawn-managed instance in a region, re-confirming after a 60s settle window to
+  avoid false alarms during rapid relaunch. Notify-only by default (#260).
+
+### Changed
+- Consistent `spawn:managed` tagging on all created resources (#258): EC2 key
+  pairs (tag-on-import), the bot cross-account IAM role, and the autoscaler
+  DynamoDB table now carry the tags; `spawn:created-at` is the canonical
+  creation-timestamp tag across resource types.
+
 ### Fixed
 - Fixed a data race on the spored agent's config (#175). The monitor loop
   periodically replaces `Agent.config` (tag refresh) while the FSx-mount and

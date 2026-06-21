@@ -287,6 +287,13 @@ func (p *LocalProvider) LookupAndTagEBSCost(_ context.Context) float64 {
 	return 0 // no EBS on local provider
 }
 
+// CountOtherManagedInstances is not meaningful for the local provider — there's
+// no region of managed instances to vacate. Return -1 (unknown) so the
+// region-vacated check is skipped (#260).
+func (p *LocalProvider) CountOtherManagedInstances(_ context.Context) int {
+	return -1
+}
+
 // getPublicIP queries an external service to get the public IP
 func getPublicIP() string {
 	// Try multiple services in case one is down

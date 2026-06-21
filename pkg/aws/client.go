@@ -991,7 +991,9 @@ func (c *Client) CheckKeyPairExists(ctx context.Context, region, keyName string)
 	return true, nil
 }
 
-// ImportKeyPair imports a public key to AWS EC2
+// ImportKeyPair imports a public key to AWS EC2, tagging it spawn:managed so
+// `spawn cleanup`/`resources` can find it (#258). ImportKeyPair supports
+// tag-on-create, so no separate CreateTags call is needed.
 func (c *Client) ImportKeyPair(ctx context.Context, region, keyName string, publicKey []byte) error {
 	cfg := c.cfg
 	cfg.Region = region
@@ -1000,6 +1002,12 @@ func (c *Client) ImportKeyPair(ctx context.Context, region, keyName string, publ
 	input := &ec2.ImportKeyPairInput{
 		KeyName:           aws.String(keyName),
 		PublicKeyMaterial: publicKey,
+		TagSpecifications: []types.TagSpecification{
+			{
+				ResourceType: types.ResourceTypeKeyPair,
+				Tags:         c.managedResourceTags(ctx, map[string]string{"spawn:purpose": "ssh-key"}),
+			},
+		},
 	}
 
 	_, err := ec2Client.ImportKeyPair(ctx, input)
@@ -1011,6 +1019,31 @@ func (c *Client) ImportKeyPair(ctx context.Context, region, keyName string, publ
 	}
 
 	return nil
+}
+
+// managedResourceTags builds the standard spawn:managed tag set for a secondary
+// AWS resource (key pair, IAM role, table, …) so cleanup can find and attribute
+// it. Mirrors the per-instance baseline (spawn:managed/created-by/account/
+// iam-user) plus spawn:created-at, and merges any extra tags. Identity lookup is
+// best-effort — a resource still gets spawn:managed=true even if STS is slow.
+func (c *Client) managedResourceTags(ctx context.Context, extra map[string]string) []types.Tag {
+	out := map[string]string{
+		"spawn:managed":    "true",
+		"spawn:created-by": "spawn",
+		"spawn:created-at": time.Now().UTC().Format(time.RFC3339),
+	}
+	if accountID, userARN, err := c.GetCallerIdentityInfo(ctx); err == nil {
+		out["spawn:account-id"] = accountID
+		out["spawn:iam-user"] = userARN
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	tags := make([]types.Tag, 0, len(out))
+	for k, v := range out {
+		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	return tags
 }
 
 func contains(s, substr string) bool {
