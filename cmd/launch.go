@@ -22,6 +22,7 @@ import (
 	"github.com/scttfrdmn/strata/pkg/strata"
 	"github.com/scttfrdmn/strata/spec"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/cohort"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/libs/pricing"
 	"github.com/spore-host/spawn/pkg/audit"
@@ -31,6 +32,7 @@ import (
 	"github.com/spore-host/spawn/pkg/input"
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/locality"
+	"github.com/spore-host/spawn/pkg/mpicohort"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/progress"
@@ -96,10 +98,11 @@ var (
 	activeProcesses  string // comma-separated process names to monitor (e.g. "rsession,jupyter")
 
 	// Job array
-	count         int
-	jobArrayName  string
-	instanceNames string
-	command       string
+	count          int
+	jobArrayName   string
+	instanceNames  string
+	command        string
+	reconcilerMode string // job-array launch engine: "legacy" (default) or "cohort"
 
 	// MPI
 	mpiEnabled            bool
@@ -269,6 +272,11 @@ func init() {
 	launchCmd.Flags().StringVar(&jobArrayName, "job-array-name", "", "Job array group name (required if --count > 1)")
 	launchCmd.Flags().StringVar(&instanceNames, "instance-names", "", "Instance name template (e.g., 'worker-{index}', default: '{job-array-name}-{index}')")
 	launchCmd.Flags().StringVar(&command, "command", "", "Command to run on all instances (executed after spored setup)")
+	// Experimental: route a job-array launch through the cohort reconciler
+	// (all-or-nothing barrier + leak-free drain) instead of the hand-rolled loop.
+	// Hidden until it's the supported default; fully functional/testable.
+	launchCmd.Flags().StringVar(&reconcilerMode, "reconciler", "legacy", "Job-array launch engine: legacy or cohort (experimental)")
+	_ = launchCmd.Flags().MarkHidden("reconciler")
 
 	// MPI
 	launchCmd.Flags().BoolVar(&mpiEnabled, "mpi", false, "Enable MPI cluster setup (requires --count > 1)")
@@ -1716,7 +1724,14 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		if jobArrayName == "" {
 			return fmt.Errorf("--job-array-name is required when --count > 1")
 		}
-		return launchJobArray(ctx, awsClient, config, plat, prog, fsxInfo, auditLog)
+		switch reconcilerMode {
+		case "", "legacy":
+			return launchJobArray(ctx, awsClient, config, plat, prog, fsxInfo, auditLog)
+		case "cohort":
+			return launchJobArrayCohort(ctx, awsClient, config, plat, prog, fsxInfo, auditLog)
+		default:
+			return fmt.Errorf("--reconciler must be 'legacy' or 'cohort', got %q", reconcilerMode)
+		}
 	}
 
 	// Step 6: Launch instance
@@ -2951,6 +2966,208 @@ func formatInstanceName(template string, jobArrayName string, index int) string 
 	return name
 }
 
+// buildJobArrayMemberConfig clones baseConfig into the per-index LaunchConfig for
+// one job-array member: job-array tags, the templated Name, an index-suffixed DNS
+// name, and — when MPI/storage is in play — the per-index MPI user-data appended
+// to the base script. It is the single source of truth shared by both the legacy
+// goroutine loop and the cohort reconciler path.
+func buildJobArrayMemberConfig(baseConfig *aws.LaunchConfig, jobArrayID string, index int, fsxInfo *aws.FSxInfo) (aws.LaunchConfig, error) {
+	instanceConfig := *baseConfig
+
+	instanceConfig.JobArrayID = jobArrayID
+	instanceConfig.JobArrayName = jobArrayName
+	instanceConfig.JobArraySize = count
+	instanceConfig.JobArrayIndex = index
+	instanceConfig.JobArrayCommand = command
+
+	instanceConfig.Name = formatInstanceName(instanceNames, jobArrayName, index)
+
+	if baseConfig.DNSName != "" {
+		instanceConfig.DNSName = fmt.Sprintf("%s-%d", baseConfig.DNSName, index)
+	}
+
+	// Append MPI user-data when enabled. Storage mounts (EFS/FSx/attached EBS)
+	// are NOT re-appended here — they're already baked into baseConfig.UserData
+	// before the user script (#166); re-appending would double-mount.
+	if mpiEnabled || efsID != "" || fsxInfo != nil {
+		baseUserDataBytes, err := base64.StdEncoding.DecodeString(instanceConfig.UserData)
+		if err != nil {
+			return aws.LaunchConfig{}, fmt.Errorf("failed to decode base user-data: %w", err)
+		}
+		combinedUserData := string(baseUserDataBytes)
+
+		if mpiEnabled {
+			mpiConfig := userdata.MPIConfig{
+				Region:              baseConfig.Region,
+				JobArrayID:          jobArrayID,
+				JobArrayIndex:       index,
+				JobArraySize:        count,
+				MPIProcessesPerNode: mpiProcessesPerNode,
+				MPICommand:          mpiCommand,
+				SkipInstall:         mpiSkipInstall,
+				EFAEnabled:          efaEnabled,
+			}
+			mpiScript, err := userdata.GenerateMPIUserData(mpiConfig)
+			if err != nil {
+				return aws.LaunchConfig{}, fmt.Errorf("failed to generate MPI user-data: %w", err)
+			}
+			combinedUserData += "\n" + mpiScript
+		}
+
+		instanceConfig.UserData = encodeUserData(combinedUserData)
+	}
+
+	return instanceConfig, nil
+}
+
+// cohortBudget maps the legacy job-array timeouts onto cohort's per-phase budget.
+// Running matches the legacy flat 2-minute running-wait; every field is set
+// explicitly so cohort doesn't inject its larger defaults.
+func cohortBudget() cohort.PhaseBudget {
+	return cohort.PhaseBudget{
+		LaunchAcked:    30 * time.Second, // RunInstances ack
+		Running:        2 * time.Minute,  // matches legacy maxWaitTime
+		Enrolled:       2 * time.Second,  // nil Enroller → trivially enrolled
+		CohortBarrier:  30 * time.Second, // straggler wait
+		CohortAssembly: 1 * time.Second,  // nil Assembler → phase skipped
+	}
+}
+
+// launchJobArrayCohort launches an MPI/job-array as an all-or-nothing cohort via
+// the cohort reconciler (--reconciler=cohort). It gains a real barrier and a
+// leak-free drain over the hand-rolled launchJobArray; peer discovery stays
+// self-organizing on-instance (nil Assembler) and there is no capacity fallback
+// yet (single-rung placement). Same signature/output contract as launchJobArray.
+func launchJobArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, plat *platform.Platform, prog *progress.Progress, fsxInfo *aws.FSxInfo, auditLog *audit.AuditLogger) error {
+	jobArrayID := generateJobArrayID(jobArrayName)
+	createdAt := time.Now()
+
+	fmt.Fprintf(os.Stderr, "\n🚀 Launching job array via cohort: %s (%d instances)\n", jobArrayName, count)
+	fmt.Fprintf(os.Stderr, "   Job Array ID: %s\n\n", jobArrayID)
+
+	auditLog.LogOperationWithData("launch_job_array", jobArrayID, "initiated",
+		map[string]interface{}{
+			"job_array_name": jobArrayName,
+			"instance_count": count,
+			"instance_type":  baseConfig.InstanceType,
+			"region":         baseConfig.Region,
+		}, nil)
+
+	// Build per-index configs + cohort intents. All members share ONE rung
+	// (single-rung, no fallback chain) — every member places as a unit.
+	rung := cohort.Rung{
+		InstanceType:  baseConfig.InstanceType,
+		AvailZone:     baseConfig.AvailabilityZone,
+		CapacityModel: cohort.CapacityOnDemand,
+	}
+	if baseConfig.Spot {
+		rung.CapacityModel = cohort.CapacitySpot
+	}
+
+	cfgs := make(map[cohort.EntityID]aws.LaunchConfig, count)
+	members := make([]cohort.EntityIntent, 0, count)
+	memberIDs := make([]cohort.EntityID, count) // index-ordered, for result re-derivation
+	for i := 0; i < count; i++ {
+		cfg, err := buildJobArrayMemberConfig(baseConfig, jobArrayID, i, fsxInfo)
+		if err != nil {
+			return fmt.Errorf("build member %d config: %w", i, err)
+		}
+		id := cohort.EntityID(cfg.Name)
+		cfgs[id] = cfg
+		memberIDs[i] = id
+		intent, err := cohort.NewEntityIntent(jobArrayName, id, "g1", cohort.CohortID(jobArrayID),
+			cohort.RungPlacement{Rung: rung}, "")
+		if err != nil {
+			return fmt.Errorf("build member %d intent: %w", i, err)
+		}
+		members = append(members, intent)
+	}
+
+	// Provider seam over the real AWS client. nil Enroller (trivially enrolled)
+	// and nil Assembler (peer discovery stays on-instance) per the v1 design.
+	act := &mpicohort.Actuator{Client: awsClient, Region: baseConfig.Region, BaseConfig: *baseConfig, Configs: cfgs}
+	obs := &mpicohort.Observer{Client: awsClient, Region: baseConfig.Region}
+	r := cohort.NewReconciler(act, obs, mpicohort.Classifier{}, nil, nil, nil)
+
+	c, err := cohort.NewMPICohort(cohort.CohortID(jobArrayID), members, cohortBudget())
+	if err != nil {
+		return fmt.Errorf("build MPI cohort: %w", err)
+	}
+
+	prog.Start(fmt.Sprintf("Reconciling %d-instance cohort", count))
+	outcome, err := r.Reconcile(ctx, c)
+	if err != nil {
+		prog.Error("Reconciling cohort", err)
+		return fmt.Errorf("cohort reconcile: %w", err)
+	}
+
+	if !outcome.Ready {
+		// cohort already drained survivors — do NOT terminate here.
+		successCount, failureCount := 0, 0
+		var details []string
+		for _, id := range memberIDs {
+			rec := outcome.Records[id]
+			if rec.Succeeded() {
+				successCount++
+			} else {
+				failureCount++
+				details = append(details, fmt.Sprintf("%s: %s", id, rec.Summary()))
+			}
+		}
+		prog.Error(fmt.Sprintf("Reconciling %d-instance cohort", count),
+			fmt.Errorf("%d/%d members failed", failureCount, count))
+		auditLog.LogOperationWithData("launch_job_array", jobArrayID, "failed",
+			map[string]interface{}{
+				"success_count": successCount,
+				"failure_count": failureCount,
+			}, fmt.Errorf("%d/%d members failed", failureCount, count))
+		return fmt.Errorf("job array launch failed (%d/%d members):\n  %s",
+			failureCount, count, strings.Join(details, "\n  "))
+	}
+	prog.Complete(fmt.Sprintf("Reconciling %d-instance cohort", count))
+
+	auditLog.LogOperationWithData("launch_job_array", jobArrayID, "success",
+		map[string]interface{}{"instance_count": count}, nil)
+
+	// The Outcome carries no instance IDs/IPs (cohort Records are state-only), so
+	// re-derive the launched set from EC2 by Name and fetch public IPs — the same
+	// surface the legacy path renders.
+	prog.Start("Getting public IPs")
+	insts, err := awsClient.ListInstances(ctx, baseConfig.Region, "")
+	if err != nil {
+		prog.Error("Getting public IPs", err)
+		return fmt.Errorf("list instances after reconcile: %w", err)
+	}
+	byName := make(map[string]aws.InstanceInfo, len(insts))
+	for _, in := range insts {
+		byName[in.Name] = in
+	}
+	launchedInstances := make([]*aws.LaunchResult, 0, count)
+	for _, id := range memberIDs { // index order
+		in, ok := byName[string(id)]
+		if !ok {
+			continue
+		}
+		publicIP := in.PublicIP
+		if publicIP == "" {
+			if ip, ipErr := awsClient.GetInstancePublicIP(ctx, baseConfig.Region, in.InstanceID); ipErr == nil {
+				publicIP = ip
+			}
+		}
+		launchedInstances = append(launchedInstances, &aws.LaunchResult{
+			InstanceID:       in.InstanceID,
+			Name:             in.Name,
+			PublicIP:         publicIP,
+			PrivateIP:        in.PrivateIP,
+			AvailabilityZone: in.AvailabilityZone,
+			State:            "running",
+		})
+	}
+	prog.Complete("Getting public IPs")
+
+	return renderJobArrayResult(launchedInstances, baseConfig, jobArrayID, createdAt, plat)
+}
+
 // launchJobArray launches N instances in parallel as a job array
 func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, plat *platform.Platform, prog *progress.Progress, fsxInfo *aws.FSxInfo, auditLog *audit.AuditLogger) error {
 	// Generate unique job array ID
@@ -2987,73 +3204,10 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 		go func(index int) {
 			defer wg.Done()
 
-			// Clone config for this instance
-			instanceConfig := *baseConfig
-
-			// Set job array fields
-			instanceConfig.JobArrayID = jobArrayID
-			instanceConfig.JobArrayName = jobArrayName
-			instanceConfig.JobArraySize = count
-			instanceConfig.JobArrayIndex = index
-			instanceConfig.JobArrayCommand = command
-
-			// Set instance name from template
-			instanceConfig.Name = formatInstanceName(instanceNames, jobArrayName, index)
-
-			// Set DNS name with index suffix if DNS is enabled
-			if baseConfig.DNSName != "" {
-				instanceConfig.DNSName = fmt.Sprintf("%s-%d", baseConfig.DNSName, index)
-			}
-
-			// Append MPI and/or storage user-data if enabled
-			if mpiEnabled || efsID != "" || fsxInfo != nil {
-				// Decode base user-data
-				baseUserDataBytes, err := base64.StdEncoding.DecodeString(instanceConfig.UserData)
-				if err != nil {
-					results <- launchResult{
-						index: index,
-						err:   fmt.Errorf("failed to decode base user-data: %w", err),
-					}
-					return
-				}
-
-				combinedUserData := string(baseUserDataBytes)
-
-				// Add MPI user-data if enabled
-				if mpiEnabled {
-					// Generate MPI user-data for this instance
-					mpiConfig := userdata.MPIConfig{
-						Region:              baseConfig.Region,
-						JobArrayID:          jobArrayID,
-						JobArrayIndex:       index,
-						JobArraySize:        count,
-						MPIProcessesPerNode: mpiProcessesPerNode,
-						MPICommand:          mpiCommand,
-						SkipInstall:         mpiSkipInstall,
-						EFAEnabled:          efaEnabled,
-					}
-
-					mpiScript, err := userdata.GenerateMPIUserData(mpiConfig)
-					if err != nil {
-						results <- launchResult{
-							index: index,
-							err:   fmt.Errorf("failed to generate MPI user-data: %w", err),
-						}
-						return
-					}
-
-					combinedUserData += "\n" + mpiScript
-				}
-
-				// NOTE: storage mounts (EFS/FSx/attached EBS volumes) are NOT added
-				// here. They're already baked into baseConfig.UserData by
-				// buildUserData, injected BEFORE the user script so the workload
-				// sees them live (#166). Re-appending here would double-mount AND
-				// land the mount after the script again. MPI user-data above is the
-				// only per-instance addition the array path needs.
-
-				// Re-encode with gzip compression
-				instanceConfig.UserData = encodeUserData(combinedUserData)
+			instanceConfig, err := buildJobArrayMemberConfig(baseConfig, jobArrayID, index, fsxInfo)
+			if err != nil {
+				results <- launchResult{index: index, err: err}
+				return
 			}
 
 			// Launch the instance
@@ -3182,6 +3336,13 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 	// Each agent queries EC2 for all instances with the same spawn:job-array-id tag
 	// This avoids AWS tag size limitations (256 char max) and scales to any array size
 
+	return renderJobArrayResult(launchedInstances, baseConfig, jobArrayID, createdAt, plat)
+}
+
+// renderJobArrayResult writes the job-array ID to the output-id file and emits
+// the success output (JSON array or the human table + management/connect hints).
+// Shared by the legacy and cohort launch paths so both render identically.
+func renderJobArrayResult(launchedInstances []*aws.LaunchResult, baseConfig *aws.LaunchConfig, jobArrayID string, createdAt time.Time, plat *platform.Platform) error {
 	// Write job array ID to file for workflow integration
 	if err := writeOutputID(jobArrayID, outputIDFile); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Failed to write job array ID to file: %v\n", err)
@@ -3238,7 +3399,7 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 	fmt.Fprintf(os.Stderr, "  • Terminate: spawn terminate --job-array-name %s\n", jobArrayName)
 	fmt.Fprintf(os.Stderr, "  • Extend:    spawn extend --job-array-name %s --ttl 4h\n", jobArrayName)
 
-	if launchedInstances[0].PublicIP != "" {
+	if len(launchedInstances) > 0 && launchedInstances[0].PublicIP != "" {
 		fmt.Fprintf(os.Stderr, "\nConnect to instances:\n")
 		for i, inst := range launchedInstances {
 			if inst.PublicIP != "" {

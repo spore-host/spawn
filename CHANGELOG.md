@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`spawn launch --reconciler cohort`** (experimental, hidden) — routes
+  job-array / MPI launches (`--count > 1`) through the
+  [cohort](https://github.com/spore-host/cohort) reconciler instead of the
+  hand-rolled goroutine loop. The cohort engine gives the all-or-nothing launch a
+  real barrier, a **leak-free drain** on partial failure, and legible per-member
+  failure summaries. Peer discovery stays self-organizing on-instance and there
+  is no capacity fallback yet (single placement rung), so the user-visible
+  outcome matches the default `legacy` engine. Default remains `legacy`; pass
+  `--reconciler cohort` to opt in.
 - **`spawn resources`** — lists every AWS resource spore.host created in an
   account/region (found by the `spawn:managed` tag via the Resource Groups
   Tagging API). Defaults to resources you created; `--all` includes other
