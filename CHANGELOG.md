@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.0] - 2026-06-21
+
 ### Added
 - **Optional spot-interruption webhook** (#228) — `spawn launch
   --spot-webhook-url <url>` makes `spored` fire a single, best-effort `POST` when
@@ -642,7 +644,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.62.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.63.0...HEAD
+[0.63.0]: https://github.com/spore-host/spawn/compare/v0.62.0...v0.63.0
 [0.62.0]: https://github.com/spore-host/spawn/compare/v0.61.0...v0.62.0
 [0.61.0]: https://github.com/spore-host/spawn/compare/v0.60.0...v0.61.0
 [0.60.0]: https://github.com/spore-host/spawn/compare/v0.59.0...v0.60.0
