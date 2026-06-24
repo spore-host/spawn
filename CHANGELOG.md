@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.64.1] - 2026-06-24
+
 ### Security
 - **Scoped spored's `ec2:CreateTags`/`ec2:DeleteTags` to already-managed instances**
   (#174). The spored IAM role previously granted `ec2:CreateTags` on `*` with no
@@ -690,7 +692,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.64.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.64.1...HEAD
+[0.64.1]: https://github.com/spore-host/spawn/compare/v0.64.0...v0.64.1
 [0.64.0]: https://github.com/spore-host/spawn/compare/v0.63.1...v0.64.0
 [0.63.1]: https://github.com/spore-host/spawn/compare/v0.63.0...v0.63.1
 [0.63.0]: https://github.com/spore-host/spawn/compare/v0.62.0...v0.63.0
