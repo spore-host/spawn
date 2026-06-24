@@ -2,11 +2,20 @@ package launcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/plugin"
 )
+
+// ErrPostLaunch marks a failure that happened AFTER RunInstances already
+// succeeded (e.g. ephemeral FSx setup). The instance was launched and has since
+// been torn down by Provision (#220). Callers that retry across AZs/regions
+// should treat a post-launch failure as terminal: the launch itself worked, so
+// retrying won't help and would just churn launch+terminate cycles. Test with
+// errors.Is(err, ErrPostLaunch).
+var ErrPostLaunch = errors.New("post-launch provisioning failure")
 
 // DefaultUsername is the local user created on instances provisioned headlessly
 // (no $USER to read). It matches the Amazon Linux default that `spawn connect`
@@ -129,9 +138,22 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 	// 5. Now that we have compute, create the ephemeral FSx and tag the instance
 	// spawn:fsx-pending so spored waits → DRA → mounts it once AVAILABLE (#194).
 	// Created here (not before launch) so capacity failures cost nothing (#213).
+	//
+	// CRITICAL (#220): if this post-launch step fails, the instance has ALREADY
+	// launched. Returning (nil, err) here would abandon a running, billable
+	// instance — and the caller (e.g. lagotto's per-AZ retry loop) would treat it
+	// as a failed attempt and launch ANOTHER one, orphaning one instance (+ any
+	// FSx created before the failure) per attempt. So tear the instance down on a
+	// post-launch failure: a partial provision must leave NOTHING billable behind
+	// (the #193 fail-closed contract extends past RunInstances).
 	if config.FSxLustreCreate {
 		if err := createAndAttachEphemeralFSx(ctx, client, &config, result.InstanceID); err != nil {
-			return nil, err
+			if termErr := client.Terminate(ctx, config.Region, result.InstanceID); termErr != nil {
+				// Couldn't even terminate — surface loudly, but still flag post-launch
+				// so the caller doesn't retry into the same downstream failure.
+				return nil, fmt.Errorf("%w: post-launch FSx setup failed (%v) AND could not terminate the now-orphaned instance %s — TERMINATE IT MANUALLY to avoid cost leak: %v", ErrPostLaunch, err, result.InstanceID, termErr)
+			}
+			return nil, fmt.Errorf("%w: FSx setup failed, terminated instance %s to avoid a leak: %v", ErrPostLaunch, result.InstanceID, err)
 		}
 	}
 	return result, nil
