@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.1] - 2026-06-24
+
 ### Fixed
 - **`launcher.Provision` no longer orphans a launched instance (and any ephemeral
   FSx) when a post-launch step fails** (#220). Previously, if `RunInstances`
@@ -24,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   down). Callers that retry across AZs/regions should treat it as terminal
   (`errors.Is(err, launcher.ErrPostLaunch)`) — the launch worked, so retrying
   can't help and only churns launch+terminate cycles (#220).
+
+### Security
+- Bumped `golang.org/x/net` to v0.55.0 in the `lambda/dns-updater` submodule
+  (the main module was already current), clearing newly-published HIGH CVEs
+  (CVE-2026-25680/25681/27136/33814/39821/42502/42506).
 
 ## [0.63.0] - 2026-06-21
 
@@ -662,7 +669,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.63.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.63.1...HEAD
+[0.63.1]: https://github.com/spore-host/spawn/compare/v0.63.0...v0.63.1
 [0.63.0]: https://github.com/spore-host/spawn/compare/v0.62.0...v0.63.0
 [0.62.0]: https://github.com/spore-host/spawn/compare/v0.61.0...v0.62.0
 [0.61.0]: https://github.com/spore-host/spawn/compare/v0.60.0...v0.61.0
