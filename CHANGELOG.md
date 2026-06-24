@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spawn status` now shows the **spored version** running on the instance (#232).
+  spored's `status` output gained a `spored: vX.Y.Z` line, which `spawn status`
+  surfaces — so you can see at a glance whether an instance is running an older
+  spored than the local spawn (useful after upgrading, or when debugging a
+  lifecycle behavior that changed between versions). The version is the one baked
+  into that instance's spored binary at launch.
+
 ## [0.63.1] - 2026-06-24
 
 ### Fixed

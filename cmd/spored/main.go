@@ -396,6 +396,7 @@ func handleStatus(checkComplete bool) error {
 	// ── Identity ──────────────────────────────────────────────────────────────
 	fmt.Printf("\n  %s  (%s)\n", identity.Name, instanceID)
 	fmt.Printf("  %s\n\n", strings.Repeat("─", 46))
+	fmt.Printf("  spored:           v%s\n", Version)
 
 	// Use original launch time from tag if available; fall back to startTime
 	launchTime := startTime
