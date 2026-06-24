@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.66.0] - 2026-06-24
+
 ### Added
 - **`spawn upgrade-spored <instance>`** replaces the spored agent on a running
   instance in place — no terminate/relaunch — and **preserves its lifecycle
@@ -730,7 +732,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.65.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.66.0...HEAD
+[0.66.0]: https://github.com/spore-host/spawn/compare/v0.65.0...v0.66.0
 [0.65.0]: https://github.com/spore-host/spawn/compare/v0.64.1...v0.65.0
 [0.64.1]: https://github.com/spore-host/spawn/compare/v0.64.0...v0.64.1
 [0.64.0]: https://github.com/spore-host/spawn/compare/v0.63.1...v0.64.0
