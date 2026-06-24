@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `aws.Client.DescribeCapacityReservation` — looks up a single Capacity
+  Reservation (state, type, AZ, start/end window) so a consumer can derive a
+  Capacity Block's start time and confirm it's in a launchable state before
+  firing. Groundwork for lagotto's Capacity-Block start-time launch (lagotto#62).
+
 ## [0.64.1] - 2026-06-24
 
 ### Security
