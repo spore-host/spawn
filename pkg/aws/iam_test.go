@@ -258,3 +258,58 @@ func TestPolicyJSONValidity(t *testing.T) {
 		})
 	}
 }
+
+// TestSporedTagPermissionsScoped is the #174 regression guard: spored's
+// ec2:CreateTags / ec2:DeleteTags must be conditioned on
+// ec2:ResourceTag/spawn:managed=true (so a compromised spore can't tag an
+// arbitrary instance into scope and then terminate it). Previously CreateTags
+// was granted on "*" with no condition.
+func TestSporedTagPermissionsScoped(t *testing.T) {
+	c := &Client{}
+	policy := c.buildInlinePolicy(nil) // base spored policy, no extra templates
+
+	stmts, ok := policy["Statement"].([]interface{})
+	if !ok {
+		t.Fatalf("policy has no Statement array: %T", policy["Statement"])
+	}
+
+	foundTagStmt := false
+	for _, s := range stmts {
+		stmt, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		actions := actionSet(stmt["Action"])
+		hasCreate := actions["ec2:CreateTags"]
+		if !hasCreate {
+			continue
+		}
+		foundTagStmt = true
+
+		// The statement granting CreateTags MUST carry the managed-tag condition.
+		cond, _ := stmt["Condition"].(map[string]interface{})
+		se, _ := cond["StringEquals"].(map[string]interface{})
+		if se["ec2:ResourceTag/spawn:managed"] != "true" {
+			t.Errorf("ec2:CreateTags is granted WITHOUT the spawn:managed=true condition (#174): %+v", stmt)
+		}
+	}
+	if !foundTagStmt {
+		t.Error("no statement grants ec2:CreateTags — spored needs it for its lifecycle tags")
+	}
+}
+
+// actionSet normalizes a statement's Action (string or []interface{}) to a set.
+func actionSet(a interface{}) map[string]bool {
+	out := map[string]bool{}
+	switch v := a.(type) {
+	case string:
+		out[v] = true
+	case []interface{}:
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				out[s] = true
+			}
+		}
+	}
+	return out
+}

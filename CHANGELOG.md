@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Scoped spored's `ec2:CreateTags`/`ec2:DeleteTags` to already-managed instances**
+  (#174). The spored IAM role previously granted `ec2:CreateTags` on `*` with no
+  condition, while the destructive `TerminateInstances`/`StopInstances` were
+  conditioned on `ec2:ResourceTag/spawn:managed=true` — so a compromised spore
+  could tag ANY instance `spawn:managed=true` and then terminate it, defeating the
+  containment. Tag writes are now conditioned on `ec2:ResourceTag/spawn:managed=true`
+  too, so a spore can only (re)tag instances already in scope (it only ever tags
+  its own instance, which always carries the tag). Re-applied to existing roles on
+  the next launch/role refresh.
+
 ## [0.64.0] - 2026-06-24
 
 ### Added

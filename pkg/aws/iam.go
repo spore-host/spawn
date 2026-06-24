@@ -596,18 +596,45 @@ func (c *Client) buildInlinePolicy(policies []string) map[string]interface{} {
 	// ALWAYS include spored-required EC2 permissions for self-management
 	// This allows spored agent to:
 	// - Read its own tags (TTL, idle timeout, etc.)
+	// - Keep its lifecycle tags current (compute-seconds, fsx-id, …)
 	// - Terminate/stop itself when conditions are met
-	// These permissions are scoped to spawn:managed=true instances only
+	// The destructive and tag-write actions are scoped to spawn:managed=true.
+
+	// Describe* are read-only and stay on "*" (Describe APIs don't support
+	// resource-level IAM scoping).
 	sporedReadPermissions := map[string]interface{}{
 		"Effect": "Allow",
 		"Action": []interface{}{
 			"ec2:DescribeTags",
 			"ec2:DescribeInstances",
-			"ec2:CreateTags",
 		},
 		"Resource": "*",
 	}
 	statements = append(statements, sporedReadPermissions)
+
+	// Tag writes are scoped to already-managed instances (#174). Previously
+	// ec2:CreateTags was granted on "*" with NO condition, so a compromised spore
+	// could tag ANY instance spawn:managed=true and then terminate it — the
+	// condition on the destructive actions below provided no containment.
+	// Conditioning CreateTags/DeleteTags on ec2:ResourceTag/spawn:managed=true
+	// means a spore can only (re)tag instances ALREADY in scope; it cannot pull a
+	// foreign instance into scope. spored only ever tags its own instance (which
+	// always carries spawn:managed=true), so legitimate use is unaffected. (This
+	// also adds the previously-missing DeleteTags grant the FSx-mount path needs.)
+	sporedTagPermissions := map[string]interface{}{
+		"Effect": "Allow",
+		"Action": []interface{}{
+			"ec2:CreateTags",
+			"ec2:DeleteTags",
+		},
+		"Resource": "*",
+		"Condition": map[string]interface{}{
+			"StringEquals": map[string]interface{}{
+				"ec2:ResourceTag/spawn:managed": "true",
+			},
+		},
+	}
+	statements = append(statements, sporedTagPermissions)
 
 	sporedActionPermissions := map[string]interface{}{
 		"Effect": "Allow",
