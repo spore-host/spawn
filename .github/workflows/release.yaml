@@ -84,6 +84,10 @@ jobs:
                 printf '%s\0%s\0' "$src" "s3://${bucket}/spored-linux-${arch}"
                 printf '%s\0%s\0' "$sha" "s3://${bucket}/spored-linux-${arch}.sha256"
                 printf '%s\0%s\0' "$src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}"
+                # Versioned checksum too, so `spawn upgrade-spored --version X` can
+                # verify a pinned download (the un-versioned latest path already
+                # has one; the versioned path was missing it). (#234)
+                printf '%s\0%s\0' "$sha" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}.sha256"
               done
             done
             # Windows spored (amd64 only) — same paths so install-spored.ps1 mirrors
@@ -94,6 +98,7 @@ jobs:
               printf '%s\0%s\0' "$win_src" "s3://${bucket}/spored-windows-amd64.exe"
               printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/spored-windows-amd64.exe.sha256"
               printf '%s\0%s\0' "$win_src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe"
+              printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe.sha256"
             done
           }
 

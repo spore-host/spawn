@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn upgrade-spored <instance>`** replaces the spored agent on a running
+  instance in place — no terminate/relaunch — and **preserves its lifecycle
+  state** (#234). The TTL deadline, accumulated compute-seconds, and the
+  completion / pre-stop / idle / FSx config all live in EC2 tags that the new
+  spored re-reads on boot, so the death clock and compute clock continue across
+  the swap rather than resetting (the TTL deadline is absolute and tag-stored, so
+  an instance mid-life keeps its original termination time). Defaults to the
+  latest release; pin with `--version`; a downgrade is refused without `--force`.
+  The swap runs over SSM (keyless — works on private-subnet / no-public-IP GPU and
+  Capacity-Block hosts), downloads the versioned, checksum-verified spored binary,
+  swaps it atomically, restarts the daemon, and **health-checks** that it came
+  back up on the target version — rolling back to the prior binary if not. Linux
+  only for now (Windows is a follow-up).
+- `spawn status` now flags when a **newer spored is available** for the instance,
+  e.g. `spored upgrade available: v0.63.1 → v0.65.0 — run 'spawn upgrade-spored …'`
+  (#234). Best-effort and offline-tolerant — if the latest release can't be
+  fetched, status just shows the running version as before.
+- spored writes its running version to the **`spawn:spored-version` tag** on boot,
+  so `spawn status` / `spawn upgrade-spored` can read it without execing into the
+  instance, and an upgrade can confirm the new binary took effect (#232/#234).
+
+### Fixed
+- **A graceful spored shutdown now flushes accumulated compute-seconds** before
+  exiting (#234). The `spawn:compute-seconds` tag was only written on a throttled
+  1–5 minute cadence, so stopping the daemon (including an in-place upgrade) could
+  discard up to ~5 minutes of compute time; `spored`'s shutdown path now persists
+  the current total so the next start resumes the compute clock without losing the
+  tail.
+
 ## [0.65.0] - 2026-06-24
 
 ### Added

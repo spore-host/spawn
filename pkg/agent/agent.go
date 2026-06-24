@@ -568,6 +568,17 @@ func (a *Agent) writeComputeSecondsTag(ctx context.Context) {
 	if time.Since(a.lastComputeTagWrite) < interval {
 		return
 	}
+	a.flushComputeSecondsTag(ctx)
+}
+
+// flushComputeSecondsTag writes the spawn:compute-seconds tag NOW, bypassing the
+// throttle in writeComputeSecondsTag. It is called on graceful shutdown (see
+// Cleanup) so an in-place spored upgrade (`spawn upgrade-spored`, #234) — which
+// stops the daemon to swap the binary — doesn't discard the up-to-5-minutes of
+// compute time accumulated since the last throttled write. The next spored boot
+// reads this tag into computeSecondsBase, so the compute clock continues across
+// the restart rather than losing the tail.
+func (a *Agent) flushComputeSecondsTag(ctx context.Context) {
 	a.lastComputeTagWrite = time.Now()
 	total := a.computeSecondsBase + int64(time.Since(a.startTime).Seconds())
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.identity.Region))
@@ -581,6 +592,31 @@ func (a *Agent) writeComputeSecondsTag(ctx context.Context) {
 			{Key: aws.String("spawn:compute-seconds"), Value: aws.String(strconv.FormatInt(total, 10))},
 		},
 	})
+}
+
+// WriteVersionTag records the running spored version in the spawn:spored-version
+// EC2 tag (#232/#234) so `spawn status` and `spawn upgrade-spored` can read the
+// on-instance version without an exec into the box, and so an upgrade can confirm
+// the new binary actually took effect. Best-effort: a tag-write failure is logged
+// and ignored (it must never gate the lifecycle loop, per #65). version is the
+// spored binary's build version (main.Version), passed in from cmd/spored.
+func (a *Agent) WriteVersionTag(ctx context.Context, version string) {
+	if version == "" {
+		return
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.identity.Region))
+	if err != nil {
+		return
+	}
+	client := ec2.NewFromConfig(cfg)
+	if _, err := client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{a.identity.InstanceID},
+		Tags: []ec2types.Tag{
+			{Key: aws.String("spawn:spored-version"), Value: aws.String(version)},
+		},
+	}); err != nil {
+		log.Printf("Warning: failed to write spawn:spored-version tag: %v", err)
+	}
 }
 
 // TotalComputeSeconds returns accumulated compute time across all start/stop cycles.
@@ -1260,6 +1296,15 @@ func (a *Agent) hibernate(ctx context.Context) {
 // Cleanup performs cleanup tasks before shutdown (plugins, DNS, registry).
 func (a *Agent) Cleanup(ctx context.Context) {
 	log.Printf("Running cleanup tasks...")
+
+	// Flush the compute-seconds tag before we stop, bypassing the periodic
+	// throttle. Without this, a graceful stop (including an in-place spored
+	// upgrade, #234) would discard up to ~5 minutes of compute time since the
+	// last throttled write; the next boot reads the tag into computeSecondsBase,
+	// so flushing here keeps the compute clock continuous across the restart.
+	if a.identity != nil && a.identity.Provider == "ec2" {
+		a.flushComputeSecondsTag(ctx)
+	}
 
 	// Stop all running plugins before deregistering from infrastructure.
 	if a.pluginRuntime != nil {
