@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`launcher.Provision` no longer orphans a launched instance (and any ephemeral
+  FSx) when a post-launch step fails** (#220). Previously, if `RunInstances`
+  succeeded but the follow-on ephemeral-FSx setup failed, `Provision` returned an
+  error *without* terminating the now-running instance — leaking a billable
+  instance, and (under lagotto's per-AZ retry loop) one orphaned instance + FSx
+  per AZ attempt. `Provision` now tears the instance back down on any post-launch
+  failure, so a partial provision leaves nothing billable (the #193 fail-closed
+  contract now extends past RunInstances). Verified live: the same scenario that
+  orphaned a t3.micro now terminates it automatically.
+
+### Added
+- `launcher.ErrPostLaunch` sentinel: wraps a failure that occurred *after*
+  `RunInstances` succeeded (the instance was launched and has since been torn
+  down). Callers that retry across AZs/regions should treat it as terminal
+  (`errors.Is(err, launcher.ErrPostLaunch)`) — the launch worked, so retrying
+  can't help and only churns launch+terminate cycles (#220).
+
 ## [0.63.0] - 2026-06-21
 
 ### Added
