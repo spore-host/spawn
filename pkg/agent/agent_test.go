@@ -554,3 +554,26 @@ func TestCheckRegionVacated(t *testing.T) {
 		}
 	})
 }
+
+// TestTotalComputeSecondsCarriesBase asserts the invariant that makes an
+// in-place spored upgrade (#234) state-preserving: compute-seconds accumulated
+// before this spored start (loaded from the spawn:compute-seconds tag into
+// computeSecondsBase at boot) are INCLUDED in the running total, so the compute
+// clock continues across a restart rather than resetting. The graceful-stop
+// flush (agent.Cleanup → flushComputeSecondsTag) persists the latest total so
+// the next boot's base is current.
+func TestTotalComputeSecondsCarriesBase(t *testing.T) {
+	a := newTestAgent(t, nil)
+	// Simulate a restart that loaded 3600s of prior compute time from the tag,
+	// with the new spored having been up for ~2s.
+	a.computeSecondsBase = 3600
+	a.startTime = time.Now().Add(-2 * time.Second)
+
+	total := a.TotalComputeSeconds()
+	if total < 3600 {
+		t.Fatalf("TotalComputeSeconds=%d dropped the persisted base (want >= 3600)", total)
+	}
+	if total > 3600+10 {
+		t.Fatalf("TotalComputeSeconds=%d unexpectedly large (base 3600 + ~2s uptime)", total)
+	}
+}

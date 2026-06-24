@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
+	"github.com/spore-host/libs/update"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/sweep"
@@ -133,7 +135,48 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Print(string(output))
+	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], string(output), instance.InstanceID))
 	return nil
+}
+
+// sporedUpgradeNotice returns a one-line "upgrade available" annotation for the
+// running spored, or "" when it's current / can't be determined (#234). It's
+// best-effort and offline-tolerant: if the latest release can't be fetched
+// (GitHub unreachable, CI) it returns "" rather than failing status. The running
+// version comes from the spawn:spored-version tag when present (written by spored
+// on boot, #232), else it's parsed from the `spored: vX.Y.Z` line in the status
+// output so older agents that predate the tag are still annotated.
+func sporedUpgradeNotice(tagVersion, statusOutput, instanceID string) string {
+	running := tagVersion
+	if running == "" {
+		running = parseSporedVersion(statusOutput)
+	}
+	if running == "" {
+		return ""
+	}
+	res := update.CheckNow("spawn", running)
+	if res == nil || !res.HasUpdate() {
+		return ""
+	}
+	return fmt.Sprintf("\n%s spored upgrade available: v%s → v%s — run 'spawn upgrade-spored %s'\n",
+		i18n.Symbol("info"), res.CurrentVersion, res.LatestVersion, instanceID)
+}
+
+// parseSporedVersion extracts the version from the `spored: vX.Y.Z` line that
+// spored status prints (cmd/spored/main.go), returning a bare semver or "".
+func parseSporedVersion(statusOutput string) string {
+	for _, line := range strings.Split(statusOutput, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "spored:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return ""
+		}
+		return strings.TrimPrefix(fields[len(fields)-1], "v")
+	}
+	return ""
 }
 
 func runSweepStatus(ctx context.Context, sweepID string, jsonOut bool, checkComplete bool) error {

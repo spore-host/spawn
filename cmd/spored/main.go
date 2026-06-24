@@ -143,6 +143,15 @@ func runDaemon() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
+	// Record the running spored version in the spawn:spored-version tag so
+	// `spawn status` / `spawn upgrade-spored` can read it without execing in, and
+	// so an in-place upgrade can confirm the new binary took effect (#232/#234).
+	// Off the critical path (own goroutine), EC2-only, best-effort — never gates
+	// the lifecycle loop (#65).
+	if identity.Provider == "ec2" {
+		go agent.WriteVersionTag(context.Background(), Version)
+	}
+
 	// Get config and identity for observability
 	agentConfig := agent.GetConfig()
 	agentIdentity := agent.GetIdentity()

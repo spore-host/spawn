@@ -46,6 +46,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 	deferred := map[string]string{
 		"connect":         "Tier 2: real SSH to a booted instance",
 		"extend":          "Tier 2: SSH → spored reload on a live instance",
+		"upgrade-spored":  "Tier 2: SSM binary swap + restart on a live instance; script/version logic unit-tested in cmd",
 		"app":             "Tier 2: app streaming on a live instance",
 		"instance-config": "Tier 2: config get/set over SSH",
 		"queue":           "Tier 3: SQS-backed; SDK v2 SQS protocol mismatch in Substrate",
