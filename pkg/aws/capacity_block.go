@@ -121,3 +121,53 @@ func (c *Client) PurchaseCapacityBlock(ctx context.Context, region, offeringID, 
 	}
 	return aws.ToString(out.CapacityReservation.CapacityReservationId), nil
 }
+
+// CapacityReservation is the subset of an EC2 Capacity Reservation that a
+// start-time launch needs (lagotto#62): the window bounds to derive the fire
+// time, the AZ to pin the launch to, and the state/type to decide whether it's
+// launchable yet. A Capacity Block reservation moves payment-pending → scheduled
+// → active → expired; only scheduled/active can accept RunInstances.
+type CapacityReservation struct {
+	ReservationID    string
+	State            string // payment-pending | scheduled | active | expired | payment-failed | ...
+	ReservationType  string // "capacity-block" for a CB-for-ML reservation
+	InstanceType     string
+	AvailabilityZone string
+	StartDate        string // RFC3339 UTC; the window open (empty if unset)
+	EndDate          string // RFC3339 UTC; the window close — all CBs end 11:30 UTC (empty if unset)
+}
+
+// DescribeCapacityReservation looks up a single Capacity Reservation by id so a
+// caller can derive a Capacity Block's start/end window and confirm it's in a
+// launchable state before firing (lagotto#62). Returns an error if the id isn't
+// found in the region.
+func (c *Client) DescribeCapacityReservation(ctx context.Context, region, reservationID string) (*CapacityReservation, error) {
+	cfg := c.cfg.Copy()
+	cfg.Region = region
+	ec2Client := ec2.NewFromConfig(cfg)
+
+	out, err := ec2Client.DescribeCapacityReservations(ctx, &ec2.DescribeCapacityReservationsInput{
+		CapacityReservationIds: []string{reservationID},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describe capacity reservation %q in %s: %w", reservationID, region, err)
+	}
+	if len(out.CapacityReservations) == 0 {
+		return nil, fmt.Errorf("capacity reservation %q not found in %s", reservationID, region)
+	}
+	r := out.CapacityReservations[0]
+	cr := &CapacityReservation{
+		ReservationID:    aws.ToString(r.CapacityReservationId),
+		State:            string(r.State),
+		ReservationType:  string(r.ReservationType),
+		InstanceType:     aws.ToString(r.InstanceType),
+		AvailabilityZone: aws.ToString(r.AvailabilityZone),
+	}
+	if r.StartDate != nil {
+		cr.StartDate = r.StartDate.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	if r.EndDate != nil {
+		cr.EndDate = r.EndDate.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	return cr, nil
+}
