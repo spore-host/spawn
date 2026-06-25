@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a remediation hint (e.g. "this AMI has no NICE DCV server", "the DCV server
   failed to start — inspect with spawn connect …"). Pure observability; the
   streaming path is unchanged when it succeeds.
+- **Made the DCV handshake testable off-instance** (spawn#282, internal). The
+  `dcv` CLI shell-outs and the `spawn:ready-*` tag write now go through small
+  injectable seams (`dcvRunner`, `tagPutter`), and the CLI's per-poll tag read is
+  an extracted pure helper. New coverage: the monitor-loop retry/terminal logic
+  (a transient "session not present" no longer latches, a terminal status stops
+  and never writes a fake ready URL) and a Tier-0 Substrate round-trip asserting
+  the launch poll recovers the token/host on `ready` and the named reason on a
+  failure status — the exact branch that previously only printed the generic
+  timeout. No user-visible behavior change.
 
 ### Removed
 - **Deleted the legacy instance-identity-document auth path from the DNS updater**

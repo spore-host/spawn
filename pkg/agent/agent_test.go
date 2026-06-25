@@ -88,8 +88,52 @@ func newTestAgent(t *testing.T, cfg *provider.Config) *Agent {
 		config:           cfg,
 		startTime:        time.Now(),
 		lastActivityTime: time.Now(),
+		dcv:              execDCVRunner{}, // real exec; writeFakeDCV puts a fake `dcv` on PATH
+		tagger:           &fakeTagPutter{},
 	}
 	return a
+}
+
+// fakeTagPutter records tag writes (no real EC2) and can return a canned error to
+// exercise the tag-write-denied path. Latest wins per key across calls.
+type fakeTagPutter struct {
+	writes []map[string]string // every putTags call, in order
+	tags   map[string]string   // merged view of all successful writes
+	err    error               // returned by putTags when non-nil
+	calls  int
+}
+
+func (f *fakeTagPutter) putTags(_ context.Context, _ string, tags map[string]string) error {
+	f.calls++
+	if f.err != nil {
+		return f.err
+	}
+	f.writes = append(f.writes, tags)
+	if f.tags == nil {
+		f.tags = map[string]string{}
+	}
+	for k, v := range tags {
+		f.tags[k] = v
+	}
+	return nil
+}
+
+// fakeDCVRunner is an injectable dcvRunner returning canned list-sessions output.
+// listOut/listErr drive classifyDCVStatus; isInstalled drives installed().
+type fakeDCVRunner struct {
+	isInstalled bool
+	listOut     string
+	listErr     error
+	descOut     []byte
+	descErr     error
+}
+
+func (f *fakeDCVRunner) installed() bool { return f.isInstalled }
+func (f *fakeDCVRunner) listSessions(_ context.Context) (string, error) {
+	return f.listOut, f.listErr
+}
+func (f *fakeDCVRunner) describeSession(_ context.Context, _ string) ([]byte, error) {
+	return f.descOut, f.descErr
 }
 
 func TestGetConfig(t *testing.T) {
@@ -377,6 +421,74 @@ func TestDCVIdleSource_ActiveClients(t *testing.T) {
 	}
 	if a.IsIdle() {
 		t.Error("IsIdle() = true when DCV has 2 active clients, want false")
+	}
+}
+
+// dcvAuthAgent builds an EC2-provider agent wired with injected dcv/tagger fakes
+// and the :8444 verifier marked already-started (so the test doesn't bind a port).
+func dcvAuthAgent(t *testing.T, runner dcvRunner, tagger tagPutter) *Agent {
+	t.Helper()
+	a := newTestAgent(t, &provider.Config{DCVSessionID: "console"})
+	a.identity.Provider = "ec2"       // maybeSetupDCVAuth no-ops on non-EC2
+	a.dcvVerifierStarted = true       // skip the real 127.0.0.1:8444 bind
+	a.dcvTokens = map[string]string{} // normally created by startDCVAuthVerifier
+	a.dcv = runner
+	a.tagger = tagger
+	return a
+}
+
+// TestMaybeSetupDCVAuth_RetriesThenReady is the spawn#282 monitor-loop-retry
+// regression: a transient "session not present yet" must NOT latch dcvAuthDone
+// (so the next tick retries), and once the session appears the ready-url/token is
+// written and the handshake stops. The old fire-once goroutine made the transient
+// failure permanent.
+func TestMaybeSetupDCVAuth_RetriesThenReady(t *testing.T) {
+	ctx := context.Background()
+	runner := &fakeDCVRunner{isInstalled: true, listOut: "no sessions yet"}
+	tagger := &fakeTagPutter{}
+	a := dcvAuthAgent(t, runner, tagger)
+
+	// Tick 1: session absent, not yet exhausted → keep waiting (no terminal write).
+	a.maybeSetupDCVAuth(ctx)
+	if a.dcvAuthDone {
+		t.Fatal("dcvAuthDone latched on a transient dcv-waiting; retry would never happen")
+	}
+	if tagger.calls != 0 {
+		t.Fatalf("wrote tags during dcv-waiting (calls=%d); should write nothing until ready/terminal", tagger.calls)
+	}
+
+	// Tick 2: session now present → ready-url + token written, handshake stops.
+	runner.listOut = "Session: 'console' (owner ec2-user)"
+	a.maybeSetupDCVAuth(ctx)
+	if !a.dcvAuthDone {
+		t.Fatal("dcvAuthDone not latched after session became ready")
+	}
+	if got := tagger.tags["spawn:ready-status"]; got != string(dcvReady) {
+		t.Errorf("spawn:ready-status = %q, want %q", got, dcvReady)
+	}
+	if tagger.tags["spawn:ready-url"] == "" || tagger.tags["spawn:ready-token"] == "" {
+		t.Errorf("ready write missing url/token: %+v", tagger.tags)
+	}
+}
+
+// TestMaybeSetupDCVAuth_TerminalStops asserts a terminal status (dcv not
+// installed) records the named reason and stops retrying — without writing a fake
+// ready-url for a session that will never exist (the old silent fall-through bug).
+func TestMaybeSetupDCVAuth_TerminalStops(t *testing.T) {
+	ctx := context.Background()
+	runner := &fakeDCVRunner{isInstalled: false} // no `dcv` on this AMI
+	tagger := &fakeTagPutter{}
+	a := dcvAuthAgent(t, runner, tagger)
+
+	a.maybeSetupDCVAuth(ctx)
+	if !a.dcvAuthDone {
+		t.Fatal("dcvAuthDone not latched on a terminal status; would retry forever")
+	}
+	if got := tagger.tags["spawn:ready-status"]; got != string(dcvNotInstalled) {
+		t.Errorf("spawn:ready-status = %q, want %q", got, dcvNotInstalled)
+	}
+	if tagger.tags["spawn:ready-url"] != "" {
+		t.Errorf("terminal status wrote a ready-url (%q); must not", tagger.tags["spawn:ready-url"])
 	}
 }
 

@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"strings"
+
+	spawnclient "github.com/spore-host/spawn/pkg/aws"
 )
 
 // DCV ready-status values written by spored to the spawn:ready-status tag
@@ -46,6 +48,34 @@ func extractReadyFromTags(tags map[string]string) (url, token, host, status stri
 		}
 	}
 	return url, token, host, status
+}
+
+// dcvScanResult is one poll pass's reading of the target instance's DCV tags.
+type dcvScanResult struct {
+	token   string // spawn:ready-token (auth token); "" until ready
+	host    string // FQDN from the ready-url, if present
+	dnsName string // spawn:dns-name, if spored registered one
+	status  string // spawn:ready-status (drives terminal/keep-polling)
+}
+
+// scanDCVReady finds the target instance in a ListInstances result and reads its
+// DCV handshake tags. Extracted from the app-launch poll loop so the tag
+// round-trip is exercisable against the Substrate emulator without a real GPU
+// instance (spawn#282 phase 3). Returns a zero result if the instance isn't present.
+func scanDCVReady(instances []spawnclient.InstanceInfo, instanceID string) dcvScanResult {
+	for _, inst := range instances {
+		if inst.InstanceID != instanceID {
+			continue
+		}
+		_, token, host, status := extractReadyFromTags(inst.Tags)
+		return dcvScanResult{
+			token:   token,
+			host:    host,
+			dnsName: inst.Tags["spawn:dns-name"],
+			status:  status,
+		}
+	}
+	return dcvScanResult{}
 }
 
 // dcvStatusTerminal reports whether a ready-status is a final failure the CLI
