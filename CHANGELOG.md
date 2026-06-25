@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`spawn status` works on keyless, SSM-only instances** (#222). A
+  lagotto/cohort-launched instance has no SSH key (SSM-only by design), so
+  `status` previously hard-failed with "no SSH key configured" — yet status needs
+  only Describe + SSM, never SSH. It now falls back to running `spored status`
+  over SSM (`RunShellScript`) when no local key resolves, including propagating
+  spored's `--check-complete` exit code (carried back as the SSM response code).
+- **`--command` longer than 256 characters no longer fails the launch** (#214,
+  #246). The workload command was delivered via the `spawn:command` EC2 tag, and
+  EC2 caps tag values at 256 chars, so any non-trivial inline command failed
+  `RunInstances` outright. The plain `--command` is now embedded in the instance's
+  user-data (`/etc/spawn/command`, ~16 KB headroom) and the bootstrap prefers it
+  over the tag; the tag is still written for short commands (and the
+  parameter-sweep path's short per-instance commands), but an oversized command is
+  no longer tagged.
+- `--hibernate-on-idle` help text no longer says "instead of terminate" — the
+  default idle action is **stop**, not terminate, so the old text misrepresented a
+  reversible choice as a destructive one (#79).
 - **The ttl-reaper now deletes a reaped instance's Route53 DNS records** (#247).
   spored's graceful shutdown deletes its DNS record, but the reaper only fires
   when spored *failed* (dead/wedged/never-ran), so reaped instances were leaking

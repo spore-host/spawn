@@ -79,21 +79,20 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Find SSH key
-	keyPath, err := findSSHKey(instance.KeyName)
-	if err != nil {
-		if statusCheckComplete {
-			fmt.Fprintf(os.Stderr, "status: %v\n", err)
-			os.Exit(3)
-		}
-		return fmt.Errorf("failed to find SSH key: %w", err)
-	}
-
 	// Build the remote spored command, forwarding --check-complete so spored
 	// reports completion via standardized exit codes (#26).
 	remoteCmd := "sudo /usr/local/bin/spored status 2>&1"
 	if statusCheckComplete {
 		remoteCmd = "sudo /usr/local/bin/spored status --check-complete"
+	}
+
+	// Find SSH key. A lagotto/cohort-launched instance is keyless (SSM-only by
+	// design, #130), so there's no local key — status must not hard-fail there.
+	// When no key resolves, run `spored status` over SSM instead (status needs
+	// only Describe + SSM, never SSH). (#222)
+	keyPath, keyErr := findSSHKey(instance.KeyName)
+	if keyErr != nil {
+		return runStatusOverSSM(ctx, client, instance, statusCheckComplete)
 	}
 
 	sshArgs := []string{
@@ -136,6 +135,45 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Print(string(output))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], string(output), instance.InstanceID))
+	return nil
+}
+
+// runStatusOverSSM gets `spored status` from an instance we hold no SSH key for
+// (keyless/SSM-only, e.g. lagotto/cohort-launched, #222). It runs the same
+// command via SSM RunShellScript — no SSH, no key, no public IP needed. The SSM
+// agent runs commands as root, so the `sudo` the SSH path uses is unnecessary
+// (and harmless to drop). In --check-complete mode it maps spored's exit code
+// (carried back as the SSM ResponseCode) to spawn's own exit code, mirroring the
+// SSH path's 0/1/2/3 contract; an SSM-level failure is exit 3 (error/unknown).
+func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, checkComplete bool) error {
+	// The SSH variant pipes 2>&1 into the human output; over SSM stdout/stderr are
+	// separate fields, so drop the redirect and combine them ourselves below.
+	cmd := "/usr/local/bin/spored status"
+	if checkComplete {
+		cmd = "/usr/local/bin/spored status --check-complete"
+	}
+
+	res, err := client.RunShellScript(ctx, instance.Region, instance.InstanceID, cmd, 60*time.Second)
+	if err != nil {
+		// Couldn't reach the instance over SSM (no agent / no profile / timeout).
+		if checkComplete {
+			fmt.Fprintf(os.Stderr, "status (ssm): %v\n", err)
+			os.Exit(3)
+		}
+		return fmt.Errorf("failed to get status over SSM (instance is keyless; SSM required): %w", err)
+	}
+
+	if checkComplete {
+		// spored's 0/1/2/3 comes back as the SSM ResponseCode.
+		os.Exit(int(res.ResponseCode))
+	}
+
+	out := res.Stdout
+	if res.Stderr != "" {
+		out += res.Stderr
+	}
+	fmt.Print(out)
+	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
 	return nil
 }
 
