@@ -330,6 +330,36 @@ func TestSporedDNSInvokeGrant(t *testing.T) {
 	}
 }
 
+// TestSporedFSxMountGrant asserts the spored base policy grants the FSx APIs the
+// async-mount path needs (#194/#221) — without these the mount silently failed
+// with AccessDenied (the spored role previously had no fsx:* perms).
+func TestSporedFSxMountGrant(t *testing.T) {
+	c := &Client{}
+	policy := c.buildInlinePolicy(nil)
+	stmts, _ := policy["Statement"].([]interface{})
+
+	need := map[string]bool{
+		"fsx:DescribeFileSystems":             false,
+		"fsx:CreateDataRepositoryAssociation": false,
+	}
+	for _, s := range stmts {
+		stmt, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for a := range actionSet(stmt["Action"]) {
+			if _, ok := need[a]; ok {
+				need[a] = true
+			}
+		}
+	}
+	for a, found := range need {
+		if !found {
+			t.Errorf("spored policy missing %s — async FSx mount (#221) would AccessDenied", a)
+		}
+	}
+}
+
 // actionSet normalizes a statement's Action (string or []interface{}) to a set.
 func actionSet(a interface{}) map[string]bool {
 	out := map[string]bool{}

@@ -22,6 +22,25 @@ const fsxPollInterval = 20 * time.Second
 // mount yet, or the user can investigate) — we never terminate over this.
 const fsxMountTimeout = 25 * time.Minute
 
+// maybeMountPendingFSx kicks off the async FSx mount the first time
+// spawn:fsx-pending is observed (#221). It's called from the monitor loop after
+// each config refresh — not once at startup — because the tag is written AFTER
+// RunInstances by the (headless) launch path and is eventually consistent, so it
+// may be absent when spored first boots. Idempotent: the mount goroutine is
+// started at most once (fsxMountStarted), so a still-pending tag on a later tick
+// doesn't spawn a second mount. Logs nothing when there's no pending FSx (the
+// common case) to avoid per-tick noise.
+func (a *Agent) maybeMountPendingFSx(ctx context.Context) {
+	if a.fsxMountStarted {
+		return
+	}
+	if a.cfg().FSxPending == "" {
+		return // not (yet) pending; re-checked on the next refresh
+	}
+	a.fsxMountStarted = true
+	go a.mountPendingFSx(ctx)
+}
+
 // mountPendingFSx mounts an FSx filesystem that was created asynchronously
 // alongside this instance (#194). The launch path tags spawn:fsx-pending=<fs-id>
 // and spawn:fsx-mount-point; this polls the FSx API until the filesystem is
