@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **Deleted the legacy instance-identity-document auth path from the DNS updater**
+  (#173 step 4, the cutover is complete). The `spawn-dns-updater` Function URL now
+  runs under `AuthType: AWS_IAM`, so the handler authorizes solely on the
+  SigV4-verified caller account; the old spoofable path is gone: removed
+  `signature.go` (embedded per-region certs + PKCS#7/RSA verification), the
+  `legacyAuthorize`/`validateInstance` fallback and its cross-account default-allow,
+  the `instance_identity_document`/`_signature` request fields, and the
+  `fullsailor/pkcs7` dependency. A request without a verified IAM authorizer is now
+  rejected 403 (can't occur under AWS_IAM; defends against an accidental revert).
+  This closes the #173 HIGH Route53-spoofing vulnerability and retires the #294
+  cert-maintenance burden for good.
+
 ## [0.68.1] - 2026-06-25
 
 ### Fixed
