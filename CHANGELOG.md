@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.67.0] - 2026-06-25
+
 ### Added
 - **DNS registration now SigV4-signs its request** to the DNS Lambda Function
   URL, and spored enables it by default (#173). This moves the DNS updater off the
@@ -754,7 +756,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.66.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.67.0...HEAD
+[0.67.0]: https://github.com/spore-host/spawn/compare/v0.66.0...v0.67.0
 [0.66.0]: https://github.com/spore-host/spawn/compare/v0.65.0...v0.66.0
 [0.65.0]: https://github.com/spore-host/spawn/compare/v0.64.1...v0.65.0
 [0.64.1]: https://github.com/spore-host/spawn/compare/v0.64.0...v0.64.1
