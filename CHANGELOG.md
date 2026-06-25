@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **spored now reliably mounts an async-created ephemeral FSx** (#221, #194). Two
+  independent bugs each caused the mount to silently never happen (no log lines,
+  empty mount point, workload hanging):
+  1. **Startup race.** spored attempted the mount exactly once at boot, reading
+     `spawn:fsx-pending` immediately. But the launch path writes that tag *after*
+     `RunInstances` (the FSx create + Lustre-port setup take seconds) and EC2 tags
+     are eventually consistent, so the tag was often absent at that one read —
+     and the mount was never retried. spored now (re)checks for the pending FSx
+     on its monitor loop after each config refresh, mounting once the tag appears.
+  2. **Missing IAM.** The spored instance role had **no `fsx:*` permissions**, so
+     even when the tag was present the mount failed with AccessDenied on
+     `fsx:DescribeFileSystems` / `fsx:CreateDataRepositoryAssociation`. The role
+     now grants those (re-applied on the next launch). Both CLI and
+     lagotto/headless launches are covered.
+
 ## [0.68.0] - 2026-06-25
 
 ### Added

@@ -669,6 +669,24 @@ func (c *Client) buildInlinePolicy(policies []string) map[string]interface{} {
 	}
 	statements = append(statements, sporedDNSInvoke)
 
+	// Allow spored to mount an async-created ephemeral FSx (#194/#221). The mount
+	// path polls fsx:DescribeFileSystems until AVAILABLE and sets up the S3 export
+	// via fsx:CreateDataRepositoryAssociation. Without these, the mount silently
+	// failed with AccessDenied (the spored role had NO fsx:* perms) — one of the
+	// two causes of #221 (the other was a startup race). These FSx APIs don't
+	// support resource-level scoping for Describe, so Resource is "*"; spored only
+	// ever touches the filesystem its own instance was tagged with.
+	sporedFSxMount := map[string]interface{}{
+		"Effect": "Allow",
+		"Action": []interface{}{
+			"fsx:DescribeFileSystems",
+			"fsx:CreateDataRepositoryAssociation",
+			"fsx:DescribeDataRepositoryAssociations",
+		},
+		"Resource": "*",
+	}
+	statements = append(statements, sporedFSxMount)
+
 	// Add user-specified policy templates
 	for _, policyStr := range policies {
 		// Get template

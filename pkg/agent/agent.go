@@ -66,6 +66,14 @@ type Agent struct {
 	dcvReadyURLWritten bool
 	ttlWarned          bool // send ttl_warning notification only once
 
+	// fsxMountStarted guards the async FSx mount (#194/#221) to run at most once.
+	// The mount is (re)triggered from the monitor loop whenever spawn:fsx-pending
+	// becomes visible — it may not be set at spored startup, because the headless
+	// launch path tags the instance AFTER RunInstances (the create + Lustre-port
+	// setup add seconds) and EC2 tags are eventually consistent. The original
+	// run-once-at-startup invocation lost that race and silently never mounted.
+	fsxMountStarted bool
+
 	// monitorInterval is the lifecycle ticker period. Zero means the production
 	// default (1 minute); tests set it small to exercise the loop quickly.
 	monitorInterval time.Duration
@@ -282,10 +290,12 @@ func (a *Agent) Monitor(ctx context.Context) {
 	// spot decision off the critical path.
 	go a.monitorSpotInterruptions(ctx)
 
-	// Mount a pending async-created FSx (#194), if any, off the critical path —
-	// the poll-until-AVAILABLE can block for minutes and must never gate the
-	// lifecycle ticker (same #65 discipline as spot monitoring above).
-	go a.mountPendingFSx(ctx)
+	// The async FSx mount (#194) is triggered from the monitor loop
+	// (maybeMountPendingFSx in checkAndAct), not once here: spawn:fsx-pending may
+	// not be visible at startup (the headless launch path tags AFTER RunInstances;
+	// EC2 tags are eventually consistent), and a run-once-at-startup read lost that
+	// race and silently never mounted (#221). Driving it from the loop re-checks
+	// after each config refresh until the tag appears.
 
 	for {
 		select {
@@ -342,6 +352,13 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 			}
 		}
 	}
+
+	// 0a0. Mount a pending async-created FSx once spawn:fsx-pending is visible
+	// (#194/#221). Driven here (after the config refresh) rather than once at
+	// startup so a tag that lands after spored boots is still picked up. Runs at
+	// most once, in its own goroutine (the poll-until-AVAILABLE can block minutes
+	// and must never gate this ticker, #65).
+	a.maybeMountPendingFSx(ctx)
 
 	// 0a. Keep spawn:logged-in-count tag current (throttled to 5/min).
 	a.writeSessionCountTag(ctx, countActiveSessions()+countActivePortConnections(a.config.ActivePorts))
