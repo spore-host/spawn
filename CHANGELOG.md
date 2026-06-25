@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **DNS registration can now SigV4-sign its request** to the DNS Lambda Function
+  URL, opt-in via `SPORE_DNS_SIGV4` (#173). This is the client half of moving the
+  DNS updater off the spoofable instance-identity-document path and onto
+  `AuthType: AWS_IAM`, where the Lambda authorizes the *verified* caller account
+  from the signed principal. It's gated off by default so the signing build can
+  roll out to instances ahead of the infra-side Function URL `AuthType` flip — a
+  signed request against the current `AuthType: NONE` URL is accepted unchanged,
+  so the rollout is non-breaking. The signing path uses the instance role's
+  ambient credentials (exactly the principal the Lambda will grant). **Note: this
+  does not yet close the vulnerability** — that requires the coordinated infra
+  cutover (cross-account `lambda:InvokeFunctionUrl` grant → flip `AuthType` →
+  IAM-aware handler → remove the legacy identity-doc/cert code); tracked in #173.
+
 ## [0.66.0] - 2026-06-24
 
 ### Added

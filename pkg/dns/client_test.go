@@ -7,6 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 )
 
 func TestGetAccountSubdomain(t *testing.T) {
@@ -118,6 +122,78 @@ func TestRegisterJobArrayDNS_InvalidName(t *testing.T) {
 		}
 	}
 }
+
+// TestCallAPI_UnsignedByDefault verifies that with signing OFF (the default,
+// pre-#173-cutover state) the request carries NO SigV4 Authorization header — so
+// the signing build is non-breaking against the current AuthType: NONE Function
+// URL.
+func TestCallAPI_UnsignedByDefault(t *testing.T) {
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(DNSUpdateResponse{Success: true, ChangeID: "C1"})
+	}))
+	defer ts.Close()
+
+	c := &Client{httpClient: ts.Client(), apiEndpoint: ts.URL, domain: "spore.host"}
+	if _, err := c.callAPI(context.Background(), DNSUpdateRequest{RecordName: "x", Action: "UPSERT"}); err != nil {
+		t.Fatalf("callAPI: %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("unsigned client sent Authorization header %q, want none", gotAuth)
+	}
+}
+
+// TestCallAPI_SignedWhenEnabled verifies that with signing ON (#173) the request
+// carries a SigV4 Authorization header scoped to the lambda service — the header
+// the Function URL needs once it runs under AuthType: AWS_IAM.
+func TestCallAPI_SignedWhenEnabled(t *testing.T) {
+	var gotAuth, gotDate string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotDate = r.Header.Get("X-Amz-Date")
+		_ = json.NewEncoder(w).Encode(DNSUpdateResponse{Success: true, ChangeID: "C1"})
+	}))
+	defer ts.Close()
+
+	c := &Client{
+		httpClient:    ts.Client(),
+		apiEndpoint:   ts.URL,
+		domain:        "spore.host",
+		sign:          true,
+		region:        "us-east-1",
+		signer:        v4.NewSigner(),
+		credsProvider: credentials.NewStaticCredentialsProvider("AKIAEXAMPLE", "secretkeyexample", ""),
+	}
+	if _, err := c.callAPI(context.Background(), DNSUpdateRequest{RecordName: "x", Action: "UPSERT"}); err != nil {
+		t.Fatalf("callAPI: %v", err)
+	}
+	if !strings.HasPrefix(gotAuth, "AWS4-HMAC-SHA256 ") {
+		t.Errorf("Authorization = %q, want an AWS4-HMAC-SHA256 SigV4 header", gotAuth)
+	}
+	if !strings.Contains(gotAuth, "/us-east-1/lambda/aws4_request") {
+		t.Errorf("Authorization credential scope = %q, want .../us-east-1/lambda/aws4_request", gotAuth)
+	}
+	if gotDate == "" {
+		t.Error("signed request missing X-Amz-Date header")
+	}
+}
+
+// TestSignRequest_NoOpWhenDisabled asserts signRequest leaves the request
+// untouched when signing is off, even if a (here nil) signer would otherwise be
+// invoked — the guard that keeps the unsigned path safe.
+func TestSignRequest_NoOpWhenDisabled(t *testing.T) {
+	c := &Client{} // sign=false, signer=nil
+	req, _ := http.NewRequest("POST", "https://example.test", strings.NewReader("{}"))
+	if err := c.signRequest(context.Background(), req, []byte("{}")); err != nil {
+		t.Fatalf("signRequest disabled should be a no-op, got %v", err)
+	}
+	if req.Header.Get("Authorization") != "" {
+		t.Error("signRequest disabled must not add an Authorization header")
+	}
+}
+
+var _ aws.CredentialsProvider = credentials.StaticCredentialsProvider{}
 
 // TestSetAccountName_SentInRequest verifies SetAccountName makes callAPI include
 // account_name in the JSON body — the field the dns-updater uses to register the
