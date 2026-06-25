@@ -8,18 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **DNS registration can now SigV4-sign its request** to the DNS Lambda Function
-  URL, opt-in via `SPORE_DNS_SIGV4` (#173). This is the client half of moving the
-  DNS updater off the spoofable instance-identity-document path and onto
-  `AuthType: AWS_IAM`, where the Lambda authorizes the *verified* caller account
-  from the signed principal. It's gated off by default so the signing build can
-  roll out to instances ahead of the infra-side Function URL `AuthType` flip — a
-  signed request against the current `AuthType: NONE` URL is accepted unchanged,
-  so the rollout is non-breaking. The signing path uses the instance role's
-  ambient credentials (exactly the principal the Lambda will grant). **Note: this
-  does not yet close the vulnerability** — that requires the coordinated infra
-  cutover (cross-account `lambda:InvokeFunctionUrl` grant → flip `AuthType` →
-  IAM-aware handler → remove the legacy identity-doc/cert code); tracked in #173.
+- **DNS registration now SigV4-signs its request** to the DNS Lambda Function
+  URL, and spored enables it by default (#173). This moves the DNS updater off the
+  spoofable instance-identity-document path toward `AuthType: AWS_IAM`, where the
+  Lambda authorizes the *cryptographically verified* caller account rather than a
+  forgeable document. Three pieces land here:
+  - `pkg/dns` SigV4-signs the POST with the instance role's ambient credentials
+    when `SPORE_DNS_SIGV4` is set (the principal the Lambda will authorize).
+  - spored's systemd unit now sets `SPORE_DNS_SIGV4=1`, so launched instances sign
+    automatically — fielding a signing fleet ahead of the `AuthType` flip. A
+    signed request against the current `AuthType: NONE` URL is accepted unchanged,
+    so this is non-breaking; older non-signing instances age out under their TTLs.
+  - the spored instance role grants itself `lambda:InvokeFunctionUrl` on the DNS
+    function. This is the scalable alternative to enumerating launch accounts in
+    the Lambda's resource policy (accounts are unbounded and spored role names are
+    dynamic): each role self-authorizes, and the Lambda enforces that a caller can
+    only write records under its own verified account's subdomain.
+  - **Note: this does not yet close the vulnerability** — that needs the
+    coordinated infra cutover (flip the Function URL to `AuthType: AWS_IAM` + the
+    verified-account-namespacing handler, then remove the legacy identity-doc/cert
+    code); tracked in #173.
 
 ## [0.66.0] - 2026-06-24
 

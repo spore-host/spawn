@@ -298,6 +298,38 @@ func TestSporedTagPermissionsScoped(t *testing.T) {
 	}
 }
 
+// TestSporedDNSInvokeGrant asserts the spored base policy grants
+// lambda:InvokeFunctionUrl on the DNS-updater function and nothing broader (#173).
+// This is the caller half of the IAM-auth cutover — the role authorizes itself to
+// call the Function URL; the Lambda authorizes the verified caller account.
+func TestSporedDNSInvokeGrant(t *testing.T) {
+	c := &Client{}
+	policy := c.buildInlinePolicy(nil)
+
+	stmts, _ := policy["Statement"].([]interface{})
+	found := false
+	for _, s := range stmts {
+		stmt, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if !actionSet(stmt["Action"])["lambda:InvokeFunctionUrl"] {
+			continue
+		}
+		found = true
+		res, _ := stmt["Resource"].(string)
+		if !strings.Contains(res, "function:spawn-dns-updater") {
+			t.Errorf("InvokeFunctionUrl not scoped to the dns-updater function: %q", res)
+		}
+		if res == "*" {
+			t.Error("InvokeFunctionUrl granted on '*' — must be scoped to the dns-updater ARN")
+		}
+	}
+	if !found {
+		t.Error("no statement grants lambda:InvokeFunctionUrl — spored can't call the DNS Function URL under AWS_IAM (#173)")
+	}
+}
+
 // actionSet normalizes a statement's Action (string or []interface{}) to a set.
 func actionSet(a interface{}) map[string]bool {
 	out := map[string]bool{}

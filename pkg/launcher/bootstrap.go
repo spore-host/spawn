@@ -554,6 +554,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# SigV4-sign DNS registration requests (#173). Harmless today (the DNS Function
+# URL is still AuthType: NONE, which ignores the signature), this fields a
+# signing fleet ahead of the AuthType: AWS_IAM flip so the cutover doesn't break
+# registration for in-flight instances. Old non-signing instances age out under
+# their TTLs ("everything dies"), so by the time the flip lands the fleet signs.
+Environment=SPORE_DNS_SIGV4=1
 ExecStart=/usr/local/bin/spored
 # on-failure (not always) prevents restart attempts during graceful shutdown
 Restart=on-failure
