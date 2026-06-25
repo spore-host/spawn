@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`spawn app launch` now reports *why* a DCV session didn't come up** instead of
+  one opaque `(timed out — DCV login screen will appear)` for every failure
+  (spawn#282). spored classifies the handshake into named states written to
+  `spawn:ready-status` — `dcv-not-installed`, `dcvserver-not-running`,
+  `session-never-created`, `tag-write-denied`, `ready` — and no longer writes a
+  ready URL for a session that never appeared. The CLI surfaces the specific cause
+  with a remediation hint (e.g. "this AMI has no NICE DCV server", "the DCV server
+  failed to start — inspect with spawn connect …"). Pure observability; the
+  streaming path is unchanged when it succeeds.
+
 ### Removed
 - **Deleted the legacy instance-identity-document auth path from the DNS updater**
   (#173 step 4, the cutover is complete). The `spawn-dns-updater` Function URL now

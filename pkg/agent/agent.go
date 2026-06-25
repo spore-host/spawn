@@ -755,14 +755,27 @@ func (a *Agent) setupDCVAuth(ctx context.Context) {
 	// Start verifier before DCV is ready (no race possible — DCV connects after boot)
 	a.startDCVAuthVerifier(ctx)
 
-	// Wait for DCV to create the session (up to 3 minutes)
-	log.Printf("DCV: waiting for session %q...", sessionID)
+	// Wait for DCV to create the session (up to 3 minutes), classifying the
+	// outcome explicitly (spawn#282). The old loop discarded the dcv error and
+	// fell through to write a ready-url even when the session never existed, so
+	// every failure looked identical to the CLI. Now we record a NAMED reason.
+	dcvInstalled := dcvOnPath()
+	log.Printf("DCV: waiting for session %q (dcv installed=%v)...", sessionID, dcvInstalled)
+	var status dcvStatus
 	for i := 0; i < 36; i++ {
-		out, _ := exec.Command("dcv", "list-sessions").Output()
-		if strings.Contains(string(out), sessionID) {
+		out, listErr := exec.Command("dcv", "list-sessions").Output()
+		status = classifyDCVStatus(dcvInstalled, listErr, string(out), sessionID, i == 35)
+		if status == dcvReady || status.terminal() {
 			break
 		}
 		time.Sleep(5 * time.Second)
+	}
+	if status != dcvReady {
+		// Don't write a ready-url/token for a session that isn't there — record
+		// only the reason so the CLI can report which layer failed.
+		log.Printf("DCV: session %q not ready: %s", sessionID, status)
+		a.writeReadyTags(ctx, map[string]string{"spawn:ready-status": string(status)})
+		return
 	}
 
 	// Generate a random 32-hex-char single-use token
@@ -784,45 +797,25 @@ func (a *Agent) setupDCVAuth(ctx context.Context) {
 		host = dns.GetFullDNSName(a.config.DNSName, a.identity.AccountID, a.dnsDomain)
 	}
 	// DCV: authToken in query string, sessionId in URL hash
-	readyURL := fmt.Sprintf("https://%s:8443/?authToken=%s#%s", host, token, sessionID)
+	readyURL := buildReadyURL(host, token, sessionID)
 
-	// Read app name from spawn:app-name EC2 tag
-	appName := a.readInstanceTag(ctx, "spawn:app-name")
-	status := "ready"
-	if appName != "" {
-		status = appName + " ready"
-	}
+	// spawn:ready-status carries the machine-readable enum ("ready"); the friendly
+	// app label lives in spawn:app-name, which the CLI reads for display. Keeping
+	// ready-status a fixed vocabulary lets the CLI branch on it deterministically.
 	a.writeReadyTags(ctx, map[string]string{
 		"spawn:ready-url":    readyURL,
 		"spawn:ready-token":  token,
-		"spawn:ready-status": status,
+		"spawn:ready-status": string(dcvReady),
 	})
 	log.Printf("DCV: spawn:ready-url written (session %s, host %s)", sessionID, host)
 }
 
-// readInstanceTag returns the value of a single EC2 tag on this instance, or "".
-func (a *Agent) readInstanceTag(ctx context.Context, key string) string {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.identity.Region))
-	if err != nil {
-		return ""
-	}
-	client := ec2.NewFromConfig(cfg)
-	out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-		InstanceIds: []string{a.identity.InstanceID},
-	})
-	if err != nil || len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
-		return ""
-	}
-	for _, t := range out.Reservations[0].Instances[0].Tags {
-		if t.Key != nil && *t.Key == key && t.Value != nil {
-			return *t.Value
-		}
-	}
-	return ""
-}
-
-// writeReadyTags writes spawn:ready-* tags to the instance, once.
-// Follows the same pattern as writeSessionCountTag.
+// writeReadyTags writes spawn:ready-* tags to the instance. The run-once guard
+// (dcvReadyURLWritten) is set ONLY on a successful ready write — a status-only
+// failure write (e.g. dcv-waiting → session-never-created) must not latch the
+// guard, so Phase 2's monitor-loop retry can still write the real ready-url once
+// DCV comes up. A CreateTags AccessDenied is surfaced as tag-write-denied so the
+// CLI can name the cause (spawn#282). Follows the writeSessionCountTag pattern.
 func (a *Agent) writeReadyTags(ctx context.Context, tags map[string]string) {
 	if a.dcvReadyURLWritten {
 		return
@@ -844,9 +837,34 @@ func (a *Agent) writeReadyTags(ctx context.Context, tags map[string]string) {
 	})
 	if err != nil {
 		log.Printf("DCV: failed to write ready tags: %v", err)
+		// Best-effort: record the IAM denial as the status so the CLI can say
+		// "spored couldn't write its tag" rather than a generic timeout. Use a
+		// minimal second CreateTags for just the status (it may also fail — then
+		// nothing more we can do, and the CLI's generic timeout is the fallback).
+		if isAccessDenied(err) {
+			_, _ = client.CreateTags(ctx, &ec2.CreateTagsInput{
+				Resources: []string{a.identity.InstanceID},
+				Tags:      []ec2types.Tag{{Key: aws.String("spawn:ready-status"), Value: aws.String(string(dcvTagWriteDenied))}},
+			})
+		}
 		return
 	}
-	a.dcvReadyURLWritten = true
+	// Only latch the guard once the real ready-url is written — not for a
+	// status-only failure record (which Phase 2 retry should be able to supersede).
+	if _, ok := tags["spawn:ready-url"]; ok {
+		a.dcvReadyURLWritten = true
+	}
+}
+
+// isAccessDenied reports whether an AWS SDK error is an authorization failure
+// (UnauthorizedOperation / AccessDenied), so a missing ec2:CreateTags grant is
+// reported as tag-write-denied rather than a silent timeout.
+func isAccessDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "UnauthorizedOperation") || strings.Contains(s, "AccessDenied")
 }
 
 // x11ActivityFile is written by kiosk-wm on every key/mouse event.
@@ -1027,18 +1045,26 @@ func (a *Agent) getGPUUtilization() float64 {
 // getDCVConnectionCount returns the number of clients connected to the DCV session,
 // or -1 if the DCV server is not yet ready (treated as a startup grace period).
 // Uses `dcv describe-session --json` — same approach as getGPUUtilization uses nvidia-smi.
+// dcvOnPath reports whether the `dcv` binary is installed (on PATH). Used to
+// distinguish "this AMI has no DCV server" from "dcvserver isn't up yet" (#282).
+func dcvOnPath() bool {
+	_, err := exec.LookPath("dcv")
+	return err == nil
+}
+
+// getDCVConnectionCount returns the DCV session's connected-client count, or -1
+// when DCV isn't ready (binary missing, server down, or unparseable output) — the
+// caller's "unknown" signal. The parsing is in parseDCVConnections (pure/tested).
 func (a *Agent) getDCVConnectionCount() int {
 	out, err := exec.Command("dcv", "describe-session", a.config.DCVSessionID, "--json").Output()
 	if err != nil {
 		return -1 // DCV not ready or session not found
 	}
-	var result struct {
-		NumConnections int `json:"num-of-connections"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
+	n, err := parseDCVConnections(out)
+	if err != nil {
 		return -1
 	}
-	return result.NumConnections
+	return n
 }
 
 func (a *Agent) hasLoggedInUsers() bool {
