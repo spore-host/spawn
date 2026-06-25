@@ -313,6 +313,39 @@ func TestDCVIdleSource_ServerNotReady(t *testing.T) {
 	}
 }
 
+func TestDCVIdleSource_GraceBounded(t *testing.T) {
+	// dcv never ready (exits non-zero → count -1). Within grace → not idle;
+	// past dcvGraceTimeout → falls through to the standard checks (spawn#282), so
+	// the verdict matches a non-DCV control with the same config (rather than the
+	// old unbounded grace, which returned not-idle forever and billed until TTL).
+	// Asserted via the pure dcvIdleDecision (deterministic) + the control-equality
+	// check below, so it doesn't depend on the test machine's live CPU.
+	writeFakeDCV(t, "console", "", 1)
+
+	// Within grace: not idle, no fall-through.
+	if idle, ft := dcvIdleDecision(false, 0, -1, 2*time.Minute, dcvGraceTimeout, 5*time.Minute); idle || ft {
+		t.Errorf("within grace: got (idle=%v, fallthrough=%v), want (false,false)", idle, ft)
+	}
+	// Past grace: fall through (let standard checks decide).
+	if _, ft := dcvIdleDecision(false, 0, -1, dcvGraceTimeout+time.Minute, dcvGraceTimeout, 5*time.Minute); !ft {
+		t.Error("past grace: want fallthrough=true (standard idle checks decide)")
+	}
+
+	// Integration: past grace, a DCV agent's verdict equals a non-DCV control's
+	// (proves it fell through to the same standard path, whatever the machine's CPU).
+	cfg := func() *provider.Config {
+		return &provider.Config{IdleTimeout: 5 * time.Minute, IdleCPUPercent: 100.0}
+	}
+	dcvAgent := newTestAgent(t, cfg())
+	dcvAgent.config.DCVSessionID = "console"
+	dcvAgent.startTime = time.Now().Add(-(dcvGraceTimeout + time.Minute))
+	control := newTestAgent(t, cfg()) // no DCVSessionID → standard path
+	if dcvAgent.IsIdle() != control.IsIdle() {
+		t.Errorf("past-grace DCV verdict (%v) != non-DCV control (%v) — did not fall through cleanly",
+			dcvAgent.IsIdle(), control.IsIdle())
+	}
+}
+
 func TestDCVIdleSource_ZeroClients(t *testing.T) {
 	// dcv returns 0 connections → isIdle returns true (idle, skip CPU/network checks).
 	writeFakeDCV(t, "console", `{"num-of-connections":0}`, 0)

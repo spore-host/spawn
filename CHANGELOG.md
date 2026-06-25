@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The DCV readiness handshake now retries and can't bill forever** (spawn#282).
+  Three reliability fixes for app streaming: (1) the handshake (session-wait →
+  token → `spawn:ready-url`) is now driven from spored's monitor loop instead of a
+  one-shot startup goroutine, so a transient failure (slow `dcvserver`, a momentary
+  `ec2:CreateTags` throttle) recovers on the next tick — and the CLI-vs-spored
+  timer race disappears (spored keeps retrying within the CLI's poll window).
+  (2) Idle detection for a DCV instance whose server *never* becomes ready now
+  falls back to the standard CPU/network idle checks after a bounded grace, so it
+  idle-stops instead of billing until TTL (the old unbounded grace was a silent
+  cost leak). (3) Added the missing UDP 8443 (QUIC) ingress rule to the `spawn-dcv`
+  security group (added idempotently to pre-existing groups too) so DCV uses its
+  low-latency transport instead of silently falling back to TCP.
+- **Reconciled the DCV/app-launch spored IAM role** with the standard spored role
+  (spawn#282): it previously granted `ec2:CreateTags` on `*` **unconditioned** (the
+  #174 tag-then-terminate class) and lacked the FSx-mount (#221) and
+  `lambda:InvokeFunctionUrl` (#173 DNS-sign) grants — so a DCV instance couldn't
+  mount ephemeral FSx and, after the #173 `AuthType: AWS_IAM` cutover, couldn't
+  register DNS. `CreateTags`/`DeleteTags` are now scoped to `spawn:managed=true`
+  and both missing grants are included (re-applied on the next `spawn app launch`).
+
 ### Changed
 - **`spawn app launch` now reports *why* a DCV session didn't come up** instead of
   one opaque `(timed out — DCV login screen will appear)` for every failure
