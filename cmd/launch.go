@@ -176,11 +176,13 @@ var (
 	iamRoleTags        []string
 
 	// Mode
-	interactive     bool
-	quiet           bool
-	waitForRunning  bool
-	waitForSSH      bool
-	skipRegionCheck bool
+	interactive      bool
+	quiet            bool
+	waitForRunning   bool
+	waitForSSH       bool
+	skipRegionCheck  bool
+	requireSpored    bool
+	terminateOnError bool
 
 	// Workflow integration
 	outputIDFile string
@@ -355,6 +357,8 @@ func init() {
 	launchCmd.Flags().BoolVar(&waitForRunning, "wait-for-running", true, "Wait until running")
 	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", true, "Wait until SSH is ready")
 	launchCmd.Flags().BoolVar(&skipRegionCheck, "skip-region-check", false, "Skip data locality region mismatch warnings")
+	launchCmd.Flags().BoolVar(&requireSpored, "require-spored", true, "Verify the spored lifecycle agent came up after launch; fail if it didn't (a spored-less instance has no TTL/idle safety net). Disable with --require-spored=false")
+	launchCmd.Flags().BoolVar(&terminateOnError, "terminate-on-error", false, "If post-launch verification fails (e.g. spored didn't come up), terminate the instance instead of leaving it running")
 
 	// Compliance
 	launchCmd.Flags().Bool("nist-800-171", false, "Enable NIST 800-171 Rev 3 compliance mode")
@@ -1857,6 +1861,31 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			waitForSSHReady(ctx, result.PublicIP, 2*time.Minute)
 		}
 		prog.Complete("Waiting for SSH")
+	}
+
+	// Step 10b: Verify spored actually came up (#50). The bootstrap installs
+	// spored asynchronously via cloud-init, so a failed install (bad download,
+	// checksum mismatch, arch/network) is invisible to `spawn launch` — leaving a
+	// "running" instance with NO lifecycle agent: no TTL enforcement, no idle stop,
+	// no completion handling. That's a cost-control hole (a TTL-less zombie). When
+	// we waited for readiness (--wait-for-ssh) and --require-spored is set, confirm
+	// spored is up over SSM (works keyed or keyless) and fail loudly if not.
+	if waitForSSH && requireSpored && plat.OS != "windows" {
+		prog.Start("Verifying spored agent")
+		if err := verifySporedReady(ctx, awsClient, config.Region, result.InstanceID, 3*time.Minute); err != nil {
+			prog.Error("Verifying spored agent", err)
+			if terminateOnError {
+				fmt.Fprintf(os.Stderr, "\n⚠️  spored did not come up; terminating %s (--terminate-on-error)\n", result.InstanceID)
+				if terr := awsClient.Terminate(ctx, config.Region, result.InstanceID); terr != nil {
+					fmt.Fprintf(os.Stderr, "   terminate failed — DELETE IT MANUALLY (spawn terminate %s): %v\n", result.InstanceID, terr)
+				}
+				return fmt.Errorf("instance %s launched but spored never came up (terminated): %w", result.InstanceID, err)
+			}
+			return fmt.Errorf("instance %s launched but spored never came up — it has NO TTL/idle safety net; "+
+				"inspect it (spawn connect %s) or terminate it (spawn terminate %s). Re-run with --terminate-on-error to auto-terminate, or --require-spored=false to skip this check: %w",
+				result.InstanceID, result.InstanceID, result.InstanceID, err)
+		}
+		prog.Complete("Verifying spored agent")
 	}
 
 	// Step 11: Register DNS (if requested).
@@ -4158,6 +4187,40 @@ func waitForSSHReady(ctx context.Context, host string, timeout time.Duration) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// verifySporedReady polls `spored status` over SSM until the agent responds or
+// the deadline passes (#50). spored is installed asynchronously by cloud-init, so
+// this is the launch-time confirmation that it actually came up — a non-nil
+// return means it never did within the window (failed install, etc.), which the
+// caller treats as a launch failure (a spored-less instance has no TTL safety
+// net). Uses SSM RunShellScript so it works for both keyed and keyless instances;
+// an SSM error early on (agent still registering) is retried, not fatal.
+func verifySporedReady(ctx context.Context, client *aws.Client, region, instanceID string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		// `spored status` exits 0 when the daemon is up and answering. Run it over
+		// SSM (the agent runs as root, so no sudo needed).
+		res, err := client.RunShellScript(ctx, region, instanceID, "/usr/local/bin/spored status", 30*time.Second)
+		if err == nil && res.Status == "Success" {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("spored status: %s: %s", res.Status, strings.TrimSpace(res.Stderr))
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("spored did not become ready within %s: %w", timeout, lastErr)
 		case <-ticker.C:
 		}
 	}
