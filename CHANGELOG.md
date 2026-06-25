@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.68.0] - 2026-06-25
+
 ### Added
 - **`spawn launch` verifies the spored agent came up, and fails if it didn't**
   (#50). spored installs asynchronously via cloud-init, so a failed install (bad
@@ -803,7 +805,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.67.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.68.0...HEAD
+[0.68.0]: https://github.com/spore-host/spawn/compare/v0.67.0...v0.68.0
 [0.67.0]: https://github.com/spore-host/spawn/compare/v0.66.0...v0.67.0
 [0.66.0]: https://github.com/spore-host/spawn/compare/v0.65.0...v0.66.0
 [0.65.0]: https://github.com/spore-host/spawn/compare/v0.64.1...v0.65.0
