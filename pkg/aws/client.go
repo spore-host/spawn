@@ -1575,76 +1575,11 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 		}
 	}
 
-	// 2. Attach inline policy to role
-	policy := `{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ec2:DescribeTags",
-        "ec2:DescribeInstances",
-        "ec2:DescribeVolumes",
-        "ec2:CreateTags"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ec2:TerminateInstances",
-        "ec2:StopInstances"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "ec2:ResourceTag/spawn:managed": "true"
-        }
-      }
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["s3:GetObject"],
-      "Resource": "arn:aws:s3:::spawn-certs-*/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["s3:GetObject"],
-      "Resource": "arn:aws:s3:::dcv-license.*/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:GetObjectVersion",
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": [
-        "arn:aws:s3:::spawn-schedules-*",
-        "arn:aws:s3:::spawn-schedules-*/*"
-      ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:GetObjectVersion",
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": [
-        "arn:aws:s3:::spawn-binaries-*",
-        "arn:aws:s3:::spawn-binaries-*/*"
-      ]
-    }
-  ]
-}`
-
+	// 2. Attach inline policy to role (sporedDCVRolePolicy, defined below).
 	_, err = iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 		RoleName:       aws.String(roleName),
 		PolicyName:     aws.String(policyName),
-		PolicyDocument: aws.String(policy),
+		PolicyDocument: aws.String(sporedDCVRolePolicy),
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to attach policy to role: %w", err)
@@ -1701,6 +1636,104 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 
 	return instanceProfileName, nil
 }
+
+// sporedDCVRolePolicy is the inline policy for the DCV/app-launch spored role
+// (spawn app launch). Kept in sync with buildInlinePolicy (the standard spored
+// role in iam.go): the same self-management grants PLUS the DCV-only S3 reads
+// (dcv-license, spawn-certs). spawn#282 reconciled the two — this role previously
+// granted ec2:CreateTags on "*" UNCONDITIONED (the #174 tag-then-terminate class)
+// and lacked the FSx-mount (#221) and lambda:InvokeFunctionUrl (#173 DNS-sign)
+// grants, so a DCV instance couldn't mount ephemeral FSx and, after the #173
+// AuthType:AWS_IAM cutover, couldn't register DNS. Both are now included;
+// CreateTags is scoped to spawn:managed=true (DCV instances always carry that tag
+// at launch, via buildTags).
+const sporedDCVRolePolicy = `{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeTags",
+        "ec2:DescribeInstances",
+        "ec2:DescribeVolumes"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["ec2:CreateTags", "ec2:DeleteTags"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:TerminateInstances",
+        "ec2:StopInstances"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "fsx:DescribeFileSystems",
+        "fsx:CreateDataRepositoryAssociation",
+        "fsx:DescribeDataRepositoryAssociations"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["lambda:InvokeFunctionUrl"],
+      "Resource": "arn:aws:lambda:*:966362334030:function:spawn-dns-updater"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": "arn:aws:s3:::spawn-certs-*/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": "arn:aws:s3:::dcv-license.*/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::spawn-schedules-*",
+        "arn:aws:s3:::spawn-schedules-*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::spawn-binaries-*",
+        "arn:aws:s3:::spawn-binaries-*/*"
+      ]
+    }
+  ]
+}`
 
 // waitForInstanceProfile polls until the instance profile is retrievable (IAM
 // is eventually consistent after creation), or a bounded deadline passes. It
@@ -2088,8 +2121,24 @@ func (c *Client) GetDefaultVPC(ctx context.Context, region string) (string, erro
 	return *result.Vpcs[0].VpcId, nil
 }
 
+// sgHasUDP8443 reports whether a security group already has an ingress rule
+// covering UDP port 8443 (NICE DCV QUIC), so the ensure-rule path is idempotent.
+func sgHasUDP8443(sg types.SecurityGroup) bool {
+	for _, p := range sg.IpPermissions {
+		if aws.ToString(p.IpProtocol) != "udp" {
+			continue
+		}
+		from, to := aws.ToInt32(p.FromPort), aws.ToInt32(p.ToPort)
+		if from <= 8443 && 8443 <= to {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateOrGetDCVSecurityGroup creates or retrieves a security group named "spawn-dcv"
-// that allows inbound TCP 8443 (NICE DCV) from anywhere. Returns the security group ID.
+// that allows inbound TCP+UDP 8443 (NICE DCV, incl. QUIC) from anywhere. Returns
+// the security group ID.
 func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID string) (string, error) {
 	cfg := c.cfg.Copy()
 	cfg.Region = region
@@ -2108,13 +2157,32 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 		return "", fmt.Errorf("describe security groups: %w", err)
 	}
 	if len(describeResult.SecurityGroups) > 0 {
-		return *describeResult.SecurityGroups[0].GroupId, nil
+		sg := describeResult.SecurityGroups[0]
+		sgID := *sg.GroupId
+		// Ensure the UDP 8443 (QUIC) rule exists on a pre-existing spawn-dcv SG
+		// created before #282 added it. Idempotent: only authorize if absent.
+		if !sgHasUDP8443(sg) {
+			_, aerr := ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+				GroupId: aws.String(sgID),
+				IpPermissions: []types.IpPermission{{
+					IpProtocol: aws.String("udp"),
+					FromPort:   aws.Int32(8443),
+					ToPort:     aws.Int32(8443),
+					IpRanges:   []types.IpRange{{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("NICE DCV QUIC (IPv4)")}},
+					Ipv6Ranges: []types.Ipv6Range{{CidrIpv6: aws.String("::/0"), Description: aws.String("NICE DCV QUIC (IPv6)")}},
+				}},
+			})
+			if aerr != nil && !contains(aerr.Error(), "InvalidPermission.Duplicate") {
+				log.Printf("DCV SG %s: could not add UDP 8443 (QUIC) rule: %v — TCP transport still works", sgID, aerr)
+			}
+		}
+		return sgID, nil
 	}
 
 	// Create it
 	createResult, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
 		GroupName:   aws.String(sgName),
-		Description: aws.String("spawn-managed: NICE DCV application streaming (TCP 8443)"),
+		Description: aws.String("spawn-managed: NICE DCV application streaming (TCP+UDP 8443)"),
 		VpcId:       aws.String(vpcID),
 		TagSpecifications: []types.TagSpecification{
 			{
@@ -2131,7 +2199,9 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 	}
 	sgID := *createResult.GroupId
 
-	// Authorize DCV port
+	// Authorize DCV ports. TCP 8443 is the HTTPS/WebSocket transport; UDP 8443 is
+	// DCV's QUIC datagram transport for lower-latency streaming (#282) — without
+	// it DCV silently falls back to TCP and feels laggy on high-RTT links.
 	_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 		GroupId: aws.String(sgID),
 		IpPermissions: []types.IpPermission{
@@ -2144,6 +2214,17 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 				},
 				Ipv6Ranges: []types.Ipv6Range{
 					{CidrIpv6: aws.String("::/0"), Description: aws.String("NICE DCV (IPv6)")},
+				},
+			},
+			{
+				IpProtocol: aws.String("udp"),
+				FromPort:   aws.Int32(8443),
+				ToPort:     aws.Int32(8443),
+				IpRanges: []types.IpRange{
+					{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("NICE DCV QUIC (IPv4)")},
+				},
+				Ipv6Ranges: []types.Ipv6Range{
+					{CidrIpv6: aws.String("::/0"), Description: aws.String("NICE DCV QUIC (IPv6)")},
 				},
 			},
 			// Also allow SSH so users can debug if needed

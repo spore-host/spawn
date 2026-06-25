@@ -66,6 +66,14 @@ type Agent struct {
 	dcvReadyURLWritten bool
 	ttlWarned          bool // send ttl_warning notification only once
 
+	// DCV handshake retry state (spawn#282 phase 2). The verifier starts once at
+	// boot (must listen before DCV connects); the session-wait + token + tag write
+	// are driven from the monitor loop (maybeSetupDCVAuth) so a transient failure
+	// (slow dcvserver, a momentary ec2:CreateTags throttle) recovers instead of
+	// being permanent — the same fix shape as the FSx run-once-but-retry guard.
+	dcvVerifierStarted bool // the :8444 verifier is up (start once)
+	dcvAuthDone        bool // ready-url written OR a terminal failure recorded (stop retrying)
+
 	// fsxMountStarted guards the async FSx mount (#194/#221) to run at most once.
 	// The mount is (re)triggered from the monitor loop whenever spawn:fsx-pending
 	// becomes visible — it may not be set at spored startup, because the headless
@@ -158,13 +166,12 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 		}()
 	}
 
-	// Log DCV idle detection if this is an application streaming instance.
+	// Log DCV idle detection if this is an application streaming instance. The DCV
+	// handshake (verifier + session-wait + token + ready-url tag) is driven from
+	// the monitor loop via maybeSetupDCVAuth, not once here — so a transient
+	// failure recovers (spawn#282 phase 2), mirroring the FSx retry discipline.
 	if config.DCVSessionID != "" {
 		log.Printf("DCV idle detection enabled for session %s", config.DCVSessionID)
-		// Start auth token verifier and wait for DCV to be ready, then write spawn:ready-url.
-		if identity.Provider == "ec2" {
-			go agent.setupDCVAuth(context.Background())
-		}
 	}
 
 	// Initialize lifecycle notifier (Slack notifications via spore-bot Lambda)
@@ -359,6 +366,12 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// most once, in its own goroutine (the poll-until-AVAILABLE can block minutes
 	// and must never gate this ticker, #65).
 	a.maybeMountPendingFSx(ctx)
+
+	// 0a1. Drive the DCV readiness handshake (verifier already up; this does one
+	// session-check + token + ready-url tag write per tick until it succeeds or
+	// hits a terminal failure). Loop-driven so a transient failure recovers
+	// (spawn#282 phase 2). No-op on non-DCV instances.
+	a.maybeSetupDCVAuth(ctx)
 
 	// 0a. Keep spawn:logged-in-count tag current (throttled to 5/min).
 	a.writeSessionCountTag(ctx, countActiveSessions()+countActivePortConnections(a.config.ActivePorts))
@@ -746,68 +759,89 @@ func s3GetFile(ctx context.Context, client *s3.Client, bucket, key, destPath str
 	return os.WriteFile(destPath, data, mode)
 }
 
-// setupDCVAuth starts the token verifier, waits for the DCV session to be ready,
-// generates a one-time token, and writes spawn:ready-url to the instance tags.
-// Runs as a goroutine in NewAgent() when spawn:dcv-session-id is set.
-func (a *Agent) setupDCVAuth(ctx context.Context) {
+// dcvSessionWaitTimeout bounds how long spored waits for the DCV session to
+// appear before recording session-never-created. Measured from spored start;
+// longer than the CLI's 5-min poll so a slow-but-eventual session still wins.
+const dcvSessionWaitTimeout = 4 * time.Minute
+
+// dcvGraceTimeout bounds the idle-detection startup grace for a DCV instance
+// whose DCV server never becomes ready (spawn#282). Within the grace we assume
+// not-idle (DCV is still coming up); past it, isIdle falls through to the
+// standard CPU/network checks so a permanently-unhealthy DCV instance still idle-
+// stops instead of billing until TTL. Comfortably exceeds dcvSessionWaitTimeout.
+const dcvGraceTimeout = 8 * time.Minute
+
+// maybeSetupDCVAuth drives the DCV readiness handshake from the monitor loop
+// (spawn#282 phase 2): it starts the :8444 token verifier once, then on each tick
+// does ONE session check and, when the session is present, issues the token and
+// writes spawn:ready-url/ready-token/ready-status. Loop-driven (not a one-shot
+// goroutine) so a transient failure — slow dcvserver, a momentary
+// ec2:CreateTags throttle — recovers on the next tick instead of being permanent
+// (the old fire-once bug). This also collapses the CLI-vs-spored timer race:
+// spored keeps retrying within the CLI's poll window.
+//
+// Stops (sets dcvAuthDone) once a ready-url is written OR a terminal failure is
+// recorded. No-op on non-DCV instances and on non-EC2 providers.
+func (a *Agent) maybeSetupDCVAuth(ctx context.Context) {
+	if a.config.DCVSessionID == "" || a.identity.Provider != "ec2" || a.dcvAuthDone {
+		return
+	}
 	sessionID := a.config.DCVSessionID
 
-	// Start verifier before DCV is ready (no race possible — DCV connects after boot)
-	a.startDCVAuthVerifier(ctx)
-
-	// Wait for DCV to create the session (up to 3 minutes), classifying the
-	// outcome explicitly (spawn#282). The old loop discarded the dcv error and
-	// fell through to write a ready-url even when the session never existed, so
-	// every failure looked identical to the CLI. Now we record a NAMED reason.
-	dcvInstalled := dcvOnPath()
-	log.Printf("DCV: waiting for session %q (dcv installed=%v)...", sessionID, dcvInstalled)
-	var status dcvStatus
-	for i := 0; i < 36; i++ {
-		out, listErr := exec.Command("dcv", "list-sessions").Output()
-		status = classifyDCVStatus(dcvInstalled, listErr, string(out), sessionID, i == 35)
-		if status == dcvReady || status.terminal() {
-			break
-		}
-		time.Sleep(5 * time.Second)
+	// Verifier must be listening before DCV connects; start it once.
+	if !a.dcvVerifierStarted {
+		a.startDCVAuthVerifier(ctx)
+		a.dcvVerifierStarted = true
 	}
+
+	// One session check this tick. "exhausted" (→ terminal session-never-created)
+	// is a wall-clock deadline from spored start, since each call is one poll.
+	dcvInstalled := dcvOnPath()
+	out, listErr := exec.Command("dcv", "list-sessions").Output()
+	exhausted := time.Since(a.startTime) > dcvSessionWaitTimeout
+	status := classifyDCVStatus(dcvInstalled, listErr, string(out), sessionID, exhausted)
+
 	if status != dcvReady {
-		// Don't write a ready-url/token for a session that isn't there — record
-		// only the reason so the CLI can report which layer failed.
-		log.Printf("DCV: session %q not ready: %s", sessionID, status)
-		a.writeReadyTags(ctx, map[string]string{"spawn:ready-status": string(status)})
+		if status.terminal() {
+			// Record the named reason (no fake ready-url) and stop retrying.
+			log.Printf("DCV: session %q not ready: %s (giving up)", sessionID, status)
+			a.writeReadyTags(ctx, map[string]string{"spawn:ready-status": string(status)})
+			a.dcvAuthDone = true
+		}
+		// dcvWaiting: leave dcvAuthDone false → retry next tick.
 		return
 	}
 
-	// Generate a random 32-hex-char single-use token
+	// Session is present — issue the one-time token.
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		log.Printf("DCV: failed to generate token: %v", err)
-		return
+		return // retry next tick
 	}
 	token := hex.EncodeToString(b)
-
-	// Register it
 	a.dcvTokensMu.Lock()
 	a.dcvTokens[token] = "ec2-user"
 	a.dcvTokensMu.Unlock()
 
-	// Build the ready URL — use DNS FQDN when available, else public IP
+	// Ready URL — DNS FQDN when available, else public IP.
 	host := a.identity.PublicIP
 	if a.config.DNSName != "" && a.dnsDomain != "" {
 		host = dns.GetFullDNSName(a.config.DNSName, a.identity.AccountID, a.dnsDomain)
 	}
-	// DCV: authToken in query string, sessionId in URL hash
 	readyURL := buildReadyURL(host, token, sessionID)
 
 	// spawn:ready-status carries the machine-readable enum ("ready"); the friendly
-	// app label lives in spawn:app-name, which the CLI reads for display. Keeping
-	// ready-status a fixed vocabulary lets the CLI branch on it deterministically.
+	// app label lives in spawn:app-name, which the CLI reads for display.
 	a.writeReadyTags(ctx, map[string]string{
 		"spawn:ready-url":    readyURL,
 		"spawn:ready-token":  token,
 		"spawn:ready-status": string(dcvReady),
 	})
-	log.Printf("DCV: spawn:ready-url written (session %s, host %s)", sessionID, host)
+	if a.dcvReadyURLWritten {
+		log.Printf("DCV: spawn:ready-url written (session %s, host %s)", sessionID, host)
+		a.dcvAuthDone = true
+	}
+	// If the tag write failed (writeReadyTags didn't latch), retry next tick.
 }
 
 // writeReadyTags writes spawn:ready-* tags to the instance. The run-once guard
@@ -876,30 +910,36 @@ func (a *Agent) isIdle() bool {
 	// key/mouse events) as the authoritative idle signal. Falls back to DCV
 	// connection count if the file doesn't exist (pre-kiosk-wm instances).
 	if a.config.DCVSessionID != "" {
-		// Check X11 activity file first (most accurate — actual input events)
-		if info, err := os.Stat(x11ActivityFile); err == nil {
-			idleTime := time.Since(info.ModTime())
-			if idleTime < a.config.IdleTimeout {
-				log.Printf("Not idle: X11 activity %v ago (threshold %v)",
-					idleTime.Round(time.Second), a.config.IdleTimeout)
-				return false
+		// Decide via the pure dcvIdleDecision (spawn#282): X11 activity file is the
+		// accurate signal when DCV is up; else the connection count; else (DCV not
+		// ready) a BOUNDED startup grace — past which we fall through to the
+		// standard CPU/network checks rather than returning not-idle forever (the
+		// old unbounded grace billed until TTL if DCV never came up).
+		info, statErr := os.Stat(x11ActivityFile)
+		fileExists := statErr == nil
+		var activityAge time.Duration
+		if fileExists {
+			activityAge = time.Since(info.ModTime())
+		}
+		connCount := -1
+		if !fileExists {
+			connCount = a.getDCVConnectionCount()
+		}
+		idle, fallThrough := dcvIdleDecision(fileExists, activityAge, connCount,
+			time.Since(a.startTime), dcvGraceTimeout, a.config.IdleTimeout)
+		if !fallThrough {
+			if idle {
+				log.Printf("DCV session %s: idle (file=%v age=%v conns=%d)",
+					a.config.DCVSessionID, fileExists, activityAge.Round(time.Second), connCount)
+			} else {
+				log.Printf("Not idle: DCV session %s (file=%v age=%v conns=%d)",
+					a.config.DCVSessionID, fileExists, activityAge.Round(time.Second), connCount)
 			}
-			log.Printf("DCV/X11 idle: no activity for %v", idleTime.Round(time.Second))
-			return true
+			return idle
 		}
-		// Fallback: use DCV connection count when activity file not present
-		count := a.getDCVConnectionCount()
-		if count < 0 {
-			log.Printf("Not idle: DCV server not yet ready (session %s)", a.config.DCVSessionID)
-			return false
-		}
-		if count > 0 {
-			log.Printf("Not idle: DCV session %s has %d connected client(s)",
-				a.config.DCVSessionID, count)
-			return false
-		}
-		log.Printf("DCV session %s: no connected clients — idle", a.config.DCVSessionID)
-		return true
+		log.Printf("DCV session %s never became ready within %v — falling back to standard idle checks",
+			a.config.DCVSessionID, dcvGraceTimeout)
+		// fall through to the standard checks below
 	}
 
 	// Active SSH/terminal sessions reset the idle timer.
