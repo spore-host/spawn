@@ -167,6 +167,45 @@ func TestBuildLinuxBootstrap_NoStorageScriptWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestBuildLinuxBootstrap_CommandEmbedded is the #214/#246 guard: a --command is
+// embedded in user-data (written to /etc/spawn/command) so it bypasses the
+// 256-char spawn:command tag cap. A long command (impossible via a tag) must
+// round-trip into the script verbatim, and the body must prefer the embedded
+// file over the tag.
+func TestBuildLinuxBootstrap_CommandEmbedded(t *testing.T) {
+	longCmd := "aws s3 cp s3://b/run.sh /tmp/run.sh && " + strings.Repeat("X", 400) + " bash /tmp/run.sh"
+	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user", Command: longCmd})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	if !strings.Contains(script, "/etc/spawn/command") {
+		t.Error("command should be embedded to /etc/spawn/command")
+	}
+	if !strings.Contains(script, longCmd) {
+		t.Error("the (long) command text was not embedded verbatim")
+	}
+	// The body must write the embedded file before the command-exec block reads
+	// it: the mkdir/here-doc write precedes the `if [ -s /etc/spawn/command ]` read.
+	idxWrite := strings.Index(script, "cat > /etc/spawn/command")
+	idxRead := strings.Index(script, "if [ -s /etc/spawn/command ]")
+	if idxWrite < 0 || idxRead < 0 || idxWrite > idxRead {
+		t.Errorf("embedded command must be written before it's read (write=%d read=%d)", idxWrite, idxRead)
+	}
+}
+
+// TestBuildLinuxBootstrap_NoCommandNoEmbed: without a Command, no embed file is
+// written — the bootstrap falls back to the spawn:command tag (sweeps / older
+// callers).
+func TestBuildLinuxBootstrap_NoCommandNoEmbed(t *testing.T) {
+	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	if strings.Contains(script, "cat > /etc/spawn/command") {
+		t.Error("no command embed should appear when Command is empty")
+	}
+}
+
 // TestEncodeLinuxUserData_ValidBase64Gzip is the #127 regression guard: the
 // encoded user-data MUST be valid base64 that gunzips back to the original
 // script. The original bug shipped raw text into RunInstances, which substrate

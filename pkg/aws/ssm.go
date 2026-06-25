@@ -22,6 +22,10 @@ type SSMRunResult struct {
 	Status string // SSM command status, e.g. "Success", "Failed"
 	Stdout string
 	Stderr string
+	// ResponseCode is the remote command's exit code (e.g. spored status'
+	// 0/1/2/3 for --check-complete). Meaningful once the invocation reaches a
+	// terminal Status; 0 on a clean success.
+	ResponseCode int32
 }
 
 // RunPowerShell runs a PowerShell command on a Windows instance via SSM
@@ -57,9 +61,10 @@ func (c *Client) RunPowerShell(ctx context.Context, region, instanceID, command 
 			switch status {
 			case "Success", "Failed", "Cancelled", "TimedOut":
 				return &SSMRunResult{
-					Status: status,
-					Stdout: aws.ToString(out.StandardOutputContent),
-					Stderr: aws.ToString(out.StandardErrorContent),
+					Status:       status,
+					Stdout:       aws.ToString(out.StandardOutputContent),
+					Stderr:       aws.ToString(out.StandardErrorContent),
+					ResponseCode: out.ResponseCode,
 				}, nil
 			}
 			// Pending / InProgress / Delayed → keep polling.
@@ -110,9 +115,10 @@ func (c *Client) RunShellScript(ctx context.Context, region, instanceID, command
 			switch status {
 			case "Success", "Failed", "Cancelled", "TimedOut":
 				return &SSMRunResult{
-					Status: status,
-					Stdout: aws.ToString(out.StandardOutputContent),
-					Stderr: aws.ToString(out.StandardErrorContent),
+					Status:       status,
+					Stdout:       aws.ToString(out.StandardOutputContent),
+					Stderr:       aws.ToString(out.StandardErrorContent),
+					ResponseCode: out.ResponseCode,
 				}, nil
 			}
 			// Pending / InProgress / Delayed → keep polling.

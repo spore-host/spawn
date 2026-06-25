@@ -668,7 +668,12 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	if config.ActiveProcessesRaw != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:active-processes"), Value: aws.String(config.ActiveProcessesRaw)})
 	}
-	if config.JobArrayCommand != "" {
+	// The command rides the spawn:command tag only when it fits EC2's 256-char
+	// tag-value cap. A longer --command is delivered via user-data instead (the
+	// bootstrap embeds it and prefers the embedded file over this tag), so we must
+	// NOT write an oversized tag here — that fails RunInstances outright (#214/#246).
+	// Short commands keep the tag for observability + the parameter-sweep path.
+	if config.JobArrayCommand != "" && len(config.JobArrayCommand) <= 256 {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:command"), Value: aws.String(config.JobArrayCommand)})
 	}
 	if config.DCVSessionID != "" {

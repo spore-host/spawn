@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"strings"
 	"testing"
 
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -168,6 +169,27 @@ func TestBuildTags_CommandWritten(t *testing.T) {
 	cmd := findTagValue(tags, "spawn:command")
 	if cmd != "python train.py --lr 0.001" {
 		t.Errorf("spawn:command = %q, want %q", cmd, "python train.py --lr 0.001")
+	}
+}
+
+// TestBuildTags_LongCommandNotTagged is the #214/#246 guard: a command longer
+// than EC2's 256-char tag cap must NOT be written to the spawn:command tag
+// (which would fail RunInstances). It's delivered via embedded user-data instead;
+// the tag is reserved for short commands / the sweep path.
+func TestBuildTags_LongCommandNotTagged(t *testing.T) {
+	long := "aws s3 cp s3://b/run.sh /tmp/run.sh && " + strings.Repeat("X", 300) + " bash /tmp/run.sh"
+	if len(long) <= 256 {
+		t.Fatalf("test command should exceed 256 chars, got %d", len(long))
+	}
+	tags := buildTags(LaunchConfig{Name: "t", JobArrayCommand: long}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	if v := findTagValue(tags, "spawn:command"); v != "" {
+		t.Errorf("oversized command must not be tagged (would fail RunInstances); got %d-char tag", len(v))
+	}
+
+	// A short command is still tagged (observability + sweep path).
+	tags = buildTags(LaunchConfig{Name: "t", JobArrayCommand: "echo hi"}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	if findTagValue(tags, "spawn:command") != "echo hi" {
+		t.Error("short command should still be written to spawn:command")
 	}
 }
 

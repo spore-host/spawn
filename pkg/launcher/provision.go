@@ -102,6 +102,9 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 			PublicKey:      opts.PublicKey,
 			Plugins:        opts.Plugins,
 			CustomUserData: opts.CustomUserData,
+			// Embed the workload command in user-data, not the 256-char-capped
+			// spawn:command tag (#214/#246). The headless path is never a sweep.
+			Command: config.JobArrayCommand,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("provision: build bootstrap: %w", err)

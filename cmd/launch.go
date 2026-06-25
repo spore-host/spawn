@@ -250,7 +250,7 @@ func init() {
 	launchCmd.Flags().StringVar(&ttl, "ttl", "", "Auto-terminate after duration (e.g., 8h, defaults to 1h idle if not set)")
 	launchCmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "Auto-terminate if idle (defaults to 1h if neither --ttl nor --idle-timeout set)")
 	launchCmd.Flags().BoolVar(&noTimeout, "no-timeout", false, "Disable automatic timeout (NOT RECOMMENDED: creates zombie risk)")
-	launchCmd.Flags().BoolVar(&hibernateOnIdle, "hibernate-on-idle", false, "Hibernate instead of terminate when idle")
+	launchCmd.Flags().BoolVar(&hibernateOnIdle, "hibernate-on-idle", false, "Hibernate instead of stop when idle (the default idle action is stop, not terminate)")
 	launchCmd.Flags().StringVar(&preStop, "pre-stop", "", "Shell command to run on the instance before any lifecycle-triggered stop/terminate (e.g., \"aws s3 sync /results s3://bucket/\")")
 	launchCmd.Flags().StringVar(&preStopTimeout, "pre-stop-timeout", "", "Max time to wait for --pre-stop command (default: 5m, spot: 90s)")
 	launchCmd.Flags().StringVar(&spotWebhookURL, "spot-webhook-url", "", "On spot interruption, spored POSTs a fire-once, best-effort notice to this URL within the ~2-min window (off-node consumers; empty = disabled)")
@@ -2673,7 +2673,23 @@ func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScr
 		Plugins:        collectPluginDeclarations(),
 		StorageScript:  storageScript,
 		CustomUserData: customUserData,
+		// Embed --command in user-data instead of the 256-char spawn:command tag
+		// (#214/#246). Sweeps deliver per-instance commands via the tag (a short
+		// step ref), so only embed for a non-sweep launch — SweepID set means the
+		// tag path owns the command.
+		Command: nonSweepCommand(config),
 	})
+}
+
+// nonSweepCommand returns the --command to embed in user-data, or "" when the
+// command should ride the spawn:command tag instead (the parameter-sweep path,
+// which sets a short per-instance command tag). Embedding lifts the 256-char tag
+// cap for the common single-launch case (#214/#246).
+func nonSweepCommand(config *aws.LaunchConfig) string {
+	if config.SweepID != "" {
+		return ""
+	}
+	return config.JobArrayCommand
 }
 
 // collectPluginDeclarations merges plugin refs from --plugin flags and --config file.
