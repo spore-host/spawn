@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn launch` verifies the spored agent came up, and fails if it didn't**
+  (#50). spored installs asynchronously via cloud-init, so a failed install (bad
+  download, checksum/arch mismatch, network) previously left a "running" instance
+  with no lifecycle agent — no TTL enforcement, no idle stop, no completion
+  handling — a silent cost-control hole (a TTL-less zombie). When waiting for
+  readiness (`--wait-for-ssh`, the default), launch now confirms `spored status`
+  responds over SSM and **fails loudly** if it doesn't, pointing you to inspect or
+  terminate the instance. On by default via `--require-spored` (disable with
+  `--require-spored=false`); add `--terminate-on-error` to auto-terminate the
+  agentless instance instead of leaving it for inspection. Linux only.
+
 ### Fixed
 - **`spawn status` works on keyless, SSM-only instances** (#222). A
   lagotto/cohort-launched instance has no SSH key (SSM-only by design), so
