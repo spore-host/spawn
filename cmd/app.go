@@ -266,6 +266,7 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Waiting for DCV session URL")
 		// Boot + user-data + DCV start + spored init takes ~3-4 minutes.
 		// Poll for up to 5 minutes (60 × 5s).
+		var lastStatus string
 		for i := 0; i < 60; i++ {
 			time.Sleep(5 * time.Second)
 			fmt.Fprintf(os.Stderr, ".")
@@ -281,32 +282,31 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 				if dns := inst.Tags["spawn:dns-name"]; dns != "" {
 					dnsName = dns
 				}
-				if readyURL := inst.Tags["spawn:ready-url"]; readyURL != "" {
-					// Extract authToken= query param — stop at & or # or end
-					if idx := strings.Index(readyURL, "authToken="); idx >= 0 {
-						raw := readyURL[idx+10:]
-						if end := strings.IndexAny(raw, "&#"); end >= 0 {
-							raw = raw[:end]
-						}
-						authToken = raw
-					}
-					// Prefer the host embedded in ready-url (may be FQDN, not raw IP)
-					if start := strings.Index(readyURL, "https://"); start >= 0 {
-						rest := readyURL[start+8:]
-						if end := strings.Index(rest, ":8443"); end >= 0 {
-							host = rest[:end]
-						}
-					}
+				url, token, urlHost, status := extractReadyFromTags(inst.Tags)
+				lastStatus = status
+				if token != "" {
+					authToken = token
 				}
+				if urlHost != "" {
+					host = urlHost
+				}
+				_ = url
 				break
 			}
 			if authToken != "" {
 				fmt.Fprintf(os.Stderr, " ready\n")
 				break
 			}
+			// A NAMED terminal failure (spored recorded WHY) — stop polling and
+			// report the specific cause instead of spinning to the generic timeout
+			// (spawn#282). dcv-waiting / empty status keep polling.
+			if dcvStatusTerminal(lastStatus) {
+				fmt.Fprintf(os.Stderr, " failed\n")
+				break
+			}
 		}
 		if authToken == "" {
-			fmt.Fprintf(os.Stderr, " (timed out — DCV login screen will appear)\n")
+			fmt.Fprintf(os.Stderr, "%s\n", dcvFailureMessage(lastStatus, result.InstanceID))
 		}
 	}
 
