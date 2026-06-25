@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
 	"strings"
 	"testing"
 	"unicode"
+
+	"github.com/aws/aws-lambda-go/events"
 )
 
 func TestEncodeAccountID(t *testing.T) {
@@ -169,25 +172,37 @@ func TestErrorResponseStructure(t *testing.T) {
 	}
 }
 
-// TestLegacyAuthorizeRejectsMissingIdentity verifies the pre-cutover fallback
-// path refuses a request that carries neither an AWS_IAM authorizer nor an
-// identity document — so a request with no credible auth never reaches Route53
-// (#173). The verified-account (AWS_IAM) path is exercised end-to-end in the
-// live cutover test plan; here we lock down the deny-by-default behavior.
-func TestLegacyAuthorizeRejectsMissingIdentity(t *testing.T) {
-	cases := []struct {
-		name string
-		req  DNSUpdateRequest
-	}{
-		{"empty", DNSUpdateRequest{RecordName: "x", Action: "UPSERT"}},
-		{"doc-without-sig", DNSUpdateRequest{InstanceIdentityDocument: "eyJ9", RecordName: "x"}},
-		{"sig-without-doc", DNSUpdateRequest{InstanceIdentitySignature: "abc", RecordName: "x"}},
+// TestHandlerRejectsWithoutIAMAuthorizer locks down the post-cutover invariant
+// (#173): a request that reaches the handler without a verified IAM authorizer is
+// rejected 403 and never touches Route53. Under AuthType: AWS_IAM this can't
+// happen (the URL rejects unsigned callers first), but the handler defends
+// against it regardless — and this guards against a future accidental revert to
+// AuthType: NONE silently re-opening the spoofing hole.
+func TestHandlerRejectsWithoutIAMAuthorizer(t *testing.T) {
+	body, _ := json.Marshal(DNSUpdateRequest{RecordName: "x", Action: "UPSERT", IPAddress: "1.2.3.4"})
+	cases := map[string]events.LambdaFunctionURLRequest{
+		"no requestContext authorizer": {Body: string(body)},
+		"authorizer without IAM": {
+			Body:           string(body),
+			RequestContext: events.LambdaFunctionURLRequestContext{Authorizer: &events.LambdaFunctionURLRequestContextAuthorizerDescription{}},
+		},
+		"IAM without account": {
+			Body: string(body),
+			RequestContext: events.LambdaFunctionURLRequestContext{
+				Authorizer: &events.LambdaFunctionURLRequestContextAuthorizerDescription{
+					IAM: &events.LambdaFunctionURLRequestContextAuthorizerIAMDescription{},
+				},
+			},
+		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := tc.req
-			if _, err := legacyAuthorize(context.Background(), &req); err == nil {
-				t.Error("legacyAuthorize accepted a request with no credible identity")
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp, err := handler(context.Background(), req)
+			if err != nil {
+				t.Fatalf("handler returned error: %v", err)
+			}
+			if resp.StatusCode != 403 {
+				t.Errorf("status = %d, want 403 (no verified IAM authorizer)", resp.StatusCode)
 			}
 		})
 	}

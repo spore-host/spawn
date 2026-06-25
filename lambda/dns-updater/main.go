@@ -15,7 +15,6 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	"github.com/aws/aws-sdk-go-v2/service/route53/types"
 )
@@ -23,23 +22,19 @@ import (
 const defaultTTL = 60
 
 type DNSUpdateRequest struct {
-	InstanceIdentityDocument  string `json:"instance_identity_document"`
-	InstanceIdentitySignature string `json:"instance_identity_signature"`
-	RecordName                string `json:"record_name"`
-	IPAddress                 string `json:"ip_address"`
-	Action                    string `json:"action"` // UPSERT or DELETE
-	Domain                    string `json:"domain,omitempty"`
+	RecordName string `json:"record_name"`
+	IPAddress  string `json:"ip_address"`
+	Action     string `json:"action"` // UPSERT or DELETE
+	Domain     string `json:"domain,omitempty"`
 	// AccountName is the DNS-safe slug of the account's friendly name
 	// (spawn:account-name tag, #121). When set, the updater also registers a
 	// CNAME {record}.{account-name}.{domain} -> the canonical base36 A-record, so
 	// the legible FQDN resolves. Empty => base36 only (unchanged behavior).
 	AccountName string `json:"account_name,omitempty"`
-}
-
-type InstanceIdentityDocument struct {
-	InstanceID string `json:"instanceId"`
-	Region     string `json:"region"`
-	AccountID  string `json:"accountId"`
+	// Note (#173): instance_identity_document / _signature were removed — the
+	// caller is now authenticated by SigV4 (AuthType: AWS_IAM) and the record is
+	// namespaced under the verified caller account, not anything in the body.
+	// Older clients may still send those keys; unknown JSON fields are ignored.
 }
 
 type DNSUpdateResponse struct {
@@ -167,33 +162,21 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 		return errorResponse(400, "Invalid record name (alphanumeric and hyphens only)")
 	}
 
-	// ── Authorize + determine the account that owns the record's subdomain ───
-	// Two paths during the #173 cutover:
-	//   (A) AWS_IAM auth (post-flip): the Function URL is AuthType: AWS_IAM, so
-	//       the request carries a SigV4-VERIFIED caller account in
-	//       requestContext.authorizer.iam. This is unspoofable — the record is
-	//       namespaced under THIS account, regardless of any identity document in
-	//       the body. No EC2 describe, no cert, no per-region maintenance.
-	//   (B) Legacy (pre-flip, AuthType: NONE): no authorizer present. Fall back to
-	//       the old instance-identity-document path so registration keeps working
-	//       until the flip. This path is removed in #173 step 4.
-	// Preferring (A) when present means deploying this handler is safe BEFORE the
-	// AuthType flip (behaves as today), and the flip alone activates the secure
-	// path — decoupling the two for a low-risk cutover.
-	var accountID string
-	if a := request.RequestContext.Authorizer; a != nil && a.IAM != nil && a.IAM.AccountID != "" {
-		accountID = a.IAM.AccountID
-		fmt.Printf("DNS authorized via AWS_IAM: verified account %s (caller %s)\n", accountID, a.IAM.UserARN)
-	} else {
-		// Legacy fallback (#173 step 4 deletes this branch once AuthType: AWS_IAM
-		// is enforced and no NONE traffic remains).
-		legacyAcct, lerr := legacyAuthorize(ctx, &req)
-		if lerr != nil {
-			fmt.Printf("DNS legacy authorize failed: %v\n", lerr)
-			return errorResponse(403, lerr.Error())
-		}
-		accountID = legacyAcct
+	// ── Authorize via the SigV4-verified caller account (#173) ──────────────────
+	// The Function URL runs under AuthType: AWS_IAM, so every request that reaches
+	// this handler has already passed SigV4 verification and carries the verified
+	// caller account in requestContext.authorizer.iam. The record is namespaced
+	// under THAT account — unspoofable, and independent of anything in the request
+	// body. No identity document, no signature, no embedded cert, no per-region
+	// maintenance (the reason IAM auth was chosen over PKCS#7; see #294). A request
+	// without the authorizer can't occur under AWS_IAM, but we reject it defensively.
+	authz := request.RequestContext.Authorizer
+	if authz == nil || authz.IAM == nil || authz.IAM.AccountID == "" {
+		fmt.Printf("DNS request without an IAM authorizer — rejecting (Function URL must be AuthType: AWS_IAM)\n")
+		return errorResponse(403, "missing IAM authorizer")
 	}
+	accountID := authz.IAM.AccountID
+	fmt.Printf("DNS authorized via AWS_IAM: verified account %s (caller %s)\n", accountID, authz.IAM.UserARN)
 
 	// Resolve domain and hosted zone
 	reqDomain := req.Domain
@@ -265,103 +248,6 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 		},
 		Body: string(body),
 	}, nil
-}
-
-// legacyAuthorize implements the pre-cutover (AuthType: NONE) authorization path:
-// parse the instance-identity document from the body, best-effort verify its
-// signature, run the EC2 instance check, and return the account the record is
-// namespaced under. This is the SPOOFABLE path #173 replaces — it's retained
-// only so DNS registration keeps working until the Function URL is flipped to
-// AuthType: AWS_IAM, and is deleted in #173 step 4. It returns an error when the
-// request is missing identity fields (callers under AWS_IAM never reach here).
-func legacyAuthorize(ctx context.Context, req *DNSUpdateRequest) (string, error) {
-	if req.InstanceIdentityDocument == "" || req.InstanceIdentitySignature == "" {
-		return "", fmt.Errorf("missing identity document/signature (and no AWS_IAM authorizer present)")
-	}
-
-	identityDocBytes, err := base64.StdEncoding.DecodeString(req.InstanceIdentityDocument)
-	if err != nil {
-		return "", fmt.Errorf("invalid instance identity document: %v", err)
-	}
-	var identityDoc InstanceIdentityDocument
-	if err := json.Unmarshal(identityDocBytes, &identityDoc); err != nil {
-		return "", fmt.Errorf("failed to parse instance identity document: %v", err)
-	}
-	if identityDoc.InstanceID == "" || identityDoc.Region == "" || identityDoc.AccountID == "" {
-		return "", fmt.Errorf("instance identity document missing required fields")
-	}
-
-	if err := verifyInstanceIdentitySignature(identityDocBytes, req.InstanceIdentitySignature); err != nil {
-		fmt.Printf("DNS sig verify skipped (cert issue): %v — continuing with EC2 validation\n", err)
-	} else {
-		fmt.Printf("DNS sig verified for instance %s account %s\n", identityDoc.InstanceID, identityDoc.AccountID)
-	}
-
-	if err := validateInstance(ctx, identityDoc.InstanceID, identityDoc.Region, req.IPAddress, req.Action); err != nil {
-		return "", err
-	}
-	return identityDoc.AccountID, nil
-}
-
-func validateInstance(ctx context.Context, instanceID, region, ipAddress, action string) error {
-	// Create regional EC2 client
-	regionalCfg := cfg.Copy()
-	regionalCfg.Region = region
-	ec2Client := ec2.NewFromConfig(regionalCfg)
-
-	// Try to describe instance (may fail for cross-account)
-	output, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-		InstanceIds: []string{instanceID},
-	})
-
-	if err != nil {
-		// Cross-account instance: EC2 API unavailable for this account.
-		// Signature verification (performed before this call) is the security control.
-		// Log for observability but allow the request — the caller proved instance ownership
-		// by providing a valid AWS-signed identity document.
-		fmt.Printf("cross-account instance %s in %s: EC2 describe unavailable (%v), proceeding on verified signature\n",
-			instanceID, region, err)
-		return nil
-	}
-
-	// Same-account case: Perform full validation
-	if len(output.Reservations) == 0 || len(output.Reservations[0].Instances) == 0 {
-		return fmt.Errorf("instance %s not found in %s", instanceID, region)
-	}
-
-	instance := output.Reservations[0].Instances[0]
-
-	// Check for a *:managed tag (e.g. spawn:managed, prism:managed)
-	hasManagedTag := false
-	for _, tag := range instance.Tags {
-		key := aws.ToString(tag.Key)
-		if strings.HasSuffix(key, ":managed") && aws.ToString(tag.Value) == "true" {
-			hasManagedTag = true
-			break
-		}
-	}
-	if !hasManagedTag {
-		return fmt.Errorf("instance %s does not have a managed tag (e.g. spawn:managed=true)", instanceID)
-	}
-
-	// For UPSERT, verify IP address matches
-	if action == "UPSERT" {
-		instancePublicIP := aws.ToString(instance.PublicIpAddress)
-		if instancePublicIP == "" {
-			return fmt.Errorf("instance %s has no public IP address", instanceID)
-		}
-		if instancePublicIP != ipAddress {
-			return fmt.Errorf("IP address mismatch: %s != %s", ipAddress, instancePublicIP)
-		}
-	}
-
-	// Check instance state
-	state := string(instance.State.Name)
-	if state != "running" && state != "stopped" {
-		return fmt.Errorf("instance %s is in invalid state: %s", instanceID, state)
-	}
-
-	return nil
 }
 
 func upsertDNSRecord(ctx context.Context, fqdn, ipAddress, zoneID string) (string, error) {
