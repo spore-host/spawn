@@ -651,6 +651,24 @@ func (c *Client) buildInlinePolicy(policies []string) map[string]interface{} {
 	}
 	statements = append(statements, sporedActionPermissions)
 
+	// Allow the spored role to invoke the DNS-updater Function URL under AWS_IAM
+	// auth (#173). This is the caller's half of the IAM-auth cutover: rather than
+	// the DNS Lambda's resource policy enumerating every launch account (which
+	// doesn't scale — accounts are unbounded and spored role names are dynamic),
+	// each spored role grants ITSELF invoke on the fixed DNS function, and the
+	// Lambda authorizes the SigV4-verified caller account. Scoped to the single
+	// dns-updater function ARN (account-pinned; region wildcard mirrors the
+	// existing setup-spawnd-iam-role.sh grant). Harmless before the AuthType flip
+	// (the NONE URL doesn't check it) and required after it.
+	sporedDNSInvoke := map[string]interface{}{
+		"Effect": "Allow",
+		"Action": []interface{}{
+			"lambda:InvokeFunctionUrl",
+		},
+		"Resource": "arn:aws:lambda:*:966362334030:function:spawn-dns-updater",
+	}
+	statements = append(statements, sporedDNSInvoke)
+
 	// Add user-specified policy templates
 	for _, policyStr := range policies {
 		// Get template

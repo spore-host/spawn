@@ -305,18 +305,19 @@ func TestBuildInlinePolicy(t *testing.T) {
 	if !ok {
 		t.Fatalf("Statement is not a slice: %T", policy["Statement"])
 	}
-	// Always includes the 3 spored self-management statements (read / tag-write /
-	// destructive-action — #174 split tag-write into its own conditioned statement),
-	// plus the template's.
-	if len(stmts) < 4 {
-		t.Errorf("expected >= 4 statements (3 spored + template), got %d", len(stmts))
+	// Always includes the 4 spored self-management statements (read / tag-write /
+	// destructive-action / dns-invoke — #174 split tag-write into its own
+	// conditioned statement; #173 added the DNS Function URL invoke grant), plus
+	// the template's.
+	if len(stmts) < 5 {
+		t.Errorf("expected >= 5 statements (4 spored + template), got %d", len(stmts))
 	}
 
 	// Unknown template names are skipped (no panic, just the spored base).
 	base := c.buildInlinePolicy([]string{"doesNotExist"})
 	baseStmts := base["Statement"].([]interface{})
-	if len(baseStmts) != 3 {
-		t.Errorf("unknown template should yield only the 3 spored statements, got %d", len(baseStmts))
+	if len(baseStmts) != 4 {
+		t.Errorf("unknown template should yield only the 4 spored statements, got %d", len(baseStmts))
 	}
 }
 
