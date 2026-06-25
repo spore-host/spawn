@@ -124,22 +124,27 @@ func init() {
 	}
 }
 
-func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	fmt.Printf("DNS handler invoked: method=%s body_len=%d\n", request.HTTPMethod, len(request.Body))
+func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (events.LambdaFunctionURLResponse, error) {
+	fmt.Printf("DNS handler invoked: method=%s body_len=%d\n", request.RequestContext.HTTP.Method, len(request.Body))
+
+	// Decode the body (Function URLs may base64-encode it).
+	rawBody := request.Body
+	if request.IsBase64Encoded {
+		if decoded, derr := base64.StdEncoding.DecodeString(rawBody); derr == nil {
+			rawBody = string(decoded)
+		}
+	}
+
 	// Parse request body
 	var req DNSUpdateRequest
-	if err := json.Unmarshal([]byte(request.Body), &req); err != nil {
+	if err := json.Unmarshal([]byte(rawBody), &req); err != nil {
 		fmt.Printf("DNS parse error: %v\n", err)
 		return errorResponse(400, fmt.Sprintf("Invalid request body: %v", err))
 	}
 
-	// Validate required fields
-	if req.InstanceIdentityDocument == "" || req.InstanceIdentitySignature == "" || req.RecordName == "" {
-		fmt.Printf("DNS missing fields: doc=%v sig=%v name=%v\n",
-			req.InstanceIdentityDocument != "", req.InstanceIdentitySignature != "", req.RecordName != "")
-		return errorResponse(400, "Missing required fields")
+	if req.RecordName == "" {
+		return errorResponse(400, "Missing required field: record_name")
 	}
-	fmt.Printf("DNS request: action=%s record=%s ip=%s\n", req.Action, req.RecordName, req.IPAddress)
 
 	// Validate action
 	req.Action = strings.ToUpper(req.Action)
@@ -162,39 +167,33 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		return errorResponse(400, "Invalid record name (alphanumeric and hyphens only)")
 	}
 
-	// Decode instance identity document
-	identityDocBytes, err := base64.StdEncoding.DecodeString(req.InstanceIdentityDocument)
-	if err != nil {
-		return errorResponse(400, fmt.Sprintf("Invalid instance identity document: %v", err))
-	}
-
-	var identityDoc InstanceIdentityDocument
-	if err := json.Unmarshal(identityDocBytes, &identityDoc); err != nil {
-		return errorResponse(400, fmt.Sprintf("Failed to parse instance identity document: %v", err))
-	}
-
-	// Validate required identity fields
-	if identityDoc.InstanceID == "" || identityDoc.Region == "" || identityDoc.AccountID == "" {
-		return errorResponse(400, "Instance identity document missing required fields")
-	}
-
-	// Verify the cryptographic signature on the identity document when possible.
-	// Skipped if signature verification fails due to expired embedded cert — EC2
-	// instance validation (DescribeInstances) still enforces instance ownership.
-	// TODO: update embedded AWS cert (issue #294)
-	if err := verifyInstanceIdentitySignature(identityDocBytes, req.InstanceIdentitySignature); err != nil {
-		fmt.Printf("DNS sig verify skipped (cert issue): %v — continuing with EC2 validation\n", err)
-		// Non-fatal: instance validation below is the primary auth check
+	// ── Authorize + determine the account that owns the record's subdomain ───
+	// Two paths during the #173 cutover:
+	//   (A) AWS_IAM auth (post-flip): the Function URL is AuthType: AWS_IAM, so
+	//       the request carries a SigV4-VERIFIED caller account in
+	//       requestContext.authorizer.iam. This is unspoofable — the record is
+	//       namespaced under THIS account, regardless of any identity document in
+	//       the body. No EC2 describe, no cert, no per-region maintenance.
+	//   (B) Legacy (pre-flip, AuthType: NONE): no authorizer present. Fall back to
+	//       the old instance-identity-document path so registration keeps working
+	//       until the flip. This path is removed in #173 step 4.
+	// Preferring (A) when present means deploying this handler is safe BEFORE the
+	// AuthType flip (behaves as today), and the flip alone activates the secure
+	// path — decoupling the two for a low-risk cutover.
+	var accountID string
+	if a := request.RequestContext.Authorizer; a != nil && a.IAM != nil && a.IAM.AccountID != "" {
+		accountID = a.IAM.AccountID
+		fmt.Printf("DNS authorized via AWS_IAM: verified account %s (caller %s)\n", accountID, a.IAM.UserARN)
 	} else {
-		fmt.Printf("DNS sig verified for instance %s account %s\n", identityDoc.InstanceID, identityDoc.AccountID)
+		// Legacy fallback (#173 step 4 deletes this branch once AuthType: AWS_IAM
+		// is enforced and no NONE traffic remains).
+		legacyAcct, lerr := legacyAuthorize(ctx, &req)
+		if lerr != nil {
+			fmt.Printf("DNS legacy authorize failed: %v\n", lerr)
+			return errorResponse(403, lerr.Error())
+		}
+		accountID = legacyAcct
 	}
-
-	// Validate instance
-	if err := validateInstance(ctx, identityDoc.InstanceID, identityDoc.Region, req.IPAddress, req.Action); err != nil {
-		fmt.Printf("DNS instance validation failed: %v\n", err)
-		return errorResponse(403, err.Error())
-	}
-	fmt.Printf("DNS instance validated, updating Route53 zone %s\n", domainZones[defaultDomain])
 
 	// Resolve domain and hosted zone
 	reqDomain := req.Domain
@@ -206,13 +205,15 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		return errorResponse(400, fmt.Sprintf("Unknown domain: %s", reqDomain))
 	}
 
-	// Build full DNS name with base36-encoded account subdomain
-	// Example: my-instance.1kpqzg2c.spore.host (for account 123456789012)
-	fqdn := getFullDNSName(req.RecordName, identityDoc.AccountID, reqDomain)
+	// Build full DNS name with base36-encoded account subdomain, anchored to the
+	// authorized account — a caller can only write records under its own account's
+	// subdomain. Example: my-instance.1kpqzg2c.spore.host (for account 123456789012)
+	fqdn := getFullDNSName(req.RecordName, accountID, reqDomain)
 
 	// Update DNS record
 	var changeID string
 	var message string
+	var err error
 
 	// Optional friendly alias: {record}.{account-name}.{domain} as a CNAME to the
 	// canonical base36 A-record (#121). base36 stays authoritative (holds the IP);
@@ -256,7 +257,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 	}
 
 	body, _ := json.Marshal(resp)
-	return events.APIGatewayProxyResponse{
+	return events.LambdaFunctionURLResponse{
 		StatusCode: 200,
 		Headers: map[string]string{
 			"Content-Type":                "application/json",
@@ -264,6 +265,42 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		},
 		Body: string(body),
 	}, nil
+}
+
+// legacyAuthorize implements the pre-cutover (AuthType: NONE) authorization path:
+// parse the instance-identity document from the body, best-effort verify its
+// signature, run the EC2 instance check, and return the account the record is
+// namespaced under. This is the SPOOFABLE path #173 replaces — it's retained
+// only so DNS registration keeps working until the Function URL is flipped to
+// AuthType: AWS_IAM, and is deleted in #173 step 4. It returns an error when the
+// request is missing identity fields (callers under AWS_IAM never reach here).
+func legacyAuthorize(ctx context.Context, req *DNSUpdateRequest) (string, error) {
+	if req.InstanceIdentityDocument == "" || req.InstanceIdentitySignature == "" {
+		return "", fmt.Errorf("missing identity document/signature (and no AWS_IAM authorizer present)")
+	}
+
+	identityDocBytes, err := base64.StdEncoding.DecodeString(req.InstanceIdentityDocument)
+	if err != nil {
+		return "", fmt.Errorf("invalid instance identity document: %v", err)
+	}
+	var identityDoc InstanceIdentityDocument
+	if err := json.Unmarshal(identityDocBytes, &identityDoc); err != nil {
+		return "", fmt.Errorf("failed to parse instance identity document: %v", err)
+	}
+	if identityDoc.InstanceID == "" || identityDoc.Region == "" || identityDoc.AccountID == "" {
+		return "", fmt.Errorf("instance identity document missing required fields")
+	}
+
+	if err := verifyInstanceIdentitySignature(identityDocBytes, req.InstanceIdentitySignature); err != nil {
+		fmt.Printf("DNS sig verify skipped (cert issue): %v — continuing with EC2 validation\n", err)
+	} else {
+		fmt.Printf("DNS sig verified for instance %s account %s\n", identityDoc.InstanceID, identityDoc.AccountID)
+	}
+
+	if err := validateInstance(ctx, identityDoc.InstanceID, identityDoc.Region, req.IPAddress, req.Action); err != nil {
+		return "", err
+	}
+	return identityDoc.AccountID, nil
 }
 
 func validateInstance(ctx context.Context, instanceID, region, ipAddress, action string) error {
@@ -473,7 +510,7 @@ func deleteCNAMERecord(ctx context.Context, aliasFQDN, zoneID string) (string, e
 	return aws.ToString(output.ChangeInfo.Id), nil
 }
 
-func errorResponse(statusCode int, message string) (events.APIGatewayProxyResponse, error) {
+func errorResponse(statusCode int, message string) (events.LambdaFunctionURLResponse, error) {
 	resp := DNSUpdateResponse{
 		Success:   false,
 		Error:     message,
@@ -481,7 +518,7 @@ func errorResponse(statusCode int, message string) (events.APIGatewayProxyRespon
 	}
 
 	body, _ := json.Marshal(resp)
-	return events.APIGatewayProxyResponse{
+	return events.LambdaFunctionURLResponse{
 		StatusCode: statusCode,
 		Headers: map[string]string{
 			"Content-Type":                "application/json",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"math/big"
 	"strings"
 	"testing"
@@ -165,6 +166,30 @@ func TestErrorResponseStructure(t *testing.T) {
 	}
 	if !strings.Contains(resp.Body, `"success":false`) {
 		t.Errorf("body %q does not contain success:false", resp.Body)
+	}
+}
+
+// TestLegacyAuthorizeRejectsMissingIdentity verifies the pre-cutover fallback
+// path refuses a request that carries neither an AWS_IAM authorizer nor an
+// identity document — so a request with no credible auth never reaches Route53
+// (#173). The verified-account (AWS_IAM) path is exercised end-to-end in the
+// live cutover test plan; here we lock down the deny-by-default behavior.
+func TestLegacyAuthorizeRejectsMissingIdentity(t *testing.T) {
+	cases := []struct {
+		name string
+		req  DNSUpdateRequest
+	}{
+		{"empty", DNSUpdateRequest{RecordName: "x", Action: "UPSERT"}},
+		{"doc-without-sig", DNSUpdateRequest{InstanceIdentityDocument: "eyJ9", RecordName: "x"}},
+		{"sig-without-doc", DNSUpdateRequest{InstanceIdentitySignature: "abc", RecordName: "x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := tc.req
+			if _, err := legacyAuthorize(context.Background(), &req); err == nil {
+				t.Error("legacyAuthorize accepted a request with no credible identity")
+			}
+		})
 	}
 }
 
