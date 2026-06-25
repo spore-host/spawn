@@ -49,6 +49,8 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/fsx"
 	fsxtypes "github.com/aws/aws-sdk-go-v2/service/fsx/types"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
+	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -89,6 +91,14 @@ type reaper struct {
 	notifyURL    string
 	graceful     bool          // REAPER_GRACEFUL=true: attempt a pre-stop flush via SSM before terminate (#187)
 	gracefulWait time.Duration // hard cap on the per-instance graceful flush (REAPER_GRACEFUL_MAX_WAIT)
+
+	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
+	// The zone lives in the reaper's OWN (infra) account — not the per-instance
+	// cross-account role — so route53Client uses the base credentials. dnsDomain
+	// is the zone's domain (e.g. "spore.host"); both empty disables DNS teardown.
+	route53Client *route53.Client
+	dnsZoneID     string
+	dnsDomain     string
 }
 
 // defaultGracefulWait caps how long the reaper waits for a single instance's
@@ -127,6 +137,16 @@ func init() {
 		notifyURL:    strings.TrimRight(os.Getenv("REAPER_NOTIFY_URL"), "/"),
 		graceful:     strings.EqualFold(os.Getenv("REAPER_GRACEFUL"), "true"),
 		gracefulWait: parseGracefulWait(os.Getenv("REAPER_GRACEFUL_MAX_WAIT")),
+		dnsZoneID:    strings.TrimSpace(os.Getenv("REAPER_DNS_ZONE_ID")),
+		dnsDomain:    strings.TrimSpace(os.Getenv("REAPER_DNS_DOMAIN")),
+	}
+	// Route53 lives in the reaper's own account; use base creds. Only wire the
+	// client when a zone is configured, so a deployment without DNS teardown
+	// stays a no-op (and needs no route53 IAM).
+	if r.dnsZoneID != "" && r.dnsDomain != "" {
+		r.route53Client = route53.NewFromConfig(cfg)
+	} else {
+		log.Printf("DNS teardown disabled (REAPER_DNS_ZONE_ID/REAPER_DNS_DOMAIN unset)")
 	}
 	labels := make([]string, len(r.accounts))
 	for i, a := range r.accounts {
@@ -336,6 +356,14 @@ type candidate struct {
 	preStop        string        // spawn:pre-stop hook command (empty = nothing to flush)
 	preStopTimeout time.Duration // spawn:pre-stop-timeout (0 = use default)
 	localUsername  string        // spawn:local-username (run the hook as this user, #63)
+
+	// DNS-teardown inputs (#247): the reaper deletes the instance's Route53
+	// records itself, because spored's graceful DeleteDNS never ran (the reaper
+	// only fires when spored failed). dnsName + accountBase36 give the canonical
+	// A-record FQDN; accountName (if set) gives the #121 alias CNAME to also remove.
+	dnsName       string // spawn:dns-name (empty = the instance registered no DNS)
+	accountBase36 string // spawn:account-base36 (the A-record's account subdomain)
+	accountName   string // spawn:account-name (the alias CNAME subdomain, #121; optional)
 }
 
 func handler(ctx context.Context) (Summary, error) {
@@ -358,6 +386,7 @@ func handler(ctx context.Context) (Summary, error) {
 				if r.dryRun {
 					log.Printf("WOULD reap %s (%s) in %s/%s — %s (age %s, deadline %s)",
 						c.id, c.name, c.account, c.region, c.reason, c.age.Round(time.Minute), c.deadline)
+					r.deleteDNS(ctx, c) // dry-run aware: logs "WOULD delete DNS …"
 					r.notify(c, true)
 					sum.Skipped++
 					continue
@@ -375,6 +404,11 @@ func handler(ctx context.Context) (Summary, error) {
 					sum.Errors++
 					continue
 				}
+				// Manual DNS teardown (#247): spored's graceful DeleteDNS never ran
+				// (the reaper only fires when spored failed), so the reaper deletes
+				// the instance's Route53 records itself. Best-effort, after the
+				// terminate so the hard-deadline guarantee is never blocked by it.
+				r.deleteDNS(ctx, c)
 				log.Printf("REAPED %s (%s) in %s/%s — %s (age %s, deadline %s)",
 					c.id, c.name, c.account, c.region, c.reason, c.age.Round(time.Minute), c.deadline)
 				r.notify(c, false)
@@ -444,6 +478,9 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 		running:       inst.State != nil && inst.State.Name == ec2types.InstanceStateNameRunning,
 		preStop:       tags[tagprefix.Tag("pre-stop")],
 		localUsername: tags[tagprefix.Tag("local-username")],
+		dnsName:       tags[tagprefix.Tag("dns-name")],
+		accountBase36: tags[tagprefix.Tag("account-base36")],
+		accountName:   tags[tagprefix.Tag("account-name")],
 	}
 	if pt := tags[tagprefix.Tag("pre-stop-timeout")]; pt != "" {
 		if d, err := time.ParseDuration(pt); err == nil {
@@ -780,6 +817,103 @@ func (r *reaper) terminate(ctx context.Context, acct account, c candidate) error
 		return err
 	}
 	return nil
+}
+
+// deleteDNS removes the Route53 records the instance registered, since spored's
+// graceful DeleteDNS never ran (the reaper only fires when spored failed) (#247).
+// It deletes the canonical A-record {dns-name}.{account-base36}.{domain} and, if
+// the instance carried the #121 friendly-name alias, the CNAME
+// {dns-name}.{account-name}.{domain}. The zone is in the reaper's own account, so
+// it uses r.route53Client (base creds), NOT the per-instance cross-account role.
+//
+// Strictly best-effort: a disabled/zoneless reaper, an instance that registered
+// no DNS, a missing record, or a Route53 error are all logged and skipped — DNS
+// cleanup must never block or fail a reap (the hard-deadline guarantee, #72).
+func (r *reaper) deleteDNS(ctx context.Context, c candidate) {
+	if r.route53Client == nil {
+		return // teardown disabled
+	}
+	records := dnsRecordsToDelete(c, r.dnsDomain)
+	if records == nil && c.dnsName != "" && c.accountBase36 == "" {
+		log.Printf("DNS teardown: %s has spawn:dns-name=%q but no spawn:account-base36 tag — skipping", c.id, c.dnsName)
+		return
+	}
+	for _, rec := range records {
+		r.deleteRecord(ctx, rec.fqdn, rec.rrType)
+	}
+}
+
+// dnsRecord is a single Route53 record the reaper will delete for a candidate.
+type dnsRecord struct {
+	fqdn   string
+	rrType r53types.RRType
+}
+
+// dnsRecordsToDelete computes the Route53 records a reaped instance registered,
+// from its tags (#247) — pure, so it's unit-tested without AWS. Returns nil when
+// the instance registered no DNS (no spawn:dns-name) or lacks the account-base36
+// needed to build the canonical FQDN. The canonical A-record is
+// {dns-name}.{account-base36}.{domain}; if the instance also carried the #121
+// friendly-name alias (spawn:account-name), its CNAME
+// {dns-name}.{account-name}.{domain} is included too.
+func dnsRecordsToDelete(c candidate, domain string) []dnsRecord {
+	if c.dnsName == "" || c.accountBase36 == "" || domain == "" {
+		return nil
+	}
+	recs := []dnsRecord{
+		{fqdn: fmt.Sprintf("%s.%s.%s", c.dnsName, c.accountBase36, domain), rrType: r53types.RRTypeA},
+	}
+	if c.accountName != "" {
+		recs = append(recs, dnsRecord{
+			fqdn:   fmt.Sprintf("%s.%s.%s", c.dnsName, c.accountName, domain),
+			rrType: r53types.RRTypeCname,
+		})
+	}
+	return recs
+}
+
+// deleteRecord deletes a single Route53 record set by name+type. It must first
+// read the existing record set (Route53 DELETE requires the exact current
+// rdata/TTL), so a missing record is a clean no-op. Best-effort + dry-run aware.
+func (r *reaper) deleteRecord(ctx context.Context, fqdn string, rrType r53types.RRType) {
+	if r.dryRun {
+		log.Printf("WOULD delete DNS %s record %s", rrType, fqdn)
+		return
+	}
+	out, err := r.route53Client.ListResourceRecordSets(ctx, &route53.ListResourceRecordSetsInput{
+		HostedZoneId:    aws.String(r.dnsZoneID),
+		StartRecordName: aws.String(fqdn),
+		StartRecordType: rrType,
+		MaxItems:        aws.Int32(1),
+	})
+	if err != nil {
+		log.Printf("DNS teardown: list %s %s failed: %v", rrType, fqdn, err)
+		return
+	}
+	var rec *r53types.ResourceRecordSet
+	for i := range out.ResourceRecordSets {
+		rs := out.ResourceRecordSets[i]
+		if strings.TrimSuffix(aws.ToString(rs.Name), ".") == fqdn && rs.Type == rrType {
+			rec = &rs
+			break
+		}
+	}
+	if rec == nil {
+		return // already gone — fine
+	}
+	if _, err := r.route53Client.ChangeResourceRecordSets(ctx, &route53.ChangeResourceRecordSetsInput{
+		HostedZoneId: aws.String(r.dnsZoneID),
+		ChangeBatch: &r53types.ChangeBatch{
+			Comment: aws.String("ttl-reaper: instance reaped (#247)"),
+			Changes: []r53types.Change{
+				{Action: r53types.ChangeActionDelete, ResourceRecordSet: rec},
+			},
+		},
+	}); err != nil {
+		log.Printf("DNS teardown: delete %s %s failed: %v", rrType, fqdn, err)
+		return
+	}
+	log.Printf("DNS teardown: deleted %s record %s", rrType, fqdn)
 }
 
 // notify posts a plain Slack-incoming-webhook payload ({"text":...}) to

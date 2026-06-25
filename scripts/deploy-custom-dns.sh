@@ -97,7 +97,10 @@ if [ ! -f "main.go" ]; then
 fi
 
 info "Building for Linux/AMD64..."
-GOOS=linux GOARCH=amd64 go build -o bootstrap main.go
+# Build the whole package, not just main.go — the handler is split across
+# main.go + signature.go, so `go build main.go` fails with
+# "undefined: verifyInstanceIdentitySignature" (#248).
+GOOS=linux GOARCH=amd64 go build -o bootstrap .
 
 info "Creating deployment package..."
 zip -q function.zip bootstrap

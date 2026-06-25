@@ -359,3 +359,65 @@ func TestEvaluateFSx_DurableNoOrphanReap(t *testing.T) {
 		t.Error("a durable FS must not be reaped via the ephemeral orphan grace (only max-age/deadline applies)")
 	}
 }
+
+// TestEvaluate_PopulatesDNSFields asserts evaluate() captures the DNS-teardown
+// tags so the reaper can delete the records after a reap (#247).
+func TestEvaluate_PopulatesDNSFields(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-dns"),
+		State:      &ec2types.InstanceState{Name: ec2types.InstanceStateNameRunning},
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			tag("spawn:ttl-deadline", now.Add(-1*time.Minute).Format(time.RFC3339)),
+			tag("spawn:dns-name", "my-box"),
+			tag("spawn:account-base36", "5k0zfnmq"),
+			tag("spawn:account-name", "buckai-prod"),
+		},
+	}
+	c, expired := newReaper().evaluate(inst, "us-east-1", now)
+	if !expired {
+		t.Fatal("expired instance should be a candidate")
+	}
+	if c.dnsName != "my-box" || c.accountBase36 != "5k0zfnmq" || c.accountName != "buckai-prod" {
+		t.Errorf("DNS fields not captured: name=%q base36=%q account=%q", c.dnsName, c.accountBase36, c.accountName)
+	}
+}
+
+// TestDNSRecordsToDelete covers the pure record-construction the reaper feeds to
+// Route53: canonical A-record always, plus the #121 friendly-name alias CNAME
+// when present; nil when the instance registered no DNS or lacks account-base36.
+func TestDNSRecordsToDelete(t *testing.T) {
+	domain := "spore.host"
+
+	// A-record only (no friendly name)
+	recs := dnsRecordsToDelete(candidate{dnsName: "box", accountBase36: "5k0zfnmq"}, domain)
+	if len(recs) != 1 || recs[0].fqdn != "box.5k0zfnmq.spore.host" || recs[0].rrType != "A" {
+		t.Errorf("A-only: got %+v", recs)
+	}
+
+	// A-record + alias CNAME
+	recs = dnsRecordsToDelete(candidate{dnsName: "box", accountBase36: "5k0zfnmq", accountName: "buckai"}, domain)
+	if len(recs) != 2 {
+		t.Fatalf("A+alias: want 2 records, got %d (%+v)", len(recs), recs)
+	}
+	if recs[0].fqdn != "box.5k0zfnmq.spore.host" || recs[0].rrType != "A" {
+		t.Errorf("A+alias[0] = %+v, want A box.5k0zfnmq.spore.host", recs[0])
+	}
+	if recs[1].fqdn != "box.buckai.spore.host" || recs[1].rrType != "CNAME" {
+		t.Errorf("A+alias[1] = %+v, want CNAME box.buckai.spore.host", recs[1])
+	}
+
+	// no DNS registered → nil
+	if recs := dnsRecordsToDelete(candidate{accountBase36: "5k0zfnmq"}, domain); recs != nil {
+		t.Errorf("no dns-name should yield nil, got %+v", recs)
+	}
+	// missing account-base36 → nil (can't build canonical FQDN)
+	if recs := dnsRecordsToDelete(candidate{dnsName: "box"}, domain); recs != nil {
+		t.Errorf("missing account-base36 should yield nil, got %+v", recs)
+	}
+	// empty domain → nil
+	if recs := dnsRecordsToDelete(candidate{dnsName: "box", accountBase36: "5k0zfnmq"}, ""); recs != nil {
+		t.Errorf("empty domain should yield nil, got %+v", recs)
+	}
+}
