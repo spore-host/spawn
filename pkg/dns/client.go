@@ -3,15 +3,20 @@ package dns
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
@@ -19,6 +24,10 @@ import (
 
 const (
 	defaultDomain = "spore.host"
+
+	// sigV4Service is the SigV4 service name for a Lambda Function URL. AWS_IAM
+	// auth on a Function URL is verified as the "lambda" service.
+	sigV4Service = "lambda"
 )
 
 // DNSUpdateRequest represents the request to the DNS API
@@ -51,6 +60,19 @@ type Client struct {
 	domain      string
 	apiEndpoint string
 	accountName string // DNS-safe account-name slug; included in requests for the alias FQDN (#121)
+
+	// SigV4 signing (#173). When sign is true, callAPI SigV4-signs the POST with
+	// the instance role's credentials so the DNS Lambda Function URL can run under
+	// AuthType: AWS_IAM and derive the *verified* caller account from the signed
+	// principal — replacing the spoofable instance-identity-document path. This is
+	// gated so the signing client can ship to instances BEFORE the Function URL
+	// AuthType is flipped in infra (a signed request against an AuthType: NONE URL
+	// is accepted — the auth headers are simply ignored), keeping the rollout
+	// non-breaking and lockstep-safe. credsProvider/region feed the signer.
+	sign          bool
+	credsProvider aws.CredentialsProvider
+	region        string
+	signer        *v4.Signer
 }
 
 // SetAccountName sets the account-name slug included in DNS requests so the
@@ -75,14 +97,39 @@ func NewClient(ctx context.Context, domain, apiEndpoint string) (*Client, error)
 		apiEndpoint = spawnconfig.GetDNSEndpointURL()
 	}
 
-	return &Client{
+	c := &Client{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 		imdsClient:  imds.NewFromConfig(cfg),
 		domain:      domain,
 		apiEndpoint: apiEndpoint,
-	}, nil
+	}
+
+	// Opt into SigV4 signing (#173) when SPORE_DNS_SIGV4 is set. Sourced from the
+	// ambient credential chain (the instance role on EC2), which is exactly the
+	// principal the Lambda will authorize once AuthType: AWS_IAM is enabled. We
+	// keep this behind a flag so the signing build can roll out to instances
+	// ahead of the infra AuthType flip without changing live behavior; the flip
+	// and the default-on switch happen in lockstep (see #173 cutover plan).
+	if sigV4Enabled() {
+		c.sign = true
+		c.credsProvider = cfg.Credentials
+		c.region = cfg.Region
+		if c.region == "" {
+			c.region = "us-east-1" // Function URL region; IMDS-less envs may not set it
+		}
+		c.signer = v4.NewSigner()
+	}
+
+	return c, nil
+}
+
+// sigV4Enabled reports whether DNS requests should be SigV4-signed (#173).
+// Opt-in via SPORE_DNS_SIGV4 (any non-empty value) so the cutover to AWS_IAM
+// auth on the Function URL can be coordinated with infra.
+func sigV4Enabled() bool {
+	return os.Getenv("SPORE_DNS_SIGV4") != ""
 }
 
 // RegisterDNS registers a DNS record for the current instance
@@ -281,6 +328,13 @@ func (c *Client) callAPI(ctx context.Context, req DNSUpdateRequest) (*DNSUpdateR
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	// SigV4-sign with the instance role creds when enabled (#173), so the DNS
+	// Lambda Function URL can authorize the *verified* caller under AuthType:
+	// AWS_IAM. No-op (plain POST) when signing is off.
+	if err := c.signRequest(ctx, httpReq, reqBody); err != nil {
+		return nil, err
+	}
+
 	// Make request
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -306,6 +360,27 @@ func (c *Client) callAPI(ctx context.Context, req DNSUpdateRequest) (*DNSUpdateR
 	}
 
 	return &dnsResp, nil
+}
+
+// signRequest SigV4-signs httpReq in place using the instance role's
+// credentials, for the lambda service in the Function URL's region (#173). It is
+// a no-op when signing is disabled, so the same code path serves both the
+// pre-cutover (plain POST, AuthType: NONE) and post-cutover (AWS_IAM) worlds.
+// The payload hash is the hex SHA-256 of the body, as SignHTTP requires.
+func (c *Client) signRequest(ctx context.Context, httpReq *http.Request, body []byte) error {
+	if !c.sign || c.signer == nil || c.credsProvider == nil {
+		return nil
+	}
+	creds, err := c.credsProvider.Retrieve(ctx)
+	if err != nil {
+		return fmt.Errorf("retrieve credentials for DNS request signing: %w", err)
+	}
+	sum := sha256.Sum256(body)
+	payloadHash := hex.EncodeToString(sum[:])
+	if err := c.signer.SignHTTP(ctx, creds, httpReq, payloadHash, sigV4Service, c.region, time.Now()); err != nil {
+		return fmt.Errorf("sign DNS request: %w", err)
+	}
+	return nil
 }
 
 // GetFQDN returns the fully qualified domain name for a record
