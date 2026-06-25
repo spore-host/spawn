@@ -274,24 +274,16 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				continue
 			}
-			for _, inst := range instances {
-				if inst.InstanceID != result.InstanceID {
-					continue
-				}
-				// Update host if we now have a DNS name or IP
-				if dns := inst.Tags["spawn:dns-name"]; dns != "" {
-					dnsName = dns
-				}
-				url, token, urlHost, status := extractReadyFromTags(inst.Tags)
-				lastStatus = status
-				if token != "" {
-					authToken = token
-				}
-				if urlHost != "" {
-					host = urlHost
-				}
-				_ = url
-				break
+			scan := scanDCVReady(instances, result.InstanceID)
+			if scan.dnsName != "" {
+				dnsName = scan.dnsName
+			}
+			lastStatus = scan.status
+			if scan.token != "" {
+				authToken = scan.token
+			}
+			if scan.host != "" {
+				host = scan.host
 			}
 			if authToken != "" {
 				fmt.Fprintf(os.Stderr, " ready\n")

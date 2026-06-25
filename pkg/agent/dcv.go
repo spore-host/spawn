@@ -1,11 +1,49 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 )
+
+// dcvRunner abstracts the `dcv` CLI shell-outs so the handshake/idle logic is
+// testable without a real DCV server (spawn#282). The real impl shells to `dcv`;
+// tests inject a fake returning canned output/errors. installed() distinguishes
+// "no DCV on this AMI" from "dcvserver not up yet" (a key named-failure split).
+type dcvRunner interface {
+	installed() bool
+	listSessions(ctx context.Context) (string, error)
+	describeSession(ctx context.Context, sessionID string) ([]byte, error)
+}
+
+// execDCVRunner is the production dcvRunner: it shells out to the `dcv` binary.
+type execDCVRunner struct{}
+
+func (execDCVRunner) installed() bool {
+	_, err := exec.LookPath("dcv")
+	return err == nil
+}
+
+func (execDCVRunner) listSessions(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "dcv", "list-sessions").Output()
+	return string(out), err
+}
+
+func (execDCVRunner) describeSession(ctx context.Context, sessionID string) ([]byte, error) {
+	return exec.CommandContext(ctx, "dcv", "describe-session", sessionID, "--json").Output()
+}
+
+// tagPutter abstracts the instance CreateTags call behind writeReadyTags so the
+// DCV handshake retry/terminal logic is testable without real EC2 (spawn#282).
+// The real impl is ec2TagPutter (in agent.go, where the AWS SDK wiring lives);
+// tests inject a fake that records writes and can return a canned error (e.g. an
+// AccessDenied to exercise the tag-write-denied path).
+type tagPutter interface {
+	putTags(ctx context.Context, instanceID string, tags map[string]string) error
+}
 
 // dcvStatus is the named outcome of the DCV readiness handshake, written to the
 // spawn:ready-status tag so the CLI can report WHY a launch didn't stream rather

@@ -74,6 +74,16 @@ type Agent struct {
 	dcvVerifierStarted bool // the :8444 verifier is up (start once)
 	dcvAuthDone        bool // ready-url written OR a terminal failure recorded (stop retrying)
 
+	// dcv runs the `dcv` CLI shell-outs (list/describe sessions). Defaults to the
+	// real exec-based runner; tests inject a fake so the handshake + idle logic is
+	// exercisable without a DCV server (spawn#282 phase 3).
+	dcv dcvRunner
+
+	// tagger writes the spawn:ready-* tags. Defaults to the real EC2 CreateTags
+	// impl; tests inject a fake so the handshake retry/terminal logic is testable
+	// without real EC2 (spawn#282 phase 3).
+	tagger tagPutter
+
 	// fsxMountStarted guards the async FSx mount (#194/#221) to run at most once.
 	// The mount is (re)triggered from the monitor loop whenever spawn:fsx-pending
 	// becomes visible — it may not be set at spored startup, because the headless
@@ -144,7 +154,9 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 		startTime:          time.Now(),
 		lastActivityTime:   time.Now(),
 		computeSecondsBase: config.ComputeSeconds, // carry over accumulated time from before this start
+		dcv:                execDCVRunner{},       // real `dcv` CLI; tests override
 	}
+	agent.tagger = &ec2TagPutter{region: identity.Region} // real EC2 CreateTags; tests override
 
 	log.Printf("Agent initialized for instance %s in %s (account: %s, provider: %s)",
 		identity.InstanceID, identity.Region, identity.AccountID, identity.Provider)
@@ -796,10 +808,9 @@ func (a *Agent) maybeSetupDCVAuth(ctx context.Context) {
 
 	// One session check this tick. "exhausted" (→ terminal session-never-created)
 	// is a wall-clock deadline from spored start, since each call is one poll.
-	dcvInstalled := dcvOnPath()
-	out, listErr := exec.Command("dcv", "list-sessions").Output()
+	out, listErr := a.dcv.listSessions(ctx)
 	exhausted := time.Since(a.startTime) > dcvSessionWaitTimeout
-	status := classifyDCVStatus(dcvInstalled, listErr, string(out), sessionID, exhausted)
+	status := classifyDCVStatus(a.dcv.installed(), listErr, out, sessionID, exhausted)
 
 	if status != dcvReady {
 		if status.terminal() {
@@ -854,32 +865,14 @@ func (a *Agent) writeReadyTags(ctx context.Context, tags map[string]string) {
 	if a.dcvReadyURLWritten {
 		return
 	}
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.identity.Region))
-	if err != nil {
-		log.Printf("DCV: failed to load AWS config for tag write: %v", err)
-		return
-	}
-	client := ec2.NewFromConfig(cfg)
-	var ec2Tags []ec2types.Tag
-	for k, v := range tags {
-		k, v := k, v
-		ec2Tags = append(ec2Tags, ec2types.Tag{Key: aws.String(k), Value: aws.String(v)})
-	}
-	_, err = client.CreateTags(ctx, &ec2.CreateTagsInput{
-		Resources: []string{a.identity.InstanceID},
-		Tags:      ec2Tags,
-	})
-	if err != nil {
+	if err := a.tagger.putTags(ctx, a.identity.InstanceID, tags); err != nil {
 		log.Printf("DCV: failed to write ready tags: %v", err)
 		// Best-effort: record the IAM denial as the status so the CLI can say
 		// "spored couldn't write its tag" rather than a generic timeout. Use a
-		// minimal second CreateTags for just the status (it may also fail — then
+		// minimal second write for just the status (it may also fail — then
 		// nothing more we can do, and the CLI's generic timeout is the fallback).
 		if isAccessDenied(err) {
-			_, _ = client.CreateTags(ctx, &ec2.CreateTagsInput{
-				Resources: []string{a.identity.InstanceID},
-				Tags:      []ec2types.Tag{{Key: aws.String("spawn:ready-status"), Value: aws.String(string(dcvTagWriteDenied))}},
-			})
+			_ = a.tagger.putTags(ctx, a.identity.InstanceID, map[string]string{"spawn:ready-status": string(dcvTagWriteDenied)})
 		}
 		return
 	}
@@ -888,6 +881,30 @@ func (a *Agent) writeReadyTags(ctx context.Context, tags map[string]string) {
 	if _, ok := tags["spawn:ready-url"]; ok {
 		a.dcvReadyURLWritten = true
 	}
+}
+
+// ec2TagPutter is the production tagPutter: it writes tags via EC2 CreateTags.
+// The region is captured at construction.
+type ec2TagPutter struct {
+	region string
+}
+
+func (p *ec2TagPutter) putTags(ctx context.Context, instanceID string, tags map[string]string) error {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(p.region))
+	if err != nil {
+		return fmt.Errorf("load AWS config for tag write: %w", err)
+	}
+	client := ec2.NewFromConfig(cfg)
+	var ec2Tags []ec2types.Tag
+	for k, v := range tags {
+		k, v := k, v
+		ec2Tags = append(ec2Tags, ec2types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	_, err = client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{instanceID},
+		Tags:      ec2Tags,
+	})
+	return err
 }
 
 // isAccessDenied reports whether an AWS SDK error is an authorization failure
@@ -1082,21 +1099,12 @@ func (a *Agent) getGPUUtilization() float64 {
 	return maxUtilization
 }
 
-// getDCVConnectionCount returns the number of clients connected to the DCV session,
-// or -1 if the DCV server is not yet ready (treated as a startup grace period).
-// Uses `dcv describe-session --json` — same approach as getGPUUtilization uses nvidia-smi.
-// dcvOnPath reports whether the `dcv` binary is installed (on PATH). Used to
-// distinguish "this AMI has no DCV server" from "dcvserver isn't up yet" (#282).
-func dcvOnPath() bool {
-	_, err := exec.LookPath("dcv")
-	return err == nil
-}
-
 // getDCVConnectionCount returns the DCV session's connected-client count, or -1
 // when DCV isn't ready (binary missing, server down, or unparseable output) — the
-// caller's "unknown" signal. The parsing is in parseDCVConnections (pure/tested).
+// caller's "unknown" signal. The parsing is in parseDCVConnections (pure/tested);
+// the shell-out goes through the dcvRunner seam so it's testable (#282).
 func (a *Agent) getDCVConnectionCount() int {
-	out, err := exec.Command("dcv", "describe-session", a.config.DCVSessionID, "--json").Output()
+	out, err := a.dcv.describeSession(context.Background(), a.config.DCVSessionID)
 	if err != nil {
 		return -1 // DCV not ready or session not found
 	}
