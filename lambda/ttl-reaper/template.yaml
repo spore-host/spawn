@@ -56,8 +56,25 @@ Parameters:
     Default: 'rate(10 minutes)'
     Description: EventBridge schedule expression for the reaper
 
+  DnsZoneId:
+    Type: String
+    Default: ''
+    Description: >
+      Route53 hosted zone ID for instance DNS (e.g. Z0341053304H0DQXF6U4X). When
+      set together with DnsDomain, the reaper deletes a reaped instance's DNS
+      records (#247) — spored's graceful DeleteDNS never ran. The zone is in the
+      reaper's OWN account. Empty disables DNS teardown.
+
+  DnsDomain:
+    Type: String
+    Default: ''
+    Description: Domain for the hosted zone above (e.g. spore.host). Empty disables DNS teardown.
+
 Conditions:
   ScanSelfEnabled: !Equals [!Ref ScanSelf, 'true']
+  DnsTeardownEnabled: !And
+    - !Not [!Equals [!Ref DnsZoneId, '']]
+    - !Not [!Equals [!Ref DnsDomain, '']]
 
 Resources:
   TTLReaperFunction:
@@ -79,6 +96,8 @@ Resources:
           REAPER_MAX_AGE: !Ref MaxAge
           REAPER_DRY_RUN: !Ref DryRun
           REAPER_NOTIFY_URL: !Ref NotifyUrl
+          REAPER_DNS_ZONE_ID: !Ref DnsZoneId
+          REAPER_DNS_DOMAIN: !Ref DnsDomain
       Policies:
         # Assume each per-account role that actually describes/terminates EC2.
         - Statement:
@@ -104,6 +123,20 @@ Resources:
                   Condition:
                     StringEquals:
                       ec2:ResourceTag/spawn:managed: 'true'
+            - !Ref AWS::NoValue
+        # DNS teardown (#247): delete a reaped instance's Route53 records, since
+        # spored's graceful DeleteDNS never ran. Scoped to the single configured
+        # hosted zone; ListResourceRecordSets is zone-level (needed to read the
+        # exact record set before a Route53 DELETE). Only attached when DNS
+        # teardown is configured.
+        - !If
+            - DnsTeardownEnabled
+            - Statement:
+                - Effect: Allow
+                  Action:
+                    - route53:ChangeResourceRecordSets
+                    - route53:ListResourceRecordSets
+                  Resource: !Sub 'arn:aws:route53:::hostedzone/${DnsZoneId}'
             - !Ref AWS::NoValue
       Events:
         ScheduleEvent:

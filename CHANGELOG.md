@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The ttl-reaper now deletes a reaped instance's Route53 DNS records** (#247).
+  spored's graceful shutdown deletes its DNS record, but the reaper only fires
+  when spored *failed* (dead/wedged/never-ran), so reaped instances were leaking
+  their `A` records (and the #121 friendly-name alias `CNAME`) into the zone
+  indefinitely. The reaper now performs the teardown itself, out-of-band — it does
+  **not** rely on the (dead) daemon — deleting `{dns-name}.{account-base36}.{domain}`
+  and, when present, the `{dns-name}.{account-name}.{domain}` alias, using its own
+  (infra-account) Route53 credentials. Best-effort and `REAPER_DRY_RUN`-aware; it
+  runs after the terminate so it can never block the hard-deadline guarantee.
+  Enable by setting `REAPER_DNS_ZONE_ID` + `REAPER_DNS_DOMAIN` (both empty = off,
+  so no `route53` IAM is attached). Mirrors the reaper's existing ownership of FSx
+  cleanup (#192/#212).
+- `scripts/deploy-custom-dns.sh` now builds the Lambda with `go build .` instead
+  of `go build main.go` (#248). The single-file build failed
+  (`undefined: verifyInstanceIdentitySignature`, which lives in `signature.go`),
+  producing a stale/empty `bootstrap`.
+
 ## [0.67.0] - 2026-06-25
 
 ### Added

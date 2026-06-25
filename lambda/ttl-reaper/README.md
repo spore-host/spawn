@@ -50,6 +50,8 @@ there and appending its ARN to the list.
 | `REAPER_MAX_AGE` | `168h` (7d) | Hard max-age ceiling (Go duration) |
 | `REAPER_DRY_RUN` | `true` | When true, log `WOULD reap` + notify without terminating |
 | `REAPER_NOTIFY_URL` | (empty) | Slack-incoming-webhook URL; every reap is posted here |
+| `REAPER_DNS_ZONE_ID` | (empty) | Route53 hosted zone ID; with `REAPER_DNS_DOMAIN`, the reaper deletes a reaped instance's DNS records (#247) |
+| `REAPER_DNS_DOMAIN` | (empty) | Domain for the zone above (e.g. `spore.host`); both empty = DNS teardown disabled |
 
 If neither `REAPER_ROLE_ARNS`/`EC2_ROLE_ARN` nor `REAPER_SCAN_SELF=true` is set,
 the reaper falls back to scanning its own account (never a silent no-op).
