@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaces the per-app, per-region AMI table whose IDs were all dangling or
   unshared from the launch account (#389); adding/updating an app is now a
   `docker push`, not a 9-region Packer build.
+- **Catalog validation runs in spawn's tests** (#290). Bumped to libs v0.39.0 and
+  added a test that runs `catalog.Validate()`, so a stale or malformed catalog (a
+  #389-class defect) fails spawn's CI, not just libs'.
 
 ### Fixed
 - **The DCV readiness handshake now retries and can't bill forever** (spawn#282).
