@@ -31,7 +31,8 @@ var (
 	appLaunchSpot         bool
 	appLaunchTTL          string
 	appLaunchIdleTimeout  string
-	appLaunchNoOpen       bool // --no-open: write session file but don't open browser
+	appLaunchNoOpen       bool   // --no-open: write session file but don't open browser
+	appLaunchVersion      string // --app-version: container image tag (#290)
 )
 
 // ── command tree ─────────────────────────────────────────────────────────────
@@ -75,6 +76,7 @@ func init() {
 	appLaunchCmd.Flags().StringVar(&appLaunchTTL, "ttl", "", "Hard termination deadline (e.g. 4h, 8h)")
 	appLaunchCmd.Flags().StringVar(&appLaunchIdleTimeout, "idle-timeout", "", "Stop when DCV has no clients for this duration (default: catalog default)")
 	appLaunchCmd.Flags().BoolVar(&appLaunchNoOpen, "no-open", false, "Write session file but do not open browser automatically")
+	appLaunchCmd.Flags().StringVar(&appLaunchVersion, "app-version", "", "App container image tag to launch (default: catalog default; see 'spawn app list')")
 }
 
 // ── spawn app list ────────────────────────────────────────────────────────────
@@ -87,16 +89,26 @@ func runAppList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tDESCRIPTION\tGPU\tFAMILIES\tLICENSE")
+	fmt.Fprintln(w, "NAME\tDESCRIPTION\tGPU\tVERSION\tFAMILIES\tLICENSE")
 	for _, app := range apps {
 		gpu := "no"
 		if app.GPU {
 			gpu = "yes"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+		// VERSION: the container default tag (with a + when alternates exist), or
+		// "—" for a not-yet-containerized app (#290).
+		version := "—"
+		if app.Containerized() {
+			version = app.TagDefault
+			if len(app.TagsAvailable) > 1 {
+				version += " (+)"
+			}
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			app.Name,
 			app.Description,
 			gpu,
+			version,
 			strings.Join(app.InstanceFamilies, ", "),
 			app.License,
 		)
@@ -146,15 +158,32 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Instance type: %s (default; override with --instance-type)\n", instanceType)
 	}
 
-	// 5. AMI selection: catalog first, then GetRecommendedAMI
+	// 5. Resolve image + base AMI (container catalog, #290).
+	//
+	// Container apps run a Docker image (entry.Image:tag) on the shared
+	// spore-dcv-base AMI (entry.BaseAMIs[region]) — no per-app AMI. The image tag
+	// is the requested --app-version validated against the catalog, or the
+	// default. A not-yet-containerized app (no Image) still launches via its
+	// legacy launch_command on a standard AL2023 AMI.
+	imageTag := ""
+	if entry.Containerized() {
+		imageTag, err = entry.ResolveTag(appLaunchVersion)
+		if err != nil {
+			return err // names the available versions
+		}
+	} else if appLaunchVersion != "" {
+		return fmt.Errorf("--app-version is not supported for %s (not a containerized app)", entry.Name)
+	}
+
 	ami := ""
-	if entry.AMIs != nil {
-		ami = entry.AMIs[region]
+	if entry.BaseAMIs != nil {
+		ami = entry.BaseAMIs[region]
 	}
 	if ami == "" {
-		fmt.Fprintf(os.Stderr, "No catalog AMI for %s in %s — using standard AL2023 AMI (install DCV manually or build catalog AMIs via infra/amis/build.sh)\n", entry.Name, region)
-		// Use standard x86 AL2023 — GPU-specific SSM paths don't exist for AL2023.
-		// Catalog AMIs (built via infra/amis/) will replace this once published (#286).
+		if entry.Containerized() {
+			return fmt.Errorf("no spore-dcv-base AMI for %s in %s — build/share it (infra/amis/dcv-gpu-al2023.pkr.hcl) or try --region us-east-1", entry.Name, region)
+		}
+		fmt.Fprintf(os.Stderr, "No base AMI for %s in %s — using standard AL2023 AMI (install DCV manually)\n", entry.Name, region)
 		ami, err = client.GetAL2023AMI(ctx, region, "x86_64", false)
 		if err != nil {
 			return fmt.Errorf("get AL2023 AMI: %w", err)
@@ -207,8 +236,17 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	// 9. DCV session ID (fixed "console" — DCV default session name)
 	dcvSessionID := "console"
 
-	// 10. DCV user-data: start DCV server + create session
-	dcvUserData := buildDCVUserData(entry.LaunchCommand, dcvSessionID)
+	// 10. DCV user-data: start DCV server + create session. Container apps (#290)
+	// pre-pull the image and run it into the DCV display as the session init;
+	// legacy apps use the baked launch_command.
+	var dcvUserData string
+	if entry.Containerized() {
+		image := entry.Image + ":" + imageTag
+		fmt.Fprintf(os.Stderr, "App image: %s\n", image)
+		dcvUserData = buildContainerDCVUserData(image, entry.GPU, dcvSessionID)
+	} else {
+		dcvUserData = buildDCVUserData(entry.LaunchCommand, dcvSessionID)
+	}
 
 	// 14. Build LaunchConfig
 	lc := spawnclient.LaunchConfig{
@@ -326,9 +364,41 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+// containerInitCommand returns the DCV session init command that runs an app
+// container into the virtual display (#290). It's the `--init` of `dcv
+// create-session`: a foreground `docker run` sharing the host X socket and (for
+// GPU apps) the GPUs, so the container's CMD renders to the DCV display. Pure, so
+// the wiring is unit-tested without Docker or EC2. --rm cleans up on exit;
+// --network host keeps it simple; the image must already be pulled (the user-data
+// pre-pulls it before create-session so the session starts instantly).
+func containerInitCommand(image string, gpu bool) string {
+	gpuFlag := ""
+	if gpu {
+		gpuFlag = "--gpus all "
+	}
+	// DISPLAY :0 is the NVIDIA/DCV X server; /tmp/.X11-unix is bind-mounted so the
+	// container draws into it. ec2-user (uid 1000) owns the DCV session.
+	return fmt.Sprintf("/usr/bin/docker run --rm %s--network host -e DISPLAY=:0 -v /tmp/.X11-unix:/tmp/.X11-unix %s", gpuFlag, image)
+}
+
+// buildContainerDCVUserData builds user-data for a containerized app (#290): it
+// pre-pulls the image, then starts a DCV session whose init runs the container.
+func buildContainerDCVUserData(image string, gpu bool, sessionID string) string {
+	prePull := fmt.Sprintf("echo 'Pre-pulling %s...'\n/usr/bin/docker pull %s || echo 'WARNING: docker pull failed; session init will retry the run'\n", image, image)
+	return buildDCVUserDataWithInit(containerInitCommand(image, gpu), sessionID, prePull, image)
+}
+
 // buildDCVUserData returns a base64-encoded user-data script that starts DCV and creates a session.
 // spored is already pre-installed in the catalog AMI.
 func buildDCVUserData(launchCommand, sessionID string) string {
+	return buildDCVUserDataWithInit(launchCommand, sessionID, "", launchCommand)
+}
+
+// buildDCVUserDataWithInit is the shared user-data core: update spored, install
+// the DCV TLS cert, start spored + dcvserver, optionally run preCreate (e.g. a
+// container pre-pull), then create the DCV session with initCommand as its
+// --init. label is a human string echoed for logging. Returns base64 user-data.
+func buildDCVUserDataWithInit(initCommand, sessionID, preCreate, label string) string {
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
 
@@ -381,6 +451,8 @@ sleep 15
 dcv close-session console 2>/dev/null || true
 sleep 2
 
+# App-specific preparation (e.g. container image pre-pull) before the session starts.
+%s
 # Create application streaming session owned by ec2-user with the app as init
 dcv create-session \
     --type virtual \
@@ -390,7 +462,7 @@ dcv create-session \
     %s 2>/dev/null || true
 
 echo "DCV session '%s' created for: %s"
-`, sessionID, launchCommand, sessionID, sessionID, launchCommand)
+`, preCreate, sessionID, initCommand, sessionID, sessionID, label)
 	return base64.StdEncoding.EncodeToString([]byte(script))
 }
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn app launch` runs apps from containers on a shared DCV base AMI** (#290).
+  A catalog app now launches its Docker image (e.g.
+  `public.ecr.aws/spore-host/paraview:5.13.2`) on the shared `spore-dcv-base` AMI
+  instead of a baked per-app AMI: the user-data pre-pulls the image and runs it
+  into the DCV display as the session, GPU apps with `--gpus all`. New
+  `--app-version <tag>` selects the image version (validated against the catalog;
+  defaults to the catalog default). `spawn app list` gains a VERSION column. This
+  replaces the per-app, per-region AMI table whose IDs were all dangling or
+  unshared from the launch account (#389); adding/updating an app is now a
+  `docker push`, not a 9-region Packer build.
+
 ### Fixed
 - **The DCV readiness handshake now retries and can't bill forever** (spawn#282).
   Three reliability fixes for app streaming: (1) the handshake (session-wait →
