@@ -33,6 +33,8 @@ var (
 	appLaunchIdleTimeout  string
 	appLaunchNoOpen       bool   // --no-open: write session file but don't open browser
 	appLaunchVersion      string // --app-version: container image tag (#290)
+	appLaunchImage        string // --image: ad-hoc image binding, BYO (spore-host#392)
+	appCatalogPath        string // --catalog: local overlay file path (spore-host#392)
 )
 
 // ── command tree ─────────────────────────────────────────────────────────────
@@ -45,11 +47,16 @@ var appGroupCmd = &cobra.Command{
 Each application is pre-configured with the right instance type, NICE DCV
 for browser-based streaming, and automatic idle termination.
 
+Apps you can launch depend on your account: public images are available to
+everyone; private images appear only if your account can pull them. Bring your
+own image with --image, or add bindings in ~/.spawn/catalog.yaml (--catalog).
+
 Examples:
-  spawn app list                       # show available apps
+  spawn app list                       # show apps launchable from your account
   spawn app launch paraview            # launch ParaView on a GPU instance
   spawn app launch igv --region us-west-2
-  spawn app launch paraview --spot --ttl 4h`,
+  spawn app launch paraview --spot --ttl 4h
+  spawn app launch paraview --image 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview:5.13.2`,
 }
 
 var appListCmd = &cobra.Command{
@@ -77,14 +84,40 @@ func init() {
 	appLaunchCmd.Flags().StringVar(&appLaunchIdleTimeout, "idle-timeout", "", "Stop when DCV has no clients for this duration (default: catalog default)")
 	appLaunchCmd.Flags().BoolVar(&appLaunchNoOpen, "no-open", false, "Write session file but do not open browser automatically")
 	appLaunchCmd.Flags().StringVar(&appLaunchVersion, "app-version", "", "App container image tag to launch (default: catalog default; see 'spawn app list')")
+	appLaunchCmd.Flags().StringVar(&appLaunchImage, "image", "", "Launch a BYO container image for this app (overrides the catalog binding), e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview:5.13.2")
+
+	// --catalog applies to both `list` and `launch`: it points the catalog at a
+	// local overlay (BYO images, spore-host#392), applied before any catalog read.
+	appGroupCmd.PersistentFlags().StringVar(&appCatalogPath, "catalog", "", "Local catalog overlay file (default: $SPAWN_CATALOG or ~/.spawn/catalog.yaml)")
+	appGroupCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if appCatalogPath != "" {
+			catalog.SetOverlayPath(appCatalogPath)
+			catalog.Reload()
+		}
+		// Surface a malformed/missing overlay loudly but non-fatally — the embedded
+		// catalog still works (the overlay is opt-in convenience, not required).
+		if err := catalog.LoadError(); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  catalog overlay: %v (using built-in catalog)\n", err)
+		}
+		return nil
+	}
 }
 
 // ── spawn app list ────────────────────────────────────────────────────────────
 
 func runAppList(cmd *cobra.Command, args []string) error {
-	apps := catalog.List()
+	// Per-account view (#392): an app is shown only if its image resolves for this
+	// account — public always, private only if owned by the caller. Account lookup
+	// is best-effort: with no creds it's "", which lists public apps only.
+	callerAccount := ""
+	if client, err := spawnclient.NewClient(context.Background()); err == nil {
+		if acct, err := client.GetAccountID(context.Background()); err == nil {
+			callerAccount = acct
+		}
+	}
+	apps := resolvableApps(catalog.List(), callerAccount)
 	if len(apps) == 0 {
-		fmt.Fprintln(os.Stderr, "No applications in catalog.")
+		fmt.Fprintln(os.Stderr, "No launchable applications in catalog.")
 		return nil
 	}
 
@@ -158,6 +191,20 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Instance type: %s (default; override with --instance-type)\n", instanceType)
 	}
 
+	// 4b. --image: ad-hoc BYO binding (spore-host#392). Rebinds this app to a
+	// user-supplied image (e.g. their own private ECR) without a catalog/overlay
+	// edit. The ref may include a tag (image:tag); a bare ref uses --app-version
+	// or "latest". Sets visibility by inference so private ECR triggers auth.
+	if appLaunchImage != "" {
+		img, tag := splitImageRef(appLaunchImage)
+		entry.Image = img
+		entry.Visibility = "" // re-infer from the new host
+		if tag != "" {
+			entry.TagDefault = tag
+			entry.TagsAvailable = []string{tag}
+		}
+	}
+
 	// 5. Resolve image + base AMI (container catalog, #290).
 	//
 	// Container apps run a Docker image (entry.Image:tag) on the shared
@@ -173,6 +220,19 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		}
 	} else if appLaunchVersion != "" {
 		return fmt.Errorf("--app-version is not supported for %s (not a containerized app)", entry.Name)
+	} else if entry.LaunchCommand == "" {
+		// No image (catalog/overlay/--image) and no legacy launch command → nothing
+		// to launch. This is the definition-only case (#392): the global catalog
+		// may ship an app's hardware spec without an image; the user supplies one.
+		return fmt.Errorf("no image configured for %s — supply one with --image <ref>, or add a binding to ~/.spawn/catalog.yaml (see 'spawn app list')", entry.Name)
+	}
+
+	// Launchability filter (#392): refuse a private image this account can't pull.
+	if entry.Containerized() {
+		callerAccount, _ := client.GetAccountID(ctx)
+		if ok, reason := appResolvable(entry, callerAccount); !ok {
+			return fmt.Errorf("cannot launch %s: %s — its image %q is not pullable from this account", entry.Name, reason, entry.Image)
+		}
 	}
 
 	ami := ""
@@ -242,8 +302,9 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	var dcvUserData string
 	if entry.Containerized() {
 		image := entry.Image + ":" + imageTag
-		fmt.Fprintf(os.Stderr, "App image: %s\n", image)
-		dcvUserData = buildContainerDCVUserData(image, entry.GPU, dcvSessionID)
+		private := entry.ImageVisibility() == catalog.VisibilityPrivate
+		fmt.Fprintf(os.Stderr, "App image: %s (%s)\n", image, entry.ImageVisibility())
+		dcvUserData = buildContainerDCVUserData(image, entry.GPU, private, region, dcvSessionID)
 	} else {
 		dcvUserData = buildDCVUserData(entry.LaunchCommand, dcvSessionID)
 	}
@@ -403,16 +464,26 @@ exec /usr/bin/docker run --rm %s--network host \
 // buildContainerDCVUserData builds user-data for a containerized app (#290): it
 // pre-pulls the image, installs the session-display-aware run wrapper (#263), and
 // starts a DCV session whose --init is that wrapper.
-func buildContainerDCVUserData(image string, gpu bool, sessionID string) string {
+func buildContainerDCVUserData(image string, gpu, private bool, region, sessionID string) string {
 	wrapper := containerRunWrapper(image, gpu)
-	// preCreate runs in the user-data (root) before create-session: pull the image
-	// and install the wrapper that DCV will invoke as --init.
-	preCreate := fmt.Sprintf(`echo 'Pre-pulling %s...'
+	// For a private-ECR image, authenticate the Docker client with the instance
+	// role before pulling (spore-host#392). Public images skip this (anonymous
+	// pull). Cross-account private images additionally need the repo policy to
+	// grant this account — if that's missing the pull fails with a clear error.
+	login := ""
+	if private {
+		login = fmt.Sprintf(`echo 'Authenticating to private ECR (%s)...'
+aws ecr get-login-password --region %s | /usr/bin/docker login --username AWS --password-stdin %s 2>&1 || echo 'WARNING: ECR login failed; private pull will fail'
+`, region, region, ecrRegistryHost(image))
+	}
+	// preCreate runs in the user-data (root) before create-session: (optionally
+	// log in to ECR), pull the image, and install the wrapper DCV invokes as --init.
+	preCreate := fmt.Sprintf(`%secho 'Pre-pulling %s...'
 /usr/bin/docker pull %s || echo 'WARNING: docker pull failed; session init will retry the run'
 cat > %s <<'EOFAPPRUN'
 %sEOFAPPRUN
 chmod +x %s
-`, image, image, containerRunPath, wrapper, containerRunPath)
+`, login, image, image, containerRunPath, wrapper, containerRunPath)
 	return buildDCVUserDataWithInit(containerRunPath, sessionID, preCreate, image)
 }
 

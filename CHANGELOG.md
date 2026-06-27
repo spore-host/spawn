@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Bring-your-own app images + per-account catalog** (spore-host#392). The app
+  catalog is now a per-account view: `spawn app list` shows only apps whose image
+  your account can pull — public images for everyone, private-ECR images only when
+  your account owns them. New flags: `--image <ref>` launches a BYO container
+  image for an app (overriding the catalog binding; private-ECR refs trigger an
+  `aws ecr get-login-password | docker login` on the instance before the pull),
+  and `--catalog <file>` (also `$SPAWN_CATALOG`, `~/.spawn/catalog.yaml`) layers a
+  local overlay that adds apps or rebinds images. An app with no resolvable image
+  fails fast at launch with guidance instead of a generic timeout. spore.host
+  ships only public images; private/personal images live in your overlay.
+
 ### Fixed
 - **Container apps now render into the DCV session's display, not host `:0`**
   (#263). The first real container launch failed with "Unable to open X display
