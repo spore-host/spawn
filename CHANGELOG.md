@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Container apps now render into the DCV session's display, not host `:0`**
+  (#263). The first real container launch failed with "Unable to open X display
+  :0" because `dcv create-session --type virtual` starts its own per-session X
+  server (not host `:0`, and `/tmp/.X11-unix` was empty). The session `--init` is
+  now a wrapper (`/usr/local/bin/spore-app-run`) that reads DCV's session
+  `DISPLAY`/`XAUTHORITY` and passes them into the container, mounting the X socket
+  and xauth file.
+- **The DCV launch path starts spored via systemd, not `spored monitor`** (#264).
+  The removed `monitor` subcommand made spored exit immediately at boot, so the
+  `:8444` token verifier never came up and no `spawn:ready-status` was ever
+  written (the launch hit the generic timeout). It now installs the canonical
+  `spored.service` unit and `systemctl start spored`, matching the standard
+  launch path.
+
 ### Added
 - **`spawn app launch` runs apps from containers on a shared DCV base AMI** (#290).
   A catalog app now launches its Docker image (e.g.
