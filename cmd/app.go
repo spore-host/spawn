@@ -364,28 +364,56 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// containerInitCommand returns the DCV session init command that runs an app
-// container into the virtual display (#290). It's the `--init` of `dcv
-// create-session`: a foreground `docker run` sharing the host X socket and (for
-// GPU apps) the GPUs, so the container's CMD renders to the DCV display. Pure, so
-// the wiring is unit-tested without Docker or EC2. --rm cleans up on exit;
-// --network host keeps it simple; the image must already be pulled (the user-data
-// pre-pulls it before create-session so the session starts instantly).
-func containerInitCommand(image string, gpu bool) string {
+// containerRunPath is where the per-launch container-run wrapper is installed.
+// DCV invokes it as the session --init, so it runs in DCV's session environment.
+const containerRunPath = "/usr/local/bin/spore-app-run"
+
+// containerRunWrapper returns a shell script that runs the app container into the
+// *DCV virtual session's* display (#263). DCV sets DISPLAY/XAUTHORITY in the
+// --init process environment for the per-session Xdcv server — which is NOT host
+// :0, the bug that made the first container launch fail with "Unable to open X
+// display :0". The wrapper reads those at session-launch time and passes them
+// into the container, bind-mounting the X socket dir and the xauth file. Pure, so
+// it's unit-tested without Docker/EC2.
+func containerRunWrapper(image string, gpu bool) string {
 	gpuFlag := ""
 	if gpu {
 		gpuFlag = "--gpus all "
 	}
-	// DISPLAY :0 is the NVIDIA/DCV X server; /tmp/.X11-unix is bind-mounted so the
-	// container draws into it. ec2-user (uid 1000) owns the DCV session.
-	return fmt.Sprintf("/usr/bin/docker run --rm %s--network host -e DISPLAY=:0 -v /tmp/.X11-unix:/tmp/.X11-unix %s", gpuFlag, image)
+	// $DISPLAY/$XAUTHORITY come from DCV's session env. Fall back to :0 only if
+	// DCV didn't set DISPLAY (e.g. a console session). The xauth file is mounted
+	// read-only at a fixed path so the container user (uid 1000) can authenticate.
+	return fmt.Sprintf(`#!/bin/bash
+# spore container app runner — executed by DCV as the session --init (#263).
+# DCV exports DISPLAY/XAUTHORITY for the virtual session; pass them to the container.
+set -u
+DISP="${DISPLAY:-:0}"
+XAUTH="${XAUTHORITY:-$HOME/.Xauthority}"
+XAUTH_ARGS=""
+if [ -f "$XAUTH" ]; then
+  XAUTH_ARGS="-e XAUTHORITY=/tmp/.xauth -v $XAUTH:/tmp/.xauth:ro"
+fi
+exec /usr/bin/docker run --rm %s--network host \
+  -e DISPLAY="$DISP" $XAUTH_ARGS \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  %s
+`, gpuFlag, image)
 }
 
 // buildContainerDCVUserData builds user-data for a containerized app (#290): it
-// pre-pulls the image, then starts a DCV session whose init runs the container.
+// pre-pulls the image, installs the session-display-aware run wrapper (#263), and
+// starts a DCV session whose --init is that wrapper.
 func buildContainerDCVUserData(image string, gpu bool, sessionID string) string {
-	prePull := fmt.Sprintf("echo 'Pre-pulling %s...'\n/usr/bin/docker pull %s || echo 'WARNING: docker pull failed; session init will retry the run'\n", image, image)
-	return buildDCVUserDataWithInit(containerInitCommand(image, gpu), sessionID, prePull, image)
+	wrapper := containerRunWrapper(image, gpu)
+	// preCreate runs in the user-data (root) before create-session: pull the image
+	// and install the wrapper that DCV will invoke as --init.
+	preCreate := fmt.Sprintf(`echo 'Pre-pulling %s...'
+/usr/bin/docker pull %s || echo 'WARNING: docker pull failed; session init will retry the run'
+cat > %s <<'EOFAPPRUN'
+%sEOFAPPRUN
+chmod +x %s
+`, image, image, containerRunPath, wrapper, containerRunPath)
+	return buildDCVUserDataWithInit(containerRunPath, sessionID, preCreate, image)
 }
 
 // buildDCVUserData returns a base64-encoded user-data script that starts DCV and creates a session.
@@ -434,10 +462,36 @@ print(r or '0')" 2>/dev/null || echo "")
   fi
 fi
 
-# Start spored (lifecycle daemon — provides DCV token verifier on :8444, idle detection, DNS)
-# Must start before DCV so the token verifier is ready when DCV initializes.
-nohup /usr/local/bin/spored monitor > /var/log/spored.log 2>&1 &
-echo "spored started (PID: $!)"
+# Start spored (lifecycle daemon — provides DCV token verifier on :8444, idle
+# detection, DNS). Install a systemd unit instead of 'spored monitor': that
+# subcommand was removed (current spored runs as bare 'spored'), so the old
+# nohup line exited immediately and the token verifier never came up (#264).
+# Mirrors the canonical unit in pkg/launcher/bootstrap.go. Must be up before DCV
+# so the :8444 verifier is listening when DCV initializes.
+cat > /etc/systemd/system/spored.service <<'EOFSPORED'
+[Unit]
+Description=Spawn Agent - Instance self-monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=SPORE_DNS_SIGV4=1
+ExecStart=/usr/local/bin/spored
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOFSPORED
+systemctl daemon-reload
+systemctl enable spored
+systemctl start spored
+echo "spored started via systemd"
 
 # Start NICE DCV server (cert already configured above)
 systemctl enable dcvserver
