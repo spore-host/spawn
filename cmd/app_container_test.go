@@ -53,7 +53,7 @@ func TestContainerRunWrapper(t *testing.T) {
 // path. Decodes the base64 to inspect the script.
 func TestBuildContainerDCVUserData(t *testing.T) {
 	const image = "public.ecr.aws/f8g1e7l5/paraview:5.13.2"
-	enc := buildContainerDCVUserData(image, true, "console")
+	enc := buildContainerDCVUserData(image, true, false, "us-east-1", "console")
 	raw, err := base64.StdEncoding.DecodeString(enc)
 	if err != nil {
 		t.Fatalf("user-data is not valid base64: %v", err)
