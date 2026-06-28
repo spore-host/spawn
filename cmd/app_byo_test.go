@@ -80,22 +80,28 @@ func TestAppResolvable(t *testing.T) {
 	}
 }
 
-func TestResolvableApps_FiltersByAccount(t *testing.T) {
-	apps := []catalog.AppEntry{
-		{Name: "pub", Image: "public.ecr.aws/x/pub", TagDefault: "1"},
-		{Name: "mine", Image: "111111111111.dkr.ecr.us-east-1.amazonaws.com/mine", TagDefault: "1"},
-		{Name: "theirs", Image: "222222222222.dkr.ecr.us-east-1.amazonaws.com/theirs", TagDefault: "1"},
+func TestClassifyForList(t *testing.T) {
+	cases := []struct {
+		name       string
+		entry      catalog.AppEntry
+		account    string
+		wantShow   bool
+		wantStatus string
+	}{
+		{"public launchable", catalog.AppEntry{Name: "pub", Image: "public.ecr.aws/x/pub", TagDefault: "1"}, "111111111111", true, appStatusLaunchable},
+		{"own private launchable", catalog.AppEntry{Name: "mine", Image: "111111111111.dkr.ecr.us-east-1.amazonaws.com/mine", TagDefault: "1"}, "111111111111", true, appStatusLaunchable},
+		{"others private hidden", catalog.AppEntry{Name: "theirs", Image: "222222222222.dkr.ecr.us-east-1.amazonaws.com/theirs", TagDefault: "1"}, "111111111111", false, ""},
+		{"recipe-only shown as recipe", catalog.AppEntry{Name: "pv", Recipe: "infra/amis/containers/paraview"}, "111111111111", true, appStatusRecipe},
+		{"recipe shown even with no creds", catalog.AppEntry{Name: "pv", Recipe: "infra/x"}, "", true, appStatusRecipe},
+		{"legacy launch_command launchable", catalog.AppEntry{Name: "igv", LaunchCommand: "/opt/igv"}, "", true, appStatusLaunchable},
 	}
-	got := resolvableApps(apps, "111111111111")
-	names := map[string]bool{}
-	for _, a := range got {
-		names[a.Name] = true
-	}
-	if !names["pub"] || !names["mine"] {
-		t.Errorf("expected pub + mine resolvable, got %v", names)
-	}
-	if names["theirs"] {
-		t.Error("another account's private image must NOT be listed")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			show, status := classifyForList(&c.entry, c.account)
+			if show != c.wantShow || status != c.wantStatus {
+				t.Errorf("classifyForList(%s, %q) = (%v,%q), want (%v,%q)", c.entry.Name, c.account, show, status, c.wantShow, c.wantStatus)
+			}
+		})
 	}
 }
 

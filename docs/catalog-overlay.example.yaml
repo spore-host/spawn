@@ -1,0 +1,41 @@
+# spore.host catalog overlay — example
+#
+# Copy to ~/.spawn/catalog.yaml (or point at it with --catalog / $SPAWN_CATALOG)
+# to bring your own app images (the "cake") on top of the public catalog (the
+# "recipe"). spore.host ships app *definitions* and build recipes; the images
+# themselves are yours to build and host.
+#
+# Overlay entries merge by name onto the built-in catalog: a matching name
+# REBINDS that app (e.g. supplies an image for a recipe-only app); a new name
+# ADDS an app. Your overlay is private to you — entries here never appear in
+# anyone else's catalog.
+#
+# What `spawn app list` shows for an app:
+#   launchable        — its image resolves for your account (public, or private
+#                       ECR your account owns), or it has a legacy launch_command
+#   recipe available  — a buildable definition with no bound image (bind one here)
+#   (hidden)          — a private image owned by another account you can't pull
+
+apps:
+  # Bind a built image to a recipe-only app (paraview ships as a recipe).
+  # Build it first:  infra/amis/containers/build-push.sh paraview 5.13.2 <your-registry>
+  - name: paraview
+    image: public.ecr.aws/EXAMPLE/paraview   # or 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview (private)
+    tag_default: "5.13.2"
+    tags_available: ["5.13.2"]
+    # visibility is inferred from the registry host (public.ecr.aws -> public,
+    # *.dkr.ecr.* -> private); set it explicitly only to override the guess.
+    # visibility: private
+
+  # Add an app that isn't in the built-in catalog at all.
+  - name: myviz
+    description: "My lab's in-house visualization tool"
+    instance_families: [g6, g5]
+    gpu: true
+    min_vram_gib: 24
+    dcv: true
+    idle_timeout_default: 20m
+    image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/myviz   # private ECR you own
+    tag_default: "1.0"
+    base_amis:
+      us-east-1: ami-0c37fb59c90d1ed3a   # a spore-dcv-base AMI shared to your launch account

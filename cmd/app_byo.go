@@ -79,14 +79,23 @@ func splitImageRef(ref string) (image, tag string) {
 	return ref, ""
 }
 
-// resolvableApps filters apps to those resolvable for the caller account
-// (the per-account catalog view, #392). Pure.
-func resolvableApps(apps []catalog.AppEntry, callerAccount string) []catalog.AppEntry {
-	out := make([]catalog.AppEntry, 0, len(apps))
-	for i := range apps {
-		if ok, _ := appResolvable(&apps[i], callerAccount); ok {
-			out = append(out, apps[i])
-		}
+// App list status values (#392).
+const (
+	appStatusLaunchable = "launchable" // image resolves for this account, or legacy launch_command
+	appStatusRecipe     = "recipe"     // buildable definition — public recipe, no bound image
+)
+
+// classifyForList decides how an app appears in `spawn app list` for the caller
+// account (#392): show=false hides it (a private image owned by another account
+// you can't pull); otherwise status is "launchable" or "recipe". Pure.
+func classifyForList(e *catalog.AppEntry, callerAccount string) (show bool, status string) {
+	if e.RecipeOnly() {
+		// A buildable definition: shown as a recipe regardless of account (the
+		// recipe itself is public). It becomes launchable once a cake is bound.
+		return true, appStatusRecipe
 	}
-	return out
+	if ok, _ := appResolvable(e, callerAccount); ok {
+		return true, appStatusLaunchable
+	}
+	return false, "" // private image this account can't pull → hidden
 }
