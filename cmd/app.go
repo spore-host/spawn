@@ -115,23 +115,28 @@ func runAppList(cmd *cobra.Command, args []string) error {
 			callerAccount = acct
 		}
 	}
-	apps := resolvableApps(catalog.List(), callerAccount)
-	if len(apps) == 0 {
-		fmt.Fprintln(os.Stderr, "No launchable applications in catalog.")
-		return nil
-	}
-
+	all := catalog.List()
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tDESCRIPTION\tGPU\tVERSION\tFAMILIES\tLICENSE")
-	for _, app := range apps {
+	fmt.Fprintln(w, "NAME\tDESCRIPTION\tGPU\tSTATUS\tVERSION\tFAMILIES")
+	shown, recipes := 0, 0
+	for _, app := range all {
+		show, status := classifyForList(&app, callerAccount)
+		if !show {
+			continue // private image this account can't pull (#392)
+		}
+		shown++
 		gpu := "no"
 		if app.GPU {
 			gpu = "yes"
 		}
-		// VERSION: the container default tag (with a + when alternates exist), or
-		// "—" for a not-yet-containerized app (#290).
+		// STATUS: "launchable" (image resolves / legacy command) vs "recipe"
+		// (buildable definition — bake it, then bind via overlay or --image, #392).
+		statusLabel := "launchable"
 		version := "—"
-		if app.Containerized() {
+		if status == appStatusRecipe {
+			statusLabel = "recipe available"
+			recipes++
+		} else if app.Containerized() {
 			version = app.TagDefault
 			if len(app.TagsAvailable) > 1 {
 				version += " (+)"
@@ -141,12 +146,22 @@ func runAppList(cmd *cobra.Command, args []string) error {
 			app.Name,
 			app.Description,
 			gpu,
+			statusLabel,
 			version,
 			strings.Join(app.InstanceFamilies, ", "),
-			app.License,
 		)
 	}
-	return w.Flush()
+	if shown == 0 {
+		fmt.Fprintln(os.Stderr, "No applications available for this account.")
+		return nil
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if recipes > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d app(s) are \"recipe available\": build the image (see infra/amis/containers/<app>),\nthen bind it in ~/.spawn/catalog.yaml or launch with --image <ref>.\n", recipes)
+	}
+	return nil
 }
 
 // ── spawn app launch ──────────────────────────────────────────────────────────

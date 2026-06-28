@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local overlay that adds apps or rebinds images. An app with no resolvable image
   fails fast at launch with guidance instead of a generic timeout. spore.host
   ships only public images; private/personal images live in your overlay.
+  `spawn app list` gains a STATUS column: **launchable** (image resolves for your
+  account, or a legacy command) vs **recipe available** (a buildable definition —
+  build the image per `infra/amis/containers/<app>`, then bind it via overlay or
+  `--image`); private images owned by another account are hidden. paraview and
+  chimerax now ship as recipes. See `docs/catalog-overlay.example.yaml`.
 
 ### Fixed
 - **Container apps now render into the DCV session's display, not host `:0`**
