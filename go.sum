@@ -226,6 +226,8 @@ github.com/spore-host/cohort v0.2.0 h1:PGKkYawNzymE6jPebRqsZHK9X/m2UVYupujMnIdK8
 github.com/spore-host/cohort v0.2.0/go.mod h1:sNMWDccvNp3Qso8ZVMcOvJTJ8GC/QY9LDUYQK1zYWLc=
 github.com/spore-host/libs v0.41.0 h1:JuuNjXpCtGZ3uXeKGgyinm1tL4HNKx88u86rxzEgBRs=
 github.com/spore-host/libs v0.41.0/go.mod h1:1NdCOXkDuw6T0MAcWOyO630e0OPaGaYiMbLcRBIHeyM=
+github.com/spore-host/libs v0.41.1 h1:OVvtUnYMBa1Z2632kC2p3J0KLE6rg0SBwFp/+smiR1g=
+github.com/spore-host/libs v0.41.1/go.mod h1:1NdCOXkDuw6T0MAcWOyO630e0OPaGaYiMbLcRBIHeyM=
 github.com/spore-host/truffle v0.38.1 h1:IPj0GvrCVhPfp/zDdgcnRspKZzL3G8y9pIS4v+Htv6A=
 github.com/spore-host/truffle v0.38.1/go.mod h1:20ZI1wEvNcqi/xefx0akXn5ZfgvquD2p27sQy88bvi0=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
