@@ -1,11 +1,29 @@
 # GATK Germline Variant Calling Pipeline (WDL)
 
-> ⚠️ **Work in progress — WDL is not yet a supported workflow integration.**
-> spawn's only first-class workflow engine today is **Nextflow** (via
-> [nf-spawn](https://github.com/spore-host/nf-spawn)). This example shows how you
-> *could* drive a WDL/Cromwell run on a spawned instance by hand, but there is no
-> spawn WDL executor and this pipeline is unverified end-to-end. Treat it as a
-> design sketch, not a turnkey path.
+> ✅ **WDL is a first-class workflow integration.** Run any WDL on spawn with
+> **[miniwdl-spawn](https://github.com/spore-host/miniwdl-spawn)** — a miniwdl
+> container backend that runs each WDL task on its own ephemeral, auto-sized,
+> auto-terminating EC2 instance (the WDL analog of
+> [nf-spawn](https://github.com/spore-host/nf-spawn) for Nextflow):
+>
+> ```bash
+> pip install miniwdl-spawn                       # installs miniwdl too
+> export SPAWN_WORKDIR_S3=s3://my-bucket/wdl-runs  # shared task I/O
+> export MINIWDL__SCHEDULER__CONTAINER_BACKEND=spawn
+> miniwdl run your.wdl -i inputs.json              # each task → a spawned instance
+> ```
+>
+> Each task's instance is sized from its `runtime { cpu, memory }` (via truffle),
+> pulls its inputs from S3, runs the `runtime.docker` image, syncs outputs back,
+> and self-terminates. Verified end-to-end (spore-host#395); see the
+> [miniwdl-spawn README](https://github.com/spore-host/miniwdl-spawn) and its
+> `examples/hello.wdl` for the proven worked example.
+>
+> The `gatk-germline.wdl` below is the **next migration target** — a realistic
+> multi-task genomics pipeline to run through miniwdl-spawn (its own follow-up).
+> The `spawn launch … --user-data` recipe shown later is the older by-hand
+> approach, kept for reference. Note: a very short task may rely on the `--ttl`
+> backstop rather than prompt self-terminate (spore-host/spawn#270).
 
 Complete GATK Best Practices germline variant calling pipeline for spawn.
 
