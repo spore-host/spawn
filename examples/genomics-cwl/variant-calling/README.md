@@ -1,13 +1,16 @@
 # Variant Calling Pipeline (CWL)
 
-> ⚠️ **Work in progress — CWL is not yet a supported workflow integration.**
-> spawn's only first-class workflow engine today is **Nextflow** (via
-> [nf-spawn](https://github.com/spore-host/nf-spawn)). This example shows how you
-> *could* drive a CWL run on a spawned instance by hand, but there is no spawn CWL
-> executor and this pipeline is unverified end-to-end. Treat it as a design
-> sketch, not a turnkey path.
+> ✅ **CWL is a first-class workflow integration on spawn**, via
+> [**cwl-spawn**](https://github.com/spore-host/cwl-spawn) — the CWL analog of
+> [nf-spawn](https://github.com/spore-host/nf-spawn) (Nextflow) and
+> [miniwdl-spawn](https://github.com/spore-host/miniwdl-spawn) (WDL). Each CWL
+> `CommandLineTool` step runs on a purpose-sized, ephemeral EC2 instance that
+> auto-terminates, with inputs/outputs bridged through S3. The end-to-end path is
+> verified (see cwl-spawn's `examples/hello.cwl`); this variant-calling pipeline
+> is the next migration target (its own follow-up — the biological workflow files
+> here are illustrative).
 
-Complete germline variant calling pipeline using Common Workflow Language (CWL) on spawn.
+Germline variant calling pipeline using Common Workflow Language (CWL) on spawn.
 
 **Pipeline:** BAM → VCF (GATK HaplotypeCaller + filtration)
 
@@ -33,37 +36,30 @@ Output: Filtered VCF
 
 ## Quick Start
 
-### Prerequisites
+### Install
 
-**Install cwltool:**
 ```bash
-pip3 install cwltool
+pip install cwl-spawn
 ```
 
-**Build CWL-ready AMI:**
+`cwl-spawn` drives `cwltool` as a library; the `spawn` and `truffle` CLIs must be
+on your `PATH` and AWS credentials configured. Each `CommandLineTool` step's EC2
+instance is auto-sized from its CWL `ResourceRequirement` (`coresMin`/`ramMin`)
+via `truffle`, or pinned with a `spore.host` `InstanceType` hint.
+
+### Run
+
 ```bash
-spawn launch --instance-type c6i.2xlarge --wait-for-ssh
+export SPAWN_WORKDIR_S3=s3://my-bucket/cwl-runs   # the S3 bridge (required)
+export SPAWN_REGION=us-east-1
+export SPAWN_TTL=4h                                # TTL backstop per step
 
-ssh instance
-sudo yum install -y python3 docker
-pip3 install cwltool
-
-# Enable Docker
-sudo systemctl start docker
-sudo usermod -a -G docker ec2-user
-
-exit
-spawn create-ami <instance-id> --name cwltool-runner
+cwl-spawn --outdir results/ variant-calling.cwl inputs.yml
 ```
 
----
-
-### Run Single Sample
-
-**1. Create inputs file:**
+**`inputs.yml`:**
 
 ```yaml
-# inputs.yml
 input_bam:
   class: File
   path: s3://my-data/NA12878.bam
@@ -80,93 +76,16 @@ reference_fasta:
     - class: File
       path: s3://references/GRCh38/Homo_sapiens_assembly38.dict
 
-dbsnp_vcf:
-  class: File
-  path: s3://references/GRCh38/Homo_sapiens_assembly38.dbsnp138.vcf
-  secondaryFiles:
-    - class: File
-      path: s3://references/GRCh38/Homo_sapiens_assembly38.dbsnp138.vcf.idx
-
 sample_name: "NA12878"
 ```
 
-**2. Launch with spawn:**
+`cwltool` handles parsing, scheduling, and output collection as usual; cwl-spawn
+only swaps the local job runner so each step executes on its own ephemeral
+instance and self-terminates when done (`--on-complete terminate` + TTL).
 
-```bash
-spawn launch \
-  --instance-type c6i.4xlarge \
-  --ami ami-cwltool-runner \
-  --ttl 4h \
-  --spot \
-  --storage 300GB \
-  --iam-policy s3:FullAccess \
-  --user-data "
-    #!/bin/bash
-    set -e
-
-    # Download workflow
-    aws s3 cp s3://my-workflows/variant-calling.cwl /workflows/pipeline.cwl
-    aws s3 cp s3://my-workflows/inputs.yml /workflows/inputs.yml
-
-    # Run cwltool
-    cd /workflows
-    cwltool --outdir /results pipeline.cwl inputs.yml
-
-    # Upload results
-    aws s3 sync /results s3://my-results/NA12878/
-
-    spored complete --status success
-  "
-```
-
----
-
-### Run Multiple Samples (spawn Array)
-
-```yaml
-# samples.yaml
-parameters:
-  sample_name: [NA12878, NA12879, NA12880]
-  bam_file:
-    - s3://data/NA12878.bam
-    - s3://data/NA12879.bam
-    - s3://data/NA12880.bam
-
-command: |
-  # Create inputs for this sample
-  cat > /tmp/inputs.yml <<EOF
-  input_bam:
-    class: File
-    path: ${bam_file}
-    secondaryFiles:
-      - class: File
-        path: ${bam_file}.bai
-
-  reference_fasta:
-    class: File
-    path: s3://references/GRCh38/Homo_sapiens_assembly38.fasta
-    secondaryFiles:
-      - class: File
-        path: s3://references/GRCh38/Homo_sapiens_assembly38.fasta.fai
-
-  sample_name: "${sample_name}"
-  EOF
-
-  # Run workflow
-  cwltool --outdir /results variant-calling.cwl /tmp/inputs.yml
-
-  # Upload
-  aws s3 sync /results s3://my-results/${sample_name}/
-
-instance-type: c6i.4xlarge
-ami: ami-cwltool-runner
-region: us-east-1
-storage: 300GB
-```
-
-```bash
-spawn launch --params samples.yaml --array-size 3 --spot --ttl 4h
-```
+> **Auto-terminate caveat:** a very short step can finish before spawn's
+> completion tag is readable, in which case the instance falls back to the TTL for
+> teardown (spore-host/spawn#270). Always set `SPAWN_TTL` as the cost backstop.
 
 ---
 
@@ -195,5 +114,7 @@ spawn launch --params samples.yaml --array-size 3 --spot --ttl 4h
 
 ## See Also
 
-- [Nextflow on spawn (nf-spawn)](../../genomics-nextflow/nf-core-sarek/) - the supported genomics-workflow path
+- [**cwl-spawn**](https://github.com/spore-host/cwl-spawn) — the CWL execution backend used here
+- [Nextflow on spawn (nf-spawn)](../../genomics-nextflow/nf-core-sarek/) — the Nextflow path
+- [WDL on spawn (miniwdl-spawn)](https://github.com/spore-host/miniwdl-spawn) — the WDL path
 - [CWL Documentation](https://www.commonwl.org/)
