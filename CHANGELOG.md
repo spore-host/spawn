@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Pinned all GitHub Actions to commit SHAs** (with version comments) across
+  the CI/security/release workflows, and pinned `trivy-action` from `@master`
+  to a release. Clears the Semgrep `github-actions-mutable-action-tag` finding
+  and hardens the CI supply chain against tag hijacking.
+
 ### Added
 - **Bring-your-own app images + per-account catalog** (spore-host#392). The app
   catalog is now a per-account view: `spawn app list` shows only apps whose image
