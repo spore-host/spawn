@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Bumped `aws-sdk-go-v2` deps in the `dashboard-api` and `scheduler-handler`
+  Lambda submodules** to clear GO-2026-5764 (`aws/protocol/eventstream`
+  HTTP/eventstream advisory, pulled transitively via `service/s3`/`service/lambda`):
+  `eventstream` → v1.7.8, `s3` → v1.97.3, `lambda` → v1.88.5. No code change;
+  restores govulncheck to green.
 - **Pinned all GitHub Actions to commit SHAs** (with version comments) across
   the CI/security/release workflows, and pinned `trivy-action` from `@master`
   to a release. Clears the Semgrep `github-actions-mutable-action-tag` finding
