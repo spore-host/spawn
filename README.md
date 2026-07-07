@@ -88,6 +88,9 @@ spawn list
 | `stage` | Data staging to/from S3 |
 | `notify` | Chat notification (Slack/Teams) |
 | `slurm` | Convert Slurm sbatch scripts |
+| `resources` | List all AWS resources spawn has created (tagged `spawn:managed`) |
+| `orphans` | Report spawn-managed resources that look abandoned (billable leaks) |
+| `cleanup` | Remove orphaned spawn-managed resources |
 
 ### Conventions
 
@@ -101,6 +104,26 @@ spawn list
 
 See **[docs/flag-conventions.md](docs/flag-conventions.md)** for the full
 convention reference (shared across spawn, truffle, lagotto, and spored).
+
+### Bounding cost: stop vs terminate
+
+TTL always **terminates** — it fully bounds cost. But the default *idle* action
+(and `--on-complete stop`) only **stops** the instance, and a stopped instance
+**keeps billing** for its EBS volumes and any attached Elastic IP, indefinitely.
+For batch/headless workloads — especially in accounts without a hosted reaper —
+prefer `--on-complete terminate` so completion fully releases the spend.
+
+To find money quietly leaking:
+
+```bash
+spawn orphans          # billable leaks: detached volumes, stopped-instance EIPs, …
+spawn cleanup --force  # remove them (never touches running instances)
+```
+
+`spawn status <instance>` also reports any Elastic IP attached to an instance —
+informational while running, a billing warning while stopped. Note: spawn never
+allocates an Elastic IP, so it never releases one; any EIP shown is a static
+address you allocated, and it's yours to release with `aws ec2 release-address`.
 
 ## spored
 

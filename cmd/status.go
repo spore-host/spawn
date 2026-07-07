@@ -135,7 +135,26 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Print(string(output))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], string(output), instance.InstanceID))
+	fmt.Print(elasticIPNotice(ctx, client, instance))
 	return nil
+}
+
+// elasticIPNotice returns a line describing any Elastic IP attached to the
+// instance, or "" if none. On a running instance it's informational; on a
+// stopped instance it's a billable-leak warning (an EIP keeps billing while the
+// instance is stopped). spawn never allocates or releases EIPs — this only makes
+// a user-owned address visible (#262). Best-effort: any lookup error is silent.
+func elasticIPNotice(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo) string {
+	eip, err := client.GetInstanceElasticIP(ctx, instance.Region, instance.InstanceID)
+	if err != nil || eip == nil {
+		return ""
+	}
+	if instance.State == "running" || instance.State == "pending" {
+		return fmt.Sprintf("\n%s Elastic IP: %s (%s)\n", i18n.Symbol("info"), eip.PublicIP, eip.AllocationID)
+	}
+	return fmt.Sprintf("\n%s Elastic IP %s (%s) is attached to this %s instance and keeps billing (~$3.60/mo). "+
+		"spawn never releases EIPs — release it yourself if unneeded:\n    aws ec2 release-address --allocation-id %s\n",
+		i18n.Symbol("warning"), eip.PublicIP, eip.AllocationID, instance.State, eip.AllocationID)
 }
 
 // runStatusOverSSM gets `spored status` from an instance we hold no SSH key for

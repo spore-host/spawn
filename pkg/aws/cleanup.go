@@ -10,6 +10,7 @@ import (
 	cwl "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	rgt "github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi"
 	rgttypes "github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi/types"
@@ -19,12 +20,21 @@ import (
 type ManagedResource struct {
 	ARN          string
 	Service      string // ec2, iam, dynamodb, logs, …
-	ResourceType string // instance, security-group, key-pair, table, …
+	ResourceType string // instance, security-group, key-pair, table, address, …
 	ID           string // the resource id parsed from the ARN (best-effort)
 	Region       string
 	Tags         map[string]string
-	// State is filled for EC2 instances (running/stopped/…); empty otherwise.
+	// State is filled for EC2 instances (running/stopped/…) and for Elastic IPs
+	// (address); empty otherwise. Address states are synthesized by scanAddresses:
+	// "unassociated" (billable, attached to nothing) or "assoc:<instance-state>"
+	// (attached to an instance in that state — billable while that state is not
+	// running).
 	State string
+	// PublicIP / AssociationID are filled only for ResourceType == "address".
+	// spawn never allocates EIPs, so these describe a USER-owned address surfaced
+	// for visibility — spawn reports it, never releases it (#262).
+	PublicIP      string
+	AssociationID string
 }
 
 // IsRunningInstance reports whether this is an EC2 instance still running or
@@ -108,8 +118,123 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 		return nil, err
 	}
 
+	// Elastic IPs don't come back from the Resource Groups Tagging API (ec2:Address
+	// isn't a taggable-in-RGT type here) and spawn never tags them anyway, so scan
+	// them separately and append. Runs AFTER instance enrichment so an EIP attached
+	// to a stopped instance can be classified as a billable leak (#262).
+	addrs, err := c.scanAddresses(ctx, cfg, region, resources)
+	if err != nil {
+		return nil, err
+	}
+	resources = append(resources, addrs...)
+
 	sort.Slice(resources, func(i, j int) bool { return resources[i].ARN < resources[j].ARN })
 	return resources, nil
+}
+
+// describeAddressesAPI is the slice of EC2 that scanAddresses needs.
+type describeAddressesAPI interface {
+	DescribeAddresses(ctx context.Context, in *ec2.DescribeAddressesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error)
+}
+
+// scanAddresses lists Elastic IPs and returns the ones that look like billable
+// leaks as synthetic address ManagedResources — for VISIBILITY only. spawn never
+// allocates an EIP, so every address here is a user-owned static address; spawn
+// reports it and NEVER releases it. Two leak shapes are surfaced:
+//   - unassociated (attached to nothing) — always billable.
+//   - associated to a spawn-managed instance that is NOT running (stopped) — an
+//     EIP on a stopped instance still bills.
+//
+// An EIP attached to a running spawn instance is legitimate and is skipped.
+// Addresses attached to instances spawn doesn't manage are ignored entirely.
+func (c *Client) scanAddresses(ctx context.Context, cfg aws.Config, region string, resources []ManagedResource) ([]ManagedResource, error) {
+	// Map instance-id -> state for the spawn-managed instances we just enriched.
+	instState := map[string]string{}
+	for _, r := range resources {
+		if r.ResourceType == "instance" && r.ID != "" {
+			instState[r.ID] = r.State
+		}
+	}
+
+	var api describeAddressesAPI = ec2.NewFromConfig(cfg)
+	out, err := api.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{})
+	if err != nil {
+		return nil, fmt.Errorf("describe elastic IPs in %s: %w", region, err)
+	}
+	return classifyAddresses(out.Addresses, instState, region), nil
+}
+
+// classifyAddresses is the pure decision core of scanAddresses (testable without
+// AWS): given the raw addresses and the spawn-managed instance states, it returns
+// the billable-leak addresses as ManagedResources.
+func classifyAddresses(addresses []ec2types.Address, instState map[string]string, region string) []ManagedResource {
+	var out []ManagedResource
+	for _, a := range addresses {
+		instID := aws.ToString(a.InstanceId)
+		assoc := aws.ToString(a.AssociationId)
+
+		var state string
+		switch {
+		case instID == "" && assoc == "":
+			// Attached to nothing — always billable.
+			state = "unassociated"
+		case instID != "":
+			st, managed := instState[instID]
+			if !managed {
+				// Attached to an instance spawn doesn't manage — not our concern.
+				continue
+			}
+			if st == "running" || st == "pending" {
+				// Legitimately in use by a live spawn instance — not a leak.
+				continue
+			}
+			// Attached to a stopped/other spawn instance — billable leak.
+			state = "assoc:" + st
+		default:
+			// Associated to an ENI but no instance id — skip (rare; not a clear leak).
+			continue
+		}
+
+		out = append(out, ManagedResource{
+			Service:       "ec2",
+			ResourceType:  "address",
+			ID:            aws.ToString(a.AllocationId),
+			Region:        region,
+			State:         state,
+			PublicIP:      aws.ToString(a.PublicIp),
+			AssociationID: assoc,
+			Tags:          map[string]string{},
+		})
+	}
+	return out
+}
+
+// ElasticIP describes an Elastic IP attached to an instance (for status output).
+type ElasticIP struct {
+	PublicIP     string
+	AllocationID string
+}
+
+// GetInstanceElasticIP returns any Elastic IP associated with the given instance,
+// or nil if none. Used by `spawn status` to surface an attached EIP so the user
+// sees the (billable) static address they're holding — informational when the
+// instance runs, a leak warning when it's stopped. spawn never releases it.
+func (c *Client) GetInstanceElasticIP(ctx context.Context, region, instanceID string) (*ElasticIP, error) {
+	cfg := c.cfg.Copy()
+	if region != "" {
+		cfg.Region = region
+	}
+	ec2c := ec2.NewFromConfig(cfg)
+	out, err := ec2c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{
+		Filters: []ec2types.Filter{{Name: aws.String("instance-id"), Values: []string{instanceID}}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describe elastic IPs for %s: %w", instanceID, err)
+	}
+	for _, a := range out.Addresses {
+		return &ElasticIP{PublicIP: aws.ToString(a.PublicIp), AllocationID: aws.ToString(a.AllocationId)}, nil
+	}
+	return nil, nil
 }
 
 // enrichInstanceState fills the State field for any EC2 instance resources.
@@ -129,9 +254,12 @@ func (c *Client) enrichInstanceState(ctx context.Context, cfg aws.Config, resour
 	ec2Client := ec2.NewFromConfig(cfg)
 	out, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: ids})
 	if err != nil {
-		// A NotFound for an already-gone instance shouldn't abort the sweep.
-		if strings.Contains(err.Error(), "InvalidInstanceID.NotFound") {
-			return nil
+		// EC2 fails the WHOLE batch with InvalidInstanceID.NotFound if ANY id is
+		// already gone. Don't lose state for the survivors — fall back to a per-id
+		// sweep so live instances still get their real state and only the truly
+		// missing ones are marked deleted.
+		if isInstanceNotFound(err) {
+			return c.enrichInstanceStatePerID(ctx, ec2Client, resources, idx)
 		}
 		return fmt.Errorf("describe instance state: %w", err)
 	}
@@ -139,6 +267,36 @@ func (c *Client) enrichInstanceState(ctx context.Context, cfg aws.Config, resour
 		for _, inst := range res.Instances {
 			id := aws.ToString(inst.InstanceId)
 			if i, ok := idx[id]; ok {
+				resources[i].State = string(inst.State.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// describeInstancesAPI is the slice of EC2 that the per-id instance fallback
+// needs — narrow enough to fake in tests (the substrate emulator doesn't
+// reproduce the batch-NotFound failure this path exists to handle).
+type describeInstancesAPI interface {
+	DescribeInstances(ctx context.Context, in *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
+}
+
+// enrichInstanceStatePerID is the fallback when a batched DescribeInstances hits
+// a NotFound: it queries each id individually, filling State for the ones that
+// still exist and marking the rest "deleted" so a gone instance is never
+// mistaken for one whose state is merely unknown.
+func (c *Client) enrichInstanceStatePerID(ctx context.Context, ec2Client describeInstancesAPI, resources []ManagedResource, idx map[string]int) error {
+	for id, i := range idx {
+		out, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{id}})
+		if err != nil {
+			if isInstanceNotFound(err) {
+				resources[i].State = "deleted"
+				continue
+			}
+			return fmt.Errorf("describe instance state %s: %w", id, err)
+		}
+		for _, res := range out.Reservations {
+			for _, inst := range res.Instances {
 				resources[i].State = string(inst.State.Name)
 			}
 		}
@@ -163,13 +321,41 @@ func (c *Client) enrichVolumeState(ctx context.Context, cfg aws.Config, resource
 	ec2Client := ec2.NewFromConfig(cfg)
 	out, err := ec2Client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{VolumeIds: ids})
 	if err != nil {
-		if strings.Contains(err.Error(), "InvalidVolume.NotFound") {
-			return nil
+		// As with instances, one already-deleted volume 400s the whole batch. Fall
+		// back to per-id so surviving volumes keep their real state — otherwise
+		// every volume's State stays blank and IsLikelyOrphan mis-flags them all.
+		if isVolumeNotFound(err) {
+			return c.enrichVolumeStatePerID(ctx, ec2Client, resources, idx)
 		}
 		return fmt.Errorf("describe volume state: %w", err)
 	}
 	for _, v := range out.Volumes {
 		if i, ok := idx[aws.ToString(v.VolumeId)]; ok {
+			resources[i].State = string(v.State)
+		}
+	}
+	return nil
+}
+
+// describeVolumesAPI is the slice of EC2 the per-id volume fallback needs.
+type describeVolumesAPI interface {
+	DescribeVolumes(ctx context.Context, in *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error)
+}
+
+// enrichVolumeStatePerID is the per-id fallback for a NotFound batch (mirrors
+// enrichInstanceStatePerID): live volumes get their real state, genuinely gone
+// ones are marked "deleted" rather than left blank.
+func (c *Client) enrichVolumeStatePerID(ctx context.Context, ec2Client describeVolumesAPI, resources []ManagedResource, idx map[string]int) error {
+	for id, i := range idx {
+		out, err := ec2Client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{VolumeIds: []string{id}})
+		if err != nil {
+			if isVolumeNotFound(err) {
+				resources[i].State = "deleted"
+				continue
+			}
+			return fmt.Errorf("describe volume state %s: %w", id, err)
+		}
+		for _, v := range out.Volumes {
 			resources[i].State = string(v.State)
 		}
 	}
@@ -205,11 +391,21 @@ func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool {
 	case r.ResourceType == "instance":
 		return false // instances aren't orphans; they're the thing infra serves
 	case r.ResourceType == "volume":
-		return r.State == "available" || r.State == "" // detached/unknown
+		// Only a genuinely detached ('available') volume is an orphan. A blank or
+		// 'deleted' state means the volume is gone or its state couldn't be
+		// resolved — NOT an orphan (nothing to clean, and treating unknown as
+		// orphan is what made 'orphans' report already-deleted volumes, #262).
+		return r.State == "available"
 	case r.ResourceType == "security-group", r.ResourceType == "key-pair":
 		return !hasRunningInstance
 	case r.Service == "iam":
 		return !hasRunningInstance
+	case r.ResourceType == "address":
+		// scanAddresses only ever emits billable-leak EIPs (unassociated, or
+		// attached to a non-running spawn instance), so any address that made it
+		// this far is a leak worth surfacing. spawn reports it but never releases
+		// it — the user owns the address (#262).
+		return true
 	default:
 		// Tables/log groups are long-lived control-plane state, not per-run
 		// orphans — don't flag them here.
@@ -281,6 +477,13 @@ func (c *Client) RemoveResource(ctx context.Context, r ManagedResource) error {
 		ec2c := ec2.NewFromConfig(cfg)
 		_, err := ec2c.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(r.ID)})
 		return ignoreNotFound(err, "InvalidVolume.NotFound")
+
+	case r.ResourceType == "address":
+		// spawn never allocates an Elastic IP, so it never releases one — the
+		// address is the user's. cleanup reports it (via orphans) but must not
+		// destroy it: releasing an EIP is irreversible and it isn't ours (#262).
+		return fmt.Errorf("refusing to release Elastic IP %s (%s) — spawn does not own it; "+
+			"release it yourself with 'aws ec2 release-address --allocation-id %s' if unneeded", r.ID, r.PublicIP, r.ID)
 
 	case r.Service == "iam" && r.ResourceType == "instance-profile":
 		return c.deleteInstanceProfile(ctx, cfg, r.ID)
