@@ -8,12 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Bumped `aws-sdk-go-v2` deps in the `dashboard-api` and `scheduler-handler`
+  Lambda submodules** to clear GO-2026-5764 (`aws/protocol/eventstream`
+  HTTP/eventstream advisory, pulled transitively via `service/s3`/`service/lambda`):
+  `eventstream` → v1.7.8, `s3` → v1.97.3, `lambda` → v1.88.5. No code change;
+  restores govulncheck to green.
 - **Pinned all GitHub Actions to commit SHAs** (with version comments) across
   the CI/security/release workflows, and pinned `trivy-action` from `@master`
   to a release. Clears the Semgrep `github-actions-mutable-action-tag` finding
   and hardens the CI supply chain against tag hijacking.
 
+### Documentation
+- **Clarified stop-vs-terminate cost** (#262). `--on-complete` and
+  `--hibernate-on-idle` help now note that a *stopped* instance keeps billing for
+  its EBS volumes and any attached Elastic IP, and recommend `--on-complete
+  terminate` for batch/headless work (especially in accounts without a hosted
+  reaper). README gains a "Bounding cost" section and lists the
+  `resources`/`orphans`/`cleanup` commands.
+
 ### Added
+- **`spawn orphans`/`resources` now surface leaked Elastic IPs, and `spawn status`
+  reports an instance's attached EIP** (#262). An EIP that is unassociated, or
+  attached to a *stopped* spawn instance, keeps billing (~$3.60/mo) — these now
+  show up as `address` rows in `orphans`/`resources`. `spawn status <instance>`
+  reports any attached Elastic IP: informational while the instance runs, a
+  billing warning while it's stopped. spawn never allocates an Elastic IP, so it
+  **never releases one** — any EIP shown is a static address you allocated, and
+  `orphans`/`cleanup`/`status` all point you at `aws ec2 release-address` rather
+  than touching it.
 - **Bring-your-own app images + per-account catalog** (spore-host#392). The app
   catalog is now a per-account view: `spawn app list` shows only apps whose image
   your account can pull — public images for everyone, private-ECR images only when
@@ -31,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chimerax now ship as recipes. See `docs/catalog-overlay.example.yaml`.
 
 ### Fixed
+- **`spawn orphans` no longer reports already-deleted EBS volumes** (#262). State
+  enrichment issued one batched `DescribeVolumes`/`DescribeInstances`; EC2 fails
+  the *whole* call if any single id is already gone, which left every resource's
+  state blank, and a blank volume state was treated as an orphan — so one deleted
+  volume made the report list every volume (including deleted ones). Enrichment
+  now falls back to a per-id sweep on `NotFound` (survivors keep their real state,
+  the gone ones are marked `deleted`), and only a genuinely `available` volume is
+  classed as an orphan.
 - **Container apps now render into the DCV session's display, not host `:0`**
   (#263). The first real container launch failed with "Unable to open X display
   :0" because `dcv create-session --type virtual` starts its own per-session X

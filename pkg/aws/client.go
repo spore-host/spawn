@@ -1101,6 +1101,23 @@ func isInstanceNotFound(err error) bool {
 	return strings.Contains(err.Error(), "InvalidInstanceID.NotFound")
 }
 
+// isVolumeNotFound reports whether err is EC2's InvalidVolume.NotFound. Unlike
+// the instance case (which is usually a post-launch propagation race), a
+// NotFound here almost always means the volume was genuinely deleted — but a
+// batched DescribeVolumes fails the WHOLE call if any single id is gone, so
+// callers use this to fall back to a per-id sweep rather than losing state for
+// every volume in the batch.
+func isVolumeNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode() == "InvalidVolume.NotFound"
+	}
+	return strings.Contains(err.Error(), "InvalidVolume.NotFound")
+}
+
 // DescribeInstanceWithRetry fetches a single instance, retrying on the
 // post-launch InvalidInstanceID.NotFound eventual-consistency window with capped
 // backoff (1s, 2s, 4s, 8s, 8s… up to ~30s total). A genuinely missing instance

@@ -74,16 +74,29 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 
 	// Split running instances out — they're never removed and gate cleanup.
-	var running, removable []aws.ManagedResource
+	// Elastic IPs are also split out: spawn never allocates them, so it never
+	// releases them (#262). They're reported for visibility but the user must
+	// release their own addresses.
+	var running, addresses, removable []aws.ManagedResource
 	for _, r := range found {
-		if r.IsRunningInstance() {
+		switch {
+		case r.IsRunningInstance():
 			running = append(running, r)
-		} else {
+		case r.ResourceType == "address":
+			addresses = append(addresses, r)
+		default:
 			removable = append(removable, r)
 		}
 	}
 
 	printResourceTable(cmd, found)
+
+	if len(addresses) > 0 {
+		fmt.Fprintf(os.Stderr, "\nℹ️  %d Elastic IP(s) shown are user-owned — spawn never releases an EIP. If unneeded, release each yourself:\n", len(addresses))
+		for _, a := range addresses {
+			fmt.Fprintf(os.Stderr, "    aws ec2 release-address --allocation-id %s   # %s (%s)\n", a.ID, a.PublicIP, a.Region)
+		}
+	}
 
 	if len(running) > 0 {
 		fmt.Fprintf(os.Stderr, "\n⚠️  %d running/pending instance(s) will NOT be removed (stop or terminate them first):\n", len(running))
