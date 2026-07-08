@@ -53,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chimerax now ship as recipes. See `docs/catalog-overlay.example.yaml`.
 
 ### Fixed
+- **`spawn launch --command` no longer fails its spored-readiness gate on a fresh
+  instance** (#277). The gate (`verifySporedReady`) sent `spored status` over SSM
+  immediately, but on a just-booted AL2023/Graviton (spot) instance the SSM agent
+  hasn't registered yet, so every `SendCommand` failed until the whole gate timed
+  out with an opaque "context deadline exceeded" — even though SSH was already up.
+  The gate now first waits for the SSM agent to report `PingStatus=Online`
+  (reusing `WaitForSSMOnline`, which also **fails fast** if the instance has no IAM
+  instance profile, since the agent could then never register), and only then
+  polls `spored status`. Gate budget raised 3m → 5m to accommodate agent
+  registration on Graviton. (This is #277 Symptom A; the `--require-spored=false`
+  early-termination — Symptom B — is tracked separately.)
 - **`spawn launch --region <r>` now pins the whole launch to that region** (#276).
   The region flag reached `RunInstances`, but the AWS client was built with
   `LoadDefaultConfig` (no region override), so caller-identity, pricing, and

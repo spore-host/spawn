@@ -1884,7 +1884,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// spored is up over SSM (works keyed or keyless) and fail loudly if not.
 	if waitForSSH && requireSpored && plat.OS != "windows" {
 		prog.Start("Verifying spored agent")
-		if err := verifySporedReady(ctx, awsClient, config.Region, result.InstanceID, 3*time.Minute); err != nil {
+		if err := verifySporedReady(ctx, awsClient, config.Region, result.InstanceID, 5*time.Minute); err != nil {
 			prog.Error("Verifying spored agent", err)
 			if terminateOnError {
 				fmt.Fprintf(os.Stderr, "\n⚠️  spored did not come up; terminating %s (--terminate-on-error)\n", result.InstanceID)
@@ -4214,13 +4214,31 @@ func waitForSSHReady(ctx context.Context, host string, timeout time.Duration) {
 func verifySporedReady(ctx context.Context, client *aws.Client, region, instanceID string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	// FIRST wait for the SSM agent to REGISTER (PingStatus=Online) before sending
+	// any command (#277). On a fresh AL2023/Graviton spot instance the agent can
+	// take a while to come up; sending `spored status` before then means every
+	// SendCommand fails until the whole gate times out with an opaque "context
+	// deadline exceeded". WaitForSSMOnline polls DescribeInstanceInformation and,
+	// crucially, fails FAST if the instance has no IAM instance profile (the agent
+	// can then never register) rather than waiting out the timeout. Give it the
+	// bulk of the budget; reserve time for the status poll below.
+	onlineTimeout := timeout - 30*time.Second
+	if onlineTimeout < 30*time.Second {
+		onlineTimeout = timeout / 2
+	}
+	if err := client.WaitForSSMOnline(ctx, region, instanceID, onlineTimeout); err != nil {
+		return fmt.Errorf("SSM agent never came online (can't verify spored): %w", err)
+	}
+
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	var lastErr error
 	for {
 		// `spored status` exits 0 when the daemon is up and answering. Run it over
-		// SSM (the agent runs as root, so no sudo needed).
+		// SSM (the agent runs as root, so no sudo needed). The agent is Online by
+		// now, so SendCommand reaches it instead of timing out.
 		res, err := client.RunShellScript(ctx, region, instanceID, "/usr/local/bin/spored status", 30*time.Second)
 		if err == nil && res.Status == "Success" {
 			return nil
