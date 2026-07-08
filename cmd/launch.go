@@ -556,8 +556,12 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Initialize AWS client
-	awsClient, err := aws.NewClient(ctx)
+	// Initialize AWS client PINNED to the resolved launch region (#276). config.Region
+	// is fully resolved above (explicit --region, or auto-detected), so pinning the
+	// client here makes every region-sensitive call (caller-identity, pricing, AMI/AZ
+	// resolution, RunInstances) use it — not the ambient AWS_REGION/profile default,
+	// which previously let a --region launch land in the wrong region.
+	awsClient, err := aws.NewClientWithRegion(ctx, config.Region)
 	if err != nil {
 		return i18n.Te("error.aws_client_init", err)
 	}
@@ -837,6 +841,14 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		if cfg.Region == "" {
 			cfg.Region = firstConfig.Region
 		}
+	}
+
+	// Re-pin the AWS client to the resolved sweep region (#276) so AMI/AZ/identity
+	// resolution below runs in the target region, not the ambient default. (The
+	// client created earlier was only needed for the detached early-return path.)
+	awsClient, err = aws.NewClientWithRegion(ctx, firstConfig.Region)
+	if err != nil {
+		return fmt.Errorf("failed to initialize AWS client: %w", err)
 	}
 
 	// Step 1: Detect AMI
@@ -3874,7 +3886,7 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 	// Auto-detect AMI if not specified
 	resolvedAMI := ami
 	if resolvedAMI == "" {
-		awsClientForAMI, amiErr := aws.NewClient(ctx)
+		awsClientForAMI, amiErr := aws.NewClientWithRegion(ctx, queueRegion)
 		if amiErr == nil {
 			if detected, amiErr2 := awsClientForAMI.GetRecommendedAMI(ctx, queueRegion, instanceType); amiErr2 == nil {
 				resolvedAMI = detected
@@ -3926,8 +3938,8 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		fmt.Fprintf(os.Stderr, "   Instance will run indefinitely until manually terminated.\n\n")
 	}
 
-	// Initialize AWS client
-	awsClient, err := aws.NewClient(ctx)
+	// Initialize AWS client pinned to the resolved queue region (#276).
+	awsClient, err := aws.NewClientWithRegion(ctx, queueRegion)
 	if err != nil {
 		return fmt.Errorf("failed to initialize AWS client: %w", err)
 	}
