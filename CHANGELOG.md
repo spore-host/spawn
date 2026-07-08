@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.69.0] - 2026-07-08
 
 ### Security
+- **Built with Go 1.26.5** to clear GO-2026-5856, a `crypto/tls` standard-library
+  advisory present in go1.26.4 (affects every module built with the toolchain).
+  CI/release now pin `go-version: 1.26.5`, so the released binaries link the
+  patched stdlib.
 - **Bumped `aws-sdk-go-v2` deps in the `dashboard-api` and `scheduler-handler`
   Lambda submodules** to clear GO-2026-5764 (`aws/protocol/eventstream`
   HTTP/eventstream advisory, pulled transitively via `service/s3`/`service/lambda`):

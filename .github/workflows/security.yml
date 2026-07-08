@@ -20,7 +20,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
       - name: Install govulncheck
         # Pinned: govulncheck v1.4.0 panics ("ForEachElement called on type
         # containing *types.TypeParam") analyzing generics, so @latest crashes the

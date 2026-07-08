@@ -25,7 +25,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
           # cache MUST stay false on the self-hosted orion runners: their
           # filesystem persists between jobs, so ~/go/pkg/mod is already warm.
           # setup-go's cache *restore* untars its saved archive over those
@@ -88,7 +88,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
           # cache MUST stay false on the self-hosted orion runners: their
           # filesystem persists between jobs, so ~/go/pkg/mod is already warm.
           # setup-go's cache *restore* untars its saved archive over those
