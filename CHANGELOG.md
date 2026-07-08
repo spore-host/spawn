@@ -53,6 +53,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chimerax now ship as recipes. See `docs/catalog-overlay.example.yaml`.
 
 ### Fixed
+- **`spawn launch --region <r>` now pins the whole launch to that region** (#276).
+  The region flag reached `RunInstances`, but the AWS client was built with
+  `LoadDefaultConfig` (no region override), so caller-identity, pricing, and
+  AMI/AZ resolution ran in the ambient `AWS_REGION`/`AWS_DEFAULT_REGION`/profile
+  region instead — and when region resolution came up empty on those paths the
+  latency-based auto-detector could pick a third region entirely (a `--region
+  us-west-2` launch landing in `us-west-1`). Launch (and the sweep/batch-queue
+  paths) now build the client with `NewClientWithRegion(ctx, config.Region)`, so
+  every region-sensitive call uses the resolved launch region.
 - **`spawn orphans` no longer reports already-deleted EBS volumes** (#262). State
   enrichment issued one batched `DescribeVolumes`/`DescribeInstances`; EC2 fails
   the *whole* call if any single id is already gone, which left every resource's

@@ -47,7 +47,28 @@ type Client struct {
 // NewClient creates a Client using the default AWS credential chain.
 // Use [NewClientFromConfig] in tests to inject a pre-configured aws.Config.
 func NewClient(ctx context.Context) (*Client, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+	return NewClientWithRegion(ctx, "")
+}
+
+// NewClientWithRegion is like [NewClient] but pins the loaded config to an
+// explicit region when one is given, so EVERY SDK call the client makes (STS
+// caller-identity, Pricing, DescribeImages/AZ resolution, RunInstances, …) runs
+// in that region — not whatever the ambient AWS_REGION / AWS_DEFAULT_REGION /
+// profile default resolves to.
+//
+// This is the fix for #276: `spawn launch --region <r>` previously only pinned
+// the RunInstances call (Launch copies the cfg and sets its region), while the
+// client's other region-sensitive helpers still used the default-chain region —
+// so a launch could resolve AMIs/AZs/identity in the wrong region and land the
+// instance somewhere other than --region. Passing the resolved region here keeps
+// the whole client consistent. An empty region preserves the default-chain
+// behavior (used by commands that legitimately span regions).
+func NewClientWithRegion(ctx context.Context, region string) (*Client, error) {
+	opts := []func(*config.LoadOptions) error{}
+	if region != "" {
+		opts = append(opts, config.WithRegion(region))
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
