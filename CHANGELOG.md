@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.70.0] - 2026-07-08
+
 ### Removed
 - **`--require-spored` (removed).** The spored-readiness check after launch is now
   unconditional (whenever `spawn launch` waits for SSH). The flag was a footgun:
@@ -28,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   steps now run with `if: !cancelled()`, so a distribution-token lapse can't block
   spored delivery (a genuinely early GoReleaser failure still fails the S3 step
   loudly on the missing artifacts).
+
+### Documentation
+- **`docs/release-tap-token.md`** — runbook for minting/rotating the fine-grained
+  PAT that GoReleaser uses to auto-publish the Homebrew tap and Scoop bucket,
+  including an expiry-reminder note so it doesn't silently lapse between releases
+  again (the root cause behind v0.69.0's tap-push failure, #280).
 
 ## [0.69.0] - 2026-07-08
 
@@ -1008,7 +1016,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.69.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.70.0...HEAD
+[0.70.0]: https://github.com/spore-host/spawn/compare/v0.69.0...v0.70.0
 [0.69.0]: https://github.com/spore-host/spawn/compare/v0.68.1...v0.69.0
 [0.68.1]: https://github.com/spore-host/spawn/compare/v0.68.0...v0.68.1
 [0.68.0]: https://github.com/spore-host/spawn/compare/v0.67.0...v0.68.0
