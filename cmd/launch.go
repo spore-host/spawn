@@ -181,7 +181,6 @@ var (
 	waitForRunning   bool
 	waitForSSH       bool
 	skipRegionCheck  bool
-	requireSpored    bool
 	terminateOnError bool
 
 	// Workflow integration
@@ -357,7 +356,6 @@ func init() {
 	launchCmd.Flags().BoolVar(&waitForRunning, "wait-for-running", true, "Wait until running")
 	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", true, "Wait until SSH is ready")
 	launchCmd.Flags().BoolVar(&skipRegionCheck, "skip-region-check", false, "Skip data locality region mismatch warnings")
-	launchCmd.Flags().BoolVar(&requireSpored, "require-spored", true, "Verify the spored lifecycle agent came up after launch; fail if it didn't (a spored-less instance has no TTL/idle safety net). Disable with --require-spored=false")
 	launchCmd.Flags().BoolVar(&terminateOnError, "terminate-on-error", false, "If post-launch verification fails (e.g. spored didn't come up), terminate the instance instead of leaving it running")
 
 	// Compliance
@@ -1880,9 +1878,10 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// checksum mismatch, arch/network) is invisible to `spawn launch` — leaving a
 	// "running" instance with NO lifecycle agent: no TTL enforcement, no idle stop,
 	// no completion handling. That's a cost-control hole (a TTL-less zombie). When
-	// we waited for readiness (--wait-for-ssh) and --require-spored is set, confirm
-	// spored is up over SSM (works keyed or keyless) and fail loudly if not.
-	if waitForSSH && requireSpored && plat.OS != "windows" {
+	// we waited for readiness (--wait-for-ssh) confirm spored is up over SSM (works
+	// keyed or keyless) and fail loudly if not. (An environment where SSM genuinely
+	// can't be reached can skip this whole readiness path with --wait-for-ssh=false.)
+	if waitForSSH && plat.OS != "windows" {
 		prog.Start("Verifying spored agent")
 		if err := verifySporedReady(ctx, awsClient, config.Region, result.InstanceID, 5*time.Minute); err != nil {
 			prog.Error("Verifying spored agent", err)
@@ -1894,7 +1893,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				return fmt.Errorf("instance %s launched but spored never came up (terminated): %w", result.InstanceID, err)
 			}
 			return fmt.Errorf("instance %s launched but spored never came up — it has NO TTL/idle safety net; "+
-				"inspect it (spawn connect %s) or terminate it (spawn terminate %s). Re-run with --terminate-on-error to auto-terminate, or --require-spored=false to skip this check: %w",
+				"inspect it (spawn connect %s) or terminate it (spawn terminate %s). Re-run with --terminate-on-error to auto-terminate: %w",
 				result.InstanceID, result.InstanceID, result.InstanceID, err)
 		}
 		prog.Complete("Verifying spored agent")
