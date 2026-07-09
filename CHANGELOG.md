@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI
+- **Release: the spored S3 upload no longer gets skipped when the Homebrew/Scoop
+  tap push fails** (#280). GoReleaser pushes the taps in its last phase; an
+  expired tap token failed that step *after* the binaries were built, aborting the
+  job and skipping the S3 upload that delivers spored to instances. The AWS + S3
+  steps now run with `if: !cancelled()`, so a distribution-token lapse can't block
+  spored delivery (a genuinely early GoReleaser failure still fails the S3 step
+  loudly on the missing artifacts).
+
 ## [0.69.0] - 2026-07-08
 
 ### Security
