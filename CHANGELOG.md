@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **`--require-spored` (removed).** The spored-readiness check after launch is now
+  unconditional (whenever `spawn launch` waits for SSH). The flag was a footgun:
+  its name implied "launch without the spored lifecycle agent," but it never
+  controlled whether spored *runs* (the bootstrap always installs + starts it) —
+  it only skipped the launch-time *verification*. That misled a field user into
+  blaming it for an unrelated termination (#277). Eliminating a spurious off-switch
+  on the TTL/idle safety net is squarely spore.host's job — no forgotten bills, no
+  zombie instances. If SSM genuinely can't be reached, `--wait-for-ssh=false`
+  already skips the whole readiness path honestly; `--terminate-on-error` still
+  governs whether a failed check auto-terminates. (Pairs with the #277 Symptom A
+  fix, which removed the main reason anyone reached for it.)
+
 ### CI
 - **Release: the spored S3 upload no longer gets skipped when the Homebrew/Scoop
   tap push fails** (#280). GoReleaser pushes the taps in its last phase; an
