@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spore-host/cohort"
@@ -269,42 +268,13 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 	// Phase 1: Launch all instances in parallel
 	prog.Start(fmt.Sprintf("Launching %d instances in parallel", count))
 
-	type launchResult struct {
-		index  int
-		result *aws.LaunchResult
-		err    error
-	}
-
-	results := make(chan launchResult, count)
-	var wg sync.WaitGroup
-
-	// Launch each instance in a goroutine
-	for i := 0; i < count; i++ {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-
-			instanceConfig, err := buildJobArrayMemberConfig(baseConfig, jobArrayID, index, fsxInfo)
-			if err != nil {
-				results <- launchResult{index: index, err: err}
-				return
-			}
-
-			// Launch the instance
-			result, err := awsClient.Launch(ctx, instanceConfig)
-			results <- launchResult{
-				index:  index,
-				result: result,
-				err:    err,
-			}
-		}(i)
-	}
-
-	// Wait for all launches to complete
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
+	results := runLaunchBatch(count, func(index int) (*aws.LaunchResult, error) {
+		instanceConfig, err := buildJobArrayMemberConfig(baseConfig, jobArrayID, index, fsxInfo)
+		if err != nil {
+			return nil, err
+		}
+		return awsClient.Launch(ctx, instanceConfig)
+	})
 
 	// Collect results
 	launchedInstances := make([]*aws.LaunchResult, 0, count)
@@ -312,7 +282,7 @@ func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.
 	successCount := 0
 	failureCount := 0
 
-	for result := range results {
+	for _, result := range results {
 		if result.err != nil {
 			launchErrors = append(launchErrors, fmt.Sprintf("Instance %d: %v", result.index, result.err))
 			failureCount++
