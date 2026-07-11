@@ -338,44 +338,9 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		prog = progress.NewProgress()
 	}
 
-	// Step 1: Detect AMI
-	prog.Start("Detecting AMI")
-	// "" or "auto" both mean auto-detect the latest AL2023 AMI (#342).
-	if config.AMI == "" || strings.EqualFold(config.AMI, "auto") {
-		ami, err := awsClient.GetRecommendedAMI(ctx, config.Region, config.InstanceType)
-		if err != nil {
-			prog.Error("Detecting AMI", err)
-			return err
-		}
-		config.AMI = ami
-	}
-	prog.Complete("Detecting AMI")
-
-	// Step 1b: Resolve target OS (--os override, else auto-detect from the AMI)
-	// and enforce the Windows lifecycle guard before we spend on a launch.
-	config.TargetOS = resolveTargetOS(ctx, awsClient, config.Region, config.AMI, osFlag)
-	if err := windowsLifecycleGuard(config); err != nil {
-		return err
-	}
-	// Reject burstable types for Windows (catches auto-detected Windows where the
-	// early --os default didn't apply); spend nothing on a launch that'd crawl (#95).
-	if err := guardWindowsInstanceType(config.TargetOS, config.InstanceType); err != nil {
-		return err
-	}
-
-	// Reject --nested-virtualization on an instance type that can't do it, before
-	// spending on a launch RunInstances would reject cryptically (#91).
-	if config.NestedVirtualization {
-		if err := awsClient.ValidateInstanceTypeForNestedVirtualization(ctx, config.InstanceType, config.Region); err != nil {
-			return err
-		}
-	}
-
-	// Pre-flight: validate instance-type feature constraints (MPI placement group,
-	// EFA, hibernation) BEFORE creating any AWS resources (IAM role, security
-	// group), so an unsupported combination fails fast with an actionable message
-	// instead of cryptically after several API calls (#110).
-	if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, hibernate || hibernateOnIdle); err != nil {
+	// Step 1: Detect AMI, resolve OS, and run pre-flight instance-type checks
+	// before spending on any AWS resources.
+	if err := ensureAMIAndPreflight(ctx, awsClient, config, prog); err != nil {
 		return err
 	}
 
@@ -392,96 +357,13 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	prog.Complete("Setting up SSH key")
 
 	// Step 3: Setup IAM instance profile
-	prog.Start("Setting up IAM role")
-	if config.IamInstanceProfile == "" {
-		// Check if user specified custom IAM configuration
-		if iamRole != "" || len(iamPolicy) > 0 || len(iamManagedPolicies) > 0 || iamPolicyFile != "" {
-			// User-specified IAM configuration
-			iamConfig := aws.IAMRoleConfig{
-				RoleName:        iamRole,
-				Policies:        iamPolicy,
-				ManagedPolicies: iamManagedPolicies,
-				PolicyFile:      iamPolicyFile,
-				TrustServices:   iamTrustServices,
-				Tags:            parseIAMRoleTags(iamRoleTags),
-			}
-
-			instanceProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, iamConfig)
-			if err != nil {
-				prog.Error("Setting up IAM role", err)
-				auditLog.LogOperation("create_iam_role", iamConfig.RoleName, "failed", err)
-				return fmt.Errorf("failed to create IAM instance profile: %w", err)
-			}
-			config.IamInstanceProfile = instanceProfile
-			auditLog.LogOperationWithData("create_iam_role", iamConfig.RoleName, "success",
-				map[string]interface{}{
-					"instance_profile": instanceProfile,
-				}, nil)
-		} else {
-			// Default: use spored IAM role
-			instanceProfile, err := awsClient.SetupSporedIAMRole(ctx)
-			if err != nil {
-				prog.Error("Setting up IAM role", err)
-				auditLog.LogOperation("create_iam_role", "spored-instance-role", "failed", err)
-				return err
-			}
-			config.IamInstanceProfile = instanceProfile
-			auditLog.LogOperation("create_iam_role", "spored-instance-role", "success", nil)
-		}
+	if err := ensureIAMProfile(ctx, awsClient, config, prog, auditLog); err != nil {
+		return err
 	}
-	prog.Complete("Setting up IAM role")
 
-	// Step 4: Security group (create for MPI if needed)
-	if mpiEnabled {
-		prog.Start("Creating MPI security group")
-		// Get default VPC
-		vpcID, err := awsClient.GetDefaultVPC(ctx, config.Region)
-		if err != nil {
-			prog.Error("Creating MPI security group", err)
-			return fmt.Errorf("failed to get default VPC: %w", err)
-		}
-
-		// Create or get MPI security group
-		sgName := fmt.Sprintf("spawn-mpi-%s", jobArrayName)
-		sgID, err := awsClient.CreateOrGetMPISecurityGroup(ctx, config.Region, vpcID, sgName)
-		if err != nil {
-			prog.Error("Creating MPI security group", err)
-			auditLog.LogOperationWithRegion("create_security_group", sgName, config.Region, "failed", err)
-			return fmt.Errorf("failed to create MPI security group: %w", err)
-		}
-
-		config.SecurityGroupIDs = []string{sgID}
-		auditLog.LogOperationWithData("create_security_group", sgName, "success",
-			map[string]interface{}{
-				"security_group_id": sgID,
-				"region":            config.Region,
-			}, nil)
-		prog.Complete("Creating MPI security group")
-	} else if config.TargetOS == "windows" && len(config.SecurityGroupIDs) == 0 {
-		// Windows needs RDP (3389) + SSH (22); the default SG won't open 3389, so
-		// RDP would be impossible (#95). Create a managed Windows SG.
-		prog.Start("Creating Windows security group")
-		vpcID, err := awsClient.GetDefaultVPC(ctx, config.Region)
-		if err != nil {
-			prog.Error("Creating Windows security group", err)
-			return fmt.Errorf("failed to get default VPC: %w", err)
-		}
-		if allowCIDR == "" || allowCIDR == "0.0.0.0/0" {
-			fmt.Fprintf(os.Stderr, "⚠️  Opening RDP (3389) + SSH (22) to 0.0.0.0/0; restrict with --allow-cidr <your-ip>/32.\n")
-		}
-		sgName := fmt.Sprintf("spawn-windows-%s", config.Name)
-		sgID, err := awsClient.CreateOrGetWindowsSecurityGroup(ctx, config.Region, vpcID, sgName, allowCIDR)
-		if err != nil {
-			prog.Error("Creating Windows security group", err)
-			auditLog.LogOperationWithRegion("create_security_group", sgName, config.Region, "failed", err)
-			return fmt.Errorf("failed to create Windows security group: %w", err)
-		}
-		config.SecurityGroupIDs = []string{sgID}
-		auditLog.LogOperationWithData("create_security_group", sgName, "success",
-			map[string]interface{}{"security_group_id": sgID, "region": config.Region}, nil)
-		prog.Complete("Creating Windows security group")
-	} else {
-		prog.Skip("Creating security group")
+	// Step 4: Security group (create for MPI / Windows if needed)
+	if err := ensureSecurityGroup(ctx, awsClient, config, prog, auditLog); err != nil {
+		return err
 	}
 
 	// Step 4.5: Create or get FSx Lustre filesystem
@@ -1071,5 +953,158 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		}
 	}
 
+	return nil
+}
+
+// ensureIAMProfile sets config.IamInstanceProfile if unset: either the
+// user-specified IAM configuration (--iam-role/--iam-policy/…) or the default
+// spored role. Extracted from launchWithProgress (#319); behavior unchanged.
+func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, prog *progress.Progress, auditLog *audit.AuditLogger) error {
+	prog.Start("Setting up IAM role")
+	if config.IamInstanceProfile == "" {
+		// Check if user specified custom IAM configuration
+		if iamRole != "" || len(iamPolicy) > 0 || len(iamManagedPolicies) > 0 || iamPolicyFile != "" {
+			// User-specified IAM configuration
+			iamConfig := aws.IAMRoleConfig{
+				RoleName:        iamRole,
+				Policies:        iamPolicy,
+				ManagedPolicies: iamManagedPolicies,
+				PolicyFile:      iamPolicyFile,
+				TrustServices:   iamTrustServices,
+				Tags:            parseIAMRoleTags(iamRoleTags),
+			}
+
+			instanceProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, iamConfig)
+			if err != nil {
+				prog.Error("Setting up IAM role", err)
+				auditLog.LogOperation("create_iam_role", iamConfig.RoleName, "failed", err)
+				return fmt.Errorf("failed to create IAM instance profile: %w", err)
+			}
+			config.IamInstanceProfile = instanceProfile
+			auditLog.LogOperationWithData("create_iam_role", iamConfig.RoleName, "success",
+				map[string]interface{}{
+					"instance_profile": instanceProfile,
+				}, nil)
+		} else {
+			// Default: use spored IAM role
+			instanceProfile, err := awsClient.SetupSporedIAMRole(ctx)
+			if err != nil {
+				prog.Error("Setting up IAM role", err)
+				auditLog.LogOperation("create_iam_role", "spored-instance-role", "failed", err)
+				return err
+			}
+			config.IamInstanceProfile = instanceProfile
+			auditLog.LogOperation("create_iam_role", "spored-instance-role", "success", nil)
+		}
+	}
+	prog.Complete("Setting up IAM role")
+	return nil
+}
+
+// ensureSecurityGroup creates and assigns a managed security group when the
+// launch needs one the default SG can't provide: an MPI SG (intra-cluster
+// ports) or a Windows SG (RDP 3389 + SSH 22). Otherwise it's a no-op. Extracted
+// from launchWithProgress (#319); behavior unchanged.
+func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, prog *progress.Progress, auditLog *audit.AuditLogger) error {
+	if mpiEnabled {
+		prog.Start("Creating MPI security group")
+		// Get default VPC
+		vpcID, err := awsClient.GetDefaultVPC(ctx, config.Region)
+		if err != nil {
+			prog.Error("Creating MPI security group", err)
+			return fmt.Errorf("failed to get default VPC: %w", err)
+		}
+
+		// Create or get MPI security group
+		sgName := fmt.Sprintf("spawn-mpi-%s", jobArrayName)
+		sgID, err := awsClient.CreateOrGetMPISecurityGroup(ctx, config.Region, vpcID, sgName)
+		if err != nil {
+			prog.Error("Creating MPI security group", err)
+			auditLog.LogOperationWithRegion("create_security_group", sgName, config.Region, "failed", err)
+			return fmt.Errorf("failed to create MPI security group: %w", err)
+		}
+
+		config.SecurityGroupIDs = []string{sgID}
+		auditLog.LogOperationWithData("create_security_group", sgName, "success",
+			map[string]interface{}{
+				"security_group_id": sgID,
+				"region":            config.Region,
+			}, nil)
+		prog.Complete("Creating MPI security group")
+	} else if config.TargetOS == "windows" && len(config.SecurityGroupIDs) == 0 {
+		// Windows needs RDP (3389) + SSH (22); the default SG won't open 3389, so
+		// RDP would be impossible (#95). Create a managed Windows SG.
+		prog.Start("Creating Windows security group")
+		vpcID, err := awsClient.GetDefaultVPC(ctx, config.Region)
+		if err != nil {
+			prog.Error("Creating Windows security group", err)
+			return fmt.Errorf("failed to get default VPC: %w", err)
+		}
+		if allowCIDR == "" || allowCIDR == "0.0.0.0/0" {
+			fmt.Fprintf(os.Stderr, "⚠️  Opening RDP (3389) + SSH (22) to 0.0.0.0/0; restrict with --allow-cidr <your-ip>/32.\n")
+		}
+		sgName := fmt.Sprintf("spawn-windows-%s", config.Name)
+		sgID, err := awsClient.CreateOrGetWindowsSecurityGroup(ctx, config.Region, vpcID, sgName, allowCIDR)
+		if err != nil {
+			prog.Error("Creating Windows security group", err)
+			auditLog.LogOperationWithRegion("create_security_group", sgName, config.Region, "failed", err)
+			return fmt.Errorf("failed to create Windows security group: %w", err)
+		}
+		config.SecurityGroupIDs = []string{sgID}
+		auditLog.LogOperationWithData("create_security_group", sgName, "success",
+			map[string]interface{}{"security_group_id": sgID, "region": config.Region}, nil)
+		prog.Complete("Creating Windows security group")
+	} else {
+		prog.Skip("Creating security group")
+	}
+	return nil
+}
+
+// ensureAMIAndPreflight detects the AMI (when unset/"auto"), resolves the target
+// OS, and runs the pre-flight instance-type guards (Windows lifecycle/burstable,
+// nested-virtualization, and MPI/EFA/hibernation feature constraints) before any
+// billable resource is created. Extracted from launchWithProgress (#319);
+// behavior unchanged.
+func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, prog *progress.Progress) error {
+	// Step 1: Detect AMI
+	prog.Start("Detecting AMI")
+	// "" or "auto" both mean auto-detect the latest AL2023 AMI (#342).
+	if config.AMI == "" || strings.EqualFold(config.AMI, "auto") {
+		ami, err := awsClient.GetRecommendedAMI(ctx, config.Region, config.InstanceType)
+		if err != nil {
+			prog.Error("Detecting AMI", err)
+			return err
+		}
+		config.AMI = ami
+	}
+	prog.Complete("Detecting AMI")
+
+	// Step 1b: Resolve target OS (--os override, else auto-detect from the AMI)
+	// and enforce the Windows lifecycle guard before we spend on a launch.
+	config.TargetOS = resolveTargetOS(ctx, awsClient, config.Region, config.AMI, osFlag)
+	if err := windowsLifecycleGuard(config); err != nil {
+		return err
+	}
+	// Reject burstable types for Windows (catches auto-detected Windows where the
+	// early --os default didn't apply); spend nothing on a launch that'd crawl (#95).
+	if err := guardWindowsInstanceType(config.TargetOS, config.InstanceType); err != nil {
+		return err
+	}
+
+	// Reject --nested-virtualization on an instance type that can't do it, before
+	// spending on a launch RunInstances would reject cryptically (#91).
+	if config.NestedVirtualization {
+		if err := awsClient.ValidateInstanceTypeForNestedVirtualization(ctx, config.InstanceType, config.Region); err != nil {
+			return err
+		}
+	}
+
+	// Pre-flight: validate instance-type feature constraints (MPI placement group,
+	// EFA, hibernation) BEFORE creating any AWS resources (IAM role, security
+	// group), so an unsupported combination fails fast with an actionable message
+	// instead of cryptically after several API calls (#110).
+	if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, hibernate || hibernateOnIdle); err != nil {
+		return err
+	}
 	return nil
 }
