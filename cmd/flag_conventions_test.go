@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -40,16 +41,33 @@ func TestFlagConventions(t *testing.T) {
 	})
 }
 
+// destructiveVerbs are the verbs that mark an irreversible/mutating action.
+var destructiveVerbs = map[string]bool{
+	"cancel": true, "terminate": true, "delete": true, "remove": true, "destroy": true,
+}
+
 // isDestructive reports whether a command performs an irreversible/mutating
 // action that warrants a confirmation flag, keyed on its verb.
+//
+// cobra's Name() is the first whitespace token of Use, so hyphenated compound
+// verbs like "workspace-remove" or "remove-schedule" arrive as a single token.
+// We therefore check every hyphen-segment, not the whole Name(): otherwise a
+// compound-verb command slips past the gate and can perform an irreversible
+// delete with no --yes/prompt (spawn#285).
 func isDestructive(c *cobra.Command) bool {
-	switch c.Name() {
-	case "cancel", "terminate", "delete", "remove", "destroy":
-		// `notify`/bot workspace destroy uses --confirm by design; allow either.
-		return c.Flags().Lookup("confirm") == nil
-	default:
+	found := false
+	for _, seg := range strings.Split(c.Name(), "-") {
+		if destructiveVerbs[seg] {
+			found = true
+			break
+		}
+	}
+	if !found {
 		return false
 	}
+	// A command may satisfy the confirmation contract with --yes OR --confirm
+	// (bot workspace destroy uses --confirm/dry-run by design).
+	return c.Flags().Lookup("confirm") == nil
 }
 
 func walk(c *cobra.Command, fn func(*cobra.Command)) {

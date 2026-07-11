@@ -33,20 +33,21 @@ const (
 )
 
 var (
-	botPlatform        string
-	botUser            string
-	botUserID          string
-	botWorkspaceID     string
-	botInstance        string
-	botNickname        string
-	botAllow           []string
-	botTagPrefix       string
-	botTable           string
-	botJSONOutput      bool // deprecated: use --output json
-	botRoleARN         string
-	botConnectCode     string   // for --connect-code self-registration
-	botAllowedChannels []string // for --allowed-channels channel restriction
-	botConnectTTLHours int      // for --connect-ttl workspace max connect code lifetime
+	botPlatform           string
+	botUser               string
+	botUserID             string
+	botWorkspaceID        string
+	botInstance           string
+	botNickname           string
+	botAllow              []string
+	botTagPrefix          string
+	botTable              string
+	botJSONOutput         bool // deprecated: use --output json
+	botRoleARN            string
+	botConnectCode        string   // for --connect-code self-registration
+	botAllowedChannels    []string // for --allowed-channels channel restriction
+	botConnectTTLHours    int      // for --connect-ttl workspace max connect code lifetime
+	botWorkspaceRemoveYes bool     // --yes: skip the workspace-remove confirmation prompt
 )
 
 var botCmd = &cobra.Command{
@@ -586,6 +587,9 @@ var botWorkspaceRemoveCmd = &cobra.Command{
 		if botPlatform == "" || botWorkspaceID == "" {
 			return fmt.Errorf("--platform and --workspace-id are required")
 		}
+		if !confirmYes(botWorkspaceRemoveYes, fmt.Sprintf("Remove workspace registration %s/%s?", botPlatform, botWorkspaceID)) {
+			return fmt.Errorf("aborted")
+		}
 		ctx := context.Background()
 		cfg, err := awsconfig.LoadDefaultConfig(ctx)
 		if err != nil {
@@ -1068,6 +1072,7 @@ func init() {
 	// workspace-add/remove/destroy share workspace-id
 	botWorkspaceAddCmd.Flags().StringVar(&botWorkspaceID, "workspace-id", "", "Platform workspace ID")
 	botWorkspaceRemoveCmd.Flags().StringVar(&botWorkspaceID, "workspace-id", "", "Platform workspace ID")
+	botWorkspaceRemoveCmd.Flags().BoolVarP(&botWorkspaceRemoveYes, "yes", "y", false, "Skip the confirmation prompt")
 	botWorkspaceDestroyCmd.Flags().StringVar(&botWorkspaceID, "workspace-id", "", "Platform workspace ID (required)")
 	botWorkspaceDestroyCmd.Flags().StringVar(&botWorkspacesTable, "workspaces-table", "", "Override DynamoDB workspaces table name")
 	botWorkspaceDestroyCmd.Flags().StringVar(&botTable, "registry-table", "", "Override DynamoDB registry table name")
