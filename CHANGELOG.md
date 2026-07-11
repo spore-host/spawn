@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scripts keep running. The `remove` verb keeps its `-y/--yes` prompt and
   `destroy` keeps its `--confirm` dry-run gate. Part of the 2026-07-11 audit
   (#328, Phase 2).
+- **`autoscale *-schedule` commands are now an `autoscale schedule` subgroup**
+  (#306). Use `spawn autoscale schedule add|remove|list` instead of the old
+  flat `autoscale add-schedule`/`remove-schedule`/`list-schedules`. This also
+  removes the confusing overlap with the top-level `spawn schedule` (parameter
+  sweeps). The flat names remain as hidden, deprecated aliases so existing
+  scripts keep working; `schedule remove` keeps its `-y/--yes` prompt. Part of
+  the 2026-07-11 audit (#328, Phase 2).
 
 ### Added
 - **`spawn autoscale list`** (#299). Lists all active auto-scaling groups. The
