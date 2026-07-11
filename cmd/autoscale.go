@@ -170,22 +170,29 @@ var autoscaleMetricActivityCmd = &cobra.Command{
 	RunE:  runAutoscaleMetricActivity,
 }
 
+// autoscaleScheduleCmd groups the scheduled-action verbs under
+// `autoscale schedule` (#306).
+var autoscaleScheduleCmd = &cobra.Command{
+	Use:   "schedule",
+	Short: "Manage scheduled scaling actions for an autoscale group",
+}
+
 var autoscaleAddScheduleCmd = &cobra.Command{
-	Use:   "add-schedule <group-name>",
+	Use:   "add <group-name>",
 	Short: "Add a scheduled action to an autoscale group",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runAutoscaleAddSchedule,
 }
 
 var autoscaleRemoveScheduleCmd = &cobra.Command{
-	Use:   "remove-schedule <group-name> <schedule-name>",
+	Use:   "remove <group-name> <schedule-name>",
 	Short: "Remove a scheduled action from an autoscale group",
 	Args:  cobra.ExactArgs(2),
 	RunE:  runAutoscaleRemoveSchedule,
 }
 
 var autoscaleListSchedulesCmd = &cobra.Command{
-	Use:   "list-schedules <group-name>",
+	Use:   "list <group-name>",
 	Short: "List all scheduled actions for an autoscale group",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runAutoscaleListSchedules,
@@ -206,10 +213,12 @@ func init() {
 	autoscaleCmd.AddCommand(autoscaleScalingActivityCmd)
 	autoscaleCmd.AddCommand(autoscaleSetMetricPolicyCmd)
 	autoscaleCmd.AddCommand(autoscaleMetricActivityCmd)
-	autoscaleCmd.AddCommand(autoscaleAddScheduleCmd)
-	autoscaleCmd.AddCommand(autoscaleRemoveScheduleCmd)
+	// Scheduled-action verbs now live under `autoscale schedule <verb>` (#306).
+	autoscaleCmd.AddCommand(autoscaleScheduleCmd)
+	autoscaleScheduleCmd.AddCommand(autoscaleAddScheduleCmd)
+	autoscaleScheduleCmd.AddCommand(autoscaleRemoveScheduleCmd)
 	autoscaleRemoveScheduleCmd.Flags().BoolVarP(&autoscaleRemoveScheduleYes, "yes", "y", false, "Skip the confirmation prompt")
-	autoscaleCmd.AddCommand(autoscaleListSchedulesCmd)
+	autoscaleScheduleCmd.AddCommand(autoscaleListSchedulesCmd)
 
 	// Global flags
 	autoscaleCmd.PersistentFlags().StringVar(&autoscaleTableName, "table", "spawn-autoscale-groups", "DynamoDB table name")
@@ -319,6 +328,30 @@ func init() {
 		"Timezone (e.g., America/New_York)")
 	autoscaleAddScheduleCmd.Flags().BoolVar(&autoscaleScheduleEnabled, "enabled", true,
 		"Enable the schedule immediately")
+
+	// Back-compat: these verbs used to be flat-hyphenated (`autoscale
+	// add-schedule`, etc.). Keep hidden, deprecated shims that share the real
+	// commands' RunE and flags so existing scripts keep working while
+	// `autoscale schedule <verb>` is canonical (#306).
+	registerScheduleAlias(autoscaleAddScheduleCmd, "add-schedule")
+	registerScheduleAlias(autoscaleRemoveScheduleCmd, "remove-schedule")
+	registerScheduleAlias(autoscaleListSchedulesCmd, "list-schedules")
+}
+
+// registerScheduleAlias adds a hidden, deprecated flat-name shim under
+// `autoscale` that delegates to the canonical `autoscale schedule <verb>`
+// command, sharing its flag set (same underlying package vars).
+func registerScheduleAlias(target *cobra.Command, oldName string) {
+	shim := &cobra.Command{
+		Use:        oldName,
+		Short:      target.Short,
+		Hidden:     true,
+		Deprecated: fmt.Sprintf("use `spawn autoscale schedule %s` instead", target.Name()),
+		Args:       target.Args,
+		RunE:       target.RunE,
+	}
+	shim.Flags().AddFlagSet(target.Flags())
+	autoscaleCmd.AddCommand(shim)
 }
 
 func getAutoscaler(ctx context.Context) (*autoscaler.AutoScaler, error) {
