@@ -105,6 +105,14 @@ var autoscaleStatusCmd = &cobra.Command{
 	RunE:  runAutoscaleStatus,
 }
 
+var autoscaleListCmd = &cobra.Command{
+	Use:     "list",
+	Aliases: []string{"ls"},
+	Short:   "List all active auto-scaling groups",
+	Args:    cobra.NoArgs,
+	RunE:    runAutoscaleList,
+}
+
 var autoscaleHealthCmd = &cobra.Command{
 	Use:   "health <group-name>",
 	Short: "Show instance health for auto-scaling group",
@@ -187,6 +195,7 @@ func init() {
 	autoscaleCmd.AddCommand(autoscaleLaunchCmd)
 	autoscaleCmd.AddCommand(autoscaleUpdateCmd)
 	autoscaleCmd.AddCommand(autoscaleStatusCmd)
+	autoscaleCmd.AddCommand(autoscaleListCmd)
 	autoscaleCmd.AddCommand(autoscaleHealthCmd)
 	autoscaleCmd.AddCommand(autoscalePauseCmd)
 	autoscaleCmd.AddCommand(autoscaleResumeCmd)
@@ -523,7 +532,23 @@ func runAutoscaleStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Otherwise list all active groups
+	// Otherwise list all active groups (same view as `autoscale list`).
+	return listAutoscaleGroups(ctx, as)
+}
+
+func runAutoscaleList(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	as, err := getAutoscaler(ctx)
+	if err != nil {
+		return err
+	}
+
+	return listAutoscaleGroups(ctx, as)
+}
+
+// listAutoscaleGroups prints a table of all active autoscale groups.
+func listAutoscaleGroups(ctx context.Context, as *autoscaler.AutoScaler) error {
 	groups, err := as.ListActiveGroups(ctx)
 	if err != nil {
 		return fmt.Errorf("list groups: %w", err)

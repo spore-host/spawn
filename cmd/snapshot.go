@@ -19,7 +19,6 @@ var (
 	snapshotDescription string
 	snapshotEncrypted   bool
 	snapshotKMSKeyARN   string
-	snapshotOutput      string
 	snapshotTempDir     string
 	snapshotTags        []string
 	snapshotMountRW     bool
@@ -110,7 +109,6 @@ func init() {
 	snapshotCreateCmd.Flags().StringVar(&snapshotKMSKeyARN, "kms-key", "", "Customer-managed KMS key ARN for encryption (implies --encrypted)")
 	snapshotCreateCmd.Flags().StringVar(&snapshotTempDir, "temp-dir", "", "Directory for the temporary ext4 image built from a dir/tarball source (default: system temp). Point at a roomy disk for large data.")
 	snapshotCreateCmd.Flags().StringArrayVar(&snapshotTags, "tag", nil, "Custom tag key=value to set on the snapshot (repeatable). Merged with the spawn:* baseline; cannot override a spawn: tag.")
-	snapshotCreateCmd.Flags().StringVarP(&snapshotOutput, "output", "o", "text", "Output format: text or json")
 
 	_ = snapshotCreateCmd.MarkFlagRequired("from")
 	_ = snapshotCreateCmd.MarkFlagRequired("size")
@@ -161,7 +159,7 @@ func runSnapshotCreate(cmd *cobra.Command, _ []string) error {
 	}
 	defer prepared.Cleanup()
 
-	if snapshotOutput != "json" {
+	if getOutputFormat() != "json" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Building EBS snapshot from %s (%d GiB volume) in %s...\n", snapshotFrom, snapshotSizeGiB, region)
 	}
 
@@ -177,7 +175,7 @@ func runSnapshotCreate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	if snapshotOutput == "json" {
+	if getOutputFormat() == "json" {
 		b, _ := json.MarshalIndent(map[string]any{
 			"snapshotId": res.SnapshotID,
 			"region":     region,

@@ -26,7 +26,7 @@ var (
 	collectS3Prefix   string
 	collectMetric     string
 	collectBestN      int
-	collectRegions    string
+	collectRegions    []string
 )
 
 var collectCmd = &cobra.Command{
@@ -74,7 +74,7 @@ func init() {
 	collectCmd.Flags().StringVar(&collectS3Prefix, "s3-prefix", "", "Custom S3 prefix for results (default: auto-detect)")
 	collectCmd.Flags().StringVar(&collectMetric, "metric", "", "Metric to use for ranking results (e.g., accuracy, loss)")
 	collectCmd.Flags().IntVar(&collectBestN, "best", 0, "Show only top N results by metric (0 = all)")
-	collectCmd.Flags().StringVar(&collectRegions, "regions", "", "Comma-separated list of regions to collect from (default: all)")
+	collectCmd.Flags().StringSliceVarP(&collectRegions, "regions", "r", nil, "Regions to collect from (comma-separated or repeated; default: all)")
 
 	_ = collectCmd.MarkFlagRequired("sweep-id")
 }
@@ -120,9 +120,9 @@ func runCollectResults(cmd *cobra.Command, args []string) error {
 	regions := getRegionsForSweep(sweepRecord)
 
 	// Apply region filter if specified
-	if collectRegions != "" {
+	if len(collectRegions) > 0 {
 		filterSet := make(map[string]bool)
-		for _, r := range strings.Split(collectRegions, ",") {
+		for _, r := range collectRegions {
 			filterSet[strings.TrimSpace(r)] = true
 		}
 

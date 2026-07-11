@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn autoscale list`** (#299). Lists all active auto-scaling groups. The
+  bare `spawn autoscale status` (no group name) already showed this table and
+  still does; `list` (alias `ls`) makes the intent explicit and matches the
+  `list`/`status` split used elsewhere. Purely additive — no existing command
+  changes.
+
+### Changed
+- **`--regions` is now consistent across commands** (#300). `spawn availability`,
+  `collect`, `sweep collect`, `stage upload`, and `stage estimate` previously took
+  `--regions` as a raw comma-string; they now use the same list flag as `spawn
+  list` — accepting comma-separated *or* repeated values and a `-r` shorthand.
+  Existing `--regions us-east-1,us-west-2` invocations keep working unchanged.
+
 ### Fixed
+- **`spawn validate -o json` and `spawn snapshot create -o json` now work** (#301).
+  Both commands defined their own local `--output`/`-o` flag that collided with
+  the root persistent `-o/--output`, so `validate -o json` failed with "unknown
+  shorthand flag". They now read the root output flag like every other command;
+  `--output json`/`-o json` selects JSON as expected. No change to the emitted
+  JSON or text.
 - **`spawn notify workspace-remove` and `spawn autoscale remove-schedule` now
   confirm before deleting** (#285). Both performed an irreversible delete (a
   DynamoDB workspace registration, a scheduled scaling action) with no prompt

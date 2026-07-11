@@ -118,7 +118,7 @@ func init() {
 	sweepCollectCmd.Flags().StringVar(&collectS3Prefix, "s3-prefix", "", "Custom S3 prefix for results (default: auto-detect)")
 	sweepCollectCmd.Flags().StringVar(&collectMetric, "metric", "", "Metric to rank results by (e.g. accuracy, loss)")
 	sweepCollectCmd.Flags().IntVar(&collectBestN, "best", 0, "Show only top N results by metric (0 = all)")
-	sweepCollectCmd.Flags().StringVar(&collectRegions, "regions", "", "Comma-separated list of regions to collect from")
+	sweepCollectCmd.Flags().StringSliceVarP(&collectRegions, "regions", "r", nil, "Regions to collect from (comma-separated or repeated)")
 
 	// Deprecate the old top-level sweep commands
 	cancelCmd.Deprecated = "use 'spawn sweep cancel <sweep-id>' instead"

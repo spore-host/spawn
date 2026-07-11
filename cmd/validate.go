@@ -17,7 +17,6 @@ import (
 
 var (
 	validateComplianceMode string
-	validateOutputFormat   string // "text" or "json"
 	validateRegion         string
 	validateInstanceID     string
 	validateInfrastructure bool // Validate infrastructure resources
@@ -44,7 +43,7 @@ Examples:
   spawn validate --infrastructure
 
   # Output as JSON for automation
-  spawn validate --nist-800-171 --output json`,
+  spawn validate --nist-800-171 -o json`,
 	RunE: runValidate,
 }
 
@@ -54,7 +53,6 @@ func init() {
 	validateCmd.Flags().StringVar(&validateComplianceMode, "nist-800-171", "", "Validate NIST 800-171 compliance")
 	validateCmd.Flags().StringVar(&validateComplianceMode, "nist-800-53", "", "Validate NIST 800-53 compliance (low, moderate, high)")
 	validateCmd.Flags().BoolVar(&validateInfrastructure, "infrastructure", false, "Validate infrastructure resources (DynamoDB, S3, Lambda)")
-	validateCmd.Flags().StringVar(&validateOutputFormat, "output", "text", "Output format (text, json)")
 	validateCmd.Flags().StringVar(&validateRegion, "region", "", "AWS region to validate (default: all regions)")
 	validateCmd.Flags().StringVar(&validateInstanceID, "instance-id", "", "Specific instance ID to validate")
 }
@@ -129,7 +127,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Output results
-	if validateOutputFormat == "json" {
+	if getOutputFormat() == "json" {
 		return outputValidationJSON(results, instances, complianceConfig)
 	}
 
@@ -318,7 +316,7 @@ func runInfrastructureValidation(ctx context.Context) error {
 	}
 
 	// Output results
-	if validateOutputFormat == "json" {
+	if getOutputFormat() == "json" {
 		return outputInfrastructureJSON(result, resolver)
 	}
 
