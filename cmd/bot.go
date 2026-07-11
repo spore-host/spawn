@@ -501,8 +501,14 @@ type botWorkspace struct {
 	TokenRotation  bool   `dynamodbav:"token_rotation,omitempty" json:"token_rotation,omitempty"`
 }
 
+// botWorkspaceCmd groups the workspace management verbs under `notify workspace`.
+var botWorkspaceCmd = &cobra.Command{
+	Use:   "workspace",
+	Short: "Manage chat-platform workspace registrations",
+}
+
 var botWorkspaceAddCmd = &cobra.Command{
-	Use:   "workspace-add",
+	Use:   "add",
 	Short: "Register a Slack/Teams workspace's bot token and signing secret",
 	Long: `Store the Slack bot token and signing secret for a workspace so the
 spore-bot Lambda can verify incoming slash command requests.
@@ -580,7 +586,7 @@ Run this once after installing the Slack app in a workspace:
 }
 
 var botWorkspaceRemoveCmd = &cobra.Command{
-	Use:   "workspace-remove",
+	Use:   "remove",
 	Short: "Remove a workspace registration",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if botPlatform == "" || botWorkspaceID == "" {
@@ -614,7 +620,7 @@ var botWorkspaceRemoveCmd = &cobra.Command{
 }
 
 var botWorkspaceListCmd = &cobra.Command{
-	Use:   "workspace-list",
+	Use:   "list",
 	Short: "List registered workspaces",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
@@ -678,7 +684,7 @@ var botWorkspaceListCmd = &cobra.Command{
 var botDestroyConfirm bool
 
 var botWorkspaceDestroyCmd = &cobra.Command{
-	Use:   "workspace-destroy",
+	Use:   "destroy",
 	Short: "Completely remove a workspace: all registrations and credentials",
 	Long: `Permanently delete all instance registrations across all users in a workspace,
 and remove the workspace's bot token and signing secret.
@@ -1007,9 +1013,10 @@ type botRegistration struct {
 func init() {
 	rootCmd.AddCommand(botCmd)
 	botCmd.AddCommand(botRegisterCmd, botDeregisterCmd, botListCmd,
-		botEnableCmd, botDisableCmd,
-		botWorkspaceAddCmd, botWorkspaceRemoveCmd, botWorkspaceListCmd,
-		botWorkspaceDestroyCmd)
+		botEnableCmd, botDisableCmd, botWorkspaceCmd)
+	// Workspace verbs now live under `notify workspace <verb>` (#305).
+	botWorkspaceCmd.AddCommand(botWorkspaceAddCmd, botWorkspaceRemoveCmd,
+		botWorkspaceListCmd, botWorkspaceDestroyCmd)
 
 	// Shared flags across all subcommands
 	allSubs := []*cobra.Command{
@@ -1076,4 +1083,31 @@ func init() {
 	botWorkspaceDestroyCmd.Flags().StringVar(&botWorkspacesTable, "workspaces-table", "", "Override DynamoDB workspaces table name")
 	botWorkspaceDestroyCmd.Flags().StringVar(&botTable, "registry-table", "", "Override DynamoDB registry table name")
 	botWorkspaceDestroyCmd.Flags().BoolVar(&botDestroyConfirm, "confirm", false, "Execute destroy (default: dry-run)")
+
+	// Back-compat: the workspace verbs used to be flat-hyphenated commands
+	// (`notify workspace-add`, etc.). Keep hidden, deprecated shims that share
+	// the real commands' RunE and flags (all bound to the same package vars) so
+	// existing scripts keep working while `notify workspace <verb>` is canonical (#305).
+	registerWorkspaceAlias(botWorkspaceAddCmd, "workspace-add")
+	registerWorkspaceAlias(botWorkspaceRemoveCmd, "workspace-remove")
+	registerWorkspaceAlias(botWorkspaceListCmd, "workspace-list")
+	registerWorkspaceAlias(botWorkspaceDestroyCmd, "workspace-destroy")
+}
+
+// registerWorkspaceAlias adds a hidden, deprecated flat-name shim under `notify`
+// that delegates to the given canonical `notify workspace <verb>` command. The
+// shim shares the target's flag set (same underlying package vars), so parsing
+// behaves identically.
+func registerWorkspaceAlias(target *cobra.Command, oldName string) {
+	shim := &cobra.Command{
+		Use:                oldName,
+		Short:              target.Short,
+		Hidden:             true,
+		Deprecated:         fmt.Sprintf("use `spawn notify workspace %s` instead", target.Name()),
+		Args:               target.Args,
+		RunE:               target.RunE,
+		DisableFlagParsing: false,
+	}
+	shim.Flags().AddFlagSet(target.Flags())
+	botCmd.AddCommand(shim)
 }
