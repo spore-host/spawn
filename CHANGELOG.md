@@ -31,6 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spellings is reintroduced without `MarkDeprecated`. Part of the 2026-07-11
   audit (#328, Phase 2).
 
+### Changed
+- **`notify workspace-*` commands are now a `notify workspace` subgroup** (#305).
+  Use `spawn notify workspace add|remove|list|destroy` instead of the old
+  flat-hyphenated `notify workspace-add` etc. The flat names still work as
+  hidden, deprecated aliases (they print a pointer to the new form), so existing
+  scripts keep running. The `remove` verb keeps its `-y/--yes` prompt and
+  `destroy` keeps its `--confirm` dry-run gate. Part of the 2026-07-11 audit
+  (#328, Phase 2).
+
 ### Added
 - **`spawn autoscale list`** (#299). Lists all active auto-scaling groups. The
   bare `spawn autoscale status` (no group name) already showed this table and
