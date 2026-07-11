@@ -152,12 +152,19 @@ func init() {
 	_ = graphPipelineCmd.Flags().MarkDeprecated("json", "use --output json instead")
 
 	// Launch command flags
+	// --detached is a historical no-op: pipeline launch invokes the orchestrator
+	// Lambda and always returns immediately. Deprecated (still accepted so
+	// existing scripts don't break); use --wait to block instead.
 	launchPipelineCmd.Flags().BoolVar(&flagDetached, "detached", false, "Launch and return immediately")
+	_ = launchPipelineCmd.Flags().MarkDeprecated("detached", "pipeline launch is always async; this flag has no effect (use --wait to block)")
 	launchPipelineCmd.Flags().BoolVar(&flagWait, "wait", false, "Wait for pipeline to complete")
 	launchPipelineCmd.Flags().StringVar(&flagRegion, "region", "", "AWS region (default: from AWS config)")
 
 	// Collect command flags
+	collectPipelineCmd.Flags().StringVar(&flagOutputDir, "output-dir", "./results", "Output directory for downloaded files")
+	// Deprecated alias for --output-dir.
 	collectPipelineCmd.Flags().StringVar(&flagOutputDir, "output", "./results", "Output directory for downloaded files")
+	_ = collectPipelineCmd.Flags().MarkDeprecated("output", "use --output-dir instead")
 	collectPipelineCmd.Flags().StringVar(&flagStage, "stage", "", "Download results from specific stage only")
 
 	// List command flags

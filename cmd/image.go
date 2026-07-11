@@ -673,7 +673,10 @@ func init() {
 	// Used only when --infra-config-arn is omitted (self-provisioning the build infra):
 	f.StringVar(&imageImportInstType, "instance-type", "m6i.large", "Build instance type (when self-provisioning infra)")
 	f.StringVar(&imageImportSubnet, "subnet-id", "", "Subnet for the build instance (when self-provisioning infra)")
+	f.StringSliceVar(&imageImportSGs, "security-group-ids", nil, "Security groups for the build instance (comma-separated or repeated; when self-provisioning infra)")
+	// Deprecated alias for --security-group-ids (bound to the same var).
 	f.StringArrayVar(&imageImportSGs, "security-group-id", nil, "Security group for the build instance, repeatable (when self-provisioning infra)")
+	_ = f.MarkDeprecated("security-group-id", "use --security-group-ids instead")
 	// Warm-AMI stage (#98): on by default — build a fast-boot AMI from the import
 	// so future launches skip the ~30 min Sysprep first boot.
 	f.BoolVar(&imageImportNoWarm, "no-warm", false, "Skip building the warm (fast-boot) AMI; produce only the raw imported base AMI")

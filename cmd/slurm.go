@@ -107,7 +107,10 @@ func init() {
 	slurmCmd.AddCommand(slurmSubmitCmd)
 
 	// Convert flags
+	slurmConvertCmd.Flags().StringVar(&slurmOutputFile, "output-file", "", "Output parameter file (default: stdout)")
+	// Deprecated alias for --output-file (shadowed the root -o/--output format flag).
 	slurmConvertCmd.Flags().StringVarP(&slurmOutputFile, "output", "o", "", "Output parameter file (default: stdout)")
+	_ = slurmConvertCmd.Flags().MarkDeprecated("output", "use --output-file instead")
 
 	// Submit flags
 	slurmSubmitCmd.Flags().BoolVarP(&slurmForceYes, "yes", "y", false, "Skip confirmation prompt")

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+- **Flag names aligned across commands** (#309, #310, #311, #312, #313, #314).
+  Each concept now has one canonical flag name everywhere; the old spellings
+  still work but are deprecated and hidden from `--help`:
+  - `--subnet` → **`--subnet-id`** (`spawn launch`)
+  - `--key-pair` → **`--key-name`** (`spawn launch`)
+  - `--security-group` / `--security-groups` / `--security-group-id` →
+    **`--security-group-ids`** (`launch`, `autoscale launch`, `burst`,
+    `image import`). `spawn launch` now accepts **multiple** security groups
+    (it previously took only one).
+  - `--tags` → **`--tag`** (`spawn autoscale launch`), matching the repeatable
+    `key=value` form used by `spawn launch`.
+  - `--output`/`-o` used as a file/dir path → **`--output-file`** or
+    **`--output-dir`** (`queue results`, `queue template generate`,
+    `queue template init`, `slurm convert`, `pipeline collect`). The local
+    flag shadowed the root `-o/--output` format flag (same class of bug as the
+    `validate -o json` fix); the path flags are renamed and `--output` kept as
+    a deprecated alias.
+  - `pipeline launch --detached` is deprecated: pipeline launch is always async,
+    so the flag never had an effect (use `--wait` to block).
+  A guard test (`flag_conventions_test.go`) now fails if any of these historical
+  spellings is reintroduced without `MarkDeprecated`. Part of the 2026-07-11
+  audit (#328, Phase 2).
+
 ### Added
 - **`spawn autoscale list`** (#299). Lists all active auto-scaling groups. The
   bare `spawn autoscale status` (no group name) already showed this table and

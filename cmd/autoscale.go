@@ -45,7 +45,8 @@ var (
 	autoscaleSecurityGroups []string
 	autoscaleIAMProfile     string
 	autoscaleUserData       string
-	autoscaleTags           map[string]string
+	autoscaleTags           map[string]string // deprecated --tags (key=value map)
+	autoscaleTagList        []string          // canonical --tag (repeatable key=value)
 
 	// Update flags
 	autoscaleNewDesired int
@@ -225,10 +226,16 @@ func init() {
 	autoscaleLaunchCmd.Flags().BoolVar(&autoscaleSpot, "spot", false, "Use spot instances")
 	autoscaleLaunchCmd.Flags().StringVar(&autoscaleKeyName, "key-name", "", "SSH key name")
 	autoscaleLaunchCmd.Flags().StringVar(&autoscaleSubnetID, "subnet-id", "", "Subnet ID")
-	autoscaleLaunchCmd.Flags().StringSliceVar(&autoscaleSecurityGroups, "security-groups", []string{}, "Security group IDs")
+	autoscaleLaunchCmd.Flags().StringSliceVar(&autoscaleSecurityGroups, "security-group-ids", nil, "Security group IDs (comma-separated or repeated)")
+	// Deprecated alias for --security-group-ids (bound to the same var).
+	autoscaleLaunchCmd.Flags().StringSliceVar(&autoscaleSecurityGroups, "security-groups", nil, "Security group IDs")
+	_ = autoscaleLaunchCmd.Flags().MarkDeprecated("security-groups", "use --security-group-ids instead")
 	autoscaleLaunchCmd.Flags().StringVar(&autoscaleIAMProfile, "iam-profile", "", "IAM instance profile")
 	autoscaleLaunchCmd.Flags().StringVar(&autoscaleUserData, "user-data", "", "User data script (base64 encoded)")
-	autoscaleLaunchCmd.Flags().StringToStringVar(&autoscaleTags, "tags", map[string]string{}, "Additional tags (key=value)")
+	autoscaleLaunchCmd.Flags().StringArrayVar(&autoscaleTagList, "tag", nil, "Additional tag key=value (repeatable)")
+	// Deprecated alias for --tag (key=value map form).
+	autoscaleLaunchCmd.Flags().StringToStringVar(&autoscaleTags, "tags", nil, "Additional tags (key=value)")
+	_ = autoscaleLaunchCmd.Flags().MarkDeprecated("tags", "use --tag key=value (repeatable) instead")
 
 	autoscaleLaunchCmd.Flags().StringVar(&scalingPolicy, "scaling-policy", "",
 		"Scaling policy type: 'queue-depth' (empty = manual mode)")
@@ -383,6 +390,18 @@ func runAutoscaleLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Merge tags from the canonical --tag (repeatable key=value) and the
+	// deprecated --tags (key=value map). --tag wins on conflict.
+	tags, err := parseKVTags(autoscaleTagList)
+	if err != nil {
+		return err
+	}
+	for k, v := range autoscaleTags {
+		if _, ok := tags[k]; !ok {
+			tags[k] = v
+		}
+	}
+
 	// Create autoscaler
 	as, err := getAutoscaler(ctx)
 	if err != nil {
@@ -408,7 +427,7 @@ func runAutoscaleLaunch(cmd *cobra.Command, args []string) error {
 			SecurityGroups:     autoscaleSecurityGroups,
 			IAMInstanceProfile: autoscaleIAMProfile,
 			UserData:           userData,
-			Tags:               autoscaleTags,
+			Tags:               tags,
 		},
 		HealthCheckInterval: 60 * time.Second,
 		ReplacementStrategy: "immediate",

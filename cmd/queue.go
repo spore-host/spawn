@@ -165,14 +165,21 @@ Examples:
 
 func init() {
 	// Results subcommand flags
+	queueResultsCmd.Flags().StringVar(&queueOutputDir, "output-dir", ".", "Output directory for results")
+	// Deprecated alias for --output-dir (shadowed the root -o/--output format flag).
 	queueResultsCmd.Flags().StringVarP(&queueOutputDir, "output", "o", ".", "Output directory for results")
+	_ = queueResultsCmd.Flags().MarkDeprecated("output", "use --output-dir instead")
 
 	// Template generate flags
+	queueTemplateGenerateCmd.Flags().String("output-file", "", "Output file (default: stdout)")
 	queueTemplateGenerateCmd.Flags().StringP("output", "o", "", "Output file (default: stdout)")
+	_ = queueTemplateGenerateCmd.Flags().MarkDeprecated("output", "use --output-file instead")
 	queueTemplateGenerateCmd.Flags().StringToString("var", nil, "Template variables (key=value)")
 
 	// Template init flags
+	queueTemplateInitCmd.Flags().String("output-file", "", "Output file (default: queue.json)")
 	queueTemplateInitCmd.Flags().StringP("output", "o", "", "Output file (default: queue.json)")
+	_ = queueTemplateInitCmd.Flags().MarkDeprecated("output", "use --output-file instead")
 
 	// Add subcommands
 	queueCmd.AddCommand(queueStatusCmd)
@@ -446,9 +453,19 @@ func runQueueTemplateList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// outputFileFlag returns the --output-file value, falling back to the
+// deprecated --output alias when only that was set.
+func outputFileFlag(cmd *cobra.Command) string {
+	if v, _ := cmd.Flags().GetString("output-file"); v != "" {
+		return v
+	}
+	v, _ := cmd.Flags().GetString("output")
+	return v
+}
+
 func runQueueTemplateGenerate(cmd *cobra.Command, args []string) error {
 	templateName := args[0]
-	output, _ := cmd.Flags().GetString("output")
+	output := outputFileFlag(cmd)
 	vars, _ := cmd.Flags().GetStringToString("var")
 
 	// Load template
@@ -532,7 +549,7 @@ func runQueueTemplateShow(cmd *cobra.Command, args []string) error {
 }
 
 func runQueueTemplateInit(cmd *cobra.Command, args []string) error {
-	output, _ := cmd.Flags().GetString("output")
+	output := outputFileFlag(cmd)
 	if output == "" {
 		output = "queue.json"
 	}
