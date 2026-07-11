@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assume-role trust policy to a named `sporedTrustPolicy` const (#323) and added
   section comments to `buildTags` (#324). Public API unchanged. Part of the
   2026-07-11 audit (#328, Phase 3).
+- **Internal: split the oversized `cmd/launch.go`** (#318), no behavior change.
+  The 4333-LOC file (the largest in the repo) is now ~9 focused same-package
+  files by concern: `launch_flags.go` (flag vars + `init`), `launch_single.go`
+  (single-instance path), `launch_sweep.go`, `launch_jobarray.go`,
+  `launch_batchqueue.go`, `launch_config.go` (config + user-data building),
+  `launch_preflight.go`, `launch_regions.go`, `launch_posthook.go`. Pure
+  reorganization — the CLI command/flag tree is byte-identical. Part of the
+  2026-07-11 audit (#328, Phase 3).
 
 ### Deprecated
 - **Flag names aligned across commands** (#309, #310, #311, #312, #313, #314).
