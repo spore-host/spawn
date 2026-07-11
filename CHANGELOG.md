@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `launch_preflight.go`, `launch_regions.go`, `launch_posthook.go`. Pure
   reorganization — the CLI command/flag tree is byte-identical. Part of the
   2026-07-11 audit (#328, Phase 3).
+- **Internal: split the oversized `cmd/autoscale.go`** (#321), no behavior
+  change. The 1417-LOC file is now grouped into same-package files by concern —
+  `autoscale_launch.go`, `autoscale_status.go`, `autoscale_policy.go`,
+  `autoscale_lifecycle.go`, `autoscale_schedule.go`, `autoscale_helpers.go` —
+  with the cobra command definitions + flag block + `init` staying in
+  `autoscale.go`. CLI command/flag tree byte-identical. Part of the 2026-07-11
+  audit (#328, Phase 3).
 
 ### Deprecated
 - **Flag names aligned across commands** (#309, #310, #311, #312, #313, #314).
