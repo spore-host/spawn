@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Internal: split the oversized `pkg/aws/client.go`** (#322), no behavior
+  change. Moved cohesive method clusters into sibling files in the same package
+  — tag construction → `tags.go`, security-group helpers → `securitygroup.go`,
+  EBS block-device/volume-sizing → `ebs.go`, and the spored IAM-role setup →
+  the existing `iam.go` — leaving `client.go` as construction + core instance
+  lifecycle (2379 → ~1340 LOC). Also extracted the spored role's inline
+  assume-role trust policy to a named `sporedTrustPolicy` const (#323) and added
+  section comments to `buildTags` (#324). Public API unchanged. Part of the
+  2026-07-11 audit (#328, Phase 3).
+
 ### Deprecated
 - **Flag names aligned across commands** (#309, #310, #311, #312, #313, #314).
   Each concept now has one canonical flag name everywhere; the old spellings
