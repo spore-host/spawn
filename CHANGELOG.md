@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Internal: extracted step helpers from `launchWithProgress`** (#319), no
+  behavior change. The single-instance launch orchestrator (743 lines) now
+  delegates its early setup phases to `ensureAMIAndPreflight`, `ensureIAMProfile`,
+  and `ensureSecurityGroup`, dropping to ~625 lines and reading as a sequence of
+  named steps. The gnarly FSx-provisioning block and the launch/wait/DNS tail
+  are left inline (they thread local state through to post-launch), and the
+  `count > 1` job-array early-return stays in the parent. Part of the 2026-07-11
+  audit (#328, Phase 3).
 - **Internal: de-duplicated the parallel-launch idiom** (#320), no behavior
   change. The parameter-sweep (`launchAllAtOnce`) and job-array (`launchJobArray`)
   paths each hand-rolled the same goroutine-fan-out + result-collect with a
