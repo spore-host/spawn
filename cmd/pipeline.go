@@ -527,13 +527,6 @@ func formatDurationFromTime(duration time.Duration) string {
 	return fmt.Sprintf("%.1fh", duration.Hours())
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
 func runCollectPipeline(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	pipelineID := args[0]

@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -115,7 +114,7 @@ func runAppList(cmd *cobra.Command, args []string) error {
 		}
 	}
 	all := catalog.List()
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	fmt.Fprintln(w, "NAME\tDESCRIPTION\tGPU\tSTATUS\tVERSION\tFAMILIES")
 	shown, recipes := 0, 0
 	for _, app := range all {

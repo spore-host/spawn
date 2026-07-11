@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -132,7 +131,7 @@ func runCostBreakdown(cmd *cobra.Command, args []string) error {
 		fmt.Println("By Region:")
 		fmt.Println()
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		w := newTableWriter(os.Stdout)
 		_, _ = fmt.Fprintln(w, "REGION\tINSTANCES\tRUNNING-HOURS\tCOST")
 		_, _ = fmt.Fprintln(w, strings.Repeat("─", 60))
 
@@ -153,7 +152,7 @@ func runCostBreakdown(cmd *cobra.Command, args []string) error {
 		fmt.Println("By Instance Type:")
 		fmt.Println()
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		w := newTableWriter(os.Stdout)
 		_, _ = fmt.Fprintln(w, "INSTANCE TYPE\tINSTANCES\tRUNNING-HOURS\tCOST")
 		_, _ = fmt.Fprintln(w, strings.Repeat("─", 60))
 

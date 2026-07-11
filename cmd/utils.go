@@ -4,11 +4,20 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/spore-host/spawn/pkg/aws"
 )
+
+// newTableWriter returns a tabwriter configured with spawn's standard column
+// padding, so table output is consistent across commands. Callers write
+// tab-separated rows and must Flush() when done.
+func newTableWriter(w io.Writer) *tabwriter.Writer {
+	return tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+}
 
 // parseKVTags parses repeated "key=value" flag values into a tag map (#161).
 // The value may itself contain '=' (split on the first only). Keys must be
@@ -148,4 +157,13 @@ func resolveInstance(ctx context.Context, client *aws.Client, identifier string)
 	fmt.Fprintf(os.Stderr, "\nPlease use the specific instance ID instead.\n")
 
 	return nil, fmt.Errorf("multiple instances found with name: %s", identifier)
+}
+
+// truncate shortens s to maxLen characters, replacing the tail with "..." when
+// it would otherwise overflow.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }

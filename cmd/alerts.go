@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -317,7 +316,7 @@ func runAlertsList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Print table
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "ALERT ID\tSWEEP/SCHEDULE\tTRIGGERS\tDESTINATIONS\tCREATED")
 	_, _ = fmt.Fprintln(w, strings.Repeat("─", 100))
 
@@ -394,7 +393,7 @@ func runAlertsHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	// Print table
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "TIMESTAMP\tTRIGGER\tSUCCESS\tMESSAGE")
 	_, _ = fmt.Fprintln(w, strings.Repeat("─", 100))
 

@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -250,7 +249,7 @@ func displayStandaloneInstances(instances []aws.InstanceInfo, hasOtherGroups boo
 		}
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	defer func() { _ = w.Flush() }()
 
 	// Header
@@ -369,19 +368,11 @@ func formatParameters(params map[string]string, maxParams int) string {
 		if i >= maxParams {
 			break
 		}
-		value := truncateValue(params[k], 20)
+		value := truncate(params[k], 20)
 		parts = append(parts, fmt.Sprintf("%s=%s", k, value))
 	}
 
 	return strings.Join(parts, " ")
-}
-
-// truncateValue truncates string if > maxLen, adds "..."
-func truncateValue(value string, maxLen int) string {
-	if len(value) <= maxLen {
-		return value
-	}
-	return value[:maxLen-3] + "..."
 }
 
 func displayInstance(inst aws.InstanceInfo, prefix string) {

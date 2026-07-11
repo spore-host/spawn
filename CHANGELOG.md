@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before acting and accept `-y`/`--yes` to skip the prompt for scripts; the
   guard test now inspects every hyphen-segment of a verb so future compound
   verbs can't regress.
+- **Config-file durations now accept a day unit** (#298). A `ttl`, `idle-timeout`,
+  or `completion-delay` written as e.g. `2d` or `1d12h` in a local config was
+  silently parsed as `0` (Go's `time.ParseDuration` rejects `d`), quietly
+  dropping the setting. Config durations now use the same day-aware parser the
+  CLI uses, so `2d` = 48h as expected. Invalid values still fall back to zero.
+
+### Changed
+- **Internal: de-duplicated helpers** (#294, #295, #296), no behavior change.
+  Collapsed two byte-identical duration/string-truncation helpers into one each,
+  routed the CLI TTL parser through the shared `pkg/config` parser (which is
+  what fixed #298), and funneled table output through a single `newTableWriter`
+  helper for consistent column padding. Part of the 2026-07-11 audit (#328).
 
 ### Removed
 - **Internal dead-code cleanup** (#286, #287, #288, #289, #291, #292). No

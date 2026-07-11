@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -53,7 +52,7 @@ func runAMISnapshots(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	defer func() { _ = w.Flush() }()
 	_, _ = fmt.Fprintf(w, "SNAPSHOT\tSIZE\tSTATE\tENCRYPTED\tAGE\tSHARED\n")
 	for _, s := range snaps {

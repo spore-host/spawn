@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -199,16 +200,67 @@ func applyDefaults(config *LocalConfig) {
 	}
 }
 
-// ParseDuration parses a duration string, returns zero duration on error
+// ParseDuration parses a duration string, returns zero duration on error.
+// It accepts Go's native duration syntax plus a day unit (e.g. "2d", "1d12h"),
+// which time.ParseDuration does not support.
 func ParseDuration(s string) time.Duration {
-	if s == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(s)
+	d, err := ParseDurationE(s)
 	if err != nil {
 		return 0
 	}
 	return d
+}
+
+// ParseDurationE parses a duration string composed of <number><unit> segments
+// where unit is one of s, m, h, d (days). It first tries Go's native
+// time.ParseDuration (which handles ns..h and fractional values), then falls
+// back to the segment parser so day units and combined forms like "1d12h" work.
+func ParseDurationE(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+
+	// Native syntax first (handles fractional values and sub-second units).
+	if d, err := time.ParseDuration(s); err == nil {
+		return d, nil
+	}
+
+	// Fallback: <number><unit> segments, unit ∈ {s,m,h,d}.
+	var total time.Duration
+	remaining := s
+	for len(remaining) > 0 {
+		i := 0
+		for i < len(remaining) && remaining[i] >= '0' && remaining[i] <= '9' {
+			i++
+		}
+		if i == 0 {
+			return 0, fmt.Errorf("invalid duration format: %s", s)
+		}
+		numStr := remaining[:i]
+		if i >= len(remaining) {
+			return 0, fmt.Errorf("invalid duration format: missing unit in %s", s)
+		}
+		unit := remaining[i]
+		remaining = remaining[i+1:]
+
+		num, err := strconv.ParseInt(numStr, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid number in duration: %s", numStr)
+		}
+		switch unit {
+		case 's':
+			total += time.Duration(num) * time.Second
+		case 'm':
+			total += time.Duration(num) * time.Minute
+		case 'h':
+			total += time.Duration(num) * time.Hour
+		case 'd':
+			total += time.Duration(num) * 24 * time.Hour
+		default:
+			return 0, fmt.Errorf("invalid unit in duration: %c", unit)
+		}
+	}
+	return total, nil
 }
 
 // detectPublicIP attempts to detect the public IP address
