@@ -135,36 +135,6 @@ func TestValidateTTL_TotalDuration(t *testing.T) {
 }
 
 // TestFormatTTLDuration validates TTL formatting for display
-func TestFormatTTLDuration(t *testing.T) {
-	tests := []struct {
-		name     string
-		ttl      string
-		expected string
-	}{
-		{"1 second", "1s", "1 second"},
-		{"Multiple seconds", "30s", "30 seconds"},
-		{"1 minute", "1m", "1 minute"},
-		{"Multiple minutes", "15m", "15 minutes"},
-		{"1 hour", "1h", "1 hour"},
-		{"Multiple hours", "2h", "2 hours"},
-		{"1 day", "1d", "1 day"},
-		{"Multiple days", "7d", "7 days"},
-		{"Hours and minutes", "2h30m", "2 hours 30 minutes"},
-		{"Days and hours", "1d12h", "1 day 12 hours"},
-		{"All components", "1d2h30m15s", "1 day 2 hours 30 minutes 15 seconds"},
-		{"Single of each", "1d1h1m1s", "1 day 1 hour 1 minute 1 second"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := formatTTLDuration(tt.ttl)
-			if result != tt.expected {
-				t.Errorf("formatTTLDuration(%q) = %q, want %q", tt.ttl, result, tt.expected)
-			}
-		})
-	}
-}
-
 // TestValidateTTL_CommonUseCases validates typical user input patterns
 func TestValidateTTL_CommonUseCases(t *testing.T) {
 	tests := []struct {

@@ -387,9 +387,3 @@ func (c *Client) signRequest(ctx context.Context, httpReq *http.Request, body []
 func (c *Client) GetFQDN(recordName string) string {
 	return fmt.Sprintf("%s.%s", recordName, c.domain)
 }
-
-// GetFQDN returns the fully qualified domain name for a record using default domain
-// Deprecated: Use Client.GetFQDN() instead for custom domain support
-func GetFQDN(recordName string) string {
-	return fmt.Sprintf("%s.%s", recordName, defaultDomain)
-}

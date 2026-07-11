@@ -67,29 +67,3 @@ func GetJobConfig(jobs []JobConfig, jobID string) *JobConfig {
 	}
 	return nil
 }
-
-// DependenciesMet checks if all dependencies for a job have been completed
-func DependenciesMet(job *JobConfig, completedJobs map[string]bool) bool {
-	for _, dep := range job.DependsOn {
-		if !completedJobs[dep] {
-			return false
-		}
-	}
-	return true
-}
-
-// GetReadyJobs returns jobs that have all dependencies satisfied
-func GetReadyJobs(jobs []JobConfig, completedJobs map[string]bool, runningJobs map[string]bool) []string {
-	ready := []string{}
-	for _, job := range jobs {
-		// Skip if already completed or running
-		if completedJobs[job.JobID] || runningJobs[job.JobID] {
-			continue
-		}
-		// Check if all dependencies are met
-		if DependenciesMet(&job, completedJobs) {
-			ready = append(ready, job.JobID)
-		}
-	}
-	return ready
-}

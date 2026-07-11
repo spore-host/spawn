@@ -94,18 +94,6 @@ func NewClient(db *dynamodb.Client) *Client {
 	}
 }
 
-// NewClientWithEncryption creates a new alerts client with KMS encryption
-func NewClientWithEncryption(db *dynamodb.Client, kmsClient *kms.Client, kmsKeyID string) *Client {
-	return &Client{
-		db:                    db,
-		kms:                   kmsClient,
-		kmsKeyID:              kmsKeyID,
-		encryptionEnabled:     true,
-		alertsTableName:       AlertsTableName,
-		alertHistoryTableName: AlertHistoryTableName,
-	}
-}
-
 // NewClientWithTableNames creates a new alerts client with custom table names
 func NewClientWithTableNames(db *dynamodb.Client, alertsTable, historyTable string) *Client {
 	return &Client{

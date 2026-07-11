@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	htmpl "html/template"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -604,33 +603,6 @@ dcv create-session \
 echo "DCV session '%s' created for: %s"
 `, preCreate, sessionID, initCommand, sessionID, sessionID, label)
 	return base64.StdEncoding.EncodeToString([]byte(script))
-}
-
-// waitForDCV polls the DCV endpoint until it responds or the timeout is exceeded.
-func waitForDCV(ctx context.Context, host string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	client := &http.Client{Timeout: 5 * time.Second}
-	url := fmt.Sprintf("https://%s:8443", host)
-
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		// DCV returns a page even with TLS errors; we just need TCP open
-		resp, err := client.Get(url) //nolint:noctx
-		if err == nil {
-			resp.Body.Close()
-			return nil
-		}
-		// Connection refused → keep waiting; TLS error → DCV is up
-		if strings.Contains(err.Error(), "tls") || strings.Contains(err.Error(), "certificate") {
-			return nil
-		}
-		time.Sleep(10 * time.Second)
-	}
-	return fmt.Errorf("DCV not ready after %v", timeout)
 }
 
 // getSessionsDir returns the path to ~/.spawn/sessions/, creating it if necessary.

@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -304,38 +303,6 @@ func validateTTL(ttl string) error {
 }
 
 // Helper function to format duration for display
-func formatTTLDuration(ttl string) string {
-	componentPattern := regexp.MustCompile(`(\d+)([smhd])`)
-	matches := componentPattern.FindAllStringSubmatch(ttl, -1)
-
-	parts := make([]string, 0, len(matches))
-	for _, match := range matches {
-		value := match[1]
-		unit := match[2]
-
-		var unitName string
-		switch unit {
-		case "s":
-			unitName = "second"
-		case "m":
-			unitName = "minute"
-		case "h":
-			unitName = "hour"
-		case "d":
-			unitName = "day"
-		}
-
-		// Pluralize if needed
-		if value != "1" {
-			unitName += "s"
-		}
-
-		parts = append(parts, fmt.Sprintf("%s %s", value, unitName))
-	}
-
-	return strings.Join(parts, " ")
-}
-
 func triggerReload(instance *aws.InstanceInfo) error {
 	// Find SSH key
 	keyPath, err := findSSHKey(instance.KeyName)

@@ -165,12 +165,3 @@ func getInstanceName(tags []ec2types.Tag) string {
 	}
 	return "unnamed"
 }
-
-func getTagValue(tags []ec2types.Tag, key string) string {
-	for _, tag := range tags {
-		if stringValue(tag.Key) == key {
-			return stringValue(tag.Value)
-		}
-	}
-	return ""
-}
