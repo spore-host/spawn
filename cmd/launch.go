@@ -62,7 +62,7 @@ var (
 	// Network (empty = auto-create)
 	vpcID    string
 	subnetID string
-	sgID     string
+	sgIDs    []string
 
 	// SSH key
 	keyPair string
@@ -233,11 +233,20 @@ func init() {
 
 	// Network
 	launchCmd.Flags().StringVar(&vpcID, "vpc", "", "VPC ID")
+	launchCmd.Flags().StringVar(&subnetID, "subnet-id", "", "Subnet ID")
+	// Deprecated alias for --subnet-id (bound to the same var).
 	launchCmd.Flags().StringVar(&subnetID, "subnet", "", "Subnet ID")
-	launchCmd.Flags().StringVar(&sgID, "security-group", "", "Security group ID")
+	_ = launchCmd.Flags().MarkDeprecated("subnet", "use --subnet-id instead")
+	launchCmd.Flags().StringSliceVar(&sgIDs, "security-group-ids", nil, "Security group IDs (comma-separated or repeated)")
+	// Deprecated alias for --security-group-ids (single value, appended to the slice).
+	launchCmd.Flags().StringSliceVar(&sgIDs, "security-group", nil, "Security group ID")
+	_ = launchCmd.Flags().MarkDeprecated("security-group", "use --security-group-ids instead")
 
 	// SSH
+	launchCmd.Flags().StringVar(&keyPair, "key-name", "", "SSH key pair name (EC2 KeyName)")
+	// Deprecated alias for --key-name (bound to the same var).
 	launchCmd.Flags().StringVar(&keyPair, "key-pair", "", "SSH key pair name")
+	_ = launchCmd.Flags().MarkDeprecated("key-pair", "use --key-name instead")
 
 	// Capacity
 	launchCmd.Flags().BoolVar(&spot, "spot", false, "Launch as Spot instance")
@@ -3917,9 +3926,9 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		launchConfig.IamInstanceProfile = iamRole
 	}
 
-	// Add network config if specified (sgID may be empty — let spawn auto-create)
-	if sgID != "" {
-		launchConfig.SecurityGroupIDs = []string{sgID}
+	// Add network config if specified (sgIDs may be empty — let spawn auto-create)
+	if len(sgIDs) > 0 {
+		launchConfig.SecurityGroupIDs = sgIDs
 	}
 	if subnetID != "" {
 		launchConfig.SubnetID = subnetID

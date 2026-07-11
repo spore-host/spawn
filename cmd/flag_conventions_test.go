@@ -16,10 +16,26 @@ import (
 //  2. Every destructive command (cancel/terminate/delete/remove/destroy) must
 //     offer a --yes flag so it can be run non-interactively and, by symmetry,
 //     prompts when it is absent.
+//  3. Canonical names for concepts that used to be spelled inconsistently
+//     across commands (spawn#309/#311/#312/#313) may only appear under their
+//     canonical spelling; the historical spellings are allowed ONLY as
+//     deprecated aliases. This stops the drift that the 2026-07 audit fixed
+//     from creeping back in.
 //
 // Walking rootCmd in-process keeps the gate exact (real flag state, not --help
 // text) and cheap (plain unit test, no AWS, no build tag).
 func TestFlagConventions(t *testing.T) {
+	// Historical flag spellings that are now deprecated aliases for a canonical
+	// name. If a command exposes one of these, it must be MarkDeprecated'd.
+	deprecatedAliases := map[string]string{
+		"subnet":            "subnet-id",
+		"key-pair":          "key-name",
+		"security-group":    "security-group-ids",
+		"security-groups":   "security-group-ids",
+		"security-group-id": "security-group-ids",
+		"tags":              "tag",
+	}
+
 	walk(rootCmd, func(c *cobra.Command) {
 		if c.Name() == "help" || !c.Runnable() {
 			return
@@ -36,6 +52,14 @@ func TestFlagConventions(t *testing.T) {
 		if isDestructive(c) {
 			if f := c.Flags().Lookup("yes"); f == nil {
 				t.Errorf("%s: destructive command is missing a --yes confirmation flag (spawn#40)", path)
+			}
+		}
+
+		// (3) historical flag spellings may exist only as deprecated aliases.
+		for old, canonical := range deprecatedAliases {
+			if f := c.Flags().Lookup(old); f != nil && f.Deprecated == "" {
+				t.Errorf("%s: defines --%s undeprecated; use --%s and MarkDeprecated(%q, ...) (2026-07 audit)",
+					path, old, canonical, old)
 			}
 		}
 	})

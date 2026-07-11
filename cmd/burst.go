@@ -55,7 +55,10 @@ func init() {
 	burstCmd.Flags().BoolVar(&burstSpot, "spot", false, "Use Spot instances")
 	burstCmd.Flags().StringVar(&burstKeyName, "key-name", "", "SSH key pair name")
 	burstCmd.Flags().StringVar(&burstSubnetID, "subnet-id", "", "Subnet ID")
+	burstCmd.Flags().StringSliceVar(&burstSecurityGroups, "security-group-ids", nil, "Security group IDs (comma-separated or repeated)")
+	// Deprecated alias for --security-group-ids (bound to the same var).
 	burstCmd.Flags().StringSliceVar(&burstSecurityGroups, "security-groups", nil, "Security group IDs")
+	_ = burstCmd.Flags().MarkDeprecated("security-groups", "use --security-group-ids instead")
 
 	_ = burstCmd.MarkFlagRequired("job-array-id")
 }
