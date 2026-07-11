@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -765,4 +766,242 @@ func (c *Client) instanceProfileExists(ctx context.Context, iamClient *iam.Clien
 		return false, fmt.Errorf("failed to check instance profile existence: %w", err)
 	}
 	return true, nil
+}
+
+// SetupSporedIAMRole creates or retrieves the IAM role and instance profile for spored
+// Returns the instance profile name
+func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
+	iamClient := iam.NewFromConfig(c.cfg)
+
+	roleName := "spored-instance-role"
+	instanceProfileName := "spored-instance-profile"
+	policyName := "spored-policy"
+
+	roleCreated := false
+	profileCreated := false
+
+	// 1. Check if role exists, create if not
+	_, err := iamClient.GetRole(ctx, &iam.GetRoleInput{
+		RoleName: aws.String(roleName),
+	})
+
+	if err != nil {
+		roleCreated = true
+		// Role doesn't exist, create it
+		_, err = iamClient.CreateRole(ctx, &iam.CreateRoleInput{
+			RoleName:                 aws.String(roleName),
+			AssumeRolePolicyDocument: aws.String(sporedTrustPolicy),
+			Description:              aws.String("IAM role for spored daemon on EC2 instances"),
+			Tags: []types.Tag{
+				{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+			},
+		})
+		if err != nil && !contains(err.Error(), "EntityAlreadyExists") {
+			return "", fmt.Errorf("failed to create IAM role: %w", err)
+		}
+	}
+
+	// 2. Attach inline policy to role (sporedDCVRolePolicy, defined below).
+	_, err = iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+		RoleName:       aws.String(roleName),
+		PolicyName:     aws.String(policyName),
+		PolicyDocument: aws.String(sporedDCVRolePolicy),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to attach policy to role: %w", err)
+	}
+
+	// 2b. Attach AmazonSSMManagedInstanceCore so the instance registers with SSM.
+	// This is what `spawn connect` uses on Windows (Session Manager + RunCommand,
+	// since there's no SSH-user model) and is a useful no-public-IP fallback on
+	// Linux too. Idempotent; AccessDenied (e.g. restricted IAM) is non-fatal —
+	// the instance still works, connect just can't fall back to SSM.
+	_, err = iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
+		RoleName:  aws.String(roleName),
+		PolicyArn: aws.String("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"),
+	})
+	if err != nil {
+		log.Printf("Warning: could not attach AmazonSSMManagedInstanceCore to %s (SSM connect may be unavailable): %v", roleName, err)
+	}
+
+	// 3. Check if instance profile exists, create if not
+	_, err = iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
+		InstanceProfileName: aws.String(instanceProfileName),
+	})
+
+	if err != nil {
+		profileCreated = true
+		// Instance profile doesn't exist, create it
+		_, err = iamClient.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
+			InstanceProfileName: aws.String(instanceProfileName),
+			Tags: []types.Tag{
+				{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+			},
+		})
+		if err != nil && !contains(err.Error(), "EntityAlreadyExists") {
+			return "", fmt.Errorf("failed to create instance profile: %w", err)
+		}
+
+		// Add role to instance profile
+		_, err = iamClient.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
+			InstanceProfileName: aws.String(instanceProfileName),
+			RoleName:            aws.String(roleName),
+		})
+		if err != nil && !contains(err.Error(), "LimitExceeded") {
+			return "", fmt.Errorf("failed to add role to instance profile: %w", err)
+		}
+	}
+
+	// If we created new resources, wait for IAM to propagate (eventual
+	// consistency). Poll GetInstanceProfile until it's retrievable rather than
+	// sleeping a fixed 10s — returns immediately once consistent (instant
+	// against emulators), bounded so it can't hang.
+	if roleCreated || profileCreated {
+		waitForInstanceProfile(ctx, iamClient, instanceProfileName)
+	}
+
+	return instanceProfileName, nil
+}
+
+// sporedDCVRolePolicy is the inline policy for the DCV/app-launch spored role
+// (spawn app launch). Kept in sync with buildInlinePolicy (the standard spored
+// role in iam.go): the same self-management grants PLUS the DCV-only S3 reads
+// (dcv-license, spawn-certs). spawn#282 reconciled the two — this role previously
+// granted ec2:CreateTags on "*" UNCONDITIONED (the #174 tag-then-terminate class)
+// and lacked the FSx-mount (#221) and lambda:InvokeFunctionUrl (#173 DNS-sign)
+// grants, so a DCV instance couldn't mount ephemeral FSx and, after the #173
+// AuthType:AWS_IAM cutover, couldn't register DNS. Both are now included;
+// CreateTags is scoped to spawn:managed=true (DCV instances always carry that tag
+// at launch, via buildTags).
+
+// sporedTrustPolicy is the assume-role trust policy for the spored EC2 role:
+// it lets the EC2 service assume the role. Used by SetupSporedIAMRole when
+// creating the role.
+const sporedTrustPolicy = `{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}`
+
+const sporedDCVRolePolicy = `{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeTags",
+        "ec2:DescribeInstances",
+        "ec2:DescribeVolumes"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["ec2:CreateTags", "ec2:DeleteTags"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:TerminateInstances",
+        "ec2:StopInstances"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "fsx:DescribeFileSystems",
+        "fsx:CreateDataRepositoryAssociation",
+        "fsx:DescribeDataRepositoryAssociations"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["lambda:InvokeFunctionUrl"],
+      "Resource": "arn:aws:lambda:*:966362334030:function:spawn-dns-updater"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": "arn:aws:s3:::spawn-certs-*/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": "arn:aws:s3:::dcv-license.*/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::spawn-schedules-*",
+        "arn:aws:s3:::spawn-schedules-*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::spawn-binaries-*",
+        "arn:aws:s3:::spawn-binaries-*/*"
+      ]
+    }
+  ]
+}`
+
+// waitForInstanceProfile polls until the instance profile is retrievable (IAM
+// is eventually consistent after creation), or a bounded deadline passes. It
+// returns as soon as the profile is readable — instantly against a strongly
+// consistent endpoint — instead of a blind fixed sleep. Best-effort: a timeout
+// is not fatal (the subsequent RunInstances will surface any real problem).
+func waitForInstanceProfile(ctx context.Context, iamClient *iam.Client, name string) {
+	const (
+		deadline = 30 * time.Second
+		interval = 500 * time.Millisecond
+	)
+	ctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
+			InstanceProfileName: aws.String(name),
+		}); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
