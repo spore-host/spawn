@@ -326,33 +326,3 @@ func (c *Client) GetExecutionHistory(ctx context.Context, scheduleID string, lim
 	return history, nil
 }
 
-// UpdateScheduleMetadata updates schedule metadata after an execution
-func (c *Client) UpdateScheduleMetadata(ctx context.Context, scheduleID, sweepID string, nextExecutionTime *time.Time) error {
-	updateExpr := "SET execution_count = execution_count + :inc, last_sweep_id = :sweep_id, updated_at = :updated_at"
-	exprValues := map[string]dynamodbtypes.AttributeValue{
-		":inc":        &dynamodbtypes.AttributeValueMemberN{Value: "1"},
-		":sweep_id":   &dynamodbtypes.AttributeValueMemberS{Value: sweepID},
-		":updated_at": &dynamodbtypes.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
-	}
-
-	if nextExecutionTime != nil {
-		updateExpr += ", next_execution_time = :next_exec"
-		exprValues[":next_exec"] = &dynamodbtypes.AttributeValueMemberS{
-			Value: nextExecutionTime.Format(time.RFC3339),
-		}
-	}
-
-	_, err := c.dynamoClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(c.tableName),
-		Key: map[string]dynamodbtypes.AttributeValue{
-			"schedule_id": &dynamodbtypes.AttributeValueMemberS{Value: scheduleID},
-		},
-		UpdateExpression:          aws.String(updateExpr),
-		ExpressionAttributeValues: exprValues,
-	})
-	if err != nil {
-		return fmt.Errorf("update schedule metadata: %w", err)
-	}
-
-	return nil
-}

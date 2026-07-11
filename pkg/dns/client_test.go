@@ -13,25 +13,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 )
 
-func TestGetAccountSubdomain(t *testing.T) {
-	got := GetAccountSubdomain("123456789012", "spore.host")
-	// Encoded account + domain.
-	want := EncodeAccountID("123456789012") + ".spore.host"
-	if got != want {
-		t.Errorf("GetAccountSubdomain = %q, want %q", got, want)
-	}
-}
-
 func TestClientGetFQDN(t *testing.T) {
 	c := &Client{domain: "example.com"}
 	if got := c.GetFQDN("my-instance"); got != "my-instance.example.com" {
 		t.Errorf("Client.GetFQDN = %q, want my-instance.example.com", got)
-	}
-}
-
-func TestPackageGetFQDN(t *testing.T) {
-	if got := GetFQDN("my-instance"); got != "my-instance.spore.host" {
-		t.Errorf("GetFQDN = %q, want my-instance.spore.host", got)
 	}
 }
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **Internal dead-code cleanup** (#286, #287, #288, #289, #291, #292). No
+  user-facing behavior change. Removed the unused `pkg/streaming` transport
+  library (TCP/gRPC/ZMQ), `pkg/instance` wildcard helpers, unused `pkg/audit`
+  context helpers, unused DNS name-decoding helpers (`DecodeAccountID`/
+  `GetAccountSubdomain`/`ParseDNSName` and the deprecated package-level
+  `GetFQDN`), unused queue dependency helpers (`DependenciesMet`/`GetReadyJobs`),
+  a couple of unused `cmd` helpers (`waitForDCV`/`getTagValue`/
+  `formatTTLDuration`), and one unused alerts constructor plus one unused
+  scheduler method — together with the tests that only covered the removed code
+  (~2.4k lines). Part of the 2026-07-11 audit (#328).
+
 ## [0.70.0] - 2026-07-08
 
 ### Removed

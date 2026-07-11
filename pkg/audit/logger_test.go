@@ -2,7 +2,6 @@ package audit
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -148,62 +147,6 @@ func TestGettersSetters(t *testing.T) {
 
 	if logger.GetCorrelationID() != "new-corr" {
 		t.Errorf("Expected GetCorrelationID to return new-corr, got %s", logger.GetCorrelationID())
-	}
-}
-
-func TestNewContextWithAudit(t *testing.T) {
-	ctx := context.Background()
-	ctx = NewContextWithAudit(ctx, "user123")
-
-	userID := GetUserIDFromContext(ctx)
-	if userID != "user123" {
-		t.Errorf("Expected userID user123, got %s", userID)
-	}
-
-	correlationID := GetCorrelationIDFromContext(ctx)
-	if correlationID == "" {
-		t.Error("Expected non-empty correlation ID")
-	}
-}
-
-func TestGetUserIDFromContextUnknown(t *testing.T) {
-	ctx := context.Background()
-	userID := GetUserIDFromContext(ctx)
-
-	if userID != "unknown" {
-		t.Errorf("Expected userID unknown, got %s", userID)
-	}
-}
-
-func TestNewLoggerFromContext(t *testing.T) {
-	ctx := context.Background()
-	ctx = NewContextWithAudit(ctx, "user456")
-
-	logger := NewLoggerFromContext(ctx)
-
-	if logger.userID != "user456" {
-		t.Errorf("Expected userID user456, got %s", logger.userID)
-	}
-
-	if logger.correlationID == "" {
-		t.Error("Expected non-empty correlation ID")
-	}
-}
-
-func TestSetLoggerInContext(t *testing.T) {
-	ctx := context.Background()
-	buf := &bytes.Buffer{}
-	logger := NewLogger(buf, "user123", "corr-456")
-
-	ctx = SetLoggerInContext(ctx, logger)
-
-	retrievedLogger := GetLoggerFromContext(ctx)
-	if retrievedLogger == nil {
-		t.Fatal("Expected logger from context, got nil")
-	}
-
-	if retrievedLogger.userID != "user123" {
-		t.Errorf("Expected userID user123, got %s", retrievedLogger.userID)
 	}
 }
 
