@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -200,7 +199,7 @@ func runListSweeps(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "\n📊 Parameter Sweeps\n\n")
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintf(w, "SWEEP ID\tNAME\tSTATUS\tPROGRESS\tREGION\tCREATED\n")
 
 	for _, sweep := range sweeps {

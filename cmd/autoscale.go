@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"text/tabwriter"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -535,7 +534,7 @@ func runAutoscaleStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "NAME\tSTATUS\tDESIRED\tMIN\tMAX\tCREATED")
 	for _, group := range groups {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%d\t%s\n",
@@ -603,7 +602,7 @@ func runAutoscaleHealth(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("check health: %w", err)
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "INSTANCE\tSTATE\tHEARTBEAT\tSPOT\tHEALTH")
 	for _, h := range health {
 		spotStr := "no"
@@ -1300,7 +1299,7 @@ func runAutoscaleListSchedules(cmd *cobra.Command, args []string) error {
 	evaluator := autoscaler.NewScheduleEvaluator()
 
 	fmt.Printf("Scheduled Actions for %s:\n\n", groupName)
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "NAME\tSCHEDULE\tDESIRED\tMIN\tMAX\tTIMEZONE\tENABLED\tNEXT TRIGGER")
 
 	for _, action := range group.ScheduleConfig.Actions {

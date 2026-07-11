@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"text/tabwriter"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -228,7 +227,7 @@ func runTeamList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "TEAM ID\tNAME\tROLE\tMEMBERS\tCREATED")
 	for _, item := range result.Items {
 		var m memberRecord
@@ -299,7 +298,7 @@ func runTeamShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("query members: %w", err)
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "MEMBER ARN\tROLE\tJOINED")
 	for _, item := range membersResult.Items {
 		var m memberRecord

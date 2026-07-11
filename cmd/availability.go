@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -74,7 +73,7 @@ func runAvailability(cmd *cobra.Command, args []string) error {
 	// Display results
 	fmt.Fprintf(os.Stderr, "\nAvailability Statistics for %s\n\n", availabilityInstanceType)
 
-	w := tabwriter.NewWriter(os.Stderr, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stderr)
 	_, _ = fmt.Fprintln(w, "Region\tSuccess Rate\tLast Success\tStatus")
 	_, _ = fmt.Fprintln(w, "------\t------------\t------------\t------")
 

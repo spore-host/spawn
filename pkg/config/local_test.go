@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadLocalConfig(t *testing.T) {
@@ -290,5 +291,31 @@ public_ip: auto
 	// Should resolve to an IP or fall back to a default
 	if cfg.PublicIP == "auto" {
 		t.Errorf("PublicIP should be resolved from 'auto'")
+	}
+}
+
+func TestParseDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want time.Duration
+	}{
+		{"empty", "", 0},
+		{"native hours", "2h", 2 * time.Hour},
+		{"native minutes", "90m", 90 * time.Minute},
+		{"fractional native", "1.5h", 90 * time.Minute},
+		{"days (was silently dropped, #298)", "2d", 48 * time.Hour},
+		{"single day", "1d", 24 * time.Hour},
+		{"days and hours combined", "1d12h", 36 * time.Hour},
+		{"all units", "1d2h30m15s", 24*time.Hour + 2*time.Hour + 30*time.Minute + 15*time.Second},
+		{"invalid returns zero", "2weeks", 0},
+		{"garbage returns zero", "abc", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ParseDuration(tt.in); got != tt.want {
+				t.Errorf("ParseDuration(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
 	}
 }

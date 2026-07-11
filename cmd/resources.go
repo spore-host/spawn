@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -74,7 +73,7 @@ func runResources(cmd *cobra.Command, args []string) error {
 }
 
 func printResourceTable(cmd *cobra.Command, resources []aws.ManagedResource) {
-	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	tw := newTableWriter(cmd.OutOrStdout())
 	fmt.Fprintln(tw, "REGION\tSERVICE\tTYPE\tID\tSTATE\tCREATED")
 	for _, r := range resources {
 		state := r.State

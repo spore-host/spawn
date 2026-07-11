@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -76,7 +75,7 @@ func runFSxList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Setup tabwriter
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintf(w, "FILESYSTEM ID\tREGION\tSTACK NAME\tSIZE (GB)\tSTATUS\tS3 BUCKET\tCREATED\n")
 
 	totalCount := 0

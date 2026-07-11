@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
@@ -85,7 +84,7 @@ func runDNSList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Filter and display
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "DNS NAME\tFQDN\tINSTANCE ID\tSTATE\tPUBLIC IP")
 	_, _ = fmt.Fprintln(w, "--------\t----\t-----------\t-----\t---------")
 

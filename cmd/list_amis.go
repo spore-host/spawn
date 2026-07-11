@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -173,7 +172,7 @@ func outputAMIsTable(amis []aws.AMIInfo) error {
 
 	fmt.Println() // Blank line
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	defer func() { _ = w.Flush() }()
 
 	// Header
@@ -261,7 +260,7 @@ func outputAMIsTable(amis []aws.AMIInfo) error {
 func outputAMIsTableSimple(amis []aws.AMIInfo) error {
 	fmt.Println() // Blank line
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newTableWriter(os.Stdout)
 	defer func() { _ = w.Flush() }()
 
 	// Header

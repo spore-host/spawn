@@ -138,9 +138,9 @@ func TestFormatDurationForTTL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatDurationForTTL(tt.input)
+			got := formatDuration(tt.input)
 			if got != tt.want {
-				t.Errorf("formatDurationForTTL() = %q, want %q", got, tt.want)
+				t.Errorf("formatDuration() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -165,7 +165,7 @@ func TestParseDurationRoundTrip(t *testing.T) {
 			}
 
 			// Format it back
-			formatted := formatDurationForTTL(parsed)
+			formatted := formatDuration(parsed)
 
 			// Parse again to ensure equivalence
 			parsed2, err := parseDuration(formatted)
@@ -326,7 +326,7 @@ func TestTTLCalculation(t *testing.T) {
 			}
 
 			// Format remaining
-			formatted := formatDurationForTTL(remaining)
+			formatted := formatDuration(remaining)
 
 			// Parse the expected and formatted to compare durations
 			wantDuration, err := parseDuration(tt.wantRemain)

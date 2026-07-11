@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -69,7 +68,7 @@ var pluginListCmd = &cobra.Command{
 			return nil
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		w := newTableWriter(os.Stdout)
 		_, _ = fmt.Fprintln(w, "NAME\tVERSION\tSTATUS\tUPDATED")
 		for _, st := range states {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",

@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -448,7 +447,7 @@ var botListCmd = &cobra.Command{
 			fmt.Println("No registrations found.")
 			return nil
 		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		w := newTableWriter(os.Stdout)
 		fmt.Fprintln(w, "USER\tNICKNAME\tINSTANCE\tACTIONS\tTAG PREFIX")
 		for _, item := range result.Items {
 			var r botRegistration
@@ -655,7 +654,7 @@ var botWorkspaceListCmd = &cobra.Command{
 			fmt.Println("No workspaces registered.")
 			return nil
 		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		w := newTableWriter(os.Stdout)
 		fmt.Fprintln(w, "PLATFORM\tWORKSPACE ID\tNAME\tINSTALLED BY\tINSTALLED AT")
 		for _, item := range result.Items {
 			var ws botWorkspace

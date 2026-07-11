@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
 var (
@@ -146,7 +146,7 @@ func stopOrHibernate(identifier string, hibernate bool) error {
 
 			if remaining > 0 {
 				// Store remaining time so it can be restored on start
-				remainingTTL = formatDurationForTTL(remaining)
+				remainingTTL = formatDuration(remaining)
 				fmt.Fprintf(os.Stderr, "Saving remaining TTL: %s (was: %s, uptime: %s)\n",
 					remainingTTL, instance.TTL, uptime.Round(time.Minute))
 			}
@@ -267,7 +267,7 @@ func stopOrHibernateJobArray(ctx context.Context, hibernate bool) error {
 				uptime := time.Since(inst.LaunchTime)
 				remaining := ttlDuration - uptime
 				if remaining > 0 {
-					remainingTTL = formatDurationForTTL(remaining)
+					remainingTTL = formatDuration(remaining)
 				}
 			}
 		}
@@ -511,77 +511,9 @@ func startJobArray(ctx context.Context) error {
 }
 
 // parseDuration parses a TTL duration string (e.g., "2h", "30m", "1h30m")
+// parseDuration parses a TTL string, accepting Go's native duration syntax plus
+// a day unit (e.g. "2d", "1d12h"). It delegates to the shared day-aware parser
+// in pkg/config so the CLI and the config-file path stay in lockstep.
 func parseDuration(ttl string) (time.Duration, error) {
-	// Try parsing as Go duration first
-	d, err := time.ParseDuration(ttl)
-	if err == nil {
-		return d, nil
-	}
-
-	// Try custom format: <number><unit> where unit is s, m, h, d
-	var total time.Duration
-	remaining := ttl
-
-	for len(remaining) > 0 {
-		// Find the next number-unit pair
-		i := 0
-		for i < len(remaining) && (remaining[i] >= '0' && remaining[i] <= '9') {
-			i++
-		}
-		if i == 0 {
-			return 0, fmt.Errorf("invalid duration format: %s", ttl)
-		}
-
-		numStr := remaining[:i]
-		if i >= len(remaining) {
-			return 0, fmt.Errorf("invalid duration format: missing unit in %s", ttl)
-		}
-
-		unit := remaining[i]
-		remaining = remaining[i+1:]
-
-		num, err := strconv.ParseInt(numStr, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid number in duration: %s", numStr)
-		}
-
-		switch unit {
-		case 's':
-			total += time.Duration(num) * time.Second
-		case 'm':
-			total += time.Duration(num) * time.Minute
-		case 'h':
-			total += time.Duration(num) * time.Hour
-		case 'd':
-			total += time.Duration(num) * 24 * time.Hour
-		default:
-			return 0, fmt.Errorf("invalid unit in duration: %c", unit)
-		}
-	}
-
-	return total, nil
-}
-
-// formatDurationForTTL formats a duration for use as a TTL tag value
-func formatDurationForTTL(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		hours := int(d.Hours())
-		minutes := int(d.Minutes()) % 60
-		if minutes > 0 {
-			return fmt.Sprintf("%dh%dm", hours, minutes)
-		}
-		return fmt.Sprintf("%dh", hours)
-	}
-	days := int(d.Hours() / 24)
-	hours := int(d.Hours()) % 24
-	if hours > 0 {
-		return fmt.Sprintf("%dd%dh", days, hours)
-	}
-	return fmt.Sprintf("%dd", days)
+	return spawnconfig.ParseDurationE(ttl)
 }
