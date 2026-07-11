@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Internal: de-duplicated the parallel-launch idiom** (#320), no behavior
+  change. The parameter-sweep (`launchAllAtOnce`) and job-array (`launchJobArray`)
+  paths each hand-rolled the same goroutine-fan-out + result-collect with a
+  private `launchResult` struct. Extracted a shared `runLaunchBatch` helper (new
+  `cmd/launch_batch.go`) that owns the fan-out; each caller keeps its own
+  post-processing, including the deliberately-different partial-failure handling
+  (sweeps keep successful instances since parameter sets are independent; a job
+  array terminates its successes on any failure since it's a unit — the #220
+  cleanup, preserved verbatim). Part of the 2026-07-11 audit (#328, Phase 3).
 - **Internal: split the oversized `pkg/aws/client.go`** (#322), no behavior
   change. Moved cohesive method clusters into sibling files in the same package
   — tag construction → `tags.go`, security-group helpers → `securitygroup.go`,

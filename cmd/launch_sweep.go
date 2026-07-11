@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -339,34 +338,18 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 
 // launchAllAtOnce launches all instances in parallel (no rolling queue)
 func launchAllAtOnce(ctx context.Context, awsClient *aws.Client, launchConfigs []*aws.LaunchConfig) ([]*aws.LaunchResult, []string, int) {
-	type launchResult struct {
-		index  int
-		result *aws.LaunchResult
-		err    error
-	}
+	results := runLaunchBatch(len(launchConfigs), func(idx int) (*aws.LaunchResult, error) {
+		return awsClient.Launch(ctx, *launchConfigs[idx])
+	})
 
-	resultsChan := make(chan launchResult, len(launchConfigs))
-	var wg sync.WaitGroup
-
-	for i, cfg := range launchConfigs {
-		wg.Add(1)
-		go func(idx int, config *aws.LaunchConfig) {
-			defer wg.Done()
-			result, err := awsClient.Launch(ctx, *config)
-			resultsChan <- launchResult{index: idx, result: result, err: err}
-		}(i, cfg)
-	}
-
-	// Wait for all launches
-	wg.Wait()
-	close(resultsChan)
-
-	// Collect results
+	// Collect results. Parameter sets are independent, so failures are recorded
+	// but successful instances are kept running (no cleanup) — the sweep report
+	// surfaces which sets failed.
 	launchedInstances := make([]*aws.LaunchResult, len(launchConfigs))
 	var failures []string
 	successCount := 0
 
-	for result := range resultsChan {
+	for _, result := range results {
 		if result.err != nil {
 			failures = append(failures, fmt.Sprintf("Parameter set %d: %v", result.index, result.err))
 		} else {
