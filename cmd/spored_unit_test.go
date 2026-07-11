@@ -23,9 +23,11 @@ func TestSporedUnit_NoPrivateTmp(t *testing.T) {
 	_, thisFile, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Join(filepath.Dir(thisFile), "..") // .../spawn
 
-	// Files that emit (or template) the spored systemd unit.
+	// Files that emit (or template) the spored systemd unit. The Go-side unit is
+	// generated in pkg/launcher/bootstrap.go (the cmd/ launch path delegates to it);
+	// the scripts are the standalone installers.
 	files := []string{
-		filepath.Join(repoRoot, "cmd", "launch.go"),
+		filepath.Join(repoRoot, "pkg", "launcher", "bootstrap.go"),
 		filepath.Join(repoRoot, "scripts", "spored.service"),
 		filepath.Join(repoRoot, "scripts", "install-spored.sh"),
 	}
