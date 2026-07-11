@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -15,7 +14,7 @@ import (
 
 var (
 	availabilityInstanceType string
-	availabilityRegions      string
+	availabilityRegions      []string
 )
 
 var availabilityCmd = &cobra.Command{
@@ -32,7 +31,7 @@ func init() {
 	rootCmd.AddCommand(availabilityCmd)
 
 	availabilityCmd.Flags().StringVar(&availabilityInstanceType, "instance-type", "", "Instance type to check (required)")
-	availabilityCmd.Flags().StringVar(&availabilityRegions, "regions", "", "Comma-separated list of regions (default: common regions)")
+	availabilityCmd.Flags().StringSliceVarP(&availabilityRegions, "regions", "r", nil, "Regions to check (comma-separated or repeated; default: common regions)")
 	_ = availabilityCmd.MarkFlagRequired("instance-type")
 }
 
@@ -41,11 +40,8 @@ func runAvailability(cmd *cobra.Command, args []string) error {
 
 	// Parse regions
 	var regions []string
-	if availabilityRegions != "" {
-		regions = strings.Split(availabilityRegions, ",")
-		for i := range regions {
-			regions[i] = strings.TrimSpace(regions[i])
-		}
+	if len(availabilityRegions) > 0 {
+		regions = availabilityRegions
 	} else {
 		// Default to common regions
 		regions = []string{

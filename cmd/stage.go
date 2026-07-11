@@ -14,12 +14,12 @@ import (
 )
 
 var (
-	stageRegions       string
+	stageRegions       []string
 	stageDestination   string
 	stageSweepID       string
 	estimateDataSizeGB int
 	estimateInstances  int
-	estimateRegions    string
+	estimateRegions    []string
 	stageDeleteYes     bool
 )
 
@@ -115,8 +115,8 @@ func init() {
 	stageDeleteCmd.Flags().BoolVarP(&stageDeleteYes, "yes", "y", false, "Skip the confirmation prompt")
 
 	// Upload flags
-	stageUploadCmd.Flags().StringVar(&stageRegions, "regions", "us-east-1,us-west-2",
-		"Comma-separated list of regions to replicate to")
+	stageUploadCmd.Flags().StringSliceVarP(&stageRegions, "regions", "r", []string{"us-east-1", "us-west-2"},
+		"Regions to replicate to (comma-separated or repeated)")
 	stageUploadCmd.Flags().StringVar(&stageDestination, "dest", "",
 		"Destination path on instances (default: /mnt/data/<filename>)")
 	stageUploadCmd.Flags().StringVar(&stageSweepID, "sweep-id", "",
@@ -127,8 +127,8 @@ func init() {
 		"Dataset size in GB")
 	stageEstimateCmd.Flags().IntVar(&estimateInstances, "instances", 10,
 		"Number of instances per region")
-	stageEstimateCmd.Flags().StringVar(&estimateRegions, "regions", "us-east-1,us-west-2",
-		"Comma-separated list of regions")
+	stageEstimateCmd.Flags().StringSliceVarP(&estimateRegions, "regions", "r", []string{"us-east-1", "us-west-2"},
+		"Regions to estimate for (comma-separated or repeated)")
 }
 
 func runStageUpload(cmd *cobra.Command, args []string) error {
@@ -310,7 +310,7 @@ func runStageEstimate(cmd *cobra.Command, args []string) error {
 	fmt.Println("\n📋 Recommendations:")
 	if estimate.Savings > 0 {
 		fmt.Println("  ✓ Use regional replication for this workload")
-		fmt.Printf("  ✓ Run: spawn stage upload <file> --regions %s\n", estimateRegions)
+		fmt.Printf("  ✓ Run: spawn stage upload <file> --regions %s\n", strings.Join(estimateRegions, ","))
 	} else {
 		fmt.Println("  • Single-region storage is sufficient for this workload")
 		fmt.Println("  • Consider replication if adding more regions or instances")
@@ -371,11 +371,11 @@ func runStageDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// parseRegionList parses a comma-separated list of regions
-func parseRegionList(regionsStr string) []string {
-	parts := strings.Split(regionsStr, ",")
-	regions := make([]string, 0, len(parts))
-	for _, part := range parts {
+// parseRegionList trims and drops empty entries from a region slice (the flag
+// is a StringSlice, so splitting is already handled by cobra).
+func parseRegionList(regionsList []string) []string {
+	regions := make([]string, 0, len(regionsList))
+	for _, part := range regionsList {
 		region := strings.TrimSpace(part)
 		if region != "" {
 			regions = append(regions, region)
