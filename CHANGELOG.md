@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn notify workspace-remove` and `spawn autoscale remove-schedule` now
+  confirm before deleting** (#285). Both performed an irreversible delete (a
+  DynamoDB workspace registration, a scheduled scaling action) with no prompt
+  and no way to run them safely. The convention test that guards destructive
+  commands keyed on the exact command name, so these hyphenated compound verbs
+  (`workspace-remove`, `remove-schedule`) slipped past it. Both now prompt
+  before acting and accept `-y`/`--yes` to skip the prompt for scripts; the
+  guard test now inspects every hyphen-segment of a verb so future compound
+  verbs can't regress.
+
 ### Removed
 - **Internal dead-code cleanup** (#286, #287, #288, #289, #291, #292). No
   user-facing behavior change. Removed the unused `pkg/streaming` transport

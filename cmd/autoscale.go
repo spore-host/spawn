@@ -29,7 +29,8 @@ var autoscaleCmd = &cobra.Command{
 }
 
 var (
-	autoscaleTerminateYes bool
+	autoscaleTerminateYes      bool
+	autoscaleRemoveScheduleYes bool
 
 	// Launch flags
 	autoscaleName           string
@@ -198,6 +199,7 @@ func init() {
 	autoscaleCmd.AddCommand(autoscaleMetricActivityCmd)
 	autoscaleCmd.AddCommand(autoscaleAddScheduleCmd)
 	autoscaleCmd.AddCommand(autoscaleRemoveScheduleCmd)
+	autoscaleRemoveScheduleCmd.Flags().BoolVarP(&autoscaleRemoveScheduleYes, "yes", "y", false, "Skip the confirmation prompt")
 	autoscaleCmd.AddCommand(autoscaleListSchedulesCmd)
 
 	// Global flags
@@ -1260,6 +1262,10 @@ func runAutoscaleRemoveSchedule(cmd *cobra.Command, args []string) error {
 
 	if !found {
 		return fmt.Errorf("schedule %q not found in group %s", scheduleName, groupName)
+	}
+
+	if !confirmYes(autoscaleRemoveScheduleYes, fmt.Sprintf("Remove schedule %q from group %s?", scheduleName, groupName)) {
+		return fmt.Errorf("aborted")
 	}
 
 	group.ScheduleConfig.Actions = newActions
