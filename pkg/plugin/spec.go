@@ -49,6 +49,12 @@ type Condition struct {
 type LocalBlock struct {
 	Provision   []Step `yaml:"provision"`
 	Deprovision []Step `yaml:"deprovision"`
+	// Reconcile runs on the controller when the instance's connection details
+	// change (notably its public IP after a stop/start), so an IP-bound local
+	// footprint can be re-pointed — e.g. spore-sync recreates its mutagen session
+	// at the new {{ instance.ip }}. Plugins whose local footprint is not tied to
+	// the instance address (e.g. a Globus endpoint) omit this block.
+	Reconcile []Step `yaml:"reconcile"`
 }
 
 // RemoteBlock holds steps that run on the remote instance.

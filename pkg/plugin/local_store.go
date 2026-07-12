@@ -32,7 +32,8 @@ type LocalRecord struct {
 	Instance    map[string]string `json:"instance"` // instance.* template values used at provision (id/name/ip)
 	Config      map[string]string `json:"config"`
 	Outputs     map[string]string `json:"outputs"`
-	Deprovision []Step            `json:"deprovision"` // the spec's local deprovision steps, captured at install
+	Deprovision []Step            `json:"deprovision"`         // spec's local deprovision steps, captured at install
+	Reconcile   []Step            `json:"reconcile,omitempty"` // spec's local reconcile steps (re-point on IP change)
 	InstalledAt time.Time         `json:"installed_at"`
 }
 

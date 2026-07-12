@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`spawn stop` now confirms before stopping.** It prompts for confirmation
+  (skippable with `-y`/`--yes`), matching `spawn terminate`. Stopping an instance
+  interrupts running work and any live plugin sessions, so it should not be a
+  silent one-keystroke action.
+
+### Added
+- **`spawn plugin install` and `spawn start` load the instance's launch key into
+  ssh-agent** for plugins with SSH-based local steps. Tools like `mutagen` shell
+  out to the system `ssh` and have no key flag, so they depend on the ambient SSH
+  environment; spawn now adds the resolved launch key (`--key`, or the key for the
+  instance's key pair — the same lookup `spawn connect` uses) to the agent so
+  those steps authenticate. Best-effort: if no agent is running it falls back to
+  the user's existing SSH setup.
+- **Plugins can declare a `local.reconcile` block, run on `spawn start`.** When a
+  stopped instance is started it gets a new public IP, which an IP-bound local
+  footprint (e.g. `spore-sync`'s mutagen session, pinned to the old address)
+  can't follow on its own. A plugin that needs re-pointing declares reconcile
+  steps; `spawn start` replays them with the new `{{ instance.ip }}` (retrying
+  while SSH comes up) for any such plugin recorded for that instance. Plugins
+  whose footprint isn't address-bound omit the block.
+
 ### Fixed
 - **Plugins no longer orphan controller-side resources on removal or
   termination.** A plugin's local deprovision steps (e.g. `spore-sync`'s

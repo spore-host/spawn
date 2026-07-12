@@ -121,6 +121,7 @@ func (s *PluginSpec) Validate(dirName string) error {
 	}
 	checkSteps("local.provision", s.Local.Provision, validLocalStepTypes, "run or push")
 	checkSteps("local.deprovision", s.Local.Deprovision, validLocalStepTypes, "run or push")
+	checkSteps("local.reconcile", s.Local.Reconcile, validLocalStepTypes, "run or push")
 	checkSteps("remote.install", s.Remote.Install, validRemoteStepTypes, "run, fetch, or extract")
 	checkSteps("remote.configure", s.Remote.Configure, validRemoteStepTypes, "run, fetch, or extract")
 	checkSteps("remote.start", s.Remote.Start, validRemoteStepTypes, "run, fetch, or extract")
@@ -163,7 +164,7 @@ func (s *PluginSpec) templateTexts() []string {
 		}
 	}
 	for _, group := range [][]Step{
-		s.Local.Provision, s.Local.Deprovision,
+		s.Local.Provision, s.Local.Deprovision, s.Local.Reconcile,
 		s.Remote.Install, s.Remote.Configure, s.Remote.Start, s.Remote.Stop,
 		s.Remote.Health.Steps,
 	} {

@@ -15,6 +15,7 @@ import (
 var (
 	stopJobArrayID        string
 	stopJobArrayName      string
+	stopYes               bool
 	hibernateJobArrayID   string
 	hibernateJobArrayName string
 	startJobArrayID       string
@@ -58,6 +59,7 @@ func init() {
 	// Add job array flags
 	stopCmd.Flags().StringVar(&stopJobArrayID, "job-array-id", "", "Stop all instances in job array by ID")
 	stopCmd.Flags().StringVar(&stopJobArrayName, "job-array-name", "", "Stop all instances in job array by name")
+	stopCmd.Flags().BoolVarP(&stopYes, "yes", "y", false, "Skip the confirmation prompt")
 	hibernateCmd.Flags().StringVar(&hibernateJobArrayID, "job-array-id", "", "Hibernate all instances in job array by ID")
 	hibernateCmd.Flags().StringVar(&hibernateJobArrayName, "job-array-name", "", "Hibernate all instances in job array by name")
 	startCmd.Flags().StringVar(&startJobArrayID, "job-array-id", "", "Start all instances in job array by ID")
@@ -80,7 +82,7 @@ func runStop(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("single instance mode requires 1 argument: <instance-id-or-name>")
 	}
-	return stopOrHibernate(args[0], false)
+	return stopOrHibernate(args[0], false, stopYes)
 }
 
 func runHibernate(cmd *cobra.Command, args []string) error {
@@ -99,10 +101,12 @@ func runHibernate(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("single instance mode requires 1 argument: <instance-id-or-name>")
 	}
-	return stopOrHibernate(args[0], true)
+	// hibernate keeps its existing no-prompt behavior (skipConfirm=true); the
+	// confirmation prompt was scoped to `spawn stop`.
+	return stopOrHibernate(args[0], true, true)
 }
 
-func stopOrHibernate(identifier string, hibernate bool) error {
+func stopOrHibernate(identifier string, hibernate bool, skipConfirm bool) error {
 	ctx := context.Background()
 
 	// Create AWS client
@@ -127,11 +131,23 @@ func stopOrHibernate(identifier string, hibernate bool) error {
 	}
 
 	action := "stop"
+	actionTitle := "Stop"
 	if hibernate {
 		action = "hibernate"
+		actionTitle = "Hibernate"
 	}
 
 	fmt.Fprintf(os.Stderr, "Found instance in %s (state: %s)\n", instance.Region, instance.State)
+
+	label := instance.InstanceID
+	if instance.Name != "" {
+		label = fmt.Sprintf("%s (%s)", instance.Name, instance.InstanceID)
+	}
+	if !confirmYes(skipConfirm, fmt.Sprintf("%s instance %s?", actionTitle, label)) {
+		fmt.Fprintln(os.Stderr, "Aborted.")
+		return nil
+	}
+
 	fmt.Fprintf(os.Stderr, "Requesting %s for instance %s...\n", action, instance.InstanceID)
 
 	// Calculate remaining TTL if set
@@ -387,12 +403,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "\nThe instance is starting up...\n")
 	_, _ = fmt.Fprintf(os.Stdout, "TTL countdown will resume once the instance is running.\n")
 
-	// Wait for instance to be running
+	// Wait for instance to be running AND to have a public IP. The public IP is
+	// often not populated the instant the state flips to "running", and a
+	// stop/start reassigns it — we need the new address to re-point any local
+	// plugin footprint (spore-sync's mutagen session), so keep polling until the
+	// IP appears rather than returning on the first "running".
 	fmt.Fprintf(os.Stderr, "\nWaiting for instance to reach running state...")
+	running := false
+	newIP := ""
 	for i := 0; i < 30; i++ {
 		time.Sleep(2 * time.Second)
 
-		// Refresh instance state
 		instances, err := client.ListInstances(ctx, instance.Region, "")
 		if err != nil {
 			break
@@ -401,16 +422,28 @@ func runStart(cmd *cobra.Command, args []string) error {
 		for _, inst := range instances {
 			if inst.InstanceID == instance.InstanceID {
 				if inst.State == "running" {
-					fmt.Fprintf(os.Stderr, " running!\n")
-					if inst.PublicIP != "" {
-						_, _ = fmt.Fprintf(os.Stdout, "\n🔌 Connect: spawn connect %s\n", instance.InstanceID)
+					if !running {
+						fmt.Fprintf(os.Stderr, " running!\n")
+						running = true
 					}
-					return nil
+					newIP = inst.PublicIP
 				}
 				break
 			}
 		}
+		if running && newIP != "" {
+			break
+		}
 		fmt.Fprintf(os.Stderr, ".")
+	}
+
+	if running && newIP != "" {
+		// A stop/start reassigns the public IP; re-point any local plugin
+		// footprint (e.g. spore-sync's mutagen session) that declares reconcile
+		// steps, so it follows the new address.
+		reconcileAllLocalPlugins(ctx, newIP, instance.InstanceID, instance.Name)
+		_, _ = fmt.Fprintf(os.Stdout, "\n🔌 Connect: spawn connect %s\n", instance.InstanceID)
+		return nil
 	}
 
 	fmt.Fprintf(os.Stderr, " (taking longer than expected)\n")

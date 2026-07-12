@@ -57,6 +57,36 @@ func TestLocalStore_SaveLoadListDelete(t *testing.T) {
 	}
 }
 
+func TestLocalStore_ReconcileStepsRoundTrip(t *testing.T) {
+	store := plugin.NewLocalStore(t.TempDir())
+	rec := &plugin.LocalRecord{
+		Name:       "spore-sync",
+		InstanceID: "i-0abc123",
+		Instance:   map[string]string{"id": "i-0abc123", "name": "box", "ip": "1.1.1.1"},
+		Config:     map[string]string{"local_path": "/tmp/x", "remote_path": "/home/ec2-user/sync", "mode": "two-way-safe"},
+		Reconcile:  []plugin.Step{{Type: "run", Run: "mutagen sync create --name spore-{{ instance.name }} {{ config.local_path }} ec2-user@{{ instance.ip }}:{{ config.remote_path }}"}},
+	}
+	if err := store.Save(rec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := store.Load("i-0abc123", "spore-sync")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Reconcile) != 1 || got.Reconcile[0].Run == "" {
+		t.Errorf("reconcile steps not round-tripped: %+v", got.Reconcile)
+	}
+	// Simulate a reconcile updating the IP and re-saving (what spawn start does).
+	got.Instance["ip"] = "2.2.2.2"
+	if err := store.Save(got); err != nil {
+		t.Fatalf("re-Save: %v", err)
+	}
+	again, _ := store.Load("i-0abc123", "spore-sync")
+	if again.Instance["ip"] != "2.2.2.2" {
+		t.Errorf("updated IP not persisted: %v", again.Instance)
+	}
+}
+
 func TestLocalStore_ListMissingInstanceIsEmpty(t *testing.T) {
 	store := plugin.NewLocalStore(t.TempDir())
 	recs, err := store.List("i-never-seen")

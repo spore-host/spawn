@@ -13,10 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"gopkg.in/yaml.v3"
 )
@@ -134,6 +132,14 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 		return fmt.Errorf("local condition: %w", err)
 	}
 
+	// If the plugin has local steps that SSH to the instance (e.g. spore-sync's
+	// mutagen), make sure the instance's launch key is loaded in ssh-agent —
+	// tools like mutagen shell out to the system ssh and have no key flag, so they
+	// rely on the ambient SSH environment.
+	if len(spec.Local.Provision) > 0 {
+		ensureLaunchKeyInAgent(ctx, instance)
+	}
+
 	resolvedCfg, err := spec.ResolvedConfig(cfg)
 	if err != nil {
 		return err
@@ -171,7 +177,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	// down the mutagen sync or delete the Globus endpoint). We persist the
 	// captured outputs because a deprovision step may reference them
 	// (e.g. {{ outputs.endpoint_id }}) and they live only here on the controller.
-	if len(spec.Local.Deprovision) > 0 {
+	if len(spec.Local.Deprovision) > 0 || len(spec.Local.Reconcile) > 0 {
 		saveLocalPluginRecord(instance, ref, spec, tmplCtx.Instance, resolvedCfg, localOutputs)
 	}
 
@@ -216,6 +222,7 @@ func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, instan
 		Config:      cfg,
 		Outputs:     outputs,
 		Deprovision: spec.Local.Deprovision,
+		Reconcile:   spec.Local.Reconcile,
 		InstalledAt: time.Now(),
 	}
 	if err := store.Save(rec); err != nil {
@@ -223,15 +230,13 @@ func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, instan
 	}
 }
 
-// runLocalDeprovision replays a recorded plugin's local deprovision steps on the
-// controller (e.g. terminate the mutagen sync, delete the Globus endpoint) and
-// removes the record. Best-effort: errors are reported but not fatal, since the
-// caller is usually tearing the instance down regardless.
-func runLocalDeprovision(ctx context.Context, store *plugin.LocalStore, instanceKey string, rec *plugin.LocalRecord) {
+// templateContextFromRecord rebuilds the template context a recorded plugin was
+// provisioned with (instance.* + config + outputs), so local deprovision /
+// reconcile steps replay against the same values — e.g. a deprovision step like
+// `mutagen sync terminate spore-{{ instance.name }}` targets the exact session
+// provision created.
+func templateContextFromRecord(rec *plugin.LocalRecord) plugin.TemplateContext {
 	tmplCtx := plugin.NewTemplateContext()
-	// Replay with the exact instance.* values provision used (name/ip/id), so a
-	// deprovision step like `mutagen sync terminate spore-{{ instance.name }}`
-	// targets the same session that provision created.
 	for k, v := range rec.Instance {
 		tmplCtx.Instance[k] = v
 	}
@@ -244,6 +249,15 @@ func runLocalDeprovision(ctx context.Context, store *plugin.LocalStore, instance
 	for k, v := range rec.Outputs {
 		tmplCtx.Outputs[k] = v
 	}
+	return tmplCtx
+}
+
+// runLocalDeprovision replays a recorded plugin's local deprovision steps on the
+// controller (e.g. terminate the mutagen sync, delete the Globus endpoint) and
+// removes the record. Best-effort: errors are reported but not fatal, since the
+// caller is usually tearing the instance down regardless.
+func runLocalDeprovision(ctx context.Context, store *plugin.LocalStore, instanceKey string, rec *plugin.LocalRecord) {
+	tmplCtx := templateContextFromRecord(rec)
 
 	fmt.Printf("Running local deprovision for plugin %s...\n", rec.Name)
 	exec := plugin.NewLocalExecutor(nil)
@@ -252,6 +266,99 @@ func runLocalDeprovision(ctx context.Context, store *plugin.LocalStore, instance
 	}
 	if err := store.Delete(instanceKey, rec.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not remove local plugin record for %s: %v\n", rec.Name, err)
+	}
+}
+
+// reconcileAllLocalPlugins re-points every recorded plugin on an instance that
+// declares local reconcile steps, using the instance's new public IP. Called by
+// `spawn start` because a stop/start reassigns the public IP, which an IP-bound
+// local footprint (e.g. a mutagen sync session pinned to the old IP) can't
+// follow on its own. The stored record is updated with the new IP so a later
+// deprovision still targets the right session. Best-effort.
+func reconcileAllLocalPlugins(ctx context.Context, newIP string, instanceKeys ...string) {
+	store, err := plugin.DefaultLocalStore()
+	if err != nil || newIP == "" {
+		return
+	}
+
+	// Determine up front whether any recorded plugin actually needs reconciling,
+	// so we only pay the SSH-readiness wait when there's work to do.
+	seen := map[string]bool{}
+	hasWork := false
+	for _, key := range instanceKeys {
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		recs, _ := store.List(key)
+		for _, rec := range recs {
+			if len(rec.Reconcile) > 0 {
+				hasWork = true
+			}
+		}
+	}
+	if !hasWork {
+		return
+	}
+
+	// Reconcile steps SSH to the instance (mutagen); ensure the launch key is in
+	// ssh-agent so they can authenticate after the stop/start.
+	for _, key := range instanceKeys {
+		if key != "" {
+			ensureLaunchKeyInAgent(ctx, key)
+			break
+		}
+	}
+
+	seen = map[string]bool{}
+	for _, key := range instanceKeys {
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		recs, err := store.List(key)
+		if err != nil {
+			continue
+		}
+		for _, rec := range recs {
+			if len(rec.Reconcile) == 0 {
+				continue
+			}
+			if rec.Instance == nil {
+				rec.Instance = map[string]string{}
+			}
+			rec.Instance["ip"] = newIP // reconcile + future deprovision use the new IP
+
+			tmplCtx := templateContextFromRecord(rec)
+			fmt.Printf("Reconciling plugin %s to new instance IP %s...\n", rec.Name, newIP)
+
+			// EC2 reports "running" before SSH is ready for full sessions, and the
+			// reconcile steps connect over SSH (e.g. mutagen sync create) — retry
+			// with backoff rather than a separate SSH probe, since the steps use
+			// their own SSH credential path (mutagen's default identities), which a
+			// raw `ssh` probe wouldn't replicate.
+			exec := plugin.NewLocalExecutor(nil)
+			var rerr error
+			for attempt := 0; attempt < 10; attempt++ {
+				if rerr = exec.RunDeprovision(ctx, rec.Reconcile, tmplCtx); rerr == nil {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					rerr = ctx.Err()
+				case <-time.After(6 * time.Second):
+					continue
+				}
+				break
+			}
+			if rerr != nil {
+				fmt.Fprintf(os.Stderr, "warning: reconcile for %s failed (sync may need a manual re-install): %v\n", rec.Name, rerr)
+				continue
+			}
+			if err := store.Save(rec); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not update local plugin record for %s: %v\n", rec.Name, err)
+			}
+		}
 	}
 }
 
@@ -622,6 +729,30 @@ func withSSHTunnel(ctx context.Context, instance, keyPath string, fn func() (*ht
 	return fn()
 }
 
+// ensureLaunchKeyInAgent loads the instance's launch SSH key into the running
+// ssh-agent so local plugin steps that shell out to the system ssh (e.g.
+// mutagen, which has no key flag) can authenticate. Best-effort: it resolves the
+// key from --key or, failing that, the instance's KeyName via the same lookup
+// `spawn connect` uses; if no agent is running or the key can't be found, it logs
+// and moves on (the step may still work if the key is already available).
+func ensureLaunchKeyInAgent(ctx context.Context, instance string) {
+	keyPath := pluginKeyPath
+	if keyPath == "" {
+		if inst := resolveInstanceViaSpawn(ctx, instance); inst != nil && inst.KeyName != "" {
+			if p, err := findSSHKey(inst.KeyName); err == nil {
+				keyPath = p
+			}
+		}
+	}
+	if keyPath == "" {
+		return // nothing to add; rely on the user's ambient SSH setup
+	}
+	// `ssh-add <key>` is idempotent — re-adding an already-loaded key is a no-op.
+	if err := exec.CommandContext(ctx, "ssh-add", keyPath).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "note: could not add %s to ssh-agent (%v); local SSH-based steps rely on your ambient SSH setup\n", keyPath, err)
+	}
+}
+
 // pluginSSHArgs returns common SSH options.
 func pluginSSHArgs(keyPath string) []string {
 	args := []string{
@@ -635,67 +766,59 @@ func pluginSSHArgs(keyPath string) []string {
 	return args
 }
 
-// lookupInstanceInfo returns the EC2 Name tag and public IP for an instance ID
-// in a single DescribeInstances call. On any failure it falls back to the given
-// identifier for the name and an empty IP, so callers degrade gracefully (the
+// lookupInstanceInfo returns the Name and public IP for an instance identifier
+// (ID or name), resolved through spawn's own instance lookup — the plugin layer
+// never talks to AWS directly. On any failure it falls back to the given
+// identifier as the name with an empty IP, so callers degrade gracefully (the
 // template context simply won't have instance.ip set, and any step that needs it
 // fails loudly at render time).
 func lookupInstanceInfo(ctx context.Context, instance string) (name, publicIP string) {
-	name, publicIP, _ = lookupInstanceDetails(ctx, instance)
-	return name, publicIP
+	inst := resolveInstanceViaSpawn(ctx, instance)
+	if inst == nil {
+		return instance, ""
+	}
+	name = inst.Name
+	if name == "" {
+		name = instance
+	}
+	return name, inst.PublicIP
 }
 
-// lookupInstanceDetails resolves an EC2 instance ID to its Name tag, public IP,
-// and SSH login user (the spawn:local-username tag, defaulting to ec2-user). For
-// a non-ID identifier (a hostname/IP the user passed directly) it returns the
-// identifier as the name with an empty IP/user.
-func lookupInstanceDetails(ctx context.Context, instance string) (name, publicIP, user string) {
-	if !strings.HasPrefix(instance, "i-") {
-		return instance, "", ""
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+// resolveInstanceViaSpawn resolves an instance identifier (ID or Name) to
+// spawn's InstanceInfo using the same client + resolver every other command
+// uses. Returns nil on any error (best-effort; callers degrade gracefully).
+func resolveInstanceViaSpawn(ctx context.Context, instance string) *aws.InstanceInfo {
+	client, err := aws.NewClient(ctx)
 	if err != nil {
-		return instance, "", ""
+		return nil
 	}
-	out, err := ec2.NewFromConfig(cfg).DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-		InstanceIds: []string{instance},
-	})
-	if err != nil || len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
-		return instance, "", ""
+	inst, err := resolveInstance(ctx, client, instance)
+	if err != nil {
+		return nil
 	}
-	inst := out.Reservations[0].Instances[0]
-	name = instance
-	for _, tag := range inst.Tags {
-		switch aws.ToString(tag.Key) {
-		case "Name":
-			name = aws.ToString(tag.Value)
-		case "spawn:local-username":
-			user = aws.ToString(tag.Value)
-		}
-	}
-	return name, aws.ToString(inst.PublicIpAddress), user
+	return inst
 }
 
-// resolvePluginSSHHost turns the --instance value into a host SSH can reach. When
-// it is an EC2 instance ID, it is resolved to user@public-ip (the plugin push
-// API is only reachable over SSH). A value that is already a hostname/IP (or
-// user@host) is returned unchanged. Errors if an instance ID has no public IP.
+// resolvePluginSSHHost turns the --instance value into a host SSH can reach. It
+// is resolved via spawn (never AWS directly) to user@public-ip, since the plugin
+// push API is only reachable over SSH. A value that is already a hostname/IP (or
+// user@host) — i.e. not something spawn can resolve — is returned unchanged.
 //
 // The SSH user defaults to ec2-user (matching `spawn connect`), since that is
 // the account the EC2 key pair authorizes; --user overrides it.
 func resolvePluginSSHHost(ctx context.Context, instance string) (string, error) {
-	if !strings.HasPrefix(instance, "i-") {
-		return instance, nil // already a hostname/IP/user@host
+	inst := resolveInstanceViaSpawn(ctx, instance)
+	if inst == nil {
+		return instance, nil // not spawn-resolvable — treat as a raw hostname/IP/user@host
 	}
-	_, ip, _ := lookupInstanceDetails(ctx, instance)
-	if ip == "" {
+	if inst.PublicIP == "" {
 		return "", fmt.Errorf("instance %s has no public IP to SSH to (plugin commands need SSH access)", instance)
 	}
 	user := pluginSSHUser
 	if user == "" {
 		user = "ec2-user"
 	}
-	return user + "@" + ip, nil
+	return user + "@" + inst.PublicIP, nil
 }
 
 // parseKeyValuePairs converts []string{"k=v"} to map[string]string.
