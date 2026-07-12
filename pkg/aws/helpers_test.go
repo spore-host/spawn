@@ -53,7 +53,7 @@ func TestEstimateVolumeSize(t *testing.T) {
 
 func TestBuildBlockDevices(t *testing.T) {
 	t.Run("default size", func(t *testing.T) {
-		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large"}, 0)
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large"}, "", 0)
 		if len(bd) != 1 {
 			t.Fatalf("expected 1 block device, got %d", len(bd))
 		}
@@ -68,15 +68,35 @@ func TestBuildBlockDevices(t *testing.T) {
 		}
 	})
 
+	// #284: the root mapping's DeviceName must match the AMI's RootDeviceName,
+	// or the size/encryption override lands on a non-root device (Ubuntu/Rocky
+	// register /dev/sda1). An empty name falls back to /dev/xvda (Amazon Linux).
+	t.Run("root device from AMI (/dev/sda1) carries the size override", func(t *testing.T) {
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large", RootVolumeSizeGiB: 200}, "/dev/sda1", 0)
+		if *bd[0].DeviceName != "/dev/sda1" {
+			t.Errorf("root device = %q, want /dev/sda1 (must match the AMI root device, #284)", *bd[0].DeviceName)
+		}
+		if *bd[0].Ebs.VolumeSize != 200 {
+			t.Errorf("root volume size = %d, want 200 (override must apply to the AMI's real root)", *bd[0].Ebs.VolumeSize)
+		}
+	})
+
+	t.Run("empty root device name falls back to /dev/xvda", func(t *testing.T) {
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large"}, "", 0)
+		if *bd[0].DeviceName != "/dev/xvda" {
+			t.Errorf("root device = %q, want /dev/xvda fallback", *bd[0].DeviceName)
+		}
+	})
+
 	t.Run("explicit size override", func(t *testing.T) {
-		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large", RootVolumeSizeGiB: 100}, 0)
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large", RootVolumeSizeGiB: 100}, "", 0)
 		if *bd[0].Ebs.VolumeSize != 100 {
 			t.Errorf("volume size = %d, want 100", *bd[0].Ebs.VolumeSize)
 		}
 	})
 
 	t.Run("hibernate sizes from RAM and encrypts", func(t *testing.T) {
-		bd := buildBlockDevices(LaunchConfig{InstanceType: "r7i.2xlarge", Hibernate: true}, 0)
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "r7i.2xlarge", Hibernate: true}, "", 0)
 		if *bd[0].Ebs.VolumeSize != 42 { // estimateVolumeSize(r7i) = 32+10
 			t.Errorf("hibernate volume size = %d, want 42", *bd[0].Ebs.VolumeSize)
 		}
@@ -86,7 +106,7 @@ func TestBuildBlockDevices(t *testing.T) {
 	})
 
 	t.Run("encryption with KMS key", func(t *testing.T) {
-		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large", EBSEncrypted: true, EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/abc"}, 0)
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large", EBSEncrypted: true, EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/abc"}, "", 0)
 		if !*bd[0].Ebs.Encrypted {
 			t.Error("expected encrypted volume")
 		}
@@ -96,7 +116,7 @@ func TestBuildBlockDevices(t *testing.T) {
 	})
 
 	t.Run("KMS key ignored without encryption", func(t *testing.T) {
-		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large", EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/abc"}, 0)
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "m7i.large", EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/abc"}, "", 0)
 		if bd[0].Ebs.KmsKeyId != nil {
 			t.Error("KMS key should not be set when encryption is off")
 		}
@@ -104,21 +124,21 @@ func TestBuildBlockDevices(t *testing.T) {
 
 	// #25: the AMI root-snapshot minimum is a hard floor on the volume size.
 	t.Run("AMI minimum raises the default", func(t *testing.T) {
-		bd := buildBlockDevices(LaunchConfig{InstanceType: "t4g.small"}, 80)
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "t4g.small"}, "", 80)
 		if *bd[0].Ebs.VolumeSize != 80 {
 			t.Errorf("volume size = %d, want 80 (AMI snapshot minimum)", *bd[0].Ebs.VolumeSize)
 		}
 	})
 
 	t.Run("AMI minimum overrides a too-small explicit size", func(t *testing.T) {
-		bd := buildBlockDevices(LaunchConfig{InstanceType: "t4g.small", RootVolumeSizeGiB: 20}, 40)
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "t4g.small", RootVolumeSizeGiB: 20}, "", 40)
 		if *bd[0].Ebs.VolumeSize != 40 {
 			t.Errorf("volume size = %d, want 40 (snapshot floor beats too-small --volume-size)", *bd[0].Ebs.VolumeSize)
 		}
 	})
 
 	t.Run("explicit size larger than AMI minimum is kept", func(t *testing.T) {
-		bd := buildBlockDevices(LaunchConfig{InstanceType: "t4g.small", RootVolumeSizeGiB: 200}, 80)
+		bd := buildBlockDevices(LaunchConfig{InstanceType: "t4g.small", RootVolumeSizeGiB: 200}, "", 80)
 		if *bd[0].Ebs.VolumeSize != 200 {
 			t.Errorf("volume size = %d, want 200 (caller asked for more than the floor)", *bd[0].Ebs.VolumeSize)
 		}
@@ -134,7 +154,7 @@ func TestBuildBlockDevices(t *testing.T) {
 				{SnapshotID: "snap-aaa", MountPoint: "/opt/databases/kraken2", ReadOnly: true},
 				{SnapshotID: "snap-bbb", MountPoint: "/data", SizeGiB: 200},
 			},
-		}, 0)
+		}, "", 0)
 		if len(bd) != 3 {
 			t.Fatalf("expected root + 2 attached = 3 mappings, got %d", len(bd))
 		}
@@ -164,7 +184,7 @@ func TestBuildBlockDevices(t *testing.T) {
 			EBSEncrypted:  true,
 			EBSKMSKeyID:   "arn:aws:kms:us-east-1:1:key/abc",
 			AttachVolumes: []AttachVolumeSpec{{SnapshotID: "snap-ccc", MountPoint: "/ref"}},
-		}, 0)
+		}, "", 0)
 		if !*bd[1].Ebs.Encrypted {
 			t.Error("attached volume should be encrypted when EBSEncrypted is set")
 		}

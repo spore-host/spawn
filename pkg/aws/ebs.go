@@ -10,11 +10,22 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
-// buildBlockDevices constructs the root EBS mapping. amiMinGiB is the AMI root
-// snapshot's minimum size (0 if unknown); the final volume is never smaller
-// than that, so launches from custom AMIs with a large baked root don't fail
-// with InvalidBlockDeviceMapping (#25).
-func buildBlockDevices(config LaunchConfig, amiMinGiB int32) []types.BlockDeviceMapping {
+// defaultRootDeviceName is the fallback root device when the AMI's registered
+// RootDeviceName can't be determined. Amazon Linux uses /dev/xvda.
+const defaultRootDeviceName = "/dev/xvda"
+
+// buildBlockDevices constructs the root EBS mapping. rootDeviceName is the AMI's
+// registered root device (e.g. /dev/xvda on Amazon Linux, /dev/sda1 on Ubuntu/
+// Rocky/Debian); the root mapping's DeviceName MUST equal it, or EC2 treats the
+// override as a non-root device and silently keeps the AMI's default root (#284).
+// An empty rootDeviceName falls back to /dev/xvda. amiMinGiB is the AMI root
+// snapshot's minimum size (0 if unknown); the final volume is never smaller than
+// that, so launches from custom AMIs with a large baked root don't fail with
+// InvalidBlockDeviceMapping (#25).
+func buildBlockDevices(config LaunchConfig, rootDeviceName string, amiMinGiB int32) []types.BlockDeviceMapping {
+	if rootDeviceName == "" {
+		rootDeviceName = defaultRootDeviceName
+	}
 	// Calculate volume size
 	volumeSize := int32(20) // Default 20 GB
 
@@ -48,7 +59,7 @@ func buildBlockDevices(config LaunchConfig, amiMinGiB int32) []types.BlockDevice
 
 	mappings := []types.BlockDeviceMapping{
 		{
-			DeviceName: aws.String("/dev/xvda"),
+			DeviceName: aws.String(rootDeviceName),
 			Ebs:        ebs,
 		},
 	}
@@ -114,24 +125,27 @@ func estimateVolumeSize(instanceType string) int32 {
 	return 20 // Default
 }
 
-// rootVolumeSizeFromAMI returns the AMI's root EBS volume size in GiB — the
-// minimum a launch from this AMI may request. It is best-effort: any error
-// (AMI not found, no permission, malformed mapping) returns 0, leaving the
-// caller's chosen size unchanged. The root device is the mapping whose name
-// matches the image's RootDeviceName; if that can't be matched, the largest
-// EBS mapping is used as a safe floor.
-func rootVolumeSizeFromAMI(ctx context.Context, ec2Client *ec2.Client, amiID string) int32 {
+// rootDeviceInfoFromAMI returns the AMI's registered root device name and its
+// root EBS volume size in GiB, from a single DescribeImages call. Both are
+// best-effort: any error (AMI not found, no permission, malformed mapping)
+// returns ("", 0), leaving the caller on its fallbacks (/dev/xvda and the
+// caller's chosen size). rootName is the mapping used to derive minGiB (else the
+// largest EBS mapping as a safe floor). Callers need both to build a block-device
+// mapping whose root DeviceName matches the AMI (#284) and is sized to at least
+// the AMI's snapshot (#25).
+func rootDeviceInfoFromAMI(ctx context.Context, ec2Client *ec2.Client, amiID string) (rootName string, minGiB int32) {
 	if amiID == "" {
-		return 0
+		return "", 0
 	}
 	out, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		ImageIds: []string{amiID},
 	})
 	if err != nil || len(out.Images) == 0 {
-		return 0
+		return "", 0
 	}
 	img := out.Images[0]
-	return rootVolumeSizeFromMappings(aws.ToString(img.RootDeviceName), img.BlockDeviceMappings)
+	rootName = aws.ToString(img.RootDeviceName)
+	return rootName, rootVolumeSizeFromMappings(rootName, img.BlockDeviceMappings)
 }
 
 // rootVolumeSizeFromMappings picks the root volume size from an AMI's block
