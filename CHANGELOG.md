@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn collect-results` now reads the sweep table from the correct account,
+  and builds the right results-bucket path** (#326). It loaded the caller's
+  default AWS account (while `spawn list-sweeps` — reading the same
+  `spawn-sweep-orchestration` table — used the spore-host-infra account), so it
+  often found no sweep. It now uses the infra account like `list-sweeps`.
+  Separately, its result-bucket path read a `account_id` attribute that the
+  orchestrator never writes (it writes `aws_account_id`), so the path was
+  malformed (`spawn-results--<region>`); it now reads the real account id.
+
 ### Changed
+- **Internal: `cmd/list-sweeps.go` and `cmd/collect.go` now use a `pkg/sweep`
+  store** (#326), no wire-format change. Added `sweep.Store` (`List`/`Get`,
+  mirroring `pkg/alerts.Client`) over the existing `SweepRecord`, and replaced
+  list-sweeps' inline anonymous struct and collect's hand-rolled
+  `types.AttributeValue` parsing (+ its duplicate `SweepRecord`/`RegionProgress`)
+  with the shared typed record. `dynamodbav` tags and the table name are
+  unchanged. Part of the 2026-07-11 audit (#328).
 - **Internal: `cmd/team.go` now uses a `pkg/team` store** (#326), no behavior
   change. Added `pkg/team` (`Client` mirroring `pkg/alerts.Client`) with the
   `TeamRecord`/`MemberRecord` item types and CRUD/query methods, and rewired all
