@@ -10,36 +10,11 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/team"
 )
-
-const (
-	teamTable       = "spawn-teams"
-	membershipTable = "spawn-team-memberships"
-)
-
-// teamRecord mirrors the DynamoDB schema for spawn-teams.
-type teamRecord struct {
-	TeamID      string `dynamodbav:"team_id"`
-	TeamName    string `dynamodbav:"team_name"`
-	OwnerARN    string `dynamodbav:"owner_arn"`
-	Description string `dynamodbav:"description,omitempty"`
-	CreatedAt   string `dynamodbav:"created_at"`
-	MemberCount int    `dynamodbav:"member_count"`
-}
-
-// memberRecord mirrors the DynamoDB schema for spawn-team-memberships.
-type memberRecord struct {
-	TeamID    string `dynamodbav:"team_id"`
-	MemberARN string `dynamodbav:"member_arn"`
-	Role      string `dynamodbav:"role"`
-	JoinedAt  string `dynamodbav:"joined_at"`
-	InvitedBy string `dynamodbav:"invited_by"`
-}
 
 var (
 	teamName        string
@@ -111,8 +86,9 @@ func init() {
 	teamRemoveCmd.Flags().BoolVarP(&teamRemoveYes, "yes", "y", false, "Skip the confirmation prompt")
 }
 
-// teamDDBClient returns a DynamoDB client using the default config.
-func teamDDBClient(ctx context.Context) (*dynamodb.Client, string, error) {
+// teamStore returns a team store Client (default account/config) plus the
+// caller's IAM ARN, used for ownership/membership checks.
+func teamStore(ctx context.Context) (*team.Client, string, error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("load AWS config: %w", err)
@@ -122,7 +98,7 @@ func teamDDBClient(ctx context.Context) (*dynamodb.Client, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("get caller identity: %w", err)
 	}
-	return dynamodb.NewFromConfig(cfg), callerARN, nil
+	return team.NewClient(dynamodb.NewFromConfig(cfg)), callerARN, nil
 }
 
 // getCallerARN returns the caller's IAM ARN via STS GetCallerIdentity.
@@ -154,7 +130,7 @@ func genTeamID() string {
 
 func runTeamCreate(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
-	ddb, callerARN, err := teamDDBClient(ctx)
+	store, callerARN, err := teamStore(ctx)
 	if err != nil {
 		return err
 	}
@@ -162,7 +138,7 @@ func runTeamCreate(cmd *cobra.Command, args []string) error {
 	teamID := genTeamID()
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	team := teamRecord{
+	tr := &team.TeamRecord{
 		TeamID:      teamID,
 		TeamName:    teamName,
 		OwnerARN:    callerARN,
@@ -170,81 +146,46 @@ func runTeamCreate(cmd *cobra.Command, args []string) error {
 		CreatedAt:   now,
 		MemberCount: 1,
 	}
-	teamItem, err := attributevalue.MarshalMap(team)
-	if err != nil {
-		return fmt.Errorf("marshal team: %w", err)
-	}
-	if _, err := ddb.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(teamTable),
-		Item:      teamItem,
-	}); err != nil {
+	if err := store.PutTeam(ctx, tr); err != nil {
 		return fmt.Errorf("create team: %w", err)
 	}
 
-	member := memberRecord{
+	if err := store.PutMembership(ctx, &team.MemberRecord{
 		TeamID:    teamID,
 		MemberARN: callerARN,
 		Role:      "owner",
 		JoinedAt:  now,
 		InvitedBy: callerARN,
-	}
-	memberItem, err := attributevalue.MarshalMap(member)
-	if err != nil {
-		return fmt.Errorf("marshal membership: %w", err)
-	}
-	if _, err := ddb.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(membershipTable),
-		Item:      memberItem,
 	}); err != nil {
 		return fmt.Errorf("create membership: %w", err)
 	}
 
-	_, _ = fmt.Fprintf(os.Stdout, "Created team %q\n  ID:    %s\n  Owner: %s\n", team.TeamName, teamID, callerARN)
+	_, _ = fmt.Fprintf(os.Stdout, "Created team %q\n  ID:    %s\n  Owner: %s\n", tr.TeamName, teamID, callerARN)
 	return nil
 }
 
 func runTeamList(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
-	ddb, callerARN, err := teamDDBClient(ctx)
+	store, callerARN, err := teamStore(ctx)
 	if err != nil {
 		return err
 	}
 
-	result, err := ddb.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(membershipTable),
-		IndexName:              aws.String("member_arn-index"),
-		KeyConditionExpression: aws.String("member_arn = :arn"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":arn": &types.AttributeValueMemberS{Value: callerARN},
-		},
-	})
+	memberships, err := store.ListTeamsForMember(ctx, callerARN)
 	if err != nil {
-		return fmt.Errorf("query memberships: %w", err)
+		return err
 	}
 
-	if len(result.Items) == 0 {
+	if len(memberships) == 0 {
 		fmt.Println("No teams found.")
 		return nil
 	}
 
 	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "TEAM ID\tNAME\tROLE\tMEMBERS\tCREATED")
-	for _, item := range result.Items {
-		var m memberRecord
-		if err := attributevalue.UnmarshalMap(item, &m); err != nil {
-			continue
-		}
-		tr, err := ddb.GetItem(ctx, &dynamodb.GetItemInput{
-			TableName: aws.String(teamTable),
-			Key: map[string]types.AttributeValue{
-				"team_id": &types.AttributeValueMemberS{Value: m.TeamID},
-			},
-		})
-		if err != nil || len(tr.Item) == 0 {
-			continue
-		}
-		var t teamRecord
-		if err := attributevalue.UnmarshalMap(tr.Item, &t); err != nil {
+	for _, m := range memberships {
+		t, err := store.GetTeam(ctx, m.TeamID)
+		if err != nil || t == nil {
 			continue
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\n", t.TeamID, t.TeamName, m.Role, t.MemberCount, t.CreatedAt)
@@ -256,28 +197,22 @@ func runTeamList(cmd *cobra.Command, args []string) error {
 func runTeamShow(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	teamID := args[0]
-	ddb, callerARN, err := teamDDBClient(ctx)
+	store, callerARN, err := teamStore(ctx)
 	if err != nil {
 		return err
 	}
 
 	// Verify membership
-	if _, err := resolveTeamMembership(ctx, ddb, teamID, callerARN); err != nil {
+	if _, err := requireMembership(ctx, store, teamID, callerARN); err != nil {
 		return fmt.Errorf("access denied: %w", err)
 	}
 
-	tr, err := ddb.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(teamTable),
-		Key: map[string]types.AttributeValue{
-			"team_id": &types.AttributeValueMemberS{Value: teamID},
-		},
-	})
-	if err != nil || len(tr.Item) == 0 {
-		return fmt.Errorf("team not found")
-	}
-	var t teamRecord
-	if err := attributevalue.UnmarshalMap(tr.Item, &t); err != nil {
+	t, err := store.GetTeam(ctx, teamID)
+	if err != nil {
 		return fmt.Errorf("unmarshal team: %w", err)
+	}
+	if t == nil {
+		return fmt.Errorf("team not found")
 	}
 
 	fmt.Printf("Team:        %s\n", t.TeamName)
@@ -287,24 +222,14 @@ func runTeamShow(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Created:     %s\n", t.CreatedAt)
 	fmt.Printf("Members:     %d\n\n", t.MemberCount)
 
-	membersResult, err := ddb.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(membershipTable),
-		KeyConditionExpression: aws.String("team_id = :tid"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":tid": &types.AttributeValueMemberS{Value: teamID},
-		},
-	})
+	members, err := store.ListMembers(ctx, teamID)
 	if err != nil {
 		return fmt.Errorf("query members: %w", err)
 	}
 
 	w := newTableWriter(os.Stdout)
 	_, _ = fmt.Fprintln(w, "MEMBER ARN\tROLE\tJOINED")
-	for _, item := range membersResult.Items {
-		var m memberRecord
-		if err := attributevalue.UnmarshalMap(item, &m); err != nil {
-			continue
-		}
+	for _, m := range members {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", m.MemberARN, m.Role, m.JoinedAt)
 	}
 	_ = w.Flush()
@@ -314,46 +239,28 @@ func runTeamShow(cmd *cobra.Command, args []string) error {
 func runTeamAdd(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	teamID, memberARN := args[0], args[1]
-	ddb, callerARN, err := teamDDBClient(ctx)
+	store, callerARN, err := teamStore(ctx)
 	if err != nil {
 		return err
 	}
 
-	role, err := resolveTeamMembership(ctx, ddb, teamID, callerARN)
+	role, err := requireMembership(ctx, store, teamID, callerARN)
 	if err != nil || role != "owner" {
 		return fmt.Errorf("only team owners can add members")
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	m := memberRecord{
+	if err := store.PutMembership(ctx, &team.MemberRecord{
 		TeamID:    teamID,
 		MemberARN: memberARN,
 		Role:      "member",
 		JoinedAt:  now,
 		InvitedBy: callerARN,
-	}
-	item, err := attributevalue.MarshalMap(m)
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-	if _, err := ddb.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(membershipTable),
-		Item:      item,
 	}); err != nil {
 		return fmt.Errorf("add member: %w", err)
 	}
 
-	// Increment member_count
-	ddb.UpdateItem(ctx, &dynamodb.UpdateItemInput{ //nolint:errcheck
-		TableName: aws.String(teamTable),
-		Key: map[string]types.AttributeValue{
-			"team_id": &types.AttributeValueMemberS{Value: teamID},
-		},
-		UpdateExpression: aws.String("SET member_count = member_count + :one"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":one": &types.AttributeValueMemberN{Value: "1"},
-		},
-	})
+	_ = store.IncrementMemberCount(ctx, teamID)
 
 	fmt.Printf("Added %s to team %s\n", memberARN, teamID)
 	return nil
@@ -362,12 +269,12 @@ func runTeamAdd(cmd *cobra.Command, args []string) error {
 func runTeamRemove(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	teamID, memberARN := args[0], args[1]
-	ddb, callerARN, err := teamDDBClient(ctx)
+	store, callerARN, err := teamStore(ctx)
 	if err != nil {
 		return err
 	}
 
-	role, err := resolveTeamMembership(ctx, ddb, teamID, callerARN)
+	role, err := requireMembership(ctx, store, teamID, callerARN)
 	if err != nil || role != "owner" {
 		return fmt.Errorf("only team owners can remove members")
 	}
@@ -380,28 +287,11 @@ func runTeamRemove(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if _, err := ddb.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: aws.String(membershipTable),
-		Key: map[string]types.AttributeValue{
-			"team_id":    &types.AttributeValueMemberS{Value: teamID},
-			"member_arn": &types.AttributeValueMemberS{Value: memberARN},
-		},
-	}); err != nil {
+	if err := store.DeleteMembership(ctx, teamID, memberARN); err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}
 
-	ddb.UpdateItem(ctx, &dynamodb.UpdateItemInput{ //nolint:errcheck
-		TableName: aws.String(teamTable),
-		Key: map[string]types.AttributeValue{
-			"team_id": &types.AttributeValueMemberS{Value: teamID},
-		},
-		UpdateExpression:    aws.String("SET member_count = member_count - :one"),
-		ConditionExpression: aws.String("member_count > :zero"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":one":  &types.AttributeValueMemberN{Value: "1"},
-			":zero": &types.AttributeValueMemberN{Value: "0"},
-		},
-	})
+	_ = store.DecrementMemberCount(ctx, teamID)
 
 	fmt.Printf("Removed %s from team %s\n", memberARN, teamID)
 	return nil
@@ -410,12 +300,12 @@ func runTeamRemove(cmd *cobra.Command, args []string) error {
 func runTeamDelete(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	teamID := args[0]
-	ddb, callerARN, err := teamDDBClient(ctx)
+	store, callerARN, err := teamStore(ctx)
 	if err != nil {
 		return err
 	}
 
-	role, err := resolveTeamMembership(ctx, ddb, teamID, callerARN)
+	role, err := requireMembership(ctx, store, teamID, callerARN)
 	if err != nil || role != "owner" {
 		return fmt.Errorf("only team owners can delete teams")
 	}
@@ -425,39 +315,16 @@ func runTeamDelete(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Delete all memberships
-	membersResult, err := ddb.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(membershipTable),
-		KeyConditionExpression: aws.String("team_id = :tid"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":tid": &types.AttributeValueMemberS{Value: teamID},
-		},
-		ProjectionExpression: aws.String("team_id, member_arn"),
-	})
+	// Delete all memberships, then the team itself.
+	members, err := store.ListMembers(ctx, teamID)
 	if err != nil {
 		return fmt.Errorf("query members: %w", err)
 	}
-
-	for _, item := range membersResult.Items {
-		var m memberRecord
-		if err := attributevalue.UnmarshalMap(item, &m); err != nil {
-			continue
-		}
-		ddb.DeleteItem(ctx, &dynamodb.DeleteItemInput{ //nolint:errcheck
-			TableName: aws.String(membershipTable),
-			Key: map[string]types.AttributeValue{
-				"team_id":    &types.AttributeValueMemberS{Value: teamID},
-				"member_arn": &types.AttributeValueMemberS{Value: m.MemberARN},
-			},
-		})
+	for _, m := range members {
+		_ = store.DeleteMembership(ctx, teamID, m.MemberARN)
 	}
 
-	if _, err := ddb.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: aws.String(teamTable),
-		Key: map[string]types.AttributeValue{
-			"team_id": &types.AttributeValueMemberS{Value: teamID},
-		},
-	}); err != nil {
+	if err := store.DeleteTeam(ctx, teamID); err != nil {
 		return fmt.Errorf("delete team: %w", err)
 	}
 
@@ -466,46 +333,28 @@ func runTeamDelete(cmd *cobra.Command, args []string) error {
 }
 
 // resolveTeamName looks up the team name by ID. Returns empty string on failure.
+// Used by the launch path to tag instances with a human-readable team name.
 func resolveTeamName(ctx context.Context, teamID string) (string, error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return "", err
 	}
-	ddb := dynamodb.NewFromConfig(cfg)
-	result, err := ddb.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(teamTable),
-		Key: map[string]types.AttributeValue{
-			"team_id": &types.AttributeValueMemberS{Value: teamID},
-		},
-	})
-	if err != nil || len(result.Item) == 0 {
-		return "", nil
-	}
-	var t teamRecord
-	if err := attributevalue.UnmarshalMap(result.Item, &t); err != nil {
+	t, err := team.NewClient(dynamodb.NewFromConfig(cfg)).GetTeam(ctx, teamID)
+	if err != nil || t == nil {
 		return "", nil
 	}
 	return t.TeamName, nil
 }
 
-// resolveTeamMembership returns the caller's role or error if not a member.
-func resolveTeamMembership(ctx context.Context, ddb *dynamodb.Client, teamID, callerARN string) (string, error) {
-	result, err := ddb.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(membershipTable),
-		Key: map[string]types.AttributeValue{
-			"team_id":    &types.AttributeValueMemberS{Value: teamID},
-			"member_arn": &types.AttributeValueMemberS{Value: callerARN},
-		},
-	})
+// requireMembership returns the caller's role in a team, or an error if they are
+// not a member (used for ownership/access checks).
+func requireMembership(ctx context.Context, store *team.Client, teamID, callerARN string) (string, error) {
+	m, err := store.GetMembership(ctx, teamID, callerARN)
 	if err != nil {
-		return "", fmt.Errorf("get membership: %w", err)
+		return "", err
 	}
-	if len(result.Item) == 0 {
+	if m == nil {
 		return "", fmt.Errorf("not a member of team %s", teamID)
-	}
-	var m memberRecord
-	if err := attributevalue.UnmarshalMap(result.Item, &m); err != nil {
-		return "", fmt.Errorf("unmarshal: %w", err)
 	}
 	return m.Role, nil
 }
