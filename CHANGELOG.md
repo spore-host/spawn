@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Internal: `cmd/team.go` now uses a `pkg/team` store** (#326), no behavior
+  change. Added `pkg/team` (`Client` mirroring `pkg/alerts.Client`) with the
+  `TeamRecord`/`MemberRecord` item types and CRUD/query methods, and rewired all
+  six `team` subcommands off raw DynamoDB (retired the `teamDDBClient` helper).
+  The `dynamodbav` tags and table names are unchanged (a test confirms the tags
+  match the previous `cmd/` structs, which the dashboard-api Lambda also depends
+  on). Part of the 2026-07-11 audit (#328).
 - **Internal: `cmd/pipeline.go` now uses a `pkg/pipeline` store** (#326), no
   behavior change. Added `pipeline.Store` (wrapping `*dynamodb.Client`, mirroring
   `pkg/alerts.Client`) with `Put`/`Get`/`ListByUser`/`SetCancelRequested`, and
