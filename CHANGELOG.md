@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Internal: `cmd/bot.go` now uses a `pkg/bot` store** (#326), no behavior
+  change. Added `pkg/bot` (`Client` mirroring `pkg/alerts.Client`) with the
+  `Registration`/`Workspace`/`ConnectCode` item types and the registry,
+  workspace, and connect-code methods (upsert/enable/list/batch-delete,
+  put/get/list/delete/token-update, redeem), and rewired all `notify`
+  subcommands + helpers off raw DynamoDB. `dynamodbav` tags and the (env-resolved)
+  table names are unchanged — a check confirms the tags match the previous
+  `cmd/` structs, which the separate spore-bot Lambda repo also depends on.
+  This completes the store-layer extraction (#326). Part of the 2026-07-11
+  audit (#328).
+
 ### Fixed
 - **`spawn collect-results` now reads the sweep table from the correct account,
   and builds the right results-bucket path** (#326). It loaded the caller's

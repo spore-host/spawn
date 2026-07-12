@@ -14,13 +14,12 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/bot"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
@@ -48,6 +47,13 @@ var (
 	botConnectTTLHours    int      // for --connect-ttl workspace max connect code lifetime
 	botWorkspaceRemoveYes bool     // --yes: skip the workspace-remove confirmation prompt
 )
+
+// botClient builds a bot store Client from the given config, honoring the
+// per-command table overrides (--table/--registry-table and --workspaces-table).
+// Empty overrides fall back to the env-resolved defaults inside the store.
+func botClient(cfg aws.Config) *bot.Client {
+	return bot.NewClientWithTableNames(dynamodb.NewFromConfig(cfg), botTable, botWorkspacesTable)
+}
 
 var botCmd = &cobra.Command{
 	Use:     "notify",
@@ -117,7 +123,7 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 
 	if botConnectCode != "" {
 		// Self-registration: redeem connect code to get user's Slack ID and workspace
-		resolved, err := redeemConnectCode(ctx, cfg, botConnectCode, botTable)
+		resolved, err := redeemConnectCode(ctx, cfg, botConnectCode)
 		if err != nil {
 			return fmt.Errorf("redeem connect code: %w", err)
 		}
@@ -138,7 +144,7 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--workspace-id is required when using --user (email)")
 		}
 		// Email → Slack user ID via Slack API using the workspace bot token
-		resolved, err := lookupSlackUserByEmail(ctx, cfg, botPlatform, workspaceID, botUser, botTable)
+		resolved, err := lookupSlackUserByEmail(ctx, cfg, botPlatform, workspaceID, botUser)
 		if err != nil {
 			return fmt.Errorf("look up Slack user by email: %w", err)
 		}
@@ -169,7 +175,7 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 	// Build registry key
 	userKey := strings.Join([]string{botPlatform, workspaceID, userID}, "#")
 
-	reg := botRegistration{
+	reg := bot.Registration{
 		UserKey:        userKey,
 		Nickname:       botNickname,
 		InstanceID:     botInstance,
@@ -182,43 +188,10 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 
-	tableName := botTable
-	if tableName == "" {
-		tableName = spawnconfig.GetBotRegistryTable()
-	}
-
-	client := dynamodb.NewFromConfig(cfg)
-	// Use UpdateItem so re-registering an already-enabled instance doesn't reset
-	// the enabled flag back to false. All other fields are overwritten.
-	_, err = client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(tableName),
-		Key: map[string]dynamodbtypes.AttributeValue{
-			"user_key": &dynamodbtypes.AttributeValueMemberS{Value: reg.UserKey},
-			"nickname": &dynamodbtypes.AttributeValueMemberS{Value: reg.Nickname},
-		},
-		UpdateExpression: aws.String(
-			"SET instance_id = :iid, aws_account_id = :acct, role_arn = :role, " +
-				"tag_prefix = :pfx, allowed_actions = :acts, registered_by = :by, " +
-				"platform = :plat, created_at = if_not_exists(created_at, :cat)"),
-		ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
-			":iid":  &dynamodbtypes.AttributeValueMemberS{Value: reg.InstanceID},
-			":acct": &dynamodbtypes.AttributeValueMemberS{Value: reg.AWSAccountID},
-			":role": &dynamodbtypes.AttributeValueMemberS{Value: reg.RoleARN},
-			":pfx":  &dynamodbtypes.AttributeValueMemberS{Value: reg.TagPrefix},
-			":acts": &dynamodbtypes.AttributeValueMemberL{Value: func() []dynamodbtypes.AttributeValue {
-				vals := make([]dynamodbtypes.AttributeValue, len(reg.AllowedActions))
-				for i, a := range reg.AllowedActions {
-					vals[i] = &dynamodbtypes.AttributeValueMemberS{Value: a}
-				}
-				return vals
-			}()},
-			":by":   &dynamodbtypes.AttributeValueMemberS{Value: reg.RegisteredBy},
-			":plat": &dynamodbtypes.AttributeValueMemberS{Value: reg.Platform},
-			":cat":  &dynamodbtypes.AttributeValueMemberS{Value: reg.CreatedAt},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("write registration: %w", err)
+	// Use UpsertRegistration so re-registering an already-enabled instance
+	// doesn't reset the enabled flag back to false.
+	if err := botClient(cfg).UpsertRegistration(ctx, &reg); err != nil {
+		return err
 	}
 
 	if botJSONOutput || getOutputFormat() == "json" {
@@ -321,21 +294,9 @@ var botDeregisterCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
-		tableName := botTable
-		if tableName == "" {
-			tableName = spawnconfig.GetBotRegistryTable()
-		}
 		userKey := strings.Join([]string{botPlatform, botWorkspaceID, botUserID}, "#")
-		client := dynamodb.NewFromConfig(cfg)
-		_, err = client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-			TableName: aws.String(tableName),
-			Key: map[string]dynamodbtypes.AttributeValue{
-				"user_key": &dynamodbtypes.AttributeValueMemberS{Value: userKey},
-				"nickname": &dynamodbtypes.AttributeValueMemberS{Value: botNickname},
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("delete registration: %w", err)
+		if err := botClient(cfg).DeleteRegistration(ctx, userKey, botNickname); err != nil {
+			return err
 		}
 		fmt.Printf("Deregistered: %s/%s/%s (%s)\n", botPlatform, botWorkspaceID, botUserID, botNickname)
 		return nil
@@ -355,25 +316,8 @@ func botEnableDisable(enabled bool) func(cmd *cobra.Command, args []string) erro
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
-		tableName := botTable
-		if tableName == "" {
-			tableName = spawnconfig.GetBotRegistryTable()
-		}
 		userKey := strings.Join([]string{botPlatform, botWorkspaceID, botUserID}, "#")
-		client := dynamodb.NewFromConfig(cfg)
-		_, err = client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-			TableName: aws.String(tableName),
-			Key: map[string]dynamodbtypes.AttributeValue{
-				"user_key": &dynamodbtypes.AttributeValueMemberS{Value: userKey},
-				"nickname": &dynamodbtypes.AttributeValueMemberS{Value: botNickname},
-			},
-			UpdateExpression: aws.String("SET enabled = :v"),
-			ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
-				":v": &dynamodbtypes.AttributeValueMemberBOOL{Value: enabled},
-			},
-			ConditionExpression: aws.String("attribute_exists(user_key)"),
-		})
-		if err != nil {
+		if err := botClient(cfg).SetRegistrationEnabled(ctx, userKey, botNickname, enabled); err != nil {
 			return fmt.Errorf("update enabled: %w", err)
 		}
 		action := "Enabled"
@@ -416,44 +360,20 @@ var botListCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
-		tableName := botTable
-		if tableName == "" {
-			tableName = spawnconfig.GetBotRegistryTable()
-		}
-		// Scan with filter on platform+workspace prefix
-		client := dynamodb.NewFromConfig(cfg)
-		prefix := botPlatform + "#" + botWorkspaceID + "#"
-		result, err := client.Scan(ctx, &dynamodb.ScanInput{
-			TableName:        aws.String(tableName),
-			FilterExpression: aws.String("begins_with(user_key, :prefix)"),
-			ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
-				":prefix": &dynamodbtypes.AttributeValueMemberS{Value: prefix},
-			},
-		})
+		regs, err := botClient(cfg).ListRegistrationsByWorkspace(ctx, botPlatform, botWorkspaceID)
 		if err != nil {
-			return fmt.Errorf("scan registrations: %w", err)
+			return err
 		}
 		if botJSONOutput || getOutputFormat() == "json" {
-			var regs []botRegistration
-			for _, item := range result.Items {
-				var r botRegistration
-				if err := attributevalue.UnmarshalMap(item, &r); err == nil {
-					regs = append(regs, r)
-				}
-			}
 			return json.NewEncoder(os.Stdout).Encode(regs)
 		}
-		if len(result.Items) == 0 {
+		if len(regs) == 0 {
 			fmt.Println("No registrations found.")
 			return nil
 		}
 		w := newTableWriter(os.Stdout)
 		fmt.Fprintln(w, "USER\tNICKNAME\tINSTANCE\tACTIONS\tTAG PREFIX")
-		for _, item := range result.Items {
-			var r botRegistration
-			if err := attributevalue.UnmarshalMap(item, &r); err != nil {
-				continue
-			}
+		for _, r := range regs {
 			parts := strings.SplitN(r.UserKey, "#", 3)
 			userID := ""
 			if len(parts) == 3 {
@@ -477,29 +397,6 @@ var (
 	botWebhookURL      string // channel webhook URL (Discord; or manual Slack) — #2
 	botWorkspacesTable string
 )
-
-type botWorkspace struct {
-	WorkspaceKey        string   `dynamodbav:"workspace_key" json:"workspace_key"`
-	BotToken            string   `dynamodbav:"bot_token" json:"bot_token"`
-	SigningSecret       string   `dynamodbav:"signing_secret" json:"signing_secret"`
-	Platform            string   `dynamodbav:"platform" json:"platform"`
-	WorkspaceName       string   `dynamodbav:"workspace_name,omitempty" json:"workspace_name,omitempty"`
-	InstalledBy         string   `dynamodbav:"installed_by" json:"installed_by"`
-	InstalledAt         string   `dynamodbav:"installed_at" json:"installed_at"`
-	AllowedChannels     []string `dynamodbav:"allowed_channels,omitempty" json:"allowed_channels,omitempty"`
-	ConnectCodeTTLHours int      `dynamodbav:"connect_code_ttl_hours,omitempty" json:"connect_code_ttl_hours,omitempty"`
-	// PublicKey is the Discord application's Ed25519 public key (hex), used by the
-	// spore-bot Lambda to verify inbound interaction requests. Discord has no
-	// signing secret (#2).
-	PublicKey string `dynamodbav:"public_key,omitempty" json:"public_key,omitempty"`
-	// IncomingWebhookURL is a channel webhook for notifications (Discord channel
-	// webhook, or a manually-supplied Slack incoming webhook).
-	IncomingWebhookURL string `dynamodbav:"incoming_webhook_url,omitempty" json:"incoming_webhook_url,omitempty"`
-	// Token rotation fields — managed automatically via OAuth; not set via CLI
-	RefreshToken   string `dynamodbav:"refresh_token,omitempty" json:"refresh_token,omitempty"`
-	TokenExpiresAt int64  `dynamodbav:"token_expires_at,omitempty" json:"token_expires_at,omitempty"`
-	TokenRotation  bool   `dynamodbav:"token_rotation,omitempty" json:"token_rotation,omitempty"`
-}
 
 // botWorkspaceCmd groups the workspace management verbs under `notify workspace`.
 var botWorkspaceCmd = &cobra.Command{
@@ -544,7 +441,7 @@ Run this once after installing the Slack app in a workspace:
 		if err != nil {
 			return fmt.Errorf("get caller identity: %w", err)
 		}
-		ws := botWorkspace{
+		ws := bot.Workspace{
 			WorkspaceKey:        botPlatform + "#" + botWorkspaceID,
 			BotToken:            botBotToken,
 			SigningSecret:       botSigningSecret,
@@ -557,21 +454,8 @@ Run this once after installing the Slack app in a workspace:
 			AllowedChannels:     botAllowedChannels,
 			ConnectCodeTTLHours: botConnectTTLHours,
 		}
-		tableName := botWorkspacesTable
-		if tableName == "" {
-			tableName = spawnconfig.GetBotWorkspacesTable()
-		}
-		client := dynamodb.NewFromConfig(cfg)
-		item, err := attributevalue.MarshalMap(ws)
-		if err != nil {
-			return fmt.Errorf("marshal workspace: %w", err)
-		}
-		_, err = client.PutItem(ctx, &dynamodb.PutItemInput{
-			TableName: aws.String(tableName),
-			Item:      item,
-		})
-		if err != nil {
-			return fmt.Errorf("write workspace: %w", err)
+		if err := botClient(cfg).PutWorkspace(ctx, &ws); err != nil {
+			return err
 		}
 		if botJSONOutput || getOutputFormat() == "json" {
 			return json.NewEncoder(os.Stdout).Encode(ws)
@@ -600,19 +484,8 @@ var botWorkspaceRemoveCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
-		tableName := botWorkspacesTable
-		if tableName == "" {
-			tableName = spawnconfig.GetBotWorkspacesTable()
-		}
-		client := dynamodb.NewFromConfig(cfg)
-		_, err = client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-			TableName: aws.String(tableName),
-			Key: map[string]dynamodbtypes.AttributeValue{
-				"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: botPlatform + "#" + botWorkspaceID},
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("delete workspace: %w", err)
+		if err := botClient(cfg).DeleteWorkspace(ctx, botPlatform, botWorkspaceID); err != nil {
+			return err
 		}
 		fmt.Printf("Removed workspace: %s/%s\n", botPlatform, botWorkspaceID)
 		return nil
@@ -628,45 +501,24 @@ var botWorkspaceListCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
-		tableName := botWorkspacesTable
-		if tableName == "" {
-			tableName = spawnconfig.GetBotWorkspacesTable()
-		}
-		client := dynamodb.NewFromConfig(cfg)
-		input := &dynamodb.ScanInput{TableName: aws.String(tableName)}
-		if botPlatform != "" {
-			input.FilterExpression = aws.String("platform = :p")
-			input.ExpressionAttributeValues = map[string]dynamodbtypes.AttributeValue{
-				":p": &dynamodbtypes.AttributeValueMemberS{Value: botPlatform},
-			}
-		}
-		result, err := client.Scan(ctx, input)
+		wss, err := botClient(cfg).ListWorkspaces(ctx, botPlatform)
 		if err != nil {
-			return fmt.Errorf("scan workspaces: %w", err)
+			return err
 		}
 		if botJSONOutput || getOutputFormat() == "json" {
-			var wss []botWorkspace
-			for _, item := range result.Items {
-				var ws botWorkspace
-				if err := attributevalue.UnmarshalMap(item, &ws); err == nil {
-					ws.BotToken = "(redacted)"
-					ws.SigningSecret = "(redacted)"
-					wss = append(wss, ws)
-				}
+			for i := range wss {
+				wss[i].BotToken = "(redacted)"
+				wss[i].SigningSecret = "(redacted)"
 			}
 			return json.NewEncoder(os.Stdout).Encode(wss)
 		}
-		if len(result.Items) == 0 {
+		if len(wss) == 0 {
 			fmt.Println("No workspaces registered.")
 			return nil
 		}
 		w := newTableWriter(os.Stdout)
 		fmt.Fprintln(w, "PLATFORM\tWORKSPACE ID\tNAME\tINSTALLED BY\tINSTALLED AT")
-		for _, item := range result.Items {
-			var ws botWorkspace
-			if err := attributevalue.UnmarshalMap(item, &ws); err != nil {
-				continue
-			}
+		for _, ws := range wss {
 			parts := strings.SplitN(ws.WorkspaceKey, "#", 2)
 			wsID := ""
 			if len(parts) == 2 {
@@ -705,56 +557,35 @@ deleted automatically. Remove it separately with:
 			return fmt.Errorf("load AWS config: %w", err)
 		}
 
-		registryTable := botTable
-		if registryTable == "" {
-			registryTable = spawnconfig.GetBotRegistryTable()
-		}
-		workspacesTable := botWorkspacesTable
-		if workspacesTable == "" {
-			workspacesTable = spawnconfig.GetBotWorkspacesTable()
-		}
-
-		client := dynamodb.NewFromConfig(cfg)
+		client := botClient(cfg)
 
 		// Scan all registrations for this workspace
-		prefix := botPlatform + "#" + botWorkspaceID + "#"
-		scanResult, err := client.Scan(ctx, &dynamodb.ScanInput{
-			TableName:        aws.String(registryTable),
-			FilterExpression: aws.String("begins_with(user_key, :prefix)"),
-			ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
-				":prefix": &dynamodbtypes.AttributeValueMemberS{Value: prefix},
-			},
-		})
+		regs, err := client.ListRegistrationsByWorkspace(ctx, botPlatform, botWorkspaceID)
 		if err != nil {
-			return fmt.Errorf("scan registrations: %w", err)
+			return err
 		}
 
 		// Look up workspace record
-		wsResult, _ := client.GetItem(ctx, &dynamodb.GetItemInput{
-			TableName: aws.String(workspacesTable),
-			Key: map[string]dynamodbtypes.AttributeValue{
-				"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: botPlatform + "#" + botWorkspaceID},
-			},
-		})
-		wsFound := wsResult != nil && wsResult.Item != nil
+		ws, err := client.GetWorkspace(ctx, botPlatform, botWorkspaceID)
+		if err != nil {
+			return err
+		}
+		wsFound := ws != nil
 
 		// Dry-run: show what would be removed
 		if !botDestroyConfirm {
 			fmt.Println("Would remove:")
-			if len(scanResult.Items) == 0 {
+			if len(regs) == 0 {
 				fmt.Println("  registrations: (none)")
 			} else {
-				fmt.Printf("  registrations: %d\n", len(scanResult.Items))
-				for _, item := range scanResult.Items {
-					var r botRegistration
-					if err := attributevalue.UnmarshalMap(item, &r); err == nil {
-						parts := strings.SplitN(r.UserKey, "#", 3)
-						userID := ""
-						if len(parts) == 3 {
-							userID = parts[2]
-						}
-						fmt.Printf("    %s/%s\n", userID, r.Nickname)
+				fmt.Printf("  registrations: %d\n", len(regs))
+				for _, r := range regs {
+					parts := strings.SplitN(r.UserKey, "#", 3)
+					userID := ""
+					if len(parts) == 3 {
+						userID = parts[2]
 					}
+					fmt.Printf("    %s/%s\n", userID, r.Nickname)
 				}
 			}
 			if wsFound {
@@ -766,50 +597,14 @@ deleted automatically. Remove it separately with:
 			return nil
 		}
 
-		// Execute: batch-delete all registrations
-		deleted := 0
-		items := scanResult.Items
-		for i := 0; i < len(items); i += 25 {
-			end := i + 25
-			if end > len(items) {
-				end = len(items)
-			}
-			requests := make([]dynamodbtypes.WriteRequest, 0, end-i)
-			for _, item := range items[i:end] {
-				var r botRegistration
-				if err := attributevalue.UnmarshalMap(item, &r); err != nil {
-					continue
-				}
-				requests = append(requests, dynamodbtypes.WriteRequest{
-					DeleteRequest: &dynamodbtypes.DeleteRequest{
-						Key: map[string]dynamodbtypes.AttributeValue{
-							"user_key": &dynamodbtypes.AttributeValueMemberS{Value: r.UserKey},
-							"nickname": &dynamodbtypes.AttributeValueMemberS{Value: r.Nickname},
-						},
-					},
-				})
-			}
-			if len(requests) > 0 {
-				if _, err := client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{
-					RequestItems: map[string][]dynamodbtypes.WriteRequest{
-						registryTable: requests,
-					},
-				}); err != nil {
-					return fmt.Errorf("batch delete: %w", err)
-				}
-				deleted += len(requests)
-			}
+		// Execute: batch-delete all registrations, then the workspace record.
+		deleted, err := client.BatchDeleteRegistrations(ctx, regs)
+		if err != nil {
+			return err
 		}
-
-		// Delete workspace record
 		if wsFound {
-			if _, err := client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-				TableName: aws.String(workspacesTable),
-				Key: map[string]dynamodbtypes.AttributeValue{
-					"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: botPlatform + "#" + botWorkspaceID},
-				},
-			}); err != nil {
-				return fmt.Errorf("delete workspace: %w", err)
+			if err := client.DeleteWorkspace(ctx, botPlatform, botWorkspaceID); err != nil {
+				return err
 			}
 		}
 
@@ -829,25 +624,11 @@ deleted automatically. Remove it separately with:
 
 // lookupSlackUserByEmail resolves a Slack user ID from an email address using
 // the workspace's bot token stored in spore-bot-workspaces DynamoDB.
-func lookupSlackUserByEmail(ctx context.Context, cfg aws.Config, platform, workspaceID, email, tableOverride string) (string, error) {
-	// Fetch bot token from workspaces table
-	workspacesTable := tableOverride
-	if workspacesTable == "" {
-		workspacesTable = spawnconfig.GetBotWorkspacesTable()
-	}
-	client := dynamodb.NewFromConfig(cfg)
-	result, err := client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(workspacesTable),
-		Key: map[string]dynamodbtypes.AttributeValue{
-			"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: platform + "#" + workspaceID},
-		},
-	})
-	if err != nil || result.Item == nil {
+func lookupSlackUserByEmail(ctx context.Context, cfg aws.Config, platform, workspaceID, email string) (string, error) {
+	client := botClient(cfg)
+	ws, err := client.GetWorkspace(ctx, platform, workspaceID)
+	if err != nil || ws == nil {
 		return "", fmt.Errorf("workspace %s/%s not registered (run spawn notify workspace-add first)", platform, workspaceID)
-	}
-	var ws botWorkspace
-	if err := attributevalue.UnmarshalMap(result.Item, &ws); err != nil {
-		return "", fmt.Errorf("unmarshal workspace: %w", err)
 	}
 	if ws.BotToken == "" {
 		return "", fmt.Errorf("no bot token stored for workspace %s — re-run spawn notify workspace-add with --bot-token", workspaceID)
@@ -864,18 +645,7 @@ func lookupSlackUserByEmail(ctx context.Context, cfg aws.Config, platform, works
 			botToken = newToken
 			// Update stored tokens
 			newExpiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second).Unix()
-			client.UpdateItem(ctx, &dynamodb.UpdateItemInput{ //nolint:errcheck
-				TableName: aws.String(workspacesTable),
-				Key: map[string]dynamodbtypes.AttributeValue{
-					"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: platform + "#" + workspaceID},
-				},
-				UpdateExpression: aws.String("SET bot_token = :t, refresh_token = :r, token_expires_at = :e"),
-				ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
-					":t": &dynamodbtypes.AttributeValueMemberS{Value: newToken},
-					":r": &dynamodbtypes.AttributeValueMemberS{Value: newRefresh},
-					":e": &dynamodbtypes.AttributeValueMemberN{Value: fmt.Sprintf("%d", newExpiresAt)},
-				},
-			})
+			_ = client.UpdateWorkspaceTokens(ctx, platform, workspaceID, newToken, newRefresh, newExpiresAt)
 		}
 	}
 
@@ -945,67 +715,20 @@ func exchangeRefreshTokenCLI(ctx context.Context, refreshToken string) (accessTo
 	return result.AccessToken, result.RefreshToken, result.ExpiresIn, nil
 }
 
-// connectCodeRecord mirrors the Lambda's ConnectCode struct for DynamoDB operations.
-type connectCodeRecord struct {
-	CodeKey     string `dynamodbav:"workspace_key"`
-	Platform    string `dynamodbav:"platform"`
-	WorkspaceID string `dynamodbav:"workspace_id"`
-	UserID      string `dynamodbav:"user_id"`
-	TTL         int64  `dynamodbav:"ttl"`
-}
-
 // redeemConnectCode atomically deletes a connect code and returns the associated
 // Slack identity. Returns nil if the code doesn't exist or has expired.
-func redeemConnectCode(ctx context.Context, cfg aws.Config, code, tableOverride string) (*connectCodeRecord, error) {
-	workspacesTable := tableOverride
-	if workspacesTable == "" {
-		workspacesTable = spawnconfig.GetBotWorkspacesTable()
-	}
-	// Normalize: accept with or without "SPORE-" prefix
-	code = strings.TrimPrefix(strings.ToUpper(code), "SPORE-")
-	key := "connect#" + code
-
-	client := dynamodb.NewFromConfig(cfg)
-	result, err := client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: aws.String(workspacesTable),
-		Key: map[string]dynamodbtypes.AttributeValue{
-			"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: key},
-		},
-		ReturnValues: dynamodbtypes.ReturnValueAllOld,
-	})
+func redeemConnectCode(ctx context.Context, cfg aws.Config, code string) (*bot.ConnectCode, error) {
+	rec, err := botClient(cfg).RedeemConnectCode(ctx, code)
 	if err != nil {
-		return nil, fmt.Errorf("redeem: %w", err)
+		return nil, err
 	}
-	if result.Attributes == nil {
+	if rec == nil {
 		return nil, nil
-	}
-	var rec connectCodeRecord
-	if err := attributevalue.UnmarshalMap(result.Attributes, &rec); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	if time.Now().Unix() > rec.TTL {
 		return nil, nil // expired
 	}
-	return &rec, nil
-}
-
-// ── types ────────────────────────────────────────────────────────────────────
-
-type botRegistration struct {
-	UserKey        string   `dynamodbav:"user_key" json:"user_key"`
-	Nickname       string   `dynamodbav:"nickname" json:"nickname"`
-	InstanceID     string   `dynamodbav:"instance_id" json:"instance_id"`
-	AWSAccountID   string   `dynamodbav:"aws_account_id" json:"aws_account_id"`
-	RoleARN        string   `dynamodbav:"role_arn,omitempty" json:"role_arn,omitempty"`
-	DNSName        string   `dynamodbav:"dns_name,omitempty" json:"dns_name,omitempty"`
-	TagPrefix      string   `dynamodbav:"tag_prefix" json:"tag_prefix"`
-	AllowedActions []string `dynamodbav:"allowed_actions" json:"allowed_actions"`
-	RegisteredBy   string   `dynamodbav:"registered_by" json:"registered_by"`
-	Platform       string   `dynamodbav:"platform" json:"platform"`
-	CreatedAt      string   `dynamodbav:"created_at" json:"created_at"`
-	// Enabled tracks whether the bot may execute EC2 commands for this registration.
-	// Stored explicitly so re-registering an enabled instance doesn't silently disable it.
-	Enabled bool `dynamodbav:"enabled" json:"enabled"`
+	return rec, nil
 }
 
 // ── init ─────────────────────────────────────────────────────────────────────
