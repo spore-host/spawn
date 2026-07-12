@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Internal: guardrail test locks `cmd/`'s AWS-SDK surface** (#327). A new test
+  (`cmd/aws_imports_test.go`) fails if a `cmd/*.go` file imports an
+  `aws-sdk-go-v2/service/*` package outside a per-file allowlist, so new AWS work
+  in the CLI layer must go through a `pkg/*` store/client (the pattern the #326
+  extraction established). The allowlist also flags entries that are no longer
+  used, so it shrinks as more logic moves into `pkg/*`. No runtime change. Part
+  of the 2026-07-11 audit (#328).
 - **Internal: `cmd/bot.go` now uses a `pkg/bot` store** (#326), no behavior
   change. Added `pkg/bot` (`Client` mirroring `pkg/alerts.Client`) with the
   `Registration`/`Workspace`/`ConnectCode` item types and the registry,
