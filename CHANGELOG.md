@@ -14,13 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silent one-keystroke action.
 
 ### Added
-- **`spawn plugin install` and `spawn start` load the instance's launch key into
-  ssh-agent** for plugins with SSH-based local steps. Tools like `mutagen` shell
-  out to the system `ssh` and have no key flag, so they depend on the ambient SSH
-  environment; spawn now adds the resolved launch key (`--key`, or the key for the
-  instance's key pair — the same lookup `spawn connect` uses) to the agent so
-  those steps authenticate. Best-effort: if no agent is running it falls back to
-  the user's existing SSH setup.
+- **`spawn plugin install` and `spawn start` configure a per-instance SSH
+  identity** for plugins with SSH-based local steps. Tools like `mutagen` shell
+  out to the system `ssh` and have no key flag, so spawn writes an `IdentityFile`
+  block for the instance's IP into a managed include (`~/.spawn/ssh_config`,
+  referenced by an `Include` added to `~/.ssh/config`) using the resolved launch
+  key (`--key`, or the instance's key pair — the same lookup `spawn connect`
+  uses). Unlike loading the key into `ssh-agent`, an `ssh_config` `IdentityFile`
+  is honored by every `ssh` regardless of which agent `IdentityAgent` points at
+  (e.g. a read-only 1Password agent), and `IdentitiesOnly yes` avoids offering
+  other keys first. The block is re-pointed on `spawn start` (new IP) and removed
+  on `spawn plugin remove` / `spawn terminate`.
 - **Plugins can declare a `local.reconcile` block, run on `spawn start`.** When a
   stopped instance is started it gets a new public IP, which an IP-bound local
   footprint (e.g. `spore-sync`'s mutagen session, pinned to the old address)

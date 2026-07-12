@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/plugin"
+	"github.com/spore-host/spawn/pkg/sshkey"
 	"gopkg.in/yaml.v3"
 )
 
@@ -132,13 +133,8 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 		return fmt.Errorf("local condition: %w", err)
 	}
 
-	// If the plugin has local steps that SSH to the instance (e.g. spore-sync's
-	// mutagen), make sure the instance's launch key is loaded in ssh-agent —
-	// tools like mutagen shell out to the system ssh and have no key flag, so they
-	// rely on the ambient SSH environment.
-	if len(spec.Local.Provision) > 0 {
-		ensureLaunchKeyInAgent(ctx, instance)
-	}
+	// (instance.ip is resolved just below; SSH identity for local steps is set up
+	// there once we have the IP.)
 
 	resolvedCfg, err := spec.ResolvedConfig(cfg)
 	if err != nil {
@@ -155,6 +151,13 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	}
 	for k, v := range resolvedCfg {
 		tmplCtx.Config[k] = v
+	}
+
+	// If the plugin has local steps that SSH to the instance (e.g. spore-sync's
+	// mutagen), configure the instance's launch key as the IdentityFile for its
+	// IP so the system ssh those steps invoke can authenticate.
+	if len(spec.Local.Provision) > 0 && instIP != "" {
+		ensureHostIdentity(ctx, instance, instIP)
 	}
 
 	// Run local provision steps on the controller. Push steps are buffered
@@ -267,6 +270,13 @@ func runLocalDeprovision(ctx context.Context, store *plugin.LocalStore, instance
 	if err := store.Delete(instanceKey, rec.Name); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not remove local plugin record for %s: %v\n", rec.Name, err)
 	}
+	// Drop the spawn-managed ssh_config identity block for this instance's IP;
+	// the instance is being torn down.
+	if ip := rec.Instance["ip"]; ip != "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			_ = sshkey.RemoveHostIdentity(home, ip)
+		}
+	}
 }
 
 // reconcileAllLocalPlugins re-points every recorded plugin on an instance that
@@ -301,11 +311,12 @@ func reconcileAllLocalPlugins(ctx context.Context, newIP string, instanceKeys ..
 		return
 	}
 
-	// Reconcile steps SSH to the instance (mutagen); ensure the launch key is in
-	// ssh-agent so they can authenticate after the stop/start.
+	// Reconcile steps SSH to the instance (mutagen) at the NEW IP; point the
+	// spawn-managed ssh_config identity at it so they can authenticate after the
+	// stop/start.
 	for _, key := range instanceKeys {
 		if key != "" {
-			ensureLaunchKeyInAgent(ctx, key)
+			ensureHostIdentity(ctx, key, newIP)
 			break
 		}
 	}
@@ -326,6 +337,13 @@ func reconcileAllLocalPlugins(ctx context.Context, newIP string, instanceKeys ..
 			}
 			if rec.Instance == nil {
 				rec.Instance = map[string]string{}
+			}
+			// Drop the stale ssh_config block for the previous IP before the record
+			// is re-pointed, so old-IP blocks don't accumulate across restarts.
+			if oldIP := rec.Instance["ip"]; oldIP != "" && oldIP != newIP {
+				if home, err := os.UserHomeDir(); err == nil {
+					_ = sshkey.RemoveHostIdentity(home, oldIP)
+				}
 			}
 			rec.Instance["ip"] = newIP // reconcile + future deprovision use the new IP
 
@@ -729,13 +747,18 @@ func withSSHTunnel(ctx context.Context, instance, keyPath string, fn func() (*ht
 	return fn()
 }
 
-// ensureLaunchKeyInAgent loads the instance's launch SSH key into the running
-// ssh-agent so local plugin steps that shell out to the system ssh (e.g.
-// mutagen, which has no key flag) can authenticate. Best-effort: it resolves the
-// key from --key or, failing that, the instance's KeyName via the same lookup
-// `spawn connect` uses; if no agent is running or the key can't be found, it logs
-// and moves on (the step may still work if the key is already available).
-func ensureLaunchKeyInAgent(ctx context.Context, instance string) {
+// ensureHostIdentity makes the instance's launch key the IdentityFile for
+// hostIP in a spawn-managed ssh_config include, so local plugin steps that shell
+// out to the system ssh (e.g. mutagen, which has no key flag) authenticate to
+// ec2-user@hostIP. Unlike loading the key into ssh-agent, an ssh_config
+// IdentityFile is honored by every ssh regardless of which agent IdentityAgent
+// points at (e.g. a read-only 1Password agent). Best-effort: resolves the key
+// from --key or the instance's KeyName (the lookup `spawn connect` uses); if no
+// key is found it logs and relies on the user's ambient SSH setup.
+func ensureHostIdentity(ctx context.Context, instance, hostIP string) {
+	if hostIP == "" {
+		return
+	}
 	keyPath := pluginKeyPath
 	if keyPath == "" {
 		if inst := resolveInstanceViaSpawn(ctx, instance); inst != nil && inst.KeyName != "" {
@@ -745,11 +768,14 @@ func ensureLaunchKeyInAgent(ctx context.Context, instance string) {
 		}
 	}
 	if keyPath == "" {
-		return // nothing to add; rely on the user's ambient SSH setup
+		return // rely on the user's ambient SSH setup
 	}
-	// `ssh-add <key>` is idempotent — re-adding an already-loaded key is a no-op.
-	if err := exec.CommandContext(ctx, "ssh-add", keyPath).Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "note: could not add %s to ssh-agent (%v); local SSH-based steps rely on your ambient SSH setup\n", keyPath, err)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	if err := sshkey.EnsureHostIdentity(home, hostIP, keyPath); err != nil {
+		fmt.Fprintf(os.Stderr, "note: could not configure SSH identity for %s (%v); local SSH-based steps rely on your ambient SSH setup\n", hostIP, err)
 	}
 }
 
