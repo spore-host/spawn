@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Plugin templates now fail loudly on non-canonical references instead of
+  silently rendering `<no value>`.** The one supported reference syntax is
+  `{{ instance.<key> }}`, `{{ config.<key> }}`, `{{ outputs.<key> }}`, and
+  `{{ pushed.<key> }}` (lowercase). Any other expression — notably the Go-style
+  `{{ .Config.x }}` / `{{ .Instance.Name }}` — is now a hard error at render
+  time and is reported by `spawn plugin validate` offline, rather than expanding
+  to an empty string at install time. This closes a class of silent plugin
+  breakage (e.g. the `tailscale` and `spore-sync` registry plugins were
+  rendering their auth key / sync target to nothing).
+
+### Changed
+- **`spawn plugin install` now populates `instance.ip` for local provision
+  steps.** The controller-side template context previously only exposed
+  `instance.id` and `instance.name`; plugins whose local steps reach the
+  instance (e.g. `spore-sync`'s `mutagen` target) can now use `{{ instance.ip }}`.
+
 ## [0.72.0] - 2026-07-12
 
 ### Changed

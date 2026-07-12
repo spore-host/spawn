@@ -113,8 +113,11 @@ func TestValidate_Problems(t *testing.T) {
 	}
 }
 
-func TestValidate_GoStyleConfigRef(t *testing.T) {
-	// The {{ .Config.key }} form must also be detected.
+func TestValidate_GoStyleRefIsInvalid(t *testing.T) {
+	// The Go-style {{ .Config.key }} form is NOT canonical syntax: the render
+	// engine can't evaluate it (it would silently produce "<no value>"), so
+	// Validate must reject it as an invalid template reference — the canonical
+	// form is lowercase {{ config.key }}.
 	spec, _ := plugin.ParseSpec([]byte(`
 name: p
 version: v1.0.0
@@ -125,7 +128,43 @@ remote:
       run: serve --name={{ .Config.undeclared }}
 `))
 	err := spec.Validate("p")
-	if err == nil || !strings.Contains(err.Error(), "undeclared config") {
-		t.Errorf("expected undeclared-config error for .Config form, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid template reference") {
+		t.Errorf("expected invalid-template-reference error for .Config form, got %v", err)
+	}
+}
+
+func TestValidate_CanonicalRefsAccepted(t *testing.T) {
+	// The canonical {{ namespace.key }} forms validate cleanly.
+	spec, _ := plugin.ParseSpec([]byte(`
+name: p
+version: v1.0.0
+description: d
+config:
+  token:
+    type: string
+    required: true
+remote:
+  start:
+    - type: run
+      run: serve --name={{ instance.name }} --token={{ config.token }} --ip={{ instance.ip }}
+`))
+	if err := spec.Validate("p"); err != nil {
+		t.Errorf("canonical references should validate cleanly, got: %v", err)
+	}
+}
+
+func TestValidate_UnknownNamespaceRejected(t *testing.T) {
+	spec, _ := plugin.ParseSpec([]byte(`
+name: p
+version: v1.0.0
+description: d
+remote:
+  start:
+    - type: run
+      run: serve {{ bogus.x }}
+`))
+	err := spec.Validate("p")
+	if err == nil || !strings.Contains(err.Error(), "invalid template reference") {
+		t.Errorf("expected invalid-template-reference error for unknown namespace, got %v", err)
 	}
 }

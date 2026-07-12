@@ -128,8 +128,12 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 
 	// Build template context with instance info and resolved config.
 	tmplCtx := plugin.NewTemplateContext()
+	instName, instIP := lookupInstanceInfo(ctx, instance)
 	tmplCtx.Instance["id"] = instance
-	tmplCtx.Instance["name"] = lookupInstanceName(ctx, instance)
+	tmplCtx.Instance["name"] = instName
+	if instIP != "" {
+		tmplCtx.Instance["ip"] = instIP
+	}
 	for k, v := range resolvedCfg {
 		tmplCtx.Config[k] = v
 	}
@@ -406,28 +410,34 @@ func pluginSSHArgs(keyPath string) []string {
 	return args
 }
 
-// lookupInstanceName returns the EC2 Name tag for an instance ID, or the
-// instance value itself if it is not an EC2 instance ID or the lookup fails.
-func lookupInstanceName(ctx context.Context, instance string) string {
+// lookupInstanceInfo returns the EC2 Name tag and public IP for an instance ID
+// in a single DescribeInstances call. On any failure it falls back to the given
+// identifier for the name and an empty IP, so callers degrade gracefully (the
+// template context simply won't have instance.ip set, and any step that needs it
+// fails loudly at render time).
+func lookupInstanceInfo(ctx context.Context, instance string) (name, publicIP string) {
 	if !strings.HasPrefix(instance, "i-") {
-		return instance
+		return instance, ""
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
-		return instance
+		return instance, ""
 	}
 	out, err := ec2.NewFromConfig(cfg).DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instance},
 	})
 	if err != nil || len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
-		return instance
+		return instance, ""
 	}
-	for _, tag := range out.Reservations[0].Instances[0].Tags {
+	inst := out.Reservations[0].Instances[0]
+	name = instance
+	for _, tag := range inst.Tags {
 		if aws.ToString(tag.Key) == "Name" {
-			return aws.ToString(tag.Value)
+			name = aws.ToString(tag.Value)
+			break
 		}
 	}
-	return instance
+	return name, aws.ToString(inst.PublicIpAddress)
 }
 
 // parseKeyValuePairs converts []string{"k=v"} to map[string]string.

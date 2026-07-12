@@ -1,6 +1,7 @@
 package plugin_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/plugin"
@@ -43,6 +44,34 @@ func TestRender_MissingKey(t *testing.T) {
 	_, err := plugin.Render("{{ config.missing }}", ctx)
 	if err == nil {
 		t.Fatal("expected error for missing config key")
+	}
+}
+
+// TestRender_NonCanonicalRefIsError guards the strict template contract: any
+// reference that is not a canonical {{ namespace.key }} form must fail loudly at
+// render time instead of silently producing "<no value>". This is the bug that
+// broke the tailscale/spore-sync registry plugins (they used {{ .Config.x }}).
+func TestRender_NonCanonicalRefIsError(t *testing.T) {
+	ctx := plugin.NewTemplateContext()
+	ctx.Config["auth_key"] = "tskey-abc"
+	ctx.Instance["name"] = "box"
+
+	for _, tmpl := range []string{
+		"{{ .Config.auth_key }}", // Go-style leading dot
+		"{{ .Instance.Name }}",   // Go-style leading dot
+		"{{ bogus.x }}",          // unknown namespace
+		"{{ config }}",           // namespace without a key
+		"{{ config.a.b }}",       // dotted key
+	} {
+		t.Run(tmpl, func(t *testing.T) {
+			out, err := plugin.Render(tmpl, ctx)
+			if err == nil {
+				t.Fatalf("Render(%q) = %q, want an error (non-canonical ref must not silently render)", tmpl, out)
+			}
+			if !errors.Is(err, plugin.ErrInvalidRef) {
+				t.Errorf("Render(%q) error = %v, want ErrInvalidRef", tmpl, err)
+			}
+		})
 	}
 }
 
