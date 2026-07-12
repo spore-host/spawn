@@ -11,9 +11,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -341,45 +339,33 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 
 	// Step 2: Create DynamoDB record
 	fmt.Fprintf(os.Stderr, "💾 Creating pipeline orchestration record...\n")
-	dynamoClient := dynamodb.NewFromConfig(cfg)
-	tableName := "spawn-pipeline-orchestration"
 
-	// Build initial pipeline state (use map to control DynamoDB attribute names)
+	// Build the initial pipeline state as the typed PipelineState (the store
+	// marshals it; the attribute names match what the orchestrator reads/writes).
 	now := time.Now().UTC()
-	pipelineState := map[string]interface{}{
-		"pipeline_id":      p.PipelineID,
-		"pipeline_name":    p.PipelineName,
-		"user_id":          userAccountID,
-		"created_at":       now,
-		"updated_at":       now,
-		"status":           "INITIALIZING",
-		"cancel_requested": false,
-		"s3_config_key":    fmt.Sprintf("s3://%s/%s", bucketName, s3Key),
-		"s3_bucket":        p.S3Bucket,
-		"s3_prefix":        p.S3Prefix,
-		"result_s3_bucket": p.ResultS3Bucket,
-		"result_s3_prefix": p.ResultS3Prefix,
-		"on_failure":       p.OnFailure,
-		"current_cost_usd": 0.0,
-		"total_stages":     len(p.Stages),
-		"completed_stages": 0,
-		"failed_stages":    0,
-		"stages":           []interface{}{}, // Empty array for stages
-	}
-	if p.MaxCostUSD != nil {
-		pipelineState["max_cost_usd"] = *p.MaxCostUSD
+	state := &pipeline.PipelineState{
+		PipelineID:      p.PipelineID,
+		PipelineName:    p.PipelineName,
+		UserID:          userAccountID,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Status:          pipeline.StatusInitializing,
+		CancelRequested: false,
+		S3ConfigKey:     fmt.Sprintf("s3://%s/%s", bucketName, s3Key),
+		S3Bucket:        p.S3Bucket,
+		S3Prefix:        p.S3Prefix,
+		ResultS3Bucket:  p.ResultS3Bucket,
+		ResultS3Prefix:  p.ResultS3Prefix,
+		OnFailure:       p.OnFailure,
+		CurrentCostUSD:  0.0,
+		TotalStages:     len(p.Stages),
+		CompletedStages: 0,
+		FailedStages:    0,
+		Stages:          []pipeline.StageState{}, // empty (non-nil), as before
+		MaxCostUSD:      p.MaxCostUSD,
 	}
 
-	item, err := attributevalue.MarshalMap(pipelineState)
-	if err != nil {
-		return fmt.Errorf("marshal DynamoDB item: %w", err)
-	}
-
-	_, err = dynamoClient.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(tableName),
-		Item:      item,
-	})
-	if err != nil {
+	if err := pipeline.NewStore(dynamodb.NewFromConfig(cfg)).Put(ctx, state); err != nil {
 		return fmt.Errorf("create DynamoDB record: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "✓ Created orchestration record\n\n")
@@ -431,28 +417,12 @@ func runStatusPipeline(cmd *cobra.Command, args []string) error {
 	}
 
 	// Query DynamoDB for pipeline state
-	dynamoClient := dynamodb.NewFromConfig(cfg)
-	tableName := "spawn-pipeline-orchestration"
-
-	result, err := dynamoClient.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(tableName),
-		Key: map[string]types.AttributeValue{
-			"pipeline_id": &types.AttributeValueMemberS{Value: pipelineID},
-		},
-	})
+	state, err := pipeline.NewStore(dynamodb.NewFromConfig(cfg)).Get(ctx, pipelineID)
 	if err != nil {
 		return fmt.Errorf("query DynamoDB: %w", err)
 	}
-
-	if result.Item == nil {
+	if state == nil {
 		return fmt.Errorf("pipeline not found: %s", pipelineID)
-	}
-
-	// Parse pipeline state
-	var state pipeline.PipelineState
-	err = attributevalue.UnmarshalMap(result.Item, &state)
-	if err != nil {
-		return fmt.Errorf("unmarshal pipeline state: %w", err)
 	}
 
 	// Display status
@@ -511,20 +481,6 @@ func runStatusPipeline(cmd *cobra.Command, args []string) error {
 }
 
 // Helper functions for extracting fields
-func getStringField(m map[string]interface{}, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-func getFloatField(m map[string]interface{}, key string) float64 {
-	if v, ok := m[key].(float64); ok {
-		return v
-	}
-	return 0.0
-}
-
 func formatDurationFromTime(duration time.Duration) string {
 	if duration < time.Minute {
 		return fmt.Sprintf("%ds", int(duration.Seconds()))
@@ -548,37 +504,21 @@ func runCollectPipeline(cmd *cobra.Command, args []string) error {
 	}
 
 	// Query DynamoDB for pipeline state
-	dynamoClient := dynamodb.NewFromConfig(cfg)
-	tableName := "spawn-pipeline-orchestration"
-
-	result, err := dynamoClient.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(tableName),
-		Key: map[string]types.AttributeValue{
-			"pipeline_id": &types.AttributeValueMemberS{Value: pipelineID},
-		},
-	})
+	state, err := pipeline.NewStore(dynamodb.NewFromConfig(cfg)).Get(ctx, pipelineID)
 	if err != nil {
 		return fmt.Errorf("query DynamoDB: %w", err)
 	}
-
-	if result.Item == nil {
+	if state == nil {
 		return fmt.Errorf("pipeline not found: %s", pipelineID)
 	}
 
-	// Parse pipeline state
-	var state map[string]interface{}
-	err = attributevalue.UnmarshalMap(result.Item, &state)
-	if err != nil {
-		return fmt.Errorf("unmarshal pipeline state: %w", err)
-	}
-
 	// Get S3 result location
-	resultBucket := getStringField(state, "result_s3_bucket")
-	resultPrefix := getStringField(state, "result_s3_prefix")
+	resultBucket := state.ResultS3Bucket
+	resultPrefix := state.ResultS3Prefix
 	if resultBucket == "" {
 		// Fall back to stage output locations
-		resultBucket = getStringField(state, "s3_bucket")
-		resultPrefix = fmt.Sprintf("%s/stages", getStringField(state, "s3_prefix"))
+		resultBucket = state.S3Bucket
+		resultPrefix = fmt.Sprintf("%s/stages", state.S3Prefix)
 	}
 
 	if resultBucket == "" {
@@ -683,37 +623,21 @@ func runListPipeline(cmd *cobra.Command, args []string) error {
 	}
 	userAccountID := *identity.Account
 
-	// Query DynamoDB for all pipelines
-	dynamoClient := dynamodb.NewFromConfig(cfg)
-	tableName := "spawn-pipeline-orchestration"
-
-	// Scan for all pipelines (or use GSI if exists)
-	scanOutput, err := dynamoClient.Scan(ctx, &dynamodb.ScanInput{
-		TableName: aws.String(tableName),
-	})
+	// Query DynamoDB for the caller's pipelines
+	pipelines, err := pipeline.NewStore(dynamodb.NewFromConfig(cfg)).ListByUser(ctx, userAccountID)
 	if err != nil {
 		return fmt.Errorf("scan DynamoDB: %w", err)
 	}
 
-	// Parse results
-	var pipelines []map[string]interface{}
-	for _, item := range scanOutput.Items {
-		var p map[string]interface{}
-		if err := attributevalue.UnmarshalMap(item, &p); err != nil {
-			continue
+	// Filter by status if specified
+	if flagStatusFilter != "" {
+		filtered := pipelines[:0]
+		for _, p := range pipelines {
+			if string(p.Status) == flagStatusFilter {
+				filtered = append(filtered, p)
+			}
 		}
-
-		// Filter by user
-		if getStringField(p, "user_id") != userAccountID {
-			continue
-		}
-
-		// Filter by status if specified
-		if flagStatusFilter != "" && getStringField(p, "status") != flagStatusFilter {
-			continue
-		}
-
-		pipelines = append(pipelines, p)
+		pipelines = filtered
 	}
 
 	if len(pipelines) == 0 {
@@ -735,26 +659,18 @@ func runListPipeline(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "PIPELINE ID                    NAME                          STATUS       COST      CREATED\n")
 	_, _ = fmt.Fprintf(os.Stdout, "──────────────────────────────────────────────────────────────────────────────────────────────────\n")
 	for _, p := range pipelines {
-		pipelineID := getStringField(p, "pipeline_id")
-		pipelineName := getStringField(p, "pipeline_name")
-		status := getStringField(p, "status")
-		cost := getFloatField(p, "current_cost_usd")
-		createdAt := getStringField(p, "created_at")
-
 		// Format created time
 		createdTime := "-"
-		if createdAt != "" {
-			if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
-				createdTime = t.Format("2006-01-02 15:04")
-			}
+		if !p.CreatedAt.IsZero() {
+			createdTime = p.CreatedAt.Format("2006-01-02 15:04")
 		}
 
-		costStr := fmt.Sprintf("$%.2f", cost)
+		costStr := fmt.Sprintf("$%.2f", p.CurrentCostUSD)
 
 		_, _ = fmt.Fprintf(os.Stdout, "%-30s %-29s %-12s %-9s %s\n",
-			truncate(pipelineID, 30),
-			truncate(pipelineName, 29),
-			status,
+			truncate(p.PipelineID, 30),
+			truncate(p.PipelineName, 29),
+			string(p.Status),
 			costStr,
 			createdTime)
 	}
@@ -780,21 +696,7 @@ func runCancelPipeline(cmd *cobra.Command, args []string) error {
 	}
 
 	// Set cancellation flag in DynamoDB
-	dynamoClient := dynamodb.NewFromConfig(cfg)
-	tableName := "spawn-pipeline-orchestration"
-
-	_, err = dynamoClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(tableName),
-		Key: map[string]types.AttributeValue{
-			"pipeline_id": &types.AttributeValueMemberS{Value: pipelineID},
-		},
-		UpdateExpression: aws.String("SET cancel_requested = :true, updated_at = :now"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":true": &types.AttributeValueMemberBOOL{Value: true},
-			":now":  &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
-		},
-	})
-	if err != nil {
+	if err := pipeline.NewStore(dynamodb.NewFromConfig(cfg)).SetCancelRequested(ctx, pipelineID); err != nil {
 		return fmt.Errorf("update DynamoDB: %w", err)
 	}
 

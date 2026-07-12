@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Internal: `cmd/pipeline.go` now uses a `pkg/pipeline` store** (#326), no
+  behavior change. Added `pipeline.Store` (wrapping `*dynamodb.Client`, mirroring
+  `pkg/alerts.Client`) with `Put`/`Get`/`ListByUser`/`SetCancelRequested`, and
+  rewired the launch/status/collect/list/cancel commands off raw DynamoDB calls.
+  The launch write now marshals the typed `PipelineState` instead of an ad-hoc
+  `map[string]interface{}` — a test asserts the emitted DynamoDB attributes are
+  byte-identical to the old map, so the wire format the orchestrator Lambda reads
+  is unchanged. Part of the 2026-07-11 audit (#328).
+
 ## [0.71.0] - 2026-07-11
 
 ### Changed
