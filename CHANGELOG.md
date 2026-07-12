@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Plugins no longer orphan controller-side resources on removal or
+  termination.** A plugin's local deprovision steps (e.g. `spore-sync`'s
+  `mutagen sync terminate`, `globus`'s endpoint delete) were never run — not even
+  by `spawn plugin remove` — so the sync session / registered endpoint leaked on
+  the controller. `spawn plugin install` now records what it created locally
+  (config + captured outputs + the deprovision steps) under `~/.spawn/plugins/`,
+  and both `spawn plugin remove` and `spawn terminate` replay those deprovision
+  steps to tear the local footprint down. Persisting the captured outputs is what
+  lets a deprovision step reference a provision-time value (e.g. the Globus
+  `{{ outputs.endpoint_id }}`) that otherwise lived only in memory. `spawn stop` /
+  `hibernate` deliberately leave the footprint in place (they are resumable).
+  Reaper- or spot-initiated termination cannot reach the controller and so
+  cannot run local deprovision — a known best-effort gap.
 - **Plugin templates now fail loudly on non-canonical references instead of
   silently rendering `<no value>`.** The one supported reference syntax is
   `{{ instance.<key> }}`, `{{ config.<key> }}`, `{{ outputs.<key> }}`, and

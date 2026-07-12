@@ -151,12 +151,23 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	// with the install request below — that guarantees they are present before
 	// the remote configure phase runs.
 	pushBuf := plugin.NewBufferingPushClient()
+	var localOutputs map[string]string
 	if len(spec.Local.Provision) > 0 {
 		fmt.Println("Running local provision steps...")
 		execWithPush := plugin.NewLocalExecutor(pushBuf)
-		if _, err := execWithPush.RunProvision(ctx, spec.Name, spec.Local.Provision, tmplCtx); err != nil {
+		localOutputs, err = execWithPush.RunProvision(ctx, spec.Name, spec.Local.Provision, tmplCtx)
+		if err != nil {
 			return fmt.Errorf("local provision: %w", err)
 		}
+	}
+
+	// Record the controller-side footprint so `spawn plugin remove` / `spawn
+	// terminate` can later replay the plugin's local deprovision steps (e.g. tear
+	// down the mutagen sync or delete the Globus endpoint). We persist the
+	// captured outputs because a deprovision step may reference them
+	// (e.g. {{ outputs.endpoint_id }}) and they live only here on the controller.
+	if len(spec.Local.Deprovision) > 0 {
+		saveLocalPluginRecord(instance, ref, spec, resolvedCfg, localOutputs)
 	}
 
 	// Run the remote half (install → configure → start) on the instance via
@@ -176,6 +187,79 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	fmt.Printf("Plugin %s installed on %s.\n", spec.Name, instance)
 	fmt.Printf("Use 'spawn plugin status %s --instance %s' to check status.\n", spec.Name, instance)
 	return nil
+}
+
+// saveLocalPluginRecord persists a controller-side record of an installed
+// plugin so its local deprovision steps can be replayed later. Best-effort: a
+// failure here is logged but does not fail the install (the plugin is already
+// installed; the cost is a potential orphaned local footprint on removal).
+func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, cfg, outputs map[string]string) {
+	store, err := plugin.DefaultLocalStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not open local plugin store: %v\n", err)
+		return
+	}
+	rec := &plugin.LocalRecord{
+		Name:        spec.Name,
+		Ref:         ref,
+		InstanceID:  instance,
+		Config:      cfg,
+		Outputs:     outputs,
+		Deprovision: spec.Local.Deprovision,
+		InstalledAt: time.Now(),
+	}
+	if err := store.Save(rec); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not record local plugin state for %s: %v\n", spec.Name, err)
+	}
+}
+
+// runLocalDeprovision replays a recorded plugin's local deprovision steps on the
+// controller (e.g. terminate the mutagen sync, delete the Globus endpoint) and
+// removes the record. Best-effort: errors are reported but not fatal, since the
+// caller is usually tearing the instance down regardless.
+func runLocalDeprovision(ctx context.Context, store *plugin.LocalStore, instanceKey string, rec *plugin.LocalRecord) {
+	tmplCtx := plugin.NewTemplateContext()
+	tmplCtx.Instance["id"] = rec.InstanceID
+	tmplCtx.Instance["name"] = rec.InstanceID
+	for k, v := range rec.Config {
+		tmplCtx.Config[k] = v
+	}
+	for k, v := range rec.Outputs {
+		tmplCtx.Outputs[k] = v
+	}
+
+	fmt.Printf("Running local deprovision for plugin %s...\n", rec.Name)
+	exec := plugin.NewLocalExecutor(nil)
+	if err := exec.RunDeprovision(ctx, rec.Deprovision, tmplCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: local deprovision for %s failed (local resources may be orphaned): %v\n", rec.Name, err)
+	}
+	if err := store.Delete(instanceKey, rec.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not remove local plugin record for %s: %v\n", rec.Name, err)
+	}
+}
+
+// deprovisionAllLocalPlugins replays local deprovision for every recorded plugin
+// on an instance, checking each candidate key (an instance may have been
+// referenced by ID or by Name at install time). Used by `spawn terminate`.
+func deprovisionAllLocalPlugins(ctx context.Context, instanceKeys ...string) {
+	store, err := plugin.DefaultLocalStore()
+	if err != nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, key := range instanceKeys {
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		recs, err := store.List(key)
+		if err != nil || len(recs) == 0 {
+			continue
+		}
+		for _, rec := range recs {
+			runLocalDeprovision(ctx, store, key, rec)
+		}
+	}
 }
 
 // remotePluginInstall sends the resolved spec, config, and buffered pushed
@@ -311,6 +395,14 @@ var pluginRemoveCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Removing plugin %s from %s...\n", name, pluginInstance)
+
+		// Tear down the controller-side footprint first (mutagen sync, Globus
+		// endpoint, …) using the record written at install time, if any.
+		if store, err := plugin.DefaultLocalStore(); err == nil {
+			if rec, err := store.Load(pluginInstance, name); err == nil {
+				runLocalDeprovision(cmd.Context(), store, pluginInstance, rec)
+			}
+		}
 
 		token, err := sshReadToken(cmd.Context(), pluginInstance, pluginKeyPath)
 		if err != nil {

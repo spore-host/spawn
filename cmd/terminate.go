@@ -89,6 +89,11 @@ func terminateSingle(ctx context.Context, identifier string) error {
 		return nil
 	}
 
+	// Tear down any controller-side plugin footprint (mutagen sync, Globus
+	// endpoint, …) before the instance goes away. Best-effort; keyed on both the
+	// instance ID and its Name since either may have been used at install time.
+	deprovisionAllLocalPlugins(ctx, instance.InstanceID, instance.Name)
+
 	fmt.Fprintf(os.Stderr, "Requesting termination for instance %s...\n", instance.InstanceID)
 	if err := client.Terminate(ctx, instance.Region, instance.InstanceID); err != nil {
 		return fmt.Errorf("failed to terminate instance: %w", err)
@@ -146,6 +151,7 @@ func terminateJobArray(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "⏭  Skipping %s (already %s)\n", inst.InstanceID, inst.State)
 			continue
 		}
+		deprovisionAllLocalPlugins(ctx, inst.InstanceID, inst.Name)
 		if err := client.Terminate(ctx, inst.Region, inst.InstanceID); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Failed to terminate %s: %v\n", inst.InstanceID, err)
 			failedInstances = append(failedInstances, inst.InstanceID)
