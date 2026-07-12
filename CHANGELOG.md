@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.71.0] - 2026-07-11
+
 ### Changed
 - **Internal: extracted step helpers from `launchWithProgress`** (#319), no
   behavior change. The single-instance launch orchestrator (743 lines) now
@@ -1154,7 +1156,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.70.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.71.0...HEAD
+[0.71.0]: https://github.com/spore-host/spawn/compare/v0.70.0...v0.71.0
 [0.70.0]: https://github.com/spore-host/spawn/compare/v0.69.0...v0.70.0
 [0.69.0]: https://github.com/spore-host/spawn/compare/v0.68.1...v0.69.0
 [0.68.1]: https://github.com/spore-host/spawn/compare/v0.68.0...v0.68.1
