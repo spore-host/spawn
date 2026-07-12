@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/sweep"
 )
 
 var (
@@ -95,15 +95,17 @@ func runCollectResults(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("📊 Collecting results for sweep: %s\n", collectSweepID)
 
-	// Load AWS config
-	cfg, err := config.LoadDefaultConfig(ctx)
+	// Load AWS config for spore-host-infra (where the sweep-orchestration table
+	// lives) — matches `spawn list-sweeps`. Previously this used the caller's
+	// default account, which read a different (usually empty) table (#326).
+	cfg, err := spawnconfig.LoadInfraAWSConfig(ctx, "us-east-1")
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
 	// Get sweep record from DynamoDB
 	fmt.Println("Fetching sweep metadata from DynamoDB...")
-	sweepRecord, err := getSweepRecord(ctx, cfg, collectSweepID)
+	sweepRecord, err := sweep.NewStore(dynamodb.NewFromConfig(cfg)).Get(ctx, collectSweepID)
 	if err != nil {
 		return fmt.Errorf("failed to get sweep record: %w", err)
 	}
@@ -199,92 +201,8 @@ func runCollectResults(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// getSweepRecord retrieves sweep metadata from DynamoDB
-func getSweepRecord(ctx context.Context, cfg aws.Config, sweepID string) (*SweepRecord, error) {
-	client := dynamodb.NewFromConfig(cfg)
-
-	result, err := client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String("spawn-sweep-orchestration"),
-		Key: map[string]types.AttributeValue{
-			"sweep_id": &types.AttributeValueMemberS{Value: sweepID},
-		},
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	if result.Item == nil {
-		return nil, nil
-	}
-
-	// Parse sweep record (simplified - only fields we need)
-	var record SweepRecord
-	record.SweepID = sweepID
-
-	if v, ok := result.Item["sweep_name"]; ok {
-		if s, ok := v.(*types.AttributeValueMemberS); ok {
-			record.SweepName = s.Value
-		}
-	}
-
-	if v, ok := result.Item["status"]; ok {
-		if s, ok := v.(*types.AttributeValueMemberS); ok {
-			record.Status = s.Value
-		}
-	}
-
-	if v, ok := result.Item["account_id"]; ok {
-		if s, ok := v.(*types.AttributeValueMemberS); ok {
-			record.AccountID = s.Value
-		}
-	}
-
-	if v, ok := result.Item["region"]; ok {
-		if s, ok := v.(*types.AttributeValueMemberS); ok {
-			record.Region = s.Value
-		}
-	}
-
-	if v, ok := result.Item["total_params"]; ok {
-		if n, ok := v.(*types.AttributeValueMemberN); ok {
-			_, _ = fmt.Sscanf(n.Value, "%d", &record.TotalParams)
-		}
-	}
-
-	if v, ok := result.Item["launched"]; ok {
-		if n, ok := v.(*types.AttributeValueMemberN); ok {
-			_, _ = fmt.Sscanf(n.Value, "%d", &record.Launched)
-		}
-	}
-
-	if v, ok := result.Item["failed"]; ok {
-		if n, ok := v.(*types.AttributeValueMemberN); ok {
-			_, _ = fmt.Sscanf(n.Value, "%d", &record.Failed)
-		}
-	}
-
-	if v, ok := result.Item["multi_region"]; ok {
-		if b, ok := v.(*types.AttributeValueMemberBOOL); ok {
-			record.MultiRegion = b.Value
-		}
-	}
-
-	// Parse region_status if present
-	if v, ok := result.Item["region_status"]; ok {
-		if m, ok := v.(*types.AttributeValueMemberM); ok {
-			record.RegionStatus = make(map[string]*RegionProgress)
-			for region := range m.Value {
-				record.RegionStatus[region] = &RegionProgress{}
-			}
-		}
-	}
-
-	return &record, nil
-}
-
 // getRegionsForSweep extracts list of regions from sweep record
-func getRegionsForSweep(sweepRecord *SweepRecord) []string {
+func getRegionsForSweep(sweepRecord *sweep.SweepRecord) []string {
 	if !sweepRecord.MultiRegion || len(sweepRecord.RegionStatus) == 0 {
 		return []string{sweepRecord.Region}
 	}
@@ -300,7 +218,7 @@ func getRegionsForSweep(sweepRecord *SweepRecord) []string {
 }
 
 // collectFromMultipleRegions collects results from multiple regional S3 buckets concurrently
-func collectFromMultipleRegions(ctx context.Context, cfg aws.Config, sweepRecord *SweepRecord, regions []string, sweepID string) ([]SweepResult, error) {
+func collectFromMultipleRegions(ctx context.Context, cfg aws.Config, sweepRecord *sweep.SweepRecord, regions []string, sweepID string) ([]SweepResult, error) {
 	type regionResult struct {
 		region  string
 		results []SweepResult
@@ -313,7 +231,7 @@ func collectFromMultipleRegions(ctx context.Context, cfg aws.Config, sweepRecord
 	for _, region := range regions {
 		go func(r string) {
 			s3Prefix := fmt.Sprintf("s3://spawn-results-%s-%s/sweeps/%s/",
-				sweepRecord.AccountID, r, sweepID)
+				sweepRecord.AWSAccountID, r, sweepID)
 
 			fmt.Printf("Collecting from %s...\n", r)
 
@@ -347,7 +265,7 @@ func collectFromMultipleRegions(ctx context.Context, cfg aws.Config, sweepRecord
 }
 
 // downloadSweepResults downloads result files from S3 for all sweep instances
-func downloadSweepResults(ctx context.Context, cfg aws.Config, sweep *SweepRecord, s3Prefix string) ([]SweepResult, error) {
+func downloadSweepResults(ctx context.Context, cfg aws.Config, rec *sweep.SweepRecord, s3Prefix string) ([]SweepResult, error) {
 	// Parse S3 prefix: s3://bucket/prefix/
 	s3Prefix = strings.TrimPrefix(s3Prefix, "s3://")
 	parts := strings.SplitN(s3Prefix, "/", 2)
@@ -428,9 +346,9 @@ func downloadSweepResults(ctx context.Context, cfg aws.Config, sweep *SweepRecor
 		}
 
 		result := SweepResult{
-			SweepID:      sweep.SweepID,
+			SweepID:      rec.SweepID,
 			SweepIndex:   index,
-			Region:       sweep.Region,
+			Region:       rec.Region,
 			Parameters:   params,
 			Metrics:      metrics,
 			DownloadedAt: time.Now(),
@@ -602,26 +520,4 @@ func writeCSV(results []SweepResult, outputFile string) error {
 	}
 
 	return nil
-}
-
-// SweepRecord is a simplified version for result collection
-type SweepRecord struct {
-	SweepID      string
-	SweepName    string
-	Status       string
-	AccountID    string
-	Region       string
-	TotalParams  int
-	Launched     int
-	Failed       int
-	MultiRegion  bool
-	RegionStatus map[string]*RegionProgress
-}
-
-// RegionProgress tracks per-region sweep progress
-type RegionProgress struct {
-	Launched     int
-	Failed       int
-	ActiveCount  int
-	NextToLaunch []int
 }

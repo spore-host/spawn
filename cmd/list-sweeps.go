@@ -9,12 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/sweep"
 )
 
 var (
@@ -92,59 +91,33 @@ func runListSweeps(cmd *cobra.Command, args []string) error {
 	}
 	userID := *identity.Arn
 
-	// Query DynamoDB for user's sweeps
-	dynamodbClient := dynamodb.NewFromConfig(cfg)
-
-	// Scan table (no GSI on user_id yet, so we scan and filter)
-	// TODO: Add GSI on user_id for better performance
-	scanInput := &dynamodb.ScanInput{
-		TableName: aws.String("spawn-sweep-orchestration"),
-	}
-
-	result, err := dynamodbClient.Scan(ctx, scanInput)
+	// Query DynamoDB for user's sweeps (no GSI on user_id yet, so scan + filter).
+	records, err := sweep.NewStore(dynamodb.NewFromConfig(cfg)).List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to query sweeps: %w", err)
 	}
 
-	// Unmarshal and filter sweeps
+	// Filter sweeps
 	var sweeps []SweepSummary
-	for _, item := range result.Items {
-		var sweep struct {
-			SweepID       string  `dynamodbav:"sweep_id"`
-			SweepName     string  `dynamodbav:"sweep_name"`
-			UserID        string  `dynamodbav:"user_id"`
-			Status        string  `dynamodbav:"status"`
-			TotalParams   int     `dynamodbav:"total_params"`
-			Launched      int     `dynamodbav:"launched"`
-			Failed        int     `dynamodbav:"failed"`
-			Region        string  `dynamodbav:"region"`
-			CreatedAt     string  `dynamodbav:"created_at"`
-			CompletedAt   string  `dynamodbav:"completed_at,omitempty"`
-			EstimatedCost float64 `dynamodbav:"estimated_cost,omitempty"`
-		}
-
-		if err := attributevalue.UnmarshalMap(item, &sweep); err != nil {
-			continue
-		}
-
+	for _, rec := range records {
 		// Filter by user
-		if sweep.UserID != userID {
+		if rec.UserID != userID {
 			continue
 		}
 
 		// Filter by status
-		if listSweepsStatus != "" && sweep.Status != listSweepsStatus {
+		if listSweepsStatus != "" && rec.Status != listSweepsStatus {
 			continue
 		}
 
 		// Filter by region
-		if listSweepsRegion != "" && sweep.Region != listSweepsRegion {
+		if listSweepsRegion != "" && rec.Region != listSweepsRegion {
 			continue
 		}
 
 		// Parse timestamps
-		createdAt, _ := time.Parse(time.RFC3339, sweep.CreatedAt)
-		completedAt, _ := time.Parse(time.RFC3339, sweep.CompletedAt)
+		createdAt, _ := time.Parse(time.RFC3339, rec.CreatedAt)
+		completedAt, _ := time.Parse(time.RFC3339, rec.CompletedAt)
 
 		// Filter by since date
 		if listSweepsSince != "" {
@@ -158,16 +131,16 @@ func runListSweeps(cmd *cobra.Command, args []string) error {
 		}
 
 		sweeps = append(sweeps, SweepSummary{
-			SweepID:       sweep.SweepID,
-			SweepName:     sweep.SweepName,
-			Status:        sweep.Status,
-			TotalParams:   sweep.TotalParams,
-			Launched:      sweep.Launched,
-			Failed:        sweep.Failed,
-			Region:        sweep.Region,
+			SweepID:       rec.SweepID,
+			SweepName:     rec.SweepName,
+			Status:        rec.Status,
+			TotalParams:   rec.TotalParams,
+			Launched:      rec.Launched,
+			Failed:        rec.Failed,
+			Region:        rec.Region,
 			CreatedAt:     createdAt,
 			CompletedAt:   completedAt,
-			EstimatedCost: sweep.EstimatedCost,
+			EstimatedCost: rec.EstimatedCost,
 		})
 	}
 
