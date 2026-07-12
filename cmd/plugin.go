@@ -28,6 +28,7 @@ var (
 	pluginKeyPath     string
 	pluginConfigPairs []string
 	pluginRemoveYes   bool
+	pluginSSHUser     string
 )
 
 var pluginCmd = &cobra.Command{
@@ -55,7 +56,11 @@ var pluginListCmd = &cobra.Command{
 		if pluginInstance == "" {
 			return fmt.Errorf("--instance is required")
 		}
-		states, err := remotePluginList(cmd.Context(), pluginInstance)
+		sshHost, err := resolvePluginSSHHost(cmd.Context(), pluginInstance)
+		if err != nil {
+			return err
+		}
+		states, err := remotePluginList(cmd.Context(), sshHost)
 		if err != nil {
 			return err
 		}
@@ -121,7 +126,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 		return fmt.Errorf("resolve plugin %q: %w", ref, err)
 	}
 
-	fmt.Printf("Installing %s v%s on %s...\n", spec.Name, spec.Version, instance)
+	fmt.Printf("Installing %s %s on %s...\n", spec.Name, spec.Version, instance)
 
 	// Check local pre-flight conditions before touching the remote.
 	localExec := plugin.NewLocalExecutor(nil)
@@ -167,7 +172,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	// captured outputs because a deprovision step may reference them
 	// (e.g. {{ outputs.endpoint_id }}) and they live only here on the controller.
 	if len(spec.Local.Deprovision) > 0 {
-		saveLocalPluginRecord(instance, ref, spec, resolvedCfg, localOutputs)
+		saveLocalPluginRecord(instance, ref, spec, tmplCtx.Instance, resolvedCfg, localOutputs)
 	}
 
 	// Run the remote half (install → configure → start) on the instance via
@@ -175,11 +180,15 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	hasRemote := len(spec.Remote.Install) > 0 || len(spec.Remote.Configure) > 0 ||
 		len(spec.Remote.Start) > 0
 	if hasRemote {
+		sshHost, err := resolvePluginSSHHost(ctx, instance)
+		if err != nil {
+			return err
+		}
 		fmt.Println("Running remote install steps on the instance...")
-		if err := remotePluginInstall(ctx, instance, spec, resolvedCfg, pushBuf.Values()); err != nil {
+		if err := remotePluginInstall(ctx, sshHost, spec, resolvedCfg, pushBuf.Values()); err != nil {
 			return fmt.Errorf("remote install: %w", err)
 		}
-		if err := waitForPluginReady(ctx, instance, spec.Name); err != nil {
+		if err := waitForPluginReady(ctx, sshHost, spec.Name); err != nil {
 			return err
 		}
 	}
@@ -193,7 +202,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 // plugin so its local deprovision steps can be replayed later. Best-effort: a
 // failure here is logged but does not fail the install (the plugin is already
 // installed; the cost is a potential orphaned local footprint on removal).
-func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, cfg, outputs map[string]string) {
+func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, instanceVars, cfg, outputs map[string]string) {
 	store, err := plugin.DefaultLocalStore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not open local plugin store: %v\n", err)
@@ -203,6 +212,7 @@ func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, cfg, o
 		Name:        spec.Name,
 		Ref:         ref,
 		InstanceID:  instance,
+		Instance:    instanceVars,
 		Config:      cfg,
 		Outputs:     outputs,
 		Deprovision: spec.Local.Deprovision,
@@ -219,8 +229,15 @@ func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, cfg, o
 // caller is usually tearing the instance down regardless.
 func runLocalDeprovision(ctx context.Context, store *plugin.LocalStore, instanceKey string, rec *plugin.LocalRecord) {
 	tmplCtx := plugin.NewTemplateContext()
-	tmplCtx.Instance["id"] = rec.InstanceID
-	tmplCtx.Instance["name"] = rec.InstanceID
+	// Replay with the exact instance.* values provision used (name/ip/id), so a
+	// deprovision step like `mutagen sync terminate spore-{{ instance.name }}`
+	// targets the same session that provision created.
+	for k, v := range rec.Instance {
+		tmplCtx.Instance[k] = v
+	}
+	if tmplCtx.Instance["id"] == "" {
+		tmplCtx.Instance["id"] = rec.InstanceID
+	}
 	for k, v := range rec.Config {
 		tmplCtx.Config[k] = v
 	}
@@ -354,7 +371,11 @@ var pluginStatusCmd = &cobra.Command{
 			return fmt.Errorf("--instance is required")
 		}
 
-		st, err := remotePluginStatus(cmd.Context(), pluginInstance, args[0])
+		sshHost, err := resolvePluginSSHHost(cmd.Context(), pluginInstance)
+		if err != nil {
+			return err
+		}
+		st, err := remotePluginStatus(cmd.Context(), sshHost, args[0])
 		if err != nil {
 			return err
 		}
@@ -397,20 +418,26 @@ var pluginRemoveCmd = &cobra.Command{
 		fmt.Printf("Removing plugin %s from %s...\n", name, pluginInstance)
 
 		// Tear down the controller-side footprint first (mutagen sync, Globus
-		// endpoint, …) using the record written at install time, if any.
+		// endpoint, …) using the record written at install time, if any. Keyed on
+		// the original --instance value the record was saved under.
 		if store, err := plugin.DefaultLocalStore(); err == nil {
 			if rec, err := store.Load(pluginInstance, name); err == nil {
 				runLocalDeprovision(cmd.Context(), store, pluginInstance, rec)
 			}
 		}
 
-		token, err := sshReadToken(cmd.Context(), pluginInstance, pluginKeyPath)
+		sshHost, err := resolvePluginSSHHost(cmd.Context(), pluginInstance)
+		if err != nil {
+			return err
+		}
+
+		token, err := sshReadToken(cmd.Context(), sshHost, pluginKeyPath)
 		if err != nil {
 			return fmt.Errorf("read token: %w", err)
 		}
 
 		var respErr error
-		_, err = withSSHTunnel(cmd.Context(), pluginInstance, pluginKeyPath, func() (*http.Response, error) {
+		_, err = withSSHTunnel(cmd.Context(), sshHost, pluginKeyPath, func() (*http.Response, error) {
 			url := fmt.Sprintf("http://127.0.0.1:7777/v1/plugins/%s", name)
 			req, err := http.NewRequestWithContext(cmd.Context(), http.MethodDelete, url, nil)
 			if err != nil {
@@ -614,28 +641,61 @@ func pluginSSHArgs(keyPath string) []string {
 // template context simply won't have instance.ip set, and any step that needs it
 // fails loudly at render time).
 func lookupInstanceInfo(ctx context.Context, instance string) (name, publicIP string) {
+	name, publicIP, _ = lookupInstanceDetails(ctx, instance)
+	return name, publicIP
+}
+
+// lookupInstanceDetails resolves an EC2 instance ID to its Name tag, public IP,
+// and SSH login user (the spawn:local-username tag, defaulting to ec2-user). For
+// a non-ID identifier (a hostname/IP the user passed directly) it returns the
+// identifier as the name with an empty IP/user.
+func lookupInstanceDetails(ctx context.Context, instance string) (name, publicIP, user string) {
 	if !strings.HasPrefix(instance, "i-") {
-		return instance, ""
+		return instance, "", ""
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
-		return instance, ""
+		return instance, "", ""
 	}
 	out, err := ec2.NewFromConfig(cfg).DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instance},
 	})
 	if err != nil || len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
-		return instance, ""
+		return instance, "", ""
 	}
 	inst := out.Reservations[0].Instances[0]
 	name = instance
 	for _, tag := range inst.Tags {
-		if aws.ToString(tag.Key) == "Name" {
+		switch aws.ToString(tag.Key) {
+		case "Name":
 			name = aws.ToString(tag.Value)
-			break
+		case "spawn:local-username":
+			user = aws.ToString(tag.Value)
 		}
 	}
-	return name, aws.ToString(inst.PublicIpAddress)
+	return name, aws.ToString(inst.PublicIpAddress), user
+}
+
+// resolvePluginSSHHost turns the --instance value into a host SSH can reach. When
+// it is an EC2 instance ID, it is resolved to user@public-ip (the plugin push
+// API is only reachable over SSH). A value that is already a hostname/IP (or
+// user@host) is returned unchanged. Errors if an instance ID has no public IP.
+//
+// The SSH user defaults to ec2-user (matching `spawn connect`), since that is
+// the account the EC2 key pair authorizes; --user overrides it.
+func resolvePluginSSHHost(ctx context.Context, instance string) (string, error) {
+	if !strings.HasPrefix(instance, "i-") {
+		return instance, nil // already a hostname/IP/user@host
+	}
+	_, ip, _ := lookupInstanceDetails(ctx, instance)
+	if ip == "" {
+		return "", fmt.Errorf("instance %s has no public IP to SSH to (plugin commands need SSH access)", instance)
+	}
+	user := pluginSSHUser
+	if user == "" {
+		user = "ec2-user"
+	}
+	return user + "@" + ip, nil
 }
 
 // parseKeyValuePairs converts []string{"k=v"} to map[string]string.
@@ -665,6 +725,7 @@ func init() {
 		sub.Flags().BoolVar(&pluginJSONOutput, "json", false, "JSON output")
 		_ = sub.Flags().MarkDeprecated("json", "use --output json instead")
 		sub.Flags().StringVar(&pluginKeyPath, "key", "", "Path to SSH private key")
+		sub.Flags().StringVar(&pluginSSHUser, "user", "", "SSH username for the instance (default: ec2-user)")
 	}
 
 	pluginRemoveCmd.Flags().BoolVarP(&pluginRemoveYes, "yes", "y", false, "Skip the confirmation prompt")

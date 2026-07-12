@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   steps.** The controller-side template context previously only exposed
   `instance.id` and `instance.name`; plugins whose local steps reach the
   instance (e.g. `spore-sync`'s `mutagen` target) can now use `{{ instance.ip }}`.
+- **`spawn plugin` commands accept an instance ID for `--instance`.** They
+  previously passed the `--instance` value straight to `ssh`, so only a hostname
+  or IP worked; an EC2 instance ID (which every other `spawn` command accepts)
+  failed to connect. The plugin commands now resolve an instance ID to its public
+  IP, connecting as `ec2-user` by default with a new `--user` flag to override.
+- **Plugin local provision steps now inherit the caller's `PATH`.** The local
+  executor previously forced a fixed `PATH` that omitted common tool locations
+  (notably Homebrew's `/opt/homebrew/bin` on Apple Silicon), so provision tools
+  like `mutagen` and `globus-cli` were "command not found". `PATH` (and `HOME`)
+  are now inherited — they are not credentials — while other environment
+  variables are still dropped to avoid leaking secrets to plugin steps.
 
 ## [0.72.0] - 2026-07-12
 

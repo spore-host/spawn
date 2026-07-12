@@ -155,9 +155,18 @@ func (e *LocalExecutor) RunDeprovision(ctx context.Context, steps []Step, tmplCt
 // runCapture executes a shell command and extracts captured values from JSON stdout.
 func (e *LocalExecutor) runCapture(ctx context.Context, step Step) (map[string]string, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", step.Run) // nosemgrep: dangerous-exec-command -- plugin step defined by plugin author
-	// Initialize with a minimal safe environment to avoid inheriting parent credentials.
+	// Initialize with a minimal safe environment to avoid inheriting parent
+	// credentials (AWS_*, tokens, …). PATH and HOME are NOT secrets and are
+	// required so provision tools (mutagen, globus-cli) are discoverable — in
+	// particular the parent PATH is preserved so Homebrew locations like
+	// /opt/homebrew/bin (Apple Silicon) are found; we fall back to a standard
+	// PATH only when the parent has none.
+	pathEnv := os.Getenv("PATH")
+	if pathEnv == "" {
+		pathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	}
 	cmd.Env = []string{
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"PATH=" + pathEnv,
 		"HOME=" + os.Getenv("HOME"),
 	}
 	for k, v := range step.Env {

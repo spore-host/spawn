@@ -15,6 +15,7 @@ func TestLocalStore_SaveLoadListDelete(t *testing.T) {
 		Name:        "globus-personal-endpoint",
 		Ref:         "globus-personal-endpoint",
 		InstanceID:  "i-0abc123",
+		Instance:    map[string]string{"id": "i-0abc123", "name": "my-box", "ip": "1.2.3.4"},
 		Config:      map[string]string{"display_name": "spore-ep"},
 		Outputs:     map[string]string{"endpoint_id": "uuid-123"},
 		Deprovision: []plugin.Step{{Type: "run", Run: "globus endpoint delete {{ outputs.endpoint_id }} --yes"}},
@@ -29,6 +30,12 @@ func TestLocalStore_SaveLoadListDelete(t *testing.T) {
 	}
 	if got.Outputs["endpoint_id"] != "uuid-123" {
 		t.Errorf("Outputs[endpoint_id] = %q, want uuid-123 (the value deprovision needs)", got.Outputs["endpoint_id"])
+	}
+	// The instance.* values must round-trip: deprovision replays with the same
+	// context provision used (e.g. mutagen sync terminate spore-{{ instance.name }}
+	// must target the real Name, not the instance ID) — the live-test orphan bug.
+	if got.Instance["name"] != "my-box" || got.Instance["ip"] != "1.2.3.4" {
+		t.Errorf("Instance map not round-tripped: %v", got.Instance)
 	}
 	if len(got.Deprovision) != 1 || got.Deprovision[0].Run == "" {
 		t.Errorf("Deprovision steps not round-tripped: %+v", got.Deprovision)

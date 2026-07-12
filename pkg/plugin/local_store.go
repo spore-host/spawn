@@ -29,6 +29,7 @@ type LocalRecord struct {
 	Name        string            `json:"name"`
 	Ref         string            `json:"ref"`
 	InstanceID  string            `json:"instance_id"`
+	Instance    map[string]string `json:"instance"` // instance.* template values used at provision (id/name/ip)
 	Config      map[string]string `json:"config"`
 	Outputs     map[string]string `json:"outputs"`
 	Deprovision []Step            `json:"deprovision"` // the spec's local deprovision steps, captured at install

@@ -153,11 +153,12 @@ func stopOrHibernate(identifier string, hibernate bool) error {
 		}
 	}
 
-	// Note: we deliberately do NOT run plugin local deprovision here. stop and
-	// hibernate are resumable — the instance comes back on `spawn start` — so a
-	// plugin's controller-side footprint (e.g. a mutagen sync session) should
-	// persist across the stop/start cycle. Local deprovision runs only on
-	// `spawn plugin remove` and `spawn terminate` (irreversible teardown).
+	// Note: we deliberately do NOT run plugin local deprovision here — stop and
+	// hibernate are resumable, so tearing down a plugin's controller-side
+	// footprint (e.g. a mutagen sync session) would be wrong. The session parks
+	// while the instance is down; `spawn start` reconciles it (a stop/start
+	// reassigns the public IP, which the pinned session can't follow on its own).
+	// Local deprovision runs only on `spawn plugin remove` / `spawn terminate`.
 	err = client.StopInstance(ctx, instance.Region, instance.InstanceID, hibernate)
 	if err != nil {
 		return fmt.Errorf("failed to %s instance: %w", action, err)
