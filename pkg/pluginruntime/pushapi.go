@@ -32,9 +32,10 @@ const (
 // PushAPIServer is the HTTP server that receives push values from the local
 // controller via an SSH-forwarded port.  It listens only on loopback.
 type PushAPIServer struct {
-	rt     *Runtime
-	token  string
-	server *http.Server
+	rt      *Runtime
+	token   string
+	server  *http.Server
+	baseCtx context.Context // lifecycle ctx for async installs; set in Start
 }
 
 // NewPushAPIServer creates and initialises the push API server.
@@ -48,6 +49,7 @@ func NewPushAPIServer(rt *Runtime) (*PushAPIServer, error) {
 	s := &PushAPIServer{rt: rt, token: token}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/plugins/install", s.handleInstall)
 	mux.HandleFunc("POST /v1/plugins/{name}/push", s.handlePush)
 	mux.HandleFunc("GET /v1/plugins/{name}/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/plugins", s.handleList)
@@ -64,6 +66,10 @@ func NewPushAPIServer(rt *Runtime) (*PushAPIServer, error) {
 
 // Start begins serving the push API in the background.
 func (s *PushAPIServer) Start(ctx context.Context) error {
+	// Retain the lifecycle context so an async install kicked off by a request
+	// keeps running after that request returns, and is cancelled on shutdown.
+	s.baseCtx = ctx
+
 	ln, err := net.Listen("tcp", pushAPIAddr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", pushAPIAddr, err)
@@ -102,6 +108,60 @@ func (s *PushAPIServer) authMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// installRequest is the body of POST /v1/plugins/install. The controller sends
+// the fully-resolved spec (as YAML) rather than a ref, so local-file refs work
+// and there is no version skew between what the controller validated and what
+// spored runs. pushed carries values captured/pushed by the controller's local
+// provision steps so configure can resolve {{ pushed.<key> }} up front.
+type installRequest struct {
+	Spec   string            `json:"spec"` // plugin.yaml contents
+	Config map[string]string `json:"config,omitempty"`
+	Pushed map[string]string `json:"pushed,omitempty"`
+}
+
+// handleInstall receives POST /v1/plugins/install and runs the remote half of a
+// plugin's lifecycle (install → configure → start) asynchronously. It returns
+// 202 Accepted immediately; the controller polls GET /v1/plugins/{name}/status
+// for the outcome. Running async keeps a slow install (e.g. a large download)
+// from tripping the server's write timeout.
+func (s *PushAPIServer) handleInstall(w http.ResponseWriter, r *http.Request) {
+	var req installRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("install decode error: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	spec, err := plugin.ParseSpec([]byte(req.Spec))
+	if err != nil {
+		log.Printf("install parse spec error: %v", err)
+		http.Error(w, "bad request: invalid spec", http.StatusBadRequest)
+		return
+	}
+	if err := spec.Validate(""); err != nil {
+		log.Printf("install validate spec error for %s: %v", spec.Name, err)
+		http.Error(w, "bad request: spec failed validation", http.StatusBadRequest)
+		return
+	}
+
+	// Run install in the background against the server's lifecycle context so it
+	// survives this request but is cancelled on spored shutdown. The result is
+	// observable via the status endpoint (state persisted by the Runtime).
+	baseCtx := s.baseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	go func() {
+		if err := s.rt.InstallWithPushed(baseCtx, spec, req.Config, req.Pushed); err != nil {
+			log.Printf("Install error for plugin %s: %v", spec.Name, err)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "installing", "name": spec.Name})
 }
 
 // handlePush receives POST /v1/plugins/{name}/push { "key": "...", "value": "..." }

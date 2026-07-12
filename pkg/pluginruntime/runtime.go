@@ -39,11 +39,37 @@ func NewRuntime(identity *provider.Identity) *Runtime {
 }
 
 // Install runs install, configure, and start steps for a plugin, then starts
-// the health goroutine.
+// the health goroutine. It is equivalent to InstallWithPushed with no
+// pre-seeded pushed values.
 func (rt *Runtime) Install(ctx context.Context, spec *plugin.PluginSpec, cfg map[string]string) error {
+	return rt.InstallWithPushed(ctx, spec, cfg, nil)
+}
+
+// InstallWithPushed runs install, configure, and start steps for a plugin with
+// pushed values seeded up front, then starts the health goroutine.
+//
+// Seeding pushed values before the configure phase is what lets the unified
+// `spawn plugin install` flow work: the controller runs the plugin's local
+// provision steps first (which may capture and push values, e.g. a Globus setup
+// key), collects those pushes, and hands them here so {{ pushed.<key> }}
+// references resolve during configure without the plugin ever parking at
+// StatusWaitingForPush.
+//
+// NOTE: the launch-time / async path (LoadFromDeclarations → Install with nil
+// pushed) has no controller to run local provision, so a plugin whose configure
+// step needs a pushed value still parks at StatusWaitingForPush and is not
+// automatically resumed when ReceivePush later delivers the value — see
+// ReceivePush. That path is unused by the current registry plugins and is left
+// as a known limitation.
+func (rt *Runtime) InstallWithPushed(ctx context.Context, spec *plugin.PluginSpec, cfg map[string]string, pushed map[string]string) error {
 	resolvedCfg, err := spec.ResolvedConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("resolve config: %w", err)
+	}
+
+	seededPushed := make(map[string]string, len(pushed))
+	for k, v := range pushed {
+		seededPushed[k] = v
 	}
 
 	state := &plugin.PluginState{
@@ -52,7 +78,7 @@ func (rt *Runtime) Install(ctx context.Context, spec *plugin.PluginSpec, cfg map
 		Status:      plugin.StatusInstalling,
 		Config:      resolvedCfg,
 		Outputs:     make(map[string]string),
-		Pushed:      make(map[string]string),
+		Pushed:      seededPushed,
 		InstalledAt: time.Now(),
 	}
 	if err := rt.store.Save(state); err != nil {
@@ -151,6 +177,13 @@ func (rt *Runtime) ListAll() ([]*plugin.PluginState, error) {
 // ReceivePush stores a key/value pushed from the local controller into the
 // plugin's state.  If the plugin was waiting for this push it transitions to
 // StatusRunning.
+//
+// NOTE: this only records the value and flips the status; it does NOT re-run the
+// configure/start steps that were skipped when the plugin parked at
+// StatusWaitingForPush (the persisted state does not retain the spec needed to
+// replay them). The unified `spawn plugin install` flow avoids this by seeding
+// pushed values before configure via InstallWithPushed, so this path is only
+// reachable from the async launch-time flow.
 func (rt *Runtime) ReceivePush(ctx context.Context, pluginName, key, value string) error {
 	st, err := rt.store.Load(pluginName)
 	if err != nil {

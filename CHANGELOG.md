@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rendering their auth key / sync target to nothing).
 
 ### Changed
+- **`spawn plugin install` now runs a plugin's full lifecycle end-to-end.**
+  Previously the command ran only a plugin's local provision steps on the
+  controller and never triggered the remote `install`/`configure`/`start` steps
+  on the instance — so remote-only plugins (e.g. `tailscale`) were inert and
+  plugins split across both halves (e.g. `globus`) could never complete. The
+  command now runs local provision on the controller, then hands the resolved
+  spec, config, and any pushed values to `spored` (via a new authenticated
+  `POST /v1/plugins/install` endpoint over the SSH tunnel) which runs the remote
+  half; the CLI polls until the plugin is running or reports the failure. Values
+  captured and pushed by local steps are delivered *before* the remote configure
+  phase, so `{{ pushed.<key> }}` resolves without the plugin parking to wait.
+  Requires SSH access to the instance (as `spawn plugin status` already does).
 - **`spawn plugin install` now populates `instance.ip` for local provision
   steps.** The controller-side template context previously only exposed
   `instance.id` and `instance.name`; plugins whose local steps reach the

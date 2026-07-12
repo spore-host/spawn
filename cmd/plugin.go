@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/plugin"
+	"gopkg.in/yaml.v3"
 )
 
 // plugin-level flags shared across subcommands
@@ -86,6 +87,13 @@ var pluginInstallCmd = &cobra.Command{
 	Short: "Install a plugin on an instance",
 	Long: `Install a plugin on a running spore instance.
 
+Runs the plugin's full lifecycle: local provision steps on this controller
+(e.g. creating a mutagen sync or a Globus endpoint), then the remote
+install/configure/start steps on the instance via spored. Values captured and
+pushed by local steps are delivered before the remote configure phase runs.
+
+Requires SSH access to the instance (the same key used by 'spawn plugin status').
+
 Plugin ref formats:
   name                  official registry (spore-host/spore-plugins)
   name@v1.2.0           pinned to git tag
@@ -138,19 +146,117 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 		tmplCtx.Config[k] = v
 	}
 
-	// Run local provision steps (may capture outputs and push values remotely).
+	// Run local provision steps on the controller. Push steps are buffered
+	// rather than delivered immediately, so their values can be handed to spored
+	// with the install request below — that guarantees they are present before
+	// the remote configure phase runs.
+	pushBuf := plugin.NewBufferingPushClient()
 	if len(spec.Local.Provision) > 0 {
 		fmt.Println("Running local provision steps...")
-		pushClient := plugin.NewSSHTunnelPushClient(instance, pluginKeyPath)
-		execWithPush := plugin.NewLocalExecutor(pushClient)
+		execWithPush := plugin.NewLocalExecutor(pushBuf)
 		if _, err := execWithPush.RunProvision(ctx, spec.Name, spec.Local.Provision, tmplCtx); err != nil {
 			return fmt.Errorf("local provision: %w", err)
+		}
+	}
+
+	// Run the remote half (install → configure → start) on the instance via
+	// spored, handing over the resolved config and any buffered pushed values.
+	hasRemote := len(spec.Remote.Install) > 0 || len(spec.Remote.Configure) > 0 ||
+		len(spec.Remote.Start) > 0
+	if hasRemote {
+		fmt.Println("Running remote install steps on the instance...")
+		if err := remotePluginInstall(ctx, instance, spec, resolvedCfg, pushBuf.Values()); err != nil {
+			return fmt.Errorf("remote install: %w", err)
+		}
+		if err := waitForPluginReady(ctx, instance, spec.Name); err != nil {
+			return err
 		}
 	}
 
 	fmt.Printf("Plugin %s installed on %s.\n", spec.Name, instance)
 	fmt.Printf("Use 'spawn plugin status %s --instance %s' to check status.\n", spec.Name, instance)
 	return nil
+}
+
+// remotePluginInstall sends the resolved spec, config, and buffered pushed
+// values to spored's install endpoint over an SSH tunnel. spored runs the
+// install asynchronously and returns 202; the outcome is polled separately.
+func remotePluginInstall(ctx context.Context, instance string, spec *plugin.PluginSpec, cfg, pushed map[string]string) error {
+	specYAML, err := yaml.Marshal(spec)
+	if err != nil {
+		return fmt.Errorf("marshal spec: %w", err)
+	}
+
+	payload, err := json.Marshal(map[string]interface{}{
+		"spec":   string(specYAML),
+		"config": cfg,
+		"pushed": pushed,
+	})
+	if err != nil {
+		return fmt.Errorf("encode install request: %w", err)
+	}
+
+	token, err := sshReadToken(ctx, instance, pluginKeyPath)
+	if err != nil {
+		return err
+	}
+
+	_, err = withSSHTunnel(ctx, instance, pluginKeyPath, func() (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			"http://127.0.0.1:7777/v1/plugins/install", bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusAccepted {
+			body, _ := io.ReadAll(resp.Body)
+			return resp, fmt.Errorf("install API: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return resp, nil
+	})
+	return err
+}
+
+// waitForPluginReady polls the remote plugin status until it reaches a terminal
+// state (running or failed) or the timeout elapses. It returns an error if the
+// plugin failed or never became ready.
+func waitForPluginReady(ctx context.Context, instance, name string) error {
+	deadline := time.Now().Add(3 * time.Minute)
+	var last plugin.PluginStatus
+	for time.Now().Before(deadline) {
+		st, err := remotePluginStatus(ctx, instance, name)
+		if err == nil {
+			if st.Status != last {
+				fmt.Printf("  %s...\n", st.Status)
+				last = st.Status
+			}
+			switch st.Status {
+			case plugin.StatusRunning:
+				return nil
+			case plugin.StatusFailed:
+				if st.Error != "" {
+					return fmt.Errorf("plugin %s failed on %s: %s", name, instance, st.Error)
+				}
+				return fmt.Errorf("plugin %s failed on %s", name, instance)
+			case plugin.StatusWaitingForPush:
+				// Should not happen in the unified flow (pushed values are seeded
+				// before configure); surface it rather than spin forever.
+				return fmt.Errorf("plugin %s is waiting for a pushed value that was not provided", name)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+	return fmt.Errorf("plugin %s did not become ready on %s within the timeout", name, instance)
 }
 
 // ── status ────────────────────────────────────────────────────────────────────

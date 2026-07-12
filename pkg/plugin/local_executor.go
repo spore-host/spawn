@@ -22,6 +22,30 @@ type PushClient interface {
 	Push(ctx context.Context, pluginName, key, value string) error
 }
 
+// BufferingPushClient records pushes in memory instead of delivering them to a
+// remote runtime. The unified `spawn plugin install` flow uses it so local
+// provision can capture and "push" values that are then handed to spored in the
+// install request (see cmd/plugin.go), guaranteeing the values are present
+// before the remote configure phase runs.
+type BufferingPushClient struct {
+	values map[string]string
+}
+
+// NewBufferingPushClient creates an empty BufferingPushClient.
+func NewBufferingPushClient() *BufferingPushClient {
+	return &BufferingPushClient{values: make(map[string]string)}
+}
+
+// Push records the value under key. pluginName is ignored — a client instance is
+// scoped to a single plugin install.
+func (c *BufferingPushClient) Push(_ context.Context, _ /*pluginName*/, key, value string) error {
+	c.values[key] = value
+	return nil
+}
+
+// Values returns the buffered pushes.
+func (c *BufferingPushClient) Values() map[string]string { return c.values }
+
 // LocalExecutor runs local plugin lifecycle steps on the controller machine.
 type LocalExecutor struct {
 	push PushClient
