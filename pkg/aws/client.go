@@ -346,13 +346,16 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// Build tags (including account and user tags for per-user isolation)
 	tags := buildTags(launchConfig, accountID, userARN, accountNameSlug)
 
-	// Build block device mappings. The AMI's root snapshot sets a hard minimum:
-	// EC2 rejects a root volume smaller than the snapshot it was created from
-	// (InvalidBlockDeviceMapping). Look that minimum up so a custom AMI with a
-	// large baked root (common for data-science images) launches without the
-	// caller having to pass --volume-size (#25).
-	amiMinGiB := rootVolumeSizeFromAMI(ctx, ec2Client, launchConfig.AMI)
-	blockDevices := buildBlockDevices(launchConfig, amiMinGiB)
+	// Build block device mappings from the AMI's registered root device. The
+	// root mapping's DeviceName must equal the AMI's RootDeviceName or the size/
+	// encryption override lands on a non-root device and EC2 keeps the AMI's
+	// default root — silently on /dev/sda1 AMIs like Ubuntu/Rocky (#284). The
+	// AMI's root snapshot also sets a hard minimum size: EC2 rejects a root
+	// volume smaller than its snapshot (InvalidBlockDeviceMapping), so a custom
+	// AMI with a large baked root launches without --volume-size (#25). Both come
+	// from one DescribeImages call.
+	rootDeviceName, amiMinGiB := rootDeviceInfoFromAMI(ctx, ec2Client, launchConfig.AMI)
+	blockDevices := buildBlockDevices(launchConfig, rootDeviceName, amiMinGiB)
 
 	// Build run instances input
 	input := &ec2.RunInstancesInput{

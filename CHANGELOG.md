@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   audit (#328).
 
 ### Fixed
+- **Root-volume size/encryption overrides now apply on Ubuntu/Rocky (and other
+  `/dev/sda1`) AMIs** (#284). `Launch` hardcoded the root block device to
+  `/dev/xvda`; for AMIs whose registered root device is `/dev/sda1` (Ubuntu,
+  Rocky, Debian, many marketplace images) the `--volume-size`/encryption
+  settings landed on a non-root device, so EC2 silently kept the AMI's default
+  (often 8–20 GB) root and could attach a stray volume. spawn now derives the
+  root device name from the AMI's `RootDeviceName` (reusing the existing
+  `DescribeImages` call — no extra API round-trip) and builds the root mapping
+  against it, falling back to `/dev/xvda` only when the lookup fails.
 - **`spawn collect-results` now reads the sweep table from the correct account,
   and builds the right results-bucket path** (#326). It loaded the caller's
   default AWS account (while `spawn list-sweeps` — reading the same
