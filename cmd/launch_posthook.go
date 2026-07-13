@@ -113,11 +113,11 @@ fi
 	if err != nil {
 		sshKeyPath = plat.SSHKeyPath // back-compat last resort
 	}
-	// SSH as the EC2 default user the launch key authorizes — NOT the local
-	// controller's $USER (plat.GetUsername()). Bootstrap may create a matching
-	// per-user account, but only ec2-user carries the EC2 key pair, so using the
-	// local username here fails with Permission denied before the DNS call runs.
-	username := "ec2-user"
+	// SSH as the local-matching user the bootstrap created (the same
+	// $LOCAL_USERNAME whose authorized_keys got the spawn public key). This is
+	// spawn's design: the instance provisions a user mirroring the controller's
+	// login, and `spawn connect` uses it — so DNS registration must use it too.
+	username := plat.GetUsername()
 
 	// Build SSH command arguments. ControlMaster=no / ControlPath=none ensure
 	// spawn's own SSH never piggybacks the user's ~/.ssh/config connection

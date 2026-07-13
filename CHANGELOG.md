@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The local-matching user can no longer be locked out by a silent SSH-key
+  substitution** (#349). When launched with a key pair that has no local `.pub`
+  file (e.g. one created via `aws ec2 create-key-pair`, which returns only the
+  private key), `spawn launch` silently installed `~/.ssh/id_rsa.pub` for the
+  instance's local user instead — so SSHing in as that user with the named key
+  failed `Permission denied`, which also broke DNS registration. spawn now
+  derives the public key from the private key when no `.pub` exists (and errors
+  loudly rather than substituting a different key). DNS registration connects as
+  the local-matching user (`$USER`), never a hardcoded `ec2-user` (the default
+  login user varies by distro).
 - **`spawn launch` output no longer stacks dozens of progress boxes when piped
   or captured.** The animated box redraw relied on an ANSI clear-screen that does
   nothing when stdout isn't a terminal, so every step reprinted the whole box.

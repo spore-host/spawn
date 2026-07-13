@@ -367,12 +367,17 @@ func encodeUserDataForOS(script, targetOS string) string {
 // that's unavailable (e.g. a user-supplied/legacy key only in ~/.ssh), it falls
 // back to the personal public key for back-compat.
 func spawnPublicKeyForUserData(plat *platform.Platform, keyName string) ([]byte, error) {
+	// When a key pair is named, install THAT key's public half for the local
+	// user — deriving it from the private key if no .pub file exists. Never
+	// silently fall back to a different key (e.g. ~/.ssh/id_rsa.pub): that leaves
+	// the local-matching user trusting a key the operator isn't connecting with,
+	// so login fails with Permission denied (#349).
 	if keyName != "" {
-		if priv, err := sshkey.Resolve(plat.HomeDir, keyName); err == nil {
-			if pub, err := os.ReadFile(priv + ".pub"); err == nil {
-				return pub, nil
-			}
+		pub, err := sshkey.PublicKeyForName(plat.HomeDir, keyName)
+		if err != nil {
+			return nil, fmt.Errorf("resolve public key for key pair %q: %w", keyName, err)
 		}
+		return pub, nil
 	}
 	pub, err := plat.ReadPublicKey()
 	if err != nil {
