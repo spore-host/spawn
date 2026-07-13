@@ -93,6 +93,10 @@ func terminateSingle(ctx context.Context, identifier string) error {
 	// endpoint, …) before the instance goes away. Best-effort; keyed on both the
 	// instance ID and its Name since either may have been used at install time.
 	deprovisionAllLocalPlugins(ctx, instance.InstanceID, instance.Name)
+	// Also drop any spawn-managed ssh_config identity block for this IP, even if
+	// no plugin left a deprovision record (e.g. tailscale writes an identity for
+	// its local mint step but has nothing to deprovision).
+	removeHostIdentityForIP(instance.PublicIP)
 
 	fmt.Fprintf(os.Stderr, "Requesting termination for instance %s...\n", instance.InstanceID)
 	if err := client.Terminate(ctx, instance.Region, instance.InstanceID); err != nil {
@@ -152,6 +156,7 @@ func terminateJobArray(ctx context.Context) error {
 			continue
 		}
 		deprovisionAllLocalPlugins(ctx, inst.InstanceID, inst.Name)
+		removeHostIdentityForIP(inst.PublicIP)
 		if err := client.Terminate(ctx, inst.Region, inst.InstanceID); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Failed to terminate %s: %v\n", inst.InstanceID, err)
 			failedInstances = append(failedInstances, inst.InstanceID)

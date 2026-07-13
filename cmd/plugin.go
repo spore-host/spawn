@@ -780,6 +780,20 @@ func ensureHostIdentity(ctx context.Context, instance, hostIP string) {
 	}
 }
 
+// removeHostIdentityForIP drops the spawn-managed ssh_config identity block for
+// an instance's IP. Called on terminate so a block written by a plugin's local
+// provision (e.g. tailscale, which has no deprovision record to trigger cleanup)
+// doesn't leak a stale Host entry pointing at a dead address. Best-effort no-op
+// when there's no block or no IP.
+func removeHostIdentityForIP(ip string) {
+	if ip == "" {
+		return
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		_ = sshkey.RemoveHostIdentity(home, ip)
+	}
+}
+
 // pluginSSHArgs returns common SSH options.
 func pluginSSHArgs(keyPath string) []string {
 	args := []string{

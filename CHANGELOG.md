@@ -32,7 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is honored by every `ssh` regardless of which agent `IdentityAgent` points at
   (e.g. a read-only 1Password agent), and `IdentitiesOnly yes` avoids offering
   other keys first. The block is re-pointed on `spawn start` (new IP) and removed
-  on `spawn plugin remove` / `spawn terminate`.
+  on `spawn plugin remove` / `spawn terminate` — including for plugins that have
+  no deprovision record (e.g. `tailscale`), so a stale `Host` entry never leaks.
 - **Plugins can declare a `local.reconcile` block, run on `spawn start`.** When a
   stopped instance is started it gets a new public IP, which an IP-bound local
   footprint (e.g. `spore-sync`'s mutagen session, pinned to the old address)
