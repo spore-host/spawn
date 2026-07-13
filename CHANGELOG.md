@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn launch` output no longer stacks dozens of progress boxes when piped
+  or captured.** The animated box redraw relied on an ANSI clear-screen that does
+  nothing when stdout isn't a terminal, so every step reprinted the whole box.
+  Launch now detects a non-TTY stdout and prints a clean one-line-per-step log
+  instead, keeping the in-place redraw only for interactive terminals.
+- **Progress boxes now align.** The `🚀`/`🎉` emoji are double-width but were
+  counted as one column, so the box's right border was ragged. Padding now
+  accounts for wide runes.
+- **`spawn launch` success now suggests `spawn connect <name>` instead of a raw
+  `ssh -i ~/.ssh/id_rsa …` command.** The old hint hardcoded `~/.ssh/id_rsa`,
+  which fails with "Permission denied" whenever the instance was launched with a
+  different key; `spawn connect` resolves the actual launch key (and falls back
+  to Session Manager).
+- **DNS registration failures now report the real reason.** The step SSH'd into
+  the instance as the local `$USER` (which the EC2 key doesn't authorize, so it
+  failed before even calling the API) and reported a generic "DNS API call
+  failed". It now connects as `ec2-user` and surfaces the actual HTTP status/body
+  (e.g. `DNS API returned HTTP 404: …`). DNS registration remains non-fatal, and
+  the message points at the public IP / `spawn connect` fallback.
+
 ### Changed
 - **`spawn stop` now confirms before stopping.** It prompts for confirmation
   (skippable with `-y`/`--yes`), matching `spawn terminate`. Stopping an instance

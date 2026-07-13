@@ -83,8 +83,10 @@ IDENTITY_DOC=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.
 IDENTITY_SIG=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/dynamic/instance-identity/signature 2>/dev/null | tr -d '\n')
 PUBLIC_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
 
-# Call DNS API
-curl -s -X POST %s \
+# Call DNS API. Capture the HTTP status and body separately so a failure
+# surfaces the real reason (e.g. 403 from the IAM-auth'd updater when this
+# account isn't authorized) instead of a generic "call failed".
+HTTP_BODY=$(curl -s -w "\n%%{http_code}" -X POST %s \
   -H "Content-Type: application/json" \
   -d "{
     \"instance_identity_document\": \"$IDENTITY_DOC\",
@@ -92,7 +94,17 @@ curl -s -X POST %s \
     \"record_name\": \"%s\",
     \"ip_address\": \"$PUBLIC_IP\",
     \"action\": \"UPSERT\"
-  }" 2>/dev/null || echo '{"success":false,"error":"DNS API call failed"}'
+  }" 2>&1)
+CURL_RC=$?
+HTTP_CODE=$(printf '%%s' "$HTTP_BODY" | tail -n1)
+HTTP_JSON=$(printf '%%s' "$HTTP_BODY" | sed '$d')
+if [ "$CURL_RC" -ne 0 ]; then
+  printf '{"success":false,"error":"could not reach DNS API (curl exit %%s): %%s"}' "$CURL_RC" "$(printf '%%s' "$HTTP_BODY" | tr -d '\n\"' | cut -c1-200)"
+elif [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+  printf '%%s' "$HTTP_JSON"
+else
+  printf '{"success":false,"error":"DNS API returned HTTP %%s: %%s"}' "$HTTP_CODE" "$(printf '%%s' "$HTTP_JSON" | tr -d '\n\"' | cut -c1-200)"
+fi
 `, apiEndpoint, recordName)
 
 	// Execute SSH command using the same keypair registered with EC2 (resolved
@@ -101,7 +113,11 @@ curl -s -X POST %s \
 	if err != nil {
 		sshKeyPath = plat.SSHKeyPath // back-compat last resort
 	}
-	username := plat.GetUsername()
+	// SSH as the EC2 default user the launch key authorizes — NOT the local
+	// controller's $USER (plat.GetUsername()). Bootstrap may create a matching
+	// per-user account, but only ec2-user carries the EC2 key pair, so using the
+	// local username here fails with Permission denied before the DNS call runs.
+	username := "ec2-user"
 
 	// Build SSH command arguments. ControlMaster=no / ControlPath=none ensure
 	// spawn's own SSH never piggybacks the user's ~/.ssh/config connection

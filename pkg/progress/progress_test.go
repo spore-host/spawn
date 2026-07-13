@@ -77,3 +77,39 @@ func TestGetSymbol(t *testing.T) {
 		}
 	}
 }
+
+func TestDisplayWidth(t *testing.T) {
+	cases := []struct {
+		s    string
+		want int
+	}{
+		{"hello", 5},
+		{"", 0},
+		{"🚀", 2},          // rocket: double-width
+		{"🎉", 2},          // party
+		{"🔌 Connect", 10}, // emoji(2)+space(1)+7
+		{"日本語", 6},        // 3 CJK = 6 cols
+	}
+	for _, c := range cases {
+		if got := displayWidth(c.s); got != c.want {
+			t.Errorf("displayWidth(%q) = %d, want %d", c.s, got, c.want)
+		}
+	}
+}
+
+func TestBoxLineAligns(t *testing.T) {
+	// Every rendered box line must be exactly boxWidth interior columns wide so
+	// the right ║ lines up with the ═ border, regardless of a leading emoji.
+	for _, tc := range []struct{ emoji, text string }{
+		{"🚀", "Spawning Instance..."},
+		{"🎉", "Instance Ready!"},
+		{"", "no emoji here"},
+	} {
+		line := boxLine(tc.emoji, tc.text)
+		// Strip the ║ borders and measure the interior display width.
+		inner := line[len("║") : len(line)-len("║")]
+		if w := displayWidth(inner); w != boxWidth {
+			t.Errorf("boxLine(%q,%q) interior width = %d, want %d\n%s", tc.emoji, tc.text, w, boxWidth, line)
+		}
+	}
+}

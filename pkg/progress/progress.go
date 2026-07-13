@@ -2,8 +2,9 @@ package progress
 
 import (
 	"fmt"
-	"runtime"
+	"os"
 	"time"
+	"unicode"
 
 	"github.com/spore-host/libs/i18n"
 )
@@ -12,7 +13,91 @@ import (
 type Progress struct {
 	steps       []Step
 	currentStep int
-	quiet       bool // when true, suppress all TUI output (e.g. for -o json)
+	quiet       bool            // when true, suppress all TUI output (e.g. for -o json)
+	tty         bool            // stdout is an interactive terminal (redraw in place)
+	printed     map[string]bool // non-TTY: step transitions already logged
+}
+
+// Box drawing. The interior between the ║ borders is boxWidth columns wide.
+const boxWidth = 56
+
+var (
+	boxTop    = "╔" + repeat("═", boxWidth) + "╗"
+	boxBottom = "╚" + repeat("═", boxWidth) + "╝"
+)
+
+func repeat(s string, n int) string {
+	out := make([]byte, 0, len(s)*n)
+	for i := 0; i < n; i++ {
+		out = append(out, s...)
+	}
+	return string(out)
+}
+
+// boxLine renders "║  <emoji> <text>...║" padded so the right border lands at
+// exactly boxWidth display columns. Emoji render two columns wide but count as
+// one rune, so plain %-Ns padding misaligns the border — displayWidth accounts
+// for that.
+func boxLine(emoji, text string) string {
+	content := "  " + emoji + " " + text
+	pad := boxWidth - displayWidth(content)
+	if pad < 0 {
+		pad = 0
+	}
+	return "║" + content + repeat(" ", pad) + "║"
+}
+
+// displayWidth returns the number of terminal columns a string occupies,
+// counting wide runes (CJK, most emoji, and variation-selector sequences) as 2.
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		switch {
+		case r == '️': // variation selector: renders the previous rune wide
+			w++
+		case unicode.IsControl(r):
+			// no width
+		case isWideRune(r):
+			w += 2
+		default:
+			w++
+		}
+	}
+	return w
+}
+
+// isWideRune reports whether r is rendered as a double-width glyph. Covers the
+// common CJK ranges and the emoji blocks spawn uses (🚀 🎉 🔌 💡 ⏰ 💤 etc.).
+func isWideRune(r rune) bool {
+	switch {
+	case r >= 0x1100 && r <= 0x115F, // Hangul Jamo
+		r >= 0x2E80 && r <= 0x303E, // CJK radicals, Kangxi
+		r >= 0x3041 && r <= 0x33FF, // Hiragana … CJK symbols
+		r >= 0x3400 && r <= 0x4DBF, // CJK Ext A
+		r >= 0x4E00 && r <= 0x9FFF, // CJK Unified
+		r >= 0xA000 && r <= 0xA4CF, // Yi
+		r >= 0xAC00 && r <= 0xD7A3, // Hangul syllables
+		r >= 0xF900 && r <= 0xFAFF, // CJK compat
+		r >= 0xFE30 && r <= 0xFE4F, // CJK compat forms
+		r >= 0xFF00 && r <= 0xFF60, // fullwidth forms
+		r >= 0xFFE0 && r <= 0xFFE6,
+		r >= 0x1F300 && r <= 0x1FAFF, // emoji & pictographs
+		r >= 0x2600 && r <= 0x27BF:   // misc symbols & dingbats
+		return true
+	}
+	return false
+}
+
+// stdoutIsTTY reports whether stdout is an interactive terminal. When it isn't
+// (piped, captured, CI), the in-place redraw (ANSI clear-screen) does nothing
+// and every display() call would re-print the whole box, so we fall back to a
+// plain line-per-step log instead.
+func stdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // Step represents a single step in the spawn process
@@ -37,6 +122,8 @@ func NewQuietProgress() *Progress {
 func newProgress(quiet bool) *Progress {
 	p := defaultProgress()
 	p.quiet = quiet
+	p.tty = stdoutIsTTY()
+	p.printed = make(map[string]bool)
 	return p
 }
 
@@ -109,39 +196,34 @@ func (p *Progress) Skip(stepName string) {
 	}
 }
 
-// display shows the current progress
+// display shows the current progress.
 func (p *Progress) display() {
 	if p.quiet {
 		return
 	}
-	// Clear screen and move cursor to top (skip in accessibility mode or when not a TTY)
-	if i18n.Global == nil || (!i18n.Global.AccessibilityMode() && runtime.GOOS != "windows") {
+	// When stdout isn't a terminal (piped/captured/CI), a full-box redraw can't
+	// clear the previous frame, so it would stack. Log one line per transition.
+	if !p.tty {
+		p.displayPlain()
+		return
+	}
+
+	// Clear screen and move cursor to top (skip in accessibility mode).
+	if i18n.Global == nil || !i18n.Global.AccessibilityMode() {
 		fmt.Print("\033[2J\033[H")
 	} else {
 		fmt.Println()
 	}
 
 	fmt.Println()
-	fmt.Println("╔════════════════════════════════════════════════════════╗")
-	fmt.Printf("║  %s %-48s║\n", i18n.Emoji("rocket"), i18n.T("spawn.progress.title"))
-	fmt.Println("╚════════════════════════════════════════════════════════╝")
+	fmt.Println(boxTop)
+	fmt.Println(boxLine(i18n.Emoji("rocket"), i18n.T("spawn.progress.title")))
+	fmt.Println(boxBottom)
 	fmt.Println()
 
 	for i, step := range p.steps {
 		symbol := getSymbol(step.Status)
-		duration := ""
-
-		if step.Status == "complete" && !step.StartTime.IsZero() && !step.EndTime.IsZero() {
-			elapsed := step.EndTime.Sub(step.StartTime)
-			if elapsed < time.Second {
-				duration = fmt.Sprintf(" (%.0fms)", elapsed.Seconds()*1000)
-			} else {
-				duration = fmt.Sprintf(" (%.1fs)", elapsed.Seconds())
-			}
-		} else if step.Status == "running" && !step.StartTime.IsZero() {
-			elapsed := time.Since(step.StartTime)
-			duration = fmt.Sprintf(" (%.1fs)", elapsed.Seconds())
-		}
+		duration := stepDuration(step)
 
 		// Highlight current step
 		if i == p.currentStep && step.Status == "running" {
@@ -154,15 +236,45 @@ func (p *Progress) display() {
 	fmt.Println()
 }
 
+// displayPlain logs step transitions one line at a time for non-TTY output,
+// emitting each step's terminal state (complete/error) exactly once.
+func (p *Progress) displayPlain() {
+	for _, step := range p.steps {
+		if step.Status != "complete" && step.Status != "error" {
+			continue
+		}
+		if p.printed[step.Name] {
+			continue
+		}
+		p.printed[step.Name] = true
+		fmt.Printf("  %s %s%s\n", getSymbol(step.Status), step.Name, stepDuration(step))
+	}
+}
+
+// stepDuration renders a step's elapsed-time suffix (e.g. " (628ms)").
+func stepDuration(step Step) string {
+	switch {
+	case step.Status == "complete" && !step.StartTime.IsZero() && !step.EndTime.IsZero():
+		elapsed := step.EndTime.Sub(step.StartTime)
+		if elapsed < time.Second {
+			return fmt.Sprintf(" (%.0fms)", elapsed.Seconds()*1000)
+		}
+		return fmt.Sprintf(" (%.1fs)", elapsed.Seconds())
+	case step.Status == "running" && !step.StartTime.IsZero():
+		return fmt.Sprintf(" (%.1fs)", time.Since(step.StartTime).Seconds())
+	}
+	return ""
+}
+
 // DisplaySuccess shows the final success message
 func (p *Progress) DisplaySuccess(instanceID, publicIP, sshCommand string, config interface{}) {
 	if p.quiet {
 		return
 	}
 	fmt.Println()
-	fmt.Println("╔════════════════════════════════════════════════════════╗")
-	fmt.Printf("║  %s %-48s║\n", i18n.Emoji("party"), i18n.T("spawn.progress.success.title"))
-	fmt.Println("╚════════════════════════════════════════════════════════╝")
+	fmt.Println(boxTop)
+	fmt.Println(boxLine(i18n.Emoji("party"), i18n.T("spawn.progress.success.title")))
+	fmt.Println(boxBottom)
 	fmt.Println()
 	fmt.Println(i18n.T("spawn.progress.success.details"))
 	fmt.Println()
