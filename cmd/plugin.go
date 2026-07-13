@@ -168,7 +168,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	var localOutputs map[string]string
 	if len(spec.Local.Provision) > 0 {
 		fmt.Println("Running local provision steps...")
-		execWithPush := plugin.NewLocalExecutor(pushBuf)
+		execWithPush := plugin.NewLocalExecutor(pushBuf).WithEnvPassthrough(spec.Local.EnvPassthrough)
 		localOutputs, err = execWithPush.RunProvision(ctx, spec.Name, spec.Local.Provision, tmplCtx)
 		if err != nil {
 			return fmt.Errorf("local provision: %w", err)
@@ -218,15 +218,16 @@ func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, instan
 		return
 	}
 	rec := &plugin.LocalRecord{
-		Name:        spec.Name,
-		Ref:         ref,
-		InstanceID:  instance,
-		Instance:    instanceVars,
-		Config:      cfg,
-		Outputs:     outputs,
-		Deprovision: spec.Local.Deprovision,
-		Reconcile:   spec.Local.Reconcile,
-		InstalledAt: time.Now(),
+		Name:           spec.Name,
+		Ref:            ref,
+		InstanceID:     instance,
+		Instance:       instanceVars,
+		Config:         cfg,
+		Outputs:        outputs,
+		Deprovision:    spec.Local.Deprovision,
+		Reconcile:      spec.Local.Reconcile,
+		EnvPassthrough: spec.Local.EnvPassthrough,
+		InstalledAt:    time.Now(),
 	}
 	if err := store.Save(rec); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not record local plugin state for %s: %v\n", spec.Name, err)
@@ -263,7 +264,7 @@ func runLocalDeprovision(ctx context.Context, store *plugin.LocalStore, instance
 	tmplCtx := templateContextFromRecord(rec)
 
 	fmt.Printf("Running local deprovision for plugin %s...\n", rec.Name)
-	exec := plugin.NewLocalExecutor(nil)
+	exec := plugin.NewLocalExecutor(nil).WithEnvPassthrough(rec.EnvPassthrough)
 	if err := exec.RunDeprovision(ctx, rec.Deprovision, tmplCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: local deprovision for %s failed (local resources may be orphaned): %v\n", rec.Name, err)
 	}
@@ -355,7 +356,7 @@ func reconcileAllLocalPlugins(ctx context.Context, newIP string, instanceKeys ..
 			// with backoff rather than a separate SSH probe, since the steps use
 			// their own SSH credential path (mutagen's default identities), which a
 			// raw `ssh` probe wouldn't replicate.
-			exec := plugin.NewLocalExecutor(nil)
+			exec := plugin.NewLocalExecutor(nil).WithEnvPassthrough(rec.EnvPassthrough)
 			var rerr error
 			for attempt := 0; attempt < 10; attempt++ {
 				if rerr = exec.RunDeprovision(ctx, rec.Reconcile, tmplCtx); rerr == nil {

@@ -47,8 +47,15 @@ type Condition struct {
 
 // LocalBlock holds steps that run on the controller machine.
 type LocalBlock struct {
-	Provision   []Step `yaml:"provision"`
-	Deprovision []Step `yaml:"deprovision"`
+	// EnvPassthrough names controller environment variables that local steps may
+	// read. Local steps run with a deliberately minimal environment (PATH + HOME
+	// only) so plugin scripts can't scoop up the caller's AWS/other credentials;
+	// a plugin that legitimately needs a controller-side secret (e.g. Tailscale's
+	// TS_API_CLIENT_SECRET to mint an auth key) opts in by listing the variable
+	// here, and spawn injects ONLY those into the step environment.
+	EnvPassthrough []string `yaml:"env_passthrough"`
+	Provision      []Step   `yaml:"provision"`
+	Deprovision    []Step   `yaml:"deprovision"`
 	// Reconcile runs on the controller when the instance's connection details
 	// change (notably its public IP after a stop/start), so an IP-bound local
 	// footprint can be re-pointed — e.g. spore-sync recreates its mutagen session

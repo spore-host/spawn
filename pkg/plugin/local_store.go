@@ -26,15 +26,16 @@ var instanceIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 // the instance, which is exactly what's being torn down. Persisting it here on
 // the controller is what makes local deprovision possible.
 type LocalRecord struct {
-	Name        string            `json:"name"`
-	Ref         string            `json:"ref"`
-	InstanceID  string            `json:"instance_id"`
-	Instance    map[string]string `json:"instance"` // instance.* template values used at provision (id/name/ip)
-	Config      map[string]string `json:"config"`
-	Outputs     map[string]string `json:"outputs"`
-	Deprovision []Step            `json:"deprovision"`         // spec's local deprovision steps, captured at install
-	Reconcile   []Step            `json:"reconcile,omitempty"` // spec's local reconcile steps (re-point on IP change)
-	InstalledAt time.Time         `json:"installed_at"`
+	Name           string            `json:"name"`
+	Ref            string            `json:"ref"`
+	InstanceID     string            `json:"instance_id"`
+	Instance       map[string]string `json:"instance"` // instance.* template values used at provision (id/name/ip)
+	Config         map[string]string `json:"config"`
+	Outputs        map[string]string `json:"outputs"`
+	Deprovision    []Step            `json:"deprovision"`               // spec's local deprovision steps, captured at install
+	Reconcile      []Step            `json:"reconcile,omitempty"`       // spec's local reconcile steps (re-point on IP change)
+	EnvPassthrough []string          `json:"env_passthrough,omitempty"` // controller env vars deprovision/reconcile may read
+	InstalledAt    time.Time         `json:"installed_at"`
 }
 
 // LocalStore persists LocalRecords on the controller under a root directory,

@@ -49,12 +49,24 @@ func (c *BufferingPushClient) Values() map[string]string { return c.values }
 // LocalExecutor runs local plugin lifecycle steps on the controller machine.
 type LocalExecutor struct {
 	push PushClient
+	// envPassthrough names controller environment variables (from the spec's
+	// local.env_passthrough) that steps are allowed to read; only these are
+	// injected into the otherwise-minimal step environment.
+	envPassthrough []string
 }
 
 // NewLocalExecutor creates a LocalExecutor.  push may be nil if no push steps
 // are expected (e.g., when only running deprovision).
 func NewLocalExecutor(push PushClient) *LocalExecutor {
 	return &LocalExecutor{push: push}
+}
+
+// WithEnvPassthrough returns e configured to inject the named controller
+// environment variables into local step environments (see LocalBlock.
+// EnvPassthrough). Returns the same executor for chaining.
+func (e *LocalExecutor) WithEnvPassthrough(names []string) *LocalExecutor {
+	e.envPassthrough = names
+	return e
 }
 
 // CheckLocalConditions verifies all local pre-flight conditions before install.
@@ -168,6 +180,18 @@ func (e *LocalExecutor) runCapture(ctx context.Context, step Step) (map[string]s
 	cmd.Env = []string{
 		"PATH=" + pathEnv,
 		"HOME=" + os.Getenv("HOME"),
+	}
+	// Inject only the explicitly opted-in controller variables (spec
+	// local.env_passthrough), resolved from spawn's own environment. A name that
+	// isn't set on the controller is skipped silently — a local condition should
+	// be the one to require it with a helpful message.
+	for _, name := range e.envPassthrough {
+		if !validLocalEnvKey(name) {
+			return nil, fmt.Errorf("invalid env_passthrough key %q", name)
+		}
+		if v, ok := os.LookupEnv(name); ok {
+			cmd.Env = append(cmd.Env, name+"="+v)
+		}
 	}
 	for k, v := range step.Env {
 		if !validLocalEnvKey(k) {

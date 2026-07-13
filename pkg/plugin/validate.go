@@ -20,6 +20,10 @@ var (
 	validConfigTypes     = map[string]bool{"": true, "string": true, "int": true, "bool": true}
 )
 
+// envVarNameRe matches a valid POSIX environment variable name (used to validate
+// local.env_passthrough entries).
+var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // semverRe matches an optional-"v" semantic version (major.minor.patch with
 // optional pre-release/build), e.g. v1.2.0, 1.0.0, 1.2.3-rc1.
 var semverRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)*$`)
@@ -96,6 +100,13 @@ func (s *PluginSpec) Validate(dirName string) error {
 		}
 		if p.Required && p.Default != nil {
 			add("config %q: required and has a default — pick one", key)
+		}
+	}
+
+	// local.env_passthrough names must be valid environment variable identifiers.
+	for _, name := range s.Local.EnvPassthrough {
+		if !envVarNameRe.MatchString(name) {
+			add("local.env_passthrough: invalid environment variable name %q", name)
 		}
 	}
 

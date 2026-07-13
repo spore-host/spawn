@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silent one-keystroke action.
 
 ### Added
+- **Plugins can declare `local.env_passthrough`** — a list of controller
+  environment variables their local steps are allowed to read. Local steps run
+  with a deliberately minimal environment (so plugin scripts can't scoop up the
+  caller's AWS or other credentials); a plugin that legitimately needs a
+  controller-side secret (e.g. Tailscale's `TS_API_CLIENT_SECRET` to mint an auth
+  key) opts in by name, and spawn injects only those variables. Also fixes an
+  inconsistency where local conditions saw the full environment but local
+  provision did not.
 - **`spawn plugin install` and `spawn start` configure a per-instance SSH
   identity** for plugins with SSH-based local steps. Tools like `mutagen` shell
   out to the system `ssh` and have no key flag, so spawn writes an `IdentityFile`
