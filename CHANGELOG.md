@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`spawn plugin install` now waits for the instance to be fully provisioned
+  before running remote steps.** It previously went straight to the remote
+  install/configure the moment SSH was reachable, racing cloud-init — so on a
+  freshly-launched instance the local user, keys, or network/DNS might not be
+  ready, causing intermittent failures. It now gates on the same deterministic
+  readiness signal `spawn launch` uses (spored active over SSM, which coincides
+  with cloud-init finishing). Best-effort: proceeds with a warning if readiness
+  can't be confirmed (e.g. a bare hostname with no resolvable instance).
 - **The local-matching user can no longer be locked out by a silent SSH-key
   substitution** (#349). When launched with a key pair that has no local `.pub`
   file (e.g. one created via `aws ec2 create-key-pair`, which returns only the

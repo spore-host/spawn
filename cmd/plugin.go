@@ -193,6 +193,18 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 		if err != nil {
 			return err
 		}
+		// Gate on the instance being fully provisioned before touching the remote
+		// half: spored must be up to receive the install request, and cloud-init
+		// must have finished (local user created, keys installed, network/DNS
+		// ready) or the remote steps race the boot. This is the same deterministic
+		// readiness signal `spawn launch` uses. Best-effort: a resolvable instance
+		// with SSM lets us wait; otherwise we proceed (e.g. a bare hostname).
+		if inst := resolveInstanceViaSpawn(ctx, instance); inst != nil && inst.InstanceID != "" {
+			fmt.Println("Waiting for the instance to be ready...")
+			if rerr := ensureInstanceReady(ctx, inst.Region, inst.InstanceID, 5*time.Minute); rerr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not confirm instance readiness (%v); proceeding\n", rerr)
+			}
+		}
 		fmt.Println("Running remote install steps on the instance...")
 		if err := remotePluginInstall(ctx, sshHost, spec, resolvedCfg, pushBuf.Values()); err != nil {
 			return fmt.Errorf("remote install: %w", err)
@@ -838,6 +850,19 @@ func resolveInstanceViaSpawn(ctx context.Context, instance string) *aws.Instance
 		return nil
 	}
 	return inst
+}
+
+// ensureInstanceReady blocks until the instance is fully provisioned — spored
+// active over SSM, which coincides with cloud-init finishing (local user
+// created, keys installed, network/DNS up). This is the same deterministic gate
+// `spawn launch` applies; commands that act on an instance right after launch
+// (plugin install, reconcile) use it so their work doesn't race the boot.
+func ensureInstanceReady(ctx context.Context, region, instanceID string, timeout time.Duration) error {
+	client, err := aws.NewClientWithRegion(ctx, region)
+	if err != nil {
+		return fmt.Errorf("aws client: %w", err)
+	}
+	return verifySporedReady(ctx, client, region, instanceID, timeout)
 }
 
 // resolvePluginSSHHost turns the --instance value into a host SSH can reach. It
