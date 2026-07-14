@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`spawn stop` now confirms before stopping.** It prompts for confirmation
+  (skippable with `-y`/`--yes`), matching `spawn terminate`. Stopping an instance
+  interrupts running work and any live plugin sessions, so it should not be a
+  silent one-keystroke action.
+
+### Added
+- **Plugin remote steps can declare `as_user: true`** to run as the instance's
+  local login user instead of root. spored runs plugin steps as root, but some
+  tools refuse that — notably Globus Connect Personal, which aborts with
+  "Running Globus Connect Personal as root is not supported" and stores its
+  config under the user's `~/.globusonline`. A step with `as_user` runs via a
+  login shell as the `spawn:local-username` user (reusing the pre-stop
+  run-as-user mechanism); if the instance has no known local user it falls back
+  to root with a warning. The `globus-personal-endpoint` plugin's setup/start/
+  status/stop steps use it (verified live: endpoint registers, connects, and
+  transfers data bidirectionally).
+- **Plugins can declare `local.env_passthrough`** — a list of controller
+  environment variables their local steps are allowed to read. Local steps run
+  with a deliberately minimal environment (so plugin scripts can't scoop up the
+  caller's AWS or other credentials); a plugin that legitimately needs a
+  controller-side secret (e.g. Tailscale's `TS_API_CLIENT_SECRET` to mint an auth
+  key) opts in by name, and spawn injects only those variables. Also fixes an
+  inconsistency where local conditions saw the full environment but local
+  provision did not.
+- **`spawn plugin install` and `spawn start` configure a per-instance SSH
+  identity** for plugins with SSH-based local steps. Tools like `mutagen` shell
+  out to the system `ssh` and have no key flag, so spawn writes an `IdentityFile`
+  block for the instance's IP into a managed include (`~/.spawn/ssh_config`,
+  referenced by an `Include` added to `~/.ssh/config`) using the resolved launch
+  key (`--key`, or the instance's key pair — the same lookup `spawn connect`
+  uses). Unlike loading the key into `ssh-agent`, an `ssh_config` `IdentityFile`
+  is honored by every `ssh` regardless of which agent `IdentityAgent` points at
+  (e.g. a read-only 1Password agent), and `IdentitiesOnly yes` avoids offering
+  other keys first. The block is re-pointed on `spawn start` (new IP) and removed
+  on `spawn plugin remove` / `spawn terminate` — including for plugins that have
+  no deprovision record (e.g. `tailscale`), so a stale `Host` entry never leaks.
+- **Plugins can declare a `local.reconcile` block, run on `spawn start`.** When a
+  stopped instance is started it gets a new public IP, which an IP-bound local
+  footprint (e.g. `spore-sync`'s mutagen session, pinned to the old address)
+  can't follow on its own. A plugin that needs re-pointing declares reconcile
+  steps; `spawn start` replays them with the new `{{ instance.ip }}` (retrying
+  while SSH comes up) for any such plugin recorded for that instance. Plugins
+  whose footprint isn't address-bound omit the block.
+
+### Fixed
+- **Plugins no longer orphan controller-side resources on removal or
+  termination.** A plugin's local deprovision steps (e.g. `spore-sync`'s
+  `mutagen sync terminate`, `globus`'s endpoint delete) were never run — not even
+  by `spawn plugin remove` — so the sync session / registered endpoint leaked on
+  the controller. `spawn plugin install` now records what it created locally
+  (config + captured outputs + the deprovision steps) under `~/.spawn/plugins/`,
+  and both `spawn plugin remove` and `spawn terminate` replay those deprovision
+  steps to tear the local footprint down. Persisting the captured outputs is what
+  lets a deprovision step reference a provision-time value (e.g. the Globus
+  `{{ outputs.endpoint_id }}`) that otherwise lived only in memory. `spawn stop` /
+  `hibernate` deliberately leave the footprint in place (they are resumable).
+  Reaper- or spot-initiated termination cannot reach the controller and so
+  cannot run local deprovision — a known best-effort gap.
+- **Plugin templates now fail loudly on non-canonical references instead of
+  silently rendering `<no value>`.** The one supported reference syntax is
+  `{{ instance.<key> }}`, `{{ config.<key> }}`, `{{ outputs.<key> }}`, and
+  `{{ pushed.<key> }}` (lowercase). Any other expression — notably the Go-style
+  `{{ .Config.x }}` / `{{ .Instance.Name }}` — is now a hard error at render
+  time and is reported by `spawn plugin validate` offline, rather than expanding
+  to an empty string at install time. This closes a class of silent plugin
+  breakage (e.g. the `tailscale` and `spore-sync` registry plugins were
+  rendering their auth key / sync target to nothing).
+
+### Changed
+- **`spawn plugin install` now runs a plugin's full lifecycle end-to-end.**
+  Previously the command ran only a plugin's local provision steps on the
+  controller and never triggered the remote `install`/`configure`/`start` steps
+  on the instance — so remote-only plugins (e.g. `tailscale`) were inert and
+  plugins split across both halves (e.g. `globus`) could never complete. The
+  command now runs local provision on the controller, then hands the resolved
+  spec, config, and any pushed values to `spored` (via a new authenticated
+  `POST /v1/plugins/install` endpoint over the SSH tunnel) which runs the remote
+  half; the CLI polls until the plugin is running or reports the failure. Values
+  captured and pushed by local steps are delivered *before* the remote configure
+  phase, so `{{ pushed.<key> }}` resolves without the plugin parking to wait.
+  Requires SSH access to the instance (as `spawn plugin status` already does).
+- **`spawn plugin install` now populates `instance.ip` for local provision
+  steps.** The controller-side template context previously only exposed
+  `instance.id` and `instance.name`; plugins whose local steps reach the
+  instance (e.g. `spore-sync`'s `mutagen` target) can now use `{{ instance.ip }}`.
+- **`spawn plugin` commands accept an instance ID for `--instance`.** They
+  previously passed the `--instance` value straight to `ssh`, so only a hostname
+  or IP worked; an EC2 instance ID (which every other `spawn` command accepts)
+  failed to connect. The plugin commands now resolve an instance ID to its public
+  IP, connecting as `ec2-user` by default with a new `--user` flag to override.
+- **Plugin local provision steps now inherit the caller's `PATH`.** The local
+  executor previously forced a fixed `PATH` that omitted common tool locations
+  (notably Homebrew's `/opt/homebrew/bin` on Apple Silicon), so provision tools
+  like `mutagen` and `globus-cli` were "command not found". `PATH` (and `HOME`)
+  are now inherited — they are not credentials — while other environment
+  variables are still dropped to avoid leaking secrets to plugin steps.
+
 ## [0.72.0] - 2026-07-12
 
 ### Changed

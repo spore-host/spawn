@@ -44,7 +44,6 @@ func TestNoNewAWSSDKImportsInCmd(t *testing.T) {
 		"launch_sweep.go":        {"sts"},
 		"list-sweeps.go":         {"dynamodb", "sts"},
 		"pipeline.go":            {"dynamodb", "lambda", "s3", "sts"},
-		"plugin.go":              {"ec2"},
 		"queue.go":               {"ec2", "s3"},
 		"schedule.go":            {"sts"},
 		"team.go":                {"dynamodb", "sts"},

@@ -20,12 +20,13 @@ func newTestServer(t *testing.T) (*PushAPIServer, *httptest.Server) {
 	store := plugin.NewDiskStateStore(dir)
 	rt := &Runtime{
 		store:         store,
-		executor:      NewRemoteExecutor(),
+		executor:      NewRemoteExecutor(""),
 		identity:      nil,
 		healthCancels: make(map[string]context.CancelFunc),
 	}
-	s := &PushAPIServer{rt: rt, token: "test-token"}
+	s := &PushAPIServer{rt: rt, token: "test-token", baseCtx: context.Background()}
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/plugins/install", s.handleInstall)
 	mux.HandleFunc("POST /v1/plugins/{name}/push", s.handlePush)
 	mux.HandleFunc("GET /v1/plugins/{name}/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/plugins", s.handleList)

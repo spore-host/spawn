@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,7 +18,17 @@ import (
 	"time"
 
 	"github.com/spore-host/spawn/pkg/plugin"
+	"github.com/spore-host/spawn/pkg/security"
 )
+
+// envPairs renders a step's Env map to "K=V" strings for exec.Cmd.Env.
+func envPairs(env map[string]string) []string {
+	pairs := make([]string, 0, len(env))
+	for k, v := range env {
+		pairs = append(pairs, k+"="+v)
+	}
+	return pairs
+}
 
 // fetchClient is used for all plugin fetch steps; the 5-minute timeout prevents
 // a stalled download from hanging the plugin lifecycle indefinitely.
@@ -33,11 +44,17 @@ var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 func validEnvKey(k string) bool { return envKeyRe.MatchString(k) }
 
 // RemoteExecutor runs plugin steps on the local instance.
-type RemoteExecutor struct{}
+type RemoteExecutor struct {
+	// localUser is the instance's local login user (from spawn:local-username).
+	// A "run" step with AsUser set executes as this user instead of root; empty
+	// means run everything as root (older instances / unknown user).
+	localUser string
+}
 
-// NewRemoteExecutor creates a RemoteExecutor.
-func NewRemoteExecutor() *RemoteExecutor {
-	return &RemoteExecutor{}
+// NewRemoteExecutor creates a RemoteExecutor. localUser is the instance's local
+// login user, used for steps that opt into AsUser; pass "" to always run as root.
+func NewRemoteExecutor(localUser string) *RemoteExecutor {
+	return &RemoteExecutor{localUser: localUser}
 }
 
 // RunSteps executes a sequence of steps, returning on the first error.
@@ -77,23 +94,43 @@ func (e *RemoteExecutor) runStep(ctx context.Context, step plugin.Step) error {
 }
 
 func (e *RemoteExecutor) runCommand(ctx context.Context, step plugin.Step) error {
+	for k := range step.Env {
+		if !validEnvKey(k) {
+			return fmt.Errorf("invalid env var key %q", k)
+		}
+	}
+
 	script := step.Run
 	if step.Background {
 		// Detach via nohup so the step returns immediately.
 		script = "nohup sh -c " + shellQuote(step.Run) + " </dev/null >/dev/null 2>&1 &"
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", script) // nosemgrep: dangerous-exec-command -- plugin step script, intentional
-	// Initialize with a minimal safe environment to avoid inheriting parent credentials.
-	cmd.Env = []string{
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"HOME=" + os.Getenv("HOME"),
+	// Steps that opt into AsUser run as the instance's local login user via a
+	// login shell (`su - <user> -c`), which sets up the user's own HOME/PATH/env
+	// — required by tools like Globus Connect Personal that refuse to run as root
+	// and store per-user state. Everything else runs as root (spored's uid) with
+	// a minimal, credential-free environment.
+	runAsUser := step.AsUser && e.localUser != ""
+	if step.AsUser && e.localUser == "" {
+		log.Printf("Plugin step requested as_user but no local user is known; running as root")
 	}
-	for k, v := range step.Env {
-		if !validEnvKey(k) {
-			return fmt.Errorf("invalid env var key %q", k)
+
+	var cmd *exec.Cmd
+	if runAsUser {
+		if err := security.ValidateUsername(e.localUser); err != nil {
+			return fmt.Errorf("as_user: invalid local username %q: %w", e.localUser, err)
 		}
-		cmd.Env = append(cmd.Env, k+"="+v)
+		cmd = exec.CommandContext(ctx, "su", "-", e.localUser, "-c", script) // nosemgrep: dangerous-exec-command -- plugin step run as the instance's own user
+		// `su -` establishes the target user's login environment; keep it and just
+		// append any step-specified vars.
+		cmd.Env = append(os.Environ(), envPairs(step.Env)...)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", script) // nosemgrep: dangerous-exec-command -- plugin step script, intentional
+		cmd.Env = append([]string{
+			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"HOME=" + os.Getenv("HOME"),
+		}, envPairs(step.Env)...)
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

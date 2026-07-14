@@ -12,6 +12,12 @@ import (
 // resolved because the pushed value has not yet been delivered.
 var ErrMissingKey = errors.New("missing pushed key")
 
+// ErrInvalidRef is returned when a template contains an expression that is not
+// a canonical {{ namespace.key }} reference (namespace ∈ instance/config/
+// outputs/pushed). It makes non-canonical syntax — e.g. the Go-style
+// {{ .Config.x }} — a hard error instead of a silent "<no value>".
+var ErrInvalidRef = errors.New("invalid template reference")
+
 // TemplateContext holds all variable namespaces available in plugin templates.
 type TemplateContext struct {
 	Instance map[string]string // instance.id, instance.name, instance.ip
@@ -70,6 +76,16 @@ func Render(tmpl string, ctx TemplateContext) (string, error) {
 			}
 			return v, nil
 		},
+		// __invalidref is the target convertExpr emits for any template
+		// expression that is NOT a canonical {{ namespace.key }} reference. It
+		// always errors, so a mistyped or legacy construct (e.g. the Go-style
+		// {{ .Config.x }}) fails loudly at render time instead of silently
+		// producing "<no value>" (spore-plugins template-syntax drift).
+		"__invalidref": func(expr string) (string, error) {
+			return "", fmt.Errorf("%w: %q — use a canonical reference: "+
+				"{{ instance.<key> }}, {{ config.<key> }}, {{ outputs.<key> }}, or {{ pushed.<key> }}",
+				ErrInvalidRef, expr)
+		},
 	}
 
 	// Convert {{ namespace.key }} to Go template function-call syntax.
@@ -118,18 +134,25 @@ func convertTemplateSyntax(s string) string {
 	return result.String()
 }
 
-// convertExpr converts a "namespace.key" expression to a template function call.
+// convertExpr converts a canonical "namespace.key" expression to a template
+// function call. Anything that is NOT a canonical reference — a Go-style
+// leading-dot expression ({{ .Config.x }}), an unknown namespace, a bare field,
+// a dotted/spaced key — is routed to __invalidref so it errors at render time
+// rather than silently rendering "<no value>". This keeps one canonical
+// template syntax and rejects every other construct loudly.
 func convertExpr(expr string) string {
 	for _, ns := range []string{"instance", "config", "outputs", "pushed"} {
 		prefix := ns + "."
 		if strings.HasPrefix(expr, prefix) {
 			key := strings.TrimPrefix(expr, prefix)
-			if !strings.ContainsAny(key, ". \t") {
+			if key != "" && !strings.ContainsAny(key, ". \t") {
 				return fmt.Sprintf(`%s "%s"`, ns, key)
 			}
 		}
 	}
-	return expr
+	// Not a canonical reference — emit a call that errors, passing the original
+	// expression (quotes escaped) for a precise message.
+	return fmt.Sprintf(`__invalidref "%s"`, strings.ReplaceAll(expr, `"`, `\"`))
 }
 
 // shellQuoteValue wraps s in single quotes, escaping embedded single quotes.

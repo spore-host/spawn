@@ -47,8 +47,21 @@ type Condition struct {
 
 // LocalBlock holds steps that run on the controller machine.
 type LocalBlock struct {
-	Provision   []Step `yaml:"provision"`
-	Deprovision []Step `yaml:"deprovision"`
+	// EnvPassthrough names controller environment variables that local steps may
+	// read. Local steps run with a deliberately minimal environment (PATH + HOME
+	// only) so plugin scripts can't scoop up the caller's AWS/other credentials;
+	// a plugin that legitimately needs a controller-side secret (e.g. Tailscale's
+	// TS_API_CLIENT_SECRET to mint an auth key) opts in by listing the variable
+	// here, and spawn injects ONLY those into the step environment.
+	EnvPassthrough []string `yaml:"env_passthrough"`
+	Provision      []Step   `yaml:"provision"`
+	Deprovision    []Step   `yaml:"deprovision"`
+	// Reconcile runs on the controller when the instance's connection details
+	// change (notably its public IP after a stop/start), so an IP-bound local
+	// footprint can be re-pointed — e.g. spore-sync recreates its mutagen session
+	// at the new {{ instance.ip }}. Plugins whose local footprint is not tied to
+	// the instance address (e.g. a Globus endpoint) omit this block.
+	Reconcile []Step `yaml:"reconcile"`
 }
 
 // RemoteBlock holds steps that run on the remote instance.
@@ -72,6 +85,13 @@ type Step struct {
 	Background bool              `yaml:"background"`
 	Capture    map[string]string `yaml:"capture"` // varname -> jmespath into stdout JSON
 	Env        map[string]string `yaml:"env"`
+	// AsUser runs a remote "run" step as the instance's local login user (via a
+	// login shell) instead of root. Needed for tools that refuse to run as root
+	// or that store per-user state — notably Globus Connect Personal, which
+	// aborts with "Running Globus Connect Personal as root is not supported" and
+	// writes its config under the user's ~/.globusonline. Ignored for local
+	// steps (already run as the controller user) and non-run step types.
+	AsUser bool `yaml:"as_user"`
 }
 
 // HealthBlock configures the remote health check loop.

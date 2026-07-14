@@ -20,14 +20,31 @@ var (
 	validConfigTypes     = map[string]bool{"": true, "string": true, "int": true, "bool": true}
 )
 
+// envVarNameRe matches a valid POSIX environment variable name (used to validate
+// local.env_passthrough entries).
+var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // semverRe matches an optional-"v" semantic version (major.minor.patch with
 // optional pre-release/build), e.g. v1.2.0, 1.0.0, 1.2.3-rc1.
 var semverRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)*$`)
 
-// configRefRe finds template references to config parameters in either
-// supported form: {{ config.key }} / {{ config "key" }} and the Go-style
-// {{ .Config.key }}. Capture group 1 or 2 holds the key.
-var configRefRe = regexp.MustCompile(`{{-?\s*(?:config(?:\s+"|\.)([A-Za-z0-9_]+)|\.Config\.([A-Za-z0-9_]+))`)
+// configRefRe finds canonical template references to config parameters:
+// {{ config.key }} (the one supported form). Capture group 1 holds the key.
+// The Go-style {{ .Config.key }} is deliberately NOT matched — it is not valid
+// template syntax (see templateRefRe / the render engine) and is reported as an
+// invalid reference rather than treated as a config reference.
+var configRefRe = regexp.MustCompile(`{{-?\s*config\.([A-Za-z0-9_]+)`)
+
+// templateRefRe matches any template action ({{ ... }}) so Validate can check
+// each one is a canonical {{ namespace.key }} reference (or a control action
+// like if/range/end). canonicalRefRe matches the accepted reference form.
+var (
+	templateRefRe  = regexp.MustCompile(`{{-?\s*(.*?)\s*-?}}`)
+	canonicalRefRe = regexp.MustCompile(`^(instance|config|outputs|pushed)\.[A-Za-z0-9_]+$`)
+	// controlKeywords are text/template actions that aren't references; specs
+	// rarely use them, but don't flag them as invalid references if present.
+	controlKeywords = map[string]bool{"if": true, "else": true, "end": true, "range": true, "with": true, "template": true, "block": true, "define": true}
+)
 
 // ValidationError aggregates all problems found in a spec so authors see every
 // issue at once rather than one-per-run.
@@ -86,6 +103,13 @@ func (s *PluginSpec) Validate(dirName string) error {
 		}
 	}
 
+	// local.env_passthrough names must be valid environment variable identifiers.
+	for _, name := range s.Local.EnvPassthrough {
+		if !envVarNameRe.MatchString(name) {
+			add("local.env_passthrough: invalid environment variable name %q", name)
+		}
+	}
+
 	// Conditions.
 	for i, c := range s.Conditions.Local {
 		if !validConditionTypes[c.Type] {
@@ -108,11 +132,21 @@ func (s *PluginSpec) Validate(dirName string) error {
 	}
 	checkSteps("local.provision", s.Local.Provision, validLocalStepTypes, "run or push")
 	checkSteps("local.deprovision", s.Local.Deprovision, validLocalStepTypes, "run or push")
+	checkSteps("local.reconcile", s.Local.Reconcile, validLocalStepTypes, "run or push")
 	checkSteps("remote.install", s.Remote.Install, validRemoteStepTypes, "run, fetch, or extract")
 	checkSteps("remote.configure", s.Remote.Configure, validRemoteStepTypes, "run, fetch, or extract")
 	checkSteps("remote.start", s.Remote.Start, validRemoteStepTypes, "run, fetch, or extract")
 	checkSteps("remote.stop", s.Remote.Stop, validRemoteStepTypes, "run, fetch, or extract")
 	checkSteps("remote.health.steps", s.Remote.Health.Steps, validRemoteStepTypes, "run, fetch, or extract")
+
+	// Every template action must be a canonical {{ namespace.key }} reference
+	// (namespace ∈ instance/config/outputs/pushed) or a control keyword. This
+	// rejects the Go-style {{ .Config.x }} and other constructs that the render
+	// engine can't evaluate — which otherwise slip through to a silent
+	// "<no value>" at launch (spore-plugins template-syntax drift).
+	for _, expr := range s.invalidTemplateRefs() {
+		add("invalid template reference {{ %s }} — use {{ instance.<key> }}, {{ config.<key> }}, {{ outputs.<key> }}, or {{ pushed.<key> }}", expr)
+	}
 
 	// Every {{ config.X }} reference must point at a declared config param.
 	for _, ref := range s.configReferences() {
@@ -128,44 +162,74 @@ func (s *PluginSpec) Validate(dirName string) error {
 	return nil
 }
 
-// configReferences returns the sorted, de-duplicated set of config keys
-// referenced via templates across every step and condition in the spec.
-func (s *PluginSpec) configReferences() []string {
-	seen := map[string]bool{}
-	scan := func(text string) {
-		for _, m := range configRefRe.FindAllStringSubmatch(text, -1) {
-			key := m[1]
-			if key == "" {
-				key = m[2]
-			}
-			if key != "" {
-				seen[key] = true
-			}
-		}
-	}
-	scanStep := func(st Step) {
-		scan(st.Run)
-		scan(st.URL)
-		scan(st.Dest)
-		scan(st.Src)
-		scan(st.Value)
+// templateTexts returns every string in the spec that may contain template
+// actions: all step fields (across every lifecycle phase) and condition run
+// commands. Shared by configReferences and invalidTemplateRefs so both scan the
+// same surface.
+func (s *PluginSpec) templateTexts() []string {
+	var texts []string
+	addStep := func(st Step) {
+		texts = append(texts, st.Run, st.URL, st.Dest, st.Src, st.Value)
 		for _, v := range st.Env {
-			scan(v)
+			texts = append(texts, v)
 		}
 	}
 	for _, group := range [][]Step{
-		s.Local.Provision, s.Local.Deprovision,
+		s.Local.Provision, s.Local.Deprovision, s.Local.Reconcile,
 		s.Remote.Install, s.Remote.Configure, s.Remote.Start, s.Remote.Stop,
 		s.Remote.Health.Steps,
 	} {
 		for _, st := range group {
-			scanStep(st)
+			addStep(st)
 		}
 	}
 	for _, c := range append(append([]Condition{}, s.Conditions.Local...), s.Conditions.Remote...) {
-		scan(c.Run)
+		texts = append(texts, c.Run)
 	}
+	return texts
+}
 
+// configReferences returns the sorted, de-duplicated set of config keys
+// referenced via canonical {{ config.key }} templates across the spec.
+func (s *PluginSpec) configReferences() []string {
+	seen := map[string]bool{}
+	for _, text := range s.templateTexts() {
+		for _, m := range configRefRe.FindAllStringSubmatch(text, -1) {
+			if m[1] != "" {
+				seen[m[1]] = true
+			}
+		}
+	}
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// invalidTemplateRefs returns the sorted, de-duplicated set of template actions
+// in the spec that are NOT a canonical {{ namespace.key }} reference and not a
+// control keyword — e.g. the Go-style {{ .Config.x }}, an unknown namespace, or
+// a malformed reference. These render to a silent "<no value>" (or an execute
+// error) at launch, so Validate flags them offline.
+func (s *PluginSpec) invalidTemplateRefs() []string {
+	seen := map[string]bool{}
+	for _, text := range s.templateTexts() {
+		for _, m := range templateRefRe.FindAllStringSubmatch(text, -1) {
+			expr := strings.TrimSpace(m[1])
+			if expr == "" {
+				continue
+			}
+			// Skip control actions (if/range/end/…) — keyword is the first token.
+			if controlKeywords[strings.Fields(expr)[0]] {
+				continue
+			}
+			if !canonicalRefRe.MatchString(expr) {
+				seen[expr] = true
+			}
+		}
+	}
 	keys := make([]string, 0, len(seen))
 	for k := range seen {
 		keys = append(keys, k)
