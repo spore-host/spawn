@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- **`spawn stop` now confirms before stopping.** It prompts for confirmation
-  (skippable with `-y`/`--yes`), matching `spawn terminate`. Stopping an instance
-  interrupts running work and any live plugin sessions, so it should not be a
-  silent one-keystroke action.
-
 ### Added
 - **Plugin remote steps can declare `as_user: true`** to run as the instance's
   local login user instead of root. spored runs plugin steps as root, but some
@@ -52,7 +46,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while SSH comes up) for any such plugin recorded for that instance. Plugins
   whose footprint isn't address-bound omit the block.
 
+### Changed
+- **`spawn stop` now confirms before stopping.** It prompts for confirmation
+  (skippable with `-y`/`--yes`), matching `spawn terminate`. Stopping an instance
+  interrupts running work and any live plugin sessions, so it should not be a
+  silent one-keystroke action.
+- **`spawn plugin install` now runs a plugin's full lifecycle end-to-end.**
+  Previously the command ran only a plugin's local provision steps on the
+  controller and never triggered the remote `install`/`configure`/`start` steps
+  on the instance — so remote-only plugins (e.g. `tailscale`) were inert and
+  plugins split across both halves (e.g. `globus`) could never complete. The
+  command now runs local provision on the controller, then hands the resolved
+  spec, config, and any pushed values to `spored` (via a new authenticated
+  `POST /v1/plugins/install` endpoint over the SSH tunnel) which runs the remote
+  half; the CLI polls until the plugin is running or reports the failure. Values
+  captured and pushed by local steps are delivered *before* the remote configure
+  phase, so `{{ pushed.<key> }}` resolves without the plugin parking to wait.
+  Requires SSH access to the instance (as `spawn plugin status` already does).
+- **`spawn plugin install` now populates `instance.ip` for local provision
+  steps.** The controller-side template context previously only exposed
+  `instance.id` and `instance.name`; plugins whose local steps reach the
+  instance (e.g. `spore-sync`'s `mutagen` target) can now use `{{ instance.ip }}`.
+- **`spawn plugin` commands accept an instance ID for `--instance`.** They
+  previously passed the `--instance` value straight to `ssh`, so only a hostname
+  or IP worked; an EC2 instance ID (which every other `spawn` command accepts)
+  failed to connect. The plugin commands now resolve an instance ID to its public
+  IP, connecting as the instance's local user (or `--user`).
+- **Plugin local provision steps now inherit the caller's `PATH`.** The local
+  executor previously forced a fixed `PATH` that omitted common tool locations
+  (notably Homebrew's `/opt/homebrew/bin` on Apple Silicon), so provision tools
+  like `mutagen` and `globus-cli` were "command not found". `PATH` (and `HOME`)
+  are now inherited — they are not credentials — while other environment
+  variables are still dropped to avoid leaking secrets to plugin steps.
+
 ### Fixed
+- **Launching from a machine whose username has capitals or dots no longer fails,
+  and `spawn connect` logs you in as your own user.** The instance creates a
+  local user matching your controller login and installs your key for it — but
+  the username was passed through verbatim, so a macOS/Windows name like
+  `SFriedman` or `john.doe` was rejected by the bootstrap's POSIX validation and
+  the launch failed. spawn now normalizes it to a valid login (`SFriedman` →
+  `sfriedman`, `john.doe` → `john-doe`; falls back to `spore`). And `spawn
+  connect` now defaults to that local-matching user (from the
+  `spawn:local-username` tag) instead of `ec2-user`, so you log in as *you*
+  (verified: `whoami` → your name, `HOME=/home/<you>`). Windows has no per-user
+  account — its key is authorized for `Administrator`, which `spawn connect`
+  still uses there. `--user` overrides on both.
+- **`spawn plugin install` now waits for the instance to be fully provisioned
+  before running remote steps.** It previously went straight to the remote
+  install/configure the moment SSH was reachable, racing cloud-init — so on a
+  freshly-launched instance the local user, keys, or network/DNS might not be
+  ready, causing intermittent failures. It now gates on the same deterministic
+  readiness signal `spawn launch` uses (spored active over SSM, which coincides
+  with cloud-init finishing). Best-effort: proceeds with a warning if readiness
+  can't be confirmed (e.g. a bare hostname with no resolvable instance).
+- **The local-matching user can no longer be locked out by a silent SSH-key
+  substitution** (#349). When launched with a key pair that has no local `.pub`
+  file (e.g. one created via `aws ec2 create-key-pair`, which returns only the
+  private key), `spawn launch` silently installed `~/.ssh/id_rsa.pub` for the
+  instance's local user instead — so SSHing in as that user with the named key
+  failed `Permission denied`, which also broke DNS registration. spawn now
+  derives the public key from the private key when no `.pub` exists (and errors
+  loudly rather than substituting a different key). DNS registration connects as
+  the local-matching user (`$USER`), never a hardcoded `ec2-user` (the default
+  login user varies by distro).
+- **`spawn launch` output no longer stacks dozens of progress boxes when piped
+  or captured.** The animated box redraw relied on an ANSI clear-screen that does
+  nothing when stdout isn't a terminal, so every step reprinted the whole box.
+  Launch now detects a non-TTY stdout and prints a clean one-line-per-step log
+  instead, keeping the in-place redraw only for interactive terminals.
+- **Progress boxes now align.** The `🚀`/`🎉` emoji are double-width but were
+  counted as one column, so the box's right border was ragged. Padding now
+  accounts for wide runes.
+- **`spawn launch` success now suggests `spawn connect <name>` instead of a raw
+  `ssh -i ~/.ssh/id_rsa …` command.** The old hint hardcoded `~/.ssh/id_rsa`,
+  which fails with "Permission denied" whenever the instance was launched with a
+  different key; `spawn connect` resolves the actual launch key (and falls back
+  to Session Manager).
+- **DNS registration failures now report the real reason, and connect over
+  IPv4.** The step SSH'd into the instance as the local `$USER` (which the EC2
+  key doesn't authorize, so it failed before even calling the API) and reported a
+  generic "DNS API call failed". It now connects as the local-matching user, and
+  the API call forces IPv4 (`curl -4`) — the dns-updater Lambda URL is dual-stack
+  but IPv4-only instances have no IPv6 route, so curl could otherwise pick an
+  AAAA address and fail to connect. Failures now surface the actual HTTP
+  status/body (e.g. `DNS API returned HTTP 404: …`). DNS registration remains
+  non-fatal, and the message points at the public IP / `spawn connect` fallback.
 - **Plugins no longer orphan controller-side resources on removal or
   termination.** A plugin's local deprovision steps (e.g. `spore-sync`'s
   `mutagen sync terminate`, `globus`'s endpoint delete) were never run — not even
@@ -75,35 +154,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to an empty string at install time. This closes a class of silent plugin
   breakage (e.g. the `tailscale` and `spore-sync` registry plugins were
   rendering their auth key / sync target to nothing).
-
-### Changed
-- **`spawn plugin install` now runs a plugin's full lifecycle end-to-end.**
-  Previously the command ran only a plugin's local provision steps on the
-  controller and never triggered the remote `install`/`configure`/`start` steps
-  on the instance — so remote-only plugins (e.g. `tailscale`) were inert and
-  plugins split across both halves (e.g. `globus`) could never complete. The
-  command now runs local provision on the controller, then hands the resolved
-  spec, config, and any pushed values to `spored` (via a new authenticated
-  `POST /v1/plugins/install` endpoint over the SSH tunnel) which runs the remote
-  half; the CLI polls until the plugin is running or reports the failure. Values
-  captured and pushed by local steps are delivered *before* the remote configure
-  phase, so `{{ pushed.<key> }}` resolves without the plugin parking to wait.
-  Requires SSH access to the instance (as `spawn plugin status` already does).
-- **`spawn plugin install` now populates `instance.ip` for local provision
-  steps.** The controller-side template context previously only exposed
-  `instance.id` and `instance.name`; plugins whose local steps reach the
-  instance (e.g. `spore-sync`'s `mutagen` target) can now use `{{ instance.ip }}`.
-- **`spawn plugin` commands accept an instance ID for `--instance`.** They
-  previously passed the `--instance` value straight to `ssh`, so only a hostname
-  or IP worked; an EC2 instance ID (which every other `spawn` command accepts)
-  failed to connect. The plugin commands now resolve an instance ID to its public
-  IP, connecting as `ec2-user` by default with a new `--user` flag to override.
-- **Plugin local provision steps now inherit the caller's `PATH`.** The local
-  executor previously forced a fixed `PATH` that omitted common tool locations
-  (notably Homebrew's `/opt/homebrew/bin` on Apple Silicon), so provision tools
-  like `mutagen` and `globus-cli` were "command not found". `PATH` (and `HOME`)
-  are now inherited — they are not credentials — while other environment
-  variables are still dropped to avoid leaking secrets to plugin steps.
 
 ## [0.72.0] - 2026-07-12
 

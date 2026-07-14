@@ -181,6 +181,42 @@ func Resolve(homeDir, keyName string) (string, error) {
 	return "", fmt.Errorf("no SSH key found for %q (looked in ~/.spawn/keys and ~/.ssh)", keyName)
 }
 
+// PublicKeyForName returns the authorized_keys-format public key for a resolved
+// key name. It prefers an adjacent <key>.pub file, but if none exists it derives
+// the public key from the private key itself — so a key pair created without a
+// local .pub (e.g. via `aws ec2 create-key-pair`, which returns only the private
+// key) still yields the CORRECT public key rather than silently falling back to
+// an unrelated default key. Returns an error if the key can't be resolved or the
+// private key can't be parsed; callers must not substitute a different key.
+func PublicKeyForName(homeDir, keyName string) ([]byte, error) {
+	priv, err := Resolve(homeDir, keyName)
+	if err != nil {
+		return nil, err
+	}
+	if pub, err := os.ReadFile(priv + ".pub"); err == nil {
+		return pub, nil
+	}
+	return PublicKeyFromPrivateFile(priv)
+}
+
+// PublicKeyFromPrivateFile parses the private key at path and returns its
+// public half in authorized_keys format. Encrypted (passphrase-protected)
+// private keys are rejected with a clear error, since bootstrap can't prompt.
+func PublicKeyFromPrivateFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read private key %s: %w", path, err)
+	}
+	signer, err := ssh.ParsePrivateKey(data)
+	if err != nil {
+		if _, ok := err.(*ssh.PassphraseMissingError); ok {
+			return nil, fmt.Errorf("private key %s is passphrase-protected; provide a matching .pub file", path)
+		}
+		return nil, fmt.Errorf("parse private key %s: %w", path, err)
+	}
+	return ssh.MarshalAuthorizedKey(signer.PublicKey()), nil
+}
+
 // Fingerprint returns the AWS-format MD5 fingerprint (colon-separated hex of the
 // MD5 of the DER-encoded public key) for the authorized_keys-format public key
 // at pubKeyPath. This matches what EC2 DescribeKeyPairs reports for an imported

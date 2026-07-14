@@ -353,3 +353,29 @@ func TestShellEscapeAttackPatterns(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeUsername(t *testing.T) {
+	cases := map[string]string{
+		"scttfrdmn": "scttfrdmn",
+		"SFriedman": "sfriedman",
+		"Scott":     "scott",
+		"john.doe":  "john-doe",
+		"admin123":  "admin123",
+		"user_1":    "user_1",
+		"123abc":    "abc",   // leading digits stripped
+		"_weird":    "weird", // leading underscore stripped
+		"":          "spore", // empty → fallback
+		"...":       "spore", // all-invalid → fallback (dots→dashes, then stripped as leading)
+		"José":      "jos",   // non-ascii → dashes; trailing dash kept? see below
+	}
+	for in, want := range cases {
+		got := NormalizeUsername(in)
+		// The result must always be a valid username (or the fallback).
+		if err := ValidateUsername(got); err != nil {
+			t.Errorf("NormalizeUsername(%q)=%q is NOT a valid username: %v", in, got, err)
+		}
+		if got != want {
+			t.Errorf("NormalizeUsername(%q)=%q, want %q", in, got, want)
+		}
+	}
+}

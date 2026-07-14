@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -235,4 +236,70 @@ func TestFingerprint_Deterministic(t *testing.T) {
 	if len(fp1) != 47 { // 16 bytes → 32 hex + 15 colons
 		t.Errorf("fingerprint %q has length %d, want 47 (AWS MD5 format)", fp1, len(fp1))
 	}
+}
+
+func TestPublicKeyForName_DerivesFromPrivateWhenNoPubFile(t *testing.T) {
+	home := t.TempDir()
+	keysDir := filepath.Join(home, ".spawn", "keys")
+	if err := os.MkdirAll(keysDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate a key pair, then write ONLY the private half (simulating a key
+	// created via `aws ec2 create-key-pair`, which returns no .pub).
+	priv, pub, err := generate(ED25519)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	privPath := filepath.Join(keysDir, "k")
+	if err := os.WriteFile(privPath, priv, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := PublicKeyForName(home, "k")
+	if err != nil {
+		t.Fatalf("PublicKeyForName: %v", err)
+	}
+	// The derived public key must match the generated one (compare the base64
+	// key material, ignoring any trailing comment/newline differences).
+	if fieldN(t, got, 1) != fieldN(t, pub, 1) {
+		t.Errorf("derived public key does not match the private key\n got:  %s\n want: %s", got, pub)
+	}
+}
+
+func TestPublicKeyForName_PrefersPubFile(t *testing.T) {
+	home := t.TempDir()
+	keysDir := filepath.Join(home, ".spawn", "keys")
+	if err := os.MkdirAll(keysDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	priv, _, _ := generate(ED25519)
+	_ = os.WriteFile(filepath.Join(keysDir, "k"), priv, 0o600)
+	// A .pub file present → returned verbatim.
+	_ = os.WriteFile(filepath.Join(keysDir, "k.pub"), []byte("ssh-ed25519 AAAASENTINEL comment\n"), 0o644)
+
+	got, err := PublicKeyForName(home, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fieldN(t, got, 1) != "AAAASENTINEL" {
+		t.Errorf("expected the .pub file to be used verbatim, got %q", string(got))
+	}
+}
+
+func TestPublicKeyForName_MissingKeyErrors(t *testing.T) {
+	home := t.TempDir()
+	if _, err := PublicKeyForName(home, "does-not-exist"); err == nil {
+		t.Error("expected an error for a key that can't be resolved, got nil (must NOT silently substitute)")
+	}
+}
+
+// fieldN returns the n-th whitespace-separated field of an authorized_keys line.
+func fieldN(t *testing.T, line []byte, n int) string {
+	t.Helper()
+	fields := strings.Fields(string(line))
+	if len(fields) <= n {
+		t.Fatalf("authorized_keys line has %d fields, want > %d: %q", len(fields), n, string(line))
+	}
+	return fields[n]
 }

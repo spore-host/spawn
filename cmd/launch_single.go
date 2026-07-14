@@ -902,8 +902,10 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			fqdn, err := registerDNS(plat, result.KeyName, result.InstanceID, result.PublicIP, dnsName, dnsConfig.Domain, dnsConfig.APIEndpoint)
 			if err != nil {
 				prog.Error("Registering DNS", err)
-				// Non-fatal: continue even if DNS registration fails
-				fmt.Fprintf(os.Stderr, "\n⚠️  DNS registration failed: %v\n", err)
+				// Non-fatal: the instance is fully usable via its public IP /
+				// `spawn connect`; DNS is a convenience. Registration is expected to
+				// fail in accounts not wired for spore.host DNS.
+				fmt.Fprintf(os.Stderr, "\n⚠️  DNS registration failed (non-fatal — use the public IP or `spawn connect %s`): %v\n", config.Name, err)
 			} else {
 				dnsRecord = fqdn
 				prog.Complete("Registering DNS")
@@ -932,14 +934,15 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		return nil
 	}
 
-	// Display success (TUI mode). Windows has no `ssh ec2-user@` path — connect
-	// via `spawn connect`, which fetches the Administrator password and opens a
-	// desktop (--rdp), a PowerShell-over-SSM session (default), or SSH (--ssh).
+	// Display success (TUI mode). Prefer `spawn connect <name>`: it resolves the
+	// instance's actual launch key (a raw `ssh -i ~/.ssh/id_rsa …` hint fails
+	// when the launch used a different key), picks the right user, and falls back
+	// to Session Manager. Windows additionally supports --rdp / --ssh.
 	var connectCmd string
 	if config.TargetOS == "windows" {
 		connectCmd = fmt.Sprintf("spawn connect %s --rdp     # graphical; or --ssh, or `spawn connect %s` (PowerShell over SSM)", config.Name, config.Name)
 	} else {
-		connectCmd = plat.GetSSHCommand("ec2-user", result.PublicIP)
+		connectCmd = fmt.Sprintf("spawn connect %s", config.Name)
 	}
 	prog.DisplaySuccess(result.InstanceID, result.PublicIP, connectCmd, config)
 
