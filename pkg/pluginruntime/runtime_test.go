@@ -14,7 +14,7 @@ func newTestRuntime(t *testing.T) *Runtime {
 	dir := t.TempDir()
 	return &Runtime{
 		store:         plugin.NewDiskStateStore(dir),
-		executor:      NewRemoteExecutor(),
+		executor:      NewRemoteExecutor(""),
 		identity:      nil,
 		healthCancels: make(map[string]context.CancelFunc),
 	}
@@ -157,7 +157,7 @@ func TestRuntime_TemplateContext_InstanceName(t *testing.T) {
 	dir := t.TempDir()
 	rt := &Runtime{
 		store:    plugin.NewDiskStateStore(dir),
-		executor: NewRemoteExecutor(),
+		executor: NewRemoteExecutor(""),
 		identity: &provider.Identity{
 			InstanceID: "i-0abc123",
 			Name:       "my-worker",

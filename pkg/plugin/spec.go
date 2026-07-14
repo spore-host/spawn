@@ -85,6 +85,13 @@ type Step struct {
 	Background bool              `yaml:"background"`
 	Capture    map[string]string `yaml:"capture"` // varname -> jmespath into stdout JSON
 	Env        map[string]string `yaml:"env"`
+	// AsUser runs a remote "run" step as the instance's local login user (via a
+	// login shell) instead of root. Needed for tools that refuse to run as root
+	// or that store per-user state — notably Globus Connect Personal, which
+	// aborts with "Running Globus Connect Personal as root is not supported" and
+	// writes its config under the user's ~/.globusonline. Ignored for local
+	// steps (already run as the controller user) and non-run step types.
+	AsUser bool `yaml:"as_user"`
 }
 
 // HealthBlock configures the remote health check loop.

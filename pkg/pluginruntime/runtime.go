@@ -28,11 +28,13 @@ type Runtime struct {
 }
 
 // NewRuntime creates a Runtime backed by the default disk state store.
-// identity may be nil (e.g. in tests); instance.* template variables will be empty.
-func NewRuntime(identity *provider.Identity) *Runtime {
+// identity may be nil (e.g. in tests); instance.* template variables will be
+// empty. localUser is the instance's local login user (spawn:local-username);
+// steps that opt into AsUser run as this user, and "" means always-root.
+func NewRuntime(identity *provider.Identity, localUser string) *Runtime {
 	return &Runtime{
 		store:         plugin.DefaultStateStore(),
-		executor:      NewRemoteExecutor(),
+		executor:      NewRemoteExecutor(localUser),
 		identity:      identity,
 		healthCancels: make(map[string]context.CancelFunc),
 	}

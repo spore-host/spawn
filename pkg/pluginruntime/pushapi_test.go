@@ -20,7 +20,7 @@ func newTestServer(t *testing.T) (*PushAPIServer, *httptest.Server) {
 	store := plugin.NewDiskStateStore(dir)
 	rt := &Runtime{
 		store:         store,
-		executor:      NewRemoteExecutor(),
+		executor:      NewRemoteExecutor(""),
 		identity:      nil,
 		healthCancels: make(map[string]context.CancelFunc),
 	}

@@ -273,8 +273,10 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 		}
 	}
 
-	// Initialize plugin runtime (always, so the push API can route to it).
-	rt := pluginruntime.NewRuntime(identity)
+	// Initialize plugin runtime (always, so the push API can route to it). Pass
+	// the local login user so plugin steps that opt into as_user (e.g. Globus
+	// Connect Personal, which refuses to run as root) run as that user.
+	rt := pluginruntime.NewRuntime(identity, config.LocalUsername)
 	agent.pluginRuntime = rt
 
 	if len(config.Plugins) > 0 {

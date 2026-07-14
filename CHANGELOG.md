@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silent one-keystroke action.
 
 ### Added
+- **Plugin remote steps can declare `as_user: true`** to run as the instance's
+  local login user instead of root. spored runs plugin steps as root, but some
+  tools refuse that — notably Globus Connect Personal, which aborts with
+  "Running Globus Connect Personal as root is not supported" and stores its
+  config under the user's `~/.globusonline`. A step with `as_user` runs via a
+  login shell as the `spawn:local-username` user (reusing the pre-stop
+  run-as-user mechanism); if the instance has no known local user it falls back
+  to root with a warning. The `globus-personal-endpoint` plugin's setup/start/
+  status/stop steps use it (verified live: endpoint registers, connects, and
+  transfers data bidirectionally).
 - **Plugins can declare `local.env_passthrough`** — a list of controller
   environment variables their local steps are allowed to read. Local steps run
   with a deliberately minimal environment (so plugin scripts can't scoop up the
