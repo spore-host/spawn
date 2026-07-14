@@ -173,16 +173,16 @@ func TestTier0_Launch_EstimateOnly(t *testing.T) {
 
 // TestTier0_StateTransitions exercises stop → start → terminate on a single
 // instance: each command must resolve the instance and exit 0. Note: stop and
-// hibernate take no -y; only terminate prompts. We assert the commands succeed
-// (spawn's behavior) rather than substrate's exact post-transition state, which
-// is emulator-specific.
+// terminate both prompt for confirmation, so pass -y in non-interactive runs;
+// hibernate takes no -y. We assert the commands succeed (spawn's behavior)
+// rather than substrate's exact post-transition state, which is emulator-specific.
 func TestTier0_StateTransitions(t *testing.T) {
 	env := startSpawnSubstrate(t)
 	arr := env.launchOK("life", "--instance-type", "t3.small")
 	id := arr[0]["instance_id"].(string)
 	env.requireState(id, "running")
 
-	env.runOK("stop", id)
+	env.runOK("stop", id, "-y")
 	env.requireState(id, "stopped")
 
 	env.runOK("start", id)
