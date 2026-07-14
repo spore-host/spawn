@@ -191,10 +191,19 @@ func TestGetUsername(t *testing.T) {
 		t.Errorf("GetUsername (USERNAME) = %q, want winuser", got)
 	}
 
-	// When both unset, falls back to "user".
+	// When both unset, falls back to the normalizer's fallback "spore".
 	_ = os.Unsetenv("USERNAME")
-	if got := p.GetUsername(); got != "user" {
-		t.Errorf("GetUsername (fallback) = %q, want user", got)
+	if got := p.GetUsername(); got != "spore" {
+		t.Errorf("GetUsername (fallback) = %q, want spore", got)
+	}
+
+	// A capitalized/dotted controller name is normalized to a valid POSIX login
+	// rather than passed through verbatim (which would fail the bootstrap).
+	if err := os.Setenv("USER", "SFriedman"); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.GetUsername(); got != "sfriedman" {
+		t.Errorf("GetUsername (normalized) = %q, want sfriedman", got)
 	}
 }
 

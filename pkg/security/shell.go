@@ -37,6 +37,41 @@ func ValidateUsername(username string) error {
 	return nil
 }
 
+// NormalizeUsername converts an arbitrary controller username (e.g. macOS
+// "SFriedman", "john.doe", "Scott") into a valid POSIX login name that
+// ValidateUsername accepts, so a fresh instance's local-matching user can be
+// created instead of the launch failing. Rules: lowercase; any character that
+// isn't [a-z0-9_-] becomes '-'; strip leading characters until it starts with a
+// letter; collapse to <=32 chars; if nothing valid remains, fall back to
+// "spore". The result is deterministic for a given input.
+func NormalizeUsername(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := b.String()
+
+	// Must start with a lowercase letter: drop any leading digits/_/-.
+	out = strings.TrimLeft(out, "0123456789_-")
+	// Trim trailing separators for a tidy name (e.g. "José" → "jos", not "jos-").
+	out = strings.TrimRight(out, "_-")
+
+	if len(out) > 32 {
+		out = strings.TrimRight(out[:32], "_-")
+	}
+	if out == "" {
+		return "spore"
+	}
+	return out
+}
+
 // ValidateBase64 ensures a string contains only valid base64 characters.
 // This prevents injection attacks in base64-encoded data.
 func ValidateBase64(s string) error {

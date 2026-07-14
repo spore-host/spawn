@@ -126,10 +126,16 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return connectViaSessionManager(instance.InstanceID, instance.Region)
 	}
 
-	// Determine SSH user
+	// Determine SSH user: prefer the instance's local-matching user (the
+	// spawn:local-username the bootstrap created and installed the key for — "log
+	// in as you"), falling back to ec2-user for instances launched before that
+	// tag existed. --user overrides.
 	user := connectUser
 	if user == "" {
-		user = "ec2-user" // Default for Amazon Linux
+		user = instance.Tags["spawn:local-username"]
+	}
+	if user == "" {
+		user = "ec2-user" // older instances / no local-username tag
 	}
 
 	// Determine SSH key

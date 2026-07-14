@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/spore-host/spawn/pkg/security"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -112,15 +113,19 @@ func (p *Platform) ReadPublicKey() ([]byte, error) {
 	return os.ReadFile(p.SSHPubKeyPath)
 }
 
-// GetUsername returns the current system username
+// GetUsername returns the controller's login name normalized to a valid POSIX
+// username, so it can serve as the instance's local-matching user (created by
+// the bootstrap) and the SSH login. macOS/Windows names often contain capitals
+// or dots (e.g. "SFriedman", "john.doe") that the bootstrap's ValidateUsername
+// would reject — failing the launch. Normalizing (SFriedman→sfriedman,
+// john.doe→john-doe) keeps "log in as you" working instead of crashing; falls
+// back to "spore" when no valid characters remain.
 func (p *Platform) GetUsername() string {
-	if username := os.Getenv("USER"); username != "" {
-		return username
+	raw := os.Getenv("USER")
+	if raw == "" {
+		raw = os.Getenv("USERNAME")
 	}
-	if username := os.Getenv("USERNAME"); username != "" {
-		return username
-	}
-	return "user"
+	return security.NormalizeUsername(raw)
 }
 
 // GetPublicKeyFingerprint returns the MD5 fingerprint of the local SSH public key
