@@ -31,12 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which fails with "Permission denied" whenever the instance was launched with a
   different key; `spawn connect` resolves the actual launch key (and falls back
   to Session Manager).
-- **DNS registration failures now report the real reason.** The step SSH'd into
-  the instance as the local `$USER` (which the EC2 key doesn't authorize, so it
-  failed before even calling the API) and reported a generic "DNS API call
-  failed". It now connects as `ec2-user` and surfaces the actual HTTP status/body
-  (e.g. `DNS API returned HTTP 404: …`). DNS registration remains non-fatal, and
-  the message points at the public IP / `spawn connect` fallback.
+- **DNS registration failures now report the real reason, and connect over
+  IPv4.** The step SSH'd into the instance as the local `$USER` (which the EC2
+  key doesn't authorize, so it failed before even calling the API) and reported a
+  generic "DNS API call failed". It now connects as the local-matching user, and
+  the API call forces IPv4 (`curl -4`) — the dns-updater Lambda URL is dual-stack
+  but IPv4-only instances have no IPv6 route, so curl could otherwise pick an
+  AAAA address and fail to connect. Failures now surface the actual HTTP
+  status/body (e.g. `DNS API returned HTTP 404: …`). DNS registration remains
+  non-fatal, and the message points at the public IP / `spawn connect` fallback.
 
 ### Changed
 - **`spawn stop` now confirms before stopping.** It prompts for confirmation

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -83,10 +84,13 @@ IDENTITY_DOC=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.
 IDENTITY_SIG=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/dynamic/instance-identity/signature 2>/dev/null | tr -d '\n')
 PUBLIC_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
 
-# Call DNS API. Capture the HTTP status and body separately so a failure
-# surfaces the real reason (e.g. 403 from the IAM-auth'd updater when this
-# account isn't authorized) instead of a generic "call failed".
-HTTP_BODY=$(curl -s -w "\n%%{http_code}" -X POST %s \
+# Call DNS API. Force IPv4 (-4): the Lambda URL is dual-stack (A + AAAA) but
+# IPv4-only instances have no IPv6 route. Capture the HTTP status and body
+# separately so a failure surfaces the real reason (e.g. 403 from the IAM-auth'd
+# updater when this account isn't authorized) instead of a generic "call failed".
+# Session-level readiness (user account created, DNS resolver populated) is
+# handled by the caller retrying the whole SSH exec, so a single attempt here.
+HTTP_BODY=$(curl -4 -s -w "\n%%{http_code}" -X POST %s \
   -H "Content-Type: application/json" \
   -d "{
     \"instance_identity_document\": \"$IDENTITY_DOC\",
@@ -135,9 +139,27 @@ fi
 		sshScript,
 	}
 
-	// Execute
-	cmd := exec.Command("ssh", sshArgs...)
-	output, err := cmd.CombinedOutput()
+	// Execute, retrying the WHOLE SSH exec (a fresh session each attempt). The
+	// shallow port-22 readiness check the launch flow uses returns before
+	// cloud-init has finished — so at first the local user's authorized_keys may
+	// not exist yet (SSH Permission denied) and the instance's DNS resolver may
+	// not yet resolve public names (curl exit 6). Both are session-level:
+	// retrying inside one early session can't recover, but re-establishing a new
+	// session does. The early-boot DNS window on a fresh instance is variable and
+	// has been observed past 90s, so retry up to a few minutes; DNS registration
+	// is non-fatal, so this is a bounded best-effort wait, not a launch blocker.
+	var output []byte
+	deadline := time.Now().Add(4 * time.Minute)
+	for {
+		cmd := exec.Command("ssh", sshArgs...)
+		output, err = cmd.CombinedOutput()
+		transient := err != nil || bytes.Contains(output, []byte("curl exit 6")) ||
+			bytes.Contains(output, []byte("curl exit 7")) || bytes.Contains(output, []byte("curl exit 28"))
+		if !transient || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to execute SSH command: %w (output: %s)", err, string(output))
 	}
