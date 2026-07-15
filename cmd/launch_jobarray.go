@@ -236,10 +236,12 @@ func launchJobArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig
 		launchedInstances = append(launchedInstances, &aws.LaunchResult{
 			InstanceID:       in.InstanceID,
 			Name:             in.Name,
+			Region:           baseConfig.Region,
 			PublicIP:         publicIP,
 			PrivateIP:        in.PrivateIP,
 			AvailabilityZone: in.AvailabilityZone,
 			State:            "running",
+			LaunchTime:       in.LaunchTime,
 		})
 	}
 	prog.Complete("Getting public IPs")

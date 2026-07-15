@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `aws.LaunchResult` now carries `Region` (the region the instance launched into)
+  and `LaunchTime` (the server-authoritative launch timestamp from RunInstances).
+  Library consumers measuring launch→terminate cost windows no longer have to
+  timestamp with their own wall-clock or thread the region separately (#351).
+
 ## [0.73.0] - 2026-07-14
 
 ### Added

@@ -264,13 +264,15 @@ type LaunchConfig struct {
 
 // LaunchResult contains information about the launched instance returned by [Client.Launch].
 type LaunchResult struct {
-	InstanceID       string // EC2 instance ID, e.g. "i-0abc123def456"
-	Name             string // Value of the Name EC2 tag set at launch
-	PublicIP         string // Public IPv4 address; empty if no public IP was assigned
-	PrivateIP        string // Private IPv4 address within the VPC
-	AvailabilityZone string // AZ where the instance was placed, e.g. "us-east-1a"
-	State            string // Initial instance state — typically "pending"
-	KeyName          string // EC2 key pair name used for SSH access
+	InstanceID       string    // EC2 instance ID, e.g. "i-0abc123def456"
+	Name             string    // Value of the Name EC2 tag set at launch
+	Region           string    // AWS region the instance was launched into, e.g. "us-east-1"
+	PublicIP         string    // Public IPv4 address; empty if no public IP was assigned
+	PrivateIP        string    // Private IPv4 address within the VPC
+	AvailabilityZone string    // AZ where the instance was placed, e.g. "us-east-1a"
+	State            string    // Initial instance state — typically "pending"
+	KeyName          string    // EC2 key pair name used for SSH access
+	LaunchTime       time.Time // Server-authoritative launch time from RunInstances; zero if the API omitted it
 }
 
 // LaunchError wraps a RunInstances failure with the verbatim AWS error code
@@ -527,7 +529,7 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		}
 	}
 
-	return newLaunchResult(result.Instances[0], launchConfig.Name, launchConfig.KeyName), nil
+	return newLaunchResult(result.Instances[0], launchConfig.Name, launchConfig.Region, launchConfig.KeyName), nil
 }
 
 // propagateSnapshotTagsToVolumes copies each attached snapshot's CUSTOM tags onto
@@ -570,11 +572,12 @@ func (c *Client) propagateSnapshotTagsToVolumes(ctx context.Context, ec2Client *
 	return nil
 }
 
-// newLaunchResult maps a RunInstances instance into a LaunchResult. Placement
-// and State are optional nested structs in the API response; guard against nil
-// so a response that omits them (some AWS-compatible endpoints do) doesn't
-// panic.
-func newLaunchResult(instance types.Instance, name, keyName string) *LaunchResult {
+// newLaunchResult maps a RunInstances instance into a LaunchResult. Placement,
+// State, and LaunchTime are optional nested/pointer fields in the API response;
+// guard against nil so a response that omits them (some AWS-compatible endpoints
+// do) doesn't panic. region is the caller's resolved launch region — RunInstances
+// doesn't echo it back, so it's threaded in from the LaunchConfig.
+func newLaunchResult(instance types.Instance, name, region, keyName string) *LaunchResult {
 	var az string
 	if instance.Placement != nil {
 		az = valueOrEmpty(instance.Placement.AvailabilityZone)
@@ -583,14 +586,20 @@ func newLaunchResult(instance types.Instance, name, keyName string) *LaunchResul
 	if instance.State != nil {
 		state = string(instance.State.Name)
 	}
+	var launchTime time.Time
+	if instance.LaunchTime != nil {
+		launchTime = *instance.LaunchTime
+	}
 	return &LaunchResult{
 		InstanceID:       valueOrEmpty(instance.InstanceId),
 		Name:             name,
+		Region:           region,
 		PrivateIP:        valueOrEmpty(instance.PrivateIpAddress),
 		PublicIP:         valueOrEmpty(instance.PublicIpAddress),
 		AvailabilityZone: az,
 		State:            state,
 		KeyName:          keyName,
+		LaunchTime:       launchTime,
 	}
 }
 
