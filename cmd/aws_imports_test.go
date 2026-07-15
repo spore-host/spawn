@@ -27,26 +27,21 @@ import (
 func TestNoNewAWSSDKImportsInCmd(t *testing.T) {
 	// file -> allowed aws-sdk-go-v2/service/* packages (the 2026-07 baseline).
 	allow := map[string][]string{
-		"alerts.go":              {"dynamodb", "sts"},
+		"alerts.go":              {"dynamodb"},
 		"availability.go":        {"dynamodb"},
 		"autoscale_helpers.go":   {"cloudwatch", "dynamodb", "ec2", "lambda", "sqs"},
 		"autoscale_status.go":    {"dynamodb", "ec2"},
 		"autoscale_lifecycle.go": {"ec2"},
-		"bot.go":                 {"dynamodb", "iam", "sts"},
+		"bot.go":                 {"dynamodb", "iam"},
 		"burst.go":               {"ec2"},
-		"cancel.go":              {"sts"},
 		"collect.go":             {"dynamodb", "s3"},
 		"completion.go":          {"ec2"},
 		"cost.go":                {"dynamodb"},
-		"extend.go":              {"sts"},
 		"fsx.go":                 {"fsx"},
-		"launch_batchqueue.go":   {"sts"},
-		"launch_sweep.go":        {"sts"},
-		"list-sweeps.go":         {"dynamodb", "sts"},
-		"pipeline.go":            {"dynamodb", "lambda", "s3", "sts"},
+		"list-sweeps.go":         {"dynamodb"},
+		"pipeline.go":            {"dynamodb", "lambda", "s3"},
 		"queue.go":               {"ec2", "s3"},
-		"schedule.go":            {"sts"},
-		"team.go":                {"dynamodb", "sts"},
+		"team.go":                {"dynamodb"},
 	}
 
 	entries, err := os.ReadDir(".")

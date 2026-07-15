@@ -15,8 +15,8 @@ import (
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/pipeline"
 )
@@ -308,12 +308,10 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get user account ID
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	userAccountID, err := spawnaws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
-	userAccountID := *identity.Account
 
 	// Step 1: Upload pipeline definition to S3
 	fmt.Fprintf(os.Stderr, "📤 Uploading pipeline definition to S3...\n")
@@ -616,12 +614,10 @@ func runListPipeline(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get user account ID for filtering
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	userAccountID, err := spawnaws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
-	userAccountID := *identity.Account
 
 	// Query DynamoDB for the caller's pipelines
 	pipelines, err := pipeline.NewStore(dynamodb.NewFromConfig(cfg)).ListByUser(ctx, userAccountID)

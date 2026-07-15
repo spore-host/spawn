@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
@@ -49,12 +48,10 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	userID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
-	userID := *identity.Account
 	correlationID := uuid.New().String()
 	auditLog := audit.NewLogger(os.Stderr, userID, correlationID)
 

@@ -8,9 +8,9 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/alerts"
+	"github.com/spore-host/spawn/pkg/aws"
 )
 
 var (
@@ -236,12 +236,10 @@ func runAlertsCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get user ID (AWS account ID)
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	userID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
-	userID := *identity.Account
 
 	// Create alert config
 	alertConfig := &alerts.AlertConfig{
@@ -293,12 +291,10 @@ func runAlertsList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get user ID
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	userID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
-	userID := *identity.Account
 
 	// Create alerts client
 	dbClient := dynamodb.NewFromConfig(cfg)

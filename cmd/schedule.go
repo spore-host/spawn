@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/scheduler"
 	"github.com/spore-host/spawn/pkg/staging"
@@ -194,12 +194,10 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get account ID
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	accountID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
-	accountID := *identity.Account
 
 	// Parse parameter file
 	params, err := parseParamsFile(paramsFile)
@@ -308,12 +306,10 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get account ID
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	accountID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
-	accountID := *identity.Account
 
 	schedulerClient := scheduler.NewClient(cfg, "", "", accountID)
 	schedules, err := schedulerClient.ListSchedulesByUser(ctx, accountID)
@@ -367,12 +363,10 @@ func runScheduleDescribe(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get account ID
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	accountID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
-	accountID := *identity.Account
 
 	schedulerClient := scheduler.NewClient(cfg, "", "", accountID)
 
@@ -455,12 +449,10 @@ func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get account ID
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	accountID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
-	accountID := *identity.Account
 
 	schedulerClient := scheduler.NewClient(cfg, "", "", accountID)
 
@@ -503,12 +495,10 @@ func updateScheduleStatusCmd(ctx context.Context, scheduleID string, status sche
 	}
 
 	// Get account ID
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	accountID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
-	accountID := *identity.Account
 
 	schedulerClient := scheduler.NewClient(cfg, "", "", accountID)
 

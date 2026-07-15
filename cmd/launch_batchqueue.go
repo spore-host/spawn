@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
@@ -98,12 +97,10 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 	}
 
 	// Get AWS account ID
-	stsClient := sts.NewFromConfig(devCfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	accountID, err := aws.NewClientFromConfig(devCfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
-	accountID := *identity.Account
 
 	// Upload queue configuration to S3
 	fmt.Fprintf(os.Stderr, "\n📤 Uploading queue configuration to S3...\n")

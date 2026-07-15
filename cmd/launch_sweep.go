@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/libs/pricing"
 	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -563,12 +562,10 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	}
 
 	// Get AWS account ID from dev account
-	stsClient := sts.NewFromConfig(devCfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	accountID, err := aws.NewClientFromConfig(devCfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get AWS account ID: %w", err)
 	}
-	accountID := *identity.Account
 
 	// Use spore-host-infra config for Lambda/S3/DynamoDB operations
 	infraCfg, err := spawnconfig.LoadInfraAWSConfig(ctx, "us-east-1")
