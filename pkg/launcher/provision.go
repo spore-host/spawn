@@ -2,10 +2,10 @@ package launcher
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/launchererr"
 	"github.com/spore-host/spawn/pkg/plugin"
 )
 
@@ -15,7 +15,11 @@ import (
 // should treat a post-launch failure as terminal: the launch itself worked, so
 // retrying won't help and would just churn launch+terminate cycles. Test with
 // errors.Is(err, ErrPostLaunch).
-var ErrPostLaunch = errors.New("post-launch provisioning failure")
+//
+// The sentinel now lives in the dependency-free leaf [launchererr] so a
+// downstream can match it without importing the launcher's AWS SDK tree
+// (spawn#354); this alias keeps every existing caller and errors.Is call working.
+var ErrPostLaunch = launchererr.ErrPostLaunch
 
 // DefaultUsername is the local user created on instances provisioned headlessly
 // (no $USER to read). It matches the Amazon Linux default that `spawn connect`

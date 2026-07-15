@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- New dependency-free leaf package **`pkg/launchererr`** holding the
+  `ErrPostLaunch` sentinel (imports only the standard library, no AWS SDK).
+  `launcher.ErrPostLaunch` is now an alias of it, so `errors.Is` and every
+  existing caller are unchanged — but a downstream that only needs to classify a
+  launch error (e.g. a capacity-retry loop) can match a post-launch failure via
+  `errors.Is(err, launchererr.ErrPostLaunch)` without importing the launcher's
+  AWS SDK dependency tree (#354).
+
 ## [0.74.0] - 2026-07-15
 
 ### Added
