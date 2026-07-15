@@ -35,7 +35,8 @@ var (
 	imageImportSubnet      string
 	imageImportSGs         []string
 	imageImportKeepISO     bool
-	imageImportWaitMin     int
+	imageImportWait        bool
+	imageImportWaitTimeout int
 	imageImportNoWarm      bool
 	imageImportWarmType    string
 	imageImportWarmTimeout int
@@ -317,18 +318,19 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 	prog.Complete("Starting import-disk-image")
 
 	// The warm-AMI stage (#98) needs the base AMI to exist, so it requires
-	// waiting. When warm is enabled (the default) and the user didn't ask to
-	// wait, wait anyway with a generous default rather than returning async.
+	// waiting. When warm is enabled (the default), wait regardless of --wait.
+	// --wait-timeout bounds the wait (default 60m); a bare --wait uses it too.
 	warm := !imageImportNoWarm
-	if warm && imageImportWaitMin <= 0 {
-		imageImportWaitMin = 60
+	shouldWait := imageImportWait || warm
+	if imageImportWaitTimeout <= 0 {
+		imageImportWaitTimeout = 60
 	}
 
-	// Async by default (like `spawn create-ami`) when warm is OFF: the build runs
-	// 20-40 min in Image Builder. Without --wait, return now with the build ARN
-	// and how to check on it; the staged ISO is left in place (cleanup needs the
-	// build to finish, which we're not waiting for).
-	if imageImportWaitMin <= 0 {
+	// Async by default (like `spawn create-ami`) when warm is OFF and --wait was
+	// not given: the build runs 20-40 min in Image Builder. Return now with the
+	// build ARN and how to check on it; the staged ISO is left in place (cleanup
+	// needs the build to finish, which we're not waiting for).
+	if !shouldWait {
 		if jsonOut {
 			return json.NewEncoder(os.Stdout).Encode(map[string]string{
 				"imageBuildVersionArn": buildArn,
@@ -352,10 +354,10 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 	// leaving the user wondering, and exit non-zero so it's catchable.
 	waitCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	waitLabel := fmt.Sprintf("Building AMI (waiting up to %dm; Ctrl-C to detach)", imageImportWaitMin)
+	waitLabel := fmt.Sprintf("Building AMI (waiting up to %dm; Ctrl-C to detach)", imageImportWaitTimeout)
 	prog.Start(waitLabel)
 	amiID, err := awsClient.WaitForImage(waitCtx, imageImportRegion, buildArn,
-		time.Duration(imageImportWaitMin)*time.Minute, func(status string) {
+		time.Duration(imageImportWaitTimeout)*time.Minute, func(status string) {
 			if !jsonOut {
 				fmt.Fprintf(os.Stderr, "  image status: %s\n", status)
 			}
@@ -368,7 +370,7 @@ func runImageImport(cmd *cobra.Command, args []string) error {
 		// from "failed".
 		detached := errors.Is(err, aws.ErrWaitTimeout) || errors.Is(err, context.Canceled) || waitCtx.Err() != nil
 		if detached {
-			reason := fmt.Sprintf("still building after %dm", imageImportWaitMin)
+			reason := fmt.Sprintf("still building after %dm", imageImportWaitTimeout)
 			if !errors.Is(err, aws.ErrWaitTimeout) {
 				reason = "detached (interrupted)"
 			}
@@ -656,12 +658,13 @@ func init() {
 	f.StringVar(&imageImportISO, "iso", "", "Windows 11 ISO: local path or s3://bucket/key.ISO (required)")
 	f.StringVar(&imageImportBucket, "bucket", "", "S3 bucket to stage a local ISO in (default: managed spawn-iso-import-<account>-<region>, auto-created)")
 	f.BoolVar(&imageImportKeepISO, "keep-iso", false, "Keep the staged ISO (and managed bucket) after the AMI is built; by default they are deleted (only applies with --wait)")
-	// --wait blocks until the AMI is built (then tags + cleans up). Bare --wait
-	// waits up to 60 min; --wait=N waits N minutes. On timeout the build keeps
-	// running and the command exits non-zero (distinct from success/failure) so
-	// scripts can branch on "still building".
-	f.IntVar(&imageImportWaitMin, "wait", 0, "Wait up to N minutes for the AMI (bare --wait = 60); 0 = return immediately (async)")
-	imageImportCmd.Flags().Lookup("wait").NoOptDefVal = "60"
+	// --wait blocks until the AMI is built (then tags + cleans up), matching the
+	// boolean --wait on `spawn launch`/`ami create`/`pipeline launch` (#317).
+	// --wait-timeout bounds it (default 60m); on timeout the build keeps running
+	// and the command exits non-zero (distinct from success/failure) so scripts
+	// can branch on "still building". Warm mode (the default) implies --wait.
+	f.BoolVar(&imageImportWait, "wait", false, "Wait for the AMI to finish building, then tag and clean up (warm mode implies this)")
+	f.IntVar(&imageImportWaitTimeout, "wait-timeout", 60, "Max minutes to wait when --wait is set before detaching (the build keeps running)")
 	f.StringVar(&imageImportS3Key, "s3-key", "", "S3 object key for the uploaded ISO (default: derived from filename, .ISO)")
 	f.StringVar(&imageImportRegion, "region", "us-east-1", "AWS region for the import build")
 	f.StringVar(&imageImportInfraArn, "infra-config-arn", "", "Image Builder infrastructure configuration ARN (optional; self-provisioned if omitted)")

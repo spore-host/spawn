@@ -530,7 +530,11 @@ var botWorkspaceListCmd = &cobra.Command{
 
 // ── workspace-destroy ─────────────────────────────────────────────────────────
 
-var botDestroyConfirm bool
+var (
+	botDestroyConfirm bool
+	botDestroyDryRun  bool
+	botDestroyYes     bool
+)
 
 var botWorkspaceDestroyCmd = &cobra.Command{
 	Use:   "destroy",
@@ -538,8 +542,8 @@ var botWorkspaceDestroyCmd = &cobra.Command{
 	Long: `Permanently delete all instance registrations across all users in a workspace,
 and remove the workspace's bot token and signing secret.
 
-Without --confirm, performs a dry-run showing what would be removed.
-With --confirm, executes the full teardown.
+Preview with --dry-run; otherwise it prompts for confirmation (skip with --yes)
+and then executes the full teardown.
 
 Note: The SpawnBotCrossAccount IAM role in customer accounts is not
 deleted automatically. Remove it separately with:
@@ -569,8 +573,10 @@ deleted automatically. Remove it separately with:
 		}
 		wsFound := ws != nil
 
-		// Dry-run: show what would be removed
-		if !botDestroyConfirm {
+		// Dry-run: show what would be removed. (--confirm is the deprecated inverse
+		// of the old default; when given without --dry-run it just means "execute",
+		// which is now the default anyway.)
+		if botDestroyDryRun {
 			fmt.Println("Would remove:")
 			if len(regs) == 0 {
 				fmt.Println("  registrations: (none)")
@@ -590,7 +596,15 @@ deleted automatically. Remove it separately with:
 			} else {
 				fmt.Printf("  workspace: %s/%s (not found)\n", botPlatform, botWorkspaceID)
 			}
-			fmt.Println("\nRun with --confirm to proceed.")
+			fmt.Println("\nRe-run without --dry-run to proceed.")
+			return nil
+		}
+
+		// Execute path (the default). Prompt unless --yes (or the deprecated
+		// --confirm) is set.
+		if !confirmYes(botDestroyYes || botDestroyConfirm,
+			fmt.Sprintf("Destroy workspace %s/%s and all its registrations/credentials?", botPlatform, botWorkspaceID)) {
+			fmt.Println("Aborted.")
 			return nil
 		}
 
@@ -802,7 +816,12 @@ func init() {
 	botWorkspaceDestroyCmd.Flags().StringVar(&botWorkspaceID, "workspace-id", "", "Platform workspace ID (required)")
 	botWorkspaceDestroyCmd.Flags().StringVar(&botWorkspacesTable, "workspaces-table", "", "Override DynamoDB workspaces table name")
 	botWorkspaceDestroyCmd.Flags().StringVar(&botTable, "registry-table", "", "Override DynamoDB registry table name")
-	botWorkspaceDestroyCmd.Flags().BoolVar(&botDestroyConfirm, "confirm", false, "Execute destroy (default: dry-run)")
+	botWorkspaceDestroyCmd.Flags().BoolVar(&botDestroyDryRun, "dry-run", false, "Preview what would be removed without deleting anything")
+	botWorkspaceDestroyCmd.Flags().BoolVarP(&botDestroyYes, "yes", "y", false, "Skip the confirmation prompt")
+	// --confirm was the old opt-in-to-execute flag; execute is now the default
+	// (prompt-gated), so --confirm only suppresses the prompt now (#315).
+	botWorkspaceDestroyCmd.Flags().BoolVar(&botDestroyConfirm, "confirm", false, "Deprecated: execute is now the default; use --dry-run to preview")
+	_ = botWorkspaceDestroyCmd.Flags().MarkDeprecated("confirm", "destroy now executes by default; use --dry-run to preview")
 
 	// Back-compat: the workspace verbs used to be flat-hyphenated commands
 	// (`notify workspace-add`, etc.). Keep hidden, deprecated shims that share

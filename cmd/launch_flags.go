@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -35,6 +36,7 @@ var (
 	ttl                string
 	idleTimeout        string
 	hibernateOnIdle    bool
+	onIdle             string
 	preStop            string
 	preStopTimeout     string
 	spotWebhookURL     string
@@ -218,7 +220,9 @@ func init() {
 	launchCmd.Flags().StringVar(&ttl, "ttl", "", "Auto-terminate after duration (e.g., 8h, defaults to 1h idle if not set)")
 	launchCmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "Auto-terminate if idle (defaults to 1h if neither --ttl nor --idle-timeout set)")
 	launchCmd.Flags().BoolVar(&noTimeout, "no-timeout", false, "Disable automatic timeout (NOT RECOMMENDED: creates zombie risk)")
-	launchCmd.Flags().BoolVar(&hibernateOnIdle, "hibernate-on-idle", false, "Hibernate instead of stop when idle (the default idle action is stop, not terminate). NOTE: a stopped instance keeps billing for its EBS volumes (and any attached Elastic IP) — for batch/headless work prefer --on-complete terminate so cost is fully bounded")
+	launchCmd.Flags().StringVar(&onIdle, "on-idle", "", "Action when the instance goes idle: stop (default) or hibernate. Mirrors --on-complete. NOTE: a stopped/hibernated instance keeps billing for its EBS volumes (and any attached Elastic IP) — for batch/headless work prefer --on-complete terminate so cost is fully bounded")
+	launchCmd.Flags().BoolVar(&hibernateOnIdle, "hibernate-on-idle", false, "Hibernate instead of stop when idle")
+	_ = launchCmd.Flags().MarkDeprecated("hibernate-on-idle", "use --on-idle hibernate")
 	launchCmd.Flags().StringVar(&preStop, "pre-stop", "", "Shell command to run on the instance before any lifecycle-triggered stop/terminate (e.g., \"aws s3 sync /results s3://bucket/\")")
 	launchCmd.Flags().StringVar(&preStopTimeout, "pre-stop-timeout", "", "Max time to wait for --pre-stop command (default: 5m, spot: 90s)")
 	launchCmd.Flags().StringVar(&spotWebhookURL, "spot-webhook-url", "", "On spot interruption, spored POSTs a fire-once, best-effort notice to this URL within the ~2-min window (off-node consumers; empty = disabled)")
@@ -388,7 +392,22 @@ func applyLaunchDefaults(cmd *cobra.Command) {
 	if !cmd.Flags().Changed("idle-timeout") && d.IdleTimeout != "" {
 		idleTimeout = d.IdleTimeout
 	}
-	if !cmd.Flags().Changed("hibernate-on-idle") && d.HibernateOnIdle != nil {
+	if !cmd.Flags().Changed("on-idle") && !cmd.Flags().Changed("hibernate-on-idle") && d.HibernateOnIdle != nil {
 		hibernateOnIdle = *d.HibernateOnIdle
+	}
+}
+
+// validateOnIdle checks the --on-idle enum. Empty (unset) is valid and means the
+// default idle action (stop). Only "stop" and "hibernate" are accepted — the idle
+// daemon never terminates (that's --on-complete's job), so "terminate" is rejected
+// with a pointer to the right flag (#316).
+func validateOnIdle(v string) error {
+	switch v {
+	case "", "stop", "hibernate":
+		return nil
+	case "terminate":
+		return fmt.Errorf("--on-idle does not accept 'terminate' (the idle daemon only stops or hibernates); use --on-complete terminate to terminate on completion")
+	default:
+		return fmt.Errorf("invalid --on-idle %q: must be 'stop' or 'hibernate'", v)
 	}
 }

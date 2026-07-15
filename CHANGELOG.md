@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **CLI consistency (2026-07 audit, Wave 2).** Several commands and flags were
+  standardized for consistency; every old form keeps working as a hidden
+  deprecated alias, so nothing breaks:
+  - `spawn fsx show` and `spawn schedule show` are the canonical single-resource
+    detail verbs (were `fsx info` / `schedule describe`, kept as aliases) (#304).
+  - `spawn autoscale set-scaling-policy` pairs symmetrically with
+    `set-metric-policy` (was `set-policy`, kept as an alias) (#307).
+  - `spawn cost <sweep-id>` shows the breakdown directly; `spawn cost breakdown
+    <sweep-id>` still works (hidden) (#308).
+  - Idle action is now the `--on-idle=stop|hibernate` enum on `spawn launch`,
+    mirroring `--on-complete`; `--hibernate-on-idle` is deprecated (#316).
+  - `spawn image import --wait` is now a boolean like `launch`/`ami create`/
+    `pipeline launch`, with a new `--wait-timeout` (minutes, default 60) for the
+    bounded wait it used to encode in `--wait=N` (#317).
+- **`spawn cleanup` and `spawn notify workspace destroy` now execute by default
+  and take `--dry-run` to preview** (was: preview by default, `--force` /
+  `--confirm` to execute). Both prompt for confirmation first (skip with `--yes`),
+  so the destructive action is still gated. `--force` / `--confirm` remain as
+  deprecated no-op-ish aliases (#315).
+
+### Deprecated
+- `fsx info` → `fsx show`; `schedule describe` → `schedule show`;
+  `autoscale set-policy` → `autoscale set-scaling-policy`;
+  `cost breakdown <id>` → `cost <id>`; `launch --hibernate-on-idle` →
+  `launch --on-idle hibernate`; `upgrade-spored --force` →
+  `upgrade-spored --allow-downgrade`; `cleanup --force` and
+  `notify workspace destroy --confirm` (execute is now the default). All still
+  function; each prints a deprecation notice (#304/#307/#308/#315/#316).
 - Internal: the 17 inline `sts.NewFromConfig(...).GetCallerIdentity(...)` call
   sites in `cmd/` now go through the existing `pkg/aws` helpers
   (`GetAccountID` / `GetCallerIdentityInfo`), which also add an IMDS fallback when

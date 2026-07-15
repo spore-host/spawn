@@ -16,6 +16,7 @@ var (
 	cleanupRegion     string
 	cleanupAllRegions bool
 	cleanupForce      bool
+	cleanupDryRun     bool
 	cleanupYes        bool
 	cleanupAll        bool
 )
@@ -27,9 +28,9 @@ var cleanupCmd = &cobra.Command{
 in dependency order. Running instances are NEVER removed — stop or terminate
 them first.
 
-By default cleanup previews what would be removed (a dry run) and removes
-nothing. Pass --force to actually delete. By default it acts only on resources
-you created; --all widens to every principal in the account.
+Preview what would be removed with --dry-run; otherwise cleanup prompts for
+confirmation (skip with --yes) and then deletes. By default it acts only on
+resources you created; --all widens to every principal in the account.
 
 A log of everything removed is written to ~/.spawn/cleanup-<timestamp>.log.`,
 	RunE: runCleanup,
@@ -39,8 +40,12 @@ func init() {
 	rootCmd.AddCommand(cleanupCmd)
 	cleanupCmd.Flags().StringVar(&cleanupRegion, "region", "", "AWS region (default: current region from AWS config)")
 	cleanupCmd.Flags().BoolVar(&cleanupAllRegions, "all-regions", false, "Clean up every enabled region")
-	cleanupCmd.Flags().BoolVar(&cleanupForce, "force", false, "Actually delete (without this, runs as a dry-run preview)")
-	cleanupCmd.Flags().BoolVarP(&cleanupYes, "yes", "y", false, "Skip the confirmation prompt (only with --force)")
+	cleanupCmd.Flags().BoolVar(&cleanupDryRun, "dry-run", false, "Preview what would be removed without deleting anything")
+	// --force was the old opt-in-to-delete flag; execute is now the default
+	// (prompt-gated), so --force is a no-op kept only for back-compat (#315).
+	cleanupCmd.Flags().BoolVar(&cleanupForce, "force", false, "Deprecated: execute is now the default; use --dry-run to preview")
+	_ = cleanupCmd.Flags().MarkDeprecated("force", "cleanup now executes by default; use --dry-run to preview")
+	cleanupCmd.Flags().BoolVarP(&cleanupYes, "yes", "y", false, "Skip the confirmation prompt")
 	cleanupCmd.Flags().BoolVar(&cleanupAll, "all", false, "Include resources created by other principals (default: only yours)")
 }
 
@@ -103,7 +108,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		for _, r := range running {
 			fmt.Fprintf(os.Stderr, "    %s (%s)\n", r.ID, r.Region)
 		}
-		if !cleanupForce {
+		if cleanupDryRun {
 			// Preview mode: just report and stop.
 		} else {
 			fmt.Fprintln(os.Stderr, "\nRefusing to clean up shared infrastructure while instances are still running.")
@@ -111,8 +116,8 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if !cleanupForce {
-		fmt.Fprintf(out, "\nDry run: %d resource(s) would be removed. Re-run with --force to delete.\n", len(removable))
+	if cleanupDryRun {
+		fmt.Fprintf(out, "\nDry run: %d resource(s) would be removed. Re-run without --dry-run to delete.\n", len(removable))
 		return nil
 	}
 

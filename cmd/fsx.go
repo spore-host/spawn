@@ -28,11 +28,12 @@ var fsxListCmd = &cobra.Command{
 }
 
 var fsxInfoCmd = &cobra.Command{
-	Use:   "info <filesystem-id>",
-	Short: "Show FSx filesystem details",
-	Long:  "Show detailed information about an FSx Lustre filesystem",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runFSxInfo,
+	Use:     "show <filesystem-id>",
+	Aliases: []string{"info"},
+	Short:   "Show FSx filesystem details",
+	Long:    "Show detailed information about an FSx Lustre filesystem",
+	Args:    cobra.ExactArgs(1),
+	RunE:    runFSxInfo,
 }
 
 var fsxDeleteCmd = &cobra.Command{

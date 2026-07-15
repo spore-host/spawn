@@ -65,6 +65,41 @@ func TestFlagConventions(t *testing.T) {
 	})
 }
 
+// TestSupersededFlagsAreDeprecated locks the specific flag renames from the
+// 2026-07 audit's Wave 2 (#315/#316): where a flag was superseded by a canonical
+// one it must remain only as a deprecated alias, so it neither disappears
+// (breaking scripts) nor lingers undeprecated (re-fragmenting the surface).
+func TestSupersededFlagsAreDeprecated(t *testing.T) {
+	// command path -> superseded flag that must be present AND deprecated.
+	cases := map[string]string{
+		"spawn launch":                   "hibernate-on-idle", // → --on-idle (#316)
+		"spawn cleanup":                  "force",             // → default execute / --dry-run (#315)
+		"spawn upgrade-spored":           "force",             // → --allow-downgrade (#315)
+		"spawn notify workspace destroy": "confirm",           // → default execute / --dry-run (#315)
+	}
+	found := map[string]bool{}
+	walk(rootCmd, func(c *cobra.Command) {
+		want, ok := cases[c.CommandPath()]
+		if !ok {
+			return
+		}
+		found[c.CommandPath()] = true
+		f := c.Flags().Lookup(want)
+		if f == nil {
+			t.Errorf("%s: expected deprecated alias --%s to still exist (back-compat)", c.CommandPath(), want)
+			return
+		}
+		if f.Deprecated == "" {
+			t.Errorf("%s: --%s must be MarkDeprecated'd (superseded in the 2026-07 audit)", c.CommandPath(), want)
+		}
+	})
+	for path := range cases {
+		if !found[path] {
+			t.Errorf("%s: command not found while checking deprecated flags (renamed or removed?)", path)
+		}
+	}
+}
+
 // destructiveVerbs are the verbs that mark an irreversible/mutating action.
 var destructiveVerbs = map[string]bool{
 	"cancel": true, "terminate": true, "delete": true, "remove": true, "destroy": true,
@@ -86,12 +121,10 @@ func isDestructive(c *cobra.Command) bool {
 			break
 		}
 	}
-	if !found {
-		return false
-	}
-	// A command may satisfy the confirmation contract with --yes OR --confirm
-	// (bot workspace destroy uses --confirm/dry-run by design).
-	return c.Flags().Lookup("confirm") == nil
+	return found
+	// Every destructive command now satisfies the contract with --yes; the old
+	// --confirm carve-out (bot workspace destroy) was retired in #315 when destroy
+	// gained a real --yes and --confirm became a deprecated alias.
 }
 
 func walk(c *cobra.Command, fn func(*cobra.Command)) {

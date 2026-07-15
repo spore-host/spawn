@@ -47,7 +47,12 @@ func init() {
 	rootCmd.AddCommand(upgradeSporedCmd)
 	f := upgradeSporedCmd.Flags()
 	f.StringVar(&upgradeSporedVersion, "version", "", "Target spored version (e.g. 0.64.0); default: latest release")
-	f.BoolVar(&upgradeSporedForce, "force", false, "Allow a downgrade (target older than the running version)")
+	// --allow-downgrade replaces the old --force, whose "force" wording collided
+	// with cleanup's execute-vs-preview meaning; here it only permits a downgrade
+	// (#315). --force kept as a hidden deprecated alias bound to the same var.
+	f.BoolVar(&upgradeSporedForce, "allow-downgrade", false, "Allow a downgrade (target older than the running version)")
+	f.BoolVar(&upgradeSporedForce, "force", false, "Deprecated alias for --allow-downgrade")
+	_ = f.MarkDeprecated("force", "use --allow-downgrade")
 	f.BoolVarP(&upgradeSporedYes, "yes", "y", false, "Skip the confirmation prompt")
 	f.DurationVar(&upgradeSporedTimeout, "timeout", 5*time.Minute, "How long to wait for the on-instance upgrade to complete")
 }
