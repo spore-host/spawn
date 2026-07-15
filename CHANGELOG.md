@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.75.0] - 2026-07-15
+
 ### Added
 - New dependency-free leaf package **`pkg/launchererr`** holding the
   `ErrPostLaunch` sentinel (imports only the standard library, no AWS SDK).
@@ -1387,7 +1389,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.74.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.75.0...HEAD
+[0.75.0]: https://github.com/spore-host/spawn/compare/v0.74.0...v0.75.0
 [0.74.0]: https://github.com/spore-host/spawn/compare/v0.73.0...v0.74.0
 [0.73.0]: https://github.com/spore-host/spawn/compare/v0.72.0...v0.73.0
 [0.72.0]: https://github.com/spore-host/spawn/compare/v0.71.0...v0.72.0
