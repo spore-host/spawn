@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Internal: the four non-interactive `spored`-over-SSH call sites (`status`,
+  `config`, `extend`, `queue`) now share a single `sporedSSHOptions()` helper for
+  their common SSH `-o` block instead of repeating it (#303). No behavior change;
+  the interactive `connect` and launch/plugin SSH paths keep their own distinct
+  options.
 - Internal: finished the `pkg/aws` file split (#325) by moving the last two
   non-core helpers out of the oversized `client.go` — `GetEFSDNSName` → `efs.go`
   and `LookupEC2OnDemandPrice` (with its region→pricing-location map) → `pricing.go`.
