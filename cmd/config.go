@@ -75,15 +75,8 @@ func runConfig(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run command via SSH
-	sshArgs := []string{
-		"-i", keyPath,
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=10",
-		"-o", "LogLevel=ERROR",
-		fmt.Sprintf("ec2-user@%s", instance.PublicIP),
-		sporedCmd,
-	}
+	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
+	sshArgs = append(sshArgs, fmt.Sprintf("ec2-user@%s", instance.PublicIP), sporedCmd)
 
 	sshCmd := exec.Command("ssh", sshArgs...)
 	output, err := sshCmd.CombinedOutput()

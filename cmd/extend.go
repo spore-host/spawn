@@ -311,15 +311,8 @@ func triggerReload(instance *aws.InstanceInfo) error {
 	}
 
 	// Run spored reload via SSH
-	sshArgs := []string{
-		"-i", keyPath,
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=10",
-		"-o", "LogLevel=ERROR",
-		fmt.Sprintf("ec2-user@%s", instance.PublicIP),
-		"sudo /usr/local/bin/spored reload",
-	}
+	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
+	sshArgs = append(sshArgs, fmt.Sprintf("ec2-user@%s", instance.PublicIP), "sudo /usr/local/bin/spored reload")
 
 	cmd := exec.Command("ssh", sshArgs...)
 	if output, err := cmd.CombinedOutput(); err != nil {

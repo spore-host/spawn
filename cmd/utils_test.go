@@ -498,3 +498,47 @@ func TestSortResultsByMetric_MissingMetric(t *testing.T) {
 	// Should not panic when metric doesn't exist
 	sortResultsByMetric(results, "nonexistent")
 }
+
+func TestSporedSSHOptions(t *testing.T) {
+	opts := sporedSSHOptions()
+
+	// Options come in -o/value pairs.
+	if len(opts)%2 != 0 {
+		t.Fatalf("expected an even number of args (-o/value pairs), got %d: %v", len(opts), opts)
+	}
+
+	// The exact set the spored-exec sites rely on: throwaway host key, short
+	// connect timeout, quiet. Order matters only in that each "-o" precedes its
+	// value; assert membership as a set of "-o VALUE" flags.
+	want := map[string]bool{
+		"StrictHostKeyChecking=no":     false,
+		"UserKnownHostsFile=/dev/null": false,
+		"ConnectTimeout=10":            false,
+		"LogLevel=ERROR":               false,
+	}
+	for i := 0; i < len(opts); i += 2 {
+		if opts[i] != "-o" {
+			t.Errorf("arg %d = %q, want %q", i, opts[i], "-o")
+			continue
+		}
+		val := opts[i+1]
+		if _, ok := want[val]; !ok {
+			t.Errorf("unexpected ssh option %q", val)
+			continue
+		}
+		want[val] = true
+	}
+	for val, seen := range want {
+		if !seen {
+			t.Errorf("missing expected ssh option %q", val)
+		}
+	}
+
+	// A fresh slice each call — callers append to it, so it must not be shared.
+	a := sporedSSHOptions()
+	b := sporedSSHOptions()
+	a[1] = "MUTATED"
+	if b[1] == "MUTATED" {
+		t.Error("sporedSSHOptions returned a shared backing slice; each call must be independent")
+	}
+}

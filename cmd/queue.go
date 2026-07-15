@@ -399,12 +399,7 @@ func sshReadFile(host, remotePath string) (string, error) {
 	}
 	keyPath, _ := sshkey.Resolve(homeDir, fmt.Sprintf("spawn-key-%s", os.Getenv("USER")))
 
-	args := []string{
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=10",
-		"-o", "LogLevel=ERROR",
-	}
+	args := sporedSSHOptions()
 	if keyPath != "" {
 		args = append(args, "-i", keyPath)
 	}

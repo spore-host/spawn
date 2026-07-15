@@ -19,6 +19,22 @@ func newTableWriter(w io.Writer) *tabwriter.Writer {
 	return tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 }
 
+// sporedSSHOptions returns the ssh -o options shared by the non-interactive
+// spored-exec call sites (status/config/extend/queue): a short-lived,
+// throwaway-host-key connection used to run a one-shot `spored` command and
+// capture its output. These are deliberately NOT the options used by the
+// interactive `spawn connect` path or the launch/plugin paths, which layer on
+// ControlMaster / accept-new / BatchMode for their own reasons — do not route
+// those through this helper.
+func sporedSSHOptions() []string {
+	return []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "ConnectTimeout=10",
+		"-o", "LogLevel=ERROR",
+	}
+}
+
 // parseKVTags parses repeated "key=value" flag values into a tag map (#161).
 // The value may itself contain '=' (split on the first only). Keys must be
 // non-empty and must not use the reserved "spawn:" prefix (those are managed by
