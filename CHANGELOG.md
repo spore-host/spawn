@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Internal: finished the `pkg/aws` file split (#325) by moving the last two
+  non-core helpers out of the oversized `client.go` — `GetEFSDNSName` → `efs.go`
+  and `LookupEC2OnDemandPrice` (with its region→pricing-location map) → `pricing.go`.
+  No behavior or API change; `client.go` is now a cohesive client/launch/lifecycle
+  core.
+
 ## [0.75.0] - 2026-07-15
 
 ### Added
