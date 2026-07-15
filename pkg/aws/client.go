@@ -312,9 +312,7 @@ func newLaunchError(err error) error {
 // determine the on-demand rate and falls back to a static table if unavailable.
 func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error) {
 	// Update config for region
-	cfg := c.cfg.Copy()
-	cfg.Region = launchConfig.Region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(launchConfig.Region)
 
 	// Get caller identity for per-user isolation tagging
 	accountID, userARN, err := c.GetCallerIdentityInfo(ctx)
@@ -618,9 +616,7 @@ func (c *Client) IsWindowsAMI(ctx context.Context, region, amiID string) bool {
 	if amiID == "" {
 		return false
 	}
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 	out, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		ImageIds: []string{amiID},
 	})
@@ -640,9 +636,7 @@ func valueOrEmpty(s *string) string {
 
 // CheckKeyPairExists checks if a key pair exists in AWS EC2
 func (c *Client) CheckKeyPairExists(ctx context.Context, region, keyName string) (bool, error) {
-	cfg := c.cfg
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	input := &ec2.DescribeKeyPairsInput{
 		KeyNames: []string{keyName},
@@ -664,9 +658,7 @@ func (c *Client) CheckKeyPairExists(ctx context.Context, region, keyName string)
 // `spawn cleanup`/`resources` can find it (#258). ImportKeyPair supports
 // tag-on-create, so no separate CreateTags call is needed.
 func (c *Client) ImportKeyPair(ctx context.Context, region, keyName string, publicKey []byte) error {
-	cfg := c.cfg
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	input := &ec2.ImportKeyPairInput{
 		KeyName:           aws.String(keyName),
@@ -789,9 +781,7 @@ func (c *Client) describeInstance(ctx context.Context, ec2Client *ec2.Client, in
 
 // GetInstancePublicIP queries an instance and returns its public IP
 func (c *Client) GetInstancePublicIP(ctx context.Context, region, instanceID string) (string, error) {
-	cfg := c.cfg
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	instance, err := c.describeInstance(ctx, ec2Client, instanceID)
 	if err != nil {
@@ -802,9 +792,7 @@ func (c *Client) GetInstancePublicIP(ctx context.Context, region, instanceID str
 
 // GetInstanceState returns the current state of an instance (e.g., "pending", "running", "stopping", "stopped", "terminated")
 func (c *Client) GetInstanceState(ctx context.Context, region, instanceID string) (string, error) {
-	cfg := c.cfg
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	instance, err := c.describeInstance(ctx, ec2Client, instanceID)
 	if err != nil {
@@ -820,9 +808,7 @@ func (c *Client) GetInstanceState(ctx context.Context, region, instanceID string
 // timeout elapses, using the SDK's instance-running waiter (poll with backoff,
 // returns as soon as it's running). Replaces fixed-duration sleeps.
 func (c *Client) WaitForRunning(ctx context.Context, region, instanceID string, timeout time.Duration) error {
-	cfg := c.cfg
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// Absorb the post-RunInstances eventual-consistency window first (#78): the
 	// SDK's running-waiter does NOT retry an InvalidInstanceID.NotFound 400, so
@@ -844,9 +830,7 @@ func (c *Client) WaitForRunning(ctx context.Context, region, instanceID string, 
 
 // Terminate terminates an EC2 instance
 func (c *Client) Terminate(ctx context.Context, region, instanceID string) error {
-	cfg := c.cfg
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	input := &ec2.TerminateInstancesInput{
 		InstanceIds: []string{instanceID},
@@ -862,9 +846,7 @@ func (c *Client) Terminate(ctx context.Context, region, instanceID string) error
 
 // UpdateInstanceTags adds or updates tags on an EC2 instance
 func (c *Client) UpdateInstanceTags(ctx context.Context, region, instanceID string, tags map[string]string) error {
-	cfg := c.cfg
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// Convert map to EC2 tag format
 	ec2Tags := make([]types.Tag, 0, len(tags))
@@ -891,9 +873,7 @@ func (c *Client) UpdateInstanceTags(ctx context.Context, region, instanceID stri
 // FindKeyPairByFingerprint searches for a key pair matching the given fingerprint
 // Returns the key name if found, empty string if not found
 func (c *Client) FindKeyPairByFingerprint(ctx context.Context, region, fingerprint string) (string, error) {
-	cfg := c.cfg
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// List all key pairs
 	input := &ec2.DescribeKeyPairsInput{}
@@ -977,9 +957,7 @@ func (c *Client) ListInstances(ctx context.Context, region string, stateFilter s
 }
 
 func (c *Client) listInstancesInRegion(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// Build filters
 	filters := []types.Filter{
@@ -1107,9 +1085,7 @@ func (c *Client) listInstancesInRegion(ctx context.Context, region string, state
 
 func (c *Client) getAllRegions(ctx context.Context) ([]string, error) {
 	// Use us-east-1 as the base region for the DescribeRegions call
-	cfg := c.cfg.Copy()
-	cfg.Region = "us-east-1"
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2("us-east-1")
 
 	result, err := ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{
 		AllRegions: aws.Bool(false), // Only enabled regions
@@ -1130,9 +1106,7 @@ func (c *Client) getAllRegions(ctx context.Context) ([]string, error) {
 
 // StopInstance stops an EC2 instance
 func (c *Client) StopInstance(ctx context.Context, region, instanceID string, hibernate bool) error {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	input := &ec2.StopInstancesInput{
 		InstanceIds: []string{instanceID},
@@ -1149,9 +1123,7 @@ func (c *Client) StopInstance(ctx context.Context, region, instanceID string, hi
 
 // StartInstance starts a stopped EC2 instance
 func (c *Client) StartInstance(ctx context.Context, region, instanceID string) error {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	input := &ec2.StartInstancesInput{
 		InstanceIds: []string{instanceID},
@@ -1241,11 +1213,4 @@ func (c *Client) GetAccountName(ctx context.Context) string {
 // GetConfig returns the AWS config
 func (c *Client) GetConfig(ctx context.Context) (aws.Config, error) {
 	return c.cfg, nil
-}
-
-// getRegionalConfig returns an AWS config for a specific region
-func (c *Client) getRegionalConfig(ctx context.Context, region string) (aws.Config, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	return cfg, nil
 }

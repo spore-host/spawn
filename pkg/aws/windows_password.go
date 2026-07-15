@@ -25,9 +25,7 @@ import (
 // Not yet wired into `connect` — that lands with the Windows connect flow
 // (spore-host/spawn#55 Phase 1 / #77).
 func (c *Client) GetPasswordData(ctx context.Context, region, instanceID string) (string, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	out, err := ec2Client.GetPasswordData(ctx, &ec2.GetPasswordDataInput{
 		InstanceId: aws.String(instanceID),

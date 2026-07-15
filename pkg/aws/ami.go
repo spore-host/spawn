@@ -52,9 +52,7 @@ func (c *Client) GetAL2023AMI(ctx context.Context, region string, arch string, g
 	}
 
 	// Query SSM Parameter Store (region-specific)
-	cfg := c.cfg
-	cfg.Region = region
-	ssmClient := ssm.NewFromConfig(cfg)
+	ssmClient := ssm.NewFromConfig(c.regionalConfig(region))
 
 	output, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
 		Name: aws.String(parameterName),

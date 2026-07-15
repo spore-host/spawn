@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their common SSH `-o` block instead of repeating it (#303). No behavior change;
   the interactive `connect` and launch/plugin SSH paths keep their own distinct
   options.
+- Internal: collapsed the ~40 repeated per-region client-construction sites in
+  `pkg/aws` behind two helpers — `c.regionalEC2(region)` and
+  `c.regionalConfig(region)` — replacing the copy-pasted
+  `cfg := c.cfg.Copy(); cfg.Region = region; ec2.NewFromConfig(cfg)` idiom, and
+  retired the old `getRegionalConfig` (whose returned error was always nil, so its
+  callers carried dead error branches) (#297). No behavior change.
 - Internal: finished the `pkg/aws` file split (#325) by moving the last two
   non-core helpers out of the oversized `client.go` — `GetEFSDNSName` → `efs.go`
   and `LookupEC2OnDemandPrice` (with its region→pricing-location map) → `pricing.go`.

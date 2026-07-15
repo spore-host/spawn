@@ -34,9 +34,7 @@ func (c *Client) CreateS3BucketIfNotExists(ctx context.Context, bucketName, regi
 func (c *Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConfig) error {
 	bucketName := config.BucketName
 	region := config.Region
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	s3Client := s3.NewFromConfig(cfg)
+	s3Client := s3.NewFromConfig(c.regionalConfig(region))
 
 	// Check if bucket exists
 	_, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{
@@ -160,9 +158,7 @@ func isCrossRegionRedirect(err error) bool {
 
 // GetFSxConfigFromS3Bucket retrieves FSx configuration from S3 bucket tags
 func (c *Client) GetFSxConfigFromS3Bucket(ctx context.Context, stackName, region string) (*FSxConfig, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	s3Client := s3.NewFromConfig(cfg)
+	s3Client := s3.NewFromConfig(c.regionalConfig(region))
 
 	// List buckets and check tags
 	listResult, err := s3Client.ListBuckets(ctx, &s3.ListBucketsInput{})

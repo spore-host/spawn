@@ -34,9 +34,7 @@ type SSMRunResult struct {
 // command path in Phase 1. The instance must have the SSM agent online (the
 // stock Windows AMIs do) and an instance profile with SSM core permissions.
 func (c *Client) RunPowerShell(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ssmClient := ssm.NewFromConfig(cfg)
+	ssmClient := ssm.NewFromConfig(c.regionalConfig(region))
 
 	send, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
 		InstanceIds:  []string{instanceID},
@@ -88,9 +86,7 @@ func (c *Client) RunPowerShell(ctx context.Context, region, instanceID, command 
 // must have the SSM agent online and an instance profile with SSM core
 // permissions (the spored role attaches AmazonSSMManagedInstanceCore).
 func (c *Client) RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ssmClient := ssm.NewFromConfig(cfg)
+	ssmClient := ssm.NewFromConfig(c.regionalConfig(region))
 
 	send, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
 		InstanceIds:  []string{instanceID},
@@ -143,9 +139,7 @@ func (c *Client) RunShellScript(ctx context.Context, region, instanceID, command
 // DescribeInstances, so callers should treat a single "false" as provisional
 // early on, not proof of death.
 func (c *Client) instanceHasInstanceProfile(ctx context.Context, region, instanceID string) (bool, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 	out, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instanceID},
 	})
@@ -183,9 +177,7 @@ func (c *Client) WaitForSSMOnline(ctx context.Context, region, instanceID string
 // WaitForSSMOnlineProgress is WaitForSSMOnline with a per-poll progress callback
 // (elapsed since the wait began). onProgress may be nil.
 func (c *Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceID string, timeout time.Duration, onProgress func(elapsed time.Duration)) error {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ssmClient := ssm.NewFromConfig(cfg)
+	ssmClient := ssm.NewFromConfig(c.regionalConfig(region))
 
 	isOnline := func() bool {
 		out, err := ssmClient.DescribeInstanceInformation(ctx, &ssm.DescribeInstanceInformationInput{

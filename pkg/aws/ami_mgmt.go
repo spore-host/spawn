@@ -43,11 +43,7 @@ type CreateAMIInput struct {
 // CreateAMI creates an AMI from a running instance
 func (c *Client) CreateAMI(ctx context.Context, region string, input CreateAMIInput) (string, error) {
 	// Create regional client
-	cfg, err := c.getRegionalConfig(ctx, region)
-	if err != nil {
-		return "", fmt.Errorf("failed to get regional config: %w", err)
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// Build tag specifications
 	tagSpecs := []types.TagSpecification{}
@@ -91,17 +87,13 @@ func (c *Client) CreateAMI(ctx context.Context, region string, input CreateAMIIn
 // WaitForAMI waits for an AMI to become available
 func (c *Client) WaitForAMI(ctx context.Context, region string, amiID string, timeout time.Duration) error {
 	// Create regional client
-	cfg, err := c.getRegionalConfig(ctx, region)
-	if err != nil {
-		return fmt.Errorf("failed to get regional config: %w", err)
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// Create waiter
 	waiter := ec2.NewImageAvailableWaiter(ec2Client)
 
 	// Wait for AMI to be available
-	err = waiter.Wait(ctx, &ec2.DescribeImagesInput{
+	err := waiter.Wait(ctx, &ec2.DescribeImagesInput{
 		ImageIds: []string{amiID},
 	}, timeout)
 	if err != nil {
@@ -115,11 +107,7 @@ func (c *Client) WaitForAMI(ctx context.Context, region string, amiID string, ti
 // Filters are applied in-memory after retrieving all AMIs owned by the account
 func (c *Client) ListAMIs(ctx context.Context, region string, filters map[string]string) ([]AMIInfo, error) {
 	// Create regional client
-	cfg, err := c.getRegionalConfig(ctx, region)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get regional config: %w", err)
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// Get current account ID
 	accountID, err := c.GetAccountID(ctx)
@@ -238,10 +226,7 @@ type DeleteAMIResult struct {
 // returned error is non-nil only if some cleanup was incomplete, but the result
 // always details exactly what happened.
 func (c *Client) DeleteAMI(ctx context.Context, region, amiID string) (*DeleteAMIResult, error) {
-	cfg, err := c.getRegionalConfig(ctx, region)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get regional config: %w", err)
-	}
+	cfg := c.regionalConfig(region)
 	ec2Client := ec2.NewFromConfig(cfg)
 
 	// Describe first to capture backing snapshots + any Image Builder tag.
@@ -366,11 +351,7 @@ type SnapshotDetail struct {
 // which OTHER AMIs share each snapshot (so callers know what can be safely
 // deleted). Backs `spawn ami snapshots <ami-id>`.
 func (c *Client) GetAMISnapshots(ctx context.Context, region, amiID string) ([]SnapshotDetail, error) {
-	cfg, err := c.getRegionalConfig(ctx, region)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get regional config: %w", err)
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	desc, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		ImageIds: []string{amiID},
