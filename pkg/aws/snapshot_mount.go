@@ -34,9 +34,7 @@ func (c *Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*
 	instanceID := idDoc.InstanceID
 	az := idDoc.AvailabilityZone
 
-	cfg := c.cfg.Copy()
-	cfg.Region = idDoc.Region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(idDoc.Region)
 
 	// Create the volume from the snapshot, in this instance's AZ.
 	cv, err := ec2Client.CreateVolume(ctx, &ec2.CreateVolumeInput{

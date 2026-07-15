@@ -128,10 +128,7 @@ func (c *Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotIn
 		return nil, fmt.Errorf("volume size must be > 0 GiB")
 	}
 
-	cfg, err := c.getRegionalConfig(ctx, in.Region)
-	if err != nil {
-		return nil, fmt.Errorf("regional config: %w", err)
-	}
+	cfg := c.regionalConfig(in.Region)
 	ebsClient := ebs.NewFromConfig(cfg)
 
 	start := &ebs.StartSnapshotInput{
@@ -291,11 +288,7 @@ func (c *Client) OpenImageSource(ctx context.Context, source, region string) (io
 		if err != nil {
 			return nil, err
 		}
-		cfg, err := c.getRegionalConfig(ctx, region)
-		if err != nil {
-			return nil, fmt.Errorf("regional config: %w", err)
-		}
-		s3Client := s3.NewFromConfig(cfg)
+		s3Client := s3.NewFromConfig(c.regionalConfig(region))
 		out, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),

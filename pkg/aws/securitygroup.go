@@ -16,9 +16,7 @@ import (
 // CreateOrGetMPISecurityGroup creates or gets a security group configured for MPI clusters
 // The security group allows all TCP traffic from instances in the same security group
 func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// Try to find existing security group
 	describeResult, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
@@ -128,9 +126,7 @@ func (c *Client) CreateOrGetWindowsSecurityGroup(ctx context.Context, region, vp
 	if allowCIDR == "" {
 		allowCIDR = "0.0.0.0/0"
 	}
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// Reuse an existing group of this name in the VPC (idempotent).
 	describeResult, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
@@ -194,9 +190,7 @@ func (c *Client) CreateOrGetWindowsSecurityGroup(ctx context.Context, region, vp
 // Lustre requires port 988 (MGS/MDS/OSS) and 1018–1023 (dynamic OST traffic)
 // to be open between all nodes that share a filesystem (fixes #316).
 func (c *Client) EnsureLustrePorts(ctx context.Context, region, sgID string) error {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	selfRef := []types.UserIdGroupPair{{GroupId: aws.String(sgID), Description: aws.String("Lustre inter-node (self)")}}
 
@@ -222,9 +216,7 @@ func (c *Client) EnsureLustrePorts(ctx context.Context, region, sgID string) err
 
 // GetDefaultVPC returns the default VPC ID for the region
 func (c *Client) GetDefaultVPC(ctx context.Context, region string) (string, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	result, err := ec2Client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{
 		Filters: []types.Filter{
@@ -264,9 +256,7 @@ func sgHasUDP8443(sg types.SecurityGroup) bool {
 // that allows inbound TCP+UDP 8443 (NICE DCV, incl. QUIC) from anywhere. Returns
 // the security group ID.
 func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID string) (string, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	const sgName = "spawn-dcv"
 

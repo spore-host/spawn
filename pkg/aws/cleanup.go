@@ -60,10 +60,7 @@ type DiscoverOptions struct {
 // the caller's spawn:iam-user — the identity already stamped on every resource
 // (#259), so cleanup acts only on what the caller owns.
 func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOptions) ([]ManagedResource, error) {
-	cfg := c.cfg.Copy()
-	if opts.Region != "" {
-		cfg.Region = opts.Region
-	}
+	cfg := c.regionalConfig(opts.Region)
 	region := cfg.Region
 
 	var callerARN string
@@ -220,11 +217,7 @@ type ElasticIP struct {
 // sees the (billable) static address they're holding — informational when the
 // instance runs, a leak warning when it's stopped. spawn never releases it.
 func (c *Client) GetInstanceElasticIP(ctx context.Context, region, instanceID string) (*ElasticIP, error) {
-	cfg := c.cfg.Copy()
-	if region != "" {
-		cfg.Region = region
-	}
-	ec2c := ec2.NewFromConfig(cfg)
+	ec2c := c.regionalEC2(region)
 	out, err := ec2c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{
 		Filters: []ec2types.Filter{{Name: aws.String("instance-id"), Values: []string{instanceID}}},
 	})
@@ -449,10 +442,7 @@ func DeletionOrder(resources []ManagedResource) []ManagedResource {
 // remove a running/pending EC2 instance — cleanup never terminates live compute
 // (#259); callers must stop/terminate those explicitly.
 func (c *Client) RemoveResource(ctx context.Context, r ManagedResource) error {
-	cfg := c.cfg.Copy()
-	if r.Region != "" {
-		cfg.Region = r.Region
-	}
+	cfg := c.regionalConfig(r.Region)
 
 	switch {
 	case r.ResourceType == "instance":

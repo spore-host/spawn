@@ -116,10 +116,7 @@ func (c *Client) EnsureImageBuilderSLR(ctx context.Context) (string, error) {
 // existing resources are reused, not recreated. This is what lets
 // `spawn image import` run without a separate CloudFormation deploy step.
 func (c *Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImportInfrastructureInput) (string, error) {
-	cfg := c.cfg.Copy()
-	if in.Region != "" {
-		cfg.Region = in.Region
-	}
+	cfg := c.regionalConfig(in.Region)
 	iamClient := iam.NewFromConfig(cfg)
 	ibClient := imagebuilder.NewFromConfig(cfg)
 
@@ -269,9 +266,7 @@ func (c *Client) UploadISOToS3(ctx context.Context, region, bucket, key, localPa
 		localSize = fi.Size()
 	}
 
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	s3Client := s3.NewFromConfig(cfg)
+	s3Client := s3.NewFromConfig(c.regionalConfig(region))
 
 	// Idempotency: if an object with the same key and byte size already exists,
 	// skip the (multi-GB, multi-minute) upload. A size match on a content-keyed
@@ -305,9 +300,7 @@ func (c *Client) UploadISOToS3(ctx context.Context, region, bucket, key, localPa
 // bucket are returned, but a still-non-empty bucket is left intact (not an
 // error: the user may have put other objects there).
 func (c *Client) DeleteISOFromS3(ctx context.Context, region, bucket, key string, alsoBucketIfEmpty bool) error {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	s3Client := s3.NewFromConfig(cfg)
+	s3Client := s3.NewFromConfig(c.regionalConfig(region))
 
 	if _, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
@@ -344,11 +337,7 @@ func (c *Client) DeleteISOFromS3(ctx context.Context, region, bucket, key string
 // components (ENA/NVMe/PCISerial/EC2WinUtil drivers, EC2Launch v2, SSM agent,
 // Defender) pre-staged by the workflow — no Packer/qemu/provisioning needed.
 func (c *Client) ImportWindowsISO(ctx context.Context, in ImportWindowsISOInput) (string, error) {
-	cfg := c.cfg.Copy()
-	if in.Region != "" {
-		cfg.Region = in.Region
-	}
-	ibClient := imagebuilder.NewFromConfig(cfg)
+	ibClient := imagebuilder.NewFromConfig(c.regionalConfig(in.Region))
 
 	execRole := in.ExecutionRole
 	if execRole == "" {
@@ -391,11 +380,7 @@ var ErrWaitTimeout = errors.New("timed out waiting for image build")
 // reason), or the timeout elapses (returning ErrWaitTimeout, build still
 // running). progressCb, if non-nil, is called with each observed status string.
 func (c *Client) WaitForImage(ctx context.Context, region, imageBuildVersionArn string, timeout time.Duration, progressCb func(status string)) (string, error) {
-	cfg := c.cfg.Copy()
-	if region != "" {
-		cfg.Region = region
-	}
-	ibClient := imagebuilder.NewFromConfig(cfg)
+	ibClient := imagebuilder.NewFromConfig(c.regionalConfig(region))
 
 	deadline := time.Now().Add(timeout)
 	var last string
@@ -442,11 +427,7 @@ type ImageStatus struct {
 // GetImageStatus returns the current state of an image build version (one call,
 // no polling) — backs `spawn image status`.
 func (c *Client) GetImageStatus(ctx context.Context, region, imageBuildVersionArn string) (*ImageStatus, error) {
-	cfg := c.cfg.Copy()
-	if region != "" {
-		cfg.Region = region
-	}
-	ibClient := imagebuilder.NewFromConfig(cfg)
+	ibClient := imagebuilder.NewFromConfig(c.regionalConfig(region))
 	out, err := ibClient.GetImage(ctx, &imagebuilder.GetImageInput{
 		ImageBuildVersionArn: aws.String(imageBuildVersionArn),
 	})
@@ -470,11 +451,7 @@ func (c *Client) GetImageStatus(ctx context.Context, region, imageBuildVersionAr
 // works), but the tags make detection explicit and let the AMI show up in
 // listings filterable by source/arch. x64 because import-disk-image is x64-only.
 func (c *Client) TagAMIWindows(ctx context.Context, region, amiID string) error {
-	cfg := c.cfg.Copy()
-	if region != "" {
-		cfg.Region = region
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 	_, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 		Resources: []string{amiID},
 		Tags: []ec2types.Tag{
@@ -495,11 +472,7 @@ func (c *Client) TagAMIWindows(ctx context.Context, region, amiID string) error 
 // tags as TagAMIWindows, but spawn:source=iso-import-warm and a
 // spawn:warm-parent pointer to the base AMI for lineage.
 func (c *Client) TagAMIWindowsWarm(ctx context.Context, region, amiID, parentAMI string) error {
-	cfg := c.cfg.Copy()
-	if region != "" {
-		cfg.Region = region
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 	_, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 		Resources: []string{amiID},
 		Tags: []ec2types.Tag{

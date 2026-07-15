@@ -32,9 +32,7 @@ type CapacityBlockOffering struct {
 // the offering whose CapacityBlockOfferingId matches offeringID, or an error if
 // no such offering is currently available (terms/price may have changed).
 func (c *Client) FindCapacityBlockOffering(ctx context.Context, region, offeringID, instanceType string, instanceCount, durationHours int32) (*CapacityBlockOffering, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	if instanceCount <= 0 {
 		instanceCount = 1
@@ -85,9 +83,7 @@ func (c *Client) FindCapacityBlockOffering(ctx context.Context, region, offering
 // itself. When dryRun is true it relies on the API's DryRun (no charge, returns
 // a DryRunOperation error on success).
 func (c *Client) PurchaseCapacityBlock(ctx context.Context, region, offeringID, platform string, dryRun bool, tags map[string]string) (string, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	plat := types.CapacityReservationInstancePlatform(platform)
 	if platform == "" {
@@ -142,9 +138,7 @@ type CapacityReservation struct {
 // launchable state before firing (lagotto#62). Returns an error if the id isn't
 // found in the region.
 func (c *Client) DescribeCapacityReservation(ctx context.Context, region, reservationID string) (*CapacityReservation, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	out, err := ec2Client.DescribeCapacityReservations(ctx, &ec2.DescribeCapacityReservationsInput{
 		CapacityReservationIds: []string{reservationID},

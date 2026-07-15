@@ -18,11 +18,7 @@ import (
 // region must match the launch region; passing an empty string falls back to
 // the client's default region.
 func (c *Client) CreatePlacementGroup(ctx context.Context, name, region string) error {
-	cfg := c.cfg.Copy()
-	if region != "" {
-		cfg.Region = region
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	_, err := ec2Client.CreatePlacementGroup(ctx, &ec2.CreatePlacementGroupInput{
 		GroupName: aws.String(name),
@@ -104,11 +100,7 @@ func (c *Client) ValidateInstanceTypeForPlacementGroup(ctx context.Context, inst
 // (e.g. hpc6a.48xlarge) only exist in certain regions and DescribeInstanceTypes
 // returns InvalidInstanceType when queried from a different region.
 func (c *Client) ValidateInstanceTypeForEFAInRegion(ctx context.Context, instanceType, region string) error {
-	cfg := c.cfg.Copy()
-	if region != "" {
-		cfg.Region = region
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	output, err := ec2Client.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{
 		InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)},
@@ -133,11 +125,7 @@ func (c *Client) ValidateInstanceTypeForEFAInRegion(ctx context.Context, instanc
 // queried in the launch region. Reads ProcessorInfo.SupportedFeatures rather
 // than hardcoding the supported families, so new families work automatically.
 func (c *Client) ValidateInstanceTypeForNestedVirtualization(ctx context.Context, instanceType, region string) error {
-	cfg := c.cfg.Copy()
-	if region != "" {
-		cfg.Region = region
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	output, err := ec2Client.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{
 		InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)},

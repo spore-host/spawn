@@ -9,12 +9,7 @@ import (
 
 // GetInstanceAMI returns the AMI ID used to launch an instance
 func (c *Client) GetInstanceAMI(ctx context.Context, region string, instanceID string) (string, error) {
-	cfg, err := c.getRegionalConfig(ctx, region)
-	if err != nil {
-		return "", fmt.Errorf("failed to get regional config: %w", err)
-	}
-
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	result, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instanceID},

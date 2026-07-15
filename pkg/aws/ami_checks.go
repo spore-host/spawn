@@ -66,12 +66,7 @@ func (c *Client) CheckAMIHealth(ctx context.Context, ami AMIInfo, region string)
 // Returns: age, outdated, currentAMI, error
 func (c *Client) checkBaseAMI(ctx context.Context, region string, baseAMIID string, arch string, gpu bool) (time.Duration, bool, string, error) {
 	// Get the base AMI creation date
-	cfg, err := c.getRegionalConfig(ctx, region)
-	if err != nil {
-		return 0, false, "", fmt.Errorf("failed to get regional config: %w", err)
-	}
-
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	// Get base AMI details
 	baseResult, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{

@@ -95,9 +95,7 @@ func (c *Client) startFSxCreate(ctx context.Context, config FSxConfig) (filesyst
 		subnetID = subnets[0]
 	}
 
-	cfg := c.cfg.Copy()
-	cfg.Region = config.Region
-	fsxClient = fsx.NewFromConfig(cfg)
+	fsxClient = fsx.NewFromConfig(c.regionalConfig(config.Region))
 
 	input := buildFSxCreateInput(config, subnetID, importPath, exportPath)
 	result, cerr := fsxClient.CreateFileSystem(ctx, input)
@@ -262,9 +260,7 @@ func (c *Client) associateFSxS3(ctx context.Context, fsxClient *fsx.Client, file
 
 // GetFSxFilesystem retrieves info for existing FSx filesystem
 func (c *Client) GetFSxFilesystem(ctx context.Context, filesystemID, region string) (*FSxInfo, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	fsxClient := fsx.NewFromConfig(cfg)
+	fsxClient := fsx.NewFromConfig(c.regionalConfig(region))
 
 	result, err := fsxClient.DescribeFileSystems(ctx, &fsx.DescribeFileSystemsInput{
 		FileSystemIds: []string{filesystemID},
@@ -310,9 +306,7 @@ func (c *Client) GetFSxFilesystem(ctx context.Context, filesystemID, region stri
 // changes to S3 on delete rather than silently dropping un-exported data (#184).
 // Already-deleting / not-found is treated as success (idempotent).
 func (c *Client) DeleteFSxFilesystem(ctx context.Context, filesystemID, region string) error {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	fsxClient := fsx.NewFromConfig(cfg)
+	fsxClient := fsx.NewFromConfig(c.regionalConfig(region))
 
 	_, err := fsxClient.DeleteFileSystem(ctx, &fsx.DeleteFileSystemInput{
 		FileSystemId: aws.String(filesystemID),
@@ -328,9 +322,7 @@ func (c *Client) DeleteFSxFilesystem(ctx context.Context, filesystemID, region s
 
 // RecallFSxFilesystem finds and recreates FSx filesystem by stack name
 func (c *Client) RecallFSxFilesystem(ctx context.Context, stackName, region string) (*FSxInfo, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	fsxClient := fsx.NewFromConfig(cfg)
+	fsxClient := fsx.NewFromConfig(c.regionalConfig(region))
 
 	// 1. Search for filesystems with this stack name tag
 	result, err := fsxClient.DescribeFileSystems(ctx, &fsx.DescribeFileSystemsInput{})
@@ -399,9 +391,7 @@ func (c *Client) RecallFSxFilesystem(ctx context.Context, stackName, region stri
 
 // GetSubnets returns subnet IDs for a VPC
 func (c *Client) GetSubnets(ctx context.Context, region, vpcID string) ([]string, error) {
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	result, err := ec2Client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
 		Filters: []ec2types.Filter{
@@ -444,9 +434,7 @@ func (c *Client) GetSubnetForAZ(ctx context.Context, region, az string) (string,
 	if err != nil {
 		return "", fmt.Errorf("failed to get default VPC: %w", err)
 	}
-	cfg := c.cfg.Copy()
-	cfg.Region = region
-	ec2Client := ec2.NewFromConfig(cfg)
+	ec2Client := c.regionalEC2(region)
 
 	result, err := ec2Client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
 		Filters: []ec2types.Filter{
