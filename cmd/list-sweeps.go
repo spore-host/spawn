@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/sweep"
 )
@@ -84,12 +84,10 @@ func runListSweeps(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get current user identity
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	_, userID, err := aws.NewClientFromConfig(cfg).GetCallerIdentityInfo(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get user identity: %w", err)
 	}
-	userID := *identity.Arn
 
 	// Query DynamoDB for user's sweeps (no GSI on user_id yet, so scan + filter).
 	records, err := sweep.NewStore(dynamodb.NewFromConfig(cfg)).List(ctx)

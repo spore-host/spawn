@@ -11,8 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/team"
 )
 
@@ -103,15 +103,11 @@ func teamStore(ctx context.Context) (*team.Client, string, error) {
 
 // getCallerARN returns the caller's IAM ARN via STS GetCallerIdentity.
 func getCallerARN(ctx context.Context, cfg aws.Config) (string, error) {
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	_, arn, err := spawnaws.NewClientFromConfig(cfg).GetCallerIdentityInfo(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get caller identity: %w", err)
 	}
-	if identity.Arn == nil {
-		return "", fmt.Errorf("caller identity ARN is nil")
-	}
-	return *identity.Arn, nil
+	return arn, nil
 }
 
 func genTeamID() string {

@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/audit"
+	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/sweep"
 )
@@ -57,12 +57,10 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get user identity for audit logging
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	userID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
-	userID := *identity.Account
 	correlationID := uuid.New().String()
 
 	// Initialize audit logger

@@ -17,8 +17,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/bot"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/tagprefix"
@@ -153,18 +153,16 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get caller identity for registered_by
-	stsClient := sts.NewFromConfig(cfg)
-	identity, err := stsClient.GetCallerIdentity(ctx, nil)
+	accountID, registeredBy, err := spawnaws.NewClientFromConfig(cfg).GetCallerIdentityInfo(ctx)
 	if err != nil {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
-	registeredBy := *identity.Arn
 
 	// Auto-create cross-account role if --role-arn not provided
 	roleARN := botRoleARN
 	if roleARN == "" {
 		fmt.Printf("No --role-arn provided — ensuring %s role exists in account %s...\n",
-			botCrossAccountRoleName, *identity.Account)
+			botCrossAccountRoleName, accountID)
 		roleARN, err = ensureCrossAccountRole(ctx, cfg)
 		if err != nil {
 			return fmt.Errorf("create cross-account role: %w", err)
@@ -179,7 +177,7 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 		UserKey:        userKey,
 		Nickname:       botNickname,
 		InstanceID:     botInstance,
-		AWSAccountID:   *identity.Account,
+		AWSAccountID:   accountID,
 		RoleARN:        roleARN,
 		TagPrefix:      tagpfx,
 		AllowedActions: botAllow,
@@ -436,8 +434,7 @@ Run this once after installing the Slack app in a workspace:
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
-		stsClient := sts.NewFromConfig(cfg)
-		identity, err := stsClient.GetCallerIdentity(ctx, nil)
+		_, callerARN, err := spawnaws.NewClientFromConfig(cfg).GetCallerIdentityInfo(ctx)
 		if err != nil {
 			return fmt.Errorf("get caller identity: %w", err)
 		}
@@ -449,7 +446,7 @@ Run this once after installing the Slack app in a workspace:
 			IncomingWebhookURL:  botWebhookURL,
 			Platform:            botPlatform,
 			WorkspaceName:       botWorkspaceName,
-			InstalledBy:         *identity.Arn,
+			InstalledBy:         callerARN,
 			InstalledAt:         time.Now().UTC().Format(time.RFC3339),
 			AllowedChannels:     botAllowedChannels,
 			ConnectCodeTTLHours: botConnectTTLHours,

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Internal: the 17 inline `sts.NewFromConfig(...).GetCallerIdentity(...)` call
+  sites in `cmd/` now go through the existing `pkg/aws` helpers
+  (`GetAccountID` / `GetCallerIdentityInfo`), which also add an IMDS fallback when
+  STS is unavailable (#302). Each site keeps its original AWS config (caller/infra
+  vs compute account), so behavior is unchanged; the `cmd/` aws-sdk-import
+  allowlist (#327) was tightened to drop `sts` accordingly.
 - Internal: the four non-interactive `spored`-over-SSH call sites (`status`,
   `config`, `extend`, `queue`) now share a single `sporedSSHOptions()` helper for
   their common SSH `-o` block instead of repeating it (#303). No behavior change;
