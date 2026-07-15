@@ -11,8 +11,8 @@ import (
 // query the Resource Groups Tagging API that Substrate emulates (GetResources
 // with TagFilters). These exercise the discovery path end-to-end against the
 // emulator: launch a spawn:managed instance, then confirm resources/orphans/
-// cleanup see (or correctly classify) it. `cleanup` is run only in its default
-// dry-run mode here — destructive --force deletion needs real resources and is
+// cleanup see (or correctly classify) it. `cleanup` is run only in its --dry-run
+// mode here — destructive --force deletion needs real resources and is
 // deferred to a higher tier.
 
 // TestTier0_Resources_ListsLaunchedInstance verifies `spawn resources` finds a
@@ -46,8 +46,8 @@ func TestTier0_Resources_EmptyAccount(t *testing.T) {
 	}
 }
 
-// TestTier0_Cleanup_DryRunPreviewsAndDeletesNothing confirms cleanup defaults to
-// a dry run: it previews but, without --force, removes nothing and exits 0.
+// TestTier0_Cleanup_DryRunPreviewsAndDeletesNothing confirms `cleanup --dry-run`
+// previews but removes nothing and exits 0 (execute is the default since #315).
 // A running instance must never be removed regardless.
 func TestTier0_Cleanup_DryRunPreviewsAndDeletesNothing(t *testing.T) {
 	env := startSpawnSubstrate(t)
@@ -55,10 +55,10 @@ func TestTier0_Cleanup_DryRunPreviewsAndDeletesNothing(t *testing.T) {
 	launched := env.launchOK("cleanup-test", "--instance-type", "t3.small")
 	id, _ := launched[0]["instance_id"].(string)
 
-	// Default (no --force): dry run.
-	out := env.runOK("cleanup", "--region", "us-east-1", "--all")
+	// --dry-run: preview only.
+	out := env.runOK("cleanup", "--region", "us-east-1", "--all", "--dry-run")
 	if !strings.Contains(strings.ToLower(out), "dry run") {
-		t.Errorf("cleanup without --force should be a dry run, got:\n%s", out)
+		t.Errorf("cleanup --dry-run should be a dry run, got:\n%s", out)
 	}
 
 	// The instance is still running, so it must still exist afterward.

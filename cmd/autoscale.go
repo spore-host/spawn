@@ -128,10 +128,14 @@ var autoscaleTerminateCmd = &cobra.Command{
 }
 
 var autoscaleSetPolicyCmd = &cobra.Command{
-	Use:   "set-policy <group-name>",
-	Short: "Set or update scaling policy for an autoscale group",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAutoscaleSetPolicy,
+	Use: "set-scaling-policy <group-name>",
+	// Renamed from `set-policy` to pair symmetrically with `set-metric-policy`
+	// (and the `scaling-activity`/`metric-activity` pair); `set-policy` kept as a
+	// deprecated alias (#307).
+	Aliases: []string{"set-policy"},
+	Short:   "Set or update scaling policy for an autoscale group",
+	Args:    cobra.ExactArgs(1),
+	RunE:    runAutoscaleSetPolicy,
 }
 
 var autoscaleScalingActivityCmd = &cobra.Command{

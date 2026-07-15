@@ -109,6 +109,10 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 		Tags: make(map[string]string),
 	}
 
+	if err := validateOnIdle(onIdle); err != nil {
+		return nil, err
+	}
+
 	// From truffle input
 	if truffleInput != nil {
 		config.InstanceType = truffleInput.InstanceType
@@ -216,7 +220,9 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if idleTimeout != "" {
 		config.IdleTimeout = idleTimeout
 	}
-	if hibernateOnIdle {
+	// Idle action: canonical --on-idle enum, with the deprecated boolean
+	// --hibernate-on-idle folded in (#316). --on-idle wins if both are given.
+	if onIdle == "hibernate" || hibernateOnIdle {
 		config.HibernateOnIdle = true
 	}
 	if preStop != "" {

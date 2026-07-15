@@ -97,13 +97,14 @@ Examples:
 }
 
 var scheduleDescribeCmd = &cobra.Command{
-	Use:   "describe <schedule-id>",
-	Short: "Show details about a schedule",
+	Use:     "show <schedule-id>",
+	Aliases: []string{"describe"},
+	Short:   "Show details about a schedule",
 	Long: `Show detailed information about a scheduled execution including
 configuration, execution history, and next run time.
 
 Examples:
-  spawn schedule describe sched-20260122-140530
+  spawn schedule show sched-20260122-140530
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runScheduleDescribe,

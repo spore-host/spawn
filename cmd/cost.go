@@ -13,21 +13,7 @@ import (
 )
 
 var costCmd = &cobra.Command{
-	Use:   "cost",
-	Short: "Cost tracking and breakdown",
-	Long: `View cost breakdowns and budget status for parameter sweeps.
-
-Examples:
-  # View cost breakdown by region and instance type
-  spawn cost breakdown <sweep-id>
-
-  # View budget status
-  spawn cost breakdown <sweep-id>
-`,
-}
-
-var costBreakdownCmd = &cobra.Command{
-	Use:   "breakdown <sweep-id>",
+	Use:   "cost <sweep-id>",
 	Short: "Show cost breakdown for a sweep",
 	Long: `Display detailed cost breakdown by region and instance type.
 
@@ -39,10 +25,21 @@ Shows:
 - Cost by region and instance type
 
 Examples:
-  spawn cost breakdown sweep-20260124-140530
+  spawn cost sweep-20260124-140530
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runCostBreakdown,
+}
+
+// costBreakdownCmd preserves the previous `spawn cost breakdown <sweep-id>` form
+// as a hidden alias; the breakdown is now reachable directly as `spawn cost
+// <sweep-id>` (#308).
+var costBreakdownCmd = &cobra.Command{
+	Use:    "breakdown <sweep-id>",
+	Short:  "Show cost breakdown for a sweep (deprecated: use `spawn cost <sweep-id>`)",
+	Hidden: true,
+	Args:   cobra.ExactArgs(1),
+	RunE:   runCostBreakdown,
 }
 
 func init() {

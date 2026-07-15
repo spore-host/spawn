@@ -58,37 +58,51 @@ func TestValidateImageImportFlags(t *testing.T) {
 	}
 }
 
-// TestWaitFlagParsing verifies the --wait flag is async by default (0), defaults
-// to 60 when given bare (NoOptDefVal), and accepts an explicit minute count.
+// TestWaitFlagParsing verifies `image import --wait` is now a boolean (matching
+// launch/ami/pipeline, #317) and that the minute count moved to --wait-timeout
+// (default 60).
 func TestWaitFlagParsing(t *testing.T) {
 	wf := imageImportCmd.Flags().Lookup("wait")
 	if wf == nil {
 		t.Fatal("--wait flag not registered")
 	}
-	if wf.DefValue != "0" {
-		t.Errorf("--wait default = %q, want 0 (async)", wf.DefValue)
+	if wf.Value.Type() != "bool" {
+		t.Errorf("--wait type = %q, want bool", wf.Value.Type())
 	}
-	if wf.NoOptDefVal != "60" {
-		t.Errorf("bare --wait should default to 60, got %q", wf.NoOptDefVal)
+	if wf.DefValue != "false" {
+		t.Errorf("--wait default = %q, want false", wf.DefValue)
+	}
+
+	wt := imageImportCmd.Flags().Lookup("wait-timeout")
+	if wt == nil {
+		t.Fatal("--wait-timeout flag not registered")
+	}
+	if wt.Value.Type() != "int" {
+		t.Errorf("--wait-timeout type = %q, want int", wt.Value.Type())
+	}
+	if wt.DefValue != "60" {
+		t.Errorf("--wait-timeout default = %q, want 60", wt.DefValue)
 	}
 
 	for _, tc := range []struct {
-		args []string
-		want int
+		args        []string
+		wantWait    bool
+		wantTimeout int
 	}{
-		{[]string{}, 0},
-		{[]string{"--wait"}, 60},
-		{[]string{"--wait=10"}, 10},
+		{[]string{}, false, 60},
+		{[]string{"--wait"}, true, 60},
+		{[]string{"--wait", "--wait-timeout=10"}, true, 10},
 	} {
-		imageImportWaitMin = 0
-		// Parse against a throwaway flagset copy isn't trivial; parse the real one
-		// then reset. cobra stores into imageImportWaitMin via IntVar.
+		imageImportWait = false
+		imageImportWaitTimeout = 60
 		if err := imageImportCmd.Flags().Parse(tc.args); err != nil {
 			t.Fatalf("parse %v: %v", tc.args, err)
 		}
-		if imageImportWaitMin != tc.want {
-			t.Errorf("args %v → wait=%d, want %d", tc.args, imageImportWaitMin, tc.want)
+		if imageImportWait != tc.wantWait || imageImportWaitTimeout != tc.wantTimeout {
+			t.Errorf("args %v → wait=%v timeout=%d, want wait=%v timeout=%d",
+				tc.args, imageImportWait, imageImportWaitTimeout, tc.wantWait, tc.wantTimeout)
 		}
 	}
-	imageImportWaitMin = 0
+	imageImportWait = false
+	imageImportWaitTimeout = 60
 }
