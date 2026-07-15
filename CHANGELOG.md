@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **`pkg/sms` is removed** (#293). It had no importers inside spawn; its
+  inbound-reply types (`PendingKey`/`PendingNotification`/`PendingTable`) were
+  used only by `spore-host/lambda/rest-api`, which now keeps its own local copies,
+  and its outbound helpers (`Send`/`StorePending`/`BuildMessage`/`ProjectNumber`)
+  were unused everywhere (the spore-bot lambda already carries its own copy).
+  Consumers pinned to an older spawn are unaffected; nothing else in spawn used it.
+
 ## [0.76.0] - 2026-07-15
 
 ### Changed
