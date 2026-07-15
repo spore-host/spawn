@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.76.0] - 2026-07-15
+
 ### Changed
 - **CLI consistency (2026-07 audit, Wave 2).** Several commands and flags were
   standardized for consistency; every old form keeps working as a hidden
@@ -36,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `upgrade-spored --allow-downgrade`; `cleanup --force` and
   `notify workspace destroy --confirm` (execute is now the default). All still
   function; each prints a deprecation notice (#304/#307/#308/#315/#316).
+
+### Changed (internal refactors — no behavior change)
 - Internal: the 17 inline `sts.NewFromConfig(...).GetCallerIdentity(...)` call
   sites in `cmd/` now go through the existing `pkg/aws` helpers
   (`GetAccountID` / `GetCallerIdentityInfo`), which also add an IMDS fallback when
@@ -1441,7 +1445,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.75.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.76.0...HEAD
+[0.76.0]: https://github.com/spore-host/spawn/compare/v0.75.0...v0.76.0
 [0.75.0]: https://github.com/spore-host/spawn/compare/v0.74.0...v0.75.0
 [0.74.0]: https://github.com/spore-host/spawn/compare/v0.73.0...v0.74.0
 [0.73.0]: https://github.com/spore-host/spawn/compare/v0.72.0...v0.73.0
