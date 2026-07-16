@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Wildcard `*:FullAccess` IAM templates now require explicit opt-in** (#175).
+  `--iam-policy s3:FullAccess` / `dynamodb:FullAccess` / `sqs:FullAccess` grant a
+  service wildcard on all resources to the instance role; requesting one now
+  errors unless you also pass `--iam-allow-full-access`, steering toward the
+  scoped `:ReadOnly`/`:WriteOnly` variants by default. Unknown template names are
+  also rejected up front instead of silently ignored.
+
+### Changed
+- **`spawn launch --no-timeout` now requires confirmation** (#175). Disabling the
+  automatic idle/TTL guardrails is a real cost/zombie risk, so it now prompts
+  (bypass with `-y`/`--yes`) and aborts if declined, rather than only printing a
+  warning. The zombie-instance guard (auto 1h idle default) was also de-duplicated
+  into a single shared helper across the single/batch-queue/sweep launch paths.
+- Internal: `pkg/agent` now runs under the race detector in CI (`make test-race`),
+  locking in the `Agent.config` mutex fix (#175).
+
 ### Removed
 - **`pkg/sms` is removed** (#293). It had no importers inside spawn; its
   inbound-reply types (`PendingKey`/`PendingNotification`/`PendingTable`) were

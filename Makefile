@@ -95,6 +95,13 @@ test-short:
 	@echo "Running short tests..."
 	go test -v -short ./...
 
+# Run the race detector on the concurrency-sensitive packages (pkg/agent holds
+# the monitor loop + background goroutines; 2026-06 audit M-corr). Scoped rather
+# than -race on the whole suite to keep it fast and non-flaky.
+test-race:
+	@echo "Running race detector on pkg/agent..."
+	go test -race -count=1 ./pkg/agent/...
+
 # Run integration tests
 test-integration:
 	@echo "Running all integration tests..."

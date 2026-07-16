@@ -232,11 +232,11 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 	prog.Complete("Setting up IAM role")
 
-	// CRITICAL SAFETY CHECK: Apply timeout defaults to all sweep configs
+	// Zombie-instance guard: apply the 1h idle-timeout default across all sweep
+	// configs (shared per-config helper), warning once for the whole sweep.
 	hasDefaultApplied := false
 	for _, cfg := range launchConfigs {
-		if cfg.TTL == "" && cfg.IdleTimeout == "" && !noTimeout {
-			cfg.IdleTimeout = "1h"
+		if applyIdleTimeoutDefault(cfg) {
 			hasDefaultApplied = true
 		}
 	}

@@ -190,6 +190,41 @@ func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string {
 	}`, region, accountID, region, accountID)
 }
 
+// FullAccessPolicyTemplates are the built-in templates that grant a service
+// wildcard action on Resource "*" (e.g. s3:* on *). They are powerful enough to
+// be dangerous on an instance role, so requesting one requires an explicit
+// opt-in (the --iam-allow-full-access flag / AllowFullAccessPolicies); otherwise
+// the scoped ReadOnly/WriteOnly variants should be used. See ValidatePolicyNames.
+var FullAccessPolicyTemplates = map[string]bool{
+	"s3:FullAccess":       true,
+	"dynamodb:FullAccess": true,
+	"sqs:FullAccess":      true,
+}
+
+// ValidatePolicyNames checks a list of requested --iam-policy template names.
+// Unknown names are rejected. Wildcard *:FullAccess templates are rejected unless
+// allowFullAccess is true, steering callers toward the scoped variants by default
+// (2026-06 audit, M-sec: wildcard IAM attachable to the instance role).
+func ValidatePolicyNames(policies []string, allowFullAccess bool) error {
+	for _, p := range policies {
+		if _, ok := PolicyTemplates[p]; !ok {
+			return fmt.Errorf("unknown IAM policy template %q (see --help for the built-in set, e.g. s3:ReadOnly)", p)
+		}
+		if FullAccessPolicyTemplates[p] && !allowFullAccess {
+			return fmt.Errorf("%q grants wildcard access (%s on all resources) to the instance role; "+
+				"use a scoped template like %s, or pass --iam-allow-full-access to opt in deliberately",
+				p, strings.SplitN(p, ":", 2)[0]+":*", scopedAlternative(p))
+		}
+	}
+	return nil
+}
+
+// scopedAlternative suggests the ReadOnly variant of a FullAccess template name.
+func scopedAlternative(fullAccess string) string {
+	svc := strings.SplitN(fullAccess, ":", 2)[0]
+	return svc + ":ReadOnly (or " + svc + ":WriteOnly)"
+}
+
 // PolicyTemplates provides built-in policy templates for common services
 var PolicyTemplates = map[string]string{
 	"s3:FullAccess": `{

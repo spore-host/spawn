@@ -40,6 +40,11 @@ jobs:
       - name: Test
         run: go test -short -coverprofile=coverage.out ./...
 
+      - name: Race detector (pkg/agent)
+        # The agent runs a monitor loop + background goroutines; guard the
+        # Agent.config access (2026-06 audit M-corr) against regressions.
+        run: go test -race -count=1 ./pkg/agent/...
+
       - name: Coverage gate
         env:
           # Ratchet floor — must not drop below this. Raise it as coverage
