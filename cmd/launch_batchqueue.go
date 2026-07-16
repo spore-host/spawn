@@ -206,16 +206,9 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		launchConfig.SubnetID = subnetID
 	}
 
-	// CRITICAL SAFETY CHECK: Prevent zombie instances
-	// If neither TTL nor idle timeout are set, default to 1h idle timeout
-	if launchConfig.TTL == "" && launchConfig.IdleTimeout == "" && !noTimeout {
-		launchConfig.IdleTimeout = "1h"
-		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h to prevent zombie instances\n")
-		fmt.Fprintf(os.Stderr, "   Instance will terminate after 1 hour of inactivity.\n")
-		fmt.Fprintf(os.Stderr, "   Override with --ttl, --idle-timeout, or --no-timeout\n\n")
-	} else if noTimeout {
-		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: --no-timeout specified\n")
-		fmt.Fprintf(os.Stderr, "   Instance will run indefinitely until manually terminated.\n\n")
+	// Zombie-instance guard (shared helper).
+	if err := guardZombieInstance(launchConfig); err != nil {
+		return err
 	}
 
 	// Initialize AWS client pinned to the resolved queue region (#276).

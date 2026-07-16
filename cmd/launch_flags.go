@@ -134,6 +134,7 @@ var (
 	iamPolicyFile      string
 	iamTrustServices   []string
 	iamRoleTags        []string
+	iamAllowFullAccess bool
 
 	// Mode
 	interactive      bool
@@ -315,7 +316,8 @@ func init() {
 
 	// IAM
 	launchCmd.Flags().StringVar(&iamRole, "iam-role", "", "IAM role name (creates if doesn't exist)")
-	launchCmd.Flags().StringSliceVar(&iamPolicy, "iam-policy", []string{}, "Service-level policies (e.g., s3:ReadOnly,dynamodb:WriteOnly)")
+	launchCmd.Flags().StringSliceVar(&iamPolicy, "iam-policy", []string{}, "Service-level policies (e.g., s3:ReadOnly,dynamodb:WriteOnly). Wildcard *:FullAccess templates require --iam-allow-full-access")
+	launchCmd.Flags().BoolVar(&iamAllowFullAccess, "iam-allow-full-access", false, "Permit wildcard *:FullAccess --iam-policy templates (s3:*/dynamodb:*/sqs:* on all resources) on the instance role; off by default — prefer scoped ReadOnly/WriteOnly")
 	launchCmd.Flags().StringSliceVar(&iamManagedPolicies, "iam-managed-policies", []string{}, "AWS managed policy ARNs")
 	launchCmd.Flags().StringVar(&iamPolicyFile, "iam-policy-file", "", "Custom IAM policy JSON file")
 	launchCmd.Flags().StringSliceVar(&iamTrustServices, "iam-trust-services", []string{"ec2"}, "Services that can assume role")

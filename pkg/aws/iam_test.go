@@ -375,3 +375,36 @@ func actionSet(a interface{}) map[string]bool {
 	}
 	return out
 }
+
+func TestValidatePolicyNames(t *testing.T) {
+	cases := []struct {
+		name      string
+		policies  []string
+		allowFull bool
+		wantErr   bool
+		errSubstr string
+	}{
+		{name: "scoped ok", policies: []string{"s3:ReadOnly", "dynamodb:WriteOnly"}, wantErr: false},
+		{name: "empty ok", policies: nil, wantErr: false},
+		{name: "fullaccess blocked by default", policies: []string{"s3:FullAccess"}, wantErr: true, errSubstr: "wildcard access"},
+		{name: "fullaccess allowed with opt-in", policies: []string{"s3:FullAccess"}, allowFull: true, wantErr: false},
+		{name: "dynamodb full blocked", policies: []string{"dynamodb:FullAccess"}, wantErr: true, errSubstr: "wildcard access"},
+		{name: "sqs full blocked", policies: []string{"sqs:FullAccess"}, wantErr: true, errSubstr: "wildcard access"},
+		{name: "unknown template", policies: []string{"s3:Bogus"}, wantErr: true, errSubstr: "unknown IAM policy template"},
+		{name: "mix scoped + full blocks", policies: []string{"s3:ReadOnly", "sqs:FullAccess"}, wantErr: true, errSubstr: "wildcard access"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidatePolicyNames(tc.policies, tc.allowFull)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if tc.wantErr && tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
+				t.Errorf("error %q missing %q", err.Error(), tc.errSubstr)
+			}
+		})
+	}
+}
