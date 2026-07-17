@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/libs/update"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
 var Version = "0.38.1"
@@ -22,6 +23,11 @@ var (
 	// Output / display flags
 	spawnOutputFormat string
 	spawnVerbose      bool
+
+	// Shared spore.host config flags (see libs/sporeconfig).
+	spawnProfile string
+	spawnRegion  string
+	spawnAccount string
 )
 
 var rootCmd = &cobra.Command{
@@ -65,6 +71,10 @@ func init() {
 	// Set PersistentPreRunE to initialize i18n after flag parsing
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		ensureI18nInitialized()
+		// Push the shared-config flag values into the config layer so
+		// pkg/config (and pkg/aws through it) can resolve profile/region with
+		// flag > env > file > default precedence.
+		spawnconfig.SetSharedFlags(spawnProfile, spawnRegion, spawnAccount)
 		return nil
 	}
 
@@ -77,6 +87,14 @@ func init() {
 	// Output format and verbosity
 	rootCmd.PersistentFlags().StringVarP(&spawnOutputFormat, "output", "o", "table", "Output format (table, json)")
 	rootCmd.PersistentFlags().BoolVarP(&spawnVerbose, "verbose", "v", false, "Enable verbose output")
+
+	// Shared spore.host config (libs/sporeconfig): AWS profile/region/account,
+	// resolved flag > env (SPORE_*/AWS_*) > ~/.config/spore/config.toml > default.
+	// Unset = ambient AWS chain (unchanged behavior). spawn's infra/compute
+	// two-account split layers on top of the resolved profile.
+	rootCmd.PersistentFlags().StringVar(&spawnProfile, "profile", "", "AWS named profile (overrides SPORE_PROFILE/AWS_PROFILE and the shared config)")
+	rootCmd.PersistentFlags().StringVar(&spawnRegion, "region", "", "Default AWS region (overrides SPORE_REGION/AWS_REGION and the shared config)")
+	rootCmd.PersistentFlags().StringVar(&spawnAccount, "account", "", "Expected AWS account ID (optional guard)")
 
 	// Enable shell completion for all supported shells
 	rootCmd.CompletionOptions.DisableDefaultCmd = false

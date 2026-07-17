@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Shared spore.host config base.** spawn now honors the suite-wide
+  `libs/sporeconfig` settings: new persistent `--profile`, `--region`, and
+  `--account` flags, the `SPORE_PROFILE`/`SPORE_REGION`/`SPORE_ACCOUNT` env vars,
+  and the `[spore]` table of `~/.config/spore/config.toml`, resolved
+  flag > env > file > default. The resolved profile/region flow into the base AWS
+  client (`pkg/aws.NewClient`), so commands that previously used only the ambient
+  chain now respect a suite-wide profile/region. Unset = unchanged (ambient AWS
+  chain); spawn's `spore-host-infra`/`spore-host-dev` two-account split is
+  preserved and layers on top (it falls through to the shared profile only when
+  `SPAWN_INFRA_PROFILE`/`SPAWN_COMPUTE_PROFILE` is explicitly cleared). spawn also
+  still reads `~/.spawn/config.yaml` for its own sections.
+
 ### Security
 - **Wildcard `*:FullAccess` IAM templates now require explicit opt-in** (#175).
   `--iam-policy s3:FullAccess` / `dynamodb:FullAccess` / `sqs:FullAccess` grant a

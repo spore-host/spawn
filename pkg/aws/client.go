@@ -29,6 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	smithy "github.com/aws/smithy-go"
 	"github.com/spore-host/libs/pricing"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 )
 
@@ -58,9 +59,22 @@ func NewClient(ctx context.Context) (*Client, error) {
 // the whole client consistent. An empty region preserves the default-chain
 // behavior (used by commands that legitimately span regions).
 func NewClientWithRegion(ctx context.Context, region string) (*Client, error) {
+	// Apply the shared spore.host config base (libs/sporeconfig): a named profile
+	// and, when the caller didn't pin a region, a shared default region. Both are
+	// empty unless configured (flag/env/file), so an unconfigured suite keeps the
+	// pure ambient-chain behavior. An explicit region argument still wins.
+	shared := spawnconfig.SharedConfig()
+	effectiveRegion := region
+	if effectiveRegion == "" {
+		effectiveRegion = shared.Region
+	}
+
 	opts := []func(*config.LoadOptions) error{}
-	if region != "" {
-		opts = append(opts, config.WithRegion(region))
+	if effectiveRegion != "" {
+		opts = append(opts, config.WithRegion(effectiveRegion))
+	}
+	if shared.Profile != "" {
+		opts = append(opts, config.WithSharedConfigProfile(shared.Profile))
 	}
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {

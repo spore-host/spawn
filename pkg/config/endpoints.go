@@ -35,9 +35,15 @@ func GetEnvironment() Environment {
 //
 // Precedence: SPAWN_INFRA_PROFILE env var → "spore-host-infra" default.
 // Set SPAWN_INFRA_PROFILE="" (empty) to use the ambient credential chain instead
-// of a named profile — required for Isengard/access-key deployments.
+// of a named profile — required for Isengard/access-key deployments. When the
+// spawn default is explicitly cleared this way but the shared config
+// (--profile / SPORE_PROFILE / config.toml) DOES name a profile, that shared
+// profile is used, so a suite-wide profile still applies to infra ops.
 func GetInfraProfile() string {
 	if val, ok := os.LookupEnv("SPAWN_INFRA_PROFILE"); ok {
+		if val == "" {
+			return SharedProfile() // spawn default cleared → fall to shared (may be "")
+		}
 		return val
 	}
 	return "spore-host-infra"
@@ -45,9 +51,13 @@ func GetInfraProfile() string {
 
 // GetComputeProfile returns the AWS named profile for compute/EC2 operations.
 // Precedence: SPAWN_COMPUTE_PROFILE env var → "spore-host-dev" default.
-// Set SPAWN_COMPUTE_PROFILE="" to use the ambient credential chain.
+// Set SPAWN_COMPUTE_PROFILE="" to use the ambient credential chain (or the
+// shared config's profile, if one is set — see GetInfraProfile).
 func GetComputeProfile() string {
 	if val, ok := os.LookupEnv("SPAWN_COMPUTE_PROFILE"); ok {
+		if val == "" {
+			return SharedProfile()
+		}
 		return val
 	}
 	return "spore-host-dev"
