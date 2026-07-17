@@ -35,14 +35,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/xray v1.36.23
 	github.com/aws/smithy-go v1.27.1
 	github.com/google/uuid v1.6.0
-	github.com/pebbe/zmq4 v1.4.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/scttfrdmn/strata v0.22.0
 	github.com/scttfrdmn/substrate v0.71.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spore-host/cohort v0.2.0
-	github.com/spore-host/libs v0.41.1
+	github.com/spore-host/libs v0.42.0
 	github.com/spore-host/truffle v0.38.1
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
 	go.opentelemetry.io/otel v1.43.0
