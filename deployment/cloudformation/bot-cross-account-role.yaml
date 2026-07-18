@@ -31,6 +31,38 @@ Parameters:
     Default: SpawnBotCrossAccount
     Description: Name of the cross-account IAM role to create
 
+  ExternalId:
+    Type: String
+    Default: ''
+    Description: >
+      STS ExternalId the spore-bot Lambda must present when assuming this role.
+      Leave EMPTY to use the legacy shared value (TagPrefix + "-bot", e.g.
+      "spawn-bot") that the Lambda falls back to. For per-account isolation
+      (recommended), set this to the high-entropy value shown when you run
+      `spawn bot register` (the register response returns `external_id`), and
+      register the instance with that same value. Each account should use its
+      own ExternalId.
+
+  ScopeStartStopByTag:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'false'
+      - 'true'
+    Description: >
+      When "true", ec2:StartInstances/StopInstances are restricted to instances
+      tagged managed=true under the tag prefix (e.g. "spawn:managed=true") — the
+      tag spawn applies to every instance it launches. When "false" (default),
+      those actions are allowed on all instances and access is gated only by the
+      spore-bot registry. Set to "true" for defense-in-depth once you have
+      confirmed all bot-controlled instances in this account carry the managed
+      tag.
+
+Conditions:
+  UseCustomExternalId: !Not [!Equals [!Ref ExternalId, '']]
+  ScopeByTag: !Equals [!Ref ScopeStartStopByTag, 'true']
+  IsPrism: !Equals [!Ref TagPrefix, 'prism']
+
 Resources:
 
   BotCrossAccountRole:
@@ -47,7 +79,9 @@ Resources:
             Action: sts:AssumeRole
             Condition:
               StringEquals:
-                sts:ExternalId: !Sub '${TagPrefix}-bot'
+                # Per-account ExternalId when provided; otherwise the legacy
+                # shared "${TagPrefix}-bot" the Lambda still falls back to.
+                sts:ExternalId: !If [UseCustomExternalId, !Ref ExternalId, !Sub '${TagPrefix}-bot']
       Policies:
         - PolicyName: BotEC2Policy
           PolicyDocument:
@@ -60,17 +94,33 @@ Resources:
                   - ec2:DescribeTags
                   - ec2:DescribeInstanceStatus
                 Resource: '*'
-              # Start/stop/hibernate — scoped to instances tagged as managed
-              # Note: the Condition key uses a literal string; deploy separate stacks
-              # for spawn vs prism tag prefix, or omit the condition and scope by
-              # instance IDs registered in spore-bot-registry instead.
-              - Effect: Allow
-                Action:
-                  - ec2:StartInstances
-                  - ec2:StopInstances
-                # trivy:ignore:AVD-AWS-0057 -- Resource * is intentional; access control
-                # is enforced by spore-bot DynamoDB registry (enabled flag per registration).
-                Resource: '*'
+              # Start/stop/hibernate. With ScopeStartStopByTag=true these are
+              # restricted to ${TagPrefix}:managed=true instances; otherwise
+              # Resource "*" and access is enforced by the spore-bot DynamoDB
+              # registry (enabled flag per registration).
+              - !If
+                - ScopeByTag
+                - Effect: Allow
+                  Action:
+                    - ec2:StartInstances
+                    - ec2:StopInstances
+                  Resource: '*'
+                  # IAM Condition map keys must be literal strings (no Fn::Sub),
+                  # so select the whole key by TagPrefix (spawn|prism).
+                  Condition:
+                    StringEquals:
+                      !If
+                        - IsPrism
+                        - 'aws:ResourceTag/prism:managed': 'true'
+                        - 'aws:ResourceTag/spawn:managed': 'true'
+                - Effect: Allow
+                  Action:
+                    - ec2:StartInstances
+                    - ec2:StopInstances
+                  # trivy:ignore:AVD-AWS-0057 -- Resource * is intentional when
+                  # ScopeStartStopByTag=false; access control is enforced by the
+                  # spore-bot DynamoDB registry (enabled flag per registration).
+                  Resource: '*'
       Tags:
         - Key: !Sub '${TagPrefix}:managed'
           Value: 'false'
@@ -89,5 +139,7 @@ Outputs:
       Name: !Sub '${AWS::StackName}-role-arn'
 
   ExternalId:
-    Description: External ID required when assuming this role (hardcoded in the Lambda)
-    Value: !Sub '${TagPrefix}-bot'
+    Description: >
+      External ID required when assuming this role. The per-account value when
+      one was provided; otherwise the legacy shared value (TagPrefix + "-bot").
+    Value: !If [UseCustomExternalId, !Ref ExternalId, !Sub '${TagPrefix}-bot']
