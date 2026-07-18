@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`bot-cross-account-role.yaml`: opt-in per-account ExternalId and tag-scoped
+  EC2 permissions.** Two new, default-off parameters let each account harden its
+  cross-account bot role without breaking existing deployments (spore-host#374):
+  - `ExternalId` — set it to the per-account high-entropy value `spawn bot
+    register` now returns (`external_id`) instead of the shared `spawn-bot`.
+    Empty keeps the legacy value, which the Lambda still falls back to.
+  - `ScopeStartStopByTag` — when `true`, `ec2:StartInstances`/`StopInstances`
+    are restricted to `<prefix>:managed=true` instances instead of `Resource
+    "*"`.
+  Re-deploying the stack with defaults reproduces the previous behavior exactly;
+  removing the code-side static-ExternalId fallback remains gated on all customer
+  roles adopting a per-account value.
+
 ## [0.77.0] - 2026-07-17
 
 ### Added
