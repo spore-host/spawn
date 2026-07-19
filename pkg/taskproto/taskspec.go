@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -68,6 +69,12 @@ const (
 	PurchaseOnDemand = "on_demand"
 	PurchaseSpot     = "spot"
 )
+
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validEnvKey reports whether k is a valid shell identifier usable as an
+// environment-variable name in the generated wrapper's `export`.
+func validEnvKey(k string) bool { return envKeyRe.MatchString(k) }
 
 var validOnComplete = map[string]bool{"terminate": true, "stop": true, "hibernate": true}
 var validPurchase = map[string]bool{"": true, PurchaseOnDemand: true, PurchaseSpot: true}
@@ -129,6 +136,13 @@ func (s *TaskSpec) Validate() error {
 	for i, m := range s.Outputs {
 		if m.Source == "" || m.Destination == "" {
 			add("outputs[%d]: source and destination are both required", i)
+		}
+	}
+	// Env keys are exported verbatim (unquoted) in the generated wrapper, so they
+	// must be valid shell identifiers; values are single-quoted and unrestricted.
+	for k := range s.Env {
+		if !validEnvKey(k) {
+			add("env key %q invalid (want a shell identifier: [A-Za-z_][A-Za-z0-9_]*)", k)
 		}
 	}
 	if len(probs) > 0 {

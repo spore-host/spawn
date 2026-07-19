@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestRenderTaskDryRun(t *testing.T) {
 		"c7a.4xlarge",          // cheapest of the two
 		"Max cost:     ~$2.48", // 0.62 × 4h
 		"s3://b/in.fq → /work/in.fq",
-		"not implemented yet (spawn#386)",
+		"Re-run without --dry-run to launch this task.",
 	}
 	for _, w := range wants {
 		if !strings.Contains(got, w) {
@@ -51,5 +52,126 @@ func TestRenderTaskDryRun(t *testing.T) {
 	// Must never claim to have launched.
 	if strings.Contains(got, "Instance i-") || strings.Contains(strings.ToLower(got), "launched instance") {
 		t.Errorf("dry-run must not launch anything:\n%s", got)
+	}
+}
+
+func TestTaskLaunchConfig(t *testing.T) {
+	spec := &taskproto.TaskSpec{
+		TaskID:    "align-42",
+		Command:   []string{"bwa", "mem"},
+		Resources: taskproto.ResourceRequest{Purchase: taskproto.PurchaseSpot},
+		Lifecycle: taskproto.Lifecycle{TTL: "4h"}, // OnComplete empty → defaults to terminate
+	}
+	sized := &taskproto.SizeResult{InstanceType: "c7i.4xlarge"}
+	cfg := taskLaunchConfig(spec, sized, "us-east-1", "spawn-task-profile", "#!/bin/bash\ntrue\n")
+
+	if cfg.InstanceType != "c7i.4xlarge" {
+		t.Errorf("InstanceType = %q", cfg.InstanceType)
+	}
+	if !cfg.Spot {
+		t.Error("Spot should be true for purchase=spot")
+	}
+	if cfg.TTL != "4h" {
+		t.Errorf("TTL = %q", cfg.TTL)
+	}
+	if cfg.OnComplete != "terminate" {
+		t.Errorf("OnComplete = %q, want terminate (default)", cfg.OnComplete)
+	}
+	if cfg.Name != "align-42" || cfg.Tags["spawn:task-id"] != "align-42" {
+		t.Errorf("task-id not stamped: Name=%q tag=%q", cfg.Name, cfg.Tags["spawn:task-id"])
+	}
+	if cfg.IamInstanceProfile != "spawn-task-profile" {
+		t.Errorf("IamInstanceProfile = %q", cfg.IamInstanceProfile)
+	}
+	if !strings.Contains(cfg.JobArrayCommand, "#!/bin/bash") {
+		t.Errorf("JobArrayCommand should carry the wrapper, got %q", cfg.JobArrayCommand)
+	}
+	// AMI/UserData must be left empty for Provision to fill.
+	if cfg.AMI != "" || cfg.UserData != "" {
+		t.Errorf("AMI/UserData should be empty for Provision, got AMI=%q UserData=%q", cfg.AMI, cfg.UserData)
+	}
+}
+
+func TestTaskLaunchConfig_OnDemandDefault(t *testing.T) {
+	spec := &taskproto.TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: taskproto.Lifecycle{TTL: "1h"}}
+	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "m7i.large"}, "us-east-1", "p", "w")
+	if cfg.Spot {
+		t.Error("Spot should default to false when purchase is unset")
+	}
+}
+
+func TestS3Bucket(t *testing.T) {
+	cases := map[string]string{
+		"s3://my-bucket/key":    "my-bucket",
+		"s3://my-bucket":        "my-bucket",
+		"s3://my-bucket/a/b/c":  "my-bucket",
+		"/local/path":           "",
+		"":                      "",
+		"https://example.com/x": "",
+	}
+	for in, want := range cases {
+		if got := s3Bucket(in); got != want {
+			t.Errorf("s3Bucket(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestS3Buckets_DistinctS3Only(t *testing.T) {
+	ms := []taskproto.Manifest{
+		{Source: "s3://in/ref.fa", Destination: "/data/ref.fa"},
+		{Source: "s3://in/reads/", Destination: "/work/reads/"}, // same bucket → deduped
+		{Source: "/work/out.bam", Destination: "s3://out/out.bam"},
+	}
+	got := s3Buckets(ms)
+	// inputs: "in" (twice, deduped); the third's destination "out" is also s3.
+	want := map[string]bool{"in": true, "out": true}
+	if len(got) != 2 {
+		t.Fatalf("s3Buckets = %v, want 2 distinct", got)
+	}
+	for _, b := range got {
+		if !want[b] {
+			t.Errorf("unexpected bucket %q in %v", b, got)
+		}
+	}
+}
+
+func TestTaskStagingPolicy(t *testing.T) {
+	pol := taskStagingPolicy([]string{"in-bucket"}, []string{"out-bucket"}, "spawn-results-1-us-east-1")
+
+	// Read on the input bucket, write on output + results.
+	wants := []string{
+		`"arn:aws:s3:::in-bucket/*"`,
+		`"arn:aws:s3:::in-bucket"`, // ListBucket target
+		`"s3:GetObject"`,
+		`"arn:aws:s3:::out-bucket/*"`,
+		`"arn:aws:s3:::spawn-results-1-us-east-1/*"`,
+		`"s3:PutObject"`,
+	}
+	for _, w := range wants {
+		if !strings.Contains(pol, w) {
+			t.Errorf("policy missing %q\n%s", w, pol)
+		}
+	}
+	// Must be scoped — no wildcard resource.
+	if strings.Contains(pol, `"Resource":"*"`) || strings.Contains(pol, `"Resource": "*"`) {
+		t.Errorf("policy must not grant Resource *:\n%s", pol)
+	}
+	// The input bucket must NOT get write.
+	if strings.Contains(pol, `"s3:PutObject"`) && strings.Contains(pol, `"arn:aws:s3:::in-bucket/*"`) {
+		// only a problem if PutObject's resource list includes in-bucket; verify it doesn't
+		// by checking the PutObject statement segment.
+		put := pol[strings.Index(pol, `"s3:PutObject"`):]
+		if strings.Contains(put, "in-bucket") {
+			t.Errorf("input bucket must not receive write access:\n%s", pol)
+		}
+	}
+
+	// The generated policy must always be valid JSON (it's string-built).
+	if !json.Valid([]byte(pol)) {
+		t.Fatalf("policy is not valid JSON:\n%s", pol)
+	}
+	// Also valid with no inputs (write-only statement).
+	if !json.Valid([]byte(taskStagingPolicy(nil, nil, "res"))) {
+		t.Fatalf("no-input policy is not valid JSON")
 	}
 }

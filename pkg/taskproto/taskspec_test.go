@@ -49,6 +49,8 @@ func TestValidate_Failures(t *testing.T) {
 		{"bad on_complete", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h", OnComplete: "explode"}}, "on_complete"},
 		{"headroom range", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Resources: ResourceRequest{MemoryHeadroomPercent: 250}}, "memory_headroom_percent"},
 		{"bad input manifest", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Inputs: []Manifest{{Source: "s3://b/x"}}}, "inputs[0]"},
+		{"bad env key", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Env: map[string]string{"BAD-KEY": "v"}}, "env key"},
+		{"env key with space", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Env: map[string]string{"a b": "v"}}, "env key"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -88,12 +88,13 @@ func retryIAM(fn func() error) error {
 
 // IAMRoleConfig contains configuration for creating IAM roles
 type IAMRoleConfig struct {
-	RoleName        string            // User-provided or auto-generated
-	Policies        []string          // Service-level policies (s3:ReadOnly, etc.)
-	ManagedPolicies []string          // AWS managed policy ARNs
-	PolicyFile      string            // Path to custom policy JSON
-	TrustServices   []string          // Services that can assume role
-	Tags            map[string]string // Tags for role
+	RoleName         string            // User-provided or auto-generated
+	Policies         []string          // Service-level policies (s3:ReadOnly, etc.)
+	ManagedPolicies  []string          // AWS managed policy ARNs
+	PolicyFile       string            // Path to custom policy JSON
+	InlinePolicyJSON string            // Custom policy JSON supplied as a string (like PolicyFile, no file); e.g. a scoped S3 policy
+	TrustServices    []string          // Services that can assume role
+	Tags             map[string]string // Tags for role
 }
 
 // GenerateScopedS3Policy creates an S3 policy scoped to spawn resources
@@ -399,7 +400,7 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 		if err := c.createIAMRole(ctx, iamClient, roleName, config); err != nil {
 			return "", fmt.Errorf("failed to create IAM role: %w", err)
 		}
-	} else if len(config.Policies) > 0 || config.PolicyFile != "" {
+	} else if len(config.Policies) > 0 || config.PolicyFile != "" || config.InlinePolicyJSON != "" {
 		// Role exists but caller specified policies — update the inline policy so that
 		// re-using a cached role (same hash) still picks up any new policy additions.
 		if err := c.updateInlinePolicy(ctx, iamClient, roleName, config); err != nil {
@@ -477,10 +478,11 @@ func (c *Client) generateRoleName(config IAMRoleConfig) string {
 // hashPolicies generates a hash of all policy sources for role naming
 func (c *Client) hashPolicies(config IAMRoleConfig) string {
 	// Combine all policy sources for hashing
-	data := fmt.Sprintf("%v|%v|%s",
+	data := fmt.Sprintf("%v|%v|%s|%s",
 		config.Policies,
 		config.ManagedPolicies,
-		config.PolicyFile)
+		config.PolicyFile,
+		config.InlinePolicyJSON)
 
 	hash := sha256.Sum256([]byte(data))
 	return fmt.Sprintf("%x", hash)
@@ -494,8 +496,15 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 		return fmt.Errorf("failed to get account ID: %w", err)
 	}
 
-	// Build trust policy with account condition
-	trustPolicy := c.buildTrustPolicyWithAccount(config.TrustServices, accountID)
+	// Build trust policy with account condition. An instance profile is always
+	// assumed by the EC2 service, so default to "ec2" when the caller gave no
+	// trust services — otherwise the policy has an empty principal and IAM rejects
+	// it with MalformedPolicyDocument ("statement with no principals").
+	trustServices := config.TrustServices
+	if len(trustServices) == 0 {
+		trustServices = []string{"ec2"}
+	}
+	trustPolicy := c.buildTrustPolicyWithAccount(trustServices, accountID)
 	trustPolicyJSON, err := json.Marshal(trustPolicy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal trust policy: %w", err)
@@ -551,6 +560,18 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 		}
 	}
 
+	// Attach a caller-supplied scoped policy passed as a string (no file).
+	if config.InlinePolicyJSON != "" {
+		_, err = iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+			RoleName:       aws.String(roleName),
+			PolicyName:     aws.String("spawn-scoped-policy"),
+			PolicyDocument: aws.String(config.InlinePolicyJSON),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to attach scoped policy: %w", err)
+		}
+	}
+
 	// Attach managed policies
 	for _, policyArn := range config.ManagedPolicies {
 		_, err = iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
@@ -565,19 +586,35 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 	return nil
 }
 
-// updateInlinePolicy replaces the inline policy on an existing role.
+// updateInlinePolicy replaces the inline policy on an existing role. It refreshes
+// both the shorthand-derived inline policy (when Policies is set) and the
+// caller-supplied scoped policy string (when InlinePolicyJSON is set), so a
+// cached role picks up either.
 func (c *Client) updateInlinePolicy(ctx context.Context, iamClient *iam.Client, roleName string, config IAMRoleConfig) error {
-	policy := c.buildInlinePolicy(config.Policies)
-	policyJSON, err := json.Marshal(policy)
-	if err != nil {
-		return fmt.Errorf("failed to marshal inline policy: %w", err)
+	if len(config.Policies) > 0 {
+		policy := c.buildInlinePolicy(config.Policies)
+		policyJSON, err := json.Marshal(policy)
+		if err != nil {
+			return fmt.Errorf("failed to marshal inline policy: %w", err)
+		}
+		if _, err := iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+			RoleName:       aws.String(roleName),
+			PolicyName:     aws.String("spawn-inline-policy"),
+			PolicyDocument: aws.String(string(policyJSON)),
+		}); err != nil {
+			return err
+		}
 	}
-	_, err = iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
-		RoleName:       aws.String(roleName),
-		PolicyName:     aws.String("spawn-inline-policy"),
-		PolicyDocument: aws.String(string(policyJSON)),
-	})
-	return err
+	if config.InlinePolicyJSON != "" {
+		if _, err := iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+			RoleName:       aws.String(roleName),
+			PolicyName:     aws.String("spawn-scoped-policy"),
+			PolicyDocument: aws.String(config.InlinePolicyJSON),
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // buildTrustPolicy creates an assume role policy document (legacy, no account condition)

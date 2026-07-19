@@ -21,20 +21,25 @@ spawn task diagnose <name|instance-id>
 Run a task described by a TaskSpec JSON file (the shared workflow-adapter
 contract, spawn#386).
 
-This is the first increment: only --dry-run is supported. It parses and validates
-the spec, sizes the cheapest instance type that fits its resource request (via
-truffle), and prints the plan — WITHOUT launching anything. Real launch and the
-durable .exitcode-in-S3 completion record are a follow-up (see #386).
+Sizes the cheapest instance type that fits the resource request (via truffle),
+then launches an ephemeral instance that stages inputs from S3, runs the command,
+stages outputs back, and writes a durable completion record to
+s3://spawn-results-&lt;account&gt;-&lt;region&gt;/tasks/&lt;task_id&gt;/completion.json — the
+signal workflow adapters poll. The instance self-terminates on completion (TTL +
+on_complete).
+
+--dry-run sizes and prints the plan without launching. Container execution
+(spec.container) is a follow-up increment — omit it to run on the host.
 
 ```
-spawn task run --spec <file> --dry-run [flags]
+spawn task run --spec <file> [flags]
 ```
 
 **Flags:**
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--dry-run` |  | bool |  | Size and preview the task without launching (currently required) |
+| `--dry-run` |  | bool |  | Size and preview the task without launching |
 | `--region` |  | string |  | Region to size against (default: the configured AWS region) |
 | `--spec` |  | string |  | Path to a TaskSpec JSON file (required) |
 
