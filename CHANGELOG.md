@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Auto-AMI now detects architecture authoritatively** (spawn#410). A plain
+  `spawn launch` on a new Graviton family — e.g. `m9g.24xlarge` (Graviton5) —
+  picked an x86_64 AMI and failed with `InvalidParameterValue: architecture
+  'arm64' … does not match 'x86_64'`, because arch detection used a static
+  allow-list of Graviton family prefixes that didn't include `m9g`.
+  `GetRecommendedAMI` now resolves the architecture from EC2
+  (`DescribeInstanceTypes` → `ProcessorInfo.SupportedArchitectures`), so any new
+  arm64 family works with no code change; the static allow-list remains as an
+  offline fallback (and gained `m9g`/`r9g`/`c9g`/`hpc7g`/`i8g`/… ).
+
 ## [0.83.0] - 2026-07-19
 
 ### Added

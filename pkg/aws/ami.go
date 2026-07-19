@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
@@ -118,37 +120,87 @@ func DetectGPUInstance(instanceType string) bool {
 	return gpuFamilies[family]
 }
 
-// DetectArchitecture returns the CPU architecture for an instance type
+// DetectArchitecture returns the CPU architecture for an instance type from a
+// static allow-list of Graviton (ARM) families. This is the OFFLINE fallback:
+// it can't know about a family that didn't exist when this list was written
+// (spawn#410: m9g/Graviton5 fell through to x86_64 and the launch failed on an
+// arch-mismatched AMI). Callers with an AWS client + region should prefer
+// (*Client).resolveArchitecture, which asks EC2 authoritatively; this remains
+// for the pure/no-client call sites (wizard, sweep grouping key) and as the
+// fallback when the API is unreachable.
 func DetectArchitecture(instanceType string) string {
-	// Graviton (ARM) instance families
+	// Graviton (ARM) instance families. New generations are added here as a
+	// best-effort default, but the authoritative source is resolveArchitecture.
 	armFamilies := map[string]bool{
 		"t4g": true,
-		"m6g": true, "m6gd": true, "m7g": true, "m7gd": true, "m8g": true,
-		"c6g": true, "c6gd": true, "c6gn": true, "c7g": true, "c7gd": true, "c7gn": true, "c8g": true,
-		"r6g": true, "r6gd": true, "r7g": true, "r7gd": true, "r8g": true,
+		"m6g": true, "m6gd": true, "m7g": true, "m7gd": true, "m8g": true, "m8gd": true, "m9g": true,
+		"c6g": true, "c6gd": true, "c6gn": true, "c7g": true, "c7gd": true, "c7gn": true, "c8g": true, "c8gd": true, "c8gn": true, "c9g": true,
+		"r6g": true, "r6gd": true, "r7g": true, "r7gd": true, "r8g": true, "r8gd": true, "r9g": true,
 		"x2gd": true,
-		"g5g":  true, // ARM GPU
+		"i8g":  true, "im8g": true, "is8g": true,
+		"hpc7g": true,
+		"g5g":   true, // ARM GPU
 	}
 
-	// Extract family
-	family := ""
-	for i, char := range instanceType {
-		if char == '.' {
-			family = instanceType[:i]
-			break
-		}
-	}
-
-	if armFamilies[family] {
+	if armFamilies[instanceFamily(instanceType)] {
 		return "arm64"
 	}
 
 	return "x86_64"
 }
 
+// instanceFamily returns the family prefix of an instance type ("m9g" from
+// "m9g.24xlarge"), or the whole string if it has no '.'.
+func instanceFamily(instanceType string) string {
+	for i, char := range instanceType {
+		if char == '.' {
+			return instanceType[:i]
+		}
+	}
+	return instanceType
+}
+
+// resolveArchitecture returns the CPU architecture for an instance type,
+// authoritatively via EC2 DescribeInstanceTypes (ProcessorInfo.SupportedArchitectures)
+// so a new family (m9g, r9g, …) needs no code change — the root cause of
+// spawn#410. Falls back to the static DetectArchitecture allow-list if the API
+// call fails or returns nothing (offline, throttled, or an unknown type), which
+// preserves today's behavior for known families. When a type advertises both
+// arm64 and x86_64 (rare), arm64 wins — spawn's ARM instance types are ARM.
+func (c *Client) resolveArchitecture(ctx context.Context, region, instanceType string) string {
+	ec2Client := c.regionalEC2(region)
+	out, err := ec2Client.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{
+		InstanceTypes: []ec2types.InstanceType{ec2types.InstanceType(instanceType)},
+	})
+	if err != nil || len(out.InstanceTypes) == 0 {
+		return DetectArchitecture(instanceType)
+	}
+	pi := out.InstanceTypes[0].ProcessorInfo
+	if pi == nil || len(pi.SupportedArchitectures) == 0 {
+		return DetectArchitecture(instanceType)
+	}
+	sawX86 := false
+	for _, a := range pi.SupportedArchitectures {
+		switch a {
+		case ec2types.ArchitectureTypeArm64:
+			return "arm64"
+		case ec2types.ArchitectureTypeX8664:
+			sawX86 = true
+		}
+	}
+	if sawX86 {
+		return "x86_64"
+	}
+	// Some other arch (e.g. i386/arm64_mac) — fall back to the static heuristic.
+	return DetectArchitecture(instanceType)
+}
+
 // GetRecommendedAMI returns the recommended AMI for an instance type in a specific region
 func (c *Client) GetRecommendedAMI(ctx context.Context, region string, instanceType string) (string, error) {
-	arch := DetectArchitecture(instanceType)
+	// Resolve arch authoritatively from EC2 so a new Graviton family (m9g, …) gets
+	// the right arm64 AMI without a code change (spawn#410); falls back to the
+	// static allow-list when the API is unavailable.
+	arch := c.resolveArchitecture(ctx, region, instanceType)
 	gpu := DetectGPUInstance(instanceType)
 
 	return c.GetAL2023AMI(ctx, region, arch, gpu)
