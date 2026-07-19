@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.79.0] - 2026-07-19
+
 ### Fixed
 - **GPU instance types now auto-detect a working AMI** (#384). Auto-AMI pointed
   at `al2023-ami-kernel-default-gpu-{x86_64,arm64}` SSM parameters that **do not
@@ -1618,7 +1620,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.78.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.79.0...HEAD
+[0.79.0]: https://github.com/spore-host/spawn/compare/v0.78.0...v0.79.0
 [0.78.0]: https://github.com/spore-host/spawn/compare/v0.77.0...v0.78.0
 [0.77.0]: https://github.com/spore-host/spawn/compare/v0.76.0...v0.77.0
 [0.76.0]: https://github.com/spore-host/spawn/compare/v0.75.0...v0.76.0
