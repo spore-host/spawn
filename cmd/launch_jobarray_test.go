@@ -115,9 +115,7 @@ func TestBuildCohort(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			minViable = tt.minViableSet // package-level launch flag
-			defer func() { minViable = 1 }()
-			c, err := buildCohort(cohortSpec{mpi: tt.mpi}, "job-1", mkMembers(tt.members))
+			c, err := buildCohort(cohortSpec{mpi: tt.mpi}, "job-1", mkMembers(tt.members), tt.minViableSet)
 			if err != nil {
 				t.Fatalf("buildCohort: %v", err)
 			}
@@ -135,14 +133,9 @@ func TestBuildCohort(t *testing.T) {
 // each member gets the job-array tags/size and a distinct index, and (with MPI
 // enabled) the per-index MPI user-data — so rank 0 and rank 1 differ.
 func TestBuildJobArrayMemberConfig(t *testing.T) {
-	// Set the flag globals the builder reads, and restore them after.
-	defer func(c int, n, names string, mpi bool) {
-		count, jobArrayName, instanceNames, mpiEnabled = c, n, names, mpi
-	}(count, jobArrayName, instanceNames, mpiEnabled)
-	count = 3
-	jobArrayName = "mpitest"
-	instanceNames = ""
-	mpiEnabled = true
+	// mpiEnabled is still read via memberParams.mpi below; the builder no longer
+	// reads count/jobArrayName/instanceNames globals (they're passed in mp).
+	mp := memberParams{name: "mpitest", size: 3, instanceNames: "", mpi: true}
 
 	// buildJobArrayMemberConfig decodes the base UserData with plain base64 (it
 	// re-gzips the combined result), so the base must be plain base64 here.
@@ -152,11 +145,11 @@ func TestBuildJobArrayMemberConfig(t *testing.T) {
 		UserData:     base64.StdEncoding.EncodeToString([]byte("#!/bin/bash\necho base\n")),
 	}
 
-	cfg0, err := buildJobArrayMemberConfig(base, "mpitest-abc", 0, nil)
+	cfg0, err := buildJobArrayMemberConfig(base, mp, "mpitest-abc", 0, nil)
 	if err != nil {
 		t.Fatalf("index 0: %v", err)
 	}
-	cfg1, err := buildJobArrayMemberConfig(base, "mpitest-abc", 1, nil)
+	cfg1, err := buildJobArrayMemberConfig(base, mp, "mpitest-abc", 1, nil)
 	if err != nil {
 		t.Fatalf("index 1: %v", err)
 	}

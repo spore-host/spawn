@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/arrayrec"
 	"github.com/spore-host/spawn/pkg/aws"
 )
 
@@ -22,14 +23,16 @@ import (
 // the id tag is the stable grouping key.
 
 var (
-	arrayRegion     string
-	arrayJSON       bool
-	arrayCancelYes  bool
-	arrayCancelPend bool
-	arrayCollectDir string
-	arrayLogsIndex  int
-	arrayLogsWhich  string
-	arrayLogsLines  int
+	arrayRegion      string
+	arrayJSON        bool
+	arrayCancelYes   bool
+	arrayCancelPend  bool
+	arrayCollectDir  string
+	arrayLogsIndex   int
+	arrayLogsWhich   string
+	arrayLogsLines   int
+	arrayRetryYes    bool
+	arrayRetryFailed bool
 )
 
 var arrayGroupCmd = &cobra.Command{
@@ -217,6 +220,96 @@ func runArrayMemberCommand(ctx context.Context, client *aws.Client, instance *aw
 	return string(output), nil
 }
 
+// retryIndexes returns the indexes in 0..size-1 that need relaunching: those
+// with no live member at all (a --min-viable gap), plus those whose only
+// member(s) are all in a non-active terminal state (terminated/stopped). An
+// index with any running/pending member is considered healthy and skipped. Pure
+// so the selection is unit-testable without AWS.
+func retryIndexes(members []arrayMember, size int) []int {
+	// active[i] is true if index i has at least one running/pending member.
+	active := make(map[int]bool)
+	for _, m := range members {
+		switch m.State {
+		case "running", "pending":
+			active[m.Index] = true
+		}
+	}
+	var out []int
+	for i := 0; i < size; i++ {
+		// Relaunch any index without a live member: missing entirely (a
+		// --min-viable gap) or present only as terminated/stopped.
+		if !active[i] {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// ── array retry ──────────────────────────────────────────────────────────────
+
+var arrayRetryCmd = &cobra.Command{
+	Use:   "retry <array-name>",
+	Short: "Relaunch missing/failed indexes of a job array (--failed)",
+	Long: `Relaunch the indexes of a job array that never came up or have died.
+
+retry reads the local launch record spawn wrote at launch
+(~/.config/spore/arrays/), so it faithfully reuses the original AMI, subnet,
+security groups, user-data, TTL, and command — none of which a surviving
+member's tags fully carry. It relaunches only indexes with no running/pending
+member, regrouped under the original array so 'spawn array status' sees them.
+
+Note: retry must run from the machine that launched the array (that's where the
+launch record lives). It launches real, billable instances — you'll be asked to
+confirm, or pass --yes.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
+		if !arrayRetryFailed {
+			return fmt.Errorf("retry requires --failed (relaunch the missing/failed indexes); it is the only supported mode today")
+		}
+
+		dir, err := arrayrec.DefaultDir()
+		if err != nil {
+			return err
+		}
+		rec, err := arrayrec.LoadByName(dir, args[0])
+		if err != nil {
+			return err
+		}
+
+		members, size, err := findArrayMembers(ctx, args[0], arrayRegion)
+		if err != nil {
+			return err
+		}
+		// Prefer the record's size (the requested count) — it's authoritative even
+		// when every member of a high index is gone, whereas the tag-derived size is
+		// only visible while at least one member survives.
+		if rec.Size > size {
+			size = rec.Size
+		}
+
+		targets := retryIndexes(members, size)
+		if len(targets) == 0 {
+			fmt.Println("Nothing to retry — every requested index has a running/pending member.")
+			return nil
+		}
+
+		fmt.Printf("Job array %s: relaunching %d index(es): %v\n", args[0], len(targets), targets)
+		fmt.Printf("Reusing launch record %s (type %s, region %s).\n", rec.ArrayID, rec.Base.InstanceType, rec.Region)
+		if rec.Base.TTL != "" {
+			fmt.Printf("Relaunched members inherit the original TTL: %s\n", rec.Base.TTL)
+		} else {
+			fmt.Printf("⚠ The original launch had no TTL — relaunched instances have no auto-terminate deadline.\n")
+		}
+		if !confirmYes(arrayRetryYes, "Launch these instances (billable)?") {
+			fmt.Println("Aborted.")
+			return nil
+		}
+
+		return relaunchArrayMembers(ctx, rec, targets)
+	},
+}
+
 // ── array status ─────────────────────────────────────────────────────────────
 
 var arrayStatusCmd = &cobra.Command{
@@ -358,9 +451,9 @@ var arrayCancelCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(arrayGroupCmd)
-	arrayGroupCmd.AddCommand(arrayStatusCmd, arrayLogsCmd, arrayCollectCmd, arrayCancelCmd)
+	arrayGroupCmd.AddCommand(arrayStatusCmd, arrayLogsCmd, arrayRetryCmd, arrayCollectCmd, arrayCancelCmd)
 
-	for _, sub := range []*cobra.Command{arrayStatusCmd, arrayLogsCmd, arrayCollectCmd, arrayCancelCmd} {
+	for _, sub := range []*cobra.Command{arrayStatusCmd, arrayLogsCmd, arrayRetryCmd, arrayCollectCmd, arrayCancelCmd} {
 		sub.Flags().StringVar(&arrayRegion, "region", "", "Region to search (default: all regions)")
 	}
 	arrayStatusCmd.Flags().BoolVar(&arrayJSON, "json", false, "Output as JSON")
@@ -369,6 +462,8 @@ func init() {
 	_ = arrayLogsCmd.MarkFlagRequired("index")
 	arrayLogsCmd.Flags().StringVar(&arrayLogsWhich, "which", "command", "Which log to tail: \"command\" or \"spored\"")
 	arrayLogsCmd.Flags().IntVar(&arrayLogsLines, "lines", 200, "Number of trailing lines to show")
+	arrayRetryCmd.Flags().BoolVar(&arrayRetryFailed, "failed", false, "Relaunch the missing/failed indexes (required)")
+	arrayRetryCmd.Flags().BoolVarP(&arrayRetryYes, "yes", "y", false, "Skip the confirmation prompt")
 	arrayCollectCmd.Flags().StringVar(&arrayCollectDir, "output-dir", "", "Destination directory hint for results")
 	arrayCancelCmd.Flags().BoolVarP(&arrayCancelYes, "yes", "y", false, "Skip the confirmation prompt")
 	arrayCancelCmd.Flags().BoolVar(&arrayCancelPend, "pending", false, "Only terminate members that are not actively running")

@@ -14,6 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--lines N` (default 200). Reuses the status path's SSH-key-or-SSM exec branch,
   so it works on keyless (lagotto/cohort-launched) members over SSM. A missing
   index errors with a pointer to `spawn array status`.
+- **`spawn array retry <name> --failed`** (#389). Relaunches only the indexes of
+  a job array that have no running/pending member — the missing (`--min-viable`)
+  gaps and any terminated/stopped members — regrouped under the original array.
+  To relaunch faithfully (original AMI, subnet, security groups, user-data, TTL,
+  and command — none of which a surviving member's tags fully carry), spawn now
+  writes a **local launch record** at launch time to `~/.config/spore/arrays/`;
+  `retry` reads it. This means retry must run from the machine that launched the
+  array. It launches real, billable instances, so it prompts unless `--yes` is
+  given; relaunched members inherit the original TTL.
+
+### Changed
+- Job arrays now persist a lightweight local launch record
+  (`~/.config/spore/arrays/<array-id>.json`) at launch, powering
+  `spawn array retry`. Best-effort — a write failure warns but never fails the
+  launch. MPI clusters (all-or-nothing) are not recorded.
 
 ## [0.80.0] - 2026-07-19
 

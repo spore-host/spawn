@@ -67,6 +67,32 @@ spawn array logs <array-name> [flags]
 | `--region` |  | string |  | Region to search (default: all regions) |
 | `--which` |  | string | `command` | Which log to tail: "command" or "spored" |
 
+### `spawn array retry`
+
+Relaunch the indexes of a job array that never came up or have died.
+
+retry reads the local launch record spawn wrote at launch
+(~/.config/spore/arrays/), so it faithfully reuses the original AMI, subnet,
+security groups, user-data, TTL, and command — none of which a surviving
+member's tags fully carry. It relaunches only indexes with no running/pending
+member, regrouped under the original array so 'spawn array status' sees them.
+
+Note: retry must run from the machine that launched the array (that's where the
+launch record lives). It launches real, billable instances — you'll be asked to
+confirm, or pass --yes.
+
+```
+spawn array retry <array-name> [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--failed` |  | bool |  | Relaunch the missing/failed indexes (required) |
+| `--region` |  | string |  | Region to search (default: all regions) |
+| `--yes` | `-y` | bool |  | Skip the confirmation prompt |
+
 ### `spawn array status`
 
 Show a job array's members, requested vs launched, and missing indexes
