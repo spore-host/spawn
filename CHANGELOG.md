@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn task run` container execution** (spawn#386, increment 3). A TaskSpec
+  with a `container` image now runs the command *inside* that image instead of
+  erroring. The generated wrapper installs Docker on demand, pulls the image, and
+  runs the argv with the input/output manifest directories bind-mounted (identity
+  mounts, so in-container paths match the spec); inputs/outputs still stage on the
+  host, so the image needs no AWS CLI. Private-ECR images are authenticated with a
+  `docker login` and get a scoped `ecr:ReadOnly` grant on the task's instance
+  profile; public images pull anonymously. `resources.gpus > 0` passes `--gpus
+  all`. The flagship `examples/task-spec.json` (a biocontainers image) now runs
+  end-to-end.
+
 ## [0.82.0] - 2026-07-19
 
 ### Fixed
