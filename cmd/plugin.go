@@ -28,6 +28,7 @@ var (
 	pluginConfigPairs []string
 	pluginRemoveYes   bool
 	pluginSSHUser     string
+	pluginDryRun      bool
 )
 
 var pluginCmd = &cobra.Command{
@@ -105,6 +106,11 @@ Plugin ref formats:
   ./path/to/plugin.yaml local file`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// --dry-run previews the plan without contacting an instance, so it does
+		// not require --instance (nothing is installed).
+		if pluginDryRun {
+			return runPluginInspect(cmd.Context(), args[0], true)
+		}
 		if pluginInstance == "" {
 			return fmt.Errorf("--instance is required")
 		}
@@ -115,6 +121,31 @@ Plugin ref formats:
 		}
 
 		return runPluginInstall(cmd.Context(), args[0], pluginInstance, cfgMap)
+	},
+}
+
+// ── inspect ─────────────────────────────────────────────────────────────────
+
+var pluginInspectCmd = &cobra.Command{
+	Use:   "inspect <plugin-ref>",
+	Short: "Preview what a plugin does, without installing it",
+	Long: `Resolve a plugin reference and render its plan — resolved source and
+version, local (controller) vs remote (instance) steps, requested controller
+environment, root vs login-user execution, downloads, health checks, cleanup,
+and its declared permissions block — WITHOUT executing anything or contacting an
+instance.
+
+Installing a plugin runs its author's code on your machine and, on the instance,
+as root. Inspect it first, especially for third-party (github:) plugins.
+
+Plugin ref formats are the same as 'spawn plugin install':
+  name                  official registry (spore-host/spore-plugins)
+  name@v1.2.0           pinned to git tag
+  github:user/repo/name custom GitHub repository
+  ./path/to/plugin.yaml local file`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runPluginInspect(cmd.Context(), args[0], false)
 	},
 }
 
@@ -904,6 +935,7 @@ func init() {
 	rootCmd.AddCommand(pluginCmd)
 	pluginCmd.AddCommand(pluginListCmd)
 	pluginCmd.AddCommand(pluginInstallCmd)
+	pluginCmd.AddCommand(pluginInspectCmd)
 	pluginCmd.AddCommand(pluginStatusCmd)
 	pluginCmd.AddCommand(pluginRemoveCmd)
 	pluginCmd.AddCommand(pluginValidateCmd)
@@ -921,4 +953,5 @@ func init() {
 
 	// Install-only flags.
 	pluginInstallCmd.Flags().StringArrayVar(&pluginConfigPairs, "config", nil, "Config as key=value (repeatable)")
+	pluginInstallCmd.Flags().BoolVar(&pluginDryRun, "dry-run", false, "Preview the plan without installing (contacts no instance)")
 }

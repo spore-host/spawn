@@ -16,6 +16,27 @@ Examples:
 spawn plugin
 ```
 
+### `spawn plugin inspect`
+
+Resolve a plugin reference and render its plan — resolved source and
+version, local (controller) vs remote (instance) steps, requested controller
+environment, root vs login-user execution, downloads, health checks, cleanup,
+and its declared permissions block — WITHOUT executing anything or contacting an
+instance.
+
+Installing a plugin runs its author's code on your machine and, on the instance,
+as root. Inspect it first, especially for third-party (github:) plugins.
+
+Plugin ref formats are the same as 'spawn plugin install':
+  name                  official registry (spore-host/spore-plugins)
+  name@v1.2.0           pinned to git tag
+  github:user/repo/name custom GitHub repository
+  ./path/to/plugin.yaml local file
+
+```
+spawn plugin inspect <plugin-ref>
+```
+
 ### `spawn plugin install`
 
 Install a plugin on a running spore instance.
@@ -42,6 +63,7 @@ spawn plugin install <plugin-ref> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--config` |  | stringArray |  | Config as key=value (repeatable) |
+| `--dry-run` |  | bool |  | Preview the plan without installing (contacts no instance) |
 | `--instance` | `-i` | string |  | Instance ID or hostname (required) |
 | `--key` |  | string |  | Path to SSH private key |
 | `--user` |  | string |  | SSH username for the instance (default: ec2-user) |
