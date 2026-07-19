@@ -65,6 +65,13 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Docs drift gate: the committed command/flag reference (docs-gen/) is
+      # generated from the CLI via `gen-docs`. Regenerate and fail if it's stale,
+      # so a flag/command change can't merge without its reference update. The
+      # umbrella docs site vendors docs-gen/ from the release tag.
+      - name: Docs reference drift gate
+        run: make check-docs
+
       # The lambda/* directories are each their own Go module, so the root
       # `go test ./...` above does NOT descend into them — their tests would
       # otherwise never run in CI (#136). Build, vet, and test each one.
