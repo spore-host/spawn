@@ -572,18 +572,30 @@ exit codes mirror 'spawn status': 0=completed, 1=failed, 2=running, 3=error.`,
 	},
 }
 
+// taskCompletionFile is the on-instance file the generated wrapper writes and
+// spored watches to fire on_complete. It matches the wrapper's SPAWN_COMPLETE
+// path and provider/ec2.go's default, but we tag it EXPLICITLY at launch (below)
+// so on-complete teardown never depends on provider-side defaulting that is
+// gated on the spawn:on-complete tag being visible when spored first boots
+// (EC2 tag eventual-consistency); see spawn#406.
+const taskCompletionFile = "/tmp/SPAWN_COMPLETE"
+
 // buildLaunchConfig maps a sized TaskSpec to the minimal aws.LaunchConfig for one
 // task instance. AMI, UserData, and KeyName are deliberately left empty for
 // launcher.Provision to fill (auto AMI, keyless/SSM, wrapper-as-user-data); the
 // scoped instance profile is set so Provision skips its default-role step.
 func taskLaunchConfig(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region, iamProfile, wrapper string) aws.LaunchConfig {
 	return aws.LaunchConfig{
-		InstanceType:       sized.InstanceType,
-		Region:             region,
-		JobArrayCommand:    wrapper, // Provision embeds this via /etc/spawn/command
-		Spot:               spec.Resources.Purchase == taskproto.PurchaseSpot,
-		TTL:                spec.Lifecycle.TTL,
-		OnComplete:         spec.EffectiveOnComplete(),
+		InstanceType:    sized.InstanceType,
+		Region:          region,
+		JobArrayCommand: wrapper, // Provision embeds this via /etc/spawn/command
+		Spot:            spec.Resources.Purchase == taskproto.PurchaseSpot,
+		TTL:             spec.Lifecycle.TTL,
+		OnComplete:      spec.EffectiveOnComplete(),
+		// Tag the completion file + a short grace explicitly so spored watches the
+		// wrapper's SPAWN_COMPLETE regardless of tag-visibility timing (spawn#406).
+		CompletionFile:     taskCompletionFile,
+		CompletionDelay:    "10s",
 		Name:               spec.TaskID,
 		IamInstanceProfile: iamProfile,
 		Tags:               map[string]string{"spawn:task-id": spec.TaskID},

@@ -148,6 +148,38 @@ func TestHashPolicies_InlinePolicyJSONAffectsRoleName(t *testing.T) {
 	}
 }
 
+func TestSporedBaselinePolicyDoc(t *testing.T) {
+	client := &Client{}
+	doc := client.sporedBaselinePolicyDoc()
+	if doc == "" {
+		t.Fatal("sporedBaselinePolicyDoc returned empty")
+	}
+	// Must be valid JSON and carry the self-management grants spored needs to
+	// read its own tags and terminate itself — the spawn#406 root cause was a
+	// scoped profile that lacked these, so TTL/on-complete never fired.
+	if !json.Valid([]byte(doc)) {
+		t.Fatalf("baseline policy is not valid JSON:\n%s", doc)
+	}
+	for _, want := range []string{"ec2:DescribeTags", "ec2:DescribeInstances", "ec2:TerminateInstances", "ec2:CreateTags"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("baseline policy missing %q\n%s", want, doc)
+		}
+	}
+}
+
+func TestBuildInlinePolicyIncludesBaseline(t *testing.T) {
+	client := &Client{}
+	// Even with only a user template, the spored baseline must be present.
+	pol := client.buildInlinePolicy([]string{"s3:ReadOnly"})
+	b, err := json.Marshal(pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "ec2:DescribeTags") {
+		t.Errorf("buildInlinePolicy dropped the spored self-management baseline:\n%s", string(b))
+	}
+}
+
 func TestBuildTrustPolicyWithAccount(t *testing.T) {
 	client := &Client{}
 	services := []string{"ec2", "lambda"}
