@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.83.0] - 2026-07-19
+
 ### Added
 - **`spawn task run` container execution** (spawn#386, increment 3). A TaskSpec
   with a `container` image now runs the command *inside* that image instead of
@@ -1782,7 +1784,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.82.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.83.0...HEAD
+[0.83.0]: https://github.com/spore-host/spawn/compare/v0.82.0...v0.83.0
 [0.82.0]: https://github.com/spore-host/spawn/compare/v0.81.0...v0.82.0
 [0.81.0]: https://github.com/spore-host/spawn/compare/v0.80.0...v0.81.0
 [0.80.0]: https://github.com/spore-host/spawn/compare/v0.79.0...v0.80.0
