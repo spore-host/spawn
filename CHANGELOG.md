@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`CITATION.cff`** — machine-readable citation metadata so the repo is citable
+  (GitHub "Cite this repository"); base for Zenodo DOI minting.
+
 ## [0.78.0] - 2026-07-19
 
 ### Added
