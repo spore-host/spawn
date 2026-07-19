@@ -3,6 +3,7 @@ package taskproto
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -16,17 +17,22 @@ import (
 // succeeds.
 //
 // resultsBucket is the plain bucket name (no s3:// prefix); the record lands
-// under tasks/<task_id>/ in it.
+// under tasks/<task_id>/ in it. region is used only for the ECR login of a
+// private-registry container image.
 //
 // Design notes (also commented in the emitted script):
 //   - We do NOT `set -e`. Under -e the script would abort the instant the user
 //     command exits non-zero, so stage-out and the completion record would never
 //     run — defeating the purpose. We capture rc=$? explicitly and gate the rest.
 //   - The user command is argv ([]string); each element is single-quoted and run
-//     in a subshell so there is no shell re-parse of a joined string.
-//   - Every interpolated value (command args, env values, paths, task_id) is
-//     single-quoted via shQuote. Env keys are validated in TaskSpec.Validate.
-func GenerateWrapper(spec *TaskSpec, resultsBucket string) string {
+//     in a subshell (host) or as the container's argv so there is no shell
+//     re-parse of a joined string.
+//   - Every interpolated value (command args, env values, paths, task_id, image,
+//     mount dirs) is single-quoted via shQuote. Env keys are validated in Validate.
+//   - When spec.Container is set, the command runs inside that image via `docker
+//     run` with the manifest dirs bind-mounted; stage-in/out still happen on the
+//     host, so the image needs no aws CLI. Docker is installed on demand.
+func GenerateWrapper(spec *TaskSpec, resultsBucket, region string) string {
 	var b strings.Builder
 	p := func(format string, a ...interface{}) { fmt.Fprintf(&b, format, a...) }
 
@@ -70,8 +76,13 @@ func GenerateWrapper(spec *TaskSpec, resultsBucket string) string {
 	p("# ---- run user command ----\n")
 	p("rc=0\n")
 	p("if [ \"$STAGE_RC\" -eq 0 ]; then\n")
-	p("  ( %s )\n", quoteArgv(spec.Command))
-	p("  rc=$?\n")
+	if spec.Container != "" {
+		writeContainerRun(p, spec, region)
+	} else {
+		// Host path: run argv in a subshell (no shell re-parse of a joined string).
+		p("  ( %s )\n", quoteArgv(spec.Command))
+		p("  rc=$?\n")
+	}
 	p("else\n")
 	p("  echo 'spawn: stage-in failed; skipping user command' >&2\n")
 	p("  rc=$STAGE_RC\n")
@@ -147,6 +158,71 @@ func quoteArgv(argv []string) string {
 	return strings.Join(parts, " ")
 }
 
+// writeContainerRun emits the container execution branch: install Docker on
+// demand, log in to a private-ECR registry (public images skip login), pull the
+// image, and run the argv inside it with the manifest dirs bind-mounted. Stage-in
+// already put inputs on the host at those dirs; stage-out reads them back after —
+// so the image needs no aws CLI. p writes into the wrapper; each line is indented
+// to sit inside the `if [ "$STAGE_RC" -eq 0 ]; then` block.
+func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region string) {
+	image := spec.Container
+
+	// Install Docker if absent (the task AMI is stock AL2023; no Docker baked in).
+	p("  if ! command -v docker >/dev/null 2>&1; then\n")
+	p("    echo 'spawn: installing docker...'\n")
+	p("    dnf install -y docker >/dev/null 2>&1 || yum install -y docker >/dev/null 2>&1\n")
+	p("    systemctl enable --now docker\n")
+	p("  fi\n")
+
+	// Private-ECR images need a docker login with the instance-role creds; public
+	// images pull anonymously. ecrImageAccount!="" ⇒ private ECR ref.
+	if ecrImageAccount(image) != "" {
+		host := ecrRegistryHost(image)
+		p("  echo 'spawn: authenticating to ECR (%s)...'\n", host)
+		p("  aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s\n",
+			shQuote(region), shQuote(host))
+	}
+
+	p("  docker pull %s\n", shQuote(image))
+
+	// docker run --rm [--gpus all] <-v dir:dir ...> <image> <argv>
+	gpuFlag := ""
+	if spec.Resources.GPUs > 0 {
+		gpuFlag = "--gpus all "
+	}
+	var mounts strings.Builder
+	for _, d := range containerMountDirs(spec) {
+		fmt.Fprintf(&mounts, "-v %s:%s ", shQuote(d), shQuote(d))
+	}
+	p("  docker run --rm %s%s%s %s\n", gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
+	p("  rc=$?\n")
+}
+
+// containerMountDirs returns the distinct host directories to bind-mount into the
+// container: the parent dir of each input Destination and each output Source
+// (identity-mounted, so in-container paths match the argv the spec author wrote).
+// Sorted for a stable wrapper; "/" , "." and empty are skipped.
+func containerMountDirs(spec *TaskSpec) []string {
+	seen := map[string]bool{}
+	var dirs []string
+	add := func(p string) {
+		d := path.Dir(p)
+		if d == "" || d == "." || d == "/" || seen[d] {
+			return
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+	for _, m := range spec.Inputs {
+		add(m.Destination)
+	}
+	for _, m := range spec.Outputs {
+		add(m.Source)
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
 // recursiveFlag returns " --recursive" when an S3/dir source is a prefix
 // (trailing slash), matching `aws s3 cp` semantics for copying a whole prefix.
 func recursiveFlag(source string) string {
@@ -154,6 +230,31 @@ func recursiveFlag(source string) string {
 		return " --recursive"
 	}
 	return ""
+}
+
+// ecrAccountRe extracts the 12-digit account ID from a private-ECR image host
+// (<account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]). Mirrors the pure
+// helper in cmd/app_byo.go; duplicated here to keep taskproto free of a cmd
+// dependency (the JSON contract package must not import the CLI).
+var ecrAccountRe = regexp.MustCompile(`^(\d{12})\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/`)
+
+// ecrImageAccount returns the AWS account owning a private-ECR image, or "" if
+// the image isn't a private-ECR ref (e.g. a public quay.io/docker.io image).
+func ecrImageAccount(image string) string {
+	m := ecrAccountRe.FindStringSubmatch(image)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// ecrRegistryHost returns the registry host (everything before the first '/') —
+// the argument `docker login` expects.
+func ecrRegistryHost(image string) string {
+	if i := strings.IndexByte(image, '/'); i >= 0 {
+		return image[:i]
+	}
+	return image
 }
 
 // shQuote wraps s in single quotes, escaping embedded single quotes. This is the

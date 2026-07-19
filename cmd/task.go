@@ -211,8 +211,11 @@ s3://spawn-results-<account>-<region>/tasks/<task_id>/completion.json — the
 signal workflow adapters poll. The instance self-terminates on completion (TTL +
 on_complete).
 
---dry-run sizes and prints the plan without launching. Container execution
-(spec.container) is a follow-up increment — omit it to run on the host.`,
+If spec.container is set, the command runs inside that image (Docker is installed
+on demand; the manifest dirs are bind-mounted; a private-ECR image is pulled with
+an ecr:ReadOnly grant, GPUs passed with --gpus all). Otherwise it runs on the host.
+
+--dry-run sizes and prints the plan without launching.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if taskRunSpecPath == "" {
 			return fmt.Errorf("--spec is required")
@@ -303,7 +306,15 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	fmt.Fprintf(out, "Task:         %s\n", spec.TaskID)
 	fmt.Fprintf(out, "Command:      %s\n", strings.Join(spec.Command, " "))
 	if spec.Container != "" {
-		fmt.Fprintf(out, "Container:    %s\n", spec.Container)
+		mode := "container (docker run"
+		if spec.Resources.GPUs > 0 {
+			mode += ", --gpus all"
+		}
+		if ecrImageAccount(spec.Container) != "" {
+			mode += ", private ECR"
+		}
+		mode += ")"
+		fmt.Fprintf(out, "Container:    %s  [%s]\n", spec.Container, mode)
 	}
 	fmt.Fprintf(out, "Region:       %s\n", region)
 	fmt.Fprintf(out, "Instance:     %s  (%d vCPU, %.0f GiB", sized.InstanceType, sized.VCPUs, sized.MemoryGiB)
@@ -346,13 +357,10 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 // a scoped instance profile granting the S3 access the wrapper needs, and
 // launches via launcher.Provision (keyless/SSM, auto AMI+IAM+user-data). It
 // returns as soon as the instance is launched — the caller polls the S3
-// completion record (a --wait poller is a follow-up increment). Container
-// execution is deferred: a spec with a container ref is rejected here.
+// completion record (or passes --wait). When spec.Container is set the command
+// runs inside that image (Docker is installed on demand; a private-ECR image
+// gets an ecr:ReadOnly grant on the scoped profile).
 func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *taskproto.TaskSpec, finder taskproto.InstanceFinder, region string) error {
-	if spec.Container != "" {
-		return fmt.Errorf("container execution is a follow-up increment (spawn#386); omit 'container' to run the command on the host")
-	}
-
 	sized, err := taskproto.Size(ctx, finder, spec.Resources)
 	if err != nil {
 		return err
@@ -369,13 +377,15 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		return fmt.Errorf("ensure results bucket %s: %w", resultsBucket, err)
 	}
 
-	wrapper := taskproto.GenerateWrapper(spec, resultsBucket)
+	wrapper := taskproto.GenerateWrapper(spec, resultsBucket, region)
 
 	// Scoped instance profile: the default spored role has no S3 write, so grant
 	// exactly the buckets this task reads (inputs) and writes (outputs + results).
+	// A private-ECR container image additionally needs ecr:ReadOnly to pull.
 	profile, err := client.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
 		TrustServices:    []string{"ec2"}, // an instance profile is assumed by EC2
 		InlinePolicyJSON: taskStagingPolicy(s3Buckets(spec.Inputs), s3Buckets(spec.Outputs), resultsBucket),
+		Policies:         taskExtraPolicies(spec),
 	})
 	if err != nil {
 		return fmt.Errorf("create task instance profile: %w", err)
@@ -631,6 +641,18 @@ func s3Bucket(uri string) string {
 		return rest[:i]
 	}
 	return rest
+}
+
+// taskExtraPolicies returns the IAM policy-template names (beyond the scoped S3
+// staging policy) a task's instance profile needs. A private-ECR container image
+// needs ecr:ReadOnly to pull; public images and non-container tasks need nothing
+// extra. The names resolve to buildInlinePolicy templates (pkg/aws/iam.go);
+// ecrImageAccount is the shared pure helper in cmd/app_byo.go.
+func taskExtraPolicies(spec *taskproto.TaskSpec) []string {
+	if spec.Container != "" && ecrImageAccount(spec.Container) != "" {
+		return []string{"ecr:ReadOnly"}
+	}
+	return nil
 }
 
 // taskStagingPolicy builds a scoped S3 policy granting read on the input buckets

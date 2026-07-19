@@ -17,6 +17,30 @@ func (f fakeTaskFinder) FindCandidates(context.Context, taskproto.ResourceReques
 	return f.cands, nil
 }
 
+func TestTaskExtraPolicies(t *testing.T) {
+	cases := []struct {
+		name  string
+		spec  *taskproto.TaskSpec
+		wantN int
+		want  string
+	}{
+		{"no container", &taskproto.TaskSpec{}, 0, ""},
+		{"public container", &taskproto.TaskSpec{Container: "quay.io/biocontainers/bwa:0.7.18"}, 0, ""},
+		{"private ECR", &taskproto.TaskSpec{Container: "123456789012.dkr.ecr.us-east-1.amazonaws.com/x:v1"}, 1, "ecr:ReadOnly"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := taskExtraPolicies(tc.spec)
+			if len(got) != tc.wantN {
+				t.Fatalf("taskExtraPolicies = %v, want %d entries", got, tc.wantN)
+			}
+			if tc.wantN > 0 && got[0] != tc.want {
+				t.Errorf("taskExtraPolicies = %v, want [%s]", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderTaskDryRun(t *testing.T) {
 	spec := &taskproto.TaskSpec{
 		TaskID:    "align-42",
@@ -53,6 +77,29 @@ func TestRenderTaskDryRun(t *testing.T) {
 	// Must never claim to have launched.
 	if strings.Contains(got, "Instance i-") || strings.Contains(strings.ToLower(got), "launched instance") {
 		t.Errorf("dry-run must not launch anything:\n%s", got)
+	}
+}
+
+func TestRenderTaskDryRun_Container(t *testing.T) {
+	spec := &taskproto.TaskSpec{
+		TaskID:    "infer",
+		Container: "123456789012.dkr.ecr.us-east-1.amazonaws.com/model:v3",
+		Command:   []string{"python", "infer.py"},
+		Resources: taskproto.ResourceRequest{CPU: 4, MemoryGiB: 16, GPUs: 1},
+		Lifecycle: taskproto.Lifecycle{TTL: "2h"},
+	}
+	finder := fakeTaskFinder{cands: []taskproto.Candidate{
+		{InstanceType: "g5.xlarge", Family: "g5", VCPUs: 4, MemoryGiB: 16, GPUs: 1, OnDemandPrice: 1.006},
+	}}
+	var buf bytes.Buffer
+	if err := renderTaskDryRun(context.Background(), &buf, spec, finder, "us-east-1"); err != nil {
+		t.Fatalf("renderTaskDryRun: %v", err)
+	}
+	got := buf.String()
+	for _, w := range []string{"model:v3", "container (docker run", "--gpus all", "private ECR"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("container dry-run missing %q\n---\n%s", w, got)
+		}
 	}
 }
 

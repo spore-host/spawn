@@ -24,7 +24,7 @@ func fullSpec() *TaskSpec {
 }
 
 func TestGenerateWrapper_Structure(t *testing.T) {
-	w := GenerateWrapper(fullSpec(), "spawn-results-123-us-east-1")
+	w := GenerateWrapper(fullSpec(), "spawn-results-123-us-east-1", "us-east-1")
 
 	mustContain := []string{
 		"#!/bin/bash",
@@ -59,7 +59,7 @@ func TestGenerateWrapper_QuotesMetacharArgs(t *testing.T) {
 		Command:   []string{"echo", "a; rm -rf /", "$(whoami)", "it's"},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "b")
+	w := GenerateWrapper(spec, "b", "us-east-1")
 
 	// Each arg must appear single-quoted; the single-quote in "it's" is escaped.
 	for _, want := range []string{`'echo'`, `'a; rm -rf /'`, `'$(whoami)'`, `'it'\''s'`} {
@@ -74,7 +74,7 @@ func TestGenerateWrapper_QuotesMetacharArgs(t *testing.T) {
 }
 
 func TestGenerateWrapper_StageOutAfterCommand(t *testing.T) {
-	w := GenerateWrapper(fullSpec(), "b")
+	w := GenerateWrapper(fullSpec(), "b", "us-east-1")
 	runIdx := strings.Index(w, "rc=$?")
 	outIdx := strings.Index(w, "s3://out-bucket/out.bam")
 	recIdx := strings.Index(w, "completion.json")
@@ -88,11 +88,102 @@ func TestGenerateWrapper_StageOutAfterCommand(t *testing.T) {
 
 func TestGenerateWrapper_NoInputsNoOutputs(t *testing.T) {
 	spec := &TaskSpec{TaskID: "t", Command: []string{"true"}, Lifecycle: Lifecycle{TTL: "1h"}}
-	w := GenerateWrapper(spec, "b")
+	w := GenerateWrapper(spec, "b", "us-east-1")
 	// Still writes the completion record + signals spored even with no staging.
 	for _, sub := range []string{"completion.json", "/tmp/SPAWN_COMPLETE", "exit $rc"} {
 		if !strings.Contains(w, sub) {
 			t.Errorf("minimal wrapper missing %q", sub)
+		}
+	}
+}
+
+func TestGenerateWrapper_HostHasNoDocker(t *testing.T) {
+	// A container-less task must never emit docker/ECR machinery.
+	w := GenerateWrapper(fullSpec(), "b", "us-east-1")
+	for _, bad := range []string{"docker run", "docker pull", "dnf install -y docker", "ecr get-login-password"} {
+		if strings.Contains(w, bad) {
+			t.Errorf("host task wrapper unexpectedly contains %q", bad)
+		}
+	}
+	if !strings.Contains(w, "( 'bash'") {
+		t.Errorf("host task should run argv in a subshell")
+	}
+}
+
+func TestGenerateWrapper_PublicContainer(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "align",
+		Container: "quay.io/biocontainers/bwa:0.7.18",
+		Command:   []string{"bwa", "mem", "/data/ref.fa"},
+		Inputs:    []Manifest{{Source: "s3://in/ref.fa", Destination: "/data/ref.fa"}},
+		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
+		Lifecycle: Lifecycle{TTL: "4h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	mustContain := []string{
+		"command -v docker",     // install guard
+		"dnf install -y docker", // install
+		"docker pull 'quay.io/biocontainers/bwa:0.7.18'",
+		"docker run --rm ", // run
+		"'quay.io/biocontainers/bwa:0.7.18' 'bwa' 'mem' '/data/ref.fa'", // image + argv
+		"-v '/data':'/data'",                        // input dir mount
+		"-v '/work':'/work'",                        // output dir mount
+		"aws s3 cp 's3://in/ref.fa' '/data/ref.fa'", // stage-in still on host
+		"completion.json",                           // record unchanged
+	}
+	for _, sub := range mustContain {
+		if !strings.Contains(w, sub) {
+			t.Errorf("public-container wrapper missing %q\n---\n%s", sub, w)
+		}
+	}
+	// Public image: NO ECR login, NO --gpus.
+	if strings.Contains(w, "ecr get-login-password") {
+		t.Error("public image should not emit an ECR login")
+	}
+	if strings.Contains(w, "--gpus") {
+		t.Error("no GPU requested; --gpus must not appear")
+	}
+}
+
+func TestGenerateWrapper_PrivateECRContainerWithGPU(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "infer",
+		Container: "123456789012.dkr.ecr.us-west-2.amazonaws.com/model:v3",
+		Command:   []string{"python", "infer.py"},
+		Resources: ResourceRequest{GPUs: 1},
+		Lifecycle: Lifecycle{TTL: "2h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-west-2")
+
+	if !strings.Contains(w, "aws ecr get-login-password --region 'us-west-2' | docker login --username AWS --password-stdin '123456789012.dkr.ecr.us-west-2.amazonaws.com'") {
+		t.Errorf("private ECR image must emit a docker login to its registry host\n---\n%s", w)
+	}
+	if !strings.Contains(w, "docker run --rm --gpus all ") {
+		t.Errorf("GPU task must pass --gpus all\n---\n%s", w)
+	}
+}
+
+func TestContainerMountDirs(t *testing.T) {
+	spec := &TaskSpec{
+		Inputs: []Manifest{
+			{Source: "s3://in/ref.fa", Destination: "/data/ref.fa"},
+			{Source: "s3://in/x", Destination: "/data/sub/x"}, // /data/sub distinct from /data
+		},
+		Outputs: []Manifest{
+			{Source: "/work/out.bam", Destination: "s3://out/out.bam"},
+			{Source: "/data/also.txt", Destination: "s3://out/also.txt"}, // /data again → deduped
+		},
+	}
+	got := containerMountDirs(spec)
+	want := []string{"/data", "/data/sub", "/work"} // sorted, deduped
+	if len(got) != len(want) {
+		t.Fatalf("containerMountDirs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("containerMountDirs = %v, want %v", got, want)
+			break
 		}
 	}
 }

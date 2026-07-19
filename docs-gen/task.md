@@ -28,8 +28,11 @@ s3://spawn-results-&lt;account&gt;-&lt;region&gt;/tasks/&lt;task_id&gt;/completi
 signal workflow adapters poll. The instance self-terminates on completion (TTL +
 on_complete).
 
---dry-run sizes and prints the plan without launching. Container execution
-(spec.container) is a follow-up increment — omit it to run on the host.
+If spec.container is set, the command runs inside that image (Docker is installed
+on demand; the manifest dirs are bind-mounted; a private-ECR image is pulled with
+an ecr:ReadOnly grant, GPUs passed with --gpus all). Otherwise it runs on the host.
+
+--dry-run sizes and prints the plan without launching.
 
 ```
 spawn task run --spec <file> [flags]
