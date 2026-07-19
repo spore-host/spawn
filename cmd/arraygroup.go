@@ -249,6 +249,7 @@ func init() {
 		sub.Flags().StringVar(&arrayRegion, "region", "", "Region to search (default: all regions)")
 	}
 	arrayStatusCmd.Flags().BoolVar(&arrayJSON, "json", false, "Output as JSON")
+	_ = arrayStatusCmd.Flags().MarkDeprecated("json", "use --output json instead")
 	arrayCollectCmd.Flags().StringVar(&arrayCollectDir, "output-dir", "", "Destination directory hint for results")
 	arrayCancelCmd.Flags().BoolVarP(&arrayCancelYes, "yes", "y", false, "Skip the confirmation prompt")
 	arrayCancelCmd.Flags().BoolVar(&arrayCancelPend, "pending", false, "Only terminate members that are not actively running")

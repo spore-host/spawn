@@ -56,6 +56,5 @@ spawn array status <array-name> [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--json` |  | bool |  | Output as JSON |
 | `--region` |  | string |  | Region to search (default: all regions) |
 
