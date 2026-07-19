@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Command/flag reference is now generated from the CLI and drift-gated.** A
+  hidden `spawn gen-docs` command (via `libs/docgen`) emits the exhaustive
+  per-command reference to `docs-gen/`; `make gen-docs` regenerates it and a CI
+  `check-docs` gate fails if the committed reference drifts from the code. The
+  docs site vendors these fragments, so the reference can no longer go stale
+  (fixes a class of doc-vs-code drift found in the 2026-07 docs audit). Run
+  `make gen-docs` after adding/renaming/removing a command or flag.
+
 ### Changed
 - **spawn now uses your existing default SSH key when you have one.** If
   `~/.ssh/id_ed25519` (or `~/.ssh/id_rsa` for Windows/RSA targets) exists, spawn

@@ -1,4 +1,4 @@
-.PHONY: all build build-spawn build-spored build-all clean install test test-coverage test-short test-integration test-integration-scheduler test-integration-queue test-e2e test-e2e-tier0 test-e2e-tier1 test-e2e-tier2 test-e2e-tier3 check vuln
+.PHONY: all build build-spawn build-spored build-all clean install test test-coverage test-short test-integration test-integration-scheduler test-integration-queue test-e2e test-e2e-tier0 test-e2e-tier1 test-e2e-tier2 test-e2e-tier3 check vuln gen-docs check-docs
 
 # Version
 VERSION ?= 0.1.0
@@ -7,6 +7,17 @@ VERSION ?= 0.1.0
 BUILD_DIR = bin
 
 all: build
+
+# Regenerate the committed command/flag reference fragments (docs-gen/) from the
+# CLI itself. Run after adding/renaming/removing a command or flag; the docs
+# drift gate (check-docs) fails CI otherwise.
+gen-docs:
+	go run . gen-docs --out docs-gen
+
+# Drift gate: regenerate and fail if the committed reference is stale. Run in CI
+# on PRs and before a release so the reference can never ship out of sync.
+check-docs: gen-docs
+	git diff --exit-code docs-gen/ || { echo "::error::docs-gen/ is stale — run 'make gen-docs' and commit"; exit 1; }
 
 # Build for current platform
 build: build-spawn build-spored
