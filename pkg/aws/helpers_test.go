@@ -19,6 +19,13 @@ func TestDetectArchitecture(t *testing.T) {
 		{"r8g.2xlarge", "arm64"},
 		{"x2gd.large", "arm64"},
 		{"g5g.xlarge", "arm64"},
+		// spawn#410: next-gen Graviton families must resolve arm64 in the static
+		// fallback too, not just via the EC2 lookup.
+		{"m9g.24xlarge", "arm64"},
+		{"r9g.16xlarge", "arm64"},
+		{"c9g.8xlarge", "arm64"},
+		{"hpc7g.16xlarge", "arm64"},
+		{"i8g.4xlarge", "arm64"},
 		{"m7i.large", "x86_64"},
 		{"c7i.xlarge", "x86_64"},
 		{"p5.48xlarge", "x86_64"},
@@ -28,6 +35,21 @@ func TestDetectArchitecture(t *testing.T) {
 	for _, tt := range tests {
 		if got := DetectArchitecture(tt.instanceType); got != tt.want {
 			t.Errorf("DetectArchitecture(%q) = %q, want %q", tt.instanceType, got, tt.want)
+		}
+	}
+}
+
+func TestInstanceFamily(t *testing.T) {
+	tests := map[string]string{
+		"m9g.24xlarge":  "m9g",
+		"t3.micro":      "t3",
+		"c7gn.16xlarge": "c7gn",
+		"noformat":      "noformat", // no dot → whole string
+		"":              "",
+	}
+	for in, want := range tests {
+		if got := instanceFamily(in); got != want {
+			t.Errorf("instanceFamily(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
