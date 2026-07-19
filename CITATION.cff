@@ -1,6 +1,7 @@
 cff-version: 1.2.0
 message: "If you use spawn in your research, please cite it as below."
 title: "spawn: an ephemeral EC2 launcher and lifecycle manager"
+doi: "10.5281/zenodo.21439888"
 abstract: >-
   spawn is the spore.host tool for launching and managing ephemeral AWS EC2
   instances (Linux and Windows), including the spored in-instance lifecycle
