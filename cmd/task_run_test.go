@@ -91,6 +91,14 @@ func TestTaskLaunchConfig(t *testing.T) {
 	if cfg.AMI != "" || cfg.UserData != "" {
 		t.Errorf("AMI/UserData should be empty for Provision, got AMI=%q UserData=%q", cfg.AMI, cfg.UserData)
 	}
+	// Completion file must be tagged explicitly (spawn#406) so on-complete
+	// teardown doesn't depend on provider-side defaulting / tag-visibility timing.
+	if cfg.CompletionFile != "/tmp/SPAWN_COMPLETE" {
+		t.Errorf("CompletionFile = %q, want /tmp/SPAWN_COMPLETE", cfg.CompletionFile)
+	}
+	if cfg.CompletionDelay == "" {
+		t.Error("CompletionDelay should be set so on-complete has a bounded grace")
+	}
 }
 
 func TestTaskLaunchConfig_OnDemandDefault(t *testing.T) {

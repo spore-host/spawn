@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Task instances now self-terminate on completion / enforce their TTL in-instance**
+  (spawn#406). `spawn task run` attaches a *scoped* IAM instance profile; that
+  profile bypassed the code path that always grants spored its EC2
+  self-management permissions, so spored got `AccessDenied` on `ec2:DescribeTags`
+  and silently ran with `TTL=0` and no `on_complete` — the instance kept running
+  until the out-of-band reaper caught it. A caller-supplied `InlinePolicyJSON`
+  now always also carries the spored self-management baseline
+  (DescribeTags/CreateTags/TerminateInstances/…), and `task run` tags the
+  completion file explicitly. Verified end-to-end: a task instance self-terminates
+  within minutes of completion.
+
 ### Added
 - **Real `spawn task run`** (spawn#386, increment 2). `task run --spec <file>`
   now launches — not just `--dry-run`. It sizes the cheapest fitting instance,

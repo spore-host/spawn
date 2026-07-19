@@ -560,7 +560,10 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 		}
 	}
 
-	// Attach a caller-supplied scoped policy passed as a string (no file).
+	// Attach a caller-supplied scoped policy passed as a string (no file). This
+	// path bypasses buildInlinePolicy, so also attach the spored self-management
+	// baseline — otherwise spored can't read its own tags and TTL/on-complete
+	// silently never fire (spawn#406).
 	if config.InlinePolicyJSON != "" {
 		_, err = iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 			RoleName:       aws.String(roleName),
@@ -569,6 +572,13 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 		})
 		if err != nil {
 			return fmt.Errorf("failed to attach scoped policy: %w", err)
+		}
+		if _, err = iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+			RoleName:       aws.String(roleName),
+			PolicyName:     aws.String("spored-baseline-policy"),
+			PolicyDocument: aws.String(c.sporedBaselinePolicyDoc()),
+		}); err != nil {
+			return fmt.Errorf("failed to attach spored baseline policy: %w", err)
 		}
 	}
 
@@ -610,6 +620,14 @@ func (c *Client) updateInlinePolicy(ctx context.Context, iamClient *iam.Client, 
 			RoleName:       aws.String(roleName),
 			PolicyName:     aws.String("spawn-scoped-policy"),
 			PolicyDocument: aws.String(config.InlinePolicyJSON),
+		}); err != nil {
+			return err
+		}
+		// Keep the spored self-management baseline in sync too (spawn#406).
+		if _, err := iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+			RoleName:       aws.String(roleName),
+			PolicyName:     aws.String("spored-baseline-policy"),
+			PolicyDocument: aws.String(c.sporedBaselinePolicyDoc()),
 		}); err != nil {
 			return err
 		}
@@ -669,6 +687,61 @@ func (c *Client) buildTrustPolicyWithAccount(services []string, accountID string
 
 // buildInlinePolicy combines multiple policy templates into one
 func (c *Client) buildInlinePolicy(policies []string) map[string]interface{} {
+	statements := c.sporedSelfManagementStatements()
+
+	// Add user-specified policy templates
+	for _, policyStr := range policies {
+		// Get template
+		template, ok := PolicyTemplates[policyStr]
+		if !ok {
+			continue
+		}
+
+		// Parse template
+		var policy map[string]interface{}
+		if err := json.Unmarshal([]byte(template), &policy); err != nil {
+			continue
+		}
+
+		// Extract statements
+		if stmts, ok := policy["Statement"].([]interface{}); ok {
+			statements = append(statements, stmts...)
+		}
+	}
+
+	return map[string]interface{}{
+		"Version":   "2012-10-17",
+		"Statement": statements,
+	}
+}
+
+// sporedBaselinePolicyDoc returns the spored self-management policy as a
+// standalone JSON document. It's attached alongside a caller-supplied
+// InlinePolicyJSON (which otherwise bypasses buildInlinePolicy), so an instance
+// with a scoped custom policy STILL gets the EC2 self-management grants spored
+// needs — without them spored can't read its own tags, so TTL and on-complete
+// silently never fire (spawn#406). Returns "" only on a marshal error (never
+// expected for this static content).
+func (c *Client) sporedBaselinePolicyDoc() string {
+	doc := map[string]interface{}{
+		"Version":   "2012-10-17",
+		"Statement": c.sporedSelfManagementStatements(),
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// sporedSelfManagementStatements returns the policy statements every
+// spored-running instance role MUST carry, regardless of any additional
+// user/scoped policy: read its own tags (TTL/idle/on-complete/completion-file),
+// keep lifecycle tags current, terminate/stop itself, invoke the DNS updater,
+// and mount an async FSx. Destructive + tag-write actions are scoped to
+// spawn:managed=true. Shared by buildInlinePolicy and sporedBaselinePolicyDoc so
+// the two paths can never drift.
+func (c *Client) sporedSelfManagementStatements() []interface{} {
 	statements := []interface{}{}
 
 	// ALWAYS include spored-required EC2 permissions for self-management
@@ -765,30 +838,7 @@ func (c *Client) buildInlinePolicy(policies []string) map[string]interface{} {
 	}
 	statements = append(statements, sporedFSxMount)
 
-	// Add user-specified policy templates
-	for _, policyStr := range policies {
-		// Get template
-		template, ok := PolicyTemplates[policyStr]
-		if !ok {
-			continue
-		}
-
-		// Parse template
-		var policy map[string]interface{}
-		if err := json.Unmarshal([]byte(template), &policy); err != nil {
-			continue
-		}
-
-		// Extract statements
-		if stmts, ok := policy["Statement"].([]interface{}); ok {
-			statements = append(statements, stmts...)
-		}
-	}
-
-	return map[string]interface{}{
-		"Version":   "2012-10-17",
-		"Statement": statements,
-	}
+	return statements
 }
 
 // buildIAMTags creates IAM tags with spawn metadata
