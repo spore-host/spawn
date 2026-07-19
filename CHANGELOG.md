@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **SSM is now guaranteed on every spawn-launched instance.** `AmazonSSMManagedInstanceCore`
+  is attached to the instance role on all profile paths — the default `spored`
+  role and user-supplied `--iam-role`/policy roles alike — and a failure to attach
+  it is now a hard error instead of a logged warning. This makes `spawn connect`'s
+  SSM fallback reliable everywhere and is the baseline that the MPI cohort's
+  control-plane peer assembly and readiness probes depend on. (Instances launched
+  in batch-queue mode with a pre-existing `--iam-role` profile name are unchanged —
+  that profile is used as-is; ensure it carries SSM core yourself.)
+
 ### Added
 - **`bot-cross-account-role.yaml`: opt-in per-account ExternalId and tag-scoped
   EC2 permissions.** Two new, default-off parameters let each account harden its
