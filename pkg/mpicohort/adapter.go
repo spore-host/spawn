@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/spore-host/cohort"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -31,6 +32,20 @@ type LaunchAPI interface {
 	StopInstance(ctx context.Context, region, instanceID string, hibernate bool) error
 	StartInstance(ctx context.Context, region, instanceID string) error
 	ListInstances(ctx context.Context, region, stateFilter string) ([]aws.InstanceInfo, error)
+	// CreatePlacementGroup is idempotent (already-exists is success) and blocks
+	// until the group is available. DeletePlacementGroup removes an (empty) group.
+	// Used for lazy per-AZ cluster placement groups under AZ fallback.
+	CreatePlacementGroup(ctx context.Context, name, region string) error
+	DeletePlacementGroup(ctx context.Context, name string) error
+}
+
+// PlacementGroupName returns the per-AZ cluster placement group name for a
+// prefix and AZ, e.g. ("spawn-mpi-train", "us-east-1b") → "spawn-mpi-train-us-east-1b".
+// A fresh name per AZ is what makes AZ fallback safe: a cluster PG binds to the
+// AZ of its first instance, so reusing one name across a drain→advance→relaunch
+// round would carry sticky AZ affinity; a distinct name per AZ sidesteps it.
+func PlacementGroupName(prefix, az string) string {
+	return prefix + "-" + az
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +69,16 @@ type Actuator struct {
 	// Actuator looks it up by intent.ID. Nil/missing → fall back to BaseConfig
 	// (the spike path); the rung overlay is applied on top either way.
 	Configs map[cohort.EntityID]aws.LaunchConfig
+
+	// PlacementGroupPrefix, when non-empty, makes the Actuator lazily create a
+	// per-AZ cluster placement group (PlacementGroupName(prefix, az)) before
+	// launching into that AZ, and set it on the launch config. This is how AZ
+	// fallback coexists with a cluster PG: each rung's AZ gets its own PG, created
+	// on demand. Empty → no PG (or the config already carries a fixed one).
+	PlacementGroupPrefix string
+
+	pgMu      sync.Mutex          // guards pgCreated
+	pgCreated map[string]struct{} // AZ → placement group ensured (create-once per AZ)
 }
 
 func (a *Actuator) Launch(ctx context.Context, intent cohort.EntityIntent) (cohort.Observation, error) {
@@ -75,6 +100,17 @@ func (a *Actuator) Launch(ctx context.Context, intent cohort.EntityIntent) (coho
 		cfg.Spot = rp.Rung.CapacityModel == cohort.CapacitySpot
 	}
 
+	// Lazy per-AZ cluster placement group: create (once) the PG for this rung's
+	// AZ and launch into it. This is what lets AZ fallback coexist with a PG —
+	// each AZ the cohort tries gets its own group.
+	if a.PlacementGroupPrefix != "" && cfg.AvailabilityZone != "" {
+		pg, err := a.ensurePlacementGroup(ctx, cfg.AvailabilityZone)
+		if err != nil {
+			return cohort.Observation{}, err
+		}
+		cfg.PlacementGroup = pg
+	}
+
 	res, err := a.Client.Launch(ctx, cfg)
 	if err != nil {
 		return cohort.Observation{}, err // Classifier maps this; do NOT classify here
@@ -87,6 +123,45 @@ func (a *Actuator) Launch(ctx context.Context, intent cohort.EntityIntent) (coho
 		Address:    res.PrivateIP, // MPI assembly needs private IPs
 		Rung:       rungOf(intent),
 	}, nil
+}
+
+// ensurePlacementGroup creates the per-AZ cluster placement group at most once
+// per AZ (create is idempotent, but this avoids the redundant 30s availability
+// poll for every member of a round in the same AZ) and returns its name.
+func (a *Actuator) ensurePlacementGroup(ctx context.Context, az string) (string, error) {
+	name := PlacementGroupName(a.PlacementGroupPrefix, az)
+
+	a.pgMu.Lock()
+	if a.pgCreated == nil {
+		a.pgCreated = make(map[string]struct{})
+	}
+	_, done := a.pgCreated[az]
+	a.pgMu.Unlock()
+	if done {
+		return name, nil
+	}
+
+	if err := a.Client.CreatePlacementGroup(ctx, name, a.Region); err != nil {
+		return "", fmt.Errorf("create placement group %q: %w", name, err)
+	}
+
+	a.pgMu.Lock()
+	a.pgCreated[az] = struct{}{}
+	a.pgMu.Unlock()
+	return name, nil
+}
+
+// CreatedPlacementGroups returns the names of every per-AZ placement group this
+// Actuator created, so the caller can delete the ones for abandoned AZs after the
+// cohort resolves (only the final AZ's group holds instances).
+func (a *Actuator) CreatedPlacementGroups() []string {
+	a.pgMu.Lock()
+	defer a.pgMu.Unlock()
+	names := make([]string, 0, len(a.pgCreated))
+	for az := range a.pgCreated {
+		names = append(names, PlacementGroupName(a.PlacementGroupPrefix, az))
+	}
+	return names
 }
 
 func (a *Actuator) Start(ctx context.Context, id cohort.EntityID) (cohort.Observation, error) {

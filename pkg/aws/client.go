@@ -157,7 +157,12 @@ type LaunchConfig struct {
 	CapacityBlock      bool     // If true, consume a Capacity Block for ML (InstanceMarketOptions MarketType=capacity-block); requires ReservationID; #216
 	Hibernate          bool     // If true, configure the instance for hibernation support
 	PlacementGroup     string   // Cluster placement group name (MPI / EFA workloads)
-	EFAEnabled         bool     // If true, attach an Elastic Fabric Adapter network interface
+	// PlacementGroupPrefix is a transient hint (NOT sent to RunInstances): when an
+	// MPI cohort auto-manages placement groups per AZ, runLaunch sets this instead
+	// of PlacementGroup so the cohort Actuator can lazily create a per-AZ group
+	// (<prefix>-<az>) under AZ fallback. Empty for non-cohort / fixed-PG launches.
+	PlacementGroupPrefix string
+	EFAEnabled           bool // If true, attach an Elastic Fabric Adapter network interface
 
 	// spawn-specific tags
 	TTL             string

@@ -22,6 +22,9 @@ type fakeLauncher struct {
 	failAZ    string            // if set, any launch into this AZ ICEs (models per-AZ capacity)
 	failAZs   map[string]bool   // if set, any launch into one of these AZs ICEs (multi-AZ exhaustion)
 	launchLog []launchRec
+
+	pgCreated map[string]int // placement group name → CreatePlacementGroup call count
+	pgDeleted []string       // placement group names passed to DeletePlacementGroup
 }
 
 type launchRec struct {
@@ -84,6 +87,23 @@ func (f *fakeLauncher) Terminate(_ context.Context, _, instanceID string) error 
 
 func (f *fakeLauncher) StopInstance(_ context.Context, _, _ string, _ bool) error { return nil }
 func (f *fakeLauncher) StartInstance(_ context.Context, _, _ string) error        { return nil }
+
+func (f *fakeLauncher) CreatePlacementGroup(_ context.Context, name, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pgCreated == nil {
+		f.pgCreated = map[string]int{}
+	}
+	f.pgCreated[name]++
+	return nil
+}
+
+func (f *fakeLauncher) DeletePlacementGroup(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pgDeleted = append(f.pgDeleted, name)
+	return nil
+}
 
 func (f *fakeLauncher) ListInstances(_ context.Context, _, _ string) ([]aws.InstanceInfo, error) {
 	f.mu.Lock()
@@ -248,6 +268,65 @@ func TestMPI_MultiAZChain_LandsAllInSurvivingAZ(t *testing.T) {
 		if in.AvailabilityZone != "us-east-1c" {
 			t.Errorf("%s landed in AZ %q — all nodes must land in the surviving AZ (us-east-1c)", name, in.AvailabilityZone)
 		}
+	}
+}
+
+// TestPlacementGroupName covers the per-AZ PG naming used for lazy AZ-fallback PGs.
+func TestPlacementGroupName(t *testing.T) {
+	if got := PlacementGroupName("spawn-mpi-train", "us-east-1b"); got != "spawn-mpi-train-us-east-1b" {
+		t.Errorf("PlacementGroupName = %q, want spawn-mpi-train-us-east-1b", got)
+	}
+	// Distinct AZs must yield distinct names (the whole point — no sticky affinity).
+	if PlacementGroupName("p", "us-east-1a") == PlacementGroupName("p", "us-east-1b") {
+		t.Error("different AZs produced the same PG name")
+	}
+}
+
+// TestActuator_PerAZPlacementGroup covers Stage 3: with a PlacementGroupPrefix,
+// the Actuator lazily creates one cluster PG per AZ (create-once, even across
+// multiple members in a round), sets it on the launch, and tracks the names so
+// abandoned ones can be cleaned up. Drives a 4-node cohort whose primary AZ is
+// exhausted so the cohort advances a→b, exercising a PG in each AZ.
+func TestActuator_PerAZPlacementGroup(t *testing.T) {
+	f := newFakeLauncher()
+	f.failAZ = "us-east-1a" // force a→b advance
+
+	act := &Actuator{Client: f, Region: "us-east-1", BaseConfig: aws.LaunchConfig{AMI: "ami-x"},
+		PlacementGroupPrefix: "spawn-mpi-train"}
+	obs := &Observer{Client: f, Region: "us-east-1"}
+	r := cohort.NewReconciler(act, obs, Classifier{}, Enroller{}, Assembler{}, nil)
+
+	chain := []cohort.Rung{
+		{InstanceType: "p5.48xlarge", AvailZone: "us-east-1a"},
+		{InstanceType: "p5.48xlarge", AvailZone: "us-east-1b"},
+	}
+	out, err := r.Reconcile(context.Background(), mpiCohort(4, chain[0], chain))
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !out.Ready {
+		t.Fatalf("cohort not Ready: %+v", out.Records)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// One PG per visited AZ; each created exactly once despite 4 members per round.
+	if got := f.pgCreated["spawn-mpi-train-us-east-1a"]; got != 1 {
+		t.Errorf("AZ-a PG created %d times, want 1 (create-once per AZ)", got)
+	}
+	if got := f.pgCreated["spawn-mpi-train-us-east-1b"]; got != 1 {
+		t.Errorf("AZ-b PG created %d times, want 1", got)
+	}
+	// Every surviving instance launched into the AZ-b group.
+	for _, in := range f.launched {
+		if in.AvailabilityZone != "us-east-1b" {
+			t.Errorf("instance in AZ %q, want us-east-1b", in.AvailabilityZone)
+		}
+	}
+	// The Actuator tracked both PGs for the caller to clean up.
+	created := act.CreatedPlacementGroups()
+	if len(created) != 2 {
+		t.Errorf("CreatedPlacementGroups = %v, want 2 (one per visited AZ)", created)
 	}
 }
 
