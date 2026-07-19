@@ -59,6 +59,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"fsx":             "Tier 2/3: FSx lifecycle against a real filesystem",
 		"capacity-block":  "Tier 1/3: real DescribeCapacityBlockOfferings; purchase is a non-refundable write never run in CI (typed-gate logic unit-tested in cmd)",
 		"plugin":          "Tier 2: plugin install/status on a live instance",
+		"task":            "Tier 1/2: diagnose aggregates a live instance's state/cost/logs; pure cost/heuristic helpers unit-tested in cmd",
 		"cost":            "Tier 1: real Cost Explorer / pricing data",
 		"availability":    "Tier 1: real instance-type offerings / quotas",
 		"ami":             "Tier 1/2: real AMI build/copy",
