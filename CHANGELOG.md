@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **GPU instance types now auto-detect a working AMI** (#384). Auto-AMI pointed
+  at `al2023-ami-kernel-default-gpu-{x86_64,arm64}` SSM parameters that **do not
+  exist**, so every GPU launch without `--ami` failed with
+  `SSM ParameterNotFound`. It now resolves the **Deep Learning Base OSS Nvidia
+  Driver GPU AMI (AL2023)** via the `deeplearning` SSM namespace. Also fixed the
+  GPU-family detection: `g6e`, `g7e`, `g7`, `g4dn`, `p4de`, `p5e`, `p6` were
+  missing (newer families silently got a **CPU** AMI), and Neuron families
+  (`inf*`/`trn*`) and AMD (`g4ad`) are no longer misclassified as NVIDIA GPUs.
+
 ### Added
+- **Heterogeneous parameter sweeps: vary `instance_type` (and `ami`/`spot`) per
+  entry** (#372). A `--param-file` sweep can now run the same workload across
+  different instance families — the shape of a price-performance benchmark. spawn
+  detects an **arch/GPU-appropriate AMI per entry** (arm64 for `c8g`, GPU for
+  `g6`, x86 for `c8i`/`c8a`), memoized so entries sharing an architecture reuse
+  one lookup; entries may still set an explicit `ami:`. An entry that omits
+  `instance_type` falls back to the top-level `--instance-type`. A sweep must be
+  all-Linux or all-Windows (a mixed-OS sweep is rejected before launch).
+  Previously the whole sweep used the first entry's AMI, so arm64/GPU entries got
+  an x86 non-GPU image and failed to boot. (Detached/Lambda sweeps use each
+  entry's explicit `ami:` and do not auto-detect.)
 - **`CITATION.cff`** — machine-readable citation metadata so the repo is citable
   (GitHub "Cite this repository"); base for Zenodo DOI minting.
 

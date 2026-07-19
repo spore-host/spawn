@@ -120,9 +120,15 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 			return fmt.Errorf("failed to build launch config for parameter set %d: %w", i, err)
 		}
 
-		// Copy base config fields that weren't in params
+		// Copy base config fields that weren't in params. instance_type is a
+		// per-entry override (#372): if an entry omits it, fall back to the
+		// top-level --instance-type so a mixed file can leave some rows on the
+		// CLI default.
 		if config.Region == "" {
 			config.Region = baseConfig.Region
+		}
+		if config.InstanceType == "" {
+			config.InstanceType = baseConfig.InstanceType
 		}
 		if config.Name == "" {
 			config.Name = fmt.Sprintf("%s-%d", name, i)
@@ -171,31 +177,53 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return fmt.Errorf("failed to initialize AWS client: %w", err)
 	}
 
-	// Step 1: Detect AMI
+	// Step 1: Detect AMI — per config, so a heterogeneous sweep (#372) gets an
+	// arch/GPU-appropriate AMI per instance type instead of the first entry's AMI
+	// forced onto every entry (which broke arm64/GPU rows). GetRecommendedAMI keys
+	// off instance type (arch + GPU), so we memoize by (region, arch, gpu) to avoid
+	// redundant SSM lookups when many entries share a family.
 	prog.Start("Detecting AMI")
-	if firstConfig.AMI == "" {
-		ami, err := awsClient.GetRecommendedAMI(ctx, firstConfig.Region, firstConfig.InstanceType)
-		if err != nil {
-			prog.Error("Detecting AMI", err)
-			return err
+	amiCache := make(map[string]string)
+	for _, cfg := range launchConfigs {
+		if cfg.AMI != "" {
+			continue
 		}
-		// Apply AMI to all configs that don't have one
-		for _, cfg := range launchConfigs {
-			if cfg.AMI == "" {
-				cfg.AMI = ami
+		key := fmt.Sprintf("%s|%s|%t", cfg.Region, aws.DetectArchitecture(cfg.InstanceType), aws.DetectGPUInstance(cfg.InstanceType))
+		ami, ok := amiCache[key]
+		if !ok {
+			var err error
+			ami, err = awsClient.GetRecommendedAMI(ctx, cfg.Region, cfg.InstanceType)
+			if err != nil {
+				prog.Error("Detecting AMI", err)
+				return fmt.Errorf("detect AMI for %s in %s: %w", cfg.InstanceType, cfg.Region, err)
 			}
+			amiCache[key] = ami
 		}
+		cfg.AMI = ami
 	}
 	prog.Complete("Detecting AMI")
 
-	// Resolve target OS once and apply to every config in the sweep; enforce the
-	// Windows lifecycle guard before launching any.
-	targetOS := resolveTargetOS(ctx, awsClient, firstConfig.Region, firstConfig.AMI, osFlag)
-	for _, cfg := range launchConfigs {
-		cfg.TargetOS = targetOS
-	}
-	if err := windowsLifecycleGuard(firstConfig); err != nil {
-		return err
+	// Resolve target OS per config (its AMI determines Linux vs Windows) and
+	// enforce the Windows lifecycle guard on each before launching any. A sweep
+	// may not mix OSes — a single --command / lifecycle model can't span both —
+	// so reject a heterogeneous-OS sweep with a clear error.
+	osCache := make(map[string]string)
+	var sweepOS string
+	for i, cfg := range launchConfigs {
+		os, ok := osCache[cfg.AMI]
+		if !ok {
+			os = resolveTargetOS(ctx, awsClient, cfg.Region, cfg.AMI, osFlag)
+			osCache[cfg.AMI] = os
+		}
+		cfg.TargetOS = os
+		if i == 0 {
+			sweepOS = os
+		} else if os != sweepOS {
+			return fmt.Errorf("sweep mixes operating systems (%s and %s): a single sweep must be all-Linux or all-Windows", sweepOS, os)
+		}
+		if err := windowsLifecycleGuard(cfg); err != nil {
+			return err
+		}
 	}
 
 	// Step 2: Setup SSH key

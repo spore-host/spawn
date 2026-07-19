@@ -17,10 +17,10 @@ func TestGetAL2023AMI(t *testing.T) {
 	// Pre-populate SSM parameters with test AMI IDs.
 	ssmClient := ssm.NewFromConfig(env.AWSConfig)
 	params := map[string]string{
-		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64":     "ami-x86-standard",
-		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64":      "ami-arm-standard",
-		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-gpu-x86_64": "ami-x86-gpu",
-		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-gpu-arm64":  "ami-arm-gpu",
+		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64":                           "ami-x86-standard",
+		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64":                            "ami-arm-standard",
+		"/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id": "ami-x86-gpu",
+		"/aws/service/deeplearning/ami/arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id":  "ami-arm-gpu",
 	}
 	for name, val := range params {
 		if _, err := ssmClient.PutParameter(ctx, &ssm.PutParameterInput{
@@ -65,11 +65,18 @@ func TestDetectGPUInstance(t *testing.T) {
 		instanceType string
 		wantGPU      bool
 	}{
-		{"p3.2xlarge", true},  // p3 family
-		{"p5.48xlarge", true}, // p5 family
-		{"g4.xlarge", true},   // g4 family (prefix match)
-		{"g5.xlarge", true},   // g5 family
-		{"g6.xlarge", true},   // g6 family
+		{"p3.2xlarge", true},    // p3 family
+		{"p5.48xlarge", true},   // p5 family
+		{"g4dn.xlarge", true},   // NVIDIA T4
+		{"g5.xlarge", true},     // g5 family
+		{"g6.xlarge", true},     // g6 family
+		{"g6e.2xlarge", true},   // spawn#384: g6e was missing → CPU AMI
+		{"g7e.2xlarge", true},   // spawn#384: g7e was missing → CPU AMI
+		{"g7.2xlarge", true},    // spawn#384: g7 was missing → CPU AMI
+		{"g5g.xlarge", true},    // arm64 NVIDIA T4G
+		{"inf2.xlarge", false},  // Neuron, not NVIDIA — no Nvidia-driver AMI
+		{"trn1.2xlarge", false}, // Neuron, not NVIDIA
+		{"g4ad.xlarge", false},  // AMD Radeon, not NVIDIA
 		{"t3.micro", false},
 		{"m5.large", false},
 		{"c5.xlarge", false},
