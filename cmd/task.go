@@ -370,6 +370,7 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	// Scoped instance profile: the default spored role has no S3 write, so grant
 	// exactly the buckets this task reads (inputs) and writes (outputs + results).
 	profile, err := client.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
+		TrustServices:    []string{"ec2"}, // an instance profile is assumed by EC2
 		InlinePolicyJSON: taskStagingPolicy(s3Buckets(spec.Inputs), s3Buckets(spec.Outputs), resultsBucket),
 	})
 	if err != nil {

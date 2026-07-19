@@ -496,8 +496,15 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 		return fmt.Errorf("failed to get account ID: %w", err)
 	}
 
-	// Build trust policy with account condition
-	trustPolicy := c.buildTrustPolicyWithAccount(config.TrustServices, accountID)
+	// Build trust policy with account condition. An instance profile is always
+	// assumed by the EC2 service, so default to "ec2" when the caller gave no
+	// trust services — otherwise the policy has an empty principal and IAM rejects
+	// it with MalformedPolicyDocument ("statement with no principals").
+	trustServices := config.TrustServices
+	if len(trustServices) == 0 {
+		trustServices = []string{"ec2"}
+	}
+	trustPolicy := c.buildTrustPolicyWithAccount(trustServices, accountID)
 	trustPolicyJSON, err := json.Marshal(trustPolicy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal trust policy: %w", err)
