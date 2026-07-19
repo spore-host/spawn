@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn array logs <name> --index N`** (#389). Tail one array member's log by
+  its (possibly sparse) job-array index: `--which command` (default,
+  `/var/log/spawn-command.log`) or `--which spored` (`/var/log/spored.log`),
+  `--lines N` (default 200). Reuses the status path's SSH-key-or-SSM exec branch,
+  so it works on keyless (lagotto/cohort-launched) members over SSM. A missing
+  index errors with a pointer to `spawn array status`.
+
 ## [0.80.0] - 2026-07-19
 
 ### Added
