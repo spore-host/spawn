@@ -517,10 +517,14 @@ func handleStatus(checkComplete bool) error {
 		}
 
 		if config.CostLimit > 0 {
-			remaining := config.CostLimit - displayTotal
-			pct := (displayTotal / config.CostLimit) * 100
-			fmt.Printf("  Cost limit:       $%.2f  ($%.2f used, %.0f%% — $%.2f remaining)\n",
-				config.CostLimit, displayTotal, pct, remaining)
+			// The cost limit is enforced against COMPUTE cost only (spored uses
+			// PricePerHour × total compute time), so measure "used" the same way —
+			// not against displayTotal, which includes EBS and would misreport how
+			// close the instance is to the limit that actually terminates it.
+			remaining := config.CostLimit - displayCompute
+			pct := (displayCompute / config.CostLimit) * 100
+			fmt.Printf("  Cost limit:       $%.2f  ($%.2f compute used, %.0f%% — $%.2f remaining; compute-only)\n",
+				config.CostLimit, displayCompute, pct, remaining)
 		}
 
 		if ebsCostKnown {
