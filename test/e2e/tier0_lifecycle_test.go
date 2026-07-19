@@ -51,17 +51,17 @@ func TestTier0_Launch_JobArray(t *testing.T) {
 	}
 }
 
-// TestTier0_Launch_JobArray_Cohort is the cohort-engine twin of
-// TestTier0_Launch_JobArray: with --reconciler cohort the job array is launched
-// as an all-or-nothing cohort through the reconciler instead of the hand-rolled
-// goroutine loop. The user-visible contract must be identical — 3 distinct
+// TestTier0_Launch_JobArray_Cohort covers the MPI all-or-nothing cohort path
+// (--mpi), distinct from the plain-array cohort exercised by
+// TestTier0_Launch_JobArray. Both now run through the cohort reconciler (the
+// legacy loop is gone); the user-visible contract must be identical — 3 distinct
 // instances, all discoverable via list, all carrying the job-array tags.
 func TestTier0_Launch_JobArray_Cohort(t *testing.T) {
 	env := startSpawnSubstrate(t)
 	arr := env.launchOK("carr", "--instance-type", "t3.small", "--count", "3",
-		"--job-array-name", "cbatch", "--reconciler", "cohort")
+		"--job-array-name", "cbatch", "--mpi", "--auto-placement-group=false")
 	if len(arr) != 3 {
-		t.Fatalf("--count 3 (cohort) launched %d instances, want 3", len(arr))
+		t.Fatalf("--count 3 (mpi cohort) launched %d instances, want 3", len(arr))
 	}
 	ids := map[string]bool{}
 	for _, inst := range arr {

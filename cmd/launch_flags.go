@@ -65,7 +65,8 @@ var (
 	jobArrayName   string
 	instanceNames  string
 	command        string
-	reconcilerMode string // job-array launch engine: "legacy" (default) or "cohort"
+	minViable      int    // job array: min members that must come up (default 1 = per-member independent)
+	reconcilerMode string // DEPRECATED no-op: job arrays always run through cohort now
 
 	// MPI
 	mpiEnabled            bool
@@ -251,10 +252,16 @@ func init() {
 	launchCmd.Flags().StringVar(&jobArrayName, "job-array-name", "", "Job array group name (required if --count > 1)")
 	launchCmd.Flags().StringVar(&instanceNames, "instance-names", "", "Instance name template (e.g., 'worker-{index}', default: '{job-array-name}-{index}')")
 	launchCmd.Flags().StringVar(&command, "command", "", "Command to run on all instances (executed after spored setup)")
-	// Experimental: route a job-array launch through the cohort reconciler
-	// (all-or-nothing barrier + leak-free drain) instead of the hand-rolled loop.
-	// Hidden until it's the supported default; fully functional/testable.
-	launchCmd.Flags().StringVar(&reconcilerMode, "reconciler", "legacy", "Job-array launch engine: legacy or cohort (experimental)")
+	// --min-viable: for a plain job array (--count>1 without --mpi), the minimum
+	// number of members that must come up for the launch to succeed. Default 1 =
+	// members are independent (one member's terminal failure doesn't tear down the
+	// rest). Set equal to --count for all-or-nothing. Ignored for --mpi, which is
+	// always all-or-nothing (a missing rank makes the cluster useless).
+	launchCmd.Flags().IntVar(&minViable, "min-viable", 1, "Job array: minimum members that must launch for success (default 1; ignored for --mpi)")
+	// DEPRECATED no-op: job arrays now always run through the cohort reconciler.
+	// Kept (hidden) so scripts passing --reconciler don't break; it warns and is
+	// otherwise ignored. Removed in a future release.
+	launchCmd.Flags().StringVar(&reconcilerMode, "reconciler", "", "Deprecated no-op (job arrays always use the cohort engine)")
 	_ = launchCmd.Flags().MarkHidden("reconciler")
 
 	// MPI

@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -189,16 +187,39 @@ func orderAZs(zones []string, preferred string) []string {
 	return ordered
 }
 
-// launchJobArrayCohort launches an MPI/job-array as an all-or-nothing cohort via
-// the cohort reconciler (--reconciler=cohort). It gains a real barrier and a
-// leak-free drain over the hand-rolled launchJobArray; peer discovery stays
-// self-organizing on-instance (nil Assembler) and there is no capacity fallback
-// yet (single-rung placement). Same signature/output contract as launchJobArray.
-func launchJobArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, plat *platform.Platform, prog *progress.Progress, fsxInfo *aws.FSxInfo, auditLog *audit.AuditLogger) error {
+// launchMPICohort launches an MPI cluster as an all-or-nothing cohort
+// (NewMPICohort → MinViable=len): a real barrier, leak-free drain, and shared-rung
+// AZ fallback. A missing rank makes the cluster useless, so it is never partial.
+func launchMPICohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, plat *platform.Platform, prog *progress.Progress, fsxInfo *aws.FSxInfo, auditLog *audit.AuditLogger) error {
+	return launchCohort(ctx, awsClient, baseConfig, plat, prog, fsxInfo, auditLog, cohortSpec{mpi: true})
+}
+
+// launchPlainArrayCohort launches an independent (embarrassingly-parallel) job
+// array through the cohort reconciler as a partial cohort: --min-viable members
+// must come up (default 1 = fully independent), but one member's terminal failure
+// does not tear down the rest. Per-entity placement/AZ fallback; no assembly.
+func launchPlainArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, plat *platform.Platform, prog *progress.Progress, fsxInfo *aws.FSxInfo, auditLog *audit.AuditLogger) error {
+	return launchCohort(ctx, awsClient, baseConfig, plat, prog, fsxInfo, auditLog, cohortSpec{mpi: false})
+}
+
+// cohortSpec selects the cohort shape for launchCohort.
+type cohortSpec struct {
+	mpi bool // true → all-or-nothing MPI cohort; false → partial (independent) array
+}
+
+// launchCohort is the shared cohort launch core for both MPI and plain job
+// arrays. It builds per-index configs + intents (with the AZ-fallback chain),
+// constructs the appropriate cohort (all-or-nothing for MPI, partial for a plain
+// array), reconciles, and renders the same output contract as before.
+func launchCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, plat *platform.Platform, prog *progress.Progress, fsxInfo *aws.FSxInfo, auditLog *audit.AuditLogger, spec cohortSpec) error {
 	jobArrayID := generateJobArrayID(jobArrayName)
 	createdAt := time.Now()
 
-	fmt.Fprintf(os.Stderr, "\n🚀 Launching job array via cohort: %s (%d instances)\n", jobArrayName, count)
+	kind := "job array"
+	if spec.mpi {
+		kind = "MPI cluster"
+	}
+	fmt.Fprintf(os.Stderr, "\n🚀 Launching %s via cohort: %s (%d instances)\n", kind, jobArrayName, count)
 	fmt.Fprintf(os.Stderr, "   Job Array ID: %s\n\n", jobArrayID)
 
 	auditLog.LogOperationWithData("launch_job_array", jobArrayID, "initiated",
@@ -207,6 +228,7 @@ func launchJobArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig
 			"instance_count": count,
 			"instance_type":  baseConfig.InstanceType,
 			"region":         baseConfig.Region,
+			"mpi":            spec.mpi,
 		}, nil)
 
 	// Build the shared placement rung + its AZ-fallback chain. When capacity is
@@ -239,14 +261,15 @@ func launchJobArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig
 	}
 
 	// Provider seam over the real AWS client. nil Enroller (trivially enrolled)
-	// and nil Assembler (peer discovery stays on-instance) per the v1 design.
+	// and nil Assembler (peer discovery stays on-instance) per the current design;
+	// the SSM Assembler/Enroller land in later stages.
 	act := &mpicohort.Actuator{Client: awsClient, Region: baseConfig.Region, BaseConfig: *baseConfig, Configs: cfgs}
 	obs := &mpicohort.Observer{Client: awsClient, Region: baseConfig.Region}
 	r := cohort.NewReconciler(act, obs, mpicohort.Classifier{}, nil, nil, nil)
 
-	c, err := cohort.NewMPICohort(cohort.CohortID(jobArrayID), members, cohortBudget())
+	c, err := buildCohort(spec, jobArrayID, members)
 	if err != nil {
-		return fmt.Errorf("build MPI cohort: %w", err)
+		return fmt.Errorf("build cohort: %w", err)
 	}
 
 	prog.Start(fmt.Sprintf("Reconciling %d-instance cohort", count))
@@ -286,7 +309,7 @@ func launchJobArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig
 
 	// The Outcome carries no instance IDs/IPs (cohort Records are state-only), so
 	// re-derive the launched set from EC2 by Name and fetch public IPs — the same
-	// surface the legacy path renders.
+	// surface the legacy path rendered.
 	prog.Start("Getting public IPs")
 	insts, err := awsClient.ListInstances(ctx, baseConfig.Region, "")
 	if err != nil {
@@ -325,146 +348,23 @@ func launchJobArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig
 	return renderJobArrayResult(launchedInstances, baseConfig, jobArrayID, createdAt, plat)
 }
 
-// launchJobArray launches N instances in parallel as a job array
-func launchJobArray(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, plat *platform.Platform, prog *progress.Progress, fsxInfo *aws.FSxInfo, auditLog *audit.AuditLogger) error {
-	// Generate unique job array ID
-	jobArrayID := generateJobArrayID(jobArrayName)
-	createdAt := time.Now()
-
-	fmt.Fprintf(os.Stderr, "\n🚀 Launching job array: %s (%d instances)\n", jobArrayName, count)
-	fmt.Fprintf(os.Stderr, "   Job Array ID: %s\n\n", jobArrayID)
-
-	// Log job array launch initiation
-	auditLog.LogOperationWithData("launch_job_array", jobArrayID, "initiated",
-		map[string]interface{}{
-			"job_array_name": jobArrayName,
-			"instance_count": count,
-			"instance_type":  baseConfig.InstanceType,
-			"region":         baseConfig.Region,
-		}, nil)
-
-	// Phase 1: Launch all instances in parallel
-	prog.Start(fmt.Sprintf("Launching %d instances in parallel", count))
-
-	results := runLaunchBatch(count, func(index int) (*aws.LaunchResult, error) {
-		instanceConfig, err := buildJobArrayMemberConfig(baseConfig, jobArrayID, index, fsxInfo)
-		if err != nil {
-			return nil, err
-		}
-		return awsClient.Launch(ctx, instanceConfig)
-	})
-
-	// Collect results
-	launchedInstances := make([]*aws.LaunchResult, 0, count)
-	var launchErrors []string
-	successCount := 0
-	failureCount := 0
-
-	for _, result := range results {
-		if result.err != nil {
-			launchErrors = append(launchErrors, fmt.Sprintf("Instance %d: %v", result.index, result.err))
-			failureCount++
-		} else {
-			launchedInstances = append(launchedInstances, result.result)
-			successCount++
-		}
+// buildCohort constructs the right cohort for the spec: an all-or-nothing MPI
+// cohort, or a partial (independent) array whose --min-viable members must come
+// up. minViable is clamped to [1, count].
+func buildCohort(spec cohortSpec, jobArrayID string, members []cohort.EntityIntent) (cohort.Cohort, error) {
+	if spec.mpi {
+		return cohort.NewMPICohort(cohort.CohortID(jobArrayID), members, cohortBudget())
 	}
-
-	// Handle partial failures
-	if failureCount > 0 {
-		prog.Error(fmt.Sprintf("Launching %d instances", count), fmt.Errorf("%d/%d instances failed to launch", failureCount, count))
-
-		auditLog.LogOperationWithData("launch_job_array", jobArrayID, "failed",
-			map[string]interface{}{
-				"success_count": successCount,
-				"failure_count": failureCount,
-			}, fmt.Errorf("%d/%d instances failed", failureCount, count))
-
-		// Terminate successfully launched instances
-		if successCount > 0 {
-			fmt.Fprintf(os.Stderr, "\n⚠️  Cleaning up %d successfully launched instances...\n", successCount)
-			for _, inst := range launchedInstances {
-				_ = awsClient.Terminate(ctx, baseConfig.Region, inst.InstanceID)
-			}
-		}
-
-		// Return detailed error
-		return fmt.Errorf("job array launch failed: %d/%d instances failed:\n  %s",
-			failureCount, count, strings.Join(launchErrors, "\n  "))
+	mv := minViable
+	if mv < 1 {
+		mv = 1
 	}
-
-	auditLog.LogOperationWithData("launch_job_array", jobArrayID, "success",
-		map[string]interface{}{
-			"instance_count": successCount,
-		}, nil)
-
-	prog.Complete(fmt.Sprintf("Launching %d instances", count))
-
-	// Sort instances by index for consistent display
-	sort.Slice(launchedInstances, func(i, j int) bool {
-		// Extract index from Name (assumes format: name-{index})
-		getName := func(r *aws.LaunchResult) int {
-			parts := strings.Split(r.Name, "-")
-			if len(parts) > 0 {
-				if idx, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
-					return idx
-				}
-			}
-			return 0
-		}
-		return getName(launchedInstances[i]) < getName(launchedInstances[j])
-	})
-
-	// Phase 2: Wait for all instances to reach "running" state
-	prog.Start("Waiting for all instances to reach running state")
-	maxWaitTime := 2 * time.Minute
-	checkInterval := 5 * time.Second
-	startTime := time.Now()
-
-	allRunning := false
-	for time.Since(startTime) < maxWaitTime {
-		allRunning = true
-		for _, inst := range launchedInstances {
-			state, err := awsClient.GetInstanceState(ctx, baseConfig.Region, inst.InstanceID)
-			if err != nil || state != "running" {
-				allRunning = false
-				break
-			}
-		}
-
-		if allRunning {
-			break
-		}
-
-		time.Sleep(checkInterval)
+	if mv > len(members) {
+		mv = len(members)
 	}
-
-	if !allRunning {
-		prog.Error("Waiting for instances", fmt.Errorf("timeout waiting for all instances to reach running state"))
-		return fmt.Errorf("timeout: not all instances reached running state within %v", maxWaitTime)
-	}
-
-	prog.Complete("Waiting for all instances")
-
-	// Phase 3: Get public IPs for all instances
-	prog.Start("Getting public IPs")
-	for _, inst := range launchedInstances {
-		publicIP, err := awsClient.GetInstancePublicIP(ctx, baseConfig.Region, inst.InstanceID)
-		if err != nil {
-			prog.Error("Getting public IP", err)
-			// Non-fatal: continue with other instances
-			fmt.Fprintf(os.Stderr, "\n⚠️  Failed to get IP for %s: %v\n", inst.InstanceID, err)
-		} else {
-			inst.PublicIP = publicIP
-		}
-	}
-	prog.Complete("Getting public IPs")
-
-	// Note: Peer discovery is handled dynamically by spored agent
-	// Each agent queries EC2 for all instances with the same spawn:job-array-id tag
-	// This avoids AWS tag size limitations (256 char max) and scales to any array size
-
-	return renderJobArrayResult(launchedInstances, baseConfig, jobArrayID, createdAt, plat)
+	// nil Assembler: a plain array has no collective assembly phase, so a partial
+	// cohort is legal (NewPartialCohort rejects a non-nil Assembler).
+	return cohort.NewPartialCohort(cohort.CohortID(jobArrayID), members, cohortBudget(), mv, nil)
 }
 
 // renderJobArrayResult writes the job-array ID to the output-id file and emits
