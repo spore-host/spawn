@@ -163,14 +163,30 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// One-shot mode: args[1:] (after --) form the remote command, wrapped in
-	// `bash -c` (Linux default shell).
+	// One-shot mode: args[1:] (after --) form the remote command. Preserve each
+	// token as its own argument by shell-quoting it individually, then joining —
+	// exactly what plain `ssh host <argv...>` does (ssh space-joins its command
+	// args and the remote login shell parses the result). The previous code
+	// space-joined the argv into one blob and re-wrapped it in `bash -c '...'`,
+	// which re-split multi-token commands (e.g. `-- bash -lc "a && b"` became
+	// `bash -c 'bash -lc a && b'`, so bash's -c got no argument) (#369).
 	var remoteCmd string
 	if len(args) > 1 {
-		remoteCmd = "bash -c '" + strings.ReplaceAll(strings.Join(args[1:], " "), "'", "'\\''") + "'"
+		remoteCmd = shellQuoteArgs(args[1:])
 	}
 
 	return sshToInstance(user, instance.PublicIP, keyPath, connectPort, remoteCmd)
+}
+
+// shellQuoteArgs single-quotes each argument (escaping embedded single quotes as
+// '\”) and joins them with spaces, so a post-`--` argv reaches the remote shell
+// with its argument boundaries intact. Mirrors passing argv straight through ssh.
+func shellQuoteArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = "'" + strings.ReplaceAll(a, "'", "'\\''") + "'"
+	}
+	return strings.Join(quoted, " ")
 }
 
 // sshToInstance runs the ssh client against host as user with keyPath, on the

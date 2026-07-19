@@ -396,3 +396,34 @@ func TestConnectCommand_FlagExists(t *testing.T) {
 		})
 	}
 }
+
+// TestShellQuoteArgs covers the #369 fix: a post-`--` argv must reach the remote
+// shell with argument boundaries intact — in particular `bash -lc "<script>"`
+// must keep the whole script as one argument to -lc, not be re-split.
+func TestShellQuoteArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"simple", []string{"ls", "-la"}, `'ls' '-la'`},
+		{
+			"bash -lc multi-token (the #369 repro)",
+			[]string{"bash", "-lc", "echo hello && echo world"},
+			`'bash' '-lc' 'echo hello && echo world'`,
+		},
+		{
+			"embedded single quotes",
+			[]string{"bash", "-lc", "echo 'hi'"},
+			`'bash' '-lc' 'echo '\''hi'\'''`,
+		},
+		{"pipeline preserved as one arg", []string{"bash", "-lc", "a | b > c"}, `'bash' '-lc' 'a | b > c'`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shellQuoteArgs(tt.args); got != tt.want {
+				t.Errorf("shellQuoteArgs(%q) =\n  %s\nwant\n  %s", tt.args, got, tt.want)
+			}
+		})
+	}
+}
