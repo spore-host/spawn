@@ -259,6 +259,19 @@ func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.Resourc
 	}
 	cands := make([]taskproto.Candidate, 0, len(results))
 	for _, r := range results {
+		// SearchInstanceTypes does NOT populate on-demand price (that's a separate
+		// pricing call), so r.OnDemandPrice is 0 here. The sizer ranks on price —
+		// without it, "cheapest" degenerates to a name tie-break and can pick the
+		// LARGEST type. So look the price up explicitly (API with a static
+		// libs/pricing fallback). A lookup miss leaves price 0; the sizer sorts
+		// those last, so a priced option always wins and we never silently pick a
+		// huge box because pricing was unavailable.
+		price := r.OnDemandPrice
+		if price <= 0 {
+			if p, perr := f.tc.OnDemandPrice(ctx, r.InstanceType, f.region); perr == nil {
+				price = p
+			}
+		}
 		cands = append(cands, taskproto.Candidate{
 			InstanceType:  r.InstanceType,
 			Family:        r.InstanceFamily,
@@ -266,7 +279,7 @@ func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.Resourc
 			MemoryGiB:     float64(r.MemoryMiB) / 1024,
 			GPUs:          int(r.GPUs),
 			Architecture:  r.Architecture,
-			OnDemandPrice: r.OnDemandPrice,
+			OnDemandPrice: price,
 		})
 	}
 	return cands, nil
