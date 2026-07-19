@@ -713,9 +713,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		if jobArrayName == "" {
 			return fmt.Errorf("--job-array-name is required when --count > 1")
 		}
-		if reconcilerMode != "" {
-			fmt.Fprintf(os.Stderr, "⚠️  --reconciler is deprecated and ignored; job arrays always use the cohort engine.\n")
-		}
 		// MPI is all-or-nothing (a missing rank makes the cluster useless);
 		// a plain array is independent work with a configurable --min-viable.
 		if mpiEnabled {

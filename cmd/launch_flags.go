@@ -61,12 +61,11 @@ var (
 	activeProcesses  string // comma-separated process names to monitor (e.g. "rsession,jupyter")
 
 	// Job array
-	count          int
-	jobArrayName   string
-	instanceNames  string
-	command        string
-	minViable      int    // job array: min members that must come up (default 1 = per-member independent)
-	reconcilerMode string // DEPRECATED no-op: job arrays always run through cohort now
+	count         int
+	jobArrayName  string
+	instanceNames string
+	command       string
+	minViable     int // job array: min members that must come up (default 1 = per-member independent)
 
 	// MPI
 	mpiEnabled            bool
@@ -258,11 +257,6 @@ func init() {
 	// rest). Set equal to --count for all-or-nothing. Ignored for --mpi, which is
 	// always all-or-nothing (a missing rank makes the cluster useless).
 	launchCmd.Flags().IntVar(&minViable, "min-viable", 1, "Job array: minimum members that must launch for success (default 1; ignored for --mpi)")
-	// DEPRECATED no-op: job arrays now always run through the cohort reconciler.
-	// Kept (hidden) so scripts passing --reconciler don't break; it warns and is
-	// otherwise ignored. Removed in a future release.
-	launchCmd.Flags().StringVar(&reconcilerMode, "reconciler", "", "Deprecated no-op (job arrays always use the cohort engine)")
-	_ = launchCmd.Flags().MarkHidden("reconciler")
 
 	// MPI
 	launchCmd.Flags().BoolVar(&mpiEnabled, "mpi", false, "Enable MPI cluster setup (requires --count > 1)")

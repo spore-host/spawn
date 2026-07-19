@@ -155,7 +155,11 @@ params:
 	t.Logf("sweep complete: %d instances launched", launched)
 }
 
-// TestTier3_MPI launches a 2-node MPI cluster and verifies hostfile is populated.
+// TestTier3_MPI launches a 2-node MPI cluster through the cohort engine and
+// verifies the control-plane peers file was pushed to the head node via SSM.
+// Since Stage 4, the launch only returns Ready after the SSM Assembler has
+// written /etc/spawn/job-array-peers.json to every node — so no timing guess is
+// needed, and the file must be present with one entry per node (private IPs).
 func TestTier3_MPI(t *testing.T) {
 	rid := runID(t)
 	name := "e2e-mpi-" + rid
@@ -168,25 +172,34 @@ func TestTier3_MPI(t *testing.T) {
 		"--count", "2",
 		"--job-array-name", name,
 		"--mpi",
+		"--auto-placement-group=false", // t3.small doesn't support cluster PGs
 	)
 	t.Logf("MPI launch: %s", out)
 	t.Cleanup(func() { spawnMayFail(t, "terminate", "--job-array-name", name, "-y") }) // terminate, not stop (#47)
 
-	// Wait for head node (index 0) to be running
 	head := waitForRunning(t, name+"-0", 4*time.Minute)
 
-	// Allow time for MPI hostfile to be populated via job-array coordination
-	time.Sleep(90 * time.Second)
-
-	// Verify hostfile exists and has 2 entries
-	hostfileOut := sshExec(t, head.Name, "cat /etc/mpi/hostfile 2>/dev/null || echo MISSING")
-	if strings.Contains(hostfileOut, "MISSING") {
-		t.Logf("MPI hostfile not yet written (may need more time): %s", hostfileOut)
-	} else {
-		lines := strings.Split(strings.TrimSpace(hostfileOut), "\n")
-		t.Logf("MPI hostfile (%d entries): %s", len(lines), hostfileOut)
-		if len(lines) < 2 {
-			t.Errorf("expected 2 MPI hostfile entries, got %d", len(lines))
+	// The control-plane Assembler writes the peers file before the launch reports
+	// Ready, so it should already be present. Verify it has one entry per node,
+	// each with a private (10./172./192.) IP — the Stage-4 behavior change.
+	peersOut := sshExec(t, head.Name, "cat /etc/spawn/job-array-peers.json 2>/dev/null || echo MISSING")
+	if strings.Contains(peersOut, "MISSING") {
+		t.Fatalf("control-plane peers file not present on head node: %s", peersOut)
+	}
+	t.Logf("peers file: %s", peersOut)
+	var peers []struct {
+		Index int    `json:"index"`
+		IP    string `json:"ip"`
+	}
+	if err := json.Unmarshal([]byte(peersOut), &peers); err != nil {
+		t.Fatalf("peers file is not valid JSON: %v", err)
+	}
+	if len(peers) != 2 {
+		t.Errorf("expected 2 peer entries, got %d", len(peers))
+	}
+	for _, p := range peers {
+		if !strings.HasPrefix(p.IP, "10.") && !strings.HasPrefix(p.IP, "172.") && !strings.HasPrefix(p.IP, "192.168.") {
+			t.Errorf("peer %d IP %q is not a private address (Stage 4 uses private IPs)", p.Index, p.IP)
 		}
 	}
 }
