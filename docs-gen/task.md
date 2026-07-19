@@ -40,6 +40,27 @@ spawn task run --spec <file> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--dry-run` |  | bool |  | Size and preview the task without launching |
+| `--poll-interval` |  | duration | `15s` | How often to poll for completion when --wait is set |
 | `--region` |  | string |  | Region to size against (default: the configured AWS region) |
 | `--spec` |  | string |  | Path to a TaskSpec JSON file (required) |
+| `--wait` |  | bool |  | Block until the task's completion record appears, then exit with its exit code |
+
+### `spawn task status`
+
+Read the completion record a 'spawn task run' task wrote to
+s3://spawn-results-&lt;account&gt;-&lt;region&gt;/tasks/&lt;task-id&gt;/completion.json.
+
+If the record isn't there yet the task is still running. With --check-complete,
+exit codes mirror 'spawn status': 0=completed, 1=failed, 2=running, 3=error.
+
+```
+spawn task status <task-id> [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--check-complete` |  | bool |  | Exit 0=completed, 1=failed, 2=running, 3=error instead of printing |
+| `--region` |  | string |  | Region the task ran in (default: the configured AWS region) |
 

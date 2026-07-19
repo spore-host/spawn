@@ -189,9 +189,13 @@ func orDash(s string) string {
 // ── task run ─────────────────────────────────────────────────────────────────
 
 var (
-	taskRunSpecPath string
-	taskRunDryRun   bool
-	taskRunRegion   string
+	taskRunSpecPath     string
+	taskRunDryRun       bool
+	taskRunRegion       string
+	taskRunWait         bool
+	taskRunPollInterval time.Duration
+	taskStatusRegion    string
+	taskStatusCheckDone bool
 )
 
 var taskRunCmd = &cobra.Command{
@@ -407,10 +411,165 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
 	fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
 	fmt.Fprintf(out, "Completion:   s3://%s/tasks/%s/completion.json\n", resultsBucket, spec.TaskID)
-	fmt.Fprintf(out, "\nPoll for completion:\n")
-	fmt.Fprintf(out, "  aws s3 cp s3://%s/tasks/%s/completion.json -   # when present, the task is done\n", resultsBucket, spec.TaskID)
-	fmt.Fprintf(out, "  spawn status %s --check-complete               # or poll the instance directly\n", lr.InstanceID)
+	if !taskRunWait {
+		fmt.Fprintf(out, "\nPoll for completion:\n")
+		fmt.Fprintf(out, "  spawn task status %s --region %s\n", spec.TaskID, region)
+		fmt.Fprintf(out, "  aws s3 cp s3://%s/tasks/%s/completion.json -\n", resultsBucket, spec.TaskID)
+		return nil
+	}
+
+	// --wait: poll the completion record until it appears or the TTL elapses,
+	// then print it and exit with the task's own exit code.
+	fmt.Fprintf(out, "\nWaiting for completion (polling every %s)...\n", taskRunPollInterval)
+	deadline := waitDeadline(spec.Lifecycle.TTL)
+	rec, err := pollCompletion(ctx, client, region, resultsBucket, spec.TaskID, taskRunPollInterval, deadline)
+	if err != nil {
+		return err
+	}
+	printCompletion(out, rec)
+	if rec.ExitCode != 0 {
+		os.Exit(rec.ExitCode)
+	}
 	return nil
+}
+
+// waitDeadline returns now+TTL as the wait cutoff, defaulting to a generous cap
+// if the TTL can't be parsed (validation should have caught that).
+func waitDeadline(ttl string) time.Time {
+	d, err := time.ParseDuration(ttl)
+	if err != nil || d <= 0 {
+		d = 24 * time.Hour
+	}
+	// A little slack past the TTL so a task that runs right up to its deadline
+	// still has its record observed before we give up.
+	return time.Now().Add(d + 2*time.Minute)
+}
+
+// pollCompletion fetches the completion record, retrying until it appears or the
+// deadline passes.
+func pollCompletion(ctx context.Context, client *aws.Client, region, resultsBucket, taskID string, every time.Duration, deadline time.Time) (*taskproto.CompletionRecord, error) {
+	if every <= 0 {
+		every = 15 * time.Second
+	}
+	for {
+		rec, present, err := fetchCompletion(ctx, client, region, resultsBucket, taskID)
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			return rec, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for task %q completion record (past TTL); poll later with 'spawn task status %s'", taskID, taskID)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(every):
+		}
+	}
+}
+
+// fetchCompletion reads and parses tasks/<taskID>/completion.json from the
+// results bucket. present=false (nil error) means the record isn't there yet —
+// the task is still running.
+func fetchCompletion(ctx context.Context, client *aws.Client, region, resultsBucket, taskID string) (rec *taskproto.CompletionRecord, present bool, err error) {
+	key := fmt.Sprintf("tasks/%s/completion.json", taskID)
+	data, err := client.GetS3Object(ctx, region, resultsBucket, key)
+	if err != nil {
+		if errors.Is(err, aws.ErrS3NoSuchKey) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	rec, err = taskproto.ParseCompletionRecord(data)
+	if err != nil {
+		return nil, false, err
+	}
+	return rec, true, nil
+}
+
+// printCompletion renders a CompletionRecord as human text.
+func printCompletion(out io.Writer, rec *taskproto.CompletionRecord) {
+	fmt.Fprintf(out, "Task:       %s\n", rec.TaskID)
+	fmt.Fprintf(out, "State:      %s\n", rec.State)
+	fmt.Fprintf(out, "Exit code:  %d\n", rec.ExitCode)
+	if rec.StartedAt != "" {
+		fmt.Fprintf(out, "Started:    %s\n", rec.StartedAt)
+	}
+	if rec.EndedAt != "" {
+		fmt.Fprintf(out, "Ended:      %s\n", rec.EndedAt)
+	}
+	if rec.RetryClass != taskproto.RetryNone {
+		fmt.Fprintf(out, "Retry:      %s (retryable=%v)\n", rec.RetryClass, rec.RetryClass.Retryable())
+	}
+	for _, l := range rec.Logs {
+		fmt.Fprintf(out, "Log:        %s\n", l)
+	}
+}
+
+// ── task status ──────────────────────────────────────────────────────────────
+
+var taskStatusCmd = &cobra.Command{
+	Use:   "status <task-id>",
+	Short: "Show a task's durable completion record (from S3)",
+	Long: `Read the completion record a 'spawn task run' task wrote to
+s3://spawn-results-<account>-<region>/tasks/<task-id>/completion.json.
+
+If the record isn't there yet the task is still running. With --check-complete,
+exit codes mirror 'spawn status': 0=completed, 1=failed, 2=running, 3=error.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
+		taskID := args[0]
+		client, err := aws.NewClient(ctx)
+		if err != nil {
+			return fmt.Errorf("init AWS client: %w", err)
+		}
+		region := taskStatusRegion
+		if region == "" {
+			region = client.Config().Region
+		}
+		if region == "" {
+			return fmt.Errorf("no region: pass --region or configure a default AWS region")
+		}
+		account, err := client.GetAccountID(ctx)
+		if err != nil {
+			if taskStatusCheckDone {
+				os.Exit(3)
+			}
+			return fmt.Errorf("resolve account id: %w", err)
+		}
+		resultsBucket := fmt.Sprintf("spawn-results-%s-%s", account, region)
+
+		rec, present, err := fetchCompletion(ctx, client, region, resultsBucket, taskID)
+		if err != nil {
+			if taskStatusCheckDone {
+				fmt.Fprintf(os.Stderr, "task status: %v\n", err)
+				os.Exit(3)
+			}
+			return err
+		}
+		if !present {
+			if taskStatusCheckDone {
+				os.Exit(2) // running
+			}
+			fmt.Printf("Task %s: running (no completion record yet)\n", taskID)
+			return nil
+		}
+
+		if taskStatusCheckDone {
+			if rec.State == taskproto.StateFailed || rec.ExitCode != 0 {
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+		if getOutputFormat() == "json" {
+			return json.NewEncoder(os.Stdout).Encode(rec)
+		}
+		printCompletion(os.Stdout, rec)
+		return nil
+	},
 }
 
 // buildLaunchConfig maps a sized TaskSpec to the minimal aws.LaunchConfig for one
@@ -533,4 +692,10 @@ func init() {
 	taskRunCmd.Flags().StringVar(&taskRunSpecPath, "spec", "", "Path to a TaskSpec JSON file (required)")
 	taskRunCmd.Flags().BoolVar(&taskRunDryRun, "dry-run", false, "Size and preview the task without launching")
 	taskRunCmd.Flags().StringVar(&taskRunRegion, "region", "", "Region to size against (default: the configured AWS region)")
+	taskRunCmd.Flags().BoolVar(&taskRunWait, "wait", false, "Block until the task's completion record appears, then exit with its exit code")
+	taskRunCmd.Flags().DurationVar(&taskRunPollInterval, "poll-interval", 15*time.Second, "How often to poll for completion when --wait is set")
+
+	taskGroupCmd.AddCommand(taskStatusCmd)
+	taskStatusCmd.Flags().StringVar(&taskStatusRegion, "region", "", "Region the task ran in (default: the configured AWS region)")
+	taskStatusCmd.Flags().BoolVar(&taskStatusCheckDone, "check-complete", false, "Exit 0=completed, 1=failed, 2=running, 3=error instead of printing")
 }

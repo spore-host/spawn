@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
@@ -97,6 +98,22 @@ func TestTaskLaunchConfig_OnDemandDefault(t *testing.T) {
 	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "m7i.large"}, "us-east-1", "p", "w")
 	if cfg.Spot {
 		t.Error("Spot should default to false when purchase is unset")
+	}
+}
+
+func TestWaitDeadline(t *testing.T) {
+	// A valid TTL yields now+TTL+slack (within a small tolerance).
+	got := waitDeadline("1h")
+	want := time.Now().Add(1*time.Hour + 2*time.Minute)
+	if diff := got.Sub(want); diff > 5*time.Second || diff < -5*time.Second {
+		t.Errorf("waitDeadline(1h) off by %s", diff)
+	}
+	// An unparseable/empty TTL falls back to a generous cap (>= ~24h out).
+	if waitDeadline("nonsense").Before(time.Now().Add(23 * time.Hour)) {
+		t.Error("waitDeadline fallback should be far in the future")
+	}
+	if waitDeadline("").Before(time.Now().Add(23 * time.Hour)) {
+		t.Error("waitDeadline empty should use the fallback cap")
 	}
 }
 
