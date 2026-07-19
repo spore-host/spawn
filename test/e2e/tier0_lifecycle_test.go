@@ -51,17 +51,19 @@ func TestTier0_Launch_JobArray(t *testing.T) {
 	}
 }
 
-// TestTier0_Launch_JobArray_Cohort covers the MPI all-or-nothing cohort path
-// (--mpi), distinct from the plain-array cohort exercised by
-// TestTier0_Launch_JobArray. Both now run through the cohort reconciler (the
-// legacy loop is gone); the user-visible contract must be identical — 3 distinct
-// instances, all discoverable via list, all carrying the job-array tags.
+// TestTier0_Launch_JobArray_Cohort exercises the plain-array cohort path with an
+// explicit all-or-nothing --min-viable (= --count), distinct from the default
+// (--min-viable 1) covered by TestTier0_Launch_JobArray. Both run through the
+// cohort reconciler (the legacy loop is gone); the user-visible contract must be
+// identical — 3 distinct instances, all discoverable via list, all carrying the
+// job-array tags. (The --mpi path is validated by the real-AWS MPI tier, not the
+// substrate, which can't model EFA/placement-group setup.)
 func TestTier0_Launch_JobArray_Cohort(t *testing.T) {
 	env := startSpawnSubstrate(t)
 	arr := env.launchOK("carr", "--instance-type", "t3.small", "--count", "3",
-		"--job-array-name", "cbatch", "--mpi", "--auto-placement-group=false")
+		"--job-array-name", "cbatch", "--min-viable", "3")
 	if len(arr) != 3 {
-		t.Fatalf("--count 3 (mpi cohort) launched %d instances, want 3", len(arr))
+		t.Fatalf("--count 3 (cohort, min-viable 3) launched %d instances, want 3", len(arr))
 	}
 	ids := map[string]bool{}
 	for _, inst := range arr {
