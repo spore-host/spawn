@@ -122,15 +122,17 @@ func TestGenerateWrapper_PublicContainer(t *testing.T) {
 	w := GenerateWrapper(spec, "b", "us-east-1")
 
 	mustContain := []string{
-		"command -v docker",     // install guard
-		"dnf install -y docker", // install
-		"docker pull 'quay.io/biocontainers/bwa:0.7.18'",
-		"docker run --rm ", // run
+		"command -v docker",                  // install guard
+		"sudo dnf install -y docker",         // install (root)
+		"sudo systemctl enable --now docker", // start daemon (root)
+		"sudo docker info",                   // bounded wait for the socket
+		"sudo docker pull 'quay.io/biocontainers/bwa:0.7.18'",
+		"sudo docker run --rm ",                                         // run
 		"'quay.io/biocontainers/bwa:0.7.18' 'bwa' 'mem' '/data/ref.fa'", // image + argv
-		"-v '/data':'/data'",                        // input dir mount
-		"-v '/work':'/work'",                        // output dir mount
-		"aws s3 cp 's3://in/ref.fa' '/data/ref.fa'", // stage-in still on host
-		"completion.json",                           // record unchanged
+		"-v '/data':'/data'",                                            // input dir mount
+		"-v '/work':'/work'",                                            // output dir mount
+		"aws s3 cp 's3://in/ref.fa' '/data/ref.fa'",                     // stage-in still on host
+		"completion.json",                                               // record unchanged
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(w, sub) {
@@ -156,10 +158,10 @@ func TestGenerateWrapper_PrivateECRContainerWithGPU(t *testing.T) {
 	}
 	w := GenerateWrapper(spec, "b", "us-west-2")
 
-	if !strings.Contains(w, "aws ecr get-login-password --region 'us-west-2' | docker login --username AWS --password-stdin '123456789012.dkr.ecr.us-west-2.amazonaws.com'") {
+	if !strings.Contains(w, "aws ecr get-login-password --region 'us-west-2' | sudo docker login --username AWS --password-stdin '123456789012.dkr.ecr.us-west-2.amazonaws.com'") {
 		t.Errorf("private ECR image must emit a docker login to its registry host\n---\n%s", w)
 	}
-	if !strings.Contains(w, "docker run --rm --gpus all ") {
+	if !strings.Contains(w, "sudo docker run --rm --gpus all ") {
 		t.Errorf("GPU task must pass --gpus all\n---\n%s", w)
 	}
 }

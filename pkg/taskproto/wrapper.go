@@ -167,25 +167,35 @@ func quoteArgv(argv []string) string {
 func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region string) {
 	image := spec.Container
 
-	// Install Docker if absent (the task AMI is stock AL2023; no Docker baked in).
+	// The command script runs as the unprivileged instance user (bootstrap runs it
+	// via `su - <user>`), but installing Docker, managing its service, and talking
+	// to the Docker socket all need root — so every privileged step here is sudo'd
+	// (AL2023's default user has passwordless sudo). The host path never needs this.
+
+	// Install Docker if absent (the task AMI is stock AL2023; no Docker baked in),
+	// then make sure the daemon is up before we pull. Failures are fatal to the
+	// container run — abort early with a non-zero rc so the completion record
+	// classifies it, rather than hanging on a `docker` call to a dead daemon.
 	p("  if ! command -v docker >/dev/null 2>&1; then\n")
 	p("    echo 'spawn: installing docker...'\n")
-	p("    dnf install -y docker >/dev/null 2>&1 || yum install -y docker >/dev/null 2>&1\n")
-	p("    systemctl enable --now docker\n")
+	p("    sudo dnf install -y docker\n")
 	p("  fi\n")
+	p("  sudo systemctl enable --now docker\n")
+	// Wait for the socket (service start is async); bounded so we never hang.
+	p("  for _i in $(seq 1 30); do sudo docker info >/dev/null 2>&1 && break; sleep 2; done\n")
 
 	// Private-ECR images need a docker login with the instance-role creds; public
 	// images pull anonymously. ecrImageAccount!="" ⇒ private ECR ref.
 	if ecrImageAccount(image) != "" {
 		host := ecrRegistryHost(image)
 		p("  echo 'spawn: authenticating to ECR (%s)...'\n", host)
-		p("  aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s\n",
+		p("  aws ecr get-login-password --region %s | sudo docker login --username AWS --password-stdin %s\n",
 			shQuote(region), shQuote(host))
 	}
 
-	p("  docker pull %s\n", shQuote(image))
-
-	// docker run --rm [--gpus all] <-v dir:dir ...> <image> <argv>
+	// docker run --rm [--gpus all] <-v dir:dir ...> <image> <argv>. --pull always
+	// folds the pull into run; rc is the container's exit code. All docker calls
+	// are sudo'd (root owns the socket).
 	gpuFlag := ""
 	if spec.Resources.GPUs > 0 {
 		gpuFlag = "--gpus all "
@@ -194,7 +204,8 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	for _, d := range containerMountDirs(spec) {
 		fmt.Fprintf(&mounts, "-v %s:%s ", shQuote(d), shQuote(d))
 	}
-	p("  docker run --rm %s%s%s %s\n", gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
+	p("  sudo docker pull %s\n", shQuote(image))
+	p("  sudo docker run --rm %s%s%s %s\n", gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
 	p("  rc=$?\n")
 }
 
