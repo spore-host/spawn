@@ -128,6 +128,26 @@ func TestGenerateScopedCloudWatchLogsPolicy(t *testing.T) {
 	}
 }
 
+func TestHashPolicies_InlinePolicyJSONAffectsRoleName(t *testing.T) {
+	client := &Client{}
+	base := IAMRoleConfig{Policies: []string{"s3:ReadOnly"}}
+	withScoped := IAMRoleConfig{Policies: []string{"s3:ReadOnly"}, InlinePolicyJSON: `{"Version":"2012-10-17","Statement":[]}`}
+	withScoped2 := IAMRoleConfig{Policies: []string{"s3:ReadOnly"}, InlinePolicyJSON: `{"Version":"2012-10-17","Statement":[{"x":1}]}`}
+
+	// A different scoped policy must yield a different cached role name, so two
+	// tasks touching different buckets don't share (and stomp) one role.
+	if client.generateRoleName(base) == client.generateRoleName(withScoped) {
+		t.Error("adding InlinePolicyJSON should change the derived role name")
+	}
+	if client.generateRoleName(withScoped) == client.generateRoleName(withScoped2) {
+		t.Error("different InlinePolicyJSON should yield different role names")
+	}
+	// Deterministic: same config → same name.
+	if client.generateRoleName(withScoped) != client.generateRoleName(withScoped) {
+		t.Error("generateRoleName should be deterministic for the same config")
+	}
+}
+
 func TestBuildTrustPolicyWithAccount(t *testing.T) {
 	client := &Client{}
 	services := []string{"ec2", "lambda"}

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Real `spawn task run`** (spawn#386, increment 2). `task run --spec <file>`
+  now launches — not just `--dry-run`. It sizes the cheapest fitting instance,
+  ensures the per-account results bucket exists, and launches an ephemeral
+  instance running a generated wrapper that: stages inputs from S3
+  (`aws s3 cp`), runs the command, stages outputs back, and writes a **durable
+  completion record** to
+  `s3://spawn-results-<account>-<region>/tasks/<task_id>/completion.json` (plus a
+  `.exitcode` object and a best-effort `command.log`) — the signal workflow
+  adapters poll. The instance self-terminates via TTL + `on_complete`. A scoped
+  IAM instance profile grants exactly the input/output/results buckets the task
+  touches (no wildcard). Spot launches fall back to on-demand once on a capacity
+  error when `fallback: on_demand` is set. Returns immediately after launch;
+  poll the completion record (a `--wait` poller and `spawn task status` are a
+  follow-up). Container execution (`spec.container`) is deferred — it errors
+  clearly for now; omit it to run on the host.
+
+### Changed
+- `IAMRoleConfig` gained an `InlinePolicyJSON` field, letting callers attach a
+  scoped inline policy from a string (no temp file). Used by `task run` to grant
+  per-task S3 staging access.
+
 ## [0.81.0] - 2026-07-19
 
 ### Added

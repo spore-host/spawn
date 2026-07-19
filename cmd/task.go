@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/taskproto"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
@@ -193,21 +195,23 @@ var (
 )
 
 var taskRunCmd = &cobra.Command{
-	Use:   "run --spec <file> --dry-run",
-	Short: "Size and plan a task from a TaskSpec (dry-run only for now)",
+	Use:   "run --spec <file>",
+	Short: "Launch a task from a TaskSpec (stage → run → durable completion record)",
 	Long: `Run a task described by a TaskSpec JSON file (the shared workflow-adapter
 contract, spawn#386).
 
-This is the first increment: only --dry-run is supported. It parses and validates
-the spec, sizes the cheapest instance type that fits its resource request (via
-truffle), and prints the plan — WITHOUT launching anything. Real launch and the
-durable .exitcode-in-S3 completion record are a follow-up (see #386).`,
+Sizes the cheapest instance type that fits the resource request (via truffle),
+then launches an ephemeral instance that stages inputs from S3, runs the command,
+stages outputs back, and writes a durable completion record to
+s3://spawn-results-<account>-<region>/tasks/<task_id>/completion.json — the
+signal workflow adapters poll. The instance self-terminates on completion (TTL +
+on_complete).
+
+--dry-run sizes and prints the plan without launching. Container execution
+(spec.container) is a follow-up increment — omit it to run on the host.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if taskRunSpecPath == "" {
 			return fmt.Errorf("--spec is required")
-		}
-		if !taskRunDryRun {
-			return fmt.Errorf("real execution is not implemented yet (spawn#386) — re-run with --dry-run to size and preview the task")
 		}
 		spec, err := taskproto.ParseSpecFile(taskRunSpecPath)
 		if err != nil {
@@ -225,7 +229,10 @@ durable .exitcode-in-S3 completion record are a follow-up (see #386).`,
 			return fmt.Errorf("no region: pass --region or configure a default AWS region")
 		}
 		finder := truffleFinder{tc: truffleaws.NewClientFromConfig(awsClient.Config()), region: region}
-		return renderTaskDryRun(cmd.Context(), os.Stdout, spec, finder, region)
+		if taskRunDryRun {
+			return renderTaskDryRun(cmd.Context(), os.Stdout, spec, finder, region)
+		}
+		return runTaskReal(cmd.Context(), os.Stdout, awsClient, spec, finder, region)
 	},
 }
 
@@ -312,8 +319,194 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 		}
 	}
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Real launch + durable completion record are not implemented yet (spawn#386).")
+	fmt.Fprintln(out, "Re-run without --dry-run to launch this task.")
 	return nil
+}
+
+// runTaskReal launches a task for real: it sizes the instance (same as dry-run),
+// ensures the per-account results bucket exists, generates the on-instance
+// wrapper (stage-in → command → stage-out → durable completion record), creates
+// a scoped instance profile granting the S3 access the wrapper needs, and
+// launches via launcher.Provision (keyless/SSM, auto AMI+IAM+user-data). It
+// returns as soon as the instance is launched — the caller polls the S3
+// completion record (a --wait poller is a follow-up increment). Container
+// execution is deferred: a spec with a container ref is rejected here.
+func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *taskproto.TaskSpec, finder taskproto.InstanceFinder, region string) error {
+	if spec.Container != "" {
+		return fmt.Errorf("container execution is a follow-up increment (spawn#386); omit 'container' to run the command on the host")
+	}
+
+	sized, err := taskproto.Size(ctx, finder, spec.Resources)
+	if err != nil {
+		return err
+	}
+
+	account, err := client.GetAccountID(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve account id: %w", err)
+	}
+	resultsBucket := fmt.Sprintf("spawn-results-%s-%s", account, region)
+	// Create the results bucket before launch so the wrapper's write can't hit
+	// NoSuchBucket on a first-ever task in this account/region.
+	if err := client.CreateS3BucketIfNotExists(ctx, resultsBucket, region); err != nil {
+		return fmt.Errorf("ensure results bucket %s: %w", resultsBucket, err)
+	}
+
+	wrapper := taskproto.GenerateWrapper(spec, resultsBucket)
+
+	// Scoped instance profile: the default spored role has no S3 write, so grant
+	// exactly the buckets this task reads (inputs) and writes (outputs + results).
+	profile, err := client.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
+		InlinePolicyJSON: taskStagingPolicy(s3Buckets(spec.Inputs), s3Buckets(spec.Outputs), resultsBucket),
+	})
+	if err != nil {
+		return fmt.Errorf("create task instance profile: %w", err)
+	}
+
+	cfg := taskLaunchConfig(spec, sized, region, profile, wrapper)
+
+	result, err := launcher.Provision(ctx, client, cfg, launcher.Options{})
+	// Single-region spot→on-demand fallback (a minimal echo of lagotto's
+	// capacity fallthrough; AZ-spread is out of scope for this increment).
+	if err != nil && cfg.Spot && spec.Resources.Fallback == taskproto.PurchaseOnDemand && isCapacityErr(err) {
+		fmt.Fprintf(out, "⚠ spot capacity unavailable (%v); retrying on-demand per fallback...\n", classifyLaunchErr(err))
+		cfg.Spot = false
+		result, err = launcher.Provision(ctx, client, cfg, launcher.Options{})
+	}
+	if err != nil {
+		return fmt.Errorf("launch task: %w", err)
+	}
+
+	lr := taskproto.LaunchResult{
+		TaskID:       spec.TaskID,
+		InstanceID:   result.InstanceID,
+		Region:       result.Region,
+		AZ:           result.AvailabilityZone,
+		InstanceType: sized.InstanceType,
+		Spot:         cfg.Spot,
+	}
+	if getOutputFormat() == "json" {
+		return json.NewEncoder(out).Encode(lr)
+	}
+
+	fmt.Fprintf(out, "✅ Task launched: %s\n", spec.TaskID)
+	fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
+	fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
+	fmt.Fprintf(out, "Completion:   s3://%s/tasks/%s/completion.json\n", resultsBucket, spec.TaskID)
+	fmt.Fprintf(out, "\nPoll for completion:\n")
+	fmt.Fprintf(out, "  aws s3 cp s3://%s/tasks/%s/completion.json -   # when present, the task is done\n", resultsBucket, spec.TaskID)
+	fmt.Fprintf(out, "  spawn status %s --check-complete               # or poll the instance directly\n", lr.InstanceID)
+	return nil
+}
+
+// buildLaunchConfig maps a sized TaskSpec to the minimal aws.LaunchConfig for one
+// task instance. AMI, UserData, and KeyName are deliberately left empty for
+// launcher.Provision to fill (auto AMI, keyless/SSM, wrapper-as-user-data); the
+// scoped instance profile is set so Provision skips its default-role step.
+func taskLaunchConfig(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region, iamProfile, wrapper string) aws.LaunchConfig {
+	return aws.LaunchConfig{
+		InstanceType:       sized.InstanceType,
+		Region:             region,
+		JobArrayCommand:    wrapper, // Provision embeds this via /etc/spawn/command
+		Spot:               spec.Resources.Purchase == taskproto.PurchaseSpot,
+		TTL:                spec.Lifecycle.TTL,
+		OnComplete:         spec.EffectiveOnComplete(),
+		Name:               spec.TaskID,
+		IamInstanceProfile: iamProfile,
+		Tags:               map[string]string{"spawn:task-id": spec.TaskID},
+	}
+}
+
+// s3Buckets extracts the distinct S3 bucket names from a manifest list's s3://
+// endpoints (source or destination, whichever is the s3 side). Non-s3 entries
+// (local paths) are skipped.
+func s3Buckets(manifests []taskproto.Manifest) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range manifests {
+		for _, ep := range []string{m.Source, m.Destination} {
+			if b := s3Bucket(ep); b != "" && !seen[b] {
+				seen[b] = true
+				out = append(out, b)
+			}
+		}
+	}
+	return out
+}
+
+// s3Bucket returns the bucket name from an s3://bucket/key URI, or "" if uri is
+// not an s3:// URI (e.g. a local path).
+func s3Bucket(uri string) string {
+	const p = "s3://"
+	if !strings.HasPrefix(uri, p) {
+		return ""
+	}
+	rest := uri[len(p):]
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
+// taskStagingPolicy builds a scoped S3 policy granting read on the input buckets
+// and write on the output + results buckets — the exact access the wrapper's
+// aws s3 cp needs, and no more (preferred over the wildcard s3:FullAccess
+// template). Modeled on GenerateScopedS3Policy.
+func taskStagingPolicy(inputBuckets, outputBuckets []string, resultsBucket string) string {
+	readB := dedupeBuckets(inputBuckets)
+	writeB := dedupeBuckets(append(append([]string{}, outputBuckets...), resultsBucket))
+
+	var stmts []string
+	if len(readB) > 0 {
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":[%s]}`, bucketObjectARNs(readB)))
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bucketARNs(readB)))
+	}
+	stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
+	return `{"Version":"2012-10-17","Statement":[` + strings.Join(stmts, ",") + `]}`
+}
+
+func dedupeBuckets(buckets []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, b := range buckets {
+		if b != "" && !seen[b] {
+			seen[b] = true
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+func bucketARNs(buckets []string) string {
+	arns := make([]string, len(buckets))
+	for i, b := range buckets {
+		arns[i] = fmt.Sprintf("%q", "arn:aws:s3:::"+b)
+	}
+	return strings.Join(arns, ",")
+}
+
+func bucketObjectARNs(buckets []string) string {
+	arns := make([]string, len(buckets))
+	for i, b := range buckets {
+		arns[i] = fmt.Sprintf("%q", "arn:aws:s3:::"+b+"/*")
+	}
+	return strings.Join(arns, ",")
+}
+
+// isCapacityErr reports whether a launch error is a capacity class (worth a
+// fallback retry), keyed on the AWS error code carried by aws.LaunchError.
+func isCapacityErr(err error) bool {
+	return classifyLaunchErr(err) == taskproto.RetryCapacity
+}
+
+// classifyLaunchErr extracts the AWS error code from a launch error and maps it
+// to a taskproto RetryClass.
+func classifyLaunchErr(err error) taskproto.RetryClass {
+	var le *aws.LaunchError
+	if errors.As(err, &le) {
+		return taskproto.ClassifyLaunchError(le.Code)
+	}
+	return taskproto.RetryNone
 }
 
 func init() {
@@ -324,6 +517,6 @@ func init() {
 
 	taskGroupCmd.AddCommand(taskRunCmd)
 	taskRunCmd.Flags().StringVar(&taskRunSpecPath, "spec", "", "Path to a TaskSpec JSON file (required)")
-	taskRunCmd.Flags().BoolVar(&taskRunDryRun, "dry-run", false, "Size and preview the task without launching (currently required)")
+	taskRunCmd.Flags().BoolVar(&taskRunDryRun, "dry-run", false, "Size and preview the task without launching")
 	taskRunCmd.Flags().StringVar(&taskRunRegion, "region", "", "Region to size against (default: the configured AWS region)")
 }
