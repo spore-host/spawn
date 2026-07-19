@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.82.0] - 2026-07-19
+
 ### Fixed
 - **Task instances now self-terminate on completion / enforce their TTL in-instance**
   (spawn#406). `spawn task run` attaches a *scoped* IAM instance profile; that
@@ -1768,7 +1770,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.81.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.82.0...HEAD
+[0.82.0]: https://github.com/spore-host/spawn/compare/v0.81.0...v0.82.0
 [0.81.0]: https://github.com/spore-host/spawn/compare/v0.80.0...v0.81.0
 [0.80.0]: https://github.com/spore-host/spawn/compare/v0.79.0...v0.80.0
 [0.79.0]: https://github.com/spore-host/spawn/compare/v0.78.0...v0.79.0
