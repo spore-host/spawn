@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   best-effort — a rate-limited/offline GitHub API never blocks an install; the
   content digest is always recorded. (Signing, checksum manifests, and
   `fetch`-step digests remain later increments of the registry supply-chain RFC.)
+- **Task-execution protocol foundation + `spawn task run --dry-run`** (#386,
+  increment 1). New `pkg/taskproto` package defines the shared workflow-adapter
+  contract (`TaskSpec`, `ResourceRequest`, input/output `Manifest`, `Lifecycle`,
+  `TaskState`) with offline spec validation, plus a sizer that picks the cheapest
+  instance type satisfying a resource request (via truffle) — including a
+  multi-family allow-list and memory headroom that truffle's single-family filter
+  lacks. `spawn task run --spec task.json --dry-run` parses, validates, sizes, and
+  prints the plan (instance type, rate, TTL, est. max cost, staging manifests)
+  **without launching anything**; real execution errors out pointing to
+  `--dry-run`. Example at `examples/task-spec.json`. Real launch and the durable
+  `.exitcode`-in-S3 completion record remain later increments (#386 stays open).
 - **`spawn array` command group** (#389). First-class job-array reporting:
   `spawn array status <name>` shows launched-vs-requested members and, crucially,
   the **missing (sparse) indexes** a `--min-viable` partial launch leaves behind —
