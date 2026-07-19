@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **GPU instance types now auto-detect a working AMI** (#384). Auto-AMI pointed
+  at `al2023-ami-kernel-default-gpu-{x86_64,arm64}` SSM parameters that **do not
+  exist**, so every GPU launch without `--ami` failed with
+  `SSM ParameterNotFound`. It now resolves the **Deep Learning Base OSS Nvidia
+  Driver GPU AMI (AL2023)** via the `deeplearning` SSM namespace. Also fixed the
+  GPU-family detection: `g6e`, `g7e`, `g7`, `g4dn`, `p4de`, `p5e`, `p6` were
+  missing (newer families silently got a **CPU** AMI), and Neuron families
+  (`inf*`/`trn*`) and AMD (`g4ad`) are no longer misclassified as NVIDIA GPUs.
+
 ### Added
 - **Heterogeneous parameter sweeps: vary `instance_type` (and `ami`/`spot`) per
   entry** (#372). A `--param-file` sweep can now run the same workload across
