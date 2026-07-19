@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"fmt"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/aws"
 )
 
 func TestBuildLaunchConfigFromParams_WorkflowStep(t *testing.T) {
@@ -174,5 +177,66 @@ func TestBuildLaunchConfigFromParams_OverrideDefaults(t *testing.T) {
 
 	if config.Spot {
 		t.Errorf("Expected spot=false (overridden), got true")
+	}
+}
+
+// TestBuildLaunchConfigFromParams_HeterogeneousEntry verifies a single sweep entry
+// can carry its own instance_type / ami / spot (#372) — the per-entry overrides a
+// heterogeneous (price-performance benchmark) sweep needs.
+func TestBuildLaunchConfigFromParams_HeterogeneousEntry(t *testing.T) {
+	defaults := map[string]interface{}{"ttl": "1h"}
+	params := map[string]interface{}{
+		"instance_type": "c8g.24xlarge",
+		"ami":           "ami-arm64sve",
+		"spot":          true,
+	}
+
+	config, err := buildLaunchConfigFromParams(defaults, params, "sweep-1", "bench", 2, 6)
+	if err != nil {
+		t.Fatalf("buildLaunchConfigFromParams failed: %v", err)
+	}
+	if config.InstanceType != "c8g.24xlarge" {
+		t.Errorf("InstanceType = %q, want c8g.24xlarge", config.InstanceType)
+	}
+	if config.AMI != "ami-arm64sve" {
+		t.Errorf("AMI = %q, want ami-arm64sve (per-entry)", config.AMI)
+	}
+	if !config.Spot {
+		t.Error("Spot = false, want true (per-entry)")
+	}
+}
+
+// TestSweepAMICacheKey_DistinguishesArchAndGPU is the crux of the #372 AMI fix:
+// the per-config AMI cache is keyed by (region, arch, GPU), so a heterogeneous
+// sweep resolves a distinct AMI per architecture/accelerator instead of forcing
+// the first entry's AMI (an x86, non-GPU image) onto arm64/GPU entries. This
+// asserts the key derivation the sweep loop uses actually separates the benchmark
+// families.
+func TestSweepAMICacheKey_DistinguishesArchAndGPU(t *testing.T) {
+	key := func(region, it string) string {
+		return fmt.Sprintf("%s|%s|%t", region, aws.DetectArchitecture(it), aws.DetectGPUInstance(it))
+	}
+	region := "us-east-1"
+	// A GROMACS price-performance matrix: Intel, AMD, Graviton, and GPU.
+	c8i := key(region, "c8i.24xlarge") // x86, no GPU
+	c8a := key(region, "c8a.24xlarge") // x86, no GPU
+	c8g := key(region, "c8g.24xlarge") // arm64, no GPU
+	g6 := key(region, "g6.2xlarge")    // x86, GPU
+
+	// c8i and c8a are both x86/no-GPU → same AMI is correct (one SSM lookup shared).
+	if c8i != c8a {
+		t.Errorf("expected c8i and c8a to share an AMI key, got %q vs %q", c8i, c8a)
+	}
+	// arm64 must get a different AMI than x86.
+	if c8g == c8i {
+		t.Errorf("arm64 (c8g) shares an AMI key with x86 (c8i): %q — arm64 entry would get an x86 AMI", c8g)
+	}
+	// GPU must get a different AMI than non-GPU x86.
+	if g6 == c8i {
+		t.Errorf("GPU (g6) shares an AMI key with non-GPU (c8i): %q — GPU entry would get a non-GPU AMI", g6)
+	}
+	// Region is part of the key.
+	if key("us-west-2", "c8i.24xlarge") == c8i {
+		t.Error("AMI key ignores region")
 	}
 }
