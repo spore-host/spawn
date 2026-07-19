@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`spawn array` command group** (#389). First-class job-array reporting:
+  `spawn array status <name>` shows launched-vs-requested members and, crucially,
+  the **missing (sparse) indexes** a `--min-viable` partial launch leaves behind —
+  the gap that silently breaks a dense-range shard scheme. `spawn array collect`
+  reports per-index members, and `spawn array cancel [--pending]` terminates them
+  (`--pending` spares actively-running members). Members are discovered by
+  grouping EC2 on the job-array tags, so no server-side record is needed.
+  (`logs` and `retry --failed` are intentionally not included yet — see #389;
+  `retry` needs launch config that isn't fully recoverable from tags.)
 - **`spawn task diagnose <name|id>`** (#391). A one-screen summary of a single
   instance — type/state/region/AZ, age, TTL, an on-the-fly compute-cost estimate
   (from the `spawn:price-per-hour` tag × age; labeled an estimate, 0 when
