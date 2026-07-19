@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -76,6 +77,57 @@ func TestBuildAZChain_PlacementGroupGate(t *testing.T) {
 	}
 	if rung.CapacityModel != cohort.CapacityOnDemand {
 		t.Errorf("capacity model = %v, want OnDemand", rung.CapacityModel)
+	}
+}
+
+// TestBuildCohort covers the MPI-vs-partial selection and --min-viable clamping:
+// MPI is always all-or-nothing (MinViable=len); a plain array uses the clamped
+// --min-viable (default 1 = independent), and a partial cohort never runs
+// assembly (NoAssembly=true).
+func TestBuildCohort(t *testing.T) {
+	mkMembers := func(n int) []cohort.EntityIntent {
+		m := make([]cohort.EntityIntent, 0, n)
+		rung := cohort.RungPlacement{Rung: cohort.Rung{InstanceType: "t3.small", AvailZone: "us-east-1a"}}
+		for i := 0; i < n; i++ {
+			intent, err := cohort.NewEntityIntent("arr", cohort.EntityID(fmt.Sprintf("arr-%d", i)),
+				"g1", "c1", rung, "")
+			if err != nil {
+				t.Fatalf("intent %d: %v", i, err)
+			}
+			m = append(m, intent)
+		}
+		return m
+	}
+
+	tests := []struct {
+		name         string
+		mpi          bool
+		minViableSet int
+		members      int
+		wantMinV     int
+		wantNoAssy   bool
+	}{
+		{"mpi is all-or-nothing", true, 1, 4, 4, false},
+		{"plain default min-viable 1", false, 1, 4, 1, true},
+		{"plain explicit min-viable", false, 3, 4, 3, true},
+		{"plain min-viable clamped to count", false, 99, 4, 4, true},
+		{"plain min-viable floored to 1", false, 0, 4, 1, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			minViable = tt.minViableSet // package-level launch flag
+			defer func() { minViable = 1 }()
+			c, err := buildCohort(cohortSpec{mpi: tt.mpi}, "job-1", mkMembers(tt.members))
+			if err != nil {
+				t.Fatalf("buildCohort: %v", err)
+			}
+			if c.MinViable != tt.wantMinV {
+				t.Errorf("MinViable = %d, want %d", c.MinViable, tt.wantMinV)
+			}
+			if c.NoAssembly != tt.wantNoAssy {
+				t.Errorf("NoAssembly = %v, want %v", c.NoAssembly, tt.wantNoAssy)
+			}
+		})
 	}
 }
 

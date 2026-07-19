@@ -711,14 +711,15 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		if jobArrayName == "" {
 			return fmt.Errorf("--job-array-name is required when --count > 1")
 		}
-		switch reconcilerMode {
-		case "", "legacy":
-			return launchJobArray(ctx, awsClient, config, plat, prog, fsxInfo, auditLog)
-		case "cohort":
-			return launchJobArrayCohort(ctx, awsClient, config, plat, prog, fsxInfo, auditLog)
-		default:
-			return fmt.Errorf("--reconciler must be 'legacy' or 'cohort', got %q", reconcilerMode)
+		if reconcilerMode != "" {
+			fmt.Fprintf(os.Stderr, "⚠️  --reconciler is deprecated and ignored; job arrays always use the cohort engine.\n")
 		}
+		// MPI is all-or-nothing (a missing rank makes the cluster useless);
+		// a plain array is independent work with a configurable --min-viable.
+		if mpiEnabled {
+			return launchMPICohort(ctx, awsClient, config, plat, prog, fsxInfo, auditLog)
+		}
+		return launchPlainArrayCohort(ctx, awsClient, config, plat, prog, fsxInfo, auditLog)
 	}
 
 	// Step 6: Launch instance

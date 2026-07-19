@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **All job-array launches (`--count > 1`) now run through the cohort engine;
+  the legacy goroutine loop is removed.** Both MPI (`--mpi`) and plain arrays get
+  the cohort barrier, leak-free drain, and AZ capacity fallback. MPI is
+  all-or-nothing (a missing rank makes the cluster useless); plain arrays are
+  independent by default.
+
 ### Added
+- **`--min-viable` for plain job arrays** (default `1`): the minimum number of
+  members that must launch for the array to succeed. Default `1` makes members
+  independent — one member's terminal failure no longer tears down the rest (an
+  improvement over the old all-or-nothing loop). Set it equal to `--count` for
+  strict all-or-nothing. Ignored for `--mpi` (always all-or-nothing).
 - **MPI/job-array cohort launches now fall back across Availability Zones on
   capacity exhaustion.** When the primary AZ has no capacity
   (`InsufficientInstanceCapacity`), the whole cohort advances to the next AZ **as
@@ -17,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capped at 4. New `DescribeAvailabilityZones` AWS helper. This stage only enables
   the chain when no cluster placement group is set; combining AZ fallback with a
   placement group lands in a follow-up.
+
+### Deprecated
+- **`--reconciler` is now a no-op** and hidden. Job arrays always use the cohort
+  engine, so the flag is ignored (it warns if passed) and will be removed in a
+  future release.
 
 ### Changed
 - **SSM is now guaranteed on every spawn-launched instance.** `AmazonSSMManagedInstanceCore`
