@@ -270,3 +270,97 @@ t3.micro,0.1,extra
 		t.Error("Expected error for row with mismatched columns, got nil")
 	}
 }
+
+func TestExpandGrid_Cartesian(t *testing.T) {
+	grid := map[string][]interface{}{
+		"learning_rate": {0.001, 0.01, 0.1},
+		"batch_size":    {32, 64, 128},
+	}
+	got := expandGrid(grid)
+	if len(got) != 9 {
+		t.Fatalf("expected 9 combinations, got %d", len(got))
+	}
+	// Deterministic order: keys sorted (batch_size before learning_rate), each
+	// key's values in file order. So the first combo is the first value of each.
+	if got[0]["batch_size"] != 32 || got[0]["learning_rate"] != 0.001 {
+		t.Errorf("first combo = %v, want {batch_size:32, learning_rate:0.001}", got[0])
+	}
+	// batch_size is the outer loop (sorted first), so its value changes slowest.
+	if got[0]["batch_size"] != 32 || got[2]["batch_size"] != 32 || got[3]["batch_size"] != 64 {
+		t.Errorf("batch_size grouping unexpected: %v / %v / %v", got[0], got[2], got[3])
+	}
+}
+
+func TestExpandGrid_Deterministic(t *testing.T) {
+	grid := map[string][]interface{}{"a": {1, 2}, "b": {"x", "y"}}
+	first := expandGrid(grid)
+	for i := 0; i < 5; i++ {
+		again := expandGrid(grid)
+		for j := range first {
+			if first[j]["a"] != again[j]["a"] || first[j]["b"] != again[j]["b"] {
+				t.Fatalf("expandGrid not deterministic at %d: %v vs %v", j, first[j], again[j])
+			}
+		}
+	}
+}
+
+func TestParseYAML_Grid(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "grid.yaml")
+	content := `
+defaults:
+  instance_type: g5.xlarge
+grid:
+  learning_rate: [0.001, 0.01, 0.1]
+  batch_size: [32, 64, 128]
+`
+	if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ParseParamFile(f)
+	if err != nil {
+		t.Fatalf("ParseParamFile: %v", err)
+	}
+	if len(result.Params) != 9 {
+		t.Errorf("expected 9 expanded param sets, got %d", len(result.Params))
+	}
+	if result.Defaults["instance_type"] != "g5.xlarge" {
+		t.Errorf("defaults not preserved: %v", result.Defaults)
+	}
+}
+
+func TestParseYAML_GridPlusParams(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "mix.yaml")
+	content := `
+params:
+  - {seed: 1}
+grid:
+  lr: [0.1, 0.2]
+`
+	if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ParseParamFile(f)
+	if err != nil {
+		t.Fatalf("ParseParamFile: %v", err)
+	}
+	// 1 explicit + 2 grid = 3; explicit set comes first.
+	if len(result.Params) != 3 {
+		t.Fatalf("expected 3 param sets, got %d", len(result.Params))
+	}
+	if result.Params[0]["seed"] != 1 {
+		t.Errorf("explicit param set should come first, got %v", result.Params[0])
+	}
+}
+
+func TestParseYAML_EmptyGridAndParamsErrors(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "empty.yaml")
+	if err := os.WriteFile(f, []byte("defaults:\n  instance_type: t3.micro\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseParamFile(f); err == nil {
+		t.Error("expected error when neither params nor grid is present, got nil")
+	}
+}

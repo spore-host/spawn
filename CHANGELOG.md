@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Parameter sweeps: native `grid:` (cartesian) expansion** (#390). A sweep
+  param file can now declare `grid: {learning_rate: [...], batch_size: [...]}`
+  and spawn expands it to one parameter set per combination — no more
+  pre-generating the full `params` list with a script. `grid` and an explicit
+  `params` list can be combined (explicit sets first). Keys expand in sorted
+  order so the generated combinations, and the sweep index assigned to each, are
+  deterministic. `--estimate-only` reflects the expanded instance count.
 - **`spawn plugin inspect` and `spawn plugin install --dry-run`** (#387). Preview
   exactly what a plugin would do before installing it — resolved source and
   version, local (controller) vs remote (instance) steps, requested controller

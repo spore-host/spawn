@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -14,8 +15,15 @@ import (
 
 // ParamFileFormat represents the parameter file structure
 type ParamFileFormat struct {
-	Defaults map[string]interface{}   `json:"defaults" yaml:"defaults"`
-	Params   []map[string]interface{} `json:"params" yaml:"params"`
+	Defaults map[string]interface{} `json:"defaults" yaml:"defaults"`
+	// Grid, when present, is expanded into the cartesian product of its named
+	// value lists and appended to Params — so `grid: {lr: [...], bs: [...]}`
+	// yields one param set per combination without the user pre-generating them.
+	// Grid and an explicit Params list may be combined; the expansion is appended
+	// after any explicit sets. Keys are iterated in sorted order so the generated
+	// combinations (and thus sweep indexes) are deterministic across runs.
+	Grid   map[string][]interface{} `json:"grid" yaml:"grid"`
+	Params []map[string]interface{} `json:"params" yaml:"params"`
 }
 
 // ParseParamFile reads and parses a parameter file (JSON, YAML, or CSV)
@@ -48,15 +56,9 @@ func parseJSON(path string) (*ParamFileFormat, error) {
 		return nil, fmt.Errorf("failed to parse JSON parameter file: %w", err)
 	}
 
-	if len(format.Params) == 0 {
-		return nil, fmt.Errorf("parameter file must contain at least one parameter set in 'params' array")
+	if err := format.finalize(); err != nil {
+		return nil, err
 	}
-
-	// Ensure Defaults is not nil
-	if format.Defaults == nil {
-		format.Defaults = make(map[string]interface{})
-	}
-
 	return &format, nil
 }
 
@@ -72,16 +74,62 @@ func parseYAML(path string) (*ParamFileFormat, error) {
 		return nil, fmt.Errorf("failed to parse YAML parameter file: %w", err)
 	}
 
-	if len(format.Params) == 0 {
-		return nil, fmt.Errorf("parameter file must contain at least one parameter set in 'params' array")
+	if err := format.finalize(); err != nil {
+		return nil, err
 	}
-
-	// Ensure Defaults is not nil
-	if format.Defaults == nil {
-		format.Defaults = make(map[string]interface{})
-	}
-
 	return &format, nil
+}
+
+// finalize expands any Grid into Params (cartesian product), ensures Defaults is
+// non-nil, and enforces that the file yields at least one parameter set. Shared
+// by the JSON and YAML parsers so both handle `grid:` identically. CSV has no
+// grid concept and validates its own row count.
+func (f *ParamFileFormat) finalize() error {
+	if f.Defaults == nil {
+		f.Defaults = make(map[string]interface{})
+	}
+	if len(f.Grid) > 0 {
+		f.Params = append(f.Params, expandGrid(f.Grid)...)
+	}
+	if len(f.Params) == 0 {
+		return fmt.Errorf("parameter file must contain at least one parameter set (a non-empty 'params' array or 'grid')")
+	}
+	return nil
+}
+
+// expandGrid returns the cartesian product of the named value lists as one
+// parameter set per combination. Keys are processed in sorted order and each
+// key's values in file order, so the resulting sequence — and therefore the
+// sweep index assigned to each combination — is deterministic. A key with an
+// empty value list contributes nothing and collapses the product to zero sets.
+func expandGrid(grid map[string][]interface{}) []map[string]interface{} {
+	keys := make([]string, 0, len(grid))
+	for k := range grid {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	combos := []map[string]interface{}{{}}
+	for _, k := range keys {
+		values := grid[k]
+		next := make([]map[string]interface{}, 0, len(combos)*len(values))
+		for _, base := range combos {
+			for _, v := range values {
+				merged := make(map[string]interface{}, len(base)+1)
+				for bk, bv := range base {
+					merged[bk] = bv
+				}
+				merged[k] = v
+				next = append(next, merged)
+			}
+		}
+		combos = next
+	}
+	// A single empty combo means the grid had no keys — yield nothing.
+	if len(combos) == 1 && len(combos[0]) == 0 {
+		return nil
+	}
+	return combos
 }
 
 // parseCSV parses a CSV parameter file
