@@ -1,0 +1,30 @@
+# Codecov configuration for spawn.
+#
+# The authoritative coverage gate is the "Coverage gate" step in
+# .github/workflows/ci.yml: a ratchet floor (MIN_COVERAGE) that fails the build
+# if total coverage drops below it. That floor is the source of truth and is
+# raised deliberately as coverage improves (target 60%, see CLAUDE.md).
+#
+# Codecov's own status checks are therefore INFORMATIONAL, not blocking. In
+# particular the default `patch` status demands ~100% coverage of every changed
+# line, which is wrong for this project: much of the changed surface is
+# AWS/SSH/SSM integration glue (RunE handlers, launch paths) that can only be
+# exercised against real AWS, not in `-short` unit tests. Marking these
+# `informational: true` keeps the coverage annotations on PRs without turning an
+# unavoidable integration-glue gap into a red required check.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# Don't let Codecov post a failing commit status; the workflow gate decides.
+github_checks:
+  annotations: true
+
+comment:
+  layout: "reach, diff, files"
+  require_changes: true

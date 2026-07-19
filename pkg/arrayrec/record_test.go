@@ -140,6 +140,84 @@ func TestSafeFileContainsUnsafeNames(t *testing.T) {
 	}
 }
 
+func TestDefaultDir(t *testing.T) {
+	dir, err := DefaultDir()
+	if err != nil {
+		t.Fatalf("DefaultDir: %v", err)
+	}
+	// It must end in the spore/arrays segment; the home prefix varies by machine.
+	if filepath.Base(dir) != "arrays" || filepath.Base(filepath.Dir(dir)) != "spore" {
+		t.Errorf("DefaultDir = %q, want it to end in .config/spore/arrays", dir)
+	}
+	if !filepath.IsAbs(dir) {
+		t.Errorf("DefaultDir = %q, want an absolute path", dir)
+	}
+}
+
+func TestLoadByIDMissing(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadByID(dir, "does-not-exist"); err == nil {
+		t.Error("expected error for a missing id record")
+	}
+}
+
+func TestLoadByIDCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(idPath(dir, "bad"), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadByID(dir, "bad"); err == nil {
+		t.Error("expected parse error for corrupt id record")
+	}
+}
+
+func TestLoadByNameCorruptPointer(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(namePath(dir, "job"), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadByName(dir, "job"); err == nil {
+		t.Error("expected parse error for corrupt name pointer")
+	}
+}
+
+func TestLoadByNameDanglingPointer(t *testing.T) {
+	// A pointer that references an id whose record file is gone.
+	dir := t.TempDir()
+	if err := os.WriteFile(namePath(dir, "job"), []byte(`{"array_id":"vanished"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadByName(dir, "job"); err == nil {
+		t.Error("expected error when the pointer's id record is missing")
+	}
+}
+
+func TestSaveIntoUnwritableParent(t *testing.T) {
+	// A file where the record dir should be: MkdirAll then fails, so Save errors
+	// rather than panicking. Skipped as root (root ignores directory perms).
+	if os.Getuid() == 0 {
+		t.Skip("running as root; directory perms are not enforced")
+	}
+	base := t.TempDir()
+	blocker := filepath.Join(base, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// blocker is a file, so using it as a parent dir must fail.
+	if err := Save(filepath.Join(blocker, "arrays"), sampleRecord()); err == nil {
+		t.Error("expected Save to error when the record dir can't be created")
+	}
+}
+
+func TestSafeFileEmpty(t *testing.T) {
+	if got := safeFile(""); got != "_" {
+		t.Errorf("safeFile(\"\") = %q, want %q", got, "_")
+	}
+	if got := safeFile("///"); got != "___" {
+		t.Errorf("safeFile(%q) = %q, want %q", "///", got, "___")
+	}
+}
+
 func assertRecordEqual(t *testing.T, got, want Record) {
 	t.Helper()
 	if got.ArrayID != want.ArrayID || got.Name != want.Name || got.Size != want.Size ||
