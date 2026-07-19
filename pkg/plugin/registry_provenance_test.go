@@ -94,6 +94,7 @@ func TestResolveWithProvenance_ContentHashIsStable(t *testing.T) {
 	// Same bytes → same digest; a different body → different digest.
 	body := provTestSpec
 	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test-only httptest server returning a static plugin-spec fixture (provTestSpec); no user input, no HTML, no XSS surface.
 		_, _ = w.Write([]byte(body))
 	}))
 	defer raw.Close()
