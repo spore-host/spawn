@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follow-up). Container execution (`spec.container`) is deferred — it errors
   clearly for now; omit it to run on the host.
 
+- **`spawn task status <task-id>`** (spawn#386, increment 2). Reads a task's
+  durable completion record from
+  `s3://spawn-results-<account>-<region>/tasks/<task-id>/completion.json` and
+  prints it (`-o json` for the raw record). If the record isn't there yet the
+  task is still running; `--check-complete` mirrors `spawn status` exit codes
+  (0=completed, 1=failed, 2=running, 3=error) for scripting.
+- **`spawn task run --wait`** blocks until the completion record appears (polling
+  every `--poll-interval`, default 15s), prints it, and exits with the task's own
+  exit code — for callers who want a synchronous run instead of polling.
+
 ### Changed
 - `IAMRoleConfig` gained an `InlinePolicyJSON` field, letting callers attach a
   scoped inline policy from a string (no temp file). Used by `task run` to grant

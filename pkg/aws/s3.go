@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -217,4 +218,38 @@ func (c *Client) GetFSxConfigFromS3Bucket(ctx context.Context, stackName, region
 	}
 
 	return nil, fmt.Errorf("no S3 bucket found with stack name: %s", stackName)
+}
+
+// ErrS3NoSuchKey is returned by GetS3Object when the object does not exist, so
+// callers can distinguish "not there yet" (e.g. a task still running, no
+// completion record) from a real error, with errors.Is.
+var ErrS3NoSuchKey = errors.New("s3: no such key")
+
+// GetS3Object fetches an object's bytes from the given bucket/key. A missing
+// object returns ErrS3NoSuchKey (wrapped) so pollers can treat absence as
+// "pending" rather than failure.
+func (c *Client) GetS3Object(ctx context.Context, region, bucket, key string) ([]byte, error) {
+	s3Client := s3.NewFromConfig(c.regionalConfig(region))
+	out, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil, fmt.Errorf("%w: s3://%s/%s", ErrS3NoSuchKey, bucket, key)
+		}
+		// Some endpoints surface a missing key as a generic NoSuchKey/NotFound code.
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
+			return nil, fmt.Errorf("%w: s3://%s/%s", ErrS3NoSuchKey, bucket, key)
+		}
+		return nil, fmt.Errorf("get s3://%s/%s: %w", bucket, key, err)
+	}
+	defer func() { _ = out.Body.Close() }()
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read s3://%s/%s: %w", bucket, key, err)
+	}
+	return data, nil
 }
