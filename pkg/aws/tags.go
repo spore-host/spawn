@@ -288,6 +288,11 @@ func (c *Client) managedResourceTags(ctx context.Context, extra map[string]strin
 	return tags
 }
 
+// AccountBase36 converts an AWS account ID to its base36 form, the segment used
+// in spawn's instance FQDNs ({name}.{account-base36}.spore.host). Exported
+// wrapper over the internal helper for callers outside this package.
+func AccountBase36(accountID string) string { return intToBase36(accountID) }
+
 // intToBase36 converts a numeric string (AWS account ID) to base36
 // Example: "942542972736" -> "c0zxr0ao"
 func intToBase36(accountID string) string {

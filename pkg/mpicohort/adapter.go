@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/spore-host/cohort"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -37,6 +38,12 @@ type LaunchAPI interface {
 	// Used for lazy per-AZ cluster placement groups under AZ fallback.
 	CreatePlacementGroup(ctx context.Context, name, region string) error
 	DeletePlacementGroup(ctx context.Context, name string) error
+	// WaitForSSMOnline blocks until the instance's SSM agent is Online (or fails
+	// fast if the instance structurally can't register); RunShellScript runs a
+	// shell command via SSM. Used by the control-plane Assembler to push the MPI
+	// peers file to every node.
+	WaitForSSMOnline(ctx context.Context, region, instanceID string, timeout time.Duration) error
+	RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*aws.SSMRunResult, error)
 }
 
 // PlacementGroupName returns the per-AZ cluster placement group name for a

@@ -2,12 +2,16 @@ package mpicohort
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/spore-host/cohort"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/provider"
 )
 
 // fakeLauncher is an in-memory LaunchAPI — no real AWS. It records launches and
@@ -25,6 +29,10 @@ type fakeLauncher struct {
 
 	pgCreated map[string]int // placement group name → CreatePlacementGroup call count
 	pgDeleted []string       // placement group names passed to DeletePlacementGroup
+
+	ssmCmds       map[string]string // instanceID → last RunShellScript command
+	ssmFailIDs    map[string]bool   // instanceIDs whose RunShellScript returns Failed
+	ssmOnlineFail map[string]bool   // instanceIDs whose WaitForSSMOnline errors
 }
 
 type launchRec struct {
@@ -103,6 +111,28 @@ func (f *fakeLauncher) DeletePlacementGroup(_ context.Context, name string) erro
 	defer f.mu.Unlock()
 	f.pgDeleted = append(f.pgDeleted, name)
 	return nil
+}
+
+func (f *fakeLauncher) WaitForSSMOnline(_ context.Context, _, instanceID string, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ssmOnlineFail[instanceID] {
+		return fmt.Errorf("ssm offline: %s", instanceID)
+	}
+	return nil
+}
+
+func (f *fakeLauncher) RunShellScript(_ context.Context, _, instanceID, command string, _ time.Duration) (*aws.SSMRunResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ssmCmds == nil {
+		f.ssmCmds = map[string]string{}
+	}
+	f.ssmCmds[instanceID] = command
+	if f.ssmFailIDs[instanceID] {
+		return &aws.SSMRunResult{Status: "Failed", ResponseCode: 1, Stderr: "boom"}, nil
+	}
+	return &aws.SSMRunResult{Status: "Success", ResponseCode: 0}, nil
 }
 
 func (f *fakeLauncher) ListInstances(_ context.Context, _, _ string) ([]aws.InstanceInfo, error) {
@@ -268,6 +298,81 @@ func TestMPI_MultiAZChain_LandsAllInSurvivingAZ(t *testing.T) {
 		if in.AvailabilityZone != "us-east-1c" {
 			t.Errorf("%s landed in AZ %q — all nodes must land in the surviving AZ (us-east-1c)", name, in.AvailabilityZone)
 		}
+	}
+}
+
+// TestPeersJSON_MatchesWritePeersFileFormat asserts the Assembler's peers JSON
+// is byte-for-byte what the on-instance writePeersFile produced (json.MarshalIndent
+// of []provider.PeerInfo, 2-space indent), sorted by index, using private IPs.
+func TestPeersJSON_MatchesWritePeersFileFormat(t *testing.T) {
+	// Members out of index order to prove sorting.
+	members := []cohort.Observation{
+		{ID: "job-1", ProviderID: "i-1", Address: "10.0.0.2"},
+		{ID: "job-0", ProviderID: "i-0", Address: "10.0.0.1"},
+	}
+	got, err := PeersJSON(members, "c0zxr0ao")
+	if err != nil {
+		t.Fatalf("PeersJSON: %v", err)
+	}
+	// Expected = the exact same marshalling the legacy writePeersFile used.
+	want, _ := json.MarshalIndent([]provider.PeerInfo{
+		{Index: 0, InstanceID: "i-0", IP: "10.0.0.1", DNS: "job-0.c0zxr0ao.spore.host", Provider: "ec2"},
+		{Index: 1, InstanceID: "i-1", IP: "10.0.0.2", DNS: "job-1.c0zxr0ao.spore.host", Provider: "ec2"},
+	}, "", "  ")
+	if string(got) != string(want) {
+		t.Errorf("PeersJSON mismatch:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestSSMAssembler_PushesToAllMembers: the happy path pushes the peers file to
+// every member over SSM, and the pushed command carries the base64 payload.
+func TestSSMAssembler_PushesToAllMembers(t *testing.T) {
+	f := newFakeLauncher()
+	asm := NewSSMAssembler(f, "us-east-1", "acct36", time.Minute, time.Minute)
+	members := []cohort.Observation{
+		{ID: "job-0", ProviderID: "i-0", Address: "10.0.0.1"},
+		{ID: "job-1", ProviderID: "i-1", Address: "10.0.0.2"},
+	}
+	if err := asm.Assemble(context.Background(), members); err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range []string{"i-0", "i-1"} {
+		cmd, ok := f.ssmCmds[id]
+		if !ok {
+			t.Errorf("no SSM push to %s", id)
+		}
+		if !strings.Contains(cmd, "base64 -d > /etc/spawn/job-array-peers.json") {
+			t.Errorf("push command to %s doesn't write the peers file atomically: %q", id, cmd)
+		}
+	}
+}
+
+// TestSSMAssembler_PushFailureIsAssemblyError: one node's push failing fails the
+// whole assembly (so cohort marks the cohort not-Ready and the caller drains).
+func TestSSMAssembler_PushFailureIsAssemblyError(t *testing.T) {
+	f := newFakeLauncher()
+	f.ssmFailIDs = map[string]bool{"i-1": true}
+	asm := NewSSMAssembler(f, "us-east-1", "", time.Minute, time.Minute)
+	members := []cohort.Observation{
+		{ID: "job-0", ProviderID: "i-0", Address: "10.0.0.1"},
+		{ID: "job-1", ProviderID: "i-1", Address: "10.0.0.2"},
+	}
+	if err := asm.Assemble(context.Background(), members); err == nil {
+		t.Fatal("expected assembly error when a node's SSM push fails, got nil")
+	}
+}
+
+// TestSSMAssembler_OfflineIsAssemblyError: a node never reaching SSM-online fails
+// assembly (fail closed rather than launch a cluster that never gets its hostfile).
+func TestSSMAssembler_OfflineIsAssemblyError(t *testing.T) {
+	f := newFakeLauncher()
+	f.ssmOnlineFail = map[string]bool{"i-0": true}
+	asm := NewSSMAssembler(f, "us-east-1", "", time.Minute, time.Minute)
+	members := []cohort.Observation{{ID: "job-0", ProviderID: "i-0", Address: "10.0.0.1"}}
+	if err := asm.Assemble(context.Background(), members); err == nil {
+		t.Fatal("expected assembly error when a node never comes online, got nil")
 	}
 }
 

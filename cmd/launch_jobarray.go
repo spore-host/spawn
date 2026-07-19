@@ -100,14 +100,20 @@ func buildJobArrayMemberConfig(baseConfig *aws.LaunchConfig, jobArrayID string, 
 // cohortBudget maps the legacy job-array timeouts onto cohort's per-phase budget.
 // Running matches the legacy flat 2-minute running-wait; every field is set
 // explicitly so cohort doesn't inject its larger defaults.
-func cohortBudget() cohort.PhaseBudget {
-	return cohort.PhaseBudget{
+func cohortBudget(spec cohortSpec) cohort.PhaseBudget {
+	b := cohort.PhaseBudget{
 		LaunchAcked:    30 * time.Second, // RunInstances ack
 		Running:        2 * time.Minute,  // matches legacy maxWaitTime
 		Enrolled:       2 * time.Second,  // nil Enroller → trivially enrolled
 		CohortBarrier:  30 * time.Second, // straggler wait
-		CohortAssembly: 1 * time.Second,  // nil Assembler → phase skipped
+		CohortAssembly: 1 * time.Second,  // plain array: nil Assembler → phase skipped
 	}
+	if spec.mpi {
+		// MPI runs the SSM control-plane Assembler: wait for SSM online + push the
+		// peers file to every node. That needs minutes on cold boot, not 1s.
+		b.CohortAssembly = 5 * time.Minute
+	}
+	return b
 }
 
 // maxAZFallbackRungs caps the AZ-fallback chain length. Each capacity-exhausted
@@ -115,6 +121,9 @@ func cohortBudget() cohort.PhaseBudget {
 // chain across every AZ could churn many full launch/drain cycles; 4 covers the
 // common "primary AZ out of capacity" case without unbounded churn.
 const maxAZFallbackRungs = 4
+
+// ssmPushTimeout bounds a single RunShellScript peers-file push per node.
+const ssmPushTimeout = 90 * time.Second
 
 // buildAZChain returns the primary placement rung and its AZ-fallback chain for
 // an MPI cohort. The chain is a list of rungs identical except for AvailZone,
@@ -212,6 +221,26 @@ func cleanupAbandonedPGs(ctx context.Context, awsClient *aws.Client, act *mpicoh
 	}
 }
 
+// drainJobArray terminates every instance carrying the given job-array-id tag.
+// Best-effort: used to compensate for cohort NOT draining on assembly failure
+// (the members are all live when Assemble runs, so a failed push must not leave a
+// billing cluster). Errors are logged, not fatal.
+func drainJobArray(ctx context.Context, awsClient *aws.Client, region, jobArrayID string) {
+	insts, err := awsClient.ListInstances(ctx, region, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  drain: list instances failed: %v\n", err)
+		return
+	}
+	for _, in := range insts {
+		if in.Tags["spawn:job-array-id"] != jobArrayID {
+			continue
+		}
+		if err := awsClient.Terminate(ctx, region, in.InstanceID); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  drain: terminate %s failed: %v\n", in.InstanceID, err)
+		}
+	}
+}
+
 // launchMPICohort launches an MPI cluster as an all-or-nothing cohort
 // (NewMPICohort → MinViable=len): a real barrier, leak-free drain, and shared-rung
 // AZ fallback. A missing rank makes the cluster useless, so it is never partial.
@@ -285,9 +314,7 @@ func launchCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 		members = append(members, intent)
 	}
 
-	// Provider seam over the real AWS client. nil Enroller (trivially enrolled)
-	// and nil Assembler (peer discovery stays on-instance) per the current design;
-	// the SSM Assembler/Enroller land in later stages. PlacementGroupPrefix (set by
+	// Provider seam over the real AWS client. PlacementGroupPrefix (set by
 	// runLaunch for the auto-PG case) makes the Actuator create a per-AZ cluster PG
 	// on demand as the cohort advances AZs.
 	act := &mpicohort.Actuator{
@@ -298,7 +325,21 @@ func launchCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 		PlacementGroupPrefix: baseConfig.PlacementGroupPrefix,
 	}
 	obs := &mpicohort.Observer{Client: awsClient, Region: baseConfig.Region}
-	r := cohort.NewReconciler(act, obs, mpicohort.Classifier{}, nil, nil, nil)
+
+	// Domain seam. MPI runs the control-plane SSM Assembler: post-barrier it
+	// pushes the peers file to every node (retiring on-instance self-discovery).
+	// A plain array has no assembly phase (nil Assembler → partial cohort legal).
+	// Enroller stays nil here; the SSM readiness probe lands in Stage 5.
+	var asm cohort.Assembler
+	if spec.mpi {
+		accountBase36 := ""
+		if acct, aerr := awsClient.GetAccountID(ctx); aerr == nil {
+			accountBase36 = aws.AccountBase36(acct)
+		}
+		asm = mpicohort.NewSSMAssembler(awsClient, baseConfig.Region, accountBase36,
+			cohortBudget(spec).CohortAssembly, ssmPushTimeout)
+	}
+	r := cohort.NewReconciler(act, obs, mpicohort.Classifier{}, nil, asm, nil)
 
 	// Clean up abandoned per-AZ placement groups the Actuator created while
 	// advancing the AZ-fallback chain. Only the surviving AZ (keepAZ) holds
@@ -320,7 +361,22 @@ func launchCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 	}
 
 	if !outcome.Ready {
-		// cohort already drained survivors — do NOT terminate here.
+		// cohort drains survivors on the launch/barrier failure paths — but NOT on
+		// assembly failure (the members are all live when Assemble runs). If any
+		// member reached the assembly phase, the caller must drain, or the whole
+		// cluster is left running and billing. Terminate by job-array-id tag.
+		assemblyReached := false
+		for _, id := range memberIDs {
+			if outcome.Records[id].ReachedPhase == cohort.PhaseCohortAssembly {
+				assemblyReached = true
+				break
+			}
+		}
+		if assemblyReached {
+			fmt.Fprintf(os.Stderr, "⚠️  Assembly failed; draining %d launched instances...\n", count)
+			drainJobArray(ctx, awsClient, baseConfig.Region, jobArrayID)
+		}
+
 		successCount, failureCount := 0, 0
 		var details []string
 		for _, id := range memberIDs {
@@ -394,7 +450,7 @@ func launchCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 // up. minViable is clamped to [1, count].
 func buildCohort(spec cohortSpec, jobArrayID string, members []cohort.EntityIntent) (cohort.Cohort, error) {
 	if spec.mpi {
-		return cohort.NewMPICohort(cohort.CohortID(jobArrayID), members, cohortBudget())
+		return cohort.NewMPICohort(cohort.CohortID(jobArrayID), members, cohortBudget(spec))
 	}
 	mv := minViable
 	if mv < 1 {
@@ -405,7 +461,7 @@ func buildCohort(spec cohortSpec, jobArrayID string, members []cohort.EntityInte
 	}
 	// nil Assembler: a plain array has no collective assembly phase, so a partial
 	// cohort is legal (NewPartialCohort rejects a non-nil Assembler).
-	return cohort.NewPartialCohort(cohort.CohortID(jobArrayID), members, cohortBudget(), mv, nil)
+	return cohort.NewPartialCohort(cohort.CohortID(jobArrayID), members, cohortBudget(spec), mv, nil)
 }
 
 // renderJobArrayResult writes the job-array ID to the output-id file and emits

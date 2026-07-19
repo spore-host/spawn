@@ -252,11 +252,11 @@ func (p *EC2Provider) DiscoverPeers(ctx context.Context, jobArrayID string) ([]P
 		return peers[i].Index < peers[j].Index
 	})
 
-	// Write to /etc/spawn/job-array-peers.json for compatibility
-	if err := writePeersFile(peers); err != nil {
-		log.Printf("Warning: Failed to write peers file: %v", err)
-	}
-
+	// NOTE: the /etc/spawn/job-array-peers.json file is no longer written here.
+	// MPI peer distribution moved to the cohort control-plane Assembler, which
+	// pushes that file to every node over SSM (pkg/mpicohort). spored no longer
+	// self-discovers peers for MPI; DiscoverPeers remains for the hybrid registry
+	// and diagnostics.
 	log.Printf("✓ Discovered %d peers in job array %s", len(peers), jobArrayID)
 	return peers, nil
 }
@@ -646,28 +646,4 @@ func intToBase36(accountID string) string {
 		return accountID
 	}
 	return strconv.FormatUint(num, 36)
-}
-
-// writePeersFile writes peer information to /etc/spawn/job-array-peers.json
-func writePeersFile(peers []PeerInfo) error {
-	// Create /etc/spawn directory if it doesn't exist
-	err := os.MkdirAll("/etc/spawn", 0755)
-	if err != nil {
-		return fmt.Errorf("failed to create /etc/spawn directory: %w", err)
-	}
-
-	// Marshal to JSON and write to file
-	peersJSON, err := json.MarshalIndent(peers, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal peers: %w", err)
-	}
-
-	peersFile := "/etc/spawn/job-array-peers.json"
-	err = os.WriteFile(peersFile, peersJSON, 0640)
-	if err != nil {
-		return fmt.Errorf("failed to write peers file: %w", err)
-	}
-
-	log.Printf("✓ Peer information written to %s (%d peers)", peersFile, len(peers))
-	return nil
 }

@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **MPI peer discovery is now control-plane, over SSM.** After the all-or-nothing
+  barrier, spawn collects every node's private IP and pushes
+  `/etc/spawn/job-array-peers.json` to all nodes via SSM (the file the MPI
+  user-data waits on to build its hostfile), instead of each instance
+  self-discovering peers from EC2. Benefits: the hostfile now uses **private IPs**
+  (correct for intra-VPC / EFA rank-to-rank traffic) and peers arrive as soon as
+  the cluster is up. If the push fails on any node the launch fails and the whole
+  cluster is drained (no orphaned billing). Requires SSM on the instances —
+  guaranteed since the SSM-baseline change above. spored no longer writes the
+  peers file for MPI.
 - **All job-array launches (`--count > 1`) now run through the cohort engine;
   the legacy goroutine loop is removed.** Both MPI (`--mpi`) and plain arrays get
   the cohort barrier, leak-free drain, and AZ capacity fallback. MPI is
