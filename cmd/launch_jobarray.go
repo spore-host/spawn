@@ -112,6 +112,83 @@ func cohortBudget() cohort.PhaseBudget {
 	}
 }
 
+// maxAZFallbackRungs caps the AZ-fallback chain length. Each capacity-exhausted
+// round drains and relaunches the WHOLE cohort in the next AZ, so an unbounded
+// chain across every AZ could churn many full launch/drain cycles; 4 covers the
+// common "primary AZ out of capacity" case without unbounded churn.
+const maxAZFallbackRungs = 4
+
+// buildAZChain returns the primary placement rung and its AZ-fallback chain for
+// an MPI cohort. The chain is a list of rungs identical except for AvailZone,
+// ordered with the operator-selected AZ first (if any). cohort advances the
+// shared rung across this chain as a unit on capacity exhaustion.
+//
+// Stage-1 scope: the chain is only built when NO cluster placement group is set.
+// A pre-created PG binds to one AZ, so moving AZ mid-fallback would break it;
+// that's resolved in a later stage (lazy per-AZ PG). With a PG set, we return a
+// single-rung chain (no fallback), matching prior behavior.
+func buildAZChain(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, capacity cohort.CapacityModel) (cohort.Rung, []cohort.Rung) {
+	primary := cohort.Rung{
+		InstanceType:  baseConfig.InstanceType,
+		AvailZone:     baseConfig.AvailabilityZone,
+		CapacityModel: capacity,
+	}
+
+	// Gated: no AZ fallback while a placement group is in play (Stage 1).
+	if baseConfig.PlacementGroup != "" {
+		return primary, []cohort.Rung{primary}
+	}
+
+	zones, err := awsClient.DescribeAvailabilityZones(ctx, baseConfig.Region)
+	if err != nil || len(zones) == 0 {
+		// AZ discovery failed — degrade to single-rung rather than fail the launch.
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  AZ fallback unavailable (%v); using a single AZ\n", err)
+		}
+		return primary, []cohort.Rung{primary}
+	}
+
+	// Order: operator-selected AZ first (if set and valid), then the rest.
+	ordered := orderAZs(zones, baseConfig.AvailabilityZone)
+	if len(ordered) > maxAZFallbackRungs {
+		ordered = ordered[:maxAZFallbackRungs]
+	}
+
+	chain := make([]cohort.Rung, 0, len(ordered))
+	for _, az := range ordered {
+		chain = append(chain, cohort.Rung{
+			InstanceType:  baseConfig.InstanceType,
+			AvailZone:     az,
+			CapacityModel: capacity,
+		})
+	}
+	if len(chain) > 1 {
+		fmt.Fprintf(os.Stderr, "   AZ fallback enabled across %d zones: %s\n", len(chain), strings.Join(ordered, ", "))
+	}
+	return chain[0], chain
+}
+
+// orderAZs returns zones with preferred first (when non-empty and present),
+// preserving the sorted order of the remainder.
+func orderAZs(zones []string, preferred string) []string {
+	if preferred == "" {
+		return zones
+	}
+	ordered := make([]string, 0, len(zones))
+	for _, z := range zones {
+		if z == preferred {
+			ordered = append(ordered, preferred) // preferred first (only if present)
+			break
+		}
+	}
+	for _, z := range zones {
+		if z != preferred {
+			ordered = append(ordered, z)
+		}
+	}
+	return ordered
+}
+
 // launchJobArrayCohort launches an MPI/job-array as an all-or-nothing cohort via
 // the cohort reconciler (--reconciler=cohort). It gains a real barrier and a
 // leak-free drain over the hand-rolled launchJobArray; peer discovery stays
@@ -132,16 +209,15 @@ func launchJobArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig
 			"region":         baseConfig.Region,
 		}, nil)
 
-	// Build per-index configs + cohort intents. All members share ONE rung
-	// (single-rung, no fallback chain) — every member places as a unit.
-	rung := cohort.Rung{
-		InstanceType:  baseConfig.InstanceType,
-		AvailZone:     baseConfig.AvailabilityZone,
-		CapacityModel: cohort.CapacityOnDemand,
-	}
+	// Build the shared placement rung + its AZ-fallback chain. When capacity is
+	// exhausted in the current AZ, cohort's collective launch advances the whole
+	// cohort to the next rung's AZ as a unit (preserving the placement-group /
+	// one-AZ invariant). See buildAZChain.
+	capacity := cohort.CapacityOnDemand
 	if baseConfig.Spot {
-		rung.CapacityModel = cohort.CapacitySpot
+		capacity = cohort.CapacitySpot
 	}
+	rung, chain := buildAZChain(ctx, awsClient, baseConfig, capacity)
 
 	cfgs := make(map[cohort.EntityID]aws.LaunchConfig, count)
 	members := make([]cohort.EntityIntent, 0, count)
@@ -155,7 +231,7 @@ func launchJobArrayCohort(ctx context.Context, awsClient *aws.Client, baseConfig
 		cfgs[id] = cfg
 		memberIDs[i] = id
 		intent, err := cohort.NewEntityIntent(jobArrayName, id, "g1", cohort.CohortID(jobArrayID),
-			cohort.RungPlacement{Rung: rung}, "")
+			cohort.RungPlacement{Rung: rung, Chain: chain}, "")
 		if err != nil {
 			return fmt.Errorf("build member %d intent: %w", i, err)
 		}

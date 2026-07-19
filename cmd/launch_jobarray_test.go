@@ -5,11 +5,36 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/aws"
 )
+
+// TestOrderAZs covers the AZ-fallback ordering: the operator-selected AZ is put
+// first when present, the rest keep their (sorted) order, and an absent/empty
+// preference is a no-op.
+func TestOrderAZs(t *testing.T) {
+	zones := []string{"us-east-1a", "us-east-1b", "us-east-1c"}
+	tests := []struct {
+		name      string
+		preferred string
+		want      []string
+	}{
+		{"empty preference", "", zones},
+		{"preferred first", "us-east-1b", []string{"us-east-1b", "us-east-1a", "us-east-1c"}},
+		{"preferred already first", "us-east-1a", zones},
+		{"preferred not present", "us-east-1z", zones},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := orderAZs(zones, tt.preferred); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("orderAZs(%v, %q) = %v, want %v", zones, tt.preferred, got, tt.want)
+			}
+		})
+	}
+}
 
 // decodeUserData reverses encodeUserData (gzip + base64) for assertions.
 func decodeUserData(t *testing.T, encoded string) string {
