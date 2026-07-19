@@ -37,6 +37,41 @@ func TestValidate_Valid(t *testing.T) {
 	}
 }
 
+func TestValidate_PermissionsBlock(t *testing.T) {
+	// A spec that declares a full permissions block (and whose controller.env
+	// covers its env_passthrough) validates cleanly, and the block round-trips
+	// through ParseSpec.
+	spec, err := plugin.ParseSpec([]byte(`
+name: good
+version: v1.0.0
+description: A valid plugin with permissions
+local:
+  env_passthrough: ["TS_API_CLIENT_SECRET"]
+permissions:
+  controller:
+    env: ["TS_API_CLIENT_ID", "TS_API_CLIENT_SECRET"]
+    network: true
+    commands: ["jq"]
+  instance:
+    root: true
+    network: true
+    ports: [8080]
+    files: ["/etc/tailscale"]
+`))
+	if err != nil {
+		t.Fatalf("ParseSpec: %v", err)
+	}
+	if spec.Permissions == nil {
+		t.Fatal("Permissions block did not round-trip through ParseSpec")
+	}
+	if !spec.Permissions.Instance.Root || len(spec.Permissions.Instance.Ports) != 1 {
+		t.Errorf("permissions not parsed as expected: %+v", spec.Permissions)
+	}
+	if err := spec.Validate("good"); err != nil {
+		t.Errorf("Validate: unexpected error: %v", err)
+	}
+}
+
 func TestValidate_DirNameMismatch(t *testing.T) {
 	spec, _ := plugin.ParseSpec([]byte(validSpec))
 	err := spec.Validate("wrong-dir")
@@ -90,6 +125,21 @@ func TestValidate_Problems(t *testing.T) {
 			name:    "push only valid locally not remotely",
 			spec:    "name: p\nversion: v1.0.0\ndescription: d\nremote:\n  install:\n    - type: push\n      key: k\n",
 			wantSub: "invalid step type",
+		},
+		{
+			name:    "permissions bad env name",
+			spec:    "name: p\nversion: v1.0.0\ndescription: d\npermissions:\n  controller:\n    env: [\"1BAD\"]\n",
+			wantSub: "permissions.controller.env: invalid environment variable name",
+		},
+		{
+			name:    "permissions port out of range",
+			spec:    "name: p\nversion: v1.0.0\ndescription: d\npermissions:\n  instance:\n    ports: [70000]\n",
+			wantSub: "out of range",
+		},
+		{
+			name:    "permissions must cover env_passthrough",
+			spec:    "name: p\nversion: v1.0.0\ndescription: d\nlocal:\n  env_passthrough: [\"TS_SECRET\"]\npermissions:\n  controller:\n    env: [\"OTHER\"]\n",
+			wantSub: "permissions.controller.env must include \"TS_SECRET\"",
 		},
 	}
 	for _, tc := range cases {

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Plugin `permissions:` declaration block** (#388). A `plugin.yaml` can now
+  declare its capability surface — `controller` (env vars read, network, expected
+  commands) and `instance` (root, network, ports opened, files managed) — as
+  explicit metadata. `spawn plugin validate` checks it: env-var names must be
+  valid, ports in range, and `controller.env` must cover everything in
+  `local.env_passthrough` so the declaration can't understate what a plugin reads.
+  This is declarative (ports/files inside opaque `run` steps still can't be
+  inferred), and pairs with the upcoming `spawn plugin inspect` preview (#387).
 - **Zenodo DOI**: spawn is archived on Zenodo with a citable DOI (concept DOI
   [10.5281/zenodo.21439888](https://doi.org/10.5281/zenodo.21439888), always
   latest). Added to `CITATION.cff` and a README badge.
