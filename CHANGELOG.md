@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Plugin install provenance / immutable pinning** (spore-plugins#8, increment 1).
+  Resolving a plugin now records where it came from: the exact `plugin.yaml`
+  sha256, and — best-effort via the GitHub commits API — the immutable commit SHA
+  a tag/branch resolved to. `spawn plugin inspect` shows a `Resolved:` line
+  (`commit <sha> · sha256 <hex>`, or "unpinned" when the commit can't be
+  determined), `spawn plugin install` prints the pin and stores `commit_sha` +
+  `spec_sha256` in the local install record for later audit. Commit resolution is
+  best-effort — a rate-limited/offline GitHub API never blocks an install; the
+  content digest is always recorded. (Signing, checksum manifests, and
+  `fetch`-step digests remain later increments of the registry supply-chain RFC.)
 - **`spawn array` command group** (#389). First-class job-array reporting:
   `spawn array status <name>` shows launched-vs-requested members and, crucially,
   the **missing (sparse) indexes** a `--min-viable` partial launch leaves behind —

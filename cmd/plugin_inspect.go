@@ -19,17 +19,17 @@ import (
 // dryRun only changes the framing (it's reached via `plugin install --dry-run`);
 // the rendered content is identical to `plugin inspect`.
 func runPluginInspect(ctx context.Context, ref string, dryRun bool) error {
-	spec, err := plugin.DefaultResolver().Resolve(ctx, ref)
+	spec, prov, err := plugin.DefaultResolver().ResolveWithProvenance(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("resolve plugin %q: %w", ref, err)
 	}
-	renderInspect(os.Stdout, plugin.ParseRef(ref), spec, dryRun)
+	renderInspect(os.Stdout, plugin.ParseRef(ref), spec, prov, dryRun)
 	return nil
 }
 
 // renderInspect writes the preview for an already-resolved spec. Split out from
 // runPluginInspect so it can be unit-tested without a resolver or an instance.
-func renderInspect(out io.Writer, pr plugin.PluginRef, spec *plugin.PluginSpec, dryRun bool) {
+func renderInspect(out io.Writer, pr plugin.PluginRef, spec *plugin.PluginSpec, prov *plugin.Provenance, dryRun bool) {
 	if dryRun {
 		fmt.Fprintf(out, "DRY RUN — nothing will be installed.\n\n")
 	}
@@ -37,6 +37,7 @@ func renderInspect(out io.Writer, pr plugin.PluginRef, spec *plugin.PluginSpec, 
 	fmt.Fprintf(out, "Plugin:      %s %s\n", spec.Name, orNone(spec.Version))
 	fmt.Fprintf(out, "Description: %s\n", orNone(spec.Description))
 	fmt.Fprintf(out, "Source:      %s\n", describeSource(pr))
+	fmt.Fprintf(out, "Resolved:    %s\n", describeProvenance(prov))
 	fmt.Fprintln(out)
 
 	// Static validation, same checks as `spawn plugin validate`. Empty dirName
@@ -71,6 +72,34 @@ func renderInspect(out io.Writer, pr plugin.PluginRef, spec *plugin.PluginSpec, 
 	fmt.Fprintf(out, "Note: commands, ports, and files created inside `run` shell steps cannot be\n")
 	fmt.Fprintf(out, "determined statically. The declared permissions block (if any) is the author's\n")
 	fmt.Fprintf(out, "statement of intent, not an enforced sandbox.\n")
+}
+
+// describeProvenance renders the resolved commit / content digest line. It makes
+// pinning status visible: a commit SHA means immutable; no SHA on a remote ref
+// means the fetch tracked a mutable branch/tag (only the content digest pins it).
+func describeProvenance(prov *plugin.Provenance) string {
+	if prov == nil {
+		return "(unknown)"
+	}
+	if prov.Host == "local" {
+		return fmt.Sprintf("local file · sha256 %s", shortHash(prov.ContentSHA256))
+	}
+	if prov.CommitSHA != "" {
+		return fmt.Sprintf("commit %s · sha256 %s", shortHash(prov.CommitSHA), shortHash(prov.ContentSHA256))
+	}
+	return fmt.Sprintf("unpinned (commit unknown) · sha256 %s", shortHash(prov.ContentSHA256))
+}
+
+// shortHash trims a hex digest to its first 12 chars for display (full value is
+// recorded in the install record).
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	if h == "" {
+		return "(none)"
+	}
+	return h
 }
 
 func describeSource(pr plugin.PluginRef) string {
