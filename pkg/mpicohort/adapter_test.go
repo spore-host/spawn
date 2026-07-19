@@ -376,6 +376,65 @@ func TestSSMAssembler_OfflineIsAssemblyError(t *testing.T) {
 	}
 }
 
+// TestEnroller_ProbeScript covers what the MPI-readiness probe checks: mpirun
+// unless --skip-mpi-install, plus the EFA provider when EFA is enabled; nothing
+// to check → trivially ready.
+func TestEnroller_ProbeScript(t *testing.T) {
+	tests := []struct {
+		name        string
+		efa, skip   bool
+		wantMPIrun  bool
+		wantEFA     bool
+		wantTrivial bool
+	}{
+		{"default checks mpirun", false, false, true, false, false},
+		{"efa also checks fi_info", true, false, true, true, false},
+		{"skip-install drops mpirun", false, true, false, false, true},
+		{"skip-install + efa checks only efa", true, true, false, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := Enroller{EFAEnabled: tt.efa, SkipMPIInstall: tt.skip}.enrollProbeScript()
+			if got := strings.Contains(s, "command -v mpirun"); got != tt.wantMPIrun {
+				t.Errorf("mpirun check = %v, want %v (%q)", got, tt.wantMPIrun, s)
+			}
+			if got := strings.Contains(s, "fi_info -p efa"); got != tt.wantEFA {
+				t.Errorf("efa check = %v, want %v (%q)", got, tt.wantEFA, s)
+			}
+			if tt.wantTrivial && s != "exit 0" {
+				t.Errorf("expected trivial 'exit 0', got %q", s)
+			}
+		})
+	}
+}
+
+// TestEnroller_IsEnrolled covers the readiness verdicts: probe success →
+// Operational; probe non-zero → Enrolled-but-not-Operational; instance not yet
+// visible → not enrolled (retryable, no hard error).
+func TestEnroller_IsEnrolled(t *testing.T) {
+	f := newFakeLauncher()
+	// Two instances present; i-bad fails the probe.
+	f.launched = map[string]aws.InstanceInfo{
+		"job-0": {InstanceID: "i-ok", Name: "job-0", State: "running"},
+		"job-1": {InstanceID: "i-bad", Name: "job-1", State: "running"},
+	}
+	f.ssmFailIDs = map[string]bool{"i-bad": true}
+	e := Enroller{Client: f, Region: "us-east-1", Timeout: time.Minute}
+
+	ok, err := e.IsEnrolled(context.Background(), "job-0")
+	if err != nil || !ok.Enrolled || !ok.Operational {
+		t.Errorf("job-0: got %+v err=%v, want Enrolled+Operational", ok, err)
+	}
+	bad, err := e.IsEnrolled(context.Background(), "job-1")
+	if err != nil || !bad.Enrolled || bad.Operational {
+		t.Errorf("job-1: got %+v err=%v, want Enrolled but not Operational", bad, err)
+	}
+	missing, err := e.IsEnrolled(context.Background(), "job-9")
+	if err != nil || missing.Enrolled {
+		t.Errorf("job-9 (not in EC2): got %+v err=%v, want not-enrolled/no-error", missing, err)
+	}
+}
+
 // TestPlacementGroupName covers the per-AZ PG naming used for lazy AZ-fallback PGs.
 func TestPlacementGroupName(t *testing.T) {
 	if got := PlacementGroupName("spawn-mpi-train", "us-east-1b"); got != "spawn-mpi-train-us-east-1b" {

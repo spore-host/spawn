@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **MPI clusters now have a real readiness barrier.** Before a cluster is
+  considered ready, each node is probed over SSM for `mpirun` (unless
+  `--skip-mpi-install`) and, when `--efa` is set, the EFA fabric provider
+  (`fi_info -p efa`) — so "ready" means MPI-capable, not merely "running". A node
+  that never becomes MPI-ready fails the launch (and the cluster is cleaned up).
 - **MPI peer discovery is now control-plane, over SSM.** After the all-or-nothing
   barrier, spawn collects every node's private IP and pushes
   `/etc/spawn/job-array-peers.json` to all nodes via SSM (the file the MPI
@@ -48,10 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the chain when no cluster placement group is set; combining AZ fallback with a
   placement group lands in a follow-up.
 
-### Deprecated
-- **`--reconciler` is now a no-op** and hidden. Job arrays always use the cohort
-  engine, so the flag is ignored (it warns if passed) and will be removed in a
-  future release.
+### Removed
+- **`--reconciler` is removed.** It was a hidden, experimental flag for opting a
+  job-array launch into the cohort engine; job arrays now always use cohort, so
+  the flag no longer exists (it was a warn-only no-op in the interim).
 
 ### Changed
 - **SSM is now guaranteed on every spawn-launched instance.** `AmazonSSMManagedInstanceCore`

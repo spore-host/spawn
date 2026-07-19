@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,7 +202,13 @@ func (a *Actuator) Terminate(ctx context.Context, id cohort.EntityID) error {
 
 // providerID resolves an EntityID (the Name tag) to an EC2 instance ID.
 func (a *Actuator) providerID(ctx context.Context, id cohort.EntityID) (string, error) {
-	insts, err := a.Client.ListInstances(ctx, a.Region, "")
+	return resolveProviderID(ctx, a.Client, a.Region, id)
+}
+
+// resolveProviderID maps an EntityID (the instance Name tag) to its EC2 instance
+// ID. Shared by the Actuator and Enroller.
+func resolveProviderID(ctx context.Context, client LaunchAPI, region string, id cohort.EntityID) (string, error) {
+	insts, err := client.ListInstances(ctx, region, "")
 	if err != nil {
 		return "", err
 	}
@@ -278,15 +285,55 @@ func (Classifier) Classify(err error) cohort.Fault {
 // Domain seam
 // ---------------------------------------------------------------------------
 
-// Enroller is the per-entity MPI readiness probe — for the spike it confirms the
-// instance is reachable; a production impl would check EFA/fabric health and
-// that the SSH key exchange (mpi.go user-data) completed.
-type Enroller struct{}
+// Enroller is the per-entity MPI-readiness probe. It confirms the node can
+// actually participate in the job — mpirun is installed and (when EFA is enabled)
+// the EFA fabric provider is present — via one cheap SSM command. This is what
+// makes cohort's barrier mean "MPI-ready", not merely "Running". It deliberately
+// does NOT probe peer connectivity — that's the Assembler's job.
+type Enroller struct {
+	Client         LaunchAPI
+	Region         string
+	EFAEnabled     bool // also require `fi_info -p efa` to report a provider
+	SkipMPIInstall bool // custom AMI with MPI preinstalled — skip the mpirun check
+	Timeout        time.Duration
+}
 
-func (Enroller) IsEnrolled(_ context.Context, _ cohort.EntityID) (cohort.Readiness, error) {
-	// Spike: trust the lifecycle Running state as enrollment. Real impl probes
-	// the instance (slurmd check-in / EFA health) — that's the domain's meaning.
-	return cohort.Readiness{Enrolled: true, Operational: true}, nil
+// enrollProbeScript is the readiness one-liner run over SSM. Exit 0 = ready.
+func (e Enroller) enrollProbeScript() string {
+	checks := []string{}
+	if !e.SkipMPIInstall {
+		checks = append(checks, "command -v mpirun >/dev/null 2>&1 || { echo 'mpirun missing' >&2; exit 1; }")
+	}
+	if e.EFAEnabled {
+		checks = append(checks, "fi_info -p efa >/dev/null 2>&1 || { echo 'efa provider missing' >&2; exit 1; }")
+	}
+	if len(checks) == 0 {
+		return "exit 0" // nothing to probe (custom AMI, no EFA) → trivially ready
+	}
+	return strings.Join(checks, "; ")
+}
+
+func (e Enroller) IsEnrolled(ctx context.Context, id cohort.EntityID) (cohort.Readiness, error) {
+	// No client → nothing to probe (the zero-value Enroller used by tests and any
+	// non-SSM path): treat as trivially ready, matching cohort's nil-Enroller.
+	if e.Client == nil {
+		return cohort.Readiness{Enrolled: true, Operational: true}, nil
+	}
+	pid, err := resolveProviderID(ctx, e.Client, e.Region, id)
+	if err != nil {
+		// Not yet visible in EC2 → not enrolled yet; the reconciler retries within
+		// the Enrolled budget. Not a hard error.
+		return cohort.Readiness{Enrolled: false, Detail: err.Error()}, nil
+	}
+	res, err := e.Client.RunShellScript(ctx, e.Region, pid, e.enrollProbeScript(), e.Timeout)
+	if err != nil {
+		return cohort.Readiness{Enrolled: false, Detail: err.Error()}, nil
+	}
+	if res.Status != "Success" || res.ResponseCode != 0 {
+		return cohort.Readiness{Enrolled: true, Operational: false,
+			Detail: fmt.Sprintf("mpi-readiness probe failed (code=%d): %s", res.ResponseCode, res.Stderr)}, nil
+	}
+	return cohort.Readiness{Enrolled: true, Operational: true, Detail: "mpi ready"}, nil
 }
 
 // Assembler runs ONCE after the all-or-nothing barrier, over the complete,

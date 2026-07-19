@@ -109,8 +109,9 @@ func cohortBudget(spec cohortSpec) cohort.PhaseBudget {
 		CohortAssembly: 1 * time.Second,  // plain array: nil Assembler → phase skipped
 	}
 	if spec.mpi {
-		// MPI runs the SSM control-plane Assembler: wait for SSM online + push the
-		// peers file to every node. That needs minutes on cold boot, not 1s.
+		// MPI runs SSM-backed enrollment + assembly, which need minutes on cold
+		// boot (SSM agent online + mpirun/EFA readiness), not the 1-2s defaults.
+		b.Enrolled = 5 * time.Minute
 		b.CohortAssembly = 5 * time.Minute
 	}
 	return b
@@ -326,20 +327,29 @@ func launchCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 	}
 	obs := &mpicohort.Observer{Client: awsClient, Region: baseConfig.Region}
 
-	// Domain seam. MPI runs the control-plane SSM Assembler: post-barrier it
-	// pushes the peers file to every node (retiring on-instance self-discovery).
-	// A plain array has no assembly phase (nil Assembler → partial cohort legal).
-	// Enroller stays nil here; the SSM readiness probe lands in Stage 5.
+	// Domain seam. MPI runs a real readiness barrier (Enroller: probe mpirun/EFA
+	// per node over SSM) and the control-plane SSM Assembler (post-barrier, push
+	// the peers file to every node — retiring on-instance self-discovery). A plain
+	// array has neither (nil Enroller → trivially enrolled; nil Assembler → partial
+	// cohort legal).
+	var enr cohort.Enroller
 	var asm cohort.Assembler
 	if spec.mpi {
 		accountBase36 := ""
 		if acct, aerr := awsClient.GetAccountID(ctx); aerr == nil {
 			accountBase36 = aws.AccountBase36(acct)
 		}
+		enr = mpicohort.Enroller{
+			Client:         awsClient,
+			Region:         baseConfig.Region,
+			EFAEnabled:     baseConfig.EFAEnabled,
+			SkipMPIInstall: mpiSkipInstall,
+			Timeout:        ssmPushTimeout,
+		}
 		asm = mpicohort.NewSSMAssembler(awsClient, baseConfig.Region, accountBase36,
 			cohortBudget(spec).CohortAssembly, ssmPushTimeout)
 	}
-	r := cohort.NewReconciler(act, obs, mpicohort.Classifier{}, nil, asm, nil)
+	r := cohort.NewReconciler(act, obs, mpicohort.Classifier{}, enr, asm, nil)
 
 	// Clean up abandoned per-AZ placement groups the Actuator created while
 	// advancing the AZ-fallback chain. Only the surviving AZ (keepAZ) holds
