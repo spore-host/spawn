@@ -22,6 +22,44 @@ type PluginSpec struct {
 	Local       LocalBlock             `yaml:"local"`
 	Remote      RemoteBlock            `yaml:"remote"`
 	Outputs     map[string]OutputSpec  `yaml:"outputs"`
+	// Permissions is an optional, author-declared statement of what the plugin
+	// touches: controller env/network/commands and instance root/network/ports/
+	// files. It is DECLARATIVE metadata, not enforced sandboxing — ports opened
+	// and files written inside opaque `run` shell steps can't be inferred
+	// statically, so a plugin declares them here for `spawn plugin inspect` to
+	// surface before you install. Absent (nil) means "not declared."
+	Permissions *PermissionsBlock `yaml:"permissions,omitempty"`
+}
+
+// PermissionsBlock is a plugin's declared capability surface, split by where the
+// capability applies: the controller (your machine) versus the instance.
+type PermissionsBlock struct {
+	Controller ControllerPermissions `yaml:"controller"`
+	Instance   InstancePermissions   `yaml:"instance"`
+}
+
+// ControllerPermissions declares what a plugin's local (controller-side) steps do.
+type ControllerPermissions struct {
+	// Env is the controller environment variables the plugin reads. It must be a
+	// superset of local.env_passthrough (which is what spawn actually injects) —
+	// Validate enforces that so the declaration can't understate what's read.
+	Env []string `yaml:"env"`
+	// Network is true if local steps make outbound network calls.
+	Network bool `yaml:"network"`
+	// Commands lists controller executables the plugin expects on PATH (e.g. jq).
+	Commands []string `yaml:"commands"`
+}
+
+// InstancePermissions declares what a plugin's remote (instance-side) steps do.
+type InstancePermissions struct {
+	// Root is true if any remote step runs as root (i.e. not as_user).
+	Root bool `yaml:"root"`
+	// Network is true if remote steps make network calls (downloads, enrollment).
+	Network bool `yaml:"network"`
+	// Ports are TCP ports the plugin opens/listens on (0 < p < 65536).
+	Ports []int `yaml:"ports"`
+	// Files are notable filesystem paths the plugin creates or manages.
+	Files []string `yaml:"files"`
 }
 
 // ConfigParam defines a plugin configuration parameter.

@@ -110,6 +110,30 @@ func (s *PluginSpec) Validate(dirName string) error {
 		}
 	}
 
+	// permissions (optional): if declared, its env names must be valid, its ports
+	// in range, and — since local.env_passthrough is what spawn actually injects —
+	// controller.env must not understate it (every passed-through var must be
+	// declared). This keeps the declaration honest rather than decorative.
+	if s.Permissions != nil {
+		declaredEnv := map[string]bool{}
+		for _, name := range s.Permissions.Controller.Env {
+			if !envVarNameRe.MatchString(name) {
+				add("permissions.controller.env: invalid environment variable name %q", name)
+			}
+			declaredEnv[name] = true
+		}
+		for _, name := range s.Local.EnvPassthrough {
+			if envVarNameRe.MatchString(name) && !declaredEnv[name] {
+				add("permissions.controller.env must include %q (it is in local.env_passthrough)", name)
+			}
+		}
+		for _, p := range s.Permissions.Instance.Ports {
+			if p < 1 || p > 65535 {
+				add("permissions.instance.ports: %d out of range (1-65535)", p)
+			}
+		}
+	}
+
 	// Conditions.
 	for i, c := range s.Conditions.Local {
 		if !validConditionTypes[c.Type] {
