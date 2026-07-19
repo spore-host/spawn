@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`spawn task diagnose <name|id>`** (#391). A one-screen summary of a single
+  instance — type/state/region/AZ, age, TTL, an on-the-fly compute-cost estimate
+  (from the `spawn:price-per-hour` tag × age; labeled an estimate, 0 when
+  unknown), job-array/sweep membership, a clearly-hedged likely-cause hint from
+  state (terminated → TTL/Spot; stopped → idle), and pointers to the spored and
+  command logs. Read-only and composes existing data (no SSH in the base path, so
+  it works even when the instance is unreachable).
 - **Parameter sweeps: native `grid:` (cartesian) expansion** (#390). A sweep
   param file can now declare `grid: {learning_rate: [...], batch_size: [...]}`
   and spawn expands it to one parameter set per combination — no more
