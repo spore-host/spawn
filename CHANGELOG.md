@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`spawn plugin inspect` and `spawn plugin install --dry-run`** (#387). Preview
+  exactly what a plugin would do before installing it — resolved source and
+  version, local (controller) vs remote (instance) steps, requested controller
+  env, root vs login-user execution, downloads, health checks, cleanup steps, and
+  the declared `permissions:` block — **without executing anything or contacting
+  an instance**. Shows a trust banner (installing runs the author's code locally
+  and, on the instance, as root) and flags unpinned / third-party sources.
+  `inspect` doesn't require `--instance`.
 - **Plugin `permissions:` declaration block** (#388). A `plugin.yaml` can now
   declare its capability surface — `controller` (env vars read, network, expected
   commands) and `instance` (root, network, ports opened, files managed) — as
