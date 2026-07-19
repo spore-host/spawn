@@ -23,6 +23,12 @@ jobs:
         with:
           go-version: '1.26.5'
 
+      # Hard-fail the tag if the committed reference (docs-gen/) is stale, so a
+      # release can never ship a reference that lags the code. Same check as CI's
+      # drift gate, run here as a pre-release guard.
+      - name: Docs reference drift guard
+        run: make check-docs
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
@@ -125,3 +131,25 @@ jobs:
           emit_copies | xargs -0 -P 16 -n 2 bash -c 'do_copy "$1" "$2"' _
 
           echo "✅ Uploaded spored ${VERSION} (linux+windows) to ${#BUCKETS[@]} US regions (parallel)"
+
+      # Nudge the umbrella docs repo to vendor this release's generated reference
+      # (docs/gen/spawn/). Fires repository_dispatch → sync-cli-docs.yaml, which
+      # opens a PR; merging deploys. Needs a cross-repo PAT (DOCS_SYNC_TOKEN) —
+      # the default GITHUB_TOKEN can't dispatch to another repo. If the secret is
+      # absent the step skips cleanly: the sync workflow's weekly schedule is the
+      # backstop, so a missing token never fails a release.
+      - name: Notify docs site of new release
+        if: ${{ !cancelled() }}
+        env:
+          DOCS_SYNC_TOKEN: ${{ secrets.DOCS_SYNC_TOKEN }}
+        run: |
+          if [ -z "${DOCS_SYNC_TOKEN:-}" ]; then
+            echo "DOCS_SYNC_TOKEN not set — skipping docs dispatch (weekly sync will catch up)."
+            exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${DOCS_SYNC_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/spore-host/spore-host/dispatches \
+            -d '{"event_type":"cli-docs-updated","client_payload":{"cli":"spawn"}}'
+          echo "✅ Dispatched cli-docs-updated (spawn) to the docs repo"
