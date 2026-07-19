@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -408,6 +407,12 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 		}
 	}
 
+	// Guarantee SSM on user-supplied/custom roles too (spore.host baseline —
+	// applies to new and pre-existing roles alike; idempotent).
+	if err := c.ensureSSMManagedPolicy(ctx, iamClient, roleName); err != nil {
+		return "", err
+	}
+
 	// Ensure instance profile exists
 	profileName := roleName // Use same name for profile
 	profileExists, err := c.instanceProfileExists(ctx, iamClient, profileName)
@@ -805,6 +810,34 @@ func (c *Client) instanceProfileExists(ctx context.Context, iamClient *iam.Clien
 
 // SetupSporedIAMRole creates or retrieves the IAM role and instance profile for spored
 // Returns the instance profile name
+// ssmManagedInstanceCoreARN is the AWS managed policy that lets an instance
+// register with SSM (Session Manager + RunCommand). spore.host guarantees this
+// on every spawn'd instance: `spawn connect` uses it (required on Windows, a
+// no-public-IP fallback on Linux), and the MPI cohort's control-plane peer
+// assembly + readiness probes push/run over SSM (#cohort-mpi). Because there is
+// no on-instance fallback for that path, SSM must be present, so attaching it
+// is a hard requirement on every instance-profile path, not best-effort.
+const ssmManagedInstanceCoreARN = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+// ensureSSMManagedPolicy attaches AmazonSSMManagedInstanceCore to roleName.
+// Idempotent: AttachRolePolicy is a no-op if the policy is already attached, so
+// this is safe to call on both freshly-created and pre-existing roles. Returns
+// an error on failure (unlike the previous best-effort attach) so no spawn'd
+// instance silently lacks SSM.
+func (c *Client) ensureSSMManagedPolicy(ctx context.Context, iamClient *iam.Client, roleName string) error {
+	err := retryIAM(func() error {
+		_, e := iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
+			RoleName:  aws.String(roleName),
+			PolicyArn: aws.String(ssmManagedInstanceCoreARN),
+		})
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("attach AmazonSSMManagedInstanceCore to %s: %w", roleName, err)
+	}
+	return nil
+}
+
 func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	iamClient := iam.NewFromConfig(c.cfg)
 
@@ -847,16 +880,11 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	}
 
 	// 2b. Attach AmazonSSMManagedInstanceCore so the instance registers with SSM.
-	// This is what `spawn connect` uses on Windows (Session Manager + RunCommand,
-	// since there's no SSH-user model) and is a useful no-public-IP fallback on
-	// Linux too. Idempotent; AccessDenied (e.g. restricted IAM) is non-fatal —
-	// the instance still works, connect just can't fall back to SSM.
-	_, err = iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
-		RoleName:  aws.String(roleName),
-		PolicyArn: aws.String("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"),
-	})
-	if err != nil {
-		log.Printf("Warning: could not attach AmazonSSMManagedInstanceCore to %s (SSM connect may be unavailable): %v", roleName, err)
+	// spore.host guarantees SSM on every instance: `spawn connect` uses it, and
+	// the MPI cohort assembles peers / probes readiness over SSM with no
+	// on-instance fallback — so a missing attach is now a hard error, not a warn.
+	if err := c.ensureSSMManagedPolicy(ctx, iamClient, roleName); err != nil {
+		return "", err
 	}
 
 	// 3. Check if instance profile exists, create if not
