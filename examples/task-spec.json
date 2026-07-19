@@ -1,0 +1,22 @@
+{
+  "task_id": "align-sample-42",
+  "command": ["bwa", "mem", "-t", "16", "/data/ref.fa", "/work/sample.fastq.gz"],
+  "container": "quay.io/biocontainers/bwa:0.7.18--he4a0461_1",
+  "resources": {
+    "cpu": 16,
+    "memory_gib": 64,
+    "architecture": "x86_64",
+    "families": ["c7i", "c7a", "m7i"],
+    "purchase": "spot",
+    "fallback": "on_demand",
+    "memory_headroom_percent": 20
+  },
+  "inputs": [
+    { "source": "s3://my-bucket/refs/ref.fa", "destination": "/data/ref.fa" },
+    { "source": "s3://my-bucket/samples/sample.fastq.gz", "destination": "/work/sample.fastq.gz" }
+  ],
+  "outputs": [
+    { "source": "/work/result.bam", "destination": "s3://my-bucket/results/sample-42.bam" }
+  ],
+  "lifecycle": { "ttl": "4h", "on_complete": "terminate" }
+}
