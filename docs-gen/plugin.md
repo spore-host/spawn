@@ -99,7 +99,7 @@ spawn plugin status <name> [flags]
 
 Statically validate one or more plugin.yaml files without contacting any
 instance. Checks schema, semver, known step/condition/config types, that the
-containing directory matches the plugin name, and that every {{ config.X }}
+containing directory matches the plugin name, and that every &#123;&#123; config.X &#125;&#125;
 template reference points at a declared config parameter.
 
 Examples:

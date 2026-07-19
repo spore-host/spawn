@@ -1,6 +1,6 @@
 ## `spawn collect-results`
 
-> **Deprecated:** use 'spawn sweep collect <sweep-id>' instead
+> **Deprecated:** use 'spawn sweep collect &lt;sweep-id&gt;' instead
 
 Collect results from all instances in a parameter sweep.
 
@@ -9,7 +9,7 @@ aggregates them into a single output file, and optionally identifies the
 best performing parameters based on a metric.
 
 Result File Convention:
-Instances should upload results to: s3://spawn-results-<account>-<region>/sweeps/<sweep-id>/<index>/results.json
+Instances should upload results to: s3://spawn-results-&lt;account&gt;-&lt;region&gt;/sweeps/&lt;sweep-id&gt;/&lt;index&gt;/results.json
 
 The result file should be a JSON object with metrics, e.g.:
 {

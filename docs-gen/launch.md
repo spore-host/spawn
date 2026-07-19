@@ -80,7 +80,7 @@ spawn launch <name> [flags]
 | `--instance-names` |  | string |  | Instance name template (e.g., 'worker-{index}', default: '{job-array-name}-{index}') |
 | `--instance-type` |  | string |  | Instance type |
 | `--interactive` |  | bool |  | Force interactive wizard |
-| `--job-array-name` |  | string |  | Job array group name (required if --count > 1) |
+| `--job-array-name` |  | string |  | Job array group name (required if --count &gt; 1) |
 | `--key-name` |  | string |  | SSH key pair name (EC2 KeyName) |
 | `--launch-delay` |  | string | `0s` | Delay between instance launches (e.g., 5s) |
 | `--max-concurrent-per-region` |  | int |  | Max instances running simultaneously per region (0 = unlimited) |
@@ -89,7 +89,7 @@ spawn launch <name> [flags]
 | `--mode` |  | string | `balanced` | Distribution mode: balanced (fair share) or opportunistic (prioritize available regions) |
 | `--mpi-command` |  | string |  | Command to run via mpirun (alternative to --command) |
 | `--mpi-processes-per-node` |  | int |  | MPI processes per node (default: vCPU count) |
-| `--mpi` |  | bool |  | Enable MPI cluster setup (requires --count > 1) |
+| `--mpi` |  | bool |  | Enable MPI cluster setup (requires --count &gt; 1) |
 | `--name` |  | string |  | Name your spore, required (sets Name tag, DNS, and hostname) |
 | `--nested-virtualization` |  | bool |  | Enable nested virtualization (run KVM/Hyper-V inside the instance). Requires a C8i/M8i/R8i instance type. |
 | `--nist-800-171` |  | bool |  | Enable NIST 800-171 Rev 3 compliance mode |
