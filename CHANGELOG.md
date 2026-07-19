@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **MPI/job-array cohort launches now fall back across Availability Zones on
+  capacity exhaustion.** When the primary AZ has no capacity
+  (`InsufficientInstanceCapacity`), the whole cohort advances to the next AZ **as
+  a unit** — every node lands in the same surviving AZ, preserving the
+  placement-group/one-AZ invariant (a per-node fallback would scatter ranks
+  across zones). The chain is the region's AZs (operator-selected AZ first),
+  capped at 4. New `DescribeAvailabilityZones` AWS helper. This stage only enables
+  the chain when no cluster placement group is set; combining AZ fallback with a
+  placement group lands in a follow-up.
+
 ### Changed
 - **SSM is now guaranteed on every spawn-launched instance.** `AmazonSSMManagedInstanceCore`
   is attached to the instance role on all profile paths — the default `spored`

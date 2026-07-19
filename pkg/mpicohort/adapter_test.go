@@ -20,6 +20,7 @@ type fakeLauncher struct {
 	failCode  map[string]string // name → AWS error code to return on Launch
 	failOnce  map[string]bool   // if true, fail only the first launch of that name
 	failAZ    string            // if set, any launch into this AZ ICEs (models per-AZ capacity)
+	failAZs   map[string]bool   // if set, any launch into one of these AZs ICEs (multi-AZ exhaustion)
 	launchLog []launchRec
 }
 
@@ -44,6 +45,9 @@ func (f *fakeLauncher) Launch(_ context.Context, cfg aws.LaunchConfig) (*aws.Lau
 	f.launchLog = append(f.launchLog, launchRec{cfg.Name, cfg.InstanceType, cfg.AvailabilityZone, cfg.UserData})
 
 	if f.failAZ != "" && cfg.AvailabilityZone == f.failAZ {
+		return nil, awsLaunchError("InsufficientInstanceCapacity")
+	}
+	if f.failAZs[cfg.AvailabilityZone] {
 		return nil, awsLaunchError("InsufficientInstanceCapacity")
 	}
 	if code, bad := f.failCode[cfg.Name]; bad {
@@ -209,6 +213,40 @@ func TestSpike_MPI_CollectiveFallback_PreservesAZ(t *testing.T) {
 	for name, in := range f.launched {
 		if in.AvailabilityZone != "us-east-1b" {
 			t.Errorf("%s landed in AZ %q — collective fallback must put ALL nodes in one AZ (us-east-1b)", name, in.AvailabilityZone)
+		}
+	}
+}
+
+// TestMPI_MultiAZChain_LandsAllInSurvivingAZ generalizes the fallback proof to a
+// longer chain (Stage 1): the first two AZs of a 3-AZ chain are capacity-exhausted;
+// the cohort must skip both and land ALL members in the third, surviving AZ.
+func TestMPI_MultiAZChain_LandsAllInSurvivingAZ(t *testing.T) {
+	f := newFakeLauncher()
+	f.failAZs = map[string]bool{"us-east-1a": true, "us-east-1b": true} // only 1c has capacity
+
+	r := newReconciler(f, Assembler{})
+	chain := []cohort.Rung{
+		{InstanceType: "p5.48xlarge", AvailZone: "us-east-1a"},
+		{InstanceType: "p5.48xlarge", AvailZone: "us-east-1b"},
+		{InstanceType: "p5.48xlarge", AvailZone: "us-east-1c"},
+	}
+
+	out, err := r.Reconcile(context.Background(), mpiCohort(4, chain[0], chain))
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !out.Ready {
+		t.Fatalf("cohort should recover by advancing a→b→c as a unit; not Ready: %+v", out.Records)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.launched) != 4 {
+		t.Fatalf("want 4 live nodes, got %d", len(f.launched))
+	}
+	for name, in := range f.launched {
+		if in.AvailabilityZone != "us-east-1c" {
+			t.Errorf("%s landed in AZ %q — all nodes must land in the surviving AZ (us-east-1c)", name, in.AvailabilityZone)
 		}
 	}
 }
