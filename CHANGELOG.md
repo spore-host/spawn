@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the cohort barrier, leak-free drain, and AZ capacity fallback. MPI is
   all-or-nothing (a missing rank makes the cluster useless); plain arrays are
   independent by default.
+- **MPI placement groups are now created per-AZ, on demand — so AZ fallback works
+  with a cluster placement group.** Previously the auto placement group was
+  created up front in one AZ, which is incompatible with moving the cohort to
+  another AZ on capacity exhaustion (a cluster PG is AZ-bound). The cohort now
+  creates a fresh `spawn-mpi-<name>-<az>` group as it enters each AZ and cleans up
+  the ones for abandoned AZs afterward. AZ fallback is therefore enabled for
+  auto-placement-group MPI launches; an explicit `--placement-group` stays fixed
+  to a single AZ (no fallback), since it's user-managed.
 
 ### Added
 - **`--min-viable` for plain job arrays** (default `1`): the minimum number of

@@ -121,10 +121,10 @@ const maxAZFallbackRungs = 4
 // ordered with the operator-selected AZ first (if any). cohort advances the
 // shared rung across this chain as a unit on capacity exhaustion.
 //
-// Stage-1 scope: the chain is only built when NO cluster placement group is set.
-// A pre-created PG binds to one AZ, so moving AZ mid-fallback would break it;
-// that's resolved in a later stage (lazy per-AZ PG). With a PG set, we return a
-// single-rung chain (no fallback), matching prior behavior.
+// A FIXED placement group (explicit --placement-group) is AZ-bound, so AZ
+// fallback is disabled for it (single-rung). The AUTO case uses
+// PlacementGroupPrefix instead of PlacementGroup, so the cohort creates a fresh
+// per-AZ group as it advances — fallback stays enabled there.
 func buildAZChain(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, capacity cohort.CapacityModel) (cohort.Rung, []cohort.Rung) {
 	primary := cohort.Rung{
 		InstanceType:  baseConfig.InstanceType,
@@ -132,7 +132,8 @@ func buildAZChain(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 		CapacityModel: capacity,
 	}
 
-	// Gated: no AZ fallback while a placement group is in play (Stage 1).
+	// Gated: no AZ fallback with a fixed, user-managed placement group (it's
+	// bound to one AZ). Auto per-AZ PGs (PlacementGroupPrefix) still get fallback.
 	if baseConfig.PlacementGroup != "" {
 		return primary, []cohort.Rung{primary}
 	}
@@ -185,6 +186,30 @@ func orderAZs(zones []string, preferred string) []string {
 		}
 	}
 	return ordered
+}
+
+// cleanupAbandonedPGs deletes the per-AZ cluster placement groups the Actuator
+// created for AZs the cohort tried and abandoned during fallback. Best-effort:
+// deletion failures are logged, not fatal (an empty PG is free and a reaper can
+// sweep it). The PG for keepAZ (the surviving AZ, if any) is retained — it holds
+// the live instances. keepAZ == "" (launch failed/drained) deletes them all.
+func cleanupAbandonedPGs(ctx context.Context, awsClient *aws.Client, act *mpicohort.Actuator, keepAZ *string) {
+	keep := ""
+	if keepAZ != nil {
+		keep = *keepAZ
+	}
+	var keepName string
+	if keep != "" && act.PlacementGroupPrefix != "" {
+		keepName = mpicohort.PlacementGroupName(act.PlacementGroupPrefix, keep)
+	}
+	for _, name := range act.CreatedPlacementGroups() {
+		if name == keepName {
+			continue
+		}
+		if err := awsClient.DeletePlacementGroup(ctx, name); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  could not delete abandoned placement group %s: %v\n", name, err)
+		}
+	}
 }
 
 // launchMPICohort launches an MPI cluster as an all-or-nothing cohort
@@ -262,10 +287,25 @@ func launchCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 
 	// Provider seam over the real AWS client. nil Enroller (trivially enrolled)
 	// and nil Assembler (peer discovery stays on-instance) per the current design;
-	// the SSM Assembler/Enroller land in later stages.
-	act := &mpicohort.Actuator{Client: awsClient, Region: baseConfig.Region, BaseConfig: *baseConfig, Configs: cfgs}
+	// the SSM Assembler/Enroller land in later stages. PlacementGroupPrefix (set by
+	// runLaunch for the auto-PG case) makes the Actuator create a per-AZ cluster PG
+	// on demand as the cohort advances AZs.
+	act := &mpicohort.Actuator{
+		Client:               awsClient,
+		Region:               baseConfig.Region,
+		BaseConfig:           *baseConfig,
+		Configs:              cfgs,
+		PlacementGroupPrefix: baseConfig.PlacementGroupPrefix,
+	}
 	obs := &mpicohort.Observer{Client: awsClient, Region: baseConfig.Region}
 	r := cohort.NewReconciler(act, obs, mpicohort.Classifier{}, nil, nil, nil)
+
+	// Clean up abandoned per-AZ placement groups the Actuator created while
+	// advancing the AZ-fallback chain. Only the surviving AZ (keepAZ) holds
+	// instances; every other created PG is empty and should be removed. keepAZ
+	// stays "" on failure (cohort drained everything), so all get deleted.
+	var keepAZ string
+	defer cleanupAbandonedPGs(ctx, awsClient, act, &keepAZ)
 
 	c, err := buildCohort(spec, jobArrayID, members)
 	if err != nil {
@@ -326,6 +366,7 @@ func launchCohort(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 		if !ok {
 			continue
 		}
+		keepAZ = in.AvailabilityZone // all members share one AZ (collective PG invariant)
 		publicIP := in.PublicIP
 		if publicIP == "" {
 			if ip, ipErr := awsClient.GetInstancePublicIP(ctx, baseConfig.Region, in.InstanceID); ipErr == nil {

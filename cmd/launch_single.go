@@ -660,17 +660,19 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				return fmt.Errorf("placement group validation: %w", err)
 			}
 			if supported {
-				mpiPlacementGroup = fmt.Sprintf("spawn-mpi-%s", jobArrayName)
-				fmt.Fprintf(os.Stderr, "Creating placement group: %s\n", mpiPlacementGroup)
-				if err := awsClient.CreatePlacementGroup(ctx, mpiPlacementGroup, config.Region); err != nil {
-					return fmt.Errorf("create placement group: %w", err)
-				}
+				// Do NOT eager-create here: the MPI cohort manages placement groups
+				// lazily per-AZ so AZ capacity fallback can move the whole cluster
+				// to another zone (a cluster PG binds to one AZ). Hand the cohort a
+				// prefix; its Actuator creates <prefix>-<az> on demand per rung.
+				config.PlacementGroupPrefix = fmt.Sprintf("spawn-mpi-%s", jobArrayName)
+				fmt.Fprintf(os.Stderr, "Placement group: auto (per-AZ, created on launch) with prefix %s\n", config.PlacementGroupPrefix)
 			} else {
 				fmt.Fprintf(os.Stderr, "ℹ️  %s doesn't support cluster placement groups (HPC instance types use AWS HPC networking); skipping placement group.\n", config.InstanceType)
 			}
 		}
 
-		// Set placement group in config
+		// An explicit --placement-group is a fixed, user-managed group (AZ-bound):
+		// set it directly. The auto case uses PlacementGroupPrefix (above) instead.
 		if mpiPlacementGroup != "" {
 			config.PlacementGroup = mpiPlacementGroup
 		}
