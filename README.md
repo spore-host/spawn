@@ -5,6 +5,7 @@
 [![codecov](https://codecov.io/gh/spore-host/spawn/branch/main/graph/badge.svg)](https://codecov.io/gh/spore-host/spawn)
 [![Go Reference](https://pkg.go.dev/badge/github.com/spore-host/spawn.svg)](https://pkg.go.dev/github.com/spore-host/spawn)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21439888.svg)](https://doi.org/10.5281/zenodo.21439888)
 
 Launch and manage EC2 instances with automatic lifecycle management.
 

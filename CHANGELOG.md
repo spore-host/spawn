@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Zenodo DOI**: spawn is archived on Zenodo with a citable DOI (concept DOI
+  [10.5281/zenodo.21439888](https://doi.org/10.5281/zenodo.21439888), always
+  latest). Added to `CITATION.cff` and a README badge.
+
 ## [0.79.0] - 2026-07-19
 
 ### Fixed
