@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **spawn now uses your existing default SSH key when you have one.** If
+  `~/.ssh/id_ed25519` (or `~/.ssh/id_rsa` for Windows/RSA targets) exists, spawn
+  imports that public key and you connect with the key you already use, instead of
+  always minting a separate managed key. Only when you have no default key does it
+  fall back to generating one under `~/.spawn/keys/`. (The instance still creates a
+  Linux user matching your local username, so `spawn connect` logs you in as you.)
+
 ### Fixed
 - **`spawn connect <id> -- <cmd>...` no longer mangles multi-token commands** (#369).
   The post-`--` argument vector was space-joined into one string and re-wrapped in

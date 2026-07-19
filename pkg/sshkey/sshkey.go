@@ -67,11 +67,42 @@ func keyName(username string, algo Algorithm) string {
 	return fmt.Sprintf("spawn-key-%s", username)
 }
 
-// EnsureKey finds or creates spawn's managed keypair for the given algorithm
-// under ~/.spawn/keys. It is idempotent: if the keypair already exists, it is
-// returned unchanged. Keys are generated in-process and written with 0600
-// (private) / 0644 (public).
+// defaultUserKey returns the user's existing default SSH keypair under ~/.ssh
+// for the given algorithm (id_ed25519 / id_rsa) when BOTH the private and public
+// files exist, or nil if there's no usable default. spawn prefers "log in with
+// the key you already use" over minting its own.
+func defaultUserKey(homeDir string, algo Algorithm) *KeyPair {
+	base := "id_ed25519"
+	if algo == RSA {
+		base = "id_rsa"
+	}
+	priv := filepath.Join(homeDir, ".ssh", base)
+	pub := priv + ".pub"
+	if !fileExists(priv) || !fileExists(pub) {
+		return nil
+	}
+	// EC2 key name derived from the fingerprint at import time by the caller; the
+	// Name here is a stable label for the user's default key.
+	return &KeyPair{
+		Name:           "spawn-default-" + base,
+		Algorithm:      algo,
+		PrivateKeyPath: priv,
+		PublicKeyPath:  pub,
+	}
+}
+
+// EnsureKey resolves the keypair spawn should use for the given algorithm,
+// preferring the user's EXISTING default SSH key (~/.ssh/id_ed25519, or id_rsa
+// for RSA/Windows) so you connect with the key you already use. Only when no
+// default of the required algorithm exists does it find-or-create spawn's own
+// managed keypair under ~/.spawn/keys (idempotent; generated in-process, 0600/
+// 0644). The caller imports the public key to EC2 by fingerprint either way.
 func EnsureKey(homeDir, username string, algo Algorithm) (*KeyPair, error) {
+	// Prefer the user's existing default key of the required algorithm.
+	if kp := defaultUserKey(homeDir, algo); kp != nil {
+		return kp, nil
+	}
+
 	dir, err := KeyDir(homeDir)
 	if err != nil {
 		return nil, err

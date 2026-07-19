@@ -303,3 +303,75 @@ func fieldN(t *testing.T, line []byte, n int) string {
 	}
 	return fields[n]
 }
+
+// writeDefaultKey creates a valid ~/.ssh/<base> keypair under home by generating
+// one with EnsureKey (in a scratch home) and copying it into place.
+func writeDefaultKey(t *testing.T, home, base string, algo Algorithm) {
+	t.Helper()
+	scratch := t.TempDir()
+	kp, err := EnsureKey(scratch, "gen", algo) // scratch has no ~/.ssh → managed key
+	if err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	priv, _ := os.ReadFile(kp.PrivateKeyPath)
+	pub, _ := os.ReadFile(kp.PublicKeyPath)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, base), priv, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, base+".pub"), pub, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEnsureKey_PrefersUserDefaultED25519: an existing ~/.ssh/id_ed25519 is used
+// instead of minting a managed ~/.spawn key.
+func TestEnsureKey_PrefersUserDefaultED25519(t *testing.T) {
+	home := t.TempDir()
+	writeDefaultKey(t, home, "id_ed25519", ED25519)
+
+	kp, err := EnsureKey(home, "alice", ED25519)
+	if err != nil {
+		t.Fatalf("EnsureKey: %v", err)
+	}
+	if kp.PrivateKeyPath != filepath.Join(home, ".ssh", "id_ed25519") {
+		t.Errorf("used %q, want the user's ~/.ssh/id_ed25519", kp.PrivateKeyPath)
+	}
+	// No managed key should have been created.
+	if fileExists(filepath.Join(home, ".spawn", "keys", "spawn-key-alice")) {
+		t.Error("managed key was created despite a usable ~/.ssh default")
+	}
+}
+
+// TestEnsureKey_PrefersUserDefaultRSA: RSA request (e.g. Windows) uses id_rsa.
+func TestEnsureKey_PrefersUserDefaultRSA(t *testing.T) {
+	home := t.TempDir()
+	writeDefaultKey(t, home, "id_rsa", RSA)
+
+	kp, err := EnsureKey(home, "bob", RSA)
+	if err != nil {
+		t.Fatalf("EnsureKey: %v", err)
+	}
+	if kp.PrivateKeyPath != filepath.Join(home, ".ssh", "id_rsa") {
+		t.Errorf("used %q, want the user's ~/.ssh/id_rsa", kp.PrivateKeyPath)
+	}
+}
+
+// TestEnsureKey_FallsBackWhenNoDefault: no ~/.ssh default → managed key. Also
+// guards the algorithm boundary: an id_rsa default must NOT satisfy an ED25519
+// request (spawn generates its own ed25519 managed key).
+func TestEnsureKey_FallsBackWhenNoDefault(t *testing.T) {
+	home := t.TempDir()
+	writeDefaultKey(t, home, "id_rsa", RSA) // only an RSA default present
+
+	kp, err := EnsureKey(home, "carol", ED25519) // but ED25519 requested
+	if err != nil {
+		t.Fatalf("EnsureKey: %v", err)
+	}
+	if kp.Name != "spawn-key-carol" {
+		t.Errorf("name = %q, want the managed spawn-key-carol (id_rsa must not satisfy ED25519)", kp.Name)
+	}
+}
