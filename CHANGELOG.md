@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn connect <id> -- <cmd>...` no longer mangles multi-token commands** (#369).
+  The post-`--` argument vector was space-joined into one string and re-wrapped in
+  `bash -c '...'`, so `-- bash -lc "echo a && echo b"` reached the remote as
+  `bash -c 'bash -lc echo a && echo b'` and failed with `bash: -c: option requires
+  an argument`. Each argument is now shell-quoted individually and passed through
+  verbatim, matching plain `ssh host <argv...>`, so quoted scripts, pipes, and
+  `&&` work.
+
 ### Changed
 - **MPI clusters now have a real readiness barrier.** Before a cluster is
   considered ready, each node is probed over SSM for `mpirun` (unless
