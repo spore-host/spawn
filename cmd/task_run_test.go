@@ -167,12 +167,11 @@ func TestTaskStagingPolicy(t *testing.T) {
 	}
 
 	// The generated policy must always be valid JSON (it's string-built).
-	var v interface{}
-	if err := json.Unmarshal([]byte(pol), &v); err != nil {
-		t.Fatalf("policy is not valid JSON: %v\n%s", err, pol)
+	if !json.Valid([]byte(pol)) {
+		t.Fatalf("policy is not valid JSON:\n%s", pol)
 	}
 	// Also valid with no inputs (write-only statement).
-	if err := json.Unmarshal([]byte(taskStagingPolicy(nil, nil, "res")), &v); err != nil {
-		t.Fatalf("no-input policy is not valid JSON: %v", err)
+	if !json.Valid([]byte(taskStagingPolicy(nil, nil, "res"))) {
+		t.Fatalf("no-input policy is not valid JSON")
 	}
 }
