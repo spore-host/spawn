@@ -4,7 +4,7 @@ Purchase and manage EC2 Capacity Blocks for ML.
 
 Discover purchasable offerings with 'truffle capacity-blocks', then purchase one
 here. After purchase, launch into it with:
-  spawn launch <name> --reservation-id <id> --capacity-block --az <reservation-az>
+  spawn launch &lt;name&gt; --reservation-id &lt;id&gt; --capacity-block --az &lt;reservation-az&gt;
 
 ```
 spawn capacity-block
@@ -17,7 +17,7 @@ Purchase a Capacity Block for ML from an offering id (from 'truffle capacity-blo
 ⚠️  A Capacity Block is billed UP FRONT and is NON-REFUNDABLE — the full block
 duration is charged at purchase. This is the single most expensive action spawn
 can take. The purchase requires you to TYPE three confirmations (the exact price,
-'purchase <offering-id>', and an acknowledgement phrase) and refuses to run on a
+'purchase &lt;offering-id&gt;', and an acknowledgement phrase) and refuses to run on a
 non-interactive terminal. Use --dry-run first to preview the price and terms
 without buying anything.
 

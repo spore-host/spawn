@@ -7,19 +7,19 @@ exceed cost thresholds, or encounter issues.
 
 Examples:
   # Create alert for sweep completion
-  spawn alerts create <sweep-id> --on-complete --email user@example.com
+  spawn alerts create &lt;sweep-id&gt; --on-complete --email user@example.com
 
   # Create alert for failures with Slack
-  spawn alerts create <sweep-id> --on-failure --slack https://hooks.slack.com/...
+  spawn alerts create &lt;sweep-id&gt; --on-failure --slack https://hooks.slack.com/...
 
   # Create cost threshold alert
-  spawn alerts create <sweep-id> --cost-threshold 100 --email user@example.com
+  spawn alerts create &lt;sweep-id&gt; --cost-threshold 100 --email user@example.com
 
   # List all alerts
   spawn alerts list
 
   # Delete alert
-  spawn alerts delete <alert-id>
+  spawn alerts delete &lt;alert-id&gt;
 
 ```
 spawn alerts

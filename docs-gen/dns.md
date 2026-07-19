@@ -3,7 +3,7 @@
 Manage DNS records for spawn instances.
 
 DNS names are automatically registered when launching with --dns flag.
-Format: <name>.<account-base36>.spore.host
+Format: &lt;name&gt;.&lt;account-base36&gt;.spore.host
 
 Examples:
   # List DNS-enabled instances

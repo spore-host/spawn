@@ -69,7 +69,7 @@ spawn snapshot create [flags]
 
 Convenience for the head-node side of the reference-data-volume recipe:
 create an EBS volume from a snapshot, attach it to the instance this command runs
-on, and mount it (read-only by default) at <mount-point>.
+on, and mount it (read-only by default) at &lt;mount-point&gt;.
 
 This only works when run ON an EC2 instance (it identifies itself via IMDS). It's
 the one-command equivalent of: aws ec2 create-volume --snapshot-id … &&

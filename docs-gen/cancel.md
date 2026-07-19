@@ -1,6 +1,6 @@
 ## `spawn cancel`
 
-> **Deprecated:** use 'spawn sweep cancel <sweep-id>' instead
+> **Deprecated:** use 'spawn sweep cancel &lt;sweep-id&gt;' instead
 
 Cancel a running parameter sweep and terminate all instances.
 

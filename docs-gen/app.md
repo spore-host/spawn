@@ -42,7 +42,7 @@ spawn app launch <app-name> [flags]
 | `--idle-timeout` |  | string |  | Stop when DCV has no clients for this duration (default: catalog default) |
 | `--image` |  | string |  | Launch a BYO container image for this app (overrides the catalog binding), e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview:5.13.2 |
 | `--instance-type` |  | string |  | Override instance type (default: first catalog family + .xlarge) |
-| `--name` |  | string |  | Session name (default: <app>-<timestamp>) |
+| `--name` |  | string |  | Session name (default: &lt;app&gt;-&lt;timestamp&gt;) |
 | `--no-open` |  | bool |  | Write session file but do not open browser automatically |
 | `--region` |  | string |  | AWS region (default: from AWS config) |
 | `--spot` |  | bool |  | Use Spot pricing |

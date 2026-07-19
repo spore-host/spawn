@@ -1,10 +1,10 @@
 ## `spawn resume`
 
-> **Deprecated:** use 'spawn sweep resume <sweep-id>' instead
+> **Deprecated:** use 'spawn sweep resume &lt;sweep-id&gt;' instead
 
 Resume an interrupted parameter sweep from checkpoint.
 
-Reads the sweep state from ~/.spawn/sweeps/<sweep-id>.json,
+Reads the sweep state from ~/.spawn/sweeps/&lt;sweep-id&gt;.json,
 queries EC2 for current instance states, and continues launching
 pending parameter sets with rolling queue orchestration.
 
@@ -13,10 +13,10 @@ Examples:
   spawn resume --sweep-id hyperparam-20260115-abc123
 
   # Resume with different max-concurrent
-  spawn resume --sweep-id <id> --max-concurrent 5
+  spawn resume --sweep-id &lt;id&gt; --max-concurrent 5
 
   # Resume in detached mode (Lambda)
-  spawn resume --sweep-id <id> --detach
+  spawn resume --sweep-id &lt;id&gt; --detach
 
 ```
 spawn resume [flags]

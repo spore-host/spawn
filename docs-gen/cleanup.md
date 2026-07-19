@@ -8,7 +8,7 @@ Preview what would be removed with --dry-run; otherwise cleanup prompts for
 confirmation (skip with --yes) and then deletes. By default it acts only on
 resources you created; --all widens to every principal in the account.
 
-A log of everything removed is written to ~/.spawn/cleanup-<timestamp>.log.
+A log of everything removed is written to ~/.spawn/cleanup-&lt;timestamp&gt;.log.
 
 ```
 spawn cleanup [flags]

@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Linux user matching your local username, so `spawn connect` logs you in as you.)
 
 ### Fixed
+- **Generated reference no longer breaks the docs build on `<placeholder>` tokens.**
+  Bumped `libs/docgen` to v0.43.1, which HTML-escapes bare `<…>` in descriptions
+  and examples (e.g. `<sweep-id>`), so the VitePress site (which parses markdown
+  through Vue) renders the reference instead of failing on an "unclosed tag".
 - **`spawn connect <id> -- <cmd>...` no longer mangles multi-token commands** (#369).
   The post-`--` argument vector was space-joined into one string and re-wrapped in
   `bash -c '...'`, so `-- bash -lc "echo a && echo b"` reached the remote as

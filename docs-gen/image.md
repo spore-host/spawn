@@ -41,7 +41,7 @@ spawn image import [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--bucket` |  | string |  | S3 bucket to stage a local ISO in (default: managed spawn-iso-import-<account>-<region>, auto-created) |
+| `--bucket` |  | string |  | S3 bucket to stage a local ISO in (default: managed spawn-iso-import-&lt;account&gt;-&lt;region&gt;, auto-created) |
 | `--execution-role` |  | string | `AWSServiceRoleForImageBuilder` | IAM execution role name or ARN |
 | `--image-index` |  | int64 | `1` | 1-based edition index in a multi-edition ISO |
 | `--infra-config-arn` |  | string |  | Image Builder infrastructure configuration ARN (optional; self-provisioned if omitted) |

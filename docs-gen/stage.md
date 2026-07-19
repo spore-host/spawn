@@ -14,10 +14,10 @@ Cost savings example:
   - Savings: $85.70 (93% reduction)
 
 Commands:
-  spawn stage upload <path>     Stage data to regional buckets
+  spawn stage upload &lt;path&gt;     Stage data to regional buckets
   spawn stage list              List staged data
   spawn stage estimate          Estimate staging cost savings
-  spawn stage delete <id>       Delete staged data
+  spawn stage delete &lt;id&gt;       Delete staged data
 
 ```
 spawn stage
@@ -95,7 +95,7 @@ spawn stage upload <local-path> [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--dest` |  | string |  | Destination path on instances (default: /mnt/data/<filename>) |
+| `--dest` |  | string |  | Destination path on instances (default: /mnt/data/&lt;filename&gt;) |
 | `--regions` | `-r` | stringSlice | `[us-east-1,us-west-2]` | Regions to replicate to (comma-separated or repeated) |
 | `--sweep-id` |  | string |  | Associate with sweep ID for tracking |
 

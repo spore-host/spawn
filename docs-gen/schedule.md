@@ -19,7 +19,7 @@ Examples:
   spawn schedule list
 
   # Cancel a schedule
-  spawn schedule cancel <schedule-id>
+  spawn schedule cancel &lt;schedule-id&gt;
 
 ```
 spawn schedule
