@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use spawn in your research, please cite it as below."
+title: "spawn: an ephemeral EC2 launcher and lifecycle manager"
+abstract: >-
+  spawn is the spore.host tool for launching and managing ephemeral AWS EC2
+  instances (Linux and Windows), including the spored in-instance lifecycle
+  daemon. It provisions instances with TTL-based auto-termination, idle
+  detection, MPI/job-array cohorts, parameter sweeps, and Slack/Teams control.
+  Part of the spore.host suite.
+type: software
+authors:
+  - given-names: Scott
+    family-names: Friedman
+    orcid: "https://orcid.org/0000-0003-1480-765X"
+    affiliation: "Amazon Web Services"
+repository-code: "https://github.com/spore-host/spawn"
+url: "https://spore.host"
+license: Apache-2.0
+keywords:
+  - cloud computing
+  - AWS
+  - EC2
+  - research computing
+  - ephemeral compute
