@@ -26,8 +26,14 @@ var instanceIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 // the instance, which is exactly what's being torn down. Persisting it here on
 // the controller is what makes local deprovision possible.
 type LocalRecord struct {
-	Name           string            `json:"name"`
-	Ref            string            `json:"ref"`
+	Name string `json:"name"`
+	Ref  string `json:"ref"`
+	// Resolved provenance of the installed spec (pinning / audit). CommitSHA is
+	// best-effort (may be empty); SpecSHA256 is always the hash of the exact
+	// plugin.yaml bytes that were installed.
+	ResolvedRef    string            `json:"resolved_ref,omitempty"` // requested tag/branch ("" = default branch)
+	CommitSHA      string            `json:"commit_sha,omitempty"`   // immutable commit the ref resolved to
+	SpecSHA256     string            `json:"spec_sha256,omitempty"`  // sha256 of the fetched plugin.yaml
 	InstanceID     string            `json:"instance_id"`
 	Instance       map[string]string `json:"instance"` // instance.* template values used at provision (id/name/ip)
 	Config         map[string]string `json:"config"`

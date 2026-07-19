@@ -56,7 +56,7 @@ func TestRenderInspect_Sections(t *testing.T) {
 		t.Fatalf("ParseSpec: %v", err)
 	}
 	var buf bytes.Buffer
-	renderInspect(&buf, plugin.PluginRef{Host: "local", Name: "./demo.yaml"}, spec, false)
+	renderInspect(&buf, plugin.PluginRef{Host: "local", Name: "./demo.yaml"}, spec, &plugin.Provenance{Host: "local", ContentSHA256: "abc123def456abc123"}, false)
 	got := buf.String()
 
 	// Each of these must appear — proves the walk surfaces the security-relevant
@@ -64,6 +64,7 @@ func TestRenderInspect_Sections(t *testing.T) {
 	wants := []string{
 		"demo v1.2.0",
 		"local file ./demo.yaml",
+		"Resolved:    local file · sha256 abc123def456",
 		"Installing runs this plugin's code",
 		"reads env: TS_API_CLIENT_SECRET",
 		"download https://example.com/app.tgz → /opt/app.tgz",
@@ -83,7 +84,7 @@ func TestRenderInspect_Sections(t *testing.T) {
 func TestRenderInspect_DryRunBanner(t *testing.T) {
 	spec, _ := plugin.ParseSpec([]byte(inspectFixture))
 	var buf bytes.Buffer
-	renderInspect(&buf, plugin.PluginRef{Host: "local", Name: "./demo.yaml"}, spec, true)
+	renderInspect(&buf, plugin.PluginRef{Host: "local", Name: "./demo.yaml"}, spec, &plugin.Provenance{Host: "local"}, true)
 	if !strings.HasPrefix(buf.String(), "DRY RUN") {
 		t.Errorf("dry-run output should start with the DRY RUN banner, got:\n%s", buf.String())
 	}
@@ -92,7 +93,7 @@ func TestRenderInspect_DryRunBanner(t *testing.T) {
 func TestRenderInspect_UnpinnedGitHubWarning(t *testing.T) {
 	spec, _ := plugin.ParseSpec([]byte(inspectFixture))
 	var buf bytes.Buffer
-	renderInspect(&buf, plugin.PluginRef{Host: "github", Owner: "someone", Repo: "plugins", Name: "demo"}, spec, false)
+	renderInspect(&buf, plugin.PluginRef{Host: "github", Owner: "someone", Repo: "plugins", Name: "demo"}, spec, &plugin.Provenance{Host: "github", Owner: "someone", Repo: "plugins", ContentSHA256: "deadbeefcafe0000"}, false)
 	got := buf.String()
 	if !strings.Contains(got, "third-party source (someone/plugins)") {
 		t.Errorf("expected third-party-source warning, got:\n%s", got)

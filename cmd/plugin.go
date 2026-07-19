@@ -151,12 +151,15 @@ Plugin ref formats are the same as 'spawn plugin install':
 
 func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]string) error {
 	resolver := plugin.DefaultResolver()
-	spec, err := resolver.Resolve(ctx, ref)
+	spec, prov, err := resolver.ResolveWithProvenance(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("resolve plugin %q: %w", ref, err)
 	}
 
 	fmt.Printf("Installing %s %s on %s...\n", spec.Name, spec.Version, instance)
+	if prov != nil && prov.CommitSHA != "" {
+		fmt.Printf("  pinned to commit %s (sha256 %s)\n", prov.CommitSHA, shortHash(prov.ContentSHA256))
+	}
 
 	// Check local pre-flight conditions before touching the remote.
 	localExec := plugin.NewLocalExecutor(nil)
@@ -212,7 +215,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	// captured outputs because a deprovision step may reference them
 	// (e.g. {{ outputs.endpoint_id }}) and they live only here on the controller.
 	if len(spec.Local.Deprovision) > 0 || len(spec.Local.Reconcile) > 0 {
-		saveLocalPluginRecord(instance, ref, spec, tmplCtx.Instance, resolvedCfg, localOutputs)
+		saveLocalPluginRecord(instance, ref, spec, prov, tmplCtx.Instance, resolvedCfg, localOutputs)
 	}
 
 	// Run the remote half (install → configure → start) on the instance via
@@ -254,7 +257,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 // plugin so its local deprovision steps can be replayed later. Best-effort: a
 // failure here is logged but does not fail the install (the plugin is already
 // installed; the cost is a potential orphaned local footprint on removal).
-func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, instanceVars, cfg, outputs map[string]string) {
+func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, prov *plugin.Provenance, instanceVars, cfg, outputs map[string]string) {
 	store, err := plugin.DefaultLocalStore()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not open local plugin store: %v\n", err)
@@ -271,6 +274,11 @@ func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, instan
 		Reconcile:      spec.Local.Reconcile,
 		EnvPassthrough: spec.Local.EnvPassthrough,
 		InstalledAt:    time.Now(),
+	}
+	if prov != nil {
+		rec.ResolvedRef = prov.RequestedRef
+		rec.CommitSHA = prov.CommitSHA
+		rec.SpecSHA256 = prov.ContentSHA256
 	}
 	if err := store.Save(rec); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not record local plugin state for %s: %v\n", spec.Name, err)
