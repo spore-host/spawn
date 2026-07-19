@@ -72,6 +72,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [10.5281/zenodo.21439888](https://doi.org/10.5281/zenodo.21439888), always
   latest). Added to `CITATION.cff` and a README badge.
 
+### Fixed
+- **`--cost-limit` no longer resets when an instance is stopped and resumed.**
+  spored enforced the limit against only the *current* boot's uptime, so a job
+  stopped and restarted several times could run well past its cost ceiling — each
+  boot restarted the tally at $0. Enforcement now charges for **total** compute
+  time across all starts (the same `spawn:compute-seconds` clock the daemon
+  already persists), mirroring how the TTL uses an absolute deadline. Also aligned
+  the `spored status` "Cost limit" line to report **compute-only** usage (it
+  previously measured against compute **+ EBS**, which didn't match what actually
+  triggers termination). The limit remains compute-only and terminates the
+  instance; it fires independently of the TTL (first to fire wins).
+
 ## [0.79.0] - 2026-07-19
 
 ### Fixed

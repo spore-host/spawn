@@ -722,3 +722,39 @@ func TestTotalComputeSecondsCarriesBase(t *testing.T) {
 		t.Fatalf("TotalComputeSeconds=%d unexpectedly large (base 3600 + ~2s uptime)", total)
 	}
 }
+
+// TestAccumulatedComputeCostIncludesPriorCompute is the regression guard for the
+// cost-limit reset bug: enforcement must charge for compute accumulated BEFORE
+// this spored start (computeSecondsBase), not just this boot's uptime. Otherwise
+// a stop/start resets the cost clock and a repeatedly-resumed instance sails past
+// its --cost-limit.
+func TestAccumulatedComputeCostIncludesPriorCompute(t *testing.T) {
+	a := newTestAgent(t, &provider.Config{PricePerHour: 10.0, CostLimit: 25.0})
+	// 2.3 hours of compute already accrued before this boot; daemon just started.
+	a.computeSecondsBase = int64((2*time.Hour + 18*time.Minute).Seconds())
+	a.startTime = time.Now()
+
+	got := a.accumulatedComputeCost()
+	// 2.3h × $10/hr = $23 (plus a negligible fraction of a second of new uptime).
+	if got < 22.99 || got > 23.5 {
+		t.Fatalf("accumulatedComputeCost=%.4f, want ~23.0 (prior 2.3h compute counted)", got)
+	}
+	// And it must have crossed 90% of the $25 limit — proving the warn/terminate
+	// path sees the carried-over spend rather than a fresh $0 after a restart.
+	if got/a.config.CostLimit < 0.90 {
+		t.Errorf("carried compute cost %.2f should be ≥90%% of limit %.2f", got, a.config.CostLimit)
+	}
+}
+
+// TestAccumulatedComputeCostFreshInstance sanity-checks the no-base case: a fresh
+// instance with no prior compute charges only for uptime.
+func TestAccumulatedComputeCostFreshInstance(t *testing.T) {
+	a := newTestAgent(t, &provider.Config{PricePerHour: 10.0, CostLimit: 25.0})
+	a.computeSecondsBase = 0
+	a.startTime = time.Now().Add(-30 * time.Minute) // half an hour up
+
+	got := a.accumulatedComputeCost()
+	if got < 4.9 || got > 5.1 {
+		t.Fatalf("accumulatedComputeCost=%.4f, want ~5.0 (0.5h × $10/hr)", got)
+	}
+}

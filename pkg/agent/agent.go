@@ -437,8 +437,13 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 
 	// 3. Check cost limit (fires independently of or alongside TTL — first-to-fire wins)
 	if a.config.CostLimit > 0 && a.config.PricePerHour > 0 {
-		uptime := time.Since(a.startTime)
-		accumulated := a.config.PricePerHour * uptime.Hours()
+		// Use TOTAL compute time across the instance's life, not just this boot's
+		// uptime: computeSecondsBase carries the compute accumulated before this
+		// spored start (persisted in spawn:compute-seconds). Using time.Since(
+		// startTime) alone would reset the cost clock on every stop/start, letting
+		// a repeatedly-resumed instance blow past its --cost-limit — the same
+		// reset trap TTL avoids with an absolute deadline.
+		accumulated := a.accumulatedComputeCost()
 		remaining := a.config.CostLimit - accumulated
 
 		if remaining <= 0 {
@@ -622,9 +627,19 @@ func (a *Agent) writeComputeSecondsTag(ctx context.Context) {
 // compute time accumulated since the last throttled write. The next spored boot
 // reads this tag into computeSecondsBase, so the compute clock continues across
 // the restart rather than losing the tail.
+// accumulatedComputeCost is the compute-only spend the cost limit is enforced
+// against: the on-demand rate × TOTAL compute time (base + this boot's uptime).
+// Using the total — not just this boot — is what stops the cost clock resetting
+// on a stop/start, mirroring how TTL uses an absolute deadline. EBS/storage is
+// deliberately excluded (the --cost-limit flag is documented as compute-only).
+func (a *Agent) accumulatedComputeCost() float64 {
+	totalCompute := time.Duration(a.TotalComputeSeconds()) * time.Second
+	return a.config.PricePerHour * totalCompute.Hours()
+}
+
 func (a *Agent) flushComputeSecondsTag(ctx context.Context) {
 	a.lastComputeTagWrite = time.Now()
-	total := a.computeSecondsBase + int64(time.Since(a.startTime).Seconds())
+	total := a.TotalComputeSeconds()
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.identity.Region))
 	if err != nil {
 		return
