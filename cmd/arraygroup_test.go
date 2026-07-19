@@ -65,6 +65,67 @@ func TestArrayLogPath(t *testing.T) {
 	}
 }
 
+func TestRetryIndexes(t *testing.T) {
+	cases := []struct {
+		name    string
+		members []arrayMember
+		size    int
+		want    []int
+	}{
+		{
+			name:    "all running",
+			members: []arrayMember{{Index: 0, State: "running"}, {Index: 1, State: "running"}},
+			size:    2,
+			want:    nil,
+		},
+		{
+			name:    "sparse gap",
+			members: []arrayMember{{Index: 0, State: "running"}, {Index: 2, State: "running"}},
+			size:    4,
+			want:    []int{1, 3},
+		},
+		{
+			name:    "terminated member is retried",
+			members: []arrayMember{{Index: 0, State: "running"}, {Index: 1, State: "terminated"}},
+			size:    2,
+			want:    []int{1},
+		},
+		{
+			name:    "stopped member is retried",
+			members: []arrayMember{{Index: 0, State: "stopped"}},
+			size:    1,
+			want:    []int{0},
+		},
+		{
+			name:    "pending counts as healthy",
+			members: []arrayMember{{Index: 0, State: "pending"}},
+			size:    1,
+			want:    nil,
+		},
+		{
+			name: "duplicate index, one running keeps it healthy",
+			// A relaunched member can briefly coexist with the old terminated one.
+			members: []arrayMember{{Index: 0, State: "terminated"}, {Index: 0, State: "running"}},
+			size:    1,
+			want:    nil,
+		},
+		{
+			name:    "size beyond surviving members",
+			members: []arrayMember{{Index: 0, State: "running"}},
+			size:    3,
+			want:    []int{1, 2},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := retryIndexes(tc.members, tc.size)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("retryIndexes() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMissingIndexes(t *testing.T) {
 	cases := []struct {
 		name    string
