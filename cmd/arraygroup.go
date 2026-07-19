@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -25,6 +27,9 @@ var (
 	arrayCancelYes  bool
 	arrayCancelPend bool
 	arrayCollectDir string
+	arrayLogsIndex  int
+	arrayLogsWhich  string
+	arrayLogsLines  int
 )
 
 var arrayGroupCmd = &cobra.Command{
@@ -36,6 +41,7 @@ Members are grouped by their job-array tags, so these work without any
 server-side record:
 
   spawn array status data-proc
+  spawn array logs data-proc --index 3
   spawn array collect data-proc ./results
   spawn array cancel data-proc --pending`,
 }
@@ -100,6 +106,115 @@ func missingIndexes(members []arrayMember, size int) []int {
 		}
 	}
 	return missing
+}
+
+// memberByIndex returns the member at the given index, or ok=false when no live
+// member holds that index (a --min-viable gap, or already terminated). Pure so
+// the logs index-selection is unit-testable without AWS.
+func memberByIndex(members []arrayMember, index int) (arrayMember, bool) {
+	for _, m := range members {
+		if m.Index == index {
+			return m, true
+		}
+	}
+	return arrayMember{}, false
+}
+
+// arrayLogPath maps the --which selector to the on-instance log path. The paths
+// are the same constants `spawn task diagnose` points at (cmd/task.go). Returns
+// an error for an unknown selector so the flag is validated in one place.
+func arrayLogPath(which string) (string, error) {
+	switch which {
+	case "command", "":
+		return commandLogRemotePath, nil
+	case "spored":
+		return sporedLogRemotePath, nil
+	default:
+		return "", fmt.Errorf("invalid --which %q: want \"command\" or \"spored\"", which)
+	}
+}
+
+// ── array logs ───────────────────────────────────────────────────────────────
+
+var arrayLogsCmd = &cobra.Command{
+	Use:   "logs <array-name>",
+	Short: "Tail a member's command or spored log (by --index)",
+	Long: `Fetch the tail of one array member's log.
+
+Selects the member by --index (the sparse job-array index, as shown by
+'spawn array status'), then reads /var/log/spawn-command.log (default) or
+/var/log/spored.log (--which spored). Uses the instance's SSH key when one is
+on disk, else falls back to SSM (keyless/lagotto-launched members).`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
+		logPath, err := arrayLogPath(arrayLogsWhich)
+		if err != nil {
+			return err
+		}
+		if arrayLogsLines <= 0 {
+			return fmt.Errorf("--lines must be positive")
+		}
+
+		members, size, err := findArrayMembers(ctx, args[0], arrayRegion)
+		if err != nil {
+			return err
+		}
+		if len(members) == 0 {
+			return fmt.Errorf("no instances found for job array %q (try --region, or the array may be fully terminated)", args[0])
+		}
+		member, ok := memberByIndex(members, arrayLogsIndex)
+		if !ok {
+			return fmt.Errorf("index %d has no live member in job array %q (requested size %d) — run 'spawn array status %s' to see which indexes launched",
+				arrayLogsIndex, args[0], size, args[0])
+		}
+
+		client, err := aws.NewClient(ctx)
+		if err != nil {
+			return fmt.Errorf("init AWS client: %w", err)
+		}
+		instance, err := resolveInstance(ctx, client, member.InstanceID)
+		if err != nil {
+			return err
+		}
+
+		remoteCmd := fmt.Sprintf("tail -n %d %s", arrayLogsLines, logPath)
+		out, err := runArrayMemberCommand(ctx, client, instance, remoteCmd)
+		if err != nil {
+			return fmt.Errorf("fetch index %d log: %w", arrayLogsIndex, err)
+		}
+		fmt.Print(out)
+		return nil
+	},
+}
+
+// runArrayMemberCommand runs a one-shot shell command on an array member and
+// returns its combined output. It reuses the exact SSH-key-or-SSM branch the
+// status path uses (cmd/status.go): when a local SSH key resolves it runs over
+// SSH (sudo, ec2-user@publicIP); otherwise — a keyless, SSM-only member as
+// lagotto/cohort launches leave — it runs over SSM RunShellScript, where the
+// agent already runs as root so `sudo` is unnecessary (#222).
+func runArrayMemberCommand(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, remoteCmd string) (string, error) {
+	keyPath, keyErr := findSSHKey(instance.KeyName)
+	if keyErr != nil {
+		res, err := client.RunShellScript(ctx, instance.Region, instance.InstanceID, remoteCmd, 60*time.Second)
+		if err != nil {
+			return "", fmt.Errorf("run over SSM (member is keyless; SSM required): %w", err)
+		}
+		out := res.Stdout
+		if res.Stderr != "" {
+			out += res.Stderr
+		}
+		return out, nil
+	}
+
+	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
+	sshArgs = append(sshArgs, fmt.Sprintf("ec2-user@%s", instance.PublicIP), "sudo "+remoteCmd+" 2>&1")
+	output, err := exec.CommandContext(ctx, "ssh", sshArgs...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ssh: %w\nOutput: %s", err, string(output))
+	}
+	return string(output), nil
 }
 
 // ── array status ─────────────────────────────────────────────────────────────
@@ -243,13 +358,17 @@ var arrayCancelCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(arrayGroupCmd)
-	arrayGroupCmd.AddCommand(arrayStatusCmd, arrayCollectCmd, arrayCancelCmd)
+	arrayGroupCmd.AddCommand(arrayStatusCmd, arrayLogsCmd, arrayCollectCmd, arrayCancelCmd)
 
-	for _, sub := range []*cobra.Command{arrayStatusCmd, arrayCollectCmd, arrayCancelCmd} {
+	for _, sub := range []*cobra.Command{arrayStatusCmd, arrayLogsCmd, arrayCollectCmd, arrayCancelCmd} {
 		sub.Flags().StringVar(&arrayRegion, "region", "", "Region to search (default: all regions)")
 	}
 	arrayStatusCmd.Flags().BoolVar(&arrayJSON, "json", false, "Output as JSON")
 	_ = arrayStatusCmd.Flags().MarkDeprecated("json", "use --output json instead")
+	arrayLogsCmd.Flags().IntVar(&arrayLogsIndex, "index", 0, "Array member index to fetch logs for")
+	_ = arrayLogsCmd.MarkFlagRequired("index")
+	arrayLogsCmd.Flags().StringVar(&arrayLogsWhich, "which", "command", "Which log to tail: \"command\" or \"spored\"")
+	arrayLogsCmd.Flags().IntVar(&arrayLogsLines, "lines", 200, "Number of trailing lines to show")
 	arrayCollectCmd.Flags().StringVar(&arrayCollectDir, "output-dir", "", "Destination directory hint for results")
 	arrayCancelCmd.Flags().BoolVarP(&arrayCancelYes, "yes", "y", false, "Skip the confirmation prompt")
 	arrayCancelCmd.Flags().BoolVar(&arrayCancelPend, "pending", false, "Only terminate members that are not actively running")
