@@ -43,6 +43,14 @@ type Provenance struct {
 	RequestedRef  string `json:"requested_ref,omitempty"`  // the tag/branch the user asked for ("" = default branch)
 	CommitSHA     string `json:"commit_sha,omitempty"`     // resolved immutable commit (best-effort; empty if unknown)
 	ContentSHA256 string `json:"content_sha256,omitempty"` // sha256 of the fetched plugin.yaml
+	// ManifestVerified is true when the fetched plugin.yaml's sha256 was checked
+	// against a release checksum manifest (increment 2). Only meaningful for an
+	// official versioned ref (name@version); bare/branch and third-party refs
+	// have no manifest and leave this false.
+	ManifestVerified bool `json:"manifest_verified,omitempty"`
+	// ReleaseTag is the git tag the official version resolved to (e.g.
+	// tailscale-v1.2.0), when a versioned official ref was requested.
+	ReleaseTag string `json:"release_tag,omitempty"`
 }
 
 // Pinned reports whether the spec resolved to an immutable reference — either a
@@ -108,18 +116,27 @@ func ParseRef(ref string) PluginRef {
 
 // Default GitHub endpoints. Overridable on compositeResolver for tests.
 const (
-	defaultRawBase = "https://raw.githubusercontent.com"
-	defaultAPIBase = "https://api.github.com"
+	defaultRawBase     = "https://raw.githubusercontent.com"
+	defaultAPIBase     = "https://api.github.com"
+	defaultReleaseBase = "https://github.com"
 )
+
+// officialTag returns the git tag for an official plugin release: <name>-<version>
+// (e.g. tailscale-v1.2.0). A dash separator (not a slash) keeps the tag a single
+// path segment, which release-asset URLs and some git tooling handle more simply.
+func officialTag(name, version string) string {
+	return name + "-" + version
+}
 
 // DefaultResolver returns a composite resolver that handles all ref formats.
 func DefaultResolver() RegistryResolver {
-	return &compositeResolver{rawBase: defaultRawBase, apiBase: defaultAPIBase}
+	return &compositeResolver{rawBase: defaultRawBase, apiBase: defaultAPIBase, releaseBase: defaultReleaseBase}
 }
 
 type compositeResolver struct {
-	rawBase string // raw.githubusercontent.com base (plugin.yaml bytes)
-	apiBase string // api.github.com base (commit-SHA resolution)
+	rawBase     string // raw.githubusercontent.com base (plugin.yaml bytes)
+	apiBase     string // api.github.com base (commit-SHA resolution)
+	releaseBase string // github.com base (release-asset downloads: manifest.json)
 }
 
 func (r *compositeResolver) Resolve(ctx context.Context, ref string) (*PluginSpec, error) {
@@ -144,14 +161,34 @@ func (r *compositeResolver) ResolveWithProvenance(ctx context.Context, ref strin
 		return spec, prov, nil
 	}
 
-	spec, data, err := r.fetchGitHubSpec(ctx, pr.Owner, pr.Repo, pr.Name, pr.Version)
+	// An official versioned ref (name@version) resolves to the release tag
+	// <name>-<version>; the plugin.yaml is fetched AT that tag and verified
+	// against the release's checksum manifest (increment 2). A bare official ref
+	// (no version) and any third-party github: ref have no release/manifest and
+	// fall through to the branch/ref fetch below.
+	gitRef := pr.Version
+	if pr.Host == "official" && pr.Version != "" {
+		tag := officialTag(pr.Name, pr.Version)
+		prov.ReleaseTag = tag
+		gitRef = tag
+	}
+
+	spec, data, err := r.fetchGitHubSpec(ctx, pr, gitRef)
 	if err != nil {
 		return nil, nil, err
 	}
 	prov.ContentSHA256 = sha256Hex(data)
+
+	if prov.ReleaseTag != "" {
+		if err := r.verifyManifest(ctx, pr, prov.ReleaseTag, prov.ContentSHA256); err != nil {
+			return nil, nil, err
+		}
+		prov.ManifestVerified = true
+	}
+
 	// Resolve the mutable ref to an immutable commit SHA, best-effort: a failure
 	// (rate limit, offline) leaves CommitSHA empty and never blocks the install.
-	prov.CommitSHA = r.resolveCommitSHA(ctx, pr.Owner, pr.Repo, pr.Version)
+	prov.CommitSHA = r.resolveCommitSHA(ctx, pr.Owner, pr.Repo, gitRef)
 	return spec, prov, nil
 }
 
@@ -162,8 +199,10 @@ func sha256Hex(b []byte) string {
 }
 
 // fetchGitHubSpec fetches a plugin.yaml from GitHub raw content, returning both
-// the parsed spec and the exact bytes (so the caller can hash them).
-func (r *compositeResolver) fetchGitHubSpec(ctx context.Context, owner, repo, name, version string) (*PluginSpec, []byte, error) {
+// the parsed spec and the exact bytes (so the caller can hash them). gitRef is
+// the already-resolved ref to fetch at ("" → the repo default branch, "main").
+func (r *compositeResolver) fetchGitHubSpec(ctx context.Context, pr PluginRef, gitRef string) (*PluginSpec, []byte, error) {
+	owner, repo, name := pr.Owner, pr.Repo, pr.Name
 	if owner != "spore-host" {
 		log.Printf("warning: installing plugin from unverified source %s/%s — content is not signed or audited", owner, repo)
 	}
@@ -175,15 +214,21 @@ func (r *compositeResolver) fetchGitHubSpec(ctx context.Context, owner, repo, na
 		}
 	}
 
-	gitRef := "main"
-	if version != "" {
-		gitRef = version
+	if gitRef == "" {
+		gitRef = "main"
 	}
 	if !validGitRef.MatchString(gitRef) || strings.Contains(gitRef, "..") {
 		return nil, nil, fmt.Errorf("invalid git ref %q", gitRef)
 	}
 
-	url := fmt.Sprintf("%s/%s/%s/%s/%s/plugin.yaml", r.rawBase, owner, repo, gitRef, name)
+	// The official registry stores each plugin under plugins/<name>/plugin.yaml;
+	// a third-party github: repo is expected to hold <name>/plugin.yaml at its
+	// root (the historical layout — unchanged here).
+	specPath := name + "/plugin.yaml"
+	if pr.Host == "official" {
+		specPath = "plugins/" + name + "/plugin.yaml"
+	}
+	url := fmt.Sprintf("%s/%s/%s/%s/%s", r.rawBase, owner, repo, gitRef, specPath)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -216,6 +261,50 @@ func (r *compositeResolver) fetchGitHubSpec(ctx context.Context, owner, repo, na
 		return nil, nil, err
 	}
 	return spec, data, nil
+}
+
+// maxManifestBytes caps the manifest.json download size (64 KiB is generous for a
+// per-plugin file map).
+const maxManifestBytes = 64 * 1024
+
+// verifyManifest downloads the release checksum manifest for an official plugin
+// release (the manifest.json asset on tag <name>-<version>) and checks that the
+// fetched plugin.yaml's sha256 matches the digest the manifest records. A missing
+// manifest, a parse error, or a digest mismatch is a hard failure — an official
+// versioned ref is expected to be released with a manifest, and a mismatch means
+// the fetched bytes are not the released bytes.
+func (r *compositeResolver) verifyManifest(ctx context.Context, pr PluginRef, tag, gotSHA256 string) error {
+	url := fmt.Sprintf("%s/%s/%s/releases/download/%s/%s", r.releaseBase, pr.Owner, pr.Repo, tag, ManifestFileName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("create manifest request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch manifest %s: %w", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("no checksum manifest for %s@%s (release %s has no %s asset) — cannot verify integrity; install an unversioned ref to bypass or upgrade the plugin", pr.Name, pr.Version, tag, ManifestFileName)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("fetch manifest %s: HTTP %d", url, resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
+	if err != nil {
+		return fmt.Errorf("read manifest: %w", err)
+	}
+	if len(data) > maxManifestBytes {
+		return fmt.Errorf("manifest exceeds maximum size (%d bytes)", maxManifestBytes)
+	}
+	m, err := ParseManifest(data)
+	if err != nil {
+		return err
+	}
+	if want := m.PluginYAMLSHA256(); want != gotSHA256 {
+		return fmt.Errorf("plugin.yaml checksum mismatch for %s@%s: manifest says %s, fetched %s — the fetched definition is not the released one", pr.Name, pr.Version, want, gotSHA256)
+	}
+	return nil
 }
 
 // resolveCommitSHA turns a mutable ref (tag/branch, or "" for the default branch)

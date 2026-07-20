@@ -680,6 +680,43 @@ Examples:
 	},
 }
 
+var pluginManifestOut string
+
+var pluginManifestCmd = &cobra.Command{
+	Use:   "manifest <plugin-dir>",
+	Short: "Generate a release checksum manifest for a plugin (offline)",
+	Long: `Generate the checksum manifest (manifest.json) for a plugin directory. The
+manifest records the sha256 of the plugin's plugin.yaml so that spawn can verify
+a fetched official plugin matches the released bytes. This is the generator side
+of the registry supply-chain story: the registry's release workflow runs it and
+publishes the output as a GitHub Release asset; spawn verifies against it at
+install time. Contacts nothing.
+
+Examples:
+  spawn plugin manifest ./plugins/tailscale
+  spawn plugin manifest ./plugins/tailscale -o manifest.json`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := plugin.BuildManifest(args[0])
+		if err != nil {
+			return err
+		}
+		data, err := m.Encode()
+		if err != nil {
+			return err
+		}
+		if pluginManifestOut == "" || pluginManifestOut == "-" {
+			_, err = cmd.OutOrStdout().Write(data)
+			return err
+		}
+		if err := os.WriteFile(pluginManifestOut, data, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", pluginManifestOut, err)
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "wrote %s manifest for %s %s\n", pluginManifestOut, m.Plugin, m.Version)
+		return nil
+	},
+}
+
 // ── push API helpers ──────────────────────────────────────────────────────────
 
 // pluginStateResponse mirrors plugin.PluginState for JSON decoding.
@@ -947,6 +984,8 @@ func init() {
 	pluginCmd.AddCommand(pluginStatusCmd)
 	pluginCmd.AddCommand(pluginRemoveCmd)
 	pluginCmd.AddCommand(pluginValidateCmd)
+	pluginCmd.AddCommand(pluginManifestCmd)
+	pluginManifestCmd.Flags().StringVarP(&pluginManifestOut, "output", "o", "", "Write manifest to this file instead of stdout")
 
 	// Shared flags across all subcommands.
 	for _, sub := range []*cobra.Command{pluginListCmd, pluginInstallCmd, pluginStatusCmd, pluginRemoveCmd} {
