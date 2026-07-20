@@ -726,15 +726,24 @@ instance. Checks schema, semver, known step/condition/config types, that the
 containing directory matches the plugin name, and that every {{ config.X }}
 template reference points at a declared config parameter.
 
+With --strict, also enforce that the declared permissions: block is consistent
+with the plugin's steps (e.g. instance.root=false must have no remote step that
+runs as root). --strict requires a permissions: block. The official registry's
+CI runs --strict so a published plugin's declared capability surface is enforced.
+
 Examples:
   spawn plugin validate ./plugins/tailscale/plugin.yaml
-  spawn plugin validate ./plugins/*/plugin.yaml`,
+  spawn plugin validate --strict ./plugins/*/plugin.yaml`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		out := cmd.OutOrStdout()
+		validate := plugin.ValidateSpecFile
+		if pluginValidateStrict {
+			validate = plugin.ValidateSpecFileStrict
+		}
 		var failed int
 		for _, path := range args {
-			if err := plugin.ValidateSpecFile(path); err != nil {
+			if err := validate(path); err != nil {
 				failed++
 				fmt.Fprintf(out, "✗ %s\n", path)
 				for _, line := range strings.Split(err.Error(), "\n") {
@@ -750,6 +759,8 @@ Examples:
 		return nil
 	},
 }
+
+var pluginValidateStrict bool
 
 var pluginManifestOut string
 
@@ -1056,6 +1067,7 @@ func init() {
 	pluginCmd.AddCommand(pluginStatusCmd)
 	pluginCmd.AddCommand(pluginRemoveCmd)
 	pluginCmd.AddCommand(pluginValidateCmd)
+	pluginValidateCmd.Flags().BoolVar(&pluginValidateStrict, "strict", false, "Also enforce permissions/step consistency (requires a permissions: block)")
 	pluginCmd.AddCommand(pluginManifestCmd)
 	pluginManifestCmd.Flags().StringVarP(&pluginManifestOut, "output", "o", "", "Write manifest to this file instead of stdout")
 

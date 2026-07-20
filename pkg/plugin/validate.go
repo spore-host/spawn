@@ -275,6 +275,93 @@ func (s *PluginSpec) invalidTemplateRefs() []string {
 	return keys
 }
 
+// remoteRunsAsRoot reports whether a remote step executes as root on the
+// instance. spored runs every remote step as root EXCEPT a "run" step that opts
+// into as_user (fetch/extract always run as root). Mirrors remote_executor.go.
+func remoteRunsAsRoot(st Step) bool {
+	if st.Type == "run" {
+		return !st.AsUser
+	}
+	return true // fetch / extract
+}
+
+// ValidatePermissionConsistency performs STRICTER, publish-time checks that the
+// author-declared permissions: block is consistent with the plugin's actual
+// steps — so the declaration surfaced by `spawn plugin inspect` can be trusted,
+// not just decorative. It is separate from Validate (which is always-on and
+// intentionally lenient) because these checks only make sense at publish time
+// for the official registry; a plugin without a permissions: block is skipped.
+//
+// Checks:
+//   - instance.root=false must have NO remote step that runs as root (every
+//     remote run step must be as_user, and there must be no fetch/extract step,
+//     which always run as root);
+//   - instance.network=false must have no fetch step (a transitive download);
+//   - controller.network=false must have no local step with a fetch/URL.
+func (s *PluginSpec) ValidatePermissionConsistency() error {
+	if s.Permissions == nil {
+		return &ValidationError{Problems: []string{"permissions: block is required for publish-time consistency checks"}}
+	}
+	var probs []string
+	add := func(format string, args ...interface{}) {
+		probs = append(probs, fmt.Sprintf(format, args...))
+	}
+
+	remoteGroups := []struct {
+		label string
+		steps []Step
+	}{
+		{"remote.install", s.Remote.Install},
+		{"remote.configure", s.Remote.Configure},
+		{"remote.start", s.Remote.Start},
+		{"remote.stop", s.Remote.Stop},
+		{"remote.health.steps", s.Remote.Health.Steps},
+	}
+
+	if !s.Permissions.Instance.Root {
+		for _, g := range remoteGroups {
+			for i, st := range g.steps {
+				if remoteRunsAsRoot(st) {
+					add("%s[%d]: runs as root but permissions.instance.root=false (a %q step needs as_user, and fetch/extract always run as root)", g.label, i, st.Type)
+				}
+			}
+		}
+	}
+
+	if !s.Permissions.Instance.Network {
+		for _, g := range remoteGroups {
+			for i, st := range g.steps {
+				if st.Type == "fetch" {
+					add("%s[%d]: is a fetch (network download) but permissions.instance.network=false", g.label, i)
+				}
+			}
+		}
+	}
+
+	if !s.Permissions.Controller.Network {
+		for _, g := range []struct {
+			label string
+			steps []Step
+		}{
+			{"local.provision", s.Local.Provision},
+			{"local.deprovision", s.Local.Deprovision},
+			{"local.reconcile", s.Local.Reconcile},
+		} {
+			for i, st := range g.steps {
+				if st.Type == "fetch" || st.URL != "" {
+					add("%s[%d]: performs a network fetch but permissions.controller.network=false", g.label, i)
+				}
+			}
+		}
+	}
+
+	if len(probs) > 0 {
+		sort.Strings(probs)
+		return &ValidationError{Problems: probs}
+	}
+	return nil
+}
+
 // ValidateSpecFile parses and fully validates a plugin.yaml at path, inferring
 // the expected plugin name from the containing directory (the registry layout
 // plugins/<name>/plugin.yaml).
@@ -285,4 +372,21 @@ func ValidateSpecFile(path string) error {
 	}
 	dirName := filepath.Base(filepath.Dir(path))
 	return spec.Validate(dirName)
+}
+
+// ValidateSpecFileStrict runs ValidateSpecFile plus the publish-time permission/
+// step consistency checks (ValidatePermissionConsistency). Used by the registry's
+// lint CI (`spawn plugin validate --strict`). A plugin with no permissions: block
+// passes the base validation but fails strict, so official plugins must declare
+// their capability surface.
+func ValidateSpecFileStrict(path string) error {
+	spec, err := ParseSpecFile(path)
+	if err != nil {
+		return err
+	}
+	dirName := filepath.Base(filepath.Dir(path))
+	if verr := spec.Validate(dirName); verr != nil {
+		return verr
+	}
+	return spec.ValidatePermissionConsistency()
 }

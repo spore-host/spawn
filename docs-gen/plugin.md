@@ -154,11 +154,22 @@ instance. Checks schema, semver, known step/condition/config types, that the
 containing directory matches the plugin name, and that every &#123;&#123; config.X &#125;&#125;
 template reference points at a declared config parameter.
 
+With --strict, also enforce that the declared permissions: block is consistent
+with the plugin's steps (e.g. instance.root=false must have no remote step that
+runs as root). --strict requires a permissions: block. The official registry's
+CI runs --strict so a published plugin's declared capability surface is enforced.
+
 Examples:
   spawn plugin validate ./plugins/tailscale/plugin.yaml
-  spawn plugin validate ./plugins/*/plugin.yaml
+  spawn plugin validate --strict ./plugins/*/plugin.yaml
 
 ```
-spawn plugin validate <path>...
+spawn plugin validate <path>... [flags]
 ```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--strict` |  | bool |  | Also enforce permissions/step consistency (requires a permissions: block) |
 

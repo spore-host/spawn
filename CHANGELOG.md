@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`spawn plugin validate --strict` enforces permission/step consistency**
+  (spore-plugins#8). The strict mode cross-checks a plugin's declared
+  `permissions:` block against its actual steps — e.g. `instance.root=false` must
+  have no remote step that runs as root (a `run` step needs `as_user`, and
+  fetch/extract always run as root), `instance.network=false` must have no fetch,
+  `controller.network=false` no local network step — and requires a `permissions:`
+  block to be present. The official registry's CI runs `--strict`, so a published
+  plugin's declared capability surface is enforced at publish time rather than
+  being merely decorative.
 - **Installed-plugin provenance is recorded on the instance** (spore-plugins#8).
   A successful `spawn plugin install` now writes a `spore:plugin:<name>` EC2 tag
   (version, content-digest + commit prefixes, and the verification tier reached —
