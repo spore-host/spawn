@@ -29,7 +29,13 @@ var (
 	pluginRemoveYes   bool
 	pluginSSHUser     string
 	pluginDryRun      bool
+	pluginInsecure    bool // --insecure: skip signature/manifest verification for official refs
 )
+
+// pluginResolver builds the registry resolver honoring the shared --insecure flag.
+func pluginResolver() plugin.RegistryResolver {
+	return plugin.DefaultResolver(plugin.WithInsecure(pluginInsecure))
+}
 
 var pluginCmd = &cobra.Command{
 	Use:   "plugin",
@@ -150,7 +156,7 @@ Plugin ref formats are the same as 'spawn plugin install':
 }
 
 func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]string) error {
-	resolver := plugin.DefaultResolver()
+	resolver := pluginResolver()
 	spec, prov, err := resolver.ResolveWithProvenance(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("resolve plugin %q: %w", ref, err)
@@ -159,6 +165,11 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	fmt.Printf("Installing %s %s on %s...\n", spec.Name, spec.Version, instance)
 	if prov != nil && prov.CommitSHA != "" {
 		fmt.Printf("  pinned to commit %s (sha256 %s)\n", prov.CommitSHA, shortHash(prov.ContentSHA256))
+	}
+	if prov != nil && prov.SignatureVerified {
+		fmt.Printf("  signature verified (official release)\n")
+	} else if prov != nil && prov.ManifestVerified {
+		fmt.Printf("  checksum-manifest verified\n")
 	}
 
 	// Check local pre-flight conditions before touching the remote.
@@ -1001,4 +1012,10 @@ func init() {
 	// Install-only flags.
 	pluginInstallCmd.Flags().StringArrayVar(&pluginConfigPairs, "config", nil, "Config as key=value (repeatable)")
 	pluginInstallCmd.Flags().BoolVar(&pluginDryRun, "dry-run", false, "Preview the plan without installing (contacts no instance)")
+
+	// --insecure: skip signature/checksum-manifest verification for official
+	// versioned refs (dev escape for unreleased/unsigned plugins).
+	for _, sub := range []*cobra.Command{pluginInstallCmd, pluginInspectCmd} {
+		sub.Flags().BoolVar(&pluginInsecure, "insecure", false, "Skip signature/checksum verification for official plugin releases (unsafe)")
+	}
 }

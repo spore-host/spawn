@@ -19,7 +19,7 @@ import (
 // dryRun only changes the framing (it's reached via `plugin install --dry-run`);
 // the rendered content is identical to `plugin inspect`.
 func runPluginInspect(ctx context.Context, ref string, dryRun bool) error {
-	spec, prov, err := plugin.DefaultResolver().ResolveWithProvenance(ctx, ref)
+	spec, prov, err := pluginResolver().ResolveWithProvenance(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("resolve plugin %q: %w", ref, err)
 	}
@@ -85,8 +85,10 @@ func describeProvenance(prov *plugin.Provenance) string {
 		return fmt.Sprintf("local file · sha256 %s", shortHash(prov.ContentSHA256))
 	}
 	verified := ""
-	if prov.ManifestVerified {
-		verified = " · manifest-verified ✓"
+	if prov.SignatureVerified {
+		verified = " · signature-verified ✓"
+	} else if prov.ManifestVerified {
+		verified = " · manifest-verified ✓ (unsigned)"
 	}
 	if prov.CommitSHA != "" {
 		return fmt.Sprintf("commit %s · sha256 %s%s", shortHash(prov.CommitSHA), shortHash(prov.ContentSHA256), verified)

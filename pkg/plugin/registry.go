@@ -48,6 +48,11 @@ type Provenance struct {
 	// official versioned ref (name@version); bare/branch and third-party refs
 	// have no manifest and leave this false.
 	ManifestVerified bool `json:"manifest_verified,omitempty"`
+	// SignatureVerified is true when the release checksum manifest carried a valid
+	// keyless (cosign/sigstore) signature from the official spore-plugins release
+	// workflow (increment 3). During the deprecation window an unsigned official
+	// release warns rather than fails, leaving this false but ManifestVerified true.
+	SignatureVerified bool `json:"signature_verified,omitempty"`
 	// ReleaseTag is the git tag the official version resolved to (e.g.
 	// tailscale-v1.2.0), when a versioned official ref was requested.
 	ReleaseTag string `json:"release_tag,omitempty"`
@@ -128,15 +133,31 @@ func officialTag(name, version string) string {
 	return name + "-" + version
 }
 
+// ResolverOption configures a resolver returned by DefaultResolver.
+type ResolverOption func(*compositeResolver)
+
+// WithInsecure disables signature/manifest enforcement for official versioned
+// refs (the `--insecure`/`--no-verify` escape hatch, for local dev against
+// unreleased/unsigned plugins). It downgrades verification to best-effort: a
+// missing or invalid manifest/signature warns instead of failing.
+func WithInsecure(insecure bool) ResolverOption {
+	return func(r *compositeResolver) { r.insecure = insecure }
+}
+
 // DefaultResolver returns a composite resolver that handles all ref formats.
-func DefaultResolver() RegistryResolver {
-	return &compositeResolver{rawBase: defaultRawBase, apiBase: defaultAPIBase, releaseBase: defaultReleaseBase}
+func DefaultResolver(opts ...ResolverOption) RegistryResolver {
+	r := &compositeResolver{rawBase: defaultRawBase, apiBase: defaultAPIBase, releaseBase: defaultReleaseBase}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 type compositeResolver struct {
 	rawBase     string // raw.githubusercontent.com base (plugin.yaml bytes)
 	apiBase     string // api.github.com base (commit-SHA resolution)
-	releaseBase string // github.com base (release-asset downloads: manifest.json)
+	releaseBase string // github.com base (release-asset downloads: manifest.json + signature)
+	insecure    bool   // when true, manifest/signature failures warn instead of failing (dev escape)
 }
 
 func (r *compositeResolver) Resolve(ctx context.Context, ref string) (*PluginSpec, error) {
@@ -180,10 +201,9 @@ func (r *compositeResolver) ResolveWithProvenance(ctx context.Context, ref strin
 	prov.ContentSHA256 = sha256Hex(data)
 
 	if prov.ReleaseTag != "" {
-		if err := r.verifyManifest(ctx, pr, prov.ReleaseTag, prov.ContentSHA256); err != nil {
+		if err := r.verifyRelease(ctx, pr, prov); err != nil {
 			return nil, nil, err
 		}
-		prov.ManifestVerified = true
 	}
 
 	// Resolve the mutable ref to an immutable commit SHA, best-effort: a failure
@@ -267,44 +287,99 @@ func (r *compositeResolver) fetchGitHubSpec(ctx context.Context, pr PluginRef, g
 // per-plugin file map).
 const maxManifestBytes = 64 * 1024
 
-// verifyManifest downloads the release checksum manifest for an official plugin
-// release (the manifest.json asset on tag <name>-<version>) and checks that the
-// fetched plugin.yaml's sha256 matches the digest the manifest records. A missing
-// manifest, a parse error, or a digest mismatch is a hard failure — an official
-// versioned ref is expected to be released with a manifest, and a mismatch means
-// the fetched bytes are not the released bytes.
-func (r *compositeResolver) verifyManifest(ctx context.Context, pr PluginRef, tag, gotSHA256 string) error {
-	url := fmt.Sprintf("%s/%s/%s/releases/download/%s/%s", r.releaseBase, pr.Owner, pr.Repo, tag, ManifestFileName)
+// verifyRelease verifies an official plugin release: it downloads the checksum
+// manifest asset, checks the fetched plugin.yaml's sha256 against it, then (when
+// present) verifies the manifest's keyless signature. It records what it verified
+// on prov (ManifestVerified / SignatureVerified).
+//
+// Strictness (RFC decision #3, verify-by-default with a deprecation window):
+//   - manifest missing/mismatch → hard failure (integrity is required);
+//   - signature present but invalid (bad sig, wrong identity, no Rekor entry) →
+//     hard failure (a tampered/forged signature must never pass);
+//   - signature ASSET ABSENT → warn, not fail (the deprecation window: existing
+//     releases predate signing). Flip to hard-fail once all official plugins are
+//     signed.
+//
+// r.insecure downgrades every failure above to a warning (the --insecure escape).
+func (r *compositeResolver) verifyRelease(ctx context.Context, pr PluginRef, prov *Provenance) error {
+	manifestData, err := r.fetchReleaseAsset(ctx, pr.Owner, pr.Repo, prov.ReleaseTag, ManifestFileName)
+	if err != nil {
+		if _, missing := err.(errAssetNotFound); missing {
+			err = fmt.Errorf("no checksum manifest for %s@%s (release %s has no %s asset) — cannot verify integrity; install an unversioned ref to bypass or upgrade the plugin", pr.Name, pr.Version, prov.ReleaseTag, ManifestFileName)
+		}
+		return r.softFail(err)
+	}
+	m, err := ParseManifest(manifestData)
+	if err != nil {
+		return r.softFail(err)
+	}
+	if want := m.PluginYAMLSHA256(); want != prov.ContentSHA256 {
+		return r.softFail(fmt.Errorf("plugin.yaml checksum mismatch for %s@%s: manifest says %s, fetched %s — the fetched definition is not the released one", pr.Name, pr.Version, want, prov.ContentSHA256))
+	}
+	prov.ManifestVerified = true
+
+	// Signature (increment 3). Absent → warn (deprecation window); present but
+	// invalid → hard fail (unless insecure).
+	sigData, err := r.fetchReleaseAsset(ctx, pr.Owner, pr.Repo, prov.ReleaseTag, SignatureFileName)
+	if err != nil {
+		if _, missing := err.(errAssetNotFound); missing {
+			log.Printf("warning: %s@%s is not signed (no %s on release %s) — integrity verified via checksum manifest only; signature verification will become mandatory", pr.Name, pr.Version, SignatureFileName, prov.ReleaseTag)
+			return nil
+		}
+		return r.softFail(err)
+	}
+	if err := verifyManifestSignature(sigData, manifestData); err != nil {
+		return r.softFail(fmt.Errorf("%s@%s signature: %w", pr.Name, pr.Version, err))
+	}
+	prov.SignatureVerified = true
+	return nil
+}
+
+// softFail returns err normally, or (when the resolver is in insecure mode)
+// downgrades it to a warning and returns nil so resolution proceeds.
+func (r *compositeResolver) softFail(err error) error {
+	if r.insecure {
+		log.Printf("warning: skipping verification failure (--insecure): %v", err)
+		return nil
+	}
+	return err
+}
+
+// errAssetNotFound signals that a release asset returned 404, so callers can
+// distinguish "no such asset" (a deprecation-window warning for signatures) from
+// a transport error.
+type errAssetNotFound struct{ name string }
+
+func (e errAssetNotFound) Error() string { return fmt.Sprintf("release asset %q not found", e.name) }
+
+// fetchReleaseAsset downloads a named asset from a GitHub release by tag. It
+// returns errAssetNotFound on a 404 so callers can treat a missing asset
+// distinctly from other errors.
+func (r *compositeResolver) fetchReleaseAsset(ctx context.Context, owner, repo, tag, name string) ([]byte, error) {
+	url := fmt.Sprintf("%s/%s/%s/releases/download/%s/%s", r.releaseBase, owner, repo, tag, name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return fmt.Errorf("create manifest request: %w", err)
+		return nil, fmt.Errorf("create request for %s: %w", name, err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetch manifest %s: %w", url, err)
+		return nil, fmt.Errorf("fetch %s: %w", url, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("no checksum manifest for %s@%s (release %s has no %s asset) — cannot verify integrity; install an unversioned ref to bypass or upgrade the plugin", pr.Name, pr.Version, tag, ManifestFileName)
+		return nil, errAssetNotFound{name: name}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("fetch manifest %s: HTTP %d", url, resp.StatusCode)
+		return nil, fmt.Errorf("fetch %s: HTTP %d", url, resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
 	if err != nil {
-		return fmt.Errorf("read manifest: %w", err)
+		return nil, fmt.Errorf("read %s: %w", name, err)
 	}
 	if len(data) > maxManifestBytes {
-		return fmt.Errorf("manifest exceeds maximum size (%d bytes)", maxManifestBytes)
+		return nil, fmt.Errorf("%s exceeds maximum size (%d bytes)", name, maxManifestBytes)
 	}
-	m, err := ParseManifest(data)
-	if err != nil {
-		return err
-	}
-	if want := m.PluginYAMLSHA256(); want != gotSHA256 {
-		return fmt.Errorf("plugin.yaml checksum mismatch for %s@%s: manifest says %s, fetched %s — the fetched definition is not the released one", pr.Name, pr.Version, want, gotSHA256)
-	}
-	return nil
+	return data, nil
 }
 
 // resolveCommitSHA turns a mutable ref (tag/branch, or "" for the default branch)
