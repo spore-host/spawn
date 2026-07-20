@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Plugin `fetch` steps accept an optional `sha256:` checksum** (spore-plugins#8).
+  When a `fetch` step declares `sha256:` (a 64-char lowercase hex digest), spored
+  hashes the downloaded bytes and fails the install on a mismatch, removing the
+  bad file — closing the "unverified transitive download" gap for a fetch URL
+  that isn't itself covered by the plugin.yaml provenance digest. Optional in the
+  spec (the registry's publish-time CI will require it on official plugins);
+  `spawn plugin inspect` now shows whether each `fetch` step is checksummed.
+
 ## [0.85.0] - 2026-07-19
 
 ### Added

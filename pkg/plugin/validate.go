@@ -28,6 +28,9 @@ var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // optional pre-release/build), e.g. v1.2.0, 1.0.0, 1.2.3-rc1.
 var semverRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)*$`)
 
+// sha256HexRe matches a bare SHA-256 digest: exactly 64 lowercase hex chars.
+var sha256HexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // configRefRe finds canonical template references to config parameters:
 // {{ config.key }} (the one supported form). Capture group 1 holds the key.
 // The Go-style {{ .Config.key }} is deliberately NOT matched — it is not valid
@@ -151,6 +154,16 @@ func (s *PluginSpec) Validate(dirName string) error {
 		for i, st := range steps {
 			if !valid[st.Type] {
 				add("%s[%d]: invalid step type %q (want %s)", label, i, st.Type, want)
+			}
+			// sha256 is a fetch-only integrity field; when set, it must be a
+			// bare 64-char lowercase hex digest, and it's meaningless on any
+			// other step type.
+			if st.SHA256 != "" {
+				if st.Type != "fetch" {
+					add("%s[%d]: sha256 is only valid on a fetch step, not %q", label, i, st.Type)
+				} else if !sha256HexRe.MatchString(st.SHA256) {
+					add("%s[%d]: invalid sha256 %q (want 64 lowercase hex chars)", label, i, st.SHA256)
+				}
 			}
 		}
 	}

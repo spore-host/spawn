@@ -4,6 +4,8 @@ package pluginruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -197,8 +199,22 @@ func (e *RemoteExecutor) fetch(ctx context.Context, step plugin.Step) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxFetchBytes)); err != nil {
+	// Hash the bytes as they're written so an optional sha256: can be verified
+	// without a second read. When no checksum is declared, the hash is computed
+	// but ignored.
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(f, hasher), io.LimitReader(resp.Body, maxFetchBytes)); err != nil {
 		return fmt.Errorf("write %s: %w", step.Dest, err)
+	}
+
+	if step.SHA256 != "" {
+		got := hex.EncodeToString(hasher.Sum(nil))
+		if got != step.SHA256 {
+			// Don't leave an unverified download in place for a later step to use.
+			_ = f.Close()
+			_ = os.Remove(step.Dest)
+			return fmt.Errorf("fetch %s: sha256 mismatch (want %s, got %s)", step.URL, step.SHA256, got)
+		}
 	}
 	return nil
 }

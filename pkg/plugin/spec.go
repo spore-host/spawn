@@ -130,6 +130,14 @@ type Step struct {
 	// writes its config under the user's ~/.globusonline. Ignored for local
 	// steps (already run as the controller user) and non-run step types.
 	AsUser bool `yaml:"as_user"`
+	// SHA256 is an optional expected checksum for a "fetch" step's downloaded
+	// content, as a lowercase 64-char hex digest. When set, spored hashes the
+	// downloaded bytes and fails the install if they don't match — closing the
+	// "unverified transitive download" gap for a fetch URL that (unlike the
+	// pinned plugin.yaml) is not itself checksummed by the registry manifest.
+	// Optional in the spec; the registry's publish-time CI requires it on
+	// official plugins' fetch steps. Ignored for non-fetch step types.
+	SHA256 string `yaml:"sha256,omitempty"`
 }
 
 // HealthBlock configures the remote health check loop.
