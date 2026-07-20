@@ -413,30 +413,49 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		InstanceType: sized.InstanceType,
 		Spot:         cfg.Spot,
 	}
-	if getOutputFormat() == "json" {
-		return json.NewEncoder(out).Encode(lr)
-	}
+	jsonOut := getOutputFormat() == "json"
 
-	fmt.Fprintf(out, "✅ Task launched: %s\n", spec.TaskID)
-	fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
-	fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
-	fmt.Fprintf(out, "Completion:   s3://%s/tasks/%s/completion.json\n", resultsBucket, spec.TaskID)
+	// Without --wait we return at launch: JSON emits the LaunchResult; human prints
+	// the launch summary + how to poll. (With --wait we fall through to the poll
+	// below and, in JSON mode, emit the CompletionRecord instead — the one-shot
+	// contract adapters want, spawn#386.)
 	if !taskRunWait {
+		if jsonOut {
+			return json.NewEncoder(out).Encode(lr)
+		}
+		fmt.Fprintf(out, "✅ Task launched: %s\n", spec.TaskID)
+		fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
+		fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
+		fmt.Fprintf(out, "Completion:   s3://%s/tasks/%s/completion.json\n", resultsBucket, spec.TaskID)
 		fmt.Fprintf(out, "\nPoll for completion:\n")
 		fmt.Fprintf(out, "  spawn task status %s --region %s\n", spec.TaskID, region)
 		fmt.Fprintf(out, "  aws s3 cp s3://%s/tasks/%s/completion.json -\n", resultsBucket, spec.TaskID)
 		return nil
 	}
 
-	// --wait: poll the completion record until it appears or the TTL elapses,
-	// then print it and exit with the task's own exit code.
-	fmt.Fprintf(out, "\nWaiting for completion (polling every %s)...\n", taskRunPollInterval)
+	// --wait: poll the completion record until it appears or the TTL elapses. In
+	// JSON mode emit the CompletionRecord verbatim (so an adapter gets the full
+	// record from one `task run --wait -o json` call); in human mode print the
+	// launch summary then the record. Either way exit with the task's exit code.
+	if !jsonOut {
+		fmt.Fprintf(out, "✅ Task launched: %s\n", spec.TaskID)
+		fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
+		fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
+		fmt.Fprintf(out, "Completion:   s3://%s/tasks/%s/completion.json\n", resultsBucket, spec.TaskID)
+		fmt.Fprintf(out, "\nWaiting for completion (polling every %s)...\n", taskRunPollInterval)
+	}
 	deadline := waitDeadline(spec.Lifecycle.TTL)
 	rec, err := pollCompletion(ctx, client, region, resultsBucket, spec.TaskID, taskRunPollInterval, deadline)
 	if err != nil {
 		return err
 	}
-	printCompletion(out, rec)
+	if jsonOut {
+		if err := json.NewEncoder(out).Encode(rec); err != nil {
+			return err
+		}
+	} else {
+		printCompletion(out, rec)
+	}
 	if rec.ExitCode != 0 {
 		os.Exit(rec.ExitCode)
 	}

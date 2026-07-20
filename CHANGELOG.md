@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`spawn task run --wait -o json` now emits the CompletionRecord**, not the
+  LaunchResult (spawn#386). Previously `--wait -o json` returned the launch info
+  (instance id) and never the terminal record; the CompletionRecord was only
+  reachable via `spawn task status <id> -o json`. Now a single
+  `task run --wait -o json` launches, waits, and prints the full CompletionRecord
+  (exit code, state, timings, logs), exiting with the task's exit code — the
+  one-shot a workflow adapter wants. Without `--wait`, `-o json` still emits the
+  LaunchResult (unchanged); human `--wait` output is unchanged.
+
 ## [0.83.1] - 2026-07-19
 
 ### Fixed
