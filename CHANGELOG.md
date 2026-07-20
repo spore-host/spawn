@@ -15,6 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that isn't itself covered by the plugin.yaml provenance digest. Optional in the
   spec (the registry's publish-time CI will require it on official plugins);
   `spawn plugin inspect` now shows whether each `fetch` step is checksummed.
+- **Official plugin releases are verified against a checksum manifest** (spore-plugins#8).
+  Installing `name@vX.Y.Z` from the official registry now resolves to the release
+  tag `name-vX.Y.Z`, fetches `plugin.yaml` at that tag, and verifies its sha256
+  against the `manifest.json` asset published on that GitHub Release — a missing
+  manifest or a digest mismatch is a hard failure, so the bytes you install are
+  provably the released ones. `spawn plugin inspect` shows `manifest-verified ✓`.
+  New `spawn plugin manifest <plugin-dir>` generates the manifest (the registry's
+  release workflow runs it; the same binary verifies it). A bare/unversioned or
+  third-party `github:` ref has no manifest and is unaffected.
+
+### Fixed
+- **`spawn plugin install <name>` from the official registry now resolves the
+  correct path.** The resolver fetched `…/<name>/plugin.yaml` but the registry
+  stores plugins under `…/plugins/<name>/plugin.yaml`, so official installs
+  404'd (only local `./path` and third-party `github:` refs worked). Official
+  refs now use the `plugins/<name>/` layout.
 
 ## [0.85.0] - 2026-07-19
 

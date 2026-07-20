@@ -84,10 +84,14 @@ func describeProvenance(prov *plugin.Provenance) string {
 	if prov.Host == "local" {
 		return fmt.Sprintf("local file · sha256 %s", shortHash(prov.ContentSHA256))
 	}
-	if prov.CommitSHA != "" {
-		return fmt.Sprintf("commit %s · sha256 %s", shortHash(prov.CommitSHA), shortHash(prov.ContentSHA256))
+	verified := ""
+	if prov.ManifestVerified {
+		verified = " · manifest-verified ✓"
 	}
-	return fmt.Sprintf("unpinned (commit unknown) · sha256 %s", shortHash(prov.ContentSHA256))
+	if prov.CommitSHA != "" {
+		return fmt.Sprintf("commit %s · sha256 %s%s", shortHash(prov.CommitSHA), shortHash(prov.ContentSHA256), verified)
+	}
+	return fmt.Sprintf("unpinned (commit unknown) · sha256 %s%s", shortHash(prov.ContentSHA256), verified)
 }
 
 // shortHash trims a hex digest to its first 12 chars for display (full value is

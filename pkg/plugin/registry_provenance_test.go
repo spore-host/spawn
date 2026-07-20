@@ -18,7 +18,8 @@ remote:
 `
 
 // newTestResolver points the resolver at local httptest servers for the raw
-// (plugin.yaml) and API (commit SHA) endpoints.
+// (plugin.yaml) and API (commit SHA) endpoints. releaseBase is left empty; the
+// release-asset (manifest) path is exercised by the manifest tests, which set it.
 func newTestResolver(rawBase, apiBase string) *compositeResolver {
 	return &compositeResolver{rawBase: rawBase, apiBase: apiBase}
 }
