@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Installed-plugin provenance is recorded on the instance** (spore-plugins#8).
+  A successful `spawn plugin install` now writes a `spore:plugin:<name>` EC2 tag
+  (version, content-digest + commit prefixes, and the verification tier reached —
+  `signature`/`manifest`/`none`) and persists the full resolved provenance into
+  spored's on-instance plugin state, so an audit can answer "which plugin bytes
+  are on this box, and how were they verified" from both the AWS control plane
+  and the instance itself — not just the controller's local record. `spawn plugin
+  status <name>` now shows a `Source:` line with the recorded provenance. Both
+  writes are best-effort and never fail an already-completed install.
+
+### Fixed
+- **Clear error on a cosign legacy-bundle signature.** A plugin release signed
+  without `--new-bundle-format` produces cosign's legacy bundle, which the
+  verifier can't parse; it now reports that explicitly instead of a cryptic
+  protobuf error (spore-plugins#8).
+
 ## [0.86.0] - 2026-07-20
 
 ### Added

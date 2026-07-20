@@ -116,9 +116,10 @@ func (s *PushAPIServer) authMiddleware(next http.Handler) http.Handler {
 // spored runs. pushed carries values captured/pushed by the controller's local
 // provision steps so configure can resolve {{ pushed.<key> }} up front.
 type installRequest struct {
-	Spec   string            `json:"spec"` // plugin.yaml contents
-	Config map[string]string `json:"config,omitempty"`
-	Pushed map[string]string `json:"pushed,omitempty"`
+	Spec       string             `json:"spec"` // plugin.yaml contents
+	Config     map[string]string  `json:"config,omitempty"`
+	Pushed     map[string]string  `json:"pushed,omitempty"`
+	Provenance *plugin.Provenance `json:"provenance,omitempty"` // resolved origin/verification, recorded in on-instance state
 }
 
 // handleInstall receives POST /v1/plugins/install and runs the remote half of a
@@ -154,7 +155,7 @@ func (s *PushAPIServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		baseCtx = context.Background()
 	}
 	go func() {
-		if err := s.rt.InstallWithPushed(baseCtx, spec, req.Config, req.Pushed); err != nil {
+		if err := s.rt.InstallWithProvenance(baseCtx, spec, req.Config, req.Pushed, req.Provenance); err != nil {
 			log.Printf("Install error for plugin %s: %v", spec.Name, err)
 		}
 	}()
