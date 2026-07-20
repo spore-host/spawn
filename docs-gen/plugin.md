@@ -84,6 +84,29 @@ spawn plugin list [flags]
 | `--key` |  | string |  | Path to SSH private key |
 | `--user` |  | string |  | SSH username for the instance (default: ec2-user) |
 
+### `spawn plugin manifest`
+
+Generate the checksum manifest (manifest.json) for a plugin directory. The
+manifest records the sha256 of the plugin's plugin.yaml so that spawn can verify
+a fetched official plugin matches the released bytes. This is the generator side
+of the registry supply-chain story: the registry's release workflow runs it and
+publishes the output as a GitHub Release asset; spawn verifies against it at
+install time. Contacts nothing.
+
+Examples:
+  spawn plugin manifest ./plugins/tailscale
+  spawn plugin manifest ./plugins/tailscale -o manifest.json
+
+```
+spawn plugin manifest <plugin-dir> [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--output` | `-o` | string |  | Write manifest to this file instead of stdout |
+
 ### `spawn plugin remove`
 
 Remove a plugin from an instance
