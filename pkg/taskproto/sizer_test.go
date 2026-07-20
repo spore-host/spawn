@@ -34,6 +34,22 @@ func TestSize_PicksCheapest(t *testing.T) {
 	}
 }
 
+func TestSize_ExactInstanceTypePin(t *testing.T) {
+	// An exact pin bypasses the finder entirely (would panic if consulted) and
+	// returns the type verbatim with its derived family.
+	f := fakeFinder{err: context.Canceled} // must NOT be called
+	got, err := Size(context.Background(), f, ResourceRequest{InstanceType: "t3.medium", Families: []string{"c7i"}, CPU: 99})
+	if err != nil {
+		t.Fatalf("exact pin should not error: %v", err)
+	}
+	if got.InstanceType != "t3.medium" {
+		t.Errorf("pin = %q, want t3.medium (verbatim, ignoring families/cpu)", got.InstanceType)
+	}
+	if got.Family != "t3" {
+		t.Errorf("pin family = %q, want t3", got.Family)
+	}
+}
+
 func TestSize_FamilyAllowList(t *testing.T) {
 	f := fakeFinder{cands: []Candidate{
 		{InstanceType: "c7a.4xlarge", Family: "c7a", OnDemandPrice: 0.62}, // cheapest but not allowed

@@ -31,13 +31,18 @@ type TaskSpec struct {
 
 // ResourceRequest is what the sizer maps to an instance type.
 type ResourceRequest struct {
-	CPU                   int      `json:"cpu,omitempty"`
-	MemoryGiB             float64  `json:"memory_gib,omitempty"`
-	GPUs                  int      `json:"gpus,omitempty"`
-	Architecture          string   `json:"architecture,omitempty"` // x86_64 | arm64 | "" (any)
-	Families              []string `json:"families,omitempty"`     // allow-list of family prefixes (e.g. c7i, m7i)
-	Purchase              string   `json:"purchase,omitempty"`     // spot | on_demand (default on_demand)
-	Fallback              string   `json:"fallback,omitempty"`     // on_demand when spot unavailable
+	CPU          int     `json:"cpu,omitempty"`
+	MemoryGiB    float64 `json:"memory_gib,omitempty"`
+	GPUs         int     `json:"gpus,omitempty"`
+	Architecture string  `json:"architecture,omitempty"` // x86_64 | arm64 | "" (any)
+	// InstanceType, when set, pins the EXACT instance type — the sizer returns it
+	// verbatim and skips family/price selection. For adapters that expose a
+	// specific type (e.g. nf-spawn's ext.instanceType) rather than a
+	// cpu/memory request. Takes precedence over Families/CPU/MemoryGiB.
+	InstanceType          string   `json:"instance_type,omitempty"`
+	Families              []string `json:"families,omitempty"` // allow-list of family prefixes (e.g. c7i, m7i)
+	Purchase              string   `json:"purchase,omitempty"` // spot | on_demand (default on_demand)
+	Fallback              string   `json:"fallback,omitempty"` // on_demand when spot unavailable
 	MemoryHeadroomPercent int      `json:"memory_headroom_percent,omitempty"`
 	// S3ReadWrite lists s3://bucket[/prefix] URIs the task needs FULL scoped access
 	// to (ListBucket + Get/Put/Delete on the whole bucket), beyond the buckets
