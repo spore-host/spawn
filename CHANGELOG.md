@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.85.0] - 2026-07-19
+
 ### Added
 - **TaskSpec `resources.instance_type` pins the exact instance type** (spawn#413).
   When set, the sizer returns it verbatim and skips family/price selection —
@@ -1830,7 +1832,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.84.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.85.0...HEAD
+[0.85.0]: https://github.com/spore-host/spawn/compare/v0.84.0...v0.85.0
 [0.84.0]: https://github.com/spore-host/spawn/compare/v0.83.1...v0.84.0
 [0.83.1]: https://github.com/spore-host/spawn/compare/v0.83.0...v0.83.1
 [0.83.0]: https://github.com/spore-host/spawn/compare/v0.82.0...v0.83.0
