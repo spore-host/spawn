@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.86.0] - 2026-07-20
+
 ### Added
 - **Plugin `fetch` steps accept an optional `sha256:` checksum** (spore-plugins#8).
   When a `fetch` step declares `sha256:` (a 64-char lowercase hex digest), spored
@@ -1867,7 +1869,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.85.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.86.0...HEAD
+[0.86.0]: https://github.com/spore-host/spawn/compare/v0.85.0...v0.86.0
 [0.85.0]: https://github.com/spore-host/spawn/compare/v0.84.0...v0.85.0
 [0.84.0]: https://github.com/spore-host/spawn/compare/v0.83.1...v0.84.0
 [0.83.1]: https://github.com/spore-host/spawn/compare/v0.83.0...v0.83.1
