@@ -51,6 +51,9 @@ func TestValidate_Failures(t *testing.T) {
 		{"bad input manifest", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Inputs: []Manifest{{Source: "s3://b/x"}}}, "inputs[0]"},
 		{"bad env key", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Env: map[string]string{"BAD-KEY": "v"}}, "env key"},
 		{"env key with space", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Env: map[string]string{"a b": "v"}}, "env key"},
+		{"bad s3_read_write", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Resources: ResourceRequest{S3ReadWrite: []string{"my-bucket"}}}, "s3_read_write"},
+		{"bad volume snapshot", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Placement: Placement{Volumes: []VolumeRef{{Snapshot: "vol-x", MountPath: "/ref"}}}}, "snapshot"},
+		{"volume no mount", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Placement: Placement{Volumes: []VolumeRef{{Snapshot: "snap-abc"}}}}, "mount_path"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,5 +72,24 @@ func TestValidate_Good(t *testing.T) {
 	s := TaskSpec{TaskID: "t", Command: []string{"echo", "hi"}, Lifecycle: Lifecycle{TTL: "2h"}}
 	if err := s.Validate(); err != nil {
 		t.Errorf("valid minimal spec rejected: %v", err)
+	}
+}
+
+func TestValidate_PlacementAndS3ReadWrite(t *testing.T) {
+	s := TaskSpec{
+		TaskID:    "t",
+		Command:   []string{"echo", "hi"},
+		Lifecycle: Lifecycle{TTL: "2h"},
+		Resources: ResourceRequest{S3ReadWrite: []string{"s3://storage-bucket", "s3://other/prefix"}},
+		Placement: Placement{
+			AMI:              "ami-123",
+			AvailabilityZone: "us-east-1a",
+			Volumes:          []VolumeRef{{Snapshot: "snap-abc", MountPath: "/ref", ReadOnly: true}},
+			FSxLustreID:      "fs-abc",
+			EFSID:            "fs-def",
+		},
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("valid placement/s3_read_write spec rejected: %v", err)
 	}
 }

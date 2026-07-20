@@ -24,6 +24,7 @@ type TaskSpec struct {
 	Resources ResourceRequest   `json:"resources"`
 	Inputs    []Manifest        `json:"inputs,omitempty"`
 	Outputs   []Manifest        `json:"outputs,omitempty"`
+	Placement Placement         `json:"placement,omitempty"` // optional launch-time knobs (AMI/AZ/volumes/FSx/EFS)
 	Lifecycle Lifecycle         `json:"lifecycle"`
 	Env       map[string]string `json:"env,omitempty"`
 }
@@ -38,6 +39,35 @@ type ResourceRequest struct {
 	Purchase              string   `json:"purchase,omitempty"`     // spot | on_demand (default on_demand)
 	Fallback              string   `json:"fallback,omitempty"`     // on_demand when spot unavailable
 	MemoryHeadroomPercent int      `json:"memory_headroom_percent,omitempty"`
+	// S3ReadWrite lists s3://bucket[/prefix] URIs the task needs FULL scoped access
+	// to (ListBucket + Get/Put/Delete on the whole bucket), beyond the buckets
+	// implied by Inputs/Outputs manifests. For adapters whose own tooling does the
+	// S3 I/O rather than the spawn wrapper — e.g. Snakemake's S3 storage plugin,
+	// which lists/reads/writes/deletes across its storage bucket. Bucket-scoped:
+	// the prefix (if any) is advisory; the grant is on the whole bucket because the
+	// plugin does bucket-level ListBucket.
+	S3ReadWrite []string `json:"s3_read_write,omitempty"`
+}
+
+// Placement carries optional launch-time knobs an adapter needs beyond sizing:
+// a specific AMI/AZ, attached reference-data volumes, and shared filesystems.
+// These map onto the corresponding spawn launch parameters. All optional — an
+// empty Placement launches with the auto-detected AMI, EC2-chosen AZ, and no
+// extra storage (today's behavior).
+type Placement struct {
+	AMI              string      `json:"ami,omitempty"`               // AMI id (ami-...); empty = auto-detect latest AL2023 for the arch
+	AvailabilityZone string      `json:"availability_zone,omitempty"` // pin an AZ; empty = EC2 chooses
+	Volumes          []VolumeRef `json:"volumes,omitempty"`           // EBS volumes from snapshots, mounted at a path
+	FSxLustreID      string      `json:"fsx_lustre_id,omitempty"`     // existing FSx for Lustre filesystem id (fs-...) to mount
+	EFSID            string      `json:"efs_id,omitempty"`            // existing EFS filesystem id (fs-...) to mount
+}
+
+// VolumeRef is one EBS volume to attach from a snapshot, mounted read-only (the
+// common shared-reference-data case) or read-write.
+type VolumeRef struct {
+	Snapshot  string `json:"snapshot"`            // snap-... to create the volume from
+	MountPath string `json:"mount_path"`          // where to mount it on the instance
+	ReadOnly  bool   `json:"read_only,omitempty"` // mount read-only (default false = read-write)
 }
 
 // Manifest is one input or output staging entry (source → destination).
@@ -136,6 +166,19 @@ func (s *TaskSpec) Validate() error {
 	for i, m := range s.Outputs {
 		if m.Source == "" || m.Destination == "" {
 			add("outputs[%d]: source and destination are both required", i)
+		}
+	}
+	for i, u := range s.Resources.S3ReadWrite {
+		if !strings.HasPrefix(u, "s3://") {
+			add("resources.s3_read_write[%d] %q must be an s3:// URI", i, u)
+		}
+	}
+	for i, v := range s.Placement.Volumes {
+		if !strings.HasPrefix(v.Snapshot, "snap-") {
+			add("placement.volumes[%d].snapshot %q must be a snap- id", i, v.Snapshot)
+		}
+		if strings.TrimSpace(v.MountPath) == "" {
+			add("placement.volumes[%d].mount_path is required", i)
 		}
 	}
 	// Env keys are exported verbatim (unquoted) in the generated wrapper, so they

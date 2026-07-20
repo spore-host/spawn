@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **TaskSpec gained `resources.s3_read_write` and a `placement` block** (spawn#386,
+  for the workflow-adapter migration). `resources.s3_read_write` is a list of
+  `s3://bucket[/prefix]` URIs the task's own tooling reads/writes/deletes/lists
+  beyond the `inputs`/`outputs` manifests — the scoped instance profile now grants
+  `ListBucket` + object `Get`/`Put`/`Delete` on those whole buckets (needed by
+  Snakemake's S3 storage plugin, which does bucket-level listing). `placement`
+  carries optional launch-time knobs: `ami`, `availability_zone`, attached EBS
+  `volumes` (from snapshots, mounted at a path), `fsx_lustre_id`, and `efs_id` —
+  mounted before the workload (the nf-spawn `ext.*` analogs). All optional; an
+  empty placement is today's behavior. The headless launcher gained an
+  `Options.StorageScript` hook to mount them.
+
 ### Changed
 - **`spawn task run --wait -o json` now emits the CompletionRecord**, not the
   LaunchResult (spawn#386). Previously `--wait -o json` returned the launch info
