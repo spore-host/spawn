@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sigstore/sigstore-go/pkg/root"
@@ -66,6 +67,20 @@ func TestVerifySignedEntity(t *testing.T) {
 			t.Error("expected rejection when the artifact differs from what was signed, got nil")
 		}
 	})
+}
+
+// TestVerifyManifestSignature_RejectsLegacyBundle ensures a cosign legacy bundle
+// (the default `cosign sign-blob --bundle` output) is rejected with a clear,
+// actionable error rather than a cryptic protobuf parse failure.
+func TestVerifyManifestSignature_RejectsLegacyBundle(t *testing.T) {
+	legacy := []byte(`{"base64Signature":"MEUCIQ...","cert":"LS0tLS1CRUdJTi...","rekorBundle":{}}`)
+	err := verifyManifestSignature(legacy, []byte(`{"any":"manifest"}`))
+	if err == nil {
+		t.Fatal("expected an error for a legacy cosign bundle, got nil")
+	}
+	if !strings.Contains(err.Error(), "legacy bundle format") {
+		t.Errorf("error %q does not explain the legacy-format problem", err)
+	}
 }
 
 // TestTrustedRootFetcherOverride confirms the fetcher hook is overridable, so

@@ -46,6 +46,13 @@ var trustedRootFetcher = func() (root.TrustedMaterial, error) {
 // inclusion and a trusted timestamp. Any failure — bad signature, wrong identity,
 // missing log entry, digest mismatch against manifestData — is an error.
 func verifyManifestSignature(sigBundleJSON, manifestData []byte) error {
+	// cosign's LEGACY bundle ({base64Signature,cert,rekorBundle}) is not the
+	// Sigstore protobuf bundle sigstore-go parses; detect it and give a clear
+	// error rather than a cryptic protobuf "unknown field" message. Releases must
+	// sign with `cosign sign-blob --new-bundle-format`.
+	if bytes.Contains(sigBundleJSON, []byte(`"base64Signature"`)) {
+		return fmt.Errorf("signature is in cosign's legacy bundle format; the release must be signed with --new-bundle-format")
+	}
 	var b bundle.Bundle
 	if err := b.UnmarshalJSON(sigBundleJSON); err != nil {
 		return fmt.Errorf("parse signature bundle: %w", err)
