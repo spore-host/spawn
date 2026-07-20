@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.84.0] - 2026-07-19
+
 ### Added
 - **TaskSpec gained `resources.s3_read_write` and a `placement` block** (spawn#386,
   for the workflow-adapter migration). `resources.s3_read_write` is a list of
@@ -1820,7 +1822,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.83.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.84.0...HEAD
+[0.84.0]: https://github.com/spore-host/spawn/compare/v0.83.1...v0.84.0
 [0.83.1]: https://github.com/spore-host/spawn/compare/v0.83.0...v0.83.1
 [0.83.0]: https://github.com/spore-host/spawn/compare/v0.82.0...v0.83.0
 [0.82.0]: https://github.com/spore-host/spawn/compare/v0.81.0...v0.82.0
