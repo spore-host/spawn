@@ -223,7 +223,10 @@ func renderPermissions(out io.Writer, spec *plugin.PluginSpec) {
 func describeStep(st plugin.Step) string {
 	switch st.Type {
 	case "fetch":
-		return fmt.Sprintf("download %s → %s", st.URL, st.Dest)
+		if st.SHA256 != "" {
+			return fmt.Sprintf("download %s → %s (sha256 %s…)", st.URL, st.Dest, st.SHA256[:12])
+		}
+		return fmt.Sprintf("download %s → %s (unverified — no sha256)", st.URL, st.Dest)
 	case "extract":
 		return fmt.Sprintf("extract %s → %s", st.Src, st.Dest)
 	case "push":

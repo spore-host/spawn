@@ -141,6 +141,21 @@ func TestValidate_Problems(t *testing.T) {
 			spec:    "name: p\nversion: v1.0.0\ndescription: d\nlocal:\n  env_passthrough: [\"TS_SECRET\"]\npermissions:\n  controller:\n    env: [\"OTHER\"]\n",
 			wantSub: "permissions.controller.env must include \"TS_SECRET\"",
 		},
+		{
+			name:    "sha256 not 64 hex chars",
+			spec:    "name: p\nversion: v1.0.0\ndescription: d\nremote:\n  install:\n    - type: fetch\n      url: https://x/y\n      dest: /tmp/y\n      sha256: deadbeef\n",
+			wantSub: "invalid sha256",
+		},
+		{
+			name:    "sha256 uppercase rejected",
+			spec:    "name: p\nversion: v1.0.0\ndescription: d\nremote:\n  install:\n    - type: fetch\n      url: https://x/y\n      dest: /tmp/y\n      sha256: " + strings.Repeat("A", 64) + "\n",
+			wantSub: "invalid sha256",
+		},
+		{
+			name:    "sha256 only on fetch",
+			spec:    "name: p\nversion: v1.0.0\ndescription: d\nremote:\n  install:\n    - type: run\n      run: echo hi\n      sha256: " + strings.Repeat("a", 64) + "\n",
+			wantSub: "sha256 is only valid on a fetch step",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
