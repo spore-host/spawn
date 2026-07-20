@@ -16,6 +16,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/taskproto"
+	"github.com/spore-host/spawn/pkg/userdata"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
@@ -384,7 +385,7 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	// A private-ECR container image additionally needs ecr:ReadOnly to pull.
 	profile, err := client.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
 		TrustServices:    []string{"ec2"}, // an instance profile is assumed by EC2
-		InlinePolicyJSON: taskStagingPolicy(s3Buckets(spec.Inputs), s3Buckets(spec.Outputs), resultsBucket),
+		InlinePolicyJSON: taskStagingPolicy(s3Buckets(spec.Inputs), s3Buckets(spec.Outputs), resultsBucket, s3Buckets2(spec.Resources.S3ReadWrite)),
 		Policies:         taskExtraPolicies(spec),
 	})
 	if err != nil {
@@ -393,7 +394,14 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 
 	cfg := taskLaunchConfig(spec, sized, region, profile, wrapper)
 
-	result, err := launcher.Provision(ctx, client, cfg, launcher.Options{})
+	// Build the storage mount script for any FSx/EFS/attached volumes the task
+	// placement requests (mounted before the workload; #166). Empty when none.
+	storageScript, err := taskStorageScript(ctx, client, spec, region)
+	if err != nil {
+		return fmt.Errorf("build task storage: %w", err)
+	}
+
+	result, err := launcher.Provision(ctx, client, cfg, launcher.Options{StorageScript: storageScript})
 	// Single-region spot→on-demand fallback (a minimal echo of lagotto's
 	// capacity fallthrough; AZ-spread is out of scope for this increment).
 	if err != nil && cfg.Spot && spec.Resources.Fallback == taskproto.PurchaseOnDemand && isCapacityErr(err) {
@@ -614,7 +622,7 @@ const taskCompletionFile = "/tmp/SPAWN_COMPLETE"
 // launcher.Provision to fill (auto AMI, keyless/SSM, wrapper-as-user-data); the
 // scoped instance profile is set so Provision skips its default-role step.
 func taskLaunchConfig(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region, iamProfile, wrapper string) aws.LaunchConfig {
-	return aws.LaunchConfig{
+	cfg := aws.LaunchConfig{
 		InstanceType:    sized.InstanceType,
 		Region:          region,
 		JobArrayCommand: wrapper, // Provision embeds this via /etc/spawn/command
@@ -629,6 +637,65 @@ func taskLaunchConfig(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, reg
 		IamInstanceProfile: iamProfile,
 		Tags:               map[string]string{"spawn:task-id": spec.TaskID},
 	}
+	// Optional launch-time placement (nf-spawn's ext.* analogs): a specific AMI/AZ
+	// and attached EBS reference-data volumes. FSx/EFS mounting is threaded via the
+	// launcher's StorageScript (built in runTaskReal), not here.
+	cfg.AMI = spec.Placement.AMI
+	cfg.AvailabilityZone = spec.Placement.AvailabilityZone
+	for _, v := range spec.Placement.Volumes {
+		cfg.AttachVolumes = append(cfg.AttachVolumes, aws.AttachVolumeSpec{
+			SnapshotID: v.Snapshot,
+			MountPoint: v.MountPath,
+			ReadOnly:   v.ReadOnly,
+		})
+	}
+	return cfg
+}
+
+// taskStorageScript builds the boot-time mount script for a task's placement
+// storage: attached EBS volumes (from snapshots), an existing EFS filesystem, and
+// an existing FSx for Lustre filesystem. Returns "" when the placement requests
+// none. The script is threaded into the headless launcher via
+// launcher.Options.StorageScript and runs before the workload command (#166).
+func taskStorageScript(ctx context.Context, client *aws.Client, spec *taskproto.TaskSpec, region string) (string, error) {
+	p := spec.Placement
+	if len(p.Volumes) == 0 && p.EFSID == "" && p.FSxLustreID == "" {
+		return "", nil
+	}
+	sc := userdata.StorageConfig{}
+
+	// Reuse the CLI's device-name assignment so the mount script's DeviceName
+	// matches the block-device mapping cfg.AttachVolumes produces.
+	var volSpecs []aws.AttachVolumeSpec
+	for _, v := range p.Volumes {
+		volSpecs = append(volSpecs, aws.AttachVolumeSpec{
+			SnapshotID: v.Snapshot,
+			MountPoint: v.MountPath,
+			ReadOnly:   v.ReadOnly,
+		})
+	}
+	sc.AttachedVolumes = attachedVolumesUserData(volSpecs)
+	if p.EFSID != "" {
+		opts, err := getEFSMountOptions()
+		if err != nil {
+			return "", fmt.Errorf("EFS mount options: %w", err)
+		}
+		sc.EFSEnabled = true
+		sc.EFSFilesystemDNS = aws.GetEFSDNSName(p.EFSID, region)
+		sc.EFSMountPoint = "/efs"
+		sc.EFSMountOptions = opts
+	}
+	if p.FSxLustreID != "" {
+		info, err := client.GetFSxFilesystem(ctx, p.FSxLustreID, region)
+		if err != nil {
+			return "", fmt.Errorf("look up FSx %s: %w", p.FSxLustreID, err)
+		}
+		sc.FSxLustreEnabled = true
+		sc.FSxFilesystemDNS = info.DNSName
+		sc.FSxMountName = info.MountName
+		sc.FSxMountPoint = "/fsx"
+	}
+	return userdata.GenerateStorageUserData(sc)
 }
 
 // s3Buckets extracts the distinct S3 bucket names from a manifest list's s3://
@@ -643,6 +710,20 @@ func s3Buckets(manifests []taskproto.Manifest) []string {
 				seen[b] = true
 				out = append(out, b)
 			}
+		}
+	}
+	return out
+}
+
+// s3Buckets2 extracts distinct bucket names from a list of s3:// URIs (e.g.
+// spec.Resources.S3ReadWrite).
+func s3Buckets2(uris []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, u := range uris {
+		if b := s3Bucket(u); b != "" && !seen[b] {
+			seen[b] = true
+			out = append(out, b)
 		}
 	}
 	return out
@@ -678,9 +759,10 @@ func taskExtraPolicies(spec *taskproto.TaskSpec) []string {
 // and write on the output + results buckets — the exact access the wrapper's
 // aws s3 cp needs, and no more (preferred over the wildcard s3:FullAccess
 // template). Modeled on GenerateScopedS3Policy.
-func taskStagingPolicy(inputBuckets, outputBuckets []string, resultsBucket string) string {
+func taskStagingPolicy(inputBuckets, outputBuckets []string, resultsBucket string, readWriteBuckets []string) string {
 	readB := dedupeBuckets(inputBuckets)
 	writeB := dedupeBuckets(append(append([]string{}, outputBuckets...), resultsBucket))
+	rwB := dedupeBuckets(readWriteBuckets)
 
 	var stmts []string
 	if len(readB) > 0 {
@@ -688,6 +770,13 @@ func taskStagingPolicy(inputBuckets, outputBuckets []string, resultsBucket strin
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bucketARNs(readB)))
 	}
 	stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
+	// Full read-write buckets (e.g. Snakemake's S3 storage plugin, which lists,
+	// reads, writes, and deletes across its storage bucket): grant object-level
+	// Get/Put/Delete + bucket-level List/GetLocation on the whole bucket.
+	if len(rwB) > 0 {
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:PutObject","s3:DeleteObject"],"Resource":[%s]}`, bucketObjectARNs(rwB)))
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bucketARNs(rwB)))
+	}
 	return `{"Version":"2012-10-17","Statement":[` + strings.Join(stmts, ",") + `]}`
 }
 

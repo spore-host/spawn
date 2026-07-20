@@ -208,7 +208,7 @@ func TestS3Buckets_DistinctS3Only(t *testing.T) {
 }
 
 func TestTaskStagingPolicy(t *testing.T) {
-	pol := taskStagingPolicy([]string{"in-bucket"}, []string{"out-bucket"}, "spawn-results-1-us-east-1")
+	pol := taskStagingPolicy([]string{"in-bucket"}, []string{"out-bucket"}, "spawn-results-1-us-east-1", nil)
 
 	// Read on the input bucket, write on output + results.
 	wants := []string{
@@ -243,7 +243,37 @@ func TestTaskStagingPolicy(t *testing.T) {
 		t.Fatalf("policy is not valid JSON:\n%s", pol)
 	}
 	// Also valid with no inputs (write-only statement).
-	if !json.Valid([]byte(taskStagingPolicy(nil, nil, "res"))) {
+	if !json.Valid([]byte(taskStagingPolicy(nil, nil, "res", nil))) {
 		t.Fatalf("no-input policy is not valid JSON")
+	}
+}
+
+func TestTaskStagingPolicyReadWriteBuckets(t *testing.T) {
+	// A read-write bucket (e.g. Snakemake's S3 storage) gets full object access +
+	// bucket-level ListBucket — the exact grant its plugin needs.
+	pol := taskStagingPolicy(nil, nil, "spawn-results-1-us-east-1", []string{"storage-bucket"})
+	wants := []string{
+		`"arn:aws:s3:::storage-bucket/*"`, // object-level Get/Put/Delete
+		`"arn:aws:s3:::storage-bucket"`,   // bucket-level ListBucket
+		`"s3:DeleteObject"`,
+		`"s3:ListBucket"`,
+	}
+	for _, w := range wants {
+		if !strings.Contains(pol, w) {
+			t.Errorf("read-write policy missing %q\n%s", w, pol)
+		}
+	}
+	if !json.Valid([]byte(pol)) {
+		t.Fatalf("read-write policy is not valid JSON:\n%s", pol)
+	}
+	if strings.Contains(pol, `"Resource":"*"`) {
+		t.Errorf("policy must not grant Resource *:\n%s", pol)
+	}
+}
+
+func TestS3Buckets2(t *testing.T) {
+	got := s3Buckets2([]string{"s3://a/x", "s3://a/y", "s3://b", "not-s3"})
+	if len(got) != 2 {
+		t.Fatalf("s3Buckets2 = %v, want [a b]", got)
 	}
 }
