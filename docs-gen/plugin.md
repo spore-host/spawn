@@ -34,8 +34,14 @@ Plugin ref formats are the same as 'spawn plugin install':
   ./path/to/plugin.yaml local file
 
 ```
-spawn plugin inspect <plugin-ref>
+spawn plugin inspect <plugin-ref> [flags]
 ```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--insecure` |  | bool |  | Skip signature/checksum verification for official plugin releases (unsafe) |
 
 ### `spawn plugin install`
 
@@ -64,6 +70,7 @@ spawn plugin install <plugin-ref> [flags]
 |------|-------|------|---------|-------------|
 | `--config` |  | stringArray |  | Config as key=value (repeatable) |
 | `--dry-run` |  | bool |  | Preview the plan without installing (contacts no instance) |
+| `--insecure` |  | bool |  | Skip signature/checksum verification for official plugin releases (unsafe) |
 | `--instance` | `-i` | string |  | Instance ID or hostname (required) |
 | `--key` |  | string |  | Path to SSH private key |
 | `--user` |  | string |  | SSH username for the instance (default: ec2-user) |

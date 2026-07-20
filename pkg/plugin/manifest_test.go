@@ -122,8 +122,38 @@ func TestResolveOfficialVersioned_ManifestVerified(t *testing.T) {
 	if !prov.ManifestVerified {
 		t.Error("ManifestVerified = false, want true")
 	}
+	// No signature asset is served, so this is the deprecation-window path:
+	// manifest verified, signature absent → SignatureVerified stays false, no error.
+	if prov.SignatureVerified {
+		t.Error("SignatureVerified = true, want false (no signature asset served)")
+	}
 	if prov.ReleaseTag != "demo-v1.0.0" {
 		t.Errorf("ReleaseTag = %q, want demo-v1.0.0", prov.ReleaseTag)
+	}
+}
+
+func TestResolveOfficialVersioned_InsecureDowngradesManifestMismatch(t *testing.T) {
+	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(manifestTestSpec)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
+	}))
+	defer raw.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }))
+	defer api.Close()
+	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(manifestJSON(t, strings.Repeat("b", 64))) // wrong digest // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
+	}))
+	defer release.Close()
+
+	// With insecure, a manifest mismatch downgrades to a warning and resolution
+	// still succeeds (but ManifestVerified stays false — nothing was verified).
+	r := manifestResolver(raw.URL, api.URL, release.URL)
+	r.insecure = true
+	_, prov, err := r.ResolveWithProvenance(context.Background(), "demo@v1.0.0")
+	if err != nil {
+		t.Fatalf("insecure resolve should not fail on mismatch: %v", err)
+	}
+	if prov.ManifestVerified {
+		t.Error("ManifestVerified = true, want false (mismatch was only warned about)")
 	}
 }
 

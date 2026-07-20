@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   New `spawn plugin manifest <plugin-dir>` generates the manifest (the registry's
   release workflow runs it; the same binary verifies it). A bare/unversioned or
   third-party `github:` ref has no manifest and is unaffected.
+- **Official plugin release signatures are verified (cosign/sigstore keyless)**
+  (spore-plugins#8). When an official release carries a `manifest.json.sigstore.json`
+  signature, `spawn` verifies it by default: a Fulcio-issued certificate whose
+  OIDC identity is pinned to the spore-plugins release workflow, with Rekor
+  transparency-log inclusion and a trusted timestamp. A present-but-invalid
+  signature (bad signature, wrong signing identity, missing log entry) is a hard
+  failure; an *unsigned* release still installs with a warning during the
+  deprecation window (integrity is still enforced via the checksum manifest).
+  `--insecure` skips verification for local dev. `spawn plugin inspect` shows
+  `signature-verified ✓`.
 
 ### Fixed
 - **`spawn plugin install <name>` from the official registry now resolves the
