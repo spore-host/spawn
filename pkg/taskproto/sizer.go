@@ -44,6 +44,17 @@ type SizeResult struct {
 // wins). Spot-vs-on-demand purchase selection is the caller's concern — Size
 // ranks on on-demand price as a stable proxy.
 func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*SizeResult, error) {
+	// An exact instance-type pin bypasses candidate search + price ranking: the
+	// caller asked for this specific type (e.g. nf-spawn's ext.instanceType), so
+	// honor it verbatim. Family/cpu/memory are ignored when a pin is set.
+	if pin := strings.TrimSpace(req.InstanceType); pin != "" {
+		return &SizeResult{
+			InstanceType: pin,
+			Family:       familyOf(pin),
+			Considered:   1,
+		}, nil
+	}
+
 	cands, err := finder.FindCandidates(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("find instance candidates: %w", err)
@@ -100,6 +111,15 @@ func EffectiveMemoryGiB(req ResourceRequest) float64 {
 		return req.MemoryGiB
 	}
 	return req.MemoryGiB * (1 + float64(req.MemoryHeadroomPercent)/100)
+}
+
+// familyOf returns the family prefix of an instance type ("c7i" from
+// "c7i.4xlarge"), or "" if it has no "." separator.
+func familyOf(instanceType string) string {
+	if i := strings.IndexByte(instanceType, '.'); i > 0 {
+		return instanceType[:i]
+	}
+	return ""
 }
 
 func familyAllowSet(families []string) map[string]bool {

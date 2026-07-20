@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **TaskSpec `resources.instance_type` pins the exact instance type** (spawn#413).
+  When set, the sizer returns it verbatim and skips family/price selection —
+  for adapters that expose a specific type (e.g. nf-spawn's `ext.instanceType`)
+  rather than a cpu/memory request. Without it, a family-only hint like
+  `t3.medium`→`families:[t3]` would size to the cheapest t3 (t3.nano), a
+  regression for adapters that mean an exact type.
+
 ## [0.84.0] - 2026-07-19
 
 ### Added
