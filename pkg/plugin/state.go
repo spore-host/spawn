@@ -55,6 +55,12 @@ type PluginState struct {
 	UpdatedAt   time.Time         `json:"updated_at"`
 	LastHealth  *time.Time        `json:"last_health,omitempty"`
 	Error       string            `json:"error,omitempty"`
+	// Provenance records where the installed spec came from and how it was
+	// verified (commit/digest/signature), so an on-instance audit — `spawn plugin
+	// status` or reading spored's state file — can answer "which bytes are here."
+	// nil for installs from a controller that didn't supply it (older spawn) or a
+	// local-file ref with no remote provenance.
+	Provenance *Provenance `json:"provenance,omitempty"`
 }
 
 // StateStore manages plugin state persistence.

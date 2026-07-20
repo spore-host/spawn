@@ -60,6 +60,42 @@ func TestInstallWithPushed_SeedsPushedBeforeConfigure(t *testing.T) {
 	}
 }
 
+// TestInstallWithProvenance_PersistsToState verifies that a resolved Provenance
+// handed to the runtime is recorded in the plugin's on-instance state, so an
+// audit can read what was installed and how it was verified.
+func TestInstallWithProvenance_PersistsToState(t *testing.T) {
+	rt := newTestRuntime(t)
+	spec := &plugin.PluginSpec{
+		Name:        "provrec",
+		Version:     "v1.0.0",
+		Description: "d",
+		Remote:      plugin.RemoteBlock{Install: []plugin.Step{{Type: "run", Run: "true"}}},
+	}
+	prov := &plugin.Provenance{
+		Host:              "official",
+		Name:              "provrec",
+		CommitSHA:         "2dda4ab8dc6f734699112473f011e34fbf862f2b",
+		ContentSHA256:     "0bffc628dd64b12920bef7561ff105c0f2ea23b2fe370db3be07cccda99561d0",
+		ManifestVerified:  true,
+		SignatureVerified: true,
+		ReleaseTag:        "provrec-v1.0.0",
+	}
+
+	if err := rt.InstallWithProvenance(context.Background(), spec, nil, nil, prov); err != nil {
+		t.Fatalf("InstallWithProvenance: %v", err)
+	}
+	st, err := rt.store.Load("provrec")
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if st.Provenance == nil {
+		t.Fatal("state.Provenance = nil, want the recorded provenance")
+	}
+	if !st.Provenance.SignatureVerified || st.Provenance.CommitSHA != prov.CommitSHA {
+		t.Errorf("state.Provenance = %+v, want signature-verified with commit %s", st.Provenance, prov.CommitSHA)
+	}
+}
+
 // TestInstall_MissingPushedParksWaiting confirms the documented limitation: with
 // no pushed value seeded, a configure step referencing {{ pushed.x }} parks the
 // plugin at WaitingForPush rather than failing.

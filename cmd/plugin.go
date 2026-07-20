@@ -251,9 +251,18 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 			}
 		}
 		fmt.Println("Running remote install steps on the instance...")
-		if err := remotePluginInstall(ctx, sshHost, spec, resolvedCfg, pushBuf.Values()); err != nil {
+		if err := remotePluginInstall(ctx, sshHost, spec, resolvedCfg, pushBuf.Values(), prov); err != nil {
 			return fmt.Errorf("remote install: %w", err)
 		}
+		// Record provenance on the instance's EC2 tags so an audit can answer
+		// "which plugin bytes are on this box" from the AWS control plane, surviving
+		// loss of the controller-side local record. Done once the install request
+		// is accepted (the bytes are on the box and their provenance is known),
+		// independent of whether the plugin's service later reaches Running —
+		// matching spored's on-instance state, which also records on failure.
+		// Best-effort: a tagging failure never fails the install.
+		recordPluginProvenanceTag(ctx, instance, spec, prov)
+
 		if err := waitForPluginReady(ctx, sshHost, spec.Name); err != nil {
 			return err
 		}
@@ -262,6 +271,53 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	fmt.Printf("Plugin %s installed on %s.\n", spec.Name, instance)
 	fmt.Printf("Use 'spawn plugin status %s --instance %s' to check status.\n", spec.Name, instance)
 	return nil
+}
+
+// pluginProvenanceTagValue builds the compact EC2-tag value recording a plugin's
+// resolved provenance. It stays well under EC2's 256-char tag-value limit: a
+// short content-digest prefix, the commit prefix (if pinned), the requested ref,
+// and the verification tier reached.
+func pluginProvenanceTagValue(spec *plugin.PluginSpec, prov *plugin.Provenance) string {
+	parts := []string{"version=" + spec.Version}
+	if prov != nil {
+		if prov.ContentSHA256 != "" {
+			parts = append(parts, "sha256="+shortHash(prov.ContentSHA256))
+		}
+		if prov.CommitSHA != "" {
+			parts = append(parts, "commit="+shortHash(prov.CommitSHA))
+		}
+		switch {
+		case prov.SignatureVerified:
+			parts = append(parts, "verify=signature")
+		case prov.ManifestVerified:
+			parts = append(parts, "verify=manifest")
+		default:
+			parts = append(parts, "verify=none")
+		}
+	}
+	return strings.Join(parts, ";")
+}
+
+// recordPluginProvenanceTag writes a spore:plugin:<name> EC2 tag recording the
+// installed plugin's provenance. Best-effort: it resolves the instance to an EC2
+// ID + region and skips silently (with a warning) if that's not possible (e.g. a
+// bare hostname not backed by a resolvable spore instance).
+func recordPluginProvenanceTag(ctx context.Context, instance string, spec *plugin.PluginSpec, prov *plugin.Provenance) {
+	inst := resolveInstanceViaSpawn(ctx, instance)
+	if inst == nil || inst.InstanceID == "" {
+		return // not an EC2-resolvable instance; the local record still holds provenance
+	}
+	client, err := aws.NewClientWithRegion(ctx, inst.Region)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not record plugin provenance tag: %v\n", err)
+		return
+	}
+	tags := map[string]string{
+		"spore:plugin:" + spec.Name: pluginProvenanceTagValue(spec, prov),
+	}
+	if err := client.UpdateInstanceTags(ctx, inst.Region, inst.InstanceID, tags); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write plugin provenance tag for %s: %v\n", spec.Name, err)
+	}
 }
 
 // saveLocalPluginRecord persists a controller-side record of an installed
@@ -470,16 +526,17 @@ func deprovisionAllLocalPlugins(ctx context.Context, instanceKeys ...string) {
 // remotePluginInstall sends the resolved spec, config, and buffered pushed
 // values to spored's install endpoint over an SSH tunnel. spored runs the
 // install asynchronously and returns 202; the outcome is polled separately.
-func remotePluginInstall(ctx context.Context, instance string, spec *plugin.PluginSpec, cfg, pushed map[string]string) error {
+func remotePluginInstall(ctx context.Context, instance string, spec *plugin.PluginSpec, cfg, pushed map[string]string, prov *plugin.Provenance) error {
 	specYAML, err := yaml.Marshal(spec)
 	if err != nil {
 		return fmt.Errorf("marshal spec: %w", err)
 	}
 
 	payload, err := json.Marshal(map[string]interface{}{
-		"spec":   string(specYAML),
-		"config": cfg,
-		"pushed": pushed,
+		"spec":       string(specYAML),
+		"config":     cfg,
+		"pushed":     pushed,
+		"provenance": prov,
 	})
 	if err != nil {
 		return fmt.Errorf("encode install request: %w", err)
@@ -581,6 +638,9 @@ var pluginStatusCmd = &cobra.Command{
 		}
 		if st.LastHealth != nil {
 			fmt.Printf("Health:  last OK %s\n", st.LastHealth.Format(time.RFC3339))
+		}
+		if p := st.Provenance; p != nil {
+			fmt.Printf("Source:  %s\n", describeProvenance(p))
 		}
 		return nil
 	},
@@ -740,6 +800,7 @@ type pluginStateResponse struct {
 	UpdatedAt  time.Time           `json:"updated_at"`
 	LastHealth *time.Time          `json:"last_health,omitempty"`
 	Error      string              `json:"error,omitempty"`
+	Provenance *plugin.Provenance  `json:"provenance,omitempty"`
 }
 
 func remotePluginList(ctx context.Context, instance string) ([]*pluginStateResponse, error) {

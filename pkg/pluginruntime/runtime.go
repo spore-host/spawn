@@ -64,6 +64,14 @@ func (rt *Runtime) Install(ctx context.Context, spec *plugin.PluginSpec, cfg map
 // ReceivePush. That path is unused by the current registry plugins and is left
 // as a known limitation.
 func (rt *Runtime) InstallWithPushed(ctx context.Context, spec *plugin.PluginSpec, cfg map[string]string, pushed map[string]string) error {
+	return rt.InstallWithProvenance(ctx, spec, cfg, pushed, nil)
+}
+
+// InstallWithProvenance is InstallWithPushed plus a resolved Provenance record
+// (origin + verification tier) that is persisted into the plugin's on-instance
+// state, so an audit can read what was installed and how it was verified. prov
+// may be nil (local-file ref, or an older controller that didn't supply it).
+func (rt *Runtime) InstallWithProvenance(ctx context.Context, spec *plugin.PluginSpec, cfg, pushed map[string]string, prov *plugin.Provenance) error {
 	resolvedCfg, err := spec.ResolvedConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("resolve config: %w", err)
@@ -81,6 +89,7 @@ func (rt *Runtime) InstallWithPushed(ctx context.Context, spec *plugin.PluginSpe
 		Config:      resolvedCfg,
 		Outputs:     make(map[string]string),
 		Pushed:      seededPushed,
+		Provenance:  prov,
 		InstalledAt: time.Now(),
 	}
 	if err := rt.store.Save(state); err != nil {
