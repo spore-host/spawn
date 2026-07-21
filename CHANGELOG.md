@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn doctor` — a read-only preflight command.** Checks everything a first
+  launch needs and reports pass / warn / fail for each: spawn & truffle versions,
+  AWS CLI, credentials, resolved account (with an optional `SPORE_ACCOUNT` match),
+  region, EC2 describe + launch permissions (via a dry-run `RunInstances`), IAM
+  instance-profile access, the spored instance profile, a usable VPC/subnet,
+  Session Manager, and optional features (TTL reaper backstop, Route 53 → warn).
+  It launches and changes nothing, and exits non-zero if a core prerequisite
+  fails — so "if `spawn doctor` passes, the Quick Start should work." Especially
+  useful on institution-managed accounts: the failing IAM checks are exactly what
+  to hand a cloud administrator. `-o json` for automation.
+
 ## [0.89.0] - 2026-07-21
 
 ### Added
