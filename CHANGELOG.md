@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Signatures are now mandatory for official plugin releases** (spore-plugins#8).
+  The deprecation window closed now that every official plugin is signed:
+  installing an official `name@vX.Y.Z` whose release has no
+  `manifest.json.sigstore.json` signature is a hard error instead of a warning.
+  `--insecure` still downgrades it (and any other verification failure) to a
+  warning for local dev. Unversioned/bare and third-party `github:` refs are
+  unaffected.
+
 ## [0.87.0] - 2026-07-20
 
 ### Added
