@@ -58,6 +58,11 @@ jobs:
 
       - name: Upload spored binaries to S3
         if: ${{ !cancelled() }}
+        env:
+          # KMS asymmetric signing key (ECDSA_SHA_256) ARN/alias in the infra
+          # account. Set as a repo variable once the key is provisioned; when
+          # empty, signing is skipped and only sha256 is published (#440).
+          SPORED_SIGNING_KEY_ID: ${{ vars.SPORED_SIGNING_KEY_ID }}
         run: |
           set -euo pipefail
           # Extract version from tag (v0.36.0 → 0.36.0)
@@ -83,6 +88,36 @@ jobs:
           sha256sum "$arm_src" | awk '{print $1}' > spored-linux-arm64.sha256
           sha256sum "$win_src" | awk '{print $1}' > spored-windows-amd64.exe.sha256
 
+          # Publisher signatures (spore-host#440). Sign each spored binary with the
+          # spore.host KMS asymmetric key (ECDSA_SHA_256) in the infra account; the
+          # private key never leaves KMS. spawn's bootstrap verifies the .sig with
+          # openssl against the public key COMPILED INTO spawn — so the trust root
+          # is the spawn binary, not this bucket. Emits base64 DER .sig files.
+          #
+          # SPORED_SIGNING_KEY_ID is the KMS key ARN/alias; when unset (key not yet
+          # provisioned), signing is skipped and only .sha256 is published — the
+          # bootstrap then stays in sha256-only mode, matching a spawn build with no
+          # key compiled in. This keeps releases working during rollout.
+          sign_blob() {  # $1=src file  $2=output .sig
+            aws kms sign \
+              --key-id "$SPORED_SIGNING_KEY_ID" \
+              --message-type RAW \
+              --signing-algorithm ECDSA_SHA_256 \
+              --message "fileb://$1" \
+              --query Signature --output text \
+              > "$2"  # already base64 (KMS returns base64 text)
+          }
+          SIGN=0
+          if [ -n "${SPORED_SIGNING_KEY_ID:-}" ]; then
+            SIGN=1
+            sign_blob "$amd_src" spored-linux-amd64.sig
+            sign_blob "$arm_src" spored-linux-arm64.sig
+            sign_blob "$win_src" spored-windows-amd64.exe.sig
+            echo "🔏 Signed spored binaries with KMS key ${SPORED_SIGNING_KEY_ID}"
+          else
+            echo "⚠️  SPORED_SIGNING_KEY_ID unset — publishing sha256 only (no publisher signature)"
+          fi
+
           # Emit every copy as a NUL-separated "src<NUL>dest" pair stream, then run
           # them all through a bounded parallel pool. The copies are independent;
           # serially they cost full latency each, in parallel ~seconds. xargs -0 -n2
@@ -91,9 +126,9 @@ jobs:
           # NUL separation is portable (GNU xargs) and safe regardless of paths.
           emit_copies() {
             for entry in \
-              "amd64:$amd_src:spored-linux-amd64.sha256" \
-              "arm64:$arm_src:spored-linux-arm64.sha256"; do
-              arch="${entry%%:*}"; rest="${entry#*:}"; src="${rest%%:*}"; sha="${rest#*:}"
+              "amd64:$amd_src:spored-linux-amd64.sha256:spored-linux-amd64.sig" \
+              "arm64:$arm_src:spored-linux-arm64.sha256:spored-linux-arm64.sig"; do
+              arch="${entry%%:*}"; rest="${entry#*:}"; src="${rest%%:*}"; rest="${rest#*:}"; sha="${rest%%:*}"; sig="${rest#*:}"
               for bucket in "${BUCKETS[@]}"; do
                 printf '%s\0%s\0' "$src" "s3://${bucket}/${PROJECT}/spored-linux-${arch}"
                 printf '%s\0%s\0' "$sha" "s3://${bucket}/${PROJECT}/spored-linux-${arch}.sha256"
@@ -104,6 +139,13 @@ jobs:
                 # verify a pinned download (the un-versioned latest path already
                 # has one; the versioned path was missing it). (#234)
                 printf '%s\0%s\0' "$sha" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}.sha256"
+                # Publisher signature (#440) alongside the binary at every path the
+                # bootstrap might read (${...}.sig), when signing is enabled.
+                if [ "$SIGN" = "1" ]; then
+                  printf '%s\0%s\0' "$sig" "s3://${bucket}/${PROJECT}/spored-linux-${arch}.sig"
+                  printf '%s\0%s\0' "$sig" "s3://${bucket}/spored-linux-${arch}.sig"
+                  printf '%s\0%s\0' "$sig" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}.sig"
+                fi
               done
             done
             # Windows spored (amd64 only) — same paths so install-spored.ps1 mirrors
@@ -115,6 +157,11 @@ jobs:
               printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/spored-windows-amd64.exe.sha256"
               printf '%s\0%s\0' "$win_src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe"
               printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe.sha256"
+              if [ "$SIGN" = "1" ]; then
+                printf '%s\0%s\0' "spored-windows-amd64.exe.sig" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe.sig"
+                printf '%s\0%s\0' "spored-windows-amd64.exe.sig" "s3://${bucket}/spored-windows-amd64.exe.sig"
+                printf '%s\0%s\0' "spored-windows-amd64.exe.sig" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe.sig"
+              fi
             done
           }
 
