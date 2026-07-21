@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.87.0] - 2026-07-20
+
 ### Added
 - **`spawn plugin validate --strict` enforces permission/step consistency**
   (spore-plugins#8). The strict mode cross-checks a plugin's declared
@@ -1895,7 +1897,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.86.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.87.0...HEAD
+[0.87.0]: https://github.com/spore-host/spawn/compare/v0.86.0...v0.87.0
 [0.86.0]: https://github.com/spore-host/spawn/compare/v0.85.0...v0.86.0
 [0.85.0]: https://github.com/spore-host/spawn/compare/v0.84.0...v0.85.0
 [0.84.0]: https://github.com/spore-host/spawn/compare/v0.83.1...v0.84.0
