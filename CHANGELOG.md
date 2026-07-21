@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.88.0] - 2026-07-20
+
 ### Changed
 - **Signatures are now mandatory for official plugin releases** (spore-plugins#8).
   The deprecation window closed now that every official plugin is signed:
@@ -1906,7 +1908,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.87.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.88.0...HEAD
+[0.88.0]: https://github.com/spore-host/spawn/compare/v0.87.0...v0.88.0
 [0.87.0]: https://github.com/spore-host/spawn/compare/v0.86.0...v0.87.0
 [0.86.0]: https://github.com/spore-host/spawn/compare/v0.85.0...v0.86.0
 [0.85.0]: https://github.com/spore-host/spawn/compare/v0.84.0...v0.85.0
