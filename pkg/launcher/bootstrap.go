@@ -106,6 +106,25 @@ LOCAL_USERNAME=%s
 LOCAL_SSH_KEY_BASE64=%s
 `, security.ShellEscape(username), security.ShellEscape(publicKeyBase64))
 
+	// spored binary authenticity (spore-host#440): embed the spore.host signing
+	// PUBLIC key so the bootstrap can verify the downloaded spored's signature
+	// against a key carried by spawn (trusted), not one served from the same S3
+	// bucket as the binary. When no key is compiled in yet, verification stays
+	// off and the body falls back to sha256-only (honestly logged).
+	if signatureVerificationEnabled() {
+		script += fmt.Sprintf(`
+# spored signing public key (spore.host). The body verifies the binary's .sig
+# against this before executing it.
+SPORED_SIG_VERIFY=1
+mkdir -p /etc/spawn
+cat > /etc/spawn/spored-signing-key.pem <<'EOFSPOREDPUBKEY'
+%s
+EOFSPOREDPUBKEY
+`, sporedSigningPublicKeyPEM)
+	} else {
+		script += "\nSPORED_SIG_VERIFY=0\n"
+	}
+
 	// Embed the --command workload directly in user-data (#214/#246) instead of
 	// the 256-char-capped spawn:command tag. Written BEFORE linuxBootstrapBody so
 	// the file exists when the body's command-exec block reads it. A single-quoted
@@ -253,6 +272,39 @@ if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
 fi
 
 echo "✅ Checksum verified: $EXPECTED_CHECKSUM"
+
+# Verify the publisher signature (spore-host#440). The sha256 above only proves
+# the download wasn't corrupted; it's served from the same bucket as the binary,
+# so it can't prove the binary is authentic. When spawn compiled in a signing key
+# (SPORED_SIG_VERIFY=1) we download the detached signature and verify it against
+# that key with openssl. The key came from spawn (trusted), NOT the bucket, so a
+# bucket compromise can't forge it. Fail closed on mismatch.
+if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
+    echo "Verifying signature..."
+    SIG_URL="${CHECKSUM_URL%.sha256}.sig"
+    if ! curl -f -o /tmp/spored.sig "${SIG_URL}" 2>/dev/null; then
+        echo "❌ Signature file not found at ${SIG_URL} — refusing to run an unsigned binary"
+        rm -f "$SPORED_TMP"
+        exit 1
+    fi
+    # The .sig is base64-encoded DER (ECDSA_SHA_256), as emitted by the release
+    # signer; decode to raw DER for openssl.
+    if ! base64 -d /tmp/spored.sig > /tmp/spored.sig.der 2>/dev/null; then
+        cp /tmp/spored.sig /tmp/spored.sig.der  # tolerate an already-binary sig
+    fi
+    if openssl dgst -sha256 -verify /etc/spawn/spored-signing-key.pem \
+         -signature /tmp/spored.sig.der "$SPORED_TMP" >/dev/null 2>&1; then
+        echo "✅ Signature verified (spore.host)"
+    else
+        echo "❌ Signature verification FAILED — refusing to run spored"
+        rm -f "$SPORED_TMP" /tmp/spored.sig /tmp/spored.sig.der
+        exit 1
+    fi
+    rm -f /tmp/spored.sig /tmp/spored.sig.der
+else
+    echo "ℹ️  Signature verification not enabled in this spawn build; relying on checksum (corruption) only"
+fi
+
 chmod +x "$SPORED_TMP"
 
 # Stop any running spored so the rename doesn't leave a stale daemon, then

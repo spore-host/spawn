@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails — so "if `spawn doctor` passes, the Quick Start should work." Especially
   useful on institution-managed accounts: the failing IAM checks are exactly what
   to hand a cloud administrator. `-o json` for automation.
+### Security
+- **spored binaries can now be verified by publisher signature at boot, not just
+  by checksum** (spore-host#440). The bootstrap previously fetched a `.sha256` from
+  the *same* S3 bucket as the spored binary — which detects corruption but can't
+  prove authenticity (an attacker who rewrites the bucket rewrites the checksum
+  too). spawn now embeds a spore.host signing **public key**; when present, the
+  generated bootstrap downloads a detached `.sig` and verifies it with `openssl`
+  against that embedded key **before executing spored**, failing closed on a
+  mismatch or missing signature. The trust root is the spawn binary (trusted via
+  Homebrew/GitHub release), not the bucket. The release pipeline signs each spored
+  binary with a KMS asymmetric key (`kms:Sign`; private key never leaves KMS).
+  Until the key is provisioned, signing is skipped and the bootstrap stays in
+  sha256-only mode with an honest log line — no false "verified" claim.
 
 ## [0.89.0] - 2026-07-21
 
