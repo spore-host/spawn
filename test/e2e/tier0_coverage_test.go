@@ -67,6 +67,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"image":           "Tier 1/2: real EC2 Image Builder ISO→AMI import (verify is local; pkg/winiso unit-tested)",
 		"snapshot":        "Tier 1/2: EBS direct APIs (StartSnapshot/PutSnapshotBlock) not modeled by Substrate; block/checksum core unit-tested in pkg/aws",
 		"validate":        "covered by pkg/infrastructure substrate tests (not CLI Tier 0)",
+		"doctor":          "Tier 1: read-only preflight (STS/EC2/IAM/SSM/Route53 probes) against real APIs; check/report logic unit-tested in pkg/doctor",
 
 		// cobra built-ins — no spawn behavior to cover.
 		"help":       "cobra built-in",
