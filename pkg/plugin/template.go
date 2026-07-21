@@ -20,7 +20,7 @@ var ErrInvalidRef = errors.New("invalid template reference")
 
 // TemplateContext holds all variable namespaces available in plugin templates.
 type TemplateContext struct {
-	Instance map[string]string // instance.id, instance.name, instance.ip
+	Instance map[string]string // instance.id, instance.name, instance.ip, instance.login_user
 	Config   map[string]string // config.<key>
 	Outputs  map[string]string // outputs.<key> — captured from prior steps
 	Pushed   map[string]string // pushed.<key> — received via push API
@@ -40,9 +40,10 @@ func NewTemplateContext() TemplateContext {
 //
 // Template syntax: {{ namespace.key }}
 //
-//	{{ instance.id }}       EC2 instance ID
-//	{{ instance.name }}     instance Name tag
-//	{{ instance.ip }}       public IP
+//	{{ instance.id }}         EC2 instance ID
+//	{{ instance.name }}       instance Name tag
+//	{{ instance.ip }}         public IP
+//	{{ instance.login_user }} the instance's login user (same user as_user steps run as)
 //	{{ config.key }}        user-supplied config parameter
 //	{{ outputs.key }}       value captured from a prior step
 //	{{ pushed.key }}        value received via the push API

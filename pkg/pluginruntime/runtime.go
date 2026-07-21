@@ -19,9 +19,10 @@ var pushedKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 // Runtime manages plugins on an instance (the spored side).
 // It is safe for concurrent use.
 type Runtime struct {
-	store    plugin.StateStore
-	executor *RemoteExecutor
-	identity *provider.Identity // may be nil in tests
+	store     plugin.StateStore
+	executor  *RemoteExecutor
+	identity  *provider.Identity // may be nil in tests
+	localUser string             // instance login user (spawn:local-username); exposed as {{ instance.login_user }}
 
 	mu            sync.Mutex
 	healthCancels map[string]context.CancelFunc
@@ -36,6 +37,7 @@ func NewRuntime(identity *provider.Identity, localUser string) *Runtime {
 		store:         plugin.DefaultStateStore(),
 		executor:      NewRemoteExecutor(localUser),
 		identity:      identity,
+		localUser:     localUser,
 		healthCancels: make(map[string]context.CancelFunc),
 	}
 }
@@ -261,6 +263,15 @@ func (rt *Runtime) buildTemplateContext(st *plugin.PluginState) plugin.TemplateC
 		tmplCtx.Instance["name"] = rt.identity.Name
 		tmplCtx.Instance["ip"] = rt.identity.PublicIP
 	}
+	// The instance's login user (spawn:local-username) — the same user `as_user`
+	// steps run as. Exposed so a plugin can name it in a file it writes (e.g. a
+	// systemd unit's User= or a chown target) rather than hardcoding "ec2-user".
+	// Falls back to ec2-user when unknown (older instances / not tagged).
+	loginUser := rt.localUser
+	if loginUser == "" {
+		loginUser = "ec2-user"
+	}
+	tmplCtx.Instance["login_user"] = loginUser
 	return tmplCtx
 }
 

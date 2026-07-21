@@ -185,4 +185,28 @@ func TestRuntime_TemplateContext_InstanceName(t *testing.T) {
 	if tmplCtx.Instance["ip"] != "1.2.3.4" {
 		t.Errorf("instance.ip: got %q, want %q", tmplCtx.Instance["ip"], "1.2.3.4")
 	}
+	// localUser unset on this Runtime → login_user falls back to ec2-user.
+	if tmplCtx.Instance["login_user"] != "ec2-user" {
+		t.Errorf("instance.login_user fallback: got %q, want ec2-user", tmplCtx.Instance["login_user"])
+	}
+}
+
+// TestBuildTemplateContext_LoginUser confirms a known login user is exposed as
+// {{ instance.login_user }} (so a plugin can name it in a file/systemd unit).
+func TestBuildTemplateContext_LoginUser(t *testing.T) {
+	rt := &Runtime{
+		store:         plugin.NewDiskStateStore(t.TempDir()),
+		executor:      NewRemoteExecutor("scttfrdmn"),
+		identity:      &provider.Identity{InstanceID: "i-1"},
+		localUser:     "scttfrdmn",
+		healthCancels: make(map[string]context.CancelFunc),
+	}
+	tmplCtx := rt.buildTemplateContext(&plugin.PluginState{
+		Config:  make(map[string]string),
+		Outputs: make(map[string]string),
+		Pushed:  make(map[string]string),
+	})
+	if tmplCtx.Instance["login_user"] != "scttfrdmn" {
+		t.Errorf("instance.login_user: got %q, want scttfrdmn", tmplCtx.Instance["login_user"])
+	}
 }

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Plugins can reference the instance login user via `{{ instance.login_user }}`.**
+  A plugin's steps can now name the instance's login user (the `spawn:local-username`
+  — the same user `as_user: true` steps run as) when writing a file it doesn't
+  execute directly, e.g. a systemd unit's `User=` or a `chown` target, instead of
+  hardcoding `ec2-user`. Falls back to `ec2-user` when the login user is unknown
+  (older/untagged instances).
+
 ## [0.88.0] - 2026-07-20
 
 ### Changed
