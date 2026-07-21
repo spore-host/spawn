@@ -86,46 +86,72 @@ func manifestJSON(t *testing.T, sha string) []byte {
 	return data
 }
 
-func TestResolveOfficialVersioned_ManifestVerified(t *testing.T) {
+// officialServers wires raw/api/release httptest servers where the plugin.yaml
+// and manifest.json are served for demo@v1.0.0 but NO signature asset exists
+// (unsigned release). Returns the three servers; caller closes them.
+func officialServersUnsigned(t *testing.T) (raw, api, release *httptest.Server) {
+	t.Helper()
 	specSHA := sha256Hex([]byte(manifestTestSpec))
-	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// official layout: /spore-host/spore-plugins/demo-v1.0.0/plugins/demo/plugin.yaml
+	raw = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/plugins/demo/plugin.yaml") || !strings.Contains(r.URL.Path, "/demo-v1.0.0/") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		_, _ = w.Write([]byte(manifestTestSpec)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
 	}))
-	defer raw.Close()
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound) // commit resolution is best-effort
 	}))
-	defer api.Close()
-	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /spore-host/spore-plugins/releases/download/demo-v1.0.0/manifest.json
-		if !strings.HasSuffix(r.URL.Path, "/demo-v1.0.0/manifest.json") {
-			w.WriteHeader(http.StatusNotFound)
+	release = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Serve the manifest, but 404 the signature asset (unsigned release).
+		if strings.HasSuffix(r.URL.Path, "/demo-v1.0.0/manifest.json") {
+			_, _ = w.Write(manifestJSON(t, specSHA)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
 			return
 		}
-		_, _ = w.Write(manifestJSON(t, specSHA)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
+		w.WriteHeader(http.StatusNotFound)
 	}))
+	return raw, api, release
+}
+
+// TestResolveOfficialVersioned_UnsignedIsHardFail: signatures are mandatory, so an
+// official versioned ref whose release has a valid manifest but NO signature asset
+// is rejected.
+func TestResolveOfficialVersioned_UnsignedIsHardFail(t *testing.T) {
+	raw, api, release := officialServersUnsigned(t)
+	defer raw.Close()
+	defer api.Close()
 	defer release.Close()
 
 	r := manifestResolver(raw.URL, api.URL, release.URL)
-	spec, prov, err := r.ResolveWithProvenance(context.Background(), "demo@v1.0.0")
-	if err != nil {
-		t.Fatalf("ResolveWithProvenance: %v", err)
+	_, _, err := r.ResolveWithProvenance(context.Background(), "demo@v1.0.0")
+	if err == nil {
+		t.Fatal("expected a hard failure for an unsigned official release, got nil")
 	}
-	if spec.Name != "demo" {
-		t.Errorf("spec.Name = %q", spec.Name)
+	if !strings.Contains(err.Error(), "is not signed") {
+		t.Errorf("error %q does not explain the missing signature", err)
+	}
+}
+
+// TestResolveOfficialVersioned_InsecureBypassesUnsigned: --insecure downgrades the
+// missing-signature hard fail to a warning; resolution succeeds and the manifest
+// still verifies (ManifestVerified set, SignatureVerified not).
+func TestResolveOfficialVersioned_InsecureBypassesUnsigned(t *testing.T) {
+	raw, api, release := officialServersUnsigned(t)
+	defer raw.Close()
+	defer api.Close()
+	defer release.Close()
+
+	r := manifestResolver(raw.URL, api.URL, release.URL)
+	r.insecure = true
+	_, prov, err := r.ResolveWithProvenance(context.Background(), "demo@v1.0.0")
+	if err != nil {
+		t.Fatalf("insecure resolve should not fail on a missing signature: %v", err)
 	}
 	if !prov.ManifestVerified {
-		t.Error("ManifestVerified = false, want true")
+		t.Error("ManifestVerified = false, want true (manifest still checked under --insecure)")
 	}
-	// No signature asset is served, so this is the deprecation-window path:
-	// manifest verified, signature absent → SignatureVerified stays false, no error.
 	if prov.SignatureVerified {
-		t.Error("SignatureVerified = true, want false (no signature asset served)")
+		t.Error("SignatureVerified = true, want false (no signature served)")
 	}
 	if prov.ReleaseTag != "demo-v1.0.0" {
 		t.Errorf("ReleaseTag = %q, want demo-v1.0.0", prov.ReleaseTag)

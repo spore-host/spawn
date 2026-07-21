@@ -292,15 +292,16 @@ const maxManifestBytes = 64 * 1024
 // present) verifies the manifest's keyless signature. It records what it verified
 // on prov (ManifestVerified / SignatureVerified).
 //
-// Strictness (RFC decision #3, verify-by-default with a deprecation window):
+// Strictness (RFC decision #3): signatures are now MANDATORY for official
+// versioned refs — the deprecation window closed once every official plugin was
+// signed.
 //   - manifest missing/mismatch → hard failure (integrity is required);
 //   - signature present but invalid (bad sig, wrong identity, no Rekor entry) →
 //     hard failure (a tampered/forged signature must never pass);
-//   - signature ASSET ABSENT → warn, not fail (the deprecation window: existing
-//     releases predate signing). Flip to hard-fail once all official plugins are
-//     signed.
+//   - signature ASSET ABSENT → hard failure (an official release must be signed).
 //
-// r.insecure downgrades every failure above to a warning (the --insecure escape).
+// r.insecure downgrades every failure above to a warning (the --insecure escape),
+// which is how a local/unsigned official ref is installed during development.
 func (r *compositeResolver) verifyRelease(ctx context.Context, pr PluginRef, prov *Provenance) error {
 	manifestData, err := r.fetchReleaseAsset(ctx, pr.Owner, pr.Repo, prov.ReleaseTag, ManifestFileName)
 	if err != nil {
@@ -318,13 +319,12 @@ func (r *compositeResolver) verifyRelease(ctx context.Context, pr PluginRef, pro
 	}
 	prov.ManifestVerified = true
 
-	// Signature (increment 3). Absent → warn (deprecation window); present but
-	// invalid → hard fail (unless insecure).
+	// Signature (increment 3): mandatory. Absent → hard fail; present but invalid
+	// → hard fail. (Both downgraded to a warning under --insecure.)
 	sigData, err := r.fetchReleaseAsset(ctx, pr.Owner, pr.Repo, prov.ReleaseTag, SignatureFileName)
 	if err != nil {
 		if _, missing := err.(errAssetNotFound); missing {
-			log.Printf("warning: %s@%s is not signed (no %s on release %s) — integrity verified via checksum manifest only; signature verification will become mandatory", pr.Name, pr.Version, SignatureFileName, prov.ReleaseTag)
-			return nil
+			err = fmt.Errorf("%s@%s is not signed (no %s on release %s) — official releases must be signed; use --insecure to bypass for local dev", pr.Name, pr.Version, SignatureFileName, prov.ReleaseTag)
 		}
 		return r.softFail(err)
 	}
