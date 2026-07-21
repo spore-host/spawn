@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.90.0] - 2026-07-21
+
 ### Added
 - **`spawn doctor` — a read-only preflight command.** Checks everything a first
   launch needs and reports pass / warn / fail for each: spawn & truffle versions,
@@ -1943,7 +1945,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.89.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.90.0...HEAD
+[0.90.0]: https://github.com/spore-host/spawn/compare/v0.89.0...v0.90.0
 [0.89.0]: https://github.com/spore-host/spawn/compare/v0.88.0...v0.89.0
 [0.88.0]: https://github.com/spore-host/spawn/compare/v0.87.0...v0.88.0
 [0.87.0]: https://github.com/spore-host/spawn/compare/v0.86.0...v0.87.0
