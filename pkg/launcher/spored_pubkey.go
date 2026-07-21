@@ -16,14 +16,17 @@ package launcher
 // and re-sign binaries. Old spawn releases keep verifying against the old key
 // until upgraded; keep signing with both during a rotation window.
 //
-// NOTE: until the KMS key is provisioned and this is populated with the real
-// public key, signatureVerificationEnabled() returns false and the bootstrap
-// falls back to sha256-only verification with a logged warning (no false
-// "signature verified" claim). Populating this constant + the release signing
-// step flips verification on.
+// This is the public half of the KMS key `alias/spored-signing`
+// (arn:aws:kms:us-east-1:966362334030:key/7b28df72-c92f-4d0c-97e3-7696e04bafd3),
+// spec ECC_NIST_P256 / ECDSA_SHA_256. Empty disables verification (sha256-only
+// with an honest log line); populated turns it on.
+//
 // A var (not const) so tests can exercise the enabled path and so a rotation can
 // be applied in one place. Production value is set here at build time.
-var sporedSigningPublicKeyPEM = ``
+var sporedSigningPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEOZo4nbX52lIw/vbPQdawhyXrhG+c
+AtY5UKek+Y9PGbBHyqAukxdMoE5hc28ZvbcDIRiSussHivyki5gr8/QlVA==
+-----END PUBLIC KEY-----`
 
 // signatureVerificationEnabled reports whether a real signing public key is
 // compiled in. When false, the bootstrap uses sha256-only verification (honestly

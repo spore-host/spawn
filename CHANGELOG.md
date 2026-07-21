@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **spored signature verification is now active.** The spore.host signing public
+  key (KMS `alias/spored-signing`, ECDSA_SHA_256) is embedded in spawn, so the
+  generated bootstrap verifies each spored binary's signature before executing it
+  (spore-host#440). Combined with the release pipeline now signing spored with the
+  matching KMS key, boot-time verification authenticates the publisher, not just
+  detects corruption. Fails closed on a missing or invalid signature.
+
 ## [0.90.0] - 2026-07-21
 
 ### Added
