@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Release signing of spored now works.** The v0.91.0 release pipeline failed to
+  sign spored (KMS `Sign` rejects a request over ~200KB, but spored is ~80MB, and
+  the release role couldn't write the `.sig` objects). Signing now signs the
+  SHA-256 *digest* (`--message-type DIGEST`) and the role can publish the
+  signatures, so signed spored binaries actually reach the buckets. Verification
+  is unchanged (`openssl dgst -sha256 -verify`). (spore-host#440)
+
 ## [0.91.0] - 2026-07-21
 
 ### Security
