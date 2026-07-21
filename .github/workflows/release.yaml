@@ -99,11 +99,19 @@ jobs:
           # bootstrap then stays in sha256-only mode, matching a spawn build with no
           # key compiled in. This keeps releases working during rollout.
           sign_blob() {  # $1=src file  $2=output .sig
+            # KMS Sign caps the request at ~200KB, so we CANNOT send the ~80MB
+            # spored binary as a RAW message. Instead compute its SHA-256 digest
+            # (32 bytes) and sign with --message-type DIGEST. ECDSA signs the
+            # digest either way, so the resulting signature still verifies with
+            # `openssl dgst -sha256 -verify` (which hashes the file then checks) —
+            # the bootstrap needs no change. (#440)
+            digest="/tmp/$(basename "$1").sha256.raw"
+            openssl dgst -sha256 -binary "$1" > "$digest"
             aws kms sign \
               --key-id "$SPORED_SIGNING_KEY_ID" \
-              --message-type RAW \
+              --message-type DIGEST \
               --signing-algorithm ECDSA_SHA_256 \
-              --message "fileb://$1" \
+              --message "fileb://$digest" \
               --query Signature --output text \
               > "$2"  # already base64 (KMS returns base64 text)
           }
