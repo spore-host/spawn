@@ -59,6 +59,31 @@ archives:
 checksum:
   name_template: 'checksums.txt'
 
+# Publisher-authenticate the release with keyless cosign (Sigstore). We sign the
+# checksums.txt — it lists the SHA-256 of every archive/package, so one signature
+# transitively authenticates all artifacts (verify the checksum's signature, then
+# each file against checksums.txt). Keyless uses the release workflow's GitHub OIDC
+# identity via Fulcio/Rekor — no long-lived key to manage or leak.
+#
+# NOTE: this signs the CLI GoReleaser artifacts (spawn tarballs/packages). It is
+# SEPARATE from spored publisher-signing, which is KMS-signed + boot-verified via
+# the S3-upload step in the release workflow (spore-host#440) — untouched here.
+#
+# cosign 3.x emits the modern Sigstore bundle (`--bundle`, bundling signature +
+# Fulcio cert + Rekor entry); the old --output-signature/--output-certificate are
+# gone. Publishes checksums.txt.bundle. Requires `id-token: write` + cosign on PATH.
+# Verify with `cosign verify-blob --bundle` (see docs: "Verify a download").
+signs:
+  - cmd: cosign
+    signature: '${artifact}.bundle'
+    args:
+      - sign-blob
+      - '--bundle=${signature}'
+      - '${artifact}'
+      - '--yes'
+    artifacts: checksum
+    output: true
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
