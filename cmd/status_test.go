@@ -1,8 +1,84 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/spore-host/spawn/pkg/aws"
 )
+
+func TestLifecycleProtectionBlock(t *testing.T) {
+	future := time.Now().Add(3 * time.Hour).UTC().Format(time.RFC3339)
+
+	t.Run("managed running instance shows the block with a deadline", func(t *testing.T) {
+		inst := &aws.InstanceInfo{
+			State:        "running",
+			InstanceType: "t3.small",
+			TTL:          "4h",
+			IdleTimeout:  "30m",
+			LaunchTime:   time.Now().Add(-1 * time.Hour),
+			Tags:         map[string]string{"spawn:managed": "true", "spawn:ttl-deadline": future},
+		}
+		out := lifecycleProtectionBlock(inst)
+		for _, want := range []string{"Lifecycle protection:", "spored", "Out-of-band reaper", "Termination deadline:", "Idle timeout:"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("block missing %q; got:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("unmanaged instance shows nothing", func(t *testing.T) {
+		inst := &aws.InstanceInfo{State: "running", Tags: map[string]string{}}
+		if out := lifecycleProtectionBlock(inst); out != "" {
+			t.Errorf("expected empty for unmanaged instance, got:\n%s", out)
+		}
+	})
+
+	t.Run("stopped instance shows nothing", func(t *testing.T) {
+		inst := &aws.InstanceInfo{State: "stopped", Tags: map[string]string{"spawn:managed": "true", "spawn:ttl-deadline": future}}
+		if out := lifecycleProtectionBlock(inst); out != "" {
+			t.Errorf("expected empty for stopped instance, got:\n%s", out)
+		}
+	})
+
+	t.Run("falls back to TTL when no deadline tag", func(t *testing.T) {
+		inst := &aws.InstanceInfo{
+			State: "running", InstanceType: "t3.small", TTL: "4h",
+			Tags: map[string]string{"spawn:managed": "true"},
+		}
+		out := lifecycleProtectionBlock(inst)
+		if !strings.Contains(out, "TTL:") || !strings.Contains(out, "4h") {
+			t.Errorf("expected TTL fallback line; got:\n%s", out)
+		}
+	})
+}
+
+func TestLifecycleDeadline(t *testing.T) {
+	t.Run("prefers the ttl-deadline tag", func(t *testing.T) {
+		want := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+		inst := &aws.InstanceInfo{Tags: map[string]string{"spawn:ttl-deadline": want.Format(time.RFC3339)}}
+		got, ok := lifecycleDeadline(inst)
+		if !ok || !got.Equal(want) {
+			t.Errorf("deadline = %v, %v; want %v, true", got, ok, want)
+		}
+	})
+
+	t.Run("falls back to launch + TTL", func(t *testing.T) {
+		launch := time.Now().Add(-1 * time.Hour)
+		inst := &aws.InstanceInfo{TTL: "4h", LaunchTime: launch, Tags: map[string]string{}}
+		got, ok := lifecycleDeadline(inst)
+		if !ok || !got.Equal(launch.Add(4*time.Hour)) {
+			t.Errorf("deadline = %v, %v; want %v, true", got, ok, launch.Add(4*time.Hour))
+		}
+	})
+
+	t.Run("no data → not ok", func(t *testing.T) {
+		if _, ok := lifecycleDeadline(&aws.InstanceInfo{Tags: map[string]string{}}); ok {
+			t.Error("expected ok=false with no deadline data")
+		}
+	})
+}
 
 // TestCheckCompleteExitCodes tests the --check-complete exit code logic
 func TestCheckCompleteExitCodes(t *testing.T) {

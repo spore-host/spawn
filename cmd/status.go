@@ -127,9 +127,90 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Print(string(output))
+	fmt.Print(lifecycleProtectionBlock(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], string(output), instance.InstanceID))
 	fmt.Print(elasticIPNotice(ctx, client, instance))
 	return nil
+}
+
+// lifecycleProtectionBlock returns a compact, human-readable summary of the
+// instance's lifecycle-safety posture, or "" if there's nothing meaningful to
+// show (e.g. an unmanaged instance). It surfaces what the safety docs describe —
+// the hard termination deadline and the worst-case compute cost — directly in the
+// CLI so a user can see at a glance that the instance is protected and bounded
+// (review feedback: "make protection status more visibly operational").
+//
+// Honesty constraints: spored (in-instance) enforcement is what spawn provisions
+// and can rely on. The out-of-band reaper runs in the infra account and is NOT
+// authoritatively visible from the launch account (see pkg/doctor ReaperConfigured
+// and docs/safety.md), so we describe it as a backstop "if deployed" rather than
+// asserting dual enforcement we can't confirm from here.
+func lifecycleProtectionBlock(instance *aws.InstanceInfo) string {
+	// Only meaningful for a spawn-managed instance that's actually running.
+	if instance.Tags["spawn:managed"] != "true" {
+		return ""
+	}
+	if instance.State != "running" && instance.State != "pending" {
+		return ""
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nLifecycle protection:\n")
+	fmt.Fprintf(&b, "  In-instance (spored):  enforces TTL + idle rules on the instance itself\n")
+	fmt.Fprintf(&b, "  Out-of-band reaper:    backstop in the spore.host-infra account, if deployed for your account\n")
+
+	// Hard termination deadline, from the authoritative launch-anchored tag the
+	// reaper also reads (spawn:ttl-deadline, RFC3339 UTC). Fall back to the TTL
+	// duration for older instances that predate the deadline tag.
+	deadline, haveDeadline := lifecycleDeadline(instance)
+	if haveDeadline {
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			fmt.Fprintf(&b, "  Termination deadline:  %s (in %s)\n",
+				deadline.Local().Format("2006-01-02 15:04 MST"), formatDuration(remaining))
+		} else {
+			fmt.Fprintf(&b, "  Termination deadline:  %s (past due — terminates on next check)\n",
+				deadline.Local().Format("2006-01-02 15:04 MST"))
+		}
+
+		// Worst-case compute cost = on-demand rate × time from launch to deadline.
+		// It's a ceiling (the idle timeout usually stops the instance well before),
+		// and it excludes EBS/network — labelled as such. Best-effort: skip if we
+		// can't price the type.
+		if rate := aws.LookupEC2OnDemandPrice(context.Background(), instance.Region, instance.InstanceType); rate > 0 && !instance.LaunchTime.IsZero() {
+			maxHours := deadline.Sub(instance.LaunchTime).Hours()
+			if maxHours > 0 {
+				fmt.Fprintf(&b, "  Max compute cost:      ~$%.2f by deadline (on-demand rate, compute only; idle-stop usually ends it sooner)\n",
+					rate*maxHours)
+			}
+		}
+	} else if instance.TTL != "" {
+		fmt.Fprintf(&b, "  TTL:                   %s (hard lifetime)\n", instance.TTL)
+	}
+
+	if instance.IdleTimeout != "" {
+		fmt.Fprintf(&b, "  Idle timeout:          %s (stops the instance when idle; never terminates)\n", instance.IdleTimeout)
+	}
+
+	return b.String()
+}
+
+// lifecycleDeadline resolves the instance's absolute termination deadline: the
+// launch-anchored spawn:ttl-deadline tag (authoritative, what the reaper reads),
+// falling back to LaunchTime + the TTL duration for older instances without the
+// tag. Returns ok=false when no deadline can be determined.
+func lifecycleDeadline(instance *aws.InstanceInfo) (time.Time, bool) {
+	if dl, ok := instance.Tags["spawn:ttl-deadline"]; ok {
+		if parsed, err := time.Parse(time.RFC3339, dl); err == nil {
+			return parsed, true
+		}
+	}
+	if instance.TTL != "" && !instance.LaunchTime.IsZero() {
+		if d, err := time.ParseDuration(instance.TTL); err == nil {
+			return instance.LaunchTime.Add(d), true
+		}
+	}
+	return time.Time{}, false
 }
 
 // elasticIPNotice returns a line describing any Elastic IP attached to the
@@ -185,6 +266,7 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 		out += res.Stderr
 	}
 	fmt.Print(out)
+	fmt.Print(lifecycleProtectionBlock(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
 	return nil
 }

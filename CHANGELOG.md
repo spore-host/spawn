@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn status` now shows a "Lifecycle protection" summary** for a running
+  managed instance: in-instance (spored) enforcement, the out-of-band reaper
+  backstop (described as "if deployed" — it isn't authoritatively visible from the
+  launch account), the hard termination deadline (from the launch-anchored
+  `spawn:ttl-deadline` tag, with time remaining), a worst-case compute-cost ceiling
+  by that deadline (on-demand rate, compute only), and the idle timeout. Surfaces
+  the safety model the docs describe directly in the CLI.
+
 ### Security
 - **Bump `google.golang.org/grpc` → 1.82.1** in the root and `lambda/dns-updater`
   modules (was 1.82.0 / 1.80.0, both indirect) — resolves GHSA-hrxh-6v49-42gf
