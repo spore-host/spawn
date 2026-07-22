@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Bump `google.golang.org/grpc` → 1.82.1** in the root and `lambda/dns-updater`
+  modules (was 1.82.0 / 1.80.0, both indirect) — resolves GHSA-hrxh-6v49-42gf
+  (gRPC-Go xDS RBAC / HTTP/2, HIGH).
+
 ## [0.91.1] - 2026-07-21
 
 ### Fixed
