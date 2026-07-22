@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the safety model the docs describe directly in the CLI.
 
 ### Security
+- **CLI release artifacts are now signed** with keyless cosign (Sigstore) + SLSA
+  build provenance (spawn#430). The release signs `checksums.txt` (which lists
+  every archive/package hash) with the workflow's GitHub OIDC identity — no
+  long-lived key — publishing `checksums.txt.bundle`, and attests build provenance.
+  This is separate from and complementary to spored's existing KMS publisher-signing
+  + boot verification. Verify a download with `cosign verify-blob --bundle`
+  (see docs: "Verify a download"). Takes effect from the next tagged release.
 - **Bump `google.golang.org/grpc` → 1.82.1** in the root and `lambda/dns-updater`
   modules (was 1.82.0 / 1.80.0, both indirect) — resolves GHSA-hrxh-6v49-42gf
   (gRPC-Go xDS RBAC / HTTP/2, HIGH).

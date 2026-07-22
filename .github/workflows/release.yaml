@@ -7,7 +7,8 @@ on:
 
 permissions:
   contents: write
-  id-token: write
+  id-token: write   # keyless cosign signing (Fulcio/Rekor) + spored KMS OIDC + provenance
+  attestations: write   # actions/attest-build-provenance (SLSA)
 
 jobs:
   goreleaser:
@@ -23,6 +24,12 @@ jobs:
         with:
           go-version: '1.26.5'
 
+      # cosign for keyless CLI-artifact signing (the .goreleaser signs: block runs
+      # `cosign sign-blob --bundle` over checksums.txt with this job's OIDC identity).
+      # This is separate from spored's KMS signing in the S3-upload step below.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
       # Hard-fail the tag if the committed reference (docs-gen/) is stale, so a
       # release can never ship a reference that lags the code. Same check as CI's
       # drift gate, run here as a pre-release guard.
@@ -35,6 +42,15 @@ jobs:
           distribution: goreleaser
           version: '~> v2'
           args: release --clean
+
+      # SLSA build provenance for the CLI release archives (complements the cosign
+      # signature — signature authenticates the publisher, attestation records how/
+      # where it was built). Attests checksums.txt, which covers every artifact by
+      # hash. Runs only on a successful GoReleaser build (dist/checksums.txt exists).
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: 'dist/checksums.txt'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
