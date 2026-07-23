@@ -348,10 +348,26 @@ func (c *Client) callAPI(ctx context.Context, req DNSUpdateRequest) (*DNSUpdateR
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	// Check the HTTP status BEFORE trying to parse the body as our JSON schema.
+	// A Function URL running under AuthType: AWS_IAM rejects an unsigned or
+	// bad-signature request with a 403 whose body is AWS's own JSON
+	// (`{"Message":"Forbidden"}`) — which unmarshals cleanly into an all-empty
+	// DNSUpdateResponse, turning a hard auth failure into a useless
+	// `DNS API error: ` (empty). Surface the status and a body snippet so the
+	// real cause (e.g. SigV4 rejection post-#173 cutover) is visible instead of
+	// silently swallowed (#435).
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet := strings.TrimSpace(string(respBody))
+		if len(snippet) > 300 {
+			snippet = snippet[:300] + "…"
+		}
+		return nil, fmt.Errorf("DNS API returned HTTP %d: %s", resp.StatusCode, snippet)
+	}
+
 	// Parse response
 	var dnsResp DNSUpdateResponse
 	if err := json.Unmarshal(respBody, &dnsResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return nil, fmt.Errorf("failed to parse response (HTTP %d): %w", resp.StatusCode, err)
 	}
 
 	// Check for errors

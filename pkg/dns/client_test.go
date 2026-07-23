@@ -67,6 +67,29 @@ func TestCallAPI_ServerError(t *testing.T) {
 	}
 }
 
+// TestCallAPI_ForbiddenNotSwallowed guards the #435 fix: a Function URL under
+// AuthType: AWS_IAM rejects a bad/absent SigV4 signature with a 403 whose body is
+// AWS's own JSON (`{"Message":"Forbidden"}`). That unmarshals cleanly into an
+// all-empty DNSUpdateResponse (Success=false, Error=""), which previously produced
+// a useless `DNS API error: ` (empty) and hid the real cause. The status check must
+// surface the 403 and body instead.
+func TestCallAPI_ForbiddenNotSwallowed(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"Message":"Forbidden"}`))
+	}))
+	defer ts.Close()
+
+	c := &Client{httpClient: ts.Client(), apiEndpoint: ts.URL, domain: "spore.host"}
+	_, err := c.callAPI(context.Background(), DNSUpdateRequest{RecordName: "x", Action: "UPSERT"})
+	if err == nil {
+		t.Fatal("expected an error for a 403 response")
+	}
+	if !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "Forbidden") {
+		t.Errorf("403 must be surfaced with status and body, got: %v", err)
+	}
+}
+
 func TestCallAPI_MalformedResponse(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("not json"))

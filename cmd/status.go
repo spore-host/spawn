@@ -128,6 +128,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Print(string(output))
 	fmt.Print(lifecycleProtectionBlock(instance))
+	fmt.Print(dnsStatusNotice(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], string(output), instance.InstanceID))
 	fmt.Print(elasticIPNotice(ctx, client, instance))
 	return nil
@@ -231,6 +232,28 @@ func elasticIPNotice(ctx context.Context, client *aws.Client, instance *aws.Inst
 		i18n.Symbol("warning"), eip.PublicIP, eip.AllocationID, instance.State, eip.AllocationID)
 }
 
+// dnsStatusNotice returns a line describing the outcome of spored's DNS
+// registration, or "" if the instance has no DNS-status tag (older spored, or DNS
+// not configured). spored records spawn:dns-status ("registered"/"failed") and, on
+// failure, spawn:dns-error — so a Function-URL auth rejection or other failure is
+// visible here instead of only in the instance's journal, where the FQDN would
+// otherwise just silently never resolve (#435).
+func dnsStatusNotice(instance *aws.InstanceInfo) string {
+	status, ok := instance.Tags["spawn:dns-status"]
+	if !ok || status == "" {
+		return ""
+	}
+	if status == "registered" {
+		return ""
+	}
+	detail := instance.Tags["spawn:dns-error"]
+	if detail == "" {
+		detail = "no detail reported"
+	}
+	return fmt.Sprintf("\n%s DNS registration failed — the instance name may not resolve: %s\n",
+		i18n.Symbol("warning"), detail)
+}
+
 // runStatusOverSSM gets `spored status` from an instance we hold no SSH key for
 // (keyless/SSM-only, e.g. lagotto/cohort-launched, #222). It runs the same
 // command via SSM RunShellScript — no SSH, no key, no public IP needed. The SSM
@@ -267,6 +290,7 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 	}
 	fmt.Print(out)
 	fmt.Print(lifecycleProtectionBlock(instance))
+	fmt.Print(dnsStatusNotice(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
 	return nil
 }

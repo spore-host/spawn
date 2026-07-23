@@ -56,7 +56,7 @@ var (
 	defaultDomain string
 )
 
-// encodeAccountID converts AWS account ID to base36 (7 chars)
+// encodeAccountID converts AWS account ID to base36 (≤8 chars)
 func encodeAccountID(accountID string) string {
 	n := new(big.Int)
 	n.SetString(accountID, 10)

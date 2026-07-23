@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **DNS registration failures are no longer silent (#435).** When spored's DNS
+  registration is rejected — e.g. a `403` from the DNS Lambda Function URL after
+  the `AuthType: AWS_IAM` cutover — the failure was swallowed: the client parsed
+  the `403` body as a normal response and produced an empty `DNS API error:`, and
+  even the real message only reached the instance's own journal. Now the client
+  checks the HTTP status and surfaces the code + body, spored records the outcome
+  as `spawn:dns-status`/`spawn:dns-error` instance tags, and `spawn status` shows
+  a clear warning when registration failed (so the FQDN "never resolves" symptom
+  is diagnosable from the launch side).
+
+### Documentation
+- Corrected the base36 account-ID example in `pkg/dns/encoding.go` (and a matching
+  comment in the DNS-updater Lambda): `123456789012` encodes to `1kpqzg2c`
+  (≤8 chars), not the stale `1s69p4h` (#434). Code was already correct.
+
 ## [0.92.0] - 2026-07-22
 
 ### Added
