@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.93.0] - 2026-07-23
+
 ### Added
 - **ttl-reaper: opt-in DNS reconciliation sweep (#438).** With `REAPER_DNS_SWEEP=true`
   (and a hosted zone configured), the reaper now lists each account's
@@ -2025,7 +2027,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.92.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.93.0...HEAD
+[0.93.0]: https://github.com/spore-host/spawn/compare/v0.92.0...v0.93.0
 [0.92.0]: https://github.com/spore-host/spawn/compare/v0.91.1...v0.92.0
 [0.91.1]: https://github.com/spore-host/spawn/compare/v0.91.0...v0.91.1
 [0.91.0]: https://github.com/spore-host/spawn/compare/v0.90.0...v0.91.0
