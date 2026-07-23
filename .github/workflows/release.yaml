@@ -85,15 +85,25 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           PROJECT=spawn
 
-          # US regions only for now. Other regions fall back to us-east-1 at
-          # install time (see FALLBACK_URL in pkg/launcher/bootstrap.go), so
-          # spored still installs everywhere — just not from a same-region bucket.
-          # us-east-1 must stay in this list (it IS the fallback).
+          # Publish to EVERY region spawn operates in — matching defaultRegions in
+          # lambda/ttl-reaper. Previously US-only, relying on a bootstrap fallback
+          # to us-east-1; but a non-US bucket that still held a STALE, UNSIGNED
+          # binary made the regional fetch succeed (so the fallback never fired) and
+          # then the .sig lookup failed, hard-failing spored install region-wide
+          # (#440). Keeping every regional bucket current with the signed binary
+          # removes that failure mode. us-east-1 must stay (it IS the fallback).
           BUCKETS=(
             spawn-binaries-us-east-1
             spawn-binaries-us-east-2
             spawn-binaries-us-west-1
             spawn-binaries-us-west-2
+            spawn-binaries-ca-central-1
+            spawn-binaries-eu-west-1
+            spawn-binaries-eu-west-2
+            spawn-binaries-eu-central-1
+            spawn-binaries-ap-southeast-1
+            spawn-binaries-ap-southeast-2
+            spawn-binaries-ap-northeast-1
           )
 
           # Checksums (computed once).
@@ -201,7 +211,7 @@ jobs:
 
           emit_copies | xargs -0 -P 16 -n 2 bash -c 'do_copy "$1" "$2"' _
 
-          echo "✅ Uploaded spored ${VERSION} (linux+windows) to ${#BUCKETS[@]} US regions (parallel)"
+          echo "✅ Uploaded spored ${VERSION} (linux+windows) to ${#BUCKETS[@]} regions (parallel)"
 
       # Nudge the umbrella docs repo to vendor this release's generated reference
       # (docs/gen/spawn/). Fires repository_dispatch → sync-cli-docs.yaml, which

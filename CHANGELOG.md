@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **spored now installs in all regions, not just the US (#440).** The release
+  workflow published the spored binary to 4 US `spawn-binaries-*` buckets only,
+  relying on a bootstrap fallback to us-east-1 for the other 7 regions. But those
+  regional buckets still held a stale, **unsigned** binary from a prior release —
+  so the bootstrap's regional fetch *succeeded* (the fallback never fired) and
+  then, with signature verification on (the default), the missing `.sig` made the
+  install **fail closed** (`exit 1`) in ca-central-1 / eu-* / ap-*. Instances
+  there came up with no spored — no TTL/idle enforcement, no DNS. Two-part fix:
+  (1) the release now publishes the signed binary to **all 11 regions** spawn
+  operates in; (2) the bootstrap now **probes a source's `.sig` before committing
+  to it** when verifying, so a stale/unsigned regional bucket falls through to the
+  us-east-1 fallback instead of downloading-then-hard-failing.
+
 ## [0.93.0] - 2026-07-23
 
 ### Added
