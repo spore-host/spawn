@@ -348,10 +348,26 @@ func (c *Client) callAPI(ctx context.Context, req DNSUpdateRequest) (*DNSUpdateR
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	// Check the HTTP status BEFORE trying to parse the body as our JSON schema.
+	// A Function URL running under AuthType: AWS_IAM rejects an unsigned or
+	// bad-signature request with a 403 whose body is AWS's own JSON
+	// (`{"Message":"Forbidden"}`) — which unmarshals cleanly into an all-empty
+	// DNSUpdateResponse, turning a hard auth failure into a useless
+	// `DNS API error: ` (empty). Surface the status and a body snippet so the
+	// real cause (e.g. SigV4 rejection post-#173 cutover) is visible instead of
+	// silently swallowed (#435).
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet := strings.TrimSpace(string(respBody))
+		if len(snippet) > 300 {
+			snippet = snippet[:300] + "…"
+		}
+		return nil, fmt.Errorf("DNS API returned HTTP %d: %s", resp.StatusCode, snippet)
+	}
+
 	// Parse response
 	var dnsResp DNSUpdateResponse
 	if err := json.Unmarshal(respBody, &dnsResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return nil, fmt.Errorf("failed to parse response (HTTP %d): %w", resp.StatusCode, err)
 	}
 
 	// Check for errors
@@ -374,6 +390,15 @@ func (c *Client) signRequest(ctx context.Context, httpReq *http.Request, body []
 	creds, err := c.credsProvider.Retrieve(ctx)
 	if err != nil {
 		return fmt.Errorf("retrieve credentials for DNS request signing: %w", err)
+	}
+	// Fail closed on empty credentials. Some credential-chain states return a
+	// blank (anonymous) credential WITHOUT an error — e.g. IMDS not yet reachable
+	// at agent startup. Signing with an empty AccessKeyID still "succeeds" locally
+	// but yields a signature the AWS_IAM Function URL rejects with a bare 403 and
+	// no invocation — indistinguishable from "not signed at all", which is exactly
+	// the silent-DNS-failure symptom (#435). Surface it as a clear error instead.
+	if creds.AccessKeyID == "" {
+		return fmt.Errorf("DNS request signing enabled (SPORE_DNS_SIGV4) but resolved AWS credentials are empty — the instance role may not be reachable via IMDS yet; the AWS_IAM DNS Function URL will reject an unsigned request")
 	}
 	sum := sha256.Sum256(body)
 	payloadHash := hex.EncodeToString(sum[:])

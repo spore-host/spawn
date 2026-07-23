@@ -54,6 +54,36 @@ func TestLifecycleProtectionBlock(t *testing.T) {
 	})
 }
 
+func TestDNSStatusNotice(t *testing.T) {
+	t.Run("no tag → nothing", func(t *testing.T) {
+		if got := dnsStatusNotice(&aws.InstanceInfo{Tags: map[string]string{}}); got != "" {
+			t.Errorf("expected empty, got %q", got)
+		}
+	})
+	t.Run("registered → nothing (no news is good news)", func(t *testing.T) {
+		inst := &aws.InstanceInfo{Tags: map[string]string{"spawn:dns-status": "registered"}}
+		if got := dnsStatusNotice(inst); got != "" {
+			t.Errorf("expected empty for registered, got %q", got)
+		}
+	})
+	t.Run("failed → surfaces the detail", func(t *testing.T) {
+		inst := &aws.InstanceInfo{Tags: map[string]string{
+			"spawn:dns-status": "failed",
+			"spawn:dns-error":  "DNS API returned HTTP 403: {\"Message\":\"Forbidden\"}",
+		}}
+		got := dnsStatusNotice(inst)
+		if !strings.Contains(got, "DNS registration failed") || !strings.Contains(got, "403") {
+			t.Errorf("failure notice should name the cause, got %q", got)
+		}
+	})
+	t.Run("failed without detail → still warns", func(t *testing.T) {
+		inst := &aws.InstanceInfo{Tags: map[string]string{"spawn:dns-status": "failed"}}
+		if got := dnsStatusNotice(inst); !strings.Contains(got, "DNS registration failed") {
+			t.Errorf("expected a warning even without detail, got %q", got)
+		}
+	})
+}
+
 func TestLifecycleDeadline(t *testing.T) {
 	t.Run("prefers the ttl-deadline tag", func(t *testing.T) {
 		want := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)

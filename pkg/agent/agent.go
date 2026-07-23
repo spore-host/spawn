@@ -220,21 +220,25 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 					config.JobArrayID, config.JobArrayName)
 				if err != nil {
 					log.Printf("Warning: Failed to register job array DNS: %v", err)
+					agent.recordDNSStatus(ctx, "failed", err.Error())
 				} else {
 					fqdn := dns.GetFullDNSName(config.DNSName, identity.AccountID, dnsDomain)
 					log.Printf("✓ Job array DNS registered: %s -> %s (change: %s)", fqdn, identity.PublicIP, resp.ChangeID)
 					if resp.Message != "" {
 						log.Printf("  %s", resp.Message)
 					}
+					agent.recordDNSStatus(ctx, "registered", "")
 				}
 			} else {
 				log.Printf("Registering DNS: %s -> %s", config.DNSName, identity.PublicIP)
 				resp, err := dnsClient.RegisterDNS(ctx, config.DNSName, identity.PublicIP)
 				if err != nil {
 					log.Printf("Warning: Failed to register DNS: %v", err)
+					agent.recordDNSStatus(ctx, "failed", err.Error())
 				} else {
 					fqdn := dns.GetFullDNSName(config.DNSName, identity.AccountID, dnsDomain)
 					log.Printf("✓ DNS registered: %s -> %s (change: %s)", fqdn, identity.PublicIP, resp.ChangeID)
+					agent.recordDNSStatus(ctx, "registered", "")
 				}
 			}
 		}
@@ -897,6 +901,26 @@ func (a *Agent) writeReadyTags(ctx context.Context, tags map[string]string) {
 	// status-only failure record (which Phase 2 retry should be able to supersede).
 	if _, ok := tags["spawn:ready-url"]; ok {
 		a.dcvReadyURLWritten = true
+	}
+}
+
+// recordDNSStatus records the outcome of DNS registration as instance tags so it
+// is visible to `spawn status`, not just buried in spored's on-instance journal.
+// Before this, a Function-URL auth rejection (403 post-#173 AWS_IAM cutover) or any
+// other failure left the FQDN silently unresolvable with no user-facing signal
+// (#435). Best-effort: a tag-write failure here is itself only logged — we never
+// let DNS bookkeeping block the agent. status is "registered" or "failed"; detail
+// (truncated to fit an EC2 tag value) is written only on failure.
+func (a *Agent) recordDNSStatus(ctx context.Context, status, detail string) {
+	tags := map[string]string{"spawn:dns-status": status}
+	if status != "registered" && detail != "" {
+		if len(detail) > 255 {
+			detail = detail[:255]
+		}
+		tags["spawn:dns-error"] = detail
+	}
+	if err := a.tagger.putTags(ctx, a.identity.InstanceID, tags); err != nil {
+		log.Printf("DNS: failed to write dns-status tag: %v", err)
 	}
 }
 
