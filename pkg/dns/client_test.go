@@ -201,6 +201,41 @@ func TestSignRequest_NoOpWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestCallAPI_EmptyCredsFailClosed verifies the #435 guard: when signing is
+// enabled but the credential chain returns an empty (anonymous) credential
+// WITHOUT erroring — as can happen when IMDS isn't reachable yet — we must NOT
+// send an effectively-unsigned request (which the AWS_IAM Function URL rejects
+// with a silent 403). It should fail closed with a clear, actionable error and
+// never reach the network.
+func TestCallAPI_EmptyCredsFailClosed(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_ = json.NewEncoder(w).Encode(DNSUpdateResponse{Success: true})
+	}))
+	defer ts.Close()
+
+	c := &Client{
+		httpClient:    ts.Client(),
+		apiEndpoint:   ts.URL,
+		domain:        "spore.host",
+		sign:          true,
+		region:        "us-east-1",
+		signer:        v4.NewSigner(),
+		credsProvider: credentials.NewStaticCredentialsProvider("", "", ""), // empty, no error
+	}
+	_, err := c.callAPI(context.Background(), DNSUpdateRequest{RecordName: "x", Action: "UPSERT"})
+	if err == nil {
+		t.Fatal("expected a fail-closed error for empty credentials")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error should name the empty-credential cause, got: %v", err)
+	}
+	if called {
+		t.Error("must not send an unsigned request to the network when creds are empty")
+	}
+}
+
 var _ aws.CredentialsProvider = credentials.StaticCredentialsProvider{}
 
 // TestSetAccountName_SentInRequest verifies SetAccountName makes callAPI include

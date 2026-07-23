@@ -391,6 +391,15 @@ func (c *Client) signRequest(ctx context.Context, httpReq *http.Request, body []
 	if err != nil {
 		return fmt.Errorf("retrieve credentials for DNS request signing: %w", err)
 	}
+	// Fail closed on empty credentials. Some credential-chain states return a
+	// blank (anonymous) credential WITHOUT an error — e.g. IMDS not yet reachable
+	// at agent startup. Signing with an empty AccessKeyID still "succeeds" locally
+	// but yields a signature the AWS_IAM Function URL rejects with a bare 403 and
+	// no invocation — indistinguishable from "not signed at all", which is exactly
+	// the silent-DNS-failure symptom (#435). Surface it as a clear error instead.
+	if creds.AccessKeyID == "" {
+		return fmt.Errorf("DNS request signing enabled (SPORE_DNS_SIGV4) but resolved AWS credentials are empty — the instance role may not be reachable via IMDS yet; the AWS_IAM DNS Function URL will reject an unsigned request")
+	}
 	sum := sha256.Sum256(body)
 	payloadHash := hex.EncodeToString(sum[:])
 	if err := c.signer.SignHTTP(ctx, creds, httpReq, payloadHash, sigV4Service, c.region, time.Now()); err != nil {
