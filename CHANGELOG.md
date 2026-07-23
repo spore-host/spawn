@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.93.1] - 2026-07-23
+
 ### Fixed
 - **spored now installs in all regions, not just the US (#440).** The release
   workflow published the spored binary to 4 US `spawn-binaries-*` buckets only,
@@ -2041,7 +2043,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.93.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.93.1...HEAD
+[0.93.1]: https://github.com/spore-host/spawn/compare/v0.93.0...v0.93.1
 [0.93.0]: https://github.com/spore-host/spawn/compare/v0.92.0...v0.93.0
 [0.92.0]: https://github.com/spore-host/spawn/compare/v0.91.1...v0.92.0
 [0.91.1]: https://github.com/spore-host/spawn/compare/v0.91.0...v0.91.1
