@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -240,5 +241,58 @@ func TestEncodeLinuxUserData_NotRaw(t *testing.T) {
 	script := "#!/bin/bash\ntrue\n"
 	if EncodeLinuxUserData(script) == script {
 		t.Error("encoded user-data must differ from the raw script (#127)")
+	}
+}
+
+// TestBuildLinuxBootstrap_SigAwareFallback covers the #440 fix: the generated
+// download logic must probe a source's .sig before committing to it (when
+// signature verification is on), so a stale/unsigned regional bucket falls
+// through to the us-east-1 fallback instead of downloading then hard-failing.
+func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
+	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	// Verification on by default.
+	if !strings.Contains(script, "SPORED_SIG_VERIFY=1") {
+		t.Error("expected SPORED_SIG_VERIFY=1 default")
+	}
+	// The candidate list must include both the regional base and the us-east-1
+	// fallback, so a source that can't satisfy the trust requirement falls through.
+	for _, want := range []string{
+		"CANDIDATES=(",
+		"${S3_BASE_URL}/${PROJECT}",
+		"${FALLBACK_URL}/${PROJECT}",
+		// HEAD-probes the .sig up front when verifying (the crux of the fix).
+		`curl -fsI "$sig_url"`,
+		"trying next source",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("generated bootstrap missing %q", want)
+		}
+	}
+	// The old brittle shape — commit to the regional binary, then separately fail
+	// on a missing .sig — must be gone.
+	if strings.Contains(script, "Regional bucket unavailable, trying us-east-1...") {
+		t.Error("old fallback logic still present; #440 refactor not applied")
+	}
+}
+
+// TestBuildLinuxBootstrap_ValidBash syntax-checks the generated script with
+// `bash -n` so a shell error in the #440 download refactor can't ship silently.
+func TestBuildLinuxBootstrap_ValidBash(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	// Strip the cloud-init "#cloud-config"/shebang handling isn't needed — the
+	// body is plain bash. `bash -n` parses without executing.
+	cmd := exec.Command("bash", "-n")
+	cmd.Stdin = strings.NewReader(script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("generated bootstrap is not valid bash: %v\n%s", err, out)
 	}
 }

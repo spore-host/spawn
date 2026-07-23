@@ -230,26 +230,51 @@ echo "Downloading spored binary..."
 # below, which the kernel allows even while the old binary executes (#27).
 SPORED_TMP="$(mktemp /tmp/spored.XXXXXX)"
 
-# Try regional bucket with project prefix first, then without prefix (legacy), then fallback to us-east-1
-if curl -f -o "$SPORED_TMP" "${S3_BASE_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
-    CHECKSUM_URL="${S3_BASE_URL}/${PROJECT}/${BINARY}.sha256"
-    echo "Downloaded from ${REGION}"
-elif curl -f -o "$SPORED_TMP" "${S3_BASE_URL}/${BINARY}" 2>/dev/null; then
-    CHECKSUM_URL="${S3_BASE_URL}/${BINARY}.sha256"
-    echo "Downloaded from ${REGION} (legacy path)"
-else
-    echo "Regional bucket unavailable, trying us-east-1..."
-    if curl -f -o "$SPORED_TMP" "${FALLBACK_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
-        CHECKSUM_URL="${FALLBACK_URL}/${PROJECT}/${BINARY}.sha256"
-    else
-        curl -f -o "$SPORED_TMP" "${FALLBACK_URL}/${BINARY}" || {
-            echo "Failed to download spored binary"
-            rm -f "$SPORED_TMP"
-            exit 1
-        }
-        CHECKSUM_URL="${FALLBACK_URL}/${BINARY}.sha256"
+# Resolve a USABLE source and download the binary from it. A source is only
+# usable if it has the binary AND, when signature verification is on
+# (SPORED_SIG_VERIFY=1), a matching .sig — otherwise we must fall through to the
+# next candidate rather than commit to it. A regional bucket carrying a stale,
+# UNSIGNED binary previously satisfied the old "did the binary download?" check,
+# so the us-east-1 fallback never fired and the later .sig lookup hard-failed the
+# whole install region-wide (#440). We now probe the .sig up front and skip any
+# source that can't satisfy the trust requirement.
+#
+# Candidates, in preference order: regional project-prefixed, regional legacy,
+# then the same two under the us-east-1 fallback. Each entry is "BASE/PREFIXPART".
+CANDIDATES=(
+    "${S3_BASE_URL}/${PROJECT}"
+    "${S3_BASE_URL}"
+    "${FALLBACK_URL}/${PROJECT}"
+    "${FALLBACK_URL}"
+)
+
+CHECKSUM_URL=""
+for base in "${CANDIDATES[@]}"; do
+    bin_url="${base}/${BINARY}"
+    sig_url="${base}/${BINARY}.sig"
+    # When verifying, require the .sig to exist at this source BEFORE downloading
+    # the (large) binary — a HEAD is enough. Skip sources that can't prove
+    # authenticity so a stale/unsigned regional bucket falls through to us-east-1.
+    if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
+        if ! curl -fsI "$sig_url" >/dev/null 2>&1; then
+            echo "No signature at ${base} — trying next source"
+            continue
+        fi
     fi
-    echo "Downloaded from us-east-1"
+    if curl -f -o "$SPORED_TMP" "$bin_url" 2>/dev/null; then
+        CHECKSUM_URL="${base}/${BINARY}.sha256"
+        echo "Downloaded spored from ${base}"
+        break
+    fi
+done
+
+if [ -z "$CHECKSUM_URL" ]; then
+    echo "Failed to download spored binary from any source (regional + us-east-1 fallback)"
+    if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
+        echo "  (signature verification is on — a source without a .sig is skipped)"
+    fi
+    rm -f "$SPORED_TMP"
+    exit 1
 fi
 
 # Download and verify SHA256 checksum (against the temp file).
