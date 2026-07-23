@@ -29,6 +29,16 @@ idle-stopped instance runs no daemon, so only the reaper will ever reclaim it,
 
 Within-deadline instances are always spared (the deadline is honored intent).
 
+It also (when configured) tears down a reaped instance's Route53 records ([#247])
+and — with `REAPER_DNS_SWEEP=true` — runs a **DNS reconciliation sweep** ([#438]):
+per account, it lists the `{base36}.{domain}` A-records and deletes any whose IP
+has no live (`running`/`pending`) `spawn:managed` instance. This catches records
+orphaned when an instance exits abruptly (hard crash, out-of-band terminate, fast
+spot reclaim) and has since aged out of the EC2 API — the instance-driven #247
+teardown can't see those. The sweep aborts without deleting anything if a region's
+live-instance scan errors (never delete against a partial live set), and honors
+`REAPER_DRY_RUN`.
+
 ## Multi-account coverage
 
 A spore lands in **whatever account the caller's credentials point at** — spawn
@@ -52,6 +62,7 @@ there and appending its ARN to the list.
 | `REAPER_NOTIFY_URL` | (empty) | Slack-incoming-webhook URL; every reap is posted here |
 | `REAPER_DNS_ZONE_ID` | (empty) | Route53 hosted zone ID; with `REAPER_DNS_DOMAIN`, the reaper deletes a reaped instance's DNS records (#247) |
 | `REAPER_DNS_DOMAIN` | (empty) | Domain for the zone above (e.g. `spore.host`); both empty = DNS teardown disabled |
+| `REAPER_DNS_SWEEP` | `false` | With a zone configured, also run a **DNS reconciliation sweep** (#438): delete `{base36}.{domain}` A-records whose IP has no live instance — catches records orphaned by abrupt exits the #247 teardown can't. Honors `REAPER_DRY_RUN` |
 
 If neither `REAPER_ROLE_ARNS`/`EC2_ROLE_ARN` nor `REAPER_SCAN_SELF=true` is set,
 the reaper falls back to scanning its own account (never a silent no-op).

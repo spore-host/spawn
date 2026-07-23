@@ -54,6 +54,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
@@ -74,10 +75,11 @@ const defaultMaxAge = 7 * 24 * time.Hour
 // creds (the Lambda's own creds for the local account, or assumed cross-account
 // creds). ssmFor is used by the graceful pre-stop tier (#187).
 type account struct {
-	label  string
-	ec2For func(region string) *ec2.Client
-	ssmFor func(region string) *ssm.Client
-	fsxFor func(region string) *fsx.Client
+	label     string
+	accountID string // 12-digit AWS account ID (for the {base36}.domain subdomain)
+	ec2For    func(region string) *ec2.Client
+	ssmFor    func(region string) *ssm.Client
+	fsxFor    func(region string) *fsx.Client
 }
 
 // reaper holds resolved configuration. Spores can be launched into ANY account a
@@ -99,6 +101,15 @@ type reaper struct {
 	route53Client *route53.Client
 	dnsZoneID     string
 	dnsDomain     string
+
+	// DNS reconciliation sweep (#438, opt-in via REAPER_DNS_SWEEP=true). The
+	// #247 teardown only deletes a record when the reaper still SEES the instance
+	// via DescribeInstances. A record whose instance died abruptly (hard crash,
+	// out-of-band terminate, fast spot reclaim) and has since aged out of the EC2
+	// API is orphaned — nothing keys off it, so it resolves forever to a dead (or
+	// later reassigned) IP. The sweep reconciles the zone against live instance IPs
+	// and deletes A-records with no live owner. Requires a configured zone.
+	sweepDNS bool
 }
 
 // defaultGracefulWait caps how long the reaper waits for a single instance's
@@ -139,6 +150,7 @@ func init() {
 		gracefulWait: parseGracefulWait(os.Getenv("REAPER_GRACEFUL_MAX_WAIT")),
 		dnsZoneID:    strings.TrimSpace(os.Getenv("REAPER_DNS_ZONE_ID")),
 		dnsDomain:    strings.TrimSpace(os.Getenv("REAPER_DNS_DOMAIN")),
+		sweepDNS:     strings.EqualFold(os.Getenv("REAPER_DNS_SWEEP"), "true"),
 	}
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
 	// client when a zone is configured, so a deployment without DNS teardown
@@ -152,8 +164,12 @@ func init() {
 	for i, a := range r.accounts {
 		labels[i] = a.label
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait)
+	if r.sweepDNS && r.route53Client == nil {
+		log.Printf("REAPER_DNS_SWEEP=true but no zone configured (REAPER_DNS_ZONE_ID/REAPER_DNS_DOMAIN) — sweep disabled")
+		r.sweepDNS = false
+	}
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -167,10 +183,23 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 	externalID := os.Getenv("EC2_EXTERNAL_ID")
 	stsClient := sts.NewFromConfig(base)
 
+	// selfAccountID resolves the reaper's own account ID (for the "self" account's
+	// DNS subdomain). Best-effort: an error just leaves it empty, which disables
+	// the sweep for the self account (never a hard failure).
+	selfAccountID := func() string {
+		out, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+		if err != nil {
+			log.Printf("resolve self account id: %v (DNS sweep disabled for self account)", err)
+			return ""
+		}
+		return aws.ToString(out.Account)
+	}
+
 	var accounts []account
 	if strings.EqualFold(os.Getenv("REAPER_SCAN_SELF"), "true") {
 		accounts = append(accounts, account{
-			label: "self",
+			label:     "self",
+			accountID: selfAccountID(),
 			ec2For: func(region string) *ec2.Client {
 				c := base.Copy()
 				c.Region = region
@@ -207,7 +236,8 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 			log.Fatalf("create cross-account config for %s: %v", roleARN, err)
 		}
 		accounts = append(accounts, account{
-			label: accountIDFromRoleARN(roleARN),
+			label:     accountIDFromRoleARN(roleARN),
+			accountID: accountIDFromRoleARN(roleARN),
 			ec2For: func(region string) *ec2.Client {
 				c := acctCfg.Copy()
 				c.Region = region
@@ -231,7 +261,8 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 		// the reaper is never a no-op by misconfiguration.
 		log.Printf("no REAPER_ROLE_ARNS/EC2_ROLE_ARN and REAPER_SCAN_SELF!=true; defaulting to local account")
 		accounts = append(accounts, account{
-			label: "self",
+			label:     "self",
+			accountID: selfAccountID(),
 			ec2For: func(region string) *ec2.Client {
 				c := base.Copy()
 				c.Region = region
@@ -338,6 +369,10 @@ type Summary struct {
 	FSxExpired int `json:"fsx_expired"` // refcount 0 AND past deadline/max-age
 	FSxReaped  int `json:"fsx_reaped"`
 	FSxSkipped int `json:"fsx_skipped"` // would-reap (dry-run) or held back (still in use / unflushed)
+
+	// DNS sweep (#438): orphaned Route53 A-records reconciled against live IPs.
+	DNSScanned int `json:"dns_scanned"` // A-records examined under the account subdomains
+	DNSReaped  int `json:"dns_reaped"`  // orphaned records deleted (or would-delete in dry-run)
 }
 
 // candidate is an instance the reaper decided should die, with the reason.
@@ -420,6 +455,17 @@ func handler(ctx context.Context) (Summary, error) {
 			// instance still using them (refcount 0). Independent of the instance
 			// scan above; an FSx outlives its instances by design.
 			r.reapFSxRegion(ctx, acct, region, start, &sum)
+		}
+
+		// DNS reconciliation sweep (#438): after scanning all regions for this
+		// account, reconcile the account's {base36}.{domain} A-records against the
+		// set of live instance public IPs and delete records with no live owner.
+		// This catches records orphaned by abrupt exits (crash / out-of-band
+		// terminate / fast spot reclaim) that the instance-driven #247 teardown
+		// can't — the instance is already gone from the EC2 API. Opt-in + best-
+		// effort; never affects the terminate path above.
+		if r.sweepDNS {
+			r.sweepAccountDNS(ctx, acct, &sum)
 		}
 	}
 
@@ -914,6 +960,155 @@ func (r *reaper) deleteRecord(ctx context.Context, fqdn string, rrType r53types.
 		return
 	}
 	log.Printf("DNS teardown: deleted %s record %s", rrType, fqdn)
+}
+
+// sweepAccountDNS reconciles the account's {base36}.{domain} A-records against the
+// set of live instance public IPs and deletes any A-record whose IP has no live
+// owner (#438). It's the record-driven complement to the instance-driven #247
+// teardown: #247 can only delete a record while the instance is still visible via
+// DescribeInstances, so a record orphaned by an abrupt exit (crash / out-of-band
+// terminate / fast spot reclaim) that has since aged out of the EC2 API is
+// unreachable by #247 — this catches it.
+//
+// Safety: strictly opt-in (REAPER_DNS_SWEEP), dry-run aware, and it aborts without
+// deleting anything if the live-IP scan errored (a partial live set could delete a
+// healthy record). It only touches the exact {base36}.{domain} A-records, never the
+// #121 friendly CNAMEs (those alias the A-record and are torn down with it by #247;
+// a CNAME carries no IP to reconcile).
+func (r *reaper) sweepAccountDNS(ctx context.Context, acct account, sum *Summary) {
+	if r.route53Client == nil || acct.accountID == "" {
+		if acct.accountID == "" {
+			log.Printf("DNS sweep: account %s has no resolved account ID — skipping", acct.label)
+		}
+		return
+	}
+	subdomain := dns.EncodeAccountID(acct.accountID) + "." + r.dnsDomain
+
+	// Build the live public-IP set across all regions. If ANY region errors we
+	// abort the sweep for this account — deleting against an incomplete live set
+	// could remove a healthy instance's record.
+	live := map[string]bool{}
+	for _, region := range r.regions {
+		ips, err := r.liveInstanceIPs(ctx, acct, region)
+		if err != nil {
+			log.Printf("DNS sweep: account %s region %s live-IP scan failed: %v — aborting sweep for this account", acct.label, region, err)
+			return
+		}
+		for _, ip := range ips {
+			live[ip] = true
+		}
+	}
+
+	// List the account's A-records and find the orphans.
+	records, err := r.listAccountARecords(ctx, subdomain)
+	if err != nil {
+		log.Printf("DNS sweep: account %s list records under %s failed: %v", acct.label, subdomain, err)
+		return
+	}
+	sum.DNSScanned += len(records)
+	orphans := orphanedRecords(records, live)
+
+	for _, o := range orphans {
+		if r.dryRun {
+			log.Printf("DNS sweep: WOULD delete orphaned A-record %s -> %s (no live instance)", o.fqdn, o.ip)
+			sum.DNSReaped++
+			continue
+		}
+		r.deleteRecord(ctx, o.fqdn, r53types.RRTypeA)
+		log.Printf("DNS sweep: deleted orphaned A-record %s -> %s (no live instance)", o.fqdn, o.ip)
+		sum.DNSReaped++
+	}
+}
+
+// aRecord is a Route53 A-record observed during the sweep: its FQDN and the single
+// IPv4 address it points at.
+type aRecord struct {
+	fqdn string
+	ip   string
+}
+
+// orphanedRecords returns the A-records whose IP is not in the live set — pure, so
+// the reconciliation logic is unit-tested without AWS. A record with no resource
+// values (shouldn't happen for an A-record) is treated as orphaned.
+func orphanedRecords(records []aRecord, live map[string]bool) []aRecord {
+	var orphans []aRecord
+	for _, rec := range records {
+		if !live[rec.ip] {
+			orphans = append(orphans, rec)
+		}
+	}
+	return orphans
+}
+
+// liveInstanceIPs returns the public IPv4 addresses of all spawn-managed instances
+// in one account+region that currently HOLD an IP (running or pending). A stopped
+// instance has no public IP and its record was already released by AWS, so it need
+// not be represented. Errors propagate so the caller can abort the sweep.
+func (r *reaper) liveInstanceIPs(ctx context.Context, acct account, region string) ([]string, error) {
+	client := acct.ec2For(region)
+	var ips []string
+	paginator := ec2.NewDescribeInstancesPaginator(client, &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{
+			{Name: aws.String(tagprefix.FilterTag("managed")), Values: []string{"true"}},
+			{Name: aws.String("instance-state-name"), Values: []string{"pending", "running"}},
+		},
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe instances: %w", err)
+		}
+		for _, res := range page.Reservations {
+			for _, inst := range res.Instances {
+				if ip := aws.ToString(inst.PublicIpAddress); ip != "" {
+					ips = append(ips, ip)
+				}
+			}
+		}
+	}
+	return ips, nil
+}
+
+// listAccountARecords lists every A-record under the account's {base36}.{domain}
+// subdomain, returning each record's FQDN and its (first) IP. Paginates the whole
+// zone and filters by the subdomain suffix — Route53 has no per-subdomain list, so
+// we walk and match. Best-effort per record: an A-record with no values is skipped.
+func (r *reaper) listAccountARecords(ctx context.Context, subdomain string) ([]aRecord, error) {
+	var out []aRecord
+	suffix := "." + subdomain
+	input := &route53.ListResourceRecordSetsInput{HostedZoneId: aws.String(r.dnsZoneID)}
+	for {
+		page, err := r.route53Client.ListResourceRecordSets(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("list records: %w", err)
+		}
+		for i := range page.ResourceRecordSets {
+			rs := page.ResourceRecordSets[i]
+			if rs.Type != r53types.RRTypeA {
+				continue
+			}
+			name := strings.TrimSuffix(aws.ToString(rs.Name), ".")
+			// Match records directly under the account subdomain (name.base36.domain),
+			// not the bare subdomain apex itself.
+			if !strings.HasSuffix(name, suffix) || name == subdomain {
+				continue
+			}
+			// Skip Route53 alias A-records (no literal ResourceRecords) — the sweep
+			// only reconciles plain A-records that carry an IP.
+			if len(rs.ResourceRecords) == 0 {
+				continue
+			}
+			out = append(out, aRecord{fqdn: name, ip: aws.ToString(rs.ResourceRecords[0].Value)})
+		}
+		if page.IsTruncated {
+			input.StartRecordName = page.NextRecordName
+			input.StartRecordType = page.NextRecordType
+			input.StartRecordIdentifier = page.NextRecordIdentifier
+			continue
+		}
+		break
+	}
+	return out, nil
 }
 
 // notify posts a plain Slack-incoming-webhook payload ({"text":...}) to
