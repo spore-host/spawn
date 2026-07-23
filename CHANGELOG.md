@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   IMDS, spored no longer sends an effectively-unsigned request that the AWS_IAM
   Function URL rejects with a silent 403; it reports the credential problem
   instead.
+- **spored now logs when it skips DNS registration because no DNS name is
+  configured (#435).** Previously an instance launched without a `spawn:dns-name`
+  tag skipped registration completely silently, which made a *launcher* that
+  forgot to emit the tag (e.g. a third-party client) look like a broken
+  spored/registration path. spored now logs `DNS registration skipped: no DNS
+  name configured`, so the cause is obvious from `/var/log/spored.log`.
 
 ### Documentation
 - Corrected the base36 account-ID example in `pkg/dns/encoding.go` (and a matching
