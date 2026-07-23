@@ -421,3 +421,46 @@ func TestDNSRecordsToDelete(t *testing.T) {
 		t.Errorf("empty domain should yield nil, got %+v", recs)
 	}
 }
+
+// TestOrphanedRecords covers the #438 DNS-sweep reconciliation: A-records whose IP
+// is not in the live-instance set are orphans; those with a live IP are spared.
+func TestOrphanedRecords(t *testing.T) {
+	live := map[string]bool{"54.1.2.3": true, "18.9.9.9": true}
+	records := []aRecord{
+		{fqdn: "alive.5k0zfnmq.spore.host", ip: "54.1.2.3"},      // live → spared
+		{fqdn: "dead.5k0zfnmq.spore.host", ip: "13.221.19.38"},   // no live owner → orphan
+		{fqdn: "also-alive.5k0zfnmq.spore.host", ip: "18.9.9.9"}, // live → spared
+		{fqdn: "stale.5k0zfnmq.spore.host", ip: "3.227.10.61"},   // no live owner → orphan
+	}
+	orphans := orphanedRecords(records, live)
+	if len(orphans) != 2 {
+		t.Fatalf("expected 2 orphans, got %d: %+v", len(orphans), orphans)
+	}
+	got := map[string]bool{}
+	for _, o := range orphans {
+		got[o.fqdn] = true
+	}
+	if !got["dead.5k0zfnmq.spore.host"] || !got["stale.5k0zfnmq.spore.host"] {
+		t.Errorf("wrong orphans: %+v", orphans)
+	}
+	if got["alive.5k0zfnmq.spore.host"] || got["also-alive.5k0zfnmq.spore.host"] {
+		t.Error("a record with a live IP must never be an orphan")
+	}
+}
+
+// TestOrphanedRecords_EmptyLiveSetDeletesAll documents the intended behavior when
+// no instances are live: every A-record under the subdomain is an orphan. (The
+// sweep still won't run on a partial/errored scan — sweepAccountDNS aborts before
+// calling this — but given a COMPLETE empty live set, all records are stale.)
+func TestOrphanedRecords_EmptyLiveSetDeletesAll(t *testing.T) {
+	records := []aRecord{
+		{fqdn: "a.5k0zfnmq.spore.host", ip: "1.1.1.1"},
+		{fqdn: "b.5k0zfnmq.spore.host", ip: "2.2.2.2"},
+	}
+	if got := orphanedRecords(records, map[string]bool{}); len(got) != 2 {
+		t.Errorf("empty live set should orphan all records, got %d", len(got))
+	}
+	if got := orphanedRecords(nil, map[string]bool{}); len(got) != 0 {
+		t.Errorf("no records should yield no orphans, got %+v", got)
+	}
+}

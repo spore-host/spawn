@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **ttl-reaper: opt-in DNS reconciliation sweep (#438).** With `REAPER_DNS_SWEEP=true`
+  (and a hosted zone configured), the reaper now lists each account's
+  `{base36}.{domain}` A-records and deletes any whose IP has no live
+  (`running`/`pending`) `spawn:managed` instance. This reclaims DNS records
+  orphaned when an instance exits **abruptly** — hard crash, out-of-band
+  `TerminateInstances`, or a fast spot reclaim — and has since aged out of the EC2
+  API, which the instance-driven teardown (#247) can't see. Aborts without deleting
+  if a region's live-instance scan errors (never deletes against a partial live
+  set) and honors `REAPER_DRY_RUN`. Off by default.
+
 ### Fixed
 - **DNS registration failures are no longer silent (#435).** When spored's DNS
   registration is rejected — e.g. a `403` from the DNS Lambda Function URL after

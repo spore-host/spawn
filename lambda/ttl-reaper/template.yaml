@@ -70,6 +70,17 @@ Parameters:
     Default: ''
     Description: Domain for the hosted zone above (e.g. spore.host). Empty disables DNS teardown.
 
+  DnsSweep:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      When true (and a zone is configured), the reaper also runs a DNS
+      reconciliation sweep (#438): it lists each account's {base36}.{domain}
+      A-records and deletes any whose IP has no live instance — catching records
+      orphaned by abrupt exits (crash / out-of-band terminate / fast spot reclaim)
+      that the instance-driven #247 teardown can't. Honors DryRun. Off by default.
+
 Conditions:
   ScanSelfEnabled: !Equals [!Ref ScanSelf, 'true']
   DnsTeardownEnabled: !And
@@ -98,6 +109,7 @@ Resources:
           REAPER_NOTIFY_URL: !Ref NotifyUrl
           REAPER_DNS_ZONE_ID: !Ref DnsZoneId
           REAPER_DNS_DOMAIN: !Ref DnsDomain
+          REAPER_DNS_SWEEP: !Ref DnsSweep
       Policies:
         # Assume each per-account role that actually describes/terminates EC2.
         - Statement:
