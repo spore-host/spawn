@@ -246,6 +246,13 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 		log.Printf("DNS registration skipped for local provider")
 	} else if config.DNSName != "" {
 		log.Printf("Warning: DNS name configured (%s) but no public IP available", config.DNSName)
+	} else {
+		// No DNS name configured (no spawn:dns-name tag) → nothing to register.
+		// Log it explicitly: a silent skip here made a client that forgot to set
+		// spawn:dns-name look like a broken spored/registration path (#435). The
+		// Go `spawn launch` always sets DNSName (--dns defaults to --name), so an
+		// empty value on EC2 means the launcher didn't emit the tag.
+		log.Printf("DNS registration skipped: no DNS name configured (no spawn:dns-name tag on the instance)")
 	}
 
 	// Initialize hybrid registry if part of a job array
