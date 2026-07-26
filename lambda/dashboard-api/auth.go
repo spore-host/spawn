@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +18,51 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
+
+// assumedRoleARNRe parses an STS assumed-role ARN into (account, roleName).
+// e.g. arn:aws:sts::435415984226:assumed-role/spore-portal-launch/<session>
+//   → account=435415984226, roleName=spore-portal-launch
+var assumedRoleARNRe = regexp.MustCompile(`^arn:aws:sts::(\d{12}):assumed-role/([^/]+)/`)
+
+// defaultPortalRoles are the Globus→STS launch roles the portal federates into.
+// A federated caller assuming one of these is a first-class portal user: we scope
+// their data by their own verified AWS account (no Cognito email / CLI link
+// needed). Extendable per-deploy via SPAWN_DASHBOARD_PORTAL_ROLES (comma list of
+// role NAMES). The account is always the SigV4-VERIFIED caller's own — trusting a
+// role name here can never widen access beyond the account that already holds it.
+var defaultPortalRoles = []string{"spore-portal-launch"}
+
+func portalRoleAllowList() []string {
+	if v := os.Getenv("SPAWN_DASHBOARD_PORTAL_ROLES"); v != "" {
+		var out []string
+		for _, r := range strings.Split(v, ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				out = append(out, r)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return defaultPortalRoles
+}
+
+// portalAccountFromARN returns the verified account id if userARN is an assumed
+// -role ARN for one of the trusted portal roles, else ("", false). This is the
+// federated-portal identity path: the scope key becomes the account itself.
+func portalAccountFromARN(userARN string) (string, bool) {
+	m := assumedRoleARNRe.FindStringSubmatch(userARN)
+	if m == nil {
+		return "", false
+	}
+	account, roleName := m[1], m[2]
+	for _, allowed := range portalRoleAllowList() {
+		if roleName == allowed {
+			return account, true
+		}
+	}
+	return "", false
+}
 
 // getUserFromRequest extracts user identity from API Gateway request
 // Returns: userID, cliIamArn, accountBase36, error
@@ -193,6 +240,16 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 	userID := *identity.Arn
 	accountID := *identity.Account
 	accountBase36 := intToBase36(accountID)
+
+	// Federated portal identity: a caller assuming a trusted portal launch role
+	// (Globus→STS) is scoped by its own VERIFIED account — no Cognito email or CLI
+	// link required (the no-paste BYOA model). We don't cache these: the assumed
+	// -role ARN carries a per-session name, so caching by userID would churn a row
+	// per login. Return early with the account as the scope key.
+	if account, ok := portalAccountFromARN(userID); ok {
+		log.Printf("federated portal identity: account %s", account)
+		return userID, account, accountBase36, nil
+	}
 
 	// Check cache
 	cached, err := getUserAccount(ctx, cfg, userID)
