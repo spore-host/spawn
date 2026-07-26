@@ -2,7 +2,7 @@
 
 - **Status:** Draft (for discussion)
 - **Tracking issue:** [spawn#386](https://github.com/spore-host/spawn/issues/386)
-- **Related:** nf-spawn, miniwdl-spawn, cwl-spawn, snakemake-executor-plugin-spawn, spawn-airflow
+- **Related:** nf-spawn, miniwdl-spawn, cwl-spawn, snakemake-executor-plugin-spawn, airflow-spawn
 
 ## Problem
 
@@ -15,7 +15,7 @@ different engine onto an ephemeral EC2 instance:
 | miniwdl-spawn | Python | miniwdl container backend |
 | cwl-spawn | Python | cwltool executor |
 | snakemake-executor-plugin-spawn | Python | Snakemake executor plugin |
-| spawn-airflow | Python | Airflow operator |
+| airflow-spawn | Python | Airflow operator |
 
 Each independently reimplements the **same** machinery:
 
