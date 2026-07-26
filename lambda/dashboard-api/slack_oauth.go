@@ -74,7 +74,7 @@ func handleSlackOAuthRedirect(request events.APIGatewayProxyRequest) (events.API
 // GET /api/slack/oauth/callback?code=...&state=...
 func handleSlackOAuthCallback(ctx context.Context, cfg aws.Config, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	clientID := os.Getenv("SLACK_CLIENT_ID")
-	clientSecret := os.Getenv("SLACK_CLIENT_SECRET")
+	clientSecret := slackClientSecret()
 	if clientID == "" || clientSecret == "" {
 		return errorResponse(500, "Slack OAuth not configured"), nil
 	}
@@ -120,7 +120,7 @@ func handleSlackOAuthCallback(ctx context.Context, cfg aws.Config, request event
 // POST /api/slack/token/rotate
 func handleSlackTokenRotate(ctx context.Context, cfg aws.Config, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	clientID := os.Getenv("SLACK_CLIENT_ID")
-	clientSecret := os.Getenv("SLACK_CLIENT_SECRET")
+	clientSecret := slackClientSecret()
 	if clientID == "" || clientSecret == "" {
 		return errorResponse(500, "Slack OAuth not configured"), nil
 	}
@@ -228,8 +228,8 @@ func storeSlackWorkspace(ctx context.Context, cfg aws.Config, tableName string, 
 		},
 	})
 
-	// Signing secret is app-level — stored in Lambda env, auto-populated for all workspaces
-	signingSecret := os.Getenv("SLACK_SIGNING_SECRET")
+	// Signing secret is app-level — from Secrets Manager (env fallback), auto-populated for all workspaces
+	signingSecret := slackSigningSecret()
 	if signingSecret == "" && existing != nil && existing.Item != nil {
 		if v, ok := existing.Item["signing_secret"].(*dynamodbtypes.AttributeValueMemberS); ok {
 			signingSecret = v.Value
@@ -386,7 +386,7 @@ func extractVerifier(state string) (string, error) {
 }
 
 func hmacB64URL(data string) string {
-	secret := os.Getenv("SLACK_CLIENT_SECRET")
+	secret := slackClientSecret()
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(data))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))

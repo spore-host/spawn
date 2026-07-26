@@ -60,7 +60,7 @@ func getFreshBotToken(ctx context.Context, cfg aws.Config, tableName, workspaceK
 	}
 
 	clientID := os.Getenv("SLACK_CLIENT_ID")
-	clientSecret := os.Getenv("SLACK_CLIENT_SECRET")
+	clientSecret := slackClientSecret()
 	newToken, newRefresh, expiresIn, err := exchangeRefreshToken(clientID, clientSecret, refreshToken)
 	if err != nil {
 		return "", fmt.Errorf("refresh token for %s: %w", workspaceKey, err)
