@@ -53,6 +53,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"pipeline":        "Tier 3: multi-stage orchestration over the queue",
 		"slurm":           "Tier 3: real Slurm submit/cluster",
 		"burst":           "Tier 3: cross-account burst needs real dev-account identity",
+		"onboard":         "Tier 2/3: real IAM CreateRole + SigV4 phone-home POST to the AuthType:AWS_IAM Function URL; role-creation + verified-caller flow needs a real account (validate/signing logic unit-tested)",
 		"autoscale":       "Tier 3: scaling decisions against a real ASG/fleet",
 		"notify":          "Tier 1/3: external notification delivery",
 		"dns":             "Tier 2: Route53 + live instance public IP",

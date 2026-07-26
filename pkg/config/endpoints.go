@@ -113,6 +113,33 @@ func GetBotLambdaRoleARN() string {
 	return botLambdaRoleARNs[GetEnvironment()]
 }
 
+// ── Portal BYOA onboarding (phone-home) ──────────────────────────────────────
+
+// portalPhoneHomeRoleARNs maps environment → the portal phone-home Lambda
+// execution role ARN. The cross-account onboarding role created by
+// `spawn onboard` trusts THIS principal (under a per-account ExternalId).
+var portalPhoneHomeRoleARNs = map[Environment]string{
+	EnvProd:  "arn:aws:iam::966362334030:role/PortalPhoneHomeLambdaRole",
+	EnvInteg: "arn:aws:iam::966362334030:role/PortalPhoneHomeLambdaRole",
+}
+
+// GetPortalPhoneHomeRoleARN returns the phone-home Lambda role ARN the onboarding
+// role trusts. Precedence: SPORE_PORTAL_PHONE_HOME_ROLE_ARN → env default.
+func GetPortalPhoneHomeRoleARN() string {
+	if v := os.Getenv("SPORE_PORTAL_PHONE_HOME_ROLE_ARN"); v != "" {
+		return v
+	}
+	return portalPhoneHomeRoleARNs[GetEnvironment()]
+}
+
+// GetPortalPhoneHomeURL returns the phone-home Function URL the onboarding role
+// POSTs its registration to. No hard-coded default (it's created by
+// infra/tofu/portal-phone-home and its exact URL is account/region-derived), so
+// it must be supplied via SPORE_PORTAL_PHONE_HOME_URL.
+func GetPortalPhoneHomeURL() string {
+	return os.Getenv("SPORE_PORTAL_PHONE_HOME_URL")
+}
+
 // GetBotRegistryTable returns the DynamoDB table name for bot registrations.
 // Precedence: SPORE_BOT_REGISTRY_TABLE → "spore-bot-registry".
 func GetBotRegistryTable() string {
