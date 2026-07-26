@@ -132,12 +132,20 @@ func GetPortalPhoneHomeRoleARN() string {
 	return portalPhoneHomeRoleARNs[GetEnvironment()]
 }
 
+// portalPhoneHomeURLs maps environment → the deployed phone-home Function URL
+// (function_url output of infra/tofu/portal-phone-home).
+var portalPhoneHomeURLs = map[Environment]string{
+	EnvProd:  "https://omnvm7osdhhnr2f7qm4xghz2xq0txwjl.lambda-url.us-east-1.on.aws/",
+	EnvInteg: "https://omnvm7osdhhnr2f7qm4xghz2xq0txwjl.lambda-url.us-east-1.on.aws/",
+}
+
 // GetPortalPhoneHomeURL returns the phone-home Function URL the onboarding role
-// POSTs its registration to. No hard-coded default (it's created by
-// infra/tofu/portal-phone-home and its exact URL is account/region-derived), so
-// it must be supplied via SPORE_PORTAL_PHONE_HOME_URL.
+// POSTs its registration to. Precedence: SPORE_PORTAL_PHONE_HOME_URL → env default.
 func GetPortalPhoneHomeURL() string {
-	return os.Getenv("SPORE_PORTAL_PHONE_HOME_URL")
+	if v := os.Getenv("SPORE_PORTAL_PHONE_HOME_URL"); v != "" {
+		return v
+	}
+	return portalPhoneHomeURLs[GetEnvironment()]
 }
 
 // GetBotRegistryTable returns the DynamoDB table name for bot registrations.
