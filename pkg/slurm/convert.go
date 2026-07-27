@@ -1,6 +1,7 @@
 package slurm
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -251,23 +252,14 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", seconds)
 }
 
-// EstimateCost estimates the cost of running a Slurm job on spawn
-func EstimateCost(job *SlurmJob) (float64, error) {
-	// Select instance type
-	instanceType, err := SelectInstanceType(job)
-	if err != nil {
-		return 0, err
-	}
-
-	// Get instance type info
-	spec, ok := GetInstanceTypeInfo(instanceType)
-	if !ok {
-		return 0, fmt.Errorf("unknown instance type: %s", instanceType)
-	}
-
-	// Calculate total instance hours
-	var totalHours float64
-
+// TotalInstanceHours returns the billable instance-hours the job implies: task
+// count × time limit for an array job (respecting --array's concurrency limit),
+// nodes × time limit for MPI, or one instance's time limit otherwise.
+//
+// This is the part of a cost estimate that depends only on the Slurm script, so
+// it is separated from the $/hr rate — the rate comes from AWS (see
+// [EstimateCostWithPricer]) and needs credentials, while this does not.
+func TotalInstanceHours(job *SlurmJob) float64 {
 	if job.IsArrayJob() {
 		// Array job: each task runs for time limit
 		numTasks := job.GetTotalTasks()
@@ -278,23 +270,91 @@ func EstimateCost(job *SlurmJob) (float64, error) {
 			// Tasks run in batches
 			batches := float64(numTasks) / float64(job.Array.MaxRunning)
 			wallTime := batches * hours
-			totalHours = float64(job.Array.MaxRunning) * wallTime
-		} else {
-			// All tasks run concurrently
-			totalHours = float64(numTasks) * hours
+			return float64(job.Array.MaxRunning) * wallTime
 		}
-	} else if job.IsMPIJob() {
+		// All tasks run concurrently
+		return float64(numTasks) * hours
+	}
+	if job.IsMPIJob() {
 		// MPI job: N nodes × time limit
-		totalHours = float64(job.Nodes) * job.TimeLimit.Hours()
-	} else {
-		// Single job
-		totalHours = job.TimeLimit.Hours()
+		return float64(job.Nodes) * job.TimeLimit.Hours()
+	}
+	// Single job
+	return job.TimeLimit.Hours()
+}
+
+// Pricer supplies the hourly rate for an instance type in a region. It is
+// satisfied by truffle's *aws.Client (Client.HourlyRate), which queries the live
+// AWS Price List and Spot history and caches the result.
+//
+// This is an interface rather than a direct dependency so pkg/slurm stays
+// unit-testable without AWS, and so the estimate has exactly one source of truth
+// for money. Rates are NOT kept in this package: the hardcoded table that used to
+// supply them drifted badly enough to overstate p5 by 79% (#447), and On-Demand
+// GPU rates vary by up to 70% between regions, which a single number cannot
+// represent at all.
+type Pricer interface {
+	// HourlyRate returns the $/hr for instanceType in region under the given
+	// purchase model ("on-demand" or "spot").
+	HourlyRate(ctx context.Context, instanceType, region, model string) (float64, error)
+}
+
+// CostEstimate is a Slurm job's projected cost, with the rates it was computed
+// from so a caller can show what the number is based on.
+type CostEstimate struct {
+	InstanceType    string
+	Region          string
+	InstanceHours   float64
+	OnDemandRate    float64 // $/hr, live
+	SpotRate        float64 // $/hr, live; 0 when no spot price is published
+	OnDemandCost    float64
+	SpotCost        float64 // 0 when SpotRate is 0
+	SpotUnavailable bool    // true when no spot price could be read for the type
+}
+
+// EstimateCostWithPricer estimates the cost of running a Slurm job on spawn,
+// taking both rates from pricer (i.e. from AWS) rather than from any table in
+// this repo.
+//
+// region is where the job would actually run — GPU On-Demand rates differ by as
+// much as 70% across regions, so a region-less estimate is not meaningful for the
+// accelerator types this command is most often used for.
+//
+// A missing spot price is reported in the result rather than returned as an
+// error: newly-launched accelerator types often have no published spot price, and
+// the On-Demand figure is still the answer to "what would this cost".
+func EstimateCostWithPricer(ctx context.Context, job *SlurmJob, pricer Pricer, region string) (*CostEstimate, error) {
+	instanceType, err := SelectInstanceType(job)
+	if err != nil {
+		return nil, err
 	}
 
-	// Calculate cost (assume spot pricing at ~70% discount)
-	onDemandCost := totalHours * spec.Price
-	spotCost := onDemandCost * 0.3 // Approximate spot price
+	hours := TotalInstanceHours(job)
 
-	// Return spot cost by default
-	return spotCost, nil
+	onDemand, err := pricer.HourlyRate(ctx, instanceType, region, "on-demand")
+	if err != nil {
+		return nil, fmt.Errorf("on-demand rate for %s in %s: %w", instanceType, region, err)
+	}
+
+	est := &CostEstimate{
+		InstanceType:  instanceType,
+		Region:        region,
+		InstanceHours: hours,
+		OnDemandRate:  onDemand,
+		OnDemandCost:  hours * onDemand,
+	}
+
+	// Spot is the default the slurm commands quote, but it is a real market rate,
+	// not a fixed fraction of On-Demand. The old flat 70%-off assumption was wrong
+	// in both directions — measured 2026-07-27 in us-east-1, the actual discount
+	// ranged from 38% (p5.48xlarge) to 62% (c5.4xlarge).
+	spot, spotErr := pricer.HourlyRate(ctx, instanceType, region, "spot")
+	if spotErr != nil || spot <= 0 {
+		est.SpotUnavailable = true
+		return est, nil
+	}
+	est.SpotRate = spot
+	est.SpotCost = hours * spot
+
+	return est, nil
 }
