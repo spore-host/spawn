@@ -44,13 +44,19 @@ func slurmCostEstimate(ctx context.Context, job *slurm.SlurmJob) (*slurm.CostEst
 	}
 
 	tc := truffleaws.NewClientFromConfig(awsClient.Config())
-	// Opt out of truffle's default static fallback. That fallback exists so a Price
-	// List outage degrades to an estimate instead of zeroed savings, which is right
-	// for a savings percentage but wrong here: this figure is what a user says yes to
-	// before spawn launches billable instances. Its table has no entry for newer
-	// families, so it answers with a family estimate — hpc7a.96xlarge came back at
-	// $0.20/hr against a real $7.20 — and a plausible wrong price is worse than an
-	// error. With the Price List pricer alone, an unpriceable type says so.
+	// Use the Price List pricer alone, without truffle's default static fallback.
+	//
+	// The fallback lets a Price List outage degrade to truffle's built-in table
+	// instead of zeroing out a savings percentage. That is a reasonable trade for a
+	// percentage, but not for this figure: it is what a user says yes to before
+	// spawn launches billable instances, and a rate that is merely old is still
+	// wrong to quote as current. An error naming the type and region is more useful
+	// here than any number.
+	//
+	// truffle#114 removed the worse half of this — the fallback used to answer an
+	// unknown type with a family guess ($0.20/hr for a real $7.20), so opting out
+	// was load-bearing rather than a preference. It is now a preference, and still
+	// the right one for a spend gate.
 	tc.SetOnDemandPricer(truffleaws.NewAWSOnDemandPricer(awsClient.Config()))
 	return slurm.EstimateCostWithPricer(ctx, job, tc, region)
 }
