@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.94.0] - 2026-07-28
+
+### Added
+- **`spawn onboard` — bring your own AWS account onto the spore.host portal from
+  the CLI (#443).** The equivalent of the web CloudFormation quick-create, run
+  with credentials for the account you're onboarding. It resolves the account via
+  STS, generates a high-entropy per-account ExternalId as a confused-deputy guard,
+  idempotently creates the `spore-portal-onboard` cross-account role with the EC2
+  launch / SSM / scoped `iam:PassRole` permissions the portal needs, and SigV4-POSTs
+  the registration to the portal so the account registers itself — no copy-paste
+  of role ARNs. `--skip-phone-home` creates the role without registering, and
+  `--json` emits the result for scripting.
+- **`--region` on `spawn slurm estimate` and `spawn slurm submit`.** GPU
+  On-Demand rates vary by up to 70% between regions, so the estimate is priced
+  per-region: `--region`, else the script's `#SPAWN --region`, else your AWS
+  config region.
+- **The dashboard API accepts a federated portal identity (#445).** A caller who
+  assumed a trusted portal launch role (`spore-portal-launch` by default,
+  extendable via `SPAWN_DASHBOARD_PORTAL_ROLES`) is now a first-class user scoped
+  by their own verified AWS account — no Cognito email or CLI link step. The
+  account always comes from the SigV4-verified caller, so trusting a role name
+  can't widen access beyond the account that already holds it.
+
 ### Changed
 - **`spawn slurm estimate` / `submit` now quote live AWS prices instead of a
   hardcoded table (#447).** Rates come from truffle, the suite's pricing
@@ -39,12 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a fix for a nil search pattern crashing the process, and correct SageMaker rate
   selection.
 
-### Added
-- **`--region` on `spawn slurm estimate` and `spawn slurm submit`.** GPU
-  On-Demand rates vary by up to 70% between regions, so the estimate is priced
-  per-region: `--region`, else the script's `#SPAWN --region`, else your AWS
-  config region.
-
 ### Removed
 - **The p3 (V100) instance types are gone from Slurm instance selection (#447).**
   AWS no longer offers p3 in us-east-1, us-east-2, us-west-2 or eu-west-1, so
@@ -60,6 +77,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table, which is the bug. `InstanceTypeSpec.Price` is likewise renamed to
   `InstanceTypeSpec.RelativeCost` to make clear it ranks candidates and is not a
   price.
+
+### Fixed
+- **`spawn onboard` no longer needs `SPORE_PORTAL_PHONE_HOME_URL` set (#444).**
+  The phone-home URL now defaults to the deployed endpoint for the active
+  environment instead of returning empty, so onboarding auto-registers out of the
+  box. The env var still overrides, matching how the role ARN already resolved.
+
+### Security
+- **Slack app secrets moved out of plaintext Lambda environment variables (#446).**
+  The dashboard API's Slack `client_secret` and `signing_secret` were readable by
+  anyone with `lambda:GetFunctionConfiguration` and shown in the console/CLI. They
+  now live in one Secrets Manager secret (`SLACK_SECRETS_ARN`), with the exec role
+  granted `secretsmanager:GetSecretValue` on just that ARN and the value cached per
+  warm Lambda. The legacy env vars still work as a fallback so the code can deploy
+  before the secret is wired and the vars removed after — no flag-day.
 
 ## [0.93.1] - 2026-07-23
 
@@ -2097,7 +2129,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.93.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.94.0...HEAD
+[0.94.0]: https://github.com/spore-host/spawn/compare/v0.93.1...v0.94.0
 [0.93.1]: https://github.com/spore-host/spawn/compare/v0.93.0...v0.93.1
 [0.93.0]: https://github.com/spore-host/spawn/compare/v0.92.0...v0.93.0
 [0.92.0]: https://github.com/spore-host/spawn/compare/v0.91.1...v0.92.0
