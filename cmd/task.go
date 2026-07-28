@@ -270,10 +270,12 @@ func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.Resourc
 		// SearchInstanceTypes does NOT populate on-demand price (that's a separate
 		// pricing call), so r.OnDemandPrice is 0 here. The sizer ranks on price —
 		// without it, "cheapest" degenerates to a name tie-break and can pick the
-		// LARGEST type. So look the price up explicitly (API with a static
-		// libs/pricing fallback). A lookup miss leaves price 0; the sizer sorts
-		// those last, so a priced option always wins and we never silently pick a
-		// huge box because pricing was unavailable.
+		// LARGEST type. So look the price up explicitly, via truffle's default
+		// pricer (live Price List, falling back to its built-in table only for a
+		// type and region that table actually covers — truffle#114). A miss now
+		// errors rather than returning a family guess; that leaves price 0, and the
+		// sizer sorts unpriced options last, so a priced option always wins and we
+		// never silently pick a huge box because pricing was unavailable.
 		price := r.OnDemandPrice
 		if price <= 0 {
 			if p, perr := f.tc.OnDemandPrice(ctx, r.InstanceType, f.region); perr == nil {

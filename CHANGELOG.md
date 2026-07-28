@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selection table.** A `#SPAWN --instance-type` override naming any type AWS
   offers is now priced normally; the vCPU/memory/GPU spec lines are simply
   omitted for a type spawn doesn't select from.
+- **truffle v0.38.1 → v0.48.0.** Brings truffle#114: a rate the AWS Price List
+  can't supply is now an error rather than a guess from the instance family. This
+  affects the `$/hr` shown by `spawn task --dry-run`, which used truffle's
+  default pricer — a type that region doesn't offer previously showed a fabricated
+  rate (`hpc7a.96xlarge` at $0.20/hr against a real $7.20) and now shows no price
+  at all, with the sizer ranking unpriced candidates last as before. Also picks up
+  a fix for a nil search pattern crashing the process, and correct SageMaker rate
+  selection.
 
 ### Added
 - **`--region` on `spawn slurm estimate` and `spawn slurm submit`.** GPU
