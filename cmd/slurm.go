@@ -7,14 +7,59 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/slurm"
+	truffleaws "github.com/spore-host/truffle/pkg/aws"
 	"gopkg.in/yaml.v3"
 )
 
 var (
 	slurmOutputFile string
 	slurmForceYes   bool
+	slurmRegion     string
 )
+
+// slurmCostEstimate resolves the region the job would run in and prices it with
+// truffle's live pricer (Price List + Spot history), which is the suite's pricing
+// authority. spawn keeps no rate table of its own: the one it had drifted to 79%
+// over the real p5 rate, and can't express the ~70% swing between regions (#447).
+//
+// Precedence for the region: --region, then the script's #SPAWN --region, then
+// the resolved AWS config region.
+func slurmCostEstimate(ctx context.Context, job *slurm.SlurmJob) (*slurm.CostEstimate, error) {
+	region := slurmRegion
+	if region == "" {
+		region = job.SpawnRegion
+	}
+
+	awsClient, err := spawnaws.NewClientWithRegion(ctx, region)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize AWS client: %w", err)
+	}
+	if region == "" {
+		region = awsClient.Config().Region
+	}
+	if region == "" {
+		return nil, fmt.Errorf("no region resolved for the cost estimate; pass --region or set one in your AWS config")
+	}
+
+	tc := truffleaws.NewClientFromConfig(awsClient.Config())
+	// Use the Price List pricer alone, without truffle's default static fallback.
+	//
+	// The fallback lets a Price List outage degrade to truffle's built-in table
+	// instead of zeroing out a savings percentage. That is a reasonable trade for a
+	// percentage, but not for this figure: it is what a user says yes to before
+	// spawn launches billable instances, and a rate that is merely old is still
+	// wrong to quote as current. An error naming the type and region is more useful
+	// here than any number.
+	//
+	// truffle#114 removed the worse half of this — the fallback used to answer an
+	// unknown type with a family guess ($0.20/hr for a real $7.20), so opting out
+	// was load-bearing rather than a preference. It is now a preference, and still
+	// the right one for a spend gate.
+	tc.SetOnDemandPricer(truffleaws.NewAWSOnDemandPricer(awsClient.Config()))
+	return slurm.EstimateCostWithPricer(ctx, job, tc, region)
+}
 
 // slurmCmd represents the slurm command
 var slurmCmd = &cobra.Command{
@@ -114,6 +159,12 @@ func init() {
 
 	// Submit flags
 	slurmSubmitCmd.Flags().BoolVarP(&slurmForceYes, "yes", "y", false, "Skip confirmation prompt")
+
+	// Cost estimates are priced per-region (GPU On-Demand rates vary by up to 70%
+	// between regions), so both commands that quote a cost accept a region.
+	for _, c := range []*cobra.Command{slurmEstimateCmd, slurmSubmitCmd} {
+		c.Flags().StringVar(&slurmRegion, "region", "", "Region to price the estimate in (default: #SPAWN --region, else your AWS config region)")
+	}
 }
 
 func runSlurmConvert(cmd *cobra.Command, args []string) error {
@@ -171,31 +222,28 @@ func runSlurmEstimate(cmd *cobra.Command, args []string) error {
 	// Print job summary
 	printJobSummary(job)
 
-	// Select instance type
-	instanceType, err := slurm.SelectInstanceType(job)
-	if err != nil {
-		return fmt.Errorf("failed to select instance type: %w", err)
-	}
-
-	// Get instance info
-	spec, ok := slurm.GetInstanceTypeInfo(instanceType)
-	if !ok {
-		return fmt.Errorf("unknown instance type: %s", instanceType)
-	}
-
-	// Estimate cost
-	estimatedCost, err := slurm.EstimateCost(job)
+	// Estimate cost. This also selects the instance type, so the printed specs and
+	// the priced type can never disagree.
+	est, err := slurmCostEstimate(cmd.Context(), job)
 	if err != nil {
 		return fmt.Errorf("failed to estimate cost: %w", err)
 	}
 
 	// Print cost estimate
 	fmt.Fprintf(os.Stderr, "\n📊 Spawn Translation:\n")
-	fmt.Fprintf(os.Stderr, "  Instance type:       %s (spot)\n", instanceType)
-	fmt.Fprintf(os.Stderr, "  vCPUs:               %d\n", spec.VCPUs)
-	fmt.Fprintf(os.Stderr, "  Memory:              %d MB\n", spec.MemoryMB)
-	if spec.GPUs > 0 {
-		fmt.Fprintf(os.Stderr, "  GPUs:                %d × %s\n", spec.GPUs, spec.GPUType)
+	fmt.Fprintf(os.Stderr, "  Instance type:       %s\n", est.InstanceType)
+	fmt.Fprintf(os.Stderr, "  Region:              %s\n", est.Region)
+	// Specs are shown when the selection table knows the type. A #SPAWN
+	// --instance-type override can name any type AWS offers, and the table only
+	// covers the ones spawn selects from — so an unknown type omits the spec lines
+	// rather than failing the whole estimate. The cost, which is what the command
+	// is for, comes from AWS and works for any type.
+	if spec, ok := slurm.GetInstanceTypeInfo(est.InstanceType); ok {
+		fmt.Fprintf(os.Stderr, "  vCPUs:               %d\n", spec.VCPUs)
+		fmt.Fprintf(os.Stderr, "  Memory:              %d MB\n", spec.MemoryMB)
+		if spec.GPUs > 0 {
+			fmt.Fprintf(os.Stderr, "  GPUs:                %d × %s\n", spec.GPUs, spec.GPUType)
+		}
 	}
 
 	if job.IsArrayJob() {
@@ -210,8 +258,18 @@ func runSlurmEstimate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "\n💰 Cost Estimate:\n")
-	fmt.Fprintf(os.Stderr, "  Estimated cost:      $%.2f (spot pricing)\n", estimatedCost)
-	fmt.Fprintf(os.Stderr, "  On-demand cost:      $%.2f (if spot unavailable)\n", estimatedCost/0.3)
+	fmt.Fprintf(os.Stderr, "  Instance hours:      %.1f\n", est.InstanceHours)
+	// Rates are stated alongside the totals: the hourly number is what a user can
+	// check against the AWS console, and it makes clear the total is rate × hours
+	// rather than an opaque figure.
+	fmt.Fprintf(os.Stderr, "  On-demand cost:      $%.2f  ($%.4f/hr)\n", est.OnDemandCost, est.OnDemandRate)
+	if est.SpotUnavailable {
+		fmt.Fprintf(os.Stderr, "  Spot cost:           unavailable — no spot price published for %s in %s\n", est.InstanceType, est.Region)
+	} else {
+		fmt.Fprintf(os.Stderr, "  Spot cost:           $%.2f  ($%.4f/hr, %.0f%% off on-demand)\n",
+			est.SpotCost, est.SpotRate, (1-est.SpotRate/est.OnDemandRate)*100)
+	}
+	fmt.Fprintf(os.Stderr, "  Rates:               live AWS pricing via truffle (%s)\n", est.Region)
 
 	fmt.Fprintf(os.Stderr, "\n⚡ Time Savings:\n")
 	fmt.Fprintf(os.Stderr, "  Cluster queue time:  2-24 hours (typical)\n")
@@ -240,13 +298,20 @@ func runSlurmSubmit(cmd *cobra.Command, args []string) error {
 	// Print job summary
 	printJobSummary(job)
 
-	// Estimate cost
-	estimatedCost, err := slurm.EstimateCost(job)
+	// Estimate cost. This gates a real, billable launch, so the figure comes from
+	// live AWS pricing — a stale estimate here is what a user says yes to.
+	est, err := slurmCostEstimate(cmd.Context(), job)
 	if err != nil {
 		return fmt.Errorf("failed to estimate cost: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "\n💰 Estimated cost: $%.2f (spot pricing)\n\n", estimatedCost)
+	if est.SpotUnavailable {
+		fmt.Fprintf(os.Stderr, "\n💰 Estimated cost: $%.2f on-demand (%s in %s, %.1f instance-hours; no spot price published)\n\n",
+			est.OnDemandCost, est.InstanceType, est.Region, est.InstanceHours)
+	} else {
+		fmt.Fprintf(os.Stderr, "\n💰 Estimated cost: $%.2f spot / $%.2f on-demand (%s in %s, %.1f instance-hours)\n\n",
+			est.SpotCost, est.OnDemandCost, est.InstanceType, est.Region, est.InstanceHours)
+	}
 
 	// Confirm unless --yes flag
 	if !slurmForceYes {

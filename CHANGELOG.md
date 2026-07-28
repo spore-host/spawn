@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`spawn slurm estimate` / `submit` now quote live AWS prices instead of a
+  hardcoded table (#447).** Rates come from truffle, the suite's pricing
+  authority, which reads the AWS Price List and Spot history for the actual
+  region. The table spawn used had drifted badly: p4d was overstated by 49% and
+  p5 by 79%, and spot was assumed to be a flat 70% off On-Demand when the real
+  discount ranges from 38% to 62%. Both commands now also print the $/hr each
+  total was computed from, the region priced, and the real spot discount, so the
+  figure can be checked against the AWS console. If no On-Demand rate can be
+  read, the estimate now **fails with an error** rather than quoting $0.00 or a
+  guess — this number gates a billable launch.
+- **GPU instance selection re-sourced from current hardware (#447).** Added the
+  g6 (L4), g6e (L40S), g7 (RTX PRO 4500), g7e (RTX PRO 6000), p4de (A100 80GB),
+  p5e/p5en (H200) and p6-b200/p6-b300 (Blackwell) families, so a `--gres=gpu:`
+  request for modern hardware can actually be satisfied. `p5.4xlarge` in
+  particular is now selectable — it is the only H100 size that doesn't require
+  renting all 8 GPUs, so single-GPU H100 jobs no longer land on a type costing 8×
+  more. `--gres=gpu:` also accepts the gres spellings for these GPUs
+  (`nvidia_h100`, `h200-141gb`, `rtx_pro_6000`, and so on).
+- **`slurm estimate` no longer fails on an instance type outside spawn's
+  selection table.** A `#SPAWN --instance-type` override naming any type AWS
+  offers is now priced normally; the vCPU/memory/GPU spec lines are simply
+  omitted for a type spawn doesn't select from.
+
+### Added
+- **`--region` on `spawn slurm estimate` and `spawn slurm submit`.** GPU
+  On-Demand rates vary by up to 70% between regions, so the estimate is priced
+  per-region: `--region`, else the script's `#SPAWN --region`, else your AWS
+  config region.
+
+### Removed
+- **The p3 (V100) instance types are gone from Slurm instance selection (#447).**
+  AWS no longer offers p3 in us-east-1, us-east-2, us-west-2 or eu-west-1, so
+  selecting one produced an instance type that could not launch — surfacing as an
+  opaque `RunInstances` failure. A `--gres=gpu:v100` script still works: it now
+  resolves to a current successor GPU (A10G/L4/L40S/H100 and later) instead of
+  dead hardware. T4 is deliberately excluded as a successor — it matches on VRAM
+  but is a large step down in compute.
+- **BREAKING (library):** `slurm.EstimateCost(job)` is removed, replaced by
+  `slurm.EstimateCostWithPricer(ctx, job, pricer, region)` plus
+  `slurm.TotalInstanceHours(job)` for the credential-free half. There is no
+  compatibility shim on purpose: any shim would have to keep reading the drifted
+  table, which is the bug. `InstanceTypeSpec.Price` is likewise renamed to
+  `InstanceTypeSpec.RelativeCost` to make clear it ranks candidates and is not a
+  price.
+
 ## [0.93.1] - 2026-07-23
 
 ### Fixed

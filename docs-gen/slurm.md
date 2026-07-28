@@ -65,8 +65,14 @@ Example:
   spawn slurm estimate train.sbatch
 
 ```
-spawn slurm estimate <script.sbatch>
+spawn slurm estimate <script.sbatch> [flags]
 ```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--region` |  | string |  | Region to price the estimate in (default: #SPAWN --region, else your AWS config region) |
 
 ### `spawn slurm submit`
 
@@ -86,5 +92,6 @@ spawn slurm submit <script.sbatch> [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
+| `--region` |  | string |  | Region to price the estimate in (default: #SPAWN --region, else your AWS config region) |
 | `--yes` | `-y` | bool |  | Skip confirmation prompt |
 
