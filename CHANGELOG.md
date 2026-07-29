@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Updated `golang.org/x/text` to v0.39.0 for CVE-2026-56852** (HIGH). A
+  `norm.Iter` can enter an infinite loop on certain input, so any code
+  normalizing untrusted text could hang. Bumped across all three modules —
+  the root module and both Lambda modules (`dns-updater`, `ttl-reaper`), which
+  pinned it independently.
+
 ## [0.94.0] - 2026-07-28
 
 ### Added
