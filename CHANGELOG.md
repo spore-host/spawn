@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn plugin search` and `spawn plugin info` — find plugins before you
+  install them (#448).** There was no way to ask what plugins exist: you had to
+  already know a name, and a typo was indistinguishable from a plugin that had
+  never been written (both 404). `search` lists the official registry, with an
+  optional query matched against names and descriptions, and flags a plugin that
+  wants root on the instance. `info <name>` shows its version, description,
+  config keys (marking which are required), and declared capability surface, and
+  suggests near-matches when the name misses. Both read a generated index that
+  the registry publishes, cached under `~/.spawn/cache` so they work offline —
+  and both always print where the listing came from and how old it is, so a
+  cached answer is never mistaken for a current one. `--refresh` refetches.
+  Discovery covers the official `spore-host/spore-plugins` registry only; see
+  the PR for why third-party entries are deferred.
+
+### Fixed
+- **Registry URLs are now pinned by tests.** The official registry keeps specs
+  under `plugins/<name>/plugin.yaml` while a third-party `github:` repo keeps
+  `<name>/plugin.yaml` at its root; no test recorded which URL a ref actually
+  resolved to, so either layout could regress silently into an install-time 404
+  (#448). The `--insecure`-path and traversal-rejection URLs are covered too.
+- **A registry ref that fails validation no longer logs an "installing plugin
+  from unverified source" warning** before being rejected.
+
 ### Security
 - **Updated `golang.org/x/text` to v0.39.0 for CVE-2026-56852** (HIGH). A
   `norm.Iter` can enter an infinite loop on certain input, so any code

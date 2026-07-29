@@ -27,8 +27,10 @@ func newTestResolver(rawBase, apiBase string) *compositeResolver {
 func TestResolveWithProvenance_GitHub_PinsAndHashes(t *testing.T) {
 	const wantSHA = "0123456789abcdef0123456789abcdef01234567"
 	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /spore-host/spore-plugins/main/demo/plugin.yaml
-		if !strings.HasSuffix(r.URL.Path, "/demo/plugin.yaml") {
+		// Exact path, not a suffix: "/demo/plugin.yaml" matches both the official
+		// plugins/<name>/ layout and the third-party root layout, so a suffix check
+		// here pinned neither. See registry_specpath_test.go.
+		if r.URL.Path != "/spore-host/spore-plugins/main/plugins/demo/plugin.yaml" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}

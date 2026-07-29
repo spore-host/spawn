@@ -16,6 +16,29 @@ Examples:
 spawn plugin
 ```
 
+### `spawn plugin info`
+
+Show what the registry knows about a plugin: version, description, config
+parameters, and declared capability surface.
+
+This reads the registry index and contacts no instance. It describes the plugin
+as PUBLISHED — for the full spec of what installing would run, including every
+step, use 'spawn plugin inspect &lt;ref&gt;'.
+
+Examples:
+  spawn plugin info tailscale
+  spawn plugin info jupyterlab --output json
+
+```
+spawn plugin info <name> [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--refresh` |  | bool |  | Bypass the local cache and refetch the registry index |
+
 ### `spawn plugin inspect`
 
 Resolve a plugin reference and render its plan — resolved source and
@@ -130,6 +153,30 @@ spawn plugin remove <name> [flags]
 | `--key` |  | string |  | Path to SSH private key |
 | `--user` |  | string |  | SSH username for the instance (default: ec2-user) |
 | `--yes` | `-y` | bool |  | Skip the confirmation prompt |
+
+### `spawn plugin search`
+
+Search the official plugin registry (spore-host/spore-plugins) for plugins
+available to install. With no query, lists everything.
+
+Reads a generated index published by the registry, cached locally so this works
+offline; the age of what you're seeing is always shown. This lists what EXISTS —
+use 'spawn plugin list --instance &lt;id&gt;' for what is installed on an instance.
+
+Examples:
+  spawn plugin search
+  spawn plugin search jupyter
+  spawn plugin search --refresh
+
+```
+spawn plugin search [query] [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--refresh` |  | bool |  | Bypass the local cache and refetch the registry index |
 
 ### `spawn plugin status`
 
