@@ -16,6 +16,35 @@ Examples:
 spawn plugin
 ```
 
+### `spawn plugin gen-index`
+
+Generate index.json for a plugin registry from its plugins/ directory.
+
+This is the generator side of plugin discovery, in the same arrangement as
+'spawn plugin manifest': it lives here, and the registry's CI invokes it, so the
+index is always derived by the same parser that installs plugins and can never
+describe a spec differently from the spec itself.
+
+--generated-at takes an RFC3339 timestamp (CI passes the commit time) so
+regenerating an unchanged registry produces a byte-identical file. It defaults to
+now, which makes every run differ — fine locally, churn in CI.
+
+Examples:
+  spawn plugin gen-index ./plugins -o index.json
+  spawn plugin gen-index ./plugins --generated-at 2026-07-29T00:00:00Z
+
+```
+spawn plugin gen-index <plugins-dir> [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--generated-at` |  | string |  | RFC3339 generation timestamp (default: now) |
+| `--output` | `-o` | string |  | Write index to this file instead of stdout |
+| `--source` |  | string | `spore-host/spore-plugins` | owner/repo the index describes |
+
 ### `spawn plugin info`
 
 Show what the registry knows about a plugin: version, description, config

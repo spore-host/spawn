@@ -242,9 +242,12 @@ Examples:
 }
 
 var pluginGenIndexCmd = &cobra.Command{
-	Use:    "gen-index <plugins-dir>",
-	Short:  "Generate the registry discovery index (offline)",
-	Hidden: true,
+	Use:   "gen-index <plugins-dir>",
+	Short: "Generate the registry discovery index (offline)",
+	// Not hidden, matching `plugin manifest` — the other registry-side generator.
+	// A hidden command is also undetectable: `gen-index --help` on a spawn that
+	// lacks it falls through to `plugin --help` and exits 0, so a registry CI
+	// probing for support would think an old binary had it.
 	Long: `Generate index.json for a plugin registry from its plugins/ directory.
 
 This is the generator side of plugin discovery, in the same arrangement as
