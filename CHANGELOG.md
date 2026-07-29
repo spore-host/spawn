@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.0] - 2026-07-29
+
 ### Added
 - **`spawn plugin search` and `spawn plugin info` — find plugins before you
   install them (#448).** There was no way to ask what plugins exist: you had to
@@ -2160,7 +2162,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.94.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.95.0...HEAD
+[0.95.0]: https://github.com/spore-host/spawn/compare/v0.94.0...v0.95.0
 [0.94.0]: https://github.com/spore-host/spawn/compare/v0.93.1...v0.94.0
 [0.93.1]: https://github.com/spore-host/spawn/compare/v0.93.0...v0.93.1
 [0.93.0]: https://github.com/spore-host/spawn/compare/v0.92.0...v0.93.0
