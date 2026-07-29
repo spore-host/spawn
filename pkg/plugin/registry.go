@@ -223,15 +223,18 @@ func sha256Hex(b []byte) string {
 // the already-resolved ref to fetch at ("" → the repo default branch, "main").
 func (r *compositeResolver) fetchGitHubSpec(ctx context.Context, pr PluginRef, gitRef string) (*PluginSpec, []byte, error) {
 	owner, repo, name := pr.Owner, pr.Repo, pr.Name
-	if owner != "spore-host" {
-		log.Printf("warning: installing plugin from unverified source %s/%s — content is not signed or audited", owner, repo)
-	}
 
-	// Validate each URL component to prevent path traversal.
+	// Validate each URL component to prevent path traversal. Before the warning
+	// below, so a ref we're about to reject isn't announced as one we're
+	// installing.
 	for _, part := range []string{owner, repo, name} {
 		if !validGitHubComponent.MatchString(part) {
 			return nil, nil, fmt.Errorf("invalid registry ref component %q", part)
 		}
+	}
+
+	if owner != "spore-host" {
+		log.Printf("warning: installing plugin from unverified source %s/%s — content is not signed or audited", owner, repo)
 	}
 
 	if gitRef == "" {
