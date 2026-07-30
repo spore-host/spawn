@@ -30,10 +30,11 @@ launch fixes only the first; only worker reuse fixes the second.
 (`nf-spawn/.../SpawnTaskHandler.groovy:186-190`) runs `spawn task run` via
 `ProcessBuilder` and **blocks** on `launchProcess.waitFor()`. Nextflow's
 `TaskPollingMonitor` calls `submit()` from its submit path, so N submits
-serialize. Each `spawn task run` additionally calls `taskproto.Size()` →
-truffle `SearchInstanceTypes` + per-candidate pricing lookups
-(`spawn/cmd/task.go:367`), **even though nf-spawn always pins `instance_type`**
-(`buildTaskSpec`) — pure per-task overhead. Together this is the ~3s/task.
+serialize on the monitor thread — the dominant ~3s/task. (The `spawn task run`
+side no longer pays a sizing cost when the type is pinned: `taskproto.Size()`
+short-circuits a pinned `instance_type` before any truffle/pricing call —
+`pkg/taskproto/sizer.go:48`, #413 — and nf-spawn always pins it. Remaining
+per-call cost is the RunInstances round-trip + a few identity/bucket calls.)
 
 **(b) Boot-per-task tax (the deeper problem).** `Client.Launch` issues
 `RunInstances` with `MinCount/MaxCount: 1` (`spawn/pkg/aws/client.go:379`), and
@@ -141,15 +142,18 @@ Every phase preserves best-effort + eventual semantics and the cost-safety
 invariant. Each phase is independently shippable and independently measurable.
 
 ### Phase 0 — cheap wins, no new architecture (establish the ceiling)
-- **spawn:** skip `taskproto.Size()` when `resources.instance_type` is pinned
-  (nf-spawn always pins it) — removes the truffle search + pricing lookups from
-  every `task run`.
+- **spawn:** ~~skip `taskproto.Size()` when `resources.instance_type` is pinned~~
+  **ALREADY DONE** — `taskproto.Size()` short-circuits a pinned `instance_type`
+  before any finder call (`pkg/taskproto/sizer.go:48-56`, commit `92b0b9f`,
+  #413/#416). nf-spawn always pins it, so `spawn task run` already skips the
+  truffle search + pricing lookups. No work here.
 - **nf-spawn:** make `submit()` non-blocking — fire the `spawn task run`
-  subprocess and capture its result asynchronously, so RunInstances round-trips
-  overlap instead of serializing on `waitFor()`.
-- **Outcome:** cuts the ~3s/task dispatch cost and overlaps dispatch. Does **not**
-  fix the boot-per-task tax (Little's Law), so peak concurrency improves but is
-  still capped. **Re-measure to set the baseline the real fix must beat.**
+  subprocess and detect its result on the next `checkIfRunning()` poll instead of
+  blocking on `waitFor()`, so RunInstances round-trips overlap instead of
+  serializing on Nextflow's monitor thread.
+- **Outcome:** overlaps the per-task launch round-trips. Does **not** fix the
+  boot-per-task tax (Little's Law), so peak concurrency improves but is still
+  capped. **Re-measure to set the baseline the real fix must beat.**
 
 ### Phase 1 — pooled workers (the real fix) — spawn
 - `pkg/taskcohort` adapter + queue-backed worker pool + per-job taskproto wrapper.
