@@ -91,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subdomain, a deceptively similar suffix, the #121 friendly CNAMEs, and alias
   A-records (which carry an AWS target rather than an IP).
 
+### Documentation
+- **Design doc: pooled task execution for wide fan-out (nf-spawn#70).**
+  `docs/pooled-task-execution-design.md` captures the reusable spawn pooled
+  execution design — fungible workers provisioned as a cohort that pull TaskSpecs
+  from a run-scoped queue and reuse across jobs — that the `spawn pool` feature
+  (above) implements. Reuses `pkg/mpicohort` (adapter precedent), `pkg/queue`
+  (single-instance job runner), and `spore-host/cohort` (partial cohort +
+  warm-start + capacity fallback).
+
 ## [0.95.0] - 2026-07-29
 
 ### Added
