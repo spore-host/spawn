@@ -58,6 +58,7 @@ func (e *ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir s
 	if bash == "" {
 		bash = "bash"
 	}
+	// nosemgrep: dangerous-exec-command -- bash is a constant; scriptPath is a file this method just wrote under a workspace dir we control (not user input). The task command inside the script is the workflow author's own, same trust model as `spawn task run`.
 	cmd := exec.CommandContext(ctx, bash, scriptPath)
 	cmd.Dir = workspaceDir
 	cmd.Stdout = e.Stdout
