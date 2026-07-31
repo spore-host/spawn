@@ -28,11 +28,14 @@ package taskpool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	smithy "github.com/aws/smithy-go"
 )
 
 // SQSAPI is the slice of the SQS SDK the queue needs. An interface (not the
@@ -103,15 +106,69 @@ func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTim
 	return &Queue{client: client, url: aws.ToString(out.QueueUrl), name: name}, nil
 }
 
+// openQueueMaxAttempts bounds OpenQueue's retry on a not-yet-visible queue.
+// GetQueueUrl is eventually consistent after CreateQueue, so a worker that boots
+// and resolves the queue can race the submitter's create and see NonExistentQueue
+// for a short window (observed in a #70 smoke: a worker exited at boot because its
+// first GetQueueUrl 400'd, seconds after the queue was created). 10 attempts ×
+// ~3s ≈ 30s of tolerance covers the consistency window without hanging forever on
+// a genuinely-absent queue.
+const openQueueMaxAttempts = 10
+
+// openQueueRetryDelay is the wait between OpenQueue attempts. A package var (not a
+// const) so tests can shrink it; production uses ~3s.
+var openQueueRetryDelay = 3 * time.Second
+
 // OpenQueue resolves an EXISTING run-scoped queue by run id (the worker path: the
 // worker knows only the run id and looks up the URL the submitter created).
+//
+// It retries a NonExistentQueue error, because GetQueueUrl is eventually
+// consistent after the submitter's CreateQueue — a freshly-booted worker can
+// resolve the queue before that create has propagated. Any OTHER error (auth,
+// throttle, malformed) returns immediately. A queue that never appears within the
+// attempt budget returns the last NonExistentQueue error, so the caller fails
+// loudly rather than silently no-op'ing.
 func OpenQueue(ctx context.Context, client SQSAPI, runID string) (*Queue, error) {
 	name := QueueName(runID)
-	out, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: aws.String(name)})
-	if err != nil {
-		return nil, fmt.Errorf("resolve queue %s: %w", name, err)
+	var lastErr error
+	for attempt := 0; attempt < openQueueMaxAttempts; attempt++ {
+		if attempt > 0 {
+			// Context-aware backoff so a cancelled worker exits promptly.
+			t := time.NewTimer(openQueueRetryDelay)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return nil, ctx.Err()
+			case <-t.C:
+			}
+		}
+		out, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: aws.String(name)})
+		if err == nil {
+			return &Queue{client: client, url: aws.ToString(out.QueueUrl), name: name}, nil
+		}
+		lastErr = err
+		if !isNonExistentQueue(err) {
+			return nil, fmt.Errorf("resolve queue %s: %w", name, err)
+		}
+		// NonExistentQueue → the create hasn't propagated yet; retry.
 	}
-	return &Queue{client: client, url: aws.ToString(out.QueueUrl), name: name}, nil
+	return nil, fmt.Errorf("resolve queue %s: not visible after %d attempts: %w", name, openQueueMaxAttempts, lastErr)
+}
+
+// isNonExistentQueue reports whether err is SQS's NonExistentQueue (the create→
+// GetQueueUrl consistency case OpenQueue retries). Matched on the API error code
+// via smithy, so it's robust to message wording.
+func isNonExistentQueue(err error) bool {
+	var qde *types.QueueDoesNotExist
+	if errors.As(err, &qde) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := apiErr.ErrorCode()
+		return code == "AWS.SimpleQueueService.NonExistentQueue" || code == "QueueDoesNotExist"
+	}
+	return false
 }
 
 // URL returns the queue's SQS URL.
