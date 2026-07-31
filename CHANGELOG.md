@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The #438 DNS reconciliation sweep could not be enabled through `make deploy`
+  (ttl-reaper).** `DnsSweep` — along with `DnsZoneId` and `DnsDomain` — was never
+  passed in the deploy target's `--parameter-overrides`, and `sam deploy` marks
+  any parameter it isn't given as `UsePreviousValue`. So the documented
+  `REAPER_DNS_SWEEP` knob was unreachable from the repo's own deploy path: on an
+  existing stack it silently kept whatever was already deployed, and on a fresh
+  stack it fell back to the template default (`false`). The sweep shipped working
+  but off, with no supported way to turn it on. All three DNS parameters are now
+  passed explicitly (`DNS_ZONE_ID` / `DNS_DOMAIN` / `DNS_SWEEP`), the README shows
+  the enabling invocation, and the verify section says to confirm `dns-sweep=true`
+  on the init line rather than assuming the feature is live.
+
+### Changed
+- **The ttl-reaper sweep's in-scope rules are now a pure, tested function
+  (`sweepableRecord`).** Deciding which Route53 records the #438 sweep may delete
+  was inline with the paginated `ListResourceRecordSets` call and therefore
+  untestable — the highest-consequence logic in the sweep, since a record wrongly
+  judged in-scope is a live-DNS outage. Extracted with no behavior change and
+  covered for each exclusion: the subdomain apex, the zone apex, another account's
+  subdomain, a deceptively similar suffix, the #121 friendly CNAMEs, and alias
+  A-records (which carry an AWS target rather than an IP).
+
 ## [0.95.0] - 2026-07-29
 
 ### Added

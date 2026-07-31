@@ -1083,22 +1083,9 @@ func (r *reaper) listAccountARecords(ctx context.Context, subdomain string) ([]a
 			return nil, fmt.Errorf("list records: %w", err)
 		}
 		for i := range page.ResourceRecordSets {
-			rs := page.ResourceRecordSets[i]
-			if rs.Type != r53types.RRTypeA {
-				continue
+			if rec, ok := sweepableRecord(page.ResourceRecordSets[i], subdomain, suffix); ok {
+				out = append(out, rec)
 			}
-			name := strings.TrimSuffix(aws.ToString(rs.Name), ".")
-			// Match records directly under the account subdomain (name.base36.domain),
-			// not the bare subdomain apex itself.
-			if !strings.HasSuffix(name, suffix) || name == subdomain {
-				continue
-			}
-			// Skip Route53 alias A-records (no literal ResourceRecords) — the sweep
-			// only reconciles plain A-records that carry an IP.
-			if len(rs.ResourceRecords) == 0 {
-				continue
-			}
-			out = append(out, aRecord{fqdn: name, ip: aws.ToString(rs.ResourceRecords[0].Value)})
 		}
 		if page.IsTruncated {
 			input.StartRecordName = page.NextRecordName
@@ -1109,6 +1096,30 @@ func (r *reaper) listAccountARecords(ctx context.Context, subdomain string) ([]a
 		break
 	}
 	return out, nil
+}
+
+// sweepableRecord decides whether one Route53 record set is in scope for the #438
+// sweep, and if so extracts the (fqdn, ip) the reconciliation keys off. Pure, so
+// the in-scope rules — the only thing standing between the sweep and deleting a
+// record it has no business touching — are unit-testable without AWS.
+//
+// In scope: a plain A-record strictly BELOW the account subdomain. Everything else
+// is skipped: other types (the #121 friendly CNAMEs carry no IP to reconcile and
+// are torn down with their A-record by #247), the subdomain apex itself, records
+// under a different account's subdomain, and alias A-records (which point at an AWS
+// resource, not a literal IP — e.g. the zone's CloudFront/API Gateway aliases).
+func sweepableRecord(rs r53types.ResourceRecordSet, subdomain, suffix string) (aRecord, bool) {
+	if rs.Type != r53types.RRTypeA {
+		return aRecord{}, false
+	}
+	name := strings.TrimSuffix(aws.ToString(rs.Name), ".")
+	if !strings.HasSuffix(name, suffix) || name == subdomain {
+		return aRecord{}, false
+	}
+	if len(rs.ResourceRecords) == 0 {
+		return aRecord{}, false
+	}
+	return aRecord{fqdn: name, ip: aws.ToString(rs.ResourceRecords[0].Value)}, true
 }
 
 // notify posts a plain Slack-incoming-webhook payload ({"text":...}) to

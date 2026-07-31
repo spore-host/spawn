@@ -11,16 +11,26 @@ build:
 #   make deploy DRY_RUN=false NOTIFY_URL=https://hooks.slack.com/... \
 #     ROLE_ARNS='arn:aws:iam::ACCT_A:role/spawn-ttl-reaper-ec2,arn:aws:iam::ACCT_B:role/spawn-ttl-reaper-ec2'
 # ROLE_ARNS must list one cross-account role per spore-launching account.
+#
+# Every template parameter the DNS features need is passed explicitly. `sam deploy`
+# marks any parameter it is NOT given as UsePreviousValue, so an omitted one is
+# unreachable from here: on an existing stack it silently keeps whatever is
+# deployed, and on a fresh stack it falls back to the template Default. DNS_SWEEP
+# in particular defaults to 'false', so leaving it out made #438 impossible to
+# enable via `make deploy` even though the code and the README documented it.
 DRY_RUN?=true
 NOTIFY_URL?=
 SCAN_SELF?=false
 ROLE_ARNS?=arn:aws:iam::435415984226:role/spawn-ttl-reaper-ec2
+DNS_ZONE_ID?=
+DNS_DOMAIN?=
+DNS_SWEEP?=false
 deploy: build
 	sam deploy \
 		--template-file template.yaml \
 		--stack-name spawn-ttl-reaper-$(ENV) \
 		--capabilities CAPABILITY_IAM \
-		--parameter-overrides Environment=$(ENV) DryRun=$(DRY_RUN) NotifyUrl=$(NOTIFY_URL) ScanSelf=$(SCAN_SELF) "RoleArns=$(ROLE_ARNS)" \
+		--parameter-overrides Environment=$(ENV) DryRun=$(DRY_RUN) NotifyUrl=$(NOTIFY_URL) ScanSelf=$(SCAN_SELF) "RoleArns=$(ROLE_ARNS)" DnsZoneId=$(DNS_ZONE_ID) DnsDomain=$(DNS_DOMAIN) DnsSweep=$(DNS_SWEEP) \
 		--resolve-s3
 
 deploy-staging:

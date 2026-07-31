@@ -99,6 +99,20 @@ make deploy DRY_RUN=true NOTIFY_URL=https://hooks.slack.com/services/... \
 make deploy DRY_RUN=false NOTIFY_URL=https://hooks.slack.com/services/... ROLE_ARNS='...'
 ```
 
+DNS teardown (#247) and the reconciliation sweep (#438) are off unless their
+parameters are passed — the sweep is opt-in on top of a configured zone, so both
+DNS knobs are needed:
+
+```bash
+make deploy DRY_RUN=false ROLE_ARNS='...' \
+  DNS_ZONE_ID=Z0341053304H0DQXF6U4X DNS_DOMAIN=spore.host DNS_SWEEP=true
+```
+
+`ROLE_ARNS` must list **every** account that has records under the zone. The sweep
+is per-account (it derives each `{base36}` subdomain from the account ID), so an
+account absent from `ROLE_ARNS` is never reconciled and its orphaned records
+persist indefinitely — exactly the leak #438 set out to close.
+
 ## Verify
 
 ```bash
@@ -109,6 +123,19 @@ make logs
 ```
 
 Dry-run logs `WOULD reap i-… — ttl-deadline (age …)`; enforce logs `REAPED i-…`.
+
+The init line reports which features are actually live — check `dns-sweep=true`
+there before trusting that #438 is running:
+
+```
+ttl-reaper initialized (accounts=[…], …, dry-run=false, …, dns-sweep=true)
+```
+
+A sweep that finds an orphan logs `DNS sweep: deleted orphaned A-record
+name.{base36}.spore.host -> 1.2.3.4 (no live instance)` (`WOULD delete` in
+dry-run) and counts it in the summary's `DNSScanned`/`DNSReaped`. A sweep whose
+live-instance scan errored logs `aborting sweep for this account` and deletes
+nothing — by design, since a partial live set could orphan a healthy record.
 
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71

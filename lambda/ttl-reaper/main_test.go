@@ -7,6 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	fsxtypes "github.com/aws/aws-sdk-go-v2/service/fsx/types"
+	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
@@ -462,5 +463,64 @@ func TestOrphanedRecords_EmptyLiveSetDeletesAll(t *testing.T) {
 	}
 	if got := orphanedRecords(nil, map[string]bool{}); len(got) != 0 {
 		t.Errorf("no records should yield no orphans, got %+v", got)
+	}
+}
+
+// TestSweepableRecord covers what the #438 sweep will and will NOT consider for
+// deletion. These are the guardrails: the sweep deletes records, so a record that
+// wrongly tests in-scope is a live-DNS outage. Cases mirror the real spore.host
+// zone, which holds CloudFront/API-Gateway aliases and per-account subdomains
+// side by side.
+func TestSweepableRecord(t *testing.T) {
+	const subdomain = "5k0zfnmq.spore.host"
+	suffix := "." + subdomain
+
+	a := func(name, ip string) r53types.ResourceRecordSet {
+		return r53types.ResourceRecordSet{
+			Name:            aws.String(name),
+			Type:            r53types.RRTypeA,
+			ResourceRecords: []r53types.ResourceRecord{{Value: aws.String(ip)}},
+		}
+	}
+
+	// In scope: a plain A-record below the account subdomain.
+	rec, ok := sweepableRecord(a("box.5k0zfnmq.spore.host.", "54.1.2.3"), subdomain, suffix)
+	if !ok {
+		t.Fatal("a plain A-record under the account subdomain must be in scope")
+	}
+	if rec.fqdn != "box.5k0zfnmq.spore.host" {
+		t.Errorf("fqdn = %q, want the trailing dot stripped", rec.fqdn)
+	}
+	if rec.ip != "54.1.2.3" {
+		t.Errorf("ip = %q, want 54.1.2.3", rec.ip)
+	}
+
+	out := []struct {
+		why string
+		rs  r53types.ResourceRecordSet
+	}{
+		{"the subdomain apex itself is not an instance record",
+			a("5k0zfnmq.spore.host.", "54.1.2.3")},
+		{"the zone apex is not under the subdomain",
+			a("spore.host.", "54.1.2.3")},
+		{"another account's subdomain must never be swept by this account",
+			a("box.4zlw3a1t.spore.host.", "54.1.2.3")},
+		{"a suffix that merely LOOKS similar is not the subdomain",
+			a("box.evil-5k0zfnmq.spore.host.", "54.1.2.3")},
+		{"the #121 friendly CNAME carries no IP to reconcile", r53types.ResourceRecordSet{
+			Name:            aws.String("friendly.5k0zfnmq.spore.host."),
+			Type:            r53types.RRTypeCname,
+			ResourceRecords: []r53types.ResourceRecord{{Value: aws.String("box.5k0zfnmq.spore.host")}},
+		}},
+		{"an alias A-record points at an AWS resource, not an IP", r53types.ResourceRecordSet{
+			Name:        aws.String("cdn.5k0zfnmq.spore.host."),
+			Type:        r53types.RRTypeA,
+			AliasTarget: &r53types.AliasTarget{DNSName: aws.String("d1hcjyt3z5xzq4.cloudfront.net.")},
+		}},
+	}
+	for _, tc := range out {
+		if _, ok := sweepableRecord(tc.rs, subdomain, suffix); ok {
+			t.Errorf("%s: %s must be out of scope", aws.ToString(tc.rs.Name), tc.why)
+		}
 	}
 }
