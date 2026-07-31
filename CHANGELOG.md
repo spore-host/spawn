@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.96.3] - 2026-07-31
+
 ### Fixed
 - **Pool workers now get an IAM profile that can actually reach the queue (#70).**
   `spawn pool create` gave workers the bare shared spored role, which grants no
@@ -2320,7 +2322,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.96.2...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.96.3...HEAD
+[0.96.3]: https://github.com/spore-host/spawn/compare/v0.96.2...v0.96.3
 [0.96.2]: https://github.com/spore-host/spawn/compare/v0.96.1...v0.96.2
 [0.96.1]: https://github.com/spore-host/spawn/compare/v0.96.0...v0.96.1
 [0.96.0]: https://github.com/spore-host/spawn/compare/v0.95.0...v0.96.0
