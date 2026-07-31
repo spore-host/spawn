@@ -149,3 +149,56 @@ func TestDirWorkspace_ResetRefusesOutsideRoot(t *testing.T) {
 		t.Errorf("Reset of sanitized in-root dir failed: %v", err)
 	}
 }
+
+// TestDirWorkspace_NotWorldWritable pins the workspace mode (#459). The job script
+// runs as the same user that creates the dir — spored is User=root and the pooled
+// script has no `su -` — so nothing needs group/other write. A world-writable
+// workspace would let any local account tamper with a live task's files, including
+// the .spawn-job.sh that Exec writes there and then executes.
+func TestDirWorkspace_NotWorldWritable(t *testing.T) {
+	ws := &DirWorkspace{Root: t.TempDir()}
+	dir, err := ws.Acquire("nf-perms")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat workspace: %v", err)
+	}
+	perm := fi.Mode().Perm()
+	if perm&0o022 != 0 {
+		t.Errorf("workspace %q mode = %#o, want no group/other write bits (0o022 clear)", dir, perm)
+	}
+	if perm != 0o700 {
+		t.Errorf("workspace %q mode = %#o, want 0700", dir, perm)
+	}
+	// The owner must still be able to create the job script and cd into the dir.
+	if err := os.WriteFile(filepath.Join(dir, ".probe"), []byte("x"), 0o600); err != nil {
+		t.Errorf("owner cannot write into its own workspace: %v", err)
+	}
+}
+
+// TestDirWorkspace_ReacquireResetsMode covers the MkdirAll-is-a-no-op-on-existing-dir
+// case: if a stale dir survives with loose perms, Acquire must still hand back a
+// 0700 workspace rather than silently inheriting them.
+func TestDirWorkspace_ReacquireResetsMode(t *testing.T) {
+	ws := &DirWorkspace{Root: t.TempDir()}
+	dir, err := ws.Acquire("nf-stale")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod to simulate a stale loose dir: %v", err)
+	}
+	again, err := ws.Acquire("nf-stale")
+	if err != nil {
+		t.Fatalf("re-Acquire: %v", err)
+	}
+	fi, err := os.Stat(again)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("re-acquired workspace mode = %#o, want 0700", perm)
+	}
+}

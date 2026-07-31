@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Pooled worker task workspaces are now created `0700`, not world-writable (#70).**
+  `taskpool.DirWorkspace.Acquire` created per-task dirs `0777`; since the pooled
+  job script runs as the same user that creates the dir (spored is root; the
+  pooled job script has no `su -`), world-writable only exposed a live task's
+  workspace — including the `.spawn-job.sh` about to execute — to tampering by any
+  local account. The dir is now `0700`, with the mode set explicitly (MkdirAll
+  skips chmod on an existing dir) so a stale/raced dir can't retain loose perms.
+
 ### Added
 - **ttl-reaper: unmanaged-subdomain report (#457).** The #438 DNS sweep is
   per-account and only ever looks at accounts listed in `REAPER_ROLE_ARNS`, so

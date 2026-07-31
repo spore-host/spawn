@@ -102,8 +102,30 @@ func (d *DirWorkspace) Acquire(taskID string) (string, error) {
 	if err := os.RemoveAll(dir); err != nil {
 		return "", fmt.Errorf("clear stale workspace %s: %w", dir, err)
 	}
-	if err := os.MkdirAll(dir, 0o777); err != nil {
+	// 0o700, not 0o777 (#459): the job script runs as the SAME user that creates this
+	// dir — spored is User=root (deployment/spawn-orchestrator.service) and
+	// GeneratePooledJobScript emits a plain #!/bin/bash with no `su -` — so no other
+	// user needs write OR read here. A workspace holds task inputs and the
+	// .spawn-job.sh that Exec writes and then executes.
+	//
+	// The prior 0o777 was not in fact world-writable: MkdirAll applies mode&^umask,
+	// and the unit sets no UMask=, so systemd's default 0022 made it 0o755. That is
+	// the point — the mode only stayed safe by accident of an ambient umask this code
+	// does not control. Request the mode we actually want instead.
+	//
+	// The one-instance path DOES drop to the unprivileged instance user (bootstrap
+	// runs its wrapper via `su - <user>`, see pkg/taskproto/wrapper.go). If a pooled
+	// worker ever does the same, chown this dir to that user rather than widening the
+	// mode back to o+w.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create workspace %s: %w", dir, err)
+	}
+	// MkdirAll applies mode&^umask, and skips chmod entirely if the dir already
+	// exists — so set the mode explicitly to get 0o700 regardless of the worker's
+	// umask. (RemoveAll above means it normally does not exist, but a race or a
+	// RemoveAll that silently no-ops on a mount point would leave stale perms.)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("set workspace mode %s: %w", dir, err)
 	}
 	return dir, nil
 }
