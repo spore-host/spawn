@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The ttl-reaper can now expire the DNS records of an account the portal has
+  proven dormant (#466, closing the last open piece of #457).** The
+  unmanaged-subdomain report (#458) deleted nothing, and its comment said why: a
+  subdomain under an account absent from `REAPER_ROLE_ARNS` is ambiguous between
+  "the customer uninstalled and left records" and "an active account nobody added
+  to the list", and the two are indistinguishable *precisely because the reaper
+  lacks the credentials* — `DescribeInstances` is how emptiness is proven. The
+  portal's account-prober (spore-host/spore-host#492) assumes a role the registry
+  *does* know about, proves emptiness across every region, and writes the verdict
+  to `spore-portal-accounts`. The reaper now reads it: every report line carries
+  the account's lifecycle status, and with `REAPER_DNS_EXPIRE=true` a `dormant` or
+  `offboarded` account's A-records are deleted.
+
+  Only `dormant` (emptiness proven through a working role) and `offboarded` (a
+  human stated intent) qualify. `unreachable` deliberately does not — that is
+  #457's trap 2: the moment we would most like to clean up is the moment the role
+  we would have verified through is gone, so it needs a human rather than a longer
+  wait. An account with no registry row, or an unreadable `Scan`, refuses and says
+  so rather than falling back to a silent report.
+
+  Two switches (`REAPER_DNS_SWEEP` **and** `REAPER_DNS_EXPIRE`) rather than one,
+  because the sweep is already enabled in production: folding expiry into it would
+  make an existing flag destructive on upgrade for a class of records it has never
+  touched. Off by default, `REAPER_DRY_RUN`-aware, and A-records only (the #121
+  friendly CNAMEs alias the A-record and carry no IP). The cost of being wrong is
+  asymmetric, which drove that caution: `spored` registers DNS once at boot with no
+  periodic re-registration, so a wrongly deleted A-record never self-heals — the
+  spore keeps running and is simply unreachable by name until it reboots.
+
+  The reaper holds `dynamodb:Scan` on the registry and nothing else — no
+  `UpdateItem`, no `PutItem` — so a reaper bug cannot manufacture the eligibility
+  it then acts on. New summary fields: `dns_expiry_eligible` /
+  `dns_expiry_ineligible` / `dns_expired_records` (eligible-but-not-expired is the
+  normal, healthy reading).
+
+### Fixed
+- **`make build` in `lambda/ttl-reaper` built `main.go` instead of the package**, so
+  a second source file in that module would have been silently omitted from the
+  deployed binary. Now builds `.`.
+
 ## [0.96.3] - 2026-07-31
 
 ### Fixed

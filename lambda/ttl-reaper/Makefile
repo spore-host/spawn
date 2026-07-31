@@ -4,7 +4,10 @@ BINARY_NAME=bootstrap
 ENV?=production
 
 build:
-	GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o $(BINARY_NAME) main.go
+	@# Build the PACKAGE (`.`), not `main.go`. Naming files builds only those files, so
+	@# adding a second source file (expiry.go, #466) to a `go build main.go` recipe
+	@# fails outright if it is referenced — and would ship a binary missing it if not.
+	GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o $(BINARY_NAME) .
 	zip function.zip $(BINARY_NAME)
 
 # Deploy into the infra account (966362334030). Override on the command line:
@@ -34,13 +37,18 @@ ROLE_ARNS?=arn:aws:iam::435415984226:role/spawn-ttl-reaper-ec2
 DNS_ZONE_ID?=
 DNS_DOMAIN?=
 DNS_SWEEP?=false
+# DNS expiry (#466): deletes records, so it is passed explicitly for the same reason
+# as DNS_SWEEP above — an omitted parameter is unreachable from here. Off by default.
+DNS_EXPIRE?=false
+ACCOUNTS_TABLE?=spore-portal-accounts
+ACCOUNTS_TABLE_KEY_ARN?=
 PARAMS_FILE=.deploy-params.yaml
 deploy: build
-	@printf 'Environment: "%s"\nDryRun: "%s"\nNotifyUrl: "%s"\nScanSelf: "%s"\nRoleArns: "%s"\nDnsZoneId: "%s"\nDnsDomain: "%s"\nDnsSweep: "%s"\n' \
-		'$(ENV)' '$(DRY_RUN)' '$(NOTIFY_URL)' '$(SCAN_SELF)' '$(ROLE_ARNS)' '$(DNS_ZONE_ID)' '$(DNS_DOMAIN)' '$(DNS_SWEEP)' > $(PARAMS_FILE)
+	@printf 'Environment: "%s"\nDryRun: "%s"\nNotifyUrl: "%s"\nScanSelf: "%s"\nRoleArns: "%s"\nDnsZoneId: "%s"\nDnsDomain: "%s"\nDnsSweep: "%s"\nDnsExpire: "%s"\nAccountsTable: "%s"\nAccountsTableKeyArn: "%s"\n' \
+		'$(ENV)' '$(DRY_RUN)' '$(NOTIFY_URL)' '$(SCAN_SELF)' '$(ROLE_ARNS)' '$(DNS_ZONE_ID)' '$(DNS_DOMAIN)' '$(DNS_SWEEP)' '$(DNS_EXPIRE)' '$(ACCOUNTS_TABLE)' '$(ACCOUNTS_TABLE_KEY_ARN)' > $(PARAMS_FILE)
 	@# Echo the mode-setting parameters so a deploy can't quietly leave a feature off
 	@# — but never NotifyUrl, which is a Slack webhook secret.
-	@echo "deploying: dry-run=$(DRY_RUN) scan-self=$(SCAN_SELF) dns-sweep=$(DNS_SWEEP) zone='$(DNS_ZONE_ID)' domain='$(DNS_DOMAIN)'"
+	@echo "deploying: dry-run=$(DRY_RUN) scan-self=$(SCAN_SELF) dns-sweep=$(DNS_SWEEP) dns-expire=$(DNS_EXPIRE) zone='$(DNS_ZONE_ID)' domain='$(DNS_DOMAIN)'"
 	sam deploy \
 		--template-file template.yaml \
 		--stack-name spawn-ttl-reaper-$(ENV) \
