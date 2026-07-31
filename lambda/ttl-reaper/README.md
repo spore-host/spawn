@@ -39,6 +39,12 @@ teardown can't see those. The sweep aborts without deleting anything if a region
 live-instance scan errors (never delete against a partial live set), and honors
 `REAPER_DRY_RUN`.
 
+The sweep also reports **unmanaged subdomains** ([#457]) — records under accounts
+absent from `REAPER_ROLE_ARNS`, which the per-account sweep cannot see at all — and
+annotates each with the portal registry's lifecycle verdict. With
+`REAPER_DNS_EXPIRE=true` it can delete the ones the registry has proven dormant or
+offboarded ([#466]). See [DNS expiry](#dns-expiry-466).
+
 ## Multi-account coverage
 
 A spore lands in **whatever account the caller's credentials point at** — spawn
@@ -62,7 +68,9 @@ there and appending its ARN to the list.
 | `REAPER_NOTIFY_URL` | (empty) | Slack-incoming-webhook URL; every reap is posted here |
 | `REAPER_DNS_ZONE_ID` | (empty) | Route53 hosted zone ID; with `REAPER_DNS_DOMAIN`, the reaper deletes a reaped instance's DNS records (#247) |
 | `REAPER_DNS_DOMAIN` | (empty) | Domain for the zone above (e.g. `spore.host`); both empty = DNS teardown disabled |
-| `REAPER_DNS_SWEEP` | `false` | With a zone configured, also run a **DNS reconciliation sweep** (#438): delete `{base36}.{domain}` A-records whose IP has no live instance — catches records orphaned by abrupt exits the #247 teardown can't. Honors `REAPER_DRY_RUN`. Also emits the report-only **unmanaged-subdomain** signal (#457) |
+| `REAPER_DNS_SWEEP` | `false` | With a zone configured, also run a **DNS reconciliation sweep** (#438): delete `{base36}.{domain}` A-records whose IP has no live instance — catches records orphaned by abrupt exits the #247 teardown can't. Honors `REAPER_DRY_RUN`. Also emits the **unmanaged-subdomain** report (#457) |
+| `REAPER_DNS_EXPIRE` | `false` | With the sweep on, **delete** the A-records under an unmanaged subdomain whose account the portal registry has proven `dormant` or `offboarded` ([#466]). Requires `REAPER_DNS_SWEEP` (the walk runs inside the sweep) and honors `REAPER_DRY_RUN`. Read the report before enabling — see [DNS expiry](#dns-expiry-466) |
+| `ACCOUNTS_TABLE` | `spore-portal-accounts` | The portal registry supplying the expiry verdict. Read-only: the reaper only `Scan`s it, and the prober owns every write |
 
 If neither `REAPER_ROLE_ARNS`/`EC2_ROLE_ARN` nor `REAPER_SCAN_SELF=true` is set,
 the reaper falls back to scanning its own account (never a silent no-op).
@@ -116,22 +124,77 @@ persist indefinitely — exactly the leak #438 set out to close.
 Because that absence used to be silent, the sweep also emits an
 **unmanaged-subdomain report** ([#457]): it walks the zone once per run, decodes
 each `{base36}` label back to an account ID, and logs any subdomain whose account
-is not in `ROLE_ARNS`. It **deletes nothing** — an unmanaged subdomain is
-ambiguous (an account that uninstalled, or a live one someone forgot to add), and
-without credentials there is no way to prove which, since `DescribeInstances` is
-how emptiness is established. So it raises a signal and stops:
+is not in `ROLE_ARNS`. Left alone, the hazard is that a released public IP returns
+to the EC2 pool, so an abandoned A-record eventually resolves to an unrelated
+instance. Counted in the summary as `DNSUnmanagedSubdomains` /
+`DNSUnmanagedRecords`.
+
+Each line carries the **portal registry's verdict** on that account ([#466]):
 
 ```
-UNMANAGED subdomain 4zlw3a1t.spore.host (account 390967728545) — 1 record(s),
-  no credentials to reconcile; add its role to REAPER_ROLE_ARNS to sweep it,
-  or offboard it deliberately (#457)
+UNMANAGED subdomain 4zlw3a1t.spore.host (account 390967728545) — 1 record(s);
+  registry status "active" — not eligible for expiry (#457)
 ```
 
-Counted in the summary as `DNSUnmanagedSubdomains` / `DNSUnmanagedRecords`. Acting
-on it is a human decision: either add the account's role (so the sweep covers it)
-or delete the records deliberately. Left alone, the hazard is that a released
-public IP returns to the EC2 pool, so an abandoned A-record eventually resolves to
-an unrelated instance.
+## DNS expiry (#466)
+
+The report above originally deleted nothing, and said why: an unmanaged subdomain
+is ambiguous — an account that uninstalled and left records, or a live one someone
+forgot to add to `ROLE_ARNS` — and the two are indistinguishable *precisely
+because we lack the credentials*, since `DescribeInstances` is how emptiness is
+proven.
+
+The portal's [`account-prober`](https://github.com/spore-host/spore-host/tree/main/lambda/portal-account-prober)
+holds credentials the registry knows about (`spore-portal-onboard`, a different
+role from the reaper's `spawn-ttl-reaper-ec2`) and does prove it across every
+region, writing the result to `spore-portal-accounts`. So for an account **in the
+registry** the ambiguity is resolvable, and `accountlifecycle.DNSExpiryEligible`
+is the verdict:
+
+| Registry status | Eligible | Why |
+|---|---|---|
+| `dormant` | **yes** | reachable *and* provably empty for N days — emptiness established through a working role |
+| `offboarded` | **yes** | a human stated the intent |
+| `active` | no | the account is in use |
+| `unreachable` | no | #457 trap 2: the role we would verify through is gone, so emptiness can no longer be proven. Needs a human, not a longer wait |
+| absent / unreadable | no | the prober has no opinion, so the original ambiguity stands in full |
+
+The verdict is **always reported**. Acting on it needs `REAPER_DNS_EXPIRE=true` on
+top of the sweep's own opt-in:
+
+```bash
+make deploy DRY_RUN=false ROLE_ARNS='...' \
+  DNS_ZONE_ID=Z0341053304H0DQXF6U4X DNS_DOMAIN=spore.host DNS_SWEEP=true \
+  DNS_EXPIRE=true ACCOUNTS_TABLE_KEY_ARN=arn:aws:kms:us-east-1:966362334030:key/...
+```
+
+Two switches rather than one because `DNS_SWEEP` is already on in production:
+folding expiry into it would make an existing flag destructive on upgrade for a
+class of records it has never touched. And the cost of being wrong is asymmetric —
+`spored` registers DNS **once, at boot** (`pkg/agent/agent.go`), with no periodic
+re-registration, so a wrongly deleted A-record **never self-heals**. The spore
+keeps running and is simply unreachable by name until it reboots.
+
+What expiry deletes: only the `A`-records under that subdomain, never the [#121]
+friendly CNAMEs (they alias the A-record and carry no IP — a dangling CNAME
+resolves to nothing, whereas a stale A-record resolves to a stranger's box).
+
+```
+EXPIRING subdomain 4zlw3a1t.spore.host (account 390967728545) — 2 record(s);
+  registry status "dormant" — ELIGIBLE for expiry (since …, last probed 1h0m0s ago) (#466)
+DNS expiry: deleted A-record box1.4zlw3a1t.spore.host -> 54.1.2.3 (account eligible for expiry)
+```
+
+Summary fields: `DNSExpiryEligible` / `DNSExpiryIneligible` (verdicts) and
+`DNSExpiredRecords` (records deleted, or would-delete under dry-run).
+**Eligible-but-not-Expired is the normal, healthy reading** — it means the verdict
+exists and the flag is off.
+
+The reaper holds `dynamodb:Scan` on the registry and nothing else — no
+`UpdateItem`, no `PutItem`. That the reaper *cannot write* the table is what makes
+it impossible for a reaper bug to manufacture the eligibility it then acts on. If
+the `Scan` fails, or the account has no row, expiry refuses and says so
+(`no registry verdicts available … nothing was deleted`).
 
 ## Verify
 
@@ -145,11 +208,15 @@ make logs
 Dry-run logs `WOULD reap i-… — ttl-deadline (age …)`; enforce logs `REAPED i-…`.
 
 The init line reports which features are actually live — check `dns-sweep=true`
-there before trusting that #438 is running:
+there before trusting that #438 is running, and `dns-expire=true` for #466:
 
 ```
-ttl-reaper initialized (accounts=[…], …, dry-run=false, …, dns-sweep=true)
+ttl-reaper initialized (accounts=[…], …, dry-run=false, …, dns-sweep=true, dns-expire=false)
 ```
+
+`REAPER_DNS_EXPIRE=true` with the sweep off logs `expiry disabled (it runs inside
+the sweep)` and reports `dns-expire=false` — the walk expiry acts on happens inside
+the sweep, so it would otherwise look enabled while reaching no candidate.
 
 A sweep that finds an orphan logs `DNS sweep: deleted orphaned A-record
 name.{base36}.spore.host -> 1.2.3.4 (no live instance)` (`WOULD delete` in
@@ -157,6 +224,8 @@ dry-run) and counts it in the summary's `DNSScanned`/`DNSReaped`. A sweep whose
 live-instance scan errored logs `aborting sweep for this account` and deletes
 nothing — by design, since a partial live set could orphan a healthy record.
 
+[#121]: https://github.com/spore-host/spawn/issues/121
 [#457]: https://github.com/spore-host/spawn/issues/457
+[#466]: https://github.com/spore-host/spawn/issues/466
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71

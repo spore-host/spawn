@@ -81,8 +81,50 @@ Parameters:
       orphaned by abrupt exits (crash / out-of-band terminate / fast spot reclaim)
       that the instance-driven #247 teardown can't. Honors DryRun. Off by default.
 
+  DnsExpire:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      When true (and DnsSweep is on), the reaper DELETES the A-records under an
+      unmanaged account subdomain that the portal registry has proven eligible —
+      dormant (emptiness proven through a working role) or offboarded (a human said
+      so). See spore-host/spawn#466. Requires DnsSweep, since the unmanaged-subdomain
+      walk runs inside the sweep.
+
+      Separate from DnsSweep on purpose: DnsSweep is already on in production, so
+      folding this into it would make an existing flag destructive on upgrade for a
+      class of records it has never touched. Honors DryRun. OFF by default, and it
+      should stay off until the report has been read: spored registers DNS once at
+      boot, so a wrongly deleted A-record never self-heals — the spore keeps running
+      and is simply unreachable by name until it reboots.
+
+  AccountsTable:
+    Type: String
+    Default: 'spore-portal-accounts'
+    Description: >
+      The portal account registry DynamoDB table (in the reaper's own account),
+      whose lifecycle status supplies the expiry verdict. Read-only — the prober
+      owns every write. Only read when DnsExpire or the sweep is on.
+
+  AccountsTableKeyArn:
+    Type: String
+    Default: ''
+    Description: >
+      KMS CMK ARN encrypting the registry table above. DynamoDB SSE with a CMK
+      requires the caller to hold kms:Decrypt on the key, so a Scan fails without
+      this even with dynamodb:Scan granted. Empty omits the grant (for a table on
+      an AWS-owned key).
+
 Conditions:
   ScanSelfEnabled: !Equals [!Ref ScanSelf, 'true']
+  RegistryReadEnabled: !And
+    - !Not [!Equals [!Ref DnsZoneId, '']]
+    - !Not [!Equals [!Ref DnsDomain, '']]
+    - !Equals [!Ref DnsSweep, 'true']
+  TableKeyProvided: !And
+    - !Not [!Equals [!Ref AccountsTableKeyArn, '']]
+    - !Condition RegistryReadEnabled
   DnsTeardownEnabled: !And
     - !Not [!Equals [!Ref DnsZoneId, '']]
     - !Not [!Equals [!Ref DnsDomain, '']]
@@ -110,6 +152,8 @@ Resources:
           REAPER_DNS_ZONE_ID: !Ref DnsZoneId
           REAPER_DNS_DOMAIN: !Ref DnsDomain
           REAPER_DNS_SWEEP: !Ref DnsSweep
+          REAPER_DNS_EXPIRE: !Ref DnsExpire
+          ACCOUNTS_TABLE: !Ref AccountsTable
       Policies:
         # Assume each per-account role that actually describes/terminates EC2.
         - Statement:
@@ -149,6 +193,34 @@ Resources:
                     - route53:ChangeResourceRecordSets
                     - route53:ListResourceRecordSets
                   Resource: !Sub 'arn:aws:route53:::hostedzone/${DnsZoneId}'
+            - !Ref AWS::NoValue
+        # Portal registry read (#466): the lifecycle status that says whether an
+        # unmanaged subdomain's account is provably dormant/offboarded. Scan only —
+        # never UpdateItem/PutItem/DeleteItem: the prober owns every write to this
+        # table, and the reaper being unable to write is what makes it impossible for
+        # a reaper bug to manufacture the eligibility it then acts on.
+        #
+        # Attached whenever the sweep is on, not only when DnsExpire is, because the
+        # verdict is REPORTED either way — reading the report is how an operator
+        # decides whether enabling expiry is safe.
+        - !If
+            - RegistryReadEnabled
+            - Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Scan
+                  Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AccountsTable}'
+            - !Ref AWS::NoValue
+        # DynamoDB SSE with a CMK requires the caller to hold kms:Decrypt on the
+        # table key; the Scan above fails without it. Decrypt ONLY — GenerateDataKey
+        # would only be needed to write, which the reaper must never do.
+        - !If
+            - TableKeyProvided
+            - Statement:
+                - Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                  Resource: !Ref AccountsTableKeyArn
             - !Ref AWS::NoValue
       Events:
         ScheduleEvent:

@@ -57,6 +57,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/tagprefix"
+	"github.com/spore-host/spore-host/lambda/accountlifecycle"
 )
 
 // defaultRegions is the set scanned when REAPER_REGIONS is unset. It mirrors the
@@ -99,7 +100,12 @@ type reaper struct {
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
 	// cross-account role — so route53Client uses the base credentials. dnsDomain
 	// is the zone's domain (e.g. "spore.host"); both empty disables DNS teardown.
-	route53Client *route53.Client
+	//
+	// route53API rather than *route53.Client so the DELETION path can be driven end
+	// to end in tests (#466). A pure decision function proves what the reaper decides;
+	// only a fake at this seam proves what it actually sends to Route53, and for a
+	// record whose loss never self-heals that distinction is worth the interface.
+	route53Client route53API
 	dnsZoneID     string
 	dnsDomain     string
 
@@ -111,6 +117,34 @@ type reaper struct {
 	// later reassigned) IP. The sweep reconciles the zone against live instance IPs
 	// and deletes A-records with no live owner. Requires a configured zone.
 	sweepDNS bool
+
+	// DNS expiry for unmanaged subdomains (#466, opt-in via REAPER_DNS_EXPIRE).
+	// The sweep above only ever looks at accounts in REAPER_ROLE_ARNS; records
+	// under an account NOT in that list are invisible to it, and the #458 report
+	// deliberately refuses to delete them because it cannot prove emptiness without
+	// credentials. The portal's account-prober can, and writes the verdict to the
+	// registry — so `registry` reads it and expireDNS decides whether to act on it.
+	//
+	// Both must be set for a deletion to happen, and expireDNS is separate from
+	// sweepDNS on purpose: sweepDNS is already enabled in production, so folding
+	// this into it would make an existing flag silently destructive on upgrade for
+	// a class of records it has never touched. See expiry.go.
+	registry  registryAPI
+	expireDNS bool
+}
+
+// route53API is the slice of *route53.Client the reaper uses: it lists record sets
+// and changes them, and nothing else.
+type route53API interface {
+	ListResourceRecordSets(ctx context.Context, in *route53.ListResourceRecordSetsInput, optFns ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error)
+	ChangeResourceRecordSets(ctx context.Context, in *route53.ChangeResourceRecordSetsInput, optFns ...func(*route53.Options)) (*route53.ChangeResourceRecordSetsOutput, error)
+}
+
+// registryAPI is the slice of accountlifecycle.Registry the reaper uses — read-only,
+// and an interface so the expiry decision can be driven through a fake in tests. The
+// reaper never writes lifecycle state; the prober owns that.
+type registryAPI interface {
+	ListAccounts(ctx context.Context) ([]accountlifecycle.Account, error)
 }
 
 // defaultGracefulWait caps how long the reaper waits for a single instance's
@@ -152,12 +186,18 @@ func init() {
 		dnsZoneID:    strings.TrimSpace(os.Getenv("REAPER_DNS_ZONE_ID")),
 		dnsDomain:    strings.TrimSpace(os.Getenv("REAPER_DNS_DOMAIN")),
 		sweepDNS:     strings.EqualFold(os.Getenv("REAPER_DNS_SWEEP"), "true"),
+		expireDNS:    strings.EqualFold(os.Getenv("REAPER_DNS_EXPIRE"), "true"),
 	}
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
 	// client when a zone is configured, so a deployment without DNS teardown
 	// stays a no-op (and needs no route53 IAM).
 	if r.dnsZoneID != "" && r.dnsDomain != "" {
 		r.route53Client = route53.NewFromConfig(cfg)
+		// The registry is wired whenever a zone is configured, NOT gated on
+		// expireDNS: the eligibility verdict is reported either way, and reporting
+		// it is how an operator decides whether turning expiry on is safe. The
+		// table is in the reaper's own account, so base creds again.
+		r.registry = accountlifecycle.NewRegistry(cfg)
 	} else {
 		log.Printf("DNS teardown disabled (REAPER_DNS_ZONE_ID/REAPER_DNS_DOMAIN unset)")
 	}
@@ -169,8 +209,14 @@ func init() {
 		log.Printf("REAPER_DNS_SWEEP=true but no zone configured (REAPER_DNS_ZONE_ID/REAPER_DNS_DOMAIN) — sweep disabled")
 		r.sweepDNS = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS)
+	// The unmanaged-subdomain walk runs inside the sweep, so expiry without the
+	// sweep would never reach a candidate. Fail loudly rather than look enabled.
+	if r.expireDNS && !r.sweepDNS {
+		log.Printf("REAPER_DNS_EXPIRE=true but the DNS sweep is off — expiry disabled (it runs inside the sweep)")
+		r.expireDNS = false
+	}
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -376,9 +422,18 @@ type Summary struct {
 	DNSReaped  int `json:"dns_reaped"`  // orphaned records deleted (or would-delete in dry-run)
 
 	// Unmanaged subdomains (#457): account subdomains present in the zone that
-	// this reaper holds no credentials for. REPORT ONLY — never deleted.
+	// this reaper holds no credentials for.
 	DNSUnmanagedSubdomains int `json:"dns_unmanaged_subdomains"`
 	DNSUnmanagedRecords    int `json:"dns_unmanaged_records"`
+
+	// DNS expiry (#466): the portal registry's verdict on each unmanaged subdomain
+	// above, and what was acted on. Eligible-but-not-Expired is the normal, healthy
+	// reading — it means the verdict exists and REAPER_DNS_EXPIRE is off. Expired is
+	// deliberately named apart from the instance-level Expired above, which counts
+	// something else entirely.
+	DNSExpiryEligible   int `json:"dns_expiry_eligible"`
+	DNSExpiryIneligible int `json:"dns_expiry_ineligible"`
+	DNSExpiredRecords   int `json:"dns_expired_records"`
 }
 
 // candidate is an instance the reaper decided should die, with the reason.
@@ -481,7 +536,7 @@ func handler(ctx context.Context) (Summary, error) {
 	// signal. Walk the zone once and report those. Deliberately after the loop:
 	// it needs the full configured set to diff against.
 	if r.sweepDNS {
-		r.reportUnmanagedSubdomains(ctx, &sum)
+		r.reportUnmanagedSubdomains(ctx, &sum, start)
 	}
 
 	log.Printf("ttl-reaper done in %s: %+v", time.Since(start).Round(time.Millisecond), sum)
@@ -1138,20 +1193,24 @@ func sweepableRecord(rs r53types.ResourceRecordSet, subdomain, suffix string) (a
 }
 
 // reportUnmanagedSubdomains walks the hosted zone once and reports account
-// subdomains that belong to accounts this reaper has no credentials for (#457).
-//
-// It DELETES NOTHING, by design. An unmanaged subdomain is ambiguous: it could be
-// an account that uninstalled and left records behind, or an account still in
-// active use that someone forgot to add to REAPER_ROLE_ARNS. Deleting in the
-// second case tears the DNS out from under working spores. Worse, we cannot tell
-// the two apart precisely because we lack the credentials — DescribeInstances is
-// how emptiness is proven, and it is unavailable here. That is the same reasoning
-// as the sweep's refusal to delete against a partial live set: no deletion without
-// a complete picture. So this raises a signal for a human and stops there.
+// subdomains that belong to accounts this reaper has no credentials for (#457),
+// annotating each with the portal registry's lifecycle verdict (#466).
 //
 // The hazard it surfaces is real: a released public IP returns to the EC2 pool, so
 // an abandoned A-record eventually resolves to an unrelated instance.
-func (r *reaper) reportUnmanagedSubdomains(ctx context.Context, sum *Summary) {
+//
+// The original #458 version deleted nothing, because an unmanaged subdomain is
+// ambiguous — an account that uninstalled and left records, or an account still in
+// active use that nobody added to REAPER_ROLE_ARNS — and we could not tell the two
+// apart *precisely because we lack the credentials*: DescribeInstances is how
+// emptiness is proven. The portal's account-prober holds credentials the registry
+// knows about and does prove it, so for a registered account the ambiguity is now
+// resolvable and accountlifecycle.DNSExpiryEligible is the answer (see expiry.go).
+//
+// The verdict is ALWAYS reported. Acting on it requires REAPER_DNS_EXPIRE on top of
+// the sweep's own opt-in, because spored registers DNS once at boot — a wrongly
+// deleted record never self-heals.
+func (r *reaper) reportUnmanagedSubdomains(ctx context.Context, sum *Summary, now time.Time) {
 	if r.dnsZoneID == "" || r.dnsDomain == "" {
 		return
 	}
@@ -1175,12 +1234,93 @@ func (r *reaper) reportUnmanagedSubdomains(ctx context.Context, sum *Summary) {
 		return
 	}
 
+	// Read the registry ONCE for the whole walk, not per subdomain. registryOK is
+	// false when we have no verdicts to work from at all, which is reported at the
+	// end — a quiet fallback to the old report would look like the expiry feature
+	// simply found nothing eligible.
+	rows, registryOK := r.loadRegistry(ctx, sum)
+
 	for _, u := range unmanagedSubdomains(names, r.dnsDomain, managed) {
-		log.Printf("UNMANAGED subdomain %s (account %s) — %d record(s), no credentials to reconcile; "+
-			"add its role to REAPER_ROLE_ARNS to sweep it, or offboard it deliberately (#457)",
-			u.subdomain, u.accountID, u.records)
 		sum.DNSUnmanagedSubdomains++
 		sum.DNSUnmanagedRecords += u.records
+
+		v := classifySubdomain(u.accountID, rows, now)
+		if v.eligible {
+			sum.DNSExpiryEligible++
+		} else {
+			sum.DNSExpiryIneligible++
+		}
+
+		if authorizeExpiry(v, registryOK, r.expireDNS) == actionExpire {
+			log.Printf("EXPIRING subdomain %s (account %s) — %d record(s); %s (#466)",
+				u.subdomain, u.accountID, u.records, v.detail)
+			r.expireSubdomain(ctx, u, sum)
+			continue
+		}
+		hint := ""
+		if v.eligible && !r.expireDNS {
+			hint = "; set REAPER_DNS_EXPIRE=true to act (#466)"
+		}
+		log.Printf("UNMANAGED subdomain %s (account %s) — %d record(s); %s%s (#457)",
+			u.subdomain, u.accountID, u.records, v.detail, hint)
+	}
+
+	if !registryOK && sum.DNSUnmanagedSubdomains > 0 {
+		log.Printf("unmanaged-subdomain report: no registry verdicts available for %d subdomain(s) — nothing was deleted (#466)",
+			sum.DNSUnmanagedSubdomains)
+	}
+}
+
+// loadRegistry reads the portal account registry into a map keyed by account ID.
+// The bool is whether we have usable verdicts; on false the map is nil, and
+// classifySubdomain then treats every account as unregistered, so nothing is
+// eligible and nothing is deleted.
+//
+// A registry with zero rows returns false too. It is indistinguishable from a
+// truncated Scan for our purposes, and either way there is no verdict to act on —
+// the distinction only matters for whether we say so out loud, which we do.
+func (r *reaper) loadRegistry(ctx context.Context, sum *Summary) (map[string]accountlifecycle.Account, bool) {
+	if r.registry == nil {
+		return nil, false
+	}
+	accts, err := r.registry.ListAccounts(ctx)
+	if err != nil {
+		// An error is NOT "no accounts are eligible". Count it so a registry that
+		// has been unreadable for weeks is visible, and fall back to report-only.
+		log.Printf("unmanaged-subdomain report: read portal registry failed: %v — reporting without verdicts", err)
+		sum.Errors++
+		return nil, false
+	}
+	if len(accts) == 0 {
+		return nil, false
+	}
+	rows := make(map[string]accountlifecycle.Account, len(accts))
+	for _, a := range accts {
+		rows[a.AccountID] = a
+	}
+	return rows, true
+}
+
+// expireSubdomain deletes the A-records under one unmanaged subdomain whose account
+// the registry has proven eligible. A-records only, mirroring the sweep: the #121
+// friendly CNAMEs alias the A-record and carry no IP, and leaving a dangling CNAME
+// resolves to nothing, whereas leaving the A-record resolves to a stranger's IP.
+func (r *reaper) expireSubdomain(ctx context.Context, u unmanagedSubdomain, sum *Summary) {
+	records, err := r.listAccountARecords(ctx, u.subdomain)
+	if err != nil {
+		log.Printf("DNS expiry: list records under %s failed: %v", u.subdomain, err)
+		sum.Errors++
+		return
+	}
+	for _, rec := range records {
+		if r.dryRun {
+			log.Printf("DNS expiry: WOULD delete A-record %s -> %s (account eligible for expiry)", rec.fqdn, rec.ip)
+			sum.DNSExpiredRecords++
+			continue
+		}
+		r.deleteRecord(ctx, rec.fqdn, r53types.RRTypeA)
+		log.Printf("DNS expiry: deleted A-record %s -> %s (account eligible for expiry)", rec.fqdn, rec.ip)
+		sum.DNSExpiredRecords++
 	}
 }
 
