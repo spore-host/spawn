@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.96.2] - 2026-07-31
+
 ### Fixed
 - **Pool workers no longer exit at boot when they resolve the queue before it's
   visible (#70).** `taskpool.OpenQueue` did a single `GetQueueUrl`; because that
@@ -2306,7 +2308,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.96.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.96.2...HEAD
+[0.96.2]: https://github.com/spore-host/spawn/compare/v0.96.1...v0.96.2
 [0.96.1]: https://github.com/spore-host/spawn/compare/v0.96.0...v0.96.1
 [0.96.0]: https://github.com/spore-host/spawn/compare/v0.95.0...v0.96.0
 [0.95.0]: https://github.com/spore-host/spawn/compare/v0.94.0...v0.95.0
