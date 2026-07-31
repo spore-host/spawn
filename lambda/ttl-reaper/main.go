@@ -38,6 +38,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -373,6 +374,11 @@ type Summary struct {
 	// DNS sweep (#438): orphaned Route53 A-records reconciled against live IPs.
 	DNSScanned int `json:"dns_scanned"` // A-records examined under the account subdomains
 	DNSReaped  int `json:"dns_reaped"`  // orphaned records deleted (or would-delete in dry-run)
+
+	// Unmanaged subdomains (#457): account subdomains present in the zone that
+	// this reaper holds no credentials for. REPORT ONLY — never deleted.
+	DNSUnmanagedSubdomains int `json:"dns_unmanaged_subdomains"`
+	DNSUnmanagedRecords    int `json:"dns_unmanaged_records"`
 }
 
 // candidate is an instance the reaper decided should die, with the reason.
@@ -467,6 +473,15 @@ func handler(ctx context.Context) (Summary, error) {
 		if r.sweepDNS {
 			r.sweepAccountDNS(ctx, acct, &sum)
 		}
+	}
+
+	// Unmanaged-subdomain report (#457): the sweep above is per-account and only
+	// ever looks at accounts in REAPER_ROLE_ARNS, so records belonging to an
+	// account NOT in that list are invisible to it — no sweep, no error, no
+	// signal. Walk the zone once and report those. Deliberately after the loop:
+	// it needs the full configured set to diff against.
+	if r.sweepDNS {
+		r.reportUnmanagedSubdomains(ctx, &sum)
 	}
 
 	log.Printf("ttl-reaper done in %s: %+v", time.Since(start).Round(time.Millisecond), sum)
@@ -1120,6 +1135,130 @@ func sweepableRecord(rs r53types.ResourceRecordSet, subdomain, suffix string) (a
 		return aRecord{}, false
 	}
 	return aRecord{fqdn: name, ip: aws.ToString(rs.ResourceRecords[0].Value)}, true
+}
+
+// reportUnmanagedSubdomains walks the hosted zone once and reports account
+// subdomains that belong to accounts this reaper has no credentials for (#457).
+//
+// It DELETES NOTHING, by design. An unmanaged subdomain is ambiguous: it could be
+// an account that uninstalled and left records behind, or an account still in
+// active use that someone forgot to add to REAPER_ROLE_ARNS. Deleting in the
+// second case tears the DNS out from under working spores. Worse, we cannot tell
+// the two apart precisely because we lack the credentials — DescribeInstances is
+// how emptiness is proven, and it is unavailable here. That is the same reasoning
+// as the sweep's refusal to delete against a partial live set: no deletion without
+// a complete picture. So this raises a signal for a human and stops there.
+//
+// The hazard it surfaces is real: a released public IP returns to the EC2 pool, so
+// an abandoned A-record eventually resolves to an unrelated instance.
+func (r *reaper) reportUnmanagedSubdomains(ctx context.Context, sum *Summary) {
+	if r.dnsZoneID == "" || r.dnsDomain == "" {
+		return
+	}
+	managed := make(map[string]bool, len(r.accounts))
+	for _, acct := range r.accounts {
+		if acct.accountID != "" {
+			managed[acct.accountID] = true
+		}
+	}
+	// With no resolved account IDs we cannot diff — every subdomain would look
+	// unmanaged. Stay quiet rather than cry wolf about the whole zone.
+	if len(managed) == 0 {
+		log.Printf("unmanaged-subdomain report: no resolved account IDs — skipping")
+		return
+	}
+
+	names, err := r.listZoneRecordNames(ctx)
+	if err != nil {
+		log.Printf("unmanaged-subdomain report: list zone failed: %v", err)
+		sum.Errors++
+		return
+	}
+
+	for _, u := range unmanagedSubdomains(names, r.dnsDomain, managed) {
+		log.Printf("UNMANAGED subdomain %s (account %s) — %d record(s), no credentials to reconcile; "+
+			"add its role to REAPER_ROLE_ARNS to sweep it, or offboard it deliberately (#457)",
+			u.subdomain, u.accountID, u.records)
+		sum.DNSUnmanagedSubdomains++
+		sum.DNSUnmanagedRecords += u.records
+	}
+}
+
+// unmanagedSubdomain is one account subdomain in the zone with no credentials.
+type unmanagedSubdomain struct {
+	subdomain string // e.g. "4zlw3a1t.spore.host"
+	accountID string // decoded, e.g. "390967728545"
+	records   int    // record sets at or below it
+}
+
+// unmanagedSubdomains groups zone record names by their account subdomain and
+// returns those whose decoded account is absent from managed. Pure, so the
+// classification — which decides what gets reported as abandoned — is testable
+// without AWS. Results are sorted for stable, diffable log output.
+func unmanagedSubdomains(names []string, domain string, managed map[string]bool) []unmanagedSubdomain {
+	suffix := "." + domain
+	counts := map[string]int{}
+	accounts := map[string]string{}
+
+	for _, raw := range names {
+		// Strip the trailing dot FIRST, then require the domain suffix. Testing
+		// suffix presence explicitly (rather than comparing pre/post TrimSuffix)
+		// is what actually excludes names outside the zone's domain — e.g.
+		// box.4zlw3a1t.example.com, whose account label would otherwise be read
+		// as one of ours.
+		fqdn := strings.TrimSuffix(raw, ".")
+		if !strings.HasSuffix(fqdn, suffix) {
+			continue // not under the domain (this also drops the apex itself)
+		}
+		name := strings.TrimSuffix(fqdn, suffix)
+		if name == "" {
+			continue
+		}
+		// The account label is the LAST label before the domain, so this also
+		// counts records nested deeper than one level.
+		label := name
+		if i := strings.LastIndex(name, "."); i >= 0 {
+			label = name[i+1:]
+		}
+		acctID, ok := dns.DecodeAccountID(label)
+		if !ok || managed[acctID] {
+			continue
+		}
+		sub := label + suffix
+		counts[sub]++
+		accounts[sub] = acctID
+	}
+
+	out := make([]unmanagedSubdomain, 0, len(counts))
+	for sub, n := range counts {
+		out = append(out, unmanagedSubdomain{subdomain: sub, accountID: accounts[sub], records: n})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].subdomain < out[j].subdomain })
+	return out
+}
+
+// listZoneRecordNames returns every record-set name in the zone, paginated. Names
+// only: the report keys off subdomain ownership, never record contents.
+func (r *reaper) listZoneRecordNames(ctx context.Context) ([]string, error) {
+	var out []string
+	input := &route53.ListResourceRecordSetsInput{HostedZoneId: aws.String(r.dnsZoneID)}
+	for {
+		page, err := r.route53Client.ListResourceRecordSets(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("list records: %w", err)
+		}
+		for i := range page.ResourceRecordSets {
+			out = append(out, aws.ToString(page.ResourceRecordSets[i].Name))
+		}
+		if page.IsTruncated {
+			input.StartRecordName = page.NextRecordName
+			input.StartRecordType = page.NextRecordType
+			input.StartRecordIdentifier = page.NextRecordIdentifier
+			continue
+		}
+		break
+	}
+	return out, nil
 }
 
 // notify posts a plain Slack-incoming-webhook payload ({"text":...}) to

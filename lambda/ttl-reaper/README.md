@@ -62,7 +62,7 @@ there and appending its ARN to the list.
 | `REAPER_NOTIFY_URL` | (empty) | Slack-incoming-webhook URL; every reap is posted here |
 | `REAPER_DNS_ZONE_ID` | (empty) | Route53 hosted zone ID; with `REAPER_DNS_DOMAIN`, the reaper deletes a reaped instance's DNS records (#247) |
 | `REAPER_DNS_DOMAIN` | (empty) | Domain for the zone above (e.g. `spore.host`); both empty = DNS teardown disabled |
-| `REAPER_DNS_SWEEP` | `false` | With a zone configured, also run a **DNS reconciliation sweep** (#438): delete `{base36}.{domain}` A-records whose IP has no live instance — catches records orphaned by abrupt exits the #247 teardown can't. Honors `REAPER_DRY_RUN` |
+| `REAPER_DNS_SWEEP` | `false` | With a zone configured, also run a **DNS reconciliation sweep** (#438): delete `{base36}.{domain}` A-records whose IP has no live instance — catches records orphaned by abrupt exits the #247 teardown can't. Honors `REAPER_DRY_RUN`. Also emits the report-only **unmanaged-subdomain** signal (#457) |
 
 If neither `REAPER_ROLE_ARNS`/`EC2_ROLE_ARN` nor `REAPER_SCAN_SELF=true` is set,
 the reaper falls back to scanning its own account (never a silent no-op).
@@ -113,6 +113,26 @@ is per-account (it derives each `{base36}` subdomain from the account ID), so an
 account absent from `ROLE_ARNS` is never reconciled and its orphaned records
 persist indefinitely — exactly the leak #438 set out to close.
 
+Because that absence used to be silent, the sweep also emits an
+**unmanaged-subdomain report** ([#457]): it walks the zone once per run, decodes
+each `{base36}` label back to an account ID, and logs any subdomain whose account
+is not in `ROLE_ARNS`. It **deletes nothing** — an unmanaged subdomain is
+ambiguous (an account that uninstalled, or a live one someone forgot to add), and
+without credentials there is no way to prove which, since `DescribeInstances` is
+how emptiness is established. So it raises a signal and stops:
+
+```
+UNMANAGED subdomain 4zlw3a1t.spore.host (account 390967728545) — 1 record(s),
+  no credentials to reconcile; add its role to REAPER_ROLE_ARNS to sweep it,
+  or offboard it deliberately (#457)
+```
+
+Counted in the summary as `DNSUnmanagedSubdomains` / `DNSUnmanagedRecords`. Acting
+on it is a human decision: either add the account's role (so the sweep covers it)
+or delete the records deliberately. Left alone, the hazard is that a released
+public IP returns to the EC2 pool, so an abandoned A-record eventually resolves to
+an unrelated instance.
+
 ## Verify
 
 ```bash
@@ -137,5 +157,6 @@ dry-run) and counts it in the summary's `DNSScanned`/`DNSReaped`. A sweep whose
 live-instance scan errored logs `aborting sweep for this account` and deletes
 nothing — by design, since a partial live set could orphan a healthy record.
 
+[#457]: https://github.com/spore-host/spawn/issues/457
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71

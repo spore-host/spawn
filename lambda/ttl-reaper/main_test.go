@@ -524,3 +524,120 @@ func TestSweepableRecord(t *testing.T) {
 		}
 	}
 }
+
+// TestUnmanagedSubdomains covers the #457 report's classification: which account
+// subdomains in the zone get flagged as having no credentials behind them. A false
+// positive here tells an operator a live account is abandoned, so the exclusions
+// matter as much as the hits.
+func TestUnmanagedSubdomains(t *testing.T) {
+	const domain = "spore.host"
+	// 5k0zfnmq = 435415984226 (dev, managed); 4zlw3a1t = 390967728545 (stale);
+	// cbxv6l3i = 966362334030 (infra, not in REAPER_ROLE_ARNS here).
+	managed := map[string]bool{"435415984226": true}
+
+	tests := []struct {
+		name  string
+		names []string
+		want  []unmanagedSubdomain
+	}{
+		{
+			name:  "the #457 orphan is reported",
+			names: []string{"win11-test.4zlw3a1t.spore.host."},
+			want:  []unmanagedSubdomain{{"4zlw3a1t.spore.host", "390967728545", 1}},
+		},
+		{
+			name:  "a managed account is never reported",
+			names: []string{"box.5k0zfnmq.spore.host.", "other.5k0zfnmq.spore.host."},
+			want:  []unmanagedSubdomain{},
+		},
+		{
+			name: "records under one unmanaged subdomain are counted together",
+			names: []string{
+				"a.4zlw3a1t.spore.host.", "b.4zlw3a1t.spore.host.", "c.4zlw3a1t.spore.host.",
+			},
+			want: []unmanagedSubdomain{{"4zlw3a1t.spore.host", "390967728545", 3}},
+		},
+		{
+			name: "ordinary zone records are not accounts",
+			names: []string{
+				"spore.host.", "www.spore.host.", "api.spore.host.",
+				"docs.spore.host.", "app.spore.host.",
+			},
+			want: []unmanagedSubdomain{},
+		},
+		{
+			name:  "friendly per-account subdomain (#121) is not base36",
+			names: []string{"abrupt438.mycelium-development.spore.host."},
+			want:  []unmanagedSubdomain{},
+		},
+		{
+			name:  "the subdomain apex alone still reports",
+			names: []string{"4zlw3a1t.spore.host."},
+			want:  []unmanagedSubdomain{{"4zlw3a1t.spore.host", "390967728545", 1}},
+		},
+		{
+			name:  "records outside the domain are ignored",
+			names: []string{"box.4zlw3a1t.example.com.", "box.4zlw3a1t.spore.host.evil.com."},
+			want:  []unmanagedSubdomain{},
+		},
+		{
+			// The account label lands LAST here, so only an explicit domain-suffix
+			// test excludes these — the decode cannot, because the label really is
+			// one of ours. Guards against reporting a foreign zone's records.
+			name:  "out-of-domain name ending in an account label is ignored",
+			names: []string{"host.4zlw3a1t.", "4zlw3a1t."},
+			want:  []unmanagedSubdomain{},
+		},
+		{
+			name:  "a look-alike parent domain is not our zone",
+			names: []string{"box.4zlw3a1t.notspore.host."},
+			want:  []unmanagedSubdomain{},
+		},
+		{
+			name:  "a deceptively similar label is not base36-decodable",
+			names: []string{"box.evil-5k0zfnmq.spore.host."},
+			want:  []unmanagedSubdomain{},
+		},
+		{
+			name: "multiple unmanaged accounts sort stably",
+			names: []string{
+				"x.cbxv6l3i.spore.host.", "y.4zlw3a1t.spore.host.",
+			},
+			want: []unmanagedSubdomain{
+				{"4zlw3a1t.spore.host", "390967728545", 1},
+				{"cbxv6l3i.spore.host", "966362334030", 1},
+			},
+		},
+		{
+			name:  "nested records attribute to the account label",
+			names: []string{"deep.nested.4zlw3a1t.spore.host."},
+			want:  []unmanagedSubdomain{{"4zlw3a1t.spore.host", "390967728545", 1}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unmanagedSubdomains(tt.names, domain, managed)
+			if len(got) != len(tt.want) {
+				t.Fatalf("unmanagedSubdomains() = %+v (%d), want %+v (%d)",
+					got, len(got), tt.want, len(tt.want))
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("[%d] = %+v, want %+v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestUnmanagedSubdomainsEmptyManagedSet guards the cry-wolf case: with no managed
+// accounts every subdomain would classify as unmanaged, so the caller skips the
+// report entirely. This asserts the classifier itself is honest about that, so the
+// guard in reportUnmanagedSubdomains is the only thing suppressing it.
+func TestUnmanagedSubdomainsEmptyManagedSet(t *testing.T) {
+	got := unmanagedSubdomains([]string{"box.5k0zfnmq.spore.host."}, "spore.host", map[string]bool{})
+	if len(got) != 1 {
+		t.Fatalf("with an empty managed set the classifier should flag everything, got %+v", got)
+	}
+}

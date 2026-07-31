@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **ttl-reaper: unmanaged-subdomain report (#457).** The #438 DNS sweep is
+  per-account and only ever looks at accounts listed in `REAPER_ROLE_ARNS`, so
+  records belonging to an account *absent* from that list were invisible to it —
+  no sweep, no error, no signal at all. The sweep now also walks the zone once per
+  run, decodes each `{base36}` label back to an account ID (`dns.DecodeAccountID`,
+  the new inverse of `EncodeAccountID`), and logs every subdomain whose account it
+  holds no credentials for, counted as `DNSUnmanagedSubdomains` /
+  `DNSUnmanagedRecords`.
+  - **Report-only; it deletes nothing.** An unmanaged subdomain is ambiguous — an
+    account that uninstalled, or a live one someone forgot to add to
+    `REAPER_ROLE_ARNS` — and without credentials there is no way to tell which,
+    since `DescribeInstances` is how emptiness is proven. Deleting on the second
+    reading would tear the DNS out from under working spores. Same reasoning as
+    the sweep's existing refusal to delete against a partial live set.
+  - The hazard it surfaces: a released public IP returns to the EC2 pool, so an
+    abandoned A-record eventually resolves to an *unrelated* instance. Found live
+    in `spore.host` (`4zlw3a1t.spore.host`, account 390967728545 — not in the org,
+    no cross-account role); the report flags exactly that record and nothing else.
+    Broader deprovisioning lifecycle tracked in #457.
+  - `DecodeAccountID` rejects ordinary DNS labels exactly rather than
+    heuristically: every 12-digit account ID is precisely 8 base36 characters
+    (36^7 < 10^11 and 36^8 > 10^12), so `www`/`api` decode far outside the account
+    range and can never masquerade as accounts. Classification is a pure function
+    (`unmanagedSubdomains`), unit-tested without AWS.
+
 ### Fixed
 - **The #438 DNS reconciliation sweep could not be enabled through `make deploy`
   (ttl-reaper).** `DnsSweep` — along with `DnsZoneId` and `DnsDomain` — was never
