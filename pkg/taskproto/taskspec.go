@@ -121,6 +121,12 @@ func ParseSpecFile(path string) (*TaskSpec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read task spec %s: %w", path, err)
 	}
+	return ParseSpec(data)
+}
+
+// ParseSpec parses a TaskSpec from raw JSON bytes, then validates it. Used by the
+// pooled-worker path, which fetches a staged spec from S3 rather than a local file.
+func ParseSpec(data []byte) (*TaskSpec, error) {
 	var spec TaskSpec
 	if err := json.Unmarshal(data, &spec); err != nil {
 		return nil, fmt.Errorf("parse task spec: %w", err)

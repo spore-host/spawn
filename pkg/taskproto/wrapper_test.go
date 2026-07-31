@@ -53,6 +53,45 @@ func TestGenerateWrapper_Structure(t *testing.T) {
 	}
 }
 
+// TestGeneratePooledJobScript_OmitsSelfTerminate: the pooled per-job script must
+// be identical to the wrapper EXCEPT for the SPAWN_COMPLETE signal — it still
+// writes the durable completion record (so the submitter's poll is unchanged) but
+// must NOT write /tmp/SPAWN_COMPLETE (which would self-terminate the worker after
+// its first task, defeating pool reuse — #70).
+func TestGeneratePooledJobScript_OmitsSelfTerminate(t *testing.T) {
+	spec := fullSpec()
+	pooled := GeneratePooledJobScript(spec, "spawn-results-123-us-east-1", "us-east-1")
+
+	if strings.Contains(pooled, "/tmp/SPAWN_COMPLETE") {
+		t.Errorf("pooled job script must NOT write /tmp/SPAWN_COMPLETE (would self-terminate the worker)\n---\n%s", pooled)
+	}
+	// The durable record is still written — the submitter polls completion.json.
+	for _, sub := range []string{
+		"aws s3 cp /tmp/spawn-completion.json \"$RESULTS_PREFIX/completion.json\"",
+		"aws s3 cp /tmp/spawn.exitcode \"$RESULTS_PREFIX/.exitcode\"",
+		"exit $rc",
+	} {
+		if !strings.Contains(pooled, sub) {
+			t.Errorf("pooled job script missing %q\n---\n%s", sub, pooled)
+		}
+	}
+
+	// It differs from the wrapper ONLY by the SPAWN_COMPLETE block: strip that
+	// block from the wrapper and the two must be byte-identical.
+	wrapper := GenerateWrapper(spec, "spawn-results-123-us-east-1", "us-east-1")
+	marker := "# ---- signal spored"
+	idx := strings.Index(wrapper, marker)
+	if idx < 0 {
+		t.Fatalf("wrapper missing the SPAWN_COMPLETE block marker %q", marker)
+	}
+	// The block is the marker line + the heredoc through the blank line before
+	// "exit $rc". Reconstruct: wrapper[:idx] + "exit $rc\n".
+	wrapperSansSignal := wrapper[:idx] + "exit $rc\n"
+	if pooled != wrapperSansSignal {
+		t.Errorf("pooled script differs from wrapper beyond the SPAWN_COMPLETE block\n--- pooled ---\n%s\n--- wrapper-sans-signal ---\n%s", pooled, wrapperSansSignal)
+	}
+}
+
 func TestGenerateWrapper_QuotesMetacharArgs(t *testing.T) {
 	spec := &TaskSpec{
 		TaskID:    "t",

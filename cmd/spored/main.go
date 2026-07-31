@@ -66,6 +66,7 @@ func newRootCmd() *cobra.Command {
 
 	root.AddCommand(
 		newRunQueueCmd(),
+		newPoolWorkerCmd(),
 		newRunPipelineStageCmd(),
 		newStatusCmd(),
 		newReloadCmd(),

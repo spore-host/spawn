@@ -33,6 +33,25 @@ import (
 //     run` with the manifest dirs bind-mounted; stage-in/out still happen on the
 //     host, so the image needs no aws CLI. Docker is installed on demand.
 func GenerateWrapper(spec *TaskSpec, resultsBucket, region string) string {
+	return generateWrapper(spec, resultsBucket, region, true)
+}
+
+// GeneratePooledJobScript builds the per-job script a POOLED worker runs for one
+// task (#70). It is byte-for-byte GenerateWrapper EXCEPT it omits the final
+// /tmp/SPAWN_COMPLETE signal: that file drives spored's on_complete action
+// (terminate/stop), which is correct for a one-instance-per-task launch but fatal
+// for a pooled worker — it would self-terminate after its FIRST task and defeat
+// reuse. The worker stays alive and keeps pulling; it drains on idle-timeout
+// instead. The durable completion record (completion.json + .exitcode) is still
+// written, so the submitter's poll is unchanged.
+func GeneratePooledJobScript(spec *TaskSpec, resultsBucket, region string) string {
+	return generateWrapper(spec, resultsBucket, region, false)
+}
+
+// generateWrapper is the shared body. signalComplete gates the spored
+// self-terminate signal: true for the one-instance-per-task wrapper, false for a
+// pooled worker's per-job script.
+func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplete bool) string {
 	var b strings.Builder
 	p := func(format string, a ...interface{}) { fmt.Fprintf(&b, format, a...) }
 
@@ -138,10 +157,15 @@ func GenerateWrapper(spec *TaskSpec, resultsBucket, region string) string {
 	p("aws s3 cp /tmp/spawn.exitcode \"$RESULTS_PREFIX/.exitcode\" || true\n\n")
 
 	// ---- signal spored ---- so on_complete fires and `spawn status --check-complete` works.
-	p("# ---- signal spored (drives on_complete + spawn status --check-complete) ----\n")
-	p("cat > /tmp/SPAWN_COMPLETE <<JSON\n")
-	p("{\"status\": \"$STATE\", \"exit_code\": $rc, \"task_id\": %s}\n", jsonStr(taskID))
-	p("JSON\n\n")
+	// A pooled worker (signalComplete=false) SKIPS this: writing SPAWN_COMPLETE would
+	// trigger spored's on_complete (terminate/stop) after the FIRST task, killing the
+	// worker and defeating reuse. The worker keeps pulling and drains on idle-timeout.
+	if signalComplete {
+		p("# ---- signal spored (drives on_complete + spawn status --check-complete) ----\n")
+		p("cat > /tmp/SPAWN_COMPLETE <<JSON\n")
+		p("{\"status\": \"$STATE\", \"exit_code\": $rc, \"task_id\": %s}\n", jsonStr(taskID))
+		p("JSON\n\n")
+	}
 
 	p("exit $rc\n")
 
