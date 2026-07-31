@@ -1,6 +1,15 @@
 # Pooled task execution — design
 
-**Status:** Draft / design (no code). Proposed.
+**Status: SHIPPED** (spawn v0.96.0–v0.97.0; validated end-to-end and at scale on
+real AWS). This document is retained as the **design rationale / historical
+record** — it is written in the original proposal tense ("proposes", "Phase 1
+will…"). What actually shipped: `spawn pool create|submit|status|drain` + `spored
+pool-worker`, on `pkg/taskcohort` + `pkg/taskpool`, with **no cohort core changes**
+(as predicted). The subcommand names shipped verbatim (they are no longer "TBD").
+Phases 0–2 are done; **Phase 3** (bulk `RunInstances`/`CreateFleet` + cohort
+`Assembler` fan-in) remains optional and unshipped. For current usage see the
+generated CLI reference (`docs-gen/pool.md`) and the nf-spawn README pool section.
+
 **Tracks:** nf-spawn#70 (dispatch-bound fan-out). Related: nf-spawn#69 (per-run
 ephemeral FSx), spawn#386 (TaskSpec adapter contract), spawn `pkg/mpicohort`
 (cohort adapter precedent), `pkg/queue` (single-instance job runner).
