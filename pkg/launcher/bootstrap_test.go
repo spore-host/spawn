@@ -264,7 +264,8 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 		"${S3_BASE_URL}/${PROJECT}",
 		"${FALLBACK_URL}/${PROJECT}",
 		// HEAD-probes the .sig up front when verifying (the crux of the fix).
-		`curl -fsI "$sig_url"`,
+		// Retry flags tolerate a transient S3 hiccup on the probe (#462).
+		`curl -fsI --retry 3 --retry-delay 1 --retry-all-errors "$sig_url"`,
 		"trying next source",
 	} {
 		if !strings.Contains(script, want) {
@@ -275,6 +276,18 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 	// on a missing .sig — must be gone.
 	if strings.Contains(script, "Regional bucket unavailable, trying us-east-1...") {
 		t.Error("old fallback logic still present; #440 refactor not applied")
+	}
+
+	// The binary + checksum fetches must RETRY (#462): a single-shot curl that
+	// dies on a transient S3 empty-reply hard-fails the whole install. Lock in the
+	// retry flags so a future edit can't silently drop them.
+	for _, want := range []string{
+		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "$SPORED_TMP"`, // binary
+		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/spored.sha256`, // checksum
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("generated bootstrap missing retry on a critical fetch: %q", want)
+		}
 	}
 }
 
