@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/spawn-hero.png" alt="spawn — launch and manage ephemeral EC2 instances" width="820">
+</p>
+
 # spawn
 
 [![CI](https://github.com/spore-host/spawn/actions/workflows/ci.yml/badge.svg)](https://github.com/spore-host/spawn/actions/workflows/ci.yml)
