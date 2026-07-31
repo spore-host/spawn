@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **spored bootstrap now retries a transient checksum/binary download instead of
+  hard-failing the install (#462).** The install verified the binary against a
+  `.sha256` fetched with a single-shot `curl -f`; a transient S3 hiccup (observed
+  as `curl (52) Empty reply from server` in a #70 smoke) on that one call aborted
+  the whole spored install — so the instance came up with no spored and never ran
+  its workload, even though the artifact was present. The binary download, the
+  checksum fetch, the `.sig` fetch, and the up-front `.sig` HEAD probe now all use
+  `curl --retry ... --retry-all-errors`, so a flaky response is retried rather
+  than fatal. (The artifacts were verified present and reachable; this was a
+  robustness gap, not a missing/misnamed release artifact.)
 - **`spawn pool create` now launches workers that actually boot (#70).** The
   pooled-worker launch built a raw `LaunchConfig` and called `RunInstances`
   directly (via the taskcohort Actuator), skipping the AMI auto-detect and IAM

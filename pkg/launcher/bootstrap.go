@@ -256,12 +256,12 @@ for base in "${CANDIDATES[@]}"; do
     # the (large) binary — a HEAD is enough. Skip sources that can't prove
     # authenticity so a stale/unsigned regional bucket falls through to us-east-1.
     if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
-        if ! curl -fsI "$sig_url" >/dev/null 2>&1; then
+        if ! curl -fsI --retry 3 --retry-delay 1 --retry-all-errors "$sig_url" >/dev/null 2>&1; then
             echo "No signature at ${base} — trying next source"
             continue
         fi
     fi
-    if curl -f -o "$SPORED_TMP" "$bin_url" 2>/dev/null; then
+    if curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "$SPORED_TMP" "$bin_url" 2>/dev/null; then
         CHECKSUM_URL="${base}/${BINARY}.sha256"
         echo "Downloaded spored from ${base}"
         break
@@ -277,10 +277,14 @@ if [ -z "$CHECKSUM_URL" ]; then
     exit 1
 fi
 
-# Download and verify SHA256 checksum (against the temp file).
+# Download and verify SHA256 checksum (against the temp file). Retry on a
+# transient S3 hiccup (curl 52 "empty reply", connection resets, 5xx): the
+# checksum object is tiny and definitely present when the binary downloaded from
+# the same base, so a single-shot fetch that dies on a flaky response would
+# hard-fail the whole install for no real reason (observed once in a #70 smoke).
 echo "Verifying checksum..."
-curl -f -o /tmp/spored.sha256 "${CHECKSUM_URL}" || {
-    echo "Failed to download checksum"
+curl -f --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/spored.sha256 "${CHECKSUM_URL}" || {
+    echo "Failed to download checksum after retries"
     rm -f "$SPORED_TMP"
     exit 1
 }
@@ -307,7 +311,7 @@ echo "✅ Checksum verified: $EXPECTED_CHECKSUM"
 if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
     echo "Verifying signature..."
     SIG_URL="${CHECKSUM_URL%.sha256}.sig"
-    if ! curl -f -o /tmp/spored.sig "${SIG_URL}" 2>/dev/null; then
+    if ! curl -f --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/spored.sig "${SIG_URL}" 2>/dev/null; then
         echo "❌ Signature file not found at ${SIG_URL} — refusing to run an unsigned binary"
         rm -f "$SPORED_TMP"
         exit 1
