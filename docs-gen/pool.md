@@ -35,6 +35,8 @@ spawn pool create --run-id R --workers N --instance-type T [flags]
 | `--idle-timeout` |  | duration | `5m0s` | Workers drain after this long with an empty queue |
 | `--instance-type` |  | string |  | Worker instance type (e.g. c7i.large) |
 | `--min-viable` |  | int | `1` | Minimum workers that must come up (best-effort: ask N, accept &gt;= this) |
+| `--s3-read` |  | stringArray |  | Extra S3 bucket the tasks read inputs from (repeatable) — beyond the results bucket workers always get |
+| `--s3-write` |  | stringArray |  | Extra S3 bucket the tasks write outputs to (repeatable) — beyond the results bucket |
 | `--spot` |  | bool |  | Launch workers as Spot instances |
 | `--ttl` |  | string | `4h` | Per-worker TTL backstop |
 | `--visibility-timeout` |  | int | `900` | SQS claim window in seconds (must exceed the longest task runtime) |

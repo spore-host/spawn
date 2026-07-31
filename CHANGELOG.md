@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`spawn pool create --s3-read`/`--s3-write` grant workers access to a task's
+  own input/output buckets (#70).** Pool workers get read/write on the run's
+  results/work bucket by default (least-privilege); when tasks stage from or write
+  to other buckets, declare them at create with `--s3-read <bucket>` /
+  `--s3-write <bucket>` (repeatable) and the worker IAM profile is widened
+  accordingly (read buckets → GetObject + List; write buckets → Get/Put/Delete +
+  List). Closes the per-task-bucket limitation noted when the scoped worker
+  profile landed.
+
+### Fixed
+- **Pool workers are now resilient to an early exit (#465).** The on-instance
+  worker ran `spored pool-worker` once at boot, so any early exit (a transient AWS
+  error, an SQS blip) left a running-but-idle instance billing until its TTL. It
+  now runs under a bounded restart-on-error loop: a non-zero exit re-execs (up to
+  20 attempts, 10s apart), while a clean idle-drain (exit 0) stops and lets
+  on-complete terminate the instance — so scale-to-zero is preserved and a
+  transient failure recovers instead of stranding a worker.
+
+### Added
 - **The ttl-reaper can now expire the DNS records of an account the portal has
   proven dormant (#466, closing the last open piece of #457).** The
   unmanaged-subdomain report (#458) deleted nothing, and its comment said why: a

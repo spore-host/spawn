@@ -40,6 +40,8 @@ var (
 	poolIdleTimeout  time.Duration
 	poolSpecPath     string
 	poolVisTimeout   int
+	poolS3Read       []string
+	poolS3Write      []string
 )
 
 var poolGroupCmd = &cobra.Command{
@@ -71,26 +73,102 @@ func poolSpecBucket(account, region string) string {
 //   - S3 read on the spawn-binaries buckets (the bootstrap downloads spored) and
 //     read+write on the spec/results bucket (fetch staged specs; the taskproto job
 //     script writes completion.json/.exitcode there).
-//
-// Known limitation: a task's OWN input/output buckets (beyond the results bucket)
-// aren't known at pool-create time, so they are not granted here — a pooled task
-// that stages from/to a third bucket needs that access added (tracked for a
-// follow-up; the common nf-spawn case keeps work in the results/work bucket).
-func poolWorkerPolicy(account, region, specBucket, runID string) string {
+//   - S3 read on extraRead buckets and read/write on extraWrite buckets — the
+//     task's OWN input/output buckets, which live beyond the results bucket. These
+//     aren't knowable from the pool alone (they're per-task), so the operator (or
+//     nf-spawn, which knows its workdir/input buckets) declares them at create via
+//     --s3-read/--s3-write. Empty (default) = results bucket only, least-privilege.
+func poolWorkerPolicy(account, region, specBucket, runID string, extraRead, extraWrite []string) string {
 	queueName := "spawn-pool-" + runID
 	queueARN := fmt.Sprintf("arn:aws:sqs:%s:%s:%s", region, account, queueName)
 	binPrefix := "arn:aws:s3:::spawn-binaries-*"
 	specObj := fmt.Sprintf("arn:aws:s3:::%s/*", specBucket)
 	specBkt := fmt.Sprintf("arn:aws:s3:::%s", specBucket)
-	return fmt.Sprintf(`{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect":"Allow","Action":["sqs:GetQueueUrl","sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],"Resource":[%q]},
-    {"Effect":"Allow","Action":["s3:GetObject"],"Resource":[%q,%q]},
-    {"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%q]},
-    {"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%q,%q]}
-  ]
-}`, queueARN, binPrefix+"/*", specObj, specObj, binPrefix, specBkt)
+
+	// Base statements: SQS on the run queue; read spawn-binaries + spec objects;
+	// write spec/results objects; list the binaries + spec buckets.
+	stmts := []string{
+		fmt.Sprintf(`{"Effect":"Allow","Action":["sqs:GetQueueUrl","sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],"Resource":[%q]}`, queueARN),
+		fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject"],"Resource":[%q,%q]}`, binPrefix+"/*", specObj),
+		fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%q]}`, specObj),
+		fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%q,%q]}`, binPrefix, specBkt),
+	}
+	// Extra task input buckets (read-only object access + list).
+	if objs, bkts := bucketResourceARNs(extraRead); len(objs) > 0 {
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject"],"Resource":[%s]}`, objs))
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bkts))
+	}
+	// Extra task output buckets (read+write+delete object access + list).
+	if objs, bkts := bucketResourceARNs(extraWrite); len(objs) > 0 {
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":[%s]}`, objs))
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bkts))
+	}
+	return `{"Version":"2012-10-17","Statement":[` + strings.Join(stmts, ",") + `]}`
+}
+
+// bucketResourceARNs turns bucket names into (object-ARNs, bucket-ARNs) JSON
+// element lists for an IAM Resource array, deduped and skipping empties. A name
+// may be given as "bucket" or "bucket/prefix"; only the bucket part is used for
+// the ARN (IAM S3 resource ARNs are bucket-scoped, with /* for objects).
+func bucketResourceARNs(names []string) (objARNs, bktARNs string) {
+	seen := map[string]bool{}
+	var objs, bkts []string
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		n = strings.TrimPrefix(n, "s3://")
+		if i := strings.IndexByte(n, '/'); i >= 0 {
+			n = n[:i] // bucket only
+		}
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		objs = append(objs, fmt.Sprintf("%q", "arn:aws:s3:::"+n+"/*"))
+		bkts = append(bkts, fmt.Sprintf("%q", "arn:aws:s3:::"+n))
+	}
+	return strings.Join(objs, ","), strings.Join(bkts, ",")
+}
+
+// poolWorkerMaxRestarts bounds the restart-on-error loop so a hard crash-loop
+// (e.g. a permanently-broken config) can't spin the CPU for the whole TTL. The
+// per-worker TTL is the ultimate backstop; this just avoids a busy loop.
+const poolWorkerMaxRestarts = 20
+
+// buildPoolWorkerCommand emits the on-instance bootstrap that runs
+// `spored pool-worker` under a bounded restart-on-ERROR loop (#465).
+//
+// The worker used to run once at boot; any early exit — a transient AWS error, an
+// SQS blip, a spot pre-warm race — left a running-but-idle instance billing until
+// TTL. This wraps it so:
+//   - exit 0 (the worker idle-drained cleanly) → STOP and let spored's on_complete
+//     terminate the instance. Scale-to-zero is preserved.
+//   - non-zero exit → sleep (fixed 10s) and re-exec, up to poolWorkerMaxRestarts,
+//     so a transient failure recovers instead of stranding the worker.
+//
+// The env exports precede the loop so every re-exec sees the same pool config.
+func buildPoolWorkerCommand(runID, specBucket, specPrefix, idleTimeout string) string {
+	return fmt.Sprintf(`export SPAWN_POOL_RUN_ID=%q
+export SPAWN_POOL_SPEC_BUCKET=%q
+export SPAWN_POOL_SPEC_PREFIX=%q
+# Restart-on-error loop (#465): re-exec on a non-zero exit (transient failure),
+# stop on 0 (clean idle-drain → let on_complete terminate). Bounded so a hard
+# crash-loop can't busy-spin for the whole TTL.
+_spawn_pool_attempt=0
+while :; do
+  spored pool-worker --idle-timeout %s
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then
+    echo "pool-worker: clean drain (exit 0); not restarting"
+    break
+  fi
+  _spawn_pool_attempt=$((_spawn_pool_attempt + 1))
+  if [ "$_spawn_pool_attempt" -ge %d ]; then
+    echo "pool-worker: exited $_rc; hit max restarts (%d); giving up (TTL will reap)" >&2
+    break
+  fi
+  echo "pool-worker: exited $_rc; restarting (attempt $_spawn_pool_attempt) in 10s" >&2
+  sleep 10
+done`, runID, specBucket, specPrefix, idleTimeout, poolWorkerMaxRestarts, poolWorkerMaxRestarts)
 }
 
 var poolCreateCmd = &cobra.Command{
@@ -166,14 +244,11 @@ var poolCreateCmd = &cobra.Command{
 // partial cohort gives best-effort/eventual semantics. Returns nil once the cohort
 // reconciles (Ready with >= minViable) or an error if it can't reach minViable.
 func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, specBucket string) error {
-	// The worker bootstrap: export the pool env the `spored pool-worker` loop reads,
-	// then run it. Runs after spored is installed (CustomUserData is appended to the
-	// bootstrap), so `spored` is on PATH.
-	workerCmd := fmt.Sprintf(`export SPAWN_POOL_RUN_ID=%q
-export SPAWN_POOL_SPEC_BUCKET=%q
-export SPAWN_POOL_SPEC_PREFIX=%q
-spored pool-worker --idle-timeout %s`,
-		poolRunID, specBucket, "staging", poolIdleTimeout.String())
+	// The worker bootstrap runs `spored pool-worker` under a restart-on-error loop
+	// (see buildPoolWorkerCommand): a transient failure re-execs instead of
+	// stranding a billing-but-idle worker (#465), while a clean idle-drain (exit 0)
+	// lets the instance terminate (scale-to-zero preserved).
+	workerCmd := buildPoolWorkerCommand(poolRunID, specBucket, "staging", poolIdleTimeout.String())
 
 	userData, err := launcher.BuildLinuxBootstrap(launcher.BootstrapConfig{
 		Username:       "ec2-user",
@@ -208,7 +283,7 @@ spored pool-worker --idle-timeout %s`,
 	iamProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
 		RoleName:         "spawn-pool-worker",
 		TrustServices:    []string{"ec2"},
-		InlinePolicyJSON: poolWorkerPolicy(account, region, specBucket, poolRunID),
+		InlinePolicyJSON: poolWorkerPolicy(account, region, specBucket, poolRunID, poolS3Read, poolS3Write),
 	})
 	if err != nil {
 		return fmt.Errorf("set up worker IAM instance profile: %w", err)
@@ -406,6 +481,8 @@ func init() {
 	poolCreateCmd.Flags().StringVar(&poolTTL, "ttl", "4h", "Per-worker TTL backstop")
 	poolCreateCmd.Flags().DurationVar(&poolIdleTimeout, "idle-timeout", 5*time.Minute, "Workers drain after this long with an empty queue")
 	poolCreateCmd.Flags().IntVar(&poolVisTimeout, "visibility-timeout", 900, "SQS claim window in seconds (must exceed the longest task runtime)")
+	poolCreateCmd.Flags().StringArrayVar(&poolS3Read, "s3-read", nil, "Extra S3 bucket the tasks read inputs from (repeatable) — beyond the results bucket workers always get")
+	poolCreateCmd.Flags().StringArrayVar(&poolS3Write, "s3-write", nil, "Extra S3 bucket the tasks write outputs to (repeatable) — beyond the results bucket")
 
 	poolSubmitCmd.Flags().StringVar(&poolSpecPath, "spec", "", "Path to a TaskSpec JSON file to enqueue")
 }
