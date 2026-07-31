@@ -30,6 +30,9 @@ lambda/ttl-reaper/ttl-reaper
 # SAM build dirs
 lambda/*/.aws-sam/
 
+# Generated sam deploy parameter files (hold per-deploy values, e.g. webhook URLs)
+lambda/*/.deploy-params.yaml
+
 # Build artifacts
 bin/
 .DS_Store

@@ -18,6 +18,15 @@ build:
 # deployed, and on a fresh stack it falls back to the template Default. DNS_SWEEP
 # in particular defaults to 'false', so leaving it out made #438 impossible to
 # enable via `make deploy` even though the code and the README documented it.
+#
+# Overrides go through a generated params file, NOT inline Key=Value pairs. sam
+# matches the WHOLE --parameter-overrides string against one regex, and an empty
+# value makes that match fail — so with several pairs and one empty (NOTIFY_URL /
+# DNS_ZONE_ID / DNS_DOMAIN are all empty by default) sam either rejects the line
+# outright or, worse, silently falls through to another pattern and mis-keys every
+# parameter (observed: NotifyUrl swallowed as the literal key "ParameterKey").
+# Repeating the flag doesn't help either — the last occurrence wins and the rest are
+# dropped. A file:// params file is the only form that handles empty values.
 DRY_RUN?=true
 NOTIFY_URL?=
 SCAN_SELF?=false
@@ -25,12 +34,18 @@ ROLE_ARNS?=arn:aws:iam::435415984226:role/spawn-ttl-reaper-ec2
 DNS_ZONE_ID?=
 DNS_DOMAIN?=
 DNS_SWEEP?=false
+PARAMS_FILE=.deploy-params.yaml
 deploy: build
+	@printf 'Environment: "%s"\nDryRun: "%s"\nNotifyUrl: "%s"\nScanSelf: "%s"\nRoleArns: "%s"\nDnsZoneId: "%s"\nDnsDomain: "%s"\nDnsSweep: "%s"\n' \
+		'$(ENV)' '$(DRY_RUN)' '$(NOTIFY_URL)' '$(SCAN_SELF)' '$(ROLE_ARNS)' '$(DNS_ZONE_ID)' '$(DNS_DOMAIN)' '$(DNS_SWEEP)' > $(PARAMS_FILE)
+	@# Echo the mode-setting parameters so a deploy can't quietly leave a feature off
+	@# — but never NotifyUrl, which is a Slack webhook secret.
+	@echo "deploying: dry-run=$(DRY_RUN) scan-self=$(SCAN_SELF) dns-sweep=$(DNS_SWEEP) zone='$(DNS_ZONE_ID)' domain='$(DNS_DOMAIN)'"
 	sam deploy \
 		--template-file template.yaml \
 		--stack-name spawn-ttl-reaper-$(ENV) \
 		--capabilities CAPABILITY_IAM \
-		--parameter-overrides Environment=$(ENV) DryRun=$(DRY_RUN) NotifyUrl=$(NOTIFY_URL) ScanSelf=$(SCAN_SELF) "RoleArns=$(ROLE_ARNS)" DnsZoneId=$(DNS_ZONE_ID) DnsDomain=$(DNS_DOMAIN) DnsSweep=$(DNS_SWEEP) \
+		--parameter-overrides file://$(PARAMS_FILE) \
 		--resolve-s3
 
 deploy-staging:
@@ -43,7 +58,7 @@ test:
 	go test -v ./...
 
 clean:
-	rm -f $(BINARY_NAME) function.zip
+	rm -f $(BINARY_NAME) function.zip $(PARAMS_FILE)
 	rm -rf .aws-sam
 
 logs:

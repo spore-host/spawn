@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passed explicitly (`DNS_ZONE_ID` / `DNS_DOMAIN` / `DNS_SWEEP`), the README shows
   the enabling invocation, and the verify section says to confirm `dns-sweep=true`
   on the init line rather than assuming the feature is live.
+- **`make deploy` (ttl-reaper) failed, or silently mis-set parameters, whenever one
+  was empty.** `sam` matches the whole `--parameter-overrides` string against a
+  single regex, and an empty value breaks that match — so with several pairs and one
+  empty (`NOTIFY_URL`, `DNS_ZONE_ID` and `DNS_DOMAIN` are all empty by default) it
+  either rejected the invocation outright or fell through to another pattern and
+  mis-keyed every parameter, in one observed case swallowing `NotifyUrl` as a
+  literal key named `ParameterKey`. That silent form is the dangerous one: the
+  deploy succeeds having applied something other than what was asked for. Overrides
+  now go through a generated `file://` params file, the only form that handles empty
+  values, and the deploy echoes the mode-setting parameters (never the webhook) so a
+  deploy can't quietly leave a feature off.
 
 ### Changed
 - **The ttl-reaper sweep's in-scope rules are now a pure, tested function
