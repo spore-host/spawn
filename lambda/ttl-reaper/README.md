@@ -45,6 +45,11 @@ annotates each with the portal registry's lifecycle verdict. With
 `REAPER_DNS_EXPIRE=true` it can delete the ones the registry has proven dormant or
 offboarded ([#466]). See [DNS expiry](#dns-expiry-466).
 
+Every run classifies its own failures and alarms when it could not look at all
+([#469]) — see [Failure observability](#failure-observability-469). A reaper that
+silently reaches nothing is indistinguishable from a fleet with nothing expired, and
+that was the state before #469.
+
 ## Multi-account coverage
 
 A spore lands in **whatever account the caller's credentials point at** — spawn
@@ -196,6 +201,83 @@ it impossible for a reaper bug to manufacture the eligibility it then acts on. I
 the `Scan` fails, or the account has no row, expiry refuses and says so
 (`no registry verdicts available … nothing was deleted`).
 
+## Failure observability ([#469])
+
+The reaper's value is that it still reaps when `spored` is dead. That guarantee is
+only as good as our ability to notice when **the reaper** is the thing that is dead
+— and until #469 it could not be noticed at all:
+
+- `handler` always returns `nil`, so the Lambda `Errors` metric never moved no
+  matter how many scans failed.
+- `Summary` went to one log line and was returned to EventBridge. Nothing read it.
+- The Slack webhook fires **only on a successful reap**. No failure path notified.
+- There were no metric filters and no alarms on this function.
+
+Every field in `Summary` except `Errors` counts something that *happened*. `Errors`
+alone says a scan did **not** happen — and it was pinned permanently nonzero by one
+uninstalled account (11 regions × 6 runs/hour = 66/hour, forever), so it could not
+distinguish *"nothing needed reaping"* from *"the reaper could not look."* That is
+the same blindness #65 created the reaper to prevent, one layer up.
+
+### What changed
+
+Failures are now classified (`failures.go`) and aggregated **per account**, because
+credentials are per account — the same role either works in every region or is
+refused in every region, so eleven identical `AccessDenied`s are **one**
+observation:
+
+| Field | Counts |
+|---|---|
+| `Errors` | **operational** failures only — throttles, timeouts, outages. Things that mean *investigate this* and usually clear on their own |
+| `AccountsDenied` | accounts whose role refused us in **every** region — one per account, not per region |
+| `FSxAccountsDenied` | accounts that refused **every** FSx call — a separate grant, so this fires even when the instance scan succeeded ([#212]) |
+
+A denial contributes **0** to `Errors`. It is not discarded — it gets its own field
+and its own alarm, so it becomes *louder*, not quieter.
+
+An account denied everywhere is **still attempted every run**. The reaper's role ARN
+embeds a CloudFormation-generated physical ID, so recreating the stack changes the
+suffix and breaks *every* customer's trust policy at once ([#457]) — which looks
+identical, from the inside, to the whole customer base uninstalling simultaneously.
+Quiescing means *not counting it as a surprise*, never *stopping the attempt*.
+
+### Sentinel log lines and alarms
+
+Three fixed strings exist **so they can be alarmed on**. Their spelling is a
+contract with the metric filters in `template.yaml`; `TestSentinelSpellingsAreStable`
+turns a rename into a build failure rather than a silently disarmed alarm.
+
+| Sentinel | Alarm | Window | Means |
+|---|---|---|---|
+| `REAPER REACHED NO ACCOUNTS` | `…-reached-no-accounts` | 2×1h | **The one that matters.** Zero accounts reached: nothing was reaped, and over-deadline instances may be running with nothing left to stop them. Investigate **our** side first — execution role, the [#457] role-ARN suffix, `EC2_EXTERNAL_ID` |
+| `REAPER ACCOUNT UNREACHABLE` | `…-account-unreachable` | 1×24h | One account's role refuses us everywhere. Chronic, not acute — the rest of the fleet is fine. Fix the role or remove it from `ROLE_ARNS` |
+| `REAPER FSX UNREACHABLE` | `…-fsx-unreachable` | 1×24h | An account refuses every FSx call, so orphaned filesystems accrue cost unreclaimed. Usually its instance scan works fine — that combination is [#212] |
+| *(none — `AWS/Lambda` `Errors`)* | `…-invocation-errors` | 1×1h | The run died outright (panic, 900s timeout, OOM, bad deploy) and so emitted **none** of the sentinels above. Without this, the loudest failure would be the quietest signal |
+
+Deploy parameters: `ALARMS_ENABLED` (default **`true`** — unlike the other flags,
+which change what the reaper *does*; this only changes what it *reports*) and
+`ALARM_TOPIC_ARN` (optional SNS topic).
+
+```bash
+make deploy ALARM_TOPIC_ARN=arn:aws:sns:us-east-1:966362334030:spore-host-alerts ...
+```
+
+An alarm with no topic is visible in the console but pages no one, which only helps
+someone who already suspected a problem and went looking — the state this change
+exists to fix.
+
+When the portal registry is configured, a denied-account line carries the registry's
+status as **corroboration only**. It describes a *different role*
+(`spore-portal-onboard`, which trusts phone-home) than the one that just refused us
+(`spawn-ttl-reaper-ec2`, which trusts this Lambda); either can be healthy while the
+other is broken. It is a second opinion about a different door, never a gate. The
+registry is read at most once per run, and not at all when no account was denied.
+
+Deliberately **not** done: no consecutive-failure counter (a stateless Lambda has
+nowhere to keep "K consecutive runs"), and `handler` still returns `nil` — making it
+error would mark runs failed that did real work and would change EventBridge retry
+behaviour. The explicit alarms are the honest mechanism.
+
 ## Verify
 
 ```bash
@@ -225,7 +307,9 @@ live-instance scan errored logs `aborting sweep for this account` and deletes
 nothing — by design, since a partial live set could orphan a healthy record.
 
 [#121]: https://github.com/spore-host/spawn/issues/121
+[#212]: https://github.com/spore-host/spawn/issues/212
 [#457]: https://github.com/spore-host/spawn/issues/457
 [#466]: https://github.com/spore-host/spawn/issues/466
+[#469]: https://github.com/spore-host/spawn/issues/469
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71

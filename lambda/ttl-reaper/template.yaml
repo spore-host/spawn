@@ -116,6 +116,28 @@ Parameters:
       this even with dynamodb:Scan granted. Empty omits the grant (for a table on
       an AWS-owned key).
 
+  AlarmsEnabled:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Create the CloudWatch metric filters and alarms that make the reaper's
+      FAILURES visible (spore-host/spawn#469). Until these existed the reaper had no
+      observability at all: the handler always returns success, so the Lambda Errors
+      metric never moved; the Slack webhook only fires on a successful reap; and the
+      Summary went to one log line nothing reads. A run whose every scan failed was
+      indistinguishable from a run with nothing to reap — which is the exact
+      blindness the reaper was created (#65) to prevent. On by default; leave it on.
+
+  AlarmTopicArn:
+    Type: String
+    Default: ''
+    Description: >
+      SNS topic ARN to notify when an alarm fires. Optional, but an alarm nobody is
+      told about only helps someone who already suspected a problem and went looking
+      — which is the state this whole change exists to fix. Empty creates the alarms
+      with no action, so they are visible in the console but will page no one.
+
 Conditions:
   ScanSelfEnabled: !Equals [!Ref ScanSelf, 'true']
   RegistryReadEnabled: !And
@@ -128,6 +150,10 @@ Conditions:
   DnsTeardownEnabled: !And
     - !Not [!Equals [!Ref DnsZoneId, '']]
     - !Not [!Equals [!Ref DnsDomain, '']]
+  ObservabilityEnabled: !Equals [!Ref AlarmsEnabled, 'true']
+  AlarmActionsEnabled: !And
+    - !Not [!Equals [!Ref AlarmTopicArn, '']]
+    - !Condition ObservabilityEnabled
 
 Resources:
   TTLReaperFunction:
@@ -234,6 +260,211 @@ Resources:
     Properties:
       LogGroupName: !Sub /aws/lambda/spawn-ttl-reaper-${Environment}
       RetentionInDays: 30
+
+  # ---------------------------------------------------------------------------
+  # Failure observability (#469, #457 failure mode A, #254 idea 3)
+  #
+  # The reaper's whole value is that it still reaps when spored is dead. That
+  # guarantee is only as good as our ability to notice when the REAPER is the thing
+  # that is dead — and until these resources existed, we could not. Every field in
+  # Summary except Errors counts something that happened; Errors alone says a scan
+  # did NOT happen, and nothing was listening to it.
+  #
+  # The patterns below match literal sentinel strings emitted by failures.go. That
+  # coupling is deliberate but fragile in one direction: renaming a constant in Go
+  # without editing the pattern here disarms the alarm silently. TestSentinelSpellings
+  # AreStable pins the spellings so that becomes a build failure instead.
+  #
+  # Alarms live here, with the function, rather than in spore-host's OpenTofu (where
+  # the prober's live) so that the alarm and the log line it matches ship in the same
+  # repo and the same `make deploy`. Splitting them across repos is how #254's class
+  # of drift starts.
+  # ---------------------------------------------------------------------------
+
+  # THE alarm that matters: a run that reached ZERO accounts. It concluded nothing
+  # and reaped nothing, which from the outside looks exactly like a quiet, healthy
+  # run over a fleet with nothing expired.
+  ReachedNoAccountsMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: ObservabilityEnabled
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '"REAPER REACHED NO ACCOUNTS"'
+      MetricTransformations:
+        - MetricName: ReaperReachedNoAccounts
+          MetricNamespace: !Sub spawn/ttl-reaper/${Environment}
+          MetricValue: '1'
+          # Without a default the metric is simply absent on healthy runs, and
+          # "absent" and "zero" are not the same thing to an alarm.
+          DefaultValue: 0
+
+  ReachedNoAccountsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ObservabilityEnabled
+    Properties:
+      AlarmName: !Sub spawn-ttl-reaper-${Environment}-reached-no-accounts
+      AlarmDescription: >
+        The TTL reaper reached ZERO accounts in a run: every account × region scan
+        failed. It therefore reaped nothing, and over-deadline instances may be
+        running right now with nothing left to stop them (#65's failure mode, one
+        layer up).
+
+        Investigate OUR side FIRST, not the customers. The most likely causes, in
+        order: (1) this Lambda's execution role lost its sts:AssumeRole grant;
+        (2) the reaper stack was recreated — its role ARN embeds a
+        CloudFormation-generated physical ID, so a new stack changes the suffix and
+        breaks EVERY customer's trust policy simultaneously (spawn#457), which looks
+        identical to the entire customer base uninstalling at once; (3) EC2_EXTERNAL_ID
+        no longer matches the cross-account roles' ExternalId condition.
+
+        Check the log line "REAPER REACHED NO ACCOUNTS" for the account count, and the
+        per-region "scan error" lines above it for the classified reason.
+      Namespace: !Sub spawn/ttl-reaper/${Environment}
+      MetricName: ReaperReachedNoAccounts
+      Statistic: Sum
+      # An hour of runs (6 at the default rate(10 minutes)), twice, before paging.
+      # A single failed run can be a transient regional blip; two consecutive hours
+      # of reaching nothing cannot.
+      Period: 3600
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # A period with no data means no run emitted the sentinel — healthy. The
+      # separate InvocationErrors alarm below is what catches "no runs at all".
+      TreatMissingData: notBreaching
+      AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+
+  # One account refused us in every region. Lower urgency than the above — the rest
+  # of the fleet is still being reaped — but it is a standing misconfiguration that
+  # will never fix itself, and before #469 it was invisible: it just added 11 to a
+  # counter nobody read.
+  AccountUnreachableMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: ObservabilityEnabled
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '"REAPER ACCOUNT UNREACHABLE"'
+      MetricTransformations:
+        - MetricName: ReaperAccountUnreachable
+          MetricNamespace: !Sub spawn/ttl-reaper/${Environment}
+          MetricValue: '1'
+          DefaultValue: 0
+
+  AccountUnreachableAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ObservabilityEnabled
+    Properties:
+      AlarmName: !Sub spawn-ttl-reaper-${Environment}-account-unreachable
+      AlarmDescription: >
+        A cross-account role refused the TTL reaper in EVERY region, so that
+        account's instances are not being reaped at all. The rest of the fleet is
+        unaffected.
+
+        Causes: the spawn-ttl-reaper-ec2 role was deleted, its trust policy no longer
+        names this reaper's execution role, or EC2_EXTERNAL_ID changed. STS answers
+        AccessDenied for all three and deliberately does not distinguish them, so as
+        not to leak whether the role exists.
+
+        This is NOT proof the customer offboarded. If the account really is gone,
+        remove its ARN from RoleArns — the reaper keeps trying every run until you do,
+        by design: it must never quietly stop watching an account that might come
+        back (spawn#457). The log line names the account and, when the portal registry
+        has a row for it, includes that registry status as corroboration — note the
+        registry describes the spore-portal-onboard role, not this one, so it is a
+        second opinion about a different door and never authoritative.
+
+        Sustained over a day: fix the role or drop the account.
+      Namespace: !Sub spawn/ttl-reaper/${Environment}
+      MetricName: ReaperAccountUnreachable
+      Statistic: Sum
+      # A full day before paging: this is chronic, not acute, and the fleet is still
+      # being reaped. Paging hourly on a standing misconfiguration is how the old
+      # Errors counter got ignored in the first place.
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+
+  # FSx has its own signal because fsx:* is a separate grant from ec2:*. An account
+  # can scan instances perfectly and never reclaim a filesystem — which is spawn#212
+  # exactly, an FSx AccessDenied that presented as a silent no-op. Sharing the
+  # account-level signal would let the EC2 success mask it again.
+  FSxUnreachableMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: ObservabilityEnabled
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '"REAPER FSX UNREACHABLE"'
+      MetricTransformations:
+        - MetricName: ReaperFSxUnreachable
+          MetricNamespace: !Sub spawn/ttl-reaper/${Environment}
+          MetricValue: '1'
+          DefaultValue: 0
+
+  FSxUnreachableAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ObservabilityEnabled
+    Properties:
+      AlarmName: !Sub spawn-ttl-reaper-${Environment}-fsx-unreachable
+      AlarmDescription: >
+        An account's role refused every FSx DescribeFileSystems call, so orphaned
+        spawn-managed FSx Lustre filesystems in it are never being reclaimed. Those
+        cost real money per GB-month for as long as this lasts, and nothing else in
+        the system will ever delete them.
+
+        This fires INDEPENDENTLY of the account-unreachable alarm on purpose: fsx:* is
+        a separate grant from ec2:*, so the usual shape of this is an account whose
+        instance scan works fine. That combination is spawn#212, where an FSx
+        AccessDenied surfaced as a silent no-op because the path was best-effort and
+        under-logged (spawn#254's recurring class).
+
+        Fix: add fsx:DescribeFileSystems (and fsx:DeleteFileSystem) to that account's
+        spawn-ttl-reaper-ec2 role — see ttl-reaper-cross-account-role.yaml. The log
+        line names the account and says whether its instance scan succeeded.
+      Namespace: !Sub spawn/ttl-reaper/${Environment}
+      MetricName: ReaperFSxUnreachable
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+
+  # A run that dies outright — panic, timeout, OOM, a bad deploy — never reaches the
+  # code that emits any sentinel above, so those alarms stay silent precisely when
+  # things are worst. This one covers that gap and needs no log parsing.
+  InvocationErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ObservabilityEnabled
+    Properties:
+      AlarmName: !Sub spawn-ttl-reaper-${Environment}-invocation-errors
+      AlarmDescription: >
+        The TTL reaper Lambda itself failed to complete — panic, timeout (900s cap),
+        out-of-memory, or a broken deploy. Nothing was reaped on those runs.
+
+        This alarm exists because the sentinel-based alarms above are emitted BY the
+        handler: a run that dies before finishing emits none of them, so without this
+        the loudest failure would be the quietest signal. Check the log group for a
+        panic trace or a Task timed out message.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TTLReaperFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
 
 Outputs:
   FunctionArn:
