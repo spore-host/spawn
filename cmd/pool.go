@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -96,7 +97,8 @@ var poolCreateCmd = &cobra.Command{
 		if vis <= 0 {
 			vis = 900 // 15m default claim window
 		}
-		if _, err := taskpool.CreateForRunWithConfig(ctx, awsClient.Config(), poolRunID, specBucket, "staging", vis); err != nil {
+		pool, err := taskpool.CreateForRunWithConfig(ctx, awsClient.Config(), poolRunID, specBucket, "staging", vis)
+		if err != nil {
 			return fmt.Errorf("create pool queue: %w", err)
 		}
 
@@ -111,6 +113,12 @@ var poolCreateCmd = &cobra.Command{
 			mv = poolWorkers
 		}
 		if err := provisionPoolWorkers(ctx, awsClient, region, specBucket); err != nil {
+			// The queue was created above; if provisioning failed there are no workers
+			// to drain it, so delete it now rather than leak an orphaned SQS queue
+			// (a failed `pool create` must leave nothing behind). Best-effort.
+			if derr := pool.Drain(ctx); derr != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  could not clean up the queue after a failed provision: %v\n", derr)
+			}
 			return err
 		}
 
@@ -144,14 +152,31 @@ spored pool-worker --idle-timeout %s`,
 		return fmt.Errorf("build worker bootstrap: %w", err)
 	}
 
+	// Resolve the AMI and IAM instance profile UP FRONT, once, for the whole pool.
+	// The taskcohort Actuator calls aws.Client.Launch directly (RunInstances), which
+	// — unlike the launcher.Provision path used by `spawn task run` — does NOT
+	// auto-fill these. RunInstances requires an ImageId, so an empty AMI fails every
+	// worker with MissingParameter. Workers are homogeneous, so one AMI + one shared
+	// spored profile fits all of them (resolve once, reuse across the cohort).
+	ami, err := awsClient.GetRecommendedAMI(ctx, region, poolInstanceType)
+	if err != nil {
+		return fmt.Errorf("auto-detect worker AMI for %s in %s: %w", poolInstanceType, region, err)
+	}
+	iamProfile, err := awsClient.SetupSporedIAMRole(ctx)
+	if err != nil {
+		return fmt.Errorf("set up worker IAM instance profile: %w", err)
+	}
+
 	base := aws.LaunchConfig{
-		InstanceType: poolInstanceType,
-		Region:       region,
-		Spot:         poolSpot,
-		TTL:          poolTTL,
-		IdleTimeout:  poolIdleTimeout.String(),
-		OnComplete:   "terminate",
-		UserData:     launcher.EncodeLinuxUserData(userData),
+		InstanceType:       poolInstanceType,
+		Region:             region,
+		AMI:                ami,
+		IamInstanceProfile: iamProfile,
+		Spot:               poolSpot,
+		TTL:                poolTTL,
+		IdleTimeout:        poolIdleTimeout.String(),
+		OnComplete:         "terminate",
+		UserData:           launcher.EncodeLinuxUserData(userData),
 		Tags: map[string]string{
 			"spawn:pool-run-id": poolRunID,
 			"spawn:role":        "pool-worker",
@@ -196,7 +221,19 @@ spored pool-worker --idle-timeout %s`,
 		return fmt.Errorf("provision workers: %w", err)
 	}
 	if !outcome.Ready {
-		return fmt.Errorf("pool failed to reach min viable (%d) workers", mv)
+		// Surface WHY: render each member's terminal fault (the AWS error code +
+		// message the Classifier preserved), so a provisioning failure is
+		// diagnosable instead of an opaque "failed to reach min viable". Mirrors
+		// how launchCohort renders job-array member failures.
+		var details []string
+		for _, m := range members {
+			rec := outcome.Records[m.ID]
+			if !rec.Succeeded() {
+				details = append(details, fmt.Sprintf("  %s: %s", m.ID, rec.Summary()))
+			}
+		}
+		return fmt.Errorf("pool failed to reach min viable (%d of %d) workers:\n%s",
+			mv, poolWorkers, strings.Join(details, "\n"))
 	}
 	return nil
 }

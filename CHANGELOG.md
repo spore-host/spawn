@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn pool create` now launches workers that actually boot (#70).** The
+  pooled-worker launch built a raw `LaunchConfig` and called `RunInstances`
+  directly (via the taskcohort Actuator), skipping the AMI auto-detect and IAM
+  instance-profile setup that the `launcher.Provision` path does — so every worker
+  failed with `MissingParameter` (RunInstances requires an ImageId) and the pool
+  never reached min-viable. `create` now resolves the recommended AMI and the
+  spored instance profile once up front (workers are homogeneous) and launches
+  with a complete config. Found by a real-AWS smoke test.
+- **A failed `spawn pool create` no longer leaks its SQS queue (#70).** The queue
+  is created before workers are provisioned; if provisioning fails there are no
+  workers to drain it, so `create` now deletes the queue on the failure path
+  instead of leaving an orphaned `spawn-pool-<run>` queue behind.
+- **`spawn pool create` reports WHY provisioning failed (#70).** On a pool that
+  can't reach min-viable, it now renders each worker's terminal fault (the AWS
+  error code + phase the cohort recorded) instead of an opaque "failed to reach
+  min viable" with no cause.
+
 ## [0.96.0] - 2026-07-31
 
 ### Security
