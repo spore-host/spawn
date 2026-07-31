@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.97.0] - 2026-07-31
+
 ### Added
 - **`spawn pool create --s3-read`/`--s3-write` grant workers access to a task's
   own input/output buckets (#70).** Pool workers get read/write on the run's
@@ -2382,7 +2384,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.96.3...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.97.0...HEAD
+[0.97.0]: https://github.com/spore-host/spawn/compare/v0.96.3...v0.97.0
 [0.96.3]: https://github.com/spore-host/spawn/compare/v0.96.2...v0.96.3
 [0.96.2]: https://github.com/spore-host/spawn/compare/v0.96.1...v0.96.2
 [0.96.1]: https://github.com/spore-host/spawn/compare/v0.96.0...v0.96.1
