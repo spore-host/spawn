@@ -79,9 +79,32 @@ const defaultMaxAge = 7 * 24 * time.Hour
 type account struct {
 	label     string
 	accountID string // 12-digit AWS account ID (for the {base36}.domain subdomain)
-	ec2For    func(region string) *ec2.Client
+	ec2For    func(region string) ec2API
 	ssmFor    func(region string) *ssm.Client
-	fsxFor    func(region string) *fsx.Client
+	fsxFor    func(region string) fsxAPI
+}
+
+// ec2API / fsxAPI are the slices of the EC2 and FSx clients the reaper uses.
+//
+// Interfaces rather than *ec2.Client/*fsx.Client so the FAILURE paths can be driven
+// in tests (#469). That is the whole point of this seam: the reaper's per-account
+// error classification, and the sentinel log lines the CloudWatch alarms match, only
+// ever run when an AWS call fails. Mutation testing showed why it is not optional —
+// with concrete clients here, deleting the reportOutcomes call entirely, or dropping
+// the per-region outcome.record, left every test passing. A change whose entire
+// purpose is "notice when the reaper is broken" must not itself be undetectable when
+// broken.
+//
+// The SDK's own paginators take narrower interfaces (DescribeInstancesAPIClient
+// etc.), so *ec2.Client and *fsx.Client satisfy these unchanged.
+type ec2API interface {
+	DescribeInstances(ctx context.Context, in *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
+	TerminateInstances(ctx context.Context, in *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
+}
+
+type fsxAPI interface {
+	DescribeFileSystems(ctx context.Context, in *fsx.DescribeFileSystemsInput, optFns ...func(*fsx.Options)) (*fsx.DescribeFileSystemsOutput, error)
+	DeleteFileSystem(ctx context.Context, in *fsx.DeleteFileSystemInput, optFns ...func(*fsx.Options)) (*fsx.DeleteFileSystemOutput, error)
 }
 
 // reaper holds resolved configuration. Spores can be launched into ANY account a
@@ -247,7 +270,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 		accounts = append(accounts, account{
 			label:     "self",
 			accountID: selfAccountID(),
-			ec2For: func(region string) *ec2.Client {
+			ec2For: func(region string) ec2API {
 				c := base.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
@@ -257,7 +280,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ssm.NewFromConfig(c)
 			},
-			fsxFor: func(region string) *fsx.Client {
+			fsxFor: func(region string) fsxAPI {
 				c := base.Copy()
 				c.Region = region
 				return fsx.NewFromConfig(c)
@@ -285,7 +308,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 		accounts = append(accounts, account{
 			label:     accountIDFromRoleARN(roleARN),
 			accountID: accountIDFromRoleARN(roleARN),
-			ec2For: func(region string) *ec2.Client {
+			ec2For: func(region string) ec2API {
 				c := acctCfg.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
@@ -295,7 +318,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ssm.NewFromConfig(c)
 			},
-			fsxFor: func(region string) *fsx.Client {
+			fsxFor: func(region string) fsxAPI {
 				c := acctCfg.Copy()
 				c.Region = region
 				return fsx.NewFromConfig(c)
@@ -310,7 +333,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 		accounts = append(accounts, account{
 			label:     "self",
 			accountID: selfAccountID(),
-			ec2For: func(region string) *ec2.Client {
+			ec2For: func(region string) ec2API {
 				c := base.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
@@ -320,7 +343,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ssm.NewFromConfig(c)
 			},
-			fsxFor: func(region string) *fsx.Client {
+			fsxFor: func(region string) fsxAPI {
 				c := base.Copy()
 				c.Region = region
 				return fsx.NewFromConfig(c)
@@ -409,13 +432,37 @@ type Summary struct {
 	Expired  int `json:"expired"`
 	Reaped   int `json:"reaped"`
 	Skipped  int `json:"skipped"` // expired-but-not-terminated (dry-run)
-	Errors   int `json:"errors"`
+
+	// Errors counts OPERATIONAL failures only — throttles, timeouts, outages: the
+	// things that mean "investigate this" and that usually clear on their own. It
+	// deliberately excludes authorization refusals, which are counted in
+	// AccountsDenied below (#469). Before that split, one uninstalled account
+	// contributed 11 errors per run forever (per region × 6 runs/hour), which
+	// pinned this field permanently nonzero and destroyed its only real job:
+	// distinguishing "nothing needed reaping" from "the reaper could not look".
+	Errors int `json:"errors"`
+
+	// AccountsDenied counts accounts whose cross-account role refused us in EVERY
+	// region — one per account, not one per region, because credentials are
+	// per-account. A standing configuration fact: it recurs every run until a human
+	// changes something, so it is reported apart from Errors rather than buried in
+	// it. Nonzero here means a role was deleted, a trust policy no longer names
+	// this reaper, or EC2_EXTERNAL_ID changed. It does NOT mean the customer left,
+	// and the account is still attempted every run regardless (#457 trap 1).
+	AccountsDenied int `json:"accounts_denied"`
 
 	// FSx (#192): orphaned spawn-managed FSx Lustre filesystems reclaimed.
 	FSxScanned int `json:"fsx_scanned"`
 	FSxExpired int `json:"fsx_expired"` // refcount 0 AND past deadline/max-age
 	FSxReaped  int `json:"fsx_reaped"`
 	FSxSkipped int `json:"fsx_skipped"` // would-reap (dry-run) or held back (still in use / unflushed)
+
+	// FSxAccountsDenied counts accounts whose role refused EVERY FSx call. Separate
+	// from AccountsDenied because fsx:* is a separate grant: an account can scan
+	// instances fine and still never have a filesystem reclaimed. That exact
+	// combination was #212, and it hid because the FSx path was best-effort and
+	// under-logged. Nonzero here means filesystems are accruing cost unreclaimed.
+	FSxAccountsDenied int `json:"fsx_accounts_denied"`
 
 	// DNS sweep (#438): orphaned Route53 A-records reconciled against live IPs.
 	DNSScanned int `json:"dns_scanned"` // A-records examined under the account subdomains
@@ -462,19 +509,43 @@ type candidate struct {
 	accountName   string // spawn:account-name (the alias CNAME subdomain, #121; optional)
 }
 
+// handler is the Lambda entrypoint. It delegates to run so the whole scan — in
+// particular its FAILURE paths and the sentinel lines the CloudWatch alarms match —
+// can be driven against fakes in tests (#469). Reaching those paths through the
+// package-level reaper is not possible, and a failure-observability change that
+// cannot itself be observed failing is the one thing this must not be.
 func handler(ctx context.Context) (Summary, error) {
+	return r.run(ctx)
+}
+
+// run does the work. The receiver shadows the package-level r deliberately: every
+// r.* below resolves to this reaper, so the body is unchanged from when it read the
+// global directly.
+func (r *reaper) run(ctx context.Context) (Summary, error) {
 	start := time.Now().UTC()
 	sum := Summary{Accounts: len(r.accounts)}
+
+	// Per-account failure aggregation (#469). Credentials are per ACCOUNT, so the
+	// same role either works in every region or is refused in every region — eleven
+	// identical AccessDenieds are ONE observation, not eleven problems. Collected
+	// here and folded into the Summary by reportOutcomes after the loop, which also
+	// emits the alarmable sentinels. See failures.go.
+	outcomes := make([]accountOutcome, 0, len(r.accounts))
 
 	// Scan every spore-launching account × region. A spore lands in whatever
 	// account the caller's credentials pointed at, so coverage must be per-account.
 	for _, acct := range r.accounts {
+		outcome := accountOutcome{label: acct.label, accountID: acct.accountID}
 		for _, region := range r.regions {
 			cands, scanned, err := r.scanRegion(ctx, acct, region, start)
 			sum.Scanned += scanned
+			outcome.record(err)
 			if err != nil {
-				log.Printf("account %s region %s: scan error: %v", acct.label, region, err)
-				sum.Errors++
+				// Logged per region regardless of class: the aggregate decides how to
+				// COUNT it, never whether to say it. Losing the per-region detail would
+				// trade one blindness for another.
+				log.Printf("account %s region %s: scan error (%s): %v",
+					acct.label, region, classifyScanError(err), err)
 				continue
 			}
 			sum.Expired += len(cands)
@@ -515,7 +586,7 @@ func handler(ctx context.Context) (Summary, error) {
 			// filesystems — those past their deadline/max-age with NO live
 			// instance still using them (refcount 0). Independent of the instance
 			// scan above; an FSx outlives its instances by design.
-			r.reapFSxRegion(ctx, acct, region, start, &sum)
+			r.reapFSxRegion(ctx, acct, region, start, &sum, &outcome)
 		}
 
 		// DNS reconciliation sweep (#438): after scanning all regions for this
@@ -528,7 +599,17 @@ func handler(ctx context.Context) (Summary, error) {
 		if r.sweepDNS {
 			r.sweepAccountDNS(ctx, acct, &sum)
 		}
+
+		outcomes = append(outcomes, outcome)
 	}
+
+	// Fold the per-account outcomes into the Summary and emit the alarmable
+	// sentinels (#469). Deliberately before the unmanaged-subdomain report so the
+	// "we reached nothing" conclusion is drawn from the account scan alone — the
+	// DNS report runs against our OWN zone with base credentials and would succeed
+	// even when every cross-account role is broken, so letting it participate would
+	// mask exactly the failure this is here to catch.
+	reportOutcomes(outcomes, &sum, r.registryStatusFunc(ctx, &sum))
 
 	// Unmanaged-subdomain report (#457): the sweep above is per-account and only
 	// ever looks at accounts in REAPER_ROLE_ARNS, so records belonging to an
@@ -644,18 +725,37 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 //     back (counted Skipped), so we never delete data that hasn't reached S3 —
 //     the #184 lesson. DeleteFileSystem then runs WITHOUT SkipFinalExport so any
 //     remaining changes flush on delete.
-func (r *reaper) reapFSxRegion(ctx context.Context, acct account, region string, now time.Time, sum *Summary) {
+//
+// outcome accumulates this account's FSx reachability across regions so a role
+// missing fsx:* is reported as one denied account rather than as N operational
+// errors — and, critically, is reported at all even when the instance scan for the
+// same account succeeded. That combination was #212.
+func (r *reaper) reapFSxRegion(ctx context.Context, acct account, region string, now time.Time, sum *Summary, outcome *accountOutcome) {
 	if acct.fsxFor == nil {
 		return
 	}
 	fsxClient := acct.fsxFor(region)
 
 	paginator := fsx.NewDescribeFileSystemsPaginator(fsxClient, &fsx.DescribeFileSystemsInput{})
+	firstPage := true
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
+		// Only the first page speaks to reachability. A failure on page 3 means the
+		// grant is fine and something else broke, and recording that as a denial
+		// would understate a real operational problem.
+		if firstPage {
+			outcome.recordFSx(err)
+			firstPage = false
+		}
 		if err != nil {
-			log.Printf("account %s region %s: describe filesystems: %v", acct.label, region, err)
-			sum.Errors++
+			log.Printf("account %s region %s: describe filesystems (%s): %v",
+				acct.label, region, classifyScanError(err), err)
+			// A denial is a standing configuration fact, counted once per account in
+			// FSxAccountsDenied instead of once per region here (#469). Everything else
+			// is operational and still counts, unchanged.
+			if classifyScanError(err) != failureDenied {
+				sum.Errors++
+			}
 			return
 		}
 		for i := range page.FileSystems {
@@ -785,7 +885,7 @@ func (r *reaper) fsxInUse(ctx context.Context, acct account, region, fsxID strin
 // deleteFSx deletes a filesystem. It does NOT set SkipFinalExport, so an attached
 // export DRA flushes remaining changes to S3 on delete — never silently dropping
 // un-exported data (#184). Idempotent on already-deleting/not-found.
-func (r *reaper) deleteFSx(ctx context.Context, fsxClient *fsx.Client, id string) error {
+func (r *reaper) deleteFSx(ctx context.Context, fsxClient fsxAPI, id string) error {
 	_, err := fsxClient.DeleteFileSystem(ctx, &fsx.DeleteFileSystemInput{
 		FileSystemId: aws.String(id),
 	})
@@ -1268,6 +1368,52 @@ func (r *reaper) reportUnmanagedSubdomains(ctx context.Context, sum *Summary, no
 	if !registryOK && sum.DNSUnmanagedSubdomains > 0 {
 		log.Printf("unmanaged-subdomain report: no registry verdicts available for %d subdomain(s) — nothing was deleted (#466)",
 			sum.DNSUnmanagedSubdomains)
+	}
+}
+
+// registryStatusFunc returns a lookup from account ID to the portal registry's
+// lifecycle status, for annotating a denied-account log line with a second
+// opinion. Returns nil when there is no registry configured or it cannot be read,
+// and reportOutcomes then simply says nothing about it.
+//
+// CORROBORATION ONLY, and structurally incapable of gating anything: the returned
+// closure produces a string for a log line and nothing else. That is not fussiness
+// about layering — the registry describes a DIFFERENT ROLE. REAPER_ROLE_ARNS holds
+// spawn-ttl-reaper-ec2, which trusts this Lambda and is deployed by hand;
+// the registry's rows describe spore-portal-onboard, which trusts
+// portal-phone-home and is created by onboarding. Either can be healthy while the
+// other is broken, in both directions. So "the registry says unreachable" is a
+// second opinion about a different door: worth printing next to the denial,
+// never worth believing over our own AccessDenied.
+//
+// Note this is read once per run, after the scan loop, so a run where no account
+// was denied does not pay for the Scan at all.
+func (r *reaper) registryStatusFunc(ctx context.Context, sum *Summary) func(string) string {
+	if r.registry == nil {
+		return nil
+	}
+	var (
+		loaded bool
+		rows   map[string]accountlifecycle.Account
+		ok     bool
+	)
+	return func(accountID string) string {
+		if !loaded {
+			rows, ok = r.loadRegistry(ctx, sum)
+			loaded = true
+		}
+		if !ok {
+			return ""
+		}
+		acct, found := rows[accountID]
+		if !found {
+			// Presence is checked explicitly rather than reading the zero value's
+			// status: an absent row means "the prober has no opinion", and rendering
+			// that as some default status would fabricate a second opinion that nobody
+			// actually holds.
+			return ""
+		}
+		return string(acct.AccountStatus())
 	}
 }
 

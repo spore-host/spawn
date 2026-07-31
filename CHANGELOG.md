@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The ttl-reaper's failures are now observable, and alarm (#469, closing #457's
+  failure mode A and #254's idea 3).** The reaper exists because #65 showed that a
+  dead `spored` monitor loop lets instances run forever. That guarantee was only as
+  good as our ability to notice when *the reaper* was the thing that had died — and
+  it was not noticeable at all. `handler` always returned `nil`, so the Lambda
+  `Errors` metric never moved however many scans failed; `Summary` went to one log
+  line nothing read; the Slack webhook fired only on *successful* reaps; and the
+  function had no metric filter and no alarm anywhere in either repo. A run whose
+  every scan was refused looked exactly like a run with nothing expired.
+
+  `Errors` is the only field in `Summary` that says a scan did **not** happen — every
+  other field counts something that did — and it was pinned permanently nonzero by
+  any single uninstalled account: credentials are lazy, so a deleted role surfaces
+  as a per-region error, 11 regions × 6 runs/hour = 66/hour, forever. A counter that
+  can never return to zero without a human editing a deploy parameter is not a
+  signal, and #469 was originally filed as a request to quieten that noise. That was
+  the wrong framing: the noise was a symptom of there being nothing listening.
+
+  Failures are now classified (`AccessDenied`/`AccessDeniedException`/
+  `UnauthorizedOperation` vs everything else, reusing the account-prober's proven
+  code set) and aggregated **per account**, since the same role either works in
+  every region or is refused in every region — eleven identical denials are *one*
+  observation. `Errors` keeps its "investigate this" meaning for operational
+  failures only; new `AccountsDenied` and `FSxAccountsDenied` fields carry the
+  standing configuration facts. FSx is tracked separately on purpose: `fsx:*` is a
+  different grant from `ec2:*`, so an account can scan instances perfectly and never
+  reclaim a filesystem — which is #212 exactly, an FSx `AccessDenied` that presented
+  as a silent no-op. Sharing one signal would let the EC2 success mask it again.
+
+  Three fixed sentinel log lines exist *so they can be alarmed on*, with four
+  CloudWatch alarms in the reaper's own `template.yaml` (`ALARMS_ENABLED`, default
+  on; optional `ALARM_TOPIC_ARN`): reaching zero accounts in a run, an account
+  refused everywhere, FSx refused everywhere, and the Lambda erroring outright —
+  that last one because a run that dies never reaches the code emitting the others,
+  so without it the loudest failure would be the quietest signal. The zero-accounts
+  alarm text points at **our** side first: the reaper's role ARN embeds a
+  CloudFormation-generated physical ID, so recreating the stack breaks every
+  customer's trust policy simultaneously (#457), which is indistinguishable from the
+  entire customer base uninstalling at once.
+
+  A denied account is **still attempted every run** — quiescing means not counting
+  it as a surprise, never ceasing to look. The portal registry's status annotates a
+  denied-account line as corroboration only: it describes `spore-portal-onboard`,
+  not the `spawn-ttl-reaper-ec2` role that just refused us, so it is a second
+  opinion about a different door and can never gate anything. Nothing here deletes
+  or terminates; it only classifies and reports.
+
 ## [0.97.0] - 2026-07-31
 
 ### Added
