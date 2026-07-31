@@ -19,13 +19,14 @@ import (
 // its (test-controlled) redelivery time; Delete removes it. Time is injected so
 // tests don't sleep.
 type fakeSQS struct {
-	mu      sync.Mutex
-	msgs    map[string]*fakeMsg // receiptHandle-independent: keyed by internal id
-	nextID  int
-	now     func() time.Time
-	sendErr error
-	recvErr error
-	visDur  time.Duration
+	mu           sync.Mutex
+	msgs         map[string]*fakeMsg // receiptHandle-independent: keyed by internal id
+	nextID       int
+	now          func() time.Time
+	sendErr      error
+	recvErr      error
+	visDur       time.Duration
+	getURLMisses int // return NonExistentQueue this many times before resolving
 }
 
 type fakeMsg struct {
@@ -43,6 +44,14 @@ func (f *fakeSQS) CreateQueue(_ context.Context, in *sqs.CreateQueueInput, _ ...
 	return &sqs.CreateQueueOutput{QueueUrl: aws.String("mem://" + aws.ToString(in.QueueName))}, nil
 }
 func (f *fakeSQS) GetQueueUrl(_ context.Context, in *sqs.GetQueueUrlInput, _ ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Simulate the create→GetQueueUrl consistency window: return NonExistentQueue
+	// for the first getURLMisses calls, then resolve.
+	if f.getURLMisses > 0 {
+		f.getURLMisses--
+		return nil, &types.QueueDoesNotExist{}
+	}
 	return &sqs.GetQueueUrlOutput{QueueUrl: aws.String("mem://" + aws.ToString(in.QueueName))}, nil
 }
 func (f *fakeSQS) SendMessage(_ context.Context, in *sqs.SendMessageInput, _ ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
@@ -381,5 +390,42 @@ func TestWorker_IdleDrain(t *testing.T) {
 	}
 	if executed != 0 {
 		t.Fatalf("executed = %d on empty queue, want 0", executed)
+	}
+}
+
+// TestOpenQueue_RetriesNonExistentQueue: a worker that boots and resolves the
+// run queue can race the submitter's CreateQueue (GetQueueUrl is eventually
+// consistent), seeing NonExistentQueue for a short window. OpenQueue must retry
+// through that window rather than fail — the #70 re-smoke bug where a worker
+// exited at boot because its first GetQueueUrl 400'd seconds after create.
+func TestOpenQueue_RetriesNonExistentQueue(t *testing.T) {
+	old := openQueueRetryDelay
+	openQueueRetryDelay = time.Millisecond // don't sleep 3s in a unit test
+	defer func() { openQueueRetryDelay = old }()
+
+	f := newFakeSQS(func() time.Time { return time.Unix(1_700_000_000, 0) })
+	f.getURLMisses = 3 // 3 NonExistentQueue responses, then resolve
+
+	q, err := OpenQueue(context.Background(), f, "run-1")
+	if err != nil {
+		t.Fatalf("OpenQueue should retry through NonExistentQueue, got: %v", err)
+	}
+	if q.URL() == "" {
+		t.Fatal("resolved queue has no URL")
+	}
+}
+
+// TestOpenQueue_GivesUpAfterBudget: a queue that never appears within the attempt
+// budget returns an error (fails loud), not a silent success.
+func TestOpenQueue_GivesUpAfterBudget(t *testing.T) {
+	old := openQueueRetryDelay
+	openQueueRetryDelay = time.Millisecond
+	defer func() { openQueueRetryDelay = old }()
+
+	f := newFakeSQS(func() time.Time { return time.Unix(1_700_000_000, 0) })
+	f.getURLMisses = openQueueMaxAttempts + 5 // never resolves within budget
+
+	if _, err := OpenQueue(context.Background(), f, "run-1"); err == nil {
+		t.Fatal("OpenQueue should error when the queue never appears within the budget")
 	}
 }

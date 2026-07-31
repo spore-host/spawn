@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Pool workers no longer exit at boot when they resolve the queue before it's
+  visible (#70).** `taskpool.OpenQueue` did a single `GetQueueUrl`; because that
+  call is eventually consistent after the submitter's `CreateQueue`, a freshly
+  booted worker could race the create and get `NonExistentQueue`, then exit
+  immediately (the worker runs once at boot) — so the pool never drained even
+  though the queue existed seconds later. `OpenQueue` now retries a
+  `NonExistentQueue` through the consistency window (bounded; any other error
+  still fails fast). Found in a real-AWS re-smoke.
+
 ## [0.96.1] - 2026-07-31
 
 ### Fixed
