@@ -32,6 +32,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (36^7 < 10^11 and 36^8 > 10^12), so `www`/`api` decode far outside the account
     range and can never masquerade as accounts. Classification is a pure function
     (`unmanagedSubdomains`), unit-tested without AWS.
+- **Pooled execution for wide fan-out — `spawn pool` (#70).** A new execution
+  mode that runs a wide fan-out as a POOL of fungible worker instances draining a
+  shared task queue, instead of one ephemeral instance per task. At high fan-out
+  the one-instance-per-task model is dispatch-bound and pays a full instance boot
+  per task, so short tasks self-terminate faster than new ones launch and
+  concurrency can't reach N; a pool inverts this — N workers pull tasks from a
+  run-scoped SQS queue and reuse across jobs (per-job cost is stage+run only).
+  - `spawn pool create --run-id R --workers N --instance-type T` provisions the
+    workers as a **partial cohort** (best-effort/eventual: ask for N, accept
+    `--min-viable`, degrade gracefully — a short pool means lower parallelism,
+    never failure) and creates the queue. `spawn pool submit --spec f.json`
+    stages a TaskSpec to S3 and enqueues it; `spawn pool status` shows queue
+    depth; `spawn pool drain` deletes the queue.
+  - Workers run `spored pool-worker`: claim a task (SQS visibility-timeout = the
+    claim; a worker that dies before ack redelivers to another — the task-level
+    echo of cohort's reaped-worker replacement), fetch the spec, run it in a
+    **clean per-task workspace** (isolation on reuse), ack, and self-terminate on
+    idle-timeout (scale to zero; the reaper backstops a missed drain).
+  - Built on the existing cohort core (`pkg/taskcohort` — the fungible-pool
+    provider seam, a task-fan-out sibling of `pkg/mpicohort`) with **no cohort
+    changes**, and on the shared TaskSpec protocol (`pkg/taskpool` reuses the
+    `spawn task run` stage/run/complete wrapper per job, minus the self-terminate
+    signal so a worker survives to run the next task). Reusable by any workflow
+    adapter, not just nf-spawn. See `docs/pooled-task-execution-design.md`.
 
 ### Fixed
 - **The #438 DNS reconciliation sweep could not be enabled through `make deploy`
