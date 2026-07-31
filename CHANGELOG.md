@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.96.0] - 2026-07-31
+
 ### Security
 - **Pooled worker task workspaces are now created `0700`, not world-writable (#70).**
   `taskpool.DirWorkspace.Acquire` created per-task dirs `0777`; since the pooled
@@ -2264,7 +2266,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.95.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.96.0...HEAD
+[0.96.0]: https://github.com/spore-host/spawn/compare/v0.95.0...v0.96.0
 [0.95.0]: https://github.com/spore-host/spawn/compare/v0.94.0...v0.95.0
 [0.94.0]: https://github.com/spore-host/spawn/compare/v0.93.1...v0.94.0
 [0.93.1]: https://github.com/spore-host/spawn/compare/v0.93.0...v0.93.1
