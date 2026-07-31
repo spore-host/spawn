@@ -62,6 +62,37 @@ func poolSpecBucket(account, region string) string {
 	return fmt.Sprintf("spawn-results-%s-%s", account, region)
 }
 
+// poolWorkerPolicy builds the scoped inline IAM policy a pool worker's instance
+// profile needs, and NOTHING more:
+//   - SQS on THIS run's queue only (arn scoped to spawn-pool-<runID>): the worker
+//     resolves the queue, long-polls, and acks — GetQueueUrl/ReceiveMessage/
+//     DeleteMessage/GetQueueAttributes. (SendMessage/CreateQueue/DeleteQueue are
+//     the operator's, not the worker's.)
+//   - S3 read on the spawn-binaries buckets (the bootstrap downloads spored) and
+//     read+write on the spec/results bucket (fetch staged specs; the taskproto job
+//     script writes completion.json/.exitcode there).
+//
+// Known limitation: a task's OWN input/output buckets (beyond the results bucket)
+// aren't known at pool-create time, so they are not granted here — a pooled task
+// that stages from/to a third bucket needs that access added (tracked for a
+// follow-up; the common nf-spawn case keeps work in the results/work bucket).
+func poolWorkerPolicy(account, region, specBucket, runID string) string {
+	queueName := "spawn-pool-" + runID
+	queueARN := fmt.Sprintf("arn:aws:sqs:%s:%s:%s", region, account, queueName)
+	binPrefix := "arn:aws:s3:::spawn-binaries-*"
+	specObj := fmt.Sprintf("arn:aws:s3:::%s/*", specBucket)
+	specBkt := fmt.Sprintf("arn:aws:s3:::%s", specBucket)
+	return fmt.Sprintf(`{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect":"Allow","Action":["sqs:GetQueueUrl","sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],"Resource":[%q]},
+    {"Effect":"Allow","Action":["s3:GetObject"],"Resource":[%q,%q]},
+    {"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%q]},
+    {"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%q,%q]}
+  ]
+}`, queueARN, binPrefix+"/*", specObj, specObj, binPrefix, specBkt)
+}
+
 var poolCreateCmd = &cobra.Command{
 	Use:   "create --run-id R --workers N --instance-type T",
 	Short: "Provision the worker pool + task queue for a run",
@@ -162,7 +193,23 @@ spored pool-worker --idle-timeout %s`,
 	if err != nil {
 		return fmt.Errorf("auto-detect worker AMI for %s in %s: %w", poolInstanceType, region, err)
 	}
-	iamProfile, err := awsClient.SetupSporedIAMRole(ctx)
+	// A pool worker needs MORE than the bare spored role: it pulls from the run's
+	// SQS queue (GetQueueUrl/ReceiveMessage/DeleteMessage/GetQueueAttributes) and
+	// its job script reads staged specs + writes completion records in S3. The
+	// bare SetupSporedIAMRole grants NEITHER — a worker with it fails GetQueueUrl
+	// with NonExistentQueue (SQS masks access-denied as not-found) and exits. So
+	// build a SCOPED instance profile (like `spawn task run` does) granting exactly
+	// the pool queue + the spec/results bucket, plus the spored binary-download the
+	// bootstrap needs. CreateOrGetInstanceProfile also guarantees SSM.
+	account, err := awsClient.GetAccountID(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve account id for worker policy: %w", err)
+	}
+	iamProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
+		RoleName:         "spawn-pool-worker",
+		TrustServices:    []string{"ec2"},
+		InlinePolicyJSON: poolWorkerPolicy(account, region, specBucket, poolRunID),
+	})
 	if err != nil {
 		return fmt.Errorf("set up worker IAM instance profile: %w", err)
 	}

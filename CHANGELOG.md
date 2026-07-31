@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Pool workers now get an IAM profile that can actually reach the queue (#70).**
+  `spawn pool create` gave workers the bare shared spored role, which grants no
+  SQS access — so a worker's `GetQueueUrl` returned `NonExistentQueue` (SQS masks
+  access-denied as not-found), it never pulled a task, and the pool stalled with
+  the queue full. Workers now get a **scoped instance profile** (like
+  `spawn task run`) granting SQS on THIS run's queue only
+  (GetQueueUrl/ReceiveMessage/DeleteMessage/GetQueueAttributes), S3 read on the
+  spawn-binaries buckets (spored bootstrap) and read/write on the spec/results
+  bucket. Found by a real-AWS smoke. (Known limitation: a task's own input/output
+  buckets beyond the results bucket aren't granted at pool-create time.)
+
 ## [0.96.2] - 2026-07-31
 
 ### Fixed
