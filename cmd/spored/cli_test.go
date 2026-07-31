@@ -24,7 +24,7 @@ func TestCLIContract(t *testing.T) {
 	for _, c := range root.Commands() {
 		byName[c.Name()] = true
 	}
-	for _, want := range []string{"run-queue", "run-pipeline-stage", "status", "reload", "config", "complete", "version"} {
+	for _, want := range []string{"run-queue", "pool-worker", "run-pipeline-stage", "status", "reload", "config", "complete", "version"} {
 		if !byName[want] {
 			t.Errorf("missing required subcommand %q", want)
 		}

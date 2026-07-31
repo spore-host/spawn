@@ -50,6 +50,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"app":             "Tier 2: app streaming on a live instance",
 		"instance-config": "Tier 2: config get/set over SSH",
 		"queue":           "Tier 3: SQS-backed; SDK v2 SQS protocol mismatch in Substrate",
+		"pool":            "Tier 2/3: provisions real worker instances (cohort). The library (queue+worker+submitter) IS Substrate-tested in pkg/taskpool (incl. end-to-end SQS+S3); the CLI's launch path needs real EC2. (#70)",
 		"pipeline":        "Tier 3: multi-stage orchestration over the queue",
 		"slurm":           "Tier 3: real Slurm submit/cluster",
 		"burst":           "Tier 3: cross-account burst needs real dev-account identity",

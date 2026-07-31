@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -33,11 +36,34 @@ type Pool struct {
 // spec store must already point at a writable bucket/prefix. visibilityTimeout is
 // the per-task claim window in seconds — size it above the longest single-task
 // runtime so an in-flight task is never redelivered while still running.
-func CreateForRun(ctx context.Context, sqs SQSAPI, specs *SpecStore, runID string, visibilityTimeout int) (*Pool, error) {
-	q, err := CreateQueue(ctx, sqs, runID, visibilityTimeout)
+func CreateForRun(ctx context.Context, sqsAPI SQSAPI, specs *SpecStore, runID string, visibilityTimeout int) (*Pool, error) {
+	q, err := CreateQueue(ctx, sqsAPI, runID, visibilityTimeout)
 	if err != nil {
 		return nil, err
 	}
+	return &Pool{RunID: runID, Queue: q, Specs: specs}, nil
+}
+
+// CreateForRunWithConfig is the CLI convenience: it builds the SQS + S3 clients
+// from an aws.Config, creates the run-scoped queue, and returns a ready Pool. It
+// exists so cmd/ can drive a pool WITHOUT importing the SQS/S3 SDK packages
+// directly — the AWS-SDK dependency stays inside pkg/ (the #326/#327 cmd-layer
+// boundary). specBucket/specPrefix locate staged specs.
+func CreateForRunWithConfig(ctx context.Context, cfg awssdk.Config, runID, specBucket, specPrefix string, visibilityTimeout int) (*Pool, error) {
+	sqsClient := sqs.NewFromConfig(cfg)
+	specs := &SpecStore{Client: s3.NewFromConfig(cfg), Bucket: specBucket, Prefix: specPrefix}
+	return CreateForRun(ctx, sqsClient, specs, runID, visibilityTimeout)
+}
+
+// OpenForRunWithConfig resolves an EXISTING run-scoped pool from an aws.Config —
+// the submit/status/drain path. Like CreateForRunWithConfig, it keeps the SDK
+// import inside pkg/.
+func OpenForRunWithConfig(ctx context.Context, cfg awssdk.Config, runID, specBucket, specPrefix string) (*Pool, error) {
+	q, err := OpenQueue(ctx, sqs.NewFromConfig(cfg), runID)
+	if err != nil {
+		return nil, err
+	}
+	specs := &SpecStore{Client: s3.NewFromConfig(cfg), Bucket: specBucket, Prefix: specPrefix}
 	return &Pool{RunID: runID, Queue: q, Specs: specs}, nil
 }
 
