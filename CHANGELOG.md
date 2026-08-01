@@ -55,6 +55,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opinion about a different door and can never gate anything. Nothing here deletes
   or terminates; it only classifies and reports.
 
+### Changed
+- Bumped the `substrate` test dependency v0.71.0 → v0.81.0 (root +
+  `lambda/dns-updater`). Test-only; no runtime or API change. The reason to take
+  it now is substrate#412: `RunInstances` previously accepted an empty `ImageId`
+  and launched an instance, so the guard against launching without a resolved AMI
+  had no offline test that could fail — the bug we filed it for **shipped**, and
+  was caught only by a paid smoke test against real AWS. Substrate now returns
+  `MissingParameter` / HTTP 400 when no AMI resolves from any source (request or
+  launch template), so that path is reachable in `-short` tests. Substrate also
+  fixed a request-parser defect found while fixing it: an explicitly-empty
+  query-protocol *body* parameter was coerced to the bare-key sentinel `"1"`, so
+  `ImageId=` arrived as the string `1` and launched from an AMI named `1` —
+  affecting every EC2/IAM/STS/SQS/SNS parameter sent empty.
+
+  Also newly testable offline: `Invalid*ID.NotFound` for explicitly-named EC2 IDs
+  (substrate#391), symbolic `Error.Code` per service wire protocol instead of an
+  HTTP status (substrate#392), `FunctionError`/`LogResult` omitted from a Lambda
+  invoke unless applicable (substrate#393), S3 `Range` and conditional
+  `If-Match`/`If-None-Match` requests (substrate#396, #397), `x-amz-checksum-*`
+  verification (substrate#399), storage classes and `CopyObject` metadata
+  directives (substrate#398), `Content-Encoding` surviving a multipart upload
+  (substrate#406), and a seedable SQS create-then-lookup consistency window plus
+  the correct `QueueDoesNotExist` error code — the legacy dotted
+  `AWS.SimpleQueueService.NonExistentQueue` was not catchable as a typed error in
+  either the Go or Python SDK, which is what the taskpool queue-lifecycle tests
+  assert on (substrate#413).
+
 ## [0.97.0] - 2026-07-31
 
 ### Added
