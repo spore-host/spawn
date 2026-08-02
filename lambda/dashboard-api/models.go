@@ -142,8 +142,19 @@ type UserAccountRecord struct {
 
 // TeamRecord represents a record in the spawn-teams DynamoDB table
 type TeamRecord struct {
-	TeamID      string `dynamodbav:"team_id" json:"team_id"`
-	TeamName    string `dynamodbav:"team_name" json:"team_name"`
+	TeamID   string `dynamodbav:"team_id" json:"team_id"`
+	TeamName string `dynamodbav:"team_name" json:"team_name"`
+	// OwnerARN is a DISPLAY field. It is written once at team creation and never
+	// read for authorization — every owner-gated handler resolves the caller's role
+	// from the memberships table instead (see resolveTeamContext in teams.go). Nor
+	// is it reliably an ARN: it holds whatever getUserFromRequest produced, which is
+	// a bare 12-digit account id for portal-federated callers and a real IAM ARN for
+	// CLI callers. Do not compare it against a caller identity to infer ownership —
+	// read the `role` field that both /teams and /teams/{id} return.
+	//
+	// Named badly, and not renamed here because the dynamodbav tag is the stored
+	// attribute name: changing it needs a data migration. Tracked in
+	// spore-host/spore-host#531.
 	OwnerARN    string `dynamodbav:"owner_arn" json:"owner_arn"`
 	Description string `dynamodbav:"description" json:"description,omitempty"`
 	CreatedAt   string `dynamodbav:"created_at" json:"created_at"`
