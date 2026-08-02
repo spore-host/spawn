@@ -41,6 +41,19 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		return handleSlackOAuthRedirect(request)
 	}
 
+	// The strata catalog is static and shared, not per-account: handleStrataGetCatalog
+	// takes no arguments and returns a package-level slice. It was routed inside the
+	// switch below, i.e. behind getUserFromRequest, so browsing five formation names
+	// required credentials that the handler cannot use and there is no per-account data
+	// to protect. Above LoadDefaultConfig too, since it needs no AWS config either —
+	// one fewer thing to fail on the anonymous path.
+	//
+	// Only the read-only listing moves. POST /api/strata/resolve stays authenticated:
+	// it reaches S3 (s3://strata-registry) with this Lambda's credentials.
+	if path == "/api/strata/catalog" && method == "GET" {
+		return handleStrataGetCatalog()
+	}
+
 	// Load AWS config
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -236,8 +249,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		}
 		return handleGetWatch(ctx, cfg, watchID, cliIamArn)
 
-	case path == "/api/strata/catalog" && method == "GET":
-		return handleStrataGetCatalog()
+	// GET /api/strata/catalog is handled before authentication above.
 
 	case path == "/api/strata/resolve" && method == "POST":
 		return handleStrataResolve(ctx, request.Body)

@@ -250,6 +250,62 @@ func TestHandlerMissingTeamID(t *testing.T) {
 	}
 }
 
+// TestHandlerStrataCatalogNeedsNoAuth verifies GET /api/strata/catalog is served
+// through the ROUTER without credentials.
+//
+// TestHandlerStrataGetCatalog below calls handleStrataGetCatalog() directly, so it
+// passes whether the route sits before or after getUserFromRequest — it cannot see
+// the gate at all. The catalog spent its life behind auth for that reason: nothing
+// exercised the path a browser actually takes. This test does, and it is the one that
+// fails if the case is ever moved back into the authenticated switch.
+//
+// The request carries no X-AWS-Credentials header and no usable identity, which is
+// exactly the anonymous visitor. Contrast TestHandlerMissingTeamID, which asserts
+// non-200 for the same shape of request against an authenticated route.
+func TestHandlerStrataCatalogNeedsNoAuth(t *testing.T) {
+	resp, err := handler(context.Background(), events.APIGatewayProxyRequest{
+		HTTPMethod: "GET",
+		Path:       "/api/strata/catalog",
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 — the catalog is static and shared, so an "+
+			"unauthenticated GET must not be gated (body: %s)", resp.StatusCode, resp.Body)
+	}
+
+	var body struct {
+		Success    bool              `json:"success"`
+		Formations []StrataFormation `json:"formations"`
+	}
+	if err := json.Unmarshal([]byte(resp.Body), &body); err != nil {
+		t.Fatalf("body not valid JSON: %v", err)
+	}
+	if !body.Success || len(body.Formations) == 0 {
+		t.Errorf("success=%v, %d formations — want success with a non-empty list",
+			body.Success, len(body.Formations))
+	}
+}
+
+// TestHandlerStrataResolveStillNeedsAuth is the other half of the pair above: only the
+// read-only listing was exempted. POST /api/strata/resolve reaches S3
+// (s3://strata-registry) with this Lambda's credentials, so it must stay gated.
+func TestHandlerStrataResolveStillNeedsAuth(t *testing.T) {
+	resp, err := handler(context.Background(), events.APIGatewayProxyRequest{
+		HTTPMethod: "POST",
+		Path:       "/api/strata/resolve",
+		Body:       `{"formation":"r-research@2024.03"}`,
+	})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if resp.StatusCode == 200 {
+		t.Error("POST /api/strata/resolve returned 200 unauthenticated — it does real " +
+			"work against S3 and must not be exempted alongside the catalog listing")
+	}
+}
+
 // TestHandlerStrataGetCatalog verifies GET /api/strata/catalog returns the formation list.
 func TestHandlerStrataGetCatalog(t *testing.T) {
 	resp, err := handleStrataGetCatalog()

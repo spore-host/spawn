@@ -186,7 +186,14 @@ func handleListMyTeams(ctx context.Context, cfg aws.Config, callerARN string) (e
 
 // handleGetTeam handles GET /teams/{team_id}
 func handleGetTeam(ctx context.Context, cfg aws.Config, teamID, callerARN string) (events.APIGatewayProxyResponse, error) {
-	if _, err := resolveTeamContext(ctx, cfg, teamID, callerARN); err != nil {
+	// The role is returned to the caller, not just used to gate. It is this
+	// function's own authorization answer, and without it a client has to re-derive
+	// ownership by comparing OwnerARN against whatever identity it thinks it has —
+	// which the portal was doing, wrongly, because OwnerARN's format depends on
+	// which auth path created the team. Clients should read `role` and never parse
+	// an ARN to guess. GET /teams already does this (TeamWithRole).
+	role, err := resolveTeamContext(ctx, cfg, teamID, callerARN)
+	if err != nil {
 		return errorResponse(403, "access denied"), nil
 	}
 
@@ -232,7 +239,7 @@ func handleGetTeam(ctx context.Context, cfg aws.Config, teamID, callerARN string
 		members = []TeamMemberRecord{}
 	}
 
-	return successResponse(map[string]interface{}{"success": true, "team": t, "members": members})
+	return successResponse(map[string]interface{}{"success": true, "team": t, "members": members, "role": role})
 }
 
 // handleAddMember handles POST /teams/{team_id}/members
