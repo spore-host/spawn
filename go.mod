@@ -38,7 +38,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/scttfrdmn/strata v0.22.0
-	github.com/scttfrdmn/substrate v0.81.0
+	github.com/scttfrdmn/substrate v0.85.0
 	github.com/sigstore/sigstore-go v1.2.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spore-host/cohort v0.2.0

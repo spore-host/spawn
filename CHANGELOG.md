@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or terminates; it only classifies and reports.
 
 ### Changed
-- Bumped the `substrate` test dependency v0.71.0 → v0.81.0 (root +
+- Bumped the `substrate` test dependency v0.71.0 → v0.85.0 (root +
   `lambda/dns-updater`). Test-only; no runtime or API change. The reason to take
   it now is substrate#412: `RunInstances` previously accepted an empty `ImageId`
   and launched an instance, so the guard against launching without a resolved AMI
@@ -81,6 +81,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AWS.SimpleQueueService.NonExistentQueue` was not catchable as a typed error in
   either the Go or Python SDK, which is what the taskpool queue-lifecycle tests
   assert on (substrate#413).
+
+  The v0.82.0–v0.85.0 span adds one fix we filed against a bug of our own making:
+  substrate's `HeadObject` did not resolve a synthesized task-completion record,
+  so `HEAD` answered 404 for a key `GET` served with a 200 body (substrate#457).
+  That broke `aws s3 cp` on a completion record — the exact command `spawn task
+  run` prints for users, since the CLI HEADs before it GETs — and it silently
+  broke `pipeline.CheckCompletionMarker`, which polls a marker by `HeadObject`:
+  absence reads as "still running", so a wait loop spun forever instead of
+  failing. `cmd/task.go`'s `fetchCompletion` was unaffected only because it calls
+  `GetObject` directly; that was luck, not design. Both verbs now agree, including
+  under the clock gate. Also newly reachable offline: EC2 rejecting reserved
+  `aws:`-prefixed tag keys (substrate#452) and honoring an explicit `ImageId` and
+  `InstanceType` *alongside* a launch template rather than ignoring the template
+  entirely (substrate#453) — `pkg/autoscaler` is the caller that passes both.
 
 ## [0.97.0] - 2026-07-31
 

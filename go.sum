@@ -391,8 +391,8 @@ github.com/sassoftware/relic/v7 v7.6.2 h1:rS44Lbv9G9eXsukknS4mSjIAuuX+lMq/FnStgm
 github.com/sassoftware/relic/v7 v7.6.2/go.mod h1:kjmP0IBVkJZ6gXeAu35/KCEfca//+PKM6vTAsyDPY+k=
 github.com/scttfrdmn/strata v0.22.0 h1:kROmZu6f3gs8NI2tH8DgbBSi3enwQZ4rDUhwC3Dc2CM=
 github.com/scttfrdmn/strata v0.22.0/go.mod h1:pH0yoiL8tF1lFPANkmV0tjNDXuN9agpZa4dH8dBFcJI=
-github.com/scttfrdmn/substrate v0.81.0 h1:NxX1dgvAx1PodsUQxYBC2TCwTVsNUXoebibxFCZrh30=
-github.com/scttfrdmn/substrate v0.81.0/go.mod h1:q0Q4+aLxZdA8peP/zcRLx2oiVQ/78FbO8qxv+ToABlA=
+github.com/scttfrdmn/substrate v0.85.0 h1:PLoj+u+nbQ0Kh28qs5Qw1Vt1TXaFmkyev9XsfmqwE3E=
+github.com/scttfrdmn/substrate v0.85.0/go.mod h1:q0Q4+aLxZdA8peP/zcRLx2oiVQ/78FbO8qxv+ToABlA=
 github.com/secure-systems-lab/go-securesystemslib v0.11.0 h1:iuCR9kcMFD4QurdKrGvPLoKZLv9YvwPYVr0473BdtFs=
 github.com/secure-systems-lab/go-securesystemslib v0.11.0/go.mod h1:+PMOTjUGwHj2vcZ+TFKlb1tXRbrdWE1LYDT5i9JC80Q=
 github.com/sergi/go-diff v1.4.0 h1:n/SP9D5ad1fORl+llWyN+D6qoUETXNZARKjyY2/KVCw=

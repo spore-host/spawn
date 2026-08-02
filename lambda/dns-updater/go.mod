@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.28.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.47
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.46.4
-	github.com/scttfrdmn/substrate v0.81.0
+	github.com/scttfrdmn/substrate v0.85.0
 )
 
 require (
