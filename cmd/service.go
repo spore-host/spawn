@@ -102,6 +102,13 @@ https://github.com/spore-host/spawn/blob/main/docs/service-readiness-contract.md
 		}
 		addrArgs := serviceAddrArgsFor(cmd)
 
+		// Before the dry run, not just before the launch: a preview that happily
+		// renders an unusable plan is worse than no preview, since the whole point
+		// of --dry-run is to catch this class of mistake for free.
+		if err := validateServiceUpload(serviceUpload); err != nil {
+			return err
+		}
+
 		if serviceDryRun {
 			return renderServiceDryRun(os.Stdout, args, addrArgs)
 		}
@@ -192,6 +199,11 @@ func renderServiceDryRun(out io.Writer, args []string, addrArgs string) error {
 				fmt.Fprintf(out, "Max cost:    ~$%.2f (rate × ttl)\n", rate*d.Hours())
 			}
 		}
+	} else if cfg.Region == "" && serviceExistingHost == "" {
+		// Say why the cost bound is missing. Silently omitting it reads as "this is
+		// free", and an unset region is also the symptom of --upload having eaten
+		// the --region flag, so naming it points at the real mistake.
+		fmt.Fprintln(out, "Rate:        unknown — no region resolved yet (pass --region to see the cost bound)")
 	}
 	fmt.Fprintln(out, "\nRe-run without --dry-run to launch.")
 	return nil
@@ -586,6 +598,37 @@ func serviceProvenance(ev *service.ReadyEvent) string {
 		parts = append(parts, fmt.Sprintf("%s=%v", k, fields[k]))
 	}
 	return strings.Join(parts, " ")
+}
+
+// validateServiceUpload checks --upload before anything billable happens.
+//
+// Ordering is the whole point: uploadToInstance already stats the file, but by
+// then an instance is running, so a typo costs a launch. Checking here turns
+// that into an immediate error and $0.
+//
+// The looks-like-a-flag case is called out separately because it is the easy
+// mistake to make and the confusing one to diagnose: --upload takes a value, so
+// `--upload --region us-east-1` binds "--region" as the filename and leaves
+// "us-east-1" to be parsed as a positional argument — the service is then handed
+// a stray argv element and the region silently goes unset. "no such file or
+// directory: --region" is technically true but buries the lede.
+func validateServiceUpload(path string) error {
+	if path == "" {
+		return nil
+	}
+	if strings.HasPrefix(path, "-") {
+		return fmt.Errorf("--upload got %q, which looks like a flag, not a file: "+
+			"--upload takes the local file to copy, so it swallowed the next argument. "+
+			"Write --upload <file> (or --upload=<file>) and put other flags after it", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("--upload %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("--upload %s is a directory; it must be a single file (usually the service binary)", path)
+	}
+	return nil
 }
 
 func serviceEffectiveName() string {
