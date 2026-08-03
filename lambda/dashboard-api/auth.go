@@ -21,7 +21,8 @@ import (
 
 // assumedRoleARNRe parses an STS assumed-role ARN into (account, roleName).
 // e.g. arn:aws:sts::435415984226:assumed-role/spore-portal-launch/<session>
-//   → account=435415984226, roleName=spore-portal-launch
+//
+//	→ account=435415984226, roleName=spore-portal-launch
 var assumedRoleARNRe = regexp.MustCompile(`^arn:aws:sts::(\d{12}):assumed-role/([^/]+)/`)
 
 // defaultPortalRoles are the Globus→STS launch roles the portal federates into.

@@ -325,4 +325,3 @@ func (c *Client) GetExecutionHistory(ctx context.Context, scheduleID string, lim
 
 	return history, nil
 }
-

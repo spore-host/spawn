@@ -282,7 +282,7 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 	// dies on a transient S3 empty-reply hard-fails the whole install. Lock in the
 	// retry flags so a future edit can't silently drop them.
 	for _, want := range []string{
-		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "$SPORED_TMP"`, // binary
+		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "$SPORED_TMP"`,      // binary
 		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/spored.sha256`, // checksum
 	} {
 		if !strings.Contains(script, want) {

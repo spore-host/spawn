@@ -34,6 +34,16 @@ jobs:
           # on-disk module cache directly; the setup-go cache is redundant here.
           cache: false
 
+      # Formatting gate. Runs first because it's the cheapest check and the
+      # fastest to act on. CI had no formatting check at all, and `make check`
+      # runs `gofmt -w` — it rewrites files and always succeeds, so it never
+      # gated anything. Three files sat unformatted on main for months, showing
+      # up as unrelated diffs in whatever PR ran `make check` next.
+      #
+      # gofmt walks paths, not modules, so this covers lambda/* too.
+      - name: Format gate
+        run: make check-fmt
+
       - name: Build
         run: go build ./...
 
