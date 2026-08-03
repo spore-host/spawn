@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`spawn service` — run a long-lived HTTP service on an instance and tunnel to it
+  (#409).** Launch a box, start an HTTP binary on it, and get back a local URL:
+
+  ```
+  spawn service ./my-server --instance-type m7i.large --upload ./my-server --ttl 2h
+  ```
+
+  This is the DCV-free sibling of the two shapes that already existed. `spawn launch
+  --command` is batch — fire, complete, reap — and `spawn app` is long-lived but
+  DCV-coupled, expressing readiness as an EC2 tag holding a browser URL. Neither
+  could serve "run an HTTP binary and let me talk to it."
+
+  spawn learns nothing about the workload. They meet at one JSON line the service
+  prints to stdout when it starts serving, and one SSH port-forward:
+
+  ```json
+  {"event":"ready","addr":"127.0.0.1:54321","provenance":{"sourceHash":"…"}}
+  ```
+
+  The service picks its own port — only it knows what is free — and *announces* it,
+  so spawn never polls a guessed port and hopes. `--addr 127.0.0.1:0` is appended to
+  your command by default (change it with `--addr-args`, or pass an empty string to
+  append nothing). Any HTTP binary that prints that line is spawnable by this one
+  verb; no workload is named anywhere in spawn.
+
+  Cost safety and lifetime are the same as every other launch path: the instance
+  goes through the mandatory-TTL guard, so a `spawn service` with no `--ttl` gets a
+  1h idle timeout rather than running until someone notices the bill, and `--dry-run`
+  quotes the rate and the TTL-bounded maximum. Ctrl-C stops the service and
+  terminates the instance; `--host` runs on an instance that is already running and
+  leaves it alone. The service listens on the instance's loopback and is reachable
+  only through the tunnel — it is never exposed to the internet.
+
+  Two things that look like they should work, and don't, are handled explicitly:
+
+  - **A readiness line is forgeable.** `init()` runs before `main`, so a workload can
+    always print a well-formed line first — "first match wins" is defeated by
+    construction. Each announced address is verified before it is trusted, and
+    candidates are tried in order, so the real line wins.
+  - **A TCP dial cannot verify a forwarded port.** `ssh -L` accepts connections on
+    the local end whether or not anything is listening on the far side, so a
+    successful connect proves only that ssh is running. Verification sends a real
+    HTTP request through the forward; any status (401, 404, 500) counts as "a server
+    is here", so an authenticated service isn't mistaken for a forged one.
+
+  Closing the SSH session also does not reliably kill what it started — without a TTY
+  there is no SIGHUP — so the remote command is wrapped to shut the service down when
+  the session ends, instead of leaving it serving and billing until the TTL.
 - **The ttl-reaper's failures are now observable, and alarm (#469, closing #457's
   failure mode A and #254's idea 3).** The reaper exists because #65 showed that a
   dead `spored` monitor loop lets instances run forever. That guarantee was only as

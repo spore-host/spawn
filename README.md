@@ -170,6 +170,9 @@ Full reference at **[spore.host/docs](https://spore.host/docs/tools/spawn)**.
   reference data (Kraken2 DB, BLAST index, model weights) onto spores without
   baking it into an AMI: `snapshot create` from a dir/tarball/raw image →
   `launch --attach-volume`.
+- **[Service readiness contract](docs/service-readiness-contract.md)** — the one
+  JSON line a long-lived HTTP service prints so `spawn service` knows which port
+  to forward to. Read this to make a binary spawnable.
 
 ## License
 
