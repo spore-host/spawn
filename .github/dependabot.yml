@@ -1,0 +1,90 @@
+# Dependabot configuration for spawn.
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Why this file exists: every action in .github/workflows is pinned to a commit
+# SHA, which closes the mutable-tag hole but opens a staleness one — a SHA never
+# moves, including past a security fix, and unlike `@v6` nothing updates it.
+# Pinning is only safe when something bumps the pins. That something is this file.
+# Nothing did before (#485): `actions/checkout@v6` had already moved and this repo
+# was still pinning the older commit, with no signal saying so.
+
+version: 2
+updates:
+  # GitHub Actions. Dependabot understands SHA pins: it rewrites both the SHA and
+  # the trailing `# vX.Y.Z` comment, so pins stay readable and the hygiene test
+  # (TestActionsArePinnedToSHAs) keeps passing.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    # Don't propose a release the day it ships; let it sit a week first. A fresh
+    # action tag is exactly when a compromised or broken one is still unnoticed.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "type:infra"
+    commit-message:
+      prefix: "deps(actions)"
+      include: "scope"
+    # No `reviewers:` key on purpose — it's deprecated and inert. Every one of the
+    # umbrella repo's Dependabot PRs asks for a reviewer and none has ever had a
+    # review request. Use CODEOWNERS if you want one.
+    groups:
+      # One PR for all of them. The pattern is "*", not "actions/*", because the
+      # release-signing actions this repo depends on are NOT under actions/ —
+      # goreleaser/goreleaser-action, sigstore/cosign-installer,
+      # aquasecurity/trivy-action, codecov/codecov-action. Under "actions/*" they
+      # would each fall outside the group, which is how updates get ignored.
+      github-actions:
+        patterns:
+          - "*"
+
+  # Go modules. TWELVE of them — the root plus every lambda/*, each pinning its
+  # own deps behind a `replace ../..`. A single "/" entry would leave all eleven
+  # Lambda modules unmanaged. Nested modules genuinely diverge: bumping a dep in
+  # the root does not touch them, and a stale nested go.mod fails govulncheck with
+  # "updates to go.mod needed" rather than anything that names the real cause
+  # (lagotto#43). Add a directory here whenever a new lambda/* module lands —
+  # TestDependabotCoversEveryGoModule fails until you do.
+  - package-ecosystem: "gomod"
+    directories:
+      - "/"
+      - "/lambda/alert-evaluator"
+      - "/lambda/alert-handler"
+      - "/lambda/autoscale-orchestrator"
+      - "/lambda/cost-history-collector"
+      - "/lambda/dashboard-api"
+      - "/lambda/dashboard-websocket"
+      - "/lambda/dashboard-websocket-processor"
+      - "/lambda/dns-updater"
+      - "/lambda/scheduler-handler"
+      - "/lambda/sweep-orchestrator"
+      - "/lambda/ttl-reaper"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "type:security"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      # The AWS SDK releases constantly and in lockstep; one PR, not thirty.
+      aws-sdk:
+        patterns:
+          - "github.com/aws/aws-sdk-go-v2*"
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
