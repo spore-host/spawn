@@ -552,6 +552,7 @@ func scpArgs(target service.SSHTarget, localPath, remotePath string) []string {
 // runQuietly runs a helper command, surfacing its output only on failure — where
 // it is the entire diagnosis.
 func runQuietly(ctx context.Context, name string, args []string) error {
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a literal at both call sites ("scp", "ssh"); args are built by scpArgs/SSHExecArgs from this run's own resolved target. exec.CommandContext runs no shell, so an argument containing shell metacharacters is passed through as one argv element rather than interpreted. The remote command string is quoted by serviceCommandWithUpload before it gets here.
 	combined, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
 		if trimmed := strings.TrimSpace(string(combined)); trimmed != "" {

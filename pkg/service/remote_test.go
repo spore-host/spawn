@@ -36,6 +36,7 @@ import (
 func fakeSSHExec(t *testing.T) func(context.Context, string) (*exec.Cmd, error) {
 	t.Helper()
 	return func(ctx context.Context, command string) (*exec.Cmd, error) {
+		// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- test fixture standing in for ssh, which also runs its argument through the remote shell. command is built by this package from test-local binary paths.
 		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		t.Cleanup(func() {
@@ -421,6 +422,7 @@ func TestWrapRemoteCommandKillsTheServiceOnSessionEnd(t *testing.T) {
 	marker := dir + "/alive"
 	inner := fmt.Sprintf("sh -c 'while :; do date >> %s; sleep 0.1; done'", marker)
 
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- test fixture; the shell is the subject under test. WrapRemoteCommand produces a shell script by design (that is how the reap-on-EOF wrapper works), so verifying it requires running one.
 	cmd := exec.Command("/bin/sh", "-c", WrapRemoteCommand(inner))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

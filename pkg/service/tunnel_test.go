@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"os/exec"
@@ -74,6 +73,7 @@ func fakeForwarder(t *testing.T, bin string, extra ...string) func(context.Conte
 			"-local", net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort)),
 			"-remote", remoteAddr,
 		}, extra...)
+		// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- test fixture; bin is a binary this test just built into t.TempDir(), args are loopback addresses. No shell.
 		return exec.CommandContext(ctx, bin, args...), nil
 	}
 }
@@ -457,7 +457,9 @@ func httptest(body string) *testServer {
 		panic(err)
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, body)
+		// Write, not Fprint: the body is a fixture string, and there is nothing
+		// here to format.
+		_, _ = w.Write([]byte(body))
 	})}
 	go func() { _ = srv.Serve(ln) }()
 	return &testServer{addr: ln.Addr().String(), srv: srv, ln: ln}

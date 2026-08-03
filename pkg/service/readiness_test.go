@@ -318,6 +318,7 @@ echo '{"addr":"%s","event":"ready","provenance":{"sourceHash":"real"}}'
 echo 'post-readiness cell output'
 sleep 30
 `, addr)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- test fixture; script is the literal above with a loopback address from listen(t) interpolated. Running a shell is the point: this reproduces a workload that forges a readiness line before the real one.
 	cmd := exec.Command("/bin/sh", "-c", script)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

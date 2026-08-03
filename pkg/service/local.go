@@ -84,6 +84,7 @@ func RunLocal(ctx context.Context, opts LocalOptions) (*Local, error) {
 	}
 
 	args := append([]string{addrFlag, addrValue}, opts.Args...)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- running a caller-named binary IS this function's contract: LocalOptions.Path is the service to run, supplied by the operator invoking spawn, who already has local shell. exec.Command runs no shell and Path is never concatenated into one, so args cannot escape into a command of their own.
 	cmd := exec.Command(opts.Path, args...)
 	cmd.Env = opts.Env
 	cmd.Dir = opts.Dir
