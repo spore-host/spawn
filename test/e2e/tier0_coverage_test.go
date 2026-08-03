@@ -48,6 +48,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"extend":          "Tier 2: SSH → spored reload on a live instance",
 		"upgrade-spored":  "Tier 2: SSM binary swap + restart on a live instance; script/version logic unit-tested in cmd",
 		"app":             "Tier 2: app streaming on a live instance",
+		"service":         "Tier 2: the whole verb is a booted instance + SSH session + port-forward, none of which Substrate serves (instances never boot, no SSH). The contract it exists for IS fully tested at $0 in pkg/service — real child, real readiness line, real loopback forward, driven through the forward, including the forgery cases — and the launch config / cost-bound / exit-classification logic is unit-tested in cmd (#409)",
 		"instance-config": "Tier 2: config get/set over SSH",
 		"queue":           "Tier 3: SQS-backed; SDK v2 SQS protocol mismatch in Substrate",
 		"pool":            "Tier 2/3: provisions real worker instances (cohort). The library (queue+worker+submitter) IS Substrate-tested in pkg/taskpool (incl. end-to-end SQS+S3); the CLI's launch path needs real EC2. (#70)",

@@ -459,6 +459,8 @@ func httptest(body string) *testServer {
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Write, not Fprint: the body is a fixture string, and there is nothing
 		// here to format.
+		//
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture. The body is a literal from the test, never user input, and the only reader is an in-process HTTP probe — there is no browser and no HTML to escape.
 		_, _ = w.Write([]byte(body))
 	})}
 	go func() { _ = srv.Serve(ln) }()
