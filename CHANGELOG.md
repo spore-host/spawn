@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn service --upload` now rejects a bad path before launching anything.**
+  `--upload` takes a value, so writing `--upload --region us-east-1` bound
+  `--region` as the filename and left `us-east-1` to be parsed as an argument to
+  the service — the region then went silently unset. The path is now validated
+  during argument parsing, and a value that looks like a flag says so explicitly
+  instead of reporting `no such file or directory: --region`.
+
+  The ordering is the substance of the fix: the upload was already checked, but
+  only after an instance was running, so a typo cost a launch. It is now caught
+  at $0. A dry run with no resolved region also says why it can't quote a cost
+  bound, rather than omitting the line — silence there reads as "free", and an
+  unset region is the symptom of this exact mistake.
+
 ### Added
 - **`spawn service` — run a long-lived HTTP service on an instance and tunnel to it
   (#409).** Launch a box, start an HTTP binary on it, and get back a local URL:

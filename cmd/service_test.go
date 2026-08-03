@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,12 +28,16 @@ func resetServiceFlags(t *testing.T) {
 		localPort                                                        int
 		output                                                           string
 		noTimeout                                                        bool
+		region                                                           string
 	}{
 		serviceInstanceType, serviceAMI, serviceTTL, serviceIdleTimeout, serviceName,
 		serviceUpload, serviceRemotePath, serviceAddrArgs,
 		serviceUser, serviceKey, serviceExistingHost, serviceSubnetID,
 		serviceSpot, serviceDryRun, serviceSecurityGroup,
 		serviceBootTimeout, serviceLocalPort, spawnOutputFormat, noTimeout,
+		// The ROOT persistent --region, which the dry run reads. Saved here
+		// because these tests set it, and it is shared with every other command.
+		spawnRegion,
 	}
 	t.Cleanup(func() {
 		serviceInstanceType, serviceAMI, serviceTTL, serviceIdleTimeout, serviceName =
@@ -41,6 +47,7 @@ func resetServiceFlags(t *testing.T) {
 		serviceSpot, serviceDryRun, serviceSecurityGroup = saved.spot, saved.dryRun, saved.sgs
 		serviceBootTimeout, serviceLocalPort = saved.boot, saved.localPort
 		spawnOutputFormat, noTimeout = saved.output, saved.noTimeout
+		spawnRegion = saved.region
 	})
 	serviceInstanceType, serviceAMI, serviceTTL, serviceIdleTimeout, serviceName = "", "", "", "", ""
 	serviceUpload, serviceRemotePath = "", ""
@@ -49,6 +56,7 @@ func resetServiceFlags(t *testing.T) {
 	serviceSpot, serviceDryRun, serviceSecurityGroup = false, false, nil
 	serviceBootTimeout, serviceLocalPort = 0, 0
 	noTimeout = false
+	spawnRegion = ""
 }
 
 func TestServiceLaunchConfigAlwaysTerminates(t *testing.T) {
@@ -507,6 +515,113 @@ func TestInstanceStateIsGone(t *testing.T) {
 		if got := instanceStateIsGone(state); got != wantGone {
 			t.Errorf("instanceStateIsGone(%q) = %v, want %v", state, got, wantGone)
 		}
+	}
+}
+
+func TestValidateServiceUpload(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "svc")
+	if err := os.WriteFile(file, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+		// wantErr is a substring the message must contain; empty means "must pass".
+		wantErr string
+	}{
+		{"empty is fine — upload is optional", "", ""},
+		{"a real file passes", file, ""},
+		// The mistake this exists for: --upload takes a value, so
+		// `--upload --region us-east-1` binds "--region" as the filename.
+		{"a flag as the value is named as such", "--region", "looks like a flag"},
+		{"a short flag too", "-r", "looks like a flag"},
+		{"a missing file", filepath.Join(dir, "nope"), "no such file"},
+		{"a directory is not a file", dir, "is a directory"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateServiceUpload(tc.path)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateServiceUpload(%q) = %v, want nil", tc.path, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateServiceUpload(%q) = nil, want an error containing %q", tc.path, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestServiceRejectsABadUploadBeforeSpendingAnything(t *testing.T) {
+	// The ordering IS the fix: uploadToInstance also stats the file, but by then
+	// an instance is running, so a typo costs a launch. This must fail at the
+	// argument-parsing stage, before any AWS client exists.
+	//
+	// The credentials are neutralised rather than trusted-absent: this test's whole
+	// claim is "it does not get as far as AWS", and a developer's shell usually has
+	// AWS_PROFILE set. If the guard ever regresses, the test must fail fast on a
+	// broken client instead of reaching a real account.
+	for _, k := range []string{"AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "no-config"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "no-creds"))
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	resetServiceFlags(t)
+	serviceInstanceType = "m7i.large"
+	serviceTTL = "1h"
+
+	cmd, _, err := rootCmd.Find([]string{"service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "not-there")
+	if err := cmd.Flags().Set("upload", missing); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Flags().Set("upload", "") })
+
+	runErr := cmd.RunE(cmd, []string{missing})
+	if runErr == nil {
+		t.Fatal("a --upload path that does not exist must fail before launching")
+	}
+	// If it got as far as AWS, the guard is in the wrong place.
+	if strings.Contains(runErr.Error(), "init AWS client") {
+		t.Errorf("validation ran after the AWS client was built: %v", runErr)
+	}
+	if !strings.Contains(runErr.Error(), "--upload") {
+		t.Errorf("error should name the offending flag: %v", runErr)
+	}
+}
+
+func TestRenderServiceDryRunSaysWhyTheCostBoundIsMissing(t *testing.T) {
+	// With no region there is no rate, and silently omitting the cost line reads
+	// as "this is free". An unset region is also the symptom of --upload having
+	// swallowed --region, so the dry run has to say so.
+	resetServiceFlags(t)
+	serviceInstanceType = "m7i.large"
+	serviceTTL = "2h"
+	spawnRegion = ""
+
+	var out bytes.Buffer
+	if err := renderServiceDryRun(&out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
+		t.Fatalf("renderServiceDryRun: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "no region resolved") {
+		t.Errorf("dry run with no region must explain the missing cost bound:\n%s", got)
+	}
+	// And it must not imply a bound it doesn't have.
+	if strings.Contains(got, "Max cost") {
+		t.Errorf("dry run quoted a cost bound with no region:\n%s", got)
 	}
 }
 
