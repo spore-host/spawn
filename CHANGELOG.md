@@ -158,6 +158,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or terminates; it only classifies and reports.
 
 ### Changed
+- **CI now fails on unformatted code.** Nothing did before: CI had no formatting
+  check at all, and `make check` runs `gofmt -w`, which rewrites files and always
+  succeeds — convenient locally, but it cannot fail a build, so it never gated
+  anything. Three files sat unformatted on `main` for months and reappeared as
+  unrelated diffs in whatever PR ran `make check` next.
+
+  `make check-fmt` reports drift instead of fixing it — offenders listed with a
+  diff — and now runs in CI, and at the end of `make check` so a local run agrees
+  with CI rather than passing what CI will reject. The three drifted files are
+  formatted (comment indentation and a trailing newline; no behavior change).
 - Bumped the `substrate` test dependency v0.71.0 → v0.85.0 (root +
   `lambda/dns-updater`). Test-only; no runtime or API change. The reason to take
   it now is substrate#412: `RunInstances` previously accepted an empty `ImageId`

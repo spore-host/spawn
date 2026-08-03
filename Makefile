@@ -1,4 +1,4 @@
-.PHONY: all build build-spawn build-spored build-all clean install test test-coverage test-short test-integration test-integration-scheduler test-integration-queue test-e2e test-e2e-tier0 test-e2e-tier1 test-e2e-tier2 test-e2e-tier3 check vuln gen-docs check-docs check-release-version
+.PHONY: all build build-spawn build-spored build-all clean install test test-coverage test-short test-integration test-integration-scheduler test-integration-queue test-e2e test-e2e-tier0 test-e2e-tier1 test-e2e-tier2 test-e2e-tier3 check check-fmt vuln gen-docs check-docs check-release-version
 
 # Version
 VERSION ?= 0.1.0
@@ -168,6 +168,26 @@ test-e2e-tier3: build
 # Run all E2E tiers sequentially
 test-e2e: test-e2e-tier1 test-e2e-tier2 test-e2e-tier3
 
+# Formatting gate: REPORT drift, don't silently fix it.
+#
+# Distinct from `check`, which runs `gofmt -w` and rewrites files in place. That
+# is convenient locally but it is not a gate — it mutates the tree and always
+# succeeds, so drift committed by an editor that doesn't format on save was never
+# caught by anything. Three files sat unformatted on main for months because CI
+# had no formatting check at all, and `make check` reformatted them on every run,
+# turning them into recurring unrelated diffs in whatever PR came next.
+#
+# Excludes vendor/ and lists offenders with a diff, so the fix is obvious.
+check-fmt:
+	@files=$$(gofmt -l . 2>/dev/null | grep -v '^vendor/' || true); \
+	if [ -n "$$files" ]; then \
+	  echo "::error::these files are not gofmt-clean — run 'gofmt -w' on them:"; \
+	  echo "$$files" | sed 's/^/  /'; \
+	  echo; gofmt -d $$files; \
+	  exit 1; \
+	fi; \
+	echo "✓ gofmt clean"
+
 # Go vulnerability check
 vuln:
 	@echo "Running govulncheck..."
@@ -175,10 +195,15 @@ vuln:
 	@echo "✓ No known vulnerabilities"
 
 # Pre-commit checks (fast)
+#
+# Step 1 formats in place (the convenient local behavior) and THEN gates, so a
+# file gofmt can't fix on its own still fails rather than passing quietly. The
+# gate is what CI runs; keeping both here means `make check` and CI agree.
 check:
 	@echo "Running pre-commit checks..."
 	@echo "1. Formatting code..."
 	@gofmt -w .
+	@$(MAKE) --no-print-directory check-fmt
 	@echo "2. Running go vet..."
 	@go vet ./...
 	@echo "3. Running staticcheck..."
