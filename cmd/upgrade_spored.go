@@ -79,7 +79,7 @@ func runUpgradeSpored(cmd *cobra.Command, args []string) error {
 	// so "latest spored" == latest spawn GitHub release.
 	target := strings.TrimPrefix(upgradeSporedVersion, "v")
 	if target == "" {
-		res := update.CheckNow("spawn", Version)
+		res := update.CheckNow("spawn", version())
 		if res == nil {
 			return fmt.Errorf("could not determine the latest spored version (GitHub unreachable); pin one with --version")
 		}

@@ -36,6 +36,15 @@ jobs:
       - name: Docs reference drift guard
         run: make check-docs
 
+      # Hard-fail the tag if the binaries wouldn't report the tag they're built
+      # from. The version is injected by an -X ldflag, which the linker accepts
+      # silently even when the target symbol doesn't exist — so a renamed
+      # variable or module path would publish binaries that call themselves
+      # "dev", with no other signal. Also refuses to publish with CHANGELOG.md
+      # still saying [Unreleased].
+      - name: Release version guard
+        run: scripts/check-release-version.sh "${GITHUB_REF_NAME}"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:

@@ -48,7 +48,7 @@ Examples:
 				Fix:    "could not initialize an AWS client — run `aws login` or set a profile: " + err.Error(),
 			}}}
 		} else {
-			report = doctor.Run(ctx, doctor.NewAWSProber(client, Version))
+			report = doctor.Run(ctx, doctor.NewAWSProber(client, version()))
 		}
 
 		if doctorJSON || getOutputFormat() == "json" {

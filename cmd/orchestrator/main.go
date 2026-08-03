@@ -8,10 +8,22 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/spore-host/spawn/pkg/buildinfo"
 	"github.com/spore-host/spawn/pkg/orchestrator"
 )
 
-const Version = "0.1.0"
+// Version is injected at build time (-X main.Version=...). It was a CONST
+// pinned at "0.1.0", which an -X ldflag cannot write at all — so this binary
+// could only ever report 0.1.0, no matter how it was built. Now a var, and empty
+// by default so the Go build stamp fills it in (see pkg/buildinfo).
+//
+// Nothing in .goreleaser.yaml or the Makefile builds this binary today; it is
+// built by hand when used. That makes the build stamp the only version source it
+// has, which is exactly the case the fallback is for.
+var Version = ""
+
+// version is the resolved version spawn-orchestrator reports.
+func version() string { return buildinfo.Version(Version) }
 
 func main() {
 	if len(os.Args) < 2 {
@@ -27,7 +39,7 @@ func main() {
 	case "status":
 		showStatus()
 	case "version":
-		fmt.Printf("spawn-orchestrator version %s\n", Version)
+		fmt.Printf("spawn-orchestrator version %s\n", version())
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -61,7 +73,7 @@ func runOrchestrator() {
 		log.SetOutput(logFile)
 	}
 
-	log.Printf("spawn-orchestrator v%s starting...", Version)
+	log.Printf("spawn-orchestrator v%s starting...", version())
 	log.Printf("Job array: %s", cfg.JobArrayID)
 	log.Printf("Queue: %s", cfg.QueueURL)
 	log.Printf("Mode: %s", cfg.BurstPolicy.Mode)
@@ -106,7 +118,7 @@ func showStatus() {
 }
 
 func printUsage() {
-	fmt.Printf("spawn-orchestrator v%s - Automatic cloud burst orchestrator\n\n", Version)
+	fmt.Printf("spawn-orchestrator v%s - Automatic cloud burst orchestrator\n\n", version())
 	fmt.Println("Usage:")
 	fmt.Println("  spawn-orchestrator run <config-file>    Start orchestrator daemon")
 	fmt.Println("  spawn-orchestrator status               Show orchestrator status")

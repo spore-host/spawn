@@ -20,6 +20,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at $0. A dry run with no resolved region also says why it can't quote a cost
   bound, rather than omitting the line — silence there reads as "free", and an
   unset region is the symptom of this exact mistake.
+- **`spawn version` no longer reports a version from 59 releases ago.** The version
+  was a hardcoded string in the source (`0.38.1`), last edited when v0.38.1 was
+  released and never touched again. Releases were unaffected — the release pipeline
+  overwrites it with the real tag — which is precisely why nobody noticed: the
+  stale value only surfaced in builds made from source, where it was reported
+  confidently and wrongly. Anyone who built spawn themselves, `go install`ed it, or
+  read a version out of a bug report got `0.38.1`. It also made every source build
+  claim an upgrade was available, because it compared that number against the
+  release feed.
+
+  The hand-written defaults are gone. A release still injects the tag; every other
+  build now falls back to the version metadata the Go toolchain stamps in
+  automatically, which cannot go stale because nobody maintains it:
+
+  ```
+  Version:    0.97.1-0.20260803020438-48ba7f76a21a+dirty   # built from a checkout
+  Version:    0.98.0                                       # a release
+  Version:    dev                                          # no metadata available
+  ```
+
+  A build with no version information at all says `dev` rather than inventing a
+  number, and skips the update check instead of comparing against a version it
+  doesn't have. `+dirty` means the working tree had uncommitted changes, so the
+  binary corresponds to no commit.
+
+  The same defect is fixed in `spored` (was pinned at `0.1.0` for 97 releases —
+  and it writes that value to the instance's `spawn:spored-version` tag, which
+  `spawn upgrade-spored` reads to decide whether an upgrade took effect) and in
+  `spawn-orchestrator` (was a `const`, which a build-time injection cannot write
+  at all, so it could only ever report `0.1.0`).
+
+- **A release can no longer publish binaries that misreport their own version.**
+  Tagging now runs a guard that builds with the real release flags and asks each
+  binary what it thinks it is, failing the release unless the answer is the tag.
+  This closes the other half of the bug above: the version injection is a linker
+  flag, and the linker accepts one that names a variable that no longer exists —
+  silently. A rename would have built, released, and shipped binaries reporting
+  `dev`, with no signal anywhere. The guard also refuses to publish while
+  `CHANGELOG.md` still says `[Unreleased]`. Runnable before tagging with
+  `make check-release-version TAG=vX.Y.Z`.
 
 ### Added
 - **`spawn service` — run a long-lived HTTP service on an instance and tunnel to it

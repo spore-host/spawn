@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/agent"
+	"github.com/spore-host/spawn/pkg/buildinfo"
 	"github.com/spore-host/spawn/pkg/observability/metrics"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/pipeline"
@@ -40,7 +41,15 @@ func detectLang() string {
 	return "en"
 }
 
-var Version = "0.1.0"
+// Version is injected at build time by GoReleaser (-X main.Version={{.Version}}).
+// Empty by default, not a number: this said "0.1.0" through 97 releases, and
+// every non-release spored — including one hand-built and uploaded to S3 — tagged
+// its instance with that. Unset falls back to the build metadata Go stamps in
+// (see pkg/buildinfo), which nobody has to remember to bump.
+var Version = ""
+
+// version is the resolved version spored reports and tags instances with.
+func version() string { return buildinfo.Version(Version) }
 
 // newRootCmd builds the spored command tree. The root command itself, run with
 // no subcommand, is the lifecycle daemon (systemd ExecStart=/usr/local/bin/spored).
@@ -53,7 +62,7 @@ func newRootCmd() *cobra.Command {
 		Use:           "spored",
 		Short:         "Spawn EC2 instance agent",
 		Long:          "spored monitors an instance's lifecycle (spot interruption, TTL, idle, completion) and is also the on-instance control CLI.",
-		Version:       Version,
+		Version:       version(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// No subcommand → run as the lifecycle daemon.
@@ -80,7 +89,7 @@ func newRootCmd() *cobra.Command {
 			Short: "Show version",
 			Args:  cobra.NoArgs,
 			Run: func(cmd *cobra.Command, args []string) {
-				fmt.Printf("spored version %s\n", Version)
+				fmt.Printf("spored version %s\n", version())
 			},
 		},
 	)
@@ -113,7 +122,7 @@ func runDaemon() {
 		log.SetOutput(logFile)
 	}
 
-	log.Printf("spored v%s starting...", Version)
+	log.Printf("spored v%s starting...", version())
 
 	// Initialize tag prefix from SPORED_TAG_PREFIX env var (default: "spawn")
 	tagprefix.Init()
@@ -150,7 +159,7 @@ func runDaemon() {
 	// Off the critical path (own goroutine), EC2-only, best-effort — never gates
 	// the lifecycle loop (#65).
 	if identity.Provider == "ec2" {
-		go agent.WriteVersionTag(context.Background(), Version)
+		go agent.WriteVersionTag(context.Background(), version())
 	}
 
 	// Get config and identity for observability
@@ -406,7 +415,7 @@ func handleStatus(checkComplete bool) error {
 	// ── Identity ──────────────────────────────────────────────────────────────
 	fmt.Printf("\n  %s  (%s)\n", identity.Name, instanceID)
 	fmt.Printf("  %s\n\n", strings.Repeat("─", 46))
-	fmt.Printf("  spored:           v%s\n", Version)
+	fmt.Printf("  spored:           v%s\n", version())
 
 	// Use original launch time from tag if available; fall back to startTime
 	launchTime := startTime

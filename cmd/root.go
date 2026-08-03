@@ -8,10 +8,21 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/libs/update"
+	"github.com/spore-host/spawn/pkg/buildinfo"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
-var Version = "0.38.1"
+// Version is the release version, injected at build time by GoReleaser
+// (-X .../cmd.Version={{.Version}}).
+//
+// The zero value is deliberately empty rather than a hand-written number. A
+// hardcoded default is a second source of truth that nothing updates: this said
+// "0.38.1" while the current release was v0.97.0, so every source build — and
+// anything reading `spawn version` — reported a release from 59 versions earlier,
+// confidently and wrongly. An empty value instead falls back to the build
+// metadata Go stamps automatically (see resolveVersion), which cannot go stale
+// because nobody maintains it.
+var Version = ""
 
 // Global flags for i18n and accessibility
 var (
@@ -49,8 +60,8 @@ func Execute() {
 	_ = rootCmd.ParseFlags(os.Args[1:])
 	ensureI18nInitialized()
 
-	// Start async update check (non-blocking, respects SPORE_NO_UPDATE_CHECK)
-	updateCh := update.CheckAsync("spawn", Version)
+	// Start async update check (non-blocking, respects SPORE_NO_UPDATE_CHECK).
+	updateCh := startUpdateCheck(version())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -66,6 +77,30 @@ func Execute() {
 	default:
 	}
 }
+
+// startUpdateCheck kicks off the background release check for the resolved
+// version, or returns an already-closed channel for a dev build.
+//
+// Skipping dev builds is not cosmetic: libs' semver parser reads "dev" as 0.0.0,
+// so a source build would compare 0.0.0 against the newest release and nag on
+// every single command — including when the build is actually AHEAD of the last
+// release, which is the normal state while developing. The old hardcoded 0.38.1
+// had the same effect for a less visible reason.
+func startUpdateCheck(current string) <-chan *update.Result {
+	if buildinfo.IsDev(current) {
+		ch := make(chan *update.Result)
+		close(ch) // a receive returns nil immediately; HasUpdate() is nil-safe
+		return ch
+	}
+	return checkAsync("spawn", current)
+}
+
+// checkAsync is update.CheckAsync behind a seam, so a test can observe WHETHER
+// the check was delegated. Without it, "skipped for a dev build" and "delegated
+// for a real version" are indistinguishable from the outside — both hand back a
+// channel that yields immediately — and a guard widened to skip every build would
+// pass the test while silently disabling the update notice for everyone.
+var checkAsync = update.CheckAsync
 
 func init() {
 	// Set PersistentPreRunE to initialize i18n after flag parsing
