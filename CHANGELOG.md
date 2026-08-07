@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`pkg/userdata.GenerateContainerUserData` + `launcher.Options.ContainerScript`
+  — a headless "provision a host and `docker run <image>`" library primitive**
+  (#353). Today, running a container image on a spawned instance meant
+  hand-building the `aws ecr get-login-password | docker login && docker pull
+  && docker run <ref>` string yourself; the only existing container-run logic
+  (`cmd/app.go`'s `containerRunWrapper`) is DCV-streaming-specific — it wires
+  `DISPLAY`/`XAUTHORITY` into the container for a GUI session, which a headless
+  consumer (calque, a future scheduler) neither wants nor can supply. The new
+  generator installs Docker on demand, authenticates to a private-ECR image
+  (skipped for a public one), pulls, and runs — no DCV/X11 anywhere in it.
+  GPU (`--gpus all`) is inferred from `InstanceType` via the same
+  `aws.DetectGPUInstance` `Provision` already uses for AMI selection, so a
+  caller doesn't separately track "is this a GPU type?" Wired through
+  `Provision` after `StorageScript` (so a containerized workload sees any
+  mounted volumes already live) and before `CustomUserData`.
+
 ### Changed
 - CI moved off the self-hosted orion runner fleet onto `ubuntu-latest`. The
   fleet (colima/Docker on orion.local) is being decommissioned org-wide; no
