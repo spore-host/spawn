@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **New `pkg/ecrref` leaf package** dedupes the private-ECR-image parser
+  (account ID + registry host extraction) that had drifted into three
+  independent copies — `cmd/app_byo.go`, `pkg/taskproto/wrapper.go`, and the
+  new `pkg/userdata/container.go` (#353) was about to make a fourth. Each
+  existing `cmd`/`taskproto` function is now a one-line alias over the shared
+  leaf (stdlib-only, so both `cmd` and `taskproto`'s "no cmd dependency" rule
+  stay satisfied); no behavior change, no public API change.
+
 ### Added
 - **`pkg/userdata.GenerateContainerUserData` + `launcher.Options.ContainerScript`
   — a headless "provision a host and `docker run <image>`" library primitive**
