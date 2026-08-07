@@ -15,12 +15,12 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.5'
 
@@ -28,7 +28,7 @@ jobs:
       # `cosign sign-blob --bundle` over checksums.txt with this job's OIDC identity).
       # This is separate from spored's KMS signing in the S3-upload step below.
       - name: Install cosign
-        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Hard-fail the tag if the committed reference (docs-gen/) is stale, so a
       # release can never ship a reference that lags the code. Same check as CI's
@@ -61,7 +61,7 @@ jobs:
       # where it was built). Attests checksums.txt, which covers every artifact by
       # hash. Runs only on a successful GoReleaser build (dist/checksums.txt exists).
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: 'dist/checksums.txt'
 
@@ -75,7 +75,7 @@ jobs:
       # correct signal, not a silent skip).
       - name: Configure AWS credentials
         if: ${{ !cancelled() }}
-        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
         with:
           role-to-assume: arn:aws:iam::966362334030:role/GitHubActions-spore-host-release
           role-session-name: spored-s3-upload
