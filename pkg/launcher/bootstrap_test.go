@@ -168,6 +168,47 @@ func TestBuildLinuxBootstrap_NoStorageScriptWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestBuildLinuxBootstrap_ContainerRunsAfterStorageBeforeUserScript is the #353
+// ordering guard: a headless container run must see any mounted storage already
+// live (same rationale as #166 for StorageScript vs CustomUserData), and must
+// itself run before the user's own script.
+func TestBuildLinuxBootstrap_ContainerRunsAfterStorageBeforeUserScript(t *testing.T) {
+	storage := "echo STORAGE_MOUNT_MARKER"
+	container := "echo CONTAINER_RUN_MARKER"
+	user := "echo USER_SCRIPT_MARKER"
+	script, err := BuildLinuxBootstrap(BootstrapConfig{
+		Username:        "ec2-user",
+		StorageScript:   storage,
+		ContainerScript: container,
+		CustomUserData:  user,
+	})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	idxStorage := strings.Index(script, "STORAGE_MOUNT_MARKER")
+	idxContainer := strings.Index(script, "CONTAINER_RUN_MARKER")
+	idxUser := strings.Index(script, "USER_SCRIPT_MARKER")
+	if idxStorage < 0 || idxContainer < 0 || idxUser < 0 {
+		t.Fatal("storage, container, and user scripts must all be included")
+	}
+	if idxStorage > idxContainer {
+		t.Errorf("storage mount (%d) must come BEFORE the container run (%d) — #353", idxStorage, idxContainer)
+	}
+	if idxContainer > idxUser {
+		t.Errorf("container run (%d) must come BEFORE the user script (%d) — #353", idxContainer, idxUser)
+	}
+}
+
+func TestBuildLinuxBootstrap_NoContainerScriptWhenEmpty(t *testing.T) {
+	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user", CustomUserData: "echo hi"})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	if strings.Contains(script, "Headless container run") {
+		t.Error("no container section should appear when ContainerScript is empty")
+	}
+}
+
 // TestBuildLinuxBootstrap_CommandEmbedded is the #214/#246 guard: a --command is
 // embedded in user-data (written to /etc/spawn/command) so it bypasses the
 // 256-char spawn:command tag cap. A long command (impossible via a tag) must
