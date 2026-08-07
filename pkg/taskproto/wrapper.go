@@ -3,9 +3,10 @@ package taskproto
 import (
 	"fmt"
 	"path"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/spore-host/spawn/pkg/ecrref"
 )
 
 // GenerateWrapper builds the self-contained bash script that runs one task on
@@ -267,30 +268,16 @@ func recursiveFlag(source string) string {
 	return ""
 }
 
-// ecrAccountRe extracts the 12-digit account ID from a private-ECR image host
-// (<account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]). Mirrors the pure
-// helper in cmd/app_byo.go; duplicated here to keep taskproto free of a cmd
-// dependency (the JSON contract package must not import the CLI).
-var ecrAccountRe = regexp.MustCompile(`^(\d{12})\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/`)
-
 // ecrImageAccount returns the AWS account owning a private-ECR image, or "" if
 // the image isn't a private-ECR ref (e.g. a public quay.io/docker.io image).
-func ecrImageAccount(image string) string {
-	m := ecrAccountRe.FindStringSubmatch(image)
-	if m == nil {
-		return ""
-	}
-	return m[1]
-}
+// Thin alias over pkg/ecrref, kept so callers in this file read the same as
+// before (was a taskproto-local duplicate of cmd/app_byo.go's helper — now
+// shared via the leaf, not copy-pasted a third time).
+func ecrImageAccount(image string) string { return ecrref.Account(image) }
 
 // ecrRegistryHost returns the registry host (everything before the first '/') —
-// the argument `docker login` expects.
-func ecrRegistryHost(image string) string {
-	if i := strings.IndexByte(image, '/'); i >= 0 {
-		return image[:i]
-	}
-	return image
-}
+// the argument `docker login` expects. Thin alias over pkg/ecrref.
+func ecrRegistryHost(image string) string { return ecrref.RegistryHost(image) }
 
 // shQuote wraps s in single quotes, escaping embedded single quotes. This is the
 // safe form for shell interpolation (unlike strconv.Quote, which uses

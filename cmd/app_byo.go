@@ -1,10 +1,10 @@
 package cmd
 
 import (
-	"regexp"
 	"strings"
 
 	"github.com/spore-host/libs/catalog"
+	"github.com/spore-host/spawn/pkg/ecrref"
 )
 
 // BYO-image catalog support (spore-host#392). An app is shown/launchable for the
@@ -13,20 +13,10 @@ import (
 // private registry). Cross-account private grants are possible but not assumed
 // for listing; launch surfaces the real pull error if a grant is missing.
 
-// ecrAccountRe extracts the 12-digit account ID from a private-ECR image host:
-//
-//	<account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]
-var ecrAccountRe = regexp.MustCompile(`^(\d{12})\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/`)
-
 // ecrImageAccount returns the AWS account that owns a private-ECR image, or ""
-// if the image isn't a private-ECR ref. Pure.
-func ecrImageAccount(image string) string {
-	m := ecrAccountRe.FindStringSubmatch(image)
-	if m == nil {
-		return ""
-	}
-	return m[1]
-}
+// if the image isn't a private-ECR ref. Pure. Thin alias over pkg/ecrref, kept
+// so callers in this file read the same as before.
+func ecrImageAccount(image string) string { return ecrref.Account(image) }
 
 // appResolvable reports whether an app's image is resolvable (pullable) for the
 // given caller account, and a short reason when not. callerAccount may be "" if
@@ -59,13 +49,9 @@ func appResolvable(e *catalog.AppEntry, callerAccount string) (bool, string) {
 }
 
 // ecrRegistryHost returns the registry host (everything before the first '/') of
-// an image ref — the argument `docker login` expects. Pure.
-func ecrRegistryHost(image string) string {
-	if i := strings.IndexByte(image, '/'); i >= 0 {
-		return image[:i]
-	}
-	return image
-}
+// an image ref — the argument `docker login` expects. Pure. Thin alias over
+// pkg/ecrref.
+func ecrRegistryHost(image string) string { return ecrref.RegistryHost(image) }
 
 // splitImageRef splits a container ref into (image, tag). The tag is the part
 // after a ':' in the LAST path segment (so a registry "host:port/repo" is not

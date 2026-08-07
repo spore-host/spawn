@@ -2,10 +2,10 @@ package userdata
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/ecrref"
 )
 
 // ContainerConfig parameterizes a headless "provision a host and docker run
@@ -19,7 +19,7 @@ type ContainerConfig struct {
 	// ref like "nginx:latest". Required.
 	Image string
 	// Region is the AWS region, used for the ECR login when Image resolves to a
-	// private-ECR ref (see ecrImageAccount). Ignored for a public image.
+	// private-ECR ref (see pkg/ecrref.AuthHost). Ignored for a public image.
 	Region string
 	// InstanceType, if set, is used to auto-detect whether to pass --gpus all to
 	// docker run (via aws.DetectGPUInstance) — the same inference Provision
@@ -56,10 +56,10 @@ func GenerateContainerUserData(cfg ContainerConfig) (string, error) {
 	b.WriteString("systemctl enable --now docker 2>&1 || echo 'WARNING: docker service failed to start'\n")
 	b.WriteString("for _i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done\n")
 
-	if host := ecrImageAccountHost(cfg.Image, cfg.Region); host.registry != "" {
-		fmt.Fprintf(&b, "echo 'spawn: authenticating to ECR (%s)...'\n", host.registry)
+	if host, region, ok := ecrref.AuthHost(cfg.Image, cfg.Region); ok {
+		fmt.Fprintf(&b, "echo 'spawn: authenticating to ECR (%s)...'\n", host)
 		fmt.Fprintf(&b, "aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s 2>&1 || echo 'WARNING: ECR login failed; private pull will fail'\n",
-			shQuote(host.region), shQuote(host.registry))
+			shQuote(region), shQuote(host))
 	}
 
 	fmt.Fprintf(&b, "docker pull %s || echo 'WARNING: docker pull failed'\n", shQuote(cfg.Image))
@@ -75,39 +75,6 @@ func GenerateContainerUserData(cfg ContainerConfig) (string, error) {
 	fmt.Fprintf(&b, "docker run --rm %s%s%s\n", gpuFlag, shQuote(cfg.Image), cmd)
 
 	return b.String(), nil
-}
-
-// ecrAccountRe extracts the 12-digit account ID from a private-ECR image host
-// (<account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]). Duplicated from
-// pkg/taskproto/wrapper.go and cmd/app_byo.go rather than imported: pkg/userdata
-// must stay free of both the CLI (cmd) and the task-execution protocol
-// (taskproto) as dependencies — this leaf's only job is generating scripts.
-var ecrAccountRe = regexp.MustCompile(`^(\d{12})\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com/`)
-
-type ecrHost struct {
-	registry string
-	region   string
-}
-
-// ecrImageAccountHost returns the registry host and region to authenticate
-// against when image is a private-ECR ref, or a zero ecrHost (registry=="") if
-// it isn't (a public image, e.g. docker.io/nginx, needs no login). The image's
-// own embedded region takes precedence over the caller-supplied Region, since
-// a cross-region ECR pull must authenticate against ITS region, not the
-// instance's.
-func ecrImageAccountHost(image, region string) ecrHost {
-	m := ecrAccountRe.FindStringSubmatch(image)
-	if m == nil {
-		return ecrHost{}
-	}
-	if i := strings.IndexByte(image, '/'); i >= 0 {
-		imageRegion := m[2]
-		if imageRegion != "" {
-			region = imageRegion
-		}
-		return ecrHost{registry: image[:i], region: region}
-	}
-	return ecrHost{}
 }
 
 // shQuote wraps s in single quotes, escaping embedded single quotes — the safe
