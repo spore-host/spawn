@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.98.0] - 2026-08-07
+
 ### Changed
 - **New `pkg/ecrref` leaf package** dedupes the private-ECR-image parser
   (account ID + registry host extraction) that had drifted into three
@@ -37,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI moved off the self-hosted orion runner fleet onto `ubuntu-latest`. The
   fleet (colima/Docker on orion.local) is being decommissioned org-wide; no
   behavior change to the tool.
+- **`libs` v0.43.2 → v0.43.3, `truffle` v0.48.0 → v0.48.1.** libs fixes
+  `catalog.Validate()`'s overlay-image handling; truffle brings the libs bump
+  plus a fix for mislabeled action pins and the orion-runner decommission
+  (mirrored above). No behavior change to spawn itself.
 
 ### Security
 - **Added a Dependabot config, so the SHA-pinned actions and Go deps get bumped (#485).**
@@ -2634,7 +2640,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.97.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.98.0...HEAD
+[0.98.0]: https://github.com/spore-host/spawn/compare/v0.97.0...v0.98.0
 [0.97.0]: https://github.com/spore-host/spawn/compare/v0.96.3...v0.97.0
 [0.96.3]: https://github.com/spore-host/spawn/compare/v0.96.2...v0.96.3
 [0.96.2]: https://github.com/spore-host/spawn/compare/v0.96.1...v0.96.2
