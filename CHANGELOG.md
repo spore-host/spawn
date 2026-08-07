@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- CI moved off the self-hosted orion runner fleet onto `ubuntu-latest`. The
+  fleet (colima/Docker on orion.local) is being decommissioned org-wide; no
+  behavior change to the tool.
+
 ### Security
 - **Added a Dependabot config, so the SHA-pinned actions and Go deps get bumped (#485).**
   Every action here is pinned to a commit SHA, which closes the mutable-tag hole
