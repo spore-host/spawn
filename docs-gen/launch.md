@@ -83,6 +83,7 @@ spawn launch <name> [flags]
 | `--job-array-name` |  | string |  | Job array group name (required if --count &gt; 1) |
 | `--key-name` |  | string |  | SSH key pair name (EC2 KeyName) |
 | `--launch-delay` |  | string | `0s` | Delay between instance launches (e.g., 5s) |
+| `--max-concurrent-auto` |  | bool |  | Derive --max-concurrent from the account's real AWS quota headroom for the sweep's instance type(s)/region, instead of a user-supplied number (spawn#492) |
 | `--max-concurrent-per-region` |  | int |  | Max instances running simultaneously per region (0 = unlimited) |
 | `--max-concurrent` |  | int |  | Max instances running simultaneously (0 = unlimited) |
 | `--min-viable` |  | int | `1` | Job array: minimum members that must launch for success (default 1; ignored for --mpi) |

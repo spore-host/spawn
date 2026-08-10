@@ -175,3 +175,10 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.55.0 // indirect
 )
+
+// TEMPORARY (spawn#492): points at a local truffle checkout carrying
+// unreleased truffle#133 (QuotaInfo.SpotUsage) + truffle#134 (Capabilities.
+// VCPUs), both of which this PR's code depends on. MUST be removed and
+// go.mod re-pinned to a real truffle tag before this PR merges — do not ship
+// a local path dependency.
+replace github.com/spore-host/truffle => ../truffle

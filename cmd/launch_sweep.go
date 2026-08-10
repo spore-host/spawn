@@ -21,6 +21,9 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	if detach && noDetach {
 		return fmt.Errorf("--detach and --no-detach are mutually exclusive")
 	}
+	if maxConcurrentAuto && maxConcurrent > 0 {
+		return fmt.Errorf("--max-concurrent-auto and --max-concurrent are mutually exclusive — pick one")
+	}
 
 	// Validate workflow integration flags
 	if wait && !detach {
@@ -54,8 +57,11 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		fmt.Fprintf(os.Stderr, "   This prevents zombie instances if CLI disconnects.\n")
 		fmt.Fprintf(os.Stderr, "   Resume monitoring with: spawn sweep status <sweep-id>\n")
 
-		// If maxConcurrent is 0 (launch all at once), set a reasonable default
-		if maxConcurrent == 0 {
+		// If maxConcurrent is 0 (launch all at once), set a reasonable default —
+		// unless --max-concurrent-auto will derive a real one below, in which
+		// case this arbitrary fallback would just be overwritten (and its
+		// stderr message would print out of order relative to the derived value).
+		if maxConcurrent == 0 && !maxConcurrentAuto {
 			// Default to number of params or 10, whichever is less
 			defaultConcurrent := len(paramFormat.Params)
 			if defaultConcurrent > 10 {
@@ -87,6 +93,39 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// Write sweep ID to file for workflow integration
 	if err := writeOutputID(sweepID, outputIDFile); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Failed to write sweep ID to file: %v\n", err)
+	}
+
+	// --max-concurrent-auto (#492): resolve region (if not already pinned) and
+	// derive a real quota-backed ceiling BEFORE the detached/non-detached branch
+	// below, since a sweep auto-enables --detach and that branch needs a
+	// concrete maxConcurrent > 0 to take the (cheaper, Lambda-orchestrated) path
+	// rather than falling through to the foreground one.
+	if maxConcurrentAuto {
+		region := baseConfig.Region
+		if region == "" {
+			fmt.Fprintf(os.Stderr, "🌍 No region specified, auto-detecting closest region for --max-concurrent-auto...\n")
+			detectedRegion, derr := detectBestRegion(ctx, baseConfig.InstanceType)
+			if derr != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  Could not auto-detect region: %v\n", derr)
+				region = "us-east-1"
+			} else {
+				region = detectedRegion
+			}
+			// Pin it on baseConfig too, so the rest of this function (and
+			// launchSweepDetached, if we end up there) doesn't re-detect it.
+			baseConfig.Region = region
+			fmt.Fprintf(os.Stderr, "✓ Selected region: %s\n", region)
+		}
+		regionClient, derr := aws.NewClientWithRegion(ctx, region)
+		if derr != nil {
+			return fmt.Errorf("--max-concurrent-auto: create AWS client for %s: %w", region, derr)
+		}
+		derived, derr := resolveAutoMaxConcurrent(ctx, paramFormat, baseConfig, region, regionClient)
+		if derr != nil {
+			return fmt.Errorf("--max-concurrent-auto: %w", derr)
+		}
+		fmt.Fprintf(os.Stderr, "✓ --max-concurrent-auto: derived %d (account quota headroom in %s)\n", derived, region)
+		maxConcurrent = derived
 	}
 
 	fmt.Fprintf(os.Stderr, "\n🧪 Parameter Sweep: %s\n", sweepID)

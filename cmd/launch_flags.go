@@ -104,6 +104,7 @@ var (
 	params                 string
 	cartesian              bool
 	maxConcurrent          int
+	maxConcurrentAuto      bool
 	maxConcurrentPerRegion int
 	launchDelay            string
 	detach                 bool
@@ -292,6 +293,7 @@ func init() {
 	launchCmd.Flags().StringVar(&params, "params", "", "Inline JSON parameters for sweep")
 	launchCmd.Flags().BoolVar(&cartesian, "cartesian", false, "Generate cartesian product of parameter lists")
 	launchCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max instances running simultaneously (0 = unlimited)")
+	launchCmd.Flags().BoolVar(&maxConcurrentAuto, "max-concurrent-auto", false, "Derive --max-concurrent from the account's real AWS quota headroom for the sweep's instance type(s)/region, instead of a user-supplied number (spawn#492)")
 	launchCmd.Flags().IntVar(&maxConcurrentPerRegion, "max-concurrent-per-region", 0, "Max instances running simultaneously per region (0 = unlimited)")
 	launchCmd.Flags().StringVar(&launchDelay, "launch-delay", "0s", "Delay between instance launches (e.g., 5s)")
 	launchCmd.Flags().BoolVar(&detach, "detach", false, "Run sweep orchestration in Lambda (auto-enabled for parameter sweeps)")
