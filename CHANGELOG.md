@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn launch --max-concurrent-auto`** derives the parameter-sweep
+  concurrency ceiling from the account's real AWS quota headroom instead of a
+  user-typed number (#492). The sweep orchestrator's wave mechanism
+  (`pkg/sweep` + `lambda/sweep-orchestrator`) already polls active-instance
+  count and launches `min(available, remaining)` — but until now its ceiling
+  was always a flag the caller had to already know. `--max-concurrent-auto`
+  queries truffle's quota client for headroom (quota minus current usage) per
+  instance family, in the region the sweep is about to launch in, and
+  converts vCPU headroom to an instance count via the real per-type vCPU
+  count (truffle's new `Capabilities.VCPUs`, not a guessed size suffix). A
+  heterogeneous sweep's derived ceiling is the MINIMUM across every distinct
+  (instance type, spot/on-demand) combination present, so a scarce family
+  can't be silently outvoted by a roomier one. Mutually exclusive with
+  `--max-concurrent`.
+
+  Real-world motivation: a 10-shard fleet launch with no concurrency
+  guardrail hit an account's real ceiling (a G/VT Spot quota of 64 vCPUs,
+  already saturated by 8 running `g7e.2xlarge` instances) with zero prior
+  warning — the actual launches then failed with
+  `MaxSpotInstanceCountExceeded`.
+
+  Not yet wired into `spawn resume`'s `--max-concurrent` override, which has
+  the same class of gap; tracked as a follow-up since resuming already has a
+  recorded region to work from and is a smaller retrofit.
+
+  Requires `truffle` v0.49.0 (bumped as part of this change) for
+  `QuotaInfo.SpotUsage` and `Capabilities.VCPUs`.
+
 ## [0.98.0] - 2026-08-07
 
 ### Changed
