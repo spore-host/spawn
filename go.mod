@@ -43,7 +43,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spore-host/cohort v0.2.0
 	github.com/spore-host/libs v0.43.3
-	github.com/spore-host/truffle v0.48.1
+	github.com/spore-host/truffle v0.49.0
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
@@ -175,10 +175,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.55.0 // indirect
 )
-
-// TEMPORARY (spawn#492): points at a local truffle checkout carrying
-// unreleased truffle#133 (QuotaInfo.SpotUsage) + truffle#134 (Capabilities.
-// VCPUs), both of which this PR's code depends on. MUST be removed and
-// go.mod re-pinned to a real truffle tag before this PR merges — do not ship
-// a local path dependency.
-replace github.com/spore-host/truffle => ../truffle

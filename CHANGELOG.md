@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same class of gap; tracked as a follow-up since resuming already has a
   recorded region to work from and is a smaller retrofit.
 
+  Requires `truffle` v0.49.0 (bumped as part of this change) for
+  `QuotaInfo.SpotUsage` and `Capabilities.VCPUs`.
+
 ## [0.98.0] - 2026-08-07
 
 ### Changed

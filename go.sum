@@ -438,8 +438,8 @@ github.com/spore-host/cohort v0.2.0 h1:PGKkYawNzymE6jPebRqsZHK9X/m2UVYupujMnIdK8
 github.com/spore-host/cohort v0.2.0/go.mod h1:sNMWDccvNp3Qso8ZVMcOvJTJ8GC/QY9LDUYQK1zYWLc=
 github.com/spore-host/libs v0.43.3 h1:Pa/DC49S8uxkmhodyi7x2nnu19qZ2uqmwZEnb6ATi1k=
 github.com/spore-host/libs v0.43.3/go.mod h1:q9UOt1DiO8Zmz4t5EWbSQV+r9FQsUOYaRkCK6TE60G4=
-github.com/spore-host/truffle v0.48.1 h1:FdsV/zKF1sNJ3h4l1sy3WFuAM6SYG//DigrcKNyBzwQ=
-github.com/spore-host/truffle v0.48.1/go.mod h1:5J8ihGNGFz2suJegMkjRwPuBsHntmQA7zkKYx5Hpc8o=
+github.com/spore-host/truffle v0.49.0 h1:OfxB26whEBnLrT7UD3vxsTDcPSvMuzpZF86qasyX1r0=
+github.com/spore-host/truffle v0.49.0/go.mod h1:5J8ihGNGFz2suJegMkjRwPuBsHntmQA7zkKYx5Hpc8o=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.4.0/go.mod h1:YvHI0jy2hoMjB+UWwv71VJQ9isScKT/TqJzVSSt89Yw=
 github.com/stretchr/objx v0.5.0/go.mod h1:Yh+to48EsGEfYuaHDzXPcE3xhTkx73EhmCGUpEOglKo=
