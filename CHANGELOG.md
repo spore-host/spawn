@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.100.0] - 2026-08-11
+
 ### Added
 - **`--completion-webhook-url`** (launch) and **`spawn:last-heartbeat`** EC2 tag
   (#497): closes the caller-facing gap where waiting for a launched instance's
@@ -71,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Requires `truffle` v0.49.0 (bumped as part of this change) for
   `QuotaInfo.SpotUsage` and `Capabilities.VCPUs`.
+
+### Changed
+- Dependency maintenance: bumped 6 GitHub Actions to their current releases
+  (no behavior change).
 
 ## [0.98.0] - 2026-08-07
 
@@ -2705,7 +2711,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.99.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.100.0...HEAD
+[0.100.0]: https://github.com/spore-host/spawn/compare/v0.99.0...v0.100.0
 [0.99.0]: https://github.com/spore-host/spawn/compare/v0.98.0...v0.99.0
 [0.98.0]: https://github.com/spore-host/spawn/compare/v0.97.0...v0.98.0
 [0.97.0]: https://github.com/spore-host/spawn/compare/v0.96.3...v0.97.0
