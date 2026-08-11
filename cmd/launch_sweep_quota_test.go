@@ -76,3 +76,48 @@ func TestSweepQuotaCombos_NoParamsErrors(t *testing.T) {
 		t.Error("want error for an empty param file")
 	}
 }
+
+// TestCombosFromLaunchConfigs_Dedupes is the spawn#494 (`spawn resume
+// --max-concurrent-auto`) counterpart to TestSweepQuotaCombos_*: extracting
+// combos from already-built *aws.LaunchConfig entries (resume's pending
+// configs are already fully merged, unlike launch's raw param sets) must
+// still dedupe correctly.
+func TestCombosFromLaunchConfigs_Dedupes(t *testing.T) {
+	configs := []*aws.LaunchConfig{
+		{InstanceType: "g7e.2xlarge", Spot: true},
+		{InstanceType: "g7e.2xlarge", Spot: true}, // duplicate
+		{InstanceType: "g7e.4xlarge", Spot: true},
+		{InstanceType: "c7i.xlarge", Spot: false},
+	}
+
+	combos, err := combosFromLaunchConfigs(configs)
+	if err != nil {
+		t.Fatalf("combosFromLaunchConfigs: %v", err)
+	}
+	want := map[sweepQuotaCombo]bool{
+		{instanceType: "g7e.2xlarge", spot: true}: true,
+		{instanceType: "g7e.4xlarge", spot: true}: true,
+		{instanceType: "c7i.xlarge", spot: false}: true,
+	}
+	if len(combos) != len(want) {
+		t.Fatalf("got %d combos, want %d: %v", len(combos), len(want), combos)
+	}
+	for _, c := range combos {
+		if !want[c] {
+			t.Errorf("unexpected combo %+v", c)
+		}
+	}
+}
+
+func TestCombosFromLaunchConfigs_MissingInstanceTypeErrors(t *testing.T) {
+	configs := []*aws.LaunchConfig{{}}
+	if _, err := combosFromLaunchConfigs(configs); err == nil {
+		t.Error("want error when a launch config has no instance_type")
+	}
+}
+
+func TestCombosFromLaunchConfigs_EmptyErrors(t *testing.T) {
+	if _, err := combosFromLaunchConfigs(nil); err == nil {
+		t.Error("want error for no launch configs")
+	}
+}

@@ -80,3 +80,41 @@ func TestResolveAutoMaxConcurrent_RequiresResolvedRegion(t *testing.T) {
 		t.Error("want error when region is empty")
 	}
 }
+
+// TestResolveAutoMaxConcurrentFromConfigs_DerivesFromRealQuota is the
+// spawn#494 (`spawn resume --max-concurrent-auto`) end-to-end guard, mirroring
+// TestResolveAutoMaxConcurrent_DerivesFromRealQuota but from already-built
+// *aws.LaunchConfig entries (resume's pending configs) rather than raw
+// ParamFileFormat params. Same Substrate seeding: 32 vCPU Standard On-Demand
+// quota / 4 vCPU per c5.xlarge = 8.
+func TestResolveAutoMaxConcurrentFromConfigs_DerivesFromRealQuota(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	ctx := context.Background()
+	client := aws.NewClientFromConfig(env.AWSConfig)
+
+	launchConfigs := []*aws.LaunchConfig{
+		{InstanceType: "c5.xlarge", Region: "us-east-1"},
+		{InstanceType: "c5.xlarge", Region: "us-east-1"},
+	}
+
+	got, err := resolveAutoMaxConcurrentFromConfigs(ctx, launchConfigs, "us-east-1", client)
+	if err != nil {
+		t.Fatalf("resolveAutoMaxConcurrentFromConfigs: %v", err)
+	}
+	if got != 8 {
+		t.Errorf("derived max-concurrent = %d, want 8 (32 vCPU quota / 4 vCPU per c5.xlarge)", got)
+	}
+}
+
+// TestResolveAutoMaxConcurrentFromConfigs_RequiresResolvedRegion is the
+// resume-path counterpart of TestResolveAutoMaxConcurrent_RequiresResolvedRegion.
+func TestResolveAutoMaxConcurrentFromConfigs_RequiresResolvedRegion(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	ctx := context.Background()
+	client := aws.NewClientFromConfig(env.AWSConfig)
+
+	launchConfigs := []*aws.LaunchConfig{{InstanceType: "c5.xlarge"}}
+	if _, err := resolveAutoMaxConcurrentFromConfigs(ctx, launchConfigs, "", client); err == nil {
+		t.Error("want error when region is empty")
+	}
+}

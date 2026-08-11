@@ -15,9 +15,10 @@ import (
 )
 
 var (
-	resumeSweepID       string
-	resumeMaxConcurrent int
-	resumeDetach        bool
+	resumeSweepID           string
+	resumeMaxConcurrent     int
+	resumeMaxConcurrentAuto bool
+	resumeDetach            bool
 )
 
 var resumeCmd = &cobra.Command{
@@ -46,6 +47,7 @@ func init() {
 	resumeCmd.Flags().StringVar(&resumeSweepID, "sweep-id", "", "Sweep ID to resume (required)")
 	_ = resumeCmd.MarkFlagRequired("sweep-id")
 	resumeCmd.Flags().IntVar(&resumeMaxConcurrent, "max-concurrent", 0, "Override max concurrent instances (0 = use original)")
+	resumeCmd.Flags().BoolVar(&resumeMaxConcurrentAuto, "max-concurrent-auto", false, "Re-derive max concurrent instances from the account's real AWS quota headroom for the pending parameter sets' instance type(s)/region, instead of the original or a user-supplied number (spawn#494). Not yet supported with --detach.")
 	resumeCmd.Flags().BoolVar(&resumeDetach, "detach", false, "Run sweep orchestration in Lambda")
 
 	rootCmd.AddCommand(resumeCmd)
@@ -54,8 +56,23 @@ func init() {
 func runResume(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 
+	if resumeMaxConcurrentAuto && resumeMaxConcurrent > 0 {
+		return fmt.Errorf("--max-concurrent-auto and --max-concurrent are mutually exclusive — pick one")
+	}
+
 	// Check if detached mode requested - handle early since detached sweeps have no local state
 	if resumeDetach {
+		// --max-concurrent-auto needs the pending parameter sets' instance
+		// types, which for a detached sweep live in S3 (SweepRecord only
+		// stores an S3ParamsKey, not the params themselves) — no download
+		// helper exists yet (only the upload side, UploadParamsToS3), and
+		// there's currently no override path from resume into the stored
+		// SweepRecord.MaxConcurrent the Lambda orchestrator reads. spawn#494
+		// tracks this as a separate follow-up; reject explicitly for now
+		// rather than silently ignoring the flag.
+		if resumeMaxConcurrentAuto {
+			return fmt.Errorf("--max-concurrent-auto is not yet supported with --detach (spawn#494)")
+		}
 		return resumeSweepDetached(ctx, resumeSweepID)
 	}
 
@@ -210,6 +227,23 @@ func runResume(cmd *cobra.Command, args []string) error {
 		}
 
 		launchConfigs = append(launchConfigs, &config)
+	}
+
+	// --max-concurrent-auto (#494): now that the pending launch configs are
+	// built (each with a resolved InstanceType/Region/Spot), derive a real
+	// quota-backed ceiling instead of the original or a user-typed number.
+	if resumeMaxConcurrentAuto {
+		regionClient, rerr := aws.NewClientWithRegion(ctx, region)
+		if rerr != nil {
+			return fmt.Errorf("--max-concurrent-auto: create AWS client for %s: %w", region, rerr)
+		}
+		derived, rerr := resolveAutoMaxConcurrentFromConfigs(ctx, launchConfigs, region, regionClient)
+		if rerr != nil {
+			return fmt.Errorf("--max-concurrent-auto: %w", rerr)
+		}
+		fmt.Fprintf(os.Stderr, "✓ --max-concurrent-auto: derived %d (account quota headroom in %s)\n", derived, region)
+		fmt.Fprintf(os.Stderr, "🔧 Overriding max-concurrent: %d -> %d\n\n", state.MaxConcurrent, derived)
+		maxConcurrent = derived
 	}
 
 	// We need to setup shared resources (AMI, SSH key, IAM role) for the pending configs

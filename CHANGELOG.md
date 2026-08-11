@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.99.0] - 2026-08-10
+### Added
+- **`spawn resume --max-concurrent-auto`** — the same quota-derived
+  concurrency ceiling `spawn launch` gained in #492 (v0.99.0), now available
+  when resuming an interrupted parameter sweep (#494). Re-derives the
+  ceiling from the account's real AWS quota headroom for the PENDING
+  parameter sets' instance type(s), instead of the sweep's original ceiling
+  or a user-typed override — useful when resuming after the account's quota
+  situation has changed (freed up, or was the reason the sweep stalled in
+  the first place). Mutually exclusive with `--max-concurrent`.
+
+  Not yet supported with `--detach` (the Lambda-orchestrated resume path):
+  that path's stored parameters live in S3 with no download helper yet
+  (only upload exists), and there's currently no route from `resume` to
+  update the Lambda-orchestrator's stored ceiling before re-invoking.
+  `--max-concurrent-auto --detach` is rejected with a clear error rather
+  than silently ignored; tracked as a separate follow-up.
 
 ### Added
 - **`spawn launch --max-concurrent-auto`** derives the parameter-sweep
