@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.99.0] - 2026-08-10
+
 ### Added
 - **`spawn launch --max-concurrent-auto`** derives the parameter-sweep
   concurrency ceiling from the account's real AWS quota headroom instead of a
@@ -2669,7 +2671,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.98.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.99.0...HEAD
+[0.99.0]: https://github.com/spore-host/spawn/compare/v0.98.0...v0.99.0
 [0.98.0]: https://github.com/spore-host/spawn/compare/v0.97.0...v0.98.0
 [0.97.0]: https://github.com/spore-host/spawn/compare/v0.96.3...v0.97.0
 [0.96.3]: https://github.com/spore-host/spawn/compare/v0.96.2...v0.96.3
