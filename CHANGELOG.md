@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`--completion-webhook-url`** (launch) and **`spawn:last-heartbeat`** EC2 tag
+  (#497): closes the caller-facing gap where waiting for a launched instance's
+  workload to finish meant polling an artifact against a pre-guessed
+  wall-clock deadline (the exact flaw behind a real calque incident — a run
+  still legitimately executing at 40 minutes had no way to be distinguished
+  from "stuck," other than the caller's own guess). `--completion-webhook-url`
+  makes spored POST a fire-once, best-effort notice (mirroring the existing
+  `--spot-webhook-url` from #228) when the on-instance completion sentinel
+  (`--completion-file`) is detected — before the grace-period sleep and
+  lifecycle action — so a caller can register its own webhook/queue target
+  instead of reinventing an S3-polling loop unaware of spored's own sentinel.
+  Shares `--webhook-correlation`/`--webhook-timeout` with the spot webhook.
+  Independently, `spawn:last-heartbeat` is now stamped with the current time
+  on every monitor tick (throttled to once/minute) regardless of
+  configuration — an always-on liveness signal a poller can check to tell
+  "still alive and ticking" from "hung" or "gone," without needing to guess a
+  timeout at all.
+
+### Added
 - **`spawn resume --max-concurrent-auto`** — the same quota-derived
   concurrency ceiling `spawn launch` gained in #492 (v0.99.0), now available
   when resuming an interrupted parameter sweep (#494). Re-derives the

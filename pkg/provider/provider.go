@@ -51,6 +51,15 @@ type Config struct {
 	WebhookCorrelation string        // opaque caller blob, echoed verbatim, never parsed
 	WebhookTimeout     time.Duration // hard cap on the POST; zero = default (2s)
 
+	// Completion webhook (#497): a fire-once, best-effort POST spored emits when
+	// the on-instance completion sentinel (CompletionFile) is detected, so a
+	// caller (e.g. calque) can block on ITS OWN webhook/queue instead of polling
+	// an S3 artifact against a pre-guessed wall-clock deadline. Shares
+	// WebhookCorrelation/WebhookTimeout with the spot webhook (both are
+	// fire-once best-effort POSTs of an on-node fact-struct; a caller wanting
+	// different correlation/timeout per event type can use two launches).
+	CompletionWebhookURL string // POST target; empty = disabled (today's behavior)
+
 	// Ephemeral FSx (#194): when an FSx is created asynchronously alongside the
 	// instance, the launch path tags spawn:fsx-pending=<fs-id> + spawn:fsx-mount-point.
 	// spored polls until the filesystem is AVAILABLE, mounts it, then flips the

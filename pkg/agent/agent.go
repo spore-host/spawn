@@ -40,25 +40,26 @@ type Agent struct {
 	// while other goroutines (FSx mount, spot monitor) read it concurrently, so
 	// access goes through cfg()/setConfig() under configMu (#175). Don't read the
 	// field directly from code that can run off the monitor goroutine.
-	config              *provider.Config
-	configMu            sync.RWMutex
-	dnsClient           *dns.Client
-	dnsDomain           string // DNS domain (e.g. "spore.host" or "prismcloud.host")
-	registry            *registry.PeerRegistry
-	pluginRuntime       *pluginruntime.Runtime
-	notifier            *Notifier // Slack lifecycle notifications (nil if not configured)
-	startTime           time.Time
-	lastActivityTime    time.Time
-	preStopDone         bool      // guards against running pre-stop hook more than once
-	spotWebhookFired    bool      // fire-once guard for the spot-interruption webhook (#228); the spot monitor re-enters every 5s
-	prevCPUIdle         int64     // /proc/stat idle jiffies at last getCPUUsage call
-	prevCPUTotal        int64     // /proc/stat total jiffies at last getCPUUsage call
-	lastSessionTagWrite time.Time // throttle spawn:logged-in-count tag writes
-	lastComputeTagWrite time.Time // throttle spawn:compute-seconds tag writes
-	computeSecondsBase  int64     // compute-seconds already accumulated before this spored start
-	prevNetRx           int64     // /proc/net/dev RX bytes at last getNetworkBytes call
-	prevNetTx           int64     // /proc/net/dev TX bytes at last getNetworkBytes call
-	idleWarned          bool      // send idle_warning notification only once
+	config                *provider.Config
+	configMu              sync.RWMutex
+	dnsClient             *dns.Client
+	dnsDomain             string // DNS domain (e.g. "spore.host" or "prismcloud.host")
+	registry              *registry.PeerRegistry
+	pluginRuntime         *pluginruntime.Runtime
+	notifier              *Notifier // Slack lifecycle notifications (nil if not configured)
+	startTime             time.Time
+	lastActivityTime      time.Time
+	preStopDone           bool      // guards against running pre-stop hook more than once
+	spotWebhookFired      bool      // fire-once guard for the spot-interruption webhook (#228); the spot monitor re-enters every 5s
+	prevCPUIdle           int64     // /proc/stat idle jiffies at last getCPUUsage call
+	prevCPUTotal          int64     // /proc/stat total jiffies at last getCPUUsage call
+	lastSessionTagWrite   time.Time // throttle spawn:logged-in-count tag writes
+	lastComputeTagWrite   time.Time // throttle spawn:compute-seconds tag writes
+	lastHeartbeatTagWrite time.Time // throttle spawn:last-heartbeat tag writes (#497)
+	computeSecondsBase    int64     // compute-seconds already accumulated before this spored start
+	prevNetRx             int64     // /proc/net/dev RX bytes at last getNetworkBytes call
+	prevNetTx             int64     // /proc/net/dev TX bytes at last getNetworkBytes call
+	idleWarned            bool      // send idle_warning notification only once
 
 	// DCV auth token verifier (embedded HTTP server for seamless browser auth)
 	dcvTokens          map[string]string // token → username
@@ -404,6 +405,14 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// 0b. Keep spawn:compute-seconds tag current (throttled to 5/min).
 	a.writeComputeSecondsTag(ctx)
 
+	// 0c. Keep spawn:last-heartbeat current (throttled to 1/min, matching the
+	// production monitor interval — #497): an always-on liveness signal a
+	// caller can poll to tell "still alive and ticking" from "hung" (spored
+	// froze) or "gone" (terminated), independent of whatever completion
+	// artifact the workload itself writes. No opt-in flag, unlike the webhooks
+	// above — it costs nothing to a caller who never reads it.
+	a.writeHeartbeatTag(ctx)
+
 	// 1. Check for completion signal (HIGH PRIORITY)
 	if a.config.OnComplete != "" {
 		if a.checkCompletion(ctx) {
@@ -612,6 +621,31 @@ func (a *Agent) writeSessionCountTag(ctx context.Context, count int) {
 		Resources: []string{a.identity.InstanceID},
 		Tags: []ec2types.Tag{
 			{Key: aws.String("spawn:logged-in-count"), Value: aws.String(strconv.Itoa(count))},
+		},
+	})
+}
+
+// writeHeartbeatTag stamps spawn:last-heartbeat with the current time, throttled
+// to once per minute (#497): an always-on liveness signal a caller can poll to
+// distinguish "still alive and ticking" from "hung" (spored crashed/froze) or
+// "gone" (instance terminated, tag no longer resolvable) — independent of
+// whatever completion artifact the workload itself writes. Follows the
+// writeSessionCountTag/writeComputeSecondsTag throttle pattern so tests can
+// push lastHeartbeatTagWrite into the future to skip the real EC2 call.
+func (a *Agent) writeHeartbeatTag(ctx context.Context) {
+	if time.Since(a.lastHeartbeatTagWrite) < time.Minute {
+		return
+	}
+	a.lastHeartbeatTagWrite = time.Now()
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.identity.Region))
+	if err != nil {
+		return
+	}
+	client := ec2.NewFromConfig(cfg)
+	_, _ = client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{a.identity.InstanceID},
+		Tags: []ec2types.Tag{
+			{Key: aws.String("spawn:last-heartbeat"), Value: aws.String(time.Now().UTC().Format(time.RFC3339))},
 		},
 	})
 }
@@ -1282,18 +1316,27 @@ func (a *Agent) emitSpotInterruptionWebhook(info *provider.InterruptionInfo) {
 		EmittedAt:            time.Now().UTC().Format(time.RFC3339),
 	}
 
+	postWebhook("Spot webhook", cfg.SpotWebhookURL, timeout, payload)
+}
+
+// postWebhook marshals payload and POSTs it to url, best-effort, time-boxed by
+// timeout. Any failure — marshal, build, timeout, DNS, non-2xx — is logged at
+// most and dropped; the caller (spot/completion webhook) must never block the
+// lifecycle action it precedes on a slow or dead endpoint. label prefixes log
+// lines so spored.log can distinguish which webhook fired.
+func postWebhook(label, url string, timeout time.Duration, payload any) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("Spot webhook: marshal failed, dropping: %v", err)
+		log.Printf("%s: marshal failed, dropping: %v", label, err)
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", cfg.SpotWebhookURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("Spot webhook: request build failed, dropping: %v", err)
+		log.Printf("%s: request build failed, dropping: %v", label, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -1301,15 +1344,65 @@ func (a *Agent) emitSpotInterruptionWebhook(info *provider.InterruptionInfo) {
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Spot webhook: POST to %s failed, dropping (best-effort): %v", cfg.SpotWebhookURL, err)
+		log.Printf("%s: POST to %s failed, dropping (best-effort): %v", label, url, err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		log.Printf("Spot webhook: endpoint %s returned %d, dropping (best-effort)", cfg.SpotWebhookURL, resp.StatusCode)
+		log.Printf("%s: endpoint %s returned %d, dropping (best-effort)", label, url, resp.StatusCode)
 		return
 	}
-	log.Printf("Spot webhook: notice POSTed to %s (action=%s)", cfg.SpotWebhookURL, info.Action)
+	log.Printf("%s: notice POSTed to %s", label, url)
+}
+
+// completionWebhookPayload is the fixed, stable on-node fact-struct spored
+// POSTs when the completion sentinel fires (#497) — the caller-facing signal
+// that was previously only reachable by parsing spored's Slack notification or
+// by the caller reinventing its own artifact-polling loop (as calque's
+// WaitForSummary did). Mirrors spotWebhookPayload's shape: Correlation is the
+// only caller-supplied field, echoed verbatim and never parsed.
+type completionWebhookPayload struct {
+	Event            string `json:"event"`                 // always "completion"
+	InstanceID       string `json:"instance_id"`           //
+	Region           string `json:"region"`                //
+	NameTag          string `json:"name_tag,omitempty"`    // spawn:name
+	OnComplete       string `json:"on_complete"`           // the configured action: terminate/stop/hibernate/exit
+	ComputeSeconds   int64  `json:"compute_seconds"`       // accumulated compute time
+	LastActivityTime string `json:"last_activity_time"`    // RFC3339
+	Correlation      string `json:"correlation,omitempty"` // opaque caller blob, verbatim
+	EmittedAt        string `json:"emitted_at"`            // RFC3339, when spored sent this
+}
+
+// emitCompletionWebhook POSTs the fixed payload to the launch-configured URL
+// exactly once, best-effort, time-boxed by WebhookTimeout (default 2s) — the
+// same fire-and-forget discipline as emitSpotInterruptionWebhook (#228),
+// applied to the completion sentinel instead of a spot notice (#497). Called
+// from checkCompletion BEFORE the grace-period sleep and lifecycle action, so
+// a caller learns of completion as early as spored itself does.
+func (a *Agent) emitCompletionWebhook(ctx context.Context) {
+	cfg := a.cfg()
+	if cfg == nil || cfg.CompletionWebhookURL == "" {
+		return // opt-in; empty URL = today's behavior
+	}
+
+	timeout := cfg.WebhookTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+
+	payload := completionWebhookPayload{
+		Event:            "completion",
+		InstanceID:       a.identity.InstanceID,
+		Region:           a.identity.Region,
+		NameTag:          a.identity.Name,
+		OnComplete:       cfg.OnComplete,
+		ComputeSeconds:   a.TotalComputeSeconds(),
+		LastActivityTime: a.lastActivityTime.UTC().Format(time.RFC3339),
+		Correlation:      cfg.WebhookCorrelation,
+		EmittedAt:        time.Now().UTC().Format(time.RFC3339),
+	}
+
+	postWebhook("Completion webhook", cfg.CompletionWebhookURL, timeout, payload)
 }
 
 func (a *Agent) sendSpotInterruptionNotification(action, interruptTime string) {
@@ -1357,6 +1450,12 @@ func (a *Agent) checkCompletion(ctx context.Context) bool {
 
 		// Notify via Slack before the grace period
 		a.notifier.Notify(ctx, "completion", "")
+
+		// Fire the optional off-node completion webhook (#497), same
+		// fire-and-forget discipline as the spot-interruption webhook (#228) —
+		// so a caller waiting on ITS OWN target learns of completion as early
+		// as spored itself does, before the grace-period sleep below.
+		a.emitCompletionWebhook(ctx)
 
 		// Warn users with grace period
 		delay := a.config.CompletionDelay

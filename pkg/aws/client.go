@@ -183,6 +183,13 @@ type LaunchConfig struct {
 	WebhookCorrelation         string // opaque caller blob, echoed verbatim in the payload, never parsed
 	WebhookTimeout             string // hard cap on the POST (default 2s) so it can't eat the window
 
+	// Completion webhook (#497): an optional, fire-once best-effort POST spored
+	// emits when the on-instance completion sentinel (CompletionFile) is
+	// detected, so a caller can wait on ITS OWN webhook/queue instead of
+	// polling an artifact against a pre-guessed wall-clock deadline. Shares
+	// WebhookCorrelation/WebhookTimeout above with the spot webhook.
+	CompletionWebhookURL string // POST target; empty disables the webhook
+
 	// Completion signal settings
 	OnComplete      string // Action: terminate, stop, hibernate
 	CompletionFile  string // File path to watch (default: /tmp/SPAWN_COMPLETE)
