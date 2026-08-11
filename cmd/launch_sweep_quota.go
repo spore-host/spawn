@@ -53,13 +53,54 @@ import (
 // avoid a second client construction and so tests can inject a
 // Substrate-backed client.
 func resolveAutoMaxConcurrent(ctx context.Context, paramFormat *ParamFileFormat, baseConfig *aws.LaunchConfig, region string, awsClient *aws.Client) (int, error) {
-	if region == "" {
-		return 0, fmt.Errorf("auto max-concurrent: no region resolved yet — derive the ceiling AFTER region resolution")
-	}
-
 	combos, err := sweepQuotaCombos(paramFormat, baseConfig)
 	if err != nil {
 		return 0, err
+	}
+	return deriveMaxConcurrentFromCombos(ctx, combos, region, awsClient)
+}
+
+// resolveAutoMaxConcurrentFromConfigs is the `spawn resume --max-concurrent-auto`
+// entry point (#494): unlike resolveAutoMaxConcurrent, the caller already has
+// fully-built *aws.LaunchConfig entries (resume reloads the original param file,
+// reconciles against live EC2 state, and builds launch configs for exactly the
+// PENDING parameter sets before this point) — re-deriving combos from raw
+// params via sweepQuotaCombos would apply a second, subtly different merge
+// pass over data that's already been merged once. Extracts combos directly
+// from the already-resolved configs instead.
+func resolveAutoMaxConcurrentFromConfigs(ctx context.Context, launchConfigs []*aws.LaunchConfig, region string, awsClient *aws.Client) (int, error) {
+	combos, err := combosFromLaunchConfigs(launchConfigs)
+	if err != nil {
+		return 0, err
+	}
+	return deriveMaxConcurrentFromCombos(ctx, combos, region, awsClient)
+}
+
+// deriveMaxConcurrentFromCombos is the shared core of both
+// resolveAutoMaxConcurrent and resolveAutoMaxConcurrentFromConfigs: given the
+// distinct (instance type, spot) combinations a sweep will launch and a
+// resolved region, query truffle's quota client once for headroom (quota -
+// current usage) per family, convert vCPU headroom to an instance count via
+// Capabilities.VCPUs (truffle#492 — the real EC2 value, not a guessed
+// size-suffix), and return the MINIMUM across every combination — the ceiling
+// must respect the tightest-fitting quota, not the loosest, or a
+// heterogeneous sweep could still overrun a scarce family while looking fine
+// against a roomy one.
+//
+// A family this can't get a quota/vCPU answer for (missing credentials,
+// unsupported family, API error) is skipped with a warning rather than
+// aborting the whole sweep — this is a SAFETY DEFAULT, not a hard gate, and a
+// caller that explicitly asked for --max-concurrent=auto should still get a
+// best-effort number rather than an outright failure when only some rows in a
+// mixed sweep are affected.
+//
+// awsClient is an already-constructed client PINNED TO region; this function
+// builds truffle clients from its config rather than constructing its own,
+// both to avoid a second client construction and so tests can inject a
+// Substrate-backed client.
+func deriveMaxConcurrentFromCombos(ctx context.Context, combos []sweepQuotaCombo, region string, awsClient *aws.Client) (int, error) {
+	if region == "" {
+		return 0, fmt.Errorf("auto max-concurrent: no region resolved yet — derive the ceiling AFTER region resolution")
 	}
 
 	quotaClient := truffleQuotas.NewClientFromConfig(awsClient.Config())
@@ -146,6 +187,30 @@ func sweepQuotaCombos(paramFormat *ParamFileFormat, baseConfig *aws.LaunchConfig
 	}
 	if len(combos) == 0 {
 		return nil, fmt.Errorf("auto max-concurrent: no parameter sets to derive a ceiling from")
+	}
+	return combos, nil
+}
+
+// combosFromLaunchConfigs extracts the distinct (instance type, spot)
+// combinations from already-built launch configs (#494's `spawn resume`
+// path — the configs are the PENDING parameter sets only, already
+// defaults-merged and per-entry-overridden by buildLaunchConfigFromParams,
+// so no second merge pass is needed here).
+func combosFromLaunchConfigs(launchConfigs []*aws.LaunchConfig) ([]sweepQuotaCombo, error) {
+	seen := make(map[sweepQuotaCombo]bool)
+	var combos []sweepQuotaCombo
+	for i, cfg := range launchConfigs {
+		if cfg.InstanceType == "" {
+			return nil, fmt.Errorf("auto max-concurrent: launch config %d has no instance_type", i)
+		}
+		c := sweepQuotaCombo{instanceType: cfg.InstanceType, spot: cfg.Spot}
+		if !seen[c] {
+			seen[c] = true
+			combos = append(combos, c)
+		}
+	}
+	if len(combos) == 0 {
+		return nil, fmt.Errorf("auto max-concurrent: no pending launch configs to derive a ceiling from")
 	}
 	return combos, nil
 }
