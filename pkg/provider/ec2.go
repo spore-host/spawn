@@ -546,6 +546,8 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			}
 		case tagprefix.Tag("spot-webhook-url"):
 			config.SpotWebhookURL = *tag.Value
+		case tagprefix.Tag("completion-webhook-url"):
+			config.CompletionWebhookURL = *tag.Value
 		case tagprefix.Tag("webhook-correlation"):
 			config.WebhookCorrelation = *tag.Value
 		case tagprefix.Tag("webhook-timeout"):

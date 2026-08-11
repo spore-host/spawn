@@ -41,6 +41,7 @@ spawn launch <name> [flags]
 | `--command` |  | string |  | Command to run on all instances (executed after spored setup) |
 | `--completion-delay` |  | string | `30s` | Grace period after completion signal |
 | `--completion-file` |  | string | `/tmp/SPAWN_COMPLETE` | File to watch for completion signal |
+| `--completion-webhook-url` |  | string |  | On workload completion (--completion-file detected), spored POSTs a fire-once, best-effort notice to this URL (spawn#497) — lets a caller wait on its own webhook/queue instead of polling an artifact against a pre-guessed deadline; empty = disabled |
 | `--compliance-strict` |  | bool |  | Strict mode: fail on warnings (default: show warnings only) |
 | `--config` |  | string |  | Launch config YAML file (supports plugins: list) |
 | `--cost-limit` |  | float64 |  | Terminate/stop when compute spend reaches this amount in USD (compute cost only; 0 = disabled) |
@@ -143,7 +144,7 @@ spawn launch <name> [flags]
 | `--wait-for-ssh` |  | bool | `true` | Wait until SSH is ready |
 | `--wait-timeout` |  | string |  | Timeout for --wait (e.g., 2h, 30m, 0=no timeout) |
 | `--wait` |  | bool |  | Wait for sweep/launch to complete (requires --detach) |
-| `--webhook-correlation` |  | string |  | Opaque blob echoed verbatim in the spot-webhook payload so a consumer can correlate the event to its own record (never parsed by spawn) |
-| `--webhook-timeout` |  | string |  | Hard cap on the spot-webhook POST so it can't eat the reclamation window (default: 2s) |
+| `--webhook-correlation` |  | string |  | Opaque blob echoed verbatim in the spot-webhook/completion-webhook payload so a consumer can correlate the event to its own record (never parsed by spawn) |
+| `--webhook-timeout` |  | string |  | Hard cap on the spot-webhook/completion-webhook POST so it can't eat the reclamation window or delay the completion action (default: 2s) |
 | `--yes` | `-y` | bool |  | Auto-approve cost estimate (skip confirmation) |
 

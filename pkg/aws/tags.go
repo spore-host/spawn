@@ -208,6 +208,18 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		}
 	}
 
+	// Completion webhook (#497): only tagged when a URL is set (opt-in). Shares
+	// spawn:webhook-correlation/spawn:webhook-timeout with the spot webhook above.
+	if config.CompletionWebhookURL != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:completion-webhook-url"), Value: aws.String(config.CompletionWebhookURL)})
+		if config.WebhookCorrelation != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-correlation"), Value: aws.String(config.WebhookCorrelation)})
+		}
+		if config.WebhookTimeout != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-timeout"), Value: aws.String(config.WebhookTimeout)})
+		}
+	}
+
 	// Record the instance's primary user so spored can run the pre-stop hook as
 	// that user rather than root (#63). Tagged whenever known.
 	if config.Username != "" {

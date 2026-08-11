@@ -541,8 +541,9 @@ func TestMonitor_SpotDetectionDoesNotGateTicker(t *testing.T) {
 		monitorInterval:  10 * time.Millisecond, // fast ticker for the test
 		// Push tag-write throttles into the future so checkAndAct skips its
 		// (real-AWS) CreateTags calls and the test stays hermetic.
-		lastSessionTagWrite: time.Now().Add(time.Hour),
-		lastComputeTagWrite: time.Now().Add(time.Hour),
+		lastSessionTagWrite:   time.Now().Add(time.Hour),
+		lastComputeTagWrite:   time.Now().Add(time.Hour),
+		lastHeartbeatTagWrite: time.Now().Add(time.Hour),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -603,8 +604,9 @@ func TestCheckAndAct_ExpiredTTL_AlwaysTerminates(t *testing.T) {
 		startTime:        time.Now().Add(-2 * time.Hour),
 		lastActivityTime: time.Now(),
 		// Keep checkAndAct hermetic: skip the (real-AWS) tag-write calls.
-		lastSessionTagWrite: time.Now().Add(time.Hour),
-		lastComputeTagWrite: time.Now().Add(time.Hour),
+		lastSessionTagWrite:   time.Now().Add(time.Hour),
+		lastComputeTagWrite:   time.Now().Add(time.Hour),
+		lastHeartbeatTagWrite: time.Now().Add(time.Hour),
 	}
 
 	a.checkAndAct(context.Background())
@@ -617,6 +619,29 @@ func TestCheckAndAct_ExpiredTTL_AlwaysTerminates(t *testing.T) {
 	}
 	if sp.hibernated {
 		t.Error("expired TTL must NOT Hibernate, even with HibernateOnIdle set (#72)")
+	}
+}
+
+// TestWriteHeartbeatTag_Throttled verifies the spawn#497 throttle guard: a
+// recent write must return immediately (no EC2 call attempted) rather than
+// re-firing every tick. This mirrors the writeSessionCountTag/
+// writeComputeSecondsTag throttle pattern. A due write can't be asserted here
+// without a real AWS call (same as its siblings, which have no direct test) —
+// this only pins the "skip when recent" half, which is what keeps
+// checkAndAct-driving tests hermetic.
+func TestWriteHeartbeatTag_Throttled(t *testing.T) {
+	a := newTestAgent(t, nil)
+	a.lastHeartbeatTagWrite = time.Now()
+
+	a.writeHeartbeatTag(context.Background())
+
+	if a.lastHeartbeatTagWrite.Equal(time.Time{}) {
+		t.Error("lastHeartbeatTagWrite unexpectedly reset to zero")
+	}
+	// Since it returned before reassigning lastHeartbeatTagWrite, the value must
+	// still be very recent (the "time.Now()" set right above), not overwritten.
+	if time.Since(a.lastHeartbeatTagWrite) > time.Second {
+		t.Error("writeHeartbeatTag did not return early on a recent write — throttle not honored")
 	}
 }
 

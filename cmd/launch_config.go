@@ -236,6 +236,11 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 		config.WebhookCorrelation = webhookCorrelation
 		config.WebhookTimeout = webhookTimeout
 	}
+	if completionWebhookURL != "" {
+		config.CompletionWebhookURL = completionWebhookURL
+		config.WebhookCorrelation = webhookCorrelation
+		config.WebhookTimeout = webhookTimeout
+	}
 	if onComplete != "" {
 		config.OnComplete = onComplete
 	}
