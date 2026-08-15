@@ -23,7 +23,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
 
       # Formatting gate. Runs first because it's the cheapest check and the
       # fastest to act on. CI had no formatting check at all, and `make check`
@@ -101,7 +101,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
 
       - name: Build spawn binary
         run: go build -o bin/spawn .
