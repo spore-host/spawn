@@ -61,7 +61,7 @@ jobs:
       # where it was built). Attests checksums.txt, which covers every artifact by
       # hash. Runs only on a successful GoReleaser build (dist/checksums.txt exists).
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'dist/checksums.txt'
 
