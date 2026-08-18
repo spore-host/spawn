@@ -1765,13 +1765,18 @@ func (a *Agent) checkRegionVacated(ctx context.Context) {
 	a.notifier.Notify(ctx, "region_vacated", region)
 }
 
-// Reload re-reads configuration from provider without restarting the daemon
+// Reload re-reads configuration from provider without restarting the daemon.
+// Returns an error when the tag refresh itself failed (spawn#505) — callers
+// (handleReload, and spawn extend's "reloaded on instance" message) must not
+// report success when the daemon's config could not actually be refreshed;
+// a discarded refresh error previously let both report success while the
+// daemon kept running on stale (possibly zero-value) config indefinitely.
 func (a *Agent) Reload(ctx context.Context) error {
 	log.Printf("Reloading configuration...")
 
-	// Refresh the provider's cached config from EC2 tags first
+	// Refresh the provider's cached config from EC2 tags first.
 	if err := a.provider.RefreshConfig(ctx); err != nil {
-		log.Printf("Warning: failed to refresh config from tags: %v", err)
+		return fmt.Errorf("failed to refresh config from tags: %w", err)
 	}
 
 	// Re-read config from provider

@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -33,6 +34,10 @@ type stubProvider struct {
 	otherInstances int
 	reportVacated  bool
 	countCalls     int
+
+	// refreshConfigErr, when set, is returned by RefreshConfig — lets tests
+	// simulate a DescribeTags failure (spawn#505).
+	refreshConfigErr error
 }
 
 func (s *stubProvider) GetIdentity(_ context.Context) (*provider.Identity, error) {
@@ -41,7 +46,7 @@ func (s *stubProvider) GetIdentity(_ context.Context) (*provider.Identity, error
 func (s *stubProvider) GetConfig(_ context.Context) (*provider.Config, error) {
 	return s.config, nil
 }
-func (s *stubProvider) RefreshConfig(_ context.Context) error       { return nil }
+func (s *stubProvider) RefreshConfig(_ context.Context) error       { return s.refreshConfigErr }
 func (s *stubProvider) Terminate(_ context.Context, _ string) error { s.terminated = true; return nil }
 func (s *stubProvider) Stop(_ context.Context, _ string) error      { s.stopped = true; return nil }
 func (s *stubProvider) Hibernate(_ context.Context) error           { s.hibernated = true; return nil }
@@ -145,6 +150,47 @@ func TestGetConfig(t *testing.T) {
 	}
 	if got.TTL != time.Hour {
 		t.Errorf("GetConfig().TTL = %v, want %v", got.TTL, time.Hour)
+	}
+}
+
+// TestReload_Success confirms a normal reload picks up the provider's fresh
+// config.
+func TestReload_Success(t *testing.T) {
+	oldCfg := &provider.Config{TTL: time.Hour}
+	a := newTestAgent(t, oldCfg)
+	stub := a.provider.(*stubProvider)
+	newCfg := &provider.Config{TTL: 2 * time.Hour}
+	stub.config = newCfg
+
+	if err := a.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload() error = %v, want nil", err)
+	}
+	if a.GetConfig() != newCfg {
+		t.Error("Reload() did not adopt the provider's refreshed config")
+	}
+}
+
+// TestReload_RefreshConfigFailurePropagates is the regression guard for
+// spawn#505: a failed tag refresh (e.g. a DescribeTags 403) must fail Reload
+// outright, not be logged as a warning and silently treated as success. A
+// caller (handleReload, and therefore `spawn extend`'s SSH-triggered reload)
+// must be able to tell "refreshed" from "still running on stale config" by
+// the return value alone.
+func TestReload_RefreshConfigFailurePropagates(t *testing.T) {
+	oldCfg := &provider.Config{TTL: time.Hour}
+	a := newTestAgent(t, oldCfg)
+	stub := a.provider.(*stubProvider)
+	stub.refreshConfigErr = errors.New("DescribeTags: 403 UnauthorizedOperation")
+	// Even though GetConfig would return a different config, Reload must fail
+	// before ever adopting it.
+	stub.config = &provider.Config{TTL: 2 * time.Hour}
+
+	err := a.Reload(context.Background())
+	if err == nil {
+		t.Fatal("Reload() error = nil, want an error when RefreshConfig fails")
+	}
+	if a.GetConfig() != oldCfg {
+		t.Error("Reload() adopted a new config despite a failed refresh — stale/poisoned config must not be swapped in on failure")
 	}
 }
 
