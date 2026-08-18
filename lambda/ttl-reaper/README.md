@@ -253,6 +253,7 @@ turns a rename into a build failure rather than a silently disarmed alarm.
 | `REAPER ACCOUNT UNREACHABLE` | `…-account-unreachable` | 1×24h | One account's role refuses us everywhere. Chronic, not acute — the rest of the fleet is fine. Fix the role or remove it from `ROLE_ARNS` |
 | `REAPER FSX UNREACHABLE` | `…-fsx-unreachable` | 1×24h | An account refuses every FSx call, so orphaned filesystems accrue cost unreclaimed. Usually its instance scan works fine — that combination is [#212] |
 | *(none — `AWS/Lambda` `Errors`)* | `…-invocation-errors` | 1×1h | The run died outright (panic, 900s timeout, OOM, bad deploy) and so emitted **none** of the sentinels above. Without this, the loudest failure would be the quietest signal |
+| *(none — `AWS/Lambda` `Invocations`)* | `…-not-invoked` | 1×30m, `TreatMissingData: breaching` | The reaper wasn't invoked **at all** — not "ran and failed," but never started (disabled EventBridge rule, deleted schedule, concurrency set to 0, or the function deleted). The four alarms above all use `TreatMissingData: notBreaching`, correctly, but that means "not running" produces zero breaching datapoints anywhere else in this table — this is the one alarm here where absence of data IS the failure ([#475]) |
 
 Deploy parameters: `ALARMS_ENABLED` (default **`true`** — unlike the other flags,
 which change what the reaper *does*; this only changes what it *reports*) and
@@ -311,5 +312,6 @@ nothing — by design, since a partial live set could orphan a healthy record.
 [#457]: https://github.com/spore-host/spawn/issues/457
 [#466]: https://github.com/spore-host/spawn/issues/466
 [#469]: https://github.com/spore-host/spawn/issues/469
+[#475]: https://github.com/spore-host/spawn/issues/475
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71
