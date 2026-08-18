@@ -3,6 +3,9 @@ package cmd
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/spore-host/spawn/pkg/aws"
 )
 
 // TestValidateTTL_ValidFormats validates correct TTL formats
@@ -247,5 +250,98 @@ func TestValidateTTL_PrefixSuffix(t *testing.T) {
 				t.Errorf("validateTTL(%q) returned nil, expected error due to extra characters", tt.ttl)
 			}
 		})
+	}
+}
+
+// TestComputeExtendedTTLTags_DeadlineAdvancesAndTTLTracksTotal is the
+// regression guard for spawn#506: after an extend, spawn:ttl must describe
+// the TOTAL duration from launch to the new deadline — not the raw extend
+// argument — so a repeated `extend <id> 8h` visibly reflects two real
+// extensions instead of looking unchanged.
+func TestComputeExtendedTTLTags_DeadlineAdvancesAndTTLTracksTotal(t *testing.T) {
+	now := time.Date(2026, 8, 18, 6, 0, 0, 0, time.UTC)
+	launch := now.Add(-1 * time.Hour) // instance has been up 1h
+	firstDeadline := launch.Add(8 * time.Hour)
+
+	instance := &aws.InstanceInfo{
+		LaunchTime: launch,
+		TTL:        "8h",
+		Tags:       map[string]string{"spawn:ttl-deadline": firstDeadline.UTC().Format(time.RFC3339)},
+	}
+
+	tags, newDeadline := computeExtendedTTLTags(instance, "8h", 8*time.Hour, now)
+
+	wantDeadline := firstDeadline.Add(8 * time.Hour)
+	if !newDeadline.Equal(wantDeadline) {
+		t.Errorf("newDeadline = %v, want %v", newDeadline, wantDeadline)
+	}
+	if got := tags["spawn:ttl-deadline"]; got != wantDeadline.UTC().Format(time.RFC3339) {
+		t.Errorf("spawn:ttl-deadline = %q, want %q", got, wantDeadline.UTC().Format(time.RFC3339))
+	}
+	// spawn:ttl must be the total from launch (1h elapsed + 8h original + 8h
+	// extend = 17h), NOT "8h" (the raw argument, spawn#506's bug).
+	wantTTL := wantDeadline.Sub(launch).Round(time.Second).String()
+	if got := tags["spawn:ttl"]; got != wantTTL {
+		t.Errorf("spawn:ttl = %q, want %q (total from launch)", got, wantTTL)
+	}
+
+	// Extending AGAIN by the same amount must move the deadline a second
+	// time, not appear as a no-op.
+	instance2 := &aws.InstanceInfo{
+		LaunchTime: launch,
+		TTL:        tags["spawn:ttl"],
+		Tags:       map[string]string{"spawn:ttl-deadline": tags["spawn:ttl-deadline"]},
+	}
+	tags2, newDeadline2 := computeExtendedTTLTags(instance2, "8h", 8*time.Hour, now)
+	if !newDeadline2.After(newDeadline) {
+		t.Errorf("second extend did not advance the deadline further: first=%v second=%v", newDeadline, newDeadline2)
+	}
+	if tags2["spawn:ttl"] == tags["spawn:ttl"] {
+		t.Error("second extend's spawn:ttl is identical to the first — a repeated extend must visibly change it")
+	}
+}
+
+// TestComputeExtendedTTLTags_FloorPreventsImmediateReap confirms a
+// past/expired deadline doesn't reap the instance the instant it's extended.
+func TestComputeExtendedTTLTags_FloorPreventsImmediateReap(t *testing.T) {
+	now := time.Date(2026, 8, 18, 6, 0, 0, 0, time.UTC)
+	launch := now.Add(-9 * time.Hour)
+	expiredDeadline := launch.Add(8 * time.Hour) // 1h in the past
+
+	instance := &aws.InstanceInfo{
+		LaunchTime: launch,
+		TTL:        "8h",
+		Tags:       map[string]string{"spawn:ttl-deadline": expiredDeadline.UTC().Format(time.RFC3339)},
+	}
+
+	_, newDeadline := computeExtendedTTLTags(instance, "30m", 30*time.Minute, now)
+
+	floor := now.Add(30 * time.Minute)
+	if newDeadline.Before(floor) {
+		t.Errorf("newDeadline = %v, want >= floor %v (must not reap immediately after extend)", newDeadline, floor)
+	}
+}
+
+// TestComputeExtendedTTLTags_NoDeadlineTagFallsBackToTTL covers an older
+// instance that predates the spawn:ttl-deadline tag.
+func TestComputeExtendedTTLTags_NoDeadlineTagFallsBackToTTL(t *testing.T) {
+	now := time.Date(2026, 8, 18, 6, 0, 0, 0, time.UTC)
+	launch := now.Add(-2 * time.Hour)
+
+	instance := &aws.InstanceInfo{
+		LaunchTime: launch,
+		TTL:        "8h",
+		Tags:       map[string]string{}, // no spawn:ttl-deadline
+	}
+
+	tags, newDeadline := computeExtendedTTLTags(instance, "4h", 4*time.Hour, now)
+
+	wantDeadline := now.Add(8 * time.Hour).Add(4 * time.Hour)
+	if !newDeadline.Equal(wantDeadline) {
+		t.Errorf("newDeadline = %v, want %v", newDeadline, wantDeadline)
+	}
+	wantTTL := wantDeadline.Sub(launch).Round(time.Second).String()
+	if got := tags["spawn:ttl"]; got != wantTTL {
+		t.Errorf("spawn:ttl = %q, want %q", got, wantTTL)
 	}
 }

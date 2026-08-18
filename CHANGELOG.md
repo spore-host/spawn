@@ -16,6 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config. `Reload` now returns the refresh error, which propagates through
   `spored reload`'s exit code and `spawn extend`'s SSH invocation, so the
   operator sees an actual failure instead of a false "reloaded" message.
+- **`spawn extend` overwrote `spawn:ttl` with the raw extend argument instead
+  of the instance's cumulative TTL** (#506). `spawn:ttl-deadline` (the
+  absolute timestamp spored and the out-of-band reaper actually enforce) was
+  always correctly advanced, but `spawn:ttl` — the tag every other reader
+  (spored's pre-deadline fallback, `spawn stop`/`hibernate`'s remaining-TTL
+  preservation) treats as "total duration from launch" — was rewritten to
+  the literal `<duration>` argument each time, so a repeated `extend <id> 8h`
+  looked unchanged even when the deadline had genuinely moved twice. Also
+  fixes the resulting consequence in `spawn stop`/`hibernate`: the
+  remaining-TTL calculation used `spawn:ttl` + `LaunchTime` directly, which
+  ignored any prior `extend` calls entirely — a stop/start cycle after an
+  extend could restore the wrong TTL. Both now derive from the authoritative
+  `spawn:ttl-deadline` tag. `spawn extend`'s own output now shows "Extended
+  by" (the argument) separately from "New TTL" (the resulting total) and the
+  resolved deadline, instead of a single ambiguous "New TTL" line.
 
 ## [0.100.1] - 2026-08-17
 
