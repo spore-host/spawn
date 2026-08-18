@@ -3,12 +3,76 @@ package aws
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/spore-host/spawn/pkg/testutil"
 )
+
+// TestCreateOrGetInstanceProfile_PolicyFileGetsSporedBaseline is the
+// regression guard for spawn#502: a role created via IAMRoleConfig.PolicyFile
+// (the path reachable from `spawn launch --iam-policy-file`) must still carry
+// the spored-baseline-policy grants. Before the fix, this was the one of
+// three policy-source branches in createIAMRole that never attached it —
+// spored could not read its own tags, so TTL/on-complete/pre-stop silently
+// never fired for hours on a real fleet.
+func TestCreateOrGetInstanceProfile_PolicyFileGetsSporedBaseline(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	c := NewClientFromConfig(env.AWSConfig)
+
+	f, err := os.CreateTemp(t.TempDir(), "policy-*.json")
+	if err != nil {
+		t.Fatalf("create temp policy file: %v", err)
+	}
+	if _, err := f.WriteString(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject"],"Resource":"arn:aws:s3:::some-bucket/prefix/*"}]}`); err != nil {
+		t.Fatalf("write temp policy file: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close temp policy file: %v", err)
+	}
+
+	cfg := IAMRoleConfig{
+		RoleName:      "spawn-502-policyfile-test",
+		TrustServices: []string{"ec2.amazonaws.com"},
+		PolicyFile:    f.Name(),
+	}
+	if _, err := c.CreateOrGetInstanceProfile(context.Background(), cfg); err != nil {
+		t.Fatalf("CreateOrGetInstanceProfile error: %v", err)
+	}
+
+	iamClient := iam.NewFromConfig(env.AWSConfig)
+	roleName := "spawn-502-policyfile-test"
+	out, err := iamClient.GetRolePolicy(context.Background(), &iam.GetRolePolicyInput{
+		RoleName:   &roleName,
+		PolicyName: strPtr("spored-baseline-policy"),
+	})
+	if err != nil {
+		t.Fatalf("role %q missing spored-baseline-policy entirely (spawn#502 regression): %v", roleName, err)
+	}
+	for _, want := range []string{"ec2:DescribeTags", "ec2:TerminateInstances"} {
+		if !strings.Contains(*out.PolicyDocument, want) {
+			t.Errorf("spored-baseline-policy on a PolicyFile-created role missing %q:\n%s", want, *out.PolicyDocument)
+		}
+	}
+
+	// The caller's own custom policy must still be attached unchanged.
+	custom, err := iamClient.GetRolePolicy(context.Background(), &iam.GetRolePolicyInput{
+		RoleName:   &roleName,
+		PolicyName: strPtr("spawn-custom-policy"),
+	})
+	if err != nil {
+		t.Fatalf("role %q missing spawn-custom-policy: %v", roleName, err)
+	}
+	if !strings.Contains(*custom.PolicyDocument, "s3:PutObject") {
+		t.Errorf("spawn-custom-policy missing the caller's own statement:\n%s", *custom.PolicyDocument)
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 // TestCreateOrGetInstanceProfile_Concurrent verifies that many concurrent
 // launches ensuring the SAME shared role/profile all succeed, rather than

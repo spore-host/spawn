@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **CRITICAL: `spawn launch --iam-policy-file` omitted the spored self-management
+  baseline policy, silently disabling TTL, `--on-complete`, and `--pre-stop` for
+  every instance launched that way** (#502). Of the three ways to attach a
+  caller policy to an instance role, two (`--iam-policies` shorthand templates,
+  and the internal `InlinePolicyJSON` path used by `spawn task`/`spawn pool`)
+  included the grants spored needs to read its own tags — the third
+  (`--iam-policy-file`, reachable only from `spawn launch`) did not. Without
+  `ec2:DescribeTags`, spored logged a `403` as a Warning and fell back to
+  `TTL=0s, IdleTimeout=0s`, so a lifetime that was correctly written to
+  instance tags was never read back and never enforced — observed in
+  production as a fleet running 4h43m past its 8h TTL with zero lifecycle
+  controls active. The spored-baseline-policy grants are now attached
+  unconditionally to every instance role `CreateOrGetInstanceProfile`
+  returns — new or cached, and regardless of which policy source(s) the
+  caller used — instead of per-branch inside `createIAMRole`, so a future
+  policy source can't reopen this gap the way `PolicyFile` did.
+
 ## [0.100.0] - 2026-08-11
 
 ### Added
