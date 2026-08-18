@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spored reload` (and therefore `spawn extend`'s on-instance reload) reported
+  success even when the config refresh itself failed** (#505). `Agent.Reload`
+  logged a failed `ec2:DescribeTags` call as a warning and continued, so a
+  daemon that could not read its own tags still printed "✓ Configuration
+  reloaded successfully" and kept running on stale (possibly zero-value)
+  config. `Reload` now returns the refresh error, which propagates through
+  `spored reload`'s exit code and `spawn extend`'s SSH invocation, so the
+  operator sees an actual failure instead of a false "reloaded" message.
+
 ## [0.100.1] - 2026-08-17
 
 ### Fixed
