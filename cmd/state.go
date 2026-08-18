@@ -150,22 +150,17 @@ func stopOrHibernate(identifier string, hibernate bool, skipConfirm bool) error 
 
 	fmt.Fprintf(os.Stderr, "Requesting %s for instance %s...\n", action, instance.InstanceID)
 
-	// Calculate remaining TTL if set
+	// Calculate remaining TTL if set, from the authoritative spawn:ttl-deadline
+	// tag when present (falling back to LaunchTime+TTL for older instances
+	// without it) — NOT from instance.TTL + LaunchTime directly, which ignores
+	// any `spawn extend` calls made since launch (spawn#506).
 	remainingTTL := ""
-	if instance.TTL != "" {
-		// Parse the TTL duration
-		ttlDuration, err := parseDuration(instance.TTL)
-		if err == nil {
-			// Calculate how long the instance has been running
-			uptime := time.Since(instance.LaunchTime)
-			remaining := ttlDuration - uptime
-
-			if remaining > 0 {
-				// Store remaining time so it can be restored on start
-				remainingTTL = formatDuration(remaining)
-				fmt.Fprintf(os.Stderr, "Saving remaining TTL: %s (was: %s, uptime: %s)\n",
-					remainingTTL, instance.TTL, uptime.Round(time.Minute))
-			}
+	if deadline, ok := lifecycleDeadline(instance); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			remainingTTL = formatDuration(remaining)
+			fmt.Fprintf(os.Stderr, "Saving remaining TTL: %s (deadline: %s)\n",
+				remainingTTL, deadline.UTC().Format("2006-01-02 15:04 UTC"))
 		}
 	}
 
@@ -280,16 +275,12 @@ func stopOrHibernateJobArray(ctx context.Context, hibernate bool) error {
 			continue
 		}
 
-		// Calculate remaining TTL if set
+		// Calculate remaining TTL if set (spawn:ttl-deadline-authoritative;
+		// see the single-instance path's comment for why — spawn#506).
 		remainingTTL := ""
-		if inst.TTL != "" {
-			ttlDuration, err := parseDuration(inst.TTL)
-			if err == nil {
-				uptime := time.Since(inst.LaunchTime)
-				remaining := ttlDuration - uptime
-				if remaining > 0 {
-					remainingTTL = formatDuration(remaining)
-				}
+		if deadline, ok := lifecycleDeadline(&inst); ok {
+			if remaining := time.Until(deadline); remaining > 0 {
+				remainingTTL = formatDuration(remaining)
 			}
 		}
 

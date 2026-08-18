@@ -106,30 +106,7 @@ func runExtend(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid TTL duration %q: %w", newTTL, err)
 	}
 
-	tags := map[string]string{"spawn:ttl": newTTL}
-
-	// Push the absolute deadline forward, keeping it anchored to the original launch time.
-	var newDeadline time.Time
-	if dl, ok := instance.Tags["spawn:ttl-deadline"]; ok {
-		if parsed, err := time.Parse(time.RFC3339, dl); err == nil {
-			newDeadline = parsed.Add(extendDuration)
-		}
-	}
-	if newDeadline.IsZero() {
-		// Older instance without deadline tag — best-effort from current TTL
-		if cur, err := time.ParseDuration(instance.TTL); err == nil {
-			newDeadline = time.Now().Add(cur).Add(extendDuration)
-		} else {
-			newDeadline = time.Now().Add(extendDuration)
-		}
-	}
-	// Safety floor: never set a deadline earlier than the requested duration from
-	// now. A past/expired existing spawn:ttl-deadline (or a stale launch anchor)
-	// must not reap the instance the moment the user asks to extend it.
-	if floor := time.Now().Add(extendDuration); newDeadline.Before(floor) {
-		newDeadline = floor
-	}
-	tags["spawn:ttl-deadline"] = newDeadline.UTC().Format(time.RFC3339)
+	tags, newDeadline := computeExtendedTTLTags(instance, newTTL, extendDuration, time.Now())
 
 	fmt.Fprintf(os.Stderr, "Extending TTL deadline to %s...\n", newDeadline.UTC().Format("2006-01-02 15:04 UTC"))
 	err = client.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, tags)
@@ -141,9 +118,10 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	auditLog.LogOperationWithRegion("extend_ttl", instance.InstanceID, instance.Region, "success", nil)
 
 	_, _ = fmt.Fprintf(os.Stdout, "\n✅ TTL extended successfully!\n")
-	_, _ = fmt.Fprintf(os.Stdout, "   Instance: %s\n", instance.InstanceID)
-	_, _ = fmt.Fprintf(os.Stdout, "   Old TTL:  %s\n", instance.TTL)
-	_, _ = fmt.Fprintf(os.Stdout, "   New TTL:  %s\n", newTTL)
+	_, _ = fmt.Fprintf(os.Stdout, "   Instance:     %s\n", instance.InstanceID)
+	_, _ = fmt.Fprintf(os.Stdout, "   Extended by:  %s\n", newTTL)
+	_, _ = fmt.Fprintf(os.Stdout, "   New TTL:      %s (total from launch)\n", tags["spawn:ttl"])
+	_, _ = fmt.Fprintf(os.Stdout, "   New deadline: %s\n", newDeadline.UTC().Format("2006-01-02 15:04 UTC"))
 
 	// Trigger reload on instance
 	fmt.Fprintf(os.Stderr, "\nTriggering configuration reload on instance...\n")
@@ -254,6 +232,54 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 	}
 
 	return nil
+}
+
+// computeExtendedTTLTags computes the tag set `spawn extend` writes, given
+// the instance's current tags, the requested extend duration string, its
+// parsed duration, and the current time (injected so this is testable
+// without a real clock). Returns the tags and the resolved new deadline.
+//
+// spawn:ttl-deadline is pushed forward from the existing deadline (or, for an
+// older instance without one, from LaunchTime + the current spawn:ttl), with
+// a floor of now+extendDuration so a stale/expired deadline can't reap the
+// instance the moment it's extended.
+//
+// spawn:ttl is recomputed as the new deadline minus LaunchTime — the total
+// duration from launch, matching what every other reader of this tag
+// (spored's pre-deadline fallback, spawn stop/hibernate's remaining-TTL
+// preservation) expects it to mean. Writing the raw extend argument here
+// instead (spawn#506) meant the tag stopped describing the instance's TTL at
+// all after the first extend call — a repeated `extend <id> 8h` looked
+// unchanged even though the deadline had genuinely moved twice.
+func computeExtendedTTLTags(instance *aws.InstanceInfo, newTTL string, extendDuration time.Duration, now time.Time) (map[string]string, time.Time) {
+	tags := map[string]string{}
+
+	var newDeadline time.Time
+	if dl, ok := instance.Tags["spawn:ttl-deadline"]; ok {
+		if parsed, err := time.Parse(time.RFC3339, dl); err == nil {
+			newDeadline = parsed.Add(extendDuration)
+		}
+	}
+	if newDeadline.IsZero() {
+		// Older instance without deadline tag — best-effort from current TTL
+		if cur, err := time.ParseDuration(instance.TTL); err == nil {
+			newDeadline = now.Add(cur).Add(extendDuration)
+		} else {
+			newDeadline = now.Add(extendDuration)
+		}
+	}
+	if floor := now.Add(extendDuration); newDeadline.Before(floor) {
+		newDeadline = floor
+	}
+	tags["spawn:ttl-deadline"] = newDeadline.UTC().Format(time.RFC3339)
+
+	if !instance.LaunchTime.IsZero() {
+		tags["spawn:ttl"] = newDeadline.Sub(instance.LaunchTime).Round(time.Second).String()
+	} else {
+		tags["spawn:ttl"] = newTTL
+	}
+
+	return tags, newDeadline
 }
 
 func validateTTL(ttl string) error {

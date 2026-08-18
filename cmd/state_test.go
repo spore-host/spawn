@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/testutil"
 )
 
@@ -414,4 +415,32 @@ func validateJobArrayInput(jobArrayID, jobArrayName string) error {
 		return fmt.Errorf("must specify either job array ID or name")
 	}
 	return nil
+}
+
+// TestLifecycleDeadline_ReflectsExtendNotJustLaunchPlusTTL is the regression
+// guard for spawn#506's second half: stop/hibernate's remaining-TTL
+// preservation must derive from spawn:ttl-deadline (authoritative, updated by
+// `spawn extend`), not from instance.TTL + LaunchTime directly — the latter
+// ignores any extend calls made since launch and would restore the wrong TTL
+// on a subsequent `spawn start`.
+func TestLifecycleDeadline_ReflectsExtendNotJustLaunchPlusTTL(t *testing.T) {
+	launch := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	// Launched with --ttl 8h, then extended once by 8h: deadline is now
+	// launch+16h, but instance.TTL (if read naively) still says "8h".
+	extendedDeadline := launch.Add(16 * time.Hour)
+
+	instance := &aws.InstanceInfo{
+		LaunchTime: launch,
+		TTL:        "8h",
+		Tags:       map[string]string{"spawn:ttl-deadline": extendedDeadline.UTC().Format(time.RFC3339)},
+	}
+
+	deadline, ok := lifecycleDeadline(instance)
+	if !ok {
+		t.Fatal("lifecycleDeadline() ok = false, want true")
+	}
+	if !deadline.Equal(extendedDeadline) {
+		t.Errorf("lifecycleDeadline() = %v, want %v (the extended deadline, not launch+TTL=%v)",
+			deadline, extendedDeadline, launch.Add(8*time.Hour))
+	}
 }
