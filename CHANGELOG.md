@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.100.1] - 2026-08-17
+
 ### Fixed
 - **CRITICAL: `spawn launch --iam-policy-file` omitted the spored self-management
   baseline policy, silently disabling TTL, `--on-complete`, and `--pre-stop` for
@@ -2740,7 +2742,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.100.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.100.1...HEAD
+[0.100.1]: https://github.com/spore-host/spawn/compare/v0.100.0...v0.100.1
 [0.100.0]: https://github.com/spore-host/spawn/compare/v0.99.0...v0.100.0
 [0.99.0]: https://github.com/spore-host/spawn/compare/v0.98.0...v0.99.0
 [0.98.0]: https://github.com/spore-host/spawn/compare/v0.97.0...v0.98.0
