@@ -466,6 +466,54 @@ Resources:
       AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
       OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
 
+  # The four alarms above all use TreatMissingData: notBreaching, correctly —
+  # no sentinel datapoint genuinely is good news. But that means a reaper that
+  # never runs at all (EventBridge rule disabled, schedule deleted or target
+  # detached, reserved concurrency set to 0, or the function deleted outright)
+  # produces ZERO breaching datapoints across every alarm above, so all four
+  # sit contentedly in OK while nothing is being enforced. InvocationErrors
+  # doesn't cover it either: AWS/Lambda Errors requires an invocation to
+  # produce a datapoint at all — no invocation, no error, no alarm.
+  #
+  # This is the one alarm in this template where TreatMissingData: breaching
+  # is correct, precisely because it inverts every other alarm's logic here:
+  # for this alarm alone, absence of data IS the failure being detected.
+  # Period is 1800s (~3 missed ticks at the default rate(10 minutes)) so a
+  # single skipped invocation doesn't page, but the reaper going fully silent
+  # is caught within the hour rather than passing unnoticed indefinitely.
+  NotInvokedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ObservabilityEnabled
+    Properties:
+      AlarmName: !Sub spawn-ttl-reaper-${Environment}-not-invoked
+      AlarmDescription: >
+        The TTL reaper has not been invoked AT ALL in the last ~30 minutes —
+        not "ran and failed" (that's …-invocation-errors), but never started.
+        Every other alarm in this stack requires an invocation to produce a
+        datapoint, so this is the last unmonitored link in the chain:
+        "something is running the reaper."
+
+        Causes: the EventBridge schedule rule was disabled (manually, or by a
+        failed deploy), the schedule was deleted or its target detached,
+        reserved concurrency was set to 0, or the function itself was deleted.
+        Check the EventBridge rule's State and the function's
+        ReservedConcurrentExecutions first.
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TTLReaperFunction
+      Statistic: Sum
+      Period: 1800
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      # The inversion is the entire point of this alarm: no invocations means
+      # the reaper isn't running, which is the failure — not a quiet period.
+      TreatMissingData: breaching
+      AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+
 Outputs:
   FunctionArn:
     Description: ARN of the TTL reaper Lambda function

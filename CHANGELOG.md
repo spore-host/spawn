@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns — new or cached, and regardless of which policy source(s) the
   caller used — instead of per-branch inside `createIAMRole`, so a future
   policy source can't reopen this gap the way `PolicyFile` did.
+- **ttl-reaper: added an alarm for the reaper not running at all** (#475). The
+  four alarms added in #469 all correctly use `TreatMissingData: notBreaching`
+  (no sentinel datapoint genuinely is good news), but that means a reaper that
+  is never invoked — a disabled EventBridge rule, a deleted schedule, reserved
+  concurrency set to 0, or the function deleted outright — produces zero
+  breaching datapoints across all four, so nothing pages while nothing is
+  being enforced. The existing `…-invocation-errors` alarm doesn't cover it
+  either: `AWS/Lambda` `Errors` requires an invocation to produce a datapoint
+  at all. New `…-not-invoked` alarm on `AWS/Lambda` `Invocations`, the one
+  alarm in this stack that intentionally uses `TreatMissingData: breaching`,
+  since absence of data is exactly the failure it detects.
 
 ## [0.100.0] - 2026-08-11
 
