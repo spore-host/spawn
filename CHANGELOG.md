@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn extend --job-array-id`/`--job-array-name` discarded the per-instance
+  reload error** (#512). The single-instance `spawn extend` path already warns
+  and prints a manual `ssh ... sudo spored reload` fallback when the
+  on-instance reload trigger fails after a successful tag write; the
+  job-array path called `triggerReload` the same way but threw the error away
+  with `_ = triggerReload(&inst)`. A caller extending N instances at once had
+  no way to tell which ones actually picked up the new TTL on-instance vs.
+  which are silently running on stale config until the next periodic tag
+  refresh (every 5 minutes in production). The job-array path now tracks and
+  reports reload failures per instance (with the same manual-fallback
+  message), and the summary output shows a `Reloaded:` count when any
+  instance's reload failed even though its tag write succeeded.
+
 ## [0.100.2] - 2026-08-18
 
 ### Fixed
