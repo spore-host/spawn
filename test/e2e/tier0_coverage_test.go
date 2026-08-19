@@ -30,7 +30,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"defaults":  "tier0_statecmds_test.go",
 		"team":      "tier0_statecmds_test.go",
 		"sweep":     "tier0_sweeps_test.go (list-sweeps query path)",
-		"status":    "output matrix (negative) + Tier 2 for SSH path",
+		"status":    "output matrix (negative) + tier0_status_json_test.go (JSON/table via keyless SSM path, #540) + Tier 2 for SSH path",
 		"version":   "output matrix / smoke",
 		"schedule":  "tier0_statecmds2_test.go (list query path; create/cancel need EventBridge → Tier 3)",
 		"alerts":    "tier0_statecmds2_test.go (create→list→delete round-trip)",
