@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A param-file key that looked like a spawn setting silently became a
+  `PARAM_*` env var and did nothing** (#526). Every unrecognised key fell through
+  to the passthrough arm, which is correct for a workload parameter and disastrous
+  for a misspelled setting: `ttl_hours: 4`, `on-complete: terminate`, `budget: 50`
+  and `max_concurrent: 3` all launched normally and bounded nothing. The first two
+  leave a running instance, which is the version of this bug that costs money.
+
+  Passthrough is unchanged for real parameters. A key is now rejected before
+  anything is launched or priced when it is (a) not a valid shell identifier — the
+  bootstrap writes each parameter into `/etc/profile.d` as
+  `export PARAM_<key>="<value>"`, so `PARAM_on-complete` is a line the shell
+  refuses, (b) a recognised key written with hyphens or in the wrong case, or (c)
+  on a curated list of CLI-only flags and near-misses, each carrying the correct
+  spelling in the error. All offending keys are reported at once rather than one
+  per run, and the `PARAM_*` variables a sweep *will* set are now listed in the
+  sweep header so an unintended passthrough has somewhere to be noticed.
+
+  Because a reserved name would otherwise be a dead end for anyone whose workload
+  genuinely has a parameter called `budget` or `time_limit`, an explicit
+  `param:<name>:` prefix passes any name straight through as `PARAM_<name>`.
+  Ambiguous English words are deliberately absent from the list — `timeout` is
+  documented step vocabulary (`examples/workflow-ci-pipeline.yaml`), and `image`,
+  `type`, `count`, `steps`, `instance` and `runtime` are all plausible sweep
+  parameters. The same check runs at the config-merge seam too, so `spawn resume`
+  cannot rebuild an instance from a file the launch path would have refused.
 - **A parameter sweep silently discarded `--ttl`, `--idle-timeout` and
   `--cost-limit`, then logged `Using safeguards: ttl=...`** (#525).
   `buildLaunchConfigFromParams` starts from an empty config and the sweep
