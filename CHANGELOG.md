@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.100.3] - 2026-08-18
+
 ### Fixed
 - **`spawn extend --job-array-id`/`--job-array-name` discarded the per-instance
   reload error** (#512). The single-instance `spawn extend` path already warns
@@ -2876,7 +2878,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.100.2...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.100.3...HEAD
+[0.100.3]: https://github.com/spore-host/spawn/compare/v0.100.2...v0.100.3
 [0.100.2]: https://github.com/spore-host/spawn/compare/v0.100.1...v0.100.2
 [0.100.1]: https://github.com/spore-host/spawn/compare/v0.100.0...v0.100.1
 [0.100.0]: https://github.com/spore-host/spawn/compare/v0.99.0...v0.100.0
