@@ -30,6 +30,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrong case like `ALL` — is now a hard error naming the valid states, instead
   of silently degrading to an empty result.
 
+- **A param-file key written one level too high — outside `defaults:`/`grid:`/`params:`
+  — vanished with no trace at all, not even a `PARAM_*` env var** (#530).
+  `pkg/params.ParamFileFormat` has exactly three fields, and both the JSON and
+  YAML parsers unmarshalled straight into it with no check for anything else,
+  so a top-level `ttl:`, `idle_timeout:`, or `cost_limit:` — an easy mistake,
+  and the same shape one level up from the row-level keys #526 already fixed
+  — silently produced an unbounded instance. Two of spawn's own shipped
+  examples had this exact bug: `examples/simple-params.yaml` put
+  `region:`/`instance_type:`/`ami:` at the top level, and
+  `examples/schedule-params.yaml` put `sweep_name:`/`max_concurrent:`/
+  `launch_delay:`/`instance_type:`/`ami:`/`disk_size:` there, none of which
+  `cmd/schedule.go` reads from anywhere but `defaults:`. Both are fixed in
+  this change.
+
+  A top-level key that IS a recognized spawn setting (reusing #526's
+  key registry) is now a hard error before anything is launched or priced,
+  naming the key and telling the user to move it under `defaults:`. Anything
+  else unrecognized — `description:`, `version:`, and other harmless
+  metadata — is a warning, not an error, printed to stderr so it has
+  somewhere to be noticed without breaking files that already carry it. The
+  check runs on both `spawn launch --param-file` (including `spawn resume`,
+  which reloads the file independently) and `spawn schedule create`, which
+  parses parameter files with its own separate, unrelated code path.
+
 ## [0.100.4] - 2026-08-19
 
 ### Fixed

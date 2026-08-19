@@ -102,6 +102,15 @@ func runResume(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to reload parameter file %q: %w", state.ParamFile, err)
 	}
 
+	// Same top-level-key check launchParameterSweep runs (#530). The original
+	// launch would already have refused a file with a dangerous top-level key,
+	// but the file on disk can change between launch and resume, and resume
+	// reloads it fresh rather than trusting the saved state.
+	if err := validateTopLevelParamKeys(state.ParamFile, paramFormat.UnknownTopLevelKeys); err != nil {
+		fmt.Fprintf(os.Stderr, "\n❌ ERROR: %v\n\n", err)
+		return fmt.Errorf("unusable param-file keys")
+	}
+
 	// Validate parameter count matches
 	if len(paramFormat.Params) != state.TotalParams {
 		return fmt.Errorf("parameter count mismatch: state file has %d params but parameter file has %d",

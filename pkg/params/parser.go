@@ -24,6 +24,34 @@ type ParamFileFormat struct {
 	// combinations (and thus sweep indexes) are deterministic across runs.
 	Grid   map[string][]interface{} `json:"grid" yaml:"grid"`
 	Params []map[string]interface{} `json:"params" yaml:"params"`
+
+	// UnknownTopLevelKeys lists every top-level key in the source file that is
+	// none of defaults/grid/params, sorted. It exists because ParamFileFormat
+	// has exactly three fields and both json.Unmarshal and yaml.Unmarshal
+	// silently drop anything else — a `ttl: 2h` written one level too high
+	// (outside defaults:) used to vanish with no trace at all, not even a
+	// PARAM_* env var (#530). Populated by parseJSON/parseYAML from a generic
+	// decode pass; left nil by parseCSV, which has no top-level-key concept.
+	// A caller with access to the recognized-key registry (cmd/sweep_keys.go)
+	// decides which of these are dangerous settings versus harmless metadata —
+	// this package only reports what survived unread.
+	UnknownTopLevelKeys []string `json:"-" yaml:"-"`
+}
+
+// knownTopLevelKeys are the only keys ParamFileFormat's JSON/YAML tags read.
+var knownTopLevelKeys = map[string]bool{"defaults": true, "grid": true, "params": true}
+
+// unrecognizedTopLevelKeys returns the keys of raw that are not defaults,
+// grid, or params, sorted for deterministic error/warning messages.
+func unrecognizedTopLevelKeys(raw map[string]interface{}) []string {
+	var out []string
+	for k := range raw {
+		if !knownTopLevelKeys[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ParseParamFile reads and parses a parameter file (JSON, YAML, or CSV)
@@ -56,6 +84,17 @@ func parseJSON(path string) (*ParamFileFormat, error) {
 		return nil, fmt.Errorf("failed to parse JSON parameter file: %w", err)
 	}
 
+	// A second, generic decode to see every top-level key the strict struct
+	// above discarded (#530). Decoding twice rather than switching the struct
+	// decode itself to DisallowUnknownFields, because unknown keys here are not
+	// automatically an error — most are harmless metadata (description:,
+	// version:) and only some are dangerous (ttl: at the wrong level); the
+	// caller in cmd/sweep_keys.go is what tells those apart.
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err == nil {
+		format.UnknownTopLevelKeys = unrecognizedTopLevelKeys(raw)
+	}
+
 	if err := format.finalize(); err != nil {
 		return nil, err
 	}
@@ -72,6 +111,14 @@ func parseYAML(path string) (*ParamFileFormat, error) {
 	var format ParamFileFormat
 	if err := yaml.Unmarshal(data, &format); err != nil {
 		return nil, fmt.Errorf("failed to parse YAML parameter file: %w", err)
+	}
+
+	// See the matching comment in parseJSON: a second, generic decode surfaces
+	// every top-level key the strict struct decode above silently dropped
+	// (#530).
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err == nil {
+		format.UnknownTopLevelKeys = unrecognizedTopLevelKeys(raw)
 	}
 
 	if err := format.finalize(); err != nil {

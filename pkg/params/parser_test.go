@@ -3,6 +3,7 @@ package params
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -351,6 +352,108 @@ grid:
 	}
 	if result.Params[0]["seed"] != 1 {
 		t.Errorf("explicit param set should come first, got %v", result.Params[0])
+	}
+}
+
+// TestParseYAML_UnknownTopLevelKeys and TestParseJSON_UnknownTopLevelKeys pin
+// #530: a top-level key that is none of defaults/grid/params must be reported
+// via UnknownTopLevelKeys rather than silently dropped by yaml.Unmarshal /
+// json.Unmarshal, which only populate ParamFileFormat's three tagged fields.
+func TestParseYAML_UnknownTopLevelKeys(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "toplevel.yaml")
+	content := `
+ttl: 2h
+description: nightly run
+defaults:
+  region: us-east-1
+params:
+  - instance_type: c5.large
+`
+	if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ParseParamFile(f)
+	if err != nil {
+		t.Fatalf("ParseParamFile: %v", err)
+	}
+	want := []string{"description", "ttl"}
+	if strings.Join(result.UnknownTopLevelKeys, ",") != strings.Join(want, ",") {
+		t.Errorf("UnknownTopLevelKeys = %v, want %v", result.UnknownTopLevelKeys, want)
+	}
+	// The dropped key must not have leaked into Defaults either — it really is
+	// invisible to everything except UnknownTopLevelKeys.
+	if _, ok := result.Defaults["ttl"]; ok {
+		t.Errorf("ttl leaked into Defaults: %v", result.Defaults)
+	}
+}
+
+func TestParseJSON_UnknownTopLevelKeys(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "toplevel.json")
+	content := `{
+  "ttl": "2h",
+  "description": "nightly run",
+  "defaults": {"region": "us-east-1"},
+  "params": [{"instance_type": "c5.large"}]
+}`
+	if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ParseParamFile(f)
+	if err != nil {
+		t.Fatalf("ParseParamFile: %v", err)
+	}
+	want := []string{"description", "ttl"}
+	if strings.Join(result.UnknownTopLevelKeys, ",") != strings.Join(want, ",") {
+		t.Errorf("UnknownTopLevelKeys = %v, want %v", result.UnknownTopLevelKeys, want)
+	}
+}
+
+// TestParseYAML_NoUnknownTopLevelKeys is the must-not-regress half: a clean
+// file (only defaults/grid/params) reports zero unknown top-level keys.
+func TestParseYAML_NoUnknownTopLevelKeys(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "clean.yaml")
+	content := `
+defaults:
+  region: us-east-1
+  ttl: 1h
+params:
+  - instance_type: c5.large
+`
+	if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ParseParamFile(f)
+	if err != nil {
+		t.Fatalf("ParseParamFile: %v", err)
+	}
+	if len(result.UnknownTopLevelKeys) != 0 {
+		t.Errorf("UnknownTopLevelKeys = %v, want none", result.UnknownTopLevelKeys)
+	}
+}
+
+// TestParseYAML_GridIsNotUnknown: grid: itself must not be reported as an
+// unknown top-level key just because it is not defaults:/params:.
+func TestParseYAML_GridIsNotUnknown(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "grid.yaml")
+	content := `
+defaults:
+  instance_type: g5.xlarge
+grid:
+  lr: [0.1, 0.2]
+`
+	if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ParseParamFile(f)
+	if err != nil {
+		t.Fatalf("ParseParamFile: %v", err)
+	}
+	if len(result.UnknownTopLevelKeys) != 0 {
+		t.Errorf("UnknownTopLevelKeys = %v, want none (grid: is a known key)", result.UnknownTopLevelKeys)
 	}
 }
 

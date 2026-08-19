@@ -340,6 +340,110 @@ func TestReservedKeyErrorNamesTheEscapeHatch(t *testing.T) {
 	}
 }
 
+// TestClassifyTopLevelKeyErrorsOnDangerousKeys covers #530: a top-level key
+// that IS a recognized row-level setting must be a hard error, because
+// silently ignoring ttl:/idle_timeout:/cost_limit: at this level produces an
+// unbounded instance with no warning at all — the same failure #526 fixed one
+// level down, one level up.
+func TestClassifyTopLevelKeyErrorsOnDangerousKeys(t *testing.T) {
+	tests := []struct {
+		key      string
+		wantHint string
+	}{
+		{"ttl", "defaults:"},
+		{"idle_timeout", "defaults:"},
+		{"cost_limit", "defaults:"},
+		{"instance_type", "defaults:"},
+		{"on_complete", "defaults:"},
+		// A recognized key misspelled at the top level: still an error, and the
+		// message should still carry the correct spelling.
+		{"TTL", "ttl"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			isError, msg := classifyTopLevelKey(tc.key)
+			if !isError {
+				t.Fatalf("classifyTopLevelKey(%q) = warning, want error: %s", tc.key, msg)
+			}
+			if !strings.Contains(msg, tc.wantHint) {
+				t.Errorf("classifyTopLevelKey(%q) message %q does not contain %q", tc.key, msg, tc.wantHint)
+			}
+		})
+	}
+}
+
+// TestClassifyTopLevelKeyErrorsOnReservedKeys: the reserved-name table (CLI-only
+// flags and near-misses) must also be a hard error at the top level — this is
+// exactly the mistake examples/schedule-params.yaml shipped with
+// (sweep_name:/max_concurrent:/launch_delay: at the top level, read by nothing).
+func TestClassifyTopLevelKeyErrorsOnReservedKeys(t *testing.T) {
+	for _, key := range []string{"sweep_name", "max_concurrent", "launch_delay", "ttl_hours", "budget"} {
+		t.Run(key, func(t *testing.T) {
+			isError, msg := classifyTopLevelKey(key)
+			if !isError {
+				t.Fatalf("classifyTopLevelKey(%q) = warning, want error: %s", key, msg)
+			}
+			if !strings.Contains(msg, key) {
+				t.Errorf("classifyTopLevelKey(%q) message does not name the key: %s", key, msg)
+			}
+		})
+	}
+}
+
+// TestClassifyTopLevelKeyWarnsOnHarmlessKeys: anything that is neither a
+// recognized row-level key nor on the reserved list is a warning, not an
+// error — most top-level clutter (description:, version:, author:) is
+// harmless metadata, and hard-failing on it would break files that already
+// carry it.
+func TestClassifyTopLevelKeyWarnsOnHarmlessKeys(t *testing.T) {
+	for _, key := range []string{"description", "version", "author", "notes"} {
+		t.Run(key, func(t *testing.T) {
+			isError, msg := classifyTopLevelKey(key)
+			if isError {
+				t.Errorf("classifyTopLevelKey(%q) = error, want warning: %s", key, msg)
+			}
+			if !strings.Contains(msg, key) {
+				t.Errorf("classifyTopLevelKey(%q) message does not name the key: %s", key, msg)
+			}
+		})
+	}
+}
+
+// TestValidateTopLevelParamKeysErrors: a dangerous top-level key fails
+// validateTopLevelParamKeys with a message naming both the key and the file.
+func TestValidateTopLevelParamKeysErrors(t *testing.T) {
+	err := validateTopLevelParamKeys("sweep.yaml", []string{"ttl", "description"})
+	if err == nil {
+		t.Fatal("validateTopLevelParamKeys accepted a file with a top-level ttl:")
+	}
+	for _, want := range []string{"ttl", "sweep.yaml"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q:\n%v", want, err)
+		}
+	}
+	// The harmless key must not have been escalated into the error too.
+	if strings.Contains(err.Error(), "description") {
+		t.Errorf("error names the harmless key, which should only warn:\n%v", err)
+	}
+}
+
+// TestValidateTopLevelParamKeysWarnOnlyPasses: a file with only harmless
+// unknown top-level keys must not fail validation — the check is a warning
+// for these, not a hard stop.
+func TestValidateTopLevelParamKeysWarnOnlyPasses(t *testing.T) {
+	if err := validateTopLevelParamKeys("sweep.yaml", []string{"description", "version"}); err != nil {
+		t.Errorf("validateTopLevelParamKeys rejected a file with only harmless top-level keys: %v", err)
+	}
+}
+
+// TestValidateTopLevelParamKeysAcceptsCleanFile: no unknown top-level keys at
+// all must not fail or warn.
+func TestValidateTopLevelParamKeysAcceptsCleanFile(t *testing.T) {
+	if err := validateTopLevelParamKeys("sweep.yaml", nil); err != nil {
+		t.Errorf("validateTopLevelParamKeys rejected a file with no unknown top-level keys: %v", err)
+	}
+}
+
 // TestExplicitParamPrefixReachesParameters is the end-to-end of the escape hatch
 // through the real merge function: prefix stripped, value intact, and no spawn
 // setting touched by a key that merely looked like one.

@@ -274,6 +274,86 @@ func validateSweepParamKeys(paramFormat *ParamFileFormat) error {
 	return fmt.Errorf("%s", b.String())
 }
 
+// classifyTopLevelKey reports how an unrecognized TOP-LEVEL param-file key —
+// one that is not defaults:, grid:, or params: — should be handled (#530).
+//
+// pkg/params.ParamFileFormat has exactly three fields, and both
+// json.Unmarshal and yaml.Unmarshal silently drop any key that is none of
+// them: `ttl: 2h` written one indentation level too high (outside defaults:)
+// used to vanish with no trace at all — not even a PARAM_* env var, which at
+// least leaves something to grep for. That is a different failure from the
+// row-level one #526 fixed (a key inside defaults:/params: that looks like a
+// setting), but the same shape one level up, so it reuses the SAME
+// recognizedRowKeys/reservedRowKeys registry rather than a second,
+// independently-drifting list:
+//
+//   - a key that IS a recognized row-level setting (ttl, cost_limit,
+//     instance_type, ...) is a hard error — the alternative is silently
+//     ignoring a setting the user clearly meant to apply, which for
+//     ttl/idle_timeout/cost_limit produces an unbounded instance with no
+//     warning at all
+//   - a key on the reserved (CLI-only/near-miss) list is also a hard error,
+//     for the same reason: sweep_name/max_concurrent/launch_delay at the top
+//     level is exactly the mistake examples/schedule-params.yaml shipped with
+//   - anything else is a warning, not an error: most top-level clutter
+//     (description:, version:, author:) is harmless metadata, and a denylist
+//     that hard-fails on it would break files that already carry it
+func classifyTopLevelKey(key string) (isError bool, message string) {
+	norm := normalizeKey(key)
+	if recognizedRowKeys[norm] {
+		spelling := ""
+		if norm != key {
+			spelling = fmt.Sprintf(" (correct spelling: %q)", norm)
+		}
+		return true, fmt.Sprintf("%q at the top level is ignored%s; move it under defaults: to apply it to every row",
+			key, spelling)
+	}
+	if hint, ok := reservedRowKeys[norm]; ok {
+		return true, fmt.Sprintf("%q at the top level is ignored: %s", key, hint)
+	}
+	return false, fmt.Sprintf("unknown top-level key %q is ignored (not defaults:, grid:, or params:)", key)
+}
+
+// validateTopLevelParamKeys checks the top-level keys pkg/params.ParseParamFile
+// found outside defaults:/grid:/params: (#530) and either errors — before
+// anything is launched or priced — or warns, printing to stderr so a warning
+// has somewhere to be noticed the same way reportPassthroughParams' passthrough
+// list does. filePath names the file in messages; the launch path uses the
+// global paramFile flag variable, but this is also called from spawn schedule
+// create, which has its own local path variable instead.
+func validateTopLevelParamKeys(filePath string, unknownKeys []string) error {
+	var errs, warns []string
+	for _, k := range unknownKeys {
+		if isError, msg := classifyTopLevelKey(k); isError {
+			errs = append(errs, msg)
+		} else {
+			warns = append(warns, msg)
+		}
+	}
+
+	if len(warns) > 0 {
+		fmt.Fprintf(os.Stderr, "⚠️  %s has %d top-level key(s) outside defaults:/grid:/params: — ignored:\n",
+			filePath, len(warns))
+		for _, w := range warns {
+			fmt.Fprintf(os.Stderr, "   %s\n", w)
+		}
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d top-level key(s) in %s look like spawn settings but sit outside defaults:/grid:/params:, so they are silently ignored:", len(errs), filePath)
+	for _, e := range errs {
+		fmt.Fprintf(&b, "\n   %s", e)
+	}
+	b.WriteString("\n\n   Only defaults:, grid: and params: are read at the top level of a param file; " +
+		"anything else — including a real spawn setting written one level too high — is dropped before " +
+		"validation ever sees it.")
+	return fmt.Errorf("%s", b.String())
+}
+
 // reportPassthroughParams lists the PARAM_* variables the sweep will set, so an
 // intentional parameter is confirmed and an unintentional one is at least visible
 // — option (3) of #526, which is the weak half of the fix on its own and the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -204,6 +205,16 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	params, err := parseParamsFile(paramsFile)
 	if err != nil {
 		return fmt.Errorf("failed to parse parameter file: %w", err)
+	}
+
+	// Same top-level-key check the `spawn launch --param-file` path runs
+	// (#530): a key that looks like a spawn/schedule setting but sits outside
+	// defaults:/params: is otherwise dropped with no trace before
+	// getSweepName/getMaxConcurrent/getLaunchDelay (which only ever look
+	// inside defaults:) get a chance to read it.
+	if err := validateTopLevelParamKeys(paramsFile, params.unknownTopLevelKeys); err != nil {
+		fmt.Fprintf(os.Stderr, "\n❌ ERROR: %v\n\n", err)
+		return fmt.Errorf("unusable param-file keys")
 	}
 
 	// Generate schedule ID
@@ -517,6 +528,13 @@ func updateScheduleStatusCmd(ctx context.Context, scheduleID string, status sche
 type parsedParams struct {
 	defaults map[string]interface{}
 	params   []map[string]interface{}
+	// unknownTopLevelKeys is every key in the file that is neither defaults:
+	// nor params:. This parser is separate from pkg/params.ParseParamFile (the
+	// `spawn launch --param-file` path) — it has its own struct, and its own
+	// silent-drop bug (#530) — so it needs its own copy of the same detection,
+	// decoding a second time into a generic map for exactly the reason
+	// pkg/params/parser.go does.
+	unknownTopLevelKeys []string
 }
 
 func parseParamsFile(filename string) (*parsedParams, error) {
@@ -534,10 +552,22 @@ func parseParamsFile(filename string) (*parsedParams, error) {
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
 
-	return &parsedParams{
+	parsed := &parsedParams{
 		defaults: result.Defaults,
 		params:   result.Params,
-	}, nil
+	}
+
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err == nil {
+		for k := range raw {
+			if k != "defaults" && k != "params" {
+				parsed.unknownTopLevelKeys = append(parsed.unknownTopLevelKeys, k)
+			}
+		}
+		sort.Strings(parsed.unknownTopLevelKeys)
+	}
+
+	return parsed, nil
 }
 
 func (p *parsedParams) getSweepName() string {
