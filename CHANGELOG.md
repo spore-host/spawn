@@ -20,6 +20,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports reload failures per instance (with the same manual-fallback
   message), and the summary output shows a `Reloaded:` count when any
   instance's reload failed even though its tag write succeeded.
+- **`spored`'s self-management IAM baseline was missing `ec2:DescribeVolumes`,
+  so the EBS storage-cost lookup always 403'd under the policy spawn itself
+  provisions** (#517). `LookupAndTagEBSCost` needs `DescribeInstances` (to get
+  the block-device mappings) and then `DescribeVolumes` (to get the actual
+  volume sizes/types to price them) — only the first was granted. Since #502
+  made `spored-baseline-policy` apply to every spawn-launched instance, the
+  lookup could never succeed in the default configuration, `spawn:ebs-hourly-cost`
+  was never written, and `spored status`'s storage-cost line stayed permanently
+  "not yet available". Added `ec2:DescribeVolumes` to the baseline policy
+  (same `Resource: "*"` statement — Describe APIs don't support resource-level
+  scoping, so this widens nothing that wasn't already wide).
+- **The un-measured EBS-cost fallback (a bare `0.003`) was logged in the same
+  shape as a real measurement**, making the two indistinguishable from the log
+  alone — a reader comparing the daemon's own "EBS hourly cost: $0.0030/hr"
+  line against `spored status`'s "not yet available" storage line for the
+  same instance got contradictory answers. `Provider.LookupAndTagEBSCost` now
+  returns `(cost float64, measured bool)`; the caller only logs a rate when
+  `measured` is true, and logs an explicit "unknown (lookup failed or denied)"
+  line otherwise.
 
 ## [0.100.2] - 2026-08-18
 

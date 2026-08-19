@@ -763,12 +763,19 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	// The destructive and tag-write actions are scoped to spawn:managed=true.
 
 	// Describe* are read-only and stay on "*" (Describe APIs don't support
-	// resource-level IAM scoping).
+	// resource-level IAM scoping). DescribeVolumes is required alongside
+	// DescribeInstances for LookupAndTagEBSCost (pkg/provider/ec2.go): it reads
+	// the block-device mappings from DescribeInstances, then needs
+	// DescribeVolumes for the actual sizes/types to price them. Without it, the
+	// EBS cost lookup 403s on every instance whose role carries this policy —
+	// which #502 made every spawn-launched instance — and silently falls back
+	// to an unmeasured constant (spawn#517).
 	sporedReadPermissions := map[string]interface{}{
 		"Effect": "Allow",
 		"Action": []interface{}{
 			"ec2:DescribeTags",
 			"ec2:DescribeInstances",
+			"ec2:DescribeVolumes",
 		},
 		"Resource": "*",
 	}

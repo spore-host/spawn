@@ -58,7 +58,7 @@ func (s *stubProvider) DiscoverPeers(_ context.Context, _ string) ([]provider.Pe
 	return nil, nil
 }
 func (s *stubProvider) GetProviderType() string                       { return "stub" }
-func (s *stubProvider) LookupAndTagEBSCost(_ context.Context) float64 { return 0 }
+func (s *stubProvider) LookupAndTagEBSCost(_ context.Context) (float64, bool) { return 0, false }
 
 // otherInstances controls the region-vacated check; -1 (unknown) by default so
 // existing tests don't trigger the 60s settle path.

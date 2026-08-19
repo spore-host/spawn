@@ -383,9 +383,17 @@ func (p *EC2Provider) CountOtherManagedInstances(ctx context.Context) int {
 // LookupAndTagEBSCost queries the instance's attached volumes, calculates the hourly
 // EBS storage cost, and stores it as spawn:ebs-hourly-cost. Called once at first
 // spored start; subsequent starts read the tag instead of re-querying.
-func (p *EC2Provider) LookupAndTagEBSCost(ctx context.Context) float64 {
+//
+// The bool return distinguishes a real measurement from the safe fallback: a
+// fallback used to be a bare 0.003 indistinguishable from an actual measured
+// rate, so the caller's log line stated an unmeasured constant as fact
+// (spawn#517). measured is false whenever any part of the lookup could not
+// complete (DescribeInstances denied/failed, DescribeVolumes denied/failed) —
+// including when it is denied by the very IAM policy spored itself provisions
+// (fixed in the same issue by granting ec2:DescribeVolumes).
+func (p *EC2Provider) LookupAndTagEBSCost(ctx context.Context) (float64, bool) {
 	if p.config.EBSHourlyCost > 0 {
-		return p.config.EBSHourlyCost // already known from tag
+		return p.config.EBSHourlyCost, true // already known from tag
 	}
 
 	// Describe the instance to get block device mappings
@@ -394,7 +402,7 @@ func (p *EC2Provider) LookupAndTagEBSCost(ctx context.Context) float64 {
 	})
 	if err != nil || len(descOut.Reservations) == 0 || len(descOut.Reservations[0].Instances) == 0 {
 		log.Printf("Warning: could not describe instance for EBS cost lookup: %v", err)
-		return 0.003 // safe fallback
+		return 0.003, false // safe fallback, NOT a measurement
 	}
 
 	inst := descOut.Reservations[0].Instances[0]
@@ -405,7 +413,7 @@ func (p *EC2Provider) LookupAndTagEBSCost(ctx context.Context) float64 {
 		}
 	}
 	if len(volumeIDs) == 0 {
-		return 0.003
+		return 0.003, false
 	}
 
 	// Describe volumes to get sizes and types
@@ -414,7 +422,7 @@ func (p *EC2Provider) LookupAndTagEBSCost(ctx context.Context) float64 {
 	})
 	if err != nil {
 		log.Printf("Warning: could not describe volumes for EBS cost lookup: %v", err)
-		return 0.003
+		return 0.003, false
 	}
 
 	const hoursPerMonth = 730.0
@@ -439,7 +447,7 @@ func (p *EC2Provider) LookupAndTagEBSCost(ctx context.Context) float64 {
 	})
 
 	p.config.EBSHourlyCost = totalHourlyCost
-	return totalHourlyCost
+	return totalHourlyCost, true
 }
 
 // loadConfigFromEC2Tags loads configuration from EC2 instance tags.

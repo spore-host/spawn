@@ -154,8 +154,13 @@ type Provider interface {
 	GetProviderType() string
 
 	// LookupAndTagEBSCost returns the hourly EBS storage cost, querying AWS if
-	// not already cached in the spawn:ebs-hourly-cost tag.
-	LookupAndTagEBSCost(ctx context.Context) float64
+	// not already cached in the spawn:ebs-hourly-cost tag. The bool reports
+	// whether the value was actually measured (DescribeInstances/DescribeVolumes
+	// both succeeded and returned volumes) as opposed to an un-measured
+	// fallback — the two cases must be distinguishable to the caller, since a
+	// fallback logged in the same shape as a measurement is indistinguishable
+	// from real data (spawn#517).
+	LookupAndTagEBSCost(ctx context.Context) (cost float64, measured bool)
 
 	// CountOtherManagedInstances returns the number of spawn:managed instances in
 	// this instance's region that are running or pending, EXCLUDING this one.
