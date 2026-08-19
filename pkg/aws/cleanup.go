@@ -245,6 +245,15 @@ func (c *Client) enrichInstanceState(ctx context.Context, cfg aws.Config, resour
 	}
 
 	ec2Client := ec2.NewFromConfig(cfg)
+	return c.enrichInstanceStateWith(ctx, ec2Client, resources, ids, idx)
+}
+
+// enrichInstanceStateWith is enrichInstanceState's testable core: it takes the
+// narrow describeInstancesAPI interface instead of building a live *ec2.Client,
+// so the aged-out-instance regression (spawn#516) is unit-tested without real
+// AWS or the substrate emulator (which doesn't reproduce the batch-NotFound
+// failure the per-id fallback exists to handle).
+func (c *Client) enrichInstanceStateWith(ctx context.Context, ec2Client describeInstancesAPI, resources []ManagedResource, ids []string, idx map[string]int) error {
 	out, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: ids})
 	if err != nil {
 		// EC2 fails the WHOLE batch with InvalidInstanceID.NotFound if ANY id is
@@ -256,12 +265,27 @@ func (c *Client) enrichInstanceState(ctx context.Context, cfg aws.Config, resour
 		}
 		return fmt.Errorf("describe instance state: %w", err)
 	}
+	seen := make(map[string]bool, len(ids))
 	for _, res := range out.Reservations {
 		for _, inst := range res.Instances {
 			id := aws.ToString(inst.InstanceId)
 			if i, ok := idx[id]; ok {
 				resources[i].State = string(inst.State.Name)
+				seen[id] = true
 			}
+		}
+	}
+	// An instance id EC2 aged out of DescribeInstances entirely (not an error —
+	// an empty result) is just as gone as one that 404s. Without this, State
+	// stays "" for every id in this population, which enrichInstanceStatePerID's
+	// fallback promises never happens but can't deliver on: the batch call
+	// SUCCEEDED here (aged-out ids don't trigger InvalidInstanceID.NotFound, only
+	// syntactically-invalid ones do), so the error branch above is never taken and
+	// the fallback never runs (spawn#516). Mark them "deleted" in the success
+	// path instead of relying on an error that EC2 doesn't raise for this case.
+	for id, i := range idx {
+		if !seen[id] {
+			resources[i].State = "deleted"
 		}
 	}
 	return nil
@@ -449,8 +473,11 @@ func (c *Client) RemoveResource(ctx context.Context, r ManagedResource) error {
 		if r.IsRunningInstance() {
 			return fmt.Errorf("refusing to remove running instance %s — stop or terminate it first", r.ID)
 		}
-		// stopped/stopping instances: terminate.
-		return c.Terminate(ctx, cfg.Region, r.ID)
+		// stopped/stopping instances: terminate. Tolerate NotFound like every
+		// other branch here — an instance already gone (e.g. tag-mapping
+		// residue that slipped past the removable/alreadyGone split) is a
+		// satisfied request, not a failure (spawn#516).
+		return ignoreNotFound(c.Terminate(ctx, cfg.Region, r.ID), "InvalidInstanceID.NotFound")
 
 	case r.ResourceType == "security-group":
 		ec2c := ec2.NewFromConfig(cfg)

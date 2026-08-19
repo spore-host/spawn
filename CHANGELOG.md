@@ -50,6 +50,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callers for the same AZ now coalesce onto a single in-flight
   `CreatePlacementGroup` call instead of each issuing their own; callers for
   different AZs are not serialized against each other.
+- **`spawn cleanup --dry-run` (and `orphans`) reported already-destroyed
+  resources as "would be removed"** (#516). Two compounding defects: (1)
+  `enrichInstanceState`'s NotFound fallback only triggers on a batch
+  `DescribeInstances` *error*, but EC2 answers an aged-out (long-terminated)
+  instance id with an empty *result*, not an error — so `State` stayed `""`
+  for exactly the population `cleanup` exists to sweep, and (2) the
+  removable/running/address split in `cmd/cleanup.go` never consulted
+  `State` at all, so even a resource correctly resolved to `deleted` (e.g.
+  volumes, which *do* 400 on an already-deleted id) still landed in
+  `removable` and in the "N resource(s) would be removed" count — visibly
+  contradicting its own displayed `deleted` state in the same table. Fixed
+  both: an instance id absent from a successful `DescribeInstances` response
+  is now marked `deleted` directly (no longer relies on an error EC2 doesn't
+  raise for this case), and `cleanup`'s split now routes `State == "deleted"`
+  into its own bucket, excluded from the removable count and reported
+  separately as tag-mapping residue. Also added `ignoreNotFound` tolerance to
+  the instance branch of `RemoveResource`, matching its volume/key-pair/
+  security-group siblings, so a real (non-dry-run) sweep of stale residue
+  reports a satisfied request instead of a doomed `Terminate` failure.
 
 ## [0.100.2] - 2026-08-18
 
