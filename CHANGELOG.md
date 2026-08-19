@@ -54,6 +54,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which reloads the file independently) and `spawn schedule create`, which
   parses parameter files with its own separate, unrelated code path.
 
+- **A parameter sweep value could be shell-reinterpreted, or silently mangled,
+  on the instance** (#531). `pkg/launcher/bootstrap.go` wrote each
+  `spawn:param:*` tag into `/etc/profile.d/spawn-params.sh` as
+  `export PARAM_<name>="<value>"`, double-quoting the raw value with no
+  escaping. `/etc/profile.d/*.sh` is sourced by every login shell, so `$`,
+  backticks, and `"` in a value were reinterpreted at boot instead of taken
+  literally: `$HOME/out` became the instance's actual home directory instead
+  of the string the user wrote, a value with a backtick ran a command, and an
+  embedded double quote (`run "A"`) broke the generated line's quoting
+  outright. Nothing failed — the workload just quietly ran with a different
+  value than the param file specified. (#526 fixed the identical issue on the
+  key side of this same line; this closes the value side.)
+
+  The value is now single-quoted, with any embedded single quote escaped via
+  the standard close-quote/escaped-quote/reopen-quote trick, which makes `$`,
+  backticks, and `"` inert. Separately, a parameter value containing a literal
+  newline is now rejected at launch time, before anything is provisioned: a
+  newline cannot survive the round trip through an EC2 tag and back through
+  the bootstrap's one-tag-per-line parsing loop, so encoding around it isn't
+  worth attempting — the launch fails with an error naming the offending
+  parameter instead of producing a malformed line on the instance.
+
 ## [0.100.4] - 2026-08-19
 
 ### Fixed

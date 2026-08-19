@@ -469,3 +469,61 @@ func TestExplicitParamPrefixReachesParameters(t *testing.T) {
 		t.Errorf("TTL = %q, want 1h — an escaped key must not disturb the real settings", config.TTL)
 	}
 }
+
+// TestValidateSweepParamKeysRejectsNewlineInValue is the value-side half of
+// #531: a passthrough parameter value containing a literal newline cannot
+// survive as an EC2 tag round-trip through pkg/launcher/bootstrap.go's
+// one-tag-per-line `read -r key value` loop, so it must be rejected here,
+// before anything is launched or priced — the same "fail before AWS is
+// touched" seam #526 used for the key side of this exact line.
+func TestValidateSweepParamKeysRejectsNewlineInValue(t *testing.T) {
+	pf := &ParamFileFormat{
+		Defaults: map[string]interface{}{"ttl": "1h", "on_complete": "terminate"},
+		Params: []map[string]interface{}{
+			{"instance_type": "c5.large", "label": "line one\nline two"},
+		},
+	}
+	err := validateSweepParamKeys(pf)
+	if err == nil {
+		t.Fatal("validateSweepParamKeys accepted a value containing a newline")
+	}
+	if !strings.Contains(err.Error(), "label") {
+		t.Errorf("error does not name the offending key:\n%v", err)
+	}
+}
+
+// TestValidateSweepParamKeysAcceptsNewlineFreeValue is the pass-with half: a
+// value that merely looks unusual (quotes, dollar signs, backticks) but has
+// no newline must still be accepted at this seam — that content is exactly
+// what the bootstrap.go quoting fix now makes safe, so the key-validation
+// seam must not start rejecting it too.
+func TestValidateSweepParamKeysAcceptsNewlineFreeValue(t *testing.T) {
+	pf := &ParamFileFormat{
+		Defaults: map[string]interface{}{"ttl": "1h", "on_complete": "terminate"},
+		Params: []map[string]interface{}{
+			{"instance_type": "c5.large", "label": `run "A"`, "prefix": "$HOME/out", "cmd": "`hostname`"},
+		},
+	}
+	if err := validateSweepParamKeys(pf); err != nil {
+		t.Errorf("rejected a value with no newline: %v", err)
+	}
+}
+
+// TestBuildLaunchConfigRejectsNewlineValueAtTheSeam mirrors
+// TestBuildLaunchConfigRejectsDangerousKeyAtTheSeam for the value side: resume
+// and the quota preflight call buildLaunchConfigFromParams directly and never
+// go through launchParameterSweep's early validation, so the same newline
+// check must also live here.
+func TestBuildLaunchConfigRejectsNewlineValueAtTheSeam(t *testing.T) {
+	_, err := buildLaunchConfigFromParams(
+		map[string]interface{}{"ttl": "1h"},
+		map[string]interface{}{"instance_type": "c5.large", "label": "a\nb"},
+		"sweep-1", "bench", 0, 1,
+	)
+	if err == nil {
+		t.Fatal("buildLaunchConfigFromParams accepted a parameter value containing a newline")
+	}
+	if !strings.Contains(err.Error(), "label") {
+		t.Errorf("error does not name the offending key: %v", err)
+	}
+}
