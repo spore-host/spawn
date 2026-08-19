@@ -213,6 +213,19 @@ func resolveParamName(key string) (string, error) {
 	return key, nil
 }
 
+// valueContainsNewline reports whether a parameter value contains a literal
+// newline character (#531). A spawn:param:* tag's value round-trips through
+// EC2's tag API and back through `--output text` in pkg/launcher/bootstrap.go,
+// whose `read -r key value` loop reads one tag per line — a value containing
+// "\n" splits into a stray, malformed extra line rather than surviving as one
+// value. There's no encoding trick worth applying here: the tag wire format
+// cannot faithfully carry a newline, so the value is rejected outright, at
+// launch time, before anything is provisioned, rather than failing silently
+// or strangely on the instance.
+func valueContainsNewline(val interface{}) bool {
+	return strings.Contains(fmt.Sprintf("%v", val), "\n")
+}
+
 // passthroughKeys returns the sorted parameter keys a merged param set would send
 // to the workload as PARAM_* env vars.
 func passthroughKeys(m map[string]interface{}) []string {
@@ -246,6 +259,16 @@ func validateSweepParamKeys(paramFormat *ParamFileFormat) error {
 		for _, k := range passthroughKeys(m) {
 			if err := classifyRowKey(k); err != nil {
 				problems = append(problems, problem{where: where, err: err})
+				continue
+			}
+			// The key is fine; also reject a value that cannot survive the trip
+			// through an EC2 tag and back (#531). Checked only for passthrough
+			// keys — the ones that become spawn:param:* tags and are read back
+			// by pkg/launcher/bootstrap.go's one-tag-per-line loop.
+			if valueContainsNewline(m[k]) {
+				problems = append(problems, problem{where: where, err: fmt.Errorf(
+					"%q contains a newline, which cannot survive as an EC2 tag value — "+
+						"remove it or replace it with a space/delimiter the workload can parse", k)})
 			}
 		}
 	}

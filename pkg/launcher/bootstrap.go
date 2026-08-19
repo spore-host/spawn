@@ -527,11 +527,22 @@ export SWEEP_INDEX="$SWEEP_INDEX"
 # Parse and export PARAM_* environment variables from tags
 EOFPARAMS
 
-    # Parse param tags and add exports
+    # Parse param tags and add exports. The value is single-quoted, not
+    # double-quoted, and any embedded single quote is escaped with the
+    # standard close-quote/escaped-quote/reopen-quote trick — spore-host/spawn#531.
+    # Double-quoting the raw tag value let dollar signs, backticks, and double
+    # quotes be reinterpreted by every login shell that sources
+    # /etc/profile.d/spawn-params.sh, so e.g. a param value of $HOME/out was
+    # shell-expanded to the instance's actual home directory instead of being
+    # sourced as the literal string the user wrote, and a value containing a
+    # double quote (run "A") broke the generated line's quoting outright.
+    # Single-quoting makes all of those inert; only a literal single quote
+    # needs escaping, which the substitution below does.
     echo "$PARAM_TAGS" | while IFS=$'\t' read -r key value; do
         if [[ $key == spawn:param:* ]]; then
             param_name=${key#spawn:param:}
-            echo "export PARAM_${param_name}=\"${value}\"" >> /etc/profile.d/spawn-params.sh
+            escaped_value=${value//\'/\'\"\'\"\'}
+            echo "export PARAM_${param_name}='${escaped_value}'" >> /etc/profile.d/spawn-params.sh
         fi
     done
 

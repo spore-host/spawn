@@ -262,6 +262,16 @@ func buildLaunchConfigFromParams(defaults, params map[string]interface{}, sweepI
 			if err != nil {
 				return config, err
 			}
+			// A value containing a literal newline cannot survive as an EC2 tag
+			// value — pkg/launcher/bootstrap.go reads spawn:param:* tags back with
+			// a one-tag-per-line loop, so a newline in the value splits into a
+			// stray malformed line on the instance (#531). Reject it here, before
+			// anything is provisioned, rather than let it round-trip and quietly
+			// misparse on the box.
+			if valueContainsNewline(val) {
+				return config, fmt.Errorf("%q contains a newline, which cannot survive as an EC2 "+
+					"tag value — remove it or replace it with a space/delimiter the workload can parse", key)
+			}
 			config.Parameters[name] = fmt.Sprintf("%v", val)
 		}
 	}

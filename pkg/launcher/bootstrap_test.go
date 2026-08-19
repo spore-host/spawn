@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -330,6 +332,106 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 			t.Errorf("generated bootstrap missing retry on a critical fetch: %q", want)
 		}
 	}
+}
+
+// extractParamTagLoop pulls the exact `while IFS=$'\t' read -r key value; do
+// ... done` block that parses spawn:param:* tags into /etc/profile.d out of
+// the generated bootstrap script, and rewrites the hardcoded
+// /etc/profile.d/spawn-params.sh path to outFile so a test can run the real
+// generated shell text against a temp file instead of needing root. Fails the
+// test (rather than returning an error) if the markers this depends on ever
+// move, so a refactor of bootstrap.go that breaks the extraction is caught
+// immediately instead of silently testing stale text.
+func extractParamTagLoop(t *testing.T, script, outFile string) string {
+	t.Helper()
+	const start = `echo "$PARAM_TAGS" | while IFS=$'\t' read -r key value; do`
+	startIdx := strings.Index(script, start)
+	if startIdx < 0 {
+		t.Fatalf("could not find the param-tag parsing loop in the generated bootstrap (marker moved?)")
+	}
+	rest := script[startIdx:]
+	const end = "\n    done\n"
+	endIdx := strings.Index(rest, end)
+	if endIdx < 0 {
+		t.Fatalf("could not find the end of the param-tag parsing loop (marker moved?)")
+	}
+	loop := rest[:endIdx+len(end)]
+	replaced := strings.ReplaceAll(loop, "/etc/profile.d/spawn-params.sh", outFile)
+	if replaced == loop {
+		t.Fatalf("extracted loop did not reference /etc/profile.d/spawn-params.sh — extraction is wrong")
+	}
+	return replaced
+}
+
+// TestBuildLinuxBootstrap_ParamValueSurvivesRealShellParsing is the #531
+// regression guard. Before the fix, pkg/launcher/bootstrap.go wrote
+//
+//	export PARAM_<name>="<value>"
+//
+// with the value double-quoted and unescaped, so a login shell sourcing
+// /etc/profile.d/spawn-params.sh reinterpreted $, `, and " in the value
+// instead of treating it as literal text. This test does not compare Go-side
+// escaping logic against expectations — that would only prove the Go string
+// manipulation does what it says, not that the shell agrees. Instead it
+// extracts the ACTUAL while-loop bootstrap.go generates, feeds it a
+// tab-separated "tag\tvalue" line exactly like `aws ec2 describe-tags --output
+// text` would produce, runs that loop for real under bash, sources the
+// resulting file for real under bash, and reads back $PARAM_<name> — so a
+// regression to double-quoting (or any other quoting mistake) is caught by
+// bash's own parser, not by Go arithmetic on strings.
+func TestBuildLinuxBootstrap_ParamValueSurvivesRealShellParsing(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{name: "embedded double quote", value: `run "A"`},
+		{name: "dollar-sign expansion attempt", value: "$HOME/out"},
+		{name: "backtick command substitution attempt", value: "`hostname`"},
+		{name: "embedded single quote", value: "it's a test"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outFile := filepath.Join(t.TempDir(), "spawn-params.sh")
+			loop := extractParamTagLoop(t, script, outFile)
+
+			shellScript := fmt.Sprintf(`#!/bin/bash
+set -e
+PARAM_TAGS=$(printf 'spawn:param:label\t%%s\n' %s)
+%s
+source %s
+printf '%%s' "$PARAM_label"
+`, shellQuoteForTest(tc.value), loop, outFile)
+
+			cmd := exec.Command("bash", "-c", shellScript) //nolint:gosec // nosemgrep
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("shell exec failed: %v\noutput: %s\nscript:\n%s", err, out, shellScript)
+			}
+			got := string(out)
+			if got != tc.value {
+				t.Errorf("value did not survive real shell sourcing: got %q, want %q (raw tag value; "+
+					"this is the exact PARAM_label the workload would see on the instance)", got, tc.value)
+			}
+		})
+	}
+}
+
+// shellQuoteForTest single-quotes a string for embedding in the *test driver*
+// shell script (the printf that manufactures a fake AWS describe-tags line).
+// This is deliberately separate from — and simpler than — the fix under test:
+// it only needs to survive going into printf's %s once, not round-trip
+// through a second layer of tag storage and profile.d sourcing.
+func shellQuoteForTest(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 // TestBuildLinuxBootstrap_ValidBash syntax-checks the generated script with
