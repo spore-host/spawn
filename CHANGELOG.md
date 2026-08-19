@@ -76,6 +76,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worth attempting — the launch fails with an error naming the offending
   parameter instead of producing a malformed line on the instance.
 
+- **`--cost-limit` was enforced against a fabricated price, not the real
+  on-demand rate** (#533). At launch, when `PricePerHour` wasn't already known,
+  spawn called its own hand-rolled, uncached AWS Pricing API lookup
+  (`LookupEC2OnDemandPrice`) and, if that failed — which it always did for any
+  principal onboarded via `spawn onboard`, whose policy granted no `pricing:*`
+  action — fell back to a static per-family-size guess table
+  (`libs/pricing.GetEC2HourlyRate`) missing every current-gen instance family
+  (g6, g6e, p5, p5e, c7g, c8g, ...). Measured: `g6e.xlarge` guessed at
+  $0.20/hr against a real $1.861/hr (9.3x under); `p5.48xlarge` guessed at
+  $9.60/hr against a real $55.04/hr (5.7x under). The fabricated value was
+  written to `spawn:price-per-hour` and is what `--cost-limit` is actually
+  checked against in-instance, so a `--cost-limit 8` on `g6e.xlarge` didn't
+  fire until roughly $74 of real spend.
+
+  Pricing at launch now delegates entirely to truffle's `OnDemandPriceWithSource`
+  — the suite's pricing authority, with a 24h cache and a real-published-rate
+  static fallback that errors rather than guesses (truffle#114/#115). If
+  truffle cannot price the instance at all (neither live nor its own static
+  table) and the launch requested `--cost-limit`, the launch now fails with an
+  error naming the instance type, region, and limit, instead of silently
+  leaving the cap unenforced. Without `--cost-limit`, an unpriceable instance
+  still launches, with `PricePerHour` left unset (spored's cap-check already
+  treats 0 as "no cap enforced," never a fabricated one). spawn's own
+  `LookupEC2OnDemandPrice` is removed.
+
+### Changed
+- **Bumped `github.com/spore-host/truffle` v0.49.0 → v0.53.0**, since
+  `--cost-limit` enforcement now depends on truffle's pricing API. Pulled in
+  transitively: `find`/`spot` multi-type queries, per-GPU VRAM/fractional-GPU
+  metadata, `find --show-real-cores`/`--show-mem-per-cpu`/`--price-unit`, and
+  several Capacity Block/Reservation discovery-path error-handling fixes. No
+  breaking changes to the APIs spawn calls (`OnDemandPrice`,
+  `OnDemandPriceWithSource`, `GetCapabilities`).
+- **`spawn onboard`'s IAM policy now grants `pricing:GetProducts`** (a
+  global, read-only action with no resource scoping), required for the fix
+  above — the pricing lookup still runs under the launching principal's own
+  credentials, in-process via truffle, not a separate service. **Operational
+  step for existing users:** a principal onboarded before this change has no
+  `pricing:GetProducts` permission and must re-run `spawn onboard` to pick it
+  up; until then, truffle's pricing lookup will fail on that principal (falling
+  back to truffle's own static table, or failing the launch outright if
+  `--cost-limit` was requested and no static price exists for the type).
+
 ## [0.100.4] - 2026-08-19
 
 ### Fixed
