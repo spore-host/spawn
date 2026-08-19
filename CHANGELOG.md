@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`--estimate-only` launched every row of a parameter sweep instead of
+  estimating it** (#524). The flag was checked only inside
+  `launchSweepDetached`, so any sweep that took the *foreground* path
+  provisioned the whole sweep while the user was asking for a preview — i.e.
+  the exact command run to avoid spending money spent it. Two ordinary
+  invocations reach that path: `--no-detach` (the documented advice for a
+  heterogeneous sweep, since only the foreground path detects an AMI per
+  config, #372), and an explicit `--detach` without `--max-concurrent`, which
+  leaves `maxConcurrent` at 0 and so fails the `detach && maxConcurrent > 0`
+  dispatch condition. `--estimate-only` is now handled once in
+  `launchParameterSweep`, above that dispatch and before the AWS client is
+  built (a cost preview reads only the param file, so it needs no
+  credentials), which makes "launches nothing" independent of which
+  orchestration path the sweep would have taken. Covered by a Tier 0 e2e
+  regression test that asserts zero instances exist afterwards by querying EC2
+  directly, for all three invocations.
+
 ## [0.100.3] - 2026-08-18
 
 ### Fixed

@@ -140,6 +140,22 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 	fmt.Fprintf(os.Stderr, "\n")
 
+	// --estimate-only is handled HERE, above the detached/foreground dispatch
+	// below, so "launches nothing" does not depend on which orchestration path
+	// this sweep would have taken (#524). It used to be checked only inside
+	// launchSweepDetached, which meant any sweep reaching the FOREGROUND path
+	// launched every row while the user was asking for a preview — via
+	// --no-detach (the documented advice for a heterogeneous sweep, since only
+	// the foreground path detects an AMI per config, #372), or via an explicit
+	// --detach with no --max-concurrent, which leaves maxConcurrent at 0 and so
+	// fails the `detach && maxConcurrent > 0` condition below.
+	//
+	// Deliberately placed before the AWS client is constructed: EstimateSweepCost
+	// reads only the param file, so a cost preview needs no credentials.
+	if estimateOnly {
+		return estimateSweepOnly(paramFormat)
+	}
+
 	// Initialize AWS client
 	awsClient, err := aws.NewClient(ctx)
 	if err != nil {
@@ -603,6 +619,43 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 	return launchedInstances, failures, successCount, nil
 }
 
+// estimateSweepOnly prints a per-row cost estimate for a sweep and returns
+// without launching anything. This is the entirety of --estimate-only's
+// behaviour on the sweep path; both orchestration paths reach it from the single
+// check in launchParameterSweep (#524).
+func estimateSweepOnly(paramFormat *ParamFileFormat) error {
+	fmt.Fprintf(os.Stderr, "💰 Estimating cost...\n")
+	costEstimate, err := pricing.EstimateSweepCost(&pricing.ParamFileFormat{
+		Defaults: paramFormat.Defaults,
+		Params:   paramFormat.Params,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to estimate cost: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "\n%s\n\n", costEstimate.Display())
+	reportSweepBudget(costEstimate.TotalCost)
+	fmt.Fprintf(os.Stderr, "✅ Estimate complete — no instances launched (--estimate-only)\n")
+	return nil
+}
+
+// reportSweepBudget compares an estimated sweep cost against --budget. It only
+// ever prints: --budget is a warning, not a cap, and nothing here blocks a
+// launch. Shared by the estimate-only path and the real detached launch so the
+// two cannot drift.
+func reportSweepBudget(totalCost float64) {
+	if budget <= 0 {
+		return
+	}
+	if totalCost > budget {
+		fmt.Fprintf(os.Stderr, "⚠️  WARNING: Estimated cost ($%.2f) exceeds budget ($%.2f) by $%.2f\n\n",
+			totalCost, budget, totalCost-budget)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "✓ Within budget: $%.2f remaining of $%.2f\n\n",
+		budget-totalCost, budget)
+}
+
 // launchSweepDetached launches a parameter sweep in detached mode (Lambda orchestration)
 func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, baseConfig *aws.LaunchConfig, sweepID, sweepName string, maxConcurrent int, launchDelay string) error {
 	// Determine region (auto-detect if not specified)
@@ -667,22 +720,13 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 
 	fmt.Fprintf(os.Stderr, "\n%s\n\n", costEstimate.Display())
 
-	// Check budget
-	if budget > 0 {
-		if costEstimate.TotalCost > budget {
-			fmt.Fprintf(os.Stderr, "⚠️  WARNING: Estimated cost ($%.2f) exceeds budget ($%.2f) by $%.2f\n\n",
-				costEstimate.TotalCost, budget, costEstimate.TotalCost-budget)
-		} else {
-			fmt.Fprintf(os.Stderr, "✓ Within budget: $%.2f remaining of $%.2f\n\n",
-				budget-costEstimate.TotalCost, budget)
-		}
-	}
+	// Check budget (warning only — see reportSweepBudget)
+	reportSweepBudget(costEstimate.TotalCost)
 
-	// If estimate-only, exit here
-	if estimateOnly {
-		fmt.Fprintf(os.Stderr, "✅ Cost estimate complete (--estimate-only specified)\n")
-		return nil
-	}
+	// No --estimate-only check here: it is handled once in launchParameterSweep,
+	// before the dispatch that chooses this function, so that the guarantee holds
+	// on the foreground path too (#524). A second check here would be dead code
+	// and would re-create the per-path shape that caused the bug.
 
 	// If not auto-approved, prompt for confirmation
 	if !autoYes {
