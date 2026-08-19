@@ -69,6 +69,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the instance branch of `RemoveResource`, matching its volume/key-pair/
   security-group siblings, so a real (non-dry-run) sweep of stale residue
   reports a satisfied request instead of a doomed `Terminate` failure.
+- **`spawn status`/`spored status` could print mutually contradictory
+  lifecycle statements in one screen, and misreported an instance's actual
+  age** (#508). Three related defects:
+  1. When `spored` couldn't read its own tags (e.g. the #502 IAM gap, or any
+     `ec2:DescribeTags` denial), the config load failure was silently
+     swallowed into zero-value defaults, and status rendered `TTL: none —
+     instance will not auto-terminate` — a definite claim asserted from data
+     that was never actually read. It now renders `TTL: UNKNOWN — could not
+     read config (<error>)` in that case, via a new `Config.ConfigLoadError`
+     field threaded from the provider's tag-load failure.
+  2. That on-instance "none"/"UNKNOWN" line could appear directly above
+     `spawn status`'s own `Termination deadline: <t>` (read from tags with
+     the *caller's*, not the instance's, credentials) with nothing
+     connecting the two. `spawn status` now detects this specific
+     combination and prints an explicit "Lifecycle mismatch" notice: the
+     deadline tag exists, but the instance cannot see it, so nothing on the
+     instance will enforce it.
+  3. `Started`/`Elapsed` described the *status-agent invocation's* age, not
+     the instance's — falling back to `time.Now()` when the
+     `spawn:launch-time` tag couldn't be read, which is exactly the failure
+     mode above, so a 7h39m-old instance reported `Elapsed: 0s`. Added a
+     second fallback tier: EC2's own `PendingTime` from the instance identity
+     document (via IMDS, no IAM permission required), so the instance's real
+     age survives a tag-read failure and only falls back to the agent's own
+     start time when IMDS is also unavailable. The fallback source is now
+     labelled inline when it isn't the authoritative tag.
 
 ## [0.100.2] - 2026-08-18
 

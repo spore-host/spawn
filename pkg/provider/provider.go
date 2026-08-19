@@ -18,6 +18,16 @@ type Identity struct {
 	PublicIP         string // Public IP address
 	PrivateIP        string // Private IP address
 	Provider         string // "ec2" or "local"
+
+	// PendingTime is EC2's own record of when this instance's launch was
+	// requested, read from the instance identity document via IMDS — no
+	// ec2:DescribeTags/DescribeInstances permission required, unlike
+	// spawn:launch-time. It is the instance's actual age, not the invoking
+	// CLI/agent process's age: `spored status` used to fall back to
+	// time.Now() (its OWN start time) when spawn:launch-time couldn't be
+	// read, so a 7h-old instance reported "Elapsed: 0s" (spawn#508). Zero for
+	// the local provider.
+	PendingTime time.Time
 }
 
 // PluginDeclaration references a plugin to install at instance startup.
@@ -28,11 +38,19 @@ type PluginDeclaration struct {
 
 // Config represents the agent configuration
 type Config struct {
-	TTL             time.Duration
-	TTLDeadline     time.Time // absolute deadline = launch_time + TTL; authoritative across stop/wake cycles
-	LaunchTime      time.Time // original launch time; never resets on stop/wake
-	ComputeSeconds  int64     // accumulated compute seconds since launch (updated by spored)
-	EBSHourlyCost   float64   // actual EBS cost per hour (queried at first start, tagged for reuse)
+	TTL         time.Duration
+	TTLDeadline time.Time // absolute deadline = launch_time + TTL; authoritative across stop/wake cycles
+	LaunchTime  time.Time // original launch time; never resets on stop/wake
+
+	// ConfigLoadError, when non-empty, means the config below is NOT what the
+	// instance's tags actually say — the load failed (e.g. ec2:DescribeTags
+	// denied, spawn#502/#508) and every zero-value field is "unknown", not
+	// "unset". A caller displaying TTL/IdleTimeout/etc. MUST check this before
+	// rendering an absent value as a resolved one (e.g. "TTL: none — instance
+	// will not auto-terminate" when the truth is "TTL: could not be read").
+	ConfigLoadError string
+	ComputeSeconds  int64   // accumulated compute seconds since launch (updated by spored)
+	EBSHourlyCost   float64 // actual EBS cost per hour (queried at first start, tagged for reuse)
 	IdleTimeout     time.Duration
 	HibernateOnIdle bool
 	CostLimit       float64

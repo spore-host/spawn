@@ -127,6 +127,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Print(string(output))
+	fmt.Print(ttlReconciliationNotice(instance, string(output)))
 	fmt.Print(lifecycleProtectionBlock(instance))
 	fmt.Print(dnsStatusNotice(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], string(output), instance.InstanceID))
@@ -214,6 +215,42 @@ func lifecycleDeadline(instance *aws.InstanceInfo) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// ttlReconciliationNotice detects and calls out spawn#508's core symptom: the
+// on-instance status output (statusOutput, from spored, sourced from EC2
+// tags read WITH THE INSTANCE'S OWN CREDENTIALS) says the instance has no TTL
+// or couldn't determine one, while the CLI's OWN view of the same instance's
+// tags (read with the caller's credentials, via instance.Tags — usually a
+// broader IAM principal than the instance role) shows a live
+// spawn:ttl-deadline. That combination is not two independent facts to
+// present side by side and let the operator reconcile by hand — it IS the
+// finding: the deadline exists, but nothing on the instance can see it, so
+// nothing on the instance will enforce it. Returns "" when there's nothing to
+// reconcile (the on-instance view agrees, or there's no deadline at all).
+func ttlReconciliationNotice(instance *aws.InstanceInfo, statusOutput string) string {
+	onInstanceUnresolved := strings.Contains(statusOutput, "TTL:              none — instance will not auto-terminate") ||
+		strings.Contains(statusOutput, "TTL:              UNKNOWN")
+	if !onInstanceUnresolved {
+		return "" // on-instance view already resolved a TTL; nothing to reconcile
+	}
+
+	deadline, haveDeadline := lifecycleDeadline(instance)
+	if !haveDeadline {
+		return "" // no tag-based deadline either — the on-instance "none" is consistent
+	}
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Sprintf("\n%s Lifecycle mismatch: spored (on-instance) could not resolve a TTL, but the "+
+			"spawn:ttl-deadline tag (%s) is already past due. Nothing on the instance is enforcing it — "+
+			"terminate manually if this instance should be gone.\n",
+			i18n.Symbol("warning"), deadline.UTC().Format("2006-01-02 15:04 UTC"))
+	}
+	return fmt.Sprintf("\n%s Lifecycle mismatch: spored (on-instance) could not resolve a TTL, but "+
+		"spawn:ttl-deadline (read from tags with YOUR credentials) says %s (in %s). The instance cannot "+
+		"see its own deadline, so nothing on it will enforce this automatically — see the likely cause below.\n",
+		i18n.Symbol("warning"), deadline.UTC().Format("2006-01-02 15:04 UTC"), formatDuration(remaining))
+}
+
 // elasticIPNotice returns a line describing any Elastic IP attached to the
 // instance, or "" if none. On a running instance it's informational; on a
 // stopped instance it's a billable-leak warning (an EIP keeps billing while the
@@ -289,6 +326,7 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 		out += res.Stderr
 	}
 	fmt.Print(out)
+	fmt.Print(ttlReconciliationNotice(instance, out))
 	fmt.Print(lifecycleProtectionBlock(instance))
 	fmt.Print(dnsStatusNotice(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))

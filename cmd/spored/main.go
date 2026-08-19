@@ -345,6 +345,39 @@ func newCompleteCmd() *cobra.Command {
 	return cmd
 }
 
+// launchTimeSourceTag/IMDS/Estimated label which source resolveLaunchTime
+// used, most to least authoritative. Exported as constants so callers can
+// compare against them without restating the literal strings (and so a typo
+// in one place can't silently desync the comparison from the label).
+const (
+	launchTimeSourceTag       = "spawn:launch-time tag"
+	launchTimeSourceIMDS      = "EC2 instance identity (IMDS)"
+	launchTimeSourceEstimated = "estimated (status agent start — actual instance age unavailable)"
+)
+
+// resolveLaunchTime picks the most authoritative available source for the
+// instance's actual launch time, most to least authoritative (spawn#508):
+//  1. tagLaunchTime — the spawn:launch-time tag, read via ec2:DescribeTags.
+//     Authoritative when readable.
+//  2. pendingTime — EC2's own record of when this instance's launch was
+//     requested, read from the instance identity document via IMDS. Needs NO
+//     IAM permission, so it survives exactly the failure mode (#502-style
+//     DescribeTags denial) that makes (1) unavailable — this is what turns
+//     "Elapsed: 0s" on a 7h-old instance into the instance's real age even
+//     when tags can't be read.
+//  3. statusAgentStart — this status-agent invocation's own start time. Last
+//     resort; only reached when both the tag AND IMDS are unavailable. Using
+//     this as "Started"/"Elapsed" (unlabelled) was the spawn#508 bug.
+func resolveLaunchTime(tagLaunchTime, pendingTime, statusAgentStart time.Time) (time.Time, string) {
+	if !tagLaunchTime.IsZero() {
+		return tagLaunchTime, launchTimeSourceTag
+	}
+	if !pendingTime.IsZero() {
+		return pendingTime, launchTimeSourceIMDS
+	}
+	return statusAgentStart, launchTimeSourceEstimated
+}
+
 func handleStatus(checkComplete bool) error {
 	// Create agent to get configuration and metrics
 	ctx := context.Background()
@@ -409,7 +442,12 @@ func handleStatus(checkComplete bool) error {
 		idleTime = time.Since(ag.GetLastActivityTime())
 	}
 
-	// Calculate start time
+	// Calculate start time — this is the STATUS AGENT INVOCATION's own start
+	// (this process, which runs fresh on every `spored status` call), not the
+	// instance's. It is only ever used as a last-resort fallback below: using
+	// it as "Started"/"Elapsed" is exactly the spawn#508 bug (a 7h39m-old
+	// instance reported "Elapsed: 0s" because this was the only source
+	// available when the tag-authoritative LaunchTime couldn't be read).
 	startTime := time.Now().Add(-uptime)
 
 	// ── Identity ──────────────────────────────────────────────────────────────
@@ -417,11 +455,7 @@ func handleStatus(checkComplete bool) error {
 	fmt.Printf("  %s\n\n", strings.Repeat("─", 46))
 	fmt.Printf("  spored:           v%s\n", version())
 
-	// Use original launch time from tag if available; fall back to startTime
-	launchTime := startTime
-	if !config.LaunchTime.IsZero() {
-		launchTime = config.LaunchTime
-	}
+	launchTime, launchTimeSource := resolveLaunchTime(config.LaunchTime, identity.PendingTime, startTime)
 	elapsed := time.Since(launchTime)
 	computeSecs := ag.TotalComputeSeconds()
 	computeTime := time.Duration(computeSecs) * time.Second
@@ -448,12 +482,27 @@ func handleStatus(checkComplete bool) error {
 	if computeTime > 0 && stoppedTime > 0 {
 		fmt.Printf("  (%s compute · %s stopped)", formatDuration(computeTime), formatDuration(stoppedTime))
 	}
+	if launchTimeSource != launchTimeSourceTag {
+		// Only annotate the fallback paths — the common case (the tag read
+		// cleanly) stays unadorned. Surfacing the source is exactly what #508
+		// needed: "Elapsed: 0s" with no indication it was the status agent's
+		// own age, not the instance's.
+		fmt.Printf("  (source: %s)", launchTimeSource)
+	}
 	fmt.Println()
 
-	if !terminateAt.IsZero() {
+	// config.ConfigLoadError is set only when the tag read itself failed
+	// (ec2:DescribeTags denied, etc, spawn#502/#508) — in that case every
+	// zero-value config field is UNKNOWN, not unset, and rendering "TTL: none"
+	// asserts a specific, possibly-false fact ("will not auto-terminate")
+	// from data that was never actually read.
+	switch {
+	case config.ConfigLoadError != "":
+		fmt.Printf("  TTL:              UNKNOWN — could not read config (%s)\n", config.ConfigLoadError)
+	case !terminateAt.IsZero():
 		fmt.Printf("  TTL:              %s remaining  (terminates %s)\n",
 			formatDuration(ttlRemaining), terminateAt.UTC().Format("2006-01-02 15:04 UTC"))
-	} else {
+	default:
 		fmt.Println("  TTL:              none — instance will not auto-terminate")
 	}
 
