@@ -13,6 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forge module checksums. Trivy's security gate started failing on every open PR
   once its vulnerability DB picked up these CVEs, independent of any code change.
 
+### Fixed
+- **`spawn list --state all` always returned an empty list, regardless of how
+  many instances existed** (#527). `"all"` was passed straight through to EC2 as
+  a literal `instance-state-name` filter value, and no instance is ever
+  literally in state `"all"`, so the filter matched nothing — exit 0, a
+  well-formed empty JSON array, reading exactly like a clean account even when
+  it wasn't. This is the command the docs recommend for "did anything leak?",
+  so the bug gave false confidence at the worst possible moment.
+
+  `--state all` (and the alias `--state any`) now means no state filter at
+  all — a genuine superset of the default that also surfaces
+  `terminated`/`shutting-down` instances (AWS retains those for about an
+  hour). The no-flag default (`pending`, `running`, `stopping`, `stopped`) is
+  unchanged. Any other unrecognized `--state` value — a typo like `runing`, or
+  wrong case like `ALL` — is now a hard error naming the valid states, instead
+  of silently degrading to an empty result.
+
 ## [0.100.4] - 2026-08-19
 
 ### Fixed

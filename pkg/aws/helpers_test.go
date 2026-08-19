@@ -270,6 +270,33 @@ func TestRootVolumeSizeFromMappings(t *testing.T) {
 	})
 }
 
+// TestValidateStateFilter covers spawn#527: "all"/"any" must be accepted as
+// meaning "no filter" (they're handled specially by listInstancesInRegion,
+// not validated away as a real EC2 state), the empty default must be
+// accepted, every real EC2 instance-state-name must be accepted, and any
+// other value — including a wrong-case "ALL" or a typo like "runing" — must
+// be a hard error naming the valid values, never a silent empty result.
+func TestValidateStateFilter(t *testing.T) {
+	valid := []string{"", "all", "any", "pending", "running", "shutting-down", "terminated", "stopping", "stopped"}
+	for _, s := range valid {
+		if err := validateStateFilter(s); err != nil {
+			t.Errorf("validateStateFilter(%q) = %v, want nil", s, err)
+		}
+	}
+
+	invalid := []string{"ALL", "All", "bogus", "runing", "Running", " running", "running "}
+	for _, s := range invalid {
+		err := validateStateFilter(s)
+		if err == nil {
+			t.Errorf("validateStateFilter(%q) = nil, want an error", s)
+			continue
+		}
+		if !strings.Contains(err.Error(), "running") {
+			t.Errorf("validateStateFilter(%q) error %q does not name valid values", s, err.Error())
+		}
+	}
+}
+
 func TestValueOrEmpty(t *testing.T) {
 	s := "hello"
 	if got := valueOrEmpty(&s); got != "hello" {

@@ -979,8 +979,37 @@ type InstanceInfo struct {
 	Parameters map[string]string // Extracted from spawn:param:* tags
 }
 
+// validEC2InstanceStates are the instance-state-name values EC2 itself
+// recognizes for DescribeInstances filtering. Kept as a literal list (rather
+// than types.InstanceStateName("").Values()) so the validation error message
+// can name them directly.
+var validEC2InstanceStates = []string{"pending", "running", "shutting-down", "terminated", "stopping", "stopped"}
+
+// validateStateFilter rejects any --state value that isn't a real EC2 state
+// or the "all"/"any" alias. Without this, an unrecognized value (a typo, or
+// literally "all") fell through to ListInstances as a literal
+// instance-state-name filter value that no instance is ever in, producing a
+// silent, well-formed empty result instead of an error (spawn#527).
+func validateStateFilter(stateFilter string) error {
+	switch stateFilter {
+	case "", "all", "any":
+		return nil
+	}
+	for _, s := range validEC2InstanceStates {
+		if stateFilter == s {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid --state %q: valid values are %s, or all/any (no filter)",
+		stateFilter, strings.Join(validEC2InstanceStates, ", "))
+}
+
 // ListInstances returns all spawn-managed instances, optionally filtered by region and state
 func (c *Client) ListInstances(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error) {
+	if err := validateStateFilter(stateFilter); err != nil {
+		return nil, err
+	}
+
 	var allInstances []InstanceInfo
 
 	// Determine which regions to search
@@ -1020,17 +1049,24 @@ func (c *Client) listInstancesInRegion(ctx context.Context, region string, state
 		},
 	}
 
-	// Add state filter if specified
-	if stateFilter != "" {
-		filters = append(filters, types.Filter{
-			Name:   aws.String("instance-state-name"),
-			Values: []string{stateFilter},
-		})
-	} else {
+	// Add state filter if specified. "all"/"any" means every state,
+	// including terminated/shutting-down — a true superset of the default —
+	// so it's expressed by omitting the instance-state-name filter entirely
+	// rather than passing "all" through as a literal (and unmatchable) EC2
+	// filter value (spawn#527).
+	switch stateFilter {
+	case "all", "any":
+		// No state filter: every instance-state-name, including terminated.
+	case "":
 		// Default: show running and stopped instances (not terminated)
 		filters = append(filters, types.Filter{
 			Name:   aws.String("instance-state-name"),
 			Values: []string{"pending", "running", "stopping", "stopped"},
+		})
+	default:
+		filters = append(filters, types.Filter{
+			Name:   aws.String("instance-state-name"),
+			Values: []string{stateFilter},
 		})
 	}
 
