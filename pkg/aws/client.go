@@ -39,6 +39,18 @@ type Client struct {
 	cfg aws.Config
 }
 
+// CallerVersion is the resolved version of the launching spawn binary,
+// written to every launched instance's spawn:version tag unless a caller
+// sets LaunchConfig.SpawnVersion explicitly. The cmd package sets this once
+// at startup (cmd.version(), which itself resolves via pkg/buildinfo) —
+// pkg/aws can't import cmd to call that directly without a cycle, so this is
+// the seam. Left empty by an SDK caller that never sets it, buildTags omits
+// the tag rather than writing a hardcoded placeholder (spawn#515 — the
+// literal "0.1.0" this replaces was worse than no tag at all, since it
+// looked like an answer to "was this launched by a spawn that predates fix
+// X?" and always gave the wrong one).
+var CallerVersion = ""
+
 // NewClient creates a Client using the default AWS credential chain.
 // Use [NewClientFromConfig] in tests to inject a pre-configured aws.Config.
 func NewClient(ctx context.Context) (*Client, error) {
@@ -271,6 +283,17 @@ type LaunchConfig struct {
 	Name string
 	Tags map[string]string
 
+	// SpawnVersion is the resolved version of the launching spawn binary
+	// (cmd.version(), i.e. buildinfo.Version(cmd.Version)) — written to
+	// spawn:version so a launched instance's tags reflect the ACTUAL spawn
+	// that created it, not a restated literal (spawn#515: buildTags used to
+	// hard-code "0.1.0" here regardless of the real version, on every
+	// instance spawn has ever launched). Empty is tolerated (older/SDK
+	// callers that don't set it): buildTags simply omits the tag rather than
+	// writing a false value, since pkg/aws cannot import cmd to resolve it
+	// itself.
+	SpawnVersion string
+
 	// TargetOS is the operating system of the instance ("windows" or "linux";
 	// "" = treated as linux). Set at launch from --os or AMI auto-detection
 	// (IsWindowsAMI) and written as the spawn:os tag so connect and the
@@ -339,6 +362,10 @@ func newLaunchError(err error) error {
 func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error) {
 	// Update config for region
 	ec2Client := c.regionalEC2(launchConfig.Region)
+
+	if launchConfig.SpawnVersion == "" {
+		launchConfig.SpawnVersion = CallerVersion
+	}
 
 	// Get caller identity for per-user isolation tagging
 	accountID, userARN, err := c.GetCallerIdentityInfo(ctx)

@@ -95,6 +95,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      age survives a tag-read failure and only falls back to the agent's own
      start time when IMDS is also unavailable. The fallback source is now
      labelled inline when it isn't the authoritative tag.
+- **Two lifecycle tags asserted things about an instance that weren't
+  true** (#515). `spawn:version` was hard-coded to the literal `"0.1.0"` in
+  `buildTags`, so every instance spawn has ever launched carried that value
+  regardless of the actual running spawn — worse than an absent tag, since
+  it looks like an answer to "was this instance launched by a spawn that
+  predates fix X?" and always gives the wrong one. It now reflects the
+  actual launching spawn's resolved version (`LaunchConfig.SpawnVersion`,
+  pushed in once from `cmd.version()`/`pkg/buildinfo` via a new
+  `aws.CallerVersion` seam — `pkg/aws` can't import `cmd` directly) and is
+  omitted, not written as a false placeholder, when a caller doesn't supply
+  one. Separately, `spawn:completion-file` was written whenever
+  `--completion-file` was non-empty, but that flag has a non-empty default
+  (`/tmp/SPAWN_COMPLETE`) — so a launch that never passed `--on-complete`
+  still got a completion-file tag describing a watch with no action attached.
+  The two tags are now written atomically: `spawn:completion-file` only
+  alongside `spawn:on-complete` (spored's own config load already defaults
+  the file path when `on-complete` is set but no file was tagged, so nothing
+  regresses for a caller who *did* ask for completion handling).
 
 ## [0.100.2] - 2026-08-18
 

@@ -311,3 +311,87 @@ func TestSlugifyDNSLabel_MaxLength(t *testing.T) {
 		t.Errorf("len = %d, want 63 (DNS label max)", len(got))
 	}
 }
+
+// TestBuildTags_VersionIsNotHardcoded is the spawn#515 regression test for
+// defect 1: spawn:version was a hardcoded literal ("0.1.0") regardless of the
+// actual running spawn's version, on every instance spawn has ever launched.
+// It must now reflect config.SpawnVersion (set by the CLI from
+// cmd.version()/buildinfo, pkg/aws can't resolve that itself) rather than a
+// restated constant, and be OMITTED (not written as a false placeholder)
+// when the caller doesn't supply one.
+func TestBuildTags_VersionIsNotHardcoded(t *testing.T) {
+	t.Run("caller-supplied version is written verbatim", func(t *testing.T) {
+		tags := buildTags(LaunchConfig{Name: "t", SpawnVersion: "0.100.2"},
+			"123456789012", "arn:aws:iam::123456789012:user/test", "")
+		if got := findTagValue(tags, "spawn:version"); got != "0.100.2" {
+			t.Errorf("spawn:version = %q, want 0.100.2 (must reflect the actual caller, not a hardcoded literal)", got)
+		}
+	})
+
+	t.Run("no caller-supplied version => tag omitted, not a false placeholder", func(t *testing.T) {
+		tags := buildTags(LaunchConfig{Name: "t"},
+			"123456789012", "arn:aws:iam::123456789012:user/test", "")
+		found := false
+		for _, tg := range tags {
+			if tg.Key != nil && *tg.Key == "spawn:version" {
+				found = true
+			}
+		}
+		if found {
+			t.Errorf("spawn:version should be omitted when SpawnVersion is unset, got %q", findTagValue(tags, "spawn:version"))
+		}
+	})
+
+	t.Run("never the old hardcoded literal", func(t *testing.T) {
+		tags := buildTags(LaunchConfig{Name: "t", SpawnVersion: "0.100.2"},
+			"123456789012", "arn:aws:iam::123456789012:user/test", "")
+		if got := findTagValue(tags, "spawn:version"); got == "0.1.0" {
+			t.Error("spawn:version must never be the old hardcoded literal 0.1.0")
+		}
+	})
+}
+
+// TestBuildTags_CompletionFileRequiresOnComplete is the spawn#515 regression
+// test for defect 2: --completion-file has a non-empty flag default
+// ("/tmp/SPAWN_COMPLETE"), so a launch that never asked for --on-complete
+// still got a spawn:completion-file tag under the old unconditional `if
+// config.CompletionFile != ""` — a watch with no action attached, which reads
+// as "this instance has a completion path" when touching the file does
+// nothing. The two tags must be written atomically: completion-file only
+// alongside on-complete.
+func TestBuildTags_CompletionFileRequiresOnComplete(t *testing.T) {
+	t.Run("CompletionFile without OnComplete => neither tag written", func(t *testing.T) {
+		// Models the real-world shape: --completion-file's flag default is
+		// always non-empty even when --on-complete was never passed.
+		tags := buildTags(LaunchConfig{Name: "t", CompletionFile: "/tmp/SPAWN_COMPLETE"},
+			"123456789012", "arn:aws:iam::123456789012:user/test", "")
+		if got := findTagValue(tags, "spawn:completion-file"); got != "" {
+			t.Errorf("spawn:completion-file = %q, want empty (no spawn:on-complete to act on it)", got)
+		}
+		if got := findTagValue(tags, "spawn:on-complete"); got != "" {
+			t.Errorf("spawn:on-complete = %q, want empty", got)
+		}
+	})
+
+	t.Run("OnComplete + CompletionFile => both tags written together", func(t *testing.T) {
+		tags := buildTags(LaunchConfig{Name: "t", OnComplete: "terminate", CompletionFile: "/tmp/SPAWN_COMPLETE"},
+			"123456789012", "arn:aws:iam::123456789012:user/test", "")
+		if got := findTagValue(tags, "spawn:completion-file"); got != "/tmp/SPAWN_COMPLETE" {
+			t.Errorf("spawn:completion-file = %q, want /tmp/SPAWN_COMPLETE", got)
+		}
+		if got := findTagValue(tags, "spawn:on-complete"); got != "terminate" {
+			t.Errorf("spawn:on-complete = %q, want terminate", got)
+		}
+	})
+
+	t.Run("OnComplete without CompletionFile => only on-complete written (spored defaults the file itself)", func(t *testing.T) {
+		tags := buildTags(LaunchConfig{Name: "t", OnComplete: "terminate"},
+			"123456789012", "arn:aws:iam::123456789012:user/test", "")
+		if got := findTagValue(tags, "spawn:on-complete"); got != "terminate" {
+			t.Errorf("spawn:on-complete = %q, want terminate", got)
+		}
+		if got := findTagValue(tags, "spawn:completion-file"); got != "" {
+			t.Errorf("spawn:completion-file = %q, want empty (spored's own config load defaults it when on-complete is set, pkg/provider/ec2.go)", got)
+		}
+	})
+}

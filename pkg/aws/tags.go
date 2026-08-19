@@ -47,10 +47,21 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		{Key: aws.String("spawn:managed"), Value: aws.String("true")},
 		{Key: aws.String("spawn:root"), Value: aws.String("true")},
 		{Key: aws.String("spawn:created-by"), Value: aws.String("spawn")},
-		{Key: aws.String("spawn:version"), Value: aws.String("0.1.0")},
 		{Key: aws.String("spawn:account-id"), Value: aws.String(accountID)},
 		{Key: aws.String("spawn:account-base36"), Value: aws.String(accountBase36)},
 		{Key: aws.String("spawn:iam-user"), Value: aws.String(userARN)}, // Per-user isolation
+	}
+
+	// spawn:version records the ACTUAL launching spawn's version (config.SpawnVersion,
+	// set by the CLI from cmd.version()/buildinfo — pkg/aws can't import cmd to
+	// resolve it itself). Previously hard-coded to the literal "0.1.0" regardless
+	// of the real version, on every instance spawn has ever launched (spawn#515) —
+	// worse than an absent tag, since it looks like an answer to "was this
+	// instance launched by a spawn that predates fix X?" and gives the wrong one.
+	// Omitted (not written as a false placeholder) when the caller doesn't supply
+	// it, e.g. an older SDK integration.
+	if config.SpawnVersion != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:version"), Value: aws.String(config.SpawnVersion)})
 	}
 
 	// Friendly account-name DNS segment, when the account has one and it
@@ -175,13 +186,19 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		tags = append(tags, types.Tag{Key: aws.String("spawn:hibernate-on-idle"), Value: aws.String("true")})
 	}
 
-	// Completion signal settings
+	// Completion signal settings. spawn:completion-file is gated on OnComplete
+	// being set too, not just CompletionFile being non-empty: --completion-file
+	// has a non-empty flag default ("/tmp/SPAWN_COMPLETE", cmd/launch_flags.go),
+	// so a launch that never asked for --on-complete previously still got a
+	// spawn:completion-file tag — a watch with no action attached. That reads,
+	// to an operator or anything summarizing tags, as "this instance has a
+	// completion path" when touching the file does nothing (spawn#515). The
+	// pair is atomic: a completion file is meaningless without an action.
 	if config.OnComplete != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:on-complete"), Value: aws.String(config.OnComplete)})
-	}
-
-	if config.CompletionFile != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:completion-file"), Value: aws.String(config.CompletionFile)})
+		if config.CompletionFile != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:completion-file"), Value: aws.String(config.CompletionFile)})
+		}
 	}
 
 	if config.CompletionDelay != "" {
