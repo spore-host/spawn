@@ -85,6 +85,7 @@ func NewEC2Provider(ctx context.Context) (*EC2Provider, error) {
 		PublicIP:         publicIP,
 		PrivateIP:        privateIP,
 		Provider:         "ec2",
+		PendingTime:      idDoc.PendingTime,
 	}
 
 	// Update config with region
@@ -98,6 +99,11 @@ func NewEC2Provider(ctx context.Context) (*EC2Provider, error) {
 		providerConfig = &Config{
 			IdleCPUPercent: 5.0,
 			Observability:  observability.DefaultConfig(),
+			// Every field above is a default, not a measurement — a caller
+			// (spawn status/spored status) must not present TTL=0/IdleTimeout=0
+			// as "no TTL configured" when the real story is "couldn't read the
+			// config that says otherwise" (spawn#508).
+			ConfigLoadError: err.Error(),
 		}
 		instanceName = ""
 	}

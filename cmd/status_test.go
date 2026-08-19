@@ -231,3 +231,62 @@ func TestStatusOutputModes(t *testing.T) {
 		})
 	}
 }
+
+// TestTTLReconciliationNotice is the spawn#508 regression test: `spawn
+// status` used to print `TTL: none — instance will not auto-terminate`
+// (from the on-instance spored output, sourced with the instance's own
+// credentials) directly above `Termination deadline: <t>` (from
+// lifecycleProtectionBlock, reading the same tags with the CALLER's
+// credentials) with nothing connecting the two — an operator had to notice
+// the contradiction and guess which was true. ttlReconciliationNotice must
+// surface that combination explicitly instead of leaving it implicit.
+func TestTTLReconciliationNotice(t *testing.T) {
+	future := time.Now().Add(3 * time.Hour).UTC().Format(time.RFC3339)
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+
+	t.Run("on-instance none + tag deadline exists => mismatch warning", func(t *testing.T) {
+		inst := &aws.InstanceInfo{Tags: map[string]string{"spawn:ttl-deadline": future}}
+		statusOutput := "  TTL:              none — instance will not auto-terminate\n"
+		got := ttlReconciliationNotice(inst, statusOutput)
+		if !strings.Contains(got, "Lifecycle mismatch") {
+			t.Errorf("expected a mismatch notice, got %q", got)
+		}
+		if !strings.Contains(got, "could not resolve a TTL") {
+			t.Errorf("notice should name the on-instance symptom, got %q", got)
+		}
+	})
+
+	t.Run("on-instance UNKNOWN (config load failed) + tag deadline exists => mismatch warning", func(t *testing.T) {
+		inst := &aws.InstanceInfo{Tags: map[string]string{"spawn:ttl-deadline": future}}
+		statusOutput := "  TTL:              UNKNOWN — could not read config (access denied)\n"
+		got := ttlReconciliationNotice(inst, statusOutput)
+		if !strings.Contains(got, "Lifecycle mismatch") {
+			t.Errorf("expected a mismatch notice for the UNKNOWN case too, got %q", got)
+		}
+	})
+
+	t.Run("on-instance none + PAST DUE tag deadline => past-due variant", func(t *testing.T) {
+		inst := &aws.InstanceInfo{Tags: map[string]string{"spawn:ttl-deadline": past}}
+		statusOutput := "  TTL:              none — instance will not auto-terminate\n"
+		got := ttlReconciliationNotice(inst, statusOutput)
+		if !strings.Contains(got, "past due") {
+			t.Errorf("expected the past-due variant, got %q", got)
+		}
+	})
+
+	t.Run("on-instance none + NO tag deadline => nothing to reconcile", func(t *testing.T) {
+		inst := &aws.InstanceInfo{Tags: map[string]string{}}
+		statusOutput := "  TTL:              none — instance will not auto-terminate\n"
+		if got := ttlReconciliationNotice(inst, statusOutput); got != "" {
+			t.Errorf("expected empty when there's no tag deadline to conflict with, got %q", got)
+		}
+	})
+
+	t.Run("on-instance RESOLVED a TTL => nothing to reconcile even if tag deadline present", func(t *testing.T) {
+		inst := &aws.InstanceInfo{Tags: map[string]string{"spawn:ttl-deadline": future}}
+		statusOutput := "  TTL:              2h30m0s remaining  (terminates 2026-08-18 15:00 UTC)\n"
+		if got := ttlReconciliationNotice(inst, statusOutput); got != "" {
+			t.Errorf("expected empty when the on-instance view already agrees, got %q", got)
+		}
+	})
+}
