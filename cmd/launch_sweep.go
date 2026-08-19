@@ -46,6 +46,26 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return fmt.Errorf("either --param-file or --params must be specified for parameter sweep")
 	}
 
+	// The CLI spend-control flags used to be dropped on the floor for a sweep
+	// (#525). buildLaunchConfigFromParams "start[s] with an empty config" and the
+	// dispatch below copies only Region/InstanceType/Name off baseConfig, so
+	// --ttl, --idle-timeout and --cost-limit never reached a single row — while
+	// the --no-detach branch below printed "Using safeguards: ttl=..." from the
+	// very variables it was about to discard, which is worse than dropping them
+	// quietly: it affirmatively tells the operator a safeguard is in place.
+	//
+	// They are applied here as sweep *defaults*, which is the one place that
+	// reaches BOTH orchestration paths: the foreground path merges Defaults into
+	// every row (buildLaunchConfigFromParams), and the detached path uploads
+	// Defaults to S3 for the Lambda orchestrator, which does the same.
+	//
+	// This runs before everything that consumes them: the --no-detach safeguard
+	// log, the --estimate-only preview (whose per-row duration comes from
+	// defaults.ttl, so before this fix `--ttl 4h --estimate-only` on a file with
+	// no ttl: quoted a 1h estimate), and applyIdleTimeoutDefault, which now sees
+	// an explicit --ttl and stops substituting an unrelated 1h *idle* timeout.
+	appliedControls := applyCLISpendControlsToSweep(paramFormat)
+
 	// AUTO-ENABLE DETACHED MODE for parameter sweeps to prevent zombie instances
 	// If the CLI disconnects (laptop sleep/shutdown), detached mode ensures:
 	// - Sweep state persists in DynamoDB
@@ -76,11 +96,26 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		// User explicitly disabled detached mode - warn about zombie instances
 		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: --no-detach specified\n")
 		fmt.Fprintf(os.Stderr, "   If CLI disconnects (laptop sleep/shutdown), instances may become zombies.\n")
-		if ttl == "" && idleTimeout == "" {
-			fmt.Fprintf(os.Stderr, "\n❌ ERROR: --no-detach requires --ttl or --idle-timeout to prevent zombie instances\n")
-			return fmt.Errorf("--no-detach requires --ttl or --idle-timeout for safety")
+		// The bound is checked per ROW, against the merged (defaults + row) values
+		// the launch will actually use, rather than against the CLI variables
+		// alone. Two reasons, both from #525:
+		//
+		//   * a `ttl:` in the param file is a real bound — it is the one that used
+		//     to reach the instances — but this check refused it, so the only way
+		//     through was to pass --ttl purely to satisfy the check and then have
+		//     its value discarded. One flag to pass the guard, another to take
+		//     effect, with nothing saying so.
+		//   * a per-row check also catches a file that bounds only SOME of its
+		//     rows, which a check on the CLI variables cannot see at all.
+		if unbounded := sweepRowsWithoutBound(paramFormat); len(unbounded) > 0 {
+			fmt.Fprintf(os.Stderr, "\n❌ ERROR: --no-detach requires a TTL or idle timeout on EVERY row to prevent zombie instances\n")
+			fmt.Fprintf(os.Stderr, "   Unbounded: %s\n", strings.Join(unbounded, ", "))
+			fmt.Fprintf(os.Stderr, "   Fix with --ttl/--idle-timeout for the whole sweep, or ttl:/idle_timeout: under defaults: or on those rows.\n")
+			return fmt.Errorf("--no-detach requires a TTL or idle timeout on every row for safety (%d unbounded)", len(unbounded))
 		}
-		fmt.Fprintf(os.Stderr, "   Using safeguards: ttl=%s, idle-timeout=%s\n\n", ttl, idleTimeout)
+		defTTL, defIdle := sweepRowBound(paramFormat.Defaults, nil)
+		fmt.Fprintf(os.Stderr, "   Using safeguards: ttl=%s, idle-timeout=%s\n", defTTL, defIdle)
+		fmt.Fprintf(os.Stderr, "   (sweep defaults, CLI flags already folded in; a row's own value wins — #525)\n\n")
 	}
 
 	// Generate sweep ID
@@ -137,6 +172,10 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 	if detach {
 		fmt.Fprintf(os.Stderr, "   Orchestration: Lambda (detached)\n")
+	}
+	if len(appliedControls) > 0 {
+		fmt.Fprintf(os.Stderr, "   From the command line: %s (each row's own value wins)\n",
+			strings.Join(appliedControls, ", "))
 	}
 	fmt.Fprintf(os.Stderr, "\n")
 
@@ -617,6 +656,83 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 	}
 
 	return launchedInstances, failures, successCount, nil
+}
+
+// sweepRowBound returns the TTL and idle timeout that will actually apply to one
+// row: the row's own value if it has one, otherwise the sweep default. Pass a nil
+// row to read the defaults themselves.
+//
+// A non-string value (`ttl: 3600` rather than `ttl: 1h`) reads as absent, which
+// matches what buildLaunchConfigFromParams does with it — the type assertion
+// there fails and the field stays empty. Agreeing with the parser is the point:
+// it means the --no-detach guard refuses that file loudly instead of letting it
+// launch with a bound the parser quietly dropped.
+func sweepRowBound(defaults, row map[string]interface{}) (ttl, idle string) {
+	pick := func(key string) string {
+		for _, m := range []map[string]interface{}{row, defaults} {
+			if v, ok := m[key]; ok {
+				if s, ok := v.(string); ok && s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	return pick("ttl"), pick("idle_timeout")
+}
+
+// sweepRowsWithoutBound labels every row that would launch with neither a TTL nor
+// an idle timeout, for the --no-detach guard's error message. Naming the rows
+// matters: on a 30-row file "some row is unbounded" is not actionable.
+func sweepRowsWithoutBound(paramFormat *ParamFileFormat) []string {
+	var out []string
+	for i, row := range paramFormat.Params {
+		if ttl, idle := sweepRowBound(paramFormat.Defaults, row); ttl == "" && idle == "" {
+			label := fmt.Sprintf("row %d", i)
+			if it, ok := row["instance_type"].(string); ok && it != "" {
+				label += " (" + it + ")"
+			}
+			out = append(out, label)
+		}
+	}
+	return out
+}
+
+// applyCLISpendControlsToSweep writes the CLI spend-control flags into a sweep's
+// `defaults:` so they actually reach each row (#525), and returns a human-readable
+// list of what it set for the launch header.
+//
+// Precedence, most specific wins:
+//
+//	a row's own params: > the CLI flag > the param file's defaults:
+//
+// So a per-row `ttl:` (a GPU row on a shorter leash, say) still wins, while a flag
+// passed at invocation time beats a value checked into the file — which is the
+// same direction cobra/viper use for flags versus config, and the reason
+// `--ttl 30m` on a file that says `ttl: 8h` does what it looks like it does.
+//
+// A non-empty ttl/idleTimeout here can only have come from the command line:
+// applyLaunchDefaults (which would otherwise fold in ~/.spawn/config.yaml) runs
+// *after* the sweep early-return in launch_single.go, so ~/.spawn defaults never
+// silently outrank the param file.
+func applyCLISpendControlsToSweep(paramFormat *ParamFileFormat) []string {
+	if paramFormat.Defaults == nil {
+		paramFormat.Defaults = make(map[string]interface{})
+	}
+	var applied []string
+	if ttl != "" {
+		paramFormat.Defaults["ttl"] = ttl
+		applied = append(applied, "ttl="+ttl)
+	}
+	if idleTimeout != "" {
+		paramFormat.Defaults["idle_timeout"] = idleTimeout
+		applied = append(applied, "idle-timeout="+idleTimeout)
+	}
+	if costLimit > 0 {
+		paramFormat.Defaults["cost_limit"] = costLimit
+		applied = append(applied, fmt.Sprintf("cost-limit=$%.2f", costLimit))
+	}
+	return applied
 }
 
 // estimateSweepOnly prints a per-row cost estimate for a sweep and returns

@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A parameter sweep silently discarded `--ttl`, `--idle-timeout` and
+  `--cost-limit`, then logged `Using safeguards: ttl=...`** (#525).
+  `buildLaunchConfigFromParams` starts from an empty config and the sweep
+  dispatch copied only `Region`/`InstanceType`/`Name` off the base config, so no
+  CLI spend control reached a single row — while the `--no-detach` branch printed
+  a safeguards line from the very variables it was about to throw away, which is
+  worse than dropping them quietly: it affirmatively tells the operator a cap is
+  active at the instant it is discarded. `cost_limit:` in a param file did not
+  work either — there was no parser case, so it fell through to the unknown-key
+  arm and became a `PARAM_cost_limit` env var that capped nothing. With both
+  routes broken a sweep had no per-instance dollar cap at all, and its only bound
+  was the zombie guard's unrelated 1h *idle* timeout, which never fires on a
+  compute-bound row yet still shows up in `spawn list` and reads as bounded.
+
+  The flags are now applied as sweep `defaults:` — the one place that reaches both
+  orchestration paths, since the foreground path merges defaults into every row
+  and the detached path uploads them to S3 for the Lambda orchestrator — and
+  `cost_limit:` is a real parser case that *errors* on a value it cannot read
+  rather than leaving the cap at 0. Precedence is most-specific-wins: a row's own
+  `params:` > the CLI flag > the file's `defaults:`.
+
+  Two knock-on fixes in the same path: `--estimate-only` now prices the TTL you
+  passed (previously `--ttl 4h` on a file with no `ttl:` was quoted at the
+  estimator's 1h default, understating the worst case fourfold), and the
+  `--no-detach` guard checks the merged **per-row** bound instead of the CLI
+  variable. A `ttl:` in the param file used to be refused by that guard even
+  though it was the value which actually reached the instances, so the only way
+  through was to pass `--ttl` to satisfy the check and have it discarded — one
+  flag to pass the guard, another to take effect. The per-row form also catches a
+  file that bounds only *some* of its rows, which a check on the CLI variable
+  could not see, and names the offending rows.
 - **`--estimate-only` launched every row of a parameter sweep instead of
   estimating it** (#524). The flag was checked only inside
   `launchSweepDetached`, so any sweep that took the *foreground* path
