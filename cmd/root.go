@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/libs/update"
+	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/buildinfo"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
@@ -59,6 +60,12 @@ func Execute() {
 	// Parse flags early to get --lang value before help is displayed
 	_ = rootCmd.ParseFlags(os.Args[1:])
 	ensureI18nInitialized()
+
+	// So every launched instance's spawn:version tag reflects the ACTUAL
+	// running spawn, not a restated literal (spawn#515) — pkg/aws can't
+	// import cmd to resolve this itself, so it's pushed in here once at
+	// startup.
+	aws.CallerVersion = version()
 
 	// Start async update check (non-blocking, respects SPORE_NO_UPDATE_CHECK).
 	updateCh := startUpdateCheck(version())
