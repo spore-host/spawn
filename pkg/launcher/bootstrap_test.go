@@ -411,7 +411,7 @@ source %s
 printf '%%s' "$PARAM_label"
 `, shellQuoteForTest(tc.value), loop, outFile)
 
-			cmd := exec.Command("bash", "-c", shellScript)
+			cmd := exec.Command("bash", "-c", shellScript) //nolint:gosec // nosemgrep
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("shell exec failed: %v\noutput: %s\nscript:\n%s", err, out, shellScript)
