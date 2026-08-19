@@ -78,21 +78,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Split running instances out — they're never removed and gate cleanup.
-	// Elastic IPs are also split out: spawn never allocates them, so it never
-	// releases them (#262). They're reported for visibility but the user must
-	// release their own addresses.
-	var running, addresses, removable []aws.ManagedResource
-	for _, r := range found {
-		switch {
-		case r.IsRunningInstance():
-			running = append(running, r)
-		case r.ResourceType == "address":
-			addresses = append(addresses, r)
-		default:
-			removable = append(removable, r)
-		}
-	}
+	running, addresses, alreadyGone, removable := splitCleanupResources(found)
 
 	printResourceTable(cmd, found)
 
@@ -116,13 +102,32 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if len(alreadyGone) > 0 {
+		fmt.Fprintf(os.Stderr, "\nℹ️  %d resource(s) shown are tag-mapping residue for things that no longer exist (the Resource Groups Tagging API's index outlives the resource) — nothing to remove for these:\n", len(alreadyGone))
+		for _, r := range alreadyGone {
+			fmt.Fprintf(os.Stderr, "    %s %s (%s)\n", r.ResourceType, r.ID, r.Region)
+		}
+	}
+
 	if cleanupDryRun {
+		if len(removable) == 0 {
+			fmt.Fprintf(out, "\nDry run: 0 resource(s) would be removed")
+			if len(alreadyGone) > 0 {
+				fmt.Fprintf(out, " (%d tag mapping(s) are residue for resources that no longer exist)", len(alreadyGone))
+			}
+			fmt.Fprintln(out, ".")
+			return nil
+		}
 		fmt.Fprintf(out, "\nDry run: %d resource(s) would be removed. Re-run without --dry-run to delete.\n", len(removable))
 		return nil
 	}
 
 	if len(removable) == 0 {
-		fmt.Fprintln(out, "\nNo removable resources (only running instances present).")
+		if len(alreadyGone) > 0 {
+			fmt.Fprintln(out, "\nNo removable resources (only already-gone tag residue and/or running instances present).")
+		} else {
+			fmt.Fprintln(out, "\nNo removable resources (only running instances present).")
+		}
 		return nil
 	}
 
@@ -161,6 +166,33 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%d resource(s) could not be removed", failed)
 	}
 	return nil
+}
+
+// splitCleanupResources partitions a discovery sweep into the four buckets
+// cleanup's output depends on:
+//   - running: running/pending instances — never removed, gate cleanup unless --dry-run
+//   - addresses: Elastic IPs — spawn never allocates or releases them (#262)
+//   - alreadyGone: resources whose State is already "deleted" — Resource Groups
+//     Tagging API tag mappings outlive the resources they describe, so a
+//     discovery sweep routinely returns ids for things no longer there.
+//     Counting these as "removable" overstates both the dry-run preview and
+//     the real confirmation prompt (spawn#516) — they must be split out, not
+//     folded into removable just because they aren't running or an address.
+//   - removable: everything else, the actual candidates for RemoveResource.
+func splitCleanupResources(found []aws.ManagedResource) (running, addresses, alreadyGone, removable []aws.ManagedResource) {
+	for _, r := range found {
+		switch {
+		case r.IsRunningInstance():
+			running = append(running, r)
+		case r.ResourceType == "address":
+			addresses = append(addresses, r)
+		case r.State == "deleted":
+			alreadyGone = append(alreadyGone, r)
+		default:
+			removable = append(removable, r)
+		}
+	}
+	return running, addresses, alreadyGone, removable
 }
 
 // deletionOrderCmd orders resources dependents-first. It mirrors the package

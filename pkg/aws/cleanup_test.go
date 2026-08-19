@@ -240,3 +240,110 @@ func resourceTypes(rs []ManagedResource) []string {
 	}
 	return out
 }
+
+// fakeInstanceAPI reproduces the TWO distinct absence shapes real EC2's
+// DescribeInstances can return, which is exactly the distinction spawn#516
+// is about:
+//   - a syntactically-valid-but-never-existed id: the WHOLE batch call fails
+//     with InvalidInstanceID.NotFound (errorOnIDs)
+//   - a real id that has since aged out of the API entirely: the call
+//     SUCCEEDS with an empty (or partial) result — no error at all
+//     (states simply omits the id)
+//
+// The substrate emulator does not reproduce the first shape (hence
+// fakeVolumeAPI's real-world counterpart above), and no existing fake
+// reproduced the second, which is the shape enrichInstanceState mishandled.
+type fakeInstanceAPI struct {
+	states    map[string]string // id -> state; absent id == aged out (empty result, no error)
+	errorOnID string            // if set and present in the request, the WHOLE call 404s instead
+}
+
+func (f *fakeInstanceAPI) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+	if f.errorOnID != "" {
+		for _, id := range in.InstanceIds {
+			if id == f.errorOnID {
+				return nil, &notFoundErr{code: "InvalidInstanceID.NotFound"}
+			}
+		}
+	}
+	var reservations []ec2types.Reservation
+	for _, id := range in.InstanceIds {
+		state, ok := f.states[id]
+		if !ok {
+			continue // aged out: EC2 just omits it, no error (spawn#516)
+		}
+		id := id
+		reservations = append(reservations, ec2types.Reservation{
+			Instances: []ec2types.Instance{{
+				InstanceId: &id,
+				State:      &ec2types.InstanceState{Name: ec2types.InstanceStateName(state)},
+			}},
+		})
+	}
+	return &ec2.DescribeInstancesOutput{Reservations: reservations}, nil
+}
+
+// TestEnrichInstanceState_AgedOutInstanceIsMarkedDeleted is the spawn#516
+// regression test: DescribeInstances returning an EMPTY result for an
+// aged-out instance id (no error at all — the batch call SUCCEEDS) must
+// still result in State == "deleted", not "" (which cleanup's removable
+// split then misreads as "not running, therefore fine to delete", when the
+// real problem is the id doesn't exist to describe in the first place).
+//
+// Before the fix, enrichInstanceState only ever set State from a
+// reservation it actually saw; an id EC2 silently dropped from the response
+// never got any State at all, and the isInstanceNotFound-triggered per-id
+// fallback never ran because DescribeInstances didn't return an error here.
+func TestEnrichInstanceState_AgedOutInstanceIsMarkedDeleted(t *testing.T) {
+	c := &Client{}
+	api := &fakeInstanceAPI{states: map[string]string{
+		"i-live": "running",
+		// i-aged-out is absent from states -> DescribeInstances omits it,
+		// with NO error (this is the real-world shape; contrast with
+		// i-neverexisted below, which DOES error).
+	}}
+	resources := []ManagedResource{
+		{ResourceType: "instance", ID: "i-live"},
+		{ResourceType: "instance", ID: "i-aged-out"},
+	}
+	ids := []string{"i-live", "i-aged-out"}
+	idx := map[string]int{"i-live": 0, "i-aged-out": 1}
+
+	if err := c.enrichInstanceStateWith(context.Background(), api, resources, ids, idx); err != nil {
+		t.Fatalf("enrichInstanceStateWith: %v", err)
+	}
+	if resources[0].State != "running" {
+		t.Errorf("i-live state = %q, want running", resources[0].State)
+	}
+	if resources[1].State != "deleted" {
+		t.Errorf("i-aged-out state = %q, want deleted (not empty)", resources[1].State)
+	}
+}
+
+// TestEnrichInstanceState_BatchNotFoundStillFallsBack confirms the OTHER
+// absence shape (a batch 404 from a syntactically-valid-but-never-existed
+// id) still routes into the per-id fallback exactly as before — this fix
+// must not regress the existing #500-era path.
+func TestEnrichInstanceState_BatchNotFoundStillFallsBack(t *testing.T) {
+	c := &Client{}
+	api := &fakeInstanceAPI{
+		states:    map[string]string{"i-live": "stopped"},
+		errorOnID: "i-neverexisted",
+	}
+	resources := []ManagedResource{
+		{ResourceType: "instance", ID: "i-live"},
+		{ResourceType: "instance", ID: "i-neverexisted"},
+	}
+	ids := []string{"i-live", "i-neverexisted"}
+	idx := map[string]int{"i-live": 0, "i-neverexisted": 1}
+
+	if err := c.enrichInstanceStateWith(context.Background(), api, resources, ids, idx); err != nil {
+		t.Fatalf("enrichInstanceStateWith: %v", err)
+	}
+	if resources[0].State != "stopped" {
+		t.Errorf("i-live state = %q, want stopped", resources[0].State)
+	}
+	if resources[1].State != "deleted" {
+		t.Errorf("i-neverexisted state = %q, want deleted", resources[1].State)
+	}
+}
