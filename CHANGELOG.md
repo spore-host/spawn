@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A parameter sweep silently discarded `--iam-role`, `--iam-policy`,
+  `--iam-policy-file`, `--iam-role-tags` and `--iam-allow-full-access`, giving
+  every instance the shared `spored-instance-role` regardless of what was
+  requested — no warning, exit 0** (#539). The single-instance and batch-queue
+  launch paths read these flags to build (or reuse) a custom role/policy; the
+  sweep path called `SetupSporedIAMRole()` unconditionally and never looked at
+  any of them, so a `--iam-policy-file` naming a workload's actual permissions
+  parsed and was thrown away. This is the same bug class as #525 (CLI spend
+  controls dropped on the sweep path) but more expensive to discover: a
+  wrong/missing IAM role means the workload dies on its first AWS API call with
+  `AccessDenied`, which reads as a workload bug rather than a launch-flag bug —
+  so the entire run's compute spend can produce zero result before anyone
+  suspects the launch flags.
+
+  The flags are now resolved into a real instance profile once per sweep (the
+  same `CreateOrGetInstanceProfile` call the single-instance path makes per
+  instance) and folded into sweep `defaults:` — the one place that reaches both
+  orchestration paths, mirroring #525's fix: the foreground path merges
+  defaults into every row via the existing `iam_role:` param-file key, and the
+  detached path uploads defaults to S3 for the Lambda orchestrator, which reads
+  `iam_role` from there too. Precedence is most-specific-wins, same as #525: a
+  row's own `iam_role:` > the CLI flag > the file's `defaults:`. A sweep with no
+  CLI IAM flags and no file-level `iam_role:` still falls back to the shared
+  `spored-instance-role`, unchanged from before this fix.
+
 ### Security
 - Bumped `golang.org/x/mod` (indirect, via `pkg/plugin`/sigstore) v0.37.0 → v0.40.0,
   fixing CVE-2026-56864/CVE-2026-56865 (HIGH) — a malicious GOSUMDB/GOPROXY could

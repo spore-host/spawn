@@ -211,6 +211,28 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return fmt.Errorf("failed to initialize AWS client: %w", err)
 	}
 
+	// The CLI IAM flags (--iam-role/--iam-policy/--iam-policy-file/
+	// --iam-managed-policies/--iam-role-tags/--iam-allow-full-access) used to be
+	// read on the single-instance and batch-queue launch paths but never on this
+	// one (#539): every sweep instance silently got the shared
+	// spored-instance-role regardless of what was requested, with no warning and
+	// exit 0. A wrong/missing IAM role is worse than most dropped launch flags —
+	// the workload dies on its first AWS API call with AccessDenied, which reads
+	// as a workload bug, not a launch-flag bug, and the whole sweep's spend
+	// produces zero result.
+	//
+	// Resolved here as a sweep default, the one place that reaches BOTH
+	// orchestration paths below (same pattern as applyCLISpendControlsToSweep for
+	// #525): the foreground path merges Defaults into every row
+	// (buildLaunchConfigFromParams's existing iam_role: case), and the detached
+	// path uploads Defaults to S3 for the Lambda orchestrator, which reads
+	// iam_role from there too (lambda/sweep-orchestrator/main.go). A row's own
+	// iam_role: still wins — same precedence already established for spend
+	// controls: row's own params: > CLI flag > file's defaults:.
+	if err := applyCLIIAMToSweep(ctx, awsClient, paramFormat, auditLog); err != nil {
+		return err
+	}
+
 	// Check for detached mode (Lambda orchestration)
 	if detach && maxConcurrent > 0 {
 		return launchSweepDetached(ctx, paramFormat, baseConfig, sweepID, name, maxConcurrent, launchDelay)
@@ -347,7 +369,16 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 	prog.Complete("Setting up SSH key")
 
-	// Step 3: Setup IAM role
+	// Step 3: Setup IAM role. A CLI --iam-role/--iam-policy/--iam-policy-file/
+	// --iam-managed-policies was already resolved into a real instance profile and
+	// folded into paramFormat.Defaults["iam_role"] by applyCLIIAMToSweep, above
+	// the detached/foreground dispatch — so buildLaunchConfigFromParams has
+	// already populated every config's IamInstanceProfile from it via the
+	// existing iam_role: case, unless a row's own iam_role: overrides it (the
+	// established precedence: row's own params: > CLI flag > file's defaults:).
+	// This step is therefore unchanged from before #539: it only runs as the
+	// fallback for a sweep with no CLI IAM flags and no file-level iam_role:
+	// default, ensuring the shared spored-instance-role.
 	prog.Start("Setting up IAM role")
 	if firstConfig.IamInstanceProfile == "" {
 		instanceProfile, err := awsClient.SetupSporedIAMRole(ctx)
@@ -743,6 +774,63 @@ func applyCLISpendControlsToSweep(paramFormat *ParamFileFormat) []string {
 		applied = append(applied, fmt.Sprintf("cost-limit=$%.2f", costLimit))
 	}
 	return applied
+}
+
+// applyCLIIAMToSweep resolves the CLI IAM flags (--iam-role/--iam-policy/
+// --iam-policy-file/--iam-managed-policies/--iam-role-tags/--iam-allow-full-access)
+// into a real instance profile ONCE per sweep — the same
+// CreateOrGetInstanceProfile call launch_single.go's ensureIAMProfile makes per
+// instance — and writes the result into paramFormat.Defaults["iam_role"] so it
+// reaches every row via the existing iam_role: case in
+// buildLaunchConfigFromParams (#539).
+//
+// A no-op when none of the flags were passed: the existing SetupSporedIAMRole
+// fallback (unchanged, in launchParameterSweep and launchSweepDetached) still
+// provides the shared spored-instance-role in that case, exactly as before this
+// fix.
+func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat *ParamFileFormat, auditLog *audit.AuditLogger) error {
+	if iamRole == "" && len(iamPolicy) == 0 && len(iamManagedPolicies) == 0 && iamPolicyFile == "" {
+		return nil
+	}
+
+	// Reject wildcard *:FullAccess templates unless explicitly opted in (2026-06
+	// audit, M-sec) — fail before any AWS call, same guard as the single-instance
+	// path.
+	if err := aws.ValidatePolicyNames(iamPolicy, iamAllowFullAccess); err != nil {
+		return err
+	}
+
+	iamConfig := aws.IAMRoleConfig{
+		RoleName:        iamRole,
+		Policies:        iamPolicy,
+		ManagedPolicies: iamManagedPolicies,
+		PolicyFile:      iamPolicyFile,
+		TrustServices:   iamTrustServices,
+		Tags:            parseIAMRoleTags(iamRoleTags),
+	}
+
+	instanceProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, iamConfig)
+	if err != nil {
+		auditLog.LogOperation("create_iam_role", iamConfig.RoleName, "failed", err)
+		return fmt.Errorf("failed to create IAM instance profile: %w", err)
+	}
+	auditLog.LogOperationWithData("create_iam_role", iamConfig.RoleName, "success",
+		map[string]interface{}{
+			"instance_profile": instanceProfile,
+		}, nil)
+
+	if paramFormat.Defaults == nil {
+		paramFormat.Defaults = make(map[string]interface{})
+	}
+	// Overwrite unconditionally, same as applyCLISpendControlsToSweep: a flag
+	// passed at invocation time outranks a value checked into the file's
+	// defaults:, and a row's own iam_role: (applied afterwards by
+	// buildLaunchConfigFromParams, which merges defaults first) still wins over
+	// both.
+	paramFormat.Defaults["iam_role"] = instanceProfile
+	fmt.Fprintf(os.Stderr, "\n✓ IAM: using instance profile %s from the command line "+
+		"(each row's own iam_role: still wins)\n", instanceProfile)
+	return nil
 }
 
 // estimateSweepOnly prints a per-row cost estimate for a sweep and returns
