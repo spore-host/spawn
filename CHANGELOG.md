@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns `(cost float64, measured bool)`; the caller only logs a rate when
   `measured` is true, and logs an explicit "unknown (lookup failed or denied)"
   line otherwise.
+- **`pkg/mpicohort`'s `Actuator.ensurePlacementGroup` had a check-then-act
+  race**: the mutex was released between checking whether an AZ's placement
+  group was already created and calling `CreatePlacementGroup`, so concurrent
+  cohort members in the same newly-visited AZ (the normal case — a round
+  launches N members at once) could each observe "not created yet" and each
+  call `CreatePlacementGroup`, defeating the once-per-AZ design that exists to
+  avoid the ~30s availability poll for every member of a round (#514,
+  surfaced by a CI flake in `TestActuator_PerAZPlacementGroup`). Concurrent
+  callers for the same AZ now coalesce onto a single in-flight
+  `CreatePlacementGroup` call instead of each issuing their own; callers for
+  different AZs are not serialized against each other.
 
 ## [0.100.2] - 2026-08-18
 

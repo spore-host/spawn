@@ -85,8 +85,21 @@ type Actuator struct {
 	// on demand. Empty → no PG (or the config already carries a fixed one).
 	PlacementGroupPrefix string
 
-	pgMu      sync.Mutex          // guards pgCreated
+	pgMu      sync.Mutex          // guards pgCreated and pgOnce
 	pgCreated map[string]struct{} // AZ → placement group ensured (create-once per AZ)
+	pgOnce    map[string]*pgCreateOnce // AZ → in-flight/completed CreatePlacementGroup call
+}
+
+// pgCreateOnce coalesces concurrent ensurePlacementGroup calls for the same AZ
+// into a single CreatePlacementGroup call. A round launches N cohort members
+// concurrently (see TestActuator_PerAZPlacementGroup), so multiple goroutines
+// commonly race into ensurePlacementGroup for the same AZ at once; without
+// this, more than one could observe pgCreated[az] unset before any of them
+// finished creating it, each paying the ~30s availability poll the once-per-AZ
+// design exists to avoid (spawn#514).
+type pgCreateOnce struct {
+	done chan struct{}
+	err  error
 }
 
 func (a *Actuator) Launch(ctx context.Context, intent cohort.EntityIntent) (cohort.Observation, error) {
@@ -136,6 +149,14 @@ func (a *Actuator) Launch(ctx context.Context, intent cohort.EntityIntent) (coho
 // ensurePlacementGroup creates the per-AZ cluster placement group at most once
 // per AZ (create is idempotent, but this avoids the redundant 30s availability
 // poll for every member of a round in the same AZ) and returns its name.
+//
+// Concurrent callers for the SAME AZ coalesce onto one CreatePlacementGroup
+// call via pgOnce: the first caller in does the create and the rest wait on
+// its result, rather than each independently observing pgCreated[az] unset
+// and calling CreatePlacementGroup themselves (spawn#514 — the lock used to be
+// released between the check and the create, so a round's concurrent members
+// could each pay the 30s poll for a newly-visited AZ). Callers for DIFFERENT
+// AZs are not serialized against each other.
 func (a *Actuator) ensurePlacementGroup(ctx context.Context, az string) (string, error) {
 	name := PlacementGroupName(a.PlacementGroupPrefix, az)
 
@@ -143,19 +164,52 @@ func (a *Actuator) ensurePlacementGroup(ctx context.Context, az string) (string,
 	if a.pgCreated == nil {
 		a.pgCreated = make(map[string]struct{})
 	}
-	_, done := a.pgCreated[az]
-	a.pgMu.Unlock()
-	if done {
+	if _, done := a.pgCreated[az]; done {
+		a.pgMu.Unlock()
 		return name, nil
 	}
+	if a.pgOnce == nil {
+		a.pgOnce = make(map[string]*pgCreateOnce)
+	}
+	once, inFlight := a.pgOnce[az]
+	if !inFlight {
+		once = &pgCreateOnce{done: make(chan struct{})}
+		a.pgOnce[az] = once
+	}
+	a.pgMu.Unlock()
 
-	if err := a.Client.CreatePlacementGroup(ctx, name, a.Region); err != nil {
-		return "", fmt.Errorf("create placement group %q: %w", name, err)
+	if inFlight {
+		// Another goroutine is already creating this AZ's placement group;
+		// wait for it rather than issuing a redundant CreatePlacementGroup.
+		select {
+		case <-once.done:
+			if once.err != nil {
+				return "", fmt.Errorf("create placement group %q: %w", name, once.err)
+			}
+			return name, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 
+	// We won the race to create this AZ's group.
+	err := a.Client.CreatePlacementGroup(ctx, name, a.Region)
+	once.err = err
+	close(once.done)
+
 	a.pgMu.Lock()
-	a.pgCreated[az] = struct{}{}
+	// Drop the once-entry regardless of outcome: on success pgCreated below is
+	// the source of truth; on failure this lets a future call retry cleanly
+	// instead of replaying the same error forever.
+	delete(a.pgOnce, az)
+	if err == nil {
+		a.pgCreated[az] = struct{}{}
+	}
 	a.pgMu.Unlock()
+
+	if err != nil {
+		return "", fmt.Errorf("create placement group %q: %w", name, err)
+	}
 	return name, nil
 }
 
