@@ -46,6 +46,15 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return fmt.Errorf("either --param-file or --params must be specified for parameter sweep")
 	}
 
+	// Reject keys that look like spawn settings before anything is launched or
+	// priced (#526). This runs before applyCLISpendControlsToSweep so the error
+	// names only what the user actually wrote, not the ttl/cost_limit that is
+	// about to be injected below.
+	if err := validateSweepParamKeys(paramFormat); err != nil {
+		fmt.Fprintf(os.Stderr, "\n❌ ERROR: %v\n\n", err)
+		return fmt.Errorf("unusable param-file keys")
+	}
+
 	// The CLI spend-control flags used to be dropped on the floor for a sweep
 	// (#525). buildLaunchConfigFromParams "start[s] with an empty config" and the
 	// dispatch below copies only Region/InstanceType/Name off baseConfig, so
@@ -177,6 +186,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		fmt.Fprintf(os.Stderr, "   From the command line: %s (each row's own value wins)\n",
 			strings.Join(appliedControls, ", "))
 	}
+	reportPassthroughParams(paramFormat)
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// --estimate-only is handled HERE, above the detached/foreground dispatch

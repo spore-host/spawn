@@ -242,8 +242,20 @@ func buildLaunchConfigFromParams(defaults, params map[string]interface{}, sweepI
 				config.Name = s
 			}
 		default:
-			// All unknown fields become parameters (PARAM_* env vars)
-			config.Parameters[key] = fmt.Sprintf("%v", val)
+			// Unknown fields become workload parameters (PARAM_* env vars) — the
+			// passthrough that makes a sweep useful. But a key that only LOOKS like
+			// a workload parameter is rejected here rather than exported into the
+			// void: see cmd/sweep_keys.go for the three rules and #526 for the
+			// table of misconfigurations this used to accept in silence.
+			//
+			// launchParameterSweep runs the same check up front, with a better
+			// message and all the bad keys at once. This copy is the one that
+			// covers resume and the quota preflight, which do not go through there.
+			name, err := resolveParamName(key)
+			if err != nil {
+				return config, err
+			}
+			config.Parameters[name] = fmt.Sprintf("%v", val)
 		}
 	}
 
