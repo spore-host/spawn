@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped `golang.org/x/mod` (indirect, via `pkg/plugin`/sigstore) v0.37.0 → v0.40.0,
+  fixing CVE-2026-56864/CVE-2026-56865 (HIGH) — a malicious GOSUMDB/GOPROXY could
+  forge module checksums. Trivy's security gate started failing on every open PR
+  once its vulnerability DB picked up these CVEs, independent of any code change.
+
 ## [0.100.4] - 2026-08-19
 
 ### Fixed
