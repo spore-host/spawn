@@ -200,7 +200,7 @@ func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, pho
 		"Statement": [
 			{"Effect":"Allow","Action":["ec2:RunInstances","ec2:DescribeInstances","ec2:DescribeInstanceStatus","ec2:DescribeImages","ec2:DescribeSubnets","ec2:DescribeSecurityGroups","ec2:DescribeVpcs","ec2:DescribeKeyPairs","ec2:CreateTags"],"Resource":"*"},
 			{"Effect":"Allow","Action":["ec2:TerminateInstances","ec2:StopInstances","ec2:StartInstances"],"Resource":"*","Condition":{"StringEquals":{"aws:ResourceTag/spawn:managed":"true"}}},
-			{"Effect":"Allow","Action":["ec2:DescribeSpotPriceHistory","servicequotas:GetServiceQuota","servicequotas:ListServiceQuotas"],"Resource":"*"},
+			{"Effect":"Allow","Action":["ec2:DescribeSpotPriceHistory","servicequotas:GetServiceQuota","servicequotas:ListServiceQuotas","pricing:GetProducts"],"Resource":"*"},
 			{"Effect":"Allow","Action":["ssm:StartSession"],"Resource":["arn:aws:ec2:*:*:instance/*","arn:aws:ssm:*::document/SSM-SessionManagerRunShell"]},
 			{"Effect":"Allow","Action":["ssm:TerminateSession","ssm:ResumeSession"],"Resource":"arn:aws:ssm:*:*:session/*"}
 		]

@@ -178,8 +178,12 @@ func lifecycleProtectionBlock(instance *aws.InstanceInfo) string {
 		// Worst-case compute cost = on-demand rate × time from launch to deadline.
 		// It's a ceiling (the idle timeout usually stops the instance well before),
 		// and it excludes EBS/network — labelled as such. Best-effort: skip if we
-		// can't price the type.
-		if rate := aws.LookupEC2OnDemandPrice(context.Background(), instance.Region, instance.InstanceType); rate > 0 && !instance.LaunchTime.IsZero() {
+		// can't price the type. Reads the spawn:price-per-hour tag rather than
+		// re-querying pricing here — that tag is the real on-demand rate truffle
+		// resolved at launch time (#533), and re-deriving it independently would
+		// let this display drift from what --cost-limit is actually enforced
+		// against.
+		if rate := pricePerHour(instance); rate > 0 && !instance.LaunchTime.IsZero() {
 			maxHours := deadline.Sub(instance.LaunchTime).Hours()
 			if maxHours > 0 {
 				fmt.Fprintf(&b, "  Max compute cost:      ~$%.2f by deadline (on-demand rate, compute only; idle-stop usually ends it sooner)\n",

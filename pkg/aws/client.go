@@ -28,9 +28,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	smithy "github.com/aws/smithy-go"
-	"github.com/spore-host/libs/pricing"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
+	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
 // Client wraps an AWS SDK configuration and provides EC2 lifecycle operations
@@ -357,8 +357,8 @@ func newLaunchError(err error) error {
 // timeout, DNS name, cost limit, etc.) are applied at launch time so spored
 // can manage the instance autonomously after the caller disconnects.
 //
-// If LaunchConfig.PricePerHour is 0, Launch queries the AWS Pricing API to
-// determine the on-demand rate and falls back to a static table if unavailable.
+// If LaunchConfig.PricePerHour is 0, Launch resolves the on-demand rate through
+// truffle, the suite's pricing authority (#533). See [resolvePricePerHour].
 func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error) {
 	// Update config for region
 	ec2Client := c.regionalEC2(launchConfig.Region)
@@ -373,18 +373,11 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		return nil, fmt.Errorf("failed to get caller identity: %w", err)
 	}
 
-	// Look up the actual on-demand price from the AWS Pricing API.
-	// This is stored in the spawn:price-per-hour tag so spored can compute effective cost
-	// without needing to know the instance type at runtime.
-	if launchConfig.PricePerHour == 0 {
-		if price := LookupEC2OnDemandPrice(ctx, launchConfig.Region, launchConfig.InstanceType); price > 0 {
-			launchConfig.PricePerHour = price
-			log.Printf("pricing: %s in %s = $%.4f/hr (from AWS Pricing API)", launchConfig.InstanceType, launchConfig.Region, price)
-		} else {
-			// Fall back to static table only as a last resort
-			launchConfig.PricePerHour = pricing.GetEC2HourlyRate(launchConfig.Region, launchConfig.InstanceType)
-			log.Printf("pricing: %s in %s = $%.4f/hr (from static table — API unavailable)", launchConfig.InstanceType, launchConfig.Region, launchConfig.PricePerHour)
-		}
+	// Resolve the on-demand price via truffle and store it in the
+	// spawn:price-per-hour tag so spored can compute effective cost without
+	// needing to know the instance type at runtime.
+	if err := resolvePricePerHour(ctx, truffleaws.NewClientFromConfig(c.cfg), &launchConfig); err != nil {
+		return nil, err
 	}
 
 	// Resolve the account's friendly name into a DNS-safe slug for a legible
