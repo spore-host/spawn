@@ -173,8 +173,15 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 	// write from here.
 	if identity.Provider == "ec2" && config.EBSHourlyCost == 0 {
 		go func() {
-			if ebsCost := prov.LookupAndTagEBSCost(context.Background()); ebsCost > 0 {
+			ebsCost, measured := prov.LookupAndTagEBSCost(context.Background())
+			if measured {
 				log.Printf("EBS hourly cost: $%.4f/hr", ebsCost)
+			} else if ebsCost > 0 {
+				// The fallback constant must never be logged in the same shape as a
+				// measurement (spawn#517) — a reader comparing this line against
+				// spored status's "not yet available" storage line would otherwise
+				// get contradictory answers about whether cost tracking is working.
+				log.Printf("EBS hourly cost: unknown (lookup failed or denied); storage cost will not be reported")
 			}
 		}()
 	}
