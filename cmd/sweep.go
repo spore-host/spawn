@@ -55,6 +55,12 @@ type InstanceState struct {
 type ParamFileFormat struct {
 	Defaults map[string]interface{}   `json:"defaults"`
 	Params   []map[string]interface{} `json:"params"`
+	// UnknownTopLevelKeys carries through pkg/params.ParamFileFormat's field of
+	// the same name (#530): every top-level key that is none of
+	// defaults/grid/params, which json.Unmarshal/yaml.Unmarshal would otherwise
+	// drop with no trace. validateTopLevelParamKeys (cmd/sweep_keys.go) is what
+	// turns this into an error or a warning.
+	UnknownTopLevelKeys []string `json:"-"`
 }
 
 // parseParamFile reads and parses a parameter file (JSON, YAML, or CSV)
@@ -67,8 +73,9 @@ func parseParamFile(path string) (*ParamFileFormat, error) {
 
 	// Convert to cmd.ParamFileFormat (same structure)
 	return &ParamFileFormat{
-		Defaults: result.Defaults,
-		Params:   result.Params,
+		Defaults:            result.Defaults,
+		Params:              result.Params,
+		UnknownTopLevelKeys: result.UnknownTopLevelKeys,
 	}, nil
 }
 

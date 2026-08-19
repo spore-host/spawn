@@ -1,12 +1,14 @@
 # Simple parameter sweep example
-# Use with: spawn launch simple-params.yaml
+# Use with: spawn launch --param-file simple-params.yaml --sweep-name simple-experiment
 
-sweep_name: simple-experiment
-region: us-east-1
-instance_type: t3.medium
-ami: ami-0c55b159cbfafe1f0
-
+# Only defaults:, grid: and params: are read at the top level of a param file
+# (spawn#530) — region:/instance_type:/ami: belong under defaults: so they
+# actually apply to every row, and sweep_name: has no param-file equivalent at
+# all (use --sweep-name on the command line instead).
 defaults:
+  region: us-east-1
+  instance_type: t3.medium
+  ami: ami-0c55b159cbfafe1f0
   dataset: mnist
   epochs: 10
 

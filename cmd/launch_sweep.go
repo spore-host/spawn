@@ -46,6 +46,18 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return fmt.Errorf("either --param-file or --params must be specified for parameter sweep")
 	}
 
+	// Reject TOP-LEVEL keys that look like dangerous spawn settings — ttl:,
+	// cost_limit:, sweep_name:, etc. written outside defaults:/grid:/params:,
+	// which pkg/params.ParseParamFile would otherwise have silently dropped
+	// with no trace at all (#530). Runs before validateSweepParamKeys so a file
+	// with both a mistaken top-level key AND a row-level typo gets the
+	// top-level error first — that one means a setting the user wrote was never
+	// even read, which is the more dangerous failure of the two.
+	if err := validateTopLevelParamKeys(paramFile, paramFormat.UnknownTopLevelKeys); err != nil {
+		fmt.Fprintf(os.Stderr, "\n❌ ERROR: %v\n\n", err)
+		return fmt.Errorf("unusable param-file keys")
+	}
+
 	// Reject keys that look like spawn settings before anything is launched or
 	// priced (#526). This runs before applyCLISpendControlsToSweep so the error
 	// names only what the user actually wrote, not the ttl/cost_limit that is

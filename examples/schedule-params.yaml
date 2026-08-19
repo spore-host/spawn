@@ -1,19 +1,27 @@
 # Example parameter file for scheduled sweeps
-# Use with: spawn schedule create schedule-params.yaml --cron "0 2 * * *"
-
-# Sweep configuration
-sweep_name: nightly-training
-region: us-east-1
-max_concurrent: 10
-launch_delay: 30s
-
-# Instance configuration
-instance_type: g5.xlarge
-ami: ami-0c55b159cbfafe1f0  # Deep Learning AMI
-disk_size: 100
+# Use with: spawn schedule create schedule-params.yaml --cron "0 2 * * *" --region us-east-1
+#
+# Only defaults: and params: are read at the top level of a schedule param
+# file (spawn#530) — everything below used to sit at the top level, which
+# `spawn schedule create` silently ignored:
+#   - sweep_name:, max_concurrent:, launch_delay: ARE read, but only from
+#     defaults: (cmd/schedule.go's getSweepName/getMaxConcurrent/getLaunchDelay
+#     treat defaults: as sweep-scope on this path — a deliberate divergence
+#     from `spawn launch`, where defaults: is a per-row fallback instead)
+#   - instance_type:, ami: are per-row settings merged from defaults: the same
+#     way `spawn launch` does it, so they belong there too
+#   - region: has no param-file equivalent on the schedule path at all; use
+#     the --region flag on `spawn schedule create` (see the command above)
+#   - disk_size: has no param-file OR CLI equivalent on the schedule path —
+#     it was never wired up, so this example never actually set a disk size
 
 # Default parameters applied to all jobs
 defaults:
+  sweep_name: nightly-training
+  max_concurrent: 10
+  launch_delay: 30s
+  instance_type: g5.xlarge
+  ami: ami-0c55b159cbfafe1f0  # Deep Learning AMI
   dataset: cifar10
   optimizer: adam
   epochs: 100
