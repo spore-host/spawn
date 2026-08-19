@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -343,5 +345,101 @@ func TestComputeExtendedTTLTags_NoDeadlineTagFallsBackToTTL(t *testing.T) {
 	wantTTL := wantDeadline.Sub(launch).Round(time.Second).String()
 	if got := tags["spawn:ttl"]; got != wantTTL {
 		t.Errorf("spawn:ttl = %q, want %q", got, wantTTL)
+	}
+}
+
+// TestExtendJobArrayInstances_ReloadFailureIsTrackedNotDiscarded is the
+// regression test for spawn#512: before the fix, a per-instance
+// triggerReload error was discarded with `_ = triggerReload(&inst)`, so a
+// caller extending a job array had no way to tell which instances actually
+// picked up the new TTL on-instance. This asserts the reload failure is
+// both reported (printed to stderr) and tracked (returned) even though the
+// tag write itself succeeded.
+func TestExtendJobArrayInstances_ReloadFailureIsTrackedNotDiscarded(t *testing.T) {
+	instances := []aws.InstanceInfo{
+		{InstanceID: "i-good", Region: "us-east-1", PublicIP: "1.2.3.4"},
+		{InstanceID: "i-reload-fails", Region: "us-east-1", PublicIP: "5.6.7.8"},
+	}
+
+	updateTags := func(region, instanceID string) error {
+		return nil // every tag write succeeds
+	}
+	reload := func(inst *aws.InstanceInfo) error {
+		if inst.InstanceID == "i-reload-fails" {
+			return errors.New("ssh: connection refused")
+		}
+		return nil
+	}
+
+	var stderr bytes.Buffer
+	successCount, failedInstances, reloadFailedInstances := extendJobArrayInstances(instances, updateTags, reload, &stderr)
+
+	if successCount != 2 {
+		t.Errorf("successCount = %d, want 2 (both tag writes succeeded)", successCount)
+	}
+	if len(failedInstances) != 0 {
+		t.Errorf("failedInstances = %v, want empty (no tag write failed)", failedInstances)
+	}
+	if len(reloadFailedInstances) != 1 || reloadFailedInstances[0] != "i-reload-fails" {
+		t.Errorf("reloadFailedInstances = %v, want [i-reload-fails]", reloadFailedInstances)
+	}
+	if !strings.Contains(stderr.String(), "i-reload-fails") || !strings.Contains(stderr.String(), "connection refused") {
+		t.Errorf("stderr does not report the reload failure: %q", stderr.String())
+	}
+}
+
+// TestExtendJobArrayInstances_TagFailureSkipsReload confirms a failed tag
+// write is still tracked in failedInstances and does not attempt a reload
+// (there is nothing to reload if the tag never changed).
+func TestExtendJobArrayInstances_TagFailureSkipsReload(t *testing.T) {
+	instances := []aws.InstanceInfo{
+		{InstanceID: "i-tag-fails", Region: "us-east-1"},
+	}
+
+	updateTags := func(region, instanceID string) error {
+		return errors.New("access denied")
+	}
+	reloadCalled := false
+	reload := func(inst *aws.InstanceInfo) error {
+		reloadCalled = true
+		return nil
+	}
+
+	var stderr bytes.Buffer
+	successCount, failedInstances, reloadFailedInstances := extendJobArrayInstances(instances, updateTags, reload, &stderr)
+
+	if successCount != 0 {
+		t.Errorf("successCount = %d, want 0", successCount)
+	}
+	if len(failedInstances) != 1 || failedInstances[0] != "i-tag-fails" {
+		t.Errorf("failedInstances = %v, want [i-tag-fails]", failedInstances)
+	}
+	if len(reloadFailedInstances) != 0 {
+		t.Errorf("reloadFailedInstances = %v, want empty", reloadFailedInstances)
+	}
+	if reloadCalled {
+		t.Error("reload should not be attempted when the tag write itself failed")
+	}
+}
+
+// TestExtendJobArrayInstances_AllSucceed confirms the happy path produces no
+// stderr warnings.
+func TestExtendJobArrayInstances_AllSucceed(t *testing.T) {
+	instances := []aws.InstanceInfo{
+		{InstanceID: "i-a", Region: "us-east-1"},
+		{InstanceID: "i-b", Region: "us-east-1"},
+	}
+	noErr := func(string, string) error { return nil }
+	noErrReload := func(*aws.InstanceInfo) error { return nil }
+
+	var stderr bytes.Buffer
+	successCount, failedInstances, reloadFailedInstances := extendJobArrayInstances(instances, noErr, noErrReload, &stderr)
+
+	if successCount != 2 || len(failedInstances) != 0 || len(reloadFailedInstances) != 0 {
+		t.Errorf("got success=%d failed=%v reloadFailed=%v, want success=2 failed=[] reloadFailed=[]",
+			successCount, failedInstances, reloadFailedInstances)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr should be empty on full success, got %q", stderr.String())
 	}
 }

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -190,29 +191,27 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 			"new_ttl":        newTTL,
 		}, nil)
 
-	// Update TTL for each instance
-	successCount := 0
-	failedInstances := []string{}
-
-	for _, inst := range jobArrayInstances {
-		err := client.UpdateInstanceTags(ctx, inst.Region, inst.InstanceID, map[string]string{
+	// Update TTL for each instance. Extracted into extendJobArrayInstances so
+	// the per-instance accounting (in particular, that a reload failure is
+	// tracked and reported, not discarded — spawn#512) is unit-testable
+	// without a real AWS client or SSH.
+	updateTags := func(region, instanceID string) error {
+		return client.UpdateInstanceTags(ctx, region, instanceID, map[string]string{
 			"spawn:ttl": newTTL,
 		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Failed to update %s: %v\n", inst.InstanceID, err)
-			failedInstances = append(failedInstances, inst.InstanceID)
-		} else {
-			successCount++
-			// Try to trigger reload (non-fatal)
-			_ = triggerReload(&inst)
-		}
 	}
+	successCount, failedInstances, reloadFailedInstances := extendJobArrayInstances(
+		jobArrayInstances, updateTags, triggerReload, os.Stderr)
 
 	// Display results
 	_, _ = fmt.Fprintf(os.Stdout, "\n✅ Job array TTL extended!\n")
 	_, _ = fmt.Fprintf(os.Stdout, "   Array:     %s\n", arrayName)
 	_, _ = fmt.Fprintf(os.Stdout, "   New TTL:   %s\n", newTTL)
 	_, _ = fmt.Fprintf(os.Stdout, "   Updated:   %d/%d instances\n", successCount, len(jobArrayInstances))
+	if len(reloadFailedInstances) > 0 {
+		_, _ = fmt.Fprintf(os.Stdout, "   Reloaded:  %d/%d instances (%d tag-updated but not confirmed reloaded — see warnings above)\n",
+			successCount-len(reloadFailedInstances), successCount, len(reloadFailedInstances))
+	}
 
 	if len(failedInstances) > 0 {
 		fmt.Fprintf(os.Stderr, "\n⚠️  Failed to update %d instances:\n", len(failedInstances))
@@ -221,8 +220,15 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 		}
 		auditLog.LogOperationWithData("extend_job_array_ttl", arrayID, "partial_success",
 			map[string]interface{}{
-				"success_count": successCount,
-				"failed_count":  len(failedInstances),
+				"success_count":       successCount,
+				"failed_count":        len(failedInstances),
+				"reload_failed_count": len(reloadFailedInstances),
+			}, nil)
+	} else if len(reloadFailedInstances) > 0 {
+		auditLog.LogOperationWithData("extend_job_array_ttl", arrayID, "partial_success",
+			map[string]interface{}{
+				"success_count":       successCount,
+				"reload_failed_count": len(reloadFailedInstances),
 			}, nil)
 	} else {
 		auditLog.LogOperationWithData("extend_job_array_ttl", arrayID, "success",
@@ -232,6 +238,42 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 	}
 
 	return nil
+}
+
+// extendJobArrayInstances applies updateTags to every instance in the job
+// array and, for each one whose tag write succeeds, calls reload to trigger
+// the on-instance config refresh. It returns the count of successful tag
+// writes, the IDs of instances whose tag write failed, and the IDs of
+// instances whose tag write succeeded but whose reload call failed.
+//
+// The reload failure must be tracked, not just printed and discarded — before
+// spawn#512, a reload error was thrown away with `_ = triggerReload(...)`, so
+// a caller extending a job array of N instances had no way to tell which (if
+// any) actually picked up the new TTL on-instance vs. which are running on
+// stale config until the next periodic tag refresh (every 5 minutes in
+// production). This mirrors the single-instance path in runExtend, which
+// warns and prints a manual SSH fallback on a reload failure.
+func extendJobArrayInstances(
+	instances []aws.InstanceInfo,
+	updateTags func(region, instanceID string) error,
+	reload func(*aws.InstanceInfo) error,
+	stderr io.Writer,
+) (successCount int, failedInstances, reloadFailedInstances []string) {
+	for _, inst := range instances {
+		if err := updateTags(inst.Region, inst.InstanceID); err != nil {
+			fmt.Fprintf(stderr, "⚠️  Failed to update %s: %v\n", inst.InstanceID, err)
+			failedInstances = append(failedInstances, inst.InstanceID)
+			continue
+		}
+		successCount++
+		if err := reload(&inst); err != nil {
+			fmt.Fprintf(stderr, "⚠️  Tag updated for %s, but failed to trigger reload: %v\n", inst.InstanceID, err)
+			fmt.Fprintf(stderr, "   Until the next periodic tag refresh, it is running on stale config. Manual fallback: ssh ec2-user@%s 'sudo spored reload'\n",
+				inst.PublicIP)
+			reloadFailedInstances = append(reloadFailedInstances, inst.InstanceID)
+		}
+	}
+	return successCount, failedInstances, reloadFailedInstances
 }
 
 // computeExtendedTTLTags computes the tag set `spawn extend` writes, given
