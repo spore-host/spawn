@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spored status` now supports `--output json` (`-o json`), emitting the same
+  facts the human table shows — sentinel/on-complete state, TTL deadline,
+  cost-limit consumed, and effective hourly rate — as a single JSON object on
+  stdout (#540).
+
 ### Fixed
 - **A parameter sweep silently discarded `--iam-role`, `--iam-policy`,
   `--iam-policy-file`, `--iam-role-tags` and `--iam-allow-full-access`, giving
@@ -32,6 +38,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row's own `iam_role:` > the CLI flag > the file's `defaults:`. A sweep with no
   CLI IAM flags and no file-level `iam_role:` still falls back to the shared
   `spored-instance-role`, unchanged from before this fix.
+
+- **`spawn status <id> -o json` printed the human-readable table, not JSON, with
+  spored's own log lines ahead of it** (#540). Two independent bugs: (1)
+  `--output json` was accepted but silently ignored by `status` — every other
+  read command already honoured it, `status` was the outlier; (2) the SSH
+  transport `cmd/status.go` used to fetch the remote `spored status` output
+  redirected the remote process's stderr into its stdout (`2>&1`) before the
+  bytes ever crossed the SSH channel, so spored's `log.Printf` diagnostics
+  (agent init, config, DNS skip, idle checks) landed on spawn's own stdout no
+  matter what spawn did on its end. A caller doing
+  `json.loads(subprocess.check_output(...))` got `Extra data` at char 4.
+
+  Fixed by implementing `--output json` in `spored status` itself (backed by a
+  single `statusReport` struct so the table and JSON renderers can't drift),
+  dropping the remote-side `2>&1`, and capturing the SSH/SSM transport's
+  stdout and stderr as separate streams end-to-end. `spawn status -o json`'s
+  stdout is now pure JSON; every diagnostic and supplementary notice (TTL
+  reconciliation, lifecycle protection, DNS status, upgrade nudge, Elastic IP)
+  goes to stderr in JSON mode. `-o table` (the default) is unchanged.
 
 ### Security
 - Bumped `golang.org/x/mod` (indirect, via `pkg/plugin`/sigstore) v0.37.0 → v0.40.0,

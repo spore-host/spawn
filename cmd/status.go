@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -45,10 +46,11 @@ func init() {
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
+	jsonOut := statusJSON || getOutputFormat() == "json"
 
 	// Check if sweep status requested (deprecated path; prefer 'spawn sweep status')
 	if statusSweepID != "" {
-		return runSweepStatus(ctx, statusSweepID, statusJSON || getOutputFormat() == "json", statusCheckComplete)
+		return runSweepStatus(ctx, statusSweepID, jsonOut, statusCheckComplete)
 	}
 
 	// Instance status mode (original behavior)
@@ -79,11 +81,21 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Build the remote spored command, forwarding --check-complete so spored
-	// reports completion via standardized exit codes (#26).
-	remoteCmd := "sudo /usr/local/bin/spored status 2>&1"
-	if statusCheckComplete {
-		remoteCmd = "sudo /usr/local/bin/spored status --check-complete"
+	// Build the remote spored command, forwarding --check-complete (#26) or
+	// --output json (#540) so spored itself renders the right thing. Note the
+	// ABSENCE of a `2>&1` here — that redirect used to merge the remote
+	// process's log.Printf diagnostics (which go to its stderr) into its own
+	// stdout BEFORE the bytes ever crossed the SSH channel, so no amount of
+	// separating stdout/stderr on our end could undo it: 4 "Agent
+	// initialized..."-style lines landed ahead of (and, in JSON mode, inside)
+	// the actual status output. Dropping it and reading SSH's stdout/stderr
+	// separately below is the fix (spawn#540).
+	remoteCmd := "sudo /usr/local/bin/spored status"
+	switch {
+	case statusCheckComplete:
+		remoteCmd += " --check-complete"
+	case jsonOut:
+		remoteCmd += " --output json"
 	}
 
 	// Find SSH key. A lagotto/cohort-launched instance is keyless (SSM-only by
@@ -92,7 +104,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// only Describe + SSM, never SSH). (#222)
 	keyPath, keyErr := findSSHKey(instance.KeyName)
 	if keyErr != nil {
-		return runStatusOverSSM(ctx, client, instance, statusCheckComplete)
+		return runStatusOverSSM(ctx, client, instance, statusCheckComplete, jsonOut)
 	}
 
 	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
@@ -100,37 +112,68 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	sshCmd := exec.Command("ssh", sshArgs...)
 
+	// Capture stdout/stderr SEPARATELY rather than CombinedOutput(): without a
+	// pty, ssh keeps the remote command's stdout and stderr on distinct local
+	// streams, so — now that the remote-side `2>&1` above is gone — this is
+	// what actually keeps spored's log.Printf lines off spawn's own stdout
+	// (#540).
+	var stdoutBuf, stderrBuf bytes.Buffer
+	sshCmd.Stdout = &stdoutBuf
+	sshCmd.Stderr = &stderrBuf
+
 	// In check-complete mode, propagate spored's exit code (0/1/2/3) as spawn's
 	// own exit code so callers can poll it. SSH passes through the remote exit
 	// status; SSH's own connection failures use 255, which we map to 3 (error).
 	if statusCheckComplete {
-		output, err := sshCmd.CombinedOutput()
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
+		runErr := sshCmd.Run()
+		if runErr != nil {
+			if exitErr, ok := runErr.(*exec.ExitError); ok {
 				code := exitErr.ExitCode()
 				if code == 255 {
 					// SSH-level failure (couldn't reach the instance): error.
-					fmt.Fprintf(os.Stderr, "ssh: %s\n", string(output))
+					fmt.Fprintf(os.Stderr, "ssh: %s%s\n", stdoutBuf.String(), stderrBuf.String())
 					os.Exit(3)
 				}
 				os.Exit(code)
 			}
-			fmt.Fprintf(os.Stderr, "failed to run status: %v\n", err)
+			fmt.Fprintf(os.Stderr, "failed to run status: %v\n", runErr)
 			os.Exit(3)
 		}
 		os.Exit(0)
 	}
 
-	output, err := sshCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to get status: %w\nOutput: %s", err, string(output))
+	runErr := sshCmd.Run()
+	// Always forward the remote agent's log/diagnostic lines to OUR stderr —
+	// never stdout, in either output mode (#540).
+	if stderrBuf.Len() > 0 {
+		fmt.Fprint(os.Stderr, stderrBuf.String())
+	}
+	if runErr != nil {
+		return fmt.Errorf("failed to get status: %w\nOutput: %s", runErr, stdoutBuf.String())
+	}
+	output := stdoutBuf.String()
+
+	if jsonOut {
+		// JSON contract: stdout carries ONLY spored's JSON, verbatim. The
+		// supplementary text notices below (lifecycle protection, DNS status,
+		// upgrade nudge, EIP) are prose, not data — printing them to stdout
+		// here would be exactly the "Extra data" parse failure #540 reports.
+		// They're still useful to a human watching the terminal, so route them
+		// to stderr instead of dropping them.
+		fmt.Print(output)
+		fmt.Fprint(os.Stderr, ttlReconciliationNotice(instance, output))
+		fmt.Fprint(os.Stderr, lifecycleProtectionBlock(instance))
+		fmt.Fprint(os.Stderr, dnsStatusNotice(instance))
+		fmt.Fprint(os.Stderr, sporedUpgradeNotice(instance.Tags["spawn:spored-version"], output, instance.InstanceID))
+		fmt.Fprint(os.Stderr, elasticIPNotice(ctx, client, instance))
+		return nil
 	}
 
-	fmt.Print(string(output))
-	fmt.Print(ttlReconciliationNotice(instance, string(output)))
+	fmt.Print(output)
+	fmt.Print(ttlReconciliationNotice(instance, output))
 	fmt.Print(lifecycleProtectionBlock(instance))
 	fmt.Print(dnsStatusNotice(instance))
-	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], string(output), instance.InstanceID))
+	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], output, instance.InstanceID))
 	fmt.Print(elasticIPNotice(ctx, client, instance))
 	return nil
 }
@@ -302,12 +345,18 @@ func dnsStatusNotice(instance *aws.InstanceInfo) string {
 // (and harmless to drop). In --check-complete mode it maps spored's exit code
 // (carried back as the SSM ResponseCode) to spawn's own exit code, mirroring the
 // SSH path's 0/1/2/3 contract; an SSM-level failure is exit 3 (error/unknown).
-func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, checkComplete bool) error {
-	// The SSH variant pipes 2>&1 into the human output; over SSM stdout/stderr are
-	// separate fields, so drop the redirect and combine them ourselves below.
+func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, checkComplete, jsonOut bool) error {
+	// RunShellScript already returns stdout/stderr as separate fields (unlike
+	// the SSH path, which used to merge them with a remote-side `2>&1` — the
+	// bug this function's siblings had, #540). Keep them separate here too:
+	// spored's log.Printf diagnostics land in res.Stderr and must never be
+	// concatenated into the value we print as stdout.
 	cmd := "/usr/local/bin/spored status"
-	if checkComplete {
-		cmd = "/usr/local/bin/spored status --check-complete"
+	switch {
+	case checkComplete:
+		cmd += " --check-complete"
+	case jsonOut:
+		cmd += " --output json"
 	}
 
 	res, err := client.RunShellScript(ctx, instance.Region, instance.InstanceID, cmd, 60*time.Second)
@@ -325,10 +374,21 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 		os.Exit(int(res.ResponseCode))
 	}
 
-	out := res.Stdout
+	// Always forward spored's diagnostic lines to OUR stderr, never stdout.
 	if res.Stderr != "" {
-		out += res.Stderr
+		fmt.Fprint(os.Stderr, res.Stderr)
 	}
+
+	out := res.Stdout
+	if jsonOut {
+		fmt.Print(out)
+		fmt.Fprint(os.Stderr, ttlReconciliationNotice(instance, out))
+		fmt.Fprint(os.Stderr, lifecycleProtectionBlock(instance))
+		fmt.Fprint(os.Stderr, dnsStatusNotice(instance))
+		fmt.Fprint(os.Stderr, sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
+		return nil
+	}
+
 	fmt.Print(out)
 	fmt.Print(ttlReconciliationNotice(instance, out))
 	fmt.Print(lifecycleProtectionBlock(instance))

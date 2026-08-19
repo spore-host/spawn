@@ -288,16 +288,20 @@ func newReloadCmd() *cobra.Command {
 
 func newStatusCmd() *cobra.Command {
 	var checkComplete bool
+	var outputFormat string
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show configuration and monitoring status",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return handleStatus(checkComplete)
+			return handleStatus(checkComplete, outputFormat)
 		},
 	}
 	cmd.Flags().BoolVar(&checkComplete, "check-complete", false,
 		"Exit with standardized codes: 0=complete 1=failed 2=running 3=error")
+	cmd.Flags().StringVarP(&outputFormat, "output", "o", "table",
+		"Output format (table, json). JSON goes to stdout only — all log/diagnostic "+
+			"lines from agent initialization stay on stderr (spawn#540).")
 	return cmd
 }
 
@@ -378,7 +382,231 @@ func resolveLaunchTime(tagLaunchTime, pendingTime, statusAgentStart time.Time) (
 	return statusAgentStart, launchTimeSourceEstimated
 }
 
-func handleStatus(checkComplete bool) error {
+// statusReport is the full data spored status computes, independent of how
+// it's rendered. Building it once and rendering it two ways (table/JSON) keeps
+// the two outputs from drifting: the JSON marshal is of THIS struct, not a
+// second hand-maintained representation of the same facts (spawn#540).
+type statusReport struct {
+	InstanceID string `json:"instance_id"`
+	Name       string `json:"name"`
+	Region     string `json:"region"`
+	Version    string `json:"spored_version"`
+
+	StartedAt       time.Time `json:"started_at"`
+	StartedAtSource string    `json:"started_at_source"`
+	ElapsedSeconds  float64   `json:"elapsed_seconds"`
+	ComputeSeconds  float64   `json:"compute_seconds"`
+	StoppedSeconds  float64   `json:"stopped_seconds"`
+
+	ConfigLoadError string `json:"config_load_error,omitempty"`
+
+	TTL statusTTL `json:"ttl"`
+
+	IdleTimeout statusIdle `json:"idle"`
+
+	OnComplete statusOnComplete `json:"on_complete"`
+
+	Cost *statusCost `json:"cost,omitempty"` // nil when no price is known (nothing to report)
+
+	CPUPercent         float64 `json:"cpu_percent"`
+	NetworkBytesPerMin int64   `json:"network_bytes_per_min"`
+	PreStopHook        string  `json:"pre_stop_hook,omitempty"`
+}
+
+type statusTTL struct {
+	Configured       bool       `json:"configured"`
+	RemainingSeconds float64    `json:"remaining_seconds,omitempty"`
+	TerminateAt      *time.Time `json:"terminate_at,omitempty"` // the TTL deadline (spawn#540: explicitly requested field)
+}
+
+type statusIdle struct {
+	Configured       bool    `json:"configured"`
+	TimeoutSeconds   float64 `json:"timeout_seconds,omitempty"`
+	IsIdle           bool    `json:"is_idle"`
+	IdleSeconds      float64 `json:"idle_seconds,omitempty"`
+	Action           string  `json:"action,omitempty"` // "stops" or "hibernates"
+	RemainingSeconds float64 `json:"remaining_seconds,omitempty"`
+}
+
+type statusOnComplete struct {
+	Action          string `json:"action,omitempty"`
+	CompletionFile  string `json:"completion_file,omitempty"`
+	SentinelPresent bool   `json:"sentinel_present"` // spawn#540: explicitly requested field
+}
+
+type statusCost struct {
+	PricePerHour  float64 `json:"price_per_hour"`
+	EBSHourlyCost float64 `json:"ebs_hourly_cost,omitempty"`
+	EBSCostKnown  bool    `json:"ebs_cost_known"`
+
+	ComputeCost    float64 `json:"compute_cost"`
+	StorageCost    float64 `json:"storage_cost,omitempty"`
+	CumulativeCost float64 `json:"cumulative_cost"`
+
+	// EffectiveRate is the blended $/hr the instance has actually cost so far
+	// (spawn#540: explicitly requested field) — nil when it can't yet be
+	// computed (EBS cost lookup still pending).
+	EffectiveRate  *float64 `json:"effective_rate,omitempty"`
+	SavingsPercent float64  `json:"savings_percent,omitempty"`
+
+	// CostLimit fields are omitted entirely when no limit is configured.
+	CostLimit          float64 `json:"cost_limit,omitempty"`
+	CostLimitUsed      float64 `json:"cost_limit_used,omitempty"` // compute-only, matches enforcement (spawn#540: "cost-limit consumed")
+	CostLimitUsedPct   float64 `json:"cost_limit_used_pct,omitempty"`
+	CostLimitRemaining float64 `json:"cost_limit_remaining,omitempty"`
+}
+
+// buildStatusReport gathers every fact `spored status` reports, from the same
+// agent/config accessors the table renderer used to read directly. This is the
+// single source of truth both renderTable and renderJSON draw from.
+func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provider.Identity) *statusReport {
+	uptime := ag.GetUptime()
+	isIdle := ag.IsIdle()
+
+	completionFileExists := false
+	if config.CompletionFile != "" {
+		if _, err := os.Stat(config.CompletionFile); err == nil {
+			completionFileExists = true
+		}
+	}
+
+	var idleTime time.Duration
+	if isIdle {
+		idleTime = time.Since(ag.GetLastActivityTime())
+	}
+
+	// Calculate start time — this is the STATUS AGENT INVOCATION's own start
+	// (this process, which runs fresh on every `spored status` call), not the
+	// instance's. It is only ever used as a last-resort fallback below: using
+	// it as "Started"/"Elapsed" is exactly the spawn#508 bug (a 7h39m-old
+	// instance reported "Elapsed: 0s" because this was the only source
+	// available when the tag-authoritative LaunchTime couldn't be read).
+	startTime := time.Now().Add(-uptime)
+
+	launchTime, launchTimeSource := resolveLaunchTime(config.LaunchTime, identity.PendingTime, startTime)
+	elapsed := time.Since(launchTime)
+	computeSecs := ag.TotalComputeSeconds()
+	computeTime := time.Duration(computeSecs) * time.Second
+	stoppedTime := elapsed - computeTime
+	if stoppedTime < 0 {
+		stoppedTime = 0
+	}
+
+	var ttlRemaining time.Duration
+	if config.TTL > 0 {
+		ttlRemaining = config.TTL - uptime
+		if ttlRemaining < 0 {
+			ttlRemaining = 0
+		}
+	}
+
+	var terminateAt time.Time
+	if !config.TTLDeadline.IsZero() {
+		terminateAt = config.TTLDeadline
+		ttlRemaining = time.Until(terminateAt)
+		if ttlRemaining < 0 {
+			ttlRemaining = 0
+		}
+	} else if config.TTL > 0 {
+		terminateAt = launchTime.Add(config.TTL)
+	}
+
+	report := &statusReport{
+		InstanceID:         identity.InstanceID,
+		Name:               identity.Name,
+		Region:             identity.Region,
+		Version:            version(),
+		StartedAt:          launchTime.UTC(),
+		StartedAtSource:    launchTimeSource,
+		ElapsedSeconds:     elapsed.Seconds(),
+		ComputeSeconds:     computeTime.Seconds(),
+		StoppedSeconds:     stoppedTime.Seconds(),
+		ConfigLoadError:    config.ConfigLoadError,
+		CPUPercent:         ag.GetCPUUsage(),
+		NetworkBytesPerMin: ag.GetNetworkBytes(),
+		PreStopHook:        config.PreStop,
+	}
+
+	if !terminateAt.IsZero() {
+		utc := terminateAt.UTC()
+		report.TTL = statusTTL{Configured: true, RemainingSeconds: ttlRemaining.Seconds(), TerminateAt: &utc}
+	} else if config.TTL > 0 {
+		report.TTL = statusTTL{Configured: true, RemainingSeconds: ttlRemaining.Seconds()}
+	}
+
+	if config.IdleTimeout > 0 {
+		idle := statusIdle{Configured: true, TimeoutSeconds: config.IdleTimeout.Seconds(), IsIdle: isIdle}
+		if isIdle {
+			idleAction := "stops"
+			if config.HibernateOnIdle {
+				idleAction = "hibernates"
+			}
+			remaining := config.IdleTimeout - idleTime
+			if remaining < 0 {
+				remaining = 0
+			}
+			idle.IdleSeconds = idleTime.Seconds()
+			idle.Action = idleAction
+			idle.RemainingSeconds = remaining.Seconds()
+		}
+		report.IdleTimeout = idle
+	}
+
+	report.OnComplete = statusOnComplete{
+		Action:          config.OnComplete,
+		CompletionFile:  config.CompletionFile,
+		SentinelPresent: completionFileExists,
+	}
+
+	if config.PricePerHour > 0 {
+		ebsHourlyCost := config.EBSHourlyCost
+		ebsCostKnown := ebsHourlyCost > 0
+		computeCost := config.PricePerHour * computeTime.Hours()
+		displayCompute := math.Round(computeCost*100) / 100
+
+		var displayEBS float64
+		if ebsCostKnown {
+			displayEBS = math.Round(ebsHourlyCost*stoppedTime.Hours()*100) / 100
+		}
+		displayTotal := displayCompute + displayEBS
+
+		cost := &statusCost{
+			PricePerHour:   config.PricePerHour,
+			EBSHourlyCost:  ebsHourlyCost,
+			EBSCostKnown:   ebsCostKnown,
+			ComputeCost:    displayCompute,
+			StorageCost:    displayEBS,
+			CumulativeCost: displayTotal,
+		}
+
+		elapsedHours := elapsed.Hours()
+		if elapsedHours > 0 && ebsCostKnown {
+			effectiveRate := displayTotal / elapsedHours
+			cost.EffectiveRate = &effectiveRate
+			savingsPct := (1 - effectiveRate/config.PricePerHour) * 100
+			if savingsPct > 0.5 {
+				cost.SavingsPercent = savingsPct
+			}
+		}
+
+		if config.CostLimit > 0 {
+			// The cost limit is enforced against COMPUTE cost only (spored uses
+			// PricePerHour × total compute time), so measure "used" the same way —
+			// not against displayTotal, which includes EBS and would misreport how
+			// close the instance is to the limit that actually terminates it.
+			cost.CostLimit = config.CostLimit
+			cost.CostLimitUsed = displayCompute
+			cost.CostLimitUsedPct = (displayCompute / config.CostLimit) * 100
+			cost.CostLimitRemaining = config.CostLimit - displayCompute
+		}
+
+		report.Cost = cost
+	}
+
+	return report
+}
+
+func handleStatus(checkComplete bool, outputFormat string) error {
 	// Create agent to get configuration and metrics
 	ctx := context.Background()
 
@@ -407,87 +635,53 @@ func handleStatus(checkComplete bool) error {
 		exitCheckComplete(config.CompletionFile)
 	}
 
-	// Get identity
 	identity := ag.GetIdentity()
-	instanceID, region := identity.InstanceID, identity.Region
+	report := buildStatusReport(ag, config, identity)
 
-	// Get uptime
-	uptime := ag.GetUptime()
-
-	// Get metrics
-	cpuUsage := ag.GetCPUUsage()
-	networkBytes := ag.GetNetworkBytes()
-	isIdle := ag.IsIdle()
-
-	// Calculate time remaining for TTL
-	var ttlRemaining time.Duration
-	if config.TTL > 0 {
-		ttlRemaining = config.TTL - uptime
-		if ttlRemaining < 0 {
-			ttlRemaining = 0
-		}
+	if outputFormat == "json" {
+		return renderStatusJSON(report)
 	}
+	return renderStatusTable(report)
+}
 
-	// Check completion file
-	completionFileExists := false
-	if config.CompletionFile != "" {
-		if _, err := os.Stat(config.CompletionFile); err == nil {
-			completionFileExists = true
-		}
-	}
+// renderStatusJSON prints ONLY the JSON-encoded report to stdout — nothing
+// else. This is the machine-readable contract: a caller doing
+// json.Unmarshal(output) must get valid JSON with no leading/trailing bytes.
+// All of the agent-initialization log.Printf calls triggered by agent.NewAgent
+// above already go to log's default output (os.Stderr) unless something
+// upstream redirects them (spawn#540 — the actual leak was an explicit `2>&1`
+// in the SSH transport that cmd/status.go used to invoke this, not anything in
+// this process).
+func renderStatusJSON(report *statusReport) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(report)
+}
 
-	// Calculate idle time
-	var idleTime time.Duration
-	if isIdle {
-		idleTime = time.Since(ag.GetLastActivityTime())
-	}
-
-	// Calculate start time — this is the STATUS AGENT INVOCATION's own start
-	// (this process, which runs fresh on every `spored status` call), not the
-	// instance's. It is only ever used as a last-resort fallback below: using
-	// it as "Started"/"Elapsed" is exactly the spawn#508 bug (a 7h39m-old
-	// instance reported "Elapsed: 0s" because this was the only source
-	// available when the tag-authoritative LaunchTime couldn't be read).
-	startTime := time.Now().Add(-uptime)
-
+// renderStatusTable prints the human-readable table — unchanged from the
+// pre-#540 output, just reading from the report struct instead of local
+// variables.
+func renderStatusTable(report *statusReport) error {
 	// ── Identity ──────────────────────────────────────────────────────────────
-	fmt.Printf("\n  %s  (%s)\n", identity.Name, instanceID)
+	fmt.Printf("\n  %s  (%s)\n", report.Name, report.InstanceID)
 	fmt.Printf("  %s\n\n", strings.Repeat("─", 46))
-	fmt.Printf("  spored:           v%s\n", version())
+	fmt.Printf("  spored:           v%s\n", report.Version)
 
-	launchTime, launchTimeSource := resolveLaunchTime(config.LaunchTime, identity.PendingTime, startTime)
-	elapsed := time.Since(launchTime)
-	computeSecs := ag.TotalComputeSeconds()
-	computeTime := time.Duration(computeSecs) * time.Second
-	stoppedTime := elapsed - computeTime
-	if stoppedTime < 0 {
-		stoppedTime = 0
-	}
+	elapsed := time.Duration(report.ElapsedSeconds * float64(time.Second))
+	computeTime := time.Duration(report.ComputeSeconds * float64(time.Second))
+	stoppedTime := time.Duration(report.StoppedSeconds * float64(time.Second))
 
-	// Use absolute deadline for TTL if available
-	var terminateAt time.Time
-	if !config.TTLDeadline.IsZero() {
-		terminateAt = config.TTLDeadline
-		ttlRemaining = time.Until(terminateAt)
-		if ttlRemaining < 0 {
-			ttlRemaining = 0
-		}
-	} else if config.TTL > 0 {
-		terminateAt = launchTime.Add(config.TTL)
-	}
-
-	// ── Lifecycle ─────────────────────────────────────────────────────────────
-	fmt.Printf("  Started:          %s\n", launchTime.UTC().Format("2006-01-02 15:04 UTC"))
+	fmt.Printf("  Started:          %s\n", report.StartedAt.Format("2006-01-02 15:04 UTC"))
 	fmt.Printf("  Elapsed:          %s", formatDuration(elapsed))
 	if computeTime > 0 && stoppedTime > 0 {
 		fmt.Printf("  (%s compute · %s stopped)", formatDuration(computeTime), formatDuration(stoppedTime))
 	}
-	if launchTimeSource != launchTimeSourceTag {
+	if report.StartedAtSource != launchTimeSourceTag {
 		// Only annotate the fallback paths — the common case (the tag read
 		// cleanly) stays unadorned. Surfacing the source is exactly what #508
 		// needed: "Elapsed: 0s" with no indication it was the status agent's
 		// own age, not the instance's.
-		fmt.Printf("  (source: %s)", launchTimeSource)
+		fmt.Printf("  (source: %s)", report.StartedAtSource)
 	}
 	fmt.Println()
 
@@ -497,101 +691,75 @@ func handleStatus(checkComplete bool) error {
 	// asserts a specific, possibly-false fact ("will not auto-terminate")
 	// from data that was never actually read.
 	switch {
-	case config.ConfigLoadError != "":
-		fmt.Printf("  TTL:              UNKNOWN — could not read config (%s)\n", config.ConfigLoadError)
-	case !terminateAt.IsZero():
+	case report.ConfigLoadError != "":
+		fmt.Printf("  TTL:              UNKNOWN — could not read config (%s)\n", report.ConfigLoadError)
+	case report.TTL.TerminateAt != nil:
 		fmt.Printf("  TTL:              %s remaining  (terminates %s)\n",
-			formatDuration(ttlRemaining), terminateAt.UTC().Format("2006-01-02 15:04 UTC"))
+			formatDuration(time.Duration(report.TTL.RemainingSeconds*float64(time.Second))),
+			report.TTL.TerminateAt.Format("2006-01-02 15:04 UTC"))
 	default:
 		fmt.Println("  TTL:              none — instance will not auto-terminate")
 	}
 
-	if config.IdleTimeout > 0 {
-		if isIdle {
-			idleAction := "stops"
-			if config.HibernateOnIdle {
-				idleAction = "hibernates"
-			}
-			remaining := config.IdleTimeout - idleTime
-			if remaining < 0 {
-				remaining = 0
-			}
+	if report.IdleTimeout.Configured {
+		idle := report.IdleTimeout
+		timeoutDur := time.Duration(idle.TimeoutSeconds * float64(time.Second))
+		if idle.IsIdle {
 			fmt.Printf("  Idle timeout:     %s  (%s for %s — %s in %s)\n",
-				formatDuration(config.IdleTimeout), idleAction, formatDuration(idleTime),
-				idleAction, formatDuration(remaining))
+				formatDuration(timeoutDur), idle.Action, formatDuration(time.Duration(idle.IdleSeconds*float64(time.Second))),
+				idle.Action, formatDuration(time.Duration(idle.RemainingSeconds*float64(time.Second))))
 		} else {
-			fmt.Printf("  Idle timeout:     %s  (currently active)\n", formatDuration(config.IdleTimeout))
+			fmt.Printf("  Idle timeout:     %s  (currently active)\n", formatDuration(timeoutDur))
 		}
 	}
 
-	if config.OnComplete != "" {
+	if report.OnComplete.Action != "" {
 		fileStatus := "watching"
-		if completionFileExists {
+		if report.OnComplete.SentinelPresent {
 			fileStatus = "✓ file present — acting on next check"
 		}
-		fmt.Printf("  On complete:      %s (%s)\n", config.OnComplete, fileStatus)
+		fmt.Printf("  On complete:      %s (%s)\n", report.OnComplete.Action, fileStatus)
 	}
 
 	// ── Cost ──────────────────────────────────────────────────────────────────
-	if config.PricePerHour > 0 {
+	if report.Cost != nil {
+		cost := report.Cost
 		fmt.Println()
-		// EBS cost: looked up from actual volumes at first start, stored in spawn:ebs-hourly-cost tag.
-		// If not yet available, skip the storage line rather than showing a guess.
-		ebsHourlyCost := config.EBSHourlyCost
-		ebsCostKnown := ebsHourlyCost > 0
-		computeCost := config.PricePerHour * computeTime.Hours()
-		displayCompute := math.Round(computeCost*100) / 100
-
-		var displayEBS float64
-		if ebsCostKnown {
-			displayEBS = math.Round(ebsHourlyCost*stoppedTime.Hours()*100) / 100
-		}
-		displayTotal := displayCompute + displayEBS
 
 		fmt.Printf("  Compute cost:     $%.2f  (%s × $%.4f/hr)\n",
-			displayCompute, formatDuration(computeTime), config.PricePerHour)
+			cost.ComputeCost, formatDuration(computeTime), cost.PricePerHour)
 		if stoppedTime >= time.Minute {
-			if ebsCostKnown {
+			if cost.EBSCostKnown {
 				fmt.Printf("  Storage cost:     $%.2f  (%s × $%.4f/hr EBS)\n",
-					displayEBS, formatDuration(stoppedTime), ebsHourlyCost)
+					cost.StorageCost, formatDuration(stoppedTime), cost.EBSHourlyCost)
 			} else {
 				fmt.Printf("  Storage cost:     not yet available  (%s stopped)\n",
 					formatDuration(stoppedTime))
 			}
 		}
-		fmt.Printf("  Cumulative cost:  $%.2f\n", displayTotal)
+		fmt.Printf("  Cumulative cost:  $%.2f\n", cost.CumulativeCost)
 
-		elapsedHours := elapsed.Hours()
-		if elapsedHours > 0 && ebsCostKnown {
-			effectiveRate := displayTotal / elapsedHours
-			savingsPct := (1 - effectiveRate/config.PricePerHour) * 100
-			if savingsPct > 0.5 {
-				fmt.Printf("  Effective rate:   $%.4f/hr  (%.0f%% lower than continuous on-demand)\n",
-					effectiveRate, savingsPct)
-			} else {
-				fmt.Printf("  Effective rate:   $%.4f/hr\n", effectiveRate)
-			}
-		} else if elapsedHours > 0 && !ebsCostKnown {
+		switch {
+		case cost.EffectiveRate != nil && cost.SavingsPercent > 0.5:
+			fmt.Printf("  Effective rate:   $%.4f/hr  (%.0f%% lower than continuous on-demand)\n",
+				*cost.EffectiveRate, cost.SavingsPercent)
+		case cost.EffectiveRate != nil:
+			fmt.Printf("  Effective rate:   $%.4f/hr\n", *cost.EffectiveRate)
+		case report.ElapsedSeconds > 0 && !cost.EBSCostKnown:
 			fmt.Println("  Effective rate:   not yet available  (EBS cost lookup pending)")
 		}
 
-		if config.CostLimit > 0 {
-			// The cost limit is enforced against COMPUTE cost only (spored uses
-			// PricePerHour × total compute time), so measure "used" the same way —
-			// not against displayTotal, which includes EBS and would misreport how
-			// close the instance is to the limit that actually terminates it.
-			remaining := config.CostLimit - displayCompute
-			pct := (displayCompute / config.CostLimit) * 100
+		if cost.CostLimit > 0 {
 			fmt.Printf("  Cost limit:       $%.2f  ($%.2f compute used, %.0f%% — $%.2f remaining; compute-only)\n",
-				config.CostLimit, displayCompute, pct, remaining)
+				cost.CostLimit, cost.CostLimitUsed, cost.CostLimitUsedPct, cost.CostLimitRemaining)
 		}
 
-		if ebsCostKnown {
+		if cost.EBSCostKnown {
 			fmt.Printf("  On-demand rate:   $%.4f/hr compute  +  $%.4f/hr EBS storage  (%s)\n",
-				config.PricePerHour, ebsHourlyCost, region)
+				cost.PricePerHour, cost.EBSHourlyCost, report.Region)
 		} else {
 			fmt.Printf("  On-demand rate:   $%.4f/hr compute  +  EBS storage pending  (%s)\n",
-				config.PricePerHour, region)
+				cost.PricePerHour, report.Region)
 		}
 		fmt.Println()
 		fmt.Println("  * Cost figures are estimates. Definitive billing is from your cloud provider.")
@@ -599,10 +767,10 @@ func handleStatus(checkComplete bool) error {
 
 	// ── Live metrics (brief) ──────────────────────────────────────────────────
 	fmt.Println()
-	fmt.Printf("  CPU:              %.1f%%\n", cpuUsage)
-	fmt.Printf("  Network:          %s/min\n", formatBytes(networkBytes))
-	if config.PreStop != "" {
-		fmt.Printf("  Pre-stop hook:    %s\n", config.PreStop)
+	fmt.Printf("  CPU:              %.1f%%\n", report.CPUPercent)
+	fmt.Printf("  Network:          %s/min\n", formatBytes(report.NetworkBytesPerMin))
+	if report.PreStopHook != "" {
+		fmt.Printf("  Pre-stop hook:    %s\n", report.PreStopHook)
 	}
 	fmt.Println()
 	return nil
