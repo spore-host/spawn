@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -27,8 +28,9 @@ type fakeLauncher struct {
 	failAZs   map[string]bool   // if set, any launch into one of these AZs ICEs (multi-AZ exhaustion)
 	launchLog []launchRec
 
-	pgCreated map[string]int // placement group name → CreatePlacementGroup call count
-	pgDeleted []string       // placement group names passed to DeletePlacementGroup
+	pgCreated     map[string]int // placement group name → CreatePlacementGroup call count
+	pgDeleted     []string       // placement group names passed to DeletePlacementGroup
+	pgCreateDelay time.Duration  // artificial delay inside CreatePlacementGroup, widens race windows in tests
 
 	ssmCmds       map[string]string // instanceID → last RunShellScript command
 	ssmFailIDs    map[string]bool   // instanceIDs whose RunShellScript returns Failed
@@ -97,6 +99,14 @@ func (f *fakeLauncher) StopInstance(_ context.Context, _, _ string, _ bool) erro
 func (f *fakeLauncher) StartInstance(_ context.Context, _, _ string) error        { return nil }
 
 func (f *fakeLauncher) CreatePlacementGroup(_ context.Context, name, _ string) error {
+	// Model the real ~30s availability poll's latency by yielding before
+	// recording the call — without this, a race between the check and the
+	// create (spawn#514) is very unlikely to actually interleave in a fast
+	// in-memory fake, even though it's exactly what production hits under
+	// load. Sleeping briefly (rather than 30s) widens the window so
+	// concurrent ensurePlacementGroup callers for the same AZ reliably race
+	// into this method if the caller doesn't coalesce them.
+	f.createPGDelay()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.pgCreated == nil {
@@ -104,6 +114,20 @@ func (f *fakeLauncher) CreatePlacementGroup(_ context.Context, name, _ string) e
 	}
 	f.pgCreated[name]++
 	return nil
+}
+
+// createPGDelay yields to the scheduler (and optionally sleeps, if
+// pgCreateDelay is set) before CreatePlacementGroup records its call, to
+// widen the check-then-act race window for TestEnsurePlacementGroup_Concurrent.
+func (f *fakeLauncher) createPGDelay() {
+	f.mu.Lock()
+	d := f.pgCreateDelay
+	f.mu.Unlock()
+	if d > 0 {
+		time.Sleep(d)
+	} else {
+		runtime.Gosched()
+	}
 }
 
 func (f *fakeLauncher) DeletePlacementGroup(_ context.Context, name string) error {
@@ -559,5 +583,99 @@ func TestActuator_ConfigsLookup(t *testing.T) {
 	}
 	if got["node-9"] != "BASE-UD" {
 		t.Errorf("node-9 user-data = %q, want BASE-UD (BaseConfig fallback)", got["node-9"])
+	}
+}
+
+// TestEnsurePlacementGroup_Concurrent is the direct regression test for
+// spawn#514: ensurePlacementGroup had a check-then-act race — the lock was
+// released between checking pgCreated[az] and calling CreatePlacementGroup —
+// so concurrent callers for the same AZ (the normal case: a round launches N
+// cohort members at once) could each observe "not created yet" and each call
+// CreatePlacementGroup, defeating the once-per-AZ design that exists
+// specifically to avoid the ~30s availability poll for every member of a
+// round in a newly-visited AZ.
+//
+// This drives many goroutines at once for a SINGLE az, with an artificial
+// delay inside CreatePlacementGroup to widen the race window (a fast in-memory
+// fake without it may not interleave even with a real race present — this is
+// how the CI flake surfaced but a quiet local run didn't, per the issue).
+func TestEnsurePlacementGroup_Concurrent(t *testing.T) {
+	f := newFakeLauncher()
+	f.pgCreateDelay = 5 * time.Millisecond
+
+	act := &Actuator{Client: f, Region: "us-east-1", PlacementGroupPrefix: "spawn-mpi-train"}
+
+	const n = 50
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	names := make([]string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			names[i], errs[i] = act.ensurePlacementGroup(context.Background(), "us-east-1a")
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: ensurePlacementGroup error: %v", i, err)
+		}
+		if names[i] != "spawn-mpi-train-us-east-1a" {
+			t.Errorf("goroutine %d: name = %q, want spawn-mpi-train-us-east-1a", i, names[i])
+		}
+	}
+
+	f.mu.Lock()
+	got := f.pgCreated["spawn-mpi-train-us-east-1a"]
+	f.mu.Unlock()
+	if got != 1 {
+		t.Errorf("CreatePlacementGroup called %d times for one AZ under %d concurrent callers, want exactly 1", got, n)
+	}
+}
+
+// TestEnsurePlacementGroup_ConcurrentDifferentAZsNotSerialized confirms the
+// fix doesn't over-serialize: concurrent callers for DIFFERENT AZs must not
+// block on each other (only same-AZ callers coalesce).
+func TestEnsurePlacementGroup_ConcurrentDifferentAZsNotSerialized(t *testing.T) {
+	f := newFakeLauncher()
+	f.pgCreateDelay = 5 * time.Millisecond
+
+	act := &Actuator{Client: f, Region: "us-east-1", PlacementGroupPrefix: "spawn-mpi-train"}
+
+	azs := []string{"us-east-1a", "us-east-1b", "us-east-1c"}
+	const perAZ = 10
+	var wg sync.WaitGroup
+	start := time.Now()
+	for _, az := range azs {
+		for i := 0; i < perAZ; i++ {
+			wg.Add(1)
+			go func(az string) {
+				defer wg.Done()
+				if _, err := act.ensurePlacementGroup(context.Background(), az); err != nil {
+					t.Errorf("ensurePlacementGroup(%s): %v", az, err)
+				}
+			}(az)
+		}
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	// If AZs were serialized against each other, this would take roughly
+	// len(azs) * pgCreateDelay; since they're independent, it should complete
+	// in roughly one delay's worth of time. Generous bound to avoid flaking
+	// on a loaded CI runner.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("ensurePlacementGroup for different AZs took %v, suggests they are serialized against each other", elapsed)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, az := range azs {
+		name := "spawn-mpi-train-" + az
+		if got := f.pgCreated[name]; got != 1 {
+			t.Errorf("CreatePlacementGroup(%s) called %d times, want 1", name, got)
+		}
 	}
 }
