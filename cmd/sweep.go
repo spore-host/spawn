@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
@@ -70,6 +72,44 @@ func parseParamFile(path string) (*ParamFileFormat, error) {
 	}, nil
 }
 
+// parseCostLimit coerces a param-file `cost_limit:` value to USD. It accepts every
+// shape a YAML/JSON/CSV param file can produce for a number — `8`, `8.50`, and the
+// quoted `"8.50"` — because the three parsers disagree about which Go type an
+// unquoted number becomes, and a type mismatch here would zero the only
+// per-instance dollar cap a sweep has (#525). Anything else is an error, never a
+// silent 0: a disabled cap must be spelled `cost_limit: 0`, not typo'd into one.
+func parseCostLimit(val interface{}) (float64, error) {
+	var f float64
+	switch v := val.(type) {
+	case float64:
+		f = v
+	case float32:
+		f = float64(v)
+	case int:
+		f = float64(v)
+	case int64:
+		f = float64(v)
+	case json.Number:
+		parsed, err := v.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("%q is not a number", v.String())
+		}
+		f = parsed
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0, fmt.Errorf("%q is not a number", v)
+		}
+		f = parsed
+	default:
+		return 0, fmt.Errorf("expected a number in USD, got %T (%v)", val, val)
+	}
+	if f < 0 {
+		return 0, fmt.Errorf("must not be negative, got %v", f)
+	}
+	return f, nil
+}
+
 // buildLaunchConfigFromParams merges defaults with parameter overrides
 func buildLaunchConfigFromParams(defaults, params map[string]interface{}, sweepID, sweepName string, index, total int) (aws.LaunchConfig, error) {
 	// Start with an empty config
@@ -133,6 +173,22 @@ func buildLaunchConfigFromParams(defaults, params map[string]interface{}, sweepI
 			if s, ok := val.(string); ok {
 				config.IdleTimeout = s
 			}
+		case "cost_limit":
+			// Terminate/stop when compute spend reaches this many USD, i.e. the
+			// param-file form of --cost-limit. Before #525 there was no case for
+			// it, so `cost_limit: 8` fell through to the default: arm and became a
+			// PARAM_cost_limit env var that capped nothing — a spend control that
+			// parsed, launched, and did nothing.
+			//
+			// Unlike the string cases above this one *errors* on a value it cannot
+			// use instead of leaving the field zero. A mistyped ttl costs you the
+			// difference between two timeouts; a mistyped cost limit silently
+			// removes the only per-instance dollar cap on this path.
+			f, err := parseCostLimit(val)
+			if err != nil {
+				return config, fmt.Errorf("cost_limit: %w", err)
+			}
+			config.CostLimit = f
 		case "hibernate_on_idle":
 			if b, ok := val.(bool); ok {
 				config.HibernateOnIdle = b
