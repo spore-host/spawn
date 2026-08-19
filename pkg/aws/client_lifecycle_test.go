@@ -123,6 +123,93 @@ func TestClient_ListInstances(t *testing.T) {
 	}
 }
 
+// launchManagedTestInstance runs one instance tagged spawn:managed=true, the
+// tag ListInstances always filters on, so it's discoverable via the client
+// method under test (launchTestInstance's plain RunInstances is not tagged
+// and only suits tests that call the raw EC2 client directly).
+func launchManagedTestInstance(t *testing.T, env *testutil.TestEnv) string {
+	t.Helper()
+	out, err := env.EC2Client().RunInstances(context.Background(), &ec2.RunInstancesInput{
+		InstanceType: ec2types.InstanceTypeT3Micro,
+		ImageId:      aws.String("ami-12345678"),
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeInstance,
+			Tags: []ec2types.Tag{
+				{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("RunInstances: %v", err)
+	}
+	return *out.Instances[0].InstanceId
+}
+
+// TestClient_ListInstances_StateAll is the regression test for spawn#527:
+// "--state all" must behave as a genuine superset of the default (it must
+// also surface a terminated instance, which the default excludes), and an
+// unrecognized state must be a hard error rather than a silently-empty
+// result. Before the fix, "all" was passed through as a literal
+// instance-state-name filter value that no instance is ever in, so this
+// first assertion fails against the old code (0 instances, not 2).
+func TestClient_ListInstances_StateAll(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	c := NewClientFromConfig(env.AWSConfig)
+	ctx := context.Background()
+
+	runningID := launchManagedTestInstance(t, env)
+	terminatedID := launchManagedTestInstance(t, env)
+	if _, err := env.EC2Client().TerminateInstances(ctx, &ec2.TerminateInstancesInput{
+		InstanceIds: []string{terminatedID},
+	}); err != nil {
+		t.Fatalf("TerminateInstances: %v", err)
+	}
+
+	// Default (no filter) must exclude the terminated instance.
+	def, err := c.ListInstances(ctx, "us-east-1", "")
+	if err != nil {
+		t.Fatalf("ListInstances(\"\"): %v", err)
+	}
+	if containsInstanceID(def, terminatedID) {
+		t.Errorf("default --state filter should exclude terminated instances, but %s is present", terminatedID)
+	}
+	if !containsInstanceID(def, runningID) {
+		t.Errorf("default --state filter should include the running instance %s", runningID)
+	}
+
+	// "all" must be a genuine superset: both instances present, including
+	// the terminated one the default excludes.
+	for _, alias := range []string{"all", "any"} {
+		got, err := c.ListInstances(ctx, "us-east-1", alias)
+		if err != nil {
+			t.Fatalf("ListInstances(%q): %v", alias, err)
+		}
+		if !containsInstanceID(got, runningID) {
+			t.Errorf("--state %s missing running instance %s", alias, runningID)
+		}
+		if !containsInstanceID(got, terminatedID) {
+			t.Errorf("--state %s missing terminated instance %s (this is the spawn#527 regression: "+
+				"\"all\" must mean no filter, not a literal unmatchable filter value)", alias, terminatedID)
+		}
+	}
+
+	// An unrecognized state must be a hard error, never a silent empty result.
+	if _, err := c.ListInstances(ctx, "us-east-1", "bogus"); err == nil {
+		t.Fatal("ListInstances(\"bogus\") = nil error, want a validation error")
+	}
+}
+
+func containsInstanceID(instances []InstanceInfo, id string) bool {
+	for _, inst := range instances {
+		if inst.InstanceID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func TestClient_KeyPairOps(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	c := NewClientFromConfig(env.AWSConfig)

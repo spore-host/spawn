@@ -42,7 +42,7 @@ func init() {
 	listCmd.Flags().StringVar(&listRegion, "region", "", "Filter by AWS region (default: all regions)")
 	listCmd.Flags().StringSliceVarP(&listRegions, "regions", "r", nil, "Filter by regions (comma-separated, e.g. us-east-1,us-west-2)")
 	listCmd.Flags().StringVar(&listAZ, "az", "", "Filter by availability zone")
-	listCmd.Flags().StringVar(&listState, "state", "", "Filter by instance state (running, stopped, etc.)")
+	listCmd.Flags().StringVar(&listState, "state", "", "Filter by instance state (running, stopped, etc.), or all/any for no filter (includes terminated)")
 	listCmd.Flags().StringVar(&listInstanceType, "instance-type", "", "Filter by exact instance type (e.g., t3.micro)")
 	listCmd.Flags().StringVar(&listInstanceFamily, "instance-family", "", "Filter by instance family (e.g., m7i, t3)")
 	listCmd.Flags().StringArrayVar(&listTag, "tag", []string{}, "Filter by tag (key=value format, can be specified multiple times)")

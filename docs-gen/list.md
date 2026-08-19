@@ -34,7 +34,7 @@ spawn list [flags]
 | `--job-array-name` |  | string |  | Filter by job array name |
 | `--region` |  | string |  | Filter by AWS region (default: all regions) |
 | `--regions` | `-r` | stringSlice |  | Filter by regions (comma-separated, e.g. us-east-1,us-west-2) |
-| `--state` |  | string |  | Filter by instance state (running, stopped, etc.) |
+| `--state` |  | string |  | Filter by instance state (running, stopped, etc.), or all/any for no filter (includes terminated) |
 | `--sweep-id` |  | string |  | Filter by parameter sweep ID |
 | `--sweep-name` |  | string |  | Filter by parameter sweep name |
 | `--tag` |  | stringArray |  | Filter by tag (key=value format, can be specified multiple times) |
