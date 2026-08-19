@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.100.4] - 2026-08-19
+
 ### Fixed
 - **A param-file key that looked like a spawn setting silently became a
   `PARAM_*` env var and did nothing** (#526). Every unrecognised key fell through
@@ -2952,7 +2954,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.100.3...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.100.4...HEAD
+[0.100.4]: https://github.com/spore-host/spawn/compare/v0.100.3...v0.100.4
 [0.100.3]: https://github.com/spore-host/spawn/compare/v0.100.2...v0.100.3
 [0.100.2]: https://github.com/spore-host/spawn/compare/v0.100.1...v0.100.2
 [0.100.1]: https://github.com/spore-host/spawn/compare/v0.100.0...v0.100.1
