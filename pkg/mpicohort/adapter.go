@@ -85,8 +85,8 @@ type Actuator struct {
 	// on demand. Empty → no PG (or the config already carries a fixed one).
 	PlacementGroupPrefix string
 
-	pgMu      sync.Mutex          // guards pgCreated and pgOnce
-	pgCreated map[string]struct{} // AZ → placement group ensured (create-once per AZ)
+	pgMu      sync.Mutex               // guards pgCreated and pgOnce
+	pgCreated map[string]struct{}      // AZ → placement group ensured (create-once per AZ)
 	pgOnce    map[string]*pgCreateOnce // AZ → in-flight/completed CreatePlacementGroup call
 }
 
