@@ -97,6 +97,7 @@ spawn launch <name> [flags]
 | `--nist-800-171` |  | bool |  | Enable NIST 800-171 Rev 3 compliance mode |
 | `--nist-800-53` |  | string |  | Enable NIST 800-53 compliance (low, moderate, high) |
 | `--no-detach` |  | bool |  | Disable auto-detach for parameter sweeps (requires --ttl or --idle-timeout) |
+| `--no-dns` |  | bool |  | Skip DNS registration entirely (unlike --wait-for-ssh=false, this does not also skip the SSH-readiness wait). Overrides dns.enabled in ~/.spawn/config.yaml for this launch (#549) |
 | `--no-timeout` |  | bool |  | Disable automatic timeout (NOT RECOMMENDED: creates zombie risk) |
 | `--notify-platform` |  | string |  | Chat platform for lifecycle notifications: slack (default), teams, or discord |
 | `--on-complete` |  | string |  | Action when workload signals completion: terminate, stop, hibernate. Use 'terminate' for batch/headless workloads — 'stop' leaves EBS (and any attached EIP) billing indefinitely, which is easy to forget in accounts without a hosted reaper |

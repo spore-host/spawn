@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/sshkey"
@@ -34,6 +37,25 @@ func loadLaunchConfig(path string) (*LaunchConfig, error) {
 		return nil, fmt.Errorf("parse launch config %s: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// shouldAttemptDNSRegistration decides whether the launch flow should even
+// try to register DNS (#549). It's a pure function so the guard's decision
+// table is directly unit-testable without running a real launch:
+//
+//   - no DNS name requested (--dns / --name never set one) → never.
+//   - SSH readiness wasn't confirmed (--wait-for-ssh=false, #56) → never;
+//     that path has its own distinct skip message and is checked by the
+//     caller before this function is even reached.
+//   - dnsConfig.IsEnabled() is false (--no-dns, or dns.enabled: false in
+//     ~/.spawn/config.yaml, with CLI flag taking precedence per
+//     DNSConfig.IsEnabled/LoadDNSConfig) → never.
+//   - otherwise → yes.
+func shouldAttemptDNSRegistration(dnsName string, waitForSSH bool, dnsConfig *spawnconfig.DNSConfig) bool {
+	if dnsName == "" || !waitForSSH || dnsConfig == nil {
+		return false
+	}
+	return dnsConfig.IsEnabled()
 }
 
 func isTerminal(f *os.File) bool {
@@ -73,7 +95,81 @@ func launchMode(interactive bool, instanceType string, stdinIsTTY bool) launchIn
 	return modeFlags
 }
 
+// resolveHost is the DNS lookup registerDNS's controller-side pre-check uses
+// (#548). Tests substitute a fake so a permanently-unresolvable-hostname case
+// can be exercised without touching the network or waiting on real DNS.
+var resolveHost = func(host string) ([]string, error) {
+	return net.LookupHost(host)
+}
+
+// isPermanentResolutionFailure reports whether err represents a definitive
+// "this name does not exist" (NXDOMAIN-class) failure, as opposed to a
+// transient resolver hiccup (timeout, temporarily unreachable server, no
+// network yet) that might well succeed on a later attempt. Go's net.DNSError
+// carries this distinction directly via IsNotFound (added for exactly this
+// purpose) — IsTimeout/IsTemporary and everything else are NOT permanent.
+// This split is the crux of #548: treating every resolution failure as
+// permanent would break genuinely-transient early-boot cases (resolver not
+// populated yet), while treating every failure as transient (today's bug)
+// burns the full retry deadline on names that can never resolve.
+func isPermanentResolutionFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return dnsErr.IsNotFound
+	}
+	return false
+}
+
+// endpointHostname extracts the hostname portion of a DNS API endpoint URL.
+// Returns "" (not an error) for a malformed/hostless endpoint — callers treat
+// that as "can't pre-check this one, fall back to the normal retry loop".
+func endpointHostname(apiEndpoint string) string {
+	u, err := url.Parse(apiEndpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// preflightDNSEndpoint is the #548 controller-side pre-check: it resolves the
+// DNS API endpoint's hostname BEFORE registerDNS commits the guest to a retry
+// loop that can burn up to 4 minutes (real instance-hours) of an SSH exec.
+// DNS is DNS: a hostname that's NXDOMAIN here (a stale/placeholder
+// dns.api_endpoint, or an account never wired for spore.host DNS — which
+// cmd/launch_single.go's caller comment calls the *expected* case for
+// unauthorized accounts) will never resolve on the guest instance either, so
+// there's nothing to gain from waiting it out server-side.
+//
+// Returns a non-nil error ONLY for a definitive NXDOMAIN
+// (isPermanentResolutionFailure) — the caller should skip the retry loop and
+// surface this as the non-fatal warning. Any other outcome (resolves fine, a
+// malformed/hostless endpoint, or a transient lookup error such as a timeout
+// or unreachable resolver) returns nil: the normal SSH retry loop must still
+// run, because THAT loop's whole reason to exist is the guest's own DNS
+// resolver taking up to ~90s to populate after boot — a transient failure on
+// the controller says nothing about that and must not short-circuit it.
+func preflightDNSEndpoint(apiEndpoint string) error {
+	host := endpointHostname(apiEndpoint)
+	if host == "" {
+		return nil
+	}
+	if _, err := resolveHost(host); isPermanentResolutionFailure(err) {
+		return fmt.Errorf("DNS API endpoint hostname %q does not resolve (%w) — this is expected in accounts not wired for spore.host DNS", host, err)
+	}
+	return nil
+}
+
 func registerDNS(plat *platform.Platform, keyName, instanceID, publicIP, recordName, domain, apiEndpoint string) (string, error) {
+	// #548: skip the guest-side SSH retry loop entirely when the endpoint is
+	// permanently unresolvable — see preflightDNSEndpoint's doc comment for
+	// why only a definitive NXDOMAIN short-circuits, not a transient failure.
+	if err := preflightDNSEndpoint(apiEndpoint); err != nil {
+		return "", err
+	}
+
 	// Build SSH command to register DNS from within the instance
 	sshScript := fmt.Sprintf(`
 # Get IMDSv2 token

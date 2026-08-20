@@ -32,22 +32,44 @@ type Config struct {
 	Defaults       LaunchDefaults       `yaml:"defaults"`
 }
 
-// DNSConfig represents DNS configuration
+// DNSConfig represents DNS configuration.
+//
+// Enabled is a tri-state pointer rather than a plain bool (#549): a
+// ~/.spawn/config.yaml that exists but doesn't mention a `dns:` section (or
+// mentions `dns:` but not `enabled:`) must NOT be treated the same as an
+// explicit `dns: { enabled: false }` — yaml.v3 leaves an absent bool key at
+// its zero value (false), which previously silently disabled DNS registration
+// for anyone with an unrelated config file. nil means "not specified at this
+// layer"; a non-nil pointer means the layer explicitly said so.
 type DNSConfig struct {
-	Enabled     bool   `yaml:"enabled"`
+	Enabled     *bool  `yaml:"enabled"`
 	Domain      string `yaml:"domain"`
 	APIEndpoint string `yaml:"api_endpoint"`
 }
 
+// IsEnabled resolves the tri-state Enabled field to a concrete bool. A nil
+// Enabled (nothing ever said otherwise) defaults to true — DNS registration
+// is on by default, matching the observed pre-#549 behavior for anyone not
+// using --no-dns or dns.enabled: false.
+func (c *DNSConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+func boolPtr(b bool) *bool { return &b }
+
 // LoadDNSConfig loads DNS configuration with precedence:
-// 1. CLI flags (passed as parameters)
+// 1. CLI flags (passed as parameters, including flagNoDNS)
 // 2. Environment variables
 // 3. Config file
 // 4. SSM Parameter Store
 // 5. Defaults
-func LoadDNSConfig(ctx context.Context, flagDomain, flagAPIEndpoint string) (*DNSConfig, error) {
+//
+// flagNoDNS is the --no-dns flag (#549): when true it forces Enabled to
+// false regardless of what the config file says, since a CLI flag on this
+// specific invocation should always win over a persisted default.
+func LoadDNSConfig(ctx context.Context, flagDomain, flagAPIEndpoint string, flagNoDNS bool) (*DNSConfig, error) {
 	cfg := &DNSConfig{
-		Enabled:     true,
+		Enabled:     boolPtr(true),
 		Domain:      defaultDomain,
 		APIEndpoint: defaultAPIEndpoint,
 	}
@@ -74,7 +96,11 @@ func LoadDNSConfig(ctx context.Context, flagDomain, flagAPIEndpoint string) (*DN
 		if fileConfig.DNS.APIEndpoint != "" {
 			cfg.APIEndpoint = fileConfig.DNS.APIEndpoint
 		}
-		cfg.Enabled = fileConfig.DNS.Enabled
+		// Only override the default when the file actually specified `enabled:`
+		// (fileConfig.DNS.Enabled != nil) — an absent key must not disable DNS.
+		if fileConfig.DNS.Enabled != nil {
+			cfg.Enabled = fileConfig.DNS.Enabled
+		}
 	}
 
 	// 2. Environment variables
@@ -91,6 +117,9 @@ func LoadDNSConfig(ctx context.Context, flagDomain, flagAPIEndpoint string) (*DN
 	}
 	if flagAPIEndpoint != "" {
 		cfg.APIEndpoint = flagAPIEndpoint
+	}
+	if flagNoDNS {
+		cfg.Enabled = boolPtr(false)
 	}
 
 	return cfg, nil

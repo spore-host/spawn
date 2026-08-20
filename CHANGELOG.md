@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spawn launch --no-dns` skips DNS registration entirely for a single
+  launch, without also skipping the SSH-readiness wait that
+  `--wait-for-ssh=false` forces (#549). A CLI flag beats a persisted
+  `dns.enabled` config-file setting, matching this repo's existing
+  flag-over-config precedence convention (e.g. `--ttl`).
+
 ### Fixed
 - **The root EBS volume size was unreachable on the parameter-sweep launch
   path** (#544): `--volume-size` was registered and read on the single-instance
@@ -36,6 +43,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   substituting a fabricated number. This is the display-side half of #533,
   which fixed the same fabrication for `--cost-limit` enforcement only.
   (#543)
+
+- **`dns.enabled: false` in `~/.spawn/config.yaml` was parsed but never
+  consulted — there was no way to skip DNS registration short of
+  `--wait-for-ssh=false`, which also (undesirably) skips the SSH-readiness
+  wait** (#549). Worse, `dns.enabled` was a plain bool with no
+  "unspecified" state, so ANY config file that existed but didn't mention
+  `dns:` unmarshaled `Enabled` to `false` and silently disabled DNS
+  registration for every named launch. `DNSConfig.Enabled` is now a
+  tri-state (`*bool`): absent means "use the default (enabled)", matching
+  the observed pre-fix behavior for everyone who never touched `dns:`.
+- **DNS registration's retry loop always burned the full 4-minute retry
+  deadline on a permanently-unresolvable `dns.api_endpoint` hostname**
+  (stale/placeholder config, or an account not wired for spore.host DNS —
+  which is the *expected* case per the code's own comment), even though
+  `curl exit 6` (couldn't resolve host) was only meant to model the
+  guest's DNS resolver not being populated yet at early boot (observed up
+  to ~90s) (#548). Measured cost: ~$7.60 of wasted instance-hours per
+  3-host fleet launch, recurring on every relaunch. `registerDNS` now
+  resolves the endpoint hostname from the controller BEFORE starting the
+  guest-side SSH retry loop; only a definitive NXDOMAIN
+  (`net.DNSError.IsNotFound`) short-circuits straight to the non-fatal
+  warning — a transient controller-side lookup failure (timeout,
+  temporarily unreachable resolver) still falls through to the existing
+  retry loop unchanged, so the genuinely-transient early-boot case is not
+  affected.
 
 ## [0.101.0] - 2026-08-19
 
