@@ -1,6 +1,8 @@
 package cost
 
 import (
+	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -10,6 +12,19 @@ const epsilon = 1e-6
 
 func approxEqual(a, b float64) bool {
 	return math.Abs(a-b) < epsilon
+}
+
+// fakePricer is a deterministic, offline stand-in for *truffleaws.Client's
+// OnDemandPrice, matching the fake used in pkg/aws/pricing_test.go for #533.
+type fakePricer struct {
+	price float64
+	err   error
+	calls int
+}
+
+func (f *fakePricer) OnDemandPrice(_ context.Context, _, _ string) (float64, error) {
+	f.calls++
+	return f.price, f.err
 }
 
 func TestCostBreakdownCalculations(t *testing.T) {
@@ -256,22 +271,85 @@ func TestCalculateRunningHours_InvalidTimestamp(t *testing.T) {
 func TestCalculateComputeCost(t *testing.T) {
 	t.Run("uses actual type over requested", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", ActualType: "t3.micro", RequestedType: "m5.large"}
-		if cost := calculateComputeCost(inst, 1.0); cost <= 0 {
-			t.Errorf("expected positive cost, got %f", cost)
+		p := &fakePricer{price: 0.0104}
+		cache := map[string]float64{}
+		cost, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
+		if !priced || cost <= 0 {
+			t.Errorf("expected positive priced cost, got cost=%f priced=%v", cost, priced)
 		}
 	})
 	t.Run("falls back to requested type", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", RequestedType: "t3.micro"}
-		single := calculateComputeCost(inst, 1.0)
-		double := calculateComputeCost(inst, 2.0)
+		p := &fakePricer{price: 0.0104}
+		cache := map[string]float64{}
+		single, _ := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
+		double, _ := calculateComputeCost(context.Background(), p, cache, inst, 2.0)
 		if !approxEqual(double, 2*single) {
 			t.Errorf("2h cost %f ≠ 2× 1h cost %f", double, single)
 		}
 	})
-	t.Run("zero hours returns zero", func(t *testing.T) {
+	t.Run("zero hours returns zero without calling the pricer", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", ActualType: "t3.micro"}
-		if cost := calculateComputeCost(inst, 0); cost != 0 {
-			t.Errorf("expected 0 for 0 hours, got %f", cost)
+		p := &fakePricer{price: 0.0104}
+		cache := map[string]float64{}
+		cost, priced := calculateComputeCost(context.Background(), p, cache, inst, 0)
+		if cost != 0 || !priced {
+			t.Errorf("expected (0, true) for 0 hours, got (%f, %v)", cost, priced)
+		}
+		if p.calls != 0 {
+			t.Errorf("pricer was called %d times for a 0-hour instance, want 0", p.calls)
+		}
+	})
+	// #543 regression: the real truffle rate is used, not libs/pricing's static
+	// per-family-size guess table, which under-quoted c8g.metal-48xl in
+	// us-east-1 by 38x ($0.20/hr against a real $7.657/hr).
+	t.Run("uses the real truffle rate, not a static guess", func(t *testing.T) {
+		inst := SweepInstance{Region: "us-east-1", ActualType: "c8g.metal-48xl"}
+		p := &fakePricer{price: 7.6570}
+		cache := map[string]float64{}
+		cost, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
+		if !priced {
+			t.Fatal("expected the instance to be priced")
+		}
+		if !approxEqual(cost, 7.6570) {
+			t.Errorf("cost = %f, want 7.6570 (the real rate)", cost)
+		}
+		if approxEqual(cost, 0.20) {
+			t.Error("cost matches the old fabricated static-guess rate ($0.20/hr)")
+		}
+	})
+	t.Run("a pricer failure is unpriced, not a fabricated zero-rate success", func(t *testing.T) {
+		inst := SweepInstance{Region: "us-east-1", ActualType: "brand-new.type"}
+		p := &fakePricer{err: errors.New("no on-demand price found")}
+		cache := map[string]float64{}
+		cost, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
+		if priced {
+			t.Error("expected priced=false when the pricer fails")
+		}
+		if cost != 0 {
+			t.Errorf("cost = %f, want 0 when unpriced", cost)
+		}
+	})
+	t.Run("a nil pricer (no AWS config) is unpriced, never a guess", func(t *testing.T) {
+		inst := SweepInstance{Region: "us-east-1", ActualType: "t3.micro"}
+		cache := map[string]float64{}
+		cost, priced := calculateComputeCost(context.Background(), nil, cache, inst, 1.0)
+		if priced || cost != 0 {
+			t.Errorf("cost=%f priced=%v, want (0, false) with no pricer available", cost, priced)
+		}
+	})
+	t.Run("caches the rate across calls for the same type and region", func(t *testing.T) {
+		inst := SweepInstance{Region: "us-east-1", ActualType: "m5.large"}
+		p := &fakePricer{price: 0.096}
+		cache := map[string]float64{}
+		if _, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0); !priced {
+			t.Fatal("expected the first call to price successfully")
+		}
+		if _, priced := calculateComputeCost(context.Background(), p, cache, inst, 3.0); !priced {
+			t.Fatal("expected the second call to price successfully")
+		}
+		if p.calls != 1 {
+			t.Errorf("pricer was called %d times for the same (type, region), want 1 (cached)", p.calls)
 		}
 	})
 }

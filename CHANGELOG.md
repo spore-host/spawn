@@ -24,6 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   near-miss spelling, now pointing at the real key (`volume_size:`) instead of
   the nonexistent flag.
 
+- `spawn launch --estimate-only`, `spawn service --dry-run`, and `spawn cost`
+  now price instances through truffle (the suite's pricing authority, #533)
+  instead of libs/pricing's static per-family-size guess table, which
+  under-quoted an unknown family/size by up to 38x — e.g. `c8g.metal-48xl` in
+  us-east-1 showed $0.20/hr against a real $7.657/hr, because the table's one
+  `"metal"` size-multiplier entry doesn't match the modern `metal-Nxl` spelling
+  and silently fell through to a 2.0x "default to xlarge" multiplier. All
+  three surfaces now print the price's source (`live` or `static fallback`)
+  next to the rate, and report a pricing miss explicitly rather than
+  substituting a fabricated number. This is the display-side half of #533,
+  which fixed the same fabrication for `--cost-limit` enforcement only.
+  (#543)
+
 ## [0.101.0] - 2026-08-19
 
 ### Added

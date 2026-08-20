@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,7 +235,7 @@ func TestRenderServiceDryRunShowsTheCostBound(t *testing.T) {
 	serviceUpload = "./svc"
 
 	var out bytes.Buffer
-	if err := renderServiceDryRun(&out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
+	if err := renderServiceDryRun(context.Background(), &out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
 		t.Fatalf("renderServiceDryRun: %v", err)
 	}
 	got := out.String()
@@ -256,6 +257,95 @@ func TestRenderServiceDryRunShowsTheCostBound(t *testing.T) {
 	}
 }
 
+// withFakeServiceDryRunPrice installs a canned resolveServiceDryRunPrice for
+// the duration of the test, so the dry-run's "Rate:" line can be exercised
+// without a real truffle/AWS call.
+func withFakeServiceDryRunPrice(t *testing.T, price aws.DisplayPrice, err error) {
+	t.Helper()
+	orig := resolveServiceDryRunPrice
+	t.Cleanup(func() { resolveServiceDryRunPrice = orig })
+	resolveServiceDryRunPrice = func(context.Context, string, string) (aws.DisplayPrice, error) {
+		return price, err
+	}
+}
+
+// TestRenderServiceDryRunShowsTheRealRateNotAGuess is the #543 regression: the
+// dry run's "Rate:"/"Max cost:" lines must come from truffle (live or its own
+// safe static fallback), never from libs/pricing's static per-family-size
+// guess table, and must say which source they came from.
+func TestRenderServiceDryRunShowsTheRealRateNotAGuess(t *testing.T) {
+	resetServiceFlags(t)
+	serviceInstanceType = "c8g.metal-48xl"
+	serviceTTL = "2h"
+	spawnRegion = "us-east-1"
+	// The real rate this bug under-quoted 38x (issue #543): libs/pricing's
+	// static guess table returned $0.20/hr against this.
+	withFakeServiceDryRunPrice(t, aws.DisplayPrice{PricePerHour: 7.6570, Source: "live"}, nil)
+
+	var out bytes.Buffer
+	if err := renderServiceDryRun(context.Background(), &out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
+		t.Fatalf("renderServiceDryRun: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "$7.6570/hr") {
+		t.Errorf("dry run did not show the real truffle rate:\n%s", got)
+	}
+	if !strings.Contains(got, "(live)") {
+		t.Errorf("dry run did not surface the price source:\n%s", got)
+	}
+	if strings.Contains(got, "$0.2000") {
+		t.Errorf("dry run quoted the old fabricated static-guess rate:\n%s", got)
+	}
+	// 2h at $7.657/hr = $15.314
+	if !strings.Contains(got, "$15.31") {
+		t.Errorf("dry run did not compute the max cost from the real rate:\n%s", got)
+	}
+}
+
+// TestRenderServiceDryRunShowsTheStaticFallbackSource covers truffle's own
+// safe static fallback (a real published rate, degraded because the live
+// Price List API was unavailable) — it must still show a rate, labeled as
+// such, never silently presented as live.
+func TestRenderServiceDryRunShowsTheStaticFallbackSource(t *testing.T) {
+	resetServiceFlags(t)
+	serviceInstanceType = "m7i.large"
+	serviceTTL = "1h"
+	spawnRegion = "us-east-1"
+	withFakeServiceDryRunPrice(t, aws.DisplayPrice{PricePerHour: 0.1008, Source: "static"}, nil)
+
+	var out bytes.Buffer
+	if err := renderServiceDryRun(context.Background(), &out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
+		t.Fatalf("renderServiceDryRun: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "(static fallback)") {
+		t.Errorf("dry run did not label the static-fallback source:\n%s", got)
+	}
+}
+
+// TestRenderServiceDryRunReportsAPricingFailurePlainly covers a truffle
+// pricing miss: the dry run must say pricing is unavailable, never silently
+// substitute a fabricated number.
+func TestRenderServiceDryRunReportsAPricingFailurePlainly(t *testing.T) {
+	resetServiceFlags(t)
+	serviceInstanceType = "brand-new.type"
+	serviceTTL = "1h"
+	spawnRegion = "us-east-1"
+	withFakeServiceDryRunPrice(t, aws.DisplayPrice{}, errors.New("no on-demand price found"))
+
+	var out bytes.Buffer
+	if err := renderServiceDryRun(context.Background(), &out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
+		t.Fatalf("renderServiceDryRun: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Rate:        unavailable") {
+		t.Errorf("dry run did not report the pricing failure plainly:\n%s", got)
+	}
+	if strings.Contains(got, "Max cost:") {
+		t.Errorf("dry run must not show a cost bound when pricing failed:\n%s", got)
+	}
+}
+
 func TestRenderServiceDryRunReportsTheAppliedIdleDefault(t *testing.T) {
 	resetServiceFlags(t)
 	serviceInstanceType = "m7i.large"
@@ -263,7 +353,7 @@ func TestRenderServiceDryRunReportsTheAppliedIdleDefault(t *testing.T) {
 	// by the guard; a dry run that showed "idle=-" would under-report what bounds
 	// the spend, which is the one number this output exists for.
 	var out bytes.Buffer
-	if err := renderServiceDryRun(&out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
+	if err := renderServiceDryRun(context.Background(), &out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
 		t.Fatalf("renderServiceDryRun: %v", err)
 	}
 	got := out.String()
@@ -280,7 +370,7 @@ func TestRenderServiceDryRunForAnExistingHostPromisesNoTeardown(t *testing.T) {
 	serviceExistingHost = "my-box"
 
 	var out bytes.Buffer
-	if err := renderServiceDryRun(&out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
+	if err := renderServiceDryRun(context.Background(), &out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
 		t.Fatalf("renderServiceDryRun: %v", err)
 	}
 	got := out.String()
@@ -612,7 +702,7 @@ func TestRenderServiceDryRunSaysWhyTheCostBoundIsMissing(t *testing.T) {
 	spawnRegion = ""
 
 	var out bytes.Buffer
-	if err := renderServiceDryRun(&out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
+	if err := renderServiceDryRun(context.Background(), &out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
 		t.Fatalf("renderServiceDryRun: %v", err)
 	}
 	got := out.String()

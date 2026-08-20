@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/spf13/cobra"
-	"github.com/spore-host/libs/pricing"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/platform"
@@ -110,7 +110,7 @@ https://github.com/spore-host/spawn/blob/main/docs/service-readiness-contract.md
 		}
 
 		if serviceDryRun {
-			return renderServiceDryRun(os.Stdout, args, addrArgs)
+			return renderServiceDryRun(ctx, os.Stdout, args, addrArgs)
 		}
 
 		client, err := aws.NewClient(ctx)
@@ -164,8 +164,26 @@ func serviceLaunchConfig(name, region string) aws.LaunchConfig {
 	}
 }
 
+// resolveServiceDryRunPrice looks up the on-demand rate for the dry-run's
+// "Rate:"/"Max cost:" lines. It is a package-level seam (like [checkAsync] in
+// cmd/root.go) so tests can inject a fake truffle response without touching
+// AWS or requiring credentials, since renderServiceDryRun otherwise has none.
+//
+// The default resolves a region-pinned AWS config and delegates to
+// [aws.ResolveDisplayPrice] — truffle, the suite's pricing authority (#533) —
+// rather than libs/pricing's static per-family-size guess table, which was
+// wrong by up to 38x for a family or size (e.g. metal-Nxl) it didn't know
+// (#543).
+var resolveServiceDryRunPrice = func(ctx context.Context, region, instanceType string) (aws.DisplayPrice, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	if err != nil {
+		return aws.DisplayPrice{}, fmt.Errorf("load AWS config: %w", err)
+	}
+	return aws.ResolveDisplayPrice(ctx, cfg, instanceType, region)
+}
+
 // renderServiceDryRun prints the plan without launching anything.
-func renderServiceDryRun(out io.Writer, args []string, addrArgs string) error {
+func renderServiceDryRun(ctx context.Context, out io.Writer, args []string, addrArgs string) error {
 	cfg := serviceLaunchConfig(serviceEffectiveName(), spawnRegion)
 	// Show the TTL default a real run would get, so a dry run doesn't
 	// under-report what bounds the spend.
@@ -193,10 +211,15 @@ func renderServiceDryRun(out io.Writer, args []string, addrArgs string) error {
 	fmt.Fprintf(out, "Tunnel:      127.0.0.1:%s → the address the service announces\n", localPortLabel())
 
 	if cfg.Region != "" && cfg.InstanceType != "" && serviceExistingHost == "" {
-		if rate := pricing.GetEC2HourlyRate(cfg.Region, cfg.InstanceType); rate > 0 {
-			fmt.Fprintf(out, "Rate:        $%.4f/hr on-demand\n", rate)
+		dp, err := resolveServiceDryRunPrice(ctx, cfg.Region, cfg.InstanceType)
+		if err != nil {
+			// Never fall back to a fabricated guess: say plainly that pricing is
+			// unavailable, so the missing cost bound isn't mistaken for "free".
+			fmt.Fprintf(out, "Rate:        unavailable — %v\n", err)
+		} else {
+			fmt.Fprintf(out, "Rate:        $%.4f/hr on-demand (%s)\n", dp.PricePerHour, dp.SourceLabel())
 			if d, err := time.ParseDuration(cfg.TTL); err == nil && d > 0 {
-				fmt.Fprintf(out, "Max cost:    ~$%.2f (rate × ttl)\n", rate*d.Hours())
+				fmt.Fprintf(out, "Max cost:    ~$%.2f (rate × ttl)\n", dp.PricePerHour*d.Hours())
 			}
 		}
 	} else if cfg.Region == "" && serviceExistingHost == "" {

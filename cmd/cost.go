@@ -175,5 +175,17 @@ func runCostBreakdown(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
+	// #543: an instance type truffle could not price (live nor its own static
+	// fallback) has its compute cost excluded above, not fabricated from a
+	// guess — say so, since a Total Cost that quietly omits real spend can't be
+	// trusted without this line.
+	if len(breakdown.UnpricedInstanceTypes) > 0 {
+		fmt.Println("⚠️  Unpriced (excluded from Total Cost above — pricing unavailable):")
+		for _, t := range breakdown.UnpricedInstanceTypes {
+			fmt.Printf("  - %s\n", t)
+		}
+		fmt.Println()
+	}
+
 	return nil
 }
