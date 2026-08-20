@@ -877,6 +877,12 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// declined to wait for SSH, so we cannot (and should not) register a record
 	// pointing at an instance whose reachability is unconfirmed — skip it rather
 	// than block on an SSH that may not yet be up (#56).
+	//
+	// #549: --no-dns (or dns.enabled: false in ~/.spawn/config.yaml) is a
+	// separate, explicit escape from DNS registration that does NOT also skip
+	// the SSH-readiness wait --wait-for-ssh=false forces. Load the DNS config
+	// first (cheap, no network calls beyond an optional SSM lookup) so the
+	// --no-dns / dns.enabled precedence can decide whether to even try.
 	var dnsRecord string
 	if dnsName != "" && !waitForSSH {
 		fmt.Fprintf(os.Stderr, "ℹ️  Skipping DNS registration (--wait-for-ssh=false); register later with: spawn dns register %s %s\n",
@@ -884,9 +890,11 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	}
 	if dnsName != "" && waitForSSH {
 		// Load DNS configuration with precedence
-		dnsConfig, err := spawnconfig.LoadDNSConfig(ctx, dnsDomain, dnsAPIEndpoint)
+		dnsConfig, err := spawnconfig.LoadDNSConfig(ctx, dnsDomain, dnsAPIEndpoint, noDNS)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\n⚠️  Failed to load DNS config: %v\n", err)
+		} else if !shouldAttemptDNSRegistration(dnsName, waitForSSH, dnsConfig) {
+			fmt.Fprintf(os.Stderr, "ℹ️  Skipping DNS registration (disabled via --no-dns or dns.enabled: false)\n")
 		} else {
 			prog.Start("Registering DNS")
 			fqdn, err := registerDNS(plat, result.KeyName, result.InstanceID, result.PublicIP, dnsName, dnsConfig.Domain, dnsConfig.APIEndpoint)

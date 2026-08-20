@@ -55,6 +55,7 @@ var (
 	dnsName          string
 	dnsDomain        string
 	dnsAPIEndpoint   string
+	noDNS            bool
 	noTimeout        bool
 	slackWorkspaceID string // for lifecycle notifications via spore-bot
 	notifyPlatform   string // chat platform for lifecycle notifications: slack (default) / teams / discord (#2)
@@ -248,6 +249,7 @@ func init() {
 	launchCmd.Flags().StringVar(&activeProcesses, "active-processes", "", "Process names to monitor, prevents idle termination while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple)")
 	launchCmd.Flags().StringVar(&dnsDomain, "dns-domain", "", "Custom DNS domain (overrides default)")
 	launchCmd.Flags().StringVar(&dnsAPIEndpoint, "dns-api-endpoint", "", "Custom DNS API endpoint (overrides default)")
+	launchCmd.Flags().BoolVar(&noDNS, "no-dns", false, "Skip DNS registration entirely (unlike --wait-for-ssh=false, this does not also skip the SSH-readiness wait). Overrides dns.enabled in ~/.spawn/config.yaml for this launch (#549)")
 
 	// Job array
 	launchCmd.Flags().IntVar(&count, "count", 1, "Number of instances to launch (job array)")
