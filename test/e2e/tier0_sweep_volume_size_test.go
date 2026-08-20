@@ -98,7 +98,7 @@ func startRunInstancesCaptureProxy(t *testing.T, backend string) (*runInstancesC
 		// always emits the root mapping first, see pkg/aws/ebs.go).
 		if vals, perr := url.ParseQuery(string(body)); perr == nil && vals.Get("Action") == "RunInstances" {
 			if sizeStr := vals.Get("BlockDeviceMapping.1.Ebs.VolumeSize"); sizeStr != "" {
-				if n, aerr := strconv.Atoi(sizeStr); aerr == nil {
+				if n, aerr := strconv.ParseInt(sizeStr, 10, 32); aerr == nil {
 					capture.mu.Lock()
 					capture.sizes[vals.Get("InstanceType")] = int32(n)
 					capture.mu.Unlock()
