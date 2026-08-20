@@ -87,6 +87,16 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// an explicit --ttl and stops substituting an unrelated 1h *idle* timeout.
 	appliedControls := applyCLISpendControlsToSweep(paramFormat)
 
+	// --volume-size used to be dropped on the floor for a sweep too (#544), the
+	// same bug class as #525/#539: it is registered and read on the
+	// single-instance launch path (cmd/launch_config.go) but launch_sweep.go
+	// never referenced it at all, so every sweep row launched with spawn's
+	// hardcoded 20 GiB default (pkg/aws/ebs.go) no matter what --volume-size
+	// asked for. Folded into paramFormat.Defaults here, same seam and same
+	// precedence rule as the spend controls above: a row's own volume_size: >
+	// the CLI flag > the file's defaults:.
+	appliedControls = append(appliedControls, applyCLIVolumeSizeToSweep(paramFormat)...)
+
 	// AUTO-ENABLE DETACHED MODE for parameter sweeps to prevent zombie instances
 	// If the CLI disconnects (laptop sleep/shutdown), detached mode ensures:
 	// - Sweep state persists in DynamoDB
@@ -786,6 +796,31 @@ func applyCLISpendControlsToSweep(paramFormat *ParamFileFormat) []string {
 		applied = append(applied, fmt.Sprintf("cost-limit=$%.2f", costLimit))
 	}
 	return applied
+}
+
+// applyCLIVolumeSizeToSweep writes --volume-size into a sweep's `defaults:` so
+// it actually reaches each row (#544), the same seam and pattern as
+// applyCLISpendControlsToSweep above: a row's own volume_size: still wins after
+// the merge, a flag passed at invocation time beats a value checked into the
+// file's defaults:, and this is the one place that reaches both the foreground
+// path (buildLaunchConfigFromParams merges Defaults into every row) and the
+// detached path (Defaults are uploaded to S3 for the Lambda orchestrator, which
+// reads volume_size from there too).
+//
+// launchVolumeSize's zero value ("unset") is indistinguishable from an explicit
+// --volume-size 0, but RootVolumeSizeGiB already treats 0 as "no override" on
+// the single-instance path (cmd/launch_config.go's `if launchVolumeSize > 0`),
+// so this mirrors that: there is no way to ask for a 0 GiB root volume, on
+// either launch path, and this fix does not add one.
+func applyCLIVolumeSizeToSweep(paramFormat *ParamFileFormat) []string {
+	if launchVolumeSize <= 0 {
+		return nil
+	}
+	if paramFormat.Defaults == nil {
+		paramFormat.Defaults = make(map[string]interface{})
+	}
+	paramFormat.Defaults["volume_size"] = launchVolumeSize
+	return []string{fmt.Sprintf("volume-size=%dGiB", launchVolumeSize)}
 }
 
 // applyCLIIAMToSweep resolves the CLI IAM flags (--iam-role/--iam-policy/

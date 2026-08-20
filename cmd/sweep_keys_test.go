@@ -117,6 +117,10 @@ func TestClassifyRowKeyRejects(t *testing.T) {
 		{"instance_types", "grid:", "plural means rows or a grid, not a list in one row"},
 		{"image_id", "ami:", "wrong name for the same thing"},
 		{"spot_price", "spot_max_price:", "near-miss on a real key"},
+		// #545: this used to point at "--disk-size", a flag that has never
+		// existed in this codebase — only --volume-size does. The message must
+		// name the real, working key (volume_size:), not a nonexistent flag.
+		{"disk_size", "volume_size:", "near-miss spelling redirected at the real key, not a dead flag name"},
 		{"on-complete", "on_complete", "hyphen instead of underscore — rule B"},
 		{"instance-type", "instance_type", "hyphen on the key that decides what you pay for"},
 		{"cost-limit", "cost_limit", "hyphen on the dollar cap"},
@@ -141,6 +145,50 @@ func TestClassifyRowKeyRejects(t *testing.T) {
 					"user what to write instead:\n  %v", tc.key, tc.wantHint, err)
 			}
 		})
+	}
+}
+
+// TestVolumeSizeIsNoLongerRejected is the #544/#545 regression guard:
+// volume_size: used to be on reservedRowKeys (rejected, pointing at a
+// nonexistent "--disk-size" flag) and is now a real, working key in
+// recognizedRowKeys instead. Both halves of that swap are asserted, because
+// leaving it in both maps would make the reserved entry dead code (see
+// TestNoRecognizedKeyIsAlsoReserved) rather than actually fixed.
+func TestVolumeSizeIsNoLongerRejected(t *testing.T) {
+	if !recognizedRowKeys["volume_size"] {
+		t.Error(`"volume_size" must be in recognizedRowKeys — it is now a real ` +
+			"param-file key (#544), not an unknown one")
+	}
+	if _, reserved := reservedRowKeys["volume_size"]; reserved {
+		t.Error(`"volume_size" must not be in reservedRowKeys — that would make it ` +
+			"rejected again, the exact bug #544/#545 fixed")
+	}
+	// classifyRowKey itself doesn't consult recognizedRowKeys (that gate lives in
+	// the caller — buildLaunchConfigFromParams's switch handles a recognized key
+	// before classifyRowKey is ever reached), so calling it directly on
+	// "volume_size" exercises only rules A/B/C and must find none of them fire:
+	// it is not a near-miss, not reserved, and a valid shell identifier.
+	if err := classifyRowKey("volume_size"); err != nil {
+		t.Errorf(`classifyRowKey("volume_size") = %v, want nil — it is no longer reserved`, err)
+	}
+}
+
+// TestDiskSizeMessageNamesTheRealFlag is the #545 fail-without/pass-with case
+// on its own: the message must name a flag/key that actually exists in this
+// codebase. Pre-fix it named "--disk-size", which `grep -rn "disk-size"`
+// across the whole repo turns up nowhere else — a rejection with no working
+// spelling to try.
+func TestDiskSizeMessageNamesTheRealFlag(t *testing.T) {
+	err := classifyRowKey("disk_size")
+	if err == nil {
+		t.Fatal(`classifyRowKey("disk_size") = nil, want an error (it is a near-miss for volume_size:)`)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "--disk-size") {
+		t.Errorf("message still names the nonexistent --disk-size flag: %v", msg)
+	}
+	if !strings.Contains(msg, "volume_size") {
+		t.Errorf("message does not name the real key (volume_size:): %v", msg)
 	}
 }
 
