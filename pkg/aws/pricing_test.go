@@ -117,3 +117,80 @@ func TestResolvePricePerHour_ExplicitPriceIsNoOp(t *testing.T) {
 		t.Errorf("PricePerHour = %v, want 3.14 (caller-supplied price must not be overridden)", cfg.PricePerHour)
 	}
 }
+
+// TestResolveDisplayPrice_Success is the #543 regression for the DISPLAY-side
+// pricing call sites (--estimate-only, `spawn service --dry-run`, `spawn
+// cost`): a successful truffle lookup returns the real rate and its source,
+// not libs/pricing's static per-family-size guess (which under-quoted
+// c8g.metal-48xl in us-east-1 by 38x — $0.20/hr against a real $7.657/hr).
+func TestResolveDisplayPrice_Success(t *testing.T) {
+	pricer := fakePricer{price: 7.6570, source: truffleaws.PriceSourceLive}
+
+	dp, err := resolveDisplayPrice(context.Background(), pricer, "c8g.metal-48xl", "us-east-1")
+	if err != nil {
+		t.Fatalf("resolveDisplayPrice: unexpected error: %v", err)
+	}
+	if dp.PricePerHour != 7.6570 {
+		t.Errorf("PricePerHour = %v, want 7.6570 (the real rate, not the $0.20 fabricated guess)", dp.PricePerHour)
+	}
+	if dp.Source != string(truffleaws.PriceSourceLive) {
+		t.Errorf("Source = %q, want %q", dp.Source, truffleaws.PriceSourceLive)
+	}
+	if got := dp.SourceLabel(); got != "live" {
+		t.Errorf("SourceLabel() = %q, want %q", got, "live")
+	}
+}
+
+// TestResolveDisplayPrice_StaticSourceIsLabeled covers truffle's own safe
+// static fallback: it must still return a usable price, labeled distinctly
+// from a live quote so a caller can tell a degraded-but-real rate from the
+// authoritative one.
+func TestResolveDisplayPrice_StaticSourceIsLabeled(t *testing.T) {
+	pricer := fakePricer{price: 0.096, source: truffleaws.PriceSourceStatic}
+
+	dp, err := resolveDisplayPrice(context.Background(), pricer, "m5.large", "us-east-1")
+	if err != nil {
+		t.Fatalf("resolveDisplayPrice: unexpected error: %v", err)
+	}
+	if dp.PricePerHour != 0.096 {
+		t.Errorf("PricePerHour = %v, want 0.096", dp.PricePerHour)
+	}
+	if got := dp.SourceLabel(); got != "static fallback" {
+		t.Errorf("SourceLabel() = %q, want %q", got, "static fallback")
+	}
+}
+
+// TestResolveDisplayPrice_FailureIsAnErrorNotAGuess covers a truffle pricing
+// miss: the display path must return an explicit error rather than falling
+// back to a fabricated rate. Unlike resolvePricePerHour there is no
+// --cost-limit gate to make conditional — a display quote that can't be
+// priced is always worth surfacing as an error, since there is nothing else
+// useful to show.
+func TestResolveDisplayPrice_FailureIsAnErrorNotAGuess(t *testing.T) {
+	pricer := fakePricer{err: errors.New("no on-demand price found")}
+
+	dp, err := resolveDisplayPrice(context.Background(), pricer, "p5.48xlarge", "us-east-1")
+	if err == nil {
+		t.Fatal("resolveDisplayPrice: expected an error when truffle cannot price the type, got nil")
+	}
+	if dp.PricePerHour != 0 {
+		t.Errorf("PricePerHour = %v, want 0 (must not fabricate a rate on failure)", dp.PricePerHour)
+	}
+	for _, want := range []string{"p5.48xlarge", "us-east-1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q — the failure must be actionable", err.Error(), want)
+		}
+	}
+}
+
+// TestResolveDisplayPrice_ZeroPriceNoErrorIsTreatedAsFailure mirrors
+// TestResolvePricePerHour_ZeroPriceNoErrorTreatedAsFailure: a pricer that
+// returns (0, source, nil) has not actually priced the instance, and must not
+// be reported as a success.
+func TestResolveDisplayPrice_ZeroPriceNoErrorIsTreatedAsFailure(t *testing.T) {
+	pricer := fakePricer{price: 0, source: truffleaws.PriceSourceUnknown, err: nil}
+
+	if _, err := resolveDisplayPrice(context.Background(), pricer, "weird.type", "us-east-1"); err == nil {
+		t.Fatal("resolveDisplayPrice: expected an error for a zero price, got nil")
+	}
+}

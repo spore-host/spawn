@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
-	"github.com/spore-host/libs/pricing"
 	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/compliance"
@@ -295,15 +294,20 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, hibernate || config.HibernateOnIdle); err != nil {
 			return err
 		}
-		odPrice := pricing.GetEC2HourlyRate(config.Region, config.InstanceType)
-		if odPrice == 0 {
-			fmt.Fprintf(os.Stderr, "💰 Cost estimate: pricing data unavailable for %s in %s\n", config.InstanceType, config.Region)
+		// Priced by truffle, the suite's pricing authority (#533) — never by
+		// libs/pricing's static per-family-size guess table, which is wrong by up
+		// to 38x for a type or size the table doesn't know (#543). A quote that
+		// doesn't say whether it's real or fabricated can't be audited, so a
+		// pricing miss is reported plainly rather than silently substituted.
+		dp, err := aws.ResolveDisplayPrice(ctx, awsClient.Config(), config.InstanceType, config.Region)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "💰 Cost estimate: %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "💰 Cost estimate for %s in %s\n", config.InstanceType, config.Region)
-			fmt.Fprintf(os.Stderr, "   On-demand:  $%.4f/hr\n", odPrice)
+			fmt.Fprintf(os.Stderr, "   On-demand:  $%.4f/hr (%s)\n", dp.PricePerHour, dp.SourceLabel())
 			if config.TTL != "" {
 				if d, err := time.ParseDuration(config.TTL); err == nil {
-					fmt.Fprintf(os.Stderr, "   TTL cost:   $%.2f (%.0f hr)\n", odPrice*d.Hours(), d.Hours())
+					fmt.Fprintf(os.Stderr, "   TTL cost:   $%.2f (%.0f hr)\n", dp.PricePerHour*d.Hours(), d.Hours())
 				}
 			}
 		}

@@ -3,14 +3,18 @@ package cost
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/spore-host/libs/pricing"
+	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
 const (
@@ -60,6 +64,15 @@ type CostBreakdown struct {
 	StickerPriceAllIn    float64 // compute+storage+network if running 24/7
 	EffectiveCostPerHour float64 // total / lifetime hours
 	SavingsPercent       float64
+
+	// UnpricedInstanceTypes lists instance types truffle could not price (live
+	// Price List lookup AND its own static-table fallback both failed) — e.g. a
+	// type retired since the sweep ran. ComputeCost, and therefore TotalCost,
+	// EXCLUDES these instances' compute entirely rather than substituting a
+	// fabricated rate (#543): a breakdown that silently priced them at $0 would
+	// under-report the total, but a family-size guess would misreport it by up
+	// to 38x in either direction, which is worse.
+	UnpricedInstanceTypes []string
 }
 
 // StateTransition records when an instance changed state
@@ -109,14 +122,53 @@ type SweepRecord struct {
 	Instances     []SweepInstance `dynamodbav:"instances"`
 }
 
+// onDemandPricer is the subset of *truffleaws.Client's pricing API
+// GetCostBreakdown needs. A spawn-local interface (rather than a direct
+// *truffleaws.Client dependency) lets tests inject a fake that never touches
+// AWS, since *truffleaws.Client satisfies it structurally — the same seam
+// pkg/aws's resolvePricePerHour uses for #533.
+type onDemandPricer interface {
+	OnDemandPrice(ctx context.Context, instanceType, region string) (float64, error)
+}
+
 // Client provides cost tracking operations
 type Client struct {
 	db *dynamodb.Client
+
+	pricerOnce sync.Once
+	pricer     onDemandPricer
 }
 
 // NewClient creates a new cost client
 func NewClient(db *dynamodb.Client) *Client {
 	return &Client{db: db}
+}
+
+// SetOnDemandPricer overrides the on-demand pricer GetCostBreakdown uses.
+// Primarily for tests that want a deterministic, offline price source; pass
+// nil to reset to the default (a truffle client built from the ambient AWS
+// credential chain, lazily on first use).
+func (c *Client) SetOnDemandPricer(p onDemandPricer) {
+	c.pricerOnce.Do(func() {}) // mark as initialized so the default is not installed later
+	c.pricer = p
+}
+
+// onDemandPricer lazily builds the default pricer if none was injected.
+func (c *Client) onDemandPricerOrDefault(ctx context.Context) onDemandPricer {
+	c.pricerOnce.Do(func() {
+		if c.pricer == nil {
+			cfg, err := awsconfig.LoadDefaultConfig(ctx)
+			if err != nil {
+				// No usable AWS config: leave c.pricer nil. Every OnDemandPrice call
+				// then fails fast per-instance below, which is reported as "unpriced"
+				// rather than a fabricated rate.
+				log.Printf("cost: could not load AWS config for pricing (%v); compute costs will be reported as unpriced", err)
+				return
+			}
+			c.pricer = truffleaws.NewClientFromConfig(cfg)
+		}
+	})
+	return c.pricer
 }
 
 // GetCostBreakdown retrieves and calculates cost breakdown for a sweep
@@ -150,6 +202,14 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 
 	regionMap := make(map[string]*RegionalCost)
 	typeMap := make(map[string]*InstanceTypeCost)
+	// rateCache avoids re-pricing the same (type, region) pair for every
+	// instance in the sweep — sweeps commonly run many instances of the same
+	// type. unpriced tracks (type, region) pairs truffle could not price, in
+	// insertion order, deduplicated, for breakdown.UnpricedInstanceTypes.
+	rateCache := make(map[string]float64)
+	unpriced := make(map[string]bool)
+	var unpricedOrder []string
+	pricer := c.onDemandPricerOrDefault(ctx)
 
 	now := time.Now()
 
@@ -176,7 +236,17 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 
 		totalHrs := totalHours(inst.LaunchedAt, endTime)
 		runningHrs := calculateRunningHours(inst.StateHistory, inst.LaunchedAt, endTime)
-		computeCost := calculateComputeCost(inst, runningHrs)
+		computeCost, priced := calculateComputeCost(ctx, pricer, rateCache, inst, runningHrs)
+		if !priced {
+			// truffle could not determine a rate (live nor its own static
+			// fallback). Exclude this instance's compute from every total rather
+			// than fabricate one — see UnpricedInstanceTypes' doc.
+			key := instType + " in " + inst.Region
+			if !unpriced[key] {
+				unpriced[key] = true
+				unpricedOrder = append(unpricedOrder, key)
+			}
+		}
 		storageCost := calculateStorageCost(inst, totalHrs)
 		networkCost := calculateNetworkCost(inst, totalHrs)
 
@@ -203,6 +273,8 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 		typeMap[instType].EstimatedCost += computeCost + storageCost + networkCost
 		typeMap[instType].InstanceCount++
 	}
+
+	breakdown.UnpricedInstanceTypes = unpricedOrder
 
 	// Recalculate total cost from components
 	breakdown.TotalCost = breakdown.ComputeCost + breakdown.StorageCost + breakdown.NetworkCost
@@ -245,8 +317,21 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 	return breakdown, nil
 }
 
-// calculateComputeCost returns compute cost for an instance given running hours
-func calculateComputeCost(inst SweepInstance, runningHrs float64) float64 {
+// calculateComputeCost returns compute cost for an instance given running
+// hours, priced by truffle (the suite's pricing authority, #533) rather than
+// libs/pricing's static per-family-size guess table — which was wrong by up
+// to 38x for a family or size (e.g. a metal-Nxl variant) it didn't know
+// (#543). The second return is false when truffle could not price the type
+// at all (neither live nor its own static fallback); the caller must treat
+// that as "unpriced", never as a $0 cost.
+//
+// rateCache is keyed "type\x00region" and shared across a whole
+// GetCostBreakdown call, since a sweep commonly runs many instances of the
+// same type — without it, a 500-instance sweep would make 500 pricing calls
+// for one real rate. Only a successful lookup is cached, so an unpriceable
+// (type, region) pair is retried on every call rather than remembered as
+// permanently unpriced — cheap, since it's already the failure path.
+func calculateComputeCost(ctx context.Context, pricer onDemandPricer, rateCache map[string]float64, inst SweepInstance, runningHrs float64) (float64, bool) {
 	instType := inst.ActualType
 	if instType == "" {
 		instType = inst.RequestedType
@@ -254,8 +339,23 @@ func calculateComputeCost(inst SweepInstance, runningHrs float64) float64 {
 	if instType == "" {
 		instType = "t3.micro"
 	}
-	hourlyRate := pricing.GetEC2HourlyRate(inst.Region, instType)
-	return runningHrs * hourlyRate
+	if runningHrs == 0 {
+		return 0, true
+	}
+
+	key := instType + "\x00" + inst.Region
+	if rate, ok := rateCache[key]; ok {
+		return runningHrs * rate, true
+	}
+	if pricer == nil {
+		return 0, false
+	}
+	rate, err := pricer.OnDemandPrice(ctx, instType, inst.Region)
+	if err != nil || rate <= 0 {
+		return 0, false
+	}
+	rateCache[key] = rate
+	return runningHrs * rate, true
 }
 
 // calculateStorageCost returns EBS storage cost for lifetime hours
