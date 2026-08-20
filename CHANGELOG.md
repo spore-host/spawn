@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The root EBS volume size was unreachable on the parameter-sweep launch
+  path** (#544): `--volume-size` was registered and read on the single-instance
+  launch path (`cmd/launch_config.go`) but never referenced by
+  `cmd/launch_sweep.go`, and the param-file equivalent, `volume_size:`, was
+  actively **rejected** rather than silently dropped — its error message named
+  `--disk-size`, a command-line flag that has never existed anywhere in this
+  codebase (#545). Between the two, there was no way to set a sweep row's root
+  volume size at all: every row launched at spawn's hardcoded 20 GiB default
+  regardless of what the workload needed, the fourth occurrence of this bug
+  class this week (#524, #525, #539). `--volume-size` and `volume_size:` are
+  now both wired into the sweep path with the same precedence rule established
+  by #525/#539: a row's own `volume_size:` beats `--volume-size` on the command
+  line, which beats the file's `defaults:`. `disk_size:` remains a rejected
+  near-miss spelling, now pointing at the real key (`volume_size:`) instead of
+  the nonexistent flag.
+
 ## [0.101.0] - 2026-08-19
 
 ### Added

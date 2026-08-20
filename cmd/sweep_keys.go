@@ -63,6 +63,7 @@ var recognizedRowKeys = map[string]bool{
 	"user_data":         true,
 	"iam_role":          true,
 	"name":              true,
+	"volume_size":       true,
 }
 
 // reservedRowKeys maps a key that must not silently pass through to the guidance
@@ -128,8 +129,14 @@ var reservedRowKeys = map[string]string{
 	"iam_instance_profile": "use iam_role:",
 	"region_name":          "use region:",
 	"availability_zones":   "one az: per row, or use grid: {az: [...]}",
-	"disk_size":            "--disk-size is a command-line flag, not a param-file key",
-	"volume_size":          "--disk-size is a command-line flag, not a param-file key",
+	// #545: this used to point at "--disk-size", a flag that has never existed
+	// in this codebase (only --volume-size does) — someone hitting this message
+	// would have had no working spelling to try. volume_size: itself is no
+	// longer on this list at all: #544 made it a real, working row/defaults key
+	// (see recognizedRowKeys and buildLaunchConfigFromParams's volume_size case),
+	// so disk_size is kept here only as the near-miss spelling, redirected at the
+	// key that actually works.
+	"disk_size": "use volume_size: with a number of GiB, e.g. volume_size: 100 (or --volume-size on the command line)",
 }
 
 // shellIdentifier is the set of names that can survive the trip to the instance.

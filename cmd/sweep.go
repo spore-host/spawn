@@ -117,6 +117,56 @@ func parseCostLimit(val interface{}) (float64, error) {
 	return f, nil
 }
 
+// parseVolumeSizeGiB coerces a param-file `volume_size:` value to GiB, using the
+// same numeric-shape convention as parseCostLimit (#525) — a YAML/JSON/CSV param
+// file can hand this back as an int, a float64, a json.Number, or a quoted
+// string, depending on which of the three parsers read the file and whether the
+// value happened to have a decimal point. Rejecting anything else here, rather
+// than defaulting to 0, matters for the same reason it did for cost_limit: 0 is
+// a real value on this path too (see buildBlockDevices in pkg/aws/ebs.go — 0
+// means "use the AMI's own default", not "unset"), so a value that merely fails
+// to parse must not silently collapse into it (#544).
+func parseVolumeSizeGiB(val interface{}) (int32, error) {
+	var f float64
+	switch v := val.(type) {
+	case float64:
+		f = v
+	case float32:
+		f = float64(v)
+	case int:
+		f = float64(v)
+	case int32:
+		// applyCLIVolumeSizeToSweep (cmd/launch_sweep.go) writes --volume-size
+		// straight into defaults["volume_size"] as launchVolumeSize's native
+		// int32 — not through any of the three param-file parsers — so this
+		// shape is the CLI-flag route, not a file format's.
+		f = float64(v)
+	case int64:
+		f = float64(v)
+	case json.Number:
+		parsed, err := v.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("%q is not a number", v.String())
+		}
+		f = parsed
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0, fmt.Errorf("%q is not a number", v)
+		}
+		f = parsed
+	default:
+		return 0, fmt.Errorf("expected a whole number of GiB, got %T (%v)", val, val)
+	}
+	if f < 0 {
+		return 0, fmt.Errorf("must not be negative, got %v", f)
+	}
+	if f != float64(int32(f)) {
+		return 0, fmt.Errorf("expected a whole number of GiB, got %v", f)
+	}
+	return int32(f), nil
+}
+
 // buildLaunchConfigFromParams merges defaults with parameter overrides
 func buildLaunchConfigFromParams(defaults, params map[string]interface{}, sweepID, sweepName string, index, total int) (aws.LaunchConfig, error) {
 	// Start with an empty config
@@ -196,6 +246,19 @@ func buildLaunchConfigFromParams(defaults, params map[string]interface{}, sweepI
 				return config, fmt.Errorf("cost_limit: %w", err)
 			}
 			config.CostLimit = f
+		case "volume_size":
+			// Root EBS volume size in GiB, the param-file form of --volume-size
+			// (#544). Before this fix there was no case for it here AND the key
+			// was actively rejected by reservedRowKeys/validateSweepParamKeys
+			// (#545, with a message naming "--disk-size" — a flag that has never
+			// existed in this codebase). Either way the result was the same: every
+			// row launched at spawn's hardcoded 20 GiB default (pkg/aws/ebs.go)
+			// regardless of what the file asked for.
+			g, err := parseVolumeSizeGiB(val)
+			if err != nil {
+				return config, fmt.Errorf("volume_size: %w", err)
+			}
+			config.RootVolumeSizeGiB = g
 		case "hibernate_on_idle":
 			if b, ok := val.(bool); ok {
 				config.HibernateOnIdle = b
