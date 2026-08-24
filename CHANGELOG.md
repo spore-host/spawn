@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flag-over-config precedence convention (e.g. `--ttl`).
 
 ### Fixed
+- **`spawn orphans` no longer counts unattached Elastic IPs owned by other
+  AWS services** (#500): an EIP with no association but carrying AWS-reserved
+  tags such as `aws:cloudformation:stack-id` belongs to another service's
+  stack — CloudFormation-managed NAT gateways and Global Accelerator addresses
+  look exactly like this — and releasing it breaks that service while the real
+  leak stays invisible behind a wall of false positives. Addresses carrying
+  `aws:`-reserved tags are now skipped in orphan classification.
+
 - **The root EBS volume size was unreachable on the parameter-sweep launch
   path** (#544): `--volume-size` was registered and read on the single-instance
   launch path (`cmd/launch_config.go`) but never referenced by
