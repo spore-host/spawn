@@ -158,22 +158,40 @@ func (c *Client) scanAddresses(ctx context.Context, cfg aws.Config, region strin
 	if err != nil {
 		return nil, fmt.Errorf("describe elastic IPs in %s: %w", region, err)
 	}
-	return classifyAddresses(out.Addresses, instState, region), nil
+	eipTags := make([]map[string]string, len(out.Addresses))
+	for i, a := range out.Addresses {
+		eipTags[i] = map[string]string{}
+		for _, t := range a.Tags {
+			if k := aws.ToString(t.Key); k != "" {
+				eipTags[i][k] = aws.ToString(t.Value)
+			}
+		}
+	}
+	return classifyAddresses(out.Addresses, eipTags, instState, region), nil
 }
 
 // classifyAddresses is the pure decision core of scanAddresses (testable without
 // AWS): given the raw addresses and the spawn-managed instance states, it returns
 // the billable-leak addresses as ManagedResources.
-func classifyAddresses(addresses []ec2types.Address, instState map[string]string, region string) []ManagedResource {
+func classifyAddresses(addresses []ec2types.Address, eipTags []map[string]string, instState map[string]string, region string) []ManagedResource {
 	var out []ManagedResource
-	for _, a := range addresses {
+	for idx, a := range addresses {
 		instID := aws.ToString(a.InstanceId)
 		assoc := aws.ToString(a.AssociationId)
 
 		var state string
 		switch {
 		case instID == "" && assoc == "":
-			// Attached to nothing — always billable.
+			skipAddress := false
+			for k := range eipTags[idx] {
+				if strings.HasPrefix(k, "aws:") {
+					skipAddress = true
+					break
+				}
+			}
+			if skipAddress {
+				continue
+			}
 			state = "unassociated"
 		case instID != "":
 			st, managed := instState[instID]
@@ -200,7 +218,7 @@ func classifyAddresses(addresses []ec2types.Address, instState map[string]string
 			State:         state,
 			PublicIP:      aws.ToString(a.PublicIp),
 			AssociationID: assoc,
-			Tags:          map[string]string{},
+			Tags:          eipTags[idx],
 		})
 	}
 	return out

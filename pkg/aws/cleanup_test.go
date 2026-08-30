@@ -168,8 +168,16 @@ func TestClassifyAddresses(t *testing.T) {
 		{AllocationId: ptr("eipalloc-stop"), PublicIp: ptr("2.2.2.2"), InstanceId: ptr("i-stopped"), AssociationId: ptr("a1")},    // stopped spawn instance
 		{AllocationId: ptr("eipalloc-run"), PublicIp: ptr("3.3.3.3"), InstanceId: ptr("i-running"), AssociationId: ptr("a2")},     // running spawn instance
 		{AllocationId: ptr("eipalloc-foreign"), PublicIp: ptr("4.4.4.4"), InstanceId: ptr("i-notmine"), AssociationId: ptr("a3")}, // not spawn-managed
+		{AllocationId: ptr("eipalloc-cfn"), PublicIp: ptr("5.5.5.5")},                                                             // unassociated, but owned by another AWS service
 	}
-	got := classifyAddresses(addrs, instState, "us-east-1")
+	eipTags := []map[string]string{
+		{},
+		{},
+		{},
+		{},
+		{"aws:cloudformation:stack-id": "arn:aws:cloudformation:us-east-1:123456789012:stack/foo/abc"},
+	}
+	got := classifyAddresses(addrs, eipTags, instState, "us-east-1")
 
 	byID := map[string]ManagedResource{}
 	for _, r := range got {
@@ -188,6 +196,9 @@ func TestClassifyAddresses(t *testing.T) {
 	}
 	if _, ok := byID["eipalloc-foreign"]; ok {
 		t.Error("EIP on a non-spawn instance must NOT be surfaced")
+	}
+	if _, ok := byID["eipalloc-cfn"]; ok {
+		t.Error("unassociated EIP carrying an aws:-reserved tag must NOT be surfaced (#500 — owned by another AWS service)")
 	}
 	// Every surfaced address is an orphan worth reporting.
 	for _, r := range got {
