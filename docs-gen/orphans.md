@@ -9,9 +9,12 @@ running instance using them:
   - Elastic IPs that are unassociated, or attached to a stopped instance
     (an EIP keeps billing even while the instance is stopped)
 
-This is a read-only report. Use 'spawn cleanup' to remove anything — except
-Elastic IPs: spawn never allocates them, so it never releases them. Any EIP
-listed is yours to release with 'aws ec2 release-address'.
+This is a read-only report. 'spawn cleanup' removes orphaned EBS volumes,
+security groups, key pairs, and IAM roles. Elastic IPs are reported but
+never released by spawn — spawn never allocates them. Before releasing an
+EIP with 'aws ec2 release-address', verify ownership using the tags column
+in the report (or 'aws ec2 describe-addresses'), as that operation is
+irreversible.
 
 ```
 spawn orphans [flags]
