@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.102.0] - 2026-08-30
+
 ### Added
 - `spawn launch --no-dns` skips DNS registration entirely for a single
   launch, without also skipping the SSH-readiness wait that
@@ -3189,7 +3191,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.101.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.102.0...HEAD
+[0.102.0]: https://github.com/spore-host/spawn/compare/v0.101.0...v0.102.0
 [0.101.0]: https://github.com/spore-host/spawn/compare/v0.100.4...v0.101.0
 [0.100.4]: https://github.com/spore-host/spawn/compare/v0.100.3...v0.100.4
 [0.100.3]: https://github.com/spore-host/spawn/compare/v0.100.2...v0.100.3
