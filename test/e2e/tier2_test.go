@@ -400,6 +400,61 @@ func TestTier2_ExtendTTL_DeadlineMoved(t *testing.T) {
 	t.Logf("deadline advanced from %s to %s", deadlineBefore, deadlineAfter)
 }
 
+// TestTier2_ConfigSetTTL_ShortenMovesDeadlineEarlier is the live-instance
+// regression test for spawn#553: `spawn instance-config <id> set ttl
+// <shorter-duration>` used to write only spawn:ttl and report full success
+// (checkmark, "TTL changed" log line) while spawn:ttl-deadline — the field
+// spored's enforcement loop actually reads — stayed at the original, longer
+// value. Substrate can't emulate SSH to a live spored process (this command
+// is Tier2-only per tier0_coverage_test.go), so unlike the pure-function
+// coverage in cmd/spored/config_ttl_test.go, this exercises the real
+// `spawn instance-config ... set ttl ...` → SSH → `spored config set ttl` →
+// CreateTags → reload path end to end and reads the tag back with the
+// caller's own credentials (not spored's), matching how the issue's repro
+// verified it.
+func TestTier2_ConfigSetTTL_ShortenMovesDeadlineEarlier(t *testing.T) {
+	t.Parallel()
+	name := "e2e-shorten-ttl-" + runID(t)
+	inst := launchInstance(t, name, "--ttl", "1h")
+
+	cfg := loadAWSConfig(t)
+
+	tagsBefore := describeInstanceTags(t, cfg, inst.InstanceID, testRegion)
+	deadlineBefore := tagsBefore["spawn:ttl-deadline"]
+	if deadlineBefore == "" {
+		t.Skip("spawn:ttl-deadline tag not set — skipping deadline verification")
+	}
+
+	// Shorten the TTL to 8 minutes — the exact repro from the issue (1h -> 8m).
+	out := spawn(t, "instance-config", inst.InstanceID, "set", "ttl", "8m")
+	if !strings.Contains(out, "Configuration updated") {
+		t.Errorf("instance-config set ttl did not report success:\n%s", out)
+	}
+
+	tagsAfter := describeInstanceTags(t, cfg, inst.InstanceID, testRegion)
+	deadlineAfter := tagsAfter["spawn:ttl-deadline"]
+
+	// This is the exact assertion that would have failed against the old
+	// code: before the fix, deadlineAfter == deadlineBefore (unchanged)
+	// because `config set ttl` only ever wrote spawn:ttl.
+	if deadlineAfter == deadlineBefore {
+		t.Fatalf("spawn:ttl-deadline did not move at all after shortening the TTL (still %s) — spawn#553 regression", deadlineBefore)
+	}
+	if deadlineAfter >= deadlineBefore {
+		t.Errorf("spawn:ttl-deadline did not move EARLIER after shortening: before=%s after=%s", deadlineBefore, deadlineAfter)
+	}
+	t.Logf("deadline shortened from %s to %s", deadlineBefore, deadlineAfter)
+
+	// spawn:ttl and spawn:ttl-deadline must agree with each other — the
+	// issue's other headline symptom (`config get ttl` vs `status`
+	// disagreeing). Confirm via the on-instance readers directly.
+	statusOut := sshExec(t, name, "sudo spored status")
+	getOut := sshExec(t, name, "sudo spored config get ttl")
+	if !strings.Contains(statusOut, "TTL") || !strings.Contains(getOut, "remaining") {
+		t.Errorf("expected both spored status and config get ttl to report a live TTL deadline; status=%q get=%q", statusOut, getOut)
+	}
+}
+
 // TestTier2_NameResolutionPrefersRunning verifies that when two instances share
 // a name (stopped + running), spawn connect picks the running one (regression #313).
 func TestTier2_NameResolutionPrefersRunning(t *testing.T) {

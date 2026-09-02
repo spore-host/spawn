@@ -78,6 +78,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   choice, not a bug, and this fix does not alter it), but it's now documented
   in code at both call sites, and `--instance-profile` lets a caller sidestep
   it entirely when a deterministic choice matters more than convenience.
+- **CRITICAL: `spawn instance-config <id> set ttl <duration>` reported full
+  success while NOT changing when the instance would terminate, whenever the
+  new duration was SHORTER than the current remaining time — and there was no
+  other supported way to shorten a TTL at all** (#553). Two tags describe an
+  instance's TTL: `spawn:ttl` (a duration string) and `spawn:ttl-deadline`
+  (the absolute timestamp `pkg/agent`'s enforcement loop actually reads,
+  preferring it over `spawn:ttl` whenever it's present — true for every
+  instance a current spawn has ever launched). `config set ttl` wrote only
+  `spawn:ttl`, then triggered a reload and printed "TTL changed: X → Y" and a
+  checkmark — four success signals — while `spawn:ttl-deadline` sat
+  untouched. `spawn extend` was the only command that wrote the deadline, and
+  it is monotonic by construction (it always adds to the existing deadline),
+  so it could never substitute as a shortening path either. In one incident
+  cited in the issue, an over-provisioned 8h TTL on a $7.657/h node
+  couldn't be tightened by any supported command; the instance ran ~6.5h
+  past the intended ~1.5h of work, costing roughly $50 of idle burn on top of
+  $47.15 already lost to the same shape across three prior incidents. A new
+  `pkg/ttl` package is now the single place that derives a deadline from a
+  TTL duration (`launch_time + ttl`, the same anchor `agent.NewAgent` uses
+  when it synthesizes a deadline for a pre-deadline instance) and renders the
+  `{spawn:ttl, spawn:ttl-deadline}` tag pair together; `spawn extend` and
+  `spored config set ttl` both now go through it instead of each
+  reimplementing a subset. Setting a TTL shorter than the remaining time is
+  now fully supported and moves the deadline earlier — extend already owns
+  "lengthen from here" and is intentionally forward-only, so `config set ttl`
+  is the one path meant to tighten an over-provisioned TTL, which is exactly
+  what the issue asked for. `config set ttl` also now: refuses outright
+  (instead of writing a partial update) when the instance's `spawn:launch-time`
+  tag is missing or unparseable, since there is no coherent anchor to compute
+  a deadline from without it; supports `0` to disable TTL enforcement
+  entirely (deleting `spawn:ttl-deadline`, matching a launch with no `--ttl`)
+  rather than silently producing an already-past deadline; and re-reads the
+  daemon's actual post-reload config before printing its checkmark, so the
+  message reports the deadline that was really enforced, not an echo of the
+  input. Finally, `spored config get ttl` now reports the same
+  deadline-derived remaining time `spored status` computes, instead of the
+  raw `spawn:ttl` tag in isolation — before this, the two commands could (and
+  did, in the reported incident) disagree about the same instance at the same
+  moment, one describing the tag that had just been written and the other
+  the deadline that actually governs termination.
 
 ## [0.102.0] - 2026-08-30
 

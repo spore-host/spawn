@@ -24,6 +24,7 @@ import (
 	"github.com/spore-host/spawn/pkg/pluginruntime"
 	"github.com/spore-host/spawn/pkg/provider"
 	"github.com/spore-host/spawn/pkg/tagprefix"
+	"github.com/spore-host/spawn/pkg/ttl"
 )
 
 // detectLang reads the system locale from environment variables and returns a
@@ -868,11 +869,18 @@ func handleConfigGet(key string) error {
 
 	switch key {
 	case "ttl":
-		if config.TTL > 0 {
-			fmt.Println(formatDuration(config.TTL))
-		} else {
-			fmt.Println("disabled")
-		}
+		// Report the field that actually governs termination
+		// (spawn:ttl-deadline, read into config.TTLDeadline), not the raw
+		// spawn:ttl duration tag in isolation. Before this fix, `config get
+		// ttl` echoed spawn:ttl and `spored status` computed remaining time
+		// from spawn:ttl-deadline — the same instance, read at the same
+		// moment, could give two different answers whenever a `config set
+		// ttl` had written spawn:ttl without moving the deadline
+		// (spawn#553's "the reporting is the sharpest part"). Deriving both
+		// from the deadline here keeps `config get ttl` and `status` in
+		// permanent agreement, because they are now the same calculation
+		// (formatTTLLine, shared with handleConfigSetTTL's own read-back).
+		fmt.Println(formatTTLLine(config, time.Now()))
 	case "idle-timeout":
 		if config.IdleTimeout > 0 {
 			fmt.Println(formatDuration(config.IdleTimeout))
@@ -926,15 +934,24 @@ func handleConfigSet(key, value string) error {
 	identity := ag.GetIdentity()
 	instanceID, region := identity.InstanceID, identity.Region
 
+	// ttl is handled separately from the generic single-tag path below: it
+	// has TWO tags (spawn:ttl and spawn:ttl-deadline), and spawn:ttl-deadline
+	// — not spawn:ttl — is the field pkg/agent's enforcement loop actually
+	// reads (agent.go prefers TTLDeadline whenever it is non-zero, which is
+	// true for every instance a current spawn has ever launched). Writing
+	// spawn:ttl alone, as this command used to do, reported full success
+	// (tag written, reload triggered, "TTL changed" logged, checkmark
+	// printed) while the enforced deadline never moved — especially
+	// dangerous for SHORTENING a TTL, since `spawn extend` can only ever
+	// move the deadline later and so offered no way to undo an
+	// over-provisioned TTL (spawn#553).
+	if key == "ttl" {
+		return handleConfigSetTTL(ctx, ag, instanceID, region, value)
+	}
+
 	// Map key to tag name
 	tagKey := ""
 	switch key {
-	case "ttl":
-		// Validate duration
-		if _, err := time.ParseDuration(value); err != nil && value != "0" {
-			return fmt.Errorf("invalid duration: %s", value)
-		}
-		tagKey = "spawn:ttl"
 	case "idle-timeout":
 		if _, err := time.ParseDuration(value); err != nil && value != "0" {
 			return fmt.Errorf("invalid duration: %s", value)
@@ -989,6 +1006,108 @@ func handleConfigSet(key, value string) error {
 
 	fmt.Printf("✓ Configuration updated: %s = %s\n", key, value)
 	return nil
+}
+
+// handleConfigSetTTL implements `spored config set ttl <value>` (spawn#553).
+// value is the new TOTAL TTL from launch (matching what spawn:ttl has always
+// meant elsewhere, and what `spawn launch --ttl` sets on day one) — not an
+// increment. A shorter value than the current remaining time is accepted and
+// moves the deadline earlier: `spawn extend` already owns the
+// "lengthen from here" case and is monotonic-forward-only by construction, so
+// this is the only supported path for tightening an over-provisioned TTL, and
+// the issue's whole complaint is that operators need it. "0" disables TTL
+// enforcement entirely (spawn:ttl-deadline is deleted, matching a launch with
+// no --ttl at all) rather than producing a already-past deadline that would
+// terminate the instance on the very next monitor tick under a different,
+// confusing name.
+func handleConfigSetTTL(ctx context.Context, ag *agent.Agent, instanceID, region, value string) error {
+	launchTime := ag.GetConfig().LaunchTime
+
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("load AWS config: %w", err)
+	}
+	cfg.Region = region
+	ec2Client := ec2.NewFromConfig(cfg)
+
+	if value == "0" {
+		fmt.Println("Disabling TTL (removing spawn:ttl-deadline)...")
+		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
+			Resources: []string{instanceID},
+			Tags:      []types.Tag{{Key: aws.String("spawn:ttl"), Value: aws.String("0")}},
+		}); err != nil {
+			return fmt.Errorf("update tag: %w", err)
+		}
+		if _, err := ec2Client.DeleteTags(ctx, &ec2.DeleteTagsInput{
+			Resources: []string{instanceID},
+			Tags:      []types.Tag{{Key: aws.String("spawn:ttl-deadline")}},
+		}); err != nil {
+			return fmt.Errorf("remove spawn:ttl-deadline tag: %w", err)
+		}
+	} else {
+		newTTL, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration: %s", value)
+		}
+
+		// Refuse rather than write a partial/incoherent update (spawn#553 fix
+		// #1): spawn:ttl-deadline is anchored to launch time everywhere else
+		// in this codebase, and there is no coherent fallback anchor for
+		// "set the new TOTAL ttl" the way `extend` has one ("add to now" when
+		// there's no prior deadline) for its ADD semantics.
+		tags, newDeadline, err := ttl.SetTags(launchTime, newTTL)
+		if err != nil {
+			return fmt.Errorf("cannot set ttl: %w (spawn:launch-time tag is missing or unparseable on this instance)", err)
+		}
+
+		fmt.Printf("Updating ttl to %s (deadline %s)...\n", value, newDeadline.UTC().Format("2006-01-02 15:04 UTC"))
+		ec2Tags := make([]types.Tag, 0, len(tags))
+		for k, v := range tags {
+			ec2Tags = append(ec2Tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+		}
+		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
+			Resources: []string{instanceID},
+			Tags:      ec2Tags,
+		}); err != nil {
+			return fmt.Errorf("update tag: %w", err)
+		}
+	}
+
+	// Reload configuration
+	fmt.Println("Reloading configuration...")
+	if err := ag.Reload(ctx); err != nil {
+		return fmt.Errorf("reload configuration: %w", err)
+	}
+
+	// Never report success without reading back the field enforcement
+	// actually uses (spawn#553 fix #4): re-fetch the config the daemon just
+	// reloaded and print what it now believes the deadline to be — via the
+	// same formatTTLLine `config get ttl` uses — instead of echoing the
+	// input value back at the operator. A checkmark here means the deadline
+	// actually moved.
+	fmt.Printf("✓ Configuration updated: ttl = %s\n", formatTTLLine(ag.GetConfig(), time.Now()))
+	return nil
+}
+
+// formatTTLLine renders config's TTL the same way regardless of caller
+// (`spored config get ttl`'s echo and `spored config set ttl`'s post-reload
+// read-back) — prioritizing the enforced spawn:ttl-deadline field over the
+// raw spawn:ttl duration tag, exactly as pkg/agent's own enforcement loop
+// does. now is injected so this is testable without a real clock.
+func formatTTLLine(config *provider.Config, now time.Time) string {
+	switch {
+	case !config.TTLDeadline.IsZero():
+		remaining := config.TTLDeadline.Sub(now)
+		if remaining < 0 {
+			remaining = 0
+		}
+		return fmt.Sprintf("%s remaining (terminates %s)",
+			formatDuration(remaining), config.TTLDeadline.UTC().Format("2006-01-02 15:04 UTC"))
+	case config.TTL > 0:
+		return formatDuration(config.TTL)
+	default:
+		return "disabled"
+	}
 }
 
 func handleConfigList() error {
