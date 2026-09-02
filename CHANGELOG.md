@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `spawn launch --instance-profile NAME` attaches an existing IAM instance
+  profile verbatim, bypassing `--iam-role`/`--iam-policy`/`--iam-policy-file`
+  resolution and the `spored-instance-profile` default entirely (#550). Also
+  wired into the batch-queue and parameter-sweep launch paths.
+- The IAM instance profile spawn actually resolved for a launch is now printed
+  in `spawn launch`'s own output (both the TUI success box and `-o json`), and
+  in `spawn task diagnose` — previously the only way to see it was
+  `ec2:DescribeInstances` (`spawn list`/`spawn status` already showed it).
 - TaskSpec (`spawn task run`'s JSON contract) gained `resources.disk_gib` and
   `lifecycle.cost_limit`, closing two of the four silent-narrowing gaps in
   #556. `resources.disk_gib` wires into the same `aws.LaunchConfig` field
@@ -54,6 +62,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request that meant 8 vCPU / 16 GiB. `pkg/taskproto.ParseSpec` now decodes
   with `json.Decoder.DisallowUnknownFields`, so any field that doesn't match
   the real schema is now a parse error naming the bad key.
+- **Two otherwise-identical `spawn launch` invocations could silently resolve
+  to different IAM instance profiles** (#550): spawn has two independent
+  profile-resolution paths — `CreateOrGetInstanceProfile` (used whenever any
+  IAM configuration is passed, including a task/pool-worker's own scoped
+  policy) creates/reuses a profile scoped to exactly what was asked for, while
+  `SetupSporedIAMRole` (used when NO IAM configuration is passed) always
+  returns the same fixed shared `spored-instance-profile`, which carries no
+  data-bucket access beyond whatever was separately attached to it. A launch
+  that happened to go through the first path got working S3 access; a later,
+  outwardly identical launch that went through the second didn't — and the
+  workload's first S3 call then 403s minutes into a paid run, deep inside a
+  detached provisioning script, reading as a missing object rather than a
+  missing permission. The heuristic itself is unchanged (that's a real design
+  choice, not a bug, and this fix does not alter it), but it's now documented
+  in code at both call sites, and `--instance-profile` lets a caller sidestep
+  it entirely when a deterministic choice matters more than convenience.
 
 ## [0.102.0] - 2026-08-30
 

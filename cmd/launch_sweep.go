@@ -835,7 +835,23 @@ func applyCLIVolumeSizeToSweep(paramFormat *ParamFileFormat) []string {
 // fallback (unchanged, in launchParameterSweep and launchSweepDetached) still
 // provides the shared spored-instance-role in that case, exactly as before this
 // fix.
+//
+// --instance-profile (the package-level instanceProfile flag var, #550) is
+// checked FIRST and bypasses this entire function's resolution — including the
+// --iam-role/--iam-policy/etc. flags — the same precedence
+// launch_single.go's ensureIAMProfile gives it on the single-instance path.
 func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat *ParamFileFormat, auditLog *audit.AuditLogger) error {
+	if instanceProfile != "" {
+		auditLog.LogOperation("create_iam_role", instanceProfile, "success", nil)
+		if paramFormat.Defaults == nil {
+			paramFormat.Defaults = make(map[string]interface{})
+		}
+		paramFormat.Defaults["iam_role"] = instanceProfile
+		fmt.Fprintf(os.Stderr, "\n✓ IAM: using --instance-profile %s verbatim (bypasses --iam-role/--iam-policy resolution; "+
+			"each row's own iam_role: still wins)\n", instanceProfile)
+		return nil
+	}
+
 	if iamRole == "" && len(iamPolicy) == 0 && len(iamManagedPolicies) == 0 && iamPolicyFile == "" {
 		return nil
 	}

@@ -79,6 +79,7 @@ spawn launch <name> [flags]
 | `--iam-trust-services` |  | stringSlice | `[ec2]` | Services that can assume role |
 | `--idle-timeout` |  | string |  | Auto-terminate if idle (defaults to 1h if neither --ttl nor --idle-timeout set) |
 | `--instance-names` |  | string |  | Instance name template (e.g., 'worker-{index}', default: '{job-array-name}-{index}') |
+| `--instance-profile` |  | string |  | Attach this EXISTING IAM instance profile by name, bypassing all --iam-role/--iam-policy/--iam-policy-file resolution and the spored-instance-profile default entirely. Use when you need a deterministic, auditable choice instead of spawn's create/reuse heuristic (#550) — e.g. a profile you've already scoped to a specific data bucket. |
 | `--instance-type` |  | string |  | Instance type |
 | `--interactive` |  | bool |  | Force interactive wizard |
 | `--job-array-name` |  | string |  | Job array group name (required if --count &gt; 1) |

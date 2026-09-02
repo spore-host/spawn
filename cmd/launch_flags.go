@@ -138,6 +138,16 @@ var (
 	iamTrustServices   []string
 	iamRoleTags        []string
 	iamAllowFullAccess bool
+	// instanceProfile names an EXISTING instance profile to attach verbatim,
+	// bypassing all of the above resolution (no create/reuse/hash lookup, no
+	// AWS IAM calls at all). See #550: two launches with no IAM flags at all
+	// can still resolve to different profiles (a fresh spawn-instance-<hash>
+	// role vs. a pre-existing shared spored-instance-profile — see
+	// pkg/aws.SetupSporedIAMRole / CreateOrGetInstanceProfile for the exact
+	// heuristic), which is invisible until a workload 403s deep into a paid
+	// run. This flag makes the choice explicit and deterministic instead of
+	// relying on the heuristic converging the way the caller expects.
+	instanceProfile string
 
 	// Mode
 	interactive      bool
@@ -329,6 +339,7 @@ func init() {
 	launchCmd.Flags().StringVar(&iamPolicyFile, "iam-policy-file", "", "Custom IAM policy JSON file")
 	launchCmd.Flags().StringSliceVar(&iamTrustServices, "iam-trust-services", []string{"ec2"}, "Services that can assume role")
 	launchCmd.Flags().StringSliceVar(&iamRoleTags, "iam-role-tags", []string{}, "Tags for IAM role (key=value format)")
+	launchCmd.Flags().StringVar(&instanceProfile, "instance-profile", "", "Attach this EXISTING IAM instance profile by name, bypassing all --iam-role/--iam-policy/--iam-policy-file resolution and the spored-instance-profile default entirely. Use when you need a deterministic, auditable choice instead of spawn's create/reuse heuristic (#550) — e.g. a profile you've already scoped to a specific data bucket.")
 
 	// Mode
 	launchCmd.Flags().BoolVar(&interactive, "interactive", false, "Force interactive wizard")

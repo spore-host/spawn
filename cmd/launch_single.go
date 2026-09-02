@@ -915,13 +915,14 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	if getOutputFormat() == "json" {
 		out := []map[string]interface{}{
 			{
-				"instance_id":   result.InstanceID,
-				"name":          config.Name,
-				"instance_type": config.InstanceType,
-				"region":        config.Region,
-				"public_ip":     result.PublicIP,
-				"state":         "running",
-				"dns":           dnsRecord,
+				"instance_id":          result.InstanceID,
+				"name":                 config.Name,
+				"instance_type":        config.InstanceType,
+				"region":               config.Region,
+				"public_ip":            result.PublicIP,
+				"state":                "running",
+				"dns":                  dnsRecord,
+				"iam_instance_profile": config.IamInstanceProfile,
 			},
 		}
 		jsonBytes, err := json.MarshalIndent(out, "", "  ")
@@ -944,6 +945,15 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	}
 	prog.DisplaySuccess(result.InstanceID, result.PublicIP, connectCmd, config)
 
+	// Surface the RESOLVED IAM instance profile directly in launch's own output
+	// (#550) — previously this was visible nowhere except ec2:DescribeInstances,
+	// so a launch that silently attached the wrong (data-inaccessible) profile
+	// was undiagnosable without reading EC2 state out-of-band. `spawn list` and
+	// `spawn status` show the same field for an already-launched instance.
+	if config.IamInstanceProfile != "" {
+		_, _ = fmt.Fprintf(os.Stdout, "  IAM instance profile: %s\n", config.IamInstanceProfile)
+	}
+
 	// Show DNS info if registered
 	if dnsRecord != "" {
 		_, _ = fmt.Fprintf(os.Stdout, "\n🌐 DNS: %s\n", dnsRecord)
@@ -963,6 +973,17 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, prog *progress.Progress, auditLog *audit.AuditLogger) error {
 	prog.Start("Setting up IAM role")
 	if config.IamInstanceProfile == "" {
+		// --instance-profile bypasses ALL resolution below — no create/reuse
+		// heuristic, no AWS IAM call at all. It takes precedence even over
+		// --iam-role/--iam-policy/etc. so the caller's explicit choice can never
+		// be second-guessed by the hash/name matching those flags would otherwise
+		// trigger (#550).
+		if instanceProfile != "" {
+			config.IamInstanceProfile = instanceProfile
+			auditLog.LogOperation("create_iam_role", instanceProfile, "success", nil)
+			prog.Complete("Setting up IAM role")
+			return nil
+		}
 		// Check if user specified custom IAM configuration
 		if iamRole != "" || len(iamPolicy) > 0 || len(iamManagedPolicies) > 0 || iamPolicyFile != "" {
 			// Reject wildcard *:FullAccess templates unless explicitly opted in

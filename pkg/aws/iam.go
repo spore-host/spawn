@@ -380,6 +380,44 @@ var PolicyTemplates = map[string]string{
 }
 
 // CreateOrGetInstanceProfile creates or retrieves an IAM instance profile
+// scoped to config: RoleName (or, if empty, a deterministic
+// spawn-instance-<hash of Policies|ManagedPolicies|PolicyFile|InlinePolicyJSON>
+// name — see generateRoleName/hashPolicies) with exactly the policies config
+// describes attached.
+//
+// #550 root cause: spawn has TWO independent instance-profile resolution paths,
+// and which one a given launch takes is decided entirely by whether that
+// specific invocation passed IAM configuration, NOT by any property of the
+// workload or the account:
+//
+//   - Callers that pass IAM config (any CLI --iam-role/--iam-policy/
+//     --iam-policy-file flag, `spawn task run`'s always-on scoped S3 staging
+//     policy, `spawn spawn-pool-worker`'s SQS+S3 policy, …) call THIS function.
+//     It creates (or reuses, if the hash matches) a profile named after that
+//     config's hash/RoleName, carrying exactly the policies that config
+//     specifies plus the spored self-management baseline
+//     (ensureSporedBaselinePolicy) and SSM.
+//   - Callers that pass NONE (plain `spawn launch` with no --iam-* flags,
+//     `spawn resume`, a batch queue with no --iam-role, a sweep row with no
+//     iam_role:) call SetupSporedIAMRole instead, which ALWAYS returns the
+//     single fixed name "spored-instance-profile"/"spored-instance-role" — a
+//     shared, account-wide role whose ONLY guaranteed grants are the spored
+//     self-management baseline + SSM. It carries no S3/data-bucket access
+//     unless something else has separately attached an inline/managed policy
+//     to that exact role name.
+//
+// So two launches that a user perceives as "the same kind of launch, days
+// apart" land on completely different profiles — one scoped to the workload's
+// actual bucket, one not — purely because one of them happened to go through
+// `spawn task run` (or carried an explicit --iam-policy-file) and the other was
+// a bare `spawn launch`/`spawn resume`/queue/sweep-row invocation with no IAM
+// flags at all. This is NOT hash nondeterminism within this function — a given
+// config always hashes to the same name — it's two different call sites
+// disagreeing about which grants a workload needs, with no signal to the user
+// about which one fired. --instance-profile (#550) sidesteps both paths
+// entirely by naming the profile to attach outright; the launch/list/status
+// commands now also print whichever profile actually got resolved, so the
+// divergence is visible without reading ec2:DescribeInstances by hand.
 func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleConfig) (string, error) {
 	iamClient := iam.NewFromConfig(c.cfg)
 
@@ -482,7 +520,18 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 	return profileName, nil
 }
 
-// generateRoleName creates a deterministic role name based on policies
+// generateRoleName creates a deterministic role name based on policies.
+//
+// Note (#550): spawn-instance-<hash> roles/profiles this creates are never
+// garbage-collected — nothing deletes one when its last referencing instance
+// terminates. This is a deliberate safe-reuse default (a role in active use by
+// another still-running instance must never be deleted out from under it, and
+// this function has no way to know whether that's the case), not an oversight,
+// but it does mean an account accumulates one of these per distinct
+// policy-config hash ever launched with, indefinitely. Deleting them
+// pre-emptively is IAM deletion, a different risk class than anything else in
+// this file — deliberately out of scope here; see spawn#550 for the follow-up
+// if this needs addressing.
 func (c *Client) generateRoleName(config IAMRoleConfig) string {
 	// Hash policies to generate deterministic name
 	policyHash := c.hashPolicies(config)
@@ -967,6 +1016,16 @@ func (c *Client) ensureSporedBaselinePolicy(ctx context.Context, iamClient *iam.
 	return nil
 }
 
+// SetupSporedIAMRole is the OTHER instance-profile resolution path (see the
+// #550 note on CreateOrGetInstanceProfile above for the full contrast): it
+// always resolves to the SAME fixed name, regardless of what the workload
+// needs, with no data-bucket access beyond whatever has separately been
+// attached to that exact shared role. Callers that pass no IAM configuration
+// at all land here; callers that pass any --iam-role/--iam-policy/
+// --iam-policy-file (or a task/pool-worker's built-in scoped policy) land on
+// CreateOrGetInstanceProfile instead. Two otherwise-identical `spawn launch`
+// invocations landing on different SIDES of that split is exactly #550's
+// symptom.
 func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	iamClient := iam.NewFromConfig(c.cfg)
 

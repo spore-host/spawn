@@ -56,6 +56,7 @@ type taskDiagnosis struct {
 	AgeHours     float64 `json:"age_hours"`
 	TTL          string  `json:"ttl,omitempty"`
 	EstCostUSD   float64 `json:"estimated_cost_usd,omitempty"`
+	IAMRole      string  `json:"iam_instance_profile,omitempty"`
 	LikelyCause  string  `json:"likely_cause,omitempty"`
 }
 
@@ -86,6 +87,7 @@ var taskDiagnoseCmd = &cobra.Command{
 			AgeHours:     age.Hours(),
 			TTL:          inst.TTL,
 			EstCostUSD:   estimateInstanceCost(inst, age),
+			IAMRole:      inst.IAMRole,
 			LikelyCause:  likelyCause(inst),
 		}
 
@@ -97,6 +99,7 @@ var taskDiagnoseCmd = &cobra.Command{
 		fmt.Printf("Type:        %s%s\n", d.InstanceType, spotSuffix(d.Spot))
 		fmt.Printf("State:       %s\n", d.State)
 		fmt.Printf("Region/AZ:   %s / %s\n", d.Region, orDash(d.AZ))
+		fmt.Printf("IAM profile: %s\n", orDash(d.IAMRole))
 		fmt.Printf("Age:         %s\n", age.Round(time.Minute))
 		if d.TTL != "" {
 			fmt.Printf("TTL:         %s\n", d.TTL)
