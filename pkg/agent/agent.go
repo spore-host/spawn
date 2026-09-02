@@ -1796,6 +1796,15 @@ func (a *Agent) Reload(ctx context.Context) error {
 	if newConfig.TTL != a.config.TTL {
 		log.Printf("TTL changed: %v → %v", a.config.TTL, newConfig.TTL)
 	}
+	// TTLDeadline is the field enforcement actually reads (see the remaining-
+	// time calculation below in monitorLoop) — log it separately from
+	// spawn:ttl so a reload where the tag changed but the deadline did not
+	// (the exact spawn#553 symptom, before that command was fixed to write
+	// both together) is visible in the daemon's own log, not just inferred
+	// from its absence.
+	if !newConfig.TTLDeadline.Equal(a.config.TTLDeadline) {
+		log.Printf("TTL deadline changed: %v → %v", a.config.TTLDeadline, newConfig.TTLDeadline)
+	}
 	if newConfig.IdleTimeout != a.config.IdleTimeout {
 		log.Printf("Idle timeout changed: %v → %v", a.config.IdleTimeout, newConfig.IdleTimeout)
 	}

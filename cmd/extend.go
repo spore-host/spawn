@@ -16,6 +16,7 @@ import (
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 var (
@@ -284,9 +285,16 @@ func extendJobArrayInstances(
 // spawn:ttl-deadline is pushed forward from the existing deadline (or, for an
 // older instance without one, from LaunchTime + the current spawn:ttl), with
 // a floor of now+extendDuration so a stale/expired deadline can't reap the
-// instance the moment it's extended.
+// instance the moment it's extended. This ADD-to-the-existing-deadline
+// semantics is what makes `extend` monotonic-forward-only by construction —
+// it is the mirror image of `spored config set ttl` (pkg/ttl.SetTags), which
+// takes newTTL as an absolute new total-from-launch and can therefore move
+// the deadline earlier (spawn#553). Once the deadline is resolved here, tag
+// rendering itself is delegated to pkg/ttl.Tags — the same function
+// `config set ttl` uses — so there is exactly one place that decides what
+// spawn:ttl looks like relative to spawn:ttl-deadline.
 //
-// spawn:ttl is recomputed as the new deadline minus LaunchTime — the total
+// spawn:ttl ends up as the new deadline minus LaunchTime — the total
 // duration from launch, matching what every other reader of this tag
 // (spored's pre-deadline fallback, spawn stop/hibernate's remaining-TTL
 // preservation) expects it to mean. Writing the raw extend argument here
@@ -294,8 +302,6 @@ func extendJobArrayInstances(
 // all after the first extend call — a repeated `extend <id> 8h` looked
 // unchanged even though the deadline had genuinely moved twice.
 func computeExtendedTTLTags(instance *aws.InstanceInfo, newTTL string, extendDuration time.Duration, now time.Time) (map[string]string, time.Time) {
-	tags := map[string]string{}
-
 	var newDeadline time.Time
 	if dl, ok := instance.Tags["spawn:ttl-deadline"]; ok {
 		if parsed, err := time.Parse(time.RFC3339, dl); err == nil {
@@ -313,15 +319,17 @@ func computeExtendedTTLTags(instance *aws.InstanceInfo, newTTL string, extendDur
 	if floor := now.Add(extendDuration); newDeadline.Before(floor) {
 		newDeadline = floor
 	}
-	tags["spawn:ttl-deadline"] = newDeadline.UTC().Format(time.RFC3339)
 
-	if !instance.LaunchTime.IsZero() {
-		tags["spawn:ttl"] = newDeadline.Sub(instance.LaunchTime).Round(time.Second).String()
-	} else {
-		tags["spawn:ttl"] = newTTL
+	if instance.LaunchTime.IsZero() {
+		// No LaunchTime to anchor spawn:ttl to (older instance) — fall back to
+		// the raw argument for that tag only; spawn:ttl-deadline (the field
+		// enforcement actually reads) is unaffected either way.
+		return map[string]string{
+			"spawn:ttl-deadline": newDeadline.UTC().Format(time.RFC3339),
+			"spawn:ttl":          newTTL,
+		}, newDeadline
 	}
-
-	return tags, newDeadline
+	return ttlpkg.Tags(instance.LaunchTime, newDeadline), newDeadline
 }
 
 func validateTTL(ttl string) error {
