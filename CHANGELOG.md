@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped `golang.org/x/crypto` v0.53.0 → v0.55.0, fixing CVE-2026-56854
+  (CRITICAL, `golang.org/x/crypto/ssh`), and `google.golang.org/grpc`
+  v1.82.1 → v1.83.1, fixing CVE-2026-84304 (HIGH). Both in the root module
+  and `lambda/ttl-reaper`'s nested module. Trivy's security gate was
+  failing on every open PR once its vulnerability DB picked up these CVEs,
+  independent of any code change.
+
 ## [0.102.0] - 2026-08-30
 
 ### Added
