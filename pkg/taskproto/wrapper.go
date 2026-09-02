@@ -218,9 +218,21 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 			shQuote(region), shQuote(host))
 	}
 
-	// docker run --rm [--gpus all] <-v dir:dir ...> <image> <argv>. --pull always
-	// folds the pull into run; rc is the container's exit code. All docker calls
-	// are sudo'd (root owns the socket).
+	// docker run --rm --user "$(id -u):$(id -g)" [--gpus all] <-v dir:dir ...>
+	// <image> <argv>. rc is the container's exit code. All docker calls are
+	// sudo'd (root owns the socket).
+	//
+	// --user "$(id -u):$(id -g)" (spawn#555): stage-in creates the bind-mounted
+	// dirs as the instance user (uid 1000 on AL2023) with the default umask, so
+	// they're 0755-owned by that uid. Without --user, the container runs as
+	// whatever USER the image declares — and every bioconda/conda-forge image
+	// (the entire mambaorg/micromamba-derived ecosystem) declares uid 57439
+	// (mambauser), not root and not 1000. On real Linux, bind mounts preserve
+	// host uid/gid, so that container gets EACCES writing into its own inputs
+	// or outputs. Running the container as the invoking user's uid:gid instead
+	// makes the container a packaging detail rather than a different security
+	// context — it always matches whoever owns the staged dirs, regardless of
+	// the image's declared USER.
 	gpuFlag := ""
 	if spec.Resources.GPUs > 0 {
 		gpuFlag = "--gpus all "
@@ -230,7 +242,7 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 		fmt.Fprintf(&mounts, "-v %s:%s ", shQuote(d), shQuote(d))
 	}
 	p("  sudo docker pull %s\n", shQuote(image))
-	p("  sudo docker run --rm %s%s%s %s\n", gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
+	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s %s\n", gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
 	p("  rc=$?\n")
 }
 
@@ -238,6 +250,18 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 // container: the parent dir of each input Destination and each output Source
 // (identity-mounted, so in-container paths match the argv the spec author wrote).
 // Sorted for a stable wrapper; "/" , "." and empty are skipped.
+//
+// NOTE (related to spawn#555, not fixed here — out of that issue's scope): only
+// input destination dirs get an explicit `mkdir -p` in the stage-in loop above.
+// An output whose parent dir isn't shared with any input (e.g. outputs living
+// under a directory no input ever wrote to) is never created on the host before
+// `docker run`. If such a dir doesn't exist yet, `docker run -v dir:dir` auto-
+// creates it — but dockerd does that as root, not as the invoking user, so even
+// with --user "$(id -u):$(id -g)" the container still can't write into it. This
+// is a separate, preexisting gap (it also affects the host/non-container path,
+// where the user command itself would hit ENOENT/EACCES first) rather than a
+// symptom of the uid mismatch #555 is about; flagging here rather than fixing to
+// avoid scope creep on this change.
 func containerMountDirs(spec *TaskSpec) []string {
 	seen := map[string]bool{}
 	var dirs []string

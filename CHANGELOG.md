@@ -15,6 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failing on every open PR once its vulnerability DB picked up these CVEs,
   independent of any code change.
 
+### Fixed
+- **`spawn task run`'s container path couldn't write into its own staged
+  inputs/outputs for any image whose declared `USER` isn't root or uid 1000**
+  (#555): stage-in creates each bind-mounted directory as the instance user
+  (uid 1000 on AL2023) with the default umask (0755), but `docker run` was
+  issued with no `--user`, so the container ran as whatever `USER` the image
+  declares. That's not an edge case — it's the default for the **entire
+  bioconda/conda-forge container ecosystem** (every image built on
+  `mambaorg/micromamba`, which defaults to uid 57439/`mambauser`), so any task
+  whose command wrote its output back into a staged directory got `EACCES`,
+  surfacing as a mysterious stage-out failure rather than as a permissions
+  problem. `docker run` now passes `--user "$(id -u):$(id -g)"` so the
+  container always runs as the same uid:gid that owns the staged directories,
+  regardless of the image's declared `USER`.
+
 ## [0.102.0] - 2026-08-30
 
 ### Added
