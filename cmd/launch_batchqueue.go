@@ -193,8 +193,11 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		DNSName:      instanceName,
 	}
 
-	// Add IAM role if specified
-	if iamRole != "" {
+	// --instance-profile (#550) takes precedence over --iam-role on this path too —
+	// it's attached verbatim, bypassing any create/reuse resolution.
+	if instanceProfile != "" {
+		launchConfig.IamInstanceProfile = instanceProfile
+	} else if iamRole != "" {
 		launchConfig.IamInstanceProfile = iamRole
 	}
 
