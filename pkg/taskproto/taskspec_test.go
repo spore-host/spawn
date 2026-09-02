@@ -16,6 +16,51 @@ const goodSpec = `{
   "lifecycle": {"ttl": "4h", "on_complete": "terminate"}
 }`
 
+// TestParseSpec_RejectsUnknownFields covers #556's exact repro: a spec that
+// guessed the wrong field names ("cpus"/"memory_mb"/"disk_gb" instead of the
+// real "cpu"/"memory_gib"/resources.disk_gib) used to parse cleanly and
+// validate clean too, silently sizing a t4g.nano for a request that meant 8
+// vCPU / 16 GiB. ParseSpec must now reject it with an error naming the bad
+// field(s), rather than discarding them.
+func TestParseSpec_RejectsUnknownFields(t *testing.T) {
+	badSpec := `{
+	  "task_id": "align-42",
+	  "command": ["bwa", "mem", "ref.fa"],
+	  "resources": {"cpus": 8, "memory_mb": 16384, "disk_gb": 20},
+	  "lifecycle": {"ttl": "4h"}
+	}`
+	_, err := ParseSpec([]byte(badSpec))
+	if err == nil {
+		t.Fatal("ParseSpec: expected an error for unknown fields (cpus/memory_mb/disk_gb), got nil")
+	}
+	// json.Decoder's DisallowUnknownFields error names the offending field.
+	if !strings.Contains(err.Error(), "cpus") {
+		t.Errorf("error %q does not name the bad field %q", err.Error(), "cpus")
+	}
+}
+
+// TestParseSpec_KnownFieldsStillParse is the control for the above: the real
+// field names, including the two new ones from #556 (disk_gib, cost_limit),
+// must still parse and validate cleanly under DisallowUnknownFields.
+func TestParseSpec_KnownFieldsStillParse(t *testing.T) {
+	spec := `{
+	  "task_id": "align-42",
+	  "command": ["bwa", "mem", "ref.fa"],
+	  "resources": {"cpu": 8, "memory_gib": 16, "disk_gib": 20},
+	  "lifecycle": {"ttl": "4h", "cost_limit": 5}
+	}`
+	got, err := ParseSpec([]byte(spec))
+	if err != nil {
+		t.Fatalf("ParseSpec: unexpected error for valid known fields: %v", err)
+	}
+	if got.Resources.DiskGiB != 20 {
+		t.Errorf("Resources.DiskGiB = %d, want 20", got.Resources.DiskGiB)
+	}
+	if got.Lifecycle.CostLimit != 5 {
+		t.Errorf("Lifecycle.CostLimit = %v, want 5", got.Lifecycle.CostLimit)
+	}
+}
+
 func TestParseSpecFile_Good(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "task.json")
@@ -48,6 +93,8 @@ func TestValidate_Failures(t *testing.T) {
 		{"bad purchase", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Resources: ResourceRequest{Purchase: "layaway"}}, "purchase"},
 		{"bad on_complete", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h", OnComplete: "explode"}}, "on_complete"},
 		{"headroom range", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Resources: ResourceRequest{MemoryHeadroomPercent: 250}}, "memory_headroom_percent"},
+		{"negative disk_gib", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Resources: ResourceRequest{DiskGiB: -5}}, "disk_gib"},
+		{"negative cost_limit", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h", CostLimit: -1}}, "cost_limit"},
 		{"bad input manifest", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Inputs: []Manifest{{Source: "s3://b/x"}}}, "inputs[0]"},
 		{"bad env key", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Env: map[string]string{"BAD-KEY": "v"}}, "env key"},
 		{"env key with space", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Env: map[string]string{"a b": "v"}}, "env key"},

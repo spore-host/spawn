@@ -80,6 +80,64 @@ func TestRenderTaskDryRun(t *testing.T) {
 	}
 }
 
+// TestRenderTaskDryRun_DiskAndCostLimit covers #556's dry-run visibility asks
+// for items 2 and 3: an explicit resources.disk_gib and lifecycle.cost_limit
+// must both show up in the preview, and the family-generation note (item 4)
+// must appear for a known older-generation family.
+func TestRenderTaskDryRun_DiskAndCostLimit(t *testing.T) {
+	spec := &taskproto.TaskSpec{
+		TaskID:    "align-42",
+		Command:   []string{"bwa", "mem", "ref.fa"},
+		Resources: taskproto.ResourceRequest{CPU: 8, MemoryGiB: 16, DiskGiB: 100},
+		Lifecycle: taskproto.Lifecycle{TTL: "4h", OnComplete: "terminate", CostLimit: 5},
+	}
+	finder := fakeTaskFinder{cands: []taskproto.Candidate{
+		{InstanceType: "a1.2xlarge", Family: "a1", VCPUs: 8, MemoryGiB: 16, OnDemandPrice: 0.204},
+	}}
+	var buf bytes.Buffer
+	if err := renderTaskDryRun(context.Background(), &buf, spec, finder, "us-east-1"); err != nil {
+		t.Fatalf("renderTaskDryRun: %v", err)
+	}
+	got := buf.String()
+	wants := []string{
+		"Root disk:    100 GiB (resources.disk_gib)",
+		"Cost limit:   $5.00 (lifecycle.cost_limit)",
+		"a1", "Graviton 1",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("dry-run output missing %q\n--- output ---\n%s", w, got)
+		}
+	}
+}
+
+// TestRenderTaskDryRun_DiskOmittedShowsAMIDefault covers the other half: when
+// resources.disk_gib is NOT set, the preview must still say something (the AMI
+// default), not stay silent — the issue's complaint was that nothing in the
+// preview would tip an author off to the 8 GiB AL2023-arm64 default.
+func TestRenderTaskDryRun_DiskOmittedShowsAMIDefault(t *testing.T) {
+	spec := &taskproto.TaskSpec{
+		TaskID:    "align-42",
+		Command:   []string{"bwa", "mem", "ref.fa"},
+		Resources: taskproto.ResourceRequest{CPU: 8, MemoryGiB: 16},
+		Lifecycle: taskproto.Lifecycle{TTL: "4h"},
+	}
+	finder := fakeTaskFinder{cands: []taskproto.Candidate{
+		{InstanceType: "c7i.2xlarge", Family: "c7i", VCPUs: 8, MemoryGiB: 16, OnDemandPrice: 0.34},
+	}}
+	var buf bytes.Buffer
+	if err := renderTaskDryRun(context.Background(), &buf, spec, finder, "us-east-1"); err != nil {
+		t.Fatalf("renderTaskDryRun: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "Root disk:    AMI default") {
+		t.Errorf("dry-run output should show the AMI-default root disk when resources.disk_gib is unset\n--- output ---\n%s", got)
+	}
+	if strings.Contains(got, "Cost limit:") {
+		t.Errorf("dry-run output should not show a cost limit line when lifecycle.cost_limit is unset\n--- output ---\n%s", got)
+	}
+}
+
 func TestRenderTaskDryRun_Container(t *testing.T) {
 	spec := &taskproto.TaskSpec{
 		TaskID:    "infer",
@@ -153,6 +211,62 @@ func TestTaskLaunchConfig_OnDemandDefault(t *testing.T) {
 	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "m7i.large"}, "us-east-1", "p", "w")
 	if cfg.Spot {
 		t.Error("Spot should default to false when purchase is unset")
+	}
+}
+
+// TestTaskLaunchConfig_DiskGiB covers #556 item 2: resources.disk_gib must wire
+// into the SAME aws.LaunchConfig field (RootVolumeSizeGiB) that --volume-size
+// populates on the regular launch path, so a task and a plain launch converge on
+// identical downstream EBS sizing.
+func TestTaskLaunchConfig_DiskGiB(t *testing.T) {
+	spec := &taskproto.TaskSpec{
+		TaskID:    "t",
+		Command:   []string{"x"},
+		Resources: taskproto.ResourceRequest{DiskGiB: 100},
+		Lifecycle: taskproto.Lifecycle{TTL: "1h"},
+	}
+	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "m7i.large"}, "us-east-1", "p", "w")
+	if cfg.RootVolumeSizeGiB != 100 {
+		t.Errorf("RootVolumeSizeGiB = %d, want 100 (from resources.disk_gib)", cfg.RootVolumeSizeGiB)
+	}
+}
+
+// TestTaskLaunchConfig_DiskGiBOmitted covers the other half of #556 item 2: when
+// resources.disk_gib is omitted (zero), RootVolumeSizeGiB must stay at its zero
+// value so the AMI-default behavior (pkg/aws/ebs.go's buildBlockDevices) is
+// unchanged from before this fix.
+func TestTaskLaunchConfig_DiskGiBOmitted(t *testing.T) {
+	spec := &taskproto.TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: taskproto.Lifecycle{TTL: "1h"}}
+	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "m7i.large"}, "us-east-1", "p", "w")
+	if cfg.RootVolumeSizeGiB != 0 {
+		t.Errorf("RootVolumeSizeGiB = %d, want 0 (unset → AMI default, unchanged behavior)", cfg.RootVolumeSizeGiB)
+	}
+}
+
+// TestTaskLaunchConfig_CostLimit covers #556 item 3: lifecycle.cost_limit must
+// wire into the SAME aws.LaunchConfig.CostLimit field --cost-limit populates,
+// which pkg/aws/pricing.go's resolvePricePerHour (the #533/#536 real-pricing
+// fix) enforces against — not any older/removed static-price logic.
+func TestTaskLaunchConfig_CostLimit(t *testing.T) {
+	spec := &taskproto.TaskSpec{
+		TaskID:    "t",
+		Command:   []string{"x"},
+		Lifecycle: taskproto.Lifecycle{TTL: "1h", CostLimit: 5.5},
+	}
+	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "m7i.large"}, "us-east-1", "p", "w")
+	if cfg.CostLimit != 5.5 {
+		t.Errorf("CostLimit = %v, want 5.5 (from lifecycle.cost_limit)", cfg.CostLimit)
+	}
+}
+
+// TestTaskLaunchConfig_CostLimitOmitted covers the omitted half: no cost_limit
+// in the spec must leave CostLimit at 0 ("disabled"), matching --cost-limit's
+// own default and leaving today's behavior unchanged.
+func TestTaskLaunchConfig_CostLimitOmitted(t *testing.T) {
+	spec := &taskproto.TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: taskproto.Lifecycle{TTL: "1h"}}
+	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "m7i.large"}, "us-east-1", "p", "w")
+	if cfg.CostLimit != 0 {
+		t.Errorf("CostLimit = %v, want 0 (unset → disabled, unchanged behavior)", cfg.CostLimit)
 	}
 }
 

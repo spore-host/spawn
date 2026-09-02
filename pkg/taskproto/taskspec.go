@@ -8,6 +8,7 @@
 package taskproto
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -44,6 +45,13 @@ type ResourceRequest struct {
 	Purchase              string   `json:"purchase,omitempty"` // spot | on_demand (default on_demand)
 	Fallback              string   `json:"fallback,omitempty"` // on_demand when spot unavailable
 	MemoryHeadroomPercent int      `json:"memory_headroom_percent,omitempty"`
+	// DiskGiB requests a root EBS volume of at least this size, mapping onto
+	// spawn launch's --volume-size (aws.LaunchConfig.RootVolumeSizeGiB). Zero
+	// (the default) means "unset" — the AMI default root size applies, same as
+	// omitting --volume-size on the regular launch path. Placement.Volumes
+	// attaches separate reference-data volumes; DiskGiB is the root disk a task's
+	// staged inputs/outputs and working directory live on (#556).
+	DiskGiB int32 `json:"disk_gib,omitempty"`
 	// S3ReadWrite lists s3://bucket[/prefix] URIs the task needs FULL scoped access
 	// to (ListBucket + Get/Put/Delete on the whole bucket), beyond the buckets
 	// implied by Inputs/Outputs manifests. For adapters whose own tooling does the
@@ -85,6 +93,14 @@ type Manifest struct {
 type Lifecycle struct {
 	TTL        string `json:"ttl"`         // e.g. "4h"; the hard deadline
 	OnComplete string `json:"on_complete"` // terminate | stop | hibernate
+	// CostLimit maps onto spawn launch's --cost-limit: terminate/stop when
+	// compute spend reaches this amount in USD (compute cost only). Zero (the
+	// default) means disabled, matching --cost-limit's own default. TTL and
+	// CostLimit are independent spend bounds, both enforced by the same
+	// launched-instance mechanism (aws.LaunchConfig.CostLimit / spored's
+	// cap-check) — set here so a task's cost ceiling doesn't have to be
+	// expressed indirectly by shortening the TTL (#556).
+	CostLimit float64 `json:"cost_limit,omitempty"`
 }
 
 // TaskState is the coarse execution state of a task.
@@ -126,9 +142,18 @@ func ParseSpecFile(path string) (*TaskSpec, error) {
 
 // ParseSpec parses a TaskSpec from raw JSON bytes, then validates it. Used by the
 // pooled-worker path, which fetches a staged spec from S3 rather than a local file.
+//
+// Parsing is strict (json.Decoder.DisallowUnknownFields): a spec is authored once
+// and machine-consumed forever, so a misremembered field name (e.g. "cpus" instead
+// of "cpu", or a "disk_gb" that doesn't exist) must be a parse error naming the bad
+// field — not silently discarded, which used to leave Validate() checking only the
+// fields that happened to parse and produce a plausible-looking but wrong (usually
+// much smaller) launch plan (#556).
 func ParseSpec(data []byte) (*TaskSpec, error) {
 	var spec TaskSpec
-	if err := json.Unmarshal(data, &spec); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&spec); err != nil {
 		return nil, fmt.Errorf("parse task spec: %w", err)
 	}
 	if err := spec.Validate(); err != nil {
@@ -160,6 +185,12 @@ func (s *TaskSpec) Validate() error {
 	}
 	if s.Resources.MemoryHeadroomPercent < 0 || s.Resources.MemoryHeadroomPercent > 100 {
 		add("resources.memory_headroom_percent must be 0-100")
+	}
+	if s.Resources.DiskGiB < 0 {
+		add("resources.disk_gib must be non-negative")
+	}
+	if s.Lifecycle.CostLimit < 0 {
+		add("lifecycle.cost_limit must be non-negative")
 	}
 	if strings.TrimSpace(s.Lifecycle.TTL) == "" {
 		add("lifecycle.ttl is required (e.g. 4h)")
