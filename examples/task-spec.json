@@ -9,7 +9,8 @@
     "families": ["c7i", "c7a", "m7i"],
     "purchase": "spot",
     "fallback": "on_demand",
-    "memory_headroom_percent": 20
+    "memory_headroom_percent": 20,
+    "disk_gib": 100
   },
   "inputs": [
     { "source": "s3://my-bucket/refs/ref.fa", "destination": "/data/ref.fa" },
@@ -18,5 +19,5 @@
   "outputs": [
     { "source": "/work/result.bam", "destination": "s3://my-bucket/results/sample-42.bam" }
   ],
-  "lifecycle": { "ttl": "4h", "on_complete": "terminate" }
+  "lifecycle": { "ttl": "4h", "on_complete": "terminate", "cost_limit": 5.00 }
 }

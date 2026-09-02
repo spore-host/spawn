@@ -326,12 +326,27 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	}
 	fmt.Fprintf(out, ")\n")
 	fmt.Fprintf(out, "              chosen as cheapest of %d matching type(s)\n", sized.Considered)
+	if note := oldGenerationNote(sized.Family); note != "" {
+		fmt.Fprintf(out, "              %s\n", note)
+	}
+	// Root disk: show what will actually apply, whether that's the TaskSpec's
+	// explicit resources.disk_gib or the AMI default — the issue's complaint
+	// (#556) was that NOTHING in the preview tipped off an author who forgot to
+	// set it and got an 8 GiB root, so the AMI-default case is shown too.
+	if spec.Resources.DiskGiB > 0 {
+		fmt.Fprintf(out, "Root disk:    %d GiB (resources.disk_gib)\n", spec.Resources.DiskGiB)
+	} else {
+		fmt.Fprintf(out, "Root disk:    AMI default (resources.disk_gib not set; see --volume-size in 'spawn launch --help')\n")
+	}
 	purchase := spec.Resources.Purchase
 	if purchase == "" {
 		purchase = taskproto.PurchaseOnDemand
 	}
 	fmt.Fprintf(out, "Purchase:     %s\n", purchase)
 	fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
+	if spec.Lifecycle.CostLimit > 0 {
+		fmt.Fprintf(out, "Cost limit:   $%.2f (lifecycle.cost_limit)\n", spec.Lifecycle.CostLimit)
+	}
 
 	if d, err := time.ParseDuration(spec.Lifecycle.TTL); err == nil && sized.OnDemandPrice > 0 {
 		fmt.Fprintf(out, "Max cost:     ~$%.2f (on-demand rate × TTL; a completed task usually costs far less)\n", sized.OnDemandPrice*d.Hours())
@@ -352,6 +367,26 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Re-run without --dry-run to launch this task.")
 	return nil
+}
+
+// oldGenerationFamilies notes instance families that are the cheapest match for
+// a bare "arm64" (or similarly unconstrained x86_64) resource request but are an
+// older, materially-slower-per-vCPU generation — "cheapest that fits" can pick
+// them over a modern equivalent that would cost about the same per job (#556).
+// Not an error: families is the documented escape hatch (e.g.
+// resources.families: ["c8g"]) — this is just a dry-run nudge to make the
+// generation visible before launch rather than after.
+var oldGenerationFamilies = map[string]string{
+	"a1": "Graviton 1 (2018) — likely slower per vCPU than a current Graviton family (e.g. c8g/m8g/r8g); pin resources.families if that matters",
+}
+
+// oldGenerationNote returns a dry-run annotation if family is a known older
+// generation, or "" otherwise.
+func oldGenerationNote(family string) string {
+	if note, ok := oldGenerationFamilies[family]; ok {
+		return "instance family: " + family + " — " + note
+	}
+	return ""
 }
 
 // runTaskReal launches a task for real: it sizes the instance (same as dry-run),
@@ -650,6 +685,20 @@ func taskLaunchConfig(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, reg
 			MountPoint: v.MountPath,
 			ReadOnly:   v.ReadOnly,
 		})
+	}
+	// resources.disk_gib / lifecycle.cost_limit are the TaskSpec equivalents of
+	// --volume-size / --cost-limit on the regular launch path (#556): both flow
+	// into the SAME aws.LaunchConfig fields the CLI flags populate
+	// (cmd/launch_config.go), so a task and a plain launch converge on identical
+	// downstream behavior. Left unset (zero) when omitted from the spec — same
+	// "0 = use AMI default" / "0 = disabled" convention --volume-size and
+	// --cost-limit already use, so an unset TaskSpec field never changes
+	// existing behavior.
+	if spec.Resources.DiskGiB > 0 {
+		cfg.RootVolumeSizeGiB = spec.Resources.DiskGiB
+	}
+	if spec.Lifecycle.CostLimit > 0 {
+		cfg.CostLimit = spec.Lifecycle.CostLimit
 	}
 	return cfg
 }

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- TaskSpec (`spawn task run`'s JSON contract) gained `resources.disk_gib` and
+  `lifecycle.cost_limit`, closing two of the four silent-narrowing gaps in
+  #556. `resources.disk_gib` wires into the same `aws.LaunchConfig` field
+  `spawn launch --volume-size` populates, so a task's root EBS volume can be
+  sized beyond the AMI default (8 GiB on AL2023 arm64) without an attached
+  reference-data volume. `lifecycle.cost_limit` wires into the same field
+  `--cost-limit` populates, enforced through the same truffle-backed real
+  on-demand pricing path (#533/#536) — TaskSpec no longer has to express a
+  spend ceiling indirectly by shortening the TTL. Both are optional and
+  additive: an omitted field leaves today's behavior (AMI-default disk, no
+  cost cap) unchanged. `spawn task run --dry-run` now also shows the
+  resolved root disk size (explicit or AMI-default) and the cost limit when
+  set, plus a note when the sized instance is a known older generation
+  (e.g. `a1`/Graviton 1) that an unconstrained `architecture: arm64` request
+  can land on.
+
 ### Security
 - Bumped `golang.org/x/crypto` v0.53.0 → v0.55.0, fixing CVE-2026-56854
   (CRITICAL, `golang.org/x/crypto/ssh`), and `google.golang.org/grpc`
@@ -29,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   problem. `docker run` now passes `--user "$(id -u):$(id -g)"` so the
   container always runs as the same uid:gid that owns the staged directories,
   regardless of the image's declared `USER`.
+- **`spawn task run`'s TaskSpec parser silently discarded unknown JSON
+  fields** (#556): a spec with a misremembered field name (e.g. `cpus`
+  instead of `cpu`, or a `disk_gb` key that was never a real field) used to
+  parse and validate cleanly, then size a wildly wrong instance with no error
+  pointing at the spec — the issue's repro produced a `t4g.nano` for a
+  request that meant 8 vCPU / 16 GiB. `pkg/taskproto.ParseSpec` now decodes
+  with `json.Decoder.DisallowUnknownFields`, so any field that doesn't match
+  the real schema is now a parse error naming the bad key.
 
 ## [0.102.0] - 2026-08-30
 
