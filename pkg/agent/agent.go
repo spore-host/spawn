@@ -958,10 +958,27 @@ func (a *Agent) writeReadyTags(ctx context.Context, tags map[string]string) {
 // other failure left the FQDN silently unresolvable with no user-facing signal
 // (#435). Best-effort: a tag-write failure here is itself only logged — we never
 // let DNS bookkeeping block the agent. status is "registered" or "failed"; detail
-// (truncated to fit an EC2 tag value) is written only on failure.
+// (truncated to fit an EC2 tag value) is written only on failure. Both values are
+// ALWAYS written from the DNS API call's actual, already-resolved outcome — the
+// caller only invokes this after RegisterDNS/RegisterJobArrayDNS has returned —
+// never optimistically ahead of it.
+//
+// #551: EC2's CreateTags (which putTags wraps) only ever adds or overwrites the
+// keys given to it — it never removes a key that isn't in the call. NewAgent (and
+// therefore this DNS-registration side effect) reruns on every `spored status`,
+// `spored reload`, and `spored config` invocation, not just once at boot, so a
+// transient early failure (spawn:dns-status=failed + spawn:dns-error=<detail>)
+// followed by a later successful attempt used to leave the stale dns-error tag
+// sitting right next to the new dns-status=registered — a live instance could
+// carry both simultaneously, contradicting itself. Explicitly delete dns-error
+// on success so the tag set can never claim both outcomes at once.
 func (a *Agent) recordDNSStatus(ctx context.Context, status, detail string) {
 	tags := map[string]string{"spawn:dns-status": status}
-	if status != "registered" && detail != "" {
+	if status == "registered" {
+		if err := a.tagger.deleteTags(ctx, a.identity.InstanceID, []string{"spawn:dns-error"}); err != nil {
+			log.Printf("DNS: failed to clear stale dns-error tag: %v", err)
+		}
+	} else if detail != "" {
 		if len(detail) > 255 {
 			detail = detail[:255]
 		}
@@ -990,6 +1007,27 @@ func (p *ec2TagPutter) putTags(ctx context.Context, instanceID string, tags map[
 		ec2Tags = append(ec2Tags, ec2types.Tag{Key: aws.String(k), Value: aws.String(v)})
 	}
 	_, err = client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{instanceID},
+		Tags:      ec2Tags,
+	})
+	return err
+}
+
+// deleteTags removes the named tags entirely via EC2 DeleteTags (#551) — the
+// counterpart putTags/CreateTags can't provide, since CreateTags only ever adds
+// or overwrites keys and never clears ones it isn't given.
+func (p *ec2TagPutter) deleteTags(ctx context.Context, instanceID string, keys []string) error {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(p.region))
+	if err != nil {
+		return fmt.Errorf("load AWS config for tag delete: %w", err)
+	}
+	client := ec2.NewFromConfig(cfg)
+	ec2Tags := make([]ec2types.Tag, 0, len(keys))
+	for _, k := range keys {
+		k := k
+		ec2Tags = append(ec2Tags, ec2types.Tag{Key: aws.String(k)})
+	}
+	_, err = client.DeleteTags(ctx, &ec2.DeleteTagsInput{
 		Resources: []string{instanceID},
 		Tags:      ec2Tags,
 	})

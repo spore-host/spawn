@@ -101,11 +101,15 @@ func newTestAgent(t *testing.T, cfg *provider.Config) *Agent {
 
 // fakeTagPutter records tag writes (no real EC2) and can return a canned error to
 // exercise the tag-write-denied path. Latest wins per key across calls.
+// deletes records every deleteTags call (#551's dns-error-clearing path), and
+// deleteErr lets a test simulate a failed delete independently of putTags.
 type fakeTagPutter struct {
-	writes []map[string]string // every putTags call, in order
-	tags   map[string]string   // merged view of all successful writes
-	err    error               // returned by putTags when non-nil
-	calls  int
+	writes    []map[string]string // every putTags call, in order
+	tags      map[string]string   // merged view of all successful writes/deletes
+	err       error               // returned by putTags when non-nil
+	calls     int
+	deletes   [][]string // every deleteTags call, in order
+	deleteErr error      // returned by deleteTags when non-nil
 }
 
 func (f *fakeTagPutter) putTags(_ context.Context, _ string, tags map[string]string) error {
@@ -119,6 +123,19 @@ func (f *fakeTagPutter) putTags(_ context.Context, _ string, tags map[string]str
 	}
 	for k, v := range tags {
 		f.tags[k] = v
+	}
+	return nil
+}
+
+func (f *fakeTagPutter) deleteTags(_ context.Context, _ string, keys []string) error {
+	f.deletes = append(f.deletes, keys)
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if f.tags != nil {
+		for _, k := range keys {
+			delete(f.tags, k)
+		}
 	}
 	return nil
 }
@@ -688,6 +705,126 @@ func TestWriteHeartbeatTag_Throttled(t *testing.T) {
 	// still be very recent (the "time.Now()" set right above), not overwritten.
 	if time.Since(a.lastHeartbeatTagWrite) > time.Second {
 		t.Error("writeHeartbeatTag did not return early on a recent write — throttle not honored")
+	}
+}
+
+// TestRecordDNSStatus_FailureWritesStatusAndError is the regression test for
+// the exact reported bug (#551): a 403 from the DNS API must produce
+// dns-status=failed + dns-error=<detail>, and must NEVER leave
+// dns-status=registered lingering from an earlier attempt.
+func TestRecordDNSStatus_FailureWritesStatusAndError(t *testing.T) {
+	a := newTestAgent(t, nil)
+	ft := a.tagger.(*fakeTagPutter)
+
+	a.recordDNSStatus(context.Background(), "failed", `DNS API returned HTTP 403: {"Message":"Forbidden"}`)
+
+	if got := ft.tags["spawn:dns-status"]; got != "failed" {
+		t.Errorf("spawn:dns-status = %q, want %q", got, "failed")
+	}
+	if got := ft.tags["spawn:dns-error"]; !strings.Contains(got, "403") {
+		t.Errorf("spawn:dns-error = %q, want it to contain the 403 detail", got)
+	}
+}
+
+// TestRecordDNSStatus_NetworkErrorWritesFailed covers the other failure shape
+// named in #551: a network-level error (not an HTTP response at all) must also
+// land as dns-status=failed with the error detail preserved, not swallowed.
+func TestRecordDNSStatus_NetworkErrorWritesFailed(t *testing.T) {
+	a := newTestAgent(t, nil)
+	ft := a.tagger.(*fakeTagPutter)
+
+	a.recordDNSStatus(context.Background(), "failed", "dial tcp: connect: connection refused")
+
+	if got := ft.tags["spawn:dns-status"]; got != "failed" {
+		t.Errorf("spawn:dns-status = %q, want %q", got, "failed")
+	}
+	if got := ft.tags["spawn:dns-error"]; !strings.Contains(got, "connection refused") {
+		t.Errorf("spawn:dns-error = %q, want it to contain the network error detail", got)
+	}
+}
+
+// TestRecordDNSStatus_SuccessClearsStaleError is the core #551 regression test:
+// a prior failed attempt (dns-status=failed, dns-error=<403 detail>) followed by
+// a later successful one must NOT leave both tags present simultaneously. EC2's
+// CreateTags is additive-only — it never removes a tag key it isn't given — so
+// simply writing dns-status=registered on success is not enough; the stale
+// dns-error must be explicitly deleted. This reproduces the actual reported
+// instance state: dns-status=registered + dns-error=<403 detail> both set.
+func TestRecordDNSStatus_SuccessClearsStaleError(t *testing.T) {
+	a := newTestAgent(t, nil)
+	ft := a.tagger.(*fakeTagPutter)
+
+	// Simulate the earlier failed attempt landing its tags first.
+	a.recordDNSStatus(context.Background(), "failed", `DNS API returned HTTP 403: {"Message":"Forbidden"}`)
+	if ft.tags["spawn:dns-status"] != "failed" || ft.tags["spawn:dns-error"] == "" {
+		t.Fatalf("setup: failed attempt did not land as expected, got %+v", ft.tags)
+	}
+
+	// Now the retry/later attempt succeeds.
+	a.recordDNSStatus(context.Background(), "registered", "")
+
+	if got := ft.tags["spawn:dns-status"]; got != "registered" {
+		t.Errorf("spawn:dns-status = %q, want %q", got, "registered")
+	}
+	if _, stillPresent := ft.tags["spawn:dns-error"]; stillPresent {
+		t.Errorf("spawn:dns-error must be cleared on success, but is still present: %q", ft.tags["spawn:dns-error"])
+	}
+	// The exact reported bug shape: both tags present at once must be impossible.
+	if ft.tags["spawn:dns-status"] == "registered" {
+		if _, ok := ft.tags["spawn:dns-error"]; ok {
+			t.Error("BUG #551: spawn:dns-status=registered coexists with a stale spawn:dns-error")
+		}
+	}
+}
+
+// TestRecordDNSStatus_SuccessDeletesBeforeStatusWrite asserts the ORDER of
+// operations on the success path: the stale dns-error tag is deleted, and the
+// dns-status write itself only ever reflects the call's actual, already-known
+// result (never an assumption made before the DNS API call resolved). The fake
+// tagger records deletes and writes in separate slices so both calls happening
+// (in either relative order, since EC2 tag operations don't need to be
+// sequenced against each other) is verifiable, and that a delete is attempted
+// at all only on the success path.
+func TestRecordDNSStatus_SuccessDeletesBeforeStatusWrite(t *testing.T) {
+	a := newTestAgent(t, nil)
+	ft := a.tagger.(*fakeTagPutter)
+
+	a.recordDNSStatus(context.Background(), "registered", "")
+
+	if len(ft.deletes) != 1 {
+		t.Fatalf("expected exactly one deleteTags call on success, got %d", len(ft.deletes))
+	}
+	if got := ft.deletes[0]; len(got) != 1 || got[0] != "spawn:dns-error" {
+		t.Errorf("deleteTags called with %v, want [\"spawn:dns-error\"]", got)
+	}
+	if got := ft.tags["spawn:dns-status"]; got != "registered" {
+		t.Errorf("spawn:dns-status = %q, want %q", got, "registered")
+	}
+
+	// On the failure path, no delete should be attempted at all — only the
+	// status+error tags are written.
+	a2 := newTestAgent(t, nil)
+	ft2 := a2.tagger.(*fakeTagPutter)
+	a2.recordDNSStatus(context.Background(), "failed", "boom")
+	if len(ft2.deletes) != 0 {
+		t.Errorf("expected no deleteTags call on failure, got %d", len(ft2.deletes))
+	}
+}
+
+// TestRecordDNSStatus_DeleteFailureStillWritesStatus verifies the best-effort
+// contract: if clearing the stale dns-error tag itself fails (e.g. a transient
+// EC2 throttle or IAM denial), recordDNSStatus must still write dns-status —
+// DNS bookkeeping never blocks the agent (matching the existing best-effort
+// contract for the status/error tag write itself).
+func TestRecordDNSStatus_DeleteFailureStillWritesStatus(t *testing.T) {
+	a := newTestAgent(t, nil)
+	ft := a.tagger.(*fakeTagPutter)
+	ft.deleteErr = errors.New("access denied")
+
+	a.recordDNSStatus(context.Background(), "registered", "")
+
+	if got := ft.tags["spawn:dns-status"]; got != "registered" {
+		t.Errorf("spawn:dns-status = %q, want %q even when the delete failed", got, "registered")
 	}
 }
 

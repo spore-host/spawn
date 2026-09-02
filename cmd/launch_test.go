@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -753,6 +754,48 @@ func TestWriteOutputID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSporedDNSFailureNotice covers the #551 launch-time surfacing fix: spored's
+// own, independent DNS-registration attempt (distinct from the CLI's SSH-driven
+// registerDNS) writes spawn:dns-status/spawn:dns-error tags that previously
+// never appeared in `spawn launch` output at all — only a separate `spawn
+// status` call would show them. sporedDNSFailureNotice is the pure function
+// that decides what (if anything) to print, given a fresh read of those tags.
+func TestSporedDNSFailureNotice(t *testing.T) {
+	t.Run("no status tag yet → nothing", func(t *testing.T) {
+		if got := sporedDNSFailureNotice(map[string]string{}, "myhost", "myhost"); got != "" {
+			t.Errorf("expected empty, got %q", got)
+		}
+	})
+	t.Run("registered → nothing (no news is good news)", func(t *testing.T) {
+		tags := map[string]string{"spawn:dns-status": "registered"}
+		if got := sporedDNSFailureNotice(tags, "myhost", "myhost"); got != "" {
+			t.Errorf("expected empty for registered, got %q", got)
+		}
+	})
+	t.Run("failed → surfaces the detail and names the requested DNS name", func(t *testing.T) {
+		tags := map[string]string{
+			"spawn:dns-status": "failed",
+			"spawn:dns-error":  `DNS API returned HTTP 403: {"Message":"Forbidden"}`,
+		}
+		got := sporedDNSFailureNotice(tags, "biosurf-c1-ladder", "biosurf-c1-ladder")
+		if !strings.Contains(got, "403") {
+			t.Errorf("notice should surface the 403 detail, got %q", got)
+		}
+		if !strings.Contains(got, "biosurf-c1-ladder") {
+			t.Errorf("notice should name the requested DNS name, got %q", got)
+		}
+		if !strings.Contains(got, "non-fatal") {
+			t.Errorf("notice should make clear this is non-fatal, got %q", got)
+		}
+	})
+	t.Run("failed without detail → still warns", func(t *testing.T) {
+		tags := map[string]string{"spawn:dns-status": "failed"}
+		if got := sporedDNSFailureNotice(tags, "myhost", "myhost"); !strings.Contains(got, "no detail reported") {
+			t.Errorf("expected a warning with fallback detail, got %q", got)
+		}
+	})
 }
 
 // Helper types and functions

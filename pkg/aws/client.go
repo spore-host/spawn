@@ -836,6 +836,28 @@ func (c *Client) GetInstancePublicIP(ctx context.Context, region, instanceID str
 	return valueOrEmpty(instance.PublicIpAddress), nil
 }
 
+// GetInstanceTags returns an instance's current EC2 tags as a map (#551). It's
+// the launch-time counterpart to ListInstances' per-instance tag extraction,
+// for a caller that already knows the instance ID and region and just needs a
+// fresh read of tags spored may have written after RunInstances returned (e.g.
+// spawn:dns-status/spawn:dns-error, populated only once spored's own,
+// independent DNS-registration attempt inside NewAgent has resolved).
+func (c *Client) GetInstanceTags(ctx context.Context, region, instanceID string) (map[string]string, error) {
+	ec2Client := c.regionalEC2(region)
+
+	instance, err := c.describeInstance(ctx, ec2Client, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	tags := make(map[string]string, len(instance.Tags))
+	for _, tag := range instance.Tags {
+		if tag.Key != nil && tag.Value != nil {
+			tags[*tag.Key] = *tag.Value
+		}
+	}
+	return tags, nil
+}
+
 // GetInstanceState returns the current state of an instance (e.g., "pending", "running", "stopping", "stopped", "terminated")
 func (c *Client) GetInstanceState(ctx context.Context, region, instanceID string) (string, error) {
 	ec2Client := c.regionalEC2(region)
