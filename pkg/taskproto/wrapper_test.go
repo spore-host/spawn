@@ -1,6 +1,11 @@
 package taskproto
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -187,6 +192,100 @@ func TestGenerateWrapper_PublicContainer(t *testing.T) {
 	}
 }
 
+// TestGenerateWrapper_ContainerRunsAsInvokingUser guards against #555: the
+// container must run as the same uid:gid that staged the bind-mounted dirs
+// (the instance user), not whatever USER the image declares. Without this,
+// any bioconda/conda-forge image — the entire mambaorg/micromamba-based
+// ecosystem, which defaults to uid 57439 (mambauser), not root and not the
+// instance's uid 1000 — gets EACCES writing into its own staged inputs/outputs.
+func TestGenerateWrapper_ContainerRunsAsInvokingUser(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "align",
+		Container: "quay.io/biocontainers/bwa:0.7.18",
+		Command:   []string{"bwa", "mem", "/data/ref.fa"},
+		Inputs:    []Manifest{{Source: "s3://in/ref.fa", Destination: "/data/ref.fa"}},
+		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
+		Lifecycle: Lifecycle{TTL: "4h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	if !strings.Contains(w, `sudo docker run --rm --user "$(id -u):$(id -g)" `) {
+		t.Errorf("container run must pass --user \"$(id -u):$(id -g)\" so the container can write into the host-uid-owned staged dirs (#555)\n---\n%s", w)
+	}
+}
+
+// TestGenerateWrapper_ContainerRunLineExecutesWithRealUID is a stronger,
+// exec-based sibling of TestGenerateWrapper_ContainerRunsAsInvokingUser (#555):
+// rather than asserting on the generated *text*, it extracts the actual
+// `docker run` line the wrapper emits and runs it for real under bash, with
+// stand-in `sudo` and `docker` shell scripts on PATH (`sudo` just execs its
+// argv; `docker` echoes its argv back) — the same "prove real shell behavior,
+// don't just check the Go string" pattern as
+// pkg/launcher/bootstrap_test.go's TestBuildLinuxBootstrap_ParamValueSurvivesRealShellParsing.
+// This catches a regression where the `--user` value is well-formed text but
+// fails to actually substitute to the real invoking uid:gid under bash's
+// command substitution (e.g. a quoting mistake that leaves `$(id -u)` inside
+// single quotes, where it wouldn't expand at all).
+func TestGenerateWrapper_ContainerRunLineExecutesWithRealUID(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	spec := &TaskSpec{
+		TaskID:    "align",
+		Container: "quay.io/biocontainers/bwa:0.7.18",
+		Command:   []string{"bwa", "mem", "/data/ref.fa"},
+		Inputs:    []Manifest{{Source: "s3://in/ref.fa", Destination: "/data/ref.fa"}},
+		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
+		Lifecycle: Lifecycle{TTL: "4h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	var dockerRunLine string
+	for _, line := range strings.Split(w, "\n") {
+		if strings.Contains(line, "docker run") {
+			dockerRunLine = strings.TrimSpace(line)
+			break
+		}
+	}
+	if dockerRunLine == "" {
+		t.Fatalf("no docker run line found in generated wrapper\n---\n%s", w)
+	}
+
+	// Stand-in PATH: `sudo` drops itself and execs its argv (so `sudo docker
+	// ...` really invokes our stand-in docker); `docker` just echoes argv so we
+	// can inspect exactly what the real shell substituted.
+	binDir := t.TempDir()
+	writeFakeExe(t, filepath.Join(binDir, "sudo"), "#!/bin/bash\nexec \"$@\"\n")
+	writeFakeExe(t, filepath.Join(binDir, "docker"), "#!/bin/bash\necho \"$@\"\n")
+
+	cmd := exec.Command("bash", "-c", dockerRunLine) //nolint:gosec // nosemgrep
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("exec of extracted docker run line failed: %v\noutput: %s\nline: %s", err, out, dockerRunLine)
+	}
+
+	u, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current: %v", err)
+	}
+	wantUser := fmt.Sprintf("--user %s:%s", u.Uid, u.Gid)
+	got := strings.TrimSpace(string(out))
+	if !strings.Contains(got, wantUser) {
+		t.Errorf("docker run line did not substitute the real invoking uid:gid under bash: got %q, want it to contain %q", got, wantUser)
+	}
+}
+
+// writeFakeExe writes an executable shell script to path, failing the test on
+// any error.
+func writeFakeExe(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil { //nolint:gosec // test fixture, needs +x
+		t.Fatalf("writeFakeExe(%s): %v", path, err)
+	}
+}
+
 func TestGenerateWrapper_PrivateECRContainerWithGPU(t *testing.T) {
 	spec := &TaskSpec{
 		TaskID:    "infer",
@@ -200,7 +299,7 @@ func TestGenerateWrapper_PrivateECRContainerWithGPU(t *testing.T) {
 	if !strings.Contains(w, "aws ecr get-login-password --region 'us-west-2' | sudo docker login --username AWS --password-stdin '123456789012.dkr.ecr.us-west-2.amazonaws.com'") {
 		t.Errorf("private ECR image must emit a docker login to its registry host\n---\n%s", w)
 	}
-	if !strings.Contains(w, "sudo docker run --rm --gpus all ") {
+	if !strings.Contains(w, `sudo docker run --rm --user "$(id -u):$(id -g)" --gpus all `) {
 		t.Errorf("GPU task must pass --gpus all\n---\n%s", w)
 	}
 }
