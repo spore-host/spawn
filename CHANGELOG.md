@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `spawn task run`'s completion record now reflects a lost output: a
+  declared output whose stage-out `aws s3 cp` failed used to leave
+  `state: completed`, `exit_code: 0`, `retry_class: ""` even though the
+  artifact never reached its destination — `OUT_RC` was computed and never
+  read. It now fails the task with a new retry class,
+  `retry_class: "output_delivery_error"`, distinct from `staging_error`
+  because the compute already succeeded and only delivery needs retrying
+  (#561).
+- `spawn task run`'s wrapper script now explicitly resets `set +e` at the
+  top of its own text, instead of relying on the invoking shell to already
+  be in default (`+e`) mode. Root-caused and confirmed by reproduction: the
+  wrapper is not always run as its own bash process — `pkg/launcher/bootstrap.go`
+  concatenates it onto the end of `/tmp/spawn-command.sh`, whose own preamble
+  is a literal `set -e`, and executes the combined file as ONE bash
+  invocation. Under that inherited `-e`, a failing user command (host or
+  containerized) aborted the whole script at the point of failure — before
+  `rc=$?` was ever captured — so stage-out, classification, and the
+  completion-record write (`completion.json`, `.exitcode`, `SPAWN_COMPLETE`)
+  never ran, and the box rode out its full TTL instead of self-terminating
+  on failure. This is the confirmed root-cause fix for #566, reproduced with
+  an exec-based test that fails without the `set +e` and passes with it.
+
 ## [0.103.0] - 2026-09-03
 
 ### Added

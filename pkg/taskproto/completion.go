@@ -58,8 +58,19 @@ const (
 
 	// Wired in this increment:
 	RetryAppError     RetryClass = "app_error"     // the user command exited non-zero
-	RetryStagingError RetryClass = "staging_error" // an input/output S3 copy failed
+	RetryStagingError RetryClass = "staging_error" // an input S3 copy failed (nothing ran)
 	RetryCapacity     RetryClass = "capacity"      // no capacity at launch (see ClassifyLaunchError)
+
+	// RetryOutputDeliveryError (spawn#561): the user command exited zero — the
+	// work itself succeeded — but a declared output failed to copy to its
+	// destination (the stage-out loop's `aws s3 cp` failed). Deliberately its own
+	// class rather than folded into RetryStagingError: compute already happened,
+	// so a retry only needs to redeliver the output, not rerun the command. This
+	// is also why it defaults Retryable() true, unlike RetryStagingError/
+	// RetryAppError, which usually recur unchanged on a bare retry — an output-
+	// delivery failure is commonly a transient S3 hiccup that a plain re-upload
+	// (of an artifact already sitting on disk before the box was reaped) fixes.
+	RetryOutputDeliveryError RetryClass = "output_delivery_error"
 
 	// Defined but not yet populated — these need spored-side signals or
 	// post-mortem instance inspection that a later increment adds:
@@ -71,11 +82,16 @@ const (
 
 // Retryable reports whether a task in this class is worth retrying. Capacity and
 // spot-interruption are transient (retry elsewhere/later); an app error or a
-// staging error will recur unchanged, so they are not retryable. The stubbed
-// classes default to not-retryable (conservative) until their signals are wired.
+// staging-in failure will recur unchanged, so they are not retryable. An
+// output-delivery failure (spawn#561) is grouped with the transient classes: the
+// compute already succeeded, so what's worth retrying is just re-delivering the
+// output, and delivery failures are often themselves transient (network blip,
+// throttling) rather than a defect that reproduces every time. The remaining
+// stubbed classes default to not-retryable (conservative) until their signals
+// are wired.
 func (r RetryClass) Retryable() bool {
 	switch r {
-	case RetryCapacity, RetrySpotInterruption:
+	case RetryCapacity, RetrySpotInterruption, RetryOutputDeliveryError:
 		return true
 	default:
 		return false

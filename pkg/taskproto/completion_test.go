@@ -53,14 +53,15 @@ func TestParseCompletionRecord_WrapperShape(t *testing.T) {
 
 func TestRetryClass_Retryable(t *testing.T) {
 	cases := map[RetryClass]bool{
-		RetryNone:             false,
-		RetryAppError:         false,
-		RetryStagingError:     false,
-		RetryCapacity:         true,
-		RetrySpotInterruption: true,
-		RetryInstanceHealth:   false,
-		RetryTTLExpired:       false,
-		RetryControllerLost:   false,
+		RetryNone:                false,
+		RetryAppError:            false,
+		RetryStagingError:        false,
+		RetryOutputDeliveryError: true, // spawn#561: compute succeeded, only delivery failed
+		RetryCapacity:            true,
+		RetrySpotInterruption:    true,
+		RetryInstanceHealth:      false,
+		RetryTTLExpired:          false,
+		RetryControllerLost:      false,
 	}
 	for rc, want := range cases {
 		if got := rc.Retryable(); got != want {
