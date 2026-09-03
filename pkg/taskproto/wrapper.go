@@ -100,13 +100,49 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 	// ---- stage-in ----
 	p("# ---- stage-in ----\n")
 	p("STAGE_RC=0\n")
+	// mkdir -p every directory containerMountDirs will bind-mount (spawn#564):
+	// input Destination parents AND output Source parents, from the SAME set
+	// `docker run -v` mounts below. Pre-creating them here, as the invoking user,
+	// means `docker run` never gets the chance to auto-create a missing bind-mount
+	// source itself — which it does as root, mode 0755, leaving the non-root
+	// container unable to write into it. Reusing containerMountDirs' output
+	// (rather than recomputing "what needs a mkdir" separately from "what gets
+	// mounted") keeps the two lists from drifting apart again.
+	for _, dir := range containerMountDirs(spec) {
+		p("mkdir -p %s\n", shQuote(dir))
+	}
+	p("\n")
 	for _, m := range spec.Inputs {
-		dir := path.Dir(m.Destination)
-		if dir != "" && dir != "." && dir != "/" {
-			p("mkdir -p %s\n", shQuote(dir))
-		}
 		p("if [ \"$STAGE_RC\" -eq 0 ]; then\n")
 		p("  aws s3 cp%s %s %s || STAGE_RC=$?\n", recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
+		// chown the staged path to the invoking uid:gid right after it lands
+		// (spawn#565). Host /tmp is 1777 (sticky): a container that later needs
+		// to unlink a staged file may only do so if it OWNS THAT FILE — sharing
+		// the directory's uid is not enough under the sticky bit. `aws s3 cp`
+		// already runs as the invoking user here, so today this chown is a
+		// same-uid no-op in every real call site — it's still emitted
+		// unconditionally (not gated on spec.Container) so the invariant
+		// "staged files are owned by the uid the container will run as" holds
+		// by construction, not by the accident of stage-in and `docker run
+		// --user "$(id -u):$(id -g)"` sharing one uninterrupted shell session.
+		// Uses the SAME "$(id -u):$(id -g)" that --user passes (#555), so the
+		// two can never drift apart. -R for a prefix source (aws s3 cp
+		// --recursive populated a whole tree under Destination, not just
+		// Destination itself).
+		//
+		// sudo, not plain chown: a non-root chown can only reassign a file to
+		// a uid that ALREADY owns it (verified: `chown` as an unprivileged
+		// user to any other uid fails EPERM even for your own file) — so a
+		// plain chown here would be a no-op in the case it already matches and
+		// silently do nothing in the one case it would need to actually repair
+		// a mismatch, defeating the whole point of a defense-in-depth guard.
+		// sudo is available: bootstrap.go grants the instance user passwordless
+		// sudo, the same precondition writeContainerRun already relies on for
+		// every docker/dnf call. Best-effort (|| true): the same-uid case
+		// (today, always) can never fail, and if ownership genuinely can't be
+		// fixed even as root, the container will surface that itself when it
+		// tries to write.
+		p("  sudo chown%s \"$(id -u):$(id -g)\" %s 2>/dev/null || true\n", recursiveChownFlag(m.Source), shQuote(m.Destination))
 		p("fi\n")
 	}
 	p("\n")
@@ -280,17 +316,14 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 // (identity-mounted, so in-container paths match the argv the spec author wrote).
 // Sorted for a stable wrapper; "/" , "." and empty are skipped.
 //
-// NOTE (related to spawn#555, not fixed here — out of that issue's scope): only
-// input destination dirs get an explicit `mkdir -p` in the stage-in loop above.
-// An output whose parent dir isn't shared with any input (e.g. outputs living
-// under a directory no input ever wrote to) is never created on the host before
-// `docker run`. If such a dir doesn't exist yet, `docker run -v dir:dir` auto-
-// creates it — but dockerd does that as root, not as the invoking user, so even
-// with --user "$(id -u):$(id -g)" the container still can't write into it. This
-// is a separate, preexisting gap (it also affects the host/non-container path,
-// where the user command itself would hit ENOENT/EACCES first) rather than a
-// symptom of the uid mismatch #555 is about; flagging here rather than fixing to
-// avoid scope creep on this change.
+// The stage-in mkdir loop (above, in generateWrapper) iterates this SAME set —
+// deliberately reusing this function's output rather than recomputing "what
+// needs a mkdir" independently — so every directory that gets bind-mounted also
+// gets pre-created, as the invoking user, before `docker run` runs (spawn#564).
+// Previously only input destination parents got an explicit `mkdir -p`; an
+// output whose parent wasn't shared with any input was left for `docker run -v`
+// to auto-create — which dockerd does as root, mode 0755, so the non-root
+// container then got EACCES on its first write.
 func containerMountDirs(spec *TaskSpec) []string {
 	seen := map[string]bool{}
 	var dirs []string
@@ -317,6 +350,16 @@ func containerMountDirs(spec *TaskSpec) []string {
 func recursiveFlag(source string) string {
 	if strings.HasSuffix(source, "/") {
 		return " --recursive"
+	}
+	return ""
+}
+
+// recursiveChownFlag returns " -R" for a prefix source (spawn#565): a
+// "--recursive" `aws s3 cp` populates a whole tree under Destination, so the
+// post-stage chown must walk it too, not just chown the top-level path.
+func recursiveChownFlag(source string) string {
+	if strings.HasSuffix(source, "/") {
+		return " -R"
 	}
 	return ""
 }
