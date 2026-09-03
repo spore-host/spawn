@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.103.0] - 2026-09-03
+
 ### Added
 - `spawn launch --instance-profile NAME` attaches an existing IAM instance
   profile verbatim, bypassing `--iam-role`/`--iam-policy`/`--iam-policy-file`
@@ -35,10 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Bumped `golang.org/x/crypto` v0.53.0 → v0.55.0, fixing CVE-2026-56854
   (CRITICAL, `golang.org/x/crypto/ssh`), and `google.golang.org/grpc`
-  v1.82.1 → v1.83.1, fixing CVE-2026-84304 (HIGH). Both in the root module
-  and `lambda/ttl-reaper`'s nested module. Trivy's security gate was
-  failing on every open PR once its vulnerability DB picked up these CVEs,
-  independent of any code change.
+  v1.82.1 → v1.83.1, fixing CVE-2026-84304 (HIGH). In the root module and
+  both nested lambda modules, `lambda/ttl-reaper` and `lambda/dns-updater`
+  (the latter carried `grpc` only as an untidied indirect dependency, so it
+  was missed on the first pass). Trivy's security gate was failing on every
+  open PR once its vulnerability DB picked up these CVEs, independent of
+  any code change.
 
 ### Fixed
 - **`spawn task run`'s container path couldn't write into its own staged
@@ -3322,7 +3326,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.102.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.103.0...HEAD
+[0.103.0]: https://github.com/spore-host/spawn/compare/v0.102.0...v0.103.0
 [0.102.0]: https://github.com/spore-host/spawn/compare/v0.101.0...v0.102.0
 [0.101.0]: https://github.com/spore-host/spawn/compare/v0.100.4...v0.101.0
 [0.100.4]: https://github.com/spore-host/spawn/compare/v0.100.3...v0.100.4
