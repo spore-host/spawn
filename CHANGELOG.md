@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.103.1] - 2026-09-03
+
 ### Fixed
 - `spawn task run`'s completion record now reflects a lost output: a
   declared output whose stage-out `aws s3 cp` failed used to leave
@@ -3370,7 +3372,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.103.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.103.1...HEAD
+[0.103.1]: https://github.com/spore-host/spawn/compare/v0.103.0...v0.103.1
 [0.103.0]: https://github.com/spore-host/spawn/compare/v0.102.0...v0.103.0
 [0.102.0]: https://github.com/spore-host/spawn/compare/v0.101.0...v0.102.0
 [0.101.0]: https://github.com/spore-host/spawn/compare/v0.100.4...v0.101.0
