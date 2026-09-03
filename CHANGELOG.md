@@ -29,6 +29,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never ran, and the box rode out its full TTL instead of self-terminating
   on failure. This is the confirmed root-cause fix for #566, reproduced with
   an exec-based test that fails without the `set +e` and passes with it.
+- `spawn task run`'s container path: a task output whose `source` directory
+  wasn't shared with any input (e.g. `outputs: [{source: "/tmp/out/", ...}]`
+  with no input under `/tmp/out`) now gets `mkdir -p`'d on the host, as the
+  invoking user, before `docker run` starts (#564). Previously the stage-in
+  `mkdir -p` loop only covered input destination directories, so an
+  output-only directory was left for `docker run -v` to auto-create —
+  which Docker does as root, mode 0755, leaving the non-root container
+  (running as `--user "$(id -u):$(id -g)"` per #555) unable to write into
+  it at all. The mkdir loop now reuses `containerMountDirs`' own output (the
+  same set `docker run -v` mounts), so the two lists can't drift apart
+  again. `examples/task-spec.json` was checked and does not need a change —
+  its output directory (`/work`) is already shared with an input.
+- Each staged input is now `chown`'d to the same `"$(id -u):$(id -g)"`
+  `docker run --user` uses (#555), right after `aws s3 cp` lands it (#565).
+  Host `/tmp` is sticky (mode 1777): unlinking a file there requires owning
+  that specific file, not just sharing the directory's uid, so a container
+  task that untars a staged archive and then deletes it could hit `EPERM`
+  if the file's owner ever diverged from the container's `--user` uid. The
+  chown uses `sudo` (the instance user has passwordless sudo) so it can
+  actually repair a real mismatch, not just no-op when the uid already
+  matches.
 
 ## [0.103.0] - 2026-09-03
 

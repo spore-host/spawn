@@ -7,6 +7,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -325,6 +326,415 @@ func TestContainerMountDirs(t *testing.T) {
 			t.Errorf("containerMountDirs = %v, want %v", got, want)
 			break
 		}
+	}
+}
+
+// TestGenerateWrapper_MkdirCoversOutputOnlyDir guards against spawn#564: an
+// output whose Source directory is NOT shared with any input's Destination
+// directory must still get a `mkdir -p` on the host before `docker run` runs.
+// Without it, `docker run -v /tmp/out:/tmp/out` auto-creates the missing
+// bind-mount source as root, mode 0755 — and the container (running as the
+// invoking uid per #555, not root) then gets EACCES on its first write.
+//
+// The spec below has an output-only directory (/tmp/out, from Source
+// "/tmp/out/result.txt") that shares nothing with the single input's
+// destination directory (/data). The OLD wrapper generation (mkdir loop over
+// spec.Inputs only) omitted /tmp/out entirely — this test's job is to catch
+// exactly that regression, so it must fail against the pre-fix code and pass
+// against the fix.
+func TestGenerateWrapper_MkdirCoversOutputOnlyDir(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "index",
+		Command:   []string{"true"},
+		Inputs:    []Manifest{{Source: "s3://in/ref.fa", Destination: "/data/ref.fa"}},
+		Outputs:   []Manifest{{Source: "/tmp/out/result.txt", Destination: "s3://out/result.txt"}},
+		Lifecycle: Lifecycle{TTL: "1h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	if !strings.Contains(w, "mkdir -p '/tmp/out'") {
+		t.Errorf("wrapper must mkdir -p the output-only directory '/tmp/out' before it can be written to or bind-mounted\n---\n%s", w)
+	}
+	// Sanity: the shared case (input dir) still gets its mkdir too.
+	if !strings.Contains(w, "mkdir -p '/data'") {
+		t.Errorf("wrapper must still mkdir -p the input destination directory '/data'\n---\n%s", w)
+	}
+	// The mkdir loop must run BEFORE any docker/user-command execution, so the
+	// directory exists by the time anything tries to write into it.
+	mkdirIdx := strings.Index(w, "mkdir -p '/tmp/out'")
+	stageIdx := strings.Index(w, "aws s3 cp 's3://in/ref.fa'")
+	if mkdirIdx < 0 || stageIdx < 0 || mkdirIdx > stageIdx {
+		t.Errorf("mkdir -p '/tmp/out' must precede stage-in/command execution; mkdirIdx=%d stageIdx=%d\n---\n%s", mkdirIdx, stageIdx, w)
+	}
+}
+
+// TestGenerateWrapper_MkdirLoopMatchesContainerMountDirs proves the mkdir loop
+// and containerMountDirs can never drift apart again (spawn#564's fix reuses
+// containerMountDirs' output directly): every directory containerMountDirs
+// returns must appear as a `mkdir -p` in the generated wrapper, for a spec
+// with multiple inputs and outputs across overlapping and non-overlapping
+// directories.
+func TestGenerateWrapper_MkdirLoopMatchesContainerMountDirs(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:  "multi",
+		Command: []string{"true"},
+		Inputs: []Manifest{
+			{Source: "s3://in/a", Destination: "/data/a"},
+			{Source: "s3://in/b", Destination: "/data/sub/b"},
+		},
+		Outputs: []Manifest{
+			{Source: "/work/out.bam", Destination: "s3://out/out.bam"},   // shares nothing with inputs
+			{Source: "/data/also.txt", Destination: "s3://out/also.txt"}, // shares /data with an input
+		},
+		Lifecycle: Lifecycle{TTL: "1h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	for _, dir := range containerMountDirs(spec) {
+		want := "mkdir -p " + shQuote(dir)
+		if !strings.Contains(w, want) {
+			t.Errorf("wrapper missing %q for containerMountDirs entry %q\n---\n%s", want, dir, w)
+		}
+	}
+}
+
+// TestGenerateWrapper_OutputOnlyDirExistsBeforeDockerRun is an exec-based
+// sibling of TestGenerateWrapper_MkdirCoversOutputOnlyDir (spawn#564): rather
+// than asserting on the generated text, it actually runs the wrapper's
+// stage-in preamble (mkdir loop + stage-in block) under bash — with stand-in
+// `aws`, `sudo`, and `docker` on PATH — and then checks, for real, that the
+// output-only directory exists and is owned by the invoking user BEFORE the
+// point where `docker run` would otherwise have auto-created it as root. This
+// is the same "prove real shell/filesystem behavior, don't just check the Go
+// string" pattern as TestGenerateWrapper_ContainerRunLineExecutesWithRealUID.
+func TestGenerateWrapper_OutputOnlyDirExistsBeforeDockerRun(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	tmp := t.TempDir()
+	outDir := filepath.Join(tmp, "out")
+	dataDir := filepath.Join(tmp, "data")
+
+	spec := &TaskSpec{
+		TaskID:    "index",
+		Container: "quay.io/biocontainers/bwa:0.7.18",
+		Command:   []string{"true"},
+		Inputs:    []Manifest{{Source: "s3://in/ref.fa", Destination: filepath.Join(dataDir, "ref.fa")}},
+		Outputs:   []Manifest{{Source: filepath.Join(outDir, "result.txt"), Destination: "s3://out/result.txt"}},
+		Lifecycle: Lifecycle{TTL: "1h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	// Extract just the stage-in preamble (mkdir loop through the stage-in
+	// `fi` blocks) — up to but not including the user-command/docker-run
+	// section, so this test proves the directories exist BEFORE docker would
+	// ever get a chance to auto-create one as root.
+	marker := "# ---- run user command ----"
+	idx := strings.Index(w, marker)
+	if idx < 0 {
+		t.Fatalf("wrapper missing marker %q", marker)
+	}
+	preamble := w[:idx]
+
+	// Stand-in PATH: `aws` no-ops successfully (stage-in "succeeds" without
+	// real S3 access); we only care that the mkdir loop ran for real under bash.
+	binDir := t.TempDir()
+	writeFakeExe(t, filepath.Join(binDir, "aws"), "#!/bin/bash\nexit 0\n")
+
+	cmd := exec.Command("bash", "-c", preamble) //nolint:gosec // nosemgrep
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("exec of stage-in preamble failed: %v\noutput: %s\npreamble:\n%s", err, out, preamble)
+	}
+
+	info, err := os.Stat(outDir)
+	if err != nil {
+		t.Fatalf("output-only directory %s was not created by the stage-in preamble: %v", outDir, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s exists but is not a directory", outDir)
+	}
+
+	// Ownership: mkdir -p run as the current test process's uid, so the dir
+	// must be owned by that same uid — never root-auto-created, since this
+	// process is not root when tests run (skip the assertion if it somehow is).
+	me, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current: %v", err)
+	}
+	if me.Uid == "0" {
+		t.Skip("running as root; ownership assertion is meaningless")
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("could not read raw stat_t for %s", outDir)
+	}
+	gotUID := fmt.Sprintf("%d", st.Uid)
+	if gotUID != me.Uid {
+		t.Errorf("output-only dir %s owned by uid %s, want invoking uid %s (would have been root-owned if docker run had auto-created it)", outDir, gotUID, me.Uid)
+	}
+}
+
+// TestGenerateWrapper_ChownsStagedInputToInvokingUID guards against spawn#565:
+// each staged input must be chowned to "$(id -u):$(id -g)" — the SAME
+// expression `docker run --user` uses (#555) — right after `aws s3 cp` lands
+// it, so the file is owned by the exact uid the container will run as
+// regardless of whether stage-in and docker-run happen to share one
+// uninterrupted shell/uid context. Without this, a staged file living in
+// host /tmp (mode 1777, sticky) can only be unlinked by whoever OWNS THE
+// FILE — sharing the directory's uid is not enough under the sticky bit —
+// so any future refactor that breaks the "stage-in and docker-run are the
+// same uid" assumption reintroduces the EPERM the issue reported.
+func TestGenerateWrapper_ChownsStagedInputToInvokingUID(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "align",
+		Container: "quay.io/biocontainers/bwa:0.7.18",
+		Command:   []string{"bwa", "mem", "/data/ref.fa"},
+		Inputs:    []Manifest{{Source: "s3://in/ref.fa", Destination: "/data/ref.fa"}},
+		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
+		Lifecycle: Lifecycle{TTL: "4h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	stageLine := `aws s3 cp 's3://in/ref.fa' '/data/ref.fa' || STAGE_RC=$?`
+	chownLine := `sudo chown "$(id -u):$(id -g)" '/data/ref.fa'`
+	if !strings.Contains(w, stageLine) {
+		t.Fatalf("wrapper missing expected stage-in line %q\n---\n%s", stageLine, w)
+	}
+	if !strings.Contains(w, chownLine) {
+		t.Errorf("wrapper missing chown of staged input to the invoking uid:gid (#565): want %q\n---\n%s", chownLine, w)
+	}
+
+	// The chown must run AFTER the aws s3 cp for the SAME input (chowning
+	// before the file exists would be a no-op on the wrong target) and BEFORE
+	// the container/user command runs.
+	stageIdx := strings.Index(w, stageLine)
+	chownIdx := strings.Index(w, chownLine)
+	runIdx := strings.Index(w, "# ---- run user command ----")
+	if stageIdx < 0 || chownIdx < 0 || runIdx < 0 || !(stageIdx < chownIdx && chownIdx < runIdx) {
+		t.Errorf("ordering wrong: want stage-in(%d) < chown(%d) < run-command(%d)", stageIdx, chownIdx, runIdx)
+	}
+}
+
+// TestGenerateWrapper_ChownRecursiveForPrefixInput guards against spawn#565's
+// recursive case: a Manifest whose Source is an S3 prefix (trailing slash)
+// stages a WHOLE TREE under Destination via `aws s3 cp --recursive` — the
+// post-stage chown must walk that tree too (`-R`), not just the top-level
+// destination path, or files nested under it keep the uid `aws s3 cp` ran
+// as (correct already, since that's the invoking uid) but the invariant
+// wouldn't generalize to any future staging mechanism that behaves
+// differently for nested entries.
+func TestGenerateWrapper_ChownRecursiveForPrefixInput(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "t",
+		Command:   []string{"true"},
+		Inputs:    []Manifest{{Source: "s3://in-bucket/reads/", Destination: "/work/reads/"}},
+		Lifecycle: Lifecycle{TTL: "1h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	want := `sudo chown -R "$(id -u):$(id -g)" '/work/reads/'`
+	if !strings.Contains(w, want) {
+		t.Errorf("wrapper missing recursive chown for prefix input: want %q\n---\n%s", want, w)
+	}
+}
+
+// TestGenerateWrapper_StagedFileOwnedByInvokingUID_RealFilesystem is an
+// exec-based verification of the #565 mechanism, not just the generated
+// text: it runs the wrapper's stage-in preamble for real, under bash, on a
+// real sticky-bit (1777) directory on this machine's filesystem, then checks
+// that the chown left the staged file owned by the invoking uid — the exact
+// precondition sticky-bit unlink checks (you may remove a file you don't own
+// in a sticky dir IF, and only if, you own the FILE itself; see the stronger
+// docker-based sibling test below for a genuine cross-uid unlink proof).
+func TestGenerateWrapper_StagedFileOwnedByInvokingUID_RealFilesystem(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	me, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current: %v", err)
+	}
+	if me.Uid == "0" {
+		t.Skip("running as root; ownership assertion is meaningless (root bypasses sticky-bit checks entirely)")
+	}
+
+	tmp := t.TempDir()
+	stickyDir := filepath.Join(tmp, "sticky-tmp")
+	if err := os.MkdirAll(stickyDir, 0o777); err != nil {
+		t.Fatalf("mkdir sticky dir: %v", err)
+	}
+	// Real sticky bit (1777), matching host /tmp on the real instance. Shell
+	// out to the external `chmod` rather than os.Chmod: on this platform/Go
+	// combination os.Chmod(dir, 0o1777) silently drops the sticky bit (mode
+	// comes back as 0o777), while `chmod 1777` sets it correctly — same
+	// discrepancy the issue itself warns about for bind mounts vs. real
+	// filesystems, just one level lower in the stack.
+	if out, err := exec.Command("chmod", "1777", stickyDir).CombinedOutput(); err != nil {
+		t.Fatalf("chmod 1777 %s: %v (%s)", stickyDir, err, out)
+	}
+	st, err := os.Stat(stickyDir)
+	if err != nil || st.Mode()&os.ModeSticky == 0 {
+		t.Fatalf("sticky bit did not take on this filesystem (mode=%v, err=%v); test needs a real sticky dir to be meaningful", st.Mode(), err)
+	}
+
+	staged := filepath.Join(stickyDir, "staged.tar")
+
+	spec := &TaskSpec{
+		TaskID:    "t",
+		Command:   []string{"true"},
+		Inputs:    []Manifest{{Source: "s3://in/staged.tar", Destination: staged}},
+		Lifecycle: Lifecycle{TTL: "1h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	marker := "# ---- run user command ----"
+	idx := strings.Index(w, marker)
+	if idx < 0 {
+		t.Fatalf("wrapper missing marker %q", marker)
+	}
+	preamble := w[:idx]
+
+	// Stand-in `aws`: instead of a real S3 fetch, `cp` writes the staged file
+	// (proving the mkdir+stage-in+chown sequence for real under bash).
+	binDir := t.TempDir()
+	writeFakeExe(t, filepath.Join(binDir, "aws"), "#!/bin/bash\n# args: s3 cp <flags...> <src> <dst>\ndst=\"${@: -1}\"\ntouch \"$dst\"\n")
+
+	cmd := exec.Command("bash", "-c", preamble) //nolint:gosec // nosemgrep
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("exec of stage-in preamble failed: %v\noutput: %s\npreamble:\n%s", err, out, preamble)
+	}
+
+	info, err := os.Stat(staged)
+	if err != nil {
+		t.Fatalf("staged file %s not created: %v", staged, err)
+	}
+	fst, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("could not read raw stat_t for %s", staged)
+	}
+	gotUID := fmt.Sprintf("%d", fst.Uid)
+	if gotUID != me.Uid {
+		t.Fatalf("staged file %s owned by uid %s after chown, want invoking uid %s — sticky-bit unlink by the container (running as this same uid per #555) would fail EPERM otherwise", staged, gotUID, me.Uid)
+	}
+
+	// Since the file's owner now equals the invoking uid, this same uid can
+	// unlink it even though it doesn't own the sticky directory (only root
+	// created that dir in this test's setup) — the sticky-bit unlink rule is
+	// "owns the dir OR owns the file", and this proves the file-ownership arm.
+	if err := os.Remove(staged); err != nil {
+		t.Errorf("removing the now-correctly-owned staged file failed: %v", err)
+	}
+}
+
+// TestGenerateWrapper_ChownFixesCrossUIDStickyUnlink_Docker is the strongest
+// available proof of the #565 mechanism, and — unlike a hand-written repro —
+// it runs the ACTUAL chown line GenerateWrapper emits, extracted from the
+// generated script's text, so it tests the real code path rather than an
+// equivalent hardcoded command. It uses real Linux semantics inside a Docker
+// container (this repo's test environment has no root/setpriv to force a uid
+// mismatch directly, and a macOS bind mount does not enforce sticky-bit
+// ownership at all — the issue's own repro note). Inside ONE alpine
+// container with a fresh tmpfs at /sticky chmod'd 1777, as uid 1000 (the
+// stand-in "invoking uid", so `id -u`/`id -g` resolve to 1000:1000 exactly
+// like they would in the real wrapper's `su - <user>` session):
+//  1. WITHOUT the fix (the extracted chown line commented out): a file
+//     created by uid 1000, then chowned to uid 6000 (a stand-in for "the
+//     image's declared user", e.g. bioconda's mambauser) — uid 1000 (matching
+//     --user "$(id -u):$(id -g)" from #555) fails to unlink it. This
+//     reproduces the issue's real-world failure exactly.
+//  2. WITH the fix: same setup, but this time the extracted chown line runs
+//     (as uid 1000, so "$(id -u):$(id -g)" expands to 1000:1000) before the
+//     unlink attempt — it now succeeds.
+//
+// Skips cleanly if Docker isn't available (e.g. sandboxed CI).
+func TestGenerateWrapper_ChownFixesCrossUIDStickyUnlink_Docker(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	spec := &TaskSpec{
+		TaskID:    "t",
+		Command:   []string{"true"},
+		Inputs:    []Manifest{{Source: "s3://in/mytar", Destination: "/sticky/mytar"}},
+		Lifecycle: Lifecycle{TTL: "1h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+	var chownLine string
+	for _, line := range strings.Split(w, "\n") {
+		if strings.Contains(line, "chown") && strings.Contains(line, "/sticky/mytar") {
+			chownLine = strings.TrimSpace(line)
+			break
+		}
+	}
+	if chownLine == "" {
+		t.Fatalf("no chown line found for the staged input in generated wrapper\n---\n%s", w)
+	}
+	t.Logf("extracted chown line under test: %s", chownLine)
+
+	// The inner "fix step" line is written to its OWN file and bind-mounted
+	// in (rather than substituted into a shell template via fmt/%q), so the
+	// extracted chown line's own quoting is interpreted exactly once — by the
+	// container's shell — with no intermediate Go-string-escaping layer that
+	// could silently rewrite it into something that no longer matches what
+	// GenerateWrapper actually emits.
+	const outerTmpl = `apk add --no-cache sudo >/dev/null 2>&1
+mkdir -p /sticky && chmod 1777 /sticky
+adduser -D -u 1000 spawnuser >/dev/null 2>&1
+adduser -D -u 6000 imageuser >/dev/null 2>&1
+# Passwordless sudo for the invoking user, matching bootstrap.go's real
+# instance setup (the precondition the wrapper's "sudo chown" relies on).
+echo 'spawnuser ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/spawnuser
+
+su spawnuser -c 'touch /sticky/mytar'
+chown 6000:6000 /sticky/mytar   # simulate landing under a mismatched uid
+chmod +x /fixstep.sh
+su spawnuser -c /fixstep.sh
+su spawnuser -c 'rm -f /sticky/mytar' 2>/tmp/err
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "UNLINK_OK"
+else
+  echo "UNLINK_FAILED: $(cat /tmp/err)"
+fi
+`
+	run := func(t *testing.T, fixStep string) string {
+		dir := t.TempDir()
+		outerPath := filepath.Join(dir, "outer.sh")
+		fixPath := filepath.Join(dir, "fixstep.sh")
+		if err := os.WriteFile(outerPath, []byte(outerTmpl), 0o755); err != nil { //nolint:gosec // test fixture, needs +x
+			t.Fatalf("write outer script: %v", err)
+		}
+		if err := os.WriteFile(fixPath, []byte("#!/bin/sh\n"+fixStep+"\n"), 0o755); err != nil { //nolint:gosec // test fixture, needs +x
+			t.Fatalf("write fix-step script: %v", err)
+		}
+		cmd := exec.Command("docker", "run", "--rm", //nolint:gosec // nosemgrep
+			"-v", outerPath+":/outer.sh",
+			"-v", fixPath+":/fixstep.sh",
+			"alpine", "sh", "/outer.sh")
+		out, err := cmd.CombinedOutput()
+		if err != nil && !strings.Contains(string(out), "UNLINK_") {
+			t.Fatalf("docker run failed: %v\noutput:\n%s", err, out)
+		}
+		return string(out)
+	}
+
+	// Case 1 (no fix): confirms the bug mechanism itself — the "fix step" is a
+	// no-op, so the mismatched-uid file cannot be unlinked.
+	withoutFix := run(t, "true")
+	if !strings.Contains(withoutFix, "UNLINK_FAILED") {
+		t.Errorf("expected unlink to FAIL without the chown (bug reproduction failed)\noutput:\n%s", withoutFix)
+	}
+
+	// Case 2 (with fix): the "fix step" is the ACTUAL extracted wrapper chown
+	// line, run verbatim as uid 1000 — so its "$(id -u):$(id -g)" expands to
+	// 1000:1000, matching #555's --user value for this same su session —
+	// after which the same unlink must succeed.
+	withFix := run(t, chownLine)
+	if !strings.Contains(withFix, "UNLINK_OK") {
+		t.Errorf("expected unlink to SUCCEED after running the wrapper's real chown line %q\noutput:\n%s", chownLine, withFix)
 	}
 }
 
