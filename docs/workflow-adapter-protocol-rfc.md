@@ -87,7 +87,8 @@ TaskState          submitted | launching | running | completed | failed | cancel
 CompletionRecord   { exit_code, state, started_at, ended_at, cost_estimate, logs[] }
 Cancellation       { task_id, reason }
 RetryClassification  app_error | capacity | spot_interruption | staging_error |
-                     instance_health | ttl_expired | controller_lost   → retryable?
+                     output_delivery_error | instance_health | ttl_expired |
+                     controller_lost   → retryable?
 ```
 
 Example `TaskSpec` (JSON) — see issue #386 for the annotated version:
