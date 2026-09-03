@@ -36,13 +36,21 @@ func (execDCVRunner) describeSession(ctx context.Context, sessionID string) ([]b
 	return exec.CommandContext(ctx, "dcv", "describe-session", sessionID, "--json").Output()
 }
 
-// tagPutter abstracts the instance CreateTags call behind writeReadyTags so the
-// DCV handshake retry/terminal logic is testable without real EC2 (spawn#282).
+// tagPutter abstracts the instance CreateTags/DeleteTags calls behind
+// writeReadyTags and recordDNSStatus so the DCV handshake retry/terminal logic
+// and DNS status bookkeeping are testable without real EC2 (spawn#282, #551).
 // The real impl is ec2TagPutter (in agent.go, where the AWS SDK wiring lives);
-// tests inject a fake that records writes and can return a canned error (e.g. an
-// AccessDenied to exercise the tag-write-denied path).
+// tests inject a fake that records writes/deletes and can return a canned
+// error (e.g. an AccessDenied to exercise the tag-write-denied path).
 type tagPutter interface {
 	putTags(ctx context.Context, instanceID string, tags map[string]string) error
+
+	// deleteTags removes the named tags entirely (EC2 DeleteTags). Unlike
+	// putTags/CreateTags — which only ever adds or overwrites keys and never
+	// clears ones absent from the call — this is how a stale tag recording an
+	// earlier, no-longer-true outcome gets removed instead of lingering
+	// alongside a newer, contradictory one (#551).
+	deleteTags(ctx context.Context, instanceID string, keys []string) error
 }
 
 // dcvStatus is the named outcome of the DCV readiness handshake, written to the

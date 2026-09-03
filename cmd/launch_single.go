@@ -908,6 +908,22 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				dnsRecord = fqdn
 				prog.Complete("Registering DNS")
 			}
+
+			// #551: the CLI's own SSH-driven registerDNS above is NOT the only
+			// DNS registration attempt — spored independently registers the same
+			// name itself at boot (pkg/agent's NewAgent, over the Go dns.Client)
+			// and records that outcome as the spawn:dns-status/spawn:dns-error
+			// instance tags. A 403/etc. from THAT attempt previously surfaced
+			// nowhere in `spawn launch` output — only a later `spawn status`
+			// would show it, and only then via dnsStatusNotice. By the time we
+			// reach here, verifySporedReady has already confirmed spored is up
+			// and running (so it has had its chance to attempt registration and
+			// write its tags), and EC2 tags are same-account reads (no SSH/SSM
+			// round trip) — cheap enough to check right now rather than deferring
+			// the whole diagnosis to a separate `spawn status` call.
+			if tags, terr := awsClient.GetInstanceTags(ctx, config.Region, result.InstanceID); terr == nil {
+				fmt.Fprint(os.Stderr, sporedDNSFailureNotice(tags, dnsName, config.Name))
+			}
 		}
 	}
 
@@ -965,6 +981,27 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	}
 
 	return nil
+}
+
+// sporedDNSFailureNotice reports spored's own, independent DNS-registration
+// outcome at launch time (#551), given the instance's freshly-read tags. It is
+// pure (no I/O) so it's directly unit-testable, mirroring cmd/status.go's
+// dnsStatusNotice — which this deliberately does NOT call, since that one's
+// wording ("the instance name may not resolve") is written for a `spawn
+// status` reader inspecting an existing instance, not a launch that already
+// reported its own (possibly different) SSH-driven registration result a few
+// lines above. Returns "" when spored's status tag is missing or anything
+// other than "failed" (including "registered", or not-yet-written).
+func sporedDNSFailureNotice(tags map[string]string, dnsName, instanceName string) string {
+	if tags["spawn:dns-status"] != "failed" {
+		return ""
+	}
+	detail := tags["spawn:dns-error"]
+	if detail == "" {
+		detail = "no detail reported"
+	}
+	return fmt.Sprintf("\n%s spored's own DNS registration for %q also failed (non-fatal — use the public IP or `spawn connect %s`): %s\n",
+		i18n.Symbol("warning"), dnsName, instanceName, detail)
 }
 
 // ensureIAMProfile sets config.IamInstanceProfile if unset: either the

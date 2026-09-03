@@ -118,6 +118,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   did, in the reported incident) disagree about the same instance at the same
   moment, one describing the tag that had just been written and the other
   the deadline that actually governs termination.
+- **An instance could carry `spawn:dns-status=registered` alongside a stale
+  `spawn:dns-error` from an earlier failed attempt** (#551): spored's DNS
+  registration (`pkg/agent`'s `NewAgent`, which reruns on every `spored
+  status`/`reload`/`config` invocation, not just once at boot) recorded its
+  outcome via EC2 `CreateTags`, which only ever adds or overwrites tag keys and
+  never removes one it isn't given. A transient early failure (`dns-status:
+  failed` + `dns-error: <403 detail>`) followed by a later successful retry
+  left the stale `dns-error` tag sitting next to the new `dns-status:
+  registered` — a live instance could contradict itself, claiming success and
+  failure simultaneously. `spawn:dns-error` is now explicitly cleared whenever
+  registration succeeds, so the tag pair can never disagree.
+- **spored's own DNS-registration failure never appeared in `spawn launch`
+  output** (#551): the CLI's SSH-driven DNS registration and spored's
+  independent, in-agent registration are two separate attempts against the
+  same DNS API, and only the CLI's own failure was ever printed — spored's
+  outcome was previously visible only via a later `spawn status` call. `spawn
+  launch` now re-reads the instance's tags right after spored has had a chance
+  to register (once `spored` is confirmed up) and prints a non-fatal warning
+  if spored's own attempt failed too.
 
 ## [0.102.0] - 2026-08-30
 
