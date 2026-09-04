@@ -51,6 +51,7 @@ spawn launch <name> [flags]
 | `--dns-api-endpoint` |  | string |  | Custom DNS API endpoint (overrides default) |
 | `--dns-domain` |  | string |  | Custom DNS domain (overrides default) |
 | `--dns` |  | string |  | Override DNS name if different from --name (advanced) |
+| `--dry-run` |  | bool |  | Resolve and print the launch configuration without launching anything (no AWS mutation) |
 | `--efa` |  | bool |  | Enable Elastic Fabric Adapter for ultra-low latency MPI (requires supported instance types) |
 | `--efs-id` |  | string |  | EFS filesystem ID to mount (fs-xxx) |
 | `--efs-mount-options` |  | string |  | Custom EFS mount options (overrides profile) |
@@ -111,6 +112,7 @@ spawn launch <name> [flags]
 | `--plugin` |  | stringArray |  | Plugin to install at launch (ref[@version], repeatable) |
 | `--pre-stop-timeout` |  | string |  | Max time to wait for --pre-stop command (default: 5m, spot: 90s) |
 | `--pre-stop` |  | string |  | Shell command to run on the instance before any lifecycle-triggered stop/terminate (e.g., "aws s3 sync /results s3://bucket/") |
+| `--print-config` |  | bool |  | Alias for --dry-run |
 | `--proximity-from` |  | string |  | Prefer regions close to this region (e.g., us-east-1) |
 | `--queue-template` |  | string |  | Queue template name (use 'spawn queue template list' to see options) |
 | `--quiet` |  | bool |  | Minimal output |

@@ -21,7 +21,6 @@ import (
 	"github.com/spore-host/spawn/pkg/progress"
 	"github.com/spore-host/spawn/pkg/userdata"
 	"github.com/spore-host/spawn/pkg/wizard"
-	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
 func runLaunch(cmd *cobra.Command, args []string) error {
@@ -62,11 +61,24 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	if batchQueueFile != "" || queueTemplate != "" {
+		// --dry-run/--print-config (#569) is not wired into the batch-queue path
+		// yet — refuse rather than silently falling through to a real launch,
+		// which would violate the flag's whole safety contract (zero AWS
+		// mutation). --estimate-only already works here via launchWithBatchQueue.
+		if launchDryRun {
+			return fmt.Errorf("--dry-run is not yet supported for --batch-queue/--queue-template launches; use --estimate-only for a cost preview")
+		}
 		return launchWithBatchQueue(ctx, plat, auditLog)
 	}
 
 	// Check for parameter sweep mode (before wizard/config logic)
 	if paramFile != "" || params != "" {
+		// Same refusal as batch-queue above: --dry-run isn't wired into the sweep
+		// path, so it must fail closed rather than silently launch. --estimate-only
+		// already covers a sweep cost preview.
+		if launchDryRun {
+			return fmt.Errorf("--dry-run is not yet supported for parameter-sweep launches (--param-file/--params); use --estimate-only for a cost preview")
+		}
 		// Parameter sweep launch path - config will be built inside launchParameterSweep
 		// Create minimal config for sweep orchestration
 		config := &aws.LaunchConfig{
@@ -153,15 +165,26 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Strata software environment selection
+	// Strata software environment selection. Skipped under --dry-run/--print-config
+	// (#569): resolveStrataEnvironment's UploadLockfile writes to S3 — an actual
+	// AWS mutation — so a dry run must not call it. Note the tag as unresolved
+	// instead, so the preview doesn't silently omit that a real launch would set
+	// strata:lockfile-s3-uri.
 	if strataFormation != "" || strataProfile != "" {
-		fmt.Fprintf(os.Stderr, "Resolving Strata environment...\n")
-		uri, err := resolveStrataEnvironment(ctx, strataFormation, strataProfile, strataRegistry)
-		if err != nil {
-			return fmt.Errorf("strata: %w", err)
+		if launchDryRun {
+			if config.Tags == nil {
+				config.Tags = make(map[string]string)
+			}
+			config.Tags["strata:lockfile-s3-uri"] = "(unresolved in --dry-run — resolving uploads a lockfile to S3)"
+		} else {
+			fmt.Fprintf(os.Stderr, "Resolving Strata environment...\n")
+			uri, err := resolveStrataEnvironment(ctx, strataFormation, strataProfile, strataRegistry)
+			if err != nil {
+				return fmt.Errorf("strata: %w", err)
+			}
+			config.Tags["strata:lockfile-s3-uri"] = uri
+			fmt.Fprintf(os.Stderr, "Strata environment resolved: %s\n", uri)
 		}
-		config.Tags["strata:lockfile-s3-uri"] = uri
-		fmt.Fprintf(os.Stderr, "Strata environment resolved: %s\n", uri)
 	}
 
 	// Validate
@@ -284,6 +307,17 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// instance's lifetime, or require confirmation if --no-timeout was set.
 	if err := guardZombieInstance(config); err != nil {
 		return err
+	}
+
+	// --dry-run / --print-config (#569): resolve the config through every step
+	// that's cheap/read-only to preview (AMI auto-detect, OS/Windows guards,
+	// MPI/EFA/hibernation pre-flight, MPI placement-group decision, pricing),
+	// print it, and return — BEFORE launchWithProgress's first AWS mutation
+	// (setupSSHKey's ImportKeyPair). Checked before --estimate-only so a launch
+	// invoked with both flags gets the richer preview (--estimate-only alone
+	// skips AMI/IAM/SG resolution entirely; this is deliberately fuller).
+	if launchDryRun {
+		return runLaunchDryRun(ctx, os.Stdout, awsClient, config)
 	}
 
 	// --estimate-only: a true dry-run. Run the same pre-flight instance-type
@@ -628,94 +662,20 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	}
 
 	// Validate MPI requirements
+	if err := validateMPIFlags(mpiEnabled, count, jobArrayName); err != nil {
+		return err
+	}
 	if mpiEnabled {
-		if count <= 1 {
-			return fmt.Errorf("--mpi requires --count > 1 (need multiple nodes)")
-		}
-		if jobArrayName == "" {
-			return fmt.Errorf("--mpi requires --job-array-name")
-		}
-
-		// Decide on a cluster placement group. HPC instance types (hpc6a/hpc7a/
-		// hpc7g) don't support cluster placement groups — they get low-latency
-		// networking from AWS HPC infrastructure — so --auto-placement-group
-		// (on by default) must SKIP them gracefully rather than hard-fail (#104).
-		// An explicitly requested --placement-group still errors if unsupported.
-		tc := truffleaws.NewClientFromConfig(awsClient.Config())
-		clusterPG := func() (bool, error) {
-			caps, err := tc.GetCapabilities(ctx, config.InstanceType, config.Region)
-			if err != nil {
-				return false, err
-			}
-			return caps.ClusterPlacement, nil
-		}
-		if mpiPlacementGroup != "" {
-			// Explicit request: must be supported (authoritative capability check).
-			supported, err := clusterPG()
-			if err != nil {
-				return fmt.Errorf("placement group validation: %w", err)
-			}
-			if !supported {
-				return fmt.Errorf("instance type %s does not support cluster placement groups (required for --placement-group)", config.InstanceType)
-			}
-		} else if mpiAutoPlacementGroup {
-			supported, err := clusterPG()
-			if err != nil {
-				return fmt.Errorf("placement group validation: %w", err)
-			}
-			if supported {
-				// Do NOT eager-create here: the MPI cohort manages placement groups
-				// lazily per-AZ so AZ capacity fallback can move the whole cluster
-				// to another zone (a cluster PG binds to one AZ). Hand the cohort a
-				// prefix; its Actuator creates <prefix>-<az> on demand per rung.
-				config.PlacementGroupPrefix = fmt.Sprintf("spawn-mpi-%s", jobArrayName)
-				fmt.Fprintf(os.Stderr, "Placement group: auto (per-AZ, created on launch) with prefix %s\n", config.PlacementGroupPrefix)
-			} else {
-				fmt.Fprintf(os.Stderr, "ℹ️  %s doesn't support cluster placement groups (HPC instance types use AWS HPC networking); skipping placement group.\n", config.InstanceType)
-			}
-		}
-
-		// An explicit --placement-group is a fixed, user-managed group (AZ-bound):
-		// set it directly. The auto case uses PlacementGroupPrefix (above) instead.
-		if mpiPlacementGroup != "" {
-			config.PlacementGroup = mpiPlacementGroup
-		}
-
-		// Validate EFA requirements
-		if efaEnabled {
-			// Validate in the launch region — some HPC instance types only exist
-			// in specific regions and DescribeInstanceTypes returns InvalidInstanceType
-			// when queried from a different region (fixes #307).
-			if err := awsClient.ValidateInstanceTypeForEFAInRegion(ctx, config.InstanceType, config.Region); err != nil {
-				return fmt.Errorf("EFA validation: %w", err)
-			}
-
-			// EFA works best with placement groups
-			if !mpiAutoPlacementGroup && mpiPlacementGroup == "" {
-				fmt.Fprintf(os.Stderr, "⚠️  Warning: EFA works best with placement groups. Consider using --auto-placement-group\n")
-			} else {
-				fmt.Fprintf(os.Stderr, "✓ EFA enabled with placement group for optimal performance\n")
-			}
-
-			// Set EFA in config
-			config.EFAEnabled = true
-		}
-
-		// Add MPI tags to config
-		if config.Tags == nil {
-			config.Tags = make(map[string]string)
-		}
-		config.Tags["spawn:mpi-enabled"] = "true"
-		if mpiProcessesPerNode > 0 {
-			config.Tags["spawn:mpi-processes-per-node"] = fmt.Sprintf("%d", mpiProcessesPerNode)
+		if err := resolveMPIPlacement(ctx, awsClient, config); err != nil {
+			return err
 		}
 	}
 
 	// Check if job array mode (count > 1)
 	if count > 1 {
 		// Job array launch path
-		if jobArrayName == "" {
-			return fmt.Errorf("--job-array-name is required when --count > 1")
+		if err := validateJobArrayFlags(count, jobArrayName); err != nil {
+			return err
 		}
 		// MPI is all-or-nothing (a missing rank makes the cluster useless);
 		// a plain array is independent work with a configurable --min-viable.

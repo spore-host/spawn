@@ -181,6 +181,13 @@ var (
 
 	// EBS root volume
 	launchVolumeSize int32
+
+	// Dry run (#569): resolve the full LaunchConfig the same way a real launch
+	// would, print it, and exit without making any AWS mutation. --print-config
+	// is a plain alias (not deprecated) — some callers read it more naturally
+	// when the point is "show me the config", others when the point is
+	// "don't actually launch"; both flags set the same variable.
+	launchDryRun bool
 )
 
 var launchCmd = &cobra.Command{
@@ -348,6 +355,14 @@ func init() {
 	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", true, "Wait until SSH is ready")
 	launchCmd.Flags().BoolVar(&skipRegionCheck, "skip-region-check", false, "Skip data locality region mismatch warnings")
 	launchCmd.Flags().BoolVar(&terminateOnError, "terminate-on-error", false, "If post-launch verification fails (e.g. spored didn't come up), terminate the instance instead of leaving it running")
+	// --dry-run (#569): resolves the same LaunchConfig a real launch would —
+	// flags, --config plugin merge, AMI auto-detection, IAM/tag/user-data
+	// assembly — and prints it (table or -o json), making ZERO AWS mutation
+	// calls (no RunInstances, no IAM role/profile create, no tag write). Doubles
+	// as a linter: an invalid flag combination fails exactly as a real launch
+	// would, before anything is spent. --print-config is a plain alias.
+	launchCmd.Flags().BoolVar(&launchDryRun, "dry-run", false, "Resolve and print the launch configuration without launching anything (no AWS mutation)")
+	launchCmd.Flags().BoolVar(&launchDryRun, "print-config", false, "Alias for --dry-run")
 
 	// Compliance
 	launchCmd.Flags().Bool("nist-800-171", false, "Enable NIST 800-171 Rev 3 compliance mode")
