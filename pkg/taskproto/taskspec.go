@@ -73,6 +73,43 @@ type Placement struct {
 	Volumes          []VolumeRef `json:"volumes,omitempty"`           // EBS volumes from snapshots, mounted at a path
 	FSxLustreID      string      `json:"fsx_lustre_id,omitempty"`     // existing FSx for Lustre filesystem id (fs-...) to mount
 	EFSID            string      `json:"efs_id,omitempty"`            // existing EFS filesystem id (fs-...) to mount
+	// EFSMountPoint/FSxMountPoint override the default mount path for EFSID/
+	// FSxLustreID (spawn#570 sub-issue 3). Empty means the default ("/efs",
+	// "/fsx") — use DefaultEFSMountPoint/DefaultFSxMountPoint or the
+	// Effective*MountPoint helpers below rather than the raw field, so every
+	// caller (the boot-time storage script in cmd/task.go AND the
+	// container-mount list in wrapper.go) resolves the SAME path for a given
+	// spec instead of each hardcoding "/efs"/"/fsx" independently.
+	EFSMountPoint string `json:"efs_mount_point,omitempty"`
+	FSxMountPoint string `json:"fsx_mount_point,omitempty"`
+}
+
+// DefaultEFSMountPoint/DefaultFSxMountPoint are the mount paths used when a
+// Placement doesn't override them. Exported as named constants (rather than
+// each caller repeating the literal "/efs"/"/fsx") so cmd/task.go's boot-time
+// mount script and wrapper.go's container `docker run -v` list can never
+// silently drift onto different defaults (spawn#570).
+const (
+	DefaultEFSMountPoint = "/efs"
+	DefaultFSxMountPoint = "/fsx"
+)
+
+// EffectiveEFSMountPoint returns p.EFSMountPoint, or DefaultEFSMountPoint if
+// unset. Meaningless when p.EFSID == "" (no EFS in this placement).
+func (p Placement) EffectiveEFSMountPoint() string {
+	if p.EFSMountPoint != "" {
+		return p.EFSMountPoint
+	}
+	return DefaultEFSMountPoint
+}
+
+// EffectiveFSxMountPoint returns p.FSxMountPoint, or DefaultFSxMountPoint if
+// unset. Meaningless when p.FSxLustreID == "" (no FSx in this placement).
+func (p Placement) EffectiveFSxMountPoint() string {
+	if p.FSxMountPoint != "" {
+		return p.FSxMountPoint
+	}
+	return DefaultFSxMountPoint
 }
 
 // VolumeRef is one EBS volume to attach from a snapshot, mounted read-only (the
@@ -200,14 +237,32 @@ func (s *TaskSpec) Validate() error {
 	if s.Lifecycle.OnComplete != "" && !validOnComplete[s.Lifecycle.OnComplete] {
 		add("lifecycle.on_complete %q invalid (want terminate, stop, or hibernate)", s.Lifecycle.OnComplete)
 	}
+	// The wrapper unconditionally emits `aws s3 cp <Source> <Destination>` for
+	// every input and `aws s3 cp <Source> <Destination>` for every output
+	// (wrapper.go's stage-in/stage-out loops) — there is no scheme dispatch, so
+	// whichever side is meant to be the S3 side MUST actually be an s3:// URI or
+	// the `aws s3 cp` call fails at runtime with no earlier warning (spawn#570
+	// sub-issue 2). An input's Source is the S3 side (S3 → local Destination); an
+	// output's Destination is the S3 side (local Source → S3 Destination).
+	// Rejecting this here, the same way resources.s3_read_write is checked
+	// below, turns a paid-boot runtime failure into an immediate parse/validate
+	// error. A manifest entry that wants to reference a path already mounted on
+	// a placement filesystem (e.g. "/efs/refs/GRCh38.fa") isn't supported by
+	// this cp-only wrapper today — Placement's EFS/FSx/volume mount already
+	// makes that path directly readable/writable by the command or container
+	// without going through a manifest entry at all.
 	for i, m := range s.Inputs {
 		if m.Source == "" || m.Destination == "" {
 			add("inputs[%d]: source and destination are both required", i)
+		} else if !strings.HasPrefix(m.Source, "s3://") {
+			add("inputs[%d].source %q must be an s3:// URI (stage-in only supports S3 → local; a path on a mounted placement filesystem is already directly accessible without a manifest entry)", i, m.Source)
 		}
 	}
 	for i, m := range s.Outputs {
 		if m.Source == "" || m.Destination == "" {
 			add("outputs[%d]: source and destination are both required", i)
+		} else if !strings.HasPrefix(m.Destination, "s3://") {
+			add("outputs[%d].destination %q must be an s3:// URI (stage-out only supports local → S3; a path on a mounted placement filesystem is already directly accessible without a manifest entry)", i, m.Destination)
 		}
 	}
 	for i, u := range s.Resources.S3ReadWrite {

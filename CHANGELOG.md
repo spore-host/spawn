@@ -25,6 +25,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually got before a failure, which was previously invisible whenever a
   task produced no completion record at all.
 
+### Fixed
+- `spawn task run`'s container path (`spec.container != ""`) now bind-mounts
+  a task's `placement` storage — EFS, FSx for Lustre, and any
+  `placement.volumes[]` — into the `docker run`, in addition to genuinely
+  mounting it on the host as before. Previously the `docker run -v` list was
+  built entirely from the input/output manifest and never consulted
+  `placement`, so a containerized task (every task, in the
+  aarch.bio/aarch.science one-tool-per-image model) could not see any
+  EFS/FSx/volume the boot-time storage script had just mounted for it, even
+  though a host-argv task (`container == ""`) saw it for free (#570 sub-issue
+  1, the blocking bug). The stage-in `mkdir -p` preamble deliberately does
+  NOT also mkdir these placement mount points — they're mounted before this
+  wrapper runs, and pre-creating a plain local directory at a not-yet-mounted
+  path would risk it being silently shadowed once the real mount lands
+  (would have reopened the #564 "mkdir set drifts from mount set" class of
+  bug in the opposite direction). Covered by fail-without/pass-with tests
+  asserting the mount appears in `docker run -v` and does NOT appear in the
+  mkdir loop.
+- `TaskSpec.Validate()` now rejects a manifest (`inputs`/`outputs`) entry
+  whose S3-side value isn't actually an `s3://...` URI — e.g.
+  `{"source": "/efs/refs/GRCh38.fa", "destination": "/tmp/GRCh38.fa"}`, a
+  local path on a mounted placement filesystem rather than S3. Previously
+  this passed `Validate()` and `--dry-run` cleanly and only failed at
+  runtime, after a paid boot, because the wrapper unconditionally emits
+  `aws s3 cp` for every manifest entry in both directions (#570 sub-issue 2,
+  the cheap fix from the issue's two options — the stretch goal of teaching
+  the wrapper to dispatch on scheme and copy a placement-local path directly
+  is deferred as a follow-up, not implemented here).
+- `Placement.EFSID`/`FSxLustreID` mount points are no longer hardcoded to
+  `/efs`/`/fsx` in two independent places. Added optional
+  `placement.efs_mount_point` / `placement.fsx_mount_point` TaskSpec fields;
+  `cmd/task.go`'s boot-time storage script and the new container-mount logic
+  above both resolve the same effective mount point (override, or the
+  unchanged `/efs`/`/fsx` default), so they can't drift onto different paths
+  for the same spec (#570 sub-issue 3).
+
 ## [0.103.1] - 2026-09-03
 
 ### Fixed

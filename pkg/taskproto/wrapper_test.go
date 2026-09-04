@@ -368,13 +368,15 @@ func TestGenerateWrapper_MkdirCoversOutputOnlyDir(t *testing.T) {
 	}
 }
 
-// TestGenerateWrapper_MkdirLoopMatchesContainerMountDirs proves the mkdir loop
-// and containerMountDirs can never drift apart again (spawn#564's fix reuses
-// containerMountDirs' output directly): every directory containerMountDirs
+// TestGenerateWrapper_MkdirLoopMatchesManifestMountDirs proves the mkdir loop
+// and manifestMountDirs can never drift apart again (spawn#564's fix reuses
+// manifestMountDirs' output directly): every directory manifestMountDirs
 // returns must appear as a `mkdir -p` in the generated wrapper, for a spec
 // with multiple inputs and outputs across overlapping and non-overlapping
-// directories.
-func TestGenerateWrapper_MkdirLoopMatchesContainerMountDirs(t *testing.T) {
+// directories. (Renamed from ...MatchesContainerMountDirs when spawn#570 split
+// the mkdir set from the docker-mount set — see TestGenerateWrapper_
+// PlacementMountsNotInMkdirLoop below for the split itself.)
+func TestGenerateWrapper_MkdirLoopMatchesManifestMountDirs(t *testing.T) {
 	spec := &TaskSpec{
 		TaskID:  "multi",
 		Command: []string{"true"},
@@ -390,10 +392,118 @@ func TestGenerateWrapper_MkdirLoopMatchesContainerMountDirs(t *testing.T) {
 	}
 	w := GenerateWrapper(spec, "b", "us-east-1")
 
-	for _, dir := range containerMountDirs(spec) {
+	for _, dir := range manifestMountDirs(spec) {
 		want := "mkdir -p " + shQuote(dir)
 		if !strings.Contains(w, want) {
-			t.Errorf("wrapper missing %q for containerMountDirs entry %q\n---\n%s", want, dir, w)
+			t.Errorf("wrapper missing %q for manifestMountDirs entry %q\n---\n%s", want, dir, w)
+		}
+	}
+}
+
+// TestGenerateWrapper_PlacementMountsIncludeInDockerRun (spawn#570 sub-issue
+// 1, the blocking bug): a containerized task with a Placement (EFS + FSx +
+// volume) but NO manifest entry under any of those paths must still get them
+// bind-mounted into the container via `docker run -v` — otherwise the
+// filesystem is genuinely mounted on the HOST (taskStorageScript's job,
+// unaffected by this fix) but invisible to the container, which is where the
+// aarch.bio/aarch.science one-tool-per-image model runs every command.
+func TestGenerateWrapper_PlacementMountsIncludeInDockerRun(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "refalign",
+		Container: "quay.io/biocontainers/bwa:0.7.18",
+		Command:   []string{"bwa", "mem", "/efs/refs/GRCh38.fa"},
+		Placement: Placement{
+			EFSID:       "fs-efs123",
+			FSxLustreID: "fs-fsx456",
+			Volumes:     []VolumeRef{{Snapshot: "snap-abc", MountPath: "/refdata", ReadOnly: true}},
+		},
+		Lifecycle: Lifecycle{TTL: "4h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	for _, want := range []string{
+		"-v '/efs':'/efs'",
+		"-v '/fsx':'/fsx'",
+		"-v '/refdata':'/refdata'",
+	} {
+		if !strings.Contains(w, want) {
+			t.Errorf("docker run -v list missing placement mount %q (spawn#570 sub-issue 1: container never sees the mounted filesystem)\n---\n%s", want, w)
+		}
+	}
+}
+
+// TestGenerateWrapper_PlacementMountOverrideHonored covers spawn#570
+// sub-issue 3's other half: when a spec overrides Placement.EFSMountPoint /
+// FSxMountPoint away from the "/efs"/"/fsx" defaults, the docker `-v` list
+// must bind-mount the OVERRIDDEN path, not the hardcoded default — the mount
+// list has to track wherever taskStorageScript actually mounted it.
+func TestGenerateWrapper_PlacementMountOverrideHonored(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "refalign",
+		Container: "quay.io/biocontainers/bwa:0.7.18",
+		Command:   []string{"bwa", "mem", "/mnt/refdata/GRCh38.fa"},
+		Placement: Placement{
+			EFSID:         "fs-efs123",
+			EFSMountPoint: "/mnt/refdata",
+			FSxLustreID:   "fs-fsx456",
+			FSxMountPoint: "/mnt/scratch",
+		},
+		Lifecycle: Lifecycle{TTL: "4h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	for _, want := range []string{"-v '/mnt/refdata':'/mnt/refdata'", "-v '/mnt/scratch':'/mnt/scratch'"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("docker run -v list missing overridden placement mount %q\n---\n%s", want, w)
+		}
+	}
+	for _, notWant := range []string{"-v '/efs':'/efs'", "-v '/fsx':'/fsx'"} {
+		if strings.Contains(w, notWant) {
+			t.Errorf("docker run -v list should not contain the un-overridden default %q once the spec overrides it\n---\n%s", notWant, w)
+		}
+	}
+}
+
+// TestGenerateWrapper_PlacementMountsNotInMkdirLoop is the critical regression
+// guard for spawn#570's resolution of the #564 invariant tension: placement
+// mount points (EFS/FSx/volume) must appear in the docker `-v` mount list
+// (proven above) but must NOT be `mkdir -p`'d by the stage-in preamble. Those
+// paths are mounted by the boot-time storage script (cmd/task.go's
+// taskStorageScript) BEFORE this wrapper runs; mkdir'ing them here risks
+// racing that mount (a plain local directory created first would then be
+// silently shadowed once the real mount lands) rather than the harmless
+// no-op #564 established for manifest-derived, non-placement directories.
+func TestGenerateWrapper_PlacementMountsNotInMkdirLoop(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "refalign",
+		Container: "quay.io/biocontainers/bwa:0.7.18",
+		Command:   []string{"bwa", "mem", "/efs/refs/GRCh38.fa"},
+		Placement: Placement{
+			EFSID:       "fs-efs123",
+			FSxLustreID: "fs-fsx456",
+			Volumes:     []VolumeRef{{Snapshot: "snap-abc", MountPath: "/refdata", ReadOnly: true}},
+		},
+		Lifecycle: Lifecycle{TTL: "4h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	// Extract just the stage-in preamble (through the mkdir loop) so a mount
+	// path incidentally appearing later in the script (e.g. inside the docker
+	// run line itself) doesn't produce a false negative.
+	marker := "# ---- run user command ----"
+	idx := strings.Index(w, marker)
+	if idx < 0 {
+		t.Fatalf("wrapper missing marker %q", marker)
+	}
+	preamble := w[:idx]
+
+	for _, bad := range []string{
+		"mkdir -p '/efs'",
+		"mkdir -p '/fsx'",
+		"mkdir -p '/refdata'",
+	} {
+		if strings.Contains(preamble, bad) {
+			t.Errorf("stage-in preamble must NOT mkdir a placement mount point %q (races the boot-time mount / #564's invariant is 'mkdir what gets mounted BY THIS SCRIPT', not placement mounts done earlier by taskStorageScript)\n---\n%s", bad, preamble)
 		}
 	}
 }
