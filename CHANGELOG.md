@@ -60,6 +60,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   above both resolve the same effective mount point (override, or the
   unchanged `/efs`/`/fsx` default), so they can't drift onto different paths
   for the same spec (#570 sub-issue 3).
+- `spawn task run` (and any other headless-launch path through a
+  freshly-created scoped IAM instance profile) could fail `RunInstances`
+  with a transient `InvalidParameterValue: ... Invalid IAM Instance Profile
+  name`, even though `CreateOrGetInstanceProfile` had already confirmed the
+  profile via `GetInstanceProfile`. That confirmation only proves IAM
+  control-plane visibility; `RunInstances` consumes the profile through
+  EC2's own, separately eventually-consistent propagation path, which AWS
+  documents and explicitly recommends retrying against. Under parallel task
+  launches, one profile could lose that second race even though the other
+  concurrent launches (with different scoped profiles) succeeded on
+  identical code. `RunInstances` now retries specifically on this
+  transient (matched on `InvalidParameterValue` + the "Invalid IAM Instance
+  Profile name" message, not on any `InvalidParameterValue`), with a
+  bounded 2s/4s/8s backoff; any other error still fails immediately with no
+  retry. Safe to retry: tags, the instance record, and any ephemeral FSx
+  are all created strictly after `RunInstances` succeeds (#213), so a
+  rejected call has created nothing to clean up (#572).
 
 ## [0.103.1] - 2026-09-03
 
