@@ -86,7 +86,18 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 
 	p("TASK_ID=%s\n", shQuote(taskID))
 	p("RESULTS_PREFIX=%s\n", shQuote(resultsPrefix))
-	p("STARTED_AT=\"$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\"\n\n")
+	p("STARTED_AT=\"$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\"\n")
+	// Phase markers. completion.json carries only started_at/ended_at, so the
+	// whole interval between them — stage-in, the Docker install, the image pull,
+	// the user command, stage-out — is one opaque number. Measured on a real task
+	// (cookbook-relion-postprocess-r1): a 94s window of which the user command was
+	// 25s, with no way to attribute the other ~69s. These lines make command.log
+	// self-timing at the cost of one `date` per phase. Deliberately plain text on
+	// stdout rather than a second structured artifact: nothing parses command.log
+	// (cmd/service.go's readiness grep is the service path, not this wrapper), and
+	// a log a human can read is the thing that was missing.
+	p("spawn_phase() { echo \"spawn: [$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] $*\"; }\n")
+	p("spawn_phase 'wrapper start'\n\n")
 
 	// ---- env ----
 	if len(spec.Env) > 0 {
@@ -99,6 +110,7 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 
 	// ---- stage-in ----
 	p("# ---- stage-in ----\n")
+	p("spawn_phase 'stage-in start'\n")
 	p("STAGE_RC=0\n")
 	// mkdir -p every directory containerMountDirs will bind-mount (spawn#564):
 	// input Destination parents AND output Source parents, from the SAME set
@@ -145,6 +157,7 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 		p("  sudo chown%s \"$(id -u):$(id -g)\" %s 2>/dev/null || true\n", recursiveChownFlag(m.Source), shQuote(m.Destination))
 		p("fi\n")
 	}
+	p("spawn_phase \"stage-in done rc=$STAGE_RC\"\n")
 	p("\n")
 
 	// ---- run user command ----
@@ -155,8 +168,10 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 		writeContainerRun(p, spec, region)
 	} else {
 		// Host path: run argv in a subshell (no shell re-parse of a joined string).
+		p("  spawn_phase 'command start'\n")
 		p("  ( %s )\n", quoteArgv(spec.Command))
 		p("  rc=$?\n")
+		p("  spawn_phase \"command exit rc=$rc\"\n")
 	}
 	p("else\n")
 	p("  echo 'spawn: stage-in failed; skipping user command' >&2\n")
@@ -169,9 +184,11 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 	p("OUT_RC=0\n")
 	if len(spec.Outputs) > 0 {
 		p("if [ \"$STAGE_RC\" -eq 0 ]; then\n")
+		p("  spawn_phase 'stage-out start'\n")
 		for _, m := range spec.Outputs {
 			p("  aws s3 cp%s %s %s || OUT_RC=$?\n", recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
 		}
+		p("  spawn_phase \"stage-out done rc=$OUT_RC\"\n")
 		p("fi\n")
 	}
 	p("\n")
@@ -266,6 +283,7 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	// then make sure the daemon is up before we pull. Failures are fatal to the
 	// container run — abort early with a non-zero rc so the completion record
 	// classifies it, rather than hanging on a `docker` call to a dead daemon.
+	p("  spawn_phase 'docker install start'\n")
 	p("  if ! command -v docker >/dev/null 2>&1; then\n")
 	p("    echo 'spawn: installing docker...'\n")
 	p("    sudo dnf install -y docker\n")
@@ -273,6 +291,7 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	p("  sudo systemctl enable --now docker\n")
 	// Wait for the socket (service start is async); bounded so we never hang.
 	p("  for _i in $(seq 1 30); do sudo docker info >/dev/null 2>&1 && break; sleep 2; done\n")
+	p("  spawn_phase 'docker install done'\n")
 
 	// Private-ECR images need a docker login with the instance-role creds; public
 	// images pull anonymously. ecrImageAccount!="" ⇒ private ECR ref.
@@ -306,9 +325,12 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	for _, d := range containerMountDirs(spec) {
 		fmt.Fprintf(&mounts, "-v %s:%s ", shQuote(d), shQuote(d))
 	}
+	p("  spawn_phase 'image pull start'\n")
 	p("  sudo docker pull %s\n", shQuote(image))
+	p("  spawn_phase 'image pull done; command start'\n")
 	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s %s\n", gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
 	p("  rc=$?\n")
+	p("  spawn_phase \"command exit rc=$rc\"\n")
 }
 
 // containerMountDirs returns the distinct host directories to bind-mount into the

@@ -986,3 +986,140 @@ esac
 		t.Errorf("SPAWN_COMPLETE not written (spored would never self-terminate the box): %v", err)
 	}
 }
+
+// TestGenerateWrapper_PhaseMarkersHelperDefinedBeforeFirstUse guards the
+// ordering the rest of #571's markers depend on: `spawn_phase()` must be
+// defined before "wrapper start" (its first call site) or every marker after
+// it is a "command not found" instead of a timestamp.
+func TestGenerateWrapper_PhaseMarkersHelperDefinedBeforeFirstUse(t *testing.T) {
+	w := GenerateWrapper(fullSpec(), "b", "us-east-1")
+	defIdx := strings.Index(w, "spawn_phase()")
+	firstCallIdx := strings.Index(w, "spawn_phase 'wrapper start'")
+	if defIdx < 0 || firstCallIdx < 0 {
+		t.Fatalf("wrapper missing spawn_phase definition or first call")
+	}
+	if !(defIdx < firstCallIdx) {
+		t.Errorf("spawn_phase() defined at %d, first called at %d — helper must be defined first", defIdx, firstCallIdx)
+	}
+}
+
+// TestGenerateWrapper_PhaseMarkersHostPath (#571) — completion.json's
+// started_at/ended_at previously made stage-in, the user command, and
+// stage-out one unattributable interval. The host path (no Container) should
+// get every phase EXCEPT the Docker-specific ones.
+func TestGenerateWrapper_PhaseMarkersHostPath(t *testing.T) {
+	w := GenerateWrapper(fullSpec(), "b", "us-east-1")
+
+	mustContain := []string{
+		"spawn_phase 'wrapper start'",
+		"spawn_phase 'stage-in start'",
+		`spawn_phase "stage-in done rc=$STAGE_RC"`,
+		"spawn_phase 'command start'",
+		`spawn_phase "command exit rc=$rc"`,
+		"spawn_phase 'stage-out start'",
+		`spawn_phase "stage-out done rc=$OUT_RC"`,
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(w, want) {
+			t.Errorf("host wrapper missing phase marker %q", want)
+		}
+	}
+	mustNotContain := []string{
+		"spawn_phase 'docker install start'",
+		"spawn_phase 'docker install done'",
+		"spawn_phase 'image pull start'",
+	}
+	for _, bad := range mustNotContain {
+		if strings.Contains(w, bad) {
+			t.Errorf("host wrapper (no Container) unexpectedly contains Docker phase marker %q", bad)
+		}
+	}
+
+	// Ordering matters as much as presence: a marker after the thing it
+	// announces is worse than no marker (it lies about when the phase ran).
+	idx := func(sub string) int {
+		i := strings.Index(w, sub)
+		if i < 0 {
+			t.Fatalf("marker %q not found", sub)
+		}
+		return i
+	}
+	wrapperStart := idx("spawn_phase 'wrapper start'")
+	stageInStart := idx("spawn_phase 'stage-in start'")
+	stageInDone := idx(`spawn_phase "stage-in done rc=$STAGE_RC"`)
+	cmdStart := idx("spawn_phase 'command start'")
+	cmdExit := idx(`spawn_phase "command exit rc=$rc"`)
+	stageOutStart := idx("spawn_phase 'stage-out start'")
+	stageOutDone := idx(`spawn_phase "stage-out done rc=$OUT_RC"`)
+	if !(wrapperStart < stageInStart && stageInStart < stageInDone &&
+		stageInDone < cmdStart && cmdStart < cmdExit &&
+		cmdExit < stageOutStart && stageOutStart < stageOutDone) {
+		t.Errorf("phase markers out of order:\nwrapperStart=%d stageInStart=%d stageInDone=%d cmdStart=%d cmdExit=%d stageOutStart=%d stageOutDone=%d",
+			wrapperStart, stageInStart, stageInDone, cmdStart, cmdExit, stageOutStart, stageOutDone)
+	}
+}
+
+// TestGenerateWrapper_PhaseMarkersContainerPath (#571) — the container path
+// gets the host markers plus the Docker-specific ones (install, image pull),
+// in the order the issue specifies: this is exactly the breakdown that let a
+// 94s command window (25s of real work, ~69s unattributable) actually be
+// attributed.
+func TestGenerateWrapper_PhaseMarkersContainerPath(t *testing.T) {
+	spec := &TaskSpec{
+		TaskID:    "align",
+		Container: "quay.io/biocontainers/bwa:0.7.18",
+		Command:   []string{"bwa", "mem", "/data/ref.fa"},
+		Inputs:    []Manifest{{Source: "s3://in/ref.fa", Destination: "/data/ref.fa"}},
+		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
+		Lifecycle: Lifecycle{TTL: "4h"},
+	}
+	w := GenerateWrapper(spec, "b", "us-east-1")
+
+	mustContain := []string{
+		"spawn_phase 'wrapper start'",
+		"spawn_phase 'stage-in start'",
+		`spawn_phase "stage-in done rc=$STAGE_RC"`,
+		"spawn_phase 'docker install start'",
+		"spawn_phase 'docker install done'",
+		"spawn_phase 'image pull start'",
+		"spawn_phase 'image pull done; command start'",
+		`spawn_phase "command exit rc=$rc"`,
+		"spawn_phase 'stage-out start'",
+		`spawn_phase "stage-out done rc=$OUT_RC"`,
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(w, want) {
+			t.Errorf("container wrapper missing phase marker %q", want)
+		}
+	}
+	// The host-path-only markers must not leak into the container path — the
+	// container path calls writeContainerRun instead, which never emits them.
+	mustNotContain := []string{
+		"spawn_phase 'command start'\n",
+	}
+	for _, bad := range mustNotContain {
+		if strings.Contains(w, bad) {
+			t.Errorf("container wrapper unexpectedly contains host-only phase marker %q", bad)
+		}
+	}
+
+	idx := func(sub string) int {
+		i := strings.Index(w, sub)
+		if i < 0 {
+			t.Fatalf("marker %q not found", sub)
+		}
+		return i
+	}
+	dockerInstallStart := idx("spawn_phase 'docker install start'")
+	dockerInstallDone := idx("spawn_phase 'docker install done'")
+	imagePullStart := idx("spawn_phase 'image pull start'")
+	imagePullDoneCmdStart := idx("spawn_phase 'image pull done; command start'")
+	cmdExit := idx(`spawn_phase "command exit rc=$rc"`)
+	if !(dockerInstallStart < dockerInstallDone &&
+		dockerInstallDone < imagePullStart &&
+		imagePullStart < imagePullDoneCmdStart &&
+		imagePullDoneCmdStart < cmdExit) {
+		t.Errorf("container phase markers out of order:\ndockerInstallStart=%d dockerInstallDone=%d imagePullStart=%d imagePullDoneCmdStart=%d cmdExit=%d",
+			dockerInstallStart, dockerInstallDone, imagePullStart, imagePullDoneCmdStart, cmdExit)
+	}
+}

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `spawn task run`'s generated wrapper now logs a `spawn: [<timestamp>] <phase>`
+  line at each real boundary — wrapper start, stage-in start/done, (container
+  tasks only) Docker install start/done and image pull start/done, command
+  start/exit, stage-out start/done (#571). Previously `completion.json`'s
+  `started_at`/`ended_at` were the only two timestamps a task had, so the
+  entire interval between them — stage-in, the Docker install, the image
+  pull, the user command, and stage-out — was one opaque number with no way
+  to tell which part actually cost the time: measured on a real task, a 94s
+  command window contained 25s of actual work and ~69s that couldn't be
+  attributed to any of the three plausible causes. Deliberately plain text
+  on `command.log`'s existing stdout rather than a new structured artifact —
+  nothing parses that log today, so the addition can't break a consumer, and
+  a log a human can read was the thing missing. The `rc=` on each "done"
+  marker is also a diagnostic for #566: it shows how far the wrapper
+  actually got before a failure, which was previously invisible whenever a
+  task produced no completion record at all.
+
 ## [0.103.1] - 2026-09-03
 
 ### Fixed
