@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.104.0] - 2026-09-04
+
 ### Added
 - `spawn launch --dry-run` (alias `--print-config`, #569): resolves the full
   flag/`--config`-plugin/AMI-auto-detection/IAM-tag/user-data pipeline exactly
@@ -3454,7 +3456,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.103.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.104.0...HEAD
+[0.104.0]: https://github.com/spore-host/spawn/compare/v0.103.1...v0.104.0
 [0.103.1]: https://github.com/spore-host/spawn/compare/v0.103.0...v0.103.1
 [0.103.0]: https://github.com/spore-host/spawn/compare/v0.102.0...v0.103.0
 [0.102.0]: https://github.com/spore-host/spawn/compare/v0.101.0...v0.102.0
