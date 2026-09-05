@@ -736,7 +736,13 @@ func taskStorageScript(ctx context.Context, client *aws.Client, spec *taskproto.
 		}
 		sc.EFSEnabled = true
 		sc.EFSFilesystemDNS = aws.GetEFSDNSName(p.EFSID, region)
-		sc.EFSMountPoint = "/efs"
+		// EffectiveEFSMountPoint (spawn#570 sub-issue 3): honors
+		// Placement.EFSMountPoint when the spec overrides it, defaulting to
+		// "/efs" otherwise — the SAME default+override resolution
+		// wrapper.go's containerMountDirs uses, so a containerized task's
+		// `docker run -v` always bind-mounts wherever this script actually
+		// mounted the filesystem, not a second, independently hardcoded path.
+		sc.EFSMountPoint = p.EffectiveEFSMountPoint()
 		sc.EFSMountOptions = opts
 	}
 	if p.FSxLustreID != "" {
@@ -747,7 +753,9 @@ func taskStorageScript(ctx context.Context, client *aws.Client, spec *taskproto.
 		sc.FSxLustreEnabled = true
 		sc.FSxFilesystemDNS = info.DNSName
 		sc.FSxMountName = info.MountName
-		sc.FSxMountPoint = "/fsx"
+		// EffectiveFSxMountPoint: see the EFS comment above — same
+		// override-or-default resolution shared with wrapper.go.
+		sc.FSxMountPoint = p.EffectiveFSxMountPoint()
 	}
 	return userdata.GenerateStorageUserData(sc)
 }

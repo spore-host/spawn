@@ -112,15 +112,28 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 	p("# ---- stage-in ----\n")
 	p("spawn_phase 'stage-in start'\n")
 	p("STAGE_RC=0\n")
-	// mkdir -p every directory containerMountDirs will bind-mount (spawn#564):
+	// mkdir -p every directory manifestMountDirs will bind-mount (spawn#564):
 	// input Destination parents AND output Source parents, from the SAME set
-	// `docker run -v` mounts below. Pre-creating them here, as the invoking user,
-	// means `docker run` never gets the chance to auto-create a missing bind-mount
-	// source itself — which it does as root, mode 0755, leaving the non-root
-	// container unable to write into it. Reusing containerMountDirs' output
-	// (rather than recomputing "what needs a mkdir" separately from "what gets
-	// mounted") keeps the two lists from drifting apart again.
-	for _, dir := range containerMountDirs(spec) {
+	// `docker run -v` mounts for those manifest entries. Pre-creating them here,
+	// as the invoking user, means `docker run` never gets the chance to
+	// auto-create a missing bind-mount source itself — which it does as root,
+	// mode 0755, leaving the non-root container unable to write into it.
+	// Reusing manifestMountDirs' output (rather than recomputing "what needs a
+	// mkdir" separately from "what gets mounted") keeps the two lists from
+	// drifting apart again.
+	//
+	// Deliberately NOT containerMountDirs (spawn#570): that function ALSO
+	// includes Placement's EFS/FSx/volume mount points, which this loop must
+	// NOT mkdir. Those paths are mounted onto by the boot-time storage script
+	// (cmd/task.go's taskStorageScript, which runs before this wrapper) —
+	// mkdir -p on top of an already-live NFS/Lustre mount is a harmless no-op,
+	// but mkdir -p BEFORE that mount lands would create a plain local directory
+	// at the mount point, which the later mount then shadows: any file this
+	// script writes into it while racing the mount lands on the local disk, not
+	// the shared filesystem, and silently disappears from the container's/host's
+	// view once the mount completes. Placement mount points must appear in the
+	// docker-mount set without ever appearing in this mkdir set.
+	for _, dir := range manifestMountDirs(spec) {
 		p("mkdir -p %s\n", shQuote(dir))
 	}
 	p("\n")
@@ -333,20 +346,27 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	p("  spawn_phase \"command exit rc=$rc\"\n")
 }
 
-// containerMountDirs returns the distinct host directories to bind-mount into the
-// container: the parent dir of each input Destination and each output Source
-// (identity-mounted, so in-container paths match the argv the spec author wrote).
-// Sorted for a stable wrapper; "/" , "." and empty are skipped.
+// manifestMountDirs returns the distinct host directories the wrapper's own
+// stage-in/stage-out loops populate: the parent dir of each input Destination
+// and each output Source (identity-mounted, so in-container paths match the
+// argv the spec author wrote). Sorted for a stable wrapper; "/", "." and
+// empty are skipped.
 //
-// The stage-in mkdir loop (above, in generateWrapper) iterates this SAME set —
-// deliberately reusing this function's output rather than recomputing "what
-// needs a mkdir" independently — so every directory that gets bind-mounted also
-// gets pre-created, as the invoking user, before `docker run` runs (spawn#564).
-// Previously only input destination parents got an explicit `mkdir -p`; an
-// output whose parent wasn't shared with any input was left for `docker run -v`
-// to auto-create — which dockerd does as root, mode 0755, so the non-root
-// container then got EACCES on its first write.
-func containerMountDirs(spec *TaskSpec) []string {
+// The stage-in mkdir loop (above, in generateWrapper) iterates this SAME
+// set — deliberately reusing this function's output rather than recomputing
+// "what needs a mkdir" independently — so every manifest directory that gets
+// bind-mounted also gets pre-created, as the invoking user, before `docker
+// run` runs (spawn#564). Previously only input destination parents got an
+// explicit `mkdir -p`; an output whose parent wasn't shared with any input
+// was left for `docker run -v` to auto-create — which dockerd does as root,
+// mode 0755, so the non-root container then got EACCES on its first write.
+//
+// This function intentionally does NOT include Placement's EFS/FSx/volume
+// mount points (spawn#570) — see containerMountDirs below for the superset
+// that does, and the comment on the mkdir loop in generateWrapper for why
+// mkdir'ing a placement mount point would be actively harmful, not just
+// redundant.
+func manifestMountDirs(spec *TaskSpec) []string {
 	seen := map[string]bool{}
 	var dirs []string
 	add := func(p string) {
@@ -362,6 +382,55 @@ func containerMountDirs(spec *TaskSpec) []string {
 	}
 	for _, m := range spec.Outputs {
 		add(m.Source)
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+// containerMountDirs returns the distinct host directories to bind-mount into
+// the container via `docker run -v`: manifestMountDirs (manifest-derived
+// input/output parents) PLUS every Placement mount point the spec's boot-time
+// storage script (cmd/task.go's taskStorageScript) already mounted on the
+// host — each Placement.Volumes[].MountPath, the EFS mount point (when
+// Placement.EFSID is set), and the FSx mount point (when
+// Placement.FSxLustreID is set). Sorted for a stable wrapper; "/", "." and
+// empty are skipped; duplicates (e.g. a volume mounted under a manifest dir)
+// are deduped.
+//
+// Before spawn#570, writeContainerRun's `docker run -v` list was built from
+// manifestMountDirs alone: a container task with an EFS/FSx/volume placement
+// but no manifest entry under that path got the filesystem mounted on the
+// HOST (taskStorageScript genuinely runs and mounts it) but never bind-mounted
+// INTO the container — every containerized task (the aarch.bio/aarch.science
+// one-tool-per-image model runs Container != "" for EVERY task) silently lost
+// access to placement storage that a host-argv task (Container == "") would
+// have seen for free. This function is now the single "what does the
+// container get to see" superset; manifestMountDirs stays the narrower "what
+// does stage-in need to mkdir" set (see the mkdir loop's comment for why the
+// two must NOT be merged back into one list).
+func containerMountDirs(spec *TaskSpec) []string {
+	dirs := manifestMountDirs(spec)
+	seen := map[string]bool{}
+	for _, d := range dirs {
+		seen[d] = true
+	}
+	add := func(d string) {
+		d = strings.TrimSuffix(d, "/")
+		if d == "" || d == "." || d == "/" || seen[d] {
+			return
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+	p := spec.Placement
+	for _, v := range p.Volumes {
+		add(v.MountPath)
+	}
+	if p.EFSID != "" {
+		add(p.EffectiveEFSMountPoint())
+	}
+	if p.FSxLustreID != "" {
+		add(p.EffectiveFSxMountPoint())
 	}
 	sort.Strings(dirs)
 	return dirs

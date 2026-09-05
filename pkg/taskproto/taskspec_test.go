@@ -115,6 +115,85 @@ func TestValidate_Failures(t *testing.T) {
 	}
 }
 
+// TestValidate_RejectsNonS3ManifestSide guards spawn#570 sub-issue 2: the
+// wrapper unconditionally emits `aws s3 cp` for every manifest entry in both
+// directions, so a manifest entry whose S3-side value isn't actually an
+// s3://... URI (e.g. a path on a mounted placement EFS, which passed
+// Validate() and --dry-run before this fix) used to fail only at runtime,
+// after a paid boot. Validate must reject it immediately, naming which side
+// and index is wrong.
+func TestValidate_RejectsNonS3ManifestSide(t *testing.T) {
+	cases := []struct {
+		name string
+		spec TaskSpec
+		want string
+	}{
+		{
+			"input source not s3",
+			TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"},
+				Inputs: []Manifest{{Source: "/efs/refs/GRCh38.fa", Destination: "/tmp/GRCh38.fa"}}},
+			"inputs[0].source",
+		},
+		{
+			"output destination not s3",
+			TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"},
+				Outputs: []Manifest{{Source: "/work/out.bam", Destination: "/efs/results/out.bam"}}},
+			"outputs[0].destination",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.spec.Validate()
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q missing %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestValidate_S3OnlyManifestsStillValid is the regression control for the
+// above: a spec whose manifests are s3:// on the correct side (the normal,
+// already-working case) must still validate cleanly.
+func TestValidate_S3OnlyManifestsStillValid(t *testing.T) {
+	s := TaskSpec{
+		TaskID:    "t",
+		Command:   []string{"echo", "hi"},
+		Lifecycle: Lifecycle{TTL: "2h"},
+		Inputs:    []Manifest{{Source: "s3://in-bucket/ref.fa", Destination: "/data/ref.fa"}},
+		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out-bucket/out.bam"}},
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("valid s3-only manifest spec rejected: %v", err)
+	}
+}
+
+// TestPlacement_EffectiveMountPoints covers spawn#570 sub-issue 3: an unset
+// EFSMountPoint/FSxMountPoint resolves to the historical hardcoded default
+// ("/efs"/"/fsx"), and a spec-supplied override is honored verbatim — the
+// same resolution wrapper.go's containerMountDirs and cmd/task.go's
+// taskStorageScript both now call, so the two can't independently hardcode
+// diverging defaults.
+func TestPlacement_EffectiveMountPoints(t *testing.T) {
+	def := Placement{EFSID: "fs-1", FSxLustreID: "fs-2"}
+	if got := def.EffectiveEFSMountPoint(); got != "/efs" {
+		t.Errorf("EffectiveEFSMountPoint() = %q, want default %q", got, "/efs")
+	}
+	if got := def.EffectiveFSxMountPoint(); got != "/fsx" {
+		t.Errorf("EffectiveFSxMountPoint() = %q, want default %q", got, "/fsx")
+	}
+
+	override := Placement{EFSID: "fs-1", EFSMountPoint: "/mnt/refdata", FSxLustreID: "fs-2", FSxMountPoint: "/mnt/scratch"}
+	if got := override.EffectiveEFSMountPoint(); got != "/mnt/refdata" {
+		t.Errorf("EffectiveEFSMountPoint() = %q, want override %q", got, "/mnt/refdata")
+	}
+	if got := override.EffectiveFSxMountPoint(); got != "/mnt/scratch" {
+		t.Errorf("EffectiveFSxMountPoint() = %q, want override %q", got, "/mnt/scratch")
+	}
+}
+
 func TestValidate_Good(t *testing.T) {
 	s := TaskSpec{TaskID: "t", Command: []string{"echo", "hi"}, Lifecycle: Lifecycle{TTL: "2h"}}
 	if err := s.Validate(); err != nil {
