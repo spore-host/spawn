@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `spawn launch --dry-run` (alias `--print-config`, #569): resolves the full
+  flag/`--config`-plugin/AMI-auto-detection/IAM-tag/user-data pipeline exactly
+  as a real launch would, prints the result (table or `-o json`), and exits
+  with ZERO AWS mutation — no `RunInstances`, no IAM role/profile create, no
+  security group create, no tag write. Reuses the real launch's own
+  resolution functions rather than a second implementation, so it can't drift
+  from actual launch behavior, and an invalid flag combination fails with the
+  same error a real launch would give (it "doubles as a linter"). Not yet
+  wired into `--batch-queue`/`--queue-template` or parameter-sweep launches —
+  those refuse `--dry-run` explicitly rather than silently falling through to
+  a real launch; use `--estimate-only` for a cost preview there.
 - `spawn task run`'s generated wrapper now logs a `spawn: [<timestamp>] <phase>`
   line at each real boundary — wrapper start, stage-in start/done, (container
   tasks only) Docker install start/done and image pull start/done, command

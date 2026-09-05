@@ -533,13 +533,32 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 // this file — deliberately out of scope here; see spawn#550 for the follow-up
 // if this needs addressing.
 func (c *Client) generateRoleName(config IAMRoleConfig) string {
-	// Hash policies to generate deterministic name
-	policyHash := c.hashPolicies(config)
-	return fmt.Sprintf("spawn-instance-%s", policyHash[:8])
+	return PredictedInstanceRoleName(config)
 }
 
 // hashPolicies generates a hash of all policy sources for role naming
 func (c *Client) hashPolicies(config IAMRoleConfig) string {
+	return hashPolicies(config)
+}
+
+// PredictedInstanceRoleName computes the same deterministic
+// "spawn-instance-<hash>" role/profile name [Client.CreateOrGetInstanceProfile]
+// would resolve to for this policy config, with NO AWS calls — it is a pure
+// function of config.Policies/ManagedPolicies/PolicyFile/InlinePolicyJSON.
+//
+// Exported so a preview path (e.g. `spawn launch --dry-run`, spawn#569) can show
+// the instance profile a real launch would create-or-reuse, without touching IAM.
+// This intentionally does NOT cover config.RoleName being explicitly set (the
+// caller-named-role branch) or the SetupSporedIAMRole default-role branch (no
+// IAM flags at all) — callers preview those directly since both are already
+// known without any hashing.
+func PredictedInstanceRoleName(config IAMRoleConfig) string {
+	policyHash := hashPolicies(config)
+	return fmt.Sprintf("spawn-instance-%s", policyHash[:8])
+}
+
+// hashPolicies generates a hash of all policy sources for role naming.
+func hashPolicies(config IAMRoleConfig) string {
 	// Combine all policy sources for hashing
 	data := fmt.Sprintf("%v|%v|%s|%s",
 		config.Policies,

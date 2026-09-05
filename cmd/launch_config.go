@@ -509,6 +509,43 @@ try {
 	return script, nil
 }
 
+// resolveCustomUserData reads --user-data/--user-data-file's actual content
+// against the local filesystem: --user-data-file wins if set, else --user-data
+// (either inline text or an "@path" file reference), else "". Pure I/O aside
+// from the two package-level flag globals it reads — no AWS — so it's safe to
+// call from a dry-run preview (spawn#569) without any of buildUserData's SSH
+// key resolution. Extracted from buildUserData so both share one
+// implementation instead of the preview re-deriving the same file-read logic.
+func resolveCustomUserData() (string, error) {
+	if userDataFile != "" {
+		// Validate path for security
+		if err := security.ValidatePathForReading(userDataFile); err != nil {
+			return "", fmt.Errorf("invalid user data file path: %w", err)
+		}
+		data, err := os.ReadFile(userDataFile)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	if userData != "" {
+		if strings.HasPrefix(userData, "@") {
+			path := userData[1:]
+			// Validate path for security
+			if err := security.ValidatePathForReading(path); err != nil {
+				return "", fmt.Errorf("invalid user data file path: %w", err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		}
+		return userData, nil
+	}
+	return "", nil
+}
+
 func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScript string) (string, error) {
 	// Inject the PUBLIC key of the same keypair we registered with EC2
 	// (config.KeyName), so the instance trusts the key `spawn connect` will use.
@@ -527,35 +564,10 @@ func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScr
 	username := plat.GetUsername()
 
 	// Read custom user data if provided. This is the CLI-only part: resolving
-	// --user-data-file and the @path form against the local filesystem. The
-	// resolved text is handed to the shared launcher below.
-	customUserData := ""
-
-	if userDataFile != "" {
-		// Validate path for security
-		if err := security.ValidatePathForReading(userDataFile); err != nil {
-			return "", fmt.Errorf("invalid user data file path: %w", err)
-		}
-		data, err := os.ReadFile(userDataFile)
-		if err != nil {
-			return "", err
-		}
-		customUserData = string(data)
-	} else if userData != "" {
-		if strings.HasPrefix(userData, "@") {
-			path := userData[1:]
-			// Validate path for security
-			if err := security.ValidatePathForReading(path); err != nil {
-				return "", fmt.Errorf("invalid user data file path: %w", err)
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return "", err
-			}
-			customUserData = string(data)
-		} else {
-			customUserData = userData
-		}
+	// --user-data-file and the @path form against the local filesystem.
+	customUserData, err := resolveCustomUserData()
+	if err != nil {
+		return "", err
 	}
 
 	// Delegate to the shared, headless bootstrap builder (pkg/launcher) so the

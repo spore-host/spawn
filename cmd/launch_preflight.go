@@ -181,6 +181,121 @@ func windowsLifecycleGuard(config *aws.LaunchConfig) error {
 	return nil
 }
 
+// validateMPIFlags checks --mpi's own flag prerequisites (multiple nodes and a
+// job-array name to group them under) — independent of whether the instance
+// TYPE actually supports a cluster placement group (that's
+// preflightInstanceConstraints). Pure, so it's shared by the real
+// launchWithProgress path and `spawn launch --dry-run` (#569) — the same check
+// runs in both, so the two can never drift.
+func validateMPIFlags(mpiEnabled bool, count int, jobArrayName string) error {
+	if !mpiEnabled {
+		return nil
+	}
+	if count <= 1 {
+		return fmt.Errorf("--mpi requires --count > 1 (need multiple nodes)")
+	}
+	if jobArrayName == "" {
+		return fmt.Errorf("--mpi requires --job-array-name")
+	}
+	return nil
+}
+
+// validateJobArrayFlags checks --count>1's own prerequisite (a job-array
+// name), independent of --mpi. Pure — shared by the real launch path and
+// `spawn launch --dry-run` (#569).
+func validateJobArrayFlags(count int, jobArrayName string) error {
+	if count > 1 && jobArrayName == "" {
+		return fmt.Errorf("--job-array-name is required when --count > 1")
+	}
+	return nil
+}
+
+// resolveMPIPlacement decides the cluster placement group for an --mpi launch
+// and applies the config-level effects (PlacementGroupPrefix/PlacementGroup,
+// EFAEnabled, the spawn:mpi-* tags) — everything --mpi does to config that
+// ISN'T creating an AWS resource (the MPI cohort creates placement groups
+// lazily per-AZ later; nothing here does). Extracted from launchWithProgress
+// (#569) so `spawn launch --dry-run` runs the exact same decision (including
+// the read-only GetCapabilities/EFA-region calls) rather than a second,
+// drift-prone copy. Reads the package-level MPI flag globals directly, same as
+// its call site did before extraction.
+func resolveMPIPlacement(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig) error {
+	// Decide on a cluster placement group. HPC instance types (hpc6a/hpc7a/
+	// hpc7g) don't support cluster placement groups — they get low-latency
+	// networking from AWS HPC infrastructure — so --auto-placement-group
+	// (on by default) must SKIP them gracefully rather than hard-fail (#104).
+	// An explicitly requested --placement-group still errors if unsupported.
+	tc := truffleaws.NewClientFromConfig(awsClient.Config())
+	clusterPG := func() (bool, error) {
+		caps, err := tc.GetCapabilities(ctx, config.InstanceType, config.Region)
+		if err != nil {
+			return false, err
+		}
+		return caps.ClusterPlacement, nil
+	}
+	if mpiPlacementGroup != "" {
+		// Explicit request: must be supported (authoritative capability check).
+		supported, err := clusterPG()
+		if err != nil {
+			return fmt.Errorf("placement group validation: %w", err)
+		}
+		if !supported {
+			return fmt.Errorf("instance type %s does not support cluster placement groups (required for --placement-group)", config.InstanceType)
+		}
+	} else if mpiAutoPlacementGroup {
+		supported, err := clusterPG()
+		if err != nil {
+			return fmt.Errorf("placement group validation: %w", err)
+		}
+		if supported {
+			// Do NOT eager-create here: the MPI cohort manages placement groups
+			// lazily per-AZ so AZ capacity fallback can move the whole cluster
+			// to another zone (a cluster PG binds to one AZ). Hand the cohort a
+			// prefix; its Actuator creates <prefix>-<az> on demand per rung.
+			config.PlacementGroupPrefix = fmt.Sprintf("spawn-mpi-%s", jobArrayName)
+			fmt.Fprintf(os.Stderr, "Placement group: auto (per-AZ, created on launch) with prefix %s\n", config.PlacementGroupPrefix)
+		} else {
+			fmt.Fprintf(os.Stderr, "ℹ️  %s doesn't support cluster placement groups (HPC instance types use AWS HPC networking); skipping placement group.\n", config.InstanceType)
+		}
+	}
+
+	// An explicit --placement-group is a fixed, user-managed group (AZ-bound):
+	// set it directly. The auto case uses PlacementGroupPrefix (above) instead.
+	if mpiPlacementGroup != "" {
+		config.PlacementGroup = mpiPlacementGroup
+	}
+
+	// Validate EFA requirements
+	if efaEnabled {
+		// Validate in the launch region — some HPC instance types only exist
+		// in specific regions and DescribeInstanceTypes returns InvalidInstanceType
+		// when queried from a different region (fixes #307).
+		if err := awsClient.ValidateInstanceTypeForEFAInRegion(ctx, config.InstanceType, config.Region); err != nil {
+			return fmt.Errorf("EFA validation: %w", err)
+		}
+
+		// EFA works best with placement groups
+		if !mpiAutoPlacementGroup && mpiPlacementGroup == "" {
+			fmt.Fprintf(os.Stderr, "⚠️  Warning: EFA works best with placement groups. Consider using --auto-placement-group\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "✓ EFA enabled with placement group for optimal performance\n")
+		}
+
+		// Set EFA in config
+		config.EFAEnabled = true
+	}
+
+	// Add MPI tags to config
+	if config.Tags == nil {
+		config.Tags = make(map[string]string)
+	}
+	config.Tags["spawn:mpi-enabled"] = "true"
+	if mpiProcessesPerNode > 0 {
+		config.Tags["spawn:mpi-processes-per-node"] = fmt.Sprintf("%d", mpiProcessesPerNode)
+	}
+	return nil
+}
+
 func setupSSHKey(ctx context.Context, awsClient *aws.Client, region, amiID string, plat *platform.Platform) (string, error) {
 	// Choose the keypair algorithm from the target OS. Windows requires RSA —
 	// the EC2 Administrator password (GetPasswordData) can only be decrypted with
