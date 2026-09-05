@@ -22,7 +22,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.8'
 
       # cosign for keyless CLI-artifact signing (the .goreleaser signs: block runs
       # `cosign sign-blob --bundle` over checksums.txt with this job's OIDC identity).
