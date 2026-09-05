@@ -352,6 +352,89 @@ func newLaunchError(err error) error {
 	return le
 }
 
+// isTransientIAMInstanceProfilePropagation reports whether err is RunInstances
+// rejecting a just-created scoped instance profile with "Invalid IAM Instance
+// Profile name" (spawn#572). This is deliberately narrow: it matches only the
+// InvalidParameterValue whose message says the IAM instance profile name is
+// invalid, not every InvalidParameterValue — most InvalidParameterValue errors
+// (a bad instance type, a bad AMI, etc.) are genuine config problems, and
+// retrying those would just waste time before failing the same way.
+//
+// Why this happens: pkg/aws/iam.go's CreateOrGetInstanceProfile already waits
+// (fixed 10s sleep) and confirms the profile via GetInstanceProfile before
+// returning it — but that only proves the profile is visible on the IAM
+// control plane. RunInstances consumes the profile through EC2's own, separate
+// IAM→EC2 propagation path, which AWS documents as independently eventually
+// consistent and explicitly recommends retrying RunInstances against. Under
+// concurrent launches, one profile can lose that second race even though the
+// IAM-side confirmation already passed.
+func isTransientIAMInstanceProfilePropagation(err error) bool {
+	if err == nil {
+		return false
+	}
+	const wantMsg = "Invalid IAM Instance Profile name"
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.ErrorCode() != "InvalidParameterValue" {
+			return false
+		}
+		return strings.Contains(apiErr.ErrorMessage(), wantMsg) || strings.Contains(err.Error(), wantMsg)
+	}
+	// Fallback for non-modeled errors that only carry code+message in the string
+	// (mirrors isAlreadyExists/isThrottle in iam.go).
+	msg := err.Error()
+	return strings.Contains(msg, "InvalidParameterValue") && strings.Contains(msg, wantMsg)
+}
+
+// runInstancesAPI is the slice of EC2 that runInstancesWithRetry needs —
+// narrow enough to fake in tests (mirrors describeInstancesAPI/
+// describeVolumesAPI in cleanup.go). *ec2.Client satisfies it.
+type runInstancesAPI interface {
+	RunInstances(ctx context.Context, in *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
+}
+
+// iamInstanceProfilePropagationBackoff is the retry schedule for the specific
+// transient in [isTransientIAMInstanceProfilePropagation] (spawn#572). A
+// handful of seconds on top of CreateOrGetInstanceProfile's existing 10s wait
+// is enough to cover EC2's separate, longer-tailed consumption-side
+// propagation without letting a genuinely bad profile name retry forever.
+var iamInstanceProfilePropagationBackoff = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+
+// runInstancesSleep is time.Sleep by default; tests override the package var so
+// the "retries N times" and "exhausts retries" cases don't pay the real
+// wall-clock cost of the backoff schedule.
+var runInstancesSleep = time.Sleep
+
+// runInstancesWithRetry calls RunInstances, retrying ONLY the specific
+// transient IAM→EC2 instance-profile-propagation error (spawn#572), with the
+// backoff schedule in iamInstanceProfilePropagationBackoff. Any other error —
+// including a genuinely invalid InvalidParameterValue (bad instance type, bad
+// AMI, etc.) or any other AWS error — is returned immediately with no retry:
+// this must not become a blanket retry-on-any-launch-error mechanism.
+//
+// Retrying RunInstances here is safe from an orphan-resource perspective:
+// Provision (pkg/launcher/provision.go) creates the instance record, tags, and
+// any ephemeral FSx strictly AFTER RunInstances succeeds (#213) — a rejected
+// RunInstances call has created nothing, so a retry attempt accumulates no
+// partial state to clean up.
+func runInstancesWithRetry(ctx context.Context, api runInstancesAPI, input *ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := api.RunInstances(ctx, input)
+		if err == nil {
+			return result, nil
+		}
+		if !isTransientIAMInstanceProfilePropagation(err) || attempt >= len(iamInstanceProfilePropagationBackoff) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		runInstancesSleep(iamInstanceProfilePropagationBackoff[attempt])
+	}
+}
+
 // Launch starts a new EC2 instance as described by launchConfig and returns its
 // ID, IP addresses, and initial state. All spawn: lifecycle tags (TTL, idle
 // timeout, DNS name, cost limit, etc.) are applied at launch time so spored
@@ -549,8 +632,12 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		}
 	}
 
-	// Launch instance
-	result, err := ec2Client.RunInstances(ctx, input)
+	// Launch instance. runInstancesWithRetry retries only the narrow #572
+	// transient (a freshly-created scoped instance profile that's visible on
+	// the IAM control plane but hasn't yet propagated to EC2's consumption
+	// path) — any other error, including other InvalidParameterValue causes,
+	// fails immediately.
+	result, err := runInstancesWithRetry(ctx, ec2Client, input)
 	if err != nil {
 		return nil, newLaunchError(err)
 	}
