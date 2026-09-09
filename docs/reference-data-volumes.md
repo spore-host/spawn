@@ -83,6 +83,41 @@ or a small short-lived EC2 instance in the target region — where the upload is
 AWS-internal and fast. Build once there, then `--attach-volume` the snapshot from
 anywhere.
 
+#### Credentials the builder needs
+
+`snapshot create` runs entirely with **your** credentials — it does *not* launch
+or hand off to a spawn-managed instance. Wherever you run it, that identity needs:
+
+- the EBS-direct snapshot actions `ebs:StartSnapshot`, `ebs:PutSnapshotBlock`,
+  `ebs:CompleteSnapshot`, plus `ec2:DescribeSnapshots` (the completion waiter); and
+- for an `s3://…` `--from`, read on the source bucket (`s3:ListBucket` +
+  `s3:GetObject`).
+
+CloudShell and your own IAM-user creds typically already have these. **A stock
+`spawn launch` instance does not:** it runs as the shared `spored-instance-role`,
+which is intentionally not granted the EBS-direct actions or read on arbitrary
+user buckets — so `snapshot create` on such an instance fails with `AccessDenied`
+(on `ebs:StartSnapshot`, and on `s3:ListBucket` for an S3 source). This is by
+design; the baseline role is *not* broadened to give every instance snapshot-build
+power.
+
+To build snapshots **from a `spawn launch` instance**, give that one instance the
+perms with `--iam-policy-file` — spawn creates a dedicated instance profile from
+the policy JSON instead of using `spored-instance-role`:
+
+```bash
+# Edit examples/iam/snapshot-build-policy.json first: set your source bucket ARN.
+spawn launch snapbuild --instance-type c7g.large --ttl 2h \
+  --iam-policy-file examples/iam/snapshot-build-policy.json \
+  --command "curl -fsSL https://spore.host/install.sh | sh && \
+    aws s3 cp s3://YOUR-BUCKET/k2_pluspf.tar.gz . && \
+    spawn snapshot create --from ./k2_pluspf.tar.gz --size 20 --name kraken2"
+```
+
+A ready-to-edit policy granting exactly the three `ebs:` actions,
+`ec2:DescribeSnapshots`, and scoped source-bucket read lives at
+[`examples/iam/snapshot-build-policy.json`](../examples/iam/snapshot-build-policy.json).
+
 ### Provenance tags
 
 `snapshot create` auto-applies `Name`, `spawn:snapshot-name`, `spawn:managed`,

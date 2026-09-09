@@ -60,6 +60,19 @@ The upload sends the uncompressed image to AWS over your connection; for a large
 DB over a slow uplink, run this from AWS CloudShell or a small in-region EC2
 instance so the upload is AWS-internal.
 
+Credentials & permissions: this command runs entirely with YOUR credentials —
+it does NOT launch or use a spawn-managed instance. Whoever runs it needs the
+EBS-direct snapshot actions ebs:StartSnapshot, ebs:PutSnapshotBlock,
+ebs:CompleteSnapshot (plus ec2:DescribeSnapshots) and, for an s3:// --from,
+read on the source bucket (s3:ListBucket + s3:GetObject).
+
+A stock 'spawn launch' instance runs as the shared spored-instance-role, which
+does NOT have these permissions — so building a snapshot from such an instance
+fails with AccessDenied. To build in-region, use AWS CloudShell, your own IAM-user
+credentials, or a 'spawn launch' instance you gave the perms via
+--iam-policy-file (see docs/reference-data-volumes.md and
+examples/iam/snapshot-build-policy.json for a ready-to-use policy).
+
 Examples:
   # From a directory:
   spawn snapshot create --from ./kraken2-db/ --size 20 --name kraken2-k2pluspf
