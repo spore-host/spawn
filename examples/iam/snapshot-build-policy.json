@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EbsDirectSnapshotBuild",
+      "Effect": "Allow",
+      "Action": [
+        "ebs:StartSnapshot",
+        "ebs:PutSnapshotBlock",
+        "ebs:CompleteSnapshot"
+      ],
+      "Resource": "arn:aws:ec2:*::snapshot/*"
+    },
+    {
+      "Sid": "DescribeSnapshotsForCompletionWaiter",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeSnapshots",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadSourceBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::YOUR-SOURCE-BUCKET",
+        "arn:aws:s3:::YOUR-SOURCE-BUCKET/*"
+      ]
+    }
+  ]
+}

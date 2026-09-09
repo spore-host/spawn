@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent of any code change. (The previous grpc bump to v1.83.1, itself a
   CVE fix, is what this now supersedes.)
 
+### Documentation
+- `spawn snapshot create --help` and `docs/reference-data-volumes.md` now spell
+  out the permissions a snapshot build needs — the EBS-direct actions
+  `ebs:StartSnapshot`/`ebs:PutSnapshotBlock`/`ebs:CompleteSnapshot` (plus
+  `ec2:DescribeSnapshots`) and read on the source bucket — and note that
+  `snapshot create` runs with the *caller's* credentials, not on a spawn-managed
+  instance. A stock `spawn launch` instance (running as the shared
+  `spored-instance-role`) does NOT have these, so building a snapshot there fails
+  with `AccessDenied`; to build in-region from a `spawn launch` instance, pass
+  `--iam-policy-file` with a policy granting them (no new flag or standing grant
+  needed). Adds a ready-to-edit `examples/iam/snapshot-build-policy.json` (#579).
+
 ## [0.104.0] - 2026-09-04
 
 ### Added
