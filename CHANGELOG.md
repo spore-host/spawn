@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped `google.golang.org/grpc` v1.83.1 → v1.83.2 (root module and the
+  `lambda/ttl-reaper` / `lambda/dns-updater` nested modules), fixing
+  CVE-2026-84445 (HIGH) — a gRPC-Go xDS-server DoS via crash. Trivy's gate
+  started failing on every open PR once its vulnerability DB picked up the CVE,
+  independent of any code change. (The previous grpc bump to v1.83.1, itself a
+  CVE fix, is what this now supersedes.)
+
 ## [0.104.0] - 2026-09-04
 
 ### Added
