@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent of any code change. (The previous grpc bump to v1.83.1, itself a
   CVE fix, is what this now supersedes.)
 
+### Added
+- `spawn connect --tty` (`-t`, #582): allocates a pseudo-terminal on the SSH
+  connection (`ssh -t`), which line-buffers the remote command's stdout so a
+  long-running command's progress streams live instead of appearing only when
+  it exits — and so nothing buffered is lost if the instance auto-terminates
+  (TTL/idle) mid-run. Off by default: a PTY merges stdout and stderr and can
+  mangle binary/structured output, so leave it off when piping such output
+  through `connect` — the default (block-buffered, separate streams) behavior
+  is unchanged.
+
 ### Documentation
 - `spawn snapshot create --help` and `docs/reference-data-volumes.md` now spell
   out the permissions a snapshot build needs — the EBS-direct actions
@@ -36,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of leaking the underlying AWS error. When the identifier is neither a
   known sweep/job-array nor a resolvable instance, it fails with a clear,
   actionable message.
+- `spawn extend`'s on-box `spored reload` now SSHes in as the instance's
+  resolved login user instead of a hardcoded `ec2-user` (#581). On a non-AL2023
+  AMI (e.g. Ubuntu, whose login user is `ubuntu`) the hardcoded user failed with
+  `Permission denied (publickey)`, so the reload silently no-op'd and the box
+  kept self-terminating at its ORIGINAL TTL — a silent failure on a
+  lifecycle-critical operation. The same hardcoded-`ec2-user` defect in the
+  other non-interactive spored-over-SSH paths (`spawn config`, `spawn status`,
+  `spawn queue status`, and array-member commands) is fixed at the same time;
+  all now share one login-user resolver so they can't drift again.
 
 ## [0.104.0] - 2026-09-04
 

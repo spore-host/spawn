@@ -25,6 +25,7 @@ var (
 	connectViaSSM     bool
 	connectRDPPort    int
 	connectSSH        bool
+	connectTTY        bool
 )
 
 var connectCmd = &cobra.Command{
@@ -38,7 +39,7 @@ var connectCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(connectCmd)
 
-	connectCmd.Flags().StringVar(&connectUser, "user", "", "SSH username (default: ec2-user)")
+	connectCmd.Flags().StringVar(&connectUser, "user", "", "SSH username (default: the instance's spawn:local-username tag, else ec2-user)")
 	connectCmd.Flags().StringVar(&connectKey, "key", "", "SSH private key path")
 	connectCmd.Flags().IntVar(&connectPort, "port", 22, "SSH port")
 	connectCmd.Flags().BoolVar(&connectSessionMgr, "session-manager", false, "Use AWS Session Manager instead of SSH")
@@ -47,6 +48,7 @@ func init() {
 	connectCmd.Flags().BoolVar(&connectSSH, "ssh", false, "Windows: SSH in (as Administrator, over OpenSSH) instead of opening a PowerShell-over-SSM session — same SSH path as Linux")
 	connectCmd.Flags().BoolVar(&connectViaSSM, "via-ssm", false, "Windows --rdp: tunnel RDP over an SSM port-forwarding session instead of connecting to the public IP")
 	connectCmd.Flags().IntVar(&connectRDPPort, "rdp-port", 13389, "Windows --rdp --via-ssm: local port for the SSM RDP tunnel")
+	connectCmd.Flags().BoolVarP(&connectTTY, "tty", "t", false, "Allocate a pseudo-terminal (ssh -t) for the remote command. Line-buffers remote stdout so a long-running command's progress streams live instead of appearing only when it exits (useful when watching a multi-minute run, or so output isn't lost if the instance auto-terminates mid-run). Off by default: a PTY MERGES stdout and stderr and can mangle binary/structured output, so leave it off when piping such output through connect.")
 
 	// Register completion for instance ID argument
 	connectCmd.ValidArgsFunction = completeInstanceID
@@ -129,14 +131,9 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	// Determine SSH user: prefer the instance's local-matching user (the
 	// spawn:local-username the bootstrap created and installed the key for — "log
 	// in as you"), falling back to ec2-user for instances launched before that
-	// tag existed. --user overrides.
-	user := connectUser
-	if user == "" {
-		user = instance.Tags["spawn:local-username"]
-	}
-	if user == "" {
-		user = "ec2-user" // older instances / no local-username tag
-	}
+	// tag existed. --user overrides. Shared with the spored-trigger paths via
+	// resolveSSHUser so they can't drift (#581).
+	user := resolveSSHUser(connectUser, instance)
 
 	// Determine SSH key
 	keyPath := connectKey
@@ -175,7 +172,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		remoteCmd = shellQuoteArgs(args[1:])
 	}
 
-	return sshToInstance(user, instance.PublicIP, keyPath, connectPort, remoteCmd)
+	return sshToInstance(user, instance.PublicIP, keyPath, connectPort, remoteCmd, connectTTY)
 }
 
 // shellQuoteArgs single-quotes each argument (escaping embedded single quotes as
@@ -195,8 +192,8 @@ func shellQuoteArgs(args []string) string {
 // keep spawn's SSH independent of the user's ~/.ssh/config connection
 // multiplexing, so many concurrent `spawn connect` calls don't serialize on one
 // shared control socket (#56). Shared by the Linux and Windows (--ssh) paths.
-func sshToInstance(user, host, keyPath string, port int, remoteCmd string) error {
-	sshArgs := buildSSHCommandArgs(user, host, keyPath, port, remoteCmd)
+func sshToInstance(user, host, keyPath string, port int, remoteCmd string, tty bool) error {
+	sshArgs := buildSSHCommandArgs(user, host, keyPath, port, remoteCmd, tty)
 
 	fmt.Fprintf(os.Stderr, "%s\n\n", i18n.Tf("spawn.connect.connecting_ssh", map[string]interface{}{
 		"Command": "ssh " + strings.Join(sshArgs, " "),
@@ -212,17 +209,23 @@ func sshToInstance(user, host, keyPath string, port int, remoteCmd string) error
 // buildSSHCommandArgs constructs the ssh argument vector. remoteCmd, if
 // non-empty, is appended verbatim as the one-shot command (the caller is
 // responsible for any shell wrapping — bash -c on Linux, none on Windows where
-// the remote shell is PowerShell). Pure/testable; no exec.
-func buildSSHCommandArgs(user, host, keyPath string, port int, remoteCmd string) []string {
-	args := []string{
-		"-i", keyPath,
+// the remote shell is PowerShell). When tty is set, `-t` is added so ssh forces
+// pseudo-terminal allocation, which line-buffers the remote command's stdout
+// (#582); it is off by default because a PTY merges stdout+stderr and can mangle
+// binary output. Pure/testable; no exec.
+func buildSSHCommandArgs(user, host, keyPath string, port int, remoteCmd string, tty bool) []string {
+	args := []string{"-i", keyPath}
+	if tty {
+		args = append(args, "-t")
+	}
+	args = append(args,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "ControlMaster=no",
 		"-o", "ControlPath=none",
 		"-p", fmt.Sprintf("%d", port),
 		fmt.Sprintf("%s@%s", user, host),
-	}
+	)
 	if remoteCmd != "" {
 		args = append(args, remoteCmd)
 	}
@@ -288,7 +291,7 @@ func connectWindows(ctx context.Context, client *aws.Client, instance *aws.Insta
 			keyPath = k
 		}
 		// The remote command (if any) runs in PowerShell — no bash -c wrap.
-		return sshToInstance(user, instance.PublicIP, keyPath, connectPort, strings.Join(command, " "))
+		return sshToInstance(user, instance.PublicIP, keyPath, connectPort, strings.Join(command, " "), connectTTY)
 	}
 
 	// One-shot command mode → SSM RunCommand (PowerShell).

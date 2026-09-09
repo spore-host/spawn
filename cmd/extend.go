@@ -129,8 +129,8 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "\nTriggering configuration reload on instance...\n")
 	if err := triggerReload(instance); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to trigger reload: %v\n", err)
-		fmt.Fprintf(os.Stderr, "   You may need to manually run: ssh ec2-user@%s 'sudo spored reload'\n",
-			instance.PublicIP)
+		fmt.Fprintf(os.Stderr, "   You may need to manually run: ssh %s@%s 'sudo spored reload'\n",
+			resolveSSHUser("", instance), instance.PublicIP)
 	} else {
 		_, _ = fmt.Fprintf(os.Stdout, "✓ Configuration reloaded on instance\n")
 	}
@@ -269,8 +269,8 @@ func extendJobArrayInstances(
 		successCount++
 		if err := reload(&inst); err != nil {
 			fmt.Fprintf(stderr, "⚠️  Tag updated for %s, but failed to trigger reload: %v\n", inst.InstanceID, err)
-			fmt.Fprintf(stderr, "   Until the next periodic tag refresh, it is running on stale config. Manual fallback: ssh ec2-user@%s 'sudo spored reload'\n",
-				inst.PublicIP)
+			fmt.Fprintf(stderr, "   Until the next periodic tag refresh, it is running on stale config. Manual fallback: ssh %s@%s 'sudo spored reload'\n",
+				resolveSSHUser("", &inst), inst.PublicIP)
 			reloadFailedInstances = append(reloadFailedInstances, inst.InstanceID)
 		}
 	}
@@ -375,7 +375,6 @@ func validateTTL(ttl string) error {
 	return nil
 }
 
-// Helper function to format duration for display
 func triggerReload(instance *aws.InstanceInfo) error {
 	// Find SSH key
 	keyPath, err := findSSHKey(instance.KeyName)
@@ -383,9 +382,7 @@ func triggerReload(instance *aws.InstanceInfo) error {
 		return fmt.Errorf("failed to find SSH key: %w", err)
 	}
 
-	// Run spored reload via SSH
-	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
-	sshArgs = append(sshArgs, fmt.Sprintf("ec2-user@%s", instance.PublicIP), "sudo /usr/local/bin/spored reload")
+	sshArgs := buildReloadSSHArgs(keyPath, instance)
 
 	cmd := exec.Command("ssh", sshArgs...)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -393,4 +390,20 @@ func triggerReload(instance *aws.InstanceInfo) error {
 	}
 
 	return nil
+}
+
+// buildReloadSSHArgs constructs the ssh argv `spawn extend` uses to run
+// `spored reload` on an instance. It is pure/testable (no exec, no key lookup)
+// so the login-user resolution can be verified directly.
+//
+// The login user comes from resolveSSHUser, NOT a hardcoded ec2-user. Hardcoding
+// ec2-user here was #581: on an Ubuntu AMI the login user is `ubuntu`, so the SSH
+// failed with "Permission denied (publickey)", the reload never ran, and the box
+// kept self-terminating at its ORIGINAL TTL — a silent no-op on `spawn extend`,
+// a lifecycle-critical operation.
+func buildReloadSSHArgs(keyPath string, instance *aws.InstanceInfo) []string {
+	user := resolveSSHUser("", instance)
+	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
+	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, instance.PublicIP), "sudo /usr/local/bin/spored reload")
+	return sshArgs
 }

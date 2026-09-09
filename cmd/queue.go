@@ -227,10 +227,21 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("instance has no public IP or DNS name")
 	}
 
+	// Resolve the login user from the spawn:local-username tag, falling back to
+	// ec2-user only for instances launched before that tag existed. Hardcoding
+	// ec2-user here fails on non-AL2023 AMIs like Ubuntu (#581). This is the raw
+	// EC2 tag shape, so it can't call resolveSSHUser (which takes aws.InstanceInfo).
+	loginUser := "ec2-user"
+	for _, tag := range instance.Tags {
+		if tag.Key != nil && *tag.Key == "spawn:local-username" && tag.Value != nil && *tag.Value != "" {
+			loginUser = *tag.Value
+		}
+	}
+
 	fmt.Fprintf(os.Stderr, "Connecting to %s...\n", connectAddr)
 
 	// Read state file via SSH
-	stateJSON, err := sshReadFile(connectAddr, "/var/lib/spored/queue-state.json")
+	stateJSON, err := sshReadFile(loginUser, connectAddr, "/var/lib/spored/queue-state.json")
 	if err != nil {
 		return fmt.Errorf("failed to read queue state: %w", err)
 	}
@@ -387,9 +398,9 @@ func runQueueResults(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// sshReadFile reads a file from a remote instance via SSH.
+// sshReadFile reads a file from a remote instance via SSH, logging in as user.
 // Uses the same key-discovery logic as spawn connect.
-func sshReadFile(host, remotePath string) (string, error) {
+func sshReadFile(user, host, remotePath string) (string, error) {
 	// Find a usable SSH key via the shared resolver (spawn-managed keys first,
 	// then ~/.ssh defaults). Best-effort: an empty keyPath falls back to the
 	// ssh client's own default key selection.
@@ -403,7 +414,7 @@ func sshReadFile(host, remotePath string) (string, error) {
 	if keyPath != "" {
 		args = append(args, "-i", keyPath)
 	}
-	args = append(args, fmt.Sprintf("ec2-user@%s", host), "cat "+remotePath)
+	args = append(args, fmt.Sprintf("%s@%s", user, host), "cat "+remotePath)
 
 	out, err := exec.Command("ssh", args...).Output()
 	if err != nil {
