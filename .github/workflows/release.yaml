@@ -75,7 +75,7 @@ jobs:
       # correct signal, not a silent skip).
       - name: Configure AWS credentials
         if: ${{ !cancelled() }}
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: arn:aws:iam::966362334030:role/GitHubActions-spore-host-release
           role-session-name: spored-s3-upload
