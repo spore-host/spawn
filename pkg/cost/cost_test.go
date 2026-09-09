@@ -6,7 +6,54 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
+
+// fakeDynamo is an offline stand-in for the one DynamoDB call GetCostBreakdown
+// makes, letting a test drive the sweep-record lookup (including a
+// ResourceNotFoundException) without touching AWS.
+type fakeDynamo struct {
+	out *dynamodb.GetItemOutput
+	err error
+}
+
+func (f *fakeDynamo) GetItem(_ context.Context, _ *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	return f.out, f.err
+}
+
+// #578: `spawn cost <single-instance>` used to surface DynamoDB's raw
+// ResourceNotFoundException because it unconditionally looked up a sweep record
+// that a plain `spawn launch` instance never has. GetCostBreakdown must now
+// report that case as ErrNoSweepRecord (so the CLI can fall back to
+// single-instance cost) and must NOT leak the raw AWS error to the caller.
+func TestGetCostBreakdown_NoSweepRecord(t *testing.T) {
+	t.Run("missing table is ErrNoSweepRecord, not a raw ResourceNotFoundException", func(t *testing.T) {
+		c := &Client{db: &fakeDynamo{err: &types.ResourceNotFoundException{}}}
+
+		_, err := c.GetCostBreakdown(context.Background(), "lith-devbox")
+		if err == nil {
+			t.Fatal("expected an error for a missing sweep table")
+		}
+		if !errors.Is(err, ErrNoSweepRecord) {
+			t.Errorf("want errors.Is(err, ErrNoSweepRecord); got %v", err)
+		}
+		var leaked *types.ResourceNotFoundException
+		if errors.As(err, &leaked) {
+			t.Errorf("raw DynamoDB ResourceNotFoundException leaked to caller: %v", err)
+		}
+	})
+
+	t.Run("missing item is ErrNoSweepRecord", func(t *testing.T) {
+		c := &Client{db: &fakeDynamo{out: &dynamodb.GetItemOutput{Item: nil}}}
+
+		_, err := c.GetCostBreakdown(context.Background(), "no-such-sweep")
+		if !errors.Is(err, ErrNoSweepRecord) {
+			t.Errorf("want errors.Is(err, ErrNoSweepRecord); got %v", err)
+		}
+	})
+}
 
 const epsilon = 1e-6
 

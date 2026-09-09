@@ -2,30 +2,39 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/cost"
 )
 
 var costCmd = &cobra.Command{
-	Use:   "cost <sweep-id>",
-	Short: "Show cost breakdown for a sweep",
-	Long: `Display detailed cost breakdown by region and instance type.
+	Use:   "cost <sweep-id | instance>",
+	Short: "Show cost breakdown for a sweep or a single instance",
+	Long: `Display a detailed cost breakdown.
 
-Shows:
+For a parameter sweep or job array, shows the full breakdown:
 - Resource costs (compute, storage, network)
 - Cloud economics (effective cost/hr, utilization, savings)
 - Time breakdown (running vs stopped hours)
 - Budget status (if budget was set)
 - Cost by region and instance type
 
+For a single instance launched with 'spawn launch' (which has no sweep cost
+record), shows an on-the-fly compute-cost estimate — the instance's on-demand
+rate (spawn:price-per-hour tag) × its runtime — the same figure 'spawn status'
+reports (#578).
+
 Examples:
   spawn cost sweep-20260124-140530
+  spawn cost my-devbox
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runCostBreakdown,
@@ -61,6 +70,19 @@ func runCostBreakdown(cmd *cobra.Command, args []string) error {
 
 	breakdown, err := costClient.GetCostBreakdown(ctx, sweepID)
 	if err != nil {
+		// No sweep record: this is almost certainly a single `spawn launch`
+		// instance, whose cost lives on its own tags, not the sweep table. Report
+		// its compute cost from rate × runtime rather than leaking DynamoDB's raw
+		// ResourceNotFoundException (#578).
+		if errors.Is(err, cost.ErrNoSweepRecord) {
+			if inst := resolveInstanceForCost(ctx, sweepID); inst != nil {
+				fmt.Print(singleInstanceCostReport(inst, time.Since(inst.LaunchTime)))
+				return nil
+			}
+			return fmt.Errorf("no cost record for %q: it is neither a known sweep/job-array "+
+				"nor a resolvable spawn instance. A single instance's cost ≈ on-demand rate × "+
+				"runtime — see `spawn status %s`", sweepID, sweepID)
+		}
 		return fmt.Errorf("get cost breakdown: %w", err)
 	}
 
@@ -188,4 +210,62 @@ func runCostBreakdown(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// resolveInstanceForCost best-effort resolves identifier to a single
+// spawn-managed instance, for the single-instance fallback of `spawn cost`.
+// Returns nil (never an error) when no AWS client can be built or the
+// identifier doesn't name an instance — the caller then prints its own
+// actionable "no cost record" message. resolveInstance already logs its lookup
+// progress and any not-found detail to stderr.
+func resolveInstanceForCost(ctx context.Context, identifier string) *aws.InstanceInfo {
+	client, err := aws.NewClient(ctx)
+	if err != nil {
+		return nil
+	}
+	inst, err := resolveInstance(ctx, client, identifier)
+	if err != nil {
+		return nil
+	}
+	return inst
+}
+
+// singleInstanceCostReport renders the compute-cost estimate for one instance:
+// its on-demand rate (the spawn:price-per-hour tag truffle resolved at launch,
+// #533) × the given runtime. This is the same rate × time `spawn status` and
+// `spawn task diagnose` show — a standalone instance has no DynamoDB cost
+// record (that table is keyed by sweep id), so this is an on-the-fly estimate,
+// clearly labelled, not a billing figure. age is normally time.Since(launch);
+// it's a parameter so the output is deterministically testable.
+func singleInstanceCostReport(inst *aws.InstanceInfo, age time.Duration) string {
+	var b strings.Builder
+	title := inst.Name
+	if title == "" {
+		title = inst.InstanceID
+	}
+	fmt.Fprintf(&b, "\nCost for %s (%s)\n", title, inst.InstanceID)
+	fmt.Fprintln(&b, strings.Repeat("━", 60))
+	fmt.Fprintln(&b)
+
+	fmt.Fprintf(&b, "Type:            %s%s\n", inst.InstanceType, spotSuffix(inst.SpotInstance))
+	fmt.Fprintf(&b, "State:           %s\n", inst.State)
+	if age > 0 {
+		fmt.Fprintf(&b, "Runtime:         %s (since launch)\n", formatDuration(age))
+	}
+
+	rate := pricePerHour(inst)
+	if rate <= 0 {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "No spawn:price-per-hour tag on this instance, so its compute cost")
+		fmt.Fprintln(&b, "cannot be estimated. Its cost ≈ on-demand rate × runtime.")
+		return b.String()
+	}
+
+	fmt.Fprintf(&b, "Rate:            $%.4f/hr (spawn:price-per-hour)\n", rate)
+	est := estimateInstanceCost(inst, age)
+	fmt.Fprintf(&b, "Est. compute:    ~$%.2f (rate × runtime, compute only; excludes EBS/network)\n", est)
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "Note: a single instance has no sweep cost record — this is an on-the-fly")
+	fmt.Fprintln(&b, "estimate from the instance's own tags, not a billing figure.")
+	return b.String()
 }

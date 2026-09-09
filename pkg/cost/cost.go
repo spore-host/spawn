@@ -2,6 +2,7 @@ package cost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -20,6 +21,24 @@ import (
 const (
 	dynamoTableName = "spawn-sweep-orchestration"
 )
+
+// ErrNoSweepRecord means the requested id has no sweep-orchestration record:
+// either it isn't a sweep/job-array id at all, or the sweep-orchestration
+// DynamoDB table doesn't exist in the account the caller's credentials point
+// at. `spawn cost` matches this (errors.Is) to fall back to single-instance
+// cost — a plain `spawn launch` instance keeps its cost on its own tags, not in
+// this table — rather than leaking a raw DynamoDB ResourceNotFoundException to
+// the user (#578).
+var ErrNoSweepRecord = errors.New("no sweep record")
+
+// dynamoGetItemAPI is the one DynamoDB call GetCostBreakdown makes. A
+// package-local interface (rather than a concrete *dynamodb.Client field) lets
+// tests inject a fake that returns a ResourceNotFoundException without touching
+// AWS — the same seam approach onDemandPricer uses. *dynamodb.Client satisfies
+// it structurally.
+type dynamoGetItemAPI interface {
+	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
+}
 
 // RegionalCost represents cost for a specific region
 type RegionalCost struct {
@@ -133,7 +152,7 @@ type onDemandPricer interface {
 
 // Client provides cost tracking operations
 type Client struct {
-	db *dynamodb.Client
+	db dynamoGetItemAPI
 
 	pricerOnce sync.Once
 	pricer     onDemandPricer
@@ -180,11 +199,19 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 		},
 	})
 	if err != nil {
+		// A missing table (wrong account, or a caller pointing `spawn cost` at a
+		// single-instance name) surfaces as ResourceNotFoundException. Report it
+		// as ErrNoSweepRecord so the CLI can fall back to single-instance cost
+		// instead of leaking the raw DynamoDB error (#578).
+		var notFound *types.ResourceNotFoundException
+		if errors.As(err, &notFound) {
+			return nil, fmt.Errorf("%w for %q", ErrNoSweepRecord, sweepID)
+		}
 		return nil, fmt.Errorf("get sweep record: %w", err)
 	}
 
 	if result.Item == nil {
-		return nil, fmt.Errorf("sweep not found: %s", sweepID)
+		return nil, fmt.Errorf("%w: %q", ErrNoSweepRecord, sweepID)
 	}
 
 	var sweep SweepRecord
