@@ -40,13 +40,7 @@ func resolveSSHTarget(ctx context.Context, client *aws.Client, instance *aws.Ins
 		return service.SSHTarget{}, fmt.Errorf("instance %s has no public IP; an SSH-reachable address is required to forward a port to it", instance.InstanceID)
 	}
 
-	user := userOverride
-	if user == "" {
-		user = instance.Tags["spawn:local-username"]
-	}
-	if user == "" {
-		user = "ec2-user" // older instances / no local-username tag
-	}
+	user := resolveSSHUser(userOverride, instance)
 
 	keyPath := keyOverride
 	if keyPath == "" {

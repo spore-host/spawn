@@ -74,9 +74,10 @@ func runConfig(cmd *cobra.Command, args []string) error {
 		sporedCmd = "sudo /usr/local/bin/spored config list 2>&1"
 	}
 
-	// Run command via SSH
+	// Run command via SSH, as the instance's resolved login user (not a hardcoded
+	// ec2-user, which fails on non-AL2023 AMIs — #581).
 	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
-	sshArgs = append(sshArgs, fmt.Sprintf("ec2-user@%s", instance.PublicIP), sporedCmd)
+	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", resolveSSHUser("", instance), instance.PublicIP), sporedCmd)
 
 	sshCmd := exec.Command("ssh", sshArgs...)
 	output, err := sshCmd.CombinedOutput()

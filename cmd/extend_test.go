@@ -10,6 +10,35 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 )
 
+// TestBuildReloadSSHArgs_ResolvesLoginUser is the #581 regression: `spawn extend`
+// reloads spored over SSH as the instance's RESOLVED login user, not a hardcoded
+// ec2-user. On an Ubuntu AMI the login user is `ubuntu` (recorded in the
+// spawn:local-username tag), so a hardcoded ec2-user@ target fails with
+// "Permission denied (publickey)" and the reload silently no-ops — the box then
+// keeps self-terminating at its original TTL. The OLD code produced
+// "ec2-user@<ip>"; this asserts the target is now "ubuntu@<ip>".
+func TestBuildReloadSSHArgs_ResolvesLoginUser(t *testing.T) {
+	ubuntu := &aws.InstanceInfo{
+		PublicIP: "1.2.3.4",
+		Tags:     map[string]string{"spawn:local-username": "ubuntu"},
+	}
+	args := buildReloadSSHArgs("key.pem", ubuntu)
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "ubuntu@1.2.3.4") {
+		t.Errorf("Ubuntu instance: expected reload target ubuntu@1.2.3.4, got args: %v", args)
+	}
+	if strings.Contains(joined, "ec2-user@") {
+		t.Errorf("Ubuntu instance: reload must NOT target hardcoded ec2-user (#581), got args: %v", args)
+	}
+
+	// An AL2023 instance (no local-username tag) still falls back to ec2-user.
+	al2023 := &aws.InstanceInfo{PublicIP: "5.6.7.8"}
+	if got := strings.Join(buildReloadSSHArgs("key.pem", al2023), " "); !strings.Contains(got, "ec2-user@5.6.7.8") {
+		t.Errorf("AL2023 instance (no local-username tag): expected ec2-user@ fallback, got: %v", got)
+	}
+}
+
 // TestValidateTTL_ValidFormats validates correct TTL formats
 func TestValidateTTL_ValidFormats(t *testing.T) {
 	tests := []struct {

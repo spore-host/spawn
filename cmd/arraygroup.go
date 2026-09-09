@@ -194,7 +194,7 @@ on disk, else falls back to SSM (keyless/lagotto-launched members).`,
 // runArrayMemberCommand runs a one-shot shell command on an array member and
 // returns its combined output. It reuses the exact SSH-key-or-SSM branch the
 // status path uses (cmd/status.go): when a local SSH key resolves it runs over
-// SSH (sudo, ec2-user@publicIP); otherwise — a keyless, SSM-only member as
+// SSH (sudo, as the instance's resolved login user @ publicIP); otherwise — a keyless, SSM-only member as
 // lagotto/cohort launches leave — it runs over SSM RunShellScript, where the
 // agent already runs as root so `sudo` is unnecessary (#222).
 func runArrayMemberCommand(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, remoteCmd string) (string, error) {
@@ -212,7 +212,9 @@ func runArrayMemberCommand(ctx context.Context, client *aws.Client, instance *aw
 	}
 
 	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
-	sshArgs = append(sshArgs, fmt.Sprintf("ec2-user@%s", instance.PublicIP), "sudo "+remoteCmd+" 2>&1")
+	// Resolved login user, not a hardcoded ec2-user (which fails on non-AL2023
+	// AMIs like Ubuntu — #581).
+	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", resolveSSHUser("", instance), instance.PublicIP), "sudo "+remoteCmd+" 2>&1")
 	output, err := exec.CommandContext(ctx, "ssh", sshArgs...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("ssh: %w\nOutput: %s", err, string(output))

@@ -108,7 +108,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
-	sshArgs = append(sshArgs, fmt.Sprintf("ec2-user@%s", instance.PublicIP), remoteCmd)
+	// Resolved login user, not a hardcoded ec2-user (which fails on non-AL2023
+	// AMIs like Ubuntu — #581).
+	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", resolveSSHUser("", instance), instance.PublicIP), remoteCmd)
 
 	sshCmd := exec.Command("ssh", sshArgs...)
 

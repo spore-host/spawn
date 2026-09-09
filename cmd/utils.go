@@ -35,6 +35,31 @@ func sporedSSHOptions() []string {
 	}
 }
 
+// resolveSSHUser picks the SSH login user for a Linux instance. An explicit
+// override (a command's --user flag) wins; otherwise it uses the
+// spawn:local-username tag the bootstrap created and installed the SSH key for,
+// falling back to ec2-user only for instances launched before that tag existed.
+//
+// This is the single source of truth for "which user does spawn SSH in as", so
+// the interactive `spawn connect` path (cmd/connect.go), resolveSSHTarget
+// (cmd/ssh_target.go), and every non-interactive spored-trigger call site
+// (extend's reload, config, status, arraygroup) agree and cannot drift.
+//
+// Hardcoding ec2-user at any of those sites is the #581 bug: on an Ubuntu AMI the
+// login user is `ubuntu`, so a hardcoded-ec2-user SSH fails with "Permission
+// denied (publickey)". For `spawn extend` that meant the on-box `spored reload`
+// silently no-op'd and the instance kept its ORIGINAL TTL — a silent failure on
+// a lifecycle-critical operation.
+func resolveSSHUser(override string, instance *aws.InstanceInfo) string {
+	if override != "" {
+		return override
+	}
+	if u := instance.Tags["spawn:local-username"]; u != "" {
+		return u
+	}
+	return "ec2-user"
+}
+
 // parseKVTags parses repeated "key=value" flag values into a tag map (#161).
 // The value may itself contain '=' (split on the first only). Keys must be
 // non-empty and must not use the reserved "spawn:" prefix (those are managed by
