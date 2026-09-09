@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.105.0] - 2026-09-09
+
 ### Security
 - Bumped `google.golang.org/grpc` v1.83.1 → v1.83.2 (root module and the
   `lambda/ttl-reaper` / `lambda/dns-updater` nested modules), fixing
@@ -3505,7 +3507,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.104.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.105.0...HEAD
+[0.105.0]: https://github.com/spore-host/spawn/compare/v0.104.0...v0.105.0
 [0.104.0]: https://github.com/spore-host/spawn/compare/v0.103.1...v0.104.0
 [0.103.1]: https://github.com/spore-host/spawn/compare/v0.103.0...v0.103.1
 [0.103.0]: https://github.com/spore-host/spawn/compare/v0.102.0...v0.103.0
