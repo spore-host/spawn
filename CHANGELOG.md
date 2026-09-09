@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--iam-policy-file` with a policy granting them (no new flag or standing grant
   needed). Adds a ready-to-edit `examples/iam/snapshot-build-policy.json` (#579).
 
+### Fixed
+- `spawn cost <name>` for a single `spawn launch` instance no longer errors with
+  a raw DynamoDB `ResourceNotFoundException` (#578). A standalone instance has no
+  sweep-orchestration cost record, so `spawn cost` now detects that case and
+  reports the instance's compute-cost estimate — its on-demand rate
+  (`spawn:price-per-hour`) × runtime, the same figure `spawn status` shows —
+  instead of leaking the underlying AWS error. When the identifier is neither a
+  known sweep/job-array nor a resolvable instance, it fails with a clear,
+  actionable message.
+
 ## [0.104.0] - 2026-09-04
 
 ### Added
