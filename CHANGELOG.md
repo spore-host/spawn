@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`spawn app launch` no longer needs an owned "DCV base AMI"** — it resolves
+  the AWS-maintained GPU Deep Learning Base AMI (Amazon Linux 2023; NVIDIA driver
+  preinstalled, present in every region) via an SSM public parameter at launch,
+  and installs the (free, self-licensing) Amazon DCV server at boot
+  (spore-host#286/#389). This removes the per-region base-AMI table that had
+  drifted into dangling, unshared, and duplicated IDs — the direct cause of the
+  "AuthFailure / no spore-dcv-base AMI in <region>" failures. GUI apps now launch
+  in any region, not just where a base AMI happened to be built and shared. An
+  app may still set an optional `base_amis:` pin (catalog/overlay) to a custom
+  pre-baked image; the boot-time DCV install is idempotent and skips itself when
+  DCV is already present. The app root volume defaults to 100 GiB (floored at the
+  AMI snapshot size) for the larger DLAMI base plus container images.
+
 ## [0.105.0] - 2026-09-09
 
 ### Security

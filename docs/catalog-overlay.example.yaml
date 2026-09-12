@@ -37,5 +37,8 @@ apps:
     idle_timeout_default: 20m
     image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/myviz   # private ECR you own
     tag_default: "1.0"
-    base_amis:
-      us-east-1: ami-0c37fb59c90d1ed3a   # a spore-dcv-base AMI shared to your launch account
+    # No base_amis needed: spawn resolves the AWS GPU DLAMI base via SSM and
+    # installs DCV at boot (spore-host#286/#389). Set base_amis ONLY to pin a
+    # custom pre-baked image (e.g. one with your app already installed):
+    # base_amis:
+    #   us-east-1: ami-xxxxxxxx   # a custom AMI visible to your launch account
