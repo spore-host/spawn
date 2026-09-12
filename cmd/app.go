@@ -248,19 +248,25 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Base AMI (spore-host#286/#389): an explicit per-region catalog pin wins
+	// (advanced use — a custom pre-baked image); otherwise resolve the
+	// AWS-maintained base via SSM — the GPU Deep Learning Base AMI (NVIDIA driver
+	// preinstalled, present in every region) for a GPU instance type, or standard
+	// AL2023 otherwise. There is no owned/shared spore base AMI: DCV is installed
+	// at boot by the user-data (it's free on EC2 and self-licenses via S3), which
+	// removes the per-region AMI table that was the source of #389.
 	ami := ""
 	if entry.BaseAMIs != nil {
 		ami = entry.BaseAMIs[region]
 	}
-	if ami == "" {
-		if entry.Containerized() {
-			return fmt.Errorf("no spore-dcv-base AMI for %s in %s — build/share it (infra/amis/dcv-gpu-al2023.pkr.hcl) or try --region us-east-1", entry.Name, region)
-		}
-		fmt.Fprintf(os.Stderr, "No base AMI for %s in %s — using standard AL2023 AMI (install DCV manually)\n", entry.Name, region)
-		ami, err = client.GetAL2023AMI(ctx, region, "x86_64", false)
+	if ami != "" {
+		fmt.Fprintf(os.Stderr, "Base AMI: %s (pinned in catalog for %s)\n", ami, region)
+	} else {
+		ami, err = client.GetRecommendedAMI(ctx, region, instanceType)
 		if err != nil {
-			return fmt.Errorf("get AL2023 AMI: %w", err)
+			return fmt.Errorf("resolve base AMI for %s in %s: %w", instanceType, region, err)
 		}
+		fmt.Fprintf(os.Stderr, "Base AMI: %s (AWS AL2023 base, resolved via SSM; DCV installed at boot)\n", ami)
 	}
 
 	// 6. Session name
@@ -339,7 +345,11 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		UserData:           dcvUserData,
 		DCVSessionID:       dcvSessionID,
 		AppName:            entry.Name,
-		RootVolumeSizeGiB:  40, // AL2023 base AMI built with 40 GB root
+		// The GPU DLAMI base is larger than a bare AL2023 AMI and container app
+		// images (ParaView, ChimeraX) are multi-GB. Request generous headroom; the
+		// launch path floors this at the AMI's own snapshot size, so it can only
+		// grow the root, never undershoot the DLAMI.
+		RootVolumeSizeGiB: 100,
 	}
 
 	// 12. Launch
@@ -501,9 +511,51 @@ chmod +x %s
 }
 
 // buildDCVUserData returns a base64-encoded user-data script that starts DCV and creates a session.
-// spored is already pre-installed in the catalog AMI.
 func buildDCVUserData(launchCommand, sessionID string) string {
 	return buildDCVUserDataWithInit(launchCommand, sessionID, "", launchCommand)
+}
+
+// Amazon DCV version installed at boot. The CloudFront layout is
+// <majorMinor>/Servers/nice-dcv-<version>-amzn2023-<arch>.tgz. Bump both together.
+const (
+	dcvVersion           = "2025.0-20103"
+	dcvVersionMajorMinor = "2025.0"
+)
+
+// dcvInstallBlock returns an idempotent bash snippet that installs the Amazon DCV
+// server on an AL2023 base at boot (spore-host#286/#389). The AWS GPU DLAMI base
+// ships the NVIDIA driver but not DCV; DCV is free on EC2 and self-licenses via
+// the regional S3 endpoint, so there is no owned/shared "DCV base AMI" to
+// maintain. If `dcv` is already present (e.g. a pinned pre-baked image), the
+// install is skipped. Uses indexed verbs so the version appears in several
+// places without repeating args; the caller injects the result as one %s, so no
+// bash '%' expansion leaks into the outer Sprintf template.
+func dcvInstallBlock() string {
+	return fmt.Sprintf(`# Install Amazon DCV if not already present (spore-host#286/#389). The AWS GPU
+# DLAMI base has the NVIDIA driver but no DCV. DCV is free on EC2 (self-licenses
+# via S3). Idempotent — a pre-baked base with DCV already installed skips this.
+if ! command -v dcv >/dev/null 2>&1; then
+  DCV_MACHINE=$(uname -m)
+  echo "Installing Amazon DCV %[1]s for AL2023/${DCV_MACHINE}..."
+  # GL/X libs DCV virtual sessions render against (NVIDIA GL comes via nice-dcv-gl).
+  dnf install -y mesa-dri-drivers mesa-libGL glx-utils xterm >/dev/null 2>&1 || true
+  rpm --import https://d1uj6qtbmh3dt5.cloudfront.net/NICE-GPG-KEY >/dev/null 2>&1 || true
+  DCV_TGZ="nice-dcv-%[1]s-amzn2023-${DCV_MACHINE}.tgz"
+  if curl -fsSL "https://d1uj6qtbmh3dt5.cloudfront.net/%[2]s/Servers/${DCV_TGZ}" -o /tmp/dcv.tgz; then
+    mkdir -p /tmp/dcv && tar -xzf /tmp/dcv.tgz -C /tmp/dcv --strip-components=1
+    # nice-dcv-server = the server; nice-xdcv = virtual-session X server;
+    # nice-dcv-gl = GPU-accelerated OpenGL in virtual sessions (x86_64 only).
+    dnf install -y /tmp/dcv/nice-dcv-server-*.rpm /tmp/dcv/nice-xdcv-*.rpm >/dev/null 2>&1 || echo "WARNING: DCV server install failed"
+    if [ "${DCV_MACHINE}" = "x86_64" ]; then
+      dnf install -y /tmp/dcv/nice-dcv-gl-*.rpm >/dev/null 2>&1 || echo "WARNING: nice-dcv-gl install failed (GPU GL may be unavailable)"
+    fi
+    rm -rf /tmp/dcv /tmp/dcv.tgz
+    systemctl enable dcvserver >/dev/null 2>&1 || true
+  else
+    echo "WARNING: could not download Amazon DCV %[1]s — the DCV session will not start"
+  fi
+fi
+`, dcvVersion, dcvVersionMajorMinor)
 }
 
 // buildDCVUserDataWithInit is the shared user-data core: update spored, install
@@ -526,6 +578,7 @@ if [ -f /tmp/spored-new ]; then
   chmod +x /tmp/spored-new && mv /tmp/spored-new /usr/local/bin/spored || true
 fi
 
+%s
 # Install wildcard TLS cert for DCV before dcvserver starts (avoids restart race).
 # Cert is under s3://spawn-certs-<region>/<account-base36>/{cert,key}.pem
 ACCOUNT_ID=$(curl -sf -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token | xargs -I{} curl -sf -H 'X-aws-ec2-metadata-token: {}' http://169.254.169.254/latest/dynamic/instance-identity/document | python3 -c "import sys,json; print(json.load(sys.stdin)['accountId'])" 2>/dev/null || echo "")
@@ -600,7 +653,7 @@ dcv create-session \
     %s 2>/dev/null || true
 
 echo "DCV session '%s' created for: %s"
-`, preCreate, sessionID, initCommand, sessionID, sessionID, label)
+`, dcvInstallBlock(), preCreate, sessionID, initCommand, sessionID, sessionID, label)
 	return base64.StdEncoding.EncodeToString([]byte(script))
 }
 

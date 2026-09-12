@@ -80,6 +80,39 @@ func TestBuildContainerDCVUserData(t *testing.T) {
 	}
 }
 
+// TestDCVInstalledAtBoot asserts the user-data installs Amazon DCV at boot on
+// the AWS DLAMI base (spore-host#286/#389): the install is idempotent-guarded,
+// pulls the correct pinned version from the DCV CloudFront layout, and includes
+// the virtual-session (nice-xdcv) and GPU-GL (nice-dcv-gl) packages. This is the
+// change that lets `spawn app launch` work without an owned/shared "DCV base AMI".
+func TestDCVInstalledAtBoot(t *testing.T) {
+	enc := buildContainerDCVUserData("public.ecr.aws/f8g1e7l5/paraview:5.13.2", true, false, "us-east-1", "console")
+	raw, _ := base64.StdEncoding.DecodeString(enc)
+	script := string(raw)
+
+	for _, want := range []string{
+		"command -v dcv",                        // idempotent guard — skip if already present
+		"nice-dcv-" + dcvVersion + "-amzn2023-", // correct pinned tarball for AL2023
+		"d1uj6qtbmh3dt5.cloudfront.net/" + dcvVersionMajorMinor + "/Servers", // official DCV download layout
+		"nice-dcv-server-", // the DCV server package
+		"nice-xdcv-",       // virtual-session X server (dcv create-session --type virtual)
+		"nice-dcv-gl-",     // GPU-accelerated OpenGL (guarded to x86_64)
+		"NICE-GPG-KEY",     // package signature verification
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("boot DCV install missing %q\n---\n%s", want, script)
+		}
+	}
+	// The install must precede the cert step and dcvserver start (the cert step
+	// chowns dcv: and restarts dcvserver — both need DCV already installed).
+	installAt := strings.Index(script, "command -v dcv")
+	certAt := strings.Index(script, "DCV_CERT_DIR")
+	startAt := strings.Index(script, "systemctl start dcvserver")
+	if installAt < 0 || certAt < 0 || startAt < 0 || !(installAt < certAt && installAt < startAt) {
+		t.Errorf("DCV install must come before cert install and dcvserver start (install=%d cert=%d start=%d)", installAt, certAt, startAt)
+	}
+}
+
 // TestBuildDCVUserData_LegacyUnchanged guards that the non-container path still
 // bakes the launch_command as init and does NOT pull a container.
 func TestBuildDCVUserData_LegacyUnchanged(t *testing.T) {

@@ -43,26 +43,32 @@ instance — not to keep adjusting the handshake on live hardware.**
 | Browser session HTML | `cmd/app.go` `writeSessionHTML()` | Full |
 | Reconnect path | `cmd/connect.go` (≈571–766) | Full |
 | DCV-aware idle detection | `pkg/agent/agent.go` `isIdle()` | Full, **unbounded grace** |
-| App catalog | `libs/catalog/catalog.yaml` | Full; AMIs only for paraview/chimerax |
-| Packer DCV AMIs | `spore-host/infra/amis/` | Partial (built mainly for some regions) |
+| App catalog | `libs/catalog/catalog.yaml` | Full; recipe-only definitions (BYO image, #392) |
+| Base AMI resolution | `cmd/app.go` + `pkg/aws/ami.go` `GetRecommendedAMI` | SSM-resolved AWS GPU DLAMI (#286/#389) |
+| DCV boot install | `cmd/app.go` `dcvInstallBlock()` | Installs Amazon DCV at boot (idempotent) |
 | Idle-detection unit tests | `pkg/agent/agent_test.go` | Present (4 tests) |
 | Handshake integration test | — | **None** (needs a real DCV instance) |
 
-The catalog has GPU AMIs for **paraview** and **chimerax** across ~9 regions;
-**igv / qgis / fiji / ds9** have `amis: {}` and fall back to a stock AL2023 image
-with no DCV installed (so those apps can't actually stream today without a
-manual install).
+Base-AMI model (spore-host#286/#389): the launcher resolves the AWS-maintained
+Deep Learning Base GPU AMI (Amazon Linux 2023; NVIDIA driver preinstalled, every
+region) via an SSM public parameter at launch, and installs the (free,
+self-licensing) Amazon DCV server at boot. There is **no owned/shared "DCV base
+AMI"** — the per-region Packer AMI table that drifted into dangling/unshared IDs
+(#389) is retired. An app may set an optional `base_amis:` pin to a custom
+pre-baked image, but normally leaves it unset.
 
 ---
 
 ## The handshake, end to end
 
-1. `spawn app launch <app>` resolves the app in the catalog, picks an AMI
-   (catalog GPU AMI, else AL2023 fallback), sets up the spored IAM role, builds
-   DCV user-data, and launches with `spawn:dcv-session-id` set.
-2. On the instance, user-data: updates spored from S3 → installs the wildcard TLS
-   cert from `s3://spawn-certs-<region>/...` → starts `dcvserver` → starts
-   `spored monitor` → `dcv create-session`.
+1. `spawn app launch <app>` resolves the app in the catalog, resolves the base
+   AMI (optional catalog pin, else the SSM-resolved AWS GPU DLAMI / AL2023), sets
+   up the spored IAM role, builds DCV user-data, and launches with
+   `spawn:dcv-session-id` set.
+2. On the instance, user-data: updates spored from S3 → **installs Amazon DCV if
+   absent** (idempotent; the DLAMI has the NVIDIA driver but not DCV) → installs
+   the wildcard TLS cert from `s3://spawn-certs-<region>/...` → starts `dcvserver`
+   via systemd → starts `spored` (systemd unit) → `dcv create-session`.
 3. spored's `NewAgent()` sees `DCVSessionID != ""` and fires
    **`go setupDCVAuth()`** (one goroutine, once).
 4. `setupDCVAuth()`: starts the `:8444` verifier → polls `dcv list-sessions` up
