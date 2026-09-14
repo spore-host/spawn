@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.106.0] - 2026-09-13
+
 ### Fixed
 - **`spawn app launch` can now pull its container image.** The `spored-instance-role`
   that the launch provisions granted no ECR actions, so `docker login` succeeded
@@ -3533,7 +3535,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.105.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.106.0...HEAD
+[0.106.0]: https://github.com/spore-host/spawn/compare/v0.105.0...v0.106.0
 [0.105.0]: https://github.com/spore-host/spawn/compare/v0.104.0...v0.105.0
 [0.104.0]: https://github.com/spore-host/spawn/compare/v0.103.1...v0.104.0
 [0.103.1]: https://github.com/spore-host/spawn/compare/v0.103.0...v0.103.1
