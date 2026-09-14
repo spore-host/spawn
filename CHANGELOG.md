@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn app launch` can now pull its container image.** The `spored-instance-role`
+  that the launch provisions granted no ECR actions, so `docker login` succeeded
+  (account-wide `GetAuthorizationToken`) but the image pull was denied
+  (`ecr:BatchGetImage ... no identity-based policy allows`) — the container never
+  started, the DCV session `--init` failed, and the launch timed out waiting for
+  the ready URL. The role's policy now grants read-only ECR pull
+  (`GetAuthorizationToken`, `BatchCheckLayerAvailability`, `GetDownloadUrlForLayer`,
+  `BatchGetImage`); cross-account pulls remain gated by the target repo's own
+  policy (#588). Takes effect on the next launch (the role policy is rewritten each
+  time).
+
 ### Changed
 - **`spawn app launch` no longer needs an owned "DCV base AMI"** — it resolves
   the AWS-maintained GPU Deep Learning Base AMI (Amazon Linux 2023; NVIDIA driver

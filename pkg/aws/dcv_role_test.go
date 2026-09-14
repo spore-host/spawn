@@ -48,6 +48,8 @@ func TestSporedDCVRolePolicy_Valid(t *testing.T) {
 		"lambda:InvokeFunctionUrl":            false, // #173 — DCV instance can sign DNS
 		"s3:GetObject":                        false, // dcv-license + certs
 		"ec2:CreateTags":                      false,
+		"ecr:GetAuthorizationToken":           false, // #588 — pull the app container image
+		"ecr:BatchGetImage":                   false, // #588 — pull the app container image
 	}
 	createTagsConditioned := false
 	for _, st := range doc.Statement {
