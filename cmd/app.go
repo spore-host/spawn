@@ -484,7 +484,11 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if !ready {
-			fmt.Fprintf(os.Stderr, "%s\n", dcvFailureMessage(lastStatus, result.InstanceID))
+			if isWeb && !dcvStatusTerminal(lastStatus) {
+				fmt.Fprintf(os.Stderr, " (timed out waiting for the web app — inspect: spawn connect %s, then `docker ps` / /var/log/spored.log)\n", result.InstanceID)
+			} else {
+				fmt.Fprintf(os.Stderr, "%s\n", dcvFailureMessage(lastStatus, result.InstanceID))
+			}
 		}
 	}
 
@@ -666,10 +670,18 @@ systemctl enable spored
 systemctl start spored
 echo "spored started via systemd"
 
+# Ensure Docker. The standard AL2023 base (CPU web apps) has no Docker; the GPU
+# DLAMI does. Idempotent — install only if absent, then start it.
+if ! command -v docker >/dev/null 2>&1; then
+  echo 'Installing Docker...'
+  dnf install -y docker >/dev/null 2>&1 || echo 'WARNING: docker install failed'
+fi
+systemctl enable --now docker >/dev/null 2>&1 || true
+
 %secho 'Pulling %s...'
-/usr/bin/docker pull %s || echo 'WARNING: docker pull failed'
+docker pull %s || echo 'WARNING: docker pull failed'
 echo 'Starting web app container on 127.0.0.1:%d...'
-/usr/bin/docker run -d --restart unless-stopped %s-p 127.0.0.1:%d:%d %s || echo 'WARNING: docker run failed'
+docker run -d --restart unless-stopped %s-p 127.0.0.1:%d:%d %s || echo 'WARNING: docker run failed'
 echo "web app container started"
 `, login, image, image, port, gpuFlag, port, port, image)
 	return base64.StdEncoding.EncodeToString([]byte(script))

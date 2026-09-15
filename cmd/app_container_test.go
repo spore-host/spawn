@@ -158,6 +158,7 @@ func TestBuildWebUserData(t *testing.T) {
 		t.Fatalf("format-verb leak in web user-data:\n%s", script)
 	}
 	for _, want := range []string{
+		"dnf install -y docker", // CPU AL2023 base has no Docker
 		"docker pull public.ecr.aws/x/code-server:latest",
 		"docker run -d --restart unless-stopped -p 127.0.0.1:8080:8080", // localhost publish
 		"/etc/spore/webproxy/cert.pem",                                  // TLS cert for the proxy
