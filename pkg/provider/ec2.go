@@ -558,6 +558,8 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			}
 		case tagprefix.Tag("ready-path"):
 			config.ReadyHealthPath = *tag.Value
+		case tagprefix.Tag("web-auth"):
+			config.WebAuth = *tag.Value
 		case tagprefix.Tag("slack-workspace-id"):
 			config.SlackWorkspaceID = *tag.Value
 		case tagprefix.Tag("pre-stop"):

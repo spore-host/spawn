@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Web apps: container run args + a proxy access-token gate** (#590). A `web`
+  catalog entry can now set `args:` (or launch with repeatable `--web-arg`) — the
+  args are appended to the container's `docker run`, so images that default to
+  binding container-localhost or requiring their own auth (code-server, Jupyter)
+  can be told to `--bind-addr 0.0.0.0:<port>` / run auth-less. spored's :443 TLS
+  reverse proxy now **gates access with a one-time token** (like the DCV
+  `authToken`): the ready URL carries `?spore_token=<t>`, which the proxy
+  exchanges for a `Secure; HttpOnly` cookie, then serves the app (WebSockets
+  included); requests without it get 403. So a web app is protected regardless of
+  its own auth, and running it auth-less internally is safe. Opt out with
+  `--no-web-auth` (the app must then provide its own auth). Bumps libs to v0.46.0.
+
 ### Fixed
 - **`spawn app launch` no longer lists or launches apps that can't actually run**
   (#592). The catalog's legacy `launch_command`-only apps (igv, qgis, fiji, ds9)

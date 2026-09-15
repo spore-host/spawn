@@ -148,7 +148,7 @@ func TestBuildDesktopDCVUserData(t *testing.T) {
 // the container and publishes its port on localhost, drops the TLS cert for the
 // spored proxy, and starts spored — with no DCV session created.
 func TestBuildWebUserData(t *testing.T) {
-	enc := buildWebUserData("public.ecr.aws/x/code-server:latest", 8080, false, false, "us-east-1")
+	enc := buildWebUserData("public.ecr.aws/x/code-server:latest", 8080, false, false, "us-east-1", []string{"--bind-addr", "0.0.0.0:8080", "--auth", "none"})
 	raw, err := base64.StdEncoding.DecodeString(enc)
 	if err != nil {
 		t.Fatalf("user-data is not valid base64: %v", err)
@@ -161,6 +161,7 @@ func TestBuildWebUserData(t *testing.T) {
 		"dnf install -y docker", // CPU AL2023 base has no Docker
 		"docker pull public.ecr.aws/x/code-server:latest",
 		"docker run -d --restart unless-stopped -p 127.0.0.1:8080:8080", // localhost publish
+		"'--bind-addr' '0.0.0.0:8080' '--auth' 'none'",                  // shell-quoted container args (#590)
 		"/etc/spore/webproxy/cert.pem",                                  // TLS cert for the proxy
 		"systemctl enable spored",                                       // spored runs the proxy + handshake
 	} {
@@ -178,7 +179,7 @@ func TestBuildWebUserData(t *testing.T) {
 
 // TestBuildWebUserData_PrivateLogin asserts a private image adds an ECR login.
 func TestBuildWebUserData_PrivateLogin(t *testing.T) {
-	enc := buildWebUserData("111111111111.dkr.ecr.us-east-1.amazonaws.com/app:1", 8888, true, true, "us-east-1")
+	enc := buildWebUserData("111111111111.dkr.ecr.us-east-1.amazonaws.com/app:1", 8888, true, true, "us-east-1", nil)
 	raw, _ := base64.StdEncoding.DecodeString(enc)
 	script := string(raw)
 	if !strings.Contains(script, "ecr get-login-password") {

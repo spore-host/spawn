@@ -77,8 +77,9 @@ type Agent struct {
 
 	// Web-UI app readiness state (#590). For AppMode=="web": probe the app's HTTP
 	// port, start a TLS reverse proxy on :443 (once), write spawn:ready-url.
-	webProxyStarted bool // the :443 TLS reverse proxy is up (start once)
-	webReadyDone    bool // web ready-url written OR a terminal failure recorded (stop retrying)
+	webProxyStarted bool   // the :443 TLS reverse proxy is up (start once)
+	webReadyDone    bool   // web ready-url written OR a terminal failure recorded (stop retrying)
+	webToken        string // access token gating the :443 proxy (empty when WebAuth=none); generated once
 
 	// dcv runs the `dcv` CLI shell-outs (list/describe sessions). Defaults to the
 	// real exec-based runner; tests inject a fake so the handshake + idle logic is

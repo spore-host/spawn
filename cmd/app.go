@@ -29,12 +29,14 @@ var (
 	appLaunchSpot         bool
 	appLaunchTTL          string
 	appLaunchIdleTimeout  string
-	appLaunchNoOpen       bool   // --no-open: write session file but don't open browser
-	appLaunchVersion      string // --app-version: container image tag (#290)
-	appLaunchImage        string // --image: ad-hoc image binding, BYO (spore-host#392)
-	appLaunchWebPort      int    // --web-port: launch --image as an ad-hoc web app on this port (#590)
-	appLaunchHealthPath   string // --health-path: HTTP readiness path for a web app (default "/")
-	appCatalogPath        string // --catalog: local overlay file path (spore-host#392)
+	appLaunchNoOpen       bool     // --no-open: write session file but don't open browser
+	appLaunchVersion      string   // --app-version: container image tag (#290)
+	appLaunchImage        string   // --image: ad-hoc image binding, BYO (spore-host#392)
+	appLaunchWebPort      int      // --web-port: launch --image as an ad-hoc web app on this port (#590)
+	appLaunchHealthPath   string   // --health-path: HTTP readiness path for a web app (default "/")
+	appLaunchWebArg       []string // --web-arg: extra args passed to a web app's container (repeatable)
+	appLaunchNoWebAuth    bool     // --no-web-auth: disable the spored :443 proxy access token
+	appCatalogPath        string   // --catalog: local overlay file path (spore-host#392)
 )
 
 // ── command tree ─────────────────────────────────────────────────────────────
@@ -87,6 +89,8 @@ func init() {
 	appLaunchCmd.Flags().StringVar(&appLaunchImage, "image", "", "Launch a BYO container image for this app (overrides the catalog binding), e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview:5.13.2")
 	appLaunchCmd.Flags().IntVar(&appLaunchWebPort, "web-port", 0, "Launch --image as a web-UI app served on this container port (e.g. 8080 for code-server, 8888 for Jupyter); spored fronts it with TLS on :443")
 	appLaunchCmd.Flags().StringVar(&appLaunchHealthPath, "health-path", "", "HTTP path probed for web-app readiness (default \"/\")")
+	appLaunchCmd.Flags().StringArrayVar(&appLaunchWebArg, "web-arg", nil, "Extra argument for a web app's container, repeatable (e.g. --web-arg=--bind-addr=0.0.0.0:8080)")
+	appLaunchCmd.Flags().BoolVar(&appLaunchNoWebAuth, "no-web-auth", false, "Disable the spored :443 access-token gate for a web app (the app must provide its own auth)")
 
 	// --catalog applies to both `list` and `launch`: it points the catalog at a
 	// local overlay (BYO images, spore-host#392), applied before any catalog read.
@@ -352,7 +356,7 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	// (application/desktop) get a "console" DCV session; a web app gets no DCV
 	// session and instead advertises its port so spored probes it + fronts it with
 	// a TLS proxy (#590).
-	var userData, dcvSessionID, appMode, readyHealthPath string
+	var userData, dcvSessionID, appMode, readyHealthPath, webAuth string
 	var readyPort int
 	switch {
 	case kind == catalog.KindWeb:
@@ -364,8 +368,14 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 			readyHealthPath = "/"
 		}
 		appMode = "web"
-		fmt.Fprintf(os.Stderr, "Web app image: %s (%s) — port %d\n", image, entry.ImageVisibility(), readyPort)
-		userData = buildWebUserData(image, readyPort, entry.GPU, private, region)
+		webAuth = "token"
+		if appLaunchNoWebAuth {
+			webAuth = "none"
+		}
+		// Container run args: catalog Args + any --web-arg (e.g. --bind-addr 0.0.0.0:<port>).
+		args := append(append([]string{}, entry.Args...), appLaunchWebArg...)
+		fmt.Fprintf(os.Stderr, "Web app image: %s (%s) — port %d, proxy auth: %s\n", image, entry.ImageVisibility(), readyPort, webAuth)
+		userData = buildWebUserData(image, readyPort, entry.GPU, private, region, args)
 	case kind == catalog.KindDesktop:
 		dcvSessionID = "console"
 		fmt.Fprintf(os.Stderr, "Desktop session (bare Linux desktop, no application)\n")
@@ -398,6 +408,7 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		UserData:           userData,
 		DCVSessionID:       dcvSessionID, // empty for a web app
 		AppMode:            appMode,      // "web" for a web app; empty otherwise
+		WebAuth:            webAuth,      // "token"/"none" for a web app; empty otherwise
 		ReadyPort:          readyPort,
 		ReadyHealthPath:    readyHealthPath,
 		AppName:            entry.Name,
@@ -441,6 +452,7 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	// handshake (#590). Ready = an auth token (DCV) or ready-status "ready" (web).
 	dnsName := sessionName // spored will register a DNS name; fall back to IP
 	authToken := ""
+	readyURL := "" // spawn:ready-url verbatim (web: carries ?spore_token=)
 	ready := false
 	isWeb := kind == catalog.KindWeb
 	if entry.DCVEnabled || isWeb {
@@ -470,6 +482,9 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 			if scan.host != "" {
 				host = scan.host
 			}
+			if scan.url != "" {
+				readyURL = scan.url
+			}
 			// Ready: DCV writes an auth token; web writes ready-status "ready"
 			// (its ready-url carries no token — the app owns its own auth).
 			if authToken != "" || scan.status == dcvStatusReady {
@@ -497,7 +512,12 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	// 15w. Web app: no DCV session HTML — the app serves its own UI. Print/open the
 	// ready-url (https://<fqdn>/ via the spored TLS proxy) directly.
 	if isWeb {
-		webURL := "https://" + host + "/"
+		// Prefer the ready-url spored wrote (carries the ?spore_token= access
+		// token); fall back to a bare URL if the tag wasn't read.
+		webURL := readyURL
+		if webURL == "" {
+			webURL = "https://" + host + "/"
+		}
 		fmt.Fprintf(os.Stdout, "\n✅  %s is ready\n", entry.Name)
 		fmt.Fprintf(os.Stdout, "   URL:       %s\n", webURL)
 		fmt.Fprintf(os.Stdout, "   Instance:  %s\n", result.InstanceID)
@@ -606,10 +626,16 @@ func buildDCVUserData(launchCommand, sessionID string) string {
 // runs it publishing its HTTP port on localhost, and installs spored — which
 // probes the port, starts the TLS proxy, and writes spawn:ready-url. Pure, so
 // it's unit-tested.
-func buildWebUserData(image string, port int, gpu, private bool, region string) string {
+func buildWebUserData(image string, port int, gpu, private bool, region string, args []string) string {
 	gpuFlag := ""
 	if gpu {
 		gpuFlag = "--gpus all "
+	}
+	// Shell-quote the container args (appended after the image, overriding CMD),
+	// e.g. --bind-addr 0.0.0.0:8080 --auth none.
+	argStr := ""
+	if len(args) > 0 {
+		argStr = " " + shellQuoteArgs(args)
 	}
 	login := ""
 	if private {
@@ -683,9 +709,9 @@ systemctl enable --now docker >/dev/null 2>&1 || true
 %secho 'Pulling %s...'
 docker pull %s || echo 'WARNING: docker pull failed'
 echo 'Starting web app container on 127.0.0.1:%d...'
-docker run -d --restart unless-stopped %s-p 127.0.0.1:%d:%d %s || echo 'WARNING: docker run failed'
+docker run -d --restart unless-stopped %s-p 127.0.0.1:%d:%d %s%s || echo 'WARNING: docker run failed'
 echo "web app container started"
-`, login, image, image, port, gpuFlag, port, port, image)
+`, login, image, image, port, gpuFlag, port, port, image, argStr)
 	return base64.StdEncoding.EncodeToString([]byte(script))
 }
 

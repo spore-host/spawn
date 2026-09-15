@@ -146,6 +146,9 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	if config.ReadyHealthPath != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:ready-path"), Value: aws.String(config.ReadyHealthPath)})
 	}
+	if config.WebAuth != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:web-auth"), Value: aws.String(config.WebAuth)})
+	}
 
 	// --- Section 5: storage ---
 	// Storage filesystem tags — written so instance scripts can auto-mount
