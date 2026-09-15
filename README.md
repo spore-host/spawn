@@ -76,6 +76,7 @@ spawn list
 |---------|-------------|
 | `launch` | Launch an EC2 instance (Linux or Windows) |
 | `connect` | Connect to an instance by name (auto-starts if stopped): SSH on Linux; RDP, PowerShell-over-SSM, or `--ssh` on Windows |
+| `app` | Launch a streamed GUI app, a bare Linux desktop, or a self-serving web app ([see below](#launch-a-gui-or-web-app)) |
 | `list` | List all managed instances |
 | `status` | Instance status, TTL, cost |
 | `extend` | Extend TTL on a running instance |
@@ -128,6 +129,61 @@ spawn cleanup --force  # remove them (never touches running instances)
 informational while running, a billing warning while stopped. Note: spawn never
 allocates an Elastic IP, so it never releases one; any EIP shown is a static
 address you allocated, and it's yours to release with `aws ec2 release-address`.
+
+## Launch a GUI or web app
+
+`spawn app` launches a research application in the cloud and opens it in your
+browser — no VNC/RDP client, no AMI to build. It streams a GUI app over an
+[Amazon DCV](https://aws.amazon.com/hpc/dcv/) virtual session, or reverse-proxies
+a web app straight to a `https://` URL. Instances self-terminate on idle/TTL just
+like `spawn launch`.
+
+```bash
+# See what you can launch (public apps + anything your account can pull)
+spawn app list
+
+# 1. A single GUI app streamed to a browser tab (the default kind)
+spawn app launch paraview            # e.g. ParaView, ChimeraX — on a GPU instance
+
+# 2. A bare Linux desktop over DCV — "open a terminal and run anything"
+spawn app launch desktop
+
+# 3. A web app that serves its own UI on a port (Jupyter, code-server, …) — no DCV
+spawn app launch my-jupyter --image 123456789012.dkr.ecr.us-east-1.amazonaws.com/jupyter --web-port 8888
+```
+
+**Three launch kinds** (set by the catalog entry's `kind`, or inferred):
+
+- **`application`** *(default; also what `dcv: true` means)* — one Linux GUI app
+  streamed over a DCV virtual session to a browser tab.
+- **`desktop`** — a bare Linux desktop (GNOME) over DCV, no specific app;
+  `spawn app launch desktop`.
+- **`web`** — an app that serves its own web UI on a port (Jupyter, code-server,
+  OpenRefine). No DCV: `spored` fronts it with a built-in TLS reverse proxy on
+  `:443`. Launch a `web` catalog entry, or bring your own image ad hoc with
+  `--image <ref> --web-port <n>` (add `--health-path` if readiness isn't at `/`).
+
+**Prerequisites**
+
+- AWS credentials — sign in with [`aws login`](https://spore.host/docs) (spore.host
+  uses the AWS CLI's `login` command). No creds → `spawn app list` shows only the
+  public apps.
+- For GPU apps (most streamed GUI apps), a **GPU-instance quota** in the target
+  region. The base image is the AWS GPU Deep Learning AMI, resolved via SSM at
+  launch, with Amazon DCV installed at boot — there is no AMI to pre-build.
+
+**What you get** — for a GUI app or desktop, `spawn` writes a session file under
+`~/.spawn/sessions/` and opens it in your browser (the DCV client connects once
+the session is ready); for a web app it prints and opens the `https://<host>/`
+URL. Reconnect later with `spawn connect <instance>`. Useful flags:
+`--instance-type`, `--region`, `--spot`, `--ttl 4h`, `--idle-timeout 20m`,
+`--app-version <tag>`, and `--no-open` (write the session file / print the URL but
+don't open a browser). The instance stops on idle and terminates at its TTL, so a
+forgotten session doesn't keep billing.
+
+To author or override catalog entries (your own images, an in-house app, or a
+pinned AMI), see **[docs/catalog-schema.md](docs/catalog-schema.md)** and the
+example overlay at **[docs/catalog-overlay.example.yaml](docs/catalog-overlay.example.yaml)**.
 
 ## spored
 

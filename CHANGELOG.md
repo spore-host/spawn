@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **Documented the `spawn app` application-streaming feature** (#593). The README
+  now has a "Launch a GUI or web app" section covering the three launch kinds
+  (`application`, `desktop`, `web`), a one-line example each, prerequisites
+  (`aws login`, a GPU-instance quota for GPU apps), and what the user sees; the
+  `app` command is now listed in the command table. Added
+  `docs/catalog-schema.md`, a full reference for every catalog `AppEntry` field
+  (including `kind`, `port`/`health_path`, and the optional `base_amis` pin) for
+  authoring a catalog entry or a `~/.spawn/catalog.yaml` overlay. Corrected two
+  stale in-code references to the retired owned "DCV base AMI" model (the DCV
+  server is installed at boot on the SSM-resolved AWS base AMI).
+
 ## [0.107.0] - 2026-09-14
 
 ### Added

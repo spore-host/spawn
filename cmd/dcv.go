@@ -103,7 +103,7 @@ func dcvStatusTerminal(status string) bool {
 func dcvFailureMessage(status, instanceID string) string {
 	switch status {
 	case dcvStatusNotInstalled:
-		return " ✗ this AMI has no NICE DCV server installed — use a catalog app with a DCV AMI (paraview, chimerax), or build one (infra/amis)."
+		return fmt.Sprintf(" ✗ the Amazon DCV server isn't installed — its boot-time install (spore-host#286/#389) didn't complete; inspect: spawn connect %s, then /var/log/cloud-init-output.log.", instanceID)
 	case dcvStatusServerNotRunning:
 		return fmt.Sprintf(" ✗ the DCV server failed to start — inspect it: spawn connect %s, then `systemctl status dcvserver` / `journalctl -u dcvserver`.", instanceID)
 	case dcvStatusSessionNotCreated:
