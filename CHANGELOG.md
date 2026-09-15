@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.107.0] - 2026-09-14
+
 ### Added
 - **Web-UI applications — `spawn app launch` now supports apps that serve their
   own web UI** (Jupyter, code-server, OpenRefine, …) with no DCV (#590). A `web`
@@ -3555,7 +3557,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.106.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.107.0...HEAD
+[0.107.0]: https://github.com/spore-host/spawn/compare/v0.106.0...v0.107.0
 [0.106.0]: https://github.com/spore-host/spawn/compare/v0.105.0...v0.106.0
 [0.105.0]: https://github.com/spore-host/spawn/compare/v0.104.0...v0.105.0
 [0.104.0]: https://github.com/spore-host/spawn/compare/v0.103.1...v0.104.0
