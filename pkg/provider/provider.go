@@ -110,6 +110,14 @@ type Config struct {
 	// short-circuiting CPU/network/disk checks (DCV streaming generates those itself).
 	DCVSessionID string
 
+	// Web-UI application streaming (#590). When AppMode=="web", spored probes the
+	// app's own HTTP port (ReadyPort + ReadyHealthPath) for readiness instead of a
+	// DCV session, writes the spawn:ready-url, and fronts the app with a TLS
+	// reverse proxy on :443. No DCV; idle uses the generic CPU/network/process path.
+	AppMode         string
+	ReadyPort       int
+	ReadyHealthPath string
+
 	// Job array settings
 	JobArrayID    string
 	JobArrayName  string

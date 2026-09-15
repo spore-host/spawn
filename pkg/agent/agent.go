@@ -75,6 +75,11 @@ type Agent struct {
 	dcvVerifierStarted bool // the :8444 verifier is up (start once)
 	dcvAuthDone        bool // ready-url written OR a terminal failure recorded (stop retrying)
 
+	// Web-UI app readiness state (#590). For AppMode=="web": probe the app's HTTP
+	// port, start a TLS reverse proxy on :443 (once), write spawn:ready-url.
+	webProxyStarted bool // the :443 TLS reverse proxy is up (start once)
+	webReadyDone    bool // web ready-url written OR a terminal failure recorded (stop retrying)
+
 	// dcv runs the `dcv` CLI shell-outs (list/describe sessions). Defaults to the
 	// real exec-based runner; tests inject a fake so the handshake + idle logic is
 	// exercisable without a DCV server (spawn#282 phase 3).
@@ -405,6 +410,11 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// hits a terminal failure). Loop-driven so a transient failure recovers
 	// (spawn#282 phase 2). No-op on non-DCV instances.
 	a.maybeSetupDCVAuth(ctx)
+
+	// 0a2. Drive the web-UI readiness handshake for AppMode=="web" (#590): probe
+	// the app's HTTP port, start the :443 TLS reverse proxy once it's up, and write
+	// spawn:ready-url. Loop-driven like the DCV handshake. No-op on non-web instances.
+	a.maybeSetupWebReady(ctx)
 
 	// 0a. Keep spawn:logged-in-count tag current (throttled to 5/min).
 	a.writeSessionCountTag(ctx, countActiveSessions()+countActivePortConnections(a.config.ActivePorts))

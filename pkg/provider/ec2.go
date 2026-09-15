@@ -550,6 +550,14 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			}
 		case tagprefix.Tag("dcv-session-id"):
 			config.DCVSessionID = *tag.Value
+		case tagprefix.Tag("app-mode"):
+			config.AppMode = *tag.Value
+		case tagprefix.Tag("ready-port"):
+			if port, err := strconv.Atoi(strings.TrimSpace(*tag.Value)); err == nil {
+				config.ReadyPort = port
+			}
+		case tagprefix.Tag("ready-path"):
+			config.ReadyHealthPath = *tag.Value
 		case tagprefix.Tag("slack-workspace-id"):
 			config.SlackWorkspaceID = *tag.Value
 		case tagprefix.Tag("pre-stop"):

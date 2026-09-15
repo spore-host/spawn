@@ -358,3 +358,68 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 
 	return sgID, nil
 }
+
+// CreateOrGetWebSecurityGroup creates or retrieves a security group named
+// "spawn-web" that allows inbound TCP 443 (the spored TLS reverse proxy that
+// fronts a web-UI app, #590) plus SSH. Returns the security group ID.
+func (c *Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID string) (string, error) {
+	ec2Client := c.regionalEC2(region)
+
+	const sgName = "spawn-web"
+
+	describeResult, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+		Filters: []types.Filter{
+			{Name: aws.String("group-name"), Values: []string{sgName}},
+			{Name: aws.String("vpc-id"), Values: []string{vpcID}},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("describe security groups: %w", err)
+	}
+	if len(describeResult.SecurityGroups) > 0 {
+		return *describeResult.SecurityGroups[0].GroupId, nil
+	}
+
+	createResult, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
+		GroupName:   aws.String(sgName),
+		Description: aws.String("spawn-managed: web-UI app streaming (TCP 443 via spored TLS proxy)"),
+		VpcId:       aws.String(vpcID),
+		TagSpecifications: []types.TagSpecification{
+			{
+				ResourceType: types.ResourceTypeSecurityGroup,
+				Tags: []types.Tag{
+					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+					{Key: aws.String("Name"), Value: aws.String(sgName)},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("create security group: %w", err)
+	}
+	sgID := *createResult.GroupId
+
+	_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: aws.String(sgID),
+		IpPermissions: []types.IpPermission{
+			{
+				IpProtocol: aws.String("tcp"),
+				FromPort:   aws.Int32(443),
+				ToPort:     aws.Int32(443),
+				IpRanges:   []types.IpRange{{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("HTTPS (spored web proxy, IPv4)")}},
+				Ipv6Ranges: []types.Ipv6Range{{CidrIpv6: aws.String("::/0"), Description: aws.String("HTTPS (spored web proxy, IPv6)")}},
+			},
+			{
+				IpProtocol: aws.String("tcp"),
+				FromPort:   aws.Int32(22),
+				ToPort:     aws.Int32(22),
+				IpRanges:   []types.IpRange{{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("SSH")}},
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("authorize web ingress: %w", err)
+	}
+
+	return sgID, nil
+}

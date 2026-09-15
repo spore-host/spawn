@@ -264,9 +264,17 @@ type LaunchConfig struct {
 	ActiveProcessesRaw string // comma-separated process names — injected as spawn:active-processes tag
 
 	// DCV application streaming
-	DCVSessionID      string // NICE DCV session ID — activates DCV idle detection in spored (e.g. "console")
-	AppName           string // Catalog application name — informational tag (e.g. "paraview")
-	RootVolumeSizeGiB int32  // Override root EBS volume size in GiB (0 = use default 20 GiB)
+	DCVSessionID string // NICE DCV session ID — activates DCV idle detection in spored (e.g. "console")
+	AppName      string // Catalog application name — informational tag (e.g. "paraview")
+
+	// Web-UI application streaming (#590). When AppMode=="web", spored probes the
+	// app's own HTTP port instead of a DCV session and fronts it with a TLS
+	// reverse proxy on :443 (no DCV). Mutually exclusive with DCVSessionID.
+	AppMode         string // "web" for a port-served app; empty otherwise — tag spawn:app-mode
+	ReadyPort       int    // container HTTP port to probe + proxy (e.g. 8888) — tag spawn:ready-port
+	ReadyHealthPath string // HTTP path probed for readiness (default "/") — tag spawn:ready-path
+
+	RootVolumeSizeGiB int32 // Override root EBS volume size in GiB (0 = use default 20 GiB)
 
 	// AttachVolumes attaches additional EBS data volumes created from snapshots,
 	// each mounted at a path inside the instance (optionally read-only) — so large

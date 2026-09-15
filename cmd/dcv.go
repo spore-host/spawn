@@ -19,6 +19,10 @@ const (
 	dcvStatusTagWriteDenied    = "tag-write-denied"
 	dcvStatusWaiting           = "dcv-waiting"
 	dcvStatusReady             = "ready"
+
+	// Web-UI app statuses (#590), mirrored from pkg/agent/webready.go.
+	webStatusNotResponding = "web-not-responding" // terminal: app port never answered
+	webStatusProxyFailed   = "web-proxy-failed"   // terminal: TLS reverse proxy couldn't start
 )
 
 // extractReadyFromTags pulls the DCV handshake outcome out of an instance's tags:
@@ -40,11 +44,14 @@ func extractReadyFromTags(tags map[string]string) (url, token, host, status stri
 		}
 		token = raw
 	}
-	// Host between https:// and :8443.
+	// Host between https:// and the first ':' (port) or '/' (path). Handles both
+	// the DCV ready-url (https://host:8443/...) and the web ready-url (https://host/).
 	if start := strings.Index(url, "https://"); start >= 0 {
 		rest := url[start+len("https://"):]
-		if end := strings.Index(rest, ":8443"); end >= 0 {
+		if end := strings.IndexAny(rest, ":/"); end >= 0 {
 			host = rest[:end]
+		} else {
+			host = rest
 		}
 	}
 	return url, token, host, status
@@ -82,7 +89,8 @@ func scanDCVReady(instances []spawnclient.InstanceInfo, instanceID string) dcvSc
 // should stop polling on (vs. waiting/empty, which mean keep polling).
 func dcvStatusTerminal(status string) bool {
 	switch status {
-	case dcvStatusNotInstalled, dcvStatusServerNotRunning, dcvStatusSessionNotCreated, dcvStatusTagWriteDenied:
+	case dcvStatusNotInstalled, dcvStatusServerNotRunning, dcvStatusSessionNotCreated, dcvStatusTagWriteDenied,
+		webStatusNotResponding, webStatusProxyFailed:
 		return true
 	default:
 		return false
@@ -102,6 +110,10 @@ func dcvFailureMessage(status, instanceID string) string {
 		return fmt.Sprintf(" ✗ DCV is up but the session was never created — check the app launch command: spawn connect %s, then /var/log/spored.log.", instanceID)
 	case dcvStatusTagWriteDenied:
 		return " ✗ spored couldn't write its ready tag (instance role missing ec2:CreateTags) — re-launch to refresh the role, or check the spored IAM policy."
+	case webStatusNotResponding:
+		return fmt.Sprintf(" ✗ the web app never answered on its port — check the container: spawn connect %s, then `docker ps` / `docker logs`.", instanceID)
+	case webStatusProxyFailed:
+		return fmt.Sprintf(" ✗ the TLS reverse proxy couldn't start (likely the wildcard cert wasn't provisioned) — inspect: spawn connect %s, then /var/log/spored.log.", instanceID)
 	case dcvStatusWaiting, "":
 		return fmt.Sprintf(" (timed out waiting for DCV — inspect with: spawn connect %s, then /var/log/spored.log)", instanceID)
 	default:
