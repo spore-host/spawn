@@ -32,6 +32,8 @@ var (
 	appLaunchNoOpen       bool   // --no-open: write session file but don't open browser
 	appLaunchVersion      string // --app-version: container image tag (#290)
 	appLaunchImage        string // --image: ad-hoc image binding, BYO (spore-host#392)
+	appLaunchWebPort      int    // --web-port: launch --image as an ad-hoc web app on this port (#590)
+	appLaunchHealthPath   string // --health-path: HTTP readiness path for a web app (default "/")
 	appCatalogPath        string // --catalog: local overlay file path (spore-host#392)
 )
 
@@ -83,6 +85,8 @@ func init() {
 	appLaunchCmd.Flags().BoolVar(&appLaunchNoOpen, "no-open", false, "Write session file but do not open browser automatically")
 	appLaunchCmd.Flags().StringVar(&appLaunchVersion, "app-version", "", "App container image tag to launch (default: catalog default; see 'spawn app list')")
 	appLaunchCmd.Flags().StringVar(&appLaunchImage, "image", "", "Launch a BYO container image for this app (overrides the catalog binding), e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview:5.13.2")
+	appLaunchCmd.Flags().IntVar(&appLaunchWebPort, "web-port", 0, "Launch --image as a web-UI app served on this container port (e.g. 8080 for code-server, 8888 for Jupyter); spored fronts it with TLS on :443")
+	appLaunchCmd.Flags().StringVar(&appLaunchHealthPath, "health-path", "", "HTTP path probed for web-app readiness (default \"/\")")
 
 	// --catalog applies to both `list` and `launch`: it points the catalog at a
 	// local overlay (BYO images, spore-host#392), applied before any catalog read.
@@ -220,10 +224,19 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 
 	// 4c. Launch kind (#590/#591): application (a single GUI app over a DCV
 	// virtual session — the default), desktop (a bare Linux desktop over DCV, no
-	// specific app), or web (an app that serves its own web UI — Feature B).
+	// specific app), or web (an app that serves its own web UI on a port, fronted
+	// by a TLS reverse proxy — no DCV). --web-port turns an --image launch into an
+	// ad-hoc web app (BYO), overriding the catalog kind.
 	kind := entry.Kind()
-	if kind == catalog.KindWeb {
-		return fmt.Errorf("%s is a web app (kind=web) — web-app launch is not supported in this build yet (spawn#590)", entry.Name)
+	if appLaunchWebPort > 0 {
+		kind = catalog.KindWeb
+		entry.Port = appLaunchWebPort
+		if appLaunchHealthPath != "" {
+			entry.HealthPath = appLaunchHealthPath
+		}
+	}
+	if kind == catalog.KindWeb && entry.Port <= 0 {
+		return fmt.Errorf("%s is a web app but no port is set — add `port:` to its catalog entry or pass --web-port <n>", entry.Name)
 	}
 
 	// 5. Resolve image + base AMI (container catalog, #290).
@@ -312,35 +325,58 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		iamProfile = p
 	}
 
-	// 10. Security group for DCV (port 8443)
+	// 10. Security group: web apps expose :443 (the spored TLS reverse proxy);
+	// DCV apps/desktops expose :8443 (the DCV server).
 	vpcID, err := client.GetDefaultVPC(ctx, region)
 	if err != nil {
 		return fmt.Errorf("get default VPC: %w", err)
 	}
-	dcvSGID, err := client.CreateOrGetDCVSecurityGroup(ctx, region, vpcID)
-	if err != nil {
-		return fmt.Errorf("create DCV security group: %w", err)
+	var sgID string
+	if kind == catalog.KindWeb {
+		sgID, err = client.CreateOrGetWebSecurityGroup(ctx, region, vpcID)
+		if err != nil {
+			return fmt.Errorf("create web security group: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Security group: %s (spawn-web, port 443 open)\n", sgID)
+	} else {
+		sgID, err = client.CreateOrGetDCVSecurityGroup(ctx, region, vpcID)
+		if err != nil {
+			return fmt.Errorf("create DCV security group: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Security group: %s (spawn-dcv, port 8443 open)\n", sgID)
 	}
-	fmt.Fprintf(os.Stderr, "Security group: %s (spawn-dcv, port 8443 open)\n", dcvSGID)
 
-	// 9. DCV session ID (fixed "console" — DCV default session name)
-	dcvSessionID := "console"
-
-	// 10. DCV user-data: start DCV server + create session. Container apps (#290)
-	// pre-pull the image and run it into the DCV display as the session init;
-	// legacy apps use the baked launch_command.
-	var dcvUserData string
+	// 11. Build user-data + the mode-specific launch fields. DCV kinds
+	// (application/desktop) get a "console" DCV session; a web app gets no DCV
+	// session and instead advertises its port so spored probes it + fronts it with
+	// a TLS proxy (#590).
+	var userData, dcvSessionID, appMode, readyHealthPath string
+	var readyPort int
 	switch {
+	case kind == catalog.KindWeb:
+		image := entry.Image + ":" + imageTag
+		private := entry.ImageVisibility() == catalog.VisibilityPrivate
+		readyPort = entry.Port
+		readyHealthPath = entry.HealthPath
+		if readyHealthPath == "" {
+			readyHealthPath = "/"
+		}
+		appMode = "web"
+		fmt.Fprintf(os.Stderr, "Web app image: %s (%s) — port %d\n", image, entry.ImageVisibility(), readyPort)
+		userData = buildWebUserData(image, readyPort, entry.GPU, private, region)
 	case kind == catalog.KindDesktop:
+		dcvSessionID = "console"
 		fmt.Fprintf(os.Stderr, "Desktop session (bare Linux desktop, no application)\n")
-		dcvUserData = buildDesktopDCVUserData(dcvSessionID)
+		userData = buildDesktopDCVUserData(dcvSessionID)
 	case entry.Containerized():
+		dcvSessionID = "console"
 		image := entry.Image + ":" + imageTag
 		private := entry.ImageVisibility() == catalog.VisibilityPrivate
 		fmt.Fprintf(os.Stderr, "App image: %s (%s)\n", image, entry.ImageVisibility())
-		dcvUserData = buildContainerDCVUserData(image, entry.GPU, private, region, dcvSessionID)
+		userData = buildContainerDCVUserData(image, entry.GPU, private, region, dcvSessionID)
 	default:
-		dcvUserData = buildDCVUserData(entry.LaunchCommand, dcvSessionID)
+		dcvSessionID = "console"
+		userData = buildDCVUserData(entry.LaunchCommand, dcvSessionID)
 	}
 
 	// 14. Build LaunchConfig
@@ -356,9 +392,12 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		TTL:                appLaunchTTL,
 		IdleTimeout:        idleTimeout,
 		OnComplete:         "stop", // stop (not terminate) so session can be restarted
-		SecurityGroupIDs:   []string{dcvSGID},
-		UserData:           dcvUserData,
-		DCVSessionID:       dcvSessionID,
+		SecurityGroupIDs:   []string{sgID},
+		UserData:           userData,
+		DCVSessionID:       dcvSessionID, // empty for a web app
+		AppMode:            appMode,      // "web" for a web app; empty otherwise
+		ReadyPort:          readyPort,
+		ReadyHealthPath:    readyHealthPath,
 		AppName:            entry.Name,
 		// The GPU DLAMI base is larger than a bare AL2023 AMI and container app
 		// images (ParaView, ChimeraX) are multi-GB. Request generous headroom; the
@@ -395,13 +434,20 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 14. Poll for spawn:ready-url written by spored's DCV token verifier.
-	// spored starts a tiny HTTP server, waits for DCV, generates a token, writes the tag.
+	// 14. Poll for spawn:ready-url written by spored. For a DCV app/desktop this is
+	// the DCV token handshake; for a web app it's the port-probe + TLS-proxy
+	// handshake (#590). Ready = an auth token (DCV) or ready-status "ready" (web).
 	dnsName := sessionName // spored will register a DNS name; fall back to IP
 	authToken := ""
-	if entry.DCVEnabled {
-		fmt.Fprintf(os.Stderr, "Waiting for DCV session URL")
-		// Boot + user-data + DCV start + spored init takes ~3-4 minutes.
+	ready := false
+	isWeb := kind == catalog.KindWeb
+	if entry.DCVEnabled || isWeb {
+		if isWeb {
+			fmt.Fprintf(os.Stderr, "Waiting for the web app")
+		} else {
+			fmt.Fprintf(os.Stderr, "Waiting for DCV session URL")
+		}
+		// Boot + user-data + app/DCV start + spored init takes ~3-4 minutes.
 		// Poll for up to 5 minutes (60 × 5s).
 		var lastStatus string
 		for i := 0; i < 60; i++ {
@@ -422,7 +468,10 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 			if scan.host != "" {
 				host = scan.host
 			}
-			if authToken != "" {
+			// Ready: DCV writes an auth token; web writes ready-status "ready"
+			// (its ready-url carries no token — the app owns its own auth).
+			if authToken != "" || scan.status == dcvStatusReady {
+				ready = true
 				fmt.Fprintf(os.Stderr, " ready\n")
 				break
 			}
@@ -434,9 +483,25 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 				break
 			}
 		}
-		if authToken == "" {
+		if !ready {
 			fmt.Fprintf(os.Stderr, "%s\n", dcvFailureMessage(lastStatus, result.InstanceID))
 		}
+	}
+
+	// 15w. Web app: no DCV session HTML — the app serves its own UI. Print/open the
+	// ready-url (https://<fqdn>/ via the spored TLS proxy) directly.
+	if isWeb {
+		webURL := "https://" + host + "/"
+		fmt.Fprintf(os.Stdout, "\n✅  %s is ready\n", entry.Name)
+		fmt.Fprintf(os.Stdout, "   URL:       %s\n", webURL)
+		fmt.Fprintf(os.Stdout, "   Instance:  %s\n", result.InstanceID)
+		fmt.Fprintf(os.Stdout, "   Reconnect: spawn connect %s\n\n", result.InstanceID)
+		if ready && !appLaunchNoOpen {
+			if err := openBrowser(webURL); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  Could not open browser automatically: %v\n   Open manually: %s\n", err, webURL)
+			}
+		}
+		return nil
 	}
 
 	// 15. Write session HTML file
@@ -528,6 +593,86 @@ chmod +x %s
 // buildDCVUserData returns a base64-encoded user-data script that starts DCV and creates a session.
 func buildDCVUserData(launchCommand, sessionID string) string {
 	return buildDCVUserDataWithInit(launchCommand, sessionID, "", launchCommand)
+}
+
+// buildWebUserData builds user-data for a web-UI app (#590): no DCV. It downloads
+// the wildcard TLS cert for spored's :443 reverse proxy, pulls the container and
+// runs it publishing its HTTP port on localhost, and installs spored — which
+// probes the port, starts the TLS proxy, and writes spawn:ready-url. Pure, so
+// it's unit-tested.
+func buildWebUserData(image string, port int, gpu, private bool, region string) string {
+	gpuFlag := ""
+	if gpu {
+		gpuFlag = "--gpus all "
+	}
+	login := ""
+	if private {
+		login = fmt.Sprintf(`echo 'Authenticating to private ECR (%s)...'
+aws ecr get-login-password --region %s | /usr/bin/docker login --username AWS --password-stdin %s 2>&1 || echo 'WARNING: ECR login failed; private pull will fail'
+`, region, region, ecrRegistryHost(image))
+	}
+	script := fmt.Sprintf(`#!/bin/bash
+set -e
+
+REGION=$(curl -sf -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token | xargs -I{} curl -sf -H 'X-aws-ec2-metadata-token: {}' http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-east-1)
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+
+# Update spored from S3.
+curl -fsSL "https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn/spored-linux-${ARCH}" -o /tmp/spored-new 2>/dev/null || \
+  curl -fsSL "https://spawn-binaries-${REGION}.s3.amazonaws.com/spored-linux-${ARCH}" -o /tmp/spored-new
+if [ -f /tmp/spored-new ]; then
+  chmod +x /tmp/spored-new && mv /tmp/spored-new /usr/local/bin/spored || true
+fi
+
+# Wildcard TLS cert for spored's :443 reverse proxy (same spawn-certs source as DCV).
+mkdir -p /etc/spore/webproxy
+ACCOUNT_ID=$(curl -sf -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token | xargs -I{} curl -sf -H 'X-aws-ec2-metadata-token: {}' http://169.254.169.254/latest/dynamic/instance-identity/document | python3 -c "import sys,json; print(json.load(sys.stdin)['accountId'])" 2>/dev/null || echo "")
+if [ -n "$ACCOUNT_ID" ]; then
+  ACCOUNT_B36=$(python3 -c "import sys; n=int('$ACCOUNT_ID'); r=''; n=n if n else 0
+while n: n,d=divmod(n,36); r=chr(48+d if d<10 else 87+d)+r
+print(r or '0')" 2>/dev/null || echo "")
+  if [ -n "$ACCOUNT_B36" ]; then
+    CERT_BUCKET="spawn-certs-${REGION}"
+    aws s3 cp "s3://${CERT_BUCKET}/${ACCOUNT_B36}/cert.pem" /etc/spore/webproxy/cert.pem 2>/dev/null && \
+    aws s3 cp "s3://${CERT_BUCKET}/${ACCOUNT_B36}/key.pem"  /etc/spore/webproxy/key.pem 2>/dev/null && \
+    chmod 600 /etc/spore/webproxy/key.pem && \
+    echo "TLS cert installed for *.${ACCOUNT_B36}.spore.host" || \
+    echo "WARNING: TLS cert not available — spored web proxy will not start"
+  fi
+fi
+
+# spored systemd unit (lifecycle + web-ready handshake + :443 TLS reverse proxy).
+cat > /etc/systemd/system/spored.service <<'EOFSPORED'
+[Unit]
+Description=Spawn Agent - Instance self-monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=SPORE_DNS_SIGV4=1
+ExecStart=/usr/local/bin/spored
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOFSPORED
+systemctl daemon-reload
+systemctl enable spored
+systemctl start spored
+echo "spored started via systemd"
+
+%secho 'Pulling %s...'
+/usr/bin/docker pull %s || echo 'WARNING: docker pull failed'
+echo 'Starting web app container on 127.0.0.1:%d...'
+/usr/bin/docker run -d --restart unless-stopped %s-p 127.0.0.1:%d:%d %s || echo 'WARNING: docker run failed'
+echo "web app container started"
+`, login, image, image, port, gpuFlag, port, port, image)
+	return base64.StdEncoding.EncodeToString([]byte(script))
 }
 
 // desktopInitPath is where the desktop-session launcher is installed; DCV runs

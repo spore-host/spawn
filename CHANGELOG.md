@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Web-UI applications — `spawn app launch` now supports apps that serve their
+  own web UI** (Jupyter, code-server, OpenRefine, …) with no DCV (#590). A `web`
+  catalog kind (or `--web-port <n>` on an `--image` launch) runs the container
+  publishing its HTTP port on localhost; spored probes that port and, once it
+  answers, starts a built-in **TLS reverse proxy on :443** (terminating with the
+  same wildcard cert the DCV path uses) and writes the `spawn:ready-url`
+  (`https://<fqdn>/`). No DCV is installed; idle detection uses the generic
+  CPU/network/process path. New flags: `--web-port`, `--health-path`. Named
+  failure statuses (`web-not-responding`, `web-proxy-failed`) so a stuck launch
+  reports why.
 - **`spawn app launch desktop` — a bare Linux desktop session** (#591). For when
   you want a general GUI workspace ("open a terminal and run anything") rather
   than a single-app kiosk: it installs a desktop environment + Amazon DCV at boot

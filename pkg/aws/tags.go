@@ -136,6 +136,16 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	if config.AppName != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:app-name"), Value: aws.String(config.AppName)})
 	}
+	// Web-UI app mode (#590): spored probes ReadyPort + fronts it with a TLS proxy.
+	if config.AppMode != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:app-mode"), Value: aws.String(config.AppMode)})
+	}
+	if config.ReadyPort > 0 {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:ready-port"), Value: aws.String(strconv.Itoa(config.ReadyPort))})
+	}
+	if config.ReadyHealthPath != "" {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:ready-path"), Value: aws.String(config.ReadyHealthPath)})
+	}
 
 	// --- Section 5: storage ---
 	// Storage filesystem tags — written so instance scripts can auto-mount

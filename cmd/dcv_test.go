@@ -44,10 +44,28 @@ func TestExtractReadyFromTags(t *testing.T) {
 			t.Errorf("empty: token=%q status=%q", token, status)
 		}
 	})
+
+	t.Run("web ready-url (no token, port-less host)", func(t *testing.T) {
+		// A web app's ready-url is https://<fqdn>/ — no :8443, no authToken (#590).
+		tags := map[string]string{
+			"spawn:ready-status": "ready",
+			"spawn:ready-url":    "https://box.5k0zfnmq.spore.host/",
+		}
+		_, token, host, status := extractReadyFromTags(tags)
+		if status != "ready" {
+			t.Errorf("status = %q", status)
+		}
+		if token != "" {
+			t.Errorf("web ready-url should have no token, got %q", token)
+		}
+		if host != "box.5k0zfnmq.spore.host" {
+			t.Errorf("host = %q, want the FQDN (parsed up to the trailing slash)", host)
+		}
+	})
 }
 
 func TestDCVStatusTerminal(t *testing.T) {
-	for _, s := range []string{dcvStatusNotInstalled, dcvStatusServerNotRunning, dcvStatusSessionNotCreated, dcvStatusTagWriteDenied} {
+	for _, s := range []string{dcvStatusNotInstalled, dcvStatusServerNotRunning, dcvStatusSessionNotCreated, dcvStatusTagWriteDenied, webStatusNotResponding, webStatusProxyFailed} {
 		if !dcvStatusTerminal(s) {
 			t.Errorf("%q should be terminal", s)
 		}

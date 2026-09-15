@@ -144,6 +144,50 @@ func TestBuildDesktopDCVUserData(t *testing.T) {
 	}
 }
 
+// TestBuildWebUserData asserts a web-UI app (#590) does NOT install DCV, pulls
+// the container and publishes its port on localhost, drops the TLS cert for the
+// spored proxy, and starts spored — with no DCV session created.
+func TestBuildWebUserData(t *testing.T) {
+	enc := buildWebUserData("public.ecr.aws/x/code-server:latest", 8080, false, false, "us-east-1")
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		t.Fatalf("user-data is not valid base64: %v", err)
+	}
+	script := string(raw)
+	if strings.Contains(script, "%!") {
+		t.Fatalf("format-verb leak in web user-data:\n%s", script)
+	}
+	for _, want := range []string{
+		"docker pull public.ecr.aws/x/code-server:latest",
+		"docker run -d --restart unless-stopped -p 127.0.0.1:8080:8080", // localhost publish
+		"/etc/spore/webproxy/cert.pem",                                  // TLS cert for the proxy
+		"systemctl enable spored",                                       // spored runs the proxy + handshake
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("web user-data missing %q\n---\n%s", want, script)
+		}
+	}
+	// A web app must NOT install DCV or create a DCV session.
+	for _, notWant := range []string{"command -v dcv", "dcv create-session", "nice-dcv"} {
+		if strings.Contains(script, notWant) {
+			t.Errorf("web user-data must not contain %q (no DCV for web apps)", notWant)
+		}
+	}
+}
+
+// TestBuildWebUserData_PrivateLogin asserts a private image adds an ECR login.
+func TestBuildWebUserData_PrivateLogin(t *testing.T) {
+	enc := buildWebUserData("111111111111.dkr.ecr.us-east-1.amazonaws.com/app:1", 8888, true, true, "us-east-1")
+	raw, _ := base64.StdEncoding.DecodeString(enc)
+	script := string(raw)
+	if !strings.Contains(script, "ecr get-login-password") {
+		t.Error("private web image should authenticate to ECR before pull")
+	}
+	if !strings.Contains(script, "--gpus all") {
+		t.Error("gpu web app should pass --gpus all")
+	}
+}
+
 // TestBuildDCVUserData_LegacyUnchanged guards that the non-container path still
 // bakes the launch_command as init and does NOT pull a container.
 func TestBuildDCVUserData_LegacyUnchanged(t *testing.T) {
