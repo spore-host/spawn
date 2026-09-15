@@ -113,6 +113,37 @@ func TestDCVInstalledAtBoot(t *testing.T) {
 	}
 }
 
+// TestBuildDesktopDCVUserData asserts a bare desktop session (#591) installs a
+// desktop environment + DCV, runs the desktop init (not an app), and pulls no
+// container.
+func TestBuildDesktopDCVUserData(t *testing.T) {
+	enc := buildDesktopDCVUserData("console")
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		t.Fatalf("user-data is not valid base64: %v", err)
+	}
+	script := string(raw)
+	if strings.Contains(script, "%!") {
+		t.Fatalf("format-verb leak in desktop user-data:\n%s", script)
+	}
+	for _, want := range []string{
+		"command -v dcv",                        // DCV still installed at boot
+		`groupinstall -y "Desktop"`,             // desktop environment install
+		desktopInitPath,                         // desktop launcher written
+		"--init " + `"` + desktopInitPath + `"`, // DCV session init is the desktop, not an app
+		"gnome-session",                         // full desktop preferred
+		"xterm",                                 // bare terminal fallback
+		"dcv create-session",                    // still a DCV session
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("desktop user-data missing %q\n---\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "docker pull") {
+		t.Error("desktop session must not pull a container")
+	}
+}
+
 // TestBuildDCVUserData_LegacyUnchanged guards that the non-container path still
 // bakes the launch_command as init and does NOT pull a container.
 func TestBuildDCVUserData_LegacyUnchanged(t *testing.T) {

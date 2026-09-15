@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`spawn app launch desktop` — a bare Linux desktop session** (#591). For when
+  you want a general GUI workspace ("open a terminal and run anything") rather
+  than a single-app kiosk: it installs a desktop environment + Amazon DCV at boot
+  and streams the whole desktop over DCV, no application container. CPU by default
+  (cheaper); pass `--instance-type g6.xlarge` for a GL-accelerated desktop. Built
+  on the new catalog `kind` field (libs v0.45.0): `application` (the default;
+  today's single-app-over-DCV, and what `dcv: true` means) and `desktop`. (`web`
+  is reserved for the upcoming web-UI app kind, #590.)
+
 ## [0.106.0] - 2026-09-13
 
 ### Fixed

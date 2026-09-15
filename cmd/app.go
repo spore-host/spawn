@@ -218,26 +218,37 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// 4c. Launch kind (#590/#591): application (a single GUI app over a DCV
+	// virtual session — the default), desktop (a bare Linux desktop over DCV, no
+	// specific app), or web (an app that serves its own web UI — Feature B).
+	kind := entry.Kind()
+	if kind == catalog.KindWeb {
+		return fmt.Errorf("%s is a web app (kind=web) — web-app launch is not supported in this build yet (spawn#590)", entry.Name)
+	}
+
 	// 5. Resolve image + base AMI (container catalog, #290).
 	//
-	// Container apps run a Docker image (entry.Image:tag) on the shared
-	// spore-dcv-base AMI (entry.BaseAMIs[region]) — no per-app AMI. The image tag
-	// is the requested --app-version validated against the catalog, or the
-	// default. A not-yet-containerized app (no Image) still launches via its
-	// legacy launch_command on a standard AL2023 AMI.
+	// Container apps run a Docker image (entry.Image:tag) on the SSM-resolved base
+	// AMI (#286/#389) — no per-app AMI. The image tag is the requested
+	// --app-version validated against the catalog, or the default. A
+	// not-yet-containerized app (no Image) launches via its legacy launch_command.
+	// A desktop kind has no image/command — it runs a desktop environment
+	// installed at boot, so it skips image resolution entirely (#591).
 	imageTag := ""
-	if entry.Containerized() {
-		imageTag, err = entry.ResolveTag(appLaunchVersion)
-		if err != nil {
-			return err // names the available versions
+	if kind != catalog.KindDesktop {
+		if entry.Containerized() {
+			imageTag, err = entry.ResolveTag(appLaunchVersion)
+			if err != nil {
+				return err // names the available versions
+			}
+		} else if appLaunchVersion != "" {
+			return fmt.Errorf("--app-version is not supported for %s (not a containerized app)", entry.Name)
+		} else if entry.LaunchCommand == "" {
+			// No image (catalog/overlay/--image) and no legacy launch command → nothing
+			// to launch. This is the definition-only case (#392): the global catalog
+			// may ship an app's hardware spec without an image; the user supplies one.
+			return fmt.Errorf("no image configured for %s — supply one with --image <ref>, or add a binding to ~/.spawn/catalog.yaml (see 'spawn app list')", entry.Name)
 		}
-	} else if appLaunchVersion != "" {
-		return fmt.Errorf("--app-version is not supported for %s (not a containerized app)", entry.Name)
-	} else if entry.LaunchCommand == "" {
-		// No image (catalog/overlay/--image) and no legacy launch command → nothing
-		// to launch. This is the definition-only case (#392): the global catalog
-		// may ship an app's hardware spec without an image; the user supplies one.
-		return fmt.Errorf("no image configured for %s — supply one with --image <ref>, or add a binding to ~/.spawn/catalog.yaml (see 'spawn app list')", entry.Name)
 	}
 
 	// Launchability filter (#392): refuse a private image this account can't pull.
@@ -319,12 +330,16 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	// pre-pull the image and run it into the DCV display as the session init;
 	// legacy apps use the baked launch_command.
 	var dcvUserData string
-	if entry.Containerized() {
+	switch {
+	case kind == catalog.KindDesktop:
+		fmt.Fprintf(os.Stderr, "Desktop session (bare Linux desktop, no application)\n")
+		dcvUserData = buildDesktopDCVUserData(dcvSessionID)
+	case entry.Containerized():
 		image := entry.Image + ":" + imageTag
 		private := entry.ImageVisibility() == catalog.VisibilityPrivate
 		fmt.Fprintf(os.Stderr, "App image: %s (%s)\n", image, entry.ImageVisibility())
 		dcvUserData = buildContainerDCVUserData(image, entry.GPU, private, region, dcvSessionID)
-	} else {
+	default:
 		dcvUserData = buildDCVUserData(entry.LaunchCommand, dcvSessionID)
 	}
 
@@ -513,6 +528,40 @@ chmod +x %s
 // buildDCVUserData returns a base64-encoded user-data script that starts DCV and creates a session.
 func buildDCVUserData(launchCommand, sessionID string) string {
 	return buildDCVUserDataWithInit(launchCommand, sessionID, "", launchCommand)
+}
+
+// desktopInitPath is where the desktop-session launcher is installed; DCV runs
+// it as the session --init, so it populates the virtual session's display.
+const desktopInitPath = "/usr/local/bin/spore-desktop-init"
+
+// buildDesktopDCVUserData builds user-data for a bare desktop session (#591): a
+// full Linux desktop in the DCV virtual session instead of a single-app kiosk —
+// "open a terminal and run anything". No container, no application. It installs
+// a desktop environment at boot (in the pre-create step) and runs it as the DCV
+// session --init, with a bare window-manager + terminal fallback so the session
+// is always usable even if the full desktop install fails. Reuses the shared DCV
+// user-data core (DCV install, cert, spored, create-session).
+func buildDesktopDCVUserData(sessionID string) string {
+	preCreate := fmt.Sprintf(`echo 'Installing desktop environment...'
+# GNOME is the AWS-documented AL2023 desktop; always add a minimal WM + terminal
+# as a fallback so the session is usable regardless.
+dnf groupinstall -y "Desktop" >/dev/null 2>&1 || dnf install -y gnome-session gnome-terminal >/dev/null 2>&1 || echo 'WARNING: GNOME install failed'
+dnf install -y xterm metacity >/dev/null 2>&1 || true
+cat > %s <<'EOFDESK'
+#!/bin/bash
+# spore desktop session init (#591). Prefer a full GNOME desktop on X11; fall
+# back to a bare window manager + terminal so the session always comes up.
+export XDG_SESSION_TYPE=x11
+export GDK_BACKEND=x11
+if command -v gnome-session >/dev/null 2>&1; then
+  exec dbus-run-session -- gnome-session
+fi
+command -v metacity >/dev/null 2>&1 && metacity &
+exec xterm -maximized
+EOFDESK
+chmod +x %s
+`, desktopInitPath, desktopInitPath)
+	return buildDCVUserDataWithInit(desktopInitPath, sessionID, preCreate, "desktop")
 }
 
 // Amazon DCV version installed at boot. The CloudFront layout is
