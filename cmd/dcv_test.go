@@ -80,7 +80,7 @@ func TestDCVStatusTerminal(t *testing.T) {
 func TestDCVFailureMessage(t *testing.T) {
 	// Each terminal status produces a distinct, non-generic message naming the layer.
 	cases := map[string]string{
-		dcvStatusNotInstalled:      "no NICE DCV server",
+		dcvStatusNotInstalled:      "DCV server isn't installed",
 		dcvStatusServerNotRunning:  "DCV server failed to start",
 		dcvStatusSessionNotCreated: "session was never created",
 		dcvStatusTagWriteDenied:    "couldn't write its ready tag",
