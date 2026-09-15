@@ -75,6 +75,10 @@ const (
 // account (#392): show=false hides it (a private image owned by another account
 // you can't pull); otherwise status is "launchable" or "recipe". Pure.
 func classifyForList(e *catalog.AppEntry, callerAccount string) (show bool, status string) {
+	if e.Kind() == catalog.KindDesktop {
+		// A bare desktop needs no image — always launchable (#591).
+		return true, appStatusLaunchable
+	}
 	if e.RecipeOnly() {
 		// A buildable definition: shown as a recipe regardless of account (the
 		// recipe itself is public). It becomes launchable once a cake is bound.
