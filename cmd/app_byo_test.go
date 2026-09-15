@@ -94,6 +94,7 @@ func TestClassifyForList(t *testing.T) {
 		{"recipe-only shown as recipe", catalog.AppEntry{Name: "pv", Recipe: "infra/amis/containers/paraview"}, "111111111111", true, appStatusRecipe},
 		{"recipe shown even with no creds", catalog.AppEntry{Name: "pv", Recipe: "infra/x"}, "", true, appStatusRecipe},
 		{"legacy launch_command launchable", catalog.AppEntry{Name: "igv", LaunchCommand: "/opt/igv"}, "", true, appStatusLaunchable},
+		{"desktop launchable with no image", catalog.AppEntry{Name: "desktop", KindRaw: "desktop"}, "", true, appStatusLaunchable},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
