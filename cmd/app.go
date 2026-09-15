@@ -256,10 +256,12 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 			}
 		} else if appLaunchVersion != "" {
 			return fmt.Errorf("--app-version is not supported for %s (not a containerized app)", entry.Name)
-		} else if entry.LaunchCommand == "" {
-			// No image (catalog/overlay/--image) and no legacy launch command → nothing
-			// to launch. This is the definition-only case (#392): the global catalog
-			// may ship an app's hardware spec without an image; the user supplies one.
+		} else {
+			// No container image. This is the definition-only case (#392): the global
+			// catalog may ship an app's hardware spec without an image (the user
+			// supplies one). A bare legacy launch_command also lands here — it relied
+			// on the retired baked-AMI model (#389) and can't launch now, so refuse
+			// rather than spin a doomed instance (#592) that fails at session init.
 			return fmt.Errorf("no image configured for %s — supply one with --image <ref>, or add a binding to ~/.spawn/catalog.yaml (see 'spawn app list')", entry.Name)
 		}
 	}

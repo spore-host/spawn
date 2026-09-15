@@ -93,7 +93,7 @@ func TestClassifyForList(t *testing.T) {
 		{"others private hidden", catalog.AppEntry{Name: "theirs", Image: "222222222222.dkr.ecr.us-east-1.amazonaws.com/theirs", TagDefault: "1"}, "111111111111", false, ""},
 		{"recipe-only shown as recipe", catalog.AppEntry{Name: "pv", Recipe: "infra/amis/containers/paraview"}, "111111111111", true, appStatusRecipe},
 		{"recipe shown even with no creds", catalog.AppEntry{Name: "pv", Recipe: "infra/x"}, "", true, appStatusRecipe},
-		{"legacy launch_command launchable", catalog.AppEntry{Name: "igv", LaunchCommand: "/opt/igv"}, "", true, appStatusLaunchable},
+		{"legacy launch_command is a definition, not launchable (#592)", catalog.AppEntry{Name: "igv", LaunchCommand: "/opt/igv"}, "", true, appStatusRecipe},
 		{"desktop launchable with no image", catalog.AppEntry{Name: "desktop", KindRaw: "desktop"}, "", true, appStatusLaunchable},
 	}
 	for _, c := range cases {
