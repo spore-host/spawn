@@ -843,8 +843,8 @@ systemctl start dcvserver
 # Wait for DCV to initialize
 sleep 15
 
-# The DCV AMI auto-creates a console session (owner: dcv). Close it so we can
-# create one with the correct owner (ec2-user) and init command (the application).
+# dcvserver auto-creates a console session on start (owner: dcv). Close it so we
+# can create one with the correct owner (ec2-user) and init command (the application).
 dcv close-session console 2>/dev/null || true
 sleep 2
 
