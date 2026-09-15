@@ -84,6 +84,12 @@ func classifyForList(e *catalog.AppEntry, callerAccount string) (show bool, stat
 		// recipe itself is public). It becomes launchable once a cake is bound.
 		return true, appStatusRecipe
 	}
+	if e.Image == "" {
+		// No container image (desktop handled above). A bare legacy launch_command
+		// relied on the retired baked-AMI model (#389) and can't launch now — it's a
+		// definition, not launchable. Bind an image via overlay or --image to launch.
+		return true, appStatusRecipe
+	}
 	if ok, _ := appResolvable(e, callerAccount); ok {
 		return true, appStatusLaunchable
 	}

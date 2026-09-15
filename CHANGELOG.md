@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn app launch` no longer lists or launches apps that can't actually run**
+  (#592). The catalog's legacy `launch_command`-only apps (igv, qgis, fiji, ds9)
+  have no container image, and the baked-AMI model a bare `launch_command` relied
+  on is retired (#389) — so they can never launch. They were shown as
+  "launchable" in `spawn app list`, and `spawn app launch <them>` would spin a
+  *doomed* instance that failed at session init (wasted cost). They now show as
+  "recipe available" (definitions — bind an image via `--image` or a
+  `~/.spawn/catalog.yaml` overlay to launch), and the launch refuses upfront with
+  a clear "no image configured" message instead of launching.
+
 ### Documentation
 - **Documented the `spawn app` application-streaming feature** (#593). The README
   now has a "Launch a GUI or web app" section covering the three launch kinds
