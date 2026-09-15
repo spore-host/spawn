@@ -45,9 +45,11 @@ spawn app launch <app-name> [flags]
 | `--instance-type` |  | string |  | Override instance type (default: first catalog family + .xlarge) |
 | `--name` |  | string |  | Session name (default: &lt;app&gt;-&lt;timestamp&gt;) |
 | `--no-open` |  | bool |  | Write session file but do not open browser automatically |
+| `--no-web-auth` |  | bool |  | Disable the spored :443 access-token gate for a web app (the app must provide its own auth) |
 | `--region` |  | string |  | AWS region (default: from AWS config) |
 | `--spot` |  | bool |  | Use Spot pricing |
 | `--ttl` |  | string |  | Hard termination deadline (e.g. 4h, 8h) |
+| `--web-arg` |  | stringArray |  | Extra argument for a web app's container, repeatable (e.g. --web-arg=--bind-addr=0.0.0.0:8080) |
 | `--web-port` |  | int |  | Launch --image as a web-UI app served on this container port (e.g. 8080 for code-server, 8888 for Jupyter); spored fronts it with TLS on :443 |
 
 ### `spawn app list`

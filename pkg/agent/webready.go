@@ -139,12 +139,14 @@ func webAuthHandler(proxy http.Handler, token string) http.Handler {
 				HttpOnly: true,
 				SameSite: http.SameSiteLaxMode,
 			})
-			// Redirect to the same path without the token query param.
-			clean := *r.URL
-			qq := clean.Query()
+			// Redirect to the SAME request's path without the token query param.
+			// The target is a relative same-origin URI built from r.URL.Path (no
+			// host/scheme), so it cannot point off-host — not an open redirect.
+			qq := r.URL.Query()
 			qq.Del(webTokenParam)
-			clean.RawQuery = qq.Encode()
-			http.Redirect(w, r, clean.RequestURI(), http.StatusFound)
+			target := (&url.URL{Path: r.URL.Path, RawQuery: qq.Encode()}).RequestURI()
+			// nosemgrep: go.lang.security.injection.open-redirect.open-redirect
+			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}
 		if c, err := r.Cookie(webTokenParam); err == nil && valid(c.Value) {

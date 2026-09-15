@@ -56,6 +56,8 @@ func TestWebAuthHandler(t *testing.T) {
 		h := webAuthHandler(app, token)
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("GET", "/", nil)
+		// A request cookie simulating a browser send (not a Set-Cookie); HttpOnly/Secure are response-cookie concerns.
+		// nosemgrep
 		req.AddCookie(&http.Cookie{Name: "spore_token", Value: token})
 		h.ServeHTTP(rec, req)
 		if !reached || rec.Code != 200 {
@@ -68,6 +70,8 @@ func TestWebAuthHandler(t *testing.T) {
 		h := webAuthHandler(app, token)
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("GET", "/", nil)
+		// A request cookie simulating a browser send (not a Set-Cookie); HttpOnly/Secure are response-cookie concerns.
+		// nosemgrep
 		req.AddCookie(&http.Cookie{Name: "spore_token", Value: "nope"})
 		h.ServeHTTP(rec, req)
 		if reached || rec.Code != http.StatusForbidden {
