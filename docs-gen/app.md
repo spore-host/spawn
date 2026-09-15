@@ -39,6 +39,7 @@ spawn app launch <app-name> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--app-version` |  | string |  | App container image tag to launch (default: catalog default; see 'spawn app list') |
+| `--health-path` |  | string |  | HTTP path probed for web-app readiness (default "/") |
 | `--idle-timeout` |  | string |  | Stop when DCV has no clients for this duration (default: catalog default) |
 | `--image` |  | string |  | Launch a BYO container image for this app (overrides the catalog binding), e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview:5.13.2 |
 | `--instance-type` |  | string |  | Override instance type (default: first catalog family + .xlarge) |
@@ -47,6 +48,7 @@ spawn app launch <app-name> [flags]
 | `--region` |  | string |  | AWS region (default: from AWS config) |
 | `--spot` |  | bool |  | Use Spot pricing |
 | `--ttl` |  | string |  | Hard termination deadline (e.g. 4h, 8h) |
+| `--web-port` |  | int |  | Launch --image as a web-UI app served on this container port (e.g. 8080 for code-server, 8888 for Jupyter); spored fronts it with TLS on :443 |
 
 ### `spawn app list`
 

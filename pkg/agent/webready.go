@@ -121,6 +121,11 @@ func (a *Agent) startWebProxy(port int) error {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	// Binding all interfaces on :443 is intentional and required: the web app must
+	// be reachable over TLS from the user's browser. Public exposure is gated by
+	// the spawn-web security group (:443 only) + the app's own auth, not by the
+	// bind address. TLS min version is pinned above.
+	// nosemgrep: go.lang.security.audit.net.bind_all.avoid-bind-to-all-interfaces
 	ln, err := tls.Listen("tcp", ":443", tlsCfg)
 	if err != nil {
 		return fmt.Errorf("listen :443: %w", err)
