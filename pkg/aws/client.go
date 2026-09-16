@@ -273,6 +273,7 @@ type LaunchConfig struct {
 	AppMode         string // "web" for a port-served app; empty otherwise — tag spawn:app-mode
 	ReadyPort       int    // container HTTP port to probe + proxy (e.g. 8888) — tag spawn:ready-port
 	ReadyHealthPath string // HTTP path probed for readiness (default "/") — tag spawn:ready-path
+	WebAuth         string // web proxy auth: "token" (default, spored gates :443 with a token) or "none" — tag spawn:web-auth
 
 	RootVolumeSizeGiB int32 // Override root EBS volume size in GiB (0 = use default 20 GiB)
 

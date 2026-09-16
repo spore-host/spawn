@@ -117,6 +117,7 @@ type Config struct {
 	AppMode         string
 	ReadyPort       int
 	ReadyHealthPath string
+	WebAuth         string // "token" (default) gates the :443 proxy with a token; "none" disables
 
 	// Job array settings
 	JobArrayID    string

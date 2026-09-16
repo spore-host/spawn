@@ -59,6 +59,7 @@ func extractReadyFromTags(tags map[string]string) (url, token, host, status stri
 
 // dcvScanResult is one poll pass's reading of the target instance's DCV tags.
 type dcvScanResult struct {
+	url     string // spawn:ready-url verbatim (web: carries the ?spore_token=); "" until ready
 	token   string // spawn:ready-token (auth token); "" until ready
 	host    string // FQDN from the ready-url, if present
 	dnsName string // spawn:dns-name, if spored registered one
@@ -74,8 +75,9 @@ func scanDCVReady(instances []spawnclient.InstanceInfo, instanceID string) dcvSc
 		if inst.InstanceID != instanceID {
 			continue
 		}
-		_, token, host, status := extractReadyFromTags(inst.Tags)
+		url, token, host, status := extractReadyFromTags(inst.Tags)
 		return dcvScanResult{
+			url:     url,
 			token:   token,
 			host:    host,
 			dnsName: inst.Tags["spawn:dns-name"],
