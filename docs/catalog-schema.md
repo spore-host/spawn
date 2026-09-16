@@ -12,6 +12,10 @@ This page documents every field of an `AppEntry` for someone authoring a catalog
 entry or a `~/.spawn/catalog.yaml` overlay. The authoritative source is the godoc
 in `libs/catalog/catalog.go` (Go module `github.com/spore-host/libs`).
 
+> New to this? Start with [Bring your own app to spawn](bring-your-own-app.md) —
+> the how-to (incl. the OpenRefine worked example) — then use this page as the
+> field-by-field reference.
+
 ## Where entries live
 
 - **Global catalog** — embedded `catalog.yaml` shipped with the tools. Public

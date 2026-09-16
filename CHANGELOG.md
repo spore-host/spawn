@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Built-in `openrefine` web app** — `spawn app launch openrefine` runs OpenRefine
+  (via libs v0.49.0), gated by spored's :443 proxy token. Completes the built-in
+  web trio with `code-server` and `jupyter`. Its image is built from the official
+  OpenRefine release in the new `spore-host/app-images` repo (OpenRefine ships no
+  canonical image). (spore-host spawn#590)
+
+### Documentation
+- **New `docs/bring-your-own-app.md`** — how to run a web app on spawn, including
+  the "no official image" case (build one; OpenRefine worked example in
+  `spore-host/app-images`) and the three rules for a web-app image. Linked from
+  the catalog schema reference.
+
 ## [0.109.0] - 2026-09-15
 
 ### Added
