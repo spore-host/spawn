@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Built-in `jupyter` web app** — `spawn app launch jupyter` runs JupyterLab in
+  the browser (via libs v0.48.0's catalog entry), gated by spored's :443 proxy
+  token. Joins `code-server` as a built-in web-UI app (spore-host spawn#590).
+
 ## [0.108.0] - 2026-09-15
 
 ### Added
