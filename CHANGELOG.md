@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.109.0] - 2026-09-15
+
 ### Added
 - **Built-in `jupyter` web app** — `spawn app launch jupyter` runs JupyterLab in
   the browser (via libs v0.48.0's catalog entry), gated by spored's :443 proxy
@@ -3603,7 +3605,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.108.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.109.0...HEAD
+[0.109.0]: https://github.com/spore-host/spawn/compare/v0.108.0...v0.109.0
 [0.108.0]: https://github.com/spore-host/spawn/compare/v0.107.0...v0.108.0
 [0.107.0]: https://github.com/spore-host/spawn/compare/v0.106.0...v0.107.0
 [0.106.0]: https://github.com/spore-host/spawn/compare/v0.105.0...v0.106.0
