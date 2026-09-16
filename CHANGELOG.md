@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Built-in `code-server` web app** — `spawn app launch code-server` runs VS Code
+  in the browser (via libs v0.47.0's catalog entry), gated by spored's :443 proxy
+  token. The first built-in web-UI app (spore-host spawn#590).
+
+### Added
 - **Web apps: container run args + a proxy access-token gate** (#590). A `web`
   catalog entry can now set `args:` (or launch with repeatable `--web-arg`) — the
   args are appended to the container's `docker run`, so images that default to

@@ -41,7 +41,7 @@ require (
 	github.com/sigstore/sigstore-go v1.2.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spore-host/cohort v0.2.0
-	github.com/spore-host/libs v0.46.0
+	github.com/spore-host/libs v0.47.0
 	github.com/spore-host/truffle v0.53.0
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
 	go.opentelemetry.io/otel v1.44.0
