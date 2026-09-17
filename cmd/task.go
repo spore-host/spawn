@@ -198,6 +198,7 @@ var (
 	taskRunRegion       string
 	taskRunWait         bool
 	taskRunPollInterval time.Duration
+	taskRunAMI          string
 	taskStatusRegion    string
 	taskStatusCheckDone bool
 )
@@ -219,6 +220,12 @@ If spec.container is set, the command runs inside that image (Docker is installe
 on demand; the manifest dirs are bind-mounted; a private-ECR image is pulled with
 an ecr:ReadOnly grant, GPUs passed with --gpus all). Otherwise it runs on the host.
 
+The launch AMI is auto-selected from the sized instance type: a GPU family (g5,
+g6, p4/p5, …) gets the AL2023 NVIDIA DLAMI so --gpus all lands on a host with a
+driver (spawn#601), and everything else gets the standard AL2023 for the type's
+architecture. Pin a specific AMI with --ami (or placement.ami in the spec); an
+explicit AMI always wins over auto-selection.
+
 --dry-run sizes and prints the plan without launching.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if taskRunSpecPath == "" {
@@ -227,6 +234,13 @@ an ecr:ReadOnly grant, GPUs passed with --gpus all). Otherwise it runs on the ho
 		spec, err := taskproto.ParseSpecFile(taskRunSpecPath)
 		if err != nil {
 			return err
+		}
+		// An explicit --ami wins over auto-selection AND over any placement.ami in
+		// the spec: the operator typed it now, so honor it verbatim (parity with
+		// `spawn launch --ami`). Left unset, the sized-instance auto-selection below
+		// applies (GPU DLAMI for a GPU family, standard AL2023 otherwise, spawn#601).
+		if taskRunAMI != "" {
+			spec.Placement.AMI = taskRunAMI
 		}
 		awsClient, err := aws.NewClient(cmd.Context())
 		if err != nil {
@@ -332,6 +346,12 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	if note := oldGenerationNote(sized.Family); note != "" {
 		fmt.Fprintf(out, "              %s\n", note)
 	}
+	// AMI: show what will actually be launched (spawn#601). Without this line an
+	// author could not tell a GPU spec would get the NVIDIA DLAMI vs the driverless
+	// default AL2023 — the issue's whole confusion. Classified OFFLINE from the
+	// sized type (no AWS): the real launch resolves the same choice via
+	// launcher.Provision → GetRecommendedAMI, which uses these same classifiers.
+	fmt.Fprintf(out, "AMI:          %s\n", taskAMIPlan(spec, sized.InstanceType))
 	// Root disk: show what will actually apply, whether that's the TaskSpec's
 	// explicit resources.disk_gib or the AMI default — the issue's complaint
 	// (#556) was that NOTHING in the preview tipped off an author who forgot to
@@ -390,6 +410,25 @@ func oldGenerationNote(family string) string {
 		return "instance family: " + family + " — " + note
 	}
 	return ""
+}
+
+// taskAMIPlan describes the AMI a task will launch with, for the dry-run preview
+// (spawn#601). It mirrors — offline, without an AWS call — the choice the real
+// launch makes: an explicit spec/flag AMI wins; otherwise a GPU-family instance
+// gets the AL2023 NVIDIA DLAMI (so `docker run --gpus all` finds a driver) and
+// everything else gets the standard AL2023 for the type's architecture. It reuses
+// the SAME aws.DetectGPUInstance / aws.DetectArchitecture classifiers that
+// GetRecommendedAMI (the real resolver) uses, so the preview cannot drift from
+// what gets launched.
+func taskAMIPlan(spec *taskproto.TaskSpec, instanceType string) string {
+	if ami := strings.TrimSpace(spec.Placement.AMI); ami != "" {
+		return ami + "  (explicit: --ami / placement.ami)"
+	}
+	arch := aws.DetectArchitecture(instanceType)
+	if aws.DetectGPUInstance(instanceType) {
+		return fmt.Sprintf("AL2023 GPU DLAMI — NVIDIA driver, %s (auto-selected for GPU instance %s; spawn#601)", arch, instanceType)
+	}
+	return fmt.Sprintf("AL2023 default — %s (auto-selected)", arch)
 }
 
 // runTaskReal launches a task for real: it sizes the instance (same as dry-run),
@@ -896,6 +935,7 @@ func init() {
 	taskRunCmd.Flags().StringVar(&taskRunSpecPath, "spec", "", "Path to a TaskSpec JSON file (required)")
 	taskRunCmd.Flags().BoolVar(&taskRunDryRun, "dry-run", false, "Size and preview the task without launching")
 	taskRunCmd.Flags().StringVar(&taskRunRegion, "region", "", "Region to size against (default: the configured AWS region)")
+	taskRunCmd.Flags().StringVar(&taskRunAMI, "ami", "", "Pin a specific AMI (overrides auto-selection and placement.ami); empty = auto-select from the sized instance type (GPU DLAMI for GPU families)")
 	taskRunCmd.Flags().BoolVar(&taskRunWait, "wait", false, "Block until the task's completion record appears, then exit with its exit code")
 	taskRunCmd.Flags().DurationVar(&taskRunPollInterval, "poll-interval", 15*time.Second, "How often to poll for completion when --wait is set")
 

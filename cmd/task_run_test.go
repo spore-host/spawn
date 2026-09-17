@@ -161,6 +161,125 @@ func TestRenderTaskDryRun_Container(t *testing.T) {
 	}
 }
 
+// TestRenderTaskDryRun_GPUAMISelected covers spawn#601: a GPU-family instance must
+// show the NVIDIA GPU DLAMI in the dry-run AMI line — NOT a driverless default —
+// so an author can see `--gpus all` will land on a host with a driver. Regression
+// guard for the issue's confusion (the AMI selection was invisible in the preview).
+func TestRenderTaskDryRun_GPUAMISelected(t *testing.T) {
+	spec := &taskproto.TaskSpec{
+		TaskID:    "gpu-ami-repro",
+		Container: "nvcr.io/hpc/gromacs:latest",
+		Command:   []string{"bash", "-c", "nvidia-smi"},
+		Resources: taskproto.ResourceRequest{CPU: 8, MemoryGiB: 32, Families: []string{"g5"}},
+		Lifecycle: taskproto.Lifecycle{TTL: "10m", OnComplete: "terminate"},
+	}
+	finder := fakeTaskFinder{cands: []taskproto.Candidate{
+		{InstanceType: "g5.2xlarge", Family: "g5", VCPUs: 8, MemoryGiB: 32, GPUs: 1, OnDemandPrice: 1.212},
+	}}
+	var buf bytes.Buffer
+	if err := renderTaskDryRun(context.Background(), &buf, spec, finder, "us-west-2"); err != nil {
+		t.Fatalf("renderTaskDryRun: %v", err)
+	}
+	got := buf.String()
+	// The AMI line must name the GPU DLAMI, and must not present the GPU instance's
+	// AMI as an unqualified default (the pre-#601 behavior the reporter inferred).
+	if !strings.Contains(got, "AMI:          AL2023 GPU DLAMI") {
+		t.Errorf("GPU dry-run must show the GPU DLAMI on the AMI line\n--- output ---\n%s", got)
+	}
+	if !strings.Contains(got, "NVIDIA driver") {
+		t.Errorf("GPU dry-run AMI line should mention the NVIDIA driver\n--- output ---\n%s", got)
+	}
+	if strings.Contains(got, "AMI:          AL2023 default") {
+		t.Errorf("GPU dry-run must not select the driverless default AL2023 AMI\n--- output ---\n%s", got)
+	}
+}
+
+// TestRenderTaskDryRun_ExplicitAMIOverrides covers the override half of spawn#601:
+// an explicit placement.ami (equivalently the --ami flag, which the RunE copies
+// into it) always wins over auto-selection, even for a GPU family.
+func TestRenderTaskDryRun_ExplicitAMIOverrides(t *testing.T) {
+	spec := &taskproto.TaskSpec{
+		TaskID:    "pinned-ami",
+		Command:   []string{"nvidia-smi"},
+		Resources: taskproto.ResourceRequest{CPU: 8, MemoryGiB: 32, Families: []string{"g5"}},
+		Placement: taskproto.Placement{AMI: "ami-0custompinned"},
+		Lifecycle: taskproto.Lifecycle{TTL: "10m"},
+	}
+	finder := fakeTaskFinder{cands: []taskproto.Candidate{
+		{InstanceType: "g5.2xlarge", Family: "g5", VCPUs: 8, MemoryGiB: 32, GPUs: 1, OnDemandPrice: 1.212},
+	}}
+	var buf bytes.Buffer
+	if err := renderTaskDryRun(context.Background(), &buf, spec, finder, "us-west-2"); err != nil {
+		t.Fatalf("renderTaskDryRun: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "AMI:          ami-0custompinned") {
+		t.Errorf("explicit AMI must be shown verbatim on the AMI line\n--- output ---\n%s", got)
+	}
+	// Auto-selection (GPU DLAMI) must NOT appear — the explicit AMI overrides it.
+	if strings.Contains(got, "AL2023 GPU DLAMI") {
+		t.Errorf("explicit AMI must override GPU auto-selection\n--- output ---\n%s", got)
+	}
+}
+
+// TestRenderTaskDryRun_NonGPUUnchanged covers the untouched half of spawn#601: a
+// CPU instance still resolves the standard AL2023 for its architecture and never
+// the GPU DLAMI.
+func TestRenderTaskDryRun_NonGPUUnchanged(t *testing.T) {
+	spec := &taskproto.TaskSpec{
+		TaskID:    "cpu-task",
+		Command:   []string{"bwa", "mem"},
+		Resources: taskproto.ResourceRequest{CPU: 16, MemoryGiB: 32},
+		Lifecycle: taskproto.Lifecycle{TTL: "4h"},
+	}
+	finder := fakeTaskFinder{cands: []taskproto.Candidate{
+		{InstanceType: "c7i.4xlarge", Family: "c7i", VCPUs: 16, MemoryGiB: 32, OnDemandPrice: 0.71},
+	}}
+	var buf bytes.Buffer
+	if err := renderTaskDryRun(context.Background(), &buf, spec, finder, "us-east-1"); err != nil {
+		t.Fatalf("renderTaskDryRun: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "AMI:          AL2023 default — x86_64 (auto-selected)") {
+		t.Errorf("CPU dry-run should show the standard AL2023 AMI for x86_64\n--- output ---\n%s", got)
+	}
+	if strings.Contains(got, "GPU DLAMI") {
+		t.Errorf("CPU dry-run must not select a GPU AMI\n--- output ---\n%s", got)
+	}
+}
+
+// TestTaskAMIPlan_GPUResolvesDLAMI asserts the classifier the dry-run and the real
+// launch (via GetRecommendedAMI) share agrees on GPU-ness per instance type: a GPU
+// family maps to the DLAMI label with the right arch, a CPU family to the default,
+// and an explicit AMI wins regardless (spawn#601).
+func TestTaskAMIPlan_GPUResolvesDLAMI(t *testing.T) {
+	cases := []struct {
+		name         string
+		instanceType string
+		placementAMI string
+		wantContains string
+		wantAbsent   string
+	}{
+		{"g5 x86 GPU", "g5.2xlarge", "", "AL2023 GPU DLAMI — NVIDIA driver, x86_64", "AL2023 default"},
+		{"g5g arm GPU", "g5g.xlarge", "", "AL2023 GPU DLAMI — NVIDIA driver, arm64", "AL2023 default"},
+		{"c7i CPU", "c7i.4xlarge", "", "AL2023 default — x86_64", "GPU DLAMI"},
+		{"c8g arm CPU", "c8g.4xlarge", "", "AL2023 default — arm64", "GPU DLAMI"},
+		{"explicit wins over GPU", "g5.2xlarge", "ami-pinned", "ami-pinned", "GPU DLAMI"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := &taskproto.TaskSpec{Placement: taskproto.Placement{AMI: tc.placementAMI}}
+			got := taskAMIPlan(spec, tc.instanceType)
+			if !strings.Contains(got, tc.wantContains) {
+				t.Errorf("taskAMIPlan(%q) = %q, want contains %q", tc.instanceType, got, tc.wantContains)
+			}
+			if tc.wantAbsent != "" && strings.Contains(got, tc.wantAbsent) {
+				t.Errorf("taskAMIPlan(%q) = %q, must not contain %q", tc.instanceType, got, tc.wantAbsent)
+			}
+		})
+	}
+}
+
 func TestTaskLaunchConfig(t *testing.T) {
 	spec := &taskproto.TaskSpec{
 		TaskID:    "align-42",
