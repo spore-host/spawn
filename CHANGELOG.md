@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.111.0] - 2026-09-16
+
 ### Fixed
 - **`task run` now targets a GPU AMI for GPU-sized instances, with a TaskSpec/CLI
   AMI override** (#601). When the sizer picks a GPU family (g5, g6, p4/p5, …), the
@@ -3632,7 +3634,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.110.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.111.0...HEAD
+[0.111.0]: https://github.com/spore-host/spawn/compare/v0.110.0...v0.111.0
 [0.110.0]: https://github.com/spore-host/spawn/compare/v0.109.0...v0.110.0
 [0.109.0]: https://github.com/spore-host/spawn/compare/v0.108.0...v0.109.0
 [0.108.0]: https://github.com/spore-host/spawn/compare/v0.107.0...v0.108.0
