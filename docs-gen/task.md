@@ -32,6 +32,12 @@ If spec.container is set, the command runs inside that image (Docker is installe
 on demand; the manifest dirs are bind-mounted; a private-ECR image is pulled with
 an ecr:ReadOnly grant, GPUs passed with --gpus all). Otherwise it runs on the host.
 
+The launch AMI is auto-selected from the sized instance type: a GPU family (g5,
+g6, p4/p5, …) gets the AL2023 NVIDIA DLAMI so --gpus all lands on a host with a
+driver (spawn#601), and everything else gets the standard AL2023 for the type's
+architecture. Pin a specific AMI with --ami (or placement.ami in the spec); an
+explicit AMI always wins over auto-selection.
+
 --dry-run sizes and prints the plan without launching.
 
 ```
@@ -42,6 +48,7 @@ spawn task run --spec <file> [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
+| `--ami` |  | string |  | Pin a specific AMI (overrides auto-selection and placement.ami); empty = auto-select from the sized instance type (GPU DLAMI for GPU families) |
 | `--dry-run` |  | bool |  | Size and preview the task without launching |
 | `--poll-interval` |  | duration | `15s` | How often to poll for completion when --wait is set |
 | `--region` |  | string |  | Region to size against (default: the configured AWS region) |
