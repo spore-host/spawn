@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.111.1] - 2026-09-17
+
 ### Fixed
 - **`task run` on a GPU instance now actually gives the container a GPU** (#606).
   A task sized onto a GPU family (e.g. `families: ["g5"]`) booted on the GPU DLAMI
@@ -3647,7 +3649,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.111.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.111.1...HEAD
+[0.111.1]: https://github.com/spore-host/spawn/compare/v0.111.0...v0.111.1
 [0.111.0]: https://github.com/spore-host/spawn/compare/v0.110.0...v0.111.0
 [0.110.0]: https://github.com/spore-host/spawn/compare/v0.109.0...v0.110.0
 [0.109.0]: https://github.com/spore-host/spawn/compare/v0.108.0...v0.109.0
