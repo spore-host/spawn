@@ -45,7 +45,12 @@ func (e *ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir s
 		return -1, fmt.Errorf("parse task spec: %w", err)
 	}
 
-	script := taskproto.GeneratePooledJobScript(spec, e.ResultsBucket, e.Region)
+	// Preserve the pre-#606 pooled behavior: --gpus all only when the spec asked
+	// for GPUs. The single-instance `task run` path additionally infers GPU from
+	// the sized family; a pooled worker doesn't size here (it runs on an already-
+	// provisioned instance), so GPU auto-detection for pools is a separate concern.
+	gpu := spec.Resources.GPUs > 0
+	script := taskproto.GeneratePooledJobScript(spec, e.ResultsBucket, e.Region, gpu)
 
 	// Write the script into the workspace and run it there, so its relative paths
 	// and any scratch files land in the isolated dir (which the worker resets after).
