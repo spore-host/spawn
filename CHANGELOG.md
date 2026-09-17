@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`task run` on a GPU instance now actually gives the container a GPU** (#606).
+  A task sized onto a GPU family (e.g. `families: ["g5"]`) booted on the GPU DLAMI
+  but the wrapper only added `docker run --gpus all` when `resources.gpus` was
+  explicitly set — so the common "just pick a g5" spec ran the container with **no
+  GPU**, and `nvidia-smi` failed with `command not found` (exit 127). `--gpus all`
+  is now passed whenever the *resolved* instance is GPU-capable (same detection
+  that selects the GPU DLAMI), not only when `gpus` is set. The wrapper also
+  installs + `nvidia-ctk runtime configure`s the NVIDIA Container Toolkit for GPU
+  runs (idempotent — a DLAMI that already ships it is just re-configured), so
+  `--gpus all` reliably attaches the driver. Validated on a real g5.xlarge:
+  `nvidia-smi` now reports the A10G inside the container (exit 0).
+
 ## [0.111.0] - 2026-09-16
 
 ### Fixed

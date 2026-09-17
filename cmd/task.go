@@ -457,7 +457,12 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		return fmt.Errorf("ensure results bucket %s: %w", resultsBucket, err)
 	}
 
-	wrapper := taskproto.GenerateWrapper(spec, resultsBucket, region)
+	// GPU-capable if the spec asked for GPUs or the sized instance is a GPU family
+	// (e.g. sized from families:["g5"] without an explicit gpus count) — same
+	// classifier that selects the GPU DLAMI. Drives `--gpus all` + NVIDIA Container
+	// Toolkit setup in the wrapper (spawn#601/#606).
+	gpu := spec.Resources.GPUs > 0 || aws.DetectGPUInstance(sized.InstanceType)
+	wrapper := taskproto.GenerateWrapper(spec, resultsBucket, region, gpu)
 
 	// Scoped instance profile: the default spored role has no S3 write, so grant
 	// exactly the buckets this task reads (inputs) and writes (outputs + results).

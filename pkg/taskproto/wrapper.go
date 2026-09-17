@@ -33,8 +33,15 @@ import (
 //   - When spec.Container is set, the command runs inside that image via `docker
 //     run` with the manifest dirs bind-mounted; stage-in/out still happen on the
 //     host, so the image needs no aws CLI. Docker is installed on demand.
-func GenerateWrapper(spec *TaskSpec, resultsBucket, region string) string {
-	return generateWrapper(spec, resultsBucket, region, true)
+//
+// gpu ⇒ the resolved instance is GPU-capable (a GPU family, or an explicit GPU
+// request), so the container must run with `--gpus all` AND the host needs the
+// NVIDIA Container Toolkit installed/configured for that flag to attach the
+// driver (spawn#601/#606). The caller decides this from the SIZED instance type
+// (not just spec.Resources.GPUs), so a task sized onto a GPU box gets the GPU
+// even when the spec only asked via `families`.
+func GenerateWrapper(spec *TaskSpec, resultsBucket, region string, gpu bool) string {
+	return generateWrapper(spec, resultsBucket, region, true, gpu)
 }
 
 // GeneratePooledJobScript builds the per-job script a POOLED worker runs for one
@@ -45,14 +52,15 @@ func GenerateWrapper(spec *TaskSpec, resultsBucket, region string) string {
 // reuse. The worker stays alive and keeps pulling; it drains on idle-timeout
 // instead. The durable completion record (completion.json + .exitcode) is still
 // written, so the submitter's poll is unchanged.
-func GeneratePooledJobScript(spec *TaskSpec, resultsBucket, region string) string {
-	return generateWrapper(spec, resultsBucket, region, false)
+func GeneratePooledJobScript(spec *TaskSpec, resultsBucket, region string, gpu bool) string {
+	return generateWrapper(spec, resultsBucket, region, false, gpu)
 }
 
 // generateWrapper is the shared body. signalComplete gates the spored
 // self-terminate signal: true for the one-instance-per-task wrapper, false for a
-// pooled worker's per-job script.
-func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplete bool) string {
+// pooled worker's per-job script. gpu gates GPU-container setup (--gpus all +
+// NVIDIA Container Toolkit install).
+func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplete, gpu bool) string {
 	var b strings.Builder
 	p := func(format string, a ...interface{}) { fmt.Fprintf(&b, format, a...) }
 
@@ -178,7 +186,7 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 	p("rc=0\n")
 	p("if [ \"$STAGE_RC\" -eq 0 ]; then\n")
 	if spec.Container != "" {
-		writeContainerRun(p, spec, region)
+		writeContainerRun(p, spec, region, gpu)
 	} else {
 		// Host path: run argv in a subshell (no shell re-parse of a joined string).
 		p("  spawn_phase 'command start'\n")
@@ -284,7 +292,7 @@ func quoteArgv(argv []string) string {
 // already put inputs on the host at those dirs; stage-out reads them back after —
 // so the image needs no aws CLI. p writes into the wrapper; each line is indented
 // to sit inside the `if [ "$STAGE_RC" -eq 0 ]; then` block.
-func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region string) {
+func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region string, gpu bool) {
 	image := spec.Container
 
 	// The command script runs as the unprivileged instance user (bootstrap runs it
@@ -305,6 +313,26 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	// Wait for the socket (service start is async); bounded so we never hang.
 	p("  for _i in $(seq 1 30); do sudo docker info >/dev/null 2>&1 && break; sleep 2; done\n")
 	p("  spawn_phase 'docker install done'\n")
+
+	// GPU instances: `docker run --gpus all` needs the NVIDIA Container Toolkit as
+	// a Docker runtime to bind-mount the host driver (incl. nvidia-smi) into the
+	// container. The GPU DLAMI has the driver but AL2023's `dnf install docker`
+	// does not include the toolkit, so without this the flag is a no-op and the
+	// container sees no GPU (spawn#606). Install (if absent) + configure + restart
+	// docker; all steps are idempotent, so a DLAMI that already ships the toolkit
+	// just gets a re-configure. Only emitted for a GPU run.
+	if gpu {
+		p("  spawn_phase 'nvidia container toolkit start'\n")
+		p("  if ! command -v nvidia-ctk >/dev/null 2>&1; then\n")
+		p("    echo 'spawn: installing NVIDIA Container Toolkit...'\n")
+		p("    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo >/dev/null\n")
+		p("    sudo dnf install -y nvidia-container-toolkit\n")
+		p("  fi\n")
+		p("  sudo nvidia-ctk runtime configure --runtime=docker\n")
+		p("  sudo systemctl restart docker\n")
+		p("  for _i in $(seq 1 30); do sudo docker info >/dev/null 2>&1 && break; sleep 2; done\n")
+		p("  spawn_phase 'nvidia container toolkit done'\n")
+	}
 
 	// Private-ECR images need a docker login with the instance-role creds; public
 	// images pull anonymously. ecrImageAccount!="" ⇒ private ECR ref.
@@ -330,8 +358,12 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	// makes the container a packaging detail rather than a different security
 	// context — it always matches whoever owns the staged dirs, regardless of
 	// the image's declared USER.
+	// --gpus all whenever the resolved instance is GPU-capable (gpu), not only when
+	// spec.Resources.GPUs was explicitly set: a task sized onto a GPU box via
+	// `families` (e.g. ["g5"]) still wants its GPU (spawn#601/#606). The toolkit
+	// block above makes the flag actually attach the driver.
 	gpuFlag := ""
-	if spec.Resources.GPUs > 0 {
+	if gpu {
 		gpuFlag = "--gpus all "
 	}
 	var mounts strings.Builder
