@@ -60,6 +60,59 @@ func TestGetAL2023AMI(t *testing.T) {
 	}
 }
 
+// TestGetRecommendedAMI_GPUFamilyResolvesDLAMI ties the whole resolver together
+// (spawn#601): given only an instance TYPE, GetRecommendedAMI must resolve the
+// NVIDIA GPU DLAMI SSM param for a GPU family and the standard AL2023 param for a
+// CPU family — the exact path the task-run / launch launch uses via
+// launcher.Provision. Architecture is derived from the type (resolveArchitecture,
+// falling back to the static allow-list here since Substrate need not implement
+// DescribeInstanceTypes).
+func TestGetRecommendedAMI_GPUFamilyResolvesDLAMI(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	ctx := context.Background()
+
+	ssmClient := ssm.NewFromConfig(env.AWSConfig)
+	params := map[string]string{
+		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64":                           "ami-x86-standard",
+		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64":                            "ami-arm-standard",
+		"/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id": "ami-x86-gpu",
+		"/aws/service/deeplearning/ami/arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id":  "ami-arm-gpu",
+	}
+	for name, val := range params {
+		if _, err := ssmClient.PutParameter(ctx, &ssm.PutParameterInput{
+			Name:  aws.String(name),
+			Value: aws.String(val),
+			Type:  ssmtypes.ParameterTypeString,
+		}); err != nil {
+			t.Fatalf("PutParameter %s: %v", name, err)
+		}
+	}
+
+	client := NewClientFromConfig(env.AWSConfig)
+
+	tests := []struct {
+		name         string
+		instanceType string
+		wantAMI      string
+	}{
+		{"g5 x86 GPU → DLAMI", "g5.2xlarge", "ami-x86-gpu"},
+		{"g5g arm GPU → arm DLAMI", "g5g.xlarge", "ami-arm-gpu"},
+		{"c7i CPU → standard x86", "c7i.4xlarge", "ami-x86-standard"},
+		{"c8g arm CPU → standard arm", "c8g.4xlarge", "ami-arm-standard"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := client.GetRecommendedAMI(ctx, "us-east-1", tt.instanceType)
+			if err != nil {
+				t.Fatalf("GetRecommendedAMI(%q): %v", tt.instanceType, err)
+			}
+			if got != tt.wantAMI {
+				t.Errorf("GetRecommendedAMI(%q) = %q, want %q", tt.instanceType, got, tt.wantAMI)
+			}
+		})
+	}
+}
+
 func TestDetectGPUInstance(t *testing.T) {
 	tests := []struct {
 		instanceType string

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`task run` now targets a GPU AMI for GPU-sized instances, with a TaskSpec/CLI
+  AMI override** (#601). When the sizer picks a GPU family (g5, g6, p4/p5, …), the
+  launch resolves the AL2023 NVIDIA DLAMI (via `launcher.Provision` →
+  `GetRecommendedAMI`) so `docker run --gpus all` lands on a host with a driver
+  instead of the driverless default AL2023 — the `task run` analog of the launch
+  path's #356/#384. Pin a specific AMI with the new `spawn task run --ami` flag or
+  `placement.ami` in the spec (an explicit AMI always wins over auto-selection).
+  The `--dry-run` preview now shows the AMI it will launch (GPU DLAMI, standard
+  AL2023, or the explicit pin), so a GPU spec's driver AMI is visible before launch
+  rather than surfacing as a runtime NVML failure inside the container.
+
 ## [0.110.0] - 2026-09-15
 
 ### Added
