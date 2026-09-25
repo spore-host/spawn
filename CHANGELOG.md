@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.111.2] - 2026-09-25
+
 ### Fixed
 - **A task asking for 16 vCPUs no longer gets a 64-vCPU instance when the sizes
   cost the same** (#610). `task run` sizes to the cheapest type that fits, and on
@@ -3672,7 +3674,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.111.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.111.2...HEAD
+[0.111.2]: https://github.com/spore-host/spawn/compare/v0.111.1...v0.111.2
 [0.111.1]: https://github.com/spore-host/spawn/compare/v0.111.0...v0.111.1
 [0.111.0]: https://github.com/spore-host/spawn/compare/v0.110.0...v0.111.0
 [0.110.0]: https://github.com/spore-host/spawn/compare/v0.109.0...v0.110.0
