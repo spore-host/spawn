@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A task asking for 16 vCPUs no longer gets a 64-vCPU instance when the sizes
+  cost the same** (#610). `task run` sizes to the cheapest type that fits, and on
+  a price **tie** it now prefers the **smallest** type that fits (vCPUs, then
+  memory) instead of falling back to the instance-type *name*. The name comparison
+  was lexicographic and therefore arbitrary: on `hpc7g` — where every size is the
+  same price because you rent the socket, not the cores — `hpc7g.16xlarge` sorted
+  ahead of `hpc7g.4xlarge` purely because `'1' < '4'`, so a 16-vCPU request was
+  answered with 64 vCPUs. (It was never a "prefers the biggest" bug: on a family
+  sized 2x/4x/8xlarge the same comparison picked the smallest and looked correct,
+  which is why it went unnoticed.) On `hpc7g` the bill was unchanged, but the same
+  tie-break would have over-provisioned at cost on any family with genuinely
+  equal-priced sizes.
+
+### Documentation
+- **`spawn task run --help` now documents how to choose the instance type
+  yourself** (#610). `resources.instance_type` has pinned an exact type since
+  #413 — it short-circuits candidate search and price ranking entirely — but it was
+  described only in internal design docs, so the one user who needed it (sweeping
+  three equal-spec `hpc7g` sizes, which `cpu`/`memory_gib` cannot distinguish)
+  concluded it didn't exist. The help text now covers the pin, the price-tie rule
+  above, and how `resources.families` differs from pinning.
+
 ## [0.111.1] - 2026-09-17
 
 ### Fixed

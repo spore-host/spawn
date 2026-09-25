@@ -41,8 +41,13 @@ type SizeResult struct {
 // the memory headroom, filters to the family allow-list (a capability truffle's
 // single-family filter lacks), requires GPUs when asked, and ranks by on-demand
 // price (cheapest first; unknown/zero prices sort last so a priced option always
-// wins). Spot-vs-on-demand purchase selection is the caller's concern — Size
+// wins). On a price TIE it prefers the smallest type that fits — vCPUs, then
+// memory (spawn#610) — so an equal-priced family like hpc7g, where every size
+// costs the same, returns what the request actually asked for instead of the
+// largest. Spot-vs-on-demand purchase selection is the caller's concern — Size
 // ranks on on-demand price as a stable proxy.
+//
+// A pinned ResourceRequest.InstanceType bypasses all of this; see below.
 func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*SizeResult, error) {
 	// An exact instance-type pin bypasses candidate search + price ranking: the
 	// caller asked for this specific type (e.g. nf-spawn's ext.instanceType), so
@@ -87,7 +92,26 @@ func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*Siz
 		case pi != pj:
 			return pi < pj
 		default:
-			// Tie-break deterministically by type name.
+			// Equal price: prefer the SMALLEST type that still fits (spawn#610).
+			// Every candidate already satisfies the cpu/memory request, so on a tie
+			// the smallest is what the spec actually asked for and it minimises blast
+			// radius — nothing is gained by renting more cores at the same rate.
+			//
+			// This used to tie-break on the type NAME, which is lexicographic and
+			// therefore semantically arbitrary: on hpc7g — where every size costs the
+			// same because you rent the socket, not the cores — "hpc7g.16xlarge" sorts
+			// before "hpc7g.4xlarge" simply because '1' < '4', so a 16-vCPU request
+			// silently got 64 vCPUs. Note the old behaviour was not "prefer the
+			// largest": on a 2x/4x/8xlarge family the same comparison picked the
+			// smallest and looked correct, which is why it went unnoticed.
+			if a, b := matched[i].VCPUs, matched[j].VCPUs; a != b {
+				return a < b
+			}
+			if a, b := matched[i].MemoryGiB, matched[j].MemoryGiB; a != b {
+				return a < b
+			}
+			// Same price, same size: fall back to the name purely so the choice is
+			// deterministic across runs.
 			return matched[i].InstanceType < matched[j].InstanceType
 		}
 	})
