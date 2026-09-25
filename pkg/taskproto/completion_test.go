@@ -2,6 +2,7 @@ package taskproto
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +36,7 @@ func TestParseCompletionRecord_WrapperShape(t *testing.T) {
 	// Mirrors the heredoc in GenerateWrapper for a failed task.
 	raw := `{
   "task_id": "align-42",
+  "run_id": "11111111-2222-3333-4444-555555555555",
   "exit_code": 1,
   "state": "failed",
   "started_at": "2026-07-19T12:00:00Z",
@@ -48,6 +50,55 @@ func TestParseCompletionRecord_WrapperShape(t *testing.T) {
 	}
 	if rec.ExitCode != 1 || rec.State != StateFailed || rec.RetryClass != RetryAppError {
 		t.Errorf("unexpected parse: %+v", rec)
+	}
+	if rec.RunID != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("run_id = %q, want the wrapper's stamped attempt id (spawn#608)", rec.RunID)
+	}
+}
+
+// TestCompletionRecord_RunIDAdditive guards the additive-field contract for
+// run_id (spawn#608): a record written by a PRE-fix wrapper has no run_id at all
+// and must still parse (with RunID ""), and a record that has one must round-trip
+// it. The empty case is what the --wait path treats as "unattributable", so it has
+// to parse rather than error.
+func TestCompletionRecord_RunIDAdditive(t *testing.T) {
+	// An old record: exactly the pre-#608 wrapper's shape, no run_id key.
+	old := `{"task_id":"align-42","exit_code":0,"state":"completed","started_at":"2026-07-19T12:00:00Z","ended_at":"2026-07-19T12:05:00Z"}`
+	rec, err := ParseCompletionRecord([]byte(old))
+	if err != nil {
+		t.Fatalf("a pre-run_id record must still parse: %v", err)
+	}
+	if rec.RunID != "" {
+		t.Errorf("RunID = %q, want empty for a record that predates run-id stamping", rec.RunID)
+	}
+	if rec.TaskID != "align-42" || rec.State != StateCompleted {
+		t.Errorf("old record parsed wrong: %+v", rec)
+	}
+
+	// A current record round-trips run_id...
+	data, err := json.Marshal(CompletionRecord{TaskID: "align-42", RunID: "run-7", State: StateFailed, ExitCode: 141})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"run_id":"run-7"`) {
+		t.Errorf("marshalled record missing run_id: %s", data)
+	}
+	back, err := ParseCompletionRecord(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.RunID != "run-7" {
+		t.Errorf("RunID = %q, want run-7", back.RunID)
+	}
+
+	// ...and stays omitted (not `"run_id":""`) when unset, so nothing downstream
+	// sees a new always-present key.
+	data, err = json.Marshal(CompletionRecord{TaskID: "align-42", State: StateCompleted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "run_id") {
+		t.Errorf("run_id must be omitempty when unset: %s", data)
 	}
 }
 

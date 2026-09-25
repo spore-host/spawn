@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`task run --wait` no longer reports the *previous* attempt's result when you
+  re-run the same `task_id`** (#608). Fix a spec, re-run it, and `--wait` could
+  answer with the earlier run's verdict — `failed 141` with the old timestamps —
+  while the new instance was still running and going on to succeed. The natural
+  read is "my fix didn't work", so the reporter re-debugged working code twice in
+  one session; re-running after a fix is the single most common reason to use
+  `--wait`, which is exactly when a leftover record exists. Both runs wrote the
+  same `tasks/<task_id>/completion.json` key and the record carried no attempt
+  identity, so attempt N was indistinguishable from attempt N−1. Now the previous
+  attempt's `completion.json` and `.exitcode` are **cleared at launch**, and every
+  run stamps a **`run_id`** into its completion record so a leftover record is
+  detectable rather than plausible: `--wait` ignores any record that isn't from
+  the run it just launched and keeps waiting, printing the run id it launched with
+  and saying out loud when it skips an older one. The S3 key is unchanged — the
+  workflow adapters that poll it see only an extra, ignorable JSON field, and a
+  record written by an older on-instance wrapper (no `run_id`) is still accepted,
+  with a warning that it can't be attributed to this run.
+
 ## [0.111.2] - 2026-09-25
 
 ### Fixed

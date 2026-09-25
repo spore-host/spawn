@@ -40,8 +40,15 @@ import (
 // driver (spawn#601/#606). The caller decides this from the SIZED instance type
 // (not just spec.Resources.GPUs), so a task sized onto a GPU box gets the GPU
 // even when the spec only asked via `families`.
-func GenerateWrapper(spec *TaskSpec, resultsBucket, region string, gpu bool) string {
-	return generateWrapper(spec, resultsBucket, region, true, gpu)
+//
+// runID identifies THIS attempt (spawn#608). It is stamped into the completion
+// record as run_id so the launcher can tell its own run's record apart from one a
+// previous run of the same task_id left at the same S3 key — the false negative
+// the issue reports. Callers must pass a freshly minted id per launch; "" emits an
+// empty run_id, which reads downstream as "unattributable" (see
+// CompletionRecord.RunID).
+func GenerateWrapper(spec *TaskSpec, resultsBucket, region string, gpu bool, runID string) string {
+	return generateWrapper(spec, resultsBucket, region, true, gpu, runID)
 }
 
 // GeneratePooledJobScript builds the per-job script a POOLED worker runs for one
@@ -52,15 +59,23 @@ func GenerateWrapper(spec *TaskSpec, resultsBucket, region string, gpu bool) str
 // reuse. The worker stays alive and keeps pulling; it drains on idle-timeout
 // instead. The durable completion record (completion.json + .exitcode) is still
 // written, so the submitter's poll is unchanged.
-func GeneratePooledJobScript(spec *TaskSpec, resultsBucket, region string, gpu bool) string {
-	return generateWrapper(spec, resultsBucket, region, false, gpu)
+//
+// runID is stamped into that record exactly as in GenerateWrapper (spawn#608):
+// a pooled worker overwrites the same tasks/<task_id>/completion.json key on
+// every execution of a given task_id, so its records need attempt identity for
+// the same reason the one-instance path does. The pooled dispatcher has no
+// launch-side id to hand down (it runs on an already-provisioned worker), so
+// ScriptExecer mints one per execution — see pkg/taskpool/exec.go.
+func GeneratePooledJobScript(spec *TaskSpec, resultsBucket, region string, gpu bool, runID string) string {
+	return generateWrapper(spec, resultsBucket, region, false, gpu, runID)
 }
 
 // generateWrapper is the shared body. signalComplete gates the spored
 // self-terminate signal: true for the one-instance-per-task wrapper, false for a
 // pooled worker's per-job script. gpu gates GPU-container setup (--gpus all +
-// NVIDIA Container Toolkit install).
-func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplete, gpu bool) string {
+// NVIDIA Container Toolkit install). runID is stamped into the completion record
+// (spawn#608).
+func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplete, gpu bool, runID string) string {
 	var b strings.Builder
 	p := func(format string, a ...interface{}) { fmt.Fprintf(&b, format, a...) }
 
@@ -246,6 +261,15 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 	p("cat > /tmp/spawn-completion.json <<JSON\n")
 	p("{\n")
 	p("  \"task_id\": %s,\n", jsonStr(taskID))
+	// run_id — the attempt identity (spawn#608). Emitted unconditionally (even
+	// when empty) so the shape of the record is the same for every run and a
+	// reader can distinguish "this wrapper stamps run ids and this one was
+	// unattributed" from "this record predates run-id stamping" only by the value,
+	// never by a structurally different record. `spawn task run --wait` compares
+	// it to the id it launched with and keeps polling on a mismatch, so a record
+	// left behind by a previous attempt of the same task_id can never be reported
+	// as this run's verdict.
+	p("  \"run_id\": %s,\n", jsonStr(runID))
 	p("  \"exit_code\": $rc,\n")
 	p("  \"state\": \"$STATE\",\n")
 	p("  \"started_at\": \"$STARTED_AT\",\n")

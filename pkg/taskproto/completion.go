@@ -28,8 +28,18 @@ type LaunchResult struct {
 // with `date -u`, and cross-language adapters treat them as opaque timestamps.
 // Keeping them as strings avoids a parse/format round-trip mismatch across the
 // bash → Go → other-language boundary.
+// RunID identifies the single ATTEMPT that produced this record (spawn#608).
+// task_id does not: re-running the same task_id overwrites the same
+// completion.json key, so before this field attempt N was indistinguishable from
+// attempt N−1 and `task run --wait` could return the previous attempt's verdict
+// for a run that was still in flight. The launcher mints a fresh run id per
+// launch, passes it to the wrapper, and refuses to accept a record whose run_id
+// is not its own. It is additive and `omitempty` on purpose — the six workflow
+// adapters that poll this exact key parse it as an unknown field (i.e. ignore
+// it), and a record written by a pre-#608 wrapper still parses with run_id "".
 type CompletionRecord struct {
 	TaskID       string     `json:"task_id"`
+	RunID        string     `json:"run_id,omitempty"`
 	ExitCode     int        `json:"exit_code"`
 	State        TaskState  `json:"state"` // completed | failed
 	StartedAt    string     `json:"started_at"`

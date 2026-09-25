@@ -50,6 +50,11 @@ driver (spawn#601), and everything else gets the standard AL2023 for the type's
 architecture. Pin a specific AMI with --ami (or placement.ami in the spec); an
 explicit AMI always wins over auto-selection.
 
+Re-running the same task_id is safe with --wait: the results of the previous
+attempt are cleared at launch, and every run stamps a run_id into its completion
+record, so --wait ignores any record that isn't from the run it just launched
+instead of reporting an earlier attempt's verdict (#608).
+
 --dry-run sizes and prints the plan without launching.
 
 ```
