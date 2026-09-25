@@ -21,9 +21,21 @@ spawn task diagnose <name|instance-id>
 Run a task described by a TaskSpec JSON file (the shared workflow-adapter
 contract, spawn#386).
 
-Sizes the cheapest instance type that fits the resource request (via truffle),
-then launches an ephemeral instance that stages inputs from S3, runs the command,
-stages outputs back, and writes a durable completion record to
+Sizing picks the cheapest type that fits, and on a price TIE the smallest that
+fits — which matters on a family like hpc7g where every size costs the same
+because you rent the socket rather than the cores, so a 16-vCPU request returns
+hpc7g.4xlarge and not the 64-vCPU hpc7g.16xlarge (spawn#610).
+
+To choose the type yourself, set resources.instance_type in the spec: that pins
+it exactly and skips candidate search and price ranking altogether (cpu,
+memory_gib, architecture and families are then ignored). That is the way to sweep
+several sizes of one family deliberately, since cpu/memory can't distinguish
+equal-spec sizes. resources.families narrows sizing to an allow-list without
+pinning a single type.
+
+Once the type is chosen, spawn launches an ephemeral instance that stages inputs
+from S3, runs the command, stages outputs back, and writes a durable completion
+record to
 s3://spawn-results-&lt;account&gt;-&lt;region&gt;/tasks/&lt;task_id&gt;/completion.json — the
 signal workflow adapters poll. The instance self-terminates on completion (TTL +
 on_complete).

@@ -2,6 +2,7 @@ package taskproto
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +111,84 @@ func TestEffectiveMemoryGiB(t *testing.T) {
 	}
 	if got := EffectiveMemoryGiB(ResourceRequest{MemoryGiB: 32, MemoryHeadroomPercent: 25}); got != 40 {
 		t.Errorf("25%% headroom on 32 = %v, want 40", got)
+	}
+}
+
+// TestSize_PriceTiePrefersSmallest is the spawn#610 regression guard: when every
+// candidate costs the same, the smallest type that fits must win.
+//
+// The hpc7g family is the real-world case and it is chosen deliberately, not
+// arbitrarily: you rent the socket rather than the cores, so 4xl/8xl/16xl are all
+// $1.6832/hr with 128 GiB, and a 16-vCPU request used to be answered with a
+// 64-vCPU box. The old tie-break compared type NAMES, and "hpc7g.16xlarge" sorts
+// before "hpc7g.4xlarge" because '1' < '4'.
+//
+// The size choice matters for the test itself: a family whose sizes are
+// 2x/4x/8xlarge would pass under the OLD code too (lexicographic order happens to
+// put the smallest first there), so such a test would be vacuous. Any regression
+// test here must include a 1-prefixed double-digit size.
+func TestSize_PriceTiePrefersSmallest(t *testing.T) {
+	const rate = 1.6832
+	f := fakeFinder{cands: []Candidate{
+		{InstanceType: "hpc7g.16xlarge", Family: "hpc7g", VCPUs: 64, MemoryGiB: 128, OnDemandPrice: rate},
+		{InstanceType: "hpc7g.4xlarge", Family: "hpc7g", VCPUs: 16, MemoryGiB: 128, OnDemandPrice: rate},
+		{InstanceType: "hpc7g.8xlarge", Family: "hpc7g", VCPUs: 32, MemoryGiB: 128, OnDemandPrice: rate},
+	}}
+	got, err := Size(context.Background(), f, ResourceRequest{
+		CPU: 16, MemoryGiB: 128, Architecture: "arm64", Families: []string{"hpc7g"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InstanceType != "hpc7g.4xlarge" {
+		t.Errorf("tie went to %q, want hpc7g.4xlarge (smallest that fits at an equal rate)", got.InstanceType)
+	}
+	if got.VCPUs != 16 {
+		t.Errorf("VCPUs = %d, want 16 (asking for 16 must not yield 64)", got.VCPUs)
+	}
+	// Guard the guard: if the fixture ever loses its 1-prefixed size, this test
+	// stops proving anything, because lexicographic order would agree with us.
+	var sawOnePrefixed bool
+	for _, c := range f.cands {
+		if strings.Contains(c.InstanceType, ".16xlarge") || strings.Contains(c.InstanceType, ".12xlarge") {
+			sawOnePrefixed = true
+		}
+	}
+	if !sawOnePrefixed {
+		t.Error("fixture lost its 1-prefixed double-digit size; this test can no longer distinguish the old lexicographic tie-break")
+	}
+}
+
+// TestSize_PriceTieFallsBackToNameWhenSameSize keeps the ordering total: equal
+// price AND equal size must still be deterministic across runs.
+func TestSize_PriceTieFallsBackToNameWhenSameSize(t *testing.T) {
+	f := fakeFinder{cands: []Candidate{
+		{InstanceType: "m7i.4xlarge", Family: "m7i", VCPUs: 16, MemoryGiB: 64, OnDemandPrice: 0.80},
+		{InstanceType: "m7a.4xlarge", Family: "m7a", VCPUs: 16, MemoryGiB: 64, OnDemandPrice: 0.80},
+	}}
+	for i := 0; i < 5; i++ {
+		got, err := Size(context.Background(), f, ResourceRequest{CPU: 16, MemoryGiB: 64})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.InstanceType != "m7a.4xlarge" {
+			t.Fatalf("run %d: got %q, want m7a.4xlarge (deterministic name fallback)", i, got.InstanceType)
+		}
+	}
+}
+
+// TestSize_PriceTiePrefersLessMemoryWhenVCPUsEqual covers the second tie-break
+// rung: same price, same vCPUs, different memory → take the smaller.
+func TestSize_PriceTiePrefersLessMemoryWhenVCPUsEqual(t *testing.T) {
+	f := fakeFinder{cands: []Candidate{
+		{InstanceType: "r7i.2xlarge", Family: "r7i", VCPUs: 8, MemoryGiB: 64, OnDemandPrice: 0.50},
+		{InstanceType: "c7i.2xlarge", Family: "c7i", VCPUs: 8, MemoryGiB: 16, OnDemandPrice: 0.50},
+	}}
+	got, err := Size(context.Background(), f, ResourceRequest{CPU: 8, MemoryGiB: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InstanceType != "c7i.2xlarge" {
+		t.Errorf("got %q, want c7i.2xlarge (same price + same vCPUs → less memory)", got.InstanceType)
 	}
 }
