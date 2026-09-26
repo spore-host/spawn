@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`--fsx-lifecycle ephemeral` no longer claims the filesystem is "reaped when
+  this instance terminates"** (#613). Nothing reaps an FSx at terminate time:
+  `spawn terminate` destroys the instance and never touches the filesystem.
+  Reclamation is **asynchronous** — an out-of-band reaper deletes the filesystem
+  on a later pass, once it has finished creating and no live instance still
+  references it, after a grace period, and only in accounts that reaper is
+  configured to scan. A user who read the old help, ran `spawn terminate`, and saw
+  it succeed reasonably concluded a 1.2 TiB (~$174/month) filesystem was gone. It
+  wasn't, and it kept billing. The flag help, the `--fsx-create`/`--fsx-ttl`
+  validation errors, and `docs/durable-storage-fsx.md` now describe when
+  reclamation actually happens, and a test fails if the friendlier, false sentence
+  comes back.
+
+### Added
+- **`spawn terminate` now names the FSx filesystem the instance was holding** —
+  its id, size and state — and says plainly that terminating does **not** delete
+  it, with the two commands that settle the question: `spawn fsx list` to confirm,
+  `spawn fsx delete <fs-id>` to remove it now (#613). It reports a filesystem that
+  is still *provisioning* (the `spawn:fsx-pending` lease) as well as a mounted one,
+  since that is the window in which the surprise is easiest to hit, and it does not
+  pretend to own a filesystem you brought yourself with `--fsx-id`. The notice is
+  informational only: terminate still deletes nothing but the instance.
+  `spawn stop`/`hibernate` print the same filesystem with the point that matters
+  there — stopping the instance ends the compute bill but the filesystem keeps
+  running and keeps billing.
+- **`--estimate-only` now includes the filesystem `--fsx-create` would create**
+  (#613): capacity, throughput tier, and an approximate monthly cost, plus the
+  limitation stated where you'll actually read it — **`--cost-limit` does not cover
+  storage**, it caps compute spend only. Previously the preview for a launch about
+  to create a ~$174/month filesystem showed a TTL cost of $0.80 and no mention of
+  the filesystem at all.
+
 ## [0.111.3] - 2026-09-25
 
 ### Fixed

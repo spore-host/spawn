@@ -62,7 +62,7 @@ spawn launch <name> [flags]
 | `--fsx-export-path` |  | string |  | S3 path to export to (e.g., s3://bucket/prefix) |
 | `--fsx-id` |  | string |  | Existing FSx Lustre filesystem ID to mount (fs-xxx) |
 | `--fsx-import-path` |  | string |  | S3 path to import from (e.g., s3://bucket/prefix) |
-| `--fsx-lifecycle` |  | string |  | FSx lifetime (REQUIRED with --fsx-create): 'ephemeral' (reaped when this instance terminates) or 'durable' (persists; requires --fsx-ttl) |
+| `--fsx-lifecycle` |  | string |  | FSx lifetime (REQUIRED with --fsx-create): 'ephemeral' (reclaimed asynchronously once the instance is gone — by the out-of-band reaper, not by `spawn terminate`) or 'durable' (persists; requires --fsx-ttl) |
 | `--fsx-mount-point` |  | string | `/fsx` | FSx mount point (default: /fsx) |
 | `--fsx-recall` |  | string |  | Recall FSx filesystem by stack name (recreate from S3) |
 | `--fsx-s3-bucket` |  | string |  | S3 bucket for FSx import/export (required with --fsx-create) |

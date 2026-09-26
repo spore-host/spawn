@@ -345,6 +345,15 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
+		// --fsx-create provisions the single most expensive thing a launch can
+		// create (1200 GiB is the FSx Lustre minimum, ~$174/month) and the estimate
+		// used to omit it entirely, so a preview that said "$0.80" was about to
+		// create a filesystem two orders of magnitude more expensive (spawn#613).
+		// Read the same flag values the real create path reads (fsxStorageCapacity/
+		// fsxThroughput), so the preview can't quote a capacity the launch wouldn't use.
+		if plan, ok := fsxCreatePlanFromFlags(config.FSxLustreCreate, fsxStorageCapacity, fsxThroughput, config.FSxLifecycle, config.FSxTTL, config.FSxMountPoint); ok {
+			renderFSxCostEstimate(os.Stderr, plan)
+		}
 		fmt.Fprintf(os.Stderr, "✅ Estimate complete — no instances launched (--estimate-only)\n")
 		return nil
 	}

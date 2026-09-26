@@ -203,6 +203,14 @@ func stopOrHibernate(identifier string, hibernate bool, skipConfirm bool) error 
 		_, _ = fmt.Fprintf(os.Stdout, "TTL countdown will pause until the instance is started again.\n")
 	}
 
+	// A stopped instance stops billing for compute but its FSx lease does not:
+	// the filesystem keeps running (and keeps the reaper's refcount above zero),
+	// so a "stopped to save money" instance can still be accruing ~$174/month of
+	// storage. Say so (spawn#613). Informational only — stop deletes nothing.
+	if notice := fsxLeaseNoticeFor(ctx, client, *instance, action); notice != "" {
+		_, _ = fmt.Fprint(os.Stdout, notice)
+	}
+
 	return nil
 }
 
