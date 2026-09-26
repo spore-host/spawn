@@ -301,6 +301,61 @@ func (c *Client) GetFSxFilesystem(ctx context.Context, filesystemID, region stri
 	}, nil
 }
 
+// FSxBrief is the minimal, nil-safe view of a filesystem: enough to tell a user
+// what exists and what it costs, with no field that only a fully-provisioned
+// filesystem has.
+//
+// It exists because [Client.GetFSxFilesystem] dereferences DNSName and
+// LustreConfiguration.MountName unconditionally, and a filesystem still in
+// CREATING has neither — the exact state spawn#613 hit (the instance was
+// terminated while its ephemeral FSx was still creating). Any read-only
+// "just tell me about this filesystem" caller should use this instead.
+type FSxBrief struct {
+	FileSystemID       string
+	StorageCapacityGiB int32
+	Status             string // FSx lifecycle state: CREATING, AVAILABLE, DELETING, …
+	SpawnLifecycle     string // spawn:fsx-lifecycle tag: "ephemeral", "durable", or "" if untagged
+	StackName          string // spawn:fsx-stack-name tag, if present
+}
+
+// DescribeFSxBrief looks up one filesystem, read-only (DescribeFileSystems),
+// and returns the subset of facts that are safe to read in ANY lifecycle state.
+// It never mutates and never deletes.
+func (c *Client) DescribeFSxBrief(ctx context.Context, filesystemID, region string) (FSxBrief, error) {
+	fsxClient := fsx.NewFromConfig(c.regionalConfig(region))
+
+	result, err := fsxClient.DescribeFileSystems(ctx, &fsx.DescribeFileSystemsInput{
+		FileSystemIds: []string{filesystemID},
+	})
+	if err != nil {
+		return FSxBrief{}, fmt.Errorf("failed to describe FSx filesystem %s: %w", filesystemID, err)
+	}
+	if len(result.FileSystems) == 0 {
+		return FSxBrief{}, fmt.Errorf("FSx filesystem not found: %s", filesystemID)
+	}
+
+	fs := result.FileSystems[0]
+	brief := FSxBrief{FileSystemID: filesystemID, Status: string(fs.Lifecycle)}
+	if fs.FileSystemId != nil {
+		brief.FileSystemID = *fs.FileSystemId
+	}
+	if fs.StorageCapacity != nil {
+		brief.StorageCapacityGiB = *fs.StorageCapacity
+	}
+	for _, tag := range fs.Tags {
+		if tag.Key == nil || tag.Value == nil {
+			continue
+		}
+		switch *tag.Key {
+		case "spawn:fsx-lifecycle":
+			brief.SpawnLifecycle = *tag.Value
+		case "spawn:fsx-stack-name":
+			brief.StackName = *tag.Value
+		}
+	}
+	return brief, nil
+}
+
 // DeleteFSxFilesystem deletes an FSx filesystem by id. It does NOT set
 // SkipFinalExport, so a filesystem with an attached export DRA flushes remaining
 // changes to S3 on delete rather than silently dropping un-exported data (#184).

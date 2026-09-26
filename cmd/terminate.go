@@ -107,6 +107,12 @@ func terminateSingle(ctx context.Context, identifier string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "   Instance: %s\n", instance.InstanceID)
 	_, _ = fmt.Fprintf(os.Stdout, "   Region:   %s\n", instance.Region)
 	_, _ = fmt.Fprintf(os.Stdout, "\nThe instance is shutting down and will be destroyed.\n")
+
+	// Name any FSx filesystem this instance held a lease on (spawn#613). Purely
+	// informational — terminate does not delete filesystems.
+	if notice := fsxLeaseNoticeFor(ctx, client, *instance, "terminate"); notice != "" {
+		_, _ = fmt.Fprint(os.Stdout, notice)
+	}
 	return nil
 }
 
@@ -167,6 +173,11 @@ func terminateJobArray(ctx context.Context) error {
 	}
 
 	_, _ = fmt.Fprintf(os.Stdout, "\nTerminated %d of %d instances.\n", successCount, len(arrayInstances))
+	// One notice per distinct filesystem the array held a lease on (spawn#613) —
+	// an array launched with --fsx-create shares a single filesystem.
+	for _, notice := range fsxLeaseNoticesFor(ctx, client, arrayInstances, "terminate") {
+		_, _ = fmt.Fprint(os.Stdout, notice)
+	}
 	if len(failedInstances) > 0 {
 		return fmt.Errorf("failed to terminate %d instance(s): %s", len(failedInstances), strings.Join(failedInstances, ", "))
 	}

@@ -318,7 +318,7 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 		switch fsxLifecycle {
 		case "ephemeral":
 			if fsxTTL != "" {
-				return nil, fmt.Errorf("--fsx-ttl is only valid with --fsx-lifecycle=durable (ephemeral FSx is reaped when the instance terminates)")
+				return nil, fmt.Errorf("--fsx-ttl is only valid with --fsx-lifecycle=durable (an ephemeral FSx needs no TTL: it is reclaimed asynchronously once no instance references it)")
 			}
 		case "durable":
 			if fsxTTL == "" {
@@ -328,7 +328,7 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 				return nil, fmt.Errorf("invalid --fsx-ttl %q: %w", fsxTTL, err)
 			}
 		case "":
-			return nil, fmt.Errorf("--fsx-create requires --fsx-lifecycle: 'ephemeral' (reaped with this instance) or 'durable' (persists; needs --fsx-ttl). An FSx costs money and holds your results — choose its lifetime explicitly")
+			return nil, fmt.Errorf("--fsx-create requires --fsx-lifecycle: 'ephemeral' (reclaimed asynchronously once the instance is gone) or 'durable' (persists; needs --fsx-ttl). An FSx costs money and holds your results — choose its lifetime explicitly")
 		default:
 			return nil, fmt.Errorf("invalid --fsx-lifecycle %q: must be 'ephemeral' or 'durable'", fsxLifecycle)
 		}

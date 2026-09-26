@@ -18,7 +18,7 @@ there is no default. Decide before you read any flags:
 
 | You want | Use | Reaped when |
 |----------|-----|-------------|
-| Storage that lives and dies with one job | `--fsx-create --fsx-lifecycle ephemeral` | the instance terminates (no live user left) |
+| Storage that lives and dies with one job | `--fsx-create --fsx-lifecycle ephemeral` | nothing references it any more — **asynchronously**, minutes after the instance goes away, not by `spawn terminate` itself |
 | Storage that persists across many jobs | `--fsx-create --fsx-lifecycle durable --fsx-ttl 30d` | nothing has used it **and** its TTL has passed |
 | To mount a filesystem you already have | `--fsx-id fs-0abc…` | spawn doesn't reap it — it's yours |
 | `--fsx-create` **without** `--fsx-lifecycle` | — | **error** (choose a lifetime) |
@@ -34,10 +34,19 @@ accidentally create a filesystem that bills forever.
   instance (via spored) waits for the filesystem to become AVAILABLE, sets up the
   S3 export association, and mounts it (~10 min, overlapping boot/staging). It's
   created in the **same AZ as the instance** (no constraint on where the instance
-  launches), and reclaimed automatically when the instance terminates. Best for
-  hands-off, one-shot jobs. **No TTL needed** — the instance *is* the lifetime.
-  Because the create is non-blocking, this is the path the lagotto capacity-poller
-  uses (it never blocks waiting on FSx).
+  launches). Best for hands-off, one-shot jobs. **No TTL needed** — the instance
+  *is* the lifetime. Because the create is non-blocking, this is the path the
+  lagotto capacity-poller uses (it never blocks waiting on FSx).
+
+  Reclamation is **asynchronous and out-of-band**: `spawn terminate` does not
+  delete filesystems. The [ttl-reaper](#6-the-reapers-promise-why-this-is-safe)
+  deletes an ephemeral filesystem on a later pass, once it is `AVAILABLE` and no
+  live instance carries either lease tag (`spawn:fsx-id` or `spawn:fsx-pending`),
+  after a 30-minute grace. So a terminate returning does **not** mean the
+  filesystem is gone — it keeps billing until that pass runs, and it only runs in
+  accounts the reaper is configured to scan. `spawn terminate` and `spawn stop`
+  name the filesystem for you; confirm with `spawn fsx list` and force it now with
+  `spawn fsx delete <fs-id>` (spawn#613).
 - **`durable`** keeps billing until its TTL, surviving crashes, idle periods, and
   "the job never ran." That's the point — but it also means a **forgotten durable
   FSx is a recurring bill**, which is why the TTL is mandatory. It also **pins
@@ -58,7 +67,8 @@ spawn launch myjob --instance-type c7g.4xlarge \
   --command 'run-pipeline --out /fsx/results'
 ```
 
-Ephemeral filesystems are deleted when the job ends. spawn never sets
+Ephemeral filesystems are deleted after the job ends (asynchronously — see
+above). spawn never sets
 `SkipFinalExport`, so any remaining changes flush to S3 on delete — but a
 **continuous** export DRA means you're protected even if the instance dies
 unexpectedly. (Don't rely on a single end-of-job flush: that's the
@@ -102,10 +112,22 @@ Every spawn-**created** FSx is tracked by the
 [ttl-reaper](https://github.com/spore-host/spawn/issues/192): it reclaims a
 filesystem only when it is **past its deadline** *and* has **no live instance
 still using it** (a refcount derived from the `spawn:fsx-id` tag each mounting
-instance carries). A single active job blocks reclamation; an orphaned filesystem
-(its job crashed, capacity never came) is reclaimed automatically. Deletion
-flushes the export DRA to S3 first. So nothing leaks silently, and nothing
-in-use is reaped out from under you.
+instance carries, plus `spawn:fsx-pending` while one is still mounting). A single
+active job blocks reclamation; an orphaned filesystem (its job crashed, capacity
+never came) is reclaimed on a later pass. Deletion flushes the export DRA to S3
+first. So nothing in-use is reaped out from under you.
+
+Two properties of that promise are worth stating plainly, because assuming
+otherwise costs money:
+
+- **It is asynchronous, not transactional.** No spawn command deletes a
+  filesystem as a side effect of destroying an instance. Reclamation happens
+  whenever the reaper next runs and finds no references — after its grace period,
+  and only for a filesystem that has reached `AVAILABLE`.
+- **It depends on the reaper covering your account.** The reaper is a deployed
+  Lambda with an explicit account list; in an account it does not scan, nothing
+  reclaims anything. If you are unsure, treat `spawn fsx list` as the source of
+  truth and delete by hand.
 
 ---
 
