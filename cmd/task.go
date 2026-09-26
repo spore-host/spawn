@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
@@ -237,6 +238,11 @@ g6, p4/p5, …) gets the AL2023 NVIDIA DLAMI so --gpus all lands on a host with 
 driver (spawn#601), and everything else gets the standard AL2023 for the type's
 architecture. Pin a specific AMI with --ami (or placement.ami in the spec); an
 explicit AMI always wins over auto-selection.
+
+Re-running the same task_id is safe with --wait: the results of the previous
+attempt are cleared at launch, and every run stamps a run_id into its completion
+record, so --wait ignores any record that isn't from the run it just launched
+instead of reporting an earlier attempt's verdict (#608).
 
 --dry-run sizes and prints the plan without launching.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -474,7 +480,30 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	// classifier that selects the GPU DLAMI. Drives `--gpus all` + NVIDIA Container
 	// Toolkit setup in the wrapper (spawn#601/#606).
 	gpu := spec.Resources.GPUs > 0 || aws.DetectGPUInstance(sized.InstanceType)
-	wrapper := taskproto.GenerateWrapper(spec, resultsBucket, region, gpu)
+
+	// Run identity for THIS attempt (spawn#608). Re-running a task_id overwrites
+	// the same tasks/<task_id>/completion.json key, so without an attempt id a
+	// record from a previous attempt is indistinguishable from this one's — and
+	// --wait returned it as the answer while the new instance was still running,
+	// reporting a fixed task as still failing. The id is stamped into the record by
+	// the wrapper and checked by pollCompletion below.
+	runID := uuid.NewString()
+
+	// Belt (the structural half of the fix): clear the previous attempt's
+	// completion artifacts BEFORE the instance can exist, so there is no stale
+	// record to mis-read in the first place. Best-effort by design — a delete
+	// failure must not abort a launch, because the run-id check below is the
+	// suspenders that catches whatever survives. Deleting an absent key is a
+	// success in S3 (the overwhelmingly common first-run case), so this is silent
+	// unless something actually went wrong.
+	if err := clearStaleCompletion(ctx, client, region, resultsBucket, spec.TaskID); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not clear a previous attempt's completion record for task %s: %v\n", spec.TaskID, err)
+		fmt.Fprintf(os.Stderr, "         (harmless: --wait verifies run_id, so a leftover record is ignored rather than reported)\n")
+	} else if spawnVerbose {
+		fmt.Fprintf(os.Stderr, "cleared any previous completion record for task %s (run_id %s)\n", spec.TaskID, runID)
+	}
+
+	wrapper := taskproto.GenerateWrapper(spec, resultsBucket, region, gpu, runID)
 
 	// Scoped instance profile: the default spored role has no S3 write, so grant
 	// exactly the buckets this task reads (inputs) and writes (outputs + results).
@@ -529,6 +558,7 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		}
 		fmt.Fprintf(out, "✅ Task launched: %s\n", spec.TaskID)
 		fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
+		fmt.Fprintf(out, "Run ID:       %s\n", runID)
 		fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
 		fmt.Fprintf(out, "Completion:   s3://%s/tasks/%s/completion.json\n", resultsBucket, spec.TaskID)
 		fmt.Fprintf(out, "\nPoll for completion:\n")
@@ -544,12 +574,16 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	if !jsonOut {
 		fmt.Fprintf(out, "✅ Task launched: %s\n", spec.TaskID)
 		fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
+		fmt.Fprintf(out, "Run ID:       %s\n", runID)
 		fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
 		fmt.Fprintf(out, "Completion:   s3://%s/tasks/%s/completion.json\n", resultsBucket, spec.TaskID)
 		fmt.Fprintf(out, "\nWaiting for completion (polling every %s)...\n", taskRunPollInterval)
 	}
 	deadline := waitDeadline(spec.Lifecycle.TTL)
-	rec, err := pollCompletion(ctx, client, region, resultsBucket, spec.TaskID, taskRunPollInterval, deadline)
+	// runID is passed so a record from a previous attempt of this task_id is
+	// ignored rather than reported (spawn#608). Notices go to stderr, never to out:
+	// in -o json mode out carries only the CompletionRecord an adapter parses.
+	rec, err := pollCompletion(ctx, client, region, resultsBucket, spec.TaskID, runID, taskRunPollInterval, deadline, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -578,21 +612,143 @@ func waitDeadline(ttl string) time.Time {
 	return time.Now().Add(d + 2*time.Minute)
 }
 
-// pollCompletion fetches the completion record, retrying until it appears or the
-// deadline passes.
-func pollCompletion(ctx context.Context, client *aws.Client, region, resultsBucket, taskID string, every time.Duration, deadline time.Time) (*taskproto.CompletionRecord, error) {
+// taskResultStore is the narrow S3 surface the task-run/task-status paths need:
+// read a task's completion record and clear a previous attempt's before launch.
+// *aws.Client satisfies it; a fake satisfies it in tests, which is the whole
+// point — the stale-record logic (spawn#608) is the part worth testing and it
+// must be testable with zero AWS.
+type taskResultStore interface {
+	GetS3Object(ctx context.Context, region, bucket, key string) ([]byte, error)
+	DeleteS3Object(ctx context.Context, region, bucket, key string) error
+}
+
+// completionKey / exitCodeKey are the two per-task result objects the on-instance
+// wrapper writes (pkg/taskproto/wrapper.go). Both are keyed by task_id ALONE, so
+// both are overwritten by every run of the same task_id — which is why both have
+// to be cleared at launch.
+//
+// The key names are deliberately NOT versioned per run (the issue floats
+// completion-<runid>.json): tasks/<task_id>/completion.json is the published
+// workflow-adapter contract that six adapter repos poll (nf-spawn, miniwdl-spawn,
+// cwl-spawn, snakemake-executor-plugin-spawn, airflow-spawn, pegasus-spawn).
+// Renaming it would break all six; the additive run_id field inside the JSON is
+// invisible to them.
+func completionKey(taskID string) string { return fmt.Sprintf("tasks/%s/completion.json", taskID) }
+func exitCodeKey(taskID string) string   { return fmt.Sprintf("tasks/%s/.exitcode", taskID) }
+
+// staleResultKeys lists every result object a previous run of taskID could have
+// left behind at a key this run will reuse.
+func staleResultKeys(taskID string) []string {
+	return []string{completionKey(taskID), exitCodeKey(taskID)}
+}
+
+// clearStaleCompletion deletes the completion artifacts of any PREVIOUS run of
+// taskID, so this run cannot be answered with an earlier attempt's verdict
+// (spawn#608). Deleting an absent key is a no-op success in S3, so the normal
+// first-run case returns nil without the caller special-casing anything. Errors
+// are joined and returned for the caller to log — never to abort a launch on.
+func clearStaleCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, taskID string) error {
+	var errs []error
+	for _, key := range staleResultKeys(taskID) {
+		if err := store.DeleteS3Object(ctx, region, resultsBucket, key); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// completionRunVerdict is pollCompletion's decision about a completion record it
+// just fetched: does this record describe the run we launched?
+type completionRunVerdict int
+
+const (
+	// completionForThisRun — the record's run_id is ours. Report it.
+	completionForThisRun completionRunVerdict = iota
+	// completionPreviousRun — the record carries a DIFFERENT run_id, so it is a
+	// previous attempt's record sitting at the shared key. Keep polling; reporting
+	// it is exactly the false negative spawn#608 describes.
+	completionPreviousRun
+	// completionUnattributed — the record has NO run_id, so it cannot be attributed
+	// to any attempt. See classifyCompletionRun for why we accept it anyway.
+	completionUnattributed
+)
+
+// classifyCompletionRun compares a fetched record's run identity to the run we
+// launched (spawn#608).
+//
+// The empty-run_id case is the judgement call. An empty run_id means the record
+// was written by a pre-#608 wrapper — there is no such thing as a current wrapper
+// that omits it (the wrapper emits the field unconditionally, and the pooled path
+// mints its own id). We ACCEPT it, loudly, rather than treating it as a mismatch:
+//
+//   - We cannot verify it, but we already deleted both result keys immediately
+//     before launch, so a record present now is overwhelmingly likely to be this
+//     run's — written by an older spored/AMI-cached wrapper, not left over.
+//   - Treating unverifiable as "keep polling" would hang every legitimate old-
+//     wrapper run until its TTL and then fail it, converting a rare misattribution
+//     risk into a guaranteed outage for anyone on a cached wrapper. A wrong answer
+//     that is announced beats a timeout that is not.
+//
+// So the warning is the contract here: the caller must tell the user the record
+// predates run-id stamping and cannot be attributed to this attempt.
+//
+// runID == "" means the CALLER has no run identity (nothing in-tree does today;
+// --wait always mints one). Such a caller gets the pre-#608 behavior — accept
+// whatever is at the key — because it has nothing to compare against.
+func classifyCompletionRun(rec *taskproto.CompletionRecord, runID string) completionRunVerdict {
+	if rec == nil {
+		return completionPreviousRun // nothing to report; keep waiting
+	}
+	if runID == "" {
+		return completionForThisRun
+	}
+	if rec.RunID == "" {
+		return completionUnattributed
+	}
+	if rec.RunID == runID {
+		return completionForThisRun
+	}
+	return completionPreviousRun
+}
+
+// pollCompletion fetches the completion record, retrying until a record for THIS
+// run (runID) appears or the deadline passes. A record left by a previous attempt
+// of the same task_id is skipped, not returned (spawn#608) — that record is a real
+// record of a real earlier run, which is exactly why returning it reads as "your
+// fix didn't work". Notices (skipped stale record, unattributable record) are
+// written to warn, which must not be the machine-readable output stream.
+func pollCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, taskID, runID string, every time.Duration, deadline time.Time, warn io.Writer) (*taskproto.CompletionRecord, error) {
 	if every <= 0 {
 		every = 15 * time.Second
 	}
+	if warn == nil {
+		warn = io.Discard
+	}
+	var notedStale bool
 	for {
-		rec, present, err := fetchCompletion(ctx, client, region, resultsBucket, taskID)
+		rec, present, err := fetchCompletion(ctx, store, region, resultsBucket, taskID)
 		if err != nil {
 			return nil, err
 		}
 		if present {
-			return rec, nil
+			switch classifyCompletionRun(rec, runID) {
+			case completionForThisRun:
+				return rec, nil
+			case completionUnattributed:
+				fmt.Fprintf(warn, "⚠ task %s: the completion record carries no run_id, so it cannot be attributed to this run (%s).\n", taskID, runID)
+				fmt.Fprintf(warn, "  It was written by a wrapper that predates run-id stamping; accepting it. If it looks like an older attempt, re-check s3://%s/%s.\n", resultsBucket, completionKey(taskID))
+				return rec, nil
+			case completionPreviousRun:
+				if !notedStale {
+					notedStale = true
+					fmt.Fprintf(warn, "ℹ task %s: ignoring a completion record from a previous run (run_id %s; this run is %s) and continuing to wait.\n", taskID, rec.RunID, runID)
+				}
+			}
 		}
 		if time.Now().After(deadline) {
+			if notedStale {
+				return nil, fmt.Errorf("timed out waiting for task %q completion record for this run (run_id %s) (past TTL); the record at s3://%s/%s is from an earlier attempt", taskID, runID, resultsBucket, completionKey(taskID))
+			}
 			return nil, fmt.Errorf("timed out waiting for task %q completion record (past TTL); poll later with 'spawn task status %s'", taskID, taskID)
 		}
 		select {
@@ -605,10 +761,10 @@ func pollCompletion(ctx context.Context, client *aws.Client, region, resultsBuck
 
 // fetchCompletion reads and parses tasks/<taskID>/completion.json from the
 // results bucket. present=false (nil error) means the record isn't there yet —
-// the task is still running.
-func fetchCompletion(ctx context.Context, client *aws.Client, region, resultsBucket, taskID string) (rec *taskproto.CompletionRecord, present bool, err error) {
-	key := fmt.Sprintf("tasks/%s/completion.json", taskID)
-	data, err := client.GetS3Object(ctx, region, resultsBucket, key)
+// the task is still running. It does NOT judge run identity: `task status` has no
+// run id to compare against, so that check lives in pollCompletion.
+func fetchCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, taskID string) (rec *taskproto.CompletionRecord, present bool, err error) {
+	data, err := store.GetS3Object(ctx, region, resultsBucket, completionKey(taskID))
 	if err != nil {
 		if errors.Is(err, aws.ErrS3NoSuchKey) {
 			return nil, false, nil
@@ -625,6 +781,11 @@ func fetchCompletion(ctx context.Context, client *aws.Client, region, resultsBuc
 // printCompletion renders a CompletionRecord as human text.
 func printCompletion(out io.Writer, rec *taskproto.CompletionRecord) {
 	fmt.Fprintf(out, "Task:       %s\n", rec.TaskID)
+	// run_id makes "which attempt is this?" answerable from the printed record
+	// itself (spawn#608) — omitted for a pre-#608 record, which has none.
+	if rec.RunID != "" {
+		fmt.Fprintf(out, "Run ID:     %s\n", rec.RunID)
+	}
 	fmt.Fprintf(out, "State:      %s\n", rec.State)
 	fmt.Fprintf(out, "Exit code:  %d\n", rec.ExitCode)
 	if rec.StartedAt != "" {

@@ -253,3 +253,29 @@ func (c *Client) GetS3Object(ctx context.Context, region, bucket, key string) ([
 	}
 	return data, nil
 }
+
+// DeleteS3Object deletes a single object. Deleting a key that does not exist is
+// a SUCCESS, not an error — that is S3's own DeleteObject semantics (it returns
+// 204 for an absent key in a non-versioned bucket), and callers rely on it: the
+// task-run path clears any previous attempt's completion record before launch
+// (spawn#608) and the common case is that there is nothing there to clear. A
+// NoSuchKey/NotFound from an S3-compatible endpoint that does surface one is
+// normalized to nil here for the same reason.
+func (c *Client) DeleteS3Object(ctx context.Context, region, bucket, key string) error {
+	s3Client := s3.NewFromConfig(c.regionalConfig(region))
+	if _, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}); err != nil {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil
+		}
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
+			return nil
+		}
+		return fmt.Errorf("delete s3://%s/%s: %w", bucket, key, err)
+	}
+	return nil
+}

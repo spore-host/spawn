@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -508,5 +511,234 @@ func TestS3Buckets2(t *testing.T) {
 	got := s3Buckets2([]string{"s3://a/x", "s3://a/y", "s3://b", "not-s3"})
 	if len(got) != 2 {
 		t.Fatalf("s3Buckets2 = %v, want [a b]", got)
+	}
+}
+
+// ── spawn#608: --wait must never report a previous attempt's completion ──────
+//
+// Re-running the same task_id overwrites the same
+// tasks/<task_id>/completion.json key, so before this fix `--wait` could return
+// the PREVIOUS attempt's verdict (with its old timestamps) while the new instance
+// was still running — a false negative in the one authoritative place, and one
+// that shows up exactly when someone re-runs after a fix.
+
+// fakeResultStore is an offline taskResultStore: GetS3Object replays a scripted
+// queue of responses (the last one repeats, so a poll loop can settle), and
+// DeleteS3Object records the keys it was asked to clear. Zero AWS, zero launches.
+type fakeResultStore struct {
+	gets    []fakeGet
+	getN    int
+	deleted []string
+	delErr  error
+}
+
+type fakeGet struct {
+	body []byte
+	err  error
+}
+
+func (f *fakeResultStore) GetS3Object(_ context.Context, _, _, _ string) ([]byte, error) {
+	i := f.getN
+	if i >= len(f.gets) {
+		i = len(f.gets) - 1
+	}
+	f.getN++
+	g := f.gets[i]
+	return g.body, g.err
+}
+
+func (f *fakeResultStore) DeleteS3Object(_ context.Context, _, _, key string) error {
+	f.deleted = append(f.deleted, key)
+	return f.delErr
+}
+
+// missingKey is what pkg/aws returns for an object that isn't there — the "task
+// still running" signal fetchCompletion translates to present=false.
+func missingKey() error { return fmt.Errorf("%w: s3://b/k", aws.ErrS3NoSuchKey) }
+
+func recordJSON(t *testing.T, rec taskproto.CompletionRecord) []byte {
+	t.Helper()
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	return data
+}
+
+// TestPollCompletion_IgnoresPreviousRunRecord is the core regression guard: a
+// record whose run_id belongs to an earlier attempt must NOT be returned — the
+// poll keeps going until this run's record shows up.
+func TestPollCompletion_IgnoresPreviousRunRecord(t *testing.T) {
+	stale := recordJSON(t, taskproto.CompletionRecord{
+		TaskID: "cookbook-plink-r1", RunID: "run-OLD", ExitCode: 141,
+		State: taskproto.StateFailed, StartedAt: "2026-09-20T03:45:12Z", EndedAt: "2026-09-20T03:45:57Z",
+	})
+	fresh := recordJSON(t, taskproto.CompletionRecord{
+		TaskID: "cookbook-plink-r1", RunID: "run-NEW", ExitCode: 0,
+		State: taskproto.StateCompleted, StartedAt: "2026-09-20T03:49:06Z", EndedAt: "2026-09-20T03:50:00Z",
+	})
+	store := &fakeResultStore{gets: []fakeGet{
+		{body: stale}, // the previous attempt's record is sitting at the key
+		{body: stale}, // still there on the next poll
+		{body: fresh}, // this run's record finally lands
+	}}
+
+	var warn bytes.Buffer
+	rec, err := pollCompletion(context.Background(), store, "us-west-2", "spawn-results-1-us-west-2",
+		"cookbook-plink-r1", "run-NEW", time.Millisecond, time.Now().Add(time.Minute), &warn)
+	if err != nil {
+		t.Fatalf("pollCompletion: %v", err)
+	}
+	if rec.RunID != "run-NEW" {
+		t.Fatalf("returned run_id = %q, want run-NEW (the stale record must never be reported)", rec.RunID)
+	}
+	if rec.ExitCode != 0 || rec.State != taskproto.StateCompleted {
+		t.Errorf("returned the wrong record: %+v", rec)
+	}
+	// The skip must be announced once, not silently.
+	if !strings.Contains(warn.String(), "previous run") {
+		t.Errorf("expected a notice about ignoring a previous run's record, got: %q", warn.String())
+	}
+	if n := strings.Count(warn.String(), "previous run"); n != 1 {
+		t.Errorf("stale notice printed %d times, want exactly 1 (not once per poll)", n)
+	}
+}
+
+// TestPollCompletion_AcceptsMatchingRunID: the happy path — a record stamped with
+// this run's id is returned immediately.
+func TestPollCompletion_AcceptsMatchingRunID(t *testing.T) {
+	body := recordJSON(t, taskproto.CompletionRecord{
+		TaskID: "t", RunID: "run-A", ExitCode: 0, State: taskproto.StateCompleted,
+	})
+	store := &fakeResultStore{gets: []fakeGet{{err: missingKey()}, {body: body}}}
+	var warn bytes.Buffer
+	rec, err := pollCompletion(context.Background(), store, "us-east-1", "b", "t", "run-A",
+		time.Millisecond, time.Now().Add(time.Minute), &warn)
+	if err != nil {
+		t.Fatalf("pollCompletion: %v", err)
+	}
+	if rec.RunID != "run-A" {
+		t.Errorf("run_id = %q, want run-A", rec.RunID)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("a matching record must not warn, got: %q", warn.String())
+	}
+}
+
+// TestPollCompletion_EmptyRunIDAcceptedWithWarning locks in the documented
+// back-compat choice: a record with NO run_id predates run-id stamping, so it
+// cannot be attributed to this run. We accept it (hanging until TTL on every
+// legitimate old-wrapper run would be worse) but say so loudly — the warning is
+// the contract, so it is asserted here.
+func TestPollCompletion_EmptyRunIDAcceptedWithWarning(t *testing.T) {
+	body := recordJSON(t, taskproto.CompletionRecord{
+		TaskID: "t", ExitCode: 3, State: taskproto.StateFailed, // no RunID
+	})
+	store := &fakeResultStore{gets: []fakeGet{{body: body}}}
+	var warn bytes.Buffer
+	rec, err := pollCompletion(context.Background(), store, "us-east-1", "b", "t", "run-A",
+		time.Millisecond, time.Now().Add(time.Minute), &warn)
+	if err != nil {
+		t.Fatalf("pollCompletion: %v", err)
+	}
+	if rec == nil || rec.ExitCode != 3 {
+		t.Fatalf("an unattributable record should still be accepted, got %+v", rec)
+	}
+	for _, want := range []string{"no run_id", "cannot be attributed"} {
+		if !strings.Contains(warn.String(), want) {
+			t.Errorf("warning missing %q, got: %q", want, warn.String())
+		}
+	}
+}
+
+// TestPollCompletion_StaleOnlyTimesOutWithAClearMessage: if the ONLY record that
+// ever appears belongs to an earlier attempt, --wait must time out rather than
+// report it, and the error must name the situation so nobody re-debugs working
+// code (the issue's actual cost).
+func TestPollCompletion_StaleOnlyTimesOutWithAClearMessage(t *testing.T) {
+	body := recordJSON(t, taskproto.CompletionRecord{
+		TaskID: "t", RunID: "run-OLD", ExitCode: 141, State: taskproto.StateFailed,
+	})
+	store := &fakeResultStore{gets: []fakeGet{{body: body}}}
+	var warn bytes.Buffer
+	_, err := pollCompletion(context.Background(), store, "us-east-1", "b", "t", "run-NEW",
+		time.Millisecond, time.Now().Add(-time.Second), &warn)
+	if err == nil {
+		t.Fatal("expected a timeout rather than the previous attempt's record")
+	}
+	if !strings.Contains(err.Error(), "earlier attempt") {
+		t.Errorf("timeout error should explain the stale record, got: %v", err)
+	}
+}
+
+// TestPollCompletion_NoRunIDCallerKeepsOldBehavior: a caller with no run identity
+// of its own (runID "") has nothing to compare against, so it must keep the
+// pre-#608 behavior of accepting whatever is at the key — never hang.
+func TestPollCompletion_NoRunIDCallerKeepsOldBehavior(t *testing.T) {
+	body := recordJSON(t, taskproto.CompletionRecord{TaskID: "t", RunID: "run-whatever", ExitCode: 0})
+	store := &fakeResultStore{gets: []fakeGet{{body: body}}}
+	rec, err := pollCompletion(context.Background(), store, "us-east-1", "b", "t", "",
+		time.Millisecond, time.Now().Add(time.Minute), nil)
+	if err != nil {
+		t.Fatalf("pollCompletion: %v", err)
+	}
+	if rec.RunID != "run-whatever" {
+		t.Errorf("run_id = %q, want the record returned unfiltered", rec.RunID)
+	}
+}
+
+func TestClassifyCompletionRun(t *testing.T) {
+	cases := []struct {
+		name  string
+		rec   *taskproto.CompletionRecord
+		runID string
+		want  completionRunVerdict
+	}{
+		{"same run", &taskproto.CompletionRecord{RunID: "a"}, "a", completionForThisRun},
+		{"different run", &taskproto.CompletionRecord{RunID: "b"}, "a", completionPreviousRun},
+		{"no run_id (pre-#608 wrapper)", &taskproto.CompletionRecord{}, "a", completionUnattributed},
+		{"caller has no run id", &taskproto.CompletionRecord{RunID: "b"}, "", completionForThisRun},
+		{"no record", nil, "a", completionPreviousRun},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyCompletionRun(tc.rec, tc.runID); got != tc.want {
+				t.Errorf("classifyCompletionRun = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClearStaleCompletion_DeletesBothKeys: the pre-launch clear must cover BOTH
+// per-task result objects the wrapper writes — completion.json AND the sibling
+// .exitcode — since both are keyed by task_id alone and both are re-read by
+// consumers.
+func TestClearStaleCompletion_DeletesBothKeys(t *testing.T) {
+	store := &fakeResultStore{}
+	if err := clearStaleCompletion(context.Background(), store, "us-west-2", "spawn-results-1-us-west-2", "cookbook-plink-r1"); err != nil {
+		t.Fatalf("clearStaleCompletion: %v", err)
+	}
+	want := []string{"tasks/cookbook-plink-r1/completion.json", "tasks/cookbook-plink-r1/.exitcode"}
+	if len(store.deleted) != len(want) {
+		t.Fatalf("deleted %v, want %v", store.deleted, want)
+	}
+	for i, k := range want {
+		if store.deleted[i] != k {
+			t.Errorf("deleted[%d] = %q, want %q", i, store.deleted[i], k)
+		}
+	}
+}
+
+// TestClearStaleCompletion_ErrorIsReportedNotSwallowed: a delete failure surfaces
+// to the caller (which logs it and launches anyway — the run-id check is the
+// suspenders), and every key is still attempted rather than aborting on the first.
+func TestClearStaleCompletion_ErrorIsReportedNotSwallowed(t *testing.T) {
+	store := &fakeResultStore{delErr: errors.New("AccessDenied")}
+	err := clearStaleCompletion(context.Background(), store, "us-east-1", "b", "t")
+	if err == nil {
+		t.Fatal("expected the delete error to be returned for logging")
+	}
+	if len(store.deleted) != 2 {
+		t.Errorf("attempted %d deletes, want both keys attempted even after a failure", len(store.deleted))
 	}
 }

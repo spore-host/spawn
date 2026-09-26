@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/google/uuid"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -50,7 +51,19 @@ func (e *ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir s
 	// the sized family; a pooled worker doesn't size here (it runs on an already-
 	// provisioned instance), so GPU auto-detection for pools is a separate concern.
 	gpu := spec.Resources.GPUs > 0
-	script := taskproto.GeneratePooledJobScript(spec, e.ResultsBucket, e.Region, gpu)
+	// Stamp a fresh run id per EXECUTION (spawn#608). A pooled worker writes to the
+	// same tasks/<task_id>/completion.json key on every execution of a given
+	// task_id, so its records need the same attempt identity the one-instance path
+	// mints at launch — otherwise a re-dispatched task_id leaves a record that
+	// nothing can attribute to an attempt. The id is minted HERE rather than passed
+	// down because the pooled dispatcher has no launch step to mint it in: the
+	// worker receives only the staged TaskSpec. That means no pool submitter can
+	// verify this id today (it never learns it); what it buys now is that every
+	// record a current-generation wrapper writes carries an id, so "run_id is
+	// empty" keeps its single meaning of "written by a pre-#608 wrapper". When #70's
+	// dispatch path grows a submitter-side run identity, thread it in here and the
+	// verification comes for free.
+	script := taskproto.GeneratePooledJobScript(spec, e.ResultsBucket, e.Region, gpu, uuid.NewString())
 
 	// Write the script into the workspace and run it there, so its relative paths
 	// and any scratch files land in the isolated dir (which the worker resets after).
