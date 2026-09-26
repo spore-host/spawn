@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.111.3] - 2026-09-25
+
 ### Fixed
 - **`task run --wait` no longer reports the *previous* attempt's result when you
   re-run the same `task_id`** (#608). Fix a spec, re-run it, and `--wait` could
@@ -3693,7 +3695,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.111.2...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.111.3...HEAD
+[0.111.3]: https://github.com/spore-host/spawn/compare/v0.111.2...v0.111.3
 [0.111.2]: https://github.com/spore-host/spawn/compare/v0.111.1...v0.111.2
 [0.111.1]: https://github.com/spore-host/spawn/compare/v0.111.0...v0.111.1
 [0.111.0]: https://github.com/spore-host/spawn/compare/v0.110.0...v0.111.0
