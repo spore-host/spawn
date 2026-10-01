@@ -85,10 +85,20 @@ func (a *Agent) mountPendingFSx(ctx context.Context) {
 	// we still mount, so the job can run (it just won't auto-mirror to S3).
 	if cfgSnap.FSxImportPath != "" || cfgSnap.FSxExportPath != "" {
 		if err := createFSxS3Association(ctx, fsxClient, fsxID, cfgSnap.FSxImportPath, cfgSnap.FSxExportPath); err != nil {
-			log.Printf("fsx: data-repository association for %s failed: %v — mounting anyway (results may not auto-export to S3)", fsxID, err)
+			// Say what is actually broken (#622). "results may not auto-export" was
+			// the old wording and it understated the import case badly: with
+			// --fsx-import-path the DRA is how the data ARRIVES, so without it the
+			// workload reads an EMPTY filesystem — not "results might not sync
+			// later". The user who hit this paid for a 1200 GiB filesystem holding
+			// nothing and spent 15 minutes finding out why.
+			log.Printf("fsx: data-repository association for %s failed: %v — mounting anyway, but %s", fsxID, err, draImpact(cfgSnap.FSxImportPath, cfgSnap.FSxExportPath))
 			a.notifier.Notify(context.Background(), "fsx_dra_failed", fsxID+": "+err.Error())
+			// Tag it so the failure is visible to `spawn status` rather than only in
+			// this log on the box, mirroring spawn:dns-status/spawn:dns-error (#435).
+			a.tagFSxDRAStatus(ctx, "failed", err.Error())
 		} else {
 			log.Printf("fsx: S3 export association created for %s", fsxID)
+			a.tagFSxDRAStatus(ctx, "associated", "")
 		}
 	}
 
@@ -171,6 +181,77 @@ func (a *Agent) waitForFSxAvailable(ctx context.Context, fsxClient *fsx.Client, 
 
 // tagFSxMounted records the now-mounted filesystem as spawn:fsx-id (the reaper
 // refcount lease, #192) and clears spawn:fsx-pending. Best-effort.
+// draImpact describes, in the user's terms, what a failed data-repository
+// association actually costs for the paths they asked for.
+//
+// An import path is how data gets ONTO the filesystem, so losing the association
+// means the mount is empty; an export path is how results get OFF it, so losing it
+// means results stay on a filesystem that may be reclaimed. Both is both.
+func draImpact(importPath, exportPath string) string {
+	switch {
+	case importPath != "" && exportPath != "":
+		return "the filesystem will be EMPTY (nothing imported from " + importPath + ") and results will NOT be exported to " + exportPath
+	case importPath != "":
+		return "the filesystem will be EMPTY — nothing will be imported from " + importPath
+	default:
+		return "results will NOT be exported to " + exportPath
+	}
+}
+
+// tagFSxDRAStatus records the outcome of the S3 data-repository association on the
+// instance, so `spawn status` can report it instead of it living only in this log
+// on the box (#622). It mirrors the DNS pattern in agent.go's tagDNSStatus,
+// including deleting a stale error tag on a later success — an instance carrying
+// both spawn:fsx-dra-status=associated and a leftover spawn:fsx-dra-error would
+// contradict itself.
+func (a *Agent) tagFSxDRAStatus(ctx context.Context, status, detail string) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.identity.Region))
+	if err != nil {
+		log.Printf("fsx: tag dra status: load config: %v", err)
+		return
+	}
+	client := ec2.NewFromConfig(cfg)
+
+	tags := []ec2types.Tag{{Key: aws.String("spawn:fsx-dra-status"), Value: aws.String(status)}}
+	if detail != "" {
+		tags = append(tags, ec2types.Tag{
+			Key: aws.String("spawn:fsx-dra-error"),
+			// EC2 tag values cap at 256 characters, and an AWS error string can
+			// exceed that — a rejected CreateTags would lose the whole signal, which
+			// is the silence this fix is about.
+			Value: aws.String(truncateTagValue(detail, 255)),
+		})
+	}
+	if _, err := client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{a.identity.InstanceID},
+		Tags:      tags,
+	}); err != nil {
+		log.Printf("fsx: write spawn:fsx-dra-status tag: %v", err)
+		return
+	}
+
+	if detail == "" {
+		if _, err := client.DeleteTags(ctx, &ec2.DeleteTagsInput{
+			Resources: []string{a.identity.InstanceID},
+			Tags:      []ec2types.Tag{{Key: aws.String("spawn:fsx-dra-error")}},
+		}); err != nil {
+			log.Printf("fsx: clear stale spawn:fsx-dra-error tag: %v", err)
+		}
+	}
+}
+
+// truncateTagValue keeps a tag value within EC2's limit, marking that it was cut
+// so a reader doesn't mistake a truncated error for the whole error.
+func truncateTagValue(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
+}
+
 func (a *Agent) tagFSxMounted(ctx context.Context, fsxID, mountPoint string) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.identity.Region))
 	if err != nil {

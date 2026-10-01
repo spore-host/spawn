@@ -924,6 +924,35 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	}
 	statements = append(statements, sporedFSxMount)
 
+	// FSx creates a per-filesystem service-linked role
+	// (AWSServiceRoleForFSxS3Access_<fsid>) on the FIRST
+	// CreateDataRepositoryAssociation in an account, and that requires the CALLING
+	// principal to hold iam:CreateServiceLinkedRole. #221 added the fsx:* actions
+	// above — necessary but not sufficient — so every DRA on a fresh filesystem
+	// failed with "Amazon FSx is unable to create Service-Linked-Role to access the
+	// S3 bucket" (#622).
+	//
+	// The cost of missing this was silent and large: spored mounts anyway by design,
+	// so --fsx-import-path produced a mounted but EMPTY 1200 GiB filesystem (the FSx
+	// Lustre minimum, ~$174/month) while the CLI printed "Instance Ready!" and the
+	// workload read an empty directory.
+	//
+	// It looked account-specific because the role persists once created: anyone who
+	// had ever made a DRA by hand never saw it.
+	//
+	// Scoped by condition to the one service principal that needs it, so this is not
+	// a general service-linked-role creation grant.
+	statements = append(statements, map[string]interface{}{
+		"Effect":   "Allow",
+		"Action":   "iam:CreateServiceLinkedRole",
+		"Resource": "*",
+		"Condition": map[string]interface{}{
+			"StringEquals": map[string]interface{}{
+				"iam:AWSServiceName": "s3.data-source.lustre.fsx.amazonaws.com",
+			},
+		},
+	})
+
 	return statements
 }
 
