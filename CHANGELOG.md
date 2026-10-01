@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Bumped OpenTelemetry to v1.45.0** to clear
+  [GO-2026-6505](https://pkg.go.dev/vuln/GO-2026-6505), reported against
+  `go.opentelemetry.io/otel/exporters/otlp/otlptrace` and `otlptracehttp` at
+  v1.44.0. The advisory was published after v0.112.1 was tagged, so `main` went red
+  on it with no code change of ours. Bumped in the root module and in the two lambda
+  modules that carry otel transitively.
+
 ### Fixed
 - **`--fsx-import-path` now actually imports your data** (#622). On a fresh
   filesystem the S3 data-repository association failed every time with *"Amazon FSx
