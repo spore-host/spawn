@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.112.1] - 2026-10-01
+
+### Fixed
+- **`spawn` no longer crashes when it looks at an FSx filesystem that is still
+  being created** (#618). Resolving a filesystem by id during `launch` or
+  `task run` dereferenced its DNS name, Lustre mount name and storage capacity
+  unconditionally — a filesystem in `CREATING` has none of them, and the result was
+  a nil-pointer panic and a stack trace instead of a usable answer. FSx Lustre takes
+  minutes to provision, and that window is exactly where #613 was reported from. A
+  not-yet-ready filesystem is now reported as such: no DNS name and no mount name
+  means a mount cannot be built yet, which is the honest answer. A tag with a
+  missing key or value had the same crash shape and is fixed with it.
+- **`spawn fsx info` no longer overstates storage cost by ~52%** (#619). It
+  multiplied capacity by a hardcoded `$0.22/GiB-month` labelled "for SSD" — a
+  PERSISTENT_1 rate, applied to the PERSISTENT_2 filesystems `spawn` actually
+  creates, whose rate at the default 125 MB/s/TiB tier is `$0.145`. For a 1200 GiB
+  filesystem (the FSx Lustre minimum) that reported ~`$264`/month against a real
+  ~`$174`. Since v0.112.0 taught `--estimate-only` to quote storage cost, the two
+  commands also disagreed about the same filesystem. `fsx info` now reads the
+  filesystem's real throughput tier and uses the single shared rate table, labels
+  the figure as approximate, and says "unknown" rather than `$0.00` when capacity
+  isn't reported yet.
+
 ## [0.112.0] - 2026-09-30
 
 ### Fixed
@@ -3761,7 +3784,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.112.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.112.1...HEAD
+[0.112.1]: https://github.com/spore-host/spawn/compare/v0.112.0...v0.112.1
 [0.112.0]: https://github.com/spore-host/spawn/compare/v0.111.4...v0.112.0
 [0.111.4]: https://github.com/spore-host/spawn/compare/v0.111.3...v0.111.4
 [0.111.3]: https://github.com/spore-host/spawn/compare/v0.111.2...v0.111.3
