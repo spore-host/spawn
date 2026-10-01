@@ -273,32 +273,48 @@ func (c *Client) GetFSxFilesystem(ctx context.Context, filesystemID, region stri
 		return nil, fmt.Errorf("FSx filesystem not found: %s", filesystemID)
 	}
 
-	fs := result.FileSystems[0]
+	return fsxInfoFrom(result.FileSystems[0]), nil
+}
 
-	// Extract S3 info from tags
-	s3Bucket := ""
-	s3ImportPath := ""
-	s3ExportPath := ""
+// fsxInfoFrom maps a described filesystem onto [FSxInfo].
+//
+// It is a separate, pure function so the mapping can be tested against a
+// filesystem in any lifecycle state without AWS — which is the whole point, since
+// this used to dereference DNSName, LustreConfiguration.MountName and
+// StorageCapacity unconditionally and therefore **panicked** on a filesystem that
+// was still CREATING (#618). All three are optional in the API and a CREATING
+// filesystem has no DNSName and no LustreConfiguration at all. Tag.Key/Value are
+// optional too, so the tag scan had the same latent shape.
+//
+// CREATING is not an edge case: FSx Lustre takes minutes to provision, and
+// spawn#613 was reported by someone who acted on a filesystem inside exactly that
+// window. A zero DNSName/MountName is already meaningful to callers — a mount
+// cannot be constructed without them — so a not-yet-ready filesystem is reported
+// as such rather than crashing the CLI.
+func fsxInfoFrom(fs types.FileSystem) *FSxInfo {
+	info := &FSxInfo{
+		FileSystemID: aws.ToString(fs.FileSystemId),
+		DNSName:      aws.ToString(fs.DNSName),
+	}
+
 	for _, tag := range fs.Tags {
-		switch *tag.Key {
+		switch aws.ToString(tag.Key) {
 		case "spawn:fsx-s3-bucket":
-			s3Bucket = *tag.Value
+			info.S3Bucket = aws.ToString(tag.Value)
 		case "spawn:fsx-s3-import-path":
-			s3ImportPath = *tag.Value
+			info.S3ImportPath = aws.ToString(tag.Value)
 		case "spawn:fsx-s3-export-path":
-			s3ExportPath = *tag.Value
+			info.S3ExportPath = aws.ToString(tag.Value)
 		}
 	}
 
-	return &FSxInfo{
-		FileSystemID:    *fs.FileSystemId,
-		DNSName:         *fs.DNSName,
-		MountName:       *fs.LustreConfiguration.MountName,
-		StorageCapacity: *fs.StorageCapacity,
-		S3Bucket:        s3Bucket,
-		S3ImportPath:    s3ImportPath,
-		S3ExportPath:    s3ExportPath,
-	}, nil
+	if fs.LustreConfiguration != nil {
+		info.MountName = aws.ToString(fs.LustreConfiguration.MountName)
+	}
+	if fs.StorageCapacity != nil {
+		info.StorageCapacity = *fs.StorageCapacity
+	}
+	return info
 }
 
 // FSxBrief is the minimal, nil-safe view of a filesystem: enough to tell a user
