@@ -238,9 +238,28 @@ func runFSxInfo(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Cost estimate
-	costPerMonth := float64(*fs.StorageCapacity) * 0.22 // $0.22/GB-month for SSD
-	fmt.Printf("\nEstimated Cost:     $%.2f/month\n", costPerMonth)
+	// Cost estimate. This used to multiply capacity by a hardcoded $0.22/GiB-month
+	// commented "for SSD" (#619) — a PERSISTENT_1 rate, applied to filesystems
+	// spawn creates as PERSISTENT_2, whose rate at the default 125 MB/s/TiB tier is
+	// $0.145. That overstated a 1200 GiB filesystem by ~52% ($264 vs $174) and
+	// disagreed with the figure `--estimate-only` prints for the same shape.
+	//
+	// Now it reads the actual throughput tier off the filesystem and uses the one
+	// shared rate table (cmd/fsx_cost.go), so the two surfaces cannot drift. Both
+	// derefs are guarded: a filesystem still CREATING may have neither field.
+	var capacityGiB, throughput int32
+	if fs.StorageCapacity != nil {
+		capacityGiB = *fs.StorageCapacity
+	}
+	if fs.LustreConfiguration != nil && fs.LustreConfiguration.PerUnitStorageThroughput != nil {
+		throughput = *fs.LustreConfiguration.PerUnitStorageThroughput
+	}
+	if capacityGiB > 0 {
+		fmt.Printf("\nEstimated Cost:     $%.2f/month (~$%.4f/GiB-month at %d MB/s/TiB — approximate, us-east-1 list price)\n",
+			fsxLustreMonthlyUSD(capacityGiB, throughput), fsxLustreUSDPerGiBMonth(throughput), throughput)
+	} else {
+		fmt.Printf("\nEstimated Cost:     unknown (storage capacity not reported yet)\n")
+	}
 
 	return nil
 }
