@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spore-host/libs/pricing"
 	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
@@ -221,10 +220,17 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// --detach with no --max-concurrent, which leaves maxConcurrent at 0 and so
 	// fails the `detach && maxConcurrent > 0` condition below.
 	//
-	// Deliberately placed before the AWS client is constructed: EstimateSweepCost
-	// reads only the param file, so a cost preview needs no credentials.
+	// Deliberately placed before the AWS client is constructed, so a preview never
+	// builds the launch machinery. Pricing each row does now reach AWS — it asks
+	// truffle for a live on-demand rate (spore-host/libs#29 removed the static
+	// per-family guess that used to answer offline with a fabricated number) — but
+	// that is a read-only Price List lookup, memoized per instance shape, and a
+	// failure degrades to truffle's static table or marks the row unpriced rather
+	// than failing the preview. So --estimate-only still launches nothing and
+	// still completes without usable credentials; it just reports what it could
+	// not price instead of inventing it.
 	if estimateOnly {
-		return estimateSweepOnly(paramFormat)
+		return estimateSweepOnly(ctx, paramFormat)
 	}
 
 	// Initialize AWS client
@@ -900,18 +906,10 @@ func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat 
 // without launching anything. This is the entirety of --estimate-only's
 // behaviour on the sweep path; both orchestration paths reach it from the single
 // check in launchParameterSweep (#524).
-func estimateSweepOnly(paramFormat *ParamFileFormat) error {
-	fmt.Fprintf(os.Stderr, "💰 Estimating cost...\n")
-	costEstimate, err := pricing.EstimateSweepCost(&pricing.ParamFileFormat{
-		Defaults: paramFormat.Defaults,
-		Params:   paramFormat.Params,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to estimate cost: %w", err)
+func estimateSweepOnly(ctx context.Context, paramFormat *ParamFileFormat) error {
+	if _, err := estimateAndReportSweep(ctx, paramFormat); err != nil {
+		return err
 	}
-
-	fmt.Fprintf(os.Stderr, "\n%s\n\n", costEstimate.Display())
-	reportSweepBudget(costEstimate.TotalCost)
 	fmt.Fprintf(os.Stderr, "✅ Estimate complete — no instances launched (--estimate-only)\n")
 	return nil
 }
@@ -920,13 +918,25 @@ func estimateSweepOnly(paramFormat *ParamFileFormat) error {
 // ever prints: --budget is a warning, not a cap, and nothing here blocks a
 // launch. Shared by the estimate-only path and the real detached launch so the
 // two cannot drift.
-func reportSweepBudget(totalCost float64) {
+//
+// partial says the estimate could not price every row, so totalCost is a floor.
+// It must change what this prints: "within budget" computed from a total that is
+// missing rows is a pass the sweep may not have earned, and silently granting one
+// is the same class of error as the fabricated rates that made the total wrong in
+// the first place (spore-host/libs#29).
+func reportSweepBudget(totalCost float64, partial bool) {
 	if budget <= 0 {
 		return
 	}
 	if totalCost > budget {
 		fmt.Fprintf(os.Stderr, "⚠️  WARNING: Estimated cost ($%.2f) exceeds budget ($%.2f) by $%.2f\n\n",
 			totalCost, budget, totalCost-budget)
+		return
+	}
+	if partial {
+		fmt.Fprintf(os.Stderr, "⚠️  Cannot confirm this sweep is within budget: the $%.2f floor fits in $%.2f,\n"+
+			"   but rows that could not be priced are missing from it (see above).\n\n",
+			totalCost, budget)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "✓ Within budget: $%.2f remaining of $%.2f\n\n",
@@ -985,20 +995,12 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 		fmt.Fprintf(os.Stderr, "✓ All parameter sets validated\n\n")
 	}
 
-	// Estimate cost
-	fmt.Fprintf(os.Stderr, "💰 Estimating cost...\n")
-	costEstimate, err := pricing.EstimateSweepCost(&pricing.ParamFileFormat{
-		Defaults: paramFormat.Defaults,
-		Params:   paramFormat.Params,
-	})
+	// Estimate cost, print it with its provenance, and check --budget (warning
+	// only — see reportSweepBudget). Shared with --estimate-only.
+	costEstimate, err := estimateAndReportSweep(ctx, paramFormat)
 	if err != nil {
-		return fmt.Errorf("failed to estimate cost: %w", err)
+		return err
 	}
-
-	fmt.Fprintf(os.Stderr, "\n%s\n\n", costEstimate.Display())
-
-	// Check budget (warning only — see reportSweepBudget)
-	reportSweepBudget(costEstimate.TotalCost)
 
 	// No --estimate-only check here: it is handled once in launchParameterSweep,
 	// before the dispatch that chooses this function, so that the guarantee holds

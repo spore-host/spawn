@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The sweep cost estimate no longer understates GPU sweeps by 4-12x**
+  (spore-host/libs#29). `--estimate-only` and the pre-launch preview priced each
+  row from `libs/pricing`'s static table, which has no GPU family newer than
+  `p4d` and quietly answered for the ones it didn't know with a per-family-size
+  guess — `$2.40/hr` for a `g6e.12xlarge` against a real `$10.49`, and a
+  confident `$0.20/hr` for instance types that **do not exist**. Rows are now
+  priced through truffle (live AWS Price List, degrading to truffle's own
+  exact-match table), and a row that cannot be priced is **named and excluded**
+  instead of invented.
+- **`--budget` can no longer pass a sweep it hasn't actually priced.** A real
+  4-row sweep that previously reported `$10.34` and `✓ Within budget: $9.66
+  remaining of $20.00` now reports a `$42.31` floor and warns that it exceeds the
+  budget by `$22.31`. Where the total is under budget but incomplete, the preview
+  says it *cannot confirm* the sweep is within budget rather than printing a pass
+  it did not earn.
+
+### Changed
+- **The sweep estimate says where its prices came from**, matching what the
+  single-instance launch path already did (#543): a `N instance shape(s) priced:
+  N live, M static fallback` line, plus an explicit list of rows that could not
+  be priced and a total labelled **FLOOR** when any row is missing from it.
+  Lookups are memoized per instance shape, so a 500-row sweep over three shapes
+  makes three pricing calls.
+- `--estimate-only` on the sweep path now performs read-only AWS Price List
+  lookups where it previously worked purely offline. It still launches nothing and
+  still completes without usable credentials — it reports rows it could not price
+  instead of fabricating them.
+
 ## [0.111.4] - 2026-09-26
 
 ### Fixed
