@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory. The grant is now part of spored's baseline, scoped by condition to the
   one FSx-S3 service principal. It looked account-specific only because the role
   persists once created, so anyone who had ever made an association by hand never
-  saw it.
+  saw it. The grant was missing on **both** instance-profile paths — including the
+  one a launch with no `--iam-*` flags takes, i.e. the simplest invocation — so both
+  are fixed and a test pins them together.
 - **A failed S3 association is no longer visible only on the instance.**
   `spawn status` now reports it — which filesystem, the underlying error, and that
   the filesystem is billing either way with the commands to list and delete it.

@@ -80,6 +80,70 @@ func TestFSxServiceLinkedRoleGrantIsScopedToTheOneService(t *testing.T) {
 	}
 }
 
+// TestBothSporedPolicyPathsGrantTheFSxServiceLinkedRole closes the gap #622's
+// report did not mention.
+//
+// spawn resolves an instance profile through TWO divergent paths (the #550
+// contrast): CreateOrGetInstanceProfile builds the dynamic baseline, while
+// SetupSporedIAMRole writes the static sporedDCVRolePolicy and is what a launch
+// with NO --iam-* flags gets — the simplest invocation there is. That static policy
+// already had the #221 fsx: actions but not the service-linked-role grant, so it
+// had the identical silent-empty-filesystem bug. Fixing only the path the reporter
+// happened to use would have left the more common one broken.
+func TestBothSporedPolicyPathsGrantTheFSxServiceLinkedRole(t *testing.T) {
+	client := &Client{}
+	for name, doc := range map[string]string{
+		"dynamic baseline (CreateOrGetInstanceProfile)": client.sporedBaselinePolicyDoc(),
+		"static DCV/no-flags role (SetupSporedIAMRole)": sporedDCVRolePolicy,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !json.Valid([]byte(doc)) {
+				t.Fatalf("policy is not valid JSON:\n%s", doc)
+			}
+			if !strings.Contains(doc, "fsx:CreateDataRepositoryAssociation") {
+				t.Fatalf("policy lacks fsx:CreateDataRepositoryAssociation, so the SLR grant would be pointless here")
+			}
+			if !strings.Contains(doc, "iam:CreateServiceLinkedRole") {
+				t.Errorf("policy grants fsx:CreateDataRepositoryAssociation but not "+
+					"iam:CreateServiceLinkedRole — the association will fail and --fsx-import-path "+
+					"will mount an EMPTY filesystem (#622):\n%s", doc)
+			}
+			if !strings.Contains(doc, "s3.data-source.lustre.fsx.amazonaws.com") {
+				t.Errorf("the SLR grant must be conditioned to the FSx-S3 service principal:\n%s", doc)
+			}
+		})
+	}
+}
+
+// TestSporedDCVPolicyIsWellFormed guards the specific mistake of annotating a
+// statement: IAM rejects unknown statement elements with MalformedPolicyDocument,
+// which would break every launch on this path rather than degrade it.
+func TestSporedDCVPolicyIsWellFormed(t *testing.T) {
+	var parsed struct {
+		Version   string                   `json:"Version"`
+		Statement []map[string]interface{} `json:"Statement"`
+	}
+	if err := json.Unmarshal([]byte(sporedDCVRolePolicy), &parsed); err != nil {
+		t.Fatalf("sporedDCVRolePolicy is not valid JSON: %v", err)
+	}
+	if parsed.Version == "" {
+		t.Error("policy has no Version")
+	}
+	allowed := map[string]bool{
+		"Sid": true, "Effect": true, "Action": true, "NotAction": true,
+		"Resource": true, "NotResource": true, "Condition": true,
+		"Principal": true, "NotPrincipal": true,
+	}
+	for i, st := range parsed.Statement {
+		for key := range st {
+			if !allowed[key] {
+				t.Errorf("statement %d has non-IAM element %q — IAM rejects this with "+
+					"MalformedPolicyDocument (no comments allowed in a policy document)", i, key)
+			}
+		}
+	}
+}
+
 // actionsContain handles Action being either a string or a list, which is how IAM
 // permits it and how these statements are built.
 func actionsContain(action interface{}, want string) bool {
