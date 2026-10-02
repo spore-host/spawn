@@ -11,6 +11,11 @@ spored_*.tar.gz
 lambda/*/bootstrap
 lambda/*/function.zip
 lambda/*.zip
+# Any zip inside a lambda module. `lambda/*.zip` above only matches the lambda/
+# directory itself, so the release artifact GoReleaser's before-hook builds
+# (lambda/ttl-reaper/ttl-reaper_lambda_linux_arm64.zip, #625) was committable — a
+# 25 MiB binary one `git add -A` away from the repo.
+lambda/*/*.zip
 
 # Lambda compiled binaries (named after their function)
 lambda/alert-evaluator/alert-evaluator

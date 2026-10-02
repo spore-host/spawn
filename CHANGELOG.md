@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The ttl-reaper Lambda is now published as a release asset**
+  (`ttl-reaper_lambda_linux_arm64.zip`, #625). Nothing could install the reaper
+  before: it was deployed by hand from a CFN template in this repo, so an account
+  whose organization forbids cross-account trust — where the reaper's normal
+  "assume a role in your account" model is unavailable — had no way to get a backstop
+  at all. Publishing the artifact is the prerequisite for `spawn reaper deploy`.
+
+### Fixed
+- **A reaper scanning its own account could not delete orphaned FSx filesystems or
+  shut instances down gracefully** (#625). Its execution policy granted
+  `ec2:Describe*`/`TerminateInstances` and **no `fsx:` or `ssm:` actions**, while the
+  reaper's code calls `fsx:DescribeFileSystems`/`DeleteFileSystem` (the #210
+  ephemeral-orphan net) and `ssm:SendCommand`/`GetCommandInvocation` (graceful
+  shutdown). In cross-account mode those run under the assumed role, which does grant
+  FSx — so the gap only ever affected the scan-its-own-account mode, and affected it
+  **silently**: instances were terminated correctly while the orphaned 1200 GiB
+  filesystem that #613 was reported for was quietly left behind. The permission set
+  now lives in one place (`pkg/reaperiam`) with a test that reads the reaper's own API
+  interfaces and fails if any call lacks a grant — the structural end of the class
+  behind #622 and lagotto #149/#151/#153.
+
 ## [0.114.0] - 2026-10-02
 
 ### Added
