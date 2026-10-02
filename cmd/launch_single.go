@@ -990,8 +990,15 @@ func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.La
 			prog.Complete("Setting up IAM role")
 			return nil
 		}
-		// Check if user specified custom IAM configuration
-		if iamRole != "" || len(iamPolicy) > 0 || len(iamManagedPolicies) > 0 || iamPolicyFile != "" {
+		// Check if user specified custom IAM configuration.
+		//
+		// --s3-read/--s3-write count as custom IAM config (#614): they must route
+		// through CreateOrGetInstanceProfile, because the SetupSporedIAMRole default
+		// below attaches a FIXED policy whose S3 grants cover only spawn's own
+		// infrastructure buckets — which is exactly why a --command reading the
+		// caller's own bucket returned 403.
+		if iamRole != "" || len(iamPolicy) > 0 || len(iamManagedPolicies) > 0 || iamPolicyFile != "" ||
+			len(s3ReadBuckets) > 0 || len(s3WriteBuckets) > 0 {
 			// Reject wildcard *:FullAccess templates unless explicitly opted in
 			// (2026-06 audit, M-sec). Fail before any AWS call.
 			if err := aws.ValidatePolicyNames(iamPolicy, iamAllowFullAccess); err != nil {
@@ -1006,6 +1013,19 @@ func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.La
 				PolicyFile:      iamPolicyFile,
 				TrustServices:   iamTrustServices,
 				Tags:            parseIAMRoleTags(iamRoleTags),
+			}
+
+			// --s3-read/--s3-write become a scoped bucket policy built by the SAME
+			// function the task path uses (#614), so launch and task cannot drift in
+			// what "read this bucket" means. It lands on the role as its own
+			// "spawn-scoped-policy" inline document, so it is additive with
+			// --iam-policy / --iam-policy-file rather than replacing them.
+			if len(s3ReadBuckets) > 0 || len(s3WriteBuckets) > 0 {
+				if err := validateS3BucketFlags(s3ReadBuckets, s3WriteBuckets); err != nil {
+					prog.Error("Setting up IAM role", err)
+					return err
+				}
+				iamConfig.InlinePolicyJSON = taskStagingPolicy(s3ReadBuckets, s3WriteBuckets, "", nil)
 			}
 
 			instanceProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, iamConfig)

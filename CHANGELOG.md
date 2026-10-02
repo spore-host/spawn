@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`--on-complete` now actually fires for a `--command` launch** (#614). Nothing on
+  that path ever signalled completion — only `spawn task run` did — so an instance
+  ran to its full TTL whether the command succeeded or failed, despite
+  `--on-complete terminate` being the documented way to bound batch cost. One
+  reporter's box idled 38 minutes after its command died in the first second.
+  **This is a behaviour change you will notice:** instances that used to sit until TTL
+  now take their `--on-complete` action when the command exits. If you relied on the
+  old behaviour to keep a box around, use `--on-complete stop` or omit the flag.
+- **A failed `--command` is no longer reported as a success.** The command was run as
+  a background job and its exit code discarded, so `✅ Command execution started`
+  printed regardless — and a command that 403'd on its first line looked like a clean
+  launch. The exit code is now captured (from `PIPESTATUS`, since `$?` after the log
+  pipe is `tee`'s status and is `0` even on failure), written to
+  `/tmp/SPAWN_EXITCODE`, and reported as a pass/fail line once it is actually known.
+
+### Added
+- **`--s3-read` and `--s3-write`** (both repeatable) grant a launch's instance access
+  to the S3 buckets you name (#614). A launch instance could previously only reach
+  spawn's own buckets, so a `--command` reading your own bucket got a 403 — and the
+  only ways out were `--iam-policy s3:ReadOnly`, which grants read on *every* bucket
+  in the account, or `AmazonS3FullAccess`. `spawn task run` already derives a
+  least-privilege policy from its spec's declared inputs and outputs; these flags give
+  `spawn launch` the same declarative capability, using the same policy builder.
+  Wildcards, ARNs and `s3://` URIs are refused, since the name goes straight into a
+  Resource ARN.
+
+### Documentation
+- **`--command`'s help now states what the instance actually is**: the command runs on
+  the bare instance as the login user (not root — use `sudo`), and Docker and fuse are
+  **not** installed, unlike on a `spawn task run` instance. All three cost #614's
+  reporter a run to discover.
+
 ## [0.112.2] - 2026-10-01
 
 ### Security
