@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`spawn service`'s documented form now always works, and a misparse says why**
+  (#621). `spawn service python3 -m worker.serve --ttl 1h` failed with
+  `unknown shorthand flag: 'm' in -m` — naming a flag the user never passed to spawn,
+  so it reads as a spawn bug rather than a missing `--`. The help's examples put
+  spawn's flags *after* the command, which worked only because none of them carried a
+  flag of its own; they now show the form that always works (spawn's flags first,
+  then `--`, then your command), including commands like `python3 -m app.serve` and
+  `uvicorn app:app --port 0` that used to break. A flag-parse error now also names the
+  fix with a copyable example.
+  **Not changed:** the parser itself. Making everything after the command positional
+  (cobra's `SetInterspersed(false)`) would have silently turned
+  `spawn service ./srv --ttl 2h` into running `./srv --ttl 2h` with **no TTL on the
+  instance** — trading a loud error for an untimed, billing instance. The previously
+  documented flags-after-command form still works for commands without their own
+  flags.
+
+### Fixed
 - **`spawn doctor`'s reaper check now tells you something** (#624). It was a hardcoded
   "not detected" that printed the *same* warning in every account — covered or not — so
   it carried no information, and a warning that always fires is one people learn to

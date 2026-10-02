@@ -57,7 +57,13 @@ var (
 )
 
 var serviceCmd = &cobra.Command{
-	Use:   "service <command> [args...]",
+	// `[-- <command>...]` mirrors cmd/connect.go's Use string, and documents the
+	// form that always works (#621): spawn's own flags first, then `--`, then the
+	// command. Without the separator, cobra's interspersed parsing claims any
+	// dash-argument belonging to the workload — `spawn service python3 -m app`
+	// failed with "unknown shorthand flag: 'm' in -m", naming a flag the user never
+	// passed to spawn.
+	Use:   "service [flags] -- <command> [args...]",
 	Short: "Run a long-lived HTTP service on an instance and tunnel to it",
 	Long: `Launch an instance, run a long-lived HTTP service on it, and open a local
 tunnel to whatever port the service chose (spawn#409).
@@ -79,18 +85,29 @@ spawn holds the tunnel until you interrupt it or the instance's lifetime ends,
 then terminates the instance. The service listens on the instance's loopback and
 is reachable only through the tunnel — it is never exposed to the internet.
 
+Put spawn's flags FIRST and separate your command with "--". Everything after the
+"--" belongs to your service, including its own flags. Without the separator,
+anything dash-shaped in your command is read as a flag to spawn — so
+"spawn service python3 -m app.serve" fails with "unknown shorthand flag: 'm'",
+naming a flag you never passed to spawn.
+
 Examples:
   # Launch an instance, upload a binary, serve it, tunnel to it
-  spawn service ./my-server --instance-type m7i.large --upload ./my-server --ttl 2h
+  spawn service --instance-type m7i.large --upload ./my-server --ttl 2h -- ./my-server
+
+  # A command with its own flags — this is why the "--" matters
+  spawn service --instance-type m7i.large --ttl 1h -- python3 -m myapp.serve
+  spawn service --instance-type m7i.large --ttl 1h -- uvicorn app:app --port 0
+  spawn service --instance-type m7i.large --ttl 1h -- node --enable-source-maps server.js
 
   # Run something already baked into the AMI
-  spawn service /opt/tools/dashboard --instance-type m7i.large --ttl 30m
+  spawn service --instance-type m7i.large --ttl 30m -- /opt/tools/dashboard
 
   # Use an instance that is already running (it is not terminated afterwards)
-  spawn service ./my-server --host my-box --upload ./my-server
+  spawn service --host my-box --upload ./my-server -- ./my-server
 
   # Preview without launching
-  spawn service ./my-server --instance-type m7i.large --ttl 1h --dry-run
+  spawn service --instance-type m7i.large --ttl 1h --dry-run -- ./my-server
 
 Full contract, including how to make a binary spawnable:
 https://github.com/spore-host/spawn/blob/main/docs/service-readiness-contract.md`,
@@ -684,6 +701,19 @@ func localPortLabel() string {
 
 func init() {
 	rootCmd.AddCommand(serviceCmd)
+
+	// Name the actual fix when cobra rejects a flag that belongs to the user's
+	// command (#621). The raw error — "unknown shorthand flag: 'm' in -m" — names a
+	// flag the user never passed to spawn, so it reads as a spawn bug rather than a
+	// missing `--`. It bites the two most ordinary ways to start a service:
+	// `python3 -m app.serve` and `node --enable-source-maps server.js`.
+	serviceCmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return fmt.Errorf("%w\n\n"+
+			"  If that flag belongs to YOUR command rather than to spawn, put spawn's flags first\n"+
+			"  and separate your command with \"--\":\n\n"+
+			"      spawn service [spawn flags] -- <your command> [its flags]\n\n"+
+			"  e.g.  spawn service --instance-type m7i.large --ttl 1h -- python3 -m myapp.serve", err)
+	})
 
 	serviceCmd.Flags().StringVar(&serviceInstanceType, "instance-type", "", "EC2 instance type to launch (required unless --host is given)")
 	serviceCmd.Flags().StringVar(&serviceAMI, "ami", "", "AMI to launch (default: the recommended AMI for the instance type)")
