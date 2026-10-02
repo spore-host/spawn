@@ -7,28 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **`spawn status` now lists every billable resource the launch is paying for**, not
-  just the instance (#615) — EBS, an FSx Lustre filesystem, an EFS mount — with the
-  rate for each and an explicit note that **`--cost-limit` caps compute only**.
-  Resources that keep billing after the instance is gone are marked as such, with the
-  commands to find and delete them. This is the general form of #613's lesson: the
-  filesystem was the most expensive thing in that launch and the least visible thing
-  in the tooling, and `spawn status` — the one surface a user checks to answer "what
-  am I paying for" — was silent about it. A stopped instance's EBS is called out as
-  **still billing** while the compute row says it is not, since "stopped to save
-  money" is the quietest version of the same surprise. Rates come from the tags spawn
-  already writes, so the view cannot drift from what `--cost-limit` is enforced
-  against, and an unpriced instance reads "rate unknown" rather than implying $0.
-  The block is omitted when the instance is the only billable thing.
-
-### Changed
-- **`spawn status`'s reaper line now points at `spawn doctor`** instead of saying
-  "if deployed for your account". Coverage became detectable in #624, so the hedge
-  was pointing at a question that now has an answer — and the comment justifying it
-  cited the hardcoded stub #624 replaced. `spawn status` stays free of the two extra
-  AWS calls; it names the command that answers definitively.
-
 ### Fixed
 - **`spawn doctor`'s reaper check now tells you something** (#624). It was a hardcoded
   "not detected" that printed the *same* warning in every account — covered or not — so

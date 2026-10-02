@@ -165,7 +165,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Print(output)
 		fmt.Fprint(os.Stderr, ttlReconciliationNotice(instance, output))
 		fmt.Fprint(os.Stderr, lifecycleProtectionBlock(instance))
-		fmt.Fprint(os.Stderr, renderBillableResources(instance))
 		fmt.Fprint(os.Stderr, dnsStatusNotice(instance))
 		fmt.Fprint(os.Stderr, fsxDRAStatusNotice(instance))
 		fmt.Fprint(os.Stderr, sporedUpgradeNotice(instance.Tags["spawn:spored-version"], output, instance.InstanceID))
@@ -176,7 +175,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Print(output)
 	fmt.Print(ttlReconciliationNotice(instance, output))
 	fmt.Print(lifecycleProtectionBlock(instance))
-	fmt.Print(renderBillableResources(instance))
 	fmt.Print(dnsStatusNotice(instance))
 	fmt.Print(fsxDRAStatusNotice(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], output, instance.InstanceID))
@@ -192,17 +190,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 // (review feedback: "make protection status more visibly operational").
 //
 // Honesty constraints: spored (in-instance) enforcement is what spawn provisions
-// and can rely on. The reaper line is hedged ("if deployed for your account")
-// because this function is pure — it renders from the instance's tags and makes no
-// AWS call, so it genuinely cannot know.
-//
-// That hedge is no longer the whole story: coverage IS detectable
-// (aws.DetectReaperCoverage, spawn#624), and `spawn doctor` now reports it
-// definitively. The comment that used to live here claimed coverage was *not*
-// authoritatively visible from a launch account and cited the old hardcoded
-// pkg/doctor stub as evidence; both were wrong. Rather than make `spawn status`
-// pay for two extra AWS calls on every invocation, the line points at the command
-// that answers it for real.
+// and can rely on. The out-of-band reaper runs in the infra account and is NOT
+// authoritatively visible from the launch account (see pkg/doctor ReaperConfigured
+// and docs/safety.md), so we describe it as a backstop "if deployed" rather than
+// asserting dual enforcement we can't confirm from here.
 func lifecycleProtectionBlock(instance *aws.InstanceInfo) string {
 	// Only meaningful for a spawn-managed instance that's actually running.
 	if instance.Tags["spawn:managed"] != "true" {
@@ -215,8 +206,7 @@ func lifecycleProtectionBlock(instance *aws.InstanceInfo) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nLifecycle protection:\n")
 	fmt.Fprintf(&b, "  In-instance (spored):  enforces TTL + idle rules on the instance itself\n")
-	fmt.Fprintf(&b, "  Out-of-band reaper:    backstop for what spored can't do (a stopped instance, a filesystem\n")
-	fmt.Fprintf(&b, "                         that outlives it) — run 'spawn doctor' to see if it covers this account\n")
+	fmt.Fprintf(&b, "  Out-of-band reaper:    backstop in the spore.host-infra account, if deployed for your account\n")
 
 	// Hard termination deadline, from the authoritative launch-anchored tag the
 	// reaper also reads (spawn:ttl-deadline, RFC3339 UTC). Fall back to the TTL
@@ -435,7 +425,6 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 		fmt.Print(out)
 		fmt.Fprint(os.Stderr, ttlReconciliationNotice(instance, out))
 		fmt.Fprint(os.Stderr, lifecycleProtectionBlock(instance))
-		fmt.Fprint(os.Stderr, renderBillableResources(instance))
 		fmt.Fprint(os.Stderr, dnsStatusNotice(instance))
 		fmt.Fprint(os.Stderr, fsxDRAStatusNotice(instance))
 		fmt.Fprint(os.Stderr, sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
@@ -445,7 +434,6 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 	fmt.Print(out)
 	fmt.Print(ttlReconciliationNotice(instance, out))
 	fmt.Print(lifecycleProtectionBlock(instance))
-	fmt.Print(renderBillableResources(instance))
 	fmt.Print(dnsStatusNotice(instance))
 	fmt.Print(fsxDRAStatusNotice(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
