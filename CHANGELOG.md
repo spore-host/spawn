@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn doctor`'s reaper check now tells you something** (#624). It was a hardcoded
+  "not detected" that printed the *same* warning in every account — covered or not — so
+  it carried no information, and a warning that always fires is one people learn to
+  scroll past. An account where nothing reclaims expired instances read exactly like a
+  healthy one; that is how a TTL-expired instance billed for 13 days without anyone
+  noticing. Coverage is now detected from the two signals it actually leaves: a reaper
+  Lambda running in the account, or the conventional `spawn-ttl-reaper-ec2` role
+  granting one elsewhere access. Verified against three real accounts, which report
+  covered-in-account, covered-cross-account and not-covered respectively.
+  "Could not determine" is now also distinct from "there is none" — the check no longer
+  asserts an absence it cannot prove.
+
+### Added
+- **A launch that depends on the out-of-band reaper warns when none covers the
+  account** (#624), before anything is spent and including under `--dry-run` /
+  `--estimate-only`. It fires only where coverage changes the outcome:
+  `--on-complete stop`/`hibernate`, where the instance's EBS keeps billing and `spored`
+  cannot act once stopped; and `--fsx-lifecycle ephemeral`, where only the reaper ever
+  deletes the filesystem (a 1200 GiB minimum, ~$174/month). A plain
+  `--on-complete terminate` does **not** warn, since `spored` handles that from inside
+  and the reaper is only its backstop — warning there would recreate the noise this
+  change removes.
+
+### Documentation
+- **`docs/durable-storage-fsx.md` says how to check coverage, and what the
+  "everything dies eventually" invariant actually promises** — that it holds in two
+  layers, and that in an uncovered account it degrades to whatever `spored` manages
+  before it stops or dies.
+
 ## [0.113.0] - 2026-10-01
 
 ### Fixed

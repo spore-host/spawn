@@ -188,12 +188,25 @@ func (p *awsProber) SSMAvailable(ctx context.Context) (string, error) {
 }
 
 func (p *awsProber) ReaperConfigured(ctx context.Context) (string, error) {
-	// The reaper is an out-of-band Lambda in the infra account with a cross-account
-	// role granted per spore-launching account. From the launch account we can't
-	// authoritatively see it, so treat its presence as advisory: report "not
-	// detected" (a Warn) unless the operator has recorded it via config. Kept
-	// simple by design — the safety docs are the source of truth.
-	return "", fmt.Errorf("not detected from this account (in-instance spored still enforces TTL)")
+	// This used to be a hardcoded "not detected" (spawn#624), on the reasoning that a
+	// launch account cannot see a reaper that lives elsewhere. The effect was a check
+	// that printed the SAME warning in every account — including accounts the reaper
+	// does cover — so it carried no information, and a warning that always fires is
+	// one users learn to scroll past. An account with a genuinely absent reaper read
+	// exactly like one with a healthy one.
+	//
+	// Coverage does leave local evidence; see aws.DetectReaperCoverage.
+	c := aws.DetectReaperCoverage(ctx, p.cfg)
+	switch {
+	case c.Covered:
+		return c.How, nil
+	case c.Determined:
+		return "", fmt.Errorf("no reaper runs in this account and no %s role grants one access — "+
+			"TTL is enforced only from inside the instance by spored, which cannot act on a STOPPED "+
+			"instance and does nothing if it dies", aws.ReaperCoverageRoleName)
+	default:
+		return "", fmt.Errorf("could not determine coverage (%s)", c.Why)
+	}
 }
 
 func (p *awsProber) Route53Available(ctx context.Context) (string, error) {
