@@ -20,24 +20,35 @@ spawn holds the tunnel until you interrupt it or the instance's lifetime ends,
 then terminates the instance. The service listens on the instance's loopback and
 is reachable only through the tunnel — it is never exposed to the internet.
 
+Put spawn's flags FIRST and separate your command with "--". Everything after the
+"--" belongs to your service, including its own flags. Without the separator,
+anything dash-shaped in your command is read as a flag to spawn — so
+"spawn service python3 -m app.serve" fails with "unknown shorthand flag: 'm'",
+naming a flag you never passed to spawn.
+
 Examples:
   # Launch an instance, upload a binary, serve it, tunnel to it
-  spawn service ./my-server --instance-type m7i.large --upload ./my-server --ttl 2h
+  spawn service --instance-type m7i.large --upload ./my-server --ttl 2h -- ./my-server
+
+  # A command with its own flags — this is why the "--" matters
+  spawn service --instance-type m7i.large --ttl 1h -- python3 -m myapp.serve
+  spawn service --instance-type m7i.large --ttl 1h -- uvicorn app:app --port 0
+  spawn service --instance-type m7i.large --ttl 1h -- node --enable-source-maps server.js
 
   # Run something already baked into the AMI
-  spawn service /opt/tools/dashboard --instance-type m7i.large --ttl 30m
+  spawn service --instance-type m7i.large --ttl 30m -- /opt/tools/dashboard
 
   # Use an instance that is already running (it is not terminated afterwards)
-  spawn service ./my-server --host my-box --upload ./my-server
+  spawn service --host my-box --upload ./my-server -- ./my-server
 
   # Preview without launching
-  spawn service ./my-server --instance-type m7i.large --ttl 1h --dry-run
+  spawn service --instance-type m7i.large --ttl 1h --dry-run -- ./my-server
 
 Full contract, including how to make a binary spawnable:
 https://github.com/spore-host/spawn/blob/main/docs/service-readiness-contract.md
 
 ```
-spawn service <command> [args...] [flags]
+spawn service [flags] -- <command> [args...]
 ```
 
 **Flags:**
