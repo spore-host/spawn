@@ -378,15 +378,18 @@ func TestBuildInlinePolicy(t *testing.T) {
 	// destructive-action / dns-invoke / fsx-mount — #174 split tag-write into its
 	// own conditioned statement; #173 added the DNS Function URL invoke grant; #221
 	// added the FSx mount grant), plus the template's.
-	if len(stmts) < 6 {
-		t.Errorf("expected >= 6 statements (5 spored + template), got %d", len(stmts))
+	// #622 added a sixth: iam:CreateServiceLinkedRole, conditioned to the FSx-S3
+	// service principal, without which every S3 data-repository association on a
+	// fresh filesystem failed and --fsx-import-path mounted an empty filesystem.
+	if len(stmts) < 7 {
+		t.Errorf("expected >= 7 statements (6 spored + template), got %d", len(stmts))
 	}
 
 	// Unknown template names are skipped (no panic, just the spored base).
 	base := c.buildInlinePolicy([]string{"doesNotExist"})
 	baseStmts := base["Statement"].([]interface{})
-	if len(baseStmts) != 5 {
-		t.Errorf("unknown template should yield only the 5 spored statements, got %d", len(baseStmts))
+	if len(baseStmts) != 6 {
+		t.Errorf("unknown template should yield only the 6 spored statements, got %d", len(baseStmts))
 	}
 }
 

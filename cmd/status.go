@@ -166,6 +166,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Fprint(os.Stderr, ttlReconciliationNotice(instance, output))
 		fmt.Fprint(os.Stderr, lifecycleProtectionBlock(instance))
 		fmt.Fprint(os.Stderr, dnsStatusNotice(instance))
+		fmt.Fprint(os.Stderr, fsxDRAStatusNotice(instance))
 		fmt.Fprint(os.Stderr, sporedUpgradeNotice(instance.Tags["spawn:spored-version"], output, instance.InstanceID))
 		fmt.Fprint(os.Stderr, elasticIPNotice(ctx, client, instance))
 		return nil
@@ -175,6 +176,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Print(ttlReconciliationNotice(instance, output))
 	fmt.Print(lifecycleProtectionBlock(instance))
 	fmt.Print(dnsStatusNotice(instance))
+	fmt.Print(fsxDRAStatusNotice(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], output, instance.InstanceID))
 	fmt.Print(elasticIPNotice(ctx, client, instance))
 	return nil
@@ -340,6 +342,43 @@ func dnsStatusNotice(instance *aws.InstanceInfo) string {
 		i18n.Symbol("warning"), detail)
 }
 
+// fsxDRAStatusNotice returns a line describing the outcome of spored's S3
+// data-repository association, or "" when the instance has no such tag (no
+// --fsx-import-path/--fsx-export-path, or an older spored).
+//
+// This exists because the failure used to live only in /var/log/spored.log on the
+// box (#622): a DRA failure is non-fatal by design — spored mounts anyway so the
+// job can run — but with --fsx-import-path the association is how the data ARRIVES,
+// so the workload silently read an empty 1200 GiB filesystem while the launch
+// reported success. The most expensive thing a launch can create was also the one
+// thing nothing reported on.
+func fsxDRAStatusNotice(instance *aws.InstanceInfo) string {
+	status, ok := instance.Tags["spawn:fsx-dra-status"]
+	if !ok || status == "" || status == "associated" {
+		return ""
+	}
+	detail := instance.Tags["spawn:fsx-dra-error"]
+	if detail == "" {
+		detail = "no detail reported"
+	}
+
+	fsxID := instance.Tags["spawn:fsx-id"]
+	if fsxID == "" {
+		fsxID = instance.Tags["spawn:fsx-pending"]
+	}
+	where := ""
+	if fsxID != "" {
+		where = " (" + fsxID + ")"
+	}
+
+	return fmt.Sprintf("\n%s FSx S3 association FAILED%s — the filesystem is mounted but NOT linked to S3:\n"+
+		"   %s\n"+
+		"   If you launched with --fsx-import-path, the mount is EMPTY: nothing was imported.\n"+
+		"   If you launched with --fsx-export-path, results will NOT be copied to S3.\n"+
+		"   The filesystem is billing regardless — 'spawn fsx list' to see it, 'spawn fsx delete <id>' to remove it.\n",
+		i18n.Symbol("warning"), where, detail)
+}
+
 // runStatusOverSSM gets `spored status` from an instance we hold no SSH key for
 // (keyless/SSM-only, e.g. lagotto/cohort-launched, #222). It runs the same
 // command via SSM RunShellScript — no SSH, no key, no public IP needed. The SSM
@@ -387,6 +426,7 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 		fmt.Fprint(os.Stderr, ttlReconciliationNotice(instance, out))
 		fmt.Fprint(os.Stderr, lifecycleProtectionBlock(instance))
 		fmt.Fprint(os.Stderr, dnsStatusNotice(instance))
+		fmt.Fprint(os.Stderr, fsxDRAStatusNotice(instance))
 		fmt.Fprint(os.Stderr, sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
 		return nil
 	}
@@ -395,6 +435,7 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 	fmt.Print(ttlReconciliationNotice(instance, out))
 	fmt.Print(lifecycleProtectionBlock(instance))
 	fmt.Print(dnsStatusNotice(instance))
+	fmt.Print(fsxDRAStatusNotice(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
 	return nil
 }

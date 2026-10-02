@@ -924,6 +924,35 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	}
 	statements = append(statements, sporedFSxMount)
 
+	// FSx creates a per-filesystem service-linked role
+	// (AWSServiceRoleForFSxS3Access_<fsid>) on the FIRST
+	// CreateDataRepositoryAssociation in an account, and that requires the CALLING
+	// principal to hold iam:CreateServiceLinkedRole. #221 added the fsx:* actions
+	// above — necessary but not sufficient — so every DRA on a fresh filesystem
+	// failed with "Amazon FSx is unable to create Service-Linked-Role to access the
+	// S3 bucket" (#622).
+	//
+	// The cost of missing this was silent and large: spored mounts anyway by design,
+	// so --fsx-import-path produced a mounted but EMPTY 1200 GiB filesystem (the FSx
+	// Lustre minimum, ~$174/month) while the CLI printed "Instance Ready!" and the
+	// workload read an empty directory.
+	//
+	// It looked account-specific because the role persists once created: anyone who
+	// had ever made a DRA by hand never saw it.
+	//
+	// Scoped by condition to the one service principal that needs it, so this is not
+	// a general service-linked-role creation grant.
+	statements = append(statements, map[string]interface{}{
+		"Effect":   "Allow",
+		"Action":   "iam:CreateServiceLinkedRole",
+		"Resource": "*",
+		"Condition": map[string]interface{}{
+			"StringEquals": map[string]interface{}{
+				"iam:AWSServiceName": "s3.data-source.lustre.fsx.amazonaws.com",
+			},
+		},
+	})
+
 	return statements
 }
 
@@ -1134,7 +1163,19 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 }
 
 // sporedDCVRolePolicy is the inline policy for the DCV/app-launch spored role
-// (spawn app launch). Kept in sync with buildInlinePolicy (the standard spored
+// (spawn app launch).
+//
+// #622 note on keeping this in sync: this policy already carried the #221
+// fsx:CreateDataRepositoryAssociation grant but NOT the
+// iam:CreateServiceLinkedRole that FSx needs to create the per-filesystem
+// service-linked role on the first association in an account. So this path had the
+// identical silent failure — --fsx-import-path mounting an EMPTY 1200 GiB
+// filesystem — and it is the path taken by a launch with NO --iam-* flags, i.e. the
+// simplest invocation. The grant below is conditioned to the single FSx-S3 service
+// principal. A test asserts both this policy and the dynamic baseline carry it, so
+// the two cannot diverge on it again.
+//
+// Kept in sync with buildInlinePolicy (the standard spored
 // role in iam.go): the same self-management grants PLUS the DCV-only S3 reads
 // (dcv-license, spawn-certs). spawn#282 reconciled the two — this role previously
 // granted ec2:CreateTags on "*" UNCONDITIONED (the #174 tag-then-terminate class)
@@ -1203,6 +1244,16 @@ const sporedDCVRolePolicy = `{
         "fsx:DescribeDataRepositoryAssociations"
       ],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": "s3.data-source.lustre.fsx.amazonaws.com"
+        }
+      }
     },
     {
       "Effect": "Allow",

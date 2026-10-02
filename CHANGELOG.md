@@ -15,6 +15,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on it with no code change of ours. Bumped in the root module and in the two lambda
   modules that carry otel transitively.
 
+### Fixed
+- **`--fsx-import-path` now actually imports your data** (#622). On a fresh
+  filesystem the S3 data-repository association failed every time with *"Amazon FSx
+  is unable to create Service-Linked-Role to access the S3 bucket"*: FSx creates a
+  per-filesystem service-linked role on the first association, which needs the
+  calling principal to hold `iam:CreateServiceLinkedRole`, and the instance role
+  didn't have it. Because the mount proceeds anyway by design, the result was a
+  mounted but **empty** 1200 GiB filesystem — the FSx Lustre minimum, ~$174/month —
+  while the CLI printed `🎉 Instance Ready!` and the workload read an empty
+  directory. The grant is now part of spored's baseline, scoped by condition to the
+  one FSx-S3 service principal. It looked account-specific only because the role
+  persists once created, so anyone who had ever made an association by hand never
+  saw it. The grant was missing on **both** instance-profile paths — including the
+  one a launch with no `--iam-*` flags takes, i.e. the simplest invocation — so both
+  are fixed and a test pins them together.
+- **A failed S3 association is no longer visible only on the instance.**
+  `spawn status` now reports it — which filesystem, the underlying error, and that
+  the filesystem is billing either way with the commands to list and delete it.
+  Previously it existed solely as a line in `/var/log/spored.log`.
+- **The association failure now says what actually broke.** The log line read
+  "results may not auto-export to S3", which is fair for an export failure and badly
+  misleading for an import one: with `--fsx-import-path` the association is how the
+  data *arrives*, so the real outcome is an empty filesystem. The message now names
+  the consequence for the paths you actually gave.
+
 ## [0.112.1] - 2026-10-01
 
 ### Fixed
