@@ -38,7 +38,7 @@ spawn launch <name> [flags]
 | `--budget` |  | float64 |  | Budget limit in dollars for parameter sweeps (0 = no limit) |
 | `--capacity-block` |  | bool |  | The --reservation-id is a Capacity Block for ML (sets MarketType=capacity-block); mutually exclusive with --spot (#216) |
 | `--cartesian` |  | bool |  | Generate cartesian product of parameter lists |
-| `--command` |  | string |  | Command to run on all instances (executed after spored setup) |
+| `--command` |  | string |  | Command to run on all instances. Runs on the BARE instance as the login user, not root (use sudo) — Docker and fuse are NOT installed, unlike 'spawn task run'. Its exit code is recorded to /tmp/SPAWN_EXITCODE and signals completion, so --on-complete fires when the command exits, pass or fail. The instance can only reach spawn's own S3 buckets unless you pass --s3-read/--s3-write, --iam-policy or --iam-policy-file. |
 | `--completion-delay` |  | string | `30s` | Grace period after completion signal |
 | `--completion-file` |  | string | `/tmp/SPAWN_COMPLETE` | File to watch for completion signal |
 | `--completion-webhook-url` |  | string |  | On workload completion (--completion-file detected), spored POSTs a fire-once, best-effort notice to this URL (spawn#497) — lets a caller wait on its own webhook/queue instead of polling an artifact against a pre-guessed deadline; empty = disabled |
@@ -121,6 +121,8 @@ spawn launch <name> [flags]
 | `--regions-geographic` |  | stringSlice |  | Geographic constraints: us, eu, ap, north-america, europe, asia-pacific |
 | `--regions-include` |  | stringSlice |  | Only use these regions (supports wildcards: us-*, eu-*) |
 | `--reservation-id` |  | string |  | Capacity Reservation / Capacity Block ID to launch into (fs-/cr-...) — instance must be in the reservation's AZ (#216) |
+| `--s3-read` |  | stringArray |  | Grant the instance read access to this S3 bucket (repeatable). A launch instance can otherwise only reach spawn's own buckets, so a --command that reads your bucket gets a 403. Scoped to exactly the named buckets — unlike --iam-policy s3:ReadOnly, which grants read on every bucket in the account. |
+| `--s3-write` |  | stringArray |  | Grant the instance write access to this S3 bucket (repeatable). Pair with --s3-read when the workload both reads inputs and writes results. |
 | `--security-group-ids` |  | stringSlice |  | Security group IDs (comma-separated or repeated) |
 | `--session-timeout` |  | string | `30m` | Auto-logout idle shells (0 to disable) |
 | `--skip-mpi-install` |  | bool |  | Skip MPI installation (use with custom AMIs that have MPI pre-installed) |

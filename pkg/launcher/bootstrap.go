@@ -596,13 +596,53 @@ EOFCMD
     fi
     chmod +x /tmp/spawn-command.sh
 
-    # Execute command as the instance's primary user in the background.
+    # Execute command as the instance's primary user, in a BACKGROUNDED SUBSHELL.
     # ($LOCAL_USERNAME is the user the bootstrap creates above; the previous
     # hardcoded "local" user never exists, so the command silently failed — #61.)
-    # Log output to both file and console.
-    su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh' 2>&1 | tee /var/log/spawn-command.log &
+    #
+    # The subshell — not a plain background job — is what lets us record the exit
+    # code and signal completion (#614). Previously this was a plain background job
+    # followed by an unconditional "started" success line (see
+    # TestCommandSuccessClaimIsGone, which gates that exact sentence from returning),
+    # which discarded the exit code and printed success unconditionally, and never
+    # wrote /tmp/SPAWN_COMPLETE at all. So --on-complete (whose help promises
+    # "Action when workload signals completion") never fired on this path and the
+    # instance burned its whole TTL whether the command succeeded or failed.
+    #
+    # MUST STAY BACKGROUNDED: spored is installed and started LATER in this script.
+    # Waiting here blocks cloud-init, so spored would not start — and TTL, idle and
+    # cost enforcement would all be unarmed — for as long as the command runs. That
+    # is the spored#65 failure (never block the ticker startup path) and is worse
+    # than the bug this fixes. The subshell gives us the exit code without waiting.
+    (
+        su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh' 2>&1 | tee /var/log/spawn-command.log
+        # PIPESTATUS[0], not $? — $? here is tee's status, which is 0 even when the
+        # command failed. That alone would have reported every failure as a success.
+        CMD_RC=${PIPESTATUS[0]}
+        echo "$CMD_RC" > /tmp/SPAWN_EXITCODE
 
-    echo "✅ Command execution started (logs: /var/log/spawn-command.log)"
+        if [ "$CMD_RC" -eq 0 ]; then
+            CMD_STATE=completed
+            echo "✅ --command finished (exit 0)"
+        else
+            CMD_STATE=failed
+            echo "❌ --command FAILED (exit $CMD_RC) — see /var/log/spawn-command.log"
+        fi
+
+        # Signal spored so --on-complete fires and 'spawn status --check-complete'
+        # works, on BOTH paths. A failed command is still a finished command: the
+        # user asked for an action on completion, and leaving a dead box billing to
+        # TTL is the more expensive surprise. Anyone wanting to keep a failed
+        # instance for inspection uses --on-complete stop, or omits it.
+        # Same JSON shape as the task wrapper (pkg/taskproto/wrapper.go) so one
+        # reader handles both sources.
+        cat > /tmp/SPAWN_COMPLETE <<JSONEOF
+{"status": "$CMD_STATE", "exit_code": $CMD_RC, "source": "command"}
+JSONEOF
+    ) &
+
+    echo "▶️  --command started in the background (logs: /var/log/spawn-command.log)"
+    echo "   Its exit code lands in /tmp/SPAWN_EXITCODE and drives --on-complete."
 fi
 
 # Create login banner (MOTD) with spore configuration

@@ -138,6 +138,19 @@ var (
 	iamTrustServices   []string
 	iamRoleTags        []string
 	iamAllowFullAccess bool
+
+	// s3ReadBuckets / s3WriteBuckets name the S3 buckets this launch's workload
+	// needs, so spawn can grant exactly those (#614).
+	//
+	// `spawn task run` already does this: it derives a least-privilege policy from
+	// the spec's DECLARED inputs/outputs (cmd/task.go's taskStagingPolicy). A
+	// --command is an opaque shell string, so nothing can be derived from it —
+	// which is why a launch reading the caller's own bucket used to 403, and why
+	// the only workarounds were --iam-policy s3:ReadOnly (Resource "*": every
+	// bucket in the account) or AmazonS3FullAccess. These flags give launch the
+	// same declarative capability, reusing the same policy builder.
+	s3ReadBuckets  []string
+	s3WriteBuckets []string
 	// instanceProfile names an EXISTING instance profile to attach verbatim,
 	// bypassing all of the above resolution (no create/reuse/hash lookup, no
 	// AWS IAM calls at all). See #550: two launches with no IAM flags at all
@@ -272,7 +285,7 @@ func init() {
 	launchCmd.Flags().IntVar(&count, "count", 1, "Number of instances to launch (job array)")
 	launchCmd.Flags().StringVar(&jobArrayName, "job-array-name", "", "Job array group name (required if --count > 1)")
 	launchCmd.Flags().StringVar(&instanceNames, "instance-names", "", "Instance name template (e.g., 'worker-{index}', default: '{job-array-name}-{index}')")
-	launchCmd.Flags().StringVar(&command, "command", "", "Command to run on all instances (executed after spored setup)")
+	launchCmd.Flags().StringVar(&command, "command", "", "Command to run on all instances. Runs on the BARE instance as the login user, not root (use sudo) — Docker and fuse are NOT installed, unlike 'spawn task run'. Its exit code is recorded to /tmp/SPAWN_EXITCODE and signals completion, so --on-complete fires when the command exits, pass or fail. The instance can only reach spawn's own S3 buckets unless you pass --s3-read/--s3-write, --iam-policy or --iam-policy-file.")
 	// --min-viable: for a plain job array (--count>1 without --mpi), the minimum
 	// number of members that must come up for the launch to succeed. Default 1 =
 	// members are independent (one member's terminal failure doesn't tear down the
@@ -344,6 +357,10 @@ func init() {
 	launchCmd.Flags().BoolVar(&iamAllowFullAccess, "iam-allow-full-access", false, "Permit wildcard *:FullAccess --iam-policy templates (s3:*/dynamodb:*/sqs:* on all resources) on the instance role; off by default — prefer scoped ReadOnly/WriteOnly")
 	launchCmd.Flags().StringSliceVar(&iamManagedPolicies, "iam-managed-policies", []string{}, "AWS managed policy ARNs")
 	launchCmd.Flags().StringVar(&iamPolicyFile, "iam-policy-file", "", "Custom IAM policy JSON file")
+	launchCmd.Flags().StringArrayVar(&s3ReadBuckets, "s3-read", nil,
+		"Grant the instance read access to this S3 bucket (repeatable). A launch instance can otherwise only reach spawn's own buckets, so a --command that reads your bucket gets a 403. Scoped to exactly the named buckets — unlike --iam-policy s3:ReadOnly, which grants read on every bucket in the account.")
+	launchCmd.Flags().StringArrayVar(&s3WriteBuckets, "s3-write", nil,
+		"Grant the instance write access to this S3 bucket (repeatable). Pair with --s3-read when the workload both reads inputs and writes results.")
 	launchCmd.Flags().StringSliceVar(&iamTrustServices, "iam-trust-services", []string{"ec2"}, "Services that can assume role")
 	launchCmd.Flags().StringSliceVar(&iamRoleTags, "iam-role-tags", []string{}, "Tags for IAM role (key=value format)")
 	launchCmd.Flags().StringVar(&instanceProfile, "instance-profile", "", "Attach this EXISTING IAM instance profile by name, bypassing all --iam-role/--iam-policy/--iam-policy-file resolution and the spored-instance-profile default entirely. Use when you need a deterministic, auditable choice instead of spawn's create/reuse heuristic (#550) — e.g. a profile you've already scoped to a specific data bucket.")
