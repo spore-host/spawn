@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.114.0] - 2026-10-02
+
 ### Added
 - **`spawn status` now lists every billable resource the launch is paying for**, not
   just the instance (#615) — EBS, an FSx Lustre filesystem, an EFS mount — with the
@@ -21,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already writes, so the view cannot drift from what `--cost-limit` is enforced
   against, and an unpriced instance reads "rate unknown" rather than implying $0.
   The block is omitted when the instance is the only billable thing.
+
+- **A launch that depends on the out-of-band reaper warns when none covers the
+  account** (#624), before anything is spent and including under `--dry-run` /
+  `--estimate-only`. It fires only where coverage changes the outcome:
+  `--on-complete stop`/`hibernate`, where the instance's EBS keeps billing and `spored`
+  cannot act once stopped; and `--fsx-lifecycle ephemeral`, where only the reaper ever
+  deletes the filesystem (a 1200 GiB minimum, ~$174/month). A plain
+  `--on-complete terminate` does **not** warn, since `spored` handles that from inside
+  and the reaper is only its backstop — warning there would recreate the noise this
+  change removes.
 
 ### Changed
 - **`spawn status`'s reaper line now points at `spawn doctor`** instead of saying
@@ -46,7 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented flags-after-command form still works for commands without their own
   flags.
 
-### Fixed
 - **`spawn doctor`'s reaper check now tells you something** (#624). It was a hardcoded
   "not detected" that printed the *same* warning in every account — covered or not — so
   it carried no information, and a warning that always fires is one people learn to
@@ -58,17 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covered-in-account, covered-cross-account and not-covered respectively.
   "Could not determine" is now also distinct from "there is none" — the check no longer
   asserts an absence it cannot prove.
-
-### Added
-- **A launch that depends on the out-of-band reaper warns when none covers the
-  account** (#624), before anything is spent and including under `--dry-run` /
-  `--estimate-only`. It fires only where coverage changes the outcome:
-  `--on-complete stop`/`hibernate`, where the instance's EBS keeps billing and `spored`
-  cannot act once stopped; and `--fsx-lifecycle ephemeral`, where only the reaper ever
-  deletes the filesystem (a 1200 GiB minimum, ~$174/month). A plain
-  `--on-complete terminate` does **not** warn, since `spored` handles that from inside
-  and the reaper is only its backstop — warning there would recreate the noise this
-  change removes.
 
 ### Documentation
 - **`docs/durable-storage-fsx.md` says how to check coverage, and what the
@@ -3923,7 +3923,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.113.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.114.0...HEAD
+[0.114.0]: https://github.com/spore-host/spawn/compare/v0.113.0...v0.114.0
 [0.113.0]: https://github.com/spore-host/spawn/compare/v0.112.2...v0.113.0
 [0.112.2]: https://github.com/spore-host/spawn/compare/v0.112.1...v0.112.2
 [0.112.1]: https://github.com/spore-host/spawn/compare/v0.112.0...v0.112.1
