@@ -316,6 +316,17 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// (setupSSHKey's ImportKeyPair). Checked before --estimate-only so a launch
 	// invoked with both flags gets the richer preview (--estimate-only alone
 	// skips AMI/IAM/SG resolution entirely; this is deliberately fuller).
+	// Warn before anything is spent when this launch leans on the out-of-band reaper
+	// and no reaper covers the account (#624). Placed ABOVE the --dry-run and
+	// --estimate-only returns on purpose: those are the "what would this cost me"
+	// surfaces, and a reaper that will not reclaim an ephemeral filesystem or a
+	// stopped instance is precisely a cost the preview should mention.
+	//
+	// Deliberately NOT on every launch — see launchLeansOnReaper. The previous
+	// version of this check fired unconditionally in every account and therefore
+	// told the user nothing.
+	warnIfReaperWontCover(ctx, awsClient, os.Stderr)
+
 	if launchDryRun {
 		return runLaunchDryRun(ctx, os.Stdout, awsClient, config)
 	}

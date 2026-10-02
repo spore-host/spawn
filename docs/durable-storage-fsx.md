@@ -129,6 +129,38 @@ otherwise costs money:
   reclaims anything. If you are unsure, treat `spawn fsx list` as the source of
   truth and delete by hand.
 
+### Checking whether your account is covered
+
+You no longer have to guess (spawn#624):
+
+```console
+$ spawn doctor
+✓ TTL reaper backstop: in-account reaper spawn-ttl-reaper-production
+```
+
+or, in an account nothing reclaims:
+
+```console
+$ spawn doctor
+⚠ TTL reaper backstop
+    → no reaper runs in this account and no spawn-ttl-reaper-ec2 role grants one
+      access — TTL is enforced only from inside the instance by spored, which
+      cannot act on a STOPPED instance and does nothing if it dies
+```
+
+Coverage is detected from one of two local signals: a reaper Lambda running in the
+account itself, or the conventional `spawn-ttl-reaper-ec2` role that grants a reaper
+elsewhere access to it. A launch that *depends* on the reaper —
+`--fsx-lifecycle ephemeral`, or `--on-complete stop`/`hibernate` — also warns before
+it spends anything when that coverage is missing.
+
+**What the invariant actually promises.** "Everything dies eventually" holds in two
+layers: `spored` enforces TTL, idle and cost from inside the instance, and the reaper
+catches what `spored` cannot. `spored` cannot act on a stopped instance, cannot delete
+a filesystem that outlives its instance, and enforces nothing if it dies — so in an
+uncovered account the invariant degrades to "whatever `spored` manages to do". Plan
+accordingly, or arrange coverage.
+
 ---
 
 *This doc is the source of truth for FSx lifetimes. lagotto's spawn-config docs

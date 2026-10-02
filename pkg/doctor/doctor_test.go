@@ -131,3 +131,48 @@ func TestRun_WarnsDoNotBlock(t *testing.T) {
 		t.Errorf("warnings alone should not block; checks: %+v", r.Checks)
 	}
 }
+
+// TestReaperWarnDoesNotPrependAnUnprovenClaim is the doctor half of spawn#624.
+//
+// The reaper line used to be assembled here as
+//
+//	"no out-of-band reaper configured; TTL is enforced in-instance by spored only: " + errText(err)
+//
+// prepended to EVERY non-nil result — including the case where the probe could not
+// determine coverage at all. Combined with a prober that always returned an error,
+// the check printed an identical warning in every account whether a reaper covered it
+// or not, which is why a real 13-day leak went unremarked. The consequence is now
+// stated by the prober, which knows which case it is.
+func TestReaperWarnDoesNotPrependAnUnprovenClaim(t *testing.T) {
+	r := Run(context.Background(), mockProber{
+		reaperErr: errors.New("could not determine coverage (iam:GetRole: AccessDenied)"),
+	})
+
+	c := find(r, "TTL reaper backstop")
+	if c == nil {
+		t.Fatal("no reaper check in the report")
+	}
+	if c.Status != Warn {
+		t.Errorf("status = %v, want Warn", c.Status)
+	}
+	if strings.Contains(c.Fix, "no out-of-band reaper configured") {
+		t.Errorf("doctor must not assert the reaper is absent when the probe only said it "+
+			"could not tell; the prober's own wording should pass through:\n%s", c.Fix)
+	}
+	if !strings.Contains(c.Fix, "could not determine coverage") {
+		t.Errorf("the prober's verdict must survive into the finding:\n%s", c.Fix)
+	}
+}
+
+// TestReaperPassNamesItsEvidence: a Pass has to say HOW coverage was established, so
+// an operator can tell an in-account reaper from a cross-account grant.
+func TestReaperPassNamesItsEvidence(t *testing.T) {
+	r := Run(context.Background(), mockProber{}) // reaperErr nil => Pass with detail "enforce"
+	c := find(r, "TTL reaper backstop")
+	if c == nil || c.Status != Pass {
+		t.Fatalf("expected a Pass, got %+v", c)
+	}
+	if c.Detail == "" {
+		t.Error("a passing reaper check must report the evidence it found, not just pass silently")
+	}
+}

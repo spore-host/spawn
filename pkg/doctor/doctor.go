@@ -229,8 +229,13 @@ func Run(ctx context.Context, p Prober) *Report {
 	}
 
 	// Optional features → Warn when unavailable.
+	//
+	// The reaper probe now returns a real verdict (spawn#624), so the consequence is
+	// stated by the prober rather than asserted here — this used to prepend "no
+	// out-of-band reaper configured" to EVERY result, including the undetermined
+	// case, which claimed more than the check knew.
 	if detail, err := p.ReaperConfigured(ctx); err != nil {
-		add("TTL reaper backstop", Warn, "", "no out-of-band reaper configured; TTL is enforced in-instance by spored only (see docs/safety): "+errText(err))
+		add("TTL reaper backstop", Warn, "", errText(err)+" (see docs/safety)")
 	} else {
 		add("TTL reaper backstop", Pass, detail, "")
 	}
