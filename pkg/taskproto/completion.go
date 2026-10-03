@@ -47,6 +47,19 @@ type CompletionRecord struct {
 	CostEstimate float64    `json:"cost_estimate,omitempty"`
 	Logs         []string   `json:"logs,omitempty"` // s3:// URIs of command.log etc.
 	RetryClass   RetryClass `json:"retry_class,omitempty"`
+
+	// TerminalReason is set only on a record written by the terminal-flush hook
+	// (spawn#632) — i.e. when a lifecycle limit ended the instance while the user
+	// command was still running, so the wrapper never reached its own record. It
+	// names which limit fired (ttl_expired, cost_limit_exceeded, idle_timeout,
+	// spot_interruption), which retry_class alone cannot: the classes that would
+	// otherwise carry it are either absent (cost/idle have none) or shared.
+	//
+	// Additive and omitempty on purpose, exactly as RunID was for #608: the six
+	// workflow adapters that poll this key parse an unknown field by ignoring it,
+	// and a record from a pre-#632 instance still parses with this empty. A reader
+	// can treat a non-empty value as "this task was cut short, not completed".
+	TerminalReason ExitReason `json:"terminal_reason,omitempty"`
 }
 
 // ParseCompletionRecord unmarshals a CompletionRecord from the bytes of a

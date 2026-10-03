@@ -43,8 +43,8 @@ func TestGenerateWrapper_Structure(t *testing.T) {
 		"set +e -u -o pipefail", // safe flags present, +e explicit (spawn#566)
 		"RESULTS_PREFIX='s3://spawn-results-123-us-east-1/tasks/align-42'",
 		"rc=$?", // exit-code capture
-		"aws s3 cp /tmp/spawn-completion.json \"$RESULTS_PREFIX/completion.json\"",
-		"aws s3 cp /tmp/spawn.exitcode \"$RESULTS_PREFIX/.exitcode\"",
+		"aws s3 cp " + shQuote(CompletionRecordPath()) + " \"$RESULTS_PREFIX/completion.json\"",
+		"aws s3 cp " + shQuote(localPath(exitCodeFileName)) + " \"$RESULTS_PREFIX/.exitcode\"",
 		"> /tmp/SPAWN_COMPLETE", // spored signal
 		"exit $rc",
 		"--recursive",         // prefix input gets --recursive
@@ -79,8 +79,8 @@ func TestGeneratePooledJobScript_OmitsSelfTerminate(t *testing.T) {
 	}
 	// The durable record is still written — the submitter polls completion.json.
 	for _, sub := range []string{
-		"aws s3 cp /tmp/spawn-completion.json \"$RESULTS_PREFIX/completion.json\"",
-		"aws s3 cp /tmp/spawn.exitcode \"$RESULTS_PREFIX/.exitcode\"",
+		"aws s3 cp " + shQuote(CompletionRecordPath()) + " \"$RESULTS_PREFIX/completion.json\"",
+		"aws s3 cp " + shQuote(localPath(exitCodeFileName)) + " \"$RESULTS_PREFIX/.exitcode\"",
 		"exit $rc",
 	} {
 		if !strings.Contains(pooled, sub) {
@@ -981,7 +981,7 @@ exit 0
 	// deliberately different signals here, so don't assert on cmd's exit status.
 	_ = err
 
-	completionPath := "/tmp/spawn-completion.json"
+	completionPath := CompletionRecordPath()
 	data, readErr := os.ReadFile(completionPath)
 	if readErr != nil {
 		t.Fatalf("completion record not written at %s: %v\nscript output: %s", completionPath, readErr, out)
@@ -1085,8 +1085,8 @@ esac
 `)
 	writeFakeExe(t, filepath.Join(binDir, "aws"), "#!/bin/bash\nexit 0\n")
 
-	completionPath := "/tmp/spawn-completion.json"
-	exitcodePath := "/tmp/spawn.exitcode"
+	completionPath := CompletionRecordPath()
+	exitcodePath := localPath(exitCodeFileName)
 	completePath := "/tmp/SPAWN_COMPLETE"
 	for _, p := range []string{completionPath, exitcodePath, completePath} {
 		_ = os.Remove(p)
@@ -1279,7 +1279,7 @@ func TestGenerateWrapper_StampsRunID(t *testing.T) {
 	// It must be inside the completion.json heredoc, i.e. before the record is
 	// copied to S3 — not somewhere decorative.
 	runIdx := strings.Index(w, `"run_id"`)
-	cpIdx := strings.Index(w, `aws s3 cp /tmp/spawn-completion.json`)
+	cpIdx := strings.Index(w, "aws s3 cp "+shQuote(CompletionRecordPath()))
 	if runIdx < 0 || cpIdx < 0 || runIdx > cpIdx {
 		t.Errorf("run_id must be written into the record before it is uploaded (run_id@%d, upload@%d)", runIdx, cpIdx)
 	}
@@ -1321,7 +1321,7 @@ func TestGenerateWrapper_RunIDKeepsCompletionJSONValid(t *testing.T) {
 		t.Fatalf("wrapper exited %v\noutput: %s", err, out)
 	}
 
-	const completionPath = "/tmp/spawn-completion.json"
+	completionPath := CompletionRecordPath()
 	data, readErr := os.ReadFile(completionPath)
 	if readErr != nil {
 		t.Fatalf("completion record not written: %v\noutput: %s", readErr, out)

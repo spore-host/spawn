@@ -31,6 +31,7 @@ import (
 	"github.com/spore-host/spawn/pkg/provider"
 	"github.com/spore-host/spawn/pkg/registry"
 	"github.com/spore-host/spawn/pkg/security"
+	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 type Agent struct {
@@ -50,6 +51,7 @@ type Agent struct {
 	startTime             time.Time
 	lastActivityTime      time.Time
 	preStopDone           bool      // guards against running pre-stop hook more than once
+	taskFlushDone         bool      // guards against writing the task terminal record twice (#632)
 	spotWebhookFired      bool      // fire-once guard for the spot-interruption webhook (#228); the spot monitor re-enters every 5s
 	prevCPUIdle           int64     // /proc/stat idle jiffies at last getCPUUsage call
 	prevCPUTotal          int64     // /proc/stat total jiffies at last getCPUUsage call
@@ -459,7 +461,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 			// backstop; only idle/on-complete may stop or hibernate.
 			log.Printf("TTL expired (deadline: %v)", a.config.TTLDeadline)
 			a.notifier.Notify(ctx, "ttl_expired", "")
-			a.terminate(ctx, "TTL expired")
+			a.terminate(ctx, "TTL expired", taskproto.ExitTTLExpired)
 			return
 		}
 
@@ -486,7 +488,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 
 		if remaining <= 0 {
 			log.Printf("Cost limit reached (limit: $%.4f, accumulated: $%.4f)", a.config.CostLimit, accumulated)
-			a.terminate(ctx, fmt.Sprintf("cost limit reached ($%.2f)", a.config.CostLimit))
+			a.terminate(ctx, fmt.Sprintf("cost limit reached ($%.2f)", a.config.CostLimit), taskproto.ExitCostLimitExceeded)
 			return
 		}
 
@@ -515,10 +517,10 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 				// Only TTL causes termination — idle timeout never destroys data.
 				if a.config.HibernateOnIdle {
 					a.notifier.Notify(ctx, "idle_hibernated", "")
-					a.hibernate(ctx)
+					a.hibernate(ctx, taskproto.ExitIdleTimeout)
 				} else {
 					a.notifier.Notify(ctx, "idle_stopped", "")
-					a.stop(ctx, "Idle timeout")
+					a.stop(ctx, "Idle timeout", taskproto.ExitIdleTimeout)
 				}
 				return
 			}
@@ -1323,7 +1325,7 @@ func (a *Agent) checkSpotInterruption(ctx context.Context) bool {
 		}))
 
 	// Run pre-stop hook with shortened timeout (stay within the 2-min window)
-	a.runPreStop(true)
+	a.runPreStop(true, taskproto.ExitSpotInterruption)
 
 	// Send Slack notification
 	a.notifier.Notify(cleanupCtx, "spot_interrupt",
@@ -1554,11 +1556,11 @@ func (a *Agent) checkCompletion(ctx context.Context) bool {
 		// Execute action based on configuration
 		switch strings.ToLower(a.config.OnComplete) {
 		case "terminate":
-			a.terminate(ctx, "Completion signal received")
+			a.terminate(ctx, "Completion signal received", taskproto.ExitCompleted)
 		case "stop":
-			a.stop(ctx, "Completion signal received")
+			a.stop(ctx, "Completion signal received", taskproto.ExitCompleted)
 		case "hibernate":
-			a.hibernate(ctx)
+			a.hibernate(ctx, taskproto.ExitCompleted)
 		case "exit":
 			// For local provider - just exit
 			log.Printf("Exiting on completion signal")
@@ -1575,10 +1577,10 @@ func (a *Agent) checkCompletion(ctx context.Context) bool {
 	return false
 }
 
-func (a *Agent) stop(ctx context.Context, reason string) {
+func (a *Agent) stop(ctx context.Context, reason string, why taskproto.ExitReason) {
 	log.Printf("Stopping instance (reason: %s)", reason)
 
-	a.runPreStop(false)
+	a.runPreStop(false, why)
 
 	// Clean up DNS before stopping
 	a.Cleanup(ctx)
@@ -1596,10 +1598,10 @@ func (a *Agent) stop(ctx context.Context, reason string) {
 	}
 }
 
-func (a *Agent) hibernate(ctx context.Context) {
+func (a *Agent) hibernate(ctx context.Context, why taskproto.ExitReason) {
 	log.Printf("Hibernating instance")
 
-	a.runPreStop(false)
+	a.runPreStop(false, why)
 
 	// Clean up DNS before hibernating
 	a.Cleanup(ctx)
@@ -1684,7 +1686,20 @@ func (a *Agent) Cleanup(ctx context.Context) {
 // runPreStop executes the user-configured pre-stop command before any
 // lifecycle-triggered shutdown. It runs at most once (guarded by preStopDone).
 // The default timeout is 5 minutes; spot interruptions use 90 seconds.
-func (a *Agent) runPreStop(spotMode bool) {
+//
+// It also runs the task terminal-flush hook (spawn#632) first. `why` is a stable
+// token, not the human reason string spored logs, so a reworded log message can
+// never change a recorded retry class.
+//
+// The flush is hung here rather than at each exit site on purpose: every path
+// that ends an instance's life already calls this function, so a future exit
+// path gets the record for free instead of being a place the two can drift
+// apart. It goes BEFORE the user's hook because that hook is allowed to take
+// minutes (PreStopTimeout) and may itself fail — the diagnostics should already
+// be in S3 by then.
+func (a *Agent) runPreStop(spotMode bool, why taskproto.ExitReason) {
+	a.flushTaskRecord(why)
+
 	if a.config.PreStop == "" || a.preStopDone {
 		return
 	}
@@ -1793,10 +1808,10 @@ func preStopDetail(summary, outputTail string) string {
 	return summary + " — " + outputTail
 }
 
-func (a *Agent) terminate(ctx context.Context, reason string) {
+func (a *Agent) terminate(ctx context.Context, reason string, why taskproto.ExitReason) {
 	log.Printf("Terminating instance (reason: %s)", reason)
 
-	a.runPreStop(false)
+	a.runPreStop(false, why)
 
 	// Clean up DNS before terminating
 	a.Cleanup(ctx)
