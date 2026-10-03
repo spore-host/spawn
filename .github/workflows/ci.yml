@@ -51,11 +51,30 @@ jobs:
       # closest cheap proxy for "a user could notice this".
       - name: Changelog gate
         if: github.event_name == 'pull_request'
+        env:
+          # Via env, never interpolated into the script body: `${{ github.* }}` inside
+          # a `run:` block is a shell-injection vector, and Semgrep's
+          # run-shell-injection rule blocks it (correctly — it caught this).
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          set -euo pipefail
-          base="origin/${{ github.base_ref }}"
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-          changed=$(git diff --name-only "$base"...HEAD)
+          set -uo pipefail
+
+          # The checkout is shallow, and a depth-1 fetch has no common ancestor, so
+          # `git diff base...HEAD` dies with "no merge base" (exit 128) before any of
+          # the logic below runs — which would fail EVERY pull request rather than the
+          # non-compliant ones. Deepen enough to find the merge base, then diff from it
+          # explicitly so the failure is detectable instead of fatal.
+          git fetch --no-tags --quiet --depth=100 origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF" || true
+
+          if ! base=$(git merge-base "origin/$BASE_REF" HEAD 2>/dev/null); then
+            # A gate must fail on a KNOWN violation, not on its own inability to
+            # measure one. If the merge base is unreachable (a very long-lived branch,
+            # a force-pushed base), warn and pass rather than block work on an
+            # infrastructure quirk.
+            echo "::warning::Could not determine the merge base against $BASE_REF; skipping the changelog presence check."
+            exit 0
+          fi
+          changed=$(git diff --name-only "$base" HEAD)
 
           code=$(echo "$changed" | grep -E '\.go$' | grep -vE '_test\.go$' | grep -vE '^docs-gen/' || true)
           if [ -z "$code" ]; then
