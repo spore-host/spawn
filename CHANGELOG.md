@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The changelog policy is now enforced in CI rather than by habit.** A PR that
+  changes Go source without touching `CHANGELOG.md` fails, and the `[Unreleased]`
+  section is checked for duplicate group headings, invalid group names, entries with
+  no group, and releases missing a compare link. Both halves had already broken: one
+  PR merged with no entry at all — found only at the next release, which hit an empty
+  `[Unreleased]` and had to reconstruct the entries from the diff at tag time — and
+  three PRs each inserting their own `### Added` left duplicate headings, which merge
+  cleanly for git and badly for Keep a Changelog, twice needing consolidation by hand.
+  Format checks are scoped to `[Unreleased]`: a dozen shipped releases already carry
+  duplicate groups, and gating frozen history would mean either rewriting released
+  notes or a permanently-red test. The presence check asks the GitHub API what the PR
+  changed rather than diffing a shallow clone, which cannot find a merge base.
+
 ## [0.115.0] - 2026-10-02
 
 ### Added
