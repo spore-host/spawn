@@ -20,6 +20,7 @@ lambda/*/*.zip
 # Lambda compiled binaries (named after their function)
 lambda/alert-evaluator/alert-evaluator
 lambda/alert-handler/alert-handler
+lambda/autoscale-orchestrator/autoscale-orchestrator
 lambda/cost-history-collector/cost-history-collector
 lambda/dashboard-api/dashboard-api
 lambda/dashboard-websocket/dashboard-websocket
