@@ -31,8 +31,21 @@ var extendCmd = &cobra.Command{
 	// Short and Long will be set after i18n initialization
 }
 
+var (
+	extendCostLimit     float64
+	extendKeepCostLimit bool
+)
+
 func init() {
 	rootCmd.AddCommand(extendCmd)
+
+	// spawn:cost-limit fires independently of the TTL ("first-to-fire wins"), so
+	// moving only the TTL left extend a no-op for anyone whose cap was sized to it
+	// (#639). By default the cap is raised to whatever the new deadline needs.
+	extendCmd.Flags().Float64Var(&extendCostLimit, "cost-limit", 0,
+		"Set the instance's cost limit to this amount in USD, instead of raising it to what the new TTL needs")
+	extendCmd.Flags().BoolVar(&extendKeepCostLimit, "keep-cost-limit", false,
+		"Extend the TTL and leave the cost limit alone. The instance will still stop when the existing cap is reached, which may be before the new deadline.")
 
 	// Register completion for instance ID argument
 	extendCmd.ValidArgsFunction = completeInstanceID
@@ -110,6 +123,14 @@ func runExtend(cmd *cobra.Command, args []string) error {
 
 	tags, newDeadline := computeExtendedTTLTags(instance, newTTL, extendDuration, time.Now())
 
+	// The cost limit is a SECOND, independent deadline. Carry it along, or the
+	// extension silently fails for every instance whose cap was sized to its TTL
+	// (#639).
+	costDecision := decideCostLimit(instance, newDeadline, extendCostLimit, extendKeepCostLimit)
+	if costDecision.Changed() {
+		tags["spawn:cost-limit"] = costLimitTagValue(costDecision.NewValue)
+	}
+
 	fmt.Fprintf(os.Stderr, "Extending TTL deadline to %s...\n", newDeadline.UTC().Format("2006-01-02 15:04 UTC"))
 	err = client.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, tags)
 	if err != nil {
@@ -124,6 +145,7 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "   Extended by:  %s\n", newTTL)
 	_, _ = fmt.Fprintf(os.Stdout, "   New TTL:      %s (total from launch)\n", tags["spawn:ttl"])
 	_, _ = fmt.Fprintf(os.Stdout, "   New deadline: %s\n", newDeadline.UTC().Format("2006-01-02 15:04 UTC"))
+	_, _ = fmt.Fprint(os.Stdout, renderCostLimitDecision(costDecision))
 
 	// Trigger reload on instance
 	fmt.Fprintf(os.Stderr, "\nTriggering configuration reload on instance...\n")
@@ -196,6 +218,27 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 	// the per-instance accounting (in particular, that a reload failure is
 	// tracked and reported, not discarded — spawn#512) is unit-testable
 	// without a real AWS client or SSH.
+	// The job-array path carries the TTL only. The cost limit fires independently
+	// (#639), so an array instance whose cap was sized to its TTL will still stop
+	// early — say so rather than leave the same trap silent. Not fixed here because
+	// the array path writes a RELATIVE spawn:ttl rather than a deadline, so the
+	// required cap has to be derived per instance from a different anchor; that is a
+	// separate change from the single-instance fix this accompanies.
+	capped := 0
+	for _, inst := range jobArrayInstances {
+		if parseTagFloat(inst.Tags["spawn:cost-limit"]) > 0 {
+			capped++
+		}
+	}
+	if capped > 0 {
+		fmt.Fprintf(os.Stderr,
+			"⚠️  %d of %d instances have a cost limit, which this does NOT change.\n"+
+				"   An instance whose cap was sized to its old TTL will still stop before the new one.\n"+
+				"   Extend those individually to have the cap raised with the TTL:\n"+
+				"     spawn extend <instance-id> %s\n\n",
+			capped, len(jobArrayInstances), newTTL)
+	}
+
 	updateTags := func(region, instanceID string) error {
 		return client.UpdateInstanceTags(ctx, region, instanceID, map[string]string{
 			"spawn:ttl": newTTL,
