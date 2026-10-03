@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -49,7 +50,22 @@ func (a *Agent) flushTaskRecord(why taskproto.ExitReason) {
 	// installed and there is nothing to do. Stat rather than config: the bootstrap
 	// writes the file only on the task path, which keeps this from needing a flag
 	// plumbed through every launch surface.
-	if _, err := os.Stat(taskproto.FlushScriptPath()); err != nil {
+	hook := taskproto.FlushScriptPath()
+	if _, err := os.Stat(hook); err != nil {
+		return
+	}
+
+	// Refuse to exec a hook that anyone but its owner could have modified. spored
+	// runs as root, so this is the difference between "root runs the script spawn
+	// installed" and "root runs whatever is at that path now".
+	//
+	// The root-owned 0700 /etc/spawn directory is the primary protection — an
+	// unprivileged user cannot create or replace a file there at all. This is the
+	// residual check for the case where something else has loosened the file, and
+	// it is strictly more than the previous constant path offered: a constant tells
+	// you where you are about to exec, not whether it is still trustworthy.
+	if err := verifyHookTrustworthy(hook); err != nil {
+		log.Printf("task flush: refusing to run %s: %v — no terminal record will be written", hook, err)
 		return
 	}
 
@@ -77,7 +93,20 @@ func (a *Agent) flushTaskRecord(why taskproto.ExitReason) {
 	// The reason token is passed as a separate argv element, never interpolated
 	// into a shell string: it originates in this package as a typed constant, and
 	// keeping it out of a shell means it stays that way.
-	cmd := exec.CommandContext(ctx, taskproto.FlushScriptPath(), string(why))
+	//
+	// Semgrep's dangerous-exec-command fires here because the path is not a
+	// literal. It is a package variable whose ONLY writer is
+	// taskproto.SetFlushScriptPathForTest — never an environment variable, a
+	// config file, an EC2 tag, the task spec, or anything else crossing a trust
+	// boundary. No shell is involved (no -c, no interpolation), so `why` is
+	// argv[1] and cannot become code. verifyHookTrustworthy above additionally
+	// refuses the exec unless the target is a regular, non-symlink file writable
+	// only by its owner — a guard the previous constant path did not have, since a
+	// constant tells you where you will exec, not whether the target is still
+	// trustworthy. The suppression must sit on the line immediately above the
+	// call; anything further up is silently ignored.
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	cmd := exec.CommandContext(ctx, hook, string(why))
 	out, err := cmd.CombinedOutput()
 	if len(out) > 0 {
 		log.Printf("task flush output: %s", out)
@@ -89,4 +118,30 @@ func (a *Agent) flushTaskRecord(why taskproto.ExitReason) {
 		return
 	}
 	log.Printf("task flush: terminal record written")
+}
+
+// verifyHookTrustworthy reports whether path is safe for a root process to
+// execute: a regular file (not a symlink, not a directory or device) that no one
+// but its owner can write.
+//
+// Deliberately portable rather than checking uid 0 via syscall.Stat_t: that
+// needs a linux/windows/other build-tag trio (see sys_*.go) for a hook that only
+// ever exists on Linux, and "owner-only writable inside a root-owned directory"
+// is the property that actually matters. os.Lstat, not os.Stat, so a symlink
+// planted at the path is rejected instead of silently followed to its target.
+func verifyHookTrustworthy(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("it is a symlink; the exec target must be the file itself")
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("it is not a regular file (mode %s)", fi.Mode())
+	}
+	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("it is group- or world-writable (mode %04o); anyone could choose what runs here", perm)
+	}
+	return nil
 }

@@ -131,6 +131,73 @@ func TestFlushTaskRecordBoundsAHangingHook(t *testing.T) {
 	}
 }
 
+// TestFlushTaskRecordRefusesATamperableHook. spored runs as root, so what it
+// execs matters more than where it execs from. A hook that anyone but its owner
+// can write means any local user picks what root runs on the next shutdown.
+//
+// The /etc/spawn directory is the primary protection; this is the residual check
+// for a file that has been loosened by something else, and it is strictly more
+// than a constant path gave us — a constant says where you will exec, not
+// whether the target is still trustworthy.
+func TestFlushTaskRecordRefusesATamperableHook(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+		ok   bool
+	}{
+		{"root-only 0700", 0o700, true},
+		{"owner+group read/exec 0750", 0o750, true},
+		{"group-writable 0770", 0o770, false},
+		{"world-writable 0777", 0o777, false},
+		{"world-writable 0702", 0o702, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callLog := installFakeHook(t, "exit 0\n")
+			if err := os.Chmod(taskproto.FlushScriptPath(), tc.mode); err != nil {
+				t.Fatalf("chmod: %v", err)
+			}
+
+			a := &Agent{}
+			a.flushTaskRecord(taskproto.ExitTTLExpired)
+
+			ran := len(hookCalls(t, callLog)) > 0
+			if ran != tc.ok {
+				if tc.ok {
+					t.Errorf("mode %04o should be accepted but the hook did not run", tc.mode)
+				} else {
+					t.Errorf("mode %04o is writable by someone other than the owner and must be "+
+						"REFUSED, but root executed it anyway", tc.mode)
+				}
+			}
+		})
+	}
+}
+
+// TestFlushTaskRecordRefusesASymlinkedHook: os.Lstat, not os.Stat, so a symlink
+// planted at the hook path is rejected rather than followed to whatever it
+// points at.
+func TestFlushTaskRecordRefusesASymlinkedHook(t *testing.T) {
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "calls.txt")
+	real := filepath.Join(dir, "real.sh")
+	body := "#!/bin/bash\nprintf '%s\\n' \"$*\" >> " + callLog + "\nexit 0\n"
+	if err := os.WriteFile(real, []byte(body), 0o700); err != nil { //nolint:gosec // test fixture, needs +x
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(dir, "task-flush.sh")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Cleanup(taskproto.SetFlushScriptPathForTest(link))
+
+	a := &Agent{}
+	a.flushTaskRecord(taskproto.ExitTTLExpired)
+
+	if calls := hookCalls(t, callLog); len(calls) != 0 {
+		t.Errorf("a symlinked hook must not be executed, got: %v", calls)
+	}
+}
+
 // TestEveryLifecycleExitPathCarriesAReasonToken is a drift gate.
 //
 // The flush is hung off runPreStop precisely because every path that ends an
