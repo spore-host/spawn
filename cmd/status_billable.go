@@ -151,7 +151,8 @@ func renderBillableResources(instance *aws.InstanceInfo) string {
 		}
 	}
 	if uncapped {
-		fmt.Fprintf(&b, "  ⚠️  --cost-limit caps COMPUTE only — the non-instance rows above are outside it.\n")
+		fmt.Fprintf(&b, "  ⚠️  --cost-limit counts compute + EBS, and refuses a launch whose storage exceeds it\n")
+		fmt.Fprintf(&b, "      up front — but it cannot RECLAIM storage that outlives the instance.\n")
 	}
 	if outlives {
 		fmt.Fprintf(&b, "      Rows marked as outliving the instance keep billing after it is gone:\n")

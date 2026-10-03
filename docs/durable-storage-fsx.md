@@ -129,6 +129,24 @@ otherwise costs money:
   reclaims anything. If you are unsure, treat `spawn fsx list` as the source of
   truth and delete by hand.
 
+### `--cost-limit` and this filesystem
+
+`--cost-limit` is a **total** ceiling covering compute and storage (spawn#616). Two
+things follow, and they are different:
+
+- **A launch whose filesystem alone exceeds the cap is refused up front.** A 1200 GiB
+  filesystem is ~$174/month, so `--cost-limit 2.50 --fsx-create` is rejected at submit
+  time rather than accepted and quietly billed. Pass
+  `--allow-cost-limit-overrun` if you mean it.
+- **The cap cannot RECLAIM the filesystem.** `spored` enforces the cap from inside the
+  instance, and the filesystem outlives it. A `durable` filesystem is never reclaimed
+  automatically; an `ephemeral` one only by the out-of-band reaper, and only in an
+  account it covers.
+
+So the cap stops you *committing* to storage it can't bound, and `spored` stops the
+compute — but deleting a filesystem that survives its instance is the reaper's job, not
+the cap's.
+
 ### Checking whether your account is covered
 
 You no longer have to guess (spawn#624):

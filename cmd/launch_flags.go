@@ -117,6 +117,11 @@ var (
 	distributionMode       string
 	budget                 float64
 	costLimit              float64
+	// allowCostLimitOverrun lets a launch proceed when the storage it creates
+	// exceeds --cost-limit on its own (#616). Explicit, because the alternative
+	// to refusing is what #613 did: respect the cap to the letter while
+	// committing ~70x it in storage the cap never counted.
+	allowCostLimitOverrun bool
 
 	// Region constraints
 	regionsInclude    []string
@@ -334,7 +339,8 @@ func init() {
 	launchCmd.Flags().BoolVar(&noDetach, "no-detach", false, "Disable auto-detach for parameter sweeps (requires --ttl or --idle-timeout)")
 	launchCmd.Flags().StringVar(&sweepName, "sweep-name", "", "Human-readable sweep identifier (auto-generated if empty)")
 	launchCmd.Flags().Float64Var(&budget, "budget", 0, "Budget limit in dollars for parameter sweeps (0 = no limit)")
-	launchCmd.Flags().Float64Var(&costLimit, "cost-limit", 0, "Terminate/stop when compute spend reaches this amount in USD (compute cost only; 0 = disabled)")
+	launchCmd.Flags().Float64Var(&costLimit, "cost-limit", 0, "Total spend ceiling in USD, covering compute AND storage (0 = disabled). spored stops the instance when compute reaches it; a launch whose storage alone exceeds it is refused up front, because storage outlives the instance and spored cannot reclaim it against the cap.")
+	launchCmd.Flags().BoolVar(&allowCostLimitOverrun, "allow-cost-limit-overrun", false, "Proceed even when the storage this launch creates exceeds --cost-limit on its own. You are committing to a bill the cap cannot bound.")
 	launchCmd.Flags().BoolVar(&estimateOnly, "estimate-only", false, "Show cost estimate and exit without launching")
 	launchCmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "Auto-approve cost estimate (skip confirmation)")
 	launchCmd.Flags().StringVar(&distributionMode, "mode", "balanced", "Distribution mode: balanced (fair share) or opportunistic (prioritize available regions)")

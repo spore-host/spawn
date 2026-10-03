@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **`--cost-limit` now covers storage, not just compute** (#616). It was compute-only,
+  which is how a `--cost-limit 2.50` launch in #613 committed a 1.2 TiB filesystem at
+  ~$174/month — roughly 70x the cap — while the cap was respected to the letter the
+  whole time. The cap is now a total, enforced in the two places it can be:
+  - **Up front:** a launch whose storage alone exceeds the cap is **refused**, naming
+    the real monthly figure and why the cap can't bound it. Pass
+    `--allow-cost-limit-overrun` if you mean it. **This is a behaviour change** — a
+    launch that succeeded yesterday under a small cap with `--fsx-create` will now be
+    rejected, which is the bug, not a regression.
+  - **In flight:** `spored` now counts **EBS** toward the cap as well as compute, priced
+    on wall clock rather than compute time — a stopped instance still pays for its
+    volumes, and the old arithmetic counted none of it.
+  FSx is deliberately *not* in the in-flight tally: terminating doesn't delete a
+  filesystem, so firing the cap on it would look like enforcement and achieve nothing.
+  That commitment is refused at launch instead, and reclaiming what outlives an
+  instance remains the reaper's job (#624/#625).
+  The `--estimate-only` preview and `spawn status` no longer say the cap excludes
+  storage; they now state what it can and cannot *reclaim*, which is the part that
+  didn't change.
+
 - **The changelog policy is now enforced in CI rather than by habit.** A PR that
   changes Go source without touching `CHANGELOG.md` fails, and the `[Unreleased]`
   section is checked for duplicate group headings, invalid group names, entries with

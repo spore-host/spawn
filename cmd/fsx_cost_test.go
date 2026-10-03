@@ -35,9 +35,20 @@ func TestRenderFSxCostEstimate_NamesTheFilesystemAndItsCost(t *testing.T) {
 			t.Errorf("estimate is missing %q; got:\n%s", want, out)
 		}
 	}
-	// The caveat must say the cap does NOT cover it, not merely mention the flag.
-	if !strings.Contains(out, "does NOT cover") {
-		t.Errorf("estimate mentions --cost-limit but never says it does not cover the filesystem; got:\n%s", out)
+	// The caveat must state the cap's REACH, not merely mention the flag.
+	//
+	// This assertion used to require "does NOT cover", which was the truth when
+	// --cost-limit was compute-only. #616 made the cap a total — it now counts this
+	// filesystem and refuses the launch if the storage exceeds the cap on its own — so
+	// the old wording would be the lie. What has NOT changed, and is the thing a user
+	// still needs told, is that the cap cannot RECLAIM storage that outlives the
+	// instance: spored enforces the cap from inside, and the filesystem survives it.
+	if !strings.Contains(out, "cannot RECLAIM") {
+		t.Errorf("estimate mentions --cost-limit but never says it cannot reclaim the filesystem; got:\n%s", out)
+	}
+	if strings.Contains(out, "does NOT cover") {
+		t.Errorf("estimate still claims --cost-limit does not cover the filesystem, which stopped being "+
+			"true in #616; got:\n%s", out)
 	}
 	// Ephemeral must not be described as deleted by terminate.
 	if !strings.Contains(out, "asynchronously") {

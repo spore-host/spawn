@@ -695,9 +695,37 @@ func (a *Agent) writeComputeSecondsTag(ctx context.Context) {
 // Using the total — not just this boot — is what stops the cost clock resetting
 // on a stop/start, mirroring how TTL uses an absolute deadline. EBS/storage is
 // deliberately excluded (the --cost-limit flag is documented as compute-only).
+// accumulatedComputeCost is what --cost-limit is measured against: the instance's
+// compute plus its EBS (#616).
+//
+// EBS is included because --cost-limit is a TOTAL ceiling, and because terminating
+// actually stops it — spawn's volumes carry DeleteOnTermination, so the bill ends with
+// the instance. It also accrues while the instance is merely STOPPED, which is the
+// quiet half of the surprise: "stopped to save money" keeps billing storage, and the
+// old compute-only arithmetic counted none of it.
+//
+// FSx is deliberately NOT included. Terminating does not delete a filesystem — a
+// durable one is never reclaimed automatically, and an ephemeral one only by the
+// out-of-band reaper, in an account it covers (#624/#625). Counting it here would let
+// the cap fire and terminate the instance while the filesystem it was reacting to kept
+// billing: an action that looks like enforcement and achieves nothing. That commitment
+// is refused up front instead, by costLimitPreflight at launch.
+//
+// The name is kept for continuity with the spawn:compute-seconds tag and the existing
+// cost reporting; the doc comment is the contract.
 func (a *Agent) accumulatedComputeCost() float64 {
 	totalCompute := time.Duration(a.TotalComputeSeconds()) * time.Second
-	return a.config.PricePerHour * totalCompute.Hours()
+	cost := a.config.PricePerHour * totalCompute.Hours()
+
+	// EBS is billed on WALL CLOCK, not compute time: a stopped instance still pays
+	// for its volumes. Pricing it over compute hours would undercount exactly the
+	// case that matters — an instance stopped "to save money" accruing storage with
+	// nothing counting it. LaunchTime never resets on stop/wake (pkg/provider), so it
+	// survives a spored restart the same way the TTL deadline does.
+	if a.config.EBSHourlyCost > 0 && !a.config.LaunchTime.IsZero() {
+		cost += a.config.EBSHourlyCost * time.Since(a.config.LaunchTime).Hours()
+	}
+	return cost
 }
 
 func (a *Agent) flushComputeSecondsTag(ctx context.Context) {

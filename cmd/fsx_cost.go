@@ -109,7 +109,8 @@ func renderFSxCostEstimate(w io.Writer, plan fsxCreatePlan) {
 			fmt.Fprintf(w, "   Lifecycle:  durable — bills until its TTL expires with nothing using it\n")
 		}
 	}
-	fmt.Fprintf(w, "   ⚠️  --cost-limit does NOT cover this: it caps compute spend only, so the\n")
-	fmt.Fprintf(w, "       filesystem keeps billing after the instance stops. Check with `spawn fsx list`;\n")
+	fmt.Fprintf(w, "   ⚠️  --cost-limit counts this, and refuses the launch if it exceeds the cap on its\n")
+	fmt.Fprintf(w, "       own — but it cannot RECLAIM it: the filesystem outlives the instance, so it\n")
+	fmt.Fprintf(w, "       keeps billing after the instance is gone. Check with `spawn fsx list`;\n")
 	fmt.Fprintf(w, "       delete with `spawn fsx delete <fs-id>`.\n")
 }

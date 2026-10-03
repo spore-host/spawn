@@ -35,7 +35,10 @@ func TestBillableResourcesNamesTheFSxNobodyWasWatching(t *testing.T) {
 		"ephemeral",            // its lifecycle, which decides who deletes it
 		"$174",                 // the cost floor — 1200 GiB minimum
 		"c5.xlarge",            // still shows the instance
-		"--cost-limit caps COMPUTE only",
+		// #616 made the cap a total, so the old "caps COMPUTE only" claim became
+		// false. What a user still needs told is the cap's REACH: it counts these
+		// rows, but cannot reclaim what outlives the instance.
+		"cannot RECLAIM storage that outlives the instance",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("billable view missing %q:\n%s", want, out)
