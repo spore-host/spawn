@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Lambda deployments no longer upload the whole source directory** (#645). The three
+  SAM-deployed lambdas used `CodeUri: .` (or, for `pipeline-orchestrator`, no `CodeUri`
+  at all), and `sam deploy` zips that directory with **no filtering of any kind** — every
+  file, dotfiles included. There is no `.samignore` feature in the SAM CLI and
+  `.gitignore` is not consulted, so #637's work kept the stray dev binary out of git
+  without keeping it out of the *deployment package*. Each build now goes to a dedicated
+  `build/` directory holding nothing but `bootstrap`, with `CodeUri` pointed explicitly
+  at it.
+  Measured with SAM's own zipper: `ttl-reaper` drops from a **75.7 MiB** deployed package
+  to **25.2 MiB** (one entry). `autoscale-orchestrator` (7.8 MiB) and
+  `pipeline-orchestrator` (17.1 MiB) were not inflated in their last deploys but had the
+  same latent exposure — the next deploy from a dirty tree would have inflated them.
+  Two things were riding along besides the dev binary: a nested `function.zip` holding a
+  *second* copy of `bootstrap` (already compressed, hence near-incompressible — which is
+  why 96 MB of files only squeezed to 75.7 MiB), and, after any release build,
+  GoReleaser's `ttl-reaper_lambda_linux_arm64.zip`.
+  **The part that mattered more than size:** `ttl-reaper`'s Makefile generates
+  `.deploy-params.yaml` immediately before `sam deploy`, holding every deploy parameter
+  including the `NotifyUrl` Slack webhook. Because SAM uploads dotfiles, that file would
+  have shipped inside the deployment package, readable by anyone with
+  `lambda:GetFunction`. Nothing was leaked — the webhook was empty in practice — but
+  `make deploy NOTIFY_URL=...` is the documented usage, so it was a live trap. A test now
+  fails if that file (or the Makefile's `PARAMS_FILE`) is ever inside a `CodeUri`
+  directory.
+  Published artifact layout is unchanged: the release zip still has `bootstrap` at its
+  root, which `spawn reaper deploy` (#625) depends on.
+
 ### Changed
 - **A 22 MiB compiled binary is no longer tracked in git** (#637).
   `lambda/autoscale-orchestrator/autoscale-orchestrator` was the one name missing

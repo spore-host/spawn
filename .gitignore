@@ -33,6 +33,9 @@ lambda/spore-bot/prism-bot
 lambda/sweep-orchestrator/sweep-orchestrator
 lambda/ttl-reaper/ttl-reaper
 
+# SAM CodeUri build dirs — hold ONLY bootstrap; see #645
+lambda/*/build/
+
 # SAM build dirs
 lambda/*/.aws-sam/
 

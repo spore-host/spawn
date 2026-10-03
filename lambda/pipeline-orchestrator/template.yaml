@@ -40,6 +40,11 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: spawn-pipeline-orchestrator
+      # Explicit, because OMITTING CodeUri is not a reprieve: ServerlessFunctionResource
+      # inherits PACKAGE_NULL_PROPERTY = True, and upload_local_artifacts documents
+      # "If path is omitted, this method will zip the current working folder and upload."
+      # So this packaged whatever cwd happened to be (spawn#645).
+      CodeUri: build/
       Handler: bootstrap
       Runtime: provided.al2023
       Architectures:

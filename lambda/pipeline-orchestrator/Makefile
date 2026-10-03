@@ -1,9 +1,17 @@
 .PHONY: build deploy clean test
 
-# Build for Lambda (ARM64)
+# Build for Lambda (ARM64) into build/, which must contain NOTHING but the bootstrap
+# binary: `sam deploy` zips the CodeUri directory with no filtering (samcli os.walk,
+# dotfiles included) and there is no .samignore. This template previously declared no
+# CodeUri at all, which packaged whatever cwd happened to be (#645).
+# function.zip stays OUTSIDE build/ for the same reason — update-code needs it.
 build:
-	GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap main.go
-	zip function.zip bootstrap
+	mkdir -p build
+	@# Build the PACKAGE (`.`), not `main.go`: naming files compiles only those files, so
+	@# a second source file would ship a binary silently missing it (see ttl-reaper).
+	GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o build/bootstrap .
+	@# -j so the zip has bootstrap at its root, not build/bootstrap.
+	zip -j function.zip build/bootstrap
 
 # Deploy to AWS (default: production)
 deploy: build
@@ -31,6 +39,7 @@ test-local:
 # Clean build artifacts
 clean:
 	rm -f bootstrap function.zip
+	rm -rf build
 
 # Run Go tests
 test:
