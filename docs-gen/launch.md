@@ -30,6 +30,7 @@ spawn launch <name> [flags]
 | `--active-ports` |  | string |  | TCP ports to monitor for active connections, prevents idle termination (e.g. '8787' for RStudio, '8787,8888' for RStudio+Jupyter) |
 | `--active-processes` |  | string |  | Process names to monitor, prevents idle termination while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple) |
 | `--allow-cidr` |  | string |  | CIDR allowed to reach the managed Windows security group (RDP 3389 + SSH 22); default 0.0.0.0/0 |
+| `--allow-cost-limit-overrun` |  | bool |  | Proceed even when the storage this launch creates exceeds --cost-limit on its own. You are committing to a bill the cap cannot bound. |
 | `--ami` |  | string |  | AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023 |
 | `--attach-volume` |  | stringArray |  | Attach an EBS volume from a snapshot, mounted at a path: snap-xxx:/mount/point[:ro]. Repeatable. Read-only is the common case for shared reference data. |
 | `--auto-placement-group` |  | bool | `true` | Automatically create placement group for MPI job arrays (default: true) |
@@ -44,7 +45,7 @@ spawn launch <name> [flags]
 | `--completion-webhook-url` |  | string |  | On workload completion (--completion-file detected), spored POSTs a fire-once, best-effort notice to this URL (spawn#497) — lets a caller wait on its own webhook/queue instead of polling an artifact against a pre-guessed deadline; empty = disabled |
 | `--compliance-strict` |  | bool |  | Strict mode: fail on warnings (default: show warnings only) |
 | `--config` |  | string |  | Launch config YAML file (supports plugins: list) |
-| `--cost-limit` |  | float64 |  | Terminate/stop when compute spend reaches this amount in USD (compute cost only; 0 = disabled) |
+| `--cost-limit` |  | float64 |  | Total spend ceiling in USD, covering compute AND storage (0 = disabled). spored stops the instance when compute reaches it; a launch whose storage alone exceeds it is refused up front, because storage outlives the instance and spored cannot reclaim it against the cap. |
 | `--cost-tier` |  | string |  | Prefer cost tier: low, standard, premium |
 | `--count` |  | int | `1` | Number of instances to launch (job array) |
 | `--detach` |  | bool |  | Run sweep orchestration in Lambda (auto-enabled for parameter sweeps) |

@@ -316,6 +316,14 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// (setupSSHKey's ImportKeyPair). Checked before --estimate-only so a launch
 	// invoked with both flags gets the richer preview (--estimate-only alone
 	// skips AMI/IAM/SG resolution entirely; this is deliberately fuller).
+	// Refuse, before anything is spent, a launch whose storage commitment alone
+	// exceeds --cost-limit (#616). Placed above the --dry-run and --estimate-only
+	// returns so a preview reports the same refusal a real launch would hit —
+	// a preview that says "fine" for a launch that will be rejected is its own bug.
+	if err := costLimitPreflight(); err != nil {
+		return err
+	}
+
 	// Warn before anything is spent when this launch leans on the out-of-band reaper
 	// and no reaper covers the account (#624). Placed ABOVE the --dry-run and
 	// --estimate-only returns on purpose: those are the "what would this cost me"
