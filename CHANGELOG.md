@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A 22 MiB compiled binary is no longer tracked in git** (#637).
+  `lambda/autoscale-orchestrator/autoscale-orchestrator` was the one name missing
+  from `.gitignore`'s hand-maintained per-lambda list, so it was tracked and
+  mutable: a plain `go build ./...` in that module — which CI itself runs on every
+  lambda module — rewrote it, and `git add -A` then staged a 22 MiB diff. No
+  user-facing behaviour change; it is build output that was never meant to be
+  committed, and was in fact a **macOS (Mach-O) build**, so it could never have run
+  on Lambda's `provided.al2023`/arm64 to begin with. Removing it from `HEAD` does
+  not shrink existing clones — the bytes stay in history — but it stops the bleeding.
+  Two new gates replace the hand-maintained list as the real protection: one fails
+  if **any** tracked file is a compiled executable (matched by magic bytes, not
+  `file` output, which calls every shell and Python script "executable"), and one
+  fails if a Go lambda module is missing its `.gitignore` entry — so the next lambda
+  cannot reintroduce this by being forgotten.
+
 ## [0.116.0] - 2026-10-03
 
 ### Fixed
