@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`spawn extend` now carries the cost limit along with the TTL** (#639). It moved
+  `spawn:ttl` and `spawn:ttl-deadline` and nothing else, while `spored` enforces the
+  cost cap independently — first-to-fire wins. So for anyone who sized their cap to
+  their TTL, which is what the cost guidance tells you to do, `extend` was a **no-op by
+  construction**: the limit just left alone was always the tighter one. One reporter
+  extended a 60m TTL by 45m and the instance still stopped at ~61m, one minute after
+  the *original* deadline, with nothing in the output mentioning the cap — so it read
+  as "extend didn't work" rather than "a second limit fired".
+  The cap is now raised to exactly what the new deadline requires — rate × hours from
+  launch, including the EBS rate, computed from the instance's own tags so it cannot
+  disagree with what is enforced — and the change is printed with both numbers and the
+  reason. It only ever raises. `--cost-limit` sets a value explicitly;
+  `--keep-cost-limit` extends the TTL and leaves the cap alone, saying so in the output.
+  Extending a **job array** still does not change cost limits, but now warns and names
+  the per-instance command that does.
+
 ### Changed
 - **The changelog policy is now enforced in CI rather than by habit.** A PR that
   changes Go source without touching `CHANGELOG.md` fails, and the `[Unreleased]`
