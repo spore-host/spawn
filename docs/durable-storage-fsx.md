@@ -150,7 +150,21 @@ $ spawn doctor
 
 Coverage is detected from one of two local signals: a reaper Lambda running in the
 account itself, or the conventional `spawn-ttl-reaper-ec2` role that grants a reaper
-elsewhere access to it. A launch that *depends* on the reaper —
+elsewhere access to it.
+
+If nothing covers your account, you can run one **in** it:
+
+```console
+$ spawn reaper deploy      # installs it in DRY RUN — reclaims nothing yet
+$ spawn reaper status      # deployed? armed? on what schedule?
+$ spawn reaper arm         # start actually reclaiming
+```
+
+This needs no cross-account trust, which matters because the reaper's normal shape —
+a Lambda in spore.host's infra account assuming a role in yours — requires your
+account to trust an external principal, and many organizations forbid that outright.
+It deploys unarmed so you can read a cycle of "what I would have reclaimed" against
+your own account's tagging before granting it the power to terminate. A launch that *depends* on the reaper —
 `--fsx-lifecycle ephemeral`, or `--on-complete stop`/`hibernate` — also warns before
 it spends anything when that coverage is missing.
 

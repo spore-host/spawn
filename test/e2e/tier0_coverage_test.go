@@ -71,6 +71,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"snapshot":        "Tier 1/2: EBS direct APIs (StartSnapshot/PutSnapshotBlock) not modeled by Substrate; block/checksum core unit-tested in pkg/aws",
 		"validate":        "covered by pkg/infrastructure substrate tests (not CLI Tier 0)",
 		"doctor":          "Tier 1: read-only preflight (STS/EC2/IAM/SSM/Route53 probes) against real APIs; check/report logic unit-tested in pkg/doctor",
+		"reaper":          "Tier 1/2: deploy/arm/teardown converge IAM + Lambda + EventBridge. Substrate doesn't route Lambda tag ops (substrate#1142) and the whole value is a scheduled function that actually terminates, which no emulator can show. Verified end-to-end against a real account instead (#625): doctor 'not covered' → deploy → doctor 'covered' → dry-run scan (FSxScanned:3, reaped nothing) → arm → a 1-minute-TTL instance reclaimed with 'REAPED i-… — ttl-deadline' in the reaper's own log → teardown → 'not covered' again. Pure logic (artifact URL/key, env vars, trust policy, arm/teardown behaviour incl. not disarming an armed reaper) unit-tested in pkg/reaperdeploy",
 
 		// cobra built-ins — no spawn behavior to cover.
 		"help":       "cobra built-in",
