@@ -35,6 +35,56 @@ jobs:
       - name: Format gate
         run: make check-fmt
 
+      # Changelog gate. CLAUDE.md requires an entry under `## [Unreleased]` in the
+      # SAME PR as any user-facing change, and the release ritual promotes that
+      # section verbatim. Nothing enforced it, and #627 merged with no entry at all —
+      # found only at the next release, which hit an EMPTY [Unreleased] and had to
+      # reconstruct the entries from the diff at tag time.
+      #
+      # PR-only: it needs the base branch to know what changed. The FORMAT half
+      # (duplicate groups, invalid group names, missing compare links) is a plain Go
+      # test in changelog_test.go, so it runs on push and locally too.
+      #
+      # Deliberately not a hard failure on every path: a PR that only touches tests,
+      # CI config, or docs-gen output has nothing user-facing to describe. The check
+      # looks at whether any Go source outside _test.go changed, which is the
+      # closest cheap proxy for "a user could notice this".
+      - name: Changelog gate
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          base="origin/${{ github.base_ref }}"
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base"...HEAD)
+
+          code=$(echo "$changed" | grep -E '\.go$' | grep -vE '_test\.go$' | grep -vE '^docs-gen/' || true)
+          if [ -z "$code" ]; then
+            echo "No non-test Go changes; changelog entry not required."
+            exit 0
+          fi
+          if echo "$changed" | grep -qx 'CHANGELOG.md'; then
+            echo "CHANGELOG.md updated alongside the code change."
+            exit 0
+          fi
+
+          echo "::error::This PR changes Go source but does not touch CHANGELOG.md."
+          echo
+          echo "Add an entry under '## [Unreleased]' in the right group (Added/Changed/"
+          echo "Deprecated/Removed/Fixed/Security, or Documentation for docs-only)."
+          echo "Describe the user-visible effect, not the implementation."
+          echo
+          echo "Why this is a gate: the release ritual promotes [Unreleased] verbatim, so a"
+          echo "missing entry is not noticed until tag time — when the change has to be"
+          echo "reconstructed from the diff by whoever is cutting the release."
+          echo
+          echo "If this genuinely has no user-visible effect (a pure refactor, a test-only"
+          echo "helper), say so in an '### Changed' entry or in the PR description and add the"
+          echo "file anyway — one line costs less than the archaeology."
+          echo
+          echo "Non-test Go files changed:"
+          echo "$code" | sed 's/^/  /'
+          exit 1
+
       - name: Build
         run: go build ./...
 
