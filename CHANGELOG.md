@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.115.0] - 2026-10-02
+
 ### Added
 - **`spawn reaper deploy` runs the TTL reaper inside your own AWS account** (#625),
   with no cross-account trust anywhere. The reaper's normal shape is a Lambda in
@@ -27,7 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   → arm → a 1-minute-TTL instance reclaimed with
   `REAPED i-… — ttl-deadline` in the reaper's own log → teardown → `⚠` again.
 
-### Added
 - **The ttl-reaper Lambda is now published as a release asset**
   (`ttl-reaper_lambda_linux_arm64.zip`, #625). Nothing could install the reaper
   before: it was deployed by hand from a CFN template in this repo, so an account
@@ -3965,7 +3966,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.114.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.115.0...HEAD
+[0.115.0]: https://github.com/spore-host/spawn/compare/v0.114.0...v0.115.0
 [0.114.0]: https://github.com/spore-host/spawn/compare/v0.113.0...v0.114.0
 [0.113.0]: https://github.com/spore-host/spawn/compare/v0.112.2...v0.113.0
 [0.112.2]: https://github.com/spore-host/spawn/compare/v0.112.1...v0.112.2
