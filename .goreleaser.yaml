@@ -1,6 +1,29 @@
 # GoReleaser configuration for spore-host/spawn
 version: 2
 
+# Build the ttl-reaper Lambda zip and attach it to the release (spawn#625). The
+# reaper is a SEPARATE go module (lambda/ttl-reaper), so GoReleaser's own `builds:`
+# (which build the root module) can't produce it — hence a before-hook, mirroring
+# lambda/ttl-reaper/Makefile's `build` target. The zip is attached via
+# `release.extra_files` below, so `spawn reaper deploy` can pull it straight from the
+# GitHub Release and upload it into the user's own account. Without a published
+# artifact there is no way to self-host the reaper, which is the whole of #625: an
+# account that forbids cross-account trust can otherwise have no backstop at all.
+#
+# Build the PACKAGE (`.`), NOT `main.go`. Naming files compiles only those files, and
+# the reaper is three (main.go, expiry.go, failures.go) — `go build main.go` fails
+# outright here with "undefined: accountOutcome". The Makefile carries the same
+# warning for the same reason (#466). Note lagotto's equivalent hook does use
+# `main.go`; its lambda is currently single-file so it works by luck, and will break
+# the day it isn't. Filed separately.
+#
+# `zip -j` so `bootstrap` sits at the zip root: Lambda resolves the handler from the
+# archive root, and a nested path yields a Runtime.InvalidEntrypoint at invoke time —
+# after a successful deploy, which is the worst place to find out.
+before:
+  hooks:
+    - sh -c "cd lambda/ttl-reaper && GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap . && zip -j ttl-reaper_lambda_linux_arm64.zip bootstrap"
+
 builds:
   - id: spawn
     main: .
@@ -192,3 +215,9 @@ release:
   prerelease: auto
   mode: replace
   name_template: "v{{.Version}}"
+  # Attach the ttl-reaper Lambda zip built by the before-hook, so it is an
+  # end-user-pullable release asset (#625). `spawn reaper deploy` downloads this and
+  # uploads it into a bucket in the caller's own account — no spore.host infra
+  # account, and no cross-account trust, which is the point.
+  extra_files:
+    - glob: ./lambda/ttl-reaper/ttl-reaper_lambda_linux_arm64.zip

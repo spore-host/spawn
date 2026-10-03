@@ -190,13 +190,20 @@ Resources:
         # When scanning the Lambda's own account directly (ScanSelf=true), it
         # needs describe/terminate locally too. Terminate is tag-scoped to
         # spawn:managed=true so the reaper can never touch unmanaged instances.
+        #
+        # The fsx: and ssm: grants below were MISSING (#625). In cross-account mode
+        # those calls run under the assumed spawn-ttl-reaper-ec2 role, which does
+        # grant fsx — so the gap only ever bit ScanSelf, and silently: the reaper
+        # terminated instances fine while failing to delete the orphaned filesystem
+        # the #210 ephemeral net exists to catch (and that #613 was reported for).
+        # pkg/reaperiam is now the single source for this set, with a test that reads
+        # the reaper's own *API interfaces and fails if a call has no grant.
         - !If
             - ScanSelfEnabled
             - Statement:
                 - Effect: Allow
                   Action:
                     - ec2:DescribeInstances
-                    - ec2:DescribeTags
                   Resource: '*'
                 - Effect: Allow
                   Action:
@@ -205,6 +212,23 @@ Resources:
                   Condition:
                     StringEquals:
                       ec2:ResourceTag/spawn:managed: 'true'
+                # #210 ephemeral-orphan net. FSx exposes no resource-tag condition
+                # key for DeleteFileSystem, so the guard is the reaper's own check
+                # (spawn:managed, no live lease, past the grace period) rather than
+                # an IAM rail — worth stating plainly instead of implying otherwise.
+                - Effect: Allow
+                  Action:
+                    - fsx:DescribeFileSystems
+                    - fsx:DeleteFileSystem
+                  Resource: '*'
+                # REAPER_GRACEFUL asks spored to shut down cleanly over SSM before an
+                # external terminate. Without these, graceful mode silently degrades
+                # to an immediate terminate.
+                - Effect: Allow
+                  Action:
+                    - ssm:SendCommand
+                    - ssm:GetCommandInvocation
+                  Resource: '*'
             - !Ref AWS::NoValue
         # DNS teardown (#247): delete a reaped instance's Route53 records, since
         # spored's graceful DeleteDNS never ran. Scoped to the single configured
