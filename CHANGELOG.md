@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`spawn reaper deploy` runs the TTL reaper inside your own AWS account** (#625),
+  with no cross-account trust anywhere. The reaper's normal shape is a Lambda in
+  spore.host's infra account that assumes a role in yours — which requires your
+  account to trust an external principal, and many organizations forbid that
+  outright. Those accounts previously had **no backstop at all**: `spored` enforces
+  TTL from inside each instance, so nothing reclaimed a *stopped* instance past its
+  deadline or a filesystem that outlived its instance. One sat stopped for 13 days,
+  still billing EBS.
+  **It deploys unarmed.** The schedule runs and logs what it *would* reclaim while
+  touching nothing, until you run `spawn reaper arm` — so you can read a cycle
+  against your own account's tagging before granting the power to terminate, which is
+  how spawn's own reaper was rolled out. `spawn reaper status` reports deployed /
+  armed / schedule, and `spawn reaper teardown` removes it.
+  Re-deploying an **armed** reaper does not silently disarm it, and `spawn doctor`
+  reports the account as covered immediately afterwards (#624) — verified end to end
+  on a real account: `⚠ not covered` → deploy → `✓ in-account reaper` → dry-run scan
+  → arm → a 1-minute-TTL instance reclaimed with
+  `REAPED i-… — ttl-deadline` in the reaper's own log → teardown → `⚠` again.
+
+### Added
 - **The ttl-reaper Lambda is now published as a release asset**
   (`ttl-reaper_lambda_linux_arm64.zip`, #625). Nothing could install the reaper
   before: it was deployed by hand from a CFN template in this repo, so an account

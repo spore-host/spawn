@@ -203,7 +203,8 @@ func (p *awsProber) ReaperConfigured(ctx context.Context) (string, error) {
 	case c.Determined:
 		return "", fmt.Errorf("no reaper runs in this account and no %s role grants one access — "+
 			"TTL is enforced only from inside the instance by spored, which cannot act on a STOPPED "+
-			"instance and does nothing if it dies", aws.ReaperCoverageRoleName)
+			"instance and does nothing if it dies. Deploy one here with 'spawn reaper deploy' "+
+			"(spawn#625); it lands in dry-run until you arm it", aws.ReaperCoverageRoleName)
 	default:
 		return "", fmt.Errorf("could not determine coverage (%s)", c.Why)
 	}
