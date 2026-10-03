@@ -8,6 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A task killed by its own TTL now leaves a completion record and its log** (#632).
+  Previously it left *nothing* — no `completion.json`, no `command.log`, no task
+  prefix in the results bucket at all. Both of those are written by the on-instance
+  wrapper *after* the user command, in sequence, so they only ever ran if the command
+  returned; when a lifecycle limit fired mid-command the log died with the disk. That
+  is the one failure mode where diagnostics matter most, and the most likely to recur,
+  because sizing a TTL tightly is the recommended practice: one reporter lost a
+  45-minute run and had no way to tell how far it got, so the next attempt's TTL was
+  another blind guess.
+  `spored` now runs a terminal-flush hook on **every** exit path it mediates —
+  *before* it stops or terminates the instance, while the network is still up — which
+  uploads `command.log` and writes a record naming the limit that fired. Because it
+  hangs off the pre-stop path rather than the TTL check, it also covers the identical
+  gap for a **cost-limit** kill, an **idle stop**, and a **spot interruption**.
+  The record is `state: "failed"` with `exit_code: -1` (the process never returned a
+  status) plus a new `terminal_reason` field — `ttl_expired`, `cost_limit_exceeded`,
+  `idle_timeout` or `spot_interruption` — and `retry_class` is now populated for the
+  two classes that were already reserved for it. There is deliberately **no new
+  `state` value**: `state` is documented `completed | failed` and six workflow
+  adapters parse that object, so a third value would send every one of them down a
+  default branch. `terminal_reason` is additive and `omitempty`, so older readers
+  ignore it and pre-#632 records still parse.
+  What this does **not** cover, to be clear: an instance killed without `spored`'s
+  involvement — a direct `terminate-instances`, an out-of-band reaper, or host
+  failure. There is no pre-stop path to hang the flush off there.
+  Thanks to the reporter, whose `spawn_phase()` timings were exactly the thing worth
+  salvaging.
+- **Exec-based task-wrapper tests no longer race across packages** (#642). Four tests
+  ran a generated script and then read the record it wrote at one hardcoded absolute
+  path, which `pkg/taskproto` and `pkg/taskpool` both wrote — and `go test ./...` runs
+  packages in parallel, so whichever script finished last decided what the other
+  package's test read. It reproduced 3/3 and passed 3/3 on the same commit depending
+  only on test-cache state, which is the worst kind of red: it reads as "your change
+  broke the wrapper" on whatever unrelated PR happens to lose. The local artifact
+  directory is now resolved at generation time (still `/tmp` in production, which is
+  load-bearing — `spored` shares the host `/tmp`, see #66) and tests point it at a
+  per-binary temp directory. Deliberately *not* a runtime environment variable: the
+  wrapper and the flush hook are generated separately and run as separate processes,
+  and the hook uses the wrapper's record path as its "don't overwrite a finished task"
+  interlock, so letting the two disagree at runtime would be strictly worse than the
+  flake.
 - **`spawn extend` now carries the cost limit along with the TTL** (#639). It moved
   `spawn:ttl` and `spawn:ttl-deadline` and nothing else, while `spored` enforces the
   cost cap independently — first-to-fire wins. So for anyone who sized their cap to

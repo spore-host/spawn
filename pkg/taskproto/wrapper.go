@@ -110,6 +110,12 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 	p("TASK_ID=%s\n", shQuote(taskID))
 	p("RESULTS_PREFIX=%s\n", shQuote(resultsPrefix))
 	p("STARTED_AT=\"$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\"\n")
+	// Persist STARTED_AT where the terminal-flush hook can read it (spawn#632).
+	// That hook runs as a separate root process while this wrapper is still blocked
+	// on the user's command, so it cannot see this shell's variables; without the
+	// file, a record flushed by a TTL kill would have to either omit started_at or
+	// invent one. Best-effort — losing it costs one field, not the record.
+	p("printf '%%s' \"$STARTED_AT\" > %s 2>/dev/null || true\n", shQuote(StartedAtPath()))
 	// Phase markers. completion.json carries only started_at/ended_at, so the
 	// whole interval between them — stage-in, the Docker install, the image pull,
 	// the user command, stage-out — is one opaque number. Measured on a real task
@@ -258,7 +264,7 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 
 	// completion.json — the authoritative record. Built with a heredoc; all
 	// interpolated values are either shell ints (rc) or our own controlled strings.
-	p("cat > /tmp/spawn-completion.json <<JSON\n")
+	p("cat > %s <<JSON\n", shQuote(CompletionRecordPath()))
 	p("{\n")
 	p("  \"task_id\": %s,\n", jsonStr(taskID))
 	// run_id — the attempt identity (spawn#608). Emitted unconditionally (even
@@ -278,11 +284,11 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 	p("  \"retry_class\": \"$RETRY_CLASS\"\n")
 	p("}\n")
 	p("JSON\n")
-	p("aws s3 cp /tmp/spawn-completion.json \"$RESULTS_PREFIX/completion.json\" || true\n\n")
+	p("aws s3 cp %s \"$RESULTS_PREFIX/completion.json\" || true\n\n", shQuote(CompletionRecordPath()))
 
 	// .exitcode — the plain-integer legacy signal the RFC names.
-	p("printf '%%s' \"$rc\" > /tmp/spawn.exitcode\n")
-	p("aws s3 cp /tmp/spawn.exitcode \"$RESULTS_PREFIX/.exitcode\" || true\n\n")
+	p("printf '%%s' \"$rc\" > %s\n", shQuote(localPath(exitCodeFileName)))
+	p("aws s3 cp %s \"$RESULTS_PREFIX/.exitcode\" || true\n\n", shQuote(localPath(exitCodeFileName)))
 
 	// ---- signal spored ---- so on_complete fires and `spawn status --check-complete` works.
 	// A pooled worker (signalComplete=false) SKIPS this: writing SPAWN_COMPLETE would

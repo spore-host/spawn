@@ -28,6 +28,7 @@ import (
 
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/security"
+	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 // EncodeLinuxUserData encodes a bootstrap script for EC2 RunInstances. EC2
@@ -80,6 +81,16 @@ type BootstrapConfig struct {
 	// prefers this embedded file over the tag, so the tag stays free for the
 	// parameter-sweep path's short per-instance commands.
 	Command string
+	// TaskFlushScript, if non-empty, is the task terminal-flush hook (spawn#632),
+	// written to taskproto.FlushScriptPath() for spored to run on every lifecycle
+	// exit path. Only `spawn task run` sets it; a plain launch has no task identity
+	// or results prefix to flush to, and spored simply finds no file.
+	//
+	// Written root-owned and 0700 under /etc/spawn deliberately: spored executes
+	// this file as root, so it must not live anywhere an unprivileged local user
+	// could write. Cloud-init runs as root, which is what makes /etc/spawn the
+	// cheap option — the generated content never passes through the instance user.
+	TaskFlushScript string
 }
 
 // BuildLinuxBootstrap returns the cloud-init user-data script that installs
@@ -145,6 +156,23 @@ cat > /etc/spawn/command <<'EOFSPAWNCMD'
 EOFSPAWNCMD
 chmod 600 /etc/spawn/command
 `, cfg.Command)
+	}
+
+	// Task terminal-flush hook (spawn#632). spored runs this as root before any
+	// lifecycle-triggered stop/terminate, so it is written root-owned 0700 — not
+	// into /tmp, which is world-writable and would turn "spored execs a file" into
+	// a local privilege-escalation path. EOFSPAWNTASKFLUSH is a distinct delimiter
+	// because the script's own body contains `JSON` heredocs.
+	if cfg.TaskFlushScript != "" {
+		script += fmt.Sprintf(`
+# Task terminal-flush hook, run by spored on any lifecycle exit (spawn#632)
+mkdir -p /etc/spawn
+cat > %s <<'EOFSPAWNTASKFLUSH'
+%s
+EOFSPAWNTASKFLUSH
+chown root:root %s
+chmod 700 %s
+`, taskproto.FlushScriptPath(), cfg.TaskFlushScript, taskproto.FlushScriptPath(), taskproto.FlushScriptPath())
 	}
 
 	script += linuxBootstrapBody

@@ -505,6 +505,14 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 
 	wrapper := taskproto.GenerateWrapper(spec, resultsBucket, region, gpu, runID)
 
+	// The terminal-flush hook (spawn#632). The wrapper's log upload and
+	// completion-record write both sit after the user command, so a task killed by
+	// its own TTL/cost limit mid-command left nothing at all to re-size from. This
+	// script is installed root-owned and run by spored before it stops or
+	// terminates — i.e. while the network is still up — and no-ops when the wrapper
+	// already wrote the real record.
+	flushHook := taskproto.GenerateFlushScript(spec, resultsBucket, region, runID)
+
 	// Scoped instance profile: the default spored role has no S3 write, so grant
 	// exactly the buckets this task reads (inputs) and writes (outputs + results).
 	// A private-ECR container image additionally needs ecr:ReadOnly to pull.
@@ -526,7 +534,10 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		return fmt.Errorf("build task storage: %w", err)
 	}
 
-	result, err := launcher.Provision(ctx, client, cfg, launcher.Options{StorageScript: storageScript})
+	result, err := launcher.Provision(ctx, client, cfg, launcher.Options{
+		StorageScript:   storageScript,
+		TaskFlushScript: flushHook,
+	})
 	// Single-region spot→on-demand fallback (a minimal echo of lagotto's
 	// capacity fallthrough; AZ-spread is out of scope for this increment).
 	if err != nil && cfg.Spot && spec.Resources.Fallback == taskproto.PurchaseOnDemand && isCapacityErr(err) {
