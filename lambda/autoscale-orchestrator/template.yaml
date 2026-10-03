@@ -21,7 +21,12 @@ Resources:
       Runtime: provided.al2023
       Architectures: [arm64]
       Handler: bootstrap
-      CodeUri: .
+      # build/ holds ONLY the bootstrap binary. `sam deploy` zips this directory
+      # with no filtering of any kind (samcli/lib/package/utils.py: os.walk, dotfiles
+      # included) and there is no .samignore feature, so `CodeUri: .` shipped the dev
+      # binary, a nested function.zip, and every source file — 75.7 MiB deployed for a
+      # ~7 MiB artifact (spawn#645).
+      CodeUri: build/
       MemorySize: 512
       Timeout: 900
       Environment:

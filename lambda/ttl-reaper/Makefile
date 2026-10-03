@@ -1,14 +1,21 @@
 .PHONY: build deploy deploy-staging deploy-production test clean logs validate
 
-BINARY_NAME=bootstrap
+BINARY_NAME=build/bootstrap
 ENV?=production
 
+# Build into build/, which must contain NOTHING but the bootstrap binary: `sam deploy`
+# zips the CodeUri directory with no filtering (samcli os.walk, dotfiles included) and
+# there is no .samignore. With CodeUri: . this shipped the dev binary, a nested
+# function.zip and every source file — 75.7 MiB deployed for a ~7 MiB artifact (#645).
+# function.zip stays OUTSIDE build/ for the same reason.
 build:
+	mkdir -p build
 	@# Build the PACKAGE (`.`), not `main.go`. Naming files builds only those files, so
 	@# adding a second source file (expiry.go, #466) to a `go build main.go` recipe
 	@# fails outright if it is referenced — and would ship a binary missing it if not.
 	GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o $(BINARY_NAME) .
-	zip function.zip $(BINARY_NAME)
+	@# -j so the zip has bootstrap at its root, not build/bootstrap.
+	zip -j function.zip $(BINARY_NAME)
 
 # Deploy into the infra account (966362334030). Override on the command line:
 #   make deploy DRY_RUN=false NOTIFY_URL=https://hooks.slack.com/... \
@@ -73,6 +80,7 @@ test:
 
 clean:
 	rm -f $(BINARY_NAME) function.zip $(PARAMS_FILE)
+	rm -rf build
 	rm -rf .aws-sam
 
 logs:

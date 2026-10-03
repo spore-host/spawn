@@ -22,7 +22,10 @@ version: 2
 # after a successful deploy, which is the worst place to find out.
 before:
   hooks:
-    - sh -c "cd lambda/ttl-reaper && GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap . && zip -j ttl-reaper_lambda_linux_arm64.zip bootstrap"
+    # Builds into build/ so the binary does not land in the template's CodeUri
+    # directory (#645). -j keeps bootstrap at the zip root, which `spawn reaper
+    # deploy` (#625) depends on, so the published artifact is byte-identical in layout.
+    - sh -c "cd lambda/ttl-reaper && mkdir -p build && GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o build/bootstrap . && zip -j ttl-reaper_lambda_linux_arm64.zip build/bootstrap"
 
 builds:
   - id: spawn
