@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanly for git and badly for Keep a Changelog, twice needing consolidation by hand.
   Format checks are scoped to `[Unreleased]`: a dozen shipped releases already carry
   duplicate groups, and gating frozen history would mean either rewriting released
-  notes or a permanently-red test.
+  notes or a permanently-red test. The presence check asks the GitHub API what the PR
+  changed rather than diffing a shallow clone, which cannot find a merge base.
 
 ## [0.115.0] - 2026-10-02
 

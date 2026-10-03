@@ -52,30 +52,38 @@ jobs:
       - name: Changelog gate
         if: github.event_name == 'pull_request'
         env:
-          # Via env, never interpolated into the script body: `${{ github.* }}` inside
-          # a `run:` block is a shell-injection vector, and Semgrep's
-          # run-shell-injection rule blocks it (correctly — it caught this).
-          BASE_REF: ${{ github.base_ref }}
+          # Everything from the github context arrives via env, never interpolated
+          # into the script body: `${{ ... }}` inside a `run:` block is a
+          # shell-injection vector and Semgrep's run-shell-injection rule blocks it
+          # (correctly — it caught the first version of this step).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -uo pipefail
 
-          # The checkout is shallow, and a depth-1 fetch has no common ancestor, so
-          # `git diff base...HEAD` dies with "no merge base" (exit 128) before any of
-          # the logic below runs — which would fail EVERY pull request rather than the
-          # non-compliant ones. Deepen enough to find the merge base, then diff from it
-          # explicitly so the failure is detectable instead of fatal.
-          git fetch --no-tags --quiet --depth=100 origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF" || true
-
-          if ! base=$(git merge-base "origin/$BASE_REF" HEAD 2>/dev/null); then
-            # A gate must fail on a KNOWN violation, not on its own inability to
-            # measure one. If the merge base is unreachable (a very long-lived branch,
-            # a force-pushed base), warn and pass rather than block work on an
-            # infrastructure quirk.
-            echo "::warning::Could not determine the merge base against $BASE_REF; skipping the changelog presence check."
+          # Ask GitHub what the PR changed, rather than recomputing it from the clone.
+          # Two git-based attempts failed first: `git diff base...HEAD` needs a merge
+          # base, and the checkout is shallow — at depth 1 the step died with
+          # "no merge base" (exit 128), which would have failed EVERY pull request;
+          # deepening main to 100 commits did not help either, because the PR branch
+          # is itself fetched at depth 1 so there is no shared object locally, and the
+          # gate silently degraded to its warn-and-skip path. A gate that never runs is
+          # worse than no gate: it reads as enforcement while enforcing nothing.
+          #
+          # The API has the answer directly and needs no history at all.
+          if ! changed=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename' 2>/dev/null); then
+            echo "::warning::Could not list this PR's files; skipping the changelog presence check."
             exit 0
           fi
-          changed=$(git diff --name-only "$base" HEAD)
+          if [ -z "$changed" ]; then
+            echo "::warning::The API returned no files for this PR; skipping the changelog presence check."
+            exit 0
+          fi
 
+          # A PR that only touches tests, CI config or generated docs has nothing
+          # user-facing to describe. Non-test Go source is the closest cheap proxy for
+          # "a user could notice this".
           code=$(echo "$changed" | grep -E '\.go$' | grep -vE '_test\.go$' | grep -vE '^docs-gen/' || true)
           if [ -z "$code" ]; then
             echo "No non-test Go changes; changelog entry not required."
@@ -97,8 +105,8 @@ jobs:
           echo "reconstructed from the diff by whoever is cutting the release."
           echo
           echo "If this genuinely has no user-visible effect (a pure refactor, a test-only"
-          echo "helper), say so in an '### Changed' entry or in the PR description and add the"
-          echo "file anyway — one line costs less than the archaeology."
+          echo "helper), say so in a '### Changed' entry and add the file anyway — one line"
+          echo "costs less than the archaeology."
           echo
           echo "Non-test Go files changed:"
           echo "$code" | sed 's/^/  /'
