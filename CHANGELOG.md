@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The #650 deploy fix disarmed the live production reaper; fixed properly** — follow-up
+  to #650. The Makefile's `describe-stacks` call had **no `--region`**, so it resolved
+  against the profile's default region, the stack read as "not found", the `|| echo '[]'`
+  branch wrote an empty live set, and every parameter fell back to its **template
+  default** — including `DryRun`, whose default is `true`. The reaper went to dry-run:
+  still running, still reporting, terminating nothing. Exactly the failure #650 was
+  written to prevent, reintroduced by the fix for it.
+  What let it past review was the **reporting**: the merge printed *"deploy changes no
+  parameters (code only)"*, because its change notes only fired when a live value existed
+  to differ from. With no live values there were no notes, so asserting all 16 defaults
+  looked identical to inheriting all 16.
+  Three changes, in order of what actually matters: every `aws cloudformation` call in the
+  deploy path is now region-explicit (`REGION?=us-east-1`); a `describe-stacks` failure
+  that is **not** a genuinely absent stack now **aborts** instead of degrading to an empty
+  live set; and an empty live set is now the **loudest** case, warning that every value
+  comes from a template default and listing each one as a change.
+  Tests cover all three, including one that reads the Makefile — the region bug isn't
+  visible in the merge logic at all, it's in the call that feeds it.
+  The production stack was restored from a snapshot taken before the bad deploy: all 16
+  parameters match the original with zero drift, `DryRun=false`, DNS sweep on, and all
+  five alarms re-wired.
+
 - **The `ssm:SendCommand` grant added in #652 could not actually authorize** — follow-up
   to #652, caught by policy simulation against the live role before anyone relied on it.
   The statement scoped `ssm:SendCommand` with `ec2:ResourceTag/spawn:managed`. **A

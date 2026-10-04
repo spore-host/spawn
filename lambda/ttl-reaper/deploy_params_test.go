@@ -246,3 +246,81 @@ func TestMakefilePassesOnlyExplicitParameters(t *testing.T) {
 			"override file, or an unspecified value cannot be inherited")
 	}
 }
+
+// TestEmptyLiveSetIsReportedLoudly is the follow-up to #650, written after the
+// fix for #650 DISARMED the live production reaper.
+//
+// The Makefile's describe-stacks call had no --region, so it resolved against the
+// profile default, the stack came back "not found", the `|| echo '[]'` branch
+// wrote an empty live set, and every parameter fell back to its TEMPLATE default
+// — DryRun among them, whose default is "true". The reaper went to dry-run: still
+// running, still reporting, terminating nothing.
+//
+// What let it past me was the REPORTING. The merge printed "deploy changes no
+// parameters (code only)" because its change notes only fired when a live value
+// existed to differ from. With no live values there were no notes, so asserting
+// all 16 defaults looked identical to inheriting all 16.
+//
+// So an empty live set must be the loudest case, not the quietest.
+func TestEmptyLiveSetIsReportedLoudly(t *testing.T) {
+	merged, stderr := runMerge(t, templateSummary, "[]", "")
+
+	if len(merged) != 16 {
+		t.Fatalf("expected all 16 template defaults, got %d", len(merged))
+	}
+	if !strings.Contains(stderr, "WARNING") {
+		t.Errorf("an empty live set must WARN — it means every parameter is being asserted "+
+			"from a template default, which is how the production reaper got disarmed.\n"+
+			"stderr: %s", stderr)
+	}
+	if !strings.Contains(stderr, "TEMPLATE DEFAULTS") {
+		t.Errorf("the warning must say the values come from template defaults, got: %s", stderr)
+	}
+	// And every parameter must be listed as a change, not silently applied.
+	if !strings.Contains(stderr, "deploy will CHANGE") {
+		t.Errorf("asserting defaults is a CHANGE and must be listed; got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "DryRun") {
+		t.Errorf("DryRun is the dangerous one and must appear by name; got: %s", stderr)
+	}
+	// The old message must NOT appear — that is the one that read as safe.
+	if strings.Contains(stderr, "changes no parameters") {
+		t.Error("an empty live set must not report \"changes no parameters\" — that message is " +
+			"what made a full reset look like a no-op")
+	}
+}
+
+// TestDeployReadsTheStackInTheRightRegion. The region bug is not visible in the
+// merge logic at all — it is in the call that FEEDS it, so the gate has to read
+// the Makefile.
+func TestDeployReadsTheStackInTheRightRegion(t *testing.T) {
+	b, err := os.ReadFile("Makefile")
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	mk := string(b)
+
+	// Every aws cloudformation call in the deploy path must be region-explicit.
+	for _, line := range strings.Split(mk, "\n") {
+		if !strings.Contains(line, "aws cloudformation") {
+			continue
+		}
+		if !strings.Contains(line, "--region") {
+			t.Errorf("an aws cloudformation call without --region:\n    %s\n\n"+
+				"Without it the call resolves against the profile's default region, the stack "+
+				"reads as absent, and the deploy falls back to template defaults — which "+
+				"disarmed the production reaper (DryRun defaults to true).",
+				strings.TrimSpace(line))
+		}
+	}
+
+	// A failed read must abort, not degrade to an empty live set.
+	if !strings.Contains(mk, "refusing to deploy with template defaults") {
+		t.Error("a describe-stacks failure other than a genuinely absent stack must ABORT the " +
+			"deploy; collapsing every failure into '[]' is what silently reset the stack")
+	}
+	if !strings.Contains(mk, "does not exist") {
+		t.Error("the deploy must distinguish a genuinely absent stack (fine, first deploy) from " +
+			"any other read failure (abort)")
+	}
+}
