@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A hardware-sensitivity manifest, a smoke script, and a gate for unset template
+  fields** — the testing half of what v0.118.0 taught. Of the eleven fixes in that
+  release, **four were findable only on real hardware** while the unit suite stayed
+  green, and three pre-existing tests actively asserted the broken behaviour as correct.
+  `scripts/hardware-sensitive.txt` lists the paths whose correctness is not provable
+  without an instance, each with the bug that earned it a place — generated shell
+  (`pkg/userdata`, `pkg/launcher/bootstrap.go`), SSM orchestration (`pkg/mpicohort`),
+  and whether AWS *accepts* and then *authorizes* a request (`pkg/aws/securitygroup.go`,
+  `pkg/aws/iam.go`). `make smoke-needed` reports whether anything since the last tag
+  touched them, so that question stops being answered from memory at tagging time;
+  test-file changes are excluded, because changing a test cannot change what an
+  instance does.
+  `make smoke` is today's hand-assembled verification written down: an MPI cohort
+  checked for rank spread across every node, `cloud-init status`, `--mpi-command`
+  argument preservation, and an `fi_pingpong -p efa` fabric check — then an
+  **independent** leak check that asks AWS rather than trusting the terminate calls,
+  because a drain that silently terminated nothing was one of the bugs (#683). About
+  $0.05 and ten minutes.
+  A new `TestMemberUserDataHasNoEmptyInterpolations` renders user-data through the
+  **production** builder and fails on the signatures of an unset field — `s3:///`, a
+  malformed ARN, an unresolved `{{...}}`, a literal `<no value>`. This is the #684
+  class: the test that should have caught it set `BinariesBucket` *itself*, so it proved
+  the template could interpolate a bucket while never checking that any caller did.
+  Confirmed to fail when #684 is reintroduced.
+
+
 ## [0.118.0] - 2026-10-04
 
 ### Added
