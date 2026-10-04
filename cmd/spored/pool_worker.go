@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/provider"
 	"github.com/spore-host/spawn/pkg/taskpool"
+	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 // newPoolWorkerCmd is the on-instance side of pooled execution (#70): a fungible
@@ -97,12 +98,12 @@ func runPoolWorker(ctx context.Context, o poolWorkerOpts) error {
 		return fmt.Errorf("open pool queue: %w", err)
 	}
 	specs := &taskpool.SpecStore{Client: s3Client, Bucket: o.specBucket, Prefix: o.specPrefix}
-	resultsBucket := fmt.Sprintf("spawn-results-%s-%s", id.AccountID, region)
+	resultsBucket := taskproto.DefaultResultsBucket(id.AccountID, region)
 
 	worker := &taskpool.Worker{
 		Queue:     q,
 		Fetcher:   specs,
-		Execer:    &taskpool.ScriptExecer{ResultsBucket: resultsBucket, Region: region, Stdout: os.Stdout, Stderr: os.Stderr},
+		Execer:    &taskpool.ScriptExecer{ResultsBucket: resultsBucket, AccountID: id.AccountID, Region: region, Stdout: os.Stdout, Stderr: os.Stderr},
 		Workspace: &taskpool.DirWorkspace{Root: o.workRoot},
 		Config: taskpool.WorkerConfig{
 			PollWaitSeconds: 20, // max SQS long-poll — fewest empty round-trips

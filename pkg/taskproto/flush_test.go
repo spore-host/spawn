@@ -77,7 +77,7 @@ func TestFlushHookNeverOverwritesTheWrapperRecord(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(CompletionRecordPath()) })
 
-	script := GenerateFlushScript(flushSpec(), "results-bucket", "us-east-1", "run-1")
+	script := genFlush(flushSpec(), "results-bucket", "us-east-1", "run-1")
 	out, awsCalls := runFlushHook(t, script, string(ExitTTLExpired))
 
 	if len(awsCalls) != 0 {
@@ -108,7 +108,7 @@ func TestFlushHookWritesAParsableTerminalRecord(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(StartedAtPath()) })
 
-	script := GenerateFlushScript(flushSpec(), "results-bucket", "us-west-2", "run-7")
+	script := genFlush(flushSpec(), "results-bucket", "us-west-2", "run-7")
 	out, awsCalls := runFlushHook(t, script, string(ExitTTLExpired))
 
 	data, err := os.ReadFile(localPath(terminalFileName))
@@ -165,7 +165,7 @@ func TestFlushHookWritesAParsableTerminalRecord(t *testing.T) {
 // still have salvaged the more useful half.
 func TestFlushHookUploadsTheLogBeforeTheRecord(t *testing.T) {
 	_ = os.Remove(CompletionRecordPath())
-	script := GenerateFlushScript(flushSpec(), "results-bucket", "us-east-1", "run-2")
+	script := genFlush(flushSpec(), "results-bucket", "us-east-1", "run-2")
 
 	logIdx := strings.Index(script, "/var/log/spawn-command.log")
 	recIdx := strings.Index(script, localPath(terminalFileName))
@@ -186,7 +186,7 @@ func TestFlushHookRecordsLogsOnlyWhenTheUploadSucceeded(t *testing.T) {
 		t.Skip("bash not available")
 	}
 
-	script := GenerateFlushScript(flushSpec(), "results-bucket", "us-east-1", "run-3")
+	script := genFlush(flushSpec(), "results-bucket", "us-east-1", "run-3")
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "task-flush.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil { //nolint:gosec // test fixture
@@ -242,7 +242,7 @@ func TestFlushHookReasonToRetryClass(t *testing.T) {
 		t.Run(string(tc.reason), func(t *testing.T) {
 			_ = os.Remove(CompletionRecordPath())
 			_ = os.Remove(localPath(terminalFileName))
-			script := GenerateFlushScript(flushSpec(), "b", "us-east-1", "r")
+			script := genFlush(flushSpec(), "b", "us-east-1", "r")
 			out, _ := runFlushHook(t, script, string(tc.reason))
 
 			data, err := os.ReadFile(localPath(terminalFileName))
@@ -271,7 +271,7 @@ func TestFlushHookReasonToRetryClass(t *testing.T) {
 func TestFlushHookSurvivesAnUnknownReason(t *testing.T) {
 	_ = os.Remove(CompletionRecordPath())
 	_ = os.Remove(localPath(terminalFileName))
-	script := GenerateFlushScript(flushSpec(), "b", "us-east-1", "r")
+	script := genFlush(flushSpec(), "b", "us-east-1", "r")
 	out, _ := runFlushHook(t, script, "some_future_reason")
 
 	data, err := os.ReadFile(localPath(terminalFileName))
@@ -300,7 +300,7 @@ func TestFlushHookSurvivesAnUnknownReason(t *testing.T) {
 // no upload is attempted.
 func TestFlushHookFindsAwsOutsideTheSystemDirs(t *testing.T) {
 	_ = os.Remove(CompletionRecordPath())
-	script := GenerateFlushScript(flushSpec(), "results-bucket", "us-east-1", "run-9")
+	script := genFlush(flushSpec(), "results-bucket", "us-east-1", "run-9")
 	_, awsCalls := runFlushHook(t, script, string(ExitTTLExpired))
 
 	if len(awsCalls) == 0 {
@@ -318,7 +318,7 @@ func TestFlushHookIsValidBash(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
-	script := GenerateFlushScript(flushSpec(), "b", "us-east-1", "r")
+	script := genFlush(flushSpec(), "b", "us-east-1", "r")
 	path := filepath.Join(t.TempDir(), "flush.sh")
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
@@ -335,7 +335,7 @@ func TestFlushHookIsValidBash(t *testing.T) {
 func TestFlushHookQuotesAHostileTaskID(t *testing.T) {
 	spec := flushSpec()
 	spec.TaskID = `x'; touch /tmp/spawn-pwned-632; echo '`
-	script := GenerateFlushScript(spec, "b", "us-east-1", "r")
+	script := genFlush(spec, "b", "us-east-1", "r")
 
 	if strings.Contains(script, "touch /tmp/spawn-pwned-632; echo") &&
 		!strings.Contains(script, `'"'"'`) && !strings.Contains(script, `\'`) {
@@ -357,7 +357,7 @@ func TestFlushHookQuotesAHostileTaskID(t *testing.T) {
 // and cannot read the wrapper's shell variables, so without this file a flushed
 // record would have to omit started_at or invent one.
 func TestWrapperPersistsStartedAtForTheFlushHook(t *testing.T) {
-	w := GenerateWrapper(flushSpec(), "b", "us-east-1", false, "r")
+	w := genWrapper(flushSpec(), "b", "us-east-1", false, "r")
 	if !strings.Contains(w, shQuote(StartedAtPath())) {
 		t.Errorf("the wrapper must persist STARTED_AT to %s for the flush hook\n---\n%s", StartedAtPath(), w)
 	}
@@ -379,7 +379,7 @@ func TestFlushHookStagingFileIsNotTheInterlockFile(t *testing.T) {
 	if terminalFileName == completionFileName {
 		t.Fatal("the flush hook's staging file must not be the file its interlock tests for")
 	}
-	script := GenerateFlushScript(flushSpec(), "b", "us-east-1", "r")
+	script := genFlush(flushSpec(), "b", "us-east-1", "r")
 	// The interlock reads the wrapper's path; the write targets the staging path.
 	if !strings.Contains(script, "if [ -f "+shQuote(CompletionRecordPath())+" ]") {
 		t.Errorf("missing the wrapper-record interlock\n---\n%s", script)

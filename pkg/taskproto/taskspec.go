@@ -28,6 +28,20 @@ type TaskSpec struct {
 	Placement Placement         `json:"placement,omitempty"` // optional launch-time knobs (AMI/AZ/volumes/FSx/EFS)
 	Lifecycle Lifecycle         `json:"lifecycle"`
 	Env       map[string]string `json:"env,omitempty"`
+
+	// ResultsPrefix overrides where this task's durable records go — an
+	// s3://bucket/prefix under which <task_id>/completion.json, /.exitcode and
+	// /command.log are written (spawn#646).
+	//
+	// Empty means s3://spawn-results-<account>-<region>/tasks, which is what every
+	// existing adapter polls, so omitting it changes nothing. Set it to collapse a
+	// consumer's two reads into one: outputs[].destination was always fully
+	// caller-controlled, and this makes the terminal record follow.
+	//
+	// The bucket must already exist unless it is spawn's own default — spawn will
+	// not create a bucket you named, because a typo would leave a stray bucket and
+	// still report success.
+	ResultsPrefix string `json:"results_prefix,omitempty"`
 }
 
 // ResourceRequest is what the sizer maps to an instance type.
