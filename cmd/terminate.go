@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -66,16 +67,39 @@ func terminateSingle(ctx context.Context, identifier string) error {
 		return i18n.Te("error.aws_client_init", err)
 	}
 
+	// `terminate` is idempotent: its goal is "this instance is not running", so a
+	// target that never existed, or is already gone, is SUCCESS and exits 0
+	// (spawn#648). Every other resolveInstance caller still treats not-found as the
+	// error it is — only this command opts in, via the ErrInstanceNotFound sentinel.
+	//
+	// This matters most to workflow executors. Reported from nf-spawn, whose
+	// cleanup ran terminate after a launch had already failed and reported:
+	//
+	//	spawn terminate failed (exit 1) for instance 'nf-03461ad6fc36' — the
+	//	instance may still be running and billing until its TTL.
+	//	Output: no instance found with name: nf-03461ad6fc36
+	//
+	// Nothing had leaked — the instance was never created — but the one sentence a
+	// user cannot ignore said the opposite. The already-terminated and
+	// shutting-down cases are if anything MORE common on that path, because
+	// on_complete=terminate means a successful task's instance is usually gone
+	// before the executor gets around to cleaning up.
 	instance, err := resolveInstance(ctx, client, identifier)
 	if err != nil {
+		if errors.Is(err, ErrInstanceNotFound) {
+			fmt.Fprintf(os.Stderr, "No instance %q exists — nothing to terminate.\n", identifier)
+			return nil
+		}
 		return err
 	}
 
 	if instance.State == "terminated" {
-		return fmt.Errorf("instance %s is already terminated", instance.InstanceID)
+		fmt.Fprintf(os.Stderr, "Instance %s is already terminated — nothing to do.\n", instance.InstanceID)
+		return nil
 	}
 	if instance.State == "shutting-down" {
-		return fmt.Errorf("instance %s is already shutting down", instance.InstanceID)
+		fmt.Fprintf(os.Stderr, "Instance %s is already shutting down — nothing to do.\n", instance.InstanceID)
+		return nil
 	}
 
 	fmt.Fprintf(os.Stderr, "Found instance in %s (state: %s)\n", instance.Region, instance.State)

@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`spawn terminate` is now idempotent when the instance is already gone** (#648).
+  Three states already satisfy its goal of "this instance is not running" — an unknown
+  **name**, already terminated, already shutting down — and all three used to exit 1.
+  They now exit 0 with a clear message. **This is a behaviour change**: a script that
+  relied on a non-zero exit to detect a missing *name* will now see success.
+  An unknown instance **ID** deliberately still fails. An ID is opaque and AWS-assigned,
+  so one that matches nothing is a typo rather than an already-cleaned-up resource, and
+  exiting 0 there would let someone believe they stopped a still-billing instance.
+  It is worth it because the old behaviour actively misled. An executor's cleanup ran
+  `terminate` after a launch had already failed and reported *"the instance may still be
+  running and billing until its TTL"* — the one sentence a user cannot ignore — when
+  nothing had been created and nothing had leaked. The already-terminated case is if
+  anything more common, since `on_complete: terminate` means a successful task's instance
+  is usually gone before an executor gets around to cleaning up.
+  Scoped deliberately to `terminate`: the shared instance resolver is used by ~10
+  commands (`connect`, `dns`, `config`, `extend`, …) where a non-existent instance
+  genuinely is an error, so only this command opts in, via a sentinel rather than
+  error-string matching. A test asserts no other command starts doing the same.
+
 - **A 22 MiB compiled binary is no longer tracked in git** (#637).
   `lambda/autoscale-orchestrator/autoscale-orchestrator` was the one name missing
   from `.gitignore`'s hand-maintained per-lambda list, so it was tracked and
@@ -25,6 +44,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot reintroduce this by being forgotten.
 
 ### Fixed
+
+- **Concurrent `spawn task run` launches no longer fail on IAM `ConcurrentModification`**
+  (#648). Two launches ~60 ms apart — the normal case for any workflow executor fanning
+  out independent processes — raced on `CreateInstanceProfile`, and one died with
+  `ConcurrentModification: The previous tagging operation is still ongoing`, taking a
+  whole Nextflow DAG with it.
+  The call was already wrapped in the `retryIAM` backoff added for #64; the gap was its
+  **predicate**. `ConcurrentModification` is neither "already exists" nor throttling, so
+  `retryIAM` returned on the *first* attempt without ever sleeping — the opposite of what
+  IAM asks for. It is now retried on the existing 500 ms × attempt backoff. Genuine
+  errors like `AccessDenied` still fail fast on the first attempt rather than waiting out
+  five sleeps.
+  This is the **common** concurrent-launch failure, not a rare one: every
+  `CreateRole`/`CreateInstanceProfile` on the launch path passes `Tags`, and it is that
+  implicit tagging operation which serialises. It was also first-run-only — once the
+  profile exists the window closes — which made it easy to dismiss as a blip.
+  `SetupSporedIAMRole` was hardening the same concern a second time by hand (three
+  un-retried calls tolerating only `EntityAlreadyExists`/`LimitExceeded` by string
+  match), so the #64 fix never reached it. All three now route through `retryIAM` and
+  inherit the behaviour instead of reimplementing it, with a test that fails if a new
+  `Create*` call is added outside the retry.
 
 - **A task whose manifest uses a top-level path (`/out`, `/data`, `/work`) now works**
   (#564). The wrapper pre-creates every bind-mount directory specifically so that
