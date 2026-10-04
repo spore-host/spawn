@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `ssm:SendCommand` grant added in #652 could not actually authorize** — follow-up
+  to #652, caught by policy simulation against the live role before anyone relied on it.
+  The statement scoped `ssm:SendCommand` with `ec2:ResourceTag/spawn:managed`. **A
+  condition key belongs to the service of the ACTION, not of the resource**:
+  `ec2:ResourceTag` is an EC2 key and is simply absent from the request context of an
+  `ssm:*` call, so the `StringEquals` never matches and the statement is an implicit
+  **deny**. Simulated against the deployed role: `SendCommand` on a `spawn:managed`
+  instance evaluated `implicitDeny` with the `ec2:` key and `allowed` with
+  `ssm:resourceTag`. So the action was granted, #652's drift gate passed, and
+  `REAPER_GRACEFUL` still could not send a command — the exact failure #652 set out to
+  fix, one layer deeper.
+  This is the same trap as the `fsx:ResourceTag` vs `aws:ResourceTag` distinction that
+  #652's *own* changelog entry described. Fails closed and silently, which is what makes
+  it worth a gate rather than a fix.
+  `TestConditionKeysBelongToTheirActionsService` now fails any statement whose
+  service-prefixed condition key doesn't match its action's service (`aws:` being the
+  global namespace, valid anywhere). #652's gate checked which actions were *granted*;
+  it could not see whether a grant could *authorize*.
+
 ## [0.117.0] - 2026-10-04
 
 ### Added

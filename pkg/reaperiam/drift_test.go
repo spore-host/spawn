@@ -295,3 +295,83 @@ func TestBothReaperRolesGrantTheSameTargetAccountActions(t *testing.T) {
 		}
 	}
 }
+
+// TestConditionKeysBelongToTheirActionsService catches the bug that #652's own
+// drift gate let through.
+//
+// That gate checks which ACTIONS are granted. It cannot see whether a grant can
+// actually authorize, and #652 shipped one that could not: `ssm:SendCommand`
+// scoped by `ec2:ResourceTag/spawn:managed`. A condition key belongs to the
+// service of the ACTION, not of the resource — `ec2:ResourceTag` is an EC2 key
+// and is simply ABSENT from the request context of an ssm:* call, so the
+// StringEquals never matches and the statement is an implicit deny.
+//
+// Verified by policy simulation against the live role: with the ec2: key,
+// SendCommand on a spawn:managed instance evaluated `implicitDeny`; with
+// `ssm:resourceTag` it evaluates `allowed`. The action was granted, the drift
+// gate passed, and REAPER_GRACEFUL still could not send a command — the exact
+// failure #652 set out to fix, one layer deeper.
+//
+// This is the same trap as fsx:ResourceTag vs aws:ResourceTag (see
+// ScanSelfStatements): a service-specific key that does not exist for the action
+// in question fails CLOSED and silently.
+func TestConditionKeysBelongToTheirActionsService(t *testing.T) {
+	b, err := os.ReadFile(crossAccountRolePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", crossAccountRolePath, err)
+	}
+
+	// Walk statements as text blocks: each starts at "- Effect:" and runs to the
+	// next one. A CFN-shorthand-aware YAML parse is not worth it for this.
+	raw := string(b)
+	blocks := regexp.MustCompile(`(?m)^\s+- Effect: Allow\n`).Split(raw, -1)
+	if len(blocks) < 4 {
+		t.Fatalf("found %d statement blocks — has the template's shape changed?", len(blocks)-1)
+	}
+
+	// service-prefixed condition keys, e.g. ec2:ResourceTag/... or ssm:resourceTag/...
+	condKey := regexp.MustCompile(`(?m)^\s+([a-z0-9]+):([A-Za-z]+Tag)/`)
+	actionKey := regexp.MustCompile(`(?m)^\s+- ([a-z0-9]+):[A-Za-z*]+\s*$`)
+
+	var checked int
+	for _, blk := range blocks[1:] {
+		// Stop at the next top-level key so one block doesn't bleed into the next.
+		if i := strings.Index(blk, "\n      Tags:"); i >= 0 {
+			blk = blk[:i]
+		}
+		actions := actionKey.FindAllStringSubmatch(blk, -1)
+		conds := condKey.FindAllStringSubmatch(blk, -1)
+		if len(actions) == 0 || len(conds) == 0 {
+			continue
+		}
+		services := map[string]bool{}
+		for _, a := range actions {
+			services[a[1]] = true
+		}
+		for _, c := range conds {
+			checked++
+			// aws: is the global namespace and is valid for any action.
+			if c[1] == "aws" {
+				continue
+			}
+			if !services[c[1]] {
+				var names []string
+				for _, a := range actions {
+					names = append(names, a[0])
+				}
+				t.Errorf("a statement granting %s is conditioned on %s:%s/, whose service does "+
+					"not match the action's.\n"+
+					"A condition key belongs to the service of the ACTION, not the resource — a "+
+					"key that does not exist for that action is absent from the request context, "+
+					"so the condition never matches and the statement is an implicit DENY. It "+
+					"fails closed and silently, which is how #652 shipped an ssm:SendCommand "+
+					"grant that could not authorize.",
+					strings.Join(names, " "), c[1], c[2])
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no service-prefixed condition keys — the gate is asserting nothing")
+	}
+	t.Logf("checked %d service-prefixed condition keys against their actions", checked)
+}
