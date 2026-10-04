@@ -61,6 +61,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adds six human annotations of its own — any one of them on stdout breaks the document.
   The stream decision is now an `emitStatus` seam with annotations passed in, so the
   rule is asserted rather than assumed.
+- **`--efa` cohorts could never enroll: the probe could not find `fi_info`** (#693). The
+  enrollment probe sourced `/etc/profile.d/mpi.sh` and `/etc/profile.d/efa.sh` and then
+  ran `fi_info -p efa` — but `aws-efa-installer` puts `fi_info` in
+  **`/opt/amazon/efa/bin`** and its PATH line in its own
+  **`/etc/profile.d/zippy_efa.sh`**, while the `efa.sh` spawn writes exports only
+  `FI_PROVIDER` and `FI_EFA_USE_DEVICE_RDMA` and touches PATH not at all. So in SSM's
+  non-login shell the probe reported `efa provider missing` every ~5s until the
+  5-minute budget expired, whether EFA was installed or not.
+  This is #684 again for EFA: that fix covered the `mpirun` half and assumed the
+  EFA half worked by analogy. The probe now **appends both install directories to PATH
+  directly** rather than trusting any profile file — a probe keyed on a third party's
+  script name breaks when they rename it — and globs `*efa*.sh` so the installer's own
+  script is sourced too.
+  The tests are now **executable**: they run the generated probe under the exact PATH an
+  SSM shell gets, with a stub binary, and assert it exits 0 — plus the inverse, that a
+  genuinely missing tool still fails. The previous tests confirmed the check *existed*,
+  not that it could ever *succeed* on a real install layout, which is precisely the gap
+  that let this ship.
+- **Relaunching a job array under a previously-used `--job-array-name` failed** (#691).
+  The `RunInstances` ClientToken was left empty, so cohort fell back to
+  `Token(cluster, entity, generation)` — keyed on the job-array **name**. The per-launch
+  `jobArrayID` (which carries a date and random suffix) was passed as the CohortID and
+  never reached the token, so two invocations sharing a name sent the **same token per
+  index**. Within EC2's retention window that is wrong twice over: differing parameters
+  give `IdempotentParameterMismatch` and fail the whole cohort (observed 18.5 hours
+  after the first launch), and *identical* parameters make EC2 return the **original
+  reservation** — so spawn could report a successful launch while holding instance IDs
+  that are already terminated, or two arrays could share instances.
+  Re-issuing a token is correct *within* one launch (retries and AZ-fallback rungs must
+  not double-launch) and wrong *across* launches. The token is now keyed on
+  `jobArrayID`, which is stable within a reconcile and distinct between invocations;
+  `spawn array retry` passes the original `rec.ArrayID`, so a retried member keeps its
+  first attempt's token and stays idempotent against it.
+- **`--estimate-only` rendered a sub-hour TTL as "0 hr"** (#662 follow-up). `--ttl 30m`
+  printed `TTL cost: $0.07 (0 hr × 2 instances)` — the dollar figure correct and the
+  duration rounded to zero, which is the worst combination in a cost preview, since "0"
+  is the number a reader takes at face value. Durations now render as `30m`, `90m` or
+  `4 hr` without rounding anything away.
 
 - **A fully-configured launch could exceed AWS's 50-tag limit and fail `RunInstances`
   outright** (#477). The parameter loop capped itself at 35 with a comment claiming that

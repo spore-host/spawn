@@ -464,6 +464,33 @@ func relaunchArrayMembers(ctx context.Context, rec arrayrec.Record, indexes []in
 // the failed/missing subset). Members regroup under the given jobArrayID, so a
 // retry's relaunched members join the original array. minViableCount is clamped
 // to [1, len(indexes)] by buildCohort.
+// memberIdempotencyToken returns the RunInstances ClientToken for one cohort
+// member, keyed on the PER-LAUNCH array id (#691).
+//
+// The token was previously left empty, so cohort fell back to
+// Token(cluster, entity, generation) = Token(<job-array-name>, <name>-<index>,
+// "g1"). jobArrayID — which carries the date and a random suffix — was passed as
+// the CohortID but never reached the token. Two separate `spawn launch`
+// invocations sharing a --job-array-name therefore sent the SAME ClientToken per
+// index, and within EC2's token-retention window that is wrong in two ways:
+//
+//   - parameters differ (new user-data, type, AZ) → IdempotentParameterMismatch
+//     and the whole cohort fails, as reported 18.5 hours after the first launch;
+//   - parameters identical → EC2 returns the ORIGINAL reservation instead of
+//     launching, so spawn can report success while handing back instance IDs
+//     that are already terminated, or two arrays can share instances.
+//
+// Re-issuing a token is correct WITHIN one launch — retries and AZ-fallback
+// rungs of the same reconcile must not double-launch — and wrong ACROSS
+// launches. Keying on jobArrayID gives exactly that: stable within a reconcile,
+// distinct between invocations.
+//
+// `spawn array retry` passes the ORIGINAL rec.ArrayID, so a retried member keeps
+// its original token and stays idempotent against its own earlier attempt.
+func memberIdempotencyToken(jobArrayID string, id cohort.EntityID) string {
+	return cohort.Token(jobArrayID, string(id), "g1")
+}
+
 func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfig *aws.LaunchConfig, plat *platform.Platform, prog *progress.Progress, fsxInfo *aws.FSxInfo, auditLog *audit.AuditLogger, spec cohortSpec, mp memberParams, jobArrayID string, createdAt time.Time, indexes []int, minViableCount int) error {
 	n := len(indexes)
 	if n == 0 {
@@ -508,7 +535,8 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 		cfgs[id] = cfg
 		memberIDs = append(memberIDs, id)
 		intent, err := cohort.NewEntityIntent(mp.name, id, "g1", cohort.CohortID(jobArrayID),
-			cohort.RungPlacement{Rung: rung, Chain: chain}, "")
+			cohort.RungPlacement{Rung: rung, Chain: chain},
+			memberIdempotencyToken(jobArrayID, id))
 		if err != nil {
 			return fmt.Errorf("build member %d intent: %w", i, err)
 		}

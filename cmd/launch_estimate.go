@@ -49,10 +49,33 @@ func renderInstanceCostEstimate(w io.Writer, instanceType, region string, priceP
 	if err != nil {
 		return
 	}
+	// Render the duration, not a rounded hour count. "%.0f hr" turned --ttl 30m
+	// into "0 hr", so the figure read as free next to a correct dollar amount —
+	// reported against 0.118.0 as `TTL cost: $0.07 (0 hr × 2 instances)`. A cost
+	// preview that says "0" about anything is the one number a reader will trust
+	// and should not.
 	if effective == 1 {
-		fmt.Fprintf(w, "   TTL cost:   $%.2f (%.0f hr)\n", pricePerHour*d.Hours(), d.Hours())
+		fmt.Fprintf(w, "   TTL cost:   $%.2f (%s)\n", pricePerHour*d.Hours(), formatTTLDuration(d))
 		return
 	}
-	fmt.Fprintf(w, "   TTL cost:   $%.2f (%.0f hr × %d instances)\n",
-		total*d.Hours(), d.Hours(), effective)
+	fmt.Fprintf(w, "   TTL cost:   $%.2f (%s × %d instances)\n",
+		total*d.Hours(), formatTTLDuration(d), effective)
+}
+
+// formatTTLDuration renders a TTL for the cost preview without rounding it away.
+//
+// time.Duration.String() gives "30m0s" and "1h30m0s"; the trailing zero units
+// are noise in a one-line estimate. Hours are kept fractional when they are not
+// whole, so a sub-hour TTL never reads as "0 hr" (#662 follow-up).
+func formatTTLDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%d hr", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%.1f hr", d.Hours())
+	}
 }

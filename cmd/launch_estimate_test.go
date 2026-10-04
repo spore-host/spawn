@@ -87,3 +87,33 @@ func TestEstimateCountIsClamped(t *testing.T) {
 		}
 	}
 }
+
+// TestEstimateSubHourTTLIsNotZeroHours is the follow-up reported against
+// 0.118.0: `--ttl 30m` rendered as "TTL cost: $0.07 (0 hr × 2 instances)".
+//
+// The dollar figure was right and the hours read zero, which is the worst
+// combination — a cost preview exists to be believed, and "0" is the number a
+// reader will take at face value.
+func TestEstimateSubHourTTLIsNotZeroHours(t *testing.T) {
+	for _, ttl := range []string{"30m", "45m", "90m", "5m", "20m"} {
+		var b strings.Builder
+		renderInstanceCostEstimate(&b, "c7g.large", "us-east-1", 0.0725, "on-demand", ttl, 2)
+		out := b.String()
+		if strings.Contains(out, "0 hr") {
+			t.Errorf("--ttl %s rendered as \"0 hr\":\n%s", ttl, out)
+		}
+		if !strings.Contains(out, "TTL cost") {
+			t.Errorf("--ttl %s produced no TTL cost line:\n%s", ttl, out)
+		}
+	}
+}
+
+// TestEstimateWholeHoursStayReadable: the common whole-hour case must not
+// regress into "4.0 hr".
+func TestEstimateWholeHoursStayReadable(t *testing.T) {
+	var b strings.Builder
+	renderInstanceCostEstimate(&b, "c7g.large", "us-east-1", 0.0725, "on-demand", "4h", 1)
+	if !strings.Contains(b.String(), "4 hr") {
+		t.Errorf("whole hours should read as \"4 hr\", got:\n%s", b.String())
+	}
+}
