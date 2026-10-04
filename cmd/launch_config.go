@@ -162,6 +162,17 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if keyPair != "" {
 		config.KeyName = keyPair
 	}
+	// Network (#667). Both of these were parsed into globals and then never
+	// copied onto the config: the only assignments lived on the batch-queue
+	// path, so an ordinary launch silently used the VPC's default security group
+	// and an arbitrary subnet. Nothing warned, and the symptom surfaced much
+	// later as a hung `hard` NFS mount or a refused SSH.
+	if len(sgIDs) > 0 {
+		config.SecurityGroupIDs = sgIDs
+	}
+	if subnetID != "" {
+		config.SubnetID = subnetID
+	}
 	if spot {
 		config.Spot = true
 	}

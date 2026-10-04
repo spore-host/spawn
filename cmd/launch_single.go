@@ -1074,6 +1074,24 @@ func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.La
 	return nil
 }
 
+// mergeManagedSecurityGroup adds a spawn-managed security group alongside any
+// the caller supplied with --security-group-ids, instead of replacing them.
+//
+// Overwriting was the second half of #667: --security-group-ids was dropped
+// before it reached the config, and then dropped AGAIN here whenever spawn
+// created a managed MPI or Windows group. An instance can carry up to 5 groups,
+// so there is no reason to choose — and no other way to add one to an MPI
+// launch, which is exactly the case (EFS/FSx mount targets, a restricted SSH
+// CIDR) where an extra group is needed.
+func mergeManagedSecurityGroup(existing []string, managed string) []string {
+	for _, sg := range existing {
+		if sg == managed {
+			return existing
+		}
+	}
+	return append(append([]string{}, existing...), managed)
+}
+
 // ensureSecurityGroup creates and assigns a managed security group when the
 // launch needs one the default SG can't provide: an MPI SG (intra-cluster
 // ports) or a Windows SG (RDP 3389 + SSH 22). Otherwise it's a no-op. Extracted
@@ -1097,7 +1115,7 @@ func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws
 			return fmt.Errorf("failed to create MPI security group: %w", err)
 		}
 
-		config.SecurityGroupIDs = []string{sgID}
+		config.SecurityGroupIDs = mergeManagedSecurityGroup(config.SecurityGroupIDs, sgID)
 		auditLog.LogOperationWithData("create_security_group", sgName, "success",
 			map[string]interface{}{
 				"security_group_id": sgID,

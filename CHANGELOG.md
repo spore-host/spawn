@@ -52,6 +52,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **unconditional** on cohort failure — it filters by the `spawn:job-array-id` tag, so
   with nothing launched it costs one `DescribeInstances`, against a missed drain costing
   $15/hr.
+- **`--security-group-ids` and `--subnet-id` were silently dropped on every ordinary
+  launch** (#667). Both were parsed into package globals whose only assignment onto the
+  `LaunchConfig` lived on the **batch-queue** path, so `spawn launch
+  --security-group-ids sg-...` exited 0 and launched the instance into the VPC's
+  **default** security group and an arbitrary subnet, with nothing warning.
+  The symptom always surfaced far from the cause: `--efs-id` mounts **hang** rather than
+  fail (the mount target sits in another security group, so 2049 is blocked and a `hard`
+  NFS mount blocks forever), `EnsureLustrePorts` iterated an empty slice so FSx never got
+  port 988 opened, and SSH from a restricted CIDR was simply refused.
+  Dropping `--subnet-id` compounds it, because the subnet also picks the **AZ**, and a
+  one-zone EFS mount target is only reachable from its own zone.
+- **A managed MPI security group no longer discards the ones you asked for** (#667).
+  When spawn created a `spawn-mpi-*` group it **overwrote** `SecurityGroupIDs` outright,
+  so under `--mpi` the flag was dropped a second time even once it reached the config —
+  and there was no flag-level workaround at all. The managed group is now **merged**
+  alongside any caller-supplied groups (an instance may carry 5), which is precisely the
+  case — an EFS/FSx mount target, a restricted SSH CIDR — where the extra group is needed.
+- **Three launch flags were accepted and did nothing**; each now has an issue and a gate
+  (#673, #674, #675). A new `TestLaunchFlagsAreWired` parses the package, finds every
+  variable bound to a launch flag, and fails if nothing reads it — the compiler cannot,
+  because the binding call itself counts as a use. It skips any function declaring the
+  name locally, which is what exposed `--vpc`: each consumer has its own
+  `vpcID, err := GetDefaultVPC(...)` shadow, so a grep reads those as uses of the flag.
+  Found: **`--vpc`** (#673) has no `LaunchConfig` field at all, so it launches in the
+  default VPC; **`--cartesian`** (#674) produces the wrong sweep **run count**, the worst
+  of the three since it bills for a sweep of the wrong shape; **`--use-reservation`**
+  (#675) is vestigial since #216's `--reservation-id` and yields an on-demand instance at
+  on-demand price while reading as "use my reserved capacity". All three are allowlisted
+  with their issue numbers so the gate enforces from now on without hiding the debt.
 
 - **The #650 deploy fix disarmed the live production reaper; fixed properly** — follow-up
   to #650. The Makefile's `describe-stacks` call had **no `--region`**, so it resolved
