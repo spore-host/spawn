@@ -28,6 +28,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Job-array and MPI instances never ran their bootstrap: the user-data was
+  double-gzipped** (#671). `buildJobArrayMemberConfig` base64-decoded
+  `baseConfig.UserData` — which `encodeUserData` had already **gzipped** — appended the
+  MPI script to those *compressed bytes*, and encoded again. What shipped was
+  `gzip(gzip(bootstrap) + mpiScript)`. cloud-init unwraps one layer, finds binary, logs
+  `Unhandled non-multipart (text/x-not-multipart) userdata` and skips the lot.
+  So **no job-array or MPI member has ever bootstrapped**: no `spored`, no peers file,
+  no hostfile — and with `spored` absent, nothing on-instance enforced `spawn:ttl`
+  either, leaving only the reaper between a failed cohort and indefinite billing.
+  There is now a `decodeUserData` that is the true inverse of `encodeUserData`, with a
+  gzip magic-number check so the Windows path (deliberately plain base64, since
+  EC2Launch cannot decompress) round-trips through it too. The test decodes the final
+  user-data exactly once, as cloud-init does, and asserts it starts with `#!`.
+- **A failed cohort left its instances running** (#671). The drain was gated on
+  `ReachedPhase == PhaseCohortAssembly`, but `Phase` is **ordered** and an instance
+  exists and bills from `PhaseLaunchAcked` onward — so a cohort dying at `running` or
+  `enrolled` had launched instances and left every one of them up. Two
+  `c8g.48xlarge` ($7.66/hr each) sat running until terminated by hand, which is also why
+  the placement group could not be deleted (`InvalidPlacementGroup.InUse`).
+  A phase predicate cannot be made safe here: `PhaseLaunchAcked` is `iota` 0, so a
+  member that never launched is indistinguishable from one that did. The drain is now
+  **unconditional** on cohort failure — it filters by the `spawn:job-array-id` tag, so
+  with nothing launched it costs one `DescribeInstances`, against a missed drain costing
+  $15/hr.
+
 - **The #650 deploy fix disarmed the live production reaper; fixed properly** — follow-up
   to #650. The Makefile's `describe-stacks` call had **no `--region`**, so it resolved
   against the profile's default region, the stack read as "not found", the `|| echo '[]'`

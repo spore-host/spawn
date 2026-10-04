@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -85,11 +84,16 @@ func buildJobArrayMemberConfig(baseConfig *aws.LaunchConfig, mp memberParams, jo
 	// retry path mp.mpi is always false and mp.efsID/fsxInfo are unset (storage is
 	// already in the persisted base user-data), so this block is skipped there.
 	if mp.mpi || mp.efsID != "" || fsxInfo != nil {
-		baseUserDataBytes, err := base64.StdEncoding.DecodeString(instanceConfig.UserData)
+		// decodeUserData, NOT a bare base64 decode (spawn#671). encodeUserData
+		// gzips, so base64-decoding alone yields COMPRESSED bytes; appending the MPI
+		// script to those and re-encoding shipped gzip(gzip(bootstrap) + mpiScript).
+		// cloud-init unwraps one layer, finds binary, logs "Unhandled non-multipart
+		// (text/x-not-multipart) userdata" and skips everything — so no member ever
+		// installed spored, which also meant nothing on-instance enforced spawn:ttl.
+		combinedUserData, err := decodeUserData(instanceConfig.UserData)
 		if err != nil {
 			return aws.LaunchConfig{}, fmt.Errorf("failed to decode base user-data: %w", err)
 		}
-		combinedUserData := string(baseUserDataBytes)
 
 		if mp.mpi {
 			mpiConfig := userdata.MPIConfig{
@@ -486,17 +490,27 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 		// assembly failure (the members are all live when Assemble runs). If any
 		// member reached the assembly phase, the caller must drain, or the whole
 		// cluster is left running and billing. Terminate by job-array-id tag.
-		assemblyReached := false
-		for _, id := range memberIDs {
-			if outcome.Records[id].ReachedPhase == cohort.PhaseCohortAssembly {
-				assemblyReached = true
-				break
-			}
-		}
-		if assemblyReached {
-			fmt.Fprintf(os.Stderr, "⚠️  Assembly failed; draining %d launched instances...\n", n)
-			drainJobArray(ctx, awsClient, baseConfig.Region, jobArrayID)
-		}
+		// Drain UNCONDITIONALLY on cohort failure (spawn#671).
+		//
+		// This used to require ReachedPhase == PhaseCohortAssembly, i.e. only an
+		// assembly failure drained. But Phase is ordered and an instance exists and
+		// bills from PhaseLaunchAcked onward, so a cohort that dies at `running` or
+		// `enrolled` had launched instances and left every one of them running. The
+		// reporter's two c8g.48xlarge ($7.66/hr each) went terminal at phase=enrolled
+		// and sat up until terminated by hand — which is also why the placement group
+		// could not be deleted ("InvalidPlacementGroup.InUse").
+		//
+		// A phase predicate cannot be made safe here anyway: PhaseLaunchAcked is iota
+		// 0, so a member that never launched is indistinguishable from one that did by
+		// ReachedPhase alone. drainJobArray filters by the spawn:job-array-id tag, so
+		// with nothing launched it is a no-op costing one DescribeInstances — against a
+		// missed drain costing $15/hr. Always draining is the only defensible default.
+		//
+		// cleanupAbandonedPGs is deferred, so it runs after this. Termination is
+		// asynchronous, so a PG delete may still race a shutting-down instance; that
+		// stays best-effort, since an empty placement group is free.
+		fmt.Fprintf(os.Stderr, "⚠️  Cohort failed; draining any launched instances...\n")
+		drainJobArray(ctx, awsClient, baseConfig.Region, jobArrayID)
 
 		successCount, failureCount := 0, 0
 		var details []string

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -354,6 +355,38 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 // cloud-init on Amazon Linux 2023 and Ubuntu supports gzip+base64 user-data,
 // which keeps the payload well under EC2's 16 KB limit even when combining
 // spored bootstrap + MPI + FSx mount scripts (fixes #304).
+// decodeUserData is the inverse of encodeUserData: base64-decode, then gunzip if
+// the payload is actually gzipped (spawn#671).
+//
+// It exists because the job-array path has to APPEND to an already-encoded base
+// script, and appending to the compressed bytes is what shipped
+// gzip(gzip(bootstrap) + mpiScript) — cloud-init unwraps one layer, finds binary,
+// and silently skips the whole user-data, so no member ever bootstrapped.
+//
+// The gzip check is a magic-number test rather than an assumption, because
+// encodeUserDataForOS deliberately does NOT gzip for Windows (EC2Launch cannot
+// decompress). A plain-base64 payload therefore round-trips through here too,
+// instead of erroring on a missing gzip header.
+func decodeUserData(encoded string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("decode user-data: %w", err)
+	}
+	if len(raw) < 2 || raw[0] != 0x1f || raw[1] != 0x8b {
+		return string(raw), nil // not gzipped (Windows path)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("gunzip user-data: %w", err)
+	}
+	defer func() { _ = zr.Close() }()
+	out, err := io.ReadAll(zr)
+	if err != nil {
+		return "", fmt.Errorf("read gunzipped user-data: %w", err)
+	}
+	return string(out), nil
+}
+
 func encodeUserData(script string) string {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
