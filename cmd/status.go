@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -425,31 +426,53 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 		os.Exit(int(res.ResponseCode))
 	}
 
-	// Always forward spored's diagnostic lines to OUR stderr, never stdout.
-	if res.Stderr != "" {
-		fmt.Fprint(os.Stderr, res.Stderr)
-	}
-
-	out := res.Stdout
-	if jsonOut {
-		fmt.Print(out)
-		fmt.Fprint(os.Stderr, ttlReconciliationNotice(instance, out))
-		fmt.Fprint(os.Stderr, lifecycleProtectionBlock(instance))
-		fmt.Fprint(os.Stderr, renderBillableResources(instance))
-		fmt.Fprint(os.Stderr, dnsStatusNotice(instance))
-		fmt.Fprint(os.Stderr, fsxDRAStatusNotice(instance))
-		fmt.Fprint(os.Stderr, sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
-		return nil
-	}
-
-	fmt.Print(out)
-	fmt.Print(ttlReconciliationNotice(instance, out))
-	fmt.Print(lifecycleProtectionBlock(instance))
-	fmt.Print(renderBillableResources(instance))
-	fmt.Print(dnsStatusNotice(instance))
-	fmt.Print(fsxDRAStatusNotice(instance))
-	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], out, instance.InstanceID))
+	emitStatus(os.Stdout, os.Stderr, res.Stdout, res.Stderr, []string{
+		ttlReconciliationNotice(instance, res.Stdout),
+		lifecycleProtectionBlock(instance),
+		renderBillableResources(instance),
+		dnsStatusNotice(instance),
+		fsxDRAStatusNotice(instance),
+		sporedUpgradeNotice(instance.Tags["spawn:spored-version"], res.Stdout, instance.InstanceID),
+	}, jsonOut)
 	return nil
+}
+
+// emitStatus writes spored's status output and spawn's own annotations to the
+// right streams.
+//
+// Split out of runStatusOverSSM so the stream discipline is testable without an
+// instance — the guard #540 asked for, and the only part of that report spawn's
+// tests did not cover. spored's side has TestRenderStatusJSON_StdoutIsPureJSON;
+// spawn's relay, which adds six annotations of its own, had nothing.
+//
+// The rule, in one place: when jsonOut is set, stdout carries spored's document
+// and NOTHING else. Every annotation spawn adds — TTL reconciliation, lifecycle
+// protection, billable resources, DNS, FSx, the spored upgrade hint — is useful
+// to a human and fatal to json.Unmarshal, so they go to stderr. spored's own
+// log.Printf diagnostics always go to stderr regardless of format: #540's
+// symptom was four agent log lines on stdout ahead of the output, where the
+// leading "2026" parsed as a valid JSON number and sent the decoder's error to
+// the wrong place entirely.
+//
+// Annotations arrive as a slice rather than being computed here, which is what
+// makes this testable at all. My first version took the *InstanceInfo and called
+// the six notice helpers itself — and the test passed WITH the routing bug
+// deliberately reintroduced, because every helper returns "" for any instance a
+// test can construct without AWS. A test whose inputs are inert cannot fail.
+func emitStatus(stdout, stderr io.Writer, sporedOut, sporedErr string, annotations []string, jsonOut bool) {
+	if sporedErr != "" {
+		fmt.Fprint(stderr, sporedErr)
+	}
+
+	fmt.Fprint(stdout, sporedOut)
+
+	dest := stdout
+	if jsonOut {
+		dest = stderr
+	}
+	for _, a := range annotations {
+		fmt.Fprint(dest, a)
+	}
 }
 
 // sporedUpgradeNotice returns a one-line "upgrade available" annotation for the

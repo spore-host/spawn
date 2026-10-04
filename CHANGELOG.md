@@ -7,34 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **A fully-configured launch could exceed AWS's 50-tag limit and fail `RunInstances`
-  outright** (#477). The parameter loop capped itself at 35 with a comment claiming that
-  "stays under AWS 50-tag limit" — but it counted only the sweep parameters and ignored
-  the ~45 tags the other sections had already appended. AWS does not truncate; it
-  rejects the call. Measured on a maximal launch (FSx + EFS + both webhooks + job array
-  + sweep + every lifecycle flag): **46 tags with no parameters at all**, 54 with ten,
-  and 79 with sixty. Ten is an ordinary sweep.
-  Parameter tags are now emitted **last** and budgeted against what the launch actually
-  used, in **sorted** order. The old loop ranged over the map directly, so *which*
-  parameters survived depended on Go's randomised iteration order — two members of the
-  same sweep could record different points in the parameter space.
-  Only parameters are droppable, and the priority is deliberate: `spawn:*` lifecycle
-  tags are spored's contract (dropping `spawn:ttl` would disable TTL enforcement and
-  bill open-endedly, far worse than a failed launch), `--tag` is an explicit request, and
-  `spawn:param:*` is a convenience record whose authoritative copy is the sweep manifest.
-  A truncation now warns on stderr, naming how many were dropped and why.
-- **Setting both `--spot-webhook-url` and `--completion-webhook-url` failed the launch**
-  — found while fixing #477, and reachable with **two flags** rather than a maximal
-  config. Both webhook blocks emitted `spawn:webhook-correlation` and
-  `spawn:webhook-timeout`, and EC2 rejects the whole `RunInstances` call on a repeated
-  key. Verified against real EC2:
-  `InvalidParameterValue: Duplicate tag key 'spawn:webhook-correlation' specified.`
-  Tags are now deduped as a pass over the assembled list rather than by threading a
-  helper through every section, so a future section cannot forget to use it.
-
-
 ### Added
 
 - **A hardware-sensitivity manifest, a smoke script, and a gate for unset template
@@ -63,6 +35,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Confirmed to fail when #684 is reintroduced.
 
 ### Fixed
+
+- **`spawn status -o json` now has a test proving stdout is parseable** (#540). The
+  substance of that report was already fixed — verified live on a `t4g.small`:
+  `exit=0`, 868 bytes of valid JSON on stdout, and the four agent log lines that broke
+  the reporter's `json.loads` correctly on stderr, along with every field they asked for
+  (`ttl.remaining_seconds`, `ttl.terminate_at`, `on_complete.sentinel_present`,
+  `cost.cost_limit` / `cost_limit_remaining` / `effective_rate`).
+  What was missing was the guard the report explicitly asked for. spored's renderer has
+  `TestRenderStatusJSON_StdoutIsPureJSON`; **spawn's relay had no test at all**, and it
+  adds six human annotations of its own — any one of them on stdout breaks the document.
+  The stream decision is now an `emitStatus` seam with annotations passed in, so the
+  rule is asserted rather than assumed.
+
+- **A fully-configured launch could exceed AWS's 50-tag limit and fail `RunInstances`
+  outright** (#477). The parameter loop capped itself at 35 with a comment claiming that
+  "stays under AWS 50-tag limit" — but it counted only the sweep parameters and ignored
+  the ~45 tags the other sections had already appended. AWS does not truncate; it
+  rejects the call. Measured on a maximal launch (FSx + EFS + both webhooks + job array
+  + sweep + every lifecycle flag): **46 tags with no parameters at all**, 54 with ten,
+  and 79 with sixty. Ten is an ordinary sweep.
+  Parameter tags are now emitted **last** and budgeted against what the launch actually
+  used, in **sorted** order. The old loop ranged over the map directly, so *which*
+  parameters survived depended on Go's randomised iteration order — two members of the
+  same sweep could record different points in the parameter space.
+  Only parameters are droppable, and the priority is deliberate: `spawn:*` lifecycle
+  tags are spored's contract (dropping `spawn:ttl` would disable TTL enforcement and
+  bill open-endedly, far worse than a failed launch), `--tag` is an explicit request, and
+  `spawn:param:*` is a convenience record whose authoritative copy is the sweep manifest.
+  A truncation now warns on stderr, naming how many were dropped and why.
+- **Setting both `--spot-webhook-url` and `--completion-webhook-url` failed the launch**
+  — found while fixing #477, and reachable with **two flags** rather than a maximal
+  config. Both webhook blocks emitted `spawn:webhook-correlation` and
+  `spawn:webhook-timeout`, and EC2 rejects the whole `RunInstances` call on a repeated
+  key. Verified against real EC2:
+  `InvalidParameterValue: Duplicate tag key 'spawn:webhook-correlation' specified.`
+  Tags are now deduped as a pass over the assembled list rather than by threading a
+  helper through every section, so a future section cannot forget to use it.
 
 - **`spawn launch` rejected the form its own `--help` documented as required** (#499).
   The spore name had to be **positional**, while the `--name` flag's help described
