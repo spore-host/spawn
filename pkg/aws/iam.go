@@ -67,10 +67,48 @@ func isThrottle(err error) bool {
 	return strings.Contains(msg, "Throttling") || strings.Contains(msg, "RequestLimitExceeded")
 }
 
+// isConcurrentModification reports whether err is IAM's "wait and try again"
+// response to two racing operations on the same resource (spawn#648).
+//
+// This is the error IAM actually returns when tagged resource creation races:
+//
+//	ConcurrentModification: The previous tagging operation is still ongoing.
+//	Please wait for a while and perform the next tagging operation until it
+//	finishes.
+//
+// It is distinct from throttling — the request was accepted and rejected on
+// conflict, not rate-limited — and from EntityAlreadyExists, because the
+// resource may not exist yet. Before this it matched neither predicate, so
+// retryIAM returned on the FIRST attempt without ever sleeping, which is the
+// opposite of what IAM is asking for.
+//
+// Every CreateRole/CreateInstanceProfile call on the launch path passes Tags,
+// and it is that implicit tagging operation which serialises — so this is the
+// COMMON concurrent-launch failure, not the rare one. Reported from two
+// `spawn task run` invocations ~60ms apart (a Nextflow executor fanning out two
+// processes): one succeeded, the other died at CreateInstanceProfile and took
+// the whole DAG with it.
+func isConcurrentModification(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.HasPrefix(iamErrorCode(err), "ConcurrentModification") {
+		return true
+	}
+	// Fallback for non-modeled errors that only carry the code in the message
+	// (emulators, wrapped errors), mirroring isThrottle/isAlreadyExists.
+	return strings.Contains(err.Error(), "ConcurrentModification")
+}
+
 // retryIAM runs fn, retrying on throttling with a short backoff. "Already
 // exists" is treated as success (the resource is present, which is the goal),
 // so concurrent launches racing to ensure the same shared role/profile converge
 // instead of failing (#64).
+//
+// ConcurrentModification is retried for the same reason (spawn#648): IAM
+// documents it as a wait-and-retry condition, and the existing
+// 500ms × attempt backoff over 5 attempts (7.5s total) is the right shape for a
+// tagging operation that has to drain.
 func retryIAM(fn func() error) error {
 	var err error
 	for attempt := 0; attempt < 5; attempt++ {
@@ -78,7 +116,7 @@ func retryIAM(fn func() error) error {
 		if err == nil || isAlreadyExists(err) {
 			return nil
 		}
-		if !isThrottle(err) {
+		if !isThrottle(err) && !isConcurrentModification(err) {
 			return err
 		}
 		time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
@@ -1092,13 +1130,22 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	if err != nil {
 		roleCreated = true
 		// Role doesn't exist, create it
-		_, err = iamClient.CreateRole(ctx, &iam.CreateRoleInput{
-			RoleName:                 aws.String(roleName),
-			AssumeRolePolicyDocument: aws.String(sporedTrustPolicy),
-			Description:              aws.String("IAM role for spored daemon on EC2 instances"),
-			Tags: []types.Tag{
-				{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-			},
+		// retryIAM, not a bare call (spawn#648): this passes Tags, so two concurrent
+		// launches racing to create the shared spored role hit IAM's
+		// ConcurrentModification on the implicit tagging operation. retryIAM also
+		// treats EntityAlreadyExists as success, which is what the string match
+		// below was doing by hand — so the behaviour is preserved and the retry is
+		// inherited rather than reimplemented.
+		err = retryIAM(func() error {
+			_, e := iamClient.CreateRole(ctx, &iam.CreateRoleInput{
+				RoleName:                 aws.String(roleName),
+				AssumeRolePolicyDocument: aws.String(sporedTrustPolicy),
+				Description:              aws.String("IAM role for spored daemon on EC2 instances"),
+				Tags: []types.Tag{
+					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+				},
+			})
+			return e
 		})
 		if err != nil && !contains(err.Error(), "EntityAlreadyExists") {
 			return "", fmt.Errorf("failed to create IAM role: %w", err)
@@ -1131,20 +1178,31 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	if err != nil {
 		profileCreated = true
 		// Instance profile doesn't exist, create it
-		_, err = iamClient.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
-			InstanceProfileName: aws.String(instanceProfileName),
-			Tags: []types.Tag{
-				{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-			},
+		// retryIAM for the same reason as CreateRole above (spawn#648) — Tags make
+		// this serialise, and EntityAlreadyExists is already success to retryIAM.
+		err = retryIAM(func() error {
+			_, e := iamClient.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
+				InstanceProfileName: aws.String(instanceProfileName),
+				Tags: []types.Tag{
+					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+				},
+			})
+			return e
 		})
 		if err != nil && !contains(err.Error(), "EntityAlreadyExists") {
 			return "", fmt.Errorf("failed to create instance profile: %w", err)
 		}
 
 		// Add role to instance profile
-		_, err = iamClient.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
-			InstanceProfileName: aws.String(instanceProfileName),
-			RoleName:            aws.String(roleName),
+		// LimitExceeded here means another launch already attached the role (a
+		// profile holds exactly one), which retryIAM treats as success via
+		// isAlreadyExists — same as the string match below (spawn#648).
+		err = retryIAM(func() error {
+			_, e := iamClient.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
+				InstanceProfileName: aws.String(instanceProfileName),
+				RoleName:            aws.String(roleName),
+			})
+			return e
 		})
 		if err != nil && !contains(err.Error(), "LimitExceeded") {
 			return "", fmt.Errorf("failed to add role to instance profile: %w", err)

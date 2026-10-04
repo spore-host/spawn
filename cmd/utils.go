@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,23 @@ import (
 
 	"github.com/spore-host/spawn/pkg/aws"
 )
+
+// ErrInstanceNotFound marks a resolveInstance failure where no such instance
+// exists, as distinct from a lookup that failed. Most callers (connect, dns,
+// config, extend, …) correctly treat that as an error; `terminate` does not,
+// because for a caller whose goal is "ensure this is not running", a
+// non-existent instance already satisfies it (spawn#648). A sentinel keeps that
+// distinction out of error-string matching.
+var ErrInstanceNotFound = errors.New("instance not found")
+
+// notFoundError carries the human message unchanged while matching
+// ErrInstanceNotFound under errors.Is. Wrapping with %w instead would append the
+// sentinel's text and produce "no instance found with name: x: instance not
+// found", so the type exists purely to keep the CLI output clean.
+type notFoundError struct{ msg string }
+
+func (e *notFoundError) Error() string        { return e.msg }
+func (e *notFoundError) Is(target error) bool { return target == ErrInstanceNotFound }
 
 // newTableWriter returns a tabwriter configured with spawn's standard column
 // padding, so table output is consistent across commands. Callers write
@@ -160,12 +178,12 @@ func resolveInstance(ctx context.Context, client *aws.Client, identifier string)
 	}
 
 	if isInstanceID {
-		return nil, fmt.Errorf("instance %s not found (must be spawn-managed)", identifier)
+		return nil, &notFoundError{fmt.Sprintf("instance %s not found (must be spawn-managed)", identifier)}
 	}
 
 	// Handle name matches
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("no instance found with name: %s", identifier)
+		return nil, &notFoundError{fmt.Sprintf("no instance found with name: %s", identifier)}
 	}
 
 	if len(matches) == 1 {
