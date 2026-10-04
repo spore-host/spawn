@@ -2,6 +2,9 @@
 
 BINARY_NAME=build/bootstrap
 ENV?=production
+# The reaper stack lives in us-east-1. Explicit, because every AWS call below
+# must target the same region the stack is in (#650 follow-up).
+REGION?=us-east-1
 
 # Build into build/, which must contain NOTHING but the bootstrap binary: `sam deploy`
 # zips the CodeUri directory with no filtering (samcli os.walk, dotfiles included) and
@@ -102,11 +105,28 @@ endef
 deploy: build
 	@# Read the live stack first, so an unspecified parameter keeps what is
 	@# deployed instead of being reset to this Makefile's idea of a default.
-	@aws cloudformation get-template-summary --template-body file://template.yaml \
-		--output json > .deploy-summary.json
-	@aws cloudformation describe-stacks --stack-name spawn-ttl-reaper-$(ENV) \
-		--query 'Stacks[0].Parameters' --output json > .deploy-live.json 2>/dev/null \
-		|| echo '[]' > .deploy-live.json
+	@# --region is NOT optional here. Without it the describe falls back to the
+	@# profile's default region, the stack is "not found", the `||` branch writes
+	@# an EMPTY live set, and every parameter falls back to the TEMPLATE default —
+	@# which for DryRun is 'true'. That disarmed the live production reaper, i.e.
+	@# precisely the failure #650 was written to prevent, reintroduced by the fix.
+	@aws cloudformation get-template-summary --region $(REGION) \
+		--template-body file://template.yaml --output json > .deploy-summary.json
+	@# Separate the two failure modes instead of collapsing them into '[]': a
+	@# genuinely absent stack (first deploy) is fine, but a describe that fails for
+	@# any OTHER reason must abort rather than silently reset the world.
+	@if ! aws cloudformation describe-stacks --region $(REGION) \
+		--stack-name spawn-ttl-reaper-$(ENV) \
+		--query 'Stacks[0].Parameters' --output json > .deploy-live.json 2>/tmp/.deploy-live.err; then \
+		if grep -q 'does not exist' /tmp/.deploy-live.err; then \
+			echo "no existing stack spawn-ttl-reaper-$(ENV) in $(REGION) — using template defaults"; \
+			echo '[]' > .deploy-live.json; \
+		else \
+			echo "ERROR: could not read the live stack; refusing to deploy with template defaults" >&2; \
+			cat /tmp/.deploy-live.err >&2; \
+			exit 1; \
+		fi; \
+	fi
 	@: > .deploy-explicit.txt
 	@$(foreach pair,$(PARAM_MAP),$(call EMIT_EXPLICIT,$(word 1,$(subst :, ,$(pair))),$(word 2,$(subst :, ,$(pair)))))
 	@python3 scripts/merge_deploy_params.py .deploy-summary.json .deploy-live.json \
@@ -121,6 +141,7 @@ deploy: build
 	sam deploy \
 		--template-file template.yaml \
 		--stack-name spawn-ttl-reaper-$(ENV) \
+		--region $(REGION) \
 		--capabilities CAPABILITY_IAM \
 		--parameter-overrides file://$(PARAMS_FILE) \
 		--resolve-s3

@@ -64,7 +64,14 @@ def merge(summary: dict, live: list, explicit: dict) -> tuple[dict, list]:
             # direction impossible rather than merely discouraged.
             merged[key] = current[key]
         elif defaults.get(key) is not None:
+            # No live value AND no override: this is a template default being
+            # ASSERTED, not inherited. On a fresh stack that is correct; against an
+            # existing stack whose read failed it is how the production reaper got
+            # disarmed, so it must be reported as a change rather than counted as
+            # "nothing happened" (#650 follow-up).
             merged[key] = defaults[key]
+            if not current:
+                notes.append(f"  {key}: (template default) -> {defaults[key]!r}")
         # else: no explicit value, not deployed, no default -> let CFN complain,
         # rather than inventing one here.
 
@@ -111,6 +118,16 @@ def main(argv: list[str]) -> int:
             explicit[key] = value
 
     merged, notes = merge(summary, live, explicit)
+
+    if not live:
+        # The loudest case, because it is the dangerous one: every parameter comes
+        # from the template, and for DryRun that default is 'true' — i.e. a reaper
+        # that silently stops terminating anything.
+        print(
+            "WARNING: no live stack parameters were read, so ALL %d parameters below "
+            "come from TEMPLATE DEFAULTS. If the stack exists, this will RESET it." % len(merged),
+            file=sys.stderr,
+        )
 
     if notes:
         print("deploy will CHANGE:", file=sys.stderr)
