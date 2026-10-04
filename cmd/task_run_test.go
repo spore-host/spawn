@@ -584,8 +584,7 @@ func TestPollCompletion_IgnoresPreviousRunRecord(t *testing.T) {
 	}}
 
 	var warn bytes.Buffer
-	rec, err := pollCompletion(context.Background(), store, "us-west-2", "spawn-results-1-us-west-2",
-		"cookbook-plink-r1", "run-NEW", time.Millisecond, time.Now().Add(time.Minute), &warn)
+	rec, err := pollCompletion(context.Background(), store, "us-west-2", "spawn-results-1-us-west-2", "tasks", "cookbook-plink-r1", "run-NEW", time.Millisecond, time.Now().Add(time.Minute), &warn)
 	if err != nil {
 		t.Fatalf("pollCompletion: %v", err)
 	}
@@ -612,7 +611,7 @@ func TestPollCompletion_AcceptsMatchingRunID(t *testing.T) {
 	})
 	store := &fakeResultStore{gets: []fakeGet{{err: missingKey()}, {body: body}}}
 	var warn bytes.Buffer
-	rec, err := pollCompletion(context.Background(), store, "us-east-1", "b", "t", "run-A",
+	rec, err := pollCompletion(context.Background(), store, "us-east-1", "b", "tasks", "t", "run-A",
 		time.Millisecond, time.Now().Add(time.Minute), &warn)
 	if err != nil {
 		t.Fatalf("pollCompletion: %v", err)
@@ -636,7 +635,7 @@ func TestPollCompletion_EmptyRunIDAcceptedWithWarning(t *testing.T) {
 	})
 	store := &fakeResultStore{gets: []fakeGet{{body: body}}}
 	var warn bytes.Buffer
-	rec, err := pollCompletion(context.Background(), store, "us-east-1", "b", "t", "run-A",
+	rec, err := pollCompletion(context.Background(), store, "us-east-1", "b", "tasks", "t", "run-A",
 		time.Millisecond, time.Now().Add(time.Minute), &warn)
 	if err != nil {
 		t.Fatalf("pollCompletion: %v", err)
@@ -661,7 +660,7 @@ func TestPollCompletion_StaleOnlyTimesOutWithAClearMessage(t *testing.T) {
 	})
 	store := &fakeResultStore{gets: []fakeGet{{body: body}}}
 	var warn bytes.Buffer
-	_, err := pollCompletion(context.Background(), store, "us-east-1", "b", "t", "run-NEW",
+	_, err := pollCompletion(context.Background(), store, "us-east-1", "b", "tasks", "t", "run-NEW",
 		time.Millisecond, time.Now().Add(-time.Second), &warn)
 	if err == nil {
 		t.Fatal("expected a timeout rather than the previous attempt's record")
@@ -677,7 +676,7 @@ func TestPollCompletion_StaleOnlyTimesOutWithAClearMessage(t *testing.T) {
 func TestPollCompletion_NoRunIDCallerKeepsOldBehavior(t *testing.T) {
 	body := recordJSON(t, taskproto.CompletionRecord{TaskID: "t", RunID: "run-whatever", ExitCode: 0})
 	store := &fakeResultStore{gets: []fakeGet{{body: body}}}
-	rec, err := pollCompletion(context.Background(), store, "us-east-1", "b", "t", "",
+	rec, err := pollCompletion(context.Background(), store, "us-east-1", "b", "tasks", "t", "",
 		time.Millisecond, time.Now().Add(time.Minute), nil)
 	if err != nil {
 		t.Fatalf("pollCompletion: %v", err)
@@ -715,7 +714,7 @@ func TestClassifyCompletionRun(t *testing.T) {
 // consumers.
 func TestClearStaleCompletion_DeletesBothKeys(t *testing.T) {
 	store := &fakeResultStore{}
-	if err := clearStaleCompletion(context.Background(), store, "us-west-2", "spawn-results-1-us-west-2", "cookbook-plink-r1"); err != nil {
+	if err := clearStaleCompletion(context.Background(), store, "us-west-2", "spawn-results-1-us-west-2", "tasks", "cookbook-plink-r1"); err != nil {
 		t.Fatalf("clearStaleCompletion: %v", err)
 	}
 	want := []string{"tasks/cookbook-plink-r1/completion.json", "tasks/cookbook-plink-r1/.exitcode"}
@@ -734,7 +733,7 @@ func TestClearStaleCompletion_DeletesBothKeys(t *testing.T) {
 // suspenders), and every key is still attempted rather than aborting on the first.
 func TestClearStaleCompletion_ErrorIsReportedNotSwallowed(t *testing.T) {
 	store := &fakeResultStore{delErr: errors.New("AccessDenied")}
-	err := clearStaleCompletion(context.Background(), store, "us-east-1", "b", "t")
+	err := clearStaleCompletion(context.Background(), store, "us-east-1", "b", "tasks", "t")
 	if err == nil {
 		t.Fatal("expected the delete error to be returned for logging")
 	}

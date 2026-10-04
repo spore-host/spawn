@@ -194,14 +194,15 @@ func orDash(s string) string {
 // ── task run ─────────────────────────────────────────────────────────────────
 
 var (
-	taskRunSpecPath     string
-	taskRunDryRun       bool
-	taskRunRegion       string
-	taskRunWait         bool
-	taskRunPollInterval time.Duration
-	taskRunAMI          string
-	taskStatusRegion    string
-	taskStatusCheckDone bool
+	taskRunSpecPath         string
+	taskRunDryRun           bool
+	taskRunRegion           string
+	taskRunWait             bool
+	taskRunPollInterval     time.Duration
+	taskRunAMI              string
+	taskStatusRegion        string
+	taskStatusResultsPrefix string
+	taskStatusCheckDone     bool
 )
 
 var taskRunCmd = &cobra.Command{
@@ -489,11 +490,23 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	if err != nil {
 		return fmt.Errorf("resolve account id: %w", err)
 	}
-	resultsBucket := fmt.Sprintf("spawn-results-%s-%s", account, region)
-	// Create the results bucket before launch so the wrapper's write can't hit
-	// NoSuchBucket on a first-ever task in this account/region.
-	if err := client.CreateS3BucketIfNotExists(ctx, resultsBucket, region); err != nil {
-		return fmt.Errorf("ensure results bucket %s: %w", resultsBucket, err)
+	// One resolution of where this task's records go, shared by the wrapper, the
+	// flush hook, the instance policy and the --wait poll (spawn#646). A spec's
+	// results_prefix overrides it; empty keeps
+	// s3://spawn-results-<account>-<region>/tasks/<task_id>.
+	resultsPrefix := taskproto.EffectiveResultsPrefix(spec, account, region)
+	resultsBucket, resultsKeyPrefix, ok := taskproto.SplitS3URI(resultsPrefix)
+	if !ok {
+		return fmt.Errorf("resources.results_prefix %q is not an s3://bucket/prefix URI", spec.ResultsPrefix)
+	}
+
+	// Create the bucket only when it is the one spawn manages. A caller who names
+	// their own bucket gets an error if it does not exist, rather than having a
+	// stray bucket created from a typo and the run reported as a success.
+	if taskproto.IsDefaultResultsBucket(resultsBucket, account, region) {
+		if err := client.CreateS3BucketIfNotExists(ctx, resultsBucket, region); err != nil {
+			return fmt.Errorf("ensure results bucket %s: %w", resultsBucket, err)
+		}
 	}
 
 	// GPU-capable if the spec asked for GPUs or the sized instance is a GPU family
@@ -517,14 +530,14 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	// suspenders that catches whatever survives. Deleting an absent key is a
 	// success in S3 (the overwhelmingly common first-run case), so this is silent
 	// unless something actually went wrong.
-	if err := clearStaleCompletion(ctx, client, region, resultsBucket, spec.TaskID); err != nil {
+	if err := clearStaleCompletion(ctx, client, region, resultsBucket, resultsKeyPrefix, spec.TaskID); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not clear a previous attempt's completion record for task %s: %v\n", spec.TaskID, err)
 		fmt.Fprintf(os.Stderr, "         (harmless: --wait verifies run_id, so a leftover record is ignored rather than reported)\n")
 	} else if spawnVerbose {
 		fmt.Fprintf(os.Stderr, "cleared any previous completion record for task %s (run_id %s)\n", spec.TaskID, runID)
 	}
 
-	wrapper := taskproto.GenerateWrapper(spec, resultsBucket, region, gpu, runID)
+	wrapper := taskproto.GenerateWrapper(spec, resultsPrefix, region, gpu, runID)
 
 	// The terminal-flush hook (spawn#632). The wrapper's log upload and
 	// completion-record write both sit after the user command, so a task killed by
@@ -532,7 +545,7 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	// script is installed root-owned and run by spored before it stops or
 	// terminates — i.e. while the network is still up — and no-ops when the wrapper
 	// already wrote the real record.
-	flushHook := taskproto.GenerateFlushScript(spec, resultsBucket, region, runID)
+	flushHook := taskproto.GenerateFlushScript(spec, resultsPrefix, region, runID)
 
 	// Scoped instance profile: the default spored role has no S3 write, so grant
 	// exactly the buckets this task reads (inputs) and writes (outputs + results).
@@ -592,10 +605,10 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
 		fmt.Fprintf(out, "Run ID:       %s\n", runID)
 		fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
-		fmt.Fprintf(out, "Completion:   s3://%s/tasks/%s/completion.json\n", resultsBucket, spec.TaskID)
+		fmt.Fprintf(out, "Completion:   %s/completion.json\n", resultsPrefix)
 		fmt.Fprintf(out, "\nPoll for completion:\n")
 		fmt.Fprintf(out, "  spawn task status %s --region %s\n", spec.TaskID, region)
-		fmt.Fprintf(out, "  aws s3 cp s3://%s/tasks/%s/completion.json -\n", resultsBucket, spec.TaskID)
+		fmt.Fprintf(out, "  aws s3 cp %s/completion.json -\n", resultsPrefix)
 		return nil
 	}
 
@@ -608,14 +621,14 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
 		fmt.Fprintf(out, "Run ID:       %s\n", runID)
 		fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
-		fmt.Fprintf(out, "Completion:   s3://%s/tasks/%s/completion.json\n", resultsBucket, spec.TaskID)
+		fmt.Fprintf(out, "Completion:   %s/completion.json\n", resultsPrefix)
 		fmt.Fprintf(out, "\nWaiting for completion (polling every %s)...\n", taskRunPollInterval)
 	}
 	deadline := waitDeadline(spec.Lifecycle.TTL)
 	// runID is passed so a record from a previous attempt of this task_id is
 	// ignored rather than reported (spawn#608). Notices go to stderr, never to out:
 	// in -o json mode out carries only the CompletionRecord an adapter parses.
-	rec, err := pollCompletion(ctx, client, region, resultsBucket, spec.TaskID, runID, taskRunPollInterval, deadline, os.Stderr)
+	rec, err := pollCompletion(ctx, client, region, resultsBucket, resultsKeyPrefix, spec.TaskID, runID, taskRunPollInterval, deadline, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -665,13 +678,26 @@ type taskResultStore interface {
 // cwl-spawn, snakemake-executor-plugin-spawn, airflow-spawn, pegasus-spawn).
 // Renaming it would break all six; the additive run_id field inside the JSON is
 // invisible to them.
-func completionKey(taskID string) string { return fmt.Sprintf("tasks/%s/completion.json", taskID) }
-func exitCodeKey(taskID string) string   { return fmt.Sprintf("tasks/%s/.exitcode", taskID) }
+// completionKey is the object key of a task's completion record, relative to the
+// results bucket. keyPrefix comes from the resolved results prefix (spawn#646),
+// so it is "tasks" by default and whatever a spec's results_prefix named otherwise.
+func completionKey(keyPrefix, taskID string) string {
+	if keyPrefix == "" {
+		return fmt.Sprintf("%s/completion.json", taskID)
+	}
+	return fmt.Sprintf("%s/%s/completion.json", keyPrefix, taskID)
+}
+func exitCodeKey(keyPrefix, taskID string) string {
+	if keyPrefix == "" {
+		return fmt.Sprintf("%s/.exitcode", taskID)
+	}
+	return fmt.Sprintf("%s/%s/.exitcode", keyPrefix, taskID)
+}
 
 // staleResultKeys lists every result object a previous run of taskID could have
 // left behind at a key this run will reuse.
-func staleResultKeys(taskID string) []string {
-	return []string{completionKey(taskID), exitCodeKey(taskID)}
+func staleResultKeys(keyPrefix, taskID string) []string {
+	return []string{completionKey(keyPrefix, taskID), exitCodeKey(keyPrefix, taskID)}
 }
 
 // clearStaleCompletion deletes the completion artifacts of any PREVIOUS run of
@@ -679,9 +705,9 @@ func staleResultKeys(taskID string) []string {
 // (spawn#608). Deleting an absent key is a no-op success in S3, so the normal
 // first-run case returns nil without the caller special-casing anything. Errors
 // are joined and returned for the caller to log — never to abort a launch on.
-func clearStaleCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, taskID string) error {
+func clearStaleCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, keyPrefix, taskID string) error {
 	var errs []error
-	for _, key := range staleResultKeys(taskID) {
+	for _, key := range staleResultKeys(keyPrefix, taskID) {
 		if err := store.DeleteS3Object(ctx, region, resultsBucket, key); err != nil {
 			errs = append(errs, err)
 		}
@@ -749,7 +775,7 @@ func classifyCompletionRun(rec *taskproto.CompletionRecord, runID string) comple
 // record of a real earlier run, which is exactly why returning it reads as "your
 // fix didn't work". Notices (skipped stale record, unattributable record) are
 // written to warn, which must not be the machine-readable output stream.
-func pollCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, taskID, runID string, every time.Duration, deadline time.Time, warn io.Writer) (*taskproto.CompletionRecord, error) {
+func pollCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, keyPrefix, taskID, runID string, every time.Duration, deadline time.Time, warn io.Writer) (*taskproto.CompletionRecord, error) {
 	if every <= 0 {
 		every = 15 * time.Second
 	}
@@ -758,7 +784,7 @@ func pollCompletion(ctx context.Context, store taskResultStore, region, resultsB
 	}
 	var notedStale bool
 	for {
-		rec, present, err := fetchCompletion(ctx, store, region, resultsBucket, taskID)
+		rec, present, err := fetchCompletion(ctx, store, region, resultsBucket, keyPrefix, taskID)
 		if err != nil {
 			return nil, err
 		}
@@ -768,7 +794,7 @@ func pollCompletion(ctx context.Context, store taskResultStore, region, resultsB
 				return rec, nil
 			case completionUnattributed:
 				fmt.Fprintf(warn, "⚠ task %s: the completion record carries no run_id, so it cannot be attributed to this run (%s).\n", taskID, runID)
-				fmt.Fprintf(warn, "  It was written by a wrapper that predates run-id stamping; accepting it. If it looks like an older attempt, re-check s3://%s/%s.\n", resultsBucket, completionKey(taskID))
+				fmt.Fprintf(warn, "  It was written by a wrapper that predates run-id stamping; accepting it. If it looks like an older attempt, re-check s3://%s/%s.\n", resultsBucket, completionKey(keyPrefix, taskID))
 				return rec, nil
 			case completionPreviousRun:
 				if !notedStale {
@@ -779,7 +805,7 @@ func pollCompletion(ctx context.Context, store taskResultStore, region, resultsB
 		}
 		if time.Now().After(deadline) {
 			if notedStale {
-				return nil, fmt.Errorf("timed out waiting for task %q completion record for this run (run_id %s) (past TTL); the record at s3://%s/%s is from an earlier attempt", taskID, runID, resultsBucket, completionKey(taskID))
+				return nil, fmt.Errorf("timed out waiting for task %q completion record for this run (run_id %s) (past TTL); the record at s3://%s/%s is from an earlier attempt", taskID, runID, resultsBucket, completionKey(keyPrefix, taskID))
 			}
 			return nil, fmt.Errorf("timed out waiting for task %q completion record (past TTL); poll later with 'spawn task status %s'", taskID, taskID)
 		}
@@ -795,8 +821,8 @@ func pollCompletion(ctx context.Context, store taskResultStore, region, resultsB
 // results bucket. present=false (nil error) means the record isn't there yet —
 // the task is still running. It does NOT judge run identity: `task status` has no
 // run id to compare against, so that check lives in pollCompletion.
-func fetchCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, taskID string) (rec *taskproto.CompletionRecord, present bool, err error) {
-	data, err := store.GetS3Object(ctx, region, resultsBucket, completionKey(taskID))
+func fetchCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, keyPrefix, taskID string) (rec *taskproto.CompletionRecord, present bool, err error) {
+	data, err := store.GetS3Object(ctx, region, resultsBucket, completionKey(keyPrefix, taskID))
 	if err != nil {
 		if errors.Is(err, aws.ErrS3NoSuchKey) {
 			return nil, false, nil
@@ -866,9 +892,21 @@ exit codes mirror 'spawn status': 0=completed, 1=failed, 2=running, 3=error.`,
 			}
 			return fmt.Errorf("resolve account id: %w", err)
 		}
-		resultsBucket := fmt.Sprintf("spawn-results-%s-%s", account, region)
+		// `task status` is given a task id, not a spec, so it cannot infer a
+		// results_prefix the spec set (spawn#646). --results-prefix is how a caller
+		// that moved its records tells status where to look; without it this stays
+		// on spawn's default, which is where every existing task's records are.
+		statusPrefix := &taskproto.TaskSpec{TaskID: taskID, ResultsPrefix: taskStatusResultsPrefix}
+		fullPrefix := taskproto.EffectiveResultsPrefix(statusPrefix, account, region)
+		resultsBucket, keyPrefix, ok := taskproto.SplitS3URI(fullPrefix)
+		if !ok {
+			if taskStatusCheckDone {
+				os.Exit(3)
+			}
+			return fmt.Errorf("--results-prefix %q is not an s3://bucket/prefix URI", taskStatusResultsPrefix)
+		}
 
-		rec, present, err := fetchCompletion(ctx, client, region, resultsBucket, taskID)
+		rec, present, err := fetchCompletion(ctx, client, region, resultsBucket, keyPrefix, taskID)
 		if err != nil {
 			if taskStatusCheckDone {
 				fmt.Fprintf(os.Stderr, "task status: %v\n", err)
@@ -1151,5 +1189,6 @@ func init() {
 
 	taskGroupCmd.AddCommand(taskStatusCmd)
 	taskStatusCmd.Flags().StringVar(&taskStatusRegion, "region", "", "Region the task ran in (default: the configured AWS region)")
+	taskStatusCmd.Flags().StringVar(&taskStatusResultsPrefix, "results-prefix", "", "s3://bucket/prefix the task's records were written under; required if the spec set results_prefix (default: spawn's own spawn-results-<account>-<region>/tasks)")
 	taskStatusCmd.Flags().BoolVar(&taskStatusCheckDone, "check-complete", false, "Exit 0=completed, 1=failed, 2=running, 3=error instead of printing")
 }

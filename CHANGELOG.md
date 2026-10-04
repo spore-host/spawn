@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`results_prefix` on the TaskSpec: put a task's durable records where you want them**
+  (#646). `outputs[].destination` was always fully caller-controlled — per object, to any
+  bucket, with the launch role's policy built from whatever the spec names — but
+  `completion.json`, `.exitcode` and `command.log` always landed at
+  `s3://spawn-results-<account>-<region>/tasks/<task_id>/` with no override. A consumer
+  wanting its own layout therefore read **two** places: its own prefix for results, and
+  the fixed spawn path for the terminal signal.
+  Set `results_prefix` to an `s3://bucket/prefix` and the records follow, so it becomes
+  one read. Omitting it changes nothing — the default is byte-identical to before, which
+  matters because six workflow adapters poll that path literally.
+  `spawn task status` gains `--results-prefix`, because it is given a task id rather
+  than a spec and so cannot infer where a spec sent its records. Without the flag it
+  stays on spawn's default, where every existing task's records are.
+  **spawn will not create a bucket you named.** It creates its own default bucket before
+  launch so a first-ever task can't hit `NoSuchBucket`; for a caller-supplied bucket a
+  missing one is an error instead, because a typo would otherwise leave a stray bucket
+  behind and still report the run as a success.
+  The prefix is now resolved once by the caller and passed to the wrapper, the flush hook
+  (#632) and the instance policy, rather than each deriving it from an account and
+  region — so a future override can't reach one and miss another.
+
 ### Changed
 
 - **`spawn terminate` is now idempotent when the instance is already gone** (#648).

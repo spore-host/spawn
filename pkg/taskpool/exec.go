@@ -27,6 +27,9 @@ type ScriptExecer struct {
 	// resolves it once at startup (spawn-results-<account>-<region>) and reuses it
 	// for every job.
 	ResultsBucket string
+	// AccountID is used to derive the DEFAULT results prefix when a spec sets no
+	// results_prefix (spawn#646).
+	AccountID string
 	// Region is used by the job script for any private-ECR login.
 	Region string
 	// Bash is the shell to invoke (default "bash"); overridable for tests.
@@ -63,7 +66,11 @@ func (e *ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir s
 	// empty" keeps its single meaning of "written by a pre-#608 wrapper". When #70's
 	// dispatch path grows a submitter-side run identity, thread it in here and the
 	// verification comes for free.
-	script := taskproto.GeneratePooledJobScript(spec, e.ResultsBucket, e.Region, gpu, uuid.NewString())
+	// The pooled worker resolves the prefix the same way the one-shot path does, so
+	// a spec's results_prefix is honoured here too (spawn#646). AccountID is needed
+	// only for the default; a spec that sets results_prefix ignores it.
+	prefix := taskproto.EffectiveResultsPrefix(spec, e.AccountID, e.Region)
+	script := taskproto.GeneratePooledJobScript(spec, prefix, e.Region, gpu, uuid.NewString())
 
 	// Write the script into the workspace and run it there, so its relative paths
 	// and any scratch files land in the isolated dir (which the worker resets after).

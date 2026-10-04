@@ -36,7 +36,7 @@ func mountDirSpec(inputDest, outputSrc string) *TaskSpec {
 // the real cause. A code read cannot catch this — it sees the mkdir emitted and
 // stops.
 func TestMountDirCreationEscalatesToSudo(t *testing.T) {
-	w := GenerateWrapper(mountDirSpec("/tmp/in.bin", "/out/results/"), "b", "us-east-1", false, "r")
+	w := genWrapper(mountDirSpec("/tmp/in.bin", "/out/results/"), "b", "us-east-1", false, "r")
 
 	if !strings.Contains(w, "sudo mkdir -p '/out/results'") {
 		t.Errorf("a mount dir must be creatable with privilege; an unprivileged mkdir cannot "+
@@ -60,7 +60,7 @@ func TestMountDirCreationEscalatesToSudo(t *testing.T) {
 // task ran against an unwritable mount and failed later for an unrelated-looking
 // reason. It must fail at stage-in, classified staging_error.
 func TestMountDirFailureFailsStageIn(t *testing.T) {
-	w := GenerateWrapper(mountDirSpec("/tmp/in.bin", "/out/results/"), "b", "us-east-1", false, "r")
+	w := genWrapper(mountDirSpec("/tmp/in.bin", "/out/results/"), "b", "us-east-1", false, "r")
 
 	idx := strings.Index(w, "cannot create mount dir /out/results")
 	if idx < 0 {
@@ -85,7 +85,7 @@ func TestMountDirFailureFailsStageIn(t *testing.T) {
 // box — a far worse outcome than the bug being fixed, and exactly the kind of
 // thing that looks harmless in a diff.
 func TestMountDirNeverChownsAnExistingDirectory(t *testing.T) {
-	w := GenerateWrapper(mountDirSpec("/tmp/staged.bin", "/out/results/"), "b", "us-east-1", false, "r")
+	w := genWrapper(mountDirSpec("/tmp/staged.bin", "/out/results/"), "b", "us-east-1", false, "r")
 
 	// /tmp is a mount dir here, so it must appear — but only behind an existence
 	// test, so neither the mkdir nor the chown runs for it.
@@ -137,7 +137,7 @@ func TestMountDirsStillExcludePlacementMounts(t *testing.T) {
 	// gates on the id, since a mount point with nothing to mount is meaningless.
 	spec.Placement.FSxLustreID = "fs-0123456789abcdef0"
 	spec.Placement.FSxMountPoint = "/mnt/fsx"
-	w := GenerateWrapper(spec, "b", "us-east-1", false, "r")
+	w := genWrapper(spec, "b", "us-east-1", false, "r")
 
 	if strings.Contains(w, "mkdir -p '/mnt/fsx'") {
 		t.Error("a placement mount point must not be mkdir'd (spawn#570) — it would shadow " +

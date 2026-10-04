@@ -111,4 +111,5 @@ spawn task status <task-id> [flags]
 |------|-------|------|---------|-------------|
 | `--check-complete` |  | bool |  | Exit 0=completed, 1=failed, 2=running, 3=error instead of printing |
 | `--region` |  | string |  | Region the task ran in (default: the configured AWS region) |
+| `--results-prefix` |  | string |  | s3://bucket/prefix the task's records were written under; required if the spec set results_prefix (default: spawn's own spawn-results-&lt;account&gt;-&lt;region&gt;/tasks) |
 

@@ -36,7 +36,7 @@ func fullSpec() *TaskSpec {
 }
 
 func TestGenerateWrapper_Structure(t *testing.T) {
-	w := GenerateWrapper(fullSpec(), "spawn-results-123-us-east-1", "us-east-1", false, testRunID)
+	w := genWrapper(fullSpec(), "spawn-results-123-us-east-1", "us-east-1", false, testRunID)
 
 	mustContain := []string{
 		"#!/bin/bash",
@@ -72,7 +72,7 @@ func TestGenerateWrapper_Structure(t *testing.T) {
 // its first task, defeating pool reuse — #70).
 func TestGeneratePooledJobScript_OmitsSelfTerminate(t *testing.T) {
 	spec := fullSpec()
-	pooled := GeneratePooledJobScript(spec, "spawn-results-123-us-east-1", "us-east-1", false, testRunID)
+	pooled := genPooled(spec, "spawn-results-123-us-east-1", "us-east-1", false, testRunID)
 
 	if strings.Contains(pooled, "/tmp/SPAWN_COMPLETE") {
 		t.Errorf("pooled job script must NOT write /tmp/SPAWN_COMPLETE (would self-terminate the worker)\n---\n%s", pooled)
@@ -90,7 +90,7 @@ func TestGeneratePooledJobScript_OmitsSelfTerminate(t *testing.T) {
 
 	// It differs from the wrapper ONLY by the SPAWN_COMPLETE block: strip that
 	// block from the wrapper and the two must be byte-identical.
-	wrapper := GenerateWrapper(spec, "spawn-results-123-us-east-1", "us-east-1", false, testRunID)
+	wrapper := genWrapper(spec, "spawn-results-123-us-east-1", "us-east-1", false, testRunID)
 	marker := "# ---- signal spored"
 	idx := strings.Index(wrapper, marker)
 	if idx < 0 {
@@ -110,7 +110,7 @@ func TestGenerateWrapper_QuotesMetacharArgs(t *testing.T) {
 		Command:   []string{"echo", "a; rm -rf /", "$(whoami)", "it's"},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	// Each arg must appear single-quoted; the single-quote in "it's" is escaped.
 	for _, want := range []string{`'echo'`, `'a; rm -rf /'`, `'$(whoami)'`, `'it'\''s'`} {
@@ -125,7 +125,7 @@ func TestGenerateWrapper_QuotesMetacharArgs(t *testing.T) {
 }
 
 func TestGenerateWrapper_StageOutAfterCommand(t *testing.T) {
-	w := GenerateWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
+	w := genWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
 	runIdx := strings.Index(w, "rc=$?")
 	outIdx := strings.Index(w, "s3://out-bucket/out.bam")
 	recIdx := strings.Index(w, "completion.json")
@@ -139,7 +139,7 @@ func TestGenerateWrapper_StageOutAfterCommand(t *testing.T) {
 
 func TestGenerateWrapper_NoInputsNoOutputs(t *testing.T) {
 	spec := &TaskSpec{TaskID: "t", Command: []string{"true"}, Lifecycle: Lifecycle{TTL: "1h"}}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 	// Still writes the completion record + signals spored even with no staging.
 	for _, sub := range []string{"completion.json", "/tmp/SPAWN_COMPLETE", "exit $rc"} {
 		if !strings.Contains(w, sub) {
@@ -150,7 +150,7 @@ func TestGenerateWrapper_NoInputsNoOutputs(t *testing.T) {
 
 func TestGenerateWrapper_HostHasNoDocker(t *testing.T) {
 	// A container-less task must never emit docker/ECR machinery.
-	w := GenerateWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
+	w := genWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
 	for _, bad := range []string{"docker run", "docker pull", "dnf install -y docker", "ecr get-login-password"} {
 		if strings.Contains(w, bad) {
 			t.Errorf("host task wrapper unexpectedly contains %q", bad)
@@ -170,7 +170,7 @@ func TestGenerateWrapper_PublicContainer(t *testing.T) {
 		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
 		Lifecycle: Lifecycle{TTL: "4h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	mustContain := []string{
 		"command -v docker",                  // install guard
@@ -214,7 +214,7 @@ func TestGenerateWrapper_ContainerRunsAsInvokingUser(t *testing.T) {
 		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
 		Lifecycle: Lifecycle{TTL: "4h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	if !strings.Contains(w, `sudo docker run --rm --user "$(id -u):$(id -g)" `) {
 		t.Errorf("container run must pass --user \"$(id -u):$(id -g)\" so the container can write into the host-uid-owned staged dirs (#555)\n---\n%s", w)
@@ -246,7 +246,7 @@ func TestGenerateWrapper_ContainerRunLineExecutesWithRealUID(t *testing.T) {
 		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
 		Lifecycle: Lifecycle{TTL: "4h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	var dockerRunLine string
 	for _, line := range strings.Split(w, "\n") {
@@ -321,7 +321,7 @@ func TestGenerateWrapper_PrivateECRContainerWithGPU(t *testing.T) {
 		Resources: ResourceRequest{GPUs: 1},
 		Lifecycle: Lifecycle{TTL: "2h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-west-2", true, testRunID)
+	w := genWrapper(spec, "b", "us-west-2", true, testRunID)
 
 	if !strings.Contains(w, "aws ecr get-login-password --region 'us-west-2' | sudo docker login --username AWS --password-stdin '123456789012.dkr.ecr.us-west-2.amazonaws.com'") {
 		t.Errorf("private ECR image must emit a docker login to its registry host\n---\n%s", w)
@@ -345,7 +345,7 @@ func TestGenerateWrapper_NonGPUOmitsToolkit(t *testing.T) {
 		Resources: ResourceRequest{CPU: 2},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 	if strings.Contains(w, "--gpus") {
 		t.Errorf("non-GPU run must not pass --gpus\n---\n%s", w)
 	}
@@ -399,7 +399,7 @@ func TestGenerateWrapper_MkdirCoversOutputOnlyDir(t *testing.T) {
 		Outputs:   []Manifest{{Source: "/tmp/out/result.txt", Destination: "s3://out/result.txt"}},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	if !strings.Contains(w, "mkdir -p '/tmp/out'") {
 		t.Errorf("wrapper must mkdir -p the output-only directory '/tmp/out' before it can be written to or bind-mounted\n---\n%s", w)
@@ -439,7 +439,7 @@ func TestGenerateWrapper_MkdirLoopMatchesManifestMountDirs(t *testing.T) {
 		},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	for _, dir := range manifestMountDirs(spec) {
 		want := "mkdir -p " + shQuote(dir)
@@ -468,7 +468,7 @@ func TestGenerateWrapper_PlacementMountsIncludeInDockerRun(t *testing.T) {
 		},
 		Lifecycle: Lifecycle{TTL: "4h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	for _, want := range []string{
 		"-v '/efs':'/efs'",
@@ -499,7 +499,7 @@ func TestGenerateWrapper_PlacementMountOverrideHonored(t *testing.T) {
 		},
 		Lifecycle: Lifecycle{TTL: "4h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	for _, want := range []string{"-v '/mnt/refdata':'/mnt/refdata'", "-v '/mnt/scratch':'/mnt/scratch'"} {
 		if !strings.Contains(w, want) {
@@ -534,7 +534,7 @@ func TestGenerateWrapper_PlacementMountsNotInMkdirLoop(t *testing.T) {
 		},
 		Lifecycle: Lifecycle{TTL: "4h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	// Extract just the stage-in preamble (through the mkdir loop) so a mount
 	// path incidentally appearing later in the script (e.g. inside the docker
@@ -583,7 +583,7 @@ func TestGenerateWrapper_OutputOnlyDirExistsBeforeDockerRun(t *testing.T) {
 		Outputs:   []Manifest{{Source: filepath.Join(outDir, "result.txt"), Destination: "s3://out/result.txt"}},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	// Extract just the stage-in preamble (mkdir loop through the stage-in
 	// `fi` blocks) — up to but not including the user-command/docker-run
@@ -655,7 +655,7 @@ func TestGenerateWrapper_ChownsStagedInputToInvokingUID(t *testing.T) {
 		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
 		Lifecycle: Lifecycle{TTL: "4h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	stageLine := `aws s3 cp 's3://in/ref.fa' '/data/ref.fa' || STAGE_RC=$?`
 	chownLine := `sudo chown "$(id -u):$(id -g)" '/data/ref.fa'`
@@ -692,7 +692,7 @@ func TestGenerateWrapper_ChownRecursiveForPrefixInput(t *testing.T) {
 		Inputs:    []Manifest{{Source: "s3://in-bucket/reads/", Destination: "/work/reads/"}},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	want := `sudo chown -R "$(id -u):$(id -g)" '/work/reads/'`
 	if !strings.Contains(w, want) {
@@ -747,7 +747,7 @@ func TestGenerateWrapper_StagedFileOwnedByInvokingUID_RealFilesystem(t *testing.
 		Inputs:    []Manifest{{Source: "s3://in/staged.tar", Destination: staged}},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	marker := "# ---- run user command ----"
 	idx := strings.Index(w, marker)
@@ -822,7 +822,7 @@ func TestGenerateWrapper_ChownFixesCrossUIDStickyUnlink_Docker(t *testing.T) {
 		Inputs:    []Manifest{{Source: "s3://in/mytar", Destination: "/sticky/mytar"}},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 	var chownLine string
 	for _, line := range strings.Split(w, "\n") {
 		if strings.Contains(line, "chown") && strings.Contains(line, "/sticky/mytar") {
@@ -925,7 +925,7 @@ func TestShQuote(t *testing.T) {
 // reachable only once STAGE_RC and rc are BOTH clean, so a command failure keeps
 // priority over an output-delivery failure when both occur.
 func TestGenerateWrapper_OutputDeliveryFailureClassification(t *testing.T) {
-	w := GenerateWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
+	w := genWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
 
 	if !strings.Contains(w, `elif [ "$OUT_RC" -ne 0 ]; then`) {
 		t.Errorf("wrapper missing the OUT_RC classification branch (spawn#561)\n---\n%s", w)
@@ -973,7 +973,7 @@ func TestGenerateWrapper_StageOutFailureExecClassifiesAsFailed(t *testing.T) {
 		},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "results-bucket", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "results-bucket", "us-east-1", false, testRunID)
 
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "wrapper.sh")
@@ -1045,7 +1045,7 @@ exit 0
 // embedded — this test pins the fix (`set +e` as the first shell option this
 // script sets) so a future edit can't drop it and reintroduce the bug.
 func TestGenerateWrapper_ExplicitSetPlusE(t *testing.T) {
-	w := GenerateWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
+	w := genWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
 	if !strings.Contains(w, "set +e -u -o pipefail") {
 		t.Errorf("wrapper must explicitly `set +e` (spawn#566: it can be concatenated after a caller's own `set -e` preamble in the same bash process, e.g. pkg/launcher/bootstrap.go's /tmp/spawn-command.sh) — relying on a fresh, default (+e) bash process is not safe\n---\n%s", w)
 	}
@@ -1080,7 +1080,7 @@ func TestGenerateWrapper_SurvivesEmbeddingAfterSetE(t *testing.T) {
 		Outputs:   []Manifest{{Source: "/work/out.txt", Destination: "s3://out/out.txt"}},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "results-bucket", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "results-bucket", "us-east-1", false, testRunID)
 
 	// Reproduce pkg/launcher/bootstrap.go's exact concatenation: its own
 	// `set -e` preamble (bootstrap.go ~line 586-590), then this wrapper appended
@@ -1155,7 +1155,7 @@ esac
 // defined before "wrapper start" (its first call site) or every marker after
 // it is a "command not found" instead of a timestamp.
 func TestGenerateWrapper_PhaseMarkersHelperDefinedBeforeFirstUse(t *testing.T) {
-	w := GenerateWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
+	w := genWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
 	defIdx := strings.Index(w, "spawn_phase()")
 	firstCallIdx := strings.Index(w, "spawn_phase 'wrapper start'")
 	if defIdx < 0 || firstCallIdx < 0 {
@@ -1171,7 +1171,7 @@ func TestGenerateWrapper_PhaseMarkersHelperDefinedBeforeFirstUse(t *testing.T) {
 // stage-out one unattributable interval. The host path (no Container) should
 // get every phase EXCEPT the Docker-specific ones.
 func TestGenerateWrapper_PhaseMarkersHostPath(t *testing.T) {
-	w := GenerateWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
+	w := genWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
 
 	mustContain := []string{
 		"spawn_phase 'wrapper start'",
@@ -1236,7 +1236,7 @@ func TestGenerateWrapper_PhaseMarkersContainerPath(t *testing.T) {
 		Outputs:   []Manifest{{Source: "/work/out.bam", Destination: "s3://out/out.bam"}},
 		Lifecycle: Lifecycle{TTL: "4h"},
 	}
-	w := GenerateWrapper(spec, "b", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
 	mustContain := []string{
 		"spawn_phase 'wrapper start'",
@@ -1295,7 +1295,7 @@ func TestGenerateWrapper_PhaseMarkersContainerPath(t *testing.T) {
 // tasks/<task_id>/completion.json key (the key is a published adapter contract and
 // deliberately not renamed per run).
 func TestGenerateWrapper_StampsRunID(t *testing.T) {
-	w := GenerateWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
+	w := genWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
 	want := fmt.Sprintf("  \"run_id\": %q,", testRunID)
 	if !strings.Contains(w, want) {
 		t.Errorf("wrapper heredoc missing %q\n---\n%s", want, w)
@@ -1310,7 +1310,7 @@ func TestGenerateWrapper_StampsRunID(t *testing.T) {
 	// The pooled per-job script stamps it too: a pooled worker overwrites the same
 	// key on every execution of a task_id, so its records need attempt identity for
 	// the same reason.
-	pooled := GeneratePooledJobScript(fullSpec(), "b", "us-east-1", false, testRunID)
+	pooled := genPooled(fullSpec(), "b", "us-east-1", false, testRunID)
 	if !strings.Contains(pooled, want) {
 		t.Errorf("pooled job script missing %q\n---\n%s", want, pooled)
 	}
@@ -1329,7 +1329,7 @@ func TestGenerateWrapper_RunIDKeepsCompletionJSONValid(t *testing.T) {
 		Command:   []string{"true"},
 		Lifecycle: Lifecycle{TTL: "1h"},
 	}
-	w := GenerateWrapper(spec, "results-bucket", "us-east-1", false, testRunID)
+	w := genWrapper(spec, "results-bucket", "us-east-1", false, testRunID)
 
 	scriptPath := filepath.Join(t.TempDir(), "wrapper.sh")
 	if err := os.WriteFile(scriptPath, []byte(w), 0o755); err != nil { //nolint:gosec // test fixture, needs +x

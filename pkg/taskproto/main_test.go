@@ -28,3 +28,23 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
+
+// legacyPrefix is the results prefix the generators used to DERIVE from a bucket
+// name, before spawn#646 made it a caller-resolved parameter. The tests below
+// keep naming a bucket because that is what their assertions read, so these three
+// shims translate.
+func legacyPrefix(bucket, taskID string) string {
+	return "s3://" + bucket + "/" + defaultResultsSubPrefix + "/" + taskID
+}
+
+func genWrapper(spec *TaskSpec, bucket, region string, gpu bool, runID string) string {
+	return GenerateWrapper(spec, legacyPrefix(bucket, spec.TaskID), region, gpu, runID)
+}
+
+func genPooled(spec *TaskSpec, bucket, region string, gpu bool, runID string) string {
+	return GeneratePooledJobScript(spec, legacyPrefix(bucket, spec.TaskID), region, gpu, runID)
+}
+
+func genFlush(spec *TaskSpec, bucket, region, runID string) string {
+	return GenerateFlushScript(spec, legacyPrefix(bucket, spec.TaskID), region, runID)
+}
