@@ -95,7 +95,7 @@ spawn launch <name> [flags]
 | `--mpi-command` |  | string |  | Command to run via mpirun (alternative to --command) |
 | `--mpi-processes-per-node` |  | int |  | MPI processes per node (default: vCPU count) |
 | `--mpi` |  | bool |  | Enable MPI cluster setup (requires --count &gt; 1) |
-| `--name` |  | string |  | Name your spore, required (sets Name tag, DNS, and hostname) |
+| `--name` |  | string |  | Name your spore (sets Name tag, DNS, and hostname). Either this or the positional form `spawn launch <name>`; both are accepted (#499). |
 | `--nested-virtualization` |  | bool |  | Enable nested virtualization (run KVM/Hyper-V inside the instance). Requires a C8i/M8i/R8i instance type. |
 | `--nist-800-171` |  | bool |  | Enable NIST 800-171 Rev 3 compliance mode |
 | `--nist-800-53` |  | string |  | Enable NIST 800-53 compliance (low, moderate, high) |

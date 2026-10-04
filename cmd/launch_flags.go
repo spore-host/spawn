@@ -209,11 +209,45 @@ var (
 )
 
 var launchCmd = &cobra.Command{
-	Use:     "launch <name>",
-	Args:    cobra.ExactArgs(1),
+	Use: "launch <name>",
+	// Accept the name as EITHER the positional or --name (#499).
+	//
+	// Both have always existed and runLaunch already reads both (--name wins,
+	// the positional fills in), but ExactArgs(1) rejected the documented form:
+	// --name is described in its own help as "required", and passing it alone
+	// failed with "accepts 1 arg(s), received 0" — a message that never mentions
+	// the name, so a caller following the built-in documentation got an error
+	// pointing at nothing.
+	Args:    launchNameArgs,
 	RunE:    runLaunch,
 	Aliases: []string{"", "run", "create"},
 	// Short and Long will be set after i18n initialization
+}
+
+// launchNameArgs accepts the spore name as either the positional argument or
+// --name, and rejects the ambiguous and missing cases with a message that names
+// the thing that is actually wrong (#499).
+//
+// Cobra's ExactArgs(1) could not express this: it sees only the positional
+// count, so --name alone was indistinguishable from supplying nothing.
+func launchNameArgs(cmd *cobra.Command, args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("too many arguments: expected a single spore name, got %d (%s)",
+			len(args), strings.Join(args, " "))
+	}
+	flagName, _ := cmd.Flags().GetString("name")
+
+	// Both given and disagreeing is a mistake worth surfacing rather than
+	// silently preferring one — the instance's Name tag, DNS record and hostname
+	// all come from this, so picking the wrong one is not cosmetic.
+	if len(args) == 1 && flagName != "" && args[0] != flagName {
+		return fmt.Errorf("conflicting names: positional %q and --name %q — pass one", args[0], flagName)
+	}
+	if len(args) == 0 && flagName == "" {
+		return fmt.Errorf("a spore name is required: pass it positionally (spawn launch my-spore) " +
+			"or with --name my-spore")
+	}
+	return nil
 }
 
 func init() {
@@ -274,7 +308,7 @@ func init() {
 	launchCmd.Flags().StringVar(&sessionTimeout, "session-timeout", "30m", "Auto-logout idle shells (0 to disable)")
 
 	// Meta
-	launchCmd.Flags().StringVar(&name, "name", "", "Name your spore, required (sets Name tag, DNS, and hostname)")
+	launchCmd.Flags().StringVar(&name, "name", "", "Name your spore (sets Name tag, DNS, and hostname). Either this or the positional form `spawn launch <name>`; both are accepted (#499).")
 	launchCmd.Flags().StringVar(&userData, "user-data", "", "User data (@file or inline)")
 	launchCmd.Flags().StringVar(&userDataFile, "user-data-file", "", "User data file")
 	launchCmd.Flags().StringVar(&dnsName, "dns", "", "Override DNS name if different from --name (advanced)")
