@@ -201,3 +201,97 @@ func TestScanSelfPolicyDocumentIsValidJSON(t *testing.T) {
 			"precisely because cross-account trust is unavailable in a governed account")
 	}
 }
+
+// crossAccountRolePath is the CFN template deployed into every account spawn
+// launches into. It grants the TARGET-ACCOUNT half of the reaper's permissions —
+// the same per-account operations ScanSelfStatements covers, just assumed rather
+// than native.
+const crossAccountRolePath = "../../deployment/cloudformation/ttl-reaper-cross-account-role.yaml"
+
+// crossAccountGrantedActions scrapes the actions the cross-account role allows.
+//
+// A regex over the YAML rather than a parse: the template is full of CFN
+// shorthand (!Sub, !Ref, !GetAtt) that a plain YAML unmarshaller rejects, and
+// pulling in a CFN-aware parser to read a list of action strings is not worth it.
+func crossAccountGrantedActions(t *testing.T) map[string]bool {
+	t.Helper()
+	b, err := os.ReadFile(crossAccountRolePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", crossAccountRolePath, err)
+	}
+	// `                  - ec2:DescribeInstances` — a list item that looks like an
+	// IAM action. Condition keys (ec2:ResourceTag/...) are excluded by requiring
+	// no slash.
+	re := regexp.MustCompile(`(?m)^\s*-\s+((?:ec2|fsx|ssm|sts|iam|dynamodb|kms|route53):[A-Za-z]+)\s*$`)
+	out := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(string(b), -1) {
+		out[m[1]] = true
+	}
+	if len(out) == 0 {
+		t.Fatalf("scraped no actions from %s — has the shape changed?", crossAccountRolePath)
+	}
+	return out
+}
+
+// TestCrossAccountRoleCoversEveryReaperAPICall is spawn#652.
+//
+// #625 added the missing fsx:/ssm: grants to the Lambda's OWN execution role,
+// which covers REAPER_SCAN_SELF. It did not touch the cross-account role, so the
+// asymmetry simply inverted: scan-self had the SSM grants and cross-account —
+// the production configuration — did not. REAPER_GRACEFUL therefore degraded to
+// an immediate hard kill in the mode it is actually deployed in.
+//
+// It degraded quietly rather than dangerously: tryGracefulPreStop is best-effort
+// and the terminate after it always runs, so #72's hard-deadline guarantee held
+// throughout. But the drift gate added in #625 only ever read the scan-self
+// policy, which is exactly why this gap survived it. Now both roles are checked
+// against the same discovered call set.
+func TestCrossAccountRoleCoversEveryReaperAPICall(t *testing.T) {
+	granted := crossAccountGrantedActions(t)
+	calls := reaperAWSCalls(t)
+
+	var missing []string
+	for call := range calls {
+		if !granted[call] {
+			missing = append(missing, call)
+		}
+	}
+	sort.Strings(missing)
+
+	if len(missing) > 0 {
+		t.Errorf("the reaper calls AWS actions the CROSS-ACCOUNT role does not grant: %s\n"+
+			"Add them to %s. Cross-account is the PRODUCTION configuration "+
+			"(ScanSelf=false), so a gap here is not hypothetical — and it will not fail "+
+			"loudly: the reaper skips whatever that call was for.",
+			strings.Join(missing, ", "), crossAccountRolePath)
+	}
+}
+
+// TestBothReaperRolesGrantTheSameTargetAccountActions keeps the two from drifting
+// in either direction. They do the same per-account work — one natively, one via
+// an assumed role — so a grant added to one and not the other is the defect that
+// produced #622, #652, and lagotto#149/#151/#153.
+//
+// Intentionally ignores ec2:DescribeTags, which the cross-account role grants and
+// the reaper never calls (tags come from the DescribeInstances response). That is
+// a leftover rather than a drift, and TestPolicyGrantsNothingTheReaperDoesNotCall
+// already covers the scan-self side.
+func TestBothReaperRolesGrantTheSameTargetAccountActions(t *testing.T) {
+	self := GrantedActions()
+	cross := crossAccountGrantedActions(t)
+	ignore := map[string]bool{"ec2:DescribeTags": true}
+
+	for a := range self {
+		if !cross[a] && !ignore[a] {
+			t.Errorf("scan-self grants %s but the cross-account role does not — the two roles "+
+				"perform the same per-account operations, so a one-sided grant means the "+
+				"feature works in one deployment mode and silently no-ops in the other", a)
+		}
+	}
+	for a := range cross {
+		if !self[a] && !ignore[a] {
+			t.Errorf("the cross-account role grants %s but scan-self does not — same problem, "+
+				"other direction (this is how #625's fsx:/ssm: gap arose)", a)
+		}
+	}
+}
