@@ -13,8 +13,62 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
-// CreateOrGetMPISecurityGroup creates or gets a security group configured for MPI clusters
-// The security group allows all TCP traffic from instances in the same security group
+// ensureMPIClusterRules makes a security group usable for MPI *and EFA* traffic
+// between its own members, idempotently.
+//
+// The rules are self-referential and all-protocol (#659). The group previously
+// authorized only `tcp` 0-65535, which silently excluded EFA: the Scalable
+// Reliable Datagram transport is not TCP, so the fabric could not pass traffic
+// at all. That is a hard failure rather than a slowdown — GCHP/MAPL aborts at
+// MPI_Win_create when the one-sided transport is unavailable instead of falling
+// back to TCP — so an EFA-enabled launch simply died.
+//
+// Egress is set explicitly even though a freshly created group already has a
+// default allow-all egress rule (which is why this went unnoticed). AWS
+// documents EFA as requiring the self-referential egress rule, and anyone who
+// tightens the permissive default otherwise loses the fabric with no indication
+// why.
+//
+// Idempotent because it now runs on every launch, including against groups that
+// already have the rules: a duplicate-rule error is success, not a launch
+// failure. Follows the EnsureLustrePorts pattern below.
+func ensureMPIClusterRules(ctx context.Context, ec2Client *ec2.Client, sgID string) error {
+	// IpProtocol "-1" means every protocol. FromPort/ToPort must be omitted —
+	// AWS rejects a port range on an all-protocols rule.
+	selfAll := []types.IpPermission{{
+		IpProtocol: aws.String("-1"),
+		UserIdGroupPairs: []types.UserIdGroupPair{{
+			GroupId:     aws.String(sgID),
+			Description: aws.String("All traffic between MPI/EFA cluster nodes (self)"),
+		}},
+	}}
+
+	isBenign := func(err error) bool {
+		s := err.Error()
+		return strings.Contains(s, "InvalidPermission.Duplicate") ||
+			strings.Contains(s, "already exists")
+	}
+
+	if _, err := ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId:       aws.String(sgID),
+		IpPermissions: selfAll,
+	}); err != nil && !isBenign(err) {
+		return fmt.Errorf("authorize all-traffic MPI ingress on %s: %w", sgID, err)
+	}
+
+	if _, err := ec2Client.AuthorizeSecurityGroupEgress(ctx, &ec2.AuthorizeSecurityGroupEgressInput{
+		GroupId:       aws.String(sgID),
+		IpPermissions: selfAll,
+	}); err != nil && !isBenign(err) {
+		return fmt.Errorf("authorize all-traffic MPI egress on %s: %w", sgID, err)
+	}
+
+	return nil
+}
+
+// CreateOrGetMPISecurityGroup creates or gets a security group configured for
+// MPI clusters. The group allows ALL traffic between its own members, which EFA
+// requires (#659), plus SSH from outside for user access.
 func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error) {
 	ec2Client := c.regionalEC2(region)
 
@@ -35,9 +89,18 @@ func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID,
 		return "", fmt.Errorf("failed to describe security groups: %w", err)
 	}
 
-	// If security group exists, return it
+	// If security group exists, reuse it — but bring its rules up to date first
+	// (#659). Returning it unexamined meant every spawn-mpi-* group created
+	// before the all-traffic fix kept only the old tcp rule, so upgrading spawn
+	// fixed nothing for anyone who had already run an MPI launch. The only
+	// workaround was deleting the group by hand, which fails while any instance
+	// still references it.
 	if len(describeResult.SecurityGroups) > 0 {
-		return *describeResult.SecurityGroups[0].GroupId, nil
+		existingID := *describeResult.SecurityGroups[0].GroupId
+		if err := ensureMPIClusterRules(ctx, ec2Client, existingID); err != nil {
+			return "", err
+		}
+		return existingID, nil
 	}
 
 	// Create new security group
@@ -71,25 +134,9 @@ func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID,
 
 	sgID := *createResult.GroupId
 
-	// Add ingress rule: allow all TCP from same security group
-	_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
-		GroupId: aws.String(sgID),
-		IpPermissions: []types.IpPermission{
-			{
-				IpProtocol: aws.String("tcp"),
-				FromPort:   aws.Int32(0),
-				ToPort:     aws.Int32(65535),
-				UserIdGroupPairs: []types.UserIdGroupPair{
-					{
-						GroupId:     aws.String(sgID),
-						Description: aws.String("Allow all TCP from MPI cluster nodes"),
-					},
-				},
-			},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to authorize security group ingress: %w", err)
+	// Allow ALL traffic between cluster nodes, not just TCP (#659).
+	if err := ensureMPIClusterRules(ctx, ec2Client, sgID); err != nil {
+		return "", err
 	}
 
 	// Add ingress rule: allow SSH from anywhere (for user access)

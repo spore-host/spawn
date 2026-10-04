@@ -7,10 +7,41 @@ import (
 	"strings"
 )
 
-// ShellEscape escapes a string for safe use as a POSIX shell argument.
-// It uses Go's strconv.Quote which handles all special shell characters.
+// ShellEscape renders s as a Go double-quoted string literal via strconv.Quote.
+//
+// It does NOT make a string safe for a POSIX shell, despite what this function
+// used to claim ("handles all special shell characters"). strconv.Quote produces
+// Go/C escaping inside DOUBLE quotes, and a POSIX shell expands `$VAR`,
+// `$(...)` and backticks inside double quotes — so none of those are
+// neutralised. It also collapses a multi-word command into a single argv word,
+// which is a separate bug when the value is a command line rather than one
+// argument (spawn#660).
+//
+// Prefer [ShellQuote] for anything interpolated into generated shell. This is
+// kept because several call sites pass values that are independently validated
+// (a username through ValidateUsername, base64 through ValidateBase64), where
+// the difference cannot bite — but new code should not assume that.
+//
+// Deprecated: use ShellQuote, or deliver untrusted text as a file rather than
+// interpolating it. See spawn#680 for the remaining call-site audit.
 func ShellEscape(s string) string {
 	return strconv.Quote(s)
+}
+
+// ShellQuote renders s as a single-quoted POSIX shell word, suppressing every
+// expansion the shell would otherwise perform.
+//
+// Single quotes are the only POSIX construct inside which nothing is special, so
+// this is what "shell-safe" actually requires. An embedded single quote is
+// emitted as '\” — closing the quoted run, escaping the quote, reopening — which
+// is the standard idiom and keeps the result a single word.
+//
+// This quotes one WORD. A command line (multiple words, with the user's own
+// quoting and redirection) cannot be made safe this way and should be written to
+// a file and executed with a shell instead; see the --mpi-command handling in
+// pkg/userdata/mpi.go (spawn#660).
+func ShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // ValidateUsername ensures username is safe for bash and follows POSIX conventions.
