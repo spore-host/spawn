@@ -26,11 +26,10 @@ import (
 // separate tests that each pass on their own.
 func TestMPIGateDeclaredAndSignalled(t *testing.T) {
 	script, err := userdata.GenerateMPIUserData(userdata.MPIConfig{
-		Region:         "us-east-1",
-		JobArrayID:     "arr-1",
-		JobArraySize:   2,
-		BinariesBucket: "b",
-		ReadyGate:      launcher.MPIReadyGate,
+		Region:       "us-east-1",
+		JobArrayID:   "arr-1",
+		JobArraySize: 2,
+		ReadyGate:    launcher.MPIReadyGate,
 	})
 	if err != nil {
 		t.Fatalf("GenerateMPIUserData: %v", err)

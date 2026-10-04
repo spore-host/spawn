@@ -364,7 +364,27 @@ func (e Enroller) enrollProbeScript() string {
 	if len(checks) == 0 {
 		return "exit 0" // nothing to probe (custom AMI, no EFA) → trivially ready
 	}
-	return strings.Join(checks, "; ")
+
+	// Source the MPI/EFA profile scripts first (spawn#684).
+	//
+	// On AL2023 the openmpi package installs to /usr/lib64/openmpi/bin, which is
+	// NOT on the default PATH; the user-data adds it via /etc/profile.d/mpi.sh.
+	// SSM RunShellScript runs a NON-LOGIN shell, so profile.d is never sourced
+	// and PATH is only /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin — so
+	// `command -v mpirun` could never succeed, no matter how correctly MPI had
+	// installed. Every MPI cohort died at phase=enrolled as a result.
+	//
+	// Verified on a real c6i.large: mpirun present at
+	// /usr/lib64/openmpi/bin/mpirun, absent from `command -v` in an SSM shell,
+	// and found immediately after sourcing mpi.sh.
+	//
+	// This matches what the workload itself does — the user-data sources the same
+	// file before invoking mpirun — so the probe now tests the environment the job
+	// actually runs in. `|| true` keeps a missing file from tripping the shell.
+	const sourceProfiles = `for p in /etc/profile.d/mpi.sh /etc/profile.d/efa.sh; do ` +
+		`[ -f "$p" ] && . "$p" || true; done`
+
+	return sourceProfiles + "; " + strings.Join(checks, "; ")
 }
 
 func (e Enroller) IsEnrolled(ctx context.Context, id cohort.EntityID) (cohort.Readiness, error) {

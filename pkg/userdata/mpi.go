@@ -18,7 +18,6 @@ type MPIConfig struct {
 	MPICommand          string
 	SkipInstall         bool
 	EFAEnabled          bool
-	BinariesBucket      string // S3 bucket for binaries (defaults to spawn-binaries-{region})
 	// ReadyGate, if set, is the sentinel file this script writes once the MPI
 	// environment is usable — peers resolved and the hostfile built (#664). A
 	// --command workload waits on it, because this script is appended AFTER the
@@ -54,6 +53,28 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 	return buf.String(), nil
 }
 
+// Cluster SSH key distribution (spawn#684).
+//
+// mpirun reaches the other ranks over ssh as root, so every node needs rank 0's
+// public key in root's authorized_keys.
+//
+// This used to go through S3: rank 0 uploaded its pubkey and the others polled
+// for it. It could never work. MPIConfig.BinariesBucket was never set by any
+// caller, so the command rendered an empty S3 URI and failed parameter
+// validation, which aborted cloud-init's scripts-user module — taking the rest
+// of the script with it, so mpirun was never installed and enrollment could not
+// pass. Had the bucket been named, the spored role grants only s3:GetObject on
+// the binaries bucket, so the upload would have been AccessDenied instead.
+//
+// The public key is now distributed by the control plane over SSM, the same path
+// the peers file already uses (pkg/mpicohort/assembler.go). No bucket, no IAM
+// grant, no cross-node polling race.
+//
+// The PRIVATE key is generated on rank 0 and never leaves it: user-data would
+// expose it to any local user via IMDS, and SSM would record it in CloudTrail.
+//
+// Rationale lives HERE rather than in the template because every byte of the
+// template ships in each instance's user-data, which EC2 caps at 16 KB.
 const mpiUserDataTemplate = `
 # MPI Setup
 {{if not .SkipInstall}}
@@ -92,35 +113,41 @@ export OMPI_ALLOW_RUN_AS_ROOT=1
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 EOF
 source /etc/profile.d/mpi.sh
+# Cluster SSH key: rank 0 mints it; the control plane distributes the public
+# half over SSM before any node is released (spawn#684).
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
 if [ "{{.JobArrayIndex}}" -eq 0 ]; then
-  mkdir -p /root/.ssh
-  ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa -q
-  aws s3 cp /root/.ssh/id_rsa.pub s3://{{.BinariesBucket}}/mpi-keys/{{.JobArrayID}}/id_rsa.pub
+  if [ ! -f /root/.ssh/id_rsa ]; then
+    ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa -q
+  fi
+  # Rank 0 also runs ranks locally, so it must authorize itself.
   cat /root/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys
-else
-  for i in {1..60}; do
-    aws s3 cp s3://{{.BinariesBucket}}/mpi-keys/{{.JobArrayID}}/id_rsa.pub /tmp/key.pub 2>/dev/null && break
-    sleep 2
-  done
-  mkdir -p /root/.ssh
-  cat /tmp/key.pub >> /root/.ssh/authorized_keys
 fi
-chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys /root/.ssh/id_rsa 2>/dev/null || true
+touch /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/id_rsa 2>/dev/null || true
 cat >> /root/.ssh/config <<'EOF'
 Host *
   StrictHostKeyChecking no
   UserKnownHostsFile=/dev/null
 EOF
 chmod 600 /root/.ssh/config
-while [ ! -f /etc/spawn/job-array-peers.json ]; do sleep 2; done
+# Wait for the control plane to push the peers file, bounded (spawn#684).
+SPAWN_PEERS_WAITED=0
+while [ ! -f /etc/spawn/job-array-peers.json ]; do
+  if [ "$SPAWN_PEERS_WAITED" -ge 600 ]; then
+    echo "spawn: no peers file after ${SPAWN_PEERS_WAITED}s; MPI wire-up never completed" >&2
+    echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > /tmp/SPAWN_COMPLETE
+    exit 1
+  fi
+  sleep 2
+  SPAWN_PEERS_WAITED=$((SPAWN_PEERS_WAITED + 2))
+done
 {{if .MPIProcessesPerNode}}SLOTS={{.MPIProcessesPerNode}}{{else}}SLOTS=$(nproc){{end}}
 jq -r ".[] | \"\(.ip) slots=$SLOTS\"" /etc/spawn/job-array-peers.json > /tmp/mpi-hostfile
 {{if .ReadyGate}}
-# Signal the --command MPI gate (#664). Here, not after the mpirun below: that
-# mpirun IS the job and can run for hours, so gating on it would make a
-# --command workload wait out the entire run. Reports the real state — an empty
-# hostfile means no peers resolved, and a workload launched against that fails
-# in confusing ways rather than saying so.
+# Signal the --command gate here, BEFORE the mpirun below (spawn#664).
 mkdir -p "$(dirname {{.ReadyGate}})"
 if [ -s /tmp/mpi-hostfile ]; then
   echo ok > {{.ReadyGate}}

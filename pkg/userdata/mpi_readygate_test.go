@@ -17,13 +17,12 @@ import (
 // a --command workload wait out the entire run, which looks exactly like a hang.
 func TestMPIReadyGateSignalledBeforeMpirun(t *testing.T) {
 	script, err := GenerateMPIUserData(MPIConfig{
-		Region:         "us-east-1",
-		JobArrayID:     "arr-1",
-		JobArrayIndex:  0,
-		JobArraySize:   2,
-		MPICommand:     "./gchp",
-		BinariesBucket: "spawn-binaries-us-east-1",
-		ReadyGate:      "/run/spawn/mpi-ready",
+		Region:        "us-east-1",
+		JobArrayID:    "arr-1",
+		JobArrayIndex: 0,
+		JobArraySize:  2,
+		MPICommand:    "./gchp",
+		ReadyGate:     "/run/spawn/mpi-ready",
 	})
 	if err != nil {
 		t.Fatalf("GenerateMPIUserData: %v", err)
@@ -62,10 +61,9 @@ func TestMPIReadyGateSignalledBeforeMpirun(t *testing.T) {
 // it unconditionally would change every existing MPI script.
 func TestMPIReadyGateOmittedWhenUnset(t *testing.T) {
 	script, err := GenerateMPIUserData(MPIConfig{
-		Region:         "us-east-1",
-		JobArrayID:     "arr-1",
-		JobArraySize:   2,
-		BinariesBucket: "b",
+		Region:       "us-east-1",
+		JobArrayID:   "arr-1",
+		JobArraySize: 2,
 	})
 	if err != nil {
 		t.Fatalf("GenerateMPIUserData: %v", err)
