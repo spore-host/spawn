@@ -293,6 +293,26 @@ func writeFakeExe(t *testing.T, path, contents string) {
 	}
 }
 
+// writeFakeSudo stands in for the passwordless sudo the bootstrap grants on the
+// instance. The wrapper escalates to `sudo mkdir -p` for a mount dir whose parent
+// it cannot write (spawn#564 — every top-level path: /out, /data, /work), and
+// these exec-based tests use exactly such paths while asserting CLASSIFICATION
+// rather than real filesystem effects. Their `aws` is stubbed too, so nothing is
+// actually written to those paths. Reports success without doing anything, so a
+// run on a developer machine does not need (or get) real privilege.
+func writeFakeSudo(t *testing.T, binDir string) {
+	t.Helper()
+	writeFakeExe(t, filepath.Join(binDir, "sudo"), `#!/bin/bash
+# Pass everything through EXCEPT the mount-dir setup, which is the only part
+# that genuinely needs privilege. A blanket pass-through would also swallow
+# "sudo docker run", masking a user command's real exit code.
+case "$1" in
+  mkdir|chown) "$@" >/dev/null 2>&1 || true; exit 0 ;;
+  *) exec "$@" ;;
+esac
+`)
+}
+
 func TestGenerateWrapper_PrivateECRContainerWithGPU(t *testing.T) {
 	spec := &TaskSpec{
 		TaskID:    "infer",
@@ -580,6 +600,7 @@ func TestGenerateWrapper_OutputOnlyDirExistsBeforeDockerRun(t *testing.T) {
 	// real S3 access); we only care that the mkdir loop ran for real under bash.
 	binDir := t.TempDir()
 	writeFakeExe(t, filepath.Join(binDir, "aws"), "#!/bin/bash\nexit 0\n")
+	writeFakeSudo(t, binDir)
 
 	cmd := exec.Command("bash", "-c", preamble) //nolint:gosec // nosemgrep
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
@@ -739,6 +760,7 @@ func TestGenerateWrapper_StagedFileOwnedByInvokingUID_RealFilesystem(t *testing.
 	// (proving the mkdir+stage-in+chown sequence for real under bash).
 	binDir := t.TempDir()
 	writeFakeExe(t, filepath.Join(binDir, "aws"), "#!/bin/bash\n# args: s3 cp <flags...> <src> <dst>\ndst=\"${@: -1}\"\ntouch \"$dst\"\n")
+	writeFakeSudo(t, binDir)
 
 	cmd := exec.Command("bash", "-c", preamble) //nolint:gosec // nosemgrep
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
@@ -972,6 +994,7 @@ for a in "$@"; do
 done
 exit 0
 `)
+	writeFakeSudo(t, binDir)
 
 	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
@@ -1084,6 +1107,7 @@ case "$1" in
 esac
 `)
 	writeFakeExe(t, filepath.Join(binDir, "aws"), "#!/bin/bash\nexit 0\n")
+	writeFakeSudo(t, binDir)
 
 	completionPath := CompletionRecordPath()
 	exitcodePath := localPath(exitCodeFileName)
@@ -1313,6 +1337,7 @@ func TestGenerateWrapper_RunIDKeepsCompletionJSONValid(t *testing.T) {
 	}
 	binDir := t.TempDir()
 	writeFakeExe(t, filepath.Join(binDir, "aws"), "#!/bin/bash\nexit 0\n")
+	writeFakeSudo(t, binDir)
 
 	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
