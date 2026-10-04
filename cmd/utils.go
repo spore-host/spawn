@@ -13,12 +13,20 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 )
 
-// ErrInstanceNotFound marks a resolveInstance failure where no such instance
-// exists, as distinct from a lookup that failed. Most callers (connect, dns,
-// config, extend, …) correctly treat that as an error; `terminate` does not,
-// because for a caller whose goal is "ensure this is not running", a
-// non-existent instance already satisfies it (spawn#648). A sentinel keeps that
-// distinction out of error-string matching.
+// ErrInstanceNotFound marks a resolveInstance failure where no instance matches
+// a caller-supplied NAME, as distinct from a lookup that failed. Most callers
+// (connect, dns, config, extend, …) correctly treat that as an error;
+// `terminate` does not, because for a caller whose goal is "ensure this is not
+// running", a name that matches nothing already satisfies it (spawn#648).
+//
+// Deliberately NOT set for an unknown instance ID. An ID is opaque and
+// AWS-assigned, so one that matches nothing is a typo rather than an
+// already-cleaned-up resource, and silently succeeding there would let someone
+// believe they terminated a still-billing instance. `spawn terminate
+// i-doesnotexist` therefore still exits non-zero, which test/e2e's negative
+// matrix pins.
+//
+// A sentinel keeps the distinction out of error-string matching.
 var ErrInstanceNotFound = errors.New("instance not found")
 
 // notFoundError carries the human message unchanged while matching
@@ -178,11 +186,21 @@ func resolveInstance(ctx context.Context, client *aws.Client, identifier string)
 	}
 
 	if isInstanceID {
-		return nil, &notFoundError{fmt.Sprintf("instance %s not found (must be spawn-managed)", identifier)}
+		// Deliberately NOT a notFoundError. An instance ID is opaque and
+		// AWS-assigned: you do not guess or reuse one, so an ID that resolves to
+		// nothing means the caller is referring to something that never existed
+		// here — overwhelmingly a typo. `terminate` must keep failing on that,
+		// because exiting 0 would let a user (or a script) believe they stopped a
+		// billing instance when they did not. A caller-assigned NAME is different;
+		// see below (spawn#648).
+		return nil, fmt.Errorf("instance %s not found (must be spawn-managed)", identifier)
 	}
 
 	// Handle name matches
 	if len(matches) == 0 {
+		// A NAME is a handle the caller chose, and its absence after cleanup is the
+		// expected steady state — which is why `terminate` treats this as success
+		// and an unknown ID as failure (spawn#648).
 		return nil, &notFoundError{fmt.Sprintf("no instance found with name: %s", identifier)}
 	}
 

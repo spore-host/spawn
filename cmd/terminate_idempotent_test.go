@@ -112,3 +112,59 @@ func TestOnlyTerminateOptsIntoNotFoundSuccess(t *testing.T) {
 		}
 	}
 }
+
+// TestUnknownInstanceIDStillFails is the counterweight to terminate's
+// idempotence, and it exists because CI caught me widening the change too far.
+//
+// test/e2e's negative matrix asserts `spawn terminate i-doesnotexist -y` exits
+// non-zero. My first version made ALL not-found resolutions succeed, which broke
+// it — and the test was right. An instance ID is opaque and AWS-assigned: one
+// that matches nothing is a typo, not a resource someone already cleaned up, and
+// exiting 0 would let a user or script believe they stopped a still-billing
+// instance. Cost control is the project's existential concern, so that case
+// stays an error.
+//
+// A caller-assigned NAME is the opposite: its absence after cleanup is the
+// expected steady state, and that is the case actually reported in #648
+// (nf-spawn's `nf-03461ad6fc36`).
+func TestUnknownInstanceIDStillFails(t *testing.T) {
+	src, err := os.ReadFile("utils.go")
+	if err != nil {
+		t.Fatalf("read utils.go: %v", err)
+	}
+	s := string(src)
+
+	// Inspect the RETURN STATEMENT for each case by splitting on statements, not
+	// by index arithmetic — the first version used strings.LastIndex and panicked
+	// on -1 when the phrase appeared before any `return`.
+	idStmt, nameStmt := "", ""
+	for _, line := range strings.Split(s, "\n") {
+		t := strings.TrimSpace(line)
+		if !strings.HasPrefix(t, "return nil,") {
+			continue
+		}
+		if strings.Contains(t, "not found (must be spawn-managed)") {
+			idStmt = t
+		}
+		if strings.Contains(t, "no instance found with name:") {
+			nameStmt = t
+		}
+	}
+
+	if idStmt == "" {
+		t.Fatal("the unknown-instance-ID error is gone")
+	}
+	if strings.Contains(idStmt, "notFoundError") {
+		t.Errorf("an unknown instance ID must NOT carry ErrInstanceNotFound — `spawn terminate "+
+			"i-doesnotexist` would exit 0, letting a typo read as a successful termination. "+
+			"test/e2e's negative matrix pins this.\n  got: %s", idStmt)
+	}
+
+	if nameStmt == "" {
+		t.Fatal("the unknown-name error is gone")
+	}
+	if !strings.Contains(nameStmt, "notFoundError") {
+		t.Errorf("an unknown NAME must carry ErrInstanceNotFound so terminate can treat it as "+
+			"success — that is the case reported in #648\n  got: %s", nameStmt)
+	}
+}

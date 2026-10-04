@@ -9,11 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`spawn terminate` is now idempotent and exits 0 when the instance is already gone**
-  (#648). Three states already satisfy its goal of "this instance is not running" —
-  never existed, already terminated, already shutting down — and all three used to exit
-  1. **This is a behaviour change**: a script that relied on a non-zero exit to detect a
-  missing instance will now see success.
+- **`spawn terminate` is now idempotent when the instance is already gone** (#648).
+  Three states already satisfy its goal of "this instance is not running" — an unknown
+  **name**, already terminated, already shutting down — and all three used to exit 1.
+  They now exit 0 with a clear message. **This is a behaviour change**: a script that
+  relied on a non-zero exit to detect a missing *name* will now see success.
+  An unknown instance **ID** deliberately still fails. An ID is opaque and AWS-assigned,
+  so one that matches nothing is a typo rather than an already-cleaned-up resource, and
+  exiting 0 there would let someone believe they stopped a still-billing instance.
   It is worth it because the old behaviour actively misled. An executor's cleanup ran
   `terminate` after a launch had already failed and reported *"the instance may still be
   running and billing until its TTL"* — the one sentence a user cannot ignore — when
