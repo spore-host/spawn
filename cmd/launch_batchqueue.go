@@ -141,7 +141,7 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 	stdScript, buildErr := buildUserData(plat, &aws.LaunchConfig{
 		InstanceType: instanceType,
 		Region:       queueRegion,
-	}, "")
+	}, "", nil)
 	var combinedScript string
 	if buildErr == nil && stdScript != "" {
 		// Append queue runner after spored installer (strip duplicate #!/bin/bash header)

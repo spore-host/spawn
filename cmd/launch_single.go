@@ -640,6 +640,10 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// Windows: the storage user-data is Linux mount scripting and would corrupt
 	// the <powershell> block. EFS/FSx on Windows is out of Phase 1 scope (#55).
 	storageScript := ""
+	// Mount points --command must see live before it starts (#668). Only EFS and
+	// FSx are required: attached EBS data volumes mount with `nofail` by design,
+	// so a missing one must not strand a workload that never referenced it.
+	var readyMountPoints []string
 	if (efsID != "" || fsxInfo != nil || len(config.AttachVolumes) > 0) && config.TargetOS != "windows" {
 		storageConfig := userdata.StorageConfig{}
 
@@ -654,6 +658,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			storageConfig.EFSFilesystemDNS = aws.GetEFSDNSName(efsID, config.Region)
 			storageConfig.EFSMountPoint = efsMountPoint
 			storageConfig.EFSMountOptions = mountOptions
+			readyMountPoints = append(readyMountPoints, efsMountPoint)
 		}
 
 		// FSx configuration
@@ -662,6 +667,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			storageConfig.FSxFilesystemDNS = fsxInfo.DNSName
 			storageConfig.FSxMountName = fsxInfo.MountName
 			storageConfig.FSxMountPoint = fsxMountPoint
+			readyMountPoints = append(readyMountPoints, fsxMountPoint)
 		}
 
 		// Attached EBS data volumes from snapshots (#144)
@@ -675,7 +681,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 
 	// Step 5: Build user data — the storage mount is injected before the user's
 	// script (inside the bootstrap), not appended after it (#166).
-	userDataScript, err := buildUserData(plat, config, storageScript)
+	userDataScript, err := buildUserData(plat, config, storageScript, readyMountPoints)
 	if err != nil {
 		return fmt.Errorf("failed to build user data: %w", err)
 	}

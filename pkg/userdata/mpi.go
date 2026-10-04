@@ -19,6 +19,19 @@ type MPIConfig struct {
 	SkipInstall         bool
 	EFAEnabled          bool
 	BinariesBucket      string // S3 bucket for binaries (defaults to spawn-binaries-{region})
+	// ReadyGate, if set, is the sentinel file this script writes once the MPI
+	// environment is usable — peers resolved and the hostfile built (#664). A
+	// --command workload waits on it, because this script is appended AFTER the
+	// bootstrap body that launches --command, so without the gate the workload
+	// starts before mpirun has a hostfile or any peer to talk to.
+	//
+	// Signalled BEFORE the rank-0 mpirun, not after: that mpirun is the job and
+	// can run for hours, so gating on its completion would make --command wait
+	// out the entire run.
+	//
+	// The path is passed in rather than imported from pkg/launcher so this stays
+	// a pure script generator with no dependency on the bootstrap assembler.
+	ReadyGate string
 }
 
 // GenerateMPIUserData generates the MPI setup script for inclusion in user-data
@@ -102,6 +115,19 @@ chmod 600 /root/.ssh/config
 while [ ! -f /etc/spawn/job-array-peers.json ]; do sleep 2; done
 {{if .MPIProcessesPerNode}}SLOTS={{.MPIProcessesPerNode}}{{else}}SLOTS=$(nproc){{end}}
 jq -r ".[] | \"\(.ip) slots=$SLOTS\"" /etc/spawn/job-array-peers.json > /tmp/mpi-hostfile
+{{if .ReadyGate}}
+# Signal the --command MPI gate (#664). Here, not after the mpirun below: that
+# mpirun IS the job and can run for hours, so gating on it would make a
+# --command workload wait out the entire run. Reports the real state — an empty
+# hostfile means no peers resolved, and a workload launched against that fails
+# in confusing ways rather than saying so.
+mkdir -p "$(dirname {{.ReadyGate}})"
+if [ -s /tmp/mpi-hostfile ]; then
+  echo ok > {{.ReadyGate}}
+else
+  echo "failed:no MPI peers resolved (empty /tmp/mpi-hostfile)" > {{.ReadyGate}}
+fi
+{{end}}
 if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   sleep 10
   {{if .MPICommand}}mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile {{.MPICommand | shellEscape}}{{end}}

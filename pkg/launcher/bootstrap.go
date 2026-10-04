@@ -25,6 +25,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/security"
@@ -91,7 +92,71 @@ type BootstrapConfig struct {
 	// could write. Cloud-init runs as root, which is what makes /etc/spawn the
 	// cheap option — the generated content never passes through the instance user.
 	TaskFlushScript string
+	// ReadyGates are additional sentinel files the --command workload must wait
+	// for before it starts, beyond the storage gate this builder adds itself.
+	//
+	// It exists because of the ordering in this function: linuxBootstrapBody —
+	// which launches --command — is appended BEFORE StorageScript and before
+	// anything a caller concatenates afterwards, so by the time the workload
+	// starts, its prerequisites have not run. #166 fixed this for CustomUserData
+	// by appending it after the storage script, but --command lives inside the
+	// static body and could not be moved the same way.
+	//
+	// Callers that append their own setup after this script (the MPI/EFA block in
+	// the job-array path, #664) must declare its gate here, at BUILD time. The
+	// declaration cannot come later: the list is written near the top of the
+	// script and read when the workload begins waiting, so a gate appended at the
+	// end of the script text would be announced after the wait had already
+	// started and been skipped.
+	ReadyGates []string
+	// ReadyMountPoints are paths that must appear in /proc/mounts for the storage
+	// gate to report success. Only set these for storage the workload genuinely
+	// requires — EFS and FSx. Attached EBS data volumes mount with `nofail` by
+	// design, so a missing one is not a launch failure and must not strand a
+	// workload that never referenced it.
+	//
+	// Verifying beats trusting an exit code: the storage script's last command is
+	// usually `echo ... >> /etc/fstab`, which returns 0 whether or not the mount
+	// succeeded, so there is no reliable status to read.
+	ReadyMountPoints []string
 }
+
+// shellQuoteJoin renders paths as a single-quoted, space-separated list safe to
+// iterate with `for x in ...`. Mount points come from flags, so they are not
+// assumed benign.
+//
+// Deliberately NOT security.ShellEscape, which is strconv.Quote — Go/C escaping
+// inside DOUBLE quotes, where $VAR, $(...) and backticks still expand. That is
+// the #660 bug; reusing it here would reintroduce it. Single quotes are the only
+// POSIX construct that suppresses every expansion, with '\” to embed a quote.
+func shellQuoteJoin(paths []string) string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
+	}
+	return strings.Join(out, " ")
+}
+
+// Ready-gate contract for the --command barrier (#668, #664).
+//
+// /run is tmpfs, so gates are per-boot by construction — exactly the lifetime
+// wanted here. A gate file holds "ok" or "failed:<reason>": a mount that fails
+// must not read as a mount that is pending, because the workload would then wait
+// out the full timeout and report the wrong cause.
+const (
+	// ReadyDir holds the barrier's sentinel files.
+	ReadyDir = "/run/spawn"
+	// RequiredGatesFile lists the gates --command waits for, one path per line.
+	RequiredGatesFile = ReadyDir + "/required-gates"
+	// StorageReadyGate is signalled after StorageScript runs (EFS/FSx/EBS mounts).
+	StorageReadyGate = ReadyDir + "/storage-ready"
+	// MPIReadyGate is signalled by the MPI/EFA setup script (#664). Declared by
+	// the caller via ReadyGates, since that script is appended after this builder.
+	MPIReadyGate = ReadyDir + "/mpi-ready"
+	// ReadyGateTimeoutSecs caps the wait. FSx mounts are the slow case; past this
+	// the workload fails loudly rather than hanging for the instance's whole TTL.
+	ReadyGateTimeoutSecs = 600
+)
 
 // BuildLinuxBootstrap returns the cloud-init user-data script that installs
 // spored and configures the instance. It is the single source of truth for the
@@ -175,6 +240,25 @@ chmod 700 %s
 `, taskproto.FlushScriptPath(), cfg.TaskFlushScript, taskproto.FlushScriptPath(), taskproto.FlushScriptPath())
 	}
 
+	// Declare the --command readiness gates BEFORE the body, which is where
+	// --command is launched (#668, #664). The list has to be on disk before the
+	// workload starts waiting; see BootstrapConfig.ReadyGates for why it cannot
+	// be appended later.
+	gates := append([]string{}, cfg.ReadyGates...)
+	if cfg.StorageScript != "" {
+		gates = append([]string{StorageReadyGate}, gates...)
+	}
+	if len(gates) > 0 && cfg.Command != "" {
+		script += fmt.Sprintf(`
+# --command readiness gates (#668, #664): the workload waits for these before
+# starting, because the setup that produces them runs LATER in this script.
+mkdir -p %s
+cat > %s <<'EOFGATES'
+%s
+EOFGATES
+`, ReadyDir, RequiredGatesFile, strings.Join(gates, "\n"))
+	}
+
 	script += linuxBootstrapBody
 
 	// Inject plugin declarations for spored to load at startup.
@@ -201,6 +285,34 @@ echo "Plugin declarations written: %d plugin(s)"
 	if cfg.StorageScript != "" {
 		script += "\n# Attached storage (mounted before the user script so the workload sees it; #166)\nset +e\n"
 		script += cfg.StorageScript
+		// Signal the storage gate so a waiting --command can proceed (#668).
+		//
+		// The gate VERIFIES the mounts rather than trusting an exit code. The
+		// storage script's last command is typically `echo ... >> /etc/fstab`,
+		// which returns 0 whether or not anything mounted, so `$?` here would
+		// report success for a failed mount — the exact silence this is meant to
+		// end. Checking /proc/mounts is the only honest signal available.
+		//
+		// Only ReadyMountPoints are required. Attached EBS data volumes mount with
+		// `nofail` on purpose, so their absence is not a launch failure and must
+		// not block a workload that never asked for them.
+		script += fmt.Sprintf(`
+# Signal the --command storage gate (#668). Verifies the mounts are live rather
+# than trusting an exit code: the storage script ends in `+"`echo >> /etc/fstab`"+`,
+# which succeeds even when nothing mounted.
+mkdir -p %s
+SPAWN_GATE_MISSING=""
+for SPAWN_MP in %s; do
+    if ! mountpoint -q "$SPAWN_MP" 2>/dev/null && ! grep -q " $SPAWN_MP " /proc/mounts; then
+        SPAWN_GATE_MISSING="$SPAWN_GATE_MISSING $SPAWN_MP"
+    fi
+done
+if [ -z "$SPAWN_GATE_MISSING" ]; then
+    echo ok > %s
+else
+    echo "failed:not mounted:$SPAWN_GATE_MISSING" > %s
+fi
+`, ReadyDir, shellQuoteJoin(cfg.ReadyMountPoints), StorageReadyGate, StorageReadyGate)
 	}
 
 	// Headless container run (#353): after storage so a containerized workload
@@ -643,7 +755,57 @@ EOFCMD
     # is the spored#65 failure (never block the ticker startup path) and is worse
     # than the bug this fixes. The subshell gives us the exit code without waiting.
     (
-        su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh' 2>&1 | tee /var/log/spawn-command.log
+        # Wait for prerequisites before running the workload (#668, #664).
+        #
+        # This MUST be inside the backgrounded subshell. Waiting out here would
+        # block cloud-init, so spored would not start and TTL/idle/cost
+        # enforcement would stay unarmed for the duration — the spored#65 failure,
+        # which is worse than the bug being fixed.
+        #
+        # The gates exist because --command is launched from this block, which is
+        # emitted BEFORE the storage and MPI setup that the workload depends on.
+        # #166 fixed the ordering for --user-data by appending it later; --command
+        # lives in the static body and cannot be moved the same way.
+        if [ -s /run/spawn/required-gates ]; then
+            GATE_RC=0
+            while read -r GATE; do
+                [ -n "$GATE" ] || continue
+                WAITED=0
+                while [ ! -s "$GATE" ]; do
+                    if [ "$WAITED" -ge 600 ]; then
+                        echo "❌ timed out after ${WAITED}s waiting for $GATE" | tee -a /var/log/spawn-command.log
+                        GATE_RC=1
+                        break
+                    fi
+                    sleep 2
+                    WAITED=$((WAITED + 2))
+                done
+                [ "$GATE_RC" -eq 0 ] || break
+                GATE_STATUS=$(cat "$GATE")
+                if [ "$GATE_STATUS" != "ok" ]; then
+                    # Report the cause here, not only in cloud-init-output: a user
+                    # debugging a failed workload reads spawn-command.log (#668).
+                    echo "❌ prerequisite failed: $GATE reports $GATE_STATUS" | tee -a /var/log/spawn-command.log
+                    GATE_RC=1
+                    break
+                fi
+                echo "✅ prerequisite ready: $GATE" >> /var/log/spawn-command.log
+            done < /run/spawn/required-gates
+
+            if [ "$GATE_RC" -ne 0 ]; then
+                # Fail instead of running: a workload started without its mounts
+                # does not fail cleanly — it writes to the wrong place or produces
+                # silently wrong output, which costs more than a clear failure.
+                echo "❌ --command NOT started: prerequisites unmet (see above)" | tee -a /var/log/spawn-command.log
+                echo 1 > /tmp/SPAWN_EXITCODE
+                cat > /tmp/SPAWN_COMPLETE <<JSONEOF
+{"status": "failed", "exit_code": 1, "source": "command"}
+JSONEOF
+                exit 1
+            fi
+        fi
+
+        su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh' 2>&1 | tee -a /var/log/spawn-command.log
         # PIPESTATUS[0], not $? — $? here is tee's status, which is 0 even when the
         # command failed. That alone would have reported every failure as a success.
         CMD_RC=${PIPESTATUS[0]}

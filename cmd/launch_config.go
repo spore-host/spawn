@@ -590,7 +590,25 @@ func resolveCustomUserData() (string, error) {
 	return "", nil
 }
 
-func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScript string) (string, error) {
+// readyGatesForLaunch returns the extra --command readiness gates to declare for
+// this launch, beyond the storage gate BuildLinuxBootstrap adds itself.
+//
+// Only MPI qualifies today. The asymmetry matters: declaring a gate that nothing
+// signals makes --command wait the full timeout and then FAIL a launch that
+// works today, so a gate is declared only where its producer is certain to be
+// appended. That is safe for `spawn array retry`, which is plain-array only —
+// MPI arrays are all-or-nothing and never take that path.
+func readyGatesForLaunch(mpi bool) []string {
+	if mpi {
+		return []string{launcher.MPIReadyGate}
+	}
+	return nil
+}
+
+// buildUserData assembles the Linux (or Windows) bootstrap. readyMountPoints are
+// the paths --command must see mounted before it starts (#668); pass nil when
+// there is no storage script, since there is then nothing to wait for.
+func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScript string, readyMountPoints []string) (string, error) {
 	// Inject the PUBLIC key of the same keypair we registered with EC2
 	// (config.KeyName), so the instance trusts the key `spawn connect` will use.
 	publicKey, err := spawnPublicKeyForUserData(plat, config.KeyName)
@@ -616,12 +634,22 @@ func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScr
 
 	// Delegate to the shared, headless bootstrap builder (pkg/launcher) so the
 	// CLI and SDK consumers (lagotto, cohort) emit identical spored user-data.
+	// --command readiness gates (#668, #664). The MPI gate is declared here, at
+	// build time, because the MPI script is appended to this script LATER (by
+	// buildJobArrayMemberConfig) and a gate announced after the workload starts
+	// waiting would simply be missed. Declaring it on the mpiEnabled flag is safe
+	// for `array retry`, which is plain-array only — MPI arrays are
+	// all-or-nothing and never take that path.
+	readyGates := readyGatesForLaunch(mpiEnabled)
+
 	return launcher.BuildLinuxBootstrap(launcher.BootstrapConfig{
-		Username:       username,
-		PublicKey:      publicKey,
-		Plugins:        collectPluginDeclarations(),
-		StorageScript:  storageScript,
-		CustomUserData: customUserData,
+		Username:         username,
+		PublicKey:        publicKey,
+		Plugins:          collectPluginDeclarations(),
+		StorageScript:    storageScript,
+		ReadyMountPoints: readyMountPoints,
+		ReadyGates:       readyGates,
+		CustomUserData:   customUserData,
 		// Embed --command in user-data instead of the 256-char spawn:command tag
 		// (#214/#246). Sweeps deliver per-instance commands via the tag (a short
 		// step ref), so only embed for a non-sweep launch — SweepID set means the

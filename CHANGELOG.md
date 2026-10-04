@@ -101,6 +101,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `"Version"`, so it passed while IAM refused the result — it now checks the two
   shapes IAM actually rejects.
 
+- **`--command` started before its storage mounts and before MPI setup** (#668, #664).
+  `--command` is launched from `linuxBootstrapBody`, which is concatenated at a fixed
+  point **before** the storage script and before anything a caller appends afterwards.
+  So the workload ran while its prerequisites did not exist — a task given `--efs-id`
+  reported `df: /efs: No such file or directory`, and an MPI member started before
+  `mpirun` had a hostfile or a single peer. #166 fixed this ordering for `--user-data`
+  by appending it after the storage script; `--command` lives inside the static body and
+  could not be moved the same way.
+  There is now a **readiness barrier**: the bootstrap declares the gates a workload must
+  wait for, each producer signals its own, and `--command` waits for all of them before
+  starting. The storage gate **verifies the mounts are live in `/proc/mounts`** rather
+  than trusting an exit code — the storage script ends in `echo >> /etc/fstab`, which
+  succeeds whether or not anything mounted, so there was never a status worth reading.
+  Only EFS and FSx are required; attached EBS volumes mount with `nofail` by design and
+  must not strand a workload that never referenced them.
+  A failed or missing prerequisite now **fails the workload loudly in
+  `/var/log/spawn-command.log`** — the log a user actually reads — saying the command
+  never started, rather than running it against missing data and producing silently
+  wrong output. It also writes a failed completion record, so `--on-complete` still
+  fires instead of the instance billing to its TTL doing nothing.
+  Two details are load-bearing and gated by tests. The wait is **inside** the
+  backgrounded subshell: waiting outside it would block cloud-init, so `spored` would
+  never start and TTL/idle/cost enforcement would stay unarmed for the duration — the
+  spored#65 failure, worse than the bug being fixed. And the MPI gate is signalled
+  **before** the rank-0 `mpirun`, not after: that `mpirun` is the job and can run for
+  hours, so gating on it would make `--command` wait out the entire run.
+  Gates are declared only where a producer is certain to signal one, because the
+  expensive direction is a gate nobody writes: that would stall every launch for the
+  full 600s timeout and then fail one that works today.
+
 - **The #650 deploy fix disarmed the live production reaper; fixed properly** — follow-up
   to #650. The Makefile's `describe-stacks` call had **no `--region`**, so it resolved
   against the profile's default region, the stack read as "not found", the `|| echo '[]'`
