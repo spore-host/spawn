@@ -100,4 +100,10 @@ func TestS3FlagsAreAdditiveWithIAMPolicy(t *testing.T) {
 	if !strings.HasPrefix(policy, `{"Version":"2012-10-17"`) {
 		t.Errorf("the scoped policy must be a complete policy document, got:\n%s", policy)
 	}
+	// "Self-contained and valid" has to mean valid to IAM, not just well-formed
+	// JSON starting with the right key. This exact call is #669's failing case —
+	// a read grant with no write target — and the prefix assertion above passed
+	// throughout, while the document carried {"s3:PutObject","Resource":[]} and
+	// IAM rejected it outright.
+	assertIAMAcceptable(t, policy)
 }

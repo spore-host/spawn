@@ -1118,13 +1118,29 @@ func taskStagingPolicy(inputBuckets, outputBuckets []string, resultsBucket strin
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":[%s]}`, bucketObjectARNs(readB)))
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bucketARNs(readB)))
 	}
-	stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
+	// Only grant write when there is somewhere to write (#669). This statement
+	// used to be unconditional, but on the launch path outputBuckets is empty and
+	// resultsBucket is "" — and dedupeBuckets drops empty strings — so
+	// `--s3-read bucket` alone shipped {"Action":["s3:PutObject"],"Resource":[]}.
+	// IAM rejects the WHOLE document for that, so a read-only grant made the
+	// instance profile impossible to create and failed the entire launch.
+	if len(writeB) > 0 {
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
+	}
 	// Full read-write buckets (e.g. Snakemake's S3 storage plugin, which lists,
 	// reads, writes, and deletes across its storage bucket): grant object-level
 	// Get/Put/Delete + bucket-level List/GetLocation on the whole bucket.
 	if len(rwB) > 0 {
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:PutObject","s3:DeleteObject"],"Resource":[%s]}`, bucketObjectARNs(rwB)))
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bucketARNs(rwB)))
+	}
+	// A document with no statements is MalformedPolicyDocument just as surely as
+	// one with an empty Resource, so guarding the write statement alone would
+	// have swapped one invalid policy for another. Return nothing instead: both
+	// PutRolePolicy call sites in pkg/aws/iam.go are guarded on
+	// InlinePolicyJSON != "", so an empty document is simply not attached.
+	if len(stmts) == 0 {
+		return ""
 	}
 	return `{"Version":"2012-10-17","Statement":[` + strings.Join(stmts, ",") + `]}`
 }

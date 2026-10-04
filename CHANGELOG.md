@@ -82,6 +82,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on-demand price while reading as "use my reserved capacity". All three are allowlisted
   with their issue numbers so the gate enforces from now on without hiding the debt.
 
+- **`--s3-read` without `--s3-write` failed the entire launch** (#669).
+  `taskStagingPolicy` appended its `s3:PutObject` statement unconditionally, but on the
+  launch path there are no output buckets and no results bucket — and `dedupeBuckets`
+  drops empty strings — so the statement shipped as
+  `{"Action":["s3:PutObject"],"Resource":[]}`. IAM rejects the **whole document** for an
+  empty `Resource`, not just the offending statement, so the instance profile could not
+  be created and `spawn launch --s3-read my-bucket` died with
+  `MalformedPolicyDocument` before reaching EC2.
+  A read-only grant now contains no write statement at all, rather than an unscoped one.
+  The same bug hit `--s3-read-write` used on its own, which is the Snakemake S3-storage
+  plugin's shape, so that path was equally broken.
+  Guarding the write statement alone would have swapped one invalid document for
+  another, since `"Statement":[]` is just as malformed; with nothing to grant the
+  function now returns an empty string and the policy is simply not attached (both
+  `PutRolePolicy` call sites were already guarded on that).
+  The pre-existing test called this exact case but asserted only that the document began
+  with `"Version"`, so it passed while IAM refused the result — it now checks the two
+  shapes IAM actually rejects.
+
 - **The #650 deploy fix disarmed the live production reaper; fixed properly** — follow-up
   to #650. The Makefile's `describe-stacks` call had **no `--region`**, so it resolved
   against the profile's default region, the stack read as "not found", the `|| echo '[]'`
