@@ -13,6 +13,7 @@ import (
 	"github.com/spore-host/spawn/pkg/arrayrec"
 	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/mpicohort"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/progress"
@@ -105,6 +106,11 @@ func buildJobArrayMemberConfig(baseConfig *aws.LaunchConfig, mp memberParams, jo
 				MPICommand:          mpiCommand,
 				SkipInstall:         mpiSkipInstall,
 				EFAEnabled:          efaEnabled,
+				// Signal the gate buildUserData declared for this script (#664).
+				// Both halves are required: a declared gate nothing signals would
+				// stall --command for the full timeout, and a signal with nothing
+				// waiting is simply inert.
+				ReadyGate: launcher.MPIReadyGate,
 			}
 			mpiScript, err := userdata.GenerateMPIUserData(mpiConfig)
 			if err != nil {

@@ -443,7 +443,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// Build user-data for each config. (Storage mounts aren't wired through this
 	// sweep path; attach-volume on sweeps would thread a storageScript here.)
 	for _, cfg := range launchConfigs {
-		userDataScript, err := buildUserData(plat, cfg, "")
+		userDataScript, err := buildUserData(plat, cfg, "", nil)
 		if err != nil {
 			return fmt.Errorf("failed to build user data: %w", err)
 		}

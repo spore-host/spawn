@@ -305,7 +305,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 
 	// Build user-data for each config
 	for _, cfg := range launchConfigs {
-		userDataScript, err := buildUserData(plat, cfg, "")
+		userDataScript, err := buildUserData(plat, cfg, "", nil)
 		if err != nil {
 			return fmt.Errorf("failed to build user data: %w", err)
 		}
