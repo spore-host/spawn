@@ -55,13 +55,69 @@ ACCOUNTS_TABLE_KEY_ARN?=
 ALARMS_ENABLED?=true
 ALARM_TOPIC_ARN?=
 PARAMS_FILE=.deploy-params.yaml
+
+# Map each Make variable to its CloudFormation parameter name. Only variables the
+# CALLER actually set are sent as overrides; everything else inherits whatever is
+# deployed (spawn#650).
+#
+# $(origin V) is what makes that distinction possible: it reports "command line"
+# or "environment" for a value the caller supplied, and "file" for the `?=`
+# defaults above. Before this, all 13 defaults were asserted on every deploy, so
+# the documented `make deploy` would have set DryRun=true on a stack running
+# DryRun=false — DISARMING the live production reaper, silently, since it keeps
+# running and reporting and merely stops terminating anything. It would also have
+# turned DnsSweep off, blanked the DNS zone/domain, and detached AlarmTopicArn so
+# every failure alarm fired into nothing.
+#
+# The Makefile comments above explain the opposite hazard (an omitted parameter
+# becomes UsePreviousValue, which is why #438 was unreachable from here). Passing
+# everything explicitly fixed that and created this. Read-then-write fixes both.
+PARAM_MAP = \
+	Environment:ENV \
+	DryRun:DRY_RUN \
+	NotifyUrl:NOTIFY_URL \
+	ScanSelf:SCAN_SELF \
+	RoleArns:ROLE_ARNS \
+	DnsZoneId:DNS_ZONE_ID \
+	DnsDomain:DNS_DOMAIN \
+	DnsSweep:DNS_SWEEP \
+	DnsExpire:DNS_EXPIRE \
+	AccountsTable:ACCOUNTS_TABLE \
+	AccountsTableKeyArn:ACCOUNTS_TABLE_KEY_ARN \
+	AlarmsEnabled:ALARMS_ENABLED \
+	AlarmTopicArn:ALARM_TOPIC_ARN \
+	MaxAge:MAX_AGE \
+	Regions:REGIONS \
+	Schedule:SCHEDULE
+
+# Emit one `CfnKey=value` line per EXPLICITLY-supplied parameter. Deliberately not
+# JSON: Make has no comma literal (`$(,)` is undefined and silently expands to
+# nothing, which produced `{"a":"1" "b":"2"}` — valid-looking and unparseable), and
+# single-quoting each line is what lets a value contain a space or a comma.
+# Schedule is `rate(10 minutes)` and Regions is comma-separated, so both matter.
+define EMIT_EXPLICIT
+$(if $(filter command line environment,$(origin $(2))),printf '%s\n' '$(1)=$($(2))' >> .deploy-explicit.txt;,)
+endef
+
 deploy: build
-	@printf 'Environment: "%s"\nDryRun: "%s"\nNotifyUrl: "%s"\nScanSelf: "%s"\nRoleArns: "%s"\nDnsZoneId: "%s"\nDnsDomain: "%s"\nDnsSweep: "%s"\nDnsExpire: "%s"\nAccountsTable: "%s"\nAccountsTableKeyArn: "%s"\nAlarmsEnabled: "%s"\nAlarmTopicArn: "%s"\n' \
-		'$(ENV)' '$(DRY_RUN)' '$(NOTIFY_URL)' '$(SCAN_SELF)' '$(ROLE_ARNS)' '$(DNS_ZONE_ID)' '$(DNS_DOMAIN)' '$(DNS_SWEEP)' '$(DNS_EXPIRE)' '$(ACCOUNTS_TABLE)' '$(ACCOUNTS_TABLE_KEY_ARN)' '$(ALARMS_ENABLED)' '$(ALARM_TOPIC_ARN)' > $(PARAMS_FILE)
-	@# Echo the mode-setting parameters so a deploy can't quietly leave a feature off
-	@# — but never NotifyUrl, which is a Slack webhook secret. ALARM_TOPIC_ARN is an
-	@# ARN, not a credential, and alarms wired to nothing is worth seeing here.
-	@echo "deploying: dry-run=$(DRY_RUN) scan-self=$(SCAN_SELF) dns-sweep=$(DNS_SWEEP) dns-expire=$(DNS_EXPIRE) zone='$(DNS_ZONE_ID)' domain='$(DNS_DOMAIN)' alarms=$(ALARMS_ENABLED) alarm-topic='$(ALARM_TOPIC_ARN)'"
+	@# Read the live stack first, so an unspecified parameter keeps what is
+	@# deployed instead of being reset to this Makefile's idea of a default.
+	@aws cloudformation get-template-summary --template-body file://template.yaml \
+		--output json > .deploy-summary.json
+	@aws cloudformation describe-stacks --stack-name spawn-ttl-reaper-$(ENV) \
+		--query 'Stacks[0].Parameters' --output json > .deploy-live.json 2>/dev/null \
+		|| echo '[]' > .deploy-live.json
+	@: > .deploy-explicit.txt
+	@$(foreach pair,$(PARAM_MAP),$(call EMIT_EXPLICIT,$(word 1,$(subst :, ,$(pair))),$(word 2,$(subst :, ,$(pair)))))
+	@python3 scripts/merge_deploy_params.py .deploy-summary.json .deploy-live.json \
+		.deploy-explicit.txt > $(PARAMS_FILE)
+	@rm -f .deploy-summary.json .deploy-live.json .deploy-explicit.txt
+	@# Echo the mode-setting parameters so a deploy can't quietly leave a feature
+	@# off — but never NotifyUrl, which is a Slack webhook secret. These are read
+	@# back from the MERGED file, so this shows what will actually be sent rather
+	@# than what this Makefile happens to default to.
+	@awk -F': ' '/^(DryRun|ScanSelf|DnsSweep|DnsExpire|AlarmsEnabled|DnsZoneId|DnsDomain|AlarmTopicArn|MaxAge|Schedule):/ \
+		{ printf "  %s %s\n", $$1, $$2 }' $(PARAMS_FILE)
 	sam deploy \
 		--template-file template.yaml \
 		--stack-name spawn-ttl-reaper-$(ENV) \
