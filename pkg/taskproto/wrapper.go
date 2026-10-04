@@ -162,8 +162,52 @@ func generateWrapper(spec *TaskSpec, resultsBucket, region string, signalComplet
 	// the shared filesystem, and silently disappears from the container's/host's
 	// view once the mount completes. Placement mount points must appear in the
 	// docker-mount set without ever appearing in this mkdir set.
+	// sudo, and only for a directory that does not already exist (spawn#564).
+	//
+	// A plain `mkdir -p` here ran as the unprivileged instance user, so it could
+	// not create any directory whose parent it does not own — which includes every
+	// top-level path: /out, /data, /work. Confirmed on a real t4g.medium, which is
+	// the only way this shows up (a code read sees the mkdir emitted and concludes
+	// it works):
+	//
+	//	mkdir: cannot create directory ‘/out’: Permission denied
+	//	spawn: [...] stage-in done rc=0              <- failure swallowed
+	//	drwxr-xr-x 2 0 0 /out/results                <- docker -v made it, as root
+	//	sh: can't create /out/results/a.txt: Permission denied
+	//
+	// So the very auto-creation-as-root this loop exists to prevent happened
+	// anyway, 90 seconds later, surfacing as a container permission error with no
+	// hint that a host mkdir had failed. spawn's own documented /data + /work
+	// example could not work, and /tmp was the only usable staging location
+	// (it already exists, 1777) — which is what forced callers to keep every
+	// staged path flat in /tmp.
+	//
+	// The existence test is not an optimization, it is required: chown'ing a
+	// PRE-EXISTING directory would be destructive. A destination of
+	// /tmp/staged.bin yields a mount dir of /tmp, and `chown` on that would strip
+	// the sticky 1777 ownership /tmp needs for every other user on the box.
+	// Only directories this script actually creates get their ownership set.
+	//
+	// A failure now sets STAGE_RC so the task fails AT stage-in, classified
+	// staging_error, instead of running the command against an unwritable mount.
+	// Unprivileged mkdir first, escalating to sudo only when that fails. Where the
+	// parent is already writable (/tmp/sub, a path under $HOME) the directory is
+	// created by the invoking user and is therefore already owned by it, so no
+	// chown is needed and no privilege is used. sudo is the fallback for a
+	// top-level path, and the chown is what makes the root-created directory
+	// writable by the container.
 	for _, dir := range manifestMountDirs(spec) {
-		p("mkdir -p %s\n", shQuote(dir))
+		q := shQuote(dir)
+		p("if [ ! -d %s ]; then\n", q)
+		p("  if mkdir -p %s 2>/dev/null; then\n", q)
+		p("    :\n")
+		p("  elif sudo mkdir -p %s && sudo chown \"$(id -u):$(id -g)\" %s; then\n", q, q)
+		p("    :\n")
+		p("  else\n")
+		p("    echo 'spawn: cannot create mount dir %s' >&2\n", dir)
+		p("    STAGE_RC=1\n")
+		p("  fi\n")
+		p("fi\n")
 	}
 	p("\n")
 	for _, m := range spec.Inputs {

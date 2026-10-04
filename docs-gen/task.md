@@ -41,8 +41,29 @@ signal workflow adapters poll. The instance self-terminates on completion (TTL +
 on_complete).
 
 If spec.container is set, the command runs inside that image (Docker is installed
-on demand; the manifest dirs are bind-mounted; a private-ECR image is pulled with
-an ecr:ReadOnly grant, GPUs passed with --gpus all). Otherwise it runs on the host.
+on demand; a private-ECR image is pulled with an ecr:ReadOnly grant, GPUs passed
+with --gpus all). Otherwise it runs on the host.
+
+What gets bind-mounted, and as whom: spawn pre-creates the parent directory of
+every inputs[].destination and outputs[].source — plus any EFS/FSx/volume mount
+point from placement — as the instance user, and bind-mounts exactly those paths
+into the container. The container then runs as that same uid:gid rather than the
+image's declared USER (spawn#555), so the staged directories are writable
+whatever the image happens to declare; every staged input is also chown'd to that
+uid so it can be deleted as well as read (spawn#565). Practical upshot: any
+absolute path works, the image's USER is irrelevant, and you do not need to keep
+staged paths flat in /tmp. A manifest path ending in "/" is a directory and is
+staged recursively in both directions (spawn#564).
+
+Staging space is NOT resources.disk_gib unless you stage onto the root
+filesystem. disk_gib sizes the root EBS volume, which is where an ordinary path
+like /work lives — so that is the knob for a large staged input. /tmp is
+different: on AL2023 it is a tmpfs, RAM-backed and capped near half of instance
+memory by default, so staging a 40 GiB index into /tmp fails on a 32 GiB box no
+matter how large disk_gib is. Stage big inputs to a non-/tmp path and size
+disk_gib, or keep /tmp and size memory_gib for the staging footprint — the
+latter tends to pick the instance FAMILY rather than just its size, so the two
+are not interchangeable on cost.
 
 The launch AMI is auto-selected from the sized instance type: a GPU family (g5,
 g6, p4/p5, …) gets the AL2023 NVIDIA DLAMI so --gpus all lands on a host with a

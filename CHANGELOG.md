@@ -7,7 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A 22 MiB compiled binary is no longer tracked in git** (#637).
+  `lambda/autoscale-orchestrator/autoscale-orchestrator` was the one name missing
+  from `.gitignore`'s hand-maintained per-lambda list, so it was tracked and
+  mutable: a plain `go build ./...` in that module — which CI itself runs on every
+  lambda module — rewrote it, and `git add -A` then staged a 22 MiB diff. No
+  user-facing behaviour change; it is build output that was never meant to be
+  committed, and was in fact a **macOS (Mach-O) build**, so it could never have run
+  on Lambda's `provided.al2023`/arm64 to begin with. Removing it from `HEAD` does
+  not shrink existing clones — the bytes stay in history — but it stops the bleeding.
+  Two new gates replace the hand-maintained list as the real protection: one fails
+  if **any** tracked file is a compiled executable (matched by magic bytes, not
+  `file` output, which calls every shell and Python script "executable"), and one
+  fails if a Go lambda module is missing its `.gitignore` entry — so the next lambda
+  cannot reintroduce this by being forgotten.
+
 ### Fixed
+
+- **A task whose manifest uses a top-level path (`/out`, `/data`, `/work`) now works**
+  (#564). The wrapper pre-creates every bind-mount directory specifically so that
+  `docker run -v` never auto-creates a missing one as root — but it did so with a plain
+  `mkdir -p`, running as the *unprivileged* instance user, which cannot create a
+  directory at the filesystem root. The failure was then **swallowed**: stage-in
+  reported success, `docker -v` created the directory as root mode 0755, and the
+  container hit `Permission denied` ninety seconds later with nothing pointing at the
+  real cause. spawn's own documented `/data` + `/work` example could not work, and
+  `/tmp` was in practice the only usable staging location.
+  Mount-dir creation now tries the unprivileged `mkdir` first and escalates to
+  `sudo mkdir` + a `chown` to the invoking uid only when that fails, so no privilege is
+  used where none is needed. A directory that cannot be created now fails the task **at
+  stage-in**, classified `staging_error`, instead of running the command against an
+  unwritable mount.
+  Confirmed on a real t4g.medium before and after: `/out/results` went from
+  `drwxr-xr-x 2 0 0` (root) to `drwxr-xr-x 2 1000 1000`, and a directory output now
+  stages recursively to S3 including its subdirectory. A code read could not catch this
+  — the `mkdir` is emitted either way; only a real instance shows it returning non-zero.
+  The chown is deliberately gated on the directory not already existing: a destination
+  of `/tmp/staged.bin` yields a mount dir of `/tmp`, and chowning *that* would strip the
+  sticky ownership the whole instance depends on.
+
 - **Lambda deployments no longer upload the whole source directory** (#645). The three
   SAM-deployed lambdas used `CodeUri: .` (or, for `pipeline-orchestrator`, no `CodeUri`
   at all), and `sam deploy` zips that directory with **no filtering of any kind** — every
@@ -35,21 +75,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Published artifact layout is unchanged: the release zip still has `bootstrap` at its
   root, which `spawn reaper deploy` (#625) depends on.
 
-### Changed
-- **A 22 MiB compiled binary is no longer tracked in git** (#637).
-  `lambda/autoscale-orchestrator/autoscale-orchestrator` was the one name missing
-  from `.gitignore`'s hand-maintained per-lambda list, so it was tracked and
-  mutable: a plain `go build ./...` in that module — which CI itself runs on every
-  lambda module — rewrote it, and `git add -A` then staged a 22 MiB diff. No
-  user-facing behaviour change; it is build output that was never meant to be
-  committed, and was in fact a **macOS (Mach-O) build**, so it could never have run
-  on Lambda's `provided.al2023`/arm64 to begin with. Removing it from `HEAD` does
-  not shrink existing clones — the bytes stay in history — but it stops the bleeding.
-  Two new gates replace the hand-maintained list as the real protection: one fails
-  if **any** tracked file is a compiled executable (matched by magic bytes, not
-  `file` output, which calls every shell and Python script "executable"), and one
-  fails if a Go lambda module is missing its `.gitignore` entry — so the next lambda
-  cannot reintroduce this by being forgotten.
+### Documentation
+
+- **`spawn task run --help` now explains what gets bind-mounted, as whom, and where
+  staging space actually comes from** (#620). The old text said only "the manifest dirs
+  are bind-mounted", which reads as though any path works for any image — and the gap
+  cost a reporter real debugging time, then led to a set of workarounds that are no
+  longer necessary.
+  It now states that spawn pre-creates the parent of every `inputs[].destination` and
+  `outputs[].source` as the instance user and runs the container as that same `uid:gid`
+  rather than the image's declared `USER` (#555), chowning staged inputs so they can be
+  deleted as well as read (#565) — so any absolute path works, the image's `USER` is
+  irrelevant, and staged paths do **not** need to be kept flat in `/tmp`.
+  It also documents the trap that `resources.disk_gib` sizes the **root EBS volume**, so
+  it is the knob for an ordinary path like `/work`, while `/tmp` on AL2023 is a tmpfs
+  capped near half of instance memory — staging a 40 GiB index into `/tmp` fails on a
+  32 GiB box no matter how large `disk_gib` is. Since sizing for a staging footprint in
+  memory tends to pick the instance *family* rather than just its size, the two choices
+  are not interchangeable on cost.
 
 ## [0.116.0] - 2026-10-03
 
