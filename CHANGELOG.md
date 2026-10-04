@@ -49,9 +49,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the placement group could not be deleted (`InvalidPlacementGroup.InUse`).
   A phase predicate cannot be made safe here: `PhaseLaunchAcked` is `iota` 0, so a
   member that never launched is indistinguishable from one that did. The drain is now
-  **unconditional** on cohort failure — it filters by the `spawn:job-array-id` tag, so
-  with nothing launched it costs one `DescribeInstances`, against a missed drain costing
-  $15/hr.
+  **unconditional** on cohort failure, so with nothing launched it costs one
+  `DescribeInstances`, against a missed drain costing $15/hr.
+  **This fixed the gating but not the leak** — see #683 below. The drain it was gating
+  could never match an instance, which only became visible on real hardware.
+- **The failed-cohort drain had never terminated anything** (#683). It filtered on
+  `in.Tags["spawn:job-array-id"]`, but `listInstancesInRegion` lifts every recognised
+  `spawn:*` tag into a **named field** and writes only *unrecognised* keys into the
+  `Tags` map — so that lookup was always `""`, the comparison was always true, and every
+  instance was skipped. A failed cohort leaked its members, which is the cost leak #671
+  was filed about in the first place.
+  What hid it: the drain printed nothing on success *or* on matching zero instances, so
+  the two were indistinguishable; and cohort's own cancellation path does terminate the
+  *cancelled* member, so a failed 2-node run left exactly one instance behind and looked
+  like a race rather than a dead code path. The member actually left billing was the one
+  that **failed** — the culprit.
+  Reproduced twice on real hardware (two `c6i.large`, then two `c5n.9xlarge`), with
+  CloudTrail showing a single `TerminateInstances` call that came from cohort, not from
+  the drain. It is also why `InvalidPlacementGroup.InUse` appeared in #671's report: the
+  deferred placement-group cleanup ran while an undrained instance still referenced it.
+  Now filtered on the named field through an `instanceBelongsToJobArray` predicate that
+  **matches nothing for an empty cohort id** (an empty id must not match every instance
+  in the account), and the drain reports what it found and did in every case, including
+  a loud warning when a cohort that launched drains nothing. A new gate fails the build
+  on any read of a recognised `spawn:*` key from `InstanceInfo.Tags`, since "that map
+  holds all the tags" is the reusable mistake rather than this one line.
+- **`--subnet-id` could not be used with `--mpi` or `--count`** (#683). A subnet exists
+  in exactly one availability zone, but the MPI AZ-fallback chain rewrote
+  `Placement.AvailabilityZone` as it advanced, so a pinned subnet in `us-east-1b` got
+  `us-east-1a` and EC2 refused every member:
+  `InvalidParameterValue: Value (us-east-1a) for parameter availabilityZone is invalid.
+  Subnet '...' is in the availability zone us-east-1b`.
+  An explicit subnet is now AZ-bound and takes the same single-rung path a fixed
+  `--placement-group` already took. The conflict was **unreachable until #667** stopped
+  dropping `--subnet-id`, so this combination had never actually worked — and the unit
+  tests could see the subnet arrive on the config but not that it then contradicted the
+  AZ chain. Found on real hardware.
 - **`--security-group-ids` and `--subnet-id` were silently dropped on every ordinary
   launch** (#667). Both were parsed into package globals whose only assignment onto the
   `LaunchConfig` lived on the **batch-queue** path, so `spawn launch

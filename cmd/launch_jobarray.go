@@ -176,6 +176,27 @@ func buildAZChain(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 		return primary, []cohort.Rung{primary}
 	}
 
+	// Gated for the same reason: an explicit --subnet-id is AZ-bound, because a
+	// subnet exists in exactly one availability zone. Advancing the chain rewrites
+	// Placement.AvailabilityZone, and EC2 rejects the launch outright when that
+	// contradicts the subnet:
+	//
+	//	InvalidParameterValue: Value (us-east-1a) for parameter availabilityZone
+	//	is invalid. Subnet '...' is in the availability zone us-east-1b
+	//
+	// This was unreachable until #667, which stopped dropping --subnet-id — so
+	// `--subnet-id` with `--mpi`/`--count` had never actually worked. Found by
+	// running #667 on real hardware; the unit tests could see the subnet arrive on
+	// the config but not that it then contradicted the AZ chain.
+	//
+	// AvailZone is left as the caller gave it (usually empty, so RunInstances
+	// derives the zone from the subnet). An inconsistent explicit --az + subnet
+	// pair is preserved rather than rewritten, so it surfaces as EC2's own clear
+	// error instead of being silently moved to a zone the caller didn't pick.
+	if baseConfig.SubnetID != "" {
+		return primary, []cohort.Rung{primary}
+	}
+
 	zones, err := awsClient.DescribeAvailabilityZones(ctx, baseConfig.Region)
 	if err != nil || len(zones) == 0 {
 		// AZ discovery failed — degrade to single-rung rather than fail the launch.
@@ -254,19 +275,77 @@ func cleanupAbandonedPGs(ctx context.Context, awsClient *aws.Client, act *mpicoh
 // Best-effort: used to compensate for cohort NOT draining on assembly failure
 // (the members are all live when Assemble runs, so a failed push must not leave a
 // billing cluster). Errors are logged, not fatal.
+// instanceBelongsToJobArray reports whether in is a member of jobArrayID.
+//
+// Reads InstanceInfo.JobArrayID, NOT Tags["spawn:job-array-id"] (#683):
+// listInstancesInRegion lifts every spawn:* tag it recognises into a named field
+// and only writes UNrecognised keys into Tags, so that lookup is always empty and
+// the drain it guarded matched nothing, ever.
+//
+// An empty jobArrayID matches nothing. Without that guard a drain called with a
+// missing id would match every plain instance in the account and terminate it.
+func instanceBelongsToJobArray(in aws.InstanceInfo, jobArrayID string) bool {
+	if jobArrayID == "" {
+		return false
+	}
+	return in.JobArrayID == jobArrayID
+}
+
 func drainJobArray(ctx context.Context, awsClient *aws.Client, region, jobArrayID string) {
 	insts, err := awsClient.ListInstances(ctx, region, "")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️  drain: list instances failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "⚠️  drain: list instances failed: %v — RUN `spawn instances list` "+
+			"AND TERMINATE BY HAND; a failed cohort's instances are still billing\n", err)
 		return
 	}
+
+	// Report what was found and done, always. This path is the only thing between
+	// a failed cohort and an open-ended bill, and it used to be completely silent
+	// on success — so "drained 2" and "drained nothing because the scan came back
+	// empty" looked identical from the outside. A real 2-node run ended with one
+	// member terminated, one left running, and no indication which had happened
+	// (#683).
+	var drained, failed int
 	for _, in := range insts {
-		if in.Tags["spawn:job-array-id"] != jobArrayID {
+		// in.JobArrayID, NOT in.Tags["spawn:job-array-id"] (#683).
+		//
+		// listInstancesInRegion lifts the spawn:* tags it knows into named fields
+		// in a switch, and only its DEFAULT branch writes into the Tags map. So
+		// every recognised tag — spawn:job-array-id among them — is absent from
+		// Tags, and the old filter compared "" against the cohort id for every
+		// instance and skipped all of them.
+		//
+		// The drain therefore terminated NOTHING, ever. Confirmed against two live
+		// instances: JobArrayID="repro682-..." while Tags["spawn:job-array-id"]=""
+		// with 25 other tags present. The single terminate seen in a real failed
+		// run came from cohort's own cancellation path, not from here, which is why
+		// the culprit member was the one left running and billing.
+		if !instanceBelongsToJobArray(in, jobArrayID) {
 			continue
 		}
 		if err := awsClient.Terminate(ctx, region, in.InstanceID); err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  drain: terminate %s failed: %v\n", in.InstanceID, err)
+			failed++
+			fmt.Fprintf(os.Stderr, "⚠️  drain: terminate %s failed: %v — TERMINATE IT BY HAND\n",
+				in.InstanceID, err)
+			continue
 		}
+		drained++
+		fmt.Fprintf(os.Stderr, "   drained %s (%s)\n", in.InstanceID, in.State)
+	}
+
+	switch {
+	case failed > 0:
+		fmt.Fprintf(os.Stderr, "⚠️  drain: %d terminated, %d FAILED to terminate and are still "+
+			"billing\n", drained, failed)
+	case drained == 0:
+		// Either nothing launched (fine) or the scan did not see what launched
+		// (expensive). The caller cannot tell these apart, so say so rather than
+		// implying the former.
+		fmt.Fprintf(os.Stderr, "   drain: no instances matched spawn:job-array-id=%s. If the "+
+			"cohort got as far as launching, verify with `spawn instances list` — a member the "+
+			"scan missed keeps billing.\n", jobArrayID)
+	default:
+		fmt.Fprintf(os.Stderr, "   drain: terminated %d instance(s)\n", drained)
 	}
 }
 
