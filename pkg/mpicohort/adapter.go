@@ -365,26 +365,35 @@ func (e Enroller) enrollProbeScript() string {
 		return "exit 0" // nothing to probe (custom AMI, no EFA) → trivially ready
 	}
 
-	// Source the MPI/EFA profile scripts first (spawn#684).
+	// Make the MPI/EFA tools findable before probing for them (spawn#684, #693).
 	//
-	// On AL2023 the openmpi package installs to /usr/lib64/openmpi/bin, which is
-	// NOT on the default PATH; the user-data adds it via /etc/profile.d/mpi.sh.
-	// SSM RunShellScript runs a NON-LOGIN shell, so profile.d is never sourced
-	// and PATH is only /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin — so
-	// `command -v mpirun` could never succeed, no matter how correctly MPI had
-	// installed. Every MPI cohort died at phase=enrolled as a result.
+	// SSM RunShellScript runs a NON-LOGIN shell: /etc/profile.d is never sourced,
+	// and PATH is only /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin. Neither
+	// toolchain installs there.
 	//
-	// Verified on a real c6i.large: mpirun present at
-	// /usr/lib64/openmpi/bin/mpirun, absent from `command -v` in an SSM shell,
-	// and found immediately after sourcing mpi.sh.
+	//   - openmpi (AL2023 package) → /usr/lib64/openmpi/bin
+	//   - aws-efa-installer        → /opt/amazon/efa/bin
 	//
-	// This matches what the workload itself does — the user-data sources the same
-	// file before invoking mpirun — so the probe now tests the environment the job
-	// actually runs in. `|| true` keeps a missing file from tripping the shell.
-	const sourceProfiles = `for p in /etc/profile.d/mpi.sh /etc/profile.d/efa.sh; do ` +
-		`[ -f "$p" ] && . "$p" || true; done`
+	// So `command -v mpirun` and `fi_info -p efa` could not succeed however
+	// correctly either had installed, and every cohort died at phase=enrolled.
+	//
+	// #684 fixed the mpirun half by sourcing /etc/profile.d/mpi.sh, which the
+	// user-data writes with a PATH line. That was not enough for EFA: the
+	// efa.sh spawn writes exports only FI_PROVIDER and FI_EFA_USE_DEVICE_RDMA and
+	// touches PATH not at all — the installer puts its own PATH line in
+	// /etc/profile.d/zippy_efa.sh, a name the glob below now covers.
+	//
+	// The install directories are APPENDED to PATH directly rather than trusted to
+	// any profile file, because a probe that depends on a third party's script
+	// name is a probe that breaks when they rename it. Sourcing is kept as well,
+	// so anything else those files set (FI_PROVIDER) still applies. Appending —
+	// not replacing — keeps the system PATH intact; the same reasoning as the
+	// task-flush hook's PATH handling.
+	const prepare = `for p in /etc/profile.d/mpi.sh /etc/profile.d/*efa*.sh; do ` +
+		`[ -f "$p" ] && . "$p" || true; done; ` +
+		`PATH="$PATH:/usr/lib64/openmpi/bin:/opt/amazon/efa/bin"`
 
-	return sourceProfiles + "; " + strings.Join(checks, "; ")
+	return prepare + "; " + strings.Join(checks, "; ")
 }
 
 func (e Enroller) IsEnrolled(ctx context.Context, id cohort.EntityID) (cohort.Readiness, error) {
