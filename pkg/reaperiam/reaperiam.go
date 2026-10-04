@@ -76,11 +76,28 @@ func ScanSelfStatements() []Statement {
 		},
 		{
 			// FSx: the #210 ephemeral-orphan net. DescribeFileSystems is read-only.
-			// DeleteFileSystem cannot be tag-conditioned the way EC2 can — FSx does
-			// not expose fsx:ResourceTag for this action — so the reaper's own
-			// in-code check (it only deletes a filesystem tagged spawn:managed with
-			// no live lease, after a grace period) is the guard. That is worth
-			// stating plainly rather than implying the IAM rail covers it.
+			//
+			// DeleteFileSystem is NOT tag-conditioned here, unlike ec2:TerminateInstances
+			// above, so the reaper's own in-code check (it only deletes a filesystem
+			// tagged spawn:managed with no live lease, past a grace period) is the
+			// only guard on this path. Worth stating plainly rather than implying an
+			// IAM rail covers it.
+			//
+			// Two condition keys are easy to conflate here (#652). FSx exposes no
+			// SERVICE key fsx:ResourceTag for this action — but the GLOBAL key
+			// aws:ResourceTag/${TagKey} does work, and the cross-account role in
+			// deployment/cloudformation/ttl-reaper-cross-account-role.yaml uses it.
+			// Confirmed by IAM policy simulation: with the tag present and "true" the
+			// call is `allowed`; absent, or present and "false", it is `implicitDeny`.
+			//
+			// Deliberately NOT adopted here yet. The simulation proves IAM EVALUATES
+			// the key; it cannot prove FSx POPULATES it at request time, because the
+			// simulator takes that context from the caller. If FSx does not supply it,
+			// the condition fails closed — deletes denied, filesystems leak, which is
+			// the safe direction but still a regression. Cross-account already carries
+			// that dependency; adding it to scan-self would extend an unverified one
+			// to the path #625 exists to make work. Resolve it with a real
+			// ephemeral-FSx reap (see #613) before tightening this.
 			Effect:   "Allow",
 			Action:   []string{"fsx:DescribeFileSystems", "fsx:DeleteFileSystem"},
 			Resource: "*",

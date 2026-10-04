@@ -93,6 +93,37 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceTag/spawn:managed: 'true'
+              # REAPER_GRACEFUL (#652): ask spored to shut down cleanly over SSM
+              # before the external terminate. These run under THIS assumed role in
+              # cross-account mode, and without them graceful mode degraded to an
+              # immediate hard kill — quietly, because tryGracefulPreStop is
+              # best-effort by design and the terminate after it always runs, so
+              # #72's hard-deadline guarantee was never at risk. The scan-self half
+              # was granted in #625; this is the other half.
+              #
+              # SendCommand is scoped to the spawn-managed instances this role may
+              # already terminate, plus the one SSM document that runs a shell
+              # command. GetCommandInvocation takes no resource-level ARN, so it is
+              # Resource '*' — it only reads the result of a command this role sent.
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                Resource:
+                  - !Sub 'arn:aws:ec2:*:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    ec2:ResourceTag/spawn:managed: 'true'
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                Resource:
+                  - !Sub 'arn:aws:ssm:*:*:document/AWS-RunShellScript'
+              - Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                # trivy:ignore:AVD-AWS-0057 -- GetCommandInvocation has no
+                # resource-level ARN; it only reads a command this role issued.
+                Resource: '*'
       Tags:
         - Key: !Sub '${TagPrefix}:managed'
           Value: 'false'

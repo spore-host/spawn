@@ -45,6 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`REAPER_GRACEFUL` now works in the cross-account deployment** (#652). The reaper's
+  graceful path asks `spored` to shut down cleanly over SSM before the external
+  terminate, but in cross-account mode — which is the production configuration — those
+  calls run under the assumed `spawn-ttl-reaper-ec2` role, and that role granted **no
+  `ssm:` actions at all**. #625 added them to the Lambda's *own* execution role, which
+  covers scan-self only, so the asymmetry inverted rather than closing.
+  It degraded quietly rather than dangerously: `tryGracefulPreStop` is best-effort and
+  the terminate after it always runs, so the hard-deadline guarantee (#72) held
+  throughout — graceful mode just silently became an immediate hard kill.
+  The #625 drift gate only ever read the scan-self policy, which is exactly why this
+  survived it. It now checks **both** roles against the same discovered call set, and a
+  second test fails if either role grants something the other doesn't.
+  `ssm:SendCommand` is scoped to `spawn:managed` instances plus the one
+  `AWS-RunShellScript` document; `ssm:GetCommandInvocation` takes no resource ARN.
+
 - **`make deploy` for the TTL reaper no longer resets every setting it was not told
   about** (#650). It asserted all 13 of its own Makefile defaults on every run, so the
   command in `lambda/ttl-reaper/README.md` would have set `DryRun=true` on the live
@@ -139,6 +154,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root, which `spawn reaper deploy` (#625) depends on.
 
 ### Documentation
+
+- **Corrected a misleading comment about tag-conditioning FSx deletes** (#652).
+  `pkg/reaperiam` read as though `fsx:DeleteFileSystem` could not be tag-conditioned at
+  all, while the cross-account role tag-conditions it — an apparent contradiction. There
+  isn't one: they refer to **different condition keys**. FSx exposes no *service* key
+  `fsx:ResourceTag` for the action, but the *global* `aws:ResourceTag/${TagKey}` does
+  work. Confirmed by IAM policy simulation — with the tag present and `"true"` the call
+  is `allowed`; absent, or present and `"false"`, it is `implicitDeny`.
+  The scan-self policy deliberately does **not** adopt the condition yet. The simulation
+  proves IAM *evaluates* the key; it cannot prove FSx *populates* it at request time,
+  since the simulator takes that context from the caller. If FSx doesn't supply it the
+  condition fails closed — deletes denied and filesystems leak, which is the safe
+  direction but still a regression. Cross-account already carries that dependency;
+  extending it to the path #625 exists to make work needs a real ephemeral-FSx reap
+  first (#613).
 
 - **`spawn task run --help` now explains what gets bind-mounted, as whom, and where
   staging space actually comes from** (#620). The old text said only "the manifest dirs
