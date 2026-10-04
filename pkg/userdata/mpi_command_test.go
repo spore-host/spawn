@@ -45,11 +45,10 @@ func commandFileBody(t *testing.T, script string) string {
 func mpiScriptWithCommand(t *testing.T, cmd string) string {
 	t.Helper()
 	s, err := GenerateMPIUserData(MPIConfig{
-		Region:         "us-east-1",
-		JobArrayID:     "arr-1",
-		JobArraySize:   2,
-		BinariesBucket: "b",
-		MPICommand:     cmd,
+		Region:       "us-east-1",
+		JobArrayID:   "arr-1",
+		JobArraySize: 2,
+		MPICommand:   cmd,
 	})
 	if err != nil {
 		t.Fatalf("GenerateMPIUserData: %v", err)

@@ -32,9 +32,14 @@ type fakeLauncher struct {
 	pgDeleted     []string       // placement group names passed to DeletePlacementGroup
 	pgCreateDelay time.Duration  // artificial delay inside CreatePlacementGroup, widens race windows in tests
 
-	ssmCmds       map[string]string // instanceID → last RunShellScript command
-	ssmFailIDs    map[string]bool   // instanceIDs whose RunShellScript returns Failed
-	ssmOnlineFail map[string]bool   // instanceIDs whose WaitForSSMOnline errors
+	ssmCmds       map[string]string   // instanceID → last RunShellScript command
+	ssmAllCmds    map[string][]string // instanceID → every RunShellScript command, in order
+	ssmFailIDs    map[string]bool     // instanceIDs whose RunShellScript returns Failed
+	ssmOnlineFail map[string]bool     // instanceIDs whose WaitForSSMOnline errors
+
+	// Cluster SSH key (#684): assembly reads rank 0's pubkey over SSM.
+	clusterKey      string // pubkey to serve; defaults to a valid-looking ssh-rsa line
+	ssmNoClusterKey bool   // serve an EMPTY key, modelling rank 0 not having generated it
 }
 
 type launchRec struct {
@@ -153,9 +158,29 @@ func (f *fakeLauncher) RunShellScript(_ context.Context, _, instanceID, command 
 		f.ssmCmds = map[string]string{}
 	}
 	f.ssmCmds[instanceID] = command
+	if f.ssmAllCmds == nil {
+		f.ssmAllCmds = map[string][]string{}
+	}
+	f.ssmAllCmds[instanceID] = append(f.ssmAllCmds[instanceID], command)
+
 	if f.ssmFailIDs[instanceID] {
 		return &aws.SSMRunResult{Status: "Failed", ResponseCode: 1, Stderr: "boom"}, nil
 	}
+
+	// The cluster-key read (#684). Assembly now reads rank 0's public key over
+	// SSM and installs it on every node, so the fake has to answer that query or
+	// the assembler correctly waits out its budget.
+	if strings.Contains(command, "id_rsa.pub") {
+		if f.ssmNoClusterKey {
+			return &aws.SSMRunResult{Status: "Success", ResponseCode: 0, Stdout: ""}, nil
+		}
+		key := f.clusterKey
+		if key == "" {
+			key = "ssh-rsa AAAAB3NzaC1yc2ETESTKEY root@rank0"
+		}
+		return &aws.SSMRunResult{Status: "Success", ResponseCode: 0, Stdout: key + "\n"}, nil
+	}
+
 	return &aws.SSMRunResult{Status: "Success", ResponseCode: 0}, nil
 }
 
@@ -677,5 +702,158 @@ func TestEnsurePlacementGroup_ConcurrentDifferentAZsNotSerialized(t *testing.T) 
 		if got := f.pgCreated[name]; got != 1 {
 			t.Errorf("CreatePlacementGroup(%s) called %d times, want 1", name, got)
 		}
+	}
+}
+
+// TestSSMAssembler_InstallsClusterKeyBeforePeers is spawn#684.
+//
+// --mpi had never worked. The cluster SSH key went through S3: rank 0 uploaded
+// its pubkey and the other ranks polled for it. MPIConfig.BinariesBucket was
+// never set by any caller, so the command rendered "s3:///", failed parameter
+// validation, and aborted cloud-init's scripts-user module — which took the rest
+// of the MPI setup with it. mpirun was therefore never installed, the enrollment
+// probe (command -v mpirun) could never pass, and every cohort died at
+// phase=enrolled. 4 of 4 real launches failed this way.
+//
+// Distribution now rides SSM, the path the peers file already used. Two
+// properties matter and neither is visible from the happy path alone:
+// the key must reach EVERY node, and it must be installed BEFORE the peers file,
+// because the peers file is the release signal and the step right after it is
+// mpirun reaching the other ranks over ssh.
+func TestSSMAssembler_InstallsClusterKeyBeforePeers(t *testing.T) {
+	f := newFakeLauncher()
+	asm := NewSSMAssembler(f, "us-east-1", "acct36", time.Minute, time.Minute)
+	members := []cohort.Observation{
+		{ID: "job-0", ProviderID: "i-0", Address: "10.0.0.1"},
+		{ID: "job-1", ProviderID: "i-1", Address: "10.0.0.2"},
+	}
+	if err := asm.Assemble(context.Background(), members); err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, id := range []string{"i-0", "i-1"} {
+		cmds := f.ssmAllCmds[id]
+		keyIdx, peersIdx := -1, -1
+		for i, c := range cmds {
+			if strings.Contains(c, "authorized_keys") && keyIdx < 0 {
+				keyIdx = i
+			}
+			if strings.Contains(c, "job-array-peers.json") && peersIdx < 0 {
+				peersIdx = i
+			}
+		}
+		if keyIdx < 0 {
+			t.Errorf("%s never received the cluster SSH key, so mpirun cannot ssh to it "+
+				"(#684). commands: %v", id, cmds)
+			continue
+		}
+		if peersIdx < 0 {
+			t.Errorf("%s never received the peers file", id)
+			continue
+		}
+		if keyIdx > peersIdx {
+			t.Errorf("%s got the peers file (cmd %d) BEFORE the cluster key (cmd %d). The "+
+				"peers file is the release signal and mpirun follows it immediately, so the "+
+				"key must already be installed.", id, peersIdx, keyIdx)
+		}
+	}
+
+	// The key install must be idempotent: assembly can be retried, and appending
+	// the same key repeatedly would grow root's authorized_keys without bound.
+	if cmds := f.ssmAllCmds["i-0"]; len(cmds) > 0 && !strings.Contains(strings.Join(cmds, "\n"), "grep -qxF") {
+		t.Error("the key install is not guarded against duplicate appends; a retried " +
+			"assembly would append the same key again")
+	}
+}
+
+// TestSSMAssembler_NoClusterKeyIsAssemblyError: if rank 0 never produces a usable
+// public key, assembly must FAIL rather than hand out a cluster whose ranks
+// cannot reach each other. Failing here is what makes the caller drain, so the
+// instances do not sit billing while mpirun retries ssh forever.
+func TestSSMAssembler_NoClusterKeyIsAssemblyError(t *testing.T) {
+	f := newFakeLauncher()
+	f.ssmNoClusterKey = true
+	// Shrink the wait so the test does not sit through the 3-minute production
+	// budget; without this the test took 180s, which is how a slow test becomes a
+	// skipped test.
+	t.Cleanup(SetKeyWaitForTest(150*time.Millisecond, 10*time.Millisecond))
+	asm := NewSSMAssembler(f, "us-east-1", "", time.Millisecond, time.Millisecond)
+	members := []cohort.Observation{{ID: "job-0", ProviderID: "i-0", Address: "10.0.0.1"}}
+
+	done := make(chan error, 1)
+	go func() { done <- asm.Assemble(context.Background(), members) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected assembly to fail when rank 0 has no usable public key")
+		}
+		if !strings.Contains(err.Error(), "cluster SSH key") {
+			t.Errorf("error should name the cluster key, got: %v", err)
+		}
+	case <-time.After(keyWaitBudget + 30*time.Second):
+		t.Fatal("assembly did not give up waiting for the cluster key")
+	}
+}
+
+// TestSSMAssembler_NoRankZeroIsAssemblyError: the key owner is identified by
+// job-array index 0. A member set without one means nothing can generate the
+// cluster key, which must be an error rather than a silently key-less cluster.
+func TestSSMAssembler_NoRankZeroIsAssemblyError(t *testing.T) {
+	f := newFakeLauncher()
+	asm := NewSSMAssembler(f, "us-east-1", "", time.Minute, time.Minute)
+	members := []cohort.Observation{
+		{ID: "job-7", ProviderID: "i-7", Address: "10.0.0.8"},
+		{ID: "job-9", ProviderID: "i-9", Address: "10.0.0.9"},
+	}
+	if err := asm.Assemble(context.Background(), members); err == nil {
+		t.Fatal("expected assembly error when no member has index 0")
+	}
+}
+
+// TestEnrollProbeSourcesMPIProfile is the second half of spawn#684, and on its
+// own it is why MPI cohorts died at phase=enrolled even once MPI installed
+// correctly.
+//
+// On AL2023 the openmpi package installs into /usr/lib64/openmpi/bin, which is
+// NOT on the default PATH — the user-data puts it there via
+// /etc/profile.d/mpi.sh. But SSM RunShellScript uses a NON-LOGIN shell, so
+// profile.d is never sourced. Verified on a real c6i.large:
+//
+//	/usr/lib64/openmpi/bin/mpirun -> orterun          (installed)
+//	$PATH = /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+//	command -v mpirun                                  → nothing
+//	source /etc/profile.d/mpi.sh && command -v mpirun  → /usr/lib64/openmpi/bin/mpirun
+//
+// So the probe tested a PATH the workload never uses, and no amount of correct
+// installation could satisfy it.
+func TestEnrollProbeSourcesMPIProfile(t *testing.T) {
+	s := Enroller{}.enrollProbeScript()
+
+	if !strings.Contains(s, "/etc/profile.d/mpi.sh") {
+		t.Errorf("the probe must source /etc/profile.d/mpi.sh before looking for mpirun: on "+
+			"AL2023 openmpi lives in /usr/lib64/openmpi/bin, which is absent from the "+
+			"non-login PATH that SSM gives it.\ngot: %q", s)
+	}
+
+	// The profile sourcing must come BEFORE the check, or it accomplishes nothing.
+	srcIdx := strings.Index(s, "/etc/profile.d/mpi.sh")
+	chkIdx := strings.Index(s, "command -v mpirun")
+	if srcIdx > chkIdx {
+		t.Errorf("profile is sourced at %d, after the mpirun check at %d", srcIdx, chkIdx)
+	}
+
+	// A missing profile must not make the probe fail outright — a custom AMI with
+	// mpirun already on PATH is legitimate.
+	if !strings.Contains(s, "|| true") {
+		t.Error("sourcing must tolerate an absent profile file, or a custom AMI that " +
+			"already has mpirun on PATH would fail the probe")
+	}
+
+	// The trivial case stays trivial: nothing to probe means no profile juggling.
+	if got := (Enroller{SkipMPIInstall: true}).enrollProbeScript(); got != "exit 0" {
+		t.Errorf("skip-install with no EFA should stay trivially ready, got %q", got)
 	}
 }

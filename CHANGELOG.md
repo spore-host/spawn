@@ -53,6 +53,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DescribeInstances`, against a missed drain costing $15/hr.
   **This fixed the gating but not the leak** — see #683 below. The drain it was gating
   could never match an instance, which only became visible on real hardware.
+- **`--mpi` had never worked end-to-end** (#684). Two independent defects, either of
+  which was enough to kill every MPI launch, and both only visible on real hardware.
+  **The cluster SSH key could not be distributed.** `mpirun` reaches the other ranks over
+  ssh as root, so every node needs rank 0's public key. That went through S3 — but
+  `MPIConfig.BinariesBucket` was **never set by any caller**, so the command rendered
+  `s3:///`, failed parameter validation, and **aborted cloud-init's `scripts-user`
+  module**, taking the rest of the MPI setup with it. `mpirun` was therefore never
+  installed and `cloud-init status` reported `error`. Naming the bucket would not have
+  helped: the spored role grants only `s3:GetObject` on `spawn-binaries-*`, so the upload
+  would have been `AccessDenied`. The field's own comment claimed a default
+  ("defaults to spawn-binaries-{region}") that no code ever applied; it is now removed
+  rather than left as a trap.
+  Distribution rides **SSM**, the control-plane path the peers file already used — no
+  bucket, no IAM grant, and no cross-node polling race. The **private** key is still
+  generated on rank 0 and never transported: user-data would expose it to any local user
+  via IMDS, and SSM would record it in CloudTrail. The key is installed *before* the
+  peers file, because the peers file is the release signal and `mpirun` follows it
+  immediately.
+  **The enrollment probe could never pass.** On AL2023 `openmpi` installs to
+  `/usr/lib64/openmpi/bin`, which is **not on the default PATH** — the user-data adds it
+  via `/etc/profile.d/mpi.sh`. But SSM runs a **non-login shell**, so profile.d is never
+  sourced and `command -v mpirun` found nothing however correctly MPI had installed.
+  Confirmed on a live `c6i.large`: `mpirun` present at `/usr/lib64/openmpi/bin/mpirun`,
+  invisible to `command -v`, and resolved immediately after sourcing the profile. The
+  probe now sources the MPI/EFA profiles first, so it tests the environment the workload
+  actually runs in, and tolerates their absence for a custom AMI that already has
+  `mpirun` on PATH.
+  Together these are why **4 of 4** MPI launches failed at `phase=enrolled` with
+  `PhaseBudgetExceeded`, across two instance families — and why #671 and #683 had to be
+  fixed first: each failure was hiding the next.
+- **A member whose peers file never arrived waited forever** (#684). The MPI user-data
+  had an unbounded wait on `/etc/spawn/job-array-peers.json`, so a node the control plane
+  never reached sat there until its TTL — and on a box where `spored` failed to install,
+  nothing enforced the TTL either (#682), so it could sit indefinitely on a billing
+  instance. It now gives up after 10 minutes, says why, and writes a failed completion
+  record so `--on-complete` still fires.
+
 - **The failed-cohort drain had never terminated anything** (#683). It filtered on
   `in.Tags["spawn:job-array-id"]`, but `listInstancesInRegion` lifts every recognised
   `spawn:*` tag into a **named field** and writes only *unrecognised* keys into the
