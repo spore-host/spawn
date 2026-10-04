@@ -5,6 +5,8 @@ package aws
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -285,24 +287,107 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		tags = append(tags, types.Tag{Key: aws.String("spawn:sweep-name"), Value: aws.String(config.SweepName)})
 		tags = append(tags, types.Tag{Key: aws.String("spawn:sweep-size"), Value: aws.String(fmt.Sprintf("%d", config.SweepSize))})
 		tags = append(tags, types.Tag{Key: aws.String("spawn:sweep-index"), Value: aws.String(fmt.Sprintf("%d", config.SweepIndex))})
+	}
 
-		// Add parameter tags (up to 35 to stay under AWS 50-tag limit)
-		paramCount := 0
-		for k, v := range config.Parameters {
-			if paramCount >= 35 {
+	// Dedupe everything the sections above appended, keeping the first
+	// occurrence. EC2 rejects the entire RunInstances call on a repeated key
+	// ("Duplicate tag key '<k>' specified"), and the spot-interruption and
+	// completion webhook blocks both emit spawn:webhook-correlation and
+	// spawn:webhook-timeout — so setting both URLs failed the launch with two
+	// flags. Done as a pass here rather than by threading appendTagUnique through
+	// every section, so a future section cannot forget to use it.
+	tags = dedupeTags(tags)
+
+	// --- Section 7: user-supplied custom tags ---
+	// Sorted so the set is deterministic, and deduped against spawn's own keys:
+	// the --tag help states the spawn: prefix is reserved, so a collision is a
+	// caller error rather than an override.
+	for _, k := range sortedKeys(config.Tags) {
+		tags = appendTagUnique(tags, k, config.Tags[k])
+	}
+
+	// --- Section 8: sweep parameter tags, LAST and budgeted (#477) ---
+	//
+	// AWS caps a resource at 50 tags and FAILS RunInstances outright when
+	// exceeded — it does not truncate. The old code capped parameters at 35 with
+	// a comment claiming that "stays under AWS 50-tag limit", but counted only
+	// the parameters and ignored the ~45 tags the sections above had already
+	// appended; a maximal launch with 60 parameters emitted 81 tags.
+	//
+	// Emitted last so the cap can be computed against what the launch actually
+	// used, and in SORTED order so the surviving subset is deterministic. The old
+	// loop ranged over the map directly, so which parameters survived depended on
+	// Go's randomised iteration order — two members of one sweep could record
+	// different points in the parameter space.
+	//
+	// Parameters are the only droppable class here: spawn:* lifecycle tags are
+	// spored's contract (dropping spawn:ttl would disable TTL enforcement and
+	// bill open-endedly), and --tag is an explicit request. spawn:param:* is a
+	// convenience record of the sweep point, and the sweep manifest remains
+	// authoritative — so a truncated tag set beats a launch that cannot start.
+	if config.SweepID != "" && len(config.Parameters) > 0 {
+		budget := awsMaxTagsPerResource - len(tags)
+		if budget < 0 {
+			budget = 0
+		}
+		keys := sortedKeys(config.Parameters)
+		emitted := 0
+		for _, k := range keys {
+			if emitted >= budget {
 				break
 			}
-			tags = append(tags, types.Tag{Key: aws.String("spawn:param:" + k), Value: aws.String(v)})
-			paramCount++
+			before := len(tags)
+			tags = appendTagUnique(tags, "spawn:param:"+k, config.Parameters[k])
+			if len(tags) > before {
+				emitted++
+			}
+		}
+		if dropped := len(keys) - emitted; dropped > 0 {
+			fmt.Fprintf(os.Stderr,
+				"⚠️  %d of %d sweep parameters were not tagged: the launch already uses %d of "+
+					"AWS's %d tags per resource.\n   The instance still runs with the full "+
+					"parameter set in its environment; only the spawn:param:* record is "+
+					"truncated (first %d by name kept).\n",
+				dropped, len(keys), len(tags)-emitted, awsMaxTagsPerResource, emitted)
 		}
 	}
 
-	// --- Section 7: user-supplied custom tags (appended last) ---
-	for k, v := range config.Tags {
-		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
-	}
-
 	return tags
+}
+
+// awsMaxTagsPerResource is AWS's hard per-resource tag cap. Exceeding it makes
+// RunInstances fail outright — EC2 does not silently truncate — and the same
+// slice is applied to both the instance and its volumes.
+const awsMaxTagsPerResource = 50
+
+// appendTagUnique appends key=value unless key is already present, keeping the
+// FIRST occurrence.
+//
+// Duplicate keys are not merely untidy: EC2 rejects the whole RunInstances call
+// with "Duplicate tag key '<k>' specified". The spot-interruption and completion
+// webhook blocks both emitted spawn:webhook-correlation and
+// spawn:webhook-timeout, so setting both URLs failed the launch with just two
+// flags — no tag-limit arithmetic required. Both blocks read the same config
+// fields, so first-wins and last-wins are identical in value here; first-wins
+// keeps the output order stable.
+func appendTagUnique(tags []types.Tag, key, value string) []types.Tag {
+	for _, t := range tags {
+		if t.Key != nil && *t.Key == key {
+			return tags
+		}
+	}
+	return append(tags, types.Tag{Key: aws.String(key), Value: aws.String(value)})
+}
+
+// sortedKeys returns m's keys in sorted order, so anything derived from a Go map
+// is deterministic rather than dependent on randomised iteration order.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // managedResourceTags builds the standard spawn:managed tag set for a secondary
@@ -374,4 +459,22 @@ func slugifyDNSLabel(name string) string {
 		slug = strings.Trim(slug[:63], "-")
 	}
 	return slug
+}
+
+// dedupeTags removes repeated keys, keeping the first occurrence and preserving
+// order. See appendTagUnique for why a duplicate key is launch-breaking.
+func dedupeTags(tags []types.Tag) []types.Tag {
+	seen := make(map[string]bool, len(tags))
+	out := make([]types.Tag, 0, len(tags))
+	for _, t := range tags {
+		if t.Key == nil {
+			continue
+		}
+		if seen[*t.Key] {
+			continue
+		}
+		seen[*t.Key] = true
+		out = append(out, t)
+	}
+	return out
 }
