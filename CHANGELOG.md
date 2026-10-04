@@ -62,6 +62,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the template could interpolate a bucket while never checking that any caller did.
   Confirmed to fail when #684 is reintroduced.
 
+### Fixed
+
+- **`spawn launch` rejected the form its own `--help` documented as required** (#499).
+  The spore name had to be **positional**, while the `--name` flag's help described
+  itself as "required" and the "Direct with flags" example omitted the positional
+  entirely. Following either piece of the built-in documentation failed — with
+  `accepts 1 arg(s), received 0`, a message that never mentions the name, so the error
+  pointed at nothing.
+  `runLaunch` already read both forms (`--name` wins, the positional fills in); only
+  `cobra.ExactArgs(1)` stood in the way, and it could not express the rule, because it
+  sees the positional count and nothing else. Either form is now accepted, the help text
+  says so, and the three failure cases each say what is actually wrong: no name at all,
+  two names that disagree, or more than one positional.
 
 ## [0.118.0] - 2026-10-04
 
