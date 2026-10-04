@@ -1,12 +1,9 @@
 package cmd
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -39,22 +36,18 @@ func TestOrderAZs(t *testing.T) {
 	}
 }
 
-// decodeUserData reverses encodeUserData (gzip + base64) for assertions.
-func decodeUserData(t *testing.T, encoded string) string {
+// mustDecodeUserData decodes through the PRODUCTION decoder (spawn#671), so these
+// assertions exercise the same path the job-array builder uses. It previously had
+// its own copy — which was correct while the production code was not, so the test
+// side knew the encoding was gzip+base64 and the builder still appended to the
+// compressed bytes.
+func mustDecodeUserData(t *testing.T, encoded string) string {
 	t.Helper()
-	raw, err := base64.StdEncoding.DecodeString(encoded)
+	out, err := decodeUserData(encoded)
 	if err != nil {
-		t.Fatalf("base64 decode: %v", err)
+		t.Fatalf("decodeUserData: %v", err)
 	}
-	gz, err := gzip.NewReader(bytes.NewReader(raw))
-	if err != nil {
-		t.Fatalf("gzip reader: %v", err)
-	}
-	out, err := io.ReadAll(gz)
-	if err != nil {
-		t.Fatalf("gzip read: %v", err)
-	}
-	return string(out)
+	return out
 }
 
 // TestBuildAZChain_PlacementGroupGate covers the Stage-1 guard: when a cluster
@@ -170,8 +163,8 @@ func TestBuildJobArrayMemberConfig(t *testing.T) {
 
 	// Per-index MPI user-data: the two must differ (rank 0 generates/uploads the
 	// SSH key + runs mpirun; others wait), and both must carry the base script.
-	ud0 := decodeUserData(t, cfg0.UserData)
-	ud1 := decodeUserData(t, cfg1.UserData)
+	ud0 := mustDecodeUserData(t, cfg0.UserData)
+	ud1 := mustDecodeUserData(t, cfg1.UserData)
 	if !strings.Contains(ud0, "echo base") || !strings.Contains(ud1, "echo base") {
 		t.Error("member user-data lost the base script")
 	}
