@@ -45,6 +45,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`make deploy` for the TTL reaper no longer resets every setting it was not told
+  about** (#650). It asserted all 13 of its own Makefile defaults on every run, so the
+  command in `lambda/ttl-reaper/README.md` would have set `DryRun=true` on the live
+  production stack — **disarming the reaper**. That is the worst failure mode available
+  to a cost backstop: it keeps running, keeps reporting, and merely stops terminating
+  anything, so nothing looks wrong until an instance outlives its TTL. The same deploy
+  would also have turned DNS sweep off, blanked the hosted-zone and domain, and detached
+  the alarm topic — silencing every failure alarm in the stack, including the
+  not-invoked alarm that exists to catch a reaper that stopped running.
+  Deploy now **reads the live stack first**: an unspecified parameter keeps whatever is
+  deployed, anything passed explicitly still gets through, and a fresh stack falls back
+  to the template defaults. So redeploying for new code is a bare `make deploy`, which
+  reports `deploy changes no parameters (code only)`. Any parameter that *would* change
+  is printed before the deploy runs.
+  Verified against the real production stack read-only: all 16 parameters inherited with
+  **zero drift** and `DryRun=false` preserved. Also now covers `MaxAge`, `Regions` and
+  `Schedule`, which the Makefile previously omitted entirely and left to
+  `UsePreviousValue`.
+  The irony worth recording: the Makefile's own comments carefully explain the
+  *opposite* hazard — an omitted parameter becomes `UsePreviousValue` and is therefore
+  unreachable, which is why #438 could not be enabled from `make deploy`. Passing
+  everything explicitly fixed that and created this. Read-then-write fixes both.
+
 - **Concurrent `spawn task run` launches no longer fail on IAM `ConcurrentModification`**
   (#648). Two launches ~60 ms apart — the normal case for any workflow executor fanning
   out independent processes — raced on `CreateInstanceProfile`, and one died with

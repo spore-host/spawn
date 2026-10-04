@@ -112,6 +112,20 @@ make deploy DRY_RUN=true NOTIFY_URL=https://hooks.slack.com/services/... \
 make deploy DRY_RUN=false NOTIFY_URL=https://hooks.slack.com/services/... ROLE_ARNS='...'
 ```
 
+**You only need to pass what you want to change.** `make deploy` reads the live
+stack's parameters first and inherits anything you do not specify, so redeploying
+to pick up new code is just `make deploy` — it reports `deploy changes no
+parameters (code only)` and leaves every setting as-is.
+
+That was not always true. Until spawn#650 the Makefile asserted all of its own
+`?=` defaults on every run, so a plain `make deploy` against the armed production
+stack would have set `DryRun=true` — **disarming the reaper**, silently, since it
+keeps running and reporting and merely stops terminating anything. It would also
+have turned `DnsSweep` off, blanked the DNS zone/domain, and detached
+`AlarmTopicArn` so every failure alarm fired into nothing. The examples below pass
+things explicitly, which is still correct and still the way to *change* a setting;
+they are no longer the only way to *keep* one.
+
 DNS teardown (#247) and the reconciliation sweep (#438) are off unless their
 parameters are passed — the sweep is opt-in on top of a configured zone, so both
 DNS knobs are needed:

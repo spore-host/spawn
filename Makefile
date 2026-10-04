@@ -178,6 +178,13 @@ test-e2e: test-e2e-tier1 test-e2e-tier2 test-e2e-tier3
 # turning them into recurring unrelated diffs in whatever PR came next.
 #
 # Excludes vendor/ and lists offenders with a diff, so the fix is obvious.
+# Mechanical fix for the duplicate-group conflict changelog_test.go rejects. Two
+# PRs each adding their own `### Fixed` merge cleanly for git and badly for the
+# format; this merges them in Keep-a-Changelog order. Touches [Unreleased] only.
+.PHONY: changelog-fix
+changelog-fix:
+	python3 scripts/changelog-consolidate.py CHANGELOG.md
+
 check-fmt:
 	@files=$$(gofmt -l . 2>/dev/null | grep -v '^vendor/' || true); \
 	if [ -n "$$files" ]; then \
