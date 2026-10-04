@@ -131,6 +131,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expensive direction is a gate nobody writes: that would stall every launch for the
   full 600s timeout and then fail one that works today.
 
+- **The auto-created MPI security group was TCP-only, so EFA could not pass traffic at
+  all** (#659). `CreateOrGetMPISecurityGroup` authorized only `tcp` 0-65535 from itself.
+  EFA's Scalable Reliable Datagram is not TCP, so the fabric was blocked outright — and
+  this is a hard failure rather than a slowdown: GCHP/MAPL **aborts at
+  `MPI_Win_create`** when the one-sided transport is unavailable instead of falling back,
+  so an EFA launch simply died.
+  The rules are now self-referential **all-protocol** (`IpProtocol: "-1"`), ingress and
+  egress. Egress is set explicitly even though a new group already has a permissive
+  default rule — which is why this went unnoticed — because AWS documents EFA as
+  requiring it, and anyone who tightens that default otherwise loses the fabric with no
+  indication why.
+  Existing groups are **backfilled**: the reuse path returned a found group without
+  looking at its rules, so every `spawn-mpi-*` group created before this kept only the
+  old TCP rule and upgrading spawn would have fixed nothing. The only workaround was
+  deleting the group by hand, which fails while any instance still references it. The
+  rule check now runs on every launch and tolerates already-present rules.
+  (The other half of #659 — the managed group discarding `--security-group-ids` — was
+  fixed with #667.)
+- **`--mpi-command` only worked for commands with no arguments** (#660). The template
+  rendered it through `shellEscape`, which is `strconv.Quote`, wrapping the whole command
+  in **one pair of double quotes** — so `--mpi-command "./gchp --flag x"` reached
+  `mpirun` as a single argv word and it tried to exec a binary of that literal name.
+  `strconv.Quote` is also Go escaping *inside double quotes*, where `$VAR`, command
+  substitution and backticks still expand, so it preserved neither argv nor safety.
+  A command line is meant to be parsed by a shell at run time, so it is no longer
+  interpolated into the generated script at all: it is written to
+  `/etc/spawn/mpi-command` through a quoted here-doc (nothing expands while writing, the
+  text lands byte-exact) and run with `mpirun … bash /etc/spawn/mpi-command`.
+- **`--estimate-only` ignored `--count`** (#662). It printed the per-instance rate times
+  the TTL, so a 2-node cohort quoted **$7.66/hr against a real ceiling of $15.31**. That
+  is the wrong direction to be wrong in: the flag exists to bound spend before committing,
+  and it is reached by users who are being careful — the same class as the FSx omission
+  fixed in #613. Above one instance the estimate now shows the per-instance rate *and*
+  the total, for both the hourly figure and the TTL cost. A `--count` of 1 (the default)
+  prints exactly what it did before, and a nonsensical count is clamped rather than
+  multiplying the estimate to `$0.00`.
+
 - **The #650 deploy fix disarmed the live production reaper; fixed properly** — follow-up
   to #650. The Makefile's `describe-stacks` call had **no `--region`**, so it resolved
   against the profile's default region, the stack read as "not found", the `|| echo '[]'`
@@ -171,6 +208,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   service-prefixed condition key doesn't match its action's service (`aws:` being the
   global namespace, valid anywhere). #652's gate checked which actions were *granted*;
   it could not see whether a grant could *authorize*.
+
+### Security
+
+- **`security.ShellEscape` is not shell-safe, and no longer claims to be** (#660, audit
+  tracked in #680). It is `strconv.Quote`, i.e. Go/C escaping inside **double** quotes —
+  where a POSIX shell still expands `$VAR`, command substitution and backticks — so it
+  neutralises none of them, while also collapsing a multi-word value into one argv word.
+  Its doc comment previously said it "handles all special shell characters".
+  A correct `security.ShellQuote` (single-quoting, with `'\''` for an embedded quote) is
+  now available and used by the storage-gate mount-point list; `ShellEscape` is marked
+  deprecated with the remaining call sites enumerated in #680. The most notable is
+  `spawn config set`, where a value containing `$(…)` is executed on the instance
+  instead of stored — self-inflicted, since the caller already owns the box, but still
+  wrong. Two places in the tree had already worked around this with their own quoting
+  and comments explaining why, which is how the pattern surfaced.
 
 ## [0.117.0] - 2026-10-04
 

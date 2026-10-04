@@ -128,8 +128,26 @@ else
   echo "failed:no MPI peers resolved (empty /tmp/mpi-hostfile)" > {{.ReadyGate}}
 fi
 {{end}}
+{{if .MPICommand}}
+# The --mpi-command, delivered as a FILE rather than interpolated into this
+# script (#660). It used to be rendered through shellEscape, i.e. strconv.Quote,
+# which wrapped the whole command in one pair of double quotes -- so mpirun got
+# a single argv word and tried to exec a binary literally named
+# "./gchp --flag x". Only argument-free commands worked. Worse, strconv.Quote is
+# Go escaping inside DOUBLE quotes, so $VAR, command substitution and backticks
+# still expanded: it preserved neither argv nor safety.
+#
+# A command line is meant to be parsed by a shell at RUN time, which is what
+# running it with bash below does. The quoted here-doc delimiter means nothing
+# expands while WRITING the file, so the text lands byte-exact.
+mkdir -p /etc/spawn
+cat > /etc/spawn/mpi-command <<'EOFMPICMD'
+{{.MPICommand}}
+EOFMPICMD
+chmod 600 /etc/spawn/mpi-command
+{{end}}
 if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   sleep 10
-  {{if .MPICommand}}mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile {{.MPICommand | shellEscape}}{{end}}
+  {{if .MPICommand}}mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile bash /etc/spawn/mpi-command{{end}}
 fi
 `

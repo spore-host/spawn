@@ -356,13 +356,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "💰 Cost estimate: %v\n", err)
 		} else {
-			fmt.Fprintf(os.Stderr, "💰 Cost estimate for %s in %s\n", config.InstanceType, config.Region)
-			fmt.Fprintf(os.Stderr, "   On-demand:  $%.4f/hr (%s)\n", dp.PricePerHour, dp.SourceLabel())
-			if config.TTL != "" {
-				if d, err := time.ParseDuration(config.TTL); err == nil {
-					fmt.Fprintf(os.Stderr, "   TTL cost:   $%.2f (%.0f hr)\n", dp.PricePerHour*d.Hours(), d.Hours())
-				}
-			}
+			// count, not 1 (#662): --count instances are launched, so quoting one
+			// understates the ceiling by exactly that factor on the flag whose
+			// whole job is to bound spend.
+			renderInstanceCostEstimate(os.Stderr, config.InstanceType, config.Region,
+				dp.PricePerHour, dp.SourceLabel(), config.TTL, count)
 		}
 		// --fsx-create provisions the single most expensive thing a launch can
 		// create (1200 GiB is the FSx Lustre minimum, ~$174/month) and the estimate

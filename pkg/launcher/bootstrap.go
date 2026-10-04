@@ -125,14 +125,15 @@ type BootstrapConfig struct {
 // iterate with `for x in ...`. Mount points come from flags, so they are not
 // assumed benign.
 //
-// Deliberately NOT security.ShellEscape, which is strconv.Quote — Go/C escaping
-// inside DOUBLE quotes, where $VAR, $(...) and backticks still expand. That is
-// the #660 bug; reusing it here would reintroduce it. Single quotes are the only
-// POSIX construct that suppresses every expansion, with '\” to embed a quote.
+// Deliberately NOT security.ShellEscape, which is strconv.Quote -- Go/C
+// escaping inside DOUBLE quotes, where $VAR, command substitution and backticks
+// all still expand. That is the #660 bug; reusing it here would reintroduce it.
+// security.ShellQuote is the single-quoting primitive that actually suppresses
+// expansion.
 func shellQuoteJoin(paths []string) string {
 	out := make([]string, len(paths))
 	for i, p := range paths {
-		out[i] = "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
+		out[i] = security.ShellQuote(p)
 	}
 	return strings.Join(out, " ")
 }
