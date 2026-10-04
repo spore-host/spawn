@@ -172,3 +172,66 @@ func TestBuildJobArrayMemberConfig(t *testing.T) {
 		t.Error("index 0 and index 1 user-data are identical — per-index MPI data not applied")
 	}
 }
+
+// TestBuildAZChain_SubnetGate is a bug found by running #667 on real hardware.
+//
+// #667 made --subnet-id actually reach the LaunchConfig (it was previously
+// parsed and dropped). That immediately collided with MPI's AZ fallback: a
+// subnet exists in exactly ONE availability zone, but buildAZChain enumerated
+// zones and set Placement.AvailabilityZone from the chain, so a pinned subnet in
+// us-east-1b got Placement.AvailabilityZone=us-east-1a and EC2 rejected every
+// member:
+//
+//	InvalidParameterValue: Value (us-east-1a) for parameter availabilityZone is
+//	invalid. Subnet 'subnet-...' is in the availability zone us-east-1b
+//
+// The conflict was unreachable before #667 precisely because the subnet was
+// being thrown away, so `--subnet-id` with `--mpi`/`--count` never worked and
+// could not have been noticed.
+//
+// An explicit subnet is AZ-bound for the same reason a fixed placement group is,
+// so it takes the same single-rung path — and like that gate, it must return
+// before touching AWS, which a nil *aws.Client proves.
+func TestBuildAZChain_SubnetGate(t *testing.T) {
+	base := &aws.LaunchConfig{
+		InstanceType: "c5n.9xlarge",
+		Region:       "us-east-1",
+		SubnetID:     "subnet-05346a3a821a4c093",
+	}
+	rung, chain := buildAZChain(context.Background(), nil, base, cohort.CapacityOnDemand)
+
+	if len(chain) != 1 {
+		t.Fatalf("an explicit --subnet-id is AZ-bound → want a single-rung chain, got %d "+
+			"rungs. Advancing the chain rewrites Placement.AvailabilityZone, which EC2 "+
+			"rejects against a subnet in a different zone.", len(chain))
+	}
+	// AvailZone stays empty so RunInstances derives the zone FROM the subnet,
+	// rather than asserting one that might contradict it.
+	if rung.AvailZone != "" {
+		t.Errorf("rung.AvailZone = %q, want empty: with a pinned subnet the zone must come "+
+			"from the subnet, not from an AZ chain", rung.AvailZone)
+	}
+	if chain[0] != rung {
+		t.Errorf("chain[0] = %+v, want the primary rung %+v", chain[0], rung)
+	}
+}
+
+// TestBuildAZChain_SubnetAndExplicitAZ: when the caller pins both, the subnet
+// still wins the fallback decision (single rung) and the AZ they asked for is
+// preserved on the rung, so an inconsistent pair surfaces as EC2's own error
+// rather than being silently rewritten to a different zone.
+func TestBuildAZChain_SubnetAndExplicitAZ(t *testing.T) {
+	base := &aws.LaunchConfig{
+		InstanceType:     "c5n.9xlarge",
+		Region:           "us-east-1",
+		AvailabilityZone: "us-east-1b",
+		SubnetID:         "subnet-05346a3a821a4c093",
+	}
+	rung, chain := buildAZChain(context.Background(), nil, base, cohort.CapacityOnDemand)
+	if len(chain) != 1 {
+		t.Fatalf("want single-rung chain, got %d", len(chain))
+	}
+	if rung.AvailZone != "us-east-1b" {
+		t.Errorf("rung.AvailZone = %q, want the caller's us-east-1b preserved", rung.AvailZone)
+	}
+}
