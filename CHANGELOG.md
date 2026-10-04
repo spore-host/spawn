@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **`spawn task run --help` now explains what gets bind-mounted, as whom, and where
+  staging space actually comes from** (#620). The old text said only "the manifest dirs
+  are bind-mounted", which reads as though any path works for any image — and the gap
+  cost a reporter real debugging time, then led to a set of workarounds that are no
+  longer necessary.
+  It now states that spawn pre-creates the parent of every `inputs[].destination` and
+  `outputs[].source` as the instance user and runs the container as that same `uid:gid`
+  rather than the image's declared `USER` (#555), chowning staged inputs so they can be
+  deleted as well as read (#565) — so any absolute path works, the image's `USER` is
+  irrelevant, and staged paths do **not** need to be kept flat in `/tmp`.
+  It also documents the trap that `resources.disk_gib` sizes the **root EBS volume**, so
+  it is the knob for an ordinary path like `/work`, while `/tmp` on AL2023 is a tmpfs
+  capped near half of instance memory — staging a 40 GiB index into `/tmp` fails on a
+  32 GiB box no matter how large `disk_gib` is. Since sizing for a staging footprint in
+  memory tends to pick the instance *family* rather than just its size, the two choices
+  are not interchangeable on cost.
+
 ### Fixed
 - **Lambda deployments no longer upload the whole source directory** (#645). The three
   SAM-deployed lambdas used `CodeUri: .` (or, for `pipeline-orchestrator`, no `CodeUri`
