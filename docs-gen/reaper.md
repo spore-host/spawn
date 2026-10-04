@@ -26,6 +26,13 @@ the reaper terminates instances, and that is not reversible.
   spawn reaper arm             # start actually reclaiming
   spawn reaper teardown        # remove it
 
+Versioning: the CLI and a deployed reaper are INDEPENDENT. Upgrading spawn does
+not touch a reaper already in an account, and 'spawn reaper deploy' installs the
+artifact for whichever version it is asked for. So a deployed reaper can be older
+than the CLI talking to it — 'spawn reaper status' prints both and says so when
+they differ. Nothing breaks when they do; an older reaper still reaps. Bring them
+together by re-running 'spawn reaper deploy' (spawn#654).
+
 ```
 spawn reaper
 ```

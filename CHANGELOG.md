@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn reaper status` now reports version skew against the CLI** (#654). The CLI and
+  a deployed reaper are **independently deployed** and nothing synchronises them:
+  upgrading spawn doesn't touch a reaper already in an account, and `spawn reaper deploy`
+  installs the artifact for whichever version it was asked for. Skew is therefore the
+  normal state, not an exception — the spore.host-operated reaper sat untouched from
+  2026-07-31 to 2026-10-04 while the CLI went from ~v0.9x to v0.116.0, missing an alarm,
+  two IAM grants and a packaging fix, with nothing anywhere saying so.
+  Status now always prints a `Version` line and, when it differs from the running CLI,
+  names both and the remedy (re-run `spawn reaper deploy`). It is deliberately **not** an
+  error: an older reaper still reaps, and the goal is visibility, not a gate.
+  Three cases are handled distinctly so the line stays trustworthy: matching versions
+  print **nothing** extra (a check that talks when it has nothing to say gets skipped,
+  which is how a real skew gets missed); a missing `spawn:version` tag reads as
+  **unknown** rather than a mismatch, because claiming one would be a guess; and a **dev
+  build** says why it isn't comparing instead of crying wolf on every working tree.
+  The `spawn reaper` help text now states the independent-versioning contract outright.
+
 ### Fixed
 
 - **The #650 deploy fix disarmed the live production reaper; fixed properly** — follow-up

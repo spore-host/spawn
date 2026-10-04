@@ -50,7 +50,14 @@ the reaper terminates instances, and that is not reversible.
   spawn reaper deploy          # install it, unarmed
   spawn reaper status          # deployed? armed? on what schedule?
   spawn reaper arm             # start actually reclaiming
-  spawn reaper teardown        # remove it`,
+  spawn reaper teardown        # remove it
+
+Versioning: the CLI and a deployed reaper are INDEPENDENT. Upgrading spawn does
+not touch a reaper already in an account, and 'spawn reaper deploy' installs the
+artifact for whichever version it is asked for. So a deployed reaper can be older
+than the CLI talking to it — 'spawn reaper status' prints both and says so when
+they differ. Nothing breaks when they do; an older reaper still reaps. Bring them
+together by re-running 'spawn reaper deploy' (spawn#654).`,
 	SilenceUsage: true,
 }
 
@@ -213,6 +220,12 @@ func runReaperStatus(cmd *cobra.Command, _ []string) error {
 
 // renderReaperStatus is pure, so the output contract is testable.
 func renderReaperStatus(info reaperdeploy.Info, account, region string) string {
+	return renderReaperStatusWithCLI(info, account, region, version())
+}
+
+// renderReaperStatusWithCLI takes the CLI version explicitly so the skew wording
+// is testable without depending on how this binary was built (spawn#654).
+func renderReaperStatusWithCLI(info reaperdeploy.Info, account, region, cliVersion string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "TTL reaper in account %s (%s)\n", account, region)
 	if !info.Deployed {
@@ -223,9 +236,16 @@ func renderReaperStatus(info reaperdeploy.Info, account, region string) string {
 		return b.String()
 	}
 	fmt.Fprintf(&b, "  Function:  %s\n", reaperdeploy.FunctionName)
+	// Version, plus how it relates to THIS CLI. The two are deployed
+	// independently and nothing synchronises them, so skew is the normal state
+	// and worth surfacing rather than leaving to be discovered (spawn#654).
+	skew := compareReaperVersion(info.Version, cliVersion)
 	if info.Version != "" {
 		fmt.Fprintf(&b, "  Version:   %s\n", info.Version)
+	} else {
+		fmt.Fprintf(&b, "  Version:   unknown\n")
 	}
+	b.WriteString(renderReaperSkew(skew))
 	if info.Armed {
 		fmt.Fprintf(&b, "  State:     ARMED — it reclaims expired spawn-managed resources\n")
 	} else {
