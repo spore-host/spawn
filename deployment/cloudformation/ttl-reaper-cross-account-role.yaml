@@ -112,7 +112,19 @@ Resources:
                   - !Sub 'arn:aws:ec2:*:${AWS::AccountId}:instance/*'
                 Condition:
                   StringEquals:
-                    ec2:ResourceTag/spawn:managed: 'true'
+                    # ssm:resourceTag, NOT ec2:ResourceTag. The condition key must
+                    # belong to the service of the ACTION, not of the resource:
+                    # ec2:ResourceTag is an EC2 key and is simply absent from the
+                    # request context of an ssm:* call, so a StringEquals on it can
+                    # never match and the statement is an implicit DENY. Verified by
+                    # policy simulation: ssm:resourceTag and aws:ResourceTag both
+                    # evaluate allowed, ec2:ResourceTag implicitDeny.
+                    #
+                    # Same trap as the fsx:ResourceTag vs aws:ResourceTag distinction
+                    # documented in pkg/reaperiam, and the first version of this grant
+                    # (#652) fell into it: the action was granted, the drift gate
+                    # passed, and REAPER_GRACEFUL still could not send a command.
+                    ssm:resourceTag/spawn:managed: 'true'
               - Effect: Allow
                 Action:
                   - ssm:SendCommand
