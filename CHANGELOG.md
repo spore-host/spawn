@@ -36,6 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--s3-read` / `--s3-write` were silently ignored on the parameter-sweep path**
+  (#539, #614). #539 was "the sweep path accepts the IAM flags, never reads them, and
+  never warns" — every row fell back to the shared `spored-instance-role`, whose fixed
+  policy grants S3 only on spawn's own infrastructure buckets, so a workload reading the
+  caller's bucket booted, billed, and died on its first `aws s3` call with 403.
+  That was fixed for the flags which existed then. **#614 later added
+  `--s3-read`/`--s3-write` to the single-instance condition and not to the sweep one**,
+  so those two kept the original behaviour — the same bug, re-created in the same place,
+  because the condition was *duplicated* rather than shared.
+  Both paths now call one `cliIAMFlagsRequireCustomProfile()` predicate, so a flag is
+  honoured everywhere or nowhere, and the sweep path builds the same scoped bucket
+  policy via `taskStagingPolicy` that the single-instance and task paths build. A gate
+  asserts neither path re-spells the condition inline.
+
 - **`spawn status -o json` now has a test proving stdout is parseable** (#540). The
   substance of that report was already fixed — verified live on a `t4g.small`:
   `exit=0`, 868 bytes of valid JSON on stdout, and the four agent log lines that broke

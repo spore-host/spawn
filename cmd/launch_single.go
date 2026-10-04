@@ -1020,8 +1020,10 @@ func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.La
 		// below attaches a FIXED policy whose S3 grants cover only spawn's own
 		// infrastructure buckets — which is exactly why a --command reading the
 		// caller's own bucket returned 403.
-		if iamRole != "" || len(iamPolicy) > 0 || len(iamManagedPolicies) > 0 || iamPolicyFile != "" ||
-			len(s3ReadBuckets) > 0 || len(s3WriteBuckets) > 0 {
+		// Shared with the sweep path (#539/#614): duplicating this condition is
+		// how --s3-read/--s3-write came to be honoured here and silently ignored
+		// on sweeps.
+		if cliIAMFlagsRequireCustomProfile() {
 			// Reject wildcard *:FullAccess templates unless explicitly opted in
 			// (2026-06 audit, M-sec). Fail before any AWS call.
 			if err := aws.ValidatePolicyNames(iamPolicy, iamAllowFullAccess); err != nil {

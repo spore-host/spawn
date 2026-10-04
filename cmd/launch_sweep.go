@@ -829,6 +829,31 @@ func applyCLIVolumeSizeToSweep(paramFormat *ParamFileFormat) []string {
 	return []string{fmt.Sprintf("volume-size=%dGiB", launchVolumeSize)}
 }
 
+// cliIAMFlagsRequireCustomProfile reports whether any CLI flag means this launch
+// needs its own instance profile rather than the shared spored-instance-role.
+//
+// Shared by the single-instance path and the sweep path ON PURPOSE. #539 was
+// "the sweep path ignores the IAM flags", and its fix listed the flags that
+// existed at the time. #614 then added --s3-read/--s3-write to the
+// single-instance condition and not to the sweep one, so those two were silently
+// dropped on sweeps — the same bug, re-created in the same place, because the
+// condition was duplicated instead of shared.
+//
+// Why it matters that these count as "custom IAM": SetupSporedIAMRole attaches a
+// FIXED policy whose S3 grants cover only spawn's own infrastructure buckets. So
+// a sweep row reading the caller's own bucket got 403 — which is exactly the
+// failure #614 fixed for single launches.
+//
+// A new IAM-ish flag belongs here, and only here.
+func cliIAMFlagsRequireCustomProfile() bool {
+	return iamRole != "" ||
+		len(iamPolicy) > 0 ||
+		len(iamManagedPolicies) > 0 ||
+		iamPolicyFile != "" ||
+		len(s3ReadBuckets) > 0 ||
+		len(s3WriteBuckets) > 0
+}
+
 // applyCLIIAMToSweep resolves the CLI IAM flags (--iam-role/--iam-policy/
 // --iam-policy-file/--iam-managed-policies/--iam-role-tags/--iam-allow-full-access)
 // into a real instance profile ONCE per sweep — the same
@@ -858,7 +883,7 @@ func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat 
 		return nil
 	}
 
-	if iamRole == "" && len(iamPolicy) == 0 && len(iamManagedPolicies) == 0 && iamPolicyFile == "" {
+	if !cliIAMFlagsRequireCustomProfile() {
 		return nil
 	}
 
@@ -876,6 +901,19 @@ func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat 
 		PolicyFile:      iamPolicyFile,
 		TrustServices:   iamTrustServices,
 		Tags:            parseIAMRoleTags(iamRoleTags),
+	}
+
+	// --s3-read/--s3-write become a scoped bucket policy built by the SAME
+	// function the single-instance and task paths use (#614), so no two paths can
+	// disagree about what "read this bucket" grants. Without this, a sweep fell
+	// back to spored-instance-role, whose fixed policy covers only spawn's own
+	// infrastructure buckets — so every row died on its first `aws s3` call with
+	// 403, after paying for the boot.
+	if len(s3ReadBuckets) > 0 || len(s3WriteBuckets) > 0 {
+		if err := validateS3BucketFlags(s3ReadBuckets, s3WriteBuckets); err != nil {
+			return err
+		}
+		iamConfig.InlinePolicyJSON = taskStagingPolicy(s3ReadBuckets, s3WriteBuckets, "", nil)
 	}
 
 	instanceProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, iamConfig)
