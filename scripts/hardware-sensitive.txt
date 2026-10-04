@@ -1,0 +1,20 @@
+# Paths whose correctness is NOT fully provable without a real instance.
+#
+# A change under any of these should be confirmed by `make smoke` before the
+# next release tag. This is not a claim that unit tests are useless here — it is
+# a claim about what unit tests can reach. Each entry below cost a shipped bug
+# that a green suite did not catch, and the reason is recorded so the list can be
+# argued with rather than inherited.
+#
+# Format: <path prefix> <tab> <why>
+
+pkg/userdata/	Generated shell. Only an instance can tell you the package is in the repo, the binary is on PATH, or the mount actually appeared. #684 (openmpi at /usr/lib64/openmpi/bin, absent from the non-login PATH) and #660 were both invisible to text assertions.
+pkg/launcher/bootstrap.go	Generated shell + cloud-init ordering. #668: the storage gate's release is a runtime property; the test can only assert the ORDER OF THE TEXT.
+pkg/taskproto/wrapper.go	Generated shell run as the workload. Quoting, exit-code plumbing and the completion record are all runtime behaviour.
+pkg/taskproto/flush.go	Executed by spored as root on a lifecycle exit path. Permissions and interlocks are filesystem facts.
+pkg/mpicohort/	SSM orchestration against real agents. #684's enrollment probe passed its unit test and could never pass on an instance. Scale behaviour (the 16-node assembly flake) is only observable live.
+pkg/aws/securitygroup.go	Whether EC2 ACCEPTS a rule shape, and whether traffic then flows. #659 needed both: describe-security-groups for the shape, fi_pingpong for the SRD traffic.
+pkg/aws/iam.go	Whether IAM accepts a document AND whether it authorizes the call. #669 shipped a document IAM rejects; #652/#665 shipped one it accepts and does not authorize. Only simulate/real calls separate those.
+pkg/aws/client.go	Composes RunInstances. #683's --subnet-id/AZ conflict is a constraint only EC2 enforces.
+cmd/launch_jobarray.go	Cohort lifecycle, drain and placement groups. #683: the drain ran, reported nothing, and terminated nothing; only a real failed cohort showed it.
+lambda/ttl-reaper/	CloudFormation and IAM that no compiler or test reaches. Two incidents, one of which disarmed the live production reaper.

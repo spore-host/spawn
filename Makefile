@@ -234,3 +234,19 @@ release: build-all
 	@echo "Release archives created in release/"
 
 .DEFAULT_GOAL := build
+
+# Real-AWS smoke for the paths unit tests cannot reach (see
+# scripts/hardware-sensitive.txt for which those are and why). Roughly $0.05 at
+# the default 2-node width; every instance gets a TTL, is terminated explicitly,
+# and is leak-checked afterwards.
+#
+# NODES=4 make smoke        wider MPI check
+# SKIP_EFA=1 make smoke     skip the EFA leg
+.PHONY: smoke smoke-needed
+smoke: build
+	@SPAWN=./spawn scripts/hardware-smoke.sh
+
+# Does anything changed since the last tag actually warrant a smoke? Answers the
+# question that currently gets answered from memory at tagging time.
+smoke-needed:
+	@scripts/hardware-smoke-needed.sh
