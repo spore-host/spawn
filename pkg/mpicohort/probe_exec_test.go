@@ -25,6 +25,18 @@ func runProbe(t *testing.T, script, extraBin string) (int, string) {
 		path = extraBin + ":" + path
 	}
 
+	// Test-only, and executing the script IS the point: the probe comes from
+	// enrollProbeScript, a fixed template with no caller input, and the gap this
+	// closes (#693) is that inspecting its TEXT cannot tell whether it can
+	// succeed on a real install layout.
+	//
+	// Two things about this directive, both of which cost a CI round-trip:
+	// it must be the line IMMEDIATELY above the finding (semgrep honours it
+	// there or on the offending line, nowhere else), and the rule ID must be
+	// the FULL id — which ends in a doubled segment,
+	// ...dangerous-exec-command.dangerous-exec-command. Dropping the last
+	// segment is silently ignored, not an error.
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = []string{"PATH=" + path}
 	var stderr strings.Builder
