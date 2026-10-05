@@ -388,6 +388,22 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		prog = progress.NewProgress()
 	}
 
+	// Step 0: pure flag validation, before anything is created (#685).
+	//
+	// These checks used to run ~286 lines further down, AFTER
+	// ensureSecurityGroup. So `spawn launch x --mpi --count 2` with no
+	// --job-array-name created a managed security group, then failed validation
+	// and left the group behind — named `spawn-mpi-` from the empty suffix, which
+	// every such launch would then share. Nothing reaps those (#685's other
+	// half), so each attempt added a durable orphan.
+	//
+	// Validation that needs no AWS call belongs before the first AWS call. The
+	// instance-type guards below genuinely need the AMI resolved first, which is
+	// why they stay in step 1.
+	if err := validateMPIFlags(mpiEnabled, count, jobArrayName); err != nil {
+		return err
+	}
+
 	// Step 1: Detect AMI, resolve OS, and run pre-flight instance-type checks
 	// before spending on any AWS resources.
 	if err := ensureAMIAndPreflight(ctx, awsClient, config, prog); err != nil {
@@ -697,10 +713,9 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		config.Username = plat.GetUsername()
 	}
 
-	// Validate MPI requirements
-	if err := validateMPIFlags(mpiEnabled, count, jobArrayName); err != nil {
-		return err
-	}
+	// MPI flags are validated at the TOP of this function now (#685), before
+	// anything is created. Placement resolution still happens here, after the
+	// AMI and instance type are known.
 	if mpiEnabled {
 		if err := resolveMPIPlacement(ctx, awsClient, config); err != nil {
 			return err

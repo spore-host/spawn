@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A rejected `--mpi` launch created a security group before failing validation**
+  (#685). `validateMPIFlags` ran about 286 lines *after* `ensureSecurityGroup` in the
+  same function, so `spawn launch x --mpi --count 2` with no `--job-array-name` created
+  a managed group, then refused the launch and left the group behind.
+  The leftover was named **`spawn-mpi-`** — the prefix with an empty suffix — so every
+  such attempt shared one group, and since #659 that group allows **all protocols**
+  between its members, which makes accidental sharing materially worse than a naming
+  wart. Nothing reaps them (the other half of #685), so each rejected attempt added a
+  durable orphan; 19 security groups and 9 placement groups were found in one region of
+  a single account, and roughly 35 were cleaned by hand over one session.
+  Pure flag validation now runs before the first AWS call, and
+  `CreateOrGetMPISecurityGroup` refuses a suffix-less name outright so the shared-group
+  case is unreachable from anywhere, not just from the CLI. A gate asserts the ordering,
+  since "this happens before that" has no runtime value to assert on.
+
+
 ## [0.120.0] - 2026-10-05
 
 ### Added
