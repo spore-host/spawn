@@ -109,6 +109,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   demonstrably failed and 4 GiB demonstrably worked and nothing between was tested;
   a higher floor would be inventing evidence.
 
+- **A transient DNS failure at boot permanently failed an EFS mount** (#704). The
+  generated storage script attempted `mount -t nfs4` exactly once. A mount target
+  that was already `available` **in the instance's own subnet** still produced
+  `mount.nfs4: Failed to resolve server fs-….efs.us-east-1.amazonaws.com` while
+  general DNS worked fine and the mount target's IP mounted first try — EFS DNS can
+  lag mount-target availability. One blip therefore became a launch that boots,
+  bills and runs nothing, because #668's readiness barrier correctly refuses to
+  start a workload against a directory that is not mounted.
+  The mount now retries six times over about a minute, with no delay added to the
+  common case where the first attempt succeeds — **and then falls back to the mount
+  target's IP**, which is the part that actually fixes it. A hardware smoke settled
+  that: the retry ran exactly as designed and *all six attempts failed*, because EFS
+  DNS propagation for a freshly created mount target outlasts any retry budget worth
+  spending at boot. Mounting by IP succeeds first try with identical options.
+  `/etc/fstab` still carries the DNS name, never the IP, so the entry survives a
+  mount-target replacement — the IP is strictly a boot-time workaround.
+  The IP lookup needs `elasticfilesystem:DescribeMountTargets`. Without it, launch
+  warns and the mount relies on DNS alone rather than failing. spawn prefers a mount
+  target in the instance's own subnet, then its AZ, then any available one, since
+  crossing an AZ bills per GiB — though a cross-AZ mount still beats a workload that
+  cannot see its data.
+  Found by the storage leg of `make smoke`. The tests run the generated shell under
+  bash against a stubbed `mount` that fails for the DNS name and succeeds for the IP,
+  because the bug was invisible to text assertions — the mount command itself was
+  correct.
+
 ## [0.120.0] - 2026-10-05
 
 ### Added

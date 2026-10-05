@@ -682,6 +682,20 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			storageConfig.EFSMountPoint = efsMountPoint
 			storageConfig.EFSMountOptions = mountOptions
 			readyMountPoints = append(readyMountPoints, efsMountPoint)
+
+			// Resolve the mount target IP as a boot-time fallback (#704). The DNS
+			// name is not reliable for a freshly created filesystem: a real run
+			// failed all six retry attempts over ~60s with the mount target
+			// available in this very subnet, while mounting by IP worked first try.
+			// Best-effort — a launch must not fail because this lookup did, since
+			// DNS works in the steady state.
+			if ip, ferr := awsClient.EFSMountTargetIP(ctx, efsID, config.Region,
+				config.SubnetID, config.AvailabilityZone); ferr != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  could not resolve an EFS mount-target IP for %s (%v); "+
+					"the mount will rely on DNS alone, which can fail at first boot (#704)\n", efsID, ferr)
+			} else if ip != "" {
+				storageConfig.EFSMountTargetIP = ip
+			}
 		}
 
 		// FSx configuration
