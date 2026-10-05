@@ -29,6 +29,13 @@ type placementGroupAPI interface {
 // A placement group is free, so this is quota hygiene rather than cost. The
 // per-VPC limit is what eventually bites — and it bites at launch time, which is
 // the worst moment to discover it.
+//
+// DiscoverOptions.OnlyMine is deliberately NOT applied, matching scanAddresses:
+// spawn does not stamp spawn:iam-user on a placement group, so honouring the
+// filter would drop every one of them and leave the sweep reporting nothing at
+// all. Visibility wins for a leak report. (The same omission makes the
+// tagging-API side of --mine silently empty for security groups and IAM
+// profiles, which is spawn#708 — not papered over here.)
 func (c *Client) scanPlacementGroups(ctx context.Context, cfg aws.Config, region string) ([]ManagedResource, error) {
 	var api placementGroupAPI = ec2.NewFromConfig(cfg)
 	return scanPlacementGroupsWith(ctx, api, region)
