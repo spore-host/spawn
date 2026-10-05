@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **EFS is now mounted by the mount-target IP first, with DNS as the fallback**
+  (#718). #704 shipped the obvious order — DNS, then the IP — and a hardware smoke
+  showed it was backwards. Twice out of three runs a mount target already
+  `available` **in the instance's own subnet** produced
+  `mount.nfs4: Failed to resolve server` for the entire 60-second retry budget,
+  while the same mount by IP succeeded on the first try.
+  None of the usual reasons to prefer the name apply here. Encryption in transit
+  would need it, since stunnel validates the certificate against the DNS name — but
+  spawn has no code path that mounts with TLS: the mount options are a fixed set and
+  no `tls` or `iam` key is accepted. fstab surviving a mount-target replacement is
+  near worthless for an instance that lives minutes to hours, and had a target
+  really been replaced the live mount would already be broken. And DNS's free AZ
+  affinity is something spawn already computes deterministically from the instance's
+  subnet. So the name cost a minute of boot in the common failure and bought nothing.
+  It remains the fallback for when no IP could be resolved — chiefly a caller without
+  `elasticfilesystem:DescribeMountTargets` — and it is still what goes in `/etc/fstab`.
+  This also closes a verification gap rather than tolerating it: with DNS first, the
+  IP path ran *only* when DNS failed, so it was both load-bearing and never
+  exercised, and because the failure is intermittent a passing smoke could not prove
+  it either way. The primary path now runs on every launch.
+- **The EFS user-data block is 51% smaller** (#718). The rationale above was carried
+  as comments inside the template, so every byte of it shipped in every instance's
+  16 KB user-data budget — 3177 bytes rendered, down to 1566 — for prose cloud-init
+  never reads. It now lives on `GenerateStorageUserData` where it costs nothing.
+
 ### Fixed
 
 - **`spawn orphans` and `spawn cleanup` reported nothing by default** (#708). `--mine`

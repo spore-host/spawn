@@ -37,7 +37,43 @@ type AttachedVolume struct {
 	ReadOnly   bool   // Mount read-only
 }
 
-// GenerateStorageUserData generates storage mounting script
+// GenerateStorageUserData generates storage mounting script.
+//
+// EFS is mounted by the mount-target IP FIRST, with the DNS name as the fallback
+// (spawn#718). #704 shipped the obvious order and a hardware smoke showed it was
+// backwards: twice out of three runs a mount target already `available` in the
+// instance's own subnet produced
+//
+//	mount.nfs4: Failed to resolve server fs-....efs.us-east-1.amazonaws.com
+//
+// for the whole 60-second retry budget, while the same mount by IP succeeded on
+// the first try. None of the usual reasons to prefer the name hold here:
+//
+//   - Encryption in transit would need it, because stunnel validates the
+//     certificate against the DNS name — but spawn cannot ask for it.
+//     EFSMountOptions emits a fixed set and ParseCustomOptions accepts no tls or
+//     iam key, so there is no code path that mounts with TLS.
+//   - fstab surviving a mount-target replacement is close to worthless for an
+//     instance that lives minutes to hours, and had a target really been
+//     replaced the live NFS mount would already be broken.
+//   - DNS resolves to the mount target in the querying instance's AZ for free,
+//     but spawn resolves the right target from the instance's own subnet at
+//     launch — deterministic rather than hopeful.
+//
+// So the name costs a minute of boot in the common failure and buys nothing. It
+// stays as the fallback for when no IP could be resolved at all, chiefly a caller
+// without elasticfilesystem:DescribeMountTargets, and it is what goes in
+// /etc/fstab.
+//
+// The ordering also fixes a verification problem rather than tolerating it. With
+// DNS first, the IP path ran only when DNS failed — load-bearing and never
+// exercised — and because the failure is intermittent, a passing smoke could not
+// prove it either way. Now the primary path runs on every launch and the rarely
+// taken path is the well-understood one.
+//
+// Rationale lives here rather than in the template because template bytes are
+// shipped in every instance's 16 KB user-data budget, and cloud-init never reads
+// a comment.
 func GenerateStorageUserData(config StorageConfig) (string, error) {
 	// shellQuote, not security.ShellEscape (#680).
 	//
@@ -96,14 +132,19 @@ echo export FSX_MOUNT={{.FSxMountPoint | shellEscape}} >> /etc/profile.d/fsx.sh
 # EFS mounting
 dnf install -y nfs-utils
 mkdir -p {{.EFSMountPoint | shellEscape}}
-# Retry the mount (#704). EFS DNS can lag mount-target availability: a mount
-# target that is already available in this very subnet still produced
-#   mount.nfs4: Failed to resolve server fs-….efs.us-east-1.amazonaws.com
-# while general DNS worked and the mount target's IP mounted first try. A single
-# attempt turned one DNS blip into a launch that boots, bills and runs nothing —
-# because #668's readiness barrier correctly refuses to start the workload
-# against a directory that is not mounted.
+# Mount by the mount-target IP first, DNS second (#718). Rationale in storage.go.
 spawn_mount_efs() {
+{{if .EFSMountTargetIP}}
+  if mount -t nfs4 -o {{.EFSMountOptions | shellEscape}} {{.EFSMountTargetIP | shellEscape}}:/ {{.EFSMountPoint | shellEscape}}; then
+    return 0
+  fi
+  if mountpoint -q {{.EFSMountPoint | shellEscape}} 2>/dev/null; then
+    return 0
+  fi
+  # A failure here is usually routing or a security group, which DNS will not
+  # fix either — but falling through costs nothing and covers a stale IP.
+  printf 'spawn: mount by mount-target IP failed; falling back to the DNS name\n' >&2
+{{end}}
   for attempt in 1 2 3 4 5 6; do
     if mount -t nfs4 -o {{.EFSMountOptions | shellEscape}} {{.EFSFilesystemDNS | shellEscape}}:/ {{.EFSMountPoint | shellEscape}}; then
       return 0
@@ -113,30 +154,14 @@ spawn_mount_efs() {
       return 0
     fi
     if [ "$attempt" -lt 6 ]; then
-      printf 'spawn: EFS mount attempt %s/6 failed; retrying in 10s\n' "$attempt" >&2
+      printf 'spawn: EFS DNS mount attempt %s/6 failed; retrying in 10s\n' "$attempt" >&2
       sleep 10
     fi
   done
-  # Not fatal here: #668's readiness barrier reads /proc/mounts and fails the
-  # workload with a named reason, which is a better signal than aborting the
-  # bootstrap half-done. Mounting by the mount-target IP would survive a
-  # persistent DNS failure, but needs a DescribeMountTargets call and a new IAM
-  # action, so it stays open on #704.
-{{if .EFSMountTargetIP}}
-  # DNS never resolved. Mount by the mount target's IP instead (#704).
-  #
-  # Not a belt-and-braces extra: on a real run every one of the six attempts
-  # above failed with "Failed to resolve server" across ~60s, with the mount
-  # target available in this instance's own subnet and general DNS working, while
-  # this exact mount by IP succeeded first try. EFS DNS propagation for a freshly
-  # created mount target outlasts any retry budget worth spending at boot.
-  printf 'spawn: EFS DNS did not resolve; mounting by mount-target IP instead\n' >&2
-  if mount -t nfs4 -o {{.EFSMountOptions | shellEscape}} {{.EFSMountTargetIP | shellEscape}}:/ {{.EFSMountPoint | shellEscape}}; then
-    printf 'spawn: EFS mounted via mount-target IP; /etc/fstab keeps the DNS name so the entry survives a mount-target replacement\n' >&2
-    return 0
-  fi
-{{end}}
-  printf 'spawn: EFS mount failed after 6 attempts over ~60s — DNS for the filesystem may not be resolving; the fstab entry remains, so mount -a will retry\n' >&2
+  # Not fatal: #668's readiness barrier reads /proc/mounts and fails the workload
+  # with a named reason, which is a better signal than aborting the bootstrap
+  # half-done.
+  printf 'spawn: EFS mount failed via mount-target IP and after 6 DNS attempts over ~60s; the fstab entry remains, so mount -a will retry\n' >&2
   return 1
 }
 spawn_mount_efs || true
