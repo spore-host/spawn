@@ -91,8 +91,13 @@ var sweepFlagCoverage = map[string]struct {
 	"capacity-block":           {sweepKnownGap, "#697"},
 	"completion-delay":         {sweepKnownGap, "#697"},
 	"completion-webhook-url":   {sweepKnownGap, "#697 — off-node completion signal"},
-	"dns":                      {sweepKnownGap, "#697"}, "dns-api-endpoint": {sweepKnownGap, "#697"},
-	"dns-domain": {sweepKnownGap, "#697"}, "no-dns": {sweepKnownGap, "#549/#697"},
+	// DNS on sweeps: a row gets spawn:dns-name only if the param file sets
+	// dns:/dns_name:, and spored skips registration without that tag. So the
+	// param file IS the sweep route and these three have nothing to do (#549).
+	"dns":                   {sweepNA, "#549 — the param file's dns:/dns_name: key is the sweep route"},
+	"dns-api-endpoint":      {sweepNA, "#549 — only consulted when a row registers DNS"},
+	"dns-domain":            {sweepNA, "#549 — only consulted when a row registers DNS"},
+	"no-dns":                {sweepNA, "#549 — sweeps never register DNS: a row gets spawn:dns-name only if the param file sets dns:/dns_name:, and spored skips registration without that tag. Nothing to disable, so this is not a gap"},
 	"efs-id":                {sweepKnownGap, "#697 — a sweep cannot mount EFS AT ALL"},
 	"efs-mount-options":     {sweepKnownGap, "#697 — see efs-id"},
 	"efs-mount-point":       {sweepKnownGap, "#697 — see efs-id"},
