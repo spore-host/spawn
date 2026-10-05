@@ -727,6 +727,28 @@ if [ "$WORKFLOW_COMMAND" != "None" ] && [ -n "$WORKFLOW_COMMAND" ]; then
     cat > /tmp/spawn-command.sh <<'EOFCMD'
 #!/bin/bash
 set -e
+# Announce the shell options the command inherits (#707). errexit is ON here,
+# and 'set -uo pipefail' does NOT clear it — so a script opening with that line,
+# believing it chose its own error policy, is actually running -e -u -o pipefail.
+#
+# This was invisible and actively misleading: the script exits BEFORE the line
+# that would have reported why. Two ordinary idioms are the usual casualties —
+# a SIGPIPE'd pipeline under pipefail ('... | head -n N' returns 141), and
+# 'wait \$pid' on a failed background job, which is a pattern for CAPTURING a
+# failure and which -e destroys at the moment it matters. It cost four
+# r8gd.8xlarge runs and three misdiagnoses to find, because nothing said so.
+#
+# Printed rather than changed: fail-fast is a defensible default, and running on
+# after a broken step to TTL would be worse. One greppable line turns an
+# invisible behaviour into a visible one.
+# Plain printf, NOT piped to tee. This script runs as $LOCAL_USERNAME via su,
+# which cannot write /var/log/spawn-command.log — and under the set -e above, a
+# failed tee would kill the command BEFORE it started. The caller already pipes
+# this script's combined output through tee as root (see the su line below), so
+# stdout lands in the log either way. Caught by executing the generated script:
+# the announcement would have been a worse bug than the one it documents.
+printf 'spawn: shell options for --command: $-=%s\n' "$-"
+printf 'spawn: errexit is ON. set -uo pipefail does NOT clear it; use set +e to opt out.\n'
 [ -f /etc/profile.d/spawn-params.sh ] && source /etc/profile.d/spawn-params.sh
 EOFCMD
     # Embedded command (baked into user-data, #214/#246) wins; else the tag value.
