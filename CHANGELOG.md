@@ -71,6 +71,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejects any regional EC2 call in `pkg/aws` built on the default-region config —
   that shape is the bug, and `DescribeRegions` is the one legitimate exception.
 
+- **Two job arrays launched close together could share an id** (#710). The
+  per-launch array id's suffix was documented as a random value and was in fact
+  `time.Now().UnixNano() % 0xFFFFFF` — a clock reading. It repeated outright on a
+  coarse clock (`time.Now()` has *microsecond* resolution on macOS, where two
+  consecutive calls return the identical value), and even on a nanosecond clock it
+  wrapped every ~16.8 ms, so two launches that far apart collided deterministically.
+  This matters because #691 made the `RunInstances` ClientToken derive from that id,
+  specifically so two launches sharing a `--job-array-name` could not share a token.
+  A colliding id brought #691's failures back: EC2 either rejects the cohort with
+  `IdempotentParameterMismatch`, or returns the **first** launch's reservation, so
+  spawn can report success while holding instance IDs that are already terminated.
+  The suffix is now 32 bits from `crypto/rand` — not `math/rand`, because the value
+  reaches a ClientToken and a predictable token is how an unrelated launch could be
+  made to collide with yours on purpose.
+  #691's own gate had been failing 5 runs out of 5 on macOS while passing in CI on
+  Linux, which is how this surfaced: a uniqueness assertion satisfied by clock
+  granularity is not an assertion. The replacement mints 2000 ids in a tight loop,
+  which outruns any wall clock on any platform, and separately rejects a
+  monotonically-increasing source so a regression to any counter is caught too.
 
 ## [0.120.0] - 2026-10-05
 
