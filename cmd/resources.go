@@ -51,7 +51,7 @@ func runResources(cmd *cobra.Command, args []string) error {
 
 	var all []aws.ManagedResource
 	for _, region := range regions {
-		found, derr := client.DiscoverManagedResources(ctx, aws.DiscoverOptions{Region: region, OnlyMine: onlyMine})
+		found, _, derr := client.DiscoverManagedResources(ctx, aws.DiscoverOptions{Region: region, OnlyMine: onlyMine})
 		if derr != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  %s: %v\n", region, derr)
 			continue

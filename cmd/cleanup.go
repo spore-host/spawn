@@ -65,7 +65,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 	var found []aws.ManagedResource
 	for _, region := range regions {
-		rs, derr := client.DiscoverManagedResources(ctx, aws.DiscoverOptions{Region: region, OnlyMine: onlyMine})
+		rs, _, derr := client.DiscoverManagedResources(ctx, aws.DiscoverOptions{Region: region, OnlyMine: onlyMine})
 		if derr != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  %s: %v\n", region, derr)
 			continue
@@ -104,10 +104,18 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(notYet) > 0 {
-		fmt.Fprintf(os.Stderr, "\nℹ️  %d placement group(s) still have members and cannot be deleted yet — "+
-			"they will be removed once the instances in them are gone:\n", len(notYet))
+		fmt.Fprintf(os.Stderr, "\nℹ️  %d resource(s) are reported but not removed:\n", len(notYet))
 		for _, r := range notYet {
-			fmt.Fprintf(os.Stderr, "    %s (%s)\n", r.ID, r.Region)
+			// Say WHY per item: the two reasons are unrelated, and a single
+			// blanket sentence was wrong for one of them.
+			reason := "still in use"
+			switch {
+			case aws.IsSharedSporedIdentity(r):
+				reason = "shared infrastructure reused by every launch — never removed"
+			case r.ResourceType == "placement-group":
+				reason = "still has members; deletable once those instances are gone"
+			}
+			fmt.Fprintf(os.Stderr, "    %s (%s) — %s\n", r.ID, r.Region, reason)
 		}
 	}
 
@@ -202,6 +210,14 @@ func splitCleanupResources(found []aws.ManagedResource) (running, addresses, alr
 		case r.ResourceType == "address":
 			addresses = append(addresses, r)
 		case r.ResourceType == "placement-group" && r.State == "in-use":
+			notYet = append(notYet, r)
+		case aws.IsSharedSporedIdentity(r):
+			// The shared spored role/profile are created once and reused by every
+			// launch, so cleanup must never offer them. Latent until #708: the
+			// --mine scope filtered on a tag they never carry, so they were
+			// invisible here and this was unreachable. Fixing the scope made them
+			// deletable — a dry run offered both — so one bug had been hiding the
+			// other (#713).
 			notYet = append(notYet, r)
 		case r.State == "deleted":
 			alreadyGone = append(alreadyGone, r)

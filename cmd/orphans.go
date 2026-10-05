@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -58,12 +59,14 @@ func runOrphans(cmd *cobra.Command, args []string) error {
 	onlyMine := !orphansAll
 
 	var orphans []aws.ManagedResource
+	scopeHidden := 0
 	for _, region := range regions {
-		rs, derr := client.DiscoverManagedResources(ctx, aws.DiscoverOptions{Region: region, OnlyMine: onlyMine})
+		rs, hidden, derr := client.DiscoverManagedResources(ctx, aws.DiscoverOptions{Region: region, OnlyMine: onlyMine})
 		if derr != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  %s: %v\n", region, derr)
 			continue
 		}
+		scopeHidden += hidden
 
 		// Any running/pending instance in the region means the shared infra
 		// (SG, key pair, IAM) is in use — only flag clearly-detached resources.
@@ -85,6 +88,10 @@ func runOrphans(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	if len(orphans) == 0 {
 		fmt.Fprintf(out, "No orphaned spawn-managed resources in %s.\n", displayCleanupRegions(regions))
+		// Never let "nothing here" stand alone when the scope hid something
+		// (#708). This command reporting zero in an account holding 21 orphans is
+		// what made the old --mine behaviour dangerous rather than merely wrong.
+		reportScopeHidden(out, scopeHidden)
 		return nil
 	}
 
@@ -99,5 +106,23 @@ func runOrphans(cmd *cobra.Command, args []string) error {
 	if hasNonAddress {
 		fmt.Fprintln(out, "\nRun 'spawn cleanup' to remove these (running instances are never removed).")
 	}
+	reportScopeHidden(out, scopeHidden)
 	return nil
+}
+
+// reportScopeHidden names resources the --mine scope excluded, so a zero result
+// is never mistaken for a clean account (spawn#708).
+//
+// Before #708, --mine filtered on spawn:iam-user — a tag spawn writes only to
+// instances and volumes — so every security group, IAM role and key pair was
+// silently dropped. `spawn orphans` printed "No orphaned spawn-managed
+// resources" in an account holding 21 of them, the oldest three months old.
+// Untagged resources are now in scope, so what remains here is genuinely
+// another principal's; saying so is still better than implying there is nothing.
+func reportScopeHidden(w io.Writer, hidden int) {
+	if hidden <= 0 {
+		return
+	}
+	fmt.Fprintf(w, "\n(%d resource(s) tagged for another principal were excluded; "+
+		"use --all to include them.)\n", hidden)
 }
