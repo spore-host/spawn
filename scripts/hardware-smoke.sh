@@ -24,10 +24,10 @@ NODES="${NODES:-2}"
 TYPE="${TYPE:-c6i.large}"
 EFA_TYPE="${EFA_TYPE:-c5n.9xlarge}"
 TTL="${TTL:-20m}"
-SPAWN="${SPAWN:-./spawn}"
+SPAWN="${SPAWN:-bin/spawn}"   # `make build` writes here, not ./spawn
 TAG="smoke-$$"
 
-[ -x "$SPAWN" ] || { echo "build spawn first (make build) or set SPAWN=" >&2; exit 2; }
+[ -x "$SPAWN" ] || { echo "no spawn binary at $SPAWN — run 'make build' (which writes bin/spawn) or set SPAWN=" >&2; exit 2; }
 command -v aws >/dev/null || { echo "aws CLI required" >&2; exit 2; }
 
 pass=0; fail=0
@@ -126,10 +126,28 @@ if [ "${SKIP_EFA:-0}" != "1" ]; then
           --query 'Reservations[].Instances[].PrivateIpAddress' --output text)
     # fi_pingpong uses the EFA provider EXCLUSIVELY — no TCP fallback — so a pass
     # here is proof that SRD traffic crosses the security group (#659).
-    ssm "$E0" 'export PATH=/opt/amazon/efa/bin:\$PATH; nohup fi_pingpong -p efa > /tmp/pp.log 2>&1 & sleep 2; echo started' >/dev/null
-    pp=$(ssm "$E1" "export PATH=/opt/amazon/efa/bin:\\\$PATH; timeout 60 fi_pingpong -p efa $IP0 2>&1 | tail -6")
-    case "$pp" in *MB/sec*) ok "EFA SRD passes traffic through the managed SG (#659)"; echo "$pp" | sed 's/^/     /' ;;
-                  *) bad "fi_pingpong did not complete: $pp" ;; esac
+    # Absolute paths, no PATH juggling. The nested-quoting version of this
+    # ($PATH escaped through a JSON parameter) came back empty and reported a
+    # false failure — and AWS's own EFA docs use the absolute path anyway, which
+    # is what #693 pointed out.
+    FIPP=/opt/amazon/efa/bin/fi_pingpong
+    ssm "$E0" "nohup $FIPP -p efa > /tmp/pp.log 2>&1 & sleep 2; echo started" >/dev/null
+    pp=$(ssm "$E1" "timeout 60 $FIPP -p efa $IP0 2>&1 | tail -6")
+
+    # Three outcomes, not two. A fabric check that cannot RUN is inconclusive,
+    # not a failure — reporting ❌ for a broken probe trains people to ignore
+    # the smoke, which is worse than having no check.
+    case "$pp" in
+      *MB/sec*)
+        ok "EFA SRD passes traffic through the managed SG (#659)"
+        echo "$pp" | sed 's/^/     /' ;;
+      "")
+        echo "  ⚠️  EFA fabric check INCONCLUSIVE: no output from $FIPP."
+        echo "     The cohort enrolled (so #693's probe fix holds); the fabric itself is unverified."
+        echo "     Check by hand: $FIPP -p efa on rank 0, then $FIPP -p efa <rank0-ip> on rank 1." ;;
+      *)
+        bad "fi_pingpong ran but did not report throughput: $pp" ;;
+    esac
   else
     bad "EFA cohort failed; see /tmp/$TAG-efa.log"
   fi

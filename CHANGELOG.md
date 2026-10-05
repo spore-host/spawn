@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`make smoke` could not find the binary, and its EFA fabric check reported a false
+  failure.** `make build` writes `bin/spawn`; the target passed `SPAWN=./spawn`, so the
+  smoke added in #688 refused to start on its first real use. The `fi_pingpong` step
+  escaped `$PATH` through a JSON parameter, came back empty, and was reported as a
+  failure — so it now uses the absolute `/opt/amazon/efa/bin/fi_pingpong` (which is what
+  AWS's own EFA docs use) and distinguishes **inconclusive** from **failed**. A check
+  that cannot run must not print ❌, because a smoke that cries wolf is a smoke people
+  stop reading.
+
 - **`--s3-read` / `--s3-write` were silently ignored on the parameter-sweep path**
   (#539, #614). #539 was "the sweep path accepts the IAM flags, never reads them, and
   never warns" — every row fell back to the shared `spored-instance-role`, whose fixed

@@ -244,7 +244,7 @@ release: build-all
 # SKIP_EFA=1 make smoke     skip the EFA leg
 .PHONY: smoke smoke-needed
 smoke: build
-	@SPAWN=./spawn scripts/hardware-smoke.sh
+	@SPAWN=bin/spawn scripts/hardware-smoke.sh
 
 # Does anything changed since the last tag actually warrant a smoke? Answers the
 # question that currently gets answered from memory at tagging time.
