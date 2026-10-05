@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Every launch flag is now classified for the parameter-sweep path** (#697). The sweep
+  path drops flags **by construction**: the dispatch builds a two-field `LaunchConfig`
+  instead of calling `buildLaunchConfig`, and `buildLaunchConfigFromParams` merges rows
+  onto an empty struct. So a flag reaches sweep rows only if someone hand-wrote a shim —
+  which has been done one category at a time, after each was reported (#525 spend
+  controls, #539 IAM twice, #549 DNS, #667 networking for single launches only,
+  #673/#674/#675).
+  Measured: of **127** `launchCmd` flags, 44 are honoured on the sweep path, **83 are
+  dropped**, and **72 of those have no param-file key either** — so there is no way to
+  express the setting on a sweep at all. The gaps include *all* EFS and FSx flags (a
+  sweep cannot mount shared storage), `--security-group-ids`/`--subnet-id` (so #667 is
+  only half-fixed), and `--pre-stop`, the hook that syncs results before termination.
+  `sweepFlagCoverage` classifies each flag as honoured, not-applicable, or a known gap
+  with its issue, and three gates keep it honest: an unclassified flag fails the build, a
+  gap must cite an issue, and a flag *claimed* as honoured must actually be referenced on
+  the sweep path — because a manifest that drifts into wishful thinking is how #539's
+  second half survived. The gate found seven flags I had not classified on its first run.
+  This does not fix the gaps; it stops new ones being added silently. #697 carries the
+  structural fix (pass the real config in and let rows override it).
+
+
 ## [0.119.0] - 2026-10-04
 
 ### Added
