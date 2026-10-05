@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`make smoke` now covers the storage path.** The hardware-sensitivity manifest flagged
+  `pkg/userdata/storage.go` as changed by #680 — and the smoke did not exercise it, which
+  is the gap that matters most there: that file generates the mount, fstab and
+  `/etc/profile.d` shell, and its unit tests can only check the rendered *text* and that
+  it parses. Neither can tell you the mount appeared or that the profile export carries
+  the right value.
+  The new leg creates an EFS filesystem and mount target, launches with `--efs-id`, then
+  asserts `/run/spawn/storage-ready` reads `ok`, `/efs` is in `/proc/mounts`, and sourcing
+  `/etc/profile.d/efs.sh` yields the mount point. It tears the fixture down in the
+  trap-based cleanup, mount target before filesystem before security group, and still
+  leak-checks independently afterwards.
+  It is **opt-in** (`SMOKE_STORAGE=1`) because it has not yet produced a clean run, and
+  an untrustworthy check is worse than a missing one — the standard already applied to
+  the EFA fabric probe. Four runs produced three different false signals, every one a bug
+  in the script rather than in spawn: `--on-complete terminate` killed the instance
+  before the checks ran (so all three returned empty and read as mount failures),
+  hand-escaped JSON swallowed a `$`, and an escaped `grep` pattern reached the instance
+  literally and reported "mpirun reached 0 of 2 nodes" on a healthy cluster. The SSM
+  helper now builds its payload with `python -c json.dumps` instead of shell
+  interpolation — the same change of representation `pkg/mpicohort/assembler.go` makes by
+  base64-encoding the peers file.
+  The product findings underneath were real and are filed as **#704**: the EFS mount is
+  attempted once, so a transient DNS failure at boot fails it permanently even though
+  general DNS worked, the VPC had DNS enabled, and mounting by the mount target's IP
+  succeeded first try with the identical options.
+
 - **The sweep parameter environment is now verified by executing it** (#531). That fix —
   single-quoting `spawn:param:*` tag values into `/etc/profile.d/spawn-params.sh` instead
   of double-quoting them — was already in place and had only ever been verified by
