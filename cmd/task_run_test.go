@@ -714,7 +714,11 @@ func TestClassifyCompletionRun(t *testing.T) {
 // consumers.
 func TestClearStaleCompletion_DeletesBothKeys(t *testing.T) {
 	store := &fakeResultStore{}
-	if err := clearStaleCompletion(context.Background(), store, "us-west-2", "spawn-results-1-us-west-2", "tasks", "cookbook-plink-r1"); err != nil {
+	// The prefix includes the task id, because that is what
+	// EffectiveResultsPrefix returns and what both production callers pass. This
+	// test previously passed a bare "tasks", encoding a calling convention no
+	// caller used — the ambiguity that produced #715.
+	if err := clearStaleCompletion(context.Background(), store, "us-west-2", "spawn-results-1-us-west-2", "tasks/cookbook-plink-r1"); err != nil {
 		t.Fatalf("clearStaleCompletion: %v", err)
 	}
 	want := []string{"tasks/cookbook-plink-r1/completion.json", "tasks/cookbook-plink-r1/.exitcode"}
@@ -733,7 +737,7 @@ func TestClearStaleCompletion_DeletesBothKeys(t *testing.T) {
 // suspenders), and every key is still attempted rather than aborting on the first.
 func TestClearStaleCompletion_ErrorIsReportedNotSwallowed(t *testing.T) {
 	store := &fakeResultStore{delErr: errors.New("AccessDenied")}
-	err := clearStaleCompletion(context.Background(), store, "us-east-1", "b", "tasks", "t")
+	err := clearStaleCompletion(context.Background(), store, "us-east-1", "b", "tasks/t")
 	if err == nil {
 		t.Fatal("expected the delete error to be returned for logging")
 	}

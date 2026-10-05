@@ -530,7 +530,7 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	// suspenders that catches whatever survives. Deleting an absent key is a
 	// success in S3 (the overwhelmingly common first-run case), so this is silent
 	// unless something actually went wrong.
-	if err := clearStaleCompletion(ctx, client, region, resultsBucket, resultsKeyPrefix, spec.TaskID); err != nil {
+	if err := clearStaleCompletion(ctx, client, region, resultsBucket, resultsKeyPrefix); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not clear a previous attempt's completion record for task %s: %v\n", spec.TaskID, err)
 		fmt.Fprintf(os.Stderr, "         (harmless: --wait verifies run_id, so a leftover record is ignored rather than reported)\n")
 	} else if spawnVerbose {
@@ -679,25 +679,50 @@ type taskResultStore interface {
 // Renaming it would break all six; the additive run_id field inside the JSON is
 // invisible to them.
 // completionKey is the object key of a task's completion record, relative to the
-// results bucket. keyPrefix comes from the resolved results prefix (spawn#646),
-// so it is "tasks" by default and whatever a spec's results_prefix named otherwise.
-func completionKey(keyPrefix, taskID string) string {
-	if keyPrefix == "" {
-		return fmt.Sprintf("%s/completion.json", taskID)
-	}
-	return fmt.Sprintf("%s/%s/completion.json", keyPrefix, taskID)
-}
-func exitCodeKey(keyPrefix, taskID string) string {
-	if keyPrefix == "" {
-		return fmt.Sprintf("%s/.exitcode", taskID)
-	}
-	return fmt.Sprintf("%s/%s/.exitcode", keyPrefix, taskID)
+// results bucket.
+//
+// taskPrefix is the KEY PORTION of taskproto.EffectiveResultsPrefix, which
+// already ends in the task id. It must not be appended again — doing so was
+// spawn#715: EffectiveResultsPrefix returns ".../tasks/<task_id>", so a builder
+// that added the id produced
+//
+//	tasks/<task_id>/<task_id>/completion.json
+//
+// while the writer, which formats the prefix directly, put the object at
+//
+//	tasks/<task_id>/completion.json
+//
+// Nothing read a completion record for four releases (v0.117.0 through
+// v0.121.0): `task status` reported every finished task as "running" and
+// `--wait` polled to TTL and exited 1 on tasks that had succeeded in seconds.
+// Both halves — EffectiveResultsPrefix gaining the task id, and these builders
+// appending it — arrived in the same commit (#658), so neither looked wrong on
+// its own.
+//
+// The parameter is named taskPrefix, and the task id is no longer a parameter at
+// all, so the same mistake cannot be made by passing the wrong thing.
+func completionKey(taskPrefix string) string {
+	return joinTaskKey(taskPrefix, "completion.json")
 }
 
-// staleResultKeys lists every result object a previous run of taskID could have
-// left behind at a key this run will reuse.
-func staleResultKeys(keyPrefix, taskID string) []string {
-	return []string{completionKey(keyPrefix, taskID), exitCodeKey(keyPrefix, taskID)}
+func exitCodeKey(taskPrefix string) string {
+	return joinTaskKey(taskPrefix, ".exitcode")
+}
+
+// joinTaskKey appends a file name to a task's key prefix. An empty prefix means
+// the bucket root, which only arises from a results_prefix of bare "s3://bucket"
+// — rare, but it must not produce a leading slash.
+func joinTaskKey(taskPrefix, name string) string {
+	if taskPrefix == "" {
+		return name
+	}
+	return taskPrefix + "/" + name
+}
+
+// staleResultKeys lists every result object a previous run of this task could
+// have left behind at a key this run will reuse.
+func staleResultKeys(taskPrefix string) []string {
+	return []string{completionKey(taskPrefix), exitCodeKey(taskPrefix)}
 }
 
 // clearStaleCompletion deletes the completion artifacts of any PREVIOUS run of
@@ -705,9 +730,12 @@ func staleResultKeys(keyPrefix, taskID string) []string {
 // (spawn#608). Deleting an absent key is a no-op success in S3, so the normal
 // first-run case returns nil without the caller special-casing anything. Errors
 // are joined and returned for the caller to log — never to abort a launch on.
-func clearStaleCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, keyPrefix, taskID string) error {
+// taskPrefix, not (prefix, taskID): the task id is already in the prefix, and a
+// vestigial id parameter is how #715 happened — a caller passing the wrong one of
+// two plausible things with no compiler or vet complaint.
+func clearStaleCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, taskPrefix string) error {
 	var errs []error
-	for _, key := range staleResultKeys(keyPrefix, taskID) {
+	for _, key := range staleResultKeys(taskPrefix) {
 		if err := store.DeleteS3Object(ctx, region, resultsBucket, key); err != nil {
 			errs = append(errs, err)
 		}
@@ -794,7 +822,7 @@ func pollCompletion(ctx context.Context, store taskResultStore, region, resultsB
 				return rec, nil
 			case completionUnattributed:
 				fmt.Fprintf(warn, "⚠ task %s: the completion record carries no run_id, so it cannot be attributed to this run (%s).\n", taskID, runID)
-				fmt.Fprintf(warn, "  It was written by a wrapper that predates run-id stamping; accepting it. If it looks like an older attempt, re-check s3://%s/%s.\n", resultsBucket, completionKey(keyPrefix, taskID))
+				fmt.Fprintf(warn, "  It was written by a wrapper that predates run-id stamping; accepting it. If it looks like an older attempt, re-check s3://%s/%s.\n", resultsBucket, completionKey(keyPrefix))
 				return rec, nil
 			case completionPreviousRun:
 				if !notedStale {
@@ -805,7 +833,7 @@ func pollCompletion(ctx context.Context, store taskResultStore, region, resultsB
 		}
 		if time.Now().After(deadline) {
 			if notedStale {
-				return nil, fmt.Errorf("timed out waiting for task %q completion record for this run (run_id %s) (past TTL); the record at s3://%s/%s is from an earlier attempt", taskID, runID, resultsBucket, completionKey(keyPrefix, taskID))
+				return nil, fmt.Errorf("timed out waiting for task %q completion record for this run (run_id %s) (past TTL); the record at s3://%s/%s is from an earlier attempt", taskID, runID, resultsBucket, completionKey(keyPrefix))
 			}
 			return nil, fmt.Errorf("timed out waiting for task %q completion record (past TTL); poll later with 'spawn task status %s'", taskID, taskID)
 		}
@@ -822,7 +850,7 @@ func pollCompletion(ctx context.Context, store taskResultStore, region, resultsB
 // the task is still running. It does NOT judge run identity: `task status` has no
 // run id to compare against, so that check lives in pollCompletion.
 func fetchCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, keyPrefix, taskID string) (rec *taskproto.CompletionRecord, present bool, err error) {
-	data, err := store.GetS3Object(ctx, region, resultsBucket, completionKey(keyPrefix, taskID))
+	data, err := store.GetS3Object(ctx, region, resultsBucket, completionKey(keyPrefix))
 	if err != nil {
 		if errors.Is(err, aws.ErrS3NoSuchKey) {
 			return nil, false, nil
