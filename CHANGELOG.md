@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`task status` reported every finished task as "running", and `--wait` polled to
+  TTL and exited 1 on tasks that had succeeded** (#715). The task id was appended to
+  the results key **twice**. `EffectiveResultsPrefix` already ends in the task id, and
+  `completionKey` appended it again, so while the wrapper wrote — and spawn printed —
+  `tasks/<task_id>/completion.json`, the reader fetched
+  `tasks/<task_id>/<task_id>/completion.json` and got a 404, which the read path
+  correctly interprets as "no record yet".
+  Present since **v0.117.0**, not v0.121.0 as first reported: both halves arrived in
+  the same commit (#658), so neither looked wrong alone. That also explains records
+  written by older versions being unreadable now — the reader changed, not the writer.
+  The cost was not just a wrong exit code. `make run` wraps `task run --wait`, so
+  every successful task appeared to fail *and* blocked for the full TTL — 25 minutes
+  of wall time per task to learn nothing.
+- **A previous attempt's completion record could answer the current run** (#715,
+  consequence of the above). `clearStaleCompletion` used the same key builders, so
+  the pre-launch clear had been deleting objects that do not exist — and since
+  deleting an absent key is a no-op success in S3, it reported success and removed
+  nothing. #608's stale-record guard has therefore been inert since v0.117.0, and
+  fixing only the read path would have resurrected that bug.
+  The task id is no longer a parameter to any of these builders, so the two plausible
+  calling conventions that caused this cannot be confused again. The gate is a
+  round-trip — the key the reader computes must equal the URI the writer prints —
+  because asserting the builder returns an expected string would not have caught it.
+
 - **`spawn orphans` and `spawn cleanup` reported nothing by default** (#708). `--mine`
   filtered on `spawn:iam-user`, a tag spawn writes only to instances and volumes.
   Shared infrastructure — security groups, IAM roles and instance profiles, key pairs,
