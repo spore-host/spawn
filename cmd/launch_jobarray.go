@@ -271,7 +271,7 @@ func cleanupAbandonedPGs(ctx context.Context, awsClient *aws.Client, act *mpicoh
 		// every time, reporting InvalidPlacementGroup.InUse on every failed MPI
 		// launch and leaving the group behind. Nine were found in one region of
 		// one account.
-		if err := awsClient.DeletePlacementGroupWithRetry(ctx, name); err != nil {
+		if err := awsClient.DeletePlacementGroupWithRetry(ctx, name, act.Region); err != nil {
 			// Name the exact command rather than just the failure. An empty
 			// placement group is free, so this is tidiness, not cost — and a
 			// one-paste remedy is worth more here than a longer wait.

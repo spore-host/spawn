@@ -62,11 +62,18 @@ func (c *Client) CreatePlacementGroup(ctx context.Context, name, region string) 
 	return fmt.Errorf("placement group %q did not become available within 30s", name)
 }
 
-// DeletePlacementGroup removes a placement group
-func (c *Client) DeletePlacementGroup(ctx context.Context, name string) error {
-	ec2Client := ec2.NewFromConfig(c.cfg)
-
-	_, err := ec2Client.DeletePlacementGroup(ctx, &ec2.DeletePlacementGroupInput{
+// DeletePlacementGroup removes a placement group in region. An empty region
+// falls back to the client's default region, matching CreatePlacementGroup.
+//
+// region is a parameter because it used to not be (spawn#685). Create pinned the
+// client to the launch region while Delete used ec2.NewFromConfig(c.cfg) — the
+// default region — so a cohort launched with --region elsewhere created its group
+// in one region and tried to delete it in another. That fails
+// InvalidPlacementGroup.Unknown, which is not retryable, so the group was
+// abandoned on the very first attempt. Worse, a same-named group really present
+// in the default region would have been deleted instead.
+func (c *Client) DeletePlacementGroup(ctx context.Context, name, region string) error {
+	_, err := c.regionalEC2(region).DeletePlacementGroup(ctx, &ec2.DeletePlacementGroupInput{
 		GroupName: aws.String(name),
 	})
 	return err
@@ -200,9 +207,9 @@ func SetPGDeleteWaitForTest(budget, interval time.Duration) func() {
 // Only InUse is retried. A permissions or not-found error is returned at once,
 // because waiting 60 seconds to re-learn that the caller cannot delete
 // placement groups is worse than saying so immediately.
-func (c *Client) DeletePlacementGroupWithRetry(ctx context.Context, name string) error {
+func (c *Client) DeletePlacementGroupWithRetry(ctx context.Context, name, region string) error {
 	return retryPlacementGroupDelete(ctx, name, func() error {
-		return c.DeletePlacementGroup(ctx, name)
+		return c.DeletePlacementGroup(ctx, name, region)
 	})
 }
 

@@ -28,9 +28,10 @@ type fakeLauncher struct {
 	failAZs   map[string]bool   // if set, any launch into one of these AZs ICEs (multi-AZ exhaustion)
 	launchLog []launchRec
 
-	pgCreated     map[string]int // placement group name → CreatePlacementGroup call count
-	pgDeleted     []string       // placement group names passed to DeletePlacementGroup
-	pgCreateDelay time.Duration  // artificial delay inside CreatePlacementGroup, widens race windows in tests
+	pgCreated      map[string]int    // placement group name → CreatePlacementGroup call count
+	pgDeleted      []string          // placement group names passed to DeletePlacementGroup
+	pgDeleteRegion map[string]string // placement group name → region the delete was issued in (#685)
+	pgCreateDelay  time.Duration     // artificial delay inside CreatePlacementGroup, widens race windows in tests
 
 	ssmCmds       map[string]string   // instanceID → last RunShellScript command
 	ssmAllCmds    map[string][]string // instanceID → every RunShellScript command, in order
@@ -135,10 +136,17 @@ func (f *fakeLauncher) createPGDelay() {
 	}
 }
 
-func (f *fakeLauncher) DeletePlacementGroup(_ context.Context, name string) error {
+func (f *fakeLauncher) DeletePlacementGroup(_ context.Context, name, region string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pgDeleted = append(f.pgDeleted, name)
+	// Recorded so a test can assert the delete goes to the region the group was
+	// CREATED in. Before #685 the signature had no region at all and the real
+	// client used its default one, so a --region launch deleted nothing.
+	if f.pgDeleteRegion == nil {
+		f.pgDeleteRegion = map[string]string{}
+	}
+	f.pgDeleteRegion[name] = region
 	return nil
 }
 

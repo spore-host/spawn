@@ -37,6 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aws ec2 delete-placement-group` command instead of only reporting the failure.
   A permissions or not-found error still returns immediately rather than burning the
   budget to re-learn it.
+- **Placement-group deletion ignored `--region` entirely** (#685). The second,
+  independent cause of the same orphans, found while fixing the first:
+  `CreatePlacementGroup` pinned the EC2 client to the launch region, but
+  `DeletePlacementGroup` took no region at all and used the client's *default* one. So
+  a cohort launched into a non-default region created its group in one region and
+  tried to delete it in another — failing `InvalidPlacementGroup.Unknown`, which is
+  not a retryable condition, so the group was abandoned on the first attempt
+  regardless of how long cleanup waited. A same-named group genuinely present in the
+  default region would have been deleted instead.
+  The region is now a required parameter, so every caller must supply one, and a gate
+  rejects any regional EC2 call in `pkg/aws` built on the default-region config —
+  that shape is the bug, and `DescribeRegions` is the one legitimate exception.
 
 
 ## [0.120.0] - 2026-10-05

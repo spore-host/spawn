@@ -3,6 +3,8 @@ package aws
 import (
 	"context"
 	"errors"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -128,5 +130,78 @@ func TestDeletePlacementGroupHonoursContext(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("took %s to notice cancellation (interval is 10s)", elapsed)
+	}
+}
+
+// TestDeletePlacementGroupTakesARegion is the second half of spawn#685's leak.
+//
+// CreatePlacementGroup pinned the client to the launch region; DeletePlacementGroup
+// used ec2.NewFromConfig(c.cfg) — the DEFAULT region — and had no region parameter
+// at all. So a cohort launched with --region in a non-default region created its
+// group in one region and tried to delete it in another: the delete failed
+// InvalidPlacementGroup.Unknown, which is not retryable, so the group was abandoned
+// on the first attempt no matter how long the retry waited. (And a same-named group
+// genuinely present in the default region would have been deleted instead.)
+//
+// The signature is the gate: a region-less Delete cannot be correct next to a
+// region-taking Create, and the compiler now enforces that every caller supplies
+// one.
+func TestDeletePlacementGroupTakesARegion(t *testing.T) {
+	var _ func(context.Context, string, string) error = (&Client{}).DeletePlacementGroup
+	var _ func(context.Context, string, string) error = (&Client{}).DeletePlacementGroupWithRetry
+}
+
+// TestNoRegionalEC2CallUsesTheDefaultConfig generalises it: the default-region
+// client is the shape of the bug, not the symptom. c.cfg carries whatever region
+// the ambient AWS config had, which has nothing to do with where the caller asked
+// to launch — so a regional EC2 call built on it silently targets the wrong
+// region. Everything regional must go through regionalEC2.
+func TestNoRegionalEC2CallUsesTheDefaultConfig(t *testing.T) {
+	// GetEnabledRegions is genuinely account-global: DescribeRegions returns the
+	// same answer from any region, and there is no caller region to honour.
+	allowed := map[string]bool{"GetEnabledRegions": true}
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read pkg/aws: %v", err)
+	}
+	funcRE := regexp.MustCompile(`(?m)^func (?:\([^)]*\) )?(\w+)\(`)
+	found := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, rerr := os.ReadFile(name)
+		if rerr != nil {
+			t.Fatalf("read %s: %v", name, rerr)
+		}
+		src := string(b)
+		for _, line := range strings.Split(src, "\n") {
+			if !strings.Contains(line, "ec2.NewFromConfig(c.cfg)") {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue // the comment in placement.go describing this very bug
+			}
+			found++
+			// Attribute it to the enclosing function so the message is actionable.
+			idx := strings.Index(src, line)
+			var fn string
+			for _, m := range funcRE.FindAllStringSubmatchIndex(src[:idx], -1) {
+				fn = src[m[2]:m[3]]
+			}
+			if allowed[fn] {
+				continue
+			}
+			t.Errorf("%s: %s builds an EC2 client from the client's DEFAULT region. "+
+				"c.cfg's region is whatever the ambient AWS config had, not where the "+
+				"caller asked to operate — so this silently targets the wrong region "+
+				"(spawn#685). Use c.regionalEC2(region).", name, fn)
+		}
+	}
+	if found == 0 {
+		t.Error("found no ec2.NewFromConfig(c.cfg) at all, not even the allowed one — " +
+			"the matcher is stale and this gate would pass vacuously")
 	}
 }
