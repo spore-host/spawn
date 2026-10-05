@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--command` now announces the shell options it inherits** (#707). It runs with
+  **errexit already enabled**, and `set -uo pipefail` does *not* clear it — so a
+  script opening with that idiomatic line, believing it chose its own error policy,
+  is actually running `-e -u -o pipefail`. The failure mode was silent and actively
+  misleading: the script exits *before* the line that would have reported why.
+  Two ordinary idioms are the usual casualties. A SIGPIPE'd pipeline under pipefail
+  — `... | head -n N` returns 141 — and `wait $pid` on a failed background job,
+  which is specifically a pattern for *capturing* a failure and which `-e` destroys
+  at the moment it matters. It cost the reporter four `r8gd.8xlarge` runs and three
+  misdiagnoses, one of which reached a published page and had to be withdrawn.
+  Two lines now land at the top of `/var/log/spawn-command.log`: the actual `$-`, and
+  a note that `set -uo pipefail` will not clear errexit and that `set +e` opts out.
+  Printed rather than changed, as the reporter suggested: fail-fast is a defensible
+  default, and running on after a broken step until TTL would be worse. The
+  `--command` help now says all of this too, so it is discoverable before a run
+  rather than after one.
+
 - **A Lambda runtime census, gating every PR** (#716). AWS ending support for Python
   3.8 raised the question "are we on a supported runtime anywhere?", and answering it
   took `lambda list-functions` across two accounts and two regions by hand. We were
