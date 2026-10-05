@@ -47,10 +47,51 @@ func (r ManagedResource) IsRunningInstance() bool {
 type DiscoverOptions struct {
 	// Region to search. Empty uses the client's configured region.
 	Region string
-	// OnlyMine restricts results to resources tagged with the caller's
-	// spawn:iam-user (the principal that created them). When false, every
-	// spawn:managed resource in the account/region is returned.
+	// OnlyMine excludes resources tagged for a DIFFERENT principal. When false,
+	// every spawn:managed resource in the account/region is returned.
+	//
+	// Note what it does NOT do: a resource with no spawn:iam-user tag is
+	// INCLUDED. See ownedByCaller for why — in short, spawn only stamps that tag
+	// on instances and volumes, so treating its absence as "someone else's"
+	// turned --mine from a filter into a blackhole (spawn#708).
 	OnlyMine bool
+}
+
+// ownedByCaller reports whether a resource is in scope for OnlyMine.
+//
+// The rule is "not someone else's", NOT "provably mine" — and the difference is
+// the whole of spawn#708. The old check was:
+//
+//	if opts.OnlyMine && tags["spawn:iam-user"] != callerARN { continue }
+//
+// spawn:iam-user is written by pkg/aws/tags.go, the INSTANCE tag builder. Shared
+// infrastructure — security groups, IAM roles and instance profiles, key pairs,
+// log groups, DynamoDB tables — is created elsewhere and never gets it. A
+// missing tag reads as "", which never equals a caller ARN, so for those classes
+// the filter did not narrow the result, it EMPTIED it:
+//
+//	$ spawn orphans --region us-east-1
+//	No orphaned spawn-managed resources in us-east-1.
+//	$ spawn orphans --region us-east-1 --all
+//	21 resource(s).     # 9 security groups, 12 IAM profiles, oldest 2026-07-19
+//
+// "Nothing to clean" is a believed answer, and it was wrong for as long as those
+// resources existed.
+//
+// Untagged is treated as shared rather than foreign for two reasons. It is the
+// only choice that helps the resources ALREADY out there — stamping the tag on
+// new resources would leave today's orphans invisible forever, and they are the
+// population that matters. And "mine" is a dubious notion for a security group
+// that is deliberately shared and reused by name across runs and principals:
+// #685's MPI group is exactly that, which is why CreateOrGetMPISecurityGroup is
+// a get-or-create.
+//
+// It also matches what the two separately-scanned classes already do: neither
+// scanAddresses nor scanPlacementGroups applies OnlyMine at all, because neither
+// resource carries the tag.
+func ownedByCaller(tags map[string]string, callerARN string) bool {
+	owner := tags["spawn:iam-user"]
+	return owner == "" || owner == callerARN
 }
 
 // DiscoverManagedResources finds spawn-created resources in one region via the
@@ -59,7 +100,11 @@ type DiscoverOptions struct {
 // ones. Results are scoped to spawn:managed=true and, when OnlyMine is set, to
 // the caller's spawn:iam-user — the identity already stamped on every resource
 // (#259), so cleanup acts only on what the caller owns.
-func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOptions) ([]ManagedResource, error) {
+// Returns the resources and, separately, how many were excluded by OnlyMine.
+// The count is reported rather than inferred because a scope that hides
+// everything used to be indistinguishable from an account that is genuinely
+// clean (#708), and "nothing to clean" is a believed answer.
+func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOptions) ([]ManagedResource, int, error) {
 	cfg := c.regionalConfig(opts.Region)
 	region := cfg.Region
 
@@ -67,7 +112,7 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 	if opts.OnlyMine {
 		_, userARN, err := c.GetCallerIdentityInfo(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("resolve caller identity for --mine scope: %w", err)
+			return nil, 0, fmt.Errorf("resolve caller identity for --mine scope: %w", err)
 		}
 		callerARN = userARN
 	}
@@ -76,13 +121,17 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 	filters := []rgttypes.TagFilter{{Key: aws.String("spawn:managed"), Values: []string{"true"}}}
 
 	var resources []ManagedResource
+	// Counted so "nothing here" is never the whole story when it is not true
+	// (#708): a scope that hid everything used to be indistinguishable from an
+	// account that was genuinely clean.
+	skippedByScope := 0
 	paginator := rgt.NewGetResourcesPaginator(rgtClient, &rgt.GetResourcesInput{
 		TagFilters: filters,
 	})
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list tagged resources in %s: %w", region, err)
+			return nil, 0, fmt.Errorf("list tagged resources in %s: %w", region, err)
 		}
 		for _, m := range page.ResourceTagMappingList {
 			arn := aws.ToString(m.ResourceARN)
@@ -90,10 +139,36 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 			for _, t := range m.Tags {
 				tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
 			}
-			if opts.OnlyMine && tags["spawn:iam-user"] != callerARN {
+			if opts.OnlyMine && !ownedByCaller(tags, callerARN) {
+				skippedByScope++
 				continue
 			}
 			svc, rtype, id := parseARN(arn)
+
+			// Drop RGT's placement-group rows; scanPlacementGroups supersedes them.
+			//
+			// I claimed in #706 that RGT does not return placement groups at all.
+			// That was wrong — it returns them keyed by GROUP ID:
+			//
+			//	arn:aws:ec2:us-east-1:…:placement-group/pg-040e64301b7f056f7
+			//
+			// and the probe I based the claim on was inconclusive because the
+			// account had none at the time. Two bugs followed. Every managed group
+			// was reported TWICE, once by id with no state and once by name with
+			// one. And the id-keyed copy is undeletable: EC2's
+			// DeletePlacementGroup takes a GroupName, so it fails with
+			// InvalidPlacementGroup.Unknown — which RemoveResource's
+			// ignoreNotFound then swallowed as success, so cleanup reported
+			// deleting a group it had not touched.
+			//
+			// The dedicated scan is kept rather than RGT's row because RGT
+			// supplies neither of the two things needed here: the NAME (required
+			// to delete) and whether the group still has members (required to
+			// know it is an orphan at all).
+			if supersededByDedicatedScan(svc, rtype) {
+				continue
+			}
+
 			resources = append(resources, ManagedResource{
 				ARN:          arn,
 				Service:      svc,
@@ -109,10 +184,10 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 	// doesn't carry it, and cleanup/orphan decisions hinge on it (running vs.
 	// stopped instances; available vs. in-use volumes).
 	if err := c.enrichInstanceState(ctx, cfg, resources); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := c.enrichVolumeState(ctx, cfg, resources); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Elastic IPs don't come back from the Resource Groups Tagging API (ec2:Address
@@ -121,7 +196,7 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 	// to a stopped instance can be classified as a billable leak (#262).
 	addrs, err := c.scanAddresses(ctx, cfg, region, resources)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	resources = append(resources, addrs...)
 
@@ -130,12 +205,12 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 	// (#685). Scanned separately, like addresses.
 	pgs, err := c.scanPlacementGroups(ctx, cfg, region)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	resources = append(resources, pgs...)
 
 	sort.Slice(resources, func(i, j int) bool { return resources[i].ARN < resources[j].ARN })
-	return resources, nil
+	return resources, skippedByScope, nil
 }
 
 // describeAddressesAPI is the slice of EC2 that scanAddresses needs.
@@ -450,6 +525,9 @@ func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool {
 		// hasRunningInstance would hide exactly the leak this exists to find.
 		// scanPlacementGroups asks EC2 which groups have members.
 		return r.State == "empty"
+	case r.Service == "iam" && isSharedSporedIdentity(r.ID):
+		// Never an orphan. See isSharedSporedIdentity.
+		return false
 	case r.Service == "iam":
 		return !hasRunningInstance
 	case r.ResourceType == "address":
@@ -624,4 +702,43 @@ func ignoreNotFound(err error, notFoundCode string) error {
 		return nil
 	}
 	return err
+}
+
+// isSharedSporedIdentity reports whether an IAM resource is the shared,
+// long-lived spored role or instance profile rather than a per-run one.
+//
+// These are created ONCE and reused by every launch, so "nothing is running
+// right now" says nothing about whether they are wanted — which is the only
+// signal IsLikelyOrphan has for IAM. Classifying them as orphans means a
+// `spawn cleanup --yes` in an idle account deletes spawn's own shared identity.
+//
+// This was latent until spawn#708. The --mine scope filtered on spawn:iam-user,
+// a tag these never carry, so they were invisible to cleanup by default and the
+// over-eager classification never fired. Fixing the scope unmasked it: the same
+// change that made 27 real orphans visible also made these two deletable, and a
+// dry run offered both. One bug hid the other.
+//
+// Matching by name rather than by tag because that is what identifies them —
+// pkg/aws/iam.go creates exactly these two fixed names, and a per-run role is
+// spawn-instance-<hash>.
+func isSharedSporedIdentity(id string) bool {
+	return id == SporedRoleName || id == SporedInstanceProfileName
+}
+
+// IsSharedSporedIdentity reports whether a resource is spawn's shared, reused
+// IAM identity, which cleanup must never remove. Exported for the cmd layer;
+// see isSharedSporedIdentity for why these are not orphans.
+func IsSharedSporedIdentity(r ManagedResource) bool {
+	return r.Service == "iam" && isSharedSporedIdentity(r.ID)
+}
+
+// supersededByDedicatedScan reports whether a Resource Groups Tagging API row
+// should be dropped because a dedicated scan covers that type better.
+//
+// Only placement groups, and only because RGT keys them by GROUP ID while
+// everything that matters needs the NAME. See the call site for the full story
+// (#713) — in short, keeping both rows double-reported every group and produced
+// one that could not be deleted.
+func supersededByDedicatedScan(service, resourceType string) bool {
+	return service == "ec2" && resourceType == "placement-group"
 }

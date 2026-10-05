@@ -16,6 +16,15 @@ import (
 	smithy "github.com/aws/smithy-go"
 )
 
+// SporedRoleName and SporedInstanceProfileName are the SHARED, long-lived IAM
+// identities spawn creates once and reuses for every launch. Named constants
+// because cleanup has to recognise them (spawn#713): they are not per-run
+// resources and must never be swept just because nothing is running right now.
+const (
+	SporedRoleName            = "spored-instance-role"
+	SporedInstanceProfileName = "spored-instance-profile"
+)
+
 // iamErrorCode returns the API error code for err, matching both the modeled
 // SDK error types and a generic smithy.APIError (which is what some emulators /
 // non-modeled responses surface). Falls back to substring matching on the
@@ -1115,8 +1124,8 @@ func (c *Client) ensureSporedBaselinePolicy(ctx context.Context, iamClient *iam.
 func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	iamClient := iam.NewFromConfig(c.cfg)
 
-	roleName := "spored-instance-role"
-	instanceProfileName := "spored-instance-profile"
+	roleName := SporedRoleName
+	instanceProfileName := SporedInstanceProfileName
 	policyName := "spored-policy"
 
 	roleCreated := false

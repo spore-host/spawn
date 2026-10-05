@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`spawn orphans` and `spawn cleanup` reported nothing by default** (#708). `--mine`
+  filtered on `spawn:iam-user`, a tag spawn writes only to instances and volumes.
+  Shared infrastructure — security groups, IAM roles and instance profiles, key pairs,
+  log groups, tables — never carries it, and a missing tag reads as `""`, which never
+  equals a caller ARN. So for those classes the filter did not *narrow* the result, it
+  **emptied** it: `spawn orphans` printed "No orphaned spawn-managed resources" in an
+  account holding 27 of them, the oldest from 2026-07-19.
+  The rule is now "not someone else's" rather than "provably mine": an untagged
+  resource is treated as shared infrastructure and included, while one tagged for a
+  different principal is still excluded. Untagged-is-shared rather than
+  untagged-is-foreign because it is the only choice that helps the resources already
+  out there, and because "mine" is a dubious notion for a security group that is
+  deliberately shared and reused by name across runs. `orphans` now also reports how
+  many resources the scope excluded, so "nothing here" can never again be the whole
+  output when it is not the whole story.
+- **Placement groups were reported twice, and one copy silently failed to delete**
+  (#713). A **correction to v0.121.0**, which claimed the Resource Groups Tagging API
+  "does not return placement groups at all". It does — keyed by group *ID*. The probe
+  that claim rested on ran against an account with zero placement groups, so it could
+  not tell an unsupported type from an empty result.
+  Consequently every managed group appeared twice: once from the tagging API by id
+  with no state, once from the dedicated scan by name with one. Worse, the id-keyed
+  copy could not be deleted — EC2's `DeletePlacementGroup` takes a *name*, so it
+  failed `InvalidPlacementGroup.Unknown`, which the tolerant error check then treated
+  as **success**. A `spawn cleanup` in v0.121.0 can therefore report removing a
+  placement group it never touched.
+  The tagging API's placement-group rows are now dropped in favour of the dedicated
+  scan, which supplies both things the other does not: the name needed to delete, and
+  whether the group still has members.
+- **`make smoke` leaked the infrastructure it exists to catch leaks of** (#713). The
+  MPI leg creates a managed security group and a per-AZ placement group; cleanup
+  terminated the instances and left both behind on every run. Three of each
+  accumulated over one session — found by `spawn orphans` once the #708 fix above
+  made the default scope work, which is a pointed way to learn it. The teardown now
+  removes them, retrying the placement-group delete for the same reason spawn itself
+  does (termination is asynchronous), and the post-run leak check asks about
+  placement groups and security groups rather than only instances, so "no instances
+  left behind" can no longer be reported over a pile of litter.
+- **`spawn cleanup` offered spawn's own shared IAM identity for deletion** (#713).
+  `spored-instance-role` and `spored-instance-profile` are created once and reused by
+  every launch, but the only signal the orphan check has for IAM is "is anything
+  running" — so an idle account made them orphans and `cleanup --yes` would have
+  deleted them. Latent until the #708 fix above: the broken scope had been hiding
+  them from cleanup entirely, so one bug was concealing the other. They are now
+  reported with the reason and never removed, while per-run
+  `spawn-instance-<hash>` profiles stay reclaimable.
+
 ## [0.121.0] - 2026-10-05
 
 ### Added
