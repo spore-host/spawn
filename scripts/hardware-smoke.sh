@@ -69,6 +69,40 @@ cleanup() {
   [ -n "${EFS_SG:-}" ] && aws ec2 delete-security-group --region "$REGION" \
     --group-id "$EFS_SG" >/dev/null 2>&1 && echo "  deleted SG $EFS_SG"
 
+  # The MPI leg's own managed infrastructure. This file terminated its instances
+  # and then left these behind on every run — three orphaned placement groups and
+  # three security groups accumulated across one session, which `spawn orphans`
+  # found once #708 made the default scope work:
+  #
+  #   ec2  placement-group  spawn-mpi-smoke22812-us-east-1a  empty
+  #   ec2  placement-group  spawn-mpi-smoke85337-us-east-1a  empty
+  #
+  # A smoke that exists to catch leaks must not be a source of them. Placement
+  # group deletion is retried because TerminateInstances is asynchronous and EC2
+  # refuses to delete a group with members — the same race #685 fixed in spawn
+  # itself, and this script has to honour it for the same reason.
+  for az_pg in $(aws ec2 describe-placement-groups --region "$REGION" \
+      --filters "Name=group-name,Values=spawn-mpi-${TAG}-*" \
+      --query 'PlacementGroups[].GroupName' --output text 2>/dev/null | tr '\t' '\n'); do
+    [ -n "$az_pg" ] || continue
+    for _ in $(seq 1 12); do
+      aws ec2 delete-placement-group --region "$REGION" --group-name "$az_pg" >/dev/null 2>&1 \
+        && { echo "  deleted placement group $az_pg"; break; }
+      sleep 5
+    done
+  done
+
+  for mpi_sg in $(aws ec2 describe-security-groups --region "$REGION" \
+      --filters "Name=group-name,Values=spawn-mpi-${TAG}*" \
+      --query 'SecurityGroups[].GroupId' --output text 2>/dev/null | tr '\t' '\n'); do
+    [ -n "$mpi_sg" ] || continue
+    for _ in $(seq 1 12); do
+      aws ec2 delete-security-group --region "$REGION" --group-id "$mpi_sg" >/dev/null 2>&1 \
+        && { echo "  deleted SG $mpi_sg"; break; }
+      sleep 5
+    done
+  done
+
   # Independent leak check: ask AWS, do not trust the terminate calls above.
   sleep 10
   local left
@@ -77,6 +111,23 @@ cleanup() {
               "Name=instance-state-name,Values=pending,running,stopping,stopped" \
     --query 'length(Reservations[].Instances[])' --output text 2>/dev/null)
   if [ "${left:-0}" = "0" ]; then ok "no instances left behind"; else bad "LEAK: $left instance(s) still alive — terminate by hand NOW"; fi
+
+  # Instances are the expensive leak, but not the only one. Three placement
+  # groups and three security groups accumulated over one session because this
+  # check only ever asked about instances, so it reported "no instances left
+  # behind" while leaving litter every run (#685/#708).
+  local pg_left sg_left
+  pg_left=$(aws ec2 describe-placement-groups --region "$REGION" \
+    --filters "Name=group-name,Values=spawn-mpi-${TAG}-*" \
+    --query 'length(PlacementGroups)' --output text 2>/dev/null)
+  sg_left=$(aws ec2 describe-security-groups --region "$REGION" \
+    --filters "Name=group-name,Values=spawn-mpi-${TAG}*" \
+    --query 'length(SecurityGroups)' --output text 2>/dev/null)
+  if [ "${pg_left:-0}" = "0" ] && [ "${sg_left:-0}" = "0" ]; then
+    ok "no placement groups or security groups left behind"
+  else
+    bad "LEAK: ${pg_left:-?} placement group(s) and ${sg_left:-?} security group(s) remain — 'spawn orphans --region $REGION' will list them"
+  fi
 }
 trap cleanup EXIT INT TERM
 

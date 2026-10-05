@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The tagging API's placement-group rows are now dropped in favour of the dedicated
   scan, which supplies both things the other does not: the name needed to delete, and
   whether the group still has members.
+- **`make smoke` leaked the infrastructure it exists to catch leaks of** (#713). The
+  MPI leg creates a managed security group and a per-AZ placement group; cleanup
+  terminated the instances and left both behind on every run. Three of each
+  accumulated over one session — found by `spawn orphans` once the #708 fix above
+  made the default scope work, which is a pointed way to learn it. The teardown now
+  removes them, retrying the placement-group delete for the same reason spawn itself
+  does (termination is asynchronous), and the post-run leak check asks about
+  placement groups and security groups rather than only instances, so "no instances
+  left behind" can no longer be reported over a pile of litter.
 - **`spawn cleanup` offered spawn's own shared IAM identity for deletion** (#713).
   `spored-instance-role` and `spored-instance-profile` are created once and reused by
   every launch, but the only signal the orphan check has for IAM is "is anything
