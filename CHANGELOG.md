@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.121.0] - 2026-10-05
+
 ### Added
 
 - **`spawn orphans` and `spawn cleanup` now see placement groups** (#685). spawn tags
@@ -4966,7 +4968,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.120.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.121.0...HEAD
+[0.121.0]: https://github.com/spore-host/spawn/compare/v0.120.0...v0.121.0
 [0.120.0]: https://github.com/spore-host/spawn/compare/v0.119.0...v0.120.0
 [0.119.0]: https://github.com/spore-host/spawn/compare/v0.118.0...v0.119.0
 [0.118.0]: https://github.com/spore-host/spawn/compare/v0.117.0...v0.118.0
