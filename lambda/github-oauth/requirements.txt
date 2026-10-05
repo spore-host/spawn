@@ -1,3 +1,0 @@
-# boto3 is included in Lambda runtime environment
-# urllib, json, base64, hmac, hashlib are all built-in
-# No additional dependencies needed

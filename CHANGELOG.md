@@ -23,7 +23,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A runtime reaching end-of-support should break a build rather than arrive as an
   email, so the allowlist is the thing you edit when a deprecation is published.
 
+### Removed
+
+- **`github-oauth-bridge` and its source** (#716). A Lambda exchanging a GitHub login
+  for AWS credentials via STS, deployed January 2026 and superseded by the current
+  portal. **Zero invocations on both the function and its API Gateway over 60 days**,
+  no page on spore.host referenced its endpoint, and the `spawn-dashboard` Cognito
+  pool uses Google and Globus rather than its OIDC issuer — so nothing depended on
+  it. Function, API Gateway, IAM role, the role's custom policy, and
+  `lambda/github-oauth/` are all gone; the code and config were archived first.
+  Its `GITHUB_CLIENT_SECRET` and `JWT_SECRET` sat in plaintext Lambda environment
+  variables, and the client id was hardcoded as a default in the source. **Deleting
+  the AWS resources does not invalidate the GitHub OAuth app** — that secret stays
+  valid until the app is revoked on GitHub.
+
 ### Fixed
+
+- **`scheduler-handler` was redeployed onto `provided.al2023`**, and its deploy
+  script could never have done it (#716). `update-function-code` does not change a
+  runtime, and `--runtime` appeared only in the *create* path — which never runs for
+  an existing function. So the script could declare `provided.al2023` and redeploy
+  forever while the deployed function stayed on `provided.al2`, which is exactly
+  what happened between January and October. The configuration update now carries
+  the runtime, and no longer ends in `&>/dev/null || true` — a step that silently
+  swallowed failures is a poor place to put the thing you are relying on.
+- **The deploy script took its region from `AWS_REGION`** (#716), which is ambient
+  and set for whatever you were last doing. Running it with `AWS_REGION=us-west-2`
+  left over from unrelated work **created a second `scheduler-handler` in the wrong
+  region** instead of updating the real one, and the create path had no wait, so the
+  following configuration update failed on a `Creating` function. The region is now
+  `us-east-1` — which is what `cmd/schedule.go` hardcodes, so anywhere else is
+  unreachable by its only caller — overridable only via the explicit
+  `SPAWN_LAMBDA_REGION`, and a mismatched `AWS_REGION` is reported rather than
+  obeyed. The create path waits for `function-active-v2`. The stray function was
+  deleted.
+- **The runtime census claimed a function had no source in the repo** (#716). It
+  greps for the function *name*, and `github-oauth-bridge`'s source was
+  `lambda/github-oauth/` — byte-identical to the deployed code and newer — because
+  the directory is named for the service, not the function. A name grep cannot prove
+  absence, so it no longer asserts it: the message now says no file mentions the
+  name, and lists `lambda/*/` as candidates to check.
 
 - **`scheduler-handler` was the one Go Lambda still on `provided.al2`** (#716), while
   every other had moved to `provided.al2023`. Its deploy script also omitted

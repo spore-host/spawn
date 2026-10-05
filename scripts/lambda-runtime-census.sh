@@ -158,8 +158,18 @@ if [ "${1:-}" = "--deployed" ]; then
         note "     referenced in the repo — bump the declaration and redeploy"
         printf '%s\n' "$refs" | sed "s|$root/||" | sed 's/^/       /' >&2
       else
-        note "     NOT in this repo at all — it cannot be rebuilt, reviewed or"
-        note "     rolled back. Import it or retire it."
+        note "     no file mentions the name \"$fn\" — but check for source under a"
+        note "     DIFFERENT name before concluding it has none:"
+        note "       ls lambda/   # a dir named for the service, not the function"
+        # Deliberately not "it is not in this repo". That claim was made about
+        # github-oauth-bridge and was WRONG: its source was lambda/github-oauth/,
+        # byte-identical to the deployed code and newer, but the directory is
+        # named for the service while the function is named …-bridge. Grepping a
+        # function name cannot prove absence of source, so this no longer says it
+        # does — the strong claim was the error, not the grep.
+        local hint
+        hint=$(ls -d "$root"/lambda/*/ 2>/dev/null | sed "s|$root/||" | tr -d '/' | tr '\n' ' ')
+        [ -n "$hint" ] && note "       candidates: $hint"
       fi
     done <<< "$listing"
   done
