@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.119.0] - 2026-10-04
+
 ### Added
 
 - **A hardware-sensitivity manifest, a smoke script, and a gate for unset template
@@ -4693,7 +4695,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.118.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.119.0...HEAD
+[0.119.0]: https://github.com/spore-host/spawn/compare/v0.118.0...v0.119.0
 [0.118.0]: https://github.com/spore-host/spawn/compare/v0.117.0...v0.118.0
 [0.117.0]: https://github.com/spore-host/spawn/compare/v0.116.0...v0.117.0
 [0.116.0]: https://github.com/spore-host/spawn/compare/v0.115.0...v0.116.0
