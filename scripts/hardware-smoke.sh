@@ -28,6 +28,14 @@ TTL="${TTL:-20m}"
 SMALL_TYPE="${SMALL_TYPE:-t4g.small}"
 SPAWN="${SPAWN:-bin/spawn}"   # `make build` writes here, not ./spawn
 TAG="smoke-$$"
+# The MPI job-array name, and therefore the prefix of every managed security
+# group and placement group the MPI leg creates. Derived ONCE: it is
+# "${TAG//-/}" because --job-array-name takes no hyphens, and computing it a
+# second time in the teardown is what made the cleanup and the leak check miss
+# every resource they were added to catch. They filtered spawn-mpi-smoke-26176-*
+# while the real groups were spawn-mpi-smoke26176-*, so both reported success
+# over four orphans.
+ARRAY_NAME="${TAG//-/}"
 
 [ -x "$SPAWN" ] || { echo "no spawn binary at $SPAWN — run 'make build' (which writes bin/spawn) or set SPAWN=" >&2; exit 2; }
 command -v aws >/dev/null || { echo "aws CLI required" >&2; exit 2; }
@@ -82,7 +90,7 @@ cleanup() {
   # refuses to delete a group with members — the same race #685 fixed in spawn
   # itself, and this script has to honour it for the same reason.
   for az_pg in $(aws ec2 describe-placement-groups --region "$REGION" \
-      --filters "Name=group-name,Values=spawn-mpi-${TAG}-*" \
+      --filters "Name=group-name,Values=spawn-mpi-${ARRAY_NAME}-*" \
       --query 'PlacementGroups[].GroupName' --output text 2>/dev/null | tr '\t' '\n'); do
     [ -n "$az_pg" ] || continue
     for _ in $(seq 1 12); do
@@ -93,7 +101,7 @@ cleanup() {
   done
 
   for mpi_sg in $(aws ec2 describe-security-groups --region "$REGION" \
-      --filters "Name=group-name,Values=spawn-mpi-${TAG}*" \
+      --filters "Name=group-name,Values=spawn-mpi-${ARRAY_NAME}*" \
       --query 'SecurityGroups[].GroupId' --output text 2>/dev/null | tr '\t' '\n'); do
     [ -n "$mpi_sg" ] || continue
     for _ in $(seq 1 12); do
@@ -118,10 +126,10 @@ cleanup() {
   # behind" while leaving litter every run (#685/#708).
   local pg_left sg_left
   pg_left=$(aws ec2 describe-placement-groups --region "$REGION" \
-    --filters "Name=group-name,Values=spawn-mpi-${TAG}-*" \
+    --filters "Name=group-name,Values=spawn-mpi-${ARRAY_NAME}-*" \
     --query 'length(PlacementGroups)' --output text 2>/dev/null)
   sg_left=$(aws ec2 describe-security-groups --region "$REGION" \
-    --filters "Name=group-name,Values=spawn-mpi-${TAG}*" \
+    --filters "Name=group-name,Values=spawn-mpi-${ARRAY_NAME}*" \
     --query 'length(SecurityGroups)' --output text 2>/dev/null)
   if [ "${pg_left:-0}" = "0" ] && [ "${sg_left:-0}" = "0" ]; then
     ok "no placement groups or security groups left behind"
@@ -194,7 +202,7 @@ storage_wait_settled() {
 
 step "MPI cohort: ${NODES} x ${TYPE} in ${REGION}"
 if "$SPAWN" launch "$TAG-mpi" --instance-type "$TYPE" --region "$REGION" \
-     --count "$NODES" --job-array-name "${TAG//-/}" --mpi \
+     --count "$NODES" --job-array-name "$ARRAY_NAME" --mpi \
      --mpi-command "hostname --short" --ttl "$TTL" --cost-limit 1.00 \
      --tag "smoke=$TAG" >/tmp/$TAG-mpi.log 2>&1; then
   ok "cohort launched and assembled (#684: --mpi works end to end)"

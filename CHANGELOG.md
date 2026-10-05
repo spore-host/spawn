@@ -89,6 +89,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The tagging API's placement-group rows are now dropped in favour of the dedicated
   scan, which supplies both things the other does not: the name needed to delete, and
   whether the group still has members.
+- **The smoke's own leak check reported a false pass** (#713, follow-up). The
+  teardown and leak check added for the leak above filtered on `spawn-mpi-${TAG}-*`,
+  but the MPI job-array name strips hyphens — real groups are
+  `spawn-mpi-smoke26176-*`, not `spawn-mpi-smoke-26176-*`. So both matched nothing:
+  the teardown deleted nothing and the check printed "no placement groups or
+  security groups left behind" over four orphans. The name is now derived once and
+  shared by the launch and the teardown, since computing it twice with different
+  rules is what allowed the drift. Caught by querying AWS directly instead of
+  believing the check — the same reason the leak check exists.
 - **`make smoke` leaked the infrastructure it exists to catch leaks of** (#713). The
   MPI leg creates a managed security group and a per-AZ placement group; cleanup
   terminated the instances and left both behind on every run. Three of each
