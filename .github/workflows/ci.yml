@@ -35,6 +35,21 @@ jobs:
       - name: Format gate
         run: make check-fmt
 
+      # Lambda runtime census (spawn#716). Offline half only: it greps every
+      # runtime DECLARATION in the repo against scripts/lambda-runtimes.txt, so
+      # it needs no credentials and can gate every PR.
+      #
+      # The point is that a runtime reaching end-of-support should break a build
+      # rather than arrive as an email. Before this, AWS notified the account,
+      # nothing in the repo changed, and no job could fail — which is how
+      # provided.al2 and python3.11 sat deployed since January, and how a README
+      # kept telling users to deploy on python3.11.
+      #
+      # The deployed half (`make lambda-runtimes-deployed`) needs AWS access and
+      # is run by hand; this job cannot see a function that is declared nowhere.
+      - name: Lambda runtime census
+        run: make lambda-runtimes
+
       # Changelog gate. CLAUDE.md requires an entry under `## [Unreleased]` in the
       # SAME PR as any user-facing change, and the release ritual promotes that
       # section verbatim. Nothing enforced it, and #627 merged with no entry at all —

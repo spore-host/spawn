@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A Lambda runtime census, gating every PR** (#716). AWS ending support for Python
+  3.8 raised the question "are we on a supported runtime anywhere?", and answering it
+  took `lambda list-functions` across two accounts and two regions by hand. We were
+  never on 3.8 — but two runtimes had been stale since January and nothing could have
+  told us. `make lambda-runtimes` now fails if any runtime declared in the repo is not
+  on the approved list in `scripts/lambda-runtimes.txt`, and runs in CI with no
+  credentials; `make lambda-runtimes-deployed` additionally checks the accounts we own.
+  The census scans **three** places, because scanning only `Runtime:` in templates is
+  what let the stale one hide: a shell deploy script sets it with `--runtime`, and
+  documentation counts too — `examples/workflows/step-functions/README.md` was telling
+  users to deploy on `python3.11`, which is advice people act on. That README is fixed.
+  A runtime reaching end-of-support should break a build rather than arrive as an
+  email, so the allowlist is the thing you edit when a deprecation is published.
+
+### Fixed
+
+- **`scheduler-handler` was the one Go Lambda still on `provided.al2`** (#716), while
+  every other had moved to `provided.al2023`. Its deploy script also omitted
+  `CGO_ENABLED=0`, unlike the two beside it — which is the likely reason it stayed
+  behind: a CGO build links the build host's glibc, and al2 ships 2.26 against
+  al2023's 2.34. Made static first, then bumped, since the order matters. The deploy
+  itself is a separate operational step.
+
 ## [0.122.0] - 2026-10-05
 
 ### Changed

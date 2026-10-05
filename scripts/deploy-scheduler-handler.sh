@@ -64,7 +64,12 @@ go mod download
 
 # Build Lambda function
 echo "🔨 Building Lambda function..."
-GOOS=linux GOARCH=amd64 go build -tags lambda.norpc -o bootstrap main.go
+# CGO_ENABLED=0 so the binary is genuinely static, matching
+# deploy-sweep-orchestrator.sh and deploy-custom-dns.sh. Without it, a build on a
+# linux/amd64 host links against that host's glibc — which is why this function
+# could sit on provided.al2 (glibc 2.26) while every other Go lambda moved to
+# provided.al2023 (2.34). Static first, then the runtime bump is safe (#716).
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags lambda.norpc -o bootstrap main.go
 
 # Create deployment package
 echo "📦 Creating deployment package..."
@@ -98,7 +103,7 @@ else
 
     aws lambda create-function \
         --function-name "$FUNCTION_NAME" \
-        --runtime provided.al2 \
+        --runtime provided.al2023 \
         --role "$ROLE_ARN" \
         --handler bootstrap \
         --zip-file fileb://function.zip \
