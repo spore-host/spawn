@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,14 +23,50 @@ import (
 	"github.com/spore-host/spawn/pkg/userdata"
 )
 
-// generateJobArrayID creates a unique ID for a job array
+// generateJobArrayID creates a unique ID for a job array.
 // Format: {name}-{timestamp}-{random}
-// Example: compute-20260113-abc123
+// Example: compute-20260113-7f3a9c2e
+//
+// The suffix is real randomness (spawn#710). It used to be
+// `time.Now().UnixNano() % 0xFFFFFF`, which the comment called random and which
+// was a clock reading — with two failure modes:
+//
+//   - On a coarse clock it simply repeats. time.Now() has MICROSECOND resolution
+//     on darwin, where two consecutive calls return the identical value, so any
+//     two ids minted in the same microsecond were equal. The #691 gate failed
+//     five times out of five there while passing in CI, whose Linux clock has
+//     nanosecond resolution — a uniqueness assertion that depends on clock
+//     granularity is not an assertion.
+//   - Even on a fine clock it wraps every 0xFFFFFF ns (~16.8 ms), so two
+//     launches that far apart collide deterministically. The keyspace was 16.8 ms
+//     of wall clock, not 24 bits, and it was predictable.
+//
+// That matters because #691 made the RunInstances ClientToken derive from THIS
+// id, precisely so two launches sharing a --job-array-name could not share a
+// token. A colliding id brings #691 straight back: EC2 either rejects the cohort
+// with IdempotentParameterMismatch or returns the FIRST launch's reservation, so
+// spawn can report success holding instances that are already terminated.
+//
+// crypto/rand rather than math/rand because the value reaches a ClientToken, and
+// a predictable token is how an unrelated launch could be made to collide with
+// yours deliberately. Cost is one read per launch.
 func generateJobArrayID(name string) string {
-	timestamp := time.Now().Format("20060102")
-	// Generate 6-character random suffix (base36: 0-9a-z)
-	random := fmt.Sprintf("%06x", time.Now().UnixNano()%0xFFFFFF)
-	return fmt.Sprintf("%s-%s-%s", name, timestamp, random)
+	return fmt.Sprintf("%s-%s-%s", name, time.Now().Format("20060102"), randomIDSuffix())
+}
+
+// randomIDSuffix returns 8 hex characters of entropy. On the (essentially
+// impossible) failure of the system CSPRNG it falls back to the clock rather
+// than failing a launch — a weak suffix is worse than a strong one but far
+// better than refusing to launch over it, and the fallback is reported so it is
+// not silent.
+func randomIDSuffix() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  could not read system randomness for the job-array id (%v); "+
+			"falling back to the clock, which can collide with a concurrent launch (#710)\n", err)
+		binary.BigEndian.PutUint32(b[:], uint32(time.Now().UnixNano())) //nolint:gosec // intentional truncation
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // formatInstanceName applies template substitution for instance names
