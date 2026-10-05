@@ -23,10 +23,11 @@ var (
 
 var cleanupCmd = &cobra.Command{
 	Use:   "cleanup",
-	Short: "Remove spawn-managed AWS infrastructure (security groups, key pairs, IAM, …)",
+	Short: "Remove spawn-managed AWS infrastructure (security groups, placement groups, key pairs, IAM, …)",
 	Long: `Remove the shared AWS resources spore.host created (tagged spawn:managed),
 in dependency order. Running instances are NEVER removed — stop or terminate
-them first.
+them first. A cluster placement group that still has members is reported and
+skipped, since EC2 refuses to delete one — re-run once those instances are gone.
 
 Preview what would be removed with --dry-run; otherwise cleanup prompts for
 confirmation (skip with --yes) and then deletes. By default it acts only on
@@ -78,7 +79,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	running, addresses, alreadyGone, removable := splitCleanupResources(found)
+	running, addresses, alreadyGone, notYet, removable := splitCleanupResources(found)
 
 	printResourceTable(cmd, found)
 
@@ -99,6 +100,14 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Fprintln(os.Stderr, "\nRefusing to clean up shared infrastructure while instances are still running.")
 			return fmt.Errorf("running instances present; stop/terminate them or wait for TTL, then re-run")
+		}
+	}
+
+	if len(notYet) > 0 {
+		fmt.Fprintf(os.Stderr, "\nℹ️  %d placement group(s) still have members and cannot be deleted yet — "+
+			"they will be removed once the instances in them are gone:\n", len(notYet))
+		for _, r := range notYet {
+			fmt.Fprintf(os.Stderr, "    %s (%s)\n", r.ID, r.Region)
 		}
 	}
 
@@ -178,21 +187,29 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 //     Counting these as "removable" overstates both the dry-run preview and
 //     the real confirmation prompt (spawn#516) — they must be split out, not
 //     folded into removable just because they aren't running or an address.
+//   - notYet: resources that exist but cannot be removed yet — currently only a
+//     placement group that still has members. EC2 refuses to delete one, so
+//     offering it is a wait ending in a failure. Kept OUT of `running`, which
+//     aborts the whole cleanup: a group whose only members are stopped
+//     instances must not block cleanup from terminating those very instances
+//     (#685). Reported, not acted on; the next sweep picks it up.
 //   - removable: everything else, the actual candidates for RemoveResource.
-func splitCleanupResources(found []aws.ManagedResource) (running, addresses, alreadyGone, removable []aws.ManagedResource) {
+func splitCleanupResources(found []aws.ManagedResource) (running, addresses, alreadyGone, notYet, removable []aws.ManagedResource) {
 	for _, r := range found {
 		switch {
 		case r.IsRunningInstance():
 			running = append(running, r)
 		case r.ResourceType == "address":
 			addresses = append(addresses, r)
+		case r.ResourceType == "placement-group" && r.State == "in-use":
+			notYet = append(notYet, r)
 		case r.State == "deleted":
 			alreadyGone = append(alreadyGone, r)
 		default:
 			removable = append(removable, r)
 		}
 	}
-	return running, addresses, alreadyGone, removable
+	return running, addresses, alreadyGone, notYet, removable
 }
 
 // deletionOrderCmd orders resources dependents-first. It mirrors the package

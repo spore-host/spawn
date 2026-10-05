@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn orphans` and `spawn cleanup` now see placement groups** (#685). spawn tags
+  every cluster placement group it creates with `spawn:managed=true`, but the Resource
+  Groups Tagging API — which discovery is built on — does not return placement groups
+  at all. So they were invisible to every spawn command: nine orphans in one region of
+  one account, and no way to find them except `aws ec2 describe-placement-groups`.
+  They are now scanned separately, the same way Elastic IPs are, and reported with
+  whether they still have members.
+  A group is judged an orphan **per group**, not per region: an MPI cohort creates one
+  group per AZ it tries, so a cohort that fell back from one AZ to another leaves the
+  abandoned AZ's group genuinely empty *while its own instances are running*. Keying on
+  "anything running in this region" — the rule for the shared security group and key
+  pair — would have hidden exactly the leak worth finding.
+  A group that still has members is reported and skipped rather than offered for
+  deletion (EC2 refuses, so attempting it is a wait ending in a failure). It is
+  deliberately **not** treated as blocking, either: that would deadlock a group whose
+  only members are stopped instances against the very terminate that would free it.
+  The sweep needs `ec2:DescribePlacementGroups`, and removing a group needs
+  `ec2:DeletePlacementGroup`.
+
 ### Fixed
 
 - **A rejected `--mpi` launch created a security group before failing validation**

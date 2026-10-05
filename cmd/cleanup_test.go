@@ -24,7 +24,7 @@ func TestSplitCleanupResources_AlreadyGoneIsNotRemovable(t *testing.T) {
 		{ResourceType: "address", ID: "eipalloc-x", State: "unassociated"},
 	}
 
-	running, addresses, alreadyGone, removable := splitCleanupResources(found)
+	running, addresses, alreadyGone, _, removable := splitCleanupResources(found)
 
 	if len(running) != 1 || running[0].ID != "i-running" {
 		t.Errorf("running = %v, want [i-running]", idsOf(running))
@@ -53,7 +53,7 @@ func TestSplitCleanupResources_NoStateIsStillRemovable(t *testing.T) {
 	found := []aws.ManagedResource{
 		{ResourceType: "security-group", ID: "sg-x", State: ""},
 	}
-	_, _, alreadyGone, removable := splitCleanupResources(found)
+	_, _, alreadyGone, _, removable := splitCleanupResources(found)
 	if len(alreadyGone) != 0 {
 		t.Errorf("alreadyGone = %v, want empty for a resource with no State opinion", idsOf(alreadyGone))
 	}
@@ -68,4 +68,42 @@ func idsOf(rs []aws.ManagedResource) []string {
 		ids[i] = r.ID
 	}
 	return ids
+}
+
+// TestSplitCleanupResources_InUsePlacementGroupIsSkippedNotBlocking is the
+// spawn#685 cleanup gate, and it guards against two opposite mistakes.
+//
+// EC2 refuses to delete a placement group that still has members, so offering
+// one up is a wait that ends in a failure — it must not be `removable`. But it
+// must also not land in `running`, because that bucket ABORTS the whole cleanup:
+// a group whose only members are STOPPED instances would then block cleanup from
+// terminating those very instances, and the group would never become deletable.
+// Deadlock in one direction, pointless failure in the other.
+func TestSplitCleanupResources_InUsePlacementGroupIsSkippedNotBlocking(t *testing.T) {
+	found := []aws.ManagedResource{
+		{ResourceType: "placement-group", ID: "spawn-mpi-x-us-east-1a", State: "empty"},
+		{ResourceType: "placement-group", ID: "spawn-mpi-x-us-east-1b", State: "in-use"},
+		{ResourceType: "instance", ID: "i-stopped", State: "stopped"},
+	}
+
+	running, _, _, notYet, removable := splitCleanupResources(found)
+
+	if len(running) != 0 {
+		t.Errorf("running = %v, want empty — an in-use placement group must not abort "+
+			"cleanup, or a group holding only stopped instances deadlocks against the "+
+			"terminate that would free it", idsOf(running))
+	}
+	if len(notYet) != 1 || notYet[0].ID != "spawn-mpi-x-us-east-1b" {
+		t.Errorf("notYet = %v, want [spawn-mpi-x-us-east-1b]", idsOf(notYet))
+	}
+	// The empty group AND the stopped instance are both removable.
+	if len(removable) != 2 {
+		t.Errorf("removable = %v, want the empty group and the stopped instance", idsOf(removable))
+	}
+	for _, r := range removable {
+		if r.ResourceType == "placement-group" && r.State == "in-use" {
+			t.Error("an in-use placement group reached removable; the delete would wait out " +
+				"its budget and then fail")
+		}
+	}
 }

@@ -23,12 +23,13 @@ running instance using them:
 
   - EBS volumes in the 'available' state
   - security groups not attached to any instance
+  - cluster placement groups with no instances left in them
   - the shared infrastructure (key pair, IAM role) when no instances remain
   - Elastic IPs that are unassociated, or attached to a stopped instance
     (an EIP keeps billing even while the instance is stopped)
 
 This is a read-only report. 'spawn cleanup' removes orphaned EBS volumes,
-security groups, key pairs, and IAM roles. Elastic IPs are reported but
+security groups, placement groups, key pairs, and IAM roles. Elastic IPs are reported but
 never released by spawn — spawn never allocates them. Before releasing an
 EIP with 'aws ec2 release-address', verify ownership using the tags column
 in the report (or 'aws ec2 describe-addresses'), as that operation is
