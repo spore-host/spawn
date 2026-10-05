@@ -410,6 +410,11 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		return err
 	}
 
+	// Still before any AWS mutation: warn if the box is too small to be trusted
+	// to enforce its own TTL (#682). A warning rather than a refusal — see
+	// aws.SporedMemoryFloorMiB for why.
+	warnIfBelowSporedMemoryFloor(ctx, awsClient, os.Stderr, config.Region, config.InstanceType, config.TTL)
+
 	// Step 2: Setup SSH key
 	prog.Start("Setting up SSH key")
 	if config.KeyName == "" {

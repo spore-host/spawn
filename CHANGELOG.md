@@ -90,6 +90,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   granularity is not an assertion. The replacement mints 2000 ids in a tight loop,
   which outruns any wall clock on any platform, and separately rejects a
   monotonically-increasing source so a regression to any counter is caught too.
+- **`spawn launch` warns when an instance is too small to enforce its own TTL**
+  (#682). `spored` enforces TTL, idle and cost limits from *inside* the instance, so
+  a box too starved to make progress is also too starved to run the loop that would
+  kill it — the enforcement mechanism and the thing it must survive are the same
+  resource. A 0.5 GiB instance wedged during a package install and was still running
+  at **twice** its 6-minute TTL, with no completion record and no signal of any kind,
+  until someone noticed and killed it by hand.
+  Below 1 GiB, launch now says so before any AWS resource is created, names the
+  specific `--ttl` that may not hold, and points at `spawn doctor` to check whether a
+  reaper covers the account — because from the outside this is indistinguishable from
+  a long-running job.
+  Deliberately a **warning, not a refusal**: a nano instance running a trivial
+  command works fine, and the demonstrated failure needed a tiny box *and* a heavy
+  bootstrap together. The second half lived inside the user's `--command`, where
+  spawn cannot see it — so refusing on memory alone would block working launches to
+  prevent a combination spawn cannot detect. The floor is 1 GiB because 0.5 GiB
+  demonstrably failed and 4 GiB demonstrably worked and nothing between was tested;
+  a higher floor would be inventing evidence.
 
 ## [0.120.0] - 2026-10-05
 
