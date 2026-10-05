@@ -6,7 +6,19 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAMBDA_DIR="${SCRIPT_DIR}/../lambda/scheduler-handler"
 FUNCTION_NAME="${SPAWN_LAMBDA_NAME:-scheduler-handler}"
-REGION="${AWS_REGION:-us-east-1}"
+# us-east-1, and deliberately NOT from AWS_REGION.
+#
+# cmd/schedule.go hardcodes us-east-1 for this function (LoadInfraAWSConfig(ctx,
+# "us-east-1")), so a deployment anywhere else is unreachable by its only caller.
+# AWS_REGION is ambient — set for whatever you were last doing — and honouring it
+# here CREATED a second scheduler-handler in us-west-2 while the stale one stayed
+# in us-east-1. Override deliberately with SPAWN_LAMBDA_REGION if you ever need
+# to, not by accident.
+REGION="${SPAWN_LAMBDA_REGION:-us-east-1}"
+if [ -n "${AWS_REGION:-}" ] && [ "$AWS_REGION" != "$REGION" ]; then
+  echo "note: AWS_REGION=$AWS_REGION is set but ignored; deploying to $REGION" >&2
+  echo "      (cmd/schedule.go only looks in $REGION; set SPAWN_LAMBDA_REGION to override)" >&2
+fi
 PROFILE="${AWS_PROFILE:-spore-host-infra}"
 
 usage() {
@@ -116,19 +128,45 @@ else
         --tags "Application=spawn,Component=scheduler" \
         --output table
 
+    # Wait before the configuration update below: a freshly created function is
+    # 'Pending'/'Creating' and UpdateFunctionConfiguration fails with
+    # ResourceConflictException. The update path already waits; the create path
+    # did not.
+    aws lambda wait function-active-v2 \
+        --function-name "$FUNCTION_NAME" \
+        --region "$REGION" \
+        --profile "$PROFILE"
+
     echo "✅ Lambda function created successfully"
 fi
 
-# Update configuration if needed
+# Configuration, including the RUNTIME (#716).
+#
+# update-function-code does not change the runtime, and --runtime appears only in
+# the create path above — which never runs for an existing function. So this
+# script could declare provided.al2023 and redeploy forever while the deployed
+# function stayed on provided.al2, which is exactly what happened: deployed
+# 2026-01, still al2 in October. A declaration that never reaches the resource is
+# the failure the runtime census catches, one level further in.
+#
+# The error is no longer swallowed either. This block used to end in
+# `&>/dev/null || true`, so a failed configuration update was invisible — which
+# is a poor property for the step that now carries the runtime.
 echo ""
-echo "⚙️  Updating Lambda configuration..."
+echo "⚙️  Updating Lambda configuration (runtime, timeout, memory)..."
 aws lambda update-function-configuration \
     --function-name "$FUNCTION_NAME" \
+    --runtime provided.al2023 \
     --timeout 300 \
     --memory-size 512 \
     --region "$REGION" \
     --profile "$PROFILE" \
-    --output table &>/dev/null || true
+    --output text --query '[FunctionName,Runtime,Timeout,MemorySize]'
+
+aws lambda wait function-updated \
+    --function-name "$FUNCTION_NAME" \
+    --region "$REGION" \
+    --profile "$PROFILE"
 
 echo ""
 echo "✅ Deployment complete!"
