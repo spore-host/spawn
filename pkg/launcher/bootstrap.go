@@ -187,7 +187,7 @@ set -e
 # User configuration
 LOCAL_USERNAME=%s
 LOCAL_SSH_KEY_BASE64=%s
-`, security.ShellEscape(username), security.ShellEscape(publicKeyBase64))
+`, security.ShellQuote(username), security.ShellQuote(publicKeyBase64))
 
 	// spored binary authenticity (spore-host#440): embed the spore.host signing
 	// PUBLIC key so the bootstrap can verify the downloaded spored's signature

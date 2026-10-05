@@ -3,30 +3,8 @@ package security
 import (
 	"errors"
 	"regexp"
-	"strconv"
 	"strings"
 )
-
-// ShellEscape renders s as a Go double-quoted string literal via strconv.Quote.
-//
-// It does NOT make a string safe for a POSIX shell, despite what this function
-// used to claim ("handles all special shell characters"). strconv.Quote produces
-// Go/C escaping inside DOUBLE quotes, and a POSIX shell expands `$VAR`,
-// `$(...)` and backticks inside double quotes — so none of those are
-// neutralised. It also collapses a multi-word command into a single argv word,
-// which is a separate bug when the value is a command line rather than one
-// argument (spawn#660).
-//
-// Prefer [ShellQuote] for anything interpolated into generated shell. This is
-// kept because several call sites pass values that are independently validated
-// (a username through ValidateUsername, base64 through ValidateBase64), where
-// the difference cannot bite — but new code should not assume that.
-//
-// Deprecated: use ShellQuote, or deliver untrusted text as a file rather than
-// interpolating it. See spawn#680 for the remaining call-site audit.
-func ShellEscape(s string) string {
-	return strconv.Quote(s)
-}
 
 // ShellQuote renders s as a single-quoted POSIX shell word, suppressing every
 // expansion the shell would otherwise perform.
