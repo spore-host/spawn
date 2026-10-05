@@ -21,17 +21,21 @@ var knownUnwiredFlags = map[string]string{
 	// call sites, which changes EFS/FSx subnet resolution too.
 	"vpc": "#673",
 
-	// --cartesian advertises the cartesian product of --param lists. The
-	// capability exists (pkg/params.expandGrid) but is only reachable via the
-	// `grid:` key in a params file, so the flag silently produces the WRONG RUN
-	// COUNT — the worst of the three, because it bills for a sweep of the wrong
-	// shape rather than merely doing nothing.
-	"cartesian": "#674",
-
-	// --use-reservation predates #216's --reservation-id/--capacity-block, which
-	// are wired. Passing it yields an on-demand instance at on-demand price while
-	// reading as "target my reserved capacity". Should become a MarkDeprecated
-	// alias like --subnet/--security-group/--key-pair.
+	// --cartesian and --use-reservation are still read by nothing, but they are
+	// now MarkDeprecated so passing either prints a warning instead of silently
+	// doing nothing (#674, #675).
+	//
+	// Neither is implemented, deliberately. The cartesian product already exists
+	// as the param file's `grid:` key, and the input --cartesian implies (a
+	// repeatable `--param lr=0.1,0.2`) does not exist — so there is nothing for
+	// it to cross. --reservation-id supersedes --use-reservation and is wired
+	// through to RunInstances. Implementing either would add a second way to do
+	// something that already works.
+	//
+	// NOTE: my original #674 text claimed --cartesian "silently produces the
+	// wrong run count". That was wrong and is corrected on the issue: with a
+	// param file the count comes from params:/grid: and the flag is simply inert.
+	"cartesian":       "#674",
 	"use-reservation": "#675",
 }
 

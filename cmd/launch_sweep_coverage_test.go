@@ -120,7 +120,7 @@ var sweepFlagCoverage = map[string]struct {
 	"plugin":                {sweepKnownGap, "#697 — spored plugin declarations"},
 	"pre-stop":              {sweepKnownGap, "#697 — DATA LOSS: the hook that syncs results before termination"},
 	"pre-stop-timeout":      {sweepKnownGap, "#697 — see pre-stop"},
-	"reservation-id":        {sweepKnownGap, "#697"}, "use-reservation": {sweepKnownGap, "#675 — read by nothing anywhere"},
+	"reservation-id":        {sweepKnownGap, "#697"}, "use-reservation": {sweepNA, "#675 — deprecated and inert; superseded by --reservation-id"},
 	"security-group":     {sweepKnownGap, "#667/#697 — fixed for single launches, still dropped on sweeps"},
 	"security-group-ids": {sweepKnownGap, "#667/#697 — see security-group"},
 	"subnet":             {sweepKnownGap, "#667/#697 — see security-group"},

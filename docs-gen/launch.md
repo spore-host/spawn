@@ -38,7 +38,6 @@ spawn launch <name> [flags]
 | `--batch-queue` |  | string |  | Batch job queue file (JSON) for sequential execution |
 | `--budget` |  | float64 |  | Budget limit in dollars for parameter sweeps (0 = no limit) |
 | `--capacity-block` |  | bool |  | The --reservation-id is a Capacity Block for ML (sets MarketType=capacity-block); mutually exclusive with --spot (#216) |
-| `--cartesian` |  | bool |  | Generate cartesian product of parameter lists |
 | `--command` |  | string |  | Command to run on all instances. Runs on the BARE instance as the login user, not root (use sudo) — Docker and fuse are NOT installed, unlike 'spawn task run'. Its exit code is recorded to /tmp/SPAWN_EXITCODE and signals completion, so --on-complete fires when the command exits, pass or fail. The instance can only reach spawn's own S3 buckets unless you pass --s3-read/--s3-write, --iam-policy or --iam-policy-file. |
 | `--completion-delay` |  | string | `30s` | Grace period after completion signal |
 | `--completion-file` |  | string | `/tmp/SPAWN_COMPLETE` | File to watch for completion signal |
@@ -142,7 +141,6 @@ spawn launch <name> [flags]
 | `--template-var` |  | stringToString |  | Template variables (key=value) |
 | `--terminate-on-error` |  | bool |  | If post-launch verification fails (e.g. spored didn't come up), terminate the instance instead of leaving it running |
 | `--ttl` |  | string |  | Auto-terminate after duration (e.g., 8h, defaults to 1h idle if not set) |
-| `--use-reservation` |  | bool |  | Use capacity reservation |
 | `--user-data-file` |  | string |  | User data file |
 | `--user-data` |  | string |  | User data (@file or inline) |
 | `--volume-size` |  | int32 |  | Root EBS volume size in GiB (0 = use AMI default) |
