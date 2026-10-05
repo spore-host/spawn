@@ -24,6 +24,7 @@ NODES="${NODES:-2}"
 TYPE="${TYPE:-c6i.large}"
 EFA_TYPE="${EFA_TYPE:-c5n.9xlarge}"
 TTL="${TTL:-20m}"
+SMALL_TYPE="${SMALL_TYPE:-t4g.small}"
 SPAWN="${SPAWN:-bin/spawn}"   # `make build` writes here, not ./spawn
 TAG="smoke-$$"
 
@@ -48,6 +49,24 @@ cleanup() {
     [ -n "$id" ] && aws ec2 terminate-instances --region "$REGION" --instance-ids "$id" >/dev/null 2>&1 \
       && echo "  terminated $id"
   done
+
+  # EFS fixture: mount target first, then the filesystem, then the SG.
+  for mt in $(aws efs describe-mount-targets --region "$REGION" --file-system-id "${FS_ID:-none}" \
+                --query 'MountTargets[].MountTargetId' --output text 2>/dev/null); do
+    aws efs delete-mount-target --region "$REGION" --mount-target-id "$mt" >/dev/null 2>&1 \
+      && echo "  deleted mount target $mt"
+  done
+  if [ -n "${FS_ID:-}" ]; then
+    for _ in $(seq 1 24); do
+      [ "$(aws efs describe-mount-targets --region "$REGION" --file-system-id "$FS_ID" \
+          --query 'length(MountTargets)' --output text 2>/dev/null)" = "0" ] && break
+      sleep 5
+    done
+    aws efs delete-file-system --region "$REGION" --file-system-id "$FS_ID" >/dev/null 2>&1 \
+      && echo "  deleted EFS $FS_ID"
+  fi
+  [ -n "${EFS_SG:-}" ] && aws ec2 delete-security-group --region "$REGION" \
+    --group-id "$EFS_SG" >/dev/null 2>&1 && echo "  deleted SG $EFS_SG"
 
   # Independent leak check: ask AWS, do not trust the terminate calls above.
   sleep 10
@@ -107,6 +126,80 @@ if [ -n "$RANK0" ]; then
   cmdfile=$(ssm "$RANK0" 'cat /etc/spawn/mpi-command')
   case "$cmdfile" in *"hostname --short"*) ok "--mpi-command preserved its arguments (#660)" ;;
                      *) bad "--mpi-command mangled: $cmdfile" ;; esac
+fi
+
+# ---------------------------------------------------------------------------
+# Storage leg. Covers pkg/userdata/storage.go, which generates the mount,
+# fstab and /etc/profile.d shell — the single largest body of generated shell
+# in the tree and the one whose unit tests can only check TEXT.
+#
+# Added because the manifest said storage.go had changed and the smoke did not
+# cover it. #680 rewrote every quoted value in that template; its tests assert
+# the rendering and `bash -n`, neither of which can tell you the mount actually
+# appeared or that the profile export carries the right value.
+# ---------------------------------------------------------------------------
+if [ "${SKIP_STORAGE:-0}" != "1" ]; then
+  step "Storage: EFS mount + profile export (1 x ${SMALL_TYPE})"
+
+  EFS_SG=$(aws ec2 create-security-group --region "$REGION" \
+    --group-name "$TAG-efs" --description "smoke EFS mount target" \
+    --vpc-id "$(aws ec2 describe-vpcs --region "$REGION" --filters Name=is-default,Values=true \
+      --query 'Vpcs[0].VpcId' --output text)" \
+    --tag-specifications "ResourceType=security-group,Tags=[{Key=smoke,Value=$TAG}]" \
+    --query GroupId --output text 2>/dev/null)
+  VPC_CIDR=$(aws ec2 describe-vpcs --region "$REGION" --filters Name=is-default,Values=true \
+    --query 'Vpcs[0].CidrBlock' --output text)
+  aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$EFS_SG" \
+    --protocol tcp --port 2049 --cidr "$VPC_CIDR" >/dev/null 2>&1
+
+  FS_ID=$(aws efs create-file-system --region "$REGION" --encrypted \
+    --tags "Key=smoke,Value=$TAG" --query FileSystemId --output text 2>/dev/null)
+  for _ in $(seq 1 24); do
+    [ "$(aws efs describe-file-systems --region "$REGION" --file-system-id "$FS_ID" \
+        --query 'FileSystems[0].LifeCycleState' --output text)" = available ] && break
+    sleep 5
+  done
+  SUBNET=$(aws ec2 describe-subnets --region "$REGION" \
+    --filters Name=default-for-az,Values=true --query 'Subnets[0].SubnetId' --output text)
+  MT_ID=$(aws efs create-mount-target --region "$REGION" --file-system-id "$FS_ID" \
+    --subnet-id "$SUBNET" --security-groups "$EFS_SG" --query MountTargetId --output text 2>/dev/null)
+  for _ in $(seq 1 30); do
+    [ "$(aws efs describe-mount-targets --region "$REGION" --mount-target-id "$MT_ID" \
+        --query 'MountTargets[0].LifeCycleState' --output text)" = available ] && break
+    sleep 5
+  done
+
+  if "$SPAWN" launch "$TAG-efs" --instance-type "$SMALL_TYPE" --region "$REGION" \
+       --subnet-id "$SUBNET" --efs-id "$FS_ID" \
+       --command 'df -h /efs; mount | grep -c /efs' \
+       --ttl "$TTL" --cost-limit 0.50 --on-complete terminate \
+       --tag "smoke=$TAG" >/tmp/$TAG-efs.log 2>&1; then
+    ok "launch with --efs-id succeeded"
+    SID=$(aws ec2 describe-instances --region "$REGION" \
+      --filters "Name=tag:smoke,Values=$TAG" "Name=instance-type,Values=$SMALL_TYPE" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[].Instances[].InstanceId' --output text | head -1)
+
+    gate=$(ssm "$SID" 'cat /run/spawn/storage-ready 2>/dev/null')
+    case "$gate" in *ok*) ok "storage gate reported ok (#668)" ;;
+                     *) bad "storage gate: ${gate:-<empty>} — the mount did not verify" ;; esac
+
+    mounted=$(ssm "$SID" 'grep -c \" /efs \" /proc/mounts')
+    [ "${mounted//[^0-9]/}" -ge 1 ] 2>/dev/null \
+      && ok "EFS is mounted at /efs" \
+      || bad "/efs is not in /proc/mounts — the generated mount shell is wrong (#680)"
+
+    # The #680 regression that unit tests cannot see: sourcing the generated
+    # profile must yield the mount point, not a word-split fragment.
+    exported=$(ssm "$SID" '. /etc/profile.d/efs.sh; printf %s \"\$EFS_MOUNT\"')
+    case "$exported" in
+      *"/efs"*) ok "profile export resolves to \$EFS_MOUNT=$exported (#680)" ;;
+      *) bad "\$EFS_MOUNT is ${exported:-<empty>} after sourcing /etc/profile.d/efs.sh — the quoting is wrong (#680)" ;;
+    esac
+  else
+    bad "launch with --efs-id failed; see /tmp/$TAG-efs.log"
+    grep -E 'ERROR|error|failed' /tmp/$TAG-efs.log | sed 's/^/     /' | head -4
+  fi
 fi
 
 if [ "${SKIP_EFA:-0}" != "1" ]; then

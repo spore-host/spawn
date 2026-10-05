@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`make smoke` now covers the storage path.** The hardware-sensitivity manifest flagged
+  `pkg/userdata/storage.go` as changed by #680 — and the smoke did not exercise it, which
+  is the gap that matters most there: that file generates the mount, fstab and
+  `/etc/profile.d` shell, and its unit tests can only check the rendered *text* and that
+  it parses. Neither can tell you the mount appeared or that the profile export carries
+  the right value.
+  The new leg creates an EFS filesystem and mount target, launches with `--efs-id`, then
+  asserts `/run/spawn/storage-ready` reads `ok`, `/efs` is in `/proc/mounts`, and sourcing
+  `/etc/profile.d/efs.sh` yields the mount point. It tears the fixture down in the
+  trap-based cleanup, mount target before filesystem before security group, and still
+  leak-checks independently afterwards.
+  On its first run it reported a genuine failure that was **not** a regression: EFS DNS
+  was not resolving in the account, while general DNS worked and mounting by the mount
+  target's IP succeeded with the identical options. Filed as #704 — the mount is
+  attempted once, so a transient DNS failure at boot fails it permanently.
+
 - **The sweep parameter environment is now verified by executing it** (#531). That fix —
   single-quoting `spawn:param:*` tag values into `/etc/profile.d/spawn-params.sh` instead
   of double-quoting them — was already in place and had only ever been verified by
