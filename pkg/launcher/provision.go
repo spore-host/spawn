@@ -253,7 +253,7 @@ func createAndAttachEphemeralFSx(ctx context.Context, client *aws.Client, config
 	// availability zone" for every AZ).
 	subnetID := config.SubnetID
 	if aws.NeedsAZSubnetResolution(subnetID, config.AvailabilityZone) {
-		s, serr := client.GetSubnetForAZ(ctx, config.Region, config.AvailabilityZone)
+		s, serr := client.GetSubnetForAZ(ctx, config.Region, config.AvailabilityZone, config.VPCID)
 		if serr != nil {
 			return fmt.Errorf("provision: could not find a subnet in az %s to co-locate the ephemeral FSx: %w", config.AvailabilityZone, serr)
 		}

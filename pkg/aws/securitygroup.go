@@ -470,3 +470,60 @@ func (c *Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID 
 
 	return sgID, nil
 }
+
+// ResolveVPC returns the VPC to place managed resources in: the caller's
+// explicit choice when set, otherwise the region's default VPC.
+//
+// One seam for every call site (#673). `--vpc` was parsed into a package global
+// that nothing read — there was no VPCID field anywhere — and every consumer
+// called GetDefaultVPC unconditionally, so `spawn launch --vpc vpc-0abc` was
+// accepted, exited 0, and launched into the DEFAULT VPC, with its security group
+// created there too.
+//
+// The failure is silent and its blast radius is network placement: wrong subnet,
+// wrong route table, no route to an EFS or FSx mount target, and SG rules written
+// into a VPC the instance is not in. An account whose research VPC is not the
+// default could not target a VPC at all.
+//
+// Shared rather than inlined because the duplicated-condition shape is exactly
+// how #539 and #667 each came to be fixed on one path and left broken on
+// another.
+func (c *Client) ResolveVPC(ctx context.Context, region, explicitVPC string) (string, error) {
+	if explicitVPC != "" {
+		return explicitVPC, nil
+	}
+	vpcID, err := c.GetDefaultVPC(ctx, region)
+	if err != nil {
+		return "", fmt.Errorf("no --vpc given and no default VPC in %s: %w", region, err)
+	}
+	return vpcID, nil
+}
+
+// ValidateSubnetInVPC fails closed when an explicit --subnet-id is not in the
+// explicit --vpc.
+//
+// Passing both is the natural way to use --vpc, and EC2's own error for the
+// mismatch arrives only at RunInstances and names neither flag. Checking up
+// front costs one DescribeSubnets and produces a message that says which of the
+// two to change.
+func (c *Client) ValidateSubnetInVPC(ctx context.Context, region, subnetID, vpcID string) error {
+	if subnetID == "" || vpcID == "" {
+		return nil
+	}
+	out, err := c.regionalEC2(region).DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+		SubnetIds: []string{subnetID},
+	})
+	if err != nil {
+		// Don't fail the launch on a describe hiccup; EC2 still rejects a real
+		// mismatch at RunInstances, so this is a better-error path, not a gate.
+		return nil
+	}
+	if len(out.Subnets) == 0 || out.Subnets[0].VpcId == nil {
+		return nil
+	}
+	if got := *out.Subnets[0].VpcId; got != vpcID {
+		return fmt.Errorf("--subnet-id %s is in VPC %s, but --vpc says %s; pass one or make them agree",
+			subnetID, got, vpcID)
+	}
+	return nil
+}

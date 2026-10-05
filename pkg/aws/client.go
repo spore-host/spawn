@@ -161,14 +161,20 @@ type LaunchConfig struct {
 	IamInstanceProfile string   // IAM instance profile name (not ARN); spored needs EC2/DynamoDB permissions
 	SecurityGroupIDs   []string // Security group IDs; a default spawn SG is created if empty
 	SubnetID           string   // VPC subnet ID; leave empty to use default subnet
-	UserData           string   // User-data, already base64-encoded (passed verbatim to RunInstances, which rejects non-base64 — #127). CLI uses encodeUserDataForOS; SDK callers use launcher.EncodeLinuxUserData.
-	ClientToken        string   // Optional RunInstances idempotency token; deterministic in (cluster,entity,generation) for callers like cohort (#108). Empty = today's behavior.
-	Spot               bool     // If true, launch as a Spot instance
-	SpotMaxPrice       string   // Optional Spot max price in $/hr, e.g. "0.50"; empty = on-demand cap
-	ReservationID      string   // Capacity Reservation / Capacity Block ID to target (RunInstances CapacityReservationSpecification); #216
-	CapacityBlock      bool     // If true, consume a Capacity Block for ML (InstanceMarketOptions MarketType=capacity-block); requires ReservationID; #216
-	Hibernate          bool     // If true, configure the instance for hibernation support
-	PlacementGroup     string   // Cluster placement group name (MPI / EFA workloads)
+	// VPCID is the VPC to place managed resources in (security groups, and the
+	// subnet chosen for FSx when SubnetID is empty). Empty = the region's
+	// default VPC, which is what every call site assumed unconditionally
+	// before #673 — so `--vpc` was accepted and the instance launched in the
+	// default VPC anyway.
+	VPCID          string
+	UserData       string // User-data, already base64-encoded (passed verbatim to RunInstances, which rejects non-base64 — #127). CLI uses encodeUserDataForOS; SDK callers use launcher.EncodeLinuxUserData.
+	ClientToken    string // Optional RunInstances idempotency token; deterministic in (cluster,entity,generation) for callers like cohort (#108). Empty = today's behavior.
+	Spot           bool   // If true, launch as a Spot instance
+	SpotMaxPrice   string // Optional Spot max price in $/hr, e.g. "0.50"; empty = on-demand cap
+	ReservationID  string // Capacity Reservation / Capacity Block ID to target (RunInstances CapacityReservationSpecification); #216
+	CapacityBlock  bool   // If true, consume a Capacity Block for ML (InstanceMarketOptions MarketType=capacity-block); requires ReservationID; #216
+	Hibernate      bool   // If true, configure the instance for hibernation support
+	PlacementGroup string // Cluster placement group name (MPI / EFA workloads)
 	// PlacementGroupPrefix is a transient hint (NOT sent to RunInstances): when an
 	// MPI cohort auto-manages placement groups per AZ, runLaunch sets this instead
 	// of PlacementGroup so the cohort Actuator can lazily create a per-AZ group

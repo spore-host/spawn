@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--vpc` is now honoured; it previously launched in the default VPC regardless**
+  (#673). The flag was bound to a package global that **nothing read** — there was no
+  `VPCID` field on `LaunchConfig` at all — and all five consumers called `GetDefaultVPC`
+  unconditionally. So `spawn launch --vpc vpc-0abc…` was accepted, exited 0, and put the
+  instance in the **default** VPC, with its managed security group created there too.
+  The failure was silent and landed on network placement: wrong subnet, wrong route
+  table, no route to an EFS or FSx mount target, and SG rules written into a VPC the
+  instance was not in. An account whose research VPC is not the default could not target
+  a VPC at all.
+  All five sites now go through one `ResolveVPC` (explicit-or-default) rather than each
+  assuming the default — the MPI and Windows security groups, FSx's subnet choice when
+  `--subnet-id` is absent, and `GetSubnetForAZ`. Threading it into the storage paths
+  matters as much as the SG ones: a filesystem created in the default VPC while the
+  instance is elsewhere presents as a broken mount, not as a dropped flag.
+  Passing `--vpc` and `--subnet-id` together is now validated up front, because it is the
+  natural way to use `--vpc` and EC2's own error for a mismatch arrives only at
+  `RunInstances` and names neither flag. The check is advisory on a describe failure —
+  a better error, not a new gate.
+  A gate fails the build on any direct `GetDefaultVPC` call from the launch path. Five
+  independent sites each assuming the default is *why* this flag did nothing, and fixing
+  some while leaving others is exactly how #539 and #667 each ended up fixed on one path
+  and broken on another.
+  Still dropped on the parameter-sweep path, tracked in #697 with the rest.
+
+
 ### Deprecated
 
 - **`--cartesian` and `--use-reservation` now warn instead of silently doing nothing**
