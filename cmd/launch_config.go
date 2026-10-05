@@ -173,6 +173,12 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if subnetID != "" {
 		config.SubnetID = subnetID
 	}
+	// --vpc (#673). Previously parsed and read by NOTHING: there was no VPCID
+	// field at all, and every consumer called GetDefaultVPC unconditionally, so
+	// this flag was accepted and the instance launched in the default VPC.
+	if vpcID != "" {
+		config.VPCID = vpcID
+	}
 	if spot {
 		config.Spot = true
 	}

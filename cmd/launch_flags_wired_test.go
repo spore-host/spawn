@@ -14,13 +14,6 @@ import (
 // knowingly) unread. Each entry needs an issue, because an entry here means the
 // flag is accepted on the command line and does nothing.
 var knownUnwiredFlags = map[string]string{
-	// --vpc has no LaunchConfig field at all: every consumer calls GetDefaultVPC
-	// instead, so `spawn launch --vpc vpc-xxx` is accepted and the instance
-	// launches in the DEFAULT VPC. Found while fixing #667; wiring it means
-	// adding the field and honouring it at the GetDefaultVPC/subnet-selection
-	// call sites, which changes EFS/FSx subnet resolution too.
-	"vpc": "#673",
-
 	// --cartesian and --use-reservation are still read by nothing, but they are
 	// now MarkDeprecated so passing either prints a warning instead of silently
 	// doing nothing (#674, #675).

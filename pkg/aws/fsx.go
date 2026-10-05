@@ -33,7 +33,8 @@ type FSxConfig struct {
 	ImportPath               string
 	ExportPath               string
 	AutoCreateBucket         bool
-	SubnetID                 string   // Optional: specify subnet, otherwise uses default VPC
+	SubnetID                 string   // Optional: specify subnet, otherwise a subnet in VPCID (or the default VPC)
+	VPCID                    string   // Optional: VPC to pick a subnet from when SubnetID is empty (#673); empty = default VPC
 	SecurityGroupIDs         []string // Security groups to associate with FSx; must allow port 988 (Lustre)
 	PerUnitStorageThroughput int32    // MB/s/TiB — required for PERSISTENT_2; valid values: 125, 250, 500, 1000
 
@@ -81,16 +82,19 @@ func (c *Client) startFSxCreate(ctx context.Context, config FSxConfig) (filesyst
 	// callers that know the instance's subnet should pass it in config.SubnetID.
 	subnetID := config.SubnetID
 	if subnetID == "" {
-		vpcID, verr := c.GetDefaultVPC(ctx, config.Region)
+		// ResolveVPC, not GetDefaultVPC (#673): an explicit --vpc must pick the
+		// subnet from THAT VPC, or the filesystem lands in the default VPC while
+		// the instance is elsewhere and the mount simply cannot route.
+		vpcID, verr := c.ResolveVPC(ctx, config.Region, config.VPCID)
 		if verr != nil {
-			return "", nil, "", "", fmt.Errorf("failed to get default VPC: %w", verr)
+			return "", nil, "", "", verr
 		}
 		subnets, serr := c.GetSubnets(ctx, config.Region, vpcID)
 		if serr != nil {
 			return "", nil, "", "", fmt.Errorf("failed to get subnets: %w", serr)
 		}
 		if len(subnets) == 0 {
-			return "", nil, "", "", fmt.Errorf("no subnets found in default VPC")
+			return "", nil, "", "", fmt.Errorf("no subnets found in VPC %s", vpcID)
 		}
 		subnetID = subnets[0]
 	}
@@ -495,13 +499,17 @@ func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool {
 	return pinnedSubnetID == "" && pinnedAZ != ""
 }
 
-// GetSubnetForAZ returns the default-VPC subnet in the given availability zone
+// GetSubnetForAZ returns a subnet in the given availability zone, from vpcID when
+// set and from the region's default VPC otherwise (#673)
 // (e.g. "us-east-1a"). FSx for Lustre is single-AZ and a mounting instance must
 // be in the SAME AZ as the filesystem, so when a launch pins an AZ the FSx must
 // be created in a subnet of THAT AZ — not an arbitrary subnets[0] (#208). Returns
 // an error if the region has no default VPC or no subnet in that AZ.
-func (c *Client) GetSubnetForAZ(ctx context.Context, region, az string) (string, error) {
-	vpcID, err := c.GetDefaultVPC(ctx, region)
+func (c *Client) GetSubnetForAZ(ctx context.Context, region, az, vpcID string) (string, error) {
+	// ResolveVPC, not GetDefaultVPC (#673): with --vpc set, the AZ's subnet must
+	// come from that VPC. Looking in the default VPC would hand back a subnet the
+	// instance is not in.
+	vpcID, err := c.ResolveVPC(ctx, region, vpcID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get default VPC: %w", err)
 	}

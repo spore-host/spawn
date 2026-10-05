@@ -482,8 +482,12 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		//   3. Else leave it empty: startFSxCreate's default-VPC fallback matches
 		//      the instance's own unpinned placement.
 		fsxConfig.SubnetID = config.SubnetID
+		// So an explicit --vpc picks the FSx subnet from THAT VPC rather than the
+		// default one, which would put the filesystem where the instance is not
+		// and leave the mount unroutable (#673).
+		fsxConfig.VPCID = config.VPCID
 		if aws.NeedsAZSubnetResolution(fsxConfig.SubnetID, config.AvailabilityZone) {
-			subnetID, serr := awsClient.GetSubnetForAZ(ctx, config.Region, config.AvailabilityZone)
+			subnetID, serr := awsClient.GetSubnetForAZ(ctx, config.Region, config.AvailabilityZone, config.VPCID)
 			if serr != nil {
 				prog.Error("Creating FSx Lustre filesystem", serr)
 				return fmt.Errorf("FSx create: could not find a subnet in --az %s to co-locate the filesystem with the instance: %w", config.AvailabilityZone, serr)
@@ -1106,10 +1110,11 @@ func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws
 	if mpiEnabled {
 		prog.Start("Creating MPI security group")
 		// Get default VPC
-		vpcID, err := awsClient.GetDefaultVPC(ctx, config.Region)
+		// Honour --vpc (#673); falls back to the default VPC when unset.
+		vpcID, err := awsClient.ResolveVPC(ctx, config.Region, config.VPCID)
 		if err != nil {
 			prog.Error("Creating MPI security group", err)
-			return fmt.Errorf("failed to get default VPC: %w", err)
+			return err
 		}
 
 		// Create or get MPI security group
@@ -1132,10 +1137,11 @@ func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws
 		// Windows needs RDP (3389) + SSH (22); the default SG won't open 3389, so
 		// RDP would be impossible (#95). Create a managed Windows SG.
 		prog.Start("Creating Windows security group")
-		vpcID, err := awsClient.GetDefaultVPC(ctx, config.Region)
+		// Honour --vpc (#673); falls back to the default VPC when unset.
+		vpcID, err := awsClient.ResolveVPC(ctx, config.Region, config.VPCID)
 		if err != nil {
 			prog.Error("Creating Windows security group", err)
-			return fmt.Errorf("failed to get default VPC: %w", err)
+			return err
 		}
 		if allowCIDR == "" || allowCIDR == "0.0.0.0/0" {
 			fmt.Fprintf(os.Stderr, "⚠️  Opening RDP (3389) + SSH (22) to 0.0.0.0/0; restrict with --allow-cidr <your-ip>/32.\n")
@@ -1163,6 +1169,13 @@ func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws
 // billable resource is created. Extracted from launchWithProgress (#319);
 // behavior unchanged.
 func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, prog *progress.Progress) error {
+	// Step 0: --vpc and --subnet-id must agree (#673). Passing both is the
+	// natural way to use --vpc, and EC2's own error for a mismatch arrives only
+	// at RunInstances and names neither flag. Checked before anything is created.
+	if err := awsClient.ValidateSubnetInVPC(ctx, config.Region, config.SubnetID, config.VPCID); err != nil {
+		return err
+	}
+
 	// Step 1: Detect AMI
 	prog.Start("Detecting AMI")
 	// "" or "auto" both mean auto-detect the latest AL2023 AMI (#342).
