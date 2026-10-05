@@ -140,3 +140,43 @@ func TestNoCodeReadsRecognisedSpawnTagsFromTheTagsMap(t *testing.T) {
 			strings.Join(offenders, "\n  "))
 	}
 }
+
+// TestAbandonedPGCleanupUsesTheRetryingDelete is the cmd-side half of spawn#685.
+//
+// The retry lives in pkg/aws and is tested there; what this guards is that the
+// cleanup path actually CALLS it. A revert to the plain DeletePlacementGroup
+// would still compile, still pass every pkg/aws test, and resume losing the race
+// against asynchronous termination on every failed cohort.
+func TestAbandonedPGCleanupUsesTheRetryingDelete(t *testing.T) {
+	b, err := os.ReadFile("launch_jobarray.go")
+	if err != nil {
+		t.Fatalf("read launch_jobarray.go: %v", err)
+	}
+	src := string(b)
+
+	start := strings.Index(src, "func cleanupAbandonedPGs(")
+	if start < 0 {
+		t.Fatal("cleanupAbandonedPGs not found; this gate would pass vacuously")
+	}
+	end := strings.Index(src[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not find the end of cleanupAbandonedPGs")
+	}
+	body := src[start : start+end]
+
+	if !strings.Contains(body, "DeletePlacementGroupWithRetry") {
+		t.Error("cleanupAbandonedPGs does not use DeletePlacementGroupWithRetry — the " +
+			"single-shot delete loses the race against asynchronous termination, which is #685")
+	}
+	// Match the non-retrying call specifically: `DeletePlacementGroup(` without
+	// the WithRetry suffix.
+	if regexp.MustCompile(`DeletePlacementGroup\(`).MatchString(body) {
+		t.Error("cleanupAbandonedPGs still contains a bare DeletePlacementGroup( call")
+	}
+	// When it does give up, the operator's next step is a manual delete — and
+	// they need the command, not only the complaint. ~35 of these were cleaned by
+	// hand in one session.
+	if !strings.Contains(body, "aws ec2 delete-placement-group --region") {
+		t.Error("the give-up message does not name the command that finishes the job")
+	}
+}

@@ -265,8 +265,19 @@ func cleanupAbandonedPGs(ctx context.Context, awsClient *aws.Client, act *mpicoh
 		if name == keepName {
 			continue
 		}
-		if err := awsClient.DeletePlacementGroup(ctx, name); err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  could not delete abandoned placement group %s: %v\n", name, err)
+		// WithRetry (#685): EC2 refuses to delete a group while any instance
+		// still references it, and TerminateInstances is asynchronous — so a
+		// delete issued immediately after the drain lost the race essentially
+		// every time, reporting InvalidPlacementGroup.InUse on every failed MPI
+		// launch and leaving the group behind. Nine were found in one region of
+		// one account.
+		if err := awsClient.DeletePlacementGroupWithRetry(ctx, name); err != nil {
+			// Name the exact command rather than just the failure. An empty
+			// placement group is free, so this is tidiness, not cost — and a
+			// one-paste remedy is worth more here than a longer wait.
+			fmt.Fprintf(os.Stderr, "⚠️  could not delete abandoned placement group %s: %v\n"+
+				"   finish it with: aws ec2 delete-placement-group --region %s --group-name %s\n",
+				name, err, act.Region, name)
 		}
 	}
 }

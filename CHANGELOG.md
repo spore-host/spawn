@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CreateOrGetMPISecurityGroup` refuses a suffix-less name outright so the shared-group
   case is unreachable from anywhere, not just from the CLI. A gate asserts the ordering,
   since "this happens before that" has no runtime value to assert on.
+- **A failed MPI cohort left its placement groups behind, every time** (#685). When a
+  cohort went terminal, spawn drained the instances and then deleted the per-AZ
+  placement groups it had created — but `TerminateInstances` is asynchronous and EC2
+  refuses to delete a group while any instance still references it. The delete lost
+  that race on essentially every failed launch, printing
+  `InvalidPlacementGroup.InUse` and moving on. Nine orphaned groups were found in one
+  region of one account.
+  Cleanup now retries for up to 60 seconds, waiting the members out. The budget is
+  short deliberately: an empty placement group is **free**, so the only cost of giving
+  up is quota pressure, and blocking the CLI's exit for minutes over a free resource
+  would be the worse trade. If it does give up, the message now includes the exact
+  `aws ec2 delete-placement-group` command instead of only reporting the failure.
+  A permissions or not-found error still returns immediately rather than burning the
+  budget to re-learn it.
 
 
 ## [0.120.0] - 2026-10-05
