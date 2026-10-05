@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`--cartesian` and `--use-reservation` now warn instead of silently doing nothing**
+  (#674, #675). Both were parsed into package globals that nothing read, so passing
+  either was accepted, had no effect, and said nothing.
+  Neither is being implemented, deliberately. The cartesian product **already exists** as
+  the param file's `grid:` key (`pkg/params.expandGrid`), and the input `--cartesian`
+  implies — a repeatable `--param lr=0.1,0.2` — does not exist: `--params` is inline JSON
+  that fails closed with a clear message, and `params:` in a file is already a list of
+  complete sets with no lists to cross. `--reservation-id` (#216) supersedes
+  `--use-reservation` and is wired through to `RunInstances`. Implementing either would
+  add a second way to do something that already works.
+  Correction to #674's original text, which was mine: it claimed `--cartesian` "silently
+  produces the wrong run count". It does not — with a param file the count comes from
+  `params:`/`grid:` and the flag is simply inert. The consequence was over-stated.
+
+
 ### Added
 
 - **Every launch flag is now classified for the parameter-sweep path** (#697). The sweep

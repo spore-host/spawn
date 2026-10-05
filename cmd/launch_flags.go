@@ -284,7 +284,16 @@ func init() {
 	// Capacity
 	launchCmd.Flags().BoolVar(&spot, "spot", false, "Launch as Spot instance")
 	launchCmd.Flags().StringVar(&spotMaxPrice, "spot-max-price", "", "Max Spot price")
-	launchCmd.Flags().BoolVar(&useReservation, "use-reservation", false, "Use capacity reservation")
+	launchCmd.Flags().BoolVar(&useReservation, "use-reservation", false,
+		"Deprecated and inert: use --reservation-id <cr-...> to target a Capacity Reservation")
+	// #675: parsed and read by NOTHING. It predates #216's --reservation-id, which is
+	// wired through to RunInstances' CapacityReservationSpecification. Passing it
+	// yielded an on-demand instance at on-demand price while reading as "use my
+	// reserved capacity" — so a user could believe they were drawing on capacity they
+	// already pay for. Deprecated rather than deleted so existing scripts keep
+	// working, but now with a warning instead of silence.
+	_ = launchCmd.Flags().MarkDeprecated("use-reservation",
+		"it never did anything; use --reservation-id <cr-...> instead")
 	launchCmd.Flags().StringVar(&reservationID, "reservation-id", "", "Capacity Reservation / Capacity Block ID to launch into (fs-/cr-...) — instance must be in the reservation's AZ (#216)")
 	launchCmd.Flags().BoolVar(&capacityBlock, "capacity-block", false, "The --reservation-id is a Capacity Block for ML (sets MarketType=capacity-block); mutually exclusive with --spot (#216)")
 
@@ -364,7 +373,17 @@ func init() {
 	// Parameter sweep
 	launchCmd.Flags().StringVar(&paramFile, "param-file", "", "Path to parameter sweep file (JSON/YAML/CSV)")
 	launchCmd.Flags().StringVar(&params, "params", "", "Inline JSON parameters for sweep")
-	launchCmd.Flags().BoolVar(&cartesian, "cartesian", false, "Generate cartesian product of parameter lists")
+	launchCmd.Flags().BoolVar(&cartesian, "cartesian", false,
+		"Deprecated and inert: use the param file's grid: key, which IS the cartesian product")
+	// #674: parsed and read by NOTHING, and there is nothing for it to cross. The
+	// cartesian product already exists as the param file's `grid:` key
+	// (pkg/params.expandGrid), which takes named value lists and yields one param set
+	// per combination. The input this flag implies — a repeatable `--param lr=0.1,0.2`
+	// — does not exist; `--params` is inline JSON and currently fails closed, and
+	// `params:` in a file is already a list of complete sets with no lists to cross.
+	// So it is deprecated toward grid: rather than implemented a second time.
+	_ = launchCmd.Flags().MarkDeprecated("cartesian",
+		"it never did anything; use the param file's grid: key for a cartesian product")
 	launchCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max instances running simultaneously (0 = unlimited)")
 	launchCmd.Flags().BoolVar(&maxConcurrentAuto, "max-concurrent-auto", false, "Derive --max-concurrent from the account's real AWS quota headroom for the sweep's instance type(s)/region, instead of a user-supplied number (spawn#492)")
 	launchCmd.Flags().IntVar(&maxConcurrentPerRegion, "max-concurrent-per-region", 0, "Max instances running simultaneously per region (0 = unlimited)")
