@@ -66,10 +66,20 @@ func runConfig(cmd *cobra.Command, args []string) error {
 	// Build spored command
 	var sporedCmd string
 	switch action {
+	// ShellQuote, not ShellEscape (#680). These arguments come straight from argv
+	// and the result is executed on the instance. ShellEscape is strconv.Quote —
+	// Go/C escaping inside DOUBLE quotes — where a POSIX shell still expands
+	// $VAR, $(...) and backticks, so `spawn config set k '$(id)'` ran `id` on the
+	// instance instead of storing the literal string. Single quotes suppress
+	// every expansion.
+	//
+	// The caller already owns the instance, so this is self-inflicted rather than
+	// a privilege boundary — but it also means a value containing $ simply could
+	// not be stored, which is a plain correctness bug.
 	case "get":
-		sporedCmd = fmt.Sprintf("sudo /usr/local/bin/spored config get %s 2>&1", security.ShellEscape(args[2]))
+		sporedCmd = fmt.Sprintf("sudo /usr/local/bin/spored config get %s 2>&1", security.ShellQuote(args[2]))
 	case "set":
-		sporedCmd = fmt.Sprintf("sudo /usr/local/bin/spored config set %s %s 2>&1", security.ShellEscape(args[2]), security.ShellEscape(args[3]))
+		sporedCmd = fmt.Sprintf("sudo /usr/local/bin/spored config set %s %s 2>&1", security.ShellQuote(args[2]), security.ShellQuote(args[3]))
 	case "list":
 		sporedCmd = "sudo /usr/local/bin/spored config list 2>&1"
 	}

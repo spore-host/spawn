@@ -796,12 +796,12 @@ cd "$WORK_DIR"
 # TODO: Implement S3 input download based on data_input config
 
 # Run stage command with timeout
+STAGE_CMD='%s'
+
 echo "========================================"
-echo "Running stage command: %s"
+echo "Running stage command: $STAGE_CMD"
 echo "========================================"
 echo ""
-
-STAGE_CMD='%s'
 
 # Run command with timeout
 timeout %s bash -c "$STAGE_CMD" || {
@@ -843,7 +843,12 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$SPAWN_REGIO
 		shellEscape(state.ResultS3Prefix),
 		region,
 		envVars,
-		stageDef.Command,
+		// stageDef.Command appears ONCE, escaped. It used to be interpolated twice:
+		// escaped into STAGE_CMD='%s', and RAW into echo "Running stage command: %s".
+		// Inside those double quotes a command containing $(...) or backticks
+		// EXECUTED — and executed a second time when the stage actually ran, so a
+		// substitution with side effects happened twice. The echo now prints the
+		// already-quoted shell variable instead (#680).
 		shellEscape(stageDef.Command),
 		timeout,
 	)

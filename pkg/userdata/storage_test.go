@@ -225,10 +225,15 @@ func TestGenerateStorageUserData_AttachedVolumes(t *testing.T) {
 		t.Fatalf("GenerateStorageUserData() error = %v", err)
 	}
 
-	if !strings.Contains(script, `spawn_resolve_dev "/dev/sdf"`) {
+	// SINGLE quotes since #680: these values were double-quoted via
+	// security.ShellEscape (strconv.Quote), which does not suppress $VAR, $(...)
+	// or backticks — so a mount point containing a substitution executed at boot.
+	// The assertion is updated, not relaxed: the value must still appear, and now
+	// in quoting that actually protects it.
+	if !strings.Contains(script, `spawn_resolve_dev '/dev/sdf'`) {
 		t.Error("script must resolve the live (NVMe) device for the requested device name")
 	}
-	if !strings.Contains(script, `mkdir -p "/opt/databases/kraken2"`) {
+	if !strings.Contains(script, `mkdir -p '/opt/databases/kraken2'`) {
 		t.Error("script must create the mount point")
 	}
 	if !strings.Contains(script, "mount -o ro,noatime") {

@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template
-
-	"github.com/spore-host/spawn/pkg/security"
 )
 
 // MPIConfig contains configuration for MPI user-data generation
@@ -36,9 +34,11 @@ type MPIConfig struct {
 // GenerateMPIUserData generates the MPI setup script for inclusion in user-data
 func GenerateMPIUserData(config MPIConfig) (string, error) {
 	// Register custom template function for shell escaping
-	funcMap := template.FuncMap{
-		"shellEscape": security.ShellEscape,
-	}
+	// No funcMap: the only consumer of shellEscape here was --mpi-command, which
+	// #660 moved out of the template entirely (it is written to a file through a
+	// quoted here-doc and run with bash). Registering an unused escaper invites
+	// the next person to reach for it.
+	funcMap := template.FuncMap{}
 
 	tmpl, err := template.New("mpi").Funcs(funcMap).Parse(mpiUserDataTemplate)
 	if err != nil {

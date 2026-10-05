@@ -34,9 +34,24 @@ type AttachedVolume struct {
 
 // GenerateStorageUserData generates storage mounting script
 func GenerateStorageUserData(config StorageConfig) (string, error) {
-	// Register custom template function for shell escaping
+	// shellQuote, not security.ShellEscape (#680).
+	//
+	// ShellEscape is strconv.Quote — Go/C escaping inside DOUBLE quotes — so a
+	// mount point containing $(...) EXECUTED at boot, and its quotes collided
+	// with the template's own. Three observed renderings for an EFS mount point:
+	//
+	//   mkdir -p "/efs$(id -u)"                       → substitution runs
+	//   echo "export EFS_MOUNT="/efs""                → nested quotes; works only by
+	//                                                   accident for simple paths
+	//   echo "export EFS_MOUNT="/my efs""             → export EFS_MOUNT=/my, then
+	//                                                   `efs` as a command
+	//
+	// The last one is the common case: a mount point with a space corrupts
+	// /etc/profile.d/efs.sh for every login on the instance. security.ShellQuote
+	// single-quotes, which suppresses expansion and is self-contained — so the
+	// template must NOT add quotes of its own around these values.
 	funcMap := template.FuncMap{
-		"shellEscape": security.ShellEscape,
+		"shellEscape": security.ShellQuote,
 	}
 
 	tmpl, err := template.New("storage").Funcs(funcMap).Parse(storageUserDataTemplate)
@@ -65,8 +80,11 @@ mkdir -p {{.FSxMountPoint | shellEscape}}
 # creation time (e.g. "q5pdvb4v") — NOT "/fsx". Using the wrong name causes
 # "client profile could not be read from MGS, rc=-22 EINVAL".
 mount -t lustre -o noatime,flock {{.FSxFilesystemDNS | shellEscape}}@tcp:/{{.FSxMountName | shellEscape}} {{.FSxMountPoint | shellEscape}}
-echo "{{.FSxFilesystemDNS}}@tcp:/{{.FSxMountName}} {{.FSxMountPoint}} lustre noatime,flock,_netdev 0 0" >> /etc/fstab
-echo "export FSX_MOUNT={{.FSxMountPoint | shellEscape}}" >> /etc/profile.d/fsx.sh
+# The WHOLE fstab line is single-quoted (#680): fstab wants literal text, so the
+# shell must not expand anything in it. Previously these values went raw into a
+# double-quoted echo, where a mount point containing $(...) executed at boot.
+echo {{printf "%s@tcp:/%s %s lustre noatime,flock,_netdev 0 0" .FSxFilesystemDNS .FSxMountName .FSxMountPoint | shellEscape}} >> /etc/fstab
+echo export FSX_MOUNT={{.FSxMountPoint | shellEscape}} >> /etc/profile.d/fsx.sh
 {{end}}
 
 {{if .EFSEnabled}}
@@ -74,8 +92,9 @@ echo "export FSX_MOUNT={{.FSxMountPoint | shellEscape}}" >> /etc/profile.d/fsx.s
 dnf install -y nfs-utils
 mkdir -p {{.EFSMountPoint | shellEscape}}
 mount -t nfs4 -o {{.EFSMountOptions | shellEscape}} {{.EFSFilesystemDNS | shellEscape}}:/ {{.EFSMountPoint | shellEscape}}
-echo "{{.EFSFilesystemDNS}}:/ {{.EFSMountPoint}} nfs4 {{.EFSMountOptions}},_netdev 0 0" >> /etc/fstab
-echo "export EFS_MOUNT={{.EFSMountPoint | shellEscape}}" >> /etc/profile.d/efs.sh
+# Single-quoted as a whole, for the same reason as the FSx line above (#680).
+echo {{printf "%s:/ %s nfs4 %s,_netdev 0 0" .EFSFilesystemDNS .EFSMountPoint .EFSMountOptions | shellEscape}} >> /etc/fstab
+echo export EFS_MOUNT={{.EFSMountPoint | shellEscape}} >> /etc/profile.d/efs.sh
 {{end}}
 {{if .AttachedVolumes}}
 # Attached EBS data volumes (created from snapshots; #144).
@@ -106,9 +125,15 @@ SPAWN_DEV="$(spawn_resolve_dev {{.DeviceName | shellEscape}})"
 if [ -n "$SPAWN_DEV" ]; then
   # Snapshot-backed volumes already carry a filesystem — never reformat.
   mount -o {{if .ReadOnly}}ro,{{end}}noatime "$SPAWN_DEV" {{.MountPoint | shellEscape}}
-  echo "$SPAWN_DEV {{.MountPoint}} auto {{if .ReadOnly}}ro,{{end}}noatime,nofail 0 2" >> /etc/fstab
+  # printf with the mount point single-quoted (#680). The whole line cannot be
+  # single-quoted like the EFS/FSx ones because $SPAWN_DEV must still expand, so
+  # the device comes through a double-quoted argument and the mount point through
+  # a quoted literal. Previously {{.MountPoint}} went in raw, where $(...) in a
+  # mount point executed at boot.
+  printf '%s %s auto {{if .ReadOnly}}ro,{{end}}noatime,nofail 0 2\n' "$SPAWN_DEV" {{.MountPoint | shellEscape}} >> /etc/fstab
 else
-  echo "spawn: timed out resolving attached volume device {{.DeviceName}} for {{.MountPoint}}" >&2
+  printf 'spawn: timed out resolving attached volume device %s for %s\n' \
+    {{.DeviceName | shellEscape}} {{.MountPoint | shellEscape}} >&2
 fi
 {{end}}
 {{end}}

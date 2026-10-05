@@ -41,7 +41,7 @@ func TestBuildLinuxBootstrap_CoreContent(t *testing.T) {
 
 	wantSubstrings := []string{
 		"#!/bin/bash",
-		`LOCAL_USERNAME="ec2-user"`, // ShellEscape uses strconv.Quote
+		`LOCAL_USERNAME='ec2-user'`, // security.ShellQuote single-quotes (#680)
 		"LOCAL_SSH_KEY_BASE64=",
 		"mv -f \"$SPORED_TMP\" /usr/local/bin/spored", // installs spored
 		"useradd -m -s /bin/bash \"$LOCAL_USERNAME\"", // creates user
@@ -79,7 +79,10 @@ func TestBuildLinuxBootstrap_EmptyKeyIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildLinuxBootstrap with empty key: %v", err)
 	}
-	if !strings.Contains(script, `LOCAL_SSH_KEY_BASE64=""`) {
+	// '' not "" since #680: security.ShellQuote single-quotes. Either renders an
+	// empty assignment to the shell; the quoting style is what changed, not the
+	// behaviour.
+	if !strings.Contains(script, `LOCAL_SSH_KEY_BASE64=''`) {
 		t.Error("empty key should produce an empty LOCAL_SSH_KEY_BASE64 assignment")
 	}
 }
