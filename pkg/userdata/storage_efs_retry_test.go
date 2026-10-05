@@ -243,50 +243,114 @@ echo "unknown" >> "$SPAWN_TEST_LOG"; exit 32
 	return dir
 }
 
-// TestEFSFallsBackToTheMountTargetIP is the second half of spawn#704, and the
-// half the first hardware smoke proved was the one that mattered.
+// TestEFSMountsByTheIPFirst is spawn#718: the IP is the PRIMARY path, not a
+// fallback.
 //
-// The retry alone is not enough. On a real t4g.small with the mount target
-// `available` in its own subnet, general DNS working, and enableDnsSupport and
-// enableDnsHostnames both true, ALL SIX attempts failed:
+// #704 shipped the obvious order — DNS, then the mount-target IP — and a
+// hardware smoke showed it was backwards. EFS DNS is unreliable at first boot:
+// twice out of three runs a mount target already `available` IN THE INSTANCE'S
+// OWN SUBNET produced "Failed to resolve server" for the full 60-second budget,
+// while this exact mount by IP succeeded first try.
 //
-//	mount.nfs4: Failed to resolve server fs-0cc326d51039a4df6.efs.us-east-1.amazonaws.com
-//	spawn: EFS mount attempt 1/6 failed; retrying in 10s
-//	... (through 6)
-//	spawn: EFS mount failed after 6 attempts over ~60s
+// None of the usual reasons to prefer the name apply to spawn: encryption in
+// transit would need it, but EFSMountOptions emits a fixed set and
+// ParseCustomOptions accepts no tls key; fstab durability across a mount-target
+// replacement is worthless for an instance that lives minutes to hours; and DNS
+// gives AZ affinity for free, which spawn already computes deterministically
+// from the instance's subnet.
 //
-// EFS DNS propagation for a freshly created mount target outlasts any retry
-// budget worth spending at boot, so the IP is what makes a first-boot mount of a
-// new filesystem work at all.
-func TestEFSFallsBackToTheMountTargetIP(t *testing.T) {
+// This ordering also fixes a verification problem rather than tolerating it.
+// With DNS first, the IP path ran only when DNS failed — load-bearing and
+// unexercised — and because the failure is intermittent, a passing smoke could
+// never prove it. Now the primary path runs on every launch.
+func TestEFSMountsByTheIPFirst(t *testing.T) {
 	fn := extractMountFunc(t, efsScriptWithIP(t))
 
-	code, log := runMountFunc(t, fn, stubBinDNSFails(t))
+	// Both would succeed. The IP must be the one tried.
+	code, log := runMountFunc(t, fn, stubBin(t, 1))
 	if code != 0 {
-		t.Errorf("mount failed (exit %d) though the mount-target IP was available.\n"+
-			"calls:\n%s\n\nA DNS name that never resolves is the observed production case, "+
-			"not a hypothetical (#704).", code, log)
+		t.Fatalf("mount failed (exit %d); calls:\n%s", code, log)
 	}
-	if n := strings.Count(log, "dns\n"); n != 6 {
-		t.Errorf("tried DNS %d time(s), want all 6 before falling back — the DNS name is the "+
-			"durable reference and must be given its full chance", n)
+	if n := strings.Count(log, "mount\n"); n != 1 {
+		t.Errorf("made %d mount attempts when the first should have succeeded", n)
 	}
-	if !strings.Contains(log, "ip\n") {
-		t.Errorf("never attempted the mount-target IP; the fallback did not engage:\n%s", log)
+	if strings.Contains(log, "sleep") {
+		t.Error("slept on the happy path; the IP mount must not pay the DNS retry budget")
+	}
+
+	// And the script must try the IP before the DNS name, which the call count
+	// alone cannot show.
+	script := efsScriptWithIP(t)
+	ipIdx := strings.Index(script, "172.31.1.24")
+	dnsIdx := strings.Index(script, "fs-0cc326d51039a4df6.efs")
+	if ipIdx < 0 || dnsIdx < 0 {
+		t.Fatal("expected both the IP and the DNS name in the script")
+	}
+	if ipIdx > dnsIdx {
+		t.Errorf("the DNS name (offset %d) is attempted before the mount-target IP "+
+			"(offset %d) — that is the #704 ordering the hardware smoke disproved",
+			dnsIdx, ipIdx)
 	}
 }
 
-// TestEFSNoIPFallbackWhenNoIPIsKnown: without a resolved mount-target IP the
-// script must not emit a half-built mount command. The lookup needs
-// elasticfilesystem:DescribeMountTargets, which a caller may not have.
-func TestEFSNoIPFallbackWhenNoIPIsKnown(t *testing.T) {
-	script := efsScript(t) // no EFSMountTargetIP
-	if strings.Contains(script, "mounting by mount-target IP") {
-		t.Error("the IP fallback was rendered with no IP configured")
+// TestEFSFallsBackToDNSWhenTheIPFails: the name is still the fallback, for a
+// stale IP or a mount target replaced between launch and boot.
+func TestEFSFallsBackToDNSWhenTheIPFails(t *testing.T) {
+	fn := extractMountFunc(t, efsScriptWithIP(t))
+
+	// mount fails for the IP and succeeds for the DNS name — the inverse of the
+	// stub used for the old ordering.
+	dir := t.TempDir()
+	mount := `#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    172.31.1.24:/)     echo "ip" >> "$SPAWN_TEST_LOG"; echo "mount.nfs4: timed out" >&2; exit 32 ;;
+    *amazonaws.com:/*) echo "dns" >> "$SPAWN_TEST_LOG"; exit 0 ;;
+  esac
+done
+echo "unknown" >> "$SPAWN_TEST_LOG"; exit 32
+`
+	for name, body := range map[string]string{
+		"mount":      mount,
+		"mountpoint": "#!/bin/sh\nexit 1\n",
+		"sleep":      "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
-	// And the retry is still there — losing the fallback must not lose the retry.
+
+	code, log := runMountFunc(t, fn, dir)
+	if code != 0 {
+		t.Errorf("mount failed (exit %d) though the DNS name would have worked; calls:\n%s", code, log)
+	}
+	if !strings.Contains(log, "ip\n") {
+		t.Error("never tried the mount-target IP first")
+	}
+	if !strings.Contains(log, "dns\n") {
+		t.Errorf("did not fall back to the DNS name after the IP failed:\n%s", log)
+	}
+}
+
+// TestEFSUsesDNSAloneWhenNoIPIsKnown: without a resolved mount-target IP — chiefly
+// a caller lacking elasticfilesystem:DescribeMountTargets — the script must fall
+// back to the DNS name WITH its retries, not emit a half-built mount.
+func TestEFSUsesDNSAloneWhenNoIPIsKnown(t *testing.T) {
+	// Assert on the MOUNT COMMANDS, not on prose: with an IP the script emits two
+	// `mount -t nfs4` invocations (IP then DNS), without one it emits exactly one.
+	// Counting them is immune to comment wording, which an earlier version of this
+	// test was not.
+	script := efsScript(t) // no EFSMountTargetIP
+	if n := strings.Count(script, "mount -t nfs4"); n != 1 {
+		t.Errorf("rendered %d `mount -t nfs4` commands with no IP configured, want exactly "+
+			"1 (the DNS attempt); a half-built IP mount would fail at boot", n)
+	}
+	if n := strings.Count(efsScriptWithIP(t), "mount -t nfs4"); n != 2 {
+		t.Errorf("rendered %d `mount -t nfs4` commands WITH an IP, want 2 (IP then DNS)", n)
+	}
 	if !strings.Contains(script, "attempt %s/6 failed") {
-		t.Error("the DNS retry disappeared when no IP was configured")
+		t.Error("the DNS retry disappeared when no IP was configured; a caller without " +
+			"DescribeMountTargets would get a single attempt")
 	}
 }
 
