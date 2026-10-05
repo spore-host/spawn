@@ -2,7 +2,8 @@
 
 Remove the shared AWS resources spore.host created (tagged spawn:managed),
 in dependency order. Running instances are NEVER removed — stop or terminate
-them first.
+them first. A cluster placement group that still has members is reported and
+skipped, since EC2 refuses to delete one — re-run once those instances are gone.
 
 Preview what would be removed with --dry-run; otherwise cleanup prompts for
 confirmation (skip with --yes) and then deletes. By default it acts only on

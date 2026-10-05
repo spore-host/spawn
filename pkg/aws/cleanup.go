@@ -125,6 +125,15 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 	}
 	resources = append(resources, addrs...)
 
+	// Placement groups are tagged spawn:managed=true but the tagging API does not
+	// return them either, so they were invisible to orphans and cleanup alike
+	// (#685). Scanned separately, like addresses.
+	pgs, err := c.scanPlacementGroups(ctx, cfg, region)
+	if err != nil {
+		return nil, err
+	}
+	resources = append(resources, pgs...)
+
 	sort.Slice(resources, func(i, j int) bool { return resources[i].ARN < resources[j].ARN })
 	return resources, nil
 }
@@ -433,6 +442,14 @@ func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool {
 		return r.State == "available"
 	case r.ResourceType == "security-group", r.ResourceType == "key-pair":
 		return !hasRunningInstance
+	case r.ResourceType == "placement-group":
+		// Per-GROUP, not per-region: unlike the shared security group and key
+		// pair, an MPI cohort creates one placement group per AZ it tries, so a
+		// cohort running in one AZ leaves the groups for the AZs it abandoned
+		// genuinely empty while instances are still running. Keying on
+		// hasRunningInstance would hide exactly the leak this exists to find.
+		// scanPlacementGroups asks EC2 which groups have members.
+		return r.State == "empty"
 	case r.Service == "iam":
 		return !hasRunningInstance
 	case r.ResourceType == "address":
@@ -456,6 +473,10 @@ func DeletionOrder(resources []ManagedResource) []ManagedResource {
 		case r.ResourceType == "instance":
 			return 0
 		case r.ResourceType == "security-group":
+			return 1
+		case r.ResourceType == "placement-group":
+			// Same rank as the security group: both become deletable once the
+			// instances are gone and neither depends on the other.
 			return 1
 		case r.ResourceType == "key-pair":
 			return 2
@@ -501,6 +522,14 @@ func (c *Client) RemoveResource(ctx context.Context, r ManagedResource) error {
 		ec2c := ec2.NewFromConfig(cfg)
 		_, err := ec2c.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: aws.String(r.ID)})
 		return ignoreNotFound(err, "InvalidGroup.NotFound")
+
+	case r.ResourceType == "placement-group":
+		// r.ID is the group NAME — a placement group has no id. The retrying
+		// delete is used here too: cleanup commonly follows a terminate, and
+		// TerminateInstances is asynchronous, so the same race applies (#685).
+		return ignoreNotFound(
+			c.DeletePlacementGroupWithRetry(ctx, r.ID, cfg.Region),
+			"InvalidPlacementGroup.Unknown")
 
 	case r.ResourceType == "key-pair":
 		ec2c := ec2.NewFromConfig(cfg)

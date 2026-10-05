@@ -38,7 +38,7 @@ type LaunchAPI interface {
 	// until the group is available. DeletePlacementGroup removes an (empty) group.
 	// Used for lazy per-AZ cluster placement groups under AZ fallback.
 	CreatePlacementGroup(ctx context.Context, name, region string) error
-	DeletePlacementGroup(ctx context.Context, name string) error
+	DeletePlacementGroup(ctx context.Context, name, region string) error
 	// WaitForSSMOnline blocks until the instance's SSM agent is Online (or fails
 	// fast if the instance structurally can't register); RunShellScript runs a
 	// shell command via SSM. Used by the control-plane Assembler to push the MPI

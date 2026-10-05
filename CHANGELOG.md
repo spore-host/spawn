@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn orphans` and `spawn cleanup` now see placement groups** (#685). spawn tags
+  every cluster placement group it creates with `spawn:managed=true`, but the Resource
+  Groups Tagging API — which discovery is built on — does not return placement groups
+  at all. So they were invisible to every spawn command: nine orphans in one region of
+  one account, and no way to find them except `aws ec2 describe-placement-groups`.
+  They are now scanned separately, the same way Elastic IPs are, and reported with
+  whether they still have members.
+  A group is judged an orphan **per group**, not per region: an MPI cohort creates one
+  group per AZ it tries, so a cohort that fell back from one AZ to another leaves the
+  abandoned AZ's group genuinely empty *while its own instances are running*. Keying on
+  "anything running in this region" — the rule for the shared security group and key
+  pair — would have hidden exactly the leak worth finding.
+  A group that still has members is reported and skipped rather than offered for
+  deletion (EC2 refuses, so attempting it is a wait ending in a failure). It is
+  deliberately **not** treated as blocking, either: that would deadlock a group whose
+  only members are stopped instances against the very terminate that would free it.
+  The sweep needs `ec2:DescribePlacementGroups`, and removing a group needs
+  `ec2:DeletePlacementGroup`.
+
+### Fixed
+
+- **A rejected `--mpi` launch created a security group before failing validation**
+  (#685). `validateMPIFlags` ran about 286 lines *after* `ensureSecurityGroup` in the
+  same function, so `spawn launch x --mpi --count 2` with no `--job-array-name` created
+  a managed group, then refused the launch and left the group behind.
+  The leftover was named **`spawn-mpi-`** — the prefix with an empty suffix — so every
+  such attempt shared one group, and since #659 that group allows **all protocols**
+  between its members, which makes accidental sharing materially worse than a naming
+  wart. Nothing reaps them (the other half of #685), so each rejected attempt added a
+  durable orphan; 19 security groups and 9 placement groups were found in one region of
+  a single account, and roughly 35 were cleaned by hand over one session.
+  Pure flag validation now runs before the first AWS call, and
+  `CreateOrGetMPISecurityGroup` refuses a suffix-less name outright so the shared-group
+  case is unreachable from anywhere, not just from the CLI. A gate asserts the ordering,
+  since "this happens before that" has no runtime value to assert on.
+- **A failed MPI cohort left its placement groups behind, every time** (#685). When a
+  cohort went terminal, spawn drained the instances and then deleted the per-AZ
+  placement groups it had created — but `TerminateInstances` is asynchronous and EC2
+  refuses to delete a group while any instance still references it. The delete lost
+  that race on essentially every failed launch, printing
+  `InvalidPlacementGroup.InUse` and moving on. Nine orphaned groups were found in one
+  region of one account.
+  Cleanup now retries for up to 60 seconds, waiting the members out. The budget is
+  short deliberately: an empty placement group is **free**, so the only cost of giving
+  up is quota pressure, and blocking the CLI's exit for minutes over a free resource
+  would be the worse trade. If it does give up, the message now includes the exact
+  `aws ec2 delete-placement-group` command instead of only reporting the failure.
+  A permissions or not-found error still returns immediately rather than burning the
+  budget to re-learn it.
+- **Placement-group deletion ignored `--region` entirely** (#685). The second,
+  independent cause of the same orphans, found while fixing the first:
+  `CreatePlacementGroup` pinned the EC2 client to the launch region, but
+  `DeletePlacementGroup` took no region at all and used the client's *default* one. So
+  a cohort launched into a non-default region created its group in one region and
+  tried to delete it in another — failing `InvalidPlacementGroup.Unknown`, which is
+  not a retryable condition, so the group was abandoned on the first attempt
+  regardless of how long cleanup waited. A same-named group genuinely present in the
+  default region would have been deleted instead.
+  The region is now a required parameter, so every caller must supply one, and a gate
+  rejects any regional EC2 call in `pkg/aws` built on the default-region config —
+  that shape is the bug, and `DescribeRegions` is the one legitimate exception.
+
+
 ## [0.120.0] - 2026-10-05
 
 ### Added

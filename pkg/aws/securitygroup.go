@@ -70,6 +70,20 @@ func ensureMPIClusterRules(ctx context.Context, ec2Client *ec2.Client, sgID stri
 // MPI clusters. The group allows ALL traffic between its own members, which EFA
 // requires (#659), plus SSH from outside for user access.
 func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error) {
+	// Refuse a name with no cluster-specific suffix (#685).
+	//
+	// Callers build this as "spawn-mpi-" + jobArrayName. With an empty name the
+	// result was the bare prefix, so EVERY such launch shared ONE group — and
+	// since #659 that group allows ALL protocols between its members, making
+	// accidental sharing worse than it was before. The caller-side ordering fix
+	// makes this unreachable from the CLI; this is the guard that keeps it
+	// unreachable from anywhere else.
+	if groupName == "" || strings.HasSuffix(groupName, "-") {
+		return "", fmt.Errorf("refusing to create MPI security group %q: the name has no "+
+			"cluster-specific suffix, so unrelated clusters would share one all-traffic "+
+			"group (#685)", groupName)
+	}
+
 	ec2Client := c.regionalEC2(region)
 
 	// Try to find existing security group
