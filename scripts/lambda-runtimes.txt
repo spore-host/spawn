@@ -1,0 +1,40 @@
+# Approved AWS Lambda runtimes.
+#
+# A runtime not listed here fails scripts/lambda-runtime-census.sh, in source and
+# in the accounts we own. The point is that a runtime reaching end-of-support
+# should break a build rather than arrive as an email: AWS notifies the account,
+# nothing in the repo changes, and before this file no CI job could fail.
+#
+# This list is the thing to edit when AWS publishes a deprecation. Adding a
+# runtime here is a deliberate act; discovering one in production is not.
+#
+# Format: <runtime> <tab> <why it is approved>
+#
+# How the stale ones got there, for context. Two were found in October 2026 by
+# querying AWS by hand because nothing tracked this:
+#
+#   scheduler-handler    provided.al2    deployed 2026-01, declared only in a
+#                                        SHELL SCRIPT (--runtime), which a grep
+#                                        for `Runtime:` in templates missed
+#   github-oauth-bridge  python3.11      deployed 2026-01, in NO repo at all
+#
+# The first is why the census scans deploy scripts as well as templates. The
+# second is why it also compares deployed runtimes against what source declares:
+# a function nothing declares cannot be caught by reading the repo.
+
+provided.al2023	Custom runtime on Amazon Linux 2023. The default for every Go lambda here — spawn's reaper, orchestrators, pollers and spored-adjacent functions.
+python3.12	Current supported Python. Used by the portal onboarding stack.
+python3.13	Current supported Python, allowed so a bump does not need a census edit first.
+nodejs20.x	Used by the spawn-ts portal demo.
+nodejs22.x	Current Node LTS on Lambda, allowed ahead of a bump.
+
+# NOT approved, and deliberately listed so the reason survives:
+#
+#   provided.al2   Amazon Linux 2 custom runtime. Superseded by provided.al2023;
+#                  on the deprecation path. A Go binary must be built with
+#                  CGO_ENABLED=0 to move cleanly, since a CGO build links the
+#                  build host's glibc (2.26 on al2, 2.34 on al2023).
+#   python3.11     Behind the 3.12 we declare elsewhere. Not EOL at time of
+#                  writing, but there is no reason to deploy it.
+#   python3.8      Support ended. The deprecation that prompted this file; we
+#                  were never on it.

@@ -250,3 +250,12 @@ smoke: build
 # question that currently gets answered from memory at tagging time.
 smoke-needed:
 	@scripts/hardware-smoke-needed.sh
+
+# Are all Lambda runtimes supported? Offline by default so it can gate a PR;
+# --deployed also checks the accounts we own (spawn#716).
+.PHONY: lambda-runtimes lambda-runtimes-deployed
+lambda-runtimes:
+	@scripts/lambda-runtime-census.sh
+
+lambda-runtimes-deployed:
+	@scripts/lambda-runtime-census.sh --deployed

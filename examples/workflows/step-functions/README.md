@@ -28,14 +28,14 @@ zip status_checker.zip status_checker.py
 ```bash
 aws lambda create-function \
     --function-name spawn-launcher \
-    --runtime python3.11 \
+    --runtime python3.12 \
     --handler launcher.handler \
     --zip-file fileb://launcher.zip \
     --role arn:aws:iam::ACCOUNT:role/lambda-execution-role
 
 aws lambda create-function \
     --function-name spawn-status-checker \
-    --runtime python3.11 \
+    --runtime python3.12 \
     --handler status_checker.handler \
     --zip-file fileb://status_checker.zip \
     --role arn:aws:iam::ACCOUNT:role/lambda-execution-role
