@@ -91,6 +91,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which outruns any wall clock on any platform, and separately rejects a
   monotonically-increasing source so a regression to any counter is caught too.
 
+- **A transient DNS failure at boot permanently failed an EFS mount** (#704). The
+  generated storage script attempted `mount -t nfs4` exactly once. A mount target
+  that was already `available` **in the instance's own subnet** still produced
+  `mount.nfs4: Failed to resolve server fs-….efs.us-east-1.amazonaws.com` while
+  general DNS worked fine and the mount target's IP mounted first try — EFS DNS can
+  lag mount-target availability. One blip therefore became a launch that boots,
+  bills and runs nothing, because #668's readiness barrier correctly refuses to
+  start a workload against a directory that is not mounted.
+  The mount now retries six times over about a minute, with no delay added to the
+  common case where the first attempt succeeds. `/etc/fstab` still carries the DNS
+  name rather than an IP, so the entry survives a mount-target replacement.
+  Mounting by the mount-target IP would additionally survive a *persistent* DNS
+  failure, but needs a `DescribeMountTargets` call and a new IAM action, so that
+  half stays open on #704.
+  Found by the storage leg of `make smoke`, and the test runs the generated shell
+  under bash against a stubbed `mount` — the bug was invisible to text assertions
+  because the mount command itself was correct.
+
 ## [0.120.0] - 2026-10-05
 
 ### Added

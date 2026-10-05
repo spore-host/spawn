@@ -91,7 +91,36 @@ echo export FSX_MOUNT={{.FSxMountPoint | shellEscape}} >> /etc/profile.d/fsx.sh
 # EFS mounting
 dnf install -y nfs-utils
 mkdir -p {{.EFSMountPoint | shellEscape}}
-mount -t nfs4 -o {{.EFSMountOptions | shellEscape}} {{.EFSFilesystemDNS | shellEscape}}:/ {{.EFSMountPoint | shellEscape}}
+# Retry the mount (#704). EFS DNS can lag mount-target availability: a mount
+# target that is already available in this very subnet still produced
+#   mount.nfs4: Failed to resolve server fs-….efs.us-east-1.amazonaws.com
+# while general DNS worked and the mount target's IP mounted first try. A single
+# attempt turned one DNS blip into a launch that boots, bills and runs nothing —
+# because #668's readiness barrier correctly refuses to start the workload
+# against a directory that is not mounted.
+spawn_mount_efs() {
+  for attempt in 1 2 3 4 5 6; do
+    if mount -t nfs4 -o {{.EFSMountOptions | shellEscape}} {{.EFSFilesystemDNS | shellEscape}}:/ {{.EFSMountPoint | shellEscape}}; then
+      return 0
+    fi
+    # Already mounted by a previous attempt that reported failure late.
+    if mountpoint -q {{.EFSMountPoint | shellEscape}} 2>/dev/null; then
+      return 0
+    fi
+    if [ "$attempt" -lt 6 ]; then
+      printf 'spawn: EFS mount attempt %s/6 failed; retrying in 10s\n' "$attempt" >&2
+      sleep 10
+    fi
+  done
+  # Not fatal here: #668's readiness barrier reads /proc/mounts and fails the
+  # workload with a named reason, which is a better signal than aborting the
+  # bootstrap half-done. Mounting by the mount-target IP would survive a
+  # persistent DNS failure, but needs a DescribeMountTargets call and a new IAM
+  # action, so it stays open on #704.
+  printf 'spawn: EFS mount failed after 6 attempts over ~60s — DNS for the filesystem may not be resolving; the fstab entry remains, so mount -a will retry\n' >&2
+  return 1
+}
+spawn_mount_efs || true
 # Single-quoted as a whole, for the same reason as the FSx line above (#680).
 echo {{printf "%s:/ %s nfs4 %s,_netdev 0 0" .EFSFilesystemDNS .EFSMountPoint .EFSMountOptions | shellEscape}} >> /etc/fstab
 echo export EFS_MOUNT={{.EFSMountPoint | shellEscape}} >> /etc/profile.d/efs.sh
