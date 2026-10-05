@@ -111,6 +111,36 @@ ssm() { # $1=instance  $2=command  -> stdout
     --instance-id "$1" --query StandardOutputContent --output text 2>/dev/null
 }
 
+# ssm_wait_online blocks until the SSM agent registers, so a later empty reply
+# means "the file is not there" rather than "nobody was listening". `spawn
+# launch` returns at state=running, which is well before the agent is up —
+# asserting through a channel that is not open yet is how the storage leg
+# concluded a mount had failed when it had not been attempted.
+ssm_wait_online() {
+  for _ in $(seq 1 60); do
+    [ "$(aws ssm describe-instance-information --region "$REGION" \
+        --filters "Key=InstanceIds,Values=$1" \
+        --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)" = Online ] && return 0
+    sleep 5
+  done
+  return 1
+}
+
+# storage_wait_settled blocks until cloud-init is done, because that is when the
+# bootstrap has finished trying to mount. Polling for the mount itself would be
+# wrong in the other direction: it cannot distinguish "not yet" from "never", and
+# a 60-second retry budget (#704) means the mount is legitimately absent for up
+# to a minute after boot.
+storage_wait_settled() {
+  for _ in $(seq 1 60); do
+    case "$(ssm "$1" 'cloud-init status 2>/dev/null | head -1')" in
+      *done*|*error*|*disabled*) return 0 ;;
+    esac
+    sleep 5
+  done
+  return 1
+}
+
 step "MPI cohort: ${NODES} x ${TYPE} in ${REGION}"
 if "$SPAWN" launch "$TAG-mpi" --instance-type "$TYPE" --region "$REGION" \
      --count "$NODES" --job-array-name "${TAG//-/}" --mpi \
@@ -217,31 +247,66 @@ if [ "${SMOKE_STORAGE:-0}" = "1" ]; then
     if [ -z "$SID" ]; then
       echo "  ⚠️  storage checks INCONCLUSIVE: the instance was gone before they ran."
     else
-    gate=$(ssm "$SID" 'cat /run/spawn/storage-ready 2>/dev/null')
+
+    # ---- Prove the channel works BEFORE asserting anything through it. ----
+    #
+    # The fifth false signal from this file (#704's first run): the leg asserted
+    # on the mount the instance had not performed yet. `spawn launch` returns at
+    # state=running, which is minutes before cloud-init installs nfs-utils and
+    # mounts. All three checks came back empty and the leg reported "the mount
+    # did not happen" — an outright wrong conclusion, drawn from a check that had
+    # not run.
+    #
+    # Worse, every branch below conflated EMPTY OUTPUT with NO RESPONSE, so a
+    # file that merely did not exist yet was indistinguishable from an SSM
+    # failure. Both of those are now impossible: reachability is established
+    # once, out loud, and every probe prints a sentinel so absence is a VALUE.
+    if ! ssm_wait_online "$SID"; then
+      echo "  ⚠️  storage checks INCONCLUSIVE: SSM never came online for $SID in 5 min."
+      echo "      Nothing is claimed about the mount — the channel to ask never opened."
+    elif ! storage_wait_settled "$SID"; then
+      echo "  ⚠️  storage checks INCONCLUSIVE: cloud-init had not finished in 5 min, so the"
+      echo "      bootstrap may simply not have reached the mount yet."
+      ssm "$SID" 'tail -40 /var/log/cloud-init-output.log' | sed 's/^/      | /'
+    else
+
+    gate=$(ssm "$SID" 'if [ -f /run/spawn/storage-ready ]; then cat /run/spawn/storage-ready; else echo ABSENT; fi')
     case "$gate" in
-      *ok*)     ok "storage gate reported ok (#668)" ;;
-      "")       echo "  ⚠️  storage gate INCONCLUSIVE: no response over SSM (instance gone?)" ;;
-      *)        bad "storage gate: $gate — the mount did not verify" ;;
+      *ok*)      ok "storage gate reported ok (#668)" ;;
+      *ABSENT*)  bad "/run/spawn/storage-ready does not exist — the storage block never ran (#668 writes it either way)" ;;
+      "")        echo "  ⚠️  storage gate INCONCLUSIVE: empty reply on a channel that just worked" ;;
+      *)         bad "storage gate: $gate — the mount did not verify" ;;
     esac
 
-    mounted=$(ssm "$SID" 'grep -c " /efs " /proc/mounts')
+    mounted=$(ssm "$SID" 'grep -c " /efs " /proc/mounts || true')
     mounted=${mounted//[^0-9]/}
     if [ -z "$mounted" ]; then
-      echo "  ⚠️  mount check INCONCLUSIVE: no response over SSM"
+      echo "  ⚠️  mount check INCONCLUSIVE: empty reply on a channel that just worked"
     elif [ "$mounted" -ge 1 ]; then
       ok "EFS is mounted at /efs"
     else
-      bad "/efs is not in /proc/mounts — the mount did not happen (see #704 before blaming quoting)"
+      bad "/efs is not in /proc/mounts — the mount did not happen"
     fi
 
     # The #680 regression that unit tests cannot see: sourcing the generated
     # profile must yield the mount point, not a word-split fragment.
-    exported=$(ssm "$SID" '. /etc/profile.d/efs.sh; printf %s "$EFS_MOUNT"')
+    exported=$(ssm "$SID" 'if [ -f /etc/profile.d/efs.sh ]; then . /etc/profile.d/efs.sh; printf %s "$EFS_MOUNT"; else printf ABSENT; fi')
     case "$exported" in
-      *"/efs"*) ok "profile export resolves to \$EFS_MOUNT=$exported (#680)" ;;
-      "") echo "  ⚠️  profile export INCONCLUSIVE: no response over SSM" ;;
-      *) bad "\$EFS_MOUNT is $exported after sourcing /etc/profile.d/efs.sh — the quoting is wrong (#680)" ;;
+      *"/efs"*)  ok "profile export resolves to \$EFS_MOUNT=$exported (#680)" ;;
+      *ABSENT*)  bad "/etc/profile.d/efs.sh does not exist — the storage block never ran" ;;
+      "")        echo "  ⚠️  profile export INCONCLUSIVE: empty reply on a channel that just worked" ;;
+      *)         bad "\$EFS_MOUNT is $exported after sourcing /etc/profile.d/efs.sh — the quoting is wrong (#680)" ;;
     esac
+
+    # Whatever the verdict, show what the mount actually DID. This is the only
+    # direct evidence for #704: a transient DNS failure that the retry then
+    # recovers from prints "EFS mount attempt N/6 failed", and a success on the
+    # first try prints nothing — so the absence of those lines is informative too.
+    echo "  --- EFS lines from cloud-init-output.log ---"
+    ssm "$SID" 'grep -iE "efs|nfs" /var/log/cloud-init-output.log | tail -25 || echo "(no EFS lines)"' \
+      | sed 's/^/      | /'
+
+    fi
     fi
   else
     bad "launch with --efs-id failed; see /tmp/$TAG-efs.log"

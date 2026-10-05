@@ -198,3 +198,110 @@ func TestEFSFstabKeepsTheDNSName(t *testing.T) {
 		}
 	}
 }
+
+// efsScriptWithIP renders the EFS branch with a mount-target IP fallback.
+func efsScriptWithIP(t *testing.T) string {
+	t.Helper()
+	script, err := GenerateStorageUserData(StorageConfig{
+		EFSEnabled:       true,
+		EFSFilesystemDNS: "fs-0cc326d51039a4df6.efs.us-east-1.amazonaws.com",
+		EFSMountTargetIP: "172.31.1.24",
+		EFSMountPoint:    "/efs",
+		EFSMountOptions:  "nfsvers=4.1,hard,timeo=600,retrans=2",
+	})
+	if err != nil {
+		t.Fatalf("GenerateStorageUserData: %v", err)
+	}
+	return script
+}
+
+// stubBinDNSFails writes a mount stub that fails for the DNS NAME and succeeds
+// for the IP — which is exactly what a real instance did: six DNS failures over
+// ~60s, then a first-try success by IP with identical options.
+func stubBinDNSFails(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	mount := `#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    *amazonaws.com:/*) echo "dns" >> "$SPAWN_TEST_LOG"
+                       echo "mount.nfs4: Failed to resolve server" >&2; exit 32 ;;
+    172.31.1.24:/)     echo "ip" >> "$SPAWN_TEST_LOG"; exit 0 ;;
+  esac
+done
+echo "unknown" >> "$SPAWN_TEST_LOG"; exit 32
+`
+	for name, body := range map[string]string{
+		"mount":      mount,
+		"mountpoint": "#!/bin/sh\nexit 1\n",
+		"sleep":      "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return dir
+}
+
+// TestEFSFallsBackToTheMountTargetIP is the second half of spawn#704, and the
+// half the first hardware smoke proved was the one that mattered.
+//
+// The retry alone is not enough. On a real t4g.small with the mount target
+// `available` in its own subnet, general DNS working, and enableDnsSupport and
+// enableDnsHostnames both true, ALL SIX attempts failed:
+//
+//	mount.nfs4: Failed to resolve server fs-0cc326d51039a4df6.efs.us-east-1.amazonaws.com
+//	spawn: EFS mount attempt 1/6 failed; retrying in 10s
+//	... (through 6)
+//	spawn: EFS mount failed after 6 attempts over ~60s
+//
+// EFS DNS propagation for a freshly created mount target outlasts any retry
+// budget worth spending at boot, so the IP is what makes a first-boot mount of a
+// new filesystem work at all.
+func TestEFSFallsBackToTheMountTargetIP(t *testing.T) {
+	fn := extractMountFunc(t, efsScriptWithIP(t))
+
+	code, log := runMountFunc(t, fn, stubBinDNSFails(t))
+	if code != 0 {
+		t.Errorf("mount failed (exit %d) though the mount-target IP was available.\n"+
+			"calls:\n%s\n\nA DNS name that never resolves is the observed production case, "+
+			"not a hypothetical (#704).", code, log)
+	}
+	if n := strings.Count(log, "dns\n"); n != 6 {
+		t.Errorf("tried DNS %d time(s), want all 6 before falling back — the DNS name is the "+
+			"durable reference and must be given its full chance", n)
+	}
+	if !strings.Contains(log, "ip\n") {
+		t.Errorf("never attempted the mount-target IP; the fallback did not engage:\n%s", log)
+	}
+}
+
+// TestEFSNoIPFallbackWhenNoIPIsKnown: without a resolved mount-target IP the
+// script must not emit a half-built mount command. The lookup needs
+// elasticfilesystem:DescribeMountTargets, which a caller may not have.
+func TestEFSNoIPFallbackWhenNoIPIsKnown(t *testing.T) {
+	script := efsScript(t) // no EFSMountTargetIP
+	if strings.Contains(script, "mounting by mount-target IP") {
+		t.Error("the IP fallback was rendered with no IP configured")
+	}
+	// And the retry is still there — losing the fallback must not lose the retry.
+	if !strings.Contains(script, "attempt %s/6 failed") {
+		t.Error("the DNS retry disappeared when no IP was configured")
+	}
+}
+
+// TestEFSFstabNeverCarriesTheIP: a mount-target replacement changes the IP, so
+// an IP in fstab would silently break on the next reboot. The DNS name is the
+// durable reference; the IP is strictly a boot-time workaround.
+func TestEFSFstabNeverCarriesTheIP(t *testing.T) {
+	script := efsScriptWithIP(t)
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, "/etc/fstab") && strings.Contains(line, "172.31.1.24") {
+			t.Errorf("fstab line carries the mount-target IP, which does not survive a "+
+				"mount-target replacement: %s", line)
+		}
+	}
+	if !strings.Contains(script, "fs-0cc326d51039a4df6.efs.us-east-1.amazonaws.com:/ /efs nfs4") {
+		t.Error("fstab no longer carries the EFS DNS name")
+	}
+}

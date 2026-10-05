@@ -17,6 +17,11 @@ type StorageConfig struct {
 
 	EFSEnabled       bool
 	EFSFilesystemDNS string
+	// EFSMountTargetIP is the mount target's IP, used ONLY as a fallback after
+	// the DNS attempts fail (#704). Empty disables the fallback. Never written to
+	// /etc/fstab: a mount-target replacement changes the IP, and the DNS name is
+	// the durable reference.
+	EFSMountTargetIP string
 	EFSMountPoint    string
 	EFSMountOptions  string // NFS mount options (e.g., "nfsvers=4.1,rsize=1048576,...")
 
@@ -117,6 +122,20 @@ spawn_mount_efs() {
   # bootstrap half-done. Mounting by the mount-target IP would survive a
   # persistent DNS failure, but needs a DescribeMountTargets call and a new IAM
   # action, so it stays open on #704.
+{{if .EFSMountTargetIP}}
+  # DNS never resolved. Mount by the mount target's IP instead (#704).
+  #
+  # Not a belt-and-braces extra: on a real run every one of the six attempts
+  # above failed with "Failed to resolve server" across ~60s, with the mount
+  # target available in this instance's own subnet and general DNS working, while
+  # this exact mount by IP succeeded first try. EFS DNS propagation for a freshly
+  # created mount target outlasts any retry budget worth spending at boot.
+  printf 'spawn: EFS DNS did not resolve; mounting by mount-target IP instead\n' >&2
+  if mount -t nfs4 -o {{.EFSMountOptions | shellEscape}} {{.EFSMountTargetIP | shellEscape}}:/ {{.EFSMountPoint | shellEscape}}; then
+    printf 'spawn: EFS mounted via mount-target IP; /etc/fstab keeps the DNS name so the entry survives a mount-target replacement\n' >&2
+    return 0
+  fi
+{{end}}
   printf 'spawn: EFS mount failed after 6 attempts over ~60s — DNS for the filesystem may not be resolving; the fstab entry remains, so mount -a will retry\n' >&2
   return 1
 }
