@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The sweep parameter environment is now verified by executing it** (#531). That fix —
+  single-quoting `spawn:param:*` tag values into `/etc/profile.d/spawn-params.sh` instead
+  of double-quoting them — was already in place and had only ever been verified by
+  reading. #680 showed why that is not enough: its nested-quote rendering was
+  syntactically valid and silently produced the wrong value.
+  The new test **extracts the real export loop from the generated bootstrap** (rather
+  than restating it, which would only verify the copy), runs it against a tag stream
+  containing `$HOME/out`, `run "A"`, `it's`, `$(id -u)`, backticks, a mixed value and a
+  path with a space, then parses the result with `bash -n` and sources it. Every value
+  must come back byte for byte, and `$HOME` is set to a sentinel that would be obvious
+  if it ever expanded. Confirmed to fail when the double-quoted form is restored.
+  Also verified, and needing no change: param **names** cannot inject into that file.
+  `shellIdentifier` (`^[A-Za-z_][A-Za-z0-9_]*$`) rejects `learning-rate`, `x;id`, spaces,
+  `$(…)` and leading digits before launch, with a message explaining that parameters
+  become `PARAM_<key>` variables. Without it, a name like `x;curl evil` would have landed
+  as a second statement in a file every login shell sources.
+
+- **Every launch flag is now classified for the parameter-sweep path** (#697). The sweep
+  path drops flags **by construction**: the dispatch builds a two-field `LaunchConfig`
+  instead of calling `buildLaunchConfig`, and `buildLaunchConfigFromParams` merges rows
+  onto an empty struct. So a flag reaches sweep rows only if someone hand-wrote a shim —
+  which has been done one category at a time, after each was reported (#525 spend
+  controls, #539 IAM twice, #549 DNS, #667 networking for single launches only,
+  #673/#674/#675).
+  Measured: of **127** `launchCmd` flags, 44 are honoured on the sweep path, **83 are
+  dropped**, and **72 of those have no param-file key either** — so there is no way to
+  express the setting on a sweep at all. The gaps include *all* EFS and FSx flags (a
+  sweep cannot mount shared storage), `--security-group-ids`/`--subnet-id` (so #667 is
+  only half-fixed), and `--pre-stop`, the hook that syncs results before termination.
+  `sweepFlagCoverage` classifies each flag as honoured, not-applicable, or a known gap
+  with its issue, and three gates keep it honest: an unclassified flag fails the build, a
+  gap must cite an issue, and a flag *claimed* as honoured must actually be referenced on
+  the sweep path — because a manifest that drifts into wishful thinking is how #539's
+  second half survived. The gate found seven flags I had not classified on its first run.
+  This does not fix the gaps; it stops new ones being added silently. #697 carries the
+  structural fix (pass the real config in and let rows override it).
+
+### Deprecated
+
+- **`--cartesian` and `--use-reservation` now warn instead of silently doing nothing**
+  (#674, #675). Both were parsed into package globals that nothing read, so passing
+  either was accepted, had no effect, and said nothing.
+  Neither is being implemented, deliberately. The cartesian product **already exists** as
+  the param file's `grid:` key (`pkg/params.expandGrid`), and the input `--cartesian`
+  implies — a repeatable `--param lr=0.1,0.2` — does not exist: `--params` is inline JSON
+  that fails closed with a clear message, and `params:` in a file is already a list of
+  complete sets with no lists to cross. `--reservation-id` (#216) supersedes
+  `--use-reservation` and is wired through to `RunInstances`. Implementing either would
+  add a second way to do something that already works.
+  Correction to #674's original text, which was mine: it claimed `--cartesian` "silently
+  produces the wrong run count". It does not — with a param file the count comes from
+  `params:`/`grid:` and the flag is simply inert. The consequence was over-stated.
+
+### Fixed
+
+- **`--vpc` is now honoured; it previously launched in the default VPC regardless**
+  (#673). The flag was bound to a package global that **nothing read** — there was no
+  `VPCID` field on `LaunchConfig` at all — and all five consumers called `GetDefaultVPC`
+  unconditionally. So `spawn launch --vpc vpc-0abc…` was accepted, exited 0, and put the
+  instance in the **default** VPC, with its managed security group created there too.
+  The failure was silent and landed on network placement: wrong subnet, wrong route
+  table, no route to an EFS or FSx mount target, and SG rules written into a VPC the
+  instance was not in. An account whose research VPC is not the default could not target
+  a VPC at all.
+  All five sites now go through one `ResolveVPC` (explicit-or-default) rather than each
+  assuming the default — the MPI and Windows security groups, FSx's subnet choice when
+  `--subnet-id` is absent, and `GetSubnetForAZ`. Threading it into the storage paths
+  matters as much as the SG ones: a filesystem created in the default VPC while the
+  instance is elsewhere presents as a broken mount, not as a dropped flag.
+  Passing `--vpc` and `--subnet-id` together is now validated up front, because it is the
+  natural way to use `--vpc` and EC2's own error for a mismatch arrives only at
+  `RunInstances` and names neither flag. The check is advisory on a describe failure —
+  a better error, not a new gate.
+  A gate fails the build on any direct `GetDefaultVPC` call from the launch path. Five
+  independent sites each assuming the default is *why* this flag did nothing, and fixing
+  some while leaving others is exactly how #539 and #667 each ended up fixed on one path
+  and broken on another.
+  Still dropped on the parameter-sweep path, tracked in #697 with the rest.
+
 ### Security
 
 - **`security.ShellEscape` is deleted; every caller now uses real single-quoting**
@@ -40,74 +121,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   made it unsafe. A test named for attack patterns was certifying the hole. Its input
   list is kept and now run through a **real shell**, requiring each value to round-trip
   byte for byte.
-
-
-### Fixed
-
-- **`--vpc` is now honoured; it previously launched in the default VPC regardless**
-  (#673). The flag was bound to a package global that **nothing read** — there was no
-  `VPCID` field on `LaunchConfig` at all — and all five consumers called `GetDefaultVPC`
-  unconditionally. So `spawn launch --vpc vpc-0abc…` was accepted, exited 0, and put the
-  instance in the **default** VPC, with its managed security group created there too.
-  The failure was silent and landed on network placement: wrong subnet, wrong route
-  table, no route to an EFS or FSx mount target, and SG rules written into a VPC the
-  instance was not in. An account whose research VPC is not the default could not target
-  a VPC at all.
-  All five sites now go through one `ResolveVPC` (explicit-or-default) rather than each
-  assuming the default — the MPI and Windows security groups, FSx's subnet choice when
-  `--subnet-id` is absent, and `GetSubnetForAZ`. Threading it into the storage paths
-  matters as much as the SG ones: a filesystem created in the default VPC while the
-  instance is elsewhere presents as a broken mount, not as a dropped flag.
-  Passing `--vpc` and `--subnet-id` together is now validated up front, because it is the
-  natural way to use `--vpc` and EC2's own error for a mismatch arrives only at
-  `RunInstances` and names neither flag. The check is advisory on a describe failure —
-  a better error, not a new gate.
-  A gate fails the build on any direct `GetDefaultVPC` call from the launch path. Five
-  independent sites each assuming the default is *why* this flag did nothing, and fixing
-  some while leaving others is exactly how #539 and #667 each ended up fixed on one path
-  and broken on another.
-  Still dropped on the parameter-sweep path, tracked in #697 with the rest.
-
-
-### Deprecated
-
-- **`--cartesian` and `--use-reservation` now warn instead of silently doing nothing**
-  (#674, #675). Both were parsed into package globals that nothing read, so passing
-  either was accepted, had no effect, and said nothing.
-  Neither is being implemented, deliberately. The cartesian product **already exists** as
-  the param file's `grid:` key (`pkg/params.expandGrid`), and the input `--cartesian`
-  implies — a repeatable `--param lr=0.1,0.2` — does not exist: `--params` is inline JSON
-  that fails closed with a clear message, and `params:` in a file is already a list of
-  complete sets with no lists to cross. `--reservation-id` (#216) supersedes
-  `--use-reservation` and is wired through to `RunInstances`. Implementing either would
-  add a second way to do something that already works.
-  Correction to #674's original text, which was mine: it claimed `--cartesian` "silently
-  produces the wrong run count". It does not — with a param file the count comes from
-  `params:`/`grid:` and the flag is simply inert. The consequence was over-stated.
-
-
-### Added
-
-- **Every launch flag is now classified for the parameter-sweep path** (#697). The sweep
-  path drops flags **by construction**: the dispatch builds a two-field `LaunchConfig`
-  instead of calling `buildLaunchConfig`, and `buildLaunchConfigFromParams` merges rows
-  onto an empty struct. So a flag reaches sweep rows only if someone hand-wrote a shim —
-  which has been done one category at a time, after each was reported (#525 spend
-  controls, #539 IAM twice, #549 DNS, #667 networking for single launches only,
-  #673/#674/#675).
-  Measured: of **127** `launchCmd` flags, 44 are honoured on the sweep path, **83 are
-  dropped**, and **72 of those have no param-file key either** — so there is no way to
-  express the setting on a sweep at all. The gaps include *all* EFS and FSx flags (a
-  sweep cannot mount shared storage), `--security-group-ids`/`--subnet-id` (so #667 is
-  only half-fixed), and `--pre-stop`, the hook that syncs results before termination.
-  `sweepFlagCoverage` classifies each flag as honoured, not-applicable, or a known gap
-  with its issue, and three gates keep it honest: an unclassified flag fails the build, a
-  gap must cite an issue, and a flag *claimed* as honoured must actually be referenced on
-  the sweep path — because a manifest that drifts into wishful thinking is how #539's
-  second half survived. The gate found seven flags I had not classified on its first run.
-  This does not fix the gaps; it stops new ones being added silently. #697 carries the
-  structural fix (pass the real config in and let rows override it).
-
 
 ## [0.119.0] - 2026-10-04
 
