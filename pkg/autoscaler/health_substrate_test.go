@@ -60,7 +60,7 @@ func runHealthTestInstance(t *testing.T, ec2Client *ec2.Client) string {
 	t.Helper()
 	ctx := context.Background()
 	out, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, ec2Client)),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),

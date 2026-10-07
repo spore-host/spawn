@@ -10,17 +10,26 @@ import (
 	"github.com/spore-host/spawn/pkg/testutil"
 )
 
-// testLaunchTemplate is a minimal LaunchTemplate for capacity tests.
-var testLaunchTemplate = LaunchTemplate{
-	InstanceType: "t3.micro",
-	AMI:          "ami-12345678",
+// testLaunchTemplateFor is a minimal LaunchTemplate whose AMI actually exists
+// in the emulator.
+//
+// Was a package-level var with a fabricated "ami-12345678", which worked only
+// because substrate v0.97.0 did not validate image ids. v0.120.0 does, and
+// ExecutePlan passes this AMI straight to RunInstances — so it has to be real.
+// A function rather than a var because registering needs *testing.T.
+func testLaunchTemplateFor(t *testing.T, ec2Client *ec2.Client) LaunchTemplate {
+	t.Helper()
+	return LaunchTemplate{
+		InstanceType: "t3.micro",
+		AMI:          testutil.RegisterTestAMI(t, ec2Client),
+	}
 }
 
 func runCapacityTestInstances(t *testing.T, ec2Client *ec2.Client, count int) []string {
 	t.Helper()
 	ctx := context.Background()
 	out, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, ec2Client)),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(int32(count)),
 		MaxCount:     aws.Int32(int32(count)),
@@ -63,7 +72,7 @@ func TestPlanCapacity_ScaleUp(t *testing.T) {
 	rc := &CapacityReconciler{}
 	group := &AutoScaleGroup{
 		DesiredCapacity: 3,
-		LaunchTemplate:  testLaunchTemplate,
+		LaunchTemplate:  LaunchTemplate{InstanceType: "t3.micro", AMI: "ami-12345678"},
 	}
 	health := []HealthStatus{
 		{InstanceID: "i-001", EC2State: "running", Healthy: true},
@@ -88,7 +97,7 @@ func TestPlanCapacity_ScaleDown(t *testing.T) {
 	rc := &CapacityReconciler{}
 	group := &AutoScaleGroup{
 		DesiredCapacity: 1,
-		LaunchTemplate:  testLaunchTemplate,
+		LaunchTemplate:  LaunchTemplate{InstanceType: "t3.micro", AMI: "ami-12345678"},
 	}
 	health := []HealthStatus{
 		{InstanceID: "i-001", EC2State: "running", Healthy: true},
@@ -112,7 +121,7 @@ func TestPlanCapacity_NoOp(t *testing.T) {
 	rc := &CapacityReconciler{}
 	group := &AutoScaleGroup{
 		DesiredCapacity: 2,
-		LaunchTemplate:  testLaunchTemplate,
+		LaunchTemplate:  LaunchTemplate{InstanceType: "t3.micro", AMI: "ami-12345678"},
 	}
 	health := []HealthStatus{
 		{InstanceID: "i-001", EC2State: "running", Healthy: true},
@@ -135,7 +144,7 @@ func TestPlanCapacity_UnhealthyInstancesMarkedForTermination(t *testing.T) {
 	rc := &CapacityReconciler{}
 	group := &AutoScaleGroup{
 		DesiredCapacity: 2,
-		LaunchTemplate:  testLaunchTemplate,
+		LaunchTemplate:  LaunchTemplate{InstanceType: "t3.micro", AMI: "ami-12345678"},
 	}
 	health := []HealthStatus{
 		{InstanceID: "i-001", EC2State: "running", Healthy: true},
@@ -167,7 +176,7 @@ func TestExecutePlan_Launch(t *testing.T) {
 		AutoScaleGroupID: "asg-exec-001",
 		GroupName:        "test-group",
 		JobArrayID:       "job-exec-001",
-		LaunchTemplate:   testLaunchTemplate,
+		LaunchTemplate:   testLaunchTemplateFor(t, env.EC2Client()),
 	}
 	plan := &CapacityPlan{
 		ToLaunch:    2,
@@ -204,7 +213,7 @@ func TestExecutePlan_Terminate(t *testing.T) {
 		AutoScaleGroupID: "asg-exec-002",
 		GroupName:        "test-group",
 		JobArrayID:       "job-exec-002",
-		LaunchTemplate:   testLaunchTemplate,
+		LaunchTemplate:   testLaunchTemplateFor(t, env.EC2Client()),
 	}
 	plan := &CapacityPlan{
 		ToLaunch:    0,

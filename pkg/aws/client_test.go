@@ -313,7 +313,7 @@ func TestEC2Operations(t *testing.T) {
 	t.Run("RunInstances", func(t *testing.T) {
 		result, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
 			InstanceType: ec2types.InstanceTypeT3Micro,
-			ImageId:      aws.String("ami-12345678"),
+			ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 			KeyName:      aws.String("my-key"),
 			MinCount:     aws.Int32(1),
 			MaxCount:     aws.Int32(1),
@@ -334,7 +334,7 @@ func TestEC2Operations(t *testing.T) {
 		// Launch an instance first.
 		launch, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
 			InstanceType: ec2types.InstanceTypeT3Micro,
-			ImageId:      aws.String("ami-12345678"),
+			ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 			MinCount:     aws.Int32(1),
 			MaxCount:     aws.Int32(1),
 		})
@@ -360,7 +360,7 @@ func TestEC2Operations(t *testing.T) {
 	t.Run("TerminateInstances", func(t *testing.T) {
 		launch, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
 			InstanceType: ec2types.InstanceTypeT3Micro,
-			ImageId:      aws.String("ami-12345678"),
+			ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 			MinCount:     aws.Int32(1),
 			MaxCount:     aws.Int32(1),
 		})
@@ -383,7 +383,7 @@ func TestEC2Operations(t *testing.T) {
 	t.Run("CreateTags", func(t *testing.T) {
 		launch, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
 			InstanceType: ec2types.InstanceTypeT3Micro,
-			ImageId:      aws.String("ami-12345678"),
+			ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 			MinCount:     aws.Int32(1),
 			MaxCount:     aws.Int32(1),
 		})

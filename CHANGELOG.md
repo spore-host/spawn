@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependencies**: `truffle` v0.53.0 → **v0.58.0**, which brings the Nitro
+  generation data and pulls newer AWS SDK minimums with it (`service/ec2` 1.321.1 →
+  1.335.0, `sts` 1.45.5 → 1.51.0, `config`, `credentials`, `imds`, `smithy-go`).
+
+### Fixed
+
+- **21 emulator-backed tests across 5 packages passed a fabricated AMI id** and
+  broke on the dependency bump above, which moved the substrate test emulator
+  v0.97.0 → v0.120.0 transitively. v0.120.0 validates image ids — correctly, since
+  real EC2 answers `InvalidAMIID.NotFound` — and the emulator ships with **zero**
+  images, so `ami-12345678` had no valid replacement. The tests now register a real
+  AMI through `RegisterImage`, which is what a caller would do against EC2, so they
+  no longer depend on how lenient the emulator happens to be. Filed upstream as
+  substrate#1432, which is a note-and-suggestion rather than a bug report: the new
+  strictness is an improvement.
+  One test needed more than a new AMI. It asserted that an instance with *no*
+  discoverable EBS volumes reports an unmeasured cost fallback (#517), and its own
+  comment admitted the premise came from substrate not populating block device
+  mappings at all. v0.120.0 populates them and attaches a root volume whether or
+  not the AMI declares a root device, so that scenario is unreachable through the
+  emulator now. It reaches the same documented fallback deterministically instead —
+  which it should have done originally, since it was passing because of something
+  substrate had not implemented rather than because of anything spawn did.
+  Pure-logic tests were deliberately left using a literal id: a test that never
+  calls EC2 should not acquire an emulator dependency.
+
 ## [0.123.0] - 2026-10-05
 
 ### Added
