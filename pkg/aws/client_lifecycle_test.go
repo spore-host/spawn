@@ -16,7 +16,7 @@ func launchTestInstance(t *testing.T, env *testutil.TestEnv) string {
 	t.Helper()
 	out, err := env.EC2Client().RunInstances(context.Background(), &ec2.RunInstancesInput{
 		InstanceType: ec2types.InstanceTypeT3Micro,
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
 	})
@@ -131,7 +131,7 @@ func launchManagedTestInstance(t *testing.T, env *testutil.TestEnv) string {
 	t.Helper()
 	out, err := env.EC2Client().RunInstances(context.Background(), &ec2.RunInstancesInput{
 		InstanceType: ec2types.InstanceTypeT3Micro,
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
 		TagSpecifications: []ec2types.TagSpecification{{

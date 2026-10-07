@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/efs"
 	"github.com/aws/aws-sdk-go-v2/service/fsx"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -134,4 +135,56 @@ func (e *TestEnv) Route53Client() *route53.Client {
 // CloudWatchLogsClient returns a CloudWatch Logs client pointed at the Substrate server.
 func (e *TestEnv) CloudWatchLogsClient() *cloudwatchlogs.Client {
 	return cloudwatchlogs.NewFromConfig(e.AWSConfig)
+}
+
+// RegisterTestAMI creates a real AMI in the substrate emulator and returns its
+// id, for tests that need to launch an instance.
+//
+// Why this exists. Emulator-backed tests across this repo passed a fabricated
+// "ami-12345678" to RunInstances. That worked only because substrate v0.97.0
+// did not validate image ids. v0.120.0 does — correctly, since real EC2 answers
+// InvalidAMIID.NotFound — and the emulator ships with ZERO images, so there was
+// no valid id to use at all. Bumping truffle to v0.58.0 pulled substrate
+// v0.120.0 in transitively and broke 21 tests in one step.
+//
+// Registering an AMI is the fix rather than a workaround: it is what a caller
+// would do against real EC2, so a test stops depending on how lenient the
+// emulator happens to be. Same reasoning as truffle#177, which decoupled three
+// of its own tests from emulator gaps instead of pinning the emulator back.
+//
+// Only for tests that actually call EC2. A pure-logic test should keep a literal
+// id and stay independent of the emulator entirely.
+func RegisterTestAMI(t *testing.T, ec2Client *ec2.Client) string {
+	return registerTestAMI(t, ec2Client, aws.String("/dev/xvda"))
+}
+
+// RegisterTestAMIWithoutRootDevice registers an AMI with NO root device, so an
+// instance launched from it has no EBS block device mappings.
+//
+// For the one test that genuinely needs an instance with no discoverable
+// volumes (spawn#517's "a fallback must be distinguishable from a real
+// measurement"). That test used to get the condition for free, because
+// substrate v0.97.0 did not populate block device mappings at all — its own
+// comment said so. v0.120.0 does, once a real AMI with a root device is used,
+// so the scenario now has to be asked for explicitly rather than inherited from
+// an emulator gap. Asking for it is better: the test says what it needs.
+func RegisterTestAMIWithoutRootDevice(t *testing.T, ec2Client *ec2.Client) string {
+	return registerTestAMI(t, ec2Client, nil)
+}
+
+func registerTestAMI(t *testing.T, ec2Client *ec2.Client, rootDevice *string) string {
+	t.Helper()
+	out, err := ec2Client.RegisterImage(context.Background(), &ec2.RegisterImageInput{
+		Name:           aws.String("spawn-test-ami"),
+		Architecture:   ec2types.ArchitectureValuesX8664,
+		RootDeviceName: rootDevice,
+	})
+	if err != nil {
+		t.Fatalf("RegisterImage: %v", err)
+	}
+	id := aws.ToString(out.ImageId)
+	if id == "" {
+		t.Fatal("RegisterImage returned an empty image id")
+	}
+	return id
 }

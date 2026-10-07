@@ -23,7 +23,7 @@ func TestGetInstanceElasticIP_Substrate(t *testing.T) {
 	// Launch an instance.
 	run, err := ec2c.RunInstances(ctx, &ec2.RunInstancesInput{
 		InstanceType: ec2types.InstanceTypeT3Micro,
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
 	})

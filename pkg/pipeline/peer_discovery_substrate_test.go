@@ -21,7 +21,7 @@ func TestQueryPipelineInstances_TagBasedPeerList(t *testing.T) {
 
 	// Launch two instances in the same pipeline stage.
 	_, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(2),
 		MaxCount:     aws.Int32(2),
@@ -75,7 +75,7 @@ func TestQueryPipelineInstances_MultiStage(t *testing.T) {
 
 	for _, s := range stages {
 		_, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
-			ImageId:      aws.String("ami-12345678"),
+			ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 			InstanceType: ec2types.InstanceTypeT3Micro,
 			MinCount:     aws.Int32(s.count),
 			MaxCount:     aws.Int32(s.count),

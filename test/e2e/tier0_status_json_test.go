@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/spawn/pkg/testutil"
 )
 
 // TestTier0_StatusJSONOutput is the direct regression test for spawn#540:
@@ -130,7 +131,7 @@ func launchKeylessInstance(t *testing.T, env *spawnEnv, name string) string {
 	t.Helper()
 	out, err := env.EC2Client().RunInstances(context.Background(), &ec2.RunInstancesInput{
 		InstanceType: ec2types.InstanceTypeT3Small,
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
 		TagSpecifications: []ec2types.TagSpecification{

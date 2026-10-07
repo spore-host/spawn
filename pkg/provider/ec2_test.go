@@ -20,7 +20,7 @@ func newTestEC2Provider(t *testing.T) (*EC2Provider, string) {
 
 	out, err := ec2Client.RunInstances(context.Background(), &ec2.RunInstancesInput{
 		InstanceType: ec2types.InstanceTypeT3Micro,
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, env.EC2Client())),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
 	})
@@ -127,12 +127,23 @@ func TestEC2Provider_LookupAndTagEBSCost_CachedTagIsMeasured(t *testing.T) {
 // pkg/agent/agent.go could not tell 0.003-because-unmeasured apart from
 // 0.003-because-that-really-is-the-rate, and logged both identically.
 //
-// The test instance from newTestEC2Provider has no block device mappings (the
-// substrate emulator's DescribeInstances response doesn't populate them), so
-// this exercises the "no volume IDs found" fallback branch — the same shape
-// of fallback as a DescribeVolumes failure, just reached one branch earlier.
+// How this reaches the fallback changed, and the reason is worth recording.
+//
+// It used to point at a normal test instance and rely on substrate v0.97.0 not
+// populating block device mappings at all — the previous comment here said
+// exactly that. v0.120.0 does populate them, and it attaches a root volume
+// whether or not the AMI declares a root device, so "an instance with no EBS
+// volumes" is no longer reachable through the emulator.
+//
+// Depending on an emulator gap was the real problem: the test passed because of
+// something substrate did not implement, not because of anything spawn did. It
+// now points at an instance id that does not exist, which reaches the
+// documented fallback deterministically and tests the same contract — the
+// previous comment already noted the two branches are "the same shape of
+// fallback ... just reached one branch earlier".
 func TestEC2Provider_LookupAndTagEBSCost_NoVolumesIsNotMeasured(t *testing.T) {
 	p, _ := newTestEC2Provider(t)
+	p.identity = &Identity{InstanceID: "i-00000000000000000", Region: "us-east-1", Provider: "ec2"}
 
 	cost, measured := p.LookupAndTagEBSCost(context.Background())
 	if measured {
