@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   substrate had not implemented rather than because of anything spawn did.
   Pure-logic tests were deliberately left using a literal id: a test that never
   calls EC2 should not acquire an emulator dependency.
+  Three nested lambda modules also needed their own `go mod tidy` — they pin their
+  own dependencies behind a `replace` to the root, so a root bump leaves them stale
+  and both the Lambda-modules build and `govulncheck` fail with
+  "updates to go.mod needed" rather than anything about a vulnerability.
 
 ## [0.123.0] - 2026-10-05
 
