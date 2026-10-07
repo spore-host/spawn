@@ -20,6 +20,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/sshkey"
+	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
 // awsProber is the real (read-only) Prober backed by the AWS client. It lives in
@@ -208,6 +209,98 @@ func (p *awsProber) ReaperConfigured(ctx context.Context) (string, error) {
 	default:
 		return "", fmt.Errorf("could not determine coverage (%s)", c.Why)
 	}
+}
+
+// NitroCoverage summarises the resolved region's Nitro fleet by generation.
+//
+// The generation itself comes from truffle, which is the suite's capability
+// authority — and it has to come from a table, because EC2's Hypervisor field
+// distinguishes nitro from xen and carries no version. AWS publishes the version
+// only in documentation. truffle's table is kept honest against AWS by its own
+// `make nitro-census`.
+//
+// Why this is a doctor check and not a launch line. Coverage is an ENVIRONMENT
+// fact and it varies a lot: us-east-1 offers 163 Nitro families (44 of them v6)
+// against us-west-1's 70 (9 v6). That constrains what you can run in a region,
+// which is the same shape as doctor's other checks — is there a usable subnet, is
+// SSM reachable, does a reaper cover this account.
+//
+// It is deliberately NOT on `launch`. The capabilities that matter at launch time
+// — EFA, cluster placement, hibernation — are already checked from their own
+// authoritative API fields in preflightInstanceConstraints, which is better than
+// inferring them from a generation. And an ordinary launch makes no
+// GetCapabilities call at all, so a generation line would add an API round-trip
+// to every launch for something most launches do not act on.
+func (p *awsProber) NitroCoverage(ctx context.Context) (string, error) {
+	// PAGINATED. DescribeInstanceTypes returns one page by default, and the first
+	// version of this reported 85 Nitro types for us-east-1 against a real 163 —
+	// numbers that reflected a page boundary rather than the region, and differed
+	// between regions for the same reason. A count that looks plausible and is
+	// wrong is worse than no count.
+	// Counted by FAMILY, not by instance type. A family is what you choose
+	// between — c7g versus c8g — while the sizes inside one are a scaling
+	// decision, so "1149 Nitro instance types" is a number nobody can act on
+	// where "163 Nitro families" is. It also matches how truffle keys its table.
+	seen := map[string]bool{}
+	byGen := map[int]int{}
+	nitro, unclassified := 0, 0
+	pager := ec2.NewDescribeInstanceTypesPaginator(ec2.NewFromConfig(p.cfg),
+		&ec2.DescribeInstanceTypesInput{})
+	for pager.HasMorePages() {
+		out, err := pager.NextPage(ctx)
+		if err != nil {
+			return "", fmt.Errorf("could not list instance types: %w", err)
+		}
+		for _, it := range out.InstanceTypes {
+			if it.Hypervisor != ec2types.InstanceTypeHypervisorNitro {
+				continue
+			}
+			fam := truffleaws.InstanceFamily(string(it.InstanceType))
+			if seen[fam] {
+				continue
+			}
+			seen[fam] = true
+			nitro++
+			switch g := truffleaws.NitroGeneration(string(it.InstanceType)); g {
+			case 0:
+				// truffle's table does not classify this family. Counted rather
+				// than guessed — a fabricated generation is indistinguishable
+				// from a real one downstream, and an unclassified family is also
+				// the signal that a new Nitro card may have shipped (truffle's
+				// coverage gate).
+				unclassified++
+			default:
+				byGen[g]++
+			}
+		}
+	}
+	if nitro == 0 {
+		return "", errors.New("no Nitro instance families found in this region, which is unexpected — check the region is correct")
+	}
+
+	// Newest first: what you can reach matters more than what you cannot.
+	var parts []string
+	newest := 0
+	for g := 6; g >= 2; g-- {
+		if byGen[g] > 0 {
+			parts = append(parts, fmt.Sprintf("v%d:%d", g, byGen[g]))
+			if g > newest {
+				newest = g
+			}
+		}
+	}
+	detail := fmt.Sprintf("%d Nitro families (%s)", nitro, strings.Join(parts, " "))
+	if unclassified > 0 {
+		detail += fmt.Sprintf(", %d unclassified", unclassified)
+	}
+
+	// Warn only when the region has nothing current. v4 is the floor worth
+	// flagging: it is where ENA Express and RDMA arrive, so a region without it
+	// cannot run the networking-sensitive workloads spawn is often used for.
+	if newest < 4 {
+		return "", fmt.Errorf("this region's newest Nitro generation is v%d — no ENA Express or RDMA here, and no current-generation instance types (%s)", newest, detail)
+	}
+	return detail, nil
 }
 
 func (p *awsProber) Route53Available(ctx context.Context) (string, error) {
