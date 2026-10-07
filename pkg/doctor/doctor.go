@@ -128,6 +128,14 @@ type Prober interface {
 	// Optional features → Warn (not Fail) when unavailable.
 	ReaperConfigured(ctx context.Context) (detail string, err error)
 	Route53Available(ctx context.Context) (detail string, err error)
+	// NitroCoverage reports what the resolved region's Nitro fleet looks like.
+	//
+	// An environment fact, not an instance-type one — which is why it belongs
+	// here and not on `launch`. Coverage varies enormously: us-east-1 offers 163
+	// Nitro families (44 of them v6) while us-west-1 offers 70 (9 v6), so the
+	// region genuinely constrains what you can run. A Warn means the region has
+	// no current-generation families at all.
+	NitroCoverage(ctx context.Context) (detail string, err error)
 }
 
 // Run executes every check in dependency order and returns the report. Checks
@@ -244,6 +252,16 @@ func Run(ctx context.Context, p Prober) *Report {
 		add("Route 53 (DNS)", Warn, "", "Route 53 access unavailable; --dns subdomains won't work (optional): "+errText(err))
 	} else {
 		add("Route 53 (DNS)", Pass, detail, "")
+	}
+
+	// Nitro fleet in this region (spawn#716 follow-on). A Warn, not a Fail: every
+	// region has SOME Nitro capacity, so this cannot block a launch — but a region
+	// without current-generation families limits what you can ask for, and that is
+	// the kind of environment constraint doctor exists to surface.
+	if detail, err := p.NitroCoverage(ctx); err != nil {
+		add("Nitro fleet", Warn, "", errText(err))
+	} else {
+		add("Nitro fleet", Pass, detail, "")
 	}
 
 	return r

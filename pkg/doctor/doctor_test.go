@@ -20,6 +20,7 @@ type mockProber struct {
 	vpcErr          error
 	ssmErr          error
 	reaperErr       error
+	nitroErr        error
 	route53Err      error
 	truffleErr      error
 	awscliErr       error
@@ -46,6 +47,9 @@ func (m mockProber) SSMAvailable(context.Context) (string, error)     { return "
 func (m mockProber) ReaperConfigured(context.Context) (string, error) { return "enforce", m.reaperErr }
 func (m mockProber) Route53Available(context.Context) (string, error) {
 	return "12 zones", m.route53Err
+}
+func (m mockProber) NitroCoverage(context.Context) (string, error) {
+	return "163 Nitro instance types (v6:44 v5:14 v4:53 v3:19 v2:33)", m.nitroErr
 }
 
 func find(r *Report, name string) *Check {
@@ -174,5 +178,52 @@ func TestReaperPassNamesItsEvidence(t *testing.T) {
 	}
 	if c.Detail == "" {
 		t.Error("a passing reaper check must report the evidence it found, not just pass silently")
+	}
+}
+
+// TestNitroCoverageIsAWarnNotAFail: every region has some Nitro capacity, so
+// this check can never block a launch. It reports an environment constraint —
+// the same category as Route 53 access or reaper coverage — and must not turn a
+// ready account into a failing one.
+func TestNitroCoverageIsAWarnNotAFail(t *testing.T) {
+	r := Run(context.Background(), mockProber{nitroErr: errors.New("newest generation is v3")})
+
+	c := find(r, "Nitro fleet")
+	if c == nil {
+		t.Fatal("no 'Nitro fleet' check in the report")
+	}
+	if c.Status != Warn {
+		t.Errorf("status = %v, want Warn — a region's Nitro fleet is a constraint, not a "+
+			"prerequisite, and cannot fail a launch", c.Status)
+	}
+	// And it must not drag the whole report down: doctor exits non-zero only on
+	// Fail, so a warn here has to leave OK() true.
+	if !r.OK() {
+		t.Error("a Nitro warning made the report not-OK, so 'spawn doctor' would exit 1 " +
+			"on an account that is perfectly able to launch")
+	}
+}
+
+// TestNitroCoveragePassReportsTheSpread: the detail is the whole value of the
+// check, since it cannot fail. A pass with an empty detail would be a line that
+// says nothing.
+func TestNitroCoveragePassReportsTheSpread(t *testing.T) {
+	r := Run(context.Background(), mockProber{})
+
+	c := find(r, "Nitro fleet")
+	if c == nil {
+		t.Fatal("no 'Nitro fleet' check in the report")
+	}
+	if c.Status != Pass {
+		t.Fatalf("status = %v, want Pass", c.Status)
+	}
+	if c.Detail == "" {
+		t.Error("passed with no detail — the generation spread is the only thing this " +
+			"check contributes, so an empty detail makes it noise")
+	}
+	for _, want := range []string{"Nitro instance types", "v6:"} {
+		if !strings.Contains(c.Detail, want) {
+			t.Errorf("detail %q does not mention %q", c.Detail, want)
+		}
 	}
 }

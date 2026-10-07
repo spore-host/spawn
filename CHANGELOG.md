@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn doctor` now reports the region's Nitro fleet** (#716 follow-on), using the
+  generation data truffle v0.58.0 exposes:
+  ```
+  ✓ Nitro fleet: 154 Nitro families (v6:44 v5:12 v4:53 v3:19 v2:26)   us-east-1
+  ✓ Nitro fleet:  70 Nitro families (v6:9 v5:6 v4:28 v3:6 v2:21)      us-west-1
+  ```
+  This is in `doctor` rather than `launch` because coverage is an **environment**
+  fact and it varies a lot — us-west-1 offers under half the Nitro families of
+  us-east-1 and a fifth the v6 count, which constrains what you can run there. That
+  is the same shape as doctor's other checks: is there a usable subnet, is Session
+  Manager reachable, does a reaper cover this account.
+  Deliberately **not** on `launch`. The capabilities that matter at launch time —
+  EFA, cluster placement, hibernation — are already verified from their own
+  authoritative API fields, which beats inferring them from a generation; and an
+  ordinary launch makes no capability call at all, so a generation line would add an
+  API round-trip to every launch for something most launches never act on.
+  It is a **Warn**, never a Fail: every region has some Nitro capacity, so this
+  cannot block a launch. The warning fires only when a region's newest generation is
+  below v4 — the point where ENA Express and RDMA arrive — and a test asserts a warn
+  here still leaves `doctor` exiting 0.
+  Unclassified families are counted rather than guessed, since a fabricated
+  generation is indistinguishable from a real one downstream. Across us-east-1,
+  us-west-1 and eu-central-1 the count is zero, which independently confirms
+  truffle's table covers what AWS currently offers.
+
 ### Changed
 
 - **Dependencies**: `truffle` v0.53.0 → **v0.58.0**, which brings the Nitro
