@@ -116,6 +116,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `curl exit 6/7/28` from an instance whose resolver is not up) and stops on
   reachability failures, while an *unrecognised* message stays retryable so a
   wording we have not seen degrades to the old behaviour rather than giving up early.
+- **spawn's longest operations printed nothing while they ran** (#739). An audit
+  of every progress-step name passed from `cmd/` found **32 distinct names, of
+  which 24 matched nothing** in the tracker's fixed nine-step list — and
+  `Start`/`Complete`/`Error`/`Skip` returned *silently* on no match, so all 24
+  were no-ops.
+  The 24 were not a random sample. They were `Verifying spored agent` (a 5-minute
+  wait), `Waiting for Windows (password available)` (12 minutes), every FSx step,
+  cohort reconciliation, `Registering DNS`, and the whole Windows ISO→AMI import.
+  The eight names that *did* match all belonged to the fast pre-launch phase,
+  which is exactly why this went unnoticed: everything that printed finished in
+  seconds, and everything slow was invisible. It is why the stall in #740/#741
+  showed no output at all.
+  A fixed list was the wrong shape to begin with — several steps are conditional
+  (FSx, MPI, Windows), and some labels are computed at runtime — so an unknown
+  name is now **appended** rather than dropped, and the step list describes what
+  the launch actually did. `Error` also prints its message outside the lookup: it
+  used to sit *inside* the matched-step branch, so an unregistered name swallowed
+  the error text too.
+- **A step in flight was invisible on any non-terminal output** (#739). The
+  plain-text renderer skipped anything not already `complete` or `error`, so a
+  running step emitted — measured — **zero bytes**, and announced itself only once
+  it had finished. Piping, capturing or running in CI therefore made a long wait
+  and a wedged process identical. Starts are now logged too, once each, and
+  `skipped` steps are reported rather than dropped.
+  The two longest waits also now state their ceiling (`Verifying spored agent (up
+  to 5 min)`), because a bounded wait that says so is a wait, and one that does
+  not is indistinguishable from a hang.
 
 - **The hand-written Lambda deploy scripts could deploy to the wrong account,
   wipe a function's environment, and report success without verifying anything.**
