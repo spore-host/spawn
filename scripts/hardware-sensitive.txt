@@ -17,4 +17,5 @@ pkg/aws/securitygroup.go	Whether EC2 ACCEPTS a rule shape, and whether traffic t
 pkg/aws/iam.go	Whether IAM accepts a document AND whether it authorizes the call. #669 shipped a document IAM rejects; #652/#665 shipped one it accepts and does not authorize. Only simulate/real calls separate those.
 pkg/aws/client.go	Composes RunInstances. #683's --subnet-id/AZ conflict is a constraint only EC2 enforces.
 cmd/launch_jobarray.go	Cohort lifecycle, drain and placement groups. #683: the drain ran, reported nothing, and terminated nothing; only a real failed cohort showed it.
+lambda/sweep-orchestrator/	Composes RunInstances from PARAM KEYS, with no compile-time link to the CLI that writes them. #749: the CLI never seeded `ami`, so every row was rejected with MissingParameter and the Lambda logged "All instances launched and completed" — a detached sweep launched ZERO instances and the CLI reported success. No unit test on either side can see a key-set disagreement across that seam.
 lambda/ttl-reaper/	CloudFormation and IAM that no compiler or test reaches. Two incidents, one of which disarmed the live production reaper.

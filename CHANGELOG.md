@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **`scripts/hardware-test-detached-sweep.sh`** verifies a detached parameter
+  sweep on real hardware: that its rows launch at all (#749), and that they carry
+  the `spawn:managed` / `spawn:ttl-deadline` tags which make them reapable
+  (#725). It currently **fails**, correctly, on #749 — the CLI does not seed
+  `ami` into the params the orchestrator Lambda reads, so every `RunInstances` is
+  rejected with `MissingParameter: ImageId` while the Lambda logs "All instances
+  launched and completed" and the CLI reports success. The #725 assertions are
+  written and waiting behind that.
+  Two traps are recorded in the script because both were hit writing it: rows
+  must be discovered by `spawn:sweep-id`, never by `Name` (the orchestrator names
+  them from a derived `SweepName`, so a filter built from the CLI argument matches
+  nothing — which would have made the script's own **cleanup** miss a live row),
+  and the orchestrator's log group is in the **infra** account while the rows land
+  in the target account, so tailing it with the launch profile returns
+  `ResourceNotFoundException` and loses the only diagnostic that explains the
+  failure.
+- **`lambda/sweep-orchestrator/` is now listed in `scripts/hardware-sensitive.txt`.**
+  It composes `RunInstances` from param keys with no compile-time link to the CLI
+  that writes them, so no unit test on either side can see a key-set
+  disagreement across that seam. Its absence from the manifest is why #749
+  shipped.
+
 ### Added
 
 - **The reaper now reclaims orphaned security groups and placement groups** (#685's
