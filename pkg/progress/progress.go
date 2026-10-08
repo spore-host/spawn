@@ -15,7 +15,8 @@ type Progress struct {
 	currentStep int
 	quiet       bool            // when true, suppress all TUI output (e.g. for -o json)
 	tty         bool            // stdout is an interactive terminal (redraw in place)
-	printed     map[string]bool // non-TTY: step transitions already logged
+	printed     map[string]bool // non-TTY: terminal state already logged, per step
+	started     map[string]bool // non-TTY: start already logged, per step
 }
 
 // Box drawing. The interior between the ║ borders is boxWidth columns wide.
@@ -124,6 +125,7 @@ func newProgress(quiet bool) *Progress {
 	p.quiet = quiet
 	p.tty = stdoutIsTTY()
 	p.printed = make(map[string]bool)
+	p.started = make(map[string]bool)
 	return p
 }
 
@@ -144,56 +146,71 @@ func defaultProgress() *Progress {
 	}
 }
 
-// Start marks a step as started
-func (p *Progress) Start(stepName string) {
+// stepIndex returns the index of stepName, APPENDING it if the fixed list does
+// not already contain it.
+//
+// Appending rather than ignoring is the whole of #739. Start/Complete/Error/Skip
+// used to scan the nine-step list and `return` silently on no match — and an
+// audit found 32 distinct names passed from cmd/, of which **24 matched nothing**.
+// Every one of those calls was a no-op, and the 24 were not a random sample: they
+// were spawn's LONGEST operations — `Verifying spored agent` (5 min),
+// `Waiting for Windows (password available)` (12 min), every FSx step, the whole
+// Windows ISO->AMI import. The eight that matched all belonged to the fast
+// pre-launch phase, which is exactly why nobody noticed: everything that printed
+// finished in seconds and everything slow was invisible.
+//
+// A fixed list was always the wrong shape for this. Several steps are
+// conditional — FSx, MPI, Windows, cohort reconciliation only happen on some
+// launches — and some labels are computed at runtime (cmd/image.go builds them in
+// variables), so no static registry can enumerate them. Find-or-append makes the
+// step list describe what this launch actually did.
+func (p *Progress) stepIndex(stepName string) int {
 	for i := range p.steps {
 		if p.steps[i].Name == stepName {
-			p.steps[i].Status = "running"
-			p.steps[i].StartTime = time.Now()
-			p.currentStep = i
-			p.display()
-			return
+			return i
 		}
 	}
+	p.steps = append(p.steps, Step{Name: stepName, Status: "pending"})
+	return len(p.steps) - 1
+}
+
+// Start marks a step as started
+func (p *Progress) Start(stepName string) {
+	i := p.stepIndex(stepName)
+	p.steps[i].Status = "running"
+	p.steps[i].StartTime = time.Now()
+	p.currentStep = i
+	p.display()
 }
 
 // Complete marks a step as complete
 func (p *Progress) Complete(stepName string) {
-	for i := range p.steps {
-		if p.steps[i].Name == stepName {
-			p.steps[i].Status = "complete"
-			p.steps[i].EndTime = time.Now()
-			p.display()
-			return
-		}
-	}
+	i := p.stepIndex(stepName)
+	p.steps[i].Status = "complete"
+	p.steps[i].EndTime = time.Now()
+	p.display()
 }
 
 // Error marks a step as errored
 func (p *Progress) Error(stepName string, err error) {
-	for i := range p.steps {
-		if p.steps[i].Name == stepName {
-			p.steps[i].Status = "error"
-			p.steps[i].EndTime = time.Now()
-			p.display()
-			if !p.quiet {
-				fmt.Println()
-				fmt.Printf("%s %s: %v\n", i18n.Symbol("error"), i18n.T("spawn.progress.error"), err)
-			}
-			return
-		}
+	i := p.stepIndex(stepName)
+	p.steps[i].Status = "error"
+	p.steps[i].EndTime = time.Now()
+	p.display()
+	// Outside the lookup on purpose: this used to sit INSIDE the matched-step
+	// branch, so an unregistered name swallowed the error text too — a failure
+	// reported nowhere at all unless the caller also returned the error.
+	if !p.quiet {
+		fmt.Println()
+		fmt.Printf("%s %s: %v\n", i18n.Symbol("error"), i18n.T("spawn.progress.error"), err)
 	}
 }
 
 // Skip marks a step as skipped
 func (p *Progress) Skip(stepName string) {
-	for i := range p.steps {
-		if p.steps[i].Name == stepName {
-			p.steps[i].Status = "skipped"
-			p.display()
-			return
-		}
-	}
+	i := p.stepIndex(stepName)
+	p.steps[i].Status = "skipped"
+	p.display()
 }
 
 // display shows the current progress.
@@ -237,17 +254,31 @@ func (p *Progress) display() {
 }
 
 // displayPlain logs step transitions one line at a time for non-TTY output,
-// emitting each step's terminal state (complete/error) exactly once.
+// emitting each step's START and then its terminal state (complete/error/
+// skipped) exactly once each.
+//
+// It used to skip any step that was not already complete or error, so a RUNNING
+// step printed nothing — measured at literally 0 bytes (#739). On a TTY the box
+// at least shows the step marked running; on a pipe, a capture, or CI, the step
+// announced itself only once it had finished. That is backwards: the whole value
+// of progress output on a non-interactive stream is knowing what is in flight,
+// and it meant a five-minute wait and a wedged process looked identical.
 func (p *Progress) displayPlain() {
 	for _, step := range p.steps {
-		if step.Status != "complete" && step.Status != "error" {
-			continue
+		switch step.Status {
+		case "running":
+			if p.started[step.Name] {
+				continue
+			}
+			p.started[step.Name] = true
+			fmt.Printf("  %s %s...\n", getSymbol(step.Status), step.Name)
+		case "complete", "error", "skipped":
+			if p.printed[step.Name] {
+				continue
+			}
+			p.printed[step.Name] = true
+			fmt.Printf("  %s %s%s\n", getSymbol(step.Status), step.Name, stepDuration(step))
 		}
-		if p.printed[step.Name] {
-			continue
-		}
-		p.printed[step.Name] = true
-		fmt.Printf("  %s %s%s\n", getSymbol(step.Status), step.Name, stepDuration(step))
 	}
 }
 

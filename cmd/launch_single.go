@@ -886,7 +886,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// becoming available (after EC2Launch runs, post-Sysprep), so wait on that
 	// instead of probing port 22 (#95). For Linux, probe SSH as before.
 	if config.TargetOS == "windows" {
-		prog.Start("Waiting for Windows (password available)")
+		prog.Start("Waiting for Windows (password available, up to 12 min)")
 		if waitForSSH {
 			// WaitForPasswordData polls GetPasswordData; it's the earliest reliable
 			// "Windows finished first boot" signal. Best-effort: don't fail the
@@ -895,7 +895,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				fmt.Fprintf(os.Stderr, "\n⚠️  Windows is still finishing first boot (Sysprep). The instance is up; `spawn connect %s` will wait for the password.\n", config.Name)
 			}
 		}
-		prog.Complete("Waiting for Windows (password available)")
+		prog.Complete("Waiting for Windows (password available, up to 12 min)")
 	} else {
 		prog.Start("Waiting for SSH")
 		switch {
@@ -941,9 +941,9 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// keyed or keyless) and fail loudly if not. (An environment where SSM genuinely
 	// can't be reached can skip this whole readiness path with --wait-for-ssh=false.)
 	if waitForSSH && plat.OS != "windows" {
-		prog.Start("Verifying spored agent")
+		prog.Start("Verifying spored agent (up to 5 min)")
 		if err := verifySporedReady(ctx, awsClient, config.Region, result.InstanceID, 5*time.Minute); err != nil {
-			prog.Error("Verifying spored agent", err)
+			prog.Error("Verifying spored agent (up to 5 min)", err)
 			if terminateOnError {
 				fmt.Fprintf(os.Stderr, "\n⚠️  spored did not come up; terminating %s (--terminate-on-error)\n", result.InstanceID)
 				if terr := awsClient.Terminate(ctx, config.Region, result.InstanceID); terr != nil {
@@ -955,7 +955,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				"inspect it (spawn connect %s) or terminate it (spawn terminate %s). Re-run with --terminate-on-error to auto-terminate: %w",
 				result.InstanceID, result.InstanceID, result.InstanceID, err)
 		}
-		prog.Complete("Verifying spored agent")
+		prog.Complete("Verifying spored agent (up to 5 min)")
 	}
 
 	// Step 11: Register DNS (if requested).
