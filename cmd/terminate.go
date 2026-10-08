@@ -87,6 +87,15 @@ func terminateSingle(ctx context.Context, identifier string) error {
 	instance, err := resolveInstance(ctx, client, identifier)
 	if err != nil {
 		if errors.Is(err, ErrInstanceNotFound) {
+			// "Never existed" and "gone a minute ago" are both success here, but
+			// they are different answers and the user is usually asking which
+			// (#736). The default state filter hides terminated and
+			// shutting-down instances, so this used to report the first when it
+			// was the second.
+			if hint := recentlyGoneHint(ctx, client, identifier); hint != "" {
+				fmt.Fprintf(os.Stderr, "Nothing to terminate%s.\n", hint)
+				return nil
+			}
 			fmt.Fprintf(os.Stderr, "No instance %q exists — nothing to terminate.\n", identifier)
 			return nil
 		}
@@ -101,6 +110,13 @@ func terminateSingle(ctx context.Context, identifier string) error {
 		fmt.Fprintf(os.Stderr, "Instance %s is already shutting down — nothing to do.\n", instance.InstanceID)
 		return nil
 	}
+	// Both branches above are currently unreachable through resolveInstance,
+	// whose default state filter is pending/running/stopping/stopped — so a
+	// terminated or shutting-down instance takes the not-found path handled
+	// above, which now names the state via recentlyGoneHint (#736). They are
+	// kept rather than deleted because they are correct if a caller ever
+	// resolves with the "all" filter, and because deleting them would remove
+	// the only in-code record that these states need handling at all.
 
 	fmt.Fprintf(os.Stderr, "Found instance in %s (state: %s)\n", instance.Region, instance.State)
 

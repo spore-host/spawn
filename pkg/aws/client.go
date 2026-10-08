@@ -1082,6 +1082,13 @@ type InstanceInfo struct {
 	Tags             map[string]string
 	IAMRole          string // IAM instance profile/role name
 
+	// StateTransitionReason is EC2's own explanation of how the instance reached
+	// its current state — "User initiated", "Client.InstanceInitiatedShutdown",
+	// a spot reclaim. Populated only for terminated/stopped instances, and it is
+	// the answer to "why did it vanish?" that `spawn status` on a just-gone
+	// instance used to be unable to give (#736).
+	StateTransitionReason string
+
 	// Job array fields
 	JobArrayID    string
 	JobArrayName  string
@@ -1224,6 +1231,9 @@ func (c *Client) listInstancesInRegion(ctx context.Context, region string, state
 					SpotInstance:     instance.InstanceLifecycle == types.InstanceLifecycleTypeSpot,
 					Tags:             make(map[string]string),
 					Parameters:       make(map[string]string),
+					// EC2 populates this for terminated/stopped instances only;
+					// it is empty for a running one (#736).
+					StateTransitionReason: valueOrEmpty(instance.StateTransitionReason),
 				}
 
 				if instance.LaunchTime != nil {

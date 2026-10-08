@@ -205,7 +205,8 @@ func resolveInstance(ctx context.Context, client *aws.Client, identifier string)
 		// because exiting 0 would let a user (or a script) believe they stopped a
 		// billing instance when they did not. A caller-assigned NAME is different;
 		// see below (spawn#648).
-		return nil, fmt.Errorf("instance %s not found (must be spawn-managed)", identifier)
+		return nil, fmt.Errorf("instance %s not found (must be spawn-managed)%s",
+			identifier, recentlyGoneHint(ctx, client, identifier))
 	}
 
 	// Handle name matches
@@ -213,7 +214,14 @@ func resolveInstance(ctx context.Context, client *aws.Client, identifier string)
 		// A NAME is a handle the caller chose, and its absence after cleanup is the
 		// expected steady state — which is why `terminate` treats this as success
 		// and an unknown ID as failure (spawn#648).
-		return nil, &notFoundError{fmt.Sprintf("no instance found with name: %s", identifier)}
+		//
+		// But "absent" and "gone five minutes ago" are different answers to the
+		// user's actual question, which is usually "why did it vanish?" (#736).
+		// The default state filter excludes terminated AND shutting-down, so an
+		// instance that was right there is reported as if it never existed — and
+		// EC2 keeps both visible for about an hour, with a transition reason.
+		return nil, &notFoundError{fmt.Sprintf("no instance found with name: %s%s",
+			identifier, recentlyGoneHint(ctx, client, identifier))}
 	}
 
 	if len(matches) == 1 {
@@ -255,4 +263,71 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// recentlyGoneHint returns a parenthetical describing a terminated or
+// shutting-down instance matching identifier, or "" when there is none.
+//
+// This is spawn#736. resolveInstance lists with the DEFAULT state filter, which
+// is pending/running/stopping/stopped — so `terminated` and, notably,
+// `shutting-down` are both invisible. An instance that had just self-terminated
+// was reported as `no instance found with name: chem-arm`, which is accurate and
+// answers the wrong question: the user was asking why it vanished.
+//
+// EC2 keeps terminated instances in DescribeInstances for roughly an hour, with
+// a StateTransitionReason ("User initiated", "Client.InstanceInitiatedShutdown",
+// a spot reclaim), so the answer was already available and simply not requested.
+//
+// Best-effort and non-fatal by construction: it only ever decorates a message
+// that is already being returned, so a failure here must never turn a clear
+// not-found into an error about a second lookup.
+func recentlyGoneHint(ctx context.Context, client *aws.Client, identifier string) string {
+	all, err := client.ListInstances(ctx, "", "all")
+	if err != nil {
+		return ""
+	}
+	return formatRecentlyGone(all, identifier)
+}
+
+// formatRecentlyGone is recentlyGoneHint's selection and wording, split out so
+// the part with the decisions in it is testable without AWS.
+func formatRecentlyGone(all []aws.InstanceInfo, identifier string) string {
+	isID := strings.HasPrefix(identifier, "i-")
+	var best *aws.InstanceInfo
+	for i := range all {
+		inst := &all[i]
+		if isID {
+			if inst.InstanceID != identifier {
+				continue
+			}
+		} else if !strings.EqualFold(inst.Name, identifier) {
+			continue
+		}
+		if inst.State != "terminated" && inst.State != "shutting-down" {
+			continue
+		}
+		// Prefer shutting-down over terminated: it is the more actionable state,
+		// and it is the one `terminate` has a branch for that could never run.
+		// Among same-state matches prefer the most recently launched, since a
+		// re-used name's older instances are not what the user just lost.
+		switch {
+		case best == nil:
+			best = inst
+		case inst.State == "shutting-down" && best.State == "terminated":
+			best = inst
+		case inst.State == best.State && inst.LaunchTime.After(best.LaunchTime):
+			best = inst
+		}
+	}
+	if best == nil {
+		return ""
+	}
+	hint := fmt.Sprintf(" — %s (%s) is %s", best.Name, best.InstanceID, best.State)
+	if best.Name == "" {
+		hint = fmt.Sprintf(" — %s is %s", best.InstanceID, best.State)
+	}
+	if reason := strings.TrimSpace(best.StateTransitionReason); reason != "" {
+		hint += ": " + reason
+	}
+	return hint
 }
