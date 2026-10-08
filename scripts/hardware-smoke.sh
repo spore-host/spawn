@@ -298,13 +298,58 @@ RANK0=$(aws ec2 describe-instances --region "$REGION" \
   --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | head -1)
 
 if [ -n "$RANK0" ]; then
-  sleep 45   # let mpirun finish
+  # POLL for mpirun's output rather than sleeping a constant (#752).
+  #
+  # This was `sleep 45   # let mpirun finish`. Two reasons that is a worse bet
+  # now: rank 0's mpirun no longer starts at a fixed offset (it waits for every
+  # peer to accept SSH first), and the wait needed grows with NODES while a
+  # constant does not. The comment below records that this very assertion has
+  # already mis-reported once on a healthy cluster, so making it time-dependent
+  # was the wrong trade.
+  #
   # Plain single-quoted shell. These used to carry \" escapes for the old
   # hand-built-JSON helper; with python encoding the payload, an escaped quote
   # now reaches the instance literally and the grep pattern stops matching —
   # which reported "mpirun reached 0 of 2 nodes" on a cluster that was fine.
-  hosts=$(ssm "$RANK0" "grep '^ip-' /var/log/cloud-init-output.log | sort -u | wc -l")
-  ranks=$(ssm "$RANK0" "grep -c '^ip-' /var/log/cloud-init-output.log")
+  hosts=""
+  ranks=""
+  mpi_waited=0
+  while [ "$mpi_waited" -lt 300 ]; do
+    hosts=$(ssm "$RANK0" "grep '^ip-' /var/log/cloud-init-output.log | sort -u | wc -l")
+    ranks=$(ssm "$RANK0" "grep -c '^ip-' /var/log/cloud-init-output.log")
+    [ "${hosts//[^0-9]/}" = "$NODES" ] && break
+    sleep 10
+    mpi_waited=$((mpi_waited + 10))
+  done
+  [ "${hosts//[^0-9]/}" = "$NODES" ] \
+    && echo "     (all $NODES nodes reported after ${mpi_waited}s)" \
+    || echo "     (gave up after ${mpi_waited}s with ${hosts//[^0-9]/} node(s))"
+
+  # Report what the peer-readiness poll actually did (#752).
+  #
+  # Read HERE, over SSM while rank 0 is still alive, because the line does not
+  # survive teardown: the MPI script's stdout lands in cloud-init-output.log,
+  # and only SOME cloud-init output reaches the serial console — the mpirun
+  # result does, these echoes do not. Reading it post-mortem from
+  # get-console-output returns nothing, which is how a first attempt at this
+  # measurement came up empty.
+  #
+  # Not an assertion, a measurement: a 0s wait is a legitimate outcome on a fast
+  # cohort. What it tells you is whether THIS run exercised the poll or merely
+  # found every peer already ready — the difference between proving the fix works
+  # and proving it does not regress.
+  # Read the MARKER FILE, not cloud-init-output.log. A first version grepped the
+  # log and found nothing on a 4-node run even though mpirun's own output was
+  # there — stdout from the appended MPI script does not reliably reach it. The
+  # file is written by the readiness loop itself, so its presence proves the poll
+  # ran and its contents give the duration.
+  peer_wait=$(ssm "$RANK0" "cat /var/log/spawn-mpi-peer-wait-seconds 2>/dev/null" 2>/dev/null)
+  peer_wait="${peer_wait//[^0-9]/}"
+  if [ -n "$peer_wait" ]; then
+    echo "     peer readiness: all peers accepted SSH after ${peer_wait}s"
+  else
+    echo "     peer readiness: marker absent (pre-#752 spored, or the poll did not run)"
+  fi
   [ "${hosts//[^0-9]/}" = "$NODES" ] \
     && ok "mpirun spread across all $NODES nodes ($ranks ranks)" \
     || bad "mpirun reached ${hosts//[^0-9]/} of $NODES nodes — the hostfile or the cluster SSH key is wrong (#684)"
