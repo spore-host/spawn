@@ -42,6 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Three `pipeline-orchestrator` Makefile targets named a Lambda that does not
+  exist** (#754). `make update-code`, `make logs` and `make invoke-test` all
+  asked for `spawn-pipeline-orchestrator-production`, but `template.yaml` sets
+  `FunctionName: spawn-pipeline-orchestrator` with no environment suffix — so
+  none of the three had ever worked, each failing on the name instead of doing
+  anything. `Environment` names the *stack*, never the function. The name now has
+  a single definition at the top of the Makefile so the two cannot drift again,
+  and `update-code` warns that it is a debug shortcut whose effect the next
+  `make deploy` silently reverts, since CloudFormation treats the S3 object
+  pinned in the template as the truth.
+  Also removes `lambda/pipeline-orchestrator/packaged.yaml`, a superseded May
+  build artifact that nothing references — `make deploy` uses `--resolve-s3` and
+  repackages every time — and which read like a deploy input.
+
 - **MPI rank 0 now waits for every peer to accept SSH, instead of sleeping ten
   seconds and hoping** (#752). The generated MPI script already waited — bounded,
   with a named failure — for the peers file, then built the hostfile. It then
