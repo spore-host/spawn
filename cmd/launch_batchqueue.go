@@ -78,16 +78,14 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 	// Auto-detect region if not specified
 	queueRegion := region
 	if queueRegion == "" {
-		fmt.Fprintf(os.Stderr, "🌍 No region specified, auto-detecting closest region...\n")
-		detectedRegion, err := detectBestRegion(ctx, instanceType)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Could not auto-detect region: %v\n", err)
-			fmt.Fprintf(os.Stderr, "   Using default: us-east-1\n")
-			queueRegion = "us-east-1"
-		} else {
-			fmt.Fprintf(os.Stderr, "✓ Selected region: %s\n", detectedRegion)
-			queueRegion = detectedRegion
+		resolved, why, rerr := resolveLaunchRegion(ctx, "", instanceType)
+		if rerr != nil {
+			return fmt.Errorf("could not choose a region for %s: %w\n"+
+				"Pass --region, or set AWS_REGION / a default in your spore config",
+				instanceType, rerr)
 		}
+		fmt.Fprintf(os.Stderr, "🌍 Region: %s (%s)\n", resolved, why)
+		queueRegion = resolved
 	}
 
 	// Load AWS config for spore-host-dev (where EC2 instances run)

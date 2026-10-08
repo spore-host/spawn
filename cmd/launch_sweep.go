@@ -196,18 +196,17 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	if maxConcurrentAuto {
 		region := baseConfig.Region
 		if region == "" {
-			fmt.Fprintf(os.Stderr, "🌍 No region specified, auto-detecting closest region for --max-concurrent-auto...\n")
-			detectedRegion, derr := detectBestRegion(ctx, baseConfig.InstanceType)
+			resolved, why, derr := resolveLaunchRegion(ctx, "", baseConfig.InstanceType)
 			if derr != nil {
-				fmt.Fprintf(os.Stderr, "⚠️  Could not auto-detect region: %v\n", derr)
-				region = "us-east-1"
-			} else {
-				region = detectedRegion
+				return fmt.Errorf("--max-concurrent-auto: could not choose a region for %s: %w\n"+
+					"Pass --region, or set AWS_REGION / a default in your spore config",
+					baseConfig.InstanceType, derr)
 			}
+			region = resolved
 			// Pin it on baseConfig too, so the rest of this function (and
-			// launchSweepDetached, if we end up there) doesn't re-detect it.
+			// launchSweepDetached, if we end up there) doesn't re-resolve it.
 			baseConfig.Region = region
-			fmt.Fprintf(os.Stderr, "✓ Selected region: %s\n", region)
+			fmt.Fprintf(os.Stderr, "🌍 Region: %s (%s)\n", region, why)
 		}
 		regionClient, derr := aws.NewClientWithRegion(ctx, region)
 		if derr != nil {
@@ -332,16 +331,14 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 
 	// Auto-detect region if not specified
 	if firstConfig.Region == "" {
-		fmt.Fprintf(os.Stderr, "🌍 No region specified, auto-detecting closest region...\n")
-		detectedRegion, err := detectBestRegion(ctx, firstConfig.InstanceType)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Could not auto-detect region: %v\n", err)
-			fmt.Fprintf(os.Stderr, "   Using default: us-east-1\n")
-			firstConfig.Region = "us-east-1"
-		} else {
-			fmt.Fprintf(os.Stderr, "✓ Selected region: %s\n", detectedRegion)
-			firstConfig.Region = detectedRegion
+		resolved, why, rerr := resolveLaunchRegion(ctx, "", firstConfig.InstanceType)
+		if rerr != nil {
+			return fmt.Errorf("could not choose a region for %s: %w\n"+
+				"Pass --region, or set AWS_REGION / a default in your spore config",
+				firstConfig.InstanceType, rerr)
 		}
+		fmt.Fprintf(os.Stderr, "🌍 Region: %s (%s)\n", resolved, why)
+		firstConfig.Region = resolved
 	}
 
 	// Apply region to all configs
@@ -1014,16 +1011,17 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	// Determine region (auto-detect if not specified)
 	sweepRegion := baseConfig.Region
 	if sweepRegion == "" {
-		fmt.Fprintf(os.Stderr, "🌍 No region specified, auto-detecting closest region...\n")
-		detectedRegion, err := detectBestRegion(ctx, baseConfig.InstanceType)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Could not auto-detect region: %v\n", err)
-			fmt.Fprintf(os.Stderr, "   Using default: us-east-1\n")
-			sweepRegion = "us-east-1"
-		} else {
-			fmt.Fprintf(os.Stderr, "✓ Selected region: %s\n", sweepRegion)
-			sweepRegion = detectedRegion
+		// The old message here printed sweepRegion BEFORE assigning to it, so it
+		// always announced the empty string — another line that did not say what
+		// it claimed.
+		resolved, why, rerr := resolveLaunchRegion(ctx, "", baseConfig.InstanceType)
+		if rerr != nil {
+			return fmt.Errorf("could not choose a region for %s: %w\n"+
+				"Pass --region, or set AWS_REGION / a default in your spore config",
+				baseConfig.InstanceType, rerr)
 		}
+		sweepRegion = resolved
+		fmt.Fprintf(os.Stderr, "🌍 Region: %s (%s)\n", sweepRegion, why)
 	}
 
 	// Load dev account config to get account ID

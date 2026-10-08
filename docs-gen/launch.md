@@ -116,7 +116,7 @@ spawn launch <name> [flags]
 | `--proximity-from` |  | string |  | Prefer regions close to this region (e.g., us-east-1) |
 | `--queue-template` |  | string |  | Queue template name (use 'spawn queue template list' to see options) |
 | `--quiet` |  | bool |  | Minimal output |
-| `--region` |  | string |  | AWS region |
+| `--region` |  | string |  | AWS region. Precedence: this flag &gt; SPORE_REGION/AWS_REGION &gt; your spore config &gt; auto-detect (auto-detect picks the lowest-latency region that actually offers the instance type) |
 | `--regions-exclude` |  | stringSlice |  | Exclude these regions (supports wildcards: us-*, eu-*) |
 | `--regions-geographic` |  | stringSlice |  | Geographic constraints: us, eu, ap, north-america, europe, asia-pacific |
 | `--regions-include` |  | stringSlice |  | Only use these regions (supports wildcards: us-*, eu-*) |
