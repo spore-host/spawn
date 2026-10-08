@@ -871,6 +871,16 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	result.PublicIP = publicIP
 	prog.Complete("Getting public IP")
 
+	// Whether the SSH path to this instance is confirmed working, and if not, why.
+	//
+	// This exists because the steps after the readiness probe reach the instance
+	// OVER SSH, so a failed probe must stop them rather than be discarded (#740).
+	// Default true: the probe is what can disprove reachability, and a launch that
+	// never ran it (Windows, --wait-for-ssh=false) must not have its later steps
+	// suppressed by a check that did not happen.
+	sshReachable := true
+	sshUnreachableReason := ""
+
 	// Step 10: Wait for the instance to be usable. For Windows, SSH (22) won't
 	// answer until late and the real "usable" signal is the Administrator password
 	// becoming available (after EC2Launch runs, post-Sysprep), so wait on that
@@ -888,10 +898,38 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		prog.Complete("Waiting for Windows (password available)")
 	} else {
 		prog.Start("Waiting for SSH")
-		if waitForSSH && result.PublicIP != "" {
-			waitForSSHReady(ctx, result.PublicIP, 2*time.Minute)
+		switch {
+		case !waitForSSH:
+			prog.Skip("Waiting for SSH")
+		case result.PublicIP == "":
+			// No public address to probe. Previously this skipped the wait and
+			// still reported ✅, which is the same false claim by a different
+			// route (#740). SSM-only access is a legitimate configuration, so say
+			// so rather than implying SSH was checked.
+			sshReachable = false
+			sshUnreachableReason = "the instance has no public IP (SSM-only access)"
+			prog.Skip("Waiting for SSH")
+			fmt.Fprintf(os.Stderr, "ℹ️  Skipping the SSH readiness check: %s\n", sshUnreachableReason)
+		default:
+			if err := waitForSSHReady(ctx, result.PublicIP, 2*time.Minute); err != nil {
+				// NOT fatal: the instance is running and spored is enforcing its
+				// own TTL/idle/cost limits, so failing the launch here would
+				// destroy a working spore over a connectivity problem. But it must
+				// be SAID, and it must gate the SSH-dependent steps below — that
+				// is the whole of #740.
+				sshReachable = false
+				sshUnreachableReason = err.Error()
+				prog.Error("Waiting for SSH", err)
+				fmt.Fprintf(os.Stderr,
+					"\n⚠️  SSH never became reachable (%v)\n"+
+						"   The instance is up and spored is enforcing its lifecycle. Check the\n"+
+						"   security group's port-22 ingress, or use `spawn connect %s`, which\n"+
+						"   falls back to SSM when SSH is unavailable.\n",
+					err, config.Name)
+			} else {
+				prog.Complete("Waiting for SSH")
+			}
 		}
-		prog.Complete("Waiting for SSH")
 	}
 
 	// Step 10b: Verify spored actually came up (#50). The bootstrap installs
@@ -933,12 +971,24 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// the SSH-readiness wait --wait-for-ssh=false forces. Load the DNS config
 	// first (cheap, no network calls beyond an optional SSM lookup) so the
 	// --no-dns / dns.enabled precedence can decide whether to even try.
+	// #740/#741: the same reasoning applies when we DID wait and SSH never came
+	// up. That case used to be unreachable, because the probe could not report
+	// failure — so instead of skipping, the launch SSHed to a host it had just
+	// failed to reach, under registerDNS's 4-minute retry budget, printing
+	// nothing. Six minutes of silence after a successful RunInstances.
 	var dnsRecord string
 	if dnsName != "" && !waitForSSH {
 		fmt.Fprintf(os.Stderr, "ℹ️  Skipping DNS registration (--wait-for-ssh=false); register later with: spawn dns register %s %s\n",
 			result.InstanceID, dnsName)
 	}
-	if dnsName != "" && waitForSSH {
+	if dnsName != "" && waitForSSH && !sshReachable {
+		fmt.Fprintf(os.Stderr,
+			"ℹ️  Skipping DNS registration: %s.\n"+
+				"   It registers over SSH, so it would retry for minutes and fail. Once SSH\n"+
+				"   works, register with: spawn dns register %s %s\n",
+			sshUnreachableReason, result.InstanceID, dnsName)
+	}
+	if dnsName != "" && waitForSSH && sshReachable {
 		// Load DNS configuration with precedence
 		dnsConfig, err := spawnconfig.LoadDNSConfig(ctx, dnsDomain, dnsAPIEndpoint, noDNS)
 		if err != nil {
@@ -947,7 +997,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			fmt.Fprintf(os.Stderr, "ℹ️  Skipping DNS registration (disabled via --no-dns or dns.enabled: false)\n")
 		} else {
 			prog.Start("Registering DNS")
-			fqdn, err := registerDNS(plat, result.KeyName, result.InstanceID, result.PublicIP, dnsName, dnsConfig.Domain, dnsConfig.APIEndpoint)
+			fqdn, err := registerDNS(ctx, plat, result.KeyName, result.InstanceID, result.PublicIP, dnsName, dnsConfig.Domain, dnsConfig.APIEndpoint)
 			if err != nil {
 				prog.Error("Registering DNS", err)
 				// Non-fatal: the instance is fully usable via its public IP /

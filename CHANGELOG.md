@@ -84,6 +84,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A launch could go silent for six minutes after succeeding, then register no
+  DNS** (#740, #741). Reproduced from a goroutine dump: the process sat in
+  `registerDNS` → `exec` → `ssh`, SSHing to a host whose SSH port had already
+  failed to answer.
+  The root cause was that `waitForSSHReady` **returned nothing**, so the timeout
+  path and the success path were the same statement and the failure was not
+  merely dropped — it was unrepresentable. The caller then marked the step
+  complete unconditionally, so an unreachable instance printed
+  `✅ Waiting for SSH (120.0s)`: the timeout, to the tenth of a second, rendered
+  as success. Nothing downstream noticed either, because the next gate verifies
+  spored over **SSM**, which was working — the instance was healthy and the one
+  broken thing was the one signal being discarded.
+  The probe now returns an error naming the host and the dial failure, the launch
+  reports it (non-fatal — the instance is up and spored is enforcing its
+  lifecycle) and points at `spawn connect`, which falls back to SSM. Crucially it
+  now also **gates** DNS registration, which registers over SSH: that skip already
+  existed for `--wait-for-ssh=false`, with the reasoning spelled out in a comment —
+  "we cannot and should not register a record pointing at an instance whose
+  reachability is unconfirmed" — and was simply unreachable when we *did* wait and
+  it failed. A launch with no public IP no longer claims to have checked SSH either.
+  Two further fixes in the DNS retry itself. Its four-minute budget was checked
+  only *between* attempts, and the exec had no context, so a single `ssh` that
+  connected and then hung outlived the deadline entirely (`ConnectTimeout=10`
+  caps only the TCP connect). The budget now binds every attempt, and the
+  caller's context is threaded through, so a Ctrl-C reaches the child. And the
+  retry predicate was `err != nil`, i.e. **every** failure was treated as a
+  transient early-boot race — so an unreachable host burned the full four minutes
+  on ~16 attempts that could not have succeeded. It now retries the races it was
+  written for (`Permission denied` before cloud-init writes `authorized_keys`;
+  `curl exit 6/7/28` from an instance whose resolver is not up) and stops on
+  reachability failures, while an *unrecognised* message stays retryable so a
+  wording we have not seen degrades to the old behaviour rather than giving up early.
+
 - **The hand-written Lambda deploy scripts could deploy to the wrong account,
   wipe a function's environment, and report success without verifying anything.**
   Found while preparing the `spawn-sweep-orchestrator` redeploy that #725 needs.
