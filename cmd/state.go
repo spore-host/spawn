@@ -144,8 +144,7 @@ func stopOrHibernate(identifier string, hibernate bool, skipConfirm bool) error 
 		label = fmt.Sprintf("%s (%s)", instance.Name, instance.InstanceID)
 	}
 	if !confirmYes(skipConfirm, fmt.Sprintf("%s instance %s?", actionTitle, label)) {
-		fmt.Fprintln(os.Stderr, "Aborted.")
-		return nil
+		return newAborted("aborted: %s was left unchanged", label)
 	}
 
 	fmt.Fprintf(os.Stderr, "Requesting %s for instance %s...\n", action, instance.InstanceID)

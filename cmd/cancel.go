@@ -129,8 +129,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 		prompt := fmt.Sprintf("Cancel sweep %s and terminate %d instance(s)? This cannot be undone.",
 			cancelSweepID, totalToTerminate)
 		if !confirmYes(cancelYes, prompt) {
-			fmt.Fprintln(os.Stderr, "Aborted.")
-			return nil
+			return newAborted("aborted: nothing was cancelled (re-run with --yes)")
 		}
 	}
 

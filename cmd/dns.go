@@ -214,8 +214,7 @@ func runDNSDelete(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	if !confirmYes(dnsDeleteYes, fmt.Sprintf("Delete the DNS record for %s?", instanceIdentifier)) {
-		fmt.Println("Aborted.")
-		return nil
+		return newAborted("aborted: no DNS change was made")
 	}
 
 	// Create AWS client

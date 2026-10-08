@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -128,8 +127,7 @@ func runAutoscaleTerminate(cmd *cobra.Command, args []string) error {
 	groupName := args[0]
 
 	if !confirmYes(autoscaleTerminateYes, fmt.Sprintf("Terminate auto-scaling group %q and all its instances? This cannot be undone.", groupName)) {
-		fmt.Fprintln(os.Stderr, "Aborted.")
-		return nil
+		return newAborted("aborted: the autoscale group was left unchanged")
 	}
 
 	as, err := getAutoscaler(ctx)

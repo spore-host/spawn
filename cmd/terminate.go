@@ -109,8 +109,10 @@ func terminateSingle(ctx context.Context, identifier string) error {
 		label = fmt.Sprintf("%s (%s)", instance.Name, instance.InstanceID)
 	}
 	if !confirmTerminate(fmt.Sprintf("Permanently terminate %s?", label)) {
-		fmt.Fprintln(os.Stderr, "Aborted.")
-		return nil
+		// Exit non-zero: the instance is still running and still billing, and a
+		// caller checking the exit code must not read that as "terminated" (#737).
+		return newAborted("aborted: %s is still running (terminate it with --yes, or `spawn terminate %s --yes`)",
+			label, instance.InstanceID)
 	}
 
 	// Tear down any controller-side plugin footprint (mutagen sync, Globus
@@ -174,8 +176,8 @@ func terminateJobArray(ctx context.Context) error {
 	fmt.Fprintf(os.Stderr, "Found job array: %s (%d instances)\n", arrayName, len(arrayInstances))
 
 	if !confirmTerminate(fmt.Sprintf("Permanently terminate all %d instances in job array %q?", len(arrayInstances), arrayName)) {
-		fmt.Fprintln(os.Stderr, "Aborted.")
-		return nil
+		return newAborted("aborted: all %d instances in job array %q are still running (re-run with --yes)",
+			len(arrayInstances), arrayName)
 	}
 
 	successCount := 0

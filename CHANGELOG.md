@@ -84,6 +84,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Declining a confirmation prompt exited 0, so a script could not tell
+  "terminated" from "did nothing"** (#737). `spawn terminate <name>` with
+  non-interactive stdin printed `Aborted.` and **exited 0** while the instance
+  kept running and kept billing — and the only thing distinguishing success from a
+  no-op was a line on stderr, which the reporter's output filter hid. An agent or
+  CI step checking the exit code concluded the spore was gone and stopped watching.
+  A declined prompt now exits **75** (`EX_TEMPFAIL`, "the user is invited to
+  retry"). Deliberately not 1: "you said no" and "it failed" need different
+  handling, and collapsing them forces a caller to parse text. The messages also
+  say what was left undone — `aborted: web-1 (i-abc) is still running` rather than
+  `Aborted.` — and a non-interactive prompt is now reported as the **usage error**
+  it is ("stdin is not a terminal, so this cannot be answered — pass `--yes`"),
+  rather than as a decision somebody made.
+  The issue counted eleven such sites. An exhaustive grep found **nineteen**,
+  across `terminate` (single and job array), `cleanup`, `cancel`, `state`,
+  `arraygroup`, `team`, `stage`, `schedule`, `plugin`, `dns`, `alerts`,
+  `autoscale`, `pipeline`, `reaper` and `bot`. All nineteen are converted, and a
+  static gate now fails the build if a new one returns success.
+  #648's opposite case is unchanged: a *name* that resolves to nothing is still
+  success for `terminate`, because the instance is already gone, which is what the
+  caller wanted. An abort is the reverse — the instance is definitely still there.
+- **`spawn connect <name> -- 'cmd; cmd'` ran the whole string as a command name**
+  (#738). A single post-`--` argument was shell-quoted into one word, so the
+  remote shell looked for a command literally named `free -m; tail /var/log/x` and
+  exited 127 with `No such file or directory` naming the user's entire command.
+  This was #369's fix over-correcting: that one was the opposite bug (argv
+  re-split by space-joining, so `-- bash -lc "a && b"` left `-c` with no
+  argument), and per-argument quoting fixed it at the cost of the command-string
+  form. The rule is now explicit on argument count — **one argument is a shell
+  command line, several are an argv** — so both work, and both directions are
+  pinned by tests since each has now been broken by fixing the other.
+  Note this does not match `ssh` exactly, and should not: real `ssh` does no
+  quoting at all, which is why `ssh h bash -lc "a && b"` is broken for `ssh` too.
+
 - **A launch could go silent for six minutes after succeeding, then register no
   DNS** (#740, #741). Reproduced from a goroutine dump: the process sat in
   `registerDNS` → `exec` → `ssh`, SSHing to a host whose SSH port had already

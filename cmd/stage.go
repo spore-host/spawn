@@ -324,8 +324,7 @@ func runStageDelete(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	if !confirmYes(stageDeleteYes, fmt.Sprintf("Delete staged data %s?", stagingID)) {
-		fmt.Println("Aborted.")
-		return nil
+		return newAborted("aborted: staged data %s was not deleted", stagingID)
 	}
 
 	// Load AWS config (infra account for DynamoDB and S3 access)
