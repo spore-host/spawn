@@ -84,6 +84,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The hand-written Lambda deploy scripts could deploy to the wrong account,
+  wipe a function's environment, and report success without verifying anything.**
+  Found while preparing the `spawn-sweep-orchestrator` redeploy that #725 needs.
+  These functions have **no CloudFormation stack**, so the script is the only
+  record of how they are configured, and a defect in one is discovered by running
+  it against production — which has happened twice.
+  `deploy-sweep-orchestrator.sh` took its account from whatever credentials were
+  ambient with no assertion, and sent `--environment "Variables={}"` on **every**
+  update, which *replaces* the function's environment with nothing. That is
+  indistinguishable from a no-op on a function with no variables set, which is why
+  it survived nine months — and it ran under `|| true`, so the wipe could not even
+  fail loudly. `deploy-scheduler-handler.sh` had the same `Variables={}` pattern
+  and no account assertion.
+  Both now assert the target account before building anything (a profile *name* is
+  not an account; a profile can be re-pointed), neither passes `Variables={}` at
+  all, both are `set -euo pipefail`, and the sweep-orchestrator deploy compares the
+  deployed `CodeSha256` against the zip it just built — because an HTTP 200 from
+  `update-function-code` says the call was accepted, not that the function runs the
+  new binary.
+- **A nested Go module could be added and never tested by CI.** The nested-module
+  step enumerated `lambda/*` by name, so the `scripts/` module's gates would have
+  run nowhere. That scoping was itself the shape of #136 — a module the root
+  `go test ./...` cannot reach — one level up, so discovery is now by `find` with
+  a guard that fails the build if it matches nothing.
+
 - **A parameter sweep now honours CLI flags instead of dropping them** (#697). The
   sweep dispatch built a two-field `LaunchConfig` — region and instance type — and
   merged param rows onto an *empty* struct, so **every other CLI flag was dropped
