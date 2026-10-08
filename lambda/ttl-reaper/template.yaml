@@ -81,6 +81,29 @@ Parameters:
       orphaned by abrupt exits (crash / out-of-band terminate / fast spot reclaim)
       that the instance-driven #247 teardown can't. Honors DryRun. Off by default.
 
+  NetResources:
+    Type: String
+    Default: 'report'
+    AllowedValues: ['off', 'report', 'reap']
+    Description: >
+      Reclamation of spawn-managed security groups and cluster placement groups
+      that no instance references and that are older than 7 days (#685). Neither
+      bills, but both consume a per-VPC quota that bites at LAUNCH time, and a
+      rejected --mpi launch used to leave one of each behind on every attempt.
+
+      Three values rather than true/false, and NOT folded into DryRun, because
+      production runs DryRun=false: a boolean would have armed a brand-new
+      destructive sweep the moment the Lambda was updated, and the only way to
+      preview it would have been to turn OFF the live instance reaper — trading an
+      untested delete for a disarmed TTL backstop. Same reasoning as DnsExpire
+      below.
+
+      'report' (default) describes and logs what it WOULD reclaim and deletes
+      nothing, so an upgrade is observable but inert. 'reap' deletes, and should be
+      set only after the report has been read. 'off' skips the sweep entirely, for
+      an account where someone else owns these resources. An unrecognised value
+      resolves to 'report' — a typo must not arm a delete. DryRun always wins.
+
   DnsExpire:
     Type: String
     Default: 'false'
@@ -183,6 +206,7 @@ Resources:
           REAPER_DNS_ZONE_ID: !Ref DnsZoneId
           REAPER_DNS_DOMAIN: !Ref DnsDomain
           REAPER_DNS_SWEEP: !Ref DnsSweep
+          REAPER_NET_RESOURCES: !Ref NetResources
           REAPER_DNS_EXPIRE: !Ref DnsExpire
           ACCOUNTS_TABLE: !Ref AccountsTable
       Policies:

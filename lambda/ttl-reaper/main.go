@@ -123,6 +123,19 @@ type reaper struct {
 	graceful     bool          // REAPER_GRACEFUL=true: attempt a pre-stop flush via SSM before terminate (#187)
 	gracefulWait time.Duration // hard cap on the per-instance graceful flush (REAPER_GRACEFUL_MAX_WAIT)
 
+	// Network-resource reclamation (#685), staged independently of dryRun.
+	//
+	// It has to be: production runs with DryRun=false, so letting this inherit the
+	// global switch would arm a brand-new destructive sweep the moment the Lambda
+	// was updated, and the only way to preview it would be to turn OFF the live
+	// instance reaper — trading an untested delete for a disarmed TTL backstop.
+	// Same reasoning as DnsExpire, for the same reason: an existing flag must not
+	// become destructive on upgrade for a class of resource it has never touched.
+	//
+	// One of netResourcesOff / netResourcesReport / netResourcesReap. dryRun still
+	// wins: a dry run never deletes, whatever this says.
+	netResources string
+
 	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
 	// cross-account role — so route53Client uses the base credentials. dnsDomain
@@ -214,6 +227,7 @@ func init() {
 		dnsDomain:    strings.TrimSpace(os.Getenv("REAPER_DNS_DOMAIN")),
 		sweepDNS:     strings.EqualFold(os.Getenv("REAPER_DNS_SWEEP"), "true"),
 		expireDNS:    strings.EqualFold(os.Getenv("REAPER_DNS_EXPIRE"), "true"),
+		netResources: parseNetResources(os.Getenv("REAPER_NET_RESOURCES")),
 	}
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
 	// client when a zone is configured, so a deployment without DNS teardown
@@ -242,8 +256,8 @@ func init() {
 		log.Printf("REAPER_DNS_EXPIRE=true but the DNS sweep is off — expiry disabled (it runs inside the sweep)")
 		r.expireDNS = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, net-resources=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.netResources)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:

@@ -85,6 +85,7 @@ PARAM_MAP = \
 	DnsDomain:DNS_DOMAIN \
 	DnsSweep:DNS_SWEEP \
 	DnsExpire:DNS_EXPIRE \
+	NetResources:NET_RESOURCES \
 	AccountsTable:ACCOUNTS_TABLE \
 	AccountsTableKeyArn:ACCOUNTS_TABLE_KEY_ARN \
 	AlarmsEnabled:ALARMS_ENABLED \
@@ -136,7 +137,7 @@ deploy: build
 	@# off — but never NotifyUrl, which is a Slack webhook secret. These are read
 	@# back from the MERGED file, so this shows what will actually be sent rather
 	@# than what this Makefile happens to default to.
-	@awk -F': ' '/^(DryRun|ScanSelf|DnsSweep|DnsExpire|AlarmsEnabled|DnsZoneId|DnsDomain|AlarmTopicArn|MaxAge|Schedule):/ \
+	@awk -F': ' '/^(DryRun|ScanSelf|DnsSweep|DnsExpire|NetResources|AlarmsEnabled|DnsZoneId|DnsDomain|AlarmTopicArn|MaxAge|Schedule):/ \
 		{ printf "  %s %s\n", $$1, $$2 }' $(PARAMS_FILE)
 	sam deploy \
 		--template-file template.yaml \

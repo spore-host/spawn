@@ -68,7 +68,14 @@ func pgrp(name string, age time.Duration, now time.Time) ec2types.PlacementGroup
 
 func runNetSweep(t *testing.T, f *fakeNetAPI, dryRun bool) (*Summary, *accountOutcome) {
 	t.Helper()
-	r := &reaper{dryRun: dryRun}
+	// Reclamation is opt-in per #685's staged rollout, so the reaping tests must
+	// ask for it explicitly. The zero value is report-only on purpose.
+	return runNetSweepMode(t, f, dryRun, netResourcesReap)
+}
+
+func runNetSweepMode(t *testing.T, f *fakeNetAPI, dryRun bool, mode string) (*Summary, *accountOutcome) {
+	t.Helper()
+	r := &reaper{dryRun: dryRun, netResources: mode}
 	acct := account{label: "self", netFor: func(string) netResourceAPI { return f }}
 	sum := &Summary{}
 	out := &accountOutcome{}
@@ -213,5 +220,94 @@ func TestNetSweepToleratesDependencyViolation(t *testing.T) {
 	if out.errorsToCount() != 0 {
 		t.Errorf("a DependencyViolation was recorded as an error (%d); it is an expected "+
 			"transient and would alarm on every cycle", out.errorsToCount())
+	}
+}
+
+// TestNetSweepModes is the staged-rollout gate. Production runs DryRun=false, so
+// without an independent switch, updating the Lambda would arm a brand-new
+// destructive sweep on deploy and the only way to preview it would be to disarm
+// the live instance reaper. Each mode is asserted on what it DELETES, not on
+// what it logs.
+func TestNetSweepModes(t *testing.T) {
+	now := time.Now()
+	fresh := func() *fakeNetAPI {
+		return &fakeNetAPI{
+			sgs: []ec2types.SecurityGroup{sg("sg-old", "spawn-mpi-x", 8*24*time.Hour, now)},
+			pgs: []ec2types.PlacementGroup{pgrp("pg-old", 8*24*time.Hour, now)},
+		}
+	}
+
+	t.Run("off describes nothing and deletes nothing", func(t *testing.T) {
+		f := fresh()
+		sum, _ := runNetSweepMode(t, f, false, netResourcesOff)
+		if len(f.deletedSG) != 0 || len(f.deletedPG) != 0 {
+			t.Errorf("off deleted %v / %v", f.deletedSG, f.deletedPG)
+		}
+		// Not merely "did not delete": off must not even count, or an operator
+		// reading the summary would think the sweep ran and found nothing.
+		if sum.NetReaped != 0 || sum.NetSkipped != 0 {
+			t.Errorf("off counted reaped=%d skipped=%d, want 0/0", sum.NetReaped, sum.NetSkipped)
+		}
+	})
+
+	t.Run("report counts but deletes nothing", func(t *testing.T) {
+		f := fresh()
+		sum, _ := runNetSweepMode(t, f, false, netResourcesReport)
+		if len(f.deletedSG) != 0 || len(f.deletedPG) != 0 {
+			t.Errorf("report deleted %v / %v — the whole point is that it does not",
+				f.deletedSG, f.deletedPG)
+		}
+		if sum.NetSkipped != 2 {
+			t.Errorf("NetSkipped = %d, want 2 — report must still show what it found", sum.NetSkipped)
+		}
+	})
+
+	t.Run("reap deletes", func(t *testing.T) {
+		f := fresh()
+		sum, _ := runNetSweepMode(t, f, false, netResourcesReap)
+		if len(f.deletedSG) != 1 || len(f.deletedPG) != 1 {
+			t.Errorf("reap deleted %v / %v, want one each", f.deletedSG, f.deletedPG)
+		}
+		if sum.NetReaped != 2 {
+			t.Errorf("NetReaped = %d, want 2", sum.NetReaped)
+		}
+	})
+
+	// A dry run means "change nothing". A second switch that could override it
+	// would make the dry run a lie, which is worse than having no dry run.
+	t.Run("dryRun wins over reap", func(t *testing.T) {
+		f := fresh()
+		runNetSweepMode(t, f, true, netResourcesReap)
+		if len(f.deletedSG) != 0 || len(f.deletedPG) != 0 {
+			t.Errorf("dry run deleted %v / %v", f.deletedSG, f.deletedPG)
+		}
+	})
+
+	// The zero value must be the safe one: a reaper built without the field set
+	// — a future construction site, or a test — must not delete.
+	t.Run("the zero value does not delete", func(t *testing.T) {
+		f := fresh()
+		runNetSweepMode(t, f, false, "")
+		if len(f.deletedSG) != 0 || len(f.deletedPG) != 0 {
+			t.Errorf("zero value deleted %v / %v", f.deletedSG, f.deletedPG)
+		}
+	})
+}
+
+// TestParseNetResources: a typo in a CloudFormation parameter must not arm a
+// destructive sweep, and must not silently disable one either.
+func TestParseNetResources(t *testing.T) {
+	for in, want := range map[string]string{
+		"off": netResourcesOff, "OFF": netResourcesOff, " off ": netResourcesOff,
+		"reap": netResourcesReap, "Reap": netResourcesReap,
+		"report": netResourcesReport,
+		"":       netResourcesReport,
+		"true":   netResourcesReport, // a boolean left over from an older deploy
+		"yes":    netResourcesReport,
+		"reep":   netResourcesReport, // the typo that must not delete
+	} {
+		if got := parseNetResources(in); got != want {
+			t.Errorf("parseNetResources(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
