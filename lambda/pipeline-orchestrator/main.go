@@ -975,36 +975,42 @@ func cleanupPipelineResources(ctx context.Context, state *pipeline.PipelineState
 		}
 	}
 
-	// Cleanup security group
+	// Cleanup security group. SYNCHRONOUS, with a retry budget — see #752: this
+	// was a `go func(){ time.Sleep(30s); … }()` and the Lambda runtime freezes the
+	// execution environment when the handler returns, so the delete never ran.
 	if state.SecurityGroupID != "" {
-		go func() {
-			time.Sleep(30 * time.Second) // Wait for instances to terminate
-			ec2Client := ec2.NewFromConfig(awsCfg)
-			_, err := ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{
+		ec2Client := ec2.NewFromConfig(awsCfg)
+		err := spawnaws.RetryPlacementGroupDelete(ctx, state.SecurityGroupID, func() error {
+			_, derr := ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{
 				GroupId: aws.String(state.SecurityGroupID),
 			})
-			if err != nil {
-				log.Printf("Warning: Failed to delete security group %s: %v", state.SecurityGroupID, err)
-			} else {
-				log.Printf("Deleted security group: %s", state.SecurityGroupID)
-			}
-		}()
+			return derr
+		})
+		if err != nil {
+			log.Printf("Warning: Failed to delete security group %s: %v (the TTL reaper will "+
+				"reclaim it after its grace period)", state.SecurityGroupID, err)
+		} else {
+			log.Printf("Deleted security group: %s", state.SecurityGroupID)
+		}
 	}
 
-	// Cleanup placement group
+	// Cleanup placement group. SYNCHRONOUS, same reason (#752).
 	if state.PlacementGroupID != "" {
-		go func() {
-			time.Sleep(30 * time.Second)
+		{
 			ec2Client := ec2.NewFromConfig(awsCfg)
-			_, err := ec2Client.DeletePlacementGroup(ctx, &ec2.DeletePlacementGroupInput{
-				GroupName: aws.String(state.PlacementGroupID),
+			err := spawnaws.RetryPlacementGroupDelete(ctx, state.PlacementGroupID, func() error {
+				_, derr := ec2Client.DeletePlacementGroup(ctx, &ec2.DeletePlacementGroupInput{
+					GroupName: aws.String(state.PlacementGroupID),
+				})
+				return derr
 			})
 			if err != nil {
-				log.Printf("Warning: Failed to delete placement group %s: %v", state.PlacementGroupID, err)
+				log.Printf("Warning: Failed to delete placement group %s: %v (the TTL reaper will "+
+					"reclaim it after its grace period)", state.PlacementGroupID, err)
 			} else {
 				log.Printf("Deleted placement group: %s", state.PlacementGroupID)
 			}
-		}()
+		}
 	}
 }
 

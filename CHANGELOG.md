@@ -84,6 +84,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two Lambda orchestrators never deleted the placement groups and security
+  groups they created** (#752). `cleanupPlacementGroup` opened with
+  `time.Sleep(30 * time.Second)` and was started with `go` immediately before
+  `return nil` at **all four** of its call sites. A Lambda **freezes its
+  execution environment when the handler returns**, so that goroutine never
+  resumed — the delete simply never happened, at every site, for the life of the
+  feature. `pipeline-orchestrator` had the identical shape twice, around
+  `DeleteSecurityGroup` and `DeletePlacementGroup`.
+  This is a second and previously unidentified mechanism behind #685, which found
+  **nine orphaned placement groups and nineteen security groups** in one region of
+  one account and was diagnosed as a CLI-side ordering bug. Neither resource bills
+  directly; the cost is per-VPC quota, which bites at **launch** time.
+  All six sites are now synchronous, and they use the retry policy `pkg/aws`
+  already owns — now exported as `RetryPlacementGroupDelete` for callers holding a
+  raw `*ec2.Client`, which the cross-account orchestrators do. A flat 30-second
+  wait was the wrong tool regardless: `TerminateInstances` is asynchronous with no
+  fixed duration, so it is a race in one direction and dead time in the other.
+  The shared policy retries **only** `InvalidPlacementGroup.InUse` against a
+  60-second budget, so a permissions error surfaces at once instead of being
+  re-learned twelve times.
+  Guarded by a test that scans both Lambdas for a `go` starting anything that
+  sleeps — resolving **named** functions, not just inline closures, because the
+  real bug's sleep sat 1200 lines from its call site and a "sleep near the `go`"
+  check could not see it.
 - **A detached parameter sweep launched zero instances and reported success**
   (#749). The orchestrator Lambda never sees a `LaunchConfig` — it reads param
   keys out of the uploaded `params.json` and builds `RunInstances` from them —

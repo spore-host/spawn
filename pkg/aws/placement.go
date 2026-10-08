@@ -213,6 +213,22 @@ func (c *Client) DeletePlacementGroupWithRetry(ctx context.Context, name, region
 	})
 }
 
+// RetryPlacementGroupDelete runs the delete-with-retry POLICY against any
+// delete function, for callers that hold a raw EC2 client rather than a
+// *Client.
+//
+// Exported for the Lambda orchestrators (#752). They assume a cross-account role
+// and so work with a bare *ec2.Client, which means they cannot use
+// DeletePlacementGroupWithRetry above — and what they had instead was a
+// `time.Sleep(30 * time.Second)` inside a goroutine started with `go` right
+// before the handler returned. A Lambda freezes its execution environment on
+// return, so that goroutine never resumed and the group was NEVER deleted. This
+// gives them the real policy — the 60s budget, the 5s interval and the
+// InUse-only classifier — rather than a fourth reimplementation of it.
+func RetryPlacementGroupDelete(ctx context.Context, name string, del func() error) error {
+	return retryPlacementGroupDelete(ctx, name, del)
+}
+
 // retryPlacementGroupDelete holds the retry policy, separated from the AWS call
 // so a test can drive the REAL loop — budget, interval, classifier and all —
 // against a scripted sequence of errors. Testing a reimplementation of this loop
