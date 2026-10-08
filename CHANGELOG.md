@@ -117,6 +117,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned by tests since each has now been broken by fixing the other.
   Note this does not match `ssh` exactly, and should not: real `ssh` does no
   quoting at all, which is why `ssh h bash -lc "a && b"` is broken for `ssh` too.
+- **`spawn status` reported `CPU: 0.0%` on an instance running at 100%** (#734).
+  Three states collapsed into one float, and two of them were sentinels a caller
+  could not tell from data: an unreadable `/proc/stat` and a first call with no
+  previous sample both returned `100.0` ("assume active"), while a **zero-length
+  sample interval** returned `0.0` — the most *reassuring* possible value from a
+  no-information state, inconsistent with both its siblings.
+  `spored status` hits all of this in one process: it reads CPU once via the idle
+  check and again for the report, microseconds apart, against a function that
+  overwrites its own previous sample. So the log line said `Not idle: CPU usage
+  100.00%` and the summary said `CPU: 0.0%`, on the same instance, in the same
+  breath, and neither was a measurement.
+  The report now samples **once** and reuses it, an unknown reading is reported as
+  `unknown (single sample; assuming active)` instead of a number, the JSON gains
+  `cpu_measured` so a consumer cannot plot an assumption, and a zero-length
+  interval returns the conservative value like every other unknown branch.
+  That last one also mattered beyond the display: the sentinel feeds `isIdle`, so
+  the one branch that returned "0% busy" from no information was the branch that
+  could have let `--idle-timeout` stop a busy instance. The daemon's ticker spaces
+  calls far enough apart that it was not reachable in practice — but one call site
+  away from stopping a working box is not a property worth keeping.
+- **`spawn status` reported boot time as time spent stopped** (#735). The
+  breakdown showed `Elapsed: 22m 13s (20m 0s compute · 2m 13s stopped)` on an
+  instance that had **never been stopped**: `stoppedTime` was a *residue* —
+  elapsed-since-launch minus compute-since-spored-started — so it absorbed boot,
+  cloud-init and package installs, and asserted a specific checkable fact from
+  arithmetic that cannot tell being stopped from never having started.
+  Boot time is now measured rather than inferred (spored knows both the instance
+  launch time and its own start) and reported as its own term, so a slow boot is
+  visible in its own right. Stopped time is reported only when there is actual
+  evidence of a stop — compute time carried over from a previous run through the
+  tag — so a first boot shows `(20m 0s compute · 2m 13s boot)` and claims nothing
+  it cannot support.
+  `sysReadCPUTimes` is now reached through a package var, because it is
+  build-tagged and the darwin implementation always errors — so on the platform
+  most development happens on, every branch of the delta logic except the first
+  was unreachable and #734 could not be reproduced locally at all.
 
 - **A launch could go silent for six minutes after succeeding, then register no
   DNS** (#740, #741). Reproduced from a goroutine dump: the process sat in

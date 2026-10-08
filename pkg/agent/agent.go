@@ -771,6 +771,23 @@ func (a *Agent) WriteVersionTag(ctx context.Context, version string) {
 	}
 }
 
+// HasPriorComputeTime reports whether this spored inherited accumulated compute
+// time from a previous run — i.e. whether the instance has genuinely been stopped
+// and started again.
+//
+// It is the honest discriminator for the "stopped" term in a status breakdown.
+// That term used to be computed by SUBTRACTION — elapsed-since-launch minus
+// compute-since-spored-started — so on a first boot it absorbed the boot,
+// cloud-init and package-install time and reported it as time spent stopped. The
+// reported case was `22m 13s (20m 0s compute · 2m 13s stopped)` on an instance
+// that had never been stopped (#735).
+//
+// computeSecondsBase is non-zero only when a previous run's total was carried
+// over through the tag, so zero means "no evidence of a prior run".
+func (a *Agent) HasPriorComputeTime() bool {
+	return a.computeSecondsBase > 0
+}
+
 // TotalComputeSeconds returns accumulated compute time across all start/stop cycles.
 func (a *Agent) TotalComputeSeconds() int64 {
 	return a.computeSecondsBase + int64(time.Since(a.startTime).Seconds())
@@ -1145,10 +1162,20 @@ func (a *Agent) isIdle() bool {
 	// block idle termination for abandoned tabs. The existing CPU and network
 	// delta checks correctly distinguish real activity from idle keep-alives.
 
-	// Check CPU usage
-	cpuUsage := a.getCPUUsage()
+	// Check CPU usage.
+	//
+	// The "measured" flag is logged rather than acted on: an unknown reading is
+	// already the conservative 100%, so it correctly blocks an idle shutdown. But
+	// saying which it was stops the log line from looking like a contradiction of
+	// the status summary, which samples separately (#734).
+	cpuUsage, cpuMeasured := a.cpuUsage()
 	if cpuUsage >= a.config.IdleCPUPercent {
-		log.Printf("Not idle: CPU usage %.2f%% >= %.2f%%", cpuUsage, a.config.IdleCPUPercent)
+		if cpuMeasured {
+			log.Printf("Not idle: CPU usage %.2f%% >= %.2f%%", cpuUsage, a.config.IdleCPUPercent)
+		} else {
+			log.Printf("Not idle: CPU usage could not be measured (no sample interval yet); "+
+				"assuming active (%.2f%%)", cpuUsage)
+		}
 		return false
 	}
 
@@ -1197,9 +1224,45 @@ func (a *Agent) isIdle() bool {
 }
 
 func (a *Agent) getCPUUsage() float64 {
-	idle, total, err := sysReadCPUTimes()
+	usage, _ := a.cpuUsage()
+	return usage
+}
+
+// readCPUTimes is the CPU-times source, indirected through a var so the delta
+// logic above can be tested on any platform.
+//
+// It needs to be: sysReadCPUTimes is build-tagged, and the darwin implementation
+// always returns errBadProcStat — so on the platform most development happens
+// on, every branch of cpuUsage except the first is unreachable, and the
+// zero-delta bug (#734) could not be reproduced locally at all.
+var readCPUTimes = func() (idle, total int64, err error) { return sysReadCPUTimes() }
+
+// cpuUsage returns CPU utilisation and whether it is a real MEASUREMENT.
+//
+// ok=false means "could not tell", and the returned value is the conservative
+// assumption (100%, active) rather than a reading. Three distinct states used to
+// collapse into one float, two of them returning sentinels a caller could not
+// distinguish from data (#734):
+//
+//   - /proc/stat unreadable            -> 100.0, "assume active"
+//   - no previous sample (first call)  -> 100.0, "assume active"
+//   - zero time between samples        -> 0.0   <- the broken one
+//
+// That last branch returned the most REASSURING possible value from a
+// no-information state, while its two siblings returned the most conservative
+// one. It produced the reported contradiction: `spored status` calls this twice
+// microseconds apart (once via IsIdle, once for the report), so the log line said
+// `Not idle: CPU usage 100.00%` and the summary said `CPU: 0.0%` — on the same
+// instance, in the same process, neither a measurement.
+//
+// It is also the sentinel that feeds the idle decision. In the daemon the ticker
+// spaces calls a second or more apart so deltaTotal > 0 and the branch is not
+// currently reachable from isIdle — but "one call site away from stopping a busy
+// instance" is not a property worth keeping.
+func (a *Agent) cpuUsage() (float64, bool) {
+	idle, total, err := readCPUTimes()
 	if err != nil {
-		return 100.0 // Assume active if can't read
+		return 100.0, false // cannot read: assume active
 	}
 
 	// Delta CPU usage since last call — avoids cumulative-since-boot bias
@@ -1208,14 +1271,18 @@ func (a *Agent) getCPUUsage() float64 {
 	a.prevCPUIdle, a.prevCPUTotal = idle, total
 
 	if prevTotal == 0 {
-		return 100.0 // First call; no delta available; assume active
+		return 100.0, false // first call, no delta: assume active
 	}
 	deltaIdle := idle - prevIdle
 	deltaTotal := total - prevTotal
 	if deltaTotal == 0 {
-		return 0.0
+		// No jiffies elapsed between samples. Unknown, and now reported as such
+		// AND as "active" rather than as 0% — consistent with the two branches
+		// above, and with getNetworkBytes, which returns its assume-active value
+		// on an unreadable counter.
+		return 100.0, false
 	}
-	return 100.0 - (float64(deltaIdle)/float64(deltaTotal))*100.0
+	return 100.0 - (float64(deltaIdle)/float64(deltaTotal))*100.0, true
 }
 
 func (a *Agent) getNetworkBytes() int64 {
@@ -1936,6 +2003,13 @@ func (a *Agent) GetInstanceInfo() (string, string, string) {
 
 func (a *Agent) GetUptime() time.Duration {
 	return time.Since(a.startTime)
+}
+
+// GetCPUUsageMeasured returns CPU utilisation and whether it is a real
+// measurement. Callers that DISPLAY the number should use this rather than
+// GetCPUUsage, so a "could not tell" is not printed as a reading (#734).
+func (a *Agent) GetCPUUsageMeasured() (float64, bool) {
+	return a.cpuUsage()
 }
 
 func (a *Agent) GetCPUUsage() float64 {
