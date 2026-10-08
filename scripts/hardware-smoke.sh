@@ -338,11 +338,17 @@ if [ -n "$RANK0" ]; then
   # cohort. What it tells you is whether THIS run exercised the poll or merely
   # found every peer already ready — the difference between proving the fix works
   # and proving it does not regress.
-  ready_line=$(ssm "$RANK0" "grep -o 'spawn: all peers accepted SSH after [0-9]*s' /var/log/cloud-init-output.log | head -1" 2>/dev/null)
-  if [ -n "${ready_line//[[:space:]]/}" ]; then
-    echo "     peer readiness: ${ready_line}"
+  # Read the MARKER FILE, not cloud-init-output.log. A first version grepped the
+  # log and found nothing on a 4-node run even though mpirun's own output was
+  # there — stdout from the appended MPI script does not reliably reach it. The
+  # file is written by the readiness loop itself, so its presence proves the poll
+  # ran and its contents give the duration.
+  peer_wait=$(ssm "$RANK0" "cat /var/log/spawn-mpi-peer-wait-seconds 2>/dev/null" 2>/dev/null)
+  peer_wait="${peer_wait//[^0-9]/}"
+  if [ -n "$peer_wait" ]; then
+    echo "     peer readiness: all peers accepted SSH after ${peer_wait}s"
   else
-    echo "     peer readiness: line not found (older spored, or the poll did not run)"
+    echo "     peer readiness: marker absent (pre-#752 spored, or the poll did not run)"
   fi
   [ "${hosts//[^0-9]/}" = "$NODES" ] \
     && ok "mpirun spread across all $NODES nodes ($ranks ranks)" \

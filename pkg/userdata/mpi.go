@@ -208,7 +208,13 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
     sleep 5
     SPAWN_PEERS_READY_WAITED=$((SPAWN_PEERS_READY_WAITED + 5))
   done
+  # Both a stdout line and a FILE. The file is what a test can read: stdout
+  # from this appended script does not reliably reach
+  # /var/log/cloud-init-output.log — a 4-node hardware run looked for the line
+  # there and found nothing, while mpirun's own output was present. A marker
+  # file removes the ambiguity about whether the poll ran and for how long.
   echo "spawn: all peers accepted SSH after ${SPAWN_PEERS_READY_WAITED}s"
+  echo "${SPAWN_PEERS_READY_WAITED}" > /var/log/spawn-mpi-peer-wait-seconds 2>/dev/null || true
   {{if .MPICommand}}mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile bash /etc/spawn/mpi-command{{end}}
 fi
 `
