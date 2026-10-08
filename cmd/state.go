@@ -406,33 +406,27 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// stop/start reassigns it — we need the new address to re-point any local
 	// plugin footprint (spore-sync's mutagen session), so keep polling until the
 	// IP appears rather than returning on the first "running".
+	// Two waiters rather than one hand-rolled loop (#752): the SDK's
+	// instance-running waiter, then a poll for the IP. This is the
+	// cmd/launch_single.go:862→871 pattern.
+	//
+	// What it replaces polled a whole-region describe every 2s, and on a
+	// ListInstances error it `break`ed out — silently reporting "taking longer
+	// than expected" for what was an API failure. It also had no ctx.Done()
+	// case, so Ctrl-C was ignored for the full minute.
 	fmt.Fprintf(os.Stderr, "\nWaiting for instance to reach running state...")
-	running := false
 	newIP := ""
-	for i := 0; i < 30; i++ {
-		time.Sleep(2 * time.Second)
-
-		instances, err := client.ListInstances(ctx, instance.Region, "")
-		if err != nil {
-			break
+	running := false
+	if err := client.WaitForRunning(ctx, instance.Region, instance.InstanceID, 2*time.Minute); err != nil {
+		fmt.Fprintf(os.Stderr, "\n   %v\n", err)
+	} else {
+		running = true
+		fmt.Fprintf(os.Stderr, " running!\n")
+		ip, ipErr := client.WaitForPublicIP(ctx, instance.Region, instance.InstanceID, time.Minute)
+		if ipErr != nil {
+			fmt.Fprintf(os.Stderr, "   no public IP yet: %v\n", ipErr)
 		}
-
-		for _, inst := range instances {
-			if inst.InstanceID == instance.InstanceID {
-				if inst.State == "running" {
-					if !running {
-						fmt.Fprintf(os.Stderr, " running!\n")
-						running = true
-					}
-					newIP = inst.PublicIP
-				}
-				break
-			}
-		}
-		if running && newIP != "" {
-			break
-		}
-		fmt.Fprintf(os.Stderr, ".")
+		newIP = ip
 	}
 
 	if running && newIP != "" {

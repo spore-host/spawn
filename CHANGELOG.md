@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Ctrl-C was ignored for up to five minutes while waiting on an instance**
+  (#752's last item). Six polls in `cmd/` had no `ctx.Done()` case at all, so a
+  cancelled context did nothing until the loop's own iteration count ran out.
+  Three of them — `spawn connect` (twice) and `spawn start`/`spawn stop`'s
+  post-start wait — also hand-rolled a *wait for running* that
+  `pkg/aws.Client.WaitForRunning` already does properly: it wraps the SDK's
+  instance-running waiter and absorbs the #78 `InvalidInstanceID.NotFound`
+  window. The hand-rolled versions polled a **whole-region** `DescribeInstances`
+  every few seconds — cost scaling with fleet size — and slept *before* the first
+  check, charging 2–5s to an instance that was already running.
+  All three now call `WaitForRunning` plus **one** refresh. A new
+  `WaitForPublicIP` covers the case `spawn start` actually needs, since a
+  stop/start reassigns the address and the IP is often unpopulated the instant
+  state flips to `running` — mirroring `WaitForPasswordData`'s shape, which is
+  this package's canonical poll.
+  `spawn start` also silently swallowed an API error: a failed `ListInstances`
+  `break`ed out of the loop and reported "taking longer than expected", which is
+  not what had happened.
+- **`spawn connect` to a DCV session no longer spins to a five-minute timeout on
+  a named failure.** Its ready-url poll duplicated the tag parsing by hand and so
+  lacked the terminal-failure detection `spawn app` has, meaning a *known* cause
+  — DCV not installed, server not running, a tag-write denial — produced a
+  generic timeout instead of the specific message (#282). It now shares
+  `scanDCVReady` and `dcvFailureMessage` with `spawn app`.
+
 - **A failed `spored` install hung a burst instance's boot forever** (#752).
   `spawn burst`'s generated user-data waited with
   `while [ ! -f /usr/local/bin/spored ]; do sleep 5; done` — unbounded, with no

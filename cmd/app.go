@@ -431,19 +431,15 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	// 13. Wait for public IP (EC2 often doesn't assign it before RunInstances returns)
 	host := result.PublicIP
 	if host == "" {
+		// WaitForPublicIP rather than a hand-rolled loop (#752): it honours
+		// ctx, and it does not sleep before the first check.
 		fmt.Fprintf(os.Stderr, "Waiting for public IP...")
-		for i := 0; i < 30; i++ {
-			time.Sleep(3 * time.Second)
-			fmt.Fprintf(os.Stderr, ".")
-			ip, err := client.GetInstancePublicIP(ctx, region, result.InstanceID)
-			if err == nil && ip != "" {
-				host = ip
-				fmt.Fprintf(os.Stderr, " %s\n", host)
-				break
-			}
-		}
-		if host == "" {
-			fmt.Fprintf(os.Stderr, " (no public IP assigned)\n")
+		ip, err := client.WaitForPublicIP(ctx, region, result.InstanceID, 90*time.Second)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, " (no public IP assigned: %v)\n", err)
+		} else {
+			host = ip
+			fmt.Fprintf(os.Stderr, " %s\n", host)
 		}
 	}
 
@@ -465,7 +461,14 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		// Poll for up to 5 minutes (60 × 5s).
 		var lastStatus string
 		for i := 0; i < 60; i++ {
-			time.Sleep(5 * time.Second)
+			// select rather than a bare sleep, so a cancelled context ends the
+			// poll instead of being ignored for the full five minutes (#752).
+			select {
+			case <-ctx.Done():
+				fmt.Fprintf(os.Stderr, " cancelled\n")
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
 			fmt.Fprintf(os.Stderr, ".")
 			instances, err := client.ListInstances(ctx, region, "running")
 			if err != nil {

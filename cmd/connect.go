@@ -89,24 +89,24 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		if err := client.StartInstance(ctx, instance.Region, instance.InstanceID); err != nil {
 			return fmt.Errorf("start instance: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "Waiting for instance to reach running state")
-		for i := 0; i < 30; i++ {
-			time.Sleep(5 * time.Second)
-			fmt.Fprintf(os.Stderr, ".")
-			instances, err := client.ListInstances(ctx, instance.Region, "running")
-			if err != nil {
-				continue
-			}
-			for idx := range instances {
-				if instances[idx].InstanceID == instance.InstanceID {
-					instance = &instances[idx]
-					fmt.Fprintf(os.Stderr, " running\n\n")
-					goto instanceReady
-				}
-			}
+		// WaitForRunning rather than a hand-rolled loop (#752). It wraps the
+		// SDK's instance-running waiter, absorbs the #78 NotFound window, and
+		// returns the moment the state flips. What it replaces polled a
+		// WHOLE-REGION describe every 5s, `continue`d on error with no
+		// ctx.Done() case — so Ctrl-C was ignored for 2.5 minutes — and slept
+		// before its first check, charging 5s to an instance already running.
+		fmt.Fprintf(os.Stderr, "Waiting for instance to reach running state...")
+		if err := client.WaitForRunning(ctx, instance.Region, instance.InstanceID, 2*time.Minute); err != nil {
+			fmt.Fprintf(os.Stderr, "\n")
+			return fmt.Errorf("instance did not reach running state: %w", err)
 		}
-		return fmt.Errorf("instance did not reach running state within 2.5 minutes")
-	instanceReady:
+		// One refresh, for the public IP and tags a stop/start reassigns.
+		refreshed, err := resolveInstance(ctx, client, instance.InstanceID)
+		if err != nil {
+			return fmt.Errorf("re-read instance after start: %w", err)
+		}
+		instance = refreshed
+		fmt.Fprintf(os.Stderr, " running\n\n")
 	}
 
 	// Non-startable states (pending, shutting-down, terminated)
@@ -637,62 +637,65 @@ func connectDCV(ctx context.Context, client *aws.Client, instance *aws.InstanceI
 		if err := client.StartInstance(ctx, instance.Region, instance.InstanceID); err != nil {
 			return fmt.Errorf("start instance: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "Waiting for instance to reach running state")
-		for i := 0; i < 30; i++ {
-			time.Sleep(5 * time.Second)
-			fmt.Fprintf(os.Stderr, ".")
-			instances, err := client.ListInstances(ctx, instance.Region, "running")
-			if err != nil {
-				continue
-			}
-			for idx := range instances {
-				if instances[idx].InstanceID == instance.InstanceID {
-					instance = &instances[idx]
-					fmt.Fprintf(os.Stderr, " running\n")
-					goto instanceRunning
-				}
-			}
+		// Same as above (#752): the waiter, then one refresh.
+		fmt.Fprintf(os.Stderr, "Waiting for instance to reach running state...")
+		if err := client.WaitForRunning(ctx, instance.Region, instance.InstanceID, 2*time.Minute); err != nil {
+			fmt.Fprintf(os.Stderr, "\n")
+			return fmt.Errorf("instance did not reach running state: %w", err)
 		}
-		return fmt.Errorf("instance did not reach running state within 2.5 minutes")
-	instanceRunning:
+		refreshed, err := resolveInstance(ctx, client, instance.InstanceID)
+		if err != nil {
+			return fmt.Errorf("re-read instance after start: %w", err)
+		}
+		instance = refreshed
+		fmt.Fprintf(os.Stderr, " running\n")
 	}
 
 	// Wait for spored to write a fresh spawn:ready-url (new token after restart)
 	fmt.Fprintf(os.Stderr, "Waiting for DCV session")
-	var readyURL, authToken string
+	// scanDCVReady (cmd/dcv.go:73) rather than a hand-rolled tag parse (#752).
+	// This duplicated extractReadyFromTags by hand and so lacked the
+	// terminal-failure detection cmd/app.go has — meaning a NAMED failure spun
+	// to the generic five-minute timeout instead of reporting its cause (#282).
+	var readyURL, authToken, lastStatus string
 	for i := 0; i < 60; i++ {
-		time.Sleep(5 * time.Second)
+		// select rather than a bare sleep, so a cancelled context ends the poll
+		// instead of being ignored for five minutes.
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, " cancelled\n")
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 		fmt.Fprintf(os.Stderr, ".")
 		instances, err := client.ListInstances(ctx, instance.Region, "running")
 		if err != nil {
 			continue
 		}
-		for idx := range instances {
-			if instances[idx].InstanceID != instance.InstanceID {
-				continue
-			}
-			instance = &instances[idx]
-			if url := instance.Tags["spawn:ready-url"]; url != "" {
-				if idx2 := strings.Index(url, "authToken="); idx2 >= 0 {
-					authToken = url[idx2+10:]
-					// strip any trailing fragment
-					if amp := strings.Index(authToken, "&"); amp >= 0 {
-						authToken = authToken[:amp]
-					}
-					if hash := strings.Index(authToken, "#"); hash >= 0 {
-						authToken = authToken[:hash]
-					}
-				}
-				readyURL = url
-			}
+		scan := scanDCVReady(instances, instance.InstanceID)
+		lastStatus = scan.status
+		if scan.token != "" {
+			authToken = scan.token
+		}
+		if scan.url != "" {
+			readyURL = scan.url
 		}
 		if authToken != "" {
 			fmt.Fprintf(os.Stderr, " ready\n")
 			break
 		}
+		// Stop on a named terminal failure rather than spinning to the timeout.
+		if dcvStatusTerminal(lastStatus) {
+			fmt.Fprintf(os.Stderr, " failed\n")
+			break
+		}
 	}
 	if authToken == "" {
-		fmt.Fprintf(os.Stderr, " (timed out)\n")
+		if dcvStatusTerminal(lastStatus) {
+			fmt.Fprintf(os.Stderr, "   %s\n", dcvFailureMessage(lastStatus, instance.InstanceID))
+		} else {
+			fmt.Fprintf(os.Stderr, " (timed out)\n")
+		}
 	}
 
 	// Try to focus an existing browser tab containing this instance ID.
