@@ -499,8 +499,29 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 
 		// Check for completion
 		if state.NextToLaunch >= state.TotalParams && activeCount == 0 {
-			log.Println("All instances launched and completed")
-			state.Status = "COMPLETED"
+			// A sweep that launched NOTHING is not completed (#749).
+			//
+			// This branch used to log "All instances launched and completed" and
+			// set COMPLETED unconditionally, so a sweep whose every row was
+			// rejected by EC2 — which is what happened for the whole life of the
+			// detached path, because no `ami` was ever seeded — recorded itself as
+			// a success. The only evidence anywhere was this function's own log.
+			//
+			// state.Failed was already being counted; the completion branch simply
+			// did not consult it. FAILED is an existing status value, so no
+			// consumer gets a new one to mishandle, and `spawn resume` correctly
+			// stops treating the sweep as finished.
+			state.Status = completionStatus(state.Launched, state.Failed)
+			switch {
+			case state.Status == "FAILED":
+				log.Printf("SWEEP FAILED: 0 of %d instances launched (%d failed) — see the "+
+					"per-instance ErrorMessage in the sweep record", state.TotalParams, state.Failed)
+			case state.Failed > 0:
+				log.Printf("Sweep completed with failures: %d launched, %d failed of %d",
+					state.Launched, state.Failed, state.TotalParams)
+			default:
+				log.Printf("All %d instances launched and completed", state.Launched)
+			}
 			state.CompletedAt = time.Now().Format(time.RFC3339)
 			if err := saveSweepState(ctx, state); err != nil {
 				return fmt.Errorf("failed to save completion state: %w", err)
@@ -1626,4 +1647,22 @@ func cleanupPlacementGroup(ctx context.Context, ec2Client *ec2.Client, placement
 	}
 
 	return nil
+}
+
+// completionStatus maps a finished sweep's launch tally to its recorded status.
+//
+// Extracted so the decision is testable without a run: the branch it replaces
+// set "COMPLETED" unconditionally, so a sweep whose every row was rejected by
+// EC2 recorded itself as a success (#749).
+//
+// A partial failure stays COMPLETED on purpose. The sweep did run, the per-row
+// ErrorMessages are in the record, and a third status value would send `cancel`,
+// `resume` and six workflow adapters — all of which branch on
+// `Status == "COMPLETED"` — down a default path. FAILED is reserved for the
+// unambiguous case: nothing launched.
+func completionStatus(launched, failed int) string {
+	if launched == 0 && failed > 0 {
+		return "FAILED"
+	}
+	return "COMPLETED"
 }
