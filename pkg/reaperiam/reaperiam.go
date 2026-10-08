@@ -103,6 +103,16 @@ func ScanSelfStatements() []Statement {
 			Action: []string{
 				"ec2:DeleteSecurityGroup",
 				"ec2:DeletePlacementGroup",
+				// CreateTags, so the sweep can stamp an UNTAGGED spawn-managed
+				// resource with its first-seen time and age it out on a later
+				// cycle. Without this the stamp fails and the resource is skipped
+				// forever — which is the hole that left 21 orphaned security
+				// groups uncollectable after the reaper shipped.
+				//
+				// Tag-conditioned like the deletes, so the reaper can only stamp
+				// something already carrying spawn:managed=true. It cannot adopt a
+				// resource that is not ours by tagging it.
+				"ec2:CreateTags",
 			},
 			Resource:  "*",
 			Condition: ManagedTagCondition,

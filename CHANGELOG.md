@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Orphaned security groups and placement groups were permanently
+  uncollectable** — the creation stamp the reaper depends on was never written by
+  anything. `spawn:created` was read in three places and written in **none**, so
+  the reaper's net-resource sweep (#685) skipped every resource it found, by
+  design:
+  > No creation stamp. Skipped rather than guessed: an untimed group could be
+  > seconds old, and deleting a group a launch is about to use would break that
+  > launch.
+  That reasoning is right in isolation. Combined with no writer — and with the
+  creating Lambda's cleanup goroutine being frozen by the runtime (#752) — the two
+  safety properties composed into a leak with **no collector**: the creator could
+  not delete them and the reaper would not. A live sweep found **21 such security
+  groups across three regions**, every one with zero network interfaces and
+  `spawn:managed=true`, which is essentially the entire set #685 first reported,
+  still present months after the reaper shipped.
+  All seven network-resource creation sites now tag through a single
+  `pkg/aws.LifecycleTags`, which always emits `spawn:managed` and `spawn:created`.
+  Two of those sites — the pipeline orchestrator's security group and placement
+  group — previously carried **no `spawn:managed` tag at all**, so the reaper was
+  not even permitted to touch them; its delete grants are conditioned on exactly
+  that tag.
+  A test now requires every raw `CreateSecurityGroup`/`CreatePlacementGroup` call
+  to tag through that helper, because six hand-rolled tag slices is how the stamp
+  came to be missing from all of them.
+- **The reaper can now reclaim an untagged orphan instead of skipping it
+  forever.** A spawn-managed resource with no creation stamp is stamped with a
+  `spawn:reaper-first-seen` time on first sight and aged out against a **30-day**
+  fallback — four times the normal grace, because the discovery time is a lower
+  bound on the real age rather than the age itself.
+  Deliberately a separate tag from `spawn:created`: backfilling that would claim
+  the resource was created when we noticed it, which is false, and would hide the
+  fact that some creation path is not tagging. `report` mode still writes nothing,
+  since a mode that claims to change nothing should not mutate tags either, and a
+  failed stamp is non-fatal — the resource is simply re-stamped next cycle.
+  This needed `ec2:CreateTags`, tag-conditioned on `spawn:managed=true` so the
+  reaper can stamp only what is already ours and cannot adopt a resource by
+  tagging it. **#685's IAM parity gate caught the grant being added to the
+  scan-self policy and not the cross-account role** — a one-sided grant that would
+  have worked in one deployment mode and silently no-opped in the other.
+
 ## [0.125.0] - 2026-10-08
 
 ### Added

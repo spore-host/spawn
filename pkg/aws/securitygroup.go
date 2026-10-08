@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -125,20 +126,9 @@ func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID,
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSecurityGroup,
-				Tags: []types.Tag{
-					{
-						Key:   aws.String("Name"),
-						Value: aws.String(groupName),
-					},
-					{
-						Key:   aws.String("spawn:managed"),
-						Value: aws.String("true"),
-					},
-					{
-						Key:   aws.String("spawn:purpose"),
-						Value: aws.String("mpi-cluster"),
-					},
-				},
+				// LifecycleTags adds spawn:created, which the reaper's sweep needs
+				// and which nothing used to write — see the #685 follow-up.
+				Tags: LifecycleTags(groupName, "mpi-cluster", time.Now()),
 			},
 		},
 	})
@@ -210,11 +200,7 @@ func (c *Client) CreateOrGetWindowsSecurityGroup(ctx context.Context, region, vp
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSecurityGroup,
-				Tags: []types.Tag{
-					{Key: aws.String("Name"), Value: aws.String(groupName)},
-					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-					{Key: aws.String("spawn:purpose"), Value: aws.String("windows")},
-				},
+				Tags:         LifecycleTags(groupName, "windows", time.Now()),
 			},
 		},
 	})
@@ -362,10 +348,7 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSecurityGroup,
-				Tags: []types.Tag{
-					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-					{Key: aws.String("Name"), Value: aws.String(sgName)},
-				},
+				Tags:         LifecycleTags(sgName, "", time.Now()),
 			},
 		},
 	})
@@ -448,10 +431,7 @@ func (c *Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID 
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSecurityGroup,
-				Tags: []types.Tag{
-					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-					{Key: aws.String("Name"), Value: aws.String(sgName)},
-				},
+				Tags:         LifecycleTags(sgName, "", time.Now()),
 			},
 		},
 	})

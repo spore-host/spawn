@@ -14,12 +14,24 @@ import (
 
 type fakeNetAPI struct {
 	instances []ec2types.Instance
+	// tagged records resource IDs stamped with the reaper's first-seen tag, so a
+	// test can assert the untagged fallback actually stamps rather than skipping.
+	tagged    []string
+	tagErr    error
 	sgs       []ec2types.SecurityGroup
 	pgs       []ec2types.PlacementGroup
 	deletedSG []string
 	deletedPG []string
 	sgDelErr  error
 	pgDelErr  error
+}
+
+func (f *fakeNetAPI) CreateTags(_ context.Context, in *ec2.CreateTagsInput, _ ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error) {
+	if f.tagErr != nil {
+		return nil, f.tagErr
+	}
+	f.tagged = append(f.tagged, in.Resources...)
+	return &ec2.CreateTagsOutput{}, nil
 }
 
 func (f *fakeNetAPI) DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
@@ -309,5 +321,127 @@ func TestParseNetResources(t *testing.T) {
 		if got := parseNetResources(in); got != want {
 			t.Errorf("parseNetResources(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// discoveryTag builds the reaper's first-seen stamp at a given age.
+func discoveryTag(age time.Duration, now time.Time) ec2types.Tag {
+	return ec2types.Tag{
+		Key:   awssdk.String(discoveryTagKey),
+		Value: awssdk.String(now.Add(-age).Format(time.RFC3339)),
+	}
+}
+
+// An untagged resource used to be skipped FOREVER. Combined with #752 — the
+// creating Lambda's cleanup goroutine being frozen by the runtime — that made
+// every orphan permanently uncollectable: the creator could not delete it and
+// the reaper would not. A live sweep found 21 such security groups across three
+// regions, all with zero network interfaces and spawn:managed=true.
+func TestUntaggedResourceIsStampedThenAgedOut(t *testing.T) {
+	now := time.Now()
+
+	t.Run("first sight: stamped, not deleted", func(t *testing.T) {
+		f := &fakeNetAPI{
+			sgs: []ec2types.SecurityGroup{{
+				GroupId: awssdk.String("sg-untagged"), GroupName: awssdk.String("spawn-old"),
+				// No spawn:created, no first-seen.
+			}},
+		}
+		sum, _ := runNetSweepMode(t, f, false, netResourcesReap)
+		if len(f.deletedSG) != 0 {
+			t.Errorf("deleted an untagged group on first sight (%v) — its age is still unknown", f.deletedSG)
+		}
+		if len(f.tagged) != 1 || f.tagged[0] != "sg-untagged" {
+			t.Errorf("tagged = %v, want [sg-untagged] — without the stamp it is skipped forever", f.tagged)
+		}
+		if sum.NetSkipped != 1 {
+			t.Errorf("NetSkipped = %d, want 1", sum.NetSkipped)
+		}
+	})
+
+	t.Run("stamped recently: still within the longer grace", func(t *testing.T) {
+		f := &fakeNetAPI{
+			sgs: []ec2types.SecurityGroup{{
+				GroupId: awssdk.String("sg-recent"), GroupName: awssdk.String("spawn-old"),
+				Tags: []ec2types.Tag{discoveryTag(10*24*time.Hour, now)},
+			}},
+		}
+		_, _ = runNetSweepMode(t, f, false, netResourcesReap)
+		if len(f.deletedSG) != 0 {
+			t.Errorf("deleted after only 10 days seen; the untagged grace is %s", netResourceUntaggedGrace)
+		}
+	})
+
+	t.Run("stamped long ago: reclaimed", func(t *testing.T) {
+		f := &fakeNetAPI{
+			sgs: []ec2types.SecurityGroup{{
+				GroupId: awssdk.String("sg-ancient"), GroupName: awssdk.String("spawn-old"),
+				Tags: []ec2types.Tag{discoveryTag(netResourceUntaggedGrace+time.Hour, now)},
+			}},
+		}
+		sum, _ := runNetSweepMode(t, f, false, netResourcesReap)
+		if len(f.deletedSG) != 1 || f.deletedSG[0] != "sg-ancient" {
+			t.Errorf("deletedSG = %v, want [sg-ancient] — an untagged orphan must eventually "+
+				"be collectable, or it is stranded for good", f.deletedSG)
+		}
+		if sum.NetReaped != 1 {
+			t.Errorf("NetReaped = %d, want 1", sum.NetReaped)
+		}
+	})
+
+	// The untagged grace must be clearly LONGER than the normal one: the age is a
+	// lower bound from when we first looked, not the real age, so the guess has to
+	// be generous.
+	t.Run("the untagged grace is longer than the tagged one", func(t *testing.T) {
+		if netResourceUntaggedGrace <= netResourceGrace {
+			t.Errorf("untagged grace %s is not longer than the tagged grace %s",
+				netResourceUntaggedGrace, netResourceGrace)
+		}
+	})
+
+	// A properly stamped resource must keep using the SHORT grace — the fallback
+	// must not slow down the normal path.
+	t.Run("a spawn:created stamp still uses the 7-day grace", func(t *testing.T) {
+		f := &fakeNetAPI{sgs: []ec2types.SecurityGroup{
+			sg("sg-tagged", "spawn-mpi-x", 8*24*time.Hour, now),
+		}}
+		_, _ = runNetSweepMode(t, f, false, netResourcesReap)
+		if len(f.deletedSG) != 1 {
+			t.Errorf("a tagged 8-day-old group was not reaped (%v); the fallback must not "+
+				"extend the normal grace", f.deletedSG)
+		}
+	})
+}
+
+// report mode must not write tags either. A mode that claims to change nothing
+// should change nothing — a stamp is harmless but it is still a mutation.
+func TestReportModeDoesNotStamp(t *testing.T) {
+	f := &fakeNetAPI{
+		sgs: []ec2types.SecurityGroup{{
+			GroupId: awssdk.String("sg-untagged"), GroupName: awssdk.String("spawn-old"),
+		}},
+	}
+	_, _ = runNetSweepMode(t, f, false, netResourcesReport)
+	if len(f.tagged) != 0 {
+		t.Errorf("report mode stamped %v", f.tagged)
+	}
+}
+
+// A failed stamp must not be fatal: the resource is simply re-stamped next
+// cycle, which is the same outcome as before the stamp existed.
+func TestStampFailureIsNotFatal(t *testing.T) {
+	f := &fakeNetAPI{
+		tagErr: errors.New("UnauthorizedOperation: no ec2:CreateTags"),
+		sgs: []ec2types.SecurityGroup{{
+			GroupId: awssdk.String("sg-untagged"), GroupName: awssdk.String("spawn-old"),
+		}},
+	}
+	sum, out := runNetSweepMode(t, f, false, netResourcesReap)
+	if sum.NetSkipped != 1 {
+		t.Errorf("NetSkipped = %d, want 1", sum.NetSkipped)
+	}
+	if out.opErrors != 0 || out.denied != 0 {
+		t.Errorf("a failed stamp recorded account errors (opErrors=%d denied=%d); it is best-effort",
+			out.opErrors, out.denied)
 	}
 }

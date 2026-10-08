@@ -23,6 +23,10 @@ type netResourceAPI interface {
 	DeleteSecurityGroup(ctx context.Context, in *ec2.DeleteSecurityGroupInput, optFns ...func(*ec2.Options)) (*ec2.DeleteSecurityGroupOutput, error)
 	DescribePlacementGroups(ctx context.Context, in *ec2.DescribePlacementGroupsInput, optFns ...func(*ec2.Options)) (*ec2.DescribePlacementGroupsOutput, error)
 	DeletePlacementGroup(ctx context.Context, in *ec2.DeletePlacementGroupInput, optFns ...func(*ec2.Options)) (*ec2.DeletePlacementGroupOutput, error)
+	// CreateTags is used only to stamp an untagged resource with the reaper's
+	// first-seen time, so it can be aged out on a later cycle rather than
+	// skipped forever.
+	CreateTags(ctx context.Context, in *ec2.CreateTagsInput, optFns ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error)
 }
 
 // netResourceGrace is how long a spawn-managed security group or placement group
@@ -41,6 +45,32 @@ type netResourceAPI interface {
 // pressure is the per-VPC quota, which bites at LAUNCH time, the worst moment to
 // discover it.
 const netResourceGrace = 7 * 24 * time.Hour
+
+// netResourceUntaggedGrace is the fallback for a spawn-managed resource carrying
+// NO creation stamp.
+//
+// Skipping untagged resources entirely was the original behaviour and the
+// reasoning was sound in isolation: EC2 reports no creation time for either
+// resource, so an untimed group could be seconds old, and deleting one a launch
+// is about to use would break that launch.
+//
+// But nothing WROTE the stamp. The two safety properties — "the creator cleans
+// up" and "the reaper never guesses an age" — composed into a leak with no
+// collector: the creating Lambda could not delete them (#752, a goroutine the
+// runtime froze) and the reaper would not. A live sweep found 21 such security
+// groups across three regions, all with zero network interfaces and
+// spawn:managed=true, which is essentially the entire set #685 first reported,
+// still present after the reaper shipped.
+//
+// 30 days closes that hole without weakening the short grace. Nothing spawn
+// creates legitimately sits unused AND untagged for a month: the creation paths
+// now stamp every resource (pkg/aws.LifecycleTags), so an untagged resource is
+// by definition from a build that predates that, or from a path nobody has
+// tagged yet — and in neither case is it a group a launch is about to use.
+//
+// It is still a GUESS, which is why it is four times the normal grace and why
+// the log line says so.
+const netResourceUntaggedGrace = 30 * 24 * time.Hour
 
 // reapNetResourcesRegion reclaims spawn-managed security groups and cluster
 // placement groups that no instance references and that are older than
@@ -123,16 +153,22 @@ func (r *reaper) reapSecurityGroups(ctx context.Context, cli netResourceAPI, acc
 			continue
 		}
 		age, ok := netResourceAge(sg.Tags, now)
+		grace := netResourceGrace
 		if !ok {
-			// No creation stamp. Skipped rather than guessed: an untimed group
-			// could be seconds old, and deleting a group a launch is about to use
-			// would break that launch. `spawn orphans` still surfaces it.
-			log.Printf("net-resources: %s/%s: security group %s (%s) has no %s tag — skipping (age unknown)",
-				acct.label, region, id, name, tagprefix.Tag("created"))
-			sum.NetSkipped++
-			continue
+			// No creation stamp: fall back to the discovery age (how long WE have
+			// been seeing it) against a much longer grace. Skipping outright is
+			// what made these permanently uncollectable.
+			age, ok = untaggedAge(sg.Tags, now)
+			if !ok {
+				log.Printf("net-resources: %s/%s: security group %s (%s) has no %s tag and no "+
+					"discovery stamp — tagging it so a later cycle can age it out",
+					acct.label, region, id, name, tagprefix.Tag("created"))
+				r.stampDiscovery(ctx, cli, id, acct, region, sum)
+				continue
+			}
+			grace = netResourceUntaggedGrace
 		}
-		if age < netResourceGrace {
+		if age < grace {
 			continue
 		}
 		if r.netReportOnly() {
@@ -183,13 +219,19 @@ func (r *reaper) reapPlacementGroups(ctx context.Context, cli netResourceAPI, ac
 			continue // creating/deleting/failed: nothing to do, and delete would fail
 		}
 		age, ok := netResourceAge(pg.Tags, now)
+		grace := netResourceGrace
 		if !ok {
-			log.Printf("net-resources: %s/%s: placement group %s has no %s tag — skipping (age unknown)",
-				acct.label, region, name, tagprefix.Tag("created"))
-			sum.NetSkipped++
-			continue
+			age, ok = untaggedAge(pg.Tags, now)
+			if !ok {
+				log.Printf("net-resources: %s/%s: placement group %s has no %s tag and no "+
+					"discovery stamp — tagging it so a later cycle can age it out",
+					acct.label, region, name, tagprefix.Tag("created"))
+				r.stampDiscovery(ctx, cli, awssdk.ToString(pg.GroupId), acct, region, sum)
+				continue
+			}
+			grace = netResourceUntaggedGrace
 		}
-		if age < netResourceGrace {
+		if age < grace {
 			continue
 		}
 		if r.netReportOnly() {
@@ -284,4 +326,67 @@ func parseNetResources(v string) string {
 // lie.
 func (r *reaper) netReportOnly() bool {
 	return r.dryRun || r.netResources != netResourcesReap
+}
+
+// discoveryTagKey records when the reaper FIRST saw an untagged resource.
+//
+// It exists because neither DescribeSecurityGroups nor DescribePlacementGroups
+// reports a creation time, so for a resource with no spawn:created stamp there is
+// no age to measure — and "no age" is what made these permanently uncollectable.
+// Stamping on first sight converts an unknowable age into a knowable one: not the
+// resource's true age, but a lower bound on it, which is the conservative
+// direction and all the grace check needs.
+//
+// Deliberately a SEPARATE key from spawn:created. Backfilling spawn:created would
+// claim the resource was created when we noticed it, which is false and would
+// also hide the fact that a creation path is not tagging.
+const discoveryTagKey = "spawn:reaper-first-seen"
+
+// untaggedAge returns how long the reaper has been observing a resource that has
+// no creation stamp, from the discovery tag it writes itself.
+func untaggedAge(tags []ec2types.Tag, now time.Time) (time.Duration, bool) {
+	for _, t := range tags {
+		if awssdk.ToString(t.Key) != discoveryTagKey {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, awssdk.ToString(t.Value))
+		if err != nil {
+			return 0, false
+		}
+		age := now.Sub(ts)
+		if age < 0 {
+			return 0, false // clock skew; treat as unknown rather than negative
+		}
+		return age, true
+	}
+	return 0, false
+}
+
+// stampDiscovery writes the first-seen tag so a later cycle can age the resource
+// out.
+//
+// Best-effort and non-fatal: a failure here means the resource is simply
+// re-stamped next cycle, which is the same outcome as now. Counted as skipped
+// either way, because nothing was reclaimed.
+func (r *reaper) stampDiscovery(ctx context.Context, cli netResourceAPI, resourceID string, acct account, region string, sum *Summary) {
+	sum.NetSkipped++
+	if resourceID == "" {
+		return
+	}
+	if r.netReportOnly() {
+		// A report-only cycle must not write either. The stamp is harmless, but a
+		// mode that claims to change nothing should change nothing — including
+		// tags.
+		return
+	}
+	if _, err := cli.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{resourceID},
+		Tags: []ec2types.Tag{{
+			Key:   awssdk.String(discoveryTagKey),
+			Value: awssdk.String(time.Now().UTC().Format(time.RFC3339)),
+		}},
+	}); err != nil {
+		log.Printf("net-resources: %s/%s: could not stamp %s with %s: %v",
+			acct.label, region, resourceID, discoveryTagKey, err)
+	}
 }
