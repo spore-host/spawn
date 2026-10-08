@@ -170,3 +170,83 @@ func TestRenderStatusTable_Unchanged(t *testing.T) {
 		t.Error("table output unexpectedly parsed as JSON")
 	}
 }
+
+// A first-boot instance must NOT report its boot time as time spent stopped.
+//
+// The reported case was `Elapsed: 22m 13s (20m 0s compute · 2m 13s stopped)` on
+// an instance that had never been stopped: stoppedTime was a RESIDUE — elapsed
+// since launch minus compute since spored started — so it absorbed boot,
+// cloud-init and package installs and asserted they were a stop (#735).
+func TestStatusReport_FirstBootReportsNoStoppedTime(t *testing.T) {
+	report := newTestReport(t)
+
+	if report.StoppedSeconds != 0 {
+		t.Errorf("StoppedSeconds = %.0f on an instance that was never stopped — "+
+			"that is boot time mislabelled (#735)", report.StoppedSeconds)
+	}
+	// The boot gap is real and now reported in its own right: spored knows both
+	// the instance launch time and its own start, so it is measured rather than
+	// inferred. A slow boot is worth seeing.
+	if report.BootSeconds <= 0 {
+		t.Errorf("BootSeconds = %.0f, want > 0 — the launch-to-spored gap is the "+
+			"residue that used to be called 'stopped'", report.BootSeconds)
+	}
+	// And it must account for the elapsed time rather than vanishing.
+	if sum := report.ComputeSeconds + report.BootSeconds + report.StoppedSeconds; sum < report.ElapsedSeconds-2 {
+		t.Errorf("compute+boot+stopped = %.0f but elapsed = %.0f; %.0fs is unaccounted for",
+			sum, report.ElapsedSeconds, report.ElapsedSeconds-sum)
+	}
+}
+
+// The rendered line must not claim a stop that did not happen.
+func TestStatusTable_NeverStoppedOmitsTheStoppedTerm(t *testing.T) {
+	report := newTestReport(t)
+	// The fixture's agent was created just now, so TotalComputeSeconds rounds to
+	// zero and the pre-existing `computeTime > 0` guard suppresses the whole
+	// breakdown. Set it to the reported shape — 20 minutes of compute after a
+	// 2m13s boot — so the renderer is actually exercised.
+	report.ComputeSeconds = (20 * time.Minute).Seconds()
+	report.BootSeconds = (2*time.Minute + 13*time.Second).Seconds()
+	report.StoppedSeconds = 0
+	report.ElapsedSeconds = (22*time.Minute + 13*time.Second).Seconds()
+
+	out := captureStdout(t, func() {
+		if err := renderStatusTable(report); err != nil {
+			t.Fatalf("renderStatusTable: %v", err)
+		}
+	})
+	if strings.Contains(out, "stopped") {
+		t.Errorf("output claims stopped time on a never-stopped instance:\n%s", out)
+	}
+	if !strings.Contains(out, "boot") {
+		t.Errorf("output does not report the boot gap:\n%s", out)
+	}
+}
+
+// CPU must render as an honest unknown rather than a confident reading when there
+// was no sample interval — which, for a one-shot `spored status`, is the common
+// case rather than an edge one (#734).
+func TestStatusTable_UnmeasuredCPUIsNotPrintedAsAValue(t *testing.T) {
+	report := newTestReport(t)
+	report.CPUMeasured = false
+	report.CPUPercent = 100.0 // the assume-active sentinel
+
+	out := captureStdout(t, func() {
+		if err := renderStatusTable(report); err != nil {
+			t.Fatalf("renderStatusTable: %v", err)
+		}
+	})
+	if strings.Contains(out, "CPU:              100.0%") {
+		t.Errorf("an unmeasured sentinel was printed as a reading:\n%s", out)
+	}
+	if !strings.Contains(out, "unknown") {
+		t.Errorf("output does not mark the CPU reading unknown:\n%s", out)
+	}
+
+	report.CPUMeasured = true
+	report.CPUPercent = 42.5
+	out = captureStdout(t, func() { _ = renderStatusTable(report) })
+	if !strings.Contains(out, "42.5%") {
+		t.Errorf("a real measurement was not printed:\n%s", out)
+	}
+}

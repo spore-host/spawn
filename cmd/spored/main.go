@@ -398,6 +398,10 @@ type statusReport struct {
 	ElapsedSeconds  float64   `json:"elapsed_seconds"`
 	ComputeSeconds  float64   `json:"compute_seconds"`
 	StoppedSeconds  float64   `json:"stopped_seconds"`
+	// BootSeconds is the gap between the instance launching and spored starting
+	// — boot, cloud-init, package installs. Reported separately because it used
+	// to be folded into StoppedSeconds by subtraction (#735).
+	BootSeconds float64 `json:"boot_seconds"`
 
 	ConfigLoadError string `json:"config_load_error,omitempty"`
 
@@ -409,9 +413,13 @@ type statusReport struct {
 
 	Cost *statusCost `json:"cost,omitempty"` // nil when no price is known (nothing to report)
 
-	CPUPercent         float64 `json:"cpu_percent"`
-	NetworkBytesPerMin int64   `json:"network_bytes_per_min"`
-	PreStopHook        string  `json:"pre_stop_hook,omitempty"`
+	CPUPercent float64 `json:"cpu_percent"`
+	// CPUMeasured is false when CPUPercent is an assumption rather than a
+	// reading — no sample interval yet, or /proc/stat unreadable (#734). A
+	// consumer must not plot or threshold an unmeasured value.
+	CPUMeasured        bool   `json:"cpu_measured"`
+	NetworkBytesPerMin int64  `json:"network_bytes_per_min"`
+	PreStopHook        string `json:"pre_stop_hook,omitempty"`
 }
 
 type statusTTL struct {
@@ -462,7 +470,12 @@ type statusCost struct {
 // single source of truth both renderTable and renderJSON draw from.
 func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provider.Identity) *statusReport {
 	uptime := ag.GetUptime()
+	// Order matters and is now deliberate: IsIdle consumes a CPU sample, so the
+	// report's own read must come AFTER it and be reused, not taken fresh. Two
+	// calls microseconds apart is what produced `Not idle: CPU usage 100.00%`
+	// beside `CPU: 0.0%` in one status output (#734).
 	isIdle := ag.IsIdle()
+	cpuPercent, cpuMeasured := ag.GetCPUUsageMeasured()
 
 	completionFileExists := false
 	if config.CompletionFile != "" {
@@ -488,8 +501,28 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 	elapsed := time.Since(launchTime)
 	computeSecs := ag.TotalComputeSeconds()
 	computeTime := time.Duration(computeSecs) * time.Second
-	stoppedTime := elapsed - computeTime
-	if stoppedTime < 0 {
+
+	// Split the unaccounted remainder into BOOT and STOPPED rather than calling
+	// all of it stopped (#735).
+	//
+	// elapsed runs from the instance's launch time; computeTime accumulates only
+	// from when spored started. The difference is therefore boot + cloud-init +
+	// package installs, PLUS any genuine stopped time — and the old code labelled
+	// the whole residue "stopped", asserting a specific checkable fact (the
+	// instance was stopped for 2m 13s) from arithmetic that cannot tell being
+	// stopped from never having started.
+	//
+	// bootTime is directly computable: spored knows both the launch time and its
+	// own start. Whatever is left after that is stopped time, and only an
+	// instance with prior compute time carried over through the tag has any.
+	bootTime := startTime.Sub(launchTime)
+	if bootTime < 0 {
+		bootTime = 0 // clock skew between the tag and local uptime
+	}
+	stoppedTime := elapsed - computeTime - bootTime
+	if stoppedTime < 0 || !ag.HasPriorComputeTime() {
+		// No carried-over compute time means the instance has never been stopped,
+		// so there is no stopped time to report however the subtraction lands.
 		stoppedTime = 0
 	}
 
@@ -522,8 +555,10 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		ElapsedSeconds:     elapsed.Seconds(),
 		ComputeSeconds:     computeTime.Seconds(),
 		StoppedSeconds:     stoppedTime.Seconds(),
+		BootSeconds:        bootTime.Seconds(),
 		ConfigLoadError:    config.ConfigLoadError,
-		CPUPercent:         ag.GetCPUUsage(),
+		CPUPercent:         cpuPercent,
+		CPUMeasured:        cpuMeasured,
 		NetworkBytesPerMin: ag.GetNetworkBytes(),
 		PreStopHook:        config.PreStop,
 	}
@@ -671,11 +706,22 @@ func renderStatusTable(report *statusReport) error {
 	elapsed := time.Duration(report.ElapsedSeconds * float64(time.Second))
 	computeTime := time.Duration(report.ComputeSeconds * float64(time.Second))
 	stoppedTime := time.Duration(report.StoppedSeconds * float64(time.Second))
+	bootTime := time.Duration(report.BootSeconds * float64(time.Second))
 
 	fmt.Printf("  Started:          %s\n", report.StartedAt.Format("2006-01-02 15:04 UTC"))
 	fmt.Printf("  Elapsed:          %s", formatDuration(elapsed))
-	if computeTime > 0 && stoppedTime > 0 {
-		fmt.Printf("  (%s compute · %s stopped)", formatDuration(computeTime), formatDuration(stoppedTime))
+	// Each term appears only when it is non-zero, so a first-boot instance that
+	// was never stopped no longer claims to have been. Boot time is worth seeing
+	// in its own right: a slow boot is a real thing to notice.
+	if computeTime > 0 && (bootTime > 0 || stoppedTime > 0) {
+		parts := []string{formatDuration(computeTime) + " compute"}
+		if bootTime > 0 {
+			parts = append(parts, formatDuration(bootTime)+" boot")
+		}
+		if stoppedTime > 0 {
+			parts = append(parts, formatDuration(stoppedTime)+" stopped")
+		}
+		fmt.Printf("  (%s)", strings.Join(parts, " · "))
 	}
 	if report.StartedAtSource != launchTimeSourceTag {
 		// Only annotate the fallback paths — the common case (the tag read
@@ -768,7 +814,14 @@ func renderStatusTable(report *statusReport) error {
 
 	// ── Live metrics (brief) ──────────────────────────────────────────────────
 	fmt.Println()
-	fmt.Printf("  CPU:              %.1f%%\n", report.CPUPercent)
+	if report.CPUMeasured {
+		fmt.Printf("  CPU:              %.1f%%\n", report.CPUPercent)
+	} else {
+		// An honest unknown beats a confident 0.0% on a box running at 100%.
+		// A one-shot `spored status` has no prior sample to delta against, so
+		// this is the COMMON case there, not an edge one.
+		fmt.Printf("  CPU:              unknown (single sample; assuming active)\n")
+	}
 	fmt.Printf("  Network:          %s/min\n", formatBytes(report.NetworkBytesPerMin))
 	if report.PreStopHook != "" {
 		fmt.Printf("  Pre-stop hook:    %s\n", report.PreStopHook)
