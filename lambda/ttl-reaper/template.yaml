@@ -465,6 +465,58 @@ Resources:
       AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
       OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
 
+  # spored stopped ticking on a RUNNING instance (#682). Unlike every sentinel
+  # above, this one is about the in-instance agent rather than the reaper's own
+  # reach: the instance is still billing, and the TTL/idle/cost limits spored
+  # enforces locally are no longer being enforced at all. The reaper is then the
+  # only thing that will ever stop it.
+  SporedQuietMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: ObservabilityEnabled
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '"SPORED NOT CHECKING IN"'
+      MetricTransformations:
+        - MetricName: SporedQuiet
+          MetricNamespace: !Sub spawn/ttl-reaper/${Environment}
+          MetricValue: '1'
+          DefaultValue: 0
+
+  SporedQuietAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ObservabilityEnabled
+    Properties:
+      AlarmName: !Sub spawn-ttl-reaper-${Environment}-spored-quiet
+      AlarmDescription: >
+        A running spawn-managed instance stopped refreshing spawn:last-heartbeat, so
+        spored started and then died. TTL, idle-stop and cost limits are enforced IN
+        the instance, so none of them are being enforced now — this reaper's deadline
+        scan is the only thing left that will terminate it.
+
+        The reported shape (spawn#682) is a starved instance: 0.5 GiB of RAM, wedged
+        during a package install, still running at TWICE its 6-minute TTL with no
+        signal of any kind, indistinguishable from a long-running job. v0.121.0's
+        memory-floor warning prevents that launch; this makes it observable when it
+        happens anyway.
+
+        Deliberately NOT a reap trigger: a wedged agent on a healthy workload is a
+        diagnosis, not a deadline. The log line names the instance, account, region
+        and how far behind it is. Usually out of memory — check spored's journal via
+        SSM, and terminate by hand if the work is lost.
+      Namespace: !Sub spawn/ttl-reaper/${Environment}
+      MetricName: SporedQuiet
+      Statistic: Sum
+      # Three consecutive runs, so a single lost tag write or a throttled
+      # TagResources call does not page anyone. A genuinely wedged agent keeps
+      # emitting this every run until the instance is reaped or killed.
+      Period: 3600
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+
   # A run that dies outright — panic, timeout, OOM, a bad deploy — never reaches the
   # code that emits any sentinel above, so those alarms stay silent precisely when
   # things are worst. This one covers that gap and needs no log parsing.

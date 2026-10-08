@@ -266,6 +266,7 @@ turns a rename into a build failure rather than a silently disarmed alarm.
 | `REAPER REACHED NO ACCOUNTS` | `…-reached-no-accounts` | 2×1h | **The one that matters.** Zero accounts reached: nothing was reaped, and over-deadline instances may be running with nothing left to stop them. Investigate **our** side first — execution role, the [#457] role-ARN suffix, `EC2_EXTERNAL_ID` |
 | `REAPER ACCOUNT UNREACHABLE` | `…-account-unreachable` | 1×24h | One account's role refuses us everywhere. Chronic, not acute — the rest of the fleet is fine. Fix the role or remove it from `ROLE_ARNS` |
 | `REAPER FSX UNREACHABLE` | `…-fsx-unreachable` | 1×24h | An account refuses every FSx call, so orphaned filesystems accrue cost unreclaimed. Usually its instance scan works fine — that combination is [#212] |
+| `SPORED NOT CHECKING IN` | `…-spored-quiet` | 3×1h | A **running** instance stopped refreshing `spawn:last-heartbeat`, so `spored` started and then died — its in-instance TTL, idle and cost limits are no longer being enforced and this reaper is the only thing left that will stop it. The one sentinel here about the *agent* rather than the reaper's own reach. Never a reap trigger: a wedged agent on a healthy workload is a diagnosis, not a deadline ([#682]) |
 | *(none — `AWS/Lambda` `Errors`)* | `…-invocation-errors` | 1×1h | The run died outright (panic, 900s timeout, OOM, bad deploy) and so emitted **none** of the sentinels above. Without this, the loudest failure would be the quietest signal |
 | *(none — `AWS/Lambda` `Invocations`)* | `…-not-invoked` | 1×30m, `TreatMissingData: breaching` | The reaper wasn't invoked **at all** — not "ran and failed," but never started (disabled EventBridge rule, deleted schedule, concurrency set to 0, or the function deleted). The four alarms above all use `TreatMissingData: notBreaching`, correctly, but that means "not running" produces zero breaching datapoints anywhere else in this table — this is the one alarm here where absence of data IS the failure ([#475]) |
 
@@ -327,5 +328,6 @@ nothing — by design, since a partial live set could orphan a healthy record.
 [#466]: https://github.com/spore-host/spawn/issues/466
 [#469]: https://github.com/spore-host/spawn/issues/469
 [#475]: https://github.com/spore-host/spawn/issues/475
+[#682]: https://github.com/spore-host/spawn/issues/682
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71

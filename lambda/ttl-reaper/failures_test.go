@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -478,9 +479,36 @@ func TestSentinelSpellingsAreStable(t *testing.T) {
 		sentinelAllAccountsFailed: "REAPER REACHED NO ACCOUNTS",
 		sentinelAccountDenied:     "REAPER ACCOUNT UNREACHABLE",
 		sentinelFSxDenied:         "REAPER FSX UNREACHABLE",
+		sentinelHeartbeatStale:    "SPORED NOT CHECKING IN",
 	} {
 		if got != want {
 			t.Errorf("sentinel = %q, want %q — update the MetricFilter patterns in template.yaml in the same commit", got, want)
+		}
+	}
+}
+
+// …and pinning the spelling is only half the contract: a sentinel with no
+// MetricFilter is a log line nobody alarms on. Read the template and require one
+// for each. This is the same failure as the heartbeat tag itself, which spored has
+// written every tick since #497 with zero readers (#682) — a signal that exists and
+// is wired to nothing is indistinguishable from no signal.
+func TestEverySentinelHasAMetricFilter(t *testing.T) {
+	b, err := os.ReadFile("template.yaml")
+	if err != nil {
+		t.Fatalf("read template.yaml: %v", err)
+	}
+	tmpl := string(b)
+	for _, s := range []string{
+		sentinelAllAccountsFailed,
+		sentinelAccountDenied,
+		sentinelFSxDenied,
+		sentinelHeartbeatStale,
+	} {
+		// The literal CloudWatch FilterPattern form, quotes included: a bare
+		// substring match would also be satisfied by the sentinel merely being
+		// named in a comment or an AlarmDescription.
+		if !strings.Contains(tmpl, `FilterPattern: '"`+s+`"'`) {
+			t.Errorf("sentinel %q has no MetricFilter in template.yaml — nothing can alarm on it", s)
 		}
 	}
 }
