@@ -7,30 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Documentation
-
-- **`scripts/hardware-test-detached-sweep.sh`** verifies a detached parameter
-  sweep on real hardware: that its rows launch at all (#749), and that they carry
-  the `spawn:managed` / `spawn:ttl-deadline` tags which make them reapable
-  (#725). It currently **fails**, correctly, on #749 — the CLI does not seed
-  `ami` into the params the orchestrator Lambda reads, so every `RunInstances` is
-  rejected with `MissingParameter: ImageId` while the Lambda logs "All instances
-  launched and completed" and the CLI reports success. The #725 assertions are
-  written and waiting behind that.
-  Two traps are recorded in the script because both were hit writing it: rows
-  must be discovered by `spawn:sweep-id`, never by `Name` (the orchestrator names
-  them from a derived `SweepName`, so a filter built from the CLI argument matches
-  nothing — which would have made the script's own **cleanup** miss a live row),
-  and the orchestrator's log group is in the **infra** account while the rows land
-  in the target account, so tailing it with the launch profile returns
-  `ResourceNotFoundException` and loses the only diagnostic that explains the
-  failure.
-- **`lambda/sweep-orchestrator/` is now listed in `scripts/hardware-sensitive.txt`.**
-  It composes `RunInstances` from param keys with no compile-time link to the CLI
-  that writes them, so no unit test on either side can see a key-set
-  disagreement across that seam. Its absence from the manifest is why #749
-  shipped.
-
 ### Added
 
 - **The reaper now reclaims orphaned security groups and placement groups** (#685's
@@ -107,6 +83,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sentinel — which is the same defect as the heartbeat tag itself.
 
 ### Fixed
+
+- **A detached parameter sweep launched zero instances and reported success**
+  (#749). The orchestrator Lambda never sees a `LaunchConfig` — it reads param
+  keys out of the uploaded `params.json` and builds `RunInstances` from them —
+  and the CLI never seeded `ami`. So every row was rejected with
+  `MissingParameter: The request must contain the parameter ImageId`, the Lambda
+  logged "All instances launched and completed", and the CLI printed "Parameter
+  sweep queued successfully" and exited 0. **Detached is the default for
+  parameter sweeps**, so the default path created nothing for the entire life of
+  the feature. `key_name` and `spot` were silently dropped by the same gap.
+  This is #697's class again, on the one path #697 explicitly scoped itself out
+  of. The codebase even documented the cause — "only the foreground path detects
+  an AMI per config" appears as a reason to prefer `--no-detach` for heterogeneous
+  sweeps — without anyone noticing it meant the detached path resolved *no* AMI.
+  The AMI is now resolved **per row**, not as one sweep-wide default:
+  `GetRecommendedAMI` keys off architecture and GPU, so a single default would
+  force one row's AMI onto all of them and an arm64 AMI on an x86 row does not
+  boot (#372). Memoized by `(region, arch, gpu)`, so fifty rows over three
+  families make three lookups. A resolve failure is **fatal** rather than a
+  warning, because continuing would upload a row with no `ami` — which is the bug.
+  An unset flag leaves its key **absent** rather than writing `""`:
+  `RunInstances` rejects an empty `KeyName` outright, and the Lambda's own
+  `iam_role` fallback would be defeated by an empty string. Precedence is
+  unchanged — a row's own key beats the CLI flag, which beats the file's defaults.
+- **The sweep orchestrator no longer records a total failure as a success**
+  (#749). A finished sweep that launched **zero** of N instances is now `FAILED`.
+  `state.Failed` was already being counted; the completion branch simply never
+  consulted it, and set `COMPLETED` unconditionally. A cost-control tool reporting
+  a launch that did not happen is the same failure class as #737, where declining
+  a terminate exited 0. A *partial* failure deliberately stays `COMPLETED` — the
+  sweep did run, per-row error messages are in the record, and a third status
+  value would send `cancel`, `resume` and six workflow adapters down a default
+  branch. `FAILED` is an existing value, so nothing receives a novel one.
+  **Takes effect only after the Lambda is redeployed**; the rest of this fix
+  ships with the CLI binary.
+- **`spawn launch` no longer promises a detached sweep is running when it cannot
+  know.** "The sweep is now running in Lambda. You can disconnect safely" was
+  unsupportable: the CLI's only evidence is that the Lambda was *invoked*. It now
+  says that plainly and points at `spawn status --sweep-id`.
 
 - **A just-terminated instance was reported as if it had never existed** (#736).
   `spawn status chem-arm`, run immediately after that instance's job failed and
@@ -404,6 +419,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An absent `ttl` deliberately produces no deadline rather than a guessed one; the
   reaper's own max-age ceiling still bounds the instance, whereas a fabricated
   deadline would terminate work the user never put a clock on.
+
+### Documentation
+
+- **`scripts/hardware-test-detached-sweep.sh`** verifies a detached parameter
+  sweep on real hardware: that its rows launch at all (#749), and that they carry
+  the `spawn:managed` / `spawn:ttl-deadline` tags which make them reapable
+  (#725). It currently **fails**, correctly, on #749 — the CLI does not seed
+  `ami` into the params the orchestrator Lambda reads, so every `RunInstances` is
+  rejected with `MissingParameter: ImageId` while the Lambda logs "All instances
+  launched and completed" and the CLI reports success. The #725 assertions are
+  written and waiting behind that.
+  Two traps are recorded in the script because both were hit writing it: rows
+  must be discovered by `spawn:sweep-id`, never by `Name` (the orchestrator names
+  them from a derived `SweepName`, so a filter built from the CLI argument matches
+  nothing — which would have made the script's own **cleanup** miss a live row),
+  and the orchestrator's log group is in the **infra** account while the rows land
+  in the target account, so tailing it with the launch profile returns
+  `ResourceNotFoundException` and loses the only diagnostic that explains the
+  failure.
+- **`lambda/sweep-orchestrator/` is now listed in `scripts/hardware-sensitive.txt`.**
+  It composes `RunInstances` from param keys with no compile-time link to the CLI
+  that writes them, so no unit test on either side can see a key-set
+  disagreement across that seam. Its absence from the manifest is why #749
+  shipped.
 
 ## [0.124.0] - 2026-10-07
 
