@@ -90,6 +90,16 @@ Resources:
                 Action:
                   - ec2:DeleteSecurityGroup
                   - ec2:DeletePlacementGroup
+                  # CreateTags so the sweep can stamp an UNTAGGED spawn-managed
+                  # resource with its first-seen time and age it out on a later
+                  # cycle. Without it the stamp fails and the resource is skipped
+                  # forever — the hole that left 21 orphaned security groups
+                  # uncollectable after the reaper shipped.
+                  #
+                  # Tag-conditioned like the deletes, so the reaper can only
+                  # stamp something already marked spawn:managed=true. It cannot
+                  # adopt a resource that is not ours by tagging it.
+                  - ec2:CreateTags
                 # trivy:ignore:AVD-AWS-0057 -- Resource * required; access is
                 # constrained by the tag condition below.
                 Resource: '*'

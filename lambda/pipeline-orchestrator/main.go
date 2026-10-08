@@ -271,10 +271,12 @@ func createStreamingSecurityGroup(ctx context.Context, pipelineID string) (strin
 		TagSpecifications: []ec2types.TagSpecification{
 			{
 				ResourceType: ec2types.ResourceTypeSecurityGroup,
-				Tags: []ec2types.Tag{
-					{Key: aws.String("spawn:pipeline-id"), Value: aws.String(pipelineID)},
-					{Key: aws.String("Name"), Value: aws.String(sgName)},
-				},
+				// These carried NO spawn:managed tag, so the reaper was not even
+				// permitted to touch them — its terminate/delete grants are
+				// conditioned on it — and spawn:created was absent too. Both are
+				// supplied by LifecycleTags now.
+				Tags: append(spawnaws.LifecycleTags(sgName, "pipeline", time.Now()),
+					ec2types.Tag{Key: aws.String("spawn:pipeline-id"), Value: aws.String(pipelineID)}),
 			},
 		},
 	})
@@ -325,10 +327,8 @@ func createPlacementGroup(ctx context.Context, pipelineID string) (string, error
 		TagSpecifications: []ec2types.TagSpecification{
 			{
 				ResourceType: ec2types.ResourceTypePlacementGroup,
-				Tags: []ec2types.Tag{
-					{Key: aws.String("spawn:pipeline-id"), Value: aws.String(pipelineID)},
-					{Key: aws.String("Name"), Value: aws.String(pgName)},
-				},
+				Tags: append(spawnaws.LifecycleTags(pgName, "pipeline", time.Now()),
+					ec2types.Tag{Key: aws.String("spawn:pipeline-id"), Value: aws.String(pipelineID)}),
 			},
 		},
 	})
