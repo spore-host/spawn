@@ -82,6 +82,10 @@ type account struct {
 	ec2For    func(region string) ec2API
 	ssmFor    func(region string) *ssm.Client
 	fsxFor    func(region string) fsxAPI
+	// netFor is the wider EC2 slice the security-group/placement-group sweep
+	// needs (spawn#685). Separate from ec2For so the instance scan's narrow
+	// two-method interface — and every test fake implementing it — is untouched.
+	netFor func(region string) netResourceAPI
 }
 
 // ec2API / fsxAPI are the slices of the EC2 and FSx clients the reaper uses.
@@ -275,6 +279,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ec2.NewFromConfig(c)
 			},
+			netFor: func(region string) netResourceAPI {
+				c := base.Copy()
+				c.Region = region
+				return ec2.NewFromConfig(c)
+			},
 			ssmFor: func(region string) *ssm.Client {
 				c := base.Copy()
 				c.Region = region
@@ -313,6 +322,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ec2.NewFromConfig(c)
 			},
+			netFor: func(region string) netResourceAPI {
+				c := acctCfg.Copy()
+				c.Region = region
+				return ec2.NewFromConfig(c)
+			},
 			ssmFor: func(region string) *ssm.Client {
 				c := acctCfg.Copy()
 				c.Region = region
@@ -334,6 +348,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 			label:     "self",
 			accountID: selfAccountID(),
 			ec2For: func(region string) ec2API {
+				c := base.Copy()
+				c.Region = region
+				return ec2.NewFromConfig(c)
+			},
+			netFor: func(region string) netResourceAPI {
 				c := base.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
@@ -464,6 +483,13 @@ type Summary struct {
 	// under-logged. Nonzero here means filesystems are accruing cost unreclaimed.
 	FSxAccountsDenied int `json:"fsx_accounts_denied"`
 
+	// Network resources (#685): spawn-managed security groups and cluster
+	// placement groups reclaimed once no instance references them and they are
+	// older than netResourceGrace. Neither costs money; the pressure is the
+	// per-VPC quota, which bites at launch time.
+	NetReaped  int `json:"net_reaped"`
+	NetSkipped int `json:"net_skipped"` // would-reap (dry-run), still referenced, or age unknown
+
 	// DNS sweep (#438): orphaned Route53 A-records reconciled against live IPs.
 	DNSScanned int `json:"dns_scanned"` // A-records examined under the account subdomains
 	DNSReaped  int `json:"dns_reaped"`  // orphaned records deleted (or would-delete in dry-run)
@@ -587,6 +613,13 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 			// instance still using them (refcount 0). Independent of the instance
 			// scan above; an FSx outlives its instances by design.
 			r.reapFSxRegion(ctx, acct, region, start, &sum, &outcome)
+
+			// Network resources (#685): spawn-managed security groups and
+			// cluster placement groups with no instance referencing them,
+			// older than netResourceGrace. Neither bills, but both consume a
+			// per-VPC quota that bites at LAUNCH time — and a rejected --mpi
+			// launch used to leave one of each behind on every attempt.
+			r.reapNetResourcesRegion(ctx, acct, region, start, &sum, &outcome)
 		}
 
 		// DNS reconciliation sweep (#438): after scanning all regions for this

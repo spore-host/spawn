@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The reaper now reclaims orphaned security groups and placement groups** (#685's
+  remaining half). The ordering and race bugs were fixed in v0.121.0 and discovery
+  was added to `spawn orphans`/`cleanup`, but nothing reclaimed these without
+  someone running a command: 19 security groups and 9 placement groups were found in
+  one region of one account, the oldest three months old.
+  Reclaimed after **7 days** with no instance referencing them. The grace is a
+  policy choice, not a technical one: the MPI security group is keyed on
+  `spawn-mpi-<job-array-name>` and reused *by name* across runs, so a short grace
+  would force a recreate on every repeat run of a named array. A week makes a weekly
+  re-run free, and a recreate is cheap anyway since #659 already backfills rules onto
+  an existing group. Neither resource costs money — the pressure is the per-VPC
+  quota, which bites at launch time, the worst moment to discover it.
+  Membership is asked of EC2 rather than inferred from spawn's own instances, because
+  **any** member blocks the delete, including one spawn did not create. A resource
+  with no creation tag is **skipped rather than assumed old**: neither describe call
+  returns a creation time, so spawn's tag is the only source, and an untimed group
+  could be seconds from use by a launch in flight. `DependencyViolation` is tolerated
+  rather than alarmed on — a group can be referenced by another group's rule or an
+  ENI, which the instance scan cannot see — and the next cycle retries.
+  The four new IAM actions are **simulated in both directions**, not merely applied:
+  deleting a `spawn:managed=true` resource is allowed, an untagged or
+  `spawn:managed=false` one is `implicitDeny`, and `ec2:DeleteVpc`,
+  `ec2:DeleteSubnet` and `iam:DeleteRole` remain denied so the blast radius is
+  unchanged. Both the scan-self policy and the CloudFormation cross-account role
+  carry them — the latter caught by a parity gate, and it is the **production**
+  configuration, where a one-sided grant would make the feature silently no-op.
+
 ### Fixed
 
 - **A parameter sweep now honours CLI flags instead of dropping them** (#697). The
@@ -66,7 +95,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An absent `ttl` deliberately produces no deadline rather than a guessed one; the
   reaper's own max-age ceiling still bounds the instance, whereas a fabricated
   deadline would terminate work the user never put a clock on.
-
 
 ## [0.124.0] - 2026-10-07
 
