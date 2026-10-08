@@ -255,7 +255,16 @@ func init() {
 
 	// Instance config
 	launchCmd.Flags().StringVar(&instanceType, "instance-type", "", "Instance type")
-	launchCmd.Flags().StringVar(&region, "region", "", "AWS region")
+	// This LOCAL --region shadows the persistent one on the root command, which
+	// binds a different variable and is documented as overriding
+	// SPORE_REGION/AWS_REGION and the shared config (cmd/root.go). On `launch` —
+	// the command where it matters most — the local flag wins, and nothing read
+	// the resolved value, so the documented precedence did not exist (#732).
+	// The help text now describes what actually happens, and the precedence
+	// itself lives in resolveLaunchRegion so there is one implementation of it.
+	launchCmd.Flags().StringVar(&region, "region", "",
+		"AWS region. Precedence: this flag > SPORE_REGION/AWS_REGION > your spore config > auto-detect "+
+			"(auto-detect picks the lowest-latency region that actually offers the instance type)")
 	launchCmd.Flags().StringVar(&az, "az", "", "Availability zone")
 	launchCmd.Flags().StringVar(&ami, "ami", "", "AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023")
 	launchCmd.Flags().StringVar(&osFlag, "os", "", "Target OS: windows or linux. Omit to auto-detect from the AMI. Use to force the OS for a custom AMI whose platform metadata is unset.")

@@ -177,6 +177,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The two longest waits also now state their ceiling (`Verifying spored agent (up
   to 5 min)`), because a bounded wait that says so is a wait, and one that does
   not is indistinguishable from a hang.
+- **`launch` ignored `AWS_REGION` and your configured default, and placed
+  instances in regions that cannot run the requested instance type** (#732).
+  With `AWS_REGION=us-east-1` set and a configured default, launches landed in
+  us-west-1 and us-west-2 — neither of which was asked for — and `c8a.large` is
+  not offered in us-west-1 at all, so that launch died with EC2's opaque
+  `Unsupported: The requested configuration is currently not supported`.
+  Two independent causes. `detectBestRegion` took the instance type as a
+  parameter and **never referenced it**, ranking purely by measured TCP latency
+  and IP geolocation — which also made the choice unstable: across 21 identical
+  runs from one machine, 20 picked one region and one picked another, because the
+  latency difference between two west-coast endpoints is smaller than the jitter.
+  And nothing on the launch path consulted `SPORE_REGION`/`AWS_REGION` or the
+  spore config at all, even though the root `--region` flag has always documented
+  that precedence: `launch` registers its **own** `--region`, which shadows the
+  root one and binds a different variable, so the resolved value was never read.
+  Now resolved as **`--region` → `SPORE_REGION`/`AWS_REGION` → spore config →
+  auto-detect**, with auto-detect as the last resort rather than the only step,
+  and the chosen region is printed with the reason it was chosen ("lowest latency
+  of 3 region(s) offering c8g.xlarge, on your continent") so a surprising choice
+  is debuggable when it happens instead of three steps later. Auto-detect now
+  filters candidates by `DescribeInstanceTypeOfferings`, so a region that cannot
+  run the instance is never a candidate; a failed offerings call is treated as
+  "offered" rather than excluding the region, because throttling or a missing
+  `ec2:DescribeInstanceTypeOfferings` grant says nothing about availability and
+  silently narrowing the choice would be worse than degrading to the old ranking.
+  **If no region qualifies, the launch now fails and asks for one** instead of
+  falling back to `us-east-1` — that default was a guess which could itself not
+  offer the type, turning "we could not choose" into a confident wrong choice.
+  The precedence lives in a single `resolveLaunchRegion`, because the
+  `if region == ""` block it replaces was duplicated at **five** call sites
+  (single launch, batch queue, three sweep paths) and fixing one would have left
+  four wrong. One of those five also printed its chosen region *before* assigning
+  it, so it always announced the empty string.
 
 - **The hand-written Lambda deploy scripts could deploy to the wrong account,
   wipe a function's environment, and report success without verifying anything.**

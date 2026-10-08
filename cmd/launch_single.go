@@ -217,18 +217,23 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return i18n.Te("error.instance_type_required", nil)
 	}
 
-	// Auto-detect region if not specified
-	if config.Region == "" {
-		fmt.Fprintf(os.Stderr, "🌍 No region specified, auto-detecting closest region...\n")
-		detectedRegion, err := detectBestRegion(ctx, config.InstanceType)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Could not auto-detect region: %v\n", err)
-			fmt.Fprintf(os.Stderr, "   Using default: us-east-1\n")
-			config.Region = "us-east-1"
-		} else {
-			fmt.Fprintf(os.Stderr, "✓ Selected region: %s\n", detectedRegion)
-			config.Region = detectedRegion
+	// Resolve the launch region (#732). The precedence lives in one place —
+	// resolveLaunchRegion — because this `if region == ""` shape was duplicated
+	// at five call sites and fixing one would have left four wrong.
+	{
+		region, why, rerr := resolveLaunchRegion(ctx, config.Region, config.InstanceType)
+		if rerr != nil {
+			// Deliberately NOT a fallback to us-east-1. The old default was a
+			// guess that could itself fail to offer the instance type, turning
+			// "we could not choose" into a confident, wrong choice.
+			return fmt.Errorf("could not choose a region for %s: %w\n"+
+				"Pass --region, or set AWS_REGION / a default in your spore config",
+				config.InstanceType, rerr)
 		}
+		if config.Region == "" {
+			fmt.Fprintf(os.Stderr, "🌍 Region: %s (%s)\n", region, why)
+		}
+		config.Region = region
 	}
 
 	// Initialize AWS client PINNED to the resolved launch region (#276). config.Region
