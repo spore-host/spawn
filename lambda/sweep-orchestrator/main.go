@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"github.com/spore-host/spawn/pkg/availability"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 )
 
 // Default configuration for shared infrastructure (with environment variable overrides)
@@ -425,9 +426,10 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 				log.Printf("Failed to save cancelled state: %v", err)
 			}
 
-			// Clean up placement group if auto-created
+			// Clean up placement group if auto-created. SYNCHRONOUS: a goroutine
+			// started here would be frozen by the Lambda runtime on return (#752).
 			if state.PlacementGroup != "" && strings.HasPrefix(state.PlacementGroup, "spawn-mpi-") {
-				go cleanupPlacementGroup(ctx, ec2Client, state.PlacementGroup)
+				_ = cleanupPlacementGroup(ctx, ec2Client, state.PlacementGroup)
 			}
 
 			return nil
@@ -527,9 +529,10 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 				return fmt.Errorf("failed to save completion state: %w", err)
 			}
 
-			// Clean up placement group if auto-created
+			// Clean up placement group if auto-created. SYNCHRONOUS: a goroutine
+			// started here would be frozen by the Lambda runtime on return (#752).
 			if state.PlacementGroup != "" && strings.HasPrefix(state.PlacementGroup, "spawn-mpi-") {
-				go cleanupPlacementGroup(ctx, ec2Client, state.PlacementGroup)
+				_ = cleanupPlacementGroup(ctx, ec2Client, state.PlacementGroup)
 			}
 
 			return nil
@@ -1189,11 +1192,11 @@ func runMultiRegionPollingLoop(ctx context.Context, state *SweepRecord, params *
 					log.Printf("Failed to save cancelled state: %v", err)
 				}
 
-				// Clean up placement group if auto-created
+				// Clean up placement group if auto-created. SYNCHRONOUS (#752).
 				if state.PlacementGroup != "" && strings.HasPrefix(state.PlacementGroup, "spawn-mpi-") {
 					// Use the first available EC2 client for cleanup
 					for _, client := range orchestrator.ec2Clients {
-						go cleanupPlacementGroup(ctx, client, state.PlacementGroup)
+						_ = cleanupPlacementGroup(ctx, client, state.PlacementGroup)
 						break
 					}
 				}
@@ -1257,11 +1260,11 @@ func runMultiRegionPollingLoop(ctx context.Context, state *SweepRecord, params *
 				return fmt.Errorf("failed to save completion state: %w", err)
 			}
 
-			// Clean up placement group if auto-created
+			// Clean up placement group if auto-created. SYNCHRONOUS (#752).
 			if state.PlacementGroup != "" && strings.HasPrefix(state.PlacementGroup, "spawn-mpi-") {
 				// Use the first available EC2 client for cleanup (placement groups are region-specific)
 				for _, client := range orchestrator.ec2Clients {
-					go cleanupPlacementGroup(ctx, client, state.PlacementGroup)
+					_ = cleanupPlacementGroup(ctx, client, state.PlacementGroup)
 					break
 				}
 			}
@@ -1631,21 +1634,42 @@ func tryLaunchInstance(ctx context.Context, ec2Client *ec2.Client, state *SweepR
 }
 
 // cleanupPlacementGroup removes a spawn-managed placement group after sweep completion
+// cleanupPlacementGroup deletes an auto-created MPI placement group, waiting out
+// its members' termination.
+//
+// MUST be called synchronously, before the handler returns (#752). It used to
+// open with `time.Sleep(30 * time.Second)` and was invoked as
+// `go cleanupPlacementGroup(...)` immediately before `return nil` at all four
+// call sites — and a Lambda FREEZES its execution environment when the handler
+// returns. The goroutine never resumed, so the group was never deleted, at every
+// site, for the life of the feature. That is a second and previously
+// unidentified mechanism behind the nine orphaned placement groups #685 found in
+// one region of one account; #685 was diagnosed as a CLI-side ordering bug.
+//
+// The 30-second sleep was also the wrong tool even in a process that could
+// outlive it: TerminateInstances is asynchronous with no fixed duration, so a
+// flat wait is a race in one direction and dead time in the other. This uses the
+// policy pkg/aws already owns — a 60s budget, a 5s interval, and a classifier
+// that retries ONLY InvalidPlacementGroup.InUse so a permissions error returns
+// at once instead of being re-learned 12 times.
+//
+// Non-fatal by design: a stranded placement group costs nothing directly, and
+// failing a completed sweep over it would be worse. It is logged loudly because
+// the cost is per-VPC quota, which bites at LAUNCH time, and because the TTL
+// reaper now reclaims these after 7 days (#685).
 func cleanupPlacementGroup(ctx context.Context, ec2Client *ec2.Client, placementGroupName string) error {
-	// Wait for all instances to terminate before deleting placement group
-	time.Sleep(30 * time.Second)
-
-	_, err := ec2Client.DeletePlacementGroup(ctx, &ec2.DeletePlacementGroupInput{
-		GroupName: aws.String(placementGroupName),
+	err := spawnaws.RetryPlacementGroupDelete(ctx, placementGroupName, func() error {
+		_, derr := ec2Client.DeletePlacementGroup(ctx, &ec2.DeletePlacementGroupInput{
+			GroupName: aws.String(placementGroupName),
+		})
+		return derr
 	})
-
 	if err != nil {
-		log.Printf("Warning: Failed to delete placement group %s: %v", placementGroupName, err)
-		// Non-fatal, placement groups are cheap to leave around
-	} else {
-		log.Printf("Deleted placement group: %s", placementGroupName)
+		log.Printf("Warning: Failed to delete placement group %s: %v (the TTL reaper will "+
+			"reclaim it after its grace period)", placementGroupName, err)
+		return err
 	}
-
+	log.Printf("Deleted placement group: %s", placementGroupName)
 	return nil
 }
 
