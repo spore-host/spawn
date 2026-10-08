@@ -1,5 +1,3 @@
-//go:build scripts
-
 // Package scripts holds gates on the hand-written deploy scripts.
 //
 // These functions have no CloudFormation stack, so the script IS the record of
@@ -12,8 +10,12 @@
 //     wipes the function's environment, under `|| true` so it could not fail
 //     loudly.
 //
-// Build-tagged so a normal `go test ./...` does not read files outside its
-// module; run with `go test -tags scripts ./scripts/`.
+// Deliberately NOT behind a build tag. The first version was, to keep a normal
+// `go test ./...` from reading files outside its module — but the files it reads
+// are the sibling deploy scripts in this same directory, so there was nothing to
+// isolate. The tag bought nothing and cost two workflow changes, one of which
+// broke: a module whose only package is tag-gated has NO packages by default, so
+// `govulncheck ./...` matched nothing and exited 1.
 package scripts
 
 import (

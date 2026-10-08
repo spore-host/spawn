@@ -107,7 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step enumerated `lambda/*` by name, so the `scripts/` module's gates would have
   run nowhere. That scoping was itself the shape of #136 — a module the root
   `go test ./...` cannot reach — one level up, so discovery is now by `find` with
-  a guard that fails the build if it matches nothing.
+  a guard that fails the build if it matches nothing. (The security workflow
+  already discovered modules that way, which is how it caught the first attempt:
+  the new module's only package was behind a build tag, so by default it had *no*
+  packages and `govulncheck ./...` matched nothing and exited 1. The tag was
+  isolating the module from files in its own directory, so it is gone.)
 
 - **A parameter sweep now honours CLI flags instead of dropping them** (#697). The
   sweep dispatch built a two-field `LaunchConfig` — region and instance type — and

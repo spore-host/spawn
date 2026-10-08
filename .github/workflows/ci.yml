@@ -171,10 +171,7 @@ jobs:
       #
       # Discovered rather than listed, and deliberately not scoped to lambda/*:
       # that scoping was itself the #136 bug one level up, and it silently
-      # excluded scripts/ the day that module was added. `-tags scripts` is
-      # passed to every module because a build tag no module uses is a no-op,
-      # whereas remembering to add a per-module tag list is the thing that gets
-      # forgotten.
+      # excluded scripts/ the day that module was added.
       - name: Nested modules (build + vet + test)
         run: |
           set -euo pipefail
@@ -187,8 +184,7 @@ jobs:
           for mod in $mods; do
             dir=$(dirname "$mod")
             echo "::group::$dir"
-            ( cd "$dir" && go build -tags scripts ./... && go vet -tags scripts ./... \
-                && go test -short -tags scripts ./... ) || fail=1
+            ( cd "$dir" && go build ./... && go vet ./... && go test -short ./... ) || fail=1
             echo "::endgroup::"
           done
           exit $fail
