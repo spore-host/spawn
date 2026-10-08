@@ -196,6 +196,11 @@ func sysHasRecentUserActivity() bool {
 }
 
 // sysWarnUsers broadcasts a message to interactive sessions via msg.exe.
+// sysWriteConsole is a no-op on Windows: there is no /dev/console, and the EC2
+// serial console for a Windows instance is not a writable character device
+// (#736). A Windows workload's log has to travel by another route.
+func sysWriteConsole(string) error { return nil }
+
 func sysWarnUsers(message string) {
 	_ = exec.Command("msg", "*", message).Run()
 }

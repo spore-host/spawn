@@ -37,6 +37,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constant does not. It now polls until the rank count reaches `NODES` or a
   deadline passes, and reports which. At 4 nodes the poll found all of them in
   **10s**, where the old constant would have spent 45.
+- **A failed `--command` job no longer takes its only diagnostic with it**
+  (#736). When a workload failed and the instance self-terminated,
+  `/var/log/spawn-command.log` went with it: the exit code survived in a tag, the
+  *reason* did not. From outside, "the job failed" and "the job failed because the
+  package install 404'd" were the same event.
+  `spored` now copies the **last 50 lines** of that log to the serial console
+  before terminating, on a **failed** outcome only. It survives the instance —
+  measured: a userspace write to `/dev/console` does appear in
+  `ec2 get-console-output`, and that output outlives the instance's visibility in
+  `describe-instances` by hours. Read it with
+  `aws ec2 get-console-output --instance-id <id>`.
+  **Allow about five minutes** after termination before reading: the
+  post-termination capture is not immediate, and before it populates the API
+  returns nothing at all rather than a partial result. Also measured, and it is
+  why the log line says so — an immediate read looks exactly like a missing log.
+  Fifty lines is a budget rather than a guess. Console output is capped around
+  64 KB and a baseline boot already consumes 13-17 KB of it, so copying a whole
+  log would evict the cloud-init messages that are *also* diagnostic, and those
+  are what explain a boot-time failure.
+  Chosen over uploading to S3 because it needs no bucket, no IAM grant and no new
+  write path, so it does not enlarge the un-reaped `spawn-results-*` footprint on
+  every launch. The task path keeps its existing S3 flush
+  (`pkg/taskproto/flush.go`), unaffected.
+  A no-op on Windows and on dev builds, where `/dev/console` does not exist. The
+  gate is the completion record `spored` was already reading just to log it, so a
+  successful job writes nothing and no new plumbing was needed; an unparseable,
+  truncated or absent record means "not a failure", because this runs on a
+  teardown path and must never interfere with it.
 
 - **Ctrl-C was ignored for up to five minutes while waiting on an instance**
   (#752's last item). Six polls in `cmd/` had no `ctx.Done()` case at all, so a

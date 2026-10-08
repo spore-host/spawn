@@ -1644,6 +1644,18 @@ func (a *Agent) checkCompletion(ctx context.Context) bool {
 			log.Printf("Completion metadata: %s", strings.TrimSpace(string(content)))
 		}
 
+		// Did the workload FAIL? The record the bootstrap writes carries
+		// {"status": "...", "exit_code": N}, so this needs no new plumbing —
+		// only reading what was already being logged (#736).
+		//
+		// On a failure the command log is the only record of WHY, and it dies
+		// with the instance, so copy its tail to the serial console before the
+		// terminate below. Gated on failure: a successful job's log is rarely
+		// read and console space is shared with the boot messages.
+		if completionFailed(content) {
+			a.writeCommandLogToConsole("workload failed")
+		}
+
 		// Notify via Slack before the grace period
 		a.notifier.Notify(ctx, "completion", "")
 
