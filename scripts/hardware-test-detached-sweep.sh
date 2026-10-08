@@ -69,13 +69,29 @@ cleanup() {
     aws ec2 terminate-instances --region "$REGION" --instance-ids $ids \
       --query 'TerminatingInstances[].InstanceId' --output text 2>/dev/null |
       tr '\t' '\n' | sed 's/^/  terminated /'
-    sleep 15
+    # Wait for them to leave the live states rather than sleeping a guess, so the
+    # check below distinguishes "still shutting down" from "stuck".
+    for _ in $(seq 1 24); do
+      [ "$(rows "pending,running,stopping,stopped,shutting-down" | grep -c '^i-' || true)" = "0" ] && break
+      sleep 5
+    done
   else
     echo "  (nothing to terminate)"
   fi
   # Independent: re-query rather than trusting the call above.
+  #
+  # shutting-down is INCLUDED. It is excluded from EC2's own default state filter
+  # — the blind spot behind #736 — so leaving it out here would report "nothing
+  # left behind" for an instance that is merely mid-termination, and identically
+  # for one whose terminate FAILED and left it stuck.
+  #
+  # Counted with grep -c on instance IDs rather than a JMESPath length().
+  # `length(Reservations[].Instances[?...])` counts RESERVATIONS, not instances:
+  # the filter yields one list per reservation, so two reservations holding zero
+  # live instances answers "2". That form gave a false leak alarm on this very
+  # test and is not usable for a cost check.
   local left
-  left=$(rows "pending,running,stopping,stopped" | grep -c '^i-' || true)
+  left=$(rows "pending,running,stopping,stopped,shutting-down" | grep -c '^i-' || true)
   if [ "${left:-0}" = "0" ]; then
     echo "  ✅ no instances left behind"
   else
