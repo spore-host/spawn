@@ -84,6 +84,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A just-terminated instance was reported as if it had never existed** (#736).
+  `spawn status chem-arm`, run immediately after that instance's job failed and
+  it self-terminated, answered `no instance found with name: chem-arm` — accurate,
+  and the wrong answer to the question being asked, which was *why it vanished*.
+  `resolveInstance` lists with the default state filter, which is
+  pending/running/stopping/stopped, so `terminated` **and `shutting-down`** are
+  both invisible. EC2 keeps terminated instances in `DescribeInstances` for about
+  an hour with a `StateTransitionReason` ("User initiated",
+  "Client.InstanceInitiatedShutdown", a spot reclaim), so the answer was already
+  available and simply not requested.
+  A not-found name or ID is now checked once more against every state, and when a
+  recently-gone instance matches, the message names it:
+  `no instance found with name: chem-arm — chem-arm (i-abc) is terminated:
+  Client.InstanceInitiatedShutdown`. `spawn terminate` uses it too, so its
+  idempotent success path now says `Nothing to terminate — web (i-abc) is
+  shutting-down: User initiated` instead of `No instance "web" exists`, which was
+  false. Running and stopped instances deliberately produce nothing, since those
+  would have been found by the normal lookup.
+  This also explains some dead code: `terminate`'s `"Instance %s is already
+  shutting down — nothing to do"` branch was **unreachable**, because the filter
+  that hides the state is the one the lookup uses. It is kept, annotated, since it
+  is correct if a caller ever resolves with the all-states filter — and the hint
+  now covers the case it was written for.
+
 - **Declining a confirmation prompt exited 0, so a script could not tell
   "terminated" from "did nothing"** (#737). `spawn terminate <name>` with
   non-interactive stdin printed `Aborted.` and **exited 0** while the instance
