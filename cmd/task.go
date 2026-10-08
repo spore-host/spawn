@@ -537,7 +537,19 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		fmt.Fprintf(os.Stderr, "cleared any previous completion record for task %s (run_id %s)\n", spec.TaskID, runID)
 	}
 
-	wrapper := taskproto.GenerateWrapper(spec, resultsPrefix, region, gpu, runID)
+	// One options value for both generators, so the wrapper and the flush hook
+	// cannot disagree about the prefix or the run id they write (spawn#764).
+	wrapperOpts := taskproto.WrapperOptions{
+		ResultsPrefix: resultsPrefix,
+		Region:        region,
+		RunID:         runID,
+		GPU:           gpu,
+	}
+
+	wrapper, err := taskproto.GenerateWrapper(spec, wrapperOpts)
+	if err != nil {
+		return fmt.Errorf("build task wrapper: %w", err)
+	}
 
 	// The terminal-flush hook (spawn#632). The wrapper's log upload and
 	// completion-record write both sit after the user command, so a task killed by
@@ -545,7 +557,10 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	// script is installed root-owned and run by spored before it stops or
 	// terminates — i.e. while the network is still up — and no-ops when the wrapper
 	// already wrote the real record.
-	flushHook := taskproto.GenerateFlushScript(spec, resultsPrefix, region, runID)
+	flushHook, err := taskproto.GenerateFlushScript(spec, wrapperOpts)
+	if err != nil {
+		return fmt.Errorf("build terminal-flush hook: %w", err)
+	}
 
 	// Scoped instance profile: the default spored role has no S3 write, so grant
 	// exactly the buckets this task reads (inputs) and writes (outputs + results).

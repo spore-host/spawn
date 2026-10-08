@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (`pkg/taskproto`): the three script generators now take a
+  `WrapperOptions` struct and return an error** (#764, split from #679).
+  `GenerateWrapper`, `GeneratePooledJobScript` and `GenerateFlushScript` had four
+  positional parameters between them, two of which — `gpu` and `runID` — were
+  added in separate releases, one of them in a PATCH. Both are per-launch
+  decisions with no safe default, and both have a zero value that compiles and
+  looks deliberate: the quickest way to make a consumer build again was
+  `GenerateWrapper(spec, bucket, region, false, "")`, which passed every test
+  while emitting an empty `run_id` and dropping `--gpus all` — #608 and #606
+  reintroduced by a padding edit.
+  A struct alone would make that *worse*, since an omitted field is silence where
+  a new positional parameter is at least a compile error. So the options carry
+  `Validate`, and the generators return `ErrMissingRunID` /
+  `ErrMissingResultsPrefix` rather than a script — a loud failure at the point of
+  misuse instead of an unattributable S3 record found weeks later. `Region` is
+  deliberately *not* required: it is used only for a private-registry ECR login,
+  so a host-command task legitimately has none.
+  **Migration** is mechanical —
+  `GenerateWrapper(spec, prefix, region, gpu, runID)` becomes
+  `GenerateWrapper(spec, taskproto.WrapperOptions{ResultsPrefix: prefix, Region: region, RunID: runID, GPU: gpu})`
+  plus an error check. There is no positional shim: it would preserve the exact
+  hazard being removed, and there is one external caller. The next per-launch
+  input is now a non-breaking addition for all three.
+
 ### Added
 
 - **`spawn logs <name>` — a spore's log, including after it has terminated.**

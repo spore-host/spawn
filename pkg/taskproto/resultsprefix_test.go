@@ -93,11 +93,12 @@ func TestGeneratorsUseTheSuppliedPrefix(t *testing.T) {
 	spec := &TaskSpec{TaskID: "t1", Command: []string{"true"}}
 	const prefix = "s3://my-bucket/sessions/abc/t1"
 
-	w := GenerateWrapper(spec, prefix, "us-east-1", false, "r")
+	opts := WrapperOptions{ResultsPrefix: prefix, Region: "us-east-1", RunID: "r"}
+	w := mustScript(GenerateWrapper(spec, opts))
 	if !strings.Contains(w, "RESULTS_PREFIX='"+prefix+"'") {
 		t.Errorf("wrapper does not use the supplied prefix:\n%s", w)
 	}
-	f := GenerateFlushScript(spec, prefix, "us-east-1", "r")
+	f := mustScript(GenerateFlushScript(spec, opts))
 	if !strings.Contains(f, "RESULTS_PREFIX='"+prefix+"'") {
 		t.Errorf("flush hook does not use the supplied prefix:\n%s", f)
 	}

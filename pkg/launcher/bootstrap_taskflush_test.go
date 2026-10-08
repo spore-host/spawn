@@ -52,9 +52,12 @@ func TestTaskFlushHookIsInstalledRootOwnedAndNotWorldWritable(t *testing.T) {
 // terminate the outer heredoc early — truncating the installed script and
 // spilling the remainder into the bootstrap as commands.
 func TestTaskFlushHookHeredocDoesNotCollideWithItsOwnBody(t *testing.T) {
-	hook := taskproto.GenerateFlushScript(
+	hook, err := taskproto.GenerateFlushScript(
 		&taskproto.TaskSpec{TaskID: "t1", Command: []string{"true"}},
-		"bucket", "us-east-1", "run-1")
+		taskproto.WrapperOptions{ResultsPrefix: "bucket", Region: "us-east-1", RunID: "run-1"})
+	if err != nil {
+		t.Fatalf("GenerateFlushScript: %v", err)
+	}
 	script := taskFlushBootstrap(t, hook)
 
 	delim := regexp.MustCompile(`cat > ` + regexp.QuoteMeta(taskproto.FlushScriptPath()) + ` <<'(\w+)'`)

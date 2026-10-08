@@ -60,7 +60,16 @@ func SetFlushScriptPathForTest(path string) (restore func()) {
 // The reason token arrives as $1 and is a stable machine token from
 // pkg/agent (ttl_expired, cost_limit_exceeded, …), never the human log string:
 // rewording a log message must not silently change a recorded retry class.
-func GenerateFlushScript(spec *TaskSpec, resultsPrefix, region, runID string) string {
+// Takes the same WrapperOptions as GenerateWrapper so the three generators stay
+// in step and the next per-launch input is a non-breaking addition for all of
+// them (spawn#764). opts.GPU is ignored here: this hook does not run the
+// container.
+func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
+	if err := opts.Validate(); err != nil {
+		return "", err
+	}
+	resultsPrefix, region, runID := opts.ResultsPrefix, opts.Region, opts.RunID
+
 	var b strings.Builder
 	p := func(format string, a ...interface{}) { fmt.Fprintf(&b, format, a...) }
 
@@ -161,5 +170,5 @@ func GenerateFlushScript(spec *TaskSpec, resultsPrefix, region, runID string) st
 	p("echo \"spawn: terminal record written for task $TASK_ID\"\n")
 	p("exit 0\n")
 
-	return b.String()
+	return b.String(), nil
 }
