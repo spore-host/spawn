@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously accepted and ignored on a sweep.
   **84 flags are now honoured, up from 44**, and the known-gap count falls from 58
   to 18 — measured by the coverage manifest rather than asserted.
+- **Important scope limit, found by hardware-testing this fix.** The above applies to
+  the **foreground** sweep path, reachable only with `--no-detach`. Detached is the
+  **default** — `launchParameterSweep` auto-enables it — and a detached sweep is
+  launched by the `spawn-sweep-orchestrator` Lambda, which builds `RunInstances`
+  from four param keys and never sees a `LaunchConfig` at all. So on the default
+  path the drop is closer to 123 of 127, and worse: those rows get no `UserData`
+  (hence no spored) and no `spawn:managed` tag (hence no reaper), so nothing can
+  stop them. Filed as #725, which is more serious than this issue and not fixed
+  here.
 - **The 18 remaining gaps are a different, smaller defect**, and the manifest now
   says so instead of lumping them in. They are flags applied *imperatively* later
   in `launchSingleInstance` — `--tag`, `--team`, `--spot-max-price`,
