@@ -1,5 +1,7 @@
 #!/bin/bash
-set -e
+# set -u because an unset variable here means deploying to the wrong place, and
+# pipefail because a failure on the left of a pipe must not be masked.
+set -euo pipefail
 
 # Script to deploy the scheduler-handler Lambda function
 
@@ -20,6 +22,13 @@ if [ -n "${AWS_REGION:-}" ] && [ "$AWS_REGION" != "$REGION" ]; then
   echo "      (cmd/schedule.go only looks in $REGION; set SPAWN_LAMBDA_REGION to override)" >&2
 fi
 PROFILE="${AWS_PROFILE:-spore-host-infra}"
+# The account this function belongs to, asserted rather than inferred.
+#
+# A profile NAME is not an account: a profile can be re-pointed, and whatever is
+# in AWS_PROFILE is ambient. The same shape of assumption about ambient config
+# already created a duplicate of this function in the wrong region. Override only
+# to deploy a fork.
+EXPECTED_ACCOUNT="${SPAWN_LAMBDA_ACCOUNT:-966362334030}"
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -60,6 +69,13 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --profile "$PROFILE")
+if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
+  echo "ERROR: profile $PROFILE is account $ACCOUNT_ID, expected $EXPECTED_ACCOUNT." >&2
+  echo "       Set AWS_PROFILE, or SPAWN_LAMBDA_ACCOUNT=$ACCOUNT_ID to deploy here deliberately." >&2
+  exit 1
+fi
 
 echo "Deploying scheduler-handler Lambda function..."
 echo "  Region: $REGION"
@@ -109,8 +125,6 @@ if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$REGION" -
 else
     echo "🆕 Creating new Lambda function..."
 
-    # Get account ID
-    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --profile "$PROFILE")
     ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/SpawnSchedulerHandlerExecutionRole"
 
     aws lambda create-function \
@@ -123,7 +137,6 @@ else
         --memory-size 512 \
         --region "$REGION" \
         --profile "$PROFILE" \
-        --environment "Variables={}" \
         --description "Handles EventBridge Scheduler triggers for spawn scheduled executions" \
         --tags "Application=spawn,Component=scheduler" \
         --output table

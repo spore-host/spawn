@@ -65,6 +65,7 @@ updates:
       - "/lambda/scheduler-handler"
       - "/lambda/sweep-orchestrator"
       - "/lambda/ttl-reaper"
+      - "/scripts"
     schedule:
       interval: "weekly"
       day: "monday"

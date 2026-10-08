@@ -165,14 +165,23 @@ jobs:
       - name: Docs reference drift gate
         run: make check-docs
 
-      # The lambda/* directories are each their own Go module, so the root
-      # `go test ./...` above does NOT descend into them — their tests would
-      # otherwise never run in CI (#136). Build, vet, and test each one.
-      - name: Lambda modules (build + vet + test)
+      # Nested modules: the root `go test ./...` does NOT descend into a
+      # directory with its own go.mod, so their tests would otherwise never run
+      # in CI (#136). Build, vet, and test each one.
+      #
+      # Discovered rather than listed, and deliberately not scoped to lambda/*:
+      # that scoping was itself the #136 bug one level up, and it silently
+      # excluded scripts/ the day that module was added.
+      - name: Nested modules (build + vet + test)
         run: |
-          set -e
+          set -euo pipefail
+          mods=$(find . -mindepth 2 -name go.mod -not -path './.git/*' | sort)
+          if [ -z "$mods" ]; then
+            echo "::error::found no nested modules — the discovery is broken, not the repo"
+            exit 1
+          fi
           fail=0
-          for mod in $(find lambda -name go.mod -maxdepth 2 | sort); do
+          for mod in $mods; do
             dir=$(dirname "$mod")
             echo "::group::$dir"
             ( cd "$dir" && go build ./... && go vet ./... && go test -short ./... ) || fail=1
