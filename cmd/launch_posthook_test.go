@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"net"
 	"strings"
@@ -239,7 +240,7 @@ func TestRegisterDNS_PermanentlyUnresolvable_SkipsSSHEntirely(t *testing.T) {
 
 	plat := &platform.Platform{OS: "linux", HomeDir: t.TempDir()}
 	start := time.Now()
-	_, err := registerDNS(plat, "test-key", "i-deadbeef", "203.0.113.10", "test-record", "spore.host", "https://stale-placeholder.invalid/update-dns")
+	_, err := registerDNS(context.Background(), plat, "test-key", "i-deadbeef", "203.0.113.10", "test-record", "spore.host", "https://stale-placeholder.invalid/update-dns")
 	elapsed := time.Since(start)
 
 	if err == nil {

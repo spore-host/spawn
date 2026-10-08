@@ -162,7 +162,7 @@ func preflightDNSEndpoint(apiEndpoint string) error {
 	return nil
 }
 
-func registerDNS(plat *platform.Platform, keyName, instanceID, publicIP, recordName, domain, apiEndpoint string) (string, error) {
+func registerDNS(ctx context.Context, plat *platform.Platform, keyName, instanceID, publicIP, recordName, domain, apiEndpoint string) (string, error) {
 	// #548: skip the guest-side SSH retry loop entirely when the endpoint is
 	// permanently unresolvable — see preflightDNSEndpoint's doc comment for
 	// why only a definitive NXDOMAIN short-circuits, not a transient failure.
@@ -244,17 +244,27 @@ fi
 	// session does. The early-boot DNS window on a fresh instance is variable and
 	// has been observed past 90s, so retry up to a few minutes; DNS registration
 	// is non-fatal, so this is a bounded best-effort wait, not a launch blocker.
+	// The budget binds EVERY attempt, not just the gaps between them (#741).
+	// exec.Command has no context, so a single ssh that connects and then hangs —
+	// post-handshake, or on a wedged remote script — outlived the deadline
+	// entirely; ConnectTimeout=10 above caps only the TCP connect.
 	var output []byte
 	deadline := time.Now().Add(4 * time.Minute)
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	for {
-		cmd := exec.Command("ssh", sshArgs...)
+		cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
 		output, err = cmd.CombinedOutput()
-		transient := err != nil || bytes.Contains(output, []byte("curl exit 6")) ||
-			bytes.Contains(output, []byte("curl exit 7")) || bytes.Contains(output, []byte("curl exit 28"))
-		if !transient || time.Now().After(deadline) {
+		if !sshRegisterRetryable(err, output) || time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	if err != nil {
 		return "", fmt.Errorf("failed to execute SSH command: %w (output: %s)", err, string(output))
@@ -290,22 +300,39 @@ func writeOutputID(id, filepath string) error {
 // waitForSSHReady polls TCP port 22 until it accepts a connection or the
 // deadline passes. This replaces a fixed sleep with an actual readiness probe:
 // it returns the instant SSH is reachable and is bounded so it can't hang.
-// Best-effort — a timeout is not fatal (the user can still connect later).
-func waitForSSHReady(ctx context.Context, host string, timeout time.Duration) {
+//
+// A timeout returns a non-nil error and is NOT fatal — the instance is up and
+// spored is enforcing its lifecycle — but the caller must know, because the
+// steps after this one (DNS registration, #741) reach the instance over SSH and
+// cannot work if this failed.
+//
+// It used to return nothing at all, which made the timeout path and the success
+// path the same statement and the failure literally unrepresentable (#740). The
+// caller then marked the step complete unconditionally, so an unreachable
+// instance printed `✅ Waiting for SSH (120.0s)` — the timeout, to the tenth of
+// a second, rendered as success — and the launch went on to SSH to a host it had
+// just failed to reach, for another four minutes, in silence.
+func waitForSSHReady(ctx context.Context, host string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	addr := net.JoinHostPort(host, "22")
+	var lastErr error
 	for {
 		conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp", addr)
 		if err == nil {
 			_ = conn.Close()
-			return
+			return nil
 		}
+		lastErr = err
 		select {
 		case <-ctx.Done():
-			return
+			// The dial error is the useful half ("connection refused" means
+			// something is listening on the host but not on 22; a timeout means
+			// nothing answered at all), so carry it rather than only the deadline.
+			return fmt.Errorf("SSH (port 22) on %s did not become reachable within %s: %w",
+				host, timeout, lastErr)
 		case <-ticker.C:
 		}
 	}
@@ -361,4 +388,52 @@ func verifySporedReady(ctx context.Context, client *aws.Client, region, instance
 		case <-ticker.C:
 		}
 	}
+}
+
+// sshRegisterRetryable reports whether a failed DNS-registration SSH attempt is
+// worth re-running in a FRESH session.
+//
+// The retryable cases are all early-boot races that a new session genuinely
+// recovers from, and which retrying inside one session cannot:
+//
+//   - the local user's authorized_keys does not exist yet, because cloud-init is
+//     still running — SSH answers with "Permission denied (publickey)";
+//   - the instance's resolver cannot yet resolve public names, so the remote
+//     curl exits 6 (couldn't resolve host), 7 (couldn't connect) or 28 (timeout).
+//
+// The predicate used to be `err != nil || <curl checks>`, i.e. **every** error
+// was transient (#741). So a host that was simply unreachable — the #740 case —
+// burned the whole four-minute budget on ~16 attempts that could not have
+// succeeded. A reachability failure is not a race: a fresh session reaches the
+// same unreachable host.
+func sshRegisterRetryable(err error, output []byte) bool {
+	// The remote command ran and reported a resolver/connectivity race on the
+	// INSTANCE side. Checked first because these come back with a non-zero exit
+	// status, so they would otherwise fall through to the error classification.
+	for _, s := range []string{"curl exit 6", "curl exit 7", "curl exit 28"} {
+		if bytes.Contains(output, []byte(s)) {
+			return true
+		}
+	}
+	if err == nil {
+		return false
+	}
+	// Terminal: we could not reach the host at all. Retrying changes nothing, and
+	// the launch should surface it rather than stall. Matched on ssh's own
+	// wording; an unrecognised failure stays retryable, so a message we have not
+	// seen before degrades to the old behaviour rather than giving up early.
+	for _, s := range []string{
+		"Connection refused",
+		"Connection timed out",
+		"No route to host",
+		"Network is unreachable",
+		"Host is unreachable",
+		"Name or service not known",
+		"Could not resolve hostname",
+	} {
+		if bytes.Contains(output, []byte(s)) {
+			return false
+		}
+	}
+	return true
 }
