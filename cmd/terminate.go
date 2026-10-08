@@ -94,6 +94,10 @@ func terminateSingle(ctx context.Context, identifier string) error {
 			// was the second.
 			if hint := recentlyGoneHint(ctx, client, identifier); hint != "" {
 				fmt.Fprintf(os.Stderr, "Nothing to terminate%s.\n", hint)
+				// Same pointer as the not-found path: this is where someone
+				// re-running terminate on a self-terminated instance lands, and
+				// the reason it died may still be readable (#736).
+				fmt.Fprintf(os.Stderr, "Its log may still be readable: spawn logs %s\n", identifier)
 				return nil
 			}
 			fmt.Fprintf(os.Stderr, "No instance %q exists — nothing to terminate.\n", identifier)
