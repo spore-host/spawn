@@ -75,6 +75,39 @@ func ScanSelfStatements() []Statement {
 			Condition: ManagedTagCondition,
 		},
 		{
+			// Network resources (#685): the security-group / placement-group
+			// sweep. Read-only; neither Describe supports resource-level
+			// permissions, so Resource must be "*".
+			Effect: "Allow",
+			Action: []string{
+				"ec2:DescribeSecurityGroups",
+				"ec2:DescribePlacementGroups",
+			},
+			Resource: "*",
+		},
+		{
+			// The destructive half of the #685 sweep, tag-gated on the same rail
+			// as TerminateInstances.
+			//
+			// ec2:ResourceTag is the SERVICE key and both of these are ec2:
+			// actions, so it is the right key here — unlike #665, where an
+			// ec2:ResourceTag condition on an ssm: action produced a silent
+			// implicit deny that looked like a working policy.
+			//
+			// Without these two grants the sweep would hit AccessDenied on every
+			// cycle. That is the #652/#665 shape: a policy IAM accepts and does
+			// not authorize, which is invisible until something quietly stops
+			// happening — so both are simulated in BOTH directions before
+			// shipping, not merely applied.
+			Effect: "Allow",
+			Action: []string{
+				"ec2:DeleteSecurityGroup",
+				"ec2:DeletePlacementGroup",
+			},
+			Resource:  "*",
+			Condition: ManagedTagCondition,
+		},
+		{
 			// FSx: the #210 ephemeral-orphan net. DescribeFileSystems is read-only.
 			//
 			// DeleteFileSystem is NOT tag-conditioned here, unlike ec2:TerminateInstances

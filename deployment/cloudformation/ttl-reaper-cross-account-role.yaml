@@ -72,6 +72,30 @@ Resources:
                 Condition:
                   StringEquals:
                     ec2:ResourceTag/spawn:managed: 'true'
+              # Network resources (#685): the security-group / placement-group
+              # sweep. Read-only; neither Describe supports resource-level
+              # permissions, so Resource must be '*'.
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribePlacementGroups
+                # trivy:ignore:AVD-AWS-0057 -- Resource * required (neither Describe
+                # has a resource-level ARN); these are read-only.
+                Resource: '*'
+              # The destructive half, on the same tag rail as TerminateInstances
+              # above. Both are ec2: actions so ec2:ResourceTag is the correct
+              # SERVICE key — unlike #665, where that key on an ssm: action was a
+              # silent implicit deny that looked like a working policy.
+              - Effect: Allow
+                Action:
+                  - ec2:DeleteSecurityGroup
+                  - ec2:DeletePlacementGroup
+                # trivy:ignore:AVD-AWS-0057 -- Resource * required; access is
+                # constrained by the tag condition below.
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ec2:ResourceTag/spawn:managed: 'true'
               # Describe FSx filesystems across all regions to find expired /
               # orphaned ephemeral filesystems (#192/#210). DescribeFileSystems has
               # no resource-level ARN, so it must be Resource '*'. Without this the

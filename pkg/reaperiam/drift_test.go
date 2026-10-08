@@ -21,6 +21,10 @@ var apiServicePrefix = map[string]string{
 	"ec2": "ec2",
 	"fsx": "fsx",
 	"ssm": "ssm",
+	// netResourceAPI is the wider EC2 slice the security-group/placement-group
+	// sweep needs (#685). Kept separate from ec2API so the instance scan's narrow
+	// interface, and every fake implementing it, stays untouched.
+	"netResource": "ec2",
 }
 
 // methodCall matches a call on one of the reaper's SDK clients, e.g.
@@ -30,7 +34,7 @@ var methodCall = regexp.MustCompile(`\b(ec2|fsx|ssm)Client\.([A-Z][A-Za-z0-9]+)\
 // ifaceMethod matches a method line inside a `type xAPI interface { … }` block.
 var ifaceMethod = regexp.MustCompile(`^\s*([A-Z][A-Za-z0-9]+)\(ctx context\.Context`)
 
-var ifaceOpen = regexp.MustCompile(`^type ([a-z0-9]+)API interface \{`)
+var ifaceOpen = regexp.MustCompile(`^type ([a-zA-Z0-9]+)API interface \{`)
 
 // reaperAWSCalls returns every AWS API action the reaper's source calls, as
 // "service:Action", discovered from (a) the methods declared on its *API interfaces
