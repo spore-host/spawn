@@ -220,7 +220,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 
 	for _, idx := range pending {
 		paramSet := paramFormat.Params[idx]
-		config, err := buildLaunchConfigFromParams(paramFormat.Defaults, paramSet, state.SweepID, state.SweepName, idx, state.TotalParams)
+		config, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, paramFormat.Defaults, paramSet, state.SweepID, state.SweepName, idx, state.TotalParams)
 		if err != nil {
 			return fmt.Errorf("failed to build launch config for parameter set %d: %w", idx, err)
 		}

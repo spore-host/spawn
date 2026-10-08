@@ -168,14 +168,45 @@ func parseVolumeSizeGiB(val interface{}) (int32, error) {
 }
 
 // buildLaunchConfigFromParams merges defaults with parameter overrides
-func buildLaunchConfigFromParams(defaults, params map[string]interface{}, sweepID, sweepName string, index, total int) (aws.LaunchConfig, error) {
-	// Start with an empty config
-	config := aws.LaunchConfig{
-		SweepID:    sweepID,
-		SweepName:  sweepName,
-		SweepIndex: index,
-		SweepSize:  total,
-		Parameters: make(map[string]string),
+func buildLaunchConfigFromParams(base aws.LaunchConfig, defaults, params map[string]interface{}, sweepID, sweepName string, index, total int) (aws.LaunchConfig, error) {
+	// Start from the CLI config, not an empty struct (spawn#697).
+	//
+	// This used to begin empty, which meant the sweep path DROPPED EVERY CLI FLAG
+	// by default — 83 of 127 — and a flag worked only if someone hand-wrote a
+	// shim for it. That class was reported six times (#525 spend controls, #539
+	// IAM twice, #549 DNS, #667 networking, #673/#674/#675) and fixed six times
+	// as one-offs, because the architecture guaranteed there would be more.
+	//
+	// The consequences were not cosmetic: a sweep could not mount ANY storage
+	// (--efs-id, all eleven --fsx-*, --attach-volume), every row landed in the
+	// VPC default security group even after #667 fixed single launches, and
+	// --pre-stop was dropped — the hook that syncs results before termination,
+	// so losing it loses output.
+	//
+	// Inverting the default makes it "honour every flag unless the row overrides
+	// it", which is what the single-instance path already does and what a caller
+	// expects. A row's own key still wins, preserving the precedence #539
+	// established: row params > CLI flag > file defaults.
+	config := base
+	config.SweepID = sweepID
+	config.SweepName = sweepName
+	config.SweepIndex = index
+	config.SweepSize = total
+	config.Parameters = make(map[string]string)
+
+	// DEEP COPY the reference fields. `config := base` copies the struct, so
+	// every row would otherwise share the base's maps and slices — one row adding
+	// a tag or a security group would silently add it to all of them, and the
+	// rows are launched concurrently.
+	config.Tags = make(map[string]string, len(base.Tags))
+	for k, v := range base.Tags {
+		config.Tags[k] = v
+	}
+	if base.SecurityGroupIDs != nil {
+		config.SecurityGroupIDs = append([]string(nil), base.SecurityGroupIDs...)
+	}
+	if base.AttachVolumes != nil {
+		config.AttachVolumes = append([]aws.AttachVolumeSpec(nil), base.AttachVolumes...)
 	}
 
 	// Merge defaults and params into a single map

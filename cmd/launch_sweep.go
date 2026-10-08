@@ -269,7 +269,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// Build launch configs for each parameter set
 	launchConfigs := make([]*aws.LaunchConfig, 0, len(paramFormat.Params))
 	for i, paramSet := range paramFormat.Params {
-		config, err := buildLaunchConfigFromParams(paramFormat.Defaults, paramSet, sweepID, name, i, len(paramFormat.Params))
+		config, err := buildLaunchConfigFromParams(*baseConfig, paramFormat.Defaults, paramSet, sweepID, name, i, len(paramFormat.Params))
 		if err != nil {
 			return fmt.Errorf("failed to build launch config for parameter set %d: %w", i, err)
 		}

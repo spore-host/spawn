@@ -79,11 +79,31 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		if launchDryRun {
 			return fmt.Errorf("--dry-run is not yet supported for parameter-sweep launches (--param-file/--params); use --estimate-only for a cost preview")
 		}
-		// Parameter sweep launch path - config will be built inside launchParameterSweep
-		// Create minimal config for sweep orchestration
-		config := &aws.LaunchConfig{
-			Region:       region,
-			InstanceType: instanceType, // May be empty, that's ok for sweeps
+		// Build the REAL config and pass it as the sweep's base (spawn#697).
+		//
+		// This used to construct a two-field struct — Region and InstanceType —
+		// and nothing else, so every other CLI flag was dropped on the sweep
+		// path. A flag worked only if someone had hand-written a shim for it,
+		// which is why the same class was reported and patched six separate
+		// times (#525, #539 twice, #549, #667, #673/#674/#675).
+		//
+		// buildLaunchConfig is exactly what the single-instance path calls, so a
+		// sweep now starts from the same config a single launch would get, and
+		// each param row overrides it. Its validation applies to sweeps too,
+		// which is the point rather than a side effect: --fsx-create without
+		// --fsx-s3-bucket was previously accepted-and-ignored on a sweep.
+		config, err := buildLaunchConfig(nil)
+		if err != nil {
+			return err
+		}
+		// Keep the two fields the old dispatch set explicitly. Region may have
+		// been resolved from config/defaults rather than the flag, and
+		// InstanceType is legitimately empty on a sweep whose rows set it.
+		if config.Region == "" {
+			config.Region = region
+		}
+		if config.InstanceType == "" {
+			config.InstanceType = instanceType
 		}
 		return launchParameterSweep(ctx, config, plat, auditLog)
 	}

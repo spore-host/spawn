@@ -21,7 +21,7 @@ func TestBuildLaunchConfigFromParams_WorkflowStep(t *testing.T) {
 		"timeout":       "10m",
 	}
 
-	config, err := buildLaunchConfigFromParams(defaults, params, "sweep-123", "test-sweep", 0, 5)
+	config, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, defaults, params, "sweep-123", "test-sweep", 0, 5)
 	if err != nil {
 		t.Fatalf("buildLaunchConfigFromParams failed: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestBuildLaunchConfigFromParams_NoWorkflowStep(t *testing.T) {
 		"beta":          0.5,
 	}
 
-	config, err := buildLaunchConfigFromParams(defaults, params, "sweep-456", "param-sweep", 2, 10)
+	config, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, defaults, params, "sweep-456", "param-sweep", 2, 10)
 	if err != nil {
 		t.Fatalf("buildLaunchConfigFromParams failed: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestBuildLaunchConfigFromParams_CommandWithoutStep(t *testing.T) {
 		"command":       "python3 train.py",
 	}
 
-	config, err := buildLaunchConfigFromParams(map[string]interface{}{}, params, "sweep-789", "cmd-sweep", 0, 1)
+	config, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, map[string]interface{}{}, params, "sweep-789", "cmd-sweep", 0, 1)
 	if err != nil {
 		t.Fatalf("buildLaunchConfigFromParams failed: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestBuildLaunchConfigFromParams_OverrideDefaults(t *testing.T) {
 		"spot":          false,       // Override default spot
 	}
 
-	config, err := buildLaunchConfigFromParams(defaults, params, "sweep-999", "override-sweep", 0, 1)
+	config, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, defaults, params, "sweep-999", "override-sweep", 0, 1)
 	if err != nil {
 		t.Fatalf("buildLaunchConfigFromParams failed: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestBuildLaunchConfigFromParams_HeterogeneousEntry(t *testing.T) {
 		"spot":          true,
 	}
 
-	config, err := buildLaunchConfigFromParams(defaults, params, "sweep-1", "bench", 2, 6)
+	config, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, defaults, params, "sweep-1", "bench", 2, 6)
 	if err != nil {
 		t.Fatalf("buildLaunchConfigFromParams failed: %v", err)
 	}
