@@ -44,6 +44,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--fsx-throughput`, `--allow-cidr`, `--strata-*`, the `--wait-for-*` pair — which
   the sweep dispatch returns before reaching. The inversion fixed every flag the
   config *carries*; nothing about these flows through a config at all.
+- **A detached sweep's instances could be stopped by nothing** (#725). Detached is
+  the **default** — `launchParameterSweep` auto-enables it — so the common sweep is
+  launched by the `spawn-sweep-orchestrator` Lambda, and its rows carried only
+  `spawn:sweep-id`, `spawn:sweep-index` and `Name`.
+  Two consequences that compounded. No `UserData` meant **no spored**, so no TTL,
+  idle or cost enforcement in-instance. And no `spawn:managed` tag meant **the
+  reaper could not act either**, because its `ec2:TerminateInstances` grant is
+  conditioned on exactly that tag — deliberately, as the rail that keeps it away
+  from resources spawn does not own. So neither layer of the lifecycle invariant
+  (#70/#72) applied: nothing inside enforced anything and nothing outside was
+  permitted to. `--ttl`, `--cost-limit` and `--on-complete` were all accepted and
+  none could function.
+  Sweep rows now carry `spawn:managed=true`, plus `spawn:ttl-deadline` when the
+  sweep has a `ttl` — which the CLI already writes into the param defaults, so
+  nothing new had to be plumbed. **This restores the backstop, not in-instance
+  enforcement**: a row is now reclaimed on a reaper cycle rather than to the
+  minute. That is a different kind of problem from "runs until a human notices",
+  and it is the one worth closing first. The `UserData` half needs the full launch
+  config to reach the Lambda at all and remains open on #725.
+  An absent `ttl` deliberately produces no deadline rather than a guessed one; the
+  reaper's own max-age ceiling still bounds the instance, whereas a fabricated
+  deadline would terminate work the user never put a clock on.
+
 
 ## [0.124.0] - 2026-10-07
 

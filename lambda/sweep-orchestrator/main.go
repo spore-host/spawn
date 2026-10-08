@@ -664,6 +664,51 @@ func launchInstance(ctx context.Context, ec2Client *ec2.Client, state *SweepReco
 	return fmt.Errorf("all instance types exhausted: %w", lastErr)
 }
 
+// sweepRowLifecycleTags returns the tags that make a detached sweep's instance
+// REAPABLE.
+//
+// This is spawn#725's mitigation. A detached sweep — which is the DEFAULT, since
+// launchParameterSweep auto-enables --detach — launches through this Lambda, and
+// its RunInstances carried only spawn:sweep-id, spawn:sweep-index and Name.
+//
+// Two consequences, and together they removed every lifetime guarantee:
+//
+//   - No UserData, so no spored: no TTL, idle or cost enforcement in-instance.
+//     That is NOT fixed here; it needs the config to reach this Lambda at all.
+//   - No spawn:managed tag, so the reaper could not touch them either. Its
+//     ec2:TerminateInstances grant is conditioned on
+//     ec2:ResourceTag/spawn:managed=true — deliberately, as the rail that keeps
+//     it away from resources spawn does not own.
+//
+// So a detached sweep's rows could be stopped by nothing: no enforcement inside,
+// and no permission to act outside. That inverts the project's lifecycle
+// invariant (#70/#72), where spored enforces and the reaper backstops.
+//
+// Stamping these two tags restores the BACKSTOP. It does not restore in-instance
+// enforcement, so a row still runs until the reaper's next cycle rather than
+// honouring its TTL to the minute — but "reaped within the hour" and "runs until
+// a human notices" are different kinds of problem, and this closes the second.
+//
+// spawn:ttl-deadline is only stamped when the sweep actually carries a ttl. An
+// absent deadline is correct rather than guessed: the reaper falls back to its
+// own REAPER_MAX_AGE ceiling, which still bounds the instance.
+func sweepRowLifecycleTags(config map[string]interface{}, now time.Time) []ec2types.Tag {
+	tags := []ec2types.Tag{
+		// The rail the reaper's terminate is conditioned on. Without this tag
+		// nothing out-of-band may act on the instance.
+		{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+	}
+	if ttl := getStringParam(config, "ttl", ""); ttl != "" {
+		if d, err := time.ParseDuration(ttl); err == nil && d > 0 {
+			tags = append(tags, ec2types.Tag{
+				Key:   aws.String("spawn:ttl-deadline"),
+				Value: aws.String(now.Add(d).UTC().Format(time.RFC3339)),
+			})
+		}
+	}
+	return tags
+}
+
 // tryLaunchInstanceSingleRegion attempts to launch with specific instance type (single-region sweeps)
 func tryLaunchInstanceSingleRegion(ctx context.Context, ec2Client *ec2.Client, state *SweepRecord, config map[string]interface{}, paramIndex int, instanceType string, instanceTypePattern string) error {
 	// Extract launch configuration
@@ -683,11 +728,11 @@ func tryLaunchInstanceSingleRegion(ctx context.Context, ec2Client *ec2.Client, s
 		TagSpecifications: []ec2types.TagSpecification{
 			{
 				ResourceType: ec2types.ResourceTypeInstance,
-				Tags: []ec2types.Tag{
+				Tags: append([]ec2types.Tag{
 					{Key: aws.String("spawn:sweep-id"), Value: aws.String(state.SweepID)},
 					{Key: aws.String("spawn:sweep-index"), Value: aws.String(fmt.Sprintf("%d", paramIndex))},
 					{Key: aws.String("Name"), Value: aws.String(fmt.Sprintf("%s-%d", state.SweepName, paramIndex))},
-				},
+				}, sweepRowLifecycleTags(config, time.Now())...),
 			},
 		},
 	}
@@ -1501,11 +1546,11 @@ func tryLaunchInstance(ctx context.Context, ec2Client *ec2.Client, state *SweepR
 		TagSpecifications: []ec2types.TagSpecification{
 			{
 				ResourceType: ec2types.ResourceTypeInstance,
-				Tags: []ec2types.Tag{
+				Tags: append([]ec2types.Tag{
 					{Key: aws.String("spawn:sweep-id"), Value: aws.String(state.SweepID)},
 					{Key: aws.String("spawn:sweep-index"), Value: aws.String(fmt.Sprintf("%d", paramIndex))},
 					{Key: aws.String("Name"), Value: aws.String(fmt.Sprintf("%s-%d", state.SweepName, paramIndex))},
-				},
+				}, sweepRowLifecycleTags(config, time.Now())...),
 			},
 		},
 	}
