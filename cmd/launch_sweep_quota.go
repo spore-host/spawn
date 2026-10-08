@@ -168,7 +168,7 @@ func sweepQuotaCombos(paramFormat *ParamFileFormat, baseConfig *aws.LaunchConfig
 	seen := make(map[sweepQuotaCombo]bool)
 	var combos []sweepQuotaCombo
 	for i, paramSet := range paramFormat.Params {
-		cfg, err := buildLaunchConfigFromParams(paramFormat.Defaults, paramSet, "", "", i, len(paramFormat.Params))
+		cfg, err := buildLaunchConfigFromParams(*baseConfig, paramFormat.Defaults, paramSet, "", "", i, len(paramFormat.Params))
 		if err != nil {
 			return nil, fmt.Errorf("auto max-concurrent: build launch config for parameter set %d: %w", i, err)
 		}

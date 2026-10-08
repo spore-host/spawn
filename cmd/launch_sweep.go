@@ -57,6 +57,34 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return fmt.Errorf("unusable param-file keys")
 	}
 
+	// Seed region and instance_type into the file's defaults from the CLI
+	// (spawn#697, found by the sweep smoke).
+	//
+	// The config inversion fixed every path that reads a LaunchConfig, but
+	// pkg/sweep/detached.go's cost estimator reads paramSet and
+	// paramFormat.Defaults DIRECTLY and never sees a config at all — so
+	// `--instance-type t4g.small --param-file rows-without-a-type.json` still
+	// failed with "param set 0: no instance_type specified". That is a SEVENTH
+	// instance of the class #697 describes, and the first one a unit test could
+	// not have found because the estimator only runs on a real launch.
+	//
+	// Writing the CLI values into Defaults is the semantically correct fix rather
+	// than a shim: --instance-type on the command line IS the default instance
+	// type for rows that do not set one, which is exactly what Defaults means. A
+	// row's own key still wins, and a file-level default the user wrote is never
+	// overwritten.
+	if baseConfig != nil {
+		if paramFormat.Defaults == nil {
+			paramFormat.Defaults = map[string]interface{}{}
+		}
+		if _, set := paramFormat.Defaults["instance_type"]; !set && baseConfig.InstanceType != "" {
+			paramFormat.Defaults["instance_type"] = baseConfig.InstanceType
+		}
+		if _, set := paramFormat.Defaults["region"]; !set && baseConfig.Region != "" {
+			paramFormat.Defaults["region"] = baseConfig.Region
+		}
+	}
+
 	// Reject keys that look like spawn settings before anything is launched or
 	// priced (#526). This runs before applyCLISpendControlsToSweep so the error
 	// names only what the user actually wrote, not the ttl/cost_limit that is
@@ -269,7 +297,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// Build launch configs for each parameter set
 	launchConfigs := make([]*aws.LaunchConfig, 0, len(paramFormat.Params))
 	for i, paramSet := range paramFormat.Params {
-		config, err := buildLaunchConfigFromParams(paramFormat.Defaults, paramSet, sweepID, name, i, len(paramFormat.Params))
+		config, err := buildLaunchConfigFromParams(*baseConfig, paramFormat.Defaults, paramSet, sweepID, name, i, len(paramFormat.Params))
 		if err != nil {
 			return fmt.Errorf("failed to build launch config for parameter set %d: %w", i, err)
 		}

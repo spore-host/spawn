@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/spore-host/spawn/pkg/aws"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -294,8 +295,7 @@ func TestValidateSweepParamKeysAcceptsCleanFile(t *testing.T) {
 // buildLaunchConfigFromParams, because resume and the quota preflight call that
 // directly and never pass through launchParameterSweep's early validation.
 func TestBuildLaunchConfigRejectsDangerousKeyAtTheSeam(t *testing.T) {
-	_, err := buildLaunchConfigFromParams(
-		map[string]interface{}{"ttl_hours": 4},
+	_, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, map[string]interface{}{"ttl_hours": 4},
 		map[string]interface{}{"instance_type": "c5.large"},
 		"sweep-1", "bench", 0, 1,
 	)
@@ -309,8 +309,7 @@ func TestBuildLaunchConfigRejectsDangerousKeyAtTheSeam(t *testing.T) {
 }
 
 func TestBuildLaunchConfigStillPassesThroughParams(t *testing.T) {
-	config, err := buildLaunchConfigFromParams(
-		map[string]interface{}{"ttl": "1h"},
+	config, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, map[string]interface{}{"ttl": "1h"},
 		map[string]interface{}{"instance_type": "c5.large", "alpha": 0.1, "nsteps": 1000},
 		"sweep-1", "bench", 0, 1,
 	)
@@ -496,8 +495,7 @@ func TestValidateTopLevelParamKeysAcceptsCleanFile(t *testing.T) {
 // through the real merge function: prefix stripped, value intact, and no spawn
 // setting touched by a key that merely looked like one.
 func TestExplicitParamPrefixReachesParameters(t *testing.T) {
-	config, err := buildLaunchConfigFromParams(
-		map[string]interface{}{"ttl": "1h"},
+	config, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, map[string]interface{}{"ttl": "1h"},
 		map[string]interface{}{"instance_type": "c5.large", "param:budget": 50, "param:time_limit": 300},
 		"sweep-1", "bench", 0, 1,
 	)
@@ -563,8 +561,7 @@ func TestValidateSweepParamKeysAcceptsNewlineFreeValue(t *testing.T) {
 // go through launchParameterSweep's early validation, so the same newline
 // check must also live here.
 func TestBuildLaunchConfigRejectsNewlineValueAtTheSeam(t *testing.T) {
-	_, err := buildLaunchConfigFromParams(
-		map[string]interface{}{"ttl": "1h"},
+	_, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, map[string]interface{}{"ttl": "1h"},
 		map[string]interface{}{"instance_type": "c5.large", "label": "a\nb"},
 		"sweep-1", "bench", 0, 1,
 	)

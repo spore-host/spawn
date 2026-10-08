@@ -83,14 +83,14 @@ var sweepFlagCoverage = map[string]struct {
 	"quiet":              {sweepNA, "output verbosity, applied by the printer not the config"},
 
 	// --- Known gaps: should work on a sweep and do not. All #697.
-	"active-ports":             {sweepKnownGap, "#697 — idle-detection input; without it idle detection uses defaults"},
-	"active-processes":         {sweepKnownGap, "#697 — see active-ports"},
-	"allow-cidr":               {sweepKnownGap, "#697 — managed SG ingress CIDR"},
-	"allow-cost-limit-overrun": {sweepKnownGap, "#697 — storage-vs-cap override"},
-	"attach-volume":            {sweepKnownGap, "#697 — no way to attach a data volume to a sweep row"},
-	"capacity-block":           {sweepKnownGap, "#697"},
-	"completion-delay":         {sweepKnownGap, "#697"},
-	"completion-webhook-url":   {sweepKnownGap, "#697 — off-node completion signal"},
+	"active-ports":             {sweepHonoured, "#697 — idle-detection input; without it idle detection uses defaults"},
+	"active-processes":         {sweepHonoured, "#697 — see active-ports"},
+	"allow-cidr":               {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"allow-cost-limit-overrun": {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"attach-volume":            {sweepHonoured, "#697 — no way to attach a data volume to a sweep row"},
+	"capacity-block":           {sweepHonoured, "#697"},
+	"completion-delay":         {sweepHonoured, "#697"},
+	"completion-webhook-url":   {sweepHonoured, "#697 — off-node completion signal"},
 	// DNS on sweeps: a row gets spawn:dns-name only if the param file sets
 	// dns:/dns_name:, and spored skips registration without that tag. So the
 	// param file IS the sweep route and these three have nothing to do (#549).
@@ -98,57 +98,57 @@ var sweepFlagCoverage = map[string]struct {
 	"dns-api-endpoint":      {sweepNA, "#549 — only consulted when a row registers DNS"},
 	"dns-domain":            {sweepNA, "#549 — only consulted when a row registers DNS"},
 	"no-dns":                {sweepNA, "#549 — sweeps never register DNS: a row gets spawn:dns-name only if the param file sets dns:/dns_name:, and spored skips registration without that tag. Nothing to disable, so this is not a gap"},
-	"efs-id":                {sweepKnownGap, "#697 — a sweep cannot mount EFS AT ALL"},
-	"efs-mount-options":     {sweepKnownGap, "#697 — see efs-id"},
-	"efs-mount-point":       {sweepKnownGap, "#697 — see efs-id"},
-	"efs-profile":           {sweepKnownGap, "#697 — see efs-id"},
-	"fsx-create":            {sweepKnownGap, "#697 — a sweep cannot mount FSx AT ALL"},
-	"fsx-export-path":       {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-id":                {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-import-path":       {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-lifecycle":         {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-mount-point":       {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-recall":            {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-s3-bucket":         {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-skip-validate":     {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-storage-capacity":  {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-throughput":        {sweepKnownGap, "#697 — see fsx-create"},
-	"fsx-ttl":               {sweepKnownGap, "#697 — see fsx-create"},
-	"hibernate-on-idle":     {sweepKnownGap, "#697 — has an on_idle/hibernate_on_idle param key"},
-	"instance-type":         {sweepKnownGap, "#697 — passed in the minimal config, but rows override; see note in the test"},
-	"key-name":              {sweepKnownGap, "#697 — has a key_name param key"},
-	"key-pair":              {sweepKnownGap, "#697 — alias of key-name"},
-	"nested-virtualization": {sweepKnownGap, "#697"},
-	"notify-platform":       {sweepKnownGap, "#697"},
-	"on-complete":           {sweepKnownGap, "#697 — has an on_complete param key; the FLAG is dropped"},
-	"on-idle":               {sweepKnownGap, "#697"},
-	"plugin":                {sweepKnownGap, "#697 — spored plugin declarations"},
-	"pre-stop":              {sweepKnownGap, "#697 — DATA LOSS: the hook that syncs results before termination"},
-	"pre-stop-timeout":      {sweepKnownGap, "#697 — see pre-stop"},
-	"reservation-id":        {sweepKnownGap, "#697"}, "use-reservation": {sweepNA, "#675 — deprecated and inert; superseded by --reservation-id"},
+	"efs-id":                {sweepHonoured, "#697 — a sweep cannot mount EFS AT ALL"},
+	"efs-mount-options":     {sweepHonoured, "#697 — see efs-id"},
+	"efs-mount-point":       {sweepHonoured, "#697 — see efs-id"},
+	"efs-profile":           {sweepHonoured, "#697 — see efs-id"},
+	"fsx-create":            {sweepHonoured, "#697 — a sweep cannot mount FSx AT ALL"},
+	"fsx-export-path":       {sweepHonoured, "#697 — see fsx-create"},
+	"fsx-id":                {sweepHonoured, "#697 — see fsx-create"},
+	"fsx-import-path":       {sweepHonoured, "#697 — see fsx-create"},
+	"fsx-lifecycle":         {sweepHonoured, "#697 — see fsx-create"},
+	"fsx-mount-point":       {sweepHonoured, "#697 — see fsx-create"},
+	"fsx-recall":            {sweepHonoured, "#697 — see fsx-create"},
+	"fsx-s3-bucket":         {sweepHonoured, "#697 — see fsx-create"},
+	"fsx-skip-validate":     {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"fsx-storage-capacity":  {sweepHonoured, "#697 — see fsx-create"},
+	"fsx-throughput":        {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"fsx-ttl":               {sweepHonoured, "#697 — see fsx-create"},
+	"hibernate-on-idle":     {sweepHonoured, "#697 — has an on_idle/hibernate_on_idle param key"},
+	"instance-type":         {sweepHonoured, "#697 — passed in the minimal config, but rows override; see note in the test"},
+	"key-name":              {sweepHonoured, "#697 — has a key_name param key"},
+	"key-pair":              {sweepHonoured, "#697 — alias of key-name"},
+	"nested-virtualization": {sweepHonoured, "#697"},
+	"notify-platform":       {sweepHonoured, "#697"},
+	"on-complete":           {sweepHonoured, "#697 — has an on_complete param key; the FLAG is dropped"},
+	"on-idle":               {sweepHonoured, "#697"},
+	"plugin":                {sweepHonoured, "#697 — spored plugin declarations"},
+	"pre-stop":              {sweepHonoured, "#697 — DATA LOSS: the hook that syncs results before termination"},
+	"pre-stop-timeout":      {sweepHonoured, "#697 — see pre-stop"},
+	"reservation-id":        {sweepHonoured, "#697"}, "use-reservation": {sweepNA, "#675 — deprecated and inert; superseded by --reservation-id"},
 	"security-group":     {sweepKnownGap, "#667/#697 — fixed for single launches, still dropped on sweeps"},
 	"security-group-ids": {sweepKnownGap, "#667/#697 — see security-group"},
 	"subnet":             {sweepKnownGap, "#667/#697 — see security-group"},
 	"subnet-id":          {sweepKnownGap, "#667/#697 — see security-group"},
 	"vpc":                {sweepKnownGap, "#673/#697 — read by nothing anywhere"},
-	"slack-workspace":    {sweepKnownGap, "#697"},
-	"spot-webhook-url":   {sweepKnownGap, "#697 — spot-interruption signal"},
-	"strata-formation":   {sweepKnownGap, "#697"}, "strata-profile": {sweepKnownGap, "#697"},
-	"strata-registry": {sweepKnownGap, "#697"},
-	"tag":             {sweepKnownGap, "#697 — custom tags never reach sweep rows"},
-	"team":            {sweepKnownGap, "#697 — team-shared access tagging"},
-	"user-data-file":  {sweepKnownGap, "#697"},
-	"spot-max-price":  {sweepKnownGap, "#697"},
+	"slack-workspace":    {sweepHonoured, "#697"},
+	"spot-webhook-url":   {sweepHonoured, "#697 — spot-interruption signal"},
+	"strata-formation":   {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."}, "strata-profile": {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"strata-registry": {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"tag":             {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"team":            {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"user-data-file":  {sweepHonoured, "#697"},
+	"spot-max-price":  {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
 
 	// Found by this gate on its first run — seven flags I had not classified,
 	// which is the gate working rather than a gap in it.
-	"completion-file":     {sweepKnownGap, "#697 — has a completion_file param key; the FLAG is dropped"},
-	"session-timeout":     {sweepKnownGap, "#697 — has a session_timeout param key; the FLAG is dropped"},
-	"user-data":           {sweepKnownGap, "#697 — has a user_data param key; the FLAG is dropped"},
-	"wait-for-running":    {sweepKnownGap, "#697 — no param key either"},
-	"wait-for-ssh":        {sweepKnownGap, "#697 — no param key either"},
-	"webhook-correlation": {sweepKnownGap, "#697 — companion to the webhook URLs, also dropped"},
-	"webhook-timeout":     {sweepKnownGap, "#697 — companion to the webhook URLs, also dropped"},
+	"completion-file":     {sweepHonoured, "#697 — has a completion_file param key; the FLAG is dropped"},
+	"session-timeout":     {sweepHonoured, "#697 — has a session_timeout param key; the FLAG is dropped"},
+	"user-data":           {sweepHonoured, "#697 — has a user_data param key; the FLAG is dropped"},
+	"wait-for-running":    {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"wait-for-ssh":        {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
+	"webhook-correlation": {sweepHonoured, "#697 — companion to the webhook URLs, also dropped"},
+	"webhook-timeout":     {sweepHonoured, "#697 — companion to the webhook URLs, also dropped"},
 }
 
 // TestEveryLaunchFlagIsClassifiedForSweeps forces the question "does this work on
@@ -275,7 +275,15 @@ func launchCmdFlagNames(t *testing.T) []string {
 func sweepPathSource(t *testing.T) string {
 	t.Helper()
 	var sb strings.Builder
-	for _, f := range []string{"launch_sweep.go", "sweep.go", "sweep_keys.go"} {
+	// launch_config.go counts as the sweep path since spawn#697.
+	//
+	// The sweep dispatch now calls buildLaunchConfig — the same function the
+	// single-instance path uses — and passes the result as the base that every
+	// param row is merged onto. So a flag that buildLaunchConfig reads IS
+	// honoured on a sweep, even though it is never mentioned in launch_sweep.go.
+	// Before the inversion this list was the whole story, because the sweep built
+	// a two-field struct and read nothing else.
+	for _, f := range []string{"launch_sweep.go", "sweep.go", "sweep_keys.go", "launch_config.go"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			continue

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"github.com/spore-host/spawn/pkg/aws"
 	"strings"
 	"testing"
 )
@@ -103,7 +104,7 @@ func TestApplyCLISpendControlsToSweep_RowStillWins(t *testing.T) {
 		ttl  string
 		cost float64
 	}{{"4h", 10}, {"30m", 2}} {
-		cfg, err := buildLaunchConfigFromParams(pf.Defaults, pf.Params[i], "sw", "sw", i, 2)
+		cfg, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, pf.Defaults, pf.Params[i], "sw", "sw", i, 2)
 		if err != nil {
 			t.Fatalf("row %d: %v", i, err)
 		}
@@ -186,8 +187,7 @@ func TestSweepRowsWithoutBound(t *testing.T) {
 // not a PARAM_* passthrough. Pre-fix it had no parser case, so it landed in
 // Parameters and capped nothing.
 func TestBuildLaunchConfigFromParams_CostLimit(t *testing.T) {
-	cfg, err := buildLaunchConfigFromParams(
-		map[string]interface{}{"cost_limit": 8}, nil, "sw", "sw", 0, 1)
+	cfg, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, map[string]interface{}{"cost_limit": 8}, nil, "sw", "sw", 0, 1)
 	if err != nil {
 		t.Fatalf("buildLaunchConfigFromParams: %v", err)
 	}
@@ -204,8 +204,7 @@ func TestBuildLaunchConfigFromParams_CostLimit(t *testing.T) {
 // fails the sweep instead of quietly becoming 0 (= no cap).
 func TestBuildLaunchConfigFromParams_BadCostLimitErrors(t *testing.T) {
 	for _, bad := range []interface{}{"eight", "", true, []interface{}{1}, -3} {
-		_, err := buildLaunchConfigFromParams(
-			map[string]interface{}{"cost_limit": bad}, nil, "sw", "sw", 0, 1)
+		_, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, map[string]interface{}{"cost_limit": bad}, nil, "sw", "sw", 0, 1)
 		if err == nil {
 			t.Errorf("cost_limit=%#v: expected an error, got none — a 0 cost limit is no cap", bad)
 			continue

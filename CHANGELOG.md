@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A parameter sweep now honours CLI flags instead of dropping them** (#697). The
+  sweep dispatch built a two-field `LaunchConfig` — region and instance type — and
+  merged param rows onto an *empty* struct, so **every other CLI flag was dropped
+  by default**: 83 of 127. A flag worked only if someone had hand-written a shim
+  for it, which is why the same class was reported and patched six separate times
+  (#525 spend controls, #539 IAM twice, #549 DNS, #667 networking, #673/#674/#675).
+  The consequences were not cosmetic. A sweep **could not mount any storage at
+  all** — `--efs-id`, all eleven `--fsx-*`, `--attach-volume` — so every row had to
+  stage through S3. Every row landed in the VPC default security group even after
+  #667 fixed single launches. And `--pre-stop` was dropped, which is the hook that
+  syncs results before termination, so losing it loses output.
+  The sweep path now calls `buildLaunchConfig` — the same function the
+  single-instance path uses — and merges each row *onto* that. The default inverts
+  from "drop every flag unless someone wrote a shim" to "honour every flag unless
+  the row overrides it". A row's own key still wins, preserving the precedence #539
+  established. `buildLaunchConfig`'s validation now applies to sweeps too, which is
+  the point rather than a side effect: `--fsx-create` without `--fsx-s3-bucket` was
+  previously accepted and ignored on a sweep.
+  **84 flags are now honoured, up from 44**, and the known-gap count falls from 58
+  to 18 — measured by the coverage manifest rather than asserted.
+- **Important scope limit, found by hardware-testing this fix.** The above applies to
+  the **foreground** sweep path, reachable only with `--no-detach`. Detached is the
+  **default** — `launchParameterSweep` auto-enables it — and a detached sweep is
+  launched by the `spawn-sweep-orchestrator` Lambda, which builds `RunInstances`
+  from four param keys and never sees a `LaunchConfig` at all. So on the default
+  path the drop is closer to 123 of 127, and worse: those rows get no `UserData`
+  (hence no spored) and no `spawn:managed` tag (hence no reaper), so nothing can
+  stop them. Filed as #725, which is more serious than this issue and not fixed
+  here.
+- **The 18 remaining gaps are a different, smaller defect**, and the manifest now
+  says so instead of lumping them in. They are flags applied *imperatively* later
+  in `launchSingleInstance` — `--tag`, `--team`, `--spot-max-price`,
+  `--fsx-throughput`, `--allow-cidr`, `--strata-*`, the `--wait-for-*` pair — which
+  the sweep dispatch returns before reaching. The inversion fixed every flag the
+  config *carries*; nothing about these flows through a config at all.
+
 ## [0.124.0] - 2026-10-07
 
 ### Added

@@ -50,10 +50,26 @@ step() { echo; echo "=== $*"; }
 cleanup() {
   step "Cleanup"
   local ids
-  ids=$(aws ec2 describe-instances --region "$REGION" \
-    --filters "Name=tag:smoke,Values=$TAG" \
-              "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-    --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' '\n')
+  # TWO filters, not one.
+  #
+  # The MPI and storage legs tag their instances smoke=$TAG. The sweep leg's rows
+  # cannot be tagged that way: --tag is one of the 18 flags still dropped on
+  # sweeps (#697's remainder), so it never reaches a row. They are found by the
+  # Name prefix spawn assigns each row instead.
+  #
+  # Getting this wrong would leak the sweep's instances while printing "no
+  # instances left behind", which is the false-pass this check already produced
+  # once for placement groups.
+  ids=$(
+    aws ec2 describe-instances --region "$REGION" \
+      --filters "Name=tag:smoke,Values=$TAG" \
+                "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' '\n'
+    aws ec2 describe-instances --region "$REGION" \
+      --filters "Name=tag:Name,Values=$TAG-sw-*" \
+                "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' '\n'
+  )
   for id in $ids; do
     [ -n "$id" ] && aws ec2 terminate-instances --region "$REGION" --instance-ids "$id" >/dev/null 2>&1 \
       && echo "  terminated $id"
@@ -76,6 +92,26 @@ cleanup() {
   fi
   [ -n "${EFS_SG:-}" ] && aws ec2 delete-security-group --region "$REGION" \
     --group-id "$EFS_SG" >/dev/null 2>&1 && echo "  deleted SG $EFS_SG"
+
+  # Sweep leg's own EFS fixture (#697). Separate from the storage leg's because
+  # the two legs can run independently; a shared variable would leave one of them
+  # leaking whichever ran second.
+  for mt in $(aws efs describe-mount-targets --region "$REGION" --file-system-id "${SWEEP_FS:-none}" \
+                --query 'MountTargets[].MountTargetId' --output text 2>/dev/null); do
+    aws efs delete-mount-target --region "$REGION" --mount-target-id "$mt" >/dev/null 2>&1 \
+      && echo "  deleted sweep mount target $mt"
+  done
+  if [ -n "${SWEEP_FS:-}" ]; then
+    for _ in $(seq 1 24); do
+      [ "$(aws efs describe-mount-targets --region "$REGION" --file-system-id "$SWEEP_FS" \
+          --query 'length(MountTargets)' --output text 2>/dev/null)" = "0" ] && break
+      sleep 5
+    done
+    aws efs delete-file-system --region "$REGION" --file-system-id "$SWEEP_FS" >/dev/null 2>&1 \
+      && echo "  deleted sweep EFS $SWEEP_FS"
+  fi
+  [ -n "${SWEEP_SG:-}" ] && aws ec2 delete-security-group --region "$REGION" \
+    --group-id "$SWEEP_SG" >/dev/null 2>&1 && echo "  deleted sweep SG $SWEEP_SG"
 
   # The MPI leg's own managed infrastructure. This file terminated its instances
   # and then left these behind on every run — three orphaned placement groups and
@@ -114,10 +150,17 @@ cleanup() {
   # Independent leak check: ask AWS, do not trust the terminate calls above.
   sleep 10
   local left
-  left=$(aws ec2 describe-instances --region "$REGION" \
-    --filters "Name=tag:smoke,Values=$TAG" \
-              "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-    --query 'length(Reservations[].Instances[])' --output text 2>/dev/null)
+  left=$(
+    {
+      aws ec2 describe-instances --region "$REGION" \
+        --filters "Name=tag:smoke,Values=$TAG" \
+                  "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+        --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null
+      aws ec2 describe-instances --region "$REGION" \
+        --filters "Name=tag:Name,Values=$TAG-sw-*" \
+                  "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+        --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null
+    } | tr '\t' '\n' | grep -c '^i-' || true)
   if [ "${left:-0}" = "0" ]; then ok "no instances left behind"; else bad "LEAK: $left instance(s) still alive — terminate by hand NOW"; fi
 
   # Instances are the expensive leak, but not the only one. Three placement
@@ -131,6 +174,12 @@ cleanup() {
   sg_left=$(aws ec2 describe-security-groups --region "$REGION" \
     --filters "Name=group-name,Values=spawn-mpi-${ARRAY_NAME}*" \
     --query 'length(SecurityGroups)' --output text 2>/dev/null)
+  local efs_left
+  efs_left=$(aws efs describe-file-systems --region "$REGION" \
+    --query "length(FileSystems[?Name=='$TAG-sweep'])" --output text 2>/dev/null)
+  if [ "${efs_left:-0}" != "0" ]; then
+    bad "LEAK: the sweep leg's EFS filesystem is still present — it bills per GiB"
+  fi
   if [ "${pg_left:-0}" = "0" ] && [ "${sg_left:-0}" = "0" ]; then
     ok "no placement groups or security groups left behind"
   else
@@ -420,3 +469,107 @@ fi
 step "Result"
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
+
+# ---------------------------------------------------------------------------
+# Sweep: does a parameter sweep honour CLI flags? (spawn#697)
+#
+# OPT-IN (SMOKE_SWEEP=1), and it exists because of a specific transition risk
+# rather than a standing one.
+#
+# Until #697 the sweep path merged param rows onto an EMPTY config, so every CLI
+# flag was dropped: 83 of 127, including --efs-id and all eleven --fsx-*. A sweep
+# could not mount anything. The fix starts each row from the real CLI config, so
+# a sweep with --efs-id now ACTUALLY ATTEMPTS AN EFS MOUNT ON EVERY ROW — code
+# that has never run on this path before.
+#
+# That is what needs an instance to settle. `make smoke-needed` does not flag the
+# sweep files, and it is right not to: the config construction is pure data and
+# fully unit-tested. What a unit test cannot tell you is whether the mount
+# actually happens on each of N concurrently-launched rows.
+# ---------------------------------------------------------------------------
+if [ "${SMOKE_SWEEP:-0}" = "1" ]; then
+  step "Sweep: 2 rows x ${SMALL_TYPE} honouring --efs-id (#697)"
+
+  SWEEP_SG=$(aws ec2 create-security-group --region "$REGION" \
+    --group-name "$TAG-sweep-efs" --description "smoke sweep EFS mount target" \
+    --vpc-id "$(aws ec2 describe-vpcs --region "$REGION" --filters Name=is-default,Values=true \
+      --query 'Vpcs[0].VpcId' --output text)" --query GroupId --output text)
+  SWEEP_VPC_CIDR=$(aws ec2 describe-vpcs --region "$REGION" --filters Name=is-default,Values=true \
+    --query 'Vpcs[0].CidrBlock' --output text)
+  aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SWEEP_SG" \
+    --protocol tcp --port 2049 --cidr "$SWEEP_VPC_CIDR" >/dev/null 2>&1
+
+  SWEEP_FS=$(aws efs create-file-system --region "$REGION" --encrypted \
+    --tags "Key=Name,Value=$TAG-sweep" --query FileSystemId --output text)
+  for _ in $(seq 1 30); do
+    [ "$(aws efs describe-file-systems --region "$REGION" --file-system-id "$SWEEP_FS" \
+        --query 'FileSystems[0].LifeCycleState' --output text)" = available ] && break
+    sleep 5
+  done
+  SWEEP_SUBNET=$(aws ec2 describe-subnets --region "$REGION" \
+    --filters Name=default-for-az,Values=true --query 'Subnets[0].SubnetId' --output text)
+  SWEEP_MT=$(aws efs create-mount-target --region "$REGION" --file-system-id "$SWEEP_FS" \
+    --subnet-id "$SWEEP_SUBNET" --security-groups "$SWEEP_SG" --query MountTargetId --output text 2>/dev/null)
+  for _ in $(seq 1 30); do
+    [ "$(aws efs describe-mount-targets --region "$REGION" --mount-target-id "$SWEEP_MT" \
+        --query 'MountTargets[0].LifeCycleState' --output text)" = available ] && break
+    sleep 5
+  done
+
+  # Two rows differing only in a parameter, so any difference between them is
+  # the sweep machinery rather than the workload.
+  cat > /tmp/$TAG-sweep.json <<'SWEEPJSON'
+{
+  "params": [
+    {"trial": "a"},
+    {"trial": "b"}
+  ]
+}
+SWEEPJSON
+
+  if "$SPAWN" launch "$TAG-sw" --instance-type "$SMALL_TYPE" --region "$REGION" \
+       --param-file /tmp/$TAG-sweep.json --subnet-id "$SWEEP_SUBNET" \
+       --efs-id "$SWEEP_FS" --command 'mount | grep -c " /efs "; sleep 900' \
+       --ttl "$TTL" --cost-limit 0.50 \
+       >/tmp/$TAG-sweep.log 2>&1; then
+    ok "sweep launched with --efs-id (previously dropped entirely)"
+
+    # Find the rows by NAME, not by --tag.
+    #
+    # --tag is one of the 18 flags still dropped on sweeps (#697's remainder:
+    # applied imperatively in launchSingleInstance, which the sweep dispatch
+    # returns before reaching). So the first version of this leg filtered on a
+    # tag the rows never received and reported "found 0" while two rows were
+    # running — the leg's own discovery key was a flag it was testing for absence.
+    #
+    # The command also now ends in `sleep 900`: `mount | grep -c` finishes in
+    # milliseconds and the rows self-terminated before these checks could run,
+    # which is the same trap the storage leg above already documents.
+    SWEEP_IDS=$(aws ec2 describe-instances --region "$REGION" \
+      --filters "Name=tag:Name,Values=$TAG-sw-*" \
+                "Name=instance-state-name,Values=pending,running" \
+      --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | head -2)
+    COUNT=$(printf '%s\n' "$SWEEP_IDS" | grep -c '^i-' || true)
+    if [ "$COUNT" -lt 2 ]; then
+      echo "  ⚠️  sweep INCONCLUSIVE: expected 2 running rows, found $COUNT"
+    else
+      ok "both sweep rows are running"
+      MOUNTED=0
+      for SID in $SWEEP_IDS; do
+        ssm_wait_online "$SID" || continue
+        storage_wait_settled "$SID" || continue
+        N=$(ssm "$SID" 'grep -c " /efs " /proc/mounts || true')
+        N=${N//[^0-9]/}
+        [ "${N:-0}" -ge 1 ] && MOUNTED=$((MOUNTED + 1))
+      done
+      if [ "$MOUNTED" -eq 2 ]; then
+        ok "EFS mounted on BOTH rows — #697's flag drop is fixed on hardware"
+      else
+        bad "EFS mounted on only $MOUNTED of 2 rows; --efs-id reaches the config but not the instance"
+      fi
+    fi
+  else
+    bad "sweep launch failed; see /tmp/$TAG-sweep.log"
+    grep -E 'ERROR|error|failed' /tmp/$TAG-sweep.log | sed 's/^/     /' | head -4
+  fi
+fi

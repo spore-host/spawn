@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"github.com/spore-host/spawn/pkg/aws"
 	"strings"
 	"testing"
 )
@@ -93,7 +94,7 @@ func TestApplyCLIVolumeSizeToSweep_RowStillWins(t *testing.T) {
 	applyCLIVolumeSizeToSweep(pf)
 
 	for i, want := range []int32{100, 250} {
-		cfg, err := buildLaunchConfigFromParams(pf.Defaults, pf.Params[i], "sw", "sw", i, 2)
+		cfg, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, pf.Defaults, pf.Params[i], "sw", "sw", i, 2)
 		if err != nil {
 			t.Fatalf("row %d: %v", i, err)
 		}
@@ -107,8 +108,7 @@ func TestApplyCLIVolumeSizeToSweep_RowStillWins(t *testing.T) {
 // not a PARAM_* passthrough. Pre-fix it had no parser case, so it landed in
 // Parameters and resized nothing (#544).
 func TestBuildLaunchConfigFromParams_VolumeSize(t *testing.T) {
-	cfg, err := buildLaunchConfigFromParams(
-		map[string]interface{}{"volume_size": 100}, nil, "sw", "sw", 0, 1)
+	cfg, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, map[string]interface{}{"volume_size": 100}, nil, "sw", "sw", 0, 1)
 	if err != nil {
 		t.Fatalf("buildLaunchConfigFromParams: %v", err)
 	}
@@ -127,8 +127,7 @@ func TestBuildLaunchConfigFromParams_VolumeSize(t *testing.T) {
 // value the operator explicitly wrote.
 func TestBuildLaunchConfigFromParams_BadVolumeSizeErrors(t *testing.T) {
 	for _, bad := range []interface{}{"a hundred gigs", "", true, []interface{}{1}, -3, 40.5} {
-		_, err := buildLaunchConfigFromParams(
-			map[string]interface{}{"volume_size": bad}, nil, "sw", "sw", 0, 1)
+		_, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, map[string]interface{}{"volume_size": bad}, nil, "sw", "sw", 0, 1)
 		if err == nil {
 			t.Errorf("volume_size=%#v: expected an error, got none — an unparsed size silently "+
 				"becomes the 20 GiB default", bad)
