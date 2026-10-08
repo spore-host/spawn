@@ -220,8 +220,16 @@ func resolveInstance(ctx context.Context, client *aws.Client, identifier string)
 		// The default state filter excludes terminated AND shutting-down, so an
 		// instance that was right there is reported as if it never existed — and
 		// EC2 keeps both visible for about an hour, with a transition reason.
+		hint := recentlyGoneHint(ctx, client, identifier)
+		if hint != "" {
+			// Point at `spawn logs` here rather than making the user know the verb.
+			// This is the moment they are asking "why did it vanish?", and the
+			// answer may be one command away — the log tail spored wrote to the
+			// serial console before it died (#736).
+			hint += fmt.Sprintf("\n   Its log may still be readable: spawn logs %s", identifier)
+		}
 		return nil, &notFoundError{fmt.Sprintf("no instance found with name: %s%s",
-			identifier, recentlyGoneHint(ctx, client, identifier))}
+			identifier, hint)}
 	}
 
 	if len(matches) == 1 {
@@ -292,6 +300,27 @@ func recentlyGoneHint(ctx context.Context, client *aws.Client, identifier string
 // formatRecentlyGone is recentlyGoneHint's selection and wording, split out so
 // the part with the decisions in it is testable without AWS.
 func formatRecentlyGone(all []aws.InstanceInfo, identifier string) string {
+	best := selectRecentlyGone(all, identifier)
+	if best == nil {
+		return ""
+	}
+	hint := fmt.Sprintf(" — %s (%s) is %s", best.Name, best.InstanceID, best.State)
+	if best.Name == "" {
+		hint = fmt.Sprintf(" — %s is %s", best.InstanceID, best.State)
+	}
+	if reason := strings.TrimSpace(best.StateTransitionReason); reason != "" {
+		hint += ": " + reason
+	}
+	return hint
+}
+
+// selectRecentlyGone picks the terminated or shutting-down instance matching
+// identifier, or nil.
+//
+// Split out of formatRecentlyGone so `spawn logs` can reuse the selection and
+// not just its wording — it needs the instance itself, for the region and ID to
+// fetch console output with.
+func selectRecentlyGone(all []aws.InstanceInfo, identifier string) *aws.InstanceInfo {
 	isID := strings.HasPrefix(identifier, "i-")
 	var best *aws.InstanceInfo
 	for i := range all {
@@ -319,15 +348,5 @@ func formatRecentlyGone(all []aws.InstanceInfo, identifier string) string {
 			best = inst
 		}
 	}
-	if best == nil {
-		return ""
-	}
-	hint := fmt.Sprintf(" — %s (%s) is %s", best.Name, best.InstanceID, best.State)
-	if best.Name == "" {
-		hint = fmt.Sprintf(" — %s is %s", best.InstanceID, best.State)
-	}
-	if reason := strings.TrimSpace(best.StateTransitionReason); reason != "" {
-		hint += ": " + reason
-	}
-	return hint
+	return best
 }
