@@ -483,6 +483,13 @@ type Summary struct {
 	// under-logged. Nonzero here means filesystems are accruing cost unreclaimed.
 	FSxAccountsDenied int `json:"fsx_accounts_denied"`
 
+	// Heartbeat observability (#682): what spawn:last-heartbeat says about spored
+	// on each RUNNING spawn-managed instance. Counted, never reaped on — a stale
+	// heartbeat is a diagnosis and the deadline paths remain the authority.
+	HeartbeatFresh   int `json:"heartbeat_fresh"`
+	HeartbeatStale   int `json:"heartbeat_stale"`   // spored started then stopped
+	HeartbeatUnknown int `json:"heartbeat_unknown"` // no tag: pre-first-tick, or no spored at all (#725)
+
 	// Network resources (#685): spawn-managed security groups and cluster
 	// placement groups reclaimed once no instance references them and they are
 	// older than netResourceGrace. Neither costs money; the pressure is the
@@ -563,7 +570,7 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 	for _, acct := range r.accounts {
 		outcome := accountOutcome{label: acct.label, accountID: acct.accountID}
 		for _, region := range r.regions {
-			cands, scanned, err := r.scanRegion(ctx, acct, region, start)
+			cands, scanned, err := r.scanRegion(ctx, acct, region, start, &sum)
 			sum.Scanned += scanned
 			outcome.record(err)
 			if err != nil {
@@ -659,7 +666,7 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 
 // scanRegion lists spawn-managed instances (running AND stopped) in one
 // account+region and returns those past their deadline or the max-age ceiling.
-func (r *reaper) scanRegion(ctx context.Context, acct account, region string, now time.Time) ([]candidate, int, error) {
+func (r *reaper) scanRegion(ctx context.Context, acct account, region string, now time.Time, sum *Summary) ([]candidate, int, error) {
 	client := acct.ec2For(region)
 	var cands []candidate
 	scanned := 0
@@ -682,6 +689,9 @@ func (r *reaper) scanRegion(ctx context.Context, acct account, region string, no
 		for _, res := range page.Reservations {
 			for _, inst := range res.Instances {
 				scanned++
+				// #682: report whether spored is still ticking. Read-only and
+				// independent of the deadline decision below.
+				r.noteHeartbeat(inst, region, acct.label, now, sum)
 				if c, expired := r.evaluate(inst, region, now); expired {
 					c.account = acct.label
 					cands = append(cands, c)

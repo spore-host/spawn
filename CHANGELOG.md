@@ -35,6 +35,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Both the scan-self policy and the CloudFormation cross-account role
   carry them — the latter caught by a parity gate, and it is the **production**
   configuration, where a one-sided grant would make the feature silently no-op.
+- **The reaper now reports when `spored` has stopped checking in** (#682). A running
+  instance whose agent has died enforces none of its own limits: TTL, idle-stop and
+  cost are all applied *in* the instance, so when the loop stops, the only thing
+  left that will ever terminate the box is the reaper's deadline scan. Until now
+  that condition was invisible — "spored is dead" looked exactly like "the job is
+  still running". The reported case was a 0.5 GiB instance wedged during a package
+  install, still billing at **twice** its 6-minute TTL with no completion record and
+  no signal of any kind, until a human noticed.
+  No new producer and no new storage were needed: `spored` has written
+  `spawn:last-heartbeat` on every tick since #497 — described there as "an always-on
+  liveness signal a caller can poll" — and a search of the tree found **zero**
+  consumers. The gap was a reader, so this adds one. Each cycle now counts every
+  managed instance as heartbeat-fresh, -stale or -unknown in the run summary, and a
+  stale one logs the `SPORED NOT CHECKING IN` sentinel naming the instance, account,
+  region and how far behind it is, with a matching CloudWatch metric filter and
+  alarm (three consecutive hourly runs, so one lost tag write pages nobody).
+  A missing tag is **unknown, not stale** — an instance pre-first-tick, or one
+  launched by something that installs no agent at all, such as a detached sweep row
+  (#725); a missing signal and a lapsed one mean different things and only one is a
+  symptom. An unparseable stamp is likewise unknown, since that is evidence of a
+  format change rather than a dead agent, and reporting it as a death would cry wolf
+  every cycle until someone found the real cause.
+  Deliberately **not** a reap trigger. A stale heartbeat is a diagnosis, not a
+  deadline: `spawn:ttl-deadline` and the max-age ceiling remain the only
+  authorities, because an agent wedged while its workload runs fine would otherwise
+  have its work destroyed to tidy a symptom. v0.121.0's memory-floor warning is the
+  preventive half of #682; this is the part that makes it observable when the
+  instance gets starved anyway.
+  Every sentinel string is now also required to have a CloudWatch metric filter in
+  the template, by test. A sentinel wired to nothing is indistinguishable from no
+  sentinel — which is the same defect as the heartbeat tag itself.
 
 ### Fixed
 

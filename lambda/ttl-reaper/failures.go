@@ -66,6 +66,16 @@ const (
 	// the role exists.
 	sentinelAccountDenied = "REAPER ACCOUNT UNREACHABLE"
 
+	// sentinelHeartbeatStale means a RUNNING spawn-managed instance has not
+	// refreshed spawn:last-heartbeat for heartbeatStaleAfter (#682). spored
+	// started and stopped, so nothing in-instance is enforcing that box's TTL,
+	// idle or cost limits and this reaper is its only backstop.
+	//
+	// Its own sentinel because it is operationally distinct from the account
+	// failures above: the reaper is working perfectly, and the instance is not.
+	// Alerting on the two together would make neither actionable.
+	sentinelHeartbeatStale = "SPORED NOT CHECKING IN"
+
 	// sentinelFSxDenied means the EC2 scan worked for an account but every FSx
 	// DescribeFileSystems call was refused. This is #212 exactly: an FSx
 	// AccessDenied that surfaced as a silent no-op because the code path was
