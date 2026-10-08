@@ -546,8 +546,21 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 			return "", fmt.Errorf("failed to attach role to instance profile: %w", err)
 		}
 
-		// Wait for instance profile to propagate (IAM eventual consistency)
-		time.Sleep(10 * time.Second)
+		// Wait for the instance profile to become readable (IAM eventual
+		// consistency), by POLLING rather than sleeping blind (#752).
+		//
+		// This was `time.Sleep(10 * time.Second)` — and waitForInstanceProfile,
+		// 830 lines below in this same file, exists precisely to replace it. Its
+		// own doc comment says so: it "returns as soon as the profile is readable
+		// — instantly against a strongly consistent endpoint — instead of a blind
+		// fixed sleep". The blind sleep it describes was still here.
+		//
+		// Beyond the wasted 10 seconds on every role setup, the sleep was not
+		// ctx-aware, so a Ctrl-C during it was ignored; and 10s is simultaneously
+		// too long for the common case and no guarantee for the slow one. The
+		// statement immediately below is already GetInstanceProfile, i.e. exactly
+		// the readiness probe this now runs.
+		waitForInstanceProfile(ctx, iamClient, profileName)
 	}
 
 	// Retrieve the instance profile to get its ARN

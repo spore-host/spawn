@@ -125,13 +125,31 @@ else
     --description "Execution role for spawn DNS Lambda function" \
     > /dev/null
 
-  # Wait for role to be available
-  sleep 3
   info "IAM role created"
 fi
 
-# Get role ARN
-ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)
+# Get the role ARN, retrying for IAM's eventual consistency (#752).
+#
+# This was `sleep 3` followed by a bare get-role with no retry and no failure
+# check. Three seconds is well inside IAM's consistency tail, so a slow
+# propagation left ROLE_ARN EMPTY and the script went on to create a Lambda with
+# an empty role — a failure that surfaces much later and nowhere near its cause.
+ROLE_ARN=""
+DNS_WAITED=0
+while [ "$DNS_WAITED" -lt 40 ]; do
+  ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text 2>/dev/null || true)
+  case "$ROLE_ARN" in
+    arn:aws:iam::*) break ;;
+  esac
+  ROLE_ARN=""
+  sleep 2
+  DNS_WAITED=$((DNS_WAITED + 2))
+done
+if [ -z "$ROLE_ARN" ]; then
+  echo "ERROR: could not read the ARN of IAM role $ROLE_NAME after ${DNS_WAITED}s." >&2
+  echo "       Refusing to continue: the Lambda would be created with an empty role." >&2
+  exit 1
+fi
 info "Role ARN: $ROLE_ARN"
 echo ""
 

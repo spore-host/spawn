@@ -203,14 +203,42 @@ func launchBurstInstances(ctx context.Context, client *ec2.Client, params *Launc
 }
 
 func generateBurstUserData(params *LaunchParams) string {
-	// User data script that registers with DynamoDB on startup
+	// User data script that registers with DynamoDB on startup.
+	//
+	// The spored wait is BOUNDED (#752). It was:
+	//
+	//	while [ ! -f /usr/local/bin/spored ]; do sleep 5; done
+	//
+	// an unbounded loop, so a failed spored install — a bad download, a checksum
+	// mismatch, the wrong architecture, no network — hung the boot forever with no
+	// output and no failure record. That is the one shape every other generated
+	// script here deliberately avoids: pkg/userdata/queue.go caps the identical
+	// wait at 300s and exits with a message naming cloud-init, and
+	// pkg/launcher/bootstrap.go's readiness barrier caps at 600s and writes a
+	// named failure. This now matches queue.go, which is the closest sibling.
+	//
+	// Failing loudly matters more here than elsewhere: an instance with no spored
+	// has NO TTL, idle or cost enforcement in-instance (#50), so a silently hung
+	// boot is also a silently unbounded bill. Exiting non-zero makes cloud-init
+	// record the failure, which is what the reaper's max-age ceiling and
+	// `spawn status` can then be reconciled against.
 	return `#!/bin/bash
 # Spawn burst instance setup
 
-# Wait for spored to be available
-while [ ! -f /usr/local/bin/spored ]; do
+# Wait for spored to be installed, bounded. An unbounded wait here hid a failed
+# install as a hung boot (#752).
+MAX_WAIT=300  # 5 minutes
+WAITED=0
+while [ ! -f /usr/local/bin/spored ] && [ $WAITED -lt $MAX_WAIT ]; do
   sleep 5
+  WAITED=$((WAITED + 5))
 done
+
+if [ ! -f /usr/local/bin/spored ]; then
+  echo "ERROR: spored not installed after ${MAX_WAIT}s. Check cloud-init logs." >&2
+  echo "spawn: this instance has NO TTL/idle/cost enforcement; terminate it by hand" >&2
+  exit 1
+fi
 
 # Start spored with hybrid registry support
 systemctl enable spored

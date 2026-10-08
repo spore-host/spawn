@@ -20,6 +20,7 @@ package scripts
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -126,5 +127,64 @@ func TestDeployScriptsDoNotSwallowFailures(t *testing.T) {
 	// set -e alone leaves a failure on the left of a pipe unnoticed.
 	if !strings.Contains(s, "set -euo pipefail") {
 		t.Error("deploy-sweep-orchestrator.sh is not set -euo pipefail")
+	}
+}
+
+// A shell script must not wait out IAM eventual consistency with a bare sleep.
+//
+// There is no `aws iam wait` for instance profiles or roles, so the correct
+// substitute is a bounded poll on the read that has to succeed. Two scripts did
+// it with a flat sleep (#752):
+//
+//   - setup-spawnd-iam-role.sh slept 10s after add-role-to-instance-profile;
+//   - deploy-custom-dns.sh slept 3s after create-role and then ran a bare
+//     get-role with no retry, so a slow propagation left ROLE_ARN EMPTY and the
+//     script created a Lambda with an empty role.
+//
+// Matched per line, immediately after an `aws iam` mutation, so a legitimate
+// sleep inside a poll loop elsewhere is not flagged.
+func TestNoBareSleepAfterIAMMutation(t *testing.T) {
+	iamMutation := regexp.MustCompile(`aws iam (create|add|attach|put|update|tag)-`)
+	bareSleep := regexp.MustCompile(`^\s*sleep \d+\s*$`)
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sh") {
+			continue
+		}
+		b, rerr := os.ReadFile(e.Name())
+		if rerr != nil {
+			continue
+		}
+		lines := strings.Split(string(b), "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") || !iamMutation.MatchString(line) {
+				continue
+			}
+			// Scan forward past the mutation's own continuation lines for a bare
+			// sleep that is not inside a `while`/`for` poll.
+			inLoop := false
+			for j := i + 1; j < min(i+12, len(lines)); j++ {
+				t2 := strings.TrimSpace(lines[j])
+				if strings.HasPrefix(t2, "#") {
+					continue
+				}
+				if strings.HasPrefix(t2, "while ") || strings.HasPrefix(t2, "for ") {
+					inLoop = true
+				}
+				if bareSleep.MatchString(lines[j]) && !inLoop {
+					t.Errorf("%s:%d sleeps %q after the IAM mutation at :%d — poll the read "+
+						"that must succeed instead; IAM's consistency tail is longer than any "+
+						"constant you can pick", e.Name(), j+1, t2, i+1)
+				}
+				// A new command ends the window.
+				if strings.HasPrefix(t2, "aws ") && j > i+1 {
+					break
+				}
+			}
+		}
 	}
 }

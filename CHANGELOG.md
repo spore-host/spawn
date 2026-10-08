@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A failed `spored` install hung a burst instance's boot forever** (#752).
+  `spawn burst`'s generated user-data waited with
+  `while [ ! -f /usr/local/bin/spored ]; do sleep 5; done` — unbounded, with no
+  failure path. A bad download, a checksum mismatch, the wrong architecture or no
+  network produced a silent hang with no output and no completion record.
+  That is worse than an ordinary hang: an instance with no `spored` has **no TTL,
+  idle or cost enforcement in-instance** (#50), so a hung boot is also an
+  unbounded bill. Now capped at 300s with a non-zero exit that names cloud-init
+  and warns that the instance is unprotected — matching `pkg/userdata/queue.go`,
+  which caps the identical wait and sits 20 lines from where this was copied from.
+  A test now scans every Go file that embeds shell for an unbounded wait, since
+  these scripts live in string literals and no shell linter ever sees them.
+- **IAM eventual consistency is now waited out by polling, not by a blind sleep**
+  (#752), in three places.
+  `pkg/aws/iam.go` slept a flat 10 seconds after attaching a role to an instance
+  profile — while `waitForInstanceProfile`, **830 lines below in the same file**,
+  exists precisely to replace it and says so: it "returns as soon as the profile
+  is readable … instead of a blind fixed sleep". The statement immediately after
+  the sleep was already `GetInstanceProfile`, i.e. the readiness probe. The sleep
+  also ignored `ctx`, so a Ctrl-C during it did nothing.
+  `scripts/setup-spawnd-iam-role.sh` slept 10s after
+  `add-role-to-instance-profile`; it now polls until the **role appears in the
+  profile**, which is the condition EC2 actually needs at `RunInstances` — not
+  merely that the profile exists.
+  `scripts/deploy-custom-dns.sh` slept 3s after `create-role` and then ran a bare
+  `get-role` with no retry and no failure check, so a slow propagation left
+  `ROLE_ARN` **empty** and the script created a Lambda with an empty role — a
+  failure surfacing far from its cause. It now retries the read and refuses to
+  continue without an ARN.
+- **The hardware smoke's leak check could report "no instances left behind" for a
+  terminate that had hung** (#752). It slept 10s and then queried
+  `pending,running,stopping,stopped` — omitting `shutting-down`, the same blind
+  spot as #736. So the sleep bought nothing: a still-terminating instance was
+  invisible with or without it, while a genuinely *failed* terminate leaves state
+  `running` and was caught instantly. The two outcomes were indistinguishable.
+  It now polls until the live set is empty, with `shutting-down` included, so
+  "still shutting down" and "stuck" are different answers. Cost control is
+  existential here, which is exactly why the check has to be able to tell them
+  apart.
 - **Orphaned security groups and placement groups were permanently
   uncollectable** — the creation stamp the reaper depends on was never written by
   anything. `spawn:created` was read in three places and written in **none**, so
