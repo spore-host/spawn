@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"strings"
+
+	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 const (
@@ -57,12 +59,12 @@ func (a *Agent) writeCommandLogToConsole(reason string) {
 
 	// Framed so it is findable in a console dump that also holds the whole boot.
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n=== spawn command log (last %d lines) — %s ===\n", consoleTailLines, reason)
+	fmt.Fprintf(&b, "\n%s (last %d lines) — %s ===\n", taskproto.ConsoleLogStartPrefix, consoleTailLines, reason)
 	b.WriteString(tail)
 	if !strings.HasSuffix(tail, "\n") {
 		b.WriteString("\n")
 	}
-	b.WriteString("=== end spawn command log ===\n")
+	b.WriteString(taskproto.ConsoleLogEndMarker + "\n")
 
 	if err := sysWriteConsole(b.String()); err != nil {
 		log.Printf("console diagnostic: could not write to the serial console: %v", err)

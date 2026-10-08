@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn logs <name>` — a spore's log, including after it has terminated.**
+  While the instance is alive it tails the log directly over SSH-or-SSM, the same
+  path `spawn array logs` uses and sharing its `--which command|spored` and
+  `--lines` flags. Once the instance is **gone** that is impossible, so it reads
+  back the command-log tail `spored` wrote to the serial console before dying
+  (#736) — which means "why did my job fail?" is answerable without knowing that
+  `ec2 get-console-output` exists, or that the log was ever on the console.
+  The framing `spored` writes is a parsed delimiter, not decoration, so the
+  output is the 50 relevant lines rather than the 40 KB of UEFI and cloud-init
+  around them. `--console` prints the whole dump instead, for failures that
+  happened before the workload started and are explained by the boot messages.
+  An absent log is reported as one of **two different things**, because they send
+  you in opposite directions: the capture takes about five minutes to appear
+  after termination, so a recent instance gets "try again shortly" while an older
+  one gets "`spored` only writes this when the workload failed". Distinguished by
+  the termination time EC2 embeds in `StateTransitionReason`; when that is absent
+  the hint is withheld rather than guessed, since a confidently wrong "try again"
+  is worse than none.
+  The failure paths now point at it, so the verb does not have to be known in
+  advance: both `no instance found with name: …` and `terminate`'s
+  "nothing to terminate" add `Its log may still be readable: spawn logs <name>`.
+  Those are the two places someone lands when asking "why did it vanish?".
+  Dumps are cached under `~/.spawn/cache/console` for **7 days** and pruned on
+  every invocation — no daemon, and the cache cannot outlive its own policy.
+  Seven days rather than matching the existing 6h `indexCacheTTL`: a diagnostic
+  does not go stale the way a package index does, and 6h would expire it *before
+  its source*, since AWS served console output for instances `DescribeInstances`
+  had entirely forgotten more than twelve hours later. A cache that expires
+  before its source teaches you not to trust it. An empty dump is never cached,
+  so "no log yet" is not pinned for a week.
+
 ### Fixed
 
 - **MPI rank 0 now waits for every peer to accept SSH, instead of sleeping ten
