@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.126.0] - 2026-10-08
+
 ### Changed
 
 - **BREAKING (`pkg/taskproto`): the three script generators now take a
@@ -5938,7 +5940,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.125.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.126.0...HEAD
+[0.126.0]: https://github.com/spore-host/spawn/compare/v0.125.0...v0.126.0
 [0.125.0]: https://github.com/spore-host/spawn/compare/v0.124.0...v0.125.0
 [0.124.0]: https://github.com/spore-host/spawn/compare/v0.123.0...v0.124.0
 [0.123.0]: https://github.com/spore-host/spawn/compare/v0.122.0...v0.123.0
