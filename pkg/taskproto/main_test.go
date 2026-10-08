@@ -37,14 +37,36 @@ func legacyPrefix(bucket, taskID string) string {
 	return "s3://" + bucket + "/" + defaultResultsSubPrefix + "/" + taskID
 }
 
+// The three shims also absorb the generators' error return (spawn#764). They
+// panic rather than taking a *testing.T and calling Fatal, which would mean
+// editing every one of their call sites: the only way these can fail is an empty
+// ResultsPrefix or RunID, and every caller below passes both, so a failure here
+// is a bug in the helper and not a condition under test. The validation itself is
+// covered directly in wrapperoptions_test.go.
+func mustScript(s string, err error) string {
+	if err != nil {
+		panic("test helper built invalid WrapperOptions: " + err.Error())
+	}
+	return s
+}
+
 func genWrapper(spec *TaskSpec, bucket, region string, gpu bool, runID string) string {
-	return GenerateWrapper(spec, legacyPrefix(bucket, spec.TaskID), region, gpu, runID)
+	return mustScript(GenerateWrapper(spec, legacyOpts(bucket, spec.TaskID, region, runID, gpu)))
 }
 
 func genPooled(spec *TaskSpec, bucket, region string, gpu bool, runID string) string {
-	return GeneratePooledJobScript(spec, legacyPrefix(bucket, spec.TaskID), region, gpu, runID)
+	return mustScript(GeneratePooledJobScript(spec, legacyOpts(bucket, spec.TaskID, region, runID, gpu)))
 }
 
 func genFlush(spec *TaskSpec, bucket, region, runID string) string {
-	return GenerateFlushScript(spec, legacyPrefix(bucket, spec.TaskID), region, runID)
+	return mustScript(GenerateFlushScript(spec, legacyOpts(bucket, spec.TaskID, region, runID, false)))
+}
+
+func legacyOpts(bucket, taskID, region, runID string, gpu bool) WrapperOptions {
+	return WrapperOptions{
+		ResultsPrefix: legacyPrefix(bucket, taskID),
+		Region:        region,
+		RunID:         runID,
+		GPU:           gpu,
+	}
 }

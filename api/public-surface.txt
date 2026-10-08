@@ -697,11 +697,16 @@ field TaskSpec.TaskID string
 field VolumeRef.MountPath string
 field VolumeRef.ReadOnly bool
 field VolumeRef.Snapshot string
+field WrapperOptions.GPU bool
+field WrapperOptions.Region string
+field WrapperOptions.ResultsPrefix string
+field WrapperOptions.RunID string
 func (*TaskSpec) EffectiveOnComplete() string
 func (*TaskSpec) Validate() error
 func (Placement) EffectiveEFSMountPoint() string
 func (Placement) EffectiveFSxMountPoint() string
 func (RetryClass) Retryable() bool
+func (WrapperOptions) Validate() error
 func ClassifyLaunchError(code string) RetryClass
 func CompletionRecordPath() string
 func DefaultResultsBucket(accountID, region string) string
@@ -709,9 +714,9 @@ func EffectiveMemoryGiB(req ResourceRequest) float64
 func EffectiveResultsPrefix(spec *TaskSpec, accountID, region string) string
 func ExtractConsoleLog(consoleOutput string) (string, bool)
 func FlushScriptPath() string
-func GenerateFlushScript(spec *TaskSpec, resultsPrefix, region, runID string) string
-func GeneratePooledJobScript(spec *TaskSpec, resultsPrefix, region string, gpu bool, runID string) string
-func GenerateWrapper(spec *TaskSpec, resultsPrefix, region string, gpu bool, runID string) string
+func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error)
+func GeneratePooledJobScript(spec *TaskSpec, opts WrapperOptions) (string, error)
+func GenerateWrapper(spec *TaskSpec, opts WrapperOptions) (string, error)
 func IsDefaultResultsBucket(bucket, accountID, region string) bool
 func ParseCompletionRecord(data []byte) (*CompletionRecord, error)
 func ParseSpec(data []byte) (*TaskSpec, error)
@@ -736,3 +741,6 @@ type SizeResult struct
 type TaskSpec struct
 type TaskState string
 type VolumeRef struct
+type WrapperOptions struct
+var ErrMissingResultsPrefix
+var ErrMissingRunID

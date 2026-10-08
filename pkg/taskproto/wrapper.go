@@ -34,21 +34,16 @@ import (
 //     run` with the manifest dirs bind-mounted; stage-in/out still happen on the
 //     host, so the image needs no aws CLI. Docker is installed on demand.
 //
-// gpu ⇒ the resolved instance is GPU-capable (a GPU family, or an explicit GPU
-// request), so the container must run with `--gpus all` AND the host needs the
-// NVIDIA Container Toolkit installed/configured for that flag to attach the
-// driver (spawn#601/#606). The caller decides this from the SIZED instance type
-// (not just spec.Resources.GPUs), so a task sized onto a GPU box gets the GPU
-// even when the spec only asked via `families`.
-//
-// runID identifies THIS attempt (spawn#608). It is stamped into the completion
-// record as run_id so the launcher can tell its own run's record apart from one a
-// previous run of the same task_id left at the same S3 key — the false negative
-// the issue reports. Callers must pass a freshly minted id per launch; "" emits an
-// empty run_id, which reads downstream as "unattributable" (see
-// CompletionRecord.RunID).
-func GenerateWrapper(spec *TaskSpec, resultsPrefix, region string, gpu bool, runID string) string {
-	return generateWrapper(spec, resultsPrefix, region, true, gpu, runID)
+// The per-launch inputs (results prefix, run id, region, GPU) arrive in a
+// WrapperOptions; see its doc for why they are not positional (spawn#764).
+// Returns an error rather than a script when a required option is missing, so a
+// forgotten field fails loudly here instead of emitting an unattributable
+// completion record discovered weeks later.
+func GenerateWrapper(spec *TaskSpec, opts WrapperOptions) (string, error) {
+	if err := opts.Validate(); err != nil {
+		return "", err
+	}
+	return generateWrapper(spec, opts.ResultsPrefix, opts.Region, true, opts.GPU, opts.RunID), nil
 }
 
 // GeneratePooledJobScript builds the per-job script a POOLED worker runs for one
@@ -60,14 +55,17 @@ func GenerateWrapper(spec *TaskSpec, resultsPrefix, region string, gpu bool, run
 // instead. The durable completion record (completion.json + .exitcode) is still
 // written, so the submitter's poll is unchanged.
 //
-// runID is stamped into that record exactly as in GenerateWrapper (spawn#608):
-// a pooled worker overwrites the same tasks/<task_id>/completion.json key on
-// every execution of a given task_id, so its records need attempt identity for
-// the same reason the one-instance path does. The pooled dispatcher has no
+// opts.RunID is stamped into that record exactly as in GenerateWrapper
+// (spawn#608): a pooled worker overwrites the same tasks/<task_id>/completion.json
+// key on every execution of a given task_id, so its records need attempt identity
+// for the same reason the one-instance path does. The pooled dispatcher has no
 // launch-side id to hand down (it runs on an already-provisioned worker), so
 // ScriptExecer mints one per execution — see pkg/taskpool/exec.go.
-func GeneratePooledJobScript(spec *TaskSpec, resultsPrefix, region string, gpu bool, runID string) string {
-	return generateWrapper(spec, resultsPrefix, region, false, gpu, runID)
+func GeneratePooledJobScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
+	if err := opts.Validate(); err != nil {
+		return "", err
+	}
+	return generateWrapper(spec, opts.ResultsPrefix, opts.Region, false, opts.GPU, opts.RunID), nil
 }
 
 // generateWrapper is the shared body. signalComplete gates the spored

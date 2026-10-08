@@ -70,7 +70,15 @@ func (e *ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir s
 	// a spec's results_prefix is honoured here too (spawn#646). AccountID is needed
 	// only for the default; a spec that sets results_prefix ignores it.
 	prefix := taskproto.EffectiveResultsPrefix(spec, e.AccountID, e.Region)
-	script := taskproto.GeneratePooledJobScript(spec, prefix, e.Region, gpu, uuid.NewString())
+	script, err := taskproto.GeneratePooledJobScript(spec, taskproto.WrapperOptions{
+		ResultsPrefix: prefix,
+		Region:        e.Region,
+		RunID:         uuid.NewString(),
+		GPU:           gpu,
+	})
+	if err != nil {
+		return -1, fmt.Errorf("build job script: %w", err)
+	}
 
 	// Write the script into the workspace and run it there, so its relative paths
 	// and any scratch files land in the isolated dir (which the worker resets after).
