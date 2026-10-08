@@ -64,6 +64,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"plugin":          "Tier 2: plugin install/status on a live instance",
 		"task":            "Tier 1/2: diagnose aggregates a live instance's state/cost/logs; pure cost/heuristic helpers unit-tested in cmd",
 		"array":           "Tier 2/3: status/collect/cancel group live job-array instances by tag; pure missingIndexes logic unit-tested in cmd",
+		"logs":            "Tier 2: BOTH paths are outside Substrate's surface. The live path is an SSH/SSM tail of /var/log/spawn-command.log on a booted instance; the terminated path is ec2:GetConsoleOutput, which Substrate does not model at all (no reference to the action anywhere in the emulator), so it can only answer with an unimplemented-action error — and even a stub would return no serial console, which is the entire thing being read. Verified for real instead (#736/#758): spored's framed tail surfaced in the console ~4.5 min after termination and was still readable 12h later. Pure logic unit-tested — cache path/TTL/pruning and the recently-gone selection in cmd/logs_test.go, the marker framing and extraction in pkg/taskproto/consolemarkers_test.go",
 		"cost":            "Tier 1: real Cost Explorer / pricing data",
 		"availability":    "Tier 1: real instance-type offerings / quotas",
 		"ami":             "Tier 1/2: real AMI build/copy",
