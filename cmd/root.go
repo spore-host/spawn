@@ -72,7 +72,9 @@ func Execute() {
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		// A declined prompt exits with its own code, so a caller can tell
+		// "you said no" from "it failed" without parsing text (#737).
+		os.Exit(exitForError(err))
 	}
 
 	// Print update notice after command completes (if available)

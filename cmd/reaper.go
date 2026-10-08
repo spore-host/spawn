@@ -190,8 +190,7 @@ func runReaperArm(cmd *cobra.Command, _ []string) error {
 	if !reaperYes {
 		fmt.Fprintf(out, "%s\n\n", reaperdeploy.ArmWarning(account, region))
 		if !confirmReaperArm(os.Stdin, out) {
-			fmt.Fprintln(out, "Aborted; the reaper stays in dry-run.")
-			return nil
+			return newAborted("aborted: the reaper stays in dry-run")
 		}
 	}
 	if err := d.Arm(ctx); err != nil {

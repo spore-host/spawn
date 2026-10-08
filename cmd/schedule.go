@@ -447,8 +447,7 @@ func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	scheduleID := args[0]
 
 	if !confirmYes(scheduleCancelYes, fmt.Sprintf("Cancel schedule %s?", scheduleID)) {
-		fmt.Println("Aborted.")
-		return nil
+		return newAborted("aborted: schedule %s was left active", scheduleID)
 	}
 
 	fmt.Fprintf(os.Stderr, "\n🛑 Cancelling Schedule\n")

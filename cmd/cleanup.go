@@ -149,8 +149,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 
 	if !confirmYes(cleanupYes, fmt.Sprintf("Permanently remove %d spawn-managed resource(s)?", len(removable))) {
-		fmt.Fprintln(out, "Aborted.")
-		return nil
+		return newAborted("aborted: nothing was cleaned up (re-run with --yes)")
 	}
 
 	logPath, logFile := openCleanupLog()

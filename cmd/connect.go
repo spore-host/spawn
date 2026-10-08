@@ -160,24 +160,51 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// One-shot mode: args[1:] (after --) form the remote command. Preserve each
-	// token as its own argument by shell-quoting it individually, then joining —
-	// exactly what plain `ssh host <argv...>` does (ssh space-joins its command
-	// args and the remote login shell parses the result). The previous code
-	// space-joined the argv into one blob and re-wrapped it in `bash -c '...'`,
-	// which re-split multi-token commands (e.g. `-- bash -lc "a && b"` became
-	// `bash -c 'bash -lc a && b'`, so bash's -c got no argument) (#369).
+	// One-shot mode: args[1:] (after --) form the remote command.
 	var remoteCmd string
 	if len(args) > 1 {
-		remoteCmd = shellQuoteArgs(args[1:])
+		remoteCmd = buildRemoteCommand(args[1:])
 	}
 
 	return sshToInstance(user, instance.PublicIP, keyPath, connectPort, remoteCmd, connectTTY)
 }
 
+// buildRemoteCommand turns the post-`--` arguments into the command string ssh
+// sends, branching on how many there are:
+//
+//   - ONE argument is a shell command line. It is passed through verbatim and the
+//     remote login shell parses it — exactly `ssh host 'free -m; tail /var/log/x'`.
+//   - TWO OR MORE are an argv. Each is quoted individually so the boundaries
+//     survive — `-- bash -lc "a && b"` must reach bash as three arguments.
+//
+// Both halves are regressions that were fixed by breaking the other, so the rule
+// is worth stating plainly: one argument is a command line, several are an argv.
+//
+// #369 was the first direction. The code space-joined argv into one blob and
+// re-wrapped it in `bash -c '...'`, so `-- bash -lc "a && b"` became
+// `bash -c 'bash -lc a && b'` and bash's -c got no argument. Per-argument quoting
+// fixed that — and removed the ability to pass a command string, so
+// `-- 'free -m; tail /x'` became a single quoted word and the remote shell looked
+// for a command with that literal name: exit 127, "No such file or directory"
+// naming the user's whole command (#738).
+//
+// Note this deliberately does NOT match `ssh` exactly. Real ssh does no quoting
+// at all — it space-joins argv and lets the remote shell re-parse, which is why
+// `ssh h bash -lc "a && b"` is broken for ssh too and why everyone single-quotes
+// for it. Matching ssh literally would reintroduce #369. The argument count is
+// what reconciles "behave like ssh" with "keep #369 fixed".
+func buildRemoteCommand(args []string) string {
+	if len(args) == 1 {
+		// A lone argument is already a command line; quoting it would make it a
+		// command NAME.
+		return args[0]
+	}
+	return shellQuoteArgs(args)
+}
+
 // shellQuoteArgs single-quotes each argument (escaping embedded single quotes as
 // '\”) and joins them with spaces, so a post-`--` argv reaches the remote shell
-// with its argument boundaries intact. Mirrors passing argv straight through ssh.
+// with its argument boundaries intact.
 func shellQuoteArgs(args []string) string {
 	quoted := make([]string, len(args))
 	for i, a := range args {

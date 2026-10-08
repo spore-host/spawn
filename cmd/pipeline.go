@@ -679,8 +679,7 @@ func runCancelPipeline(cmd *cobra.Command, args []string) error {
 	pipelineID := args[0]
 
 	if !confirmYes(flagCancelYes, fmt.Sprintf("Cancel pipeline %s and terminate its instances? This cannot be undone.", pipelineID)) {
-		fmt.Fprintln(os.Stderr, "Aborted.")
-		return nil
+		return newAborted("aborted: the pipeline was left unchanged")
 	}
 
 	fmt.Fprintf(os.Stderr, "⚠️  Cancelling pipeline: %s\n", pipelineID)

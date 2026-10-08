@@ -123,6 +123,18 @@ func confirmYes(skip bool, prompt string) bool {
 	fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && line == "" {
+		// EOF with nothing read: there was no answer, rather than an answer of
+		// "no". Those are different and used to be indistinguishable — a script
+		// that forgot --yes got `Aborted.`, which reads as a decision somebody
+		// made instead of a flag somebody omitted (#737).
+		//
+		// Deliberately still only a MESSAGE change, and deliberately not gated on
+		// stdinIsInteractive: `echo y | spawn terminate …` is a legitimate
+		// scripted confirmation, and refusing to read a piped answer would break
+		// it. The first version of this fix did exactly that, and the existing
+		// confirmYes tests caught it — they feed stdin through an os.Pipe, which
+		// is not a character device.
+		fmt.Fprintf(os.Stderr, "\n  No answer on stdin — pass --yes to confirm non-interactively.\n")
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(line)) {

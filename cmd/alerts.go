@@ -339,8 +339,7 @@ func runAlertsDelete(cmd *cobra.Command, args []string) error {
 	alertID := args[0]
 
 	if !confirmYes(alertDeleteYes, fmt.Sprintf("Delete alert %s?", alertID)) {
-		fmt.Println("Aborted.")
-		return nil
+		return newAborted("aborted: no alert change was made")
 	}
 
 	// Load AWS config

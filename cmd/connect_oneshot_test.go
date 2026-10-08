@@ -116,3 +116,69 @@ func TestConnectOneShot_PreQuotedString(t *testing.T) {
 		t.Errorf("expected %q, got %q", expected, lastArg)
 	}
 }
+
+// TestBuildRemoteCommand pins BOTH directions of the one-shot rule, because each
+// has now been broken by fixing the other: #369 (argv re-split by space-joining)
+// and #738 (a command string quoted into a command name).
+func TestBuildRemoteCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+		why  string
+	}{
+		{
+			"a single argument is a command line, passed through verbatim",
+			[]string{"free -m; tail /var/log/x"},
+			"free -m; tail /var/log/x",
+			"#738: quoting it made the remote shell look for a command with that literal name (exit 127)",
+		},
+		{
+			"a single simple command is also passed through",
+			[]string{"uptime"},
+			"uptime",
+			"one argument is one argument",
+		},
+		{
+			"a single argument with a pipeline keeps its operators",
+			[]string{"ps aux | grep spored | wc -l"},
+			"ps aux | grep spored | wc -l",
+			"the remote shell must see the pipes, not a filename containing them",
+		},
+		{
+			"multiple arguments are an argv, each quoted",
+			[]string{"tail", "-25", "/var/log/x"},
+			"'tail' '-25' '/var/log/x'",
+			"argument boundaries must survive",
+		},
+		{
+			"bash -lc keeps its script as ONE argument",
+			[]string{"bash", "-lc", "a && b"},
+			"'bash' '-lc' 'a && b'",
+			"#369: space-joining made bash's -c get no argument",
+		},
+		{
+			"an embedded single quote is escaped in the argv form",
+			[]string{"echo", "it's"},
+			`'echo' 'it'\''s'`,
+			"the quote must not terminate the quoting",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildRemoteCommand(tc.args); got != tc.want {
+				t.Errorf("buildRemoteCommand(%q) =\n  %s\nwant\n  %s\n(%s)", tc.args, got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// The single-argument passthrough is unquoted BY DESIGN — it is a shell command
+// line, with the same trust as --command, and the user wrote it. Asserted
+// explicitly so nobody "hardens" it back into #738 by quoting it.
+func TestBuildRemoteCommand_SingleArgIsNotQuoted(t *testing.T) {
+	got := buildRemoteCommand([]string{"echo $HOME && hostname"})
+	if strings.Contains(got, "'") {
+		t.Errorf("single argument was quoted (%s) — that is #738, and it is what makes "+
+			"a command string unrunnable", got)
+	}
+}

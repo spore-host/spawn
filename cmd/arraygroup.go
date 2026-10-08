@@ -304,8 +304,7 @@ confirm, or pass --yes.`,
 			fmt.Printf("⚠ The original launch had no TTL — relaunched instances have no auto-terminate deadline.\n")
 		}
 		if !confirmYes(arrayRetryYes, "Launch these instances (billable)?") {
-			fmt.Println("Aborted.")
-			return nil
+			return newAborted("aborted: nothing was launched")
 		}
 
 		return relaunchArrayMembers(ctx, rec, targets)
@@ -428,8 +427,8 @@ var arrayCancelCmd = &cobra.Command{
 			fmt.Printf("  index %d  %s  %s (%s)\n", m.Index, m.Name, m.InstanceID, m.State)
 		}
 		if !confirmYes(arrayCancelYes, "Terminate these instances?") {
-			fmt.Println("Aborted.")
-			return nil
+			// Still running, still billing — the exit code must say so (#737).
+			return newAborted("aborted: the instances are still running (re-run with --yes)")
 		}
 
 		client, err := aws.NewClient(ctx)

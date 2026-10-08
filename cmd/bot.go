@@ -604,8 +604,7 @@ deleted automatically. Remove it separately with:
 		// --confirm) is set.
 		if !confirmYes(botDestroyYes || botDestroyConfirm,
 			fmt.Sprintf("Destroy workspace %s/%s and all its registrations/credentials?", botPlatform, botWorkspaceID)) {
-			fmt.Println("Aborted.")
-			return nil
+			return newAborted("aborted: no change was made")
 		}
 
 		// Execute: batch-delete all registrations, then the workspace record.

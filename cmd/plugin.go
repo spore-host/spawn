@@ -659,8 +659,7 @@ var pluginRemoveCmd = &cobra.Command{
 		name := args[0]
 
 		if !confirmYes(pluginRemoveYes, fmt.Sprintf("Remove plugin %s from %s?", name, pluginInstance)) {
-			fmt.Println("Aborted.")
-			return nil
+			return newAborted("aborted: plugin %s was left installed on %s", name, pluginInstance)
 		}
 
 		fmt.Printf("Removing plugin %s from %s...\n", name, pluginInstance)

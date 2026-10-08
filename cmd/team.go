@@ -279,8 +279,7 @@ func runTeamRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	if !confirmYes(teamRemoveYes, fmt.Sprintf("Remove %s from team %s?", memberARN, teamID)) {
-		fmt.Println("Aborted.")
-		return nil
+		return newAborted("aborted: %s is still a member of team %s", memberARN, teamID)
 	}
 
 	if err := store.DeleteMembership(ctx, teamID, memberARN); err != nil {
@@ -307,8 +306,7 @@ func runTeamDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	if !confirmYes(teamDeleteYes, fmt.Sprintf("Delete team %s and all its memberships? This cannot be undone.", teamID)) {
-		fmt.Println("Aborted.")
-		return nil
+		return newAborted("aborted: team %s was not deleted", teamID)
 	}
 
 	// Delete all memberships, then the team itself.
