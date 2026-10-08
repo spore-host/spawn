@@ -19,6 +19,16 @@ gen-docs:
 check-docs: gen-docs
 	git diff --exit-code docs-gen/ || { echo "::error::docs-gen/ is stale — run 'make gen-docs' and commit"; exit 1; }
 
+# Regenerate the committed snapshot of the exported API that OTHER REPOS compile
+# against (api/public-surface.txt). Run when a change to one of those packages is
+# intended, and commit the result in the same change — the gate in
+# api_surface_test.go fails CI otherwise, and reports whether what you changed is
+# an addition (safe) or a removal/signature change (not safe in a PATCH). #679
+.PHONY: api-snapshot
+api-snapshot:
+	go test -run TestPublicAPISurface -update .
+	@echo "api/public-surface.txt regenerated — review the diff before committing."
+
 # Release guard: build with the real release ldflags and confirm the binaries
 # report the tag. Run automatically by the release workflow; run it by hand
 # before tagging to catch a stale CHANGELOG without burning a tag.

@@ -40,6 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before its source teaches you not to trust it. An empty dump is never cached,
   so "no log yet" is not pinned for a week.
 
+- **A gate on the exported API that other repos compile against** (#679).
+  `pkg/aws`, `pkg/launcher`, `pkg/taskproto`, `pkg/ecrref`, `pkg/launchererr`,
+  `pkg/taskcohort`, `pkg/taskpool` and `pkg/storage` are imported by
+  spore-host-mcp, lagotto and calque, so re-shaping an exported symbol in them is
+  a change to someone else's build. Nothing here knew that, which is how
+  `taskproto.GenerateWrapper` gained a parameter in **v0.111.1 — a PATCH
+  release** — and the first sign of it was a Dependabot bump sitting red for six
+  days in a different repository, with nothing linking it back.
+  `api/public-surface.txt` is now a committed snapshot of that surface, and CI
+  fails when it drifts, reporting whether what changed was an **addition**
+  (backward-compatible) or a **removal or signature change** (not safe in a
+  PATCH; pre-1.0 that bumps MINOR). Intended changes are made visible rather than
+  blocked: run `make api-snapshot` and commit the result in the same PR.
+  The eight packages are also now named in `CLAUDE.md`, with a second gate
+  keeping that table and the one CI reads from drifting apart.
+
 ### Fixed
 
 - **Three `pipeline-orchestrator` Makefile targets named a Lambda that does not

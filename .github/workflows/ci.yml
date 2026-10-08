@@ -165,6 +165,19 @@ jobs:
       - name: Docs reference drift gate
         run: make check-docs
 
+      # Cross-repo API gate: pkg/aws, pkg/launcher, pkg/taskproto and five others
+      # are imported by spore-host-mcp, lagotto and calque, so re-shaping an
+      # exported symbol in them is a wire-contract change, not a refactor. #679
+      # happened because nothing here knew that: GenerateWrapper gained a
+      # parameter in a PATCH release, and the first anyone noticed was a
+      # Dependabot bump sitting red for six days in a different repository.
+      #
+      # Named as its own step even though `go test ./...` above already runs it,
+      # so the failure is legible in the checks list instead of buried in the
+      # output of every package's tests.
+      - name: Cross-repo API surface gate
+        run: go test -run 'TestPublicAPISurface|TestPublicPackagesExist' -count=1 .
+
       # Nested modules: the root `go test ./...` does NOT descend into a
       # directory with its own go.mod, so their tests would otherwise never run
       # in CI (#136). Build, vet, and test each one.
