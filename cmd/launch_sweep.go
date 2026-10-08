@@ -1044,6 +1044,20 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 		return fmt.Errorf("failed to load infra AWS config: %w", err)
 	}
 
+	// Seed the launch keys the orchestrator reads but cannot derive (#749).
+	//
+	// The Lambda never sees a LaunchConfig — it builds RunInstances from the
+	// uploaded params — and `ami` was never seeded, so it sent no ImageId and EC2
+	// rejected EVERY row. Must run BEFORE the upload below, and before validation,
+	// so what gets validated is what gets launched.
+	regionClient, rcErr := aws.NewClientWithRegion(ctx, sweepRegion)
+	if rcErr != nil {
+		return fmt.Errorf("failed to initialize AWS client for %s: %w", sweepRegion, rcErr)
+	}
+	if err := seedDetachedLaunchKeys(ctx, regionClient, paramFormat, baseConfig, sweepRegion); err != nil {
+		return fmt.Errorf("detached sweep: %w", err)
+	}
+
 	// Convert ParamFileFormat to sweep.ParamFileFormat
 	sweepParamFormat := &sweep.ParamFileFormat{
 		Defaults: paramFormat.Defaults,
@@ -1201,7 +1215,14 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	}
 	fmt.Fprintf(os.Stderr, "✓ Lambda invoked\n\n")
 
-	// Display success
+	// "Queued", not "launched" — and the distinction is load-bearing.
+	//
+	// The CLI's evidence is that the Lambda was INVOKED. It does not know whether
+	// a single row started. For the whole life of this path none ever did: every
+	// RunInstances was rejected for want of an ImageId, the Lambda logged "All
+	// instances launched and completed", and this message was the only thing the
+	// user ever saw (#749). The seeding above fixes the cause, but the CLI still
+	// cannot verify the outcome, so it should not keep implying it has.
 	fmt.Fprintf(os.Stderr, "✅ Parameter sweep queued successfully!\n\n")
 	fmt.Fprintf(os.Stderr, "Sweep ID:          %s\n", sweepID)
 	fmt.Fprintf(os.Stderr, "Sweep Name:        %s\n", sweepName)
@@ -1210,8 +1231,9 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	fmt.Fprintf(os.Stderr, "Region:            %s\n", sweepRegion)
 	fmt.Fprintf(os.Stderr, "Orchestration:     Lambda (infra account)\n\n")
 
-	fmt.Fprintf(os.Stderr, "The sweep is now running in Lambda. You can disconnect safely.\n\n")
-	fmt.Fprintf(os.Stderr, "To check status:\n")
+	fmt.Fprintf(os.Stderr, "The orchestrator has been invoked and will launch the rows; you can\n")
+	fmt.Fprintf(os.Stderr, "disconnect safely. Nothing here confirms a row actually started —\n")
+	fmt.Fprintf(os.Stderr, "check that before relying on it:\n")
 	fmt.Fprintf(os.Stderr, "  spawn status --sweep-id %s\n\n", sweepID)
 	fmt.Fprintf(os.Stderr, "To resume if needed:\n")
 	fmt.Fprintf(os.Stderr, "  spawn resume --sweep-id %s --detach\n", sweepID)

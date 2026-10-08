@@ -116,3 +116,65 @@ func readMainForTest(t *testing.T) string {
 	}
 	return string(b)
 }
+
+// TestCompletionStatusReflectsFailures is #749's worst half: this branch used to
+// log "All instances launched and completed" and set COMPLETED unconditionally,
+// so a sweep whose EVERY row was rejected by EC2 recorded itself as a success.
+// For the whole life of the detached path that is what happened — no `ami` was
+// seeded, so RunInstances was rejected every time — and the only evidence
+// anywhere was the Lambda's own log.
+//
+// Asserts the decision table directly rather than through a run, because the
+// inputs (launched/failed/total) are already the state the loop maintains.
+func TestCompletionStatusReflectsFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		launched, failed, total int
+		want                    string
+		why                     string
+	}{
+		{
+			"every row rejected", 0, 2, 2, "FAILED",
+			"a sweep that launched nothing is not completed — this is #749",
+		},
+		{
+			"every row rejected, large sweep", 0, 200, 200, "FAILED",
+			"scale does not change it",
+		},
+		{
+			"partial failure", 1, 1, 2, "COMPLETED",
+			"the sweep did run; the count makes the failures visible, and a new " +
+				"status value would send every consumer down a default branch",
+		},
+		{
+			"all launched", 2, 0, 2, "COMPLETED",
+			"the ordinary case",
+		},
+		{
+			// A zero-row sweep cannot be a failure: nothing was asked for.
+			"nothing to launch", 0, 0, 0, "COMPLETED",
+			"no rows, no failures",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := completionStatus(tc.launched, tc.failed)
+			if got != tc.want {
+				t.Errorf("completionStatus(launched=%d, failed=%d) = %q, want %q — %s",
+					tc.launched, tc.failed, got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// FAILED must be an EXISTING status value, not a new one. `cancel` and `resume`
+// both branch on `Status == "COMPLETED"`, and six workflow adapters read sweep
+// records; a novel value would send all of them down a default path.
+func TestCompletionStatusUsesOnlyKnownValues(t *testing.T) {
+	known := map[string]bool{"COMPLETED": true, "FAILED": true}
+	for _, pair := range [][2]int{{0, 1}, {1, 1}, {2, 0}, {0, 0}} {
+		if s := completionStatus(pair[0], pair[1]); !known[s] {
+			t.Errorf("completionStatus(%d, %d) = %q, which is not an existing sweep status",
+				pair[0], pair[1], s)
+		}
+	}
+}
