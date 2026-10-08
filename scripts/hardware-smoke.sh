@@ -324,6 +324,26 @@ if [ -n "$RANK0" ]; then
   [ "${hosts//[^0-9]/}" = "$NODES" ] \
     && echo "     (all $NODES nodes reported after ${mpi_waited}s)" \
     || echo "     (gave up after ${mpi_waited}s with ${hosts//[^0-9]/} node(s))"
+
+  # Report what the peer-readiness poll actually did (#752).
+  #
+  # Read HERE, over SSM while rank 0 is still alive, because the line does not
+  # survive teardown: the MPI script's stdout lands in cloud-init-output.log,
+  # and only SOME cloud-init output reaches the serial console — the mpirun
+  # result does, these echoes do not. Reading it post-mortem from
+  # get-console-output returns nothing, which is how a first attempt at this
+  # measurement came up empty.
+  #
+  # Not an assertion, a measurement: a 0s wait is a legitimate outcome on a fast
+  # cohort. What it tells you is whether THIS run exercised the poll or merely
+  # found every peer already ready — the difference between proving the fix works
+  # and proving it does not regress.
+  ready_line=$(ssm "$RANK0" "grep -o 'spawn: all peers accepted SSH after [0-9]*s' /var/log/cloud-init-output.log | head -1" 2>/dev/null)
+  if [ -n "${ready_line//[[:space:]]/}" ]; then
+    echo "     peer readiness: ${ready_line}"
+  else
+    echo "     peer readiness: line not found (older spored, or the poll did not run)"
+  fi
   [ "${hosts//[^0-9]/}" = "$NODES" ] \
     && ok "mpirun spread across all $NODES nodes ($ranks ranks)" \
     || bad "mpirun reached ${hosts//[^0-9]/} of $NODES nodes — the hostfile or the cluster SSH key is wrong (#684)"
