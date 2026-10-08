@@ -22,6 +22,7 @@ func sysCountActivePortConnections([]int) int         { return 0 }
 func sysHasActiveTerminals() bool                     { return false }
 func sysHasRecentUserActivity() bool                  { return false }
 func sysWarnUsers(string)                             {}
+func sysWriteConsole(string) error                    { return nil }
 
 // sysShellCommand runs a pre-stop hook on non-linux/non-windows builds (dev /
 // darwin). It runs the hook as the given user via `su - <user> -c` when set,

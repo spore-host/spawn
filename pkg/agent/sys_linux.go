@@ -204,6 +204,35 @@ func sysWarnUsers(message string) {
 	_ = exec.Command("wall", message).Run()
 }
 
+// sysWriteConsole writes text to the serial console, where it survives the
+// instance (#736).
+//
+// This is the only way to get a diagnostic off an instance that is about to
+// terminate without an S3 bucket and an IAM grant. Measured on real hardware: a
+// userspace write to /dev/console DOES appear in ec2 get-console-output, and
+// that output outlives the instance's visibility in describe-instances by hours.
+//
+// Two measured caveats drove the design:
+//
+//   - The post-termination capture takes ~4-5 MINUTES to populate. Before that
+//     the API returns nothing at all, so a caller must not promise an
+//     immediately-readable log.
+//   - Only SOME cloud-init output reaches the console on its own — rank 0's
+//     mpirun result does, the surrounding script's echoes do not. So this has to
+//     be an EXPLICIT write; relying on a log line drifting there does not work.
+//
+// Best-effort by construction. It runs on a terminate path where the instance is
+// going away regardless, so a failure here must never block or fail that.
+func sysWriteConsole(text string) error {
+	f, err := os.OpenFile("/dev/console", os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	_, err = f.WriteString(text)
+	return err
+}
+
 // sysShellCommand builds the OS shell invocation for a user pre-stop hook. When
 // user is non-empty it runs the hook as that user via `su - <user> -c` (a login
 // shell, so $HOME/PATH/env match how the workload ran) instead of as root —
