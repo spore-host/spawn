@@ -998,6 +998,42 @@ func (c *Client) WaitForRunning(ctx context.Context, region, instanceID string, 
 	return nil
 }
 
+// WaitForPublicIP blocks until the instance has a public IP or the timeout
+// elapses, returning the address.
+//
+// Needed because the IP is often unpopulated the instant the state flips to
+// "running", and a stop/start reassigns it — so "running" is not the signal a
+// caller wanting to connect actually needs. GetInstancePublicIP below is a single
+// describe and cannot wait.
+//
+// Mirrors WaitForPasswordData's shape (pkg/aws/windows_password.go), which is the
+// canonical poll in this package: a deadline, the check, then a select on
+// ctx.Done() and the interval — so a cancelled context ends the wait at once
+// instead of being ignored for the full budget, which is what the hand-rolled
+// loops this replaces did (#752).
+func (c *Client) WaitForPublicIP(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		ip, err := c.GetInstancePublicIP(ctx, region, instanceID)
+		if err != nil {
+			return "", err
+		}
+		if ip != "" {
+			return ip, nil
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("instance %s had no public IP within %s "+
+				"(launched into a subnet without auto-assign, or still attaching?)",
+				instanceID, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
 // Terminate terminates an EC2 instance
 func (c *Client) Terminate(ctx context.Context, region, instanceID string) error {
 	ec2Client := c.regionalEC2(region)
