@@ -133,7 +133,39 @@ func (a *Agent) setConfig(c *provider.Config) {
 	a.configMu.Unlock()
 }
 
+// NewAgent builds the agent AND activates it: initialization logging, the EBS
+// cost lookup, DNS registration, job-array registry registration with its
+// heartbeat, peer discovery, and plugin loading. This is what the DAEMON wants.
+//
+// Query subcommands must use [NewAgentForQuery] instead — see #733.
 func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
+	return newAgent(ctx, prov, true)
+}
+
+// NewAgentForQuery builds the agent WITHOUT any side effect: no DNS
+// registration, no tag writes, no registry registration, no heartbeat
+// goroutine, no plugin loading, no initialization logging.
+//
+// It exists because `spored status` called NewAgent, and NewAgent registers DNS
+// — an HTTP POST that mutates a Route53 record, plus an EC2 tag write. So
+// `spawn status`, a read-only query, performed a control-plane WRITE on every
+// invocation, and polling it in a loop (the normal way to watch a job) generated
+// one write per poll (#733).
+//
+// The reported symptom was cosmetic — `Warning: Failed to register DNS: DNS API
+// returned HTTP 403` appearing above the status summary, alarming during a demo —
+// but that warning was only visible BECAUSE the write was failing. Had it
+// succeeded, nothing would have printed and the behaviour would still have been
+// wrong.
+//
+// Correct long-term shape is to split construction from a Start/Activate the
+// daemon calls. This is the narrow version of that: one constructor, the side
+// effects behind a flag, so there is no parallel path to drift.
+func NewAgentForQuery(ctx context.Context, prov provider.Provider) (*Agent, error) {
+	return newAgent(ctx, prov, false)
+}
+
+func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agent, error) {
 	// Get identity from provider
 	identity, err := prov.GetIdentity(ctx)
 	if err != nil {
@@ -167,10 +199,16 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 	}
 	agent.tagger = &ec2TagPutter{region: identity.Region} // real EC2 CreateTags; tests override
 
-	log.Printf("Agent initialized for instance %s in %s (account: %s, provider: %s)",
-		identity.InstanceID, identity.Region, identity.AccountID, identity.Provider)
-	log.Printf("Config: TTL=%v, IdleTimeout=%v, Hibernate=%v",
-		config.TTL, config.IdleTimeout, config.HibernateOnIdle)
+	// Everything below this point is ACTIVATION — logging and side effects — and
+	// is skipped for a query (#733). The pure state assignments (dnsDomain,
+	// notifier, pluginRuntime) still happen either way, because a query may need
+	// to report them.
+	if activate {
+		log.Printf("Agent initialized for instance %s in %s (account: %s, provider: %s)",
+			identity.InstanceID, identity.Region, identity.AccountID, identity.Provider)
+		log.Printf("Config: TTL=%v, IdleTimeout=%v, Hibernate=%v",
+			config.TTL, config.IdleTimeout, config.HibernateOnIdle)
+	}
 
 	// Look up actual EBS volume cost on first start; caches result in the
 	// spawn:ebs-hourly-cost tag. Do NOT write agent.config here: this goroutine
@@ -179,7 +217,7 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 	// persisted to the tag (and the provider's config) by LookupAndTagEBSCost, so
 	// the monitor's next config refresh (≤5 min) picks it up without a shared
 	// write from here.
-	if identity.Provider == "ec2" && config.EBSHourlyCost == 0 {
+	if activate && identity.Provider == "ec2" && config.EBSHourlyCost == 0 {
 		go func() {
 			ebsCost, measured := prov.LookupAndTagEBSCost(context.Background())
 			if measured {
@@ -198,14 +236,17 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 	// handshake (verifier + session-wait + token + ready-url tag) is driven from
 	// the monitor loop via maybeSetupDCVAuth, not once here — so a transient
 	// failure recovers (spawn#282 phase 2), mirroring the FSx retry discipline.
-	if config.DCVSessionID != "" {
+	if activate && config.DCVSessionID != "" {
 		log.Printf("DCV idle detection enabled for session %s", config.DCVSessionID)
 	}
 
 	// Initialize lifecycle notifier (Slack notifications via spore-bot Lambda)
 	if config.NotifyURL != "" {
+		// Constructing the notifier sends nothing; only the lifecycle hooks do.
 		agent.notifier = NewNotifier(config, identity)
-		log.Printf("Slack lifecycle notifications enabled for workspace %s", config.SlackWorkspaceID)
+		if activate {
+			log.Printf("Slack lifecycle notifications enabled for workspace %s", config.SlackWorkspaceID)
+		}
 	}
 
 	// Initialize DNS client and register if DNS name is configured
@@ -216,7 +257,9 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 	}
 	agent.dnsDomain = dnsDomain
 
-	if config.DNSName != "" && identity.PublicIP != "" && identity.Provider == "ec2" {
+	// THE one from #733: this block POSTs to the DNS API, mutating a Route53
+	// record, and writes an EC2 tag via recordDNSStatus. A query must do neither.
+	if activate && config.DNSName != "" && identity.PublicIP != "" && identity.Provider == "ec2" {
 		dnsClient, err := dns.NewClient(ctx, dnsDomain, "")
 		if err != nil {
 			log.Printf("Warning: Failed to create DNS client: %v", err)
@@ -258,11 +301,11 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 				}
 			}
 		}
-	} else if config.DNSName != "" && identity.Provider == "local" {
+	} else if activate && config.DNSName != "" && identity.Provider == "local" {
 		log.Printf("DNS registration skipped for local provider")
-	} else if config.DNSName != "" {
+	} else if activate && config.DNSName != "" {
 		log.Printf("Warning: DNS name configured (%s) but no public IP available", config.DNSName)
-	} else {
+	} else if activate {
 		// No DNS name configured (no spawn:dns-name tag) → nothing to register.
 		// Log it explicitly: a silent skip here made a client that forgot to set
 		// spawn:dns-name look like a broken spored/registration path (#435). The
@@ -272,7 +315,7 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 	}
 
 	// Initialize hybrid registry if part of a job array
-	if config.JobArrayID != "" {
+	if activate && config.JobArrayID != "" {
 		reg, err := registry.NewPeerRegistry(ctx, identity)
 		if err != nil {
 			log.Printf("Warning: Failed to initialize registry: %v (continuing without hybrid mode)", err)
@@ -306,7 +349,7 @@ func NewAgent(ctx context.Context, prov provider.Provider) (*Agent, error) {
 	rt := pluginruntime.NewRuntime(identity, config.LocalUsername)
 	agent.pluginRuntime = rt
 
-	if len(config.Plugins) > 0 {
+	if activate && len(config.Plugins) > 0 {
 		// Convert provider.PluginDeclaration to plugin.Declaration.
 		decls := make([]plugin.Declaration, len(config.Plugins))
 		for i, pd := range config.Plugins {
