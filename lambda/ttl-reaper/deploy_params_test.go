@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -322,5 +323,44 @@ func TestDeployReadsTheStackInTheRightRegion(t *testing.T) {
 	if !strings.Contains(mk, "does not exist") {
 		t.Error("the deploy must distinguish a genuinely absent stack (fine, first deploy) from " +
 			"any other read failure (abort)")
+	}
+}
+
+// TestEveryTemplateParameterIsInThePARAMMAP: a CloudFormation parameter the
+// Makefile cannot set is only reachable by hand-editing the stack, which is the
+// state the merge-params machinery exists to prevent. Missing NetResources from
+// PARAM_MAP would have made #685's staged rollout unsettable by `make deploy`.
+func TestEveryTemplateParameterIsInThePARAMMAP(t *testing.T) {
+	tmpl, err := os.ReadFile("template.yaml")
+	if err != nil {
+		t.Fatalf("read template.yaml: %v", err)
+	}
+	mk, err := os.ReadFile("Makefile")
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+
+	// Parameter names are the 2-space-indented keys inside the Parameters block.
+	params := regexp.MustCompile(`(?m)^  ([A-Z][A-Za-z0-9]*):$`)
+	body := string(tmpl)
+	start := strings.Index(body, "\nParameters:\n")
+	if start < 0 {
+		t.Fatal("template.yaml has no Parameters block")
+	}
+	end := strings.Index(body[start+1:], "\nResources:\n")
+	if end < 0 {
+		t.Fatal("template.yaml has no Resources block")
+	}
+	found := params.FindAllStringSubmatch(body[start:start+1+end], -1)
+	if len(found) == 0 {
+		t.Fatal("parsed zero parameters — the regex no longer matches the template")
+	}
+
+	for _, m := range found {
+		name := m[1]
+		if !strings.Contains(string(mk), name+":") {
+			t.Errorf("template parameter %s is not in the Makefile's PARAM_MAP — "+
+				"`make deploy %s=…` would be silently ignored", name, name)
+		}
 	}
 }

@@ -35,6 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Both the scan-self policy and the CloudFormation cross-account role
   carry them — the latter caught by a parity gate, and it is the **production**
   configuration, where a one-sided grant would make the feature silently no-op.
+  **Reclamation is off by default and staged**, via a new `REAPER_NET_RESOURCES` /
+  `NetResources` setting with three values rather than a boolean. It is
+  deliberately **not** folded into `DryRun`: production runs with the dry run
+  **off**, so a boolean would have armed a brand-new destructive sweep the moment
+  the Lambda was updated, and the only way to preview it would have been to turn
+  off the **live instance reaper** — trading an untested delete for a disarmed TTL
+  backstop. `report` (the default) logs what it would reclaim and deletes nothing,
+  so an upgrade is observable but inert; `reap` deletes, once the report has been
+  read; `off` skips the sweep entirely. An unrecognised value resolves to
+  `report`, because a typo in a stack parameter must not arm a delete, and
+  `DryRun` still wins over everything. Same reasoning as `DnsExpire`, which this
+  follows deliberately.
+  A new test also requires every template parameter to appear in the deploy
+  Makefile's map: a parameter the tooling cannot set is reachable only by
+  hand-editing the stack, which is the state that machinery exists to prevent.
 - **The reaper now reports when `spored` has stopped checking in** (#682). A running
   instance whose agent has died enforces none of its own limits: TTL, idle-stop and
   cost are all applied *in* the instance, so when the loop stops, the only thing

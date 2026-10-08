@@ -75,6 +75,7 @@ there and appending its ARN to the list.
 | `REAPER_DNS_DOMAIN` | (empty) | Domain for the zone above (e.g. `spore.host`); both empty = DNS teardown disabled |
 | `REAPER_DNS_SWEEP` | `false` | With a zone configured, also run a **DNS reconciliation sweep** (#438): delete `{base36}.{domain}` A-records whose IP has no live instance — catches records orphaned by abrupt exits the #247 teardown can't. Honors `REAPER_DRY_RUN`. Also emits the **unmanaged-subdomain** report (#457) |
 | `REAPER_DNS_EXPIRE` | `false` | With the sweep on, **delete** the A-records under an unmanaged subdomain whose account the portal registry has proven `dormant` or `offboarded` ([#466]). Requires `REAPER_DNS_SWEEP` (the walk runs inside the sweep) and honors `REAPER_DRY_RUN`. Read the report before enabling — see [DNS expiry](#dns-expiry-466) |
+| `REAPER_NET_RESOURCES` | `report` | Reclaim spawn-managed **security groups** and **cluster placement groups** with no instance referencing them, older than **7 days** ([#685]). `report` logs what it *would* reclaim and deletes nothing; `reap` deletes; `off` skips the sweep entirely. Three values and **not** folded into `REAPER_DRY_RUN` on purpose — production runs with the dry run off, so a boolean would arm a new destructive sweep on upgrade and the only preview would be disarming the live instance reaper. A typo resolves to `report`; `REAPER_DRY_RUN` always wins |
 | `ACCOUNTS_TABLE` | `spore-portal-accounts` | The portal registry supplying the expiry verdict. Read-only: the reaper only `Scan`s it, and the prober owns every write |
 
 If neither `REAPER_ROLE_ARNS`/`EC2_ROLE_ARN` nor `REAPER_SCAN_SELF=true` is set,
@@ -329,5 +330,6 @@ nothing — by design, since a partial live set could orphan a healthy record.
 [#469]: https://github.com/spore-host/spawn/issues/469
 [#475]: https://github.com/spore-host/spawn/issues/475
 [#682]: https://github.com/spore-host/spawn/issues/682
+[#685]: https://github.com/spore-host/spawn/issues/685
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71

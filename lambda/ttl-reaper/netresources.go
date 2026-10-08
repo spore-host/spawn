@@ -56,7 +56,7 @@ const netResourceGrace = 7 * 24 * time.Hour
 // because ANY member blocks the delete — including one spawn did not create.
 // Inferring would report a group as empty and then fail to delete it.
 func (r *reaper) reapNetResourcesRegion(ctx context.Context, acct account, region string, now time.Time, sum *Summary, outcome *accountOutcome) {
-	if acct.netFor == nil {
+	if acct.netFor == nil || r.netResources == netResourcesOff {
 		return
 	}
 	cli := acct.netFor(region)
@@ -135,7 +135,7 @@ func (r *reaper) reapSecurityGroups(ctx context.Context, cli netResourceAPI, acc
 		if age < netResourceGrace {
 			continue
 		}
-		if r.dryRun {
+		if r.netReportOnly() {
 			log.Printf("WOULD reap security group %s (%s) in %s/%s — unused for %s",
 				id, name, acct.label, region, age.Round(time.Hour))
 			sum.NetSkipped++
@@ -192,7 +192,7 @@ func (r *reaper) reapPlacementGroups(ctx context.Context, cli netResourceAPI, ac
 		if age < netResourceGrace {
 			continue
 		}
-		if r.dryRun {
+		if r.netReportOnly() {
 			log.Printf("WOULD reap placement group %s in %s/%s — unused for %s",
 				name, acct.label, region, age.Round(time.Hour))
 			sum.NetSkipped++
@@ -239,4 +239,49 @@ func netResourceAge(tags []ec2types.Tag, now time.Time) (time.Duration, bool) {
 		return age, true
 	}
 	return 0, false
+}
+
+// The three states of network-resource reclamation.
+//
+// Three rather than a boolean, because the two questions are genuinely separate:
+// "should this sweep run at all" and "may it delete". A boolean would have
+// collapsed them onto the global DryRun, and production runs DryRun=false — so
+// the only way to preview a brand-new destructive sweep would have been to turn
+// OFF the live instance reaper, trading an untested delete for a disarmed TTL
+// backstop. That is not a trade worth offering.
+const (
+	// netResourcesOff skips the sweep entirely. No describes, no cost, no log
+	// noise — for an account where someone else owns these resources.
+	netResourcesOff = "off"
+	// netResourcesReport describes and logs what it WOULD reclaim, and deletes
+	// nothing. The default, so updating the Lambda is observable but inert.
+	netResourcesReport = "report"
+	// netResourcesReap deletes. Explicit opt-in, once the report has been read.
+	netResourcesReap = "reap"
+)
+
+// parseNetResources maps the env var onto a mode, defaulting to report.
+//
+// An unrecognised value becomes report rather than reap or an error: a typo in a
+// CloudFormation parameter must not arm a destructive sweep, and must not
+// silently disable one either — report is the only choice that is wrong in a
+// recoverable direction. The caller logs what it resolved to.
+func parseNetResources(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case netResourcesOff:
+		return netResourcesOff
+	case netResourcesReap:
+		return netResourcesReap
+	default:
+		return netResourcesReport
+	}
+}
+
+// netReportOnly reports whether this cycle may delete network resources.
+//
+// dryRun wins over netResourcesReap deliberately: a dry run means "change
+// nothing", and a second switch that could override it would make the dry run a
+// lie.
+func (r *reaper) netReportOnly() bool {
+	return r.dryRun || r.netResources != netResourcesReap
 }
