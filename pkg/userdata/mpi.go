@@ -174,7 +174,41 @@ EOFMPICMD
 chmod 600 /etc/spawn/mpi-command
 {{end}}
 if [ "{{.JobArrayIndex}}" -eq 0 ]; then
-  sleep 10
+  # Every peer must accept a non-interactive SSH before mpirun, which SSHes to
+  # all of them (#752).
+  #
+  # This was a bare 'sleep 10', with no comment. The peers file waited for
+  # above means the CONTROLLER resolved every peer's IP — it says nothing
+  # about whether a
+  # peer's sshd is up, or whether rank 0's public key has reached that peer's
+  # /root/.ssh/authorized_keys, which is the mechanism in
+  # pkg/mpicohort/assembler.go. So the pad was a race, and one that WORSENS with
+  # cohort size: constant wait, growing number of peers that must all be ready.
+  #
+  # BatchMode=yes is load-bearing — it tests sshd AND authorized_keys together.
+  # A port probe (nc -z … 22) would pass while MPI still failed.
+  #
+  # Bounded and named-failing like the peers-file wait above, rather than
+  # unbounded: a broken peer should produce a SPAWN_COMPLETE record saying so,
+  # not an opaque mpirun error about an unreachable host. And a healthy 2-node
+  # cohort now starts in ~0s instead of always paying 10.
+  SPAWN_PEERS_READY_WAITED=0
+  while :; do
+    NOT_READY=0
+    for PEER_IP in $(awk '{print $1}' /tmp/mpi-hostfile); do
+      ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+          "$PEER_IP" true 2>/dev/null || NOT_READY=$((NOT_READY + 1))
+    done
+    [ "$NOT_READY" -eq 0 ] && break
+    if [ "$SPAWN_PEERS_READY_WAITED" -ge 600 ]; then
+      echo "spawn: $NOT_READY peer(s) never accepted SSH after ${SPAWN_PEERS_READY_WAITED}s; MPI cannot start" >&2
+      echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > /tmp/SPAWN_COMPLETE
+      exit 1
+    fi
+    sleep 5
+    SPAWN_PEERS_READY_WAITED=$((SPAWN_PEERS_READY_WAITED + 5))
+  done
+  echo "spawn: all peers accepted SSH after ${SPAWN_PEERS_READY_WAITED}s"
   {{if .MPICommand}}mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile bash /etc/spawn/mpi-command{{end}}
 fi
 `

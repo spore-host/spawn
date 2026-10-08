@@ -298,13 +298,32 @@ RANK0=$(aws ec2 describe-instances --region "$REGION" \
   --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | head -1)
 
 if [ -n "$RANK0" ]; then
-  sleep 45   # let mpirun finish
+  # POLL for mpirun's output rather than sleeping a constant (#752).
+  #
+  # This was `sleep 45   # let mpirun finish`. Two reasons that is a worse bet
+  # now: rank 0's mpirun no longer starts at a fixed offset (it waits for every
+  # peer to accept SSH first), and the wait needed grows with NODES while a
+  # constant does not. The comment below records that this very assertion has
+  # already mis-reported once on a healthy cluster, so making it time-dependent
+  # was the wrong trade.
+  #
   # Plain single-quoted shell. These used to carry \" escapes for the old
   # hand-built-JSON helper; with python encoding the payload, an escaped quote
   # now reaches the instance literally and the grep pattern stops matching —
   # which reported "mpirun reached 0 of 2 nodes" on a cluster that was fine.
-  hosts=$(ssm "$RANK0" "grep '^ip-' /var/log/cloud-init-output.log | sort -u | wc -l")
-  ranks=$(ssm "$RANK0" "grep -c '^ip-' /var/log/cloud-init-output.log")
+  hosts=""
+  ranks=""
+  mpi_waited=0
+  while [ "$mpi_waited" -lt 300 ]; do
+    hosts=$(ssm "$RANK0" "grep '^ip-' /var/log/cloud-init-output.log | sort -u | wc -l")
+    ranks=$(ssm "$RANK0" "grep -c '^ip-' /var/log/cloud-init-output.log")
+    [ "${hosts//[^0-9]/}" = "$NODES" ] && break
+    sleep 10
+    mpi_waited=$((mpi_waited + 10))
+  done
+  [ "${hosts//[^0-9]/}" = "$NODES" ] \
+    && echo "     (all $NODES nodes reported after ${mpi_waited}s)" \
+    || echo "     (gave up after ${mpi_waited}s with ${hosts//[^0-9]/} node(s))"
   [ "${hosts//[^0-9]/}" = "$NODES" ] \
     && ok "mpirun spread across all $NODES nodes ($ranks ranks)" \
     || bad "mpirun reached ${hosts//[^0-9]/} of $NODES nodes — the hostfile or the cluster SSH key is wrong (#684)"

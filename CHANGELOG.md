@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MPI rank 0 now waits for every peer to accept SSH, instead of sleeping ten
+  seconds and hoping** (#752). The generated MPI script already waited — bounded,
+  with a named failure — for the peers file, then built the hostfile. It then
+  slept a bare `sleep 10` before `mpirun`, with no comment.
+  The peers file existing means the **controller** resolved every peer's IP. It
+  says nothing about whether a peer's `sshd` is accepting connections, or whether
+  rank 0's public key has reached that peer's `authorized_keys` — which is what
+  `pkg/mpicohort/assembler.go` actually distributes, and what `mpirun` needs,
+  because it SSHes to every host in the hostfile. So the pad was a race, and one
+  that **worsens with cohort size**: a constant wait against a growing number of
+  peers that must all be ready.
+  Replaced with a bounded poll requiring a successful non-interactive SSH to every
+  host in the hostfile. `BatchMode=yes` is load-bearing — it tests `sshd` **and**
+  `authorized_keys` together, where a port probe would pass while MPI still
+  failed. Capped at 600s with a `SPAWN_COMPLETE` failure record, matching the
+  peers-file wait above it, so a broken peer produces a named cause rather than
+  an opaque `mpirun` error about an unreachable host. A healthy cohort now starts
+  as soon as its peers are ready instead of always paying ten seconds.
+  Verified on real hardware at **4 nodes** (`NODES=4 scripts/hardware-smoke.sh`):
+  all 4 nodes, 8 ranks, clean teardown with no leaked instances, placement groups
+  or security groups.
+- **The hardware smoke no longer guesses how long `mpirun` takes.** Its MPI
+  assertion slept a flat 45s before grepping rank 0's log for the per-node lines.
+  That became a worse bet with the change above — rank 0's `mpirun` no longer
+  starts at a fixed offset, and the wait needed grows with `NODES` while a
+  constant does not. It now polls until the rank count reaches `NODES` or a
+  deadline passes, and reports which. At 4 nodes the poll found all of them in
+  **10s**, where the old constant would have spent 45.
+
 - **Ctrl-C was ignored for up to five minutes while waiting on an instance**
   (#752's last item). Six polls in `cmd/` had no `ctx.Done()` case at all, so a
   cancelled context did nothing until the loop's own iteration count ran out.
