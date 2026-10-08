@@ -107,6 +107,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that hides the state is the one the lookup uses. It is kept, annotated, since it
   is correct if a caller ever resolves with the all-states filter — and the hint
   now covers the case it was written for.
+- **`spawn status` was not read-only: it performed a DNS registration write on
+  every invocation** (#733). `spored status` constructed a full agent, and
+  `NewAgent` registers DNS as part of construction — an HTTP POST that mutates a
+  Route53 record, plus an EC2 tag write via the status recorder. Polling status in
+  a loop, which is the normal way to watch a job (and what the demo guide
+  instructs presenters to do), therefore generated one control-plane write per
+  poll.
+  The reported symptom looked cosmetic: spored's initialization lines leaking into
+  the status output, with an alarming `Warning: Failed to register DNS: DNS API
+  returned HTTP 403` above the summary. But those lines were a *symptom*, and the
+  warning was only visible **because the write was failing** — had it succeeded,
+  nothing would have printed and the behaviour would still have been wrong.
+  `NewAgentForQuery` now builds the agent with **no** side effect: no DNS
+  registration, no EBS cost lookup, no job-array registry registration, no
+  heartbeat goroutine, no plugin loading, no initialization logging. The five
+  non-daemon `spored` subcommands use it — `status`, `reload`, `config get`,
+  `config set` and `config list`. The two mutating ones are included on purpose:
+  `config set` performs its own intended write and should not also register DNS.
+  One constructor with the side effects behind a flag, rather than a parallel
+  constructor that would drift. The correct long-term shape is still to split
+  construction from a `Start`/`Activate` the daemon calls; this is the narrow
+  version of it, and a test asserts the daemon path **still activates**, so the
+  fix cannot be mistaken for disabling DNS registration altogether.
 
 - **Declining a confirmation prompt exited 0, so a script could not tell
   "terminated" from "did nothing"** (#737). `spawn terminate <name>` with

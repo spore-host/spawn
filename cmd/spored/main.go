@@ -654,7 +654,7 @@ func handleStatus(checkComplete bool, outputFormat string) error {
 		return fmt.Errorf("initialize provider: %w", err)
 	}
 
-	ag, err := agent.NewAgent(ctx, prov)
+	ag, err := agent.NewAgentForQuery(ctx, prov)
 	if err != nil {
 		if checkComplete {
 			os.Exit(3)
@@ -882,7 +882,7 @@ func handleReload() error {
 		return fmt.Errorf("initialize provider: %w", err)
 	}
 
-	ag, err := agent.NewAgent(ctx, prov)
+	ag, err := agent.NewAgentForQuery(ctx, prov)
 	if err != nil {
 		return fmt.Errorf("initialize agent: %w", err)
 	}
@@ -913,7 +913,7 @@ func handleConfigGet(key string) error {
 		return fmt.Errorf("initialize provider: %w", err)
 	}
 
-	ag, err := agent.NewAgent(ctx, prov)
+	ag, err := agent.NewAgentForQuery(ctx, prov)
 	if err != nil {
 		return fmt.Errorf("initialize agent: %w", err)
 	}
@@ -979,7 +979,7 @@ func handleConfigSet(key, value string) error {
 		return fmt.Errorf("config set is only supported on EC2 instances\nFor local instances, edit the config file: /etc/spawn/local.yaml")
 	}
 
-	ag, err := agent.NewAgent(ctx, prov)
+	ag, err := agent.NewAgentForQuery(ctx, prov)
 	if err != nil {
 		return fmt.Errorf("initialize agent: %w", err)
 	}
@@ -1171,7 +1171,7 @@ func handleConfigList() error {
 		return fmt.Errorf("initialize provider: %w", err)
 	}
 
-	ag, err := agent.NewAgent(ctx, prov)
+	ag, err := agent.NewAgentForQuery(ctx, prov)
 	if err != nil {
 		return fmt.Errorf("initialize agent: %w", err)
 	}
