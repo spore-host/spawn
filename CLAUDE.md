@@ -39,6 +39,42 @@ GoReleaser auto-generates the **GitHub Release notes** from commit messages;
 `CHANGELOG.md` is the curated, human-facing companion and is the source of truth
 for "what changed." Keep both — they serve different readers.
 
+## The public surface (other repos compile against it)
+
+Most of `pkg/` is internal by convention. **These eight packages are not** — they
+are imported by other repositories, so an exported symbol in them is a wire
+contract:
+
+| package | imported by |
+|---|---|
+| `pkg/aws` | spore-host-mcp, lagotto, calque |
+| `pkg/launcher` | spore-host-mcp, lagotto, calque |
+| `pkg/taskproto` | spore-host-mcp |
+| `pkg/ecrref` | spore-host-mcp |
+| `pkg/launchererr` | lagotto |
+| `pkg/taskcohort` | calque |
+| `pkg/taskpool` | calque |
+| `pkg/storage` | calque |
+
+**Removing an exported symbol, renaming one, or changing a signature or an
+exported struct field in any of them bumps MINOR, never PATCH** — pre-1.0 that is
+this repo's rule for a breaking change. Adding one is backward-compatible.
+
+This is enforced. `api/public-surface.txt` is a committed snapshot of that
+surface and `api_surface_test.go` fails CI when it drifts, telling you whether
+what you changed was an addition or a removal. When the change is intended, run
+`make api-snapshot` and commit the result **in the same PR**, and say so in the
+CHANGELOG if anything was removed or changed.
+
+Why it is enforced rather than advised: `pkg/taskproto.GenerateWrapper` gained a
+parameter in **v0.111.1, a PATCH release** (#679). A consumer is entitled to
+treat a patch bump as safe, and Dependabot is configured across these repos on
+exactly that assumption — so the breakage surfaced as a red build in
+spore-host-mcp that sat for six days with nothing linking it back here.
+
+Keep the table and the test's `publicPackages` map in step; the map is the one CI
+reads.
+
 ## Build & test
 
 - `make check` — fmt, vet, lint, short tests (run before every commit)

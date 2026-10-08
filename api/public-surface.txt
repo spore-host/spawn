@@ -1,0 +1,738 @@
+# Exported API surface of spawn's cross-repo packages (spawn#679).
+# GENERATED — regenerate with `make api-snapshot`. Do not hand-edit.
+#
+# A change here is a change to a contract another repo compiles against.
+# Adding a symbol is backward-compatible; removing one, renaming one, or
+# changing a signature or an exported struct field is NOT, and pre-1.0 that
+# means the release bumps MINOR, never PATCH.
+
+## pkg/aws (imported by: spore-host-mcp, lagotto, calque)
+const AMI_AL2023_ARM
+const AMI_AL2023_GPU_ARM
+const AMI_AL2023_GPU_X86
+const AMI_AL2023_X86
+const CreatedTagKey
+const ReaperCoverageRoleName
+const SourceDir
+const SourceRawImage SnapshotSourceKind
+const SourceTar
+const SporedInstanceProfileName
+const SporedMemoryFloorMiB int64
+const SporedRoleName
+field AMIHealthCheck.BaseAMIAge time.Duration
+field AMIHealthCheck.BaseAMIOutdated bool
+field AMIHealthCheck.CurrentBaseAMI string
+field AMIHealthCheck.OldBaseAMI string
+field AMIHealthCheck.Warnings []string
+field AMIInfo.AMIID string
+field AMIInfo.Architecture string
+field AMIInfo.BaseOS string
+field AMIInfo.CreationDate time.Time
+field AMIInfo.Deprecated bool
+field AMIInfo.Description string
+field AMIInfo.GPU bool
+field AMIInfo.Name string
+field AMIInfo.Size int64
+field AMIInfo.SnapshotIDs []string
+field AMIInfo.Stack string
+field AMIInfo.Tags map[string]string
+field AMIInfo.Version string
+field AttachVolumeSpec.MountPoint string
+field AttachVolumeSpec.ReadOnly bool
+field AttachVolumeSpec.SizeGiB int32
+field AttachVolumeSpec.SnapshotID string
+field BuildSnapshotInput.Description string
+field BuildSnapshotInput.Encrypted bool
+field BuildSnapshotInput.KMSKeyARN string
+field BuildSnapshotInput.Region string
+field BuildSnapshotInput.Tags map[string]string
+field BuildSnapshotInput.VolumeSize int64
+field BuildSnapshotResult.BlockSize int32
+field BuildSnapshotResult.BlocksPut int
+field BuildSnapshotResult.BytesRead int64
+field BuildSnapshotResult.SnapshotID string
+field CapacityBlockOffering.AvailabilityZone string
+field CapacityBlockOffering.CurrencyCode string
+field CapacityBlockOffering.DurationHours int32
+field CapacityBlockOffering.EndDate string
+field CapacityBlockOffering.InstanceCount int32
+field CapacityBlockOffering.InstanceType string
+field CapacityBlockOffering.OfferingID string
+field CapacityBlockOffering.StartDate string
+field CapacityBlockOffering.Tenancy string
+field CapacityBlockOffering.UpfrontFee string
+field CapacityReservation.AvailabilityZone string
+field CapacityReservation.EndDate string
+field CapacityReservation.InstanceType string
+field CapacityReservation.ReservationID string
+field CapacityReservation.ReservationType string
+field CapacityReservation.StartDate string
+field CapacityReservation.State string
+field CreateAMIInput.Description string
+field CreateAMIInput.InstanceID string
+field CreateAMIInput.Name string
+field CreateAMIInput.NoReboot bool
+field CreateAMIInput.Tags map[string]string
+field DeleteAMIResult.AMIID string
+field DeleteAMIResult.DeletedSnapshots []string
+field DeleteAMIResult.ImageBuilderArn string
+field DeleteAMIResult.ImageBuilderError string
+field DeleteAMIResult.RetainedSnapshots map[string]string
+field DeleteAMIResult.SnapshotErrors map[string]string
+field DiscoverOptions.OnlyMine bool
+field DiscoverOptions.Region string
+field DisplayPrice.PricePerHour float64
+field DisplayPrice.Source string
+field ElasticIP.AllocationID string
+field ElasticIP.PublicIP string
+field EnsureImportInfrastructureInput.InstanceType string
+field EnsureImportInfrastructureInput.Region string
+field EnsureImportInfrastructureInput.SecurityGroupID []string
+field EnsureImportInfrastructureInput.SubnetID string
+field FSxBrief.FileSystemID string
+field FSxBrief.SpawnLifecycle string
+field FSxBrief.StackName string
+field FSxBrief.Status string
+field FSxBrief.StorageCapacityGiB int32
+field FSxConfig.AutoCreateBucket bool
+field FSxConfig.ExportPath string
+field FSxConfig.ImportPath string
+field FSxConfig.Lifecycle string
+field FSxConfig.PerUnitStorageThroughput int32
+field FSxConfig.Region string
+field FSxConfig.S3Bucket string
+field FSxConfig.SecurityGroupIDs []string
+field FSxConfig.StackName string
+field FSxConfig.StorageCapacity int32
+field FSxConfig.SubnetID string
+field FSxConfig.TTLDeadline time.Time
+field FSxConfig.VPCID string
+field FSxInfo.DNSName string
+field FSxInfo.FileSystemID string
+field FSxInfo.MountName string
+field FSxInfo.S3Bucket string
+field FSxInfo.S3ExportPath string
+field FSxInfo.S3ImportPath string
+field FSxInfo.StorageCapacity int32
+field IAMRoleConfig.InlinePolicyJSON string
+field IAMRoleConfig.ManagedPolicies []string
+field IAMRoleConfig.Policies []string
+field IAMRoleConfig.PolicyFile string
+field IAMRoleConfig.RoleName string
+field IAMRoleConfig.Tags map[string]string
+field IAMRoleConfig.TrustServices []string
+field ImageStatus.AMI string
+field ImageStatus.Reason string
+field ImageStatus.Status string
+field ImportWindowsISOInput.Description string
+field ImportWindowsISOInput.ExecutionRole string
+field ImportWindowsISOInput.ImageIndex *int64
+field ImportWindowsISOInput.InfrastructureConfigurationArn string
+field ImportWindowsISOInput.Name string
+field ImportWindowsISOInput.Region string
+field ImportWindowsISOInput.SecureBoot *bool
+field ImportWindowsISOInput.SemanticVersion string
+field ImportWindowsISOInput.URI string
+field InstanceInfo.AvailabilityZone string
+field InstanceInfo.IAMRole string
+field InstanceInfo.IdleTimeout string
+field InstanceInfo.InstanceID string
+field InstanceInfo.InstanceType string
+field InstanceInfo.JobArrayID string
+field InstanceInfo.JobArrayIndex string
+field InstanceInfo.JobArrayName string
+field InstanceInfo.JobArraySize string
+field InstanceInfo.KeyName string
+field InstanceInfo.LaunchTime time.Time
+field InstanceInfo.Name string
+field InstanceInfo.Parameters map[string]string
+field InstanceInfo.PrivateIP string
+field InstanceInfo.PublicIP string
+field InstanceInfo.Region string
+field InstanceInfo.SpotInstance bool
+field InstanceInfo.State string
+field InstanceInfo.StateTransitionReason string
+field InstanceInfo.SweepID string
+field InstanceInfo.SweepIndex string
+field InstanceInfo.SweepName string
+field InstanceInfo.SweepSize string
+field InstanceInfo.TTL string
+field InstanceInfo.Tags map[string]string
+field LaunchConfig.AMI string
+field LaunchConfig.ActivePortsRaw string
+field LaunchConfig.ActiveProcessesRaw string
+field LaunchConfig.AppMode string
+field LaunchConfig.AppName string
+field LaunchConfig.AttachVolumes []AttachVolumeSpec
+field LaunchConfig.AvailabilityZone string
+field LaunchConfig.CapacityBlock bool
+field LaunchConfig.ClientToken string
+field LaunchConfig.CompletionDelay string
+field LaunchConfig.CompletionFile string
+field LaunchConfig.CompletionWebhookURL string
+field LaunchConfig.CostLimit float64
+field LaunchConfig.DCVSessionID string
+field LaunchConfig.DNSName string
+field LaunchConfig.EBSEncrypted bool
+field LaunchConfig.EBSKMSKeyID string
+field LaunchConfig.EFAEnabled bool
+field LaunchConfig.EFSID string
+field LaunchConfig.EFSMountPoint string
+field LaunchConfig.FSxExportPath string
+field LaunchConfig.FSxImportPath string
+field LaunchConfig.FSxLifecycle string
+field LaunchConfig.FSxLustreCreate bool
+field LaunchConfig.FSxLustreID string
+field LaunchConfig.FSxLustreRecall string
+field LaunchConfig.FSxMountName string
+field LaunchConfig.FSxMountPoint string
+field LaunchConfig.FSxPending string
+field LaunchConfig.FSxS3Bucket string
+field LaunchConfig.FSxStorageCapacity int32
+field LaunchConfig.FSxTTL string
+field LaunchConfig.Hibernate bool
+field LaunchConfig.HibernateOnIdle bool
+field LaunchConfig.IMDSv2Enforced bool
+field LaunchConfig.IMDSv2HopLimit int
+field LaunchConfig.IamInstanceProfile string
+field LaunchConfig.IdleTimeout string
+field LaunchConfig.InstanceType string
+field LaunchConfig.JobArrayCommand string
+field LaunchConfig.JobArrayID string
+field LaunchConfig.JobArrayIndex int
+field LaunchConfig.JobArrayName string
+field LaunchConfig.JobArraySize int
+field LaunchConfig.KeyName string
+field LaunchConfig.Name string
+field LaunchConfig.NestedVirtualization bool
+field LaunchConfig.NotifyCommand string
+field LaunchConfig.NotifyPlatform string
+field LaunchConfig.NotifyURL string
+field LaunchConfig.OnComplete string
+field LaunchConfig.Parameters map[string]string
+field LaunchConfig.PlacementGroup string
+field LaunchConfig.PlacementGroupPrefix string
+field LaunchConfig.PreStop string
+field LaunchConfig.PreStopTimeout string
+field LaunchConfig.PricePerHour float64
+field LaunchConfig.ReadyHealthPath string
+field LaunchConfig.ReadyPort int
+field LaunchConfig.Region string
+field LaunchConfig.ReservationID string
+field LaunchConfig.RootVolumeSizeGiB int32
+field LaunchConfig.SecurityGroupIDs []string
+field LaunchConfig.SessionTimeout string
+field LaunchConfig.SlackWorkspaceID string
+field LaunchConfig.SpawnVersion string
+field LaunchConfig.Spot bool
+field LaunchConfig.SpotInterruptionWebhookURL string
+field LaunchConfig.SpotMaxPrice string
+field LaunchConfig.SubnetID string
+field LaunchConfig.SweepID string
+field LaunchConfig.SweepIndex int
+field LaunchConfig.SweepName string
+field LaunchConfig.SweepSize int
+field LaunchConfig.TTL string
+field LaunchConfig.Tags map[string]string
+field LaunchConfig.TargetOS string
+field LaunchConfig.UserData string
+field LaunchConfig.Username string
+field LaunchConfig.VPCID string
+field LaunchConfig.WebAuth string
+field LaunchConfig.WebhookCorrelation string
+field LaunchConfig.WebhookTimeout string
+field LaunchError.Code string
+field LaunchResult.AvailabilityZone string
+field LaunchResult.InstanceID string
+field LaunchResult.KeyName string
+field LaunchResult.LaunchTime time.Time
+field LaunchResult.Name string
+field LaunchResult.PrivateIP string
+field LaunchResult.PublicIP string
+field LaunchResult.Region string
+field LaunchResult.State string
+field ManagedResource.ARN string
+field ManagedResource.AssociationID string
+field ManagedResource.ID string
+field ManagedResource.PublicIP string
+field ManagedResource.Region string
+field ManagedResource.ResourceType string
+field ManagedResource.Service string
+field ManagedResource.State string
+field ManagedResource.Tags map[string]string
+field MountSnapshotResult.DeviceName string
+field MountSnapshotResult.InstanceID string
+field MountSnapshotResult.VolumeID string
+field PreparedImage.Cleanup func()
+field PreparedImage.Reader io.ReadCloser
+field ReaperCoverage.Covered bool
+field ReaperCoverage.Determined bool
+field ReaperCoverage.How string
+field ReaperCoverage.Why string
+field S3BucketConfig.BucketName string
+field S3BucketConfig.ExportPath string
+field S3BucketConfig.ImportPath string
+field S3BucketConfig.Region string
+field S3BucketConfig.StackName string
+field S3BucketConfig.StorageCapacity int32
+field SSMRunResult.ResponseCode int32
+field SSMRunResult.Status string
+field SSMRunResult.Stderr string
+field SSMRunResult.Stdout string
+field SnapshotDetail.Description string
+field SnapshotDetail.Encrypted bool
+field SnapshotDetail.SharedWith []string
+field SnapshotDetail.SnapshotID string
+field SnapshotDetail.StartTime time.Time
+field SnapshotDetail.State string
+field SnapshotDetail.VolumeSize int32
+func (*Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*MountSnapshotResult, error)
+func (*Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotInput, image io.Reader) (*BuildSnapshotResult, error)
+func (*Client) CheckAMIHealth(ctx context.Context, ami AMIInfo, region string) (*AMIHealthCheck, error)
+func (*Client) CheckKeyPairExists(ctx context.Context, region, keyName string) (bool, error)
+func (*Client) Config() aws.Config
+func (*Client) CreateAMI(ctx context.Context, region string, input CreateAMIInput) (string, error)
+func (*Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig) (*FSxInfo, error)
+func (*Client) CreateFSxLustreFilesystemAsync(ctx context.Context, config FSxConfig) (filesystemID string, err error)
+func (*Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID string) (string, error)
+func (*Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleConfig) (string, error)
+func (*Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error)
+func (*Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID string) (string, error)
+func (*Client) CreateOrGetWindowsSecurityGroup(ctx context.Context, region, vpcID, groupName, allowCIDR string) (string, error)
+func (*Client) CreatePlacementGroup(ctx context.Context, name, region string) error
+func (*Client) CreateS3BucketIfNotExists(ctx context.Context, bucketName, region string) error
+func (*Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConfig) error
+func (*Client) DeleteAMI(ctx context.Context, region, amiID string) (*DeleteAMIResult, error)
+func (*Client) DeleteFSxFilesystem(ctx context.Context, filesystemID, region string) error
+func (*Client) DeleteISOFromS3(ctx context.Context, region, bucket, key string, alsoBucketIfEmpty bool) error
+func (*Client) DeletePlacementGroup(ctx context.Context, name, region string) error
+func (*Client) DeletePlacementGroupWithRetry(ctx context.Context, name, region string) error
+func (*Client) DeleteS3Object(ctx context.Context, region, bucket, key string) error
+func (*Client) DescribeAvailabilityZones(ctx context.Context, region string) ([]string, error)
+func (*Client) DescribeCapacityReservation(ctx context.Context, region, reservationID string) (*CapacityReservation, error)
+func (*Client) DescribeFSxBrief(ctx context.Context, filesystemID, region string) (FSxBrief, error)
+func (*Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOptions) ([]ManagedResource, int, error)
+func (*Client) EFSMountTargetIP(ctx context.Context, filesystemID, region, subnetID, az string) (string, error)
+func (*Client) EnableTracing()
+func (*Client) EnsureImageBuilderSLR(ctx context.Context) (string, error)
+func (*Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImportInfrastructureInput) (string, error)
+func (*Client) EnsureLustrePorts(ctx context.Context, region, sgID string) error
+func (*Client) FindCapacityBlockOffering(ctx context.Context, region, offeringID, instanceType string, instanceCount, durationHours int32) (*CapacityBlockOffering, error)
+func (*Client) FindKeyPairByFingerprint(ctx context.Context, region, fingerprint string) (string, error)
+func (*Client) GetAL2023AMI(ctx context.Context, region string, arch string, gpu bool) (string, error)
+func (*Client) GetAMISnapshots(ctx context.Context, region, amiID string) ([]SnapshotDetail, error)
+func (*Client) GetAccountID(ctx context.Context) (string, error)
+func (*Client) GetAccountName(ctx context.Context) string
+func (*Client) GetCallerIdentityInfo(ctx context.Context) (accountID string, userARN string, err error)
+func (*Client) GetConfig(ctx context.Context) (aws.Config, error)
+func (*Client) GetConsoleOutput(ctx context.Context, region, instanceID string) (string, error)
+func (*Client) GetDefaultVPC(ctx context.Context, region string) (string, error)
+func (*Client) GetEnabledRegions(ctx context.Context) ([]string, error)
+func (*Client) GetFSxConfigFromS3Bucket(ctx context.Context, stackName, region string) (*FSxConfig, error)
+func (*Client) GetFSxFilesystem(ctx context.Context, filesystemID, region string) (*FSxInfo, error)
+func (*Client) GetImageStatus(ctx context.Context, region, imageBuildVersionArn string) (*ImageStatus, error)
+func (*Client) GetInstanceAMI(ctx context.Context, region string, instanceID string) (string, error)
+func (*Client) GetInstanceElasticIP(ctx context.Context, region, instanceID string) (*ElasticIP, error)
+func (*Client) GetInstancePublicIP(ctx context.Context, region, instanceID string) (string, error)
+func (*Client) GetInstanceState(ctx context.Context, region, instanceID string) (string, error)
+func (*Client) GetInstanceTags(ctx context.Context, region, instanceID string) (map[string]string, error)
+func (*Client) GetPasswordData(ctx context.Context, region, instanceID string) (string, error)
+func (*Client) GetRecommendedAMI(ctx context.Context, region string, instanceType string) (string, error)
+func (*Client) GetS3Object(ctx context.Context, region, bucket, key string) ([]byte, error)
+func (*Client) GetSubnetForAZ(ctx context.Context, region, az, vpcID string) (string, error)
+func (*Client) GetSubnets(ctx context.Context, region, vpcID string) ([]string, error)
+func (*Client) ImportKeyPair(ctx context.Context, region, keyName string, publicKey []byte) error
+func (*Client) ImportWindowsISO(ctx context.Context, in ImportWindowsISOInput) (string, error)
+func (*Client) InstanceMemoryMiB(ctx context.Context, region, instanceType string) (mib int64, ok bool)
+func (*Client) InstanceTypeOfferedInRegion(ctx context.Context, region, instanceType string) (bool, error)
+func (*Client) IsWindowsAMI(ctx context.Context, region, amiID string) bool
+func (*Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error)
+func (*Client) ListAMIs(ctx context.Context, region string, filters map[string]string) ([]AMIInfo, error)
+func (*Client) ListInstances(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error)
+func (*Client) OpenImageSource(ctx context.Context, source, region string) (io.ReadCloser, error)
+func (*Client) PrepareSnapshotImage(ctx context.Context, source, region string, maxBytes int64, tempDir string) (*PreparedImage, error)
+func (*Client) PurchaseCapacityBlock(ctx context.Context, region, offeringID, platform string, dryRun bool, tags map[string]string) (string, error)
+func (*Client) RecallFSxFilesystem(ctx context.Context, stackName, region string) (*FSxInfo, error)
+func (*Client) RemoveResource(ctx context.Context, r ManagedResource) error
+func (*Client) ResolveVPC(ctx context.Context, region, explicitVPC string) (string, error)
+func (*Client) RunPowerShell(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
+func (*Client) RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
+func (*Client) SetWindowsAdminPasswordViaSSM(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error)
+func (*Client) SetupSporedIAMRole(ctx context.Context) (string, error)
+func (*Client) StartInstance(ctx context.Context, region, instanceID string) error
+func (*Client) StopInstance(ctx context.Context, region, instanceID string, hibernate bool) error
+func (*Client) TagAMIWindows(ctx context.Context, region, amiID string) error
+func (*Client) TagAMIWindowsWarm(ctx context.Context, region, amiID, parentAMI string) error
+func (*Client) Terminate(ctx context.Context, region, instanceID string) error
+func (*Client) UpdateInstanceTags(ctx context.Context, region, instanceID string, tags map[string]string) error
+func (*Client) UploadISOToS3(ctx context.Context, region, bucket, key, localPath string) error
+func (*Client) ValidateInstanceTypeForEFAInRegion(ctx context.Context, instanceType, region string) error
+func (*Client) ValidateInstanceTypeForNestedVirtualization(ctx context.Context, instanceType, region string) error
+func (*Client) ValidateInstanceTypeForPlacementGroup(ctx context.Context, instanceType string) error
+func (*Client) ValidateSubnetInVPC(ctx context.Context, region, subnetID, vpcID string) error
+func (*Client) WaitForAMI(ctx context.Context, region string, amiID string, timeout time.Duration) error
+func (*Client) WaitForImage(ctx context.Context, region, imageBuildVersionArn string, timeout time.Duration, progressCb func(status string)) (string, error)
+func (*Client) WaitForPasswordData(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error)
+func (*Client) WaitForPublicIP(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error)
+func (*Client) WaitForRunning(ctx context.Context, region, instanceID string, timeout time.Duration) error
+func (*Client) WaitForSSMOnline(ctx context.Context, region, instanceID string, timeout time.Duration) error
+func (*Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceID string, timeout time.Duration, onProgress func(elapsed time.Duration)) error
+func (*LaunchError) Error() string
+func (*LaunchError) Unwrap() error
+func (DisplayPrice) SourceLabel() string
+func (ManagedResource) IsRunningInstance() bool
+func (ReaperCoverage) Summary() string
+func AccountBase36(accountID string) string
+func AttachDeviceName(i int) string
+func DecryptWindowsPassword(passwordData, privateKeyPath string) (string, error)
+func DeletionOrder(resources []ManagedResource) []ManagedResource
+func DescribeInstanceWithRetry(ctx context.Context, ec2Client *ec2.Client, instanceID string) (*types.Instance, error)
+func DetectArchitecture(instanceType string) string
+func DetectGPUInstance(instanceType string) bool
+func DetectReaperCoverage(ctx context.Context, cfg awssdk.Config) ReaperCoverage
+func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string
+func GenerateScopedDynamoDBPolicy(region, accountID string) string
+func GenerateScopedS3Policy(region, accountID string) string
+func GenerateWindowsPassword(n int) (string, error)
+func GetEFSDNSName(filesystemID, region string) string
+func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool
+func IsSharedSporedIdentity(r ManagedResource) bool
+func LifecycleTags(name, purpose string, now time.Time) []types.Tag
+func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool
+func NewClient(ctx context.Context) (*Client, error)
+func NewClientFromConfig(cfg aws.Config) *Client
+func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
+func PredictedInstanceRoleName(config IAMRoleConfig) string
+func ReaperCoverageAdvice(c ReaperCoverage, onComplete, fsxLifecycle string) string
+func ResolveDisplayPrice(ctx context.Context, cfg aws.Config, instanceType, region string) (DisplayPrice, error)
+func RetryPlacementGroupDelete(ctx context.Context, name string, del func() error) error
+func SetPGDeleteWaitForTest(budget, interval time.Duration) func()
+func ValidatePolicyNames(policies []string, allowFullAccess bool) error
+type AMIHealthCheck struct
+type AMIInfo struct
+type AttachVolumeSpec struct
+type BuildSnapshotInput struct
+type BuildSnapshotResult struct
+type CapacityBlockOffering struct
+type CapacityReservation struct
+type Client struct
+type CreateAMIInput struct
+type DeleteAMIResult struct
+type DiscoverOptions struct
+type DisplayPrice struct
+type ElasticIP struct
+type EnsureImportInfrastructureInput struct
+type FSxBrief struct
+type FSxConfig struct
+type FSxInfo struct
+type IAMRoleConfig struct
+type ImageStatus struct
+type ImportWindowsISOInput struct
+type InstanceInfo struct
+type LaunchConfig struct
+type LaunchError struct
+type LaunchResult struct
+type ManagedResource struct
+type MountSnapshotResult struct
+type PreparedImage struct
+type ReaperCoverage struct
+type S3BucketConfig struct
+type SSMRunResult struct
+type SnapshotDetail struct
+type SnapshotSourceKind int
+var CallerVersion
+var ErrS3NoSuchKey
+var ErrSSMUnreachable
+var ErrWaitTimeout
+var FullAccessPolicyTemplates
+var PolicyTemplates
+
+## pkg/ecrref (imported by: spore-host-mcp)
+func Account(image string) string
+func AuthHost(image, fallbackRegion string) (host, region string, ok bool)
+func RegistryHost(image string) string
+
+## pkg/launcher (imported by: spore-host-mcp, lagotto, calque)
+const DefaultUsername
+const MPIReadyGate
+const ReadyDir
+const ReadyGateTimeoutSecs
+const RequiredGatesFile
+const StorageReadyGate
+field BootstrapConfig.Command string
+field BootstrapConfig.ContainerScript string
+field BootstrapConfig.CustomUserData string
+field BootstrapConfig.Plugins []plugin.Declaration
+field BootstrapConfig.PublicKey []byte
+field BootstrapConfig.ReadyGates []string
+field BootstrapConfig.ReadyMountPoints []string
+field BootstrapConfig.StorageScript string
+field BootstrapConfig.TaskFlushScript string
+field BootstrapConfig.Username string
+field Options.ContainerScript string
+field Options.CustomUserData string
+field Options.Plugins []plugin.Declaration
+field Options.PublicKey []byte
+field Options.StorageScript string
+field Options.TaskFlushScript string
+field Options.Username string
+func BuildLinuxBootstrap(cfg BootstrapConfig) (string, error)
+func EncodeLinuxUserData(script string) string
+func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig, opts Options) (*aws.LaunchResult, error)
+type BootstrapConfig struct
+type Options struct
+var ErrPostLaunch
+
+## pkg/launchererr (imported by: lagotto)
+var ErrPostLaunch
+
+## pkg/storage (imported by: calque)
+const EFSProfileBurst EFSProfile
+const EFSProfileGeneral EFSProfile
+const EFSProfileMaxIO EFSProfile
+const EFSProfileMaxThroughput EFSProfile
+field EFSMountOptions.ActimeO int
+field EFSMountOptions.Async bool
+field EFSMountOptions.Hard bool
+field EFSMountOptions.NFSVers string
+field EFSMountOptions.NoResvPort bool
+field EFSMountOptions.NoShareCache bool
+field EFSMountOptions.RSize int
+field EFSMountOptions.Retrans int
+field EFSMountOptions.Timeo int
+field EFSMountOptions.WSize int
+func (EFSMountOptions) ToMountString() string
+func GetEFSProfile(profile EFSProfile) (EFSMountOptions, error)
+func GetProfileDescription(profile EFSProfile) string
+func ParseCustomOptions(optString string) (EFSMountOptions, error)
+func ValidateProfile(profile string) error
+type EFSMountOptions struct
+type EFSProfile string
+
+## pkg/taskcohort (imported by: calque)
+field Actuator.BaseConfig aws.LaunchConfig
+field Actuator.Client LaunchAPI
+field Actuator.Region string
+field Observer.Client LaunchAPI
+field Observer.Region string
+func (*Actuator) Launch(ctx context.Context, intent cohort.EntityIntent) (cohort.Observation, error)
+func (*Actuator) Start(ctx context.Context, id cohort.EntityID) (cohort.Observation, error)
+func (*Actuator) Stop(_ context.Context, _ cohort.EntityID, _ cohort.StopMode) error
+func (*Actuator) Terminate(ctx context.Context, id cohort.EntityID) error
+func (*Observer) Observe(ctx context.Context, ids []cohort.EntityID) ([]cohort.Observation, error)
+func (Classifier) Classify(err error) cohort.Fault
+method LaunchAPI.Launch (ctx context.Context, cfg aws.LaunchConfig) (*aws.LaunchResult, error)
+method LaunchAPI.ListInstances (ctx context.Context, region, stateFilter string) ([]aws.InstanceInfo, error)
+method LaunchAPI.StartInstance (ctx context.Context, region, instanceID string) error
+method LaunchAPI.Terminate (ctx context.Context, region, instanceID string) error
+type Actuator struct
+type Classifier struct
+type LaunchAPI interface
+type Observer struct
+
+## pkg/taskpool (imported by: calque)
+field Claimed.Ref TaskRef
+field DirWorkspace.Root string
+field Pool.Log io.Writer
+field Pool.Queue *Queue
+field Pool.RunID string
+field Pool.Specs *SpecStore
+field ScriptExecer.AccountID string
+field ScriptExecer.Bash string
+field ScriptExecer.Region string
+field ScriptExecer.ResultsBucket string
+field ScriptExecer.Stderr *os.File
+field ScriptExecer.Stdout *os.File
+field SpecStore.Bucket string
+field SpecStore.Client S3API
+field SpecStore.Prefix string
+field TaskRef.SpecURI string
+field TaskRef.TaskID string
+field Worker.Config WorkerConfig
+field Worker.Execer TaskExecer
+field Worker.Fetcher SpecFetcher
+field Worker.Queue *Queue
+field Worker.Workspace WorkspaceProvider
+field WorkerConfig.IdleTimeout time.Duration
+field WorkerConfig.Log io.Writer
+field WorkerConfig.PollWaitSeconds int32
+func (*DirWorkspace) Acquire(taskID string) (string, error)
+func (*DirWorkspace) Reset(dir string) error
+func (*Pool) Depth(ctx context.Context) (visible, inFlight int, err error)
+func (*Pool) Drain(ctx context.Context) error
+func (*Pool) Enqueue(ctx context.Context, spec *taskproto.TaskSpec, specJSON []byte) error
+func (*Queue) Ack(ctx context.Context, c *Claimed) error
+func (*Queue) Claim(ctx context.Context, waitSeconds int32) (*Claimed, error)
+func (*Queue) Delete(ctx context.Context) error
+func (*Queue) Depth(ctx context.Context) (visible, inFlight int, err error)
+func (*Queue) Submit(ctx context.Context, ref TaskRef) error
+func (*Queue) URL() string
+func (*ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir string) (int, error)
+func (*SpecStore) Fetch(ctx context.Context, specURI string) ([]byte, error)
+func (*SpecStore) Stage(ctx context.Context, runID, taskID string, specJSON []byte) (string, error)
+func (*Worker) Run(ctx context.Context) (executed int, err error)
+func CreateForRun(ctx context.Context, sqsAPI SQSAPI, specs *SpecStore, runID string, visibilityTimeout int) (*Pool, error)
+func CreateForRunWithConfig(ctx context.Context, cfg awssdk.Config, runID, specBucket, specPrefix string, visibilityTimeout int) (*Pool, error)
+func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTimeout int) (*Queue, error)
+func OpenForRunWithConfig(ctx context.Context, cfg awssdk.Config, runID, specBucket, specPrefix string) (*Pool, error)
+func OpenQueue(ctx context.Context, client SQSAPI, runID string) (*Queue, error)
+func QueueName(runID string) string
+method S3API.GetObject (ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+method S3API.PutObject (ctx context.Context, in *s3.PutObjectInput, opts ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+method SQSAPI.CreateQueue (ctx context.Context, in *sqs.CreateQueueInput, opts ...func(*sqs.Options)) (*sqs.CreateQueueOutput, error)
+method SQSAPI.DeleteMessage (ctx context.Context, in *sqs.DeleteMessageInput, opts ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
+method SQSAPI.DeleteQueue (ctx context.Context, in *sqs.DeleteQueueInput, opts ...func(*sqs.Options)) (*sqs.DeleteQueueOutput, error)
+method SQSAPI.GetQueueAttributes (ctx context.Context, in *sqs.GetQueueAttributesInput, opts ...func(*sqs.Options)) (*sqs.GetQueueAttributesOutput, error)
+method SQSAPI.GetQueueUrl (ctx context.Context, in *sqs.GetQueueUrlInput, opts ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error)
+method SQSAPI.ReceiveMessage (ctx context.Context, in *sqs.ReceiveMessageInput, opts ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
+method SQSAPI.SendMessage (ctx context.Context, in *sqs.SendMessageInput, opts ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
+method SpecFetcher.Fetch (ctx context.Context, specURI string) ([]byte, error)
+method TaskExecer.Exec (ctx context.Context, specJSON []byte, workspaceDir string) (exitCode int, err error)
+method WorkspaceProvider.Acquire (taskID string) (dir string, err error)
+method WorkspaceProvider.Reset (dir string) error
+type Claimed struct
+type DirWorkspace struct
+type Pool struct
+type Queue struct
+type S3API interface
+type SQSAPI interface
+type ScriptExecer struct
+type SpecFetcher interface
+type SpecStore struct
+type TaskExecer interface
+type TaskRef struct
+type Worker struct
+type WorkerConfig struct
+type WorkspaceProvider interface
+
+## pkg/taskproto (imported by: spore-host-mcp)
+const ConsoleLogEndMarker
+const ConsoleLogStartPrefix
+const DefaultEFSMountPoint
+const DefaultFSxMountPoint
+const ExitCompleted ExitReason
+const ExitCostLimitExceeded ExitReason
+const ExitIdleTimeout ExitReason
+const ExitSpotInterruption ExitReason
+const ExitTTLExpired ExitReason
+const PurchaseOnDemand
+const PurchaseSpot
+const RetryAppError RetryClass
+const RetryCapacity RetryClass
+const RetryControllerLost RetryClass
+const RetryInstanceHealth RetryClass
+const RetryNone RetryClass
+const RetryOutputDeliveryError RetryClass
+const RetrySpotInterruption RetryClass
+const RetryStagingError RetryClass
+const RetryTTLExpired RetryClass
+const StateCancelled TaskState
+const StateCompleted TaskState
+const StateFailed TaskState
+const StateLaunching TaskState
+const StateRunning TaskState
+const StateSubmitted TaskState
+field Candidate.Architecture string
+field Candidate.Family string
+field Candidate.GPUs int
+field Candidate.InstanceType string
+field Candidate.MemoryGiB float64
+field Candidate.OnDemandPrice float64
+field Candidate.VCPUs int
+field CompletionRecord.CostEstimate float64
+field CompletionRecord.EndedAt string
+field CompletionRecord.ExitCode int
+field CompletionRecord.Logs []string
+field CompletionRecord.RetryClass RetryClass
+field CompletionRecord.RunID string
+field CompletionRecord.StartedAt string
+field CompletionRecord.State TaskState
+field CompletionRecord.TaskID string
+field CompletionRecord.TerminalReason ExitReason
+field LaunchResult.AZ string
+field LaunchResult.InstanceID string
+field LaunchResult.InstanceType string
+field LaunchResult.Region string
+field LaunchResult.Spot bool
+field LaunchResult.TaskID string
+field Lifecycle.CostLimit float64
+field Lifecycle.OnComplete string
+field Lifecycle.TTL string
+field Manifest.Destination string
+field Manifest.Source string
+field Placement.AMI string
+field Placement.AvailabilityZone string
+field Placement.EFSID string
+field Placement.EFSMountPoint string
+field Placement.FSxLustreID string
+field Placement.FSxMountPoint string
+field Placement.Volumes []VolumeRef
+field ResourceRequest.Architecture string
+field ResourceRequest.CPU int
+field ResourceRequest.DiskGiB int32
+field ResourceRequest.Fallback string
+field ResourceRequest.Families []string
+field ResourceRequest.GPUs int
+field ResourceRequest.InstanceType string
+field ResourceRequest.MemoryGiB float64
+field ResourceRequest.MemoryHeadroomPercent int
+field ResourceRequest.Purchase string
+field ResourceRequest.S3ReadWrite []string
+field SizeResult.Considered int
+field SizeResult.Family string
+field SizeResult.InstanceType string
+field SizeResult.MemoryGiB float64
+field SizeResult.OnDemandPrice float64
+field SizeResult.VCPUs int
+field TaskSpec.Command []string
+field TaskSpec.Container string
+field TaskSpec.Env map[string]string
+field TaskSpec.Inputs []Manifest
+field TaskSpec.Lifecycle Lifecycle
+field TaskSpec.Outputs []Manifest
+field TaskSpec.Placement Placement
+field TaskSpec.Resources ResourceRequest
+field TaskSpec.ResultsPrefix string
+field TaskSpec.TaskID string
+field VolumeRef.MountPath string
+field VolumeRef.ReadOnly bool
+field VolumeRef.Snapshot string
+func (*TaskSpec) EffectiveOnComplete() string
+func (*TaskSpec) Validate() error
+func (Placement) EffectiveEFSMountPoint() string
+func (Placement) EffectiveFSxMountPoint() string
+func (RetryClass) Retryable() bool
+func ClassifyLaunchError(code string) RetryClass
+func CompletionRecordPath() string
+func DefaultResultsBucket(accountID, region string) string
+func EffectiveMemoryGiB(req ResourceRequest) float64
+func EffectiveResultsPrefix(spec *TaskSpec, accountID, region string) string
+func ExtractConsoleLog(consoleOutput string) (string, bool)
+func FlushScriptPath() string
+func GenerateFlushScript(spec *TaskSpec, resultsPrefix, region, runID string) string
+func GeneratePooledJobScript(spec *TaskSpec, resultsPrefix, region string, gpu bool, runID string) string
+func GenerateWrapper(spec *TaskSpec, resultsPrefix, region string, gpu bool, runID string) string
+func IsDefaultResultsBucket(bucket, accountID, region string) bool
+func ParseCompletionRecord(data []byte) (*CompletionRecord, error)
+func ParseSpec(data []byte) (*TaskSpec, error)
+func ParseSpecFile(path string) (*TaskSpec, error)
+func SetFlushScriptPathForTest(path string) (restore func())
+func SetLocalRecordDirForTest(dir string) (restore func())
+func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*SizeResult, error)
+func SplitS3URI(uri string) (bucket, key string, ok bool)
+func StartedAtPath() string
+method InstanceFinder.FindCandidates (ctx context.Context, req ResourceRequest) ([]Candidate, error)
+type Candidate struct
+type CompletionRecord struct
+type ExitReason string
+type InstanceFinder interface
+type LaunchResult struct
+type Lifecycle struct
+type Manifest struct
+type Placement struct
+type ResourceRequest struct
+type RetryClass string
+type SizeResult struct
+type TaskSpec struct
+type TaskState string
+type VolumeRef struct
