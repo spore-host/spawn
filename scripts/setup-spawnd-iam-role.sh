@@ -85,9 +85,29 @@ aws iam add-role-to-instance-profile \
   --role-name "$ROLE_NAME" \
   2>/dev/null || echo "Role already added to instance profile"
 
-# Wait for IAM propagation
-echo "Waiting for IAM propagation (10 seconds)..."
-sleep 10
+# Wait for IAM propagation by POLLING, not by sleeping a guess (#752).
+#
+# There is no `aws iam wait` for instance profiles, so the bounded poll below is
+# the correct substitute. The readiness condition is not "the profile exists" —
+# it is "the ROLE is attached to it", which is what EC2 needs at RunInstances and
+# what the add-role call above may not have propagated yet.
+echo "Waiting for the role to appear in the instance profile..."
+IAM_WAITED=0
+while [ "$IAM_WAITED" -lt 60 ]; do
+  if aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" \
+      --query "InstanceProfile.Roles[?RoleName=='$ROLE_NAME'] | length(@)" \
+      --output text 2>/dev/null | grep -q '^1$'; then
+    break
+  fi
+  sleep 2
+  IAM_WAITED=$((IAM_WAITED + 2))
+done
+if [ "$IAM_WAITED" -ge 60 ]; then
+  echo "ERROR: $ROLE_NAME did not appear in instance profile $PROFILE_NAME after ${IAM_WAITED}s." >&2
+  echo "       A launch using this profile would fail; investigate before launching." >&2
+  exit 1
+fi
+echo "Role is attached and readable after ${IAM_WAITED}s"
 
 echo "✅ IAM role and instance profile configured successfully"
 echo "Role Name: $ROLE_NAME"

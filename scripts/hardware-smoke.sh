@@ -47,6 +47,26 @@ step() { echo; echo "=== $*"; }
 
 # Terminate everything we created, whatever happens. This runs on error and on
 # interrupt, because the one thing worse than a failed smoke is a leaked cluster.
+# smoke_live_instances lists this run's instances in any NON-terminal state.
+#
+# shutting-down is included deliberately: it is excluded from EC2's own default
+# state filter, which is the blind spot behind #736 — a terminating instance
+# reported as nonexistent. Leaving it out would make "still shutting down" and
+# "terminate failed and it is stuck" indistinguishable, which is the one
+# distinction a leak check exists to draw.
+smoke_live_instances() {
+  {
+    aws ec2 describe-instances --region "$REGION" \
+      --filters "Name=tag:smoke,Values=$TAG" \
+                "Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down" \
+      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null
+    aws ec2 describe-instances --region "$REGION" \
+      --filters "Name=tag:Name,Values=$TAG-sw-*" \
+                "Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down" \
+      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null
+  } | tr '\t' '\n' | grep '^i-' || true
+}
+
 cleanup() {
   step "Cleanup"
   local ids
@@ -148,19 +168,31 @@ cleanup() {
   done
 
   # Independent leak check: ask AWS, do not trust the terminate calls above.
-  sleep 10
-  local left
-  left=$(
-    {
-      aws ec2 describe-instances --region "$REGION" \
-        --filters "Name=tag:smoke,Values=$TAG" \
-                  "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-        --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null
-      aws ec2 describe-instances --region "$REGION" \
-        --filters "Name=tag:Name,Values=$TAG-sw-*" \
-                  "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-        --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null
-    } | tr '\t' '\n' | grep -c '^i-' || true)
+  #
+  # POLLS until the live set is empty rather than sleeping a guess, and includes
+  # shutting-down in the filter (#752).
+  #
+  # The old form was `sleep 10` then one query over
+  # pending,running,stopping,stopped. That filter omits shutting-down — the same
+  # blind spot as #736, where EC2's default state filter made a terminating
+  # instance report as nonexistent — so the sleep bought nothing: a
+  # still-terminating instance was invisible with or without it, while a FAILED
+  # terminate leaves state `running` and is caught instantly. Worse, "invisible"
+  # and "gone" were indistinguishable, so a terminate that hung would have
+  # reported no leak.
+  #
+  # Cost control is existential here, so the check now distinguishes
+  # "still shutting down" (wait) from "stuck" (report it).
+  local left=""
+  local waited=0
+  while :; do
+    left=$(smoke_live_instances)
+    [ -z "$left" ] && break
+    [ "$waited" -ge 120 ] && break
+    sleep 5
+    waited=$((waited + 5))
+  done
+  left=$(printf '%s\n' "$left" | grep -c '^i-' || true)
   if [ "${left:-0}" = "0" ]; then ok "no instances left behind"; else bad "LEAK: $left instance(s) still alive — terminate by hand NOW"; fi
 
   # Instances are the expensive leak, but not the only one. Three placement
