@@ -8,6 +8,12 @@
 # Days to keep this function's CloudWatch logs (#653). Configurable; the default
 # matches what the template previously hardcoded, so behaviour is unchanged.
 LOG_RETENTION_DAYS?=30
+# Reconciliation schedule (#772). Defaults match the template, so these change
+# nothing unless set: `make deploy SCHEDULE_STATE=DISABLED` turns the schedule
+# off properly, through CloudFormation. Doing it with `aws events disable-rule`
+# would be stack drift and would be silently reverted by the next deploy.
+SCHEDULE_STATE?=ENABLED
+SCHEDULE_RATE?=rate(1 minute)
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
 
 BINARY_NAME=build/bootstrap
@@ -31,7 +37,7 @@ deploy: build
 		--template-file template.yaml \
 		--stack-name spawn-autoscale-orchestrator-$(ENV) \
 		--capabilities CAPABILITY_IAM \
-		--parameter-overrides Environment=$(ENV) Version=$(VERSION) LogRetentionDays=$(LOG_RETENTION_DAYS) \
+		--parameter-overrides Environment=$(ENV) Version=$(VERSION) LogRetentionDays=$(LOG_RETENTION_DAYS) ScheduleState=$(SCHEDULE_STATE) 'ScheduleRate=$(SCHEDULE_RATE)' \
 		--resolve-s3
 
 deploy-staging:

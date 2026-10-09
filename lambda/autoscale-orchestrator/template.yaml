@@ -35,6 +35,39 @@ Parameters:
       plane measured to grow without bound (#653). Declaring the group here with a
       retention is what stops that, so this must stay set.
 
+  ScheduleRate:
+    Type: String
+    Default: rate(1 minute)
+    Description: >
+      How often the orchestrator reconciles autoscale groups. One minute is a
+      responsiveness figure, and it is worth revisiting per environment: this
+      stack polled every minute from February to October 2026 against an EMPTY
+      groups table — 10,080 invocations a week, finding nothing (#772).
+
+  ScheduleState:
+    Type: String
+    Default: ENABLED
+    AllowedValues: [ENABLED, DISABLED]
+    Description: >
+      Whether the reconciliation schedule runs. Default ENABLED, so this
+      parameter changes nothing unless set.
+      Note the spelling: it is SAM's `State`, NOT `Enabled`. `Enabled: !Ref …`
+      silently does not work — SAM resolves it as
+      `"ENABLED" if self.Enabled else "DISABLED"`
+      (samtranslator/model/eventsources/push.py:162), and at transform time a
+      !Ref is an intrinsic DICT, which is always truthy in Python. So an
+      Enabled-based parameter yields ENABLED for every value including 'false',
+      and `sam validate --lint` accepts it. `State` is passed through verbatim.
+      It exists because the rule is CLOUDFORMATION-MANAGED
+      (AutoScaleOrchestratorFunctionScheduleEvent), so `aws events disable-rule`
+      would be stack drift and would be silently reverted by the next deploy —
+      the same trap as spawn#754's update-function-code. Turning the schedule off
+      is therefore a DEPLOY, not a CLI call.
+      Setting this false leaves the function deployed and reachable; `spawn
+      autoscale status` then reports the schedule as DISABLED and names the
+      remedy (spawn#772/#773), so the feature is inert rather than silently
+      broken.
+
 Resources:
   AutoScaleOrchestratorFunction:
     Type: AWS::Serverless::Function
@@ -95,8 +128,8 @@ Resources:
         ScheduleEvent:
           Type: Schedule
           Properties:
-            Schedule: rate(1 minute)
-            Enabled: true
+            Schedule: !Ref ScheduleRate
+            State: !Ref ScheduleState
 
   AutoScaleGroupsTable:
     Type: AWS::DynamoDB::Table
