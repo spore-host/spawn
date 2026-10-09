@@ -5,6 +5,9 @@
 # and a -dirty suffix for uncommitted changes — so the stamp says "deployed from
 # uncommitted code" out loud instead of claiming a release. Leading v stripped to
 # match pkg/reaperdeploy.Tags.
+# Days to keep this function's CloudWatch logs (#653). Configurable; the default
+# matches what the template previously hardcoded, so behaviour is unchanged.
+LOG_RETENTION_DAYS?=30
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
 
 BINARY_NAME=build/bootstrap
@@ -28,7 +31,7 @@ deploy: build
 		--template-file template.yaml \
 		--stack-name spawn-autoscale-orchestrator-$(ENV) \
 		--capabilities CAPABILITY_IAM \
-		--parameter-overrides Environment=$(ENV) Version=$(VERSION) \
+		--parameter-overrides Environment=$(ENV) Version=$(VERSION) LogRetentionDays=$(LOG_RETENTION_DAYS) \
 		--resolve-s3
 
 deploy-staging:

@@ -2,6 +2,9 @@
 
 BINARY_NAME=build/bootstrap
 ENV?=production
+# Days to keep this function's CloudWatch logs (#653). Configurable; the default
+# matches what the template previously hardcoded, so behaviour is unchanged.
+LOG_RETENTION_DAYS?=30
 # The version stamped onto the function as spawn:version (#654). `git describe`
 # rather than a bare tag on purpose: it yields v0.126.1 on a tag, v0.126.1-3-gabc
 # when ahead, and a -dirty suffix when the tree has uncommitted changes — so the
@@ -99,7 +102,8 @@ PARAM_MAP = \
 	MaxAge:MAX_AGE \
 	Regions:REGIONS \
 	Schedule:SCHEDULE \
-	Version:VERSION
+	Version:VERSION \
+	LogRetentionDays:LOG_RETENTION_DAYS
 
 # Emit one `CfnKey=value` line per EXPLICITLY-supplied parameter. Deliberately not
 # JSON: Make has no comma literal (`$(,)` is undefined and silently expands to

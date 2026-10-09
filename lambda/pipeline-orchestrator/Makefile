@@ -5,6 +5,9 @@
 # and a -dirty suffix for uncommitted changes — so the stamp says "deployed from
 # uncommitted code" out loud instead of claiming a release. Leading v stripped to
 # match pkg/reaperdeploy.Tags.
+# Days to keep this function's CloudWatch logs (#653). Configurable; the default
+# matches what the template previously hardcoded, so behaviour is unchanged.
+LOG_RETENTION_DAYS?=30
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
 
 # The deployed function's name, in ONE place. It must match template.yaml's
@@ -35,7 +38,7 @@ deploy: build
 		--template-file template.yaml \
 		--stack-name $(STACK) \
 		--capabilities CAPABILITY_IAM \
-		--parameter-overrides Environment=production Version=$(VERSION) \
+		--parameter-overrides Environment=production Version=$(VERSION) LogRetentionDays=$(LOG_RETENTION_DAYS) \
 		--resolve-s3
 
 # Deploy to staging
@@ -44,7 +47,7 @@ deploy-staging: build
 		--template-file template.yaml \
 		--stack-name $(STACK)-staging \
 		--capabilities CAPABILITY_IAM \
-		--parameter-overrides Environment=staging Version=$(VERSION) \
+		--parameter-overrides Environment=staging Version=$(VERSION) LogRetentionDays=$(LOG_RETENTION_DAYS) \
 		--resolve-s3
 
 # Test locally (requires SAM CLI)
