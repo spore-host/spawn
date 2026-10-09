@@ -8,12 +8,22 @@
 # rows are launched by the spawn-sweep-orchestrator Lambda from a handful of
 # param keys; it never sees a LaunchConfig, which is the root of both issues.
 #
-# AS OF 2026-10-08 THIS TEST FAILS, correctly, on #749: the CLI does not seed
-# `ami` into the params the Lambda reads, so every RunInstances is rejected with
-# `MissingParameter: The request must contain the parameter ImageId` — and the
-# Lambda then logs "All instances launched and completed" while the CLI reports
-# success. Zero instances are created. #725's tag assertions below cannot run
-# until that is fixed; they are written and waiting.
+# PASSING as of 2026-10-08, 8/8, against spawn v0.126.0 and the orchestrator
+# Lambda deployed the same day. This is the first run in which #725's assertions
+# were observable at all.
+#
+# It used to fail, correctly, on #749: the CLI did not seed `ami` into the params
+# the Lambda reads, so every RunInstances was rejected with `MissingParameter:
+# The request must contain the parameter ImageId` — and the Lambda then logged
+# "All instances launched and completed" while the CLI reported success. Zero
+# instances were created, so the tag assertions below could not run.
+#
+# Two things have to be true at once for this test to mean anything, and only one
+# of them is in the repo: the CLI must seed the params (#751, shipped in
+# v0.126.0) AND the deployed orchestrator must carry the tag fix (#726) — a
+# Lambda does not upgrade with the CLI, which is #654. If this test regresses,
+# check the deployed function's LastModified against `git log -- lambda/sweep-orchestrator/`
+# before looking for a code bug.
 #
 # Cost safety: the smallest ARM type, a 20-minute TTL, an explicit terminate, and
 # an INDEPENDENT leak-check that re-queries rather than trusting the terminate.
