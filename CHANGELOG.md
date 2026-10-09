@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Every spore.host-operated Lambda now stamps the version it was deployed
+  from, and CI gates that it does** (#654). Nothing synchronises the CLI with the
+  control plane — `spawn` upgrades when a user upgrades it, a Lambda only when
+  someone runs its deploy — so version skew is the *normal* state. That is
+  defensible, since the two are deployed independently; what was not is that it
+  was **invisible**. `spawn-ttl-reaper-production` sat untouched from 2026-07-31
+  to 2026-10-04 while the CLI went from ~v0.9x to v0.116.0, missing three merged
+  fixes, with nothing anywhere saying so.
+  All six deploy mechanisms now set a `spawn:version` tag readable in one API
+  call without invoking the function, matching what `spawn reaper deploy` already
+  did for the self-hosted reaper: three SAM templates take a `Version` parameter,
+  and three shell deploys call `aws lambda tag-resource`. The value comes from
+  `git describe --tags --always --dirty`, so a deploy from an uncommitted tree
+  stamps `-dirty` and says so rather than claiming a release.
+  `make lambda-versions` gates PRs offline — a new Lambda cannot arrive
+  unreadable — and `make lambda-versions-deployed` reports live versions for an
+  operator. Replaces comparing a function's `LastModified` against
+  `git log -- lambda/<name>/`, which is archaeology and is wrong whenever a
+  redeploy carried no source change, or a source change was never deployed.
+
 ## [0.126.1] - 2026-10-09
 
 ### Security

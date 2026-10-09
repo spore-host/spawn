@@ -12,6 +12,17 @@ Parameters:
       - development
     Description: Environment name
 
+  Version:
+    Type: String
+    Default: unknown
+    Description: >
+      The spawn version this artifact was built from, stamped onto the function as
+      the spawn:version tag so an operator can read it in ONE API call (spawn#654).
+      Nothing synchronises this stack with the CLI, so version skew is the normal
+      state — and until now it was invisible, answerable only by comparing the
+      function's LastModified against git log. `unknown` means it was deployed by
+      something that did not stamp it.
+
 Resources:
   # DynamoDB table for pipeline state
   PipelineOrchestrationTable:
@@ -108,6 +119,11 @@ Resources:
         Environment: !Ref Environment
         Application: spawn
         Component: pipeline-orchestrator
+        # Readable without invoking the function (spawn#654).
+        spawn:managed: 'true'
+        spawn:component: pipeline-orchestrator
+        spawn:created-by: sam deploy
+        spawn:version: !Ref Version
 
   # CloudWatch Log Group with retention
   PipelineOrchestratorLogGroup:

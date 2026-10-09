@@ -2,6 +2,12 @@
 
 BINARY_NAME=build/bootstrap
 ENV?=production
+# The version stamped onto the function as spawn:version (#654). `git describe`
+# rather than a bare tag on purpose: it yields v0.126.1 on a tag, v0.126.1-3-gabc
+# when ahead, and a -dirty suffix when the tree has uncommitted changes — so the
+# stamp says "deployed from uncommitted code" out loud instead of claiming a
+# release. The leading v is stripped to match pkg/reaperdeploy.Tags.
+VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
 # The reaper stack lives in us-east-1. Explicit, because every AWS call below
 # must target the same region the stack is in (#650 follow-up).
 REGION?=us-east-1
@@ -92,7 +98,8 @@ PARAM_MAP = \
 	AlarmTopicArn:ALARM_TOPIC_ARN \
 	MaxAge:MAX_AGE \
 	Regions:REGIONS \
-	Schedule:SCHEDULE
+	Schedule:SCHEDULE \
+	Version:VERSION
 
 # Emit one `CfnKey=value` line per EXPLICITLY-supplied parameter. Deliberately not
 # JSON: Make has no comma literal (`$(,)` is undefined and silently expands to
@@ -137,7 +144,7 @@ deploy: build
 	@# off — but never NotifyUrl, which is a Slack webhook secret. These are read
 	@# back from the MERGED file, so this shows what will actually be sent rather
 	@# than what this Makefile happens to default to.
-	@awk -F': ' '/^(DryRun|ScanSelf|DnsSweep|DnsExpire|NetResources|AlarmsEnabled|DnsZoneId|DnsDomain|AlarmTopicArn|MaxAge|Schedule):/ \
+	@awk -F': ' '/^(DryRun|ScanSelf|DnsSweep|DnsExpire|NetResources|AlarmsEnabled|DnsZoneId|DnsDomain|AlarmTopicArn|MaxAge|Schedule|Version):/ \
 		{ printf "  %s %s\n", $$1, $$2 }' $(PARAMS_FILE)
 	sam deploy \
 		--template-file template.yaml \

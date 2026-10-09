@@ -100,6 +100,27 @@ else
     --function-name "$FUNCTION_NAME" --region "$REGION"
 fi
 
+# Stamp the version so an operator can read it in ONE API call (#654).
+#
+# This function is NOT CloudFormation-managed, so a tag added here is not stack
+# drift — unlike the SAM-deployed lambdas, where the tag is declared in the
+# template for exactly that reason.
+#
+# `git describe` rather than a bare tag: it yields 0.126.1 on a tag,
+# 0.126.1-3-gabc when ahead, and a -dirty suffix for uncommitted changes, so the
+# stamp says "deployed from uncommitted code" out loud instead of claiming a
+# release. Before this, answering "is the deployed sweep orchestrator current?"
+# meant comparing LastModified against `git log -- lambda/sweep-orchestrator/`.
+SPAWN_VERSION=$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
+FUNCTION_ARN=$(aws lambda get-function-configuration \
+  --function-name "$FUNCTION_NAME" --region "$REGION" \
+  --query FunctionArn --output text)
+aws lambda tag-resource \
+  --resource "$FUNCTION_ARN" \
+  --tags "spawn:managed=true,spawn:component=sweep-orchestrator,spawn:created-by=deploy-sweep-orchestrator.sh,spawn:version=$SPAWN_VERSION" \
+  --region "$REGION" >/dev/null
+echo "stamped spawn:version=$SPAWN_VERSION"
+
 rm function.zip
 
 # Verify the function is actually running the binary just built. An HTTP 200 from
