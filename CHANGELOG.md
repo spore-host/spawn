@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Lambda log groups now have a bounded retention, and CI gates that every
+  deploy path sets one** (#653). A footprint audit measured the actual control
+  plane rather than assuming: **10 log groups with no retention at all, holding
+  51 MB** — the only artifact measured to grow without bound. A log group that
+  Lambda auto-creates on first invocation keeps logs *forever* by default, and
+  only the four declared by a SAM template had a retention, which is exactly why
+  the script-deployed functions were among the ten.
+  All six deploy paths now set it: the three SAM templates take a
+  `LogRetentionDays` parameter (default **30**, matching what they previously
+  hardcoded), and the three shell deploys call `aws logs put-retention-policy`,
+  overridable with `LOG_RETENTION_DAYS`. `make lambda-versions` — now
+  `scripts/lambda-deploy-census.sh`, since it checks more than versions — fails a
+  PR whose deploy path omits either a `spawn:version` stamp or a retention.
+  Nothing is applied to existing log groups by this change: setting retention
+  deletes logs older than the window, so the ten outliers are left for a
+  deliberate operator decision.
+  Also corrects two priorities on #653 with measurements: the `spawn-results-*`
+  bucket it called "arguably the biggest real cost today" holds **83 KB** across
+  182 objects since July, and the account has **21** `spawn*`/`spore*` buckets
+  rather than the two the issue listed — including 11 regional
+  `spawn-binaries-*`.
+
 - **Every spore.host-operated Lambda now stamps the version it was deployed
   from, and CI gates that it does** (#654). Nothing synchronises the CLI with the
   control plane — `spawn` upgrades when a user upgrades it, a Lambda only when

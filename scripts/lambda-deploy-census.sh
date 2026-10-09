@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Fail if any spore.host-operated Lambda is deployed without a readable version,
-# or — with --deployed — if what is deployed does not match this working tree.
+# Fail if any spore.host-operated Lambda deploy path omits a property every one of
+# them must set: a readable version (#654) or a log retention (#653). With
+# --deployed, also report live versions against this working tree.
 #
 # Why this exists (spawn#654). Nothing synchronises the CLI with the control
 # plane: `spawn` upgrades when a user upgrades it, and a Lambda upgrades only
@@ -46,7 +47,7 @@ note() { printf '  %s\n' "$1" >&2; }
 # sweep-orchestrator and scheduler-handler go unstamped — they are deployed by
 # scripts, and no YAML key exists to find.
 # ---------------------------------------------------------------------------
-echo "=== offline: deploy mechanisms must stamp spawn:version"
+echo "=== offline: deploy mechanisms must stamp spawn:version and set log retention"
 
 for t in lambda/*/template.yaml; do
   [ -e "$t" ] || continue
@@ -54,12 +55,19 @@ for t in lambda/*/template.yaml; do
   # The ASSIGNMENT, not the string. A bare `grep spawn:version` also matches the
   # parameter's own Description, which mentions the tag by name — so reverting
   # the real tag left the gate green. Verified by reverting it (see below).
-  if grep -q "AWS::Serverless::Function" "$t" && ! grep -qE "^[[:space:]]*spawn:version:[[:space:]]*!Ref[[:space:]]+Version" "$t"; then
+  grep -q "AWS::Serverless::Function" "$t" || { note "✅ $name (SAM template, no function)"; continue; }
+  ok=1
+  if ! grep -qE "^[[:space:]]*spawn:version:[[:space:]]*!Ref[[:space:]]+Version" "$t"; then
     note "❌ $t declares a function but never stamps spawn:version"
-    fail=1
-  else
-    note "✅ $name (SAM template)"
+    fail=1; ok=0
   fi
+  # A declared LogGroup with a retention is the only thing that stops Lambda
+  # auto-creating an immortal one on first invocation (#653).
+  if ! grep -qE "^[[:space:]]*RetentionInDays:" "$t"; then
+    note "❌ $t declares a function but no log group retention"
+    fail=1; ok=0
+  fi
+  [ "$ok" = "1" ] && note "✅ $name (SAM template)"
 done
 
 for s in scripts/deploy-*.sh; do
@@ -70,12 +78,20 @@ for s in scripts/deploy-*.sh; do
   # Must appear inside a --tags value, not merely somewhere in the file: these
   # scripts also echo the stamp and explain it in comments, both of which a bare
   # substring match accepts. That exact revert passed before this was tightened.
+  ok=1
   if ! grep -qE -- "--tags.*spawn:version=" "$s"; then
     note "❌ $s deploys a function but never stamps spawn:version"
-    fail=1
-  else
-    note "✅ $(basename "$s") (shell deploy)"
+    fail=1; ok=0
   fi
+  # The INVOCATION, not the string: the comment above each call explains what
+  # put-retention-policy does, so a bare substring match passes on a script that
+  # only talks about it. That exact revert passed before this was tightened — the
+  # third time in one session a gate matched its own explanatory prose.
+  if ! grep -qE "^[[:space:]]*aws logs put-retention-policy" "$s"; then
+    note "❌ $s deploys a function but never sets log retention"
+    fail=1; ok=0
+  fi
+  [ "$ok" = "1" ] && note "✅ $(basename "$s") (shell deploy)"
 done
 
 if [ "$fail" -ne 0 ]; then
@@ -84,6 +100,8 @@ if [ "$fail" -ne 0 ]; then
   echo "is the normal state here — the CLI and the control plane are deployed" >&2
   echo "independently (#654). Stamp it: a SAM template takes a Version parameter" >&2
   echo "and a spawn:version tag; a shell deploy calls 'aws lambda tag-resource'." >&2
+  echo "For retention: a SAM template declares an AWS::Logs::LogGroup with" >&2
+  echo "RetentionInDays; a shell deploy calls 'aws logs put-retention-policy'." >&2
   exit 1
 fi
 
