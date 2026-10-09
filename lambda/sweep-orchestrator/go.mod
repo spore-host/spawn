@@ -31,6 +31,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.32.16 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ebs v1.34.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/efs v1.41.16 // indirect
+	github.com/aws/aws-sdk-go-v2/service/eventbridge v1.55.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/fsx v1.65.10 // indirect
 	github.com/aws/aws-sdk-go-v2/service/iam v1.53.10 // indirect
 	github.com/aws/aws-sdk-go-v2/service/imagebuilder v1.55.6 // indirect
