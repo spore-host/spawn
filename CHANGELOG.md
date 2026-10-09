@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The autoscale reconciliation schedule is now a deploy-time parameter**
+  (#772). `ScheduleState` (ENABLED/DISABLED, default **ENABLED**) and
+  `ScheduleRate` (default `rate(1 minute)`) make the schedule changeable through
+  CloudFormation, which is the only safe way: the rule is CFN-managed
+  (`AutoScaleOrchestratorFunctionScheduleEvent`), so `aws events disable-rule`
+  would be stack drift and would be **silently reverted by the next deploy** —
+  the same trap as #754's `update-function-code`. `make deploy
+  SCHEDULE_STATE=DISABLED` does it properly.
+  Defaults are unchanged, so this is a no-op until someone chooses otherwise.
+  The template documents a trap worth knowing: SAM's `Enabled: !Ref <param>`
+  **silently does not work.** It resolves as
+  `"ENABLED" if self.Enabled else "DISABLED"`, and at transform time a `!Ref` is
+  an intrinsic dict — always truthy — so every value including `'false'` yields
+  `ENABLED`, and `sam validate --lint` accepts it. Verified by running SAM's own
+  translator locally: the `Enabled` form produced a hardcoded `ENABLED` for a
+  parameter set to `DISABLED`. `State` is passed through verbatim and is the
+  correct spelling.
+
 - **`spawn autoscale` now reports whether anything will actually act on a group**
   (#772). `autoscale launch` and `add-schedule` write into the group's DynamoDB
   record; a *scheduled* Lambda reads those records and acts. Nothing in the CLI
