@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`spawn footprint` — a report of everything spawn has created, including the
+  control plane** (#653). `spawn orphans` covers the *data* plane: volumes,
+  security groups, placement groups, Elastic IPs. Nothing covered the Lambdas,
+  their log groups and execution roles, EventBridge schedules, state tables, and
+  auto-created buckets — the TTL reaper is the backstop for instances, and
+  nothing is the backstop for the reaper.
+  It **never deletes**; it is a report, and a Tier 0 test pins that by launching
+  an instance and confirming it survives.
+  Rows are found two ways and each says which: `tag` (the authoritative
+  `spawn:managed`, reusing the same discovery path `resources` and `cleanup` use)
+  and `name` (needed because most of the control plane predates being tagged).
+  Log groups report their retention, and a log group whose Lambda no longer
+  exists is flagged — deleting a function does *not* delete its log group, which
+  `/aws/lambda/github-oauth-bridge` demonstrated by outliving the function it
+  belonged to.
+  An empty result says what was searched for rather than implying a clean
+  account, which is the #708 lesson, and the help text states the name half's
+  blind spot outright: one live Lambda is called `scheduler-handler`, with no
+  prefix at all. On its first run against the infra account it reported **109
+  resources** — including 23 DynamoDB tables and 5 EventBridge rules that no
+  earlier inventory had mentioned.
+
 - **Lambda log groups now have a bounded retention, and CI gates that every
   deploy path sets one** (#653). A footprint audit measured the actual control
   plane rather than assuming: **10 log groups with no retention at all, holding

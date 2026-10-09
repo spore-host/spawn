@@ -68,6 +68,14 @@ field CapacityReservation.ReservationID string
 field CapacityReservation.ReservationType string
 field CapacityReservation.StartDate string
 field CapacityReservation.State string
+field ControlPlaneResource.Created time.Time
+field ControlPlaneResource.Detail string
+field ControlPlaneResource.Kind string
+field ControlPlaneResource.Name string
+field ControlPlaneResource.Region string
+field ControlPlaneResource.Service string
+field ControlPlaneResource.Warn string
+field ControlPlaneResource.Why string
 field CreateAMIInput.Description string
 field CreateAMIInput.InstanceID string
 field CreateAMIInput.Name string
@@ -357,6 +365,8 @@ func (*Client) RemoveResource(ctx context.Context, r ManagedResource) error
 func (*Client) ResolveVPC(ctx context.Context, region, explicitVPC string) (string, error)
 func (*Client) RunPowerShell(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
 func (*Client) RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
+func (*Client) ScanControlPlane(ctx context.Context, region string) ([]ControlPlaneResource, []string)
+func (*Client) ScanGlobalFootprint(ctx context.Context) ([]ControlPlaneResource, []string)
 func (*Client) SetWindowsAdminPasswordViaSSM(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error)
 func (*Client) SetupSporedIAMRole(ctx context.Context) (string, error)
 func (*Client) StartInstance(ctx context.Context, region, instanceID string) error
@@ -416,6 +426,7 @@ type BuildSnapshotResult struct
 type CapacityBlockOffering struct
 type CapacityReservation struct
 type Client struct
+type ControlPlaneResource struct
 type CreateAMIInput struct
 type DeleteAMIResult struct
 type DiscoverOptions struct
