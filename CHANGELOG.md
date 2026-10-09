@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Rebuilt against Go 1.26.9 and `golang.org/x/net` v0.60.0** for the batch of
+  Go vulnerabilities disclosed 2026-10-09: GO-2026-6605, 6607, 6608, 6610, 6611,
+  6612, 6613 and 6617, spanning `net/http`, `crypto/tls`, `mime/multipart`,
+  `net/http/httputil`, `net/textproto` and x/net's HTTP/2 implementation.
+  The CI Go pin moves 1.26.8 → 1.26.9 in all three workflows, and x/net
+  0.58.0 → 0.60.0 in the root module and all three Lambda modules that require it
+  (the other nine nested modules are re-tidied, because a module with a
+  `replace ../..` pins its own copy of the root's dependencies and otherwise
+  fails with "updates to go.mod needed").
+  **v0.126.0's published binaries predate the fix** — they were built against Go
+  1.26.8 with x/net 0.58.0. The disclosure landed in a three-hour window after
+  that release was cut: spawn's vulnerability scan passed at 21:32Z and failed at
+  00:41Z with no change but 22 lines of shell comments in a test script.
+
 ## [0.126.0] - 2026-10-08
 
 ### Changed

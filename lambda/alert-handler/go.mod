@@ -1,6 +1,6 @@
 module github.com/spore-host/spawn/lambda/alert-handler
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/aws/aws-lambda-go v1.54.0
