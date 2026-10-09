@@ -45,6 +45,7 @@ field AutoscaleCoverage.Covered bool
 field AutoscaleCoverage.Determined bool
 field AutoscaleCoverage.Function string
 field AutoscaleCoverage.How string
+field AutoscaleCoverage.Looked string
 field AutoscaleCoverage.Region string
 field AutoscaleCoverage.Rule string
 field AutoscaleCoverage.RuleState string
@@ -403,11 +404,12 @@ func (ReaperCoverage) Summary() string
 func AccountBase36(accountID string) string
 func AttachDeviceName(i int) string
 func AutoscaleCoverageAdvice(c AutoscaleCoverage) string
+func AutoscaleFunctionName(env string) string
 func DecryptWindowsPassword(passwordData, privateKeyPath string) (string, error)
 func DeletionOrder(resources []ManagedResource) []ManagedResource
 func DescribeInstanceWithRetry(ctx context.Context, ec2Client *ec2.Client, instanceID string) (*types.Instance, error)
 func DetectArchitecture(instanceType string) string
-func DetectAutoscaleCoverage(ctx context.Context, cfg awssdk.Config) AutoscaleCoverage
+func DetectAutoscaleCoverage(ctx context.Context, cfg awssdk.Config, env string) AutoscaleCoverage
 func DetectGPUInstance(instanceType string) bool
 func DetectReaperCoverage(ctx context.Context, cfg awssdk.Config) ReaperCoverage
 func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string

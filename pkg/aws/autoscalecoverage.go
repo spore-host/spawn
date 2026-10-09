@@ -10,9 +10,23 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 )
 
-// autoscaleFunctionPrefix matches the orchestrator Lambda's name
-// ("spawn-autoscale-orchestrator-production" / "-staging").
-const autoscaleFunctionPrefix = "spawn-autoscale-orchestrator"
+// AutoscaleFunctionName is the orchestrator Lambda's name for an environment.
+// The caller's env decides it, which is load-bearing: an account can hold
+// SEVERAL orchestrators.
+//
+// The first version matched a shared prefix and took whichever function came
+// back first. That produced a real false alarm the moment staging's schedule was
+// disabled — a user working in PRODUCTION was warned that "the autoscale
+// orchestrator spawn-autoscale-orchestrator-staging … is DISABLED", about an
+// environment they were not using, while production's schedule was healthy.
+// That is the cry-wolf failure this check exists to avoid (#624), reintroduced
+// by the check itself.
+func AutoscaleFunctionName(env string) string {
+	if env == "" {
+		env = "production"
+	}
+	return "spawn-autoscale-orchestrator-" + env
+}
 
 // AutoscaleCoverage is what could be determined about whether anything will act
 // on this account's autoscale groups.
@@ -54,6 +68,9 @@ type AutoscaleCoverage struct {
 	// RuleState is "DISABLED" for the precise case that motivated this check.
 	Rule      string
 	RuleState string
+	// Looked is the function name the probe searched for, so an absent result
+	// names what was missing rather than gesturing at a category.
+	Looked string
 	// Region is where the probe actually looked, and it is reported in the
 	// advice for a specific reason: `spawn autoscale` resolves its AWS config
 	// from the ambient default chain and ignores --region, so running it without
@@ -72,8 +89,9 @@ type AutoscaleCoverage struct {
 // that the function exists — and it is exactly the state #772 would have created
 // by disabling the per-minute rules. So coverage means: the function is there
 // AND something enabled invokes it.
-func DetectAutoscaleCoverage(ctx context.Context, cfg awssdk.Config) AutoscaleCoverage {
+func DetectAutoscaleCoverage(ctx context.Context, cfg awssdk.Config, env string) AutoscaleCoverage {
 	var probeErrs []string
+	want := AutoscaleFunctionName(env)
 	region := cfg.Region
 	if region == "" {
 		region = "<no region resolved>"
@@ -92,7 +110,9 @@ func DetectAutoscaleCoverage(ctx context.Context, cfg awssdk.Config) AutoscaleCo
 			break
 		}
 		for _, fn := range out.Functions {
-			if strings.HasPrefix(awssdk.ToString(fn.FunctionName), autoscaleFunctionPrefix) {
+			// EXACT match on the environment's function, not a prefix. See
+			// AutoscaleFunctionName for the false alarm a prefix caused.
+			if awssdk.ToString(fn.FunctionName) == want {
 				fnName = awssdk.ToString(fn.FunctionName)
 				fnARN = awssdk.ToString(fn.FunctionArn)
 				break
@@ -107,9 +127,9 @@ func DetectAutoscaleCoverage(ctx context.Context, cfg awssdk.Config) AutoscaleCo
 	if fnName == "" {
 		if len(probeErrs) == 0 {
 			// Definitive: looked at every function and none is an orchestrator.
-			return AutoscaleCoverage{Determined: true, Region: region}
+			return AutoscaleCoverage{Determined: true, Region: region, Looked: want}
 		}
-		return AutoscaleCoverage{Why: strings.Join(probeErrs, "; "), Region: region}
+		return AutoscaleCoverage{Why: strings.Join(probeErrs, "; "), Region: region, Looked: want}
 	}
 
 	// 2. An ENABLED rule that invokes it.
@@ -199,10 +219,10 @@ func AutoscaleCoverageAdvice(c AutoscaleCoverage) string {
 			"recorded and never acted on", c.Function, c.Region)
 
 	default:
-		return fmt.Sprintf("no autoscale orchestrator found in %s, so groups and schedules you "+
+		return fmt.Sprintf("no autoscale orchestrator (%s) found in %s, so groups and schedules you "+
 			"create here are recorded and never acted on. Deploy it from "+
 			"lambda/autoscale-orchestrator (make deploy) — or, if it is deployed in a different "+
 			"region, note that `spawn autoscale` uses the ambient AWS region and ignores "+
-			"--region, so set AWS_REGION", c.Region)
+			"--region, so set AWS_REGION", c.Looked, c.Region)
 	}
 }

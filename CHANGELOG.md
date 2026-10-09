@@ -214,6 +214,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The autoscale coverage check warned about the wrong environment** (#772). It
+  matched orchestrators by name *prefix* and reported whichever the API returned
+  first, so once staging's schedule was disabled a user working in **production**
+  was warned that staging was DISABLED — about an environment they were not
+  using, while production was healthy. It now matches the exact function for the
+  `--env` being operated on, and an absent result names the function it looked
+  for as well as the region. A warning about the wrong thing is the #624
+  cry-wolf failure, reintroduced by the check written to prevent it.
+  Also: `ScheduleRate` is no longer passed via `--parameter-overrides`. That form
+  cannot carry a value containing a space, and every valid EventBridge rate has
+  one — it failed a real staging deploy with `Parameter ScheduleExpression is not
+  valid` and rolled the stack back. The trap is documented in the Makefile, which
+  is where the ttl-reaper one already records it.
+
 - **`spawn autoscale` honours `--region` instead of silently ignoring it**
   (#774). The root `--region` flag — whose help says it "overrides
   SPORE_REGION/AWS_REGION and the shared config" — overrode nothing: every

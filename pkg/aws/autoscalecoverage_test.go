@@ -53,19 +53,19 @@ func TestAutoscaleCoverageAdviceDistinguishesTheFourStates(t *testing.T) {
 		mustSay:    []string{"NOTHING invokes", "us-east-1", "recorded and never acted on"},
 		mustNotSay: []string{"DISABLED", "enable-rule"},
 	}, {
-		name: "absent names the region it looked in",
-		cov:  AutoscaleCoverage{Determined: true, Region: "us-west-2"},
+		name: "absent names the function AND the region it looked for",
+		cov:  AutoscaleCoverage{Determined: true, Region: "us-west-2", Looked: "spawn-autoscale-orchestrator-production"},
 		// The region is load-bearing: `spawn autoscale` ignores --region, so an
 		// absent result is as likely to mean "looked in the wrong region" as
 		// "not deployed". A confident warning that omits where it looked is the
 		// cry-wolf failure this check exists to avoid.
-		mustSay: []string{"no autoscale orchestrator found in us-west-2", "AWS_REGION"},
+		mustSay: []string{"spawn-autoscale-orchestrator-production", "us-west-2", "AWS_REGION"},
 	}, {
 		name:    "undetermined must hedge, not accuse",
 		cov:     AutoscaleCoverage{Why: "lambda:ListFunctions: AccessDenied"},
 		mustSay: []string{"could not determine"},
 		// "I could not tell" is not "there is none" — conflating them is #624.
-		mustNotSay: []string{"recorded and never acted on", "no autoscale orchestrator found"},
+		mustNotSay: []string{"recorded and never acted on", "no autoscale orchestrator ("},
 	}}
 
 	for _, tc := range tests {
@@ -105,5 +105,30 @@ func TestAutoscaleCoverageAdviceNeverBlamesWhenUndetermined(t *testing.T) {
 	}
 	if !strings.Contains(got, "could not determine") {
 		t.Errorf("an undetermined probe must say so:\n%s", got)
+	}
+}
+
+// TestAutoscaleFunctionNameIsEnvScoped guards the false alarm the first version
+// of this check produced.
+//
+// It matched a shared PREFIX and took whichever orchestrator the API returned
+// first. The moment staging's schedule was disabled, a user working in
+// production was warned that staging was DISABLED — about an environment they
+// were not using, while production was healthy. A warning about the wrong thing
+// is the #624 cry-wolf failure, reintroduced by the check meant to prevent it.
+func TestAutoscaleFunctionNameIsEnvScoped(t *testing.T) {
+	if got := AutoscaleFunctionName("staging"); got != "spawn-autoscale-orchestrator-staging" {
+		t.Errorf("AutoscaleFunctionName(staging) = %q", got)
+	}
+	if got := AutoscaleFunctionName("production"); got != "spawn-autoscale-orchestrator-production" {
+		t.Errorf("AutoscaleFunctionName(production) = %q", got)
+	}
+	// An unset env must not match everything; it resolves to production.
+	if got := AutoscaleFunctionName(""); got != "spawn-autoscale-orchestrator-production" {
+		t.Errorf("AutoscaleFunctionName(\"\") = %q, want the production name rather than a prefix", got)
+	}
+	if AutoscaleFunctionName("staging") == AutoscaleFunctionName("production") {
+		t.Error("staging and production resolve to the same function name, so the check cannot " +
+			"tell them apart — which is what warned a production user about staging")
 	}
 }

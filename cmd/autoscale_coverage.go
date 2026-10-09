@@ -35,7 +35,9 @@ func reportAutoscaleCoverage(ctx context.Context, w io.Writer) spawnaws.Autoscal
 		// Nothing useful to say, and the caller's real work already succeeded.
 		return spawnaws.AutoscaleCoverage{Why: err.Error()}
 	}
-	c := spawnaws.DetectAutoscaleCoverage(ctx, cfg)
+	// Scoped to the env being operated on (--env), not "any orchestrator in the
+	// account": matching a prefix warned a production user about staging.
+	c := spawnaws.DetectAutoscaleCoverage(ctx, cfg, autoscaleEnv)
 	if advice := spawnaws.AutoscaleCoverageAdvice(c); advice != "" {
 		fmt.Fprintf(w, "\n⚠️  %s\n", advice)
 		return c
