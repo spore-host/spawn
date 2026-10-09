@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`spawn autoscale` now reports whether anything will actually act on a group**
+  (#772). `autoscale launch` and `add-schedule` write into the group's DynamoDB
+  record; a *scheduled* Lambda reads those records and acts. Nothing in the CLI
+  referenced that schedule, so the two halves could come apart silently — every
+  command reporting success while the group sat inert, with nothing saying why.
+  That is why the two per-minute rules in #772 could not simply be switched off:
+  a thing that cannot be observed cannot safely be turned off.
+  `autoscale status` and `autoscale launch` now warn when coverage is missing,
+  and distinguish **four** states rather than collapsing them: covered;
+  orchestrator deployed but its schedule `DISABLED` (naming the rule and the
+  `aws events enable-rule` to fix it); deployed but nothing invokes it; and
+  absent. A probe that could not complete says *"could not determine"* instead of
+  claiming an absence — the #624 lesson, where a check that warned in every
+  account carried no information.
+  `autoscale launch`'s "Instances will launch on next scheduled run (within 1
+  minute)" is now conditional. It was unconditionally false with the schedule
+  disabled, and the immediate trigger does not rescue it: invoking the function
+  directly succeeds whether or not a rule is enabled, so a disabled schedule
+  reconciles exactly once at creation and then never again.
+  The warning also names the region it looked in, because `spawn autoscale`
+  resolves its config from the ambient AWS chain and **ignores `--region`** — so
+  without `AWS_REGION` set it probed us-west-2 and confidently reported no
+  orchestrator in an account that has one. The region handling is a separate
+  pre-existing defect; naming the region makes that false negative
+  self-diagnosing in the meantime.
+
 - **`spawn footprint` — a report of everything spawn has created, including the
   control plane** (#653). `spawn orphans` covers the *data* plane: volumes,
   security groups, placement groups, Elastic IPs. Nothing covered the Lambdas,

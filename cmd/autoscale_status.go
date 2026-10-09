@@ -31,11 +31,21 @@ func runAutoscaleStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		printGroupStatus(group)
+		// The question someone asks of `status` when a group is not scaling is
+		// "why", and the answer is often that nothing is scheduled to act on it
+		// (spawn#772). Printed after the group so the group stays the headline.
+		reportAutoscaleCoverage(ctx, os.Stdout)
 		return nil
 	}
 
 	// Otherwise list all active groups (same view as `autoscale list`).
-	return listAutoscaleGroups(ctx, as)
+	listErr := listAutoscaleGroups(ctx, as)
+	// Reported even when the listing FAILED, and deliberately so: coverage is
+	// most useful exactly when something is wrong, and returning early would
+	// hide it behind an unrelated error. Observed while wiring this — a missing
+	// groups table made the listing fail and swallowed the coverage line with it.
+	reportAutoscaleCoverage(ctx, os.Stdout)
+	return listErr
 }
 
 func runAutoscaleList(cmd *cobra.Command, args []string) error {
