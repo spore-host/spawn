@@ -274,10 +274,10 @@ lambda-runtimes:
 # #654 is `spawn reaper status`, for the self-hosted reaper in their own account).
 .PHONY: lambda-versions lambda-versions-deployed
 lambda-versions:
-	@scripts/lambda-version-census.sh
+	@scripts/lambda-deploy-census.sh
 
 lambda-versions-deployed:
-	@scripts/lambda-version-census.sh --deployed
+	@scripts/lambda-deploy-census.sh --deployed
 
 lambda-runtimes-deployed:
 	@scripts/lambda-runtime-census.sh --deployed

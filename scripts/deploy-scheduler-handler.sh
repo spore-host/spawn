@@ -195,6 +195,23 @@ aws lambda tag-resource \
     --region "$REGION" --profile "$PROFILE" >/dev/null
 echo "stamped spawn:version=$SPAWN_VERSION"
 
+# Set log retention (#653). A log group Lambda auto-creates on first invocation
+# has NO retention and keeps logs forever: a footprint audit found 10 such groups
+# holding 51 MB, the only control-plane artifact measured to grow without bound.
+# The three SAM-deployed functions declare a group with a retention; the
+# script-deployed ones did not, which is exactly why theirs were among the ten.
+#
+# put-retention-policy is idempotent and creates nothing: if the group does not
+# exist yet (first deploy, never invoked) it fails, which is why the failure is
+# tolerated rather than fatal — the next deploy after a first invocation sets it.
+LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
+aws logs put-retention-policy \
+  --log-group-name "/aws/lambda/$FUNCTION_NAME" \
+  --retention-in-days "$LOG_RETENTION_DAYS" \
+  --region "$REGION" --profile "$PROFILE" 2>/dev/null \
+  && echo "log retention: ${LOG_RETENTION_DAYS}d on /aws/lambda/$FUNCTION_NAME" \
+  || echo "log retention: could not set it yet (group not created until first invocation)"
+
 echo ""
 echo "✅ Deployment complete!"
 echo ""

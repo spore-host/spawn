@@ -24,6 +24,17 @@ Parameters:
       function's LastModified against git log. `unknown` means it was deployed by
       something that did not stamp it.
 
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    Description: >
+      Days to keep this function's CloudWatch logs. Configurable, but it has a
+      default on purpose: a log group that Lambda auto-creates on first invocation
+      has NO retention and keeps logs forever. A footprint audit found 10 such
+      groups holding 51 MB in the infra account — the only artifact in the control
+      plane measured to grow without bound (#653). Declaring the group here with a
+      retention is what stops that, so this must stay set.
+
 Resources:
   AutoScaleOrchestratorFunction:
     Type: AWS::Serverless::Function
@@ -110,7 +121,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub /aws/lambda/spawn-autoscale-orchestrator-${Environment}
-      RetentionInDays: 30
+      RetentionInDays: !Ref LogRetentionDays
 
 Outputs:
   FunctionArn:
