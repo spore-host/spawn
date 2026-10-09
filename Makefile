@@ -267,5 +267,17 @@ smoke-needed:
 lambda-runtimes:
 	@scripts/lambda-runtime-census.sh
 
+# Version census (#654). The offline half gates PRs: every deploy mechanism must
+# stamp spawn:version, so a new Lambda cannot arrive unreadable. The --deployed
+# half is operator-facing and needs the infra profile — these functions are in
+# spore.host's account, so a user's CLI cannot see them (the user-facing half of
+# #654 is `spawn reaper status`, for the self-hosted reaper in their own account).
+.PHONY: lambda-versions lambda-versions-deployed
+lambda-versions:
+	@scripts/lambda-version-census.sh
+
+lambda-versions-deployed:
+	@scripts/lambda-version-census.sh --deployed
+
 lambda-runtimes-deployed:
 	@scripts/lambda-runtime-census.sh --deployed

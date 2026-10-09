@@ -1,5 +1,12 @@
 .PHONY: build deploy clean test
 
+# The version stamped onto the function as spawn:version (#654). `git describe`
+# rather than a bare tag: it yields 0.126.1 on a tag, 0.126.1-3-gabc when ahead,
+# and a -dirty suffix for uncommitted changes — so the stamp says "deployed from
+# uncommitted code" out loud instead of claiming a release. Leading v stripped to
+# match pkg/reaperdeploy.Tags.
+VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
+
 # The deployed function's name, in ONE place. It must match template.yaml's
 # `FunctionName:` exactly — there is no Environment suffix. update-code, logs and
 # invoke-test each used to hardcode `spawn-pipeline-orchestrator-production`,
@@ -28,7 +35,7 @@ deploy: build
 		--template-file template.yaml \
 		--stack-name $(STACK) \
 		--capabilities CAPABILITY_IAM \
-		--parameter-overrides Environment=production \
+		--parameter-overrides Environment=production Version=$(VERSION) \
 		--resolve-s3
 
 # Deploy to staging
@@ -37,7 +44,7 @@ deploy-staging: build
 		--template-file template.yaml \
 		--stack-name $(STACK)-staging \
 		--capabilities CAPABILITY_IAM \
-		--parameter-overrides Environment=staging \
+		--parameter-overrides Environment=staging Version=$(VERSION) \
 		--resolve-s3
 
 # Test locally (requires SAM CLI)

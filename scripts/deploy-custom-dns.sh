@@ -246,6 +246,20 @@ LAMBDA_ARN=$(aws lambda get-function \
   --output text)
 
 info "Lambda ARN: $LAMBDA_ARN"
+
+# Stamp the version so an operator can read it in ONE API call (#654). This
+# function is not CloudFormation-managed, so a tag here is not stack drift.
+#
+# This script was the one the version census found: it deploys spawn-dns-updater
+# from lambda/dns-updater/, but the script's own name says "custom-dns", so an
+# enumeration keyed on the lambda directory name missed it entirely — the same
+# shape as the runtime census finding github-oauth-bridge.
+SPAWN_VERSION=$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
+aws lambda tag-resource \
+  --resource "$LAMBDA_ARN" \
+  --tags "spawn:managed=true,spawn:component=dns-updater,spawn:created-by=deploy-custom-dns.sh,spawn:version=$SPAWN_VERSION" \
+  > /dev/null
+info "Stamped spawn:version=$SPAWN_VERSION"
 echo ""
 
 # Step 5: Create API Gateway

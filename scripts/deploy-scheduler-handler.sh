@@ -181,6 +181,20 @@ aws lambda wait function-updated \
     --region "$REGION" \
     --profile "$PROFILE"
 
+# Stamp the version so an operator can read it in ONE API call (#654). Not
+# CloudFormation-managed, so a tag added here is not stack drift. The create
+# branch above sets Application/Component tags but no version, and the UPDATE
+# path — the one that actually runs on a redeploy — set no tags at all.
+SPAWN_VERSION=$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
+SCHED_ARN=$(aws lambda get-function-configuration \
+    --function-name "$FUNCTION_NAME" --region "$REGION" --profile "$PROFILE" \
+    --query FunctionArn --output text)
+aws lambda tag-resource \
+    --resource "$SCHED_ARN" \
+    --tags "spawn:managed=true,spawn:component=scheduler-handler,spawn:created-by=deploy-scheduler-handler.sh,spawn:version=$SPAWN_VERSION" \
+    --region "$REGION" --profile "$PROFILE" >/dev/null
+echo "stamped spawn:version=$SPAWN_VERSION"
+
 echo ""
 echo "✅ Deployment complete!"
 echo ""

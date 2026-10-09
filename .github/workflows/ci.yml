@@ -50,6 +50,19 @@ jobs:
       - name: Lambda runtime census
         run: make lambda-runtimes
 
+      # Lambda version census (spawn#654). Same two-half shape; offline only here.
+      # Every deploy mechanism must stamp spawn:version, so a NEW Lambda cannot
+      # arrive unreadable — which is the structural half of the problem. Nothing
+      # synchronises the CLI with the control plane, so skew is the normal state;
+      # until this it was invisible, answerable only by comparing a function's
+      # LastModified against `git log -- lambda/<name>/`.
+      #
+      # The deployed half (`make lambda-versions-deployed`) needs the infra
+      # profile and is run by hand. On its first run it found six functions last
+      # deployed in February and three nobody would have thought to list.
+      - name: Lambda version census
+        run: make lambda-versions
+
       # Changelog gate. CLAUDE.md requires an entry under `## [Unreleased]` in the
       # SAME PR as any user-facing change, and the release ritual promotes that
       # section verbatim. Nothing enforced it, and #627 merged with no entry at all —

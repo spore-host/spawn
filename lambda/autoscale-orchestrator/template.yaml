@@ -13,6 +13,17 @@ Parameters:
     Default: 'arn:aws:iam::435415984226:role/spawn-autoscale-ec2'
     Description: ARN of the cross-account EC2 management role in spore-host-dev
 
+  Version:
+    Type: String
+    Default: unknown
+    Description: >
+      The spawn version this artifact was built from, stamped onto the function as
+      the spawn:version tag so an operator can read it in ONE API call (spawn#654).
+      Nothing synchronises this stack with the CLI, so version skew is the normal
+      state — and until now it was invisible, answerable only by comparing the
+      function's LastModified against git log. `unknown` means it was deployed by
+      something that did not stamp it.
+
 Resources:
   AutoScaleOrchestratorFunction:
     Type: AWS::Serverless::Function
@@ -35,6 +46,15 @@ Resources:
           HYBRID_REGISTRY_TABLE: spawn-hybrid-registry
           EC2_ROLE_ARN: !Ref EC2RoleArn
           EC2_EXTERNAL_ID: spawn-autoscale-orchestrator
+          SPAWN_VERSION: !Ref Version
+      # Readable without invoking the function (spawn#654). Mirrors
+      # pkg/reaperdeploy.Tags so every spore.host lambda answers the same
+      # question the same way.
+      Tags:
+        spawn:managed: 'true'
+        spawn:component: autoscale-orchestrator
+        spawn:created-by: sam deploy
+        spawn:version: !Ref Version
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref AutoScaleGroupsTable

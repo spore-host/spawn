@@ -161,6 +161,22 @@ Parameters:
       — which is the state this whole change exists to fix. Empty creates the alarms
       with no action, so they are visible in the console but will page no one.
 
+  Version:
+    Type: String
+    Default: unknown
+    Description: >
+      The spawn version this artifact was built from, stamped onto the function as
+      the spawn:version tag so an operator can read it in ONE API call (spawn#654).
+      Nothing synchronises this stack with the CLI — a `sam deploy` is the only
+      thing that moves it — so version skew is the NORMAL state, and until now it
+      was invisible: this stack sat untouched from 2026-07-31 to 2026-10-04 while
+      the CLI went from ~v0.9x to v0.116.0, missing three merged fixes, and nothing
+      anywhere said so. Answering "is the deployed reaper current?" required
+      comparing the function's LastModified against `git log -- lambda/ttl-reaper/`,
+      which is archaeology rather than a check.
+      Passed explicitly by the Makefile on every deploy. `unknown` means it was
+      deployed by something that did not stamp it.
+
 Conditions:
   ScanSelfEnabled: !Equals [!Ref ScanSelf, 'true']
   RegistryReadEnabled: !And
@@ -209,6 +225,16 @@ Resources:
           REAPER_NET_RESOURCES: !Ref NetResources
           REAPER_DNS_EXPIRE: !Ref DnsExpire
           ACCOUNTS_TABLE: !Ref AccountsTable
+          SPAWN_VERSION: !Ref Version
+      # Readable without invoking the function, which is the whole point: a check
+      # that has to invoke a reaper to ask its version is not a check anyone will
+      # run against production. Mirrors pkg/reaperdeploy.Tags, so the self-hosted
+      # and operated reapers answer the same question the same way (spawn#654).
+      Tags:
+        spawn:managed: 'true'
+        spawn:component: ttl-reaper
+        spawn:created-by: sam deploy
+        spawn:version: !Ref Version
       Policies:
         # Assume each per-account role that actually describes/terminates EC2.
         - Statement:
