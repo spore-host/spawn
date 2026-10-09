@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -129,12 +130,17 @@ func runAutoscaleLaunch(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Desired capacity: %d\n", autoscaleDesired)
 	fmt.Printf("Min/Max: %d/%d\n", autoscaleMin, autoscaleMax)
 
+	// Coverage FIRST, so the claim below can be honest about what happens next
+	// (spawn#772). A group is recorded by this command; it is acted on by a
+	// scheduled Lambda, and nothing here used to check that the schedule exists.
+	cov := reportAutoscaleCoverage(ctx, os.Stdout)
+
 	// Trigger Lambda immediately
 	if err := triggerLambda(ctx, groupID); err != nil {
 		log.Printf("Warning: failed to trigger Lambda: %v", err)
-		fmt.Println("\nGroup created but Lambda not triggered. Instances will launch on next scheduled run (within 1 minute).")
+		fmt.Printf("\nGroup created but Lambda not triggered. %s\n", autoscaleScheduleClaim(cov))
 	} else {
-		fmt.Println("\nTriggered immediate reconciliation. Instances will launch shortly.")
+		fmt.Printf("\nTriggered immediate reconciliation. %s\n", autoscaleScheduleClaim(cov))
 	}
 
 	return nil
