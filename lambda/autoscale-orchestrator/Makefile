@@ -14,14 +14,10 @@ LOG_RETENTION_DAYS?=30
 # `aws events disable-rule` would be stack drift and would be silently reverted
 # by the next deploy.
 #
-# ScheduleRate is deliberately NOT passed here, and must not be added without
-# switching to a params file. `--parameter-overrides` cannot carry a value
-# containing a SPACE, and every valid EventBridge rate has one
-# ("rate(1 minute)"). Passing it inline failed a real staging deploy with
-# `Parameter ScheduleExpression is not valid` and rolled the stack back. The
-# ttl-reaper Makefile documents this trap at length and uses a file:// params
-# file for exactly this reason. The template default is correct, so the rate is
-# changed by editing the template until someone needs it per-environment.
+# There is deliberately no SCHEDULE_RATE: the rate is hardcoded in the template,
+# because a space-containing value cannot be passed through
+# `--parameter-overrides` at all (it failed a real deploy and rolled the stack
+# back). See the comment at the Schedule property for the full reason.
 # Explicit, never ambient. A `sam deploy` with no --region resolves one from the
 # environment, and getting it wrong does not fail — it CREATES A SECOND STACK in
 # the wrong region while the real one sits untouched. #650 is the same family:

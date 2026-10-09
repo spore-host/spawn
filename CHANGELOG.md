@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every Lambda template parameter is now gated as actually passed by its
+  deploy** (#776). A parameter declared in a template but never passed takes its
+  **default** on every deploy, and an operator supplying it on the command line
+  is ignored without a word — a silent substitution, not a crash.
+  `lambda/ttl-reaper` had its own version of this check and it earned its keep by
+  catching `LogRetentionDays` wired into none of three templates (#770).
+  `autoscale-orchestrator` and `pipeline-orchestrator` had **no tests at all**,
+  so when `ScheduleState` was added (#772) nothing would have noticed if it had
+  been forgotten.
+  Now **one** test over `lambda/*/`, accepting both deploy styles in this repo
+  (the `PARAM_MAP` merge file and inline `--parameter-overrides`). One rather
+  than a copy per module, because a per-module check cannot cover the module
+  nobody added one to — which is exactly how this gap existed.
+  Its first run deleted a parameter rather than classifying it: `ScheduleRate`
+  had been added hours earlier and **could not be passed at all**, because
+  `--parameter-overrides` cannot carry a value containing a space and every valid
+  EventBridge rate has one. A parameter the supported deploy path cannot set
+  advertises configurability that does not exist — the same defect as #774's
+  ignored `--region` — so the rate is hardcoded again, with the reason recorded
+  at the property.
+
 - **The autoscale reconciliation schedule is now a deploy-time parameter**
   (#772). `ScheduleState` (ENABLED/DISABLED, default **ENABLED**) and
   `ScheduleRate` (default `rate(1 minute)`) make the schedule changeable through

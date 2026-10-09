@@ -35,15 +35,6 @@ Parameters:
       plane measured to grow without bound (#653). Declaring the group here with a
       retention is what stops that, so this must stay set.
 
-  ScheduleRate:
-    Type: String
-    Default: rate(1 minute)
-    Description: >
-      How often the orchestrator reconciles autoscale groups. One minute is a
-      responsiveness figure, and it is worth revisiting per environment: this
-      stack polled every minute from February to October 2026 against an EMPTY
-      groups table — 10,080 invocations a week, finding nothing (#772).
-
   ScheduleState:
     Type: String
     Default: ENABLED
@@ -128,7 +119,16 @@ Resources:
         ScheduleEvent:
           Type: Schedule
           Properties:
-            Schedule: !Ref ScheduleRate
+            # Hardcoded, NOT a parameter (#776). It was briefly a parameter and
+            # could not be passed: `--parameter-overrides` cannot carry a value
+            # containing a space, and every valid rate has one — passing it
+            # inline failed a real deploy with `Parameter ScheduleExpression is
+            # not valid` and rolled the stack back. A parameter the supported
+            # deploy path cannot set advertises configurability that does not
+            # exist, which is the same defect as #774's ignored --region.
+            # Change the rate by editing this line, or switch this Makefile to a
+            # file:// params file as ttl-reaper does and make it a parameter then.
+            Schedule: rate(1 minute)
             State: !Ref ScheduleState
 
   AutoScaleGroupsTable:
