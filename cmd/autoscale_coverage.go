@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 )
 
@@ -26,7 +25,12 @@ import (
 // turn a successful launch into a failure, so every error path here degrades to
 // either a hedged note or silence.
 func reportAutoscaleCoverage(ctx context.Context, w io.Writer) spawnaws.AutoscaleCoverage {
-	cfg, err := config.LoadDefaultConfig(ctx)
+	// The SAME resolver the rest of the command uses (spawn#774), so coverage
+	// cannot report on a different region than the one being operated on. It
+	// previously called config.LoadDefaultConfig directly and reported "no
+	// autoscale orchestrator runs in this account" against an account that has
+	// one, because the ambient region was us-west-2.
+	cfg, err := autoscaleConfig(ctx)
 	if err != nil {
 		// Nothing useful to say, and the caller's real work already succeeded.
 		return spawnaws.AutoscaleCoverage{Why: err.Error()}

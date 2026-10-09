@@ -196,6 +196,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn autoscale` honours `--region` instead of silently ignoring it**
+  (#774). The root `--region` flag — whose help says it "overrides
+  SPORE_REGION/AWS_REGION and the shared config" — overrode nothing: every
+  autoscale call site built its AWS config with a bare
+  `config.LoadDefaultConfig(ctx)`, taking the region from the ambient chain. It
+  was ignored in *both* directions, with `AWS_REGION` winning even when
+  `--region` contradicted it.
+  The symptoms: the groups listing failed with `ResourceNotFoundException` in any
+  region without a groups table; `autoscale health` reported a healthy group as
+  having no instances; and **`autoscale terminate` would find nothing to
+  terminate and report success while the instances kept billing**. It also made
+  #772's new coverage check report "no autoscale orchestrator runs in this
+  account" against an account that has one.
+  All **four** call sites now route through one resolver, which fixes the shared
+  *profile* they also ignored and uses the same precedence as every other command
+  (explicit region > shared config > ambient). Two of the four were found by the
+  new gate, not by me — `autoscale health` and `autoscale terminate` both had
+  `cfg, _ := config.LoadDefaultConfig(ctx)`, discarding the error as well.
+
 - **Three `pipeline-orchestrator` Makefile targets named a Lambda that does not
   exist** (#754). `make update-code`, `make logs` and `make invoke-test` all
   asked for `spawn-pipeline-orchestrator-production`, but `template.yaml` sets

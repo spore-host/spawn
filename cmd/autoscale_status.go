@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -100,8 +99,13 @@ func runAutoscaleHealth(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get group: %w", err)
 	}
 
-	// Get instances
-	cfg, _ := config.LoadDefaultConfig(ctx)
+	// Get instances. Region-resolved like every other autoscale call site
+	// (#774); a wrong region here reports a healthy group as having no
+	// instances.
+	cfg, err := autoscaleConfig(ctx)
+	if err != nil {
+		return err
+	}
 	ec2Client := ec2.NewFromConfig(cfg)
 
 	result, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
