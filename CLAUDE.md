@@ -92,9 +92,63 @@ Two things it records that are easy to get wrong: nothing reaps the control plan
 deployed from *other* repos, so an unfamiliar function name is not necessarily an
 orphan.
 
+## Writing a gate
+
+A lot of this repo's CI is **gates**: tests whose job is to fail when someone
+removes a property, rather than to check that today's code works. `make check`
+runs dozens of them. They are cheap to write and easy to write *uselessly* — a
+gate that cannot fail is worse than no gate, because it is counted as coverage.
+
+Four rules, each of which exists because a gate here broke one of them:
+
+1. **A gate is not done until you have watched it fail against a revert that
+   compiles.** "I reverted the change and the test failed" is only evidence if
+   the test *ran*. Three gates in one session were "verified" against reverts
+   that failed to build — `go vet` stopped at an unused variable or a dropped
+   import, so the gate never executed and the verification proved nothing. Make
+   the revert compile (`_ = x`, `case false:`) and then watch the gate fail.
+
+2. **Test the invariant where it lives, not only through the path that reaches
+   it.** A guard can be unreachable through its own constructor and still be
+   load-bearing for a future caller. `Idleness.IdleFor`'s `!Determined` check
+   survived a deliberate revert because every test built the struct through
+   `DetectIdleness`, which never produces the offending combination (#787). The
+   fix was a test that constructs the invalid state directly.
+
+3. **Match the assignment or the invocation, never the bare name.** Four gates
+   matched their own explanation: `spawn:version` appeared in a CloudFormation
+   parameter `Description` and in an `echo`, and `put-retention-policy` appeared
+   in a comment saying which call to make. The working forms are anchored and
+   structural — `^\s*spawn:version:\s*!Ref\s+Version`, `--tags.*spawn:version=`,
+   `^\s*aws logs put-retention-policy` (see `scripts/lambda-deploy-census.sh`).
+   Match the identifier on its own and the sentence documenting the gate will
+   satisfy it.
+
+4. **Discover the set, don't list it.** A gate over a hand-written list reports
+   a clean bill of health for everything the list forgot. The first version of
+   `scripts/lambda-deploy-census.sh` named five functions in an account holding
+   more than twice that many; three control-plane inventories in #653 were each
+   incomplete; and a log-group query filtered by prefix found 10 of 14 groups,
+   missing the one holding 80% of the data. Enumerate from the filesystem or the
+   API, and **fail when discovery finds nothing** — `scripts/nested-modules.sh`
+   exits non-zero on an empty result, because a discovery that found nothing has
+   broken, not proven the repo clean. Where a list is unavoidable
+   (`footprintExactNames` in `pkg/aws/footprint.go`, for names carrying no
+   prefix), add an entry only after seeing it in a live account, never from
+   memory.
+
+One corollary, for when a gate reports an absence: **a suspicious negative is
+more often the invocation than the system.** Four false negatives in one session
+came from the tool, not the code under test — `strings` on a Go binary, `awk $2`
+on tab-separated `gh pr checks` output, `--max-items` reshaping a JMESPath
+result to `null`, and `FilterLogEvents --limit` returning an empty *first* page
+with a continuation token. The last nearly produced a "fix" to working code.
+Confirm an absence by a second, differently-shaped route before acting on it.
+
 ## Build & test
 
-- `make check` — fmt, vet, lint, short tests (run before every commit)
+- `make check` — fmt, vet, lint, short tests, and every nested module (run
+  before every commit)
 - `make test` — full unit tests with coverage
 - `make build` — build spawn + spored
 

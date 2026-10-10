@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **`CLAUDE.md` now records how to write a gate that can actually fail.** A large
+  share of this repo's CI consists of gates — tests whose job is to fail when
+  someone removes a property — and several were written here that could not fail,
+  which is worse than having none because they are counted as coverage. The four
+  rules are each drawn from a gate in this repo that broke them: verify against a
+  revert that **compiles** (three "verified" reverts failed `go vet` first, so the
+  gate never ran); test the invariant directly and not only through the
+  constructor (#787's `!Determined` guard survived a real revert because no test
+  could build the offending state); match the assignment or invocation rather than
+  the bare identifier (four gates matched their own prose, including
+  `spawn:version` inside a parameter `Description`); and discover the set rather
+  than listing it (`lambda-deploy-census.sh` once named five functions in an
+  account of twelve). Plus the corollary that a suspicious negative usually
+  indicts the invocation, not the system — four false negatives in one session
+  came from the probe, including `FilterLogEvents --limit` returning an empty
+  *first* page with a continuation token.
+- **`make check` is described accurately**: it also runs every nested module
+  (#788), which the previous summary omitted.
+
 - **`docs/infra-account.md` — a measured map of the deployed control plane.**
   `spawn` is not only a CLI: 18 Lambda functions, 23 DynamoDB tables, 21 S3
   buckets and 16 IAM roles live in the shared infra account, and nothing
