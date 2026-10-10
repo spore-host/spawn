@@ -92,9 +92,27 @@ spawn reaper status
 
 ### `spawn reaper teardown`
 
-Remove the reaper from this account
+Remove the reaper from this account: the schedule, the Lambda, its role, and
+the S3 bucket holding its artifact.
+
+The bucket used to be left behind deliberately (#653). Under "leave no trace"
+that is wrong — an idle reaper that tidied everything except a bucket has left a
+trace while reporting that it has not.
+
+The original concern is answered rather than overruled. The bucket is removed
+only when it is tagged spawn:managed=true AND contains nothing outside
+ttl-reaper/; a bucket that fails either check is reported and kept, with
+--force-artifacts to override. So the liberty is only taken over a bucket that is
+provably spawn's and holds only spawn's artifacts.
 
 ```
-spawn reaper teardown
+spawn reaper teardown [flags]
 ```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--force-artifacts` |  | bool |  | Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed) |
+| `--keep-artifacts` |  | bool |  | Leave the artifact bucket in place (it is removed by default) |
 

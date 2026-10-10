@@ -21,6 +21,9 @@ var (
 	reaperSchedule string
 	reaperRegions  string
 	reaperYes      bool
+
+	reaperKeepArtifacts  bool
+	reaperForceArtifacts bool
 )
 
 var reaperCmd = &cobra.Command{
@@ -91,8 +94,20 @@ var reaperStatusCmd = &cobra.Command{
 }
 
 var reaperTeardownCmd = &cobra.Command{
-	Use:          "teardown",
-	Short:        "Remove the reaper from this account",
+	Use:   "teardown",
+	Short: "Remove the reaper from this account, including its artifact bucket",
+	Long: `Remove the reaper from this account: the schedule, the Lambda, its role, and
+the S3 bucket holding its artifact.
+
+The bucket used to be left behind deliberately (#653). Under "leave no trace"
+that is wrong — an idle reaper that tidied everything except a bucket has left a
+trace while reporting that it has not.
+
+The original concern is answered rather than overruled. The bucket is removed
+only when it is tagged spawn:managed=true AND contains nothing outside
+ttl-reaper/; a bucket that fails either check is reported and kept, with
+--force-artifacts to override. So the liberty is only taken over a bucket that is
+provably spawn's and holds only spawn's artifacts.`,
 	SilenceUsage: true,
 	RunE:         runReaperTeardown,
 }
@@ -110,6 +125,11 @@ func init() {
 	reaperDeployCmd.Flags().StringVar(&reaperRegions, "regions", "", "Comma-separated regions for the reaper to scan (default: the deploy region)")
 
 	reaperArmCmd.Flags().BoolVar(&reaperYes, "yes", false, "Skip the confirmation prompt")
+
+	reaperTeardownCmd.Flags().BoolVar(&reaperKeepArtifacts, "keep-artifacts", false,
+		"Leave the artifact bucket in place (it is removed by default)")
+	reaperTeardownCmd.Flags().BoolVar(&reaperForceArtifacts, "force-artifacts", false,
+		"Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed)")
 }
 
 // newReaperDeployer builds a Deployer and resolves account/region. Split out so each
@@ -279,9 +299,13 @@ func runReaperTeardown(cmd *cobra.Command, _ []string) error {
 	}
 	out := cmd.OutOrStdout()
 
-	removed, err := d.Teardown(ctx)
+	removed, err := d.Teardown(ctx, reaperdeploy.TeardownOptions{
+		Bucket:         reaperdeploy.DefaultBucketName(account, region),
+		KeepArtifacts:  reaperKeepArtifacts,
+		ForceArtifacts: reaperForceArtifacts,
+	})
 	for _, r := range removed {
-		fmt.Fprintf(out, "  - removed %s\n", r)
+		fmt.Fprintf(out, "  - %s\n", r)
 	}
 	if err != nil {
 		return err
@@ -290,8 +314,7 @@ func runReaperTeardown(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "Nothing to remove in account %s (%s).\n", account, region)
 		return nil
 	}
-	fmt.Fprintf(out, "\nThe artifact bucket was left in place (it may hold other objects); remove it by hand if you want it gone.\n")
-	fmt.Fprintf(out, "Nothing out-of-band reclaims resources in this account now — 'spawn doctor' will say so.\n")
+	fmt.Fprintf(out, "\nNothing out-of-band reclaims resources in this account now — 'spawn doctor' will say so.\n")
 	return nil
 }
 

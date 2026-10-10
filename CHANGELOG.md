@@ -23,6 +23,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carry a value containing a space and that SAM's `Enabled: !Ref` silently
   always resolves to ENABLED.
 
+### Changed
+
+- **`spawn reaper teardown` now removes the artifact bucket** (#653). It removed
+  the schedule, Lambda, permission and role, and **deliberately kept the bucket**,
+  reporting what it kept. That was a defensible explicit choice and is not
+  defensible under "leave no trace" — and it blocked idle self-removal (#772),
+  because a reaper that tidies everything except a bucket has left a trace while
+  reporting that it has not.
+  The original concern — that emptying a bucket someone may have put other things
+  in is a liberty — is **answered rather than overruled**. The bucket is removed
+  only when it is tagged `spawn:managed=true` *and* contains nothing outside
+  `ttl-reaper/`. A bucket failing either check is reported and kept, naming the
+  offending object; `--force-artifacts` overrides the tag check but **not** the
+  contents check, because emptying a repurposed bucket destroys data spawn never
+  wrote. `--keep-artifacts` is the opt-out, and it *says* it kept the bucket
+  rather than keeping it silently.
+  `spawn reaper deploy` now tags the bucket at creation, so teardown has positive
+  evidence instead of inferring ownership from the name — #755's lesson, where
+  `spawn:created` was read in three places and written in none. Tagging failure is
+  non-fatal: a deploy that cannot tag has still produced a working reaper, and the
+  teardown handles an untagged bucket explicitly.
+
 ### Added
 
 - **Every Lambda template parameter is now gated as actually passed by its
