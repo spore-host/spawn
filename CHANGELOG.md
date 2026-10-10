@@ -235,6 +235,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn footprint -o json` emitted inconsistent key casing.** The top level was
+  snake_case but its elements were PascalCase (`control_plane[].Service`),
+  because `ControlPlaneResource` carried no json tags. A machine contract should
+  not require knowing which half of the struct you are reading. Tagged now, so
+  every key is snake_case.
+
 - **The autoscale coverage check warned about the wrong environment** (#772). It
   matched orchestrators by name *prefix* and reported whichever the API returned
   first, so once staging's schedule was disabled a user working in **production**
