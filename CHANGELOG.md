@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **`docs/infra-account.md` — a measured map of the deployed control plane.**
+  `spawn` is not only a CLI: 18 Lambda functions, 23 DynamoDB tables, 21 S3
+  buckets and 16 IAM roles live in the shared infra account, and nothing
+  documented what they were or which code owned them. Every figure is measured
+  from the live account rather than recalled, with the commands to re-measure.
+  It records what is least obvious from the source: how each function is invoked
+  (EventBridge schedule, API Gateway, or direct CLI invoke — the last explains
+  why several have no resource policy); which live functions are deployed from
+  *other* repos, so an unfamiliar name is not an orphan; that `lambda/alert-handler/`
+  builds in CI but **has no live function anywhere**; and the deploy traps that
+  have each cost a real failure, including that `--parameter-overrides` cannot
+  carry a value containing a space and that SAM's `Enabled: !Ref` silently
+  always resolves to ENABLED.
+
 ### Added
 
 - **Every Lambda template parameter is now gated as actually passed by its

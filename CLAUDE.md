@@ -75,6 +75,23 @@ spore-host-mcp that sat for six days with nothing linking it back here.
 Keep the table and the test's `publicPackages` map in step; the map is the one CI
 reads.
 
+## The deployed control plane
+
+`spawn` is not only a CLI: 18 Lambda functions, 23 DynamoDB tables, 21 S3
+buckets and 16 IAM roles live in the shared infra account (966362334030).
+**[docs/infra-account.md](docs/infra-account.md)** maps what is there to the code
+that owns it, how each function is invoked, and the deploy traps that have each
+cost a real failure.
+
+Read it before changing anything under `lambda/`. It is measured from the live
+account rather than recalled — re-measure with `spawn footprint` and
+`make lambda-versions-deployed` rather than trusting the page.
+
+Two things it records that are easy to get wrong: nothing reaps the control plane
+(the TTL reaper covers instances, not this), and several live functions are
+deployed from *other* repos, so an unfamiliar function name is not necessarily an
+orphan.
+
 ## Build & test
 
 - `make check` — fmt, vet, lint, short tests (run before every commit)
