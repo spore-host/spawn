@@ -24,24 +24,28 @@ import (
 // reaper is the backstop for instances; nothing is the backstop for the reaper
 // itself, and nothing was even ENUMERATING it.
 type ControlPlaneResource struct {
-	Service string // lambda, logs, s3, iam, events, dynamodb
-	Kind    string // function, log-group, bucket, role, instance-profile, rule, table
-	Name    string
-	Region  string // empty for global (IAM, and S3 bucket names that carry no region)
+	// json tags on every field: `spawn footprint -o json` is a machine contract,
+	// and without them the payload was snake_case at the top level and PascalCase
+	// inside it — `control_plane[].Service`. A consumer should not have to know
+	// which half of the struct it is reading.
+	Service string `json:"service"` // lambda, logs, s3, iam, events, dynamodb
+	Kind    string `json:"kind"`    // function, log-group, bucket, role, instance-profile, rule, table
+	Name    string `json:"name"`
+	Region  string `json:"region"` // empty for global (IAM, and S3 bucket names that carry no region)
 	// Detail is the one fact that matters for this kind: a log group's retention,
 	// a bucket's creation date, a function's last modification.
-	Detail string
+	Detail string `json:"detail,omitempty"`
 	// Created is zero when the API does not report it (log groups report a
 	// creation time; S3 reports one; Lambda does not, only LastModified).
-	Created time.Time
+	Created time.Time `json:"created,omitempty"`
 	// Why records WHICH signal matched, so a reader can tell a confident
 	// identification from a guess. Three attempts at a footprint list during #653
 	// were each wrong — the issue's own table, a prefix-filtered query, and a
 	// "cleanup candidates" list — so the provenance of every row is printed
 	// rather than assumed.
-	Why string
+	Why string `json:"why,omitempty"`
 	// Warn is a specific, evidence-backed hazard for this row. Empty when none.
-	Warn string
+	Warn string `json:"warn,omitempty"`
 }
 
 // footprintNamePrefixes are the name patterns that identify a spore.host
