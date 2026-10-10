@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -57,6 +58,16 @@ type S3API interface {
 	HeadBucket(context.Context, *s3.HeadBucketInput, ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
 	CreateBucket(context.Context, *s3.CreateBucketInput, ...func(*s3.Options)) (*s3.CreateBucketOutput, error)
 	PutObject(context.Context, *s3.PutObjectInput, ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	// Tagging at creation, so a later teardown has POSITIVE evidence the bucket is
+	// ours instead of inferring it from the name (#755's lesson: the stamp has to
+	// be written at the creation site or nothing can act on it later).
+	PutBucketTagging(context.Context, *s3.PutBucketTaggingInput, ...func(*s3.Options)) (*s3.PutBucketTaggingOutput, error)
+	GetBucketTagging(context.Context, *s3.GetBucketTaggingInput, ...func(*s3.Options)) (*s3.GetBucketTaggingOutput, error)
+	// Teardown needs all three: S3 refuses DeleteBucket on a non-empty bucket, so
+	// the contents must be listed and removed first.
+	ListObjectsV2(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+	DeleteBucket(context.Context, *s3.DeleteBucketInput, ...func(*s3.Options)) (*s3.DeleteBucketOutput, error)
 }
 
 // Deployer converges the reaper's resources in one account.
@@ -251,7 +262,110 @@ func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) erro
 		}
 		return fmt.Errorf("reaperdeploy: create bucket %s: %w", bucket, err)
 	}
+
+	// Stamp it at the creation site, so a later teardown can prove the bucket is
+	// ours rather than inferring it from the name. This is #755's lesson applied
+	// here: spawn:created was read in three places and written in none, and the
+	// two safety properties composed into a leak with no collector.
+	//
+	// Non-fatal: a deploy that cannot tag has still produced a working reaper, and
+	// failing here would turn a cosmetic gap into an outage. The teardown handles
+	// an untagged bucket explicitly rather than assuming the tag is present.
+	if _, err := d.S3.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
+		Bucket: awssdk.String(bucket),
+		Tagging: &s3types.Tagging{TagSet: []s3types.Tag{
+			{Key: awssdk.String("spawn:managed"), Value: awssdk.String("true")},
+			{Key: awssdk.String("spawn:component"), Value: awssdk.String("ttl-reaper")},
+			{Key: awssdk.String("spawn:created-by"), Value: awssdk.String("spawn reaper deploy")},
+		}},
+	}); err != nil {
+		log.Printf("reaperdeploy: could not tag bucket %s (%v) — teardown will need --force-artifacts to remove it", bucket, err)
+	}
 	return nil
+}
+
+// artifactKeyPrefix is the only prefix the reaper writes under. Teardown refuses
+// to delete a bucket holding anything else, because a bucket someone repurposed
+// is not ours to empty.
+const artifactKeyPrefix = "ttl-reaper/"
+
+// removeArtifactBucket empties and deletes the artifact bucket.
+//
+// This closes the gap #653 recorded: teardown removed the rule, permission,
+// function and role, and DELIBERATELY left the bucket, reporting what it kept.
+// That was defensible as an explicit choice and is not defensible under "leave no
+// trace" — and it blocks idle self-removal (#772), because a reaper that removes
+// itself while leaving a bucket has converted a visible trace into a claimed-clean
+// one, which is worse than leaving it.
+//
+// Two guards, because deleting a bucket destroys its contents irreversibly:
+//
+//   - the bucket must be TAGGED spawn:managed, or force must be set. The name
+//     embeds the account id so it cannot belong to another account, but a name is
+//     not evidence that WE made it — someone could have created it by hand.
+//   - every object must be under ttl-reaper/. A bucket holding anything else has
+//     been repurposed, and emptying it would destroy data this code never wrote.
+//
+// Returns the actions taken, so the caller reports work that actually happened
+// rather than work it intended — the DeleteRule lesson a few lines up.
+func (d *Deployer) removeArtifactBucket(ctx context.Context, bucket string, force bool) ([]string, error) {
+	if _, err := d.S3.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: awssdk.String(bucket)}); err != nil {
+		return nil, nil // already gone: a teardown re-run converges
+	}
+
+	if !force {
+		out, err := d.S3.GetBucketTagging(ctx, &s3.GetBucketTaggingInput{Bucket: awssdk.String(bucket)})
+		managed := false
+		if err == nil {
+			for _, t := range out.TagSet {
+				if awssdk.ToString(t.Key) == "spawn:managed" && awssdk.ToString(t.Value) == "true" {
+					managed = true
+				}
+			}
+		}
+		if !managed {
+			// An untagged bucket predates the tagging above. Say what to do rather
+			// than silently keeping it, which is the behaviour being fixed.
+			return nil, fmt.Errorf("bucket %s is not tagged spawn:managed=true, so it cannot be "+
+				"confirmed as spawn's; re-run with --force-artifacts to remove it anyway", bucket)
+		}
+	}
+
+	var keys []string
+	var token *string
+	for {
+		page, err := d.S3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            awssdk.String(bucket),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list %s: %w", bucket, err)
+		}
+		for _, o := range page.Contents {
+			k := awssdk.ToString(o.Key)
+			if !strings.HasPrefix(k, artifactKeyPrefix) {
+				return nil, fmt.Errorf("bucket %s holds %q, which spawn never wrote — refusing to "+
+					"empty a bucket that has been repurposed", bucket, k)
+			}
+			keys = append(keys, k)
+		}
+		if page.NextContinuationToken == nil {
+			break
+		}
+		token = page.NextContinuationToken
+	}
+
+	for _, k := range keys {
+		if _, err := d.S3.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: awssdk.String(bucket), Key: awssdk.String(k),
+		}); err != nil {
+			return nil, fmt.Errorf("delete %s/%s: %w", bucket, k, err)
+		}
+	}
+	if _, err := d.S3.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: awssdk.String(bucket)}); err != nil {
+		return nil, fmt.Errorf("delete bucket %s: %w", bucket, err)
+	}
+	return []string{fmt.Sprintf("deleted artifact bucket %s (%d object(s))", bucket, len(keys))}, nil
 }
 
 func (d *Deployer) fetchArtifact(ctx context.Context, opts Options) ([]byte, error) {
@@ -459,12 +573,35 @@ func (d *Deployer) Inspect(ctx context.Context) (Info, error) {
 	return info, nil
 }
 
-// Teardown removes what Deploy created, most-dependent first.
+// TeardownOptions controls how far a teardown goes.
+type TeardownOptions struct {
+	// Bucket is the artifact bucket to remove. Empty leaves it alone, which is
+	// the pre-#653 behaviour and is kept only for callers that genuinely want it.
+	Bucket string
+	// KeepArtifacts leaves the bucket in place. The opt-OUT, deliberately: the
+	// default is now to remove it, because silent retention is the thing being
+	// fixed (#653).
+	KeepArtifacts bool
+	// ForceArtifacts removes the bucket even when it is not tagged
+	// spawn:managed=true. Needed for buckets created before the tag existed.
+	ForceArtifacts bool
+}
+
+// Teardown removes what Deploy created, most-dependent first, and now the
+// artifact bucket too.
 //
-// It deliberately leaves the artifact bucket: deleting a bucket requires emptying it,
-// and silently removing an S3 bucket a user may have put other things in is a bigger
-// liberty than this command should take. It says so.
-func (d *Deployer) Teardown(ctx context.Context) ([]string, error) {
+// It USED to leave the bucket deliberately, on the reasoning that emptying an S3
+// bucket a user may have put other things in is a liberty — and it said so. That
+// was a defensible explicit choice. It is not defensible under "leave no trace"
+// (#653), and it blocks idle self-removal (#772): a reaper that removes itself
+// while leaving a bucket has turned a visible trace into a claimed-clean one,
+// which is worse than leaving it.
+//
+// The original concern is answered rather than overruled — removeArtifactBucket
+// refuses a bucket that is not tagged as ours, and refuses one holding any object
+// spawn did not write. So the liberty is only taken over a bucket that is
+// provably spawn's and contains only spawn's artifacts.
+func (d *Deployer) Teardown(ctx context.Context, opts TeardownOptions) ([]string, error) {
 	var removed []string
 	var firstErr error
 	note := func(what string, err error) {
@@ -515,6 +652,23 @@ func (d *Deployer) Teardown(ctx context.Context) ([]string, error) {
 
 	_, err = d.IAM.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: awssdk.String(RoleName)})
 	note("role "+RoleName, err)
+
+	// The bucket LAST: it is the only step whose failure should not stop the
+	// rest, and the rest is what actually disarms the reaper. A teardown that
+	// refused to remove the function because a bucket tag was missing would be
+	// the wrong trade.
+	switch {
+	case opts.Bucket == "":
+		// Nothing asked for.
+	case opts.KeepArtifacts:
+		removed = append(removed, fmt.Sprintf("kept artifact bucket %s (--keep-artifacts)", opts.Bucket))
+	default:
+		acts, berr := d.removeArtifactBucket(ctx, opts.Bucket, opts.ForceArtifacts)
+		removed = append(removed, acts...)
+		if berr != nil && firstErr == nil {
+			firstErr = berr
+		}
+	}
 
 	return removed, firstErr
 }

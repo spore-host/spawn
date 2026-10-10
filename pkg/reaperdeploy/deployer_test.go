@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // --- fakes: record calls, return plausible shapes, touch no network -------------
@@ -131,6 +132,12 @@ func (f *fakeEvents) DeleteRule(context.Context, *eventbridge.DeleteRuleInput, .
 type fakeS3 struct {
 	bucketExists bool
 	calls        []string
+	// objects the bucket holds, so a teardown test can model a repurposed bucket.
+	objects []string
+	// tagged reports spawn:managed=true. Separate from bucketExists so the
+	// untagged-bucket path (created before tagging existed) is representable.
+	tagged     bool
+	taggingErr error
 }
 
 func (f *fakeS3) HeadBucket(context.Context, *s3.HeadBucketInput, ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
@@ -147,6 +154,47 @@ func (f *fakeS3) CreateBucket(context.Context, *s3.CreateBucketInput, ...func(*s
 func (f *fakeS3) PutObject(context.Context, *s3.PutObjectInput, ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	f.calls = append(f.calls, "PutObject")
 	return &s3.PutObjectOutput{}, nil
+}
+
+func (f *fakeS3) PutBucketTagging(context.Context, *s3.PutBucketTaggingInput, ...func(*s3.Options)) (*s3.PutBucketTaggingOutput, error) {
+	f.calls = append(f.calls, "PutBucketTagging")
+	if f.taggingErr != nil {
+		return nil, f.taggingErr
+	}
+	f.tagged = true
+	return &s3.PutBucketTaggingOutput{}, nil
+}
+
+func (f *fakeS3) GetBucketTagging(context.Context, *s3.GetBucketTaggingInput, ...func(*s3.Options)) (*s3.GetBucketTaggingOutput, error) {
+	f.calls = append(f.calls, "GetBucketTagging")
+	if !f.tagged {
+		// S3 returns NoSuchTagSet for an untagged bucket; any error is treated as
+		// "cannot confirm", which is what the production path must do.
+		return nil, errors.New("NoSuchTagSet")
+	}
+	return &s3.GetBucketTaggingOutput{TagSet: []s3types.Tag{
+		{Key: awssdk.String("spawn:managed"), Value: awssdk.String("true")},
+	}}, nil
+}
+
+func (f *fakeS3) ListObjectsV2(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	f.calls = append(f.calls, "ListObjectsV2")
+	out := &s3.ListObjectsV2Output{}
+	for _, k := range f.objects {
+		out.Contents = append(out.Contents, s3types.Object{Key: awssdk.String(k)})
+	}
+	return out, nil
+}
+
+func (f *fakeS3) DeleteObject(_ context.Context, in *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	f.calls = append(f.calls, "DeleteObject:"+awssdk.ToString(in.Key))
+	return &s3.DeleteObjectOutput{}, nil
+}
+
+func (f *fakeS3) DeleteBucket(context.Context, *s3.DeleteBucketInput, ...func(*s3.Options)) (*s3.DeleteBucketOutput, error) {
+	f.calls = append(f.calls, "DeleteBucket")
+	f.bucketExists = false
+	return &s3.DeleteBucketOutput{}, nil
 }
 
 func zipBytes() []byte { return []byte("PK\x03\x04 pretend this is a lambda") }
@@ -332,7 +380,7 @@ func TestTeardownIsIdempotent(t *testing.T) {
 	iamF, lamF, evF := &fakeIAM{roleExists: true}, &fakeLambda{exists: true}, &fakeEvents{}
 	d := newTestDeployer(iamF, lamF, evF, &fakeS3{bucketExists: true})
 
-	removed, err := d.Teardown(context.Background())
+	removed, err := d.Teardown(context.Background(), TeardownOptions{})
 	if err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
@@ -374,7 +422,7 @@ func TestTeardownDoesNotClaimToRemoveAnAbsentRule(t *testing.T) {
 	d := newTestDeployer(&fakeIAM{}, &fakeLambda{exists: false}, &fakeEvents{}, &fakeS3{})
 	d.Events = ev // the faithful fake: DescribeRule says absent, DeleteRule still succeeds
 
-	removed, err := d.Teardown(context.Background())
+	removed, err := d.Teardown(context.Background(), TeardownOptions{})
 	if err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
@@ -385,5 +433,140 @@ func TestTeardownDoesNotClaimToRemoveAnAbsentRule(t *testing.T) {
 	}
 	if ev.deleteCalled {
 		t.Error("DeleteRule should not even be attempted when DescribeRule says the rule is absent")
+	}
+}
+
+// --- artifact bucket teardown (#653) --------------------------------------------
+
+// TestTeardownRemovesTheArtifactBucket is the behaviour change. Teardown used to
+// remove the rule, function and role and deliberately KEEP the bucket, reporting
+// what it kept. Under "leave no trace" that is wrong, and it blocks idle
+// self-removal (#772): a reaper that tidies everything except a bucket has left a
+// trace while reporting that it has not.
+func TestTeardownRemovesTheArtifactBucket(t *testing.T) {
+	iamF, lamF, evF := &fakeIAM{roleExists: true}, &fakeLambda{exists: true}, &fakeEvents{}
+	s3F := &fakeS3{bucketExists: true, tagged: true, objects: []string{
+		"ttl-reaper/v0.126.1.zip", "ttl-reaper/v0.125.0.zip",
+	}}
+	d := newTestDeployer(iamF, lamF, evF, s3F)
+
+	removed, err := d.Teardown(context.Background(), TeardownOptions{Bucket: "spawn-reaper-artifacts-1-us-east-1"})
+	if err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if !strings.Contains(strings.Join(removed, "; "), "deleted artifact bucket") {
+		t.Errorf("teardown did not report deleting the bucket:\n%v", removed)
+	}
+	// Emptied before deleted: S3 refuses DeleteBucket on a non-empty bucket, so a
+	// DeleteBucket without the DeleteObjects would fail against real S3 while
+	// passing a fake that does not model the constraint.
+	calls := strings.Join(s3F.calls, ",")
+	for _, want := range []string{"DeleteObject:ttl-reaper/v0.126.1.zip", "DeleteObject:ttl-reaper/v0.125.0.zip", "DeleteBucket"} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("missing %s; calls were %v", want, s3F.calls)
+		}
+	}
+	if strings.Index(calls, "DeleteBucket") < strings.Index(calls, "DeleteObject") {
+		t.Error("DeleteBucket was called before the objects were removed")
+	}
+}
+
+// TestTeardownRefusesAnUntaggedBucket protects the concern the old behaviour was
+// built around: a bucket's NAME is not evidence that spawn created it. The name
+// embeds the account id so it cannot belong to another account, but a human could
+// have made it by hand.
+func TestTeardownRefusesAnUntaggedBucket(t *testing.T) {
+	s3F := &fakeS3{bucketExists: true, tagged: false, objects: []string{"ttl-reaper/v1.zip"}}
+	d := newTestDeployer(&fakeIAM{}, &fakeLambda{}, &fakeEvents{}, s3F)
+
+	_, err := d.Teardown(context.Background(), TeardownOptions{Bucket: "spawn-reaper-artifacts-1-us-east-1"})
+	if err == nil {
+		t.Fatal("teardown deleted an untagged bucket; it must refuse and say how to override")
+	}
+	if !strings.Contains(err.Error(), "force-artifacts") {
+		t.Errorf("the refusal must name the override; got: %v", err)
+	}
+	if strings.Contains(strings.Join(s3F.calls, ","), "DeleteBucket") {
+		t.Error("DeleteBucket was called despite the refusal")
+	}
+}
+
+// TestTeardownForceRemovesAnUntaggedBucket covers buckets created before the tag
+// existed — which is every bucket deployed before this change.
+func TestTeardownForceRemovesAnUntaggedBucket(t *testing.T) {
+	s3F := &fakeS3{bucketExists: true, tagged: false, objects: []string{"ttl-reaper/v1.zip"}}
+	d := newTestDeployer(&fakeIAM{}, &fakeLambda{}, &fakeEvents{}, s3F)
+
+	if _, err := d.Teardown(context.Background(), TeardownOptions{
+		Bucket: "spawn-reaper-artifacts-1-us-east-1", ForceArtifacts: true,
+	}); err != nil {
+		t.Fatalf("--force-artifacts should remove an untagged bucket: %v", err)
+	}
+	if !strings.Contains(strings.Join(s3F.calls, ","), "DeleteBucket") {
+		t.Error("--force-artifacts did not delete the bucket")
+	}
+}
+
+// TestTeardownRefusesARepurposedBucket is the guard that matters most: emptying a
+// bucket destroys its contents irreversibly, so an object spawn never wrote is a
+// hard stop regardless of tags or --force-artifacts.
+func TestTeardownRefusesARepurposedBucket(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		s3F := &fakeS3{bucketExists: true, tagged: true, objects: []string{
+			"ttl-reaper/v1.zip", "my-dissertation.pdf",
+		}}
+		d := newTestDeployer(&fakeIAM{}, &fakeLambda{}, &fakeEvents{}, s3F)
+
+		_, err := d.Teardown(context.Background(), TeardownOptions{
+			Bucket: "spawn-reaper-artifacts-1-us-east-1", ForceArtifacts: force,
+		})
+		if err == nil {
+			t.Fatalf("force=%v: teardown emptied a bucket holding an object spawn never wrote", force)
+		}
+		if !strings.Contains(err.Error(), "my-dissertation.pdf") {
+			t.Errorf("force=%v: the refusal must name the offending object; got: %v", force, err)
+		}
+		calls := strings.Join(s3F.calls, ",")
+		if strings.Contains(calls, "DeleteObject") || strings.Contains(calls, "DeleteBucket") {
+			t.Errorf("force=%v: deleted something despite refusing; calls=%v", force, s3F.calls)
+		}
+	}
+}
+
+// TestTeardownKeepArtifacts pins the opt-OUT. The default is removal; retention
+// is now a choice someone states rather than a silent behaviour.
+func TestTeardownKeepArtifacts(t *testing.T) {
+	s3F := &fakeS3{bucketExists: true, tagged: true, objects: []string{"ttl-reaper/v1.zip"}}
+	d := newTestDeployer(&fakeIAM{}, &fakeLambda{}, &fakeEvents{}, s3F)
+
+	removed, err := d.Teardown(context.Background(), TeardownOptions{
+		Bucket: "spawn-reaper-artifacts-1-us-east-1", KeepArtifacts: true,
+	})
+	if err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if !strings.Contains(strings.Join(removed, "; "), "kept artifact bucket") {
+		t.Errorf("--keep-artifacts must SAY it kept the bucket rather than silently keeping it:\n%v", removed)
+	}
+	if strings.Contains(strings.Join(s3F.calls, ","), "DeleteBucket") {
+		t.Error("--keep-artifacts deleted the bucket")
+	}
+}
+
+// TestDeployTagsTheBucket closes the loop: the teardown guard above is only
+// usable if the tag is written at creation. #755 is the precedent — spawn:created
+// was read in three places and written in none.
+func TestDeployTagsTheBucket(t *testing.T) {
+	s3F := &fakeS3{}
+	d := newTestDeployer(&fakeIAM{}, &fakeLambda{}, &fakeEvents{}, s3F)
+
+	if _, err := d.Deploy(context.Background(), Options{
+		AccountID: "111122223333", Region: "us-east-1", Version: "0.126.1", Artifact: "x",
+	}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if !strings.Contains(strings.Join(s3F.calls, ","), "PutBucketTagging") {
+		t.Errorf("deploy created a bucket without tagging it, so teardown can never confirm it is "+
+			"ours; calls=%v", s3F.calls)
 	}
 }
