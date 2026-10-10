@@ -99,13 +99,19 @@ func createLambdaFunction(t *testing.T, lc *lambdasvc.Client, name string) {
 }
 
 // createAllLambdas provisions all four Lambda stubs the validator checks.
+//
+// Named from the same constants the resolver uses, NOT written out again. This
+// fixture used to spell them itself and so carried the same wrong name
+// ("spawn-scheduler-handler" — the deployed function has no prefix), which meant
+// the test agreed with the bug and reported the control plane healthy (#790). A
+// fixture that restates the value under test cannot detect it being wrong.
 func createAllLambdas(t *testing.T, lc *lambdasvc.Client) {
 	t.Helper()
 	for _, name := range []string{
-		"spawn-scheduler-handler",
-		"spawn-sweep-orchestrator",
-		"spawn-alert-handler",
-		"spawn-dashboard-api",
+		schedulerHandlerFunction,
+		sweepOrchestratorFunction,
+		alertHandlerFunction,
+		dashboardAPIFunction,
 	} {
 		createLambdaFunction(t, lc, name)
 	}
@@ -197,11 +203,11 @@ func TestValidate_MissingLambda(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	createAllDynamoTables(t, env.DynamoClient())
 	createAllS3Buckets(t, env.S3Client())
-	// Omit spawn-scheduler-handler.
+	// Omit the scheduler handler.
 	for _, name := range []string{
-		"spawn-sweep-orchestrator",
-		"spawn-alert-handler",
-		"spawn-dashboard-api",
+		sweepOrchestratorFunction,
+		alertHandlerFunction,
+		dashboardAPIFunction,
 	} {
 		createLambdaFunction(t, env.LambdaClient(), name)
 	}
@@ -215,13 +221,13 @@ func TestValidate_MissingLambda(t *testing.T) {
 	}
 	found := false
 	for _, e := range result.Errors {
-		if strings.Contains(e, "spawn-scheduler-handler") {
+		if strings.Contains(e, schedulerHandlerFunction) {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected error mentioning spawn-scheduler-handler; errors: %v", result.Errors)
+		t.Errorf("expected error mentioning %s; errors: %v", schedulerHandlerFunction, result.Errors)
 	}
 }
 

@@ -131,8 +131,18 @@ func TestResolver_LambdaFunctions(t *testing.T) {
 			},
 			region:    "us-east-1",
 			accountID: "123456789012",
+			// Spelled out as literals on purpose, NOT built from the constants
+			// in resolver.go. A test that restates the value under test cannot
+			// notice it changing, which is how "spawn-scheduler-handler" — a
+			// function name that has never existed — was asserted here and in
+			// the Substrate fixture while the live function was called
+			// `scheduler-handler` (#790).
+			//
+			// The division of labour: this test trips when a name CHANGES;
+			// lambda_names_test.go decides whether the new name is one the
+			// repo's deploy scripts actually create.
 			wantFunctions: map[string]string{
-				"scheduler_handler":  "arn:aws:lambda:us-east-1:966362334030:function:spawn-scheduler-handler",
+				"scheduler_handler":  "arn:aws:lambda:us-east-1:966362334030:function:scheduler-handler",
 				"sweep_orchestrator": "arn:aws:lambda:us-east-1:966362334030:function:spawn-sweep-orchestrator",
 				"alert_handler":      "arn:aws:lambda:us-east-1:966362334030:function:spawn-alert-handler",
 				"dashboard_api":      "arn:aws:lambda:us-east-1:966362334030:function:spawn-dashboard-api",

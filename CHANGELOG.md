@@ -7,64 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Documentation
-
-- **`CLAUDE.md` now records how to write a gate that can actually fail.** A large
-  share of this repo's CI consists of gates — tests whose job is to fail when
-  someone removes a property — and several were written here that could not fail,
-  which is worse than having none because they are counted as coverage. The four
-  rules are each drawn from a gate in this repo that broke them: verify against a
-  revert that **compiles** (three "verified" reverts failed `go vet` first, so the
-  gate never ran); test the invariant directly and not only through the
-  constructor (#787's `!Determined` guard survived a real revert because no test
-  could build the offending state); match the assignment or invocation rather than
-  the bare identifier (four gates matched their own prose, including
-  `spawn:version` inside a parameter `Description`); and discover the set rather
-  than listing it (`lambda-deploy-census.sh` once named five functions in an
-  account of twelve). Plus the corollary that a suspicious negative usually
-  indicts the invocation, not the system — four false negatives in one session
-  came from the probe, including `FilterLogEvents --limit` returning an empty
-  *first* page with a continuation token.
-- **`make check` is described accurately**: it also runs every nested module
-  (#788), which the previous summary omitted.
-
-- **`docs/infra-account.md` — a measured map of the deployed control plane.**
-  `spawn` is not only a CLI: 18 Lambda functions, 23 DynamoDB tables, 21 S3
-  buckets and 16 IAM roles live in the shared infra account, and nothing
-  documented what they were or which code owned them. Every figure is measured
-  from the live account rather than recalled, with the commands to re-measure.
-  It records what is least obvious from the source: how each function is invoked
-  (EventBridge schedule, API Gateway, or direct CLI invoke — the last explains
-  why several have no resource policy); which live functions are deployed from
-  *other* repos, so an unfamiliar name is not an orphan; that `lambda/alert-handler/`
-  builds in CI but **has no live function anywhere**; and the deploy traps that
-  have each cost a real failure, including that `--parameter-overrides` cannot
-  carry a value containing a space and that SAM's `Enabled: !Ref` silently
-  always resolves to ENABLED.
-
-### Changed
-
-- **`spawn reaper teardown` now removes the artifact bucket** (#653). It removed
-  the schedule, Lambda, permission and role, and **deliberately kept the bucket**,
-  reporting what it kept. That was a defensible explicit choice and is not
-  defensible under "leave no trace" — and it blocked idle self-removal (#772),
-  because a reaper that tidies everything except a bucket has left a trace while
-  reporting that it has not.
-  The original concern — that emptying a bucket someone may have put other things
-  in is a liberty — is **answered rather than overruled**. The bucket is removed
-  only when it is tagged `spawn:managed=true` *and* contains nothing outside
-  `ttl-reaper/`. A bucket failing either check is reported and kept, naming the
-  offending object; `--force-artifacts` overrides the tag check but **not** the
-  contents check, because emptying a repurposed bucket destroys data spawn never
-  wrote. `--keep-artifacts` is the opt-out, and it *says* it kept the bucket
-  rather than keeping it silently.
-  `spawn reaper deploy` now tags the bucket at creation, so teardown has positive
-  evidence instead of inferring ownership from the name — #755's lesson, where
-  `spawn:created` was read in three places and written in none. Tagging failure is
-  non-fatal: a deploy that cannot tag has still produced a working reaper, and the
-  teardown handles an untagged bucket explicitly.
-
 ### Added
+
+- **Two gates on the class of defect behind #790.**
+  `TestEveryHardcodedLambdaNameIsCreatedByADeployMechanism` reads the function
+  names out of every deploy script and template in the repo and fails when Go
+  source hardcodes a name none of them create — discovered, not listed, so the
+  naming convention is not written down a second time to drift again. It found
+  ten created names, including two nobody had enumerated by hand.
+  `TestValidateRecommendationsNameOnlyRealCommandsAndPaths` resolves every
+  command a recommendation mentions against the real cobra tree and checks every
+  path it names exists. Checking the first word would not have been enough:
+  `config` **is** a real command, and the defect was the subcommand after it.
 
 - **`make check` now runs the nested-module loop, via the same script CI uses.**
   `go test ./...` does not descend into a directory with its own `go.mod`, so the
@@ -233,6 +187,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator. Replaces comparing a function's `LastModified` against
   `git log -- lambda/<name>/`, which is archaeology and is wrong whenever a
   redeploy carried no source change, or a source change was never deployed.
+
+### Changed
+
+- **`spawn reaper teardown` now removes the artifact bucket** (#653). It removed
+  the schedule, Lambda, permission and role, and **deliberately kept the bucket**,
+  reporting what it kept. That was a defensible explicit choice and is not
+  defensible under "leave no trace" — and it blocked idle self-removal (#772),
+  because a reaper that tidies everything except a bucket has left a trace while
+  reporting that it has not.
+  The original concern — that emptying a bucket someone may have put other things
+  in is a liberty — is **answered rather than overruled**. The bucket is removed
+  only when it is tagged `spawn:managed=true` *and* contains nothing outside
+  `ttl-reaper/`. A bucket failing either check is reported and kept, naming the
+  offending object; `--force-artifacts` overrides the tag check but **not** the
+  contents check, because emptying a repurposed bucket destroys data spawn never
+  wrote. `--keep-artifacts` is the opt-out, and it *says* it kept the bucket
+  rather than keeping it silently.
+  `spawn reaper deploy` now tags the bucket at creation, so teardown has positive
+  evidence instead of inferring ownership from the name — #755's lesson, where
+  `spawn:created` was read in three places and written in none. Tagging failure is
+  non-fatal: a deploy that cannot tag has still produced a working reaper, and the
+  teardown handles an untagged bucket explicitly.
+
+### Fixed
+
+- **`spawn validate --infrastructure` no longer reports a deployed Lambda as
+  missing** (#790). The scheduler handler is deployed as `scheduler-handler`,
+  with no `spawn-` prefix — `scripts/deploy-scheduler-handler.sh` defaults to
+  `SPAWN_LAMBDA_NAME:-scheduler-handler` — but the resolver reconstructed the
+  name from the prefix convention and asked for `spawn-scheduler-handler`, which
+  has never existed. Against the live shared account the command reported two
+  errors, of which **one was false**, so the operator had to work out which half
+  to believe. It now reports the one real error. Scheduling itself was never
+  affected: `spawn schedule` has always invoked the unprefixed name.
+  The same wrong name was also asserted by the resolver's unit test and seeded by
+  the Substrate fixture, so three places agreed with the bug. The fixture now
+  provisions from the same constants the resolver uses, while the unit test keeps
+  literal ARNs on purpose — a test that restates the value under test cannot
+  notice it being wrong.
+- **A failing infrastructure report now points somewhere real** (#790). It
+  recommended `spawn config deploy-infrastructure` and
+  `spawn config init --self-hosted`; neither exists, and both had been there
+  since the initial commit. Because `config` is an alias for `instance-config`,
+  following the advice did not even produce an "unknown command" error — it tried
+  to read runtime config over SSH from an instance named
+  `deploy-infrastructure`. Missing Lambdas are now named one per line with the
+  script that deploys each, missing tables with the setup script or template that
+  creates them, and self-hosted mode with the config keys and
+  `SPAWN_LAMBDA_*_ARN` variables that actually drive it. Where nothing in the
+  repo deploys a function, it says so rather than inventing a command.
+
+### Documentation
+
+- **`CLAUDE.md` now records how to write a gate that can actually fail.** A large
+  share of this repo's CI consists of gates — tests whose job is to fail when
+  someone removes a property — and several were written here that could not fail,
+  which is worse than having none because they are counted as coverage. The four
+  rules are each drawn from a gate in this repo that broke them: verify against a
+  revert that **compiles** (three "verified" reverts failed `go vet` first, so the
+  gate never ran); test the invariant directly and not only through the
+  constructor (#787's `!Determined` guard survived a real revert because no test
+  could build the offending state); match the assignment or invocation rather than
+  the bare identifier (four gates matched their own prose, including
+  `spawn:version` inside a parameter `Description`); and discover the set rather
+  than listing it (`lambda-deploy-census.sh` once named five functions in an
+  account of twelve). Plus the corollary that a suspicious negative usually
+  indicts the invocation, not the system — four false negatives in one session
+  came from the probe, including `FilterLogEvents --limit` returning an empty
+  *first* page with a continuation token.
+- **`make check` is described accurately**: it also runs every nested module
+  (#788), which the previous summary omitted.
+
+- **`docs/infra-account.md` — a measured map of the deployed control plane.**
+  `spawn` is not only a CLI: 18 Lambda functions, 23 DynamoDB tables, 21 S3
+  buckets and 16 IAM roles live in the shared infra account, and nothing
+  documented what they were or which code owned them. Every figure is measured
+  from the live account rather than recalled, with the commands to re-measure.
+  It records what is least obvious from the source: how each function is invoked
+  (EventBridge schedule, API Gateway, or direct CLI invoke — the last explains
+  why several have no resource policy); which live functions are deployed from
+  *other* repos, so an unfamiliar name is not an orphan; that `lambda/alert-handler/`
+  builds in CI but **has no live function anywhere**; and the deploy traps that
+  have each cost a real failure, including that `--parameter-overrides` cannot
+  carry a value containing a space and that SAM's `Enabled: !Ref` silently
+  always resolves to ENABLED.
 
 ## [0.126.1] - 2026-10-09
 
