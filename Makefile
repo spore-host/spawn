@@ -227,7 +227,19 @@ check:
 	@staticcheck ./... || echo "staticcheck not installed, skipping..."
 	@echo "4. Running short tests..."
 	@go test -short ./...
+	@echo "5. Nested modules (build + vet + test)..."
+	@$(MAKE) --no-print-directory check-nested
 	@echo "✓ All checks passed!"
+
+# The 12 nested modules, via the SAME script CI runs (#136).
+#
+# `go test ./...` does not descend into a directory with its own go.mod, so
+# without this `make check` is weaker than CI — and that gap cost two round trips
+# in one session (#770's unwired template parameter, #771's missing go.sum entry),
+# both found only after a push. One script, two callers, no drift.
+.PHONY: check-nested
+check-nested:
+	@scripts/nested-modules.sh
 
 # Development
 dev: build

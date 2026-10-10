@@ -47,6 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`make check` now runs the nested-module loop, via the same script CI uses.**
+  `go test ./...` does not descend into a directory with its own `go.mod`, so the
+  12 modules under `lambda/` and `scripts/` were invisible to the local gate while
+  CI checked them. A nested module that does not even **compile** passed
+  `make check` and failed in CI.
+  That gap cost two round trips in one session: #770's `LogRetentionDays` wired
+  into no Makefile (caught by `lambda/ttl-reaper`'s own test, which only CI ran)
+  and #771's missing `go.sum` entry after `pkg/aws` gained six SDK imports. Both
+  were found after a push, where the fix is a second commit and another wait.
+  Extracted to `scripts/nested-modules.sh` and called from **both** `make check`
+  and the workflow, rather than duplicated — a local gate that differs from CI
+  teaches people to push and find out, and two copies of the loop would drift
+  back apart. The script refuses to pass when it discovers no modules, since a
+  broken discovery is not a clean repo.
+
 - **An idle reaper now says so, and can be told to remove itself on a schedule**
   (#772). `spawn reaper status` reports when the in-account reaper has run
   regularly and reclaimed nothing, and `spawn reaper teardown --if-idle-for 720h`
