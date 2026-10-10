@@ -251,6 +251,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The reaper's cross-account trust no longer names a CloudFormation-generated
+  role ARN** (#476). It named `…TTLReaperFunctionRole-ZJ84YZ2dCPei`, so recreating
+  the reaper stack would have broken cross-account reaping for **every onboarded
+  account at once** — with the failure mode being "expired instances are no longer
+  terminated".
+  `deployment/cloudformation/ttl-reaper-cross-account-role.yaml` now trusts
+  `${ReaperAccountId}:root` with an `ArnLike` on `aws:PrincipalArn`
+  (`spawn-ttl-reaper-*` by default), which survives the suffix being regenerated
+  and stays far narrower than a bare `:root` — what this role grants is
+  `ec2:TerminateInstances`. `ReaperLambdaRoleArn` is replaced by
+  `ReaperAccountId` + `ReaperRoleNamePattern`.
+  The exact-ARN form could not have been migrated gradually: **IAM rejects a trust
+  policy naming a principal that does not exist yet**
+  (`MalformedPolicyDocument: Invalid principal in policy`), so the new role would
+  have had to exist before it could be trusted — an overlap migration per
+  onboarded account. The pattern removes the problem rather than sequencing
+  around it.
+
 - **`spawn footprint -o json` emitted inconsistent key casing.** The top level was
   snake_case but its elements were PascalCase (`control_plane[].Service`),
   because `ControlPlaneResource` carried no json tags. A machine contract should
