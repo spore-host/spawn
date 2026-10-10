@@ -157,9 +157,14 @@ Recorded because each cost a real failure:
   every template parameter is passed at all.
 - **SAM's `Enabled: !Ref <param>` silently does not work** — at transform time a
   `!Ref` is a truthy dict, so every value yields `ENABLED`. Use `State`.
-- **The reaper's cross-account trust names a CFN-generated role ARN**
-  (`…TTLReaperFunctionRole-ZJ84YZ2dCPei`), so recreating the stack breaks every
-  onboarded account at once (#476).
+- **The reaper's cross-account trust used to name a CFN-generated role ARN**
+  (`…TTLReaperFunctionRole-ZJ84YZ2dCPei`), so recreating the stack would have
+  broken every onboarded account at once (#476). Fixed 2026-10-10: the trust now
+  uses `:root` plus an `ArnLike` on `aws:PrincipalArn`, which survives the suffix
+  being regenerated and stays narrower than bare `:root`. Note for anyone
+  re-deriving this: IAM **rejects** a trust policy naming a principal that does
+  not exist yet, so the exact-ARN form cannot be migrated by adding the new ARN
+  first.
 - **`spawn autoscale` took its region from the ambient chain** and ignored
   `--region` until #775.
 
