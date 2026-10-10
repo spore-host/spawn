@@ -199,21 +199,12 @@ jobs:
       # that scoping was itself the #136 bug one level up, and it silently
       # excluded scripts/ the day that module was added.
       - name: Nested modules (build + vet + test)
-        run: |
-          set -euo pipefail
-          mods=$(find . -mindepth 2 -name go.mod -not -path './.git/*' | sort)
-          if [ -z "$mods" ]; then
-            echo "::error::found no nested modules — the discovery is broken, not the repo"
-            exit 1
-          fi
-          fail=0
-          for mod in $mods; do
-            dir=$(dirname "$mod")
-            echo "::group::$dir"
-            ( cd "$dir" && go build ./... && go vet ./... && go test -short ./... ) || fail=1
-            echo "::endgroup::"
-          done
-          exit $fail
+        # The SAME script `make check` runs, so the local gate cannot be weaker
+        # than this one. It was, and that cost two round trips in one session:
+        # #770's template parameter wired into no Makefile, and #771's missing
+        # go.sum entry after pkg/aws gained six SDK imports. Both were found here
+        # rather than on a laptop.
+        run: scripts/nested-modules.sh
 
   # Tier 0 E2E — the real spawn binary driven against the Substrate AWS
   # emulator. No AWS account/credentials; exercises the full CLI surface
