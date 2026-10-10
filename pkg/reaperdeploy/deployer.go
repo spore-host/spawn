@@ -12,6 +12,7 @@ import (
 	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	cwlogs "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
 	ebtypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -72,6 +73,9 @@ type S3API interface {
 
 // Deployer converges the reaper's resources in one account.
 type Deployer struct {
+	// Logs is optional: only the idle check uses it, and a nil Logs reports
+	// "undetermined" rather than failing, so existing callers keep working.
+	Logs   LogsAPI
 	IAM    IAMAPI
 	Lambda LambdaAPI
 	Events EventsAPI
@@ -714,5 +718,6 @@ func New(cfg awssdk.Config) *Deployer {
 		Lambda: lambda.NewFromConfig(cfg),
 		Events: eventbridge.NewFromConfig(cfg),
 		S3:     s3.NewFromConfig(cfg),
+		Logs:   cwlogs.NewFromConfig(cfg),
 	}
 }

@@ -114,5 +114,6 @@ spawn reaper teardown [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--force-artifacts` |  | bool |  | Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed) |
+| `--if-idle-for` |  | duration | `0s` | Only tear down if the reaper has reclaimed nothing for at least this long (e.g. 720h); otherwise report and exit 0 |
 | `--keep-artifacts` |  | bool |  | Leave the artifact bucket in place (it is removed by default) |
 

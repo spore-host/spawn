@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -24,6 +25,7 @@ var (
 
 	reaperKeepArtifacts  bool
 	reaperForceArtifacts bool
+	reaperIfIdleFor      time.Duration
 )
 
 var reaperCmd = &cobra.Command{
@@ -128,6 +130,8 @@ func init() {
 
 	reaperTeardownCmd.Flags().BoolVar(&reaperKeepArtifacts, "keep-artifacts", false,
 		"Leave the artifact bucket in place (it is removed by default)")
+	reaperTeardownCmd.Flags().DurationVar(&reaperIfIdleFor, "if-idle-for", 0,
+		"Only tear down if the reaper has reclaimed nothing for at least this long (e.g. 720h); otherwise report and exit 0")
 	reaperTeardownCmd.Flags().BoolVar(&reaperForceArtifacts, "force-artifacts", false,
 		"Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed)")
 }
@@ -233,7 +237,22 @@ func runReaperStatus(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprint(cmd.OutOrStdout(), renderReaperStatus(info, account, region))
+	out := cmd.OutOrStdout()
+	fmt.Fprint(out, renderReaperStatus(info, account, region))
+
+	// Idleness last, and only when something is actually deployed: "this reaper
+	// has had nothing to do" is meaningless for an account that has none
+	// (spawn#772).
+	//
+	// Best-effort — a log group that cannot be read must not turn a working
+	// status report into an error. IdlenessAdvice says "could not tell" rather
+	// than implying idleness, which matters because this is the line someone
+	// would act on by deleting things.
+	if info.Deployed {
+		if msg := reaperdeploy.IdlenessAdvice(d.DetectIdleness(ctx, time.Now()), time.Now()); msg != "" {
+			fmt.Fprintf(out, "\n%s\n", msg)
+		}
+	}
 	return nil
 }
 
@@ -298,6 +317,47 @@ func runReaperTeardown(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	out := cmd.OutOrStdout()
+
+	// --if-idle-for exists so removal can be SCHEDULED without the Lambda being
+	// able to delete things (spawn#772).
+	//
+	// The obvious reading of "self-remove" is a reaper that deletes itself when
+	// idle. That needs lambda:DeleteFunction, iam:DeleteRole, events:DeleteRule
+	// and s3:DeleteBucket added to the 11 EC2/FSx/SSM actions it has today — and
+	// #613's audit of the in-account reaper is quotable because the policy is
+	// minimal, in an account whose organization forbids external trust. Granting a
+	// scheduled function iam:DeleteRole to save a human one command is the wrong
+	// trade.
+	//
+	// So the capability lives here, under the caller's own credentials, which
+	// already carry those permissions. Put it in a cron if you want it automatic.
+	if reaperIfIdleFor > 0 {
+		idle := d.DetectIdleness(ctx, time.Now())
+		switch {
+		case !idle.Determined:
+			// Never remove on an inconclusive read. Exit 0: this is a scheduled
+			// no-op, not a failure.
+			fmt.Fprintf(out, "Not tearing down: could not determine idleness (%s).\n", idle.Why)
+			return nil
+		case idle.EverWorked:
+			fmt.Fprintf(out, "Not tearing down: the reaper reclaimed something at %s.\n",
+				idle.LastWorked.UTC().Format(time.RFC3339))
+			return nil
+		case !idle.Ran:
+			// A reaper that has not RUN is a broken schedule, not an unused
+			// feature. Removing it here would delete something that never got the
+			// chance to work — the opposite of the intent.
+			fmt.Fprintf(out, "Not tearing down: the reaper has not run at all, which is a broken "+
+				"schedule rather than an idle one. Check `spawn reaper status`.\n")
+			return nil
+		}
+		if got := idle.IdleFor(time.Now()); got < reaperIfIdleFor {
+			fmt.Fprintf(out, "Not tearing down: idle for %s, which is less than the %s required.\n",
+				got.Round(time.Hour), reaperIfIdleFor)
+			return nil
+		}
+		fmt.Fprintf(out, "Idle for at least %s — tearing down.\n", reaperIfIdleFor)
+	}
 
 	removed, err := d.Teardown(ctx, reaperdeploy.TeardownOptions{
 		Bucket:         reaperdeploy.DefaultBucketName(account, region),

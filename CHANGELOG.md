@@ -47,6 +47,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An idle reaper now says so, and can be told to remove itself on a schedule**
+  (#772). `spawn reaper status` reports when the in-account reaper has run
+  regularly and reclaimed nothing, and `spawn reaper teardown --if-idle-for 720h`
+  removes it only if that is true.
+  It distinguishes the two causes of "reclaimed nothing", because they have
+  **opposite remedies**: a reaper that runs and finds nothing may be an unused
+  feature (removal restores "leave no trace"), while a reaper that has not *run*
+  is a broken schedule — and removing that one deletes something that was never
+  given the chance to work. The second is reported as a broken schedule and is
+  **never** offered for teardown. An unreadable log group reports "could not
+  tell" and removes nothing, so a permission error can never be mistaken for
+  idleness.
+  Idleness is derived from the reaper's own CloudWatch logs, which needs **no new
+  Lambda permission at all**. The obvious reading of "self-remove" — a reaper that
+  deletes itself — would require adding `lambda:DeleteFunction`, `iam:DeleteRole`,
+  `events:DeleteRule` and `s3:DeleteBucket` to the 11 EC2/FSx/SSM actions it has
+  today. #613's audit of that reaper is quotable because its policy is minimal, in
+  an account whose organisation forbids external trust; granting a scheduled
+  function `iam:DeleteRole` to save a human one command is the wrong trade. So the
+  capability lives in the CLI under the caller's own credentials — put it in a
+  cron if you want it automatic.
+  The 30-day window matches the log retention set in #770, so the honest answer is
+  "idle for at least 30 days" rather than a number the evidence cannot support.
+
 - **Every Lambda template parameter is now gated as actually passed by its
   deploy** (#776). A parameter declared in a template but never passed takes its
   **default** on every deploy, and an operator supplying it on the command line
