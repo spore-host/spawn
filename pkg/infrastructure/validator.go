@@ -235,6 +235,36 @@ func findSubstring(s, substr string) bool {
 	return false
 }
 
+// lambdaDeployMechanism says how a given function is deployed.
+//
+// Every value here is either a path that exists in this repo or an explicit
+// statement that nothing deploys the function. That is gated: the previous
+// recommendation told the operator to run `spawn config deploy-infrastructure`,
+// which does not exist — and because `config` is an alias for `instance-config`,
+// following it did not even produce an "unknown command" error. It tried to read
+// runtime config over SSH from an instance named "deploy-infrastructure" (#790).
+//
+// A failing health check gets one actionable line. Sending that line to a dead
+// end is worse than printing nothing.
+func lambdaDeployMechanism(functionName string) string {
+	switch functionName {
+	case schedulerHandlerFunction:
+		return "deploy with scripts/deploy-scheduler-handler.sh"
+	case sweepOrchestratorFunction:
+		return "deploy with scripts/deploy-sweep-orchestrator.sh"
+	case dashboardAPIFunction:
+		return "deploy with lambda/dashboard-api/deploy.sh"
+	case alertHandlerFunction:
+		// Deliberately not a path. Nothing in this repo deploys it, and saying so
+		// is the honest answer — `spawn alerts` writes records this function is
+		// the only reader of, so alerts cannot fire until it is deployed.
+		return "nothing in this repo deploys this function; " +
+			"alerts created with `spawn alerts create` cannot fire until it is (see issue #783)"
+	default:
+		return "see docs/infra-account.md for which script or template owns this function"
+	}
+}
+
 // GetRecommendations returns recommendations based on validation errors
 func (v *Validator) GetRecommendations(result *ValidationResult) []string {
 	if result.Valid {
@@ -252,7 +282,13 @@ func (v *Validator) GetRecommendations(result *ValidationResult) []string {
 		}
 	}
 	if hasDynamoDBErrors {
-		recommendations = append(recommendations, "Deploy DynamoDB tables using CloudFormation: spawn config deploy-infrastructure")
+		recommendations = append(recommendations,
+			"Create the missing DynamoDB tables from the repo: "+
+				"scripts/setup-schedules-dynamodb.sh (schedules), "+
+				"scripts/setup-sweep-dynamodb.sh (sweeps), "+
+				"scripts/setup-availability-dynamodb.sh (availability stats), or "+
+				"deployment/cloudformation/alerts-tables.yaml (alerts). "+
+				"docs/infra-account.md maps every table to the code that reads it.")
 	}
 
 	// Check for missing S3 buckets
@@ -276,12 +312,34 @@ func (v *Validator) GetRecommendations(result *ValidationResult) []string {
 		}
 	}
 	if hasLambdaErrors {
-		recommendations = append(recommendations, "Deploy Lambda functions using CloudFormation: spawn config deploy-infrastructure")
+		// Name the mechanism per function rather than emitting one generic line.
+		// There is no single command that deploys this control plane — each
+		// function has its own script, and one has none at all — so a generic
+		// recommendation cannot be both short and true.
+		named := false
+		for _, status := range result.Resources {
+			if status.Type != "Lambda Function" || status.Exists {
+				continue
+			}
+			fn := extractFunctionName(status.Name)
+			recommendations = append(recommendations,
+				fmt.Sprintf("Lambda %s: %s", fn, lambdaDeployMechanism(fn)))
+			named = true
+		}
+		if !named {
+			recommendations = append(recommendations,
+				"Deploy the missing Lambda functions from the repo; "+
+					"docs/infra-account.md lists which script or template owns each one.")
+		}
 	}
 
 	// Check if in self-hosted mode but resources not found
 	if v.resolver.IsSelfHosted() {
-		recommendations = append(recommendations, "Run: spawn config init --self-hosted to reconfigure infrastructure")
+		recommendations = append(recommendations,
+			"Self-hosted mode resolves every resource from configuration: set the "+
+				"table names, bucket prefixes and Lambda ARNs under `infrastructure:` in "+
+				"~/.spawn/config.yaml, or override individually with the "+
+				"SPAWN_LAMBDA_*_ARN environment variables.")
 	}
 
 	return recommendations

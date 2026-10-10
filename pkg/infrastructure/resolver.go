@@ -6,6 +6,29 @@ import (
 	"github.com/spore-host/spawn/pkg/config"
 )
 
+// sharedInfraAccountID is the spore.host shared infra account, which holds the
+// control plane every shared-mode install talks to.
+const sharedInfraAccountID = "966362334030"
+
+// Lambda function names AS DEPLOYED.
+//
+// They are not uniformly prefixed, and that is the trap: three carry `spawn-`
+// and schedulerHandlerFunction does not, because
+// scripts/deploy-scheduler-handler.sh defaults to
+// `SPAWN_LAMBDA_NAME:-scheduler-handler`. Reconstructing the name from the
+// convention instead of reading it from the deploy mechanism is what made
+// `spawn validate --infrastructure` report a live function as missing (#790).
+//
+// lambda_names_test.go gates every one of these against the names the repo's
+// deploy scripts and templates actually create, so a name invented here fails
+// before it reaches a user.
+const (
+	schedulerHandlerFunction  = "scheduler-handler"
+	sweepOrchestratorFunction = "spawn-sweep-orchestrator"
+	alertHandlerFunction      = "spawn-alert-handler"
+	dashboardAPIFunction      = "spawn-dashboard-api"
+)
+
 // Resolver resolves infrastructure resource names and ARNs
 // It handles both shared (spore-host-infra account) and self-hosted modes
 type Resolver struct {
@@ -79,13 +102,19 @@ func (r *Resolver) GetSchedulesBucket() string {
 
 // Lambda resource resolution
 
-// GetSchedulerHandlerARN returns the Lambda function ARN for scheduler handler
+// GetSchedulerHandlerARN returns the Lambda function ARN for scheduler handler.
+//
+// The function has NO `spawn-` prefix. This getter said it did until #790, which
+// made `spawn validate --infrastructure` report a deployed function as missing —
+// the one error in its report that was not real, so the next reader had to work
+// out which half to believe. cmd/schedule.go has always invoked the unprefixed
+// name, which is why scheduling itself worked throughout.
 func (r *Resolver) GetSchedulerHandlerARN() string {
 	if r.config.Lambda.SchedulerHandlerARN != "" {
 		return r.config.Lambda.SchedulerHandlerARN
 	}
 	// Default to spore-host-infra account (966362334030)
-	return fmt.Sprintf("arn:aws:lambda:%s:966362334030:function:spawn-scheduler-handler", r.region)
+	return fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", r.region, sharedInfraAccountID, schedulerHandlerFunction)
 }
 
 // GetSweepOrchestratorARN returns the Lambda function ARN for sweep orchestrator
@@ -94,7 +123,7 @@ func (r *Resolver) GetSweepOrchestratorARN() string {
 		return r.config.Lambda.SweepOrchestratorARN
 	}
 	// Default to spore-host-infra account
-	return fmt.Sprintf("arn:aws:lambda:%s:966362334030:function:spawn-sweep-orchestrator", r.region)
+	return fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", r.region, sharedInfraAccountID, sweepOrchestratorFunction)
 }
 
 // GetAlertHandlerARN returns the Lambda function ARN for alert handler
@@ -103,7 +132,7 @@ func (r *Resolver) GetAlertHandlerARN() string {
 		return r.config.Lambda.AlertHandlerARN
 	}
 	// Default to spore-host-infra account
-	return fmt.Sprintf("arn:aws:lambda:%s:966362334030:function:spawn-alert-handler", r.region)
+	return fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", r.region, sharedInfraAccountID, alertHandlerFunction)
 }
 
 // GetDashboardAPIARN returns the Lambda function ARN for dashboard API
@@ -112,7 +141,7 @@ func (r *Resolver) GetDashboardAPIARN() string {
 		return r.config.Lambda.DashboardAPIARN
 	}
 	// Default to spore-host-infra account
-	return fmt.Sprintf("arn:aws:lambda:%s:966362334030:function:spawn-dashboard-api", r.region)
+	return fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", r.region, sharedInfraAccountID, dashboardAPIFunction)
 }
 
 // CloudWatch resource resolution

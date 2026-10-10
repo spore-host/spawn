@@ -85,7 +85,11 @@ func LoadInfrastructureConfig(ctx context.Context, flagMode string) (*Infrastruc
 		Lambda: LambdaConfig{
 			// Default ARNs point to spore-host-infra account (966362334030)
 			// These will be constructed at runtime based on region
-			SchedulerHandlerARN:  "", // Constructed: arn:aws:lambda:{region}:966362334030:function:spawn-scheduler-handler
+			// Note the missing prefix on the first one — the deployed function is
+			// `scheduler-handler`, not `spawn-scheduler-handler`. This comment
+			// claimed otherwise, which is how the wrong name in
+			// pkg/infrastructure.Resolver survived review (#790).
+			SchedulerHandlerARN:  "", // Constructed: arn:aws:lambda:{region}:966362334030:function:scheduler-handler
 			SweepOrchestratorARN: "", // Constructed: arn:aws:lambda:{region}:966362334030:function:spawn-sweep-orchestrator
 			AlertHandlerARN:      "", // Constructed: arn:aws:lambda:{region}:966362334030:function:spawn-alert-handler
 			DashboardAPIARN:      "", // Constructed: arn:aws:lambda:{region}:966362334030:function:spawn-dashboard-api
