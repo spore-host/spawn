@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `sporedDCVRolePolicy` is now a `var` built with `fmt.Sprintf` rather than a
+  `const`, so the control-tag deny renders from the same `reaperControlTagKeys`
+  slice the dynamic policy uses and the two cannot drift on it. Unexported, so no
+  public surface changes.
+
 - **`spawn onboard --spored-profile` is deprecated in favour of `--spored-role`.**
   `iam:PassRole` names a role, not an instance profile. The old flag remains as an
   alias bound to the same variable, so existing invocations keep working — and
@@ -148,6 +153,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **Two gates in `pkg/aws` that my own change exposed as broken, both now
+  property-based.** `TestSporedTagPermissionsScoped` matched statements by
+  `Action` without reading `Effect`, so it treated the new control-tag `Deny` as
+  an unconditioned grant — an `Action` match alone cannot tell a grant from a
+  prohibition. `TestBuildInlinePolicy` asserted literal statement counts (6 and
+  7), so every statement legitimately added to the spored baseline over the past
+  year (#174, #173, #221, #622) failed it for no reason and taught whoever hit it
+  to bump a number; it now measures the baseline and asserts the two properties
+  that were meant — a known template adds statements, an unknown one adds none.
+  Both were re-verified against compiling reverts to confirm they still catch the
+  defects they were written for.
 
 - **Every scheduled sweep failed; `spawn schedule` has never worked** (#812).
   `lambda/scheduler-handler` invoked
@@ -254,6 +271,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifacts behind.
 
 ### Security
+
+- **The TTL reaper executed instance-writable tag content as root, on any
+  spawn-managed instance in the account** (advisory GHSA-8q3p-qcv8-2pr4, #830).
+  The graceful pre-stop tier (#187) read the `spawn:pre-stop` tag and ran it
+  through SSM `AWS-RunShellScript`, which executes as root, and the `spored`
+  instance role holds `ec2:CreateTags` on `Resource: "*"` for every instance
+  carrying `spawn:managed=true`. So any principal holding one spore's
+  instance-role credentials — which includes any unprivileged local user on that
+  spore, via IMDS — could rewrite **another** instance's `spawn:pre-stop` and
+  `spawn:ttl-deadline` and obtain root command execution there when the reaper
+  next collected it. In a team-shared account, that is cross-tenant root RCE.
+  Two distinct paths reached root, and both are closed:
+  the privilege drop was conditional (`if localUsername != ""`), so an instance
+  with that tag missing — or *deleted*, which the same role could do — ran the
+  hook as root; and the username was spliced into `su - %s -c …` unquoted while
+  the hook body beside it was quoted, so `x -c '…' #` supplied its own `-c`.
+  Running the hook as root was never the intent: #63 is "run the hook as this
+  user". The reaper now refuses to run the hook at all unless the tag names a
+  valid, non-`root` POSIX user, which cannot weaken the hard-deadline guarantee
+  (#72) because the caller terminates either way — the only loss is the flush,
+  which is already what happens when an instance isn't SSM-managed.
+  The command construction moved into `buildPreStopCommand` so the guard can be
+  tested where it lives; `tryGracefulPreStop` takes a concrete `*ssm.Client` and
+  could not be driven at all.
+- **The `spored` instance role can no longer write the tags the reaper acts on.**
+  Both spored policies gained an explicit `Deny` on `ec2:CreateTags` and
+  `ec2:DeleteTags` conditioned on `ForAnyValue:StringEquals` over `aws:TagKeys`
+  for `spawn:pre-stop`, `spawn:pre-stop-timeout` and `spawn:local-username`.
+  `Deny` rather than a narrower `Allow` because an explicit deny cannot be
+  overridden by a later grant, and these two policies have already diverged in
+  exactly that way once. `ForAnyValue` rather than `ForAllValues` because the
+  latter would only fire when *every* requested key is a control key, so
+  appending one innocuous tag would defeat it.
+  **The list is deliberately only three keys.** The obvious longer version is
+  wrong: spored legitimately writes `spawn:last-heartbeat` every cycle and both
+  writes and deletes `spawn:ttl-deadline` on the `spored ttl set` path, so
+  denying those would have broken idle detection and `spored ttl` while reading
+  as a hardening. Deadline tampering stays contained by the unconditional max-age
+  ceiling instead (#76), which is the right tool precisely because that key has a
+  legitimate in-instance writer.
+  Verified by 11 `simulate-custom-policy` evaluations across both documents: all
+  three control keys `explicitDeny` on create and delete, including when mixed
+  with a legitimate key in the same request, while `spawn:last-heartbeat`,
+  `spawn:ttl`, `spawn:ttl-deadline` and `spawn:fsx-dra-status` all stay `allowed`.
+
+  **Existing roles need remediation.** `spored-instance-role` is rewritten on
+  each launch, so a launch from a build containing this change updates it — but
+  until then a long-lived role keeps the old grant. Deploying the reaper is the
+  independent and higher-priority half: it closes the root escalation on its own,
+  without waiting for the policy to reach any instance.
 
 - **The in-account TTL reaper could run arbitrary root commands on any
   SSM-managed instance** (advisory GHSA-2hfh-q6jv-qgjp, #818).
@@ -377,6 +444,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolves.
 
 ### Documentation
+
+- **`lambda/ttl-reaper/README.md` contradicted the code in two places**, both now
+  gated rather than merely corrected. It said flatly that a reaper-kill "does
+  **not** run the in-instance pre-stop hook", written before #187 added exactly
+  that and never updated — so a reader auditing the reaper's blast radius would
+  have concluded there was no SSM execution path at all. And it said
+  "Within-deadline instances are always spared", which stopped being true when the
+  max-age ceiling became unconditional (#76); the ceiling is the control against a
+  spore writing itself a far-future deadline, so a page promising the opposite is
+  the most misleading line available. `TestReaperDocsAgreeThatTheCeilingBeatsAFarFutureDeadline`
+  now covers the README alongside `main.go` and `template.yaml` — it was the one
+  page left out, and the one a reader reaches first.
+- Four link references used in that README (`#76`, `#187`, `#247`, `#438`) had no
+  definition, so they rendered as literal text.
 
 - **`CLAUDE.md` gains a fifth gate rule: assert the documented intent, not the
   behaviour you observed.** A test written by reading the code can only confirm

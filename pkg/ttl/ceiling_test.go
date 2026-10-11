@@ -62,9 +62,13 @@ func TestDefaultReaperMaxAgeMatchesTheReaper(t *testing.T) {
 // carries the scope, in both places, rather than matching whole sentences.
 func TestReaperDocsAgreeThatTheCeilingBeatsAFarFutureDeadline(t *testing.T) {
 	root := repoRoot(t)
+	// The README was not in this list, and said the opposite — "Within-deadline
+	// instances are always spared" — for as long as the code did. It is the page a
+	// reader reaches first, so it is the one most worth gating.
 	for _, f := range []string{
 		filepath.Join(root, "lambda", "ttl-reaper", "main.go"),
 		filepath.Join(root, "lambda", "ttl-reaper", "template.yaml"),
+		filepath.Join(root, "lambda", "ttl-reaper", "README.md"),
 	} {
 		body := readFile(t, f)
 		if !strings.Contains(strings.ToLower(body), "far-future") {

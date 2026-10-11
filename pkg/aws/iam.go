@@ -918,6 +918,11 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	// foreign instance into scope. spored only ever tags its own instance (which
 	// always carries spawn:managed=true), so legitimate use is unaffected. (This
 	// also adds the previously-missing DeleteTags grant the FSx-mount path needs.)
+	//
+	// That reasoning is correct and was not sufficient: re-tagging an instance
+	// already in scope is itself an attack when the reaper EXECUTES a tag's value.
+	// See reaperControlTagKeys below, and the Deny appended right after this
+	// statement — GHSA-8q3p-qcv8-2pr4.
 	sporedTagPermissions := map[string]interface{}{
 		"Effect": "Allow",
 		"Action": []interface{}{
@@ -932,6 +937,7 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 		},
 	}
 	statements = append(statements, sporedTagPermissions)
+	statements = append(statements, reaperControlTagDeny())
 
 	sporedActionPermissions := map[string]interface{}{
 		"Effect": "Allow",
@@ -1265,6 +1271,77 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 // CreateTags is scoped to spawn:managed=true (DCV instances always carry that tag
 // at launch, via buildTags).
 
+// reaperControlTagKeys are the instance tags the TTL reaper does not merely read
+// but ACTS on, and in the pre-stop case EXECUTES. The instance must never be able
+// to write them (GHSA-8q3p-qcv8-2pr4).
+//
+// The attack this closes: ec2:CreateTags is granted on Resource "*" conditioned on
+// ec2:ResourceTag/spawn:managed=true, so a spore can retag any OTHER spawn-managed
+// instance in the account — the policy comment above reasons correctly that it
+// "cannot pull a foreign instance into scope", which turns out to be the wrong
+// worry. The reaper feeds spawn:pre-stop to SSM AWS-RunShellScript, which runs as
+// root, so writing a victim's spawn:pre-stop (or clearing its
+// spawn:local-username, so no privilege drop happens) is root command execution on
+// the victim. Any unprivileged local user on any spore can reach the role's
+// credentials through IMDS, so this is a one-spore-to-whole-account pivot.
+//
+// Why only these three. The obvious longer list is wrong: spored legitimately
+// writes spawn:last-heartbeat (pkg/agent/agent.go) and both writes and deletes
+// spawn:ttl-deadline (the `spored ttl set` path, via ttl.SetTags), so denying
+// those keys would break idle detection and `spored ttl` rather than harden
+// anything. These three are read-only to the instance by construction: they are
+// set once at launch by the CLI and nothing in pkg/agent or cmd/spored ever writes
+// them. Tampering with the deadline remains possible and remains contained by the
+// unconditional max-age ceiling instead (#76) — that is the right tool for it,
+// because the deadline has a legitimate in-instance writer and the hook does not.
+//
+// Deny, not a narrower Allow. An explicit Deny cannot be overridden by a later
+// Allow, and these two policies have already diverged once in exactly that way:
+// the DCV copy granted ec2:CreateTags on "*" UNCONDITIONED while the dynamic
+// baseline was being scoped for #174.
+var reaperControlTagKeys = []string{
+	"spawn:pre-stop",
+	"spawn:pre-stop-timeout",
+	"spawn:local-username",
+}
+
+// reaperControlTagDeny is the statement form for buildInlinePolicy.
+//
+// ForAnyValue:StringEquals is the correct operator: aws:TagKeys is multi-valued,
+// and the deny must fire when the request carries *any* control key, even
+// alongside legitimate ones. ForAllValues here would only deny a request made up
+// entirely of control keys, so appending one legitimate tag would defeat it.
+func reaperControlTagDeny() map[string]interface{} {
+	keys := make([]interface{}, 0, len(reaperControlTagKeys))
+	for _, k := range reaperControlTagKeys {
+		keys = append(keys, k)
+	}
+	return map[string]interface{}{
+		"Effect": "Deny",
+		"Action": []interface{}{
+			"ec2:CreateTags",
+			"ec2:DeleteTags",
+		},
+		"Resource": "*",
+		"Condition": map[string]interface{}{
+			"ForAnyValue:StringEquals": map[string]interface{}{
+				"aws:TagKeys": keys,
+			},
+		},
+	}
+}
+
+// reaperControlTagKeysJSON renders the same list for the static DCV policy below,
+// so the two policies cannot drift on it — the failure mode this whole comment
+// block is about.
+func reaperControlTagKeysJSON() string {
+	quoted := make([]string, 0, len(reaperControlTagKeys))
+	for _, k := range reaperControlTagKeys {
+		quoted = append(quoted, `"`+k+`"`)
+	}
+	return strings.Join(quoted, ", ")
+}
+
 // sporedTrustPolicy is the assume-role trust policy for the spored EC2 role:
 // it lets the EC2 service assume the role. Used by SetupSporedIAMRole when
 // creating the role.
@@ -1281,7 +1358,10 @@ const sporedTrustPolicy = `{
   ]
 }`
 
-const sporedDCVRolePolicy = `{
+// A var rather than a const so the reaper control-tag deny below is rendered from
+// reaperControlTagKeys, the same slice buildInlinePolicy uses. Hardcoding the list
+// twice is the drift this file has already shipped once.
+var sporedDCVRolePolicy = fmt.Sprintf(`{
   "Version": "2012-10-17",
   "Statement": [
     {
@@ -1300,6 +1380,16 @@ const sporedDCVRolePolicy = `{
       "Condition": {
         "StringEquals": {
           "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Effect": "Deny",
+      "Action": ["ec2:CreateTags", "ec2:DeleteTags"],
+      "Resource": "*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": [%s]
         }
       }
     },
@@ -1387,7 +1477,7 @@ const sporedDCVRolePolicy = `{
       ]
     }
   ]
-}`
+}`, reaperControlTagKeysJSON())
 
 // waitForInstanceProfile polls until the instance profile is retrievable (IAM
 // is eventually consistent after creation), or a bounded deadline passes. It
