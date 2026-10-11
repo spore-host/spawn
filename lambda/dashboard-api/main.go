@@ -224,12 +224,6 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		}
 		return handleGetCostHistory(ctx, cfg, days, cliIamArn)
 
-	case path == "/api/alert-preferences" && method == "GET":
-		return handleGetAlertPreferences(ctx, cfg, cliIamArn)
-
-	case path == "/api/alert-preferences" && method == "POST":
-		return handleSaveAlertPreferences(ctx, cfg, request.Body, cliIamArn)
-
 	case path == "/api/user/profile" && method == "GET":
 		return handleGetUserProfile(ctx, cfg, userID, cliIamArn, accountBase36)
 

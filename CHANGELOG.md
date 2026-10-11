@@ -190,6 +190,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`lambda/alert-evaluator` and the dashboard's `/api/alert-preferences`
+  endpoints are gone** (#794), completing the alerting removal #783 began. The
+  evaluator was **deployed and running hourly since 2026-02-20** — roughly 5,500
+  invocations — reading `spawn-alert-preferences`, which has never held a record.
+  Its SNS topic had **zero confirmed subscriptions**, so even a triggered alert
+  had nowhere to go: the path was dead at both ends.
+  The dashboard half goes with it deliberately. `POST /api/alert-preferences`
+  was the only writer of that table, and keeping a user-facing endpoint that
+  accepts configuration nothing consumes is precisely the defect #790 was about.
+  **`spawn-cost-history` is unaffected** — `cost-history-collector` still writes
+  it and the dashboard still reads it; only the evaluator's read of it went away.
+  Also torn down in the shared infra account: the function, its
+  `spawn-alert-evaluator-hourly` rule, and its log group. **Deliberately kept:**
+  `SpawnDashboardLambdaRole`, which is shared by four still-live functions, and
+  the `spawn-cost-alerts` topic and `spawn-alert-preferences` table, both
+  declared in a template whose other resources are live. Those belong to #653.
+
 - **The `spawn alerts` command and `lambda/alert-handler` are gone** (#783).
   **This is a breaking change: the next release must bump MINOR.** `spawn alerts
   create|list|delete|history` no longer exists.
