@@ -67,7 +67,11 @@ func portalAccountFromARN(userARN string) (string, bool) {
 
 // getUserFromRequest extracts user identity from API Gateway request
 // Returns: userID, cliIamArn, accountBase36, error
-func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIGatewayProxyRequest) (string, string, string, error) {
+// getUserFromRequest identifies the caller and, when the request carried
+// credentials, returns a provider for them so cross-account reads can be made AS
+// the caller rather than as this Lambda (#815). The provider is nil for the API
+// Gateway IAM path, which identifies a caller but yields nothing to act with.
+func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIGatewayProxyRequest) (string, string, string, aws.CredentialsProvider, error) {
 	// Check for credentials in X-AWS-Credentials header (from Cognito Identity Pool)
 	if credsHeader, ok := request.Headers["x-aws-credentials"]; ok && credsHeader != "" {
 		return getUserFromCredentialsHeader(ctx, cfg, request, credsHeader)
@@ -109,13 +113,13 @@ func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIG
 
 	// If still no user ID, return error
 	if userID == "" {
-		return "", "", "", fmt.Errorf("unable to determine user identity from request")
+		return "", "", "", nil, fmt.Errorf("unable to determine user identity from request")
 	}
 
 	// Check if user account info is cached in DynamoDB
 	cached, err := getUserAccount(ctx, cfg, userID)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to query user account cache: %w", err)
+		return "", "", "", nil, fmt.Errorf("failed to query user account cache: %w", err)
 	}
 
 	// If cached, update last access and return
@@ -129,18 +133,18 @@ func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIG
 			cliIamArn = cached.AWSAccountID
 		}
 
-		return userID, cliIamArn, cached.AccountBase36, nil
+		return userID, cliIamArn, cached.AccountBase36, nil, nil
 	}
 
 	// Not cached - detect account ID using STS
 	stsClient := sts.NewFromConfig(cfg)
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to get caller identity: %w", err)
+		return "", "", "", nil, fmt.Errorf("failed to get caller identity: %w", err)
 	}
 
 	if identity.Account == nil || identity.Arn == nil {
-		return "", "", "", fmt.Errorf("incomplete identity response from STS")
+		return "", "", "", nil, fmt.Errorf("incomplete identity response from STS")
 	}
 
 	userARN := aws.ToString(identity.Arn)
@@ -162,14 +166,14 @@ func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIG
 		// Extract email from Cognito claims
 		email, err := extractEmailFromRequest(request)
 		if err != nil {
-			return "", "", "", fmt.Errorf("web users must have email: %w", err)
+			return "", "", "", nil, fmt.Errorf("web users must have email: %w", err)
 		}
 
 		// Look up CLI IAM ARN by email
 		cliIamArn, err = lookupCliIamArnByEmail(ctx, cfg, email)
 		if err != nil {
 			log.Printf("identity not linked for email %s: %v", email, err)
-			return "", "", "", fmt.Errorf("identity not linked: link your CLI IAM user via 'spawn auth link'")
+			return "", "", "", nil, fmt.Errorf("identity not linked: link your CLI IAM user via 'spawn auth link'")
 		}
 	}
 
@@ -185,23 +189,27 @@ func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIG
 		log.Printf("warning: failed to cache user account: %v", err)
 	}
 
-	return userID, cliIamArn, accountBase36, nil
+	return userID, cliIamArn, accountBase36, nil, nil
 }
 
 // getUserFromCredentialsHeader validates credentials from X-AWS-Credentials header
 // Header format: base64-encoded JSON with accessKeyId, secretAccessKey, sessionToken
-func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request events.APIGatewayProxyRequest, credsHeader string) (string, string, string, error) {
+func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request events.APIGatewayProxyRequest, credsHeader string) (string, string, string, aws.CredentialsProvider, error) {
+	// Declared first so EVERY failure path below returns a nil provider: a caller
+	// we could not validate must not be actable-as (#815).
+	var callerCreds aws.CredentialsProvider
+
 	// Reject oversized headers before attempting decode.
 	const maxCredentialHeaderBytes = 8192
 	if len(credsHeader) > maxCredentialHeaderBytes {
-		return "", "", "", fmt.Errorf("credentials header too large")
+		return "", "", "", callerCreds, fmt.Errorf("credentials header too large")
 	}
 
 	// Decode base64 credentials
 	credsJSON, err := base64.StdEncoding.DecodeString(credsHeader)
 	if err != nil {
 		log.Printf("failed to decode credentials header: %v", err)
-		return "", "", "", fmt.Errorf("failed to decode credentials header: %w", err)
+		return "", "", "", callerCreds, fmt.Errorf("failed to decode credentials header: %w", err)
 	}
 
 	var creds struct {
@@ -212,30 +220,35 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 
 	if err := json.Unmarshal(credsJSON, &creds); err != nil {
 		log.Printf("failed to parse credentials JSON: %v", err)
-		return "", "", "", fmt.Errorf("failed to parse credentials JSON: %w", err)
+		return "", "", "", callerCreds, fmt.Errorf("failed to parse credentials JSON: %w", err)
 	}
 
 	// Validate credentials using STS GetCallerIdentity
+	// Build the provider once and use it BOTH to validate and to return, so the
+	// credentials handed to cross-account reads are exactly the ones STS
+	// confirmed — not a second copy that could diverge.
+	callerCreds = aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		return aws.Credentials{
+			AccessKeyID:     creds.AccessKeyID,
+			SecretAccessKey: creds.SecretAccessKey,
+			SessionToken:    creds.SessionToken,
+		}, nil
+	})
+
 	stsClient := sts.NewFromConfig(cfg, func(o *sts.Options) {
-		o.Credentials = aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
-			return aws.Credentials{
-				AccessKeyID:     creds.AccessKeyID,
-				SecretAccessKey: creds.SecretAccessKey,
-				SessionToken:    creds.SessionToken,
-			}, nil
-		})
+		o.Credentials = callerCreds
 	})
 
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
 		log.Printf("STS GetCallerIdentity failed: %v", err)
-		return "", "", "", fmt.Errorf("invalid credentials: %w", err)
+		return "", "", "", callerCreds, fmt.Errorf("invalid credentials: %w", err)
 	}
 
 	log.Printf("credentials validated")
 
 	if identity.Arn == nil || identity.Account == nil {
-		return "", "", "", fmt.Errorf("incomplete identity response from STS")
+		return "", "", "", callerCreds, fmt.Errorf("incomplete identity response from STS")
 	}
 
 	userID := *identity.Arn
@@ -249,13 +262,13 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 	// per login. Return early with the account as the scope key.
 	if account, ok := portalAccountFromARN(userID); ok {
 		log.Printf("federated portal identity: account %s", account)
-		return userID, account, accountBase36, nil
+		return userID, account, accountBase36, callerCreds, nil
 	}
 
 	// Check cache
 	cached, err := getUserAccount(ctx, cfg, userID)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to query user account cache: %w", err)
+		return "", "", "", callerCreds, fmt.Errorf("failed to query user account cache: %w", err)
 	}
 
 	if cached != nil {
@@ -267,7 +280,7 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 			cliIamArn = cached.AWSAccountID
 		}
 
-		return userID, cliIamArn, cached.AccountBase36, nil
+		return userID, cliIamArn, cached.AccountBase36, callerCreds, nil
 	}
 
 	// Determine identity type and extract CLI IAM ARN
@@ -285,14 +298,14 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 		// Extract email from Cognito claims in request
 		email, err := extractEmailFromRequest(request)
 		if err != nil {
-			return "", "", "", fmt.Errorf("web users must have email: %w", err)
+			return "", "", "", callerCreds, fmt.Errorf("web users must have email: %w", err)
 		}
 
 		// Look up CLI IAM ARN by email
 		cliIamArn, err = lookupCliIamArnByEmail(ctx, cfg, email)
 		if err != nil {
 			log.Printf("identity not linked for email %s: %v", email, err)
-			return "", "", "", fmt.Errorf("identity not linked: link your CLI IAM user via 'spawn auth link'")
+			return "", "", "", callerCreds, fmt.Errorf("identity not linked: link your CLI IAM user via 'spawn auth link'")
 		}
 	}
 
@@ -306,7 +319,7 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 		log.Printf("warning: failed to cache user account: %v", err)
 	}
 
-	return userID, cliIamArn, accountBase36, nil
+	return userID, cliIamArn, accountBase36, callerCreds, nil
 }
 
 // extractEmailFromRequest extracts email from API Gateway request

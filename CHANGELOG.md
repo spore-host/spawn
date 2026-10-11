@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Four gates, each watched failing against a revert that compiles: the refusal
+  without caller credentials, the client being built with them, the STS client
+  carrying `callerCreds` rather than the ambient chain, and every failure path in
+  the credentials handler returning a **nil** provider — because handing back a
+  half-built provider from a path where validation failed would let an unverified
+  caller be acted as, which is the inverse of the original bug and worse.
+  Note that the last property is partly enforced by the compiler: declaring the
+  provider after the first early return does not build, since those returns
+  reference it. The gate covers the compiling variant, where the early returns use
+  a literal `nil` and the declaration drifts later.
+
 - **Behavioural coverage for the live half of `pkg/staging`**, which had none.
   `staging_test.go`'s five tests covered only the functions this change removed,
   so deleting it would have left `resolveSchedulesBucket` untested — the function
@@ -435,6 +446,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **The dashboard's cross-account EC2 reads have never worked, and now do —
+  with no IAM change at all** (#815). The member-account role's trust names
+  `Cognito_SpawnDashboard_Auth_Role`, the identity-pool role the browser assumes,
+  and that role already carries `sts:AssumeRole` scoped to exactly the one role
+  ARN. **Both halves of the design were deployed and correct.** Only the code was
+  wrong: `main.go` built one `aws.Config` from this Lambda's own credentials and
+  passed it to every handler, so the AssumeRole was attributed to the Lambda.
+  Measured with `simulate-principal-policy`:
+
+  ```
+  Cognito_SpawnDashboard_Auth_Role -> allowed
+  SpawnDashboardLambdaRole         -> implicitDeny
+  ```
+
+  The caller's credentials — already validated against STS by
+  `getUserFromCredentialsHeader`, then discarded — are now threaded through to
+  `getEC2ClientForRegion`, which builds the STS client with them. That one line is
+  the fix.
+
+  **The obvious repair was rejected deliberately.** Adding the Lambda role to the
+  trust and granting it `sts:AssumeRole` would create a standing role able to read
+  **every** onboarded tenant's instances, assumed by a Lambda behind a public API,
+  growing in reach with each account onboarded — the shape of
+  GHSA-qc2h-6qqf-wcm4's fail-open ownership check and GHSA-7pm4-cqjg-vh2q's open
+  front door, both fixed earlier in this audit. Acting as the caller inverts it:
+  each user reads their own account with their own permissions, and this Lambda
+  holds no cross-tenant access.
+
+  A request that authenticated **without** usable credentials (the API Gateway IAM
+  path identifies a caller but yields nothing to act with) now gets a named
+  refusal rather than a silent fall-through to the ambient credential chain, which
+  is this Lambda's role. The role session name carries the caller too, so
+  CloudTrail in the member account shows which dashboard user read it rather than
+  one shared identity.
 
 - **Scheduled executions read a bucket they had never written to** (#804).
   `resolveSchedulesBucket` prefers the shared `spawn-schedules-<region>` and falls
