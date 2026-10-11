@@ -83,6 +83,69 @@ func TestResolverLambdaNamesAreCoveredByTheScan(t *testing.T) {
 	}
 }
 
+// The widened identifier pattern is only safe while every match really is a
+// Lambda function name. Pin the population so a sixth cannot appear unnoticed.
+//
+// This exists because the pattern above is deliberately loose — it matches any
+// identifier containing Func/Function/FuncName assigned a string literal — and
+// that looseness was justified by a measurement ("exactly five, all genuine")
+// rather than by the regex itself. A measurement that nothing re-checks is the
+// hand-maintained list rule 4 warns about, one level up: the list here is the
+// set of things the loose pattern is allowed to match.
+//
+// If this fails, read the new match. If it names a Lambda function, add it to
+// the expected set. If it does not — say a `handlerFunctionName = "index.handler"`
+// — then the pattern has started matching something it should not, and the
+// pattern needs narrowing rather than the list growing.
+func TestEveryLambdaNamingIdentifierIsChecked(t *testing.T) {
+	root := repoRoot(t)
+	// identifier -> the value it should hold, as a cross-check that the match is
+	// a function name and not something that merely looks like one.
+	want := map[string]string{
+		"defaultOrchestratorFuncName": "spawn-sweep-orchestrator",
+		"defaultLambdaFuncName":       "spawn-sweep-orchestrator",
+		"schedulerHandlerFunction":    "scheduler-handler",
+		"sweepOrchestratorFunction":   "spawn-sweep-orchestrator",
+		"dashboardAPIFunction":        "spawn-dashboard-api",
+	}
+
+	ident := regexp.MustCompile(`(?mi)^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*func(?:tion)?(?:name)?)[[:space:]]*=[[:space:]]*"([a-z0-9][a-z0-9-]*)"`)
+
+	got := map[string]string{}
+	walkRepoFiles(t, root, func(path, rel string) {
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return
+		}
+		for _, m := range ident.FindAllStringSubmatch(readStripped(t, path, "//"), -1) {
+			got[m[1]] = m[2]
+		}
+	})
+
+	if len(got) == 0 {
+		t.Fatal("found no Lambda-naming identifiers — the discovery is broken, not the repo")
+	}
+
+	for name, value := range got {
+		expected, known := want[name]
+		if !known {
+			t.Errorf("new Lambda-naming identifier %q = %q.\n"+
+				"If it names a Lambda function, add it here. If it does not, the pattern in "+
+				"lambdaNamesHardcodedInGoSource has started matching something it should not and "+
+				"needs narrowing — do not widen this list to accommodate a false positive.",
+				name, value)
+			continue
+		}
+		if value != expected {
+			t.Errorf("%s = %q, want %q", name, value, expected)
+		}
+	}
+	for name := range want {
+		if _, ok := got[name]; !ok {
+			t.Errorf("%q is no longer present; if it was removed, drop it from this list", name)
+		}
+	}
+}
+
 // lambdaNamesCreatedByDeployMechanisms reads the names out of the shell scripts
 // and CloudFormation/SAM templates that create functions.
 func lambdaNamesCreatedByDeployMechanisms(t *testing.T, root string) map[string]string {
@@ -129,9 +192,22 @@ func lambdaNamesHardcodedInGoSource(t *testing.T, root string) map[string]string
 	// from a variable or a constant, and the constants are checked through their
 	// own call sites.
 	lit := regexp.MustCompile(`:function:([a-z0-9][a-z0-9-]*)`)
-	// A bare constant declaration, so the resolver's names are seen even though
-	// its Sprintf uses %s.
-	constDecl := regexp.MustCompile(`(?m)^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*Function[[:space:]]*=[[:space:]]*"([a-z0-9][a-z0-9-]*)"`)
+	// Any identifier that NAMES a Lambda function, assigned a string literal.
+	//
+	// The first version of this required the identifier to end in `Function` and
+	// required a literal after `:function:`. Both conditions described how I
+	// happened to spell the constants in THIS package, not the property being
+	// gated — so it missed #812 twice over: `defaultOrchestratorFuncName` ends in
+	// `FuncName`, and it reaches AWS through `:function:%s` with the name in a
+	// variable. The result was a scheduler handler invoking a function that has
+	// never existed, and a gate written for exactly that class reporting clean.
+	//
+	// Matching `Func` or `Function` anywhere in the identifier is safe here, not
+	// merely convenient: across the whole repo exactly five non-test identifiers
+	// match, and all five are genuine Lambda function names. Measured, not
+	// assumed — and TestEveryLambdaNamingIdentifierIsChecked below pins the count
+	// so a sixth cannot appear unnoticed.
+	constDecl := regexp.MustCompile(`(?mi)^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*func(tion)?(name)?[[:space:]]*=[[:space:]]*"([a-z0-9][a-z0-9-]*)"`)
 
 	walkRepoFiles(t, root, func(path, rel string) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
@@ -148,7 +224,7 @@ func lambdaNamesHardcodedInGoSource(t *testing.T, root string) map[string]string
 			used[m[1]] = rel
 		}
 		for _, m := range constDecl.FindAllStringSubmatch(src, -1) {
-			used[m[1]] = rel
+			used[m[3]] = rel
 		}
 	})
 	return used

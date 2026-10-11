@@ -167,11 +167,36 @@ fi
 # is a poor property for the step that now carries the runtime.
 echo ""
 echo "⚙️  Updating Lambda configuration (runtime, timeout, memory)..."
+# Set the environment EXPLICITLY, so the deployed configuration is reproducible
+# from this script rather than inherited from compiled-in defaults (#812).
+#
+# The handler's defaults were wrong — it invoked `sweep-orchestrator` where the
+# deployed function is `spawn-sweep-orchestrator` — and because this script set no
+# environment at all, there was nothing in the deploy path to correct or even
+# reveal it. Every scheduled sweep failed with ResourceNotFoundException.
+#
+# Named here even though the code defaults now match: a value that only exists as
+# a compiled-in default cannot be read back from AWS, so skew between the repo and
+# the deployed function is invisible. Stating it makes `aws lambda
+# get-function-configuration` the answer rather than a guess.
+#
+# Note that --environment REPLACES the whole environment rather than merging.
+# That is deliberate here: this script is meant to be the source of truth for
+# this function's configuration, so a variable set out-of-band in the console
+# SHOULD be overwritten — out-of-band config is the problem being fixed. The
+# live function had no variables at all when this was written, so nothing is
+# being displaced. Contrast deploy-sweep-orchestrator.sh, which once sent
+# `Variables={}` and wiped a populated environment under `|| true`; the gate in
+# scripts/deploy_scripts_test.go exists for that case.
+ORCHESTRATOR_FUNCTION_NAME="${SPAWN_ORCHESTRATOR_FUNCTION_NAME:-spawn-sweep-orchestrator}"
+ORCHESTRATOR_REGION="${SPAWN_ORCHESTRATOR_REGION:-us-east-1}"
+
 aws lambda update-function-configuration \
     --function-name "$FUNCTION_NAME" \
     --runtime provided.al2023 \
     --timeout 300 \
     --memory-size 512 \
+    --environment "Variables={SPAWN_ORCHESTRATOR_FUNCTION_NAME=$ORCHESTRATOR_FUNCTION_NAME,SPAWN_ORCHESTRATOR_REGION=$ORCHESTRATOR_REGION}" \
     --region "$REGION" \
     --profile "$PROFILE" \
     --output text --query '[FunctionName,Runtime,Timeout,MemorySize]'
