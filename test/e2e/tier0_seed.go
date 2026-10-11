@@ -9,6 +9,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
+	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -128,6 +130,29 @@ func (e *spawnEnv) seedAlertTables() {
 	})
 	if err != nil {
 		e.t.Fatalf("seed spawn-alerts: %v", err)
+	}
+}
+
+// seedAlertHandler creates the Lambda function that consumes the alerts table.
+//
+// Needed because `spawn alerts create` now refuses to write an alert when
+// nothing exists to deliver it (#790) — seeding the tables alone models a
+// control plane where every alert created would be inert, which is exactly the
+// state the refusal exists to catch. A round-trip test wants the WORKING
+// deployment, so it seeds the consumer too.
+//
+// The function body is a placeholder: the CLI only asks whether it exists.
+func (e *spawnEnv) seedAlertHandler() {
+	e.t.Helper()
+	_, err := e.LambdaClient().CreateFunction(context.Background(), &lambdasvc.CreateFunctionInput{
+		FunctionName: aws.String("spawn-alert-handler"),
+		Role:         aws.String("arn:aws:iam::123456789012:role/test-role"),
+		Runtime:      lambdatypes.Runtime("python3.12"),
+		Handler:      aws.String("index.handler"),
+		Code:         &lambdatypes.FunctionCode{ZipFile: []byte("placeholder")},
+	})
+	if err != nil {
+		e.t.Fatalf("seed spawn-alert-handler: %v", err)
 	}
 }
 
