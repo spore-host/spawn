@@ -153,27 +153,35 @@ test-integration-queue:
 # emulator). Tiers 1–3 require AWS credentials (AWS_PROFILE=spore-host-dev or env
 # vars) and a compiled spawn binary at ./bin/spawn (run 'make build' first).
 
+# -count=1 on every tier below is load-bearing, not habit (#831, #792). These
+# tests exec bin/spawn at runtime, and Go's test cache cannot see a binary read at
+# runtime — so without it a second run reports `ok (cached)` whatever bin/spawn has
+# become. Replacing bin/spawn with a script whose whole body is `exit 1` passed the
+# entire Tier 0 surface that way. On tiers 2 and 3 it is worse than embarrassing:
+# they launch real billable instances, so a cached pass lets a release be cut on a
+# run that never touched AWS. TestEveryE2EMakeRecipePassesCountOne gates this.
+
 # Tier 0 — CLI against the Substrate emulator: no AWS account, deterministic,
 # safe for CI. Exercises the full command surface (args → cobra → AWS client →
 # Substrate) asserting JSON, exit codes, and emulator state.
 test-e2e-tier0: build
 	@echo "Running E2E tier 0 (CLI against Substrate, no AWS account)..."
-	go test -tags=e2e_tier0 -timeout 30m ./test/e2e/
+	go test -count=1 -tags=e2e_tier0 -timeout 30m ./test/e2e/
 
 # Tier 1 — AWS API-only, no instances launched, ~free, ~5 min
 test-e2e-tier1: build
 	@echo "Running E2E tier 1 (API-only, no instances)..."
-	go test -v -tags=e2e_tier1 -run TestTier1 -timeout 10m ./test/e2e/
+	go test -v -count=1 -tags=e2e_tier1 -run TestTier1 -timeout 10m ./test/e2e/
 
 # Tier 2 — Single instance per test, ~$0.50 total, ~20 min
 test-e2e-tier2: build
 	@echo "Running E2E tier 2 (single-instance tests, ~\$$1)..."
-	go test -v -tags=e2e_tier2 -run TestTier2 -timeout 80m ./test/e2e/
+	go test -v -count=1 -tags=e2e_tier2 -run TestTier2 -timeout 80m ./test/e2e/
 
 # Tier 3 — Multi-instance (job arrays, sweeps, FSx, MPI), ~$2-5 total, ~35 min
 test-e2e-tier3: build
 	@echo "Running E2E tier 3 (multi-instance tests, ~\$$2-5)..."
-	go test -v -tags=e2e_tier3 -run TestTier3 -timeout 60m ./test/e2e/
+	go test -v -count=1 -tags=e2e_tier3 -run TestTier3 -timeout 60m ./test/e2e/
 
 # Run all E2E tiers sequentially
 test-e2e: test-e2e-tier1 test-e2e-tier2 test-e2e-tier3
