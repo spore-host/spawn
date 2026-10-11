@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`TestDocsDoNotCitePathsThatDoNotExist`** — a doc that names a file in
+  backticks must either name one that exists or declare itself historical. The
+  forcing function is the point: a doc is either current, in which case its paths
+  resolve, or it is history and says so, with no third state where it quietly
+  describes a repo that no longer exists. `libs/` is excluded because it is a
+  separate repository, and prose like "the cmd directory" is not matched because
+  it is not a claim about a specific file.
+
 - Making the reaper's call discovery real surfaced two actions nobody had reasoned
   about, because they had always been excluded: `sts:GetCallerIdentity` and the
   two Route53 calls. They are now recorded in a `grantedElsewhere` map with a
@@ -903,6 +911,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolves.
 
 ### Documentation
+
+- **A live, hourly Lambda that nothing in this repo can deploy** (#848).
+  `docs/infra-account.md` asked only one of the two questions — "code with no
+  deployment", answer none — and the inverse is not none.
+  `spawn-cost-history-collector` is invoked every hour by an ENABLED EventBridge
+  rule, was last modified **2026-02-20**, and the only references to it anywhere
+  in the repository are its own `go.mod`, a `.gitignore` entry, a Dependabot
+  entry and the changelog. No deploy script, no Makefile target, no CFN or SAM
+  template — so the source cannot reach the function that is running, and
+  Dependabot has been bumping a module that cannot be shipped. The existing gate
+  reasons outward from hardcoded Lambda names in Go source, and nothing in Go
+  source names this function, so it is invisible to that direction.
+- **`docs/spawn-audit-2026-07-11.md` marked SUPERSEDED.** It is framed as a live
+  prioritized report ("Phase 0 — Do now") and cites `cmd/launch.go` five times
+  including its line count, plus `pkg/audit/context.go`. Neither file exists —
+  `cmd/launch.go` was split up — so a reader following its own top-priority item
+  finds nothing and cannot tell whether the finding was fixed, renamed or never
+  real.
+- **`docs/dcv-streaming-design-review.md`'s central risk corrected in place.**
+  Section 3, "Idle detection can hang 'not idle' forever", and the table's
+  "**unbounded grace**" are no longer true: `pkg/agent/agent.go` defines
+  `const dcvGraceTimeout = 8 * time.Minute` and bounds exactly that, so the
+  instance cannot "bill forever". The analysis is left in place because it is why
+  the bound exists — deleting the question makes the answer look arbitrary.
+- **The reaper's cross-account onboarding command could not work** — it passed
+  `--parameter-overrides ReaperLambdaRoleArn=…` and the template declares no such
+  parameter (`ReaperAccountId`, `ReaperRoleNamePattern`, `RoleName`, `TagPrefix`),
+  so CloudFormation rejects it outright. This is the step a customer runs to put
+  an account under the cost backstop. The instruction predated #476, which
+  deliberately replaced the exact role ARN with a name pattern; the accompanying
+  "chicken-and-egg, deploy the Lambda first to read its role ARN" paragraph was
+  stale for the same reason and is gone, since a pattern-based trust does not
+  reference a principal that must already exist.
+- **The README's `.deb`/`.rpm` install commands 404'd.** GoReleaser puts the
+  version in the asset name (`spawn_0.127.0_linux_amd64.deb`), so there is no
+  version-less `releases/latest/download/` URL to fetch. Replaced with a tag
+  resolution, verified end to end: the exact pipeline the README now gives
+  resolves `0.127.0` and both assets return 200.
+- **Every `spore.host/docs` link 404'd**; the live host is `docs.spore.host`
+  (`/docs` → 404, `/docs/tools/spawn` → 404, `docs.spore.host/tools/spawn` → 200).
+- **Three `examples/README.md` quickstarts could not run**: `spawn launch --params
+  <file>` exits with "a spore name is required", so each now passes one.
 
 - **`lambda/ttl-reaper/README.md` contradicted the code in two places**, both now
   gated rather than merely corrected. It said flatly that a reaper-kill "does

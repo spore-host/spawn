@@ -4,6 +4,18 @@
 v0.34.0 "Interactive Application Streaming (DCV)" epic
 ([spore-host/spore-host #282], with #285/#286/#289/#290).
 
+> **Correction, 2026-10-11.** This note's central risk — section 3, "Idle
+> detection can hang 'not idle' forever", and the "**unbounded grace**" entry in
+> the table below — **is no longer true, and the fix is in the tree.**
+> `pkg/agent/agent.go` defines `const dcvGraceTimeout = 8 * time.Minute` and
+> bounds the DCV startup grace with it, so idle detection cannot hang and the
+> instance cannot "bill forever". Read sections 3 and the grace column as
+> describing the state at the time of writing.
+>
+> Left in place rather than edited away: the analysis is why the bound exists, and
+> deleting the question makes the answer look arbitrary. The individual claims are
+> annotated inline below.
+
 **Why this note exists:** prior work on DCV "went around and around without
 resolution." This document maps what is actually built, traces the full
 handshake, and isolates *why* it churned — so the next round of work targets the
@@ -42,7 +54,7 @@ instance — not to keep adjusting the handshake on live hardware.**
 | CLI ready-url poll | `cmd/app.go` (≈261–311) | Full |
 | Browser session HTML | `cmd/app.go` `writeSessionHTML()` | Full |
 | Reconnect path | `cmd/connect.go` (≈571–766) | Full |
-| DCV-aware idle detection | `pkg/agent/agent.go` `isIdle()` | Full, **unbounded grace** |
+| DCV-aware idle detection | `pkg/agent/agent.go` `isIdle()` | Full — grace is **bounded** by `dcvGraceTimeout` (8m) since this note was written |
 | App catalog | `libs/catalog/catalog.yaml` | Full; recipe-only definitions (BYO image, #392) |
 | Base AMI resolution | `cmd/app.go` + `pkg/aws/ami.go` `GetRecommendedAMI` | SSM-resolved AWS GPU DLAMI (#286/#389) |
 | DCV boot install | `cmd/app.go` `dcvInstallBlock()` | Installs Amazon DCV at boot (idempotent) |
@@ -96,7 +108,7 @@ When it works, it works. The problem is every step from 2–4 can fail invisibly
 - `setupDCVAuth()` runs as a single startup goroutine (`agent.go:157`); it is **not** re-driven by the monitor loop. Any transient failure (slow `dcvserver`, a momentary `ec2:CreateTags` throttle) is **permanent** — the instance never gets a `ready-url`.
 - `writeReadyTags()` correctly skips setting `dcvReadyURLWritten` on a CreateTags error (so it *could* retry) — but nothing calls it again.
 
-### 3. Idle detection can hang "not idle" forever
+### 3. Idle detection can hang "not idle" forever — FIXED, see the correction above
 - In `isIdle()` (`agent.go:818–823`): when the X11 activity file is absent and `getDCVConnectionCount()` returns `-1` (DCV not ready / `dcv` missing / parse error), it returns **not-idle with no time cap.** If DCV never becomes healthy, the instance **never idles and bills until TTL** — a silent cost leak that looks like "idle timeout is broken."
 
 ### 4. Two unsynchronized timers

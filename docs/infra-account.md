@@ -101,6 +101,28 @@ repo is deployed somewhere" is a property worth being able to check, and
 `TestEveryHardcodedLambdaNameIsCreatedByADeployMechanism` now enforces it with
 an exception list of zero.
 
+### Deployment with no deploy mechanism — the inverse, and it is NOT none
+
+The section above only asks one of the two questions. The other direction —
+**a live function nothing in this repo can update** — has one answer, and it is
+a worse state than code with no deployment, because nothing about it looks
+wrong from either side.
+
+`spawn-cost-history-collector` is live, invoked **hourly** by an ENABLED
+EventBridge rule (`spawn-cost-history-collector-hourly`, `rate(1 hour)`), and
+was last modified **2026-02-20**. The only references to it anywhere in the
+repository are its own `go.mod`, a `.gitignore` entry, a Dependabot entry and
+the changelog. There is **no deploy script, no Makefile target and no
+CloudFormation or SAM template** — so the code in `lambda/cost-history-collector/`
+cannot be built and shipped to the function that is running, and the running
+bytes are whatever someone uploaded by hand eight months ago.
+
+That is the general hazard recorded in the "leave no trace" notes made concrete:
+version skew is the normal state for this control plane, and nothing warns. The
+gate above cannot catch this one, because it reasons from hardcoded Lambda names
+in Go source outward to a deploy mechanism, and nothing in Go source names this
+function. Tracked as #848.
+
 ## DynamoDB tables
 
 Mapped to the code that reads them. Three have **no reference in this repo** and

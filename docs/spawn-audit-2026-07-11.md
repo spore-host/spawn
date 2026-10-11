@@ -1,5 +1,27 @@
 # Spawn CLI Assessment — Prioritized Findings Report
 
+> **Status: SUPERSEDED — historical, 2026-07-11. Do not act on this document.**
+>
+> It is framed as a live prioritized report ("Phase 0 — Do now") and it is not one
+> any more. Most concretely, it cites `cmd/launch.go` five times, including its
+> 4324-line count, and names `pkg/audit/context.go`. **Neither file exists** —
+> `cmd/launch.go` was split into `launch_flags.go`, `launch_single.go`,
+> `launch_jobarray.go` and others, so a reader following the document's own
+> top-priority item finds nothing and cannot tell whether the finding was fixed,
+> renamed, or never real.
+>
+> Several of its themes were acted on and are tracked properly elsewhere: the
+> dead-code inventory is #811, the `--output`/`-o` shadowing is fixed, and the
+> flat-hyphenated command families (`notify workspace-*`) now have deprecated
+> aliases. The current audit is the `Security audit 2026-10` and
+> `Correctness audit 2026-10` milestones.
+>
+> Kept rather than deleted because the reasoning is still worth reading, and
+> because the dangling-path gate (`TestDocsDoNotCitePathsThatDoNotExist`) now
+> requires exactly this choice: a doc is either current, in which case its paths
+> resolve, or it says it is history.
+
+
 ## 1. Executive Summary
 
 The spawn CLI surface is fundamentally healthy: the command tree is broad (130 nodes) but the core lifecycle verbs (`start`/`stop`/`hibernate`/`terminate`/`cancel`), the `--json`→`--output` deprecation gate, and the destructive-verb `--yes` convention are all consistent and test-enforced. The problems cluster into three themes: **(a) CLI ergonomics drift** — flat-hyphenated command families that should be subgroups (`notify workspace-*`, `autoscale *-schedule`), and inconsistent flag names/types across the launch family (`--subnet`/`--subnet-id`, `--key-pair`/`--key-name`, `--tag`/`--tags`, `--regions` slice-vs-string, `--output`/`-o` shadowing the root format flag); **(b) internal dead code** — several fully-unwired packages and file-level orphans totaling ~1000+ lines; and **(c) oversized/coupled internals** — `cmd/launch.go` (4324 LOC) and its 749-line `launchWithProgress`, the `pkg/aws` god-client, and cmd/ reaching for DynamoDB/STS directly instead of a store layer.
