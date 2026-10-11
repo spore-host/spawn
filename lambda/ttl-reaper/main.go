@@ -56,6 +56,7 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/dns"
+	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 	"github.com/spore-host/spore-host/lambda/accountlifecycle"
 )
@@ -1031,10 +1032,12 @@ func (r *reaper) tryGracefulPreStop(ctx context.Context, acct account, c candida
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 
-	// Run as the instance's user (#63), matching the in-instance pre-stop.
-	command := c.preStop
-	if c.localUsername != "" {
-		command = fmt.Sprintf("su - %s -c %s", c.localUsername, shellQuote(c.preStop))
+	command, err := buildPreStopCommand(c.preStop, c.localUsername)
+	if err != nil {
+		log.Printf("graceful pre-stop: %s has no usable %s tag (%v) — skipping the hook rather than "+
+			"running it as root; terminating without flush",
+			c.id, tagprefix.Tag("local-username"), err)
+		return
 	}
 
 	ssmClient := acct.ssmFor(c.region)
@@ -1089,6 +1092,49 @@ func (r *reaper) tryGracefulPreStop(ctx context.Context, acct account, c candida
 // escaping any embedded single quotes.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// buildPreStopCommand renders the shell the reaper hands to SSM for an
+// instance's --pre-stop hook, running it as the instance's own user (#63) to
+// match what spored does in-instance. It returns an error — meaning "do not run
+// the hook at all" — rather than falling back to root.
+//
+// Both inputs come from instance tags, and the spored instance role holds
+// ec2:CreateTags on every instance carrying spawn:managed=true, so a spore can
+// rewrite these tags on ANY spawn-managed instance in the account, not only its
+// own. SSM runs AWS-RunShellScript as root. Two separate ways that used to become
+// root execution on the victim (GHSA-8q3p-qcv8-2pr4):
+//
+//   - No username meant no `su` at all, so the hook ran as root. The guard was
+//     `if localUsername != ""`, which made root the *default* for any instance
+//     whose tag was missing — or deleted, which the same role can do. Refusing is
+//     the fail-closed reading of #63 ("run the hook as this user"), and it cannot
+//     weaken the hard-deadline guarantee (#72) because the caller terminates
+//     either way. The only loss is the flush, which is already what happens when
+//     the instance isn't SSM-managed.
+//
+//   - The username was spliced in unquoted while the hook body was quoted. su
+//     takes its first non-option argument as the user, so `x -c 'id > /tmp/p' #`
+//     supplied its own -c and ran as root instead of as the unprivileged user.
+//
+// Validate, then quote — the same order as pkg/launcher/bootstrap.go, and what
+// pkg/agent/agent.go already does before handing a username to `su`. Validation
+// is the load-bearing half: ValidateUsername admits only
+// ^[a-z][a-z0-9_-]{0,31}$, which contains no shell metacharacter, so the quoting
+// is belt-and-braces against the validator being loosened later.
+func buildPreStopCommand(preStop, localUsername string) (string, error) {
+	if err := security.ValidateUsername(localUsername); err != nil {
+		return "", err
+	}
+	// ValidateUsername is about POSIX login syntax, so "root" satisfies it — and
+	// `su - root` makes the privilege drop a no-op, which is the thing this
+	// function exists to prevent. Caught by the gate, which was written from the
+	// intent ("never as root") rather than from the code.
+	if localUsername == "root" {
+		return "", fmt.Errorf("refusing to run the pre-stop hook as %q: the point of the su is to "+
+			"drop privilege", localUsername)
+	}
+	return fmt.Sprintf("su - %s -c %s", shellQuote(localUsername), shellQuote(preStop)), nil
 }
 
 func (r *reaper) terminate(ctx context.Context, acct account, c candidate) error {

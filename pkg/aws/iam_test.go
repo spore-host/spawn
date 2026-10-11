@@ -335,6 +335,15 @@ func TestSporedTagPermissionsScoped(t *testing.T) {
 		if !ok {
 			continue
 		}
+		// Only Allow statements can grant anything. Without this, the gate also
+		// examined the reaper control-tag Deny (GHSA-8q3p-qcv8-2pr4), which names
+		// ec2:CreateTags and correctly carries no ec2:ResourceTag condition — a
+		// Deny that fired only on spawn:managed instances would be a narrower
+		// deny, which is the opposite of what is wanted. Reading Effect is the
+		// point: an Action match alone cannot tell a grant from a prohibition.
+		if stmt["Effect"] != "Allow" {
+			continue
+		}
 		actions := actionSet(stmt["Action"])
 		hasCreate := actions["ec2:CreateTags"]
 		if !hasCreate {

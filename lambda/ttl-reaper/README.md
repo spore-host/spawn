@@ -13,8 +13,18 @@ its deadline regardless of `spored`'s health.
 
 It is a **backstop, not a replacement**: `spored` remains the primary, graceful
 enforcer (it runs the pre-stop hook, deregisters DNS, stops vs terminates per
-policy). The reaper only catches what `spored` missed. A reaper-kill is an
-external `TerminateInstances` — it does **not** run the in-instance pre-stop hook.
+policy). The reaper only catches what `spored` missed.
+
+A reaper-kill is an external `TerminateInstances`. By default it does **not** run
+the in-instance pre-stop hook; with `REAPER_GRACEFUL=true` ([#187]) it first
+attempts the hook over SSM, bounded by `REAPER_GRACEFUL_MAX_WAIT`, and terminates
+regardless of the outcome. That attempt runs the hook as the instance's
+`spawn:local-username` and is **skipped entirely** if that tag is missing or does
+not name a valid non-`root` user — SSM commands run as root, and both the hook and
+the username are instance-writable tags, so running one without dropping privilege
+would be arbitrary root execution on any spawn-managed instance in the account
+(GHSA-8q3p-qcv8-2pr4). Skipping cannot weaken the deadline guarantee: termination
+happens either way.
 
 ## What it does
 
@@ -27,7 +37,12 @@ idle-stopped instance runs no daemon, so only the reaper will ever reclaim it,
 2. `now - spawn:launch-time > REAPER_MAX_AGE` — a hard ceiling that fires even
    for `--no-timeout` / missing / unparseable deadlines.
 
-Within-deadline instances are always spared (the deadline is honored intent).
+Note that (2) is a genuine **ceiling**, not a fallback: it applies to an instance
+whose deadline is still in the future. A within-deadline instance older than
+`REAPER_MAX_AGE` is reaped, because `spawn:ttl-deadline` is writable from inside
+the instance and an honored far-future deadline would make a spore permanently
+unreapable ([#76]). Within-deadline instances under the ceiling are spared — the
+deadline is honored intent, up to the ceiling.
 
 It also (when configured) tears down a reaped instance's Route53 records ([#247])
 and — with `REAPER_DNS_SWEEP=true` — runs a **DNS reconciliation sweep** ([#438]):
@@ -333,3 +348,7 @@ nothing — by design, since a partial live set could orphan a healthy record.
 [#685]: https://github.com/spore-host/spawn/issues/685
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71
+[#76]: https://github.com/spore-host/spawn/issues/76
+[#187]: https://github.com/spore-host/spawn/issues/187
+[#247]: https://github.com/spore-host/spawn/issues/247
+[#438]: https://github.com/spore-host/spawn/issues/438
