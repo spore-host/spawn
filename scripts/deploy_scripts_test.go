@@ -113,7 +113,15 @@ func shellScripts(t *testing.T) []string {
 // failure as the unprefixed `scheduler-handler` function (#790) and the
 // lambda/*-scoped module loop (#136): a filter built from a convention cannot
 // find the thing that does not follow it.
-var deploys = regexp.MustCompile(`aws (lambda (create-function|update-function-code|update-function-configuration)|cloudformation (deploy|create-stack|update-stack))`)
+//
+// IAM verbs are in the set because leaving them out had a consequence: two
+// committed scripts granted sts:AssumeRole into an account the project's hard
+// constraint forbids, neither asserted its target account, and neither was
+// discovered here — because this regex listed the verbs I happened to be fixing
+// in #799 (lambda + cloudformation) rather than the verbs that mutate
+// deployed state. The most security-relevant script class was the one class
+// outside the gate.
+var deploys = regexp.MustCompile(`aws (lambda (create-function|update-function-code|update-function-configuration)|cloudformation (deploy|create-stack|update-stack)|iam (create|put|attach|update)-[a-z-]+)`)
 
 // deployingScripts discovers the scripts the gates below apply to.
 func deployingScripts(t *testing.T) []string {

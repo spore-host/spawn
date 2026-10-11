@@ -8,6 +8,19 @@ PROFILE=${1:-default}
 TABLE_NAME="spawn-user-accounts"
 REGION="us-east-1"
 
+# Assert the target account (#799 follow-up). The deploy-script gates originally
+# discovered only `aws lambda`/`aws cloudformation` verbs, so the IAM-mutating
+# scripts — the class that creates cross-account trust — were the one class
+# outside the account assertion. Two of them had committed a grant into an
+# account the project forbids. Override only to deploy a fork.
+EXPECTED_ACCOUNT="${SPAWN_LAMBDA_ACCOUNT:-966362334030}"
+ACCOUNT_ID=$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)
+if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
+  echo "ERROR: credentials are for account $ACCOUNT_ID, expected $EXPECTED_ACCOUNT." >&2
+  echo "       Set AWS_PROFILE, or SPAWN_LAMBDA_ACCOUNT=$ACCOUNT_ID to deploy here deliberately." >&2
+  exit 1
+fi
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Setting up DynamoDB Table: $TABLE_NAME"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -102,12 +115,6 @@ cat > /tmp/dashboard-policy-updated.json <<EOF
       "Resource": "arn:aws:dynamodb:*:*:table/spawn-user-accounts"
     },
     {
-      "Sid": "AssumeRoleForCrossAccount",
-      "Effect": "Allow",
-      "Action": "sts:AssumeRole",
-      "Resource": "arn:aws:iam::942542972736:role/SpawnDashboardCrossAccountRole"
-    },
-    {
       "Sid": "CancelSweeps",
       "Effect": "Allow",
       "Action": [
@@ -132,15 +139,21 @@ echo "→ Updating IAM policy..."
 # Get existing policy versions and delete non-default ones to avoid hitting the 5 version limit
 VERSIONS=$(aws iam list-policy-versions --profile "$PROFILE" --policy-arn "$POLICY_ARN" --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null || echo "")
 for VERSION in $VERSIONS; do
+    # swallow-ok: pruning is best-effort; a version already gone must not abort the update below
     aws iam delete-policy-version --profile "$PROFILE" --policy-arn "$POLICY_ARN" --version-id "$VERSION" 2>/dev/null || true
 done
 
 # Create new policy version and set as default
-aws iam create-policy-version \
+if ! aws iam create-policy-version \
     --profile "$PROFILE" \
     --policy-arn "$POLICY_ARN" \
     --policy-document file:///tmp/dashboard-policy-updated.json \
-    --set-as-default &>/dev/null || true
+    --set-as-default >/dev/null; then
+  echo "ERROR: failed to apply the new policy version for $POLICY_ARN" >&2
+  echo "       The role's permissions are UNCHANGED. A common cause is the 5-version" >&2
+  echo "       limit; list and prune with 'aws iam list-policy-versions'." >&2
+  exit 1
+fi
 
 echo -e "  ${GREEN}✓${NC} IAM policy updated with write permissions"
 

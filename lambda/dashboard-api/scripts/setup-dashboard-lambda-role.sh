@@ -8,6 +8,19 @@ PROFILE=${1:-default}
 ROLE_NAME="SpawnDashboardLambdaRole"
 POLICY_NAME="SpawnDashboardLambdaPolicy"
 
+# Assert the target account (#799 follow-up). The deploy-script gates originally
+# discovered only `aws lambda`/`aws cloudformation` verbs, so the IAM-mutating
+# scripts — the class that creates cross-account trust — were the one class
+# outside the account assertion. Two of them had committed a grant into an
+# account the project forbids. Override only to deploy a fork.
+EXPECTED_ACCOUNT="${SPAWN_LAMBDA_ACCOUNT:-966362334030}"
+ACCOUNT_ID=$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)
+if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
+  echo "ERROR: credentials are for account $ACCOUNT_ID, expected $EXPECTED_ACCOUNT." >&2
+  echo "       Set AWS_PROFILE, or SPAWN_LAMBDA_ACCOUNT=$ACCOUNT_ID to deploy here deliberately." >&2
+  exit 1
+fi
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Setting up IAM Role for Dashboard Lambda"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -60,7 +73,7 @@ echo "→ Attaching Lambda basic execution policy..."
 aws iam attach-role-policy \
     --profile "$PROFILE" \
     --role-name "$ROLE_NAME" \
-    --policy-arn "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" 2>/dev/null || true
+    --policy-arn "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 
 echo -e "  ${GREEN}✓${NC} Basic execution policy attached"
 
@@ -97,12 +110,6 @@ cat > /tmp/dashboard-policy.json <<EOF
       ]
     },
     {
-      "Sid": "AssumeRoleForCrossAccount",
-      "Effect": "Allow",
-      "Action": "sts:AssumeRole",
-      "Resource": "arn:aws:iam::942542972736:role/SpawnDashboardCrossAccountRole"
-    },
-    {
       "Sid": "CancelSweeps",
       "Effect": "Allow",
       "Action": [
@@ -130,7 +137,7 @@ echo "→ Attaching custom policy..."
 aws iam attach-role-policy \
     --profile "$PROFILE" \
     --role-name "$ROLE_NAME" \
-    --policy-arn "$POLICY_ARN" 2>/dev/null || true
+    --policy-arn "$POLICY_ARN"
 
 echo -e "  ${GREEN}✓${NC} Custom policy attached"
 
