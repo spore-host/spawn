@@ -19,5 +19,5 @@ spawn onboard [flags]
 | `--phone-home-url` |  | string |  | Portal phone-home Function URL (or SPORE_PORTAL_PHONE_HOME_URL) |
 | `--region` |  | string |  | AWS region to onboard (default: profile/SDK region) |
 | `--skip-phone-home` |  | bool |  | Create the role but don't auto-register with the portal |
-| `--spored-profile` |  | string |  | Instance profile name to allow PassRole for (default spored-instance-profile) |
+| `--spored-role` |  | string |  | Role name to allow iam:PassRole for (default spored-instance-role) |
 

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`cmd/onboard_test.go`, the file's first test.** Four gates, each verified
+  against a compiling revert that restores the original defect. They parse the
+  policy JSON and assert on structure rather than substrings, because a
+  `Contains(policy, "spawn:managed")` would have been satisfied by the statements
+  that *did* carry the condition — and the defect was precisely that the ones that
+  mattered did not. The requirement is expressed as a list of instance-mutating
+  **actions** rather than of statements, so a future statement inherits it.
+
 - **`spawn launch` warns when `--ttl` exceeds the reaper's default ceiling.**
   Now that the ceiling is unconditional, a TTL longer than it is silently
   ineffective — the instance is reclaimed at the ceiling regardless of the
@@ -28,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two drifting apart is how the exemption survived.
 
 ### Changed
+
+- **`spawn onboard --spored-profile` is deprecated in favour of `--spored-role`.**
+  `iam:PassRole` names a role, not an instance profile. The old flag remains as an
+  alias bound to the same variable, so existing invocations keep working — and
+  now actually work, since the value is finally used as a role name.
 
 - **The Lambda-name gate now keys on the property, not on how the constants
   happened to be spelled.** The version added for #790 required the identifier to
@@ -224,6 +237,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifacts behind.
 
 ### Security
+
+- **`spawn onboard` generated a role that could open a shell on any instance in a
+  customer's account** (advisory GHSA-w7wx-6439-wff7, #817). Four defects in ~25
+  lines of a file that had **no test at all**, which is most of why they survived:
+  it builds the role the hosted portal assumes inside a BYOA account, so every
+  grant is against someone else's infrastructure.
+  - `ssm:StartSession` was granted on `arn:aws:ec2:*:*:instance/*` with **no tag
+    condition**, while every destructive action beside it was gated on
+    `spawn:managed`. A portal compromise meant an interactive root shell on
+    arbitrary **non-spawn** production instances. Now conditioned on
+    `ssm:resourceTag/spawn:managed` — the **`ssm:`** key, not `ec2:`, because a
+    condition key belongs to the service of the *action* and an `ec2:` key is
+    simply absent from an `ssm:` request context, making such a statement a
+    silent implicit deny (#665). Split from the SSM *document* grant, since
+    `StartSession` authorises against instance and document separately and a
+    document carries no tag.
+  - `ec2:CreateTags` was unconditioned on `*`, which is the #174 defect:
+    `pkg/aws/iam.go` documents it as "a compromised spore could tag ANY instance
+    `spawn:managed=true` and then terminate it", and that fix reached the spored
+    policies but never this file. Two API calls terminated any instance in an
+    onboarded account. Now split in two, because this role *launches*: tagging at
+    `RunInstances` time cannot satisfy a resource-tag condition (the tag is what
+    is being created), so that case uses `ec2:CreateAction`, and retagging an
+    existing instance uses `ec2:ResourceTag/spawn:managed`.
+  - `iam:PassRole` interpolated an instance **profile** name into a **role** ARN
+    slot, so the grant matched nothing and the portal's `RunInstances` was denied.
+    It now derives from `pkg/aws.SporedRoleName`. An IAM grant that cannot match
+    is not a safe failure — it reads as working while the feature it enables is
+    simply broken, which is why nobody noticed.
+  - **No existing role needs remediation:** `spore-portal-accounts` measures
+    `Count=0` and `spore-portal-onboard` does not exist in the compute account, so
+    no account has ever been onboarded. That independently corroborates the
+    `PassRole` finding.
 
 - **The reaper's max-age ceiling now applies even inside a live deadline**, which
   is what its own documentation always said it did. `main.go`'s header describes
