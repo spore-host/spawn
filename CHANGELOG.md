@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Tier 0 e2e suite no longer tests whatever `bin/spawn` happens to
+  contain** (#792). It preferred an existing `bin/spawn` unconditionally, and
+  `bin/` is gitignored — exactly the artifact that accumulates locally. It
+  misled this repo three times in one day, in both directions: a nine-hour-old
+  binary made an alerts round-trip **pass vacuously** (the dangerous half — a
+  failing test prompts investigation, a passing one does not), and after `spawn
+  alerts` was deleted the coverage gate **failed** demanding a decision for a
+  command that no longer existed, because it enumerates the command list from
+  the binary. It now always builds from source, once per process, and prints
+  which binary it built so a run's output says what was tested. A
+  freshness-by-mtime heuristic was considered and rejected: what goes stale is
+  not only behaviour but the command *inventory*, so the comparison would have to
+  be right every time, whereas `go build` is right by construction.
+- **`make check-docs` passed while shipping reference docs for a deleted
+  command** (#795). The drift check is `git diff --exit-code docs-gen/`, which
+  catches a fragment whose *content* changed but not one whose *command* is gone
+  — nothing rewrote or removed the file, so there was no diff. `docs-gen/alerts.md`
+  survived the removal of `spawn alerts` and would have kept describing four
+  subcommands that do not exist. `gen-docs` now prunes orphaned fragments and
+  names each one it removes.
+
 - **Six deploy scripts asserted nothing about which AWS account they were
   pointed at** (#799). Credentials are whatever happens to be ambient, so each
   would have built a copy of production in a sandbox without complaint —
@@ -38,6 +59,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifacts behind.
 
 ### Changed
+
+- **The docs gate asserts set equality in both directions** (#795). Pruning
+  alone fixes one instance; an assertion that the fragment set and the command
+  set agree cannot pass while they disagree, whatever the cause — a file deleted
+  by hand, a command added without regenerating, or a generator that writes
+  somewhere new. The second direction (a command with no committed fragment) was
+  previously caught only incidentally, by `git diff` noticing an untracked file,
+  which says nothing if the file was never generated.
+  Pruning also refuses when the generated set is implausibly small, because a
+  broken tree walk or an i18n failure would otherwise delete the entire published
+  reference and `git diff` would report it faithfully but far too late — the same
+  rule as `scripts/nested-modules.sh` refusing to pass on an empty discovery.
 
 - **The deploy-script gates discover their targets instead of listing them**
   (#799). Each of four gates had hardcoded the same two filenames, so six

@@ -25,11 +25,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -96,21 +98,83 @@ func seedFakeHome(t *testing.T) string {
 
 // tier0SpawnBin returns a path to the spawn binary, building it once if needed.
 // Looks for ./bin/spawn relative to the module root, else builds to a temp path.
+// tier0SpawnBin returns the binary every tier 0 test drives, ALWAYS freshly
+// built from the current source.
+//
+// It used to prefer an existing bin/spawn unconditionally (#792). bin/ is
+// gitignored, so it is exactly the artifact that accumulates locally, and the
+// suite then tested whatever that build happened to contain. It misled this
+// repo three times in one day, in both directions:
+//
+//   - a nine-hour-old binary with no `alerts create` refusal in it made
+//     TestTier0_AlertsRoundTrip PASS vacuously, which is the dangerous half: a
+//     failing test prompts investigation, a passing one does not;
+//   - after `alerts` was deleted, TestTier0_CommandCoverageGate FAILED demanding
+//     a coverage decision for a command that no longer existed, because it
+//     enumerates the command list FROM THE BINARY.
+//
+// That second case is why a freshness heuristic was rejected: what goes stale is
+// not only behaviour but the command INVENTORY, so any mtime comparison has to
+// be right every time. `go build` is right by construction.
+//
+// Built once per test process rather than per test — there are 72 call sites, and
+// t.TempDir() is per-test, which is what made the bin/spawn shortcut tempting in
+// the first place.
 func tier0SpawnBin(t *testing.T) string {
 	t.Helper()
+	tier0BinOnce.Do(buildTier0Bin)
+	if tier0BinErr != nil {
+		t.Fatalf("build spawn binary: %v", tier0BinErr)
+	}
+	return tier0BinPath
+}
+
+var (
+	tier0BinOnce sync.Once
+	tier0BinPath string
+	tier0BinDir  string
+	tier0BinErr  error
+)
+
+func buildTier0Bin() {
 	_, file, _, _ := runtime.Caller(0) // .../spawn/test/e2e/substrate_cli.go
 	root := filepath.Join(filepath.Dir(file), "..", "..")
-	if p := filepath.Join(root, "bin", "spawn"); fileExists(p) {
-		return p
+
+	dir, err := os.MkdirTemp("", "spawn-tier0-")
+	if err != nil {
+		tier0BinErr = err
+		return
 	}
-	// Build once into the test binary's temp dir.
-	out := filepath.Join(t.TempDir(), "spawn")
+	tier0BinDir = dir
+	out := filepath.Join(dir, "spawn")
+
 	cmd := exec.Command("go", "build", "-o", out, ".")
 	cmd.Dir = root
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build spawn binary: %v\n%s", err, b)
+	if b, berr := cmd.CombinedOutput(); berr != nil {
+		tier0BinErr = fmt.Errorf("%w\n%s", berr, b)
+		return
 	}
-	return out
+	tier0BinPath = out
+
+	// Say which binary the suite is testing. The old behaviour printed nothing,
+	// so there was no way to tell from a run's output which binary produced a
+	// result — which is how a stale one went unnoticed.
+	fmt.Fprintf(os.Stderr, "tier0: built %s from %s\n", out, root)
+}
+
+// TestMain removes the binary built above.
+//
+// Safe to define here: reaper.go also defines TestMain, but under
+// `e2e_tier1 || e2e_tier2 || e2e_tier3`, and no target combines tags — the
+// Makefile and ci.yml each pass exactly one. Were that ever to change, the
+// result is a duplicate-TestMain COMPILE error, which is loud rather than
+// silent.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if tier0BinDir != "" {
+		_ = os.RemoveAll(tier0BinDir)
+	}
+	os.Exit(code)
 }
 
 func fileExists(p string) bool {
