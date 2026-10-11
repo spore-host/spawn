@@ -24,6 +24,16 @@ import (
 
 var (
 	queueOutputDir string
+	// queueResultsConfig lets `spawn queue results` learn where the results
+	// actually went (#804). The writer uploads to the queue JSON's
+	// ResultS3Bucket/ResultS3Prefix; the reader used to rebuild
+	// "spawn-results-<region>" from the region alone, directly under a comment
+	// saying it "should match what was specified in the queue config" — which it
+	// never loaded. It happened to work for the wizard default and the bundled
+	// examples, and not for pkg/queue/templates/*.json's {{S3_BUCKET}}, for any
+	// other bucket a user names, or for the integration fixtures.
+	queueResultsConfig string
+	queueResultsBucket string
 )
 
 var queueCmd = &cobra.Command{
@@ -166,6 +176,10 @@ Examples:
 func init() {
 	// Results subcommand flags
 	queueResultsCmd.Flags().StringVar(&queueOutputDir, "output-dir", ".", "Output directory for results")
+	queueResultsCmd.Flags().StringVar(&queueResultsConfig, "config", "",
+		"Queue config JSON the queue was launched with; its result_s3_bucket is where results actually went")
+	queueResultsCmd.Flags().StringVar(&queueResultsBucket, "bucket", "",
+		"S3 bucket holding the results (overrides --config; default spawn-results-<region>)")
 	// Deprecated alias for --output-dir (shadowed the root -o/--output format flag).
 	queueResultsCmd.Flags().StringVarP(&queueOutputDir, "output", "o", ".", "Output directory for results")
 	_ = queueResultsCmd.Flags().MarkDeprecated("output", "use --output-dir instead")
@@ -331,10 +345,18 @@ func runQueueResults(cmd *cobra.Command, args []string) error {
 
 	s3Client := s3.NewFromConfig(cfg)
 
-	// Determine S3 bucket and prefix
-	// This should match what was specified in the queue config
-	bucket := fmt.Sprintf("spawn-results-%s", downloadRegion)
-	prefix := fmt.Sprintf("queues/%s/", queueID)
+	// Determine S3 bucket and prefix.
+	//
+	// The old code derived "spawn-results-<region>" here, under a comment saying
+	// it "should match what was specified in the queue config" — and never loaded
+	// the config, so it only matched for the wizard default (#804). The queue
+	// config is a local JSON the caller supplies at launch and nothing persists it
+	// server-side, so the only honest options are to be told or to guess; now it
+	// asks, and says when it is guessing.
+	bucket, prefix, err := resolveQueueResultsLocation(queueID, downloadRegion)
+	if err != nil {
+		return err
+	}
 
 	// Create output directory
 	if err := os.MkdirAll(queueOutputDir, 0755); err != nil {
@@ -734,4 +756,48 @@ func runQueueTemplateInit(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "  spawn launch --batch-queue %s --instance-type <type> --region <region>\n\n", output)
 
 	return nil
+}
+
+// resolveQueueResultsLocation decides where to look for a queue's results (#804).
+//
+// Precedence: an explicit --bucket, then the result_s3_bucket in the --config the
+// queue was launched with, then the historical spawn-results-<region> guess. The
+// guess is announced, because the failure mode it produces is an empty listing
+// that looks exactly like "the queue produced nothing".
+func resolveQueueResultsLocation(queueID, region string) (bucket, prefix string, err error) {
+	prefix = fmt.Sprintf("queues/%s/", queueID)
+
+	if queueResultsBucket != "" {
+		return queueResultsBucket, prefix, nil
+	}
+
+	if queueResultsConfig != "" {
+		data, rerr := os.ReadFile(queueResultsConfig)
+		if rerr != nil {
+			return "", "", fmt.Errorf("read --config %s: %w", queueResultsConfig, rerr)
+		}
+		var cfg struct {
+			ResultS3Bucket string `json:"result_s3_bucket"`
+			ResultS3Prefix string `json:"result_s3_prefix"`
+		}
+		if jerr := json.Unmarshal(data, &cfg); jerr != nil {
+			return "", "", fmt.Errorf("parse --config %s: %w", queueResultsConfig, jerr)
+		}
+		if cfg.ResultS3Bucket == "" {
+			return "", "", fmt.Errorf("--config %s declares no result_s3_bucket, so it cannot say "+
+				"where the results went; pass --bucket", queueResultsConfig)
+		}
+		if cfg.ResultS3Prefix != "" {
+			prefix = strings.TrimSuffix(cfg.ResultS3Prefix, "/") + "/"
+		}
+		return cfg.ResultS3Bucket, prefix, nil
+	}
+
+	bucket = fmt.Sprintf("spawn-results-%s", region)
+	fmt.Fprintf(os.Stderr,
+		"⚠️  No --bucket or --config given, so guessing %s from the region.\n"+
+			"   That is only correct if the queue was launched with the wizard default. If the\n"+
+			"   listing below is empty, the results are probably in the bucket your queue config\n"+
+			"   named — pass --config <queue.json> or --bucket.\n", bucket)
+	return bucket, prefix, nil
 }

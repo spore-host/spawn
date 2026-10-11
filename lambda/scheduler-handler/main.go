@@ -58,6 +58,7 @@ type ScheduleRecord struct {
 	Timezone           string    `dynamodbav:"timezone"`
 	NextExecutionTime  time.Time `dynamodbav:"next_execution_time"`
 	S3ParamsKey        string    `dynamodbav:"s3_params_key"`
+	S3ParamsBucket     string    `dynamodbav:"s3_params_bucket,omitempty"`
 	SweepName          string    `dynamodbav:"sweep_name"`
 	MaxConcurrent      int       `dynamodbav:"max_concurrent"`
 	LaunchDelay        string    `dynamodbav:"launch_delay"`
@@ -159,7 +160,7 @@ func handler(ctx context.Context, event Event) error {
 	}
 
 	// 4. Validate parameter file exists in S3 (sweep-orchestrator will download it)
-	_, err = downloadParams(ctx, schedule.S3ParamsKey, schedule.Region)
+	_, err = downloadParams(ctx, schedule.S3ParamsBucket, schedule.S3ParamsKey, schedule.Region)
 	if err != nil {
 		return recordError(ctx, event.ScheduleID, "", fmt.Errorf("validate params: %w", err))
 	}
@@ -242,8 +243,21 @@ func getScheduleRecord(ctx context.Context, scheduleID string) (*ScheduleRecord,
 	return &schedule, nil
 }
 
-func downloadParams(ctx context.Context, s3Key, region string) (*ParamFileFormat, error) {
-	bucket := fmt.Sprintf(schedulesBucketTmpl, region)
+// downloadParams fetches the schedule's parameter file.
+//
+// recordedBucket is the bucket the CLI actually wrote to, persisted on the record
+// since #804. Before that the record carried only a key and this function rebuilt
+// the name from the region — but resolveSchedulesBucket falls back to an
+// account-scoped `spawn-schedules-<account>-<region>` when the shared name is
+// taken by another account, so in any account that took the fallback every
+// scheduled execution read a bucket it had never written to.
+//
+// Empty means a record written before the field existed. Falling back to the
+// template is right for those: it is what they were created under, and it is the
+// shared name, since an account on the fallback path would have been failing
+// already.
+func downloadParams(ctx context.Context, recordedBucket, s3Key, region string) (*ParamFileFormat, error) {
+	bucket := paramsBucket(recordedBucket, region)
 
 	result, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
@@ -328,4 +342,22 @@ func recordError(ctx context.Context, scheduleID, sweepID string, err error) err
 
 func main() {
 	lambda.Start(handler)
+}
+
+// paramsBucket decides which bucket holds a schedule's parameter file.
+//
+// Pure, and separate from downloadParams, so the decision can be tested without
+// an S3 client — the thing that matters is "a recorded bucket is used", and a
+// gate reading the source for the ORDER of two expressions was checking style
+// rather than mechanism: an implementation that computes the template first and
+// then overrides it is equally correct, and passed that gate while a broken one
+// could too.
+func paramsBucket(recordedBucket, region string) string {
+	if recordedBucket != "" {
+		return recordedBucket
+	}
+	fallback := fmt.Sprintf(schedulesBucketTmpl, region)
+	log.Printf("schedule params: record carries no s3_params_bucket (pre-#804); "+
+		"falling back to the region template %q", fallback)
+	return fallback
 }
