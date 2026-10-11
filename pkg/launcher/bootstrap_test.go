@@ -299,9 +299,15 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildLinuxBootstrap: %v", err)
 	}
-	// Verification on by default.
-	if !strings.Contains(script, "SPORED_SIG_VERIFY=1") {
-		t.Error("expected SPORED_SIG_VERIFY=1 default")
+	// Verification on by default — matched as the ASSIGNMENT at line start.
+	//
+	// A bare strings.Contains passed against a revert that emptied the signing
+	// key, because `SPORED_SIG_VERIFY=1` also appears inside two shell comments
+	// in linuxBootstrapBody (bootstrap.go:391 and :464), which bootstrap.go:263
+	// appends unconditionally. The string is therefore in EVERY bootstrap,
+	// signed or not, and this gate could not fail (#813).
+	if !sigVerifyOn.MatchString(script) {
+		t.Error("expected the SPORED_SIG_VERIFY=1 assignment at line start")
 	}
 	// The candidate list must include both the regional base and the us-east-1
 	// fallback, so a source that can't satisfy the trust requirement falls through.
