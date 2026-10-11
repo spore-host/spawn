@@ -255,6 +255,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`BufferingPushClient`'s doc comment, which was the actual defect here.** It
+  read "records pushes in memory *instead of* delivering them to a remote
+  runtime", and #810 concluded from that — across three independent audit passes —
+  that "pushed plugin data never reaches an instance" and that there is a
+  `spawn plugin push` command which "appears to push, succeeds, and delivers
+  nothing". Neither is true. There is no such command, and buffering **is** the
+  delivery mechanism: `spawn plugin install` collects what local provision steps
+  push and hands the whole map to spored in the install request, over an SSH
+  tunnel to `127.0.0.1:7777/v1/plugins/install`. That ordering guarantee is the
+  point — delivering values one at a time, as the removed transports would, could
+  not give it. The comment now says so, for the same reason #809's does: a
+  description that is fair about the type and misleading about the system is what
+  three readers keyed on.
+
 - **A fourth gate dropped for checking a correlate rather than a mechanism.** The
   first version asserted, by comparing source positions, that
   `downloadParams` consults the recorded bucket before the region template. A
@@ -382,6 +396,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `examples/README.md`'s staging quickstart said to run it; it now says what to do
   instead (`aws s3 cp`, or an FSx data-repository association via
   `--fsx-import-path`).
+- **`pkg/plugin/push_ssh.go` and `push_ssm.go`** (#810) — two `PushClient`
+  implementations, 179 lines, that nothing ever constructed. The SSH one
+  duplicated the tunnel and token helpers `cmd/plugin.go` already has and uses.
 
 - **`installDCVCert` and its `s3GetFile` helper** (#809). Dead — the definition
   and its own doc comment were the only references in the tree, across all three

@@ -22,11 +22,24 @@ type PushClient interface {
 	Push(ctx context.Context, pluginName, key, value string) error
 }
 
-// BufferingPushClient records pushes in memory instead of delivering them to a
-// remote runtime. The unified `spawn plugin install` flow uses it so local
-// provision can capture and "push" values that are then handed to spored in the
-// install request (see cmd/plugin.go), guaranteeing the values are present
-// before the remote configure phase runs.
+// BufferingPushClient records pushes in memory, and is the ONLY implementation —
+// deliberately, because buffering is how delivery works here, not a stand-in for
+// it.
+//
+// `spawn plugin install` runs local provision steps, collects what they push,
+// and hands the whole map to spored in the install request
+// (cmd/plugin.go: remotePluginInstall → SSH tunnel → POST
+// 127.0.0.1:7777/v1/plugins/install). That guarantees the values are present
+// before the remote configure phase runs, which delivering them one at a time
+// could not.
+//
+// Saying so plainly because the previous wording — "records pushes in memory
+// instead of delivering them to a remote runtime" — read as a stub, and #810
+// concluded from it that "pushed plugin data never reaches an instance". It does.
+// There were two other PushClient implementations (an SSM transport and an SSH
+// tunnel in pkg/plugin) that nothing constructed; they duplicated the tunnel and
+// token helpers cmd/plugin.go already has, and #810 removed them. The receiver
+// they targeted is live and reached by the path above.
 type BufferingPushClient struct {
 	values map[string]string
 }
