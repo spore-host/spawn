@@ -18,6 +18,11 @@ const (
 
 // WatchInfo represents a lagotto watch for the dashboard API.
 type WatchInfo struct {
+	// UserID is the owning principal's CLI IAM ARN. json:"-" because it is an
+	// authorization input, not dashboard data — adding it to the struct is what
+	// lets the ownership check be a plain comparison instead of a lookup into the
+	// raw item map, which is how it came to be fail-open (#821).
+	UserID              string     `json:"-" dynamodbav:"user_id"`
 	WatchID             string     `json:"watch_id" dynamodbav:"watch_id"`
 	Status              string     `json:"status" dynamodbav:"status"`
 	InstanceTypePattern string     `json:"instance_type_pattern" dynamodbav:"instance_type_pattern"`
@@ -107,11 +112,17 @@ func handleGetWatch(ctx context.Context, cfg aws.Config, watchID, userARN string
 		return errorResponse(500, fmt.Sprintf("unmarshal watch: %v", err)), nil
 	}
 
-	// Verify ownership
-	if v, ok := result.Item["user_id"]; ok {
-		if s, ok := v.(*dynamodbtypes.AttributeValueMemberS); ok && s.Value != userARN {
-			return errorResponse(403, "Access denied"), nil
-		}
+	// Verify ownership.
+	//
+	// This was the only fail-OPEN ownership check in the file set. It read the raw
+	// item map and skipped the comparison entirely when `user_id` was absent — or
+	// present but not a string — so a watch record missing that attribute was
+	// returned to any authenticated caller who could name its ID (#821,
+	// GHSA-qc2h-6qqf-wcm4). Comparing the unmarshalled field instead makes both of
+	// those a mismatch against "", i.e. a 403, which is the idiom every sibling
+	// handler already uses (sweeps.go, instances.go).
+	if w.UserID != userARN {
+		return errorResponse(403, "Access denied"), nil
 	}
 
 	return successResponse(WatchesResponse{

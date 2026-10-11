@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller just never checked ownership). Against that revert the handler-level gate
   reports the attack concretely — it writes `evil.mycelium-development.spore.host`
   and says so.
+- Nineteen gates across both defects, each watched failing against a revert that
+  compiles. The Slack verification is driven with genuinely HMAC-signed requests
+  and ten hostile variants — no headers, signature over a different body, a
+  different secret, replays six minutes either side of now, a truncated
+  signature, the wrong scheme version. Two gates are ordering gates rather than
+  presence gates (`TestSlackRotateVerifiesBeforeRotating`,
+  `TestChmodHappensAfterVerification`'s sibling in spirit), because verifying
+  after the credential has been rotated is a check that cannot prevent anything.
+  `TestNoOwnershipCheckIsConditionalOnTheAttributeExisting` discovers the shape
+  across the whole package instead of pinning the one line that was wrong, so the
+  same fail-open cannot reappear in another handler.
 
 - **`ManagedSSMTagCondition`**, separate from the `ec2:`-keyed one. A condition
   key belongs to the service of the **action**, so reusing
@@ -366,6 +377,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#835). It was previously checked only for non-emptiness, leaving the handler to
   rely on Route53 rejecting a malformed A-record value — a validation step in
   another service, reached only *after* the request had been authorized.
+- **The Slack token-rotation endpoint was reachable unauthenticated from the
+  public internet, and returned a live bot token in its response** (advisory
+  GHSA-qc2h-6qqf-wcm4, #821). `POST /api/slack/token/rotate` was routed above
+  `getUserFromRequest` alongside the two OAuth routes — but unlike those, with no
+  comment saying why — and the API Gateway route is `$default` with
+  `AuthorizationType: NONE`. It took a workspace's current bot token out of the
+  request body, rotated it with Slack, replaced the stored one, and returned the
+  **new** token as `{"ok":true,"token":"xoxb-…"}`. Possession of a leaked or
+  already-stale token was therefore the only credential needed to mint a fresh
+  valid one, while the legitimate owner lost theirs.
+  Confirmed against production with a deliberately invalid token: the endpoint
+  answered `500 {"error":"Token rotation failed: workspace not found for token"}`,
+  showing the handler ran with nothing in front of it. Nothing was written,
+  because the lookup fails before the update. `spore-bot-workspaces` holds seven
+  real workspaces.
+  Inbound requests are now verified with Slack's HMAC signature over the raw body,
+  with a five-minute replay window checked as an **absolute** skew so a replay
+  cannot be refreshed by dating it forward. The signing secret needed for this
+  (`slackSigningSecret()`) already existed and was stored both in Secrets Manager
+  and on every workspace row — it had simply never been used to verify anything.
+  The response no longer contains the token, and the error no longer says whether
+  a token matched a workspace, which was an oracle for whether a token is live.
+- **A watch record with no owner was returned to any authenticated caller**
+  (same advisory, #821). `handleGetWatch` read `user_id` out of the raw DynamoDB
+  item and skipped the comparison entirely when the attribute was absent — or
+  present but not a string. It was the only fail-open ownership check in the file
+  set; `sweeps.go` and `instances.go` already used the direct comparison.
+  `WatchInfo` now carries `UserID` (tagged `json:"-"`, since it is an
+  authorization input and not dashboard data, and returning it would leak the
+  owning principal's IAM ARN), so an absent owner is a mismatch rather than a
+  bypass.
 
 - **The TTL reaper executed instance-writable tag content as root, on any
   spawn-managed instance in the account** (advisory GHSA-8q3p-qcv8-2pr4, #830).

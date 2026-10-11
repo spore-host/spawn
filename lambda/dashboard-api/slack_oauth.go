@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -119,6 +121,23 @@ func handleSlackOAuthCallback(ctx context.Context, cfg aws.Config, request event
 // Slack calls this when a token needs to be rotated (if configured in app settings).
 // POST /api/slack/token/rotate
 func handleSlackTokenRotate(ctx context.Context, cfg aws.Config, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// Verify this really came from Slack BEFORE touching any stored credential.
+	// This route sits above getUserFromRequest and the API Gateway route is
+	// $default / AuthorizationType: NONE, so without this check anyone on the
+	// internet could post a workspace's current token here and be handed a freshly
+	// minted one (#821, GHSA-qc2h-6qqf-wcm4).
+	if err := verifySlackRequest(request, time.Now()); err != nil {
+		if errors.Is(err, errSlackNotConfigured) {
+			// An operator error, not a caller error. Fail closed and say so: the
+			// alternative is an endpoint that silently stops verifying when the
+			// secret goes missing.
+			log.Printf("slack token rotate: refusing — %v", err)
+			return errorResponse(500, "Slack request verification is not configured"), nil
+		}
+		log.Printf("slack token rotate: rejected unverified request: %v", err)
+		return errorResponse(401, "Slack signature verification failed"), nil
+	}
+
 	clientID := os.Getenv("SLACK_CLIENT_ID")
 	clientSecret := slackClientSecret()
 	if clientID == "" || clientSecret == "" {
@@ -137,15 +156,21 @@ func handleSlackTokenRotate(ctx context.Context, cfg aws.Config, request events.
 	workspacesTable := getEnvOrDefault("SPORE_BOT_WORKSPACES_TABLE", "spore-bot-workspaces")
 
 	// Find workspace by current token, refresh, and update
-	newToken, err := rotateTokenByCurrentToken(ctx, cfg, workspacesTable, clientID, clientSecret, event.Token)
-	if err != nil {
-		return errorResponse(500, fmt.Sprintf("Token rotation failed: %v", err)), nil
+	if _, err := rotateTokenByCurrentToken(ctx, cfg, workspacesTable, clientID, clientSecret, event.Token); err != nil {
+		log.Printf("slack token rotate: %v", err)
+		// Do not echo the reason: "workspace not found for token" tells an
+		// unverified caller whether a token is live, which is an oracle even with
+		// the signature check in front of it.
+		return errorResponse(500, "Token rotation failed"), nil
 	}
 
+	// The new token is NOT returned. It is stored for the workspace, and Slack
+	// already has it — writing a live credential into an HTTP response body puts it
+	// in access logs and any proxy in between for no benefit.
 	return events.APIGatewayProxyResponse{
 		StatusCode: 200,
 		Headers:    map[string]string{"Content-Type": "application/json"},
-		Body:       fmt.Sprintf(`{"ok":true,"token":%q}`, newToken),
+		Body:       `{"ok":true}`,
 	}, nil
 }
 
