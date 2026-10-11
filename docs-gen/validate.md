@@ -30,7 +30,7 @@ spawn validate [flags]
 |------|-------|------|---------|-------------|
 | `--infrastructure` |  | bool |  | Validate infrastructure resources (DynamoDB, S3, Lambda) |
 | `--instance-id` |  | string |  | Specific instance ID to validate |
-| `--nist-800-171` |  | string |  | Validate NIST 800-171 compliance |
-| `--nist-800-53` |  | string |  | Validate NIST 800-53 compliance (low, moderate, high) |
+| `--nist-800-171` |  | bool |  | Validate NIST 800-171 Rev 3 compliance |
+| `--nist-800-53` |  | string |  | Validate NIST 800-53 compliance at a baseline: low, moderate, high (default low) |
 | `--region` |  | string |  | AWS region to validate (default: all regions) |
 

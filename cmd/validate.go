@@ -16,7 +16,12 @@ import (
 )
 
 var (
-	validateComplianceMode string
+	// Separate variables, one per flag. Both flags used to bind to a single
+	// string, which is part of how the arity bug survived: --nist-800-171 takes no
+	// value but was registered as a StringVar, so pflag REQUIRED one and the mode
+	// was decided by Changed() while the value went unread (#808).
+	validateNIST171        bool
+	validateNIST53         string
 	validateRegion         string
 	validateInstanceID     string
 	validateInfrastructure bool // Validate infrastructure resources
@@ -50,8 +55,21 @@ Examples:
 func init() {
 	rootCmd.AddCommand(validateCmd)
 
-	validateCmd.Flags().StringVar(&validateComplianceMode, "nist-800-171", "", "Validate NIST 800-171 compliance")
-	validateCmd.Flags().StringVar(&validateComplianceMode, "nist-800-53", "", "Validate NIST 800-53 compliance (low, moderate, high)")
+	// --nist-800-171 has nothing to supply, so it is a bool. As a StringVar pflag
+	// demanded an argument and ate the next token: `spawn validate --nist-800-171
+	// -o json` consumed "-o" as the flag's value, then "json" as a positional, and
+	// printed a human table with exit 0 — the documented JSON path silently
+	// producing the wrong format (#808).
+	validateCmd.Flags().BoolVar(&validateNIST171, "nist-800-171", false,
+		"Validate NIST 800-171 Rev 3 compliance")
+
+	// --nist-800-53 does take a baseline. NoOptDefVal makes a bare --nist-800-53
+	// mean "low", which is what the handler already assumed when the value was
+	// empty, so the flag can be written either way without pflag demanding an
+	// argument.
+	validateCmd.Flags().StringVar(&validateNIST53, "nist-800-53", "",
+		"Validate NIST 800-53 compliance at a baseline: "+strings.Join(nist53Baselines, ", ")+" (default low)")
+	validateCmd.Flags().Lookup("nist-800-53").NoOptDefVal = nist53DefaultBaseline
 	validateCmd.Flags().BoolVar(&validateInfrastructure, "infrastructure", false, "Validate infrastructure resources (DynamoDB, S3, Lambda)")
 	validateCmd.Flags().StringVar(&validateRegion, "region", "", "AWS region to validate (default: all regions)")
 	validateCmd.Flags().StringVar(&validateInstanceID, "instance-id", "", "Specific instance ID to validate")
@@ -65,14 +83,32 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		return runInfrastructureValidation(ctx)
 	}
 
-	// Determine compliance mode
+	// Determine compliance mode.
+	//
+	// Both frameworks at once used to be accepted, with 800-171 silently winning.
+	// Refusing is better than picking: a caller who passed both asked for
+	// something this command cannot do, and quietly doing half of it is the
+	// failure mode this whole issue is about.
+	if validateNIST171 && cmd.Flags().Changed("nist-800-53") {
+		return fmt.Errorf("--nist-800-171 and --nist-800-53 are mutually exclusive; pass one")
+	}
+
 	complianceMode := ""
-	if cmd.Flags().Changed("nist-800-171") {
+	switch {
+	case validateNIST171:
 		complianceMode = "nist-800-171"
-	} else if cmd.Flags().Changed("nist-800-53") {
-		val, _ := cmd.Flags().GetString("nist-800-53")
+	case cmd.Flags().Changed("nist-800-53"):
+		val := validateNIST53
 		if val == "" {
-			val = "low" // Default to low baseline
+			val = nist53DefaultBaseline
+		}
+		// Validate HERE, not twelve frames down. An unknown baseline used to
+		// surface as "unknown compliance mode: nist-800-53-nonsense" from inside
+		// the config loader, which names an internal string rather than the flag
+		// the user typed or the values it accepts.
+		if !isNIST53Baseline(val) {
+			return fmt.Errorf("invalid --nist-800-53 baseline %q: want one of %s",
+				val, strings.Join(nist53Baselines, ", "))
 		}
 		complianceMode = fmt.Sprintf("nist-800-53-%s", val)
 	}
@@ -446,4 +482,21 @@ func outputInfrastructureJSON(result *infrastructure.ValidationResult, resolver 
 
 	fmt.Println(string(jsonBytes))
 	return nil
+}
+
+// nist53Baselines are the NIST 800-53 baselines --nist-800-53 accepts, in
+// increasing order of strictness. Exported as a slice rather than a set so the
+// flag's help text and its error message list them in the same order.
+var nist53Baselines = []string{"low", "moderate", "high"}
+
+// nist53DefaultBaseline is what a bare --nist-800-53 means.
+const nist53DefaultBaseline = "low"
+
+func isNIST53Baseline(v string) bool {
+	for _, b := range nist53Baselines {
+		if b == v {
+			return true
+		}
+	}
+	return false
 }
