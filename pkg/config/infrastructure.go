@@ -37,8 +37,6 @@ type InfrastructureConfig struct {
 type DynamoDBConfig struct {
 	SchedulesTable          string `yaml:"schedules_table"`
 	SweepOrchestrationTable string `yaml:"sweep_orchestration_table"`
-	AlertsTable             string `yaml:"alerts_table"`
-	AlertHistoryTable       string `yaml:"alert_history_table"`
 	// Additional tables can be added here
 }
 
@@ -54,7 +52,6 @@ type S3Config struct {
 type LambdaConfig struct {
 	SchedulerHandlerARN  string `yaml:"scheduler_handler_arn"`
 	SweepOrchestratorARN string `yaml:"sweep_orchestrator_arn"`
-	AlertHandlerARN      string `yaml:"alert_handler_arn"`
 	DashboardAPIARN      string `yaml:"dashboard_api_arn"`
 	// Additional functions can be added here
 }
@@ -75,8 +72,6 @@ func LoadInfrastructureConfig(ctx context.Context, flagMode string) (*Infrastruc
 		DynamoDB: DynamoDBConfig{
 			SchedulesTable:          "spawn-schedules",
 			SweepOrchestrationTable: "spawn-sweep-orchestration",
-			AlertsTable:             "spawn-alerts",
-			AlertHistoryTable:       "spawn-alert-history",
 		},
 		S3: S3Config{
 			BinariesBucketPrefix:  "spawn-binaries",
@@ -91,7 +86,6 @@ func LoadInfrastructureConfig(ctx context.Context, flagMode string) (*Infrastruc
 			// pkg/infrastructure.Resolver survived review (#790).
 			SchedulerHandlerARN:  "", // Constructed: arn:aws:lambda:{region}:966362334030:function:scheduler-handler
 			SweepOrchestratorARN: "", // Constructed: arn:aws:lambda:{region}:966362334030:function:spawn-sweep-orchestrator
-			AlertHandlerARN:      "", // Constructed: arn:aws:lambda:{region}:966362334030:function:spawn-alert-handler
 			DashboardAPIARN:      "", // Constructed: arn:aws:lambda:{region}:966362334030:function:spawn-dashboard-api
 		},
 		CloudWatch: CloudWatchConfig{
@@ -113,12 +107,6 @@ func LoadInfrastructureConfig(ctx context.Context, flagMode string) (*Infrastruc
 		if fileConfig.Infrastructure.DynamoDB.SweepOrchestrationTable != "" {
 			cfg.DynamoDB.SweepOrchestrationTable = fileConfig.Infrastructure.DynamoDB.SweepOrchestrationTable
 		}
-		if fileConfig.Infrastructure.DynamoDB.AlertsTable != "" {
-			cfg.DynamoDB.AlertsTable = fileConfig.Infrastructure.DynamoDB.AlertsTable
-		}
-		if fileConfig.Infrastructure.DynamoDB.AlertHistoryTable != "" {
-			cfg.DynamoDB.AlertHistoryTable = fileConfig.Infrastructure.DynamoDB.AlertHistoryTable
-		}
 
 		// S3
 		if fileConfig.Infrastructure.S3.BinariesBucketPrefix != "" {
@@ -134,9 +122,6 @@ func LoadInfrastructureConfig(ctx context.Context, flagMode string) (*Infrastruc
 		}
 		if fileConfig.Infrastructure.Lambda.SweepOrchestratorARN != "" {
 			cfg.Lambda.SweepOrchestratorARN = fileConfig.Infrastructure.Lambda.SweepOrchestratorARN
-		}
-		if fileConfig.Infrastructure.Lambda.AlertHandlerARN != "" {
-			cfg.Lambda.AlertHandlerARN = fileConfig.Infrastructure.Lambda.AlertHandlerARN
 		}
 		if fileConfig.Infrastructure.Lambda.DashboardAPIARN != "" {
 			cfg.Lambda.DashboardAPIARN = fileConfig.Infrastructure.Lambda.DashboardAPIARN
@@ -160,12 +145,6 @@ func LoadInfrastructureConfig(ctx context.Context, flagMode string) (*Infrastruc
 	if envTable := os.Getenv("SPAWN_DYNAMODB_SWEEP_ORCHESTRATION_TABLE"); envTable != "" {
 		cfg.DynamoDB.SweepOrchestrationTable = envTable
 	}
-	if envTable := os.Getenv("SPAWN_DYNAMODB_ALERTS_TABLE"); envTable != "" {
-		cfg.DynamoDB.AlertsTable = envTable
-	}
-	if envTable := os.Getenv("SPAWN_DYNAMODB_ALERT_HISTORY_TABLE"); envTable != "" {
-		cfg.DynamoDB.AlertHistoryTable = envTable
-	}
 
 	// S3 env vars
 	if envBucket := os.Getenv("SPAWN_S3_BINARIES_BUCKET_PREFIX"); envBucket != "" {
@@ -181,9 +160,6 @@ func LoadInfrastructureConfig(ctx context.Context, flagMode string) (*Infrastruc
 	}
 	if envARN := os.Getenv("SPAWN_LAMBDA_SWEEP_ORCHESTRATOR_ARN"); envARN != "" {
 		cfg.Lambda.SweepOrchestratorARN = envARN
-	}
-	if envARN := os.Getenv("SPAWN_LAMBDA_ALERT_HANDLER_ARN"); envARN != "" {
-		cfg.Lambda.AlertHandlerARN = envARN
 	}
 	if envARN := os.Getenv("SPAWN_LAMBDA_DASHBOARD_API_ARN"); envARN != "" {
 		cfg.Lambda.DashboardAPIARN = envARN

@@ -156,10 +156,6 @@ func failingInfrastructureRecommendations(t *testing.T) []string {
 				Name: "arn:aws:lambda:us-east-1:966362334030:function:spawn-sweep-orchestrator",
 				Type: "Lambda Function",
 			},
-			"lambda_alert_handler": {
-				Name: "arn:aws:lambda:us-east-1:966362334030:function:spawn-alert-handler",
-				Type: "Lambda Function",
-			},
 			"lambda_dashboard_api": {
 				Name: "arn:aws:lambda:us-east-1:966362334030:function:spawn-dashboard-api",
 				Type: "Lambda Function",

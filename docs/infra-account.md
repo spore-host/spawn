@@ -44,7 +44,7 @@ code and it determines what breaks when a schedule is disabled.
 | function | source | schedule | notes |
 |---|---|---|---|
 | `spawn-ttl-reaper-production` | `lambda/ttl-reaper/` | `rate(10 minutes)` | the out-of-band backstop that terminates expired instances. Cross-account: `REAPER_SCAN_SELF=false`, assumes `spawn-ttl-reaper-ec2` in 435415984226 |
-| `spawn-alert-evaluator` | `lambda/alert-evaluator/` | `rate(1 hour)` | evaluates user alert preferences |
+| `spawn-alert-evaluator` | `lambda/alert-evaluator/` | `rate(1 hour)` | evaluates user alert preferences. **Has had nothing to do since 2026-02-20**: `spawn-alert-preferences` has never held a record, so this is ~5,500 invocations finding nothing (#794) |
 | `spawn-cost-history-collector` | `lambda/cost-history-collector/` | `rate(1 hour)` | writes to `spawn-cost-history` |
 | `spawn-autoscale-orchestrator-production` | `lambda/autoscale-orchestrator/` | `rate(1 minute)`, **ENABLED** | reconciles autoscale groups |
 | `spawn-autoscale-orchestrator-staging` | same | `rate(1 minute)`, **DISABLED** | disabled 2026-10-09 (#772): it polled every minute from February against an empty table |
@@ -85,10 +85,15 @@ orphans:
 
 ### Code with no deployment
 
-**`lambda/alert-handler/` has no live function in this account.** It builds and
-is vetted in CI (the nested-module loop covers it), but nothing runs it. Either
-it is unfinished, or it was superseded by `alert-evaluator` and not removed.
-Worth a decision rather than leaving it ambiguous.
+**None, as of 2026-10-10.** `lambda/alert-handler/` used to be here — built and
+vetted in CI, run by nothing. #783 resolved it by removal rather than
+deployment, because nothing emitted the event it handled (deploying it would
+have changed nothing) and `spawn-alerts` had never held a record.
+
+Keeping this section with a negative answer on purpose: "every Lambda in the
+repo is deployed somewhere" is a property worth being able to check, and
+`TestEveryHardcodedLambdaNameIsCreatedByADeployMechanism` now enforces it with
+an exception list of zero.
 
 ## DynamoDB tables
 
@@ -104,7 +109,8 @@ belong to adjacent projects.
 | `spawn-websocket-connections` | `lambda/dashboard-websocket-processor/` |
 | `spawn-autoscale-groups-{production,staging}` | `lambda/dashboard-api/autoscale.go`. **Both empty** — no autoscale group has ever been configured (#772) |
 | `spawn-schedules`, `spawn-schedule-history` | `cmd/schedule.go`, `deployment/cloudformation/schedules-tables.yaml` |
-| `spawn-alerts`, `spawn-alert-preferences`, `spawn-alert-history` | the alert path; `deployment/cloudformation/alerts-tables.yaml` |
+| `spawn-alert-preferences` | `lambda/alert-evaluator/` (live, hourly) and `lambda/dashboard-api/`; `deployment/cloudformation/alerts-tables.yaml`. **Empty** — see #794 |
+| `spawn-alerts`, `spawn-alert-history` | **nothing, since #783 removed the alerts path.** Still deployed and empty; the template that creates them stays because two of its four tables are live. Their removal belongs to the control-plane reaping in #653 |
 | `spawn-cost-history` | `cost-history-collector` |
 | `spawn-teams`, `spawn-team-memberships` | team sharing (#137) |
 | `spore-portal-accounts` | the reaper's `ACCOUNTS_TABLE` — which accounts it scans |

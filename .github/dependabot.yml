@@ -55,7 +55,6 @@ updates:
     directories:
       - "/"
       - "/lambda/alert-evaluator"
-      - "/lambda/alert-handler"
       - "/lambda/autoscale-orchestrator"
       - "/lambda/cost-history-collector"
       - "/lambda/dashboard-api"

@@ -9,13 +9,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
-	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // Tier 0 control-plane seeding. spawn's stateful commands (team, schedule,
-// alerts, sweeps) assume their DynamoDB tables and S3 buckets already exist —
+// sweeps) assume their DynamoDB tables and S3 buckets already exist —
 // real deployments provision them via CloudFormation. Substrate starts empty,
 // so each test seeds exactly what its command touches before driving the binary.
 
@@ -93,66 +91,6 @@ func (e *spawnEnv) seedScheduleTable() {
 	})
 	if err != nil {
 		e.t.Fatalf("seed spawn-schedules: %v", err)
-	}
-}
-
-// seedAlertTables provisions spawn-alerts (alert_id hash + user_id-index and
-// sweep_id-index GSIs that `spawn alerts list` queries) and spawn-alert-history.
-func (e *spawnEnv) seedAlertTables() {
-	e.t.Helper()
-	_, err := e.DynamoClient().CreateTable(context.Background(), &dynamodb.CreateTableInput{
-		TableName:   aws.String("spawn-alerts"),
-		BillingMode: ddbtypes.BillingModePayPerRequest,
-		AttributeDefinitions: []ddbtypes.AttributeDefinition{
-			{AttributeName: aws.String("alert_id"), AttributeType: ddbtypes.ScalarAttributeTypeS},
-			{AttributeName: aws.String("user_id"), AttributeType: ddbtypes.ScalarAttributeTypeS},
-			{AttributeName: aws.String("sweep_id"), AttributeType: ddbtypes.ScalarAttributeTypeS},
-		},
-		KeySchema: []ddbtypes.KeySchemaElement{
-			{AttributeName: aws.String("alert_id"), KeyType: ddbtypes.KeyTypeHash},
-		},
-		GlobalSecondaryIndexes: []ddbtypes.GlobalSecondaryIndex{
-			{
-				IndexName: aws.String("user_id-index"),
-				KeySchema: []ddbtypes.KeySchemaElement{
-					{AttributeName: aws.String("user_id"), KeyType: ddbtypes.KeyTypeHash},
-				},
-				Projection: &ddbtypes.Projection{ProjectionType: ddbtypes.ProjectionTypeAll},
-			},
-			{
-				IndexName: aws.String("sweep_id-index"),
-				KeySchema: []ddbtypes.KeySchemaElement{
-					{AttributeName: aws.String("sweep_id"), KeyType: ddbtypes.KeyTypeHash},
-				},
-				Projection: &ddbtypes.Projection{ProjectionType: ddbtypes.ProjectionTypeAll},
-			},
-		},
-	})
-	if err != nil {
-		e.t.Fatalf("seed spawn-alerts: %v", err)
-	}
-}
-
-// seedAlertHandler creates the Lambda function that consumes the alerts table.
-//
-// Needed because `spawn alerts create` now refuses to write an alert when
-// nothing exists to deliver it (#790) — seeding the tables alone models a
-// control plane where every alert created would be inert, which is exactly the
-// state the refusal exists to catch. A round-trip test wants the WORKING
-// deployment, so it seeds the consumer too.
-//
-// The function body is a placeholder: the CLI only asks whether it exists.
-func (e *spawnEnv) seedAlertHandler() {
-	e.t.Helper()
-	_, err := e.LambdaClient().CreateFunction(context.Background(), &lambdasvc.CreateFunctionInput{
-		FunctionName: aws.String("spawn-alert-handler"),
-		Role:         aws.String("arn:aws:iam::123456789012:role/test-role"),
-		Runtime:      lambdatypes.Runtime("python3.12"),
-		Handler:      aws.String("index.handler"),
-		Code:         &lambdatypes.FunctionCode{ZipFile: []byte("placeholder")},
-	})
-	if err != nil {
-		e.t.Fatalf("seed spawn-alert-handler: %v", err)
 	}
 }
 

@@ -27,7 +27,6 @@ import (
 func TestNoNewAWSSDKImportsInCmd(t *testing.T) {
 	// file -> allowed aws-sdk-go-v2/service/* packages (the 2026-07 baseline).
 	allow := map[string][]string{
-		"alerts.go":              {"dynamodb"},
 		"availability.go":        {"dynamodb"},
 		"autoscale_helpers.go":   {"cloudwatch", "dynamodb", "ec2", "lambda", "sqs"},
 		"autoscale_status.go":    {"dynamodb", "ec2"},

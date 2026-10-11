@@ -98,7 +98,7 @@ func createLambdaFunction(t *testing.T, lc *lambdasvc.Client, name string) {
 	}
 }
 
-// createAllLambdas provisions all four Lambda stubs the validator checks.
+// createAllLambdas provisions the Lambda stubs the validator checks.
 //
 // Named from the same constants the resolver uses, NOT written out again. This
 // fixture used to spell them itself and so carried the same wrong name
@@ -110,7 +110,6 @@ func createAllLambdas(t *testing.T, lc *lambdasvc.Client) {
 	for _, name := range []string{
 		schedulerHandlerFunction,
 		sweepOrchestratorFunction,
-		alertHandlerFunction,
 		dashboardAPIFunction,
 	} {
 		createLambdaFunction(t, lc, name)
@@ -206,7 +205,6 @@ func TestValidate_MissingLambda(t *testing.T) {
 	// Omit the scheduler handler.
 	for _, name := range []string{
 		sweepOrchestratorFunction,
-		alertHandlerFunction,
 		dashboardAPIFunction,
 	} {
 		createLambdaFunction(t, env.LambdaClient(), name)
