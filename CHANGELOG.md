@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`TestNoTestFabricatesAnAMIForTheEC2API`** — every `ImageId` a test hands to
+  the EC2 API must come from `RegisterTestAMI`. Discovery across the tree, so a
+  new test cannot reintroduce the fixture; pure-logic tests that legitimately keep
+  a literal id are untouched because they never assign it to `ImageId`. It divides
+  labour with the tests themselves: a malformed id fails the gate, and a
+  well-formed-but-unregistered one passes the gate and then fails the test loudly,
+  now that the swallowing skips are `t.Fatalf`.
+- **A sixth rule in `CLAUDE.md`: gate the mechanism, not a correlate of it.**
+  Three gates written during this audit had to be deleted after they ran — "no
+  local flag may shadow a persistent root flag" (twenty-odd commands do so by
+  convention), "was a flag value supplied?" computed from whether any later flag
+  appeared on the line (forty false positives), and "no test may skip on an
+  emulator failure while containing an invented AMI id" (eight). In each case the
+  striking detail in the story of how the bug was found was not the load-bearing
+  one, and the precise rule was narrower and duller. The signal is an allowlist of
+  things that are obviously fine: a list of what is *normal* means the rule is
+  wrong, which is rule 4 inside out.
+
 - **`PipelineStatus.IsTerminal` and `.Succeeded`**, with an exhaustive switch and
   no `default`, so a status added without being classified cannot fall through to
   "keep waiting" — which would be an unbounded poll rather than a visible error.
@@ -288,6 +306,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **Eleven tests reported coverage they did not have** (#843). They skipped, and
+  every skip blamed the emulator — "substrate RunInstances unavailable",
+  "substrate does not fully model the launch path" — each a true description of
+  what happened and a false diagnosis. The ids they passed to `RunInstances`
+  (`ami-base`, `ami-dcv`, `ami-x86-standard`) were invented; substrate has
+  validated image ids since v0.120.0 and ships with none, and
+  `testutil.RegisterTestAMI` already existed and was already used by five other
+  tests. So the fixture was the defect and the skip hid it. A skip counts as a
+  pass.
+  Restored: three `DeleteAMI` tests covering **irreversible snapshot deletion**
+  (including "retains a snapshot shared with another AMI" — an un-deleted
+  snapshot is an EBS cost leak), three `WaitForSSMOnline` tests including
+  `NoProfileIsDeadNotSlow`, two `spawn app launch` readiness-poll tests, two
+  `verifySporedReady` tests, and `Provision` end to end — the headless path
+  lagotto's capacity-poller takes (lagotto#19).
+  Repo-wide skips: **14 → 3**. The three that remain name a genuine external
+  requirement and the test that covers it instead.
+- **A destructive-action guard that skipped instead of failing.**
+  `TestMountDirNeverChownsAnExistingDirectory` exists to stop `chown` stripping
+  `/tmp`'s sticky 1777 ownership. Moving the chown out of its `if [ ! -d ]` guard
+  leaves the guard in place — the `mkdir` still needs it — so the guarded block
+  contains no chown and the test reported "no chown emitted for /tmp at all —
+  even safer than required" while the script chowned `/tmp` unconditionally.
+  Verified by doing it. It now requires the chown to exist *and* to be inside the
+  guard.
 
 - **`spawn pipeline launch --wait` never waited** (#807). The flag had exactly two
   references in the tree — its declaration and its registration — while the launch
