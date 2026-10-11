@@ -85,6 +85,17 @@ echo ""
 # Get AWS account ID
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 info "AWS Account: $ACCOUNT_ID"
+
+# PRINTING the account is not checking it. This script read ACCOUNT_ID and only
+# echoed it, so ambient credentials silently decided where a Lambda, an IAM role
+# and Route53 records were created. Found when the deploy-script gates were
+# widened past their hardcoded two-file list (#799). Override only for a fork.
+EXPECTED_ACCOUNT="${SPAWN_LAMBDA_ACCOUNT:-966362334030}"
+if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
+  echo "ERROR: credentials are for account $ACCOUNT_ID, expected $EXPECTED_ACCOUNT." >&2
+  echo "       Set AWS_PROFILE, or SPAWN_LAMBDA_ACCOUNT=$ACCOUNT_ID to deploy here deliberately." >&2
+  exit 1
+fi
 echo ""
 
 # Step 1: Build Lambda function
@@ -137,6 +148,9 @@ fi
 ROLE_ARN=""
 DNS_WAITED=0
 while [ "$DNS_WAITED" -lt 40 ]; do
+  # A failed attempt is expected while IAM propagates; the loop's deadline below
+  # is what reports the real failure.
+  # swallow-ok: this IS the poll, so an individual get-role failure is the normal case
   ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text 2>/dev/null || true)
   case "$ROLE_ARN" in
     arn:aws:iam::*) break ;;
@@ -373,7 +387,7 @@ info "Granting API Gateway permission to invoke Lambda..."
 # Remove old permission if exists
 aws lambda remove-permission \
   --function-name "$FUNCTION_NAME" \
-  --statement-id apigateway-invoke &>/dev/null || true
+  --statement-id apigateway-invoke &>/dev/null || true # swallow-ok: idempotent cleanup; the permission may not exist yet
 
 # Add new permission
 aws lambda add-permission \
