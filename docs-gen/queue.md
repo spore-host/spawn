@@ -37,6 +37,8 @@ spawn queue results <queue-id> [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
+| `--bucket` |  | string |  | S3 bucket holding the results (overrides --config; default spawn-results-&lt;region&gt;) |
+| `--config` |  | string |  | Queue config JSON the queue was launched with; its result_s3_bucket is where results actually went |
 | `--output-dir` |  | string | `.` | Output directory for results |
 
 ### `spawn queue status`

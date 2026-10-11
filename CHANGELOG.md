@@ -213,6 +213,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A fourth gate dropped for checking a correlate rather than a mechanism.** The
+  first version asserted, by comparing source positions, that
+  `downloadParams` consults the recorded bucket before the region template. A
+  revert that computed the template first and then overrode it **passed** — and
+  correctly, because computing-then-overriding is equally valid. The decision is
+  now a pure `paramsBucket(recorded, region)` with a behavioural table test beside
+  it, and the note replacing the old assertion says why. Rule 6, for the fourth
+  time in this audit.
+- Two matchers in the new gate were tightened after a revert slipped past them:
+  `dynamodbav:"s3_params_bucket` is a **prefix** of
+  `dynamodbav:"s3_params_bucket_unused"`, so renaming the field passed. Rule 3
+  applies to a gate's own matcher as much as to the code it guards.
+
 - **A gate removed after it ran.** The first version of `cmd/inert_flags_test.go`
   required that no local flag shadow a persistent root flag, on the theory that
   `logs --region` broke because the local flag won the binding. It reported more
@@ -345,6 +358,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **Scheduled executions read a bucket they had never written to** (#804).
+  `resolveSchedulesBucket` prefers the shared `spawn-schedules-<region>` and falls
+  back to an account-scoped `spawn-schedules-<account>-<region>` when the shared
+  name is taken by another account — and it **returns** which one it used.
+  `cmd/schedule.go` discarded that, `ScheduleRecord` had no bucket field, and
+  `lambda/scheduler-handler` rebuilt the name from the region alone. So in any
+  account that took the fallback path, **every scheduled sweep failed** on a
+  missing object. The record now carries `s3_params_bucket` and the handler
+  prefers it, falling back to the region template only for records written before
+  the field existed — which is right for those, since an account on the fallback
+  path would already have been failing.
+- **`spawn queue results` looked in the wrong bucket** (same issue). It derived
+  `spawn-results-<region>` directly beneath a comment saying it "should match what
+  was specified in the queue config", which it never loaded, while the writer
+  uploads to the queue JSON's `result_s3_bucket`. It happened to work for the
+  wizard default and the bundled examples, and not for
+  `pkg/queue/templates/*.json`'s `{{S3_BUCKET}}`, for any other bucket a user
+  names, or for the integration fixtures. It now takes `--config` (reading
+  `result_s3_bucket`/`result_s3_prefix`) or `--bucket`, and **announces** the
+  region-derived guess when given neither — guessing wrong produces an empty
+  listing, which is indistinguishable from the queue having produced nothing.
+  A `--config` that declares no bucket is an error rather than a silent fall back
+  to the guess.
 
 - **A 42 MB binary was committed by `git add -A` while writing this very PR**, and
   `TestNoTrackedCompiledBinaries` caught it in CI rather than locally. A

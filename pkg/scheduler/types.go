@@ -17,11 +17,24 @@ type ScheduleRecord struct {
 	NextExecutionTime  time.Time `dynamodbav:"next_execution_time"`
 
 	// Sweep configuration (passed to orchestrator)
-	S3ParamsKey   string `dynamodbav:"s3_params_key"`
-	SweepName     string `dynamodbav:"sweep_name"`
-	MaxConcurrent int    `dynamodbav:"max_concurrent"`
-	LaunchDelay   string `dynamodbav:"launch_delay"`
-	Region        string `dynamodbav:"region"`
+	S3ParamsKey string `dynamodbav:"s3_params_key"`
+	// S3ParamsBucket is the bucket the params were ACTUALLY written to (#804).
+	//
+	// resolveSchedulesBucket prefers the shared `spawn-schedules-<region>` and
+	// falls back to an account-scoped `spawn-schedules-<account>-<region>` when
+	// the shared name is taken by another account. It returns which one it used,
+	// and the caller used to discard that — so the record carried only a key and
+	// the scheduler-handler rebuilt the bucket from a region template. In any
+	// account that took the fallback, every scheduled execution therefore read a
+	// bucket it had never written to.
+	//
+	// omitempty so records written before this field existed unmarshal cleanly;
+	// the reader falls back to the template for those.
+	S3ParamsBucket string `dynamodbav:"s3_params_bucket,omitempty"`
+	SweepName      string `dynamodbav:"sweep_name"`
+	MaxConcurrent  int    `dynamodbav:"max_concurrent"`
+	LaunchDelay    string `dynamodbav:"launch_delay"`
+	Region         string `dynamodbav:"region"`
 
 	// Execution limits
 	Status         string    `dynamodbav:"status"` // "active" | "paused" | "cancelled"
