@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -472,43 +473,56 @@ func TestAccountOutcome_FSxOperationalFailureIsNotADenial(t *testing.T) {
 
 // The sentinel strings are a CONTRACT with the metric filters in template.yaml:
 // CloudWatch matches the literal text, so renaming one here without editing the
-// template silently disarms the alarm and nothing else in the build would notice.
-// Pinning the exact spellings makes that a test failure instead.
-func TestSentinelSpellingsAreStable(t *testing.T) {
-	for got, want := range map[string]string{
-		sentinelAllAccountsFailed: "REAPER REACHED NO ACCOUNTS",
-		sentinelAccountDenied:     "REAPER ACCOUNT UNREACHABLE",
-		sentinelFSxDenied:         "REAPER FSX UNREACHABLE",
-		sentinelHeartbeatStale:    "SPORED NOT CHECKING IN",
-	} {
-		if got != want {
-			t.Errorf("sentinel = %q, want %q — update the MetricFilter patterns in template.yaml in the same commit", got, want)
-		}
+// template silently disarms the alarm — and a sentinel with no filter at all is a
+// log line nobody alarms on, the same failure as the heartbeat tag spored wrote
+// every tick for months with zero readers (#682). A signal wired to nothing is
+// indistinguishable from no signal.
+//
+// Both halves used to be gated against a hand-written list of the four sentinels,
+// in two separate tests. A FIFTH sentinel would have been covered by neither: no
+// spelling pin, no filter requirement, nothing to say so (CLAUDE.md rule 4).
+// Discovering them from the source covers a new one the moment it is declared,
+// and folds the rename case into the same check — a renamed constant is a literal
+// the template no longer contains.
+func discoverSentinels(t *testing.T) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile("failures.go")
+	if err != nil {
+		t.Fatalf("read failures.go: %v", err)
 	}
+	re := regexp.MustCompile(`(?m)^\t(sentinel[A-Za-z0-9]+)\s*=\s*"([^"]+)"`)
+	found := map[string]string{}
+	for _, m := range re.FindAllStringSubmatch(string(b), -1) {
+		found[m[1]] = m[2]
+	}
+	if len(found) == 0 {
+		t.Fatal("found no sentinel constants in failures.go — the extraction has broken, which is " +
+			"not the same as there being none")
+	}
+	if len(found) < 4 {
+		t.Fatalf("found only %d sentinels (%v); there are at least four", len(found), found)
+	}
+	return found
 }
 
-// …and pinning the spelling is only half the contract: a sentinel with no
-// MetricFilter is a log line nobody alarms on. Read the template and require one
-// for each. This is the same failure as the heartbeat tag itself, which spored has
-// written every tick since #497 with zero readers (#682) — a signal that exists and
-// is wired to nothing is indistinguishable from no signal.
 func TestEverySentinelHasAMetricFilter(t *testing.T) {
 	b, err := os.ReadFile("template.yaml")
 	if err != nil {
 		t.Fatalf("read template.yaml: %v", err)
 	}
 	tmpl := string(b)
-	for _, s := range []string{
-		sentinelAllAccountsFailed,
-		sentinelAccountDenied,
-		sentinelFSxDenied,
-		sentinelHeartbeatStale,
-	} {
-		// The literal CloudWatch FilterPattern form, quotes included: a bare
-		// substring match would also be satisfied by the sentinel merely being
-		// named in a comment or an AlarmDescription.
-		if !strings.Contains(tmpl, `FilterPattern: '"`+s+`"'`) {
-			t.Errorf("sentinel %q has no MetricFilter in template.yaml — nothing can alarm on it", s)
+
+	for name, text := range discoverSentinels(t) {
+		// Match the quoted FilterPattern shape, not the bare text: the text also
+		// appears in alarm descriptions, which would satisfy a looser check with no
+		// filter existing at all (rule 3).
+		want := `FilterPattern: '"` + text + `"'`
+		if !strings.Contains(tmpl, want) {
+			t.Errorf("%s = %q has no MetricFilter in template.yaml.\n"+
+				"  expected a line containing: %s\n"+
+				"  Either the constant was renamed without updating the template — which disarms the "+
+				"alarm silently, since CloudWatch matches literal text — or a new sentinel was added "+
+				"with nothing alarming on it.", name, text, want)
 		}
 	}
 }

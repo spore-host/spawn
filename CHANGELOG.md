@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Making the reaper's call discovery real surfaced two actions nobody had reasoned
+  about, because they had always been excluded: `sts:GetCallerIdentity` and the
+  two Route53 calls. They are now recorded in a `grantedElsewhere` map with a
+  reason each. `sts:GetCallerIdentity` needing no IAM permission is **proven**
+  rather than assumed — the live production role grants only `sts:AssumeRole`, and
+  the reaper calls GetCallerIdentity on every invocation and has been succeeding
+  every ten minutes.
+
 - **`TestNoTestFabricatesAnAMIForTheEC2API`** — every `ImageId` a test hands to
   the EC2 API must come from `RegisterTestAMI`. Discovery across the tree, so a
   new test cannot reintroduce the fixture; pure-logic tests that legitimately keep
@@ -329,6 +337,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **A 42 MB binary was committed by `git add -A` while writing this very PR**, and
+  `TestNoTrackedCompiledBinaries` caught it in CI rather than locally. A
+  single-package `go build ./lambda/<name>/` writes the executable into the
+  **current** directory rather than next to its source, so the long-standing
+  `lambda/<name>/<name>` ignore entries did not cover the repo root.
+  `.gitignore` now covers both paths, and `TestEveryGoLambdaBinaryIsIgnored` —
+  which already checked the per-directory half — checks the root half too, scoped
+  to lambdas in the **root module**, since one with its own `go.mod` cannot be
+  built from the repo root at all. Requiring it for all twelve was the first
+  version, and that is rule 6's mistake inside the fix for rule 4: gating the set
+  of lambda names, a correlate, rather than the set that can produce the binary.
+
+- **Four gates reported a clean bill of health for sets they only partly
+  covered** (#845) — the hand-maintained-list class, rule 4.
+  - `templateSummary` in the reaper's deploy tests claimed "the 16 parameters the
+    template declares". It declares **19**: `NetResources`, `Version` and
+    `LogRetentionDays` had been added and the fixture never updated, so the
+    merge-params machinery — whose job is to stop a deploy resetting a live
+    parameter, the thing that disarmed the production reaper once — was never
+    exercised for three of them, and `NetResources` is the staged **destructive**
+    sweep (#685). Two assertions in the same file also said "want all 16
+    declared". All three now derive from `template.yaml`.
+  - **`apiServicePrefix` omitted route53, so a whole service was invisible to its
+    own coverage gate.** `pkg/reaperiam` asserts that every AWS action the reaper
+    calls is granted, and both halves of the discovery were anchored on a
+    four-entry list (`ec2|fsx|ssm` in the regex, four keys in the map). The reaper
+    has a `route53API` interface and calls two Route53 actions, so "every action
+    the reaper calls" silently excluded a service. The service names are
+    discovered now and an **unmapped** one fails rather than resolving to `""`.
+    No live defect behind it — the SAM template grants Route53 scoped to the zone,
+    the live role has it, and `spawn reaper deploy` exposes no DNS flags — but the
+    gate would not have said either way.
+  - The reaper's four sentinels were enumerated by hand in **two** gates, so a
+    fifth would have had no spelling pin and no metric-filter requirement. They
+    are discovered from `failures.go` now, with a floor, which also folds the
+    rename case into the same check: a renamed constant is a literal the template
+    no longer contains.
+  - `TestEveryTemplateParameterIsInThePARAMMAP` matched the CFN key half of a
+    `CfnKey:MAKE_VAR` pair and never the make-variable, so `DryRun:DRYRUN` passed
+    while `make deploy DRY_RUN=true` was silently ignored — the exact failure the
+    PARAM_MAP exists to prevent. It parses the pairs now and checks the
+    make-variable against the SCREAMING_SNAKE convention, with `Environment:ENV`
+    as the one documented departure.
 
 - **Eleven tests reported coverage they did not have** (#843). They skipped, and
   every skip blamed the emulator — "substrate RunInstances unavailable",

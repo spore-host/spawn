@@ -33,6 +33,28 @@ lambda/spore-bot/prism-bot
 lambda/sweep-orchestrator/sweep-orchestrator
 lambda/ttl-reaper/ttl-reaper
 
+# …and the same binaries at the REPO ROOT. A single-package
+# `go build ./lambda/<name>/` writes the executable into the current directory,
+# not next to its source, so the entries above do not cover it. Committing one is
+# a 42 MB mistake `git add -A` makes silently: it happened while writing #845 and
+# TestNoTrackedCompiledBinaries caught it in CI rather than locally.
+#
+# TestGitignoreCoversEveryLambdaBinary keeps both lists complete. The first version
+# of this one named nine of the twelve directories — the hand-maintained-list
+# defect that PR was fixing, reproduced in its own fix.
+/alert-evaluator
+/alert-handler
+/autoscale-orchestrator
+/cost-history-collector
+/dashboard-api
+/dashboard-websocket
+/dashboard-websocket-processor
+/dns-updater
+/pipeline-orchestrator
+/scheduler-handler
+/sweep-orchestrator
+/ttl-reaper
+
 # SAM CodeUri build dirs — hold ONLY bootstrap; see #645
 lambda/*/build/
 

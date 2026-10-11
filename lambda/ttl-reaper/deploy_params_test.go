@@ -10,27 +10,90 @@ import (
 	"testing"
 )
 
-// The 16 parameters the reaper template declares, as get-template-summary reports
-// them. DryRun's default is deliberately "true" — that is what made the old
-// Makefile dangerous, since a fallback to the template default disarms the reaper.
-const templateSummary = `{"Parameters":[
-  {"ParameterKey":"Environment","DefaultValue":"production"},
-  {"ParameterKey":"DryRun","DefaultValue":"true"},
-  {"ParameterKey":"NotifyUrl","DefaultValue":""},
-  {"ParameterKey":"ScanSelf","DefaultValue":"false"},
-  {"ParameterKey":"RoleArns","DefaultValue":"arn:aws:iam::435415984226:role/spawn-ttl-reaper-ec2"},
-  {"ParameterKey":"DnsZoneId","DefaultValue":""},
-  {"ParameterKey":"DnsDomain","DefaultValue":""},
-  {"ParameterKey":"DnsSweep","DefaultValue":"false"},
-  {"ParameterKey":"DnsExpire","DefaultValue":"false"},
-  {"ParameterKey":"AccountsTable","DefaultValue":"spore-portal-accounts"},
-  {"ParameterKey":"AccountsTableKeyArn","DefaultValue":""},
-  {"ParameterKey":"AlarmsEnabled","DefaultValue":"true"},
-  {"ParameterKey":"AlarmTopicArn","DefaultValue":""},
-  {"ParameterKey":"MaxAge","DefaultValue":"168h"},
-  {"ParameterKey":"Regions","DefaultValue":"us-east-1"},
-  {"ParameterKey":"Schedule","DefaultValue":"rate(10 minutes)"}
-]}`
+// templateSummaryFromTemplate builds what `aws cloudformation
+// get-template-summary` would report, FROM template.yaml.
+//
+// This was a hardcoded const listing "the 16 parameters the reaper template
+// declares". The template declares nineteen. NetResources, Version and
+// LogRetentionDays had been added and the fixture never updated, so the
+// merge-params machinery — whose entire job is to stop a deploy resetting a
+// parameter — was never exercised for three of them, and NetResources is the
+// staged DESTRUCTIVE sweep (#685). A fixture that lists the world by hand
+// reports a clean bill of health for everything it forgot (CLAUDE.md rule 4).
+//
+// Deriving it means the fixture cannot drift. DryRun's default being "true" is
+// the thing these tests care about — a fallback to the template default disarms
+// the reaper — and that now comes from the template rather than from a copy of
+// it.
+func templateSummaryFromTemplate(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("template.yaml")
+	if err != nil {
+		t.Fatalf("read template.yaml: %v", err)
+	}
+	body := string(b)
+
+	start := strings.Index(body, "\nParameters:\n")
+	if start < 0 {
+		t.Fatal("template.yaml has no Parameters block")
+	}
+	end := strings.Index(body[start+1:], "\nResources:\n")
+	if end < 0 {
+		t.Fatal("template.yaml has no Resources block")
+	}
+	block := body[start : start+1+end]
+
+	type param struct {
+		ParameterKey string `json:"ParameterKey"`
+		DefaultValue string `json:"DefaultValue"`
+	}
+	var params []param
+
+	nameRe := regexp.MustCompile(`(?m)^  ([A-Z][A-Za-z0-9]*):$`)
+	defRe := regexp.MustCompile(`(?m)^    Default:\s*(.*)$`)
+
+	idx := nameRe.FindAllStringSubmatchIndex(block, -1)
+	for i, loc := range idx {
+		name := block[loc[2]:loc[3]]
+		segEnd := len(block)
+		if i+1 < len(idx) {
+			segEnd = idx[i+1][0]
+		}
+		def := ""
+		if m := defRe.FindStringSubmatch(block[loc[1]:segEnd]); m != nil {
+			def = strings.Trim(strings.TrimSpace(m[1]), `'"`)
+		}
+		params = append(params, param{ParameterKey: name, DefaultValue: def})
+	}
+
+	if len(params) < 15 {
+		t.Fatalf("parsed only %d parameters out of template.yaml; the extraction has broken rather "+
+			"than the template having shrunk", len(params))
+	}
+	out, err := json.Marshal(map[string][]param{"Parameters": params})
+	if err != nil {
+		t.Fatalf("marshal summary: %v", err)
+	}
+	return string(out)
+}
+
+// templateParameterCount is how many parameters template.yaml declares, read from
+// the template.
+//
+// The two assertions below used to say "want all 16 declared", which is the same
+// hand-maintained count as the fixture and went stale the same way — three
+// parameters were added and both numbers stayed at 16, so the tests asserted
+// against a world three parameters smaller than the real one and still passed.
+func templateParameterCount(t *testing.T) int {
+	t.Helper()
+	var doc struct {
+		Parameters []struct{} `json:"Parameters"`
+	}
+	if err := json.Unmarshal([]byte(templateSummaryFromTemplate(t)), &doc); err != nil {
+		t.Fatalf("parse derived summary: %v", err)
+	}
+	return len(doc.Parameters)
+}
 
 // The live production stack as it actually was on 2026-10-04: ARMED (DryRun
 // false), DNS sweep on, alarms wired to a real topic, 11 regions.
@@ -106,7 +169,7 @@ func runMerge(t *testing.T, summary, live, explicit string) (map[string]string, 
 // fired into nothing, including the not-invoked alarm that exists to catch a
 // stopped reaper.
 func TestDeployWithNoOverridesChangesNothing(t *testing.T) {
-	got, stderr := runMerge(t, templateSummary, liveParams, "")
+	got, stderr := runMerge(t, templateSummaryFromTemplate(t), liveParams, "")
 
 	var live []struct {
 		ParameterKey   string
@@ -133,7 +196,7 @@ func TestDeployWithNoOverridesChangesNothing(t *testing.T) {
 }
 
 func TestExplicitOverrideIsAppliedAndReported(t *testing.T) {
-	got, stderr := runMerge(t, templateSummary, liveParams, "DryRun=true\nDnsSweep=false\n")
+	got, stderr := runMerge(t, templateSummaryFromTemplate(t), liveParams, "DryRun=true\nDnsSweep=false\n")
 
 	if got["DryRun"] != "true" || got["DnsSweep"] != "false" {
 		t.Errorf("explicit values must win, got DryRun=%q DnsSweep=%q", got["DryRun"], got["DnsSweep"])
@@ -153,7 +216,7 @@ func TestExplicitOverrideIsAppliedAndReported(t *testing.T) {
 // defaults apply — which is why DryRun defaults to "true" there. A new deployment
 // starts unarmed.
 func TestFreshStackUsesTemplateDefaults(t *testing.T) {
-	got, _ := runMerge(t, templateSummary, "[]", "")
+	got, _ := runMerge(t, templateSummaryFromTemplate(t), "[]", "")
 
 	if got["DryRun"] != "true" {
 		t.Errorf("DryRun = %q, want \"true\" on a fresh stack — a new reaper starts unarmed",
@@ -162,8 +225,8 @@ func TestFreshStackUsesTemplateDefaults(t *testing.T) {
 	if got["MaxAge"] != "168h" {
 		t.Errorf("MaxAge = %q, want the template default", got["MaxAge"])
 	}
-	if len(got) != 16 {
-		t.Errorf("got %d parameters, want all 16 declared", len(got))
+	if want := templateParameterCount(t); len(got) != want {
+		t.Errorf("got %d parameters, want all %d the template declares", len(got), want)
 	}
 }
 
@@ -171,7 +234,7 @@ func TestFreshStackUsesTemplateDefaults(t *testing.T) {
 // Key=Value form in the first place (see the Makefile's comment), so it has to
 // round-trip as "" rather than being dropped.
 func TestEmptyValuesSurvive(t *testing.T) {
-	got, _ := runMerge(t, templateSummary, liveParams, "NotifyUrl=\n")
+	got, _ := runMerge(t, templateSummaryFromTemplate(t), liveParams, "NotifyUrl=\n")
 	if v, ok := got["NotifyUrl"]; !ok || v != "" {
 		t.Errorf("NotifyUrl = %q (present=%v), want an empty string", v, ok)
 	}
@@ -181,7 +244,7 @@ func TestEmptyValuesSurvive(t *testing.T) {
 // is comma-separated, which is why the explicit file is Key=value lines rather
 // than JSON assembled in Make.
 func TestValuesWithSpacesAndCommasSurvive(t *testing.T) {
-	got, _ := runMerge(t, templateSummary, liveParams,
+	got, _ := runMerge(t, templateSummaryFromTemplate(t), liveParams,
 		"Schedule=rate(5 minutes)\nRegions=us-east-1,eu-central-1,ap-northeast-1\n")
 
 	if got["Schedule"] != "rate(5 minutes)" {
@@ -206,7 +269,7 @@ func TestUndeclaredExplicitParameterIsRejected(t *testing.T) {
 		return p
 	}
 	cmd := exec.Command("python3", "scripts/merge_deploy_params.py",
-		write("s.json", templateSummary), write("l.json", liveParams),
+		write("s.json", templateSummaryFromTemplate(t)), write("l.json", liveParams),
 		write("e.txt", "NotAParameter=x\n"))
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -264,10 +327,10 @@ func TestMakefilePassesOnlyExplicitParameters(t *testing.T) {
 //
 // So an empty live set must be the loudest case, not the quietest.
 func TestEmptyLiveSetIsReportedLoudly(t *testing.T) {
-	merged, stderr := runMerge(t, templateSummary, "[]", "")
+	merged, stderr := runMerge(t, templateSummaryFromTemplate(t), "[]", "")
 
-	if len(merged) != 16 {
-		t.Fatalf("expected all 16 template defaults, got %d", len(merged))
+	if want := templateParameterCount(t); len(merged) != want {
+		t.Fatalf("expected all %d template defaults, got %d", want, len(merged))
 	}
 	if !strings.Contains(stderr, "WARNING") {
 		t.Errorf("an empty live set must WARN — it means every parameter is being asserted "+
@@ -356,11 +419,70 @@ func TestEveryTemplateParameterIsInThePARAMMAP(t *testing.T) {
 		t.Fatal("parsed zero parameters — the regex no longer matches the template")
 	}
 
+	// Parse PARAM_MAP into real CfnKey:MAKE_VAR pairs.
+	//
+	// This used to be strings.Contains(mk, name+":"), which checks only the CFN
+	// key half. `DryRun:DRYRUN` satisfied it while `make deploy DRY_RUN=true` was
+	// silently ignored — the exact failure the PARAM_MAP exists to prevent, left
+	// undetected by the gate guarding it. Contains was also unanchored, so any
+	// mention of `DryRun:` anywhere in the Makefile counted.
+	pairRe := regexp.MustCompile(`(?m)^\t([A-Z][A-Za-z0-9]*):([A-Z][A-Z0-9_]*)\s*\\?$`)
+	pairs := map[string]string{}
+	for _, m := range pairRe.FindAllStringSubmatch(string(mk), -1) {
+		pairs[m[1]] = m[2]
+	}
+	if len(pairs) == 0 {
+		t.Fatal("parsed zero PARAM_MAP entries — the pair regex no longer matches the Makefile, " +
+			"which is not the same as every parameter being mapped")
+	}
+
+	// The make variable is conventionally the SCREAMING_SNAKE of the CFN key.
+	// Environment:ENV is the one deliberate departure.
+	exceptions := map[string]string{"Environment": "ENV"}
+
 	for _, m := range found {
 		name := m[1]
-		if !strings.Contains(string(mk), name+":") {
+		mkVar, ok := pairs[name]
+		if !ok {
 			t.Errorf("template parameter %s is not in the Makefile's PARAM_MAP — "+
 				"`make deploy %s=…` would be silently ignored", name, name)
+			continue
+		}
+		want := exceptions[name]
+		if want == "" {
+			want = screamingSnake(name)
+		}
+		if mkVar != want {
+			t.Errorf("PARAM_MAP maps %s to the make variable %s, but the Makefile's own default and "+
+				"every documented invocation use %s. A mismatch here is silent: $(origin %s) is "+
+				"undefined, so the parameter is never sent and the deploy inherits whatever is live.",
+				name, mkVar, want, mkVar)
 		}
 	}
+}
+
+// screamingSnake converts a CloudFormation parameter name to the Makefile
+// variable convention: NetResources -> NET_RESOURCES, DnsZoneId -> DNS_ZONE_ID.
+func screamingSnake(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			prev := rune(s[i-1])
+			next := rune(0)
+			if i+1 < len(s) {
+				next = rune(s[i+1])
+			}
+			prevLower := prev >= 'a' && prev <= 'z'
+			nextLower := next >= 'a' && next <= 'z'
+			if prevLower || nextLower {
+				b.WriteByte('_')
+			}
+		}
+		if r >= 'a' && r <= 'z' {
+			b.WriteRune(r - 32)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
