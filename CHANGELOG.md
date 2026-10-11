@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.127.0] - 2026-10-10
+
+**Breaking:** `spawn alerts` is removed — see Removed below. Pre-1.0, a breaking change bumps MINOR.
+
 ### Added
 
 - **Two gates on the class of defect behind #790.**
@@ -208,7 +212,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declared in a template whose other resources are live. Those belong to #653.
 
 - **The `spawn alerts` command and `lambda/alert-handler` are gone** (#783).
-  **This is a breaking change: the next release must bump MINOR.** `spawn alerts
+  **Breaking change — this is why 0.127.0 is a MINOR bump.** `spawn alerts
   create|list|delete|history` no longer exists.
   The evidence for removing rather than deploying: the handler is event-driven
   and **nothing emitted the event it handled** — `sweep-orchestrator`'s only
@@ -6350,7 +6354,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.126.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.127.0...HEAD
+[0.127.0]: https://github.com/spore-host/spawn/compare/v0.126.1...v0.127.0
 [0.126.1]: https://github.com/spore-host/spawn/compare/v0.126.0...v0.126.1
 [0.126.0]: https://github.com/spore-host/spawn/compare/v0.125.0...v0.126.0
 [0.125.0]: https://github.com/spore-host/spawn/compare/v0.124.0...v0.125.0
