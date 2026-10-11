@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Gates on version selection, which is the input that decides whether verification
+  happens: semantic rather than lexical ordering (`1.10.0` beats `1.9.0`, which a
+  string compare gets backwards and would silently install an older plugin);
+  plugin-name isolation, so `demo-extra-1.2.3` is not read as a version of `demo`
+  and `install tailscale` cannot resolve to a `tailscale-exit-node` release; drafts
+  and prereleases excluded; API failures reported as errors and never as "no
+  releases"; and pagination followed, bounded, and asserted with a full first page
+  whose newest release is on page two.
+
 - **`pkg/sporedinstall`** — the one implementation of download-verify-install for
   `spored`, plus the compiled-in signing public key (moved from
   `pkg/launcher/spored_pubkey.go`, which is deleted). Emits a shell function that
@@ -102,6 +111,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two drifting apart is how the exemption survived.
 
 ### Changed
+
+- **A test that asserted the vulnerability was correct behaviour has been
+  inverted.** `TestResolveOfficialBare_NoManifestFetch` required that a bare
+  official ref resolve successfully, not set `ManifestVerified`, and *never contact
+  the release endpoint* — it failed the test if verification was attempted. That was
+  an accurate description of the code and a false description of the design, and
+  because it was written from the code it would have failed on the fix. It is now
+  `TestResolveOfficialBare_ResolvesToLatestReleaseAndVerifies` and asserts the
+  opposite, with the reason recorded in place (CLAUDE.md rule 5).
+- Resolving an official ref from the default branch is now reachable only under
+  `--insecure`. Three provenance tests that legitimately exercise that path use an
+  explicitly-named `newInsecureTestResolver` rather than quietly relying on the old
+  default, and the spec-path test now pins the **tagged** URL for a bare name, since
+  fetching at the tag is the mechanism by which verification is reached.
 
 - `sporedDCVRolePolicy` is now a `var` built with `fmt.Sprintf` rather than a
   `const`, so the control-tag deny renders from the same `reaperControlTagKeys`
@@ -350,6 +373,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifacts behind.
 
 ### Security
+
+- **`spawn plugin install <name>` performed no verification at all** (advisory
+  GHSA-54x4-pc23-4m6j, #816). The shortest and most natural install form — a bare
+  name with no `@version` — fetched the spec from the registry's `main` branch. The
+  verification machinery is well built and genuinely fail-closed, but it is gated on
+  a release tag having been resolved, and a bare name left that empty. So the form a
+  person is most likely to type did no signature check, no checksum check, and
+  emitted no warning, while a plugin spec runs as root on the instance.
+  The gate was not wrong when written: bare-name resolution used to 404 against the
+  official registry layout (#448), so the path was unreachable. Fixing that quietly
+  armed this. Confirmed reachable today —
+  `plugins/tailscale/plugin.yaml` on `main` returns HTTP 200.
+  A bare official name now resolves to the plugin's **latest release tag**, which is
+  exactly the input the verified path already takes. Verification itself is
+  unchanged; it simply now runs. A plugin with no releases, or a releases API that
+  cannot be read, **refuses** rather than falling back to the mutable branch — a
+  rate limit must not be able to select the unverified path. `--insecure` still
+  reaches the default branch, and now says so: the "unverified source" warning used
+  to fire only for a third-party owner, so the official unverified path told the
+  user nothing.
 
 - **Any caller could publish or delete a DNS alias under another tenant's
   subdomain** (advisory GHSA-q9qq-223w-mqx6, #820). `lambda/dns-updater` builds
