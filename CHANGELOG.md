@@ -29,6 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Lambda-name gate now keys on the property, not on how the constants
+  happened to be spelled.** The version added for #790 required the identifier to
+  end in `Function` and required a literal after `:function:`. Both describe the
+  constants in `pkg/infrastructure`, not the property being gated — so it missed
+  #812 twice: `defaultOrchestratorFuncName` ends in `FuncName`, and the name
+  reaches AWS through `:function:%s` from a variable. Demonstrated rather than
+  asserted: against the shipped bug the old pattern does not match and the new one
+  does.
+  The widened pattern is deliberately loose, so a second test pins the population
+  it may match — exactly five non-test identifiers repo-wide, each with its
+  expected value. A sixth now fails with instructions to narrow the pattern rather
+  than grow the list, because a measurement nothing re-checks is rule 4's
+  hand-maintained list one level up.
+
 - **A test that asserted the old behaviour was replaced, not deleted.**
   `TestEvaluate_WithinDeadline_Spared` used a 30-day-old instance with a
   two-hour-future deadline and asserted it was spared. It was right about the
@@ -104,6 +118,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **Every scheduled sweep failed; `spawn schedule` has never worked** (#812).
+  `lambda/scheduler-handler` invoked
+  `arn:aws:lambda:…:function:sweep-orchestrator`, but the deployed function is
+  `spawn-sweep-orchestrator` — verified against the live account, where the
+  unprefixed name does not exist and the deployed handler had **no environment
+  variables at all**, so nothing overrode the compiled-in default. Consistent with
+  all three `spawn-schedules-*` buckets measuring 0 objects: no schedule has ever
+  run far enough to stage its parameters.
+  This is #790's mirror image — a *missing* prefix rather than an extra one.
+- **A second failure was hiding behind the first:** the invoke ARN interpolated
+  `schedule.Region`, the region the sweep's *instances* go to, while the
+  orchestrator is deployed once in the infra account's `us-east-1`. Even with the
+  name fixed, a schedule targeting any other region would have invoked an ARN in a
+  region the orchestrator has never been deployed to. The region is now its own
+  setting (`SPAWN_ORCHESTRATOR_REGION`), not derived from the schedule.
+- **`scripts/deploy-scheduler-handler.sh` now sets the environment explicitly.**
+  It previously set none, so the deployed configuration came entirely from
+  compiled-in defaults — which cannot be read back from AWS, making skew between
+  the repo and the live function invisible. Note `--environment` *replaces* rather
+  than merges, which is deliberate: this script is meant to be the source of truth
+  for the function's configuration.
 
 - **`/api/cost-summary` survived the autoscale removal.** `handleGetCostSummary`
   and `calculateInstanceCosts` lived in `lambda/dashboard-api/autoscale.go` but

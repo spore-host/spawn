@@ -21,10 +21,20 @@ import (
 
 // Environment variables for self-hosted infrastructure (with fallbacks to shared infrastructure)
 const (
-	defaultSchedulesTable       = "spawn-schedules"
-	defaultHistoryTable         = "spawn-schedule-history"
-	defaultSchedulesBucketTmpl  = "spawn-schedules-%s" // %s = region
-	defaultOrchestratorFuncName = "sweep-orchestrator"
+	defaultSchedulesTable      = "spawn-schedules"
+	defaultHistoryTable        = "spawn-schedule-history"
+	defaultSchedulesBucketTmpl = "spawn-schedules-%s" // %s = region
+	// The deployed function is spawn-sweep-orchestrator — scripts/deploy-sweep-orchestrator.sh
+	// creates exactly that name. This constant said "sweep-orchestrator" and so
+	// every scheduled sweep invoked an ARN for a function that has never existed,
+	// failing with ResourceNotFoundException (#812). Verified against the live
+	// account: `sweep-orchestrator` does not exist, `spawn-sweep-orchestrator`
+	// does, and the deployed scheduler-handler had no environment override.
+	//
+	// #790 was the same class in the other direction — a name with an extra
+	// prefix. Both are now gated by lambda_names_test.go.
+	defaultOrchestratorFuncName = "spawn-sweep-orchestrator"
+	defaultOrchestratorRegion   = "us-east-1" // where the single orchestrator is deployed
 )
 
 // defaultAccountID is the infra account ID; overridable via SPAWN_INFRA_ACCOUNT_ID.
@@ -89,6 +99,7 @@ var (
 	historyTable         string
 	schedulesBucketTmpl  string
 	orchestratorFuncName string
+	orchestratorRegion   string
 )
 
 func init() {
@@ -108,9 +119,10 @@ func init() {
 	historyTable = getEnv("SPAWN_SCHEDULE_HISTORY_TABLE", defaultHistoryTable)
 	schedulesBucketTmpl = getEnv("SPAWN_SCHEDULES_BUCKET_TEMPLATE", defaultSchedulesBucketTmpl)
 	orchestratorFuncName = getEnv("SPAWN_ORCHESTRATOR_FUNCTION_NAME", defaultOrchestratorFuncName)
+	orchestratorRegion = getEnv("SPAWN_ORCHESTRATOR_REGION", defaultOrchestratorRegion)
 
-	log.Printf("Configuration: account=%s, schedules_table=%s, history_table=%s, orchestrator=%s",
-		accountID, schedulesTable, historyTable, orchestratorFuncName)
+	log.Printf("Configuration: account=%s, schedules_table=%s, history_table=%s, orchestrator=%s in %s",
+		accountID, schedulesTable, historyTable, orchestratorFuncName, orchestratorRegion)
 }
 
 func getEnv(key, defaultValue string) string {
@@ -175,7 +187,13 @@ func handler(ctx context.Context, event Event) error {
 		"force_download": false,
 	})
 
-	orchestratorArn := fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", schedule.Region, accountID, orchestratorFuncName)
+	// The orchestrator's OWN region, not the schedule's. The orchestrator is
+	// deployed once, in the infra account's us-east-1; schedule.Region is where
+	// the sweep's INSTANCES go, which is a different axis. Interpolating it here
+	// meant a schedule targeting any other region invoked an ARN in a region the
+	// orchestrator has never been deployed to — a second ResourceNotFoundException
+	// hiding behind the first (#812).
+	orchestratorArn := fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", orchestratorRegion, accountID, orchestratorFuncName)
 	_, err = lambdaClient.Invoke(ctx, &lambdasvc.InvokeInput{
 		FunctionName:   aws.String(orchestratorArn),
 		InvocationType: "Event", // Asynchronous
