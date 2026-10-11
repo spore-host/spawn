@@ -75,6 +75,18 @@ func manifestResolver(rawBase, apiBase, releaseBase string) *compositeResolver {
 	return &compositeResolver{rawBase: rawBase, apiBase: apiBase, releaseBase: releaseBase}
 }
 
+// manifestJSONVersion builds a manifest.json body at an explicit version, for
+// tests that resolve to a tag other than v1.0.0.
+func manifestJSONVersion(t *testing.T, sha, version string) []byte {
+	t.Helper()
+	m := &Manifest{SchemaVersion: ManifestSchemaVersion, Plugin: "demo", Version: version, Files: map[string]string{"plugin.yaml": sha}}
+	data, err := m.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 // manifestJSON builds a manifest.json body for the given plugin.yaml sha256.
 func manifestJSON(t *testing.T, sha string) []byte {
 	t.Helper()
@@ -228,28 +240,131 @@ func TestResolveOfficialVersioned_ManifestMissing(t *testing.T) {
 	}
 }
 
-func TestResolveOfficialBare_NoManifestFetch(t *testing.T) {
-	// A bare official ref (no version) has no release/manifest; resolution must
-	// succeed and must NOT mark ManifestVerified. The release server fails the
-	// test if it's ever contacted.
+func TestResolveOfficialBare_ResolvesToLatestReleaseAndVerifies(t *testing.T) {
+	// This test used to be TestResolveOfficialBare_NoManifestFetch, and it asserted
+	// the opposite: that a bare official ref resolves successfully, does NOT set
+	// ManifestVerified, and must never contact the release endpoint ("release
+	// endpoint should not be contacted for a bare official ref").
+	//
+	// That was an accurate description of the code and a false description of the
+	// design. A plugin spec runs as root on the instance, so the install form with
+	// no verification cannot be the default one — and because the test was written
+	// from the code, it certified the gap and would have failed on the fix
+	// (CLAUDE.md rule 5, #816, GHSA-54x4-pc23-4m6j).
+	//
+	// The intent, stated the other way round: a bare name resolves to the plugin's
+	// latest release and goes through the SAME verification a versioned ref does.
+	specSHA := sha256Hex([]byte(manifestTestSpec))
+
 	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Must be fetched AT the resolved tag, not at main.
+		if !strings.Contains(r.URL.Path, "/demo-1.2.0/") {
+			t.Errorf("plugin.yaml fetched from %q, want the demo-1.2.0 tag", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		_, _ = w.Write([]byte(manifestTestSpec)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
 	}))
 	defer raw.Close()
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }))
-	defer api.Close()
-	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("release endpoint should not be contacted for a bare official ref")
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/releases") {
+			// Deliberately unsorted, with a draft, a prerelease, a newer version of
+			// a DIFFERENT plugin, and a same-prefix neighbour: 1.2.0 must win.
+			_, _ = w.Write([]byte(`[
+				{"tag_name":"demo-1.0.0"},
+				{"tag_name":"demo-9.9.9","draft":true},
+				{"tag_name":"demo-2.0.0-rc1","prerelease":true},
+				{"tag_name":"other-5.0.0"},
+				{"tag_name":"demo-extra-7.0.0"},
+				{"tag_name":"demo-1.2.0"},
+				{"tag_name":"demo-1.1.9"}
+			]`)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer api.Close()
+
+	contacted := false
+	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contacted = true
+		switch {
+		case strings.HasSuffix(r.URL.Path, ManifestFileName):
+			_, _ = w.Write(manifestJSONVersion(t, specSHA, "v1.2.0")) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer release.Close()
 
 	r := manifestResolver(raw.URL, api.URL, release.URL)
 	_, prov, err := r.ResolveWithProvenance(context.Background(), "demo")
-	if err != nil {
-		t.Fatalf("ResolveWithProvenance: %v", err)
+
+	if !contacted {
+		t.Error("the release endpoint was never contacted for a bare official ref — verification " +
+			"is still being skipped, which is the whole defect")
 	}
-	if prov.ManifestVerified {
-		t.Error("ManifestVerified = true for a bare ref, want false")
+	if prov != nil && prov.ReleaseTag != "demo-1.2.0" {
+		t.Errorf("ReleaseTag = %q, want demo-1.2.0 (the highest non-draft, non-prerelease release)",
+			prov.ReleaseTag)
+	}
+	// The signature asset is absent from this stub, so verification must HARD FAIL
+	// rather than quietly resolve — that is the fail-closed behaviour a versioned
+	// ref already had and a bare name did not.
+	if err == nil {
+		t.Fatal("resolution succeeded with no signature on the release; a bare name must be held to " +
+			"the same standard as a versioned one")
+	}
+	if !strings.Contains(err.Error(), "not signed") {
+		t.Errorf("error %q does not report the missing signature", err)
+	}
+}
+
+// A bare official name with NO releases must refuse rather than silently install
+// the unsigned spec from the default branch.
+func TestResolveOfficialBare_NoReleasesRefuses(t *testing.T) {
+	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(manifestTestSpec)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
+	}))
+	defer raw.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/releases") {
+			_, _ = w.Write([]byte(`[{"tag_name":"other-1.0.0"}]`)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer api.Close()
+
+	r := manifestResolver(raw.URL, api.URL, "")
+	if _, _, err := r.ResolveWithProvenance(context.Background(), "demo"); err == nil {
+		t.Fatal("a plugin with no published releases resolved successfully; installing an unsigned " +
+			"spec from a mutable branch must be an explicit --insecure choice")
+	} else if !strings.Contains(err.Error(), "no published releases") {
+		t.Errorf("error %q does not explain that there is nothing to verify against", err)
+	}
+}
+
+// A releases-API failure must refuse too, not fall back to the default branch.
+//
+// Separate from the no-releases case: "the API said there are none" and "we could
+// not ask" are different, and only one of them is safe to treat as information.
+func TestResolveOfficialBare_ReleasesAPIFailureRefuses(t *testing.T) {
+	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(manifestTestSpec)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
+	}))
+	defer raw.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden) // rate limited
+	}))
+	defer api.Close()
+
+	r := manifestResolver(raw.URL, api.URL, "")
+	if _, _, err := r.ResolveWithProvenance(context.Background(), "demo"); err == nil {
+		t.Fatal("a rate-limited releases API resolved successfully from the default branch; an API " +
+			"failure must not be able to choose the unverified path")
+	} else if !strings.Contains(err.Error(), "could not determine the latest release") {
+		t.Errorf("error %q does not explain why it refused", err)
 	}
 }

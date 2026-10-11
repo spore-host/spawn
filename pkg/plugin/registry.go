@@ -182,16 +182,54 @@ func (r *compositeResolver) ResolveWithProvenance(ctx context.Context, ref strin
 		return spec, prov, nil
 	}
 
-	// An official versioned ref (name@version) resolves to the release tag
-	// <name>-<version>; the plugin.yaml is fetched AT that tag and verified
-	// against the release's checksum manifest (increment 2). A bare official ref
-	// (no version) and any third-party github: ref have no release/manifest and
-	// fall through to the branch/ref fetch below.
+	// An official ref resolves to the release tag <name>-<version>; the
+	// plugin.yaml is fetched AT that tag and verified against the release's
+	// checksum manifest (increment 2).
+	//
+	// A BARE official name (no @version) used to skip all of that: it fell through
+	// to the default branch, leaving prov.ReleaseTag empty, and the verification
+	// below is gated on that being set. So the install form a person is most
+	// likely to type was the one that checked nothing, while a plugin spec runs as
+	// root on the instance (#816, GHSA-54x4-pc23-4m6j). It resolves to the
+	// plugin's latest release now, which makes the verified path the default
+	// rather than the opt-in — the verification itself is unchanged, it simply
+	// runs.
 	gitRef := pr.Version
-	if pr.Host == "official" && pr.Version != "" {
-		tag := officialTag(pr.Name, pr.Version)
-		prov.ReleaseTag = tag
-		gitRef = tag
+	if pr.Host == "official" {
+		version := pr.Version
+		if version == "" {
+			latest, err := r.latestOfficialVersion(ctx, pr.Owner, pr.Repo, pr.Name)
+			switch {
+			case err != nil:
+				// An API failure must not be able to select the unverified branch:
+				// a rate limit would otherwise silently downgrade the install.
+				if e := r.softFail(fmt.Errorf("could not determine the latest release of %q: %w "+
+					"— refusing to fall back to the unverified default branch; pass %s@<version>, "+
+					"or --insecure for local dev", pr.Name, err, pr.Name)); e != nil {
+					return nil, nil, e
+				}
+				// --insecure only: fall through with no tag, i.e. the default branch.
+			case latest == "":
+				if e := r.softFail(fmt.Errorf("%q has no published releases in %s/%s, so there is "+
+					"nothing to verify against — pass --insecure to install the unsigned spec from "+
+					"the default branch", pr.Name, pr.Owner, pr.Repo)); e != nil {
+					return nil, nil, e
+				}
+			default:
+				version = latest
+				log.Printf("resolved %s to its latest release %s", pr.Name, version)
+			}
+		}
+		// Still empty only on the --insecure fall-through above. Guarding on it
+		// rather than assuming matters because softFail returns NIL under
+		// --insecure, so the error branches above continue rather than return —
+		// building a tag from an empty version would produce "demo-" and fetch a
+		// ref that cannot exist.
+		if version != "" {
+			tag := officialTag(pr.Name, version)
+			prov.ReleaseTag = tag
+			gitRef = tag
+		}
 	}
 
 	spec, data, err := r.fetchGitHubSpec(ctx, pr, gitRef)
@@ -233,8 +271,14 @@ func (r *compositeResolver) fetchGitHubSpec(ctx context.Context, pr PluginRef, g
 		}
 	}
 
+	// The warning used to fire only for a third-party owner, so a bare official
+	// name — the unverified path that mattered most — told the user nothing
+	// (#816). gitRef is empty exactly when we are about to fetch a mutable default
+	// branch, which is the condition worth warning about regardless of owner.
 	if owner != "spore-host" {
 		log.Printf("warning: installing plugin from unverified source %s/%s — content is not signed or audited", owner, repo)
+	} else if gitRef == "" {
+		log.Printf("warning: installing %s/%s from the default branch — this content is NOT signature-verified", owner, repo)
 	}
 
 	if gitRef == "" {

@@ -24,6 +24,19 @@ func newTestResolver(rawBase, apiBase string) *compositeResolver {
 	return &compositeResolver{rawBase: rawBase, apiBase: apiBase}
 }
 
+// newInsecureTestResolver resolves from the DEFAULT BRANCH, which since #816 is
+// reachable for an official ref only under --insecure: a bare name now resolves
+// to the plugin's latest release so that signature verification is the default
+// rather than the opt-in.
+//
+// The tests below use it because their subject is provenance plumbing — commit-SHA
+// pinning, content hashing — not verification, and the default-branch path is
+// still the one they need to exercise. Verified bare-name resolution is covered
+// directly in manifest_test.go (TestResolveOfficialBare_*).
+func newInsecureTestResolver(rawBase, apiBase string) *compositeResolver {
+	return &compositeResolver{rawBase: rawBase, apiBase: apiBase, insecure: true}
+}
+
 func TestResolveWithProvenance_GitHub_PinsAndHashes(t *testing.T) {
 	const wantSHA = "0123456789abcdef0123456789abcdef01234567"
 	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +60,7 @@ func TestResolveWithProvenance_GitHub_PinsAndHashes(t *testing.T) {
 	}))
 	defer api.Close()
 
-	r := newTestResolver(raw.URL, api.URL)
+	r := newInsecureTestResolver(raw.URL, api.URL)
 	spec, prov, err := r.ResolveWithProvenance(context.Background(), "demo")
 	if err != nil {
 		t.Fatalf("ResolveWithProvenance: %v", err)
@@ -77,7 +90,7 @@ func TestResolveWithProvenance_CommitAPIFailure_BestEffort(t *testing.T) {
 	}))
 	defer api.Close()
 
-	r := newTestResolver(raw.URL, api.URL)
+	r := newInsecureTestResolver(raw.URL, api.URL)
 	_, prov, err := r.ResolveWithProvenance(context.Background(), "demo")
 	if err != nil {
 		t.Fatalf("resolve should succeed even when commit API fails: %v", err)
@@ -105,7 +118,7 @@ func TestResolveWithProvenance_ContentHashIsStable(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer api.Close()
-	r := newTestResolver(raw.URL, api.URL)
+	r := newInsecureTestResolver(raw.URL, api.URL)
 
 	_, p1, err := r.ResolveWithProvenance(context.Background(), "demo")
 	if err != nil {

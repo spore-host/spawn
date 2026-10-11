@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -30,16 +31,22 @@ func recordingRawServer(t *testing.T, got *string) *httptest.Server {
 
 func TestFetchGitHubSpec_ResolvedURLPath(t *testing.T) {
 	tests := []struct {
-		name     string
-		ref      string
-		wantPath string
+		name        string
+		ref         string
+		wantPath    string
+		hasReleases bool
 	}{
 		{
 			// A bare name is the official registry: specs live under plugins/.
 			// Getting this wrong is exactly the bug reported in spawn#448.
-			name:     "official bare name",
-			ref:      "demo",
-			wantPath: "/spore-host/spore-plugins/main/plugins/demo/plugin.yaml",
+			// A bare official name resolves to the plugin's latest release tag
+			// since #816 — it used to fetch from main, which skipped signature
+			// verification entirely. The path assertion is what pins that: fetching
+			// at the tag is the mechanism by which the verified path is reached.
+			name:        "official bare name resolves to the latest release tag",
+			ref:         "demo",
+			wantPath:    "/spore-host/spore-plugins/demo-1.0.0/plugins/demo/plugin.yaml",
+			hasReleases: true,
 		},
 		{
 			// A third-party repo keeps the spec at its root — no plugins/ prefix.
@@ -53,12 +60,19 @@ func TestFetchGitHubSpec_ResolvedURLPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotPath string
 			raw := recordingRawServer(t, &gotPath)
-			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if tc.hasReleases && strings.Contains(req.URL.Path, "/releases") {
+					_, _ = w.Write([]byte(`[{"tag_name":"demo-1.0.0"}]`)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture
+					return
+				}
 				w.WriteHeader(http.StatusNotFound) // commit SHA is best-effort here
 			}))
 			defer api.Close()
 
-			r := newTestResolver(raw.URL, api.URL)
+			// Insecure because this test's subject is the fetched URL, and there is
+			// no release server here to satisfy the manifest/signature checks that
+			// resolving to a tag now triggers. Those are asserted in manifest_test.go.
+			r := newInsecureTestResolver(raw.URL, api.URL)
 			if _, err := r.Resolve(context.Background(), tc.ref); err != nil {
 				t.Fatalf("Resolve(%q): %v", tc.ref, err)
 			}
