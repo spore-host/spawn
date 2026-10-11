@@ -32,15 +32,13 @@ spawn slurm submit examples/slurm/bioinformatics.sbatch --spot
 
 ### Data Staging
 
-1. **Stage large dataset:**
-```bash
-# Example: 100GB reference genome
-spawn stage upload hg38-reference.fasta \
-  --regions us-east-1,us-west-2 \
-  --dest /mnt/data/reference.fasta
-```
+> **`spawn stage` was removed in #805.** It uploaded to a bucket it never created,
+> nothing ever downloaded the staged data, and it published a "93% cost reduction"
+> figure for a path that had never run. The parameter file below still works for a
+> normal launch; stage the data yourself (`aws s3 cp`, or an FSx data-repository
+> association via `--fsx-import-path`) and reference it by path.
 
-2. **Launch with staged data:**
+**Launch with the parameter file:**
 ```bash
 spawn launch my-genome-run --params examples/staging/reference-genome.yaml
 ```

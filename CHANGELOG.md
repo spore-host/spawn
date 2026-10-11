@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Behavioural coverage for the live half of `pkg/staging`**, which had none.
+  `staging_test.go`'s five tests covered only the functions this change removed,
+  so deleting it would have left `resolveSchedulesBucket` untested — the function
+  #804 had just made load-bearing, since the caller now persists which bucket it
+  chose. Four tests against the Substrate emulator replace them: the shared name
+  is preferred, the **returned** name is a bucket that actually exists (a function
+  that creates the right bucket and reports the wrong name is precisely what broke
+  scheduled sweeps), the account-scoped fallback works and carries the account id,
+  and two calls return the same name. Swapping dead-code coverage for live-code
+  coverage is why both changes belong together.
+
 - **Three gates on the cert paths, which is what was actually missing.** The certs
   are written by shell at boot and read by Go at runtime, and nothing connected
   the two — which is how they drifted far enough apart that one side was dead and
@@ -353,6 +364,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comparison against an unset variable is always false.
 
 ### Removed
+
+- **`spawn stage`** (#805), with its three subcommands and ~1,600 lines. It
+  uploaded to a bucket it never created, **nothing ever downloaded the staged
+  data**, and no staging bucket exists in the account — so it had never run, while
+  publishing "Savings: $85.70 (93% reduction)" to anyone who typed
+  `spawn stage estimate`. That figure was the most concrete thing the feature
+  produced.
+  `pkg/staging/cost.go` and its tests went with it: the model is entirely
+  staging-specific ("Data Staging Cost Comparison", `EstimateStagingCost`) and has
+  nothing to estimate once the feature is gone. Recoverable from history if the
+  idea is ever revived.
+  **`pkg/staging` is NOT removed.** `NewClient`, `resolveSchedulesBucket`,
+  `ensureBucket` and `UploadScheduleParams` are live on the `spawn schedule` path —
+  three `spawn-schedules-*` buckets exist — so only the seven stage-only functions
+  went, each verified to have zero callers outside the command first.
+  `examples/README.md`'s staging quickstart said to run it; it now says what to do
+  instead (`aws s3 cp`, or an FSx data-repository association via
+  `--fsx-import-path`).
 
 - **`installDCVCert` and its `s3GetFile` helper** (#809). Dead — the definition
   and its own doc comment were the only references in the tree, across all three
