@@ -69,7 +69,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 	}
 
 	// Extract user identity and account info
-	userID, cliIamArn, accountBase36, err := getUserFromRequest(ctx, cfg, request)
+	userID, cliIamArn, accountBase36, callerCreds, err := getUserFromRequest(ctx, cfg, request)
 	if err != nil {
 		log.Printf("authentication failed: %v", err)
 		return errorResponse(401, "authentication failed"), nil
@@ -141,7 +141,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		return handleDeleteTeam(ctx, cfg, tid, cliIamArn)
 
 	case path == "/api/instances" && method == "GET":
-		return handleListInstances(ctx, cfg, cliIamArn, teamID)
+		return handleListInstances(ctx, cfg, callerCreds, cliIamArn, teamID)
 
 	case path == "/api/instances/" && method == "GET":
 		// Extract instance ID from path
@@ -149,7 +149,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		if instanceID == "" {
 			return errorResponse(400, "Instance ID is required"), nil
 		}
-		return handleGetInstance(ctx, cfg, instanceID, cliIamArn)
+		return handleGetInstance(ctx, cfg, callerCreds, instanceID, cliIamArn)
 
 	case path == "/api/sweeps" && method == "GET":
 		return handleListSweeps(ctx, cfg, cliIamArn, teamID)
@@ -178,10 +178,10 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		if instanceID == "" {
 			return errorResponse(400, "Instance ID is required"), nil
 		}
-		return handleTerminateInstance(ctx, cfg, instanceID, cliIamArn)
+		return handleTerminateInstance(ctx, cfg, callerCreds, instanceID, cliIamArn)
 
 	case path == "/api/cost-summary" && method == "GET":
-		return handleGetCostSummary(ctx, cfg, cliIamArn)
+		return handleGetCostSummary(ctx, cfg, callerCreds, cliIamArn)
 
 	case path == "/api/cost-history" && method == "GET":
 		days := 30
@@ -222,7 +222,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 }
 
 // handleListInstances handles GET /api/instances
-func handleListInstances(ctx context.Context, cfg aws.Config, cliIamArn, teamID string) (events.APIGatewayProxyResponse, error) {
+func handleListInstances(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, cliIamArn, teamID string) (events.APIGatewayProxyResponse, error) {
 	startTime := time.Now()
 
 	// Validate team membership before querying team-scoped instances.
@@ -233,7 +233,7 @@ func handleListInstances(ctx context.Context, cfg aws.Config, cliIamArn, teamID 
 	}
 
 	// Query all regions in parallel (filtered by IAM user for per-user isolation)
-	instances, err := listInstances(ctx, cfg, cliIamArn, teamID)
+	instances, err := listInstances(ctx, cfg, callerCreds, cliIamArn, teamID)
 	if err != nil {
 		return errorResponse(500, fmt.Sprintf("Failed to list instances: %v", err)), nil
 	}
@@ -253,9 +253,9 @@ func handleListInstances(ctx context.Context, cfg aws.Config, cliIamArn, teamID 
 }
 
 // handleGetInstance handles GET /api/instances/{id}
-func handleGetInstance(ctx context.Context, cfg aws.Config, instanceID, cliIamArn string) (events.APIGatewayProxyResponse, error) {
+func handleGetInstance(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, instanceID, cliIamArn string) (events.APIGatewayProxyResponse, error) {
 	// Get single instance (with per-user isolation check)
-	instance, err := getInstance(ctx, cfg, instanceID, cliIamArn)
+	instance, err := getInstance(ctx, cfg, callerCreds, instanceID, cliIamArn)
 	if err != nil {
 		return errorResponse(404, fmt.Sprintf("Instance not found: %v", err)), nil
 	}

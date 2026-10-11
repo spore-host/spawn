@@ -66,8 +66,14 @@ var instancePricing = map[string]float64{
 }
 
 // handleGetCostSummary handles GET /api/cost-summary.
-func handleGetCostSummary(ctx context.Context, cfg aws.Config, cliIamArn string) (events.APIGatewayProxyResponse, error) {
-	cost, err := calculateInstanceCosts(ctx, cfg, cliIamArn)
+// callerCreds is the caller's own credentials, threaded through so cross-account
+// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
+// the request authenticated without usable credentials, in which case
+// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
+// which the member-account trust does not name, and which would be a standing
+// cross-tenant read path if it did.
+func handleGetCostSummary(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, cliIamArn string) (events.APIGatewayProxyResponse, error) {
+	cost, err := calculateInstanceCosts(ctx, cfg, callerCreds, cliIamArn)
 	if err != nil {
 		return errorResponse(500, fmt.Sprintf("Failed to calculate costs: %v", err)), nil
 	}
@@ -75,13 +81,19 @@ func handleGetCostSummary(ctx context.Context, cfg aws.Config, cliIamArn string)
 	return successResponse(CostSummaryAPIResponse{Success: true, Cost: *cost})
 }
 
-func calculateInstanceCosts(ctx context.Context, cfg aws.Config, cliIamArn string) (*CostSummary, error) {
+// callerCreds is the caller's own credentials, threaded through so cross-account
+// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
+// the request authenticated without usable credentials, in which case
+// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
+// which the member-account trust does not name, and which would be a standing
+// cross-tenant read path if it did.
+func calculateInstanceCosts(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, cliIamArn string) (*CostSummary, error) {
 	breakdown := make(map[string]TypeCost)
 	totalHourly := 0.0
 	totalCount := 0
 
 	for _, region := range awsRegions {
-		ec2Client, err := getEC2ClientForRegion(ctx, cfg, region)
+		ec2Client, err := getEC2ClientForRegion(ctx, cfg, callerCreds, region)
 		if err != nil {
 			continue
 		}

@@ -31,7 +31,13 @@ var awsRegions = []string{
 // listInstances queries all regions in parallel and returns spawn-managed instances.
 // When teamID is non-empty, instances tagged with spawn:team-id=teamID are merged with
 // the caller's personal instances (deduplicated by instance ID).
-func listInstances(ctx context.Context, cfg aws.Config, cliIamArn, teamID string) ([]InstanceInfo, error) {
+// callerCreds is the caller's own credentials, threaded through so cross-account
+// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
+// the request authenticated without usable credentials, in which case
+// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
+// which the member-account trust does not name, and which would be a standing
+// cross-tenant read path if it did.
+func listInstances(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, cliIamArn, teamID string) ([]InstanceInfo, error) {
 	var wg sync.WaitGroup
 	// Buffer twice the regions to hold both personal and team results per region
 	bufSize := len(awsRegions)
@@ -48,7 +54,7 @@ func listInstances(ctx context.Context, cfg aws.Config, cliIamArn, teamID string
 			defer wg.Done()
 
 			// Get EC2 client for region with cross-account credentials
-			ec2Client, err := getEC2ClientForRegion(ctx, cfg, r)
+			ec2Client, err := getEC2ClientForRegion(ctx, cfg, callerCreds, r)
 			if err != nil {
 				errorsChan <- fmt.Errorf("region %s: %w", r, err)
 				return
@@ -124,7 +130,13 @@ func listInstances(ctx context.Context, cfg aws.Config, cliIamArn, teamID string
 }
 
 // getInstance gets a single instance by ID
-func getInstance(ctx context.Context, cfg aws.Config, instanceID, cliIamArn string) (*InstanceInfo, error) {
+// callerCreds is the caller's own credentials, threaded through so cross-account
+// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
+// the request authenticated without usable credentials, in which case
+// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
+// which the member-account trust does not name, and which would be a standing
+// cross-tenant read path if it did.
+func getInstance(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, instanceID, cliIamArn string) (*InstanceInfo, error) {
 	// Try all regions in parallel until we find the instance
 	var wg sync.WaitGroup
 	instanceChan := make(chan *InstanceInfo, 1)
@@ -145,7 +157,7 @@ func getInstance(ctx context.Context, cfg aws.Config, instanceID, cliIamArn stri
 			foundMutex.Unlock()
 
 			// Get EC2 client for region
-			ec2Client, err := getEC2ClientForRegion(ctx, cfg, r)
+			ec2Client, err := getEC2ClientForRegion(ctx, cfg, callerCreds, r)
 			if err != nil {
 				return
 			}
@@ -261,11 +273,17 @@ func convertReservationsToInstances(reservations []types.Reservation, region, ac
 }
 
 // handleTerminateInstance handles DELETE /api/instances/{id}
-func handleTerminateInstance(ctx context.Context, cfg aws.Config, instanceID, cliIamArn string) (events.APIGatewayProxyResponse, error) {
+// callerCreds is the caller's own credentials, threaded through so cross-account
+// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
+// the request authenticated without usable credentials, in which case
+// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
+// which the member-account trust does not name, and which would be a standing
+// cross-tenant read path if it did.
+func handleTerminateInstance(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, instanceID, cliIamArn string) (events.APIGatewayProxyResponse, error) {
 	// Find the instance across regions, verify ownership, then terminate
 	var foundRegion string
 	for _, region := range awsRegions {
-		ec2Client, err := getEC2ClientForRegion(ctx, cfg, region)
+		ec2Client, err := getEC2ClientForRegion(ctx, cfg, callerCreds, region)
 		if err != nil {
 			continue
 		}
