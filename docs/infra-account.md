@@ -117,6 +117,18 @@ CloudFormation or SAM template** — so the code in `lambda/cost-history-collect
 cannot be built and shipped to the function that is running, and the running
 bytes are whatever someone uploaded by hand eight months ago.
 
+**Resolved 2026-10-11:** `scripts/deploy-cost-history-collector.sh` exists now, so
+the function is shippable and the existing deploy-script gates
+(`TestDeployScriptsAssertTheAccount`, the census's version-stamp and
+log-retention checks) apply to it. The function itself was never the problem — it
+works, and `lambda/dashboard-api/cost_history.go` serves `GET /api/cost-history`
+from the table it fills. It was simply unreachable from the repo.
+
+The script deliberately does **not** create the hourly EventBridge rule. The live
+one (`spawn-cost-history-collector-hourly`, `rate(1 hour)`) already exists, and a
+deploy script that also owns the schedule would be able to silently change how
+often a cost collector runs.
+
 That is the general hazard recorded in the "leave no trace" notes made concrete:
 version skew is the normal state for this control plane, and nothing warns. The
 gate above cannot catch this one, because it reasons from hardcoded Lambda names
