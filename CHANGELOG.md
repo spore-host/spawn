@@ -7,7 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The docs gate asserts set equality in both directions** (#795). Pruning
+  alone fixes one instance; an assertion that the fragment set and the command
+  set agree cannot pass while they disagree, whatever the cause — a file deleted
+  by hand, a command added without regenerating, or a generator that writes
+  somewhere new. The second direction (a command with no committed fragment) was
+  previously caught only incidentally, by `git diff` noticing an untracked file,
+  which says nothing if the file was never generated.
+  Pruning also refuses when the generated set is implausibly small, because a
+  broken tree walk or an i18n failure would otherwise delete the entire published
+  reference and `git diff` would report it faithfully but far too late — the same
+  rule as `scripts/nested-modules.sh` refusing to pass on an empty discovery.
+
+- **The deploy-script gates discover their targets instead of listing them**
+  (#799). Each of four gates had hardcoded the same two filenames, so six
+  deploying scripts were unguarded — including one in the very directory being
+  scanned, which a `scripts/deploy-*.sh` glob missed because of its name.
+  Discovery is now by what a script **does** (`aws lambda create-function`,
+  `cloudformation deploy`, …) anywhere in the tree, and fails when it finds
+  nothing rather than passing vacuously.
+  Two refinements came out of widening it, both recorded in the code: the region
+  gate now applies only to Lambda deploys, because a deliberately multi-region
+  stack script is not the hazard it was written for; and legitimate `|| true`
+  uses carry an explicit `# swallow-ok: <reason>` marker — a poll loop and an
+  idempotent cleanup — rather than the gate being weakened to accept them.
+- **The account gate now matches the assignment and the comparison**, not the
+  bare identifier (#799). Renaming the assignment used to **pass**, because the
+  script's own error message keeps the substring `EXPECTED_ACCOUNT` alive. Either
+  half alone asserts nothing: an assignment never compared is dead, and a
+  comparison against an unset variable is always false.
+
 ### Fixed
+
+- **Three deploy scripts targeting a member account no longer assume one.**
+  `setup-cross-account-role.sh`, `setup-sweep-cross-account-role.sh` and
+  `setup-spawnd-iam-role.sh` create roles in whichever account is being onboarded,
+  so there is no correct default account to assert. They now require
+  `SPAWN_MEMBER_ACCOUNT` explicitly (`:?`, so unset is a hard failure) and refuse
+  to run inside the infra account, where a cross-account role would trust itself.
+- **`setup-user-accounts-table.sh` no longer reports success for a failed policy
+  update.** `create-policy-version --set-as-default` ran with `&>/dev/null || true`,
+  so a failure — the five-version limit being the common one — left permissions
+  unchanged while the script printed success.
+- **Four `attach-role-policy` calls no longer swallow errors.** `AttachRolePolicy`
+  is idempotent, so `|| true` tolerated no real case while hiding `AccessDenied` —
+  which would leave a role with no permissions, silently.
 
 - **The Tier 0 e2e suite no longer tests whatever `bin/spawn` happens to
   contain** (#792). It preferred an existing `bin/spawn` unconditionally, and
@@ -58,38 +104,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs on the error paths, where `set -e` had been leaving 27 MB of build
   artifacts behind.
 
-### Changed
+### Security
 
-- **The docs gate asserts set equality in both directions** (#795). Pruning
-  alone fixes one instance; an assertion that the fragment set and the command
-  set agree cannot pass while they disagree, whatever the cause — a file deleted
-  by hand, a command added without regenerating, or a generator that writes
-  somewhere new. The second direction (a command with no committed fragment) was
-  previously caught only incidentally, by `git diff` noticing an untracked file,
-  which says nothing if the file was never generated.
-  Pruning also refuses when the generated set is implausibly small, because a
-  broken tree walk or an i18n failure would otherwise delete the entire published
-  reference and `git diff` would report it faithfully but far too late — the same
-  rule as `scripts/nested-modules.sh` refusing to pass on an empty discovery.
-
-- **The deploy-script gates discover their targets instead of listing them**
-  (#799). Each of four gates had hardcoded the same two filenames, so six
-  deploying scripts were unguarded — including one in the very directory being
-  scanned, which a `scripts/deploy-*.sh` glob missed because of its name.
-  Discovery is now by what a script **does** (`aws lambda create-function`,
-  `cloudformation deploy`, …) anywhere in the tree, and fails when it finds
-  nothing rather than passing vacuously.
-  Two refinements came out of widening it, both recorded in the code: the region
-  gate now applies only to Lambda deploys, because a deliberately multi-region
-  stack script is not the hazard it was written for; and legitimate `|| true`
-  uses carry an explicit `# swallow-ok: <reason>` marker — a poll loop and an
-  idempotent cleanup — rather than the gate being weakened to accept them.
-- **The account gate now matches the assignment and the comparison**, not the
-  bare identifier (#799). Renaming the assignment used to **pass**, because the
-  script's own error message keeps the substring `EXPECTED_ACCOUNT` alive. Either
-  half alone asserts nothing: an assignment never compared is dead, and a
-  comparison against an unset variable is always false.
-
+- **Removed an `sts:AssumeRole` grant into an account this project does not own**
+  (advisory pending). Two committed scripts granted
+  `sts:AssumeRole` on a role ARN in account `942542972736`, and the statement had
+  reached the live `SpawnDashboardLambdaPolicy`, attached to the execution role of
+  four production Lambda functions. Confirmed by simulation: before the fix that
+  action evaluated **allowed**; it is now `implicitDeny`, with every other action
+  on the role unchanged.
+  It was inert — the role name is one nothing in the repo creates, and the live
+  code assumes a role in a different account — so nothing depended on it, which is
+  precisely why nothing would have noticed it being re-applied.
+  Three structural fixes, so review is no longer the only control:
+  `TestNoARNNamesAnAccountWeDoNotOwn` rejects any ARN naming an account outside an
+  **allowlist** of accounts this project owns (an allowlist, not a denylist, so a
+  typo'd or unfamiliar account is caught too — verified against both); the
+  deploy-script discovery now includes `aws iam (create|put|attach|update)-`,
+  bringing six IAM-mutating scripts under the account assertion for the first
+  time; and the script that re-applied the policy no longer discards its own
+  failure.
+- **`SECURITY.md` added, with a working private reporting channel.** The suite had
+  no vulnerability-reporting route anywhere — the umbrella's `SECURITY.md` is a
+  security overview with no reporting section. GitHub private vulnerability
+  reporting is now enabled on this repository so the documented link actually
+  resolves.
 
 ## [0.127.0] - 2026-10-10
 

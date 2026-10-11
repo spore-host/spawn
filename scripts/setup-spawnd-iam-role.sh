@@ -4,6 +4,24 @@ set -e
 ROLE_NAME="spawnd-role"
 PROFILE_NAME="spawnd-role"
 
+# Assert the target account (#799 follow-up). This script creates a role in a
+# MEMBER account — whichever account is being onboarded — so there is no correct
+# default and one must not be invented. State it explicitly; the `:?` makes an
+# unset value a hard failure rather than a silent deploy into whatever profile
+# happened to be ambient.
+EXPECTED_ACCOUNT="${SPAWN_MEMBER_ACCOUNT:?set SPAWN_MEMBER_ACCOUNT to the account ID you are onboarding}"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
+  echo "ERROR: credentials are for account $ACCOUNT_ID, expected $EXPECTED_ACCOUNT." >&2
+  echo "       Point AWS_PROFILE at the member account, or correct SPAWN_MEMBER_ACCOUNT." >&2
+  exit 1
+fi
+if [ "$ACCOUNT_ID" = "966362334030" ]; then
+  echo "ERROR: refusing to create a cross-account role inside the infra account." >&2
+  echo "       It would trust itself, which means the profile is aimed at the wrong account." >&2
+  exit 1
+fi
+
 echo "Creating IAM role and instance profile for spored agent..."
 
 # Create trust policy for EC2

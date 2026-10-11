@@ -5,6 +5,19 @@ ROLE_NAME="SpawnSweepOrchestratorRole"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 REGION="us-east-1"
 
+# Assert the target account (#799 follow-up). The deploy-script gates originally
+# discovered only `aws lambda`/`aws cloudformation` verbs, so the IAM-mutating
+# scripts — the class that creates cross-account trust — were the one class
+# outside the account assertion. Two of them had committed a grant into an
+# account the project forbids. Override only to deploy a fork.
+EXPECTED_ACCOUNT="${SPAWN_LAMBDA_ACCOUNT:-966362334030}"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
+  echo "ERROR: credentials are for account $ACCOUNT_ID, expected $EXPECTED_ACCOUNT." >&2
+  echo "       Set AWS_PROFILE, or SPAWN_LAMBDA_ACCOUNT=$ACCOUNT_ID to deploy here deliberately." >&2
+  exit 1
+fi
+
 echo "Creating IAM role for Lambda sweep orchestrator..."
 
 # Create trust policy
