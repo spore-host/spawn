@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/plugin"
+	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
 
 func TestBuildLinuxBootstrap_RequiresUsername(t *testing.T) {
@@ -43,7 +44,8 @@ func TestBuildLinuxBootstrap_CoreContent(t *testing.T) {
 		"#!/bin/bash",
 		`LOCAL_USERNAME='ec2-user'`, // security.ShellQuote single-quotes (#680)
 		"LOCAL_SSH_KEY_BASE64=",
-		"mv -f \"$SPORED_TMP\" /usr/local/bin/spored", // installs spored
+		sporedinstall.FuncName + " \"$BINARY\"",       // installs spored, via the verified installer
+		"mv -f \"$tmp\" " + sporedinstall.Dest,        // ...which installs by atomic rename
 		"useradd -m -s /bin/bash \"$LOCAL_USERNAME\"", // creates user
 		"authorized_keys",                             // trusts the key
 		"Name=key,Values=spawn:command",               // reads + runs the command tag (#2)
@@ -311,8 +313,15 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 	}
 	// The candidate list must include both the regional base and the us-east-1
 	// fallback, so a source that can't satisfy the trust requirement falls through.
+	// The candidate list moved into pkg/sporedinstall's shared shell function,
+	// which iterates "$@" — so what has to be asserted now is that the CALL SITE
+	// still passes all four bases, in preference order. Matching the array literal
+	// would have been matching the old implementation's shape.
+	callSite := sporedinstall.FuncName
+	if i := strings.Index(script, callSite+" \"$BINARY\""); i < 0 {
+		t.Fatal("the bootstrap does not call " + callSite + "; it must not hand-roll a second download path")
+	}
 	for _, want := range []string{
-		"CANDIDATES=(",
 		"${S3_BASE_URL}/${PROJECT}",
 		"${FALLBACK_URL}/${PROJECT}",
 		// HEAD-probes the .sig up front when verifying (the crux of the fix).
@@ -334,8 +343,9 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 	// dies on a transient S3 empty-reply hard-fails the whole install. Lock in the
 	// retry flags so a future edit can't silently drop them.
 	for _, want := range []string{
-		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "$SPORED_TMP"`,      // binary
-		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/spored.sha256`, // checksum
+		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "$tmp"`,          // binary
+		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "${tmp}.sha256"`, // checksum
+		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "${tmp}.sig"`,    // signature
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("generated bootstrap missing retry on a critical fetch: %q", want)

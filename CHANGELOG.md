@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`pkg/sporedinstall`** — the one implementation of download-verify-install for
+  `spored`, plus the compiled-in signing public key (moved from
+  `pkg/launcher/spored_pubkey.go`, which is deleted). Emits a shell function that
+  requires a checksum, verifies the signature when a key is compiled in, puts the
+  executable bit on only after every check has passed, and installs by atomic
+  rename so a running `spored` cannot cause `ETXTBSY`.
+- **Gates that execute the generated shell rather than matching strings in it.**
+  `pkg/sporedinstall/install_test.go` stands up an `httptest` server serving a
+  genuinely signed artifact, generates a real P-256 key with Go's crypto, and runs
+  the shipped script against seven hostile sources — no checksum, wrong checksum,
+  empty checksum, missing signature, a signature that does not match the binary,
+  a corrupt signature, and an absent binary — asserting each exits non-zero **and
+  installs nothing**. This is deliberate: the gates that existed asserted things
+  like `strings.Contains(script, "sha256sum")`, which a comment satisfies and a
+  fail-open checksum block satisfies equally. A substring cannot distinguish
+  "verifies" from "mentions verifying", nor "aborts" from "warns and continues".
+  It earned its keep immediately — against a revert that restored the fail-open,
+  the executable test reported `exited 0 despite no checksum published` and that
+  the binary had been installed, while the string assertions still passed.
+- `TestEverySporedDownloaderUsesTheVerifiedInstaller` discovers every file that
+  fetches a `spored-linux-*` artifact and requires it to call the shared
+  installer, so a fourth path cannot be added quietly; plus
+  `TestNoCallSiteSwallowsTheInstallerFailure` (a verified installer whose exit
+  status is ignored is barely better than none) and
+  `TestChmodHappensAfterVerification` (ordering, not presence — a `chmod +x`
+  before the checksum leaves an executable attacker-controlled file in `/tmp`
+  even on the refusal path).
+
 - **`ManagedSSMTagCondition`**, separate from the `ec2:`-keyed one. A condition
   key belongs to the service of the **action**, so reusing
   `ManagedTagCondition` on an `ssm:` action yields a statement IAM accepts and
@@ -178,6 +206,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestEveryE2EMakeRecipePassesCountOne` discovers the recipes rather than naming
   the targets, so a future tier inherits the requirement, and fails when discovery
   finds nothing.
+- The signature download now reads the base64 payload from stdin rather than as a
+  positional argument (`base64 -d < file`). GNU coreutils accepts
+  `base64 -d FILE` and BSD/macOS does not; redirection works on both. Not
+  academic — it is how this was first tested.
 
 - **Every scheduled sweep failed; `spawn schedule` has never worked** (#812).
   `lambda/scheduler-handler` invoked
@@ -334,6 +366,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until then a long-lived role keeps the old grant. Deploying the reaper is the
   independent and higher-priority half: it closes the root escalation on its own,
   without waiting for the policy to reach any instance.
+- **Two spored install paths ran the agent as root without verifying it; one was
+  on every app launch** (advisory GHSA-3x4q-99gh-fxhx, #819). `spored` is
+  installed by curl-to-root from an S3 bucket and runs as root. The boot path has
+  done this properly since spore-host#440 — probe for a signature before
+  committing to a source, require a sha256, verify a detached signature against a
+  key compiled into `spawn` rather than one served from the same bucket, fail
+  closed at every step. Two other paths had none of it:
+  - **`cmd/app.go`, twice** — a bare `curl`, a `chmod +x`, and
+    `mv … || true`. No checksum, no signature, and the install failing was
+    swallowed. This is the user-data of every `spawn app launch`.
+  - **`cmd/upgrade_spored.go`** — sha256 only, and fail-**open**: a missing
+    `.sha256` printed `WARNING: no checksum published; skipping verification` to
+    stderr and installed anyway. A missing checksum is not a reason to skip
+    verification — an attacker who can rewrite a bucket can equally delete a
+    checksum object, so "verify if one happens to be published" is a check the
+    attacker opts you out of. There was no signature verification at all.
+
+  All three now call one shell function from the new `pkg/sporedinstall`, so there
+  is a single implementation to get right instead of three to keep in step. Each
+  was written by copying the shape of the *download* rather than the shape of the
+  *verification*, which is why having three was the root cause rather than a
+  detail.
 
 - **The in-account TTL reaper could run arbitrary root commands on any
   SSM-managed instance** (advisory GHSA-2hfh-q6jv-qgjp, #818).

@@ -18,6 +18,7 @@ import (
 	"github.com/spore-host/libs/catalog"
 	spawnclient "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/platform"
+	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
 
 // ── app command flags ────────────────────────────────────────────────────────
@@ -651,12 +652,20 @@ set -e
 
 REGION=$(curl -sf -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token | xargs -I{} curl -sf -H 'X-aws-ec2-metadata-token: {}' http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-east-1)
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+# __SPORED_INSTALLER__
 
-# Update spored from S3.
-curl -fsSL "https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn/spored-linux-${ARCH}" -o /tmp/spored-new 2>/dev/null || \
-  curl -fsSL "https://spawn-binaries-${REGION}.s3.amazonaws.com/spored-linux-${ARCH}" -o /tmp/spored-new
-if [ -f /tmp/spored-new ]; then
-  chmod +x /tmp/spored-new && mv /tmp/spored-new /usr/local/bin/spored || true
+# Update spored from S3, verified. This block previously did a bare curl, chmod
+# +x and an "mv ... || true" — no checksum, no signature, and the install failing
+# swallowed — while installing a root daemon on every app launch
+# (GHSA-3x4q-99gh-fxhx, #819). It now uses the same fail-closed installer as the
+# normal boot path. On failure the AMI's existing spored stays in place, which is
+# a real fallback; running an unverified download is not.
+if ! spore_install_verified_spored "spored-linux-${ARCH}" \
+      "https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn" \
+      "https://spawn-binaries-${REGION}.s3.amazonaws.com" \
+      "https://spawn-binaries-us-east-1.s3.amazonaws.com/spawn" \
+      "https://spawn-binaries-us-east-1.s3.amazonaws.com"; then
+  echo "WARNING: could not install a verified spored; keeping the version baked into the AMI"
 fi
 
 # Wildcard TLS cert for spored's :443 reverse proxy (same spawn-certs source as DCV).
@@ -715,7 +724,7 @@ echo 'Starting web app container on 127.0.0.1:%d...'
 docker run -d --restart unless-stopped %s-p 127.0.0.1:%d:%d %s%s || echo 'WARNING: docker run failed'
 echo "web app container started"
 `, login, image, image, port, gpuFlag, port, port, image, argStr)
-	return base64.StdEncoding.EncodeToString([]byte(script))
+	return base64.StdEncoding.EncodeToString([]byte(spliceSporedInstaller(script)))
 }
 
 // desktopInitPath is where the desktop-session launcher is installed; DCV runs
@@ -806,13 +815,20 @@ set -e
 # Detect region and architecture
 REGION=$(curl -sf -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token | xargs -I{} curl -sf -H 'X-aws-ec2-metadata-token: {}' http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-east-1)
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+# __SPORED_INSTALLER__
 
-# Update spored from S3 to pick up the latest version (AMI may have an older copy).
-# Try project-prefixed path first, then fall back to legacy path
-curl -fsSL "https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn/spored-linux-${ARCH}" -o /tmp/spored-new 2>/dev/null || \
-  curl -fsSL "https://spawn-binaries-${REGION}.s3.amazonaws.com/spored-linux-${ARCH}" -o /tmp/spored-new
-if [ -f /tmp/spored-new ]; then
-  chmod +x /tmp/spored-new && mv /tmp/spored-new /usr/local/bin/spored || true
+# Update spored from S3, verified. This block previously did a bare curl, chmod
+# +x and an "mv ... || true" — no checksum, no signature, and the install failing
+# swallowed — while installing a root daemon on every app launch
+# (GHSA-3x4q-99gh-fxhx, #819). It now uses the same fail-closed installer as the
+# normal boot path. On failure the AMI's existing spored stays in place, which is
+# a real fallback; running an unverified download is not.
+if ! spore_install_verified_spored "spored-linux-${ARCH}" \
+      "https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn" \
+      "https://spawn-binaries-${REGION}.s3.amazonaws.com" \
+      "https://spawn-binaries-us-east-1.s3.amazonaws.com/spawn" \
+      "https://spawn-binaries-us-east-1.s3.amazonaws.com"; then
+  echo "WARNING: could not install a verified spored; keeping the version baked into the AMI"
 fi
 
 %s
@@ -891,7 +907,7 @@ dcv create-session \
 
 echo "DCV session '%s' created for: %s"
 `, dcvInstallBlock(), preCreate, sessionID, initCommand, sessionID, sessionID, label)
-	return base64.StdEncoding.EncodeToString([]byte(script))
+	return base64.StdEncoding.EncodeToString([]byte(spliceSporedInstaller(script)))
 }
 
 // getSessionsDir returns the path to ~/.spawn/sessions/, creating it if necessary.
@@ -1112,3 +1128,39 @@ var sessionHTMLTemplate = `<!DOCTYPE html>
 </body>
 </html>
 `
+
+// sporedInstallerPrelude emits the compiled-in signing key and the one shared
+// download-verify-install shell function, for splicing into user-data ahead of
+// any call to it.
+//
+// Both app user-data paths used to install spored with a bare curl, a chmod and
+// `mv ... || true` — no checksum, no signature, and the install failing
+// swallowed — while the boot path a few files away had done it properly since
+// spore-host#440. They now call the same function, so there is one
+// implementation to get right instead of three to keep in step
+// (GHSA-3x4q-99gh-fxhx, #819).
+// sporedInstallerSentinel is the line each user-data template carries where the
+// installer belongs. A sentinel rather than a Sprintf verb because these
+// templates already take 8-10 positional arguments, and an explicit %[n]s resets
+// the index for every implicit verb after it — go vet caught that immediately,
+// but the quiet version of the same mistake is shifting one argument and
+// producing a script that still builds.
+const sporedInstallerSentinel = "# __SPORED_INSTALLER__"
+
+// spliceSporedInstaller replaces the sentinel with the signing key and the one
+// shared download-verify-install shell function.
+//
+// Both app user-data paths used to install spored with a bare curl, a chmod and
+// an "mv ... || true" — no checksum, no signature, and the install failing
+// swallowed — while the boot path a few files away had done it properly since
+// spore-host#440. They now call the same function, so there is one
+// implementation to get right instead of three to keep in step
+// (GHSA-3x4q-99gh-fxhx, #819).
+//
+// If the sentinel is absent the script is returned unchanged, which would be a
+// silent downgrade — so TestEveryAppUserDataInstallsSporedVerified asserts the
+// generated output, not this function.
+func spliceSporedInstaller(script string) string {
+	return strings.Replace(script, sporedInstallerSentinel,
+		sporedinstall.KeySetupScript()+sporedinstall.VerifiedInstallFunc(), 1)
+}
