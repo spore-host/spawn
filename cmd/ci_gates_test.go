@@ -377,3 +377,59 @@ func globMatch(pattern, s string) bool {
 	}
 	return strings.HasSuffix(s, parts[len(parts)-1])
 }
+
+// Every e2e make target must pass -count=1.
+//
+// The e2e harness builds bin/spawn and then execs it at runtime. Go's test cache
+// keys on source, build flags and environment — it cannot see a binary read at
+// runtime — so a second invocation reports `ok (cached)` no matter what bin/spawn
+// has become. Demonstrated on #831: replacing bin/spawn with a shell script whose
+// entire body is `exit 1` still produced
+//
+//	ok  	github.com/spore-host/spawn/test/e2e	(cached)
+//
+// for the whole Tier 0 surface. Tiers 2 and 3 are the expensive version of the same
+// hole: they launch real billable instances, so a cached pass lets a release be cut
+// on a run that never touched AWS, with output indistinguishable from one that did.
+// This was #792, fixed where it was noticed and left in the Makefile, which is
+// where most people invoke it from.
+//
+// Discovery rather than a list of target names (CLAUDE.md rule 4): it finds every
+// recipe line in the Makefile that runs `go test` against ./test/e2e/, so a future
+// Tier 4 inherits the requirement instead of silently escaping it. Fails if it
+// finds none, because a discovery that found nothing has broken rather than proven
+// the Makefile clean.
+func TestEveryE2EMakeRecipePassesCountOne(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+
+	checked := 0
+	for i, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "\t") || !strings.Contains(line, "go test") {
+			continue
+		}
+		if !strings.Contains(line, "./test/e2e") {
+			continue
+		}
+		checked++
+		if !strings.Contains(line, "-count=1") {
+			t.Errorf("Makefile:%d runs the e2e suite without -count=1, so a cached pass can "+
+				"certify a bin/spawn that was never exercised (#831):\n\t%s",
+				i+1, strings.TrimSpace(line))
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("found no Makefile recipe running go test against ./test/e2e — discovery has broken, " +
+			"it has not proven the Makefile clean")
+	}
+	// The repo has four tiers today. A floor, not an inventory: if discovery drops
+	// below it, the pattern above has stopped matching rather than the targets
+	// having been removed.
+	if checked < 4 {
+		t.Errorf("found only %d e2e recipes; the repo has four tiers, so the match has stopped "+
+			"finding some of them", checked)
+	}
+}

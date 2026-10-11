@@ -165,6 +165,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that were meant — a known template adds statements, an unknown one adds none.
   Both were re-verified against compiling reverts to confirm they still catch the
   defects they were written for.
+- **All four `make test-e2e-tier*` targets now pass `-count=1`** (#831). The e2e
+  harness builds `bin/spawn` and execs it at runtime, and Go's test cache keys on
+  source, build flags and environment — it cannot see a binary read at runtime —
+  so a second invocation reported `ok (cached)` regardless of what `bin/spawn` had
+  become. Replacing `bin/spawn` with a shell script whose entire body was `exit 1`
+  still passed the whole Tier 0 surface. This was #792, fixed where it was noticed
+  and left in the Makefile, which is where most people invoke it from. Tiers 2 and
+  3 are the costly version of the same hole: they launch real billable instances,
+  so a cached pass let a release be cut on a run that never touched AWS, with
+  output indistinguishable from one that did.
+  `TestEveryE2EMakeRecipePassesCountOne` discovers the recipes rather than naming
+  the targets, so a future tier inherits the requirement, and fails when discovery
+  finds nothing.
 
 - **Every scheduled sweep failed; `spawn schedule` has never worked** (#812).
   `lambda/scheduler-handler` invoked
