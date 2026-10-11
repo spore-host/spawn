@@ -35,6 +35,18 @@ var ManagedTagCondition = map[string]map[string]string{
 	"StringEquals": {"ec2:ResourceTag/spawn:managed": "true"},
 }
 
+// ManagedSSMTagCondition is the same rail for ssm:* actions.
+//
+// It exists separately because a condition key belongs to the service of the
+// ACTION, not of the resource. ec2:ResourceTag is an EC2 key and is simply absent
+// from the request context of an ssm: call, so reusing ManagedTagCondition on
+// ssm:SendCommand would produce a statement IAM accepts and never authorizes — a
+// silent implicit DENY, which is the #652/#665 shape this package already
+// documents twice.
+var ManagedSSMTagCondition = map[string]map[string]string{
+	"StringEquals": {"ssm:resourceTag/spawn:managed": "true"},
+}
+
 // Statement is the minimal IAM statement shape emitted here.
 type Statement struct {
 	Effect    string      `json:"Effect"`
@@ -147,11 +159,41 @@ func ScanSelfStatements() []Statement {
 		},
 		{
 			// The REAPER_GRACEFUL path asks spored to shut down cleanly over SSM
-			// before an external terminate. Neither the template's function policy
-			// nor the cross-account role grants these today, so graceful mode
-			// degrades to an immediate terminate — quietly.
+			// before an external terminate.
+			//
+			// Scoped to spawn-managed instances (#818). This was
+			// `Resource: "*"` with no condition, which granted arbitrary shell as
+			// root on ANY SSM-managed instance in the account — the reaper invokes
+			// DocumentName "AWS-RunShellScript" (main.go:1029) — and so strictly
+			// dominated the ec2:TerminateInstances that this same document
+			// tag-gates with considerable care.
+			//
+			// The cross-account role in
+			// deployment/cloudformation/ttl-reaper-cross-account-role.yaml:173-197
+			// has had the correct shape all along; the scan-self copy never
+			// received it. This is that shape, including the split below: the
+			// comment that used to sit here claimed neither policy granted these
+			// at all, which stopped being true when the cross-account grant landed.
+			Effect:    "Allow",
+			Action:    []string{"ssm:SendCommand"},
+			Resource:  "arn:aws:ec2:*:*:instance/*",
+			Condition: ManagedSSMTagCondition,
+		},
+		{
+			// SendCommand authorizes against the instance AND the document, and a
+			// document carries no spawn:managed tag — so conditioning this
+			// statement too would deny every call. Scoped instead to the single
+			// document the reaper actually names.
 			Effect:   "Allow",
-			Action:   []string{"ssm:SendCommand", "ssm:GetCommandInvocation"},
+			Action:   []string{"ssm:SendCommand"},
+			Resource: "arn:aws:ssm:*:*:document/AWS-RunShellScript",
+		},
+		{
+			// GetCommandInvocation takes no resource-level ARN, so Resource "*" is
+			// the only expressible form. It only reads the result of a command
+			// this role already sent.
+			Effect:   "Allow",
+			Action:   []string{"ssm:GetCommandInvocation"},
 			Resource: "*",
 		},
 	}

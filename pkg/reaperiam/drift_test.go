@@ -379,3 +379,139 @@ func TestConditionKeysBelongToTheirActionsService(t *testing.T) {
 	}
 	t.Logf("checked %d service-prefixed condition keys against their actions", checked)
 }
+
+// Every destructive action the reaper holds must be contained — by a condition,
+// or by a resource ARN narrower than "*".
+//
+// The existing coverage gates in this file assert that every API the reaper CALLS
+// is GRANTED. That is the #254 direction, and it is necessarily blind to the
+// opposite problem: a grant that is broader than the reaper needs. #818 was
+// exactly that — ssm:SendCommand on Resource "*" with no condition, which gave
+// arbitrary shell as root on any SSM-managed instance in the account and so
+// strictly dominated the ec2:TerminateInstances this same document tag-gates
+// carefully.
+//
+// Expressed as a list of ACTIONS rather than of statements, so a statement added
+// later inherits the requirement instead of slipping past a per-statement check.
+func TestEveryDestructiveActionIsContained(t *testing.T) {
+	doc, err := ScanSelfPolicyDocument()
+	if err != nil {
+		t.Fatalf("ScanSelfPolicyDocument: %v", err)
+	}
+	var parsed struct {
+		Statement []struct {
+			Action    []string    `json:"Action"`
+			Resource  string      `json:"Resource"`
+			Condition interface{} `json:"Condition"`
+		} `json:"Statement"`
+	}
+	if err := json.Unmarshal([]byte(doc), &parsed); err != nil {
+		t.Fatalf("policy does not parse: %v", err)
+	}
+	if len(parsed.Statement) == 0 {
+		t.Fatal("policy parsed to zero statements — the gate is checking nothing")
+	}
+
+	// Actions that can destroy, mutate or execute. Read-only actions are omitted
+	// deliberately: Resource "*" on a Describe is how those APIs work.
+	destructive := map[string]bool{
+		"ec2:TerminateInstances":   true,
+		"ec2:DeleteSecurityGroup":  true,
+		"ec2:DeletePlacementGroup": true,
+		"ec2:CreateTags":           true,
+		"ssm:SendCommand":          true,
+		"fsx:DeleteFileSystem":     true,
+	}
+
+	// fsx:DeleteFileSystem is knowingly uncontained, and the reasoning is in
+	// ScanSelfStatements: FSx exposes no service condition key for it, the global
+	// aws:ResourceTag key is evaluated by IAM but unproven to be POPULATED by FSx
+	// at request time, and adopting it unverified would fail closed — denying
+	// deletes and leaking filesystems. The reaper's in-code check (spawn:managed,
+	// no live lease, past grace) is the guard instead. #613 resolves it with a
+	// real ephemeral-FSx reap.
+	//
+	// One entry, with an issue behind it. Adding a second should require the same.
+	knownUncontained := map[string]string{
+		"fsx:DeleteFileSystem": "#613 — no usable FSx condition key; guarded in code, see ScanSelfStatements",
+	}
+
+	seen := map[string]bool{}
+	for _, st := range parsed.Statement {
+		contained := st.Condition != nil || st.Resource != "*"
+		for _, a := range st.Action {
+			if !destructive[a] {
+				continue
+			}
+			seen[a] = true
+			if contained {
+				continue
+			}
+			if _, ok := knownUncontained[a]; ok {
+				continue
+			}
+			t.Errorf("%s is granted on Resource %q with no condition.\n"+
+				"A destructive action must be contained by a condition or a narrower resource, "+
+				"or the tag-scoped grants beside it provide no containment. If it genuinely "+
+				"cannot be contained, add it to knownUncontained with the issue that tracks it.",
+				a, st.Resource)
+		}
+	}
+
+	for a := range destructive {
+		if !seen[a] {
+			t.Errorf("%s is not granted at all; if it was removed, drop it from `destructive` — "+
+				"otherwise this gate is silently checking fewer actions than it claims", a)
+		}
+	}
+}
+
+// ssm: actions must carry ssm: condition keys, never ec2:.
+//
+// A condition key belongs to the service of the ACTION. ec2:ResourceTag is absent
+// from the request context of an ssm: call, so a StringEquals on it can never
+// match and the statement becomes a silent implicit DENY — a policy that reads as
+// working and authorizes nothing. That is #652/#665, and this package documents
+// the trap twice without previously asserting it.
+func TestSSMActionsUseSSMConditionKeys(t *testing.T) {
+	doc, err := ScanSelfPolicyDocument()
+	if err != nil {
+		t.Fatalf("ScanSelfPolicyDocument: %v", err)
+	}
+	var parsed struct {
+		Statement []struct {
+			Action    []string                     `json:"Action"`
+			Resource  string                       `json:"Resource"`
+			Condition map[string]map[string]string `json:"Condition"`
+		} `json:"Statement"`
+	}
+	if err := json.Unmarshal([]byte(doc), &parsed); err != nil {
+		t.Fatalf("policy does not parse: %v", err)
+	}
+
+	checked := 0
+	for _, st := range parsed.Statement {
+		isSSM := false
+		for _, a := range st.Action {
+			if strings.HasPrefix(a, "ssm:") {
+				isSSM = true
+			}
+		}
+		if !isSSM || st.Condition == nil {
+			continue
+		}
+		checked++
+		for _, byKey := range st.Condition {
+			for key := range byKey {
+				if strings.HasPrefix(key, "ec2:") {
+					t.Errorf("an ssm: statement is conditioned on %q — an ec2: key is absent from "+
+						"an ssm: request context, so this can never match and the statement is a "+
+						"silent implicit DENY (#665)", key)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no conditioned ssm: statement found — the gate is checking nothing")
+	}
+}

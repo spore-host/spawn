@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ManagedSSMTagCondition`**, separate from the `ec2:`-keyed one. A condition
+  key belongs to the service of the **action**, so reusing
+  `ManagedTagCondition` on an `ssm:` action yields a statement IAM accepts and
+  never authorizes — a silent implicit deny (#652/#665).
+- **Two gates on `pkg/reaperiam`, both verified against compiling reverts.**
+  `TestEveryDestructiveActionIsContained` requires every destructive action to be
+  bounded by a condition or a resource narrower than `*`; the existing coverage
+  gates assert that everything the reaper *calls* is *granted*, which is
+  necessarily blind to a grant being too broad. `fsx:DeleteFileSystem` is the one
+  recorded exception, with #613 behind it.
+  `TestSSMActionsUseSSMConditionKeys` fails an `ssm:` statement conditioned on an
+  `ec2:` key — the trap this package documents twice and had never asserted.
+  The containment gate caught a mistake of mine while being written: it listed
+  `ec2:DeleteTags`, which the reaper does not hold, and its own
+  "if it is not granted, drop it" check refused to let the list claim coverage it
+  did not have.
+
 - **`cmd/onboard_test.go`, the file's first test.** Four gates, each verified
   against a compiling revert that restores the original defect. They parse the
   policy JSON and assert on structure rather than substrings, because a
@@ -237,6 +254,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifacts behind.
 
 ### Security
+
+- **The in-account TTL reaper could run arbitrary root commands on any
+  SSM-managed instance** (advisory GHSA-2hfh-q6jv-qgjp, #818).
+  `pkg/reaperiam.ScanSelfPolicyDocument` — the inline policy
+  `spawn reaper deploy` writes — granted `ssm:SendCommand` on `Resource: "*"`
+  with no condition, and the reaper invokes `DocumentName: "AWS-RunShellScript"`.
+  That is arbitrary shell as root on anything SSM-managed in the account, which
+  strictly dominates the `ec2:TerminateInstances` the *same document* tag-gates
+  with considerable care.
+  The correct shape already existed in
+  `deployment/cloudformation/ttl-reaper-cross-account-role.yaml`; the scan-self
+  copy never received it. It now matches: `SendCommand` scoped to
+  `arn:aws:ec2:*:*:instance/*` with `ssm:resourceTag/spawn:managed`, split from a
+  separate grant on the one document the reaper names (a document carries no tag,
+  so conditioning that statement too would deny every call), with
+  `GetCommandInvocation` left on `*` because it takes no resource-level ARN.
+  **No deployed role needs remediation.** Checked both accounts: the production
+  reaper's role has no `ssm:SendCommand` grant at all, and the cross-account role
+  already carried the scoped form. No self-scan reaper has ever been deployed, so
+  the over-broad grant existed only in the generator. Anyone who *has* run
+  `spawn reaper deploy` should re-run it.
+  A stale comment went with it: it claimed neither the template nor the
+  cross-account role granted these actions, which stopped being true when the
+  cross-account grant landed.
 
 - **`spawn onboard` generated a role that could open a shell on any instance in a
   customer's account** (advisory GHSA-w7wx-6439-wff7, #817). Four defects in ~25
