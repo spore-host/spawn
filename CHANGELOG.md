@@ -39,7 +39,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   half alone asserts nothing: an assignment never compared is dead, and a
   comparison against an unset variable is always false.
 
+### Removed
+
+- **`spawn autoscale` and its orchestrators are gone** (#772).
+  **Breaking: 13 subcommands removed, so the next release bumps MINOR.**
+  `health`, `launch`, `list`, `metric-activity`, `pause`, `resume`,
+  `scaling-activity`, `schedule`, `set-metric-policy`, `set-scaling-policy`,
+  `status`, `terminate`, `update` no longer exist, nor do the
+  `/api/autoscale-groups*` dashboard endpoints.
+  The production orchestrator had reconciled on `rate(1 minute)` since
+  2026-02-14 — roughly 350,000 invocations — against a table that **has never
+  held a record**. Both groups tables measured `Count=0` at deletion, so no user
+  loses working behaviour.
+  Removed from AWS as well: both `spawn-autoscale-orchestrator-*`
+  CloudFormation stacks (two functions, two roles, two rules, two log groups and
+  the two empty tables) and the `spawn-autoscale-ec2-role` stack in the compute
+  account. Everything was CloudFormation-managed, including that role — deleting
+  it directly would have caused stack drift and it would have returned. The
+  control plane is **90 resources, down from 100**, re-measured with
+  `spawn footprint` rather than decremented by hand.
+  The EC2 role is the reason this is a removal rather than a tightening: it held
+  `ec2:RunInstances`/`TerminateInstances`/`CreateTags` on `*` and `iam:PassRole`
+  on `*` constrained only by `iam:PassedToService`, which constrains the service
+  and not the role — so the holder could launch an instance carrying any
+  EC2-assumable role in the account and read its credentials. Trust was the whole
+  infra account, gated by an `sts:ExternalId` published in the template. A
+  deployed, never-used privilege-escalation primitive is better deleted than
+  narrowed.
+- **`pkg/aws`'s autoscale coverage API is removed** — `AutoscaleCoverage`,
+  `DetectAutoscaleCoverage`, `AutoscaleCoverageAdvice`, `AutoscaleFunctionName`
+  (13 exported members). `pkg/aws` is a cross-repo package, so this is a wire
+  contract change and **contributes to the MINOR bump**. It was added in
+  #774/#775 earlier the same day and adopted by nobody — verified against local
+  checkouts of all three consumers and an org-wide code search, both zero. It
+  existed to warn when an autoscale orchestrator was running without coverage,
+  which is not a question that can be asked any more.
+
 ### Fixed
+
+- **`/api/cost-summary` survived the autoscale removal.** `handleGetCostSummary`
+  and `calculateInstanceCosts` lived in `lambda/dashboard-api/autoscale.go` but
+  have nothing to do with autoscale; deleting the file wholesale removed a live
+  route, which the build caught. They now live in `cost_summary.go`, moved
+  verbatim — changing cost arithmetic inside a removal would hide a behaviour
+  change in a mechanical one.
+  Recorded there, not fixed: the handler runs on a hardcoded, **undated**,
+  us-east-1-only price table that defaults an unknown instance type to a
+  **fabricated `$0.10/hr`**, then multiplies by 730 and presents it as a monthly
+  estimate. truffle#114 established that a fabricated price is worse than no
+  price because nothing downstream can tell the difference. Tracked in
+  truffle#184.
+- **Two IAM scripts no longer grant on deleted tables** — the
+  `spawn-autoscale-groups-production` and `spawn-registry-production` ARNs are
+  gone from `setup-user-accounts-table.sh` and `setup-dashboard-lambda-role.sh`.
+  The second was already dead before this change: `dynamoRegistryTable` was
+  declared in `lambda/dashboard-api/autoscale.go` and referenced nowhere, so the
+  dashboard was granted access to a registry table it never read.
 
 - **Three deploy scripts targeting a member account no longer assume one.**
   `setup-cross-account-role.sh`, `setup-sweep-cross-account-role.sh` and
@@ -129,6 +184,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   security overview with no reporting section. GitHub private vulnerability
   reporting is now enabled on this repository so the documented link actually
   resolves.
+
+### Documentation
+
+- **Four stale figures corrected, all of them mine.** `CLAUDE.md` claimed 18
+  Lambda functions where the page it calls authoritative said 17 — and both are
+  now 15. The `Makefile`'s "The 12 nested modules" is replaced by a statement
+  that the script discovers them, because a hand-written count is the
+  anti-pattern rule 4 warns about and that one had drifted to 10 before anyone
+  noticed. `docs/infra-account.md` said "Four have no reference in this repo"
+  where three do, and "All 18 log groups" where the number had already changed —
+  that claim is now made without a count.
 
 ## [0.127.0] - 2026-10-10
 

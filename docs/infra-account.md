@@ -4,7 +4,7 @@ What is deployed in the shared infra account (**966362334030**, `us-east-1`),
 what each piece does, and where its source lives.
 
 **Measured, not recalled.** Every figure here came from the live account on
-**2026-10-10** via `spawn footprint` (#771) and the AWS API. Re-measure rather
+**2026-10-11** via `spawn footprint` (#771) and the AWS API. Re-measure rather
 than trusting this page:
 
 ```sh
@@ -20,24 +20,28 @@ log groups, and a bucket list that missed an 11-bucket family.
 
 ## Scale
 
-**100 control-plane resources**, none of which the TTL reaper or `spawn cleanup`
+**90 control-plane resources**, none of which the TTL reaper or `spawn cleanup`
 touches — those cover launched instances and their attachments, not the control
 plane (#653).
 
 | | count |
 |---|---|
-| Lambda functions | 17 |
-| CloudWatch log groups | 17 |
-| DynamoDB tables | 23 |
-| EventBridge rules | 4 |
+| Lambda functions | 15 |
+| CloudWatch log groups | 15 |
+| DynamoDB tables | 21 |
+| EventBridge rules | 2 |
 | S3 buckets | 21 |
-| IAM roles | 16 |
+| IAM roles | 14 |
 | IAM instance profiles | 2 |
 
-Down from 103 on 2026-10-09: #794 removed `spawn-alert-evaluator`, its hourly
-rule and its log group. Re-measured with `spawn footprint -o json` rather than
-decremented by hand — the first attempt at this edit guessed 101 and was wrong,
-which is the reason the page insists on measuring.
+Down from 103 on 2026-10-09, in two steps: #794 removed `spawn-alert-evaluator`
+with its rule and log group (103 → 100), and #772 removed both autoscale
+orchestrator stacks — two functions, two roles, two rules, two log groups and the
+two empty groups tables (100 → 90).
+
+Every figure re-measured with `spawn footprint -o json`, never decremented by
+hand. An earlier attempt at this edit did the arithmetic manually, said 101, and
+was wrong because it forgot a rule — which is why the page insists on measuring.
 
 ## Lambda functions
 
@@ -50,8 +54,6 @@ code and it determines what breaks when a schedule is disabled.
 |---|---|---|---|
 | `spawn-ttl-reaper-production` | `lambda/ttl-reaper/` | `rate(10 minutes)` | the out-of-band backstop that terminates expired instances. Cross-account: `REAPER_SCAN_SELF=false`, assumes `spawn-ttl-reaper-ec2` in 435415984226 |
 | `spawn-cost-history-collector` | `lambda/cost-history-collector/` | `rate(1 hour)` | writes to `spawn-cost-history` |
-| `spawn-autoscale-orchestrator-production` | `lambda/autoscale-orchestrator/` | `rate(1 minute)`, **ENABLED** | reconciles autoscale groups |
-| `spawn-autoscale-orchestrator-staging` | same | `rate(1 minute)`, **DISABLED** | disabled 2026-10-09 (#772): it polled every minute from February against an empty table |
 
 ### API Gateway-fronted
 
@@ -101,7 +103,7 @@ an exception list of zero.
 
 ## DynamoDB tables
 
-Mapped to the code that reads them. Four have **no reference in this repo** and
+Mapped to the code that reads them. Three have **no reference in this repo** and
 belong to adjacent projects.
 
 | table | read by |
@@ -111,7 +113,7 @@ belong to adjacent projects.
 | `spawn-sweep-orchestration` | `lambda/dashboard-api/models.go` |
 | `spawn-pipeline-orchestration` | `lambda/pipeline-orchestrator/` |
 | `spawn-websocket-connections` | `lambda/dashboard-websocket-processor/` |
-| `spawn-autoscale-groups-{production,staging}` | `lambda/dashboard-api/autoscale.go`. **Both empty** — no autoscale group has ever been configured (#772) |
+
 | `spawn-schedules`, `spawn-schedule-history` | `cmd/schedule.go`, `deployment/cloudformation/schedules-tables.yaml` |
 | `spawn-alert-preferences` | **nothing, since #794 removed `alert-evaluator`.** Still deployed and empty. Its template stays because `spawn-cost-history`, declared alongside it, is live |
 | `spawn-alerts`, `spawn-alert-history` | **nothing, since #783 removed the alerts path.** Still deployed and empty; the template that creates them stays because two of its four tables are live. Their removal belongs to the control-plane reaping in #653 |
@@ -148,7 +150,10 @@ covers the above (#653). Known consequences:
 
 - **Deleting a Lambda does not delete its log group.**
   `/aws/lambda/github-oauth-bridge` outlived the function it belonged to.
-- All 18 log groups now carry **30-day retention** (#770), applied 2026-10-09.
+- The log groups all carried **30-day retention** when #770 applied it on
+  2026-10-09; the ones added or removed since inherit or drop it with their
+  function. Stated without a count on purpose — the previous wording said "all 18"
+  and was wrong within a day.
   Before that, 14 had none and held 238.7 MB.
 - Every operated deploy path stamps `spawn:version` (#768), so skew between the
   CLI and the control plane is readable in one API call instead of inferred from
@@ -176,7 +181,8 @@ Recorded because each cost a real failure:
   not exist yet, so the exact-ARN form cannot be migrated by adding the new ARN
   first.
 - **`spawn autoscale` took its region from the ambient chain** and ignored
-  `--region` until #775.
+  `--region` until #775. The command and its orchestrators were removed entirely
+  in #772; the trap is recorded because the shape recurs.
 
 ## Related
 
