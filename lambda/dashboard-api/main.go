@@ -173,38 +173,6 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 	case path == "/api/sweeps/cleanup" && method == "POST":
 		return handleCleanupSweeps(ctx, cfg, request.Body, cliIamArn)
 
-	case path == "/api/autoscale-groups" && method == "GET":
-		return handleListAutoscaleGroups(ctx, cfg, cliIamArn, teamID)
-
-	case path == "/api/autoscale-groups/" && method == "GET":
-		// Extract group ID from path
-		groupID := request.PathParameters["id"]
-		if groupID == "" {
-			return errorResponse(400, "Autoscale group ID is required"), nil
-		}
-		return handleGetAutoscaleGroup(ctx, cfg, groupID, cliIamArn)
-
-	case path == "/api/autoscale-groups//pause" && method == "POST":
-		groupID := request.PathParameters["id"]
-		if groupID == "" {
-			return errorResponse(400, "Autoscale group ID is required"), nil
-		}
-		return handlePauseAutoscaleGroup(ctx, cfg, groupID, cliIamArn)
-
-	case path == "/api/autoscale-groups//resume" && method == "POST":
-		groupID := request.PathParameters["id"]
-		if groupID == "" {
-			return errorResponse(400, "Autoscale group ID is required"), nil
-		}
-		return handleResumeAutoscaleGroup(ctx, cfg, groupID, cliIamArn)
-
-	case path == "/api/autoscale-groups/" && method == "DELETE":
-		groupID := request.PathParameters["id"]
-		if groupID == "" {
-			return errorResponse(400, "Autoscale group ID is required"), nil
-		}
-		return handleTerminateAutoscaleGroup(ctx, cfg, groupID, cliIamArn)
-
 	case path == "/api/instances/" && method == "DELETE":
 		instanceID := request.PathParameters["id"]
 		if instanceID == "" {

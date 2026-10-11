@@ -231,7 +231,9 @@ check:
 	@$(MAKE) --no-print-directory check-nested
 	@echo "✓ All checks passed!"
 
-# The 12 nested modules, via the SAME script CI runs (#136).
+# Every nested module, via the SAME script CI runs (#136). Deliberately not a
+# count: a hand-written number here is the anti-pattern rule 4 warns about, and
+# this one had drifted from 12 to 10 before anyone noticed.
 #
 # `go test ./...` does not descend into a directory with its own go.mod, so
 # without this `make check` is weaker than CI — and that gap cost two round trips

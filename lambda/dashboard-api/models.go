@@ -223,25 +223,6 @@ type SweepInstance struct {
 	ErrorMessage string `dynamodbav:"error_message,omitempty"`
 }
 
-// Autoscale API Response structures
-
-// AutoScaleGroupsAPIResponse is the response for /api/autoscale-groups
-type AutoScaleGroupsAPIResponse struct {
-	Success         bool                 `json:"success"`
-	Message         string               `json:"message,omitempty"`
-	Error           string               `json:"error,omitempty"`
-	TotalGroups     int                  `json:"total_groups"`
-	AutoScaleGroups []AutoScaleGroupInfo `json:"autoscale_groups"`
-}
-
-// AutoScaleGroupDetailAPIResponse is the response for /api/autoscale-groups/{id}
-type AutoScaleGroupDetailAPIResponse struct {
-	Success bool            `json:"success"`
-	Message string          `json:"message,omitempty"`
-	Error   string          `json:"error,omitempty"`
-	Group   GroupDetailInfo `json:"group"`
-}
-
 // CostSummaryAPIResponse is the response for /api/cost-summary
 type CostSummaryAPIResponse struct {
 	Success bool        `json:"success"`

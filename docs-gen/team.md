@@ -1,6 +1,6 @@
 ## `spawn team`
 
-Create and manage teams for sharing spawn instances, sweeps, and autoscale groups
+Create and manage teams for sharing spawn instances and sweeps
 
 ```
 spawn team

@@ -77,8 +77,8 @@ reads.
 
 ## The deployed control plane
 
-`spawn` is not only a CLI: 18 Lambda functions, 23 DynamoDB tables, 21 S3
-buckets and 16 IAM roles live in the shared infra account (966362334030).
+`spawn` is not only a CLI: 15 Lambda functions, 21 DynamoDB tables, 21 S3
+buckets and 14 IAM roles live in the shared infra account (966362334030).
 **[docs/infra-account.md](docs/infra-account.md)** maps what is there to the code
 that owns it, how each function is invoked, and the deploy traps that have each
 cost a real failure.

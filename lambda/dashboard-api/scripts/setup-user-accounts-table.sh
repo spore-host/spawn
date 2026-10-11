@@ -100,9 +100,7 @@ cat > /tmp/dashboard-policy-updated.json <<EOF
       ],
       "Resource": [
         "arn:aws:dynamodb:*:*:table/spawn-user-accounts",
-        "arn:aws:dynamodb:*:*:table/spawn-sweep-orchestration",
-        "arn:aws:dynamodb:*:*:table/spawn-autoscale-groups-production",
-        "arn:aws:dynamodb:*:*:table/spawn-registry-production"
+        "arn:aws:dynamodb:*:*:table/spawn-sweep-orchestration"
       ]
     },
     {

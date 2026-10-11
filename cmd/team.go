@@ -26,7 +26,7 @@ var (
 var teamCmd = &cobra.Command{
 	Use:   "team",
 	Short: "Manage team-based resource sharing",
-	Long:  "Create and manage teams for sharing spawn instances, sweeps, and autoscale groups",
+	Long:  "Create and manage teams for sharing spawn instances and sweeps",
 }
 
 var teamCreateCmd = &cobra.Command{
