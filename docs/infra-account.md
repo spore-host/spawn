@@ -4,7 +4,7 @@ What is deployed in the shared infra account (**966362334030**, `us-east-1`),
 what each piece does, and where its source lives.
 
 **Measured, not recalled.** Every figure here came from the live account on
-**2026-10-09** via `spawn footprint` (#771) and the AWS API. Re-measure rather
+**2026-10-10** via `spawn footprint` (#771) and the AWS API. Re-measure rather
 than trusting this page:
 
 ```sh
@@ -20,19 +20,24 @@ log groups, and a bucket list that missed an 11-bucket family.
 
 ## Scale
 
-**103 control-plane resources**, none of which the TTL reaper or `spawn cleanup`
+**100 control-plane resources**, none of which the TTL reaper or `spawn cleanup`
 touches — those cover launched instances and their attachments, not the control
 plane (#653).
 
 | | count |
 |---|---|
-| Lambda functions | 18 |
-| CloudWatch log groups | 18 |
+| Lambda functions | 17 |
+| CloudWatch log groups | 17 |
 | DynamoDB tables | 23 |
-| EventBridge rules | 5 |
+| EventBridge rules | 4 |
 | S3 buckets | 21 |
 | IAM roles | 16 |
 | IAM instance profiles | 2 |
+
+Down from 103 on 2026-10-09: #794 removed `spawn-alert-evaluator`, its hourly
+rule and its log group. Re-measured with `spawn footprint -o json` rather than
+decremented by hand — the first attempt at this edit guessed 101 and was wrong,
+which is the reason the page insists on measuring.
 
 ## Lambda functions
 
@@ -44,7 +49,6 @@ code and it determines what breaks when a schedule is disabled.
 | function | source | schedule | notes |
 |---|---|---|---|
 | `spawn-ttl-reaper-production` | `lambda/ttl-reaper/` | `rate(10 minutes)` | the out-of-band backstop that terminates expired instances. Cross-account: `REAPER_SCAN_SELF=false`, assumes `spawn-ttl-reaper-ec2` in 435415984226 |
-| `spawn-alert-evaluator` | `lambda/alert-evaluator/` | `rate(1 hour)` | evaluates user alert preferences. **Has had nothing to do since 2026-02-20**: `spawn-alert-preferences` has never held a record, so this is ~5,500 invocations finding nothing (#794) |
 | `spawn-cost-history-collector` | `lambda/cost-history-collector/` | `rate(1 hour)` | writes to `spawn-cost-history` |
 | `spawn-autoscale-orchestrator-production` | `lambda/autoscale-orchestrator/` | `rate(1 minute)`, **ENABLED** | reconciles autoscale groups |
 | `spawn-autoscale-orchestrator-staging` | same | `rate(1 minute)`, **DISABLED** | disabled 2026-10-09 (#772): it polled every minute from February against an empty table |
@@ -109,7 +113,7 @@ belong to adjacent projects.
 | `spawn-websocket-connections` | `lambda/dashboard-websocket-processor/` |
 | `spawn-autoscale-groups-{production,staging}` | `lambda/dashboard-api/autoscale.go`. **Both empty** — no autoscale group has ever been configured (#772) |
 | `spawn-schedules`, `spawn-schedule-history` | `cmd/schedule.go`, `deployment/cloudformation/schedules-tables.yaml` |
-| `spawn-alert-preferences` | `lambda/alert-evaluator/` (live, hourly) and `lambda/dashboard-api/`; `deployment/cloudformation/alerts-tables.yaml`. **Empty** — see #794 |
+| `spawn-alert-preferences` | **nothing, since #794 removed `alert-evaluator`.** Still deployed and empty. Its template stays because `spawn-cost-history`, declared alongside it, is live |
 | `spawn-alerts`, `spawn-alert-history` | **nothing, since #783 removed the alerts path.** Still deployed and empty; the template that creates them stays because two of its four tables are live. Their removal belongs to the control-plane reaping in #653 |
 | `spawn-cost-history` | `cost-history-collector` |
 | `spawn-teams`, `spawn-team-memberships` | team sharing (#137) |

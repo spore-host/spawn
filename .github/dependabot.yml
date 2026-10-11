@@ -54,7 +54,6 @@ updates:
   - package-ecosystem: "gomod"
     directories:
       - "/"
-      - "/lambda/alert-evaluator"
       - "/lambda/autoscale-orchestrator"
       - "/lambda/cost-history-collector"
       - "/lambda/dashboard-api"
