@@ -20,6 +20,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from reappearing in Go. Same class as #790's Lambda names and #804's bucket —
   two sides constructing one identifier independently — except that here one side
   is shell, so the sharing has to be an assertion rather than a shared constant.
+- **`scripts/deploy-cost-history-collector.sh`** (#848), so the one live Lambda
+  nothing in the repo could ship is shippable. The function is invoked hourly by
+  an enabled EventBridge rule and its output is served by
+  `lambda/dashboard-api`'s `GET /api/cost-history`, so it was never dead code —
+  there was simply no path from `lambda/cost-history-collector/` to the function
+  running since 2026-02-20, and Dependabot had spent eight months bumping a module
+  that could not reach production.
+  Modelled on `deploy-scheduler-handler.sh` so the existing gates apply
+  automatically — verified by reverting each: removing the account assertion fails
+  `TestDeployScriptsAssertTheAccount` **naming the new script**, and removing the
+  `put-retention-policy` call fails the census. It asserts the runtime on every
+  deploy rather than only on create (the #716 trap, where a script declared
+  `provided.al2023` and redeployed for ten months while the function stayed on
+  `provided.al2`), stamps `spawn:version` from `git describe --dirty` so the
+  deployed bytes can be traced to a commit, builds the **package** rather than
+  `main.go`, and ignores `AWS_REGION` in favour of an explicit region.
+  It deliberately does **not** create the hourly EventBridge rule: the live one
+  already exists, and a deploy script that also owned the schedule could silently
+  change how often a cost collector runs.
 
 - **`TestDocsDoNotCitePathsThatDoNotExist`** — a doc that names a file in
   backticks must either name one that exists or declare itself historical. The
