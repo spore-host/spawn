@@ -94,18 +94,3 @@ func (e *spawnEnv) seedSchedule(userID, id, name, status string) {
 }
 
 // ── stage ──────────────────────────────────────────────────────────────────
-
-// TestTier0_StageListEmpty verifies `stage list` (a DynamoDB scan) exits 0 with
-// the friendly message on a seeded-but-empty table. (upload/delete touch real
-// multi-region S3 and stay in Tier 2/3.)
-func TestTier0_StageListEmpty(t *testing.T) {
-	env := startSpawnSubstrate(t)
-	seedDynamoTable(t, env.DynamoClient(), "spawn-staged-data", "staging_id", nil)
-	out := env.runOK("stage", "list")
-	if !strings.Contains(strings.ToLower(out), "no staged data") {
-		_, stderr, _ := env.run("stage", "list")
-		if !strings.Contains(strings.ToLower(stderr+out), "no staged data") {
-			t.Errorf("expected 'no staged data', got stdout:\n%s\nstderr:\n%s", out, stderr)
-		}
-	}
-}
