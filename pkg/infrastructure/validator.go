@@ -71,8 +71,6 @@ func (v *Validator) validateDynamoDBTables(ctx context.Context, result *Validati
 	tables := map[string]string{
 		"schedules":           v.resolver.GetSchedulesTable(),
 		"sweep_orchestration": v.resolver.GetSweepOrchestrationTable(),
-		"alerts":              v.resolver.GetAlertsTable(),
-		"alert_history":       v.resolver.GetAlertHistoryTable(),
 	}
 
 	for name, tableName := range tables {
@@ -151,7 +149,6 @@ func (v *Validator) validateLambdaFunctions(ctx context.Context, result *Validat
 	functions := map[string]string{
 		"scheduler_handler":  v.resolver.GetSchedulerHandlerARN(),
 		"sweep_orchestrator": v.resolver.GetSweepOrchestratorARN(),
-		"alert_handler":      v.resolver.GetAlertHandlerARN(),
 		"dashboard_api":      v.resolver.GetDashboardAPIARN(),
 	}
 
@@ -254,12 +251,6 @@ func lambdaDeployMechanism(functionName string) string {
 		return "deploy with scripts/deploy-sweep-orchestrator.sh"
 	case dashboardAPIFunction:
 		return "deploy with lambda/dashboard-api/deploy.sh"
-	case alertHandlerFunction:
-		// Deliberately not a path. Nothing in this repo deploys it, and saying so
-		// is the honest answer — `spawn alerts` writes records this function is
-		// the only reader of, so alerts cannot fire until it is deployed.
-		return "nothing in this repo deploys this function; " +
-			"alerts created with `spawn alerts create` cannot fire until it is (see issue #783)"
 	default:
 		return "see docs/infra-account.md for which script or template owns this function"
 	}
@@ -284,10 +275,8 @@ func (v *Validator) GetRecommendations(result *ValidationResult) []string {
 	if hasDynamoDBErrors {
 		recommendations = append(recommendations,
 			"Create the missing DynamoDB tables from the repo: "+
-				"scripts/setup-schedules-dynamodb.sh (schedules), "+
-				"scripts/setup-sweep-dynamodb.sh (sweeps), "+
-				"scripts/setup-availability-dynamodb.sh (availability stats), or "+
-				"deployment/cloudformation/alerts-tables.yaml (alerts). "+
+				"scripts/setup-schedules-dynamodb.sh (schedules) or "+
+				"scripts/setup-sweep-dynamodb.sh (sweeps). "+
 				"docs/infra-account.md maps every table to the code that reads it.")
 	}
 

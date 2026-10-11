@@ -188,6 +188,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git log -- lambda/<name>/`, which is archaeology and is wrong whenever a
   redeploy carried no source change, or a source change was never deployed.
 
+### Removed
+
+- **The `spawn alerts` command and `lambda/alert-handler` are gone** (#783).
+  **This is a breaking change: the next release must bump MINOR.** `spawn alerts
+  create|list|delete|history` no longer exists.
+  The evidence for removing rather than deploying: the handler is event-driven
+  and **nothing emitted the event it handled** — `sweep-orchestrator`'s only
+  `lambda.Invoke` is `reinvokeSelf` — so deploying it would have changed nothing
+  without also building an emission path and a scheduler for the time and cost
+  triggers. `spawn-alerts` has **never held a record**, so no user loses
+  anything. And every commit touching the handler since the initial one was
+  mechanical: CVE bumps, a Go version bump, a test migration. Removing it also
+  retires the `spawn-alerts`/`spawn-alert-history` config keys,
+  `SPAWN_DYNAMODB_ALERTS_TABLE`, `SPAWN_DYNAMODB_ALERT_HISTORY_TABLE` and
+  `SPAWN_LAMBDA_ALERT_HANDLER_ARN`.
+  Cost alerting via the dashboard is untouched: `alert-evaluator` reads
+  `spawn-alert-preferences`, a different table, and is still deployed — though it
+  has had nothing to do since February (#794).
+  The two now-unread tables are left in place; deleting them is control-plane
+  reaping, which nothing does yet (#653). The template that creates them stays
+  because two of its four tables are live.
+- **`deployment/cloudformation/self-hosted-stack.yaml` is gone** (#783). 354
+  lines, one commit — the initial one — never edited and never deployed in either
+  account. It declared 11 resources and **no functions**, so deploying it would
+  have produced half a control plane, and it named a log group for the function
+  removed above. Its informational value is superseded by
+  `docs/infra-account.md`, which maps 103 resources measured from the live
+  account rather than 11 imagined in 2026-02. #780 should start from the measured
+  document.
+
 ### Changed
 
 - **`spawn alerts create` now refuses an alert that cannot be delivered**

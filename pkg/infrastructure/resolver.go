@@ -25,7 +25,6 @@ const sharedInfraAccountID = "966362334030"
 const (
 	schedulerHandlerFunction  = "scheduler-handler"
 	sweepOrchestratorFunction = "spawn-sweep-orchestrator"
-	alertHandlerFunction      = "spawn-alert-handler"
 	dashboardAPIFunction      = "spawn-dashboard-api"
 )
 
@@ -62,22 +61,6 @@ func (r *Resolver) GetSweepOrchestrationTable() string {
 		return r.config.DynamoDB.SweepOrchestrationTable
 	}
 	return "spawn-sweep-orchestration" // Default for shared infrastructure
-}
-
-// GetAlertsTable returns the DynamoDB table name for alerts
-func (r *Resolver) GetAlertsTable() string {
-	if r.config.DynamoDB.AlertsTable != "" {
-		return r.config.DynamoDB.AlertsTable
-	}
-	return "spawn-alerts" // Default for shared infrastructure
-}
-
-// GetAlertHistoryTable returns the DynamoDB table name for alert history
-func (r *Resolver) GetAlertHistoryTable() string {
-	if r.config.DynamoDB.AlertHistoryTable != "" {
-		return r.config.DynamoDB.AlertHistoryTable
-	}
-	return "spawn-alert-history" // Default for shared infrastructure
 }
 
 // S3 resource resolution
@@ -124,15 +107,6 @@ func (r *Resolver) GetSweepOrchestratorARN() string {
 	}
 	// Default to spore-host-infra account
 	return fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", r.region, sharedInfraAccountID, sweepOrchestratorFunction)
-}
-
-// GetAlertHandlerARN returns the Lambda function ARN for alert handler
-func (r *Resolver) GetAlertHandlerARN() string {
-	if r.config.Lambda.AlertHandlerARN != "" {
-		return r.config.Lambda.AlertHandlerARN
-	}
-	// Default to spore-host-infra account
-	return fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", r.region, sharedInfraAccountID, alertHandlerFunction)
 }
 
 // GetDashboardAPIARN returns the Lambda function ARN for dashboard API
@@ -188,13 +162,10 @@ func (r *Resolver) GetResourceSummary() map[string]string {
 		"mode":                      string(r.config.Mode),
 		"schedules_table":           r.GetSchedulesTable(),
 		"sweep_orchestration_table": r.GetSweepOrchestrationTable(),
-		"alerts_table":              r.GetAlertsTable(),
-		"alert_history_table":       r.GetAlertHistoryTable(),
 		"binaries_bucket":           r.GetBinariesBucket(),
 		"schedules_bucket":          r.GetSchedulesBucket(),
 		"scheduler_handler_arn":     r.GetSchedulerHandlerARN(),
 		"sweep_orchestrator_arn":    r.GetSweepOrchestratorARN(),
-		"alert_handler_arn":         r.GetAlertHandlerARN(),
 		"dashboard_api_arn":         r.GetDashboardAPIARN(),
 	}
 }

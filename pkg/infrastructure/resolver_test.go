@@ -21,8 +21,6 @@ func TestResolver_DynamoDBTables(t *testing.T) {
 			wantTables: map[string]string{
 				"schedules":           "spawn-schedules",
 				"sweep_orchestration": "spawn-sweep-orchestration",
-				"alerts":              "spawn-alerts",
-				"alert_history":       "spawn-alert-history",
 			},
 		},
 		{
@@ -32,15 +30,11 @@ func TestResolver_DynamoDBTables(t *testing.T) {
 				DynamoDB: config.DynamoDBConfig{
 					SchedulesTable:          "my-spawn-schedules",
 					SweepOrchestrationTable: "my-spawn-sweeps",
-					AlertsTable:             "my-spawn-alerts",
-					AlertHistoryTable:       "my-spawn-alert-history",
 				},
 			},
 			wantTables: map[string]string{
 				"schedules":           "my-spawn-schedules",
 				"sweep_orchestration": "my-spawn-sweeps",
-				"alerts":              "my-spawn-alerts",
-				"alert_history":       "my-spawn-alert-history",
 			},
 		},
 	}
@@ -54,12 +48,6 @@ func TestResolver_DynamoDBTables(t *testing.T) {
 			}
 			if got := resolver.GetSweepOrchestrationTable(); got != tt.wantTables["sweep_orchestration"] {
 				t.Errorf("GetSweepOrchestrationTable() = %v, want %v", got, tt.wantTables["sweep_orchestration"])
-			}
-			if got := resolver.GetAlertsTable(); got != tt.wantTables["alerts"] {
-				t.Errorf("GetAlertsTable() = %v, want %v", got, tt.wantTables["alerts"])
-			}
-			if got := resolver.GetAlertHistoryTable(); got != tt.wantTables["alert_history"] {
-				t.Errorf("GetAlertHistoryTable() = %v, want %v", got, tt.wantTables["alert_history"])
 			}
 		})
 	}
@@ -144,7 +132,6 @@ func TestResolver_LambdaFunctions(t *testing.T) {
 			wantFunctions: map[string]string{
 				"scheduler_handler":  "arn:aws:lambda:us-east-1:966362334030:function:scheduler-handler",
 				"sweep_orchestrator": "arn:aws:lambda:us-east-1:966362334030:function:spawn-sweep-orchestrator",
-				"alert_handler":      "arn:aws:lambda:us-east-1:966362334030:function:spawn-alert-handler",
 				"dashboard_api":      "arn:aws:lambda:us-east-1:966362334030:function:spawn-dashboard-api",
 			},
 		},
@@ -155,7 +142,6 @@ func TestResolver_LambdaFunctions(t *testing.T) {
 				Lambda: config.LambdaConfig{
 					SchedulerHandlerARN:  "arn:aws:lambda:us-west-2:123456789012:function:my-scheduler",
 					SweepOrchestratorARN: "arn:aws:lambda:us-west-2:123456789012:function:my-orchestrator",
-					AlertHandlerARN:      "arn:aws:lambda:us-west-2:123456789012:function:my-alerts",
 					DashboardAPIARN:      "arn:aws:lambda:us-west-2:123456789012:function:my-dashboard",
 				},
 			},
@@ -164,7 +150,6 @@ func TestResolver_LambdaFunctions(t *testing.T) {
 			wantFunctions: map[string]string{
 				"scheduler_handler":  "arn:aws:lambda:us-west-2:123456789012:function:my-scheduler",
 				"sweep_orchestrator": "arn:aws:lambda:us-west-2:123456789012:function:my-orchestrator",
-				"alert_handler":      "arn:aws:lambda:us-west-2:123456789012:function:my-alerts",
 				"dashboard_api":      "arn:aws:lambda:us-west-2:123456789012:function:my-dashboard",
 			},
 		},
@@ -179,9 +164,6 @@ func TestResolver_LambdaFunctions(t *testing.T) {
 			}
 			if got := resolver.GetSweepOrchestratorARN(); got != tt.wantFunctions["sweep_orchestrator"] {
 				t.Errorf("GetSweepOrchestratorARN() = %v, want %v", got, tt.wantFunctions["sweep_orchestrator"])
-			}
-			if got := resolver.GetAlertHandlerARN(); got != tt.wantFunctions["alert_handler"] {
-				t.Errorf("GetAlertHandlerARN() = %v, want %v", got, tt.wantFunctions["alert_handler"])
 			}
 			if got := resolver.GetDashboardAPIARN(); got != tt.wantFunctions["dashboard_api"] {
 				t.Errorf("GetDashboardAPIARN() = %v, want %v", got, tt.wantFunctions["dashboard_api"])
@@ -292,13 +274,10 @@ func TestResolver_GetResourceSummary(t *testing.T) {
 		"mode",
 		"schedules_table",
 		"sweep_orchestration_table",
-		"alerts_table",
-		"alert_history_table",
 		"binaries_bucket",
 		"schedules_bucket",
 		"scheduler_handler_arn",
 		"sweep_orchestrator_arn",
-		"alert_handler_arn",
 		"dashboard_api_arn",
 	}
 

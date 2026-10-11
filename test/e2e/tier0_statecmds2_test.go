@@ -14,7 +14,7 @@ import (
 )
 
 // Tier 0 breadth for control-plane-only commands that need no instance/SSH —
-// schedule (list query path) and alerts (full create→list→delete round-trip).
+// schedule (list query path).
 // These were previously deferred as "Tier 2/3" but are backed purely by
 // DynamoDB, so Substrate can serve them exactly like team and sweep.
 
@@ -90,86 +90,6 @@ func (e *spawnEnv) seedSchedule(userID, id, name, status string) {
 		Item:      item,
 	}); err != nil {
 		e.t.Fatalf("seed schedule %s: %v", id, err)
-	}
-}
-
-// ── alerts ──────────────────────────────────────────────────────────────────
-
-// TestTier0_AlertsRoundTrip exercises the full create → list → delete cycle
-// against Substrate (all DynamoDB-backed, no external delivery).
-func TestTier0_AlertsRoundTrip(t *testing.T) {
-	env := startSpawnSubstrate(t)
-	env.seedAlertTables()
-	// The consumer must exist or create refuses — see seedAlertHandler (#790).
-	env.seedAlertHandler()
-
-	// create
-	out := env.runOK("alerts", "create", "sweep-xyz",
-		"--on-complete", "--email", "researcher@example.com")
-	if !strings.Contains(out, "Alert created:") {
-		t.Fatalf("unexpected alerts create output:\n%s", out)
-	}
-	alertID := extractField(out, "Alert created:")
-	if alertID == "" {
-		t.Fatalf("no alert ID in create output:\n%s", out)
-	}
-
-	// list shows it
-	if out := env.runOK("alerts", "list"); !strings.Contains(out, alertID) {
-		// list writes to stderr in table mode; fall back to combined check
-		_, stderr, _ := env.run("alerts", "list")
-		if !strings.Contains(stderr, alertID) && !strings.Contains(out, alertID) {
-			t.Errorf("created alert %s not in list:\n%s\n%s", alertID, out, stderr)
-		}
-	}
-
-	// delete it (now prompts; -y skips — spawn#40)
-	env.runOK("alerts", "delete", alertID, "-y")
-}
-
-// TestTier0_AlertsCreateRefusedWhenUndeliverable is the end-to-end proof of
-// #790: with the alerts tables present but no consumer deployed, `alerts create`
-// must fail rather than report success for a record nothing will ever read.
-//
-// Deliberately asserts the ABSENCE of a write as well as the non-zero exit. The
-// defect was never that the write failed — the write worked perfectly, which is
-// why it went unnoticed since the initial commit — so "it returned an error" on
-// its own would not distinguish the fix from a refusal that still wrote.
-func TestTier0_AlertsCreateRefusedWhenUndeliverable(t *testing.T) {
-	env := startSpawnSubstrate(t)
-	env.seedAlertTables()
-	// No seedAlertHandler() here: that is the point.
-
-	stdout, stderr, code := env.run("alerts", "create", "sweep-xyz",
-		"--on-complete", "--email", "researcher@example.com")
-	if code == 0 {
-		t.Fatalf("alerts create exited 0 with no consumer deployed; stdout:\n%s\nstderr:\n%s", stdout, stderr)
-	}
-	combined := stdout + stderr
-	if !strings.Contains(combined, "cannot be delivered") {
-		t.Errorf("refusal does not explain itself; output:\n%s", combined)
-	}
-	if strings.Contains(stdout, "Alert created:") {
-		t.Errorf("reported an alert as created while refusing; stdout:\n%s", stdout)
-	}
-
-	// Nothing was written: list must still be empty.
-	listOut, listErr, _ := env.run("alerts", "list")
-	if !strings.Contains(strings.ToLower(listOut+listErr), "no alerts") {
-		t.Errorf("a refused alert left a record behind; list output:\n%s\n%s", listOut, listErr)
-	}
-}
-
-// TestTier0_AlertsListEmpty verifies list on seeded-but-empty tables exits 0.
-func TestTier0_AlertsListEmpty(t *testing.T) {
-	env := startSpawnSubstrate(t)
-	env.seedAlertTables()
-	if out := env.runOK("alerts", "list"); !strings.Contains(strings.ToLower(out), "no alerts") {
-		// message may be on stderr
-		_, stderr, _ := env.run("alerts", "list")
-		if !strings.Contains(strings.ToLower(stderr+out), "no alerts") {
-			t.Errorf("expected 'no alerts', got stdout:\n%s\nstderr:\n%s", out, stderr)
-		}
 	}
 }
 

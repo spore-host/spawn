@@ -57,9 +57,12 @@ func TestEveryHardcodedLambdaNameIsCreatedByADeployMechanism(t *testing.T) {
 //
 // An exception list is the thing this gate exists to avoid, so it is kept to
 // names with an open issue rather than a convenience. One entry today.
-var undeployedFunctions = map[string]string{
-	alertHandlerFunction: "#783 — builds in CI, deployed nowhere; `spawn alerts` cannot fire until it is",
-}
+// EMPTY, and worth keeping that way. Its one entry was spawn-alert-handler, and
+// #783 resolved it by removing the function rather than by deploying it — so
+// every Lambda name in Go source is now one some deploy mechanism in this repo
+// actually creates. An addition here is a claim that a name is referenced while
+// nothing deploys it, which is a state to fix rather than to record.
+var undeployedFunctions = map[string]string{}
 
 // The resolver's own four names must be covered by the scan above. Without this,
 // renaming a constant to something the scan happens not to find would silently
@@ -71,7 +74,6 @@ func TestResolverLambdaNamesAreCoveredByTheScan(t *testing.T) {
 	for _, name := range []string{
 		schedulerHandlerFunction,
 		sweepOrchestratorFunction,
-		alertHandlerFunction,
 		dashboardAPIFunction,
 	} {
 		if _, ok := used[name]; !ok {
