@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Six deploy scripts asserted nothing about which AWS account they were
+  pointed at** (#799). Credentials are whatever happens to be ambient, so each
+  would have built a copy of production in a sandbox without complaint —
+  `lambda/dashboard-api/deploy.sh`, its duplicate under `scripts/`, both
+  dashboard-websocket scripts, `scripts/deploy-custom-dns.sh` and
+  `scripts/setup-schedules-dynamodb.sh`. The DNS one already *printed* the
+  account and never compared it.
+- **`scripts/setup-schedules-dynamodb.sh` reported success for a failed stack
+  update** (#799). `|| true` on both `update-stack` and
+  `wait stack-update-complete` swallowed every failure, after which the script
+  printed `✅ Stack updated successfully` unconditionally. It now matches the one
+  error that genuinely means success — "No updates are to be performed" — and
+  aborts on anything else.
+- **Four Lambda deploy scripts stamped no `spawn:version` and set no log
+  retention** (#799). An untagged function cannot be checked for version skew,
+  and skew is the normal state here because the control plane does not upgrade
+  with the repo. Measured consequence: the live `spawn-dashboard-api` carried
+  `spawn:managed` and `spawn:purpose` but no version, so #768's "skew is readable
+  in one API call" was false for it. Stamping now happens on **every** deploy
+  rather than only on create.
+- **`lambda/dashboard-api/deploy.sh` raced itself and skipped its own cleanup**
+  (#799). It called `update-function-configuration` immediately after
+  `update-function-code`, which Lambda rejects while the first update is in
+  flight — exit 254 with the code updated and the configuration not, a state that
+  looks like total failure. It now waits. Cleanup moved to a `trap` so it also
+  runs on the error paths, where `set -e` had been leaving 27 MB of build
+  artifacts behind.
+
+### Changed
+
+- **The deploy-script gates discover their targets instead of listing them**
+  (#799). Each of four gates had hardcoded the same two filenames, so six
+  deploying scripts were unguarded — including one in the very directory being
+  scanned, which a `scripts/deploy-*.sh` glob missed because of its name.
+  Discovery is now by what a script **does** (`aws lambda create-function`,
+  `cloudformation deploy`, …) anywhere in the tree, and fails when it finds
+  nothing rather than passing vacuously.
+  Two refinements came out of widening it, both recorded in the code: the region
+  gate now applies only to Lambda deploys, because a deliberately multi-region
+  stack script is not the hazard it was written for; and legitimate `|| true`
+  uses carry an explicit `# swallow-ok: <reason>` marker — a poll loop and an
+  idempotent cleanup — rather than the gate being weakened to accept them.
+- **The account gate now matches the assignment and the comparison**, not the
+  bare identifier (#799). Renaming the assignment used to **pass**, because the
+  script's own error message keeps the substring `EXPECTED_ACCOUNT` alive. Either
+  half alone asserts nothing: an assignment never compared is dead, and a
+  comparison against an unset variable is always false.
+
+
 ## [0.127.0] - 2026-10-10
 
 **Breaking:** `spawn alerts` is removed — see Removed below. Pre-1.0, a breaking change bumps MINOR.

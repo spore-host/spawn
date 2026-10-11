@@ -49,7 +49,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# The region above is deliberately configurable — this stack is multi-region by
+# design and the choice is echoed below. The ACCOUNT is not configurable, and was
+# unchecked until #799 widened the deploy gates past scripts/deploy-*.sh, which
+# this file's name had been escaping. Override only for a fork.
+EXPECTED_ACCOUNT="${SPAWN_LAMBDA_ACCOUNT:-966362334030}"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
+  echo "ERROR: credentials are for account $ACCOUNT_ID, expected $EXPECTED_ACCOUNT." >&2
+  echo "       Set AWS_PROFILE, or SPAWN_LAMBDA_ACCOUNT=$ACCOUNT_ID to deploy here deliberately." >&2
+  exit 1
+fi
+
 echo "Setting up spawn scheduled executions infrastructure..."
+echo "  Account: $ACCOUNT_ID"
 echo "  Region: $REGION"
 echo "  Environment: $ENVIRONMENT"
 echo "  Stack: $STACK_NAME"
@@ -72,18 +85,38 @@ if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$RE
     echo "✅ Stack created successfully"
 else
     echo "Stack already exists. Updating..."
-    aws cloudformation update-stack \
+
+    # The two `|| true`s this replaces swallowed EVERY update-stack and wait
+    # failure, and the script then printed "✅ Stack updated successfully"
+    # unconditionally — a failed deploy reporting a green tick (#799).
+    #
+    # "No updates are to be performed" is the one failure that genuinely means
+    # success, so it is matched explicitly and everything else aborts.
+    set +e
+    UPDATE_ERR=$(aws cloudformation update-stack \
         --stack-name "$STACK_NAME" \
         --template-body "file://${TEMPLATE_FILE}" \
         --parameters "ParameterKey=Environment,ParameterValue=${ENVIRONMENT}" \
-        --region "$REGION" 2>&1 | grep -v "No updates are to be performed" || true
+        --region "$REGION" 2>&1 >/dev/null)
+    UPDATE_RC=$?
+    set -e
 
-    echo "Waiting for stack update to complete..."
-    aws cloudformation wait stack-update-complete \
-        --stack-name "$STACK_NAME" \
-        --region "$REGION" 2>/dev/null || true
+    if [ "$UPDATE_RC" -ne 0 ]; then
+        if printf '%s' "$UPDATE_ERR" | grep -q "No updates are to be performed"; then
+            echo "✅ Stack is already up to date — no changes to apply"
+        else
+            echo "ERROR: update-stack failed:" >&2
+            printf '%s\n' "$UPDATE_ERR" >&2
+            exit 1
+        fi
+    else
+        echo "Waiting for stack update to complete..."
+        aws cloudformation wait stack-update-complete \
+            --stack-name "$STACK_NAME" \
+            --region "$REGION"
 
-    echo "✅ Stack updated successfully"
+        echo "✅ Stack updated successfully"
+    fi
 fi
 
 echo ""

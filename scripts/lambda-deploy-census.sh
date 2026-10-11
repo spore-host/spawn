@@ -70,7 +70,19 @@ for t in lambda/*/template.yaml; do
   [ "$ok" = "1" ] && note "✅ $name (SAM template)"
 done
 
-for s in scripts/deploy-*.sh; do
+# DISCOVERED repo-wide, not globbed from one directory. `scripts/deploy-*.sh`
+# missed four scripts under lambda/*/ that create and update live functions —
+# including the only deploy path for spawn-dashboard-api, which consequently
+# carries no spawn:version tag at all (#799). A glob built from a directory and a
+# filename prefix cannot find what sits elsewhere or is named differently; that
+# is the same defect as #136's lambda/*-scoped module loop.
+shell_deploys=$(find . -name '*.sh' -not -path './.git/*' -not -path './bin/*' | sort)
+if [ -z "$shell_deploys" ]; then
+  echo "found no shell scripts at all — the discovery is broken, not the repo" >&2
+  exit 1
+fi
+
+for s in $shell_deploys; do
   [ -e "$s" ] || continue
   # Only scripts that actually create or update a function; the setup-* helpers
   # that make roles and buckets have no function to stamp.
@@ -91,7 +103,9 @@ for s in scripts/deploy-*.sh; do
     note "❌ $s deploys a function but never sets log retention"
     fail=1; ok=0
   fi
-  [ "$ok" = "1" ] && note "✅ $(basename "$s") (shell deploy)"
+  # The full path, not basename: four different scripts are called deploy.sh,
+  # so a basename tells the reader nothing about which one passed.
+  [ "$ok" = "1" ] && note "✅ ${s#./} (shell deploy)"
 done
 
 if [ "$fail" -ne 0 ]; then
