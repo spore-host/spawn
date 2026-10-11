@@ -17,7 +17,7 @@ func seedInstance(t *testing.T, ec2Client *ec2.Client, tags map[string]string) s
 	t.Helper()
 	ctx := context.Background()
 	run, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-dcv"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, ec2Client)),
 		InstanceType: ec2types.InstanceTypeG4dnXlarge,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),

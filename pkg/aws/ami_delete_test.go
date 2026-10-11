@@ -67,13 +67,13 @@ func TestDeleteAMI_NonImageBuilder_NoIBCall(t *testing.T) {
 
 	// Need an instance to CreateImage from (substrate models RunInstances).
 	run, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-base"),
+		ImageId:      aws.String(testutil.RegisterTestAMI(t, ec2Client)),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
 	})
 	if err != nil || len(run.Instances) == 0 {
-		t.Skipf("substrate RunInstances unavailable: %v", err)
+		t.Fatalf("substrate RunInstances failed with a registered AMI — the emulator or the fixture is broken, and skipping here is what hid this for months: %v", err)
 	}
 	instID := aws.ToString(run.Instances[0].InstanceId)
 
@@ -109,11 +109,11 @@ func TestDeleteAMI_RetainsSharedSnapshot(t *testing.T) {
 	ec2Client := ec2.NewFromConfig(env.AWSConfig)
 
 	run, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId: aws.String("ami-base"), InstanceType: ec2types.InstanceTypeT3Micro,
+		ImageId: aws.String(testutil.RegisterTestAMI(t, ec2Client)), InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
 	})
 	if err != nil || len(run.Instances) == 0 {
-		t.Skipf("substrate RunInstances unavailable: %v", err)
+		t.Fatalf("substrate RunInstances failed with a registered AMI — the emulator or the fixture is broken, and skipping here is what hid this for months: %v", err)
 	}
 	amiA, err := client.CreateAMI(ctx, "us-east-1", CreateAMIInput{
 		InstanceID: aws.ToString(run.Instances[0].InstanceId), Name: "shared-snap-A",
@@ -169,11 +169,11 @@ func TestDeleteAMI_DeletesExclusiveSnapshot(t *testing.T) {
 	ec2Client := ec2.NewFromConfig(env.AWSConfig)
 
 	run, err := ec2Client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId: aws.String("ami-base"), InstanceType: ec2types.InstanceTypeT3Micro,
+		ImageId: aws.String(testutil.RegisterTestAMI(t, ec2Client)), InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
 	})
 	if err != nil || len(run.Instances) == 0 {
-		t.Skipf("substrate RunInstances unavailable: %v", err)
+		t.Fatalf("substrate RunInstances failed with a registered AMI — the emulator or the fixture is broken, and skipping here is what hid this for months: %v", err)
 	}
 	ami, err := client.CreateAMI(ctx, "us-east-1", CreateAMIInput{
 		InstanceID: aws.ToString(run.Instances[0].InstanceId), Name: "exclusive-snap",

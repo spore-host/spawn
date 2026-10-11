@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
@@ -44,11 +45,20 @@ func TestProvision_EndToEnd(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	ctx := context.Background()
 
-	// Seed the SSM AMI parameters GetRecommendedAMI reads.
+	// Seed the SSM AMI parameters GetRecommendedAMI reads, with ids of AMIs that
+	// actually exist in the emulator.
+	//
+	// They used to be the literals "ami-x86-standard" / "ami-arm-standard", which
+	// substrate rejects as malformed since v0.120.0 — so Provision failed at
+	// RunInstances, the error contained "launch", and the skip below swallowed it.
+	// This test is the headless path lagotto's capacity-poller takes (lagotto#19),
+	// and it has been reporting coverage while exercising nothing.
+	ec2Client := ec2.NewFromConfig(env.AWSConfig)
+	amiID := testutil.RegisterTestAMI(t, ec2Client)
 	ssmClient := ssm.NewFromConfig(env.AWSConfig)
 	for name, val := range map[string]string{
-		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64": "ami-x86-standard",
-		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64":  "ami-arm-standard",
+		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64": amiID,
+		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64":  amiID,
 	} {
 		if _, err := ssmClient.PutParameter(ctx, &ssm.PutParameterInput{
 			Name: awssdk.String(name), Value: awssdk.String(val), Type: ssmtypes.ParameterTypeString,
@@ -65,10 +75,12 @@ func TestProvision_EndToEnd(t *testing.T) {
 		OnComplete:   "terminate",
 	}, Options{}) // keyless: SSM-only, like the Lambda
 	if err != nil {
-		// Substrate may not fully model IAM CreateRole or RunInstances; in that
-		// case skip rather than fail (mirrors the other substrate launch tests).
-		if strings.Contains(err.Error(), "IAM") || strings.Contains(err.Error(), "launch") {
-			t.Skipf("substrate does not fully model the launch path: %v", err)
+		// The "launch" clause used to be here too, which made this skip swallow a
+		// malformed-AMI failure caused by the fixture rather than by the emulator.
+		// IAM CreateRole is still genuinely unmodelled in places, so that half
+		// stays — but a launch failure is now a real failure.
+		if strings.Contains(err.Error(), "IAM") {
+			t.Skipf("substrate does not model this IAM path: %v", err)
 		}
 		t.Fatalf("Provision: %v", err)
 	}

@@ -99,7 +99,7 @@ removes a property, rather than to check that today's code works. `make check`
 runs dozens of them. They are cheap to write and easy to write *uselessly* — a
 gate that cannot fail is worse than no gate, because it is counted as coverage.
 
-Five rules, each of which exists because a gate here broke one of them:
+Six rules, each of which exists because a gate here broke one of them:
 
 1. **A gate is not done until you have watched it fail against a revert that
    compiles.** "I reverted the change and the test failed" is only evidence if
@@ -158,6 +158,29 @@ Five rules, each of which exists because a gate here broke one of them:
    end up disagreeing with each other. When two sources of intent conflict, gate
    their agreement too (`TestReaperDocsAgreeThatTheCeilingBeatsAFarFutureDeadline`),
    because the drift is the root cause and the behaviour is only the symptom.
+
+6. **Gate the mechanism, not a correlate of it.** The story of how a bug was
+   found suggests the wrong gate surprisingly often, because the striking detail
+   is rarely the load-bearing one. Three gates written during one audit had to be
+   deleted after they ran:
+
+   - "no local flag may shadow a persistent root flag", written after
+     `logs --region` swallowed the global one — which reported twenty-odd
+     commands that declare their own `--region` by convention. Shadowing was how
+     the symptom presented; the defect was that the flag was never read.
+   - "was a flag value supplied?", computed from whether any later flag appeared
+     anywhere on the line — forty false positives, because the question is only
+     ever about the next token.
+   - "no test may skip on an emulator failure while containing an invented AMI
+     id", written because the skip *messages* are what survived review — eight
+     false positives, because invented ids appear legitimately in table
+     expectations and in config fields that never reach the API.
+
+   Each precise rule turned out narrower and duller than the one the story
+   suggested: *the flag variable must be read*, *look at the next token*, *an
+   ImageId handed to the EC2 API must come from `RegisterTestAMI`*. If a gate
+   needs an allowlist of things that are obviously fine, that is the signal — a
+   list of what is normal means the rule is wrong, which is rule 4 inside out.
 
 One corollary, for when a gate reports an absence: **a suspicious negative is
 more often the invocation than the system.** Four false negatives in one session

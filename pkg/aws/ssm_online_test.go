@@ -19,14 +19,14 @@ func launchWithProfile(t *testing.T, ctx context.Context, env *testutil.TestEnv)
 	t.Helper()
 	ec2c := ec2.NewFromConfig(env.AWSConfig)
 	run, err := ec2c.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId: aws.String("ami-base"), InstanceType: ec2types.InstanceTypeM7iXlarge,
+		ImageId: aws.String(testutil.RegisterTestAMI(t, ec2c)), InstanceType: ec2types.InstanceTypeM7iXlarge,
 		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
 		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{
 			Name: aws.String("spawn-spored-profile"),
 		},
 	})
 	if err != nil || len(run.Instances) == 0 {
-		t.Skipf("substrate RunInstances unavailable: %v", err)
+		t.Fatalf("substrate RunInstances failed with a registered AMI — the emulator or the fixture is broken, and skipping here is what hid this for months: %v", err)
 	}
 	return aws.ToString(run.Instances[0].InstanceId)
 }
@@ -58,11 +58,11 @@ func TestInstanceHasInstanceProfile_NoProfile(t *testing.T) {
 
 	ec2c := ec2.NewFromConfig(env.AWSConfig)
 	run, err := ec2c.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId: aws.String("ami-base"), InstanceType: ec2types.InstanceTypeM7iXlarge,
+		ImageId: aws.String(testutil.RegisterTestAMI(t, ec2c)), InstanceType: ec2types.InstanceTypeM7iXlarge,
 		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
 	})
 	if err != nil || len(run.Instances) == 0 {
-		t.Skipf("substrate RunInstances unavailable: %v", err)
+		t.Fatalf("substrate RunInstances failed with a registered AMI — the emulator or the fixture is broken, and skipping here is what hid this for months: %v", err)
 	}
 	id := aws.ToString(run.Instances[0].InstanceId)
 
@@ -89,11 +89,11 @@ func TestWaitForSSMOnline_NoProfileIsDeadNotSlow(t *testing.T) {
 
 	ec2c := ec2.NewFromConfig(env.AWSConfig)
 	run, err := ec2c.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId: aws.String("ami-base"), InstanceType: ec2types.InstanceTypeM7iXlarge,
+		ImageId: aws.String(testutil.RegisterTestAMI(t, ec2c)), InstanceType: ec2types.InstanceTypeM7iXlarge,
 		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
 	})
 	if err != nil || len(run.Instances) == 0 {
-		t.Skipf("substrate RunInstances unavailable: %v", err)
+		t.Fatalf("substrate RunInstances failed with a registered AMI — the emulator or the fixture is broken, and skipping here is what hid this for months: %v", err)
 	}
 	id := aws.ToString(run.Instances[0].InstanceId)
 

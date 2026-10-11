@@ -95,8 +95,24 @@ func TestMountDirNeverChownsAnExistingDirectory(t *testing.T) {
 	}
 	block := w[strings.Index(w, guard):]
 	block = block[:strings.Index(block, "\nfi\n")+4]
+	// This used to t.Skip here, reading "no chown emitted for /tmp at all — even
+	// safer than required". It is not safer, and the skip was reachable by exactly
+	// the change this test exists to prevent: moving the chown OUT of the
+	// existence guard leaves the guard in place (the mkdir still needs it), so the
+	// guarded block contains no chown and the destructive-action test reported
+	// itself satisfied while the script chowned /tmp unconditionally. Verified by
+	// doing it.
+	//
+	// So: the chown must exist, and it must be inside the guard.
+	if !strings.Contains(w, "chown") {
+		t.Fatalf("no chown is emitted anywhere. Either it was removed — in which case a "+
+			"root-created mount dir is left unwritable by the container, and this test is the wrong "+
+			"place to notice — or it moved somewhere this test cannot see.\n---\n%s", w)
+	}
 	if !strings.Contains(block, "chown") {
-		t.Skip("no chown emitted for /tmp at all — even safer than required")
+		t.Fatalf("a chown is emitted but NOT inside the `if [ ! -d ... ]` guard, so it runs against "+
+			"pre-existing directories. For a mount dir of /tmp that strips the sticky 1777 ownership "+
+			"every other user on the box needs.\n---\n%s", w)
 	}
 	// The chown exists but is unreachable for an existing dir. Prove it by running
 	// the block with a directory that DOES exist and asserting chown is not called.
