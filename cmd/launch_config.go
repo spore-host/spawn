@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
@@ -18,6 +19,7 @@ import (
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/sshkey"
 	"github.com/spore-host/spawn/pkg/storage"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 	"github.com/spore-host/spawn/pkg/userdata"
 )
 
@@ -208,6 +210,16 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 	if ttl != "" {
 		config.TTL = ttl
+		// A --ttl longer than the reaper's max-age ceiling is silently
+		// ineffective: the ceiling applies even inside a live deadline, because
+		// spawn:ttl-deadline is writable from the instance and so cannot be the
+		// only bound (#76). Say so here rather than let the user discover it when
+		// the instance disappears early.
+		if d, err := time.ParseDuration(ttl); err == nil {
+			if w := ttlpkg.CeilingWarning(d); w != "" {
+				fmt.Fprintln(os.Stderr, w)
+			}
+		}
 	}
 	// --name implies DNS registration; --dns overrides the DNS portion only.
 	if dnsName == "" && name != "" {

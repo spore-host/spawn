@@ -38,7 +38,7 @@ Parameters:
   MaxAge:
     Type: String
     Default: '168h'
-    Description: Hard max-age ceiling (Go duration); reaps even --no-timeout/missing-deadline instances older than this
+    Description: Hard max-age ceiling (Go duration); reaps ANY instance older than this, including one inside a far-future spawn:ttl-deadline — the deadline is instance-writable, so the ceiling is the tamper defence
 
   DryRun:
     Type: String

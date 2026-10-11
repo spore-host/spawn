@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn launch` warns when `--ttl` exceeds the reaper's default ceiling.**
+  Now that the ceiling is unconditional, a TTL longer than it is silently
+  ineffective — the instance is reclaimed at the ceiling regardless of the
+  deadline. The warning names the threshold and says to raise `REAPER_MAX_AGE` for
+  genuinely longer-lived instances, rather than letting an operator discover it
+  when an instance disappears at seven days.
+- **Three gates, each verified against a compiling revert.**
+  `TestEvaluate_MaxAgeCeilingAppliesEvenWithinDeadline` asserts the behaviour
+  directly — restoring the early return fails it.
+  `TestDefaultReaperMaxAgeMatchesTheReaper` reads the reaper's Go constant **and**
+  its CloudFormation parameter default, so the ceiling value the CLI warns against
+  cannot drift from the one actually deployed; `pkg/ttl` and the reaper are
+  separate modules, so the constant has to be duplicated, and an uncompared
+  duplicate is the #790 defect.
+  `TestReaperDocsAgreeThatTheCeilingBeatsAFarFutureDeadline` requires both the
+  header and the parameter description to state the far-future case, because the
+  two drifting apart is how the exemption survived.
+
 ### Changed
+
+- **A test that asserted the old behaviour was replaced, not deleted.**
+  `TestEvaluate_WithinDeadline_Spared` used a 30-day-old instance with a
+  two-hour-future deadline and asserted it was spared. It was right about the
+  code and wrong about the design, and it is why the gap lasted: a test that
+  encodes observed behaviour cannot tell you the behaviour is wrong. It is now
+  two tests — one for within-deadline-and-within-ceiling (still spared), one for
+  the forged far-future case (reaped, reason `max-age`).
 
 - **The docs gate asserts set equality in both directions** (#795). Pruning
   alone fixes one instance; an assertion that the fragment set and the command
@@ -161,6 +189,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The reaper's max-age ceiling now applies even inside a live deadline**, which
+  is what its own documentation always said it did. `main.go`'s header describes
+  the ceiling as firing "even for --no-timeout / missing / **far-future**
+  deadlines — defense against escape hatches and tag tampering", but the code
+  returned early for any instance within its `spawn:ttl-deadline`, and the
+  template's `MaxAge` description mentioned only missing deadlines. Three
+  documents, two intents, and the code implemented the narrow one.
+  That mattered because the deadline tag is **writable from the instance**: the
+  instance role grants `ec2:CreateTags` conditioned on `spawn:managed=true`, which
+  the instance itself satisfies, so a spore could write a deadline decades out and
+  become permanently unreapable — and forge `spawn:last-heartbeat` to keep the
+  quiet-spored alarm silent while doing it. #76 tracks signing the tag; this makes
+  the ceiling a real bound in the meantime, so the worst case is `REAPER_MAX_AGE`
+  rather than forever.
+
 - **The spored signature-verification gate could not fail** (#813). Emptying
   `sporedSigningPublicKeyPEM` — a one-literal, cleanly-compiling edit, and the
   documented way to disable signing — makes every launch download and run spored
@@ -211,6 +254,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolves.
 
 ### Documentation
+
+- **`CLAUDE.md` gains a fifth gate rule: assert the documented intent, not the
+  behaviour you observed.** A test written by reading the code can only confirm
+  the code; if the behaviour is wrong, the test certifies it and will fail on the
+  fix. This change is the worked example — `TestEvaluate_WithinDeadline_Spared`
+  blessed an exemption that let an instance make itself unreapable, and was right
+  about the code and wrong about the design. The rule says to write the assertion
+  from the comment, parameter description or issue, run it, and if it fails
+  resolve *which* is wrong before writing anything down — and to gate the
+  agreement when two sources of intent conflict, because the drift is the root
+  cause and the behaviour only the symptom.
 
 - **Four stale figures corrected, all of them mine.** `CLAUDE.md` claimed 18
   Lambda functions where the page it calls authoritative said 17 — and both are
