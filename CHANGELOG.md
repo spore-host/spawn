@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Three gates on the cert paths, which is what was actually missing.** The certs
+  are written by shell at boot and read by Go at runtime, and nothing connected
+  the two — which is how they drifted far enough apart that one side was dead and
+  nobody noticed. `TestUserDataWritesThePathsTheAgentReads` requires every path
+  the agent reads to be written by `cmd/app.go`;
+  `TestUserDataWritesTheDCVCertWhereDCVReadsIt` pins DCV's own private directory,
+  because a plausible-but-wrong path fails by silently falling back to
+  self-signed; and `TestAgentDoesNotUseTheSupersededDCVCertPath` keeps `/etc/dcv/`
+  from reappearing in Go. Same class as #790's Lambda names and #804's bucket —
+  two sides constructing one identifier independently — except that here one side
+  is shell, so the sharing has to be an assertion rather than a shared constant.
+
 - **`TestDocsDoNotCitePathsThatDoNotExist`** — a doc that names a file in
   backticks must either name one that exists or declare itself historical. The
   forcing function is the point: a doc is either current, in which case its paths
@@ -322,6 +334,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comparison against an unset variable is always false.
 
 ### Removed
+
+- **`installDCVCert` and its `s3GetFile` helper** (#809). Dead — the definition
+  and its own doc comment were the only references in the tree, across all three
+  `GOOS` values — and dead because they had been **superseded**, not forgotten.
+  They fetched the wildcard cert into `/etc/dcv/`, injected `tls-certificate` into
+  `/etc/dcv/dcv.conf` and restarted `dcvserver`. `cmd/app.go`'s DCV user-data has
+  since done this at boot, writing
+  `/var/lib/dcv/.config/NICE/dcv/private/dcv.{pem,key}` — the path DCV actually
+  reads — and `webready.go`'s own comment records that arrangement.
+  The audit's reading of this, "DCV sessions always use a self-signed cert and
+  `spawn-certs` is a read-only bucket with no live end", was wrong in both halves:
+  the live reader is an `aws s3 cp` in generated shell, which a Go-only search
+  cannot see. Wiring the function up would have been worse than leaving it — the
+  wrong destination path, a `dcvserver` restart that drops live sessions, and two
+  writers fighting over the same cert state. A comment where they were records
+  this, so the next reader does not re-derive the same wrong conclusion from the
+  same Go-only evidence.
 
 - **`spawn autoscale` and its orchestrators are gone** (#772).
   **Breaking: 13 subcommands removed, so the next release bumps MINOR.**

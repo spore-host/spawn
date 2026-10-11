@@ -23,7 +23,6 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/plugin"
@@ -878,68 +877,28 @@ func (a *Agent) startDCVAuthVerifier(ctx context.Context) {
 	log.Printf("DCV: auth token verifier listening on 127.0.0.1:8444")
 }
 
-// installDCVCert downloads the wildcard TLS cert for this account from S3 and
-// configures DCV to use it, then restarts dcvserver. Fails gracefully — if the
-// cert is not in S3, DCV continues with its self-signed cert.
-func (a *Agent) installDCVCert(ctx context.Context) {
-	region := a.identity.Region
-	accountBase36 := dns.EncodeAccountID(a.identity.AccountID)
-	bucket := "spawn-certs-" + region
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
-	if err != nil {
-		log.Printf("DCV cert: skipping — cannot load AWS config: %v", err)
-		return
-	}
-	s3c := s3.NewFromConfig(cfg)
-
-	if err := s3GetFile(ctx, s3c, bucket, accountBase36+"/cert.pem", "/etc/dcv/dcv.pem", 0644); err != nil {
-		log.Printf("DCV cert: cert not found in S3 (%v) — using self-signed", err)
-		return
-	}
-	if err := s3GetFile(ctx, s3c, bucket, accountBase36+"/key.pem", "/etc/dcv/dcv.key", 0600); err != nil {
-		log.Printf("DCV cert: key download failed (%v) — reverting", err)
-		os.Remove("/etc/dcv/dcv.pem")
-		return
-	}
-
-	// Inject TLS directives into the [security] section of dcv.conf (idempotent).
-	// Must be inside [security] — appending at end of file won't work.
-	if dcvConf, err := os.ReadFile("/etc/dcv/dcv.conf"); err == nil && !bytes.Contains(dcvConf, []byte("tls-certificate")) {
-		const tlsLines = "tls-certificate=/etc/dcv/dcv.pem\ntls-private-key=/etc/dcv/dcv.key\n"
-		updated := bytes.Replace(dcvConf,
-			[]byte("[security]"),
-			[]byte("[security]\n"+tlsLines),
-			1)
-		if !bytes.Equal(updated, dcvConf) {
-			_ = os.WriteFile("/etc/dcv/dcv.conf", updated, 0644)
-		}
-	}
-
-	if out, err := exec.CommandContext(ctx, "systemctl", "restart", "dcvserver").CombinedOutput(); err != nil {
-		log.Printf("DCV cert: dcvserver restart failed: %v\n%s", err, out)
-		return
-	}
-	time.Sleep(3 * time.Second)
-	log.Printf("DCV cert: installed wildcard cert for *.%s.spore.host", accountBase36)
-}
-
-// s3GetFile downloads an S3 object and writes it to destPath with the given mode.
-func s3GetFile(ctx context.Context, client *s3.Client, bucket, key, destPath string, mode os.FileMode) error {
-	out, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return err
-	}
-	defer out.Body.Close()
-	data, err := io.ReadAll(out.Body)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(destPath, data, mode)
-}
+// The DCV wildcard cert is installed by the LAUNCH USER-DATA, not here (#809).
+//
+// There used to be an installDCVCert on this type, plus an s3GetFile helper it
+// was the only caller of, which fetched spawn-certs-<region>/<base36>/{cert,key}
+// into /etc/dcv/, injected tls-certificate into /etc/dcv/dcv.conf and restarted
+// dcvserver. Nothing ever called it — the definition and its own doc comment were
+// the only references in the tree, across all three GOOS values.
+//
+// It was dead because it had been SUPERSEDED, not forgotten: cmd/app.go's DCV
+// user-data does this at boot, and writes to
+// /var/lib/dcv/.config/NICE/dcv/private/dcv.{pem,key} — which is where DCV
+// actually reads them. webProxyCertPath's comment in webready.go records the
+// current arrangement: "the launch user-data drops the wildcard TLS cert for the
+// reverse proxy (same spawn-certs source as DCV, but DCV owns its own copy under
+// /var/lib/dcv)".
+//
+// So the audit's reading of this — "DCV sessions always use a self-signed cert,
+// and spawn-certs is a read-only bucket with no live end" — was wrong in both
+// halves, because the live reader is `aws s3 cp` in shell and a Go-only grep
+// cannot see it. Wiring the function up would have been worse than leaving it:
+// the wrong destination path, a dcvserver restart that drops live sessions, and
+// two writers fighting over the same cert state.
 
 // dcvSessionWaitTimeout bounds how long spored waits for the DCV session to
 // appear before recording session-never-created. Measured from spored start;
