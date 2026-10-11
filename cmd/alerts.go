@@ -6,11 +6,14 @@ import (
 	"os"
 	"strings"
 
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/alerts"
 	"github.com/spore-host/spawn/pkg/aws"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/infrastructure"
 )
 
 var (
@@ -241,6 +244,14 @@ func runAlertsCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
 
+	// Refuse to create an alert nothing can deliver (#790).
+	//
+	// Deliberately BEFORE the write. Checking afterwards would leave a dead
+	// record behind and report an error, which is the worst of both.
+	if err := checkAlertsDeliverable(ctx, cfg, userID); err != nil {
+		return err
+	}
+
 	// Create alert config
 	alertConfig := &alerts.AlertConfig{
 		SweepID:         sweepID,
@@ -279,6 +290,37 @@ func runAlertsCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// checkAlertsDeliverable returns an error when alerts provably cannot be
+// delivered, and nil otherwise — including when the check could not be made.
+//
+// The undetermined case warns and proceeds on purpose. The check costs one
+// lambda:GetFunction, which a caller who can write to the alerts table may not
+// hold; refusing on AccessDenied would break working installs to protect them
+// from a defect they may not have.
+func checkAlertsDeliverable(ctx context.Context, cfg awssdk.Config, accountID string) error {
+	infraCfg, err := spawnconfig.LoadInfrastructureConfig(ctx, "")
+	if err != nil {
+		// Not fatal: without the config we cannot say anything, which is the
+		// undetermined case rather than a reason to refuse.
+		fmt.Fprintf(os.Stderr, "warning: could not load infrastructure config, so alert delivery was not verified (%v)\n", err)
+		return nil
+	}
+
+	region := cfg.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+
+	resolver := infrastructure.NewResolver(infraCfg, region, accountID)
+	d := infrastructure.CheckAlertDelivery(ctx, resolver, cfg)
+
+	refuse, warn := d.Decide()
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, warn)
+	}
+	return refuse
 }
 
 func runAlertsList(cmd *cobra.Command, args []string) error {

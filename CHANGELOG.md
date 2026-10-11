@@ -190,6 +190,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`spawn alerts create` now refuses an alert that cannot be delivered**
+  (#790). It validated five trigger types, wrote the record, printed
+  `Alert created: …` and exited 0 — while the only reader of that table,
+  `lambda/alert-handler`, is deployed nowhere. Every alert ever created was
+  silently inert, and `spawn alerts history` stayed empty, which reads like
+  "nothing has gone wrong" rather than "nothing is watching". The command now
+  checks that the consumer exists before writing and exits non-zero with what to
+  do about it, so no dead record is left behind.
+  **A check that cannot run does not refuse.** It costs one
+  `lambda:GetFunction`, which a caller able to write to the alerts table may not
+  hold, so `AccessDenied` or a network failure warns and proceeds — refusing
+  there would break working installs to protect them from a defect they may not
+  have. Only a definite "the function does not exist" refuses. A self-hosted
+  install that points `SPAWN_LAMBDA_ALERT_HANDLER_ARN` (or
+  `infrastructure.lambda.alert_handler_arn`) at its own deployed function is
+  unaffected.
+  The Tier 0 end-to-end suite now covers both halves: the create→list→delete
+  round-trip seeds the consumer, and a new case asserts that with no consumer the
+  command exits non-zero **and leaves no record behind** — the write always
+  worked, so "it returned an error" alone would not distinguish the fix from a
+  refusal that still wrote.
+
 - **`spawn reaper teardown` now removes the artifact bucket** (#653). It removed
   the schedule, Lambda, permission and role, and **deliberately kept the bucket**,
   reporting what it kept. That was a defensible explicit choice and is not
