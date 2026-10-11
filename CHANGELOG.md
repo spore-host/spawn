@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestChmodHappensAfterVerification` (ordering, not presence — a `chmod +x`
   before the checksum leaves an executable attacker-controlled file in `/tmp`
   even on the refusal path).
+- Eight gates on alias tenancy, driven against the Substrate Route53 emulator
+  rather than a hand mock, because what is most likely to be wrong is how real
+  record names and values come back — trailing dots, TXT quoting, octal escaping —
+  and a fake that returns what the code expects cannot catch any of it. Two are
+  handler-level on purpose: every unit test calls `authorizeAlias` directly, so
+  deleting the call from `handler` leaves them all green, which is precisely the
+  shape of the original bug (`aliasDNSName` validated the slug correctly; the
+  caller just never checked ownership). Against that revert the handler-level gate
+  reports the attack concretely — it writes `evil.mycelium-development.spore.host`
+  and says so.
 
 - **`ManagedSSMTagCondition`**, separate from the `ec2:`-keyed one. A condition
   key belongs to the service of the **action**, so reusing
@@ -182,6 +192,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A fail-open on the success path, found by a gate written to assert the
+  refusal.** Resolving the owner returned "unclaimed" when the record listing came
+  back empty, which authorizes the write. A real hosted zone always carries apex
+  SOA and NS records that cannot be deleted, so an empty listing never means "no
+  records under this slug" — it means the listing did not do what was asked (wrong
+  zone ID, pagination bug, stubbed client). It now refuses. The error path already
+  failed closed; this was the same hole reappearing one branch over, and it was
+  only visible because the emulator returns an empty list where real Route53
+  returns `NoSuchHostedZone`.
+  The test fixture now seeds an apex record for the same reason: Substrate's
+  `CreateHostedZone` does not create SOA/NS, so without it every test here
+  exercised a zone shape that cannot exist in production.
+
 - **Two gates in `pkg/aws` that my own change exposed as broken, both now
   property-based.** `TestSporedTagPermissionsScoped` matched statements by
   `Action` without reading `Effect`, so it treated the new control-tag `Deny` as
@@ -316,6 +339,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifacts behind.
 
 ### Security
+
+- **Any caller could publish or delete a DNS alias under another tenant's
+  subdomain** (advisory GHSA-q9qq-223w-mqx6, #820). `lambda/dns-updater` builds
+  the canonical record from the SigV4-verified caller account, so a caller can
+  only write under its own base36 subdomain — and the comment saying so sits two
+  lines above the friendly alias (#121), which was built from `req.AccountName`
+  out of the **request body**, validated only as a DNS label. So any caller could
+  UPSERT `{record}.{any-tenant-slug}.{domain}` onto its own instance, or DELETE
+  it. The alias owner is now resolved server-side.
+
+  Resolving it was the hard part, because there was nowhere obvious to resolve it
+  *from*. The friendly name comes from `account:GetAccountInformation`, which for
+  a member account needs org-management credentials this project must never hold;
+  and the natural registry, the `spore-portal-accounts` table, is written by the
+  portal rather than by spawn and currently holds zero items, so a lookup against
+  it would authorize nothing and break the one tenant actually using aliases.
+  Ownership is therefore derived from the zone's own state, which already encodes
+  it: an existing alias CNAME points at `{record}.{base36}.{domain}`, and that
+  base36 label decodes back to the owning account. A first use of an unclaimed
+  slug takes it and records a `_spore-owner.{slug}` TXT marker, so ownership
+  survives the last alias CNAME being deleted — otherwise that deletion is exactly
+  when a slug would silently become available to a squatter. The explicit marker
+  outranks an inferred owner, so one planted CNAME cannot contest a recorded claim.
+- **`ip_address` is validated as an IPv4 literal** before anything is written
+  (#835). It was previously checked only for non-emptiness, leaving the handler to
+  rely on Route53 rejecting a malformed A-record value — a validation step in
+  another service, reached only *after* the request had been authorized.
 
 - **The TTL reaper executed instance-writable tag content as root, on any
   spawn-managed instance in the account** (advisory GHSA-8q3p-qcv8-2pr4, #830).

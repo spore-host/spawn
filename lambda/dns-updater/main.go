@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -150,9 +151,22 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 		return errorResponse(400, "Invalid action (must be UPSERT or DELETE)")
 	}
 
-	// Validate IP address for UPSERT
-	if req.Action == "UPSERT" && req.IPAddress == "" {
-		return errorResponse(400, "IP address required for UPSERT")
+	// Validate IP address for UPSERT.
+	//
+	// This used to check only that the field was non-empty, leaving the handler to
+	// rely on Route53 rejecting a malformed A-record value — a validation step in
+	// someone else's service, reached only after the request had been authorized
+	// (#835). Parse it here, and require a v4 literal specifically, because the
+	// record written below is an A record.
+	if req.Action == "UPSERT" {
+		if req.IPAddress == "" {
+			return errorResponse(400, "IP address required for UPSERT")
+		}
+		ip := net.ParseIP(strings.TrimSpace(req.IPAddress))
+		if ip == nil || ip.To4() == nil {
+			return errorResponse(400, "Invalid ip_address (must be an IPv4 literal)")
+		}
+		req.IPAddress = ip.String()
 	}
 
 	// Validate record name format
@@ -201,7 +215,20 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 	// Optional friendly alias: {record}.{account-name}.{domain} as a CNAME to the
 	// canonical base36 A-record (#121). base36 stays authoritative (holds the IP);
 	// the alias just points at it, so the IP is updated in one place.
+	//
+	// The slug is caller-supplied, so unlike fqdn above it is NOT anchored to the
+	// verified account by construction — it has to be authorized against the zone's
+	// record of who owns that subdomain. Without this, any caller could UPSERT a
+	// tenant's friendly name onto its own instance, or DELETE it
+	// (#820, GHSA-q9qq-223w-mqx6). A refusal is non-fatal: the canonical record is
+	// the functional one and the alias is a convenience.
 	alias := aliasDNSName(req.RecordName, req.AccountName, reqDomain)
+	if alias != "" {
+		if ok, reason := authorizeAlias(ctx, req.AccountName, reqDomain, zoneID, accountID); !ok {
+			fmt.Printf("alias refused: %s\n", reason)
+			alias = ""
+		}
+	}
 
 	if req.Action == "UPSERT" {
 		changeID, err = upsertDNSRecord(ctx, fqdn, req.IPAddress, zoneID)
