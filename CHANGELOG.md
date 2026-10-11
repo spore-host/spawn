@@ -161,6 +161,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The spored signature-verification gate could not fail** (#813). Emptying
+  `sporedSigningPublicKeyPEM` — a one-literal, cleanly-compiling edit, and the
+  documented way to disable signing — makes every launch download and run spored
+  **unverified**, from the same bucket that serves its checksum. That is exactly
+  the gap #440 closed. Both existing gates still passed:
+  `TestBuildLinuxBootstrap_SigAwareFallback` matched `SPORED_SIG_VERIFY=1` as a
+  bare substring, and that string also appears inside **two shell comments** in
+  `linuxBootstrapBody`, which is appended unconditionally — so it is present in
+  every bootstrap, signed or not. `TestBootstrap_SignatureEnabled` injects its own
+  test key and never reads the production value, and **no test asserted the
+  production key existed at all.**
+  Fixed three ways: the assignment is now matched anchored at line start
+  (`(?m)^SPORED_SIG_VERIFY=1$`); a new test asserts the compiled-in key is
+  non-empty **and parses as an ECDSA P-256 public key**, because a truncated or
+  placeholder value would satisfy a length check while failing `openssl` at boot
+  on every instance; and the disabled path asserts the enabling assignment is
+  *absent* rather than only that `=0` is present.
+  Both reverts verified against compiling edits: an empty key now fails two tests,
+  and a `REPLACE_ME` placeholder fails the PEM parse.
+- **`TestBootstrap_SignatureDisabledByDefault` was permanently dead.** It opened
+  with `if signatureVerificationEnabled() { t.Skip(...) }` and a key *is*
+  compiled in, so it skipped on every run while counting as coverage for the
+  disabled path. `sporedSigningPublicKeyPEM` is a `var` precisely so a test can
+  exercise that path, so it now sets it, runs, and restores via `t.Cleanup`.
+
 - **Removed an `sts:AssumeRole` grant into an account this project does not own**
   (advisory pending). Two committed scripts granted
   `sts:AssumeRole` on a role ARN in account `942542972736`, and the statement had
