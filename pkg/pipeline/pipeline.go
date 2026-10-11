@@ -82,6 +82,31 @@ const (
 	StatusCancelled    PipelineStatus = "CANCELLED"
 )
 
+// IsTerminal reports whether the pipeline has stopped moving.
+//
+// Needed by `spawn pipeline launch --wait` (#807), which polls until this is
+// true. The switch is exhaustive on purpose and has no default: a status added
+// without classifying it here must not silently fall into "keep waiting", which
+// is an unbounded hang rather than a visible error.
+// TestEveryPipelineStatusIsClassified enforces that.
+func (s PipelineStatus) IsTerminal() bool {
+	switch s {
+	case StatusCompleted, StatusFailed, StatusCancelled:
+		return true
+	case StatusInitializing, StatusRunning:
+		return false
+	}
+	return false
+}
+
+// Succeeded reports whether a TERMINAL status represents success. Meaningless
+// before IsTerminal is true.
+//
+// Separate from IsTerminal because `--wait` has to distinguish them: the point of
+// waiting in CI is `spawn pipeline launch --wait && ./collect-results.sh`, so a
+// FAILED pipeline must exit non-zero rather than merely stop blocking.
+func (s PipelineStatus) Succeeded() bool { return s == StatusCompleted }
+
 // StageStatus represents the current state of a stage
 type StageStatus string
 

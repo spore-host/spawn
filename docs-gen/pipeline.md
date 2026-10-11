@@ -85,7 +85,8 @@ spawn pipeline launch <file> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--region` |  | string |  | AWS region (default: from AWS config) |
-| `--wait` |  | bool |  | Wait for pipeline to complete |
+| `--wait-timeout` |  | duration | `24h0m0s` | Give up waiting after this long (the pipeline keeps running; --wait then exits non-zero) |
+| `--wait` |  | bool |  | Block until the pipeline reaches a terminal state, and exit non-zero if it did not succeed |
 
 ### `spawn pipeline list`
 

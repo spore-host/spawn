@@ -125,6 +125,7 @@ var (
 	flagJSONOutput   bool // deprecated: use --output json
 	flagDetached     bool
 	flagWait         bool
+	flagWaitTimeout  time.Duration
 	flagRegion       string
 	flagOutputDir    string
 	flagStage        string
@@ -155,7 +156,10 @@ func init() {
 	// existing scripts don't break); use --wait to block instead.
 	launchPipelineCmd.Flags().BoolVar(&flagDetached, "detached", false, "Launch and return immediately")
 	_ = launchPipelineCmd.Flags().MarkDeprecated("detached", "pipeline launch is always async; this flag has no effect (use --wait to block)")
-	launchPipelineCmd.Flags().BoolVar(&flagWait, "wait", false, "Wait for pipeline to complete")
+	launchPipelineCmd.Flags().BoolVar(&flagWait, "wait", false,
+		"Block until the pipeline reaches a terminal state, and exit non-zero if it did not succeed")
+	launchPipelineCmd.Flags().DurationVar(&flagWaitTimeout, "wait-timeout", 24*time.Hour,
+		"Give up waiting after this long (the pipeline keeps running; --wait then exits non-zero)")
 	launchPipelineCmd.Flags().StringVar(&flagRegion, "region", "", "AWS region (default: from AWS config)")
 
 	// Collect command flags
@@ -401,7 +405,84 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 	// Output just the pipeline ID to stdout for scripting
 	_, _ = fmt.Fprintf(os.Stdout, "%s\n", p.PipelineID)
 
+	if flagWait {
+		return waitForPipeline(ctx, pipeline.NewStore(dynamodb.NewFromConfig(cfg)), p.PipelineID, flagWaitTimeout)
+	}
 	return nil
+}
+
+// pipelineGetter is the slice of the store waitForPipeline needs, so the wait
+// loop is testable without DynamoDB.
+type pipelineGetter interface {
+	Get(ctx context.Context, pipelineID string) (*pipeline.PipelineState, error)
+}
+
+// waitForPipelinePollInterval is how often --wait re-reads the pipeline's state.
+// Pipelines run for minutes to hours and the read is a single GetItem, so this is
+// about not hammering DynamoDB rather than about latency.
+var waitForPipelinePollInterval = 15 * time.Second
+
+// waitForPipeline blocks until the pipeline reaches a terminal state, returning
+// a non-nil error unless it succeeded.
+//
+// --wait existed as a registered flag that was never read (#807): the launch path
+// invokes the orchestrator with InvocationType: Event and returned immediately,
+// so a CI step written as
+//
+//	spawn pipeline launch p.json --wait && ./collect-results.sh
+//
+// exited 0 at once and ran the next step against a pipeline that had not started.
+// Exiting non-zero on FAILED is the half that makes the flag worth having; a
+// version that merely blocked would still let that `&&` succeed on a failed run.
+func waitForPipeline(ctx context.Context, store pipelineGetter, pipelineID string, timeout time.Duration) error {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	fmt.Fprintf(os.Stderr, "\nWaiting for pipeline %s (poll every %s, giving up after %s)...\n",
+		pipelineID, waitForPipelinePollInterval, timeout)
+
+	ticker := time.NewTicker(waitForPipelinePollInterval)
+	defer ticker.Stop()
+
+	var lastStatus pipeline.PipelineStatus
+	for {
+		state, err := store.Get(ctx, pipelineID)
+		switch {
+		case err != nil:
+			// A transient read failure must not be reported as a pipeline
+			// failure; keep polling until the deadline and say what happened.
+			fmt.Fprintf(os.Stderr, "  (status read failed: %v — retrying)\n", err)
+		case state == nil:
+			// The orchestrator writes the record asynchronously, so "not there
+			// yet" is normal immediately after launch.
+			fmt.Fprintf(os.Stderr, "  (pipeline record not written yet — retrying)\n")
+		default:
+			if state.Status != lastStatus {
+				fmt.Fprintf(os.Stderr, "  %s — %d/%d stages\n",
+					state.Status, state.CompletedStages, state.TotalStages)
+				lastStatus = state.Status
+			}
+			if state.Status.IsTerminal() {
+				if state.Status.Succeeded() {
+					fmt.Fprintf(os.Stderr, "\n✅ Pipeline %s completed\n", pipelineID)
+					return nil
+				}
+				return fmt.Errorf("pipeline %s finished %s (%d/%d stages completed, %d failed)",
+					pipelineID, state.Status, state.CompletedStages, state.TotalStages, state.FailedStages)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("gave up waiting for pipeline %s after %s (last status %q) — it is still "+
+				"running; check with `spawn pipeline status %s`",
+				pipelineID, timeout, lastStatus, pipelineID)
+		case <-ticker.C:
+		}
+	}
 }
 
 func runStatusPipeline(cmd *cobra.Command, args []string) error {

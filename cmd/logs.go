@@ -19,7 +19,6 @@ var (
 	logsLines   int
 	logsConsole bool
 	logsNoCache bool
-	logsRegion  string
 )
 
 // consoleCacheTTL is how long a fetched console dump is kept on disk.
@@ -252,6 +251,11 @@ func init() {
 	logsCmd.Flags().IntVar(&logsLines, "lines", 100, "Lines to tail from a LIVE instance (the console block is fixed at what spored wrote)")
 	logsCmd.Flags().BoolVar(&logsConsole, "console", false, "Print the whole serial console dump, not just the command-log block")
 	logsCmd.Flags().BoolVar(&logsNoCache, "no-cache", false, "Ignore the local cache and re-fetch from AWS")
-	logsCmd.Flags().StringVar(&logsRegion, "region", "", "AWS region (default: resolved as for other commands)")
+	// No local --region here. One was registered and never read, which SHADOWED
+	// the persistent root --region: `spawn logs x --region us-west-2` bound to the
+	// dead local flag, so the value never reached SetSharedFlags and the global
+	// mechanism never saw it. There was therefore no working --region on this
+	// command at all (#807). Deleting the local flag is the fix — the persistent
+	// one then applies, as it does everywhere else.
 	rootCmd.AddCommand(logsCmd)
 }

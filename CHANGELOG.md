@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`PipelineStatus.IsTerminal` and `.Succeeded`**, with an exhaustive switch and
+  no `default`, so a status added without being classified cannot fall through to
+  "keep waiting" — which would be an unbounded poll rather than a visible error.
+- **`TestEveryFlagVariableIsReadSomewhere`**, which catches the #775/#807 shape
+  structurally: a flag variable with only its declaration and registration in
+  non-test source is accepted from the user and discarded. It reads the source
+  because cobra cannot tell a flag that is read from one that is not.
+  Deprecated flags are exempt — that is what deprecating one means — and the
+  exemption is taken from the code's own `MarkDeprecated` calls rather than a hand
+  list. Three flags surfaced on the first run (`--use-reservation`, pipeline
+  `--detached`, cleanup `--force`) and all three are deliberately deprecated
+  no-ops. Neither `--wait` nor `logs --region` was, which is exactly why they were
+  defects rather than decisions.
+- **`TestPipelineLaunchActuallyWaits`** and **`TestEveryPipelineStatusIsClassified`**,
+  both of which exist because two reverts went uncaught on the first attempt.
+  Reference counting passed a revert to `if flagWait && false { … }` — three
+  references each, dead code — so it detects a flag nobody looks at but not one
+  looked at and ignored; the wiring needs asserting separately. And `IsTerminal`'s
+  comment claimed a classification gate that I had not written: removing
+  `StatusCancelled` from the terminal set as a deliberate revert failed nothing.
+
 - **Four gates over every user-facing string in `cmd/` and `pkg/`**, reporting
   352 printed `spawn` invocations across 18,439 literals: commands resolve,
   resolved commands are **runnable**, named flags exist, and printed paths and
@@ -135,6 +156,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A gate removed after it ran.** The first version of `cmd/inert_flags_test.go`
+  required that no local flag shadow a persistent root flag, on the theory that
+  `logs --region` broke because the local flag won the binding. It reported more
+  than twenty commands — `launch`, `list`, `doctor`, every `array` subcommand —
+  declaring their own `--region`. That is the repo's convention, not a defect, and
+  keeping the gate would have meant an allowlist of twenty entries each asserting
+  that ordinary code is an exception: rule 4's anti-pattern inside out, where the
+  list is what is normal and the gate is what is wrong. The reasoning is recorded
+  in the file in place of the test. The actual defect was that the flag was never
+  read, which the gate above catches without any reference to shadowing.
+
 - **A second test that certified a defect has been inverted.**
   `TestCompareFedRAMPLevels` required the FedRAMP comparison text to contain
   `--fedramp`, a flag that exists nowhere in the CLI — so it mandated that the
@@ -256,6 +288,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **`spawn pipeline launch --wait` never waited** (#807). The flag had exactly two
+  references in the tree — its declaration and its registration — while the launch
+  path invokes the orchestrator with `InvocationType: Event` and returns. So
+  `spawn pipeline launch p.json --wait && ./collect-results.sh` exited 0 at once
+  and ran the next step against a pipeline that had not started, which is the
+  precise thing the flag exists to prevent. It now polls until the pipeline is
+  terminal and **exits non-zero unless it succeeded** — the second half is what
+  makes the flag worth having, since a version that merely blocked would still let
+  that `&&` succeed after a FAILED run. A transient read failure or a
+  not-yet-written record is retried rather than reported as failure (the
+  orchestrator writes the record asynchronously, so "not found" is normal right
+  after launch), and `--wait-timeout` bounds the whole thing at 24h, because an
+  unbounded wait on a wedged pipeline hangs CI forever — a different failure from
+  the one being fixed but no better.
+- **`spawn logs --region` was dropped, and shadowed the working global flag**
+  (#807). The local flag had the same two-reference signature, and a local flag
+  wins the binding — so `spawn logs x --region us-west-2` bound to the dead local
+  one, the value never reached `SetSharedFlags`, and there was no working
+  `--region` on that command at all. Removing the local flag lets the persistent
+  root flag apply, as it does elsewhere.
 
 - **The tool printed instructions that do not work, and the gate that was
   supposed to catch that covered one function** (#806). #790 fixed this for
