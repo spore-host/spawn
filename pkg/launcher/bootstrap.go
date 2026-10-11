@@ -29,6 +29,7 @@ import (
 
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/security"
+	"github.com/spore-host/spawn/pkg/sporedinstall"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -194,19 +195,13 @@ LOCAL_SSH_KEY_BASE64=%s
 	// against a key carried by spawn (trusted), not one served from the same S3
 	// bucket as the binary. When no key is compiled in yet, verification stays
 	// off and the body falls back to sha256-only (honestly logged).
-	if signatureVerificationEnabled() {
-		script += fmt.Sprintf(`
-# spored signing public key (spore.host). The body verifies the binary's .sig
-# against this before executing it.
-SPORED_SIG_VERIFY=1
-mkdir -p /etc/spawn
-cat > /etc/spawn/spored-signing-key.pem <<'EOFSPOREDPUBKEY'
-%s
-EOFSPOREDPUBKEY
-`, sporedSigningPublicKeyPEM)
-	} else {
-		script += "\nSPORED_SIG_VERIFY=0\n"
-	}
+	script += sporedinstall.KeySetupScript()
+
+	// The one implementation of download-verify-install, shared with
+	// cmd/app.go and cmd/upgrade_spored.go. It used to live inline in
+	// linuxBootstrapBody below, which is why the other two paths were able to
+	// ship without any of it (GHSA-3x4q-99gh-fxhx).
+	script += sporedinstall.VerifiedInstallFunc()
 
 	// Embed the --command workload directly in user-data (#214/#246) instead of
 	// the 256-char-capped spawn:command tag. Written BEFORE linuxBootstrapBody so
@@ -380,124 +375,19 @@ PROJECT="spawn"
 
 echo "Downloading spored binary..."
 
-# Download to a temp path, NOT directly over /usr/local/bin/spored. Writing in
-# place fails with "Text file busy" (ETXTBSY) if a spored is already running
-# (baked into the AMI or from a previous boot); we install via atomic rename
-# below, which the kernel allows even while the old binary executes (#27).
-SPORED_TMP="$(mktemp /tmp/spored.XXXXXX)"
-
-# Resolve a USABLE source and download the binary from it. A source is only
-# usable if it has the binary AND, when signature verification is on
-# (SPORED_SIG_VERIFY=1), a matching .sig — otherwise we must fall through to the
-# next candidate rather than commit to it. A regional bucket carrying a stale,
-# UNSIGNED binary previously satisfied the old "did the binary download?" check,
-# so the us-east-1 fallback never fired and the later .sig lookup hard-failed the
-# whole install region-wide (#440). We now probe the .sig up front and skip any
-# source that can't satisfy the trust requirement.
-#
-# Candidates, in preference order: regional project-prefixed, regional legacy,
-# then the same two under the us-east-1 fallback. Each entry is "BASE/PREFIXPART".
-CANDIDATES=(
-    "${S3_BASE_URL}/${PROJECT}"
-    "${S3_BASE_URL}"
-    "${FALLBACK_URL}/${PROJECT}"
-    "${FALLBACK_URL}"
-)
-
-CHECKSUM_URL=""
-for base in "${CANDIDATES[@]}"; do
-    bin_url="${base}/${BINARY}"
-    sig_url="${base}/${BINARY}.sig"
-    # When verifying, require the .sig to exist at this source BEFORE downloading
-    # the (large) binary — a HEAD is enough. Skip sources that can't prove
-    # authenticity so a stale/unsigned regional bucket falls through to us-east-1.
-    if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
-        if ! curl -fsI --retry 3 --retry-delay 1 --retry-all-errors "$sig_url" >/dev/null 2>&1; then
-            echo "No signature at ${base} — trying next source"
-            continue
-        fi
-    fi
-    if curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "$SPORED_TMP" "$bin_url" 2>/dev/null; then
-        CHECKSUM_URL="${base}/${BINARY}.sha256"
-        echo "Downloaded spored from ${base}"
-        break
-    fi
-done
-
-if [ -z "$CHECKSUM_URL" ]; then
-    echo "Failed to download spored binary from any source (regional + us-east-1 fallback)"
-    if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
-        echo "  (signature verification is on — a source without a .sig is skipped)"
-    fi
-    rm -f "$SPORED_TMP"
+# Verified install, from pkg/sporedinstall (the function definition is spliced in
+# above this body). Candidates in preference order: regional project-prefixed,
+# regional legacy, then the same two under the us-east-1 fallback. The function
+# probes each source for a .sig before committing to it when verification is on,
+# requires a sha256, and fails closed — so no "|| true" here, ever.
+if ! spore_install_verified_spored "$BINARY" \
+      "${S3_BASE_URL}/${PROJECT}" \
+      "${S3_BASE_URL}" \
+      "${FALLBACK_URL}/${PROJECT}" \
+      "${FALLBACK_URL}"; then
+    echo "spored install failed — aborting bootstrap rather than running an unverified agent"
     exit 1
 fi
-
-# Download and verify SHA256 checksum (against the temp file). Retry on a
-# transient S3 hiccup (curl 52 "empty reply", connection resets, 5xx): the
-# checksum object is tiny and definitely present when the binary downloaded from
-# the same base, so a single-shot fetch that dies on a flaky response would
-# hard-fail the whole install for no real reason (observed once in a #70 smoke).
-echo "Verifying checksum..."
-curl -f --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/spored.sha256 "${CHECKSUM_URL}" || {
-    echo "Failed to download checksum after retries"
-    rm -f "$SPORED_TMP"
-    exit 1
-}
-
-EXPECTED_CHECKSUM=$(cat /tmp/spored.sha256)
-ACTUAL_CHECKSUM=$(sha256sum "$SPORED_TMP" | awk '{print $1}')
-
-if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-    echo "❌ Checksum verification failed!"
-    echo "   Expected: $EXPECTED_CHECKSUM"
-    echo "   Actual:   $ACTUAL_CHECKSUM"
-    rm -f "$SPORED_TMP"
-    exit 1
-fi
-
-echo "✅ Checksum verified: $EXPECTED_CHECKSUM"
-
-# Verify the publisher signature (spore-host#440). The sha256 above only proves
-# the download wasn't corrupted; it's served from the same bucket as the binary,
-# so it can't prove the binary is authentic. When spawn compiled in a signing key
-# (SPORED_SIG_VERIFY=1) we download the detached signature and verify it against
-# that key with openssl. The key came from spawn (trusted), NOT the bucket, so a
-# bucket compromise can't forge it. Fail closed on mismatch.
-if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
-    echo "Verifying signature..."
-    SIG_URL="${CHECKSUM_URL%.sha256}.sig"
-    if ! curl -f --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/spored.sig "${SIG_URL}" 2>/dev/null; then
-        echo "❌ Signature file not found at ${SIG_URL} — refusing to run an unsigned binary"
-        rm -f "$SPORED_TMP"
-        exit 1
-    fi
-    # The .sig is base64-encoded DER (ECDSA_SHA_256), as emitted by the release
-    # signer; decode to raw DER for openssl.
-    if ! base64 -d /tmp/spored.sig > /tmp/spored.sig.der 2>/dev/null; then
-        cp /tmp/spored.sig /tmp/spored.sig.der  # tolerate an already-binary sig
-    fi
-    if openssl dgst -sha256 -verify /etc/spawn/spored-signing-key.pem \
-         -signature /tmp/spored.sig.der "$SPORED_TMP" >/dev/null 2>&1; then
-        echo "✅ Signature verified (spore.host)"
-    else
-        echo "❌ Signature verification FAILED — refusing to run spored"
-        rm -f "$SPORED_TMP" /tmp/spored.sig /tmp/spored.sig.der
-        exit 1
-    fi
-    rm -f /tmp/spored.sig /tmp/spored.sig.der
-else
-    echo "ℹ️  Signature verification not enabled in this spawn build; relying on checksum (corruption) only"
-fi
-
-chmod +x "$SPORED_TMP"
-
-# Stop any running spored so the rename doesn't leave a stale daemon, then
-# atomically move the verified binary into place. rename(2) over a busy binary
-# is permitted — the running process keeps the old (now-unlinked) inode — so
-# this never hits ETXTBSY.
-systemctl stop spored 2>/dev/null || true
-mv -f "$SPORED_TMP" /usr/local/bin/spored
 
 # Setup local user account
 echo "Setting up user: $LOCAL_USERNAME"

@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
 
 // sigVerifyOn matches the ASSIGNMENT that turns verification on, anchored at line
@@ -18,7 +20,7 @@ var sigVerifyOn = regexp.MustCompile(`(?m)^SPORED_SIG_VERIFY=1$`)
 // The compiled-in signing key must be a real P-256 public key.
 //
 // This is the assertion whose absence made #813 possible. Emptying
-// sporedSigningPublicKeyPEM is a one-literal, cleanly-compiling edit that makes
+// sporedinstall.SigningKeyPEM is a one-literal, cleanly-compiling edit that makes
 // every launch run an UNVERIFIED spored — reopening the same-bucket-checksum gap
 // #440 closed — and before this, both signature gates still passed: one matched a
 // shell comment, the other injects its own test key and never reads production's.
@@ -27,15 +29,15 @@ var sigVerifyOn = regexp.MustCompile(`(?m)^SPORED_SIG_VERIFY=1$`)
 // truncated or placeholder value would satisfy a length check while failing
 // openssl at boot on every instance, which is the same silent-downgrade shape.
 func TestProductionSigningKeyIsRealAndUsable(t *testing.T) {
-	if strings.TrimSpace(sporedSigningPublicKeyPEM) == "" {
+	if strings.TrimSpace(sporedinstall.SigningKeyPEM) == "" {
 		t.Fatal("no signing key is compiled in: every launch would download and run " +
 			"spored unverified from the same bucket that serves its checksum (#440)")
 	}
-	if !signatureVerificationEnabled() {
-		t.Fatal("signatureVerificationEnabled() is false with a key present")
+	if !sporedinstall.VerificationEnabled() {
+		t.Fatal("sporedinstall.VerificationEnabled() is false with a key present")
 	}
 
-	block, _ := pem.Decode([]byte(sporedSigningPublicKeyPEM))
+	block, _ := pem.Decode([]byte(sporedinstall.SigningKeyPEM))
 	if block == nil {
 		t.Fatal("the compiled-in signing key is not valid PEM")
 	}
@@ -56,17 +58,17 @@ func TestProductionSigningKeyIsRealAndUsable(t *testing.T) {
 // With no signing key compiled in, the bootstrap must not CLAIM to verify a
 // signature: it sets SPORED_SIG_VERIFY=0 and keeps the sha256 corruption check.
 //
-// This used to open with `if signatureVerificationEnabled() { t.Skip(...) }`, and
+// This used to open with `if sporedinstall.VerificationEnabled() { t.Skip(...) }`, and
 // since a key IS compiled in it skipped on every run — permanently dead, while
-// counting as coverage for the disabled path. sporedSigningPublicKeyPEM is a var
+// counting as coverage for the disabled path. sporedinstall.SigningKeyPEM is a var
 // precisely so a test can exercise this path, so now it does.
 func TestBootstrap_SignatureDisabledWhenNoKeyIsCompiledIn(t *testing.T) {
-	restore := sporedSigningPublicKeyPEM
-	t.Cleanup(func() { sporedSigningPublicKeyPEM = restore })
-	sporedSigningPublicKeyPEM = ""
+	restore := sporedinstall.SigningKeyPEM
+	t.Cleanup(func() { sporedinstall.SigningKeyPEM = restore })
+	sporedinstall.SigningKeyPEM = ""
 
-	if signatureVerificationEnabled() {
-		t.Fatal("signatureVerificationEnabled() is true with an empty key")
+	if sporedinstall.VerificationEnabled() {
+		t.Fatal("sporedinstall.VerificationEnabled() is true with an empty key")
 	}
 	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user", PublicKey: []byte("ssh-ed25519 AAAA test")})
 	if err != nil {
@@ -95,9 +97,9 @@ func TestBootstrap_SignatureDisabledWhenNoKeyIsCompiledIn(t *testing.T) {
 // TestBootstrap_SignatureEnabled: with a key set, the bootstrap embeds it and the
 // verify block downloads the .sig and runs openssl, failing closed on mismatch.
 func TestBootstrap_SignatureEnabled(t *testing.T) {
-	orig := sporedSigningPublicKeyPEM
-	sporedSigningPublicKeyPEM = "-----BEGIN PUBLIC KEY-----\nTESTKEY\n-----END PUBLIC KEY-----"
-	t.Cleanup(func() { sporedSigningPublicKeyPEM = orig })
+	orig := sporedinstall.SigningKeyPEM
+	sporedinstall.SigningKeyPEM = "-----BEGIN PUBLIC KEY-----\nTESTKEY\n-----END PUBLIC KEY-----"
+	t.Cleanup(func() { sporedinstall.SigningKeyPEM = orig })
 
 	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user", PublicKey: []byte("ssh-ed25519 AAAA test")})
 	if err != nil {

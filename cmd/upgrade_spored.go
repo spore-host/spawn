@@ -11,6 +11,7 @@ import (
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/libs/update"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
 
 var (
@@ -154,7 +155,7 @@ func buildSporedUpgradeScript(version string) string {
 	// caller's semver comparison; it only ever contains [0-9.]+ plus an optional
 	// pre-release suffix, none of which can break out of the shell context below.
 	return fmt.Sprintf(`set -euo pipefail
-TARGET_VERSION=%q
+TARGET_VERSION=%[1]q
 
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -171,42 +172,31 @@ else
   REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-east-1)
 fi
 
-REG_BASE="https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn/versions/${TARGET_VERSION}"
+%[2]sREG_BASE="https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn/versions/${TARGET_VERSION}"
 FB_BASE="https://spawn-binaries-us-east-1.s3.amazonaws.com/spawn/versions/${TARGET_VERSION}"
 
-TMP=$(mktemp /tmp/spored.XXXXXX)
-if curl -fsS -o "$TMP" "${REG_BASE}/${BIN}" 2>/dev/null; then
-  SUM_URL="${REG_BASE}/${BIN}.sha256"
-else
-  echo "Regional bucket missing v${TARGET_VERSION}; trying us-east-1..."
-  curl -fsS -o "$TMP" "${FB_BASE}/${BIN}" || { echo "Failed to download spored v${TARGET_VERSION} (${BIN})" >&2; rm -f "$TMP"; exit 1; }
-  SUM_URL="${FB_BASE}/${BIN}.sha256"
-fi
-
-# Verify SHA256 (the versioned .sha256 is uploaded alongside the binary, #234).
-if curl -fsS -o "${TMP}.sha256" "$SUM_URL" 2>/dev/null; then
-  EXPECTED=$(cat "${TMP}.sha256")
-  ACTUAL=$(sha256sum "$TMP" | awk '{print $1}')
-  if [ "$EXPECTED" != "$ACTUAL" ]; then
-    echo "Checksum verification failed (expected $EXPECTED, got $ACTUAL)" >&2
-    rm -f "$TMP" "${TMP}.sha256"
-    exit 1
-  fi
-  echo "Checksum verified: $ACTUAL"
-else
-  echo "WARNING: no checksum published for v${TARGET_VERSION}; skipping verification" >&2
-fi
-chmod +x "$TMP"
-
-# Back up the current binary so we can roll back on a failed health check.
+# Back up the current binary BEFORE the install, so the health-check rollback
+# below has something to go back to. The installer replaces the binary itself.
 BACKUP=$(mktemp /tmp/spored-backup.XXXXXX)
 cp -f /usr/local/bin/spored "$BACKUP" 2>/dev/null || true
 
-# Stop spored gracefully: SIGTERM → spored's Cleanup flushes compute-seconds to
-# the tag (#234), so the compute clock survives the swap. Then atomic rename over
-# the (now-stopped) binary and restart.
-systemctl stop spored 2>/dev/null || true
-mv -f "$TMP" /usr/local/bin/spored
+# Download, verify and install via the one shared implementation. This block
+# previously verified the sha256 only, and FAIL-OPEN: a missing .sha256 printed
+# "WARNING: no checksum published; skipping verification" to stderr and installed
+# anyway. A missing checksum is not a reason to skip verification — an attacker
+# who can rewrite the bucket can equally delete a checksum object, so
+# "verify if one happens to be published" is a check the attacker opts you out
+# of. There was no signature verification at all, though the boot path had had it
+# since spore-host#440 (GHSA-3x4q-99gh-fxhx, #819).
+#
+# Stopping spored gracefully matters here: SIGTERM lets spored's Cleanup flush
+# compute-seconds to the tag (#234) so the compute clock survives the swap. The
+# installer does that stop itself, then installs by atomic rename.
+if ! spore_install_verified_spored "$BIN" "$REG_BASE" "$FB_BASE"; then
+  echo "Failed to install a verified spored v${TARGET_VERSION} (${BIN})" >&2
+  rm -f "$BACKUP"
+  exit 1
+fi
 systemctl daemon-reload 2>/dev/null || true
 systemctl start spored
 
@@ -218,12 +208,11 @@ if ! systemctl is-active --quiet spored || [ "$NEW_VERSION" != "$TARGET_VERSION"
   systemctl stop spored 2>/dev/null || true
   if [ -s "$BACKUP" ]; then mv -f "$BACKUP" /usr/local/bin/spored; fi
   systemctl start spored 2>/dev/null || true
-  rm -f "${TMP}.sha256"
   exit 1
 fi
-rm -f "$BACKUP" "${TMP}.sha256"
+rm -f "$BACKUP"
 echo "spored upgraded to v${NEW_VERSION}"
-`, version)
+`, version, sporedinstall.KeySetupScript()+sporedinstall.VerifiedInstallFunc())
 }
 
 // compareVersions returns -1 if a < b, 0 if equal, 1 if a > b, comparing bare
