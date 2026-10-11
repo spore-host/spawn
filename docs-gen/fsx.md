@@ -1,6 +1,6 @@
 ## `spawn fsx`
 
-Manage FSx Lustre filesystems: list, info, export, delete
+Manage FSx Lustre filesystems: list, show, delete (export via `delete --export-first`)
 
 ```
 spawn fsx

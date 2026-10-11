@@ -344,7 +344,7 @@ func instanceBelongsToJobArray(in aws.InstanceInfo, jobArrayID string) bool {
 func drainJobArray(ctx context.Context, awsClient *aws.Client, region, jobArrayID string) {
 	insts, err := awsClient.ListInstances(ctx, region, "")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️  drain: list instances failed: %v — RUN `spawn instances list` "+
+		fmt.Fprintf(os.Stderr, "⚠️  drain: list instances failed: %v — RUN `spawn list` "+
 			"AND TERMINATE BY HAND; a failed cohort's instances are still billing\n", err)
 		return
 	}
@@ -392,7 +392,7 @@ func drainJobArray(ctx context.Context, awsClient *aws.Client, region, jobArrayI
 		// (expensive). The caller cannot tell these apart, so say so rather than
 		// implying the former.
 		fmt.Fprintf(os.Stderr, "   drain: no instances matched spawn:job-array-id=%s. If the "+
-			"cohort got as far as launching, verify with `spawn instances list` — a member the "+
+			"cohort got as far as launching, verify with `spawn list` — a member the "+
 			"scan missed keeps billing.\n", jobArrayID)
 	default:
 		fmt.Fprintf(os.Stderr, "   drain: terminated %d instance(s)\n", drained)

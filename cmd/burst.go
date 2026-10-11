@@ -116,7 +116,7 @@ func runBurst(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  [%d] %s\n", i, id)
 	}
 	fmt.Printf("\nInstances will register with job array: %s\n", burstJobArrayID)
-	fmt.Printf("Monitor with: spawn status --job-array-id %s\n", burstJobArrayID)
+	fmt.Printf("Monitor with: spawn array status %s\n", burstJobArrayID)
 
 	return nil
 }

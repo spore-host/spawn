@@ -166,7 +166,7 @@ func runAppList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if recipes > 0 {
-		fmt.Fprintf(os.Stderr, "\n%d app(s) are \"recipe available\": build the image (see infra/amis/containers/<app>),\nthen bind it in ~/.spawn/catalog.yaml or launch with --image <ref>.\n", recipes)
+		fmt.Fprintf(os.Stderr, "\n%d app(s) are \"recipe available\": build the image (see docs/bring-your-own-app.md),\nthen bind it in ~/.spawn/catalog.yaml or launch with --image <ref>.\n", recipes)
 	}
 	return nil
 }

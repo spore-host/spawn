@@ -198,7 +198,7 @@ func validateEphemeralFSx(config *aws.LaunchConfig) error {
 	case "ephemeral":
 		// ok
 	case "durable":
-		return fmt.Errorf("provision: durable FSx is not supported on the headless path — pre-create it (spawn fsx create) and mount by id/name instead")
+		return fmt.Errorf("provision: durable FSx is not supported on the headless path — pre-create it (`spawn launch --fsx-create --fsx-lifecycle=durable --fsx-ttl=<duration>`) and mount by id/name instead")
 	case "":
 		return fmt.Errorf("provision: FSx create requires fsx lifecycle 'ephemeral' (durable is not supported headlessly)")
 	default:

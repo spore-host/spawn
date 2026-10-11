@@ -350,13 +350,24 @@ func TestCompareFedRAMPLevels(t *testing.T) {
 		t.Error("Comparison should mention 3PAO assessment")
 	}
 
-	// Should contain usage examples
-	if !strings.Contains(comparison, "spawn launch") {
+	// Should contain usage examples that actually work.
+	//
+	// These two assertions used to require "spawn launch" and "--fedramp".
+	// No --fedramp-low/-moderate/-high flag exists anywhere in the CLI — the
+	// FedRAMP levels are internal constants — so the comparison was advertising a
+	// way to request FedRAMP that a user cannot type, and this test required it to
+	// keep doing so. Written from the code, it would have failed on the fix
+	// (CLAUDE.md rule 5, #806). The real control is the NIST 800-53 baseline that
+	// FedRAMP is built on, which `spawn validate` does expose.
+	if !strings.Contains(comparison, "spawn validate") {
 		t.Error("Comparison should contain usage examples")
 	}
 
-	if !strings.Contains(comparison, "--fedramp") {
-		t.Error("Comparison should show FedRAMP flag usage")
+	if !strings.Contains(comparison, "--nist-800-53=") {
+		t.Error("Comparison should show the baseline flag a user can actually pass")
+	}
+	if strings.Contains(comparison, "--fedramp") {
+		t.Error("Comparison names a --fedramp flag; no such flag exists in the CLI")
 	}
 
 	// Should mention infrastructure requirements

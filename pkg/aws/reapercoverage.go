@@ -152,5 +152,5 @@ func ReaperCoverageAdvice(c ReaperCoverage, onComplete, fsxLifecycle string) str
 	return lead + ", and:\n   - " + strings.Join(at, "\n   - ") +
 		"\n   spored enforces lifetime from INSIDE the instance, so it cannot reclaim anything that outlives\n" +
 		"   it — a stopped instance's volumes, or a filesystem that survives termination — and it enforces\n" +
-		"   nothing at all if it dies. See docs/safety."
+		"   nothing at all if it dies."
 }

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Four gates over every user-facing string in `cmd/` and `pkg/`**, reporting
+  352 printed `spawn` invocations across 18,439 literals: commands resolve,
+  resolved commands are **runnable**, named flags exist, and printed paths and
+  `github.com/spore-host/...` URLs exist on disk.
+  Literals come from `go/ast` rather than a regex, so comments are excluded and
+  both raw and interpreted strings are handled.
+  The hard part is telling an invocation from prose: "from the spawn repo" is
+  indistinguishable from `spawn repo` to any parser, and resolving-or-not cannot
+  be the test, because `spawn instances list` not resolving is precisely the bug.
+  A string is treated as an invocation when its first word is a real subcommand
+  **or** it is backtick/single-quote delimited.
+  Three discriminator rules were removed after they produced false positives,
+  each recorded in place: parentheses (parenthesised prose is common), trailing
+  quotes (an apostrophe in "the instance's lifetime" looks like a closing quote),
+  and treating everything before the first flag as a command path (that reads
+  positional **arguments** as subcommands, and reported `spawn cost my-devbox` as
+  a nonexistent command). The rule that works mirrors cobra: descend only while
+  the current command is a group and the next word names one of its subcommands.
+  Also handled: printf templates (`spawn notify workspace %s` is runnable once
+  substituted) and `ShorthandLookup`, which **panics** on a name longer than one
+  character — that panic was the gate's first output, a stack trace instead of a
+  finding.
+
 - Gates on version selection, which is the input that decides whether verification
   happens: semantic rather than lexical ordering (`1.10.0` beats `1.9.0`, which a
   string compare gets backwards and would silently install an older plugin);
@@ -111,6 +134,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two drifting apart is how the exemption survived.
 
 ### Changed
+
+- **A second test that certified a defect has been inverted.**
+  `TestCompareFedRAMPLevels` required the FedRAMP comparison text to contain
+  `--fedramp`, a flag that exists nowhere in the CLI — so it mandated that the
+  tool keep advertising something a user cannot type, and would have failed on
+  the fix. It now requires the baseline flag that does exist, and fails if
+  `--fedramp` reappears. That is the second instance of CLAUDE.md rule 5 in this
+  batch, after #816's.
 
 - **A test that asserted the vulnerability was correct behaviour has been
   inverted.** `TestResolveOfficialBare_NoManifestFetch` required that a bare
@@ -225,6 +256,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **The tool printed instructions that do not work, and the gate that was
+  supposed to catch that covered one function** (#806). #790 fixed this for
+  `spawn validate --infrastructure`'s recommendations; the gate I added then
+  looked only at `pkg/infrastructure`, which is the same mistake in a new place —
+  a gate scoped to where the author happened to be looking. Generalising it to
+  every string literal in `cmd/` and `pkg/` found everything #806 reported **plus
+  three more it had not**:
+  - `spawn instances list` on the cost-leak path (`cmd/launch_jobarray.go`), the
+    one instruction given when a failed cohort may still be billing. There is no
+    `instances` command; it is `spawn list`.
+  - `spawn fsx create` (`pkg/launcher/provision.go`) — the insidious one, because
+    cobra prints group help and **exits 0** for an unknown subcommand of a group
+    with no `RunE`, so a script following the advice reports success having
+    created nothing. Durable FSx is `spawn launch --fsx-create
+    --fsx-lifecycle=durable --fsx-ttl=<duration>`.
+  - `spawn fsx`'s own summary advertised `info` and `export`; the subcommands are
+    `list`, `show`, `delete`, and export is `delete --export-first`.
+  - **New:** `spawn status --job-array-id` (`cmd/burst.go`) printed as "Monitor
+    with:" — no such flag; it is `spawn array status <name>`.
+  - **New:** the `spawn notify` examples used `--user` and `--workspace`, which
+    exist on `register` but not on `deregister`/`list` (`--user-id`,
+    `--workspace-id`).
+  - **New:** the FedRAMP comparison table advertised `spawn launch
+    --fedramp-low|moderate|high`. Those flags exist nowhere in the tree; the real
+    control is `spawn validate --nist-800-53=<level>`.
+  - `spawn config init --self-hosted` ×3 (`pkg/compliance`) — there is no `config
+    init`, and self-hosted mode is a config-**file** key:
+    `infrastructure.mode: self-hosted`.
+  - `spawn validate --config <file>` — no such flag.
+  - Five dangling doc paths, each verified absent on disk: `docs/lifecycle.md`
+    (printed on **every** launch without `--ttl`/`--idle-timeout`), `docs/safety`
+    ×2, `docs/compliance/<framework>.md` ×2, and
+    `infra/amis/containers/<app>` — the last replaced with
+    `docs/bring-your-own-app.md`, which does exist and is the right page.
 
 - **A fail-open on the success path, found by a gate written to assert the
   refusal.** Resolving the owner returned "unclaimed" when the record listing came
