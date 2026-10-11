@@ -255,6 +255,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **`CLAUDE.md` gains a fifth gate rule: assert the documented intent, not the
+  behaviour you observed.** A test written by reading the code can only confirm
+  the code; if the behaviour is wrong, the test certifies it and will fail on the
+  fix. This change is the worked example — `TestEvaluate_WithinDeadline_Spared`
+  blessed an exemption that let an instance make itself unreapable, and was right
+  about the code and wrong about the design. The rule says to write the assertion
+  from the comment, parameter description or issue, run it, and if it fails
+  resolve *which* is wrong before writing anything down — and to gate the
+  agreement when two sources of intent conflict, because the drift is the root
+  cause and the behaviour only the symptom.
+
 - **Four stale figures corrected, all of them mine.** `CLAUDE.md` claimed 18
   Lambda functions where the page it calls authoritative said 17 — and both are
   now 15. The `Makefile`'s "The 12 nested modules" is replaced by a statement

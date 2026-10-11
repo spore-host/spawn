@@ -99,7 +99,7 @@ removes a property, rather than to check that today's code works. `make check`
 runs dozens of them. They are cheap to write and easy to write *uselessly* — a
 gate that cannot fail is worse than no gate, because it is counted as coverage.
 
-Four rules, each of which exists because a gate here broke one of them:
+Five rules, each of which exists because a gate here broke one of them:
 
 1. **A gate is not done until you have watched it fail against a revert that
    compiles.** "I reverted the change and the test failed" is only evidence if
@@ -136,6 +136,28 @@ Four rules, each of which exists because a gate here broke one of them:
    (`footprintExactNames` in `pkg/aws/footprint.go`, for names carrying no
    prefix), add an entry only after seeing it in a live account, never from
    memory.
+
+5. **Assert the documented intent, not the behaviour you observed.** A test
+   written by reading the code can only ever confirm the code. If the behaviour
+   is wrong, such a test certifies it and makes the bug permanent — it will fail
+   on the fix.
+
+   `TestEvaluate_WithinDeadline_Spared` asserted that a 30-day-old instance with
+   a two-hour-future deadline was spared by the TTL reaper. That is exactly what
+   the code did. It is not what the reaper's own header says it does: the max-age
+   ceiling fires "even for --no-timeout / missing / **far-future** deadlines —
+   defense against escape hatches and tag tampering". Since `spawn:ttl-deadline`
+   is writable from the instance, the exemption the test blessed let a spore make
+   itself permanently unreapable. The test was right about the code and wrong
+   about the design, and it is the reason the gap lasted months (#76).
+
+   So: write the assertion from the comment, the parameter description or the
+   issue — then run it. If it fails, you have found either a bug or a stale
+   document, and **either way you must resolve which before writing the test
+   down.** Codifying whichever you happened to read first is how three documents
+   end up disagreeing with each other. When two sources of intent conflict, gate
+   their agreement too (`TestReaperDocsAgreeThatTheCeilingBeatsAFarFutureDeadline`),
+   because the drift is the root cause and the behaviour is only the symptom.
 
 One corollary, for when a gate reports an absence: **a suspicious negative is
 more often the invocation than the system.** Four false negatives in one session
