@@ -44,7 +44,7 @@ var (
 	onboardRegion        string
 	onboardPhoneHomeURL  string
 	onboardPhoneHomeRole string
-	onboardSporedProfile string
+	onboardSporedRole    string
 	onboardExternalID    string
 	onboardSkipPhoneHome bool
 	onboardJSONOutput    bool
@@ -100,13 +100,21 @@ func runOnboard(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	sporedProfile := onboardSporedProfile
-	if sporedProfile == "" {
-		sporedProfile = "spored-instance-profile"
+	// iam:PassRole names a ROLE. This defaulted to "spored-instance-profile" — an
+	// instance PROFILE name in a role ARN slot — so the grant could never match
+	// any role and the portal's RunInstances was denied (#817). The role is
+	// aws.SporedRoleName; the profile of the same family is a different object.
+	//
+	// Reinterpreting the flag's value as a role name is safe: the previous
+	// behaviour granted PassRole on an ARN that cannot exist, so anyone who set
+	// it was already getting a denied launch.
+	sporedRole := onboardSporedRole
+	if sporedRole == "" {
+		sporedRole = spawnaws.SporedRoleName
 	}
 
 	fmt.Printf("Onboarding account %s (region %s)…\n", accountID, region)
-	roleARN, err := ensurePortalOnboardRole(ctx, cfg, accountID, phoneHomeRole, externalID, sporedProfile)
+	roleARN, err := ensurePortalOnboardRole(ctx, cfg, accountID, phoneHomeRole, externalID, sporedRole)
 	if err != nil {
 		return fmt.Errorf("ensure onboarding role: %w", err)
 	}
@@ -158,7 +166,7 @@ func generateExternalID() (string, error) {
 // trusting phoneHomeRole under externalID, with the portal launch permissions.
 // Returns the role ARN. If the role already exists, returns it unchanged (re-run
 // safe) — note an existing role keeps its original trust/ExternalId.
-func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, phoneHomeRole, externalID, sporedProfile string) (string, error) {
+func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, phoneHomeRole, externalID, sporedRole string) (string, error) {
 	client := iam.NewFromConfig(cfg)
 
 	if existing, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(portalOnboardRoleName)}); err == nil {
@@ -194,14 +202,45 @@ func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, pho
 		return "", fmt.Errorf("create role: %w", err)
 	}
 
-	// EC2 launch + lifecycle + SSM. Destructive actions scoped to spawn:managed.
+	// EC2 launch + lifecycle + SSM. Every action that can affect an instance is
+	// scoped to spawn:managed; the unconditioned grants are read-only or create-only.
+	//
+	// Three statements here were tightened in #817. Each had the same shape: an
+	// action that can reach an EXISTING instance, granted on "*" with no
+	// condition, sitting beside destructive actions that were carefully
+	// conditioned — so the condition provided no containment.
+	//
+	//  1. ec2:CreateTags was unconditioned, which is the #174 defect
+	//     (pkg/aws/iam.go:912 documents it: "a compromised spore could tag ANY
+	//     instance spawn:managed=true and then terminate it"). That fix landed in
+	//     the spored policies and never reached here. It is split in two below
+	//     because this role LAUNCHES: tagging at RunInstances time cannot satisfy
+	//     a resource-tag condition, since the tag is what is being created — so
+	//     that case uses ec2:CreateAction instead.
+	//
+	//  2. ssm:StartSession had no tag condition at all, so a portal compromise
+	//     yielded an interactive root shell on arbitrary NON-spawn production
+	//     instances in every onboarded account. It is split from the SSM document
+	//     grant because StartSession authorizes against both the instance and the
+	//     document, and a document carries no spawn:managed tag — one statement
+	//     covering both would condition the document too and deny everything.
+	//
+	//     The condition key is ssm:resourceTag, NOT ec2:ResourceTag. A condition
+	//     key belongs to the service of the ACTION: ec2:ResourceTag is absent from
+	//     the request context of an ssm:* call, so a StringEquals on it can never
+	//     match and the statement becomes a silent implicit DENY. That trap is
+	//     #665, and deployment/cloudformation/ttl-reaper-cross-account-role.yaml
+	//     documents it at length.
 	launchPolicy := `{
 		"Version": "2012-10-17",
 		"Statement": [
-			{"Effect":"Allow","Action":["ec2:RunInstances","ec2:DescribeInstances","ec2:DescribeInstanceStatus","ec2:DescribeImages","ec2:DescribeSubnets","ec2:DescribeSecurityGroups","ec2:DescribeVpcs","ec2:DescribeKeyPairs","ec2:CreateTags"],"Resource":"*"},
+			{"Effect":"Allow","Action":["ec2:RunInstances","ec2:DescribeInstances","ec2:DescribeInstanceStatus","ec2:DescribeImages","ec2:DescribeSubnets","ec2:DescribeSecurityGroups","ec2:DescribeVpcs","ec2:DescribeKeyPairs"],"Resource":"*"},
+			{"Effect":"Allow","Action":["ec2:CreateTags"],"Resource":"*","Condition":{"StringEquals":{"ec2:CreateAction":"RunInstances"}}},
+			{"Effect":"Allow","Action":["ec2:CreateTags","ec2:DeleteTags"],"Resource":"*","Condition":{"StringEquals":{"ec2:ResourceTag/spawn:managed":"true"}}},
 			{"Effect":"Allow","Action":["ec2:TerminateInstances","ec2:StopInstances","ec2:StartInstances"],"Resource":"*","Condition":{"StringEquals":{"aws:ResourceTag/spawn:managed":"true"}}},
 			{"Effect":"Allow","Action":["ec2:DescribeSpotPriceHistory","servicequotas:GetServiceQuota","servicequotas:ListServiceQuotas","pricing:GetProducts"],"Resource":"*"},
-			{"Effect":"Allow","Action":["ssm:StartSession"],"Resource":["arn:aws:ec2:*:*:instance/*","arn:aws:ssm:*::document/SSM-SessionManagerRunShell"]},
+			{"Effect":"Allow","Action":["ssm:StartSession"],"Resource":"arn:aws:ec2:*:*:instance/*","Condition":{"StringEquals":{"ssm:resourceTag/spawn:managed":"true"}}},
+			{"Effect":"Allow","Action":["ssm:StartSession"],"Resource":"arn:aws:ssm:*::document/SSM-SessionManagerRunShell"},
 			{"Effect":"Allow","Action":["ssm:TerminateSession","ssm:ResumeSession"],"Resource":"arn:aws:ssm:*:*:session/*"}
 		]
 	}`
@@ -213,7 +252,7 @@ func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, pho
 		return "", fmt.Errorf("attach launch policy: %w", err)
 	}
 
-	// iam:PassRole scoped to the single spored profile + PassedToService ec2.
+	// iam:PassRole scoped to the single spored ROLE + PassedToService ec2.
 	passPolicy := fmt.Sprintf(`{
 		"Version": "2012-10-17",
 		"Statement": [{
@@ -221,7 +260,7 @@ func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, pho
 			"Resource":"arn:aws:iam::%s:role/%s",
 			"Condition":{"StringEquals":{"iam:PassedToService":"ec2.amazonaws.com"}}
 		}]
-	}`, accountID, sporedProfile)
+	}`, accountID, sporedRole)
 	if _, err := client.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 		RoleName:       aws.String(portalOnboardRoleName),
 		PolicyName:     aws.String("PortalPassSporedProfile"),
@@ -284,7 +323,15 @@ func init() {
 	onboardCmd.Flags().StringVar(&onboardRegion, "region", "", "AWS region to onboard (default: profile/SDK region)")
 	onboardCmd.Flags().StringVar(&onboardPhoneHomeURL, "phone-home-url", "", "Portal phone-home Function URL (or SPORE_PORTAL_PHONE_HOME_URL)")
 	onboardCmd.Flags().StringVar(&onboardPhoneHomeRole, "phone-home-role", "", "Portal phone-home Lambda role ARN to trust (or SPORE_PORTAL_PHONE_HOME_ROLE_ARN)")
-	onboardCmd.Flags().StringVar(&onboardSporedProfile, "spored-profile", "", "Instance profile name to allow PassRole for (default spored-instance-profile)")
+	onboardCmd.Flags().StringVar(&onboardSporedRole, "spored-role", "", "Role name to allow iam:PassRole for (default "+spawnaws.SporedRoleName+")")
+	// --spored-profile was the old name and took a PROFILE name, which could never
+	// match an iam:PassRole resource ARN (#817). Kept as a deprecated alias bound
+	// to the same variable so existing invocations keep working — and now actually
+	// work, since the value is finally used as a role name.
+	onboardCmd.Flags().StringVar(&onboardSporedRole, "spored-profile", "", "Deprecated: use --spored-role")
+	if err := onboardCmd.Flags().MarkDeprecated("spored-profile", "use --spored-role; iam:PassRole names a role, not an instance profile"); err != nil {
+		panic(err)
+	}
 	onboardCmd.Flags().StringVar(&onboardExternalID, "external-id", "", "Reuse a specific ExternalId (default: generate a new one)")
 	onboardCmd.Flags().BoolVar(&onboardSkipPhoneHome, "skip-phone-home", false, "Create the role but don't auto-register with the portal")
 	onboardCmd.Flags().BoolVar(&onboardJSONOutput, "json", false, "Output the result as JSON")
