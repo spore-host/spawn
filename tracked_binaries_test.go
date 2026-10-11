@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -122,8 +123,16 @@ func TestEveryGoLambdaBinaryIsIgnored(t *testing.T) {
 			continue
 		}
 		name := e.Name()
-		if _, err := os.Stat("lambda/" + name + "/go.mod"); err != nil {
-			continue // not a Go module (e.g. the Python github-oauth lambda)
+		_, modErr := os.Stat("lambda/" + name + "/go.mod")
+		hasOwnGoMod := modErr == nil
+		if !hasOwnGoMod {
+			// No go.mod of its own: either part of the ROOT module (it has .go
+			// files, e.g. pipeline-orchestrator) or not Go at all (the Python
+			// github-oauth lambda). Only the former needs the per-directory entry.
+			goFiles, _ := filepath.Glob("lambda/" + name + "/*.go")
+			if len(goFiles) == 0 {
+				continue
+			}
 		}
 		// `go build` with no -o writes a binary named after the module directory.
 		want := "lambda/" + name + "/" + name
@@ -131,6 +140,31 @@ func TestEveryGoLambdaBinaryIsIgnored(t *testing.T) {
 			t.Errorf(".gitignore is missing %q.\n"+
 				"A `go build ./...` in lambda/%s would leave a committable binary there — "+
 				"that is exactly how #637 happened.", want, name)
+		}
+
+		// …and the REPO ROOT, for the lambdas that can actually land one there.
+		//
+		// A single-package `go build ./lambda/<name>/` writes the executable into
+		// the CURRENT directory, not next to its source, so the entry above misses
+		// it. 42 MB of pipeline-orchestrator got committed that way by `git add -A`
+		// while writing #845, and TestNoTrackedCompiledBinaries caught it in CI
+		// rather than locally.
+		//
+		// Scoped to lambdas in the ROOT module, because that is the set where this
+		// is reachable: one with its own go.mod cannot be built from the repo root
+		// at all (`go build ./lambda/scheduler-handler/` → "main module does not
+		// contain package"). Requiring a root entry for those eight too was the
+		// first version of this check, and it is rule 6's mistake inside my own
+		// fix — gating the whole set of lambda names, a correlate, instead of the
+		// set that can produce the binary. .gitignore still lists them all as
+		// defence in depth, which costs nothing and covers a module later being
+		// folded into the root.
+		if !hasOwnGoMod {
+			if rootWant := "/" + name; !lines[rootWant] {
+				t.Errorf(".gitignore is missing %q.\n"+
+					"lambda/%s is part of the ROOT module, so `go build ./lambda/%s/` drops the "+
+					"binary in the repo root, where `git add -A` stages it.", rootWant, name, name)
+			}
 		}
 	}
 }

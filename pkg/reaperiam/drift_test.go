@@ -15,21 +15,58 @@ import (
 // spawn#622 and lagotto #149/#151/#153.
 const reaperSource = "../../lambda/ttl-reaper"
 
-// apiServicePrefix maps the reaper's *API interface names and SDK client variables to
-// the IAM service prefix their methods belong to.
+// apiServicePrefix maps the reaper's *API interface names and SDK client variables
+// to the IAM service prefix their methods belong to, where the name alone is not
+// the prefix.
+//
+// This used to be the whole list — ec2, fsx, ssm, netResource — and the regex
+// below was anchored on the same four. The reaper has a route53API interface and a
+// route53Client, so every Route53 action it calls was INVISIBLE to its own
+// coverage gate: the gate asserts that everything the reaper calls is granted, and
+// silently excluded a whole service from "everything". A hand-written list reports
+// a clean bill of health for what it forgot (CLAUDE.md rule 4).
+//
+// That hid no live defect — the SAM template grants Route53 scoped to the hosted
+// zone, the live production role has it, and `spawn reaper deploy` exposes no DNS
+// features so ScanSelfPolicyDocument omitting it is consistent. The gate would not
+// have told us either way, which is the problem.
+//
+// Only exceptions live here now; service names are discovered, and an unmapped one
+// fails rather than resolving to "".
 var apiServicePrefix = map[string]string{
-	"ec2": "ec2",
-	"fsx": "fsx",
-	"ssm": "ssm",
 	// netResourceAPI is the wider EC2 slice the security-group/placement-group
 	// sweep needs (#685). Kept separate from ec2API so the instance scan's narrow
 	// interface, and every fake implementing it, stays untouched.
 	"netResource": "ec2",
+	// registryAPI is accountlifecycle, not an AWS service: its ListAccounts reads
+	// DynamoDB through another package's client, so it grants nothing here.
+	"registry": "",
 }
 
-// methodCall matches a call on one of the reaper's SDK clients, e.g.
-// `ssmClient.SendCommand(` or `fsxClient.DeleteFileSystem(`.
-var methodCall = regexp.MustCompile(`\b(ec2|fsx|ssm)Client\.([A-Z][A-Za-z0-9]+)\(`)
+// knownAWSServices is every AWS service the reaper could be talking to. A
+// discovered name that is neither here nor in apiServicePrefix is what the gate
+// refuses to guess about.
+var knownAWSServices = map[string]bool{
+	"ec2": true, "fsx": true, "ssm": true, "route53": true, "sts": true,
+}
+
+// serviceFor resolves a discovered interface or client name to an IAM service
+// prefix, reporting whether it is mapped at all.
+func serviceFor(name string) (string, bool) {
+	if v, ok := apiServicePrefix[name]; ok {
+		return v, true
+	}
+	if knownAWSServices[name] {
+		return name, true
+	}
+	return "", false
+}
+
+// methodCall matches a call on any of the reaper's SDK clients, e.g.
+// `ssmClient.SendCommand(` or `route53Client.ChangeResourceRecordSets(`. The
+// service half is captured rather than enumerated, so a new client cannot slip
+// past unseen — serviceFor decides whether it is understood.
+var methodCall = regexp.MustCompile(`\b([a-z][a-zA-Z0-9]*)Client\.([A-Z][A-Za-z0-9]+)\(`)
 
 // ifaceMethod matches a method line inside a `type xAPI interface { … }` block.
 var ifaceMethod = regexp.MustCompile(`^\s*([A-Z][A-Za-z0-9]+)\(ctx context\.Context`)
@@ -63,7 +100,14 @@ func reaperAWSCalls(t *testing.T) map[string]bool {
 		var svc string
 		for _, line := range strings.Split(src, "\n") {
 			if m := ifaceOpen.FindStringSubmatch(line); m != nil {
-				svc = apiServicePrefix[m[1]] // "" for interfaces we don't map (e.g. registryAPI)
+				mapped, ok := serviceFor(m[1])
+				if !ok {
+					t.Errorf("%s declares type %sAPI, which maps to no IAM service. Add it to "+
+						"knownAWSServices, or to apiServicePrefix with the prefix its methods belong "+
+						"to (or \"\" if it is not an AWS service). Leaving it unmapped is what "+
+						"excluded route53 from this gate entirely.", name, m[1])
+				}
+				svc = mapped
 				continue
 			}
 			if svc == "" {
@@ -80,7 +124,17 @@ func reaperAWSCalls(t *testing.T) map[string]bool {
 
 		// (b) direct client calls.
 		for _, m := range methodCall.FindAllStringSubmatch(src, -1) {
-			calls[apiServicePrefix[m[1]]+":"+m[2]] = true
+			mapped, ok := serviceFor(m[1])
+			if !ok {
+				t.Errorf("%s calls %sClient.%s, but %q maps to no IAM service — so this call is "+
+					"invisible to the coverage gate below. Add it to knownAWSServices or "+
+					"apiServicePrefix.", name, m[1], m[2], m[1])
+				continue
+			}
+			if mapped == "" {
+				continue // deliberately not an AWS service
+			}
+			calls[mapped+":"+m[2]] = true
 		}
 	}
 
@@ -88,6 +142,34 @@ func reaperAWSCalls(t *testing.T) map[string]bool {
 		t.Fatalf("discovered no AWS calls in %s — the gate would pass vacuously", reaperSource)
 	}
 	return calls
+}
+
+// grantedElsewhere are actions the reaper calls that these two policies
+// deliberately do not cover. Each needs a reason, and each reason is a scope
+// boundary rather than a judgement call — which is what distinguishes this from
+// the allowlist CLAUDE.md rule 6 warns about, where the list is what is normal and
+// the rule is what is wrong. Here the rule ("every called action must be granted")
+// is right, and these are the edges of what each policy is for.
+//
+// All three only became visible when apiServicePrefix stopped being a hand-written
+// list of four services. Before that they were silently excluded, which is why
+// none of them had ever been reasoned about.
+var grantedElsewhere = map[string]string{
+	// GetCallerIdentity needs no IAM permission at all. Proven rather than
+	// assumed: the live production role grants only sts:AssumeRole (for the
+	// cross-account role), the reaper calls GetCallerIdentity on every invocation,
+	// and it has been succeeding every ten minutes.
+	"sts:GetCallerIdentity": "requires no permission; the live role grants no sts:GetCallerIdentity and the reaper works",
+
+	// Route53 runs on the reaper's BASE credentials in the infra account, not the
+	// assumed member-account role (main.go: "cross-account role — so route53Client
+	// uses the base credentials"). template.yaml grants it scoped to the configured
+	// hosted zone, conditionally on DNS being set up. ScanSelfPolicyDocument is
+	// what `spawn reaper deploy` writes and that path exposes no DNS flags, so it
+	// has nothing to grant; the cross-account role is for member-account EC2 and
+	// FSx, where a hosted zone does not apply.
+	"route53:ChangeResourceRecordSets": "granted by template.yaml on the base credentials, scoped to DnsZoneId",
+	"route53:ListResourceRecordSets":   "granted by template.yaml on the base credentials, scoped to DnsZoneId",
 }
 
 // TestPolicyCoversEveryReaperAPICall is the structural end of the drift class.
@@ -104,9 +186,13 @@ func TestPolicyCoversEveryReaperAPICall(t *testing.T) {
 
 	var missing []string
 	for call := range calls {
-		if !granted[call] {
-			missing = append(missing, call)
+		if granted[call] {
+			continue
 		}
+		if _, ok := grantedElsewhere[call]; ok {
+			continue
+		}
+		missing = append(missing, call)
 	}
 	sort.Strings(missing)
 
@@ -256,9 +342,13 @@ func TestCrossAccountRoleCoversEveryReaperAPICall(t *testing.T) {
 
 	var missing []string
 	for call := range calls {
-		if !granted[call] {
-			missing = append(missing, call)
+		if granted[call] {
+			continue
 		}
+		if _, ok := grantedElsewhere[call]; ok {
+			continue
+		}
+		missing = append(missing, call)
 	}
 	sort.Strings(missing)
 
