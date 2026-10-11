@@ -29,6 +29,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   looked at and ignored; the wiring needs asserting separately. And `IsTerminal`'s
   comment claimed a classification gate that I had not written: removing
   `StatusCancelled` from the terminal set as a deliberate revert failed nothing.
+- **`TestExampleFlagsCanBeWrittenAsDocumented`** — every flag a command documents
+  without a value must accept being written that way. #806's gate checks a named
+  flag *exists*; it cannot tell that the flag demands an argument the example does
+  not supply, and this closes that gap by resolving against pflag's own notion of
+  arity.
+  Its first version computed "was a value supplied?" from whether any later flag
+  appeared anywhere on the line, which reported `--stack my-stack --region x` as
+  giving `--stack` no value — about forty false positives. The question is only
+  ever about the immediately following token, so it walks tokens now.
+- **`TestNoTwoLiveFlagsShareOneVariable`** — this is what hid #808 from #807's
+  unread-flag gate: both flags bound to `validateComplianceMode`, giving it a
+  declaration and two registrations, so a reference count of three made it look
+  read. Shared variables also clobber each other, whichever is parsed last
+  winning.
+  Aliases are the legitimate case and are exempt by the code's own declaration,
+  not a hand list: a deprecated flag, or one whose usage says "Alias for --x".
+  The first version exempted only deprecated flags and reported `launch
+  --print-config`, which is a deliberate **live** alias of `--dry-run`.
+- **`TestValidateCallsTheBaselineCheck`** — because testing the validator is not
+  testing that anything validates. `TestNIST53BaselineValidation` exercises
+  `isNIST53Baseline` directly and kept passing against a revert to
+  `if !isNIST53Baseline(val) && false`, which left the function correct and the
+  handler unguarded.
 
 - **Four gates over every user-facing string in `cmd/` and `pkg/`**, reporting
   352 printed `spawn` invocations across 18,439 literals: commands resolve,
@@ -309,6 +332,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one, the value never reached `SetSharedFlags`, and there was no working
   `--region` on that command at all. Removing the local flag lets the persistent
   root flag apply, as it does elsewhere.
+- **`spawn validate --nist-800-171 -o json` silently printed a table** (#808).
+  Both compliance flags were registered as `StringVar`, so pflag **required** a
+  value — while the mode was decided by `Changed()` and the value never read.
+  `--nist-800-171` has nothing to supply, so it ate the next token: `-o` became
+  the flag's value, `json` became a positional, and the command printed a human
+  table and exited 0. Three things failed as a result, all of them the tool's own
+  words: the command's documented Example `spawn validate --nist-800-171`, the
+  same invocation in its `-o json` Example, and the remedy its error message
+  prints ("use --nist-800-171 or --nist-800-53=<low|moderate|high>").
+  `--nist-800-171` is now a bool. `--nist-800-53` keeps its baseline but gains
+  `NoOptDefVal = "low"`, so a bare `--nist-800-53` means what the handler already
+  assumed when the value was empty.
+- **An invalid `--nist-800-53` baseline is rejected at the flag**, naming the
+  accepted values. It used to surface twelve frames down as
+  `unknown compliance mode: nist-800-53-nonsense` — an internal string rather than
+  the flag the user typed or the values it takes.
+- **Passing both frameworks is refused** instead of 800-171 silently winning. A
+  caller who passed both asked for something the command cannot do, and quietly
+  doing half of it is the failure mode this issue is about.
 
 - **The tool printed instructions that do not work, and the gate that was
   supposed to catch that covered one function** (#806). #790 fixed this for
