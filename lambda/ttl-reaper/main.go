@@ -750,9 +750,23 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 				c.reason, c.deadline, c.age = "ttl-deadline", dl, now.Sub(deadline)
 				return c, true
 			}
-			// Within deadline — respect it; do NOT also apply max-age below
-			// (the deadline is the user's explicit, honored intent).
-			return candidate{}, false
+			// Within deadline — fall through to the max-age ceiling below.
+			//
+			// This used to `return candidate{}, false`, exempting any instance
+			// with a future deadline from the ceiling entirely. That contradicted
+			// this file's own stated design (see the header: the ceiling "fires
+			// even for --no-timeout / missing / FAR-FUTURE deadlines — defense
+			// against escape hatches and tag tampering") and defeated it as a
+			// security control: the instance role can write its own
+			// spawn:ttl-deadline (pkg/aws/iam.go grants ec2:CreateTags gated on
+			// spawn:managed, which the instance itself satisfies), so a deadline
+			// of 2099 made a spore permanently unreapable. #76 tracks signing the
+			// tag; this makes the ceiling real in the meantime.
+			//
+			// Consequence, deliberately accepted: a deadline beyond
+			// REAPER_MAX_AGE is now capped by it. `spawn launch` warns when --ttl
+			// exceeds the default ceiling so this is not a surprise, and an
+			// operator who wants longer-lived instances raises MaxAge explicitly.
 		}
 		log.Printf("instance %s: unparseable ttl-deadline %q, falling back to max-age", id, dl)
 	}

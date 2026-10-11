@@ -39,20 +39,51 @@ func TestEvaluate_PastDeadline_Reaped(t *testing.T) {
 	}
 }
 
-func TestEvaluate_WithinDeadline_Spared(t *testing.T) {
+func TestEvaluate_WithinDeadline_AndWithinCeiling_Spared(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	inst := ec2types.Instance{
 		InstanceId: aws.String("i-fresh"),
-		// launch-time far in the past, but deadline is in the FUTURE: the
-		// honored deadline must win and max-age must NOT also fire.
 		Tags: []ec2types.Tag{
 			tag("spawn:managed", "true"),
 			tag("spawn:ttl-deadline", now.Add(2*time.Hour).Format(time.RFC3339)),
-			tag("spawn:launch-time", now.Add(-30*24*time.Hour).Format(time.RFC3339)),
+			tag("spawn:launch-time", now.Add(-2*time.Hour).Format(time.RFC3339)),
 		},
 	}
 	if _, expired := newReaper().evaluate(inst, "us-east-1", now); expired {
-		t.Fatal("instance within its ttl-deadline must be spared even if launch-time is old")
+		t.Fatal("instance within both its deadline and the max-age ceiling must be spared")
+	}
+}
+
+// The max-age ceiling applies EVEN to an instance inside its own deadline.
+//
+// This test replaces one that asserted the opposite — a 30-day-old instance with
+// a 2-hour-future deadline was "spared", which is what the code did. That
+// contradicted the reaper's own documented design, where the ceiling "fires even
+// for --no-timeout / missing / far-future deadlines — defense against escape
+// hatches and tag tampering", and it defeated the control: an instance can write
+// its own spawn:ttl-deadline, so a forged far-future value made it permanently
+// unreapable.
+//
+// The old test was not wrong about the code. It was wrong about the design, and
+// it is the reason the gap survived — a test that encodes the behaviour rather
+// than the intent cannot tell you the behaviour is wrong.
+func TestEvaluate_MaxAgeCeilingAppliesEvenWithinDeadline(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-forged"),
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			// A deadline 70 years out — what a tampering instance would write.
+			tag("spawn:ttl-deadline", now.Add(70*365*24*time.Hour).Format(time.RFC3339)),
+			tag("spawn:launch-time", now.Add(-30*24*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	c, expired := newReaper().evaluate(inst, "us-east-1", now)
+	if !expired {
+		t.Fatal("an instance past the max-age ceiling must be reaped even with a far-future deadline")
+	}
+	if c.reason != "max-age" {
+		t.Errorf("reason = %q, want max-age — the reported reason must name the control that fired", c.reason)
 	}
 }
 

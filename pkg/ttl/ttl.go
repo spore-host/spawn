@@ -20,6 +20,7 @@ package ttl
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -89,4 +90,42 @@ func SetTags(launchTime time.Time, newTTL time.Duration) (map[string]string, tim
 		return nil, time.Time{}, err
 	}
 	return Tags(launchTime, deadline), deadline, nil
+}
+
+// DefaultReaperMaxAge mirrors the ttl-reaper's REAPER_MAX_AGE default
+// (lambda/ttl-reaper/main.go's defaultMaxAge and the MaxAge parameter default in
+// its template).
+//
+// Duplicated here rather than imported because the reaper is a separate Go
+// module and the CLI cannot read a deployment parameter it does not own. The
+// duplication is gated: TestDefaultReaperMaxAgeMatchesTheReaper reads the
+// reaper's source and fails if the two drift, so this cannot quietly become a
+// second source of truth — the defect #790 was about.
+const DefaultReaperMaxAge = 7 * 24 * time.Hour
+
+// ExceedsDefaultCeiling reports whether a requested TTL is longer than the
+// reaper's default max-age ceiling, in which case the instance will be reclaimed
+// at the ceiling rather than at the requested deadline.
+//
+// The ceiling applies even inside a live deadline, because spawn:ttl-deadline is
+// writable by the instance itself and so cannot be the only bound (#76). That
+// makes a long --ttl silently ineffective, which is worth saying at launch rather
+// than discovering at the ceiling.
+func ExceedsDefaultCeiling(requested time.Duration) bool {
+	return requested > DefaultReaperMaxAge
+}
+
+// CeilingWarning is the line to show when ExceedsDefaultCeiling is true. Empty
+// otherwise, so a caller can print unconditionally.
+func CeilingWarning(requested time.Duration) string {
+	if !ExceedsDefaultCeiling(requested) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"warning: --ttl %s exceeds the TTL reaper's default max-age ceiling of %s, so the "+
+			"instance will be reclaimed at ~%s regardless of the deadline.\n"+
+			"  The ceiling applies even inside a live deadline because spawn:ttl-deadline is "+
+			"writable from the instance, so it cannot be the only bound.\n"+
+			"  For a longer-lived instance, raise REAPER_MAX_AGE on the reaper deployment.",
+		requested, DefaultReaperMaxAge, DefaultReaperMaxAge)
 }
