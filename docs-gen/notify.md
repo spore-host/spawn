@@ -10,8 +10,8 @@ termination) and control instances via chat slash commands without CLI access.
 Examples:
   spawn notify register --platform slack --user professor@example.com \
     --instance i-0abc123 --nickname rstudio --allow start,stop,status
-  spawn notify deregister --platform slack --user professor@example.com --nickname rstudio
-  spawn notify list --platform slack --workspace T03NE3GTY
+  spawn notify deregister --platform slack --user-id U04KZABCD --nickname rstudio
+  spawn notify list --platform slack --workspace-id T03NE3GTY
 
 ```
 spawn notify

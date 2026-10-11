@@ -142,7 +142,7 @@ func generateRecommendations(result *ValidationResult, framework, baseline strin
 		}
 		if hasInfraWarning {
 			recommendations = append(recommendations,
-				"Deploy self-hosted infrastructure: use spawn config init --self-hosted",
+				"Deploy self-hosted infrastructure: set `infrastructure.mode: self-hosted` in ~/.spawn/config.yaml",
 				"Self-hosted infrastructure is REQUIRED for Moderate and High baselines")
 		}
 	}
@@ -150,7 +150,6 @@ func generateRecommendations(result *ValidationResult, framework, baseline strin
 	// General recommendations
 	if len(result.Violations) > 0 {
 		recommendations = append(recommendations,
-			fmt.Sprintf("Review %s documentation: docs/compliance/%s.md", framework, strings.ToLower(framework)),
 			"Run validation before launch: spawn validate --"+framework)
 	}
 
@@ -233,7 +232,6 @@ func FormatReportText(report *ComplianceReport) string {
 	builder.WriteString("\n")
 	builder.WriteString("For more information:\n")
 	builder.WriteString("  spawn validate --help\n")
-	fmt.Fprintf(&builder, "  docs/compliance/%s-quickstart.md\n", strings.ToLower(report.Framework))
 	builder.WriteString(strings.Repeat("=", 80))
 	builder.WriteString("\n")
 
@@ -278,7 +276,7 @@ func GenerateInstanceReport(instance *aws.InstanceInfo, framework, baseline stri
 
 	report.Recommendations = []string{
 		"Runtime validation will be available in a future release",
-		"Use pre-flight validation: spawn validate --config <file>",
+		"Use pre-flight validation: see `spawn validate --help` for the available checks",
 	}
 
 	return report

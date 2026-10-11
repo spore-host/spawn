@@ -242,9 +242,9 @@ Authorization Timeline (typical):
 └─────────────┴──────────────┴──────────────┴──────────────┘
 
 Usage:
-  spawn launch --fedramp-low ...       # FedRAMP Low
-  spawn launch --fedramp-moderate ...  # FedRAMP Moderate
-  spawn launch --fedramp-high ...      # FedRAMP High
+  spawn validate --nist-800-53=low       # FedRAMP Low baseline controls
+  spawn validate --nist-800-53=moderate  # FedRAMP Moderate baseline controls
+  spawn validate --nist-800-53=high      # FedRAMP High baseline controls
 
 Note: FedRAMP authorization requires:
 1. System Security Plan (SSP) - customer responsibility

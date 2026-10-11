@@ -17,7 +17,7 @@ import (
 var fsxCmd = &cobra.Command{
 	Use:   "fsx",
 	Short: "FSx filesystem management commands",
-	Long:  "Manage FSx Lustre filesystems: list, info, export, delete",
+	Long:  "Manage FSx Lustre filesystems: list, show, delete (export via `delete --export-first`)",
 }
 
 var fsxListCmd = &cobra.Command{

@@ -243,7 +243,7 @@ func Run(ctx context.Context, p Prober) *Report {
 	// out-of-band reaper configured" to EVERY result, including the undetermined
 	// case, which claimed more than the check knew.
 	if detail, err := p.ReaperConfigured(ctx); err != nil {
-		add("TTL reaper backstop", Warn, "", errText(err)+" (see docs/safety)")
+		add("TTL reaper backstop", Warn, "", errText(err))
 	} else {
 		add("TTL reaper backstop", Pass, detail, "")
 	}

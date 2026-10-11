@@ -63,7 +63,7 @@ func (v *Validator) ValidateLaunchConfig(ctx context.Context, cfg *aws.LaunchCon
 		result.AddWarning(fmt.Sprintf(
 			"%s requires self-hosted infrastructure, but shared infrastructure is configured. "+
 				"This may not meet compliance requirements. "+
-				"Run 'spawn config init --self-hosted' to configure self-hosted mode.",
+				"Set `infrastructure.mode: self-hosted` in ~/.spawn/config.yaml.",
 			v.complianceConfig.GetModeDisplayName(),
 		))
 	}
@@ -73,7 +73,7 @@ func (v *Validator) ValidateLaunchConfig(ctx context.Context, cfg *aws.LaunchCon
 		result.AddWarning(
 			"Using shared infrastructure with compliance mode enabled. " +
 				"For full compliance, consider deploying self-hosted infrastructure. " +
-				"Run 'spawn config init --self-hosted' to configure.",
+				"Set `infrastructure.mode: self-hosted` in ~/.spawn/config.yaml.",
 		)
 	}
 
