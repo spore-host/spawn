@@ -107,14 +107,32 @@ spore-host-dev 435415984226, plus any others):
 aws cloudformation deploy \
   --template-file ../../deployment/cloudformation/ttl-reaper-cross-account-role.yaml \
   --stack-name spawn-ttl-reaper-ec2 \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides ReaperLambdaRoleArn=<reaper-lambda-role-arn>
+  --region us-east-1 \
+  --capabilities CAPABILITY_NAMED_IAM
 ```
 
-The reaper Lambda role ARN is the `FunctionRoleArn` output of the Lambda stack
-(step 2). First-deploy is chicken-and-egg: deploy the Lambda once (it can't
-assume until the roles exist), read its role ARN, deploy the roles, then the
-next scheduled run works.
+No `--parameter-overrides` is needed for a spore.host deployment: `ReaperAccountId`
+defaults to the infra account (966362334030) and `ReaperRoleNamePattern` to
+`spawn-ttl-reaper-*`. For a self-hosted reaper, pass your own infra account:
+
+```bash
+  --parameter-overrides ReaperAccountId=<your-infra-account-id>
+```
+
+This step used to be documented as `--parameter-overrides
+ReaperLambdaRoleArn=<reaper-lambda-role-arn>`, and **that parameter does not
+exist** — the template declares `ReaperAccountId`, `ReaperRoleNamePattern`,
+`RoleName` and `TagPrefix`, so CloudFormation rejects the documented command
+outright. The instruction predated #476, which deliberately replaced the exact
+role ARN with a name PATTERN: the reaper's role is generated with a random suffix,
+so a trust naming it exactly breaks the moment that stack is recreated, for every
+onboarded account at once, with the failure mode "expired instances are no longer
+terminated".
+
+**There is no longer a chicken-and-egg ordering.** The old text said to deploy the
+Lambda first, read its `FunctionRoleArn`, then deploy the roles — which followed
+from naming the ARN. With a pattern the trust does not reference a principal that
+has to exist yet, so this template can be deployed first, or in either order.
 
 ### 2. Reaper Lambda in the infra account (spore-host-infra, 966362334030)
 

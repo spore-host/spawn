@@ -42,7 +42,7 @@ spawn stage upload hg38-reference.fasta \
 
 2. **Launch with staged data:**
 ```bash
-spawn launch --params examples/staging/reference-genome.yaml
+spawn launch my-genome-run --params examples/staging/reference-genome.yaml
 ```
 
 3. **Cost savings:**
@@ -54,7 +54,7 @@ spawn launch --params examples/staging/reference-genome.yaml
 
 1. **Launch hyperparameter search:**
 ```bash
-spawn launch --params examples/sweeps/hyperparameter-search.yaml
+spawn launch my-sweep --params examples/sweeps/hyperparameter-search.yaml
 ```
 
 2. **Monitor progress:**
@@ -74,7 +74,7 @@ spawn collect-results --sweep-id <sweep-id> \
 
 1. **Launch MPI simulation:**
 ```bash
-spawn launch --params examples/mpi/mpi-simulation.yaml --mpi
+spawn launch my-mpi-run --params examples/mpi/mpi-simulation.yaml --mpi
 ```
 
 2. **Features:**

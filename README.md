@@ -31,13 +31,19 @@ scoop install spawn
 
 **Debian / Ubuntu**
 ```bash
-curl -LO https://github.com/spore-host/spawn/releases/latest/download/spawn_linux_amd64.deb
-sudo dpkg -i spawn_linux_amd64.deb
+# GoReleaser puts the version in the asset name, so there is no version-less
+# "latest/download" URL to fetch — resolve the tag first.
+VER=$(curl -fsSL https://api.github.com/repos/spore-host/spawn/releases/latest \
+        | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+curl -LO "https://github.com/spore-host/spawn/releases/download/v${VER}/spawn_${VER}_linux_amd64.deb"
+sudo dpkg -i "spawn_${VER}_linux_amd64.deb"
 ```
 
 **RHEL / Fedora**
 ```bash
-sudo rpm -i https://github.com/spore-host/spawn/releases/latest/download/spawn_linux_amd64.rpm
+VER=$(curl -fsSL https://api.github.com/repos/spore-host/spawn/releases/latest \
+        | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+sudo rpm -i "https://github.com/spore-host/spawn/releases/download/v${VER}/spawn_${VER}_linux_amd64.rpm"
 ```
 
 **Direct download** — pre-built binaries for Linux, macOS, and Windows (amd64/arm64) on the [releases page](https://github.com/spore-host/spawn/releases/latest).
@@ -165,7 +171,7 @@ spawn app launch my-jupyter --image 123456789012.dkr.ecr.us-east-1.amazonaws.com
 
 **Prerequisites**
 
-- AWS credentials — sign in with [`aws login`](https://spore.host/docs) (spore.host
+- AWS credentials — sign in with [`aws login`](https://docs.spore.host/tools/spawn) (spore.host
   uses the AWS CLI's `login` command). No creds → `spawn app list` shows only the
   public apps.
 - For GPU apps (most streamed GUI apps), a **GPU-instance quota** in the target
@@ -216,7 +222,7 @@ without the bootstrap — but then the spore won't self-manage; prefer `Provisio
 
 ## Documentation
 
-Full reference at **[spore.host/docs](https://spore.host/docs/tools/spawn)**.
+Full reference at **[docs.spore.host/tools/spawn](https://docs.spore.host/tools/spawn)**.
 
 - **[Windows beta guide](docs/windows-beta-guide.md)** — end-to-end: Windows 11
   ISO → custom (auto-warmed) AMI → launch → connect via RDP, PowerShell-over-SSM,
