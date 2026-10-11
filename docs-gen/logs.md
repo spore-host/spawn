@@ -25,6 +25,5 @@ spawn logs <name-or-instance-id> [flags]
 | `--console` |  | bool |  | Print the whole serial console dump, not just the command-log block |
 | `--lines` |  | int | `100` | Lines to tail from a LIVE instance (the console block is fixed at what spored wrote) |
 | `--no-cache` |  | bool |  | Ignore the local cache and re-fetch from AWS |
-| `--region` |  | string |  | AWS region (default: resolved as for other commands) |
 | `--which` |  | string | `command` | Which log: command or spored |
 
