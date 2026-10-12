@@ -396,6 +396,12 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		if plan, ok := fsxCreatePlanFromFlags(config.FSxLustreCreate, fsxStorageCapacity, fsxThroughput, config.FSxLifecycle, config.FSxTTL, config.FSxMountPoint); ok {
 			renderFSxCostEstimate(os.Stderr, plan)
 		}
+		// The cap belongs on this surface too (#811): --estimate-only is the other
+		// "what would this cost me" answer, and the estimates above are compute and
+		// storage quoted separately with no statement of what bounds them.
+		if note := costLimitScopeNote(costLimit); note != "" {
+			fmt.Fprintf(os.Stderr, "%s\n", note)
+		}
 		fmt.Fprintf(os.Stderr, "✅ Estimate complete — no instances launched (--estimate-only)\n")
 		return nil
 	}

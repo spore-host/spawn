@@ -365,3 +365,99 @@ func seedAL2023AMIParams(t *testing.T, env *testutil.TestEnv) {
 		}
 	}
 }
+
+// The --cost-limit cap must appear in the preview, in both output formats (#811).
+//
+// The mechanism being gated is that the preview PRINTS the cap, not that
+// costLimitScopeNote returns a string. That distinction is the whole bug: the
+// function was correct, its test was green, and the note never reached a user
+// because nothing called it. A test of the helper alone would have passed
+// throughout — it did, for months.
+func TestLaunchPreviewStatesTheCostLimit(t *testing.T) {
+	plan := launchPlan{
+		Name:                 "p",
+		InstanceType:         "c7g.large",
+		Region:               "us-east-1",
+		OnDemandPricePerHour: 0.0725,
+		MaxCostUSD:           0.58,
+		CostLimitUSD:         50,
+	}
+
+	var buf bytes.Buffer
+	renderLaunchPlanTable(&buf, plan)
+	out := buf.String()
+	if !strings.Contains(out, "Cost limit:") {
+		t.Errorf("the launch preview does not mention --cost-limit. It prints "+
+			"`Max cost: ~$%.2f`, which is rate × ttl and compute only, so omitting the cap "+
+			"invites the reader to assume that line IS the cap.\n--- preview ---\n%s",
+			plan.MaxCostUSD, out)
+	}
+	// The scope, not just the number: a bare "$50.00" next to a compute-only
+	// estimate says nothing about storage being outside what spored can reclaim.
+	for _, want := range []string{"compute + storage", "reaper"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the preview states the cap but not its scope (missing %q)", want)
+		}
+	}
+	// And the compute-only nature of Max cost is now said out loud, since the two
+	// lines sit together and mean different things.
+	if !strings.Contains(out, "compute only") {
+		t.Error("`Max cost:` does not say it covers compute only, so it reads as the total " +
+			"beside a cap that is not compute-only")
+	}
+
+	// No cap set: nothing to say, and nothing printed.
+	buf.Reset()
+	plan.CostLimitUSD = 0
+	renderLaunchPlanTable(&buf, plan)
+	if strings.Contains(buf.String(), "Cost limit:") {
+		t.Error("the preview states a cost limit when none was set")
+	}
+}
+
+// The machine-readable preview must carry it too, or a wrapper reading -o json
+// cannot see the cap that governs the launch it is about to make.
+func TestLaunchPlanJSONCarriesTheCostLimit(t *testing.T) {
+	b, err := json.Marshal(launchPlan{CostLimitUSD: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"cost_limit_usd":50`) {
+		t.Errorf("launchPlan JSON has no cost_limit_usd: %s", b)
+	}
+	// omitempty: an unset cap must not render as a 0 that reads like "capped at $0".
+	b, err = json.Marshal(launchPlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "cost_limit_usd") {
+		t.Errorf("an unset cap is serialized as 0, which reads as a $0 cap: %s", b)
+	}
+}
+
+// The cap must be carried from the resolved config into the plan.
+//
+// Separate from TestLaunchPreviewStatesTheCostLimit because the two halves fail
+// independently and the symptom is identical: with the render call present but the
+// field never populated, the preview is silent about a cap that is in force. That
+// revert passed the render gate, which is why this one exists.
+func TestDescribeLaunchPlanCarriesTheCostLimit(t *testing.T) {
+	prevCount := count
+	t.Cleanup(func() { count = prevCount })
+	count = 1
+
+	plan := describeLaunchPlan(&spawnaws.LaunchConfig{
+		Name: "x", InstanceType: "c7g.large", Region: "us-east-1", CostLimit: 42.5,
+	})
+	if plan.CostLimitUSD != 42.5 {
+		t.Errorf("CostLimitUSD = %v, want 42.5 — the cap never reaches the preview, so a "+
+			"launch bounded at $42.50 previews as unbounded", plan.CostLimitUSD)
+	}
+
+	plan = describeLaunchPlan(&spawnaws.LaunchConfig{
+		Name: "x", InstanceType: "c7g.large", Region: "us-east-1",
+	})
+	if plan.CostLimitUSD != 0 {
+		t.Errorf("CostLimitUSD = %v with no cap configured", plan.CostLimitUSD)
+	}
+}

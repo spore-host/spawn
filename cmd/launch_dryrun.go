@@ -161,6 +161,12 @@ type launchPlan struct {
 	OnDemandPricePerHour float64           `json:"on_demand_price_per_hour,omitempty"`
 	PriceSource          string            `json:"price_source,omitempty"`
 	MaxCostUSD           float64           `json:"max_cost_usd,omitempty"`
+	// CostLimitUSD is the --cost-limit cap, which the preview omitted entirely
+	// (#811). It matters most precisely here: MaxCostUSD above is `rate × ttl`,
+	// compute only, so a preview showing an authoritative-looking cost line while
+	// saying nothing about the cap invites the reader to assume the cap is what
+	// they are looking at.
+	CostLimitUSD float64 `json:"cost_limit_usd,omitempty"`
 }
 
 // describeLaunchPlan projects a resolved LaunchConfig into the dry-run's
@@ -195,6 +201,7 @@ func describeLaunchPlan(config *aws.LaunchConfig) launchPlan {
 		JobArrayName:         jobArrayName,
 		Count:                count,
 		Tags:                 config.Tags,
+		CostLimitUSD:         config.CostLimit,
 	}
 
 	plan.IamInstanceProfile, plan.IamInstanceProfileIsPreview = previewIAMInstanceProfile(config)
@@ -302,8 +309,16 @@ func renderLaunchPlanTable(out io.Writer, p launchPlan) {
 	if p.OnDemandPricePerHour > 0 {
 		fmt.Fprintf(out, "Rate:         $%.4f/hr on-demand (%s)\n", p.OnDemandPricePerHour, p.PriceSource)
 		if p.MaxCostUSD > 0 {
-			fmt.Fprintf(out, "Max cost:     ~$%.2f (rate × ttl)\n", p.MaxCostUSD)
+			fmt.Fprintf(out, "Max cost:     ~$%.2f (rate × ttl, compute only)\n", p.MaxCostUSD)
 		}
+	}
+	// The cap, stated beside the number it bounds (#811).
+	//
+	// costLimitScopeNote existed for exactly this and had no caller but its own
+	// test — so the note never printed, while the test asserting "the number is
+	// shown in the launch preview" passed. The honest fix was to call it.
+	if note := costLimitScopeNote(p.CostLimitUSD); note != "" {
+		fmt.Fprintf(out, "%s\n", note)
 	}
 	if p.PreStop != "" {
 		fmt.Fprintf(out, "Pre-stop:     %s\n", p.PreStop)

@@ -116,7 +116,7 @@ func TestStorageCommitmentExcludesRootEBS(t *testing.T) {
 // the honest thing to say beside it is which half the cap can actually act on.
 func TestCostLimitScopeNoteStatesTheSplit(t *testing.T) {
 	withCostLimitFlags(t, 50, false, false, 0, 0, "")
-	note := costLimitScopeNote()
+	note := costLimitScopeNote(costLimit)
 	for _, want := range []string{"compute + storage", "reaper"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("scope note must contain %q, got: %s", want, note)
@@ -124,7 +124,7 @@ func TestCostLimitScopeNoteStatesTheSplit(t *testing.T) {
 	}
 
 	withCostLimitFlags(t, 0, false, false, 0, 0, "")
-	if costLimitScopeNote() != "" {
+	if costLimitScopeNote(costLimit) != "" {
 		t.Error("no cap means nothing to say about its scope")
 	}
 }
