@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TestNoLambdaHasTwoImplementations` — a Go lambda directory may not also ship
+  a Python entry point. Keyed on `def lambda_handler(` at the start of a line,
+  not on the presence of Python: a Go lambda may legitimately ship helpers
+  (`lambda/ttl-reaper/scripts/merge_deploy_params.py`), and flagging those would
+  be the allowlist-of-obviously-fine-things signal that means the rule is wrong
+  (rule 6). Verified four ways — it fails when the file is restored, ignores a
+  Python helper, ignores a docstring that merely mentions the handler, and fails
+  when its own discovery of Go lambdas breaks.
+
+
 - `TestRegionConstraintConversionCarriesEveryField` compares the two constraint
   structs through their **JSON forms** — they declare the same five tags, being
   copies of each other — which catches a dropped field, a swapped pair, and
@@ -472,6 +482,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`lambda/dns-updater/handler.py`** — 472 lines of a complete Python
+  implementation of a function deployed as Go. The live function is
+  `provided.al2023` with handler `bootstrap`, read off the function itself, and
+  nothing in the repo ever packaged the Python.
+
+  The language mismatch was the smaller half. Its docstring described its
+  security model as "Validates AWS-signed instance identity document" — the
+  PKCS#7 identity-document scheme that #173 **replaced** with SigV4, and which
+  `main.go` records as removed. It also hardcoded the production hosted zone ID.
+  So a reader who found it had a plausible, deployable implementation of a
+  superseded authentication design, for the one function whose entire security
+  story is that its caller is SigV4-verified.
+
+
 - **`pkg/observability/alerting`** — 234 non-test lines plus 291 of tests: an
   Alertmanager webhook bridge with a payload parser, alert formatting and two
   sender implementations, and **zero importers of any kind**. Nothing called
@@ -573,6 +597,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- Two stale citations in `tracked_binaries_test.go`. One justified the gate's
+  scoping with "lambda/github-oauth is Python (handler.py)" — **there is no such
+  directory**; the function that name refers to is one
+  `scripts/lambda-runtimes.txt` records as deployed since 2026-01 and present in
+  no repo at all. The scoping is right, the example was a phantom. The other
+  cited `handler.py` as an example of a text file `file` calls "executable",
+  which this change deletes; it now names a Python helper that still exists.
+
 
 - **`--proximity-from` and `--cost-tier` claimed to do something they do not.**
   Both are accepted on `spawn launch`, **validated** (an invalid cost tier or
