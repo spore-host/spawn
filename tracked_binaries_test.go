@@ -14,9 +14,9 @@ import (
 // Matching magic bytes rather than shelling out to `file` is deliberate: `file`
 // describes every shell and Python script in this repo as "... text
 // executable", and there are 20+ of those under lambda/ alone (deploy.sh,
-// handler.py, the dashboard-api setup scripts). A substring check on "executable"
-// would fail on all of them, which is how a gate like this ends up deleted
-// instead of fixed.
+// ttl-reaper/scripts/merge_deploy_params.py, the dashboard-api setup scripts).
+// A substring check on "executable" would fail on all of them, which is how a
+// gate like this ends up deleted instead of fixed.
 var binaryMagics = []struct {
 	name  string
 	magic []byte
@@ -101,8 +101,14 @@ func TestNoTrackedCompiledBinaries(t *testing.T) {
 // a new lambda silently absent from a hand-maintained list — is caught at the
 // source rather than only once a binary has been committed.
 //
-// Scoped to modules with a go.mod: lambda/github-oauth is Python (handler.py)
-// and has no Go build output, so requiring an entry for it would be noise.
+// Scoped to modules with a go.mod, because a directory with no Go build output
+// has no binary to ignore and requiring an entry for it would be noise.
+//
+// This used to justify the scoping with "lambda/github-oauth is Python
+// (handler.py)". There is no lambda/github-oauth directory — the function that
+// name refers to is one scripts/lambda-runtimes.txt records as deployed since
+// 2026-01 and present in no repo at all. The scoping is right; the example was
+// a phantom.
 func TestEveryGoLambdaBinaryIsIgnored(t *testing.T) {
 	gitignore, err := os.ReadFile(".gitignore")
 	if err != nil {
