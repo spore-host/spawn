@@ -482,6 +482,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`pkg/compliance`'s report generator and standalone validator wrappers** —
+  **1,852 lines** (746 non-test, 1,106 test), taking the package from 3,782
+  lines to 1,930. There is no `spawn compliance` command and never was.
+
+  - `report.go` + `report_test.go`: all seven exported functions
+    (`GenerateComplianceReport`, `GenerateInstanceReport`,
+    `GenerateSummaryReport`, `FormatReportJSON`, `FormatReportText`,
+    `CompareBaselinesReport`, `CompareFedRAMPReport`) had **zero** callers
+    outside the file and its own test.
+  - thirteen standalone `Validate*Compliance` / `Enforce*Compliance` /
+    `Validate*Instance` / `Get*Description` / `Compare*` functions across
+    `nist80053.go`, `nist80171.go` and `fedramp.go`, plus the eleven test
+    functions that covered only them.
+
+  **The validator is untouched.** `NewValidator` and the four methods `cmd/`
+  actually calls — `ValidateLaunchConfig`, `EnforceLaunchConfig` and
+  `IsStrictMode` from `cmd/launch_single.go`, `ValidateInstances` from
+  `cmd/validate.go` — and the three `*ControlSet` constructors they dispatch to
+  all remain, as do every test of them. `ControlViolation.Error` is deliberately
+  untouched: it is what makes the type satisfy `error`.
+
+  The removed wrappers were **not** a second implementation, which is what
+  distinguishes this from the `pkg/regions` case. Each was two lines over the
+  live path — `controlSet := NIST80053ControlSet(baseline); return
+  controlSet.ValidateLaunchConfig(cfg), nil` — and the live path is the
+  better-covered one (10 test references against 1 for the wrapper), so nothing
+  unique was lost. Checked before deleting, precisely because the `pkg/regions`
+  finding an hour earlier was the opposite.
+
+
 - **`lambda/dns-updater/handler.py`** — 472 lines of a complete Python
   implementation of a function deployed as Go. The live function is
   `provided.al2023` with handler `bootstrap`, read off the function itself, and
@@ -597,6 +627,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- Deleting dead code **cascades**, and the second pass caught a wrong deletion.
+  Removing the thirteen wrappers orphaned four more functions that had only ever
+  been reachable through them. Three were then removed; the fourth,
+  `GetBaselineControlCount`, was **restored** — it has no production caller, but
+  `TestFedRAMPControlSet`, a test of the live path, uses it to assert that a
+  FedRAMP control set holds the same number of controls as the NIST baseline it
+  maps to. Deleting it would have forced that assertion to be weakened or the
+  count reimplemented in the test. "Dead outside tests" is not the same as "safe
+  to delete" when a live test needs it to say what it means, and the reason is now
+  recorded at the function.
+
 
 - Two stale citations in `tracked_binaries_test.go`. One justified the gate's
   scoping with "lambda/github-oauth is Python (handler.py)" — **there is no such

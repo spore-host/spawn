@@ -2,7 +2,6 @@ package compliance
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/spore-host/spawn/pkg/aws"
 )
@@ -222,65 +221,4 @@ func getNIST80171Controls() []Control {
 			},
 		},
 	}
-}
-
-// ValidateNIST80171Compliance validates a launch config against NIST 800-171 controls
-func ValidateNIST80171Compliance(cfg *aws.LaunchConfig) (*ValidationResult, error) {
-	controlSet := NIST80171ControlSet()
-	result := controlSet.ValidateLaunchConfig(cfg)
-	return result, nil
-}
-
-// EnforceNIST80171Compliance enforces NIST 800-171 controls on a launch config
-func EnforceNIST80171Compliance(cfg *aws.LaunchConfig) {
-	controlSet := NIST80171ControlSet()
-	controlSet.EnforceLaunchConfig(cfg)
-}
-
-// ValidateNIST80171Instance validates a running instance against NIST 800-171 controls
-func ValidateNIST80171Instance(instance *aws.InstanceInfo) (*ValidationResult, error) {
-	controlSet := NIST80171ControlSet()
-	result := controlSet.ValidateInstance(instance)
-	return result, nil
-}
-
-// GetNIST80171ControlMapping returns a map of NIST 800-171 controls to their implementations
-func GetNIST80171ControlMapping() map[string]string {
-	return map[string]string{
-		"AC-06": "IAM role scoping (v0.13.0)",
-		"AC-17": "IMDSv2 enforcement, SSH key management",
-		"AU-02": "Structured audit logging (v0.13.0)",
-		"IA-02": "AWS IAM authentication",
-		"IA-05": "KMS secrets encryption (v0.13.0), SSH key pairs",
-		"SC-07": "Security group configuration",
-		"SC-08": "TLS for API calls (AWS SDK)",
-		"SC-12": "KMS integration (v0.13.0)",
-		"SC-13": "EBS encryption, TLS",
-		"SC-28": "EBS encryption, S3 encryption",
-	}
-}
-
-// GetNIST80171Description returns a description of NIST 800-171 compliance
-func GetNIST80171Description() string {
-	return fmt.Sprintf(`NIST SP 800-171 Rev 3: Protecting Controlled Unclassified Information (CUI)
-
-Compliance Mode: NIST 800-171 Rev 3
-
-Enforced Controls:
-- SC-28: EBS volumes encrypted at rest
-- AC-17: IMDSv2 required for metadata access
-- AU-02: Audit logging enabled (structured logs)
-- SC-07: Security group boundary protection
-- SC-08/SC-13: TLS for all communications
-- IA-02/IA-05: IAM authentication and KMS key management
-- AC-06: Least privilege IAM roles
-
-Controls: %d implemented
-Framework: NIST 800-171 Rev 3 (110 controls total)
-
-Note: spawn implements technical controls. Organizational controls
-(policies, procedures, training) are the customer's responsibility.
-
-Recommendation: Use self-hosted infrastructure for full compliance.
-Shared infrastructure generates warnings but is permitted.`, len(getNIST80171Controls()))
 }

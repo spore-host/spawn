@@ -2,7 +2,6 @@ package compliance
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/spore-host/spawn/pkg/aws"
@@ -243,139 +242,15 @@ func getHighBaselineControls() []Control {
 	return controls
 }
 
-// ValidateNIST80053Compliance validates a launch config against a specific baseline
-func ValidateNIST80053Compliance(cfg *aws.LaunchConfig, baseline Baseline) (*ValidationResult, error) {
-	controlSet := NIST80053ControlSet(baseline)
-	result := controlSet.ValidateLaunchConfig(cfg)
-	return result, nil
-}
-
-// EnforceNIST80053Compliance enforces baseline controls on a launch config
-func EnforceNIST80053Compliance(cfg *aws.LaunchConfig, baseline Baseline) {
-	controlSet := NIST80053ControlSet(baseline)
-	controlSet.EnforceLaunchConfig(cfg)
-}
-
-// ValidateNIST80053Instance validates a running instance against a baseline
-func ValidateNIST80053Instance(instance *aws.InstanceInfo, baseline Baseline) (*ValidationResult, error) {
-	controlSet := NIST80053ControlSet(baseline)
-	result := controlSet.ValidateInstance(instance)
-	return result, nil
-}
-
-// GetBaselineRequirements returns a summary of requirements for each baseline
-func GetBaselineRequirements() map[Baseline][]string {
-	return map[Baseline][]string{
-		BaselineLow: {
-			"EBS encryption (AWS-managed or customer-managed KMS)",
-			"IMDSv2 enforcement",
-			"Security group configuration",
-			"Audit logging",
-			"IAM authentication and authorization",
-			"Self-hosted infrastructure (recommended)",
-		},
-		BaselineModerate: {
-			"All Low baseline requirements",
-			"Private subnet deployment (no public IPs)",
-			"Customer-managed KMS keys (recommended)",
-			"Self-hosted infrastructure (required)",
-			"Flaw remediation processes",
-		},
-		BaselineHigh: {
-			"All Moderate baseline requirements",
-			"Customer-managed KMS keys (required)",
-			"VPC endpoints for AWS services",
-			"Multi-AZ deployment (recommended)",
-			"System backup configuration",
-			"Explicit security group rules (deny by default)",
-		},
-	}
-}
-
-// GetBaselineDescription returns a detailed description of a baseline
-func GetBaselineDescription(baseline Baseline) string {
-	requirements := GetBaselineRequirements()[baseline]
-	reqStr := ""
-	for _, req := range requirements {
-		reqStr += fmt.Sprintf("  - %s\n", req)
-	}
-
-	switch baseline {
-	case BaselineLow:
-		return fmt.Sprintf(`NIST 800-53 Rev 5 Low Baseline
-
-Impact Level: Low
-System Type: General-purpose federal information systems
-Authorization: Suitable for FedRAMP Low
-
-Requirements:
-%s
-Controls: %d implemented
-Framework: NIST 800-53 Rev 5 (based on NIST 800-171)
-
-This baseline is appropriate for systems where:
-- Loss of confidentiality, integrity, or availability would have LIMITED adverse effect
-- Information and systems are not mission-critical
-- Basic security controls are sufficient
-
-Note: spawn implements technical controls. Organizational controls
-(policies, procedures, training) remain the customer's responsibility.`, reqStr, len(getLowBaselineControls()))
-
-	case BaselineModerate:
-		return fmt.Sprintf(`NIST 800-53 Rev 5 Moderate Baseline
-
-Impact Level: Moderate
-System Type: Sensitive federal information systems
-Authorization: Suitable for FedRAMP Moderate
-
-Requirements:
-%s
-Controls: %d implemented
-Framework: NIST 800-53 Rev 5 (superset of Low baseline)
-
-This baseline is appropriate for systems where:
-- Loss of confidentiality, integrity, or availability would have SERIOUS adverse effect
-- Information and systems support important missions
-- Enhanced security controls are required
-
-⚠️  IMPORTANT: Moderate baseline REQUIRES self-hosted infrastructure.
-Shared infrastructure will generate errors.
-
-Note: spawn implements technical controls. Organizational controls
-(policies, procedures, training) remain the customer's responsibility.`, reqStr, len(getModerateBaselineControls()))
-
-	case BaselineHigh:
-		return fmt.Sprintf(`NIST 800-53 Rev 5 High Baseline
-
-Impact Level: High
-System Type: Critical federal information systems
-Authorization: Suitable for FedRAMP High
-
-Requirements:
-%s
-Controls: %d implemented
-Framework: NIST 800-53 Rev 5 (superset of Moderate baseline)
-
-This baseline is appropriate for systems where:
-- Loss of confidentiality, integrity, or availability would have SEVERE or CATASTROPHIC adverse effect
-- Information and systems are mission-critical
-- Stringent security controls are mandatory
-
-⚠️  CRITICAL: High baseline REQUIRES:
-  - Self-hosted infrastructure (mandatory)
-  - Customer-managed KMS keys (mandatory)
-  - Private subnets (no public IPs)
-  - VPC endpoints for AWS services
-  - Multi-AZ deployment (recommended)
-
-Note: spawn implements technical controls. Organizational controls
-(policies, procedures, training) remain the customer's responsibility.`, reqStr, len(getHighBaselineControls()))
-
-	default:
-		return "Unknown baseline"
-	}
-}
-
+// Retained because a LIVE test depends on it to express its assertion (#811).
+//
+// Nothing in production calls this: its only non-test caller was
+// GetBaselineDescription, which this change removed. But TestFedRAMPControlSet —
+// a test of the live FedRAMPControlSet path — uses it to assert that a FedRAMP
+// control set holds the same number of controls as the NIST baseline it maps to.
+// Deleting it would have forced that assertion to be weakened or the count
+// reimplemented in the test, and "dead outside tests" is not the same as "safe to
+// delete" when a live test needs it to say what it means.
 // GetBaselineControlCount returns the number of controls in each baseline
 func GetBaselineControlCount(baseline Baseline) int {
 	switch baseline {
@@ -388,42 +263,4 @@ func GetBaselineControlCount(baseline Baseline) int {
 	default:
 		return 0
 	}
-}
-
-// CompareBaselines returns a comparison of control counts across baselines
-func CompareBaselines() string {
-	return fmt.Sprintf(`NIST 800-53 Rev 5 Baseline Comparison
-
-Low Baseline:      %d controls (NIST 800-171 foundation)
-Moderate Baseline: %d controls (Low + enhanced protections)
-High Baseline:     %d controls (Moderate + stringent requirements)
-
-Progressive Control Enhancement:
-┌─────────────┬──────────────┬──────────────┬──────────────┐
-│   Control   │     Low      │   Moderate   │     High     │
-├─────────────┼──────────────┼──────────────┼──────────────┤
-│ EBS Encrypt │   Required   │   Required   │   Required   │
-│             │ (any KMS)    │ (any KMS)    │ (customer)   │
-├─────────────┼──────────────┼──────────────┼──────────────┤
-│   IMDSv2    │   Required   │   Required   │   Required   │
-├─────────────┼──────────────┼──────────────┼──────────────┤
-│ Private Net │      -       │   Required   │   Required   │
-├─────────────┼──────────────┼──────────────┼──────────────┤
-│  Public IP  │   Allowed    │   Blocked    │   Blocked    │
-├─────────────┼──────────────┼──────────────┼──────────────┤
-│ Self-Hosted │ Recommended  │   Required   │   Required   │
-├─────────────┼──────────────┼──────────────┼──────────────┤
-│ VPC Endpoints│      -       │ Recommended  │   Required   │
-├─────────────┼──────────────┼──────────────┼──────────────┤
-│  Multi-AZ   │      -       │      -       │ Recommended  │
-└─────────────┴──────────────┴──────────────┴──────────────┘
-
-Usage:
-  spawn launch --nist-800-53=low ...       # Low baseline
-  spawn launch --nist-800-53=moderate ...  # Moderate baseline
-  spawn launch --nist-800-53=high ...      # High baseline
-`,
-		GetBaselineControlCount(BaselineLow),
-		GetBaselineControlCount(BaselineModerate),
-		GetBaselineControlCount(BaselineHigh))
 }
