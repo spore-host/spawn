@@ -110,11 +110,9 @@ type SweepRecord struct {
 
 // RegionConstraint defines constraints for region selection (embedded for DynamoDB compatibility)
 type RegionConstraint struct {
-	Include       []string `dynamodbav:"include,omitempty" json:"include,omitempty"`
-	Exclude       []string `dynamodbav:"exclude,omitempty" json:"exclude,omitempty"`
-	Geographic    []string `dynamodbav:"geographic,omitempty" json:"geographic,omitempty"`
-	ProximityFrom string   `dynamodbav:"proximity_from,omitempty" json:"proximity_from,omitempty"`
-	CostTier      string   `dynamodbav:"cost_tier,omitempty" json:"cost_tier,omitempty"`
+	Include    []string `dynamodbav:"include,omitempty" json:"include,omitempty"`
+	Exclude    []string `dynamodbav:"exclude,omitempty" json:"exclude,omitempty"`
+	Geographic []string `dynamodbav:"geographic,omitempty" json:"geographic,omitempty"`
 }
 
 // RegionProgress tracks per-region sweep progress

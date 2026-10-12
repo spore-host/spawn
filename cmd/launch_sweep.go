@@ -1129,11 +1129,9 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	// Apply region constraints if specified
 	if shouldApplyRegionConstraints() {
 		constraint := &sweep.RegionConstraint{
-			Include:       regionsInclude,
-			Exclude:       regionsExclude,
-			Geographic:    regionsGeographic,
-			ProximityFrom: proximityFrom,
-			CostTier:      costTier,
+			Include:    regionsInclude,
+			Exclude:    regionsExclude,
+			Geographic: regionsGeographic,
 		}
 
 		// Validated and applied by pkg/regions, which is where the tests for this
@@ -1169,29 +1167,6 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 		fmt.Fprintf(os.Stderr, "🌍 Applied region constraints: %d regions allowed\n", len(filteredRegions))
 		fmt.Fprintf(os.Stderr, "   Filtered regions: %v\n", filteredRegions)
 		fmt.Fprintf(os.Stderr, "   Constraint: %s\n", rc.String())
-		// Say which parts of the constraint did nothing.
-		//
-		// --proximity-from and --cost-tier are accepted, VALIDATED (an invalid cost
-		// tier or proximity region is rejected, so they feel load-bearing) and
-		// persisted to the sweep record — but nothing reads them when selecting
-		// regions. Their only consumers, regions.ScoreRegions and
-		// GetRegionsByPriority, have no callers. Since either flag alone satisfies
-		// shouldApplyRegionConstraints, `--cost-tier low` on its own printed
-		// "Applied region constraints: N regions allowed" with N = every region and
-		// nothing filtered. Tracked separately for the finish-or-withdraw decision;
-		// until then the output must not claim an effect that does not happen.
-		if constraint.ProximityFrom != "" || constraint.CostTier != "" {
-			var ignored []string
-			if constraint.ProximityFrom != "" {
-				ignored = append(ignored, "--proximity-from")
-			}
-			if constraint.CostTier != "" {
-				ignored = append(ignored, "--cost-tier")
-			}
-			fmt.Fprintf(os.Stderr, "   NOTE: %s recorded but NOT applied — region ordering by "+
-				"proximity/cost is not implemented, so these did not change the selection above\n",
-				strings.Join(ignored, " and "))
-		}
 	}
 
 	if len(regionGroups) == 1 {

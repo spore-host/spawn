@@ -240,9 +240,7 @@ func matchesContinent(region, continentCode string) bool {
 func shouldApplyRegionConstraints() bool {
 	return len(regionsInclude) > 0 ||
 		len(regionsExclude) > 0 ||
-		len(regionsGeographic) > 0 ||
-		proximityFrom != "" ||
-		costTier != ""
+		len(regionsGeographic) > 0
 }
 
 // regionConstraintFromSweep converts the persisted constraint into the one
@@ -278,11 +276,9 @@ func regionConstraintFromSweep(c *sweep.RegionConstraint) *regions.RegionConstra
 		return nil
 	}
 	return &regions.RegionConstraint{
-		Include:       c.Include,
-		Exclude:       c.Exclude,
-		Geographic:    c.Geographic,
-		ProximityFrom: c.ProximityFrom,
-		CostTier:      c.CostTier,
+		Include:    c.Include,
+		Exclude:    c.Exclude,
+		Geographic: c.Geographic,
 		// AllowEmpty deliberately left false: cmd's applyRegionConstraints always
 		// errored on an empty result, and an empty region set means the sweep has
 		// nowhere to launch. Carrying the old behaviour across explicitly rather

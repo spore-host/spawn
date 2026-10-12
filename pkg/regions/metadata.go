@@ -2,12 +2,33 @@ package regions
 
 // RegionMetadata contains geographic and cost information for AWS regions
 type RegionMetadata struct {
-	Code        string  // AWS region code (e.g., "us-east-1")
-	Name        string  // Human-readable name
-	Geographic  string  // Geographic group: "us", "eu", "ap", "sa", "af", "me", "ca"
-	Subregion   string  // Subregion: "north-america", "europe", "asia-pacific", etc.
-	CostTier    string  // Cost tier: "low", "standard", "premium"
-	Coordinates LatLong // Geographic coordinates for proximity calculations
+	Code       string // AWS region code (e.g., "us-east-1")
+	Name       string // Human-readable name
+	Geographic string // Geographic group: "us", "eu", "ap", "sa", "af", "me", "ca"
+	Subregion  string // Subregion: "north-america", "europe", "asia-pacific", etc.
+	// CostTier and Coordinates are retained as data but have NO consumer, and
+	// deliberately so (#864). Their only consumer was pkg/regions/priority.go,
+	// which backed `--cost-tier` and `--proximity-from`; both flags were withdrawn
+	// rather than finished, and the scoring was deleted with them.
+	//
+	// Do not wire CostTier into a cost decision. It is a hand-assigned
+	// three-bucket approximation with no provenance and no collection date, and
+	// truffle is this suite's pricing authority (#533) — it sorts by live
+	// on-demand price. A static table of the same shape was already measured wrong
+	// by up to 38x for a type the table does not know (#543), and this project
+	// requires any static price reaching output to state that it is static, why,
+	// and when it was collected. These values state none of that.
+	//
+	// Do not wire Coordinates into region selection either. `detectBestRegion`
+	// already picks a region by MEASURED TCP latency to each EC2 endpoint, over the
+	// SCP-aware enabled-region set (#732), which answers "which region is close to
+	// me" better than great-circle distance between hardcoded coordinates can.
+	//
+	// They stay because they are accurate reference data and cheap to keep. If a
+	// future reachability pass flags them, this comment is the answer to "why
+	// isn't it used".
+	CostTier    string  // Cost tier bucket — NOT for cost decisions, see above
+	Coordinates LatLong // Geographic coordinates — NOT for region selection, see above
 }
 
 // LatLong represents geographic coordinates

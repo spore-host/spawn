@@ -24,11 +24,9 @@ func TestRegionConstraintConversionCarriesEveryField(t *testing.T) {
 	// Every field populated distinctly, so a mis-mapped pair (Include↔Exclude,
 	// say) is visible rather than averaging out.
 	src := &sweep.RegionConstraint{
-		Include:       []string{"us-east-1", "us-west-*"},
-		Exclude:       []string{"eu-*"},
-		Geographic:    []string{"us"},
-		ProximityFrom: "us-east-2",
-		CostTier:      "low",
+		Include:    []string{"us-east-1", "us-west-*"},
+		Exclude:    []string{"eu-*"},
+		Geographic: []string{"us"},
 	}
 
 	got := regionConstraintFromSweep(src)

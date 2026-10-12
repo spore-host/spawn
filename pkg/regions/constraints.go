@@ -15,14 +15,6 @@ type RegionConstraint struct {
 	//               "north-america", "europe", "asia-pacific", etc.
 	Geographic []string `json:"geographic,omitempty" dynamodbav:"geographic,omitempty"`
 
-	// ProximityFrom specifies a region to calculate proximity scores from
-	// Regions closer to this region will be prioritized
-	ProximityFrom string `json:"proximity_from,omitempty" dynamodbav:"proximity_from,omitempty"`
-
-	// CostTier specifies the preferred cost tier
-	// Valid values: "low", "standard", "premium"
-	CostTier string `json:"cost_tier,omitempty" dynamodbav:"cost_tier,omitempty"`
-
 	// AllowEmpty allows the constraint to result in an empty region set
 	// If false, an error will be returned if no regions match
 	AllowEmpty bool `json:"allow_empty,omitempty" dynamodbav:"allow_empty,omitempty"`
@@ -39,9 +31,7 @@ type RegionPriority struct {
 func (c *RegionConstraint) IsEmpty() bool {
 	return len(c.Include) == 0 &&
 		len(c.Exclude) == 0 &&
-		len(c.Geographic) == 0 &&
-		c.ProximityFrom == "" &&
-		c.CostTier == ""
+		len(c.Geographic) == 0
 }
 
 // String returns a human-readable representation of the constraint
@@ -56,12 +46,6 @@ func (c *RegionConstraint) String() string {
 	}
 	if len(c.Geographic) > 0 {
 		parts = append(parts, "geographic="+joinStrings(c.Geographic, ","))
-	}
-	if c.ProximityFrom != "" {
-		parts = append(parts, "proximity_from="+c.ProximityFrom)
-	}
-	if c.CostTier != "" {
-		parts = append(parts, "cost_tier="+c.CostTier)
 	}
 
 	if len(parts) == 0 {

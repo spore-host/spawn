@@ -300,48 +300,6 @@ func TestValidateConstraint(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "valid cost tier - low",
-			constraint: &RegionConstraint{
-				CostTier: "low",
-			},
-			expectError: false,
-		},
-		{
-			name: "valid cost tier - standard",
-			constraint: &RegionConstraint{
-				CostTier: "standard",
-			},
-			expectError: false,
-		},
-		{
-			name: "valid cost tier - premium",
-			constraint: &RegionConstraint{
-				CostTier: "premium",
-			},
-			expectError: false,
-		},
-		{
-			name: "invalid cost tier",
-			constraint: &RegionConstraint{
-				CostTier: "expensive",
-			},
-			expectError: true,
-		},
-		{
-			name: "valid proximity region",
-			constraint: &RegionConstraint{
-				ProximityFrom: "us-east-1",
-			},
-			expectError: false,
-		},
-		{
-			name: "invalid proximity region",
-			constraint: &RegionConstraint{
-				ProximityFrom: "invalid-region",
-			},
-			expectError: true,
-		},
-		{
 			name: "valid geographic group",
 			constraint: &RegionConstraint{
 				Geographic: []string{"us", "eu"},
