@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TestEveryCommandIsBuiltByARelease` — every `package main` in the root module
+  must appear as a `main:` in `.goreleaser.yaml`. The set is discovered from the
+  filesystem rather than listed, because a gate naming the commands it knew
+  about would have reported a clean bill of health for exactly the one nobody
+  remembered. Verified three ways: it fails when an unshipped command is
+  re-added, it **passes** once a build entry is added for that command (so it
+  gates the relationship, not the existence of a directory), and it fails when
+  its own parse of the release config stops matching.
+
+
 - `docs/dns-updater-authorization.md` — who may register a record in the
   `spore.host` zone, where the entitled set comes from, the simulated IAM grant,
   and the two live steps that no script performs.
@@ -394,6 +404,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`cmd/orchestrator` and `pkg/orchestrator`** — 679 non-test lines plus 654 of
+  tests, for a **second binary no release has ever produced**.
+  `.goreleaser.yaml` builds `spawn` and `spored` and nothing else, so
+  `spawn-orchestrator` could not be installed by any supported route; no sibling
+  repo imported the package and it was not part of `api/public-surface.txt`.
+  `deployment/spawn-orchestrator.service` goes with it — its `ExecStart` named
+  `/usr/local/bin/spawn-orchestrator`, which nothing writes, and passed
+  `/etc/spawn/orchestrator-config.yaml`, which the repo never contained.
+
+  Nothing was broken by this, which is the point: it compiled, it vetted, it had
+  more test lines than most live packages, and `make check` was green on all of
+  it for as long as it existed.
+
+
 - **`spawn stage`** (#805), with its three subcommands and ~1,600 lines. It
   uploaded to a bucket it never created, **nothing ever downloaded the staged
   data**, and no staging bucket exists in the account — so it had never run, while
@@ -467,6 +491,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- Two comments that cited things which were not true, both exposed by removing
+  the orchestrator:
+
+  - `pkg/taskpool/exec.go` justified its `0o700` workspace mode with "spored is
+    `User=root` (`deployment/spawn-orchestrator.service`)" — a unit file for a
+    *different* binary, and one no release produced. The conclusion holds, but
+    for a different reason: the unit `pkg/launcher/bootstrap.go` actually writes
+    sets no `User=` at all, so root comes from systemd's default. Now cites that.
+  - the generated `spored.service` said SigV4 DNS signing was "harmless today
+    (the DNS Function URL is still `AuthType: NONE`, which ignores the
+    signature)". The cutover landed: the live function is `AuthType: AWS_IAM`
+    (verified 2026-10-11), so an unsigned request is rejected at the URL and the
+    instance never registers. The variable is load-bearing, and the comment
+    described it as optional.
+
 
 - **`spawn launch --dry-run` never mentioned `--cost-limit`** (#811). The preview
   printed `Max cost: ~$X (rate × ttl)` — compute only — and said nothing about
