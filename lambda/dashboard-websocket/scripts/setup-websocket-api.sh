@@ -98,6 +98,12 @@ for ROUTE_KEY in "${ROUTES[@]}"; do
     if [ -n "$EXISTING_ROUTE_ID" ] && [ "$EXISTING_ROUTE_ID" != "None" ]; then
         echo "Route $ROUTE_KEY already exists: $EXISTING_ROUTE_ID"
     else
+        # authz-none-ok: the edge is intentionally open and the HANDLER authenticates.
+        # A client must present a ticket minted by `POST /api/ws-token` on dashboard-api;
+        # lambda/dashboard-websocket/main.go validates it before accepting the
+        # connection. Checked 2026-10-12. API Gateway WebSocket authorizers cannot see a
+        # query-string ticket on $connect in the same way, which is why this is done in
+        # the handler.
         ROUTE_ID=$(aws apigatewayv2 create-route \
             --api-id "$API_ID" \
             --route-key "$ROUTE_KEY" \

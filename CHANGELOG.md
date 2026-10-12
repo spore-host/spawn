@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TestNoDeployScriptCreatesAnUnauthenticatedAPIGatewayRoute` — a script that
+  creates an API Gateway method or route must make the authorization decision
+  explicit. It catches **both** ways to get `NONE`: naming it, and omitting
+  `--authorization-type` entirely, which the API defaults to `NONE` and which is
+  the form review misses.
+
+  "Authenticated at the edge" is deliberately **not** the rule. On its first run
+  this flagged two scripts that are legitimate — `setup-dashboard-api-gateway.sh`
+  and `setup-websocket-api.sh` both leave the edge open and authenticate in the
+  handler (`getUserFromRequest` / `getUserFromCredentialsHeader` /
+  `verifySlackRequest`, and a ticket minted by `POST /api/ws-token`). Requiring
+  edge auth would have needed an allowlist of things that are fine, which is the
+  signal the rule is wrong (rule 6). So the rule is that leaving the edge open
+  must be **stated** next to the call with an `authz-none-ok:` marker, the same
+  convention as `env-replace-ok:` and `swallow-ok:`. The adjacency walk those
+  gates shared is now one helper.
+
+  Verified five ways: explicit `NONE` fails, an omitted flag fails, a marker that
+  is present but **not adjacent** still fails, an adjacent marker passes (so the
+  gate tests the stated decision rather than forbidding routes), and removing a
+  real marker fails again.
+
+
 - `TestNoLambdaHasTwoImplementations` — a Go lambda directory may not also ship
   a Python entry point. Keyed on `def lambda_handler(` at the start of a line,
   not on the presence of Python: a Go lambda may legitimately ship helpers
@@ -481,6 +504,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comparison against an unset variable is always false.
 
 ### Removed
+
+- **`scripts/deploy-custom-dns.sh` no longer creates an API Gateway** (#870).
+  Steps 5 and 6 built a REST API — `spawn-dns-api`, `POST /update-dns` at
+  `--authorization-type NONE` — and added an `apigateway-invoke` permission to
+  the function: **a public, unauthenticated endpoint into the DNS updater**,
+  created on every run.
+
+  It also could not work. The handler takes a `LambdaFunctionURLRequest`, while
+  API Gateway REST sends an `APIGatewayProxyRequest` and expects a matching
+  response shape, so a POST returned **502** rather than a handler response —
+  verified against the resource the script created on 2026-10-12 before it was
+  deleted again. It wrote no DNS, but it did invoke a billable function and was
+  one handler-signature change away from being live.
+
+  The section predated #173, which moved the updater to a Function URL with
+  `AuthType: AWS_IAM`. Nothing consumed it: neither `/spawn/dns/*` SSM parameter
+  was set, and spored registers through the Function URL.
+
+  The script now reads the **Function URL** off the function and prints it,
+  warning if its `AuthType` is not `AWS_IAM` — since the updater namespaces every
+  record under the SigV4-verified caller, anything else leaves records unanchored.
+  It also no longer tells the operator to publish `/spawn/dns/api_endpoint`,
+  because the CLI path consuming that value is broken independently (#872).
+
 
 - **`spawn launch --proximity-from` and `--cost-tier` are withdrawn** (#864),
   together with `pkg/regions/priority.go` (152 lines: `ScoreRegions`,
