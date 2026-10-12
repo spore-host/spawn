@@ -308,6 +308,19 @@ var envLiteral = regexp.MustCompile(`--environment\s+"?Variables=\{`)
 // than to the file.
 func deliberateEnvReplace(t *testing.T, rel, cmd string) bool {
 	t.Helper()
+	return adjacentMarker(t, rel, envLiteral, cmd, "env-replace-ok:")
+}
+
+// adjacentMarker reports whether the comment block attached to the command
+// carrying a match for lineRe declares the decision with marker.
+//
+// Adjacency is the whole point and is enforced by walking UP from the matching
+// line through the rest of the command, blank lines and comments, stopping at the
+// first line that is none of those — so a marker has to be attached to this call
+// rather than sitting anywhere in the file. Shared by every "state the decision"
+// gate here so the walk exists once.
+func adjacentMarker(t *testing.T, rel string, lineRe *regexp.Regexp, cmd, marker string) bool {
+	t.Helper()
 	// The RAW file, not read()'s comment-stripped form. read() drops comment lines
 	// on purpose — a gate that scans raw text flags a comment explaining a fixed
 	// bug as the bug (rule 3) — but the marker being looked for here IS a comment,
@@ -320,7 +333,7 @@ func deliberateEnvReplace(t *testing.T, rel, cmd string) bool {
 	}
 	lines := strings.Split(string(b), "\n")
 	for i, line := range lines {
-		if !envLiteral.MatchString(line) {
+		if !lineRe.MatchString(line) {
 			continue
 		}
 		// Confirm this line belongs to the command being examined, not another.
@@ -333,7 +346,7 @@ func deliberateEnvReplace(t *testing.T, rel, cmd string) bool {
 			case t == "":
 				continue
 			case strings.HasPrefix(t, "#"):
-				if strings.Contains(t, "env-replace-ok:") {
+				if strings.Contains(t, marker) {
 					return true
 				}
 			case strings.HasSuffix(t, "\\"), strings.HasPrefix(t, "aws "):
@@ -536,4 +549,74 @@ func TestNoBareSleepAfterIAMMutation(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A script may not create a public, unauthenticated API Gateway route (#870).
+//
+// deploy-custom-dns.sh created a REST API with POST /update-dns at
+// authorizationType NONE and wired it to the DNS updater — a public endpoint
+// into the function that writes records in the real spore.host zone. It could
+// not actually write (the integration was incompatible with the handler's
+// Function URL event type, so it returned 502) but it did invoke a billable
+// function, and it was one handler-signature change away from being live.
+//
+// Two ways to get NONE, and the gate has to catch both: naming it, and omitting
+// the flag entirely, since the API defaults to NONE when it is absent. The
+// second is the one that would slip through review.
+//
+// Deliberately NOT failing on an empty discovery, unlike the other gates here.
+// Zero API Gateway methods is a correct state — the DNS updater is reached
+// through its Function URL. The rule is conditional: if a script creates a route,
+// the authorization decision must be explicit.
+//
+// And "authenticated at the edge" is NOT the rule, because that would need an
+// allowlist of the things that are fine — rule 6's tell. On its first run this
+// gate flagged two scripts that are deliberate: `setup-dashboard-api-gateway.sh`
+// and `setup-websocket-api.sh` both create open routes and authenticate in the
+// HANDLER instead — dashboard-api via getUserFromRequest /
+// getUserFromCredentialsHeader / verifySlackRequest, and the websocket via a
+// ticket minted by `POST /api/ws-token`. That is a legitimate design, just a
+// weaker one, so the rule is that leaving the edge open has to be SAID, with the
+// reason, next to the call. Same `-ok:` convention as env-replace-ok above.
+func TestNoDeployScriptCreatesAnUnauthenticatedAPIGatewayRoute(t *testing.T) {
+	for _, f := range shellScripts(t) {
+		// read() strips comments, so the paragraph above — which names the flag
+		// it forbids — cannot satisfy this gate (rule 3).
+		s := readRel(t, f)
+		for _, verb := range []string{"apigateway put-method", "apigatewayv2 create-route"} {
+			for _, c := range awsCommands(s, verb) {
+				auth := commandFlagValue(c, "--authorization-type")
+				if auth == "" || auth == "NONE" || auth == "none" {
+					if adjacentMarker(t, f, regexp.MustCompile(regexp.QuoteMeta(verb)), c, "authz-none-ok:") {
+						continue
+					}
+				}
+				switch auth {
+				case "":
+					t.Errorf("%s runs `aws %s` with no --authorization-type:\n  %s\n"+
+						"  The API defaults to NONE when the flag is absent, so this creates a "+
+						"PUBLIC unauthenticated route. Name an authorizer explicitly.", f, verb, c)
+				case "NONE", "none":
+					t.Errorf("%s creates an API Gateway route with --authorization-type NONE:\n  %s\n"+
+						"  That is a public unauthenticated entry point. The DNS updater is reached "+
+						"through its Function URL with AuthType: AWS_IAM (#173); a REST API in front "+
+						"of it was removed in #870.", f, c)
+				}
+			}
+		}
+	}
+}
+
+// commandFlagValue returns the token after flag in a joined command, or "" if
+// the flag is absent. The NEXT token specifically — a flag's value is never
+// anywhere else on the line, and treating "appears later" as "is the value" is
+// how a gate ends up with forty false positives (CLAUDE.md rule 6).
+func commandFlagValue(cmd, flag string) string {
+	f := strings.Fields(cmd)
+	for i, w := range f {
+		if w == flag && i+1 < len(f) {
+			return strings.Trim(f[i+1], `"'`)
+		}
+	}
+	return ""
 }

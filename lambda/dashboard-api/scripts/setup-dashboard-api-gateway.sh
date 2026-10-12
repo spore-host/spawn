@@ -75,6 +75,12 @@ echo -e "  ${GREEN}✓${NC} Integration created: $INTEGRATION_ID"
 
 # Create catch-all route
 echo "→ Creating routes..."
+# authz-none-ok: the edge is intentionally open and the HANDLER authenticates.
+# lambda/dashboard-api/auth.go verifies every request via getUserFromRequest
+# (API Gateway IAM identity) or getUserFromCredentialsHeader, and Slack requests
+# via verifySlackRequest's HMAC over v0:{ts}:{body}. Checked 2026-10-12. If that
+# handler-side check is ever removed, attach a JWT/IAM authorizer here instead of
+# deleting this comment.
 ROUTE_ID=$(aws apigatewayv2 create-route \
     --profile "$PROFILE" \
     --region "$REGION" \

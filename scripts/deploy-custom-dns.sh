@@ -431,126 +431,53 @@ aws logs put-retention-policy \
 info "Stamped spawn:version=$SPAWN_VERSION"
 echo ""
 
-# Step 5: Create API Gateway
-echo "Step 5: Creating API Gateway..."
-
-API_NAME="spawn-dns-api"
-
-# Check if API already exists
-API_ID=$(aws apigateway get-rest-apis \
-  --query "items[?name=='$API_NAME'].id" \
-  --output text)
-
-if [ -z "$API_ID" ]; then
-  info "Creating REST API: $API_NAME"
-
-  API_ID=$(aws apigateway create-rest-api \
-    --name "$API_NAME" \
-    --description "DNS update API for spawn instances" \
-    --query 'id' \
-    --output text)
-
-  info "API created: $API_ID"
+# The invocation path is the Lambda FUNCTION URL, not an API Gateway.
+#
+# Steps 5 and 6 used to create a REST API here — `spawn-dns-api`, with
+# `POST /update-dns` at `--authorization-type NONE` — plus an
+# `apigateway-invoke` permission on the function. All of it is removed (#870).
+#
+# It predated #173, which moved the updater to a Function URL with
+# `AuthType: AWS_IAM` and rewrote the handler to take a
+# LambdaFunctionURLRequest. The API Gateway section was never deleted, so this
+# script went on building infrastructure for an architecture the function no
+# longer has:
+#
+#   - the integration could not work. API Gateway REST sends an
+#     APIGatewayProxyRequest and expects a matching response shape, so a POST
+#     returned 502 rather than a handler response. Verified against the resource
+#     this script created on 2026-10-12, before it was deleted again.
+#   - it was a PUBLIC, UNAUTHENTICATED endpoint into the DNS updater. It could
+#     not write DNS (the 502 above), but it did invoke a billable function and
+#     was one handler-signature change away from being live.
+#   - nothing consumed it. Neither /spawn/dns/* SSM parameter was set, and
+#     spored registers through the Function URL.
+#
+# Read the Function URL off the function rather than constructing it: AWS
+# assigns it and it cannot be derived from the function name.
+#
+# A function with no Function URL configured is a real state this script must
+# REPORT rather than abort on — the warn branch below says spored cannot register
+# DNS without one. Aborting here would make a recoverable misconfiguration look
+# like a deploy failure, after the code has already shipped. Kept on one line so
+# the marker sits immediately above the call, which is the only place the gate in
+# scripts/deploy_scripts_test.go honours it.
+# swallow-ok: absent Function URL is reported by the warn branch below, not fatal
+FUNCTION_URL=$(aws lambda get-function-url-config --function-name "$FUNCTION_NAME" --query 'FunctionUrl' --output text 2>/dev/null || true)
+if [ -z "$FUNCTION_URL" ] || [ "$FUNCTION_URL" = "None" ]; then
+  warn "no Function URL on $FUNCTION_NAME — spored cannot register DNS without one"
+  FUNCTION_URL="(none configured)"
 else
-  warn "API Gateway $API_NAME already exists: $API_ID"
+  FUNCTION_URL_AUTH=$(aws lambda get-function-url-config \
+    --function-name "$FUNCTION_NAME" \
+    --query 'AuthType' --output text 2>/dev/null || echo UNKNOWN)
+  info "Function URL: $FUNCTION_URL (AuthType: $FUNCTION_URL_AUTH)"
+  if [ "$FUNCTION_URL_AUTH" != "AWS_IAM" ]; then
+    warn "AuthType is $FUNCTION_URL_AUTH, not AWS_IAM. The updater namespaces every"
+    warn "record under the SigV4-verified caller account, so anything other than"
+    warn "AWS_IAM leaves records unanchored to a verified caller (#173)."
+  fi
 fi
-
-# Get root resource ID
-ROOT_ID=$(aws apigateway get-resources \
-  --rest-api-id "$API_ID" \
-  --query 'items[?path==`/`].id' \
-  --output text)
-
-info "Root resource: $ROOT_ID"
-
-# Check if /update-dns resource exists
-RESOURCE_ID=$(aws apigateway get-resources \
-  --rest-api-id "$API_ID" \
-  --query "items[?pathPart=='update-dns'].id" \
-  --output text)
-
-if [ -z "$RESOURCE_ID" ]; then
-  info "Creating /update-dns resource..."
-
-  RESOURCE_ID=$(aws apigateway create-resource \
-    --rest-api-id "$API_ID" \
-    --parent-id "$ROOT_ID" \
-    --path-part "update-dns" \
-    --query 'id' \
-    --output text)
-
-  info "Resource created: $RESOURCE_ID"
-else
-  warn "Resource /update-dns already exists: $RESOURCE_ID"
-fi
-
-# Create POST method
-if ! aws apigateway get-method \
-  --rest-api-id "$API_ID" \
-  --resource-id "$RESOURCE_ID" \
-  --http-method POST &>/dev/null; then
-
-  info "Creating POST method..."
-
-  aws apigateway put-method \
-    --rest-api-id "$API_ID" \
-    --resource-id "$RESOURCE_ID" \
-    --http-method POST \
-    --authorization-type NONE \
-    --no-api-key-required \
-    > /dev/null
-
-  info "POST method created"
-else
-  warn "POST method already exists"
-fi
-
-# Create Lambda integration
-info "Creating Lambda integration..."
-
-aws apigateway put-integration \
-  --rest-api-id "$API_ID" \
-  --resource-id "$RESOURCE_ID" \
-  --http-method POST \
-  --type AWS_PROXY \
-  --integration-http-method POST \
-  --uri "arn:aws:apigateway:$REGION:lambda:path/2015-03-31/functions/$LAMBDA_ARN/invocations" \
-  > /dev/null
-
-info "Lambda integration created"
-
-# Grant API Gateway permission to invoke Lambda
-info "Granting API Gateway permission to invoke Lambda..."
-
-# Remove old permission if exists
-aws lambda remove-permission \
-  --function-name "$FUNCTION_NAME" \
-  --statement-id apigateway-invoke &>/dev/null || true # swallow-ok: idempotent cleanup; the permission may not exist yet
-
-# Add new permission
-aws lambda add-permission \
-  --function-name "$FUNCTION_NAME" \
-  --statement-id apigateway-invoke \
-  --action lambda:InvokeFunction \
-  --principal apigateway.amazonaws.com \
-  --source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*" \
-  > /dev/null
-
-info "Permission granted"
-echo ""
-
-# Step 6: Deploy API
-echo "Step 6: Deploying API to production..."
-
-aws apigateway create-deployment \
-  --rest-api-id "$API_ID" \
-  --stage-name prod \
-  --description "Deployment $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  > /dev/null
-
-API_ENDPOINT="https://$API_ID.execute-api.$REGION.amazonaws.com/prod/update-dns"
-
-info "API deployed to: $API_ENDPOINT"
 echo ""
 
 # Summary
@@ -559,25 +486,24 @@ echo "  Deployment Complete!"
 echo "========================================="
 echo ""
 echo "Configuration:"
-echo "  Domain:       $DOMAIN"
-echo "  Hosted Zone:  $HOSTED_ZONE_ID"
-echo "  API Endpoint: $API_ENDPOINT"
+echo "  Domain:        $DOMAIN"
+echo "  Hosted Zone:   $HOSTED_ZONE_ID"
+echo "  Function URL:  $FUNCTION_URL"
 echo ""
 echo "Next Steps:"
 echo ""
 echo "1. Verify DNS delegation (if not already done):"
 echo "   dig NS $DOMAIN"
 echo ""
-echo "2. Configure SSM parameters for auto-discovery:"
-echo "   aws ssm put-parameter \\"
-echo "     --name \"/spawn/dns/domain\" \\"
-echo "     --value \"$DOMAIN\" \\"
-echo "     --type String"
+echo "2. (Optional) Publish the domain for CLI auto-discovery:"
+echo "   aws ssm put-parameter --region $REGION --type String \\"
+echo "     --name \"/spawn/dns/domain\" --value \"$DOMAIN\""
 echo ""
-echo "   aws ssm put-parameter \\"
-echo "     --name \"/spawn/dns/api_endpoint\" \\"
-echo "     --value \"$API_ENDPOINT\" \\"
-echo "     --type String"
+echo "   /spawn/dns/api_endpoint is deliberately NOT suggested. pkg/config reads"
+echo "   it, but the CLI path consuming it posts UNSIGNED and still sends the"
+echo "   PKCS#7 identity fields #173 removed, so pointing it at the Function URL"
+echo "   yields a 403 rather than a working registration. Tracked separately."
+echo "   spored registers in-instance with SigV4 and is unaffected."
 echo ""
 echo "3. Test the deployment:"
 echo "   spawn launch --dns test --ttl 1h"
