@@ -41,6 +41,10 @@ type DNSUpdateRequest struct {
 	JobArrayID                string `json:"job_array_id,omitempty"`   // Optional: for group DNS
 	JobArrayName              string `json:"job_array_name,omitempty"` // Optional: for group DNS
 	AccountName               string `json:"account_name,omitempty"`   // Optional: DNS-safe account-name slug for the alias FQDN (#121)
+	// Lease asks the updater to stamp a renewal lease beside the record (see
+	// lease.go). Sent ONLY by a client that will keep renewing — set via
+	// SetRenewing — because a lease that is never renewed expires its record.
+	Lease bool `json:"lease,omitempty"`
 }
 
 // DNSUpdateResponse represents the response from the DNS API
@@ -60,6 +64,12 @@ type Client struct {
 	domain      string
 	apiEndpoint string
 	accountName string // DNS-safe account-name slug; included in requests for the alias FQDN (#121)
+	// renewing is whether this client's owner will re-register on a timer, and
+	// therefore whether a registration may carry a lease. False by default and set
+	// only by spored's agent: `spawn dns register` uses this same client for a
+	// one-shot registration, and a lease it never renewed would expire a live
+	// record LeaseMaxAge later.
+	renewing bool
 
 	// SigV4 signing (#173). When sign is true, callAPI SigV4-signs the POST with
 	// the instance role's credentials so the DNS Lambda Function URL can run under
@@ -79,6 +89,11 @@ type Client struct {
 // updater registers the friendly alias FQDN ({record}.{account-name}.{domain}).
 // Empty (the default) means base36 only.
 func (c *Client) SetAccountName(slug string) { c.accountName = slug }
+
+// SetRenewing declares that the caller will re-register at LeaseRefreshInterval
+// for as long as the record should exist, so registrations may carry a lease.
+// Only call this from something that actually renews — see the renewing field.
+func (c *Client) SetRenewing(renewing bool) { c.renewing = renewing }
 
 // NewClient creates a new DNS client with optional custom domain and API endpoint
 // If domain or apiEndpoint are empty, defaults are used
@@ -176,6 +191,7 @@ func (c *Client) RegisterDNS(ctx context.Context, recordName, ipAddress string) 
 		Action:                    "UPSERT",
 		Domain:                    c.domain,
 		AccountName:               c.accountName,
+		Lease:                     c.renewing,
 	}
 
 	return c.callAPI(ctx, req)
@@ -225,6 +241,7 @@ func (c *Client) RegisterJobArrayDNS(ctx context.Context, recordName, ipAddress,
 		Action:                    "UPSERT",
 		Domain:                    c.domain,
 		AccountName:               c.accountName,
+		Lease:                     c.renewing,
 		JobArrayID:                jobArrayID,
 		JobArrayName:              jobArrayName,
 	}

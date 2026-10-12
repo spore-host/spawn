@@ -172,6 +172,12 @@ type reaper struct {
 	// a class of records it has never touched. See expiry.go.
 	registry  registryAPI
 	expireDNS bool
+
+	// DNS lease expiry (opt-in via REAPER_DNS_LEASE_EXPIRE; see lease_expiry.go).
+	// Separate from expireDNS for the same reason expireDNS is separate from
+	// sweepDNS: an existing flag must never become destructive for a new class of
+	// record on upgrade. Needs the sweep on, like expireDNS.
+	expireLeases bool
 }
 
 // route53API is the slice of *route53.Client the reaper uses: it lists record sets
@@ -228,6 +234,7 @@ func init() {
 		dnsDomain:    strings.TrimSpace(os.Getenv("REAPER_DNS_DOMAIN")),
 		sweepDNS:     strings.EqualFold(os.Getenv("REAPER_DNS_SWEEP"), "true"),
 		expireDNS:    strings.EqualFold(os.Getenv("REAPER_DNS_EXPIRE"), "true"),
+		expireLeases: strings.EqualFold(os.Getenv("REAPER_DNS_LEASE_EXPIRE"), "true"),
 		netResources: parseNetResources(os.Getenv("REAPER_NET_RESOURCES")),
 	}
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
@@ -257,8 +264,12 @@ func init() {
 		log.Printf("REAPER_DNS_EXPIRE=true but the DNS sweep is off — expiry disabled (it runs inside the sweep)")
 		r.expireDNS = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, net-resources=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.netResources)
+	if r.expireLeases && !r.sweepDNS {
+		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
+		r.expireLeases = false
+	}
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -528,7 +539,17 @@ type Summary struct {
 	// something else entirely.
 	DNSExpiryEligible   int `json:"dns_expiry_eligible"`
 	DNSExpiryIneligible int `json:"dns_expiry_ineligible"`
-	DNSExpiredRecords   int `json:"dns_expired_records"`
+
+	// DNS leases (lease_expiry.go). Stale-but-not-Expired is the healthy reading
+	// while REAPER_DNS_LEASE_EXPIRE is off: it is how an operator sees what arming
+	// it would do. Covered counts leases left to the instance sweep.
+	DNSLeasesFresh       int `json:"dns_leases_fresh"`
+	DNSLeasesStale       int `json:"dns_leases_stale"`
+	DNSLeasesExpired     int `json:"dns_leases_expired"`
+	DNSLeasesOrphaned    int `json:"dns_leases_orphaned"`
+	DNSLeasesUnparseable int `json:"dns_leases_unparseable"`
+	DNSLeasesCovered     int `json:"dns_leases_covered"`
+	DNSExpiredRecords    int `json:"dns_expired_records"`
 }
 
 // candidate is an instance the reaper decided should die, with the reason.
@@ -673,6 +694,7 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 	// it needs the full configured set to diff against.
 	if r.sweepDNS {
 		r.reportUnmanagedSubdomains(ctx, &sum, start)
+		r.reportLeases(ctx, &sum, start)
 	}
 
 	log.Printf("ttl-reaper done in %s: %+v", time.Since(start).Round(time.Millisecond), sum)

@@ -90,6 +90,7 @@ there and appending its ARN to the list.
 | `REAPER_DNS_DOMAIN` | (empty) | Domain for the zone above (e.g. `spore.host`); both empty = DNS teardown disabled |
 | `REAPER_DNS_SWEEP` | `false` | With a zone configured, also run a **DNS reconciliation sweep** (#438): delete `{base36}.{domain}` A-records whose IP has no live instance — catches records orphaned by abrupt exits the #247 teardown can't. Honors `REAPER_DRY_RUN`. Also emits the **unmanaged-subdomain** report (#457) |
 | `REAPER_DNS_EXPIRE` | `false` | With the sweep on, **delete** the A-records under an unmanaged subdomain whose account the portal registry has proven `dormant` or `offboarded` ([#466]). Requires `REAPER_DNS_SWEEP` (the walk runs inside the sweep) and honors `REAPER_DRY_RUN`. Read the report before enabling — see [DNS expiry](#dns-expiry-466) |
+| `REAPER_DNS_LEASE_EXPIRE` | `false` | With the sweep on, **delete** an A-record under an account subdomain this reaper does **not** cover when its owner has stopped renewing its DNS lease for longer than `pkg/dns.LeaseMaxAge` (6h), plus the lease itself, and any lease whose A-record is already gone. The only backstop for a record left by an abruptly terminated instance in an account the reaper holds no credentials in. Records with no lease (every spored before leases) and records in covered accounts are never touched. Requires `REAPER_DNS_SWEEP`, honors `REAPER_DRY_RUN`. See [DNS leases](#dns-leases) |
 | `REAPER_NET_RESOURCES` | `report` | Reclaim spawn-managed **security groups** and **cluster placement groups** with no instance referencing them, older than **7 days** ([#685]). `report` logs what it *would* reclaim and deletes nothing; `reap` deletes; `off` skips the sweep entirely. Three values and **not** folded into `REAPER_DRY_RUN` on purpose — production runs with the dry run off, so a boolean would arm a new destructive sweep on upgrade and the only preview would be disarming the live instance reaper. A typo resolves to `report`; `REAPER_DRY_RUN` always wins |
 | `ACCOUNTS_TABLE` | `spore-portal-accounts` | The portal registry supplying the expiry verdict. Read-only: the reaper only `Scan`s it, and the prober owns every write |
 
@@ -248,6 +249,39 @@ The reaper holds `dynamodb:Scan` on the registry and nothing else — no
 it impossible for a reaper bug to manufacture the eligibility it then acts on. If
 the `Scan` fails, or the account has no row, expiry refuses and says so
 (`no registry verdicts available … nothing was deleted`).
+
+
+## DNS leases
+
+The DNS sweep and DNS expiry both work by asking about the instance behind a record,
+and both need credentials in the account that owns it. For an account the reaper does
+not cover, neither can run, and a record left by an instance that was terminated
+abruptly — console, spot reclaim, crash, anything that skips spored's cleanup — keeps
+pointing at its IP after AWS hands that IP to someone else.
+
+A **lease** lets the zone answer instead. A spored that supports it re-registers about
+hourly, and the DNS updater stamps each registration's time into a TXT record,
+`_spore-lease.<record>`, written atomically with the A-record and only under the
+SigV4-verified caller's own namespace. A record whose lease has gone unrenewed for six
+hours has been abandoned by its owner.
+
+What the reaper does with that, in order of how much it matters:
+
+- **Reports always.** `dns_leases_stale` is what arming would expire; `dns_leases_orphaned`
+  is leases whose A-record is already gone.
+- **Acts only with `REAPER_DNS_LEASE_EXPIRE=true`**, which arrives off.
+- **Only for accounts it does not cover.** Where the reaper has credentials, the
+  `DescribeInstances` sweep is authoritative, and a stale lease there most likely means a
+  hung spored on a live instance. `dns_leases_covered` counts those, untouched.
+- **Never a record without a lease.** Every spored released before leases registers
+  once and never renews; the updater writes no lease for it, and clears an inherited one
+  if a non-renewing client re-registers a name, so such records behave exactly as before.
+- **Never an unparseable lease.** It is reported and left.
+- **Re-reads the lease immediately before deleting**, so a renewal that lands mid-run wins.
+- **A-records and the lease only**, never the alias CNAMEs — a dangling CNAME resolves to
+  nothing, a dangling A-record resolves to a stranger.
+
+A wrongly expired record self-heals: its spored re-registers within the hour.
 
 ## Failure observability ([#469])
 

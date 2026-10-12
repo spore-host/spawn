@@ -33,6 +33,14 @@ type DNSUpdateRequest struct {
 	// CNAME {record}.{account-name}.{domain} -> the canonical base36 A-record, so
 	// the legible FQDN resolves. Empty => base36 only (unchanged behavior).
 	AccountName string `json:"account_name,omitempty"`
+	// Lease is the client's promise to renew this registration on a timer
+	// (pkg/dns.LeaseRefreshInterval). When true the updater stamps a lease beside
+	// the record, and a record whose lease goes unrenewed can be expired without
+	// credentials in the owning account. When false — every client older than this
+	// field — no lease is written and any existing one is cleared, so the record is
+	// never expired by lease. Opt-in by the client because only the client knows
+	// whether it will renew.
+	Lease bool `json:"lease,omitempty"`
 	// Note (#173): instance_identity_document / _signature were removed — the
 	// caller is now authenticated by SigV4 (AuthType: AWS_IAM) and the record is
 	// namespaced under the verified caller account, not anything in the body.
@@ -251,7 +259,7 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 	}
 
 	if req.Action == "UPSERT" {
-		changeID, err = upsertDNSRecord(ctx, fqdn, req.IPAddress, zoneID)
+		changeID, err = upsertDNSRecord(ctx, fqdn, req.IPAddress, zoneID, req.Lease)
 		if err != nil {
 			return errorResponse(500, fmt.Sprintf("Failed to update DNS: %v", err))
 		}
@@ -266,6 +274,13 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 		}
 	} else {
 		changeID, err = deleteDNSRecord(ctx, fqdn, zoneID)
+		if err == nil {
+			// The lease describes a record that no longer exists. Non-fatal: the
+			// reaper deletes a lease whose A-record is gone.
+			if lerr := removeLease(ctx, fqdn, zoneID); lerr != nil {
+				fmt.Printf("warning: record %s deleted but its lease was not: %v\n", fqdn, lerr)
+			}
+		}
 		if err != nil {
 			return errorResponse(500, fmt.Sprintf("Failed to delete DNS: %v", err))
 		}
@@ -297,31 +312,43 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 	}, nil
 }
 
-func upsertDNSRecord(ctx context.Context, fqdn, ipAddress, zoneID string) (string, error) {
-	comment := fmt.Sprintf("Updated by spawn instance at %s", time.Now().UTC().Format(time.RFC3339))
+func upsertDNSRecord(ctx context.Context, fqdn, ipAddress, zoneID string, lease bool) (string, error) {
+	now := time.Now().UTC()
+	comment := fmt.Sprintf("Updated by spawn instance at %s", now.Format(time.RFC3339))
+
+	changes := []types.Change{
+		{
+			Action: types.ChangeActionUpsert,
+			ResourceRecordSet: &types.ResourceRecordSet{
+				Name: aws.String(fqdn),
+				Type: types.RRTypeA,
+				TTL:  aws.Int64(defaultTTL),
+				ResourceRecords: []types.ResourceRecord{
+					{Value: aws.String(ipAddress)},
+				},
+			},
+		},
+	}
+	// The lease rides in the SAME batch as the A-record, which Route53 applies
+	// atomically: the record and its renewal are written together or not at all.
+	if lease {
+		changes = append(changes, leaseChange(fqdn, now))
+	}
 
 	output, err := route53Client.ChangeResourceRecordSets(ctx, &route53.ChangeResourceRecordSetsInput{
 		HostedZoneId: aws.String(zoneID),
 		ChangeBatch: &types.ChangeBatch{
 			Comment: aws.String(comment),
-			Changes: []types.Change{
-				{
-					Action: types.ChangeActionUpsert,
-					ResourceRecordSet: &types.ResourceRecordSet{
-						Name: aws.String(fqdn),
-						Type: types.RRTypeA,
-						TTL:  aws.Int64(defaultTTL),
-						ResourceRecords: []types.ResourceRecord{
-							{Value: aws.String(ipAddress)},
-						},
-					},
-				},
-			},
+			Changes: changes,
 		},
 	})
 	if err != nil {
 		return "", err
 	}
+
+	// A non-renewing writer must not inherit a renewing writer's lease, or the
+	// record expires under a live instance. See clearLeaseIfUnrenewed.
+	clearLeaseIfUnrenewed(ctx, fqdn, zoneID, lease)
 
 	return aws.ToString(output.ChangeInfo.Id), nil
 }
