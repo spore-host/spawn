@@ -82,6 +82,15 @@ echo "  Domain:      $DOMAIN"
 echo "  Region:      $REGION"
 echo ""
 
+# Make REGION actually bind, rather than being parsed, printed and then ignored.
+#
+# Most `aws` calls below carried no --region, so they used whatever was ambient
+# while this script printed the region it believed it was deploying to. That is
+# how a second scheduler-handler came to exist in us-west-2 while the stale one
+# kept serving traffic from us-east-1 (#716). Exporting it fixes every call at
+# once, including the ones added later.
+export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
+
 # Get AWS account ID
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 info "AWS Account: $ACCOUNT_ID"
@@ -123,7 +132,19 @@ echo ""
 # Step 2: Create IAM role
 echo "Step 2: Creating IAM role..."
 
-ROLE_NAME="SpawnDNSLambdaRole"
+# The role the LIVE function runs under, read off the function rather than named
+# from memory.
+#
+# This said SpawnDNSLambdaRole, which does not exist in the infra account at all.
+# spawn-dns-updater runs under SpawnDNSLambdaExecutionRole. So every IAM
+# permission this script granted went to a role it created for the purpose and
+# nothing used, while the function kept running under a different role whose
+# policies live only in the account — and the script reported success either way.
+# A grant added here for a new feature would simply not have taken effect.
+#
+# Overridable, because an operator deploying their own custom-DNS stack in their
+# own account has no reason to inherit spore.host's role name.
+ROLE_NAME="${SPAWN_DNS_ROLE_NAME:-SpawnDNSLambdaExecutionRole}"
 
 # Check if role exists
 if aws iam get-role --role-name "$ROLE_NAME" &>/dev/null; then
@@ -212,6 +233,50 @@ aws iam put-role-policy \
 
 rm /tmp/spawn-lambda-policy.json
 info "IAM policy attached"
+
+# The account-registry read, for caller AUTHORIZATION (#835).
+#
+# Its own inline policy rather than another statement in the one above, so that
+# the single grant allowing this function to read customer records can be audited
+# and revoked on its own.
+#
+# Scoped three ways, and the third one is load-bearing:
+#
+#   - to the one table;
+#   - to the one attribute, via the dynamodb:Attributes condition key (a
+#     DynamoDB key on a dynamodb: action — the pairing that #665 got wrong by
+#     putting ec2:ResourceTag on an ssm: action and earning a silent implicit
+#     deny);
+#   - to Select=SPECIFIC_ATTRIBUTES, WITHOUT which the attribute scoping does
+#     nothing. ForAllValues:StringEquals is true for an EMPTY set, so a Scan that
+#     names no attributes at all satisfies it and returns every field of every
+#     item. This is the same trap as ForAllValues:StringNotEquals on aws:TagKeys
+#     being defeated by one innocuous tag. Pinning Select is what makes a
+#     full-table read a denial rather than a loophole.
+DNS_ACCOUNTS_TABLE="${DNS_ACCOUNTS_TABLE:-spawn-user-accounts}"
+cat > /tmp/spawn-dns-registry-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAccountRegistryForCallerAuthorization",
+      "Effect": "Allow",
+      "Action": "dynamodb:Scan",
+      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${DNS_ACCOUNTS_TABLE}",
+      "Condition": {
+        "StringEquals": { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["aws_account_id"] }
+      }
+    }
+  ]
+}
+EOF
+aws iam put-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "SpawnDNSAccountRegistryRead" \
+  --policy-document file:///tmp/spawn-dns-registry-policy.json
+rm /tmp/spawn-dns-registry-policy.json
+info "Account-registry read policy attached (table: $DNS_ACCOUNTS_TABLE)"
 echo ""
 
 # Step 4: Create or update Lambda function
@@ -219,20 +284,93 @@ echo "Step 4: Deploying Lambda function..."
 
 FUNCTION_NAME="spawn-dns-updater"
 
+# Build the environment by MERGING into the deployed one, never replacing it.
+#
+# `--environment` replaces the entire variable map. The update path below passed
+# Variables={HOSTED_ZONE_ID=...,DOMAIN=...}, so running this script against the
+# live function would have deleted DOMAIN_ZONES — the only variable it actually
+# has, and the one main.go prefers — leaving it on the legacy single-zone
+# fallback. It would also have silently dropped DNS_AUTHZ_MODE, i.e. turned
+# #835's enforcement off as a side effect of shipping unrelated code. That is the
+# #716 shape: a deploy quietly reverting configuration it never meant to touch.
+#
+# DOMAIN_ZONES is merged key-by-key rather than overwritten, so deploying one
+# domain cannot unregister the others in a multi-domain map. DOMAIN is no longer
+# written: main.go reads DEFAULT_DOMAIN, never DOMAIN, so the old variable was
+# inert.
+merge_lambda_env() {
+  # stdin: deployed Variables map as JSON. args: KEY=VALUE to set.
+  python3 -c '
+import json, sys
+try:
+    cur = json.load(sys.stdin) or {}
+except Exception:
+    cur = {}
+if not isinstance(cur, dict):
+    cur = {}
+for kv in sys.argv[1:]:
+    k, _, v = kv.partition("=")
+    if k == "DOMAIN_ZONES":
+        zones = {}
+        for e in (cur.get("DOMAIN_ZONES") or "").split(","):
+            d, _, z = e.strip().partition("=")
+            if d and z:
+                zones[d] = z
+        for e in v.split(","):
+            d, _, z = e.strip().partition("=")
+            if d and z:
+                zones[d] = z
+        cur["DOMAIN_ZONES"] = ",".join(f"{d}={z}" for d, z in sorted(zones.items()))
+    else:
+        cur[k] = v
+print(json.dumps({"Variables": cur}))
+' "$@"
+}
+
+# Only variables the operator actually set are passed through, so an unset
+# DNS_AUTHZ_MODE leaves the deployed value alone instead of clearing it.
+ENV_ARGS=(
+  "DOMAIN_ZONES=${DOMAIN}=${HOSTED_ZONE_ID}"
+  "DEFAULT_DOMAIN=${DOMAIN}"
+  "HOSTED_ZONE_ID=${HOSTED_ZONE_ID}"
+)
+for passthrough in DNS_AUTHZ_MODE DNS_ALLOWED_ACCOUNTS DNS_ACCOUNTS_TABLE; do
+  if [ -n "${!passthrough:-}" ]; then
+    ENV_ARGS+=("${passthrough}=${!passthrough}")
+  fi
+done
+
 # Check if function exists
 if aws lambda get-function --function-name "$FUNCTION_NAME" &>/dev/null; then
   warn "Lambda function $FUNCTION_NAME already exists, updating code..."
+
+  DEPLOYED_ENV=$(aws lambda get-function-configuration \
+    --function-name "$FUNCTION_NAME" \
+    --query 'Environment.Variables' --output json)
+  if [ -z "$DEPLOYED_ENV" ] || [ "$DEPLOYED_ENV" = "null" ]; then
+    DEPLOYED_ENV='{}'
+  fi
+  MERGED_ENV=$(printf '%s' "$DEPLOYED_ENV" | merge_lambda_env "${ENV_ARGS[@]}")
 
   aws lambda update-function-code \
     --function-name "$FUNCTION_NAME" \
     --zip-file fileb://lambda/dns-updater/function.zip \
     > /dev/null
+  aws lambda wait function-updated --function-name "$FUNCTION_NAME"
 
-  info "Updating configuration..."
+  # --runtime on every deploy, not only on create.
+  #
+  # update-function-code does not change the runtime and --runtime appears only
+  # in the create path, which never runs for an existing function. So a script
+  # can declare provided.al2023 and redeploy forever while the function stays on
+  # provided.al2 — exactly what happened to scheduler-handler (#716).
+  info "Updating configuration (runtime + merged environment)..."
   aws lambda update-function-configuration \
     --function-name "$FUNCTION_NAME" \
-    --environment Variables="{HOSTED_ZONE_ID=$HOSTED_ZONE_ID,DOMAIN=$DOMAIN}" \
+    --runtime provided.al2023 \
+    --environment "$MERGED_ENV" \
     > /dev/null
+  aws lambda wait function-updated --function-name "$FUNCTION_NAME"
 
   info "Lambda function updated"
 else
@@ -246,7 +384,7 @@ else
     --zip-file fileb://lambda/dns-updater/function.zip \
     --timeout 30 \
     --memory-size 256 \
-    --environment Variables="{HOSTED_ZONE_ID=$HOSTED_ZONE_ID,DOMAIN=$DOMAIN}" \
+    --environment "$(printf '{}' | merge_lambda_env "${ENV_ARGS[@]}")" \
     --description "DNS updater for spawn managed instances" \
     > /dev/null
 

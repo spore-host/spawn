@@ -241,16 +241,182 @@ func TestDeployScriptsDoNotTakeRegionFromAWSREGION(t *testing.T) {
 	}
 }
 
-// `--environment "Variables={}"` on an update REPLACES the function's
-// environment with nothing. It is indistinguishable from a no-op on a function
-// that has no variables set, which is why it survived.
-func TestDeployScriptsDoNotWipeTheEnvironment(t *testing.T) {
-	for _, f := range deployingScripts(t) {
+// `--environment` on update-function-configuration REPLACES the whole variable
+// map, so a LITERAL map is unconditionally destructive on an update path.
+//
+// The first version of this gate matched only `Variables={}` — the empty map.
+// That was the anecdote, not the mechanism: the bug it was written for happened
+// to wipe the environment to nothing, and "wipes it to nothing" is the memorable
+// half. deploy-custom-dns.sh passed
+// `Variables={HOSTED_ZONE_ID=$HOSTED_ZONE_ID,DOMAIN=$DOMAIN}` against a live
+// function whose only variable was DOMAIN_ZONES, and sailed through: non-empty,
+// so not `{}`, and just as destructive. It would also have silently cleared
+// DNS_AUTHZ_MODE, turning off #835's enforcement as a side effect of shipping
+// unrelated code. CLAUDE.md rule 6 — gate the mechanism (a literal cannot
+// preserve anything) rather than a correlate of it (the literal was empty).
+//
+// The permitted form is a shell variable built from a prior read of the deployed
+// map, so both halves are checked: no literal, and the read must exist.
+//
+// Replacing IS right for a script that is meant to be the declarative source of
+// truth for its function's configuration — deploy-scheduler-handler.sh argues
+// exactly that, and the argument holds (the live function carries only the two
+// variables that script sets, checked). So the property gated here is not "never
+// replace" but "replacing is a decision that has to be stated next to the call",
+// via an `env-replace-ok:` marker in the adjacent comment. Same shape as the
+// `swallow-ok:` marker this repo already uses for a deliberate `|| true`, and
+// adjacency is the point: a marker anywhere in the file would licence every call
+// in it.
+func TestDeployScriptsDoNotReplaceTheEnvironmentOnUpdate(t *testing.T) {
+	for _, f := range lambdaDeployingScripts(t) {
 		s := readRel(t, f)
-		if strings.Contains(s, "Variables={}") {
-			t.Errorf("%s passes Variables={} — that wipes the live environment, it does not preserve it", f)
+		cmds := awsCommands(s, "update-function-configuration")
+		for _, c := range cmds {
+			if !strings.Contains(c, "--environment") {
+				continue
+			}
+			if !envLiteral.MatchString(c) {
+				if !strings.Contains(s, "Environment.Variables") {
+					t.Errorf("%s passes --environment on an update but never reads the deployed "+
+						"Environment.Variables, so it cannot be preserving them", f)
+				}
+				continue
+			}
+			if deliberateEnvReplace(t, f, c) {
+				continue
+			}
+			t.Errorf("%s passes a literal Variables={...} to update-function-configuration:\n"+
+				"  %s\n"+
+				"  --environment REPLACES the entire map, so this deletes every variable not "+
+				"named here, including any set out of band. Either read the deployed map with "+
+				"`get-function-configuration --query 'Environment.Variables'` and merge, or — if "+
+				"this script is deliberately the source of truth for that function's config — say "+
+				"so with an `env-replace-ok: <reason>` comment beside the call.", f, c)
 		}
 	}
+}
+
+// envLiteral matches an inline variable map, quoted or not.
+var envLiteral = regexp.MustCompile(`--environment\s+"?Variables=\{`)
+
+// deliberateEnvReplace reports whether the comment block adjacent to the call
+// carrying the literal declares the replacement intentional.
+//
+// Adjacency is enforced by walking UP from the --environment line through the
+// rest of the command, blank lines and comments, and stopping at the first line
+// that is none of those — so the marker has to be attached to this call rather
+// than to the file.
+func deliberateEnvReplace(t *testing.T, rel, cmd string) bool {
+	t.Helper()
+	// The RAW file, not read()'s comment-stripped form. read() drops comment lines
+	// on purpose — a gate that scans raw text flags a comment explaining a fixed
+	// bug as the bug (rule 3) — but the marker being looked for here IS a comment,
+	// so this one case has to go around it. The first version of this function
+	// took the stripped text and could never match, while reporting the two
+	// annotated calls as unannotated.
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), rel)) //nolint:gosec // repo's own scripts
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	lines := strings.Split(string(b), "\n")
+	for i, line := range lines {
+		if !envLiteral.MatchString(line) {
+			continue
+		}
+		// Confirm this line belongs to the command being examined, not another.
+		if fn := commandFunctionName(cmd); fn != "" && !commandNear(lines, i, fn) {
+			continue
+		}
+		for j := i - 1; j >= 0 && i-j <= 40; j-- {
+			t := strings.TrimSpace(lines[j])
+			switch {
+			case t == "":
+				continue
+			case strings.HasPrefix(t, "#"):
+				if strings.Contains(t, "env-replace-ok:") {
+					return true
+				}
+			case strings.HasSuffix(t, "\\"), strings.HasPrefix(t, "aws "):
+				continue
+			default:
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// commandFunctionName extracts the --function-name argument, used only to tell
+// two update-function-configuration calls in one script apart.
+func commandFunctionName(cmd string) string {
+	f := strings.Fields(cmd)
+	for i, w := range f {
+		if w == "--function-name" && i+1 < len(f) {
+			return f[i+1]
+		}
+	}
+	return ""
+}
+
+// commandNear reports whether fn appears within a few lines of idx, i.e. in the
+// same invocation.
+func commandNear(lines []string, idx int, fn string) bool {
+	for j := idx - 8; j <= idx+8; j++ {
+		if j >= 0 && j < len(lines) && strings.Contains(lines[j], fn) {
+			return true
+		}
+	}
+	return false
+}
+
+// Attribute-scoped DynamoDB grants must also pin dynamodb:Select.
+//
+// ForAllValues:StringEquals is satisfied by an EMPTY set, so a request naming no
+// attributes at all passes an `ForAllValues:StringEquals dynamodb:Attributes`
+// condition and reads every field of every item. Pinning Select to
+// SPECIFIC_ATTRIBUTES is what turns that from a loophole into a denial — the same
+// family as ForAllValues:StringNotEquals on aws:TagKeys being defeated by one
+// innocuous tag key. Simulated both ways before this gate was written.
+func TestAttributeScopedDynamoGrantsPinSelect(t *testing.T) {
+	checked := 0
+	for _, f := range shellScripts(t) {
+		s := readRel(t, f)
+		if !strings.Contains(s, "dynamodb:Attributes") {
+			continue
+		}
+		checked++
+		if !strings.Contains(s, `"dynamodb:Select": "SPECIFIC_ATTRIBUTES"`) {
+			t.Errorf("%s scopes a DynamoDB grant with dynamodb:Attributes but does not pin "+
+				"dynamodb:Select to SPECIFIC_ATTRIBUTES. ForAllValues is true for an empty set, "+
+				"so a Scan naming no attributes satisfies the condition and returns every "+
+				"field of every item — the attribute scoping is decorative without it.", f)
+		}
+	}
+	// Rule 4: an empty discovery is reported, not silently passed. This gate was
+	// added alongside the only such grant in the tree, so zero matches means that
+	// grant was removed (update this gate deliberately) or the scan has broken.
+	if checked == 0 {
+		t.Error("no script uses dynamodb:Attributes — this gate shipped with the grant in " +
+			"deploy-custom-dns.sh, so either that was removed or this discovery has broken")
+	}
+}
+
+// awsCommands returns each logical `aws ...` command containing verb, with
+// backslash line-continuations joined, so a multi-line invocation is examined as
+// the one command it is rather than as unrelated lines.
+func awsCommands(script, verb string) []string {
+	joined := strings.ReplaceAll(script, "\\\n", " ")
+	var out []string
+	for _, line := range strings.Split(joined, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Contains(line, "aws ") && strings.Contains(line, verb) {
+			out = append(out, strings.Join(strings.Fields(line), " "))
+		}
+	}
+	return out
 }
 
 // "The call returned 200" is not evidence the function runs the new binary.
