@@ -468,6 +468,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn launch --dry-run` never mentioned `--cost-limit`** (#811). The preview
+  printed `Max cost: ~$X (rate × ttl)` — compute only — and said nothing about
+  the cap, so the authoritative-looking cost line sat exactly where a reader
+  would expect to find it. `-o json` omitted it too, so a wrapper reading the
+  plan could not see the ceiling governing the launch it was about to make. The
+  cap and its scope now print beside that number, `Max cost:` says "compute
+  only" out loud since the two lines mean different things, and the plan carries
+  `cost_limit_usd`. `--estimate-only` states it as well, that being the other
+  "what would this cost me" surface.
+
+  The cause is worth recording: `costLimitScopeNote` existed for precisely this,
+  with a doc comment saying it was "used in the launch preview", and its only
+  callers were its own tests. `TestCostLimitScopeNoteStatesTheSplit` opened "the
+  number is shown in the launch preview". Neither was true — so the note never
+  printed and a green test was counted as coverage for behaviour that did not
+  happen. The test was written from the comment, which is right; nobody checked
+  that the comment was.
+
+  Gated in four places, each watched failing against a revert that compiles: the
+  render call removed, the field not populated from the config, the JSON tag
+  dropped, and `omitempty` removed so an unset cap serializes as a `$0` ceiling.
+  The populate-the-field revert initially **passed** the render gate, which is
+  why it has a gate of its own: with the call present but the field always zero,
+  the preview is silent about a cap that is in force, and the symptom is
+  identical.
+
+
 - **`scripts/deploy-custom-dns.sh` was unsafe to run, which is why
   `spawn-dns-updater` had not been deployed since 2026-06-25.** Three separate
   defects, each of which reported success:

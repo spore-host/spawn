@@ -92,13 +92,26 @@ func costLimitPreflight() error {
 	return fmt.Errorf("%s", b.String())
 }
 
-// costLimitScopeNote is the one-line description of what the cap covers, used in the
-// launch preview so the scope is stated where the number is shown rather than only in
-// flag help.
-func costLimitScopeNote() string {
-	if costLimit <= 0 {
+// costLimitScopeNote is the one-line description of what the cap covers, printed in
+// the launch preview so the scope is stated where the number is shown rather than
+// only in flag help.
+//
+// Takes the limit rather than reading the `costLimit` flag global, so that
+// renderLaunchPlanTable stays a pure function of the launchPlan it is handed —
+// every other line in that table comes from the plan, and one line reaching past
+// it to a package global would be the only thing standing between that renderer
+// and a table-driven test.
+//
+// It had no caller but its own test until #811. Its doc comment said it was "used
+// in the launch preview", and TestCostLimitScopeNoteStatesTheSplit opened with
+// "the number is shown in the launch preview"; neither was true, so the note never
+// printed and the green test was counted as coverage for behaviour that did not
+// happen. CLAUDE.md rule 5 in its sharpest form: the test was written from the
+// comment, which is right, but nobody checked that the comment was.
+func costLimitScopeNote(limit float64) string {
+	if limit <= 0 {
 		return ""
 	}
 	return fmt.Sprintf("Cost limit:   $%.2f total (compute + storage; spored stops compute, "+
-		"but storage that outlives the instance is only reclaimed by the reaper)", costLimit)
+		"but storage that outlives the instance is only reclaimed by the reaper)", limit)
 }
