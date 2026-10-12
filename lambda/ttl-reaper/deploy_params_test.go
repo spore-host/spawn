@@ -581,7 +581,7 @@ func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	// These are the parameters whose DEPLOYED value must win. DryRun first because
 	// it is the one that silently stops the reaper terminating anything.
 	for _, k := range []string{
-		"DryRun", "NetResources", "ScanSelf", "DnsSweep", "DnsExpire",
+		"DryRun", "NetResources", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
 	} {

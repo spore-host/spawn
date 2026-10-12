@@ -57,6 +57,8 @@ type Agent struct {
 	lastSessionTagWrite   time.Time // throttle spawn:logged-in-count tag writes
 	lastComputeTagWrite   time.Time // throttle spawn:compute-seconds tag writes
 	lastHeartbeatTagWrite time.Time // throttle spawn:last-heartbeat tag writes (#497)
+	nextDNSRefresh        time.Time // when the DNS lease is next renewed (pkg/dns/lease.go)
+	lastDNSStatus         string    // last spawn:dns-status written, so renewal only re-tags on change
 	computeSecondsBase    int64     // compute-seconds already accumulated before this spored start
 	prevNetRx             int64     // /proc/net/dev RX bytes at last getNetworkBytes call
 	prevNetTx             int64     // /proc/net/dev TX bytes at last getNetworkBytes call
@@ -270,35 +272,22 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 			// the account has no name — base36 only, unchanged.
 			dnsClient.SetAccountName(config.AccountName)
 
-			// Register DNS (use job array method if part of a job array)
-			if config.JobArrayID != "" && config.JobArrayName != "" {
-				log.Printf("Registering job array DNS: %s -> %s (array: %s)",
-					config.DNSName, identity.PublicIP, config.JobArrayName)
-				resp, err := dnsClient.RegisterJobArrayDNS(ctx, config.DNSName, identity.PublicIP,
-					config.JobArrayID, config.JobArrayName)
-				if err != nil {
-					log.Printf("Warning: Failed to register job array DNS: %v", err)
-					agent.recordDNSStatus(ctx, "failed", err.Error())
-				} else {
-					fqdn := dns.GetFullDNSName(config.DNSName, identity.AccountID, dnsDomain)
-					log.Printf("✓ Job array DNS registered: %s -> %s (change: %s)", fqdn, identity.PublicIP, resp.ChangeID)
-					if resp.Message != "" {
-						log.Printf("  %s", resp.Message)
-					}
-					agent.recordDNSStatus(ctx, "registered", "")
-				}
+			// This spored renews its registration on a timer (refreshDNSLease), so
+			// it may ask for a lease. The one-shot `spawn dns register` uses the same
+			// client and must not — see dns.Client.renewing.
+			dnsClient.SetRenewing(true)
+
+			// The SAME registration the renewal timer calls, so boot and renewal
+			// cannot drift apart into two slightly different requests.
+			regErr := agent.registerDNS(ctx)
+			if regErr != nil {
+				agent.recordDNSStatus(ctx, "failed", regErr.Error())
+				agent.lastDNSStatus = "failed"
 			} else {
-				log.Printf("Registering DNS: %s -> %s", config.DNSName, identity.PublicIP)
-				resp, err := dnsClient.RegisterDNS(ctx, config.DNSName, identity.PublicIP)
-				if err != nil {
-					log.Printf("Warning: Failed to register DNS: %v", err)
-					agent.recordDNSStatus(ctx, "failed", err.Error())
-				} else {
-					fqdn := dns.GetFullDNSName(config.DNSName, identity.AccountID, dnsDomain)
-					log.Printf("✓ DNS registered: %s -> %s (change: %s)", fqdn, identity.PublicIP, resp.ChangeID)
-					agent.recordDNSStatus(ctx, "registered", "")
-				}
+				agent.recordDNSStatus(ctx, "registered", "")
+				agent.lastDNSStatus = "registered"
 			}
+			agent.nextDNSRefresh = nextLeaseRefresh(time.Now(), regErr == nil)
 		}
 	} else if activate && config.DNSName != "" && identity.Provider == "local" {
 		log.Printf("DNS registration skipped for local provider")
@@ -474,6 +463,12 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// artifact the workload itself writes. No opt-in flag, unlike the webhooks
 	// above — it costs nothing to a caller who never reads it.
 	a.writeHeartbeatTag(ctx)
+
+	// 0d. Renew the DNS lease (throttled to ~hourly, jittered). Without renewal a
+	// registration is made once at boot and its lease would expire under a live
+	// instance; with it, a record whose owner has gone away can be expired from the
+	// zone alone, with no credentials in this account (pkg/dns/lease.go).
+	a.refreshDNSLease(ctx)
 
 	// 1. Check for completion signal (HIGH PRIORITY)
 	if a.config.OnComplete != "" {

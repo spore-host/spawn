@@ -9,6 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DNS leases: a record whose owner stops renewing it can now be expired from
+  the zone alone, with no credentials in the account that owns it.**
+
+  Every existing backstop for a stale A-record asks about the instance behind
+  it. The DNS sweep (#438) calls `DescribeInstances` in the owning account, and
+  DNS expiry (#466) relies on the portal prober assuming a role there. Both need
+  credentials in that account, so for any account the reaper does not cover — an
+  account spore.host must never hold credentials in, or any governed org that
+  will not grant an external principal access — a record left by an abruptly
+  terminated instance pointed at its IP **indefinitely**, under a spore.host
+  name, after AWS had handed that IP to someone else. A self-hosted reaper
+  (#625) does not help: it cannot touch spore.host's zone.
+
+  A lease asks the owner instead. Three parts:
+
+  - **spored** re-registers about hourly (1h ± 10m, jittered so a job array
+    does not hit Route53's five-per-second limit), through the same code path
+    as its boot registration so the two cannot drift, and re-tags
+    `spawn:dns-status` only when it changes.
+  - **the DNS updater** stamps the registration time into a
+    `_spore-lease.<record>` TXT record **in the same Route53 batch** as the
+    A-record, so the two are written atomically, and only under the
+    SigV4-verified caller's own namespace (#173), so nobody can renew anyone
+    else's record. It removes the lease on DELETE.
+  - **the TTL reaper** reports leases unrenewed for six hours and, with
+    `REAPER_DNS_LEASE_EXPIRE=true`, expires the A-record and its lease, for
+    account subdomains it does **not** cover.
+
+  The safety properties, each gated against a revert that compiles:
+
+  - **Opt-in by the client.** Only a client that will renew may ask for a
+    lease, and `spawn dns register` — a one-shot caller of the same client —
+    does not; a lease it never renewed would expire a live record six hours
+    later. A gate parses every non-test Go file and fails if anything other
+    than spored's agent calls `SetRenewing(true)`, or if the agent does without
+    calling `refreshDNSLease`.
+  - **Old clients are unaffected.** A request with no `lease` field — what every
+    released spored sends — gets no lease, proven through the real handler. And
+    a non-renewing client re-registering a name **clears** an inherited lease,
+    since otherwise that lease would age out under a live instance.
+  - **Covered accounts are never expired by lease.** The `DescribeInstances`
+    sweep is authoritative there, and a stale lease most likely means a hung
+    spored on a live box.
+  - **An unparseable lease is never acted on**; a lease dated in the future
+    reads as fresh, so clock skew cannot expire a live record; and the reaper
+    re-reads a lease immediately before deleting, so a renewal landing mid-run
+    wins.
+  - **Arrives off.** `DnsLeaseExpire` defaults to `false` and is live-wins, not
+    always-asserted, so arming it later is not undone by a plain deploy.
+
+  A wrongly expired record now self-heals on the next renewal, which removes
+  the premise behind #466's caution that a deleted record "never self-heals" —
+  for renewing clients. That comment in `expiry.go` is corrected, since it is
+  still true of every pre-lease spored.
+
+  The lease format is a contract between three separately built components, and
+  `lambda/dns-updater` is its own module that cannot import `pkg/dns`.
+  `TestDNSLeaseContractMatchesTheUpdater` parses the updater's copy with
+  `go/ast` and fails if its name or format drifts.
+
+
 - Four gates for the above, and a `print-explicit-params` target so they can
   assert on what `make deploy` **actually emits** rather than on `PARAM_MAP`
   membership — which is what the previous gate checked, and why it stayed green

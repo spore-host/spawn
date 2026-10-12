@@ -122,6 +122,16 @@ Parameters:
       boot, so a wrongly deleted A-record never self-heals — the spore keeps running
       and is simply unreachable by name until it reboots.
 
+  DnsLeaseExpire:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Expire DNS records whose owner has stopped renewing their lease, for account
+      subdomains this reaper does NOT cover (pkg/dns/lease.go). The only backstop
+      for a record left by an abruptly terminated instance in an account spore.host
+      holds no credentials in. Requires DnsSweep. Arrives off: the stale count is
+      reported either way, and arming it is a separate decision.
   AccountsTable:
     Type: String
     Default: 'spore-portal-accounts'
@@ -235,6 +245,7 @@ Resources:
           REAPER_DNS_SWEEP: !Ref DnsSweep
           REAPER_NET_RESOURCES: !Ref NetResources
           REAPER_DNS_EXPIRE: !Ref DnsExpire
+          REAPER_DNS_LEASE_EXPIRE: !Ref DnsLeaseExpire
           ACCOUNTS_TABLE: !Ref AccountsTable
           SPAWN_VERSION: !Ref Version
       # Readable without invoking the function, which is the whole point: a check

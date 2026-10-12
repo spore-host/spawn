@@ -14,11 +14,14 @@ package main
 // proves emptiness across every region. So for any account IN THE REGISTRY the
 // ambiguity is now resolvable, and accountlifecycle.DNSExpiryEligible is the verdict.
 //
-// What has NOT changed is the cost of being wrong. spored registers DNS once, at boot
-// (pkg/agent/agent.go:234) — there is no periodic re-registration, so a wrongly
-// deleted A-record never self-heals. The spore keeps running and is merely
-// unreachable by name until it reboots. Hence: the verdict is always REPORTED, and
-// acting on it needs REAPER_DNS_EXPIRE on top of the sweep's own opt-in.
+// What has NOT changed is the cost of being wrong. This used to say that spored
+// registers DNS once, at boot, so a wrongly deleted A-record never self-heals. That
+// is no longer true of a spored that renews a DNS lease (pkg/dns/lease.go): it
+// re-registers about hourly, so a record deleted under it comes back on the next
+// renewal. It IS still true of every spored released before leases, which register
+// once and never again — and this expiry acts on whole subdomains, which can hold
+// either kind. So the caution stands: the verdict is always REPORTED, and acting on
+// it needs REAPER_DNS_EXPIRE on top of the sweep's own opt-in.
 
 import (
 	"fmt"
