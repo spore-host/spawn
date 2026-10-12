@@ -245,173 +245,49 @@ func shouldApplyRegionConstraints() bool {
 		costTier != ""
 }
 
-// validateRegionConstraint validates region constraint parameters
-func validateRegionConstraint(constraint *sweep.RegionConstraint) error {
-	// Validate cost tier
-	if constraint.CostTier != "" {
-		validTiers := map[string]bool{
-			"low":      true,
-			"standard": true,
-			"premium":  true,
-		}
-		if !validTiers[constraint.CostTier] {
-			return fmt.Errorf("invalid cost tier: %s (valid: low, standard, premium)", constraint.CostTier)
-		}
+// regionConstraintFromSweep converts the persisted constraint into the one
+// pkg/regions filters with.
+//
+// There were two implementations of this filtering (#811). cmd/ had its own
+// applyRegionConstraints, filterInclude/Exclude/GeographicRegions,
+// matchesAnyPattern, matchesWildcard, validateRegionConstraint, containsString
+// and formatConstraint, written against sweep.RegionConstraint; pkg/regions had
+// the same functions against its own near-identical struct. The wildcard
+// matchers were character-for-character the same function with different
+// identifier names.
+//
+// The live copy was the one in cmd/, and it had NO tests. The unreferenced copy
+// in pkg/regions has filter_test.go, 393 lines covering six functions. So the
+// dead-code pass that found pkg/regions unreachable (#811) recommended deleting
+// the tested implementation and leaving the untested duplicate deciding which
+// AWS regions a launch targets. Routing through pkg/regions instead deletes ~100
+// lines here and brings those tests to bear on a live path.
+//
+// Equivalence was proven before the swap, not read off the page: a differential
+// run over regions.AllAWSRegions with every combination of 9 include patterns,
+// 9 exclude patterns and 7 geographic groups — 567 cases, 0 mismatches. The only
+// behavioural differences are on paths this caller never takes (pkg/regions
+// guards a nil constraint and honours AllowEmpty; shouldApplyRegionConstraints
+// already guarantees non-nil and non-empty).
+//
+// sweep.RegionConstraint stays as the persisted type — it carries dynamodbav
+// tags and is written to the sweep record — so this is a conversion, not a
+// replacement.
+func regionConstraintFromSweep(c *sweep.RegionConstraint) *regions.RegionConstraint {
+	if c == nil {
+		return nil
 	}
-
-	// Validate proximity region
-	if constraint.ProximityFrom != "" {
-		if !regions.IsValidRegion(constraint.ProximityFrom) {
-			return fmt.Errorf("invalid proximity region: %s", constraint.ProximityFrom)
-		}
+	return &regions.RegionConstraint{
+		Include:       c.Include,
+		Exclude:       c.Exclude,
+		Geographic:    c.Geographic,
+		ProximityFrom: c.ProximityFrom,
+		CostTier:      c.CostTier,
+		// AllowEmpty deliberately left false: cmd's applyRegionConstraints always
+		// errored on an empty result, and an empty region set means the sweep has
+		// nowhere to launch. Carrying the old behaviour across explicitly rather
+		// than inheriting a zero value by accident.
 	}
-
-	// Validate geographic groups
-	for _, group := range constraint.Geographic {
-		if _, ok := regions.GeographicGroups[group]; !ok {
-			return fmt.Errorf("invalid geographic group: %s", group)
-		}
-	}
-
-	return nil
-}
-
-// applyRegionConstraints filters regions based on constraints
-func applyRegionConstraints(allRegions []string, constraint *sweep.RegionConstraint) ([]string, error) {
-	candidates := make([]string, len(allRegions))
-	copy(candidates, allRegions)
-
-	// Apply include filter
-	if len(constraint.Include) > 0 {
-		candidates = filterIncludeRegions(candidates, constraint.Include)
-	}
-
-	// Apply exclude filter
-	if len(constraint.Exclude) > 0 {
-		candidates = filterExcludeRegions(candidates, constraint.Exclude)
-	}
-
-	// Apply geographic filter
-	if len(constraint.Geographic) > 0 {
-		candidates = filterGeographicRegions(candidates, constraint.Geographic)
-	}
-
-	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no regions match constraints: %s", formatConstraint(constraint))
-	}
-
-	return candidates, nil
-}
-
-// filterIncludeRegions keeps only regions matching include patterns
-func filterIncludeRegions(allRegions []string, patterns []string) []string {
-	result := make([]string, 0, len(allRegions))
-	for _, region := range allRegions {
-		if matchesAnyPattern(region, patterns) {
-			result = append(result, region)
-		}
-	}
-	return result
-}
-
-// filterExcludeRegions removes regions matching exclude patterns
-func filterExcludeRegions(allRegions []string, patterns []string) []string {
-	result := make([]string, 0, len(allRegions))
-	for _, region := range allRegions {
-		if !matchesAnyPattern(region, patterns) {
-			result = append(result, region)
-		}
-	}
-	return result
-}
-
-// filterGeographicRegions keeps only regions in specified geographic groups
-func filterGeographicRegions(allRegions []string, groups []string) []string {
-	allowed := make(map[string]bool)
-	for _, group := range groups {
-		if groupRegions, ok := regions.GeographicGroups[group]; ok {
-			for _, r := range groupRegions {
-				allowed[r] = true
-			}
-		}
-	}
-
-	result := make([]string, 0, len(allRegions))
-	for _, region := range allRegions {
-		if allowed[region] {
-			result = append(result, region)
-		}
-	}
-	return result
-}
-
-// matchesAnyPattern checks if region matches any of the patterns
-func matchesAnyPattern(region string, patterns []string) bool {
-	for _, pattern := range patterns {
-		if matchesWildcard(region, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesWildcard matches region against pattern with wildcard support
-func matchesWildcard(s, pattern string) bool {
-	// Exact match
-	if s == pattern {
-		return true
-	}
-
-	// Prefix wildcard (us-*)
-	if strings.HasSuffix(pattern, "*") {
-		prefix := strings.TrimSuffix(pattern, "*")
-		return strings.HasPrefix(s, prefix)
-	}
-
-	// Suffix wildcard (*-1)
-	if strings.HasPrefix(pattern, "*") {
-		suffix := strings.TrimPrefix(pattern, "*")
-		return strings.HasSuffix(s, suffix)
-	}
-
-	return false
-}
-
-// containsString checks if slice contains string
-func containsString(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
-// formatConstraint returns human-readable constraint description
-func formatConstraint(c *sweep.RegionConstraint) string {
-	parts := []string{}
-
-	if len(c.Include) > 0 {
-		parts = append(parts, fmt.Sprintf("include=%s", strings.Join(c.Include, ",")))
-	}
-	if len(c.Exclude) > 0 {
-		parts = append(parts, fmt.Sprintf("exclude=%s", strings.Join(c.Exclude, ",")))
-	}
-	if len(c.Geographic) > 0 {
-		parts = append(parts, fmt.Sprintf("geographic=%s", strings.Join(c.Geographic, ",")))
-	}
-	if c.ProximityFrom != "" {
-		parts = append(parts, fmt.Sprintf("proximity_from=%s", c.ProximityFrom))
-	}
-	if c.CostTier != "" {
-		parts = append(parts, fmt.Sprintf("cost_tier=%s", c.CostTier))
-	}
-
-	if len(parts) == 0 {
-		return "no constraints"
-	}
-
-	return strings.Join(parts, ", ")
 }
 
 // resolveLaunchRegion returns the region a launch should use, in precedence

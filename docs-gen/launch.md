@@ -45,7 +45,7 @@ spawn launch <name> [flags]
 | `--compliance-strict` |  | bool |  | Strict mode: fail on warnings (default: show warnings only) |
 | `--config` |  | string |  | Launch config YAML file (supports plugins: list) |
 | `--cost-limit` |  | float64 |  | Total spend ceiling in USD, covering compute AND storage (0 = disabled). spored stops the instance when compute reaches it; a launch whose storage alone exceeds it is refused up front, because storage outlives the instance and spored cannot reclaim it against the cap. |
-| `--cost-tier` |  | string |  | Prefer cost tier: low, standard, premium |
+| `--cost-tier` |  | string |  | Prefer cost tier: low, standard, premium. RECORDED BUT NOT YET APPLIED: region ordering by cost tier is not implemented, so this does not change which regions are selected. |
 | `--count` |  | int | `1` | Number of instances to launch (job array) |
 | `--detach` |  | bool |  | Run sweep orchestration in Lambda (auto-enabled for parameter sweeps) |
 | `--dns-api-endpoint` |  | string |  | Custom DNS API endpoint (overrides default) |
@@ -113,7 +113,7 @@ spawn launch <name> [flags]
 | `--pre-stop-timeout` |  | string |  | Max time to wait for --pre-stop command (default: 5m, spot: 90s) |
 | `--pre-stop` |  | string |  | Shell command to run on the instance before any lifecycle-triggered stop/terminate (e.g., "aws s3 sync /results s3://bucket/") |
 | `--print-config` |  | bool |  | Alias for --dry-run |
-| `--proximity-from` |  | string |  | Prefer regions close to this region (e.g., us-east-1) |
+| `--proximity-from` |  | string |  | Prefer regions close to this region (e.g., us-east-1). RECORDED BUT NOT YET APPLIED: region ordering by proximity is not implemented, so this does not change which regions are selected. |
 | `--queue-template` |  | string |  | Queue template name (use 'spawn queue template list' to see options) |
 | `--quiet` |  | bool |  | Minimal output |
 | `--region` |  | string |  | AWS region. Precedence: this flag &gt; SPORE_REGION/AWS_REGION &gt; your spore config &gt; auto-detect (auto-detect picks the lowest-latency region that actually offers the instance type) |
