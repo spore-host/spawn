@@ -10,7 +10,14 @@ LOG_RETENTION_DAYS?=30
 # when ahead, and a -dirty suffix when the tree has uncommitted changes — so the
 # stamp says "deployed from uncommitted code" out loud instead of claiming a
 # release. The leading v is stripped to match pkg/reaperdeploy.Tags.
-VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
+# The `|| echo unknown` this used to carry never fired: a pipeline's exit status
+# is the LAST command's, and `sed` succeeds on empty input. So outside a git repo
+# VERSION came out EMPTY, not "unknown" — verified by running this Makefile in a
+# non-repo directory. That was harmless while the value was being silently dropped
+# (#869); now that Version is asserted on every deploy it would stamp an empty
+# string, which is worse than the template default it replaced. Capture first,
+# then default.
+VERSION?=$(shell v=$$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//'); printf '%s' "$${v:-unknown}")
 # The reaper stack lives in us-east-1. Explicit, because every AWS call below
 # must target the same region the stack is in (#650 follow-up).
 REGION?=us-east-1
@@ -114,6 +121,57 @@ define EMIT_EXPLICIT
 $(if $(filter command line environment,$(origin $(2))),printf '%s\n' '$(1)=$($(2))' >> .deploy-explicit.txt;,)
 endef
 
+# Parameters this repository OWNS, asserted on every deploy regardless of origin
+# (#869).
+#
+# There are two classes of parameter here and conflating them is dangerous in
+# both directions.
+#
+#   LIVE-WINS (everything else): the deployed value must survive a deploy that
+#   does not mention it. EMIT_EXPLICIT above implements this by emitting only
+#   what $(origin) says the caller actually set. This is load-bearing: DRY_RUN
+#   defaults to `true` here while production runs `false`, so emitting a `?=`
+#   default would DISARM the live reaper. That is spawn#650, and it has already
+#   been reintroduced once by a fix for itself.
+#
+#   ALWAYS-ASSERT (below): the repo is the source of truth, so the value is sent
+#   whether or not the caller named it. Version is the reason this exists —
+#   `VERSION?=$(shell git describe ...)` looks like automatic stamping, but a
+#   `?=` assignment has origin `file`, not `command line`, so EMIT_EXPLICIT
+#   silently dropped it and CloudFormation fell back to the template default of
+#   `unknown`. The production stack therefore had NO Version parameter at all
+#   from 2026-06-08 until 2026-10-12, while this Makefile appeared to compute it.
+#   #768's whole purpose is that deployed bytes can be traced to a commit.
+#
+# Keep this list tiny and never put a mode-setting parameter in it. A parameter
+# here cannot be left alone by a deploy, which is exactly wrong for DryRun,
+# NetResources, ScanSelf, DnsSweep, DnsExpire, NotifyUrl or AlarmTopicArn.
+# TestAlwaysAssertContainsOnlySafeParameters pins the membership so that adding
+# one is a deliberate, reviewed edit rather than a convenience.
+ALWAYS_ASSERT = Version:VERSION LogRetentionDays:LOG_RETENTION_DAYS
+
+define EMIT_ALWAYS
+printf '%s\n' '$(1)=$($(2))' >> .deploy-explicit.txt;
+endef
+
+# WRITE_EXPLICIT_FILE builds .deploy-explicit.txt. Defined once and called from
+# both `deploy` and `print-explicit-params` on purpose: a gate that asserted on a
+# second copy of this logic would be asserting on something a deploy never runs.
+define WRITE_EXPLICIT_FILE
+: > .deploy-explicit.txt; \
+$(foreach pair,$(ALWAYS_ASSERT),$(call EMIT_ALWAYS,$(word 1,$(subst :, ,$(pair))),$(word 2,$(subst :, ,$(pair))))) \
+$(foreach pair,$(PARAM_MAP),$(call EMIT_EXPLICIT,$(word 1,$(subst :, ,$(pair))),$(word 2,$(subst :, ,$(pair)))))
+endef
+
+# print-explicit-params shows the override lines a deploy WOULD send, without
+# deploying or touching AWS. This is what TestVersionReachesCloudFormation drives,
+# so the gate sees what `make deploy` actually emits (#869).
+.PHONY: print-explicit-params
+print-explicit-params:
+	@$(WRITE_EXPLICIT_FILE)
+	@cat .deploy-explicit.txt
+	@rm -f .deploy-explicit.txt
+
 deploy: build
 	@# Read the live stack first, so an unspecified parameter keeps what is
 	@# deployed instead of being reset to this Makefile's idea of a default.
@@ -139,8 +197,10 @@ deploy: build
 			exit 1; \
 		fi; \
 	fi
-	@: > .deploy-explicit.txt
-	@$(foreach pair,$(PARAM_MAP),$(call EMIT_EXPLICIT,$(word 1,$(subst :, ,$(pair))),$(word 2,$(subst :, ,$(pair)))))
+	@# ALWAYS_ASSERT first, EMIT_EXPLICIT second. merge_deploy_params.py reads the
+	@# file line by line into a dict, so the LAST line for a key wins — which means
+	@# `make deploy VERSION=x` still beats the always-asserted default.
+	@$(WRITE_EXPLICIT_FILE)
 	@python3 scripts/merge_deploy_params.py .deploy-summary.json .deploy-live.json \
 		.deploy-explicit.txt > $(PARAMS_FILE)
 	@rm -f .deploy-summary.json .deploy-live.json .deploy-explicit.txt

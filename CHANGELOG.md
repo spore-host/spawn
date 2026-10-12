@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Four gates for the above, and a `print-explicit-params` target so they can
+  assert on what `make deploy` **actually emits** rather than on `PARAM_MAP`
+  membership — which is what the previous gate checked, and why it stayed green
+  while `Version` was being dropped. The emission is defined once
+  (`WRITE_EXPLICIT_FILE`) and called by both targets, so the gate cannot be
+  asserting on a copy a deploy never runs.
+
+  `TestVersionReachesCloudFormation` drives the real Makefile emission through
+  the real merge script and rejects `""`, `"unknown"`, and a value with no
+  digits. `TestPlainDeployEmitsNoModeSettingParameter` is the #650 guard applied
+  to the Makefile's emission, which had no coverage before — the existing test
+  drives the script with a hand-written override string, so it could not catch a
+  Makefile that emitted too much. `TestAlwaysAssertContainsOnlySafeParameters`
+  pins the membership so widening it requires editing the test.
+  `TestVersionFallsBackOutsideAGitRepo` runs the Makefile in a temp directory.
+
+  Verified against seven reverts that parse, including the dangerous one: adding
+  `DryRun` to `ALWAYS_ASSERT` is caught by three independent tests, and making
+  `EMIT_EXPLICIT` unconditional by two. Every pre-existing #650 guard passes
+  unchanged — none had to be weakened.
+
+
 - `TestNoDeployScriptCreatesAnUnauthenticatedAPIGatewayRoute` — a script that
   creates an API Gateway method or route must make the authorization decision
   explicit. It catches **both** ways to get `NONE`: naming it, and omitting
@@ -704,6 +726,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **The reaper Makefile's computed `VERSION` now actually reaches
+  CloudFormation** (#869). `VERSION?=$(shell git describe …)` looked like
+  automatic stamping, but a `?=` assignment has origin `file`, and
+  `EMIT_EXPLICIT` only emits parameters whose `$(origin)` is `command line` or
+  `environment` — so the value was computed and silently discarded, and the stack
+  fell back to the template default. The production stack carried **no `Version`
+  parameter at all** from 2026-06-08 until 2026-10-12, while the Makefile
+  appeared to set it, defeating the point of #768.
+
+  Fixed by distinguishing two classes of parameter rather than emitting
+  everything, because **the obvious fix disarms the reaper**: `DRY_RUN` defaults
+  to `true` here while production runs `false`, so asserting `?=` defaults is
+  spawn#650 — which has already been reintroduced once by a fix for itself.
+
+  - **always-assert** (`ALWAYS_ASSERT` = `Version`, `LogRetentionDays`): the repo
+    owns the value, so it is sent on every deploy.
+  - **live-wins** (everything else): unchanged, still origin-gated, so an
+    unspecified parameter inherits what is deployed.
+
+  Always-asserted entries are emitted *before* the origin-gated ones, because
+  `merge_deploy_params.py` reads the file line by line into a dict — so the last
+  line for a key wins and `make deploy VERSION=x` still beats the default.
+
+- **The version fallback never fell back.** `git describe … | sed 's/^v//' ||
+  echo unknown` takes its exit status from `sed`, which succeeds on empty input,
+  so outside a git repository `VERSION` evaluated to the **empty string**, not
+  `unknown` — confirmed by running the Makefile in a non-repo directory. Harmless
+  while the value was being dropped; with Version now asserted on every deploy it
+  would have stamped an empty string, which is worse than the template default it
+  replaced. It now captures first and defaults with `${v:-unknown}`.
+
 
 - `sweepFlagCoverage` classified both withdrawn flags as `sweepHonoured` —
   asserting that the sweep path honoured flags which did nothing. The gate over

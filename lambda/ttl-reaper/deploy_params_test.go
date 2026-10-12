@@ -486,3 +486,197 @@ func screamingSnake(s string) string {
 	}
 	return b.String()
 }
+
+// explicitFromMakefile runs the Makefile's own emission and returns what it would
+// send. Driving `make print-explicit-params` rather than reconstructing the logic
+// is the point: #869 existed because the gate in this file asserted on PARAM_MAP
+// membership, which is a statement about what is *mappable*, not about what is
+// actually emitted. Version was in PARAM_MAP throughout and never reached the
+// stack.
+func explicitFromMakefile(t *testing.T, args ...string) (map[string]string, string) {
+	t.Helper()
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make not available")
+	}
+	cmd := exec.Command("make", append([]string{"print-explicit-params"}, args...)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("make print-explicit-params %v: %v\nstderr: %s", args, err, stderr.String())
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("unparsable emission line %q", line)
+		}
+		got[k] = v
+	}
+	return got, string(out)
+}
+
+// The computed version must actually reach CloudFormation (#869).
+//
+// `VERSION?=$(shell git describe ...)` looked like automatic stamping, but a `?=`
+// assignment has origin `file`, and EMIT_EXPLICIT only emits `command line` or
+// `environment` origins — so the value was computed and silently dropped, and the
+// stack fell back to the template default. The production stack carried NO Version
+// parameter from 2026-06-08 to 2026-10-12 while this Makefile appeared to set it.
+//
+// Driven end to end: the Makefile's real emission, through the real merge script,
+// against a live parameter set that has no Version — exactly the production shape.
+func TestVersionReachesCloudFormation(t *testing.T) {
+	explicit, raw := explicitFromMakefile(t)
+
+	if _, ok := explicit["Version"]; !ok {
+		t.Fatalf("`make deploy` emits no Version override, so CloudFormation falls back to the "+
+			"template default and the deployed bytes cannot be traced to a commit (#768).\n"+
+			"emitted:\n%s", raw)
+	}
+
+	merged, _ := runMerge(t, templateSummaryFromTemplate(t), liveParams, raw)
+
+	switch merged["Version"] {
+	case "":
+		t.Error("Version merged to the empty string — an empty stamp is worse than the " +
+			"template default it replaced")
+	case "unknown":
+		t.Error("Version merged to \"unknown\", the template default: the computed value is " +
+			"still not reaching the stack")
+	}
+	if !strings.ContainsAny(merged["Version"], "0123456789") {
+		t.Errorf("Version = %q, which carries no digits — `git describe` output should", merged["Version"])
+	}
+
+	// LogRetentionDays is the other always-asserted one: an unset retention means
+	// logs are kept forever (#770).
+	if merged["LogRetentionDays"] == "" {
+		t.Error("LogRetentionDays did not reach the merged parameters")
+	}
+
+	// The assertion that must survive this change. Asserting Version on every
+	// deploy must not have turned the other parameters into always-asserted ones.
+	if merged["DryRun"] != "false" {
+		t.Errorf("DryRun = %q, want the live %q — making Version always-assert must NOT have "+
+			"made DryRun always-assert, which would DISARM the production reaper (spawn#650)",
+			merged["DryRun"], "false")
+	}
+}
+
+// A plain `make deploy` must emit no mode-setting parameter at all (#650, #869).
+//
+// The complement of the test above, and the one that catches the tempting fix for
+// #869 — "just emit every default" — which would push DRY_RUN's `?=true` onto a
+// stack running `false`. This asserts on the Makefile's real emission, which had
+// no coverage before: TestDeployWithNoOverridesChangesNothing drives the script
+// with a hand-written explicit string, so it could not have caught a Makefile that
+// emitted too much.
+func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
+	explicit, raw := explicitFromMakefile(t)
+
+	// These are the parameters whose DEPLOYED value must win. DryRun first because
+	// it is the one that silently stops the reaper terminating anything.
+	for _, k := range []string{
+		"DryRun", "NetResources", "ScanSelf", "DnsSweep", "DnsExpire",
+		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
+		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
+	} {
+		if v, ok := explicit[k]; ok {
+			t.Errorf("a plain `make deploy` emits %s=%q. It must not: an unspecified parameter "+
+				"has to inherit the deployed value, and for DryRun asserting the Makefile's "+
+				"default of `true` over a live `false` disarms the production reaper (spawn#650).\n"+
+				"emitted:\n%s", k, v, raw)
+		}
+	}
+	if len(explicit) == 0 {
+		t.Fatal("the Makefile emitted nothing at all — the always-asserted parameters are " +
+			"missing, so this test would pass vacuously")
+	}
+}
+
+// ALWAYS_ASSERT membership is pinned, so widening it is a reviewed decision.
+//
+// A parameter in that list cannot be left alone by a deploy. That is right for
+// Version (a stale stamp is a lie) and wrong for every mode-setting parameter.
+// Pinning the exact set here means adding one requires editing this test, which is
+// the review step the #650 regression went around.
+func TestAlwaysAssertContainsOnlySafeParameters(t *testing.T) {
+	b, err := os.ReadFile("Makefile")
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	var line string
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(l, "ALWAYS_ASSERT") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatal("no ALWAYS_ASSERT in the Makefile — either it was renamed (update this test) " +
+			"or the always-assert mechanism was removed and Version is being dropped again")
+	}
+	_, rhs, _ := strings.Cut(line, "=")
+
+	want := map[string]bool{"Version": true, "LogRetentionDays": true}
+	got := map[string]bool{}
+	for _, pair := range strings.Fields(rhs) {
+		key, _, ok := strings.Cut(pair, ":")
+		if !ok {
+			t.Errorf("ALWAYS_ASSERT entry %q is not CfnKey:MAKE_VAR", pair)
+			continue
+		}
+		got[key] = true
+		if !want[key] {
+			t.Errorf("ALWAYS_ASSERT contains %s. A parameter here is sent on EVERY deploy and "+
+				"cannot inherit its deployed value — which disarms the reaper if it is DryRun, "+
+				"silences alarms if it is AlarmTopicArn, and blanks DNS if it is DnsZoneId. If "+
+				"this is genuinely intended, widen the allowlist in this test deliberately.", key)
+		}
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("ALWAYS_ASSERT no longer contains %s, so its computed value is silently "+
+				"dropped again (#869)", k)
+		}
+	}
+}
+
+// The version fallback must actually fall back.
+//
+// The old form was `git describe ... | sed 's/^v//' || echo unknown`. A pipeline's
+// exit status is the LAST command's, and sed succeeds on empty input, so the `||`
+// never fired: outside a git repository VERSION evaluated to the EMPTY STRING, not
+// "unknown". That was invisible while the value was being dropped; now that it is
+// asserted on every deploy it would stamp an empty version.
+func TestVersionFallsBackOutsideAGitRepo(t *testing.T) {
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make not available")
+	}
+	dir := t.TempDir() // not a git repository
+	b, err := os.ReadFile("Makefile")
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe := "include Makefile\nv:\n\t@printf '%s' '$(VERSION)'\n"
+	if err := os.WriteFile(filepath.Join(dir, "probe.mk"), []byte(probe), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("make", "-f", "probe.mk", "v")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("probe make: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "unknown" {
+		t.Errorf("VERSION outside a git repo = %q, want \"unknown\". An empty stamp is worse "+
+			"than the template default, and it is now asserted on every deploy.", got)
+	}
+}
