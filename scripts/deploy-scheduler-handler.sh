@@ -188,9 +188,18 @@ echo "⚙️  Updating Lambda configuration (runtime, timeout, memory)..."
 # being displaced. Contrast deploy-sweep-orchestrator.sh, which once sent
 # `Variables={}` and wiped a populated environment under `|| true`; the gate in
 # scripts/deploy_scripts_test.go exists for that case.
+#
+# env-replace-ok: this script is the declarative source of truth for this
+# function's configuration, and out-of-band config is the defect being fixed.
+# Re-checked 2026-10-11 against the live function `scheduler-handler`: its
+# environment holds exactly the two variables set below and nothing else, so the
+# replacement displaces nothing.
 ORCHESTRATOR_FUNCTION_NAME="${SPAWN_ORCHESTRATOR_FUNCTION_NAME:-spawn-sweep-orchestrator}"
 ORCHESTRATOR_REGION="${SPAWN_ORCHESTRATOR_REGION:-us-east-1}"
 
+# env-replace-ok: see the rationale above — this script is the declarative source
+# of truth for this function's configuration, and the live function carries
+# exactly the two variables set here (checked 2026-10-11).
 aws lambda update-function-configuration \
     --function-name "$FUNCTION_NAME" \
     --runtime provided.al2023 \

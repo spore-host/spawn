@@ -63,6 +63,12 @@ if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$REGION" -
         --profile "$AWS_PROFILE"
 
     echo "Updating environment variables..."
+    # env-replace-ok: WEBSOCKET_ENDPOINT is derived from the API above, and this
+    # script is the only thing that sets it. Checked 2026-10-11 against the live
+    # function spawn-dashboard-websocket-processor: its environment holds exactly
+    # WEBSOCKET_ENDPOINT and nothing else, so replacing displaces nothing. If this
+    # function ever gains a variable set elsewhere, merge instead — see
+    # scripts/deploy-custom-dns.sh's merge_lambda_env.
     aws lambda update-function-configuration \
         --function-name "$FUNCTION_NAME" \
         --environment "Variables={WEBSOCKET_ENDPOINT=$WS_ENDPOINT}" \

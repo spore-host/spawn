@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	"github.com/aws/aws-sdk-go-v2/service/route53/types"
 )
@@ -93,6 +94,7 @@ func init() {
 		panic(fmt.Sprintf("unable to load SDK config: %v", err))
 	}
 	route53Client = route53.NewFromConfig(cfg)
+	dynamoClient = dynamodb.NewFromConfig(cfg)
 
 	// Parse DOMAIN_ZONES env var: "spore.host=Z048...,prismcloud.host=Z09ABC..."
 	domainZones = make(map[string]string)
@@ -190,7 +192,25 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 		return errorResponse(403, "missing IAM authorizer")
 	}
 	accountID := authz.IAM.AccountID
-	fmt.Printf("DNS authorized via AWS_IAM: verified account %s (caller %s)\n", accountID, authz.IAM.UserARN)
+	fmt.Printf("DNS authenticated via AWS_IAM: verified account %s (caller %s)\n", accountID, authz.IAM.UserARN)
+
+	// ── Authorize the verified account (#835, GHSA-7pm4-cqjg-vh2q) ──────────────
+	// SigV4 above establishes WHO the caller is. It does not establish that they
+	// are a customer: the Function URL's resource policy is `Principal: "*"`, so
+	// until that is narrowed, any principal in any AWS account reaches this line
+	// with a verified identity. See authorize.go for which registry answers this
+	// and why this ships in audit mode rather than enforcing on deploy.
+	if ok, reason := authorizeCaller(ctx, accountID); !ok {
+		if authzEnforced() {
+			fmt.Printf("DNS caller REFUSED: %s\n", reason)
+			// Deliberately terse to the client: the reason names the registry and
+			// the allowlist, which an unentitled caller has no business learning.
+			// The log line above carries the detail.
+			return errorResponse(403, "caller account is not entitled to register DNS records")
+		}
+		fmt.Printf("DNS caller WOULD BE REFUSED (DNS_AUTHZ_MODE is not %q, allowing): %s\n",
+			authzModeEnforce, reason)
+	}
 
 	// Resolve domain and hosted zone
 	reqDomain := req.Domain

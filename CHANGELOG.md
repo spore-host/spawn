@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `docs/dns-updater-authorization.md` — who may register a record in the
+  `spore.host` zone, where the entitled set comes from, the simulated IAM grant,
+  and the two live steps that no script performs.
+
 - Four gates, each watched failing against a revert that compiles: the refusal
   without caller credentials, the client being built with them, the STS client
   carrying `callerCreds` rather than the ambient chain, and every failure path in
@@ -464,6 +468,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`scripts/deploy-custom-dns.sh` was unsafe to run, which is why
+  `spawn-dns-updater` had not been deployed since 2026-06-25.** Three separate
+  defects, each of which reported success:
+
+  - it created and granted IAM permissions to `SpawnDNSLambdaRole`, a role that
+    **does not exist** in the infra account. The function runs under
+    `SpawnDNSLambdaExecutionRole`, so every grant the script made went to a role
+    nothing used — a permission added here for a new feature would simply not
+    have taken effect;
+  - its update path passed `--environment Variables={HOSTED_ZONE_ID=...,DOMAIN=...}`,
+    and `--environment` replaces the entire map, so running it would have deleted
+    `DOMAIN_ZONES` — the only variable the live function has, and the one the
+    handler prefers — while writing `DOMAIN`, which the handler never reads (it
+    reads `DEFAULT_DOMAIN`). The environment is now merged into the deployed one,
+    key by key for `DOMAIN_ZONES` so deploying one domain cannot unregister
+    others;
+  - it parsed `--region`, printed it, and then ignored it, because most of its
+    `aws` calls carried no `--region`. The region is now exported, which fixes
+    every call including ones added later.
+
+  It also now asserts `--runtime` on the update path, not just on create:
+  `update-function-code` does not change the runtime, which is how
+  scheduler-handler sat on `provided.al2` for nine months (#716).
+
+- `TestDeployScriptsDoNotWipeTheEnvironment` matched only the literal
+  `Variables={}` — the empty map. That was the anecdote rather than the
+  mechanism, and the gate passed `deploy-custom-dns.sh`'s *non-empty* literal,
+  which is equally destructive. Generalized to any literal map on an update path,
+  which found the same latent bug in two more scripts
+  (`deploy-scheduler-handler.sh` and the dashboard websocket processor's
+  `deploy.sh`, both verified against their live functions as displacing nothing
+  today) and now requires a deliberate replacement to be stated with an adjacent
+  `env-replace-ok:` comment, in the style of the existing `swallow-ok:` marker.
+  Adjacency is enforced by walking up from the call, so a marker elsewhere in the
+  file licenses nothing. It also could not see the marker at first: the shared
+  `read()` helper strips comments on purpose (rule 3), so this one gate reads the
+  raw file.
+
+
 - **The dashboard's cross-account EC2 reads have never worked, and now do —
   with no IAM change at all** (#815). The member-account role's trust names
   `Cognito_SpawnDashboard_Auth_Role`, the identity-pool role the browser assumes,
@@ -815,6 +858,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifacts behind.
 
 ### Security
+
+- **The DNS updater authenticated its callers but never authorized them**
+  (advisory GHSA-7pm4-cqjg-vh2q, #835). The Function URL is `AuthType: AWS_IAM`
+  and the record is namespaced under the SigV4-verified caller account, so a
+  caller cannot write outside its own subdomain — that part was right. But the
+  function's resource policy is the one AWS auto-generates, `Principal: "*"`
+  gated only on `lambda:FunctionUrlAuthType`, so any principal in any AWS account
+  reached the handler with a verified identity. Since the record name is
+  caller-chosen and the record lands in the real `spore.host` zone, a stranger
+  with a free AWS account could publish `login.<their-base36>.spore.host`
+  pointing anywhere — a phishing primitive hosted and paid for by spore.host.
+
+  The verified account is now checked against a registry (`spawn-user-accounts`,
+  overridable via `DNS_ACCOUNTS_TABLE`) plus an explicit `DNS_ALLOWED_ACCOUNTS`
+  list, failing closed on a lookup error and on a lookup that returns nothing at
+  all — an empty allowlist is a broken lookup, not a permissive one.
+
+  **Deploying this does not close the hole**, and the ship-it-enforcing version
+  would have caused an outage. Enforcement is behind `DNS_AUTHZ_MODE=enforce` and
+  defaults to audit, which logs the would-be refusal and continues, because the
+  zone serves four live A records under a subdomain belonging to an account that
+  is *not* in the registry. The real fix is narrowing the resource policy, which
+  is a live AWS change rather than a deploy; both steps, the simulation results
+  and the rollback are in `docs/dns-updater-authorization.md`.
+
+- The account-registry read is granted as its own inline policy scoped to one
+  table, one attribute (`dynamodb:Attributes`) **and** to
+  `dynamodb:Select = SPECIFIC_ATTRIBUTES`. The last is not belt-and-braces:
+  `ForAllValues:StringEquals` is satisfied by an empty set, so a `Scan` naming no
+  attributes passes the attribute condition and reads every field of every item.
+  Simulated allow-and-deny eight ways before shipping.
 
 - **`spawn plugin install <name>` performed no verification at all** (advisory
   GHSA-54x4-pc23-4m6j, #816). The shortest and most natural install form — a bare
