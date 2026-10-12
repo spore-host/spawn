@@ -155,6 +155,22 @@ func (v *Validator) ValidateInstances(ctx context.Context, instances []aws.Insta
 	return results, nil
 }
 
+// GetComplianceSummary and GetControlList are retained despite having no caller
+// outside tests (#811).
+//
+// The live API is NewValidator plus four methods — ValidateLaunchConfig and
+// EnforceLaunchConfig and IsStrictMode from cmd/launch_single.go, and
+// ValidateInstances from cmd/validate.go. These two are the validator's
+// introspection surface: a human-readable summary and the resolved control list.
+// They are unused because there is no `spawn compliance` command, which is the
+// same finish-or-withdraw question as the one tracked for --proximity-from and
+// --cost-tier in #864, not evidence that they are wrong.
+//
+// Deleting them would leave the kept half of this package with nothing to call if
+// that command is ever written, and deleting every unused exported method in turn
+// eventually removes the component's usable surface while each step looks locally
+// justified. So: kept, and said out loud, rather than quietly either way.
+
 // GetComplianceSummary returns a human-readable summary of compliance status
 func (v *Validator) GetComplianceSummary() string {
 	if !v.complianceConfig.IsComplianceEnabled() {
