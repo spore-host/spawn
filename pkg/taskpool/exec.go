@@ -136,7 +136,8 @@ func (d *DirWorkspace) Acquire(taskID string) (string, error) {
 		return "", fmt.Errorf("clear stale workspace %s: %w", dir, err)
 	}
 	// 0o700, not 0o777 (#459): the job script runs as the SAME user that creates this
-	// dir — spored is User=root (deployment/spawn-orchestrator.service) and
+	// dir — spored runs as root (the unit written by pkg/launcher/bootstrap.go sets
+	// no `User=`, so systemd defaults to root) and
 	// GeneratePooledJobScript emits a plain #!/bin/bash with no `su -` — so no other
 	// user needs write OR read here. A workspace holds task inputs and the
 	// .spawn-job.sh that Exec writes and then executes.

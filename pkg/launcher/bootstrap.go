@@ -845,11 +845,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# SigV4-sign DNS registration requests (#173). Harmless today (the DNS Function
-# URL is still AuthType: NONE, which ignores the signature), this fields a
-# signing fleet ahead of the AuthType: AWS_IAM flip so the cutover doesn't break
-# registration for in-flight instances. Old non-signing instances age out under
-# their TTLs ("everything dies"), so by the time the flip lands the fleet signs.
+# SigV4-sign DNS registration requests (#173). This is now REQUIRED, not
+# anticipatory: the DNS Function URL is AuthType: AWS_IAM (verified against the
+# live function 2026-10-11), so an unsigned request is rejected at the URL and the
+# instance never registers. The comment here said the URL "is still AuthType:
+# NONE, which ignores the signature" long after the cutover landed, which reads as
+# though this variable were optional — it is load-bearing.
+#
+# The staged rollout it describes did work as intended: signing shipped first so a
+# fleet was already signing before the flip, and old non-signing instances aged
+# out under their TTLs ("everything dies").
 Environment=SPORE_DNS_SIGV4=1
 ExecStart=/usr/local/bin/spored
 # on-failure (not always) prevents restart attempts during graceful shutdown
