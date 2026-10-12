@@ -131,23 +131,6 @@ func ValidateConstraint(constraint *RegionConstraint) error {
 		return nil
 	}
 
-	// Validate cost tier
-	if constraint.CostTier != "" {
-		validTiers := map[string]bool{
-			"low":      true,
-			"standard": true,
-			"premium":  true,
-		}
-		if !validTiers[constraint.CostTier] {
-			return fmt.Errorf("invalid cost tier: %s (valid: low, standard, premium)", constraint.CostTier)
-		}
-	}
-
-	// Validate proximity region
-	if constraint.ProximityFrom != "" && !IsValidRegion(constraint.ProximityFrom) {
-		return fmt.Errorf("invalid proximity region: %s", constraint.ProximityFrom)
-	}
-
 	// Validate geographic groups
 	for _, group := range constraint.Geographic {
 		if _, ok := GeographicGroups[group]; !ok {

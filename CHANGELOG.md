@@ -482,6 +482,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`spawn launch --proximity-from` and `--cost-tier` are withdrawn** (#864),
+  together with `pkg/regions/priority.go` (152 lines: `ScoreRegions`,
+  `GetRegionsByPriority`, haversine distance and cost-tier scoring) and the
+  `ProximityFrom`/`CostTier` fields on the region-constraint types and their
+  validation.
+
+  **This is a user-visible flag removal, so MINOR.** Both flags were accepted,
+  validated and persisted, and never affected region selection — nothing read
+  them. Withdrawn rather than finished, because each would have duplicated a
+  live mechanism with a worse one:
+
+  - `--cost-tier` would have ranked regions by a hand-assigned three-bucket
+    table with no provenance and no collection date. truffle is this suite's
+    pricing authority (#533) and already sorts by live on-demand price; a static
+    table of that shape was measured wrong by up to 38x for a type it did not
+    know (#543), and this project requires a static price reaching output to say
+    that it is static, why, and when it was collected.
+  - `--proximity-from` would have ordered regions by great-circle distance
+    between hardcoded coordinates. `detectBestRegion` already selects by
+    **measured TCP latency** to each region's EC2 endpoint over the SCP-aware
+    enabled-region set (#732) — a better answer to the same question, and live.
+
+  No migration is needed: no documentation, example or issue referenced either
+  flag, and **zero of the 23 live sweep records carry `proximity_from` or
+  `cost_tier`** (checked). `RegionMetadata.CostTier` and `Coordinates` are kept
+  as reference data with a comment recording why they have no consumer, so a
+  future reachability pass gets "why isn't it used" answered rather than
+  rediscovering the question.
+
+
 - **`pkg/compliance`'s report generator and standalone validator wrappers** —
   **1,852 lines** (746 non-test, 1,106 test), taking the package from 3,782
   lines to 1,930. There is no `spawn compliance` command and never was.
@@ -627,6 +657,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- `sweepFlagCoverage` classified both withdrawn flags as `sweepHonoured` —
+  asserting that the sweep path honoured flags which did nothing. The gate over
+  that table is sound and caught the removal immediately in the other direction
+  (it fails when the list names a flag `launchCmd` no longer registers); it is
+  the hand-written *classification* that was wrong.
+
 
 - Deleting dead code **cascades**, and the second pass caught a wrong deletion.
   Removing the thirteen wrappers orphaned four more functions that had only ever
