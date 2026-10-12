@@ -1,3 +1,22 @@
+# Alertmanager routing for the spawn fleet.
+#
+# BRING YOUR OWN RECEIVER. The `url` below used to point at a webhook receiver
+# that shipped with spawn (pkg/observability/alerting). Nothing ever started
+# that server — no command, no entry point, no caller of its Bridge.Start — so
+# the receiver named here never existed at runtime, and alerts routed to it went
+# nowhere. The Go code was removed rather than left to imply a listener; this
+# config is kept because the routing and the alert rules beside it are useful,
+# and it is now explicit that the endpoint is yours to provide.
+#
+# Replace the url with your own receiver, or swap webhook_configs for any
+# Alertmanager receiver (slack_configs, pagerduty_configs, ...).
+#
+# Note that the metrics these alerts fire on are OPT-IN: spored's metrics server
+# defaults to disabled (pkg/observability.DefaultConfig) and must be enabled in
+# the agent config, and nothing in spawn sets the `spawn:metrics-enabled` tag
+# that prometheus.yaml's EC2 service discovery filters on — tag your instances
+# yourself with `--tag spawn:metrics-enabled=true`.
+
 global:
   resolve_timeout: 5m
 
@@ -24,7 +43,9 @@ route:
 receivers:
   - name: 'spawn-webhook'
     webhook_configs:
-      - url: 'http://localhost:8080/alertmanager/webhook'
+      # Your receiver. See the note at the top of this file: spawn no longer
+      # ships one, and the address below is a placeholder, not a listener.
+      - url: 'http://localhost:8080/your-receiver'
         send_resolved: true
         max_alerts: 0
 

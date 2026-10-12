@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `docs/self-hosted-monitoring.md` — what `deployment/prometheus/` and
+  `deployment/grafana/` are, and the **two defaults that make them do nothing**
+  until changed: `spored`'s metrics server is `Enabled: false` by default, and
+  nothing in spawn sets the `spawn:metrics-enabled` tag that the Prometheus EC2
+  service-discovery job filters on (it is read in one place and written
+  nowhere). Copying the configs and seeing empty graphs gave no clue which of
+  the two was missing.
+
+- `TestEveryDeploymentSubtreeIsReferenced` — every top-level entry under
+  `deployment/` must be referenced from a doc, script, workflow, Makefile or
+  non-test source. Twelve files of scrape config, alert rules and dashboards
+  were findable only by listing the directory, and unreferenced config is not
+  read: that tree shipped a receiver for a server nobody started and a scrape
+  filter on a tag nothing sets, and neither was noticed.
+
+  It took three attempts to make this gate able to fail, which is the point of
+  rule 1. Version one passed with the new doc deleted, because `CHANGELOG.md`
+  was in the searched text — a changelog records that something happened, it
+  does not tell a reader what a config is for. Version two still passed, because
+  the gate's own file names both trees in its comments and so **vouched for
+  itself**. Only version three fails on a deleted doc, fails when a tree
+  references itself from inside, and fails when its own text collection breaks.
+
+
 - `TestEveryCommandIsBuiltByARelease` — every `package main` in the root module
   must appear as a `main:` in `.goreleaser.yaml`. The set is discovered from the
   filesystem rather than listed, because a gate naming the commands it knew
@@ -404,6 +428,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`pkg/observability/alerting`** — 234 non-test lines plus 291 of tests: an
+  Alertmanager webhook bridge with a payload parser, alert formatting and two
+  sender implementations, and **zero importers of any kind**. Nothing called
+  `Bridge.Start`, so the receiver that
+  `deployment/prometheus/alertmanager.yaml` posted to never existed at runtime
+  and alerts routed to it went nowhere.
+
+  Only the bridge. `pkg/observability/metrics` and `pkg/observability/tracing`
+  are live (`cmd/spored/main.go`), and the `AlertingConfig` struct stays — it
+  carries Prometheus/Alertmanager URLs for `pkg/provider/local.go`. #811
+  proposed removing `deployment/prometheus/` and `deployment/grafana/` as "the
+  config half" of this package; that is wrong, and they are kept — see below.
+
+
 - **`cmd/orchestrator` and `pkg/orchestrator`** — 679 non-test lines plus 654 of
   tests, for a **second binary no release has ever produced**.
   `.goreleaser.yaml` builds `spawn` and `spored` and nothing else, so
@@ -491,6 +529,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- `deployment/prometheus/alertmanager.yaml` pointed at
+  `http://localhost:8080/alertmanager/webhook`, a receiver spawn shipped code
+  for but never started. It now carries a placeholder and says plainly that the
+  receiver is yours to provide, with the two opt-in requirements stated at the
+  top of the file rather than only in a doc.
+
 
 - Two comments that cited things which were not true, both exposed by removing
   the orchestrator:
