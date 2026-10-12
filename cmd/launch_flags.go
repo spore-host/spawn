@@ -411,8 +411,8 @@ func init() {
 	launchCmd.Flags().StringSliceVar(&regionsInclude, "regions-include", []string{}, "Only use these regions (supports wildcards: us-*, eu-*)")
 	launchCmd.Flags().StringSliceVar(&regionsExclude, "regions-exclude", []string{}, "Exclude these regions (supports wildcards: us-*, eu-*)")
 	launchCmd.Flags().StringSliceVar(&regionsGeographic, "regions-geographic", []string{}, "Geographic constraints: us, eu, ap, north-america, europe, asia-pacific")
-	launchCmd.Flags().StringVar(&proximityFrom, "proximity-from", "", "Prefer regions close to this region (e.g., us-east-1)")
-	launchCmd.Flags().StringVar(&costTier, "cost-tier", "", "Prefer cost tier: low, standard, premium")
+	launchCmd.Flags().StringVar(&proximityFrom, "proximity-from", "", "Prefer regions close to this region (e.g., us-east-1). RECORDED BUT NOT YET APPLIED: region ordering by proximity is not implemented, so this does not change which regions are selected.")
+	launchCmd.Flags().StringVar(&costTier, "cost-tier", "", "Prefer cost tier: low, standard, premium. RECORDED BUT NOT YET APPLIED: region ordering by cost tier is not implemented, so this does not change which regions are selected.")
 
 	// Batch queue
 	launchCmd.Flags().StringVar(&batchQueueFile, "batch-queue", "", "Batch job queue file (JSON) for sequential execution")

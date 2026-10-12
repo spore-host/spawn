@@ -5,6 +5,21 @@ import (
 	"sort"
 )
 
+// Retained deliberately despite having no caller (#811).
+//
+// The dead-code pass listed this file for deletion, and it is unreferenced. But
+// `spawn launch` accepts `--proximity-from` and `--cost-tier`, and ScoreRegions
+// is the only thing in the tree that could act on either. Both flags are
+// validated (an invalid cost tier or proximity region is rejected) and persisted
+// to the sweep record, so a user has every reason to believe they work; nothing
+// reads them when regions are selected. Deleting this file would remove the only
+// implementation of what two documented flags promise, and turn a wiring gap
+// into a design decision taken by accident.
+//
+// So it stays until that is decided — finish it or withdraw the flags — and the
+// flag help and sweep output now say plainly that the values are recorded but
+// not applied, rather than implying an effect that does not happen.
+
 // ScoreRegions calculates priority scores for regions based on constraints
 // Returns a sorted list of regions with scores (highest score first)
 func ScoreRegions(regions []string, constraint *RegionConstraint) []RegionPriority {

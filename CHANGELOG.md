@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TestRegionConstraintConversionCarriesEveryField` compares the two constraint
+  structs through their **JSON forms** — they declare the same five tags, being
+  copies of each other — which catches a dropped field, a swapped pair, and
+  `AllowEmpty` flipped true in one assertion, plus a field-count check for a
+  field added with `json:"-"` that would otherwise be invisible.
+  `TestRegionFilteringUsesThePackageWithTheTests` pins the invariant that
+  actually broke: the tested implementation must be the one in use, anchored on
+  the invocation since the comment documenting the gate names the function.
+
+  Four compiling reverts checked — a dropped field, two swapped fields,
+  `AllowEmpty` true (a sweep with nowhere to launch succeeding), and a
+  `json:"-"` field added to one struct and not the other. The first version of
+  the test walked fields with `reflect.FieldByName` and was blocked by
+  semgrep's `unsafe-reflect-by-name` rule; reaching for `nosemgrep` was the easy
+  move, and the replacement is simpler than what it replaced.
+
+
 - `docs/self-hosted-monitoring.md` — what `deployment/prometheus/` and
   `deployment/grafana/` are, and the **two defaults that make them do nothing**
   until changed: `spored`'s metrics server is `Enabled: false` by default, and
@@ -304,6 +321,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Region filtering is de-duplicated onto `pkg/regions`, the copy that has
+  tests** (#811). There were two implementations: `cmd/launch_regions.go` had
+  `applyRegionConstraints`, `filterInclude/Exclude/GeographicRegions`,
+  `matchesAnyPattern`, `matchesWildcard`, `validateRegionConstraint`,
+  `containsString` and `formatConstraint` written against
+  `sweep.RegionConstraint`; `pkg/regions` had the same functions against its own
+  near-identical struct. The wildcard matchers were character-for-character the
+  same function with different identifier names, and `ValidateConstraint` matched
+  down to its error strings.
+
+  The **live** copy was the one in `cmd/`, with **no tests at all**. The
+  unreferenced one in `pkg/regions` has `filter_test.go` — 393 lines covering six
+  functions. So the logic deciding which AWS regions a launch targets ran
+  untested while its tested twin sat dead, and the dead-code pass that found it
+  (#811) recommended deleting the tested implementation. Routing through
+  `pkg/regions` removes 121 lines from `cmd/` and brings those tests to bear on a
+  live path instead.
+
+  Equivalence was proven before the swap rather than read off the page: a
+  differential run over `regions.AllAWSRegions` with every combination of 9
+  include patterns, 9 exclude patterns and 7 geographic groups — **567 cases, 0
+  mismatches**. The only behavioural differences are on paths this caller never
+  takes (`pkg/regions` guards a nil constraint and honours `AllowEmpty`;
+  `shouldApplyRegionConstraints` already guarantees non-nil and non-empty).
+  `sweep.RegionConstraint` stays as the persisted type.
+
+
 - **`BufferingPushClient`'s doc comment, which was the actual defect here.** It
   read "records pushes in memory *instead of* delivering them to a remote
   runtime", and #810 concluded from that — across three independent audit passes —
@@ -529,6 +573,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is not a question that can be asked any more.
 
 ### Fixed
+
+- **`--proximity-from` and `--cost-tier` claimed to do something they do not.**
+  Both are accepted on `spawn launch`, **validated** (an invalid cost tier or
+  proximity region is rejected, so they feel load-bearing) and persisted to the
+  sweep record — but nothing reads them when regions are selected. Their only
+  consumers, `regions.ScoreRegions` and `GetRegionsByPriority`, have no callers.
+  And because either flag alone satisfies `shouldApplyRegionConstraints`,
+  `--cost-tier low` on its own printed `Applied region constraints: N regions
+  allowed` with N = every region and nothing filtered.
+
+  The flags are unchanged for now — whether to implement the ordering or
+  withdraw them is a product decision, tracked in #864 — but the help text and
+  the sweep output now say the values are recorded and not applied, instead of
+  implying an effect that does not happen. `pkg/regions/priority.go` is retained
+  for the same reason: it is unreferenced, but it is the only implementation of
+  what those two flags promise, and deleting it would turn a wiring gap into a
+  design decision taken by accident.
+
 
 - `deployment/prometheus/alertmanager.yaml` pointed at
   `http://localhost:8080/alertmanager/webhook`, a receiver spawn shipped code
