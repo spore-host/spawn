@@ -345,7 +345,79 @@ func waitForSSHReady(ctx context.Context, host string, timeout time.Duration) er
 // caller treats as a launch failure (a spored-less instance has no TTL safety
 // net). Uses SSM RunShellScript so it works for both keyed and keyless instances;
 // an SSM error early on (agent still registering) is retried, not fatal.
+// sporedCheck is how a launch confirms spored came up on the instance.
+type sporedCheck int
+
+const (
+	sporedCheckNone    sporedCheck = iota // not verified (--wait-for-ssh=false)
+	sporedCheckLinux                      // `spored status` via AWS-RunShellScript
+	sporedCheckWindows                    // the spored service via AWS-RunPowerShellScript
+)
+
+// sporedVerificationFor decides how — and whether — to verify spored after a
+// launch. It is a function of the INSTANCE's OS and nothing else (#882).
+//
+// It used to be decided inline as `waitForSSH && plat.OS != "windows"`, where
+// plat is platform.Detect() and plat.OS is runtime.GOOS: the OS of the machine
+// RUNNING spawn. So the instance's verification depended on the user's laptop.
+// From macOS, a Windows instance got the Linux check — SSM refused it with
+// UnsupportedPlatformType and the launch reported "spored never came up" about a
+// spore that was healthy (observed, i-061da267b7a9442de); with --terminate-on-error
+// that terminates it. From a Windows workstation, a Linux instance got no check
+// at all. The workstation's OS is deliberately not a parameter here, so it cannot
+// creep back in.
+func sporedVerificationFor(waitForSSH bool, targetOS string) sporedCheck {
+	if !waitForSSH {
+		return sporedCheckNone
+	}
+	if strings.EqualFold(targetOS, "windows") {
+		return sporedCheckWindows
+	}
+	return sporedCheckLinux
+}
+
+// sporedVerifyTimeout is the budget for a check. Windows gets longer: its first
+// boot also installs the AWS CLI from an MSI before spored can be fetched.
+func sporedVerifyTimeout(c sporedCheck) time.Duration {
+	if c == sporedCheckWindows {
+		return 10 * time.Minute
+	}
+	return 5 * time.Minute
+}
+
+// windowsSporedRunning exits 0 only if the spored service exists and is Running.
+// Asks the Service Control Manager rather than running spored.exe, because a
+// verified-install refusal (#879) leaves no spored.exe to run — and "no binary"
+// must read as not-ready, not as an execution error.
+const windowsSporedRunning = `$s = Get-Service spored -ErrorAction SilentlyContinue; if ($s -and $s.Status -eq 'Running') { exit 0 } else { Write-Output ('spored service: ' + $(if ($s) { $s.Status } else { 'not installed' })); exit 1 }`
+
+// sporedProbe returns the probe for a check: whether it runs as PowerShell
+// (AWS-RunPowerShellScript) or shell (AWS-RunShellScript), and the command. Pure,
+// so the mapping that sent a Linux document to a Windows instance is testable.
+func sporedProbe(check sporedCheck) (powershell bool, command string) {
+	if check == sporedCheckWindows {
+		return true, windowsSporedRunning
+	}
+	return false, "/usr/local/bin/spored status"
+}
+
+// verifySporedReady confirms spored is up on a Linux instance. Kept with its
+// original signature for its other callers; launches use verifySporedReadyOn.
 func verifySporedReady(ctx context.Context, client *aws.Client, region, instanceID string, timeout time.Duration) error {
+	return verifySporedReadyOn(ctx, client, region, instanceID, sporedCheckLinux, timeout)
+}
+
+// verifySporedReadyOn confirms spored is up, probing with the check that matches
+// the instance's OS.
+func verifySporedReadyOn(ctx context.Context, client *aws.Client, region, instanceID string, check sporedCheck, timeout time.Duration) error {
+	powershell, command := sporedProbe(check)
+	probe := func(ctx context.Context) (*aws.SSMRunResult, error) {
+		if powershell {
+			return client.RunPowerShell(ctx, region, instanceID, command, 30*time.Second)
+		}
+		return client.RunShellScript(ctx, region, instanceID, command, 30*time.Second)
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -373,14 +445,15 @@ func verifySporedReady(ctx context.Context, client *aws.Client, region, instance
 		// `spored status` exits 0 when the daemon is up and answering. Run it over
 		// SSM (the agent runs as root, so no sudo needed). The agent is Online by
 		// now, so SendCommand reaches it instead of timing out.
-		res, err := client.RunShellScript(ctx, region, instanceID, "/usr/local/bin/spored status", 30*time.Second)
+		res, err := probe(ctx)
 		if err == nil && res.Status == "Success" {
 			return nil
 		}
 		if err != nil {
 			lastErr = err
 		} else {
-			lastErr = fmt.Errorf("spored status: %s: %s", res.Status, strings.TrimSpace(res.Stderr))
+			lastErr = fmt.Errorf("spored status: %s: %s", res.Status,
+				strings.TrimSpace(strings.TrimSpace(res.Stdout)+" "+strings.TrimSpace(res.Stderr)))
 		}
 		select {
 		case <-ctx.Done():

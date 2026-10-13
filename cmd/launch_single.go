@@ -951,10 +951,16 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// we waited for readiness (--wait-for-ssh) confirm spored is up over SSM (works
 	// keyed or keyless) and fail loudly if not. (An environment where SSM genuinely
 	// can't be reached can skip this whole readiness path with --wait-for-ssh=false.)
-	if waitForSSH && plat.OS != "windows" {
-		prog.Start("Verifying spored agent (up to 5 min)")
-		if err := verifySporedReady(ctx, awsClient, config.Region, result.InstanceID, 5*time.Minute); err != nil {
-			prog.Error("Verifying spored agent (up to 5 min)", err)
+	//
+	// Decided by the INSTANCE's OS (config.TargetOS), never by plat.OS — that is
+	// the workstation's runtime.GOOS, and using it is #882. See sporedVerificationFor.
+	if check := sporedVerificationFor(waitForSSH, config.TargetOS); check != sporedCheckNone {
+		timeout := sporedVerifyTimeout(check)
+		// One label for Start/Error/Complete: progress matches steps by name (#739).
+		step := fmt.Sprintf("Verifying spored agent (up to %d min)", int(timeout.Minutes()))
+		prog.Start(step)
+		if err := verifySporedReadyOn(ctx, awsClient, config.Region, result.InstanceID, check, timeout); err != nil {
+			prog.Error(step, err)
 			if terminateOnError {
 				fmt.Fprintf(os.Stderr, "\n⚠️  spored did not come up; terminating %s (--terminate-on-error)\n", result.InstanceID)
 				if terr := awsClient.Terminate(ctx, config.Region, result.InstanceID); terr != nil {
@@ -966,7 +972,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				"inspect it (spawn connect %s) or terminate it (spawn terminate %s). Re-run with --terminate-on-error to auto-terminate: %w",
 				result.InstanceID, result.InstanceID, result.InstanceID, err)
 		}
-		prog.Complete("Verifying spored agent (up to 5 min)")
+		prog.Complete(step)
 	}
 
 	// Step 11: Register DNS (if requested).
