@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Windows verifier is **executed**, not string-matched. CI cannot run Windows
+  PowerShell 5.1 but GitHub's runners ship PowerShell 7, and every API used
+  exists in both. The test substitutes a fake `aws` for the script's `& $aws s3
+  cp` and runs the whole generated install: verified install, a tampered source
+  skipped in favour of the next, every source tampered, a matching checksum with
+  a foreign signature (the bucket-write case), a missing `.sig`, a missing
+  `.sha256`, and both DER integer shapes — 33-byte and short — that a fixed-width
+  signature converter would silently reject on some launches. In CI a missing
+  `pwsh` fails rather than skips. Also checked: the real v0.128.0 Windows binary
+  verifies against the real key, and a tampered copy is refused.
+- `.gitleaks.toml` allowlists the spored signing **public** key's coordinates in
+  the generated `install-spored.ps1` by exact line shape, not by path, so a real
+  secret added to that file is still caught — verified against two negative
+  controls on the gitleaks version CI pins (8.21.2). The config now records that
+  its semantics are version-dependent: 8.21 ORs a table's `paths` and `regexes`,
+  later versions AND them, and 8.21 ignores the newer `[[allowlists]]` form
+  altogether. A version validated only against a newer local gitleaks passed
+  locally and failed CI with sixteen findings.
+- Two gates on the rendered Windows user-data: `service install` must be
+  reachable only through a successful verification, and the whole `<powershell>`
+  block must parse under PowerShell's own parser — a syntax error there fails
+  nothing in spawn, and would leave every Windows spore without spored.
+
+
 - `TestOnlyTheReleaseWorkflowPublishesSpored` — nothing but the release workflow
   may write a spored binary to S3. Every shell script, Makefile and workflow is
   scanned, and commands are read as **logical** lines with arguments taken by
@@ -17,7 +41,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script restored**, because that script put its `s3://` destination on a
   continuation line; the gate was blind to the one thing it existed to stop.
 
+### Changed
+
+- **`scripts/install-spored.ps1` is now generated**, from the same verifier the
+  Windows launch bootstrap uses, and fails closed (#879). It used to install
+  spored unverified. It is kept rather than deleted because Windows has no
+  `spawn upgrade-spored` yet (#234), so it is the only manual path there is; a
+  hand-maintained copy of the verifier is how Windows came to skip verification,
+  so it is not hand-maintained. `TestInstallSporedPs1IsGenerated` fails if the
+  committed file differs from the generator.
+
 ### Removed
+
+- **`scripts/install-spored.sh`** (#879), a manual installer that downloaded
+  spored and installed it as a root systemd service with no checksum or
+  signature check. `spawn upgrade-spored` is the supported, verified way to
+  (re)install spored on an existing Linux instance.
+
 
 - **`scripts/deploy-spored.sh`** (#876). It uploaded `bin/spored-*` to every
   regional bucket with **no `.sha256` and no `.sig`**, while the boot installer
@@ -31,6 +71,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deleted rather than fixed: the `.sig` is made by a KMS key reachable only
   through the release workflow's OIDC role, so no script can produce a valid
   one. **spored ships only by tagging a release.**
+
+### Security
+
+- **Windows spores now verify spored before installing it, and install nothing
+  if it does not verify** (advisory GHSA-q59f-6gc3-qj2p, #879). The Windows
+  launch bootstrap copied `spored-windows-amd64.exe` out of S3 and registered it
+  as a SYSTEM service with no checksum or signature check — the Linux bootstrap
+  has verified both since GHSA-3x4q-99gh-fxhx, which described two such paths;
+  this was a third. It also carried on when the download failed.
+
+  It now downloads the `.sha256` and `.sig` beside the binary from the same
+  source, checks both, and only then installs; a source that fails is skipped
+  and the next tried, and if none verifies nothing is installed and the console
+  says so. The material was always there: every release already publishes the
+  Windows binary's checksum and KMS signature.
+
+  Targets Windows PowerShell 5.1 on Windows 11+, deliberately not PowerShell 7:
+  EC2Launch runs user-data with the built-in `powershell.exe`, and requiring 7
+  would mean downloading an unverified installer before verifying spored. The
+  key is embedded as its P-256 X/Y coordinates — .NET Framework 4.8 has no
+  `ImportSubjectPublicKeyInfo` — derived at generation time from the same
+  `SigningKeyPEM` Linux uses, so the two cannot verify against different keys.
 
 ## [0.128.0] - 2026-10-12
 

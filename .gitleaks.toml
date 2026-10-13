@@ -1,15 +1,36 @@
 # gitleaks configuration for spawn.
-# Extends the built-in default ruleset; adds an allowlist for known
-# false positives — documentation examples and security-test fixtures that
-# contain illustrative (fake) keys, not real credentials.
+# Extends the built-in default ruleset; adds an allowlist for known false
+# positives — documentation examples and security-test fixtures that contain
+# illustrative (fake) keys, not real credentials, and the spored signing PUBLIC
+# key's coordinates in the generated Windows installer.
+#
+# VERSION-SENSITIVE. This is written for the gitleaks CI pins in
+# .github/workflows/security.yml (8.21.2). In that version a single [allowlist]
+# table's `paths` and `regexes` are OR'd. From 8.25 the legacy table is read with
+# them AND'd, and the newer [[allowlists]] form is unknown to 8.21 — so 8.21.2
+# ignores [[allowlists]] entirely, dropping every allowlist here. Both were found
+# the hard way (#879): a config validated against a newer local gitleaks passed
+# locally and failed CI with sixteen findings. If CI's gitleaks is upgraded, this
+# file must move to [[allowlists]] in the same change; the failure is loud (CI
+# flags the fixtures again), not silent.
 
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Docs examples and test fixtures contain placeholder secrets, not real ones"
+description = "Docs/test fixtures with placeholder secrets; the spored signing public key in the generated Windows installer"
 paths = [
   '''SECURITY\.md''',
   '''docs/.*\.md''',
   '''.*_test\.go''',
+]
+# The spore.host spored-signing PUBLIC key's P-256 coordinates, embedded in the
+# generated scripts/install-spored.ps1 (#879). A public key is not a secret — the
+# same key ships as PEM in pkg/sporedinstall — but 64 hex characters beside the
+# word "key" is exactly what generic-api-key matches. Allowlisted by LINE, in
+# exactly the generated shape, rather than by path: a path allowlist would also
+# hide a real secret pasted into that file later.
+regexTarget = "line"
+regexes = [
+  '''\$sporeKey[XY] = '[0-9a-f]{64}'$''',
 ]

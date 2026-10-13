@@ -84,7 +84,9 @@ func newRootCmd() *cobra.Command {
 		newCompleteCmd(),
 		// Explicit `version` subcommand preserves the historical contract
 		// (`spored version` → "spored version X"); cobra's --version flag alone
-		// would break callers like scripts/install-spored.sh.
+		// would break callers that parse it: `spawn upgrade-spored`
+		// (cmd/upgrade_spored.go) and the release version guard
+		// (scripts/check-release-version.sh).
 		&cobra.Command{
 			Use:   "version",
 			Short: "Show version",
