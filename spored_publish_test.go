@@ -38,7 +38,7 @@ import (
 // continuation line — so the gate was blind to the one script it exists to stop.
 // Callers therefore join `\` continuations first, and this reads the arguments by
 // position: in `aws s3 cp|mv|sync SRC DST`, it is a write exactly when DST is an
-// s3:// URL, which is also what tells an upload from a download (install-spored.sh
+// s3:// URL, which is also what tells an upload from a download (an installer
 // copies FROM S3).
 func writesSporedToS3(cmd string) bool {
 	f := strings.Fields(cmd)
@@ -177,7 +177,7 @@ func TestWritesSporedToS3(t *testing.T) {
 		{`aws s3 cp spored s3://spawn-binaries-us-east-1/spawn/spored-linux-amd64`, true},
 		{`aws s3 sync dist/spored/ s3://b/spawn/`, true},
 		{`aws s3api put-object --bucket b --key spawn/spored-linux-arm64 --body x`, true},
-		// downloads: s3:// is the SOURCE — install-spored.sh does exactly this
+		// downloads: s3:// is the SOURCE — every installer does exactly this
 		{`aws s3 cp "$S3_PATH_PREFIX" /usr/local/bin/spored --region "$REGION"`, false},
 		{`aws s3 cp s3://spawn-binaries-us-east-1/spawn/spored-linux-amd64 /tmp/x`, false},
 		// uploads of something else

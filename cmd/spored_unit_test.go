@@ -29,7 +29,6 @@ func TestSporedUnit_NoPrivateTmp(t *testing.T) {
 	files := []string{
 		filepath.Join(repoRoot, "pkg", "launcher", "bootstrap.go"),
 		filepath.Join(repoRoot, "scripts", "spored.service"),
-		filepath.Join(repoRoot, "scripts", "install-spored.sh"),
 	}
 
 	for _, f := range files {

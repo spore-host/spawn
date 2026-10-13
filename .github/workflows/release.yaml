@@ -191,8 +191,9 @@ jobs:
                 fi
               done
             done
-            # Windows spored (amd64 only) — same paths so install-spored.ps1 mirrors
-            # install-spored.sh (#77).
+            # Windows spored (amd64 only) — the same paths, .sha256 and .sig the Linux
+            # binaries get, which the Windows launch bootstrap and the generated
+            # scripts/install-spored.ps1 both verify (#77, #879).
             for bucket in "${BUCKETS[@]}"; do
               printf '%s\0%s\0' "$win_src" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe"
               printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe.sha256"

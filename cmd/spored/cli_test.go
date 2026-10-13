@@ -11,7 +11,8 @@ import (
 // scripts depend on. These names/flags are load-bearing: spawn shells out to
 // `spored status --check-complete`, `spored config get/set/list`,
 // `spored reload`, `spored complete --status/--message`, the bootstrap runs the
-// bare binary as the daemon, and install-spored.sh runs `spored version`.
+// bare binary as the daemon, and `spawn upgrade-spored` and the release version
+// guard parse `spored version`.
 func TestCLIContract(t *testing.T) {
 	root := newRootCmd()
 

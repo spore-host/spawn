@@ -21,9 +21,11 @@ func TestVersionHasNoHardcodedDefault(t *testing.T) {
 }
 
 // TestVersionSubcommandReportsResolvedVersion locks the output contract
-// scripts/install-spored.sh parses ("spored version X"), and checks it reports
-// the resolved version rather than the empty variable — an empty third field
-// would make the install script's version comparison silently compare "".
+// ("spored version X") that `spawn upgrade-spored` and
+// scripts/check-release-version.sh parse, and checks it reports the resolved
+// version rather than the empty variable — an empty field would make the upgrade's
+// version comparison silently compare "", and the release guard pass a binary that
+// reports nothing.
 func TestVersionSubcommandReportsResolvedVersion(t *testing.T) {
 	root := newRootCmd()
 	var out bytes.Buffer
