@@ -179,7 +179,7 @@ func runDNSRegister(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// Create DNS client
-	dnsClient, err := dns.NewClient(ctx, "", "")
+	dnsClient, err := dns.NewClient(ctx, resolveDNSDomain(), "")
 	if err != nil {
 		return fmt.Errorf("failed to create DNS client: %w", err)
 	}
@@ -249,7 +249,7 @@ func runDNSDelete(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// Create DNS client
-	dnsClient, err := dns.NewClient(ctx, "", "")
+	dnsClient, err := dns.NewClient(ctx, resolveDNSDomain(), "")
 	if err != nil {
 		return fmt.Errorf("failed to create DNS client: %w", err)
 	}

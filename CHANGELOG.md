@@ -7,7 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`spawn launch --dns-domain` and `--dns-api-endpoint`** (#872). Neither has
+  ever reached the registration that happens. Both are now hidden and print a
+  warning; custom-domain registration is #891.
+
+### Removed
+
+- **`spawn launch` no longer registers DNS itself; spored does** (#872). The
+  launch SSHed into the instance and ran an unsigned `curl` against an API
+  Gateway that was deleted long ago, carrying the identity-document fields the
+  updater stopped reading in #173. It failed on every launch, and its warning
+  blamed the user's account ("expected in accounts not wired for spore.host
+  DNS"). spored registers the same name from the `spawn:dns-name` tag, signed,
+  and keeps its lease renewed, and that was the registration that actually
+  worked. The launch now reports spored's result: the record, the failure
+  detail, or that registration is still pending. It also stops claiming to
+  "skip" DNS for `--wait-for-ssh=false` and SSM-only launches, which spored
+  registered all along. Also removed:
+  the `dns.domain` / `dns.api_endpoint` config keys, `SPAWN_DNS_DOMAIN` /
+  `SPAWN_DNS_API_ENDPOINT`, and the `/spawn/dns/domain` / `/spawn/dns/api_endpoint`
+  SSM lookups. They fed only that path, and the domain was never sent. The keys
+  are ignored if present.
+
 ### Fixed
+
+- **`--no-dns` and `dns.enabled: false` actually skip DNS registration**
+  (#872). They suppressed only the CLI's own attempt; the `spawn:dns-name` tag
+  was written regardless, so spored registered the name anyway. They now
+  withhold the tag.
+
+- **`spawn dns register` and `spawn dns delete` work from a workstation**
+  (#872). The DNS client fetched the instance identity document from IMDS
+  before every request, so off-instance it failed before sending anything. The
+  updater has ignored those fields since #173. The client no longer fetches
+  them, and `--domain` now reaches the request instead of only the printed name.
 
 - **Windows spored now signs its DNS requests, so Windows spores register DNS**
   (#883). spored signed only when `SPORE_DNS_SIGV4` was set, and only the Linux

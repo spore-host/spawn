@@ -1,17 +1,14 @@
 package config
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 // isolateDNSConfigEnv points HOME at a fresh temp dir (no ~/.spawn/config.yaml
-// unless the test writes one) and disables AWS credential discovery so
-// LoadDNSConfig's SSM lookup fails fast instead of hanging or hitting a real
-// account. This is the same pattern cmd/service_test.go uses for AWS-adjacent
-// hermetic tests.
+// unless the test writes one) and disables AWS credential discovery, so no
+// test here can reach a real account even if LoadDNSConfig regains a lookup.
 func isolateDNSConfigEnv(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -23,8 +20,6 @@ func isolateDNSConfigEnv(t *testing.T) string {
 	t.Setenv("AWS_SESSION_TOKEN", "")
 	t.Setenv("AWS_CONFIG_FILE", filepath.Join(home, "no-aws-config"))
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(home, "no-aws-creds"))
-	t.Setenv("SPAWN_DNS_DOMAIN", "")
-	t.Setenv("SPAWN_DNS_API_ENDPOINT", "")
 	return home
 }
 
@@ -69,7 +64,7 @@ func TestDNSConfig_IsEnabled_TriState(t *testing.T) {
 func TestLoadDNSConfig_NoConfigFile_DefaultsEnabled(t *testing.T) {
 	isolateDNSConfigEnv(t)
 
-	cfg, err := LoadDNSConfig(context.Background(), "", "", false)
+	cfg, err := LoadDNSConfig(false)
 	if err != nil {
 		t.Fatalf("LoadDNSConfig() error = %v", err)
 	}
@@ -87,7 +82,7 @@ func TestLoadDNSConfig_ConfigFilePresentButSilentOnDNS_StillEnabled(t *testing.T
 	home := isolateDNSConfigEnv(t)
 	writeSpawnConfig(t, home, "compliance:\n  mode: nist-800-171\n")
 
-	cfg, err := LoadDNSConfig(context.Background(), "", "", false)
+	cfg, err := LoadDNSConfig(false)
 	if err != nil {
 		t.Fatalf("LoadDNSConfig() error = %v", err)
 	}
@@ -102,7 +97,7 @@ func TestLoadDNSConfig_ConfigDisabled_NoFlag_Skips(t *testing.T) {
 	home := isolateDNSConfigEnv(t)
 	writeSpawnConfig(t, home, "dns:\n  enabled: false\n")
 
-	cfg, err := LoadDNSConfig(context.Background(), "", "", false)
+	cfg, err := LoadDNSConfig(false)
 	if err != nil {
 		t.Fatalf("LoadDNSConfig() error = %v", err)
 	}
@@ -118,35 +113,12 @@ func TestLoadDNSConfig_ConfigEnabled_FlagOverridesToDisabled(t *testing.T) {
 	home := isolateDNSConfigEnv(t)
 	writeSpawnConfig(t, home, "dns:\n  enabled: true\n")
 
-	cfg, err := LoadDNSConfig(context.Background(), "", "", true /* --no-dns */)
+	cfg, err := LoadDNSConfig(true /* --no-dns */)
 	if err != nil {
 		t.Fatalf("LoadDNSConfig() error = %v", err)
 	}
 	if cfg.IsEnabled() {
 		t.Error("IsEnabled() = true, want false (--no-dns must override dns.enabled: true)")
-	}
-}
-
-// TestLoadDNSConfig_NothingSet_DefaultProceeds: no config file, no flag →
-// default (enabled) proceeds. This is the explicit "nothing set" case called
-// out in the issue's test requirements, distinct from the no-file case above
-// in that here we also confirm domain/endpoint fall back to the built-in
-// defaults, not just Enabled.
-func TestLoadDNSConfig_NothingSet_DefaultProceeds(t *testing.T) {
-	isolateDNSConfigEnv(t)
-
-	cfg, err := LoadDNSConfig(context.Background(), "", "", false)
-	if err != nil {
-		t.Fatalf("LoadDNSConfig() error = %v", err)
-	}
-	if !cfg.IsEnabled() {
-		t.Error("IsEnabled() = false, want true (default)")
-	}
-	if cfg.Domain != defaultDomain {
-		t.Errorf("Domain = %q, want default %q", cfg.Domain, defaultDomain)
-	}
-	if cfg.APIEndpoint != defaultAPIEndpoint {
-		t.Errorf("APIEndpoint = %q, want default %q", cfg.APIEndpoint, defaultAPIEndpoint)
 	}
 }
 
@@ -156,11 +128,26 @@ func TestLoadDNSConfig_ConfigDisabled_NoDNSAlsoTrue(t *testing.T) {
 	home := isolateDNSConfigEnv(t)
 	writeSpawnConfig(t, home, "dns:\n  enabled: false\n")
 
-	cfg, err := LoadDNSConfig(context.Background(), "", "", true)
+	cfg, err := LoadDNSConfig(true)
 	if err != nil {
 		t.Fatalf("LoadDNSConfig() error = %v", err)
 	}
 	if cfg.IsEnabled() {
 		t.Error("IsEnabled() = true, want false")
+	}
+}
+
+// A config file written for the withdrawn CLI registration path (#872) still
+// carries `domain:` and `api_endpoint:`. Those keys are ignored, not an error,
+// and must not disturb `enabled:` beside them.
+func TestLoadDNSConfig_WithdrawnKeysAreIgnored(t *testing.T) {
+	home := isolateDNSConfigEnv(t)
+	writeSpawnConfig(t, home, "dns:\n  enabled: false\n  domain: example.com\n  api_endpoint: https://f4gm19tl70.execute-api.us-east-1.amazonaws.com/prod/update-dns\n")
+	cfg, err := LoadDNSConfig(false)
+	if err != nil {
+		t.Fatalf("LoadDNSConfig() error = %v", err)
+	}
+	if cfg.IsEnabled() {
+		t.Error("dns.enabled: false beside the withdrawn keys was not honoured")
 	}
 }

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -59,54 +58,5 @@ func TestWaitForSSHReady_RespectsCallerCancellation(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("ignored the cancelled context for %s", elapsed)
-	}
-}
-
-// sshRegisterRetryable: the predicate used to be `err != nil || <curl checks>`,
-// so EVERY error was transient and an unreachable host burned the full
-// four-minute budget on ~16 attempts that could not have succeeded (#741).
-func TestSSHRegisterRetryable(t *testing.T) {
-	errExit := errors.New("exit status 255")
-
-	for _, tc := range []struct {
-		name   string
-		err    error
-		output string
-		want   bool
-		why    string
-	}{
-		{"success", nil, `{"success":true}`, false, "nothing to retry"},
-		{
-			"cloud-init has not written authorized_keys yet",
-			errExit, "Permission denied (publickey).", true,
-			"a fresh session later DOES recover this — it is the race the retry exists for",
-		},
-		{"instance resolver not up (curl 6)", errExit, "curl exit 6", true, "early-boot DNS race"},
-		{"instance cannot connect (curl 7)", errExit, "curl exit 7", true, "early-boot DNS race"},
-		{"instance request timed out (curl 28)", errExit, "curl exit 28", true, "early-boot DNS race"},
-		{
-			"curl race reported WITHOUT a process error",
-			nil, "curl exit 6", true,
-			"the remote script can report the race on a zero exit; must still retry",
-		},
-		{
-			"host refuses the connection",
-			errExit, "ssh: connect to host 10.0.0.1 port 22: Connection refused", false,
-			"a fresh session reaches the same refusing host — this is #741's four wasted minutes",
-		},
-		{"connect times out", errExit, "ssh: connect to host 10.0.0.1 port 22: Connection timed out", false, "unreachable"},
-		{"no route", errExit, "ssh: connect to host 10.0.0.1 port 22: No route to host", false, "unreachable"},
-		{"network unreachable", errExit, "connect: Network is unreachable", false, "unreachable"},
-		{
-			"an unrecognised failure stays retryable",
-			errExit, "ssh: some message we have never seen", true,
-			"degrade to the old behaviour rather than giving up early on an unknown",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := sshRegisterRetryable(tc.err, []byte(tc.output)); got != tc.want {
-				t.Errorf("sshRegisterRetryable = %v, want %v — %s", got, tc.want, tc.why)
-			}
-		})
 	}
 }
