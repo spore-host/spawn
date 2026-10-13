@@ -3,8 +3,24 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
+
+// windowsLicenceNote accompanies every rate quoted for a Windows target (#884).
+//
+// truffle, the pricing authority, prices Linux on shared tenancy only, so for a
+// Windows instance the figure it returns is the Linux rate — EC2 bills the
+// Windows licence on top, often roughly doubling a small instance. Quoting that
+// number as "the rate" understates in the expensive direction on exactly the
+// surfaces a careful user consults before spending. Until truffle can price
+// Windows, the number is shown as what it is: a lower bound.
+const windowsLicenceNote = "Linux rate: EXCLUDES the Windows licence EC2 adds, so the real cost is higher (a lower bound)"
+
+// isWindowsTarget reports whether a resolved target OS is Windows.
+func isWindowsTarget(targetOS string) bool {
+	return strings.EqualFold(strings.TrimSpace(targetOS), "windows")
+}
 
 // renderInstanceCostEstimate writes the instance portion of the --estimate-only
 // preview, for count instances.
@@ -21,7 +37,10 @@ import (
 // byte-for-byte what it was, so the common path gains no noise. Above 1, both
 // figures are shown: the per-instance rate is what a user checks against a price
 // list, and the total is what they actually pay.
-func renderInstanceCostEstimate(w io.Writer, instanceType, region string, pricePerHour float64, sourceLabel, ttl string, count int) {
+//
+// targetOS is the instance's OS ("windows" or "linux"); for Windows the rate is
+// labelled as the Linux lower bound it is (#884).
+func renderInstanceCostEstimate(w io.Writer, instanceType, region, targetOS string, pricePerHour float64, sourceLabel, ttl string, count int) {
 	// A count of 0 or less is reachable (`--count` is a plain int flag) and must
 	// not multiply the estimate to zero: "$0.00" for a launch that still costs
 	// money is the most dangerous possible rendering of this bug. Quote the
@@ -40,6 +59,9 @@ func renderInstanceCostEstimate(w io.Writer, instanceType, region string, priceP
 		fmt.Fprintf(w, "💰 Cost estimate for %d × %s in %s\n", effective, instanceType, region)
 		fmt.Fprintf(w, "   On-demand:  $%.4f/hr each — $%.4f/hr total (%s)\n",
 			pricePerHour, total, sourceLabel)
+	}
+	if isWindowsTarget(targetOS) {
+		fmt.Fprintf(w, "   ⚠️  %s\n", windowsLicenceNote)
 	}
 
 	if ttl == "" {

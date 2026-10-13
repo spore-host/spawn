@@ -385,7 +385,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 			// understates the ceiling by exactly that factor on the flag whose
 			// whole job is to bound spend.
 			renderInstanceCostEstimate(os.Stderr, config.InstanceType, config.Region,
-				dp.PricePerHour, dp.SourceLabel(), config.TTL, count)
+				estimateTargetOS(ctx, awsClient, config), dp.PricePerHour, dp.SourceLabel(), config.TTL, count)
 		}
 		// --fsx-create provisions the single most expensive thing a launch can
 		// create (1200 GiB is the FSx Lustre minimum, ~$174/month) and the estimate
@@ -1300,7 +1300,14 @@ func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *a
 	// Step 1: Detect AMI
 	prog.Start("Detecting AMI")
 	// "" or "auto" both mean auto-detect the latest AL2023 AMI (#342).
-	if config.AMI == "" || strings.EqualFold(config.AMI, "auto") {
+	if isAutoAMI(config.AMI) {
+		// Auto-detect only ever finds a LINUX image. With --os windows it used to
+		// proceed anyway: the instance was labelled Windows everywhere — preview,
+		// spored check, Windows guards — and booted Amazon Linux (#884).
+		if err := guardWindowsNeedsAMI(osFlag); err != nil {
+			prog.Error("Detecting AMI", err)
+			return err
+		}
 		ami, err := awsClient.GetRecommendedAMI(ctx, config.Region, config.InstanceType)
 		if err != nil {
 			prog.Error("Detecting AMI", err)

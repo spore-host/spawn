@@ -66,6 +66,40 @@ func resolveTargetOS(ctx context.Context, awsClient *aws.Client, region, amiID, 
 	return "linux"
 }
 
+// isAutoAMI reports whether --ami asks spawn to choose the image.
+func isAutoAMI(ami string) bool {
+	return ami == "" || strings.EqualFold(ami, "auto")
+}
+
+// guardWindowsNeedsAMI refuses `--os windows` when spawn would pick the AMI (#884).
+//
+// AMI auto-detection returns Amazon Linux 2023 and nothing else, so `--os windows`
+// without `--ami` launched a Linux instance while every surface — the dry-run
+// preview, the spored readiness check, the Windows guards — treated it as Windows.
+// spawn does not choose a Windows version on the user's behalf (Server 2022 vs
+// 2025, Base vs Core, a licensed or BYOL image are real decisions), so the fix is
+// to refuse and say how to find one.
+func guardWindowsNeedsAMI(osFlag string) error {
+	if !strings.EqualFold(strings.TrimSpace(osFlag), "windows") {
+		return nil
+	}
+	return fmt.Errorf("--os windows needs an explicit --ami: AMI auto-detection only finds Amazon Linux, " +
+		"so this would launch a Linux instance labelled Windows.\n" +
+		"  Find the latest Windows Server AMI for the region with:\n" +
+		"    aws ssm get-parameter --name /aws/service/ami-windows-latest/Windows_Server-2025-English-Full-Base --query Parameter.Value --output text --region <region>\n" +
+		"  then pass it as --ami <ami-id>")
+}
+
+// estimateTargetOS is the target OS as far as --estimate-only can know it. That
+// path resolves no AMI, so it uses --os, else an explicit --ami's platform.
+func estimateTargetOS(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig) string {
+	ami := config.AMI
+	if isAutoAMI(ami) {
+		ami = ""
+	}
+	return resolveTargetOS(ctx, awsClient, config.Region, ami, osFlag)
+}
+
 // defaultWindowsInstanceType is the default for `--os windows` when the user
 // doesn't pass --instance-type. Windows must not default to a burstable type:
 // the Sysprep/OOBE first boot starves on CPU credits and takes ~20+ min (#95).

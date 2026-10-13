@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would have signed for the wrong region and been refused. The region now comes
   from the endpoint's own hostname (`<id>.lambda-url.<region>.on.aws`), with the
   ambient region used only for a custom endpoint whose hostname carries none.
+- **`spawn launch --os windows` without `--ami` is refused instead of launching
+  Linux** (#884). AMI auto-detection only finds Amazon Linux 2023, so the launch
+  booted Linux while the preview, the spored readiness check and the Windows
+  guards all treated it as Windows. spawn does not choose a Windows version for
+  you; the error names the SSM parameter that returns the latest Windows Server
+  AMI to pass as `--ami`.
+
+- **Windows rates are labelled as the Linux lower bound they are** (#884). The
+  pricing source prices Linux only, so `--dry-run` and `--estimate-only` quoted a
+  Windows instance at the Linux rate with nothing saying the Windows licence EC2
+  adds was missing. Both now say so beside the figure, and the `-o json` plan
+  carries `price_is_lower_bound: true`. Real Windows pricing is spore-host/truffle#185.
 
 ### Security
 
