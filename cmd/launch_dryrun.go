@@ -87,6 +87,7 @@ func runLaunchDryRun(ctx context.Context, out io.Writer, awsClient *aws.Client, 
 	if dp, err := resolveLaunchDryRunPrice(ctx, awsClient, config.InstanceType, config.Region); err == nil {
 		plan.OnDemandPricePerHour = dp.PricePerHour
 		plan.PriceSource = dp.SourceLabel()
+		plan.PriceIsLowerBound = isWindowsTarget(config.TargetOS)
 		if d, derr := parseDuration(plan.TTL); derr == nil {
 			plan.MaxCostUSD = dp.PricePerHour * d.Hours()
 		}
@@ -160,7 +161,10 @@ type launchPlan struct {
 	Tags                 map[string]string `json:"tags,omitempty"`
 	OnDemandPricePerHour float64           `json:"on_demand_price_per_hour,omitempty"`
 	PriceSource          string            `json:"price_source,omitempty"`
-	MaxCostUSD           float64           `json:"max_cost_usd,omitempty"`
+	// PriceIsLowerBound is set for a Windows target (#884): the rate is the Linux
+	// one and excludes the Windows licence, so it and MaxCostUSD understate.
+	PriceIsLowerBound bool    `json:"price_is_lower_bound,omitempty"`
+	MaxCostUSD        float64 `json:"max_cost_usd,omitempty"`
 	// CostLimitUSD is the --cost-limit cap, which the preview omitted entirely
 	// (#811). It matters most precisely here: MaxCostUSD above is `rate × ttl`,
 	// compute only, so a preview showing an authoritative-looking cost line while
@@ -310,6 +314,9 @@ func renderLaunchPlanTable(out io.Writer, p launchPlan) {
 		fmt.Fprintf(out, "Rate:         $%.4f/hr on-demand (%s)\n", p.OnDemandPricePerHour, p.PriceSource)
 		if p.MaxCostUSD > 0 {
 			fmt.Fprintf(out, "Max cost:     ~$%.2f (rate × ttl, compute only)\n", p.MaxCostUSD)
+		}
+		if p.PriceIsLowerBound {
+			fmt.Fprintf(out, "              ⚠️  %s\n", windowsLicenceNote)
 		}
 	}
 	// The cap, stated beside the number it bounds (#811).

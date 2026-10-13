@@ -15,7 +15,7 @@ import (
 // are being careful.
 func TestEstimateMultipliesByCount(t *testing.T) {
 	var b strings.Builder
-	renderInstanceCostEstimate(&b, "c8g.48xlarge", "us-east-1", 7.656, "on-demand", "4h", 2)
+	renderInstanceCostEstimate(&b, "c8g.48xlarge", "us-east-1", "linux", 7.656, "on-demand", "4h", 2)
 	out := b.String()
 
 	// 7.656 * 2 = 15.312/hr; over 4h = 61.248
@@ -41,7 +41,7 @@ func TestEstimateMultipliesByCount(t *testing.T) {
 // a redundant total.
 func TestEstimateSingleInstanceUnchanged(t *testing.T) {
 	var b strings.Builder
-	renderInstanceCostEstimate(&b, "m7i.large", "us-east-1", 0.1008, "on-demand", "2h", 1)
+	renderInstanceCostEstimate(&b, "m7i.large", "us-east-1", "linux", 0.1008, "on-demand", "2h", 1)
 	out := b.String()
 
 	if !strings.Contains(out, "0.1008") {
@@ -62,7 +62,7 @@ func TestEstimateSingleInstanceUnchanged(t *testing.T) {
 // "cheap" — an instance with no TTL is the unbounded case.
 func TestEstimateWithoutTTL(t *testing.T) {
 	var b strings.Builder
-	renderInstanceCostEstimate(&b, "m7i.large", "us-east-1", 0.1008, "on-demand", "", 3)
+	renderInstanceCostEstimate(&b, "m7i.large", "us-east-1", "linux", 0.1008, "on-demand", "", 3)
 	out := b.String()
 
 	if !strings.Contains(out, "0.3024") && !strings.Contains(out, "0.30") {
@@ -79,7 +79,7 @@ func TestEstimateWithoutTTL(t *testing.T) {
 func TestEstimateCountIsClamped(t *testing.T) {
 	for _, n := range []int{0, -5} {
 		var b strings.Builder
-		renderInstanceCostEstimate(&b, "m7i.large", "us-east-1", 0.1008, "on-demand", "1h", n)
+		renderInstanceCostEstimate(&b, "m7i.large", "us-east-1", "linux", 0.1008, "on-demand", "1h", n)
 		out := b.String()
 		if strings.Contains(out, "0.0000/hr") || strings.Contains(out, "$0.00 ") {
 			t.Errorf("count=%d produced a zero estimate; a nonsensical count must not read "+
@@ -97,7 +97,7 @@ func TestEstimateCountIsClamped(t *testing.T) {
 func TestEstimateSubHourTTLIsNotZeroHours(t *testing.T) {
 	for _, ttl := range []string{"30m", "45m", "90m", "5m", "20m"} {
 		var b strings.Builder
-		renderInstanceCostEstimate(&b, "c7g.large", "us-east-1", 0.0725, "on-demand", ttl, 2)
+		renderInstanceCostEstimate(&b, "c7g.large", "us-east-1", "linux", 0.0725, "on-demand", ttl, 2)
 		out := b.String()
 		if strings.Contains(out, "0 hr") {
 			t.Errorf("--ttl %s rendered as \"0 hr\":\n%s", ttl, out)
@@ -112,7 +112,7 @@ func TestEstimateSubHourTTLIsNotZeroHours(t *testing.T) {
 // regress into "4.0 hr".
 func TestEstimateWholeHoursStayReadable(t *testing.T) {
 	var b strings.Builder
-	renderInstanceCostEstimate(&b, "c7g.large", "us-east-1", 0.0725, "on-demand", "4h", 1)
+	renderInstanceCostEstimate(&b, "c7g.large", "us-east-1", "linux", 0.0725, "on-demand", "4h", 1)
 	if !strings.Contains(b.String(), "4 hr") {
 		t.Errorf("whole hours should read as \"4 hr\", got:\n%s", b.String())
 	}
