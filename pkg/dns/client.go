@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -121,30 +122,64 @@ func NewClient(ctx context.Context, domain, apiEndpoint string) (*Client, error)
 		apiEndpoint: apiEndpoint,
 	}
 
-	// Opt into SigV4 signing (#173) when SPORE_DNS_SIGV4 is set. Sourced from the
-	// ambient credential chain (the instance role on EC2), which is exactly the
-	// principal the Lambda will authorize once AuthType: AWS_IAM is enabled. We
-	// keep this behind a flag so the signing build can roll out to instances
-	// ahead of the infra AuthType flip without changing live behavior; the flip
-	// and the default-on switch happen in lockstep (see #173 cutover plan).
+	// SigV4-sign DNS requests (#173), by DEFAULT (#883). Credentials come from the
+	// ambient chain — the instance role on EC2 — which is the principal the
+	// AuthType: AWS_IAM Function URL authorizes.
+	//
+	// This used to be opt-in via SPORE_DNS_SIGV4, so a signing client could ship
+	// before the Function URL was flipped to AWS_IAM; the comment here said "the
+	// flip and the default-on switch happen in lockstep". The flip happened and the
+	// default-on switch never did. It only looked done because the three Linux
+	// systemd units set the variable — the Windows service sets no environment, so
+	// Windows spored sent UNSIGNED requests, which an AWS_IAM URL refuses with 403
+	// whatever its resource policy says (observed on a v0.128.0 Windows spore).
 	if sigV4Enabled() {
 		c.sign = true
 		c.credsProvider = cfg.Credentials
-		c.region = cfg.Region
-		if c.region == "" {
-			c.region = "us-east-1" // Function URL region; IMDS-less envs may not set it
-		}
+		c.region = signingRegion(apiEndpoint, cfg.Region)
 		c.signer = v4.NewSigner()
 	}
 
 	return c, nil
 }
 
-// sigV4Enabled reports whether DNS requests should be SigV4-signed (#173).
-// Opt-in via SPORE_DNS_SIGV4 (any non-empty value) so the cutover to AWS_IAM
-// auth on the Function URL can be coordinated with infra.
+// sigV4Enabled reports whether DNS requests are SigV4-signed: always, unless
+// SPORE_DNS_SIGV4 explicitly opts out (0/false/off/no) for a deployment that
+// genuinely runs an unauthenticated DNS endpoint (#883). An unset variable SIGNS —
+// that is the change; an unsigned request to an AWS_IAM URL can only be refused.
 func sigV4Enabled() bool {
-	return os.Getenv("SPORE_DNS_SIGV4") != ""
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SPORE_DNS_SIGV4"))) {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
+}
+
+// functionURLHost matches a Lambda Function URL hostname and captures its region.
+var functionURLHost = regexp.MustCompile(`^[a-z0-9]+\.lambda-url\.([a-z0-9-]+)\.on\.aws$`)
+
+// signingRegion is the region a SigV4 signature for endpoint must be scoped to —
+// the region of the Function URL itself, read from its hostname.
+//
+// It used to be the client's ambient region (cfg.Region), falling back to
+// us-east-1 when unset. That was right only by accident: LoadDefaultConfig does
+// not read the region from IMDS, so on an instance cfg.Region is usually empty and
+// the fallback happened to match the URL. Any spored environment that set
+// AWS_REGION outside us-east-1 would have signed for the wrong region and been
+// refused. The endpoint's own hostname cannot disagree with the endpoint.
+//
+// fallback (the ambient region, else us-east-1) is used only for a custom
+// endpoint whose hostname carries no region.
+func signingRegion(endpoint, fallback string) string {
+	if u, err := url.Parse(endpoint); err == nil {
+		if m := functionURLHost.FindStringSubmatch(strings.ToLower(u.Hostname())); m != nil {
+			return m[1]
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return "us-east-1"
 }
 
 // RegisterDNS registers a DNS record for the current instance

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows spored now signs its DNS requests, so Windows spores register DNS**
+  (#883). spored signed only when `SPORE_DNS_SIGV4` was set, and only the Linux
+  systemd units set it; the Windows service sets no environment. Windows spored
+  therefore sent unsigned requests, which the `AuthType: AWS_IAM` DNS Function
+  URL refuses with 403 whatever its resource policy says — observed on a
+  v0.128.0 Windows spore — so Windows DNS, and DNS leases (#875), could not work.
+  The opt-in existed to stage the #173 cutover, and its own comment said the
+  flip and "the default-on switch happen in lockstep"; the switch never
+  happened. Signing is now the default, with `SPORE_DNS_SIGV4=0` (or
+  `false`/`off`/`no`) as an explicit opt-out for an unauthenticated endpoint.
+
+- **DNS requests are signed for the Function URL's region, not the client's.**
+  The signing region was the ambient one (`cfg.Region`), falling back to
+  us-east-1 — correct only by accident, because `LoadDefaultConfig` does not read
+  the region from IMDS, so on an instance it was usually empty and the fallback
+  matched the URL. A spored environment with `AWS_REGION` set outside us-east-1
+  would have signed for the wrong region and been refused. The region now comes
+  from the endpoint's own hostname (`<id>.lambda-url.<region>.on.aws`), with the
+  ambient region used only for a custom endpoint whose hostname carries none.
+
 ### Security
 
 - **CI verifies the gitleaks binary before running it** (#885). The security
