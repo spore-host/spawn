@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TestLaunchDecidesSporedVerificationByTargetOS` reads the launch call site's
+  AST and fails if the verification decision is passed anything of `plat` — the
+  original defect was one wrong value in one condition, which a test of the
+  decision function alone cannot see. Five compiling reverts fail, including the
+  tempting non-fix of skipping verification for Windows, which would also have
+  made the false error disappear.
+
+
 - The Windows verifier is **executed**, not string-matched. CI cannot run Windows
   PowerShell 5.1 but GitHub's runners ship PowerShell 7, and every API used
   exists in both. The test substitutes a fake `aws` for the script's `& $aws s3
@@ -71,6 +79,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deleted rather than fixed: the `.sig` is made by a KMS key reachable only
   through the release workflow's OIDC role, so no script can produce a valid
   one. **spored ships only by tagging a release.**
+
+### Fixed
+
+- **`spawn launch` chose how to verify spored by the OS of your workstation,
+  not the instance** (#882). The check was gated on `plat.OS`, which is
+  `runtime.GOOS` — the machine running spawn. Launching Windows from macOS ran
+  the Linux check against the Windows instance; SSM refused it with
+  `UnsupportedPlatformType`, and the launch reported "spored never came up" about
+  a spore that was healthy, exiting 1 (observed). **With `--terminate-on-error`
+  that terminated a healthy instance.** From a Windows workstation, a Linux
+  instance got no check at all, so a failed spored install was reported as a
+  successful launch.
+
+  The decision is now a function of the instance's OS (`config.TargetOS`) only;
+  the workstation's OS is deliberately not a parameter. A Windows target is
+  verified properly instead of skipped — asking the Service Control Manager
+  through `AWS-RunPowerShellScript` whether the spored service is Running, with a
+  10-minute budget for first boot — which matters now that the Windows install
+  fails closed (#879) and so has a real failure to report.
 
 ### Security
 
