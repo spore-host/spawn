@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **CI verifies the gitleaks binary before running it** (#885). The security
+  workflow installed it with `curl | tar` and executed the result unchecked — the
+  scanner deciding whether secrets are present was itself unverified, and a
+  pinned version with no pinned hash runs a replaced release asset unnoticed. The
+  expected SHA-256 is now pinned in the workflow (cross-checked against the
+  published checksums when pinned) and checked with `sha256sum -c` before
+  extraction. `TestWorkflowsVerifyWhatTheyDownload` forbids piping a download
+  into tar or a shell and requires any `curl -o` download to be checked in the
+  same step; its first version read physical lines and missed the original step,
+  whose `| tar` sat after a line continuation.
+
 ## [0.128.1] - 2026-10-13
 
 ### Added
