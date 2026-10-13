@@ -21,9 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verifies against the real key, and a tampered copy is refused.
 - `.gitleaks.toml` allowlists the spored signing **public** key's coordinates in
   the generated `install-spored.ps1` by exact line shape, not by path, so a real
-  secret added to that file is still caught. The allowlists are now separate
-  tables: within one, `paths` and `regexes` combine with AND, so adding a regex
-  to the existing path-based table looked like a fix and changed nothing.
+  secret added to that file is still caught — verified against two negative
+  controls on the gitleaks version CI pins (8.21.2). The config now records that
+  its semantics are version-dependent: 8.21 ORs a table's `paths` and `regexes`,
+  later versions AND them, and 8.21 ignores the newer `[[allowlists]]` form
+  altogether. A version validated only against a newer local gitleaks passed
+  locally and failed CI with sixteen findings.
 - Two gates on the rendered Windows user-data: `service install` must be
   reachable only through a successful verification, and the whole `<powershell>`
   block must parse under PowerShell's own parser — a syntax error there fails
