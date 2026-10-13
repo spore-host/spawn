@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signature converter would silently reject on some launches. In CI a missing
   `pwsh` fails rather than skips. Also checked: the real v0.128.0 Windows binary
   verifies against the real key, and a tampered copy is refused.
+- `.gitleaks.toml` allowlists the spored signing **public** key's coordinates in
+  the generated `install-spored.ps1` by exact line shape, not by path, so a real
+  secret added to that file is still caught. The allowlists are now separate
+  tables: within one, `paths` and `regexes` combine with AND, so adding a regex
+  to the existing path-based table looked like a fix and changed nothing.
 - Two gates on the rendered Windows user-data: `service install` must be
   reachable only through a successful verification, and the whole `<powershell>`
   block must parse under PowerShell's own parser — a syntax error there fails

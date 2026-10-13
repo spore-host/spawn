@@ -257,7 +257,11 @@ func TestWindowsAcceptsEveryDERIntegerShape(t *testing.T) {
 	f := newWinFixture(t)
 	sum := sha256.Sum256(bin)
 	var long, short bool
-	for i := 0; i < 400 && !(long && short); i++ {
+	// A short integer (< 32 bytes) occurs about once per 256 integers, so with two
+	// per signature the first version's 400 tries missed it ~4% of the time — and
+	// CI drew that 4% (#881). Signing is cheap and pwsh runs only when a NEW shape
+	// appears, so the budget can be large: 5000 tries miss with probability ~1e-17.
+	for i := 0; i < 5000 && !(long && short); i++ {
 		sig, err := ecdsa.SignASN1(rand.Reader, f.key, sum[:])
 		if err != nil {
 			t.Fatal(err)

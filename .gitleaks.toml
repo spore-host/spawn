@@ -1,15 +1,32 @@
 # gitleaks configuration for spawn.
-# Extends the built-in default ruleset; adds an allowlist for known
-# false positives — documentation examples and security-test fixtures that
-# contain illustrative (fake) keys, not real credentials.
+# Extends the built-in default ruleset; adds allowlists for known false
+# positives. Each is a SEPARATE table on purpose: within one allowlist, paths and
+# regexes combine with AND, so a single table holding both would allow only a
+# finding that is in an allowed path AND matches a regex — which is how the
+# public-key entry below first appeared to be added and did nothing.
 
 [extend]
 useDefault = true
 
-[allowlist]
+# Documentation examples and security-test fixtures contain illustrative (fake)
+# keys, not real credentials.
+[[allowlists]]
 description = "Docs examples and test fixtures contain placeholder secrets, not real ones"
 paths = [
   '''SECURITY\.md''',
   '''docs/.*\.md''',
   '''.*_test\.go''',
+]
+
+# The spore.host spored-signing PUBLIC key's P-256 coordinates, embedded in the
+# generated scripts/install-spored.ps1 (#879). A public key is not a secret — the
+# same key ships as PEM in pkg/sporedinstall — but 64 hex characters beside the
+# word "key" is exactly what generic-api-key matches. Allowlisted by LINE, in
+# exactly the generated shape, rather than by path: a path allowlist would also
+# hide a real secret pasted into that file later.
+[[allowlists]]
+description = "spored signing PUBLIC key coordinates in the generated Windows installer"
+regexTarget = "line"
+regexes = [
+  '''\$sporeKey[XY] = '[0-9a-f]{64}'$''',
 ]
