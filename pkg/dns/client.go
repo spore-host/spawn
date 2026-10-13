@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,7 +18,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
@@ -32,16 +30,19 @@ const (
 )
 
 // DNSUpdateRequest represents the request to the DNS API
+//
+// It carries no instance identity document (#872). The updater authenticates
+// the SigV4-signed caller and ignores those fields; fetching them from IMDS was
+// all that stopped this client working off-instance, so `spawn dns register` and
+// `spawn dns delete` failed on every workstation.
 type DNSUpdateRequest struct {
-	InstanceIdentityDocument  string `json:"instance_identity_document"`
-	InstanceIdentitySignature string `json:"instance_identity_signature"`
-	RecordName                string `json:"record_name"`
-	IPAddress                 string `json:"ip_address"`
-	Action                    string `json:"action"`
-	Domain                    string `json:"domain,omitempty"`
-	JobArrayID                string `json:"job_array_id,omitempty"`   // Optional: for group DNS
-	JobArrayName              string `json:"job_array_name,omitempty"` // Optional: for group DNS
-	AccountName               string `json:"account_name,omitempty"`   // Optional: DNS-safe account-name slug for the alias FQDN (#121)
+	RecordName   string `json:"record_name"`
+	IPAddress    string `json:"ip_address"`
+	Action       string `json:"action"`
+	Domain       string `json:"domain,omitempty"`
+	JobArrayID   string `json:"job_array_id,omitempty"`   // Optional: for group DNS
+	JobArrayName string `json:"job_array_name,omitempty"` // Optional: for group DNS
+	AccountName  string `json:"account_name,omitempty"`   // Optional: DNS-safe account-name slug for the alias FQDN (#121)
 	// Lease asks the updater to stamp a renewal lease beside the record (see
 	// lease.go). Sent ONLY by a client that will keep renewing — set via
 	// SetRenewing — because a lease that is never renewed expires its record.
@@ -61,7 +62,6 @@ type DNSUpdateResponse struct {
 // Client handles DNS API operations
 type Client struct {
 	httpClient  *http.Client
-	imdsClient  *imds.Client
 	domain      string
 	apiEndpoint string
 	accountName string // DNS-safe account-name slug; included in requests for the alias FQDN (#121)
@@ -99,7 +99,7 @@ func (c *Client) SetRenewing(renewing bool) { c.renewing = renewing }
 // NewClient creates a new DNS client with optional custom domain and API endpoint
 // If domain or apiEndpoint are empty, defaults are used
 func NewClient(ctx context.Context, domain, apiEndpoint string) (*Client, error) {
-	// Load AWS config for IMDS
+	// Ambient AWS config: the credentials that sign the request.
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
@@ -117,7 +117,6 @@ func NewClient(ctx context.Context, domain, apiEndpoint string) (*Client, error)
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		imdsClient:  imds.NewFromConfig(cfg),
 		domain:      domain,
 		apiEndpoint: apiEndpoint,
 	}
@@ -191,42 +190,14 @@ func (c *Client) RegisterDNS(ctx context.Context, recordName, ipAddress string) 
 		return nil, fmt.Errorf("invalid DNS name: %s (must be alphanumeric and hyphens only)", recordName)
 	}
 
-	// Get instance identity document
-	identityDoc, err := c.imdsClient.GetInstanceIdentityDocument(ctx, &imds.GetInstanceIdentityDocumentInput{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get instance identity document: %w", err)
-	}
-
-	// Marshal identity document to JSON
-	identityDocJSON, err := json.Marshal(identityDoc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal identity document: %w", err)
-	}
-
-	// Get instance identity signature
-	sigResp, err := c.imdsClient.GetDynamicData(ctx, &imds.GetDynamicDataInput{
-		Path: "instance-identity/signature",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get identity signature: %w", err)
-	}
-	defer func() { _ = sigResp.Content.Close() }()
-
-	signatureBytes, err := io.ReadAll(sigResp.Content)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read signature: %w", err)
-	}
-
 	// Build request
 	req := DNSUpdateRequest{
-		InstanceIdentityDocument:  base64.StdEncoding.EncodeToString(identityDocJSON),
-		InstanceIdentitySignature: strings.TrimSpace(string(signatureBytes)),
-		RecordName:                recordName,
-		IPAddress:                 ipAddress,
-		Action:                    "UPSERT",
-		Domain:                    c.domain,
-		AccountName:               c.accountName,
-		Lease:                     c.renewing,
+		RecordName:  recordName,
+		IPAddress:   ipAddress,
+		Action:      "UPSERT",
+		Domain:      c.domain,
+		AccountName: c.accountName,
+		Lease:       c.renewing,
 	}
 
 	return c.callAPI(ctx, req)
@@ -241,44 +212,16 @@ func (c *Client) RegisterJobArrayDNS(ctx context.Context, recordName, ipAddress,
 		return nil, fmt.Errorf("invalid DNS name: %s (must be alphanumeric, hyphens, and dots only)", recordName)
 	}
 
-	// Get instance identity document
-	identityDoc, err := c.imdsClient.GetInstanceIdentityDocument(ctx, &imds.GetInstanceIdentityDocumentInput{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get instance identity document: %w", err)
-	}
-
-	// Marshal identity document to JSON
-	identityDocJSON, err := json.Marshal(identityDoc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal identity document: %w", err)
-	}
-
-	// Get instance identity signature
-	sigResp, err := c.imdsClient.GetDynamicData(ctx, &imds.GetDynamicDataInput{
-		Path: "instance-identity/signature",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get identity signature: %w", err)
-	}
-	defer func() { _ = sigResp.Content.Close() }()
-
-	signatureBytes, err := io.ReadAll(sigResp.Content)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read signature: %w", err)
-	}
-
 	// Build request with job array fields
 	req := DNSUpdateRequest{
-		InstanceIdentityDocument:  base64.StdEncoding.EncodeToString(identityDocJSON),
-		InstanceIdentitySignature: strings.TrimSpace(string(signatureBytes)),
-		RecordName:                recordName,
-		IPAddress:                 ipAddress,
-		Action:                    "UPSERT",
-		Domain:                    c.domain,
-		AccountName:               c.accountName,
-		Lease:                     c.renewing,
-		JobArrayID:                jobArrayID,
-		JobArrayName:              jobArrayName,
+		RecordName:   recordName,
+		IPAddress:    ipAddress,
+		Action:       "UPSERT",
+		Domain:       c.domain,
+		AccountName:  c.accountName,
+		Lease:        c.renewing,
+		JobArrayID:   jobArrayID,
+		JobArrayName: jobArrayName,
 	}
 
 	return c.callAPI(ctx, req)
@@ -286,40 +229,15 @@ func (c *Client) RegisterJobArrayDNS(ctx context.Context, recordName, ipAddress,
 
 // DeleteJobArrayDNS deletes both per-instance and group DNS for a job array member
 func (c *Client) DeleteJobArrayDNS(ctx context.Context, recordName, ipAddress, jobArrayID, jobArrayName string) (*DNSUpdateResponse, error) {
-	// Get instance identity
-	identityDoc, err := c.imdsClient.GetInstanceIdentityDocument(ctx, &imds.GetInstanceIdentityDocumentInput{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get instance identity document: %w", err)
-	}
-
-	identityDocJSON, err := json.Marshal(identityDoc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal identity document: %w", err)
-	}
-
-	sigResp, err := c.imdsClient.GetDynamicData(ctx, &imds.GetDynamicDataInput{
-		Path: "instance-identity/signature",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get identity signature: %w", err)
-	}
-	defer func() { _ = sigResp.Content.Close() }()
-
-	signatureBytes, err := io.ReadAll(sigResp.Content)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read signature: %w", err)
-	}
 
 	req := DNSUpdateRequest{
-		InstanceIdentityDocument:  base64.StdEncoding.EncodeToString(identityDocJSON),
-		InstanceIdentitySignature: strings.TrimSpace(string(signatureBytes)),
-		RecordName:                recordName,
-		IPAddress:                 ipAddress,
-		Action:                    "DELETE",
-		Domain:                    c.domain,
-		AccountName:               c.accountName,
-		JobArrayID:                jobArrayID,
-		JobArrayName:              jobArrayName,
+		RecordName:   recordName,
+		IPAddress:    ipAddress,
+		Action:       "DELETE",
+		Domain:       c.domain,
+		AccountName:  c.accountName,
+		JobArrayID:   jobArrayID,
+		JobArrayName: jobArrayName,
 	}
 
 	return c.callAPI(ctx, req)
@@ -327,38 +245,13 @@ func (c *Client) DeleteJobArrayDNS(ctx context.Context, recordName, ipAddress, j
 
 // DeleteDNS deletes a DNS record for the current instance
 func (c *Client) DeleteDNS(ctx context.Context, recordName, ipAddress string) (*DNSUpdateResponse, error) {
-	// Get instance identity
-	identityDoc, err := c.imdsClient.GetInstanceIdentityDocument(ctx, &imds.GetInstanceIdentityDocumentInput{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get instance identity document: %w", err)
-	}
-
-	identityDocJSON, err := json.Marshal(identityDoc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal identity document: %w", err)
-	}
-
-	sigResp, err := c.imdsClient.GetDynamicData(ctx, &imds.GetDynamicDataInput{
-		Path: "instance-identity/signature",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get identity signature: %w", err)
-	}
-	defer func() { _ = sigResp.Content.Close() }()
-
-	signatureBytes, err := io.ReadAll(sigResp.Content)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read signature: %w", err)
-	}
 
 	req := DNSUpdateRequest{
-		InstanceIdentityDocument:  base64.StdEncoding.EncodeToString(identityDocJSON),
-		InstanceIdentitySignature: strings.TrimSpace(string(signatureBytes)),
-		RecordName:                recordName,
-		IPAddress:                 ipAddress,
-		Action:                    "DELETE",
-		Domain:                    c.domain,
-		AccountName:               c.accountName,
+		RecordName:  recordName,
+		IPAddress:   ipAddress,
+		Action:      "DELETE",
+		Domain:      c.domain,
+		AccountName: c.accountName,
 	}
 
 	return c.callAPI(ctx, req)

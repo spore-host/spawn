@@ -30,6 +30,11 @@ var knownUnwiredFlags = map[string]string{
 	// param file the count comes from params:/grid: and the flag is simply inert.
 	"cartesian":       "#674",
 	"use-reservation": "#675",
+	// Configured the CLI's own DNS registration, withdrawn in #872 — spored
+	// registers against its compiled-in endpoint. MarkDeprecated, so it warns.
+	// (--dns-domain is equally inert on launch but does not appear here: its
+	// variable is shared with `spawn dns --domain`, which reads it.)
+	"dns-api-endpoint": "#872",
 }
 
 // TestLaunchFlagsAreWired catches flags that cobra parses into a package global

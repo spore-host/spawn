@@ -228,7 +228,11 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	} else if name == "" && dnsName != "" {
 		name = dnsName
 	}
-	if dnsName != "" {
+	// The spawn:dns-name tag (written from config.DNSName) is what makes spored
+	// register DNS, so --no-dns / dns.enabled: false must withhold it. They used to
+	// gate only the CLI's own registration attempt, while spored registered the
+	// name anyway: "skip DNS registration entirely" skipped nothing (#872).
+	if dnsName != "" && dnsRegistrationEnabled() {
 		config.DNSName = dnsName
 	}
 	if slackWorkspaceID != "" {

@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -756,44 +758,48 @@ func TestWriteOutputID(t *testing.T) {
 	}
 }
 
-// TestSporedDNSFailureNotice covers the #551 launch-time surfacing fix: spored's
-// own, independent DNS-registration attempt (distinct from the CLI's SSH-driven
-// registerDNS) writes spawn:dns-status/spawn:dns-error tags that previously
-// never appeared in `spawn launch` output at all — only a separate `spawn
-// status` call would show them. sporedDNSFailureNotice is the pure function
-// that decides what (if anything) to print, given a fresh read of those tags.
-func TestSporedDNSFailureNotice(t *testing.T) {
-	t.Run("no status tag yet → nothing", func(t *testing.T) {
-		if got := sporedDNSFailureNotice(map[string]string{}, "myhost", "myhost"); got != "" {
-			t.Errorf("expected empty, got %q", got)
+// TestSporedDNSReport: what the launch says about DNS is read from spored's own
+// spawn:dns-status/spawn:dns-error tags (#551), and since #872 that is the ONLY
+// registration there is, so every state must say something true — including
+// "not yet", which used to print nothing.
+func TestSporedDNSReport(t *testing.T) {
+	const fqdn = "myhost.c0zxr0ao.spore.host"
+	t.Run("registered → the record, no notice", func(t *testing.T) {
+		rec, note := sporedDNSReport(map[string]string{"spawn:dns-status": "registered"}, "myhost", fqdn, "myhost")
+		if rec != fqdn || note != "" {
+			t.Errorf("got (%q, %q), want (%q, \"\")", rec, note, fqdn)
 		}
 	})
-	t.Run("registered → nothing (no news is good news)", func(t *testing.T) {
-		tags := map[string]string{"spawn:dns-status": "registered"}
-		if got := sporedDNSFailureNotice(tags, "myhost", "myhost"); got != "" {
-			t.Errorf("expected empty for registered, got %q", got)
+	t.Run("registered but account unknown → no invented record", func(t *testing.T) {
+		rec, note := sporedDNSReport(map[string]string{"spawn:dns-status": "registered"}, "myhost", "", "myhost")
+		if rec != "" || !strings.Contains(note, "spawn status") {
+			t.Errorf("got (%q, %q)", rec, note)
 		}
 	})
-	t.Run("failed → surfaces the detail and names the requested DNS name", func(t *testing.T) {
+	t.Run("failed → surfaces the detail, names the name, non-fatal", func(t *testing.T) {
 		tags := map[string]string{
 			"spawn:dns-status": "failed",
 			"spawn:dns-error":  `DNS API returned HTTP 403: {"Message":"Forbidden"}`,
 		}
-		got := sporedDNSFailureNotice(tags, "biosurf-c1-ladder", "biosurf-c1-ladder")
-		if !strings.Contains(got, "403") {
-			t.Errorf("notice should surface the 403 detail, got %q", got)
+		rec, got := sporedDNSReport(tags, "biosurf-c1-ladder", fqdn, "biosurf-c1-ladder")
+		if rec != "" {
+			t.Errorf("a failed registration reported a record %q", rec)
 		}
-		if !strings.Contains(got, "biosurf-c1-ladder") {
-			t.Errorf("notice should name the requested DNS name, got %q", got)
-		}
-		if !strings.Contains(got, "non-fatal") {
-			t.Errorf("notice should make clear this is non-fatal, got %q", got)
+		for _, want := range []string{"403", "biosurf-c1-ladder", "non-fatal"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("notice missing %q: %q", want, got)
+			}
 		}
 	})
 	t.Run("failed without detail → still warns", func(t *testing.T) {
-		tags := map[string]string{"spawn:dns-status": "failed"}
-		if got := sporedDNSFailureNotice(tags, "myhost", "myhost"); !strings.Contains(got, "no detail reported") {
+		if _, got := sporedDNSReport(map[string]string{"spawn:dns-status": "failed"}, "myhost", fqdn, "myhost"); !strings.Contains(got, "no detail reported") {
 			t.Errorf("expected a warning with fallback detail, got %q", got)
+		}
+	})
+	t.Run("no status yet → says it is pending, claims no record", func(t *testing.T) {
+		rec, got := sporedDNSReport(nil, "myhost", fqdn, "myhost")
+		if rec != "" || !strings.Contains(got, fqdn) || !strings.Contains(got, "spawn status myhost") {
+			t.Errorf("got (%q, %q)", rec, got)
 		}
 	})
 }
@@ -806,4 +812,52 @@ type validationError struct {
 
 func (e *validationError) Error() string {
 	return e.msg
+}
+
+// TestNoDNSWithholdsTheTagSporedRegistersFrom is #872. spored registers DNS from
+// the spawn:dns-name tag, which is written from config.DNSName; --no-dns and
+// dns.enabled: false used to suppress only the CLI's own attempt, so spored
+// registered the name regardless. The control has to act on config.DNSName.
+func TestNoDNSWithholdsTheTagSporedRegistersFrom(t *testing.T) {
+	prevName, prevDNS, prevNoDNS, prevType := name, dnsName, noDNS, instanceType
+	t.Cleanup(func() { name, dnsName, noDNS, instanceType = prevName, prevDNS, prevNoDNS, prevType })
+	instanceType = "m7i.large"
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	build := func() string {
+		t.Helper()
+		cfg, err := buildLaunchConfig(nil)
+		if err != nil {
+			t.Fatalf("buildLaunchConfig: %v", err)
+		}
+		return cfg.DNSName
+	}
+
+	name, dnsName, noDNS = "web", "", false
+	if got := build(); got != "web" {
+		t.Fatalf("--name web: DNSName = %q, want web (the name implies DNS)", got)
+	}
+
+	name, dnsName, noDNS = "web", "", true
+	if got := build(); got != "" {
+		t.Errorf("--no-dns: DNSName = %q; spored would still register it", got)
+	}
+
+	name, dnsName, noDNS = "", "web", true
+	if got := build(); got != "" {
+		t.Errorf("--dns web --no-dns: DNSName = %q; spored would still register it", got)
+	}
+
+	if err := os.MkdirAll(filepath.Join(home, ".spawn"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".spawn", "config.yaml"), []byte("dns:\n  enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name, dnsName, noDNS = "web", "", false
+	if got := build(); got != "" {
+		t.Errorf("dns.enabled: false: DNSName = %q; spored would still register it", got)
+	}
 }

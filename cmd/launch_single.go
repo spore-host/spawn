@@ -15,6 +15,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/compliance"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/input"
 	"github.com/spore-host/spawn/pkg/locality"
 	"github.com/spore-host/spawn/pkg/platform"
@@ -882,14 +883,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	result.PublicIP = publicIP
 	prog.Complete("Getting public IP")
 
-	// Whether the SSH path to this instance is confirmed working, and if not, why.
-	//
-	// This exists because the steps after the readiness probe reach the instance
-	// OVER SSH, so a failed probe must stop them rather than be discarded (#740).
-	// Default true: the probe is what can disprove reachability, and a launch that
-	// never ran it (Windows, --wait-for-ssh=false) must not have its later steps
-	// suppressed by a check that did not happen.
-	sshReachable := true
 	sshUnreachableReason := ""
 
 	// Step 10: Wait for the instance to be usable. For Windows, SSH (22) won't
@@ -917,7 +910,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			// still reported ✅, which is the same false claim by a different
 			// route (#740). SSM-only access is a legitimate configuration, so say
 			// so rather than implying SSH was checked.
-			sshReachable = false
 			sshUnreachableReason = "the instance has no public IP (SSM-only access)"
 			prog.Skip("Waiting for SSH")
 			fmt.Fprintf(os.Stderr, "ℹ️  Skipping the SSH readiness check: %s\n", sshUnreachableReason)
@@ -928,8 +920,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				// destroy a working spore over a connectivity problem. But it must
 				// be SAID, and it must gate the SSH-dependent steps below — that
 				// is the whole of #740.
-				sshReachable = false
-				sshUnreachableReason = err.Error()
 				prog.Error("Waiting for SSH", err)
 				fmt.Fprintf(os.Stderr,
 					"\n⚠️  SSH never became reachable (%v)\n"+
@@ -954,6 +944,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	//
 	// Decided by the INSTANCE's OS (config.TargetOS), never by plat.OS — that is
 	// the workstation's runtime.GOOS, and using it is #882. See sporedVerificationFor.
+	sporedVerified := false
 	if check := sporedVerificationFor(waitForSSH, config.TargetOS); check != sporedCheckNone {
 		timeout := sporedVerifyTimeout(check)
 		// One label for Start/Error/Complete: progress matches steps by name (#739).
@@ -973,75 +964,33 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				result.InstanceID, result.InstanceID, result.InstanceID, err)
 		}
 		prog.Complete(step)
+		sporedVerified = true
 	}
 
-	// Step 11: Register DNS (if requested).
+	// Step 11: Report DNS (#872).
 	//
-	// DNS registration is performed by SSHing into the instance, so it requires
-	// SSH to be confirmed ready. When --wait-for-ssh=false the caller explicitly
-	// declined to wait for SSH, so we cannot (and should not) register a record
-	// pointing at an instance whose reachability is unconfirmed — skip it rather
-	// than block on an SSH that may not yet be up (#56).
+	// spored registers the record itself, at boot, from the spawn:dns-name tag —
+	// signed with the instance role, and renewing the lease that keeps the record
+	// alive (#875). The CLI used to register as well, by SSHing in and running an
+	// unsigned curl against an API Gateway that no longer exists; it failed on
+	// every launch and blamed the user's account for it. spored's attempt was the
+	// one that worked all along, so the launch now reports what spored did.
 	//
-	// #549: --no-dns (or dns.enabled: false in ~/.spawn/config.yaml) is a
-	// separate, explicit escape from DNS registration that does NOT also skip
-	// the SSH-readiness wait --wait-for-ssh=false forces. Load the DNS config
-	// first (cheap, no network calls beyond an optional SSM lookup) so the
-	// --no-dns / dns.enabled precedence can decide whether to even try.
-	// #740/#741: the same reasoning applies when we DID wait and SSH never came
-	// up. That case used to be unreachable, because the probe could not report
-	// failure — so instead of skipping, the launch SSHed to a host it had just
-	// failed to reach, under registerDNS's 4-minute retry budget, printing
-	// nothing. Six minutes of silence after a successful RunInstances.
+	// The tags are read only once spored has been verified up; before that their
+	// absence means nothing, and says so.
 	var dnsRecord string
-	if dnsName != "" && !waitForSSH {
-		fmt.Fprintf(os.Stderr, "ℹ️  Skipping DNS registration (--wait-for-ssh=false); register later with: spawn dns register %s %s\n",
-			result.InstanceID, dnsName)
-	}
-	if dnsName != "" && waitForSSH && !sshReachable {
-		fmt.Fprintf(os.Stderr,
-			"ℹ️  Skipping DNS registration: %s.\n"+
-				"   It registers over SSH, so it would retry for minutes and fail. Once SSH\n"+
-				"   works, register with: spawn dns register %s %s\n",
-			sshUnreachableReason, result.InstanceID, dnsName)
-	}
-	if dnsName != "" && waitForSSH && sshReachable {
-		// Load DNS configuration with precedence
-		dnsConfig, err := spawnconfig.LoadDNSConfig(ctx, dnsDomain, dnsAPIEndpoint, noDNS)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "\n⚠️  Failed to load DNS config: %v\n", err)
-		} else if !shouldAttemptDNSRegistration(dnsName, waitForSSH, dnsConfig) {
-			fmt.Fprintf(os.Stderr, "ℹ️  Skipping DNS registration (disabled via --no-dns or dns.enabled: false)\n")
-		} else {
-			prog.Start("Registering DNS")
-			fqdn, err := registerDNS(ctx, plat, result.KeyName, result.InstanceID, result.PublicIP, dnsName, dnsConfig.Domain, dnsConfig.APIEndpoint)
-			if err != nil {
-				prog.Error("Registering DNS", err)
-				// Non-fatal: the instance is fully usable via its public IP /
-				// `spawn connect`; DNS is a convenience. Registration is expected to
-				// fail in accounts not wired for spore.host DNS.
-				fmt.Fprintf(os.Stderr, "\n⚠️  DNS registration failed (non-fatal — use the public IP or `spawn connect %s`): %v\n", config.Name, err)
-			} else {
-				dnsRecord = fqdn
-				prog.Complete("Registering DNS")
-			}
-
-			// #551: the CLI's own SSH-driven registerDNS above is NOT the only
-			// DNS registration attempt — spored independently registers the same
-			// name itself at boot (pkg/agent's NewAgent, over the Go dns.Client)
-			// and records that outcome as the spawn:dns-status/spawn:dns-error
-			// instance tags. A 403/etc. from THAT attempt previously surfaced
-			// nowhere in `spawn launch` output — only a later `spawn status`
-			// would show it, and only then via dnsStatusNotice. By the time we
-			// reach here, verifySporedReady has already confirmed spored is up
-			// and running (so it has had its chance to attempt registration and
-			// write its tags), and EC2 tags are same-account reads (no SSH/SSM
-			// round trip) — cheap enough to check right now rather than deferring
-			// the whole diagnosis to a separate `spawn status` call.
-			if tags, terr := awsClient.GetInstanceTags(ctx, config.Region, result.InstanceID); terr == nil {
-				fmt.Fprint(os.Stderr, sporedDNSFailureNotice(tags, dnsName, config.Name))
-			}
+	if config.DNSName != "" {
+		var tags map[string]string
+		if sporedVerified {
+			tags, _ = awsClient.GetInstanceTags(ctx, config.Region, result.InstanceID)
 		}
+		fqdn := ""
+		if acct, aerr := awsClient.GetAccountID(ctx); aerr == nil {
+			fqdn = dns.GetFullDNSName(config.DNSName, acct, sporedDNSDomain)
+		}
+		var notice string
+		dnsRecord, notice = sporedDNSReport(tags, config.DNSName, fqdn, config.Name)
+		fmt.Fprint(os.Stderr, notice)
 	}
 
 	// Output: JSON array or TUI depending on --output flag
@@ -1100,25 +1049,36 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	return nil
 }
 
-// sporedDNSFailureNotice reports spored's own, independent DNS-registration
-// outcome at launch time (#551), given the instance's freshly-read tags. It is
-// pure (no I/O) so it's directly unit-testable, mirroring cmd/status.go's
-// dnsStatusNotice — which this deliberately does NOT call, since that one's
-// wording ("the instance name may not resolve") is written for a `spawn
-// status` reader inspecting an existing instance, not a launch that already
-// reported its own (possibly different) SSH-driven registration result a few
-// lines above. Returns "" when spored's status tag is missing or anything
-// other than "failed" (including "registered", or not-yet-written).
-func sporedDNSFailureNotice(tags map[string]string, dnsName, instanceName string) string {
-	if tags["spawn:dns-status"] != "failed" {
-		return ""
+// sporedDNSDomain is the zone spored registers under. Nothing passes spored a
+// domain (it reads SPORED_DNS_DOMAIN, which no launch sets), so this is the one
+// a launched instance actually uses.
+const sporedDNSDomain = "spore.host"
+
+// sporedDNSReport turns spored's own DNS tags into what the launch tells the user
+// (#551, #872): the record, when spored registered it, and otherwise a notice
+// saying what happened or that it has not happened yet. fqdn may be "" when the
+// account could not be resolved; the notices then name the short name instead.
+func sporedDNSReport(tags map[string]string, dnsName, fqdn, instanceName string) (record, notice string) {
+	shown := fqdn
+	if shown == "" {
+		shown = dnsName
 	}
-	detail := tags["spawn:dns-error"]
-	if detail == "" {
-		detail = "no detail reported"
+	switch tags["spawn:dns-status"] {
+	case "registered":
+		if fqdn == "" {
+			return "", fmt.Sprintf("ℹ️  spored registered DNS for %q; `spawn status %s` shows the record.\n", dnsName, instanceName)
+		}
+		return fqdn, ""
+	case "failed":
+		detail := tags["spawn:dns-error"]
+		if detail == "" {
+			detail = "no detail reported"
+		}
+		return "", fmt.Sprintf("\n%s spored could not register DNS for %q (non-fatal — use the public IP or `spawn connect %s`): %s\n",
+			i18n.Symbol("warning"), dnsName, instanceName, detail)
 	}
-	return fmt.Sprintf("\n%s spored's own DNS registration for %q also failed (non-fatal — use the public IP or `spawn connect %s`): %s\n",
-		i18n.Symbol("warning"), dnsName, instanceName, detail)
+	return "", fmt.Sprintf("ℹ️  DNS: spored registers %s once it is running; `spawn status %s` shows the result.\n",
+		shown, instanceName)
 }
 
 // ensureIAMProfile sets config.IamInstanceProfile if unset: either the

@@ -332,9 +332,15 @@ func init() {
 	launchCmd.Flags().StringVar(&notifyPlatform, "notify-platform", "", "Chat platform for lifecycle notifications: slack (default), teams, or discord")
 	launchCmd.Flags().StringVar(&activePorts, "active-ports", "", "TCP ports to monitor for active connections, prevents idle termination (e.g. '8787' for RStudio, '8787,8888' for RStudio+Jupyter)")
 	launchCmd.Flags().StringVar(&activeProcesses, "active-processes", "", "Process names to monitor, prevents idle termination while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple)")
-	launchCmd.Flags().StringVar(&dnsDomain, "dns-domain", "", "Custom DNS domain (overrides default)")
-	launchCmd.Flags().StringVar(&dnsAPIEndpoint, "dns-api-endpoint", "", "Custom DNS API endpoint (overrides default)")
-	launchCmd.Flags().BoolVar(&noDNS, "no-dns", false, "Skip DNS registration entirely (unlike --wait-for-ssh=false, this does not also skip the SSH-readiness wait). Overrides dns.enabled in ~/.spawn/config.yaml for this launch (#549)")
+	launchCmd.Flags().StringVar(&dnsDomain, "dns-domain", "", "Deprecated: has no effect")
+	launchCmd.Flags().StringVar(&dnsAPIEndpoint, "dns-api-endpoint", "", "Deprecated: has no effect")
+	// Both configured the CLI's own SSH-driven DNS registration, withdrawn in #872:
+	// spored registers the name, under spore.host, against its compiled-in
+	// endpoint. Neither ever reached it — the SSH path did not even send the domain.
+	// Kept, hidden, so a script passing them gets a warning instead of a failure.
+	_ = launchCmd.Flags().MarkDeprecated("dns-domain", "it has no effect: spored registers DNS under spore.host (#872)")
+	_ = launchCmd.Flags().MarkDeprecated("dns-api-endpoint", "it has no effect: spored registers DNS against its own endpoint (#872)")
+	launchCmd.Flags().BoolVar(&noDNS, "no-dns", false, "Do not register DNS for this instance (by default spored registers the --name/--dns name). Overrides dns.enabled in ~/.spawn/config.yaml for this launch (#549)")
 
 	// Job array
 	launchCmd.Flags().IntVar(&count, "count", 1, "Number of instances to launch (job array)")
