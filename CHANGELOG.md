@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.128.0] - 2026-10-12
+
 ### Added
 
 - **DNS leases: a record whose owner stops renewing it can now be expired from
@@ -1402,8 +1404,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Inbound requests are now verified with Slack's HMAC signature over the raw body,
   with a five-minute replay window checked as an **absolute** skew so a replay
   cannot be refreshed by dating it forward. The signing secret needed for this
-  (`slackSigningSecret()`) already existed and was stored both in Secrets Manager
-  and on every workspace row — it had simply never been used to verify anything.
+  (`slackSigningSecret()`) already existed in Secrets Manager — it had simply never
+  been used to verify anything.
   The response no longer contains the token, and the error no longer says whether
   a token matched a workspace, which was an oracle for whether a token is live.
 - **A watch record with no owner was returned to any authenticated caller**
@@ -8034,7 +8036,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.127.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.128.0...HEAD
+[0.128.0]: https://github.com/spore-host/spawn/compare/v0.127.0...v0.128.0
 [0.127.0]: https://github.com/spore-host/spawn/compare/v0.126.1...v0.127.0
 [0.126.1]: https://github.com/spore-host/spawn/compare/v0.126.0...v0.126.1
 [0.126.0]: https://github.com/spore-host/spawn/compare/v0.125.0...v0.126.0
