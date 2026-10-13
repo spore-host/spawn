@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `TestOnlyTheReleaseWorkflowPublishesSpored` — nothing but the release workflow
+  may write a spored binary to S3. Every shell script, Makefile and workflow is
+  scanned, and commands are read as **logical** lines with arguments taken by
+  position, so `aws s3 cp SRC DST` is a write exactly when `DST` is an `s3://`
+  URL. The first version matched per physical line and **passed with the deleted
+  script restored**, because that script put its `s3://` destination on a
+  continuation line; the gate was blind to the one thing it existed to stop.
+
+### Removed
+
+- **`scripts/deploy-spored.sh`** (#876). It uploaded `bin/spored-*` to every
+  regional bucket with **no `.sha256` and no `.sig`**, while the boot installer
+  refuses any spored whose checksum does not match or whose signature does not
+  verify. One run would have left new binaries beside the old checksums, and
+  every instance launched afterwards would have refused to install spored and
+  booted with no TTL, idle-stop or cost-limit enforcement — the failure the
+  release workflow's own comments record as having happened once (#440). It also
+  covered 10 regions of the release's 11 and no Windows binary.
+
+  Deleted rather than fixed: the `.sig` is made by a KMS key reachable only
+  through the release workflow's OIDC role, so no script can produce a valid
+  one. **spored ships only by tagging a release.**
+
 ## [0.128.0] - 2026-10-12
 
 ### Added
