@@ -1,4 +1,4 @@
-.PHONY: all build build-spawn build-spored build-all clean install test test-coverage test-short test-integration test-integration-scheduler test-integration-queue test-e2e test-e2e-tier0 test-e2e-tier1 test-e2e-tier2 test-e2e-tier3 check check-fmt vuln gen-docs check-docs check-release-version
+.PHONY: all build build-spawn build-spored build-all clean install test test-coverage test-short test-integration test-e2e test-e2e-tier0 test-e2e-tier1 test-e2e-tier2 test-e2e-tier3 check check-fmt vuln gen-docs check-docs check-release-version
 
 # Version
 VERSION ?= 0.1.0
@@ -130,23 +130,17 @@ test-race: hermetic-exec
 	@echo "Running race detector on pkg/agent..."
 	go test -race -count=1 -exec $(HERMETIC_EXEC) ./pkg/agent/...
 
-# Run integration tests
-test-integration:
+# Run integration tests. LAUNCHES REAL, BILLABLE INSTANCES (the root package's
+# multi-region sweep tests): requires AWS credentials. Depends on build because
+# those tests exec ./bin/spawn, and -count=1 because Go's test cache cannot see a
+# binary read at runtime (#831). The test-integration-scheduler and
+# test-integration-queue targets were removed with the tests they ran (#913):
+# the scheduler tests drove a DynamoDB schema and trigger that never existed, and
+# the queue tests were t.Skip placeholders.
+test-integration: build
 	@echo "Running all integration tests..."
-	@echo "Note: These tests require AWS credentials and may take 20-30 minutes"
-	go test -v -tags=integration -timeout 45m ./...
-
-# Run scheduler integration tests only
-test-integration-scheduler:
-	@echo "Running scheduler integration tests..."
-	@echo "Note: Requires AWS credentials (spore-host-dev profile)"
-	go test -v -tags=integration -run TestScheduler -timeout 20m ./...
-
-# Run queue integration tests only
-test-integration-queue:
-	@echo "Running queue integration tests..."
-	@echo "Note: Requires AWS credentials (spore-host-dev profile)"
-	go test -v -tags=integration -run TestQueue -timeout 20m ./...
+	@echo "Note: These tests require AWS credentials, launch billable instances, and may take 20-30 minutes"
+	go test -v -count=1 -tags=integration -timeout 45m ./...
 
 # E2E test suite — four independently runnable tiers.
 # Tier 0 needs NO AWS account (runs the real spawn binary against the Substrate
@@ -239,6 +233,8 @@ check:
 	@$(MAKE) --no-print-directory check-nested
 	@echo "6. Module tidiness (root + nested)..."
 	@$(MAKE) --no-print-directory check-tidy
+	@echo "7. Build tags (go vet under every discovered tag, no execution)..."
+	@$(MAKE) --no-print-directory check-build-tags
 	@echo "✓ All checks passed!"
 
 # Short tests under the hermetic `go test -exec` wrapper (test/hermetic, #968).
@@ -274,6 +270,15 @@ check-nested:
 .PHONY: check-tidy
 check-tidy:
 	@scripts/check-tidy.sh
+
+# Every module vetted under every custom build tag it uses (#913), so code behind
+# `//go:build integration` / `e2e_tier*` can't stop compiling unseen — the root
+# integration_test.go had never compiled. Tags are discovered from //go:build
+# lines, not listed. Compile-only: vet runs no tests, which matters because the
+# integration and tier 1-3 tests launch billable instances. Same script CI runs.
+.PHONY: check-build-tags
+check-build-tags:
+	@scripts/check-build-tags.sh
 
 # Development
 dev: build
