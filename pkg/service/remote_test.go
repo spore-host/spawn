@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -33,19 +32,27 @@ import (
 // TTL, so without this the suite would leave a listening process behind on every
 // run, and the leak checks in local_test.go match by binary name and would blame
 // whichever test ran next.
+//
+// The process-group calls are POSIX-only and live in procgroup_posix_test.go, so
+// this file compiles for GOOS=windows (#925). Every caller already skips on
+// Windows ("uses a POSIX shell"); the guard below makes that a property of the
+// fixture rather than of each caller remembering to.
 func fakeSSHExec(t *testing.T) func(context.Context, string) (*exec.Cmd, error) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fakeSSHExec runs /bin/sh in its own POSIX process group")
+	}
 	return func(ctx context.Context, command string) (*exec.Cmd, error) {
 		// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- test fixture standing in for ssh, which also runs its argument through the remote shell. command is built by this package from test-local binary paths.
 		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		ownProcessGroup(cmd)
 		t.Cleanup(func() {
 			if cmd.Process == nil {
 				return
 			}
-			// Negative pid = the whole group, i.e. the shell and every descendant
-			// it backgrounded. Best-effort: the group is usually already gone.
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			// The whole group, i.e. the shell and every descendant it
+			// backgrounded. Best-effort: the group is usually already gone.
+			killProcessGroup(cmd.Process)
 		})
 		return cmd, nil
 	}
