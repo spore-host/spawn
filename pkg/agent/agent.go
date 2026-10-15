@@ -62,6 +62,10 @@ type Agent struct {
 	lastDNSStatus         string          // last spawn:dns-status written, so renewal only re-tags on change
 	computeSecondsBase    int64           // compute-seconds already accumulated before this spored start
 	liveClock             bool            // TotalComputeSeconds counts real running time (daemon, or a query that adopted its clock, #896)
+	computeStart          time.Time       // when this boot's compute started counting; zero means startTime (#928)
+	bootID                string          // kernel boot id, "" when unknown; tags the durable checkpoint (#928)
+	checkpointPath        string          // durable compute checkpoint; "" for a query agent or an unsupported platform (#928)
+	checkpointWarned      bool            // a checkpoint write failure has been logged
 	prevNetRx             int64           // /proc/net/dev RX bytes at last getNetworkBytes call
 	prevNetTx             int64           // /proc/net/dev TX bytes at last getNetworkBytes call
 	netSampled            bool            // prevNetRx/prevNetTx hold a real sample (a counter can legitimately be 0, #919)
@@ -286,6 +290,41 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	// The daemon IS the clock; a query agent is not until it adopts the
 	// daemon's (AdoptPublishedComputeClock, #896).
 	agent.liveClock = activate
+
+	// Carry compute over from earlier boots (#928). The tag alone lost whatever
+	// the last pre-stop write missed, and counting from spored's own start
+	// dropped every boot's OS and cloud-init time, which EC2 bills; the durable
+	// checkpoint fixes both (resolveComputeStart).
+	agent.bootID = sysBootID()
+	var checkpoint *ComputeCheckpoint
+	if p := ComputeCheckpointPath(); p != "" {
+		if c, err := ReadComputeCheckpoint(p); err == nil {
+			checkpoint = &c
+		} else if !os.IsNotExist(err) && activate {
+			log.Printf("Warning: ignoring unreadable compute checkpoint: %v", err)
+		}
+		if activate {
+			agent.checkpointPath = p
+		}
+	}
+	if activate {
+		base, from, source := resolveComputeStart(computeStartInputs{
+			InstanceID: identity.InstanceID,
+			BootID:     agent.bootID,
+			BootTime:   sysBootTime(),
+			LaunchTime: config.LaunchTime,
+			SporedAt:   agent.startTime,
+			TagSeconds: config.ComputeSeconds,
+			Checkpoint: checkpoint,
+		})
+		agent.computeSecondsBase, agent.computeStart = base, from
+		log.Printf("Compute clock: %ds carried over from earlier boots (%s); this boot counts from %s",
+			base, source, from.UTC().Format(time.RFC3339))
+	} else if checkpoint != nil && checkpoint.InstanceID == identity.InstanceID && checkpoint.TotalSeconds > agent.computeSecondsBase {
+		// A query with no live clock reports the freshest checkpoint: the file
+		// is written every tick, the tag at most every five minutes.
+		agent.computeSecondsBase = checkpoint.TotalSeconds
+	}
 	agent.tagger = newTagPutter(identity.Region) // real EC2 CreateTags; tests override
 
 	// Everything below this point is ACTIVATION — logging and side effects — and
@@ -827,6 +866,10 @@ func (a *Agent) writeHeartbeatTag(ctx context.Context) {
 // Throttle: every 1 minute for the first 10 minutes (fast feedback on fresh instances),
 // then every 5 minutes thereafter.
 func (a *Agent) writeComputeSecondsTag(ctx context.Context) {
+	// The local checkpoint is cheap and needs no network, so it is written on
+	// every tick, unthrottled: a stop can then lose at most one tick (#928).
+	a.WriteComputeCheckpoint()
+
 	uptime := time.Since(a.startTime)
 	interval := 5 * time.Minute
 	if uptime < 10*time.Minute {
@@ -894,17 +937,11 @@ func (a *Agent) CostLimitSpend() float64 {
 func (a *Agent) flushComputeSecondsTag(ctx context.Context) {
 	a.lastComputeTagWrite = time.Now()
 	total := a.TotalComputeSeconds()
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.identity.Region))
-	if err != nil {
-		return
+	if err := a.putComputeSecondsTag(ctx, total); err != nil {
+		// Logged, not swallowed: a lost write here is how compute vanished across
+		// a stop (#928). The local checkpoint still holds the total.
+		log.Printf("Warning: could not write spawn:compute-seconds=%d: %v", total, err)
 	}
-	client := ec2.NewFromConfig(cfg)
-	_, _ = client.CreateTags(ctx, &ec2.CreateTagsInput{
-		Resources: []string{a.identity.InstanceID},
-		Tags: []ec2types.Tag{
-			{Key: aws.String("spawn:compute-seconds"), Value: aws.String(strconv.FormatInt(total, 10))},
-		},
-	})
 }
 
 // WriteVersionTag records the running spored version in the spawn:spored-version
@@ -950,9 +987,26 @@ func (a *Agent) HasPriorComputeTime() bool {
 }
 
 // TotalComputeSeconds returns accumulated compute time across all start/stop cycles.
+//
+// This boot counts from computeFrom: the kernel's boot time where it is known
+// to be safe (resolveComputeStart), since EC2 bills from there; otherwise
+// spored's own start.
 func (a *Agent) TotalComputeSeconds() int64 {
-	return a.computeSecondsBase + int64(time.Since(a.startTime).Seconds())
+	return a.computeSecondsBase + int64(time.Since(a.computeFrom()).Seconds())
 }
+
+// computeFrom is when this boot's compute started counting.
+func (a *Agent) computeFrom() time.Time {
+	if a.computeStart.IsZero() {
+		return a.startTime
+	}
+	return a.computeStart
+}
+
+// ComputeStart is when this boot's compute started counting — the daemon's, for
+// a query agent that adopted its clock. `spored status` measures the launch-to-
+// counting gap from it (#928).
+func (a *Agent) ComputeStart() time.Time { return a.computeFrom() }
 
 // ── DCV auth token verifier ───────────────────────────────────────────────────
 
@@ -2100,6 +2154,10 @@ func (a *Agent) Cleanup(ctx context.Context) {
 	// upgrade, #234) would discard up to ~5 minutes of compute time since the
 	// last throttled write; the next boot reads the tag into computeSecondsBase,
 	// so flushing here keeps the compute clock continuous across the restart.
+	//
+	// The local checkpoint goes first: it needs no network, and a stop's
+	// shutdown is exactly when the network write is likeliest to fail (#928).
+	a.WriteComputeCheckpoint()
 	if a.identity != nil && a.identity.Provider == "ec2" {
 		a.flushComputeSecondsTag(ctx)
 	}

@@ -27,6 +27,7 @@ var (
 var stopCmd = &cobra.Command{
 	Use:   "stop [instance-id-or-name]",
 	Short: "Stop a running instance (preserves EBS volumes)",
+	Long:  "Stop a running instance (preserves EBS volumes).\n\n" + ttlDeadlineDoesNotPause,
 	RunE:  runStop,
 	Args:  cobra.RangeArgs(0, 1),
 }
@@ -35,6 +36,7 @@ var stopCmd = &cobra.Command{
 var hibernateCmd = &cobra.Command{
 	Use:   "hibernate [instance-id-or-name]",
 	Short: "Hibernate an instance to disk (saves RAM state)",
+	Long:  "Hibernate an instance to disk (saves RAM state).\n\n" + ttlDeadlineDoesNotPause,
 	RunE:  runHibernate,
 	Args:  cobra.RangeArgs(0, 1),
 }
@@ -43,6 +45,7 @@ var hibernateCmd = &cobra.Command{
 var startCmd = &cobra.Command{
 	Use:   "start [instance-id-or-name]",
 	Short: "Start a stopped or hibernated instance",
+	Long:  "Start a stopped or hibernated instance.\n\n" + ttlDeadlineDoesNotPause,
 	RunE:  runStart,
 	Args:  cobra.RangeArgs(0, 1),
 }
@@ -161,20 +164,6 @@ func stopOrHibernateInstance(ctx context.Context, client *aws.Client, instance *
 
 	fmt.Fprintf(os.Stderr, "Requesting %s for instance %s...\n", action, instance.InstanceID)
 
-	// Calculate remaining TTL if set, from the authoritative spawn:ttl-deadline
-	// tag when present (falling back to LaunchTime+TTL for older instances
-	// without it) — NOT from instance.TTL + LaunchTime directly, which ignores
-	// any `spawn extend` calls made since launch (spawn#506).
-	remainingTTL := ""
-	if deadline, ok := lifecycleDeadline(instance); ok {
-		remaining := time.Until(deadline)
-		if remaining > 0 {
-			remainingTTL = formatDuration(remaining)
-			fmt.Fprintf(os.Stderr, "Saving remaining TTL: %s (deadline: %s)\n",
-				remainingTTL, deadline.UTC().Format("2006-01-02 15:04 UTC"))
-		}
-	}
-
 	// Note: we deliberately do NOT run plugin local deprovision here — stop and
 	// hibernate are resumable, so tearing down a plugin's controller-side
 	// footprint (e.g. a mutagen sync session) would be wrong. The session parks
@@ -186,32 +175,23 @@ func stopOrHibernateInstance(ctx context.Context, client *aws.Client, instance *
 		return fmt.Errorf("failed to %s instance: %w", action, err)
 	}
 
-	// Tag the instance with the stop reason and remaining TTL
-	stopReason := "user-stopped"
-	if hibernate {
-		stopReason = "user-hibernated"
-	}
-	tags := map[string]string{
-		"spawn:last-stop-reason": stopReason,
-		"spawn:last-stop-time":   time.Now().UTC().Format(time.RFC3339),
-	}
-	if remainingTTL != "" {
-		tags["spawn:ttl-remaining"] = remainingTTL
-	}
-	_ = client.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, tags)
+	// Record why and when it stopped. No TTL is saved: the deadline does not
+	// pause, so there is nothing to restore at start (#928).
+	_ = client.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, stopTags(hibernate, time.Now()))
 
+	ttlNote := ttlDeadlineNotice(instance, "stop", statusLocation(), time.Now())
 	if hibernate {
 		_, _ = fmt.Fprintf(os.Stdout, "\n✅ Hibernate request sent!\n")
 		_, _ = fmt.Fprintf(os.Stdout, "   Instance: %s\n", instance.InstanceID)
 		_, _ = fmt.Fprintf(os.Stdout, "   Region:   %s\n", instance.Region)
 		_, _ = fmt.Fprintf(os.Stdout, "\nThe instance will hibernate (save RAM to disk) and stop.\n")
-		_, _ = fmt.Fprintf(os.Stdout, "TTL countdown will pause until the instance is started again.\n")
+		_, _ = fmt.Fprint(os.Stdout, ttlNote)
 	} else {
 		_, _ = fmt.Fprintf(os.Stdout, "\n✅ Stop request sent!\n")
 		_, _ = fmt.Fprintf(os.Stdout, "   Instance: %s\n", instance.InstanceID)
 		_, _ = fmt.Fprintf(os.Stdout, "   Region:   %s\n", instance.Region)
 		_, _ = fmt.Fprintf(os.Stdout, "\nThe instance will stop (EBS preserved).\n")
-		_, _ = fmt.Fprintf(os.Stdout, "TTL countdown will pause until the instance is started again.\n")
+		_, _ = fmt.Fprint(os.Stdout, ttlNote)
 	}
 
 	// A stopped instance stops billing for compute but its FSx lease does not:
@@ -300,15 +280,6 @@ func stopOrHibernateJobArray(ctx context.Context, hibernate bool) error {
 			continue
 		}
 
-		// Calculate remaining TTL if set (spawn:ttl-deadline-authoritative;
-		// see the single-instance path's comment for why — spawn#506).
-		remainingTTL := ""
-		if deadline, ok := lifecycleDeadline(&inst); ok {
-			if remaining := time.Until(deadline); remaining > 0 {
-				remainingTTL = formatDuration(remaining)
-			}
-		}
-
 		// Stop/hibernate the instance
 		err := client.StopInstance(ctx, inst.Region, inst.InstanceID, hibernate)
 		if err != nil {
@@ -317,19 +288,8 @@ func stopOrHibernateJobArray(ctx context.Context, hibernate bool) error {
 			continue
 		}
 
-		// Tag the instance
-		stopReason := "user-stopped"
-		if hibernate {
-			stopReason = "user-hibernated"
-		}
-		tags := map[string]string{
-			"spawn:last-stop-reason": stopReason,
-			"spawn:last-stop-time":   time.Now().UTC().Format(time.RFC3339),
-		}
-		if remainingTTL != "" {
-			tags["spawn:ttl-remaining"] = remainingTTL
-		}
-		_ = client.UpdateInstanceTags(ctx, inst.Region, inst.InstanceID, tags)
+		// Tag the instance (no TTL saved: the deadline does not pause, #928).
+		_ = client.UpdateInstanceTags(ctx, inst.Region, inst.InstanceID, stopTags(hibernate, time.Now()))
 
 		successCount++
 		fmt.Fprintf(os.Stderr, "✓ %s %s\n", action, inst.InstanceID)
@@ -339,6 +299,7 @@ func stopOrHibernateJobArray(ctx context.Context, hibernate bool) error {
 	_, _ = fmt.Fprintf(os.Stdout, "\n✅ Job array %s request sent!\n", action)
 	_, _ = fmt.Fprintf(os.Stdout, "   Array:     %s\n", arrayName)
 	_, _ = fmt.Fprintf(os.Stdout, "   Processed: %d/%d instances\n", successCount, len(jobArrayInstances))
+	_, _ = fmt.Fprintf(os.Stdout, "\nEach instance's TTL deadline still applies while it is stopped.\n")
 
 	if len(failedInstances) > 0 {
 		fmt.Fprintf(os.Stderr, "\n⚠️  Failed to %s %d instances:\n", action, len(failedInstances))
@@ -398,21 +359,21 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return startFailedError(instance, err, time.Now())
 	}
 
-	// Tag the instance with the start event. The TTL is deliberately NOT
-	// rewritten here: see startDoesNotRestoreTTLNotice.
-	tags := map[string]string{
-		"spawn:last-start-time": time.Now().UTC().Format(time.RFC3339),
-	}
+	// Record the start. The TTL is NOT touched: spawn:ttl is the total from
+	// launch (pkg/ttl.Tags) and spawn:ttl-deadline is absolute, so there is
+	// nothing to "restore" (#983, #928). An instance stopped by an older spawn
+	// may still carry spawn:ttl-remaining; say plainly that it was not restored
+	// (see startDoesNotRestoreTTLNotice).
 	if notice := startDoesNotRestoreTTLNotice(instance); notice != "" {
 		fmt.Fprint(os.Stderr, notice)
 	}
-	_ = client.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, tags)
+	_ = client.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, startTags(time.Now()))
 
 	_, _ = fmt.Fprintf(os.Stdout, "\n✅ Start request sent!\n")
 	_, _ = fmt.Fprintf(os.Stdout, "   Instance: %s\n", instance.InstanceID)
 	_, _ = fmt.Fprintf(os.Stdout, "   Region:   %s\n", instance.Region)
 	_, _ = fmt.Fprintf(os.Stdout, "\nThe instance is starting up...\n")
-	_, _ = fmt.Fprintf(os.Stdout, "TTL countdown will resume once the instance is running.\n")
+	_, _ = fmt.Fprint(os.Stdout, ttlDeadlineNotice(instance, "start", statusLocation(), time.Now()))
 
 	// Wait for instance to be running AND to have a public IP. The public IP is
 	// often not populated the instant the state flips to "running", and a
@@ -522,15 +483,12 @@ func startJobArray(ctx context.Context) error {
 			continue
 		}
 
-		// Tag the instance with start time. The TTL is deliberately NOT
-		// rewritten here: see startDoesNotRestoreTTLNotice.
-		tags := map[string]string{
-			"spawn:last-start-time": time.Now().UTC().Format(time.RFC3339),
-		}
+		// Tag the instance with the start time. The TTL is left alone: the
+		// deadline is absolute (see the single-instance path, #928, #983).
 		if notice := startDoesNotRestoreTTLNotice(&inst); notice != "" {
 			fmt.Fprint(os.Stderr, notice)
 		}
-		_ = client.UpdateInstanceTags(ctx, inst.Region, inst.InstanceID, tags)
+		_ = client.UpdateInstanceTags(ctx, inst.Region, inst.InstanceID, startTags(time.Now()))
 
 		successCount++
 		fmt.Fprintf(os.Stderr, "✓ Started %s\n", inst.InstanceID)
@@ -565,9 +523,11 @@ func startJobArray(ctx context.Context) error {
 // at it too). What the write did do was corrupt spawn:ttl, which every other
 // reader takes as the total from launch, and on an older instance without a
 // deadline tag it SHORTENED the TTL to launch+remaining. The deadline is
-// fixed at launch by design ("stop and start cannot extend it"; #928 tracks
-// the stop message that still claims a pause), so start reports the deadline
-// that is actually enforced instead of claiming a restore.
+// fixed at launch by design ("stop and start cannot extend it"; #928 fixed
+// the stop message that claimed a pause), so start reports the deadline that
+// is actually enforced instead of claiming a restore. Since #928 stop no longer
+// writes spawn:ttl-remaining, so this only fires for instances stopped by an
+// older spawn.
 func startDoesNotRestoreTTLNotice(instance *aws.InstanceInfo) string {
 	remaining := instance.Tags["spawn:ttl-remaining"]
 	if remaining == "" {
@@ -577,7 +537,7 @@ func startDoesNotRestoreTTLNotice(instance *aws.InstanceInfo) string {
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf("Note: %s had %s of TTL left when it was stopped, but the TTL does not pause while stopped.\n"+
+	return fmt.Sprintf("Note: %s had %s of TTL left when it was stopped. That is not restored: the deadline keeps counting while stopped.\n"+
 		"   It is still enforced at its deadline, %s. To give it more time: spawn extend %s <duration>\n",
 		instance.InstanceID, remaining, deadline.UTC().Format("2006-01-02 15:04 UTC"), instance.InstanceID)
 }
@@ -617,4 +577,62 @@ func startFailedError(instance *aws.InstanceInfo, err error, now time.Time) erro
 		return fmt.Errorf("failed to start instance: %w\n  likely cause: %s", err, note)
 	}
 	return fmt.Errorf("failed to start instance: %w", err)
+}
+
+// ttlDeadlineDoesNotPause is the one statement of how a TTL behaves across a
+// stop, shared by the stop/hibernate/start help and checked against the docs
+// (TestStopStartAgreeWithTheDocsThatTheDeadlineDoesNotPause).
+//
+// `spawn stop` used to print "TTL countdown will pause until the instance is
+// started again", and `spawn start` "Restoring TTL: … (was paused during stop)".
+// Neither was true. The deadline is spawn:ttl-deadline, set once at launch and
+// read by both spored and the reaper; the docs say it "never moves across
+// stop/wake cycles", and a restarted instance in #928 showed exactly the
+// original launch+1h deadline.
+const ttlDeadlineDoesNotPause = "The TTL deadline is absolute: it keeps counting while the instance is " +
+	"stopped, and stopping or starting does not move it. Only 'spawn extend' does."
+
+// ttlDeadlineNotice is the TTL line `spawn stop`, `hibernate` and `start` print:
+// the deadline in status's format (local time with UTC, #896) and the fact that
+// it still applies. verb is "stop" or "start".
+func ttlDeadlineNotice(instance *aws.InstanceInfo, verb string, loc *time.Location, now time.Time) string {
+	deadline, ok := lifecycleDeadline(instance)
+	if !ok {
+		return "No TTL deadline is set on this instance.\n"
+	}
+	when := formatStatusTime(deadline, loc)
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		if verb == "start" {
+			return fmt.Sprintf("The TTL deadline has passed: %s. The instance will terminate shortly after it boots; "+
+				"run 'spawn extend' first if you need more time.\n", when)
+		}
+		return fmt.Sprintf("The TTL deadline has passed: %s. Starting the instance again will terminate it.\n", when)
+	}
+	if verb == "start" {
+		return fmt.Sprintf("The TTL deadline still applies: %s, in %s. The stop did not extend it.\n",
+			when, formatDuration(remaining))
+	}
+	return fmt.Sprintf("The TTL deadline still applies: %s, in %s. It keeps counting while the instance is stopped.\n",
+		when, formatDuration(remaining))
+}
+
+// stopTags are the tags `spawn stop`/`hibernate` write: why and when. They
+// used to include spawn:ttl-remaining, which start then wrote back over
+// spawn:ttl as though the countdown had paused (#928).
+func stopTags(hibernate bool, now time.Time) map[string]string {
+	reason := "user-stopped"
+	if hibernate {
+		reason = "user-hibernated"
+	}
+	return map[string]string{
+		"spawn:last-stop-reason": reason,
+		"spawn:last-stop-time":   now.UTC().Format(time.RFC3339),
+	}
+}
+
+// startTags are the tags `spawn start` writes. Never spawn:ttl or
+// spawn:ttl-deadline: the deadline is absolute (#928).
+func startTags(now time.Time) map[string]string {
+	return map[string]string{"spawn:last-start-time": now.UTC().Format(time.RFC3339)}
 }

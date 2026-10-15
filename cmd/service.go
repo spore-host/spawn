@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"sort"
 	"strconv"
@@ -20,6 +19,7 @@ import (
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/service"
+	"github.com/spore-host/spawn/pkg/sshtarget"
 	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
@@ -609,8 +609,16 @@ func scpArgs(target service.SSHTarget, localPath, remotePath string) []string {
 // runQuietly runs a helper command, surfacing its output only on failure — where
 // it is the entire diagnosis.
 func runQuietly(ctx context.Context, name string, args []string) error {
-	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a literal at both call sites ("scp", "ssh"); args are built by scpArgs/SSHExecArgs from this run's own resolved target. exec.CommandContext runs no shell, so an argument containing shell metacharacters is passed through as one argv element rather than interpreted. The remote command string is quoted by serviceCommandWithUpload before it gets here.
-	combined, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	// sshtarget.Command accepts only ssh/scp and refuses an empty or loopback
+	// host (#928). exec runs no shell, so an argument containing shell
+	// metacharacters is passed through as one argv element rather than
+	// interpreted. The remote command string is quoted by
+	// serviceCommandWithUpload before it gets here.
+	c, err := sshtarget.Command(ctx, name, args...)
+	if err != nil {
+		return err
+	}
+	combined, err := c.CombinedOutput()
 	if err != nil {
 		if trimmed := strings.TrimSpace(string(combined)); trimmed != "" {
 			return fmt.Errorf("%s failed: %w: %s", name, err, trimmed)

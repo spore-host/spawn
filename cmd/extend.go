@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +13,7 @@ import (
 	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/spotrequest"
+	"github.com/spore-host/spawn/pkg/sshtarget"
 	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
@@ -140,7 +140,13 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "   New deadline: %s\n", newDeadline.UTC().Format("2006-01-02 15:04 UTC"))
 	_, _ = fmt.Fprint(os.Stdout, renderCostLimitDecision(costDecision))
 
-	// Trigger reload on instance
+	// Trigger reload on instance. A non-running instance has no spored to
+	// reload and no address to reach it at; it reads the new deadline from its
+	// tags when it next starts (#928).
+	if instance.State != "running" {
+		fmt.Fprintf(os.Stderr, "\nInstance is %s; spored will read the new deadline from its tags when it next starts.\n", instance.State)
+		return nil
+	}
 	fmt.Fprintf(os.Stderr, "\nTriggering configuration reload on instance...\n")
 	if err := triggerReload(instance); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to trigger reload: %v\n", err)
@@ -434,7 +440,10 @@ func triggerReload(instance *aws.InstanceInfo) error {
 
 	sshArgs := buildReloadSSHArgs(keyPath, instance)
 
-	cmd := exec.Command("ssh", sshArgs...)
+	cmd, err := sshtarget.Command(context.Background(), "ssh", sshArgs...)
+	if err != nil {
+		return err
+	}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w: %s", err, string(output))
 	}

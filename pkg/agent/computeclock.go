@@ -40,7 +40,7 @@ func (a *Agent) ComputeClock() ComputeClock {
 	if a.identity != nil {
 		id = a.identity.InstanceID
 	}
-	return ComputeClock{InstanceID: id, StartedAt: a.startTime.UTC(), BaseSeconds: a.computeSecondsBase}
+	return ComputeClock{InstanceID: id, StartedAt: a.computeFrom().UTC(), BaseSeconds: a.computeSecondsBase}
 }
 
 // ComputeClockLive reports whether TotalComputeSeconds counts real running time
@@ -111,7 +111,7 @@ func (a *Agent) AdoptComputeClock(c ComputeClock, bootTime time.Time) error {
 	case c.BaseSeconds < 0:
 		return errors.New("compute clock has a negative base")
 	}
-	a.startTime = c.StartedAt
+	a.computeStart = c.StartedAt
 	a.computeSecondsBase = c.BaseSeconds
 	a.liveClock = true
 	return nil

@@ -112,8 +112,13 @@ func TestStop_PersistentSpotIsStopped(t *testing.T) {
 	if !strings.Contains(strings.Join(f.actions, ","), "StopInstances") {
 		t.Errorf("no StopInstances call: %v", f.actions)
 	}
-	if !strings.Contains(stderr, "Saving remaining TTL") {
-		t.Errorf("the TTL save should still happen for a stoppable instance:\n%s", stderr)
+	// It goes through the normal stop path. That path no longer saves a
+	// "remaining TTL" (#928: the deadline does not move across a stop).
+	if !strings.Contains(stderr, "Requesting stop") {
+		t.Errorf("a stoppable instance should take the normal stop path:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "Saving remaining TTL") {
+		t.Errorf("stop still claims to save the remaining TTL (#928):\n%s", stderr)
 	}
 }
 

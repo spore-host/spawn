@@ -216,3 +216,17 @@ var errEmptyProcStat = fmt.Errorf("empty cpu stat")
 func sysAcceleratorFamilies() []string {
 	return detectAccelerators("/sys/bus/pci/devices", "/dev")
 }
+
+// sysComputeCheckpointPath is the daemon's durable compute checkpoint (#928).
+// Unlike the compute clock in /run, it must outlive the boot: /var/lib is on the
+// root EBS volume, which a stop preserves.
+func sysComputeCheckpointPath() string { return "/var/lib/spored/compute-checkpoint.json" }
+
+// sysBootID is the kernel's random per-boot id, or "" when it cannot be read.
+func sysBootID() string {
+	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}

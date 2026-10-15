@@ -1,6 +1,8 @@
 ## `spawn stop`
 
-Stop a running instance (preserves EBS volumes)
+Stop a running instance (preserves EBS volumes).
+
+The TTL deadline is absolute: it keeps counting while the instance is stopped, and stopping or starting does not move it. Only 'spawn extend' does.
 
 ```
 spawn stop [instance-id-or-name] [flags]

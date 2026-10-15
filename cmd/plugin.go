@@ -10,9 +10,10 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/spore-host/spawn/pkg/sshtarget"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -1024,7 +1025,10 @@ func sshReadToken(ctx context.Context, instance, keyPath string) (string, error)
 	args = append(args, instance, "sudo", "cat", "/var/lib/spored/push.token")
 
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd, err := sshtarget.Command(ctx, "ssh", args...)
+	if err != nil {
+		return "", err
+	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -1048,7 +1052,10 @@ func withSSHTunnel(ctx context.Context, instance, keyPath string, fn func() (*ht
 		instance,
 	)
 
-	tunnel := exec.CommandContext(tunnelCtx, "ssh", args...)
+	tunnel, err := sshtarget.Command(tunnelCtx, "ssh", args...)
+	if err != nil {
+		return nil, err
+	}
 	if err := tunnel.Start(); err != nil {
 		return nil, fmt.Errorf("start SSH tunnel: %w", err)
 	}

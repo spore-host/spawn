@@ -16,6 +16,7 @@ import (
 	"github.com/spore-host/libs/update"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/sshtarget"
 	"github.com/spore-host/spawn/pkg/sweep"
 	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
@@ -83,6 +84,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Only a running instance has a spored to ask. Anything else is answered
+	// from EC2 and its tags, with no SSH and no SSM: a stopped instance has no
+	// public IP, and ssh to the empty host it left reached this machine's own
+	// sshd (#928).
+	if !statusNeedsInstance(instance) {
+		return runStatusFromEC2(ctx, client, instance, statusCheckComplete, jsonOut)
+	}
+
 	// Build the remote spored command, forwarding --check-complete (#26) or
 	// --output json (#540) so spored itself renders the right thing. Note the
 	// ABSENCE of a `2>&1` here — that redirect used to merge the remote
@@ -104,8 +113,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// design, #130), so there's no local key — status must not hard-fail there.
 	// When no key resolves, run `spored status` over SSM instead (status needs
 	// only Describe + SSM, never SSH). (#222)
+	//
+	// A running instance with no public IP (a private subnet) is the same case
+	// as no key: there is nothing for SSH to reach, and SSM needs neither.
 	keyPath, keyErr := findSSHKey(instance.KeyName)
-	if keyErr != nil {
+	if keyErr != nil || instance.PublicIP == "" {
 		return runStatusOverSSM(ctx, client, instance, statusCheckComplete, jsonOut)
 	}
 
@@ -114,7 +126,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// AMIs like Ubuntu — #581).
 	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", resolveSSHUser("", instance), instance.PublicIP), remoteCmd)
 
-	sshCmd := exec.Command("ssh", sshArgs...)
+	sshCmd, err := sshtarget.Command(ctx, "ssh", sshArgs...)
+	if err != nil {
+		if statusCheckComplete {
+			fmt.Fprintf(os.Stderr, "status: %v\n", err)
+			os.Exit(3)
+		}
+		return err
+	}
 
 	// Capture stdout/stderr SEPARATELY rather than CombinedOutput(): without a
 	// pty, ssh keeps the remote command's stdout and stderr on distinct local
@@ -410,6 +429,38 @@ func fsxDRAStatusNotice(instance *aws.InstanceInfo) string {
 		"   If you launched with --fsx-export-path, results will NOT be copied to S3.\n"+
 		"   The filesystem is billing regardless — 'spawn fsx list' to see it, 'spawn fsx delete <id>' to remove it.\n",
 		i18n.Symbol("warning"), where, detail)
+}
+
+// runStatusFromEC2 is `spawn status` for an instance that is not running:
+// rendered from EC2 data and tags, without reaching the instance (#928).
+//
+// --check-complete exits 3 (unknown): spored is the only thing that can say
+// whether the workload finished, and it is not running. That is the same code
+// an unreachable instance always got; what changed is that spawn no longer
+// tries to reach it.
+func runStatusFromEC2(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, checkComplete, jsonOut bool) error {
+	if checkComplete {
+		fmt.Fprintf(os.Stderr, "status: instance %s is %s; spored is not running, so completion cannot be determined\n",
+			instance.InstanceID, instance.State)
+		os.Exit(3)
+	}
+	rate := resolveStatusRate(ctx, instance, clientSpotPriceLookup(client))
+	report := buildEC2StatusReport(instance, rate, time.Now())
+	if jsonOut {
+		out, err := marshalEC2Status(report)
+		if err != nil {
+			return err
+		}
+		fmt.Print(out)
+		fmt.Fprint(os.Stderr, renderBillableResourcesAt(instance, rate))
+		fmt.Fprint(os.Stderr, fsxDRAStatusNotice(instance))
+		return nil
+	}
+	fmt.Print(renderEC2Status(report, statusLocation()))
+	fmt.Print(renderBillableResourcesAt(instance, rate))
+	fmt.Print(fsxDRAStatusNotice(instance))
+	fmt.Print(elasticIPNotice(ctx, client, instance))
+	return nil
 }
 
 // runStatusOverSSM gets `spored status` from an instance we hold no SSH key for

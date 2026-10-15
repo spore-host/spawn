@@ -234,3 +234,10 @@ func sysAcceleratorFamilies() []string {
 	}
 	return nil
 }
+
+// No durable compute checkpoint on Windows (#928), for the same reason as the
+// compute clock: there is no boot id to tell a spored restart from a new boot.
+// The spawn:compute-seconds tag, flushed on service stop, carries compute
+// across a stop/start.
+func sysComputeCheckpointPath() string { return "" }
+func sysBootID() string                { return "" }

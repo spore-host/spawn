@@ -47,3 +47,10 @@ func sysBootTime() time.Time      { return time.Time{} }
 
 // sysAcceleratorFamilies: no accelerators on a dev build.
 func sysAcceleratorFamilies() []string { return nil }
+
+// No durable compute checkpoint outside Linux (#928): there is no boot id to
+// tell a restart within a boot from a new boot, and a checkpoint that cannot
+// say which boot it describes cannot be reused safely. The spawn:compute-seconds
+// tag still carries compute across a stop/start there.
+func sysComputeCheckpointPath() string { return "" }
+func sysBootID() string                { return "" }

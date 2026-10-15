@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/spore-host/spawn/pkg/sshtarget"
 )
 
 // Tunnel is a live `ssh -L` port-forward from a local port to an address on the
@@ -117,7 +119,7 @@ func OpenTunnel(ctx context.Context, opts TunnelOptions) (*Tunnel, error) {
 			return nil, errors.New("service: TunnelOptions.Target needs a User and Host")
 		}
 		start = func(ctx context.Context, localPort int, remoteAddr string) (*exec.Cmd, error) {
-			return exec.CommandContext(ctx, "ssh", SSHTunnelArgs(opts.Target, localPort, remoteAddr)...), nil
+			return sshtarget.Command(ctx, "ssh", SSHTunnelArgs(opts.Target, localPort, remoteAddr)...)
 		}
 	}
 

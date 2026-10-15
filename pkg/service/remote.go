@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/spore-host/spawn/pkg/sshtarget"
 )
 
 // Remote is a service running on a remote host, reachable through an SSH
@@ -113,7 +115,7 @@ func RunRemote(ctx context.Context, opts RemoteOptions) (*Remote, error) {
 			return nil, errors.New("service: RemoteOptions.Target needs a User and Host")
 		}
 		execFn = func(ctx context.Context, command string) (*exec.Cmd, error) {
-			return exec.CommandContext(ctx, "ssh", SSHExecArgs(opts.Target, command)...), nil
+			return sshtarget.Command(ctx, "ssh", SSHExecArgs(opts.Target, command)...)
 		}
 	}
 

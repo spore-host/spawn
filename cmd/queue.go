@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/spore-host/spawn/pkg/sshtarget"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -438,7 +439,11 @@ func sshReadFile(user, host, remotePath string) (string, error) {
 	}
 	args = append(args, fmt.Sprintf("%s@%s", user, host), "cat "+remotePath)
 
-	out, err := exec.Command("ssh", args...).Output()
+	sshCmd, err := sshtarget.Command(context.Background(), "ssh", args...)
+	if err != nil {
+		return "", err
+	}
+	out, err := sshCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("ssh to %s failed: %w", host, err)
 	}
