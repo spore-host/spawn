@@ -28,9 +28,23 @@ type PeerRegistry struct {
 	ttl       int64
 }
 
-// NewPeerRegistry creates a new peer registry
+// NewPeerRegistry creates a new peer registry.
+//
+// The client is pinned to identity.Region (#899). The table is not in the
+// spore.host infra account: `spawn burst` creates it (EnsureTable) in the
+// launching account and region, and launches the burst instances into that same
+// region, so the instance's own region is where the table lives. It used to be
+// the ambient chain alone — but the SDK does not read the region from IMDS and
+// instances carry no AWS_REGION, so on EC2 every Register/Heartbeat/Deregister
+// failed with "Missing Region" before reaching DynamoDB. The ambient chain is
+// still the fallback for an identity with no AWS region (a local provider whose
+// config omits it — see Identity.AWSRegion).
 func NewPeerRegistry(ctx context.Context, identity *provider.Identity) (*PeerRegistry, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+	var opts []func(*config.LoadOptions) error
+	if region := identity.AWSRegion(); region != "" {
+		opts = append(opts, config.WithRegion(region))
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}

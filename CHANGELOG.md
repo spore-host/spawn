@@ -73,6 +73,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--on-complete`. If rank 0 gives up because a peer never accepts SSH, the
   members it can reach stop as well.
 
+- **spored's hybrid-registry client now has a region** (#899). On every
+  job-array member (the report was a `--mpi` cohort, but any `--count` array
+  takes the same path) spored logged `Failed to register with hybrid registry:
+  … Missing Region`: the DynamoDB client was built from the ambient AWS chain,
+  which on an instance names no region, because the SDK does not read it from
+  IMDS. It is now pinned to the instance's own region, where `spawn burst`
+  creates the `spawn-hybrid-registry` table — not the spore.host infra account,
+  which holds no such table. A local (hybrid) node uses its configured region
+  for both registration and peer discovery, and still falls back to the ambient
+  chain when its config names none. `spored run-queue` (`spawn launch
+  --batch-queue`) had the same defect in its results uploader and now takes the
+  instance's region from IMDS when nothing else sets one.
+
 ## [0.128.2] - 2026-10-13
 
 ### Deprecated

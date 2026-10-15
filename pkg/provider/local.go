@@ -133,7 +133,15 @@ func NewLocalProvider(ctx context.Context) (*LocalProvider, error) {
 
 	// Try to initialize DynamoDB client for hybrid coordination
 	// This is optional - local-only mode works without it
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	//
+	// Pinned to the configured region when there is one (#899), the same region
+	// pkg/registry's client registers this node with — otherwise registration
+	// and DiscoverPeers could read and write two different regions' tables.
+	var ddbOpts []func(*awsconfig.LoadOptions) error
+	if region := identity.AWSRegion(); region != "" {
+		ddbOpts = append(ddbOpts, awsconfig.WithRegion(region))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, ddbOpts...)
 	if err == nil {
 		provider.dynamoClient = dynamodb.NewFromConfig(cfg)
 		log.Printf("DynamoDB client initialized for hybrid registry")
