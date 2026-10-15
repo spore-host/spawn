@@ -564,6 +564,10 @@ func (f *failingEC2) TerminateInstances(context.Context, *ec2.TerminateInstances
 	return nil, f.err
 }
 
+func (f *failingEC2) CancelSpotInstanceRequests(context.Context, *ec2.CancelSpotInstanceRequestsInput, ...func(*ec2.Options)) (*ec2.CancelSpotInstanceRequestsOutput, error) {
+	return &ec2.CancelSpotInstanceRequestsOutput{}, nil
+}
+
 // emptyEC2 answers successfully with no instances — a healthy scan of a fleet with
 // nothing to reap, which is exactly what a totally broken run must not resemble.
 type emptyEC2 struct{}
@@ -574,6 +578,10 @@ func (emptyEC2) DescribeInstances(context.Context, *ec2.DescribeInstancesInput, 
 
 func (emptyEC2) TerminateInstances(context.Context, *ec2.TerminateInstancesInput, ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error) {
 	return &ec2.TerminateInstancesOutput{}, nil
+}
+
+func (emptyEC2) CancelSpotInstanceRequests(context.Context, *ec2.CancelSpotInstanceRequestsInput, ...func(*ec2.Options)) (*ec2.CancelSpotInstanceRequestsOutput, error) {
+	return &ec2.CancelSpotInstanceRequestsOutput{}, nil
 }
 
 // failingFSx refuses every DescribeFileSystems call.
@@ -799,6 +807,10 @@ func (c *countingEC2) DescribeInstances(context.Context, *ec2.DescribeInstancesI
 
 func (c *countingEC2) TerminateInstances(context.Context, *ec2.TerminateInstancesInput, ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error) {
 	return &ec2.TerminateInstancesOutput{}, nil
+}
+
+func (c *countingEC2) CancelSpotInstanceRequests(context.Context, *ec2.CancelSpotInstanceRequestsInput, ...func(*ec2.Options)) (*ec2.CancelSpotInstanceRequestsOutput, error) {
+	return &ec2.CancelSpotInstanceRequestsOutput{}, nil
 }
 
 // The registry annotation, end to end through handler: a denied account whose row

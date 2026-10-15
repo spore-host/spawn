@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -306,10 +307,7 @@ func handleTerminateInstance(ctx context.Context, cfg aws.Config, callerCreds aw
 		}
 
 		foundRegion = region
-		_, err = ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
-			InstanceIds: []string{instanceID},
-		})
-		if err != nil {
+		if err := terminateCancellingSpot(ctx, ec2Client, instance); err != nil {
 			return errorResponse(500, fmt.Sprintf("Failed to terminate instance: %v", err)), nil
 		}
 		break
@@ -325,6 +323,42 @@ func handleTerminateInstance(ctx context.Context, cfg aws.Config, callerCreds aw
 		"instance_id": instanceID,
 		"region":      foundRegion,
 	})
+}
+
+// terminateAPI is the slice of the EC2 client terminateCancellingSpot uses.
+type terminateAPI interface {
+	CancelSpotInstanceRequests(ctx context.Context, in *ec2.CancelSpotInstanceRequestsInput, optFns ...func(*ec2.Options)) (*ec2.CancelSpotInstanceRequestsOutput, error)
+	TerminateInstances(ctx context.Context, in *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
+}
+
+// terminateCancellingSpot terminates the instance, cancelling its Spot request
+// first. A --spot launch with a stop/hibernate lifecycle gets a PERSISTENT
+// request (spawn#922), which reopens when its instance is terminated and makes
+// EC2 launch a replacement. Cancelling never terminates anything, and cancelling
+// a one-time request is harmless, so any request id the instance carries is
+// cancelled. As in `spawn terminate`, an instance whose PERSISTENT request
+// (spawn:spot-request-type=persistent) cannot be cancelled is not terminated —
+// that would launch a replacement — and the error names the request to cancel.
+// A failed cancel of a one-time request is only logged: it closes with its
+// instance.
+func terminateCancellingSpot(ctx context.Context, api terminateAPI, instance types.Instance) error {
+	instanceID := aws.ToString(instance.InstanceId)
+	if reqID := aws.ToString(instance.SpotInstanceRequestId); reqID != "" {
+		if _, err := api.CancelSpotInstanceRequests(ctx, &ec2.CancelSpotInstanceRequestsInput{
+			SpotInstanceRequestIds: []string{reqID},
+		}); err != nil && !strings.Contains(err.Error(), "InvalidSpotInstanceRequestID.NotFound") {
+			if getTagValue(instance.Tags, "spawn:spot-request-type") == "persistent" {
+				return fmt.Errorf("not terminating %s: its persistent spot request %s could not be "+
+					"cancelled, and terminating would launch a replacement — cancel the request, then retry: %w",
+					instanceID, reqID, err)
+			}
+			log.Printf("warning: could not cancel %s's one-time spot request %s: %v", instanceID, reqID, err)
+		}
+	}
+	_, err := api.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
+		InstanceIds: []string{instanceID},
+	})
+	return err
 }
 
 // getTagValue extracts a tag value by key

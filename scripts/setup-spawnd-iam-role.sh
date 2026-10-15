@@ -56,7 +56,8 @@ POLICY_DOCUMENT=$(cat <<'EOF'
         "ec2:DescribeInstances",
         "ec2:DescribeTags",
         "ec2:TerminateInstances",
-        "ec2:StopInstances"
+        "ec2:StopInstances",
+        "ec2:CancelSpotInstanceRequests"
       ],
       "Resource": "*",
       "Condition": {

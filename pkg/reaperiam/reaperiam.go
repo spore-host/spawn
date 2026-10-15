@@ -87,6 +87,19 @@ func ScanSelfStatements() []Statement {
 			Condition: ManagedTagCondition,
 		},
 		{
+			// Cancelled before every terminate (#922): a persistent Spot request
+			// left open launches a replacement for the instance just reaped. On
+			// the same rail: spawn tags a persistent request with the instance's
+			// own tags, spawn:managed=true included, so the condition matches the
+			// requests spawn made and nothing else. An untagged (pre-#922,
+			// one-time) request is refused, which is harmless — a one-time request
+			// closes with its instance.
+			Effect:    "Allow",
+			Action:    []string{"ec2:CancelSpotInstanceRequests"},
+			Resource:  "*",
+			Condition: ManagedTagCondition,
+		},
+		{
 			// Network resources (#685): the security-group / placement-group
 			// sweep. Read-only; neither Describe supports resource-level
 			// permissions, so Resource must be "*".

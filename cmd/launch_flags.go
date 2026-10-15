@@ -289,7 +289,7 @@ func init() {
 	_ = launchCmd.Flags().MarkDeprecated("key-pair", "use --key-name instead")
 
 	// Capacity
-	launchCmd.Flags().BoolVar(&spot, "spot", false, "Launch as Spot instance")
+	launchCmd.Flags().BoolVar(&spot, "spot", false, "Launch as Spot instance. With a stop-based lifecycle (--idle-timeout, --on-complete stop|hibernate, --hibernate) the request is persistent so EC2 can stop it; otherwise one-time")
 	launchCmd.Flags().StringVar(&spotMaxPrice, "spot-max-price", "", "Max Spot price")
 	launchCmd.Flags().BoolVar(&useReservation, "use-reservation", false,
 		"Deprecated and inert: use --reservation-id <cr-...> to target a Capacity Reservation")

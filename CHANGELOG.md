@@ -173,6 +173,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `spawn-pipeline-orchestrator` Lambda has to be redeployed for any of this
   to take effect.
 
+- **`--spot` with an idle timeout, `--on-idle`, `--on-complete stop|hibernate` or
+  `--hibernate` now launches an instance EC2 can actually stop** (#922). Every
+  `--spot` launch used to make a one-time Spot request, and EC2 refuses to stop
+  an instance from one, so the idle timeout's default stop, `--on-idle`,
+  `--on-complete stop|hibernate`, `spawn stop` and `spawn hibernate` all failed
+  on Spot. A Spot launch whose lifecycle stops or hibernates now makes a
+  **persistent** request that is interrupted by stopping (or hibernating, when
+  configured with `--hibernate`). The request is tagged like the instance, and
+  the instance carries `spawn:spot-request-type`. A `--spot` launch with a
+  terminate-only lifecycle (`--ttl`, `--on-complete terminate`) is still
+  one-time, as before.
+- **Terminating a Spot instance cancels its Spot request first** (#922), so a
+  persistent request cannot launch a replacement. This covers `spawn terminate`
+  and every other CLI path that terminates (cleanup, cohorts, launch rollback),
+  spored's own TTL, on-complete and cost-limit terminate, the TTL reaper, and
+  the dashboard. If the CLI or dashboard cannot cancel a persistent request it
+  does not terminate the instance; it prints the `aws ec2
+  cancel-spot-instance-requests` command to run first. spored and the reaper
+  terminate anyway and log the request id, because an instance past its
+  deadline must not keep running. New grants of `ec2:CancelSpotInstanceRequests`,
+  conditioned on `spawn:managed=true`, are added to: the spored instance role
+  (re-applied on the next launch), the portal onboarding role, and the reaper's
+  scan-self and cross-account (`spawn-ttl-reaper-ec2`) roles.
+- **`spawn stop` and `spawn hibernate` on a one-time Spot instance say why up
+  front** (#922). They used to print "Saving remaining TTL" and then fail with
+  EC2's `UnsupportedOperation`. They now refuse before doing anything, and
+  suggest `spawn terminate` or a stop-based lifecycle at launch.
+- **`spawn status` describes what the idle timeout really does** (#922). On a
+  one-time Spot instance it said "stops the instance when idle"; it now says the
+  instance cannot be stopped and runs until its deadline. It also says
+  "hibernates" for `--on-idle hibernate`.
+
 ### Security
 
 - **The unit tests no longer make real AWS and DNS calls with your credentials**

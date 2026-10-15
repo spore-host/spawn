@@ -57,6 +57,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/security"
+	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 	"github.com/spore-host/spore-host/lambda/accountlifecycle"
 )
@@ -105,6 +106,9 @@ type account struct {
 type ec2API interface {
 	DescribeInstances(ctx context.Context, in *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 	TerminateInstances(ctx context.Context, in *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
+	// CancelSpotInstanceRequests: a persistent Spot request (#922) launches a
+	// replacement when its instance is terminated, so terminate cancels it first.
+	CancelSpotInstanceRequests(ctx context.Context, in *ec2.CancelSpotInstanceRequestsInput, optFns ...func(*ec2.Options)) (*ec2.CancelSpotInstanceRequestsOutput, error)
 }
 
 type fsxAPI interface {
@@ -571,6 +575,12 @@ type candidate struct {
 	deadline string // the deadline/launch-time that triggered it
 	age      time.Duration
 
+	// spotRequestID is the Spot request the instance was launched from (empty for
+	// on-demand). terminate cancels it first: a persistent request — what a
+	// --spot launch with a stop/hibernate lifecycle gets (#922) — reopens when its
+	// instance is terminated, and EC2 launches a replacement every time.
+	spotRequestID string
+
 	// Graceful-tier inputs (#187): if the instance is running and has a pre-stop
 	// hook, the reaper tries to flush it via SSM before the hard terminate.
 	running        bool
@@ -761,6 +771,7 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 	// deadline and max-age branches.
 	base := candidate{
 		id: id, name: name, region: region,
+		spotRequestID: aws.ToString(inst.SpotInstanceRequestId),
 		running:       inst.State != nil && inst.State.Name == ec2types.InstanceStateNameRunning,
 		preStop:       tags[tagprefix.Tag("pre-stop")],
 		localUsername: tags[tagprefix.Tag("local-username")],
@@ -1170,6 +1181,19 @@ func buildPreStopCommand(preStop, localUsername string) (string, error) {
 
 func (r *reaper) terminate(ctx context.Context, acct account, c candidate) error {
 	client := acct.ec2For(c.region)
+
+	// Cancel the Spot request BEFORE the terminate (#922): terminating first
+	// reopens a persistent request, and EC2 launches a replacement before a later
+	// cancel could land. Best-effort, never blocking the reap (the hard-deadline
+	// guarantee, #72): an instance past its deadline dies even if the cancel is
+	// refused — which it is until the account's spawn-ttl-reaper-ec2 role carries
+	// ec2:CancelSpotInstanceRequests. The failure is logged with the request id
+	// so it can be cancelled by hand.
+	if err := spotrequest.Cancel(ctx, client, c.spotRequestID); err != nil {
+		log.Printf("account %s region %s: SPOT_CANCEL_FAILED %s request %s — a persistent request "+
+			"will launch a replacement; cancel it by hand: %v", acct.label, c.region, c.id, c.spotRequestID, err)
+	}
+
 	_, err := client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
 		InstanceIds: []string{c.id},
 	})

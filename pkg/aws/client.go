@@ -30,6 +30,7 @@ import (
 	smithy "github.com/aws/smithy-go"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
+	"github.com/spore-host/spawn/pkg/spotrequest"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
@@ -601,19 +602,8 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		}
 	}
 
-	// Add Spot configuration if needed
-	if launchConfig.Spot {
-		input.InstanceMarketOptions = &types.InstanceMarketOptionsRequest{
-			MarketType: types.MarketTypeSpot,
-			SpotOptions: &types.SpotMarketOptions{
-				SpotInstanceType: types.SpotInstanceTypeOneTime,
-			},
-		}
-
-		if launchConfig.SpotMaxPrice != "" {
-			input.InstanceMarketOptions.SpotOptions.MaxPrice = aws.String(launchConfig.SpotMaxPrice)
-		}
-	}
+	// Add Spot configuration if needed (one-time or persistent: see applySpotOptions).
+	applySpotOptions(input, launchConfig, tags)
 
 	// Target a Capacity Reservation / Capacity Block for ML (#216). When a
 	// reservation id is set, point RunInstances at it; the instance must be in the
@@ -1040,15 +1030,18 @@ func (c *Client) WaitForPublicIP(ctx context.Context, region, instanceID string,
 	}
 }
 
-// Terminate terminates an EC2 instance
+// Terminate terminates an EC2 instance. A Spot instance's request is cancelled
+// first: a persistent request (#922) left open launches a replacement the moment
+// its instance is terminated. If a persistent request cannot be cancelled the
+// instance is NOT terminated and the error says how to cancel it by hand — every
+// CLI terminate path (terminate, cleanup, cohorts, launch rollback) comes through
+// here, and a person is there to act on it.
 func (c *Client) Terminate(ctx context.Context, region, instanceID string) error {
 	ec2Client := c.regionalEC2(region)
 
-	input := &ec2.TerminateInstancesInput{
-		InstanceIds: []string{instanceID},
-	}
-
-	_, err := ec2Client.TerminateInstances(ctx, input)
+	err := spotrequest.Terminate(ctx, ec2Client, region, instanceID, spotrequest.Strict, func(msg string) {
+		fmt.Fprintf(os.Stderr, "⚠️  %s\n", msg)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to terminate instance: %w", err)
 	}

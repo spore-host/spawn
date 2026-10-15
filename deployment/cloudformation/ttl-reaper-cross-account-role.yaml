@@ -103,6 +103,20 @@ Resources:
                 Condition:
                   StringEquals:
                     ec2:ResourceTag/spawn:managed: 'true'
+              # Cancel a terminated instance's Spot request (#922): a persistent
+              # request left open launches a replacement. Same tag rail — spawn
+              # tags a persistent request with the instance's own tags. Without
+              # this grant the reaper still terminates, and logs
+              # SPOT_CANCEL_FAILED with the request id.
+              - Effect: Allow
+                Action:
+                  - ec2:CancelSpotInstanceRequests
+                # trivy:ignore:AVD-AWS-0057 -- Resource * with the tag condition,
+                # as for TerminateInstances above.
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ec2:ResourceTag/spawn:managed: 'true'
               # Network resources (#685): the security-group / placement-group
               # sweep. Read-only; neither Describe supports resource-level
               # permissions, so Resource must be '*'.
