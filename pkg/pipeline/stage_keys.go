@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -63,7 +64,13 @@ const (
 // the keys existing pipelines use. prefix is the run's prefix (RunKeyPrefix),
 // not the bare s3_prefix.
 func StageKeyPrefix(prefix, stageID string) string {
-	return fmt.Sprintf("%s/stages/%s/", prefix, stageID)
+	return StagesPrefix(prefix) + stageID + "/"
+}
+
+// StagesPrefix is the key prefix under which every stage of a run keeps its
+// markers and outputs: "<prefix>/stages/". prefix is the run's prefix.
+func StagesPrefix(prefix string) string {
+	return prefix + "/stages/"
 }
 
 // StageOutputPrefix is where a stage's data_output files are uploaded and
@@ -83,6 +90,31 @@ func StageInstanceOutputPrefix(prefix, stageID string, instanceCount, instanceIn
 		return StageOutputPrefix(prefix, stageID)
 	}
 	return fmt.Sprintf("%s%d/", StageOutputPrefix(prefix, stageID), instanceIndex)
+}
+
+// ParseStageOutputKey is the inverse of StageOutputPrefix: for a key under
+// StagesPrefix(prefix) that is a stage's data_output file, it returns the
+// stage id and the file's path below the stage's output prefix ("a.csv", or
+// "<instance-index>/a.csv" for a multi-instance stage), and ok. For any other
+// key under the run, a COMPLETE or FAILED marker among them, ok is false.
+//
+// relPath is the key's text, not a vetted local path: an object key may
+// contain "..", and a caller that writes it to disk must check it stays inside
+// its destination (#989).
+func ParseStageOutputKey(prefix, key string) (stageID, relPath string, ok bool) {
+	rest, found := strings.CutPrefix(key, StagesPrefix(prefix))
+	if !found {
+		return "", "", false
+	}
+	stageID, rest, found = strings.Cut(rest, "/")
+	if !found || stageID == "" {
+		return "", "", false
+	}
+	relPath, found = strings.CutPrefix(rest, "output/")
+	if !found || relPath == "" {
+		return "", "", false
+	}
+	return stageID, relPath, true
 }
 
 // StageMarkerKey is the key of a stage-level COMPLETE or FAILED marker. Stage

@@ -91,8 +91,6 @@
   ],
   "s3_bucket": "my-processing-bucket",
   "s3_prefix": "pipelines/data-processing",
-  "result_s3_bucket": "my-results",
-  "result_s3_prefix": "pipelines/results",
   "on_failure": "stop",
   "max_cost_usd": 50.0
 }

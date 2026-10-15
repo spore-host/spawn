@@ -61,8 +61,6 @@
   ],
   "s3_bucket": "my-pipeline-data",
   "s3_prefix": "pipelines/ml-training",
-  "result_s3_bucket": "my-results",
-  "result_s3_prefix": "pipelines/results",
   "on_failure": "stop",
   "max_cost_usd": 100.0,
   "notification_email": "user@example.com"
