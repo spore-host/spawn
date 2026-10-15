@@ -39,22 +39,13 @@ func sysReadCPUTimes() (idle, total int64, err error) {
 	return idleVal, totalVal, nil
 }
 
-// sysReadNetworkBytes returns cumulative RX+TX bytes on the primary interfaces.
+// sysReadNetworkBytes returns cumulative RX+TX bytes over the physical
+// interfaces, or -1, -1 ("unknown") when /proc/net/dev is unreadable or no
+// interface in it is backed by a device (#919).
 func sysReadNetworkBytes() (rx, tx int64) {
-	data, err := os.ReadFile("/proc/net/dev")
+	rx, tx, _, err := readNetDevBytes("/proc/net/dev", "/sys/class/net")
 	if err != nil {
-		return -1, -1 // signal "unknown" → caller assumes active
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, "eth0") || strings.Contains(line, "ens") {
-			fields := strings.Fields(line)
-			if len(fields) >= 10 {
-				r, _ := strconv.ParseInt(fields[1], 10, 64)
-				t, _ := strconv.ParseInt(fields[9], 10, 64)
-				rx += r
-				tx += t
-			}
-		}
+		return -1, -1
 	}
 	return rx, tx
 }

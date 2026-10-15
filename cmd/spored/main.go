@@ -454,9 +454,15 @@ type statusReport struct {
 	// CPUMeasured is false when CPUPercent is an assumption rather than a
 	// reading — no sample interval yet, or /proc/stat unreadable (#734). A
 	// consumer must not plot or threshold an unmeasured value.
-	CPUMeasured        bool   `json:"cpu_measured"`
-	NetworkBytesPerMin int64  `json:"network_bytes_per_min"`
-	PreStopHook        string `json:"pre_stop_hook,omitempty"`
+	CPUMeasured        bool  `json:"cpu_measured"`
+	NetworkBytesPerMin int64 `json:"network_bytes_per_min"`
+	// NetworkMeasured is CPUMeasured's twin: false when NetworkBytesPerMin is
+	// the assume-active placeholder, not a reading, and NetworkUnknown says why
+	// (#919). A one-shot `spored status` has no earlier sample, so this is the
+	// common case there.
+	NetworkMeasured bool   `json:"network_measured"`
+	NetworkUnknown  string `json:"network_unknown,omitempty"`
+	PreStopHook     string `json:"pre_stop_hook,omitempty"`
 }
 
 type statusTTL struct {
@@ -564,6 +570,7 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 	// beside `CPU: 0.0%` in one status output (#734).
 	isIdle := ag.IsIdle()
 	cpuPercent, cpuMeasured := ag.GetCPUUsageMeasured()
+	netBytes, netMeasured, netUnknown := ag.GetNetworkBytesMeasured()
 
 	completionFileExists := false
 	if config.CompletionFile != "" {
@@ -669,7 +676,9 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		ConfigLoadError:    config.ConfigLoadError,
 		CPUPercent:         cpuPercent,
 		CPUMeasured:        cpuMeasured,
-		NetworkBytesPerMin: ag.GetNetworkBytes(),
+		NetworkBytesPerMin: netBytes,
+		NetworkMeasured:    netMeasured,
+		NetworkUnknown:     netUnknown,
 		PreStopHook:        config.PreStop,
 	}
 
@@ -996,7 +1005,12 @@ func renderStatusTable(report *statusReport) error {
 		// this is the COMMON case there, not an edge one.
 		fmt.Printf("  CPU:              unknown (single sample; assuming active)\n")
 	}
-	fmt.Printf("  Network:          %s/min\n", formatBytes(report.NetworkBytesPerMin))
+	if report.NetworkMeasured {
+		fmt.Printf("  Network:          %s/min\n", formatBytes(report.NetworkBytesPerMin))
+	} else {
+		// Not "976.6 KB/min": that was the placeholder, printed as traffic (#919).
+		fmt.Printf("  Network:          unknown (%s; assuming active)\n", report.NetworkUnknown)
+	}
 	if report.PreStopHook != "" {
 		fmt.Printf("  Pre-stop hook:    %s\n", report.PreStopHook)
 	}
