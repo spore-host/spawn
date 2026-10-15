@@ -479,6 +479,10 @@ func spawnPublicKeyForUserData(plat *platform.Platform, keyName string) ([]byte,
 // path, and (2) installs spored as a Windows Service from the regional S3 bucket
 // — the same buckets/binary the Linux bootstrap uses — so the instance enforces
 // TTL/idle/completion in-instance just like Linux.
+//
+// It starts no workload: no --command, MPI, task runner or custom user data.
+// If it ever does, gate that start on `spored is-spot-replacement` exiting 0, as
+// the Linux bootstrap does (#1007), or a Spot replacement will re-run it.
 func buildWindowsUserData(authorizedKey string) (string, error) {
 	// authorizedKey is an authorized_keys line (e.g. "ssh-rsa AAAA... spawn").
 	// Guard against breaking out of the PowerShell here-string.
