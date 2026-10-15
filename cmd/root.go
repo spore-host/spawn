@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
@@ -117,9 +118,21 @@ func init() {
 	// their own PersistentPreRunE and so never run root's.
 	cobra.OnInitialize(configureDiagnosticLog)
 
+	// Run every ancestor's PersistentPreRunE, not only the nearest one. Cobra's
+	// default runs just the closest hook, so a group that declares its own (as
+	// `spawn app` does for --catalog) silently replaced this root hook for its
+	// whole subtree: --profile/--region/--account never reached the config
+	// layer and --output was never validated there (#975).
+	cobra.EnableTraverseRunHooks = true
+
 	// Set PersistentPreRunE to initialize i18n after flag parsing
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		ensureI18nInitialized()
+		// Reject an --output value no command renders, before anything runs:
+		// otherwise a typo or a file name falls through to the table (#975).
+		if err := validateOutputFormat(cmd); err != nil {
+			return err
+		}
 		// Push the shared-config flag values into the config layer so
 		// pkg/config (and pkg/aws through it) can resolve profile/region with
 		// flag > env > file > default precedence.
@@ -134,7 +147,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&flagNoColor, "no-color", false, "Disable colorized output")
 
 	// Output format and verbosity
-	rootCmd.PersistentFlags().StringVarP(&spawnOutputFormat, "output", "o", "table", "Output format (table, json)")
+	rootCmd.PersistentFlags().StringVarP(&spawnOutputFormat, "output", "o", outputFormatTable, "Output format ("+strings.Join(outputFormats, ", ")+")")
 	rootCmd.PersistentFlags().BoolVarP(&spawnVerbose, "verbose", "v", false, "Enable verbose output (also copies the audit trail and diagnostic log lines, normally kept in ~/.spawn/audit.log and ~/.spawn/spawn.log, to stderr)")
 
 	// Shared spore.host config (libs/sporeconfig): AWS profile/region/account,
