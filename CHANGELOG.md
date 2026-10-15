@@ -60,7 +60,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the member index appended when an `--instance-names` template would give
   members the same name), maps it to the private IP in `/etc/hosts`, and keeps
   it across reboots. MPI hostfiles still address peers by private IP.
-### Fixed
 
 - **`--mpi-command` now signals completion, so `--on-complete` fires across
   the MPI cohort** (#894). mpirun ran, but nothing recorded that it had
