@@ -213,6 +213,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and runs with `-count=1`. `make check` and CI now `go vet` every module under
   every build tag found in its `//go:build` lines, without running anything, so
   tagged test code can't silently stop compiling again (#913).
+- **The test suite compiles for Windows** (#925). `pkg/taskproto` and
+  `pkg/service` each had a test file using Unix-only `syscall` APIs with no
+  build constraint, so `go test ./...` could not build on Windows, although
+  windows/amd64 ships. The Unix file-ownership tests are now constrained to
+  non-Windows, and the fake-ssh fixture's process-group handling moved
+  behind a per-OS helper. A new gate, `make check-goos` (also in `make check`
+  and CI), runs `go vet ./...` for every GOOS that `.goreleaser.yaml` builds.
+  It discovers the set from that file and fails if it finds none.
 
 ### Security
 

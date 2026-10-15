@@ -179,6 +179,16 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Vet every GOOS the release builds (#925). The step above vets linux only,
+      # and `go build` never type-checks _test.go files, so two test files that
+      # could not compile for windows (syscall.Stat_t, SysProcAttr.Setpgid) sat
+      # unnoticed while GoReleaser shipped windows/amd64. The GOOS set is
+      # discovered from .goreleaser.yaml (and the discovery fails if it finds
+      # none), so a target added to the release is vetted from that day on. The
+      # SAME script `make check` runs.
+      - name: Release GOOS vet gate
+        run: scripts/release-goos-vet.sh
+
       # Docs drift gate: the committed command/flag reference (docs-gen/) is
       # generated from the CLI via `gen-docs`. Regenerate and fail if it's stale,
       # so a flag/command change can't merge without its reference update. The

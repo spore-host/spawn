@@ -225,6 +225,8 @@ check:
 	@$(MAKE) --no-print-directory check-fmt
 	@echo "2. Running go vet..."
 	@go vet ./...
+	@echo "2b. Vetting every GOOS the release builds..."
+	@$(MAKE) --no-print-directory check-goos
 	@echo "3. Running staticcheck..."
 	@staticcheck ./... || echo "staticcheck not installed, skipping..."
 	@echo "4. Running short tests (hermetic: no credentials, no network)..."
@@ -250,6 +252,14 @@ hermetic-exec:
 	@go build -o $(HERMETIC_EXEC) ./test/hermetic
 test-hermetic: hermetic-exec
 	go test -short -exec $(HERMETIC_EXEC) ./...
+
+# `go vet ./...` once per GOOS in .goreleaser.yaml, discovered, not listed (#925).
+# Plain `go vet` checks only the host GOOS, and `go build` never type-checks
+# tests, so two test files that could not compile for Windows went unnoticed
+# while windows/amd64 shipped. The SAME script CI runs.
+.PHONY: check-goos
+check-goos:
+	@scripts/release-goos-vet.sh
 
 # Every nested module, via the SAME script CI runs (#136). Deliberately not a
 # count: a hand-written number here is the anti-pattern rule 4 warns about, and

@@ -2,11 +2,14 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Every command in this module must be a command some release produces (#811).
@@ -120,4 +123,64 @@ func goreleaserMainPackages(path string) (map[string]bool, error) {
 		out[filepath.ToSlash(filepath.Clean(v))] = true
 	}
 	return out, nil
+}
+
+// scripts/release-goos-vet.sh (#925) vets every GOOS the release builds, and
+// discovers that set by parsing .goreleaser.yaml with awk so that it needs
+// nothing beyond the Go toolchain. A hand-rolled parser can drift from the
+// format, and a drifted one reports a SUBSET as clean, which is the failure the
+// discovery exists to prevent. So check its answer against a real YAML decode
+// of the same file, by a differently-shaped route.
+func TestReleaseGOOSDiscoveryAgreesWithYAML(t *testing.T) {
+	const script = "scripts/release-goos-vet.sh"
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	// Read both inputs through the test process, so `go test`'s cache keys on
+	// them and an edit to either re-runs this test.
+	if _, err := os.ReadFile(script); err != nil { //nolint:gosec // the repo's own script
+		t.Fatalf("read %s: %v", script, err)
+	}
+	b, err := os.ReadFile(".goreleaser.yaml")
+	if err != nil {
+		t.Fatalf("read .goreleaser.yaml: %v", err)
+	}
+
+	var cfg struct {
+		Builds []struct {
+			ID   string   `yaml:"id"`
+			Goos []string `yaml:"goos"`
+		} `yaml:"builds"`
+	}
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		t.Fatalf("decode .goreleaser.yaml: %v", err)
+	}
+	if len(cfg.Builds) == 0 {
+		t.Fatal("decoded no builds from .goreleaser.yaml; the decode has broken, not the release")
+	}
+	want := map[string]bool{}
+	for _, b := range cfg.Builds {
+		if len(b.Goos) == 0 {
+			t.Errorf("build %q lists no goos, so GoReleaser applies its default set, which the "+
+				"vet gate will not guess at; list it explicitly", b.ID)
+		}
+		for _, g := range b.Goos {
+			want[g] = true
+		}
+	}
+	var wantList []string
+	for g := range want {
+		wantList = append(wantList, g)
+	}
+	sort.Strings(wantList)
+
+	out, err := exec.Command("bash", script, "--list").CombinedOutput() //nolint:gosec // fixed repo script
+	if err != nil {
+		t.Fatalf("%s --list failed: %v\n%s", script, err, out)
+	}
+	got := strings.Fields(string(out))
+	if strings.Join(got, ",") != strings.Join(wantList, ",") {
+		t.Errorf("%s discovers GOOS %v, but .goreleaser.yaml decodes to %v; the awk parse has "+
+			"drifted from the file, so the vet gate is checking the wrong set", script, got, wantList)
+	}
 }
