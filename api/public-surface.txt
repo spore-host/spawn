@@ -19,6 +19,7 @@ const SourceTar
 const SporedInstanceProfileName
 const SporedMemoryFloorMiB int64
 const SporedRoleName
+const SpotPriceTag
 field AMIHealthCheck.BaseAMIAge time.Duration
 field AMIHealthCheck.BaseAMIOutdated bool
 field AMIHealthCheck.CurrentBaseAMI string
@@ -294,6 +295,11 @@ field SnapshotDetail.SnapshotID string
 field SnapshotDetail.StartTime time.Time
 field SnapshotDetail.State string
 field SnapshotDetail.VolumeSize int32
+field SpotPrice.AvailabilityZone string
+field SpotPrice.InstanceType string
+field SpotPrice.PricePerHour float64
+field SpotPrice.ProductDescription string
+field SpotPrice.Timestamp time.Time
 func (*Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*MountSnapshotResult, error)
 func (*Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotInput, image io.Reader) (*BuildSnapshotResult, error)
 func (*Client) CheckAMIHealth(ctx context.Context, ami AMIInfo, region string) (*AMIHealthCheck, error)
@@ -310,6 +316,7 @@ func (*Client) CreateOrGetWindowsSecurityGroup(ctx context.Context, region, vpcI
 func (*Client) CreatePlacementGroup(ctx context.Context, name, region string) error
 func (*Client) CreateS3BucketIfNotExists(ctx context.Context, bucketName, region string) error
 func (*Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConfig) error
+func (*Client) CurrentSpotPrice(ctx context.Context, region, instanceID string) (SpotPrice, error)
 func (*Client) DeleteAMI(ctx context.Context, region, amiID string) (*DeleteAMIResult, error)
 func (*Client) DeleteFSxFilesystem(ctx context.Context, filesystemID, region string) error
 func (*Client) DeleteISOFromS3(ctx context.Context, region, bucket, key string, alsoBucketIfEmpty bool) error
@@ -451,6 +458,7 @@ type S3BucketConfig struct
 type SSMRunResult struct
 type SnapshotDetail struct
 type SnapshotSourceKind int
+type SpotPrice struct
 var CallerVersion
 var ErrS3NoSuchKey
 var ErrSSMUnreachable

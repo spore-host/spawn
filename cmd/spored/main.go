@@ -166,6 +166,12 @@ func runDaemon() {
 		go agent.WriteVersionTag(context.Background(), version())
 	}
 
+	// Publish the compute clock so `spored status` — a separate, fresh process —
+	// counts real running time instead of the last spawn:compute-seconds
+	// checkpoint, which is 0 on a brand-new instance (#896). Best-effort: a
+	// status without it falls back to the checkpoint and says so.
+	publishComputeClock(agent)
+
 	// Get config and identity for observability
 	agentConfig := agent.GetConfig()
 	agentIdentity := agent.GetIdentity()
@@ -420,7 +426,15 @@ type statusReport struct {
 	StartedAtSource string    `json:"started_at_source"`
 	ElapsedSeconds  float64   `json:"elapsed_seconds"`
 	ComputeSeconds  float64   `json:"compute_seconds"`
-	StoppedSeconds  float64   `json:"stopped_seconds"`
+	// ComputeClock says what ComputeSeconds measures: "live" (the daemon's own
+	// running clock) or "checkpoint" (the last spawn:compute-seconds tag write,
+	// which lags and is 0 on a new instance) (#896).
+	ComputeClock string `json:"compute_clock"`
+	// BilledSeconds is the running time the compute cost is charged on:
+	// ComputeSeconds plus the boot gap, which EC2 bills although spored was not
+	// yet up to count it.
+	BilledSeconds  float64 `json:"billed_seconds"`
+	StoppedSeconds float64 `json:"stopped_seconds"`
 	// BootSeconds is the gap between the instance launching and spored starting
 	// — boot, cloud-init, package installs. Reported separately because it used
 	// to be folded into StoppedSeconds by subtraction (#735).
@@ -467,7 +481,18 @@ type statusOnComplete struct {
 }
 
 type statusCost struct {
-	PricePerHour  float64 `json:"price_per_hour"`
+	// PricePerHour is the ON-DEMAND rate (spawn:price-per-hour): the comparison
+	// baseline, and what --cost-limit is enforced against.
+	PricePerHour float64 `json:"price_per_hour"`
+	// RatePerHour is the rate the cost figures are charged at — the spot price
+	// for a spot instance when spawn recorded one, else the on-demand rate — and
+	// RateBasis says which (#896).
+	RatePerHour float64 `json:"rate_per_hour"`
+	RateBasis   string  `json:"rate_basis"`
+	// ComputeCostKnown is false until any running time has been recorded; a $0.00
+	// then is "no data", not "free".
+	ComputeCostKnown bool `json:"compute_cost_known"`
+
 	EBSHourlyCost float64 `json:"ebs_hourly_cost,omitempty"`
 	EBSCostKnown  bool    `json:"ebs_cost_known"`
 
@@ -488,10 +513,50 @@ type statusCost struct {
 	CostLimitRemaining float64 `json:"cost_limit_remaining,omitempty"`
 }
 
+// Rate bases for statusCost.RateBasis.
+const (
+	rateBasisOnDemand      = "on-demand"
+	rateBasisSpot          = "spot"
+	rateBasisSpotUnknown   = "on-demand (spot price unknown)"
+	computeClockLive       = "live"
+	computeClockCheckpoint = "checkpoint"
+)
+
+// minEffectiveRateWindow is how much elapsed time an effective rate needs.
+const minEffectiveRateWindow = time.Minute
+
+func computeClockLabel(live bool) string {
+	if live {
+		return computeClockLive
+	}
+	return computeClockCheckpoint
+}
+
+// statusComputeRate picks the rate spored status charges compute at. A spot
+// instance is charged at the spot price spawn recorded at launch; the row used to
+// say "(spot)" and charge the on-demand rate, overstating cost about 2.7x on the
+// reported m8a.4xlarge (#896). A spot instance with no recorded price falls back
+// to on-demand and says so — an overstatement, labelled, rather than a guess. The
+// SpotPricePerHour tag alone also marks the instance as spot, so a failed IMDS
+// read does not discard a price spawn did record.
+func statusComputeRate(config *provider.Config, isSpot bool) (float64, string) {
+	switch {
+	case config.SpotPricePerHour > 0:
+		return config.SpotPricePerHour, rateBasisSpot
+	case isSpot:
+		return config.PricePerHour, rateBasisSpotUnknown
+	default:
+		return config.PricePerHour, rateBasisOnDemand
+	}
+}
+
 // buildStatusReport gathers every fact `spored status` reports, from the same
 // agent/config accessors the table renderer used to read directly. This is the
 // single source of truth both renderTable and renderJSON draw from.
-func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provider.Identity) *statusReport {
+//
+// isSpot is whether the instance runs on the spot market (IMDS
+// instance-life-cycle); it decides which rate the cost figures use.
+func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provider.Identity, isSpot bool) *statusReport {
 	uptime := ag.GetUptime()
 	// Order matters and is now deliberate: IsIdle consumes a CPU sample, so the
 	// report's own read must come AFTER it and be reused, not taken fresh. Two
@@ -525,6 +590,15 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 	computeSecs := ag.TotalComputeSeconds()
 	computeTime := time.Duration(computeSecs) * time.Second
 
+	// liveClock is whether computeTime is real running time. It is for the
+	// daemon, and for this status process once it has adopted the daemon's
+	// published clock (handleStatus). Without that, computeTime is only the last
+	// spawn:compute-seconds checkpoint — 0 on a brand-new instance, which is how
+	// "Compute cost: $0.00 (0s × ...)" appeared at 47s elapsed (#896) — and
+	// startTime is this process's own start, so the boot/stopped split below
+	// would be arithmetic on the wrong clock.
+	liveClock := ag.ComputeClockLive()
+
 	// Split the unaccounted remainder into BOOT and STOPPED rather than calling
 	// all of it stopped (#735).
 	//
@@ -548,6 +622,17 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		// so there is no stopped time to report however the subtraction lands.
 		stoppedTime = 0
 	}
+	if !liveClock {
+		// startTime is this status process's own start, not the daemon's, so
+		// "boot" would be all of elapsed and "stopped" would be noise. Report
+		// neither rather than a split computed against the wrong clock.
+		bootTime, stoppedTime = 0, 0
+	}
+
+	// billedTime is the running time EC2 charges for. Billing starts when the
+	// instance enters running, before the OS boots, so the boot gap is billed
+	// compute even though spored was not yet counting it.
+	billedTime := computeTime + bootTime
 
 	var ttlRemaining time.Duration
 	if config.TTL > 0 {
@@ -577,6 +662,8 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		StartedAtSource:    launchTimeSource,
 		ElapsedSeconds:     elapsed.Seconds(),
 		ComputeSeconds:     computeTime.Seconds(),
+		ComputeClock:       computeClockLabel(liveClock),
+		BilledSeconds:      billedTime.Seconds(),
 		StoppedSeconds:     stoppedTime.Seconds(),
 		BootSeconds:        bootTime.Seconds(),
 		ConfigLoadError:    config.ConfigLoadError,
@@ -617,46 +704,61 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		SentinelPresent: completionFileExists,
 	}
 
-	if config.PricePerHour > 0 {
+	if rate, basis := statusComputeRate(config, isSpot); rate > 0 {
 		ebsHourlyCost := config.EBSHourlyCost
 		ebsCostKnown := ebsHourlyCost > 0
-		computeCost := config.PricePerHour * computeTime.Hours()
-		displayCompute := math.Round(computeCost*100) / 100
+		computeCost := rate * billedTime.Hours()
 
-		var displayEBS float64
+		var storageCost float64
 		if ebsCostKnown {
-			displayEBS = math.Round(ebsHourlyCost*stoppedTime.Hours()*100) / 100
+			storageCost = ebsHourlyCost * stoppedTime.Hours()
 		}
-		displayTotal := displayCompute + displayEBS
+		total := computeCost + storageCost
+		displayCompute := math.Round(computeCost*100) / 100
+		displayEBS := math.Round(storageCost*100) / 100
 
 		cost := &statusCost{
-			PricePerHour:   config.PricePerHour,
-			EBSHourlyCost:  ebsHourlyCost,
-			EBSCostKnown:   ebsCostKnown,
-			ComputeCost:    displayCompute,
-			StorageCost:    displayEBS,
-			CumulativeCost: displayTotal,
+			PricePerHour:     config.PricePerHour,
+			RatePerHour:      rate,
+			RateBasis:        basis,
+			EBSHourlyCost:    ebsHourlyCost,
+			EBSCostKnown:     ebsCostKnown,
+			ComputeCostKnown: billedTime >= time.Second,
+			ComputeCost:      displayCompute,
+			StorageCost:      displayEBS,
+			CumulativeCost:   displayCompute + displayEBS,
 		}
 
-		elapsedHours := elapsed.Hours()
-		if elapsedHours > 0 && ebsCostKnown {
-			effectiveRate := displayTotal / elapsedHours
+		// The effective rate is a ratio, and a ratio of zeros is not a saving:
+		// with no running time recorded it came out as $0.0000/hr, "100% lower
+		// than continuous on-demand" (#896). It needs real running time on the
+		// live clock (a checkpoint lags elapsed by minutes, which reads as a
+		// saving too), a known EBS rate, and a minute of elapsed time — before
+		// that, whole-second compute over a sub-minute elapsed is noise. It is
+		// computed from the unrounded figures: a cents-rounded total divided by
+		// a few minutes is noise too.
+		if elapsed >= minEffectiveRateWindow && billedTime >= time.Second && liveClock && ebsCostKnown {
+			effectiveRate := total / elapsed.Hours()
 			cost.EffectiveRate = &effectiveRate
-			savingsPct := (1 - effectiveRate/config.PricePerHour) * 100
-			if savingsPct > 0.5 {
-				cost.SavingsPercent = savingsPct
+			if config.PricePerHour > 0 {
+				savingsPct := (1 - effectiveRate/config.PricePerHour) * 100
+				if savingsPct > 0.5 {
+					cost.SavingsPercent = savingsPct
+				}
 			}
 		}
 
-		if config.CostLimit > 0 {
-			// The cost limit is enforced against COMPUTE cost only (spored uses
+		if config.CostLimit > 0 && config.PricePerHour > 0 {
+			// The cost limit is enforced against the ON-DEMAND rate (spored uses
 			// PricePerHour × total compute time), so measure "used" the same way —
-			// not against displayTotal, which includes EBS and would misreport how
-			// close the instance is to the limit that actually terminates it.
+			// not against the spot rate or displayTotal, either of which would
+			// misreport how close the instance is to the limit that actually
+			// terminates it.
+			used := math.Round(config.PricePerHour*computeTime.Hours()*100) / 100
 			cost.CostLimit = config.CostLimit
-			cost.CostLimitUsed = displayCompute
-			cost.CostLimitUsedPct = (displayCompute / config.CostLimit) * 100
-			cost.CostLimitRemaining = config.CostLimit - displayCompute
+			cost.CostLimitUsed = used
+			cost.CostLimitUsedPct = (used / config.CostLimit) * 100
+			cost.CostLimitRemaining = config.CostLimit - used
 		}
 
 		report.Cost = cost
@@ -694,13 +796,34 @@ func handleStatus(checkComplete bool, outputFormat string) error {
 		exitCheckComplete(config.CompletionFile)
 	}
 
+	// Count compute on the daemon's clock, not this process's (#896). When the
+	// daemon has not published one (an older spored, Windows, or a daemon that
+	// is not running) the report falls back to the spawn:compute-seconds
+	// checkpoint and labels it.
+	if err := ag.AdoptPublishedComputeClock(); err != nil && !os.IsNotExist(err) {
+		log.Printf("compute clock unavailable, using the last checkpoint: %v", err)
+	}
+
 	identity := ag.GetIdentity()
-	report := buildStatusReport(ag, config, identity)
+	report := buildStatusReport(ag, config, identity, prov.IsSpotInstance(ctx))
 
 	if outputFormat == "json" {
 		return renderStatusJSON(report)
 	}
 	return renderStatusTable(report)
+}
+
+// publishComputeClock writes the daemon's compute clock where `spored status`
+// reads it (#896). Best-effort and logged: a status without it falls back to the
+// spawn:compute-seconds checkpoint and labels the figure as such.
+func publishComputeClock(ag *agent.Agent) {
+	p := agent.ComputeClockPath()
+	if p == "" {
+		return
+	}
+	if err := agent.WriteComputeClock(p, ag.ComputeClock()); err != nil {
+		log.Printf("Warning: could not publish compute clock to %s: %v", p, err)
+	}
 }
 
 // renderStatusJSON prints ONLY the JSON-encoded report to stdout — nothing
@@ -763,7 +886,7 @@ func renderStatusTable(report *statusReport) error {
 	case report.ConfigLoadError != "":
 		fmt.Printf("  TTL:              UNKNOWN — could not read config (%s)\n", report.ConfigLoadError)
 	case report.TTL.TerminateAt != nil:
-		fmt.Printf("  TTL:              %s remaining  (terminates %s)\n",
+		fmt.Printf("  TTL:              %s remaining — terminates %s\n",
 			formatDuration(time.Duration(report.TTL.RemainingSeconds*float64(time.Second))),
 			report.TTL.TerminateAt.Format("2006-01-02 15:04 UTC"))
 	default:
@@ -795,8 +918,21 @@ func renderStatusTable(report *statusReport) error {
 		cost := report.Cost
 		fmt.Println()
 
-		fmt.Printf("  Compute cost:     $%.2f  (%s × $%.4f/hr)\n",
-			cost.ComputeCost, formatDuration(computeTime), cost.PricePerHour)
+		billedTime := time.Duration(report.BilledSeconds * float64(time.Second))
+		live := report.ComputeClock == computeClockLive
+		rateLabel := fmt.Sprintf("$%.4f/hr %s", cost.RatePerHour, cost.RateBasis)
+		switch {
+		case !cost.ComputeCostKnown:
+			// "$0.00 (0s × ...)" on a running instance reads as "free"; it means
+			// nothing has been recorded yet (#896).
+			fmt.Printf("  Compute cost:     —  (no running time recorded yet; %s)\n", rateLabel)
+		case !live:
+			fmt.Printf("  Compute cost:     $%.2f  (%s × %s, as of the last checkpoint)\n",
+				cost.ComputeCost, formatDuration(billedTime), rateLabel)
+		default:
+			fmt.Printf("  Compute cost:     $%.2f  (%s × %s)\n",
+				cost.ComputeCost, formatDuration(billedTime), rateLabel)
+		}
 		if stoppedTime >= time.Minute {
 			if cost.EBSCostKnown {
 				fmt.Printf("  Storage cost:     $%.2f  (%s × $%.4f/hr EBS)\n",
@@ -806,7 +942,11 @@ func renderStatusTable(report *statusReport) error {
 					formatDuration(stoppedTime))
 			}
 		}
-		fmt.Printf("  Cumulative cost:  $%.2f\n", cost.CumulativeCost)
+		if cost.ComputeCostKnown {
+			fmt.Printf("  Cumulative cost:  $%.2f\n", cost.CumulativeCost)
+		} else {
+			fmt.Println("  Cumulative cost:  —")
+		}
 
 		switch {
 		case cost.EffectiveRate != nil && cost.SavingsPercent > 0.5:
@@ -814,12 +954,18 @@ func renderStatusTable(report *statusReport) error {
 				*cost.EffectiveRate, cost.SavingsPercent)
 		case cost.EffectiveRate != nil:
 			fmt.Printf("  Effective rate:   $%.4f/hr\n", *cost.EffectiveRate)
+		case !cost.ComputeCostKnown:
+			fmt.Println("  Effective rate:   —  (no running time recorded yet)")
+		case !live:
+			fmt.Println("  Effective rate:   —  (the last checkpoint lags elapsed time)")
+		case report.ElapsedSeconds < minEffectiveRateWindow.Seconds():
+			fmt.Println("  Effective rate:   —  (needs a minute of running time)")
 		case report.ElapsedSeconds > 0 && !cost.EBSCostKnown:
 			fmt.Println("  Effective rate:   not yet available  (EBS cost lookup pending)")
 		}
 
 		if cost.CostLimit > 0 {
-			fmt.Printf("  Cost limit:       $%.2f  ($%.2f compute used, %.0f%% — $%.2f remaining; compute-only)\n",
+			fmt.Printf("  Cost limit:       $%.2f  ($%.2f compute used, %.0f%% — $%.2f remaining; compute-only, at the on-demand rate)\n",
 				cost.CostLimit, cost.CostLimitUsed, cost.CostLimitUsedPct, cost.CostLimitRemaining)
 		}
 
@@ -829,6 +975,12 @@ func renderStatusTable(report *statusReport) error {
 		} else {
 			fmt.Printf("  On-demand rate:   $%.4f/hr compute  +  EBS storage pending  (%s)\n",
 				cost.PricePerHour, report.Region)
+		}
+		switch cost.RateBasis {
+		case rateBasisSpot:
+			fmt.Printf("  Spot rate:        $%.4f/hr compute  (spot price when launched; spot prices move)\n", cost.RatePerHour)
+		case rateBasisSpotUnknown:
+			fmt.Println("  Spot rate:        unknown — costs above use the on-demand rate, so they overstate")
 		}
 		fmt.Println()
 		fmt.Println("  * Cost figures are estimates. Definitive billing is from your cloud provider.")

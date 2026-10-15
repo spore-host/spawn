@@ -60,6 +60,7 @@ type Agent struct {
 	nextDNSRefresh        time.Time // when the DNS lease is next renewed (pkg/dns/lease.go)
 	lastDNSStatus         string    // last spawn:dns-status written, so renewal only re-tags on change
 	computeSecondsBase    int64     // compute-seconds already accumulated before this spored start
+	liveClock             bool      // TotalComputeSeconds counts real running time (daemon, or a query that adopted its clock, #896)
 	prevNetRx             int64     // /proc/net/dev RX bytes at last getNetworkBytes call
 	prevNetTx             int64     // /proc/net/dev TX bytes at last getNetworkBytes call
 	idleWarned            bool      // send idle_warning notification only once
@@ -198,6 +199,9 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 		computeSecondsBase: config.ComputeSeconds, // carry over accumulated time from before this start
 		dcv:                execDCVRunner{},       // real `dcv` CLI; tests override
 	}
+	// The daemon IS the clock; a query agent is not until it adopts the
+	// daemon's (AdoptPublishedComputeClock, #896).
+	agent.liveClock = activate
 	agent.tagger = &ec2TagPutter{region: identity.Region} // real EC2 CreateTags; tests override
 
 	// Everything below this point is ACTIVATION — logging and side effects — and

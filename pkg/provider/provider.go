@@ -69,7 +69,13 @@ type Config struct {
 	HibernateOnIdle bool
 	CostLimit       float64
 	PricePerHour    float64 // On-demand price per hour (recorded at launch; used for cost-limit enforcement)
-	IdleCPUPercent  float64
+	// SpotPricePerHour is the spot market price spawn observed for this
+	// instance's AZ and type at launch (spawn:spot-price-per-hour, #896). 0 when
+	// the instance is on-demand or the lookup failed. Display only: the cost
+	// limit stays enforced against the on-demand PricePerHour, which can only
+	// overstate a spot instance's spend, never understate it.
+	SpotPricePerHour float64
+	IdleCPUPercent   float64
 
 	// Pre-stop hook
 	PreStop        string        // Shell command to run before any lifecycle-triggered stop

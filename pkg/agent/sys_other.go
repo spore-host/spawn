@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"time"
 )
 
 // Conservative stubs so darwin/dev builds compile. spored only ever runs on
@@ -41,3 +42,7 @@ func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) 
 	_, _, _ = dnsName, mountName, mountPoint
 	return fmt.Errorf("FSx Lustre mounting is only supported on Linux")
 }
+
+// No compute clock outside Linux/Windows: spored does not run there for real.
+func sysComputeClockPath() string { return "" }
+func sysBootTime() time.Time      { return time.Time{} }

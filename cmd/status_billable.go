@@ -37,6 +37,13 @@ type billableResource struct {
 // --estimate-only didn't mention it, terminate didn't mention it, and status didn't
 // either. Every surface a user would check was silent about the largest line item.
 func billableResources(instance *aws.InstanceInfo) []billableResource {
+	return billableResourcesAt(instance, tagStatusRate(instance))
+}
+
+// billableResourcesAt is billableResources with the compute rate already
+// resolved — for a spot instance, its spot price rather than the on-demand rate
+// it used to be costed at under a "(spot)" label (#896).
+func billableResourcesAt(instance *aws.InstanceInfo, rate statusRate) []billableResource {
 	if instance == nil || len(instance.Tags) == 0 {
 		return nil
 	}
@@ -53,8 +60,9 @@ func billableResources(instance *aws.InstanceInfo) []billableResource {
 	if instance.SpotInstance {
 		compute.Note += " (spot)"
 	}
-	if rate := parseTagFloat(tags["spawn:price-per-hour"]); rate > 0 {
-		compute.USD = fmt.Sprintf("~$%.4f/hr", rate)
+	if rate.PerHour > 0 {
+		compute.USD = fmt.Sprintf("~$%.4f/hr", rate.PerHour)
+		compute.Note += " — " + rate.rateNote()
 	} else {
 		// Honest blank rather than $0.00: an unpriced instance is how #533's cap
 		// silently stopped being enforceable.
@@ -126,7 +134,13 @@ func billableResources(instance *aws.InstanceInfo) []billableResource {
 // renderBillableResources formats the billable-resource view, or "" when there is
 // nothing to say (an unmanaged instance, or no tags).
 func renderBillableResources(instance *aws.InstanceInfo) string {
-	res := billableResources(instance)
+	return renderBillableResourcesAt(instance, tagStatusRate(instance))
+}
+
+// renderBillableResourcesAt is renderBillableResources with the compute rate
+// already resolved.
+func renderBillableResourcesAt(instance *aws.InstanceInfo, rate statusRate) string {
+	res := billableResourcesAt(instance, rate)
 	// One compute line alone is what `spawn status` already conveys; the point of
 	// this block is the resources BESIDES the instance.
 	if len(res) < 2 {

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Windows implementations of spored's OS-specific idle/metrics leaves (#77).
@@ -221,3 +222,10 @@ func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) 
 	_, _, _ = dnsName, mountName, mountPoint
 	return fmt.Errorf("FSx Lustre mounting is not supported on Windows")
 }
+
+// sysComputeClockPath is "" on Windows: there is no boot-scoped tmpfs to put the
+// clock in, and a file under ProgramData would survive a stop/start and report
+// the stopped interval as compute. `spored status` falls back to the
+// spawn:compute-seconds checkpoint there, and says so (#896).
+func sysComputeClockPath() string { return "" }
+func sysBootTime() time.Time      { return time.Time{} }
