@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `go mod tidy` works again. An integration-tagged test still imported
+  `pkg/orchestrator`, which #862 deleted, so tidy failed outright; the stale test is
+  removed, and the root and `lambda/dashboard-api` modules are tidied (drops the
+  orphaned `robfig/cron` and an unused SQS SDK requirement). `make check` and CI now
+  fail when any module, root or nested, is not tidy (#907).
+
 ## [0.128.2] - 2026-10-13
 
 ### Deprecated

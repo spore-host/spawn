@@ -237,6 +237,8 @@ check:
 	@go test -short ./...
 	@echo "5. Nested modules (build + vet + test)..."
 	@$(MAKE) --no-print-directory check-nested
+	@echo "6. Module tidiness (root + nested)..."
+	@$(MAKE) --no-print-directory check-tidy
 	@echo "✓ All checks passed!"
 
 # Every nested module, via the SAME script CI runs (#136). Deliberately not a
@@ -250,6 +252,14 @@ check:
 .PHONY: check-nested
 check-nested:
 	@scripts/nested-modules.sh
+
+# Every module, root and nested, must be `go mod tidy`-clean (#907). Tidy is
+# the only tool here that loads packages under every build tag, so it is what
+# catches an integration-tagged test importing a package that no longer exists
+# — which nothing else in check or CI compiles. Same script CI runs.
+.PHONY: check-tidy
+check-tidy:
+	@scripts/check-tidy.sh
 
 # Development
 dev: build
