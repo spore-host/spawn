@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -69,7 +70,16 @@ var launchPipelineCmd = &cobra.Command{
 	Long: `Launch a multi-stage pipeline.
 
 The pipeline definition will be uploaded to S3 and a Lambda orchestrator
-will be invoked to manage the pipeline execution.`,
+will be invoked to manage the pipeline execution.
+
+Each launch is a new run with its own run id. A run's stage markers, outputs
+and config live under <s3_prefix>/runs/<run-id>/, so a run never reads
+another run's results, even under the same s3_prefix.
+
+pipeline_id comes from the definition file, so launching the same file again
+reuses it. If that pipeline has a run still in flight, launch refuses rather
+than replacing the running pipeline's record. --replace cancels the run in
+flight (its instances are terminated) and then starts the new one.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runLaunchPipeline,
 }
@@ -131,6 +141,7 @@ var (
 	flagStage        string
 	flagStatusFilter string
 	flagCancelYes    bool
+	flagReplace      bool
 )
 
 func init() {
@@ -161,6 +172,8 @@ func init() {
 	launchPipelineCmd.Flags().DurationVar(&flagWaitTimeout, "wait-timeout", 24*time.Hour,
 		"Give up waiting after this long (the pipeline keeps running; --wait then exits non-zero)")
 	launchPipelineCmd.Flags().StringVar(&flagRegion, "region", "", "AWS region (default: from AWS config)")
+	launchPipelineCmd.Flags().BoolVar(&flagReplace, "replace", false,
+		"If the pipeline has a run in flight, cancel it (terminating its instances) and start a new run")
 
 	// Collect command flags
 	collectPipelineCmd.Flags().StringVar(&flagOutputDir, "output-dir", "./results", "Output directory for downloaded files")
@@ -323,6 +336,23 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
+	store := pipeline.NewStore(dynamodb.NewFromConfig(cfg))
+
+	// Refuse early, before creating anything, if the pipeline has a run in
+	// flight. This read is only for the early message: the decision is the
+	// conditional write below, which two concurrent launches cannot both pass.
+	if !flagReplace {
+		if existing, err := store.Get(ctx, p.PipelineID); err == nil && existing != nil && !existing.Status.IsTerminal() {
+			return activeRunRefusal(&pipeline.ActiveRunError{PipelineID: p.PipelineID, Existing: existing})
+		}
+	}
+
+	// Every launch is a new run (#943).
+	runID, err := pipeline.NewRunID(time.Now())
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "   Run ID: %s\n\n", runID)
 
 	// Get user account ID
 	awsClient := spawnaws.NewClientFromConfig(cfg)
@@ -347,7 +377,9 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "📤 Uploading pipeline definition to S3...\n")
 	s3Client := s3.NewFromConfig(cfg)
 	bucketName := fmt.Sprintf("spawn-pipelines-%s", region)
-	s3Key := fmt.Sprintf("pipelines/%s/config.json", p.PipelineID)
+	// Per run: a second launch used to overwrite the first run's definition
+	// here, which that run's orchestrator re-reads on every cold start (#943).
+	s3Key := fmt.Sprintf("pipelines/%s/runs/%s/config.json", p.PipelineID, runID)
 
 	pipelineJSON, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
@@ -374,6 +406,7 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 	state := &pipeline.PipelineState{
 		PipelineID:      p.PipelineID,
 		PipelineName:    p.PipelineName,
+		RunID:           runID,
 		UserID:          userAccountID,
 		CreatedAt:       now,
 		UpdatedAt:       now,
@@ -394,7 +427,13 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 		InstanceProfile: instanceProfile,
 	}
 
-	if err := pipeline.NewStore(dynamodb.NewFromConfig(cfg)).Put(ctx, state); err != nil {
+	if err := createPipelineRecord(ctx, store, state, flagReplace, os.Stderr); err != nil {
+		// Nothing will read this run's definition.
+		_, _ = s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: aws.String(s3Key)})
+		var active *pipeline.ActiveRunError
+		if errors.As(err, &active) {
+			return activeRunRefusal(active)
+		}
 		return fmt.Errorf("create DynamoDB record: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "✓ Created orchestration record\n\n")
@@ -406,6 +445,7 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 
 	payload := map[string]string{
 		"pipeline_id": p.PipelineID,
+		"run_id":      runID,
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -433,9 +473,85 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "%s\n", p.PipelineID)
 
 	if flagWait {
-		return waitForPipeline(ctx, pipeline.NewStore(dynamodb.NewFromConfig(cfg)), p.PipelineID, flagWaitTimeout)
+		return waitForPipeline(ctx, store, p.PipelineID, flagWaitTimeout)
 	}
 	return nil
+}
+
+// pipelineRecordStore is the slice of pipeline.Store that creating a run's
+// record needs, so the --replace sequence is testable without DynamoDB.
+type pipelineRecordStore interface {
+	Put(ctx context.Context, state *pipeline.PipelineState) error
+	Replace(ctx context.Context, state *pipeline.PipelineState, prevRunID string) error
+	Get(ctx context.Context, pipelineID string) (*pipeline.PipelineState, error)
+	SetCancelRequestedForRun(ctx context.Context, pipelineID, runID string) error
+}
+
+// How long --replace waits for the run it cancelled to finish, and how often it
+// looks. The orchestrator polls every 10s and then terminates the instances.
+var (
+	replaceCancelWait = 5 * time.Minute
+	replacePollEvery  = 5 * time.Second
+)
+
+// createPipelineRecord writes the new run's record. Without replace it is a
+// conditional create that fails with *pipeline.ActiveRunError if a run is in
+// flight. With replace, the run in flight is cancelled first and given
+// replaceCancelWait to finish, so its own orchestrator terminates its instances
+// and records it CANCELLED; then the new record replaces it, conditionally on
+// it still being that run.
+//
+// If the old run has not finished by then, it is replaced anyway: its
+// orchestrator, on its next poll, sees the record now belongs to another run,
+// terminates its own instances and stops, and the instances' TTL tags are the
+// backstop if it is not running at all.
+func createPipelineRecord(ctx context.Context, store pipelineRecordStore, state *pipeline.PipelineState, replace bool, out io.Writer) error {
+	err := store.Put(ctx, state)
+	var active *pipeline.ActiveRunError
+	if !errors.As(err, &active) || !replace {
+		return err
+	}
+	prev := active.Existing
+	if prev == nil {
+		return fmt.Errorf("%w, and it could not be read to cancel it", active)
+	}
+
+	fmt.Fprintf(out, "⚠️  Cancelling run %q of pipeline %s (status %s) to replace it...\n", prev.RunID, prev.PipelineID, prev.Status)
+	if !prev.CancelRequested {
+		if err := store.SetCancelRequestedForRun(ctx, prev.PipelineID, prev.RunID); err != nil {
+			return fmt.Errorf("cancel the run in flight: %w", err)
+		}
+	}
+
+	deadline := time.Now().Add(replaceCancelWait)
+	for {
+		cur, err := store.Get(ctx, prev.PipelineID)
+		if err == nil && (cur == nil || cur.RunID != prev.RunID || cur.Status.IsTerminal()) {
+			if cur != nil && cur.RunID == prev.RunID {
+				fmt.Fprintf(out, "✓ Run %q finished %s\n", prev.RunID, cur.Status)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(out, "⚠️  Run %q has not finished after %s; replacing it anyway. Its orchestrator "+
+				"terminates its instances when it sees it was replaced, and their TTL is the backstop.\n",
+				prev.RunID, replaceCancelWait)
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(replacePollEvery):
+		}
+	}
+	return store.Replace(ctx, state, prev.RunID)
+}
+
+// activeRunRefusal is the error a launch over a run in flight reports.
+func activeRunRefusal(active *pipeline.ActiveRunError) error {
+	return fmt.Errorf("%w.\n\nLaunching again would replace that run's record. Either wait for it "+
+		"(spawn pipeline status %s), cancel it (spawn pipeline cancel %s), or launch with --replace "+
+		"to cancel it and start a new run", active, active.PipelineID, active.PipelineID)
 }
 
 // pipelineGetter is the slice of the store waitForPipeline needs, so the wait
@@ -624,7 +740,8 @@ func runCollectPipeline(cmd *cobra.Command, args []string) error {
 	if resultBucket == "" {
 		// Fall back to stage output locations
 		resultBucket = state.S3Bucket
-		resultPrefix = fmt.Sprintf("%s/stages", state.S3Prefix)
+		// The run's own stage data (#943), not every run under s3_prefix.
+		resultPrefix = fmt.Sprintf("%s/stages", state.DataPrefix())
 	}
 
 	if resultBucket == "" {

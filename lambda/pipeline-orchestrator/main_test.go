@@ -137,7 +137,7 @@ func newHarness(t *testing.T, state *pipeline.PipelineState) *harness {
 		return &pipeline.PipelineState{PipelineID: state.PipelineID}, nil
 	}
 	saveStateFn = func(context.Context, *pipeline.PipelineState) error { h.saved++; return nil }
-	reinvokeFn = func(context.Context, string) error { h.reinvoked++; return nil }
+	reinvokeFn = func(context.Context, string, string) error { h.reinvoked++; return nil }
 	notifyFn = func(context.Context, *pipeline.PipelineState, string, string) error { return nil }
 	cleanupNetFn = func(context.Context, *pipeline.PipelineState) { h.cleaned++ }
 	return h
