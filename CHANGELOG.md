@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TTL); `none` means no TTL, `expired` means the deadline has passed, `-` a
   terminated instance.
 
+- **`--command` logs no longer open with the shell-options notice** (#897).
+  Every `/var/log/spawn-command.log` (what `spawn array logs` shows) began with
+  two `spawn: shell options ... errexit is ON` lines, on every member, even when
+  the command succeeded. The #707 warning now appears in the command log only
+  when the command exits non-zero, after its output, naming the exit code; it
+  is also noted once in `cloud-init-output.log` at boot.
+- **The job-array and `--mpi` launch summary prints one connect hint instead of
+  a raw `ssh -i <key> ec2-user@<ip>` line per member** (#897):
+  `Connect: spawn connect arr-<index>   (e.g. spawn connect arr-0)`, following
+  `--instance-names` when it is set. `spawn connect` picks the key and falls
+  back to SSM, and the summary no longer prints your local key path.
+
 ### Fixed
 
 - `go mod tidy` works again. An integration-tagged test still imported
@@ -39,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `spawn list > file` wrote raw `\x1b[32m` sequences because only
   `--no-color` turned colour off. Colour is now also off when stdout is a pipe or
   file, when `NO_COLOR` is set, or when `TERM=dumb`. `--no-color` still works.
+
+- **`--name` now sets the OS hostname, as its help always said** (#897).
+  Nothing set it, so single instances, job-array members (`arr-3`) and `--mpi`
+  members (`sim-0`) all kept the EC2 default `ip-172-31-...`, which is what
+  `hostname` and `mpirun hostname` printed. The bootstrap now sets the hostname
+  from the Name tag before `--command` starts (lowercased to a valid DNS label,
+  with the member index appended when an `--instance-names` template would give
+  members the same name), maps it to the private IP in `/etc/hosts`, and keeps
+  it across reboots. MPI hostfiles still address peers by private IP.
 
 ## [0.128.2] - 2026-10-13
 

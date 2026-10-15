@@ -3,6 +3,7 @@ package launcher
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -24,64 +25,118 @@ func extractCommandScript(t *testing.T, script string) string {
 	return rest[:j]
 }
 
-// TestCommandAnnouncesInheritedShellOptions is spawn#707.
-//
-// --command runs with errexit ALREADY enabled, and `set -uo pipefail` does not
-// clear it — so a script opening with that line, believing it chose its own
-// error policy, actually runs -e -u -o pipefail. The failure mode is silent and
-// actively misleading: the script exits BEFORE the line that would report why.
-//
-// Two ordinary idioms are the casualties. A SIGPIPE'd pipeline under pipefail
-// (`... | head -n N` returns 141), and `wait $pid` on a failed background job —
-// which is specifically a pattern for CAPTURING a failure, destroyed at the
-// moment it matters. It cost the reporter four r8gd.8xlarge runs and three
-// misdiagnoses, one of which reached a published page and had to be withdrawn.
-//
-// The fix is to say so, not to change it: fail-fast is defensible, and running
-// on after a broken step until TTL would be worse. This test EXECUTES the
-// generated script because the whole bug is about what the shell actually does.
-func TestCommandAnnouncesInheritedShellOptions(t *testing.T) {
+// TestCommandStillRunsUnderErrexit is the measurement spawn#707's notice rests
+// on: --command runs with errexit ALREADY enabled, and `set -uo pipefail` does
+// not clear it. The failure-time notice (below) tells users exactly that; if
+// this ever stops being true the notice is wrong and must change with it.
+// EXECUTES the generated script because the whole bug is about what the shell
+// actually does.
+func TestCommandStillRunsUnderErrexit(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
-	script, err := BuildLinuxBootstrap(BootstrapConfig{
-		Username: "ec2-user",
-		Command:  "set -uo pipefail\necho AFTER=$-\n",
-	})
-	if err != nil {
-		t.Fatalf("BuildLinuxBootstrap: %v", err)
-	}
-
-	body := extractCommandScript(t, script) + "\nset -uo pipefail\necho AFTER=$-\n"
-	cmd := exec.Command("bash", "-c", body) //nolint:gosec // nosemgrep
-	cmd.Env = []string{"PATH=/usr/bin:/bin"}
-	out, err := cmd.CombinedOutput()
-	got := string(out)
-	if err != nil {
-		t.Fatalf("the generated command script failed to run: %v\noutput:\n%s", err, got)
-	}
-
-	if !strings.Contains(got, "$-=") {
-		t.Errorf("the script does not announce $-, so the inherited options stay invisible "+
-			"— which is the whole of #707:\n%s", got)
-	}
-	// The announcement must name errexit and the two things a reader needs: that
-	// the idiomatic hardening line does NOT clear it, and how to opt out.
-	for _, want := range []string{"errexit is ON", "set -uo pipefail does NOT clear it", "set +e"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("announcement missing %q:\n%s", want, got)
-		}
-	}
-	// And the measurement that makes the report true: errexit survives
-	// `set -uo pipefail`. If this ever stops being the case the announcement is
-	// wrong and must change with it.
+	got := runCommandScript(t, "set -uo pipefail\necho AFTER=$-\n")
 	if !strings.Contains(got, "AFTER=") {
 		t.Fatalf("the user's command did not run:\n%s", got)
 	}
 	after := got[strings.Index(got, "AFTER=")+len("AFTER="):]
 	if !strings.Contains(strings.SplitN(after, "\n", 2)[0], "e") {
-		t.Errorf("errexit is NOT set after `set -uo pipefail` (%q) — the announcement now "+
-			"tells users something untrue", strings.SplitN(after, "\n", 2)[0])
+		t.Errorf("errexit is NOT set after `set -uo pipefail` (%q) — the errexit notice "+
+			"now tells users something untrue", strings.SplitN(after, "\n", 2)[0])
+	}
+}
+
+// runCommandScript runs the generated /tmp/spawn-command.sh with userCmd
+// appended, as the bootstrap assembles it, and returns its combined output —
+// i.e. exactly what lands in /var/log/spawn-command.log from the script itself.
+func runCommandScript(t *testing.T, userCmd string) string {
+	t.Helper()
+	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user", Command: userCmd})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	body := extractCommandScript(t, script) + "\n" + userCmd
+	cmd := exec.Command("bash", "-c", body) //nolint:gosec // nosemgrep
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the generated command script failed to run: %v\noutput:\n%s", err, out)
+	}
+	return string(out)
+}
+
+// TestSuccessfulCommandLogHasNoShellOptionPreamble is spawn#897 (1).
+//
+// The #707 notice used to open EVERY /var/log/spawn-command.log — the file users
+// read (`spawn array logs arr --index 3`) — on every member, success or not:
+//
+//	spawn: shell options for --command: $-=ehB
+//	spawn: errexit is ON. set -uo pipefail does NOT clear it; use set +e to opt out.
+//	member 3 of 8 on ...
+//
+// A command that succeeded was not cut short by errexit, so the log should be
+// the command's own output and nothing else.
+func TestSuccessfulCommandLogHasNoShellOptionPreamble(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	got := runCommandScript(t, "echo member 3 of 8\n")
+	if got != "member 3 of 8\n" {
+		t.Errorf("a successful command's log carries more than its own output (#897):\n%q", got)
+	}
+}
+
+// extractCommandOutcome pulls the root-side block that runs after the command
+// exits (it decides completed/failed) out of the real bootstrap.
+func extractCommandOutcome(t *testing.T, script string) string {
+	t.Helper()
+	const start = "        if [ \"$CMD_RC\" -eq 0 ]; then\n"
+	const end = "\n        fi\n"
+	i := strings.Index(script, start)
+	if i < 0 {
+		t.Fatal("could not find the --command outcome block (marker moved?)")
+	}
+	j := strings.Index(script[i:], end)
+	if j < 0 {
+		t.Fatal("could not find the end of the --command outcome block")
+	}
+	return script[i : i+j+len(end)]
+}
+
+// TestFailedCommandLogNamesErrexit keeps #707's safety intent after #897 moved
+// the notice: when the command FAILS — the only time errexit can have ended a
+// run early, before the line that would have said why — the command log must
+// still say errexit was on, that `set -uo pipefail` does not clear it, and how
+// to opt out. Runs the real outcome block with the log redirected.
+func TestFailedCommandLogNamesErrexit(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user", Command: "false"})
+	if err != nil {
+		t.Fatalf("BuildLinuxBootstrap: %v", err)
+	}
+	for _, rc := range []string{"0", "141"} {
+		log := filepath.Join(t.TempDir(), "spawn-command.log")
+		block := strings.ReplaceAll(extractCommandOutcome(t, script), "/var/log/spawn-command.log", log)
+		cmd := exec.Command("bash", "-c", "set -e\nCMD_RC="+rc+"\n"+block) //nolint:gosec // nosemgrep
+		cmd.Env = []string{"PATH=/usr/bin:/bin"}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("outcome block failed (rc=%s): %v\n%s", rc, err, out)
+		}
+		data, _ := os.ReadFile(log)
+		got := string(data)
+		if rc == "0" {
+			if got != "" {
+				t.Errorf("a successful command still gets the errexit notice in its log (#897):\n%s", got)
+			}
+			continue
+		}
+		for _, want := range []string{"exited 141", "errexit is ON", "set -uo pipefail does NOT clear it", "set +e"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("failed command's log is missing %q (#707):\n%s", want, got)
+			}
+		}
 	}
 }
 

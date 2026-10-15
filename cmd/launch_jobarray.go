@@ -69,12 +69,16 @@ func randomIDSuffix() string {
 	return hex.EncodeToString(b[:])
 }
 
+// defaultInstanceNameTemplate is the member Name template when --instance-names
+// is not given.
+const defaultInstanceNameTemplate = "{job-array-name}-{index}"
+
 // formatInstanceName applies template substitution for instance names
 // Supported variables: {index}, {job-array-name}
 // Default template: "{job-array-name}-{index}"
 func formatInstanceName(template string, jobArrayName string, index int) string {
 	if template == "" {
-		template = "{job-array-name}-{index}"
+		template = defaultInstanceNameTemplate
 	}
 
 	name := template
@@ -82,6 +86,34 @@ func formatInstanceName(template string, jobArrayName string, index int) string 
 	name = strings.ReplaceAll(name, "{job-array-name}", jobArrayName)
 
 	return name
+}
+
+// jobArrayConnectHint is the one connect line the job-array summary prints, in
+// place of the raw `ssh -i <key> ec2-user@<ip>` line per member it used to print
+// (#897). That list grew with the array, exposed the local key path, and
+// bypassed `spawn connect` — which resolves a member by its Name tag
+// (resolveInstance, case-insensitive), picks the key, and falls back to SSM when
+// there is no public IP.
+//
+// The pattern is derived from the same Name template formatInstanceName applies,
+// so a custom --instance-names ("worker-{index}") yields "spawn connect
+// worker-<index>". A template without {index} gives every member the SAME Name,
+// which `spawn connect <name>` cannot disambiguate, so the hint falls back to
+// the instance ID.
+func jobArrayConnectHint(template, jobArrayName string, example *aws.LaunchResult) string {
+	if template == "" {
+		template = defaultInstanceNameTemplate
+	}
+	if !strings.Contains(template, "{index}") {
+		return fmt.Sprintf("spawn connect <instance-id>   (e.g. spawn connect %s)", example.InstanceID)
+	}
+	pattern := strings.ReplaceAll(template, "{job-array-name}", jobArrayName)
+	pattern = strings.ReplaceAll(pattern, "{index}", "<index>")
+	exampleName := example.Name
+	if exampleName == "" {
+		exampleName = example.InstanceID
+	}
+	return fmt.Sprintf("spawn connect %s   (e.g. spawn connect %s)", pattern, exampleName)
 }
 
 // memberParams carries the job-array knobs the per-member config builder needs
@@ -765,7 +797,7 @@ func buildCohort(spec cohortSpec, jobArrayID string, members []cohort.EntityInte
 // renderJobArrayResult writes the job-array ID to the output-id file and emits
 // the success output (JSON array or the human table + management/connect hints).
 // Shared by the legacy and cohort launch paths so both render identically.
-func renderJobArrayResult(launchedInstances []*aws.LaunchResult, baseConfig *aws.LaunchConfig, mp memberParams, jobArrayID string, createdAt time.Time, plat *platform.Platform) error {
+func renderJobArrayResult(launchedInstances []*aws.LaunchResult, baseConfig *aws.LaunchConfig, mp memberParams, jobArrayID string, createdAt time.Time, _ *platform.Platform) error {
 	// Write job array ID to file for workflow integration
 	if err := writeOutputID(jobArrayID, outputIDFile); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Failed to write job array ID to file: %v\n", err)
@@ -822,14 +854,8 @@ func renderJobArrayResult(launchedInstances []*aws.LaunchResult, baseConfig *aws
 	fmt.Fprintf(os.Stderr, "  • Terminate: spawn terminate --job-array-name %s\n", mp.name)
 	fmt.Fprintf(os.Stderr, "  • Extend:    spawn extend --job-array-name %s --ttl 4h\n", mp.name)
 
-	if len(launchedInstances) > 0 && launchedInstances[0].PublicIP != "" {
-		fmt.Fprintf(os.Stderr, "\nConnect to instances:\n")
-		for i, inst := range launchedInstances {
-			if inst.PublicIP != "" {
-				sshCmd := plat.GetSSHCommand("ec2-user", inst.PublicIP)
-				fmt.Fprintf(os.Stderr, "  [%d] %s\n", i, sshCmd)
-			}
-		}
+	if len(launchedInstances) > 0 {
+		fmt.Fprintf(os.Stderr, "  • Connect:   %s\n", jobArrayConnectHint(mp.instanceNames, mp.name, launchedInstances[0]))
 	}
 
 	fmt.Fprintf(os.Stderr, "\n")
