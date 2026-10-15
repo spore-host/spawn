@@ -398,19 +398,14 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to start instance: %w", err)
 	}
 
-	// Check if there's a saved TTL to restore
+	// Tag the instance with the start event. The TTL is deliberately NOT
+	// rewritten here: see startDoesNotRestoreTTLNotice.
 	tags := map[string]string{
 		"spawn:last-start-time": time.Now().UTC().Format(time.RFC3339),
 	}
-
-	if ttlRemaining, exists := instance.Tags["spawn:ttl-remaining"]; exists && ttlRemaining != "" {
-		// Restore the remaining TTL
-		tags["spawn:ttl"] = ttlRemaining
-		// Clear the saved remaining TTL (will be set in subsequent update)
-		fmt.Fprintf(os.Stderr, "Restoring TTL: %s (was paused during stop)\n", ttlRemaining)
+	if notice := startDoesNotRestoreTTLNotice(instance); notice != "" {
+		fmt.Fprint(os.Stderr, notice)
 	}
-
-	// Tag the instance with the start event and restored TTL
 	_ = client.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, tags)
 
 	_, _ = fmt.Fprintf(os.Stdout, "\n✅ Start request sent!\n")
@@ -527,12 +522,13 @@ func startJobArray(ctx context.Context) error {
 			continue
 		}
 
-		// Tag the instance with start time and restore TTL if available
+		// Tag the instance with start time. The TTL is deliberately NOT
+		// rewritten here: see startDoesNotRestoreTTLNotice.
 		tags := map[string]string{
 			"spawn:last-start-time": time.Now().UTC().Format(time.RFC3339),
 		}
-		if ttlRemaining, exists := inst.Tags["spawn:ttl-remaining"]; exists && ttlRemaining != "" {
-			tags["spawn:ttl"] = ttlRemaining
+		if notice := startDoesNotRestoreTTLNotice(&inst); notice != "" {
+			fmt.Fprint(os.Stderr, notice)
 		}
 		_ = client.UpdateInstanceTags(ctx, inst.Region, inst.InstanceID, tags)
 
@@ -562,6 +558,34 @@ func startJobArray(ctx context.Context) error {
 // parseDuration parses a TTL string, accepting Go's native duration syntax plus
 // a day unit (e.g. "2d", "1d12h"). It delegates to the shared day-aware parser
 // in pkg/config so the CLI and the config-file path stay in lockstep.
+// startDoesNotRestoreTTLNotice is what `spawn start` says about the TTL of a
+// stopped instance that `spawn stop`/`hibernate` saved a spawn:ttl-remaining
+// for. Empty when there is nothing saved.
+//
+// `spawn start` used to "restore" that value by writing spawn:ttl=<remaining>
+// and nothing else (#983). That enforced nothing: spored and the TTL reaper
+// both read spawn:ttl-deadline, which the start never moved, so the instance
+// still died at its original deadline (and the reaper reaps stopped instances
+// at it too). What the write did do was corrupt spawn:ttl, which every other
+// reader takes as the total from launch, and on an older instance without a
+// deadline tag it SHORTENED the TTL to launch+remaining. The deadline is
+// fixed at launch by design ("stop and start cannot extend it"; #928 tracks
+// the stop message that still claims a pause), so start reports the deadline
+// that is actually enforced instead of claiming a restore.
+func startDoesNotRestoreTTLNotice(instance *aws.InstanceInfo) string {
+	remaining := instance.Tags["spawn:ttl-remaining"]
+	if remaining == "" {
+		return ""
+	}
+	deadline, ok := lifecycleDeadline(instance)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("Note: %s had %s of TTL left when it was stopped, but the TTL does not pause while stopped.\n"+
+		"   It is still enforced at its deadline, %s. To give it more time: spawn extend %s <duration>\n",
+		instance.InstanceID, remaining, deadline.UTC().Format("2006-01-02 15:04 UTC"), instance.InstanceID)
+}
+
 func parseDuration(ttl string) (time.Duration, error) {
 	return spawnconfig.ParseDurationE(ttl)
 }

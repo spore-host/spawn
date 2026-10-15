@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -442,5 +443,26 @@ func TestLifecycleDeadline_ReflectsExtendNotJustLaunchPlusTTL(t *testing.T) {
 	if !deadline.Equal(extendedDeadline) {
 		t.Errorf("lifecycleDeadline() = %v, want %v (the extended deadline, not launch+TTL=%v)",
 			deadline, extendedDeadline, launch.Add(8*time.Hour))
+	}
+}
+
+// TestStartReportsTheEnforcedDeadlineInsteadOfRestoringTTL (#983): `spawn
+// start` used to "restore" spawn:ttl-remaining by writing spawn:ttl alone,
+// which moved nothing that is enforced. It now tells the user the deadline
+// still applies. The deadline is fixed at launch by design (#928).
+func TestStartReportsTheEnforcedDeadlineInsteadOfRestoringTTL(t *testing.T) {
+	deadline := time.Date(2026, 10, 15, 18, 42, 0, 0, time.UTC)
+	inst := &aws.InstanceInfo{InstanceID: "i-x", Tags: map[string]string{
+		"spawn:ttl-remaining": "40m",
+		"spawn:ttl-deadline":  deadline.Format(time.RFC3339),
+	}}
+	got := startDoesNotRestoreTTLNotice(inst)
+	for _, want := range []string{"40m", "does not pause", "2026-10-15 18:42 UTC", "spawn extend i-x"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("notice missing %q:\n%s", want, got)
+		}
+	}
+	if n := startDoesNotRestoreTTLNotice(&aws.InstanceInfo{Tags: map[string]string{}}); n != "" {
+		t.Errorf("no saved remaining TTL should print nothing, got %q", n)
 	}
 }

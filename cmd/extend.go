@@ -121,15 +121,7 @@ func runExtend(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid TTL duration %q: %w", newTTL, err)
 	}
 
-	tags, newDeadline := computeExtendedTTLTags(instance, newTTL, extendDuration, time.Now())
-
-	// The cost limit is a SECOND, independent deadline. Carry it along, or the
-	// extension silently fails for every instance whose cap was sized to its TTL
-	// (#639).
-	costDecision := decideCostLimit(instance, newDeadline, extendCostLimit, extendKeepCostLimit)
-	if costDecision.Changed() {
-		tags["spawn:cost-limit"] = costLimitTagValue(costDecision.NewValue)
-	}
+	tags, newDeadline, costDecision := extensionTags(instance, newTTL, extendDuration, time.Now(), extendCostLimit, extendKeepCostLimit)
 
 	fmt.Fprintf(os.Stderr, "Extending TTL deadline to %s...\n", newDeadline.UTC().Format("2006-01-02 15:04 UTC"))
 	err = client.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, tags)
@@ -195,6 +187,14 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 		return fmt.Errorf("no instances found with job-array-name: %s", extendJobArrayName)
 	}
 
+	// Parse once, up front, so a duration validateTTL accepts but
+	// time.ParseDuration does not (e.g. "1d") fails before anything is written,
+	// as it does on the single-instance path.
+	extendDuration, err := time.ParseDuration(newTTL)
+	if err != nil {
+		return fmt.Errorf("invalid TTL duration %q: %w", newTTL, err)
+	}
+
 	// Display summary
 	arrayName := jobArrayInstances[0].JobArrayName
 	if arrayName == "" {
@@ -204,7 +204,7 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 
 	fmt.Fprintf(os.Stderr, "Found job array: %s (%d instances)\n", arrayName, len(jobArrayInstances))
 	fmt.Fprintf(os.Stderr, "Array ID: %s\n", arrayID)
-	fmt.Fprintf(os.Stderr, "\nExtending TTL to %s for all instances...\n", newTTL)
+	fmt.Fprintf(os.Stderr, "\nExtending TTL by %s for all instances...\n", newTTL)
 
 	// Log job array TTL extension initiation
 	auditLog.LogOperationWithData("extend_job_array_ttl", arrayID, "initiated",
@@ -214,43 +214,29 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 			"new_ttl":        newTTL,
 		}, nil)
 
-	// Update TTL for each instance. Extracted into extendJobArrayInstances so
-	// the per-instance accounting (in particular, that a reload failure is
-	// tracked and reported, not discarded — spawn#512) is unit-testable
-	// without a real AWS client or SSH.
-	// The job-array path carries the TTL only. The cost limit fires independently
-	// (#639), so an array instance whose cap was sized to its TTL will still be
-	// terminated early — say so rather than leave the same trap silent. Not fixed here because
-	// the array path writes a RELATIVE spawn:ttl rather than a deadline, so the
-	// required cap has to be derived per instance from a different anchor; that is a
-	// separate change from the single-instance fix this accompanies.
-	capped := 0
-	for _, inst := range jobArrayInstances {
-		if parseTagFloat(inst.Tags["spawn:cost-limit"]) > 0 {
-			capped++
-		}
-	}
-	if capped > 0 {
-		fmt.Fprintf(os.Stderr,
-			"⚠️  %d of %d instances have a cost limit, which this does NOT change.\n"+
-				"   An instance whose cap was sized to its old TTL will still be terminated before the new one.\n"+
-				"   Extend those individually to have the cap raised with the TTL:\n"+
-				"     spawn extend <instance-id> %s\n\n",
-			capped, len(jobArrayInstances), newTTL)
-	}
-
-	updateTags := func(region, instanceID string) error {
-		return client.UpdateInstanceTags(ctx, region, instanceID, map[string]string{
-			"spawn:ttl": newTTL,
-		})
-	}
+	// Each instance goes through extensionTags, exactly as the single-instance
+	// path does: spawn:ttl-deadline (what spored and the TTL reaper enforce) is
+	// pushed forward from THAT instance's own deadline, spawn:ttl stays the total
+	// from launch, and the cost limit is raised per instance when its cap would
+	// otherwise fire first (#639). Before #983 this path wrote only
+	// spawn:ttl=<raw argument>, so it reported success while every instance kept
+	// its original, enforced deadline.
+	//
+	// The per-instance accounting lives in extendJobArrayInstances so that a
+	// reload failure is tracked and reported, not discarded (spawn#512), and is
+	// unit-testable without a real AWS client or SSH.
+	updateTags := jobArrayTagUpdater(
+		func(region, instanceID string, tags map[string]string) error {
+			return client.UpdateInstanceTags(ctx, region, instanceID, tags)
+		},
+		newTTL, extendDuration, time.Now(), extendCostLimit, extendKeepCostLimit, os.Stderr)
 	successCount, failedInstances, reloadFailedInstances := extendJobArrayInstances(
 		jobArrayInstances, updateTags, triggerReload, os.Stderr)
 
 	// Display results
 	_, _ = fmt.Fprintf(os.Stdout, "\n✅ Job array TTL extended!\n")
 	_, _ = fmt.Fprintf(os.Stdout, "   Array:     %s\n", arrayName)
-	_, _ = fmt.Fprintf(os.Stdout, "   New TTL:   %s\n", newTTL)
+	_, _ = fmt.Fprintf(os.Stdout, "   Extended:  by %s (each instance's deadline moved from its own current deadline)\n", newTTL)
 	_, _ = fmt.Fprintf(os.Stdout, "   Updated:   %d/%d instances\n", successCount, len(jobArrayInstances))
 	if len(reloadFailedInstances) > 0 {
 		_, _ = fmt.Fprintf(os.Stdout, "   Reloaded:  %d/%d instances (%d tag-updated but not confirmed reloaded — see warnings above)\n",
@@ -299,12 +285,12 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 // warns and prints a manual SSH fallback on a reload failure.
 func extendJobArrayInstances(
 	instances []aws.InstanceInfo,
-	updateTags func(region, instanceID string) error,
+	updateTags func(inst *aws.InstanceInfo) error,
 	reload func(*aws.InstanceInfo) error,
 	stderr io.Writer,
 ) (successCount int, failedInstances, reloadFailedInstances []string) {
 	for _, inst := range instances {
-		if err := updateTags(inst.Region, inst.InstanceID); err != nil {
+		if err := updateTags(&inst); err != nil {
 			fmt.Fprintf(stderr, "⚠️  Failed to update %s: %v\n", inst.InstanceID, err)
 			failedInstances = append(failedInstances, inst.InstanceID)
 			continue
@@ -318,6 +304,43 @@ func extendJobArrayInstances(
 		}
 	}
 	return successCount, failedInstances, reloadFailedInstances
+}
+
+// jobArrayTagUpdater returns the per-instance tag update the job-array path
+// hands to extendJobArrayInstances. It computes each instance's tags with
+// extensionTags — the same function the single-instance path uses — and writes
+// them in one call, so spawn:ttl never moves without spawn:ttl-deadline (#983).
+// Each instance's new deadline, and any cost-limit change, is printed to out.
+func jobArrayTagUpdater(
+	write func(region, instanceID string, tags map[string]string) error,
+	newTTL string, extendDuration time.Duration, now time.Time,
+	explicitCostLimit float64, keepCostLimit bool, out io.Writer,
+) func(inst *aws.InstanceInfo) error {
+	return func(inst *aws.InstanceInfo) error {
+		tags, newDeadline, costDecision := extensionTags(inst, newTTL, extendDuration, now, explicitCostLimit, keepCostLimit)
+		if err := write(inst.Region, inst.InstanceID, tags); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "✓ %s: deadline %s\n", inst.InstanceID, newDeadline.UTC().Format("2006-01-02 15:04 UTC"))
+		_, _ = fmt.Fprint(out, renderCostLimitDecision(costDecision))
+		return nil
+	}
+}
+
+// extensionTags is the complete tag set `spawn extend` writes for one
+// instance, shared by the single-instance and job-array paths so the two
+// cannot drift (#983): the TTL pair from computeExtendedTTLTags plus, when the
+// cost limit would otherwise fire before the new deadline, a raised
+// spawn:cost-limit. The cost limit is a SECOND, independent deadline; leave it
+// alone and the extension silently fails for every instance whose cap was
+// sized to its TTL (#639).
+func extensionTags(instance *aws.InstanceInfo, newTTL string, extendDuration time.Duration, now time.Time, explicitCostLimit float64, keepCostLimit bool) (map[string]string, time.Time, costLimitDecision) {
+	tags, newDeadline := computeExtendedTTLTags(instance, newTTL, extendDuration, now)
+	costDecision := decideCostLimit(instance, newDeadline, explicitCostLimit, keepCostLimit)
+	if costDecision.Changed() {
+		tags["spawn:cost-limit"] = costLimitTagValue(costDecision.NewValue)
+	}
+	return tags, newDeadline, costDecision
 }
 
 // computeExtendedTTLTags computes the tag set `spawn extend` writes, given
