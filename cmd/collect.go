@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/sweep"
 )
@@ -113,20 +114,26 @@ func runCollectResults(cmd *cobra.Command, args []string) error {
 	// Load AWS config for spore-host-infra (where the sweep-orchestration table
 	// lives) — matches `spawn list-sweeps`. Previously this used the caller's
 	// default account, which read a different (usually empty) table (#326).
-	cfg, err := spawnconfig.LoadInfraAWSConfig(ctx, "us-east-1")
+	infraCfg, err := collectInfraConfig(ctx, "us-east-1")
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
 	// Get sweep record from DynamoDB
 	fmt.Println("Fetching sweep metadata from DynamoDB...")
-	sweepRecord, err := sweep.NewStore(dynamodb.NewFromConfig(cfg)).Get(ctx, collectSweepID)
+	sweepRecord, err := collectGetSweep(ctx, infraCfg, collectSweepID)
 	if err != nil {
 		return fmt.Errorf("failed to get sweep record: %w", err)
 	}
 
 	if sweepRecord == nil {
 		return fmt.Errorf("sweep not found: %s", collectSweepID)
+	}
+
+	// The results are NOT in the infra account (#1034). Only the record is.
+	cfg, err := resultsReaderConfig(ctx, sweepRecord, collectS3Prefix != "")
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("Sweep: %s (Status: %s)\n", sweepRecord.SweepName, sweepRecord.Status)
@@ -214,6 +221,59 @@ func runCollectResults(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// Seams for the credentials collect-results uses, so a test can tell which
+// account's credentials signed which request.
+var (
+	collectInfraConfig   = spawnconfig.LoadInfraAWSConfig
+	collectComputeConfig = spawnconfig.LoadComputeAWSConfig
+	collectGetSweep      = func(ctx context.Context, cfg aws.Config, id string) (*sweep.SweepRecord, error) {
+		return sweep.NewStore(dynamodb.NewFromConfig(cfg)).Get(ctx, id)
+	}
+	collectAccountOf = func(ctx context.Context, cfg aws.Config) (string, error) {
+		return spawnaws.NewClientFromConfig(cfg).GetAccountID(ctx)
+	}
+)
+
+// resultsReaderConfig returns the credentials to read a sweep's results with:
+// the COMPUTE account's (#1034).
+//
+// spawn-results-<account>-<region> is named for the sweep's aws_account_id,
+// which `spawn launch --param-file` takes from the compute config. The rows run
+// in that account, and the instances write there under their own account ID. The
+// only spawn code that creates such a bucket (`spawn task run`, pools) does it
+// with compute credentials, and nothing grants another account access. This used
+// to read with the infra config that the sweep record comes from, so every list
+// was AccessDenied: a warning per region, then "No results found" and exit 0.
+//
+// A sweep record naming a different account than the compute credentials is an
+// error, not a warning: those reads cannot succeed, and an empty result looks
+// exactly like a sweep that wrote nothing. With --s3-prefix the user named the
+// bucket, so its account is not checked.
+func resultsReaderConfig(ctx context.Context, rec *sweep.SweepRecord, customPrefix bool) (aws.Config, error) {
+	cfg, err := collectComputeConfig(ctx, rec.Region)
+	if err != nil {
+		return aws.Config{}, fmt.Errorf("failed to load compute AWS config for the results buckets: %w", err)
+	}
+	if customPrefix {
+		return cfg, nil
+	}
+	if rec.AWSAccountID == "" {
+		return aws.Config{}, fmt.Errorf("sweep %s records no aws_account_id, so its results bucket "+
+			"(spawn-results-<account>-<region>) cannot be named; pass --s3-prefix", rec.SweepID)
+	}
+	acct, err := collectAccountOf(ctx, cfg)
+	if err != nil {
+		return aws.Config{}, fmt.Errorf("failed to identify the compute account: %w", err)
+	}
+	if acct != rec.AWSAccountID {
+		return aws.Config{}, fmt.Errorf("sweep %s ran in account %s, and its results are in that account's "+
+			"spawn-results-%s-<region> buckets, but the compute credentials (profile %q) are for account %s. "+
+			"Set SPAWN_COMPUTE_PROFILE to a profile for %s, or pass --s3-prefix",
+			rec.SweepID, rec.AWSAccountID, rec.AWSAccountID, spawnconfig.GetComputeProfile(), acct, rec.AWSAccountID)
+	}
+	return cfg, nil
 }
 
 // getRegionsForSweep extracts list of regions from sweep record

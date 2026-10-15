@@ -435,6 +435,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--ami` is not passed. A per-row AMI was resolved for every row without one,
   and the orchestrator merges a row over the defaults, so the file's AMI was
   never launched (#1026).
+- **`spawn collect-results` / `spawn sweep collect` read results with the
+  compute account's credentials** (#1034). `spawn-results-<account>-<region>` is
+  named for, written from and created in the sweep's compute account. Collect
+  read it with the infra credentials it fetches the sweep record with, so every
+  list was denied: a warning per region, then `No results found` and exit 0.
+  The sweep record still comes from the infra account. If the compute
+  credentials (`SPAWN_COMPUTE_PROFILE`, default `spore-host-dev`) are for a
+  different account than the sweep ran in, the command now fails and names both
+  accounts.
 
 ### Security
 
