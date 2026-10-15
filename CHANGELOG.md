@@ -140,6 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gave UTC and the termination deadline gave local time for the same moment.
   spored's UTC timestamps are re-rendered to match, and so is the
   lifecycle-mismatch warning.
+
 ### Security
 
 - **The unit tests no longer make real AWS and DNS calls with your credentials**
