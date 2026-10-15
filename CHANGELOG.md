@@ -487,6 +487,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registers the DNS name and job-array entry again, so the running instance
   keeps its name. This also applies to `--on-complete stop` and `hibernate`.
   The pre-stop hook still runs only once.
+- **A failed `--on-complete stop` or `hibernate` no longer repeats the
+  completion announcement every minute** (#978). The completion file stays on
+  disk, so when EC2 refused the stop, every one-minute check found it again and
+  sent another `completion` notification, POSTed the completion webhook again,
+  copied the command log to the serial console again and slept the grace
+  period again, holding up the TTL and cost-limit checks each time. Now the
+  notification, the webhook and the grace period happen once. A failed attempt
+  sends one `completion_stop_failed` notification and is retried on the same
+  backoff as a failed idle stop (5, 10, 20 and 40 minutes, then hourly), and
+  the TTL and cost limit are still enforced while it waits. The idle stop and
+  the on-complete stop share that backoff, so an instance EC2 will not stop is
+  not asked twice and the failure is reported once. `--on-complete terminate`
+  is still retried every minute.
 - **A GPU that cannot be read no longer counts as an idle GPU, and Trainium,
   Inferentia, Gaudi and AMD accelerators are now checked** (#954). When
   `nvidia-smi` failed (for example a driver that no longer matched the kernel

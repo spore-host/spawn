@@ -69,8 +69,8 @@ type Agent struct {
 	diskUnknownWarned     bool            // "disk I/O cannot be measured" logged once, not every tick (#937)
 	idleWarned            bool            // send idle_warning notification only once
 	accelUnknownWarned    map[string]bool // accelerator families warned "cannot be measured", once each (#954)
-	idleActionFailures    int             // consecutive failed idle stop/hibernate attempts (#948)
-	idleActionRetryAt     time.Time       // no idle stop/hibernate attempt before this (#948)
+	stopRetry             stopRetry       // backoff for a failed stop/hibernate, idle (#948) or on-complete (#978)
+	completionAnnounced   bool            // completion notification, webhook and grace period done; once (#978)
 
 	// idleMu guards idleSnap and lastActivityTime. The monitor loop writes them;
 	// the Prometheus scrape, the spot-interruption goroutine and status read
@@ -1747,53 +1747,38 @@ func (a *Agent) warnUsers(message string) {
 func (a *Agent) checkCompletion(ctx context.Context) bool {
 	// Check if completion file exists
 	if _, err := os.Stat(a.config.CompletionFile); err == nil {
-		log.Printf("Completion signal detected: file %s exists", a.config.CompletionFile)
-
-		// Read completion file for metadata (optional)
-		content, err := os.ReadFile(a.config.CompletionFile)
-		if err == nil && len(content) > 0 {
-			log.Printf("Completion metadata: %s", strings.TrimSpace(string(content)))
+		// Announce once. The file stays on disk, so every tick after a
+		// failed stop/hibernate comes back here; before #978 each one sent
+		// another `completion` notification, POSTed the webhook again (a
+		// caller may treat each POST as "done"), copied the command log to the
+		// console again and slept the grace period again, holding up the TTL
+		// and cost-limit checks below.
+		if !a.completionAnnounced {
+			a.completionAnnounced = true
+			a.announceCompletion(ctx)
 		}
-
-		// Did the workload FAIL? The record the bootstrap writes carries
-		// {"status": "...", "exit_code": N}, so this needs no new plumbing —
-		// only reading what was already being logged (#736).
-		//
-		// On a failure the command log is the only record of WHY, and it dies
-		// with the instance, so copy its tail to the serial console before the
-		// terminate below. Gated on failure: a successful job's log is rarely
-		// read and console space is shared with the boot messages.
-		if completionFailed(content) {
-			a.writeCommandLogToConsole("workload failed")
-		}
-
-		// Notify via Slack before the grace period
-		a.notifier.Notify(ctx, "completion", "")
-
-		// Fire the optional off-node completion webhook (#497), same
-		// fire-and-forget discipline as the spot-interruption webhook (#228) —
-		// so a caller waiting on ITS OWN target learns of completion as early
-		// as spored itself does, before the grace-period sleep below.
-		a.emitCompletionWebhook(ctx)
-
-		// Warn users with grace period
-		delay := a.config.CompletionDelay
-		a.warnUsers(i18n.Tf("spawn.agent.workload_complete", map[string]interface{}{
-			"Action": a.config.OnComplete,
-			"Delay":  delay,
-		}))
-
-		log.Printf("Grace period: waiting %v before action", delay)
-		time.Sleep(delay)
 
 		// Execute action based on configuration
 		switch strings.ToLower(a.config.OnComplete) {
 		case "terminate":
+			// Retried every tick on failure, deliberately: terminate is the
+			// TTL's action too, and there is nothing to back off to.
 			a.terminate(ctx, "Completion signal received", taskproto.ExitCompleted)
-		case "stop":
-			_ = a.stop(ctx, "Completion signal received", taskproto.ExitCompleted)
-		case "hibernate":
-			_ = a.hibernate(ctx, taskproto.ExitCompleted)
+		case "stop", "hibernate":
+			at := stopAttempt{trigger: "on-complete", action: "stop", failEvent: "completion_stop_failed",
+				run: func() error { return a.stop(ctx, "Completion signal received", taskproto.ExitCompleted) }}
+			if strings.EqualFold(a.config.OnComplete, "hibernate") {
+				at.action = "hibernate"
+				at.run = func() error { return a.hibernate(ctx, taskproto.ExitCompleted) }
+			}
+			attempted, _ := a.stopWithBackoff(ctx, time.Now(), at)
+			if !attempted {
+				// Backing off after a failed attempt. Let the TTL and cost-limit
+				// checks run: they are the backstop for an instance that cannot
+				// be stopped. The idle check shares the backoff, so it does not
+				// try the same stop in between.
+				return false
+			}
 		case "exit":
 			// For local provider - just exit
 			log.Printf("Exiting on completion signal")
@@ -1810,6 +1795,50 @@ func (a *Agent) checkCompletion(ctx context.Context) bool {
 	return false
 }
 
+// announceCompletion is the once-per-signal part of the completion path: the
+// `completion` notification, the completion webhook, the user warning and the
+// grace period (#978).
+func (a *Agent) announceCompletion(ctx context.Context) {
+	log.Printf("Completion signal detected: file %s exists", a.config.CompletionFile)
+
+	// Read completion file for metadata (optional)
+	content, err := os.ReadFile(a.config.CompletionFile)
+	if err == nil && len(content) > 0 {
+		log.Printf("Completion metadata: %s", strings.TrimSpace(string(content)))
+	}
+
+	// Did the workload FAIL? The record the bootstrap writes carries
+	// {"status": "...", "exit_code": N}, so this needs no new plumbing —
+	// only reading what was already being logged (#736).
+	//
+	// On a failure the command log is the only record of WHY, and it dies
+	// with the instance, so copy its tail to the serial console before the
+	// terminate below. Gated on failure: a successful job's log is rarely
+	// read and console space is shared with the boot messages.
+	if completionFailed(content) {
+		a.writeCommandLogToConsole("workload failed")
+	}
+
+	// Notify via Slack before the grace period
+	a.notifier.Notify(ctx, "completion", "")
+
+	// Fire the optional off-node completion webhook (#497), same
+	// fire-and-forget discipline as the spot-interruption webhook (#228) —
+	// so a caller waiting on ITS OWN target learns of completion as early
+	// as spored itself does, before the grace-period sleep below.
+	a.emitCompletionWebhook(ctx)
+
+	// Warn users with grace period
+	delay := a.config.CompletionDelay
+	a.warnUsers(i18n.Tf("spawn.agent.workload_complete", map[string]interface{}{
+		"Action": a.config.OnComplete,
+		"Delay":  delay,
+	}))
+
+	log.Printf("Grace period: waiting %v before action", delay)
+	time.Sleep(delay)
+}
+
 func (a *Agent) shutdownWarnDelay() time.Duration {
 	if a.warnDelay > 0 {
 		return a.warnDelay
@@ -1817,65 +1846,101 @@ func (a *Agent) shutdownWarnDelay() time.Duration {
 	return 5 * time.Second
 }
 
-// idleActionRetryBase and idleActionRetryMax bound the backoff between
-// attempts at a failed idle stop or hibernate (#948).
+// stopRetryBase and stopRetryMax bound the backoff between attempts at a
+// failed stop or hibernate, idle (#948) or on-complete (#978).
 const (
-	idleActionRetryBase = 5 * time.Minute
-	idleActionRetryMax  = time.Hour
+	stopRetryBase = 5 * time.Minute
+	stopRetryMax  = time.Hour
 )
 
-// idleActionRetryDelay is how long to wait after the n-th consecutive failure
+// stopRetryDelay is how long to wait after the n-th consecutive failure
 // (n >= 1): 5, 10, 20, 40 minutes, then hourly.
-func idleActionRetryDelay(failures int) time.Duration {
-	d := idleActionRetryBase
-	for i := 1; i < failures && d < idleActionRetryMax; i++ {
+func stopRetryDelay(failures int) time.Duration {
+	d := stopRetryBase
+	for i := 1; i < failures && d < stopRetryMax; i++ {
 		d *= 2
 	}
-	if d > idleActionRetryMax {
-		d = idleActionRetryMax
+	if d > stopRetryMax {
+		d = stopRetryMax
 	}
 	return d
 }
 
-// idleTimeoutReached stops or hibernates the instance once the idle timeout has
-// passed, unless a previous attempt failed and its backoff has not run out.
+// stopRetry is the backoff state for stop/hibernate. There is one per agent,
+// shared by the idle and on-complete triggers: whether EC2 will stop this
+// instance does not depend on why spored asked, so a refusal for one trigger
+// also holds off the other, and the failure is announced once.
+type stopRetry struct {
+	failures int       // consecutive failed attempts
+	retryAt  time.Time // no attempt before this
+}
+
+// backingOff reports whether an attempt at now must wait.
+func (r *stopRetry) backingOff(now time.Time) bool { return now.Before(r.retryAt) }
+
+// stopAttempt describes one trigger's stop or hibernate for stopWithBackoff.
+// run is the a.stop or a.hibernate call itself, so each call site names its
+// own taskproto.Exit* token (TestEveryLifecycleExitPathCarriesAReasonToken).
+type stopAttempt struct {
+	trigger   string       // "idle", "on-complete": for the log and the failure detail
+	action    string       // "stop" or "hibernate"
+	run       func() error // the a.stop / a.hibernate call
+	failEvent string       // notification sent once, on the first failure
+}
+
+// stopWithBackoff stops or hibernates the instance unless a previous attempt
+// failed and its backoff has not run out. It reports
+// whether it attempted, and the provider's error.
 //
-// Before #948 a failed stop was simply logged, so the next tick, still idle and
-// still past the timeout, ran the whole sequence again: once a minute until TTL,
-// each time announcing `idle_stopped` for an instance that kept running and
-// deleting its DNS name again. The common cause is permanent (a one-time Spot
-// instance cannot be stopped; a role without ec2:StopInstances), so a retry
-// every minute buys nothing. A transient failure (throttling) is retried soon
-// enough by the backoff.
+// Before #948 (idle) and #978 (on-complete) a failed stop was simply logged, so
+// the next tick ran the whole sequence again: once a minute until TTL. The
+// common cause is permanent (a one-time Spot instance cannot be stopped; a role
+// without ec2:StopInstances), so a retry every minute buys nothing. A transient
+// failure (throttling) is retried soon enough by the backoff. The failure is
+// announced once, on the first attempt that fails: the first failure is the
+// news. Success is the caller's to announce.
+func (a *Agent) stopWithBackoff(ctx context.Context, now time.Time, at stopAttempt) (bool, error) {
+	r := &a.stopRetry
+	if r.backingOff(now) {
+		return false, nil // backing off after a failed attempt; logged when it failed
+	}
+	err := at.run()
+	if err == nil {
+		*r = stopRetry{}
+		return true, nil
+	}
+
+	r.failures++
+	delay := stopRetryDelay(r.failures)
+	r.retryAt = now.Add(delay)
+	log.Printf("%s %s failed (attempt %d): %v; the instance is still running, "+
+		"next attempt in %v", at.trigger, at.action, r.failures, err, delay)
+	if r.failures == 1 {
+		a.notifier.Notify(ctx, at.failEvent,
+			fmt.Sprintf("%s %s failed, instance still running; retrying with backoff: %v", at.trigger, at.action, err))
+	}
+	return true, err
+}
+
+// idleTimeoutReached stops or hibernates the instance once the idle timeout has
+// passed, on stopWithBackoff's backoff, and announces it only once EC2 has
+// accepted the request (#948).
 func (a *Agent) idleTimeoutReached(ctx context.Context, now time.Time) {
-	if now.Before(a.idleActionRetryAt) {
-		return // backing off after a failed attempt; logged when it failed
+	if a.stopRetry.backingOff(now) {
+		return
 	}
 	log.Printf("Idle timeout reached (%v)", now.Sub(a.lastActivity()))
 
-	action, event := "stop", "idle_stopped"
-	var err error
+	event := "idle_stopped"
+	at := stopAttempt{trigger: "idle", action: "stop", failEvent: "idle_stop_failed",
+		run: func() error { return a.stop(ctx, "Idle timeout", taskproto.ExitIdleTimeout) }}
 	if a.config.HibernateOnIdle {
-		action, event = "hibernate", "idle_hibernated"
-		err = a.hibernate(ctx, taskproto.ExitIdleTimeout)
-	} else {
-		err = a.stop(ctx, "Idle timeout", taskproto.ExitIdleTimeout)
+		event = "idle_hibernated"
+		at.action = "hibernate"
+		at.run = func() error { return a.hibernate(ctx, taskproto.ExitIdleTimeout) }
 	}
-	if err == nil {
-		a.idleActionFailures = 0
+	if _, err := a.stopWithBackoff(ctx, now, at); err == nil {
 		a.notifier.Notify(ctx, event, "")
-		return
-	}
-
-	a.idleActionFailures++
-	delay := idleActionRetryDelay(a.idleActionFailures)
-	a.idleActionRetryAt = now.Add(delay)
-	log.Printf("Idle %s failed (attempt %d): %v; the instance is still running, "+
-		"next attempt in %v", action, a.idleActionFailures, err, delay)
-	if a.idleActionFailures == 1 {
-		// Once, not on every attempt: the first failure is the news.
-		a.notifier.Notify(ctx, "idle_stop_failed",
-			fmt.Sprintf("idle %s failed, instance still running; retrying with backoff: %v", action, err))
 	}
 }
 

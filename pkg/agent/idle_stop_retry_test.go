@@ -100,12 +100,12 @@ func TestSuccessfulIdleStopIsAnnounced(t *testing.T) {
 func TestIdleActionRetryDelay(t *testing.T) {
 	want := []time.Duration{5 * time.Minute, 10 * time.Minute, 20 * time.Minute, 40 * time.Minute, time.Hour, time.Hour}
 	for i, w := range want {
-		if got := idleActionRetryDelay(i + 1); got != w {
+		if got := stopRetryDelay(i + 1); got != w {
 			t.Errorf("delay after failure %d = %v, want %v", i+1, got, w)
 		}
 	}
-	if d := idleActionRetryDelay(1000); d != idleActionRetryMax {
-		t.Errorf("delay after many failures = %v, want the cap %v", d, idleActionRetryMax)
+	if d := stopRetryDelay(1000); d != stopRetryMax {
+		t.Errorf("delay after many failures = %v, want the cap %v", d, stopRetryMax)
 	}
 }
 
