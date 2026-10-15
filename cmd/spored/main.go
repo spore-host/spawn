@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -290,22 +291,42 @@ func newReloadCmd() *cobra.Command {
 }
 
 func newStatusCmd() *cobra.Command {
-	var checkComplete bool
+	var checkComplete, verbose bool
 	var outputFormat string
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show configuration and monitoring status",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return handleStatus(checkComplete, outputFormat)
+			log.SetOutput(statusLogSink(verbose, os.Stderr))
+			return runStatus(checkComplete, outputFormat)
 		},
 	}
 	cmd.Flags().BoolVar(&checkComplete, "check-complete", false,
 		"Exit with standardized codes: 0=complete 1=failed 2=running 3=error")
 	cmd.Flags().StringVarP(&outputFormat, "output", "o", "table",
-		"Output format (table, json). JSON goes to stdout only — all log/diagnostic "+
-			"lines from agent initialization stay on stderr (spawn#540).")
+		"Output format (table, json). JSON goes to stdout only (spawn#540).")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false,
+		"Print the agent's diagnostic log lines (initialization, idle checks) to stderr")
 	return cmd
+}
+
+// statusLogSink is where `spored status` sends the agent's Go `log` diagnostics.
+// Building the query agent logs its initialization and runs an idle check, which
+// printed lines such as "Not idle: CPU usage could not be measured ..." — and,
+// in "Agent initialized ...", the AWS account ID — into the middle of a status
+// display that is a human report (spawn#895). They are diagnostics of a
+// read-only query, not of the daemon (whose log is the durable record), so they
+// are discarded unless asked for.
+// runStatus is handleStatus behind a seam, so a test can drive the real status
+// command — flag parsing and log routing — without an instance to query.
+var runStatus = handleStatus
+
+func statusLogSink(verbose bool, stderr io.Writer) io.Writer {
+	if verbose {
+		return stderr
+	}
+	return io.Discard
 }
 
 func newConfigCmd() *cobra.Command {
@@ -685,11 +706,10 @@ func handleStatus(checkComplete bool, outputFormat string) error {
 // renderStatusJSON prints ONLY the JSON-encoded report to stdout — nothing
 // else. This is the machine-readable contract: a caller doing
 // json.Unmarshal(output) must get valid JSON with no leading/trailing bytes.
-// All of the agent-initialization log.Printf calls triggered by agent.NewAgent
-// above already go to log's default output (os.Stderr) unless something
-// upstream redirects them (spawn#540 — the actual leak was an explicit `2>&1`
-// in the SSH transport that cmd/status.go used to invoke this, not anything in
-// this process).
+// The agent-initialization log.Printf calls triggered by agent.NewAgent above
+// never reach stdout: they are discarded, or sent to stderr under --verbose
+// (statusLogSink, spawn#895). spawn#540's leak was an explicit `2>&1` in the
+// SSH transport that cmd/status.go used to invoke this.
 func renderStatusJSON(report *statusReport) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

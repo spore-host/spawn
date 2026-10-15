@@ -42,7 +42,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "⚠️  Could not determine account ID (STS/IMDS unavailable); continuing with audit user=unknown\n")
 	}
 	correlationID := uuid.New().String()
-	auditLog := audit.NewLogger(os.Stderr, userID, correlationID)
+	auditLog := newAuditLogger(userID, correlationID)
 
 	// Detect platform
 	plat, err := platform.Detect()

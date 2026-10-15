@@ -5,7 +5,7 @@ package aws
 import (
 	"context"
 	"fmt"
-	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -334,7 +334,7 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 				}},
 			})
 			if aerr != nil && !contains(aerr.Error(), "InvalidPermission.Duplicate") {
-				log.Printf("DCV SG %s: could not add UDP 8443 (QUIC) rule: %v — TCP transport still works", sgID, aerr)
+				fmt.Fprintf(os.Stderr, "⚠️  DCV SG %s: could not add UDP 8443 (QUIC) rule: %v — TCP transport still works\n", sgID, aerr)
 			}
 		}
 		return sgID, nil

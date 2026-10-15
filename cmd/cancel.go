@@ -10,7 +10,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/sweep"
@@ -64,7 +63,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	correlationID := uuid.New().String()
 
 	// Initialize audit logger
-	auditLog := audit.NewLogger(os.Stderr, userID, correlationID)
+	auditLog := newAuditLogger(userID, correlationID)
 	auditLog.LogOperation("cancel_sweep", cancelSweepID, "initiated", nil)
 
 	// Query sweep state

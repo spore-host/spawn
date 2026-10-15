@@ -3,7 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
+	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -67,7 +67,7 @@ func runBurst(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	// Ensure DynamoDB table exists
-	log.Printf("Ensuring DynamoDB registry table exists...")
+	fmt.Fprintln(os.Stderr, "Ensuring DynamoDB registry table exists...")
 	if err := registry.EnsureTable(ctx); err != nil {
 		return fmt.Errorf("failed to ensure registry table: %w", err)
 	}
@@ -87,7 +87,7 @@ func runBurst(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to find AMI: %w", err)
 		}
 		burstAMI = amiID
-		log.Printf("Using AMI: %s", burstAMI)
+		fmt.Fprintf(os.Stderr, "Using AMI: %s\n", burstAMI)
 	}
 
 	// Prepare launch parameters
@@ -104,7 +104,7 @@ func runBurst(cmd *cobra.Command, args []string) error {
 	}
 
 	// Launch instances
-	log.Printf("Launching %d instances to join job array %s...", burstCount, burstJobArrayID)
+	fmt.Fprintf(os.Stderr, "Launching %d instances to join job array %s...\n", burstCount, burstJobArrayID)
 	instanceIDs, err := launchBurstInstances(ctx, ec2Client, launchParams)
 	if err != nil {
 		return fmt.Errorf("failed to launch instances: %w", err)

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
 )
 
@@ -144,7 +143,7 @@ func runCapacityBlockPurchase(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	auditLog := audit.NewLogger(os.Stderr, acctID, offeringID)
+	auditLog := newAuditLogger(acctID, offeringID)
 	auditLog.LogOperationWithData("capacity_block_purchase", offeringID, "initiated",
 		map[string]interface{}{"region": cbpRegion, "upfront_fee": off.UpfrontFee, "currency": off.CurrencyCode, "account": acctID}, nil)
 

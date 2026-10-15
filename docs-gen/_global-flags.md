@@ -12,5 +12,5 @@ These apply to every `spawn` command.
 | `--output` | `-o` | string | `table` | Output format (table, json) |
 | `--profile` |  | string |  | AWS named profile (overrides SPORE_PROFILE/AWS_PROFILE and the shared config) |
 | `--region` |  | string |  | Default AWS region (overrides SPORE_REGION/AWS_REGION and the shared config) |
-| `--verbose` | `-v` | bool |  | Enable verbose output |
+| `--verbose` | `-v` | bool |  | Enable verbose output (also copies the audit trail and diagnostic log lines, normally kept in ~/.spawn/audit.log and ~/.spawn/spawn.log, to stderr) |
 
