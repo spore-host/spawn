@@ -27,20 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TTL); `none` means no TTL, `expired` means the deadline has passed, `-` a
   terminated instance.
 
-### Fixed
-
-- `go mod tidy` works again. An integration-tagged test still imported
-  `pkg/orchestrator`, which #862 deleted, so tidy failed outright; the stale test is
-  removed, and the root and `lambda/dashboard-api` modules are tidied (drops the
-  orphaned `robfig/cron` and an unused SQS SDK requirement). `make check` and CI now
-  fail when any module, root or nested, is not tidy (#907).
-
-- **No colour escapes when stdout is not a terminal** (#898). `spawn list | cat`
-  and `spawn list > file` wrote raw `\x1b[32m` sequences because only
-  `--no-color` turned colour off. Colour is now also off when stdout is a pipe or
-  file, when `NO_COLOR` is set, or when `TERM=dumb`. `--no-color` still works.
-### Changed
-
 - **`--command` logs no longer open with the shell-options notice** (#897).
   Every `/var/log/spawn-command.log` (what `spawn array logs` shows) began with
   two `spawn: shell options ... errexit is ON` lines, on every member, even when
@@ -54,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back to SSM, and the summary no longer prints your local key path.
 
 ### Fixed
+
+- `go mod tidy` works again. An integration-tagged test still imported
+  `pkg/orchestrator`, which #862 deleted, so tidy failed outright; the stale test is
+  removed, and the root and `lambda/dashboard-api` modules are tidied (drops the
+  orphaned `robfig/cron` and an unused SQS SDK requirement). `make check` and CI now
+  fail when any module, root or nested, is not tidy (#907).
+
+- **No colour escapes when stdout is not a terminal** (#898). `spawn list | cat`
+  and `spawn list > file` wrote raw `\x1b[32m` sequences because only
+  `--no-color` turned colour off. Colour is now also off when stdout is a pipe or
+  file, when `NO_COLOR` is set, or when `TERM=dumb`. `--no-color` still works.
 
 - **`--name` now sets the OS hostname, as its help always said** (#897).
   Nothing set it, so single instances, job-array members (`arr-3`) and `--mpi`
