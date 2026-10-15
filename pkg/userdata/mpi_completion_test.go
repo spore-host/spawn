@@ -129,7 +129,11 @@ exec bash -c "${cmd//$STUB_ROOT\/tmp\//$STUB_ROOT/hosts/$host/}"
 		}
 	}
 
-	cmd := exec.Command("bash", "-c", "set -e\nSLOTS=1\n"+block)
+	rank0 := filepath.Join(root, "rank0.sh")
+	if err := os.WriteFile(rank0, []byte("set -e\nSLOTS=1\n"+block), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", rank0)
 	cmd.Env = append(os.Environ(),
 		"PATH="+filepath.Join(root, "bin")+":"+os.Getenv("PATH"),
 		"STUB_ROOT="+root,
