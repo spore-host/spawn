@@ -89,6 +89,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not compile on Windows until #941, plus #1000 and #1001). Windows-only tests,
   such as spored's `sys_windows.go` readings, were previously compiled and never
   run. Tests that exercise Linux-only behaviour skip on Windows (#1002).
+- S3 uploads and downloads now use the AWS SDK's `feature/s3/transfermanager`
+  instead of its deprecated predecessor, the S3 `manager` package (#932). This
+  covers job and queue results uploaded by spored, pipeline stage inputs and
+  outputs, `spawn pipeline` result downloads, schedule and batch-queue
+  parameter files, and Windows ISO staging. Transfers behave as before.
+  transfermanager's own defaults would change them, so spawn keeps the old
+  ones: 5 MiB parts (64 MiB with 4 at a time for ISOs), single-request uploads
+  below one part, 5 parts in flight, ranged downloads, and CRC32 upload
+  checksums. One difference: an upload larger than one part is now buffered in
+  memory, a part per worker plus one, where the old uploader read the file in
+  place. That is about 35 MiB for a default transfer and about 384 MiB for an
+  ISO. The AWS SDK modules move up to the versions transfermanager requires
+  (`service/s3` v1.114).
 
 ### Deprecated
 

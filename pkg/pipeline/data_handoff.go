@@ -11,21 +11,19 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	tm "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/spore-host/spawn/pkg/s3transfer"
 )
 
 // StageDataHandler manages S3 data input/output for pipeline stages
 type StageDataHandler struct {
-	s3Client *s3.Client
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	s3Uploader *manager.Uploader
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	s3Downloader *manager.Downloader
-	bucket       string
-	prefix       string
-	pipelineID   string
-	stageID      string
+	s3Client   *s3.Client
+	s3Transfer *tm.Client
+	bucket     string
+	prefix     string
+	pipelineID string
+	stageID    string
 }
 
 // NewStageDataHandler creates a new data handler using the default AWS credential chain.
@@ -42,15 +40,12 @@ func NewStageDataHandler(ctx context.Context, bucket, prefix, pipelineID, stageI
 func NewStageDataHandlerWithAWSConfig(_ context.Context, bucket, prefix, pipelineID, stageID string, awsCfg aws.Config) (*StageDataHandler, error) {
 	s3Client := s3.NewFromConfig(awsCfg)
 	return &StageDataHandler{
-		s3Client: s3Client,
-		//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-		s3Uploader: manager.NewUploader(s3Client),
-		//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-		s3Downloader: manager.NewDownloader(s3Client),
-		bucket:       bucket,
-		prefix:       prefix,
-		pipelineID:   pipelineID,
-		stageID:      stageID,
+		s3Client:   s3Client,
+		s3Transfer: s3transfer.New(s3Client),
+		bucket:     bucket,
+		prefix:     prefix,
+		pipelineID: pipelineID,
+		stageID:    stageID,
 	}, nil
 }
 
@@ -156,10 +151,10 @@ func (h *StageDataHandler) downloadFile(ctx context.Context, key, localPath stri
 	defer func() { _ = file.Close() }()
 
 	// Download from S3
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	_, err = h.s3Downloader.Download(ctx, file, &s3.GetObjectInput{
-		Bucket: aws.String(h.bucket),
-		Key:    aws.String(key),
+	_, err = h.s3Transfer.DownloadObject(ctx, &tm.DownloadObjectInput{
+		Bucket:   aws.String(h.bucket),
+		Key:      aws.String(key),
+		WriterAt: file,
 	})
 	if err != nil {
 		return fmt.Errorf("s3 download: %w", err)
@@ -247,8 +242,7 @@ func (h *StageDataHandler) uploadFile(ctx context.Context, localPath, s3Key stri
 	defer func() { _ = file.Close() }()
 
 	// Upload to S3
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	_, err = h.s3Uploader.Upload(ctx, &s3.PutObjectInput{
+	_, err = h.s3Transfer.UploadObject(ctx, &tm.UploadObjectInput{
 		Bucket: aws.String(h.bucket),
 		Key:    aws.String(s3Key),
 		Body:   file,
@@ -314,8 +308,7 @@ func DownloadResultsToLocal(ctx context.Context, bucket, prefix, pipelineID, loc
 	}
 
 	s3Client := s3.NewFromConfig(cfg)
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	downloader := manager.NewDownloader(s3Client)
+	downloader := s3transfer.New(s3Client)
 
 	// List all stage outputs
 	resultsPrefix := fmt.Sprintf("%s/stages/", prefix)
@@ -356,10 +349,10 @@ func DownloadResultsToLocal(ctx context.Context, bucket, prefix, pipelineID, loc
 				return fmt.Errorf("create file %s: %w", localPath, err)
 			}
 
-			//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-			_, err = downloader.Download(ctx, file, &s3.GetObjectInput{
-				Bucket: aws.String(bucket),
-				Key:    aws.String(key),
+			_, err = downloader.DownloadObject(ctx, &tm.DownloadObjectInput{
+				Bucket:   aws.String(bucket),
+				Key:      aws.String(key),
+				WriterAt: file,
 			})
 			_ = file.Close()
 
