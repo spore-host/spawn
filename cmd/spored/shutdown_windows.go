@@ -3,7 +3,9 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 )
@@ -37,4 +39,10 @@ func waitForShutdown() {
 	case <-sigChan:
 		requestStop()
 	}
+}
+
+// powerOff shuts the machine down from the OS. Used to retire a Spot
+// replacement (#995); see shutdown_other.go. Fixed argv, no shell.
+func powerOff(ctx context.Context) error {
+	return exec.CommandContext(ctx, "shutdown", "/s", "/t", "0").Run()
 }
