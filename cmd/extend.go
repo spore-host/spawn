@@ -331,7 +331,7 @@ func jobArrayTagUpdater(
 // sized to its TTL (#639).
 func extensionTags(instance *aws.InstanceInfo, newTTL string, extendDuration time.Duration, now time.Time, explicitCostLimit float64, keepCostLimit bool) (map[string]string, time.Time, costLimitDecision) {
 	tags, newDeadline := computeExtendedTTLTags(instance, newTTL, extendDuration, now)
-	costDecision := decideCostLimit(instance, newDeadline, explicitCostLimit, keepCostLimit)
+	costDecision := decideCostLimit(instance, newDeadline, now, explicitCostLimit, keepCostLimit)
 	if costDecision.Changed() {
 		tags["spawn:cost-limit"] = costLimitTagValue(costDecision.NewValue)
 	}
@@ -355,8 +355,9 @@ func extensionTags(instance *aws.InstanceInfo, newTTL string, extendDuration tim
 // `config set ttl` uses — so there is exactly one place that decides what
 // spawn:ttl looks like relative to spawn:ttl-deadline.
 //
-// spawn:ttl ends up as the new deadline minus LaunchTime — the total
-// duration from launch, matching what every other reader of this tag
+// spawn:ttl ends up as the new deadline minus the ORIGINAL launch time
+// (spawn:launch-time; EC2's LaunchTime resets on every start, #992) — the
+// total duration from launch, matching what every other reader of this tag
 // (spored's pre-deadline fallback, spawn stop/hibernate's remaining-TTL
 // preservation) expects it to mean. Writing the raw extend argument here
 // instead (spawn#506) meant the tag stopped describing the instance's TTL at
@@ -369,10 +370,16 @@ func computeExtendedTTLTags(instance *aws.InstanceInfo, newTTL string, extendDur
 			newDeadline = parsed.Add(extendDuration)
 		}
 	}
+	// The original launch, not EC2's LaunchTime, which resets on every start
+	// (#992): spawn:ttl is the total from the original launch everywhere else.
+	launch := originalLaunchTime(instance)
 	if newDeadline.IsZero() {
-		// Older instance without deadline tag — best-effort from current TTL
-		if cur, err := ttlpkg.ParseDuration(instance.TTL); err == nil {
-			newDeadline = now.Add(cur).Add(extendDuration)
+		// Older instance without a deadline tag. Its current deadline is
+		// launch + spawn:ttl: that is what spored synthesizes and what the TTL
+		// reaper enforces (#990). This used to be now + spawn:ttl, which also
+		// handed back all the time already elapsed since launch.
+		if cur, err := ttlpkg.ParseDuration(instance.TTL); err == nil && cur > 0 && !launch.IsZero() {
+			newDeadline = launch.Add(cur).Add(extendDuration)
 		} else {
 			newDeadline = now.Add(extendDuration)
 		}
@@ -381,8 +388,8 @@ func computeExtendedTTLTags(instance *aws.InstanceInfo, newTTL string, extendDur
 		newDeadline = floor
 	}
 
-	if instance.LaunchTime.IsZero() {
-		// No LaunchTime to anchor spawn:ttl to (older instance) — fall back to
+	if launch.IsZero() {
+		// No launch time to anchor spawn:ttl to (older instance) — fall back to
 		// the raw argument for that tag only; spawn:ttl-deadline (the field
 		// enforcement actually reads) is unaffected either way.
 		return map[string]string{
@@ -390,7 +397,7 @@ func computeExtendedTTLTags(instance *aws.InstanceInfo, newTTL string, extendDur
 			"spawn:ttl":          newTTL,
 		}, newDeadline
 	}
-	return ttlpkg.Tags(instance.LaunchTime, newDeadline), newDeadline
+	return ttlpkg.Tags(launch, newDeadline), newDeadline
 }
 
 // validateTTL reports whether s is a valid `spawn extend` duration.
