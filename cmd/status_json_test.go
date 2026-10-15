@@ -46,7 +46,9 @@ func TestStatusJSONStdoutIsPureJSON(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	emitStatus(&stdout, &stderr, sporedJSON, sporedStderr, annotations, true)
+	// verbose=true: the one mode in which spored's diagnostics are relayed at
+	// all since #895, so it is the mode that can misroute them to stdout.
+	emitStatus(&stdout, &stderr, sporedJSON, sporedStderr, annotations, true, true)
 
 	// The whole point: stdout must parse.
 	var doc map[string]any
@@ -64,10 +66,10 @@ func TestStatusJSONStdoutIsPureJSON(t *testing.T) {
 		t.Error("spored's log.Printf diagnostics reached stdout; these are exactly the four " +
 			"lines that broke #540's reporter")
 	}
-	// And they must not be silently dropped either — a diagnostic nobody sees is
-	// its own problem.
+	// And under --verbose they must not be silently dropped either — a
+	// diagnostic nobody can ask to see is its own problem.
 	if !strings.Contains(stderr.String(), "Agent initialized") {
-		t.Error("spored's diagnostics were dropped rather than routed to stderr")
+		t.Error("spored's diagnostics were dropped under --verbose rather than routed to stderr")
 	}
 }
 
@@ -79,7 +81,7 @@ func TestStatusTableModeKeepsAnnotationsOnStdout(t *testing.T) {
 	annotations := []string{"\n  Billable: 1 x gp3 30GiB\n"}
 
 	var stdout, stderr bytes.Buffer
-	emitStatus(&stdout, &stderr, table, "", annotations, false)
+	emitStatus(&stdout, &stderr, table, "", annotations, false, false)
 
 	if !strings.Contains(stdout.String(), "my-spore") {
 		t.Errorf("the table itself must be on stdout, got:\n%s", stdout.String())
@@ -102,7 +104,7 @@ func TestStatusJSONAnnotationsGoToStderr(t *testing.T) {
 	annotations := []string{"\n  DNS: my-spore.spore.host\n", "\n  Cost limit: $5.00\n"}
 
 	var stdout, stderr bytes.Buffer
-	emitStatus(&stdout, &stderr, sporedJSON, "", annotations, true)
+	emitStatus(&stdout, &stderr, sporedJSON, "", annotations, true, false)
 
 	if got := strings.TrimSpace(stdout.String()); got != strings.TrimSpace(sporedJSON) {
 		t.Errorf("stdout carried more than spored's document:\n  got:  %q\n  want: %q\n\n"+

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -112,6 +111,12 @@ func startUpdateCheck(current string) <-chan *update.Result {
 var checkAsync = update.CheckAsync
 
 func init() {
+	// Route Go `log` diagnostics off the terminal unless --verbose (#895).
+	// OnInitialize rather than root's PersistentPreRunE: it runs after flag
+	// parsing for EVERY command, including those (`spawn app ...`) that declare
+	// their own PersistentPreRunE and so never run root's.
+	cobra.OnInitialize(configureDiagnosticLog)
+
 	// Set PersistentPreRunE to initialize i18n after flag parsing
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		ensureI18nInitialized()
@@ -130,7 +135,7 @@ func init() {
 
 	// Output format and verbosity
 	rootCmd.PersistentFlags().StringVarP(&spawnOutputFormat, "output", "o", "table", "Output format (table, json)")
-	rootCmd.PersistentFlags().BoolVarP(&spawnVerbose, "verbose", "v", false, "Enable verbose output")
+	rootCmd.PersistentFlags().BoolVarP(&spawnVerbose, "verbose", "v", false, "Enable verbose output (also copies the audit trail and diagnostic log lines, normally kept in ~/.spawn/audit.log and ~/.spawn/spawn.log, to stderr)")
 
 	// Shared spore.host config (libs/sporeconfig): AWS profile/region/account,
 	// resolved flag > env (SPORE_*/AWS_*) > ~/.config/spore/config.toml > default.
@@ -163,7 +168,7 @@ func initI18n() {
 	}
 
 	if err := i18n.Init(cfg); err != nil {
-		log.Printf("Warning: failed to initialize i18n: %v", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize i18n: %v\n", err)
 		// Continue with default English
 	}
 

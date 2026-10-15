@@ -517,7 +517,7 @@ func relaunchArrayMembers(ctx context.Context, rec arrayrec.Record, indexes []in
 	if err != nil {
 		userID = "unknown"
 	}
-	auditLog := audit.NewLogger(os.Stderr, userID, uuid.New().String())
+	auditLog := newAuditLogger(userID, uuid.New().String())
 
 	plat, err := platform.Detect()
 	if err != nil {

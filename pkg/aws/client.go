@@ -16,7 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -667,7 +667,7 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// applied here. Never fatal — a tagging failure must not fail the launch.
 	if len(launchConfig.AttachVolumes) > 0 {
 		if err := c.propagateSnapshotTagsToVolumes(ctx, ec2Client, result.Instances[0], launchConfig.AttachVolumes); err != nil {
-			log.Printf("warning: could not propagate snapshot tags to attached volumes: %v", err)
+			fmt.Fprintf(os.Stderr, "⚠️  could not propagate snapshot tags to attached volumes: %v\n", err)
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
@@ -49,7 +50,9 @@ func resolvePricePerHour(ctx context.Context, pricer onDemandPricer, cfg *Launch
 			return fmt.Errorf("cannot determine the on-demand price for %s in %s, required to enforce --cost-limit %.2f: %w",
 				cfg.InstanceType, cfg.Region, cfg.CostLimit, err)
 		}
-		log.Printf("pricing: no on-demand price available for %s in %s (%v) — launching with no cost-limit enforcement possible", cfg.InstanceType, cfg.Region, err)
+		// A warning the user must see, so stderr directly rather than the `log`
+		// diagnostics a CLI may route to a file (#895).
+		fmt.Fprintf(os.Stderr, "⚠️  pricing: no on-demand price available for %s in %s (%v) — launching with no cost-limit enforcement possible\n", cfg.InstanceType, cfg.Region, err)
 		return nil
 	}
 

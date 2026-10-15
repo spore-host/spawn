@@ -276,9 +276,9 @@ func (r *compositeResolver) fetchGitHubSpec(ctx context.Context, pr PluginRef, g
 	// (#816). gitRef is empty exactly when we are about to fetch a mutable default
 	// branch, which is the condition worth warning about regardless of owner.
 	if owner != "spore-host" {
-		log.Printf("warning: installing plugin from unverified source %s/%s — content is not signed or audited", owner, repo)
+		fmt.Fprintf(os.Stderr, "warning: installing plugin from unverified source %s/%s — content is not signed or audited\n", owner, repo)
 	} else if gitRef == "" {
-		log.Printf("warning: installing %s/%s from the default branch — this content is NOT signature-verified", owner, repo)
+		fmt.Fprintf(os.Stderr, "warning: installing %s/%s from the default branch — this content is NOT signature-verified\n", owner, repo)
 	}
 
 	if gitRef == "" {
@@ -386,7 +386,7 @@ func (r *compositeResolver) verifyRelease(ctx context.Context, pr PluginRef, pro
 // downgrades it to a warning and returns nil so resolution proceeds.
 func (r *compositeResolver) softFail(err error) error {
 	if r.insecure {
-		log.Printf("warning: skipping verification failure (--insecure): %v", err)
+		fmt.Fprintf(os.Stderr, "warning: skipping verification failure (--insecure): %v\n", err)
 		return nil
 	}
 	return err

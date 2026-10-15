@@ -68,7 +68,7 @@ func runExtend(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
 	correlationID := uuid.New().String()
-	auditLog := audit.NewLogger(os.Stderr, userID, correlationID)
+	auditLog := newAuditLogger(userID, correlationID)
 
 	// Determine if extending job array or single instance
 	if extendJobArrayID != "" || extendJobArrayName != "" {

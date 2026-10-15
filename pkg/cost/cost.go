@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -181,7 +181,7 @@ func (c *Client) onDemandPricerOrDefault(ctx context.Context) onDemandPricer {
 				// No usable AWS config: leave c.pricer nil. Every OnDemandPrice call
 				// then fails fast per-instance below, which is reported as "unpriced"
 				// rather than a fabricated rate.
-				log.Printf("cost: could not load AWS config for pricing (%v); compute costs will be reported as unpriced", err)
+				fmt.Fprintf(os.Stderr, "⚠️  cost: could not load AWS config for pricing (%v); compute costs will be reported as unpriced\n", err)
 				return
 			}
 			c.pricer = truffleaws.NewClientFromConfig(cfg)

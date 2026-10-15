@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -283,7 +282,7 @@ func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) erro
 			{Key: awssdk.String("spawn:created-by"), Value: awssdk.String("spawn reaper deploy")},
 		}},
 	}); err != nil {
-		log.Printf("reaperdeploy: could not tag bucket %s (%v) — teardown will need --force-artifacts to remove it", bucket, err)
+		fmt.Fprintf(os.Stderr, "⚠️  reaperdeploy: could not tag bucket %s (%v) — teardown will need --force-artifacts to remove it\n", bucket, err)
 	}
 	return nil
 }

@@ -146,11 +146,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	runErr := sshCmd.Run()
-	// Always forward the remote agent's log/diagnostic lines to OUR stderr —
-	// never stdout, in either output mode (#540).
-	if stderrBuf.Len() > 0 {
-		fmt.Fprint(os.Stderr, stderrBuf.String())
-	}
+	// Forward the remote agent's stderr to OUR stderr — never stdout, in either
+	// output mode (#540) — minus its Go log diagnostics unless --verbose (#895).
+	relaySporedStderr(os.Stderr, stderrBuf.String(), spawnVerbose)
 	if runErr != nil {
 		return fmt.Errorf("failed to get status: %w\nOutput: %s", runErr, stdoutBuf.String())
 	}
@@ -433,7 +431,7 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 		dnsStatusNotice(instance),
 		fsxDRAStatusNotice(instance),
 		sporedUpgradeNotice(instance.Tags["spawn:spored-version"], res.Stdout, instance.InstanceID),
-	}, jsonOut)
+	}, jsonOut, spawnVerbose)
 	return nil
 }
 
@@ -452,17 +450,18 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 // log.Printf diagnostics always go to stderr regardless of format: #540's
 // symptom was four agent log lines on stdout ahead of the output, where the
 // leading "2026" parsed as a valid JSON number and sent the decoder's error to
-// the wrong place entirely.
+// the wrong place entirely. Those diagnostics are relayed only under --verbose
+// (#895): spored no longer prints them during `status` unless asked, and older
+// sporeds' timestamped lines are filtered here; anything else spored wrote to
+// stderr, such as an error, is always relayed.
 //
 // Annotations arrive as a slice rather than being computed here, which is what
 // makes this testable at all. My first version took the *InstanceInfo and called
 // the six notice helpers itself — and the test passed WITH the routing bug
 // deliberately reintroduced, because every helper returns "" for any instance a
 // test can construct without AWS. A test whose inputs are inert cannot fail.
-func emitStatus(stdout, stderr io.Writer, sporedOut, sporedErr string, annotations []string, jsonOut bool) {
-	if sporedErr != "" {
-		fmt.Fprint(stderr, sporedErr)
-	}
+func emitStatus(stdout, stderr io.Writer, sporedOut, sporedErr string, annotations []string, jsonOut, verbose bool) {
+	relaySporedStderr(stderr, sporedErr, verbose)
 
 	fmt.Fprint(stdout, sporedOut)
 
