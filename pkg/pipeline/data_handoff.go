@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
@@ -28,7 +27,7 @@ type StageDataHandler struct {
 
 // NewStageDataHandler creates a new data handler using the default AWS credential chain.
 func NewStageDataHandler(ctx context.Context, bucket, prefix, pipelineID, stageID string) (*StageDataHandler, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
@@ -297,7 +296,7 @@ func (h *StageDataHandler) CheckCompletionMarker(ctx context.Context, stageID st
 
 // DownloadResultsToLocal downloads all pipeline results to a local directory
 func DownloadResultsToLocal(ctx context.Context, bucket, prefix, pipelineID, localDir string) error {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -44,7 +43,7 @@ type StageInfo struct {
 // NewStageRunner creates a new stage runner
 func NewStageRunner(ctx context.Context) (*StageRunner, error) {
 	// Get instance metadata
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
@@ -253,7 +252,7 @@ func downloadPipelineDefinitionFromS3(ctx context.Context, s3Key string) (*Pipel
 	bucket, key := parts[0], parts[1]
 
 	// Download from S3
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
@@ -306,7 +305,7 @@ func splitS3URL(s3URL string) []string {
 
 // IsPipelineInstance checks if the current instance is part of a pipeline
 func IsPipelineInstance(ctx context.Context) (bool, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx)
 	if err != nil {
 		return false, fmt.Errorf("load AWS config: %w", err)
 	}

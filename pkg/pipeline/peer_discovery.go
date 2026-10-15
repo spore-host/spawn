@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/spawn/pkg/tagprefix"
@@ -43,7 +42,7 @@ type PipelinePeerFile struct {
 // GeneratePeerDiscoveryFile generates the peer discovery file for a pipeline instance
 // using the default AWS credential chain.
 func GeneratePeerDiscoveryFile(ctx context.Context, pipelineID, stageID string, stageIndex, instanceIndex int, pipelineDef *Pipeline) error {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
