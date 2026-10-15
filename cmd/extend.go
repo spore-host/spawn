@@ -45,7 +45,7 @@ func init() {
 	extendCmd.Flags().Float64Var(&extendCostLimit, "cost-limit", 0,
 		"Set the instance's cost limit to this amount in USD, instead of raising it to what the new TTL needs")
 	extendCmd.Flags().BoolVar(&extendKeepCostLimit, "keep-cost-limit", false,
-		"Extend the TTL and leave the cost limit alone. The instance will still stop when the existing cap is reached, which may be before the new deadline.")
+		"Extend the TTL and leave the cost limit alone. spored will still terminate the instance when the existing cap is reached, which may be before the new deadline.")
 
 	// Register completion for instance ID argument
 	extendCmd.ValidArgsFunction = completeInstanceID
@@ -219,8 +219,8 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 	// tracked and reported, not discarded — spawn#512) is unit-testable
 	// without a real AWS client or SSH.
 	// The job-array path carries the TTL only. The cost limit fires independently
-	// (#639), so an array instance whose cap was sized to its TTL will still stop
-	// early — say so rather than leave the same trap silent. Not fixed here because
+	// (#639), so an array instance whose cap was sized to its TTL will still be
+	// terminated early — say so rather than leave the same trap silent. Not fixed here because
 	// the array path writes a RELATIVE spawn:ttl rather than a deadline, so the
 	// required cap has to be derived per instance from a different anchor; that is a
 	// separate change from the single-instance fix this accompanies.
@@ -233,7 +233,7 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 	if capped > 0 {
 		fmt.Fprintf(os.Stderr,
 			"⚠️  %d of %d instances have a cost limit, which this does NOT change.\n"+
-				"   An instance whose cap was sized to its old TTL will still stop before the new one.\n"+
+				"   An instance whose cap was sized to its old TTL will still be terminated before the new one.\n"+
 				"   Extend those individually to have the cap raised with the TTL:\n"+
 				"     spawn extend <instance-id> %s\n\n",
 			capped, len(jobArrayInstances), newTTL)

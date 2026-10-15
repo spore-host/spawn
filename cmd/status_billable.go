@@ -14,7 +14,9 @@ type billableResource struct {
 	ID   string `json:"id,omitempty"`   // instance id, volume/filesystem id
 	Note string `json:"note,omitempty"` // type/size/lifecycle, human-readable
 	USD  string `json:"cost,omitempty"` // rendered rate, e.g. "~$0.0104/hr"
-	// Capped reports whether --cost-limit governs this resource. Only compute is.
+	// Capped reports whether --cost-limit counts this resource. Compute and EBS are
+	// (pkg/agent accumulatedComputeCost, #616); FSx and EFS are not, because
+	// terminating the instance does not stop them billing.
 	Capped bool `json:"capped_by_cost_limit"`
 	// OutlivesInstance marks a resource that keeps billing after the instance is
 	// gone — the shape that produced a 1.2 TiB filesystem nobody was watching.
@@ -33,7 +35,7 @@ type billableResource struct {
 // a launch can provision an FSx filesystem (the FSx Lustre minimum is 1200 GiB,
 // ~$174/month), an EFS mount, and EBS volumes that keep billing while the instance
 // is merely stopped. In #613 the filesystem was the most expensive thing in the
-// launch and the least visible thing in the tooling: --cost-limit is compute-only,
+// launch and the least visible thing in the tooling: --cost-limit was then compute-only,
 // --estimate-only didn't mention it, terminate didn't mention it, and status didn't
 // either. Every surface a user would check was silent about the largest line item.
 func billableResources(instance *aws.InstanceInfo) []billableResource {
@@ -50,7 +52,7 @@ func billableResourcesAt(instance *aws.InstanceInfo, rate statusRate) []billable
 	tags := instance.Tags
 	var out []billableResource
 
-	// Compute — the only thing --cost-limit governs.
+	// Compute — counted by --cost-limit.
 	compute := billableResource{
 		Kind:   "instance",
 		ID:     instance.InstanceID,
@@ -74,12 +76,15 @@ func billableResourcesAt(instance *aws.InstanceInfo, rate statusRate) []billable
 	out = append(out, compute)
 
 	// EBS. The rate was resolved once at first boot and cached on the instance
-	// (spawn:ebs-hourly-cost), so this needs no DescribeVolumes.
+	// (spawn:ebs-hourly-cost), so this needs no DescribeVolumes. Counted by
+	// --cost-limit since #616 (on wall-clock time, so stopped time counts too), and
+	// reclaimed by the termination the cap triggers (DeleteOnTermination).
 	if rate := parseTagFloat(tags["spawn:ebs-hourly-cost"]); rate > 0 {
 		ebs := billableResource{
-			Kind: "ebs",
-			Note: "root/data volumes",
-			USD:  fmt.Sprintf("~$%.4f/hr", rate),
+			Kind:   "ebs",
+			Note:   "root/data volumes",
+			USD:    fmt.Sprintf("~$%.4f/hr", rate),
+			Capped: true,
 		}
 		if instance.State == "stopped" || instance.State == "stopping" {
 			// The quiet surprise: "stopped to save money" still bills storage, and
@@ -149,7 +154,6 @@ func renderBillableResourcesAt(instance *aws.InstanceInfo, rate statusRate) stri
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nBillable resources:\n")
-	uncapped := false
 	outlives := false
 	for _, r := range res {
 		id := r.ID
@@ -157,17 +161,14 @@ func renderBillableResourcesAt(instance *aws.InstanceInfo, rate statusRate) stri
 			id = "—"
 		}
 		fmt.Fprintf(&b, "  %-9s %-22s %-24s %s\n", r.Kind, id, r.USD, r.Note)
-		if !r.Capped {
-			uncapped = true
-		}
 		if r.OutlivesInstance {
 			outlives = true
 		}
 	}
-	if uncapped {
-		fmt.Fprintf(&b, "  ⚠️  --cost-limit counts compute + EBS, and refuses a launch whose storage exceeds it\n")
-		fmt.Fprintf(&b, "      up front — but it cannot RECLAIM storage that outlives the instance.\n")
-	}
+	// Always said: the block only renders when there is storage beside compute, and
+	// the cap's reach over storage is the thing a reader of this block needs.
+	fmt.Fprintf(&b, "  ⚠️  --cost-limit counts compute + EBS, and refuses a launch whose storage exceeds it\n")
+	fmt.Fprintf(&b, "      up front — but it cannot RECLAIM storage that outlives the instance.\n")
 	if outlives {
 		fmt.Fprintf(&b, "      Rows marked as outliving the instance keep billing after it is gone:\n")
 		fmt.Fprintf(&b, "      'spawn fsx list' / 'spawn orphans' to find them, and delete explicitly.\n")

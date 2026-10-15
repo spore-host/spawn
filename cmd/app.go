@@ -701,6 +701,7 @@ RestartSec=10
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target

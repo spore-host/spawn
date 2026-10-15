@@ -110,7 +110,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from one place, as `spawn collect-results` and `spawn sweep collect` do, and a
   test fails whenever a deprecated command has a flag its named replacement does
   not accept with the same meaning (#935).
-
 - `go mod tidy` works again. An integration-tagged test still imported
   `pkg/orchestrator`, which #862 deleted, so tidy failed outright; the stale test is
   removed, and the root and `lambda/dashboard-api` modules are tidied (drops the
@@ -297,6 +296,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now fails on findings and skips (with a message) only when the binary is
   absent, and CI runs a pinned, checksum-verified staticcheck 2026.2.2 on
   every push and PR. CI previously ran no linter.
+- **`spored status` reports cost-limit headroom the way the cap enforces it**
+  (#959). Since #616 `--cost-limit` counts compute plus EBS (EBS on wall-clock time
+  since launch, including while stopped), but the `Cost limit:` line and
+  `cost_limit_used` / `cost_limit_remaining` in `-o json` were still computed from
+  compute alone, so they overstated the remaining budget — most on a stopped
+  instance, whose EBS kept accruing while the displayed figure stood still — and
+  the cap could fire before "remaining" reached zero. Both now read the same
+  figure the enforcement terminates on, and the line says `compute + EBS` instead
+  of `compute-only`.
+- **`spawn status -o json` marks EBS as `capped_by_cost_limit: true`** (#959). It
+  said `false`, contradicting both the enforcement and the human footer on the
+  same view. FSx and EFS stay `false`: terminating the instance does not stop them
+  billing.
+- **`launch --cost-limit` and `extend --keep-cost-limit` help say the instance is
+  terminated at the cap, not stopped** (#959), and `--cost-limit` says it counts
+  compute + EBS. The generated reference (`docs-gen/`) is regenerated to match.
 
 ### Security
 
@@ -354,6 +369,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it now prints `Network: unknown (single sample; assuming active)`, the same
   way the CPU line does. The JSON output gains `network_measured` and
   `network_unknown`.
+- **The spored systemd unit written for web-app instances (`spawn app`) now sets
+  `NoNewPrivileges=true`** (#959), like the canonical unit, the DCV unit and
+  `scripts/spored.service` already did. spored runs as root and needs no privilege
+  escalation; the setting stops a hook or job it spawns from gaining privileges
+  through a setuid binary or file capabilities.
 
 ## [0.128.2] - 2026-10-13
 

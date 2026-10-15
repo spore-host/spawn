@@ -719,20 +719,12 @@ func (a *Agent) writeComputeSecondsTag(ctx context.Context) {
 	a.flushComputeSecondsTag(ctx)
 }
 
-// flushComputeSecondsTag writes the spawn:compute-seconds tag NOW, bypassing the
-// throttle in writeComputeSecondsTag. It is called on graceful shutdown (see
-// Cleanup) so an in-place spored upgrade (`spawn upgrade-spored`, #234) — which
-// stops the daemon to swap the binary — doesn't discard the up-to-5-minutes of
-// compute time accumulated since the last throttled write. The next spored boot
-// reads this tag into computeSecondsBase, so the compute clock continues across
-// the restart rather than losing the tail.
-// accumulatedComputeCost is the compute-only spend the cost limit is enforced
-// against: the on-demand rate × TOTAL compute time (base + this boot's uptime).
-// Using the total — not just this boot — is what stops the cost clock resetting
-// on a stop/start, mirroring how TTL uses an absolute deadline. EBS/storage is
-// deliberately excluded (the --cost-limit flag is documented as compute-only).
 // accumulatedComputeCost is what --cost-limit is measured against: the instance's
 // compute plus its EBS (#616).
+//
+// Compute is the on-demand rate × TOTAL compute time (base + this boot's uptime).
+// Using the total — not just this boot — is what stops the cost clock resetting on
+// a stop/start, mirroring how TTL uses an absolute deadline.
 //
 // EBS is included because --cost-limit is a TOTAL ceiling, and because terminating
 // actually stops it — spawn's volumes carry DeleteOnTermination, so the bill ends with
@@ -764,6 +756,22 @@ func (a *Agent) accumulatedComputeCost() float64 {
 	return cost
 }
 
+// CostLimitSpend is the spend --cost-limit is enforced against, exactly as the
+// enforcement loop measures it (accumulatedComputeCost: compute + EBS, #616).
+// `spored status` reports cost-limit used/remaining from this rather than
+// re-deriving it, so the headroom it shows is the headroom that terminates the
+// instance (#959).
+func (a *Agent) CostLimitSpend() float64 {
+	return a.accumulatedComputeCost()
+}
+
+// flushComputeSecondsTag writes the spawn:compute-seconds tag NOW, bypassing the
+// throttle in writeComputeSecondsTag. It is called on graceful shutdown (see
+// Cleanup) so an in-place spored upgrade (`spawn upgrade-spored`, #234) — which
+// stops the daemon to swap the binary — doesn't discard the up-to-5-minutes of
+// compute time accumulated since the last throttled write. The next spored boot
+// reads this tag into computeSecondsBase, so the compute clock continues across
+// the restart rather than losing the tail.
 func (a *Agent) flushComputeSecondsTag(ctx context.Context) {
 	a.lastComputeTagWrite = time.Now()
 	total := a.TotalComputeSeconds()
