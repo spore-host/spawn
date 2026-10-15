@@ -114,7 +114,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current spawn workflow runs this command: `spawn pipeline launch` stage
   instances run their command directly. #910 proposes removing the stage
   runner or wiring it in.
-### Fixed
 
 - **`spawn status` costs a spot instance at its spot price** (#896). The
   instance row said `(spot)` but every figure used the on-demand rate, about
