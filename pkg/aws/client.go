@@ -1040,7 +1040,7 @@ func (c *Client) Terminate(ctx context.Context, region, instanceID string) error
 	ec2Client := c.regionalEC2(region)
 
 	err := spotrequest.Terminate(ctx, ec2Client, region, instanceID, spotrequest.Strict, func(msg string) {
-		log.Printf("warning: %s", msg)
+		fmt.Fprintf(os.Stderr, "⚠️  %s\n", msg)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to terminate instance: %w", err)
