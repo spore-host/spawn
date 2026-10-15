@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/plugin"
 )
 
 // These tests run the generated bootstrap under bash with a stubbed spored, for
@@ -216,6 +218,29 @@ func TestSpotReplacementCheckIsInsideTheCommandSubshell(t *testing.T) {
 	}
 	if guard < open || guard > su {
 		t.Fatal("the Spot replacement check is not inside the --command subshell ahead of the command")
+	}
+}
+
+// spored reads /etc/spawn/plugins.json once, at startup, so the bootstrap
+// writes it before starting spored (#1023). The post-spored check costs an EC2
+// round trip and can exit the script, so placed ahead of the declarations it
+// would make spored miss them on every original instance.
+func TestSpotReplacementStopComesAfterPluginDeclarations(t *testing.T) {
+	script, err := BuildLinuxBootstrap(BootstrapConfig{
+		Username: "tester",
+		Plugins:  []plugin.Declaration{{Ref: "spore-host/jupyter"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugins := strings.Index(script, "cat > /etc/spawn/plugins.json")
+	stop := strings.Index(script, "\nif spawn_is_spot_replacement; then")
+	if plugins < 0 || stop < 0 {
+		t.Fatalf("markers not found (plugins=%d stop=%d)", plugins, stop)
+	}
+	if stop < plugins {
+		t.Error("the Spot replacement stop runs before the plugin declarations are written, " +
+			"so the check's latency makes spored start without them")
 	}
 }
 

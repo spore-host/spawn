@@ -62,9 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deciding to retire it. The Linux bootstrap now asks the new
   `spored is-spot-replacement` (exit 0 replacement, 1 not, 2 unknown) before it
   starts `--command` or `spawn task` work, and again after spored starts. On a
-  replacement it skips the command and stops there, so storage mounts, plugins,
-  the container, custom user data and the MPI, batch-queue and pool-worker
-  scripts don't run either; spored then retires the instance. Anything short of
+  replacement it skips the command and stops there, so storage mounts, the
+  container, custom user data and the MPI, batch-queue and pool-worker scripts
+  don't run either; spored then retires the instance. Declared `--plugin`s are
+  still written before the stop, as spored reads them only at startup. Anything short of
   a definite "replacement" runs the workload as before: an unreadable answer is
   retried for up to a minute (not at all on an IAM refusal), then the workload
   starts. Holding instead would leave every original stuck whenever EC2 or IMDS
