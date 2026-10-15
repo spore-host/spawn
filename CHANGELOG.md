@@ -183,6 +183,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a coloured `running` cell no longer pushes its column wider than its
   header. English output is unchanged.
 
+- **Idle-stop never fired on instances whose network interface is not named
+  `eth0` or `ens*`** (#919). On an m8a with Amazon Linux 2023 the NIC is
+  `enp39s0`, which spored did not recognise, so it read zero bytes on every
+  check, took every check for the first one, and assumed the instance was
+  active. `--idle-timeout` therefore did nothing, and the log reported
+  `Not idle: Network traffic 1000000 bytes` once a minute. spored now counts
+  every physical interface, whatever it is called, and skips loopback, Docker,
+  veth, bridge and VPN interfaces. When it cannot read any interface it logs one
+  warning saying idle-stop will not trigger, rather than reporting invented
+  traffic. The Prometheus network metric had the same filter and now reports
+  the real interface.
+- **`spawn status` and `spored status` no longer print `Network: 976.6 KB/min`
+  when nothing was measured** (#919). That figure was the "assume active"
+  placeholder. A one-shot status has no earlier sample to compare against, so
+  it now prints `Network: unknown (single sample; assuming active)`, the same
+  way the CPU line does. The JSON output gains `network_measured` and
+  `network_unknown`.
+
 ## [0.128.2] - 2026-10-13
 
 ### Deprecated

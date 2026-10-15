@@ -250,3 +250,32 @@ func TestStatusTable_UnmeasuredCPUIsNotPrintedAsAValue(t *testing.T) {
 		t.Errorf("a real measurement was not printed:\n%s", out)
 	}
 }
+
+// The network line is CPU's twin: an unmeasured reading is the assume-active
+// placeholder, which used to print as "976.6 KB/min" of traffic on an idle box
+// and made a broken idle check look like a busy instance (#919).
+func TestStatusTable_UnmeasuredNetworkIsNotPrintedAsAValue(t *testing.T) {
+	report := newTestReport(t)
+	report.NetworkMeasured = false
+	report.NetworkBytesPerMin = 1000000 // the assume-active placeholder
+	report.NetworkUnknown = "single sample"
+
+	out := captureStdout(t, func() {
+		if err := renderStatusTable(report); err != nil {
+			t.Fatalf("renderStatusTable: %v", err)
+		}
+	})
+	if strings.Contains(out, formatBytes(1000000)) {
+		t.Errorf("an unmeasured placeholder was printed as traffic:\n%s", out)
+	}
+	if !strings.Contains(out, "Network:          unknown (single sample") {
+		t.Errorf("output does not mark the network reading unknown:\n%s", out)
+	}
+
+	report.NetworkMeasured = true
+	report.NetworkBytesPerMin = 4096
+	out = captureStdout(t, func() { _ = renderStatusTable(report) })
+	if !strings.Contains(out, "Network:          "+formatBytes(4096)+"/min") {
+		t.Errorf("a real measurement was not printed:\n%s", out)
+	}
+}

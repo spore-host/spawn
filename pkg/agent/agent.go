@@ -63,6 +63,8 @@ type Agent struct {
 	liveClock             bool      // TotalComputeSeconds counts real running time (daemon, or a query that adopted its clock, #896)
 	prevNetRx             int64     // /proc/net/dev RX bytes at last getNetworkBytes call
 	prevNetTx             int64     // /proc/net/dev TX bytes at last getNetworkBytes call
+	netSampled            bool      // prevNetRx/prevNetTx hold a real sample (a counter can legitimately be 0, #919)
+	netUnknownWarned      bool      // "network cannot be measured" logged once, not every tick (#919)
 	idleWarned            bool      // send idle_warning notification only once
 
 	// DCV auth token verifier (embedded HTTP server for seamless browser auth)
@@ -1225,8 +1227,13 @@ func (a *Agent) isIdle() bool {
 		return false
 	}
 
-	// Check network traffic
-	networkBytes := a.getNetworkBytes()
+	// Check network traffic. An unmeasured reading is the conservative
+	// assume-active value, exactly as for CPU above, and is logged as what it is.
+	networkBytes, netMeasured, netWhy := a.networkBytes()
+	if !netMeasured {
+		log.Printf("Not idle: network traffic could not be measured (%s); assuming active", netWhy)
+		return false
+	}
 	if networkBytes > 100000 { // 100KB/min threshold — filters out spored's own EC2/IMDS API calls (~25KB/min)
 		log.Printf("Not idle: Network traffic %d bytes", networkBytes)
 		return false
@@ -1324,26 +1331,62 @@ func (a *Agent) cpuUsage() (float64, bool) {
 	if deltaTotal == 0 {
 		// No jiffies elapsed between samples. Unknown, and now reported as such
 		// AND as "active" rather than as 0% — consistent with the two branches
-		// above, and with getNetworkBytes, which returns its assume-active value
+		// above, and with networkBytes, which returns its assume-active value
 		// on an unreadable counter.
 		return 100.0, false
 	}
 	return 100.0 - (float64(deltaIdle)/float64(deltaTotal))*100.0, true
 }
 
-func (a *Agent) getNetworkBytes() int64 {
-	// OS-specific cumulative counters; compute delta since last call rather than
-	// cumulative-since-boot. A negative reading means "unknown" → assume active.
-	rx, tx := sysReadNetworkBytes()
+// readNetworkBytes is the network-counter source, indirected through a var for
+// the same reason as readCPUTimes: the darwin stub always says "unknown", so the
+// delta logic below is otherwise untestable where development happens.
+var readNetworkBytes = func() (rx, tx int64) { return sysReadNetworkBytes() }
+
+// networkAssumedActive is what an unmeasured network reading reports: far over
+// the 100KB/min idle threshold, so "could not tell" never reads as "idle".
+const networkAssumedActive int64 = 1000000
+
+// networkBytes returns network bytes since the previous sample and whether that
+// is a real MEASUREMENT. When measured is false the value is the conservative
+// networkAssumedActive and why says what was missing.
+//
+// The semantics of "unknown" are the CPU check's (cpuUsage, #734): the idle
+// decision treats it as active, and status displays it as unknown rather than as
+// a number. That is the safe direction for a check that stops instances, and the
+// cost of it is the reason for the rest of this function: an unknown that never
+// resolves disables idle-stop, so it must be rare and it must be loud.
+//
+// It used to be neither (#919). The first-sample test was prev == 0, and a host
+// whose interface the old name filter did not recognise read 0 bytes on every
+// call, so EVERY call was a "first call" and returned the assume-active value —
+// indistinguishable in the log from 976.6 KB/min of real traffic. Now the first
+// sample is tracked explicitly, a counter that cannot be read is reported as
+// unknown (and warned about once), and the reader picks interfaces by structure
+// (readNetDevBytes) so the unreadable case is genuinely exceptional.
+func (a *Agent) networkBytes() (bytes int64, measured bool, why string) {
+	rx, tx := readNetworkBytes()
 	if rx < 0 || tx < 0 {
-		return 1000000 // can't read; assume active
+		const reason = "no physical network interface counters could be read"
+		if !a.netUnknownWarned {
+			a.netUnknownWarned = true
+			log.Printf("WARNING: %s; network traffic is treated as active, so idle-stop "+
+				"will not trigger on this host (#919)", reason)
+		}
+		return networkAssumedActive, false, reason
 	}
-	prevRx, prevTx := a.prevNetRx, a.prevNetTx
-	a.prevNetRx, a.prevNetTx = rx, tx
-	if prevRx == 0 && prevTx == 0 {
-		return 1000000 // First call — no delta; assume active
+	prevRx, prevTx, sampled := a.prevNetRx, a.prevNetTx, a.netSampled
+	a.prevNetRx, a.prevNetTx, a.netSampled = rx, tx, true
+	if !sampled {
+		return networkAssumedActive, false, "single sample"
 	}
-	return (rx - prevRx) + (tx - prevTx)
+	delta := (rx - prevRx) + (tx - prevTx)
+	if delta < 0 {
+		// The counted interfaces changed (an ENI detached) or a counter reset. The
+		// delta means nothing, and a negative one would read as idle.
+		return networkAssumedActive, false, "interface counters went backwards"
+	}
+	return delta, true, ""
 }
 
 func (a *Agent) getDiskIO() int64 {
@@ -2075,7 +2118,15 @@ func (a *Agent) GetCPUUsage() float64 {
 }
 
 func (a *Agent) GetNetworkBytes() int64 {
-	return a.getNetworkBytes()
+	bytes, _, _ := a.networkBytes()
+	return bytes
+}
+
+// GetNetworkBytesMeasured returns network bytes since the previous sample,
+// whether that is a real measurement, and if not, why. Callers that DISPLAY the
+// number should use this, so an assumption is not printed as traffic (#919).
+func (a *Agent) GetNetworkBytesMeasured() (int64, bool, string) {
+	return a.networkBytes()
 }
 
 func (a *Agent) IsIdle() bool {

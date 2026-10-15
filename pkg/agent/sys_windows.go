@@ -67,9 +67,11 @@ func sysReadCPUTimes() (idle, total int64, err error) {
 	return idle, total, nil
 }
 
-// sysReadNetworkBytes returns cumulative RX+TX bytes across adapters.
+// sysReadNetworkBytes returns cumulative RX+TX bytes across adapters, or -1, -1
+// ("unknown") when there are none: the sum of nothing is $null, which [int64]
+// turns into a 0 that reads as a measured "no traffic" (#919).
 func sysReadNetworkBytes() (rx, tx int64) {
-	total, ok := psInt64(`[int64]((Get-NetAdapterStatistics | Measure-Object -Property ReceivedBytes -Sum).Sum) + [int64]((Get-NetAdapterStatistics | Measure-Object -Property SentBytes -Sum).Sum)`)
+	total, ok := psInt64(`$s = @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue); if ($s.Count -eq 0) { 'none' } else { [int64](($s | Measure-Object -Property ReceivedBytes -Sum).Sum) + [int64](($s | Measure-Object -Property SentBytes -Sum).Sum) }`)
 	if !ok {
 		return -1, -1
 	}

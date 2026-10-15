@@ -21,38 +21,19 @@ func (a *Agent) GetCPUUsageContext(ctx context.Context) (float64, error) {
 	return a.getCPUUsage(), nil
 }
 
-// GetNetworkStats returns network statistics
+// GetNetworkStats returns network statistics summed over the physical
+// interfaces. It returns an error, and so no sample, when none is found: a zero
+// counter labelled "eth0" on a host whose NIC is enp39s0 is what this reported
+// before #919.
 func (a *Agent) GetNetworkStats(ctx context.Context) (metrics.NetworkStats, error) {
-	data, err := os.ReadFile("/proc/net/dev")
+	rx, tx, ifaces, err := readNetDevBytes("/proc/net/dev", "/sys/class/net")
 	if err != nil {
 		return metrics.NetworkStats{}, err
 	}
-
-	lines := strings.Split(string(data), "\n")
-	var rxBytes, txBytes uint64
-	var iface string
-
-	for _, line := range lines {
-		if strings.Contains(line, "eth0") || strings.Contains(line, "ens") {
-			fields := strings.Fields(line)
-			if len(fields) >= 10 {
-				iface = strings.TrimSuffix(fields[0], ":")
-				rx, _ := strconv.ParseUint(fields[1], 10, 64)
-				tx, _ := strconv.ParseUint(fields[9], 10, 64)
-				rxBytes += rx
-				txBytes += tx
-			}
-		}
-	}
-
-	if iface == "" {
-		iface = "eth0"
-	}
-
 	return metrics.NetworkStats{
-		BytesReceived: rxBytes,
-		BytesSent:     txBytes,
-		Interface:     iface,
+		BytesReceived: uint64(rx),
+		BytesSent:     uint64(tx),
+		Interface:     strings.Join(ifaces, ","),
 	}, nil
 }
 
