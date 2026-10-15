@@ -70,6 +70,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs every writer and checks what reached IAM, and a document still carrying
   the variable is refused before it is sent.
 
+### Security
+
+- **The SAM-deployed TTL reaper's `ScanSelf=true` policy no longer grants
+  unconditioned `ssm:SendCommand`** (#985). `lambda/ttl-reaper/template.yaml`
+  kept its own copy of the scan-self permissions, and it had drifted from the
+  one `spawn reaper deploy` uses: `ssm:SendCommand` was allowed on every
+  resource with no condition, which is root shell on any SSM-managed instance
+  in the account. It is now limited to `spawn:managed=true` instances and the
+  `AWS-RunShellScript` document, as #818 already did elsewhere. The same copy
+  also lacked the network-resource sweep's grants (#685), so that sweep hit
+  AccessDenied every cycle in a `ScanSelf=true` deployment; they are added.
+  A new gate parses the template and the cross-account role and fails unless
+  every statement matches `pkg/reaperiam` in actions, resources and
+  conditions. The cross-account role also drops `ec2:DescribeTags`, which the
+  reaper never calls. Production runs `ScanSelf=false`, so the operated
+  reaper's own role was not affected.
+
 ## [0.130.0] - 2026-10-16
 
 ### Added

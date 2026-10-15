@@ -20,6 +20,15 @@
 // which does not — so a reaper deployed to scan its own account could terminate
 // instances but would silently fail to delete the orphaned filesystem that #613 was
 // reported for. Scan-self is exactly the mode a self-hosted reaper uses.
+//
+// # The other two copies
+//
+// The SAM template's ScanSelf branch and the cross-account role
+// (deployment/cloudformation/ttl-reaper-cross-account-role.yaml) are YAML and cannot
+// import this package, so they are copies. template_drift_test.go parses both and
+// fails unless every statement equals one here in actions, resources and conditions
+// (#985, after the SAM copy was found missing the #685 grants and still granting
+// ssm:SendCommand unconditioned). Change this file first, then mirror it.
 package reaperiam
 
 import (
@@ -67,7 +76,7 @@ func ScanSelfStatements() []Statement {
 			// to see every instance to decide which are spawn's.
 			//
 			// NOT ec2:DescribeTags, which the CFN template and the cross-account role
-			// both grant: the reaper reads tags from the DescribeInstances response
+			// both used to grant (removed in #985): the reaper reads tags from the DescribeInstances response
 			// (tagMap(inst.Tags)) and never calls DescribeTags. Harmless there, but
 			// an unused grant is a leftover, and
 			// TestPolicyGrantsNothingTheReaperDoesNotCall keeps this list honest in
