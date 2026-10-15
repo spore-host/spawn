@@ -312,6 +312,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`launch --cost-limit` and `extend --keep-cost-limit` help say the instance is
   terminated at the cap, not stopped** (#959), and `--cost-limit` says it counts
   compute + EBS. The generated reference (`docs-gen/`) is regenerated to match.
+- **A secret-scan finding on one branch no longer fails every open PR's Secret
+  Scan** (#1024). The gitleaks job checked out with full history, which fetches
+  every branch, and then scanned all of them, so a hit on one PR's branch (real or
+  false positive) turned every other PR red until that branch was force-pushed.
+  The scan now covers exactly the history of the commit under test: on a pull
+  request, main plus every commit in the PR (a secret added and later removed in
+  the PR is still caught); on a push or the weekly run, main's full history.
+  `workflow_secret_scan_test.go` fails if the scan loses its HEAD scope or its
+  full-history checkout.
 
 ### Security
 
