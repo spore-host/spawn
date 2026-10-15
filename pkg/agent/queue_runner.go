@@ -362,6 +362,14 @@ func (r *QueueRunner) uploadJobResults(jobID string, resultPaths []string) error
 		}
 
 		for _, filePath := range matches {
+			// Validate each match too: the pattern check sees only the pattern,
+			// so a wildcard ("/e*c/passwd", C:\Win*\...) or a symlink or
+			// junction under an allowed directory would otherwise reach a system
+			// file (#1000).
+			if err := security.ValidatePathForReading(filePath); err != nil {
+				return fmt.Errorf("invalid result path %s (from pattern %s): %w", filePath, pattern, err)
+			}
+
 			// Upload to S3
 			s3Key := fmt.Sprintf("%s/jobs/%s/%s",
 				r.config.ResultS3Prefix, jobID, filepath.Base(filePath))
