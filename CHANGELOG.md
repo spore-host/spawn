@@ -74,6 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers on its first call, but it does add an EC2 round trip before the
   post-spored steps of every launch. The Windows bootstrap starts no workload
   (it doesn't run `--command` at all), so it has nothing to gate.
+- **The `spot_replacement_retired` notification now names the original
+  instance** (#1007). It carries `original_instance_id`. spore-bot uses that
+  field to reach the users registered for the original. Nobody registers the
+  replacement's own id, so without it the bot could post only to channel
+  webhooks.
 
 ### Fixed
 

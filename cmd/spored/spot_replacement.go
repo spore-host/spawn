@@ -104,7 +104,9 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // replacement has no tags of its own.
 func replacementNotifier(identity *provider.Identity) func(context.Context, spotrequest.Detection) {
 	return func(ctx context.Context, d spotrequest.Detection) {
-		n := agent.NewNotifier(notifyConfigFromTags(d.RequestTags), identity)
+		// Name the original: the bot DMs the users registered for it, and
+		// nobody registered this replacement's id (#1007).
+		n := agent.NewNotifier(notifyConfigFromTags(d.RequestTags), identity).WithOriginalInstance(d.OriginalInstanceID)
 		n.Notify(ctx, "spot_replacement_retired", fmt.Sprintf(
 			"replacement of %s launched by leaked Spot request %s; cancelling the request and shutting down",
 			d.OriginalInstanceID, d.RequestID))
