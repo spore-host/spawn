@@ -653,11 +653,13 @@ func statusComputeRate(config *provider.Config, isSpot bool) (float64, string) {
 // isSpot is whether the instance runs on the spot market (IMDS
 // instance-life-cycle); it decides which rate the cost figures use.
 func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provider.Identity, isSpot bool) *statusReport {
-	// Order matters and is now deliberate: IsIdle consumes a CPU sample, so the
-	// report's own read must come AFTER it and be reused, not taken fresh. Two
-	// calls microseconds apart is what produced `Not idle: CPU usage 100.00%`
-	// beside `CPU: 0.0%` in one status output (#734).
-	isIdle := ag.IsIdle()
+	// One evaluation, and every figure below is read from it: the decision and
+	// the readings come from the same samples. Two samples microseconds apart is
+	// what produced `Not idle: CPU usage 100.00%` beside `CPU: 0.0%` in one
+	// status output (#734). This process owns its Agent and runs no monitor
+	// loop, so it is the sampler here (#952); a one-shot has one sample, so the
+	// counter readings are "unknown (single sample)".
+	isIdle := ag.EvaluateIdle()
 	cpuPercent, cpuMeasured := ag.GetCPUUsageMeasured()
 	netBytes, netMeasured, netUnknown := ag.GetNetworkBytesMeasured()
 	diskBytes, diskMeasured, diskUnknown := ag.GetDiskIOBytesMeasured()

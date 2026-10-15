@@ -461,6 +461,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and SSM Session Manager shells. Output from a job does not count as input.
   This also stops spored relying on the column layout of `w`, which differs
   between distributions.
+- **A Prometheus scrape could make a busy instance look idle and get it
+  stopped** (#952). With `observability.metrics.enabled`, every scrape ran the
+  idle check and read the CPU counter itself, at the same time as spored's
+  once-a-minute check. That was a data race, and it also reset the starting
+  point of the next measurement, so the next check only counted the traffic
+  and disk I/O since the scrape. With a 15-second scrape interval, 200 KB a
+  minute of real traffic could read as under the 100 KB threshold. Now only
+  the once-a-minute check takes measurements, and the metrics endpoint,
+  `spored status` and the webhooks read its last result. Every check also
+  measures CPU, network and disk on every tick. Before, a check that stopped
+  early (on an active session or busy CPU) skipped the later counters, so the
+  next reading covered several minutes. The scrape no longer adds a
+  `Not idle: ...` line to the log each time, and the `spawn_cpu_usage_percent`
+  metric is omitted, not reported as 100%, until the first measurement.
 
 ## [0.130.0] - 2026-10-16
 
