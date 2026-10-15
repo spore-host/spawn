@@ -103,7 +103,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain when its config names none. `spored run-queue` (`spawn launch
   --batch-queue`) had the same defect in its results uploader and now takes the
   instance's region from IMDS when nothing else sets one.
-### Fixed
 
 - **`spored run-pipeline-stage`'s S3 and EC2 clients now have a region**
   (#906). The pipeline stage runner's clients (stage data handoff, peer
