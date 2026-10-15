@@ -1,0 +1,12 @@
+# Packages the Windows CI job (`scripts/windows-tests.sh`) does NOT test.
+#
+# One package per line: the import path relative to the module root, then
+# whitespace, then the reason. Every reason must cite an issue (#NNN) so a skip
+# is a tracked debt, not a decision nobody remembers making.
+# windows_ci_test.go enforces that, that every entry names a real package, and
+# that no package holding a Windows-only test is ever listed here.
+#
+# Everything NOT listed is tested on windows-latest by default: a new package is
+# included automatically, and has to be added here deliberately to escape.
+pkg/service    #925: test files do not compile on Windows (syscall.SysProcAttr.Setpgid, syscall.Kill); fixed by #941
+pkg/taskproto  #925: test files do not compile on Windows (syscall.Stat_t); fixed by #941

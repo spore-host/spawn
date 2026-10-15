@@ -18,7 +18,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -275,6 +275,34 @@ jobs:
       - name: Build-tag compile gate
         run: make check-build-tags
 
+  # Unit tests on Windows (#971). spawn ships a Windows spored (CPU, network,
+  # disk and kernel-clock readings in pkg/agent/sys_windows.go), and until this
+  # job its Windows-only tests were compiled at best and never run, so bugs that
+  # only show at runtime (WMI/perf-counter names, PowerShell output parsing, API
+  # availability) were found by reading code, if at all (#919, #937).
+  #
+  # Every root-module package runs EXCEPT those listed, with a reason and an
+  # issue, in scripts/windows-test-skips.txt. windows_ci_test.go gates that this
+  # job exists, runs on Windows, sets no AWS credentials, and covers every
+  # package holding a Windows-only test, so it cannot pass vacuously.
+  #
+  # No AWS: -short, and no credentials are set here. Nested modules (lambda/*,
+  # scripts) are Linux-deployed and are not run on Windows.
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.9'
+
+      - name: Unit tests (Windows)
+        shell: bash
+        run: scripts/windows-tests.sh
+
   # Tier 0 E2E — the real spawn binary driven against the Substrate AWS
   # emulator. No AWS account/credentials; exercises the full CLI surface
   # (args → cobra → AWS client → Substrate) and asserts JSON, exit codes, and
@@ -283,7 +311,7 @@ jobs:
     name: E2E Tier 0 (Substrate)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
