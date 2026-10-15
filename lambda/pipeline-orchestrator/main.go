@@ -40,7 +40,7 @@ const (
 	// defaultStageRegion is where a stage with no region launches. The launch,
 	// the user data and the cleanup all go through stageRegion so they agree;
 	// cleanup used to hardcode it while launch used the Lambda's own region.
-	defaultStageRegion = "us-east-1"
+	defaultStageRegion = pipeline.DefaultStageRegion
 
 	// defaultStageTimeout bounds a stage command that declares no timeout.
 	defaultStageTimeout = time.Hour
@@ -384,24 +384,30 @@ func setupPipelineResources(ctx context.Context, state *pipeline.PipelineState, 
 // each stage's region, where they do not exist. Each is recorded in state as
 // soon as it exists, so a failure part way is still cleaned up.
 func setupNetworkResources(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline) error {
-	// The security group goes on every stage instance (buildStageRunInstancesInput),
-	// so it is needed in every stage region.
-	if pipelineDef.HasStreamingStages() {
-		for _, region := range stageRegions(pipelineDef, func(*pipeline.Stage) bool { return true }) {
-			if _, ok := state.SecurityGroups[region]; ok {
-				continue
-			}
-			log.Printf("Pipeline has streaming stages, creating security group in %s...", region)
-			client, err := netEC2ForRegion(ctx, region)
-			if err != nil {
-				return fmt.Errorf("ec2 client for %s: %w", region, err)
-			}
-			sgID, err := createStreamingSecurityGroup(ctx, client, state, region)
-			if err != nil {
-				return fmt.Errorf("create security group in %s: %w", region, err)
-			}
-			log.Printf("Created security group %s in %s", sgID, region)
+	// A streaming pipeline needs the security group in every stage region,
+	// since it goes on every stage instance there (buildStageRunInstancesInput).
+	// An EFA stage needs it in its own region: EFA requires a group that admits
+	// all traffic from itself, which the default group of a non-default VPC
+	// need not (#956).
+	efaRegions := map[string]bool{}
+	for _, r := range stageRegions(pipelineDef, func(st *pipeline.Stage) bool { return st.EFAEnabled }) {
+		efaRegions[r] = true
+	}
+	streaming := pipelineDef.HasStreamingStages()
+	for _, region := range stageRegions(pipelineDef, func(st *pipeline.Stage) bool { return streaming || st.EFAEnabled }) {
+		if _, ok := state.SecurityGroups[region]; ok {
+			continue
 		}
+		log.Printf("Creating the pipeline security group in %s (streaming=%v, efa=%v)...", region, streaming, efaRegions[region])
+		client, err := netEC2ForRegion(ctx, region)
+		if err != nil {
+			return fmt.Errorf("ec2 client for %s: %w", region, err)
+		}
+		sgID, err := createStreamingSecurityGroup(ctx, client, state, region, efaRegions[region])
+		if err != nil {
+			return fmt.Errorf("create security group in %s: %w", region, err)
+		}
+		log.Printf("Created security group %s in %s", sgID, region)
 	}
 
 	if pipelineDef.HasEFAStages() {
@@ -452,7 +458,7 @@ func stageRegions(pipelineDef *pipeline.Pipeline, keep func(*pipeline.Stage) boo
 // (client's region) and records it in state.SecurityGroups. Ingress is from the
 // group itself only: the streaming ports and SSH between the pipeline's own
 // instances. SSH used to be open to 0.0.0.0/0 (#929).
-func createStreamingSecurityGroup(ctx context.Context, ec2Client networkEC2API, state *pipeline.PipelineState, region string) (string, error) {
+func createStreamingSecurityGroup(ctx context.Context, ec2Client networkEC2API, state *pipeline.PipelineState, region string, efa bool) (string, error) {
 	pipelineID := state.PipelineID
 	sgName := networkGroupName(state)
 	description := fmt.Sprintf("Security group for spawn pipeline %s", pipelineID)
@@ -486,7 +492,7 @@ func createStreamingSecurityGroup(ctx context.Context, ec2Client networkEC2API, 
 
 	_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 		GroupId:       aws.String(sgID),
-		IpPermissions: streamingIngress(sgID),
+		IpPermissions: streamingIngress(sgID, efa),
 	})
 	if err != nil {
 		return "", fmt.Errorf("authorize ingress failed: %w", err)
@@ -496,10 +502,20 @@ func createStreamingSecurityGroup(ctx context.Context, ec2Client networkEC2API, 
 }
 
 // streamingIngress is the security group's ingress: TCP 50000-60000 and SSH,
-// both from members of the group only. Nothing is open to an address range.
-func streamingIngress(sgID string) []ec2types.IpPermission {
+// both from members of the group only, plus, in a region with an EFA stage,
+// all traffic from members of the group, which EFA requires (#956). Nothing is
+// open to an address range. A new group's default egress (all traffic) covers
+// EFA's outbound requirement.
+func streamingIngress(sgID string, efa bool) []ec2types.IpPermission {
 	self := []ec2types.UserIdGroupPair{{GroupId: aws.String(sgID)}}
-	return []ec2types.IpPermission{
+	var perms []ec2types.IpPermission
+	if efa {
+		perms = append(perms, ec2types.IpPermission{
+			IpProtocol:       aws.String("-1"),
+			UserIdGroupPairs: self,
+		})
+	}
+	return append(perms, []ec2types.IpPermission{
 		{
 			IpProtocol:       aws.String("tcp"),
 			FromPort:         aws.Int32(50000),
@@ -512,7 +528,7 @@ func streamingIngress(sgID string) []ec2types.IpPermission {
 			ToPort:           aws.Int32(22),
 			UserIdGroupPairs: self,
 		},
-	}
+	}...)
 }
 
 // networkGroupName names the pipeline's security and placement groups. Per run
@@ -1055,7 +1071,20 @@ func buildStageRunInstancesInput(state *pipeline.PipelineState, stageDef *pipeli
 	// in the stage's region, and a group from another region does not exist
 	// there.
 	region := stageRegion(stageDef)
-	if sg := securityGroupFor(state, region); sg != "" {
+	sg := securityGroupFor(state, region)
+	switch {
+	case stageDef.EFAEnabled:
+		// An EFA interface, built as `spawn launch --efa` builds it (#956).
+		// efa_enabled used to add only the placement group, so the instance
+		// got an ENA interface and `fi_info -p efa` found nothing. The group
+		// goes on the interface: RunInstances refuses instance-level groups
+		// alongside NetworkInterfaces.
+		var groups []string
+		if sg != "" {
+			groups = []string{sg}
+		}
+		input.NetworkInterfaces = []ec2types.InstanceNetworkInterfaceSpecification{spawnaws.EFANetworkInterface("", groups)}
+	case sg != "":
 		input.SecurityGroupIds = []string{sg}
 	}
 	if pg := placementGroupFor(state, region); stageDef.EFAEnabled && pg != "" {

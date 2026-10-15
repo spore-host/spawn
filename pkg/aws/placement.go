@@ -104,6 +104,31 @@ func (c *Client) ValidateInstanceTypeForPlacementGroup(ctx context.Context, inst
 	return fmt.Errorf("instance type %s does not support cluster placement groups", instanceType)
 }
 
+// EFANetworkInterface is the RunInstances network interface that attaches an
+// Elastic Fabric Adapter: the primary interface (device 0) with interface type
+// "efa", a public IP, deleted with the instance. subnetID "" lets EC2 choose the
+// default subnet; securityGroupIDs go on the interface, because RunInstances
+// rejects instance-level SecurityGroupIds alongside NetworkInterfaces. EFA also
+// needs a group that allows all traffic to and from itself.
+//
+// Shared by `spawn launch --efa` and pipeline stages with efa_enabled, which
+// used to add only the placement group and so got an ENA interface (#956).
+func EFANetworkInterface(subnetID string, securityGroupIDs []string) types.InstanceNetworkInterfaceSpecification {
+	ni := types.InstanceNetworkInterfaceSpecification{
+		DeviceIndex:              aws.Int32(0),
+		AssociatePublicIpAddress: aws.Bool(true),
+		DeleteOnTermination:      aws.Bool(true),
+		InterfaceType:            aws.String("efa"),
+	}
+	if subnetID != "" {
+		ni.SubnetId = aws.String(subnetID)
+	}
+	if len(securityGroupIDs) > 0 {
+		ni.Groups = securityGroupIDs
+	}
+	return ni
+}
+
 // ValidateInstanceTypeForEFAInRegion checks if instance type supports EFA by
 // querying the EC2 API in the specified launch region. Some instance types
 // (e.g. hpc6a.48xlarge) only exist in certain regions and DescribeInstanceTypes

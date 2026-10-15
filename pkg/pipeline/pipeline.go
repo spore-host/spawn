@@ -57,6 +57,19 @@ type Stage struct {
 	EFAEnabled     bool   `json:"efa_enabled,omitempty"`
 }
 
+// DefaultStageRegion is where a stage with no region runs. The orchestrator
+// launches it there, and validation compares regions with it.
+const DefaultStageRegion = "us-east-1"
+
+// EffectiveRegion is the region the stage runs in: its region, or
+// DefaultStageRegion.
+func (s *Stage) EffectiveRegion() string {
+	if s.Region == "" {
+		return DefaultStageRegion
+	}
+	return s.Region
+}
+
 // DataConfig defines how data is passed between stages
 type DataConfig struct {
 	Mode string `json:"mode"` // "s3" or "stream"
@@ -290,6 +303,33 @@ func (p *Pipeline) Validate() error {
 		return err
 	}
 
+	return p.validateStreamRegions()
+}
+
+// validateStreamRegions rejects a stream-mode data_input whose source stage is
+// in another region (#956). Each region has its own pipeline security group,
+// whose ingress admits only that group, the stages' instances are in each
+// region's default VPC, and peer discovery publishes private IPs: nothing peers
+// the VPCs or opens a public path, so the consumer could never connect. Use s3
+// mode across regions, or put both stages in one region.
+func (p *Pipeline) validateStreamRegions() error {
+	for i := range p.Stages {
+		st := &p.Stages[i]
+		in := st.DataInput
+		if in == nil || in.Mode != "stream" {
+			continue
+		}
+		src := p.GetStage(in.SourceStage)
+		if src == nil {
+			continue // ValidateInput reports it
+		}
+		if src.EffectiveRegion() != st.EffectiveRegion() {
+			return fmt.Errorf("stage %s: streams from stage %s across regions (%s -> %s), which is not supported: "+
+				"each region's stages are in their own VPC and security group, with nothing connecting them. "+
+				"Use \"mode\": \"s3\" between regions, or run both stages in one region",
+				st.StageID, src.StageID, src.EffectiveRegion(), st.EffectiveRegion())
+		}
+	}
 	return nil
 }
 

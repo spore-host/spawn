@@ -413,6 +413,7 @@ func DescribeInstanceWithRetry(ctx context.Context, ec2Client *ec2.Client, insta
 func DetectArchitecture(instanceType string) string
 func DetectGPUInstance(instanceType string) bool
 func DetectReaperCoverage(ctx context.Context, cfg awssdk.Config) ReaperCoverage
+func EFANetworkInterface(subnetID string, securityGroupIDs []string) types.InstanceNetworkInterfaceSpecification
 func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string
 func GenerateScopedDynamoDBPolicy(region, accountID string) string
 func GenerateScopedS3Policy(region, accountID string) string

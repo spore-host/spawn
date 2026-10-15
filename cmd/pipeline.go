@@ -361,6 +361,13 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
 
+	// An efa_enabled stage on a type without EFA would fail at RunInstances,
+	// mid-pipeline, after earlier stages had run and been billed. Checked here,
+	// before anything is created, against EC2's own capability data (#956).
+	if err := checkEFAStages(ctx, p, awsClient.ValidateInstanceTypeForEFAInRegion); err != nil {
+		return err
+	}
+
 	// The stages' instance profile, scoped to the pipeline's bucket and prefix.
 	// The shared default spored profile has no access to pipeline data, so the
 	// stages could neither read their inputs nor write outputs or markers
@@ -474,6 +481,21 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 
 	if flagWait {
 		return waitForPipeline(ctx, store, p.PipelineID, flagWaitTimeout)
+	}
+	return nil
+}
+
+// checkEFAStages checks every efa_enabled stage's instance type supports EFA in
+// the stage's region, with check (EC2 DescribeInstanceTypes, through pkg/aws).
+func checkEFAStages(ctx context.Context, p *pipeline.Pipeline, check func(ctx context.Context, instanceType, region string) error) error {
+	for i := range p.Stages {
+		st := &p.Stages[i]
+		if !st.EFAEnabled {
+			continue
+		}
+		if err := check(ctx, st.InstanceType, st.EffectiveRegion()); err != nil {
+			return fmt.Errorf("stage %s has efa_enabled: %w", st.StageID, err)
+		}
 	}
 	return nil
 }
