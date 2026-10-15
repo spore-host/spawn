@@ -71,13 +71,26 @@ func TestTier0_StatusJSONOutput(t *testing.T) {
 		t.Errorf("instance_id = %v, want %q", decoded["instance_id"], id)
 	}
 
-	// The log lines are fine on stderr — that's the intended destination.
-	if !strings.Contains(stderr, "Agent initialized for instance") {
-		t.Errorf("expected spored's diagnostic lines on stderr, got:\n%s", stderr)
-	}
-	// ...but they must NOT be on stdout, in front of or inside the JSON.
+	// They must NOT be on stdout, in front of or inside the JSON (#540)...
 	if strings.Contains(stdout, "Agent initialized") || strings.Contains(stdout, "Not idle") {
 		t.Errorf("spored's log lines leaked onto stdout (the #540 bug):\n%s", stdout)
+	}
+	// ...and by default not on stderr either: they carry the account ID into
+	// terminals and recordings (#895). --verbose is the way to see them.
+	if strings.Contains(stderr, "Agent initialized") || strings.Contains(stderr, "123456789012") {
+		t.Errorf("spored's diagnostic lines reached stderr without --verbose (#895):\n%s", stderr)
+	}
+
+	// With --verbose they are relayed to stderr — never dropped, never stdout.
+	stdout, stderr, code = env.run("status", id, "-o", "json", "--verbose")
+	if code != 0 {
+		t.Fatalf("spawn status -o json --verbose: expected exit 0, got %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("--verbose stdout did not parse as JSON: %v\nstdout:\n%q", err, stdout)
+	}
+	if !strings.Contains(stderr, "Agent initialized for instance") {
+		t.Errorf("expected spored's diagnostic lines on stderr with --verbose, got:\n%s", stderr)
 	}
 }
 
@@ -117,8 +130,19 @@ func TestTier0_StatusTableOutput(t *testing.T) {
 	if strings.Contains(stdout, "Agent initialized") {
 		t.Errorf("spored's log lines leaked onto stdout in table mode:\n%s", stdout)
 	}
+	if strings.Contains(stderr, "Agent initialized") {
+		t.Errorf("spored's diagnostic lines reached stderr without --verbose (#895):\n%s", stderr)
+	}
+
+	stdout, stderr, code = env.run("status", id, "--verbose")
+	if code != 0 {
+		t.Fatalf("spawn status --verbose: expected exit 0, got %d\nstdout:\n%s", code, stdout)
+	}
+	if strings.Contains(stdout, "Agent initialized") {
+		t.Errorf("spored's log lines leaked onto stdout in table mode with --verbose:\n%s", stdout)
+	}
 	if !strings.Contains(stderr, "Agent initialized") {
-		t.Errorf("expected spored's diagnostic lines on stderr, got:\n%s", stderr)
+		t.Errorf("expected spored's diagnostic lines on stderr with --verbose, got:\n%s", stderr)
 	}
 }
 
