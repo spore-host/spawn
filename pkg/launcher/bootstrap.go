@@ -255,16 +255,21 @@ EOFGATES
 `, ReadyDir, RequiredGatesFile, strings.Join(gates, "\n"))
 	}
 
-	script += linuxBootstrapBody
-
-	// Inject plugin declarations for spored to load at startup.
+	// Plugin declarations, written BEFORE linuxBootstrapBody (#1023). The body
+	// ends in `systemctl start spored`; the unit is Type=simple, so that returns
+	// as soon as spored is forked, and spored reads this file exactly once, at
+	// startup (provider.loadPluginDeclarations, then agent.newAgent). Written
+	// after the body, as it used to be, the plugins loaded only if this `cat`
+	// won a race against spored's IMDS reads and first DescribeTags, so anything
+	// that slowed the bootstrap at that point silently dropped every plugin.
+	// Written here, the file exists before spored is even installed.
 	if len(cfg.Plugins) > 0 {
 		declJSON, err := json.Marshal(cfg.Plugins)
 		if err != nil {
 			return "", fmt.Errorf("marshal plugin declarations: %w", err)
 		}
 		script += fmt.Sprintf(`
-# Write plugin declarations for spored to load at startup
+# Plugin declarations, read once by spored at startup, so written before it starts (#1023)
 mkdir -p /etc/spawn
 cat > /etc/spawn/plugins.json <<'EOFPLUGINS'
 %s
@@ -273,6 +278,8 @@ chmod 644 /etc/spawn/plugins.json
 echo "Plugin declarations written: %d plugin(s)"
 `, string(declJSON), len(cfg.Plugins))
 	}
+
+	script += linuxBootstrapBody
 
 	// Mount attached storage BEFORE the user's script, so the workload sees the
 	// volumes already live (#166). The storage script does its own mkdir + mount;
