@@ -6,25 +6,40 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"gopkg.in/yaml.v3"
 )
 
-// Integration tests for multi-region sweep features
-// Run with: go test -v -tags=integration ./...
+// Integration tests for multi-region sweep features.
+// Run with: make build && go test -v -count=1 -tags=integration .
+//
+// COST: these launch REAL, billable EC2 instances (CLAUDE.md "Cost safety").
+// Every sweep they launch is bounded three ways:
+//   - TTL: every param file sets `ttl: 30m`, so spored self-terminates;
+//   - explicit terminate: launchSweep registers a t.Cleanup that runs
+//     `spawn cancel --yes` — registered at launch, so a t.Fatalf part-way
+//     through a test still cancels. (--yes is load-bearing: cancel prompts,
+//     and with no answer on stdin it aborts without terminating anything.);
+//   - leak-check: the same cleanup then asks EC2 directly, in every region the
+//     param file names, for instances tagged spawn:sweep-id=<id> that are not
+//     terminated, terminates any it finds, and fails the test.
+//
+// Compile-only in CI and `make check` (scripts/check-build-tags.sh, #913); never
+// executed there.
 
 // loadAWSConfig loads AWS config using AWS_PROFILE env var when set (local dev),
 // or the default credential chain (CI with configure-aws-credentials action).
-func loadAWSConfig(ctx context.Context, defaultProfile string) (awsconfig.Config, error) {
+func loadAWSConfig(ctx context.Context, defaultProfile string) (aws.Config, error) {
 	profile := os.Getenv("AWS_PROFILE")
 	if profile == "" {
 		profile = defaultProfile
@@ -82,8 +97,9 @@ params:
 		}
 	}
 
-	// Cancel sweep to clean up
-	t.Log("Canceling sweep for cleanup...")
+	// Cancel explicitly so the CANCELLED transition can be asserted; the
+	// cleanup launchSweep registered still leak-checks afterwards.
+	t.Log("Canceling sweep...")
 	cancelSweep(t, sweepID)
 
 	// Wait for cancellation
@@ -145,9 +161,6 @@ params:
 		}
 	}
 
-	// Cancel sweep
-	t.Log("Canceling sweep...")
-	cancelSweep(t, sweepID)
 }
 
 func TestInstanceTypeFallback(t *testing.T) {
@@ -204,9 +217,6 @@ params:
 		t.Error("No instance was launched")
 	}
 
-	// Cancel sweep
-	t.Log("Canceling sweep...")
-	cancelSweep(t, sweepID)
 }
 
 func TestRegionalCostTracking(t *testing.T) {
@@ -261,15 +271,6 @@ params:
 		t.Log("Note: No costs tracked yet (instances may not have launched)")
 	}
 
-	// Cancel sweep
-	t.Log("Canceling sweep...")
-	cancelSweep(t, sweepID)
-}
-
-func TestMultiRegionResultCollection(t *testing.T) {
-	t.Skip("Skipping result collection test - requires instances to upload results")
-	// This test would need real instances to upload result files to S3
-	// which takes longer and requires coordinated setup
 }
 
 // Helper functions
@@ -293,8 +294,14 @@ func createTempParamFile(t *testing.T, content string) string {
 	return tmpFile.Name()
 }
 
+// launchSweep launches a sweep and registers its teardown: cancel (unless the
+// test already did) and then an independent leak-check. The regions to check
+// are read from the param file BEFORE launching, so a param file naming no
+// region fails here instead of launching something nothing would check.
 func launchSweep(t *testing.T, paramFile string, args ...string) string {
 	t.Helper()
+
+	regions := paramFileRegions(t, paramFile)
 
 	// Build command: spawn launch --param-file <file> <args>
 	cmdArgs := []string{"launch", "--param-file", paramFile}
@@ -314,13 +321,118 @@ func launchSweep(t *testing.T, paramFile string, args ...string) string {
 		if strings.Contains(line, "Sweep ID:") {
 			parts := strings.Fields(line)
 			if len(parts) >= 3 {
-				return parts[2]
+				sweepID := parts[2]
+				t.Cleanup(func() {
+					if !cancelledSweeps[sweepID] {
+						cancelSweep(t, sweepID)
+					}
+					leakCheckSweep(t, sweepID, regions)
+				})
+				return sweepID
 			}
 		}
 	}
 
-	t.Fatalf("Could not find Sweep ID in output:\n%s", string(output))
+	// Something may have launched even though no ID was printed; the TTL is
+	// the only bound left, so say so loudly.
+	t.Fatalf("Could not find Sweep ID in output — any instances it launched are bounded only by their TTL:\n%s", string(output))
 	return ""
+}
+
+// paramFileRegions returns every distinct region a param file names, in its
+// defaults or any param. Fatal when there are none: an empty set would make
+// the leak-check vacuous.
+func paramFileRegions(t *testing.T, paramFile string) []string {
+	t.Helper()
+
+	data, err := os.ReadFile(paramFile)
+	if err != nil {
+		t.Fatalf("read param file: %v", err)
+	}
+	var pf struct {
+		Defaults map[string]interface{}   `yaml:"defaults"`
+		Params   []map[string]interface{} `yaml:"params"`
+	}
+	if err := yaml.Unmarshal(data, &pf); err != nil {
+		t.Fatalf("parse param file: %v", err)
+	}
+
+	seen := map[string]bool{}
+	var regions []string
+	for _, m := range append([]map[string]interface{}{pf.Defaults}, pf.Params...) {
+		if r, ok := m["region"].(string); ok && r != "" && !seen[r] {
+			seen[r] = true
+			regions = append(regions, r)
+		}
+	}
+	if len(regions) == 0 {
+		t.Fatalf("param file %s names no region; refusing to launch a sweep the leak-check could not cover", paramFile)
+	}
+	return regions
+}
+
+// cancelledSweeps records sweeps a test cancelled itself, so the cleanup
+// doesn't cancel twice. Integration tests in this file do not run in parallel.
+var cancelledSweeps = map[string]bool{}
+
+// leakCheckSweep independently verifies, against EC2 rather than the sweep's
+// own state, that nothing tagged with this sweep ID is still alive. Anything it
+// finds is terminated and the test fails: cancel was supposed to have done that.
+//
+// It polls for a while rather than checking once, because a detached sweep's
+// orchestrator Lambda can launch between our cancel and its next look at the
+// cancel flag; an instance that appears in that window is still a leak.
+func leakCheckSweep(t *testing.T, sweepID string, regions []string) {
+	t.Helper()
+
+	ctx := context.Background()
+	const (
+		window   = 3 * time.Minute
+		interval = 20 * time.Second
+	)
+	deadline := time.Now().Add(window)
+	for {
+		for _, region := range regions {
+			cfg, err := loadAWSConfig(ctx, "spore-host-dev")
+			if err != nil {
+				t.Errorf("leak-check %s: load AWS config: %v — CHECK FOR ORPHANED INSTANCES MANUALLY (tag spawn:sweep-id=%s)", region, err, sweepID)
+				continue
+			}
+			cfg.Region = region
+			client := ec2.NewFromConfig(cfg)
+
+			var live []string
+			p := ec2.NewDescribeInstancesPaginator(client, &ec2.DescribeInstancesInput{
+				Filters: []ec2types.Filter{
+					{Name: stringPtr("tag:spawn:sweep-id"), Values: []string{sweepID}},
+					{Name: stringPtr("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
+				},
+			})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					t.Errorf("leak-check %s: describe: %v — CHECK FOR ORPHANED INSTANCES MANUALLY (tag spawn:sweep-id=%s)", region, err, sweepID)
+					break
+				}
+				for _, r := range page.Reservations {
+					for _, inst := range r.Instances {
+						live = append(live, *inst.InstanceId)
+					}
+				}
+			}
+			if len(live) == 0 {
+				continue
+			}
+			t.Errorf("LEAK: sweep %s left %d live instance(s) in %s after cancel: %v — terminating", sweepID, len(live), region, live)
+			if _, err := client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: live}); err != nil {
+				t.Errorf("leak-check %s: terminate %v: %v — TERMINATE THESE MANUALLY", region, live, err)
+			}
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(interval)
+	}
 }
 
 func getSweepStatus(t *testing.T, sweepID string) *SweepStatus {
@@ -345,7 +457,11 @@ func getSweepStatus(t *testing.T, sweepID string) *SweepStatus {
 func cancelSweep(t *testing.T, sweepID string) {
 	t.Helper()
 
-	cmd := exec.Command("./bin/spawn", "cancel", "--sweep-id", sweepID)
+	cancelledSweeps[sweepID] = true
+
+	// --yes: cancel asks for confirmation before terminating, and with no
+	// answer on stdin it aborts having terminated nothing (#40, #737).
+	cmd := exec.Command("./bin/spawn", "cancel", "--sweep-id", sweepID, "--yes")
 	cmd.Env = os.Environ()
 
 	output, err := cmd.CombinedOutput()
@@ -395,7 +511,7 @@ func TestDynamoDBConnection(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, "spore-host-infra")
 	if err != nil {
 		t.Fatalf("Failed to load AWS config: %v", err)
 	}
@@ -416,757 +532,4 @@ func TestDynamoDBConnection(t *testing.T) {
 
 func stringPtr(s string) *string {
 	return &s
-}
-
-// Scheduler Integration Tests
-
-func TestSchedulerOneTimeExecution(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-	scheduleID := fmt.Sprintf("test-one-time-%d", time.Now().Unix())
-
-	// Upload parameter file to S3
-	paramFile := "../testdata/integration/scheduler/one-time-schedule.yaml"
-	paramContent, err := os.ReadFile(paramFile)
-	if err != nil {
-		t.Fatalf("failed to read parameter file: %v", err)
-	}
-
-	s3Key := fmt.Sprintf("test/%s.yaml", scheduleID)
-	uploadParamFileToS3(t, ctx, string(paramContent), "spawn-schedules-us-east-1", s3Key)
-	t.Cleanup(func() {
-		cleanupS3File(t, ctx, "spawn-schedules-us-east-1", s3Key)
-	})
-
-	// Create one-time schedule
-	executionTime := time.Now().Add(5 * time.Minute)
-	createTestSchedule(t, ctx, scheduleID, s3Key, "one-time", executionTime, "", 0)
-	t.Cleanup(func() {
-		cleanupTestSchedule(t, ctx, scheduleID)
-	})
-
-	// Hack: modify execution time to trigger in 30 seconds
-	updateScheduleExecutionTime(t, ctx, scheduleID, time.Now().Add(30*time.Second))
-
-	// Wait for execution (max 2 minutes)
-	t.Log("Waiting for schedule execution...")
-	sweepID := waitForScheduleExecution(t, ctx, scheduleID, 2*time.Minute)
-	t.Logf("Schedule executed, sweep ID: %s", sweepID)
-
-	// Verify execution record
-	history := getScheduleHistory(t, ctx, scheduleID)
-	if len(history) == 0 {
-		t.Fatal("No execution history found")
-	}
-
-	exec := history[0]
-	if exec.Status != "success" {
-		t.Errorf("Expected status=success, got %s", exec.Status)
-	}
-	if exec.SweepID == "" {
-		t.Error("Expected sweep_id to be populated")
-	}
-
-	// Cleanup: cancel sweep if it's still running
-	if sweepID != "" {
-		t.Cleanup(func() {
-			cancelSweep(t, sweepID)
-		})
-	}
-
-	t.Log("✓ One-time schedule executed successfully")
-}
-
-func TestSchedulerCancelBeforeExecution(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-	scheduleID := fmt.Sprintf("test-cancel-%d", time.Now().Unix())
-
-	// Upload parameter file
-	paramContent := `regions: [us-east-1]
-instance_type: t3.micro
-ami: auto
-capacity_type: spot
-count: 1
-tags:
-  spawn:test: "true"
-`
-	s3Key := fmt.Sprintf("test/%s.yaml", scheduleID)
-	uploadParamFileToS3(t, ctx, paramContent, "spawn-schedules-us-east-1", s3Key)
-	t.Cleanup(func() {
-		cleanupS3File(t, ctx, "spawn-schedules-us-east-1", s3Key)
-	})
-
-	// Create schedule for future
-	executionTime := time.Now().Add(5 * time.Minute)
-	createTestSchedule(t, ctx, scheduleID, s3Key, "one-time", executionTime, "", 0)
-	t.Cleanup(func() {
-		cleanupTestSchedule(t, ctx, scheduleID)
-	})
-
-	// Cancel immediately
-	updateScheduleStatus(t, ctx, scheduleID, "cancelled")
-
-	// Hack: modify execution time to 10 seconds from now
-	updateScheduleExecutionTime(t, ctx, scheduleID, time.Now().Add(10*time.Second))
-
-	// Wait 30 seconds
-	time.Sleep(30 * time.Second)
-
-	// Verify no execution occurred
-	history := getScheduleHistory(t, ctx, scheduleID)
-	if len(history) > 0 {
-		t.Errorf("Expected no execution, but found %d execution(s)", len(history))
-	}
-
-	// Verify schedule status is cancelled
-	record := getScheduleRecord(t, ctx, scheduleID)
-	if status := getAttributeString(record, "status"); status != "cancelled" {
-		t.Errorf("Expected status=cancelled, got %s", status)
-	}
-
-	t.Log("✓ Cancelled schedule did not execute")
-}
-
-func TestSchedulerPauseResume(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-	scheduleID := fmt.Sprintf("test-pause-%d", time.Now().Unix())
-
-	// Upload parameter file
-	paramContent := `regions: [us-east-1]
-instance_type: t3.micro
-ami: auto
-capacity_type: spot
-count: 1
-tags:
-  spawn:test: "true"
-`
-	s3Key := fmt.Sprintf("test/%s.yaml", scheduleID)
-	uploadParamFileToS3(t, ctx, paramContent, "spawn-schedules-us-east-1", s3Key)
-	t.Cleanup(func() {
-		cleanupS3File(t, ctx, "spawn-schedules-us-east-1", s3Key)
-	})
-
-	// Create recurring schedule
-	createTestSchedule(t, ctx, scheduleID, s3Key, "recurring", time.Now().Add(1*time.Minute), "*/1 * * * *", 0)
-	t.Cleanup(func() {
-		cleanupTestSchedule(t, ctx, scheduleID)
-	})
-
-	// Pause schedule
-	updateScheduleStatus(t, ctx, scheduleID, "paused")
-
-	// Modify next execution to 10 seconds from now
-	updateScheduleExecutionTime(t, ctx, scheduleID, time.Now().Add(10*time.Second))
-
-	// Wait 30 seconds
-	time.Sleep(30 * time.Second)
-
-	// Verify no execution while paused
-	history := getScheduleHistory(t, ctx, scheduleID)
-	if len(history) > 0 {
-		t.Errorf("Expected no execution while paused, but found %d execution(s)", len(history))
-	}
-
-	// Resume schedule
-	updateScheduleStatus(t, ctx, scheduleID, "active")
-
-	// Modify next execution to 10 seconds from now
-	updateScheduleExecutionTime(t, ctx, scheduleID, time.Now().Add(10*time.Second))
-
-	// Wait for execution
-	t.Log("Waiting for schedule execution after resume...")
-	sweepID := waitForScheduleExecution(t, ctx, scheduleID, 2*time.Minute)
-	t.Logf("Schedule executed after resume, sweep ID: %s", sweepID)
-
-	// Cleanup sweep
-	if sweepID != "" {
-		t.Cleanup(func() {
-			cancelSweep(t, sweepID)
-		})
-	}
-
-	t.Log("✓ Pause/resume functionality works correctly")
-}
-
-func TestSchedulerRecurringExecution(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-	scheduleID := fmt.Sprintf("test-recurring-%d", time.Now().Unix())
-
-	// Upload parameter file
-	paramContent := `regions: [us-east-1]
-instance_type: t3.micro
-ami: auto
-capacity_type: spot
-count: 1
-tags:
-  spawn:test: "true"
-`
-	s3Key := fmt.Sprintf("test/%s.yaml", scheduleID)
-	uploadParamFileToS3(t, ctx, paramContent, "spawn-schedules-us-east-1", s3Key)
-	t.Cleanup(func() {
-		cleanupS3File(t, ctx, "spawn-schedules-us-east-1", s3Key)
-	})
-
-	// Create recurring schedule with max 3 executions
-	createTestSchedule(t, ctx, scheduleID, s3Key, "recurring", time.Now().Add(1*time.Minute), "*/1 * * * *", 3)
-	t.Cleanup(func() {
-		cleanupTestSchedule(t, ctx, scheduleID)
-	})
-
-	// Execute 3 times quickly by hacking execution times
-	var sweepIDs []string
-	for i := 0; i < 3; i++ {
-		t.Logf("Triggering execution %d...", i+1)
-		updateScheduleExecutionTime(t, ctx, scheduleID, time.Now().Add(10*time.Second))
-		time.Sleep(1 * time.Minute)
-
-		history := getScheduleHistory(t, ctx, scheduleID)
-		if len(history) != i+1 {
-			t.Errorf("Expected %d executions, got %d", i+1, len(history))
-		}
-		if len(history) > 0 && history[0].SweepID != "" {
-			sweepIDs = append(sweepIDs, history[0].SweepID)
-		}
-	}
-
-	// Cleanup sweeps
-	for _, sweepID := range sweepIDs {
-		if sweepID != "" {
-			t.Cleanup(func() {
-				cancelSweep(t, sweepID)
-			})
-		}
-	}
-
-	// Verify execution count
-	record := getScheduleRecord(t, ctx, scheduleID)
-	execCount := getAttributeNumber(record, "execution_count")
-	if execCount != 3 {
-		t.Errorf("Expected execution_count=3, got %d", execCount)
-	}
-
-	// Wait 1 more minute and verify no 4th execution
-	t.Log("Waiting to verify no 4th execution...")
-	time.Sleep(1 * time.Minute)
-	history := getScheduleHistory(t, ctx, scheduleID)
-	if len(history) > 3 {
-		t.Errorf("Expected max 3 executions, got %d", len(history))
-	}
-
-	t.Log("✓ Recurring schedule executed correctly with max_executions limit")
-}
-
-func TestSchedulerExecutionLimits(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-
-	// Test 1: max_executions limit
-	t.Run("MaxExecutions", func(t *testing.T) {
-		scheduleID := fmt.Sprintf("test-maxexec-%d", time.Now().Unix())
-
-		paramContent := `regions: [us-east-1]
-instance_type: t3.micro
-ami: auto
-capacity_type: spot
-count: 1
-tags:
-  spawn:test: "true"
-`
-		s3Key := fmt.Sprintf("test/%s.yaml", scheduleID)
-		uploadParamFileToS3(t, ctx, paramContent, "spawn-schedules-us-east-1", s3Key)
-		t.Cleanup(func() {
-			cleanupS3File(t, ctx, "spawn-schedules-us-east-1", s3Key)
-		})
-
-		// Create schedule with max 2 executions
-		createTestSchedule(t, ctx, scheduleID, s3Key, "recurring", time.Now().Add(1*time.Minute), "*/1 * * * *", 2)
-		t.Cleanup(func() {
-			cleanupTestSchedule(t, ctx, scheduleID)
-		})
-
-		// Trigger 2 executions
-		for i := 0; i < 2; i++ {
-			updateScheduleExecutionTime(t, ctx, scheduleID, time.Now().Add(10*time.Second))
-			time.Sleep(1 * time.Minute)
-		}
-
-		// Verify only 2 executions
-		history := getScheduleHistory(t, ctx, scheduleID)
-		if len(history) != 2 {
-			t.Errorf("Expected 2 executions, got %d", len(history))
-		}
-
-		t.Log("✓ max_executions limit enforced")
-	})
-
-	// Test 2: end_after in past doesn't execute
-	t.Run("EndAfterPast", func(t *testing.T) {
-		scheduleID := fmt.Sprintf("test-endafter-%d", time.Now().Unix())
-
-		paramContent := `regions: [us-east-1]
-instance_type: t3.micro
-ami: auto
-capacity_type: spot
-count: 1
-tags:
-  spawn:test: "true"
-`
-		s3Key := fmt.Sprintf("test/%s.yaml", scheduleID)
-		uploadParamFileToS3(t, ctx, paramContent, "spawn-schedules-us-east-1", s3Key)
-		t.Cleanup(func() {
-			cleanupS3File(t, ctx, "spawn-schedules-us-east-1", s3Key)
-		})
-
-		// Create schedule with end_after in the past
-		createTestScheduleWithEndAfter(t, ctx, scheduleID, s3Key, time.Now().Add(-1*time.Hour))
-		t.Cleanup(func() {
-			cleanupTestSchedule(t, ctx, scheduleID)
-		})
-
-		// Try to execute
-		updateScheduleExecutionTime(t, ctx, scheduleID, time.Now().Add(10*time.Second))
-		time.Sleep(30 * time.Second)
-
-		// Verify no execution
-		history := getScheduleHistory(t, ctx, scheduleID)
-		if len(history) > 0 {
-			t.Errorf("Expected no execution for expired schedule, got %d", len(history))
-		}
-
-		t.Log("✓ end_after limit enforced")
-	})
-}
-
-func TestSchedulerErrorHandling(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-	scheduleID := fmt.Sprintf("test-error-%d", time.Now().Unix())
-
-	// Create schedule with invalid S3 key (non-existent file)
-	s3Key := fmt.Sprintf("test/nonexistent-%s.yaml", scheduleID)
-	createTestSchedule(t, ctx, scheduleID, s3Key, "one-time", time.Now().Add(1*time.Minute), "", 0)
-	t.Cleanup(func() {
-		cleanupTestSchedule(t, ctx, scheduleID)
-	})
-
-	// Trigger execution
-	updateScheduleExecutionTime(t, ctx, scheduleID, time.Now().Add(10*time.Second))
-
-	// Wait for execution attempt
-	t.Log("Waiting for execution attempt...")
-	time.Sleep(1 * time.Minute)
-
-	// Verify execution record with error
-	history := getScheduleHistory(t, ctx, scheduleID)
-	if len(history) == 0 {
-		t.Fatal("Expected execution record, got none")
-	}
-
-	exec := history[0]
-	if exec.Status == "success" {
-		t.Error("Expected status=failed, got success")
-	}
-
-	// Note: Error message might not be populated depending on Lambda implementation
-	t.Logf("Execution status: %s", exec.Status)
-
-	t.Log("✓ Error handling works correctly")
-}
-
-// Queue Integration Tests
-
-func TestQueueSimpleExecution(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	t.Skip("Queue tests require actual EC2 instances - implement after spored agent is ready")
-
-	// TODO: Implement when spored queue runner is ready
-	// 1. Read queue config from testdata/integration/queue/simple-queue.json
-	// 2. Upload to S3
-	// 3. Launch EC2 instance with user-data that runs queue
-	// 4. Wait for queue completion (poll S3 for queue-state.json)
-	// 5. Verify both jobs completed successfully
-	// 6. Terminate instance
-}
-
-func TestQueueWithDependencies(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	t.Skip("Queue tests require actual EC2 instances - implement after spored agent is ready")
-}
-
-func TestQueueOnFailurePolicies(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	t.Skip("Queue tests require actual EC2 instances - implement after spored agent is ready")
-}
-
-func TestQueueRetryLogic(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	t.Skip("Queue tests require actual EC2 instances - implement after spored agent is ready")
-}
-
-func TestQueueTimeout(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	t.Skip("Queue tests require actual EC2 instances - implement after spored agent is ready")
-}
-
-func TestQueueStatePersistence(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	t.Skip("Queue tests require actual EC2 instances - implement after spored agent is ready")
-}
-
-func TestScheduledBatchQueue(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	t.Skip("Combined workflow test requires both scheduler and queue to be working")
-}
-
-// Helper functions for scheduler tests
-
-func createTestSchedule(t *testing.T, ctx context.Context, scheduleID, paramFileKey, scheduleType string, executionTime time.Time, cronExpr string, maxExecutions int) {
-	t.Helper()
-
-	cfg, err := loadAWSConfig(ctx, "spore-host-dev")
-	if err != nil {
-		t.Fatalf("failed to load AWS config: %v", err)
-	}
-
-	client := dynamodb.NewFromConfig(cfg)
-
-	item := map[string]types.AttributeValue{
-		"schedule_id":        &types.AttributeValueMemberS{Value: scheduleID},
-		"parameter_file_key": &types.AttributeValueMemberS{Value: paramFileKey},
-		"schedule_type":      &types.AttributeValueMemberS{Value: scheduleType},
-		"status":             &types.AttributeValueMemberS{Value: "active"},
-		"execution_count":    &types.AttributeValueMemberN{Value: "0"},
-		"created_at":         &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
-	}
-
-	if scheduleType == "one-time" {
-		item["execution_time"] = &types.AttributeValueMemberS{Value: executionTime.Format(time.RFC3339)}
-	} else if scheduleType == "recurring" {
-		item["cron_expression"] = &types.AttributeValueMemberS{Value: cronExpr}
-		item["next_execution_time"] = &types.AttributeValueMemberS{Value: executionTime.Format(time.RFC3339)}
-		if maxExecutions > 0 {
-			item["max_executions"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", maxExecutions)}
-		}
-	}
-
-	_, err = client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: stringPtr("spawn-schedules"),
-		Item:      item,
-	})
-	if err != nil {
-		t.Fatalf("failed to create test schedule: %v", err)
-	}
-}
-
-func uploadParamFileToS3(t *testing.T, ctx context.Context, content, bucket, key string) {
-	t.Helper()
-
-	cfg, err := loadAWSConfig(ctx, "spore-host-infra")
-	if err != nil {
-		t.Fatalf("failed to load AWS config: %v", err)
-	}
-
-	client := s3.NewFromConfig(cfg)
-
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-		Body:   strings.NewReader(content),
-	})
-	if err != nil {
-		t.Fatalf("failed to upload parameter file: %v", err)
-	}
-}
-
-func cleanupS3File(t *testing.T, ctx context.Context, bucket, key string) {
-	t.Helper()
-
-	cfg, err := loadAWSConfig(ctx, "spore-host-infra")
-	if err != nil {
-		t.Logf("Warning: failed to load AWS config: %v", err)
-		return
-	}
-
-	client := s3.NewFromConfig(cfg)
-
-	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-	})
-	if err != nil {
-		t.Logf("Warning: failed to delete S3 file: %v", err)
-	}
-}
-
-func updateScheduleExecutionTime(t *testing.T, ctx context.Context, scheduleID string, nextTime time.Time) {
-	t.Helper()
-
-	cfg, err := loadAWSConfig(ctx, "spore-host-dev")
-	if err != nil {
-		t.Fatalf("failed to load AWS config: %v", err)
-	}
-
-	client := dynamodb.NewFromConfig(cfg)
-
-	// Determine which field to update based on schedule type
-	record := getScheduleRecord(t, ctx, scheduleID)
-	scheduleType := getAttributeString(record, "schedule_type")
-
-	var updateExpr string
-	if scheduleType == "one-time" {
-		updateExpr = "SET execution_time = :time"
-	} else {
-		updateExpr = "SET next_execution_time = :time"
-	}
-
-	_, err = client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: stringPtr("spawn-schedules"),
-		Key: map[string]types.AttributeValue{
-			"schedule_id": &types.AttributeValueMemberS{Value: scheduleID},
-		},
-		UpdateExpression: &updateExpr,
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":time": &types.AttributeValueMemberS{Value: nextTime.Format(time.RFC3339)},
-		},
-	})
-	if err != nil {
-		t.Fatalf("failed to update schedule execution time: %v", err)
-	}
-}
-
-func updateScheduleStatus(t *testing.T, ctx context.Context, scheduleID, status string) {
-	t.Helper()
-
-	cfg, err := loadAWSConfig(ctx, "spore-host-dev")
-	if err != nil {
-		t.Fatalf("failed to load AWS config: %v", err)
-	}
-
-	client := dynamodb.NewFromConfig(cfg)
-
-	updateExpr := "SET #status = :status"
-	_, err = client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: stringPtr("spawn-schedules"),
-		Key: map[string]types.AttributeValue{
-			"schedule_id": &types.AttributeValueMemberS{Value: scheduleID},
-		},
-		UpdateExpression: &updateExpr,
-		ExpressionAttributeNames: map[string]string{
-			"#status": "status",
-		},
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":status": &types.AttributeValueMemberS{Value: status},
-		},
-	})
-	if err != nil {
-		t.Fatalf("failed to update schedule status: %v", err)
-	}
-}
-
-func waitForScheduleExecution(t *testing.T, ctx context.Context, scheduleID string, timeout time.Duration) string {
-	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		history := getScheduleHistory(t, ctx, scheduleID)
-		if len(history) > 0 && history[0].SweepID != "" {
-			return history[0].SweepID
-		}
-
-		if time.Now().After(deadline) {
-			t.Fatalf("schedule did not execute within timeout")
-		}
-
-		select {
-		case <-ticker.C:
-			// Continue polling
-		}
-	}
-}
-
-func getScheduleHistory(t *testing.T, ctx context.Context, scheduleID string) []ScheduleExecution {
-	t.Helper()
-
-	cfg, err := loadAWSConfig(ctx, "spore-host-dev")
-	if err != nil {
-		t.Logf("Warning: failed to load AWS config: %v", err)
-		return nil
-	}
-
-	client := dynamodb.NewFromConfig(cfg)
-
-	result, err := client.Query(ctx, &dynamodb.QueryInput{
-		TableName:              stringPtr("spawn-schedule-history"),
-		KeyConditionExpression: stringPtr("schedule_id = :sid"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":sid": &types.AttributeValueMemberS{Value: scheduleID},
-		},
-		ScanIndexForward: boolPtr(false), // Most recent first
-	})
-	if err != nil {
-		t.Logf("Warning: failed to query schedule history: %v", err)
-		return nil
-	}
-
-	var history []ScheduleExecution
-	for _, item := range result.Items {
-		exec := ScheduleExecution{
-			ScheduleID: scheduleID,
-			Status:     getAttributeString(item, "status"),
-			SweepID:    getAttributeString(item, "sweep_id"),
-		}
-		if execTime := getAttributeString(item, "execution_time"); execTime != "" {
-			exec.ExecutionTime, _ = time.Parse(time.RFC3339, execTime)
-		}
-		history = append(history, exec)
-	}
-
-	return history
-}
-
-func getScheduleRecord(t *testing.T, ctx context.Context, scheduleID string) map[string]types.AttributeValue {
-	t.Helper()
-
-	cfg, err := loadAWSConfig(ctx, "spore-host-dev")
-	if err != nil {
-		t.Fatalf("failed to load AWS config: %v", err)
-	}
-
-	client := dynamodb.NewFromConfig(cfg)
-
-	result, err := client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: stringPtr("spawn-schedules"),
-		Key: map[string]types.AttributeValue{
-			"schedule_id": &types.AttributeValueMemberS{Value: scheduleID},
-		},
-	})
-	if err != nil {
-		t.Fatalf("failed to get schedule record: %v", err)
-	}
-
-	return result.Item
-}
-
-func cleanupTestSchedule(t *testing.T, ctx context.Context, scheduleID string) {
-	t.Helper()
-
-	cfg, err := loadAWSConfig(ctx, "spore-host-dev")
-	if err != nil {
-		t.Logf("Warning: failed to load AWS config: %v", err)
-		return
-	}
-
-	client := dynamodb.NewFromConfig(cfg)
-
-	_, err = client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: stringPtr("spawn-schedules"),
-		Key: map[string]types.AttributeValue{
-			"schedule_id": &types.AttributeValueMemberS{Value: scheduleID},
-		},
-	})
-	if err != nil {
-		t.Logf("Warning: failed to delete schedule: %v", err)
-	}
-}
-
-func getAttributeString(item map[string]types.AttributeValue, key string) string {
-	if v, ok := item[key].(*types.AttributeValueMemberS); ok {
-		return v.Value
-	}
-	return ""
-}
-
-func getAttributeNumber(item map[string]types.AttributeValue, key string) int {
-	if v, ok := item[key].(*types.AttributeValueMemberN); ok {
-		var n int
-		fmt.Sscanf(v.Value, "%d", &n)
-		return n
-	}
-	return 0
-}
-
-func createTestScheduleWithEndAfter(t *testing.T, ctx context.Context, scheduleID, paramFileKey string, endAfter time.Time) {
-	t.Helper()
-
-	cfg, err := loadAWSConfig(ctx, "spore-host-dev")
-	if err != nil {
-		t.Fatalf("failed to load AWS config: %v", err)
-	}
-
-	client := dynamodb.NewFromConfig(cfg)
-
-	item := map[string]types.AttributeValue{
-		"schedule_id":        &types.AttributeValueMemberS{Value: scheduleID},
-		"parameter_file_key": &types.AttributeValueMemberS{Value: paramFileKey},
-		"schedule_type":      &types.AttributeValueMemberS{Value: "one-time"},
-		"status":             &types.AttributeValueMemberS{Value: "active"},
-		"execution_count":    &types.AttributeValueMemberN{Value: "0"},
-		"created_at":         &types.AttributeValueMemberS{Value: time.Now().Format(time.RFC3339)},
-		"execution_time":     &types.AttributeValueMemberS{Value: time.Now().Add(1 * time.Minute).Format(time.RFC3339)},
-		"end_after":          &types.AttributeValueMemberS{Value: endAfter.Format(time.RFC3339)},
-	}
-
-	_, err = client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: stringPtr("spawn-schedules"),
-		Item:      item,
-	})
-	if err != nil {
-		t.Fatalf("failed to create test schedule: %v", err)
-	}
-}
-
-func boolPtr(b bool) *bool {
-	return &b
-}
-
-type ScheduleExecution struct {
-	ScheduleID    string
-	ExecutionTime time.Time
-	SweepID       string
-	Status        string
 }

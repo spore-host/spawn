@@ -26,7 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn:ttl-deadline` tag, so `spawn extend` is reflected, else launch time +
   TTL); `none` means no TTL, `expired` means the deadline has passed, `-` a
   terminated instance.
-
 - **`--command` logs no longer open with the shell-options notice** (#897).
   Every `/var/log/spawn-command.log` (what `spawn array logs` shows) began with
   two `spawn: shell options ... errexit is ON` lines, on every member, even when
@@ -38,7 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Connect: spawn connect arr-<index>   (e.g. spawn connect arr-0)`, following
   `--instance-names` when it is set. `spawn connect` picks the key and falls
   back to SSM, and the summary no longer prints your local key path.
-
 - **The audit trail and diagnostic log lines no longer appear in the terminal
   by default (#895).** `spawn launch` (single, job array and `--mpi`), `cancel`,
   `extend` and `capacity-block` used to print a raw JSON audit record — carrying
@@ -57,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from an older spored that still emits them. Errors from spored are still
   shown.
 
+### Removed
+
+- The `make test-integration-scheduler` and `make test-integration-queue` targets,
+  with the tests they ran (#913). The scheduler tests wrote a DynamoDB schedule
+  schema that the scheduler has never read and waited for a trigger that doesn't
+  exist (schedules fire from EventBridge Scheduler), so they could not pass. The
+  queue tests were `t.Skip` placeholders.
+
 ### Fixed
 
 - `go mod tidy` works again. An integration-tagged test still imported
@@ -64,12 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed, and the root and `lambda/dashboard-api` modules are tidied (drops the
   orphaned `robfig/cron` and an unused SQS SDK requirement). `make check` and CI now
   fail when any module, root or nested, is not tidy (#907).
-
 - **No colour escapes when stdout is not a terminal** (#898). `spawn list | cat`
   and `spawn list > file` wrote raw `\x1b[32m` sequences because only
   `--no-color` turned colour off. Colour is now also off when stdout is a pipe or
   file, when `NO_COLOR` is set, or when `TERM=dumb`. `--no-color` still works.
-
 - **`--name` now sets the OS hostname, as its help always said** (#897).
   Nothing set it, so single instances, job-array members (`arr-3`) and `--mpi`
   members (`sim-0`) all kept the EC2 default `ip-172-31-...`, which is what
@@ -78,7 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the member index appended when an `--instance-names` template would give
   members the same name), maps it to the private IP in `/etc/hosts`, and keeps
   it across reboots. MPI hostfiles still address peers by private IP.
-
 - **`--mpi-command` now signals completion, so `--on-complete` fires across
   the MPI cohort** (#894). mpirun ran, but nothing recorded that it had
   finished, so every member rode the job out to idle or TTL even with
@@ -90,7 +93,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signals every member over the cohort's SSH mesh, so each one runs its own
   `--on-complete`. If rank 0 gives up because a peer never accepts SSH, the
   members it can reach stop as well.
-
 - **spored's hybrid-registry client now has a region** (#899). On every
   job-array member (the report was a `--mpi` cohort, but any `--count` array
   takes the same path) spored logged `Failed to register with hybrid registry:
@@ -103,7 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain when its config names none. `spored run-queue` (`spawn launch
   --batch-queue`) had the same defect in its results uploader and now takes the
   instance's region from IMDS when nothing else sets one.
-
 - **`spored run-pipeline-stage`'s S3 and EC2 clients now have a region**
   (#906). The pipeline stage runner's clients (stage data handoff, peer
   discovery, and the pipeline-definition download) used the default AWS
@@ -114,7 +115,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current spawn workflow runs this command: `spawn pipeline launch` stage
   instances run their command directly. #910 proposes removing the stage
   runner or wiring it in.
-
 - **`spawn status` costs a spot instance at its spot price** (#896). The
   instance row said `(spot)` but every figure used the on-demand rate, about
   2.7x too high on an m8a.4xlarge. A spot launch now records the spot price for
@@ -140,7 +140,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gave UTC and the termination deadline gave local time for the same moment.
   spored's UTC timestamps are re-rendered to match, and so is the
   lifecycle-mismatch warning.
-
 - **A failed pipeline stage no longer leaves its instance running and billing**
   (#912). A stage whose command failed or timed out, or whose bootstrap failed,
   exited before the self-terminate step. The orchestrator never read the
@@ -172,7 +171,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The `spawn-pipeline-orchestrator` Lambda has to be redeployed for any of this
   to take effect.
-
 - **`--spot` with an idle timeout, `--on-idle`, `--on-complete stop|hibernate` or
   `--hibernate` now launches an instance EC2 can actually stop** (#922). Every
   `--spot` launch used to make a one-time Spot request, and EC2 refuses to stop
@@ -204,6 +202,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one-time Spot instance it said "stops the instance when idle"; it now says the
   instance cannot be stopped and runs until its deadline. It also says
   "hibernates" for `--on-idle hibernate`.
+- `make test-integration` builds again. The root `integration_test.go` had not
+  compiled since the initial release (`undefined: config`, and a config loader
+  with the wrong return type), and the stale `pkg/integration` orchestrator test
+  from #907 is removed here too. The surviving multi-region sweep tests now clean
+  up after themselves: they cancel with `--yes` (without it, `spawn cancel`
+  prompted, got no answer, and terminated nothing), cancel from `t.Cleanup` so a
+  failed assertion no longer skips it, and leak-check EC2 for anything still
+  carrying the sweep's tag. `make test-integration` now builds `bin/spawn` first
+  and runs with `-count=1`. `make check` and CI now `go vet` every module under
+  every build tag found in its `//go:build` lines, without running anything, so
+  tagged test code can't silently stop compiling again (#913).
 
 ### Security
 
@@ -226,7 +235,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorder, so a test that reaches AWS, the DNS API or any other off-box host
   fails and names the request. `pkg/agent` also installs this in its own
   `TestMain`, so `go test ./pkg/agent` is safe on its own.
-
 - **Only hybrid job-array members register with the hybrid registry** (#904).
   spored registered every instance carrying `spawn:job-array-id` with the
   `spawn-hybrid-registry` DynamoDB table, so every ordinary `spawn launch
@@ -238,7 +246,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local nodes and instances launched by `spawn burst` (tagged
   `spawn:burst=true`); other members log that the registry was skipped. Peer
   discovery is unchanged.
-
 - **Table columns line up in Japanese and other CJK locales** (#909). `spawn
   list` and every other table spawn prints padded columns by character count,
   so a double-width character such as those in `名前` or `IAMロール` shifted
@@ -246,7 +253,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal displays, and colour escapes no longer count towards a cell's width,
   so a coloured `running` cell no longer pushes its column wider than its
   header. English output is unchanged.
-
 - **Idle-stop never fired on instances whose network interface is not named
   `eth0` or `ens*`** (#919). On an m8a with Amazon Linux 2023 the NIC is
   `enp39s0`, which spored did not recognise, so it read zero bytes on every

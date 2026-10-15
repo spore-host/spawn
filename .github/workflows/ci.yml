@@ -222,6 +222,15 @@ jobs:
       - name: Module tidiness gate
         run: make check-tidy
 
+      # Build-tag compile gate (#913): every module is vetted under every custom
+      # build tag discovered from its //go:build lines (integration, e2e_tier*).
+      # The plain `go vet ./...` above only sees the default build, which is how
+      # the root integration_test.go went from the initial release without ever
+      # compiling. Compile-only — vet executes nothing, and the integration and
+      # tier 1-3 tests launch billable instances. The SAME target `make check` runs.
+      - name: Build-tag compile gate
+        run: make check-build-tags
+
   # Tier 0 E2E — the real spawn binary driven against the Substrate AWS
   # emulator. No AWS account/credentials; exercises the full CLI surface
   # (args → cobra → AWS client → Substrate) and asserts JSON, exit codes, and
