@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -18,7 +19,7 @@ func fakeIMDS(t *testing.T, region string) {
 			w.Header().Set("X-Aws-Ec2-Metadata-Token-Ttl-Seconds", "21600")
 			_, _ = w.Write([]byte("token"))
 		case r.Method == http.MethodGet && r.URL.Path == "/latest/dynamic/instance-identity/document":
-			_, _ = w.Write([]byte(`{"region":"` + region + `","instanceId":"i-0123456789abcdef0"}`))
+			_ = json.NewEncoder(w).Encode(map[string]string{"region": region, "instanceId": "i-0123456789abcdef0"})
 		default:
 			http.NotFound(w, r)
 		}
