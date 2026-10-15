@@ -61,12 +61,24 @@ type JobResult struct {
 }
 
 // NewQueueRunner creates a new queue runner using the default AWS credential chain.
+//
+// The region falls back to the instance's own, from IMDS (#899). `spored
+// run-queue` runs on the instance, which carries no AWS_REGION, and the SDK does
+// not consult IMDS for the region unless asked — so the results uploader failed
+// every PutObject with "Missing Region". An explicit AWS_REGION or profile region
+// still wins; IMDS is consulted only when neither is set.
 func NewQueueRunner(ctx context.Context, queueFile string) (*QueueRunner, error) {
-	awsCfg, err := config.LoadDefaultConfig(ctx)
+	awsCfg, err := loadQueueRunnerAWSConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
 	return NewQueueRunnerWithAWSConfig(ctx, queueFile, "", awsCfg)
+}
+
+// loadQueueRunnerAWSConfig is NewQueueRunner's AWS config: the default chain,
+// with the instance's IMDS region as the fallback when no region is set (#899).
+func loadQueueRunnerAWSConfig(ctx context.Context) (aws.Config, error) {
+	return config.LoadDefaultConfig(ctx, config.WithEC2IMDSRegion())
 }
 
 // NewQueueRunnerWithAWSConfig creates a queue runner with an injected AWS config.

@@ -30,6 +30,20 @@ type Identity struct {
 	PendingTime time.Time
 }
 
+// AWSRegion is the region an AWS client built for this identity should be pinned
+// to, or "" when the identity names no AWS region and the client should fall
+// back to the ambient chain (#899).
+//
+// Region is "local" — a placeholder, not a region — for a local provider whose
+// config omits one (pkg/config.LoadLocalConfig's default). Pinning a client to it
+// would point DynamoDB at dynamodb.local.amazonaws.com, so it counts as unset.
+func (i *Identity) AWSRegion() string {
+	if i == nil || i.Region == "local" {
+		return ""
+	}
+	return i.Region
+}
+
 // PluginDeclaration references a plugin to install at instance startup.
 type PluginDeclaration struct {
 	Ref    string            `json:"ref" yaml:"ref"`
