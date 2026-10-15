@@ -111,6 +111,18 @@ func (rt *Runtime) InstallWithProvenance(ctx context.Context, spec *plugin.Plugi
 
 	tmplCtx := rt.buildTemplateContext(state)
 
+	// Pre-flight: conditions.remote, before any install step runs (#1040). The
+	// spec documents these as "pre-flight checks before install", but nothing
+	// evaluated them, so a plugin's platform or command check was silently
+	// ignored. A failure marks the plugin failed with the author's message,
+	// which `spawn plugin install` and `spawn plugin status` report.
+	if len(spec.Conditions.Remote) > 0 {
+		log.Printf("Plugin %s: checking %d remote condition(s)", spec.Name, len(spec.Conditions.Remote))
+		if err := rt.checkRemoteConditions(ctx, spec.Conditions.Remote, tmplCtx, false); err != nil {
+			return rt.failPlugin(state, fmt.Errorf("remote condition: %w", err))
+		}
+	}
+
 	// Install phase.
 	log.Printf("Plugin %s: install", spec.Name)
 	if err := rt.executor.RunSteps(ctx, spec.Remote.Install, tmplCtx); err != nil {
@@ -151,6 +163,66 @@ func (rt *Runtime) InstallWithProvenance(ctx context.Context, spec *plugin.Plugi
 
 	log.Printf("Plugin %s: running", spec.Name)
 	return nil
+}
+
+// Preflight evaluates a spec's conditions.remote without installing anything or
+// recording state. `spawn plugin install` calls it (POST /v1/plugins/preflight)
+// before running the plugin's local provision steps, so a spore that fails a
+// remote condition is reported before the controller has, say, minted a
+// credential or created an endpoint for an install that cannot succeed.
+//
+// Pushed values do not exist yet at that point, so a condition whose command
+// references {{ pushed.* }} is deferred to the check InstallWithProvenance
+// makes, rather than failed here.
+func (rt *Runtime) Preflight(ctx context.Context, spec *plugin.PluginSpec, cfg map[string]string) error {
+	resolvedCfg, err := spec.ResolvedConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve config: %w", err)
+	}
+	tmplCtx := rt.buildTemplateContext(&plugin.PluginState{Config: resolvedCfg})
+	return rt.checkRemoteConditions(ctx, spec.Conditions.Remote, tmplCtx, true)
+}
+
+// conditionTimeout bounds the evaluation of a spec's conditions.remote, so a
+// hung pre-flight command cannot park a plugin at "installing" forever. It is
+// kept under the push API's WriteTimeout because the preflight endpoint
+// evaluates conditions synchronously.
+const conditionTimeout = 10 * time.Second
+
+// checkRemoteConditions evaluates conds on this spore. With deferPushed, a
+// condition that cannot be rendered yet for want of a pushed value is skipped.
+func (rt *Runtime) checkRemoteConditions(ctx context.Context, conds []plugin.Condition, tmplCtx plugin.TemplateContext, deferPushed bool) error {
+	ctx, cancel := context.WithTimeout(ctx, conditionTimeout)
+	defer cancel()
+	host := rt.conditionHost()
+	for _, c := range conds {
+		err := plugin.CheckCondition(ctx, c, tmplCtx, host)
+		if err != nil && deferPushed && errors.Is(err, plugin.ErrMissingKey) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// conditionHost is this spore as a plugin.ConditionHost: platform conditions
+// are compared against hostGOOS (the same value the Windows refusal reads),
+// and command conditions run exactly as a root run step does.
+func (rt *Runtime) conditionHost() plugin.ConditionHost {
+	return plugin.ConditionHost{
+		GOOS: hostGOOS,
+		RunCommand: func(ctx context.Context, script string) error {
+			err := rt.executor.runCommand(ctx, plugin.Step{Type: "run", Run: script})
+			if inner := errors.Unwrap(err); inner != nil {
+				// runCommand prefixes `run "<script>"`; CheckCondition already
+				// names the command, so keep only the exit status.
+				return inner
+			}
+			return err
+		},
+	}
 }
 
 // ErrStopStepsFailed marks a Remove whose remote.stop steps failed. The plugin

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -200,19 +201,23 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 		fmt.Printf("  checksum-manifest verified\n")
 	}
 
-	// Check local pre-flight conditions before touching the remote.
-	localExec := plugin.NewLocalExecutor(nil)
-	if err := localExec.CheckLocalConditions(spec.Conditions.Local); err != nil {
+	resolvedCfg, err := spec.ResolvedConfig(cfg)
+	if err != nil {
+		return err
+	}
+
+	// Check local pre-flight conditions before touching the remote. Their
+	// commands are rendered against the resolved config, like steps.
+	condCtx := plugin.NewTemplateContext()
+	for k, v := range resolvedCfg {
+		condCtx.Config[k] = v
+	}
+	if err := plugin.NewLocalExecutor(nil).CheckLocalConditions(ctx, spec.Conditions.Local, condCtx); err != nil {
 		return fmt.Errorf("local condition: %w", err)
 	}
 
 	// (instance.ip is resolved just below; SSH identity for local steps is set up
 	// there once we have the IP.)
-
-	resolvedCfg, err := spec.ResolvedConfig(cfg)
-	if err != nil {
-		return err
-	}
 
 	// Build template context with instance info and resolved config.
 	tmplCtx := plugin.NewTemplateContext()
@@ -224,6 +229,47 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	}
 	for k, v := range resolvedCfg {
 		tmplCtx.Config[k] = v
+	}
+
+	// Contact the spore up front when there is a remote half or a remote
+	// pre-flight condition: the remote conditions are checked there, by spored,
+	// before the local provision steps below run (#1040), so a spore that
+	// cannot take the plugin is reported before the controller mints a
+	// credential or creates an endpoint for it.
+	hasRemote := len(spec.Remote.Install) > 0 || len(spec.Remote.Configure) > 0 ||
+		len(spec.Remote.Start) > 0
+	var sshHost string
+	if hasRemote || len(spec.Conditions.Remote) > 0 {
+		sshHost, err = resolvePluginSSHHost(ctx, instance)
+		if err != nil {
+			return err
+		}
+		// Gate on the instance being fully provisioned before touching the remote
+		// half: spored must be up to receive the request, and cloud-init must
+		// have finished (local user created, keys installed, network/DNS ready)
+		// or the remote steps race the boot. This is the same deterministic
+		// readiness signal `spawn launch` uses. Best-effort: a resolvable instance
+		// with SSM lets us wait; otherwise we proceed (e.g. a bare hostname).
+		if inst := resolveInstanceViaSpawn(ctx, instance); inst != nil && inst.InstanceID != "" {
+			fmt.Println("Waiting for the instance to be ready...")
+			if rerr := ensureInstanceReady(ctx, inst.Region, inst.InstanceID, 5*time.Minute); rerr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not confirm instance readiness (%v); proceeding\n", rerr)
+			}
+		}
+	}
+	if len(spec.Conditions.Remote) > 0 {
+		fmt.Printf("Checking %d remote condition(s) on the instance...\n", len(spec.Conditions.Remote))
+		if err := remotePluginPreflight(ctx, sshHost, spec, resolvedCfg); err != nil {
+			if !errors.Is(err, errPreflightUnsupported) {
+				return err
+			}
+			// An older spored has no preflight endpoint. If there is a remote half,
+			// a spored new enough to evaluate conditions does so before its install
+			// phase and the failure is reported below; an older one does not
+			// evaluate them at all.
+			fmt.Fprintf(os.Stderr, "warning: this instance's spored cannot check remote conditions before install; "+
+				"they are checked (by a spored that supports them) only when the remote install runs\n")
+		}
 	}
 
 	// If the plugin has local steps that SSH to the instance (e.g. spore-sync's
@@ -259,25 +305,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 
 	// Run the remote half (install → configure → start) on the instance via
 	// spored, handing over the resolved config and any buffered pushed values.
-	hasRemote := len(spec.Remote.Install) > 0 || len(spec.Remote.Configure) > 0 ||
-		len(spec.Remote.Start) > 0
 	if hasRemote {
-		sshHost, err := resolvePluginSSHHost(ctx, instance)
-		if err != nil {
-			return err
-		}
-		// Gate on the instance being fully provisioned before touching the remote
-		// half: spored must be up to receive the install request, and cloud-init
-		// must have finished (local user created, keys installed, network/DNS
-		// ready) or the remote steps race the boot. This is the same deterministic
-		// readiness signal `spawn launch` uses. Best-effort: a resolvable instance
-		// with SSM lets us wait; otherwise we proceed (e.g. a bare hostname).
-		if inst := resolveInstanceViaSpawn(ctx, instance); inst != nil && inst.InstanceID != "" {
-			fmt.Println("Waiting for the instance to be ready...")
-			if rerr := ensureInstanceReady(ctx, inst.Region, inst.InstanceID, 5*time.Minute); rerr != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not confirm instance readiness (%v); proceeding\n", rerr)
-			}
-		}
 		fmt.Println("Running remote install steps on the instance...")
 		if err := remotePluginInstall(ctx, sshHost, spec, resolvedCfg, pushBuf.Values(), prov); err != nil {
 			return fmt.Errorf("remote install: %w", err)
@@ -595,6 +623,72 @@ func remotePluginInstall(ctx context.Context, instance string, spec *plugin.Plug
 		return resp, nil
 	})
 	return err
+}
+
+// errPreflightUnsupported means the instance's spored predates
+// POST /v1/plugins/preflight. Such a spored routes the path to
+// DELETE /v1/plugins/{name} and answers 405 (or 404).
+var errPreflightUnsupported = errors.New("spored has no preflight endpoint")
+
+// errRemoteCondition marks a remote pre-flight condition that failed on the
+// instance; the error text is the condition's message and detail.
+var errRemoteCondition = errors.New("remote condition failed on the instance")
+
+// remotePluginPreflight asks spored to evaluate spec's conditions.remote on the
+// instance, installing nothing (#1040).
+func remotePluginPreflight(ctx context.Context, instance string, spec *plugin.PluginSpec, cfg map[string]string) error {
+	specYAML, err := yaml.Marshal(spec)
+	if err != nil {
+		return fmt.Errorf("marshal spec: %w", err)
+	}
+	payload, err := json.Marshal(map[string]interface{}{"spec": string(specYAML), "config": cfg})
+	if err != nil {
+		return fmt.Errorf("encode preflight request: %w", err)
+	}
+	token, err := sshReadToken(ctx, instance, pluginKeyPath)
+	if err != nil {
+		return err
+	}
+	_, err = withSSHTunnel(ctx, instance, pluginKeyPath, func() (*http.Response, error) {
+		return postPluginPreflight(ctx, http.DefaultClient, "http://127.0.0.1:7777", token, payload)
+	})
+	return err
+}
+
+// postPluginPreflight sends a preflight request to spored's push API at baseURL
+// and maps the answer to an error: nil when every remote condition passed, one
+// wrapping errRemoteCondition (and naming the condition's message) when one
+// failed, and errPreflightUnsupported for a spored without the endpoint.
+func postPluginPreflight(ctx context.Context, client *http.Client, baseURL, token string, payload []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/plugins/preflight", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return resp, nil
+	case http.StatusPreconditionFailed:
+		var pr struct {
+			Error string `json:"error"`
+		}
+		msg := strings.TrimSpace(string(body))
+		if json.Unmarshal(body, &pr) == nil && pr.Error != "" {
+			msg = pr.Error
+		}
+		return resp, fmt.Errorf("%w: %s", errRemoteCondition, msg)
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		return resp, errPreflightUnsupported
+	default:
+		return resp, fmt.Errorf("preflight API: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 }
 
 // waitForPluginReady polls the remote plugin status until it reaches a terminal

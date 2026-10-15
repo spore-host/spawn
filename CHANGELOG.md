@@ -572,6 +572,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   way the CPU line does. The JSON output gains `network_measured` and
   `network_unknown`.
 
+- **A plugin's remote pre-flight conditions are now checked** (#1040). The
+  `conditions.remote` block of a plugin spec, documented as "pre-flight checks
+  before install", was validated and then ignored, so a `type: command` check
+  such as "docker must already be present", or a `type: platform` OS
+  requirement, never ran. spored now evaluates them on the instance before the
+  plugin's install steps, and a failure marks the plugin failed with the
+  condition's message, which `spawn plugin install` and `spawn plugin status`
+  print. `spawn plugin install` also asks the instance to check them before it
+  runs the plugin's local steps, so a failing check stops the install before
+  anything is created on your machine (against an instance running an older
+  spored it warns that it cannot check them first). A condition of a type spawn
+  does not know now fails instead of being skipped, a platform `os` matches
+  regardless of case, and condition commands, local and remote, are rendered
+  with `{{ config.* }}` values like steps.
+
 ### Security
 
 - **The unit tests no longer make real AWS and DNS calls with your credentials**

@@ -25,13 +25,7 @@ func newTestServer(t *testing.T) (*PushAPIServer, *httptest.Server) {
 		healthCancels: make(map[string]context.CancelFunc),
 	}
 	s := &PushAPIServer{rt: rt, token: "test-token", baseCtx: context.Background()}
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/plugins/install", s.handleInstall)
-	mux.HandleFunc("POST /v1/plugins/{name}/push", s.handlePush)
-	mux.HandleFunc("GET /v1/plugins/{name}/status", s.handleStatus)
-	mux.HandleFunc("GET /v1/plugins", s.handleList)
-	mux.HandleFunc("DELETE /v1/plugins/{name}", s.handleRemove)
-	srv := httptest.NewServer(s.authMiddleware(mux))
+	srv := httptest.NewServer(s.authMiddleware(s.routes()))
 	t.Cleanup(srv.Close)
 	return s, srv
 }
