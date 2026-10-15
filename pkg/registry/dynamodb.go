@@ -26,6 +26,22 @@ type PeerRegistry struct {
 	tableName string
 	identity  *provider.Identity
 	ttl       int64
+	// publicIP, when set, is the instance's current public IP; identity's is
+	// the boot-time one, and a resume from hibernation can change it (#1019).
+	publicIP func() string
+}
+
+// SetPublicIPSource makes Register record fn() as the instance's IP rather
+// than the identity's boot-time public IP (#1019). Set before the first
+// Register; not safe to call concurrently with it.
+func (r *PeerRegistry) SetPublicIPSource(fn func() string) { r.publicIP = fn }
+
+// ip is the public IP to register: the source's, else the identity's.
+func (r *PeerRegistry) ip() string {
+	if r.publicIP != nil {
+		return r.publicIP()
+	}
+	return r.identity.PublicIP
 }
 
 // NewPeerRegistry creates a new peer registry.
@@ -80,7 +96,7 @@ func (r *PeerRegistry) Register(ctx context.Context, jobArrayID string, index in
 		"instance_id":    &types.AttributeValueMemberS{Value: r.identity.InstanceID},
 		"index":          &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", index)},
 		"provider":       &types.AttributeValueMemberS{Value: r.identity.Provider},
-		"ip_address":     &types.AttributeValueMemberS{Value: r.identity.PublicIP},
+		"ip_address":     &types.AttributeValueMemberS{Value: r.ip()},
 		"private_ip":     &types.AttributeValueMemberS{Value: r.identity.PrivateIP},
 		"region":         &types.AttributeValueMemberS{Value: r.identity.Region},
 		"registered_at":  &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", now)},

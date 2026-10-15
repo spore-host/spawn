@@ -531,6 +531,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance again, but a completion written after the resume is acted on as
   usual. Windows instances are not covered yet: their clocks do not show a
   resume (#962).
+- **After a resume from hibernation with a new public IP, nothing in spored
+  keeps using the old one** (#1019). #987 re-registered the DNS name with the
+  new IP; three other things still had the IP from the first boot:
+  - `spawn:ready-url` for a DCV desktop or web app on an instance with no DNS
+    name named the old IP, so the URL `spawn` opens went nowhere. spored now
+    rewrites it with the new IP, keeping the same access token;
+  - `{{ instance.ip }}` in a plugin's steps (a health check, or a plugin
+    installed after the resume) rendered the old IP;
+  - the job-array entry in the hybrid registry was re-registered with the old
+    IP.
+
+  And an instance whose first boot had no public IP never registered its DNS
+  name, even once it had one. spored now looks for a public IP again about
+  once an hour, and after a resume, and registers the name once there is one.
 - **A GPU that cannot be read no longer counts as an idle GPU, and Trainium,
   Inferentia, Gaudi and AMD accelerators are now checked** (#954). When
   `nvidia-smi` failed (for example a driver that no longer matched the kernel

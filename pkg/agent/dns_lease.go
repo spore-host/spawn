@@ -74,19 +74,48 @@ func nextLeaseRefresh(now time.Time, succeeded bool) time.Time {
 
 // refreshDNSLease renews this instance's DNS registration when it is due.
 //
-// Called every tick and cheap when not due. Does nothing unless the boot path set
-// up a DNS client — i.e. this instance registered DNS in the first place — so a
-// spore with no DNS name never starts calling the updater.
+// Called every tick and cheap when not due. A spore with no DNS name, or no
+// public IP, never calls the updater. One whose boot had no public IP looks for
+// one again, at IMDS, once a renewal interval (a spore in a private subnet has
+// none, and asking more often would only repeat the answer); once it has one,
+// or once a DNS client that failed to build can be built, it gets the client
+// here and registers (#1019). A failed client build is retried on the failure
+// schedule, not every tick.
 //
 // spawn:dns-status is re-written only when it CHANGES. The boot path tags on every
 // registration, and doing the same hourly would be two EC2 API calls an hour per
 // spore to say nothing new.
 func (a *Agent) refreshDNSLease(ctx context.Context) {
-	if a.dnsClient == nil || a.config.DNSName == "" || a.publicIP() == "" {
+	if a.config == nil || a.config.DNSName == "" {
 		return
 	}
 	now := time.Now()
 	if now.Before(a.nextDNSRefresh) {
+		return
+	}
+	if a.publicIP() == "" {
+		// Quiet on failure: IMDS has no public-ipv4 for an instance without one,
+		// and that is the normal answer, not a fault.
+		_ = a.readPublicIP(ctx)
+		if a.publicIP() == "" {
+			a.nextDNSRefresh = nextLeaseRefresh(now, true)
+			return
+		}
+	}
+	if a.dnsTargetErr != nil {
+		// The target tags do not validate, so there is nothing to register with.
+		// Say so once, as the boot path does for an instance that had an IP then
+		// (#891), and look again only on the renewal schedule.
+		if a.lastDNSStatus != "failed" {
+			log.Printf("Warning: DNS not registered: %v", a.dnsTargetErr)
+			a.recordDNSStatus(ctx, "failed", a.dnsTargetErr.Error())
+			a.lastDNSStatus = "failed"
+		}
+		a.nextDNSRefresh = nextLeaseRefresh(now, true)
+		return
+	}
+	if !a.ensureDNSClient(ctx) {
+		a.nextDNSRefresh = nextLeaseRefresh(now, false)
 		return
 	}
 	err := a.registerDNS(ctx)

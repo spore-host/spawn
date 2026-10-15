@@ -43,6 +43,8 @@ type Agent struct {
 	configMu              sync.RWMutex
 	dnsClient             *dns.Client
 	dnsDomain             string // DNS domain (e.g. "spore.host" or "prismcloud.host")
+	dnsEndpoint           string // DNS updater URL; "" is the compiled-in spore.host one (#891)
+	dnsTargetErr          error  // the domain or endpoint tag did not validate: never register (#891)
 	registry              *registry.PeerRegistry
 	pluginRuntime         *pluginruntime.Runtime
 	notifier              *Notifier // Slack lifecycle notifications (nil if not configured)
@@ -108,6 +110,12 @@ type Agent struct {
 	webProxyStarted bool   // the :443 TLS reverse proxy is up (start once)
 	webReadyDone    bool   // web ready-url written OR a terminal failure recorded (stop retrying)
 	webToken        string // access token gating the :443 proxy (empty when WebAuth=none); generated once
+
+	// The written spawn:ready-url's host, and how to build it for another, so
+	// refreshReadyURL can follow a public IP that changed on a resume (#1019).
+	// Monitor loop only.
+	readyURLHost  string
+	readyURLBuild func(host string) string
 
 	// dcv runs the `dcv` CLI shell-outs (list/describe sessions). Defaults to the
 	// real exec-based runner; tests inject a fake so the handshake + idle logic is
@@ -334,33 +342,20 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	// Skip DNS for local provider (Phase 1 decision)
 	dnsDomain, dnsEndpoint, targetErr := resolveDNSTarget(config)
 	agent.dnsDomain = dnsDomain
+	agent.dnsEndpoint = dnsEndpoint
+	agent.dnsTargetErr = targetErr
 
 	// THE one from #733: this block POSTs to the DNS API, mutating a Route53
 	// record, and writes an EC2 tag via recordDNSStatus. A query must do neither.
-	if activate && config.DNSName != "" && identity.PublicIP != "" && identity.Provider == "ec2" && targetErr != nil {
+	if activate && config.DNSName != "" && agent.publicIP() != "" && identity.Provider == "ec2" && targetErr != nil {
 		// A target that does not validate is reported, not replaced: silently
 		// registering under spore.host instead would put the record somewhere
 		// nobody asked for and nobody will look (#891).
 		log.Printf("Warning: DNS not registered: %v", targetErr)
 		agent.recordDNSStatus(ctx, "failed", targetErr.Error())
 		agent.lastDNSStatus = "failed"
-	} else if activate && config.DNSName != "" && identity.PublicIP != "" && identity.Provider == "ec2" {
-		dnsClient, err := newDNSClient(ctx, dnsDomain, dnsEndpoint)
-		if err != nil {
-			log.Printf("Warning: Failed to create DNS client: %v", err)
-		} else {
-			agent.dnsClient = dnsClient
-
-			// Pass the friendly account-name slug so the updater also registers
-			// the alias FQDN {name}.{account-name}.spore.host (#121). Empty when
-			// the account has no name — base36 only, unchanged.
-			dnsClient.SetAccountName(config.AccountName)
-
-			// This spored renews its registration on a timer (refreshDNSLease), so
-			// it may ask for a lease. The one-shot `spawn dns register` uses the same
-			// client and must not — see dns.Client.renewing.
-			dnsClient.SetRenewing(true)
-
+	} else if activate && config.DNSName != "" && agent.publicIP() != "" && identity.Provider == "ec2" {
+		if agent.ensureDNSClient(ctx) {
 			// The SAME registration the renewal timer calls, so boot and renewal
 			// cannot drift apart into two slightly different requests.
 			regErr := agent.registerDNS(ctx)
@@ -376,7 +371,8 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	} else if activate && config.DNSName != "" && identity.Provider == "local" {
 		log.Printf("DNS registration skipped for local provider")
 	} else if activate && config.DNSName != "" {
-		log.Printf("Warning: DNS name configured (%s) but no public IP available", config.DNSName)
+		// refreshDNSLease registers it if a public IP appears later (#1019).
+		log.Printf("Warning: DNS name configured (%s) but no public IP available yet; it will be registered if one appears", config.DNSName)
 	} else if activate {
 		// No DNS name configured (no spawn:dns-name tag) → nothing to register.
 		// Log it explicitly: a silent skip here made a client that forgot to set
@@ -392,7 +388,7 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 		if err != nil {
 			log.Printf("Warning: Failed to initialize registry: %v (continuing without hybrid mode)", err)
 		} else {
-			agent.registry = reg
+			agent.attachRegistry(reg)
 
 			// Register with hybrid registry using index from config
 			index := config.JobArrayIndex
@@ -431,7 +427,7 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	// the local login user so plugin steps that opt into as_user (e.g. Globus
 	// Connect Personal, which refuses to run as root) run as that user.
 	rt := pluginruntime.NewRuntime(identity, config.LocalUsername)
-	agent.pluginRuntime = rt
+	agent.attachPluginRuntime(rt)
 
 	if activate && len(config.Plugins) > 0 {
 		// Convert provider.PluginDeclaration to plugin.Declaration.
@@ -445,6 +441,57 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	}
 
 	return agent, nil
+}
+
+// ensureDNSClient creates the DNS client if there is none yet and this instance
+// should have one: an EC2 instance with a DNS name and a public IP. It reports
+// whether a client is there afterwards.
+//
+// The boot path calls it, and so does refreshDNSLease, because the public IP is
+// not fixed at boot: an instance that booted without one, then got one (an EIP
+// associated later, or a resume from hibernation), would otherwise never be
+// registered (#1019).
+func (a *Agent) ensureDNSClient(ctx context.Context) bool {
+	if a.dnsClient != nil {
+		return true
+	}
+	if a.config.DNSName == "" || a.publicIP() == "" || a.identity == nil || a.identity.Provider != "ec2" {
+		return false
+	}
+	// An invalid spawn:dns-domain or spawn:dns-endpoint is never replaced by the
+	// default: the record would land where nobody asked for it (#891).
+	if a.dnsTargetErr != nil {
+		return false
+	}
+	c, err := newDNSClient(ctx, a.dnsDomain, a.dnsEndpoint)
+	if err != nil {
+		log.Printf("Warning: Failed to create DNS client: %v", err)
+		return false
+	}
+	// Pass the friendly account-name slug so the updater also registers the
+	// alias FQDN {name}.{account-name}.spore.host (#121). Empty when the
+	// account has no name — base36 only, unchanged.
+	c.SetAccountName(a.config.AccountName)
+	// This spored renews its registration on a timer (refreshDNSLease), so it
+	// may ask for a lease. The one-shot `spawn dns register` uses the same
+	// client and must not — see dns.Client.renewing.
+	c.SetRenewing(true)
+	a.dnsClient = c
+	return true
+}
+
+// attachPluginRuntime and attachRegistry hand the instance's public IP to the
+// plugin runtime ({{ instance.ip }}) and the hybrid registry as a getter of
+// the guarded current value, never as the boot-time identity snapshot, so a
+// public IP re-read after a resume reaches them too (#1019).
+func (a *Agent) attachPluginRuntime(rt *pluginruntime.Runtime) {
+	rt.SetPublicIPSource(a.publicIP)
+	a.pluginRuntime = rt
+}
+
+func (a *Agent) attachRegistry(reg *registry.PeerRegistry) {
+	reg.SetPublicIPSource(a.publicIP)
+	a.registry = reg
 }
 
 func (a *Agent) Monitor(ctx context.Context) {
@@ -561,6 +608,10 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// the app's HTTP port, start the :443 TLS reverse proxy once it's up, and write
 	// spawn:ready-url. Loop-driven like the DCV handshake. No-op on non-web instances.
 	a.maybeSetupWebReady(ctx)
+
+	// 0a3. Keep spawn:ready-url on the instance's current address: one written
+	// with the public IP goes stale when a resume changes it (#1019).
+	a.refreshReadyURL(ctx)
 
 	// 0a. Keep spawn:logged-in-count tag current (throttled to 5/min).
 	a.writeSessionCountTag(ctx, countActiveSessions()+countActivePortConnections(a.config.ActivePorts))
@@ -1032,10 +1083,7 @@ func (a *Agent) maybeSetupDCVAuth(ctx context.Context) {
 	a.dcvTokensMu.Unlock()
 
 	// Ready URL — DNS FQDN when available, else public IP.
-	host := a.publicIP()
-	if a.config.DNSName != "" && a.dnsDomain != "" {
-		host = dns.GetFullDNSName(a.config.DNSName, a.identity.AccountID, a.dnsDomain)
-	}
+	host := a.readyHost()
 	readyURL := buildReadyURL(host, token, sessionID)
 
 	// spawn:ready-status carries the machine-readable enum ("ready"); the friendly
@@ -1048,6 +1096,9 @@ func (a *Agent) maybeSetupDCVAuth(ctx context.Context) {
 	if a.dcvReadyURLWritten {
 		log.Printf("DCV: spawn:ready-url written (session %s, host %s)", sessionID, host)
 		a.dcvAuthDone = true
+		// The token stays valid for the session's lifetime (see the verifier),
+		// so a rewrite for a new host keeps it (#1019).
+		a.noteReadyURL(host, func(h string) string { return buildReadyURL(h, token, sessionID) })
 	}
 	// If the tag write failed (writeReadyTags didn't latch), retry next tick.
 }
