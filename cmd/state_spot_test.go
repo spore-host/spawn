@@ -32,7 +32,7 @@ func (f *recordingEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "text/xml")
 	a := form.Get("Action")
-	_, _ = w.Write([]byte(`<` + a + `Response xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>r</requestId></` + a + `Response>`))
+	_, _ = w.Write([]byte(`<` + a + `Response xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>r</requestId></` + a + `Response>`)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 }
 
 func recordingClient(t *testing.T, f *recordingEC2) *aws.Client {

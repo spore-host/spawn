@@ -88,7 +88,7 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			b.WriteString(`<item><key>` + spotrequest.TypeTag + `</key><value>` + f.spotType + `</value></item>`)
 		}
 		b.WriteString(`</tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
-		_, _ = w.Write(b.Bytes())
+		_, _ = w.Write(b.Bytes()) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 	case "CancelSpotInstanceRequests":
 		if f.cancelDenied {
 			w.WriteHeader(http.StatusForbidden)
