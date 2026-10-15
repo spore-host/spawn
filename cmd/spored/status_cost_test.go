@@ -257,3 +257,69 @@ func TestStatusReport_RestartedInstanceDoesNotBillTheStop(t *testing.T) {
 		t.Errorf("effective rate %.4f is not below the on-demand rate for an instance that ran 92s of 197s", *r.Cost.EffectiveRate)
 	}
 }
+
+// #945: the daemon ran 22s, the instance hibernated for 8 hours and resumed
+// into the same boot, and has run 38s since. `spored status` reads the clock
+// the daemon published before the hibernation, from /run, which survives it.
+// Compute is the 60s of running; the 8 hours are hibernated — part of elapsed,
+// billed as EBS like a stop, and never as compute.
+func TestStatusReport_HibernatedTimeIsNotCompute(t *testing.T) {
+	const bootID = "boot-945"
+	mono, boottime := 10*time.Second, 10*time.Second // the daemon started 10s into the boot
+	restore := agent.SetKernelClocksForTest(bootID, func() (time.Duration, time.Duration, bool) { return mono, boottime, true })
+	defer restore()
+
+	const hibernation = 8 * time.Hour
+	now := time.Now()
+	daemonStart := now.Add(-(60*time.Second + hibernation))
+	cfg := &provider.Config{
+		LaunchTime:    daemonStart.Add(-10 * time.Second),
+		PricePerHour:  0.1078,
+		EBSHourlyCost: 0.0011,
+	}
+	path := filepath.Join(t.TempDir(), "compute-clock.json")
+	if err := agent.WriteComputeClock(path, agent.ComputeClock{
+		InstanceID: statusIdentity().InstanceID, StartedAt: daemonStart, KernelClock: true, BootID: bootID,
+		StartMonotonicNS: int64(mono), StartBoottimeNS: int64(boottime),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mono, boottime = mono+22*time.Second, boottime+22*time.Second
+	boottime += hibernation
+	mono, boottime = mono+38*time.Second, boottime+38*time.Second
+
+	ag := queryAgent(t, cfg)
+	c, err := agent.ReadComputeClock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ag.AdoptComputeClock(c, cfg.LaunchTime); err != nil {
+		t.Fatalf("AdoptComputeClock: %v", err)
+	}
+	r := buildStatusReport(ag, cfg, statusIdentity(), false)
+
+	if r.ComputeSeconds < 59 || r.ComputeSeconds > 61 {
+		t.Errorf("compute = %.0fs, want the 60s the instance ran: the hibernation was counted", r.ComputeSeconds)
+	}
+	if r.BilledSeconds > 75 {
+		t.Errorf("billed = %.0fs, want ~70s (60s compute + 10s boot)", r.BilledSeconds)
+	}
+	if got := time.Duration(r.HibernatedSeconds * float64(time.Second)); got != hibernation {
+		t.Errorf("hibernated = %v, want %v", got, hibernation)
+	}
+	if r.StoppedSeconds != 0 {
+		t.Errorf("stopped = %.0fs, want 0: the hibernation is reported as hibernated, once", r.StoppedSeconds)
+	}
+	if r.Cost == nil {
+		t.Fatal("no cost section")
+	}
+	if want := 0.0011 * hibernation.Hours(); r.Cost.StorageCost < want-0.01 {
+		t.Errorf("storage cost = $%.4f, want EBS for the hibernation ($%.4f)", r.Cost.StorageCost, want)
+	}
+	out := renderTable(t, r)
+	for _, want := range []string{"8h 0m hibernated", "Storage cost:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}

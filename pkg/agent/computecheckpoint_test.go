@@ -26,6 +26,13 @@ var (
 
 const issueInstance = "i-0abc928"
 
+// resolveWall is resolveComputeStart's wall-clock decision, for the rules that
+// predate the kernel clocks (#945) and still apply where there are none.
+func resolveWall(in computeStartInputs) (base int64, from time.Time, source string) {
+	s := resolveComputeStart(in)
+	return s.Base, s.From, s.Source
+}
+
 // The first boot's checkpoint as the daemon's shutdown wrote it: everything
 // from kernel boot to the stop.
 func firstBootCheckpoint() *ComputeCheckpoint {
@@ -41,7 +48,7 @@ func firstBootCheckpoint() *ComputeCheckpoint {
 // the kernel's boot time — the OS and cloud-init time EC2 bills, which counting
 // from spored's own start dropped.
 func TestResolveComputeStart_CarriesEarlierBootsAcrossAStop(t *testing.T) {
-	base, from, _ := resolveComputeStart(computeStartInputs{
+	base, from, _ := resolveWall(computeStartInputs{
 		InstanceID: issueInstance, BootID: nextBootID, BootTime: boot2At,
 		LaunchTime: t0928, SporedAt: spored2At,
 		TagSeconds: 0, // the shutdown's tag write was lost
@@ -64,7 +71,7 @@ func TestResolveComputeStart_CarriesEarlierBootsAcrossAStop(t *testing.T) {
 // Neither copy is authoritative: whichever recorded more wins, since neither
 // includes the current boot.
 func TestResolveComputeStart_TheLargerOfTagAndCheckpointWins(t *testing.T) {
-	base, _, _ := resolveComputeStart(computeStartInputs{
+	base, _, _ := resolveWall(computeStartInputs{
 		InstanceID: issueInstance, BootID: nextBootID, BootTime: boot2At, SporedAt: spored2At,
 		TagSeconds: 500, Checkpoint: firstBootCheckpoint(),
 	})
@@ -81,7 +88,7 @@ func TestResolveComputeStart_RestartWithinABootDoesNotDoubleCount(t *testing.T) 
 		TotalSeconds: 70 + 600, WrittenAt: boot2At.Add(10 * time.Minute),
 	}
 	restart := boot2At.Add(10*time.Minute + 5*time.Second)
-	base, from, _ := resolveComputeStart(computeStartInputs{
+	base, from, _ := resolveWall(computeStartInputs{
 		InstanceID: issueInstance, BootID: nextBootID, BootTime: boot2At, SporedAt: restart,
 		TagSeconds: 70 + 600, // the stop flush wrote the total INCLUDING this boot
 		Checkpoint: cp,
@@ -98,7 +105,7 @@ func TestResolveComputeStart_RestartWithinABootDoesNotDoubleCount(t *testing.T) 
 // this boot (an older spored ran in it), so this boot counts only from spored's
 // start — never from the kernel's boot, which would count that part twice.
 func TestResolveComputeStart_TagOnlyCountsFromSporedStart(t *testing.T) {
-	base, from, _ := resolveComputeStart(computeStartInputs{
+	base, from, _ := resolveWall(computeStartInputs{
 		InstanceID: issueInstance, BootID: nextBootID, BootTime: boot2At, SporedAt: spored2At, TagSeconds: 300,
 	})
 	if base != 300 || !from.Equal(spored2At) {
@@ -118,7 +125,7 @@ func TestResolveComputeStart_IgnoresAForeignOrUnidentifiedCheckpoint(t *testing.
 		"checkpoint has no id": {InstanceID: issueInstance, BootID: nextBootID, SporedAt: spored2At, TagSeconds: 0, Checkpoint: noBoot},
 		"this boot has no id":  {InstanceID: issueInstance, BootID: "", SporedAt: spored2At, TagSeconds: 0, Checkpoint: firstBootCheckpoint()},
 	} {
-		if base, _, _ := resolveComputeStart(in); base != 0 {
+		if base, _, _ := resolveWall(in); base != 0 {
 			t.Errorf("%s: base = %d, want the checkpoint ignored", name, base)
 		}
 	}
@@ -127,13 +134,13 @@ func TestResolveComputeStart_IgnoresAForeignOrUnidentifiedCheckpoint(t *testing.
 // First boot: nothing recorded, so the boot counts from the kernel's boot —
 // but never from before the instance launched.
 func TestResolveComputeStart_FirstBoot(t *testing.T) {
-	_, from, _ := resolveComputeStart(computeStartInputs{
+	_, from, _ := resolveWall(computeStartInputs{
 		InstanceID: issueInstance, BootID: firstBootID, BootTime: boot1At, LaunchTime: t0928, SporedAt: spored1At,
 	})
 	if !from.Equal(boot1At) {
 		t.Errorf("from = %v, want boot %v", from, boot1At)
 	}
-	_, from, _ = resolveComputeStart(computeStartInputs{
+	_, from, _ = resolveWall(computeStartInputs{
 		InstanceID: issueInstance, BootID: firstBootID, BootTime: t0928.Add(-time.Hour), LaunchTime: t0928, SporedAt: spored1At,
 	})
 	if !from.Equal(t0928) {
@@ -173,7 +180,7 @@ func TestCleanup_PersistsComputeWhenTheTagWriteFails(t *testing.T) {
 	}
 
 	// The next boot.
-	base, _, _ := resolveComputeStart(computeStartInputs{
+	base, _, _ := resolveWall(computeStartInputs{
 		InstanceID: issueInstance, BootID: nextBootID, BootTime: time.Now(), SporedAt: time.Now(),
 		TagSeconds: 0, Checkpoint: &cp,
 	})

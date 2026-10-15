@@ -241,3 +241,13 @@ func sysAcceleratorFamilies() []string {
 // across a stop/start.
 func sysComputeCheckpointPath() string { return "" }
 func sysBootID() string                { return "" }
+
+// sysKernelClocks reports none on Windows, so compute there is measured from
+// the service's start through Go's monotonic reading. On Windows that reading
+// is the interrupt time, which keeps counting through sleep and hibernation,
+// unlike CLOCK_MONOTONIC on Linux. A hibernated Windows instance therefore
+// still counts the hibernation as compute (#962, found in #945), and resume
+// detection (#987), which reads the same clocks, sees no resume there: neither
+// this reading nor resumedBetween's wall-clock comparison moves.
+// QueryUnbiasedInterruptTime excludes it, and is the reading a fix would use.
+func sysKernelClocks() (kernelClocks, bool) { return kernelClocks{}, false }

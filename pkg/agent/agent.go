@@ -64,6 +64,8 @@ type Agent struct {
 	liveClock             bool            // TotalComputeSeconds counts real running time (daemon, or a query that adopted its clock, #896)
 	computeStart          time.Time       // when this boot's compute started counting; zero means startTime (#928)
 	bootID                string          // kernel boot id, "" when unknown; tags the durable checkpoint (#928)
+	kernelOrigin          kernelClocks    // the kernel clocks when this boot's compute started counting (#945)
+	kernelOriginKnown     bool            // kernelOrigin is set; compute is then measured on CLOCK_MONOTONIC
 	checkpointPath        string          // durable compute checkpoint; "" for a query agent or an unsupported platform (#928)
 	checkpointWarned      bool            // a checkpoint write failure has been logged
 	prevNetRx             int64           // /proc/net/dev RX bytes at last getNetworkBytes call
@@ -295,7 +297,7 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	// the last pre-stop write missed, and counting from spored's own start
 	// dropped every boot's OS and cloud-init time, which EC2 bills; the durable
 	// checkpoint fixes both (resolveComputeStart).
-	agent.bootID = sysBootID()
+	agent.bootID = readBootID()
 	var checkpoint *ComputeCheckpoint
 	if p := ComputeCheckpointPath(); p != "" {
 		if c, err := ReadComputeCheckpoint(p); err == nil {
@@ -308,7 +310,8 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 		}
 	}
 	if activate {
-		base, from, source := resolveComputeStart(computeStartInputs{
+		kernelNow, kernelOK := readKernelClocks()
+		start := resolveComputeStart(computeStartInputs{
 			InstanceID: identity.InstanceID,
 			BootID:     agent.bootID,
 			BootTime:   sysBootTime(),
@@ -316,10 +319,13 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 			SporedAt:   agent.startTime,
 			TagSeconds: config.ComputeSeconds,
 			Checkpoint: checkpoint,
+			Kernel:     kernelNow,
+			KernelOK:   kernelOK,
 		})
-		agent.computeSecondsBase, agent.computeStart = base, from
+		agent.computeSecondsBase, agent.computeStart = start.Base, start.From
+		agent.kernelOrigin, agent.kernelOriginKnown = start.Origin, start.OriginKnown
 		log.Printf("Compute clock: %ds carried over from earlier boots (%s); this boot counts from %s",
-			base, source, from.UTC().Format(time.RFC3339))
+			start.Base, start.Source, start.From.UTC().Format(time.RFC3339))
 	} else if checkpoint != nil && checkpoint.InstanceID == identity.InstanceID && checkpoint.TotalSeconds > agent.computeSecondsBase {
 		// A query with no live clock reports the freshest checkpoint: the file
 		// is written every tick, the tag at most every five minutes.
@@ -990,9 +996,9 @@ func (a *Agent) HasPriorComputeTime() bool {
 //
 // This boot counts from computeFrom: the kernel's boot time where it is known
 // to be safe (resolveComputeStart), since EC2 bills from there; otherwise
-// spored's own start.
+// spored's own start. Time spent hibernated is not counted (thisBootRunning).
 func (a *Agent) TotalComputeSeconds() int64 {
-	return a.computeSecondsBase + int64(time.Since(a.computeFrom()).Seconds())
+	return a.computeSecondsBase + int64(a.thisBootRunning().Seconds())
 }
 
 // computeFrom is when this boot's compute started counting.

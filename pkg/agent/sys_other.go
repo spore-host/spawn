@@ -54,3 +54,8 @@ func sysAcceleratorFamilies() []string { return nil }
 // tag still carries compute across a stop/start there.
 func sysComputeCheckpointPath() string { return "" }
 func sysBootID() string                { return "" }
+
+// No kernel clocks outside Linux and Windows: compute is measured on the wall
+// clock, as before #945, and resume detection (#987) falls back to comparing
+// the wall clock with Go's monotonic clock.
+func sysKernelClocks() (kernelClocks, bool) { return kernelClocks{}, false }

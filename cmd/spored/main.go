@@ -456,6 +456,11 @@ type statusReport struct {
 	// — boot, cloud-init, package installs. Reported separately because it used
 	// to be folded into StoppedSeconds by subtraction (#735).
 	BootSeconds float64 `json:"boot_seconds"`
+	// HibernatedSeconds is time this boot spent hibernated (#945). Like
+	// stopped time it is part of elapsed, bills EBS and not compute, and is
+	// excluded from ComputeSeconds; it is reported apart from StoppedSeconds
+	// because it is measured directly rather than left over by subtraction.
+	HibernatedSeconds float64 `json:"hibernated_seconds"`
 
 	ConfigLoadError string `json:"config_load_error,omitempty"`
 
@@ -741,7 +746,11 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 	if bootTime < 0 {
 		bootTime = 0 // clock skew between the tag and local uptime
 	}
-	stoppedTime := elapsed - computeTime - bootTime
+	// A hibernate-and-resume stays in the same boot, so it is neither boot
+	// time nor a stop the carried-over base would reveal. The kernel measures
+	// it (#945): it is part of elapsed, and is not compute.
+	hibernatedTime := ag.HibernatedTime()
+	stoppedTime := elapsed - computeTime - bootTime - hibernatedTime
 	if stoppedTime < 0 || !ag.HasPriorComputeTime() {
 		// No carried-over compute time means the instance has never been stopped,
 		// so there is no stopped time to report however the subtraction lands.
@@ -751,8 +760,10 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		// startTime is this status process's own start, not the daemon's, so
 		// "boot" would be all of elapsed and "stopped" would be noise. Report
 		// neither rather than a split computed against the wrong clock.
-		bootTime, stoppedTime = 0, 0
+		bootTime, stoppedTime, hibernatedTime = 0, 0, 0
 	}
+	// EBS bills while stopped and while hibernated alike.
+	notRunningTime := stoppedTime + hibernatedTime
 
 	// billedTime is the running time EC2 charges for. Billing starts when the
 	// instance enters running, before the OS boots, so the boot gap is billed
@@ -791,6 +802,7 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		BilledSeconds:      billedTime.Seconds(),
 		StoppedSeconds:     stoppedTime.Seconds(),
 		BootSeconds:        bootTime.Seconds(),
+		HibernatedSeconds:  hibernatedTime.Seconds(),
 		ConfigLoadError:    config.ConfigLoadError,
 		CPUPercent:         cpuPercent,
 		CPUMeasured:        cpuMeasured,
@@ -846,7 +858,7 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 
 		var storageCost float64
 		if ebsCostKnown {
-			storageCost = ebsHourlyCost * stoppedTime.Hours()
+			storageCost = ebsHourlyCost * notRunningTime.Hours()
 		}
 		total := computeCost + storageCost
 		displayCompute := math.Round(computeCost*100) / 100
@@ -960,6 +972,18 @@ func publishComputeClock(ag *agent.Agent) {
 	}
 }
 
+// notRunningLabel names the not-running time a storage cost covers.
+func notRunningLabel(stopped, hibernated time.Duration) string {
+	switch {
+	case hibernated > 0 && stopped > 0:
+		return "stopped or hibernated"
+	case hibernated > 0:
+		return "hibernated"
+	default:
+		return "stopped"
+	}
+}
+
 // renderStatusJSON prints ONLY the JSON-encoded report to stdout — nothing
 // else. This is the machine-readable contract: a caller doing
 // json.Unmarshal(output) must get valid JSON with no leading/trailing bytes.
@@ -986,19 +1010,23 @@ func renderStatusTable(report *statusReport) error {
 	computeTime := time.Duration(report.ComputeSeconds * float64(time.Second))
 	stoppedTime := time.Duration(report.StoppedSeconds * float64(time.Second))
 	bootTime := time.Duration(report.BootSeconds * float64(time.Second))
+	hibernatedTime := time.Duration(report.HibernatedSeconds * float64(time.Second))
 
 	fmt.Printf("  Started:          %s\n", report.StartedAt.Format("2006-01-02 15:04 UTC"))
 	fmt.Printf("  Elapsed:          %s", formatDuration(elapsed))
 	// Each term appears only when it is non-zero, so a first-boot instance that
 	// was never stopped no longer claims to have been. Boot time is worth seeing
 	// in its own right: a slow boot is a real thing to notice.
-	if computeTime > 0 && (bootTime > 0 || stoppedTime > 0) {
+	if computeTime > 0 && (bootTime > 0 || stoppedTime > 0 || hibernatedTime > 0) {
 		parts := []string{formatDuration(computeTime) + " compute"}
 		if bootTime > 0 {
 			parts = append(parts, formatDuration(bootTime)+" boot")
 		}
 		if stoppedTime > 0 {
 			parts = append(parts, formatDuration(stoppedTime)+" stopped")
+		}
+		if hibernatedTime > 0 {
+			parts = append(parts, formatDuration(hibernatedTime)+" hibernated")
 		}
 		fmt.Printf("  (%s)", strings.Join(parts, " · "))
 	}
@@ -1067,13 +1095,13 @@ func renderStatusTable(report *statusReport) error {
 			fmt.Printf("  Compute cost:     $%.2f  (%s × %s)\n",
 				cost.ComputeCost, formatDuration(billedTime), rateLabel)
 		}
-		if stoppedTime >= time.Minute {
+		if notRunning := stoppedTime + hibernatedTime; notRunning >= time.Minute {
 			if cost.EBSCostKnown {
 				fmt.Printf("  Storage cost:     $%.2f  (%s × $%.4f/hr EBS)\n",
-					cost.StorageCost, formatDuration(stoppedTime), cost.EBSHourlyCost)
+					cost.StorageCost, formatDuration(notRunning), cost.EBSHourlyCost)
 			} else {
-				fmt.Printf("  Storage cost:     not yet available  (%s stopped)\n",
-					formatDuration(stoppedTime))
+				fmt.Printf("  Storage cost:     not yet available  (%s %s)\n",
+					formatDuration(notRunning), notRunningLabel(stoppedTime, hibernatedTime))
 			}
 		}
 		if cost.ComputeCostKnown {
