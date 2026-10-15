@@ -357,6 +357,7 @@ func (*Client) GetInstanceTags(ctx context.Context, region, instanceID string) (
 func (*Client) GetPasswordData(ctx context.Context, region, instanceID string) (string, error)
 func (*Client) GetRecommendedAMI(ctx context.Context, region string, instanceType string) (string, error)
 func (*Client) GetS3Object(ctx context.Context, region, bucket, key string) ([]byte, error)
+func (*Client) GetSelfOwnedSpawnAMI(ctx context.Context, region, instanceType string) (string, error)
 func (*Client) GetSubnetForAZ(ctx context.Context, region, az, vpcID string) (string, error)
 func (*Client) GetSubnets(ctx context.Context, region, vpcID string) ([]string, error)
 func (*Client) ImportKeyPair(ctx context.Context, region, keyName string, publicKey []byte) error

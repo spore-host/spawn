@@ -29,7 +29,6 @@ func TestNoNewAWSSDKImportsInCmd(t *testing.T) {
 	allow := map[string][]string{
 		"availability.go": {"dynamodb"},
 		"bot.go":          {"dynamodb", "iam"},
-		"burst.go":        {"ec2"},
 		"collect.go":      {"dynamodb", "s3"},
 		"completion.go":   {"ec2"},
 		"cost.go":         {"dynamodb"},
