@@ -328,13 +328,22 @@ func saveSweepState(ctx context.Context, state *SweepRecord) error {
 	return fmt.Errorf("failed to save state after 3 retries: %w", err)
 }
 
-func downloadParams(ctx context.Context, s3Key string, forceDownload bool) (*ParamFileFormat, error) {
-	// Parse S3 key (format: s3://bucket/key)
+// splitParamsKey parses a record's s3_params_key, which must be s3://bucket/key
+// (pkg/sweep.ParamsURI). Split out of downloadParams so the contract with the
+// callers that write the record is testable without S3 (#1026).
+func splitParamsKey(s3Key string) (bucket, key string, err error) {
 	parts := strings.SplitN(strings.TrimPrefix(s3Key, "s3://"), "/", 2)
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid S3 key format: %s", s3Key)
+		return "", "", fmt.Errorf("invalid S3 key format: %s", s3Key)
 	}
-	bucket, key := parts[0], parts[1]
+	return parts[0], parts[1], nil
+}
+
+func downloadParams(ctx context.Context, s3Key string, forceDownload bool) (*ParamFileFormat, error) {
+	bucket, key, err := splitParamsKey(s3Key)
+	if err != nil {
+		return nil, err
+	}
 
 	// Check cache in /tmp
 	cacheFile := fmt.Sprintf("/tmp/%s", strings.ReplaceAll(key, "/", "_"))

@@ -61,7 +61,14 @@ func TestSchedulerHandlerPrefersTheRecordedBucket(t *testing.T) {
 	root := repoRootFromCmd(t)
 	src := readRepoSource(t, filepath.Join(root, "lambda", "scheduler-handler", "main.go"))
 
-	if !strings.Contains(src, `dynamodbav:"s3_params_bucket,omitempty"`) {
+	// Either the handler declares the field itself, or (since #1026) its
+	// ScheduleRecord IS the CLI's pkg/scheduler type, which must then carry it.
+	declared := strings.Contains(src, `dynamodbav:"s3_params_bucket,omitempty"`)
+	if !declared && regexp.MustCompile(`(?m)^type ScheduleRecord = scheduler\.ScheduleRecord$`).MatchString(src) {
+		shared := readRepoSource(t, filepath.Join(root, "pkg", "scheduler", "types.go"))
+		declared = regexp.MustCompile(`(?m)^\s*S3ParamsBucket\s+string\s+` + "`" + `dynamodbav:"s3_params_bucket,omitempty"` + "`").MatchString(shared)
+	}
+	if !declared {
 		t.Error("the handler's ScheduleRecord does not unmarshal s3_params_bucket, so it cannot " +
 			"learn where the params were written")
 	}

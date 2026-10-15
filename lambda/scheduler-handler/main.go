@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/spore-host/spawn/pkg/scheduler"
+	"github.com/spore-host/spawn/pkg/sweep"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,6 +38,8 @@ const (
 	// prefix. Both are now gated by lambda_names_test.go.
 	defaultOrchestratorFuncName = "spawn-sweep-orchestrator"
 	defaultOrchestratorRegion   = "us-east-1" // where the single orchestrator is deployed
+	// The orchestrator loads its state from this table by sweep ID (#1026).
+	defaultSweepTable = "spawn-sweep-orchestration"
 )
 
 // defaultAccountID is the infra account ID; overridable via SPAWN_INFRA_ACCOUNT_ID.
@@ -46,49 +51,15 @@ type Event struct {
 	ExecutionTime string `json:"execution_time"`
 }
 
-// ScheduleRecord represents a schedule in DynamoDB
-type ScheduleRecord struct {
-	ScheduleID         string    `dynamodbav:"schedule_id"`
-	UserID             string    `dynamodbav:"user_id"`
-	ScheduleName       string    `dynamodbav:"schedule_name"`
-	CreatedAt          time.Time `dynamodbav:"created_at"`
-	UpdatedAt          time.Time `dynamodbav:"updated_at"`
-	ScheduleExpression string    `dynamodbav:"schedule_expression"`
-	ScheduleType       string    `dynamodbav:"schedule_type"`
-	Timezone           string    `dynamodbav:"timezone"`
-	NextExecutionTime  time.Time `dynamodbav:"next_execution_time"`
-	S3ParamsKey        string    `dynamodbav:"s3_params_key"`
-	S3ParamsBucket     string    `dynamodbav:"s3_params_bucket,omitempty"`
-	SweepName          string    `dynamodbav:"sweep_name"`
-	MaxConcurrent      int       `dynamodbav:"max_concurrent"`
-	LaunchDelay        string    `dynamodbav:"launch_delay"`
-	Region             string    `dynamodbav:"region"`
-	Status             string    `dynamodbav:"status"`
-	ExecutionCount     int       `dynamodbav:"execution_count"`
-	MaxExecutions      int       `dynamodbav:"max_executions,omitempty"`
-	EndAfter           time.Time `dynamodbav:"end_after,omitempty"`
-	LastSweepID        string    `dynamodbav:"last_sweep_id,omitempty"`
-	ScheduleARN        string    `dynamodbav:"schedule_arn,omitempty"`
-	TTL                int64     `dynamodbav:"ttl"`
-}
+// ScheduleRecord is the record `spawn schedule create` writes. Shared with the
+// CLI rather than copied, so a field the CLI adds (aws_account_id, #1026) cannot
+// be silently dropped on read here.
+type ScheduleRecord = scheduler.ScheduleRecord
 
 // ParamFileFormat matches CLI parameter file structure
 type ParamFileFormat struct {
 	Defaults map[string]interface{}   `json:"defaults" yaml:"defaults"`
 	Params   []map[string]interface{} `json:"params" yaml:"params"`
-}
-
-// SweepConfig is the sweep orchestrator input
-type SweepConfig struct {
-	SweepID       string `json:"sweep_id"`
-	SweepName     string `json:"sweep_name"`
-	UserID        string `json:"user_id"`
-	S3ParamsKey   string `json:"s3_params_key"`
-	MaxConcurrent int    `json:"max_concurrent"`
-	LaunchDelay   string `json:"launch_delay"`
-	Region        string `json:"region"`
-	Source        string `json:"source"`
-	ScheduleID    string `json:"schedule_id,omitempty"`
 }
 
 var (
@@ -101,6 +72,14 @@ var (
 	schedulesBucketTmpl  string
 	orchestratorFuncName string
 	orchestratorRegion   string
+
+	// The orchestrator's table and params bucket live in ITS region, which is
+	// not necessarily this function's (#1015's latent note), so they get their
+	// own clients.
+	orchestratorDynamo *dynamodb.Client
+	orchestratorS3     *s3.Client
+	sweepTable         string
+	sweepsBucket       string
 )
 
 func init() {
@@ -121,6 +100,13 @@ func init() {
 	schedulesBucketTmpl = getEnv("SPAWN_SCHEDULES_BUCKET_TEMPLATE", defaultSchedulesBucketTmpl)
 	orchestratorFuncName = getEnv("SPAWN_ORCHESTRATOR_FUNCTION_NAME", defaultOrchestratorFuncName)
 	orchestratorRegion = getEnv("SPAWN_ORCHESTRATOR_REGION", defaultOrchestratorRegion)
+	sweepTable = getEnv("SPAWN_SWEEP_ORCHESTRATION_TABLE", defaultSweepTable)
+	sweepsBucket = getEnv("SPAWN_SWEEPS_BUCKET", sweep.SweepsBucket(orchestratorRegion))
+
+	orchCfg := cfg.Copy()
+	orchCfg.Region = orchestratorRegion
+	orchestratorDynamo = dynamodb.NewFromConfig(orchCfg)
+	orchestratorS3 = s3.NewFromConfig(orchCfg)
 
 	log.Printf("Configuration: account=%s, schedules_table=%s, history_table=%s, orchestrator=%s in %s",
 		accountID, schedulesTable, historyTable, orchestratorFuncName, orchestratorRegion)
@@ -159,49 +145,35 @@ func handler(ctx context.Context, event Event) error {
 		return recordError(ctx, event.ScheduleID, "", fmt.Errorf("schedule expired"))
 	}
 
-	// 4. Validate parameter file exists in S3 (sweep-orchestrator will download it)
-	_, err = downloadParams(ctx, schedule.S3ParamsBucket, schedule.S3ParamsKey, schedule.Region)
+	// 4. Load the parameter file the CLI uploaded.
+	params, err := downloadParams(ctx, schedule.S3ParamsBucket, schedule.S3ParamsKey, schedule.Region)
 	if err != nil {
-		return recordError(ctx, event.ScheduleID, "", fmt.Errorf("validate params: %w", err))
+		return recordError(ctx, event.ScheduleID, "", fmt.Errorf("load params: %w", err))
 	}
 
 	// 5. Generate sweep ID
 	sweepID := fmt.Sprintf("%s-%s", schedule.SweepName, time.Now().Format("20060102-150405"))
 	log.Printf("Creating sweep: %s", sweepID)
 
-	// 6. Create sweep configuration
-	sweepConfig := SweepConfig{
-		SweepID:       sweepID,
-		SweepName:     schedule.SweepName,
-		UserID:        schedule.UserID,
-		S3ParamsKey:   schedule.S3ParamsKey,
-		MaxConcurrent: schedule.MaxConcurrent,
-		LaunchDelay:   schedule.LaunchDelay,
-		Region:        schedule.Region,
-		Source:        "scheduled",
-		ScheduleID:    event.ScheduleID,
+	// 6. Build what the orchestrator consumes. This used to build a SweepConfig
+	// and then send only its sweep ID, writing no record — so the orchestrator's
+	// first step, loading the record by that ID, failed for every scheduled
+	// sweep (#1026).
+	prepared, err := prepareSweep(schedule, params, sweepID, sweepsBucket, time.Now())
+	if err != nil {
+		return recordError(ctx, event.ScheduleID, sweepID, err)
 	}
 
-	// 7. Invoke sweep-orchestrator Lambda asynchronously
-	sweepPayload, _ := json.Marshal(map[string]interface{}{
-		"sweep_id":       sweepConfig.SweepID,
-		"force_download": false,
-	})
-
-	// The orchestrator's OWN region, not the schedule's. The orchestrator is
-	// deployed once, in the infra account's us-east-1; schedule.Region is where
-	// the sweep's INSTANCES go, which is a different axis. Interpolating it here
-	// meant a schedule targeting any other region invoked an ARN in a region the
-	// orchestrator has never been deployed to — a second ResourceNotFoundException
-	// hiding behind the first (#812).
+	// 7. Stage the params, write the record, then invoke.
 	orchestratorArn := fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", orchestratorRegion, accountID, orchestratorFuncName)
-	_, err = lambdaClient.Invoke(ctx, &lambdasvc.InvokeInput{
-		FunctionName:   aws.String(orchestratorArn),
-		InvocationType: "Event", // Asynchronous
-		Payload:        sweepPayload,
-	})
-	if err != nil {
-		return recordError(ctx, event.ScheduleID, sweepID, fmt.Errorf("invoke orchestrator: %w", err))
+	if err := startSweep(ctx, sweepStarter{
+		s3:              orchestratorS3,
+		dynamo:          orchestratorDynamo,
+		lambda:          lambdaClient,
+		sweepTable:      sweepTable,
+		orchestratorArn: orchestratorArn,
+	}, prepared); err != nil {
+		return recordError(ctx, event.ScheduleID, sweepID, err)
 	}
 
 	// 8. Record successful execution
@@ -360,4 +332,112 @@ func paramsBucket(recordedBucket, region string) string {
 	log.Printf("schedule params: record carries no s3_params_bucket (pre-#804); "+
 		"falling back to the region template %q", fallback)
 	return fallback
+}
+
+// preparedSweep is everything the handler sends the orchestrator's way.
+type preparedSweep struct {
+	Record       *sweep.SweepRecord
+	ParamsBucket string
+	ParamsKey    string
+	ParamsBody   []byte
+	Payload      []byte
+}
+
+// prepareSweep turns a firing schedule into the staged params, sweep record and
+// invoke payload the orchestrator consumes — all built by pkg/sweep, the code
+// `spawn launch --param-file` uses, so the two callers cannot drift apart again.
+// Pure, so the contract is testable without AWS.
+func prepareSweep(schedule *ScheduleRecord, params *ParamFileFormat, sweepID, paramsBucket string, now time.Time) (*preparedSweep, error) {
+	sp := &sweep.ParamFileFormat{Defaults: params.Defaults, Params: params.Params}
+	record, err := sweep.NewScheduledSweepRecord(sweep.ScheduledSweep{
+		SweepID:       sweepID,
+		SweepName:     schedule.SweepName,
+		UserID:        schedule.UserID,
+		ScheduleID:    schedule.ScheduleID,
+		AccountID:     schedule.AWSAccountID,
+		Region:        schedule.Region,
+		MaxConcurrent: schedule.MaxConcurrent,
+		LaunchDelay:   schedule.LaunchDelay,
+		ParamsBucket:  paramsBucket,
+		Params:        sp,
+	}, now)
+	if err != nil {
+		return nil, err
+	}
+	body, err := sweep.EncodeParams(sp)
+	if err != nil {
+		return nil, fmt.Errorf("encode params: %w", err)
+	}
+	payload, err := json.Marshal(sweep.OrchestratorEvent{SweepID: sweepID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+	return &preparedSweep{
+		Record:       record,
+		ParamsBucket: paramsBucket,
+		ParamsKey:    sweep.ParamsObjectKey(sweepID),
+		ParamsBody:   body,
+		Payload:      payload,
+	}, nil
+}
+
+type paramsPutter interface {
+	PutObject(context.Context, *s3.PutObjectInput, ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+}
+
+type recordPutter interface {
+	PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+}
+
+type invoker interface {
+	Invoke(context.Context, *lambdasvc.InvokeInput, ...func(*lambdasvc.Options)) (*lambdasvc.InvokeOutput, error)
+}
+
+// sweepStarter is the three calls that start a sweep, behind interfaces so the
+// order and content can be tested without AWS.
+type sweepStarter struct {
+	s3              paramsPutter
+	dynamo          recordPutter
+	lambda          invoker
+	sweepTable      string
+	orchestratorArn string
+}
+
+// startSweep stages the params, writes the sweep record, then invokes the
+// orchestrator — the order `spawn launch --param-file` uses, and the only one in
+// which the orchestrator finds both when it starts. The handler used to do only
+// the last step (#1026).
+//
+// orchestratorArn is the orchestrator's OWN region, not the schedule's. The
+// orchestrator is deployed once, in the infra account's us-east-1;
+// schedule.Region is where the sweep's INSTANCES go, which is a different axis.
+// Interpolating it meant a schedule targeting any other region invoked an ARN in
+// a region the orchestrator has never been deployed to (#812).
+func startSweep(ctx context.Context, d sweepStarter, p *preparedSweep) error {
+	if _, err := d.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(p.ParamsBucket),
+		Key:         aws.String(p.ParamsKey),
+		Body:        bytes.NewReader(p.ParamsBody),
+		ContentType: aws.String("application/json"),
+	}); err != nil {
+		return fmt.Errorf("stage params: %w", err)
+	}
+	item, err := attributevalue.MarshalMap(p.Record)
+	if err != nil {
+		return fmt.Errorf("marshal sweep record: %w", err)
+	}
+	if _, err := d.dynamo.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(d.sweepTable),
+		Item:      item,
+	}); err != nil {
+		return fmt.Errorf("write sweep record: %w", err)
+	}
+	if _, err := d.lambda.Invoke(ctx, &lambdasvc.InvokeInput{
+		FunctionName:   aws.String(d.orchestratorArn),
+		InvocationType: "Event", // Asynchronous
+		Payload:        p.Payload,
+	}); err != nil {
+		return fmt.Errorf("invoke orchestrator: %w", err)
+	}
+	return nil
 }

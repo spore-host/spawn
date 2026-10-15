@@ -38,20 +38,40 @@ Resources:
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/spawn-schedules/index/*'
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/spawn-schedule-history'
 
-              # S3 - Read parameter files from spawn-schedules-* buckets
+              # S3 - Read parameter files from spawn-schedules-* buckets. Wildcarded
+              # because the CLI falls back to an account-scoped
+              # spawn-schedules-<account>-<region> when the shared name is taken
+              # (#804), and the schedule's region need not be this function's.
               - Effect: Allow
                 Action:
                   - s3:GetObject
                 Resource:
-                  - !Sub 'arn:aws:s3:::spawn-schedules-${AWS::Region}/schedules/*'
+                  - 'arn:aws:s3:::spawn-schedules-*/schedules/*'
 
-              # Lambda - Invoke sweep-orchestrator Lambda
+              # Start the sweep the way `spawn launch --param-file` does (#1026):
+              # stage the params where the orchestrator's role can read them,
+              # write the record it loads, then invoke it. The orchestrator and
+              # its table and bucket live in its own region (us-east-1), not
+              # necessarily this function's.
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - 'arn:aws:s3:::spawn-sweeps-*/sweeps/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/spawn-sweep-orchestration'
+
+              # Lambda - Invoke the orchestrator. Named sweep-orchestrator here
+              # until #1026, after the code was corrected to the deployed
+              # spawn-sweep-orchestrator in #812.
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
                 Resource:
-                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:sweep-orchestrator'
-                  - !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:sweep-orchestrator'
+                  - !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:spawn-sweep-orchestrator'
 
               # CloudWatch Logs - Create and write logs
               - Effect: Allow
