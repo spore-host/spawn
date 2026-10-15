@@ -107,11 +107,12 @@ func TestBurstMembersHaveATTL(t *testing.T) {
 }
 
 // TestBurstRejectsTTLsWithNoDeadline: buildTags computes spawn:ttl-deadline with
-// time.ParseDuration, and the reaper enforces the deadline. A TTL it cannot parse
-// would give a member spawn:ttl but no deadline, so it must be refused before
-// anything launches; so must an empty or non-positive one.
+// pkg/ttl's parser, and the reaper enforces the deadline. A TTL it cannot parse
+// would give a member no deadline, so it must be refused before anything
+// launches; so must an empty or non-positive one. A day-unit TTL does yield a
+// deadline since #990, so it is accepted.
 func TestBurstRejectsTTLsWithNoDeadline(t *testing.T) {
-	for _, ttl := range []string{"", "1d", "forever", "0s", "-1h"} {
+	for _, ttl := range []string{"", "forever", "0s", "-1h", "1x"} {
 		params := burstTestParams()
 		params.TTL = ttl
 		fake := &fakeBurstLauncher{}
@@ -120,6 +121,13 @@ func TestBurstRejectsTTLsWithNoDeadline(t *testing.T) {
 		}
 		if len(fake.got) != 0 {
 			t.Errorf("--ttl %q: Launch was called", ttl)
+		}
+	}
+	for _, ttl := range []string{"1d", "2d12h", "36h"} {
+		params := burstTestParams()
+		params.TTL = ttl
+		if err := validateBurstParams(params); err != nil {
+			t.Errorf("--ttl %q refused (%v); it parses to a deadline", ttl, err)
 		}
 	}
 }

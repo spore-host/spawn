@@ -22,10 +22,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+
+	"github.com/spore-host/spawn/pkg/ttl"
 )
 
 // TypeTag records which kind of Spot request a spawn launch made. Written at
@@ -64,13 +65,15 @@ func NeedsStoppable(idleTimeout, onComplete string, hibernate, hibernateOnIdle b
 
 // idleTimeoutSet mirrors how spored reads spawn:idle-timeout: a duration that
 // parses to more than zero arms the idle monitor; "", "0" or garbage does not
-// (pkg/provider/ec2.go ignores an unparseable value).
+// (pkg/provider/ec2.go ignores an unparseable value). It parses with pkg/ttl,
+// spored's parser since #990, so a day-unit idle timeout ("1d") also asks for a
+// stoppable request.
 func idleTimeoutSet(v string) bool {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return false
 	}
-	d, err := time.ParseDuration(v)
+	d, err := ttl.ParseDuration(v)
 	return err == nil && d > 0
 }
 

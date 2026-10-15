@@ -467,6 +467,12 @@ func runInstancesWithRetry(ctx context.Context, api runInstancesAPI, input *ec2.
 // If LaunchConfig.PricePerHour is 0, Launch resolves the on-demand rate through
 // truffle, the suite's pricing authority (#533). See [resolvePricePerHour].
 func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error) {
+	// Reject an unparseable TTL or lifecycle duration before any AWS call, so a
+	// value nothing could enforce never reaches a running instance (#990).
+	if err := launchConfig.ValidateDurations(); err != nil {
+		return nil, err
+	}
+
 	// Update config for region
 	ec2Client := c.regionalEC2(launchConfig.Region)
 
@@ -505,7 +511,10 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	accountNameSlug := slugifyDNSLabel(c.GetAccountName(ctx))
 
 	// Build tags (including account and user tags for per-user isolation)
-	tags := buildTags(launchConfig, accountID, userARN, accountNameSlug)
+	tags, err := buildTags(launchConfig, accountID, userARN, accountNameSlug)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build block device mappings from the AMI's registered root device. The
 	// root mapping's DeviceName must equal the AMI's RootDeviceName or the size/

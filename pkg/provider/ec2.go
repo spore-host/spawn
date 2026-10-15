@@ -22,6 +22,7 @@ import (
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 // EC2Provider implements Provider for EC2 instances
@@ -489,14 +490,27 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 	if err != nil {
 		return nil, "", err
 	}
+	config, instanceName := configFromTags(output.Tags)
 
+	// Load plugin declarations written to /etc/spawn/plugins.json by user-data.
+	config.Plugins = loadPluginDeclarations()
+
+	return config, instanceName, nil
+}
+
+// configFromTags builds spored's Config from the instance's tags, and returns
+// the EC2 Name tag (may be empty). Split from loadConfigFromEC2Tags so the
+// parsing is testable without EC2. Every duration tag is read with pkg/ttl's
+// shared parser — the one launch and the TTL reaper use — so a value the CLI
+// accepted (e.g. "1d") is never silently ignored here (#990).
+func configFromTags(tags []types.TagDescription) (*Config, string) {
 	config := &Config{
 		IdleCPUPercent: 5.0, // Default
 		Observability:  observability.DefaultConfig(),
 	}
 
 	var instanceName string
-	for _, tag := range output.Tags {
+	for _, tag := range tags {
 		if tag.Key == nil || tag.Value == nil {
 			continue
 		}
@@ -505,7 +519,7 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 		case "Name":
 			instanceName = *tag.Value
 		case tagprefix.Tag("ttl"):
-			if duration, err := time.ParseDuration(*tag.Value); err == nil {
+			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {
 				config.TTL = duration
 			}
 		case tagprefix.Tag("ttl-deadline"):
@@ -525,7 +539,7 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 				config.EBSHourlyCost = f
 			}
 		case tagprefix.Tag("idle-timeout"):
-			if duration, err := time.ParseDuration(*tag.Value); err == nil {
+			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {
 				config.IdleTimeout = duration
 			}
 		case tagprefix.Tag("hibernate-on-idle"):
@@ -592,7 +606,7 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 		case tagprefix.Tag("pre-stop"):
 			config.PreStop = *tag.Value
 		case tagprefix.Tag("pre-stop-timeout"):
-			if duration, err := time.ParseDuration(*tag.Value); err == nil {
+			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {
 				config.PreStopTimeout = duration
 			}
 		case tagprefix.Tag("spot-webhook-url"):
@@ -602,7 +616,7 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 		case tagprefix.Tag("webhook-correlation"):
 			config.WebhookCorrelation = *tag.Value
 		case tagprefix.Tag("webhook-timeout"):
-			if duration, err := time.ParseDuration(*tag.Value); err == nil {
+			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {
 				config.WebhookTimeout = duration
 			}
 		case tagprefix.Tag("local-username"):
@@ -620,7 +634,7 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 		case tagprefix.Tag("completion-file"):
 			config.CompletionFile = *tag.Value
 		case tagprefix.Tag("completion-delay"):
-			if duration, err := time.ParseDuration(*tag.Value); err == nil {
+			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {
 				config.CompletionDelay = duration
 			}
 		case tagprefix.Tag("job-array-id"):
@@ -674,10 +688,7 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 		config.CompletionDelay = 30 * time.Second
 	}
 
-	// Load plugin declarations written to /etc/spawn/plugins.json by user-data.
-	config.Plugins = loadPluginDeclarations()
-
-	return config, instanceName, nil
+	return config, instanceName
 }
 
 // loadPluginDeclarations reads /etc/spawn/plugins.json if present.

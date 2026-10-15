@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/spawn/pkg/spotrequest"
+	"github.com/spore-host/spawn/pkg/ttl"
 )
 
 // propagatableSnapshotTags filters a snapshot's tags down to the ones worth
@@ -32,7 +33,11 @@ func propagatableSnapshotTags(snapTags []types.Tag) []types.Tag {
 	return out
 }
 
-func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) []types.Tag {
+// buildTags returns an error, rather than a partial tag set, when a lifecycle
+// duration cannot be parsed: a spawn:ttl with no spawn:ttl-deadline, or a
+// spawn:idle-timeout spored cannot read, launches an instance that nothing
+// stops (#990).
+func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) ([]types.Tag, error) {
 	// buildTags assembles the spawn: metadata tag set in sections:
 	//   1. Base identity (always present): managed/root/created-by/version/account/iam-user.
 	//   2. Naming & DNS: Name, account-name alias, dns-name.
@@ -95,14 +100,30 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	}
 
 	if config.TTL != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:ttl"), Value: aws.String(config.TTL)})
-		// Compute the absolute deadline once at launch; spored uses this across stop/wake cycles
-		// so that TTL is always relative to original launch time, never reset.
-		if d, err := time.ParseDuration(config.TTL); err == nil {
-			ttlDeadline = launchAt.Add(d)
-			deadline := ttlDeadline.Format(time.RFC3339)
-			tags = append(tags, types.Tag{Key: aws.String("spawn:ttl-deadline"), Value: aws.String(deadline)})
+		// spawn:ttl and spawn:ttl-deadline are written together or not at all.
+		// The deadline is what spored and the TTL reaper enforce; spawn:ttl alone
+		// enforces nothing. This used to write spawn:ttl unconditionally and the
+		// deadline only when time.ParseDuration accepted the value, which it does
+		// not for "1d": the launch succeeded with no deadline, so a one-day TTL
+		// was bounded only by the reaper's 7-day max-age ceiling (#990). Now an
+		// unparseable TTL fails the launch instead.
+		d, err := ttl.ParseTTL(config.TTL)
+		if err != nil {
+			return nil, fmt.Errorf("refusing to launch with TTL %q: it cannot be turned into a spawn:ttl-deadline, "+
+				"so nothing would enforce it: %w", config.TTL, err)
 		}
+		ttlValue, err := ttl.TagValue(config.TTL)
+		if err != nil {
+			return nil, fmt.Errorf("refusing to launch with TTL %q: %w", config.TTL, err)
+		}
+		// Anchored to the same instant as spawn:launch-time, once, at launch;
+		// spored uses it across stop/wake cycles so the TTL is always relative
+		// to the original launch, never reset.
+		ttlDeadline = launchAt.Add(d)
+		deadline := ttlDeadline.Format(time.RFC3339)
+		tags = append(tags,
+			types.Tag{Key: aws.String("spawn:ttl"), Value: aws.String(ttlValue)},
+			types.Tag{Key: aws.String("spawn:ttl-deadline"), Value: aws.String(deadline)})
 	}
 
 	if config.DNSName != "" {
@@ -205,7 +226,11 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	}
 
 	if config.IdleTimeout != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:idle-timeout"), Value: aws.String(config.IdleTimeout)})
+		v, err := lifecycleDurationTag("idle-timeout", config.IdleTimeout)
+		if err != nil {
+			return nil, err
+		}
+		tags = append(tags, types.Tag{Key: aws.String("spawn:idle-timeout"), Value: aws.String(v)})
 	}
 
 	// Which kind of Spot request this is (#922): `spawn stop` and `spawn status`
@@ -242,14 +267,22 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	}
 
 	if config.CompletionDelay != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:completion-delay"), Value: aws.String(config.CompletionDelay)})
+		v, err := lifecycleDurationTag("completion-delay", config.CompletionDelay)
+		if err != nil {
+			return nil, err
+		}
+		tags = append(tags, types.Tag{Key: aws.String("spawn:completion-delay"), Value: aws.String(v)})
 	}
 
 	// Pre-stop hook
 	if config.PreStop != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:pre-stop"), Value: aws.String(config.PreStop)})
 		if config.PreStopTimeout != "" {
-			tags = append(tags, types.Tag{Key: aws.String("spawn:pre-stop-timeout"), Value: aws.String(config.PreStopTimeout)})
+			v, err := lifecycleDurationTag("pre-stop-timeout", config.PreStopTimeout)
+			if err != nil {
+				return nil, err
+			}
+			tags = append(tags, types.Tag{Key: aws.String("spawn:pre-stop-timeout"), Value: aws.String(v)})
 		}
 	}
 
@@ -261,7 +294,11 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-correlation"), Value: aws.String(config.WebhookCorrelation)})
 		}
 		if config.WebhookTimeout != "" {
-			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-timeout"), Value: aws.String(config.WebhookTimeout)})
+			v, err := lifecycleDurationTag("webhook-timeout", config.WebhookTimeout)
+			if err != nil {
+				return nil, err
+			}
+			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-timeout"), Value: aws.String(v)})
 		}
 	}
 
@@ -273,7 +310,11 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-correlation"), Value: aws.String(config.WebhookCorrelation)})
 		}
 		if config.WebhookTimeout != "" {
-			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-timeout"), Value: aws.String(config.WebhookTimeout)})
+			v, err := lifecycleDurationTag("webhook-timeout", config.WebhookTimeout)
+			if err != nil {
+				return nil, err
+			}
+			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-timeout"), Value: aws.String(v)})
 		}
 	}
 
@@ -377,7 +418,19 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		}
 	}
 
-	return tags
+	return tags, nil
+}
+
+// lifecycleDurationTag is the spawn:<name> tag value for a duration spored
+// reads, or an error naming the field when it cannot be parsed. A value spored
+// cannot parse is not a warning: spored skips it and falls back to the
+// default, or for idle-timeout to no idle timeout at all (#990).
+func lifecycleDurationTag(name, value string) (string, error) {
+	v, err := ttl.TagValue(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid %s %q: %w", name, value, err)
+	}
+	return v, nil
 }
 
 // awsMaxTagsPerResource is AWS's hard per-resource tag cap. Exceeding it makes

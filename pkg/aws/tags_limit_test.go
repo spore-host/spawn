@@ -35,7 +35,7 @@ type tagPair struct{ Key, Value string }
 
 func builtTags(t *testing.T, cfg LaunchConfig) []tagPair {
 	t.Helper()
-	raw := buildTags(cfg, "123456789012", "arn:aws:iam::1:user/u", "acct")
+	raw := mustBuildTags(t, cfg, "123456789012", "arn:aws:iam::1:user/u", "acct")
 	out := make([]tagPair, 0, len(raw))
 	for _, tg := range raw {
 		out = append(out, tagPair{Key: *tg.Key, Value: *tg.Value})

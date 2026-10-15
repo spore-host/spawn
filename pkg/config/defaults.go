@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/spore-host/spawn/pkg/ttl"
 	"gopkg.in/yaml.v3"
 )
 
@@ -77,6 +78,13 @@ func applyDefaultKey(d *LaunchDefaults, key, value string) error {
 	case "active-ports":
 		d.ActivePorts = value
 	case "idle-timeout":
+		// Validated with the shared parser (#990), so a default that spored
+		// could not read never reaches a launch. "" clears it.
+		if value != "" {
+			if _, err := ttl.ParseTTL(value); err != nil {
+				return fmt.Errorf("invalid idle-timeout %q: %w (use a duration such as 30m, 2h or 1d)", value, err)
+			}
+		}
 		d.IdleTimeout = value
 	case "hibernate-on-idle":
 		if value == "" {

@@ -62,6 +62,11 @@ func TestValidateTTL_ValidFormats(t *testing.T) {
 		{"Short hour", "1h"},
 		{"Short day", "1d"},
 		{"Multiple hours and minutes", "3h45m"},
+		// The shared parser (#990) takes Go's fractional syntax too, and
+		// fractional days.
+		{"Decimal hours", "2.5h"},
+		{"Decimal days", "1.5d"},
+		{"Days then hours (#990)", "2d12h"},
 	}
 
 	for _, tt := range tests {
@@ -88,7 +93,6 @@ func TestValidateTTL_InvalidFormats(t *testing.T) {
 		{"Invalid unit - M", "1M", "TTL must be in format"},
 		{"Space between number and unit", "2 h", "TTL must be in format"},
 		{"Space between components", "2h 30m", "TTL must be in format"},
-		{"Decimal number", "2.5h", "TTL must be in format"},
 		{"Negative number", "-1h", "TTL must be in format"},
 		{"Just unit", "h", "TTL must be in format"},
 		{"Unit before number", "h2", "TTL must be in format"},

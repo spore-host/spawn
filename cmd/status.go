@@ -17,6 +17,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/sweep"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 var (
@@ -291,7 +292,7 @@ func lifecycleDeadline(instance *aws.InstanceInfo) (time.Time, bool) {
 		}
 	}
 	if instance.TTL != "" && !instance.LaunchTime.IsZero() {
-		if d, err := time.ParseDuration(instance.TTL); err == nil {
+		if d, err := ttlpkg.ParseDuration(instance.TTL); err == nil && d > 0 {
 			return instance.LaunchTime.Add(d), true
 		}
 	}

@@ -79,6 +79,11 @@ type Options struct {
 // Windows is out of scope here (no spored-on-Windows headless path yet, #77);
 // callers must build Windows user-data themselves.
 func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig, opts Options) (*aws.LaunchResult, error) {
+	// Before the AMI, IAM and user-data work below, all of which calls AWS:
+	// a TTL or lifecycle duration nothing could enforce fails here (#990).
+	if err := config.ValidateDurations(); err != nil {
+		return nil, fmt.Errorf("provision: %w", err)
+	}
 	if config.InstanceType == "" {
 		return nil, fmt.Errorf("provision: instance type is required")
 	}

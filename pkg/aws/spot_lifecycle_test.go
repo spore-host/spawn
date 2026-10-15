@@ -214,7 +214,8 @@ func TestLaunch_SpotRequestShapeForEachLifecycle(t *testing.T) {
 	}{
 		{"ttl only", LaunchConfig{Spot: true, TTL: "1h"}, "one-time", ""},
 		{"on-complete terminate", LaunchConfig{Spot: true, TTL: "1h", OnComplete: "terminate"}, "one-time", ""},
-		{"idle timeout zero is off", LaunchConfig{Spot: true, TTL: "1h", IdleTimeout: "0"}, "one-time", ""},
+		// An idle timeout of "0" is refused by Launch since #990 (ValidateDurations),
+		// so that it reads as "off" is checked in pkg/spotrequest instead.
 		{"idle timeout (default action stop)", LaunchConfig{Spot: true, TTL: "1h", IdleTimeout: "15m"}, "persistent", "stop"},
 		// #949: --on-idle / --on-complete hibernate configure hibernation, so the
 		// persistent request is interrupted by hibernating, as the idle action is.

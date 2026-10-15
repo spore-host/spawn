@@ -299,6 +299,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read, so a command that trusted them failed with AccessDenied. Declare stage
   results as `data_output`, which `collect` gathers. The `spawn-pipeline-orchestrator` Lambda has to be redeployed
   for this to take effect.
+- **`spawn burst --ttl` accepts day units** (`1d`, `2d12h`), like every other
+  TTL since #990; it used to refuse them because the tag builder could not turn
+  them into a deadline, which it now can.
+- **A Spot launch with a day-unit `--idle-timeout` (`1d`) now gets a persistent,
+  stoppable request** (#990, #922). The request type was chosen with Go's
+  duration parser, which has no day unit, while spored arms the idle stop with
+  the day-aware one, so the stop would have been refused by EC2.
 
 ### Security
 
@@ -327,6 +334,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conditions. The cross-account role also drops `ec2:DescribeTags`, which the
   reaper never calls. Production runs `ScanSelf=false`, so the operated
   reaper's own role was not affected.
+- **`spawn launch --ttl 1d` now enforces a one-day TTL** (#990). It used to tag
+  `spawn:ttl=1d` and no `spawn:ttl-deadline`: the deadline was written only when
+  Go's duration parser accepted the value, and it has no day unit, and spored
+  read the tag the same way. The launch succeeded with nothing enforcing the
+  TTL, so the instance was bounded only by the TTL reaper's 7-day max-age
+  ceiling. Every TTL and lifecycle duration now goes through one parser, which
+  accepts Go durations plus days (`1d`, `2d12h`, `1.5d`). That covers `--ttl`,
+  `--idle-timeout`, `--pre-stop-timeout`, `--completion-delay`,
+  `--webhook-timeout`, `--fsx-ttl`, `spawn extend`, `spored config set
+  ttl/idle-timeout/completion-delay`, `spawn defaults set idle-timeout`, sweep
+  `ttl`/`idle_timeout` (CLI and the detached-sweep Lambda), `spawn task`
+  `lifecycle.ttl`, `spawn app`/`service`/`pool --ttl`, batch-queue and pipeline
+  timeouts, the wizard, and the readers: spored, the TTL reaper (including
+  `REAPER_MAX_AGE`), `spawn status` and cost estimates. Anything it cannot
+  parse, plus a zero TTL or idle timeout, is rejected before any AWS call. A
+  sweep `ttl: 3600` (a number, not a duration) is now an error rather than
+  being dropped. Day-unit values are stored in tags in Go form (`24h0m0s`) so
+  older readers agree.
+- **The TTL reaper enforces `spawn:ttl` on instances that have no deadline
+  tag** (#990): launch time + `spawn:ttl`, the deadline spored already applies
+  in that case. This catches instances launched with a day-unit `--ttl` before
+  this fix. A stopped instance runs no spored, so until now it lived until the
+  max-age ceiling. `spawn:ttl=0` (TTL disabled) is still exempt.
+- **The launch path can no longer write `spawn:ttl` without
+  `spawn:ttl-deadline`.** `buildTags` returns an error instead. The #983 gate
+  that every `spawn:ttl` writer also writes the deadline now requires the
+  deadline write on the same code path, not just somewhere in the function, so
+  the conditional write behind this bug fails it. A new test checks that every
+  accepted TTL spelling produces a deadline.
+- `pkg/aws.LaunchConfig.ValidateDurations` is new (an addition to the public
+  surface). `Client.Launch` and `launcher.Provision` call it first.
 
 ## [0.130.1] - 2026-10-17
 

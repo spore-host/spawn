@@ -306,8 +306,8 @@ func init() {
 
 	// Behavior
 	launchCmd.Flags().BoolVar(&hibernate, "hibernate", false, "Configure the instance for hibernation (encrypted root sized for RAM). Implied by --on-idle hibernate and --on-complete hibernate")
-	launchCmd.Flags().StringVar(&ttl, "ttl", "", "Auto-terminate after duration (e.g., 8h, defaults to 1h idle if not set)")
-	launchCmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "Auto-terminate if idle (defaults to 1h if neither --ttl nor --idle-timeout set)")
+	launchCmd.Flags().StringVar(&ttl, "ttl", "", "Auto-terminate after duration (e.g., 8h, 90m, 1d, 2d12h; defaults to 1h idle if not set)")
+	launchCmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "Auto-terminate if idle, e.g. 30m, 2h, 1d (defaults to 1h if neither --ttl nor --idle-timeout set)")
 	launchCmd.Flags().BoolVar(&noTimeout, "no-timeout", false, "Disable automatic timeout (NOT RECOMMENDED: creates zombie risk)")
 	launchCmd.Flags().StringVar(&onIdle, "on-idle", "", "Action when the instance goes idle: stop (default) or hibernate. Mirrors --on-complete. NOTE: a stopped/hibernated instance keeps billing for its EBS volumes (and any attached Elastic IP) — for batch/headless work prefer --on-complete terminate so cost is fully bounded")
 	launchCmd.Flags().BoolVar(&hibernateOnIdle, "hibernate-on-idle", false, "Hibernate instead of stop when idle")

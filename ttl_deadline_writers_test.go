@@ -37,6 +37,10 @@ import (
 // it is how `config set ttl 0` disables enforcement; that is still deciding the
 // deadline rather than ignoring it. The unit is the enclosing top-level
 // declaration, so a helper closure inside the function is covered.
+//
+// Appearing somewhere in the function is not enough (#990): each spawn:ttl
+// write needs a deadline write in its own block or an enclosing one, so a
+// deadline behind a condition the TTL write does not share fails the gate.
 func TestEveryTTLTagWriterAlsoWritesTheDeadline(t *testing.T) {
 	writers, missing := scanTTLWriters(t, ".")
 	if len(writers) == 0 {
@@ -46,7 +50,7 @@ func TestEveryTTLTagWriterAlsoWritesTheDeadline(t *testing.T) {
 		t.Logf("spawn:ttl writer: %s", w)
 	}
 	for _, m := range missing {
-		t.Errorf("%s writes spawn:ttl but never writes spawn:ttl-deadline, the tag spored and the TTL reaper "+
+		t.Errorf("%s writes spawn:ttl without writing spawn:ttl-deadline on the same path (same block or an enclosing one), the tag spored and the TTL reaper "+
 			"actually enforce. Move both together (see pkg/ttl.Tags, or computeExtendedTTLTags for extend).", m)
 	}
 }
@@ -101,18 +105,47 @@ func scanTTLWriters(t *testing.T, root string) (writers, missing []string) {
 	return writers, missing
 }
 
-// tagWrites reports whether decl writes spawn:ttl and whether it writes (or
-// deletes) spawn:ttl-deadline, by the structural forms listed on the gate.
+// tagWrites reports whether decl writes spawn:ttl, and whether EVERY such
+// write is covered by a write (or delete) of spawn:ttl-deadline, by the
+// structural forms listed on the gate.
+//
+// A deadline write covers a ttl write when it sits in the same block as the
+// ttl write or in an enclosing one, so it cannot be skipped by a condition the
+// ttl write does not share. Before #990 this only asked whether both keys
+// appeared somewhere in the function, which buildTags satisfied while writing
+// the deadline inside `if d, err := time.ParseDuration(ttl); err == nil`: the
+// TTL tag was unconditional and the deadline was not, so `--ttl 1d` launched
+// with no deadline at all. That shape now fails here; the value-level half
+// (every accepted TTL spelling really yields a deadline) is
+// TestBuildTags_EveryAcceptedTTLFormYieldsADeadline in pkg/aws.
 func tagWrites(decl ast.Decl) (ttl, deadline bool) {
+	type write struct {
+		key  string
+		path []ast.Node // enclosing blocks, outermost first
+	}
+	var writes []write
+	var stack []ast.Node
+	blocks := func() []ast.Node {
+		var out []ast.Node
+		for _, n := range stack {
+			switch n.(type) {
+			case *ast.BlockStmt, *ast.CaseClause, *ast.CommClause:
+				out = append(out, n)
+			}
+		}
+		return out
+	}
 	mark := func(e ast.Expr) {
-		switch tagKey(e) {
-		case "ttl":
-			ttl = true
-		case "ttl-deadline":
-			deadline = true
+		if k := tagKey(e); k == "ttl" || k == "ttl-deadline" {
+			writes = append(writes, write{key: k, path: blocks()})
 		}
 	}
 	ast.Inspect(decl, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
 		switch n := n.(type) {
 		case *ast.CompositeLit:
 			for _, elt := range n.Elts {
@@ -142,6 +175,45 @@ func tagWrites(decl ast.Decl) (ttl, deadline bool) {
 		}
 		return true
 	})
+
+	// isPrefix reports whether outer is a prefix of inner: the deadline's
+	// innermost block is the ttl write's block or one enclosing it.
+	isPrefix := func(outer, inner []ast.Node) bool {
+		if len(outer) > len(inner) {
+			return false
+		}
+		for i := range outer {
+			if outer[i] != inner[i] {
+				return false
+			}
+		}
+		return true
+	}
+	deadline = true
+	for _, w := range writes {
+		if w.key != "ttl" {
+			continue
+		}
+		ttl = true
+		covered := false
+		for _, d := range writes {
+			if d.key == "ttl-deadline" && isPrefix(d.path, w.path) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			deadline = false
+		}
+	}
+	if !ttl {
+		deadline = false
+		for _, w := range writes {
+			if w.key == "ttl-deadline" {
+				deadline = true
+			}
+		}
+	}
 	return ttl, deadline
 }
 
@@ -205,6 +277,23 @@ func TestTTLWriterDetectorShapes(t *testing.T) {
 		{"read is not a write", `func f() { x := tags["spawn:ttl"]; _ = x }`, false, false},
 		{"switch case is not a write", `func f() { switch k { case "spawn:ttl": } }`, false, false},
 		{"other tag", `func f() { tags["spawn:ttl-remaining"] = x }`, false, false},
+		// #990: buildTags' shape. Both keys are in the function, but the
+		// deadline is behind a condition the TTL write does not share.
+		{"deadline conditional on the parse (#990)",
+			`func f() { if c.TTL != "" { tags = append(tags, types.Tag{Key: aws.String("spawn:ttl")}); if d, err := p(c.TTL); err == nil { tags = append(tags, types.Tag{Key: aws.String("spawn:ttl-deadline")}) } } }`,
+			true, false},
+		{"deadline in a sibling branch",
+			`func f() { if a { tags["spawn:ttl"] = x } else { tags["spawn:ttl-deadline"] = y } }`, true, false},
+		{"deadline in a switch case the ttl write is not in",
+			`func f() { tags["spawn:ttl"] = x; switch k { case 1: tags["spawn:ttl-deadline"] = y } }`, true, false},
+		{"deadline in an enclosing block covers a nested ttl write",
+			`func f() { tags["spawn:ttl-deadline"] = y; if a { tags["spawn:ttl"] = x } }`, true, true},
+		{"both in the same nested block (the fixed buildTags)",
+			`func f() { if c.TTL != "" { d, err := p(c.TTL); if err != nil { return }; tags = append(tags, types.Tag{Key: aws.String("spawn:ttl")}, types.Tag{Key: aws.String("spawn:ttl-deadline")}) } }`,
+			true, true},
+		{"every ttl write must be covered, not just one",
+			`func f() { if y { _ = map[string]string{"spawn:ttl": a, "spawn:ttl-deadline": b} }; if z { tags["spawn:ttl"] = c } }`,
+			true, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

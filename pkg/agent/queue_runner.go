@@ -18,6 +18,7 @@ import (
 	"github.com/spore-host/spawn/pkg/queue"
 	"github.com/spore-host/spawn/pkg/s3transfer"
 	"github.com/spore-host/spawn/pkg/security"
+	"github.com/spore-host/spawn/pkg/ttl"
 )
 
 // QueueRunner executes a batch job queue sequentially
@@ -126,7 +127,7 @@ func (r *QueueRunner) Run() error {
 
 	// Setup global timeout if specified
 	if r.config.GlobalTimeout != "" {
-		timeout, err := time.ParseDuration(r.config.GlobalTimeout)
+		timeout, err := ttl.ParseDuration(r.config.GlobalTimeout)
 		if err == nil {
 			r.ctx, r.cancelFunc = context.WithTimeout(r.ctx, timeout)
 		}
@@ -270,7 +271,7 @@ func (r *QueueRunner) executeJobWithRetry(job *queue.JobConfig) (*JobResult, err
 // executeJob executes a single job
 func (r *QueueRunner) executeJob(job *queue.JobConfig, attempt int) (*JobResult, error) {
 	// Parse timeout
-	timeout, err := time.ParseDuration(job.Timeout)
+	timeout, err := ttl.ParseDuration(job.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("parse timeout: %w", err)
 	}

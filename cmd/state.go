@@ -554,10 +554,6 @@ func startJobArray(ctx context.Context) error {
 	return nil
 }
 
-// parseDuration parses a TTL duration string (e.g., "2h", "30m", "1h30m")
-// parseDuration parses a TTL string, accepting Go's native duration syntax plus
-// a day unit (e.g. "2d", "1d12h"). It delegates to the shared day-aware parser
-// in pkg/config so the CLI and the config-file path stay in lockstep.
 // startDoesNotRestoreTTLNotice is what `spawn start` says about the TTL of a
 // stopped instance that `spawn stop`/`hibernate` saved a spawn:ttl-remaining
 // for. Empty when there is nothing saved.
@@ -586,6 +582,9 @@ func startDoesNotRestoreTTLNotice(instance *aws.InstanceInfo) string {
 		instance.InstanceID, remaining, deadline.UTC().Format("2006-01-02 15:04 UTC"), instance.InstanceID)
 }
 
+// parseDuration parses a TTL string, accepting Go's native duration syntax plus
+// a day unit (e.g. "2d", "1d12h"). It delegates to pkg/ttl.ParseDuration (via
+// pkg/config), the one parser launch, spored and the TTL reaper share (#990).
 func parseDuration(ttl string) (time.Duration, error) {
 	return spawnconfig.ParseDurationE(ttl)
 }

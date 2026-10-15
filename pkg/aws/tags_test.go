@@ -21,7 +21,7 @@ func TestBuildTags_FSxIDWritten(t *testing.T) {
 		FSxMountPoint: "/fsx",
 	}
 
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags := mustBuildTags(t, config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	fsxID := findTagValue(tags, "spawn:fsx-id")
 	if fsxID != "fs-0abc1234" {
@@ -44,13 +44,13 @@ func TestBuildTags_FSxIDWritten(t *testing.T) {
 // spawn:local-username so spored runs the pre-stop hook as that user, not root
 // (#63). Absent when Username is empty (older behavior).
 func TestBuildTags_LocalUsername(t *testing.T) {
-	withUser := buildTags(LaunchConfig{Name: "t", Username: "ec2-user"},
+	withUser := mustBuildTags(t, LaunchConfig{Name: "t", Username: "ec2-user"},
 		"123456789012", "arn:aws:iam::123456789012:user/test", "")
 	if got := findTagValue(withUser, "spawn:local-username"); got != "ec2-user" {
 		t.Errorf("spawn:local-username = %q, want ec2-user", got)
 	}
 
-	withoutUser := buildTags(LaunchConfig{Name: "t"},
+	withoutUser := mustBuildTags(t, LaunchConfig{Name: "t"},
 		"123456789012", "arn:aws:iam::123456789012:user/test", "")
 	if got := findTagValue(withoutUser, "spawn:local-username"); got != "" {
 		t.Errorf("spawn:local-username = %q, want empty when Username unset", got)
@@ -62,7 +62,7 @@ func TestBuildTags_LocalUsername(t *testing.T) {
 // can wait, set up the DRA, and mount) — and NOT spawn:fsx-id (the FS isn't
 // AVAILABLE yet; spored flips the tag after mounting).
 func TestBuildTags_FSxPending(t *testing.T) {
-	tags := buildTags(LaunchConfig{
+	tags := mustBuildTags(t, LaunchConfig{
 		Name:          "t",
 		FSxPending:    "fs-0pending",
 		FSxMountPoint: "/fsx",
@@ -89,7 +89,7 @@ func TestBuildTags_FSxPending(t *testing.T) {
 // blob, and the timeout all become spawn:* tags; with no URL, none appear (the
 // correlation/timeout are companions meaningful only alongside a URL).
 func TestBuildTags_SpotWebhook(t *testing.T) {
-	withURL := buildTags(LaunchConfig{
+	withURL := mustBuildTags(t, LaunchConfig{
 		Name:                       "t",
 		SpotInterruptionWebhookURL: "https://example.test/hook",
 		WebhookCorrelation:         "opaque-blob-42",
@@ -107,7 +107,7 @@ func TestBuildTags_SpotWebhook(t *testing.T) {
 	}
 
 	// No URL → none of the three tags are written (opt-in; today's behavior).
-	without := buildTags(LaunchConfig{
+	without := mustBuildTags(t, LaunchConfig{
 		Name:               "t",
 		WebhookCorrelation: "orphan", // present but URL-less → must be dropped
 		WebhookTimeout:     "3s",
@@ -123,7 +123,7 @@ func TestBuildTags_SpotWebhook(t *testing.T) {
 // TestBuildTags_SpotWebhook: the completion-webhook URL is tagged only when
 // set (opt-in), sharing the same webhook-correlation/webhook-timeout tags.
 func TestBuildTags_CompletionWebhook(t *testing.T) {
-	withURL := buildTags(LaunchConfig{
+	withURL := mustBuildTags(t, LaunchConfig{
 		Name:                 "t",
 		CompletionWebhookURL: "https://example.test/completion-hook",
 		WebhookCorrelation:   "opaque-blob-42",
@@ -141,7 +141,7 @@ func TestBuildTags_CompletionWebhook(t *testing.T) {
 	}
 
 	// No URL → the completion-webhook tag is not written (opt-in).
-	without := buildTags(LaunchConfig{Name: "t"}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	without := mustBuildTags(t, LaunchConfig{Name: "t"}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 	if got := findTagValue(without, "spawn:completion-webhook-url"); got != "" {
 		t.Errorf("spawn:completion-webhook-url = %q, want empty when no URL is set", got)
 	}
@@ -154,7 +154,7 @@ func TestBuildTags_FSxMountPointDefault(t *testing.T) {
 		// FSxMountPoint intentionally empty
 	}
 
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags := mustBuildTags(t, config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	fsxMount := findTagValue(tags, "spawn:fsx-mount-point")
 	if fsxMount != "/fsx" {
@@ -170,7 +170,7 @@ func TestBuildTags_EFSIDWritten(t *testing.T) {
 		EFSMountPoint: "/efs",
 	}
 
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags := mustBuildTags(t, config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	efsID := findTagValue(tags, "spawn:efs-id")
 	if efsID != "fs-0def5678" {
@@ -192,7 +192,7 @@ func TestBuildTags_CommandWritten(t *testing.T) {
 		JobArrayCommand: "python train.py --lr 0.001",
 	}
 
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags := mustBuildTags(t, config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	cmd := findTagValue(tags, "spawn:command")
 	if cmd != "python train.py --lr 0.001" {
@@ -209,13 +209,13 @@ func TestBuildTags_LongCommandNotTagged(t *testing.T) {
 	if len(long) <= 256 {
 		t.Fatalf("test command should exceed 256 chars, got %d", len(long))
 	}
-	tags := buildTags(LaunchConfig{Name: "t", JobArrayCommand: long}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags := mustBuildTags(t, LaunchConfig{Name: "t", JobArrayCommand: long}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 	if v := findTagValue(tags, "spawn:command"); v != "" {
 		t.Errorf("oversized command must not be tagged (would fail RunInstances); got %d-char tag", len(v))
 	}
 
 	// A short command is still tagged (observability + sweep path).
-	tags = buildTags(LaunchConfig{Name: "t", JobArrayCommand: "echo hi"}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags = mustBuildTags(t, LaunchConfig{Name: "t", JobArrayCommand: "echo hi"}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 	if findTagValue(tags, "spawn:command") != "echo hi" {
 		t.Error("short command should still be written to spawn:command")
 	}
@@ -224,7 +224,7 @@ func TestBuildTags_LongCommandNotTagged(t *testing.T) {
 // TestBuildTags_NoFSxWhenNotSet verifies FSx tags are absent when not configured.
 func TestBuildTags_NoFSxWhenNotSet(t *testing.T) {
 	config := LaunchConfig{Name: "test-instance"}
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags := mustBuildTags(t, config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	if v := findTagValue(tags, "spawn:fsx-id"); v != "" {
 		t.Errorf("spawn:fsx-id should be absent when FSxLustreID is empty, got %q", v)
@@ -241,7 +241,7 @@ func TestBuildTags_NoFSxWhenNotSet(t *testing.T) {
 // fields that drive the network interface construction.
 func TestBuildTags_ManagedTagPresent(t *testing.T) {
 	config := LaunchConfig{Name: "test"}
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags := mustBuildTags(t, config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	managed := findTagValue(tags, "spawn:managed")
 	if managed != "true" {
@@ -265,7 +265,7 @@ func findTagValue(tags []ec2types.Tag, key string) string {
 func TestBuildTags_AccountName(t *testing.T) {
 	config := LaunchConfig{Name: "job"}
 
-	withName := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "hpc-burst-prod")
+	withName := mustBuildTags(t, config, "123456789012", "arn:aws:iam::123456789012:user/test", "hpc-burst-prod")
 	if got := findTagValue(withName, "spawn:account-name"); got != "hpc-burst-prod" {
 		t.Errorf("spawn:account-name = %q, want hpc-burst-prod", got)
 	}
@@ -274,7 +274,7 @@ func TestBuildTags_AccountName(t *testing.T) {
 		t.Error("spawn:account-base36 must always be present")
 	}
 
-	withoutName := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	withoutName := mustBuildTags(t, config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 	if got := findTagValue(withoutName, "spawn:account-name"); got != "" {
 		t.Errorf("spawn:account-name should be absent when slug is empty, got %q", got)
 	}
@@ -321,7 +321,7 @@ func TestSlugifyDNSLabel_MaxLength(t *testing.T) {
 // when the caller doesn't supply one.
 func TestBuildTags_VersionIsNotHardcoded(t *testing.T) {
 	t.Run("caller-supplied version is written verbatim", func(t *testing.T) {
-		tags := buildTags(LaunchConfig{Name: "t", SpawnVersion: "0.100.2"},
+		tags := mustBuildTags(t, LaunchConfig{Name: "t", SpawnVersion: "0.100.2"},
 			"123456789012", "arn:aws:iam::123456789012:user/test", "")
 		if got := findTagValue(tags, "spawn:version"); got != "0.100.2" {
 			t.Errorf("spawn:version = %q, want 0.100.2 (must reflect the actual caller, not a hardcoded literal)", got)
@@ -329,7 +329,7 @@ func TestBuildTags_VersionIsNotHardcoded(t *testing.T) {
 	})
 
 	t.Run("no caller-supplied version => tag omitted, not a false placeholder", func(t *testing.T) {
-		tags := buildTags(LaunchConfig{Name: "t"},
+		tags := mustBuildTags(t, LaunchConfig{Name: "t"},
 			"123456789012", "arn:aws:iam::123456789012:user/test", "")
 		found := false
 		for _, tg := range tags {
@@ -343,7 +343,7 @@ func TestBuildTags_VersionIsNotHardcoded(t *testing.T) {
 	})
 
 	t.Run("never the old hardcoded literal", func(t *testing.T) {
-		tags := buildTags(LaunchConfig{Name: "t", SpawnVersion: "0.100.2"},
+		tags := mustBuildTags(t, LaunchConfig{Name: "t", SpawnVersion: "0.100.2"},
 			"123456789012", "arn:aws:iam::123456789012:user/test", "")
 		if got := findTagValue(tags, "spawn:version"); got == "0.1.0" {
 			t.Error("spawn:version must never be the old hardcoded literal 0.1.0")
@@ -363,7 +363,7 @@ func TestBuildTags_CompletionFileRequiresOnComplete(t *testing.T) {
 	t.Run("CompletionFile without OnComplete => neither tag written", func(t *testing.T) {
 		// Models the real-world shape: --completion-file's flag default is
 		// always non-empty even when --on-complete was never passed.
-		tags := buildTags(LaunchConfig{Name: "t", CompletionFile: "/tmp/SPAWN_COMPLETE"},
+		tags := mustBuildTags(t, LaunchConfig{Name: "t", CompletionFile: "/tmp/SPAWN_COMPLETE"},
 			"123456789012", "arn:aws:iam::123456789012:user/test", "")
 		if got := findTagValue(tags, "spawn:completion-file"); got != "" {
 			t.Errorf("spawn:completion-file = %q, want empty (no spawn:on-complete to act on it)", got)
@@ -374,7 +374,7 @@ func TestBuildTags_CompletionFileRequiresOnComplete(t *testing.T) {
 	})
 
 	t.Run("OnComplete + CompletionFile => both tags written together", func(t *testing.T) {
-		tags := buildTags(LaunchConfig{Name: "t", OnComplete: "terminate", CompletionFile: "/tmp/SPAWN_COMPLETE"},
+		tags := mustBuildTags(t, LaunchConfig{Name: "t", OnComplete: "terminate", CompletionFile: "/tmp/SPAWN_COMPLETE"},
 			"123456789012", "arn:aws:iam::123456789012:user/test", "")
 		if got := findTagValue(tags, "spawn:completion-file"); got != "/tmp/SPAWN_COMPLETE" {
 			t.Errorf("spawn:completion-file = %q, want /tmp/SPAWN_COMPLETE", got)
@@ -385,7 +385,7 @@ func TestBuildTags_CompletionFileRequiresOnComplete(t *testing.T) {
 	})
 
 	t.Run("OnComplete without CompletionFile => only on-complete written (spored defaults the file itself)", func(t *testing.T) {
-		tags := buildTags(LaunchConfig{Name: "t", OnComplete: "terminate"},
+		tags := mustBuildTags(t, LaunchConfig{Name: "t", OnComplete: "terminate"},
 			"123456789012", "arn:aws:iam::123456789012:user/test", "")
 		if got := findTagValue(tags, "spawn:on-complete"); got != "terminate" {
 			t.Errorf("spawn:on-complete = %q, want terminate", got)
@@ -402,7 +402,7 @@ func TestBuildTags_CompletionFileRequiresOnComplete(t *testing.T) {
 // `spawn burst` sets it (#904).
 func TestBuildTags_JobArrayMemberIsNotTaggedBurst(t *testing.T) {
 	config := LaunchConfig{Name: "w-0", JobArrayID: "ja-1", JobArrayName: "w", JobArraySize: 2}
-	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags := mustBuildTags(t, config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 	if got := findTagValue(tags, "spawn:job-array-id"); got != "ja-1" {
 		t.Fatalf("spawn:job-array-id = %q, want ja-1", got)
 	}

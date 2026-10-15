@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/platform"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 // Wizard guides users through spawning an instance
@@ -213,10 +213,7 @@ func (w *Wizard) askAutoTerminate() error {
 	switch choice {
 	case "1":
 		fmt.Print(i18n.T("spawn.wizard.step4.ttl_prompt"))
-		ttl := w.readLine()
-		if ttl == "" {
-			ttl = "8h"
-		}
+		ttl := w.readDuration("8h")
 		w.config.TTL = ttl
 		fmt.Printf("  %s %s\n", i18n.Symbol("success"), i18n.Tf("spawn.wizard.step4.ttl_set", map[string]interface{}{
 			"TTL": ttl,
@@ -224,10 +221,7 @@ func (w *Wizard) askAutoTerminate() error {
 
 	case "2":
 		fmt.Print(i18n.T("spawn.wizard.step4.idle_prompt"))
-		idle := w.readLine()
-		if idle == "" {
-			idle = "1h"
-		}
+		idle := w.readDuration("1h")
 		w.config.IdleTimeout = idle
 		fmt.Printf("  %s %s\n", i18n.Symbol("success"), i18n.Tf("spawn.wizard.step4.idle_set", map[string]interface{}{
 			"Idle": idle,
@@ -235,17 +229,11 @@ func (w *Wizard) askAutoTerminate() error {
 
 	case "3":
 		fmt.Print(i18n.T("spawn.wizard.step4.ttl_prompt_short"))
-		ttl := w.readLine()
-		if ttl == "" {
-			ttl = "8h"
-		}
+		ttl := w.readDuration("8h")
 		w.config.TTL = ttl
 
 		fmt.Print(i18n.T("spawn.wizard.step4.idle_prompt_short"))
-		idle := w.readLine()
-		if idle == "" {
-			idle = "1h"
-		}
+		idle := w.readDuration("1h")
 		w.config.IdleTimeout = idle
 		fmt.Printf("  %s %s\n", i18n.Symbol("success"), i18n.Tf("spawn.wizard.step4.both_set", map[string]interface{}{
 			"TTL":  ttl,
@@ -373,7 +361,7 @@ func (w *Wizard) confirm() (*aws.LaunchConfig, error) {
 	}
 
 	if w.config.TTL != "" {
-		duration, _ := time.ParseDuration(w.config.TTL)
+		duration, _ := ttlpkg.ParseDuration(w.config.TTL)
 		hours := duration.Hours()
 		totalCost := cost * hours
 		fmt.Printf("   %s\n", i18n.Tf("spawn.wizard.summary.total_cost", map[string]interface{}{
@@ -394,6 +382,23 @@ func (w *Wizard) confirm() (*aws.LaunchConfig, error) {
 	}
 
 	return nil, i18n.Te("error.cancelled_by_user", nil)
+}
+
+// readDuration reads a TTL or idle timeout, returning def for an empty line
+// and re-prompting until the value parses with pkg/ttl's shared parser — the
+// one spored and the TTL reaper use — so the wizard cannot hand the launch a
+// duration nothing would enforce (#990).
+func (w *Wizard) readDuration(def string) string {
+	for {
+		v := w.readLine()
+		if v == "" {
+			return def
+		}
+		if _, err := ttlpkg.ParseTTL(v); err == nil {
+			return v
+		}
+		fmt.Printf("  %q is not a duration; enter one such as 8h, 90m or 1d (blank for %s): ", v, def)
+	}
 }
 
 func (w *Wizard) readLine() string {

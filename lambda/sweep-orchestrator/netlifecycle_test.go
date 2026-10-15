@@ -178,3 +178,21 @@ func TestCompletionStatusUsesOnlyKnownValues(t *testing.T) {
 		}
 	}
 }
+
+// #990: the CLI accepts day units for a sweep's ttl, and so must the Lambda,
+// with the same parser. time.ParseDuration rejected "1d", so a detached sweep
+// row with `ttl: 1d` got no deadline and lived until the reaper's 7-day
+// max-age ceiling.
+func TestSweepRowDeadlineAcceptsDayUnits(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	for ttl, want := range map[string]time.Duration{"1d": 24 * time.Hour, "2d12h": 60 * time.Hour, "1.5d": 36 * time.Hour} {
+		v, ok := tagValue(sweepRowLifecycleTags(map[string]interface{}{"ttl": ttl}, now), "spawn:ttl-deadline")
+		if !ok {
+			t.Errorf("ttl %q: no spawn:ttl-deadline", ttl)
+			continue
+		}
+		if got, err := time.Parse(time.RFC3339, v); err != nil || !got.Equal(now.Add(want)) {
+			t.Errorf("ttl %q: deadline %q, want %v", ttl, v, now.Add(want))
+		}
+	}
+}

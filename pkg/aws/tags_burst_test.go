@@ -25,7 +25,7 @@ func TestBuildTags_BurstMemberIsReaperVisibleAndBounded(t *testing.T) {
 		Tags:          map[string]string{"spawn:burst": "true"},
 	}
 	before := time.Now()
-	tags := buildTags(cfg, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	tags := mustBuildTags(t, cfg, "123456789012", "arn:aws:iam::123456789012:user/test", "")
 
 	for key, want := range map[string]string{
 		"spawn:managed":         "true",

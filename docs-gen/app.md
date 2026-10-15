@@ -48,7 +48,7 @@ spawn app launch <app-name> [flags]
 | `--no-web-auth` |  | bool |  | Disable the spored :443 access-token gate for a web app (the app must provide its own auth) |
 | `--region` |  | string |  | AWS region (default: from AWS config) |
 | `--spot` |  | bool |  | Use Spot pricing |
-| `--ttl` |  | string |  | Hard termination deadline (e.g. 4h, 8h) |
+| `--ttl` |  | string |  | Hard termination deadline (e.g. 4h, 8h, 1d) |
 | `--web-arg` |  | stringArray |  | Extra argument for a web app's container, repeatable (e.g. --web-arg=--bind-addr=0.0.0.0:8080) |
 | `--web-port` |  | int |  | Launch --image as a web-UI app served on this container port (e.g. 8080 for code-server, 8888 for Jupyter); spored fronts it with TLS on :443 |
 

@@ -6,11 +6,11 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spore-host/spawn/pkg/plugin"
+	"github.com/spore-host/spawn/pkg/ttl"
 	"gopkg.in/yaml.v3"
 )
 
@@ -211,56 +211,15 @@ func ParseDuration(s string) time.Duration {
 	return d
 }
 
-// ParseDurationE parses a duration string composed of <number><unit> segments
-// where unit is one of s, m, h, d (days). It first tries Go's native
-// time.ParseDuration (which handles ns..h and fractional values), then falls
-// back to the segment parser so day units and combined forms like "1d12h" work.
+// ParseDurationE parses a duration with pkg/ttl.ParseDuration, the one parser
+// every TTL and lifecycle duration in spawn goes through (#990): Go's syntax
+// plus a day unit ("2d", "1d12h"). An empty string is zero, not an error, for
+// the config-file callers that treat "unset" that way.
 func ParseDurationE(s string) (time.Duration, error) {
 	if s == "" {
 		return 0, nil
 	}
-
-	// Native syntax first (handles fractional values and sub-second units).
-	if d, err := time.ParseDuration(s); err == nil {
-		return d, nil
-	}
-
-	// Fallback: <number><unit> segments, unit ∈ {s,m,h,d}.
-	var total time.Duration
-	remaining := s
-	for len(remaining) > 0 {
-		i := 0
-		for i < len(remaining) && remaining[i] >= '0' && remaining[i] <= '9' {
-			i++
-		}
-		if i == 0 {
-			return 0, fmt.Errorf("invalid duration format: %s", s)
-		}
-		numStr := remaining[:i]
-		if i >= len(remaining) {
-			return 0, fmt.Errorf("invalid duration format: missing unit in %s", s)
-		}
-		unit := remaining[i]
-		remaining = remaining[i+1:]
-
-		num, err := strconv.ParseInt(numStr, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid number in duration: %s", numStr)
-		}
-		switch unit {
-		case 's':
-			total += time.Duration(num) * time.Second
-		case 'm':
-			total += time.Duration(num) * time.Minute
-		case 'h':
-			total += time.Duration(num) * time.Hour
-		case 'd':
-			total += time.Duration(num) * 24 * time.Hour
-		default:
-			return 0, fmt.Errorf("invalid unit in duration: %c", unit)
-		}
-	}
-	return total, nil
+	return ttl.ParseDuration(s)
 }
 
 // lookupPublicIP is detectPublicIP, as a variable so tests do not query the

@@ -181,6 +181,10 @@ var poolCreateCmd = &cobra.Command{
 		if poolWorkers < 1 {
 			return fmt.Errorf("--workers must be >= 1")
 		}
+		// Before any AWS call, with the parser spored uses (#990).
+		if err := (aws.LaunchConfig{TTL: poolTTL}).ValidateDurations(); err != nil {
+			return fmt.Errorf("--ttl: %w", err)
+		}
 		ctx := cmd.Context()
 		awsClient, err := aws.NewClient(ctx)
 		if err != nil {

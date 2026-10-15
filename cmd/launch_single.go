@@ -36,6 +36,12 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Reject an unparseable --ttl/--idle-timeout (etc.) before any AWS call,
+	// on every launch path below (#990).
+	if err := validateLaunchDurationFlags(); err != nil {
+		return err
+	}
+
 	// Get the account ID for audit logging. This is best-effort and resilient:
 	// it uses the AWS client's GetAccountID, which falls back to IMDS if STS is
 	// unreachable (e.g. an STS VPC endpoint with private DNS this subnet can't
@@ -164,6 +170,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+	}
+	// Whatever produced the config (the wizard included), its durations must
+	// parse before the security-group, key-pair and FSx work below (#990).
+	if err := config.ValidateDurations(); err != nil {
+		return err
 	}
 
 	// Apply custom --tag key=value tags to the instance + its created volumes,
