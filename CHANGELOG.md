@@ -140,7 +140,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gave UTC and the termination deadline gave local time for the same moment.
   spored's UTC timestamps are re-rendered to match, and so is the
   lifecycle-mismatch warning.
-### Fixed
 
 - **Only hybrid job-array members register with the hybrid registry** (#904).
   spored registered every instance carrying `spawn:job-array-id` with the
