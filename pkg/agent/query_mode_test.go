@@ -54,6 +54,7 @@ func queryProvider() *countingProvider {
 			// Every field that triggers a side effect in NewAgent.
 			DNSName:    "demo",   // -> DNS registration POST + tag write
 			JobArrayID: "ja-abc", // -> registry Register + heartbeat goroutine
+			Burst:      true,     // only hybrid/burst members join the registry (#904)
 			// EBSHourlyCost zero -> cost lookup + tag write
 		},
 		otherInstances: -1,
