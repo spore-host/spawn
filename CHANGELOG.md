@@ -103,6 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain when its config names none. `spored run-queue` (`spawn launch
   --batch-queue`) had the same defect in its results uploader and now takes the
   instance's region from IMDS when nothing else sets one.
+### Fixed
+
+- **`spored run-pipeline-stage`'s S3 and EC2 clients now have a region**
+  (#906). The pipeline stage runner's clients (stage data handoff, peer
+  discovery, and the pipeline-definition download) used the default AWS
+  credential chain. On an instance that chain names no region, because the SDK
+  does not read one from IMDS, so every call would have failed with
+  `Missing Region`. If nothing else sets a region, they now use the instance's
+  region from IMDS; an explicit `AWS_REGION` or profile region still wins. No
+  current spawn workflow runs this command: `spawn pipeline launch` stage
+  instances run their command directly. #910 proposes removing the stage
+  runner or wiring it in.
 
 ## [0.128.2] - 2026-10-13
 
