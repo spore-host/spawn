@@ -1024,7 +1024,63 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 		},
 	})
 
+	statements = append(statements, sporedHybridRegistryStatement())
+
 	return statements
+}
+
+// sporedHybridRegistryActions are exactly the DynamoDB calls the in-instance
+// registry client (pkg/registry.PeerRegistry) makes: Register is PutItem, the
+// heartbeat is UpdateItem, Deregister on shutdown is DeleteItem, DiscoverPeers is
+// Query. No Scan, no batch calls, no table management — EnsureTable runs on the
+// workstation under the user's own credentials (#905). A test derives this list
+// from the client's source so the two cannot drift.
+var sporedHybridRegistryActions = []string{
+	"dynamodb:PutItem",
+	"dynamodb:UpdateItem",
+	"dynamodb:DeleteItem",
+	"dynamodb:Query",
+}
+
+// sporedHybridRegistryResource is the registry table in the instance's OWN
+// account, any region. ${aws:PrincipalAccount} pins the account without the
+// policy needing to know it, so the static sporedDCVRolePolicy can carry the
+// same grant as the dynamic baseline.
+const sporedHybridRegistryResource = "arn:aws:dynamodb:*:${aws:PrincipalAccount}:table/spawn-hybrid-registry"
+
+// sporedHybridRegistryStatement lets spored register a job-array member in the
+// hybrid registry (#905). Every spored whose instance carries spawn:job-array-id
+// calls registry.Register at startup; neither spored policy granted any action
+// on the table, so registration could not succeed on any member (it is a logged
+// warning, so nobody noticed), and `spawn burst`, whose whole purpose is cloud
+// members joining a registry-coordinated array, could not work. (It also failed
+// earlier, for want of a region; that half is #899.)
+//
+// Scoped to the one table and the four item-level actions the client uses. It
+// cannot be narrowed further to the member's own item: the partition key is the
+// job-array id, which the policy cannot know. That is strictly less than the
+// role already holds — it can terminate any spawn-managed instance in the
+// account.
+func sporedHybridRegistryStatement() map[string]interface{} {
+	actions := make([]interface{}, 0, len(sporedHybridRegistryActions))
+	for _, a := range sporedHybridRegistryActions {
+		actions = append(actions, a)
+	}
+	return map[string]interface{}{
+		"Effect":   "Allow",
+		"Action":   actions,
+		"Resource": sporedHybridRegistryResource,
+	}
+}
+
+// sporedHybridRegistryStatementJSON renders the same statement for the static
+// DCV policy, so the two policies cannot drift on it.
+func sporedHybridRegistryStatementJSON() string {
+	b, err := json.Marshal(sporedHybridRegistryStatement())
+	if err != nil {
+		panic(err) // static content; cannot fail
+	}
+	return string(b)
 }
 
 // buildIAMTags creates IAM tags with spawn metadata
@@ -1481,9 +1537,10 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
         "arn:aws:s3:::spawn-binaries-*",
         "arn:aws:s3:::spawn-binaries-*/*"
       ]
-    }
+    },
+    %s
   ]
-}`, reaperControlTagKeysJSON())
+}`, reaperControlTagKeysJSON(), sporedHybridRegistryStatementJSON())
 
 // waitForInstanceProfile polls until the instance profile is retrievable (IAM
 // is eventually consistent after creation), or a bounded deadline passes. It

@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#898) beside the existing `ttl`, which keeps meaning the configured TTL.
   `ttl_remaining_seconds` is `null` when there is no deadline or the instance is
   already terminated, and `0` once the deadline has passed.
+- **`spawn burst --ttl` and `--idle-timeout`** (#917). Every burst instance now
+  has a TTL, 8h unless you pass `--ttl`, and terminates when it expires.
+  `--idle-timeout` also ends an instance once it has been idle that long. The
+  TTL must be a Go duration such as `30m`, `2h` or `36h`, because that is what
+  the TTL deadline is computed from. `1d` is rejected rather than launching an
+  instance with no deadline.
+- **`spawn burst --instance-profile`** (#905) attaches an existing IAM instance
+  profile by name, with no IAM calls, as `spawn launch --instance-profile` does.
+  Without it, burst uses the shared `spored-instance-profile`, creating it if
+  needed.
 
 ### Changed
 
@@ -221,6 +231,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behind a per-OS helper. A new gate, `make check-goos` (also in `make check`
   and CI), runs `go vet ./...` for every GOOS that `.goreleaser.yaml` builds.
   It discovers the set from that file and fails if it finds none.
+- **`spawn burst` instances can now run spored** (#905). Burst launched its
+  instances with no IAM instance profile, so spored on them had no AWS
+  credentials. It could not read its tags, register in the hybrid registry,
+  register DNS or terminate itself. Burst now attaches the same
+  `spored-instance-profile` that `spawn launch` uses.
+- **`spawn burst` failed at launch every time** (#905). It sent its user-data
+  script unencoded, and RunInstances rejects user-data that is not base64.
+- **The TTL reaper, `spawn list` and `spawn array status` can see burst
+  instances** (#917). Burst wrote five tags by hand and none of the ones
+  `spawn launch` writes. Without `spawn:managed=true`, the reaper's max-age
+  ceiling never applied, `spawn list` skipped the instances, and the spored role
+  could not terminate them. Burst now launches each member through the same
+  launch path as `spawn launch`, so it gets the same tags, and each member gets
+  its own job-array index instead of all registering at index 0. Instances are
+  named `spawn-burst-<id>-<index>`. `--job-array-name` now defaults to the job
+  array ID, so the `spawn array status` command burst prints finds the
+  instances. If a launch fails part-way, burst lists the instances already
+  running and how to cancel them.
+- **spored can use the hybrid registry** (#905). The spored role had no access
+  to the `spawn-hybrid-registry` table, so no job-array member could register.
+  Both spored policies now grant `PutItem`, `UpdateItem`, `DeleteItem` and
+  `Query` on that one table, in the instance's own account. Existing roles get
+  the grant on the next launch.
 
 ### Security
 
