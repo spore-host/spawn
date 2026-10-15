@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   profile by name, with no IAM calls, as `spawn launch --instance-profile` does.
   Without it, burst uses the shared `spored-instance-profile`, creating it if
   needed.
+- **The spored systemd-unit gates now find every unit instead of checking a
+  list** (#946). `TestSporedUnit_NoPrivateTmp` scanned two named files and never
+  saw the two units `cmd/app.go` writes for web-app and DCV instances, so a
+  `PrivateTmp=true` there (which silently breaks `--on-complete` and `--pre-stop`,
+  #66) would have passed. The test now discovers every `spored.service` file and
+  every heredoc that writes `/etc/systemd/system/spored.service`, fails if it finds
+  none or meets an emitter it cannot parse, and rejects any truthy `PrivateTmp=`,
+  not only `true`. A new `TestSporedUnit_AfterNetworkOnline` requires each unit to
+  order after and want `network-online.target`, which spored's shutdown flush of
+  `spawn:compute-seconds` (#928) and DNS deregistration rely on. All four current
+  units already comply.
 
 ### Changed
 
