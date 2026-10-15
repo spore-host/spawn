@@ -46,7 +46,7 @@
       "instance_count": 1,
       "region": "us-east-1",
       "timeout": "1h",
-      "command": "python evaluate.py --model /models/best.h5",
+      "command": "python evaluate.py --model /models/0/best.h5",
       "depends_on": ["train"],
       "data_input": {
         "mode": "s3",

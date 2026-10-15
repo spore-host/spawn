@@ -72,6 +72,19 @@ func StageOutputPrefix(prefix, stageID string) string {
 	return StageKeyPrefix(prefix, stageID) + "output/"
 }
 
+// StageInstanceOutputPrefix is where ONE instance of a stage uploads its
+// data_output files: StageOutputPrefix itself for a single-instance stage, and
+// "<output>/<instance-index>/" when instance_count > 1. Every instance of a
+// multi-instance stage runs the same command and uploads the same paths, and
+// they used to share one prefix, so same-named outputs overwrote each other and
+// the last writer won (#944).
+func StageInstanceOutputPrefix(prefix, stageID string, instanceCount, instanceIndex int) string {
+	if instanceCount <= 1 {
+		return StageOutputPrefix(prefix, stageID)
+	}
+	return fmt.Sprintf("%s%d/", StageOutputPrefix(prefix, stageID), instanceIndex)
+}
+
 // StageMarkerKey is the key of a stage-level COMPLETE or FAILED marker. Stage
 // instances no longer write it: with instance_count > 1 the first instance to
 // finish marked the whole stage complete (#930). The orchestrator still reads

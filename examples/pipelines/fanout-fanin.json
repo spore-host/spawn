@@ -20,17 +20,17 @@
       "instance_count": 1,
       "region": "us-east-1",
       "spot": true,
-      "command": "./process.py --chunk 1",
+      "command": "./process.py --chunk 1 --output /output/chunk-1-result.csv",
       "depends_on": ["split"],
       "data_input": {
         "mode": "s3",
         "source_stage": "split",
-        "pattern": "/data/chunks/chunk-1-*",
+        "pattern": "chunk-1-*",
         "dest_path": "/input"
       },
       "data_output": {
         "mode": "s3",
-        "paths": ["/output/*"]
+        "paths": ["/output/chunk-1-*"]
       }
     },
     {
@@ -39,17 +39,17 @@
       "instance_count": 1,
       "region": "us-east-1",
       "spot": true,
-      "command": "./process.py --chunk 2",
+      "command": "./process.py --chunk 2 --output /output/chunk-2-result.csv",
       "depends_on": ["split"],
       "data_input": {
         "mode": "s3",
         "source_stage": "split",
-        "pattern": "/data/chunks/chunk-2-*",
+        "pattern": "chunk-2-*",
         "dest_path": "/input"
       },
       "data_output": {
         "mode": "s3",
-        "paths": ["/output/*"]
+        "paths": ["/output/chunk-2-*"]
       }
     },
     {
@@ -58,17 +58,17 @@
       "instance_count": 1,
       "region": "us-east-1",
       "spot": true,
-      "command": "./process.py --chunk 3",
+      "command": "./process.py --chunk 3 --output /output/chunk-3-result.csv",
       "depends_on": ["split"],
       "data_input": {
         "mode": "s3",
         "source_stage": "split",
-        "pattern": "/data/chunks/chunk-3-*",
+        "pattern": "chunk-3-*",
         "dest_path": "/input"
       },
       "data_output": {
         "mode": "s3",
-        "paths": ["/output/*"]
+        "paths": ["/output/chunk-3-*"]
       }
     },
     {

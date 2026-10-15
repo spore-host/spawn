@@ -101,6 +101,9 @@ func NewStageRunner(ctx context.Context) (*StageRunner, error) {
 		return nil, err
 	}
 
+	// Every stage's instance_count decides its output layout (#944).
+	dataHandler.pipelineDef = pipelineDef
+
 	// Get stage definition
 	stageDef := pipelineDef.GetStage(stageInfo.StageID)
 	if stageDef == nil {

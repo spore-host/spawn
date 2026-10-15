@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/spore-host/spawn/pkg/queue"
@@ -355,6 +357,19 @@ func (d *DataConfig) ValidateInput(validStageIDs map[string]bool) error {
 		for _, stage := range d.SourceStages {
 			if !validStageIDs[stage] {
 				return fmt.Errorf("source_stages references unknown stage: %s", stage)
+			}
+		}
+
+		// The pattern is matched against each file's path relative to its
+		// source stage's output (see OutputRelPath), so an absolute one can
+		// never match: such a stage silently received nothing (#944).
+		if d.Pattern != "" {
+			if strings.HasPrefix(d.Pattern, "/") {
+				return fmt.Errorf("pattern %q is absolute; it is matched against each file's path relative to "+
+					"the directory of the source stage's data_output pattern (e.g. \"chunk-1-*\" for files from \"/data/chunks/*\")", d.Pattern)
+			}
+			if _, err := path.Match(d.Pattern, ""); err != nil {
+				return fmt.Errorf("pattern %q: %w", d.Pattern, err)
 			}
 		}
 	}

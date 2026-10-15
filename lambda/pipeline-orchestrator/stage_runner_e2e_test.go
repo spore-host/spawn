@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -334,5 +335,30 @@ func TestStageRunnerEndToEnd_StaysInsideItsRun(t *testing.T) {
 	})
 	if err != nil || len(list.Contents) != 1 || !strings.HasSuffix(aws.ToString(list.Contents[0].Key), "/result.txt") {
 		t.Errorf("this run's outputs under %s: %v (%v), want result.txt", pipeline.StageOutputPrefix(e.state.DataPrefix(), "train"), list, err)
+	}
+}
+
+// #944: through the real spored, an instance of a multi-instance stage uploads
+// under its own index, and an absolute data_output pattern keys files by their
+// path relative to the pattern's directory, not by their whole path.
+func TestStageRunnerEndToEnd_OutputsAreKeyedByInstanceAndPatternDir(t *testing.T) {
+	for _, index := range []int{0, 1} {
+		e := runStageEndToEnd(t, `mkdir -p $OUT && cp $IN/data.csv $OUT/result.txt`, index)
+		if e.runErr != nil {
+			t.Fatalf("instance %d: stage user data failed: %v\ncalls:\n%s", index, e.runErr, e.calls)
+		}
+		// runStageEndToEnd gives "train" index+1 instances.
+		want := pipeline.StageOutputPrefix("pfx", "train") + "result.txt"
+		if index > 0 {
+			want = pipeline.StageOutputPrefix("pfx", "train") + fmt.Sprintf("%d/result.txt", index)
+		}
+		if got, ok := e.object(t, want); !ok || got != "hello pipeline\n" {
+			list, _ := e.s3.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{Bucket: aws.String("bkt"), Prefix: aws.String("pfx/")})
+			var keys []string
+			for _, o := range list.Contents {
+				keys = append(keys, aws.ToString(o.Key))
+			}
+			t.Errorf("instance %d of %d: no output at %s; keys %v", index, index+1, want, keys)
+		}
 	}
 }
