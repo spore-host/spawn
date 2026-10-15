@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,9 @@ func TestBuildPoolWorkerCommand_RestartContract(t *testing.T) {
 // running a stubbed loop: a fake `spored` that exits 0 must run exactly once (no
 // restart), proving a clean drain terminates the instance rather than looping.
 func TestBuildPoolWorkerCommand_ExitZeroStops(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: runs the generated pool-worker loop, which runs on a Linux instance, under bash with a stub on a :-separated PATH (#1002)")
+	}
 	dir := t.TempDir()
 	// Stub `spored` on PATH that records each call and exits 0.
 	stub := filepath.Join(dir, "spored")

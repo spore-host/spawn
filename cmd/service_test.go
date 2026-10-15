@@ -615,6 +615,13 @@ func TestValidateServiceUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	missing := filepath.Join(dir, "nope")
+	_, statErr := os.Stat(missing)
+	if statErr == nil {
+		t.Fatalf("%s unexpectedly exists", missing)
+	}
+	notFound := errors.Unwrap(statErr).Error()
+
 	cases := []struct {
 		name string
 		path string
@@ -627,7 +634,10 @@ func TestValidateServiceUpload(t *testing.T) {
 		// `--upload --region us-east-1` binds "--region" as the filename.
 		{"a flag as the value is named as such", "--region", "looks like a flag"},
 		{"a short flag too", "-r", "looks like a flag"},
-		{"a missing file", filepath.Join(dir, "nope"), "no such file"},
+		// The OS's own not-found text: "no such file or directory" on POSIX,
+		// "cannot find the file" on Windows (#971). The point is that the
+		// cause reaches the user, not its wording.
+		{"a missing file", missing, notFound},
 		{"a directory is not a file", dir, "is a directory"},
 	}
 	for _, tc := range cases {

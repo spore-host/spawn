@@ -728,6 +728,9 @@ func TestValidateCompletionConfig(t *testing.T) {
 
 // TestWriteOutputID tests the writeOutputID function for workflow integration
 func TestWriteOutputID(t *testing.T) {
+	// A directory that certainly exists on every OS. A literal "/tmp" does not
+	// exist on Windows, where the write then succeeded by creating C:\tmp (#971).
+	dir := t.TempDir()
 	tests := []struct {
 		name     string
 		id       string
@@ -743,7 +746,7 @@ func TestWriteOutputID(t *testing.T) {
 		{
 			name:     "directory path (should fail)",
 			id:       "sweep-456",
-			filepath: "/tmp",
+			filepath: dir,
 			wantErr:  true,
 		},
 	}
@@ -824,7 +827,7 @@ func TestNoDNSWithholdsTheTagSporedRegistersFrom(t *testing.T) {
 	instanceType = "m7i.large"
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	build := func() string {
 		t.Helper()

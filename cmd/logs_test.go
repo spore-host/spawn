@@ -44,7 +44,7 @@ func TestParseTransitionTime(t *testing.T) {
 // problem this project treats as a design flaw elsewhere.
 func TestPruneConsoleCache(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".spawn", "cache", "console")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -88,7 +88,7 @@ func TestConsoleCacheTTLOutlastsMeasuredSourceRetention(t *testing.T) {
 
 // Pruning must not explode when the cache has never been written.
 func TestPruneConsoleCacheMissingDir(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	pruneConsoleCache() // must not panic
 }
 

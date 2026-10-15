@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -23,6 +24,9 @@ import (
 // clean workspace, and (c) the queue is empty at the end. No paid AWS; no vacuous
 // green (a real command writes a per-task sentinel we check).
 func TestPool_EndToEnd_AgainstSubstrate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: tasks run with sh on the (Linux) pool worker (#1002)")
+	}
 	env := testutil.SubstrateServer(t)
 	ctx := context.Background()
 	sqsClient := env.SQSClient()

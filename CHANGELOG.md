@@ -83,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`parser.ParseDir` and the `ecdsa.PublicKey.X/.Y` coordinates embedded in
   the Windows spored install script), and line-scoped `//lint:ignore`s, each
   with a reason.
+- **CI runs the unit tests on Windows** (#971). A `windows-latest` job runs
+  `go test -short` over every root-module package except those listed, each with
+  a reason and an issue, in `scripts/windows-test-skips.txt` (today: two that do
+  not compile on Windows until #941, plus #1000 and #1001). Windows-only tests,
+  such as spored's `sys_windows.go` readings, were previously compiled and never
+  run. Tests that exercise Linux-only behaviour skip on Windows (#1002).
 
 ### Deprecated
 
@@ -321,6 +327,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the PR is still caught); on a push or the weekly run, main's full history.
   `workflow_secret_scan_test.go` fails if the scan loses its HEAD scope or its
   full-history checkout.
+- **Local plugin files work on Windows** (#997). `spawn plugin inspect` and
+  `install` recognised a local file only by `./`, `../` or `/`, so
+  `C:\plugins\demo.yaml` or `.\demo.yaml` was looked up as a registry name in
+  spore-host/spore-plugins and failed. Any OS-absolute path, and `.\`/`..\` on
+  Windows, is now a local file.
+- **Pipeline stage inputs on a Windows spore no longer pull nested objects**
+  (#998). The input pattern was matched against S3 keys with the host's path
+  rules, so on Windows `output/*.txt` also matched `output/nested/result.txt`; it
+  now matches the way S3 keys are written on every OS. Output keys for an
+  absolute pattern are `/`-separated there too.
+- **`spawn snapshot --from <raw image>` closes the image when it is done**
+  (#999). The source file (or S3 object stream) was never closed; on Windows that
+  also kept the file locked until spawn exited.
 
 ### Security
 

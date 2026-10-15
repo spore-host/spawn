@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,9 @@ func extractParamLoop(t *testing.T, script, dst string) string {
 // in #680's storage template survived — it was syntactically valid and silently
 // wrong. So this runs the real loop and sources its output.
 func TestSweepParamsSurviveAsLiterals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: executes the Linux user-data sweep-params loop under bash (#1002)")
+	}
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}

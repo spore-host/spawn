@@ -20,7 +20,7 @@ func TestEnvPassthrough_OnlyNamedVarsReachSteps(t *testing.T) {
 	// Write the two vars (empty if unset) so we can assert what the step saw.
 	step := plugin.Step{
 		Type: "run",
-		Run:  `printf 'passed=%s leaked=%s' "$TS_API_CLIENT_SECRET" "$AWS_SECRET_ACCESS_KEY" > ` + out,
+		Run:  `printf 'passed=%s leaked=%s' "$TS_API_CLIENT_SECRET" "$AWS_SECRET_ACCESS_KEY" > ` + shPath(out),
 	}
 
 	exec := plugin.NewLocalExecutor(nil).WithEnvPassthrough([]string{"TS_API_CLIENT_SECRET"})
@@ -42,7 +42,7 @@ func TestEnvPassthrough_OnlyNamedVarsReachSteps(t *testing.T) {
 func TestEnvPassthrough_UnsetVarIsSkipped(t *testing.T) {
 	os.Unsetenv("SPAWN_TEST_ABSENT_VAR")
 	out := filepath.Join(t.TempDir(), "env.txt")
-	step := plugin.Step{Type: "run", Run: `printf '%s' "${SPAWN_TEST_ABSENT_VAR:-UNSET}" > ` + out}
+	step := plugin.Step{Type: "run", Run: `printf '%s' "${SPAWN_TEST_ABSENT_VAR:-UNSET}" > ` + shPath(out)}
 
 	exec := plugin.NewLocalExecutor(nil).WithEnvPassthrough([]string{"SPAWN_TEST_ABSENT_VAR"})
 	if _, err := exec.RunProvision(context.Background(), "p", []plugin.Step{step}, plugin.NewTemplateContext()); err != nil {
@@ -59,7 +59,7 @@ func TestEnvPassthrough_UnsetVarIsSkipped(t *testing.T) {
 func TestEnvPassthrough_NoPassthroughByDefault(t *testing.T) {
 	t.Setenv("TS_API_CLIENT_SECRET", "mint-me")
 	out := filepath.Join(t.TempDir(), "env.txt")
-	step := plugin.Step{Type: "run", Run: `printf '%s' "${TS_API_CLIENT_SECRET:-STRIPPED}" > ` + out}
+	step := plugin.Step{Type: "run", Run: `printf '%s' "${TS_API_CLIENT_SECRET:-STRIPPED}" > ` + shPath(out)}
 
 	exec := plugin.NewLocalExecutor(nil) // no WithEnvPassthrough
 	if _, err := exec.RunProvision(context.Background(), "p", []plugin.Step{step}, plugin.NewTemplateContext()); err != nil {
@@ -70,3 +70,8 @@ func TestEnvPassthrough_NoPassthroughByDefault(t *testing.T) {
 		t.Errorf("got %q, want STRIPPED (parent env must not leak without opt-in)", string(got))
 	}
 }
+
+// shPath renders a host path for a `sh -c` step. Steps run under sh, where a
+// backslash is an escape, so a Windows path must be written with forward
+// slashes (which Windows accepts) or the redirect lands somewhere else (#971).
+func shPath(p string) string { return filepath.ToSlash(p) }

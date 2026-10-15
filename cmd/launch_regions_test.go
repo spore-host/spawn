@@ -105,7 +105,7 @@ func TestRegionsOfferingInstanceType_EmptyTypeCallsNothing(t *testing.T) {
 // `if region == ""` shape it replaced was duplicated at five call sites (#732).
 func TestResolveLaunchRegion_Precedence(t *testing.T) {
 	// Isolate from any real spore config file / ambient AWS_* in the environment.
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	t.Setenv("SPORE_REGION", "")
 	t.Setenv("AWS_REGION", "")
 	t.Setenv("AWS_DEFAULT_REGION", "")

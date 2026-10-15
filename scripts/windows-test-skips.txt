@@ -10,3 +10,5 @@
 # included automatically, and has to be added here deliberately to escape.
 pkg/service    #925: test files do not compile on Windows (syscall.SysProcAttr.Setpgid, syscall.Kill); fixed by #941
 pkg/taskproto  #925: test files do not compile on Windows (syscall.Stat_t); fixed by #941
+pkg/pluginruntime  #1001: plugin remote steps run via sh/su/tar, which a Windows spore lacks; its tests are sh fixtures
+pkg/security   #1000: the path validators are POSIX-only, so their tests assert Linux paths a Windows host rejects or ignores

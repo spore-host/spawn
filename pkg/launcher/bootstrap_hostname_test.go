@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -66,6 +67,9 @@ REGION=us-west-2 INSTANCE_ID=i-0abc TOKEN=t
 // "sets Name tag, DNS, and hostname", and job-array / --mpi members are named
 // arr-3, sim-0 — yet `hostname` printed the EC2 default ip-172-31-....
 func TestBootstrapSetsHostnameFromName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: executes the Linux user-data bootstrap (/etc/hosts) under bash (#1002)")
+	}
 	cases := []struct {
 		desc, tag, arrayID, index, want string
 	}{

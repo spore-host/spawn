@@ -87,7 +87,10 @@ func (c *Client) PrepareSnapshotImage(ctx context.Context, source, region string
 		if err != nil {
 			return nil, err
 		}
-		return &PreparedImage{Reader: rc, Cleanup: func() {}}, nil
+		// Cleanup must close the source: the caller calls only Cleanup, so a
+		// no-op here leaked the open file or S3 body, and on Windows kept the
+		// file locked until exit (#999).
+		return &PreparedImage{Reader: rc, Cleanup: func() { _ = rc.Close() }}, nil
 	}
 
 	// Build a tar stream for the source, then convert tar → ext4.

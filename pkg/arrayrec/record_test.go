@@ -3,6 +3,7 @@ package arrayrec
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -98,6 +99,9 @@ func TestSaveRequiresIDAndName(t *testing.T) {
 }
 
 func TestFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: asserts a POSIX 0600 mode; Windows has no mode bits, the profile ACL protects the file (#1002)")
+	}
 	dir := t.TempDir()
 	r := sampleRecord()
 	if err := Save(dir, r); err != nil {

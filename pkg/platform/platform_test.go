@@ -129,11 +129,14 @@ func TestGetSSHCommand(t *testing.T) {
 	}
 }
 
+// These build a Platform for a POSIX host. Run on Windows (#971), the path is
+// still joined with the host separator, so compare in slash form: the property
+// under test is "under the home dir", not which separator the host uses.
 func TestGetConfigPath(t *testing.T) {
 	t.Run("unix path", func(t *testing.T) {
 		p := &Platform{OS: "linux", HomeDir: "/home/alice"}
 		path := p.GetConfigPath()
-		if !strings.HasPrefix(path, "/home/alice") {
+		if !strings.HasPrefix(filepath.ToSlash(path), "/home/alice") {
 			t.Errorf("path %q does not start with home dir", path)
 		}
 		if !strings.Contains(path, "config.toml") {
@@ -144,7 +147,7 @@ func TestGetConfigPath(t *testing.T) {
 	t.Run("darwin path", func(t *testing.T) {
 		p := &Platform{OS: "darwin", HomeDir: "/Users/bob"}
 		path := p.GetConfigPath()
-		if !strings.HasPrefix(path, "/Users/bob") {
+		if !strings.HasPrefix(filepath.ToSlash(path), "/Users/bob") {
 			t.Errorf("path %q does not start with home dir", path)
 		}
 		if !strings.Contains(path, "config.toml") {
@@ -157,7 +160,7 @@ func TestGetLogPath(t *testing.T) {
 	t.Run("unix path", func(t *testing.T) {
 		p := &Platform{OS: "linux", HomeDir: "/home/alice"}
 		path := p.GetLogPath()
-		if !strings.HasPrefix(path, "/home/alice") {
+		if !strings.HasPrefix(filepath.ToSlash(path), "/home/alice") {
 			t.Errorf("path %q does not start with home dir", path)
 		}
 		if !strings.HasSuffix(path, "logs") {
