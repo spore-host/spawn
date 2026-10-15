@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"runtime"
 	"sync"
 	"time"
 
@@ -15,6 +16,10 @@ import (
 
 // pushedKeyRe matches valid pushed key names (same constraints as POSIX env vars, max 64 chars).
 var pushedKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+
+// hostGOOS is the OS spored is running on. A variable so tests can exercise
+// the Windows refusal on any OS (#1001).
+var hostGOOS = runtime.GOOS
 
 // Runtime manages plugins on an instance (the spored side).
 // It is safe for concurrent use.
@@ -74,6 +79,11 @@ func (rt *Runtime) InstallWithPushed(ctx context.Context, spec *plugin.PluginSpe
 // state, so an audit can read what was installed and how it was verified. prov
 // may be nil (local-file ref, or an older controller that didn't supply it).
 func (rt *Runtime) InstallWithProvenance(ctx context.Context, spec *plugin.PluginSpec, cfg, pushed map[string]string, prov *plugin.Provenance) error {
+	// Plugins are Linux-only (#1001): refuse before recording any state or
+	// running a step, rather than failing at the first "sh -c" on Windows.
+	if err := plugin.CheckSporeOS(hostGOOS); err != nil {
+		return err
+	}
 	resolvedCfg, err := spec.ResolvedConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("resolve config: %w", err)
@@ -259,6 +269,13 @@ func (rt *Runtime) ReceivePush(ctx context.Context, pluginName, key, value strin
 // LoadFromDeclarations installs each plugin in the declaration list.
 // Already-running plugins are skipped.  Each install runs in its own goroutine.
 func (rt *Runtime) LoadFromDeclarations(ctx context.Context, declarations []plugin.Declaration, resolver plugin.RegistryResolver) {
+	if len(declarations) == 0 {
+		return
+	}
+	if err := plugin.CheckSporeOS(hostGOOS); err != nil {
+		log.Printf("Plugins: not installing %d declared plugin(s): %v", len(declarations), err)
+		return
+	}
 	for _, decl := range declarations {
 		go func(d plugin.Declaration) {
 			spec, err := resolver.Resolve(ctx, d.Ref)

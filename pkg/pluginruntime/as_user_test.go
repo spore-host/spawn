@@ -13,6 +13,7 @@ import (
 // no known local user falls back to running normally (as spored's uid), rather
 // than failing — older instances have no spawn:local-username.
 func TestRunCommand_AsUser_NoLocalUserRunsAsRoot(t *testing.T) {
+	posixSporeOnly(t)
 	out := filepath.Join(t.TempDir(), "ran")
 	e := NewRemoteExecutor("") // no local user
 	step := plugin.Step{Type: "run", AsUser: true, Run: "echo ok > " + out}
@@ -26,6 +27,7 @@ func TestRunCommand_AsUser_NoLocalUserRunsAsRoot(t *testing.T) {
 
 // TestRunCommand_NonAsUser_RunsNormally is the baseline: a plain step runs.
 func TestRunCommand_NonAsUser_RunsNormally(t *testing.T) {
+	posixSporeOnly(t)
 	out := filepath.Join(t.TempDir(), "ran")
 	e := NewRemoteExecutor("someuser") // set, but step doesn't opt in
 	step := plugin.Step{Type: "run", Run: "echo ok > " + out}

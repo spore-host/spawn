@@ -105,6 +105,9 @@ pushed by local steps are delivered before the remote configure phase runs.
 
 Requires SSH access to the instance (the same key used by 'spawn plugin status').
 
+Linux spores only: plugin steps are POSIX shell, so 'spawn plugin install'
+refuses a Windows spore (spawn:os=windows) before running anything.
+
 Plugin ref formats:
   name                  official registry (spore-host/spore-plugins)
   name@v1.2.0           pinned to git tag
@@ -155,7 +158,32 @@ Plugin ref formats are the same as 'spawn plugin install':
 	},
 }
 
+// pluginInstanceLookup resolves --instance for the Windows guard in
+// runPluginInstall. A variable so a test can hand it a Windows instance
+// without AWS.
+var pluginInstanceLookup = resolveInstanceViaSpawn
+
+// refusePluginsOnWindowsSpore fails a plugin install aimed at a Windows spore
+// (spawn:os=windows), before anything runs locally or remotely (#1001). An
+// instance spawn cannot resolve (nil: a raw host, or no AWS access) is let
+// through; spored on a Windows spore refuses the install itself.
+func refusePluginsOnWindowsSpore(inst *aws.InstanceInfo, instance string) error {
+	if inst == nil {
+		return nil
+	}
+	if err := plugin.CheckSporeOS(inst.Tags["spawn:os"]); err != nil {
+		return fmt.Errorf("cannot install a plugin on %s (spawn:os=windows): %w", instance, err)
+	}
+	return nil
+}
+
 func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]string) error {
+	// Before resolving the plugin, so nothing is fetched and no local provision
+	// step runs for an install that cannot succeed.
+	if err := refusePluginsOnWindowsSpore(pluginInstanceLookup(ctx, instance), instance); err != nil {
+		return err
+	}
+
 	resolver := pluginResolver()
 	spec, prov, err := resolver.ResolveWithProvenance(ctx, ref)
 	if err != nil {

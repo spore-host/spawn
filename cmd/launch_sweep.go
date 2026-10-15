@@ -404,6 +404,9 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		if err := windowsLifecycleGuard(cfg); err != nil {
 			return err
 		}
+		if err := windowsPluginGuard(cfg.TargetOS, collectPluginDeclarations()); err != nil {
+			return err
+		}
 	}
 
 	// Step 2: Setup SSH key
