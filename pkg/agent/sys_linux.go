@@ -51,31 +51,15 @@ func sysReadNetworkBytes() (rx, tx int64) {
 	return rx, tx
 }
 
-// sysReadDiskIOBytes returns cumulative bytes read+written across block devices.
+// sysReadDiskIOBytes returns cumulative bytes read+written over the whole
+// disks, or -1 ("unknown") when /proc/diskstats is unreadable or no device in it
+// is a whole disk backed by hardware (#937).
 func sysReadDiskIOBytes() int64 {
-	data, err := os.ReadFile("/proc/diskstats")
+	read, written, _, err := readDiskstatsBytes("/proc/diskstats", "/sys/block")
 	if err != nil {
-		return 0
+		return -1
 	}
-	var totalSectors int64
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 14 {
-			continue
-		}
-		deviceName := fields[2]
-		if strings.HasPrefix(deviceName, "xvd") || strings.HasPrefix(deviceName, "nvme") ||
-			strings.HasPrefix(deviceName, "sd") || strings.HasPrefix(deviceName, "vd") {
-			// Skip partitions (trailing digit).
-			if len(deviceName) > 4 && deviceName[len(deviceName)-1] >= '0' && deviceName[len(deviceName)-1] <= '9' {
-				continue
-			}
-			sectorsRead, _ := strconv.ParseInt(fields[5], 10, 64)
-			sectorsWritten, _ := strconv.ParseInt(fields[9], 10, 64)
-			totalSectors += sectorsRead + sectorsWritten
-		}
-	}
-	return totalSectors * 512
+	return read + written
 }
 
 // sysIsProcessRunning reports whether a process with the exact name is running.

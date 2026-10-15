@@ -462,6 +462,11 @@ type statusReport struct {
 	// common case there.
 	NetworkMeasured bool   `json:"network_measured"`
 	NetworkUnknown  string `json:"network_unknown,omitempty"`
+	// DiskBytesPerMin, DiskMeasured and DiskUnknown are the disk I/O signal,
+	// with the network fields' semantics (#937).
+	DiskBytesPerMin int64  `json:"disk_bytes_per_min"`
+	DiskMeasured    bool   `json:"disk_measured"`
+	DiskUnknown     string `json:"disk_unknown,omitempty"`
 	PreStopHook     string `json:"pre_stop_hook,omitempty"`
 }
 
@@ -570,6 +575,7 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 	isIdle := ag.IsIdle()
 	cpuPercent, cpuMeasured := ag.GetCPUUsageMeasured()
 	netBytes, netMeasured, netUnknown := ag.GetNetworkBytesMeasured()
+	diskBytes, diskMeasured, diskUnknown := ag.GetDiskIOBytesMeasured()
 
 	completionFileExists := false
 	if config.CompletionFile != "" {
@@ -693,6 +699,9 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		NetworkBytesPerMin: netBytes,
 		NetworkMeasured:    netMeasured,
 		NetworkUnknown:     netUnknown,
+		DiskBytesPerMin:    diskBytes,
+		DiskMeasured:       diskMeasured,
+		DiskUnknown:        diskUnknown,
 		PreStopHook:        config.PreStop,
 	}
 
@@ -1023,6 +1032,11 @@ func renderStatusTable(report *statusReport) error {
 	} else {
 		// Not "976.6 KB/min": that was the placeholder, printed as traffic (#919).
 		fmt.Printf("  Network:          unknown (%s; assuming active)\n", report.NetworkUnknown)
+	}
+	if report.DiskMeasured {
+		fmt.Printf("  Disk I/O:         %s/min\n", formatBytes(report.DiskBytesPerMin))
+	} else {
+		fmt.Printf("  Disk I/O:         unknown (%s; assuming active)\n", report.DiskUnknown)
 	}
 	if report.PreStopHook != "" {
 		fmt.Printf("  Pre-stop hook:    %s\n", report.PreStopHook)

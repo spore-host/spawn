@@ -1,126 +1,12 @@
 package agent
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 )
 
-// TestGetDiskIO_ParsesDiskstats validates parsing of /proc/diskstats format
-func TestGetDiskIO_ParsesDiskstats(t *testing.T) {
-	// Create a mock /proc/diskstats file
-	tmpDir := t.TempDir()
-	mockDiskstats := filepath.Join(tmpDir, "diskstats")
-
-	// Sample /proc/diskstats content
-	// Format: major minor name reads ... sectors_read ... writes ... sectors_written ...
-	content := `   8       0 xvda 1234 100 50000 200 5678 300 30000 400 0 600 800
-   8       1 xvda1 100 10 5000 20 100 20 3000 40 0 60 80
- 259       0 nvme0n1 2000 200 100000 300 3000 400 50000 500 0 800 1000
- 259       1 nvme0n1p1 200 20 10000 30 300 40 5000 50 0 80 100
-   8      16 sdb 500 50 25000 100 600 60 15000 120 0 220 340
- 254       0 vda 300 30 15000 60 400 40 10000 80 0 140 200
-`
-	err := os.WriteFile(mockDiskstats, []byte(content), 0644)
-	if err != nil {
-		t.Fatalf("Failed to write mock diskstats: %v", err)
-	}
-
-	// We can't easily mock ioutil.ReadFile in the function,
-	// so let's test the parsing logic manually
-	// Expected calculation:
-	// xvda: sectors_read=50000 + sectors_written=30000 = 80000
-	// nvme0n1: sectors_read=100000 + sectors_written=50000 = 150000
-	// sdb: sectors_read=25000 + sectors_written=15000 = 40000
-	// vda: sectors_read=15000 + sectors_written=10000 = 25000
-	// Total sectors: 295000
-	// Total bytes: 295000 * 512 = 151,040,000 bytes
-
-	// Since we can't mock the file path easily, we'll test the parsing logic
-	// by reading our mock file directly
-	data, err := os.ReadFile(mockDiskstats)
-	if err != nil {
-		t.Fatalf("Failed to read mock diskstats: %v", err)
-	}
-
-	// Test parsing logic
-	expectedBytes := int64(295000 * 512) // 151,040,000 bytes
-	_ = expectedBytes
-
-	t.Logf("Mock diskstats created successfully")
-	t.Logf("Sample data: %s", string(data[:100]))
-}
-
-// TestGetDiskIO_SkipsPartitions validates that partition entries are skipped
-func TestGetDiskIO_SkipsPartitions(t *testing.T) {
-	tests := []struct {
-		deviceName  string
-		shouldSkip  bool
-		description string
-	}{
-		{"xvda", false, "Main xvd device (len=4, not > 4)"},
-		{"xvda1", true, "xvd partition (len=5, > 4 and ends with digit)"},
-		{"xvdb2", true, "xvd partition 2 (len=5, > 4 and ends with digit)"},
-		{"nvme0n1", true, "Main NVMe device (len=7, > 4 and ends with '1' - gets incorrectly skipped by current logic)"},
-		{"nvme0n1p1", true, "NVMe partition (len=9, > 4 and ends with digit)"},
-		{"nvme1n1p2", true, "NVMe partition 2 (len=9, > 4 and ends with digit)"},
-		{"sda", false, "Main SCSI device (len=3, not > 4)"},
-		{"sda1", false, "SCSI partition (len=4, not > 4 - gets incorrectly included by current logic)"},
-		{"vda", false, "Main virtio device (len=3, not > 4)"},
-		{"vda1", false, "virtio partition (len=4, not > 4 - gets incorrectly included by current logic)"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.description, func(t *testing.T) {
-			// Test actual partition detection logic from agent.go:415
-			// Skip if: len > 4 AND last char is digit
-			shouldSkipByLogic := len(tt.deviceName) > 4 &&
-				tt.deviceName[len(tt.deviceName)-1] >= '0' &&
-				tt.deviceName[len(tt.deviceName)-1] <= '9'
-
-			if shouldSkipByLogic != tt.shouldSkip {
-				t.Errorf("Device %s: partition detection mismatch. Logic says skip=%v, expected skip=%v",
-					tt.deviceName, shouldSkipByLogic, tt.shouldSkip)
-			}
-		})
-	}
-}
-
-// TestGetDiskIO_DeviceTypesRecognized validates recognized device types
-func TestGetDiskIO_DeviceTypesRecognized(t *testing.T) {
-	tests := []struct {
-		deviceName string
-		recognized bool
-	}{
-		{"xvda", true}, // Xen virtual disk
-		{"xvdb", true},
-		{"nvme0n1", true}, // NVMe SSD
-		{"nvme1n1", true},
-		{"sda", true}, // SCSI/SATA
-		{"sdb", true},
-		{"vda", true}, // virtio disk
-		{"vdb", true},
-		{"hda", false},   // IDE (not in filter)
-		{"loop0", false}, // Loop device (not in filter)
-		{"dm-0", false},  // Device mapper (not in filter)
-		{"sr0", false},   // CD-ROM (not in filter)
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.deviceName, func(t *testing.T) {
-			// Test device recognition logic from getDiskIO (uses strings.HasPrefix)
-			recognized := strings.HasPrefix(tt.deviceName, "xvd") ||
-				strings.HasPrefix(tt.deviceName, "nvme") ||
-				strings.HasPrefix(tt.deviceName, "sd") ||
-				strings.HasPrefix(tt.deviceName, "vd")
-
-			if recognized != tt.recognized {
-				t.Errorf("Device %s: expected recognized=%v, got %v", tt.deviceName, tt.recognized, recognized)
-			}
-		})
-	}
-}
+// The disk filter tests that lived here re-implemented the old prefix-and-length
+// filter inline and asserted what it did, including skipping nvme0n1 and keeping
+// sda1, so they certified #937. The real reader is tested in diskstats_test.go.
 
 // TestGetDiskIO_SectorToByteConversion validates sector to byte conversion
 func TestGetDiskIO_SectorToByteConversion(t *testing.T) {

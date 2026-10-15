@@ -279,3 +279,45 @@ func TestStatusTable_UnmeasuredNetworkIsNotPrintedAsAValue(t *testing.T) {
 		t.Errorf("a real measurement was not printed:\n%s", out)
 	}
 }
+
+// Disk I/O follows the network line: an unmeasured reading is the assume-active
+// placeholder and must print as unknown, never as I/O (#937).
+func TestStatusTable_UnmeasuredDiskIsNotPrintedAsAValue(t *testing.T) {
+	report := newTestReport(t)
+	report.DiskMeasured = false
+	report.DiskBytesPerMin = 1000000 // the assume-active placeholder
+	report.DiskUnknown = "single sample"
+
+	out := captureStdout(t, func() {
+		if err := renderStatusTable(report); err != nil {
+			t.Fatalf("renderStatusTable: %v", err)
+		}
+	})
+	if strings.Contains(out, "Disk I/O:         "+formatBytes(1000000)) {
+		t.Errorf("an unmeasured placeholder was printed as disk I/O:\n%s", out)
+	}
+	if !strings.Contains(out, "Disk I/O:         unknown (single sample") {
+		t.Errorf("output does not mark the disk reading unknown:\n%s", out)
+	}
+
+	report.DiskMeasured = true
+	report.DiskBytesPerMin = 8192
+	out = captureStdout(t, func() { _ = renderStatusTable(report) })
+	if !strings.Contains(out, "Disk I/O:         "+formatBytes(8192)+"/min") {
+		t.Errorf("a real measurement was not printed:\n%s", out)
+	}
+}
+
+// A one-shot `spored status` takes a single disk sample, so the report must
+// carry the disk reading as unknown, with a reason, whatever host it runs on: a
+// "single sample" on Linux, an unreadable counter elsewhere (#937).
+func TestStatusReport_OneShotDiskIsUnknownWithAReason(t *testing.T) {
+	report := newTestReport(t)
+	if report.DiskMeasured {
+		t.Errorf("a one-shot report claims a measured disk reading of %d bytes; "+
+			"one sample has no delta", report.DiskBytesPerMin)
+	}
+	if report.DiskUnknown == "" {
+		t.Error("an unmeasured disk reading carries no reason")
+	}
+}

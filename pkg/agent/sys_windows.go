@@ -79,11 +79,17 @@ func sysReadNetworkBytes() (rx, tx int64) {
 	return total, 0
 }
 
-// sysReadDiskIOBytes returns cumulative disk bytes (read+written) across disks.
+// sysReadDiskIOBytes returns cumulative disk bytes (read+written) across
+// physical disks, or -1 ("unknown") when the counter is absent.
+//
+// DiskBytesPersec in the RAW perf class is a cumulative byte count despite its
+// name, so the caller deltas it like /proc/diskstats. The _Total instance is
+// missing when perf counters are disabled or corrupt, and [int64]$null is a 0
+// that would read as a measured "no disk I/O" (#937, as #919 for network).
 func sysReadDiskIOBytes() int64 {
-	v, ok := psInt64(`[int64]((Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk | Where-Object {$_.Name -eq "_Total"}).DiskBytesPersec)`)
+	v, ok := psInt64(`$d = Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -ErrorAction SilentlyContinue | Where-Object {$_.Name -eq "_Total"}; if ($null -eq $d) { 'none' } else { [int64]$d.DiskBytesPersec }`)
 	if !ok {
-		return 0
+		return -1
 	}
 	return v
 }
