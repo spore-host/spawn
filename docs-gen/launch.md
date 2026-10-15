@@ -88,7 +88,7 @@ spawn launch <name> [flags]
 | `--max-concurrent` |  | int |  | Max instances running simultaneously (0 = unlimited) |
 | `--min-viable` |  | int | `1` | Job array: minimum members that must launch for success (default 1; ignored for --mpi) |
 | `--mode` |  | string | `balanced` | Distribution mode: balanced (fair share) or opportunistic (prioritize available regions) |
-| `--mpi-command` |  | string |  | Command to run via mpirun (alternative to --command) |
+| `--mpi-command` |  | string |  | Command to run via mpirun across the MPI cohort (alternative to --command). Rank 0 runs mpirun as root. Its output goes to /var/log/spawn-command.log on rank 0 (read it with 'spawn array logs &lt;name&gt; --index 0'), and its exit code is recorded to /tmp/SPAWN_EXITCODE there. When it exits, pass or fail, every member is signalled, so --on-complete fires across the whole cohort. |
 | `--mpi-processes-per-node` |  | int |  | MPI processes per node (default: vCPU count) |
 | `--mpi` |  | bool |  | Enable MPI cluster setup (requires --count &gt; 1) |
 | `--name` |  | string |  | Name your spore (sets Name tag, DNS, and hostname). Either this or the positional form `spawn launch <name>`; both are accepted (#499). |

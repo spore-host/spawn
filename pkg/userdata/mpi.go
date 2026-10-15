@@ -73,6 +73,36 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 // The PRIVATE key is generated on rank 0 and never leaves it: user-data would
 // expose it to any local user via IMDS, and SSM would record it in CloudTrail.
 //
+// Completion of --mpi-command (spawn#894).
+//
+// --mpi-command must behave like --command on rank 0's node: its output goes to
+// /var/log/spawn-command.log (where 'spawn array logs' reads), its exit code to
+// /tmp/SPAWN_EXITCODE, and /tmp/SPAWN_COMPLETE is written so spored fires
+// --on-complete. Before this, mpirun ran as the bare last line of the script:
+// its output reached only cloud-init-output.log and nothing recorded that it
+// had finished, so every member, rank 0 included, rode the job to idle or TTL.
+// MPI is the most expensive launch type, so that is the costliest place for
+// the --on-complete backstop to be missing.
+//
+// Every member has to learn that the job finished, not only rank 0, because the
+// job is one mpirun spanning all of them. This adds no new channel for that. It
+// uses the root SSH mesh mpirun itself needs: rank 0's key is authorized on
+// every peer before release, and the readiness loop has just proven each peer
+// accepts a BatchMode login. Rank 0 writes the same SPAWN_COMPLETE record on
+// each peer, so each peer's spored runs its own --on-complete with its own
+// grace period and pre-stop hook. Peers are signalled in parallel and BEFORE
+// rank 0's own record, so rank 0 cannot start terminating while peers are
+// still unsignalled. It skips its own address (hostname -I), which it writes
+// locally anyway.
+//
+// 'set +e' before mpirun is required. This script is appended to the bootstrap,
+// which runs under 'set -e'. That is the #566 failure: a failing command
+// aborted the script before its exit code was read. PIPESTATUS[0] is mpirun's
+// status. $? would be tee's, which reports every failure as a success.
+//
+// When rank 0 gives up waiting for peer SSH, it signals completion the same
+// way. The peers that can be reached stop then, and do not ride to TTL.
+//
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
 const mpiUserDataTemplate = `
@@ -192,6 +222,23 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   # unbounded: a broken peer should produce a SPAWN_COMPLETE record saying so,
   # not an opaque mpirun error about an unreachable host. And a healthy 2-node
   # cohort now starts in ~0s instead of always paying 10.
+{{if .MPICommand}}
+  # Record rank 0's result and hand it to every member (spawn#894).
+  spawn_mpi_done() {
+    local s=completed; [ "$1" -eq 0 ] || s=failed
+    local rec="{\"status\": \"$s\", \"exit_code\": $1, \"source\": \"mpi\"}" ip pids=""
+    echo "$1" > /tmp/SPAWN_EXITCODE
+    for ip in $(awk '{print $1}' /tmp/mpi-hostfile); do
+      case " $(hostname -I 2>/dev/null) " in *" $ip "*) continue ;; esac
+      ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ip" \
+        "echo '$rec' > /tmp/SPAWN_COMPLETE" ||
+        echo "spawn: could not signal completion to $ip" | tee -a /var/log/spawn-command.log &
+      pids="$pids $!"
+    done
+    [ -z "$pids" ] || wait $pids
+    echo "$rec" > /tmp/SPAWN_COMPLETE
+  }
+{{end}}
   SPAWN_PEERS_READY_WAITED=0
   while :; do
     NOT_READY=0
@@ -201,8 +248,8 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
     done
     [ "$NOT_READY" -eq 0 ] && break
     if [ "$SPAWN_PEERS_READY_WAITED" -ge 600 ]; then
-      echo "spawn: $NOT_READY peer(s) never accepted SSH after ${SPAWN_PEERS_READY_WAITED}s; MPI cannot start" >&2
-      echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > /tmp/SPAWN_COMPLETE
+      echo "spawn: $NOT_READY peer(s) never accepted SSH after ${SPAWN_PEERS_READY_WAITED}s; MPI cannot start" | tee -a /var/log/spawn-command.log >&2
+      {{if .MPICommand}}spawn_mpi_done 1{{else}}echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > /tmp/SPAWN_COMPLETE{{end}}
       exit 1
     fi
     sleep 5
@@ -215,6 +262,10 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   # file removes the ambiguity about whether the poll ran and for how long.
   echo "spawn: all peers accepted SSH after ${SPAWN_PEERS_READY_WAITED}s"
   echo "${SPAWN_PEERS_READY_WAITED}" > /var/log/spawn-mpi-peer-wait-seconds 2>/dev/null || true
-  {{if .MPICommand}}mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile bash /etc/spawn/mpi-command{{end}}
+{{if .MPICommand}}
+  set +e
+  mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile bash /etc/spawn/mpi-command 2>&1 | tee -a /var/log/spawn-command.log
+  spawn_mpi_done "${PIPESTATUS[0]}"
+{{end}}
 fi
 `

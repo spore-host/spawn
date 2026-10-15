@@ -357,7 +357,7 @@ func init() {
 	// MPI
 	launchCmd.Flags().BoolVar(&mpiEnabled, "mpi", false, "Enable MPI cluster setup (requires --count > 1)")
 	launchCmd.Flags().IntVar(&mpiProcessesPerNode, "mpi-processes-per-node", 0, "MPI processes per node (default: vCPU count)")
-	launchCmd.Flags().StringVar(&mpiCommand, "mpi-command", "", "Command to run via mpirun (alternative to --command)")
+	launchCmd.Flags().StringVar(&mpiCommand, "mpi-command", "", "Command to run via mpirun across the MPI cohort (alternative to --command). Rank 0 runs mpirun as root. Its output goes to /var/log/spawn-command.log on rank 0 (read it with 'spawn array logs <name> --index 0'), and its exit code is recorded to /tmp/SPAWN_EXITCODE there. When it exits, pass or fail, every member is signalled, so --on-complete fires across the whole cohort.")
 	launchCmd.Flags().BoolVar(&mpiSkipInstall, "skip-mpi-install", false, "Skip MPI installation (use with custom AMIs that have MPI pre-installed)")
 	launchCmd.Flags().StringVar(&mpiPlacementGroup, "placement-group", "", "AWS Placement Group for MPI instances (auto-created if not specified)")
 	launchCmd.Flags().BoolVar(&mpiAutoPlacementGroup, "auto-placement-group", true, "Automatically create placement group for MPI job arrays (default: true)")

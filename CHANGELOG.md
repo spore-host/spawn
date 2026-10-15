@@ -60,6 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the member index appended when an `--instance-names` template would give
   members the same name), maps it to the private IP in `/etc/hosts`, and keeps
   it across reboots. MPI hostfiles still address peers by private IP.
+### Fixed
+
+- **`--mpi-command` now signals completion, so `--on-complete` fires across
+  the MPI cohort** (#894). mpirun ran, but nothing recorded that it had
+  finished, so every member rode the job out to idle or TTL even with
+  `--on-complete terminate`. That left MPI, the most expensive launch type,
+  without the cost backstop. It now behaves like `--command` on rank 0. Its
+  output goes to `/var/log/spawn-command.log`, so `spawn array logs <name>
+  --index 0` can read it (before, it was only in cloud-init's log). Its exit
+  code goes to `/tmp/SPAWN_EXITCODE`. Once mpirun exits, pass or fail, rank 0
+  signals every member over the cohort's SSH mesh, so each one runs its own
+  `--on-complete`. If rank 0 gives up because a peer never accepts SSH, the
+  members it can reach stop as well.
 
 ## [0.128.2] - 2026-10-13
 
