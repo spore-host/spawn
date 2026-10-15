@@ -238,7 +238,7 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if slackWorkspaceID != "" {
 		config.SlackWorkspaceID = slackWorkspaceID
 		// The spore-bot Lambda Function URL — hard-coded for hosted spore.host;
-		// can be overridden via SPORE_BOT_NOTIFY_URL env var for self-hosted deployments.
+		// can be overridden via SPORE_NOTIFY_URL env var for self-hosted deployments.
 		notifyURL := spawnconfig.GetNotifyURL()
 		config.NotifyURL = notifyURL
 		config.NotifyCommand = "/spore" // routes notifications to spore-bot workspace config
