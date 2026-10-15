@@ -684,6 +684,7 @@ var pluginRemoveCmd = &cobra.Command{
 		}
 
 		var respErr error
+		var warning string
 		_, err = withSSHTunnel(cmd.Context(), sshHost, pluginKeyPath, func() (*http.Response, error) {
 			url := fmt.Sprintf("http://127.0.0.1:7777/v1/plugins/%s", name)
 			req, err := http.NewRequestWithContext(cmd.Context(), http.MethodDelete, url, nil)
@@ -695,10 +696,13 @@ var pluginRemoveCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			if resp.StatusCode == http.StatusNotFound {
+			body, _ := io.ReadAll(resp.Body)
+			switch resp.StatusCode {
+			case http.StatusOK:
+				warning = removeWarning(body)
+			case http.StatusNotFound:
 				respErr = fmt.Errorf("plugin %q not found on %s", name, pluginInstance)
-			} else if resp.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(resp.Body)
+			default:
 				respErr = fmt.Errorf("remove API: HTTP %d — %s", resp.StatusCode, string(body))
 			}
 			return resp, nil
@@ -711,8 +715,22 @@ var pluginRemoveCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Plugin %s removed from %s.\n", name, pluginInstance)
+		if warning != "" {
+			fmt.Fprintf(os.Stderr, "warning: %s; what the plugin started may still be running on %s\n", warning, pluginInstance)
+		}
 		return nil
 	},
+}
+
+// removeWarning is the "warning" spored puts in a remove response when the
+// plugin was removed but its remote.stop steps failed (#1018); "" otherwise,
+// including from an older spored, which sends none.
+func removeWarning(body []byte) string {
+	var r struct {
+		Warning string `json:"warning"`
+	}
+	_ = json.Unmarshal(body, &r)
+	return r.Warning
 }
 
 // ── validate ──────────────────────────────────────────────────────────────────

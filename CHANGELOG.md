@@ -444,6 +444,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credentials (`SPAWN_COMPUTE_PROFILE`, default `spore-host-dev`) are for a
   different account than the sweep ran in, the command now fails and names both
   accounts.
+- **`spawn plugin remove` now runs the plugin's `remote.stop` steps** (#1018).
+  A plugin spec could declare them, and `spawn plugin inspect` listed them
+  under "On removal", but nothing ran them, so a service the plugin started
+  (a systemd unit, a daemon) kept running after the plugin was removed. They
+  now run on the instance, with the plugin's config and pushed values, before
+  spored forgets the plugin. If a stop step fails, the plugin is still
+  removed, and `spawn plugin remove` warns that what it started may still be
+  running. `remote.stop` does not run when the instance stops, hibernates or
+  terminates: nothing runs `remote.start` again when the instance comes back,
+  so for example a `tailscale down` there would keep the node off the
+  tailnet after the next `spawn start`. `inspect` now says when each step
+  runs. A plugin installed by an older spored has no stop steps on record, so
+  removing it runs none, as before.
 
 ### Security
 
