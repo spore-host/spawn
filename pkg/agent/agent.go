@@ -71,6 +71,16 @@ type Agent struct {
 	accelUnknownWarned    map[string]bool // accelerator families warned "cannot be measured", once each (#954)
 	stopRetry             stopRetry       // backoff for a failed stop/hibernate, idle (#948) or on-complete (#978)
 	completionAnnounced   bool            // completion notification, webhook and grace period done; once (#978)
+	completionSpent       time.Time       // mtime of a completion file already acted on before a resume (#987)
+	lastTick              tickReading     // the clocks at the last monitor tick, for resume detection (#987)
+	lastTickSet           bool
+
+	// currentIP is the public IP re-read after a resume (#987); see publicIP.
+	// lookupPublicIP reads it; nil means IMDS on EC2. Tests set it.
+	ipMu           sync.Mutex
+	currentIP      string
+	currentIPSet   bool
+	lookupPublicIP func(context.Context) (string, error)
 
 	// idleMu guards idleSnap and lastActivityTime. The monitor loop writes them;
 	// the Prometheus scrape, the spot-interruption goroutine and status read
@@ -447,6 +457,9 @@ func (a *Agent) Monitor(ctx context.Context) {
 
 	log.Printf("Monitoring started")
 
+	// The clocks' baseline for resume detection (#987).
+	a.checkResume(ctx)
+
 	// Spot-interruption monitoring runs in its own goroutine and must NEVER gate
 	// the main lifecycle ticker below. Spot detection (IsSpotInstance) makes a
 	// blocking IMDS call; if that ever stalls, gating the ticker on it silently
@@ -510,6 +523,11 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// silence is immediately diagnosable from spored.log without a live repro
 	// (the failure mode in #65, where the loop never ran at all).
 	log.Printf("monitor tick %d", a.configRefreshTick+1)
+
+	// Resumed from hibernation since the last tick? Then reset the per-boot
+	// state first, so this tick's pre-stop, DNS and idle checks see a fresh
+	// boot (#987).
+	a.checkResume(ctx)
 
 	// 0. Periodically refresh config from EC2 tags (every 5 ticks = 5 min).
 	// EC2 tag API has eventual consistency — tags set at launch may not be
@@ -1014,7 +1032,7 @@ func (a *Agent) maybeSetupDCVAuth(ctx context.Context) {
 	a.dcvTokensMu.Unlock()
 
 	// Ready URL — DNS FQDN when available, else public IP.
-	host := a.identity.PublicIP
+	host := a.publicIP()
 	if a.config.DNSName != "" && a.dnsDomain != "" {
 		host = dns.GetFullDNSName(a.config.DNSName, a.identity.AccountID, a.dnsDomain)
 	}
@@ -1746,7 +1764,12 @@ func (a *Agent) warnUsers(message string) {
 
 func (a *Agent) checkCompletion(ctx context.Context) bool {
 	// Check if completion file exists
-	if _, err := os.Stat(a.config.CompletionFile); err == nil {
+	if fi, err := os.Stat(a.config.CompletionFile); err == nil {
+		// Acted on before a hibernation, and not written again since: the
+		// instance was started again on purpose (#987).
+		if !a.completionSpent.IsZero() && fi.ModTime().Equal(a.completionSpent) {
+			return false
+		}
 		// Announce once. The file stays on disk, so every tick after a
 		// failed stop/hibernate comes back here; before #978 each one sent
 		// another `completion` notification, POSTed the webhook again (a
@@ -1944,12 +1967,13 @@ func (a *Agent) idleTimeoutReached(ctx context.Context, now time.Time) {
 	}
 }
 
-// restoreAfterFailedStop puts back what Cleanup removed when the stop or
-// hibernate it prepared for did not happen, so a running instance keeps its DNS
-// name and job-array registration (#948) and its plugins (#979). Cleanup runs
-// before the EC2 call because a hibernating guest is frozen, not shut down, and
-// gets no later chance to deregister.
-func (a *Agent) restoreAfterFailedStop(ctx context.Context) {
+// restoreAfterCleanup puts back what Cleanup removed, for an instance that is
+// running after all: the stop or hibernate Cleanup prepared for failed, so it
+// keeps its DNS name and job-array registration (#948) and its plugins (#979);
+// or it has resumed from the hibernation (#987). Cleanup runs before the EC2
+// call because a hibernating guest is frozen, not shut down, and gets no later
+// chance to deregister.
+func (a *Agent) restoreAfterCleanup(ctx context.Context) {
 	if a.registry != nil && a.config.JobArrayID != "" {
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := a.registry.Register(rctx, a.config.JobArrayID, a.config.JobArrayIndex); err != nil {
@@ -1989,7 +2013,7 @@ func (a *Agent) stop(ctx context.Context, reason string, why taskproto.ExitReaso
 	err := a.provider.Stop(ctx, reason)
 	if err != nil {
 		log.Printf("Failed to stop instance: %v", err)
-		a.restoreAfterFailedStop(ctx)
+		a.restoreAfterCleanup(ctx)
 	}
 	return err
 }
@@ -2011,7 +2035,7 @@ func (a *Agent) hibernate(ctx context.Context, why taskproto.ExitReason) error {
 	err := a.provider.Hibernate(ctx)
 	if err != nil {
 		log.Printf("Failed to hibernate: %v", err)
-		a.restoreAfterFailedStop(ctx)
+		a.restoreAfterCleanup(ctx)
 	}
 	return err
 }
@@ -2049,14 +2073,14 @@ func (a *Agent) Cleanup(ctx context.Context) {
 	}
 
 	// Clean up DNS (EC2 only)
-	if a.dnsClient != nil && a.config.DNSName != "" && a.identity.PublicIP != "" {
+	if ip := a.publicIP(); a.dnsClient != nil && a.config.DNSName != "" && ip != "" {
 		cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
 		// Use job array DNS deletion if part of a job array
 		if a.config.JobArrayID != "" && a.config.JobArrayName != "" {
 			log.Printf("Deleting job array DNS record: %s (array: %s)", a.config.DNSName, a.config.JobArrayName)
-			resp, err := a.dnsClient.DeleteJobArrayDNS(cleanupCtx, a.config.DNSName, a.identity.PublicIP,
+			resp, err := a.dnsClient.DeleteJobArrayDNS(cleanupCtx, a.config.DNSName, ip,
 				a.config.JobArrayID, a.config.JobArrayName)
 			if err != nil {
 				log.Printf("Warning: Failed to delete job array DNS: %v", err)
@@ -2069,7 +2093,7 @@ func (a *Agent) Cleanup(ctx context.Context) {
 			}
 		} else {
 			log.Printf("Deleting DNS record: %s", a.config.DNSName)
-			_, err := a.dnsClient.DeleteDNS(cleanupCtx, a.config.DNSName, a.identity.PublicIP)
+			_, err := a.dnsClient.DeleteDNS(cleanupCtx, a.config.DNSName, ip)
 			if err != nil {
 				log.Printf("Warning: Failed to delete DNS: %v", err)
 			} else {

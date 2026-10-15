@@ -21,28 +21,28 @@ func (a *Agent) registerDNS(ctx context.Context) error {
 	}
 	if a.config.JobArrayID != "" && a.config.JobArrayName != "" {
 		log.Printf("Registering job array DNS: %s -> %s (array: %s)",
-			a.config.DNSName, a.identity.PublicIP, a.config.JobArrayName)
-		resp, err := a.dnsClient.RegisterJobArrayDNS(ctx, a.config.DNSName, a.identity.PublicIP,
+			a.config.DNSName, a.publicIP(), a.config.JobArrayName)
+		resp, err := a.dnsClient.RegisterJobArrayDNS(ctx, a.config.DNSName, a.publicIP(),
 			a.config.JobArrayID, a.config.JobArrayName)
 		if err != nil {
 			log.Printf("Warning: Failed to register job array DNS: %v", err)
 			return err
 		}
 		fqdn := dns.GetFullDNSName(a.config.DNSName, a.identity.AccountID, a.dnsDomain)
-		log.Printf("✓ Job array DNS registered: %s -> %s (change: %s)", fqdn, a.identity.PublicIP, resp.ChangeID)
+		log.Printf("✓ Job array DNS registered: %s -> %s (change: %s)", fqdn, a.publicIP(), resp.ChangeID)
 		if resp.Message != "" {
 			log.Printf("  %s", resp.Message)
 		}
 		return nil
 	}
-	log.Printf("Registering DNS: %s -> %s", a.config.DNSName, a.identity.PublicIP)
-	resp, err := a.dnsClient.RegisterDNS(ctx, a.config.DNSName, a.identity.PublicIP)
+	log.Printf("Registering DNS: %s -> %s", a.config.DNSName, a.publicIP())
+	resp, err := a.dnsClient.RegisterDNS(ctx, a.config.DNSName, a.publicIP())
 	if err != nil {
 		log.Printf("Warning: Failed to register DNS: %v", err)
 		return err
 	}
 	fqdn := dns.GetFullDNSName(a.config.DNSName, a.identity.AccountID, a.dnsDomain)
-	log.Printf("✓ DNS registered: %s -> %s (change: %s)", fqdn, a.identity.PublicIP, resp.ChangeID)
+	log.Printf("✓ DNS registered: %s -> %s (change: %s)", fqdn, a.publicIP(), resp.ChangeID)
 	return nil
 }
 
@@ -82,7 +82,7 @@ func nextLeaseRefresh(now time.Time, succeeded bool) time.Time {
 // registration, and doing the same hourly would be two EC2 API calls an hour per
 // spore to say nothing new.
 func (a *Agent) refreshDNSLease(ctx context.Context) {
-	if a.dnsClient == nil || a.config.DNSName == "" || a.identity.PublicIP == "" {
+	if a.dnsClient == nil || a.config.DNSName == "" || a.publicIP() == "" {
 		return
 	}
 	now := time.Now()

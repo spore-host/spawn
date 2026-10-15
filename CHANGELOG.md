@@ -508,6 +508,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Now, when the stop or hibernate fails, each plugin gets back the status it
   had (running or degraded) and its health check starts again. A plugin that
   was removed or reinstalled in the meantime is left as it is.
+- **An instance resumed from hibernation now starts with a clean slate, as a
+  stopped instance does** (#987). A hibernated instance resumes the same
+  spored process, and spored carried its state from before the hibernation
+  into the new run:
+  - the next stop, hibernate or TTL terminate skipped the pre-stop hook (for
+    example an `aws s3 sync`) and the task record;
+  - the DNS name, deleted before the hibernate, came back only at the hourly
+    renewal, and then with the public IP from the first boot;
+  - the idle timer had already run out, so after a `spawn start` with no login
+    the instance hibernated again within about a minute.
+
+  spored now notices the resume from the kernel's clocks: the time the system
+  has spent suspended jumps, and as a backup the wall clock jumps ahead of
+  the monotonic clock. It then re-arms the pre-stop hook and the task record,
+  restarts the idle timer and the idle warning, reads the public IP again and
+  re-registers the DNS name with it, re-registers the job-array entry, and
+  restores the plugins. It also resets the failed-stop backoff and the
+  network, disk and CPU baselines, so the first idle check does not measure
+  across the hibernation. After an `--on-complete hibernate`, the completion
+  file that triggered it is still on disk. It no longer hibernates the resumed
+  instance again, but a completion written after the resume is acted on as
+  usual. Windows instances are not covered yet: their clocks do not show a
+  resume (#962).
 - **A GPU that cannot be read no longer counts as an idle GPU, and Trainium,
   Inferentia, Gaudi and AMD accelerators are now checked** (#954). When
   `nvidia-smi` failed (for example a driver that no longer matched the kernel
