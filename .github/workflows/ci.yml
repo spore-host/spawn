@@ -291,7 +291,20 @@ jobs:
   test-windows:
     name: Test (Windows)
     runs-on: windows-latest
+    env:
+      # Not a credential: stops the AWS SDK probing for an instance-metadata
+      # role, so a test that reaches for AWS fails fast instead of hanging.
+      AWS_EC2_METADATA_DISABLED: 'true'
     steps:
+      # Check out with LF endings, as on Linux. The runner's git defaults to
+      # core.autocrlf=true, which rewrites every file to CRLF; the repo's hygiene
+      # tests read sources, go.mod and ci.yml as text and match "\n"-anchored
+      # patterns, so under CRLF they fail for a reason no Windows user of the
+      # shipped binaries would ever see.
+      - name: Check out with LF line endings
+        shell: bash
+        run: git config --global core.autocrlf false && git config --global core.eol lf
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
