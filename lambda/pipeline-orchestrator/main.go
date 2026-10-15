@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -20,16 +21,69 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
+	"github.com/aws/smithy-go"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/pipeline"
+	"github.com/spore-host/spawn/pkg/ttl"
 )
 
 const (
 	defaultTableName = "spawn-pipeline-orchestration"
 	maxExecutionDur  = 13 * time.Minute
 	pollInterval     = 10 * time.Second
+
+	// defaultStageRegion is where a stage with no region launches. The launch,
+	// the user data and the cleanup all go through stageRegion so they agree;
+	// cleanup used to hardcode it while launch used the Lambda's own region.
+	defaultStageRegion = "us-east-1"
+
+	// defaultStageTimeout bounds a stage command that declares no timeout.
+	defaultStageTimeout = time.Hour
+
+	// stageBootstrapAllowance is the time a stage instance needs on top of its
+	// command's timeout: downloading spored, installing the AWS CLI, writing the
+	// marker and the 60s linger before it terminates itself. A stage's TTL is
+	// its timeout plus this, so the reaper never reclaims a stage that is still
+	// inside its own timeout (#912).
+	stageBootstrapAllowance = 30 * time.Minute
+
+	// pipelineDeadlineSlack is added to the sum of every stage's TTL to give
+	// the whole pipeline's deadline. Past it the orchestrator fails the
+	// pipeline, terminates what is left and stops re-invoking itself (#912).
+	pipelineDeadlineSlack = 30 * time.Minute
+)
+
+// markerAPI is the S3 call the orchestrator uses to read a stage's
+// COMPLETE/FAILED marker. An interface so tests can supply the markers.
+type markerAPI interface {
+	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
+}
+
+// stageEC2API is what the orchestrator needs from EC2 in a stage's region to
+// watch and reclaim that stage's instances.
+type stageEC2API interface {
+	DescribeInstances(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
+	TerminateInstances(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
+}
+
+// Seams over the AWS side effects, replaced in tests.
+var (
+	markers      markerAPI
+	ec2ForRegion = func(ctx context.Context, region string) (stageEC2API, error) {
+		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+		if err != nil {
+			return nil, err
+		}
+		return ec2.NewFromConfig(cfg), nil
+	}
+	loadStateFn  = loadPipelineState
+	saveStateFn  = savePipelineState
+	reinvokeFn   = reinvokeSelf
+	notifyFn     = sendNotification
+	cleanupNetFn = cleanupNetworkResources
 )
 
 // PipelineEvent is the Lambda input event
@@ -57,6 +111,7 @@ func init() {
 	s3Client = s3.NewFromConfig(awsCfg)
 	lambdaClient = lambdasvc.NewFromConfig(awsCfg)
 	snsClient = sns.NewFromConfig(awsCfg)
+	markers = s3Client
 
 	tableName = getEnv("SPAWN_PIPELINE_ORCHESTRATION_TABLE", defaultTableName)
 	log.Printf("Configuration: table=%s", tableName)
@@ -343,7 +398,7 @@ func runPipelinePollingLoop(ctx context.Context, state *pipeline.PipelineState, 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
-	deadline := time.Now().Add(maxExecutionDur)
+	invocationDeadline := time.Now().Add(maxExecutionDur)
 
 	// Get topological order
 	order, err := pipelineDef.GetTopologicalOrder()
@@ -351,166 +406,278 @@ func runPipelinePollingLoop(ctx context.Context, state *pipeline.PipelineState, 
 		return fmt.Errorf("get topological order: %w", err)
 	}
 
+	// The pipeline deadline is anchored to CreatedAt, which `spawn pipeline
+	// launch` always writes. Should a record lack it, anchor it now rather than
+	// leave the pipeline unbounded.
+	if state.CreatedAt.IsZero() {
+		state.CreatedAt = time.Now()
+		if err := saveStateFn(ctx, state); err != nil {
+			log.Printf("Failed to save anchored created_at: %v", err)
+		}
+	}
+
 	for {
-		// Reload state to check for cancellation
-		currentState, err := loadPipelineState(ctx, state.PipelineID)
-		if err != nil {
-			log.Printf("Failed to reload pipeline state: %v", err)
-		} else if currentState.CancelRequested {
-			log.Println("Cancellation requested, stopping orchestration")
-			state.Status = pipeline.StatusCancelled
-			state.CompletedAt = timePtr(time.Now())
-			if err := savePipelineState(ctx, state); err != nil {
-				log.Printf("Failed to save cancelled state: %v", err)
-			}
-			cleanupPipelineResources(ctx, state)
-			return nil
+		done, err := pollOnce(ctx, state, pipelineDef, order, time.Now())
+		if err != nil || done {
+			return err
 		}
 
-		// Check timeout
-		if time.Now().After(deadline) {
-			if state.Status == pipeline.StatusCompleted || state.Status == pipeline.StatusFailed || state.Status == pipeline.StatusCancelled {
-				log.Printf("Pipeline in terminal state %s, not reinvoking", state.Status)
-				return nil
-			}
-
+		// Re-invoke before the Lambda's own timeout. pollOnce has already
+		// failed the pipeline if it is past its deadline, so this chain is
+		// bounded (#912): it used to continue every ~13 minutes indefinitely.
+		if time.Now().After(invocationDeadline) {
 			log.Println("Approaching Lambda timeout, re-invoking...")
-			if err := savePipelineState(ctx, state); err != nil {
+			if err := saveStateFn(ctx, state); err != nil {
 				log.Printf("Failed to save state before re-invocation: %v", err)
 			}
-			return reinvokeSelf(ctx, pipelineID)
-		}
-
-		// Process stages in topological order
-		madeProgress := false
-		for _, stageID := range order {
-			stageState := getStageState(state, stageID)
-			if stageState == nil {
-				log.Printf("Warning: stage %s not found in state", stageID)
-				continue
-			}
-
-			stageDef := pipelineDef.GetStage(stageID)
-			if stageDef == nil {
-				log.Printf("Warning: stage %s not found in definition", stageID)
-				continue
-			}
-
-			switch stageState.Status {
-			case pipeline.StageStatusPending:
-				// Check if dependencies are met
-				if dependenciesMet(state, stageDef) {
-					log.Printf("Stage %s dependencies met, marking as ready", stageID)
-					stageState.Status = pipeline.StageStatusReady
-					madeProgress = true
-				}
-
-			case pipeline.StageStatusReady:
-				// Launch stage
-				log.Printf("Launching stage %s", stageID)
-				if err := launchStage(ctx, state, stageDef, stageState); err != nil {
-					log.Printf("Failed to launch stage %s: %v", stageID, err)
-					stageState.Status = pipeline.StageStatusFailed
-					stageState.ErrorMessage = err.Error()
-					stageState.CompletedAt = timePtr(time.Now())
-					state.FailedStages++
-
-					// Check on_failure policy
-					if state.OnFailure == "stop" {
-						log.Printf("Stage %s failed and on_failure=stop, marking remaining stages as skipped", stageID)
-						skipRemainingStages(state, order, stageID)
-					}
-					madeProgress = true
-				} else {
-					stageState.Status = pipeline.StageStatusLaunching
-					stageState.LaunchedAt = timePtr(time.Now())
-					madeProgress = true
-				}
-
-			case pipeline.StageStatusLaunching:
-				// Check if instances are running
-				if allInstancesRunning(ctx, stageState) {
-					log.Printf("Stage %s instances all running", stageID)
-					stageState.Status = pipeline.StageStatusRunning
-					madeProgress = true
-				}
-
-			case pipeline.StageStatusRunning:
-				// Check if stage completed
-				completed, err := checkStageCompletion(ctx, state, stageState)
-				if err != nil {
-					log.Printf("Error checking stage %s completion: %v", stageID, err)
-				} else if completed {
-					log.Printf("Stage %s completed", stageID)
-					stageState.Status = pipeline.StageStatusCompleted
-					stageState.CompletedAt = timePtr(time.Now())
-					state.CompletedStages++
-
-					// Calculate cost
-					calculateStageCost(stageState)
-					state.CurrentCostUSD += stageState.StageCostUSD
-
-					// Check budget
-					if state.MaxCostUSD != nil && state.CurrentCostUSD > *state.MaxCostUSD {
-						log.Printf("Budget exceeded: $%.2f > $%.2f", state.CurrentCostUSD, *state.MaxCostUSD)
-						state.Status = pipeline.StatusCancelled
-						state.CompletedAt = timePtr(time.Now())
-						skipRemainingStages(state, order, stageID)
-
-						// Send budget exceeded notification
-						msg := fmt.Sprintf("Pipeline %s (%s) cancelled due to budget exceeded.\n\nCurrent cost: $%.2f\nBudget limit: $%.2f\nStages completed: %d/%d",
-							state.PipelineID, state.PipelineName, state.CurrentCostUSD, *state.MaxCostUSD,
-							state.CompletedStages, state.TotalStages)
-						if err := sendNotification(ctx, state, "Spawn Pipeline: Budget Exceeded", msg); err != nil {
-							log.Printf("Warning: Failed to send budget notification: %v", err)
-						}
-
-						break
-					}
-
-					madeProgress = true
-				}
-			}
-		}
-
-		// Save state if progress made
-		if madeProgress {
-			if err := savePipelineState(ctx, state); err != nil {
-				log.Printf("Failed to save state: %v", err)
-			}
-		}
-
-		// Check for completion
-		if allStagesComplete(state) {
-			log.Println("All stages completed")
-			if state.FailedStages > 0 {
-				state.Status = pipeline.StatusFailed
-			} else {
-				state.Status = pipeline.StatusCompleted
-			}
-			state.CompletedAt = timePtr(time.Now())
-			if err := savePipelineState(ctx, state); err != nil {
-				return fmt.Errorf("failed to save completion state: %w", err)
-			}
-
-			// Send completion notification
-			duration := state.CompletedAt.Sub(state.CreatedAt)
-			subject := fmt.Sprintf("Spawn Pipeline: %s", state.Status)
-			msg := fmt.Sprintf("Pipeline %s (%s) %s.\n\nStages completed: %d\nStages failed: %d\nTotal cost: $%.2f\nDuration: %v\n\nPipeline ID: %s",
-				state.PipelineName, state.PipelineID, strings.ToLower(string(state.Status)),
-				state.CompletedStages, state.FailedStages, state.CurrentCostUSD, duration.Round(time.Second),
-				state.PipelineID)
-			if err := sendNotification(ctx, state, subject, msg); err != nil {
-				log.Printf("Warning: Failed to send completion notification: %v", err)
-			}
-
-			cleanupPipelineResources(ctx, state)
-			return nil
+			return reinvokeFn(ctx, pipelineID)
 		}
 
 		// Wait for next poll
 		<-ticker.C
 	}
+}
+
+// pollOnce runs one orchestration pass. It returns done=true once the pipeline
+// has reached a terminal state, after its instances have been terminated.
+func pollOnce(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline, order []string, now time.Time) (bool, error) {
+	// Reload state to check for cancellation
+	currentState, err := loadStateFn(ctx, state.PipelineID)
+	if err != nil {
+		log.Printf("Failed to reload pipeline state: %v", err)
+	} else if currentState.CancelRequested {
+		log.Println("Cancellation requested, stopping orchestration")
+		finishPipeline(ctx, state, pipelineDef, pipeline.StatusCancelled, "pipeline cancelled")
+		return true, nil
+	}
+
+	// The whole pipeline's deadline (#912). Without it a stage that never
+	// reported anything kept the orchestrator re-invoking itself forever.
+	if deadline := pipelineDeadline(state, pipelineDef); now.After(deadline) {
+		reason := fmt.Sprintf("pipeline exceeded its deadline of %s (created %s)",
+			deadline.UTC().Format(time.RFC3339), state.CreatedAt.UTC().Format(time.RFC3339))
+		log.Printf("Pipeline %s: %s; failing it and terminating its instances", state.PipelineID, reason)
+		finishPipeline(ctx, state, pipelineDef, pipeline.StatusFailed, reason)
+		msg := fmt.Sprintf("Pipeline %s (%s) failed: %s.\n\nIts remaining instances were terminated.",
+			state.PipelineName, state.PipelineID, reason)
+		if err := notifyFn(ctx, state, "Spawn Pipeline: FAILED (deadline exceeded)", msg); err != nil {
+			log.Printf("Warning: Failed to send deadline notification: %v", err)
+		}
+		return true, nil
+	}
+
+	// Process stages in topological order
+	madeProgress := false
+	for _, stageID := range order {
+		stageState := getStageState(state, stageID)
+		if stageState == nil {
+			log.Printf("Warning: stage %s not found in state", stageID)
+			continue
+		}
+
+		stageDef := pipelineDef.GetStage(stageID)
+		if stageDef == nil {
+			log.Printf("Warning: stage %s not found in definition", stageID)
+			continue
+		}
+
+		switch stageState.Status {
+		case pipeline.StageStatusPending:
+			// A stage whose dependency failed or was skipped can never run.
+			// It used to stay pending forever, so on_failure=continue never
+			// let the pipeline finish (#912).
+			if dep := blockingDependency(state, stageDef); dep != "" {
+				log.Printf("Stage %s skipped: dependency %s did not complete", stageID, dep)
+				stageState.Status = pipeline.StageStatusSkipped
+				stageState.ErrorMessage = fmt.Sprintf("skipped: dependency %s did not complete", dep)
+				madeProgress = true
+			} else if dependenciesMet(state, stageDef) {
+				log.Printf("Stage %s dependencies met, marking as ready", stageID)
+				stageState.Status = pipeline.StageStatusReady
+				madeProgress = true
+			}
+
+		case pipeline.StageStatusReady:
+			// Launch stage
+			log.Printf("Launching stage %s", stageID)
+			if err := launchStage(ctx, state, stageDef, stageState); err != nil {
+				log.Printf("Failed to launch stage %s: %v", stageID, err)
+				// Instances launched before the failing one are terminated
+				// by failStage rather than left running.
+				stageState.LaunchedAt = timePtr(now)
+				failStage(ctx, state, pipelineDef, stageState, err.Error())
+			} else {
+				stageState.Status = pipeline.StageStatusLaunching
+				stageState.LaunchedAt = timePtr(now)
+			}
+			madeProgress = true
+
+		case pipeline.StageStatusLaunching:
+			// Check if instances are running
+			if allInstancesRunning(ctx, stageState) {
+				log.Printf("Stage %s instances all running", stageID)
+				stageState.Status = pipeline.StageStatusRunning
+				madeProgress = true
+			}
+
+		case pipeline.StageStatusRunning:
+			outcome, reason, err := checkStageOutcome(ctx, state, stageDef, stageState, now)
+			if err != nil {
+				log.Printf("Error checking stage %s outcome: %v", stageID, err)
+				continue
+			}
+			switch outcome {
+			case stageFailed:
+				log.Printf("Stage %s failed: %s", stageID, reason)
+				failStage(ctx, state, pipelineDef, stageState, reason)
+				madeProgress = true
+
+			case stageCompleted:
+				log.Printf("Stage %s completed", stageID)
+				stageState.Status = pipeline.StageStatusCompleted
+				stageState.CompletedAt = timePtr(now)
+				state.CompletedStages++
+
+				// Calculate cost
+				calculateStageCost(stageState)
+				state.CurrentCostUSD += stageState.StageCostUSD
+				madeProgress = true
+
+				// Check budget
+				if state.MaxCostUSD != nil && state.CurrentCostUSD > *state.MaxCostUSD {
+					log.Printf("Budget exceeded: $%.2f > $%.2f", state.CurrentCostUSD, *state.MaxCostUSD)
+					// This used to set CANCELLED and `break` out of the
+					// switch only: the loop carried on, the status was never
+					// saved, and the next invocation boundary returned
+					// without terminating anything. Finish the pipeline here.
+					finishPipeline(ctx, state, pipelineDef, pipeline.StatusCancelled, "budget exceeded")
+
+					// Send budget exceeded notification
+					msg := fmt.Sprintf("Pipeline %s (%s) cancelled due to budget exceeded.\n\nCurrent cost: $%.2f\nBudget limit: $%.2f\nStages completed: %d/%d",
+						state.PipelineID, state.PipelineName, state.CurrentCostUSD, *state.MaxCostUSD,
+						state.CompletedStages, state.TotalStages)
+					if err := notifyFn(ctx, state, "Spawn Pipeline: Budget Exceeded", msg); err != nil {
+						log.Printf("Warning: Failed to send budget notification: %v", err)
+					}
+					return true, nil
+				}
+			}
+		}
+	}
+
+	// Save state if progress made
+	if madeProgress {
+		if err := saveStateFn(ctx, state); err != nil {
+			log.Printf("Failed to save state: %v", err)
+		}
+	}
+
+	// Check for completion
+	if allStagesComplete(state) {
+		log.Println("All stages completed")
+		status := pipeline.StatusCompleted
+		if state.FailedStages > 0 {
+			status = pipeline.StatusFailed
+		}
+		finishPipeline(ctx, state, pipelineDef, status, "")
+
+		// Send completion notification
+		duration := state.CompletedAt.Sub(state.CreatedAt)
+		subject := fmt.Sprintf("Spawn Pipeline: %s", state.Status)
+		msg := fmt.Sprintf("Pipeline %s (%s) %s.\n\nStages completed: %d\nStages failed: %d\nTotal cost: $%.2f\nDuration: %v\n\nPipeline ID: %s",
+			state.PipelineName, state.PipelineID, strings.ToLower(string(state.Status)),
+			state.CompletedStages, state.FailedStages, state.CurrentCostUSD, duration.Round(time.Second),
+			state.PipelineID)
+		if err := notifyFn(ctx, state, subject, msg); err != nil {
+			log.Printf("Warning: Failed to send completion notification: %v", err)
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// finishPipeline puts the pipeline in a terminal status: every stage that has
+// not finished is marked skipped, every instance still alive is terminated, the
+// state is saved and the pipeline's network resources are deleted. Every
+// terminal path goes through it, so none can return with instances running.
+func finishPipeline(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline, status pipeline.PipelineStatus, reason string) {
+	now := time.Now()
+	for i := range state.Stages {
+		st := &state.Stages[i]
+		switch st.Status {
+		case pipeline.StageStatusCompleted, pipeline.StageStatusFailed, pipeline.StageStatusSkipped:
+			continue
+		}
+		wasRunning := st.Status == pipeline.StageStatusLaunching || st.Status == pipeline.StageStatusRunning
+		st.Status = pipeline.StageStatusSkipped
+		if reason != "" {
+			st.ErrorMessage = "skipped: " + reason
+		}
+		if wasRunning {
+			st.CompletedAt = timePtr(now)
+			calculateStageCost(st)
+			state.CurrentCostUSD += st.StageCostUSD
+		}
+	}
+
+	terminateAllInstances(ctx, state, pipelineDef)
+
+	state.Status = status
+	state.CompletedAt = timePtr(now)
+	if err := saveStateFn(ctx, state); err != nil {
+		log.Printf("Failed to save %s state: %v", status, err)
+	}
+	cleanupNetFn(ctx, state)
+}
+
+// failStage marks a stage failed, terminates its instances and applies the
+// pipeline's on_failure policy. "stop" (the default) skips every stage that has
+// not finished and terminates the ones in flight; "continue" lets independent
+// stages carry on, and the stages that depend on this one are skipped on the
+// next pass by blockingDependency.
+func failStage(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline, stageState *pipeline.StageState, reason string) {
+	now := time.Now()
+	stageState.Status = pipeline.StageStatusFailed
+	stageState.ErrorMessage = reason
+	stageState.CompletedAt = timePtr(now)
+	state.FailedStages++
+	calculateStageCost(stageState)
+	state.CurrentCostUSD += stageState.StageCostUSD
+
+	terminateStageInstances(ctx, stageState, stageRegion(pipelineDef.GetStage(stageState.StageID)))
+
+	if state.OnFailure == "continue" {
+		return
+	}
+	log.Printf("Stage %s failed and on_failure=%q, stopping the pipeline", stageState.StageID, state.OnFailure)
+	for i := range state.Stages {
+		st := &state.Stages[i]
+		switch st.Status {
+		case pipeline.StageStatusCompleted, pipeline.StageStatusFailed, pipeline.StageStatusSkipped:
+			continue
+		}
+		if st.Status == pipeline.StageStatusLaunching || st.Status == pipeline.StageStatusRunning {
+			terminateStageInstances(ctx, st, stageRegion(pipelineDef.GetStage(st.StageID)))
+			st.CompletedAt = timePtr(now)
+			calculateStageCost(st)
+			state.CurrentCostUSD += st.StageCostUSD
+		}
+		st.Status = pipeline.StageStatusSkipped
+		st.ErrorMessage = fmt.Sprintf("skipped: stage %s failed and on_failure is stop", stageState.StageID)
+	}
+}
+
+// blockingDependency returns the first dependency of stageDef that failed or
+// was skipped, so stageDef can never run; "" if there is none.
+func blockingDependency(state *pipeline.PipelineState, stageDef *pipeline.Stage) string {
+	for _, depID := range stageDef.DependsOn {
+		depState := getStageState(state, depID)
+		if depState != nil && (depState.Status == pipeline.StageStatusFailed || depState.Status == pipeline.StageStatusSkipped) {
+			return depID
+		}
+	}
+	return ""
 }
 
 func getStageState(state *pipeline.PipelineState, stageID string) *pipeline.StageState {
@@ -540,9 +707,9 @@ func launchStage(ctx context.Context, state *pipeline.PipelineState, stageDef *p
 	}
 
 	// Get EC2 client for stage's region
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(stageDef.Region))
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(stageRegion(stageDef)))
 	if err != nil {
-		return fmt.Errorf("load config for region %s: %w", stageDef.Region, err)
+		return fmt.Errorf("load config for region %s: %w", stageRegion(stageDef), err)
 	}
 	ec2Client := ec2.NewFromConfig(cfg)
 
@@ -560,11 +727,7 @@ func launchStage(ctx context.Context, state *pipeline.PipelineState, stageDef *p
 }
 
 func launchStageInstance(ctx context.Context, awsClient *spawnaws.Client, ec2Client *ec2.Client, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, index int) (*pipeline.InstanceInfo, error) {
-	// Determine region
-	region := stageDef.Region
-	if region == "" {
-		region = "us-east-1" // Default region
-	}
+	region := stageRegion(stageDef)
 
 	// Determine AMI to use
 	amiID := stageDef.AMI
@@ -579,57 +742,13 @@ func launchStageInstance(ctx context.Context, awsClient *spawnaws.Client, ec2Cli
 		log.Printf("Using recommended AMI %s for stage %s", amiID, stageDef.StageID)
 	}
 
-	// Use existing spored instance profile
-	instanceProfile := "spored-instance-profile"
-
 	// Generate user data with pipeline context
 	userData, err := generatePipelineUserData(state, stageDef, stageState, index, region)
 	if err != nil {
 		return nil, fmt.Errorf("generate user data: %w", err)
 	}
 
-	// Build RunInstances input
-	input := &ec2.RunInstancesInput{
-		MinCount:     aws.Int32(1),
-		MaxCount:     aws.Int32(1),
-		InstanceType: ec2types.InstanceType(stageDef.InstanceType),
-		ImageId:      aws.String(amiID),
-		UserData:     aws.String(userData),
-		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{
-			Name: aws.String(instanceProfile),
-		},
-		TagSpecifications: []ec2types.TagSpecification{
-			{
-				ResourceType: ec2types.ResourceTypeInstance,
-				Tags: []ec2types.Tag{
-					{Key: aws.String("spawn:pipeline-id"), Value: aws.String(state.PipelineID)},
-					{Key: aws.String("spawn:stage-id"), Value: aws.String(stageDef.StageID)},
-					{Key: aws.String("spawn:stage-index"), Value: aws.String(fmt.Sprintf("%d", stageState.StageIndex))},
-					{Key: aws.String("spawn:instance-index"), Value: aws.String(fmt.Sprintf("%d", index))},
-					{Key: aws.String("Name"), Value: aws.String(fmt.Sprintf("%s-%s-%d", state.PipelineName, stageDef.StageID, index))},
-				},
-			},
-		},
-	}
-
-	// Add spot if specified
-	if stageDef.Spot {
-		input.InstanceMarketOptions = &ec2types.InstanceMarketOptionsRequest{
-			MarketType: ec2types.MarketTypeSpot,
-		}
-	}
-
-	// Add security group if streaming
-	if state.SecurityGroupID != "" {
-		input.SecurityGroupIds = []string{state.SecurityGroupID}
-	}
-
-	// Add placement group if EFA
-	if stageDef.EFAEnabled && state.PlacementGroupID != "" {
-		input.Placement = &ec2types.Placement{
-			GroupName: aws.String(state.PlacementGroupID),
-		}
-	}
+	input := buildStageRunInstancesInput(state, stageDef, stageState, index, amiID, userData, time.Now())
 
 	// Launch
 	result, err := ec2Client.RunInstances(ctx, input)
@@ -657,20 +776,132 @@ func launchStageInstance(ctx context.Context, awsClient *spawnaws.Client, ec2Cli
 	return instanceInfo, nil
 }
 
+// buildStageRunInstancesInput is the RunInstances request for one stage
+// instance.
+func buildStageRunInstancesInput(state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, index int, amiID, userData string, now time.Time) *ec2.RunInstancesInput {
+	input := &ec2.RunInstancesInput{
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+		InstanceType: ec2types.InstanceType(stageDef.InstanceType),
+		ImageId:      aws.String(amiID),
+		UserData:     aws.String(userData),
+		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{
+			Name: aws.String(spawnaws.SporedInstanceProfileName),
+		},
+		// The user data halts the instance on every exit as its last resort
+		// (#912). With this, a halt is a terminate, which needs no IAM
+		// permission and no AWS CLI. The EC2 default is stop, which would leave
+		// the stage's EBS volumes billing.
+		InstanceInitiatedShutdownBehavior: ec2types.ShutdownBehaviorTerminate,
+		TagSpecifications: []ec2types.TagSpecification{
+			{
+				ResourceType: ec2types.ResourceTypeInstance,
+				Tags:         stageInstanceTags(state, stageDef, stageState, index, now),
+			},
+		},
+	}
+
+	// Add spot if specified
+	if stageDef.Spot {
+		input.InstanceMarketOptions = &ec2types.InstanceMarketOptionsRequest{
+			MarketType: ec2types.MarketTypeSpot,
+		}
+	}
+
+	// Add security group if streaming
+	if state.SecurityGroupID != "" {
+		input.SecurityGroupIds = []string{state.SecurityGroupID}
+	}
+
+	// Add placement group if EFA
+	if stageDef.EFAEnabled && state.PlacementGroupID != "" {
+		input.Placement = &ec2types.Placement{
+			GroupName: aws.String(state.PlacementGroupID),
+		}
+	}
+	return input
+}
+
+// stageInstanceTags are the tags on a stage instance.
+//
+// They used to be the pipeline/stage ids and Name only (#912). Without
+// spawn:managed=true the TTL reaper, which lists only managed instances and
+// whose terminate grant is conditioned on that tag, could not see a stage
+// instance, and the instance's own role could not terminate itself either (the
+// spored role's ec2:TerminateInstances carries the same condition). So a stage
+// whose command failed ran until someone cancelled the pipeline by hand.
+//
+// The lifecycle tags match what `spawn launch` writes (pkg/aws buildTags):
+// spawn:launch-time, plus spawn:ttl and spawn:ttl-deadline from pkg/ttl. The TTL
+// is the stage's timeout plus stageBootstrapAllowance, so the reaper reclaims
+// an instance only once its stage could no longer be legitimately running.
+func stageInstanceTags(state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, index int, now time.Time) []ec2types.Tag {
+	name := fmt.Sprintf("%s-%s-%d", state.PipelineName, stageDef.StageID, index)
+	tags := spawnaws.LifecycleTags(name, "pipeline", now)
+
+	launch := now.UTC()
+	ttlTags := ttl.Tags(launch, launch.Add(stageTTL(stageDef)))
+	tags = append(tags,
+		ec2types.Tag{Key: aws.String("spawn:launch-time"), Value: aws.String(launch.Format(time.RFC3339))},
+		ec2types.Tag{Key: aws.String("spawn:ttl"), Value: aws.String(ttlTags["spawn:ttl"])},
+		ec2types.Tag{Key: aws.String("spawn:ttl-deadline"), Value: aws.String(ttlTags["spawn:ttl-deadline"])},
+		ec2types.Tag{Key: aws.String("spawn:pipeline-id"), Value: aws.String(state.PipelineID)},
+		ec2types.Tag{Key: aws.String("spawn:stage-id"), Value: aws.String(stageDef.StageID)},
+		ec2types.Tag{Key: aws.String("spawn:stage-index"), Value: aws.String(fmt.Sprintf("%d", stageState.StageIndex))},
+		ec2types.Tag{Key: aws.String("spawn:instance-index"), Value: aws.String(fmt.Sprintf("%d", index))},
+	)
+	return tags
+}
+
+// stageRegion is the region a stage runs in. nil-safe, for cleanup paths that
+// look a stage up by id.
+func stageRegion(stageDef *pipeline.Stage) string {
+	if stageDef == nil || stageDef.Region == "" {
+		return defaultStageRegion
+	}
+	return stageDef.Region
+}
+
+// stageTimeout is the bound on a stage's command: its declared timeout, or
+// defaultStageTimeout. Validate rejects an unparseable timeout, so the fallback
+// covers only a definition that skipped it.
+func stageTimeout(stageDef *pipeline.Stage) time.Duration {
+	if stageDef != nil && stageDef.Timeout != "" {
+		if d, err := time.ParseDuration(stageDef.Timeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultStageTimeout
+}
+
+// stageTTL is how long a stage instance may live: the command's timeout plus
+// the bootstrap and teardown around it. It is written as the instance's
+// spawn:ttl-deadline and is also the point at which the orchestrator gives up
+// on a stage that has reported nothing.
+func stageTTL(stageDef *pipeline.Stage) time.Duration {
+	return stageTimeout(stageDef) + stageBootstrapAllowance
+}
+
+// pipelineDeadline is when the orchestrator stops waiting for the pipeline:
+// the sum of every stage's TTL, which bounds even a fully serial pipeline, plus
+// pipelineDeadlineSlack, from the pipeline's creation.
+func pipelineDeadline(state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline) time.Time {
+	var total time.Duration
+	for i := range pipelineDef.Stages {
+		total += stageTTL(&pipelineDef.Stages[i])
+	}
+	return state.CreatedAt.Add(total + pipelineDeadlineSlack)
+}
+
 func generatePipelineUserData(state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, instanceIndex int, region string) (string, error) {
 	// Escape shell variables
 	shellEscape := func(s string) string {
 		return strings.ReplaceAll(s, "'", "'\\''")
 	}
 
-	// Determine timeout (convert to seconds)
-	timeout := "3600" // Default 1 hour
-	if stageDef.Timeout != "" {
-		duration, err := time.ParseDuration(stageDef.Timeout)
-		if err == nil {
-			timeout = fmt.Sprintf("%d", int(duration.Seconds()))
-		}
-	}
+	// The command's timeout, in seconds. Shared with the instance's TTL tag so
+	// the two cannot disagree.
+	timeout := fmt.Sprintf("%d", int(stageTimeout(stageDef).Seconds()))
 
 	// Build environment variables
 	envVars := ""
@@ -678,9 +909,57 @@ func generatePipelineUserData(state *pipeline.PipelineState, stageDef *pipeline.
 		envVars += fmt.Sprintf("export %s='%s'\n", k, shellEscape(v))
 	}
 
-	// Generate user data script
+	// Generate user data script.
+	//
+	// The instance terminates itself on EVERY exit (#912). It used to do so
+	// only at the end of the success path: the failure branch, the stage
+	// timeout and any bootstrap failure under `set -e` all exited first and
+	// left the instance running. spawn_finish is installed as an EXIT trap
+	// before anything can fail, writes the FAILED marker unless COMPLETE was
+	// written, and then terminates the instance two ways: the API (the
+	// instance id from IMDSv2 via curl, because ec2-metadata exists only on
+	// Amazon Linux), and a halt, which RunInstances' InstanceInitiatedShutdown
+	// Behavior=terminate turns into a terminate with no IAM or AWS CLI needed.
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
+
+# Pipeline configuration
+export SPAWN_PIPELINE_ID='%s'
+export SPAWN_PIPELINE_NAME='%s'
+export SPAWN_STAGE_ID='%s'
+export SPAWN_STAGE_INDEX='%d'
+export SPAWN_INSTANCE_INDEX='%d'
+export SPAWN_S3_BUCKET='%s'
+export SPAWN_S3_PREFIX='%s'
+export SPAWN_RESULT_S3_BUCKET='%s'
+export SPAWN_RESULT_S3_PREFIX='%s'
+export SPAWN_REGION='%s'
+
+# Terminate this instance however the script exits (#912).
+SPAWN_STAGE_RESULT=""
+spawn_finish() {
+    rc=$?
+    set +e
+    trap - EXIT
+    if [ "$SPAWN_STAGE_RESULT" != "complete" ]; then
+        echo "Stage did not complete (exit $rc); writing FAILED marker"
+        echo "failed exit=$rc" | aws s3 cp - "s3://${SPAWN_S3_BUCKET}/${SPAWN_S3_PREFIX}/stages/${SPAWN_STAGE_ID}/FAILED" --region "$SPAWN_REGION"
+    fi
+    echo "Terminating instance in 60s..."
+    sleep 60
+    IMDS_TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+    INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" "http://169.254.169.254/latest/meta-data/instance-id")
+    if [ -n "$INSTANCE_ID" ]; then
+        aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$SPAWN_REGION"
+    fi
+    # Backstop: the instance was launched with shutdown behaviour terminate.
+    shutdown -h now || poweroff
+    exit $rc
+}
+trap spawn_finish EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Detect architecture
 ARCH=$(uname -m)
@@ -772,18 +1051,6 @@ if ! command -v aws &> /dev/null; then
     rm -rf /tmp/aws /tmp/awscliv2.zip
 fi
 
-# Pipeline configuration
-export SPAWN_PIPELINE_ID='%s'
-export SPAWN_PIPELINE_NAME='%s'
-export SPAWN_STAGE_ID='%s'
-export SPAWN_STAGE_INDEX='%d'
-export SPAWN_INSTANCE_INDEX='%d'
-export SPAWN_S3_BUCKET='%s'
-export SPAWN_S3_PREFIX='%s'
-export SPAWN_RESULT_S3_BUCKET='%s'
-export SPAWN_RESULT_S3_PREFIX='%s'
-export SPAWN_REGION='%s'
-
 # User environment variables
 %s
 
@@ -803,16 +1070,16 @@ echo "Running stage command: $STAGE_CMD"
 echo "========================================"
 echo ""
 
-# Run command with timeout
-timeout %s bash -c "$STAGE_CMD" || {
-    EXIT_CODE=$?
+# Run command with timeout. -k: a command that ignores SIGTERM is killed.
+set +e
+timeout -k 60 %s bash -c "$STAGE_CMD"
+EXIT_CODE=$?
+set -e
+if [ "$EXIT_CODE" -ne 0 ]; then
     echo "Stage command failed with exit code: $EXIT_CODE"
-
-    # Write failure marker to S3
-    echo "failed" | aws s3 cp - "s3://${SPAWN_S3_BUCKET}/${SPAWN_S3_PREFIX}/stages/${SPAWN_STAGE_ID}/FAILED" --region "$SPAWN_REGION"
-
-    exit $EXIT_CODE
-}
+    # spawn_finish writes the FAILED marker and terminates the instance.
+    exit "$EXIT_CODE"
+fi
 
 echo ""
 echo "========================================"
@@ -824,13 +1091,10 @@ echo "========================================"
 
 # Write completion marker to S3
 echo "success" | aws s3 cp - "s3://${SPAWN_S3_BUCKET}/${SPAWN_S3_PREFIX}/stages/${SPAWN_STAGE_ID}/COMPLETE" --region "$SPAWN_REGION"
+SPAWN_STAGE_RESULT="complete"
 
-echo "✅ Stage complete, terminating instance in 60s..."
-sleep 60
-
-# Terminate self
-INSTANCE_ID=$(ec2-metadata --instance-id | cut -d " " -f 2)
-aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$SPAWN_REGION"
+echo "✅ Stage complete"
+exit 0
 `,
 		shellEscape(state.PipelineID),
 		shellEscape(state.PipelineName),
@@ -841,7 +1105,7 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$SPAWN_REGIO
 		shellEscape(state.S3Prefix),
 		shellEscape(state.ResultS3Bucket),
 		shellEscape(state.ResultS3Prefix),
-		region,
+		shellEscape(region),
 		envVars,
 		// stageDef.Command appears ONCE, escaped. It used to be interpolated twice:
 		// escaped into STAGE_CMD='%s', and RAW into echo "Running stage command: %s".
@@ -866,28 +1130,176 @@ func allInstancesRunning(ctx context.Context, stageState *pipeline.StageState) b
 	return time.Since(*stageState.LaunchedAt) > 1*time.Minute
 }
 
-func checkStageCompletion(ctx context.Context, state *pipeline.PipelineState, stageState *pipeline.StageState) (bool, error) {
-	// Check for S3 completion marker
-	markerKey := fmt.Sprintf("%s/stages/%s/COMPLETE", state.S3Prefix, stageState.StageID)
+type stageOutcome int
 
-	_, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+const (
+	stageStillRunning stageOutcome = iota
+	stageCompleted
+	stageFailed
+)
+
+// checkStageOutcome decides whether a running stage has completed, failed or is
+// still running.
+//
+// It used to look for the COMPLETE marker only, and fall back to "all instances
+// terminated" read from InstanceInfo.State, which is written once at launch and
+// was never refreshed (#912). A failed stage therefore stayed running forever.
+// Now, in order:
+//   - a FAILED marker fails the stage (it wins over COMPLETE, since with several
+//     instances one may fail while another completes);
+//   - a COMPLETE marker completes it;
+//   - if every instance has gone (refreshed from EC2) without writing COMPLETE,
+//     it failed: a spot interruption, a crash, or a script that could not
+//     write its marker;
+//   - if the stage has outlived its TTL, it failed.
+func checkStageOutcome(ctx context.Context, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, now time.Time) (stageOutcome, string, error) {
+	failed, err := markerExists(ctx, state, stageState.StageID, "FAILED")
+	if err != nil {
+		return stageStillRunning, "", err
+	}
+	if failed {
+		return stageFailed, "stage command failed (FAILED marker written)", nil
+	}
+
+	completed, err := markerExists(ctx, state, stageState.StageID, "COMPLETE")
+	if err != nil {
+		return stageStillRunning, "", err
+	}
+	if completed {
+		return stageCompleted, "", nil
+	}
+
+	alive, err := refreshInstanceStates(ctx, stageState, stageRegion(stageDef))
+	if err != nil {
+		// Not a decision: the TTL check below still bounds the stage.
+		log.Printf("Warning: could not refresh instance states for stage %s: %v", stageState.StageID, err)
+	} else if !alive {
+		return stageFailed, "every stage instance exited without writing the COMPLETE marker", nil
+	}
+
+	if stageState.LaunchedAt != nil && now.Sub(*stageState.LaunchedAt) > stageTTL(stageDef) {
+		return stageFailed, fmt.Sprintf("stage exceeded its timeout plus bootstrap allowance (%s)", stageTTL(stageDef)), nil
+	}
+	return stageStillRunning, "", nil
+}
+
+// markerExists reports whether the stage's COMPLETE or FAILED marker is in S3.
+// Only a not-found answer means absent; any other error is returned, so a
+// permissions or network problem is not read as "not finished yet".
+func markerExists(ctx context.Context, state *pipeline.PipelineState, stageID, marker string) (bool, error) {
+	key := fmt.Sprintf("%s/stages/%s/%s", state.S3Prefix, stageID, marker)
+	_, err := markers.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(state.S3Bucket),
-		Key:    aws.String(markerKey),
+		Key:    aws.String(key),
 	})
 	if err == nil {
-		return true, nil // Marker exists
+		return true, nil
 	}
+	var nf *s3types.NotFound
+	var nsk *s3types.NoSuchKey
+	if errors.As(err, &nf) || errors.As(err, &nsk) {
+		return false, nil
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey") {
+		return false, nil
+	}
+	return false, fmt.Errorf("head s3://%s/%s: %w", state.S3Bucket, key, err)
+}
 
-	// Check if all instances terminated (alternative completion signal)
-	allTerminated := true
+// instanceGone reports whether an EC2 instance state means the instance is no
+// longer running the stage.
+func instanceGone(s string) bool {
+	switch ec2types.InstanceStateName(s) {
+	case ec2types.InstanceStateNameTerminated, ec2types.InstanceStateNameShuttingDown,
+		ec2types.InstanceStateNameStopped, ec2types.InstanceStateNameStopping:
+		return true
+	}
+	return false
+}
+
+// refreshInstanceStates reads the stage's instances' states from EC2 into
+// stageState and reports whether any is still alive.
+func refreshInstanceStates(ctx context.Context, stageState *pipeline.StageState, region string) (bool, error) {
+	if len(stageState.Instances) == 0 {
+		return false, nil
+	}
+	ids := make([]string, 0, len(stageState.Instances))
 	for _, inst := range stageState.Instances {
-		if inst.State != "terminated" && inst.State != "stopped" {
-			allTerminated = false
-			break
+		ids = append(ids, inst.InstanceID)
+	}
+	client, err := ec2ForRegion(ctx, region)
+	if err != nil {
+		return false, fmt.Errorf("ec2 client for %s: %w", region, err)
+	}
+	out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: ids})
+	if err != nil {
+		return false, fmt.Errorf("describe instances: %w", err)
+	}
+	observed := map[string]string{}
+	for _, res := range out.Reservations {
+		for _, inst := range res.Instances {
+			if inst.InstanceId != nil && inst.State != nil {
+				observed[*inst.InstanceId] = string(inst.State.Name)
+			}
 		}
 	}
+	alive := false
+	for i := range stageState.Instances {
+		inst := &stageState.Instances[i]
+		if st, ok := observed[inst.InstanceID]; ok {
+			inst.State = st
+		}
+		if !instanceGone(inst.State) {
+			alive = true
+		}
+	}
+	return alive, nil
+}
 
-	return allTerminated, nil
+// terminateStageInstances terminates every instance of the stage not already
+// gone, in the stage's own region.
+func terminateStageInstances(ctx context.Context, stageState *pipeline.StageState, region string) {
+	var ids []string
+	for _, inst := range stageState.Instances {
+		if !instanceGone(inst.State) {
+			ids = append(ids, inst.InstanceID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	client, err := ec2ForRegion(ctx, region)
+	if err != nil {
+		log.Printf("Warning: Failed to load EC2 client for region %s: %v (instances %v are left to "+
+			"their own self-termination and the TTL reaper)", region, err, ids)
+		return
+	}
+	log.Printf("Terminating %d instances for stage %s in %s", len(ids), stageState.StageID, region)
+	if _, err := client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids}); err != nil {
+		log.Printf("Warning: Failed to terminate instances for stage %s: %v (left to their own "+
+			"self-termination and the TTL reaper)", stageState.StageID, err)
+		return
+	}
+	now := time.Now()
+	for i := range stageState.Instances {
+		inst := &stageState.Instances[i]
+		if !instanceGone(inst.State) {
+			inst.State = string(ec2types.InstanceStateNameShuttingDown)
+			inst.TerminatedAt = timePtr(now)
+		}
+	}
+	log.Printf("Terminated instances for stage %s: %v", stageState.StageID, ids)
+}
+
+// terminateAllInstances terminates every stage's live instances, each in its
+// stage's region. Cleanup used to send every TerminateInstances to us-east-1,
+// so a stage in any other region was never reclaimed by it.
+func terminateAllInstances(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline) {
+	for i := range state.Stages {
+		st := &state.Stages[i]
+		terminateStageInstances(ctx, st, stageRegion(pipelineDef.GetStage(st.StageID)))
+	}
 }
 
 func calculateStageCost(stageState *pipeline.StageState) {
@@ -903,22 +1315,6 @@ func calculateStageCost(stageState *pipeline.StageState) {
 	stageState.StageCostUSD = instanceHours * 0.10
 }
 
-func skipRemainingStages(state *pipeline.PipelineState, order []string, failedStageID string) {
-	found := false
-	for _, stageID := range order {
-		if stageID == failedStageID {
-			found = true
-			continue
-		}
-		if found {
-			stageState := getStageState(state, stageID)
-			if stageState != nil && stageState.Status == pipeline.StageStatusPending {
-				stageState.Status = pipeline.StageStatusSkipped
-			}
-		}
-	}
-}
-
 func allStagesComplete(state *pipeline.PipelineState) bool {
 	for _, stage := range state.Stages {
 		if stage.Status != pipeline.StageStatusCompleted &&
@@ -930,51 +1326,9 @@ func allStagesComplete(state *pipeline.PipelineState) bool {
 	return true
 }
 
-func cleanupPipelineResources(ctx context.Context, state *pipeline.PipelineState) {
-	// Terminate all instances
-	for _, stage := range state.Stages {
-		if len(stage.Instances) == 0 {
-			continue
-		}
-
-		// Collect instance IDs
-		instanceIDs := []string{}
-		for _, inst := range stage.Instances {
-			if inst.State != "terminated" && inst.State != "stopped" {
-				instanceIDs = append(instanceIDs, inst.InstanceID)
-			}
-		}
-
-		if len(instanceIDs) > 0 {
-			// Determine region for this stage (stages can be in different regions)
-			region := "us-east-1" // Default
-			for _, stageSpec := range state.Stages {
-				if stageSpec.StageID == stage.StageID && stageSpec.StageIndex == stage.StageIndex {
-					// This doesn't have region, need to get from original pipeline def
-					// For now, use default region
-					break
-				}
-			}
-
-			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
-			if err != nil {
-				log.Printf("Warning: Failed to load config for region %s: %v", region, err)
-				continue
-			}
-			ec2Client := ec2.NewFromConfig(cfg)
-
-			log.Printf("Terminating %d instances for stage %s", len(instanceIDs), stage.StageID)
-			_, err = ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
-				InstanceIds: instanceIDs,
-			})
-			if err != nil {
-				log.Printf("Warning: Failed to terminate instances for stage %s: %v", stage.StageID, err)
-			} else {
-				log.Printf("Terminated instances for stage %s: %v", stage.StageID, instanceIDs)
-			}
-		}
-	}
-
+// cleanupNetworkResources deletes the pipeline's security and placement
+// groups. Instances are terminated first, by terminateAllInstances.
+func cleanupNetworkResources(ctx context.Context, state *pipeline.PipelineState) {
 	// Cleanup security group. SYNCHRONOUS, with a retry budget — see #752: this
 	// was a `go func(){ time.Sleep(30s); … }()` and the Lambda runtime freezes the
 	// execution environment when the handler returns, so the delete never ran.
