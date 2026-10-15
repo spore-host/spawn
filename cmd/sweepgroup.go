@@ -18,7 +18,7 @@ Examples:
   spawn sweep status sweep-20260116-abc123
   spawn sweep cancel sweep-20260116-abc123
   spawn sweep resume sweep-20260116-abc123 --max-concurrent 5
-  spawn sweep collect sweep-20260116-abc123 --output results.json`,
+  spawn sweep collect sweep-20260116-abc123 --output-file results.json`,
 }
 
 // ── sweep list ──────────────────────────────────────────────────────────────
@@ -102,17 +102,13 @@ func init() {
 	_ = sweepStatusCmd.Flags().MarkDeprecated("json", "use --output json instead")
 	sweepStatusCmd.Flags().BoolVar(&sweepStatusCheckComplete, "check-complete", false, "Exit with standardized codes: 0=complete 1=failed 2=running 3=error")
 
-	// sweep resume flags
-	sweepResumeCmd.Flags().IntVar(&resumeMaxConcurrent, "max-concurrent", 0, "Override max concurrent instances (0 = use original)")
-	sweepResumeCmd.Flags().BoolVar(&resumeDetach, "detach", false, "Run sweep orchestration in Lambda")
+	// sweep resume flags: the same set the deprecated top-level resume declares
+	// (they share runResume and its vars), so neither spelling can lose one (#935).
+	registerResumeFlags(sweepResumeCmd)
 
-	// sweep collect flags (reuse collect vars)
-	sweepCollectCmd.Flags().StringVarP(&collectOutputFile, "output-file", "f", "results.json", "Output file path")
-	sweepCollectCmd.Flags().StringVar(&collectFormat, "format", "json", "Output format: json, csv, jsonl")
-	sweepCollectCmd.Flags().StringVar(&collectS3Prefix, "s3-prefix", "", "Custom S3 prefix for results (default: auto-detect)")
-	sweepCollectCmd.Flags().StringVar(&collectMetric, "metric", "", "Metric to rank results by (e.g. accuracy, loss)")
-	sweepCollectCmd.Flags().IntVar(&collectBestN, "best", 0, "Show only top N results by metric (0 = all)")
-	sweepCollectCmd.Flags().StringSliceVarP(&collectRegions, "regions", "r", nil, "Regions to collect from (comma-separated or repeated)")
+	// sweep collect flags: the same set the deprecated collect-results declares
+	// (they share runCollectResults and its vars) (#935).
+	registerCollectFlags(sweepCollectCmd)
 
 	// Deprecate the old top-level sweep commands
 	cancelCmd.Deprecated = "use 'spawn sweep cancel <sweep-id>' instead"

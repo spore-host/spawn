@@ -7,7 +7,7 @@ Examples:
   spawn sweep status sweep-20260116-abc123
   spawn sweep cancel sweep-20260116-abc123
   spawn sweep resume sweep-20260116-abc123 --max-concurrent 5
-  spawn sweep collect sweep-20260116-abc123 --output results.json
+  spawn sweep collect sweep-20260116-abc123 --output-file results.json
 
 ```
 spawn sweep
@@ -43,7 +43,7 @@ spawn sweep collect <sweep-id> [flags]
 | `--format` |  | string | `json` | Output format: json, csv, jsonl |
 | `--metric` |  | string |  | Metric to rank results by (e.g. accuracy, loss) |
 | `--output-file` | `-f` | string | `results.json` | Output file path |
-| `--regions` | `-r` | stringSlice |  | Regions to collect from (comma-separated or repeated) |
+| `--regions` | `-r` | stringSlice |  | Regions to collect from (comma-separated or repeated; default: all) |
 | `--s3-prefix` |  | string |  | Custom S3 prefix for results (default: auto-detect) |
 
 ### `spawn sweep list`
@@ -76,6 +76,7 @@ spawn sweep resume <sweep-id> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--detach` |  | bool |  | Run sweep orchestration in Lambda |
+| `--max-concurrent-auto` |  | bool |  | Re-derive max concurrent instances from the account's real AWS quota headroom for the pending parameter sets' instance type(s)/region, instead of the original or a user-supplied number (spawn#494). Not yet supported with --detach. |
 | `--max-concurrent` |  | int |  | Override max concurrent instances (0 = use original) |
 
 ### `spawn sweep status`

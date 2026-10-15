@@ -92,7 +92,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exist (schedules fire from EventBridge Scheduler), so they could not pass. The
   queue tests were `t.Skip` placeholders.
 
+### Deprecated
+
+- **`spawn collect-results --output`/`-o`** is now a deprecated alias for the new
+  `--output-file`/`-f`, the spelling `spawn sweep collect` already uses. The old
+  flag shadowed the global `-o/--output` format flag, so a user following
+  collect-results' deprecation notice to `spawn sweep collect ... --output
+  results.csv` set the output *format* and silently got `results.json`; the
+  `spawn sweep` help example showed exactly that invocation, and now uses
+  `--output-file` (#935).
+
 ### Fixed
+
+- `spawn sweep resume` accepts `--max-concurrent-auto` (#494), which until now
+  only the deprecated `spawn resume` had, so following `spawn resume`'s
+  deprecation notice lost the option. The two commands now declare their flags
+  from one place, as `spawn collect-results` and `spawn sweep collect` do, and a
+  test fails whenever a deprecated command has a flag its named replacement does
+  not accept with the same meaning (#935).
 
 - `go mod tidy` works again. An integration-tagged test still imported
   `pkg/orchestrator`, which #862 deleted, so tidy failed outright; the stale test is

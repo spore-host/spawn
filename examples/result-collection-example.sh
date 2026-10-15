@@ -137,16 +137,16 @@ echo ""
 echo "Collecting results..."
 
 # Collect all results to JSON
-spawn collect-results --sweep-id $SWEEP_ID --output results.json
+spawn collect-results --sweep-id $SWEEP_ID --output-file results.json
 
 # Collect to CSV for spreadsheet analysis
-spawn collect-results --sweep-id $SWEEP_ID --output results.csv --format csv
+spawn collect-results --sweep-id $SWEEP_ID --output-file results.csv --format csv
 
 # Find top 3 runs by accuracy
-spawn collect-results --sweep-id $SWEEP_ID --output best-accuracy.json --metric accuracy --best 3
+spawn collect-results --sweep-id $SWEEP_ID --output-file best-accuracy.json --metric accuracy --best 3
 
 # Find top 3 runs by f1_score
-spawn collect-results --sweep-id $SWEEP_ID --output best-f1.json --metric f1_score --best 3
+spawn collect-results --sweep-id $SWEEP_ID --output-file best-f1.json --metric f1_score --best 3
 
 echo ""
 echo "Results collected:"
