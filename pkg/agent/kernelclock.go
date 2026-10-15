@@ -1,6 +1,9 @@
 package agent
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // kernelClocks is one reading of the kernel's two since-boot clocks (#945).
 //
@@ -20,7 +23,8 @@ import "time"
 //     suspended, which is what status reports as hibernated.
 //
 // Both are zero at kernel boot, so "count from the kernel's boot" is the
-// reading {0, 0}.
+// reading {0, 0}. On Windows the same roles are played by the unbiased and the
+// biased interrupt time (#962, interruptTimeClocks).
 type kernelClocks struct {
 	Monotonic time.Duration
 	Boottime  time.Duration
@@ -32,6 +36,24 @@ func (k kernelClocks) suspended() time.Duration {
 		return d
 	}
 	return 0
+}
+
+// interruptTimeClocks maps Windows' two interrupt-time counts, in 100ns units
+// since boot, onto the kernel clock roles (#962): the unbiased count, which
+// excludes sleep and hibernation, is Monotonic; the biased count, which
+// includes them, is Boottime. See sysKernelClocks in sys_windows.go for the
+// documentation each role rests on. It lives here, not there, so the mapping is
+// tested on every platform. A pair no real system produces (biased behind
+// unbiased, or too large for a time.Duration) reports false.
+func interruptTimeClocks(unbiased, biased uint64) (kernelClocks, bool) {
+	const unit = 100 // ns per interrupt-time unit
+	if biased < unbiased || biased > math.MaxInt64/unit {
+		return kernelClocks{}, false
+	}
+	return kernelClocks{
+		Monotonic: time.Duration(unbiased) * unit,
+		Boottime:  time.Duration(biased) * unit,
+	}, true
 }
 
 // readKernelClocks reads both clocks now, or reports false where the platform
