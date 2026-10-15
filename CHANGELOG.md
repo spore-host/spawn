@@ -94,6 +94,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pkg/aws.EFANetworkInterface`, the RunInstances network interface that
   attaches an EFA, shared by `spawn launch --efa` and pipeline EFA stages
   (#956). This is an addition to the public `pkg/aws` surface.
+- **`spawn pipeline status` shows the run id**, the one `spawn pipeline
+  collect --run` takes, and lists the pipeline's other runs found in its
+  `s3_bucket`, newest first, with the `collect --run` command to fetch one
+  (#1014). The id used to be only in the stored record. `status` also honours
+  `--output json` now, which it ignored: it prints the record with `run_id`
+  (always present, `""` on a pipeline launched before run ids) and `runs`, every
+  run id found, oldest first (`null`, with `runs_error`, when they could not be
+  listed). Listing the runs needs `s3:ListBucket` on the pipeline's
+  `s3_bucket`; without it `status` warns and shows the rest.
 
 ### Deprecated
 

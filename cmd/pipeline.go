@@ -90,9 +90,15 @@ var statusPipelineCmd = &cobra.Command{
 
 Displays:
 - Overall pipeline status
+- The current run id, which 'spawn pipeline collect --run' takes, and the
+  pipeline's other runs found in its s3_bucket
 - Per-stage progress
 - Instance information
-- Cost tracking`,
+- Cost tracking
+
+With --output json, prints the pipeline record with run_id and runs (every run
+id found in S3, oldest first; null, with runs_error, when they could not be
+listed).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStatusPipeline,
 }
@@ -694,32 +700,110 @@ func runStatusPipeline(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pipeline not found: %s", pipelineID)
 	}
 
-	// Display status
-	_, _ = fmt.Fprintf(os.Stdout, "Pipeline: %s\n", state.PipelineName)
-	_, _ = fmt.Fprintf(os.Stdout, "ID: %s\n", pipelineID)
-	_, _ = fmt.Fprintf(os.Stdout, "Status: %s\n", state.Status)
-	_, _ = fmt.Fprintf(os.Stdout, "Created: %s\n", state.CreatedAt.Format(time.RFC3339))
-	_, _ = fmt.Fprintf(os.Stdout, "Updated: %s\n", state.UpdatedAt.Format(time.RFC3339))
-	_, _ = fmt.Fprintf(os.Stdout, "\n")
+	runs, runsErr := statusRunIDs(ctx, s3.NewFromConfig(cfg), state)
+	return writePipelineStatus(os.Stdout, os.Stderr, state, runs, runsErr, getOutputFormat() == "json")
+}
+
+// statusRunIDs lists the runs of the pipeline that have data in its s3_bucket,
+// for `spawn pipeline status` (#1014). One ListObjectsV2 of common prefixes per
+// 1000 runs.
+func statusRunIDs(ctx context.Context, client s3.ListObjectsV2APIClient, state *pipeline.PipelineState) ([]string, error) {
+	if state.S3Bucket == "" {
+		return []string{}, nil
+	}
+	return pipeline.ListRunIDs(ctx, client, state.S3Bucket, state.S3Prefix)
+}
+
+// pipelineStatusView is `spawn pipeline status --output json`: the pipeline
+// record, with run_id always present (it is omitted from the record when
+// empty, on records written before run ids) and the run ids found in S3,
+// oldest first. runs is null, and runs_error says why, when they could not be
+// listed.
+type pipelineStatusView struct {
+	*pipeline.PipelineState
+	RunID     string   `json:"run_id"`
+	Runs      []string `json:"runs"`
+	RunsError string   `json:"runs_error,omitempty"`
+}
+
+// statusOtherRunsShown caps the "Other runs" line; JSON lists every run.
+const statusOtherRunsShown = 10
+
+// writePipelineStatus renders `spawn pipeline status`. The text header names
+// the run id, which `spawn pipeline collect --run` takes, and the pipeline's
+// other runs (#1014); it used to show neither, so the id was only in the
+// record.
+func writePipelineStatus(out, errOut io.Writer, state *pipeline.PipelineState, runs []string, runsErr error, asJSON bool) error {
+	if asJSON {
+		view := pipelineStatusView{PipelineState: state, RunID: state.RunID, Runs: runs}
+		if runsErr != nil {
+			view.Runs = nil
+			view.RunsError = runsErr.Error()
+		}
+		data, err := json.MarshalIndent(view, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal JSON: %w", err)
+		}
+		_, _ = fmt.Fprintf(out, "%s\n", data)
+		return nil
+	}
+
+	_, _ = fmt.Fprintf(out, "Pipeline: %s\n", state.PipelineName)
+	_, _ = fmt.Fprintf(out, "ID: %s\n", state.PipelineID)
+	if state.RunID != "" {
+		_, _ = fmt.Fprintf(out, "Run: %s\n", state.RunID)
+	} else {
+		_, _ = fmt.Fprintf(out, "Run: - (launched before run ids; collect it without --run)\n")
+	}
+	_, _ = fmt.Fprintf(out, "Status: %s\n", state.Status)
+	_, _ = fmt.Fprintf(out, "Created: %s\n", state.CreatedAt.Format(time.RFC3339))
+	_, _ = fmt.Fprintf(out, "Updated: %s\n", state.UpdatedAt.Format(time.RFC3339))
+	if runsErr != nil {
+		_, _ = fmt.Fprintf(errOut, "⚠️  Could not list this pipeline's other runs: %v\n", runsErr)
+	} else {
+		var others []string
+		for _, id := range runs {
+			if id != state.RunID {
+				others = append(others, id)
+			}
+		}
+		if len(others) > 0 {
+			shown, older := others, 0
+			if len(others) > statusOtherRunsShown {
+				older = len(others) - statusOtherRunsShown
+				shown = others[older:] // the newest: run ids sort by launch time
+			}
+			// Newest first, so the line reads back from the current run.
+			_, _ = fmt.Fprintf(out, "Other runs:")
+			for i := len(shown) - 1; i >= 0; i-- {
+				_, _ = fmt.Fprintf(out, " %s", shown[i])
+			}
+			if older > 0 {
+				_, _ = fmt.Fprintf(out, " (and %d older; --output json lists all)", older)
+			}
+			_, _ = fmt.Fprintf(out, "\n  collect one with: spawn pipeline collect %s --run <run-id>\n", state.PipelineID)
+		}
+	}
+	_, _ = fmt.Fprintf(out, "\n")
 
 	// Progress
-	_, _ = fmt.Fprintf(os.Stdout, "Progress: %d/%d stages completed", state.CompletedStages, state.TotalStages)
+	_, _ = fmt.Fprintf(out, "Progress: %d/%d stages completed", state.CompletedStages, state.TotalStages)
 	if state.FailedStages > 0 {
-		_, _ = fmt.Fprintf(os.Stdout, " (%d failed)", state.FailedStages)
+		_, _ = fmt.Fprintf(out, " (%d failed)", state.FailedStages)
 	}
-	_, _ = fmt.Fprintf(os.Stdout, "\n")
+	_, _ = fmt.Fprintf(out, "\n")
 
 	// Cost: an estimate at on-demand rates (#930), and labelled as one.
-	_, _ = fmt.Fprintf(os.Stdout, "Estimated cost: $%.2f", state.CurrentCostUSD)
+	_, _ = fmt.Fprintf(out, "Estimated cost: $%.2f", state.CurrentCostUSD)
 	if state.MaxCostUSD != nil && *state.MaxCostUSD > 0 {
-		_, _ = fmt.Fprintf(os.Stdout, " / $%.2f", *state.MaxCostUSD)
+		_, _ = fmt.Fprintf(out, " / $%.2f", *state.MaxCostUSD)
 	}
-	_, _ = fmt.Fprintf(os.Stdout, " (finished stages, at on-demand rates)\n\n")
+	_, _ = fmt.Fprintf(out, " (finished stages, at on-demand rates)\n\n")
 
 	// Stages table
 	if len(state.Stages) > 0 {
-		_, _ = fmt.Fprintf(os.Stdout, "STAGE                STATUS       INSTANCES  EST COST  DURATION\n")
-		_, _ = fmt.Fprintf(os.Stdout, "─────────────────────────────────────────────────────────────────\n")
+		_, _ = fmt.Fprintf(out, "STAGE                STATUS       INSTANCES  EST COST  DURATION\n")
+		_, _ = fmt.Fprintf(out, "─────────────────────────────────────────────────────────────────\n")
 		for _, stage := range state.Stages {
 			// Calculate duration
 			duration := ""
@@ -741,7 +825,7 @@ func runStatusPipeline(cmd *cobra.Command, args []string) error {
 				costStr = fmt.Sprintf("$%.2f", stage.StageCostUSD)
 			}
 
-			_, _ = fmt.Fprintf(os.Stdout, "%-20s %-12s %-10s %-9s %s\n",
+			_, _ = fmt.Fprintf(out, "%-20s %-12s %-10s %-9s %s\n",
 				truncate(stage.StageID, 20), stage.Status, instanceStr, costStr, duration)
 		}
 	}

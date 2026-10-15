@@ -81,8 +81,9 @@ outputs, every `stages/<stage>/output/` above, into `--output-dir` (default
 
 The `COMPLETE` and `FAILED` markers and the stage config are not downloaded.
 `--stage <stage>` collects one stage. `--run <run-id>` collects an earlier run
-of the same `pipeline_id`; the run id is printed at launch, and when a run has
-no outputs, `collect` lists the runs it can find. An object whose key would
+of the same `pipeline_id`; the run id is printed at launch and by `spawn
+pipeline status`, which also lists the pipeline's other runs, and when a run
+has no outputs, `collect` lists the runs it can find. An object whose key would
 land outside `--output-dir` (a key containing `..`) is refused, and then
 nothing is downloaded.
 

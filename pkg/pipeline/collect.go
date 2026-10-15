@@ -85,7 +85,7 @@ func CollectRunOutputs(ctx context.Context, client CollectS3API, state *Pipeline
 	}
 	if len(files) == 0 {
 		_, _ = fmt.Fprintf(out, "⚠️  No stage outputs found under s3://%s/%s\n", state.S3Bucket, listPrefix)
-		if runs, err := listRunIDs(ctx, client, state.S3Bucket, state.S3Prefix); err == nil && len(runs) > 0 {
+		if runs, err := ListRunIDs(ctx, client, state.S3Bucket, state.S3Prefix); err == nil && len(runs) > 0 {
 			_, _ = fmt.Fprintf(out, "   Runs of this pipeline in s3://%s: %s (select one with --run)\n",
 				state.S3Bucket, strings.Join(runs, ", "))
 		}
@@ -200,11 +200,14 @@ func downloadCollectFile(ctx context.Context, client CollectS3API, bucket string
 	return file.Close()
 }
 
-// listRunIDs lists the run ids that have data under s3_prefix, for the hint
-// when the collected run has no outputs.
-func listRunIDs(ctx context.Context, client CollectS3API, bucket, s3Prefix string) ([]string, error) {
+// ListRunIDs lists the run ids that have data under s3_prefix, oldest first
+// (run ids begin with their launch time), for the hint when the collected run
+// has no outputs and for `spawn pipeline status` (#1014). It lists only the
+// common prefixes under <s3_prefix>/runs/, one request per 1000 runs. The
+// result is non-nil, so a JSON consumer can tell "no runs" from "not listed".
+func ListRunIDs(ctx context.Context, client s3.ListObjectsV2APIClient, bucket, s3Prefix string) ([]string, error) {
 	runsPrefix := strings.TrimSuffix(RunKeyPrefix(s3Prefix, "x"), "x")
-	var ids []string
+	ids := []string{}
 	pager := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
 		Bucket:    aws.String(bucket),
 		Prefix:    aws.String(runsPrefix),
