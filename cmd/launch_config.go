@@ -638,6 +638,24 @@ func readyGatesForLaunch(mpi bool) []string {
 // the paths --command must see mounted before it starts (#668); pass nil when
 // there is no storage script, since there is then nothing to wait for.
 func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScript string, readyMountPoints []string) (string, error) {
+	// The Windows bootstrap runs no workload: buildWindowsUserData takes only the
+	// key. The launch guards refuse --command and --user-data for Windows
+	// (#1022); this is the backstop at the point where they would be dropped, so
+	// a caller that skips the guards gets an error instead of an instance that
+	// never runs its workload and never fires --on-complete.
+	if config.TargetOS == "windows" {
+		if config.JobArrayCommand != "" {
+			return "", fmt.Errorf("--command is not supported on Windows: the Windows bootstrap would not run it (#1022)")
+		}
+		custom, err := resolveCustomUserData()
+		if err != nil {
+			return "", err
+		}
+		if custom != "" {
+			return "", fmt.Errorf("--user-data is not supported on Windows: the Windows bootstrap would drop it (#1022)")
+		}
+	}
+
 	// Inject the PUBLIC key of the same keypair we registered with EC2
 	// (config.KeyName), so the instance trusts the key `spawn connect` will use.
 	publicKey, err := spawnPublicKeyForUserData(plat, config.KeyName)
@@ -646,8 +664,8 @@ func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScr
 	}
 
 	// Windows uses a completely different bootstrap: EC2Launch runs a
-	// <powershell> block, not bash, and there is no spored yet (#77). Branch
-	// early to a minimal PowerShell script.
+	// <powershell> block, not bash. It installs SSH and spored and nothing else;
+	// the workload inputs were refused above (#1022).
 	if config.TargetOS == "windows" {
 		return buildWindowsUserData(string(publicKey))
 	}

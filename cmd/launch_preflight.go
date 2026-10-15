@@ -213,7 +213,11 @@ func windowsLifecycleGuard(config *aws.LaunchConfig) error {
 			"and/or --idle-timeout. The in-instance agent enforces these and the server-side " +
 			"reaper backstops the TTL deadline.\n  Re-run with e.g. --ttl 8h")
 	}
-	return nil
+	// Refuse the flags Windows can't honour (#1022). Here, not only at the top of
+	// runLaunch, because this is where an AUTO-DETECTED Windows AMI is first
+	// known: every path that resolves the OS (single launch, job array, sweep,
+	// --dry-run) calls this guard once it has.
+	return windowsUnsupportedFlags(config.TargetOS, launchFlags)
 }
 
 // validateMPIFlags checks --mpi's own flag prerequisites (multiple nodes and a

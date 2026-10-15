@@ -27,6 +27,15 @@ import (
 func runLaunch(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
+	// An explicit --os windows is known before anything is resolved, so refuse
+	// the flags Windows can't honour here, before any AWS call and ahead of every dispatch below (#1022).
+	// The batch-queue and detached-sweep paths never resolve a target OS, so this
+	// is the only place they are checked. An auto-detected Windows AMI is caught
+	// later, by windowsLifecycleGuard.
+	if err := windowsUnsupportedFlags(osFlag, launchFlags); err != nil {
+		return err
+	}
+
 	// Get the account ID for audit logging. This is best-effort and resilient:
 	// it uses the AWS client's GetAccountID, which falls back to IMDS if STS is
 	// unreachable (e.g. an STS VPC endpoint with private DNS this subnet can't
