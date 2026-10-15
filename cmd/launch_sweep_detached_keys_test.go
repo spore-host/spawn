@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"regexp"
 	"sort"
@@ -84,7 +85,7 @@ func TestSeedDetachedLaunchKeys_FillsTheLaunchCriticalKeys(t *testing.T) {
 		Spot:               true,
 	}
 
-	if err := seedDetachedLaunchKeys(nil, nil, pf, base, "us-east-1"); err != nil {
+	if err := seedDetachedLaunchKeys(context.Background(), nil, pf, base, "us-east-1"); err != nil {
 		t.Fatalf("seedDetachedLaunchKeys: %v", err)
 	}
 
@@ -118,7 +119,7 @@ func TestSeedDetachedLaunchKeys_RespectsPrecedence(t *testing.T) {
 	}
 	base := &aws.LaunchConfig{InstanceType: "c7g.large", AMI: "ami-from-flag", KeyName: "key-from-flag"}
 
-	if err := seedDetachedLaunchKeys(nil, nil, pf, base, "us-east-1"); err != nil {
+	if err := seedDetachedLaunchKeys(context.Background(), nil, pf, base, "us-east-1"); err != nil {
 		t.Fatalf("seedDetachedLaunchKeys: %v", err)
 	}
 	if got := pf.Defaults["ami"]; got != "ami-from-file" {
@@ -143,7 +144,7 @@ func TestSeedDetachedLaunchKeys_DoesNotWriteEmptyValues(t *testing.T) {
 	}
 	base := &aws.LaunchConfig{InstanceType: "t4g.small", AMI: "ami-x"} // no key, no profile, no spot
 
-	if err := seedDetachedLaunchKeys(nil, nil, pf, base, "us-east-1"); err != nil {
+	if err := seedDetachedLaunchKeys(context.Background(), nil, pf, base, "us-east-1"); err != nil {
 		t.Fatalf("seedDetachedLaunchKeys: %v", err)
 	}
 	for _, key := range []string{"key_name", "iam_role", "spot"} {
@@ -162,7 +163,7 @@ func TestSeedDetachedLaunchKeys_NoInstanceTypeIsAnError(t *testing.T) {
 		Defaults: map[string]interface{}{},
 		Params:   []map[string]interface{}{{"trial": "a"}},
 	}
-	err := seedDetachedLaunchKeys(nil, nil, pf, &aws.LaunchConfig{}, "us-east-1")
+	err := seedDetachedLaunchKeys(context.Background(), nil, pf, &aws.LaunchConfig{}, "us-east-1")
 	if err == nil {
 		t.Fatal("no error for a row with no instance type; it would upload with no ami")
 	}

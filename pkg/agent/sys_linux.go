@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -286,4 +287,61 @@ func sysBootTime() time.Time {
 		return time.Time{}
 	}
 	return time.Now().Add(-time.Duration(secs * float64(time.Second)))
+}
+
+// errEmptyProcStat: /proc/stat had no lines. Linux-only (#923): declared in the
+// OS-agnostic agent.go it was dead code on every other GOOS.
+var errEmptyProcStat = fmt.Errorf("empty cpu stat")
+
+// isRecentActivity returns true if the idle duration string from `w` is less than maxIdle.
+// Linux-only (#923): its one caller is sysCountActiveSessions above.
+func isRecentActivity(idle string, maxIdle time.Duration) bool {
+	// "?" means no tty activity measured — treat as not active
+	if idle == "?" {
+		return false
+	}
+	// Seconds only: "Xs"
+	if strings.HasSuffix(idle, "s") {
+		secs, err := strconv.ParseFloat(strings.TrimSuffix(idle, "s"), 64)
+		if err == nil {
+			return time.Duration(secs)*time.Second < maxIdle
+		}
+	}
+	// Minutes:seconds "MM:SS"
+	if strings.Contains(idle, ":") && !strings.Contains(idle, "m") {
+		parts := strings.Split(idle, ":")
+		if len(parts) == 2 {
+			mins, e1 := strconv.ParseFloat(parts[0], 64)
+			secs, e2 := strconv.ParseFloat(parts[1], 64)
+			if e1 == nil && e2 == nil {
+				d := time.Duration(mins)*time.Minute + time.Duration(secs)*time.Second
+				return d < maxIdle
+			}
+		}
+	}
+	// Minutes with suffix "MMm" or "HH:MMm"
+	if strings.HasSuffix(idle, "m") {
+		s := strings.TrimSuffix(idle, "m")
+		if strings.Contains(s, ":") {
+			parts := strings.Split(s, ":")
+			if len(parts) == 2 {
+				hrs, e1 := strconv.ParseFloat(parts[0], 64)
+				mins, e2 := strconv.ParseFloat(parts[1], 64)
+				if e1 == nil && e2 == nil {
+					d := time.Duration(hrs)*time.Hour + time.Duration(mins)*time.Minute
+					return d < maxIdle
+				}
+			}
+		}
+		mins, err := strconv.ParseFloat(s, 64)
+		if err == nil {
+			return time.Duration(mins)*time.Minute < maxIdle
+		}
+	}
+	// "Xdays" — definitely not recent
+	if strings.Contains(idle, "day") {
+		return false
+	}
+	// Unknown format — conservatively treat as recent to avoid false idle
+	return true
 }

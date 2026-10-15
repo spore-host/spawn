@@ -665,6 +665,7 @@ func lookupSlackUserByEmail(ctx context.Context, cfg aws.Config, platform, works
 	req.Header.Set("Authorization", "Bearer "+botToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		//lint:ignore ST1005 "Slack" is a proper noun; lowercasing it would misspell the product name (#923)
 		return "", fmt.Errorf("Slack API request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -684,6 +685,7 @@ func lookupSlackUserByEmail(ctx context.Context, cfg aws.Config, platform, works
 		if slackResp.Error == "users_not_found" {
 			return "", fmt.Errorf("no Slack user found with email %q in workspace %s", email, workspaceID)
 		}
+		//lint:ignore ST1005 "Slack" is a proper noun; lowercasing it would misspell the product name (#923)
 		return "", fmt.Errorf("Slack API error: %s", slackResp.Error)
 	}
 	return slackResp.User.ID, nil
@@ -720,6 +722,7 @@ func exchangeRefreshTokenCLI(ctx context.Context, refreshToken string) (accessTo
 		return "", "", 0, fmt.Errorf("parse: %w", err)
 	}
 	if !result.OK {
+		//lint:ignore ST1005 "Slack" is a proper noun; lowercasing it would misspell the product name (#923)
 		return "", "", 0, fmt.Errorf("Slack API: %s", result.Error)
 	}
 	return result.AccessToken, result.RefreshToken, result.ExpiresIn, nil

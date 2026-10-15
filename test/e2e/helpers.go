@@ -1,3 +1,5 @@
+//go:build e2e_tier1 || e2e_tier2 || e2e_tier3
+
 // Package e2e contains end-to-end integration tests for spawn, truffle, and lagotto.
 //
 // Tests are split into three independently runnable tiers:

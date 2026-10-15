@@ -61,9 +61,6 @@ var sweepCancelCmd = &cobra.Command{
 
 // ── sweep resume ────────────────────────────────────────────────────────────
 
-var sweepResumeMaxConcurrent int
-var sweepResumeDetach bool
-
 var sweepResumeCmd = &cobra.Command{
 	Use:   "resume <sweep-id>",
 	Short: "Resume an interrupted parameter sweep from checkpoint",
@@ -75,9 +72,6 @@ var sweepResumeCmd = &cobra.Command{
 }
 
 // ── sweep collect ───────────────────────────────────────────────────────────
-
-var sweepCollectOutputFile string
-var sweepCollectFormat string
 
 var sweepCollectCmd = &cobra.Command{
 	Use:   "collect <sweep-id>",

@@ -10,17 +10,19 @@ import (
 	"time"
 )
 
-// inUseErr is the error EC2 returns while a placement group still has members.
+// errInUse is the error EC2 returns while a placement group still has members.
 // Carried as a plain string because that is the form a wrapped SDK error
 // presents, which is the case the classifier most needs to handle.
-var inUseErr = errors.New("operation error EC2: DeletePlacementGroup, https response error " +
+//
+//lint:ignore ST1005 verbatim EC2 error text, trailing period included; the classifier must match what EC2 actually sends (#923)
+var errInUse = errors.New("operation error EC2: DeletePlacementGroup, https response error " +
 	"StatusCode: 400, api error InvalidPlacementGroup.InUse: The placement group " +
 	"'spawn-mpi-x-us-east-1a' is in use and may not be deleted.")
 
 // TestPlacementGroupInUseIsRecognised: if the classifier misses, the retry never
 // engages and the whole fix is inert.
 func TestPlacementGroupInUseIsRecognised(t *testing.T) {
-	if !placementGroupInUse(inUseErr) {
+	if !placementGroupInUse(errInUse) {
 		t.Error("the real InvalidPlacementGroup.InUse text is not recognised, so the retry " +
 			"would never engage")
 	}
@@ -53,7 +55,7 @@ func TestDeletePlacementGroupRetriesUntilMembersAreGone(t *testing.T) {
 	del := func() error {
 		calls++
 		if calls < 4 {
-			return inUseErr
+			return errInUse
 		}
 		return nil
 	}
@@ -96,7 +98,7 @@ func TestDeletePlacementGroupDoesNotRetryOtherErrors(t *testing.T) {
 func TestDeletePlacementGroupGivesUpWithinBudget(t *testing.T) {
 	t.Cleanup(SetPGDeleteWaitForTest(50*time.Millisecond, 5*time.Millisecond))
 
-	del := func() error { return inUseErr } // never drains
+	del := func() error { return errInUse } // never drains
 
 	start := time.Now()
 	err := retryPlacementGroupDelete(context.Background(), "spawn-mpi-stuck", del)
@@ -111,7 +113,7 @@ func TestDeletePlacementGroupGivesUpWithinBudget(t *testing.T) {
 	if !strings.Contains(err.Error(), "spawn-mpi-stuck") {
 		t.Errorf("error %q does not name the placement group left behind", err)
 	}
-	if !errors.Is(err, inUseErr) {
+	if !errors.Is(err, errInUse) {
 		t.Error("the underlying InUse error should stay wrapped, so callers can classify it")
 	}
 }
@@ -122,7 +124,7 @@ func TestDeletePlacementGroupHonoursContext(t *testing.T) {
 	t.Cleanup(SetPGDeleteWaitForTest(time.Minute, 10*time.Second))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	del := func() error { cancel(); return inUseErr }
+	del := func() error { cancel(); return errInUse }
 
 	start := time.Now()
 	if err := retryPlacementGroupDelete(ctx, "spawn-mpi-x", del); !errors.Is(err, context.Canceled) {

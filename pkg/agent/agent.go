@@ -632,10 +632,8 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 }
 
 // Sentinels for the OS CPU-times reader (sysReadCPUTimes).
-var (
-	errEmptyProcStat = fmt.Errorf("empty cpu stat")
-	errBadProcStat   = fmt.Errorf("unexpected cpu stat format")
-)
+// errEmptyProcStat is Linux-only and lives in sys_linux.go with its one reader.
+var errBadProcStat = fmt.Errorf("unexpected cpu stat format")
 
 // countActivePortConnections counts ESTABLISHED connections on the given ports —
 // detects browser-based app users (RStudio, Jupyter) that don't appear in the
@@ -649,58 +647,6 @@ func countActivePortConnections(ports []int) int {
 // block idle detection. OS-specific source.
 func countActiveSessions() int {
 	return sysCountActiveSessions()
-}
-
-// isRecentActivity returns true if the idle duration string from `w` is less than maxIdle.
-func isRecentActivity(idle string, maxIdle time.Duration) bool {
-	// "?" means no tty activity measured — treat as not active
-	if idle == "?" {
-		return false
-	}
-	// Seconds only: "Xs"
-	if strings.HasSuffix(idle, "s") {
-		secs, err := strconv.ParseFloat(strings.TrimSuffix(idle, "s"), 64)
-		if err == nil {
-			return time.Duration(secs)*time.Second < maxIdle
-		}
-	}
-	// Minutes:seconds "MM:SS"
-	if strings.Contains(idle, ":") && !strings.Contains(idle, "m") {
-		parts := strings.Split(idle, ":")
-		if len(parts) == 2 {
-			mins, e1 := strconv.ParseFloat(parts[0], 64)
-			secs, e2 := strconv.ParseFloat(parts[1], 64)
-			if e1 == nil && e2 == nil {
-				d := time.Duration(mins)*time.Minute + time.Duration(secs)*time.Second
-				return d < maxIdle
-			}
-		}
-	}
-	// Minutes with suffix "MMm" or "HH:MMm"
-	if strings.HasSuffix(idle, "m") {
-		s := strings.TrimSuffix(idle, "m")
-		if strings.Contains(s, ":") {
-			parts := strings.Split(s, ":")
-			if len(parts) == 2 {
-				hrs, e1 := strconv.ParseFloat(parts[0], 64)
-				mins, e2 := strconv.ParseFloat(parts[1], 64)
-				if e1 == nil && e2 == nil {
-					d := time.Duration(hrs)*time.Hour + time.Duration(mins)*time.Minute
-					return d < maxIdle
-				}
-			}
-		}
-		mins, err := strconv.ParseFloat(s, 64)
-		if err == nil {
-			return time.Duration(mins)*time.Minute < maxIdle
-		}
-	}
-	// "Xdays" — definitely not recent
-	if strings.Contains(idle, "day") {
-		return false
-	}
-	// Unknown format — conservatively treat as recent to avoid false idle
-	return true
 }
 
 // findActiveProcess returns the first configured process name that is currently

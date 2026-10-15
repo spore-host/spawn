@@ -325,16 +325,6 @@ func TestPipelineLaunchRegistersWaitFlags(t *testing.T) {
 
 // ── small helpers (kept local so this file reads on its own) ─────────────────
 
-func regexpMustCompile(expr string) *regexp.Regexp { return regexp.MustCompile(expr) }
-
-func mapValues(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for _, v := range m {
-		out = append(out, v)
-	}
-	return out
-}
-
 // countWholeWord counts identifier-boundary occurrences of name, so counting
 // references to `flagWait` is not inflated by `flagWaitTimeout`.
 func countWholeWord(haystack, name string) int {

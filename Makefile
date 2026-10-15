@@ -228,7 +228,7 @@ check:
 	@echo "2b. Vetting every GOOS the release builds..."
 	@$(MAKE) --no-print-directory check-goos
 	@echo "3. Running staticcheck..."
-	@staticcheck ./... || echo "staticcheck not installed, skipping..."
+	@$(MAKE) --no-print-directory check-staticcheck
 	@echo "4. Running short tests (hermetic: no credentials, no network)..."
 	@$(MAKE) --no-print-directory test-hermetic
 	@echo "5. Nested modules (build + vet + test)..."
@@ -260,6 +260,21 @@ test-hermetic: hermetic-exec
 .PHONY: check-goos
 check-goos:
 	@scripts/release-goos-vet.sh
+
+# staticcheck fails the build on findings; only a MISSING binary is skipped (#923).
+# This used to be `staticcheck ./... || echo "not installed"`, and `||` fires on
+# any non-zero exit — staticcheck exits 1 when it reports findings, so the step
+# printed "not installed" about an installed tool and passed, while 67 findings
+# sat on main behind it. CI installs a pinned, checksum-verified binary (the pin
+# lives there, in one place) and runs staticcheck unconditionally, so a skip
+# here cannot hide a finding from a PR.
+.PHONY: check-staticcheck
+check-staticcheck:
+	@if command -v staticcheck >/dev/null 2>&1; then \
+		staticcheck ./...; \
+	else \
+		echo "staticcheck not installed, skipping (CI runs the version pinned in .github/workflows/ci.yml)"; \
+	fi
 
 # Every nested module, via the SAME script CI runs (#136). Deliberately not a
 # count: a hand-written number here is the anti-pattern rule 4 warns about, and

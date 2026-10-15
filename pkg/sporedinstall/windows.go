@@ -80,12 +80,17 @@ func p256Coordinates(keyPEM string) (string, string, error) {
 	if !ok || ec.Curve != elliptic.P256() {
 		return "", "", fmt.Errorf("not a P-256 ECDSA key")
 	}
-	pad := func(b []byte) string {
-		out := make([]byte, 32)
-		copy(out[32-len(b):], b)
-		return hex.EncodeToString(out)
+	// Bytes is the SEC 1 uncompressed point, 0x04 || X || Y, with each coordinate
+	// already fixed at 32 bytes for P-256 — the padding .NET needs (#923: replaces
+	// the deprecated PublicKey.X/.Y, whose big.Int bytes had to be left-padded).
+	pt, err := ec.Bytes()
+	if err != nil {
+		return "", "", err
 	}
-	return pad(ec.X.Bytes()), pad(ec.Y.Bytes()), nil
+	if len(pt) != 65 || pt[0] != 4 {
+		return "", "", fmt.Errorf("unexpected P-256 point encoding (%d bytes)", len(pt))
+	}
+	return hex.EncodeToString(pt[1:33]), hex.EncodeToString(pt[33:65]), nil
 }
 
 // windowsInstallTemplate is the PowerShell itself. Placeholders are replaced by

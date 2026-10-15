@@ -22,6 +22,7 @@ func TestDecryptWindowsPassword_RoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	const want = "Sup3r$ecretAdminPass!"
+	//lint:ignore SA1019 mimics EC2, which encrypts the Windows password with PKCS #1 v1.5 (#923)
 	ciphertext, err := rsa.EncryptPKCS1v15(rand.Reader, &priv.PublicKey, []byte(want))
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +56,7 @@ func TestDecryptWindowsPassword_FromPKCS1File(t *testing.T) {
 	}
 
 	const want = "Another!Pass123"
+	//lint:ignore SA1019 mimics EC2, which encrypts the Windows password with PKCS #1 v1.5 (#923)
 	ct, err := rsa.EncryptPKCS1v15(rand.Reader, &priv.PublicKey, []byte(want))
 	if err != nil {
 		t.Fatal(err)

@@ -86,6 +86,11 @@ func decryptWindowsPassword(passwordData string, priv *rsa.PrivateKey) (string, 
 	if err != nil {
 		return "", fmt.Errorf("base64-decode password data: %w", err)
 	}
+	// EC2 GetPasswordData encrypts with PKCS #1 v1.5; the format is AWS's, not a
+	// choice we can make. The padding-oracle concern does not apply: this runs
+	// once, locally, on the user's own key, and its result is not exposed to a
+	// remote party.
+	//lint:ignore SA1019 the EC2 Windows password format is PKCS #1 v1.5 by AWS's definition (#923)
 	plaintext, err := rsa.DecryptPKCS1v15(nil, priv, ciphertext)
 	if err != nil {
 		return "", fmt.Errorf("decrypt password (is this the RSA key the instance launched with?): %w", err)
