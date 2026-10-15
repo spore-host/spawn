@@ -72,7 +72,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signals every member over the cohort's SSH mesh, so each one runs its own
   `--on-complete`. If rank 0 gives up because a peer never accepts SSH, the
   members it can reach stop as well.
-### Fixed
 
 - **spored's hybrid-registry client now has a region** (#899). On every
   job-array member (the report was a `--mpi` cohort, but any `--count` array
