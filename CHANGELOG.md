@@ -476,6 +476,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a race against spored's first metadata reads. A slow disk or any extra step
   at that point silently dropped every plugin. The file is now written before
   spored is installed or started.
+- **`TestJobArrayIDSuffixIsNotTheClock` no longer flakes** (#1044). It failed on
+  the first duplicate among 2000 job-array ids, but the id's 32-bit random
+  suffix collides about once in 2000 such runs (6 of 20000 measured). It now
+  fails on more than one duplicate. A clock-derived suffix still fails it by
+  hundreds, and a new test checks that the tolerance still catches a clock. The
+  id format is unchanged: a production collision needs the same
+  `--job-array-name` on the same day, and is about 10⁻⁶ even at 100 such launches.
 
 ### Security
 

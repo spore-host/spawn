@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -131,21 +132,73 @@ func TestIntentIsBuiltWithAnExplicitToken(t *testing.T) {
 // A tight loop is the discriminator: it issues far more calls than a
 // microsecond-resolution clock has distinct values to offer, so a clock-derived
 // suffix cannot survive it on any platform.
+//
+// It must NOT fail on the first duplicate (#1044). The suffix is 32 bits of
+// entropy, and 2000 draws from 2^32 collide once with probability about
+// n^2/2^33 = 4.7e-4, so a first-duplicate rule flaked about one run in 2000
+// (6 of 20000 measured). What separates a clock from entropy is the COUNT: a
+// clock repeats hundreds of times in this loop, entropy at most once with
+// overwhelming probability (two or more collisions: about 1.1e-7). So this
+// fails on more than maxDups.
 func TestJobArrayIDSuffixIsNotTheClock(t *testing.T) {
-	const n = 2000
+	dups := duplicateIDs(generateJobArrayID, jobArrayIDDraws)
+	if len(dups) > maxJobArrayIDDups {
+		shown := dups
+		if len(shown) > 5 {
+			shown = shown[:5]
+		}
+		t.Fatalf("generateJobArrayID produced %d duplicate ids in %d calls (entropy allows at most %d), e.g.\n  %s\n\n"+
+			"A tight loop outruns any wall clock, so repeated duplicates mean the suffix is "+
+			"derived from time rather than entropy. #691 made the RunInstances ClientToken "+
+			"depend on this id, so a collision means EC2 either rejects the cohort with "+
+			"IdempotentParameterMismatch or returns the FIRST launch's reservation, "+
+			"possibly terminated instances reported as a successful launch (#710).",
+			len(dups), jobArrayIDDraws, maxJobArrayIDDups, strings.Join(shown, "\n  "))
+	}
+}
+
+// jobArrayIDDraws calls, at most maxJobArrayIDDups duplicates. See
+// TestJobArrayIDSuffixIsNotTheClock for why the tolerance is one.
+const (
+	jobArrayIDDraws   = 2000
+	maxJobArrayIDDups = 1
+)
+
+// duplicateIDs calls gen n times in a tight loop and describes each repeat.
+func duplicateIDs(gen func(string) string, n int) []string {
 	seen := make(map[string]int, n)
+	var dups []string
 	for i := 0; i < n; i++ {
-		id := generateJobArrayID("gchp")
+		id := gen("gchp")
 		if first, dup := seen[id]; dup {
-			t.Fatalf("generateJobArrayID produced %q at both call %d and call %d.\n\n"+
-				"A tight loop outruns any wall clock, so a duplicate here means the suffix is "+
-				"derived from time rather than entropy. #691 made the RunInstances ClientToken "+
-				"depend on this id, so a collision means EC2 either rejects the cohort with "+
-				"IdempotentParameterMismatch or returns the FIRST launch's reservation — "+
-				"possibly terminated instances reported as a successful launch (#710).",
-				id, first, i)
+			dups = append(dups, fmt.Sprintf("%q at calls %d and %d", id, first, i))
+			continue
 		}
 		seen[id] = i
+	}
+	return dups
+}
+
+// The tolerance must not let a clock through. A microsecond clock read in a
+// tight loop returns each value for several consecutive calls; built
+// deterministically here rather than from time.Now, whose resolution differs
+// by platform. Even a clock that repeats only once in every 100 calls must
+// exceed the tolerance. (The other #710 mode, the ~16.8 ms wrap, collides
+// between launches, not within one tight loop; no in-loop test sees it.)
+func TestDuplicateToleranceStillCatchesAClock(t *testing.T) {
+	for _, every := range []int{2, 4, 100} {
+		tick := 0
+		clock := func(n string) string {
+			tick++
+			if tick%every == 0 {
+				return fmt.Sprintf("%s-20260101-%08x", n, tick-1) // a repeat of the previous reading
+			}
+			return fmt.Sprintf("%s-20260101-%08x", n, tick)
+		}
+		if d := duplicateIDs(clock, jobArrayIDDraws); len(d) <= maxJobArrayIDDups {
+			t.Errorf("a clock repeating every %d calls gave %d duplicates, within the tolerance of %d: "+
+				"the test no longer detects the #710 failure", every, len(d), maxJobArrayIDDups)
+		}
 	}
 }
 
