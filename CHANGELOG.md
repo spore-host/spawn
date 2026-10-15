@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from an older spored that still emits them. Errors from spored are still
   shown.
 
+### Removed
+
+- The `make test-integration-scheduler` and `make test-integration-queue` targets,
+  with the tests they ran (#913). The scheduler tests wrote a DynamoDB schedule
+  schema that the scheduler has never read and waited for a trigger that doesn't
+  exist (schedules fire from EventBridge Scheduler), so they could not pass. The
+  queue tests were `t.Skip` placeholders.
+
 ### Fixed
 
 - `go mod tidy` works again. An integration-tagged test still imported
@@ -262,14 +270,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it now prints `Network: unknown (single sample; assuming active)`, the same
   way the CPU line does. The JSON output gains `network_measured` and
   `network_unknown`.
-
-### Removed
-
-- The `make test-integration-scheduler` and `make test-integration-queue` targets,
-  with the tests they ran (#913). The scheduler tests wrote a DynamoDB schedule
-  schema that the scheduler has never read and waited for a trigger that doesn't
-  exist (schedules fire from EventBridge Scheduler), so they could not pass. The
-  queue tests were `t.Skip` placeholders.
 
 ## [0.128.2] - 2026-10-13
 
