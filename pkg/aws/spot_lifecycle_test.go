@@ -88,14 +88,14 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			b.WriteString(`<item><key>` + spotrequest.TypeTag + `</key><value>` + f.spotType + `</value></item>`)
 		}
 		b.WriteString(`</tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
-		_, _ = w.Write(b.Bytes()) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+		_, _ = w.Write(b.Bytes()) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 	case "CancelSpotInstanceRequests":
 		if f.cancelDenied {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>denied</Message></Error></Errors><RequestID>r</RequestID></Response>`))
 			return
 		}
-		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 		_, _ = w.Write([]byte(`<CancelSpotInstanceRequestsResponse ` + ns + `><requestId>r</requestId><spotInstanceRequestSet><item>` +
 			`<spotInstanceRequestId>` + form.Get("SpotInstanceRequestId.1") + `</spotInstanceRequestId><state>cancelled</state></item></spotInstanceRequestSet></CancelSpotInstanceRequestsResponse>`))
 	case "TerminateInstances":
