@@ -39,6 +39,11 @@ type stubProvider struct {
 	// refreshConfigErr, when set, is returned by RefreshConfig — lets tests
 	// simulate a DescribeTags failure (spawn#505).
 	refreshConfigErr error
+
+	// stopErr/hibernateErr make Stop/Hibernate fail, as EC2 does for a one-time
+	// Spot instance (#948); the call counts record every attempt.
+	stopErr, hibernateErr     error
+	stopCalls, hibernateCalls int
 }
 
 func (s *stubProvider) GetIdentity(_ context.Context) (*provider.Identity, error) {
@@ -49,9 +54,23 @@ func (s *stubProvider) GetConfig(_ context.Context) (*provider.Config, error) {
 }
 func (s *stubProvider) RefreshConfig(_ context.Context) error       { return s.refreshConfigErr }
 func (s *stubProvider) Terminate(_ context.Context, _ string) error { s.terminated = true; return nil }
-func (s *stubProvider) Stop(_ context.Context, _ string) error      { s.stopped = true; return nil }
-func (s *stubProvider) Hibernate(_ context.Context) error           { s.hibernated = true; return nil }
-func (s *stubProvider) IsSpotInstance(_ context.Context) bool       { return s.spot }
+func (s *stubProvider) Stop(_ context.Context, _ string) error {
+	s.stopCalls++
+	if s.stopErr != nil {
+		return s.stopErr
+	}
+	s.stopped = true
+	return nil
+}
+func (s *stubProvider) Hibernate(_ context.Context) error {
+	s.hibernateCalls++
+	if s.hibernateErr != nil {
+		return s.hibernateErr
+	}
+	s.hibernated = true
+	return nil
+}
+func (s *stubProvider) IsSpotInstance(_ context.Context) bool { return s.spot }
 func (s *stubProvider) CheckSpotInterruption(_ context.Context) (*provider.InterruptionInfo, error) {
 	return nil, nil
 }

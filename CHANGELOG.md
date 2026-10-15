@@ -475,6 +475,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next reading covered several minutes. The scrape no longer adds a
   `Not idle: ...` line to the log each time, and the `spawn_cpu_usage_percent`
   metric is omitted, not reported as 100%, until the first measurement.
+- **A failed idle stop is no longer repeated every minute** (#948). When EC2
+  refused to stop an idle instance (for example a one-time Spot instance, or
+  a role without `ec2:StopInstances`), spored logged the error and tried
+  again on the next check, once a minute until the TTL. Each attempt sent
+  another `idle_stopped` notification for an instance that was still running,
+  and deleted its DNS name again. Now `idle_stopped` and `idle_hibernated` are
+  sent only after EC2 accepts the request. A failed attempt sends one
+  `idle_stop_failed` notification with the error, and spored retries after 5,
+  10, 20 and 40 minutes, then hourly. When a stop or hibernate fails, spored
+  registers the DNS name and job-array entry again, so the running instance
+  keeps its name. This also applies to `--on-complete stop` and `hibernate`.
+  The pre-stop hook still runs only once.
 
 ## [0.130.0] - 2026-10-16
 

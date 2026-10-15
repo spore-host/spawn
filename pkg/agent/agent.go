@@ -69,6 +69,8 @@ type Agent struct {
 	diskSampled           bool      // prevDiskBytes holds a real sample (#937)
 	diskUnknownWarned     bool      // "disk I/O cannot be measured" logged once, not every tick (#937)
 	idleWarned            bool      // send idle_warning notification only once
+	idleActionFailures    int       // consecutive failed idle stop/hibernate attempts (#948)
+	idleActionRetryAt     time.Time // no idle stop/hibernate attempt before this (#948)
 
 	// idleMu guards idleSnap and lastActivityTime. The monitor loop writes them;
 	// the Prometheus scrape, the spot-interruption goroutine and status read
@@ -133,6 +135,11 @@ type Agent struct {
 	// peerRefreshInterval is the peers-file refresh period. Zero means the
 	// production default (PeerRefreshInterval); tests set it small.
 	peerRefreshInterval time.Duration
+
+	// warnDelay is how long stop/hibernate/terminate wait after warning
+	// logged-in users. Zero means the production default (5s); tests set it
+	// small.
+	warnDelay time.Duration
 
 	// regionVacatedSettle is how long the last-instance check waits before
 	// re-confirming the region is empty (#260). Zero means the production default
@@ -636,19 +643,16 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 			idleTime := time.Since(a.lastActivity())
 
 			if idleTime >= a.config.IdleTimeout {
-				log.Printf("Idle timeout reached (%v)", idleTime)
 
 				// Send event name that reflects the actual action.
 				// Default: stop the instance (compute billing pauses, instance preserved).
 				// --hibernate-on-idle: hibernate instead (RAM saved to disk).
 				// Only TTL causes termination — idle timeout never destroys data.
-				if a.config.HibernateOnIdle {
-					a.notifier.Notify(ctx, "idle_hibernated", "")
-					a.hibernate(ctx, taskproto.ExitIdleTimeout)
-				} else {
-					a.notifier.Notify(ctx, "idle_stopped", "")
-					a.stop(ctx, "Idle timeout", taskproto.ExitIdleTimeout)
-				}
+				//
+				// A failed stop is retried on a backoff, not every tick, and the
+				// "stopped" notification is sent only once EC2 has accepted the
+				// request (#948).
+				a.idleTimeoutReached(ctx, time.Now())
 				return
 			}
 
@@ -1813,9 +1817,9 @@ func (a *Agent) checkCompletion(ctx context.Context) bool {
 		case "terminate":
 			a.terminate(ctx, "Completion signal received", taskproto.ExitCompleted)
 		case "stop":
-			a.stop(ctx, "Completion signal received", taskproto.ExitCompleted)
+			_ = a.stop(ctx, "Completion signal received", taskproto.ExitCompleted)
 		case "hibernate":
-			a.hibernate(ctx, taskproto.ExitCompleted)
+			_ = a.hibernate(ctx, taskproto.ExitCompleted)
 		case "exit":
 			// For local provider - just exit
 			log.Printf("Exiting on completion signal")
@@ -1832,7 +1836,98 @@ func (a *Agent) checkCompletion(ctx context.Context) bool {
 	return false
 }
 
-func (a *Agent) stop(ctx context.Context, reason string, why taskproto.ExitReason) {
+func (a *Agent) shutdownWarnDelay() time.Duration {
+	if a.warnDelay > 0 {
+		return a.warnDelay
+	}
+	return 5 * time.Second
+}
+
+// idleActionRetryBase and idleActionRetryMax bound the backoff between
+// attempts at a failed idle stop or hibernate (#948).
+const (
+	idleActionRetryBase = 5 * time.Minute
+	idleActionRetryMax  = time.Hour
+)
+
+// idleActionRetryDelay is how long to wait after the n-th consecutive failure
+// (n >= 1): 5, 10, 20, 40 minutes, then hourly.
+func idleActionRetryDelay(failures int) time.Duration {
+	d := idleActionRetryBase
+	for i := 1; i < failures && d < idleActionRetryMax; i++ {
+		d *= 2
+	}
+	if d > idleActionRetryMax {
+		d = idleActionRetryMax
+	}
+	return d
+}
+
+// idleTimeoutReached stops or hibernates the instance once the idle timeout has
+// passed, unless a previous attempt failed and its backoff has not run out.
+//
+// Before #948 a failed stop was simply logged, so the next tick, still idle and
+// still past the timeout, ran the whole sequence again: once a minute until TTL,
+// each time announcing `idle_stopped` for an instance that kept running and
+// deleting its DNS name again. The common cause is permanent (a one-time Spot
+// instance cannot be stopped; a role without ec2:StopInstances), so a retry
+// every minute buys nothing. A transient failure (throttling) is retried soon
+// enough by the backoff.
+func (a *Agent) idleTimeoutReached(ctx context.Context, now time.Time) {
+	if now.Before(a.idleActionRetryAt) {
+		return // backing off after a failed attempt; logged when it failed
+	}
+	log.Printf("Idle timeout reached (%v)", now.Sub(a.lastActivity()))
+
+	action, event := "stop", "idle_stopped"
+	var err error
+	if a.config.HibernateOnIdle {
+		action, event = "hibernate", "idle_hibernated"
+		err = a.hibernate(ctx, taskproto.ExitIdleTimeout)
+	} else {
+		err = a.stop(ctx, "Idle timeout", taskproto.ExitIdleTimeout)
+	}
+	if err == nil {
+		a.idleActionFailures = 0
+		a.notifier.Notify(ctx, event, "")
+		return
+	}
+
+	a.idleActionFailures++
+	delay := idleActionRetryDelay(a.idleActionFailures)
+	a.idleActionRetryAt = now.Add(delay)
+	log.Printf("Idle %s failed (attempt %d): %v; the instance is still running, "+
+		"next attempt in %v", action, a.idleActionFailures, err, delay)
+	if a.idleActionFailures == 1 {
+		// Once, not on every attempt: the first failure is the news.
+		a.notifier.Notify(ctx, "idle_stop_failed",
+			fmt.Sprintf("idle %s failed, instance still running; retrying with backoff: %v", action, err))
+	}
+}
+
+// restoreAfterFailedStop puts back what Cleanup removed when the stop or
+// hibernate it prepared for did not happen, so a running instance keeps its DNS
+// name and its job-array registration (#948). Cleanup runs before the EC2 call
+// because a hibernating guest is frozen, not shut down, and gets no later
+// chance to deregister.
+func (a *Agent) restoreAfterFailedStop(ctx context.Context) {
+	if a.registry != nil && a.config.JobArrayID != "" {
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := a.registry.Register(rctx, a.config.JobArrayID, a.config.JobArrayIndex); err != nil {
+			log.Printf("Warning: failed to re-register with hybrid registry after a failed stop: %v", err)
+		}
+		cancel()
+	}
+	// The lease renewal is the registration path; making it due now re-registers
+	// the record Cleanup deleted, and keeps spawn:dns-status honest if it fails.
+	a.nextDNSRefresh = time.Time{}
+	a.refreshDNSLease(ctx)
+}
+
+// stop runs the pre-stop hook and cleanup, then asks the provider to stop the
+// instance. It returns the provider's error; on failure the DNS name and
+// registry entry are restored, since the instance is still running (#948).
+func (a *Agent) stop(ctx context.Context, reason string, why taskproto.ExitReason) error {
 	log.Printf("Stopping instance (reason: %s)", reason)
 
 	a.runPreStop(false, why)
@@ -1845,15 +1940,18 @@ func (a *Agent) stop(ctx context.Context, reason string, why taskproto.ExitReaso
 	}))
 
 	// Wait a moment for users to see warning
-	time.Sleep(5 * time.Second)
+	time.Sleep(a.shutdownWarnDelay())
 
 	err := a.provider.Stop(ctx, reason)
 	if err != nil {
 		log.Printf("Failed to stop instance: %v", err)
+		a.restoreAfterFailedStop(ctx)
 	}
+	return err
 }
 
-func (a *Agent) hibernate(ctx context.Context, why taskproto.ExitReason) {
+// hibernate is stop's twin for --hibernate-on-idle and on-complete hibernate.
+func (a *Agent) hibernate(ctx context.Context, why taskproto.ExitReason) error {
 	log.Printf("Hibernating instance")
 
 	a.runPreStop(false, why)
@@ -1864,12 +1962,14 @@ func (a *Agent) hibernate(ctx context.Context, why taskproto.ExitReason) {
 	a.warnUsers(i18n.T("spawn.agent.hibernating"))
 
 	// Wait a moment for users to see warning
-	time.Sleep(5 * time.Second)
+	time.Sleep(a.shutdownWarnDelay())
 
 	err := a.provider.Hibernate(ctx)
 	if err != nil {
 		log.Printf("Failed to hibernate: %v", err)
+		a.restoreAfterFailedStop(ctx)
 	}
+	return err
 }
 
 // Cleanup performs cleanup tasks before shutdown (plugins, DNS, registry).
@@ -2076,7 +2176,7 @@ func (a *Agent) terminate(ctx context.Context, reason string, why taskproto.Exit
 	}))
 
 	// Wait a moment for users to see warning
-	time.Sleep(5 * time.Second)
+	time.Sleep(a.shutdownWarnDelay())
 
 	// Last-instance check: if no other spawn-managed instances remain running in
 	// this region, notify that the region is vacated (#260). Notify-only by

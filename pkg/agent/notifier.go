@@ -55,6 +55,10 @@ type Notifier struct {
 	originalInstanceID string
 	imdsClient         *imds.Client
 	httpClient         *http.Client
+
+	// record, when set, receives each event synchronously instead of it being
+	// sent. Tests only.
+	record func(eventType, detail string)
 }
 
 // NewNotifier creates a Notifier from the agent config and provider identity.
@@ -111,7 +115,14 @@ func (n *Notifier) WithOriginalInstance(id string) *Notifier {
 // Notify sends a lifecycle event notification asynchronously.
 // Safe to call on a nil Notifier.
 func (n *Notifier) Notify(ctx context.Context, eventType, detail string) {
-	if n == nil || n.notifyURL == "" {
+	if n == nil {
+		return
+	}
+	if n.record != nil {
+		n.record(eventType, detail)
+		return
+	}
+	if n.notifyURL == "" {
 		return
 	}
 	// Fire-and-forget — use a fresh context so the goroutine isn't cancelled
