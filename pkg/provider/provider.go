@@ -145,6 +145,13 @@ type Config struct {
 	JobArrayIndex int
 	JobArraySize  int
 
+	// Burst is set from the spawn:burst=true tag, which only `spawn burst` writes
+	// (cmd/burst.go). It marks an EC2 instance launched to join a hybrid job array
+	// alongside local nodes — the one kind of EC2 job-array member that registers
+	// with the hybrid registry (#904). An ordinary `spawn launch --count`/`--mpi`
+	// member carries spawn:job-array-id but not this tag.
+	Burst bool
+
 	// Plugin declarations to install at instance startup.
 	Plugins []PluginDeclaration
 

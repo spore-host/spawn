@@ -140,6 +140,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gave UTC and the termination deadline gave local time for the same moment.
   spored's UTC timestamps are re-rendered to match, and so is the
   lifecycle-mismatch warning.
+### Fixed
+
+- **Only hybrid job-array members register with the hybrid registry** (#904).
+  spored registered every instance carrying `spawn:job-array-id` with the
+  `spawn-hybrid-registry` DynamoDB table, so every ordinary `spawn launch
+  --count` / `--mpi` member logged `Failed to register with hybrid registry`
+  on boot: the instance role grants no DynamoDB access, and the table only
+  exists where `spawn burst` has run. Nothing reads the registry for those
+  arrays — EC2 peer discovery uses tags, and MPI peers come from the cohort
+  control plane. spored now registers (and heartbeats and deregisters) only
+  local nodes and instances launched by `spawn burst` (tagged
+  `spawn:burst=true`); other members log that the registry was skipped. Peer
+  discovery is unchanged.
 
 ## [0.128.2] - 2026-10-13
 

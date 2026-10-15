@@ -395,3 +395,20 @@ func TestBuildTags_CompletionFileRequiresOnComplete(t *testing.T) {
 		}
 	})
 }
+
+// An ordinary `spawn launch --count`/`--mpi` job-array member carries
+// spawn:job-array-id but never spawn:burst — that tag is what tells spored the
+// member is hybrid and should register with the hybrid registry, and only
+// `spawn burst` sets it (#904).
+func TestBuildTags_JobArrayMemberIsNotTaggedBurst(t *testing.T) {
+	config := LaunchConfig{Name: "w-0", JobArrayID: "ja-1", JobArrayName: "w", JobArraySize: 2}
+	tags := buildTags(config, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	if got := findTagValue(tags, "spawn:job-array-id"); got != "ja-1" {
+		t.Fatalf("spawn:job-array-id = %q, want ja-1", got)
+	}
+	for _, tag := range tags {
+		if tag.Key != nil && *tag.Key == "spawn:burst" {
+			t.Fatalf("a spawn launch job-array member is tagged spawn:burst=%q; spored would register it with the hybrid registry", *tag.Value)
+		}
+	}
+}

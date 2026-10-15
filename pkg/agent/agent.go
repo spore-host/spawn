@@ -135,6 +135,33 @@ func (a *Agent) setConfig(c *provider.Config) {
 	a.configMu.Unlock()
 }
 
+// newPeerRegistry builds the hybrid-registry client. A variable so tests can
+// observe whether activation reached it without touching DynamoDB.
+var newPeerRegistry = registry.NewPeerRegistry
+
+// joinsHybridRegistry reports whether this instance registers with the hybrid
+// registry (the spawn-hybrid-registry DynamoDB table): only a member of a hybrid
+// job array does (#904).
+//
+// A hybrid member is either a local node (the local provider — its
+// DiscoverPeers reads the registry to find the other members), or an EC2
+// instance `spawn burst` launched to join one, which it marks spawn:burst=true.
+// `spawn burst` is also the only thing that creates the table
+// (registry.EnsureTable).
+//
+// spawn:job-array-id alone is not enough: buildJobArrayMemberConfig puts it on
+// every `spawn launch --count` member, MPI or not. Nothing reads the registry
+// for those arrays — EC2 peer discovery uses tags, and MPI peers come from the
+// cohort Assembler — while registering failed on every member (the instance
+// role grants no DynamoDB actions, and the table exists only where burst has
+// run), leaving a warning and heartbeat noise on every boot.
+func joinsHybridRegistry(identity *provider.Identity, config *provider.Config) bool {
+	if identity == nil || config == nil || config.JobArrayID == "" {
+		return false
+	}
+	return identity.Provider == "local" || config.Burst
+}
+
 // NewAgent builds the agent AND activates it: initialization logging, the EBS
 // cost lookup, DNS registration, job-array registry registration with its
 // heartbeat, peer discovery, and plugin loading. This is what the DAEMON wants.
@@ -306,9 +333,9 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 		log.Printf("DNS registration skipped: no DNS name configured (no spawn:dns-name tag on the instance)")
 	}
 
-	// Initialize hybrid registry if part of a job array
-	if activate && config.JobArrayID != "" {
-		reg, err := registry.NewPeerRegistry(ctx, identity)
+	// Initialize hybrid registry if this is a hybrid job-array member (#904)
+	if activate && joinsHybridRegistry(identity, config) {
+		reg, err := newPeerRegistry(ctx, identity)
 		if err != nil {
 			log.Printf("Warning: Failed to initialize registry: %v (continuing without hybrid mode)", err)
 		} else {
@@ -325,7 +352,12 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 					config.JobArrayID, identity.Provider)
 			}
 		}
+	} else if activate && config.JobArrayID != "" {
+		log.Printf("Hybrid registry skipped: job array %s is not hybrid (no spawn:burst tag, not a local node)",
+			config.JobArrayID)
+	}
 
+	if activate && config.JobArrayID != "" {
 		// Discover peers
 		peers, err := prov.DiscoverPeers(ctx, config.JobArrayID)
 		if err != nil {

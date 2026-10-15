@@ -612,6 +612,8 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			if index, err := strconv.Atoi(*tag.Value); err == nil {
 				config.JobArrayIndex = index
 			}
+		case tagprefix.Tag("burst"):
+			config.Burst = *tag.Value == "true"
 
 		// Observability - Metrics
 		case tagprefix.Tag("metrics-enabled"):
