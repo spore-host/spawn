@@ -1,0 +1,31 @@
+# Notification event types spored sends to spore-bot's POST /notify.
+#
+# SOURCE OF TRUTH: spore-host/spawn, every `a.notifier.Notify(ctx, "<event>", ...)`
+# call (pkg/agent/agent.go, pkg/agent/fsx_mount.go; Notifier is in
+# pkg/agent/notifier.go). Find them with:
+#
+#   git -C <spawn> grep -nE 'Notify\([^,]+, *"' -- '*.go'
+#
+# plus any event chosen by variable (idle_stopped/idle_hibernated in
+# idleTimeoutReached). When spawn adds an event, add it here AND give it an
+# explicit case in formatNotification (notify.go), buildDiscordEmbed
+# (discord.go) and twilioMessage (sms_notify.go); TestSporedEventsHandled fails
+# until all three agree with this list. To check this list against a spawn
+# checkout: SPAWN_SRC=/path/to/spawn go test -run TestSporedEventsMatchSpawn .
+#
+# One event per line; '#' starts a comment.
+
+ttl_warning
+ttl_expired
+idle_warning
+idle_stopped
+idle_hibernated
+idle_stop_failed   # spawn#948 / spawn PR #977 (spore-host#558)
+completion
+spot_interrupt
+pre_stop_start
+pre_stop_failed
+pre_stop_timeout
+region_vacated     # spawn#260
+fsx_mount_failed
+fsx_dra_failed     # spawn#194, #622
