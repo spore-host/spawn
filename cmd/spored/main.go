@@ -482,6 +482,77 @@ type statusReport struct {
 	DiskMeasured    bool   `json:"disk_measured"`
 	DiskUnknown     string `json:"disk_unknown,omitempty"`
 	PreStopHook     string `json:"pre_stop_hook,omitempty"`
+
+	// Peers is the job-array peers file, for a job-array member only (#933).
+	Peers *statusPeers `json:"peers,omitempty"`
+}
+
+// statusPeers reports the peers file a job-array member's workload reads
+// (provider.JobArrayPeersFile). `spored status` runs in its own process, so it
+// reads the file the daemon wrote rather than the daemon's memory; the file's
+// modification time is when the daemon last confirmed the list.
+type statusPeers struct {
+	JobArrayID string `json:"job_array_id"`
+	File       string `json:"file"`
+	// MaintainedBySpored is true for a hybrid member (burst or local node),
+	// whose file spored rewrites every RefreshIntervalSeconds. For --mpi the
+	// cohort Assembler writes it once, at assembly.
+	MaintainedBySpored     bool    `json:"maintained_by_spored"`
+	RefreshIntervalSeconds float64 `json:"refresh_interval_seconds,omitempty"`
+
+	Count      int                 `json:"count"`
+	Peers      []provider.PeerInfo `json:"peers"`
+	UpdatedAt  *time.Time          `json:"updated_at,omitempty"`
+	AgeSeconds float64             `json:"age_seconds,omitempty"`
+	// Stale is true when spored maintains the file but has not rewritten it
+	// for three refresh intervals: discovery or the write is failing, and the
+	// list may be missing members that joined or still list ones that left.
+	Stale bool `json:"stale"`
+	// Error is why the file could not be read (for example, not written yet).
+	Error string `json:"error,omitempty"`
+}
+
+// peersStaleAfter is how many missed refreshes make a spored-maintained peers
+// file stale.
+const peersStaleAfter = 3
+
+// buildPeersStatus reads the peers file at path. maintained says whether spored
+// rewrites it every interval.
+func buildPeersStatus(jobArrayID, path string, maintained bool, interval time.Duration, now time.Time) *statusPeers {
+	st := &statusPeers{
+		JobArrayID:         jobArrayID,
+		File:               path,
+		MaintainedBySpored: maintained,
+		Peers:              []provider.PeerInfo{},
+	}
+	if maintained {
+		st.RefreshIntervalSeconds = interval.Seconds()
+	}
+	peers, updated, err := provider.ReadPeersFile(path)
+	if !updated.IsZero() {
+		u := updated.UTC()
+		st.UpdatedAt = &u
+		st.AgeSeconds = now.Sub(updated).Seconds()
+		if st.AgeSeconds < 0 {
+			st.AgeSeconds = 0
+		}
+		st.Stale = maintained && now.Sub(updated) > peersStaleAfter*interval
+	}
+	switch {
+	case os.IsNotExist(err) && maintained:
+		st.Error = "not written yet"
+	case os.IsNotExist(err):
+		st.Error = "no peers file: spored writes one only for hybrid (burst or local) members, and spawn launch --mpi at assembly"
+	case err != nil:
+		st.Error = err.Error()
+	default:
+		st.Peers = peers
+		if st.Peers == nil {
+			st.Peers = []provider.PeerInfo{}
+		}
+	}
+	st.Count = len(st.Peers)
+	return st
 }
 
 type statusTTL struct {
@@ -748,6 +819,11 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		Action:          config.OnComplete,
 		CompletionFile:  config.CompletionFile,
 		SentinelPresent: completionFileExists,
+	}
+
+	if config.JobArrayID != "" {
+		report.Peers = buildPeersStatus(config.JobArrayID, ag.PeersFilePath(), ag.MaintainsPeersFile(),
+			agent.PeerRefreshInterval, time.Now())
 	}
 
 	if rate, basis := statusComputeRate(config, isSpot); rate > 0 {
@@ -1055,8 +1131,40 @@ func renderStatusTable(report *statusReport) error {
 	if report.PreStopHook != "" {
 		fmt.Printf("  Pre-stop hook:    %s\n", report.PreStopHook)
 	}
+	if report.Peers != nil {
+		renderPeersTable(report.Peers)
+	}
 	fmt.Println()
 	return nil
+}
+
+// renderPeersTable prints the job-array peers section of `spored status`.
+func renderPeersTable(p *statusPeers) {
+	fmt.Println()
+	fmt.Printf("  Job array:        %s\n", p.JobArrayID)
+	if p.Error != "" {
+		fmt.Printf("  Peers:            unknown — %s (%s)\n", p.Error, p.File)
+		return
+	}
+	line := fmt.Sprintf("  Peers:            %d in %s", p.Count, p.File)
+	if p.UpdatedAt != nil {
+		line += fmt.Sprintf("  (updated %s ago", formatDuration(time.Duration(p.AgeSeconds*float64(time.Second))))
+		if p.MaintainedBySpored {
+			line += fmt.Sprintf(", refreshed every %s", formatDuration(time.Duration(p.RefreshIntervalSeconds*float64(time.Second))))
+		}
+		line += ")"
+	}
+	fmt.Println(line)
+	if p.Stale {
+		fmt.Println("  ⚠️  Peer list is stale: spored has not refreshed it for several intervals; see the spored log")
+	}
+	for _, peer := range p.Peers {
+		addr := peer.IP
+		if peer.DNS != "" {
+			addr += "  " + peer.DNS
+		}
+		fmt.Printf("    [%d] %-20s %-6s %s\n", peer.Index, peer.InstanceID, peer.Provider, addr)
+	}
 }
 
 // exitCheckComplete inspects the completion file and exits with the standardized

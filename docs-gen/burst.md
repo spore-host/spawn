@@ -6,6 +6,11 @@ and coordinate with local instances to process workloads.
 This enables "cloud bursting" where local compute capacity can be
 extended with on-demand cloud resources.
 
+On each instance, spored writes the job array's live members (the other burst
+instances and the local nodes) to /etc/spawn/job-array-peers.json, a JSON
+array of {index, instance_id, ip, dns, provider}, and rewrites it every minute
+so members that join later appear. spored status shows the list and its age.
+
 Every instance gets a TTL (--ttl, default 8h) and terminates when it expires.
 
 Each instance installs and verifies spored at boot, the same way spawn launch
