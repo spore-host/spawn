@@ -14,6 +14,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed, and the root and `lambda/dashboard-api` modules are tidied (drops the
   orphaned `robfig/cron` and an unused SQS SDK requirement). `make check` and CI now
   fail when any module, root or nested, is not tidy (#907).
+### Added
+
+- **`spawn --version`** (spore-host/truffle#189). It was rejected as an unknown
+  flag; it now prints the same version, commit and build date as
+  `spawn version` (without the network update check, so scripts can probe the
+  binary offline).
+- **`spawn list -o json` reports `ttl_deadline` and `ttl_remaining_seconds`**
+  (#898) beside the existing `ttl`, which keeps meaning the configured TTL.
+  `ttl_remaining_seconds` is `null` when there is no deadline or the instance is
+  already terminated, and `0` once the deadline has passed.
+
+### Changed
+
+- **`spawn list`'s TTL column shows the time left, not the configured TTL**
+  (#898). A `--ttl 1h` instance seven minutes old now reads `53m` rather than
+  `1h` for its whole life. The deadline is the one `spawn status` reports (the
+  `spawn:ttl-deadline` tag, so `spawn extend` is reflected, else launch time +
+  TTL); `none` means no TTL, `expired` means the deadline has passed, `-` a
+  terminated instance.
+
+### Fixed
+
+- **No colour escapes when stdout is not a terminal** (#898). `spawn list | cat`
+  and `spawn list > file` wrote raw `\x1b[32m` sequences because only
+  `--no-color` turned colour off. Colour is now also off when stdout is a pipe or
+  file, when `NO_COLOR` is set, or when `TERM=dumb`. `--no-color` still works.
 
 ## [0.128.2] - 2026-10-13
 

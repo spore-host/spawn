@@ -47,12 +47,7 @@ var versionCmd = &cobra.Command{
 	Long:  `Display version, build date, and git commit information for spawn.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		v := version()
-		commit, date := versionDetail()
-		fmt.Printf("🌱 Spawn - EC2 Instance Lifecycle Manager\n\n")
-		fmt.Printf("Version:    %s\n", v)
-		fmt.Printf("Git Commit: %s\n", commit)
-		fmt.Printf("Build Date: %s\n", date)
-		fmt.Printf("\nProject:    https://spore.host\n")
+		fmt.Print(versionText())
 
 		// Explicit, user-initiated check — report whether a newer release exists.
 		// CheckNow is synchronous and ungated (unlike the incidental CheckAsync
@@ -65,6 +60,21 @@ var versionCmd = &cobra.Command{
 		}
 		fmt.Print(renderUpdateNotice(res, v))
 	},
+}
+
+// versionText is the version block shared by `spawn version` and
+// `spawn --version`, so the two can never report different things. Only the
+// subcommand adds the network update check after it: a flag that is often run
+// by scripts to probe the binary should not make a request to GitHub.
+func versionText() string {
+	commit, date := versionDetail()
+	var b strings.Builder
+	fmt.Fprintf(&b, "🌱 Spawn - EC2 Instance Lifecycle Manager\n\n")
+	fmt.Fprintf(&b, "Version:    %s\n", version())
+	fmt.Fprintf(&b, "Git Commit: %s\n", commit)
+	fmt.Fprintf(&b, "Build Date: %s\n", date)
+	fmt.Fprintf(&b, "\nProject:    https://spore.host\n")
+	return b.String()
 }
 
 // renderUpdateNotice formats the on-demand update check for the version command:
@@ -92,4 +102,17 @@ func renderUpdateNotice(res *update.Result, current string) string {
 
 func init() {
 	rootCmd.AddCommand(versionCmd)
+
+	// `spawn --version` (spore-host/truffle#189). Setting Version is what makes
+	// cobra register the flag; the template replaces cobra's default
+	// "spawn version X" line with the same block `spawn version` prints. The
+	// template text is computed here, once, which is fine: nothing about the
+	// binary's version changes while it runs.
+	rootCmd.Version = version()
+	rootCmd.SetVersionTemplate(versionTemplateEscape(versionText()))
+}
+
+// versionTemplateEscape makes literal text safe to use as a text/template.
+func versionTemplateEscape(s string) string {
+	return strings.NewReplacer("{{", `{{"{{"}}`).Replace(s)
 }

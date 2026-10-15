@@ -155,7 +155,7 @@ func outputTable(instances []aws.InstanceInfo) error {
 
 // displayParameterSweeps shows all parameter sweeps with stats and instances
 func displayParameterSweeps(sweeps map[string][]aws.InstanceInfo) {
-	if flagNoColor || flagAccessibility {
+	if !colorEnabled() {
 		fmt.Println("Parameter Sweeps:")
 	} else {
 		fmt.Println("\033[1mParameter Sweeps:\033[0m")
@@ -198,7 +198,7 @@ func displayParameterSweeps(sweeps map[string][]aws.InstanceInfo) {
 
 // displayStandaloneJobArrays shows standalone job arrays (not part of a sweep)
 func displayStandaloneJobArrays(jobArrays map[string][]aws.InstanceInfo) {
-	if flagNoColor || flagAccessibility {
+	if !colorEnabled() {
 		fmt.Println("Job Arrays:")
 	} else {
 		fmt.Println("\033[1mJob Arrays:\033[0m")
@@ -242,7 +242,7 @@ func displayStandaloneJobArrays(jobArrays map[string][]aws.InstanceInfo) {
 // displayStandaloneInstances shows standalone instances (not part of sweep or job array)
 func displayStandaloneInstances(instances []aws.InstanceInfo, hasOtherGroups bool) {
 	if hasOtherGroups {
-		if flagNoColor || flagAccessibility {
+		if !colorEnabled() {
 			fmt.Println("Standalone Instances:")
 		} else {
 			fmt.Println("\033[1mStandalone Instances:\033[0m")
@@ -268,10 +268,7 @@ func displayStandaloneInstances(instances []aws.InstanceInfo, hasOtherGroups boo
 
 	for _, inst := range instances {
 		age := formatDuration(time.Since(inst.LaunchTime))
-		ttl := inst.TTL
-		if ttl == "" {
-			ttl = "none"
-		}
+		ttl := ttlRemaining(inst, time.Now())
 		name := inst.Name
 		if name == "" {
 			name = "-"
@@ -409,7 +406,7 @@ func displayInstance(inst aws.InstanceInfo, prefix string) {
 }
 
 func colorizeState(state string) string {
-	if flagNoColor || flagAccessibility {
+	if !colorEnabled() {
 		return state
 	}
 	switch state {
@@ -429,31 +426,34 @@ func colorizeState(state string) string {
 func outputJSON(instances []aws.InstanceInfo) error {
 	// Build JSON objects for each instance
 	output := make([]map[string]interface{}, len(instances))
+	now := time.Now()
 	for i, inst := range instances {
 		obj := map[string]interface{}{
-			"instance_id":       inst.InstanceID,
-			"name":              inst.Name,
-			"instance_type":     inst.InstanceType,
-			"state":             inst.State,
-			"region":            inst.Region,
-			"availability_zone": inst.AvailabilityZone,
-			"public_ip":         inst.PublicIP,
-			"private_ip":        inst.PrivateIP,
-			"launch_time":       inst.LaunchTime.Format(time.RFC3339),
-			"ttl":               inst.TTL,
-			"idle_timeout":      inst.IdleTimeout,
-			"key_name":          inst.KeyName,
-			"spot":              inst.SpotInstance,
-			"iam_role":          inst.IAMRole,
-			"job_array_id":      inst.JobArrayID,
-			"job_array_name":    inst.JobArrayName,
-			"job_array_index":   inst.JobArrayIndex,
-			"job_array_size":    inst.JobArraySize,
-			"sweep_id":          inst.SweepID,
-			"sweep_name":        inst.SweepName,
-			"sweep_index":       inst.SweepIndex,
-			"sweep_size":        inst.SweepSize,
-			"parameters":        inst.Parameters,
+			"instance_id":           inst.InstanceID,
+			"name":                  inst.Name,
+			"instance_type":         inst.InstanceType,
+			"state":                 inst.State,
+			"region":                inst.Region,
+			"availability_zone":     inst.AvailabilityZone,
+			"public_ip":             inst.PublicIP,
+			"private_ip":            inst.PrivateIP,
+			"launch_time":           inst.LaunchTime.Format(time.RFC3339),
+			"ttl":                   inst.TTL,
+			"ttl_deadline":          deadlineRFC3339(inst),
+			"ttl_remaining_seconds": ttlRemainingSeconds(inst, now),
+			"idle_timeout":          inst.IdleTimeout,
+			"key_name":              inst.KeyName,
+			"spot":                  inst.SpotInstance,
+			"iam_role":              inst.IAMRole,
+			"job_array_id":          inst.JobArrayID,
+			"job_array_name":        inst.JobArrayName,
+			"job_array_index":       inst.JobArrayIndex,
+			"job_array_size":        inst.JobArraySize,
+			"sweep_id":              inst.SweepID,
+			"sweep_name":            inst.SweepName,
+			"sweep_index":           inst.SweepIndex,
+			"sweep_size":            inst.SweepSize,
+			"parameters":            inst.Parameters,
 		}
 		output[i] = obj
 	}
@@ -466,6 +466,58 @@ func outputJSON(instances []aws.InstanceInfo) error {
 
 	fmt.Println(string(jsonBytes))
 	return nil
+}
+
+// ttlRemaining is the TTL column of `spawn list`: the time left before the
+// instance's hard termination deadline, not the TTL it was launched with. An
+// instance launched with --ttl 1h shows "1h" for its whole life under the
+// configured value, which answers the wrong question for a list you scan to see
+// what is about to go (#898). The deadline is resolved exactly as `spawn status`
+// resolves it (lifecycleDeadline): the spawn:ttl-deadline tag, which `spawn
+// extend` moves, else launch time + TTL.
+func ttlRemaining(inst aws.InstanceInfo, now time.Time) string {
+	switch inst.State {
+	case "terminated", "shutting-down":
+		return "-"
+	}
+	deadline, ok := lifecycleDeadline(&inst)
+	if !ok {
+		return "none"
+	}
+	left := deadline.Sub(now)
+	if left <= 0 {
+		return "expired"
+	}
+	return formatDuration(left)
+}
+
+// deadlineRFC3339 is the resolved termination deadline for JSON output, or ""
+// when there is none.
+func deadlineRFC3339(inst aws.InstanceInfo) string {
+	deadline, ok := lifecycleDeadline(&inst)
+	if !ok {
+		return ""
+	}
+	return deadline.UTC().Format(time.RFC3339)
+}
+
+// ttlRemainingSeconds is the time left before the deadline in whole seconds for
+// JSON output: nil (null) when there is no deadline or the instance is already
+// gone, 0 once the deadline has passed.
+func ttlRemainingSeconds(inst aws.InstanceInfo, now time.Time) interface{} {
+	switch inst.State {
+	case "terminated", "shutting-down":
+		return nil
+	}
+	deadline, ok := lifecycleDeadline(&inst)
+	if !ok {
+		return nil
+	}
+	left := deadline.Sub(now)
+	if left < 0 {
+		left = 0
+	}
+	return int64(left / time.Second)
 }
 
 func formatDuration(d time.Duration) string {

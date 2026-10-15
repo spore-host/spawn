@@ -178,3 +178,22 @@ func TestReleaseGuardRunsOnRelease(t *testing.T) {
 func restore(p *string, old string) func() {
 	return func() { *p = old }
 }
+
+// TestRootVersionFlagMatchesVersionCommand: `spawn --version` must work (it was
+// "unknown flag") and print the same block as `spawn version`
+// (spore-host/truffle#189).
+func TestRootVersionFlagMatchesVersionCommand(t *testing.T) {
+	var buf strings.Builder
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"--version"})
+	t.Cleanup(func() { rootCmd.SetOut(nil); rootCmd.SetArgs(nil) })
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("spawn --version: %v", err)
+	}
+	if got, want := buf.String(), versionText(); got != want {
+		t.Errorf("spawn --version printed\n%q\nwant the `spawn version` block\n%q", got, want)
+	}
+	if !strings.Contains(buf.String(), "Version:    "+version()) {
+		t.Errorf("spawn --version does not report version %q: %q", version(), buf.String())
+	}
+}
