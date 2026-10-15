@@ -32,23 +32,32 @@ type StagingMetadata struct {
 
 // Client handles data staging operations
 type Client struct {
-	s3Client     *s3.Client
+	cfg          aws.Config
 	dynamoClient *dynamodb.Client
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	uploader  *manager.Uploader
-	accountID string
+	accountID    string
 }
 
-// NewClient creates a new staging client
+// NewClient creates a new staging client. cfg supplies credentials; its region
+// does not choose where schedule buckets live (see s3For).
 func NewClient(cfg aws.Config, accountID string) *Client {
-	s3Client := s3.NewFromConfig(cfg)
 	return &Client{
-		s3Client:     s3Client,
+		cfg:          cfg,
 		dynamoClient: dynamodb.NewFromConfig(cfg),
-		//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-		uploader:  manager.NewUploader(s3Client),
-		accountID: accountID,
+		accountID:    accountID,
 	}
+}
+
+// s3For returns an S3 client for a bucket in region.
+//
+// The schedule buckets are per region (spawn-schedules-<region>), but the
+// caller's config is not: `spawn schedule create` loads the infra config in
+// us-east-1 whatever --region says. Sent from a client in the wrong region,
+// HeadBucket on an existing bucket elsewhere gets a 301, PutObject gets
+// PermanentRedirect, and CreateBucket with a LocationConstraint that differs
+// from the endpoint's region is rejected (IllegalLocationConstraintException).
+// So every S3 call here goes through a client in the bucket's own region.
+func (c *Client) s3For(region string) *s3.Client {
+	return s3.NewFromConfig(c.cfg, func(o *s3.Options) { o.Region = region })
 }
 
 // resolveSchedulesBucket returns the S3 bucket name to use for schedules in this account.
@@ -70,7 +79,8 @@ func (c *Client) resolveSchedulesBucket(ctx context.Context, region string) (str
 // ensureBucket ensures a single named bucket exists; returns the name if it does (or was created).
 // Returns an error if the bucket is owned by another account or creation fails.
 func (c *Client) ensureBucket(ctx context.Context, bucket, region string) (string, error) {
-	_, err := c.s3Client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
+	s3Client := c.s3For(region)
+	_, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
 	if err == nil {
 		return bucket, nil // already exists in our account
 	}
@@ -82,7 +92,7 @@ func (c *Client) ensureBucket(ctx context.Context, bucket, region string) (strin
 			LocationConstraint: s3types.BucketLocationConstraint(region),
 		}
 	}
-	if _, createErr := c.s3Client.CreateBucket(ctx, input); createErr != nil {
+	if _, createErr := s3Client.CreateBucket(ctx, input); createErr != nil {
 		if strings.Contains(createErr.Error(), "BucketAlreadyOwnedByYou") {
 			return bucket, nil // we own it
 		}
@@ -90,7 +100,7 @@ func (c *Client) ensureBucket(ctx context.Context, bucket, region string) (strin
 	}
 
 	// Block public access
-	c.s3Client.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{ //nolint:errcheck
+	s3Client.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{ //nolint:errcheck
 		Bucket: aws.String(bucket),
 		PublicAccessBlockConfiguration: &s3types.PublicAccessBlockConfiguration{
 			BlockPublicAcls:       aws.Bool(true),
@@ -102,7 +112,7 @@ func (c *Client) ensureBucket(ctx context.Context, bucket, region string) (strin
 
 	// 7-day lifecycle rule — queue configs are ephemeral
 	expireDays := int32(7)
-	_, err = c.s3Client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+	_, err = s3Client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
 		Bucket: aws.String(bucket),
 		LifecycleConfiguration: &s3types.BucketLifecycleConfiguration{
 			Rules: []s3types.LifecycleRule{
@@ -122,9 +132,9 @@ func (c *Client) ensureBucket(ctx context.Context, bucket, region string) (strin
 	return bucket, err
 }
 
-// UploadScheduleParams uploads a parameter file for scheduled execution.
-// The destination bucket is resolved (and created) on demand.
-// UploadScheduleParams uploads a parameter file for scheduled execution.
+// UploadScheduleParams uploads a parameter file for scheduled execution to the
+// schedules bucket in region, which is resolved (and created) on demand. The
+// upload uses a client in region, not the caller's config region.
 // Returns (bucket, s3Key, size, sha256, error).
 func (c *Client) UploadScheduleParams(ctx context.Context, localPath, scheduleID, region string) (string, string, int64, string, error) {
 	bucket, err := c.resolveSchedulesBucket(ctx, region)
@@ -155,7 +165,7 @@ func (c *Client) UploadScheduleParams(ctx context.Context, localPath, scheduleID
 
 	// Upload to S3
 	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	_, err = c.uploader.Upload(ctx, &s3.PutObjectInput{
+	_, err = manager.NewUploader(c.s3For(region)).Upload(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(s3Key),
 		Body:   file,

@@ -105,7 +105,11 @@ func (v *Validator) validateDynamoDBTables(ctx context.Context, result *Validati
 }
 
 func (v *Validator) validateS3Buckets(ctx context.Context, result *ValidationResult) {
-	client := s3.NewFromConfig(v.awsCfg)
+	// The buckets are named for the resolver's region (spawn-binaries-<region>),
+	// which is --region, not necessarily the config's ambient region. A HeadBucket
+	// signed for another region gets a 301 and was reported as "Error accessing
+	// S3 bucket", so the client must be in the buckets' region.
+	client := s3.NewFromConfig(v.awsCfg, func(o *s3.Options) { o.Region = v.resolver.GetRegion() })
 
 	buckets := map[string]string{
 		"binaries":  v.resolver.GetBinariesBucket(),

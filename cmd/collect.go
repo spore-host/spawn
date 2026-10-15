@@ -250,7 +250,13 @@ func collectFromMultipleRegions(ctx context.Context, cfg aws.Config, sweepRecord
 
 			fmt.Printf("Collecting from %s...\n", r)
 
-			regionResults, err := downloadSweepResults(ctx, cfg, sweepRecord, s3Prefix)
+			// spawn-results-<account>-<r> lives in r, but cfg is the infra
+			// config loaded in us-east-1. Signed for us-east-1, every request to a
+			// bucket elsewhere is a 301 that surfaced only as a warning and
+			// "No results found".
+			regionCfg := cfg.Copy()
+			regionCfg.Region = r
+			regionResults, err := downloadSweepResults(ctx, regionCfg, sweepRecord, s3Prefix)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to collect from %s: %v\n", r, err)
 				resultsChan <- regionResult{region: r, results: nil, err: err}
