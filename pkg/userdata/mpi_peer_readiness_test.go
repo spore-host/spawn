@@ -5,6 +5,9 @@ import (
 	"testing"
 )
 
+// readinessProbe is the per-peer login the readiness loop runs.
+const readinessProbe = `"$PEER_IP" true`
+
 // Rank 0 must wait for every peer to accept a non-interactive SSH before
 // mpirun, not sleep a constant (#752).
 //
@@ -50,14 +53,32 @@ func TestMPIWaitsForPeerSSHBeforeMpirun(t *testing.T) {
 	// Bounded, with a NAMED failure — the discipline the peers-file wait above it
 	// already follows. An unbounded version would hang the boot, and a silent one
 	// would surface as an opaque mpirun error.
-	readyIdx := strings.Index(script, "BatchMode=yes")
+	// Anchored to the readiness PROBE (an ssh running `true`), not the bare
+	// option: the completion hand-off to peers (#894) also uses BatchMode=yes.
+	readyIdx := strings.Index(script, readinessProbe)
+	if readyIdx < 0 {
+		t.Fatalf("no readiness probe (%q) in the rendered script", readinessProbe)
+	}
 	tail := script[readyIdx:]
 	if !strings.Contains(tail, "600") {
 		t.Error("the peer readiness wait has no deadline")
 	}
-	if !strings.Contains(tail, "SPAWN_COMPLETE") {
+	// With --mpi-command the failure record goes through spawn_mpi_done, which
+	// also signals the reachable peers (#894). TestMPIPeerReadinessFailure-
+	// SignalsReachablePeers executes that path. Without a command, the script
+	// writes the record directly.
+	if !strings.Contains(tail, "spawn_mpi_done 1") {
 		t.Error("a peer that never accepts SSH produces no SPAWN_COMPLETE failure record, " +
 			"so the cohort fails with an opaque mpirun error instead of a named cause")
+	}
+	bare, err := GenerateMPIUserData(MPIConfig{
+		Region: "us-east-1", JobArrayID: "arr-1", JobArrayIndex: 0, JobArraySize: 4,
+	})
+	if err != nil {
+		t.Fatalf("GenerateMPIUserData: %v", err)
+	}
+	if !strings.Contains(bare[strings.Index(bare, readinessProbe):], "> /tmp/SPAWN_COMPLETE") {
+		t.Error("without --mpi-command, a peer that never accepts SSH produces no SPAWN_COMPLETE failure record")
 	}
 
 	// Ordering: readiness must come after the hostfile is built (it reads it) and
@@ -84,7 +105,7 @@ func TestMPIPeerReadinessIsRankZeroOnly(t *testing.T) {
 		t.Fatalf("GenerateMPIUserData: %v", err)
 	}
 	guard := strings.Index(script, `-eq 0 ]; then`)
-	ready := strings.Index(script, "BatchMode=yes")
+	ready := strings.Index(script, readinessProbe)
 	if guard < 0 || ready < guard {
 		t.Errorf("the readiness wait is not inside the rank-0 guard (guard=%d ready=%d); "+
 			"every peer would wait for every other peer", guard, ready)
