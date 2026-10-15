@@ -35,6 +35,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/xray v1.36.23
 	github.com/aws/smithy-go v1.28.2
 	github.com/google/uuid v1.6.0
+	github.com/mattn/go-runewidth v0.0.19
 	github.com/prometheus/client_golang v1.23.2
 	github.com/scttfrdmn/strata v0.22.0
 	github.com/scttfrdmn/substrate v0.120.0
@@ -76,6 +77,7 @@ require (
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.6.0 // indirect
 	github.com/containerd/cgroups/v3 v3.0.5 // indirect
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect
 	github.com/digitorus/pkcs7 v0.0.0-20230818184609-3a137a874352 // indirect
