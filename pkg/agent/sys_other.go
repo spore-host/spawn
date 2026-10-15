@@ -44,3 +44,6 @@ func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) 
 // No compute clock outside Linux/Windows: spored does not run there for real.
 func sysComputeClockPath() string { return "" }
 func sysBootTime() time.Time      { return time.Time{} }
+
+// sysAcceleratorFamilies: no accelerators on a dev build.
+func sysAcceleratorFamilies() []string { return nil }
