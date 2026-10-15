@@ -1946,9 +1946,9 @@ func (a *Agent) idleTimeoutReached(ctx context.Context, now time.Time) {
 
 // restoreAfterFailedStop puts back what Cleanup removed when the stop or
 // hibernate it prepared for did not happen, so a running instance keeps its DNS
-// name and its job-array registration (#948). Cleanup runs before the EC2 call
-// because a hibernating guest is frozen, not shut down, and gets no later
-// chance to deregister.
+// name and job-array registration (#948) and its plugins (#979). Cleanup runs
+// before the EC2 call because a hibernating guest is frozen, not shut down, and
+// gets no later chance to deregister.
 func (a *Agent) restoreAfterFailedStop(ctx context.Context) {
 	if a.registry != nil && a.config.JobArrayID != "" {
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -1956,6 +1956,11 @@ func (a *Agent) restoreAfterFailedStop(ctx context.Context) {
 			log.Printf("Warning: failed to re-register with hybrid registry after a failed stop: %v", err)
 		}
 		cancel()
+	}
+	// Cleanup recorded every plugin as stopped and ended its health loop; the
+	// instance is still running, so put both back (#979).
+	if a.pluginRuntime != nil {
+		a.pluginRuntime.ResumeStopped(ctx)
 	}
 	// The lease renewal is the registration path; making it due now re-registers
 	// the record Cleanup deleted, and keeps spawn:dns-status honest if it fails.

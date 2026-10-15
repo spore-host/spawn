@@ -500,6 +500,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the on-complete stop share that backoff, so an instance EC2 will not stop is
   not asked twice and the failure is reported once. `--on-complete terminate`
   is still retried every minute.
+- **A failed stop or hibernate no longer leaves every plugin marked stopped on
+  a running instance** (#979). spored stops its plugins before asking EC2 to
+  stop the instance. When EC2 refused, the instance kept running, but
+  `spawn plugin status` reported each plugin as stopped and its health check
+  was no longer running, so a plugin that failed afterwards was never noticed.
+  Now, when the stop or hibernate fails, each plugin gets back the status it
+  had (running or degraded) and its health check starts again. A plugin that
+  was removed or reinstalled in the meantime is left as it is.
 - **A GPU that cannot be read no longer counts as an idle GPU, and Trainium,
   Inferentia, Gaudi and AMD accelerators are now checked** (#954). When
   `nvidia-smi` failed (for example a driver that no longer matched the kernel

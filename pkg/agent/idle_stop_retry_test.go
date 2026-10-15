@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/spore-host/spawn/pkg/dns"
+	"github.com/spore-host/spawn/pkg/plugin"
+	"github.com/spore-host/spawn/pkg/pluginruntime"
 	"github.com/spore-host/spawn/pkg/provider"
 )
 
@@ -159,6 +161,44 @@ func TestFailedStopRestoresDNS(t *testing.T) {
 				if actions[i] != tc.want[i] {
 					t.Fatalf("DNS actions = %v, want %v", actions, tc.want)
 				}
+			}
+		})
+	}
+}
+
+// Cleanup records every plugin as stopped and ends its health loop before the
+// stop. When the stop fails the instance is still running, so the plugins must
+// be recorded as running again (#979); when it succeeds they stay stopped.
+func TestFailedStopRestoresPlugins(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		hibernate bool
+		stopErr   error
+		want      plugin.PluginStatus
+	}{
+		{"stop fails", false, errOneTimeSpot, plugin.StatusRunning},
+		{"hibernate fails", true, errOneTimeSpot, plugin.StatusRunning},
+		{"stop succeeds", false, nil, plugin.StatusStopped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := plugin.NewDiskStateStore(t.TempDir())
+			if err := store.Save(&plugin.PluginState{Name: "globus", Version: "1.0.0", Status: plugin.StatusRunning}); err != nil {
+				t.Fatal(err)
+			}
+			a, _, _ := idleAgent(t, &provider.Config{
+				IdleTimeout: 30 * time.Minute, IdleCPUPercent: 5, HibernateOnIdle: tc.hibernate,
+			}, tc.stopErr)
+			a.pluginRuntime = pluginruntime.NewRuntimeWithStore(store, a.identity, "")
+			a.nextDNSRefresh = time.Now().Add(time.Hour)
+
+			a.idleTimeoutReached(context.Background(), time.Now())
+
+			st, err := store.Load("globus")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Status != tc.want {
+				t.Errorf("plugin status after %s = %q, want %q", tc.name, st.Status, tc.want)
 			}
 		})
 	}
