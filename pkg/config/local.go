@@ -175,7 +175,7 @@ func applyDefaults(config *LocalConfig) {
 
 	// Resolve public IP if set to "auto"
 	if config.PublicIP == "auto" {
-		if ip := detectPublicIP(); ip != "" {
+		if ip := lookupPublicIP(); ip != "" {
 			config.PublicIP = ip
 		} else {
 			// Fallback to first non-loopback IP
@@ -262,6 +262,10 @@ func ParseDurationE(s string) (time.Duration, error) {
 	}
 	return total, nil
 }
+
+// lookupPublicIP is detectPublicIP, as a variable so tests do not query the
+// external services below (#968).
+var lookupPublicIP = detectPublicIP
 
 // detectPublicIP attempts to detect the public IP address
 func detectPublicIP() string {

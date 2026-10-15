@@ -38,7 +38,11 @@ func (a *Agent) maybeMountPendingFSx(ctx context.Context) {
 		return // not (yet) pending; re-checked on the next refresh
 	}
 	a.fsxMountStarted = true
-	go a.mountPendingFSx(ctx)
+	mount := a.mountPendingFSx
+	if a.fsxMounter != nil {
+		mount = a.fsxMounter // tests: observe the start without calling FSx (#968)
+	}
+	go mount(ctx)
 }
 
 // mountPendingFSx mounts an FSx filesystem that was created asynchronously

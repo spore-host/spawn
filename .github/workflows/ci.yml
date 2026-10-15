@@ -143,13 +143,21 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: Build hermetic test wrapper
+        # Every unit test runs under it (#968): fake credentials, and AWS_ENDPOINT_URL
+        # and HTTP(S)_PROXY pointed at a loopback recorder, so a test that reaches
+        # AWS or the spore.host DNS API fails here rather than passing because the
+        # call happened to fail. CI has no credentials, which is exactly why a leak
+        # used to be invisible here.
+        run: go build -o "$RUNNER_TEMP/hermetic-exec" ./test/hermetic
+
       - name: Test
-        run: go test -short -coverprofile=coverage.out ./...
+        run: go test -short -exec "$RUNNER_TEMP/hermetic-exec" -coverprofile=coverage.out ./...
 
       - name: Race detector (pkg/agent)
         # The agent runs a monitor loop + background goroutines; guard the
         # Agent.config access (2026-06 audit M-corr) against regressions.
-        run: go test -race -count=1 ./pkg/agent/...
+        run: go test -race -count=1 -exec "$RUNNER_TEMP/hermetic-exec" ./pkg/agent/...
 
       - name: Coverage gate
         env:
@@ -189,7 +197,7 @@ jobs:
       # so the failure is legible in the checks list instead of buried in the
       # output of every package's tests.
       - name: Cross-repo API surface gate
-        run: go test -run 'TestPublicAPISurface|TestPublicPackagesExist' -count=1 .
+        run: go test -exec "$RUNNER_TEMP/hermetic-exec" -run 'TestPublicAPISurface|TestPublicPackagesExist' -count=1 .
 
       # Nested modules: the root `go test ./...` does NOT descend into a
       # directory with its own go.mod, so their tests would otherwise never run

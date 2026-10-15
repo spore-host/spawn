@@ -41,6 +41,12 @@ func aliasTestZone(t *testing.T) string {
 		t.Fatalf("build config: %v", err)
 	}
 	route53Client = route53.NewFromConfig(cfg)
+	// Both test accounts are entitled. Without this the handler tests Scanned the
+	// LIVE account registry through init's ambient-credential dynamoClient — on a
+	// developer machine, a real DynamoDB read of the production table — and
+	// passed in CI only because that Scan failed and fell back to the static
+	// allowlist (#968).
+	stubRegistry(t, []string{ownerAcct, otherAcct}, nil)
 
 	zone, err := route53Client.CreateHostedZone(context.Background(), &route53.CreateHostedZoneInput{
 		Name:            aws.String(testDomain),

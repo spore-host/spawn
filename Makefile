@@ -126,9 +126,9 @@ test-short:
 # Run the race detector on the concurrency-sensitive packages (pkg/agent holds
 # the monitor loop + background goroutines; 2026-06 audit M-corr). Scoped rather
 # than -race on the whole suite to keep it fast and non-flaky.
-test-race:
+test-race: hermetic-exec
 	@echo "Running race detector on pkg/agent..."
-	go test -race -count=1 ./pkg/agent/...
+	go test -race -count=1 -exec $(HERMETIC_EXEC) ./pkg/agent/...
 
 # Run integration tests
 test-integration:
@@ -233,13 +233,27 @@ check:
 	@go vet ./...
 	@echo "3. Running staticcheck..."
 	@staticcheck ./... || echo "staticcheck not installed, skipping..."
-	@echo "4. Running short tests..."
-	@go test -short ./...
+	@echo "4. Running short tests (hermetic: no credentials, no network)..."
+	@$(MAKE) --no-print-directory test-hermetic
 	@echo "5. Nested modules (build + vet + test)..."
 	@$(MAKE) --no-print-directory check-nested
 	@echo "6. Module tidiness (root + nested)..."
 	@$(MAKE) --no-print-directory check-tidy
 	@echo "✓ All checks passed!"
+
+# Short tests under the hermetic `go test -exec` wrapper (test/hermetic, #968).
+# Ambient AWS credentials are stripped and replaced with fakes, and AWS_ENDPOINT_URL
+# and HTTP(S)_PROXY point at a loopback recorder, so a test that reaches AWS, the
+# spore.host DNS API (not an SDK client) or any other off-box host FAILS and is
+# named. Before this, TestNewAgent_StillActivates registered a real spore.host DNS
+# record on every `make check` run with credentials — and passed either way.
+HERMETIC_EXEC := $(CURDIR)/$(BUILD_DIR)/hermetic-exec
+.PHONY: hermetic-exec test-hermetic
+hermetic-exec:
+	@mkdir -p $(BUILD_DIR)
+	@go build -o $(HERMETIC_EXEC) ./test/hermetic
+test-hermetic: hermetic-exec
+	go test -short -exec $(HERMETIC_EXEC) ./...
 
 # Every nested module, via the SAME script CI runs (#136). Deliberately not a
 # count: a hand-written number here is the anti-pattern rule 4 warns about, and

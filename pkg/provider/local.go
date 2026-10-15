@@ -42,7 +42,7 @@ func NewLocalProvider(ctx context.Context) (*LocalProvider, error) {
 	// Get public IP
 	publicIP := localConfig.PublicIP
 	if publicIP == "" || publicIP == "auto" {
-		publicIP = getPublicIP()
+		publicIP = lookupPublicIP()
 	}
 
 	// Get private IP
@@ -301,6 +301,10 @@ func (p *LocalProvider) LookupAndTagEBSCost(_ context.Context) (float64, bool) {
 func (p *LocalProvider) CountOtherManagedInstances(_ context.Context) int {
 	return -1
 }
+
+// lookupPublicIP is getPublicIP, as a variable so tests do not query the three
+// external services below on every run (#968).
+var lookupPublicIP = getPublicIP
 
 // getPublicIP queries an external service to get the public IP
 func getPublicIP() string {

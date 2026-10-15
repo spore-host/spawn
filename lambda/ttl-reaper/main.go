@@ -215,7 +215,16 @@ var r *reaper
 
 func init() {
 	tagprefix.Init() // respect SPORED_TAG_PREFIX, matching how spawn writes tags
+}
 
+// configure builds the reaper from the Lambda's environment and credentials.
+//
+// It runs from main, not init. As an init it ran in every TEST binary too, and
+// resolveAccounts called STS GetCallerIdentity with whatever credentials were
+// ambient — so each `go test` of this module made a real AWS call from a
+// developer's laptop before a single test ran (#968). Tests build their own
+// reaper and never needed this one.
+func configure() {
 	ctx := context.Background()
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -1741,5 +1750,6 @@ func launchTime(tagVal string, apiLaunch *time.Time) time.Time {
 }
 
 func main() {
+	configure()
 	lambda.Start(handler)
 }

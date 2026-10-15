@@ -266,10 +266,12 @@ job_array:
 	}
 }
 
+// "auto" resolves through the public-IP lookup. The lookup is faked: the real
+// one queries api.ipify.org and friends, which a unit test must not (#968).
 func TestLoadLocalConfig_PublicIPResolution(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping IP resolution test in short mode")
-	}
+	orig := lookupPublicIP
+	lookupPublicIP = func() string { return "198.51.100.7" }
+	t.Cleanup(func() { lookupPublicIP = orig })
 
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
@@ -288,9 +290,8 @@ public_ip: auto
 		t.Fatalf("LoadLocalConfig() error = %v", err)
 	}
 
-	// Should resolve to an IP or fall back to a default
-	if cfg.PublicIP == "auto" {
-		t.Errorf("PublicIP should be resolved from 'auto'")
+	if cfg.PublicIP != "198.51.100.7" {
+		t.Errorf("PublicIP = %q, want the looked-up 198.51.100.7 for 'auto'", cfg.PublicIP)
 	}
 }
 

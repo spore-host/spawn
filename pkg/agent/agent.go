@@ -102,6 +102,9 @@ type Agent struct {
 	// setup add seconds) and EC2 tags are eventually consistent. The original
 	// run-once-at-startup invocation lost that race and silently never mounted.
 	fsxMountStarted bool
+	// fsxMounter replaces mountPendingFSx when non-nil. Tests only: the real one
+	// polls the FSx API for up to 25 minutes (#968).
+	fsxMounter func(context.Context)
 
 	// monitorInterval is the lifecycle ticker period. Zero means the production
 	// default (1 minute); tests set it small to exercise the loop quickly.
@@ -134,10 +137,6 @@ func (a *Agent) setConfig(c *provider.Config) {
 	a.config = c
 	a.configMu.Unlock()
 }
-
-// newPeerRegistry builds the hybrid-registry client. A variable so tests can
-// observe whether activation reached it without touching DynamoDB.
-var newPeerRegistry = registry.NewPeerRegistry
 
 // joinsHybridRegistry reports whether this instance registers with the hybrid
 // registry (the spawn-hybrid-registry DynamoDB table): only a member of a hybrid
@@ -194,6 +193,20 @@ func NewAgentForQuery(ctx context.Context, prov provider.Provider) (*Agent, erro
 	return newAgent(ctx, prov, false)
 }
 
+// The constructors newAgent's activation reaches the outside world through. On
+// an instance each is the real thing; they are variables so a test can see
+// activation happen WITHOUT it happening (#968). TestNewAgent_StillActivates
+// used to call the real ones, and with a developer's ambient credentials that
+// was a real Route53 UPSERT through the DNS API, an EC2 CreateTags and a
+// DynamoDB PutItem on every `make check` — and it passed either way, because
+// NewAgent logs those failures rather than returning them. This package's
+// TestMain (internal/hermetic) now fails any test that reaches the network.
+var (
+	newDNSClient    = dns.NewClient
+	newPeerRegistry = registry.NewPeerRegistry
+	newTagPutter    = func(region string) tagPutter { return &ec2TagPutter{region: region} }
+)
+
 func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agent, error) {
 	// Get identity from provider
 	identity, err := prov.GetIdentity(ctx)
@@ -229,7 +242,7 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	// The daemon IS the clock; a query agent is not until it adopts the
 	// daemon's (AdoptPublishedComputeClock, #896).
 	agent.liveClock = activate
-	agent.tagger = &ec2TagPutter{region: identity.Region} // real EC2 CreateTags; tests override
+	agent.tagger = newTagPutter(identity.Region) // real EC2 CreateTags; tests override
 
 	// Everything below this point is ACTIVATION — logging and side effects — and
 	// is skipped for a query (#733). The pure state assignments (dnsDomain,
@@ -292,7 +305,7 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	// THE one from #733: this block POSTs to the DNS API, mutating a Route53
 	// record, and writes an EC2 tag via recordDNSStatus. A query must do neither.
 	if activate && config.DNSName != "" && identity.PublicIP != "" && identity.Provider == "ec2" {
-		dnsClient, err := dns.NewClient(ctx, dnsDomain, "")
+		dnsClient, err := newDNSClient(ctx, dnsDomain, "")
 		if err != nil {
 			log.Printf("Warning: Failed to create DNS client: %v", err)
 		} else {
