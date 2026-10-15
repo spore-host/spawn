@@ -141,6 +141,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spored's UTC timestamps are re-rendered to match, and so is the
   lifecycle-mismatch warning.
 
+- **A failed pipeline stage no longer leaves its instance running and billing**
+  (#912). A stage whose command failed or timed out, or whose bootstrap failed,
+  exited before the self-terminate step. The orchestrator never read the
+  `FAILED` marker, so the stage stayed "running" and the orchestrator Lambda
+  re-invoked itself every ~13 minutes until someone ran `spawn pipeline cancel`.
+  The TTL reaper could not reclaim the instance because it carried no
+  `spawn:managed` tag, and without that tag the instance's own role was not
+  allowed to terminate it either. Now:
+  - A stage instance terminates itself however its script exits. It reads its
+    instance id from IMDSv2, because `ec2-metadata` does not exist on Ubuntu or
+    Debian AMIs, so even successful stages there kept running. It is launched
+    with shutdown behaviour `terminate` and halts as a last resort.
+  - Stage instances carry `spawn:managed=true`, `spawn:launch-time`, `spawn:ttl`
+    and `spawn:ttl-deadline`, the same tags `spawn launch` writes. The TTL is the
+    stage's `timeout` (default 1h) plus 30 minutes for bootstrap, so the reaper
+    backstops them.
+  - The orchestrator reads `FAILED`, and also fails a stage whose instances have
+    all gone without writing `COMPLETE` or that has outlived its TTL. It
+    terminates that stage's instances and applies `on_failure`: `stop` skips the
+    remaining stages and terminates the ones in flight, and `continue` skips only
+    the failed stage's dependents, which used to wait forever.
+  - A pipeline past its deadline (the sum of its stages' TTLs plus 30 minutes) is
+    failed and its instances terminated, and the orchestrator stops re-invoking
+    itself.
+  - Exceeding `max_cost_usd` now terminates the pipeline's remaining instances.
+    The status used to be set but never saved, and nothing was terminated.
+  - Cleanup terminates each stage's instances in that stage's region. It used to
+    send every terminate request to us-east-1.
+
+  The `spawn-pipeline-orchestrator` Lambda has to be redeployed for any of this
+  to take effect.
+
 ### Security
 
 - **The unit tests no longer make real AWS and DNS calls with your credentials**
@@ -200,39 +232,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it now prints `Network: unknown (single sample; assuming active)`, the same
   way the CPU line does. The JSON output gains `network_measured` and
   `network_unknown`.
-### Fixed
-
-- **A failed pipeline stage no longer leaves its instance running and billing**
-  (#912). A stage whose command failed or timed out, or whose bootstrap failed,
-  exited before the self-terminate step. The orchestrator never read the
-  `FAILED` marker, so the stage stayed "running" and the orchestrator Lambda
-  re-invoked itself every ~13 minutes until someone ran `spawn pipeline cancel`.
-  The TTL reaper could not reclaim the instance because it carried no
-  `spawn:managed` tag, and without that tag the instance's own role was not
-  allowed to terminate it either. Now:
-  - A stage instance terminates itself however its script exits. It reads its
-    instance id from IMDSv2, because `ec2-metadata` does not exist on Ubuntu or
-    Debian AMIs, so even successful stages there kept running. It is launched
-    with shutdown behaviour `terminate` and halts as a last resort.
-  - Stage instances carry `spawn:managed=true`, `spawn:launch-time`, `spawn:ttl`
-    and `spawn:ttl-deadline`, the same tags `spawn launch` writes. The TTL is the
-    stage's `timeout` (default 1h) plus 30 minutes for bootstrap, so the reaper
-    backstops them.
-  - The orchestrator reads `FAILED`, and also fails a stage whose instances have
-    all gone without writing `COMPLETE` or that has outlived its TTL. It
-    terminates that stage's instances and applies `on_failure`: `stop` skips the
-    remaining stages and terminates the ones in flight, and `continue` skips only
-    the failed stage's dependents, which used to wait forever.
-  - A pipeline past its deadline (the sum of its stages' TTLs plus 30 minutes) is
-    failed and its instances terminated, and the orchestrator stops re-invoking
-    itself.
-  - Exceeding `max_cost_usd` now terminates the pipeline's remaining instances.
-    The status used to be set but never saved, and nothing was terminated.
-  - Cleanup terminates each stage's instances in that stage's region. It used to
-    send every terminate request to us-east-1.
-
-  The `spawn-pipeline-orchestrator` Lambda has to be redeployed for any of this
-  to take effect.
 
 ## [0.128.2] - 2026-10-13
 
