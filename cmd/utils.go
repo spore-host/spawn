@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spore-host/spawn/pkg/aws"
 )
@@ -38,11 +37,12 @@ type notFoundError struct{ msg string }
 func (e *notFoundError) Error() string        { return e.msg }
 func (e *notFoundError) Is(target error) bool { return target == ErrInstanceNotFound }
 
-// newTableWriter returns a tabwriter configured with spawn's standard column
+// newTableWriter returns a table writer configured with spawn's standard column
 // padding, so table output is consistent across commands. Callers write
-// tab-separated rows and must Flush() when done.
-func newTableWriter(w io.Writer) *tabwriter.Writer {
-	return tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+// tab-separated rows and must Flush() when done. Columns align by terminal
+// display width, so CJK text and ANSI colour do not shift them (#909).
+func newTableWriter(w io.Writer) *tableWriter {
+	return &tableWriter{out: w, padding: 2}
 }
 
 // sporedSSHOptions returns the ssh -o options shared by the non-interactive

@@ -152,6 +152,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local nodes and instances launched by `spawn burst` (tagged
   `spawn:burst=true`); other members log that the registry was skipped. Peer
   discovery is unchanged.
+### Fixed
+
+- **Table columns line up in Japanese and other CJK locales** (#909). `spawn
+  list` and every other table spawn prints padded columns by character count,
+  so a double-width character such as those in `名前` or `IAMロール` shifted
+  every later column left by one cell. Columns are now padded by the width a
+  terminal displays, and colour escapes no longer count towards a cell's width,
+  so a coloured `running` cell no longer pushes its column wider than its
+  header. English output is unchanged.
 
 ## [0.128.2] - 2026-10-13
 
