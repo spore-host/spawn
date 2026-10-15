@@ -7,13 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- `go mod tidy` works again. An integration-tagged test still imported
-  `pkg/orchestrator`, which #862 deleted, so tidy failed outright; the stale test is
-  removed, and the root and `lambda/dashboard-api` modules are tidied (drops the
-  orphaned `robfig/cron` and an unused SQS SDK requirement). `make check` and CI now
-  fail when any module, root or nested, is not tidy (#907).
 ### Added
 
 - **`spawn --version`** (spore-host/truffle#189). It was rejected as an unknown
@@ -35,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminated instance.
 
 ### Fixed
+
+- `go mod tidy` works again. An integration-tagged test still imported
+  `pkg/orchestrator`, which #862 deleted, so tidy failed outright; the stale test is
+  removed, and the root and `lambda/dashboard-api` modules are tidied (drops the
+  orphaned `robfig/cron` and an unused SQS SDK requirement). `make check` and CI now
+  fail when any module, root or nested, is not tidy (#907).
 
 - **No colour escapes when stdout is not a terminal** (#898). `spawn list | cat`
   and `spawn list > file` wrote raw `\x1b[32m` sequences because only
