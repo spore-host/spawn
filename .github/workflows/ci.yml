@@ -206,6 +206,14 @@ jobs:
         # rather than on a laptop.
         run: scripts/nested-modules.sh
 
+      # Module tidiness (#907): every go.mod, root and nested, must be
+      # `go mod tidy`-clean. Tidy loads every build tag, so this is the only
+      # step that sees an integration-tagged test importing a deleted package —
+      # one sat on main after #862 and made `go mod tidy` itself fail. The SAME
+      # target `make check` runs.
+      - name: Module tidiness gate
+        run: make check-tidy
+
   # Tier 0 E2E — the real spawn binary driven against the Substrate AWS
   # emulator. No AWS account/credentials; exercises the full CLI surface
   # (args → cobra → AWS client → Substrate) and asserts JSON, exit codes, and
