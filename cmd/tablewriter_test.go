@@ -3,7 +3,6 @@ package cmd
 import (
 	"bytes"
 	"fmt"
-	"math/rand"
 	"regexp"
 	"strings"
 	"testing"
@@ -136,7 +135,7 @@ func TestTableWriterMatchesTabwriterOnASCII(t *testing.T) {
 		"trailing\t\nx\t\t\n\t\tend\n",
 		"a\tb\n\nc\td\n",
 	}
-	rng := rand.New(rand.NewSource(909))
+	rng := &splitmix{state: 909}
 	pieces := []string{"", "a", "bb", "cccc", "ddddddd", "x y"}
 	for n := 0; n < 300; n++ {
 		var sb strings.Builder
@@ -184,4 +183,18 @@ func TestTableWriterWritesThroughAtTabFreeLine(t *testing.T) {
 	if got, want := out.String(), "a  b\nSection\nc  d\n"; got != want {
 		t.Fatalf("after Flush got %q, want %q", got, want)
 	}
+}
+
+// splitmix is a tiny deterministic generator for the randomized comparison
+// above. The codebase carries no math/rand (see pkg/agent/dns_lease.go), and a
+// test only needs a reproducible sequence, not randomness.
+type splitmix struct{ state uint64 }
+
+func (s *splitmix) Intn(n int) int {
+	s.state += 0x9e3779b97f4a7c15
+	z := s.state
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+	z ^= z >> 31
+	return int(z % uint64(n))
 }
