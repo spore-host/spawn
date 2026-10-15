@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -68,7 +69,15 @@ type PluginState struct {
 	StopSteps []Step `json:"stop_steps,omitempty"`
 }
 
-// StateStore manages plugin state persistence.
+// ErrNotInstalled is what StateStore.Load returns, wrapped, when the plugin has
+// no persisted state: it is not installed on this instance. Callers that must
+// tell "not installed" from a failure to read the state (the push API, which
+// answers 404 for the one and 500 for the other, #1038) test for it with
+// errors.Is.
+var ErrNotInstalled = errors.New("not installed")
+
+// StateStore manages plugin state persistence. Load returns an error wrapping
+// ErrNotInstalled when the plugin has no state.
 type StateStore interface {
 	Load(name string) (*PluginState, error)
 	Save(state *PluginState) error
@@ -100,14 +109,16 @@ func (s *DiskStateStore) statePath(name string) string {
 	return filepath.Join(s.pluginDir(name), "state.json")
 }
 
-// Load loads the persisted state for a plugin.
+// Load loads the persisted state for a plugin. A plugin with no state file is
+// not installed, and the error wraps ErrNotInstalled; any other failure (an
+// unreadable or undecodable file) does not.
 func (s *DiskStateStore) Load(name string) (*PluginState, error) {
 	if err := checkPluginName(name); err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(s.statePath(name))
 	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("plugin %q: state not found", name)
+		return nil, fmt.Errorf("plugin %q: %w", name, ErrNotInstalled)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load state for %s: %w", name, err)

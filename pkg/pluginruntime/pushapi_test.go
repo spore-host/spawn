@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -183,5 +186,95 @@ func TestPushAPI_Remove(t *testing.T) {
 	// State should be gone.
 	if _, err := s.rt.store.Load("foo"); err == nil {
 		t.Error("plugin state still present after remove")
+	}
+}
+
+// do sends an authenticated request to the test server and returns the status.
+func do(t *testing.T, srv *httptest.Server, method, path string, body []byte) int {
+	t.Helper()
+	req, _ := http.NewRequest(method, srv.URL+path, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// corruptPlugin writes an undecodable state file for name: the plugin is
+// there, but spored cannot read it. That is a server error, not "not found".
+func corruptPlugin(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, name), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name, "state.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #1038: every per-plugin endpoint answers 404 for a plugin that is not
+// installed — the CLI turns that into `plugin "x" not found on <instance>` —
+// and 500 only for a real failure. remove used to answer 500 for both, and
+// status 404 for both.
+func TestPushAPI_NotInstalledIs404_OtherFailuresAre500(t *testing.T) {
+	dir := t.TempDir()
+	rt := &Runtime{
+		store:         plugin.NewDiskStateStore(dir),
+		executor:      NewRemoteExecutor(""),
+		healthCancels: make(map[string]context.CancelFunc),
+	}
+	s := &PushAPIServer{rt: rt, token: "test-token", baseCtx: context.Background()}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/plugins/{name}/push", s.handlePush)
+	mux.HandleFunc("GET /v1/plugins/{name}/status", s.handleStatus)
+	mux.HandleFunc("DELETE /v1/plugins/{name}", s.handleRemove)
+	srv := httptest.NewServer(s.authMiddleware(mux))
+	t.Cleanup(srv.Close)
+
+	corruptPlugin(t, dir, "broken")
+	push, _ := json.Marshal(map[string]string{"key": "token", "value": "v"})
+
+	for _, tt := range []struct {
+		name   string
+		method string
+		path   string
+		body   []byte
+		want   int
+	}{
+		{"remove, not installed", http.MethodDelete, "/v1/plugins/absent", nil, http.StatusNotFound},
+		{"status, not installed", http.MethodGet, "/v1/plugins/absent/status", nil, http.StatusNotFound},
+		{"push, not installed", http.MethodPost, "/v1/plugins/absent/push", push, http.StatusNotFound},
+		{"remove, unreadable state", http.MethodDelete, "/v1/plugins/broken", nil, http.StatusInternalServerError},
+		{"status, unreadable state", http.MethodGet, "/v1/plugins/broken/status", nil, http.StatusInternalServerError},
+		{"push, unreadable state", http.MethodPost, "/v1/plugins/broken/push", push, http.StatusInternalServerError},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := do(t, srv, tt.method, tt.path, tt.body); got != tt.want {
+				t.Errorf("%s %s = %d, want %d", tt.method, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// The runtime itself reports "not installed" as a typed error, so callers
+// other than the push API can tell it from a failure too.
+func TestRuntime_RemoveNotInstalled_IsErrNotInstalled(t *testing.T) {
+	dir := t.TempDir()
+	rt := &Runtime{
+		store:         plugin.NewDiskStateStore(dir),
+		executor:      NewRemoteExecutor(""),
+		healthCancels: make(map[string]context.CancelFunc),
+	}
+	if err := rt.Remove(context.Background(), "absent"); !errors.Is(err, plugin.ErrNotInstalled) {
+		t.Errorf("Remove(absent) = %v, want an error wrapping plugin.ErrNotInstalled", err)
+	}
+	if _, err := rt.Status("absent"); !errors.Is(err, plugin.ErrNotInstalled) {
+		t.Errorf("Status(absent) = %v, want an error wrapping plugin.ErrNotInstalled", err)
+	}
+	corruptPlugin(t, dir, "broken")
+	if err := rt.Remove(context.Background(), "broken"); err == nil || errors.Is(err, plugin.ErrNotInstalled) {
+		t.Errorf("Remove(broken) = %v, want a failure that is not ErrNotInstalled", err)
 	}
 }

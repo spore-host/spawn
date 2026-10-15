@@ -819,14 +819,7 @@ var pluginRemoveCmd = &cobra.Command{
 				return nil, err
 			}
 			body, _ := io.ReadAll(resp.Body)
-			switch resp.StatusCode {
-			case http.StatusOK:
-				warning = removeWarning(body)
-			case http.StatusNotFound:
-				respErr = fmt.Errorf("plugin %q not found on %s", name, pluginInstance)
-			default:
-				respErr = fmt.Errorf("remove API: HTTP %d — %s", resp.StatusCode, string(body))
-			}
+			warning, respErr = removeOutcome(resp.StatusCode, body, name, pluginInstance)
 			return resp, nil
 		})
 		if err != nil {
@@ -842,6 +835,22 @@ var pluginRemoveCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// removeOutcome reads spored's answer to DELETE /v1/plugins/{name}: the
+// warning to print on success, or the error to return. A 404 means the plugin
+// is not installed there and says so (#1038); before spored answered 404 for
+// that, it answered 500 and the user saw "remove API: HTTP 500 — internal
+// error".
+func removeOutcome(status int, body []byte, name, instance string) (warning string, err error) {
+	switch status {
+	case http.StatusOK:
+		return removeWarning(body), nil
+	case http.StatusNotFound:
+		return "", fmt.Errorf("plugin %q not found on %s", name, instance)
+	default:
+		return "", fmt.Errorf("remove API: HTTP %d — %s", status, strings.TrimSpace(string(body)))
+	}
 }
 
 // removeWarning is the "warning" spored puts in a remove response when the

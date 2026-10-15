@@ -1,6 +1,7 @@
 package plugin_test
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -84,5 +85,24 @@ func TestDiskStateStore_Delete(t *testing.T) {
 	// Directory should be gone.
 	if _, err := os.Stat(dir + "/p"); !os.IsNotExist(err) {
 		t.Errorf("expected plugin dir to be removed, got err=%v", err)
+	}
+}
+
+// #1038: a missing state file means "not installed", reported as a typed
+// error the push API maps to 404; an unreadable one is a different failure.
+func TestDiskStateStore_LoadMissing_IsErrNotInstalled(t *testing.T) {
+	dir := t.TempDir()
+	store := plugin.NewDiskStateStore(dir)
+	if _, err := store.Load("absent"); !errors.Is(err, plugin.ErrNotInstalled) {
+		t.Errorf("Load(absent) = %v, want an error wrapping ErrNotInstalled", err)
+	}
+	if err := os.MkdirAll(dir+"/broken", 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/broken/state.json", []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load("broken"); err == nil || errors.Is(err, plugin.ErrNotInstalled) {
+		t.Errorf("Load(broken) = %v, want a decode error that is not ErrNotInstalled", err)
 	}
 }

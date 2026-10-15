@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,5 +165,22 @@ func TestRemoveWarning(t *testing.T) {
 	// An older spored sends no warning; neither does a clean remove.
 	if got := removeWarning([]byte(`{"status":"removed"}`)); got != "" {
 		t.Errorf("removeWarning of a clean remove = %q, want empty", got)
+	}
+}
+
+// #1038: spored answers 404 for a plugin that is not installed, and the CLI
+// says so rather than reporting a server error.
+func TestRemoveOutcome(t *testing.T) {
+	if _, err := removeOutcome(http.StatusNotFound, []byte("not found\n"), "tailscale", "my-box"); err == nil ||
+		err.Error() != `plugin "tailscale" not found on my-box` {
+		t.Errorf("404: err = %v, want plugin \"tailscale\" not found on my-box", err)
+	}
+	if _, err := removeOutcome(http.StatusInternalServerError, []byte("internal error\n"), "tailscale", "my-box"); err == nil ||
+		err.Error() != "remove API: HTTP 500 — internal error" {
+		t.Errorf("500: err = %v", err)
+	}
+	w, err := removeOutcome(http.StatusOK, []byte(`{"status":"removed","warning":"stop steps failed"}`), "tailscale", "my-box")
+	if err != nil || w != "stop steps failed" {
+		t.Errorf("200: warning = %q, err = %v", w, err)
 	}
 }
