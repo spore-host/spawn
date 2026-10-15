@@ -114,6 +114,14 @@ func ScanSelfStatements() []Statement {
 			// leads to, cancelling a request and terminating a replacement, is
 			// the two tag-conditioned grants above. So an UNTAGGED replacement is
 			// deliberately not terminable by the reaper. It is reported instead.
+			//
+			// #984 looked for a safe way to widen that and found none. The EC2
+			// instance resource has no condition key naming its Spot request, and
+			// aws:ResourceTag on TerminateInstances or CreateTags is the
+			// instance's own tags, so neither grant can be limited to "instances
+			// a spawn-tagged request launched". Dropping the tag condition would
+			// let the reaper end instances spawn does not own. A person ends the
+			// replacement, from the SPOT REPLACEMENT NOT TERMINATED line.
 			Effect:   "Allow",
 			Action:   []string{"ec2:DescribeSpotInstanceRequests"},
 			Resource: "*",

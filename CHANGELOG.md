@@ -69,6 +69,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The policy now names the account literally, resolved at write time. A test
   runs every writer and checks what reached IAM, and a document still carrying
   the variable is refused before it is sent.
+- **A Spot replacement the TTL reaper cannot terminate is now reported with
+  everything needed to end it** (#984). An untagged instance launched by a
+  leaked persistent Spot request is outside the reaper's tag-scoped grant, and
+  there is no safe way to widen it. IAM has no condition key that ties an
+  instance to its Spot request, and a terminate grant without the
+  `spawn:managed` condition would reach instances spawn does not own. So a
+  person still ends the instance. The `SPOT REPLACEMENT NOT TERMINATED` line
+  now names the 12-digit account (scan-self mode used to print `self`), the
+  instance's type, state and launch time, and the original instance. It gives a
+  `describe-instances` check that the instance belongs to the request,
+  followed by the `terminate-instances` command. A throttled terminate is no
+  longer blamed on the grant. The line is also posted to `REAPER_NOTIFY_URL`
+  once, on the run that finds the replacement. Before, the stranded path
+  returned before notifying, so the webhook heard nothing of either the cancel
+  or the instance. The alarm's description now says where to look and what to
+  run.
 
 ### Security
 

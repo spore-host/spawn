@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -462,5 +465,107 @@ func TestParseSpotRequests(t *testing.T) {
 		if got := parseSpotRequests(in); got != want {
 			t.Errorf("parseSpotRequests(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// #984: the alarm is the only remedy for an untagged replacement, so the line it
+// points at must be enough to act on. It names the ACCOUNT (an operator holds
+// credentials per account; "acct" or "self" is not one), says why the reaper
+// could not do it, and gives a check that the instance really is the request's
+// before the terminate — the reaper is about to ask a person to kill an
+// untagged instance on its word.
+func TestSpotSweep_StrandedReplacementMessageIsActionable(t *testing.T) {
+	req := spotReq("sir-1", "i-repl", ec2types.SpotInstanceStateActive, "spawn:original-instance-id", "i-orig")
+	repl := inst("i-repl", ec2types.InstanceStateNameRunning)
+	repl.InstanceType = ec2types.InstanceTypeM7iLarge
+	f := &fakeSpotEC2{
+		reqs:         []ec2types.SpotInstanceRequest{req},
+		insts:        []ec2types.Instance{repl},
+		terminateErr: apiErr("UnauthorizedOperation"),
+	}
+	_, out := sweep(t, f, spotRequestsReap)
+	for _, want := range []string{
+		sentinelSpotReplacementStranded,
+		"account 111111111111 region us-east-1",
+		"i-repl (m7i.large, running, launched " + rfc(sweepNow.Add(-2*time.Hour)) + ")",
+		"original instance i-orig",
+		"#984",
+		"With credentials for account 111111111111",
+		"aws ec2 describe-instances --region us-east-1 --instance-ids i-repl --query 'Reservations[].Instances[].SpotInstanceRequestId' --output text (it must print sir-1)",
+		"aws ec2 terminate-instances --region us-east-1 --instance-ids i-repl",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stranded line should contain %q:\n%s", want, out)
+		}
+	}
+	if n := strings.Count(out, sentinelSpotReplacementStranded); n != 1 {
+		t.Errorf("sentinel appears %d times, want 1 (the metric filter counts lines)", n)
+	}
+	if strings.Count(strings.TrimRight(out, "\n"), "\n") > 1 {
+		// CANCELLED line + the stranded line. A multi-line stranded message would
+		// split into several CloudWatch events and lose its context.
+		t.Errorf("stranded message must be one log line:\n%s", out)
+	}
+}
+
+// A refusal that is not an authorization failure is transient, and the line
+// must not blame the tag-scoped grant for it.
+func TestSpotSweep_StrandedTransientFailureSaysItRetries(t *testing.T) {
+	f := &fakeSpotEC2{
+		reqs:         []ec2types.SpotInstanceRequest{spotReq("sir-1", "i-repl", ec2types.SpotInstanceStateActive)},
+		insts:        []ec2types.Instance{inst("i-repl", ec2types.InstanceStateNameRunning)},
+		terminateErr: apiErr("RequestLimitExceeded"),
+	}
+	sum, out := sweep(t, f, spotRequestsReap)
+	if !strings.Contains(out, "retries next run") || strings.Contains(out, "#984") {
+		t.Errorf("a throttled terminate should say it retries, not cite the grant:\n%s", out)
+	}
+	if sum.Errors != 1 {
+		t.Errorf("errors = %d, want 1 for a non-denial", sum.Errors)
+	}
+}
+
+// The webhook gets the stranded replacement once, on the run that cancelled
+// its request. Before #984 the stranded path returned before notifying, so the
+// webhook heard nothing at all — neither the cancel nor the instance a person
+// now has to end.
+func TestSpotSweep_StrandedReplacementIsNotifiedOnce(t *testing.T) {
+	var posts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var body struct{ Text string }
+		_ = json.NewDecoder(req.Body).Decode(&body)
+		posts = append(posts, body.Text)
+	}))
+	defer srv.Close()
+
+	run := func(state ec2types.SpotInstanceState) {
+		f := &fakeSpotEC2{
+			reqs:         []ec2types.SpotInstanceRequest{spotReq("sir-1", "i-repl", state)},
+			insts:        []ec2types.Instance{inst("i-repl", ec2types.InstanceStateNameRunning)},
+			terminateErr: apiErr("UnauthorizedOperation"),
+		}
+		r := sweepReaper(f, spotRequestsReap)
+		r.notifyURL = srv.URL
+		var sum Summary
+		_ = captureLogs(func() {
+			o := accountOutcome{label: "acct"}
+			r.reapSpotRequestsRegion(context.Background(), r.accounts[0], "us-east-1", sweepNow, &sum, &o)
+		})
+	}
+
+	run(ec2types.SpotInstanceStateActive) // discovers it and cancels the request
+	if len(posts) != 1 {
+		t.Fatalf("got %d notifications on discovery, want 1: %q", len(posts), posts)
+	}
+	for _, want := range []string{sentinelSpotReplacementStranded, "account 111111111111",
+		"aws ec2 terminate-instances --region us-east-1 --instance-ids i-repl"} {
+		if !strings.Contains(posts[0], want) {
+			t.Errorf("notification should contain %q: %s", want, posts[0])
+		}
+	}
+
+	run(ec2types.SpotInstanceStateCancelled) // later run: request already cancelled
+	if len(posts) != 1 {
+		t.Errorf("a later run re-notified (%d posts); the alarm covers repeats", len(posts))
 	}
 }

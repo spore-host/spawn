@@ -669,14 +669,19 @@ Resources:
     Condition: ObservabilityEnabled
     Properties:
       AlarmName: !Sub spawn-ttl-reaper-${Environment}-spot-replacement-stranded
-      AlarmDescription: >
+      AlarmDescription: !Sub >
         A persistent Spot request spawn made launched a replacement instance after
         its original was terminated outside spawn, and the reaper could not
-        terminate it. The request is cancelled, so nothing more launches, but the
-        instance bills until someone terminates it. An untagged instance is
-        outside the reaper's tag-scoped ec2:TerminateInstances grant by design.
-        The log line names the account, region and instance, and gives the exact
-        aws ec2 terminate-instances command.
+        terminate it. The request is already cancelled, so nothing more launches,
+        but the instance bills until a person terminates it. To act: in log group
+        /aws/lambda/spawn-ttl-reaper-${Environment}, filter for
+        "SPOT REPLACEMENT NOT TERMINATED". Each line names the account, region,
+        instance and Spot request, and gives two commands. Run the
+        describe-instances check, which must print the request id, then the
+        terminate-instances command, both with credentials for that account. The
+        reaper cannot do this itself: the replacement is untagged, its
+        TerminateInstances grant is scoped to spawn:managed=true, and no IAM
+        condition key ties an instance to its Spot request (spawn#984).
       Namespace: !Sub spawn/ttl-reaper/${Environment}
       MetricName: ReaperSpotReplacementStranded
       Statistic: Sum
