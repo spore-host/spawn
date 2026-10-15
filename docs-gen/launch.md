@@ -126,7 +126,7 @@ spawn launch <name> [flags]
 | `--slack-workspace` |  | string |  | Slack workspace ID for lifecycle notifications (e.g. T03NE3GTY) |
 | `--spot-max-price` |  | string |  | Max Spot price |
 | `--spot-webhook-url` |  | string |  | On spot interruption, spored POSTs a fire-once, best-effort notice to this URL within the ~2-min window (off-node consumers; empty = disabled) |
-| `--spot` |  | bool |  | Launch as Spot instance |
+| `--spot` |  | bool |  | Launch as Spot instance. With a stop-based lifecycle (--idle-timeout, --on-complete stop\|hibernate, --hibernate) the request is persistent so EC2 can stop it; otherwise one-time |
 | `--strata-formation` |  | string |  | Strata formation to activate (e.g. r-research@2024.03) |
 | `--strata-profile` |  | string |  | Path to a Strata profile YAML file |
 | `--strata-registry` |  | string | `s3://strata-registry` | Strata registry S3 URL |

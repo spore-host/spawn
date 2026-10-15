@@ -274,7 +274,7 @@ func lifecycleProtectionBlockAt(instance *aws.InstanceInfo, rate statusRate) str
 	}
 
 	if instance.IdleTimeout != "" {
-		fmt.Fprintf(&b, "  Idle timeout:          %s (stops the instance when idle; never terminates)\n", instance.IdleTimeout)
+		fmt.Fprintf(&b, "  Idle timeout:          %s (%s)\n", instance.IdleTimeout, idleActionDescription(instance))
 	}
 
 	return b.String()

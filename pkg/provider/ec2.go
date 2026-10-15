@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/spawn/pkg/observability"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
+	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
@@ -147,9 +148,13 @@ func (p *EC2Provider) RefreshConfig(ctx context.Context) error {
 func (p *EC2Provider) Terminate(ctx context.Context, reason string) error {
 	log.Printf("Terminating EC2 instance %s (reason: %s)", p.identity.InstanceID, reason)
 
-	_, err := p.ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
-		InstanceIds: []string{p.identity.InstanceID},
-	})
+	// Cancel this instance's Spot request first (#922). A persistent request —
+	// what a --spot launch with a stop/hibernate lifecycle gets — reopens when its
+	// instance terminates and EC2 launches a replacement. Best-effort: spored
+	// terminates at the TTL, on-complete and the cost limit, and an instance past
+	// any of those must die even if the cancel is refused.
+	err := spotrequest.Terminate(ctx, p.ec2Client, p.identity.Region, p.identity.InstanceID, spotrequest.BestEffort,
+		func(msg string) { log.Printf("Warning: %s", msg) })
 
 	if err != nil {
 		return fmt.Errorf("failed to terminate: %w", err)

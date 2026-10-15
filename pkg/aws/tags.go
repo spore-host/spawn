@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/spawn/pkg/spotrequest"
 )
 
 // propagatableSnapshotTags filters a snapshot's tags down to the ones worth
@@ -195,6 +196,13 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 
 	if config.IdleTimeout != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:idle-timeout"), Value: aws.String(config.IdleTimeout)})
+	}
+
+	// Which kind of Spot request this is (#922): `spawn stop` and `spawn status`
+	// need to know whether EC2 will accept a stop, and only a persistent request
+	// allows one.
+	if config.Spot && !(config.CapacityBlock && config.ReservationID != "") {
+		tags = append(tags, types.Tag{Key: aws.String(spotrequest.TypeTag), Value: aws.String(spotRequestType(config))})
 	}
 
 	if config.HibernateOnIdle {

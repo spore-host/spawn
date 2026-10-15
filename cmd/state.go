@@ -10,6 +10,7 @@ import (
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/spotrequest"
 )
 
 var (
@@ -120,7 +121,11 @@ func stopOrHibernate(identifier string, hibernate bool, skipConfirm bool) error 
 	if err != nil {
 		return err
 	}
+	return stopOrHibernateInstance(ctx, client, instance, hibernate, skipConfirm)
+}
 
+// stopOrHibernateInstance stops or hibernates an already-resolved instance.
+func stopOrHibernateInstance(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo, hibernate, skipConfirm bool) error {
 	// Check current state
 	if instance.State == "stopped" {
 		return fmt.Errorf("instance %s is already stopped", instance.InstanceID)
@@ -135,6 +140,13 @@ func stopOrHibernate(identifier string, hibernate bool, skipConfirm bool) error 
 	if hibernate {
 		action = "hibernate"
 		actionTitle = "Hibernate"
+	}
+
+	// Before anything is printed or saved: EC2 refuses to stop an instance from a
+	// one-time Spot request, and this used to print "Saving remaining TTL" and
+	// then fail with UnsupportedOperation (#922).
+	if err := oneTimeSpotStopError(instance, action); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "Found instance in %s (state: %s)\n", instance.Region, instance.State)
@@ -169,7 +181,7 @@ func stopOrHibernate(identifier string, hibernate bool, skipConfirm bool) error 
 	// while the instance is down; `spawn start` reconciles it (a stop/start
 	// reassigns the public IP, which the pinned session can't follow on its own).
 	// Local deprovision runs only on `spawn plugin remove` / `spawn terminate`.
-	err = client.StopInstance(ctx, instance.Region, instance.InstanceID, hibernate)
+	err := client.StopInstance(ctx, instance.Region, instance.InstanceID, hibernate)
 	if err != nil {
 		return fmt.Errorf("failed to %s instance: %w", action, err)
 	}
@@ -279,6 +291,12 @@ func stopOrHibernateJobArray(ctx context.Context, hibernate bool) error {
 
 		if inst.State != "running" {
 			fmt.Fprintf(os.Stderr, "⏭  Skipping %s (state: %s)\n", inst.InstanceID, inst.State)
+			continue
+		}
+
+		if err := oneTimeSpotStopError(&inst, action); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Cannot %s %s: one-time Spot instance (EC2 cannot stop it)\n", action, inst.InstanceID)
+			failedInstances = append(failedInstances, inst.InstanceID)
 			continue
 		}
 
@@ -546,4 +564,23 @@ func startJobArray(ctx context.Context) error {
 // in pkg/config so the CLI and the config-file path stay in lockstep.
 func parseDuration(ttl string) (time.Duration, error) {
 	return spawnconfig.ParseDurationE(ttl)
+}
+
+// oneTimeSpotStopError explains, before any work is done, why an instance from a
+// one-time Spot request cannot be stopped or hibernated: EC2 only stops Spot
+// instances from PERSISTENT requests, and rejects the call with
+// UnsupportedOperation (#922). spawn launches --spot as persistent when the
+// lifecycle needs a stop (an idle timeout, --on-complete stop|hibernate,
+// --hibernate); a terminate-only --spot launch, and any launched before that, is
+// one-time. nil when the stop can go ahead.
+func oneTimeSpotStopError(instance *aws.InstanceInfo, action string) error {
+	if !instance.SpotInstance || !spotrequest.IsOneTime(instance.Tags) {
+		return nil
+	}
+	return fmt.Errorf("cannot %s %s: it is a Spot instance from a one-time Spot request, and EC2 can only "+
+		"stop Spot instances from persistent requests. Nothing was changed.\n"+
+		"  To end it:      spawn terminate %s\n"+
+		"  To get a stoppable Spot instance, launch with a stop-based lifecycle — --idle-timeout, "+
+		"--on-complete stop|hibernate, or --hibernate — which makes spawn request persistent Spot",
+		action, instance.InstanceID, instance.InstanceID)
 }

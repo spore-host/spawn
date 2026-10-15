@@ -289,6 +289,15 @@ Resources:
                   Condition:
                     StringEquals:
                       ec2:ResourceTag/spawn:managed: 'true'
+                # #922: cancel a persistent Spot request before terminating its
+                # instance, or EC2 launches a replacement. Same tag rail.
+                - Effect: Allow
+                  Action:
+                    - ec2:CancelSpotInstanceRequests
+                  Resource: '*'
+                  Condition:
+                    StringEquals:
+                      ec2:ResourceTag/spawn:managed: 'true'
                 # #210 ephemeral-orphan net. FSx exposes no resource-tag condition
                 # key for DeleteFileSystem, so the guard is the reaper's own check
                 # (spawn:managed, no live lease, past the grace period) rather than

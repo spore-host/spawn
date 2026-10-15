@@ -939,11 +939,16 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	statements = append(statements, sporedTagPermissions)
 	statements = append(statements, reaperControlTagDeny())
 
+	// ec2:CancelSpotInstanceRequests (#922): spored cancels its own persistent
+	// Spot request before it self-terminates, or EC2 launches a replacement. The
+	// request carries the instance's tags, so the same spawn:managed condition
+	// scopes it.
 	sporedActionPermissions := map[string]interface{}{
 		"Effect": "Allow",
 		"Action": []interface{}{
 			"ec2:TerminateInstances",
 			"ec2:StopInstances",
+			"ec2:CancelSpotInstanceRequests",
 		},
 		"Resource": "*",
 		"Condition": map[string]interface{}{
@@ -1397,7 +1402,8 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
       "Effect": "Allow",
       "Action": [
         "ec2:TerminateInstances",
-        "ec2:StopInstances"
+        "ec2:StopInstances",
+        "ec2:CancelSpotInstanceRequests"
       ],
       "Resource": "*",
       "Condition": {

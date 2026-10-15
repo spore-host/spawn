@@ -125,6 +125,9 @@ func TestOnboardPolicyConditionsEveryInstanceMutatingAction(t *testing.T) {
 		"ec2:StopInstances":      true,
 		"ec2:StartInstances":     true,
 		"ssm:StartSession":       true,
+		// #922: cancelling a persistent Spot request strands its stopped
+		// instance, so it is as instance-affecting as StopInstances.
+		"ec2:CancelSpotInstanceRequests": true,
 	}
 
 	seen := map[string]bool{}
