@@ -67,37 +67,10 @@ func sysIsProcessRunning(name string) bool {
 	return exec.Command("pgrep", "-x", name).Run() == nil
 }
 
-// sysCountActiveSessions returns login sessions with recent keyboard activity,
-// via `w -h -s` (idle column), falling back to `who` for raw presence.
+// sysCountActiveSessions returns the login sessions with keyboard input in the
+// last 5 minutes, from the idle time of each terminal (ttyidle.go, #953).
 func sysCountActiveSessions() int {
-	out, err := exec.Command("w", "-h", "-s").Output()
-	if err != nil {
-		who, werr := exec.Command("who").Output()
-		if werr != nil {
-			return 0
-		}
-		count := 0
-		for _, line := range strings.Split(strings.TrimSpace(string(who)), "\n") {
-			if strings.TrimSpace(line) != "" {
-				count++
-			}
-		}
-		return count
-	}
-	active := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		if isRecentActivity(fields[3], 5*time.Minute) {
-			active++
-		}
-	}
-	return active
+	return countTTYSessions(time.Now())
 }
 
 // sysCountActivePortConnections counts ESTABLISHED connections on the given
@@ -134,45 +107,6 @@ func sysCountActivePortConnections(ports []int) int {
 		}
 	}
 	return count
-}
-
-// sysHasActiveTerminals reports whether interactive PTYs exist (/dev/pts).
-func sysHasActiveTerminals() bool {
-	entries, err := os.ReadDir("/dev/pts")
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if entry.Name() == "ptmx" {
-			continue
-		}
-		if _, err := strconv.Atoi(entry.Name()); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-// sysHasRecentUserActivity reports recent logins (last 5 min) via `last`,
-// falling back to /var/log/wtmp mtime.
-func sysHasRecentUserActivity() bool {
-	output, err := exec.Command("last", "-s", "-5min", "-w").Output()
-	if err != nil {
-		fileInfo, serr := os.Stat("/var/log/wtmp")
-		if serr != nil {
-			return false
-		}
-		return time.Since(fileInfo.ModTime()) < 5*time.Minute
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "wtmp") && !strings.HasPrefix(line, "reboot") {
-			if !strings.Contains(line, "system boot") && !strings.Contains(line, "down") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // sysWarnUsers broadcasts a message to logged-in terminals (wall).

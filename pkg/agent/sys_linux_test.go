@@ -4,8 +4,11 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSysShellCommand_RunAsUser verifies the pre-stop hook is wrapped in
@@ -53,5 +56,36 @@ func TestShellQuoteArg(t *testing.T) {
 		if got := shellQuoteArg(in); got != want {
 			t.Errorf("shellQuoteArg(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The idle decision with an SSH session left open and idle for two hours, and
+// every other signal idle: the instance is idle. Before #953 the PTY's existence
+// ("Not idle: Active terminals present") blocked idle-stop for ever.
+func TestIsIdle_IdlePTYDoesNotBlockIdleStop(t *testing.T) {
+	now := time.Now()
+	origRoot, origLines := sessionDevRoot, loginTTYLines
+	t.Cleanup(func() { sessionDevRoot, loginTTYLines = origRoot, origLines })
+	sessionDevRoot = fakeDev(t, now, map[string]time.Duration{"pts/0": 2 * time.Hour})
+	loginTTYLines = func() []string { return []string{"pts/0"} }
+
+	stubCPUTimes(t, [2]int64{1000, 1000}, [2]int64{1990, 2000}, [2]int64{2980, 3000})
+	stubNetworkBytes(t, [2]int64{5000, 5000})
+	stubDiskIOBytes(t, 4096)
+	a := newTestAgent(t, nil)
+	_, _ = a.cpuUsage()
+	_, _, _ = a.networkBytes()
+	_, _, _ = a.diskIOBytes()
+
+	if !a.isIdle() {
+		t.Error("an idle PTY blocked the idle decision (#953)")
+	}
+
+	// And typing in it does block it.
+	if err := os.Chtimes(filepath.Join(sessionDevRoot, "pts", "0"), time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if a.isIdle() {
+		t.Error("a PTY with input just now did not count as an active session")
 	}
 }
