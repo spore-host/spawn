@@ -279,6 +279,15 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if onComplete != "" {
 		config.OnComplete = onComplete
 	}
+	// --on-idle hibernate / --hibernate-on-idle / --on-complete hibernate imply
+	// --hibernate (#949). EC2 hibernates only an instance launched configured for
+	// it; without this the idle or completion hibernate silently became a stop
+	// (RAM lost) and a persistent Spot request was interrupted by stop. Setting it
+	// here, not only in pkg/aws, is what makes the hibernation pre-flight, the
+	// dry-run plan and the cost estimate see it.
+	if config.HibernationRequested() {
+		config.Hibernate = true
+	}
 	if completionFile != "" {
 		config.CompletionFile = completionFile
 	}

@@ -379,7 +379,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// so a config that couldn't launch (e.g. --efa on a non-EFA type) surfaces the
 	// same actionable error instead of a misleading "estimate complete" (#124).
 	if estimateOnly {
-		if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, hibernate || config.HibernateOnIdle); err != nil {
+		if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, config.Hibernate); err != nil {
 			return err
 		}
 		// The same refusal a real launch gives (#1058); an estimate must not report
@@ -1334,7 +1334,7 @@ func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *a
 	// EFA, hibernation) BEFORE creating any AWS resources (IAM role, security
 	// group), so an unsupported combination fails fast with an actionable message
 	// instead of cryptically after several API calls (#110).
-	if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, hibernate || config.HibernateOnIdle); err != nil {
+	if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, config.Hibernate); err != nil {
 		return err
 	}
 	return nil

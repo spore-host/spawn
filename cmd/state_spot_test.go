@@ -129,7 +129,10 @@ func TestIdleActionDescription(t *testing.T) {
 		{"one-time spot", runningSpot(spotrequest.TypeOneTime), "can't be stopped", "stops the instance"},
 		{"persistent spot", runningSpot(spotrequest.TypePersistent), "stops the instance when idle", "can't"},
 		{"on-demand", &aws.InstanceInfo{Tags: map[string]string{}}, "stops the instance when idle", "can't"},
-		{"on-demand hibernate-on-idle", &aws.InstanceInfo{Tags: map[string]string{"spawn:hibernate-on-idle": "true"}}, "hibernates", "stops"},
+		{"on-demand hibernate-on-idle, configured", &aws.InstanceInfo{HibernationConfigured: true, Tags: map[string]string{"spawn:hibernate-on-idle": "true"}}, "hibernates", "stops"},
+		// #949: an instance not configured for hibernation is stopped, not
+		// hibernated — what --on-idle hibernate launched before the fix.
+		{"on-demand hibernate-on-idle, not configured", &aws.InstanceInfo{Tags: map[string]string{"spawn:hibernate-on-idle": "true"}}, "not configured", "hibernates the instance"},
 	}
 	for _, tc := range cases {
 		got := idleActionDescription(tc.inst)

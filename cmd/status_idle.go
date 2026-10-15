@@ -21,6 +21,13 @@ func idleActionDescription(instance *aws.InstanceInfo) string {
 			"it runs until its termination deadline or 'spawn terminate'"
 	}
 	if instance.Tags["spawn:hibernate-on-idle"] == "true" {
+		// #949: EC2 hibernates only an instance configured for it. Before then
+		// --on-idle hibernate did not configure it, and spored's hibernate falls
+		// back to a plain stop, so say what will really happen.
+		if !instance.HibernationConfigured {
+			return "stops the instance when idle: hibernation was requested, but the instance is not " +
+				"configured for it, so RAM is not kept; never terminates"
+		}
 		return "hibernates the instance when idle; never terminates"
 	}
 	return "stops the instance when idle; never terminates"

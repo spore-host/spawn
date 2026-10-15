@@ -143,6 +143,7 @@ field ImportWindowsISOInput.SecureBoot *bool
 field ImportWindowsISOInput.SemanticVersion string
 field ImportWindowsISOInput.URI string
 field InstanceInfo.AvailabilityZone string
+field InstanceInfo.HibernationConfigured bool
 field InstanceInfo.IAMRole string
 field InstanceInfo.IdleTimeout string
 field InstanceInfo.InstanceID string
@@ -400,6 +401,7 @@ func (*Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceID 
 func (*LaunchError) Error() string
 func (*LaunchError) Unwrap() error
 func (DisplayPrice) SourceLabel() string
+func (LaunchConfig) HibernationRequested() bool
 func (ManagedResource) IsRunningInstance() bool
 func (ReaperCoverage) Summary() string
 func AccountBase36(accountID string) string

@@ -305,7 +305,7 @@ func init() {
 	launchCmd.Flags().BoolVar(&capacityBlock, "capacity-block", false, "The --reservation-id is a Capacity Block for ML (sets MarketType=capacity-block); mutually exclusive with --spot (#216)")
 
 	// Behavior
-	launchCmd.Flags().BoolVar(&hibernate, "hibernate", false, "Enable hibernation")
+	launchCmd.Flags().BoolVar(&hibernate, "hibernate", false, "Configure the instance for hibernation (encrypted root sized for RAM). Implied by --on-idle hibernate and --on-complete hibernate")
 	launchCmd.Flags().StringVar(&ttl, "ttl", "", "Auto-terminate after duration (e.g., 8h, defaults to 1h idle if not set)")
 	launchCmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "Auto-terminate if idle (defaults to 1h if neither --ttl nor --idle-timeout set)")
 	launchCmd.Flags().BoolVar(&noTimeout, "no-timeout", false, "Disable automatic timeout (NOT RECOMMENDED: creates zombie risk)")

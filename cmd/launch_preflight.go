@@ -187,9 +187,10 @@ func preflightInstanceConstraints(ctx context.Context, awsClient *aws.Client, co
 			config.InstanceType, instanceFamilyHint(config.InstanceType))
 	}
 
-	// --hibernate / --hibernate-on-idle: must support hibernation.
+	// --hibernate, --on-idle hibernate, --on-complete hibernate: must support
+	// hibernation (#949: each of them configures it).
 	if wantHibernate && !caps.Hibernation {
-		return fmt.Errorf("instance type %q does not support hibernation (required for --hibernate/--hibernate-on-idle).\n       Choose a hibernation-capable type, or drop the hibernation flag", config.InstanceType)
+		return fmt.Errorf("instance type %q does not support hibernation (required by %s).\n       Choose a hibernation-capable type, or use stop instead of hibernate", config.InstanceType, hibernationRequestedBy(config))
 	}
 
 	// --mpi: needs a cluster placement group UNLESS it's an HPC type (which spawn
@@ -425,4 +426,25 @@ func setupSSHKey(ctx context.Context, awsClient *aws.Client, region, amiID strin
 		return "", fmt.Errorf("failed to import key pair: %w", err)
 	}
 	return kp.Name, nil
+}
+
+// hibernationRequestedBy names the flags that asked for hibernation, for the
+// pre-flight refusal: since #949 --on-idle hibernate and --on-complete hibernate
+// configure hibernation too, so a message naming only --hibernate would point at
+// a flag the user never passed.
+func hibernationRequestedBy(config *aws.LaunchConfig) string {
+	var by []string
+	if hibernate {
+		by = append(by, "--hibernate")
+	}
+	if config.HibernateOnIdle {
+		by = append(by, "--on-idle hibernate")
+	}
+	if strings.EqualFold(strings.TrimSpace(config.OnComplete), "hibernate") {
+		by = append(by, "--on-complete hibernate")
+	}
+	if len(by) == 0 {
+		return "--hibernate"
+	}
+	return strings.Join(by, ", ")
 }
