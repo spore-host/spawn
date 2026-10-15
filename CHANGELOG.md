@@ -64,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status --verbose` prints them to stderr; `spawn status --verbose` relays them
   from an older spored that still emits them. Errors from spored are still
   shown.
+- **The hibernation preflight error no longer ends in a full stop** (#923), matching
+  its EFA and MPI siblings, so it reads cleanly when wrapped. The wording is
+  otherwise unchanged. This is the only user-visible text change from making
+  staticcheck blocking. Everything else in that change is dead-code removal,
+  test fixes, two small migrations off deprecated APIs with identical output
+  (`parser.ParseDir` and the `ecdsa.PublicKey.X/.Y` coordinates embedded in
+  the Windows spored install script), and line-scoped `//lint:ignore`s, each
+  with a reason.
 
 ### Removed
 
@@ -254,6 +262,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both spored policies now grant `PutItem`, `UpdateItem`, `DeleteItem` and
   `Query` on that one table, in the instance's own account. Existing roles get
   the grant on the next launch.
+- **`make check`'s staticcheck step can fail** (#923). It was
+  `staticcheck ./... || echo "staticcheck not installed"`, and because `||`
+  fires on any non-zero exit, findings were reported as a missing tool and the
+  step passed. 67 findings had accumulated on main. They are fixed, the step
+  now fails on findings and skips (with a message) only when the binary is
+  absent, and CI runs a pinned, checksum-verified staticcheck 2026.2.2 on
+  every push and PR. CI previously ran no linter.
 
 ### Security
 

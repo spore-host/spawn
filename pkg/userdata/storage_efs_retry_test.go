@@ -215,34 +215,6 @@ func efsScriptWithIP(t *testing.T) string {
 	return script
 }
 
-// stubBinDNSFails writes a mount stub that fails for the DNS NAME and succeeds
-// for the IP — which is exactly what a real instance did: six DNS failures over
-// ~60s, then a first-try success by IP with identical options.
-func stubBinDNSFails(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	mount := `#!/bin/sh
-for a in "$@"; do
-  case "$a" in
-    *amazonaws.com:/*) echo "dns" >> "$SPAWN_TEST_LOG"
-                       echo "mount.nfs4: Failed to resolve server" >&2; exit 32 ;;
-    172.31.1.24:/)     echo "ip" >> "$SPAWN_TEST_LOG"; exit 0 ;;
-  esac
-done
-echo "unknown" >> "$SPAWN_TEST_LOG"; exit 32
-`
-	for name, body := range map[string]string{
-		"mount":      mount,
-		"mountpoint": "#!/bin/sh\nexit 1\n",
-		"sleep":      "#!/bin/sh\nexit 0\n",
-	} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-	return dir
-}
-
 // TestEFSMountsByTheIPFirst is spawn#718: the IP is the PRIMARY path, not a
 // fallback.
 //

@@ -200,26 +200,32 @@ func TestPublicPackagesDocumented(t *testing.T) {
 // breaks a consumer exactly as surely as changing a function signature, and it
 // is the easier of the two to do by accident.
 func exportedDecls(dir string) ([]string, error) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	// Every non-test .go file in the directory, parsed one by one. This is what
+	// the deprecated parser.ParseDir did with this filter (#923): it too ignored
+	// build tags, and grouping by package name was never used here.
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-
+	fset := token.NewFileSet()
 	var out []string
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				switch d := decl.(type) {
-				case *ast.FuncDecl:
-					if s := renderFunc(fset, d); s != "" {
-						out = append(out, s)
-					}
-				case *ast.GenDecl:
-					out = append(out, renderGenDecl(fset, d)...)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if s := renderFunc(fset, d); s != "" {
+					out = append(out, s)
 				}
+			case *ast.GenDecl:
+				out = append(out, renderGenDecl(fset, d)...)
 			}
 		}
 	}

@@ -21,10 +21,11 @@ import (
 
 // QueueRunner executes a batch job queue sequentially
 type QueueRunner struct {
-	config     *queue.QueueConfig
-	state      *QueueState
-	stateFile  string
-	s3Client   *s3.Client
+	config    *queue.QueueConfig
+	state     *QueueState
+	stateFile string
+	s3Client  *s3.Client
+	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
 	s3Uploader *manager.Uploader
 	ctx        context.Context
 	cancelFunc context.CancelFunc
@@ -102,10 +103,11 @@ func NewQueueRunnerWithAWSConfig(ctx context.Context, queueFile, stateFile strin
 	runnerCtx, cancel := context.WithCancel(ctx)
 
 	return &QueueRunner{
-		config:     cfg,
-		state:      state,
-		stateFile:  stateFile,
-		s3Client:   s3Client,
+		config:    cfg,
+		state:     state,
+		stateFile: stateFile,
+		s3Client:  s3Client,
+		//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
 		s3Uploader: manager.NewUploader(s3Client),
 		ctx:        runnerCtx,
 		cancelFunc: cancel,
@@ -395,6 +397,7 @@ func (r *QueueRunner) uploadFile(localPath, bucket, key string) error {
 	}
 	defer func() { _ = file.Close() }()
 
+	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
 	_, err = r.s3Uploader.Upload(r.ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),

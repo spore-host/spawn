@@ -34,8 +34,9 @@ type StagingMetadata struct {
 type Client struct {
 	s3Client     *s3.Client
 	dynamoClient *dynamodb.Client
-	uploader     *manager.Uploader
-	accountID    string
+	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
+	uploader  *manager.Uploader
+	accountID string
 }
 
 // NewClient creates a new staging client
@@ -44,8 +45,9 @@ func NewClient(cfg aws.Config, accountID string) *Client {
 	return &Client{
 		s3Client:     s3Client,
 		dynamoClient: dynamodb.NewFromConfig(cfg),
-		uploader:     manager.NewUploader(s3Client),
-		accountID:    accountID,
+		//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
+		uploader:  manager.NewUploader(s3Client),
+		accountID: accountID,
 	}
 }
 
@@ -152,6 +154,7 @@ func (c *Client) UploadScheduleParams(ctx context.Context, localPath, scheduleID
 	}
 
 	// Upload to S3
+	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
 	_, err = c.uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(s3Key),

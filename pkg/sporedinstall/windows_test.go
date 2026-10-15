@@ -334,3 +334,43 @@ func TestInstallSporedPs1IsGenerated(t *testing.T) {
 		}
 	}
 }
+
+// p256Coordinates must return the key's own point, each coordinate exactly 32
+// bytes, including when a coordinate's leading byte is zero — the case .NET's
+// fixed-width ECPoint rejects if left unpadded. Round-tripped through the
+// standard library's own decoder rather than compared with PublicKey.X/.Y, which
+// are deprecated (#923).
+func TestP256CoordinatesRoundTripFixedWidth(t *testing.T) {
+	sawShort := false
+	for i := 0; i < 5000 && (i < 50 || !sawShort); i++ {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		x, y, err := p256Coordinates(string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(x) != 64 || len(y) != 64 {
+			t.Fatalf("coordinates are %d/%d hex chars, want 64 each", len(x), len(y))
+		}
+		if strings.HasPrefix(x, "00") || strings.HasPrefix(y, "00") {
+			sawShort = true
+		}
+		pt, _ := hex.DecodeString("04" + x + y)
+		back, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), pt)
+		if err != nil {
+			t.Fatalf("coordinates do not decode as a P-256 point: %v", err)
+		}
+		if !back.Equal(&key.PublicKey) {
+			t.Fatal("coordinates decode to a different key")
+		}
+	}
+	if !sawShort {
+		t.Fatal("never exercised a coordinate with a leading zero byte")
+	}
+}

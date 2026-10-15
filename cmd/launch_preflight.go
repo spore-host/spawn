@@ -156,7 +156,7 @@ func preflightInstanceConstraints(ctx context.Context, awsClient *aws.Client, co
 
 	// --hibernate / --hibernate-on-idle: must support hibernation.
 	if wantHibernate && !caps.Hibernation {
-		return fmt.Errorf("instance type %q does not support hibernation (required for --hibernate/--hibernate-on-idle).\n       Choose a hibernation-capable type, or drop the hibernation flag.", config.InstanceType)
+		return fmt.Errorf("instance type %q does not support hibernation (required for --hibernate/--hibernate-on-idle).\n       Choose a hibernation-capable type, or drop the hibernation flag", config.InstanceType)
 	}
 
 	// --mpi: needs a cluster placement group UNLESS it's an HPC type (which spawn
@@ -208,6 +208,7 @@ func windowsLifecycleGuard(config *aws.LaunchConfig) error {
 	// (TTL or idle) so a Windows box can't run unbounded if the agent fails to
 	// install; the server-side reaper (#70) backstops the TTL deadline regardless.
 	if config.TTL == "" && config.IdleTimeout == "" {
+		//lint:ignore ST1005 "Windows" is a proper noun, and this is a sentence shown to the user as-is (#923)
 		return fmt.Errorf("Windows instances require a timeout: set --ttl (hard deadline) " +
 			"and/or --idle-timeout. The in-instance agent enforces these and the server-side " +
 			"reaper backstops the TTL deadline.\n  Re-run with e.g. --ttl 8h")

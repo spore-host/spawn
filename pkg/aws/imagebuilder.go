@@ -280,10 +280,12 @@ func (c *Client) UploadISOToS3(ctx context.Context, region, bucket, key, localPa
 		}
 	}
 
+	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
 	uploader := manager.NewUploader(s3Client, func(u *manager.Uploader) {
 		u.PartSize = 64 * 1024 * 1024 // 64 MiB parts
 		u.Concurrency = 4
 	})
+	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
 	if _, err := uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),

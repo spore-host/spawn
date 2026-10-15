@@ -189,6 +189,40 @@ jobs:
       - name: Release GOOS vet gate
         run: scripts/release-goos-vet.sh
 
+      # staticcheck gate (#923). CI ran no linter at all, and `make check`'s
+      # staticcheck step could not fail (`|| echo "not installed"` swallowed the
+      # exit-1-on-findings), so 67 findings accumulated on main unseen.
+      #
+      # Run here unconditionally, NOT via `make check-staticcheck`: that target
+      # skips when the binary is absent, which is right on a laptop and wrong in
+      # CI, where a skipped linter reads as a passing one.
+      #
+      # Verified the same way as gitleaks (#885): pinned version AND pinned hash,
+      # the hash held here rather than read from the release's .sha256 file,
+      # because a file fetched alongside the download can be replaced alongside
+      # it. Cross-checked against the published
+      # staticcheck_linux_amd64.tar.gz.sha256 for 2026.2.2 (v0.8.2) when pinned.
+      #
+      # Upgrading staticcheck can add checks, so expect new findings with a bump;
+      # fix them (or a narrowly scoped, justified //lint:ignore) in the same PR.
+      - name: Install staticcheck
+        run: |
+          VER=2026.2.2
+          SHA256=14c081e0f0d05b5a4d4c53fd3d357d4a5af9d20501465fefc9024ee828d3aa5c
+          T=staticcheck_linux_amd64.tar.gz
+          # No sudo: install into the job's own temp dir and put it on PATH, so
+          # this works on a self-hosted runner as well as a GitHub-hosted one.
+          D="$RUNNER_TEMP/staticcheck-$VER"
+          mkdir -p "$D"
+          curl -sSLf -o "$D/$T" "https://github.com/dominikh/go-tools/releases/download/${VER}/$T"
+          echo "$SHA256  $D/$T" | sha256sum -c -
+          tar -xzf "$D/$T" -C "$D" staticcheck/staticcheck
+          echo "$D/staticcheck" >> "$GITHUB_PATH"
+          "$D/staticcheck/staticcheck" -version
+
+      - name: staticcheck
+        run: staticcheck ./...
+
       # Docs drift gate: the committed command/flag reference (docs-gen/) is
       # generated from the CLI via `gen-docs`. Regenerate and fail if it's stale,
       # so a flag/command change can't merge without its reference update. The

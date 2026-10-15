@@ -149,7 +149,6 @@ func (f fakeFetcher) Fetch(_ context.Context, uri string) ([]byte, error) {
 // scripted exit code / error per task id.
 type recordingExecer struct {
 	mu       sync.Mutex
-	ranDirs  map[string]string // taskID(from spec) → dir; but specJSON is opaque, so key by call order
 	calls    int
 	exitFor  func(call int) (int, error)
 	execedIn []string

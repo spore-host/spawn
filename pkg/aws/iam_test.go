@@ -143,7 +143,7 @@ func TestHashPolicies_InlinePolicyJSONAffectsRoleName(t *testing.T) {
 		t.Error("different InlinePolicyJSON should yield different role names")
 	}
 	// Deterministic: same config → same name.
-	if client.generateRoleName(withScoped) != client.generateRoleName(withScoped) {
+	if first, second := client.generateRoleName(withScoped), client.generateRoleName(withScoped); first != second {
 		t.Error("generateRoleName should be deterministic for the same config")
 	}
 }
