@@ -272,3 +272,27 @@ func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) 
 func shellQuoteArg(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// sysComputeClockPath is where the daemon publishes its compute clock for
+// `spored status` (#896). /run is a tmpfs on every systemd distro spawn
+// supports, so the file cannot outlive the boot it describes: a stop/start
+// clears it and the next daemon start rewrites it.
+func sysComputeClockPath() string { return "/run/spored/compute-clock.json" }
+
+// sysBootTime returns when the running kernel booted, from /proc/uptime, or the
+// zero time when it cannot be read.
+func sysBootTime() time.Time {
+	data, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return time.Time{}
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return time.Time{}
+	}
+	secs, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || secs <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(-time.Duration(secs * float64(time.Second)))
+}

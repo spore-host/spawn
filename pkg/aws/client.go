@@ -671,6 +671,12 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		}
 	}
 
+	// Best-effort: record what this spot instance actually pays, so spored and
+	// `spawn status` don't cost it at the on-demand rate (#896).
+	if launchConfig.Spot {
+		recordLaunchSpotPrice(ctx, ec2Client, result.Instances[0])
+	}
+
 	return newLaunchResult(result.Instances[0], launchConfig.Name, launchConfig.Region, launchConfig.KeyName), nil
 }
 

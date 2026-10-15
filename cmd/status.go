@@ -154,6 +154,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	output := stdoutBuf.String()
 
+	// One rate for every cost line spawn adds: for a spot instance, its spot
+	// price rather than the on-demand rate (#896).
+	rate := resolveStatusRate(ctx, instance, clientSpotPriceLookup(client))
+
 	if jsonOut {
 		// JSON contract: stdout carries ONLY spored's JSON, verbatim. The
 		// supplementary text notices below (lifecycle protection, DNS status,
@@ -163,8 +167,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		// to stderr instead of dropping them.
 		fmt.Print(output)
 		fmt.Fprint(os.Stderr, ttlReconciliationNotice(instance, output))
-		fmt.Fprint(os.Stderr, lifecycleProtectionBlock(instance))
-		fmt.Fprint(os.Stderr, renderBillableResources(instance))
+		fmt.Fprint(os.Stderr, lifecycleProtectionBlockAt(instance, rate))
+		fmt.Fprint(os.Stderr, renderBillableResourcesAt(instance, rate))
 		fmt.Fprint(os.Stderr, dnsStatusNotice(instance))
 		fmt.Fprint(os.Stderr, fsxDRAStatusNotice(instance))
 		fmt.Fprint(os.Stderr, sporedUpgradeNotice(instance.Tags["spawn:spored-version"], output, instance.InstanceID))
@@ -172,10 +176,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Print(output)
+	// spored writes its times in UTC (it cannot know the operator's zone);
+	// re-render them like spawn's own so one screen uses one format (#896). The
+	// notices below parse the ORIGINAL output.
+	fmt.Print(localizeSporedTimes(output, statusLocation()))
 	fmt.Print(ttlReconciliationNotice(instance, output))
-	fmt.Print(lifecycleProtectionBlock(instance))
-	fmt.Print(renderBillableResources(instance))
+	fmt.Print(lifecycleProtectionBlockAt(instance, rate))
+	fmt.Print(renderBillableResourcesAt(instance, rate))
 	fmt.Print(dnsStatusNotice(instance))
 	fmt.Print(fsxDRAStatusNotice(instance))
 	fmt.Print(sporedUpgradeNotice(instance.Tags["spawn:spored-version"], output, instance.InstanceID))
@@ -203,6 +210,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 // pay for two extra AWS calls on every invocation, the line points at the command
 // that answers it for real.
 func lifecycleProtectionBlock(instance *aws.InstanceInfo) string {
+	return lifecycleProtectionBlockAt(instance, tagStatusRate(instance))
+}
+
+// lifecycleProtectionBlockAt is lifecycleProtectionBlock with the compute rate
+// already resolved, so a spot instance's ceiling is its spot price (#896).
+func lifecycleProtectionBlockAt(instance *aws.InstanceInfo, rate statusRate) string {
 	// Only meaningful for a spawn-managed instance that's actually running.
 	if instance.Tags["spawn:managed"] != "true" {
 		return ""
@@ -224,11 +237,11 @@ func lifecycleProtectionBlock(instance *aws.InstanceInfo) string {
 	if haveDeadline {
 		remaining := time.Until(deadline)
 		if remaining > 0 {
-			fmt.Fprintf(&b, "  Termination deadline:  %s (in %s)\n",
-				deadline.Local().Format("2006-01-02 15:04 MST"), formatDuration(remaining))
+			fmt.Fprintf(&b, "  Termination deadline:  %s, in %s\n",
+				formatStatusTime(deadline, statusLocation()), formatDuration(remaining))
 		} else {
-			fmt.Fprintf(&b, "  Termination deadline:  %s (past due — terminates on next check)\n",
-				deadline.Local().Format("2006-01-02 15:04 MST"))
+			fmt.Fprintf(&b, "  Termination deadline:  %s, past due — terminates on next check\n",
+				formatStatusTime(deadline, statusLocation()))
 		}
 
 		// Worst-case compute cost = on-demand rate × time from launch to deadline.
@@ -239,11 +252,21 @@ func lifecycleProtectionBlock(instance *aws.InstanceInfo) string {
 		// resolved at launch time (#533), and re-deriving it independently would
 		// let this display drift from what --cost-limit is actually enforced
 		// against.
-		if rate := pricePerHour(instance); rate > 0 && !instance.LaunchTime.IsZero() {
+		//
+		// A spot instance's ceiling is at its spot price (#896) — it used to be
+		// the on-demand rate under a "(spot)" label. Spot prices move, and a spot
+		// instance's default max price is the on-demand rate, so that figure stays
+		// beside it as the bound.
+		if rate.PerHour > 0 && !instance.LaunchTime.IsZero() {
 			maxHours := deadline.Sub(instance.LaunchTime).Hours()
 			if maxHours > 0 {
-				fmt.Fprintf(&b, "  Max compute cost:      ~$%.2f by deadline (on-demand rate, compute only; idle-stop usually ends it sooner)\n",
-					rate*maxHours)
+				if rate.SpotPriced && rate.OnDemand > 0 {
+					fmt.Fprintf(&b, "  Max compute cost:      ~$%.2f by deadline at the %s (~$%.2f at on-demand); compute only, idle-stop usually ends it sooner\n",
+						rate.PerHour*maxHours, rate.Basis, rate.OnDemand*maxHours)
+				} else {
+					fmt.Fprintf(&b, "  Max compute cost:      ~$%.2f by deadline (%s, compute only; idle-stop usually ends it sooner)\n",
+						rate.PerHour*maxHours, rate.rateNote())
+				}
 			}
 		}
 	} else if instance.TTL != "" {
@@ -303,12 +326,12 @@ func ttlReconciliationNotice(instance *aws.InstanceInfo, statusOutput string) st
 		return fmt.Sprintf("\n%s Lifecycle mismatch: spored (on-instance) could not resolve a TTL, but the "+
 			"spawn:ttl-deadline tag (%s) is already past due. Nothing on the instance is enforcing it — "+
 			"terminate manually if this instance should be gone.\n",
-			i18n.Symbol("warning"), deadline.UTC().Format("2006-01-02 15:04 UTC"))
+			i18n.Symbol("warning"), formatStatusTime(deadline, statusLocation()))
 	}
 	return fmt.Sprintf("\n%s Lifecycle mismatch: spored (on-instance) could not resolve a TTL, but "+
-		"spawn:ttl-deadline (read from tags with YOUR credentials) says %s (in %s). The instance cannot "+
+		"spawn:ttl-deadline (read from tags with YOUR credentials) says %s, in %s. The instance cannot "+
 		"see its own deadline, so nothing on it will enforce this automatically — see the likely cause below.\n",
-		i18n.Symbol("warning"), deadline.UTC().Format("2006-01-02 15:04 UTC"), formatDuration(remaining))
+		i18n.Symbol("warning"), formatStatusTime(deadline, statusLocation()), formatDuration(remaining))
 }
 
 // elasticIPNotice returns a line describing any Elastic IP attached to the
@@ -424,10 +447,15 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 		os.Exit(int(res.ResponseCode))
 	}
 
-	emitStatus(os.Stdout, os.Stderr, res.Stdout, res.Stderr, []string{
+	rate := resolveStatusRate(ctx, instance, clientSpotPriceLookup(client))
+	sporedOut := res.Stdout
+	if !jsonOut {
+		sporedOut = localizeSporedTimes(sporedOut, statusLocation()) // display only (#896)
+	}
+	emitStatus(os.Stdout, os.Stderr, sporedOut, res.Stderr, []string{
 		ttlReconciliationNotice(instance, res.Stdout),
-		lifecycleProtectionBlock(instance),
-		renderBillableResources(instance),
+		lifecycleProtectionBlockAt(instance, rate),
+		renderBillableResourcesAt(instance, rate),
 		dnsStatusNotice(instance),
 		fsxDRAStatusNotice(instance),
 		sporedUpgradeNotice(instance.Tags["spawn:spored-version"], res.Stdout, instance.InstanceID),

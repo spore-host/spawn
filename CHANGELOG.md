@@ -115,6 +115,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instances run their command directly. #910 proposes removing the stage
   runner or wiring it in.
 
+- **`spawn status` costs a spot instance at its spot price** (#896). The
+  instance row said `(spot)` but every figure used the on-demand rate, about
+  2.7x too high on an m8a.4xlarge. A spot launch now records the spot price for
+  its zone, type and platform (`spawn:spot-price-per-hour`), and compute cost,
+  cumulative cost, effective rate, max cost and the billable-resources row use
+  it. Instances launched before this are priced at the current spot price
+  (needs `ec2:DescribeSpotPriceHistory`). If no spot price can be found, the
+  on-demand rate is used and the output says it overstates. The on-demand rate
+  is still shown as the baseline, and `--cost-limit` is still enforced and
+  reported at the on-demand rate.
+- **A brand-new instance no longer shows `$0.00 (0s × ...)` and "100% lower than
+  continuous on-demand"** (#896). `spored status` runs as a fresh process. It
+  counted compute from its own start, which left only the
+  `spawn:compute-seconds` checkpoint, and that is 0 until the daemon's first
+  write. The daemon now publishes its compute clock (`/run/spored`), so status
+  counts real running time, including the boot time EC2 bills for. When the
+  clock is unavailable (older spored, Windows), status says the figure is from
+  the last checkpoint. Compute and cumulative cost show `—` until any running
+  time has been recorded. The effective rate and its saving show `—` for the
+  first minute, and on the checkpoint fallback.
+- **`spawn status` shows times in one format** (#896): local time with UTC in
+  parentheses, e.g. `2026-10-15 10:59 MST (17:59 UTC)`. Before, the TTL line
+  gave UTC and the termination deadline gave local time for the same moment.
+  spored's UTC timestamps are re-rendered to match, and so is the
+  lifecycle-mismatch warning.
+
 ## [0.128.2] - 2026-10-13
 
 ### Deprecated

@@ -1,0 +1,128 @@
+package agent
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// ComputeClock is the daemon's compute clock, published so a separate
+// `spored status` process can report real running time (#896).
+//
+// Why it has to be published: `spored status` is a fresh process. Its Agent's
+// startTime is "now", so TotalComputeSeconds was the spawn:compute-seconds tag
+// plus roughly zero — a checkpoint the daemon writes once a minute at best and
+// every five minutes after the first ten. On a brand-new instance that tag is
+// still 0, which is how `Compute cost: $0.00 (0s × ...)` appeared at 47s elapsed.
+// The same zero startTime made the boot term swallow all of elapsed, so the
+// breakdown said "boot" for time the instance had spent computing.
+//
+// The daemon knows the two numbers status needs — when it started and the
+// compute it inherited from earlier boots — so it writes them down once at
+// startup and status adopts them.
+type ComputeClock struct {
+	InstanceID  string    `json:"instance_id"`
+	StartedAt   time.Time `json:"started_at"`
+	BaseSeconds int64     `json:"base_seconds"`
+}
+
+// ComputeClockPath is where the daemon publishes its clock, or "" on platforms
+// with no boot-scoped location for it (see sysComputeClockPath).
+func ComputeClockPath() string { return sysComputeClockPath() }
+
+// ComputeClock returns this agent's clock: when it started counting and the
+// compute it carried over from before.
+func (a *Agent) ComputeClock() ComputeClock {
+	id := ""
+	if a.identity != nil {
+		id = a.identity.InstanceID
+	}
+	return ComputeClock{InstanceID: id, StartedAt: a.startTime.UTC(), BaseSeconds: a.computeSecondsBase}
+}
+
+// ComputeClockLive reports whether TotalComputeSeconds counts real running time
+// — true for the daemon itself and for a query agent that adopted the daemon's
+// clock. False means it is only the last spawn:compute-seconds checkpoint, which
+// can lag by minutes and is 0 until the daemon's first write.
+func (a *Agent) ComputeClockLive() bool { return a.liveClock }
+
+// WriteComputeClock atomically writes c to path, world-readable (status may run
+// unprivileged over SSM or SSH).
+func WriteComputeClock(path string, c ComputeClock) error {
+	if path == "" {
+		return errors.New("no compute clock path on this platform")
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// ReadComputeClock reads a clock written by WriteComputeClock.
+func ReadComputeClock(path string) (ComputeClock, error) {
+	var c ComputeClock
+	if path == "" {
+		return c, errors.New("no compute clock path on this platform")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return c, err
+	}
+	if err := json.Unmarshal(data, &c); err != nil {
+		return c, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return c, nil
+}
+
+// AdoptComputeClock makes this agent count compute from the daemon's clock
+// rather than its own construction time. It refuses a clock that cannot
+// describe this boot of this instance, because adopting a stale one would report
+// stopped time as compute — the opposite error, and a costlier one:
+//
+//   - a different instance id (an image baked from a running spore);
+//   - a start in the future, or none at all;
+//   - a start before the current kernel booted, when the boot time is knowable
+//     (a clock left over from before a stop/start).
+//
+// bootTime is injected for tests; pass the zero time when it is unknown.
+func (a *Agent) AdoptComputeClock(c ComputeClock, bootTime time.Time) error {
+	now := time.Now()
+	switch {
+	case c.StartedAt.IsZero():
+		return errors.New("compute clock has no start time")
+	case a.identity != nil && c.InstanceID != a.identity.InstanceID:
+		return fmt.Errorf("compute clock belongs to %s, not %s", c.InstanceID, a.identity.InstanceID)
+	case c.StartedAt.After(now.Add(time.Minute)):
+		return fmt.Errorf("compute clock starts in the future (%s)", c.StartedAt.Format(time.RFC3339))
+	case !bootTime.IsZero() && c.StartedAt.Before(bootTime.Add(-time.Minute)):
+		return fmt.Errorf("compute clock predates this boot (started %s, booted %s)",
+			c.StartedAt.Format(time.RFC3339), bootTime.UTC().Format(time.RFC3339))
+	case c.BaseSeconds < 0:
+		return errors.New("compute clock has a negative base")
+	}
+	a.startTime = c.StartedAt
+	a.computeSecondsBase = c.BaseSeconds
+	a.liveClock = true
+	return nil
+}
+
+// AdoptPublishedComputeClock reads the daemon's clock from its platform path and
+// adopts it, returning why not when it cannot.
+func (a *Agent) AdoptPublishedComputeClock() error {
+	c, err := ReadComputeClock(ComputeClockPath())
+	if err != nil {
+		return err
+	}
+	return a.AdoptComputeClock(c, sysBootTime())
+}

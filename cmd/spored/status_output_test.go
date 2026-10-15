@@ -68,7 +68,7 @@ func newTestReport(t *testing.T) *statusReport {
 	if err != nil {
 		t.Fatalf("agent.NewAgent: %v", err)
 	}
-	return buildStatusReport(ag, cfg, identity)
+	return buildStatusReport(ag, cfg, identity, false)
 }
 
 // captureStdout redirects os.Stdout for the duration of fn and returns

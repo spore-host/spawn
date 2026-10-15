@@ -519,6 +519,10 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 			if price, err := strconv.ParseFloat(*tag.Value, 64); err == nil {
 				config.PricePerHour = price
 			}
+		case tagprefix.Tag("spot-price-per-hour"):
+			if price, err := strconv.ParseFloat(*tag.Value, 64); err == nil && price > 0 {
+				config.SpotPricePerHour = price
+			}
 		case tagprefix.Tag("idle-cpu"):
 			if cpu, err := strconv.ParseFloat(*tag.Value, 64); err == nil {
 				config.IdleCPUPercent = cpu
