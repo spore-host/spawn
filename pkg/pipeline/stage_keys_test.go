@@ -65,6 +65,8 @@ func TestStageDataPolicyCoversTheStageKeysAndNoOthers(t *testing.T) {
 			StageOutputPrefix(prefix, "me") + "result.txt",
 			StageMarkerKey(prefix, "me", MarkerComplete),
 			StageMarkerKey(prefix, "me", MarkerFailed),
+			StageInstanceMarkerKey(prefix, "me", 3, MarkerComplete),
+			StageInstanceMarkerKey(prefix, "me", 3, MarkerFailed),
 		} {
 			if !objectGrant("s3:PutObject", key) {
 				t.Errorf("prefix %q: no s3:PutObject on %s", prefix, key)

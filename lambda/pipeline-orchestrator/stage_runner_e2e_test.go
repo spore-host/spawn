@@ -88,6 +88,7 @@ type e2eStage struct {
 	inDir    string
 	outDir   string
 	instance string
+	index    int
 }
 
 // runStageEndToEnd seeds Substrate with an upstream stage's output, launches a
@@ -95,7 +96,7 @@ type e2eStage struct {
 // RunInstances input (so its tags are exactly the ones the orchestrator
 // writes), writes the stage config the way launchStage does, and executes the
 // stage's user data with the real spored.
-func runStageEndToEnd(t *testing.T, command string) *e2eStage {
+func runStageEndToEnd(t *testing.T, command string, index int) *e2eStage {
 	t.Helper()
 	spored := buildSpored(t)
 	env := testutil.SubstrateServer(t)
@@ -110,7 +111,7 @@ func runStageEndToEnd(t *testing.T, command string) *e2eStage {
 		Stages: []pipeline.Stage{
 			{StageID: "preprocess", InstanceType: "t3.micro", InstanceCount: 1, Region: "us-east-1", Command: "true",
 				DataOutput: &pipeline.DataConfig{Mode: "s3", Paths: []string{"/data/*"}}},
-			{StageID: "train", InstanceType: "t3.micro", InstanceCount: 1, Region: "us-east-1", Timeout: "10m",
+			{StageID: "train", InstanceType: "t3.micro", InstanceCount: index + 1, Region: "us-east-1", Timeout: "10m",
 				Command:    strings.NewReplacer("$IN", inDir, "$OUT", outDir).Replace(command),
 				DependsOn:  []string{"preprocess"},
 				DataInput:  &pipeline.DataConfig{Mode: "s3", SourceStage: "preprocess", DestPath: inDir},
@@ -156,7 +157,7 @@ func runStageEndToEnd(t *testing.T, command string) *e2eStage {
 	}
 	ec2c := env.EC2Client()
 	ami := testutil.RegisterTestAMI(t, ec2c)
-	in := buildStageRunInstancesInput(state, def.GetStage("train"), getStageState(state, "train"), 0, ami, "ud", now)
+	in := buildStageRunInstancesInput(state, def.GetStage("train"), getStageState(state, "train"), index, ami, "ud", now)
 	in.IamInstanceProfile = nil // the emulator has no such profile; the profile is asserted elsewhere
 	out, err := ec2c.RunInstances(ctx, in)
 	if err != nil {
@@ -166,7 +167,7 @@ func runStageEndToEnd(t *testing.T, command string) *e2eStage {
 
 	calls, runErr := execUserData(t, userDataRun{
 		state: state, stageDef: def.GetStage("train"), stageState: getStageState(state, "train"),
-		region: "us-east-1", spored: spored,
+		region: "us-east-1", index: index, spored: spored,
 		env: []string{
 			"AWS_EC2_METADATA_SERVICE_ENDPOINT=" + fakeIMDS(t, instanceID, "us-east-1"),
 			"AWS_ENDPOINT_URL=" + env.URL,
@@ -175,7 +176,7 @@ func runStageEndToEnd(t *testing.T, command string) *e2eStage {
 		},
 	})
 	return &e2eStage{calls: calls, runErr: runErr, s3: s3c, state: state, def: def,
-		inDir: inDir, outDir: outDir, instance: instanceID}
+		inDir: inDir, outDir: outDir, instance: instanceID, index: index}
 }
 
 func (e *e2eStage) object(t *testing.T, key string) (string, bool) {
@@ -197,7 +198,7 @@ func (e *e2eStage) markerSeen(t *testing.T, marker string) bool {
 	old := markers
 	defer func() { markers = old }()
 	markers = e.s3
-	ok, err := markerExists(context.Background(), e.state, "train", marker)
+	ok, err := markerExists(context.Background(), e.state, pipeline.StageInstanceMarkerKey("pfx", "train", e.index, marker))
 	if err != nil {
 		t.Fatalf("markerExists(%s): %v", marker, err)
 	}
@@ -207,7 +208,7 @@ func (e *e2eStage) markerSeen(t *testing.T, marker string) bool {
 // #911: data_input is downloaded before the command runs, data_output is
 // uploaded after it, and COMPLETE is written where the orchestrator reads it.
 func TestStageRunnerEndToEnd_InputsDownloadedOutputsUploaded(t *testing.T) {
-	e := runStageEndToEnd(t, `mkdir -p $OUT && tr a-z A-Z < $IN/data.csv > $OUT/result.txt && echo "$GREETING" >> $OUT/result.txt`)
+	e := runStageEndToEnd(t, `mkdir -p $OUT && tr a-z A-Z < $IN/data.csv > $OUT/result.txt && echo "$GREETING" >> $OUT/result.txt`, 0)
 	if e.runErr != nil {
 		t.Fatalf("stage user data failed: %v\ncalls:\n%s", e.runErr, e.calls)
 	}
@@ -238,6 +239,12 @@ func TestStageRunnerEndToEnd_InputsDownloadedOutputsUploaded(t *testing.T) {
 	if !e.markerSeen(t, pipeline.MarkerComplete) {
 		t.Error("the orchestrator does not see a COMPLETE marker for a stage that succeeded")
 	}
+	old := markers
+	markers = e.s3
+	defer func() { markers = old }()
+	if outcome, _, err := checkStageOutcome(context.Background(), e.state, e.def.GetStage("train"), getStageState(e.state, "train"), time.Now()); err != nil || outcome != stageCompleted {
+		t.Errorf("the orchestrator's verdict on the stage = %v (%v), want completed", outcome, err)
+	}
 	if e.markerSeen(t, pipeline.MarkerFailed) {
 		t.Error("FAILED marker written for a stage that succeeded")
 	}
@@ -248,13 +255,15 @@ func TestStageRunnerEndToEnd_InputsDownloadedOutputsUploaded(t *testing.T) {
 }
 
 // A failing command: the runner writes FAILED where the orchestrator reads it,
-// uploads nothing, and the instance still terminates.
+// uploads nothing, and the instance still terminates. Run as instance 1 of a
+// two-instance stage, so the marker must carry the instance index from the
+// instance's tags (#930), and the orchestrator must fail the stage on it.
 func TestStageRunnerEndToEnd_FailedCommandWritesFailed(t *testing.T) {
-	e := runStageEndToEnd(t, `mkdir -p $OUT && echo partial > $OUT/result.txt && exit 3`)
+	e := runStageEndToEnd(t, `mkdir -p $OUT && echo partial > $OUT/result.txt && exit 3`, 1)
 	if e.runErr == nil {
 		t.Error("stage user data exited 0 for a failing command")
 	}
-	body, ok := e.object(t, pipeline.StageMarkerKey("pfx", "train", pipeline.MarkerFailed))
+	body, ok := e.object(t, pipeline.StageInstanceMarkerKey("pfx", "train", 1, pipeline.MarkerFailed))
 	if !ok {
 		t.Fatalf("spored wrote no FAILED marker; calls:\n%s", e.calls)
 	}
@@ -266,6 +275,12 @@ func TestStageRunnerEndToEnd_FailedCommandWritesFailed(t *testing.T) {
 	}
 	if e.markerSeen(t, pipeline.MarkerComplete) {
 		t.Error("COMPLETE marker written for a failed stage")
+	}
+	old := markers
+	markers = e.s3
+	defer func() { markers = old }()
+	if outcome, _, err := checkStageOutcome(context.Background(), e.state, e.def.GetStage("train"), getStageState(e.state, "train"), time.Now()); err != nil || outcome != stageFailed {
+		t.Errorf("the orchestrator's verdict on the stage = %v (%v), want failed", outcome, err)
 	}
 	list, err := e.s3.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
 		Bucket: aws.String("bkt"), Prefix: aws.String(pipeline.StageOutputPrefix("pfx", "train")),

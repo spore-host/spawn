@@ -142,6 +142,15 @@ type StageState struct {
 	Instances     []InstanceInfo `json:"instances,omitempty"`
 	InstanceHours float64        `json:"instance_hours"`
 	StageCostUSD  float64        `json:"stage_cost_usd"`
+
+	// PricePerHourUSD is the on-demand rate of one of the stage's instances,
+	// resolved once, and PriceSource where it came from ("live", "static", or
+	// "" when unknown). The stage's cost is an ESTIMATE at this rate: spot
+	// stages are billed less, and EBS and data transfer are not counted. It
+	// was a flat $0.10/hour whatever the type, so max_cost_usd let through
+	// about 300x its value on a p4d.24xlarge (#930).
+	PricePerHourUSD float64 `json:"price_per_hour_usd,omitempty"`
+	PriceSource     string  `json:"price_source,omitempty"`
 }
 
 // PipelineState tracks runtime state of entire pipeline
@@ -182,7 +191,15 @@ type PipelineState struct {
 	// Stage details
 	Stages []StageState `json:"stages" dynamodbav:"stages"`
 
-	// Network configuration
+	// Network configuration, per stage region: security groups and placement
+	// groups are regional, and a stage launched in eu-west-1 cannot use a
+	// group created in the Lambda's region (#929). Keyed by region.
+	SecurityGroups  map[string]string `json:"security_groups,omitempty" dynamodbav:"security_groups,omitempty"`
+	PlacementGroups map[string]string `json:"placement_groups,omitempty" dynamodbav:"placement_groups,omitempty"`
+
+	// Deprecated: the single groups an orchestrator before #929 created, in
+	// the Lambda's own region. Read only for pipelines in flight across the
+	// upgrade, and cleaned up in that region.
 	SecurityGroupID  string `json:"security_group_id,omitempty" dynamodbav:"security_group_id,omitempty"`
 	PlacementGroupID string `json:"placement_group_id,omitempty" dynamodbav:"placement_group_id,omitempty"`
 }

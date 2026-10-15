@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,6 +71,16 @@ type stageEC2API interface {
 	TerminateInstances(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
 }
 
+// networkEC2API is what the orchestrator needs from EC2 in a stage's region to
+// create and delete the pipeline's security and placement groups.
+type networkEC2API interface {
+	CreateSecurityGroup(ctx context.Context, params *ec2.CreateSecurityGroupInput, optFns ...func(*ec2.Options)) (*ec2.CreateSecurityGroupOutput, error)
+	AuthorizeSecurityGroupIngress(ctx context.Context, params *ec2.AuthorizeSecurityGroupIngressInput, optFns ...func(*ec2.Options)) (*ec2.AuthorizeSecurityGroupIngressOutput, error)
+	DeleteSecurityGroup(ctx context.Context, params *ec2.DeleteSecurityGroupInput, optFns ...func(*ec2.Options)) (*ec2.DeleteSecurityGroupOutput, error)
+	CreatePlacementGroup(ctx context.Context, params *ec2.CreatePlacementGroupInput, optFns ...func(*ec2.Options)) (*ec2.CreatePlacementGroupOutput, error)
+	DeletePlacementGroup(ctx context.Context, params *ec2.DeletePlacementGroupInput, optFns ...func(*ec2.Options)) (*ec2.DeletePlacementGroupOutput, error)
+}
+
 // runInstancesAPI is the EC2 call that launches a stage instance.
 type runInstancesAPI interface {
 	RunInstances(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
@@ -83,6 +94,25 @@ var (
 			return nil, err
 		}
 		return ec2.NewFromConfig(cfg), nil
+	}
+	netEC2ForRegion = func(ctx context.Context, region string) (networkEC2API, error) {
+		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+		if err != nil {
+			return nil, err
+		}
+		return ec2.NewFromConfig(cfg), nil
+	}
+	// legacyNetworkRegion is where an orchestrator before #929 created the
+	// pipeline's single security and placement group: its own region.
+	legacyNetworkRegion = func() string { return awsCfg.Region }
+	// priceFn is the on-demand rate of instanceType in region, from truffle
+	// via pkg/aws (live Price List, or its static table).
+	priceFn = func(ctx context.Context, instanceType, region string) (float64, string, error) {
+		p, err := spawnaws.ResolveDisplayPrice(ctx, awsCfg, instanceType, region)
+		if err != nil {
+			return 0, "", err
+		}
+		return p.PricePerHour, p.SourceLabel(), nil
 	}
 	recommendedAMIFn = func(ctx context.Context, region, instanceType string) (string, error) {
 		awsClient, err := spawnaws.NewClient(ctx)
@@ -180,6 +210,8 @@ func handler(ctx context.Context, event PipelineEvent) error {
 			state.Status = pipeline.StatusFailed
 			state.CompletedAt = timePtr(time.Now())
 			_ = savePipelineState(ctx, state)
+			// Groups already created in other regions are recorded in state.
+			cleanupNetFn(ctx, state)
 			return fmt.Errorf("failed to setup resources: %w", err)
 		}
 		state.Status = pipeline.StatusRunning
@@ -311,35 +343,85 @@ func setupPipelineResources(ctx context.Context, state *pipeline.PipelineState, 
 		log.Printf("Initialized stage %s (index=%d, status=pending)", stageSpec.StageID, indexMap[stageSpec.StageID])
 	}
 
-	// Create security group if streaming stages exist
+	return setupNetworkResources(ctx, state, pipelineDef)
+}
+
+// setupNetworkResources creates the pipeline's security groups and placement
+// groups, one per stage region (#929). Both are regional, and they used to be
+// created once in the Lambda's own region and then handed to RunInstances in
+// each stage's region, where they do not exist. Each is recorded in state as
+// soon as it exists, so a failure part way is still cleaned up.
+func setupNetworkResources(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline) error {
+	// The security group goes on every stage instance (buildStageRunInstancesInput),
+	// so it is needed in every stage region.
 	if pipelineDef.HasStreamingStages() {
-		log.Println("Pipeline has streaming stages, creating security group...")
-		sgID, err := createStreamingSecurityGroup(ctx, state.PipelineID)
-		if err != nil {
-			return fmt.Errorf("create security group: %w", err)
+		for _, region := range stageRegions(pipelineDef, func(*pipeline.Stage) bool { return true }) {
+			if _, ok := state.SecurityGroups[region]; ok {
+				continue
+			}
+			log.Printf("Pipeline has streaming stages, creating security group in %s...", region)
+			client, err := netEC2ForRegion(ctx, region)
+			if err != nil {
+				return fmt.Errorf("ec2 client for %s: %w", region, err)
+			}
+			sgID, err := createStreamingSecurityGroup(ctx, client, state, region)
+			if err != nil {
+				return fmt.Errorf("create security group in %s: %w", region, err)
+			}
+			log.Printf("Created security group %s in %s", sgID, region)
 		}
-		state.SecurityGroupID = sgID
-		log.Printf("Created security group: %s", sgID)
 	}
 
-	// Create placement group if EFA stages exist
 	if pipelineDef.HasEFAStages() {
-		log.Println("Pipeline has EFA stages, creating placement group...")
-		pgID, err := createPlacementGroup(ctx, state.PipelineID)
-		if err != nil {
-			return fmt.Errorf("create placement group: %w", err)
+		for _, region := range stageRegions(pipelineDef, func(st *pipeline.Stage) bool { return st.EFAEnabled }) {
+			if _, ok := state.PlacementGroups[region]; ok {
+				continue
+			}
+			log.Printf("Pipeline has EFA stages, creating placement group in %s...", region)
+			client, err := netEC2ForRegion(ctx, region)
+			if err != nil {
+				return fmt.Errorf("ec2 client for %s: %w", region, err)
+			}
+			pgName, err := createPlacementGroup(ctx, client, state.PipelineID)
+			if err != nil {
+				return fmt.Errorf("create placement group in %s: %w", region, err)
+			}
+			if state.PlacementGroups == nil {
+				state.PlacementGroups = map[string]string{}
+			}
+			state.PlacementGroups[region] = pgName
+			log.Printf("Created placement group %s in %s", pgName, region)
 		}
-		state.PlacementGroupID = pgID
-		log.Printf("Created placement group: %s", pgID)
 	}
 
 	return nil
 }
 
-func createStreamingSecurityGroup(ctx context.Context, pipelineID string) (string, error) {
-	// Get default region EC2 client
-	ec2Client := ec2.NewFromConfig(awsCfg)
+// stageRegions is the sorted set of regions of the stages keep selects.
+func stageRegions(pipelineDef *pipeline.Pipeline, keep func(*pipeline.Stage) bool) []string {
+	seen := map[string]bool{}
+	var out []string
+	for i := range pipelineDef.Stages {
+		st := &pipelineDef.Stages[i]
+		if !keep(st) {
+			continue
+		}
+		r := stageRegion(st)
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
+// createStreamingSecurityGroup creates the pipeline's security group in region
+// (client's region) and records it in state.SecurityGroups. Ingress is from the
+// group itself only: the streaming ports and SSH between the pipeline's own
+// instances. SSH used to be open to 0.0.0.0/0 (#929).
+func createStreamingSecurityGroup(ctx context.Context, ec2Client networkEC2API, state *pipeline.PipelineState, region string) (string, error) {
+	pipelineID := state.PipelineID
 	sgName := fmt.Sprintf("spawn-pipeline-%s", pipelineID)
 	description := fmt.Sprintf("Security group for spawn pipeline %s", pipelineID)
 
@@ -363,30 +445,16 @@ func createStreamingSecurityGroup(ctx context.Context, pipelineID string) (strin
 		return "", fmt.Errorf("create security group failed: %w", err)
 	}
 
-	sgID := *createResult.GroupId
+	sgID := aws.ToString(createResult.GroupId)
+	// Recorded before the ingress call, so a failure there still deletes it.
+	if state.SecurityGroups == nil {
+		state.SecurityGroups = map[string]string{}
+	}
+	state.SecurityGroups[region] = sgID
 
-	// Add ingress rules: allow all TCP 50000-60000 between pipeline instances (self-referential)
 	_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
-		GroupId: aws.String(sgID),
-		IpPermissions: []ec2types.IpPermission{
-			{
-				IpProtocol: aws.String("tcp"),
-				FromPort:   aws.Int32(50000),
-				ToPort:     aws.Int32(60000),
-				UserIdGroupPairs: []ec2types.UserIdGroupPair{
-					{GroupId: aws.String(sgID)}, // Self-referential
-				},
-			},
-			// SSH access
-			{
-				IpProtocol: aws.String("tcp"),
-				FromPort:   aws.Int32(22),
-				ToPort:     aws.Int32(22),
-				IpRanges: []ec2types.IpRange{
-					{CidrIp: aws.String("0.0.0.0/0")},
-				},
-			},
-		},
+		GroupId:       aws.String(sgID),
+		IpPermissions: streamingIngress(sgID),
 	})
 	if err != nil {
 		return "", fmt.Errorf("authorize ingress failed: %w", err)
@@ -395,9 +463,27 @@ func createStreamingSecurityGroup(ctx context.Context, pipelineID string) (strin
 	return sgID, nil
 }
 
-func createPlacementGroup(ctx context.Context, pipelineID string) (string, error) {
-	ec2Client := ec2.NewFromConfig(awsCfg)
+// streamingIngress is the security group's ingress: TCP 50000-60000 and SSH,
+// both from members of the group only. Nothing is open to an address range.
+func streamingIngress(sgID string) []ec2types.IpPermission {
+	self := []ec2types.UserIdGroupPair{{GroupId: aws.String(sgID)}}
+	return []ec2types.IpPermission{
+		{
+			IpProtocol:       aws.String("tcp"),
+			FromPort:         aws.Int32(50000),
+			ToPort:           aws.Int32(60000),
+			UserIdGroupPairs: self,
+		},
+		{
+			IpProtocol:       aws.String("tcp"),
+			FromPort:         aws.Int32(22),
+			ToPort:           aws.Int32(22),
+			UserIdGroupPairs: self,
+		},
+	}
+}
 
+func createPlacementGroup(ctx context.Context, ec2Client networkEC2API, pipelineID string) (string, error) {
 	pgName := fmt.Sprintf("spawn-pipeline-%s", pipelineID)
 
 	_, err := ec2Client.CreatePlacementGroup(ctx, &ec2.CreatePlacementGroupInput{
@@ -416,6 +502,38 @@ func createPlacementGroup(ctx context.Context, pipelineID string) (string, error
 	}
 
 	return pgName, nil
+}
+
+// securityGroupFor is the pipeline's security group in region, or "" if it
+// has none there. A pipeline set up before #929 has only the legacy single
+// group, which exists in the Lambda's region and nowhere else.
+func securityGroupFor(state *pipeline.PipelineState, region string) string {
+	if id, ok := state.SecurityGroups[region]; ok {
+		return id
+	}
+	if legacy := legacySecurityGroupID(state); len(state.SecurityGroups) == 0 && legacy != "" && region == legacyNetworkRegion() {
+		return legacy
+	}
+	return ""
+}
+
+// legacySecurityGroupID is the single security group an orchestrator before
+// #929 created, in the Lambda's region. The field is deprecated; this is its
+// one reader, for pipelines in flight across the upgrade.
+func legacySecurityGroupID(state *pipeline.PipelineState) string {
+	//lint:ignore SA1019 the deprecated field's one intended reader (#929)
+	return state.SecurityGroupID
+}
+
+// placementGroupFor is securityGroupFor for placement groups.
+func placementGroupFor(state *pipeline.PipelineState, region string) string {
+	if name, ok := state.PlacementGroups[region]; ok {
+		return name
+	}
+	if len(state.PlacementGroups) == 0 && state.PlacementGroupID != "" && region == legacyNetworkRegion() {
+		return state.PlacementGroupID
+	}
+	return ""
 }
 
 func runPipelinePollingLoop(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline, pipelineID string) error {
@@ -563,29 +681,36 @@ func pollOnce(ctx context.Context, state *pipeline.PipelineState, pipelineDef *p
 				state.CompletedStages++
 
 				// Calculate cost
-				calculateStageCost(stageState)
+				calculateStageCost(ctx, state, stageDef, stageState)
 				state.CurrentCostUSD += stageState.StageCostUSD
 				madeProgress = true
-
-				// Check budget
-				if state.MaxCostUSD != nil && state.CurrentCostUSD > *state.MaxCostUSD {
-					log.Printf("Budget exceeded: $%.2f > $%.2f", state.CurrentCostUSD, *state.MaxCostUSD)
-					// This used to set CANCELLED and `break` out of the
-					// switch only: the loop carried on, the status was never
-					// saved, and the next invocation boundary returned
-					// without terminating anything. Finish the pipeline here.
-					finishPipeline(ctx, state, pipelineDef, pipeline.StatusCancelled, "budget exceeded")
-
-					// Send budget exceeded notification
-					msg := fmt.Sprintf("Pipeline %s (%s) cancelled due to budget exceeded.\n\nCurrent cost: $%.2f\nBudget limit: $%.2f\nStages completed: %d/%d",
-						state.PipelineID, state.PipelineName, state.CurrentCostUSD, *state.MaxCostUSD,
-						state.CompletedStages, state.TotalStages)
-					if err := notifyFn(ctx, state, "Spawn Pipeline: Budget Exceeded", msg); err != nil {
-						log.Printf("Warning: Failed to send budget notification: %v", err)
-					}
-					return true, nil
-				}
 			}
+		}
+	}
+
+	// Check the budget against the ESTIMATED spend so far: finished stages
+	// plus the elapsed time of the ones still running, at each stage's
+	// on-demand rate (#930). It used to be checked only when a stage
+	// completed, so a long-running stage cost nothing until it finished, and
+	// at a flat $0.10/instance-hour whatever the instance type. Once every
+	// stage has finished there is nothing left to stop, so the pipeline is
+	// reported as it ended rather than cancelled.
+	if state.MaxCostUSD != nil && !allStagesComplete(state) {
+		if est := estimatedCost(ctx, state, pipelineDef, now); est > *state.MaxCostUSD {
+			log.Printf("Budget exceeded: estimated $%.2f > $%.2f", est, *state.MaxCostUSD)
+			// This used to set CANCELLED and `break` out of the switch only:
+			// the loop carried on, the status was never saved, and the next
+			// invocation boundary returned without terminating anything.
+			// Finish the pipeline here.
+			finishPipeline(ctx, state, pipelineDef, pipeline.StatusCancelled, "budget exceeded")
+
+			msg := fmt.Sprintf("Pipeline %s (%s) cancelled: its estimated cost exceeded the budget.\n\nEstimated cost: $%.2f %s\nBudget limit: $%.2f\nStages completed: %d/%d",
+				state.PipelineID, state.PipelineName, state.CurrentCostUSD, costEstimateNote, *state.MaxCostUSD,
+				state.CompletedStages, state.TotalStages)
+			if err := notifyFn(ctx, state, "Spawn Pipeline: Budget Exceeded", msg); err != nil {
+				log.Printf("Warning: Failed to send budget notification: %v", err)
+			}
+			return true, nil
 		}
 	}
 
@@ -608,9 +733,9 @@ func pollOnce(ctx context.Context, state *pipeline.PipelineState, pipelineDef *p
 		// Send completion notification
 		duration := state.CompletedAt.Sub(state.CreatedAt)
 		subject := fmt.Sprintf("Spawn Pipeline: %s", state.Status)
-		msg := fmt.Sprintf("Pipeline %s (%s) %s.\n\nStages completed: %d\nStages failed: %d\nTotal cost: $%.2f\nDuration: %v\n\nPipeline ID: %s",
+		msg := fmt.Sprintf("Pipeline %s (%s) %s.\n\nStages completed: %d\nStages failed: %d\nEstimated cost: $%.2f %s\nDuration: %v\n\nPipeline ID: %s",
 			state.PipelineName, state.PipelineID, strings.ToLower(string(state.Status)),
-			state.CompletedStages, state.FailedStages, state.CurrentCostUSD, duration.Round(time.Second),
+			state.CompletedStages, state.FailedStages, state.CurrentCostUSD, costEstimateNote, duration.Round(time.Second),
 			state.PipelineID)
 		if err := notifyFn(ctx, state, subject, msg); err != nil {
 			log.Printf("Warning: Failed to send completion notification: %v", err)
@@ -640,7 +765,7 @@ func finishPipeline(ctx context.Context, state *pipeline.PipelineState, pipeline
 		}
 		if wasRunning {
 			st.CompletedAt = timePtr(now)
-			calculateStageCost(st)
+			calculateStageCost(ctx, state, pipelineDef.GetStage(st.StageID), st)
 			state.CurrentCostUSD += st.StageCostUSD
 		}
 	}
@@ -666,7 +791,7 @@ func failStage(ctx context.Context, state *pipeline.PipelineState, pipelineDef *
 	stageState.ErrorMessage = reason
 	stageState.CompletedAt = timePtr(now)
 	state.FailedStages++
-	calculateStageCost(stageState)
+	calculateStageCost(ctx, state, pipelineDef.GetStage(stageState.StageID), stageState)
 	state.CurrentCostUSD += stageState.StageCostUSD
 
 	terminateStageInstances(ctx, stageState, stageRegion(pipelineDef.GetStage(stageState.StageID)))
@@ -684,7 +809,7 @@ func failStage(ctx context.Context, state *pipeline.PipelineState, pipelineDef *
 		if st.Status == pipeline.StageStatusLaunching || st.Status == pipeline.StageStatusRunning {
 			terminateStageInstances(ctx, st, stageRegion(pipelineDef.GetStage(st.StageID)))
 			st.CompletedAt = timePtr(now)
-			calculateStageCost(st)
+			calculateStageCost(ctx, state, pipelineDef.GetStage(st.StageID), st)
 			state.CurrentCostUSD += st.StageCostUSD
 		}
 		st.Status = pipeline.StageStatusSkipped
@@ -763,6 +888,12 @@ func launchStage(ctx context.Context, state *pipeline.PipelineState, pipelineDef
 	ec2Client, err := launchEC2ForRegion(ctx, stageRegion(stageDef))
 	if err != nil {
 		return fmt.Errorf("load config for region %s: %w", stageRegion(stageDef), err)
+	}
+
+	// Priced before anything is launched, so a budget that cannot be enforced
+	// launches nothing (#930).
+	if err := ensureStagePrice(ctx, state, stageDef, stageState); err != nil {
+		return err
 	}
 
 	// The stage runner reads the definition from the pipeline's own bucket
@@ -867,15 +998,16 @@ func buildStageRunInstancesInput(state *pipeline.PipelineState, stageDef *pipeli
 		}
 	}
 
-	// Add security group if streaming
-	if state.SecurityGroupID != "" {
-		input.SecurityGroupIds = []string{state.SecurityGroupID}
+	// The pipeline's groups in THIS stage's region (#929). RunInstances runs
+	// in the stage's region, and a group from another region does not exist
+	// there.
+	region := stageRegion(stageDef)
+	if sg := securityGroupFor(state, region); sg != "" {
+		input.SecurityGroupIds = []string{sg}
 	}
-
-	// Add placement group if EFA
-	if stageDef.EFAEnabled && state.PlacementGroupID != "" {
+	if pg := placementGroupFor(state, region); stageDef.EFAEnabled && pg != "" {
 		input.Placement = &ec2types.Placement{
-			GroupName: aws.String(state.PlacementGroupID),
+			GroupName: aws.String(pg),
 		}
 	}
 	return input
@@ -973,7 +1105,7 @@ func generatePipelineUserData(state *pipeline.PipelineState, stageDef *pipeline.
 	// writing one. Rendered from the same pkg/pipeline function the runner and
 	// the orchestrator use, so the three cannot disagree on the key.
 	failedMarker := fmt.Sprintf("s3://%s/%s", state.S3Bucket,
-		pipeline.StageMarkerKey(state.S3Prefix, stageDef.StageID, pipeline.MarkerFailed))
+		pipeline.StageInstanceMarkerKey(state.S3Prefix, stageDef.StageID, instanceIndex, pipeline.MarkerFailed))
 
 	// Generate user data script.
 	//
@@ -1200,37 +1332,76 @@ const (
 // It used to look for the COMPLETE marker only, and fall back to "all instances
 // terminated" read from InstanceInfo.State, which is written once at launch and
 // was never refreshed (#912). A failed stage therefore stayed running forever.
-// Now, in order:
-//   - a FAILED marker fails the stage (it wins over COMPLETE, since with several
-//     instances one may fail while another completes);
-//   - a COMPLETE marker completes it;
-//   - if every instance has gone (refreshed from EC2) without writing COMPLETE,
-//     it failed: a spot interruption, a crash, or a script that could not
-//     write its marker;
+//
+// Markers are per instance (#930): every instance of a stage wrote the same
+// stage-level key, so with instance_count > 1 the first instance to finish
+// marked the stage complete, its dependents launched while the others were
+// still running, and a sibling's later FAILED was never read. Now, in order:
+//   - any instance's FAILED marker fails the stage (as does the legacy
+//     stage-level FAILED, written by instances launched before #930);
+//   - the stage completes when EVERY instance has written COMPLETE (the legacy
+//     stage-level COMPLETE counts only for a single-instance stage, where it
+//     means the same thing);
+//   - an instance that has gone (refreshed from EC2) without writing COMPLETE
+//     fails the stage, since it never can complete: a spot interruption, a
+//     crash, or a script that could not write its marker;
 //   - if the stage has outlived its TTL, it failed.
 func checkStageOutcome(ctx context.Context, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, now time.Time) (stageOutcome, string, error) {
-	failed, err := markerExists(ctx, state, stageState.StageID, pipeline.MarkerFailed)
+	want := expectedInstances(stageDef, stageState)
+
+	legacyFailed, err := markerExists(ctx, state, pipeline.StageMarkerKey(state.S3Prefix, stageState.StageID, pipeline.MarkerFailed))
 	if err != nil {
 		return stageStillRunning, "", err
 	}
-	if failed {
+	if legacyFailed {
 		return stageFailed, "stage command failed (FAILED marker written)", nil
 	}
 
-	completed, err := markerExists(ctx, state, stageState.StageID, pipeline.MarkerComplete)
-	if err != nil {
-		return stageStillRunning, "", err
+	complete := make([]bool, want)
+	nComplete := 0
+	for i := 0; i < want; i++ {
+		failed, err := markerExists(ctx, state, pipeline.StageInstanceMarkerKey(state.S3Prefix, stageState.StageID, i, pipeline.MarkerFailed))
+		if err != nil {
+			return stageStillRunning, "", err
+		}
+		if failed {
+			return stageFailed, fmt.Sprintf("instance %d of %d failed (FAILED marker written)", i, want), nil
+		}
+		done, err := markerExists(ctx, state, pipeline.StageInstanceMarkerKey(state.S3Prefix, stageState.StageID, i, pipeline.MarkerComplete))
+		if err != nil {
+			return stageStillRunning, "", err
+		}
+		if done {
+			complete[i] = true
+			nComplete++
+		}
 	}
-	if completed {
+	if nComplete == want {
 		return stageCompleted, "", nil
 	}
+	if want == 1 {
+		legacyDone, err := markerExists(ctx, state, pipeline.StageMarkerKey(state.S3Prefix, stageState.StageID, pipeline.MarkerComplete))
+		if err != nil {
+			return stageStillRunning, "", err
+		}
+		if legacyDone {
+			return stageCompleted, "", nil
+		}
+	}
 
-	alive, err := refreshInstanceStates(ctx, stageState, stageRegion(stageDef))
-	if err != nil {
+	if _, err := refreshInstanceStates(ctx, stageState, stageRegion(stageDef)); err != nil {
 		// Not a decision: the TTL check below still bounds the stage.
 		log.Printf("Warning: could not refresh instance states for stage %s: %v", stageState.StageID, err)
-	} else if !alive {
-		return stageFailed, "every stage instance exited without writing the COMPLETE marker", nil
+	} else {
+		if len(stageState.Instances) == 0 {
+			return stageFailed, "the stage has no instances", nil
+		}
+		for i := range stageState.Instances {
+			if i < want && !complete[i] && instanceGone(stageState.Instances[i].State) {
+				return stageFailed, fmt.Sprintf("instance %d of %d (%s) exited without writing its COMPLETE marker",
+					i, want, stageState.Instances[i].InstanceID), nil
+			}
+		}
 	}
 
 	if stageState.LaunchedAt != nil && now.Sub(*stageState.LaunchedAt) > stageTTL(stageDef) {
@@ -1239,11 +1410,22 @@ func checkStageOutcome(ctx context.Context, state *pipeline.PipelineState, stage
 	return stageStillRunning, "", nil
 }
 
-// markerExists reports whether the stage's COMPLETE or FAILED marker is in S3.
+// expectedInstances is how many instances must report COMPLETE: the stage's
+// instance_count. launchStage launches exactly that many or fails the stage.
+func expectedInstances(stageDef *pipeline.Stage, stageState *pipeline.StageState) int {
+	if stageDef != nil && stageDef.InstanceCount > 0 {
+		return stageDef.InstanceCount
+	}
+	if n := len(stageState.Instances); n > 0 {
+		return n
+	}
+	return 1
+}
+
+// markerExists reports whether the marker at key is in the pipeline's bucket.
 // Only a not-found answer means absent; any other error is returned, so a
 // permissions or network problem is not read as "not finished yet".
-func markerExists(ctx context.Context, state *pipeline.PipelineState, stageID, marker string) (bool, error) {
-	key := pipeline.StageMarkerKey(state.S3Prefix, stageID, marker)
+func markerExists(ctx context.Context, state *pipeline.PipelineState, key string) (bool, error) {
 	_, err := markers.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(state.S3Bucket),
 		Key:    aws.String(key),
@@ -1358,17 +1540,81 @@ func terminateAllInstances(ctx context.Context, state *pipeline.PipelineState, p
 	}
 }
 
-func calculateStageCost(stageState *pipeline.StageState) {
+// costEstimateNote qualifies every cost the orchestrator reports: it is an
+// estimate, not a bill.
+const costEstimateNote = "(estimate: on-demand rates; spot is billed less; EBS and data transfer not included)"
+
+// calculateStageCost sets the stage's instance-hours and ESTIMATED cost, from
+// launch to completion, at the stage's on-demand rate (#930). It used to be a
+// flat $0.10 per instance-hour, about 1/300th of a p4d.24xlarge. A stage
+// launched before rates were recorded is priced now; one whose rate cannot be
+// resolved is costed at 0 and logged as unpriced.
+func calculateStageCost(ctx context.Context, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState) {
 	if stageState.LaunchedAt == nil || stageState.CompletedAt == nil {
 		return
+	}
+	if err := ensureStagePrice(ctx, state, stageDef, stageState); err != nil {
+		log.Printf("Warning: %v", err)
 	}
 
 	hours := stageState.CompletedAt.Sub(*stageState.LaunchedAt).Hours()
 	instanceHours := hours * float64(len(stageState.Instances))
 	stageState.InstanceHours = instanceHours
+	stageState.StageCostUSD = instanceHours * stageState.PricePerHourUSD
+	if stageState.PricePerHourUSD == 0 && instanceHours > 0 {
+		log.Printf("Warning: stage %s has no price; its %.2f instance-hours are not in the cost estimate",
+			stageState.StageID, instanceHours)
+	}
+}
 
-	// Simplified cost calculation (use $0.10/hour as default)
-	stageState.StageCostUSD = instanceHours * 0.10
+// ensureStagePrice resolves the stage's on-demand rate once and records it.
+// On-demand, also for spot stages: an upper bound, so a budget is never
+// under-enforced because the spot price moved. A stage that cannot be priced
+// is an error only when the pipeline has a budget, because a budget that
+// cannot be priced cannot be enforced (the --cost-limit rule in pkg/aws).
+func ensureStagePrice(ctx context.Context, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState) error {
+	if stageState.PricePerHourUSD > 0 || stageDef == nil {
+		return nil
+	}
+	rate, source, err := priceFn(ctx, stageDef.InstanceType, stageRegion(stageDef))
+	if err == nil && rate <= 0 {
+		err = fmt.Errorf("no on-demand price for %s in %s", stageDef.InstanceType, stageRegion(stageDef))
+	}
+	if err != nil {
+		if state.MaxCostUSD != nil {
+			return fmt.Errorf("cannot price stage %s (%s in %s), required to enforce max_cost_usd $%.2f: %w",
+				stageDef.StageID, stageDef.InstanceType, stageRegion(stageDef), *state.MaxCostUSD, err)
+		}
+		log.Printf("Warning: cannot price stage %s (%s in %s): %v; its cost will not be estimated",
+			stageDef.StageID, stageDef.InstanceType, stageRegion(stageDef), err)
+		return nil
+	}
+	stageState.PricePerHourUSD = rate
+	stageState.PriceSource = source
+	log.Printf("Stage %s: %s in %s = $%.4f/h on-demand (%s)", stageDef.StageID, stageDef.InstanceType,
+		stageRegion(stageDef), rate, source)
+	return nil
+}
+
+// estimatedCost is the pipeline's estimated spend at now: the finished stages'
+// costs plus each in-flight stage's instance-hours so far at its rate.
+func estimatedCost(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline, now time.Time) float64 {
+	total := state.CurrentCostUSD
+	for i := range state.Stages {
+		st := &state.Stages[i]
+		if st.Status != pipeline.StageStatusLaunching && st.Status != pipeline.StageStatusRunning {
+			continue
+		}
+		if st.LaunchedAt == nil {
+			continue
+		}
+		// A stage launched before rates were recorded is priced now.
+		if err := ensureStagePrice(ctx, state, pipelineDef.GetStage(st.StageID), st); err != nil {
+			log.Printf("Warning: %v", err)
+		}
+		total += now.Sub(*st.LaunchedAt).Hours() * float64(len(st.Instances)) * st.PricePerHourUSD
+	}
+	return total
 }
 
 func allStagesComplete(state *pipeline.PipelineState) bool {
@@ -1383,45 +1629,73 @@ func allStagesComplete(state *pipeline.PipelineState) bool {
 }
 
 // cleanupNetworkResources deletes the pipeline's security and placement
-// groups. Instances are terminated first, by terminateAllInstances.
+// groups, each in the region it was created in (#929). Instances are
+// terminated first, by terminateAllInstances.
 func cleanupNetworkResources(ctx context.Context, state *pipeline.PipelineState) {
-	// Cleanup security group. SYNCHRONOUS, with a retry budget — see #752: this
-	// was a `go func(){ time.Sleep(30s); … }()` and the Lambda runtime freezes the
+	sgs := map[string]string{}
+	for region, id := range state.SecurityGroups {
+		sgs[region] = id
+	}
+	if legacy := legacySecurityGroupID(state); legacy != "" && len(state.SecurityGroups) == 0 {
+		sgs[legacyNetworkRegion()] = legacy
+	}
+	pgs := map[string]string{}
+	for region, name := range state.PlacementGroups {
+		pgs[region] = name
+	}
+	if state.PlacementGroupID != "" && len(state.PlacementGroups) == 0 {
+		pgs[legacyNetworkRegion()] = state.PlacementGroupID
+	}
+
+	// SYNCHRONOUS, with a retry budget — see #752: this was a
+	// `go func(){ time.Sleep(30s); … }()` and the Lambda runtime freezes the
 	// execution environment when the handler returns, so the delete never ran.
-	if state.SecurityGroupID != "" {
-		ec2Client := ec2.NewFromConfig(awsCfg)
-		err := spawnaws.RetryPlacementGroupDelete(ctx, state.SecurityGroupID, func() error {
-			_, derr := ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{
-				GroupId: aws.String(state.SecurityGroupID),
-			})
+	for _, region := range sortedKeys(sgs) {
+		id := sgs[region]
+		client, err := netEC2ForRegion(ctx, region)
+		if err != nil {
+			log.Printf("Warning: no EC2 client for %s to delete security group %s: %v", region, id, err)
+			continue
+		}
+		err = spawnaws.RetryPlacementGroupDelete(ctx, id, func() error {
+			_, derr := client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: aws.String(id)})
 			return derr
 		})
 		if err != nil {
-			log.Printf("Warning: Failed to delete security group %s: %v (the TTL reaper will "+
-				"reclaim it after its grace period)", state.SecurityGroupID, err)
+			log.Printf("Warning: Failed to delete security group %s in %s: %v (the TTL reaper will "+
+				"reclaim it after its grace period)", id, region, err)
 		} else {
-			log.Printf("Deleted security group: %s", state.SecurityGroupID)
+			log.Printf("Deleted security group %s in %s", id, region)
 		}
 	}
 
-	// Cleanup placement group. SYNCHRONOUS, same reason (#752).
-	if state.PlacementGroupID != "" {
-		{
-			ec2Client := ec2.NewFromConfig(awsCfg)
-			err := spawnaws.RetryPlacementGroupDelete(ctx, state.PlacementGroupID, func() error {
-				_, derr := ec2Client.DeletePlacementGroup(ctx, &ec2.DeletePlacementGroupInput{
-					GroupName: aws.String(state.PlacementGroupID),
-				})
-				return derr
-			})
-			if err != nil {
-				log.Printf("Warning: Failed to delete placement group %s: %v (the TTL reaper will "+
-					"reclaim it after its grace period)", state.PlacementGroupID, err)
-			} else {
-				log.Printf("Deleted placement group: %s", state.PlacementGroupID)
-			}
+	for _, region := range sortedKeys(pgs) {
+		name := pgs[region]
+		client, err := netEC2ForRegion(ctx, region)
+		if err != nil {
+			log.Printf("Warning: no EC2 client for %s to delete placement group %s: %v", region, name, err)
+			continue
+		}
+		err = spawnaws.RetryPlacementGroupDelete(ctx, name, func() error {
+			_, derr := client.DeletePlacementGroup(ctx, &ec2.DeletePlacementGroupInput{GroupName: aws.String(name)})
+			return derr
+		})
+		if err != nil {
+			log.Printf("Warning: Failed to delete placement group %s in %s: %v (the TTL reaper will "+
+				"reclaim it after its grace period)", name, region, err)
+		} else {
+			log.Printf("Deleted placement group %s in %s", name, region)
 		}
 	}
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func reinvokeSelf(ctx context.Context, pipelineID string) error {

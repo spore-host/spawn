@@ -25,6 +25,10 @@ type StageDataHandler struct {
 	prefix     string
 	pipelineID string
 	stageID    string
+
+	// instanceIndex is this instance's index within its stage; its markers
+	// are per instance (StageInstanceMarkerKey, #930).
+	instanceIndex int
 }
 
 // NewStageDataHandler creates a new data handler using the default AWS credential chain.
@@ -255,14 +259,14 @@ func (h *StageDataHandler) uploadFile(ctx context.Context, localPath, s3Key stri
 	return nil
 }
 
-// WriteCompletionMarker writes the stage's COMPLETE marker, at the key the
-// orchestrator reads (StageMarkerKey). Written only after the outputs are
+// WriteCompletionMarker writes this instance's COMPLETE marker, at the key the
+// orchestrator reads (StageInstanceMarkerKey). Written only after the outputs are
 // uploaded, so a downstream stage never starts before its inputs exist.
 func (h *StageDataHandler) WriteCompletionMarker(ctx context.Context) error {
 	return h.writeMarker(ctx, MarkerComplete, "success")
 }
 
-// WriteFailureMarker writes the stage's FAILED marker, at the key the
+// WriteFailureMarker writes this instance's FAILED marker, at the key the
 // orchestrator reads. The orchestrator fails the stage on it, so the runner
 // writes it itself rather than leaving the stage user data to guess.
 func (h *StageDataHandler) WriteFailureMarker(ctx context.Context, reason string) error {
@@ -270,13 +274,14 @@ func (h *StageDataHandler) WriteFailureMarker(ctx context.Context, reason string
 }
 
 func (h *StageDataHandler) writeMarker(ctx context.Context, marker, body string) error {
-	markerKey := StageMarkerKey(h.prefix, h.stageID, marker)
+	markerKey := StageInstanceMarkerKey(h.prefix, h.stageID, h.instanceIndex, marker)
 
 	log.Printf("Writing %s marker: s3://%s/%s", marker, h.bucket, markerKey)
 
 	metadata := map[string]string{
 		"pipeline-id": h.pipelineID,
 		"stage-id":    h.stageID,
+		"instance":    fmt.Sprintf("%d", h.instanceIndex),
 		"written-at":  time.Now().UTC().Format(time.RFC3339),
 	}
 
@@ -294,9 +299,10 @@ func (h *StageDataHandler) writeMarker(ctx context.Context, marker, body string)
 	return nil
 }
 
-// CheckCompletionMarker checks if a completion marker exists for a stage
+// CheckCompletionMarker checks whether the COMPLETE marker for stageID at this
+// handler's instance index exists.
 func (h *StageDataHandler) CheckCompletionMarker(ctx context.Context, stageID string) (bool, error) {
-	markerKey := StageMarkerKey(h.prefix, stageID, MarkerComplete)
+	markerKey := StageInstanceMarkerKey(h.prefix, stageID, h.instanceIndex, MarkerComplete)
 
 	_, err := h.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(h.bucket),

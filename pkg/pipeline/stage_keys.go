@@ -33,9 +33,20 @@ func StageOutputPrefix(prefix, stageID string) string {
 	return StageKeyPrefix(prefix, stageID) + "output/"
 }
 
-// StageMarkerKey is the key of a stage's COMPLETE or FAILED marker.
+// StageMarkerKey is the key of a stage-level COMPLETE or FAILED marker. Stage
+// instances no longer write it: with instance_count > 1 the first instance to
+// finish marked the whole stage complete (#930). The orchestrator still reads
+// it, for instances launched before per-instance markers existed.
 func StageMarkerKey(prefix, stageID, marker string) string {
 	return StageKeyPrefix(prefix, stageID) + marker
+}
+
+// StageInstanceMarkerKey is the key of one stage instance's COMPLETE or FAILED
+// marker: "<prefix>/stages/<stage-id>/<instance-index>/<marker>". A stage is
+// complete when every instance has written COMPLETE, and failed as soon as any
+// one writes FAILED (#930).
+func StageInstanceMarkerKey(prefix, stageID string, instanceIndex int, marker string) string {
+	return fmt.Sprintf("%s%d/%s", StageKeyPrefix(prefix, stageID), instanceIndex, marker)
 }
 
 // StageConfigKey is where the orchestrator writes the pipeline definition for

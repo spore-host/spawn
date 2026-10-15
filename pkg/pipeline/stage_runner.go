@@ -90,6 +90,7 @@ func NewStageRunner(ctx context.Context) (*StageRunner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create data handler: %w", err)
 	}
+	dataHandler.instanceIndex = stageInfo.InstanceIndex
 
 	// Download pipeline definition from S3. From here on a failure is
 	// reported as the stage's FAILED marker, since the handler can write it.

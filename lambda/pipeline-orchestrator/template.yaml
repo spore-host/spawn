@@ -125,6 +125,14 @@ Resources:
               Action:
                 - lambda:InvokeFunction
               Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:spawn-pipeline-orchestrator*'
+        # On-demand rates for the cost estimate max_cost_usd is enforced
+        # against (spawn#930). truffle falls back to its static table without
+        # it, which covers only common types.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - pricing:GetProducts
+              Resource: '*'
         # SSM parameter access for AMI lookup
         - Statement:
             - Effect: Allow
