@@ -395,7 +395,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Start the instance
 	err = client.StartInstance(ctx, instance.Region, instance.InstanceID)
 	if err != nil {
-		return fmt.Errorf("failed to start instance: %w", err)
+		return startFailedError(instance, err, time.Now())
 	}
 
 	// Tag the instance with the start event. The TTL is deliberately NOT
@@ -517,7 +517,7 @@ func startJobArray(ctx context.Context) error {
 		// Start the instance
 		err := client.StartInstance(ctx, inst.Region, inst.InstanceID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Failed to start %s: %v\n", inst.InstanceID, err)
+			fmt.Fprintf(os.Stderr, "⚠️  Failed to start %s: %v\n", inst.InstanceID, startFailedError(&inst, err, time.Now()))
 			failedInstances = append(failedInstances, inst.InstanceID)
 			continue
 		}
@@ -607,4 +607,15 @@ func oneTimeSpotStopError(instance *aws.InstanceInfo, action string) error {
 		"  To get a stoppable Spot instance, launch with a stop-based lifecycle — --idle-timeout, "+
 		"--on-complete stop|hibernate, or --hibernate — which makes spawn request persistent Spot",
 		action, instance.InstanceID, instance.InstanceID)
+}
+
+// startFailedError explains a failed `spawn start`. When the instance's
+// persistent Spot request has passed the ValidUntil spawn gave it at launch
+// (#950), that is the likely cause, and it is said, because EC2's own error
+// doesn't mention the request.
+func startFailedError(instance *aws.InstanceInfo, err error, now time.Time) error {
+	if note := spotrequest.StartFailureNote(instance.Tags, now); note != "" {
+		return fmt.Errorf("failed to start instance: %w\n  likely cause: %s", err, note)
+	}
+	return fmt.Errorf("failed to start instance: %w", err)
 }

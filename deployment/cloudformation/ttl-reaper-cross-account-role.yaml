@@ -117,6 +117,18 @@ Resources:
                 Condition:
                   StringEquals:
                     ec2:ResourceTag/spawn:managed: 'true'
+              # The orphaned persistent Spot request sweep (#950): find
+              # spawn-tagged persistent requests whose instance was terminated
+              # outside spawn. Read-only, and DescribeSpotInstanceRequests has no
+              # resource-level permissions, so Resource must be '*'. The cancel
+              # it leads to is the tag-conditioned grant above, and terminating a
+              # replacement is the tag-conditioned TerminateInstances. Nothing new
+              # is destructive.
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeSpotInstanceRequests
+                # trivy:ignore:AVD-AWS-0057 -- no resource-level ARN; read-only.
+                Resource: '*'
               # Network resources (#685): the security-group / placement-group
               # sweep. Read-only; neither Describe supports resource-level
               # permissions, so Resource must be '*'.

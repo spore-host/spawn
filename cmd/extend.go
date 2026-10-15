@@ -16,6 +16,7 @@ import (
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/spotrequest"
 	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
@@ -122,6 +123,12 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	}
 
 	tags, newDeadline, costDecision := extensionTags(instance, newTTL, extendDuration, time.Now(), extendCostLimit, extendKeepCostLimit)
+
+	// A persistent Spot request's end date was fixed at launch to the old
+	// deadline (#950), and EC2 cannot move it. Say so before extending past it.
+	if w := spotrequest.ExtendWarning(instance.Tags, newDeadline); w != "" {
+		fmt.Fprintf(os.Stderr, "⚠️  Warning: %s\n", w)
+	}
 
 	fmt.Fprintf(os.Stderr, "Extending TTL deadline to %s...\n", newDeadline.UTC().Format("2006-01-02 15:04 UTC"))
 	err = client.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, tags)

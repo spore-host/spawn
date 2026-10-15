@@ -671,6 +671,10 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		return nil, fmt.Errorf("no instances returned")
 	}
 
+	// Name the original instance on its persistent Spot request, so the reaper
+	// can tell a replacement launched by a leaked request apart (#950).
+	tagOriginalInstance(ctx, ec2Client, launchConfig, result.Instances[0])
+
 	// Best-effort: propagate each attached snapshot's custom tags onto the volume
 	// created from it, so a data volume is traceable back to its source DB (#161).
 	// RunInstances tags all volumes uniformly, so per-volume snapshot tags must be

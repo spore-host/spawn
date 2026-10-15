@@ -581,7 +581,7 @@ func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	// These are the parameters whose DEPLOYED value must win. DryRun first because
 	// it is the one that silently stops the reaper terminating anything.
 	for _, k := range []string{
-		"DryRun", "NetResources", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
+		"DryRun", "NetResources", "SpotRequests", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
 	} {
@@ -678,5 +678,45 @@ func TestVersionFallsBackOutsideAGitRepo(t *testing.T) {
 	if got := strings.TrimSpace(string(out)); got != "unknown" {
 		t.Errorf("VERSION outside a git repo = %q, want \"unknown\". An empty stamp is worse "+
 			"than the template default, and it is now asserted on every deploy.", got)
+	}
+}
+
+// TestEveryTemplateParameterIsReferenced: a parameter declared but never
+// referenced does nothing, whatever value a deploy passes. A new mode parameter
+// (SpotRequests, #950) whose REAPER_* environment line was forgotten would pass
+// every test above: it is in the PARAM_MAP, it deploys, it is echoed, and the
+// Lambda never sees it. Matched on the reference forms CloudFormation evaluates
+// (!Ref X, ${X}, Ref: X), outside the Parameters block, so the parameter's own
+// declaration and Description cannot satisfy it (rule 3).
+func TestEveryTemplateParameterIsReferenced(t *testing.T) {
+	b, err := os.ReadFile("template.yaml")
+	if err != nil {
+		t.Fatalf("read template.yaml: %v", err)
+	}
+	body := string(b)
+	start := strings.Index(body, "\nParameters:\n")
+	if start < 0 {
+		t.Fatal("template.yaml has no Parameters block")
+	}
+	// The block ends at the next top-level key (Conditions, Resources, ...).
+	next := regexp.MustCompile(`(?m)^[A-Z][A-Za-z]*:`).FindStringIndex(body[start+len("\nParameters:\n"):])
+	if next == nil {
+		t.Fatal("nothing follows the Parameters block")
+	}
+	end := start + len("\nParameters:\n") + next[0]
+	paramsBlock := body[start:end]
+	rest := body[:start] + body[end:]
+
+	names := regexp.MustCompile(`(?m)^  ([A-Z][A-Za-z0-9]*):$`).FindAllStringSubmatch(paramsBlock, -1)
+	if len(names) < 15 {
+		t.Fatalf("parsed only %d parameters — the extraction has broken", len(names))
+	}
+	for _, m := range names {
+		n := regexp.QuoteMeta(m[1])
+		ref := regexp.MustCompile(`!Ref\s+'?` + n + `'?\b|\$\{` + n + `\}|\bRef:\s+` + n + `\b`)
+		if !ref.MatchString(rest) {
+			t.Errorf("template parameter %s is declared but never referenced, so no value of it "+
+				"reaches the function (a REAPER_* environment line missing?)", m[1])
+		}
 	}
 }

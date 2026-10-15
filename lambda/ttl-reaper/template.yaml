@@ -104,6 +104,21 @@ Parameters:
       an account where someone else owns these resources. An unrecognised value
       resolves to 'report' — a typo must not arm a delete. DryRun always wins.
 
+  SpotRequests:
+    Type: String
+    Default: 'report'
+    AllowedValues: ['off', 'report', 'reap']
+    Description: >
+      The orphaned persistent Spot request sweep (#950). A --spot launch with a
+      stop-based lifecycle makes a persistent request. If its instance is ended
+      outside spawn (the console, aws ec2 terminate-instances), the request
+      reopens and EC2 launches untagged replacements. The sweep cancels
+      spawn-tagged persistent requests whose instance is gone, replaced or
+      expired, and terminates a replacement after cancelling its request. Staged
+      like NetResources and for the same reason: 'report' (default) logs and
+      notifies what it WOULD do, 'reap' acts, 'off' skips it. An unrecognised
+      value resolves to 'report'. DryRun always wins.
+
   DnsExpire:
     Type: String
     Default: 'false'
@@ -244,6 +259,7 @@ Resources:
           REAPER_DNS_DOMAIN: !Ref DnsDomain
           REAPER_DNS_SWEEP: !Ref DnsSweep
           REAPER_NET_RESOURCES: !Ref NetResources
+          REAPER_SPOT_REQUESTS: !Ref SpotRequests
           REAPER_DNS_EXPIRE: !Ref DnsExpire
           REAPER_DNS_LEASE_EXPIRE: !Ref DnsLeaseExpire
           ACCOUNTS_TABLE: !Ref AccountsTable
@@ -298,6 +314,12 @@ Resources:
                   Condition:
                     StringEquals:
                       ec2:ResourceTag/spawn:managed: 'true'
+                # #950: the orphaned-Spot-request sweep. Read-only, and
+                # DescribeSpotInstanceRequests has no resource-level permissions.
+                - Effect: Allow
+                  Action:
+                    - ec2:DescribeSpotInstanceRequests
+                  Resource: '*'
                 # #210 ephemeral-orphan net. FSx exposes no resource-tag condition
                 # key for DeleteFileSystem, so the guard is the reaper's own check
                 # (spawn:managed, no live lease, past the grace period) rather than
@@ -539,6 +561,83 @@ Resources:
       MetricName: ReaperFSxUnreachable
       Statistic: Sum
       Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+
+  # The Spot-request sweep (#950) is a separate grant from the instance scan,
+  # so its denial needs its own signal, as FSx's does (#212).
+  SpotRequestsUnreachableMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: ObservabilityEnabled
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '"REAPER SPOT REQUESTS UNREACHABLE"'
+      MetricTransformations:
+        - MetricName: ReaperSpotRequestsUnreachable
+          MetricNamespace: !Sub spawn/ttl-reaper/${Environment}
+          MetricValue: '1'
+          DefaultValue: 0
+
+  SpotRequestsUnreachableAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ObservabilityEnabled
+    Properties:
+      AlarmName: !Sub spawn-ttl-reaper-${Environment}-spot-requests-unreachable
+      AlarmDescription: >
+        An account's role refused every ec2:DescribeSpotInstanceRequests, so the
+        sweep for orphaned persistent Spot requests (#950) is not running there.
+        A request left open by a terminate outside spawn keeps launching
+        replacement instances, untagged and unreaped, until it is cancelled.
+
+        Fix: redeploy that account's spawn-ttl-reaper-ec2 stack from
+        ttl-reaper-cross-account-role.yaml, which grants it.
+      Namespace: !Sub spawn/ttl-reaper/${Environment}
+      MetricName: ReaperSpotRequestsUnreachable
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+      OKActions: !If [AlarmActionsEnabled, [!Ref AlarmTopicArn], !Ref 'AWS::NoValue']
+
+  # A replacement instance launched by a leaked persistent request, which the
+  # reaper could not terminate (#950). It is billing, untagged, and invisible to
+  # spawn list. The request is already cancelled. A human has to end it.
+  SpotReplacementStrandedMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: ObservabilityEnabled
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '"SPOT REPLACEMENT NOT TERMINATED"'
+      MetricTransformations:
+        - MetricName: ReaperSpotReplacementStranded
+          MetricNamespace: !Sub spawn/ttl-reaper/${Environment}
+          MetricValue: '1'
+          DefaultValue: 0
+
+  SpotReplacementStrandedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ObservabilityEnabled
+    Properties:
+      AlarmName: !Sub spawn-ttl-reaper-${Environment}-spot-replacement-stranded
+      AlarmDescription: >
+        A persistent Spot request spawn made launched a replacement instance after
+        its original was terminated outside spawn, and the reaper could not
+        terminate it. The request is cancelled, so nothing more launches, but the
+        instance bills until someone terminates it. An untagged instance is
+        outside the reaper's tag-scoped ec2:TerminateInstances grant by design.
+        The log line names the account, region and instance, and gives the exact
+        aws ec2 terminate-instances command.
+      Namespace: !Sub spawn/ttl-reaper/${Environment}
+      MetricName: ReaperSpotReplacementStranded
+      Statistic: Sum
+      Period: 3600
       EvaluationPeriods: 1
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold

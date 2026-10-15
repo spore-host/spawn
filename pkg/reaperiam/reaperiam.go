@@ -100,6 +100,16 @@ func ScanSelfStatements() []Statement {
 			Condition: ManagedTagCondition,
 		},
 		{
+			// The orphaned persistent Spot request sweep (#950). Read-only, and
+			// DescribeSpotInstanceRequests takes no resource-level ARN. What it
+			// leads to, cancelling a request and terminating a replacement, is
+			// the two tag-conditioned grants above. So an UNTAGGED replacement is
+			// deliberately not terminable by the reaper. It is reported instead.
+			Effect:   "Allow",
+			Action:   []string{"ec2:DescribeSpotInstanceRequests"},
+			Resource: "*",
+		},
+		{
 			// Network resources (#685): the security-group / placement-group
 			// sweep. Read-only; neither Describe supports resource-level
 			// permissions, so Resource must be "*".

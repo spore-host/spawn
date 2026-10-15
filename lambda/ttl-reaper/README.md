@@ -92,6 +92,7 @@ there and appending its ARN to the list.
 | `REAPER_DNS_EXPIRE` | `false` | With the sweep on, **delete** the A-records under an unmanaged subdomain whose account the portal registry has proven `dormant` or `offboarded` ([#466]). Requires `REAPER_DNS_SWEEP` (the walk runs inside the sweep) and honors `REAPER_DRY_RUN`. Read the report before enabling — see [DNS expiry](#dns-expiry-466) |
 | `REAPER_DNS_LEASE_EXPIRE` | `false` | With the sweep on, **delete** an A-record under an account subdomain this reaper does **not** cover when its owner has stopped renewing its DNS lease for longer than `pkg/dns.LeaseMaxAge` (6h), plus the lease itself, and any lease whose A-record is already gone. The only backstop for a record left by an abruptly terminated instance in an account the reaper holds no credentials in. Records with no lease (every spored before leases) and records in covered accounts are never touched. Requires `REAPER_DNS_SWEEP`, honors `REAPER_DRY_RUN`. See [DNS leases](#dns-leases) |
 | `REAPER_NET_RESOURCES` | `report` | Reclaim spawn-managed **security groups** and **cluster placement groups** with no instance referencing them, older than **7 days** ([#685]). `report` logs what it *would* reclaim and deletes nothing; `reap` deletes; `off` skips the sweep entirely. Three values and **not** folded into `REAPER_DRY_RUN` on purpose — production runs with the dry run off, so a boolean would arm a new destructive sweep on upgrade and the only preview would be disarming the live instance reaper. A typo resolves to `report`; `REAPER_DRY_RUN` always wins |
+| `REAPER_SPOT_REQUESTS` | `report` | The orphaned persistent **Spot request** sweep ([#950]). Cancels spawn-tagged persistent requests whose instance is terminated or gone, has been replaced (EC2 launched a new instance after the original was terminated outside spawn) or has expired, and terminates a replacement after cancelling its request. A request whose original instance is alive is left to the instance scan: the request's own `spawn:ttl-deadline` goes stale after `spawn extend`, and cancelling would strand a stopped instance. An untagged replacement is outside the tag-scoped terminate grant. It is reported as `SPOT REPLACEMENT NOT TERMINATED` (alarmed) with the command to end it. `report` / `reap` / `off` as for `REAPER_NET_RESOURCES`, and `REAPER_DRY_RUN` always wins |
 | `ACCOUNTS_TABLE` | `spore-portal-accounts` | The portal registry supplying the expiry verdict. Read-only: the reaper only `Scan`s it, and the prober owns every write |
 
 If neither `REAPER_ROLE_ARNS`/`EC2_ROLE_ARN` nor `REAPER_SCAN_SELF=true` is set,
@@ -398,6 +399,7 @@ nothing — by design, since a partial live set could orphan a healthy record.
 [#475]: https://github.com/spore-host/spawn/issues/475
 [#682]: https://github.com/spore-host/spawn/issues/682
 [#685]: https://github.com/spore-host/spawn/issues/685
+[#950]: https://github.com/spore-host/spawn/issues/950
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71
 [#76]: https://github.com/spore-host/spawn/issues/76

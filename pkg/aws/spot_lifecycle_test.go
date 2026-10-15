@@ -34,6 +34,10 @@ type fakeEC2 struct {
 	// memMiB, when set, answers DescribeInstanceTypes with that memory (#949);
 	// otherwise the call is refused and the caller falls back.
 	memMiB string
+
+	// runSpotRequestID, when set, is returned as the launched instance's
+	// spotInstanceRequestId (#950).
+	runSpotRequestID string
 }
 
 func (f *fakeEC2) actions() []string {
@@ -79,8 +83,12 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			`<Arn>arn:aws:iam::123456789012:user/t</Arn><UserId>U</UserId><Account>123456789012</Account>` +
 			`</GetCallerIdentityResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></GetCallerIdentityResponse>`))
 	case "RunInstances":
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 		_, _ = w.Write([]byte(`<RunInstancesResponse ` + ns + `><requestId>r</requestId><reservationId>r-1</reservationId>` +
-			`<instancesSet><item><instanceId>i-new</instanceId><instanceState><code>0</code><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`))
+			`<instancesSet><item><instanceId>i-new</instanceId>` + spotReqXML(f.runSpotRequestID) +
+			`<instanceState><code>0</code><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`))
+	case "CreateTags":
+		_, _ = w.Write([]byte(`<CreateTagsResponse ` + ns + `><requestId>r</requestId><return>true</return></CreateTagsResponse>`))
 	case "DescribeInstances":
 		var b bytes.Buffer
 		b.WriteString(`<DescribeInstancesResponse ` + ns + `><requestId>r</requestId><reservationSet><item><reservationId>r-1</reservationId><instancesSet><item><instanceId>i-1</instanceId>`)
@@ -403,4 +411,11 @@ func actionListed(action interface{}, want string) bool {
 		}
 	}
 	return false
+}
+
+func spotReqXML(id string) string {
+	if id == "" {
+		return ""
+	}
+	return `<spotInstanceRequestId>` + id + `</spotInstanceRequestId>`
 }

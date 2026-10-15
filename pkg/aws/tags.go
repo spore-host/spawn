@@ -82,8 +82,10 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 
 	// --- Section 3: lifecycle ---
 	// Record the absolute launch time once — survives stop/wake cycles.
-	launchTime := time.Now().UTC().Format(time.RFC3339)
+	launchAt := time.Now().UTC()
+	launchTime := launchAt.Format(time.RFC3339)
 	tags = append(tags, types.Tag{Key: aws.String("spawn:launch-time"), Value: aws.String(launchTime)})
+	var ttlDeadline time.Time // zero when there is no TTL; read by the Spot ValidUntil below
 
 	// Target OS — lets `spawn connect` choose the Windows (SSM + password) vs
 	// Linux (SSH) path without re-describing the AMI, and documents the OS for
@@ -97,7 +99,8 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		// Compute the absolute deadline once at launch; spored uses this across stop/wake cycles
 		// so that TTL is always relative to original launch time, never reset.
 		if d, err := time.ParseDuration(config.TTL); err == nil {
-			deadline := time.Now().Add(d).UTC().Format(time.RFC3339)
+			ttlDeadline = launchAt.Add(d)
+			deadline := ttlDeadline.Format(time.RFC3339)
 			tags = append(tags, types.Tag{Key: aws.String("spawn:ttl-deadline"), Value: aws.String(deadline)})
 		}
 	}
@@ -210,6 +213,13 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	// allows one.
 	if config.Spot && !(config.CapacityBlock && config.ReservationID != "") {
 		tags = append(tags, types.Tag{Key: aws.String(spotrequest.TypeTag), Value: aws.String(spotRequestType(config))})
+		// A persistent request's end date (#950), recorded on the instance and the
+		// request. applySpotOptions sends this same value as ValidUntil, and
+		// `spawn extend` / `spawn start` read it from the instance.
+		if spotIsPersistent(config) {
+			vu := spotrequest.ValidUntil(ttlDeadline, launchAt).Format(time.RFC3339)
+			tags = append(tags, types.Tag{Key: aws.String(spotrequest.ValidUntilTag), Value: aws.String(vu)})
+		}
 	}
 
 	if config.HibernateOnIdle {

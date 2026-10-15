@@ -3,6 +3,10 @@
 package aws
 
 import (
+	"context"
+	"log"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -52,6 +56,13 @@ func applySpotOptions(input *ec2.RunInstancesInput, lc LaunchConfig, tags []type
 	opts := &types.SpotMarketOptions{SpotInstanceType: types.SpotInstanceTypeOneTime}
 	if spotIsPersistent(lc) {
 		opts.SpotInstanceType = types.SpotInstanceTypePersistent
+		// ValidUntil (#950): EC2 gives a persistent request no end date of its
+		// own, so a request orphaned by a terminate outside spawn would keep
+		// launching replacements indefinitely. Bound it at the TTL deadline (or
+		// the reaper's max-age without one), the value buildTags recorded.
+		if vu, ok := spotValidUntilFromTags(tags); ok {
+			opts.ValidUntil = aws.Time(vu)
+		}
 		opts.InstanceInterruptionBehavior = types.InstanceInterruptionBehaviorStop
 		if lc.Hibernate {
 			opts.InstanceInterruptionBehavior = types.InstanceInterruptionBehaviorHibernate
@@ -69,4 +80,42 @@ func applySpotOptions(input *ec2.RunInstancesInput, lc LaunchConfig, tags []type
 		MarketType:  types.MarketTypeSpot,
 		SpotOptions: opts,
 	}
+}
+
+// spotValidUntilFromTags reads the end date buildTags recorded for a persistent
+// request (spotrequest.ValidUntilTag), so the request and the instance tag carry
+// the same instant.
+func spotValidUntilFromTags(tags []types.Tag) (time.Time, bool) {
+	for _, t := range tags {
+		if aws.ToString(t.Key) == spotrequest.ValidUntilTag {
+			v, err := time.Parse(time.RFC3339, aws.ToString(t.Value))
+			return v, err == nil
+		}
+	}
+	return time.Time{}, false
+}
+
+// tagOriginalInstance records, on a persistent Spot request, the instance spawn
+// launched from it (spotrequest.OriginalInstanceTag, #950). The TTL reaper reads
+// it to tell a replacement instance apart: one EC2 launched after the original
+// was terminated outside spawn. The instance ID only exists after RunInstances,
+// so this is a second call. It is best-effort. Without the tag the reaper still
+// spots a replacement by its missing spawn:managed tag. It can't spot one that
+// inherited the tags.
+func tagOriginalInstance(ctx context.Context, api createTagsAPI, lc LaunchConfig, inst types.Instance) {
+	reqID := aws.ToString(inst.SpotInstanceRequestId)
+	if reqID == "" || !lc.Spot || !spotIsPersistent(lc) {
+		return
+	}
+	if _, err := api.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{reqID},
+		Tags:      []types.Tag{{Key: aws.String(spotrequest.OriginalInstanceTag), Value: inst.InstanceId}},
+	}); err != nil {
+		log.Printf("warning: could not tag Spot request %s with its instance id: %v", reqID, err)
+	}
+}
+
+// createTagsAPI is the slice of the EC2 client tagOriginalInstance uses.
+type createTagsAPI interface {
+	CreateTags(ctx context.Context, in *ec2.CreateTagsInput, optFns ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error)
 }
