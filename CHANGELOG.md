@@ -39,6 +39,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--instance-names` when it is set. `spawn connect` picks the key and falls
   back to SSM, and the summary no longer prints your local key path.
 
+- **The audit trail and diagnostic log lines no longer appear in the terminal
+  by default (#895).** `spawn launch` (single, job array and `--mpi`), `cancel`,
+  `extend` and `capacity-block` used to print a raw JSON audit record — carrying
+  your AWS account ID — between their progress lines, and library diagnostics
+  such as `2026/10/15 09:59:58 pricing: m8a.4xlarge in us-west-2 = $0.9738/hr`
+  appeared alongside them. The audit trail is now appended to
+  `~/.spawn/audit.log` (owner-only) and diagnostics to `~/.spawn/spawn.log`;
+  `--verbose` also copies both to stderr. If `~/.spawn` cannot be written, audit
+  records fall back to stderr rather than being lost. Warnings you need to act on
+  (no on-demand price, unverified plugin source, an untagged bucket, and similar)
+  are still printed.
+- **`spawn status` and `spored status` no longer print the agent's idle-check
+  and initialization log lines (#895)** — e.g. `Not idle: CPU usage could not be
+  measured ...`, and the `Agent initialized ... (account: ...)` line. `spored
+  status --verbose` prints them to stderr; `spawn status --verbose` relays them
+  from an older spored that still emits them. Errors from spored are still
+  shown.
+
 ### Fixed
 
 - `go mod tidy` works again. An integration-tagged test still imported
@@ -85,25 +103,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain when its config names none. `spored run-queue` (`spawn launch
   --batch-queue`) had the same defect in its results uploader and now takes the
   instance's region from IMDS when nothing else sets one.
-### Changed
-
-- **The audit trail and diagnostic log lines no longer appear in the terminal
-  by default (#895).** `spawn launch` (single, job array and `--mpi`), `cancel`,
-  `extend` and `capacity-block` used to print a raw JSON audit record — carrying
-  your AWS account ID — between their progress lines, and library diagnostics
-  such as `2026/10/15 09:59:58 pricing: m8a.4xlarge in us-west-2 = $0.9738/hr`
-  appeared alongside them. The audit trail is now appended to
-  `~/.spawn/audit.log` (owner-only) and diagnostics to `~/.spawn/spawn.log`;
-  `--verbose` also copies both to stderr. If `~/.spawn` cannot be written, audit
-  records fall back to stderr rather than being lost. Warnings you need to act on
-  (no on-demand price, unverified plugin source, an untagged bucket, and similar)
-  are still printed.
-- **`spawn status` and `spored status` no longer print the agent's idle-check
-  and initialization log lines (#895)** — e.g. `Not idle: CPU usage could not be
-  measured ...`, and the `Agent initialized ... (account: ...)` line. `spored
-  status --verbose` prints them to stderr; `spawn status --verbose` relays them
-  from an older spored that still emits them. Errors from spored are still
-  shown.
 
 ## [0.128.2] - 2026-10-13
 
