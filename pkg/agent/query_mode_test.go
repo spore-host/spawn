@@ -2,9 +2,18 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/provider"
+	"github.com/spore-host/spawn/pkg/registry"
 )
 
 // countingProvider embeds the package's stubProvider and counts the two calls
@@ -89,11 +98,87 @@ func TestNewAgentForQuery_PerformsNoSideEffects(t *testing.T) {
 	}
 }
 
+// fakeActivation stands in for everything NewAgent's activation reaches: the
+// spore.host DNS API (an httptest server behind a real dns.Client), the hybrid
+// registry's DynamoDB (an httptest server behind a real PeerRegistry), and the EC2
+// tag writer. The real clients are built from ambient credentials, which is how
+// this test used to make a real Route53 UPSERT, CreateTags and PutItem on every
+// developer's `make check` (#968).
+type fakeActivation struct {
+	mu       sync.Mutex
+	dnsReqs  []dns.DNSUpdateRequest
+	ddbCalls []string // X-Amz-Target of every DynamoDB call
+	tags     *fakeTagPutter
+}
+
+func (f *fakeActivation) dnsRequests() []dns.DNSUpdateRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]dns.DNSUpdateRequest(nil), f.dnsReqs...)
+}
+
+func (f *fakeActivation) dynamoCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ddbCalls...)
+}
+
+func installFakeActivation(t *testing.T) *fakeActivation {
+	t.Helper()
+	f := &fakeActivation{tags: &fakeTagPutter{}}
+
+	dnsAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req dns.DNSUpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("fake DNS API: undecodable request: %v", err)
+		}
+		f.mu.Lock()
+		f.dnsReqs = append(f.dnsReqs, req)
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"change_id":"/change/FAKE"}`))
+	}))
+	t.Cleanup(dnsAPI.Close)
+
+	dynamo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.ddbCalls = append(f.ddbCalls, r.Header.Get("X-Amz-Target"))
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(dynamo.Close)
+
+	origDNS, origReg, origTags := newDNSClient, newPeerRegistry, newTagPutter
+	t.Cleanup(func() { newDNSClient, newPeerRegistry, newTagPutter = origDNS, origReg, origTags })
+
+	newDNSClient = func(ctx context.Context, domain, _ string) (*dns.Client, error) {
+		return dns.NewClient(ctx, domain, dnsAPI.URL)
+	}
+	newPeerRegistry = func(_ context.Context, id *provider.Identity) (*registry.PeerRegistry, error) {
+		return registry.NewPeerRegistryFromConfig(id, aws.Config{
+			Region:       "us-west-2",
+			Credentials:  credentials.NewStaticCredentialsProvider("AKIAFAKE", "fake", ""),
+			BaseEndpoint: aws.String(dynamo.URL),
+		}), nil
+	}
+	newTagPutter = func(string) tagPutter { return f.tags }
+	return f
+}
+
 // ...and the daemon path must still do the work, or this fix would have disabled
 // DNS registration and job-array membership instead of relocating them.
+//
+// Asserted through fakes (#968): this used to call the real clients, so it
+// registered demo.<account>.spore.host for real whenever credentials were around
+// — and passed whether or not they were, since NewAgent only logs those failures.
 func TestNewAgent_StillActivates(t *testing.T) {
+	fake := installFakeActivation(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel) // stops the registry heartbeat goroutine
+
 	p := queryProvider()
-	a, err := NewAgent(context.Background(), p)
+	a, err := NewAgent(ctx, p)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
 	}
@@ -105,5 +190,33 @@ func TestNewAgent_StillActivates(t *testing.T) {
 	}
 	if a.dnsDomain == "" {
 		t.Error("dnsDomain was not set")
+	}
+
+	// DNS: one leased UPSERT of the configured name to the public IP, recorded
+	// as registered on the instance.
+	reqs := fake.dnsRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("DNS API got %d request(s), want 1 registration: %+v", len(reqs), reqs)
+	}
+	if r := reqs[0]; r.Action != "UPSERT" || r.RecordName != "demo" || r.IPAddress != "203.0.113.10" || !r.Lease {
+		t.Errorf("DNS registration = %+v, want a leased UPSERT of demo -> 203.0.113.10", r)
+	}
+	if a.lastDNSStatus != "registered" {
+		t.Errorf("lastDNSStatus = %q, want registered", a.lastDNSStatus)
+	}
+	if got := fake.tags.tags["spawn:dns-status"]; got != "registered" {
+		t.Errorf("spawn:dns-status tag = %q, want registered", got)
+	}
+
+	// Registry: the job-array member registered (PutItem) and kept the client.
+	if a.registry == nil {
+		t.Error("NewAgent did not keep a registry client for a job-array member")
+	}
+	var put bool
+	for _, c := range fake.dynamoCalls() {
+		put = put || strings.HasSuffix(c, ".PutItem")
+	}
+	if !put {
+		t.Errorf("registry made no PutItem; DynamoDB calls: %v", fake.dynamoCalls())
 	}
 }

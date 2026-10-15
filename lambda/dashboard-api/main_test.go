@@ -3,10 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 )
 
 // TestCORSHeaders verifies the corsHeaders map has required CORS fields.
@@ -225,7 +230,40 @@ func TestHandlerUnknownPath(t *testing.T) {
 }
 
 // TestHandlerMissingTeamID verifies that requests without auth return non-200.
+// fakeLambdaAWS points the handler's AWS config at a local server that answers
+// every call with an empty result, and returns the X-Amz-Target of each call.
+// The real config is this Lambda's credentials; in a test those were whatever was
+// ambient, so a handler test read real DynamoDB from a developer's machine (#968).
+func fakeLambdaAWS(t *testing.T) func() []string {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Header.Get("X-Amz-Target"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	orig := loadAWSConfig
+	t.Cleanup(func() { loadAWSConfig = orig })
+	loadAWSConfig = func(context.Context) (aws.Config, error) {
+		return aws.Config{
+			Region:       "us-east-1",
+			Credentials:  credentials.NewStaticCredentialsProvider("AKIAFAKE", "fake", ""),
+			BaseEndpoint: aws.String(srv.URL),
+		}, nil
+	}
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), calls...)
+	}
+}
+
 func TestHandlerMissingTeamID(t *testing.T) {
+	calls := fakeLambdaAWS(t)
 	req := events.APIGatewayProxyRequest{
 		HTTPMethod: "GET",
 		Path:       "/teams",
@@ -240,13 +278,16 @@ func TestHandlerMissingTeamID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}
-	// Without valid AWS creds, will get 401, 500, or 400 — all are non-2xx and have JSON body.
+	// The caller has no account record (the fake table is empty): non-2xx, JSON body.
 	if resp.StatusCode == 200 {
 		t.Error("expected non-200 for unauthenticated request")
 	}
 	var body APIResponse
 	if err := json.Unmarshal([]byte(resp.Body), &body); err != nil {
 		t.Fatalf("body not valid JSON: %v", err)
+	}
+	if len(calls()) == 0 {
+		t.Error("the handler never looked the caller up, so this did not exercise the authenticated path")
 	}
 }
 

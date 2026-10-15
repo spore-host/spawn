@@ -18,6 +18,12 @@ import (
 	"github.com/scttfrdmn/strata/spec"
 )
 
+// loadAWSConfig is the handler's AWS config: the Lambda's own credentials. A
+// variable so a test can drive the router without them — handler tests that
+// called the real one read this Lambda's DynamoDB tables with whatever
+// credentials were ambient on the developer's machine (#968).
+var loadAWSConfig = func(ctx context.Context) (aws.Config, error) { return config.LoadDefaultConfig(ctx) }
+
 // handler is the main Lambda handler
 func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	// Extract path and method
@@ -55,7 +61,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 	}
 
 	// Load AWS config
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx)
 	if err != nil {
 		return errorResponse(500, "Failed to load AWS config"), nil
 	}

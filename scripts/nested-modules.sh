@@ -41,6 +41,16 @@ if [ -z "$mods" ]; then
   exit 1
 fi
 
+# Every module's short tests run under the hermetic `go test -exec` wrapper
+# (#968): no ambient credentials, and a test that reaches AWS, the spore.host DNS
+# API or any other off-box host FAILS, named, instead of passing quietly. Built
+# once here from the root module so the script needs nothing installed.
+root=$(cd "$(dirname "$0")/.." && pwd)
+hermetic_dir=$(mktemp -d)
+trap 'rm -rf "$hermetic_dir"' EXIT
+hermetic_exec="$hermetic_dir/hermetic-exec"
+( cd "$root" && go build -o "$hermetic_exec" ./test/hermetic )
+
 # GitHub's log-folding markers, only when running in Actions. Locally they would
 # just be noise.
 group_open() { [ -n "${GITHUB_ACTIONS:-}" ] && echo "::group::$1" || echo "  $1"; return 0; }
@@ -50,7 +60,7 @@ fail=0
 for mod in $mods; do
   dir=$(dirname "$mod")
   group_open "$dir"
-  if ! ( cd "$dir" && go build ./... && go vet ./... && go test -short ./... ); then
+  if ! ( cd "$dir" && go build ./... && go vet ./... && go test -short -exec "$hermetic_exec" ./... ); then
     echo "FAIL $dir" >&2
     fail=1
   fi
