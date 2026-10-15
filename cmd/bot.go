@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,7 +15,6 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
-	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/spf13/cobra"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/bot"
@@ -27,7 +25,7 @@ import (
 const (
 	// botCrossAccountRoleName is created automatically in the caller's AWS account
 	// when registering an instance without an explicit --role-arn.
-	botCrossAccountRoleName = "SpawnBotCrossAccount"
+	botCrossAccountRoleName = bot.CrossAccountRoleName
 )
 
 var (
@@ -42,6 +40,8 @@ var (
 	botTable              string
 	botJSONOutput         bool // deprecated: use --output json
 	botRoleARN            string
+	botExternalID         string   // --external-id: ExternalId in --role-arn's trust policy
+	botRepair             bool     // --repair: rewrite a stale SpawnBotCrossAccount trust policy
 	botConnectCode        string   // for --connect-code self-registration
 	botAllowedChannels    []string // for --allowed-channels channel restriction
 	botConnectTTLHours    int      // for --connect-ttl workspace max connect code lifetime
@@ -86,7 +86,18 @@ The --nickname is the friendly name used in slash commands, e.g.:
   /prism status jupyter
 
 Both the instance ID and instance name (DNS name or spawn:name tag) are
-accepted as the target in slash commands once registered.`,
+accepted as the target in slash commands once registered.
+
+Without --role-arn, spawn creates the SpawnBotCrossAccount role in your
+account, trusting spore-bot's execution role (SPORE_BOT_LAMBDA_ROLE_ARN
+overrides it) under a per-account ExternalId, and stores that ExternalId in the
+registration. If the role exists but trusts a different principal, or has no
+per-account ExternalId, register stops and says so. A role spawn created
+before #1046 trusted the prism-bot stack's role; --repair rewrites its trust
+policy. A role spawn did not create is never modified.
+
+With --role-arn (for example the bot-cross-account-role.yaml stack's RoleArn
+output), pass the ExternalId in that role's trust policy with --external-id.`,
 	RunE: runBotRegister,
 }
 
@@ -158,16 +169,27 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
 
-	// Auto-create cross-account role if --role-arn not provided
+	// Auto-create (or check, or --repair) the cross-account role if --role-arn
+	// was not provided. Its ExternalId goes into the registration: spore-bot
+	// will not assume a role for a registration without one (spore-host#413).
 	roleARN := botRoleARN
+	externalID := botExternalID
 	if roleARN == "" {
+		if externalID != "" {
+			return fmt.Errorf("--external-id is only meaningful with --role-arn; without it spawn uses the %s role's own ExternalId", botCrossAccountRoleName)
+		}
 		fmt.Printf("No --role-arn provided — ensuring %s role exists in account %s...\n",
 			botCrossAccountRoleName, accountID)
-		roleARN, err = ensureCrossAccountRole(ctx, cfg)
+		roleARN, externalID, err = bot.EnsureCrossAccountRole(ctx, iam.NewFromConfig(cfg),
+			spawnconfig.GetBotLambdaRoleARN(), botRepair, generateExternalID, os.Stdout)
 		if err != nil {
-			return fmt.Errorf("create cross-account role: %w", err)
+			return fmt.Errorf("cross-account role: %w", err)
 		}
 		fmt.Printf("  ✓ Role: %s\n", roleARN)
+	} else if botRepair {
+		return fmt.Errorf("--repair applies to the auto-managed %s role; it cannot be combined with --role-arn", botCrossAccountRoleName)
+	} else if externalID == "" {
+		fmt.Fprintf(os.Stderr, "Warning: --role-arn without --external-id. spore-bot only assumes a role with the per-account ExternalId in its trust policy; pass it with --external-id unless this registration already stores it.\n")
 	}
 
 	// Build registry key
@@ -179,6 +201,7 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 		InstanceID:     botInstance,
 		AWSAccountID:   accountID,
 		RoleARN:        roleARN,
+		ExternalID:     externalID,
 		TagPrefix:      tagpfx,
 		AllowedActions: botAllow,
 		RegisteredBy:   registeredBy,
@@ -200,82 +223,6 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Allowed actions: %s\n", strings.Join(reg.AllowedActions, ", "))
 	fmt.Printf("  Tag prefix: %s\n", reg.TagPrefix)
 	return nil
-}
-
-// ensureCrossAccountRole creates the SpawnBotCrossAccount IAM role in the caller's
-// AWS account if it doesn't already exist, and returns its ARN.
-// The role trusts the spore-bot Lambda execution role to assume it, allowing the
-// bot to call ec2:Describe/Start/Stop on instances in this account.
-func ensureCrossAccountRole(ctx context.Context, cfg aws.Config) (string, error) {
-	client := iam.NewFromConfig(cfg)
-
-	// Check if role already exists
-	existing, err := client.GetRole(ctx, &iam.GetRoleInput{
-		RoleName: aws.String(botCrossAccountRoleName),
-	})
-	if err == nil {
-		return *existing.Role.Arn, nil
-	}
-
-	var notFound *iamtypes.NoSuchEntityException
-	if !errors.As(err, &notFound) {
-		return "", fmt.Errorf("get role: %w", err)
-	}
-
-	// Create the role
-	trustPolicy := fmt.Sprintf(`{
-		"Version": "2012-10-17",
-		"Statement": [{
-			"Effect": "Allow",
-			"Principal": {"AWS": %q},
-			"Action": "sts:AssumeRole",
-			"Condition": {"StringEquals": {"sts:ExternalId": "spawn-bot"}}
-		}]
-	}`, spawnconfig.GetBotLambdaRoleARN())
-
-	created, err := client.CreateRole(ctx, &iam.CreateRoleInput{
-		RoleName:                 aws.String(botCrossAccountRoleName),
-		AssumeRolePolicyDocument: aws.String(trustPolicy),
-		Description:              aws.String("Allows spore-bot Lambda to control EC2 instances in this account via Slack/Teams commands"),
-		// Tag so `spawn cleanup`/`resources` can find and attribute it (#258).
-		Tags: []iamtypes.Tag{
-			{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-			{Key: aws.String("spawn:created-by"), Value: aws.String("spawn")},
-			{Key: aws.String("spawn:created-at"), Value: aws.String(time.Now().UTC().Format(time.RFC3339))},
-			{Key: aws.String("spawn:purpose"), Value: aws.String("bot-cross-account")},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("create role: %w", err)
-	}
-
-	// Attach inline permission policy
-	permPolicy := `{
-		"Version": "2012-10-17",
-		"Statement": [{
-			"Effect": "Allow",
-			"Action": [
-				"ec2:DescribeInstances",
-				"ec2:DescribeTags",
-				"ec2:StartInstances",
-				"ec2:StopInstances",
-				"ec2:CreateTags",
-				"ec2:DeleteTags"
-			],
-			"Resource": "*"
-		}]
-	}`
-
-	_, err = client.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
-		RoleName:       aws.String(botCrossAccountRoleName),
-		PolicyName:     aws.String("SpawnBotEC2Control"),
-		PolicyDocument: aws.String(permPolicy),
-	})
-	if err != nil {
-		return "", fmt.Errorf("attach role policy: %w", err)
-	}
-
-	return *created.Role.Arn, nil
 }
 
 // ── deregister ────────────────────────────────────────────────────────────────
@@ -793,6 +740,8 @@ func init() {
 	botRegisterCmd.Flags().StringSliceVar(&botAllow, "allow", nil, "Allowed actions (default: start,stop,status,hibernate,url)")
 	botRegisterCmd.Flags().StringVar(&botTagPrefix, "tag-prefix", "", "Tag prefix: spawn or prism (default: auto-detected)")
 	botRegisterCmd.Flags().StringVar(&botRoleARN, "role-arn", "", "Cross-account IAM role ARN for this instance's account (created automatically if omitted)")
+	botRegisterCmd.Flags().StringVar(&botExternalID, "external-id", "", "STS ExternalId in --role-arn's trust policy (the auto-created role supplies its own)")
+	botRegisterCmd.Flags().BoolVar(&botRepair, "repair", false, "Rewrite the trust policy of a spawn-created "+botCrossAccountRoleName+" role that trusts an old bot principal or lacks a per-account ExternalId")
 	botRegisterCmd.Flags().StringVar(&botConnectCode, "connect-code", "", "One-time code from /spore connect (alternative to --user-id)")
 
 	// Deregister flags

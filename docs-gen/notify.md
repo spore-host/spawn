@@ -104,6 +104,17 @@ The --nickname is the friendly name used in slash commands, e.g.:
 Both the instance ID and instance name (DNS name or spawn:name tag) are
 accepted as the target in slash commands once registered.
 
+Without --role-arn, spawn creates the SpawnBotCrossAccount role in your
+account, trusting spore-bot's execution role (SPORE_BOT_LAMBDA_ROLE_ARN
+overrides it) under a per-account ExternalId, and stores that ExternalId in the
+registration. If the role exists but trusts a different principal, or has no
+per-account ExternalId, register stops and says so. A role spawn created
+before #1046 trusted the prism-bot stack's role; --repair rewrites its trust
+policy. A role spawn did not create is never modified.
+
+With --role-arn (for example the bot-cross-account-role.yaml stack's RoleArn
+output), pass the ExternalId in that role's trust policy with --external-id.
+
 ```
 spawn notify register [flags]
 ```
@@ -114,9 +125,11 @@ spawn notify register [flags]
 |------|-------|------|---------|-------------|
 | `--allow` |  | stringSlice |  | Allowed actions (default: start,stop,status,hibernate,url) |
 | `--connect-code` |  | string |  | One-time code from /spore connect (alternative to --user-id) |
+| `--external-id` |  | string |  | STS ExternalId in --role-arn's trust policy (the auto-created role supplies its own) |
 | `--instance` |  | string |  | Instance ID (i-...) or name |
 | `--nickname` |  | string |  | Friendly name for slash commands (default: 'default') |
 | `--platform` |  | string |  | Chat platform: slack, teams, or discord |
+| `--repair` |  | bool |  | Rewrite the trust policy of a spawn-created SpawnBotCrossAccount role that trusts an old bot principal or lacks a per-account ExternalId |
 | `--role-arn` |  | string |  | Cross-account IAM role ARN for this instance's account (created automatically if omitted) |
 | `--table` |  | string |  | Override DynamoDB registry table name |
 | `--tag-prefix` |  | string |  | Tag prefix: spawn or prism (default: auto-detected) |

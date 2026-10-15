@@ -97,11 +97,27 @@ func GetDNSEndpointURL() string {
 
 // ── Bot / notification registration ──────────────────────────────────────────
 
+// SporeBotRoleName is the execution role of the hosted spore-bot Lambda. It is
+// a fixed name, created by spore-host's infra/tofu/spore-bot
+// (aws_iam_role.spore_bot), not one CloudFormation generated with a random
+// suffix, so recreating a stack cannot change it (#476, #1046).
+const SporeBotRoleName = "spore-bot-role"
+
+// DefaultBotLambdaRoleARN is the principal that SpawnBotCrossAccount roles
+// trust: the hosted spore-bot Lambda's execution role. It is the single source
+// for that ARN; deployment/cloudformation/bot-cross-account-role.yaml's
+// BotLambdaRoleArn default must equal it, and bot_principal_test.go fails the
+// build when any file in the repo names a different bot principal.
+//
+// It was the prism-bot stack's auto-generated function role until #1046, which
+// spore-bot no longer runs as.
+const DefaultBotLambdaRoleARN = "arn:aws:iam::966362334030:role/" + SporeBotRoleName
+
 // botLambdaRoleARNs maps environment → spore-bot Lambda execution role ARN
 // that cross-account IAM roles trust for bot operations.
 var botLambdaRoleARNs = map[Environment]string{
-	EnvProd:  "arn:aws:iam::966362334030:role/prism-bot-PrismBotFunctionRole-U2vZFZXgWBeM",
-	EnvInteg: "arn:aws:iam::966362334030:role/prism-bot-PrismBotFunctionRole-U2vZFZXgWBeM", // update when integ stack exists
+	EnvProd:  DefaultBotLambdaRoleARN,
+	EnvInteg: DefaultBotLambdaRoleARN, // update when an integ stack exists
 }
 
 // GetBotLambdaRoleARN returns the ARN of the spore-bot Lambda execution role.

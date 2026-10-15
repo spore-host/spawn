@@ -213,3 +213,44 @@ func TestBotStore_WorkspaceAndConnectCode(t *testing.T) {
 		t.Errorf("workspace still present after delete: %+v", got)
 	}
 }
+
+// spore-bot refuses to assume a role for a registration with no external_id
+// (spore-host#413), so register must store one, and a later upsert that does
+// not carry one (--role-arn without --external-id) must not erase it (#1046).
+func TestBotStore_UpsertRegistration_ExternalID(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+	reg := &Registration{
+		UserKey: "slack#T3#U3", Nickname: "box", InstanceID: "i-3",
+		AWSAccountID: "111122223333", TagPrefix: "spawn", AllowedActions: []string{"status"},
+		RegisteredBy: "me", Platform: "slack", CreatedAt: "t", ExternalID: "xid-1",
+	}
+	if err := c.UpsertRegistration(ctx, reg); err != nil {
+		t.Fatalf("UpsertRegistration: %v", err)
+	}
+	got := func() string {
+		t.Helper()
+		regs, err := c.ListRegistrationsByWorkspace(ctx, "slack", "T3")
+		if err != nil || len(regs) != 1 {
+			t.Fatalf("want 1 registration, got %d (%v)", len(regs), err)
+		}
+		return regs[0].ExternalID
+	}
+	if x := got(); x != "xid-1" {
+		t.Fatalf("external_id = %q, want xid-1", x)
+	}
+	reg.ExternalID = ""
+	if err := c.UpsertRegistration(ctx, reg); err != nil {
+		t.Fatalf("re-UpsertRegistration: %v", err)
+	}
+	if x := got(); x != "xid-1" {
+		t.Errorf("upsert without an ExternalID changed external_id to %q, want xid-1 kept", x)
+	}
+	reg.ExternalID = "xid-2"
+	if err := c.UpsertRegistration(ctx, reg); err != nil {
+		t.Fatalf("re-UpsertRegistration: %v", err)
+	}
+	if x := got(); x != "xid-2" {
+		t.Errorf("external_id = %q after upsert with xid-2", x)
+	}
+}
