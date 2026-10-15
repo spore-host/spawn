@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spf13/cobra"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
 // completeInstanceID provides completion for instance IDs
@@ -18,16 +18,14 @@ func completeInstanceID(cmd *cobra.Command, args []string, toComplete string) ([
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Load AWS config
-	cfg, err := config.LoadDefaultConfig(ctx)
+	// Completion runs without the root's PersistentPreRunE, so record the
+	// parsed --profile/--region/--account here: completion then lists the
+	// instances of the account and region the completed command will use.
+	spawnconfig.SetSharedFlags(spawnProfile, spawnRegion, spawnAccount)
+	region, _ := cmd.Flags().GetString("region")
+	cfg, err := loadAWSConfig(ctx, region)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError
-	}
-
-	// Get region from flag or default
-	region, _ := cmd.Flags().GetString("region")
-	if region != "" {
-		cfg.Region = region
 	}
 
 	// Create EC2 client

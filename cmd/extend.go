@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
@@ -58,7 +57,7 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	// Get user identity for audit logging
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}

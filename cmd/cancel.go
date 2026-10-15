@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -156,7 +155,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 				}
 			}
 
-			devCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+			devCfg, err := loadAWSConfig(ctx, region)
 			if err != nil {
 				return fmt.Errorf("failed to load dev account config: %w", err)
 			}
@@ -219,7 +218,7 @@ func terminateMultiRegion(ctx context.Context, instancesByRegion map[string][]st
 			fmt.Fprintf(os.Stderr, "   Terminating %d instances in %s...\n", len(instList), r)
 
 			// Load regional config
-			regionalCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(r))
+			regionalCfg, err := loadAWSConfig(ctx, r)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {

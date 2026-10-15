@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/fsx"
 	"github.com/aws/aws-sdk-go-v2/service/fsx/types"
 	"github.com/spf13/cobra"
@@ -64,7 +63,7 @@ func runFSxList(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	// Load AWS config
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
@@ -151,7 +150,7 @@ func runFSxInfo(cmd *cobra.Command, args []string) error {
 	filesystemID := args[0]
 
 	// Load AWS config
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
@@ -269,7 +268,7 @@ func runFSxDelete(cmd *cobra.Command, args []string) error {
 	filesystemID := args[0]
 
 	// Load AWS config
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}

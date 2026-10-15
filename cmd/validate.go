@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/compliance"
@@ -317,7 +316,7 @@ func runInfrastructureValidation(ctx context.Context) error {
 	}
 
 	// Load AWS config
-	awsCfg, err := config.LoadDefaultConfig(ctx)
+	awsCfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}

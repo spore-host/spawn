@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/spf13/cobra"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
@@ -110,12 +109,21 @@ func runBurst(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Load AWS config
-	cfg, err := config.LoadDefaultConfig(ctx)
+	// Load the AWS config the way every other command does (#939): the root
+	// --region and --profile flags, then SPORE_REGION/SPORE_PROFILE and the
+	// shared spore config, then the ambient chain. A bare SDK load read none of
+	// them, so burst launched in the ambient region whatever --region said. The
+	// AMI lookup, the registry table and every member use this one config, so
+	// they agree on the region.
+	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
+	if cfg.Region == "" {
+		return fmt.Errorf("no AWS region: pass --region, or set SPORE_REGION or AWS_REGION")
+	}
 	launchParams.Region = cfg.Region
+	fmt.Fprintf(os.Stderr, "Region: %s\n", launchParams.Region)
 
 	awsClient := spawnaws.NewClientFromConfig(cfg)
 
@@ -130,7 +138,7 @@ func runBurst(cmd *cobra.Command, args []string) error {
 
 	// Ensure DynamoDB table exists
 	fmt.Fprintln(os.Stderr, "Ensuring DynamoDB registry table exists...")
-	if err := registry.EnsureTable(ctx); err != nil {
+	if err := registry.EnsureTable(ctx, cfg); err != nil {
 		return fmt.Errorf("failed to ensure registry table: %w", err)
 	}
 

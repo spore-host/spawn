@@ -30,7 +30,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/spf13/cobra"
@@ -64,7 +63,7 @@ This is the CLI equivalent of the web CloudFormation quick-create.`,
 func runOnboard(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, onboardRegion)
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}

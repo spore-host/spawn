@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/spore-host/spawn/pkg/provider"
 	"github.com/spore-host/spawn/pkg/registry"
 )
@@ -55,7 +56,11 @@ job_array:
 	t.Logf("Local provider identity: %s (%s)", identity.InstanceID, identity.Provider)
 
 	// 2. Ensure DynamoDB registry table exists
-	if err := registry.EnsureTable(ctx); err != nil {
+	awsCfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		t.Fatalf("load AWS config: %v", err)
+	}
+	if err := registry.EnsureTable(ctx, awsCfg); err != nil {
 		t.Fatalf("EnsureTable() error = %v", err)
 	}
 

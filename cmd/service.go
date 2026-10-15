@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
@@ -198,7 +197,7 @@ func serviceLaunchConfig(name, region string) aws.LaunchConfig {
 // wrong by up to 38x for a family or size (e.g. metal-Nxl) it didn't know
 // (#543).
 var resolveServiceDryRunPrice = func(ctx context.Context, region, instanceType string) (aws.DisplayPrice, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	cfg, err := loadAWSConfig(ctx, region)
 	if err != nil {
 		return aws.DisplayPrice{}, fmt.Errorf("load AWS config: %w", err)
 	}
