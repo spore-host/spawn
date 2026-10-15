@@ -279,6 +279,19 @@ func runGraphPipeline(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// pipelineStageIAMConfig is the role config for a pipeline's stage instances:
+// the pipeline's S3 data grant. CreateOrGetInstanceProfile adds the spored
+// self-management baseline (tags, self-terminate) and SSM, and names the role
+// after a hash of the policy, so pipelines sharing a bucket and prefix share
+// one role rather than creating one per run.
+func pipelineStageIAMConfig(p *pipeline.Pipeline) spawnaws.IAMRoleConfig {
+	return spawnaws.IAMRoleConfig{
+		TrustServices:    []string{"ec2"},
+		InlinePolicyJSON: pipeline.StageDataPolicy(p.S3Bucket, p.S3Prefix),
+		Tags:             map[string]string{"spawn:purpose": "pipeline"},
+	}
+}
+
 func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	file := args[0]
@@ -312,10 +325,23 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get user account ID
-	userAccountID, err := spawnaws.NewClientFromConfig(cfg).GetAccountID(ctx)
+	awsClient := spawnaws.NewClientFromConfig(cfg)
+	userAccountID, err := awsClient.GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
+
+	// The stages' instance profile, scoped to the pipeline's bucket and prefix.
+	// The shared default spored profile has no access to pipeline data, so the
+	// stages could neither read their inputs nor write outputs or markers
+	// (#911). Created here, with the caller's credentials, as `spawn task run`
+	// does, so the orchestrator Lambda needs only iam:PassRole on it.
+	fmt.Fprintf(os.Stderr, "🔐 Preparing the stage instance profile...\n")
+	instanceProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, pipelineStageIAMConfig(p))
+	if err != nil {
+		return fmt.Errorf("create stage instance profile: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "✓ Instance profile: %s\n\n", instanceProfile)
 
 	// Step 1: Upload pipeline definition to S3
 	fmt.Fprintf(os.Stderr, "📤 Uploading pipeline definition to S3...\n")
@@ -365,6 +391,7 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 		FailedStages:    0,
 		Stages:          []pipeline.StageState{}, // empty (non-nil), as before
 		MaxCostUSD:      p.MaxCostUSD,
+		InstanceProfile: instanceProfile,
 	}
 
 	if err := pipeline.NewStore(dynamodb.NewFromConfig(cfg)).Put(ctx, state); err != nil {

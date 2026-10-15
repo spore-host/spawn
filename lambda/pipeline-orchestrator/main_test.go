@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -18,6 +21,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/pipeline"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
@@ -488,10 +492,22 @@ func TestEveryRunInstancesUsesTheStageInput(t *testing.T) {
 
 // ---- the user data, executed ----------------------------------------------
 
-// runUserData executes the generated user data under bash with every external
-// command it reaches faked, and returns the log of what the fakes were asked
-// to do. Paths that need root are redirected into a temp dir.
-func runUserData(t *testing.T, command string, failDownload bool) (string, error) {
+// userDataRun is one execution of the generated stage user data.
+type userDataRun struct {
+	state        *pipeline.PipelineState
+	stageDef     *pipeline.Stage
+	stageState   *pipeline.StageState
+	region       string
+	spored       string   // the file the fake curl serves as the spored binary
+	failDownload bool     // every binary download fails
+	env          []string // extra environment, e.g. AWS endpoints for a real spored
+}
+
+// execUserData executes the generated user data under bash with every external
+// command it reaches faked except spored, which is whatever r.spored is, and
+// returns the log of what the fakes were asked to do. Paths that need root are
+// redirected into a temp dir.
+func execUserData(t *testing.T, r userDataRun) (string, error) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		// The script is a Linux instance's user-data, and the harness roots it by
@@ -503,10 +519,7 @@ func runUserData(t *testing.T, command string, failDownload bool) (string, error
 	if err != nil {
 		t.Skip("bash not available")
 	}
-	state, def := twoStagePipeline("stop", time.Now())
-	stageDef := def.GetStage("train")
-	stageDef.Command = command
-	ud, err := generatePipelineUserData(state, stageDef, getStageState(state, "train"), 0, "eu-west-1")
+	ud, err := generatePipelineUserData(r.state, r.stageDef, r.stageState, 0, r.region)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +545,8 @@ func runUserData(t *testing.T, command string, failDownload bool) (string, error
 	).Replace(string(raw))
 
 	fakes := map[string]string{
-		// curl: IMDS answers only with a v2 token; binary downloads may fail.
+		// curl: IMDS answers only with a v2 token; binary downloads serve
+		// $SPORED_SRC, or fail.
 		"curl": `out=""; url=""; tok=""; prev=""
 for a in "$@"; do
   case "$prev" in -o) out="$a";; -H) case "$a" in X-aws-ec2-metadata-token:*) tok="${a#*: }";; esac;; esac
@@ -545,7 +559,7 @@ case "$url" in
   */meta-data/instance-id) [ "$tok" = tok123 ] && echo i-0fromimds || exit 22;;
   */meta-data/placement/region) echo eu-west-1;;
   *.sha256) echo abc > "$out";;
-  *) [ -n "$FAIL_DOWNLOAD" ] && exit 22; echo bin > "$out";;
+  *) [ -n "$FAIL_DOWNLOAD" ] && exit 22; cp "$SPORED_SRC" "$out";;
 esac`,
 		"aws":       `[ "$1 $2" = "s3 cp" ] && cat >/dev/null; echo "aws $*" >> "$CALLS"`,
 		"shutdown":  `echo "shutdown $*" >> "$CALLS"`,
@@ -562,8 +576,9 @@ esac`,
 	}
 	// ec2-metadata is deliberately absent, as on Ubuntu and Debian.
 	cmd := exec.Command(bash, "-c", script)
-	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "CALLS=" + logf, "HOME=" + dir}
-	if failDownload {
+	cmd.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin", "CALLS=" + logf, "HOME=" + dir,
+		"SPORED_SRC=" + r.spored}, r.env...)
+	if r.failDownload {
 		cmd.Env = append(cmd.Env, "FAIL_DOWNLOAD=1")
 	}
 	out, runErr := cmd.CombinedOutput()
@@ -572,9 +587,29 @@ esac`,
 	return string(calls), runErr
 }
 
+// runUserData runs the "train" stage's user data with a fake spored whose
+// whole body is sporedBody, logging its arguments.
+func runUserData(t *testing.T, sporedBody string, failDownload bool) (string, error) {
+	t.Helper()
+	state, def := twoStagePipeline("stop", time.Now())
+	fake := filepath.Join(t.TempDir(), "spored")
+	if err := os.WriteFile(fake, []byte("#!/bin/bash\necho \"spored $*\" >> \"$CALLS\"\n"+sporedBody+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return execUserData(t, userDataRun{
+		state: state, stageDef: def.GetStage("train"), stageState: getStageState(state, "train"),
+		region: "eu-west-1", spored: fake, failDownload: failDownload,
+	})
+}
+
 func assertSelfTerminated(t *testing.T, calls string) {
 	t.Helper()
-	if !strings.Contains(calls, "aws ec2 terminate-instances --instance-ids i-0fromimds --region eu-west-1") {
+	assertSelfTerminatedWith(t, calls, "eu-west-1")
+}
+
+func assertSelfTerminatedWith(t *testing.T, calls, region string) {
+	t.Helper()
+	if !strings.Contains(calls, "aws ec2 terminate-instances --instance-ids i-0fromimds --region "+region) {
 		t.Errorf("instance did not terminate itself through the API with the IMDSv2 instance id; calls:\n%s", calls)
 	}
 	if !strings.Contains(calls, "shutdown -h now") {
@@ -582,28 +617,30 @@ func assertSelfTerminated(t *testing.T, calls string) {
 	}
 }
 
-// #912: a stage whose command fails must write FAILED and terminate. It used
-// to write FAILED and exit, leaving the instance running.
+// #912: a stage that fails must write FAILED and terminate. It used to write
+// FAILED and exit, leaving the instance running. The stage is run by spored
+// (#910); here a fake one exits 3.
 func TestUserData_FailedStageTerminates(t *testing.T) {
 	calls, err := runUserData(t, "exit 3", false)
 	if err == nil {
-		t.Error("script exited 0 for a failing stage command")
+		t.Error("script exited 0 for a failing stage")
 	}
-	if !strings.Contains(calls, "aws s3 cp - s3://bkt/pfx/stages/train/FAILED") {
-		t.Errorf("FAILED marker not written; calls:\n%s", calls)
+	if !strings.Contains(calls, "aws s3 cp - s3://bkt/"+pipeline.StageMarkerKey("pfx", "train", pipeline.MarkerFailed)) {
+		t.Errorf("fallback FAILED marker not written at the key the orchestrator reads; calls:\n%s", calls)
 	}
 	assertSelfTerminated(t, calls)
 }
 
 // The success path must terminate too, without ec2-metadata (absent here, as
-// on Ubuntu), and must not write FAILED.
+// on Ubuntu), and must not write FAILED. COMPLETE is spored's to write, after
+// the outputs (TestStageRunnerEndToEnd_InputsDownloadedOutputsUploaded).
 func TestUserData_SuccessfulStageTerminatesWithoutEC2Metadata(t *testing.T) {
-	calls, err := runUserData(t, "true", false)
+	calls, err := runUserData(t, "exit 0", false)
 	if err != nil {
-		t.Errorf("script failed for a succeeding stage command: %v", err)
+		t.Errorf("script failed for a succeeding stage: %v", err)
 	}
-	if !strings.Contains(calls, "aws s3 cp - s3://bkt/pfx/stages/train/COMPLETE") {
-		t.Errorf("COMPLETE marker not written; calls:\n%s", calls)
+	if !strings.Contains(calls, "spored run-pipeline-stage") {
+		t.Errorf("the stage runner was not run; calls:\n%s", calls)
 	}
 	if strings.Contains(calls, "/FAILED") {
 		t.Errorf("FAILED marker written for a successful stage; calls:\n%s", calls)
@@ -614,7 +651,7 @@ func TestUserData_SuccessfulStageTerminatesWithoutEC2Metadata(t *testing.T) {
 // A bootstrap failure under set -e, before the stage command runs, must
 // terminate the instance and report the failure.
 func TestUserData_BootstrapFailureTerminates(t *testing.T) {
-	calls, err := runUserData(t, "true", true)
+	calls, err := runUserData(t, "exit 0", true)
 	if err == nil {
 		t.Error("script exited 0 although spored could not be downloaded")
 	}
@@ -622,4 +659,125 @@ func TestUserData_BootstrapFailureTerminates(t *testing.T) {
 		t.Errorf("FAILED marker not written for a bootstrap failure; calls:\n%s", calls)
 	}
 	assertSelfTerminated(t, calls)
+}
+
+// ---- what the stage runner needs from the orchestrator (#910) -------------
+
+// fakeLauncher records RunInstances calls and the order of side effects.
+type fakeLauncher struct {
+	events *[]string
+	inputs []*ec2.RunInstancesInput
+}
+
+func (f *fakeLauncher) RunInstances(_ context.Context, in *ec2.RunInstancesInput, _ ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
+	f.inputs = append(f.inputs, in)
+	*f.events = append(*f.events, "run")
+	id := fmt.Sprintf("i-%d", len(f.inputs))
+	return &ec2.RunInstancesOutput{Instances: []ec2types.Instance{{
+		InstanceId: aws.String(id), State: &ec2types.InstanceState{Name: ec2types.InstanceStateNamePending},
+	}}}, nil
+}
+
+// launchStage must write the pipeline definition to the key every stage
+// instance's s3-config-key tag names, before any instance can boot and read
+// it, and tag the instances with the bucket and prefix the runner's data
+// handler uses, under the scoped instance profile. Without s3-config-key the
+// runner refuses to start; without the profile it cannot read or write the
+// pipeline's S3 paths.
+func TestLaunchStageGivesTheRunnerItsTagsConfigAndProfile(t *testing.T) {
+	state, def := twoStagePipeline("stop", time.Now())
+	state.InstanceProfile = "spawn-instance-abc12345"
+	def.Stages[0].AMI = "ami-given" // no AMI lookup
+	def.Stages[0].InstanceCount = 2
+	stageState := &pipeline.StageState{StageID: "train", StageIndex: 0, Status: pipeline.StageStatusReady}
+
+	var events []string
+	written := map[string][]byte{}
+	launcher := &fakeLauncher{events: &events}
+	oldPut, oldLaunch, oldAMI := putObjectFn, launchEC2ForRegion, recommendedAMIFn
+	t.Cleanup(func() { putObjectFn, launchEC2ForRegion, recommendedAMIFn = oldPut, oldLaunch, oldAMI })
+	putObjectFn = func(_ context.Context, in *s3.PutObjectInput) error {
+		b, _ := io.ReadAll(in.Body)
+		written["s3://"+aws.ToString(in.Bucket)+"/"+aws.ToString(in.Key)] = b
+		events = append(events, "put")
+		return nil
+	}
+	var launchRegion string
+	launchEC2ForRegion = func(_ context.Context, region string) (runInstancesAPI, error) {
+		launchRegion = region
+		return launcher, nil
+	}
+	recommendedAMIFn = func(context.Context, string, string) (string, error) {
+		t.Error("AMI lookup called although the stage names an AMI")
+		return "", nil
+	}
+
+	if err := launchStage(context.Background(), state, def, def.GetStage("train"), stageState); err != nil {
+		t.Fatal(err)
+	}
+	if launchRegion != "eu-west-1" {
+		t.Errorf("launched in %q, want the stage's region eu-west-1", launchRegion)
+	}
+	if len(launcher.inputs) != 2 || len(events) == 0 || events[0] != "put" {
+		t.Fatalf("want the stage config written before %d launches; events %v", 2, events)
+	}
+	for i, in := range launcher.inputs {
+		tags := tagMap(in.TagSpecifications[0].Tags)
+		cfgURL := tags[tagprefix.Tag("s3-config-key")]
+		body, ok := written[cfgURL]
+		if !ok {
+			t.Errorf("instance %d: %s = %q, which nothing was written to (wrote %v)", i, tagprefix.Tag("s3-config-key"), cfgURL, keys(written))
+			continue
+		}
+		var got pipeline.Pipeline
+		if err := json.Unmarshal(body, &got); err != nil || got.GetStage("train") == nil {
+			t.Errorf("instance %d: the stage config is not the pipeline definition: %v %s", i, err, body)
+		}
+		if cfgURL != "s3://bkt/"+pipeline.StageConfigKey("pfx", "pl-1") {
+			t.Errorf("stage config at %q, want it inside the pipeline's bucket/prefix, which the stage profile is granted", cfgURL)
+		}
+		if tags[tagprefix.Tag("s3-bucket")] != "bkt" || tags[tagprefix.Tag("s3-prefix")] != "pfx" {
+			t.Errorf("instance %d: s3-bucket/s3-prefix tags = %q/%q, want bkt/pfx (the marker and data location the orchestrator reads)",
+				i, tags[tagprefix.Tag("s3-bucket")], tags[tagprefix.Tag("s3-prefix")])
+		}
+		if tags[tagprefix.Tag("instance-index")] != fmt.Sprintf("%d", i) {
+			t.Errorf("instance %d: instance-index tag = %q", i, tags[tagprefix.Tag("instance-index")])
+		}
+		if got := aws.ToString(in.IamInstanceProfile.Name); got != "spawn-instance-abc12345" {
+			t.Errorf("instance %d: launched with profile %q, want the pipeline's scoped profile", i, got)
+		}
+	}
+}
+
+// A record written before the scoped profile existed still launches, with the
+// shared default.
+func TestStageInstanceProfileFallsBackToTheDefault(t *testing.T) {
+	if got := stageInstanceProfile(&pipeline.PipelineState{}); got != spawnaws.SporedInstanceProfileName {
+		t.Errorf("profile = %q, want %q", got, spawnaws.SporedInstanceProfileName)
+	}
+}
+
+// The fallback FAILED marker the user data writes is at the orchestrator's key.
+func TestUserDataFallbackMarkerIsTheOrchestratorsKey(t *testing.T) {
+	state, def := twoStagePipeline("stop", time.Now())
+	ud, err := generatePipelineUserData(state, def.GetStage("train"), getStageState(state, "train"), 0, "eu-west-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := base64.StdEncoding.DecodeString(ud)
+	want := "SPAWN_FAILED_MARKER='s3://bkt/" + pipeline.StageMarkerKey("pfx", "train", pipeline.MarkerFailed) + "'"
+	if !strings.Contains(string(raw), "\n"+want+"\n") {
+		t.Errorf("user data does not assign %s", want)
+	}
+	if !regexp.MustCompile(`(?m)^timeout -k 60 \d+ /usr/local/bin/spored run-pipeline-stage$`).Match(raw) {
+		t.Error("user data does not run spored run-pipeline-stage under the stage timeout")
+	}
+}
+
+func keys(m map[string][]byte) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

@@ -126,6 +126,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned before notifying, so the webhook heard nothing of either the cancel
   or the instance. The alarm's description now says where to look and what to
   run.
+- **Pipeline stages now receive their `data_input` and keep their `data_output`**
+  (#910, #911). Both were validated and then ignored: the stage script had only
+  TODOs where the S3 download and upload belonged, so a stage started with an
+  empty input directory, its outputs were lost when its instance terminated, and
+  the pipeline could still report `COMPLETED`. Stage instances now run
+  `spored run-pipeline-stage`, which already implemented the handoff and peer
+  discovery but was never invoked. It downloads the upstream stages' outputs,
+  runs the command, uploads the declared outputs, and writes `COMPLETE` only
+  after that, so a downstream stage cannot start before its inputs exist. Any
+  failure writes `FAILED`. Both markers are written at the keys the orchestrator
+  reads. The termination, TTL and `FAILED` guarantees from #912 are unchanged.
+  - `spawn pipeline launch` now creates (or reuses) an instance profile for the
+    stages, scoped to the pipeline's `s3_bucket`/`s3_prefix`. The shared default
+    spored profile has no access to pipeline data, so the stages could not
+    read or write it, markers included. Launching a pipeline therefore needs IAM
+    permissions, as `spawn task run` does.
+  - The stage command now runs in `/opt/spawn/pipeline/<pipeline>/<stage>`, as
+    before, rather than `/root`. Its `env` is applied by the runner.
+  - The stage runner's S3 clients use the bucket's own region, so a stage in
+    another region can still reach the pipeline's bucket.
+
+  The `spawn-pipeline-orchestrator` Lambda has to be redeployed (its template
+  now lets it pass the stage profile), and pipelines have to be launched with
+  this CLI.
 
 ### Security
 
