@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 func TestGenerateScopedS3Policy(t *testing.T) {
@@ -34,8 +36,19 @@ func TestGenerateScopedS3Policy(t *testing.T) {
 	if !strings.Contains(policyStr, "spawn-binaries-"+region) {
 		t.Error("Policy does not include spawn-binaries bucket for region")
 	}
-	if !strings.Contains(policyStr, "spawn-results-"+region) {
-		t.Error("Policy does not include spawn-results bucket for region")
+	// The results grants must name the bucket spawn actually writes to (#1049).
+	// They used to name spawn-results-<region>, which this test then asserted.
+	results := taskproto.DefaultResultsBucket(accountID, region)
+	for _, want := range []string{
+		`"arn:aws:s3:::` + results + `/*"`, // PutObject
+		`"arn:aws:s3:::` + results + `"`,   // ListBucket
+	} {
+		if !strings.Contains(policyStr, want) {
+			t.Errorf("Policy does not grant %s, the results bucket spawn uses:\n%s", want, policyStr)
+		}
+	}
+	if strings.Contains(policyStr, "spawn-results-"+region) {
+		t.Errorf("Policy still grants spawn-results-%s, a bucket spawn never uses", region)
 	}
 
 	// Verify no wildcards in Resource

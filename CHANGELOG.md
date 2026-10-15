@@ -131,6 +131,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exist (schedules fire from EventBridge Scheduler), so they could not pass. The
   queue tests were `t.Skip` placeholders.
 
+### Deprecated
+
+- **`pkg/aws.GenerateScopedS3Policy`** (#1049). Nothing calls it, in spawn or
+  in spore-host-mcp, lagotto or calque, and it will be removed in a future
+  minor release. Its signature is unchanged. Its results grants now name the
+  bucket spawn actually uses, `spawn-results-<account>-<region>`, instead of
+  `spawn-results-<region>`, so the policy is correct while it remains.
+
 ### Fixed
 
 - **A `--cost-limit` on a Windows instance is refused instead of enforced at

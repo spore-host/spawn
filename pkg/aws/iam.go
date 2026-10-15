@@ -144,7 +144,17 @@ type IAMRoleConfig struct {
 	Tags             map[string]string // Tags for role
 }
 
-// GenerateScopedS3Policy creates an S3 policy scoped to spawn resources
+// GenerateScopedS3Policy creates an S3 policy scoped to spawn resources.
+//
+// The results bucket is spawn-results-<account>-<region>, the one spawn creates
+// and writes to (taskproto.DefaultResultsBucket). It used to be
+// spawn-results-<region>, a bucket spawn never uses, with accountID accepted and
+// ignored, so a role built from this could not write results (#1049).
+//
+// Deprecated: nothing calls this, in spawn or in any repository importing
+// pkg/aws (#1049). Build a policy for the buckets a launch actually uses
+// instead, as `spawn task run` and `spawn pool` do. It will be removed in a
+// future minor release.
 func GenerateScopedS3Policy(region, accountID string) string {
 	return fmt.Sprintf(`{
 		"Version": "2012-10-17",
@@ -168,7 +178,7 @@ func GenerateScopedS3Policy(region, accountID string) string {
 					"s3:PutObjectAcl"
 				],
 				"Resource": [
-					"arn:aws:s3:::spawn-results-%s/*",
+					"arn:aws:s3:::spawn-results-%s-%s/*",
 					"arn:aws:s3:::spawn-schedules-*/*"
 				]
 			},
@@ -180,12 +190,12 @@ func GenerateScopedS3Policy(region, accountID string) string {
 				],
 				"Resource": [
 					"arn:aws:s3:::spawn-binaries-%s",
-					"arn:aws:s3:::spawn-results-%s",
+					"arn:aws:s3:::spawn-results-%s-%s",
 					"arn:aws:s3:::spawn-schedules-*"
 				]
 			}
 		]
-	}`, region, region, region, region)
+	}`, region, accountID, region, region, accountID, region)
 }
 
 // GenerateScopedDynamoDBPolicy creates a DynamoDB policy scoped to spawn tables
