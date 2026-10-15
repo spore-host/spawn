@@ -521,6 +521,53 @@ EOFJOBARRAY
     echo "✅ Job array environment configured (Index: $JOB_ARRAY_INDEX/$JOB_ARRAY_SIZE)"
 fi
 
+# Set the OS hostname from the Name tag (#897). --name's help promises it "sets
+# Name tag, DNS, and hostname", but nothing set the hostname: every instance —
+# single, job-array member (arr-3) and --mpi member (sim-0) alike — kept the EC2
+# default ip-172-31-..., so 'hostname' in a --command and 'mpirun hostname'
+# printed names that identify nothing. Done here, BEFORE --command starts below,
+# so the workload sees it.
+#
+# Best-effort throughout: under set -e any failure would abort the bootstrap and
+# leave spored uninstalled, which is far worse than a default hostname.
+#
+# - Sanitized to an RFC 1123 label (lowercase [a-z0-9-], <=63 chars). A Name
+#   that sanitizes to nothing leaves the EC2 default alone.
+# - Job-array members must stay distinct (Open MPI tells nodes apart by
+#   hostname). An --instance-names template without {index} gives every member
+#   the same Name, so the index is appended when the name does not carry it.
+# - preserve_hostname stops cloud-init's update_hostname module resetting it to
+#   the EC2 default on the next boot (stop/start, hibernate).
+# - /etc/hosts maps it to the private IP so it resolves locally (sudo, MPI
+#   daemons). Peers are still addressed by IP: the MPI hostfile is built from
+#   peer private IPs (pkg/userdata/mpi.go), not hostnames, so mpirun is
+#   unaffected by the rename.
+SPAWN_NAME_TAG=$(aws ec2 describe-tags --region $REGION \
+    --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=Name" \
+    --query 'Tags[0].Value' --output text 2>/dev/null || echo "None")
+SPAWN_HOSTNAME=""
+if [ -n "$SPAWN_NAME_TAG" ] && [ "$SPAWN_NAME_TAG" != "None" ]; then
+    SPAWN_HOSTNAME=$(printf '%s' "$SPAWN_NAME_TAG" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
+        | sed -e 's/--*/-/g' -e 's/^-//' | cut -c1-63 | sed -e 's/-*$//' || true)
+fi
+if [ -n "$SPAWN_HOSTNAME" ] && [ "$JOB_ARRAY_ID" != "None" ] && [ -n "$JOB_ARRAY_INDEX" ]; then
+    if ! printf '%s' "$SPAWN_HOSTNAME" | grep -qE "(^|[^0-9])${JOB_ARRAY_INDEX}([^0-9]|\$)"; then
+        SPAWN_HOSTNAME="$(printf '%s' "$SPAWN_HOSTNAME" | cut -c1-$((62 - ${#JOB_ARRAY_INDEX})))-${JOB_ARRAY_INDEX}"
+    fi
+fi
+if [ -n "$SPAWN_HOSTNAME" ]; then
+    hostnamectl set-hostname "$SPAWN_HOSTNAME" 2>/dev/null || hostname "$SPAWN_HOSTNAME" 2>/dev/null || true
+    echo "$SPAWN_HOSTNAME" > /etc/hostname 2>/dev/null || true
+    mkdir -p /etc/cloud/cloud.cfg.d 2>/dev/null || true
+    echo "preserve_hostname: true" > /etc/cloud/cloud.cfg.d/99-spawn-hostname.cfg 2>/dev/null || true
+    SPAWN_PRIVATE_IP=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4 2>/dev/null || true)
+    [[ "$SPAWN_PRIVATE_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || SPAWN_PRIVATE_IP=""
+    if ! grep -qE "[[:space:]]${SPAWN_HOSTNAME}([[:space:]]|\$)" /etc/hosts 2>/dev/null; then
+        echo "${SPAWN_PRIVATE_IP:-127.0.1.1} ${SPAWN_HOSTNAME}" >> /etc/hosts 2>/dev/null || true
+    fi
+    echo "✅ Hostname set to $SPAWN_HOSTNAME (from the Name tag)"
+fi
+
 # Setup parameter sweep environment variables (if part of a sweep)
 SWEEP_ID=$(aws ec2 describe-tags --region $REGION \
     --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:sweep-id" \
@@ -617,28 +664,22 @@ if [ "$WORKFLOW_COMMAND" != "None" ] && [ -n "$WORKFLOW_COMMAND" ]; then
     cat > /tmp/spawn-command.sh <<'EOFCMD'
 #!/bin/bash
 set -e
-# Announce the shell options the command inherits (#707). errexit is ON here,
-# and 'set -uo pipefail' does NOT clear it — so a script opening with that line,
-# believing it chose its own error policy, is actually running -e -u -o pipefail.
+# errexit is ON here, and 'set -uo pipefail' does NOT clear it (#707) — so a
+# script opening with that line, believing it chose its own error policy, is
+# actually running -e -u -o pipefail. The two usual casualties are a SIGPIPE'd
+# pipeline under pipefail ('... | head -n N' returns 141) and 'wait \$pid' on a
+# failed background job, a pattern for CAPTURING a failure that -e destroys. It
+# cost four r8gd.8xlarge runs and three misdiagnoses to find, because nothing
+# said so. Fail-fast stays (running on after a broken step to TTL is worse).
 #
-# This was invisible and actively misleading: the script exits BEFORE the line
-# that would have reported why. Two ordinary idioms are the usual casualties —
-# a SIGPIPE'd pipeline under pipefail ('... | head -n N' returns 141), and
-# 'wait \$pid' on a failed background job, which is a pattern for CAPTURING a
-# failure and which -e destroys at the moment it matters. It cost four
-# r8gd.8xlarge runs and three misdiagnoses to find, because nothing said so.
-#
-# Printed rather than changed: fail-fast is a defensible default, and running on
-# after a broken step to TTL would be worse. One greppable line turns an
-# invisible behaviour into a visible one.
-# Plain printf, NOT piped to tee. This script runs as $LOCAL_USERNAME via su,
-# which cannot write /var/log/spawn-command.log — and under the set -e above, a
-# failed tee would kill the command BEFORE it started. The caller already pipes
-# this script's combined output through tee as root (see the su line below), so
-# stdout lands in the log either way. Caught by executing the generated script:
-# the announcement would have been a worse bug than the one it documents.
-printf 'spawn: shell options for --command: $-=%s\n' "$-"
-printf 'spawn: errexit is ON. set -uo pipefail does NOT clear it; use set +e to opt out.\n'
+# The notice that says so is NOT printed here. It used to be — two lines at the
+# top of every /var/log/spawn-command.log, which is the file users actually
+# read, on every member of every array, whether or not anything failed (#897).
+# It is now written by the root-side caller, into the command log only when the
+# command exits non-zero (the only case in which errexit can have cut a run
+# short), and announced once per boot in cloud-init-output.log. Nothing in this
+# script may write /var/log: it runs as $LOCAL_USERNAME via su, which cannot,
+# and under set -e a failed write kills the command before it starts.
 [ -f /etc/profile.d/spawn-params.sh ] && source /etc/profile.d/spawn-params.sh
 EOFCMD
     # Embedded command (baked into user-data, #214/#246) wins; else the tag value.
@@ -729,6 +770,13 @@ JSONEOF
             echo "✅ --command finished (exit 0)"
         else
             CMD_STATE=failed
+            # The #707 errexit notice, where it can explain something: after the
+            # last line of a FAILED command's output. Root writes it (this
+            # subshell), so no su/permission hazard; on success it is silent (#897).
+            printf '%s\n' \
+                "spawn: --command exited $CMD_RC. errexit is ON for --command (set -e) and set -uo pipefail does NOT clear it, so the first failing command ends the run." \
+                "spawn: common causes: a SIGPIPE'd pipeline under pipefail ('... | head' returns 141), or 'wait \$pid' on a failed background job. Use set +e to opt out." \
+                >> /var/log/spawn-command.log
             echo "❌ --command FAILED (exit $CMD_RC) — see /var/log/spawn-command.log"
         fi
 
@@ -746,6 +794,8 @@ JSONEOF
 
     echo "▶️  --command started in the background (logs: /var/log/spawn-command.log)"
     echo "   Its exit code lands in /tmp/SPAWN_EXITCODE and drives --on-complete."
+    # Once per boot, outside the command log (#707, #897).
+    echo "   Note: --command runs with errexit ON (set -e); set -uo pipefail does NOT clear it; use set +e to opt out."
 fi
 
 # Create login banner (MOTD) with spore configuration
