@@ -160,7 +160,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal displays, and colour escapes no longer count towards a cell's width,
   so a coloured `running` cell no longer pushes its column wider than its
   header. English output is unchanged.
-### Fixed
 
 - **Idle-stop never fired on instances whose network interface is not named
   `eth0` or `ens*`** (#919). On an m8a with Amazon Linux 2023 the NIC is
