@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/spawn/pkg/observability"
@@ -31,6 +32,11 @@ type EC2Provider struct {
 	ec2Client  *ec2.Client
 	identity   *Identity
 	config     *Config
+
+	// registryClient reads the hybrid registry. Only a burst member
+	// (Config.Burst) uses it, to find the local nodes of its job array (#918).
+	registryClient registryQueryAPI
+	registryTable  string
 }
 
 // NewEC2Provider creates an EC2 provider
@@ -124,6 +130,11 @@ func NewEC2Provider(ctx context.Context) (*EC2Provider, error) {
 		ec2Client:  ec2Client,
 		identity:   identity,
 		config:     providerConfig,
+		// Same config, and so the same region, as the EC2 client: the
+		// instance's own region, which is where `spawn burst` creates the
+		// registry table and launches its members.
+		registryClient: dynamodb.NewFromConfig(cfg),
+		registryTable:  HybridRegistryTable,
 	}, nil
 }
 
@@ -212,11 +223,52 @@ func (p *EC2Provider) Hibernate(ctx context.Context) error {
 	return nil
 }
 
+// DiscoverPeers finds the members of jobArrayID.
+//
+// Every member finds its EC2 siblings by the spawn:job-array-id tag. A burst
+// member (spawn:burst=true) also reads the hybrid registry, because the local
+// nodes it was launched to work alongside have no EC2 tags and are only listed
+// there (#918). The two sets are merged with each instance listed once. An
+// ordinary `spawn launch --count` member stays tag-only: it is not in the
+// registry and nothing else of its array is either (#904).
+//
+// A registry read that fails does not fail discovery. The member keeps its tag
+// peers and the failure is logged, as the local provider does.
 func (p *EC2Provider) DiscoverPeers(ctx context.Context, jobArrayID string) ([]PeerInfo, error) {
 	if jobArrayID == "" {
 		return nil, nil
 	}
 
+	peers, err := p.discoverPeersByTag(ctx, jobArrayID)
+	if err != nil {
+		return nil, err
+	}
+
+	if !p.readsHybridRegistry() {
+		return peers, nil
+	}
+
+	registryPeers, err := queryRegistryPeers(ctx, p.registryClient, p.registryTable, jobArrayID)
+	if err != nil {
+		log.Printf("Warning: could not read hybrid registry peers for job array %s: %v (using EC2 peers only)", jobArrayID, err)
+		return peers, nil
+	}
+
+	merged := mergePeers(peers, registryPeers)
+	log.Printf("✓ Discovered %d peers in job array %s (%d by tag, %d from the hybrid registry)",
+		len(merged), jobArrayID, len(peers), len(registryPeers))
+	return merged, nil
+}
+
+// readsHybridRegistry reports whether this member's discovery includes the
+// hybrid registry: only a burst member does, and only with a client to read it.
+func (p *EC2Provider) readsHybridRegistry() bool {
+	return p.config != nil && p.config.Burst && p.registryClient != nil
+}
+
+// discoverPeersByTag finds the running members of jobArrayID through their
+// spawn:job-array-id tag.
+func (p *EC2Provider) discoverPeersByTag(ctx context.Context, jobArrayID string) ([]PeerInfo, error) {
 	log.Printf("Discovering peers for job array: %s", jobArrayID)
 
 	// Query for all instances with the same job-array-id

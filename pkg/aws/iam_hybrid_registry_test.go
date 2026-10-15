@@ -14,22 +14,37 @@ import (
 // makes and which table it names — the two facts the spored role must agree with.
 const registrySource = "../registry/dynamodb.go"
 
-// registryClientActions discovers the DynamoDB actions PeerRegistry (the type
-// spored constructs) can issue, from `r.client.<Op>(` calls on its receiver.
-// Fails when it finds none: an empty discovery has broken, not proven anything.
+// providerRegistrySource is spored's other hybrid-registry client: the peer
+// reads pkg/provider makes, for local nodes and, since #918, for burst members
+// on EC2 with the spored role's credentials.
+const providerRegistrySource = "../provider/hybrid_registry.go"
+
+// registryClientActions discovers the DynamoDB actions spored can issue on the
+// hybrid registry: `r.client.<Op>(` calls in PeerRegistry (the type spored
+// constructs to register) and `client.<Op>(` calls in pkg/provider's registry
+// reader. Fails when either source yields none: an empty discovery has broken,
+// not proven anything.
 func registryClientActions(t *testing.T) []string {
 	t.Helper()
-	src, err := os.ReadFile(registrySource)
-	if err != nil {
-		t.Fatalf("read %s: %v", registrySource, err)
-	}
-	re := regexp.MustCompile(`\br\.client\.([A-Z][A-Za-z]+)\(`)
 	seen := map[string]bool{}
-	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
-		seen["dynamodb:"+m[1]] = true
-	}
-	if len(seen) == 0 {
-		t.Fatalf("found no r.client.<Op>( calls in %s — the discovery is broken", registrySource)
+	for _, src := range []struct {
+		path string
+		re   *regexp.Regexp
+	}{
+		{registrySource, regexp.MustCompile(`\br\.client\.([A-Z][A-Za-z]+)\(`)},
+		{providerRegistrySource, regexp.MustCompile(`\bclient\.([A-Z][A-Za-z]+)\(`)},
+	} {
+		body, err := os.ReadFile(src.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", src.path, err)
+		}
+		matches := src.re.FindAllStringSubmatch(string(body), -1)
+		if len(matches) == 0 {
+			t.Fatalf("found no DynamoDB client calls in %s — the discovery is broken", src.path)
+		}
+		for _, m := range matches {
+			seen["dynamodb:"+m[1]] = true
+		}
 	}
 	out := make([]string, 0, len(seen))
 	for a := range seen {
