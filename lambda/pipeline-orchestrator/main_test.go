@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -492,6 +493,12 @@ func TestEveryRunInstancesUsesTheStageInput(t *testing.T) {
 // to do. Paths that need root are redirected into a temp dir.
 func runUserData(t *testing.T, command string, failDownload bool) (string, error) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		// The script is a Linux instance's user-data, and the harness roots it by
+		// splicing native paths into it, which bash mangles as C:\... on Windows.
+		// The failure-path tests only passed there because the script failed.
+		t.Skip("Linux-only: executes the pipeline stage's Linux user-data under bash (#1002)")
+	}
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash not available")

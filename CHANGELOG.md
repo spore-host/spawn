@@ -110,6 +110,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spored status` no longer counts its own run time as compute** (#971). On the
+  checkpoint path — always, on Windows, which publishes no compute clock — the
+  compute figure included how long the status command itself had been running,
+  so a fresh instance read "2s … as of the last checkpoint" before any checkpoint
+  existed. The boot and billed figures were also late by however long the
+  CPU/network sampling took, which on Windows (a PowerShell process per sample)
+  is seconds: 47s after launch reported 52s billed.
+
 - `spawn sweep resume` accepts `--max-concurrent-auto` (#494), which until now
   only the deprecated `spawn resume` had, so following `spawn resume`'s
   deprecation notice lost the option. The two commands now declare their flags

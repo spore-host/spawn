@@ -136,18 +136,28 @@ func TestStatusReport_QueryCountsTheDaemonsRunningTime(t *testing.T) {
 	cfg := &provider.Config{LaunchTime: time.Now().Add(-47 * time.Second), PricePerHour: issueOnDemand,
 		SpotPricePerHour: issueSpot, EBSHourlyCost: issueEBS}
 	ag := queryAgent(t, cfg)
-	publishAndAdopt(t, ag, time.Now().Add(-30*time.Second), 0) // daemon up 17s after launch
+	daemonStart := time.Now().Add(-30 * time.Second) // daemon up 17s after launch
+	publishAndAdopt(t, ag, daemonStart, 0)
+	// Sampling inside buildStatusReport is not instant (seconds on Windows, where
+	// each sample is a PowerShell process), so "now" is a window, not an instant.
+	before := time.Now()
 	r := buildStatusReport(ag, cfg, statusIdentity(), true)
+	after := time.Now()
+	within := func(got float64, from time.Time) bool {
+		return got >= before.Sub(from).Seconds()-1 && got <= after.Sub(from).Seconds()+1
+	}
 
 	if r.ComputeClock != computeClockLive {
 		t.Errorf("compute clock = %q, want live", r.ComputeClock)
 	}
-	if r.ComputeSeconds < 29 || r.ComputeSeconds > 32 {
-		t.Errorf("compute = %.0fs, want ~30s (the daemon has been up 30s)", r.ComputeSeconds)
+	if !within(r.ComputeSeconds, daemonStart) {
+		t.Errorf("compute = %.0fs, want %.0f–%.0fs (the daemon's running time)", r.ComputeSeconds,
+			before.Sub(daemonStart).Seconds(), after.Sub(daemonStart).Seconds())
 	}
 	// Billing started at launch, so the boot gap is billed too.
-	if r.BilledSeconds < 46 || r.BilledSeconds > 49 {
-		t.Errorf("billed = %.0fs, want ~47s (launch to now)", r.BilledSeconds)
+	if !within(r.BilledSeconds, cfg.LaunchTime) {
+		t.Errorf("billed = %.0fs, want %.0f–%.0fs (launch to now)", r.BilledSeconds,
+			before.Sub(cfg.LaunchTime).Seconds(), after.Sub(cfg.LaunchTime).Seconds())
 	}
 	out := renderTable(t, r)
 	if strings.Contains(out, "(0s ×") {
@@ -191,8 +201,16 @@ func TestStatusReport_NoRunningTimeClaimsNoSaving(t *testing.T) {
 					t.Errorf("output contains %q with no running time recorded:\n%s", bad, out)
 				}
 			}
-			if !strings.Contains(out, "Compute cost:     —") {
-				t.Errorf("compute cost is not shown as unknown:\n%s", out)
+			// Sampling takes seconds on Windows, so by the time the live clock is
+			// read it may genuinely have run a second or more; "unknown" is owed
+			// exactly when the report has under a second of billed time. On Linux
+			// that is always, so the gate bites there.
+			if r.BilledSeconds < 1 {
+				if !strings.Contains(out, "Compute cost:     —") {
+					t.Errorf("compute cost is not shown as unknown:\n%s", out)
+				}
+			} else if r.ComputeClock != computeClockLive {
+				t.Errorf("billed = %.0fs on the checkpoint path with no checkpoint written:\n%s", r.BilledSeconds, out)
 			}
 		})
 	}
