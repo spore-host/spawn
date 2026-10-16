@@ -82,35 +82,32 @@ func (e *LocalExecutor) WithEnvPassthrough(names []string) *LocalExecutor {
 	return e
 }
 
-// CheckLocalConditions verifies all local pre-flight conditions before install.
-func (e *LocalExecutor) CheckLocalConditions(conditions []Condition) error {
-	for _, cond := range conditions {
-		if err := e.checkCondition(cond); err != nil {
-			msg := cond.Message
-			if msg == "" {
-				msg = fmt.Sprintf("condition %q failed", cond.Type)
-			}
-			return fmt.Errorf("%s: %w", msg, err)
-		}
-	}
-	return nil
+// CheckLocalConditions verifies the spec's conditions.local on the controller
+// before anything is installed. Condition commands are rendered against tmplCtx
+// (config is resolved by then; instance and outputs may not be) and run with
+// the caller's environment, unlike local steps: a condition's job is often to
+// check that a variable the plugin needs is set (e.g. tailscale's
+// `test -n "$TS_API_CLIENT_SECRET"`), and it only reports an exit status.
+func (e *LocalExecutor) CheckLocalConditions(ctx context.Context, conditions []Condition, tmplCtx TemplateContext) error {
+	return CheckConditions(ctx, conditions, tmplCtx, LocalConditionHost())
 }
 
-func (e *LocalExecutor) checkCondition(cond Condition) error {
-	switch cond.Type {
-	case "command":
-		cmd := exec.Command("sh", "-c", cond.Run) // nosemgrep: dangerous-exec-command -- plugin condition defined by plugin author
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("command %q: %w", cond.Run, err)
-		}
-		return nil
-	case "platform":
-		if cond.OS != "" && runtime.GOOS != cond.OS {
-			return fmt.Errorf("requires OS %q, running on %q", cond.OS, runtime.GOOS)
-		}
-		return nil
-	default:
-		return fmt.Errorf("unknown condition type %q", cond.Type)
+// LocalConditionHost is the controller as a ConditionHost.
+func LocalConditionHost() ConditionHost {
+	return ConditionHost{
+		GOOS: runtime.GOOS,
+		RunCommand: func(ctx context.Context, script string) error {
+			cmd := exec.CommandContext(ctx, "sh", "-c", script) // nosemgrep: dangerous-exec-command -- plugin condition defined by plugin author
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				if msg := strings.TrimSpace(stderr.String()); msg != "" {
+					return fmt.Errorf("%w: %s", err, msg)
+				}
+				return err
+			}
+			return nil
+		},
 	}
 }
 

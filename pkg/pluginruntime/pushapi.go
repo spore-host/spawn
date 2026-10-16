@@ -49,20 +49,26 @@ func NewPushAPIServer(rt *Runtime) (*PushAPIServer, error) {
 
 	s := &PushAPIServer{rt: rt, token: token}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/plugins/install", s.handleInstall)
-	mux.HandleFunc("POST /v1/plugins/{name}/push", s.handlePush)
-	mux.HandleFunc("GET /v1/plugins/{name}/status", s.handleStatus)
-	mux.HandleFunc("GET /v1/plugins", s.handleList)
-	mux.HandleFunc("DELETE /v1/plugins/{name}", s.handleRemove)
-
 	s.server = &http.Server{
 		Addr:         pushAPIAddr,
-		Handler:      s.authMiddleware(mux),
+		Handler:      s.authMiddleware(s.routes()),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}
 	return s, nil
+}
+
+// routes returns the push API's handler, unauthenticated (wrap it in
+// authMiddleware).
+func (s *PushAPIServer) routes() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/plugins/install", s.handleInstall)
+	mux.HandleFunc("POST /v1/plugins/preflight", s.handlePreflight)
+	mux.HandleFunc("POST /v1/plugins/{name}/push", s.handlePush)
+	mux.HandleFunc("GET /v1/plugins/{name}/status", s.handleStatus)
+	mux.HandleFunc("GET /v1/plugins", s.handleList)
+	mux.HandleFunc("DELETE /v1/plugins/{name}", s.handleRemove)
+	return mux
 }
 
 // Start begins serving the push API in the background.
@@ -172,6 +178,50 @@ func (s *PushAPIServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "installing", "name": spec.Name})
+}
+
+// PreflightResponse is the body of POST /v1/plugins/preflight: Status is
+// "ok" (HTTP 200) or "failed" (HTTP 412 Precondition Failed), and Error is the
+// failed condition's message and detail.
+type PreflightResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// handlePreflight receives POST /v1/plugins/preflight (the same body as
+// install; pushed and provenance are ignored) and evaluates the spec's
+// conditions.remote synchronously, installing nothing and recording no state.
+// It answers 200 when every condition passes and 412 with the failed
+// condition's message when one does not (#1040).
+func (s *PushAPIServer) handlePreflight(w http.ResponseWriter, r *http.Request) {
+	var req installRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("preflight decode error: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	spec, err := plugin.ParseSpec([]byte(req.Spec))
+	if err != nil {
+		log.Printf("preflight parse spec error: %v", err)
+		http.Error(w, "bad request: invalid spec", http.StatusBadRequest)
+		return
+	}
+	if err := spec.Validate(""); err != nil {
+		log.Printf("preflight validate spec error for %s: %v", spec.Name, err)
+		http.Error(w, "bad request: spec failed validation", http.StatusBadRequest)
+		return
+	}
+
+	resp := PreflightResponse{Status: "ok"}
+	code := http.StatusOK
+	if err := s.rt.Preflight(r.Context(), spec, req.Config); err != nil {
+		log.Printf("Plugin %s: preflight failed: %v", spec.Name, err)
+		resp = PreflightResponse{Status: "failed", Error: err.Error()}
+		code = http.StatusPreconditionFailed
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handlePush receives POST /v1/plugins/{name}/push { "key": "...", "value": "..." }

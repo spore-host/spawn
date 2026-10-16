@@ -11,7 +11,7 @@ import (
 // Valid type sets, kept in sync with the executors and spec:
 //   - remote step types: remote_executor.go runStep
 //   - local step types:  local_executor.go RunProvision
-//   - condition types:   local_executor.go checkCondition
+//   - condition types:   conditions.go evalCondition (local and remote)
 //   - config param types: spec.go ConfigParam
 var (
 	validRemoteStepTypes = map[string]bool{"run": true, "fetch": true, "extract": true}
@@ -19,6 +19,18 @@ var (
 	validConditionTypes  = map[string]bool{"command": true, "platform": true}
 	validConfigTypes     = map[string]bool{"": true, "string": true, "int": true, "bool": true}
 )
+
+// ConditionTypes returns the condition types a spec may declare (the set
+// Validate accepts), sorted. Tests discover the set from here rather than
+// listing it, so a type added to the validator without an evaluator fails them.
+func ConditionTypes() []string {
+	types := make([]string, 0, len(validConditionTypes))
+	for t := range validConditionTypes {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return types
+}
 
 // envVarNameRe matches a valid POSIX environment variable name (used to validate
 // local.env_passthrough entries).
