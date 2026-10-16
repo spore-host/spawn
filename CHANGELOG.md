@@ -470,6 +470,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a message naming every such flag and why. Every other launch flag is
   recorded as honoured on Windows, and a test fails when a new flag is added
   without that decision.
+- **`--plugin` plugins load reliably** (#1023). The bootstrap wrote
+  `/etc/spawn/plugins.json` after `systemctl start spored`, but spored reads it
+  only once, at startup, so declared plugins loaded only when the bootstrap won
+  a race against spored's first metadata reads. A slow disk or any extra step
+  at that point silently dropped every plugin. The file is now written before
+  spored is installed or started.
 
 ### Security
 
