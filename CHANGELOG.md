@@ -383,6 +383,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and reported "No results found".
   - `spawn validate --infrastructure --region <r>` reported the binaries and
     schedules buckets as inaccessible.
+- **CI action pins now say which version they actually run** (#994).
+  `actions/checkout@3d3c42e…` was commented `# v6` in every workflow but is
+  v7.0.1; likewise `goreleaser-action` `# v7` is v7.2.3 and
+  `configure-aws-credentials` `# v6` is v6.3.0. `dependabot.yml` already cited a
+  `TestActionsArePinnedToSHAs` that did not exist; it does now. The SHAs were
+  right and are unchanged; only the comments were wrong — but those comments are
+  what reviewers read and what Dependabot rewrites. A new
+  `workflow_pins_test.go` now fails on any `uses:` not pinned to a full SHA with
+  a `# vX.Y.Z` comment, and checks each comment against
+  `scripts/action-pins.txt`, a table of what every pinned SHA really is,
+  regenerated from GitHub by `scripts/refresh-action-pins.sh` (run it, and
+  commit the table, whenever a pin changes — including on a Dependabot bump).
 
 ### Security
 
