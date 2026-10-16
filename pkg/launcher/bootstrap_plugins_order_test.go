@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,6 +35,9 @@ import (
 //   - errexit is turned off, because writes to other root-owned paths (/etc/motd,
 //     /var/log/...) fail in a test and are irrelevant here.
 func TestPluginsJSONExistsWhenSporedStarts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: executes the Linux user-data bootstrap (/etc/spawn) under bash (#1002)")
+	}
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash not available")
