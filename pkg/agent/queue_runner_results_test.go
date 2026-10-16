@@ -11,8 +11,8 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/spore-host/spawn/pkg/s3transfer"
 
 	"github.com/spore-host/spawn/pkg/queue"
 )
@@ -58,7 +58,7 @@ func TestUploadJobResults_ValidatesEachGlobMatch(t *testing.T) {
 	})
 	r := &QueueRunner{
 		config:     &queue.QueueConfig{ResultS3Bucket: "results", ResultS3Prefix: "q"},
-		s3Uploader: manager.NewUploader(client),
+		s3Uploader: s3transfer.New(client),
 		ctx:        context.Background(),
 	}
 
