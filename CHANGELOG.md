@@ -123,6 +123,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn sweep` help example showed exactly that invocation, and now uses
   `--output-file` (#935).
 
+- **`pkg/aws.GenerateScopedS3Policy`** (#1049). Nothing calls it, in spawn or
+  in spore-host-mcp, lagotto or calque, and it will be removed in a future
+  minor release. Its signature is unchanged. Its results grants now name the
+  bucket spawn actually uses, `spawn-results-<account>-<region>`, instead of
+  `spawn-results-<region>`, so the policy is correct while it remains.
+
 ### Removed
 
 - The `make test-integration-scheduler` and `make test-integration-queue` targets,
@@ -130,14 +136,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema that the scheduler has never read and waited for a trigger that doesn't
   exist (schedules fire from EventBridge Scheduler), so they could not pass. The
   queue tests were `t.Skip` placeholders.
-
-### Deprecated
-
-- **`pkg/aws.GenerateScopedS3Policy`** (#1049). Nothing calls it, in spawn or
-  in spore-host-mcp, lagotto or calque, and it will be removed in a future
-  minor release. Its signature is unchanged. Its results grants now name the
-  bucket spawn actually uses, `spawn-results-<account>-<region>`, instead of
-  `spawn-results-<region>`, so the policy is correct while it remains.
 
 ### Fixed
 
