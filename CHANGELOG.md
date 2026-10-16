@@ -41,6 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order after and want `network-online.target`, which spored's shutdown flush of
   `spawn:compute-seconds` (#928) and DNS deregistration rely on. All four current
   units already comply.
+- **CI fails when spored sends a notification spore-bot does not handle**
+  (#1004). Every event spored passes to its notifier, including ones chosen
+  through a variable or a struct field, is checked against spore-bot's list of
+  handled events (vendored in `testdata/spore-bot/`, with a CI step that fails
+  when the copy drifts from spore-host main). `fsx_mount_failed`,
+  `fsx_dra_failed` and `region_vacated` each reached Slack, Discord and SMS as a
+  generic fallback message before spore-bot caught up; a new event now has to be
+  handled before it ships.
 
 ### Changed
 

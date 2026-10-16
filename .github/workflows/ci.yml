@@ -243,6 +243,20 @@ jobs:
       - name: Cross-repo API surface gate
         run: go test -exec "$RUNNER_TEMP/hermetic-exec" -run 'TestPublicAPISurface|TestPublicPackagesExist' -count=1 .
 
+      # spored -> spore-bot event gate (#1004): every event spored passes to
+      # Notifier.Notify must be one spore-bot handles, or users get its generic
+      # fallback message (fsx_mount_failed, fsx_dra_failed and region_vacated
+      # shipped that way). The unit test reads the bot's list from a vendored
+      # copy so `go test` stays offline; the sync step fetches spore-host main
+      # and fails when the copy has drifted. Re-vendor with the curl command the
+      # failure prints.
+      - name: spored notification events handled by spore-bot
+        run: go test -exec "$RUNNER_TEMP/hermetic-exec" -run 'TestSporedNotifyEventsHandledBySporeBot' -count=1 -v .
+      - name: spore-bot event list sync (fetches spore-host main)
+        env:
+          SPORE_BOT_EVENTS_SYNC: "1"
+        run: go test -tags=spore_bot_sync -run 'TestSporeBotEventsVendoredCopyIsCurrent' -count=1 -v .
+
       # Nested modules: the root `go test ./...` does NOT descend into a
       # directory with its own go.mod, so their tests would otherwise never run
       # in CI (#136). Build, vet, and test each one.
