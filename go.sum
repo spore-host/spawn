@@ -56,6 +56,8 @@ github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.39 h1:Suq0L+B
 github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.39/go.mod h1:JX+/lB8RXleUNZ3Uw6o7FnE8t4CkKT8gDHEmlF8qZfI=
 github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.3 h1:gr3b87OLB29jymWPzp/CAyXwQRJVE+sC4Wm0qBIKHsk=
 github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.3/go.mod h1:BRjf4L/Yx2hY54o+ZibPbLJyMMeSwqYQXwcJfqW66a8=
+github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.20.12 h1:Zy6Tme1AA13kX8x3CnkHx5cqdGWGaj/anwOiWGnA0Xo=
+github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.20.12/go.mod h1:ql4uXYKoTM9WUAUSmthY4AtPVrlTBZOvnBJTiCUdPxI=
 github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.16 h1:q9YuNkYR/7lxflWCcEv3C0cecUt3Zvrh2hn9ZNxieNA=
 github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.16/go.mod h1:3BSeJQF55QQI+dDFHx4WTIjTvX/Lvtk8Jaaf/SGAnBM=
 github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.6 h1:CqL8NN3p4I0JTwwV5MEoatIl4Y2amZ2X9dRD+0hbRL0=
