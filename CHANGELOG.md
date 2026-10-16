@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.129.0] - 2026-10-16
+
 ### Added
 
 - `pkg/aws.CheckCostLimitEnforceable`, the check above, so callers can refuse
@@ -517,28 +519,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and shows the deadline (#928 tracks the matching `spawn stop` message). A
   new test fails if any code writes `spawn:ttl` without also writing or removing
   `spawn:ttl-deadline`.
-
-### Security
-
-- **The unit tests no longer make real AWS and DNS calls with your credentials**
-  (#968). `TestNewAgent_StillActivates` called the real spored agent
-  constructor, so on any machine with AWS credentials a plain `make check` sent a
-  real Route53 UPSERT through the spore.host DNS API (registering
-  `demo.<account>.spore.host -> 203.0.113.10`), an EC2 `CreateTags` and a
-  DynamoDB `PutItem` — and passed whether they succeeded or not. The same
-  audit found more: an FSx `DescribeFileSystems` poll from the FSx mount test,
-  S3 `PutObject` uploads from the task-pool job-script tests (through the `aws`
-  CLI), public-IP lookups to api.ipify.org/ifconfig.me/icanhazip.com from the
-  local-provider tests, an STS `GetCallerIdentity` from the TTL reaper's package
-  `init` in every one of its test runs, a DynamoDB `GetItem` from a
-  dashboard-api handler test, and a DynamoDB `Scan` of the DNS account registry
-  from two dns-updater handler tests. Each now goes through a fake.
-  `make check`, CI and `scripts/nested-modules.sh` now run every short test
-  under a hermetic wrapper (`test/hermetic`): ambient credentials are replaced
-  with fakes, and `AWS_ENDPOINT_URL` and `HTTP(S)_PROXY` point at a local
-  recorder, so a test that reaches AWS, the DNS API or any other off-box host
-  fails and names the request. `pkg/agent` also installs this in its own
-  `TestMain`, so `go test ./pkg/agent` is safe on its own.
 - **Only hybrid job-array members register with the hybrid registry** (#904).
   spored registered every instance carrying `spawn:job-array-id` with the
   `spawn-hybrid-registry` DynamoDB table, so every ordinary `spawn launch
@@ -574,6 +554,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it now prints `Network: unknown (single sample; assuming active)`, the same
   way the CPU line does. The JSON output gains `network_measured` and
   `network_unknown`.
+
+### Security
+
+- **The unit tests no longer make real AWS and DNS calls with your credentials**
+  (#968). `TestNewAgent_StillActivates` called the real spored agent
+  constructor, so on any machine with AWS credentials a plain `make check` sent a
+  real Route53 UPSERT through the spore.host DNS API (registering
+  `demo.<account>.spore.host -> 203.0.113.10`), an EC2 `CreateTags` and a
+  DynamoDB `PutItem` — and passed whether they succeeded or not. The same
+  audit found more: an FSx `DescribeFileSystems` poll from the FSx mount test,
+  S3 `PutObject` uploads from the task-pool job-script tests (through the `aws`
+  CLI), public-IP lookups to api.ipify.org/ifconfig.me/icanhazip.com from the
+  local-provider tests, an STS `GetCallerIdentity` from the TTL reaper's package
+  `init` in every one of its test runs, a DynamoDB `GetItem` from a
+  dashboard-api handler test, and a DynamoDB `Scan` of the DNS account registry
+  from two dns-updater handler tests. Each now goes through a fake.
+  `make check`, CI and `scripts/nested-modules.sh` now run every short test
+  under a hermetic wrapper (`test/hermetic`): ambient credentials are replaced
+  with fakes, and `AWS_ENDPOINT_URL` and `HTTP(S)_PROXY` point at a local
+  recorder, so a test that reaches AWS, the DNS API or any other off-box host
+  fails and names the request. `pkg/agent` also installs this in its own
+  `TestMain`, so `go test ./pkg/agent` is safe on its own.
 - **The spored systemd unit written for web-app instances (`spawn app`) now sets
   `NoNewPrivileges=true`** (#959), like the canonical unit, the DCV unit and
   `scripts/spored.service` already did. spored runs as root and needs no privilege
@@ -8820,7 +8822,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.128.2...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.129.0...HEAD
+[0.129.0]: https://github.com/spore-host/spawn/compare/v0.128.2...v0.129.0
 [0.128.2]: https://github.com/spore-host/spawn/compare/v0.128.1...v0.128.2
 [0.128.1]: https://github.com/spore-host/spawn/compare/v0.128.0...v0.128.1
 [0.128.0]: https://github.com/spore-host/spawn/compare/v0.127.0...v0.128.0
