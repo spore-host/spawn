@@ -1000,7 +1000,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		}
 		fqdn := ""
 		if acct, aerr := awsClient.GetAccountID(ctx); aerr == nil {
-			fqdn = dns.GetFullDNSName(config.DNSName, acct, sporedDNSDomain)
+			fqdn = dns.GetFullDNSName(config.DNSName, acct, launchDNSDomain(config))
 		}
 		var notice string
 		dnsRecord, notice = sporedDNSReport(tags, config.DNSName, fqdn, config.Name)
@@ -1063,10 +1063,15 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	return nil
 }
 
-// sporedDNSDomain is the zone spored registers under. Nothing passes spored a
-// domain (it reads SPORED_DNS_DOMAIN, which no launch sets), so this is the one
-// a launched instance actually uses.
-const sporedDNSDomain = "spore.host"
+// launchDNSDomain is the zone a launched spore registers under: its custom
+// target (#891) when it has one, else spore.host — the same choice spored makes
+// from the spawn:dns-domain tag.
+func launchDNSDomain(config *aws.LaunchConfig) string {
+	if config.DNSDomain != "" {
+		return config.DNSDomain
+	}
+	return dns.DefaultDomain
+}
 
 // sporedDNSReport turns spored's own DNS tags into what the launch tells the user
 // (#551, #872): the record, when spored registered it, and otherwise a notice
@@ -1305,6 +1310,12 @@ func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *a
 	if err := guardWindowsInstanceType(config.TargetOS, config.InstanceType); err != nil {
 		return err
 	}
+	// The custom DNS target spored registers with (#891), validated before any
+	// resource is created.
+	if err := resolveLaunchDNSTarget(ctx, awsClient, config); err != nil {
+		return err
+	}
+
 	// A --cost-limit spored would enforce at the Linux rate (#1058). Launch refuses
 	// it too, but only after IAM, security group, key and any FSx are created.
 	if err := aws.CheckCostLimitEnforceable(*config, isWindowsTarget(config.TargetOS)); err != nil {

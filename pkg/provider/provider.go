@@ -114,6 +114,11 @@ type Config struct {
 
 	// DNS settings
 	DNSName string
+	// DNSDomain and DNSEndpoint are a custom DNS target (#891), from the
+	// spawn:dns-domain and spawn:dns-endpoint tags. Empty means spore.host's.
+	// Unvalidated here: the agent checks them before use.
+	DNSDomain   string
+	DNSEndpoint string
 
 	// Notification settings — populated from EC2 tags at startup
 	NotifyURL        string   // spore-bot Lambda Function URL for lifecycle notifications

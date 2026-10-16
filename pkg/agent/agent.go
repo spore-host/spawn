@@ -298,16 +298,20 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 
 	// Initialize DNS client and register if DNS name is configured
 	// Skip DNS for local provider (Phase 1 decision)
-	dnsDomain := os.Getenv("SPORED_DNS_DOMAIN")
-	if dnsDomain == "" {
-		dnsDomain = "spore.host"
-	}
+	dnsDomain, dnsEndpoint, targetErr := resolveDNSTarget(config)
 	agent.dnsDomain = dnsDomain
 
 	// THE one from #733: this block POSTs to the DNS API, mutating a Route53
 	// record, and writes an EC2 tag via recordDNSStatus. A query must do neither.
-	if activate && config.DNSName != "" && identity.PublicIP != "" && identity.Provider == "ec2" {
-		dnsClient, err := newDNSClient(ctx, dnsDomain, "")
+	if activate && config.DNSName != "" && identity.PublicIP != "" && identity.Provider == "ec2" && targetErr != nil {
+		// A target that does not validate is reported, not replaced: silently
+		// registering under spore.host instead would put the record somewhere
+		// nobody asked for and nobody will look (#891).
+		log.Printf("Warning: DNS not registered: %v", targetErr)
+		agent.recordDNSStatus(ctx, "failed", targetErr.Error())
+		agent.lastDNSStatus = "failed"
+	} else if activate && config.DNSName != "" && identity.PublicIP != "" && identity.Provider == "ec2" {
+		dnsClient, err := newDNSClient(ctx, dnsDomain, dnsEndpoint)
 		if err != nil {
 			log.Printf("Warning: Failed to create DNS client: %v", err)
 		} else {

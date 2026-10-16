@@ -1,10 +1,13 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,12 +26,10 @@ type Config struct {
 
 // DNSConfig represents DNS configuration.
 //
-// Only `enabled` remains (#872). The record is registered by spored on the
-// instance, from the spawn:dns-name tag, against the endpoint compiled into it;
-// the CLI's own SSH-driven registration, which is what `domain` and
-// `api_endpoint` (and their env, SSM and flag equivalents) configured, posted to
-// an API Gateway deleted long ago and never sent the domain at all. Those keys
-// are now ignored rather than read and silently disregarded.
+// Domain and APIEndpoint name a custom DNS deployment (#891) — see
+// ResolveDNSTarget. They were removed in #872 because the only thing that read
+// them was the CLI's own SSH registration, which never sent the domain; they now
+// reach spored, which is what registers.
 //
 // Enabled is a tri-state pointer rather than a plain bool (#549): a
 // ~/.spawn/config.yaml that exists but doesn't mention a `dns:` section (or
@@ -38,7 +39,9 @@ type Config struct {
 // for anyone with an unrelated config file. nil means "not specified at this
 // layer"; a non-nil pointer means the layer explicitly said so.
 type DNSConfig struct {
-	Enabled *bool `yaml:"enabled"`
+	Enabled     *bool  `yaml:"enabled"`
+	Domain      string `yaml:"domain"`
+	APIEndpoint string `yaml:"api_endpoint"`
 }
 
 // IsEnabled resolves the tri-state Enabled field to a concrete bool. A nil
@@ -65,6 +68,63 @@ func LoadDNSConfig(flagNoDNS bool) (*DNSConfig, error) {
 		cfg.Enabled = boolPtr(false)
 	}
 	return cfg, nil
+}
+
+// SSM parameters a custom DNS deployment can publish for every launch in an
+// account and region (#891).
+const (
+	SSMDNSDomainPath   = "/spawn/dns/domain"
+	SSMDNSEndpointPath = "/spawn/dns/api_endpoint"
+)
+
+// DNSTarget is a resolved custom DNS target. Empty fields mean spore.host's.
+// The sources say where each value came from, for the launch preview and for
+// error messages. Unvalidated: pkg/dns owns validation (and imports this
+// package, so it cannot be called from here).
+type DNSTarget struct {
+	Domain, DomainSource     string
+	Endpoint, EndpointSource string
+}
+
+// SSMGetter is the one SSM call ResolveDNSTarget makes; *ssm.Client satisfies it.
+type SSMGetter interface {
+	GetParameter(ctx context.Context, in *ssm.GetParameterInput, optFns ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
+}
+
+// ResolveDNSTarget resolves the custom DNS target for a launch, each field
+// independently: the flag, then SPAWN_DNS_DOMAIN / SPAWN_DNS_API_ENDPOINT, then
+// ~/.spawn/config.yaml (dns.domain / dns.api_endpoint), then the SSM parameters
+// above, then spore.host's (empty). ssmClient may be nil to skip SSM; a missing
+// parameter, or any SSM error, means "not set there".
+func ResolveDNSTarget(ctx context.Context, ssmClient SSMGetter, flagDomain, flagEndpoint string) DNSTarget {
+	var file DNSConfig
+	if fc, err := loadFromFile(); err == nil && fc != nil {
+		file = fc.DNS
+	}
+	pick := func(flag, envKey, fileVal, ssmPath string) (string, string) {
+		if v := strings.TrimSpace(flag); v != "" {
+			return v, "flag"
+		}
+		if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+			return v, "env " + envKey
+		}
+		if v := strings.TrimSpace(fileVal); v != "" {
+			return v, "~/.spawn/config.yaml"
+		}
+		if ssmClient != nil {
+			out, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{Name: &ssmPath})
+			if err == nil && out.Parameter != nil && out.Parameter.Value != nil {
+				if v := strings.TrimSpace(*out.Parameter.Value); v != "" {
+					return v, "SSM " + ssmPath
+				}
+			}
+		}
+		return "", ""
+	}
+	var t DNSTarget
+	t.Domain, t.DomainSource = pick(flagDomain, "SPAWN_DNS_DOMAIN", file.Domain, SSMDNSDomainPath)
+	t.Endpoint, t.EndpointSource = pick(flagEndpoint, "SPAWN_DNS_API_ENDPOINT", file.APIEndpoint, SSMDNSEndpointPath)
+	return t
 }
 
 // loadFromFile loads configuration from ~/.spawn/config.yaml

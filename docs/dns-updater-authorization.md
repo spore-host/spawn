@@ -185,6 +185,15 @@ got wrong until 2026-10-11, each of which made it unsafe to run:
   has) and written `DOMAIN`, which the handler never reads;
 - it parsed, printed and then ignored `--region`, because most of its `aws` calls
   carried no `--region`.
+- adding a zone was destructive (fixed in #891). `put-role-policy` replaced the
+  Route53 grant with one on the new zone alone, revoking the live spore.host
+  zone, and `DEFAULT_DOMAIN`/`HOSTED_ZONE_ID` were overwritten with the new
+  zone's. The grant now covers every zone in the merged `DOMAIN_ZONES`, and the
+  defaults are only set when absent.
+- it never created the Function URL, only read one (fixed in #891). It now
+  creates it with `AuthType: AWS_IAM`, refuses any other auth type, and grants
+  `lambda:InvokeFunctionUrl` per `--allow-account`. See
+  [custom-dns.md](custom-dns.md).
 
 The function was last deployed 2026-06-25 and the code has moved since, so a
 `main` that contains a fix is not a production that has one — see the deployed-code

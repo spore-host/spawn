@@ -104,6 +104,13 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 
 	if config.DNSName != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:dns-name"), Value: aws.String(config.DNSName)})
+		// A custom DNS target (#891) only means something beside a name to register.
+		if config.DNSDomain != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:dns-domain"), Value: aws.String(config.DNSDomain)})
+		}
+		if config.DNSEndpoint != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:dns-endpoint"), Value: aws.String(config.DNSEndpoint)})
+		}
 	}
 
 	// --- Section 4: notifications & activity signals ---

@@ -1,9 +1,14 @@
 package config
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 )
 
 // isolateDNSConfigEnv points HOME at a fresh temp dir (no ~/.spawn/config.yaml
@@ -137,17 +142,69 @@ func TestLoadDNSConfig_ConfigDisabled_NoDNSAlsoTrue(t *testing.T) {
 	}
 }
 
-// A config file written for the withdrawn CLI registration path (#872) still
-// carries `domain:` and `api_endpoint:`. Those keys are ignored, not an error,
-// and must not disturb `enabled:` beside them.
-func TestLoadDNSConfig_WithdrawnKeysAreIgnored(t *testing.T) {
+// dns.enabled beside the custom-target keys (#891) is still honoured: the keys
+// are read by ResolveDNSTarget and must not disturb LoadDNSConfig.
+func TestLoadDNSConfig_EnabledBesideTargetKeys(t *testing.T) {
 	home := isolateDNSConfigEnv(t)
-	writeSpawnConfig(t, home, "dns:\n  enabled: false\n  domain: example.com\n  api_endpoint: https://f4gm19tl70.execute-api.us-east-1.amazonaws.com/prod/update-dns\n")
+	writeSpawnConfig(t, home, "dns:\n  enabled: false\n  domain: spore.example.edu\n  api_endpoint: https://abc.lambda-url.eu-west-1.on.aws/\n")
 	cfg, err := LoadDNSConfig(false)
 	if err != nil {
 		t.Fatalf("LoadDNSConfig() error = %v", err)
 	}
 	if cfg.IsEnabled() {
-		t.Error("dns.enabled: false beside the withdrawn keys was not honoured")
+		t.Error("dns.enabled: false beside domain/api_endpoint was not honoured")
+	}
+}
+
+type fakeSSM map[string]string
+
+func (f fakeSSM) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
+	v, ok := f[*in.Name]
+	if !ok {
+		return nil, errors.New("ParameterNotFound")
+	}
+	return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Value: &v}}, nil
+}
+
+// Each field resolves on its own: flag > env > file > SSM > spore.host's (empty).
+func TestResolveDNSTarget_Precedence(t *testing.T) {
+	const fileEP = "https://file.lambda-url.eu-west-1.on.aws/"
+	ssmAll := fakeSSM{SSMDNSDomainPath: "ssm.example.org", SSMDNSEndpointPath: "https://ssm.lambda-url.us-west-2.on.aws/"}
+	ctx := context.Background()
+
+	home := isolateDNSConfigEnv(t)
+	t.Setenv("SPAWN_DNS_DOMAIN", "")
+	t.Setenv("SPAWN_DNS_API_ENDPOINT", "")
+
+	if got := ResolveDNSTarget(ctx, nil, "", ""); got != (DNSTarget{}) {
+		t.Errorf("nothing set = %+v, want empty (spore.host)", got)
+	}
+	got := ResolveDNSTarget(ctx, ssmAll, "", "")
+	if got.Domain != "ssm.example.org" || got.DomainSource != "SSM "+SSMDNSDomainPath || got.Endpoint != ssmAll[SSMDNSEndpointPath] {
+		t.Errorf("SSM only = %+v", got)
+	}
+
+	writeSpawnConfig(t, home, "dns:\n  domain: file.example.org\n  api_endpoint: "+fileEP+"\n")
+	got = ResolveDNSTarget(ctx, ssmAll, "", "")
+	if got.Domain != "file.example.org" || got.Endpoint != fileEP || got.DomainSource != "~/.spawn/config.yaml" {
+		t.Errorf("file over SSM = %+v", got)
+	}
+
+	t.Setenv("SPAWN_DNS_DOMAIN", "env.example.org")
+	got = ResolveDNSTarget(ctx, ssmAll, "", "")
+	if got.Domain != "env.example.org" || got.DomainSource != "env SPAWN_DNS_DOMAIN" || got.Endpoint != fileEP {
+		t.Errorf("env over file, per field = %+v", got)
+	}
+
+	got = ResolveDNSTarget(ctx, ssmAll, "flag.example.org", "")
+	if got.Domain != "flag.example.org" || got.DomainSource != "flag" {
+		t.Errorf("flag over env = %+v", got)
+	}
+
+	// A missing SSM parameter is "not set", not an error.
+	isolateDNSConfigEnv(t)
+	t.Setenv("SPAWN_DNS_DOMAIN", "")
+	if got := ResolveDNSTarget(ctx, fakeSSM{}, "", ""); got != (DNSTarget{}) {
+		t.Errorf("SSM without the parameters = %+v, want empty", got)
 	}
 }

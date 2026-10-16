@@ -181,6 +181,8 @@ field LaunchConfig.CompletionFile string
 field LaunchConfig.CompletionWebhookURL string
 field LaunchConfig.CostLimit float64
 field LaunchConfig.DCVSessionID string
+field LaunchConfig.DNSDomain string
+field LaunchConfig.DNSEndpoint string
 field LaunchConfig.DNSName string
 field LaunchConfig.EBSEncrypted bool
 field LaunchConfig.EBSKMSKeyID string
@@ -369,6 +371,7 @@ func (*Client) PrepareSnapshotImage(ctx context.Context, source, region string, 
 func (*Client) PurchaseCapacityBlock(ctx context.Context, region, offeringID, platform string, dryRun bool, tags map[string]string) (string, error)
 func (*Client) RecallFSxFilesystem(ctx context.Context, stackName, region string) (*FSxInfo, error)
 func (*Client) RemoveResource(ctx context.Context, r ManagedResource) error
+func (*Client) ResolveDNSTarget(ctx context.Context, region, flagDomain, flagEndpoint string) spawnconfig.DNSTarget
 func (*Client) ResolveVPC(ctx context.Context, region, explicitVPC string) (string, error)
 func (*Client) RunPowerShell(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
 func (*Client) RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
