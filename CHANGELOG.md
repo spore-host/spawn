@@ -499,6 +499,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parameters are `NoEcho`; pass them with `UsePreviousValue` on stack updates.
   The `bot-cross-account-role.yaml` example role ARN and a comment naming
   `SPORE_BOT_NOTIFY_URL` (the variable is `SPORE_NOTIFY_URL`) are corrected.
+- **`spawn extend --job-array-id/--job-array-name` now actually extends the
+  instances** (#983). It used to write only `spawn:ttl`, set to the raw argument,
+  and report "Job array TTL extended!". spored and the TTL reaper enforce
+  `spawn:ttl-deadline`, which it never changed, so every instance still
+  terminated at its original deadline. Each instance's deadline now moves
+  forward from its own current deadline, exactly as `spawn extend <id>` does,
+  and the new deadline is printed for each instance. The cost limit is raised
+  per instance when it would otherwise stop the instance first, and
+  `--cost-limit` / `--keep-cost-limit` work as on a single instance. That
+  replaces the old advice to extend capped instances one at a time.
+- **`spawn start` no longer claims to restore a paused TTL** (#983). It wrote the
+  remaining time saved at stop into `spawn:ttl` and left the enforced deadline
+  where it was. On an instance with a deadline that changed nothing. On an older
+  instance without one it shortened the TTL. The TTL deadline is fixed at launch
+  and does not pause while the instance is stopped, so `spawn start` now says so
+  and shows the deadline (#928 tracks the matching `spawn stop` message). A
+  new test fails if any code writes `spawn:ttl` without also writing or removing
+  `spawn:ttl-deadline`.
 
 ### Security
 

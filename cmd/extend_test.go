@@ -390,7 +390,7 @@ func TestExtendJobArrayInstances_ReloadFailureIsTrackedNotDiscarded(t *testing.T
 		{InstanceID: "i-reload-fails", Region: "us-east-1", PublicIP: "5.6.7.8"},
 	}
 
-	updateTags := func(region, instanceID string) error {
+	updateTags := func(*aws.InstanceInfo) error {
 		return nil // every tag write succeeds
 	}
 	reload := func(inst *aws.InstanceInfo) error {
@@ -425,7 +425,7 @@ func TestExtendJobArrayInstances_TagFailureSkipsReload(t *testing.T) {
 		{InstanceID: "i-tag-fails", Region: "us-east-1"},
 	}
 
-	updateTags := func(region, instanceID string) error {
+	updateTags := func(*aws.InstanceInfo) error {
 		return errors.New("access denied")
 	}
 	reloadCalled := false
@@ -458,7 +458,7 @@ func TestExtendJobArrayInstances_AllSucceed(t *testing.T) {
 		{InstanceID: "i-a", Region: "us-east-1"},
 		{InstanceID: "i-b", Region: "us-east-1"},
 	}
-	noErr := func(string, string) error { return nil }
+	noErr := func(*aws.InstanceInfo) error { return nil }
 	noErrReload := func(*aws.InstanceInfo) error { return nil }
 
 	var stderr bytes.Buffer
@@ -470,5 +470,82 @@ func TestExtendJobArrayInstances_AllSucceed(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr should be empty on full success, got %q", stderr.String())
+	}
+}
+
+// TestJobArrayExtendMovesEachInstancesDeadline is the #983 regression. The
+// job-array path used to write {spawn:ttl: <raw argument>} and nothing else,
+// so `spawn extend --job-array-name X 4h` printed success while every instance
+// kept the spawn:ttl-deadline that spored and the TTL reaper actually enforce.
+// This drives the real per-instance updater the array path uses and asserts,
+// for each of two instances with DIFFERENT deadlines, that the write carries
+// that instance's own deadline moved forward, a total-from-launch spawn:ttl,
+// and nothing that disagrees with the single-instance path.
+func TestJobArrayExtendMovesEachInstancesDeadline(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	launch := now.Add(-1 * time.Hour)
+	instances := []aws.InstanceInfo{
+		{InstanceID: "i-a", Region: "us-east-1", LaunchTime: launch, TTL: "2h",
+			Tags: map[string]string{"spawn:ttl-deadline": launch.Add(2 * time.Hour).Format(time.RFC3339)}},
+		{InstanceID: "i-b", Region: "us-east-1", LaunchTime: launch, TTL: "3h",
+			Tags: map[string]string{"spawn:ttl-deadline": launch.Add(3 * time.Hour).Format(time.RFC3339)}},
+	}
+
+	written := map[string]map[string]string{}
+	write := func(region, id string, tags map[string]string) error {
+		written[id] = tags
+		return nil
+	}
+	var out bytes.Buffer
+	update := jobArrayTagUpdater(write, "4h", 4*time.Hour, now, 0, false, &out)
+	success, failed, _ := extendJobArrayInstances(instances, update, func(*aws.InstanceInfo) error { return nil }, &out)
+	if success != 2 || len(failed) != 0 {
+		t.Fatalf("success=%d failed=%v, want 2/none", success, failed)
+	}
+
+	for _, inst := range instances {
+		got := written[inst.InstanceID]
+		old, _ := time.Parse(time.RFC3339, inst.Tags["spawn:ttl-deadline"])
+		want := old.Add(4 * time.Hour)
+		if got["spawn:ttl-deadline"] != want.Format(time.RFC3339) {
+			t.Errorf("%s: spawn:ttl-deadline = %q, want %q (its own deadline + 4h) — the enforced deadline did not move",
+				inst.InstanceID, got["spawn:ttl-deadline"], want.Format(time.RFC3339))
+		}
+		if wantTTL := want.Sub(launch).String(); got["spawn:ttl"] != wantTTL {
+			t.Errorf("%s: spawn:ttl = %q, want %q (total from launch, not the raw argument #506)",
+				inst.InstanceID, got["spawn:ttl"], wantTTL)
+		}
+		single, _, _ := extensionTags(&inst, "4h", 4*time.Hour, now, 0, false)
+		for k, v := range single {
+			if got[k] != v {
+				t.Errorf("%s: array path wrote %s=%q, single-instance path writes %q", inst.InstanceID, k, got[k], v)
+			}
+		}
+		if !strings.Contains(out.String(), inst.InstanceID+": deadline "+want.Format("2006-01-02 15:04 UTC")) {
+			t.Errorf("output does not report %s's new deadline:\n%s", inst.InstanceID, out.String())
+		}
+	}
+}
+
+// TestJobArrayExtendRaisesEachInstancesCostLimit: with the deadline now moved
+// per instance, the #639 cost-limit decision applies per instance too, instead
+// of the old "extend those individually" warning.
+func TestJobArrayExtendRaisesEachInstancesCostLimit(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	launch := now.Add(-1 * time.Hour)
+	inst := aws.InstanceInfo{InstanceID: "i-capped", Region: "us-east-1", LaunchTime: launch, TTL: "2h",
+		Tags: map[string]string{
+			"spawn:ttl-deadline":   launch.Add(2 * time.Hour).Format(time.RFC3339),
+			"spawn:cost-limit":     "2.0000", // sized to the 2h TTL at $1/h
+			"spawn:price-per-hour": "1.0",
+		}}
+	var got map[string]string
+	update := jobArrayTagUpdater(func(_, _ string, tags map[string]string) error { got = tags; return nil },
+		"4h", 4*time.Hour, now, 0, false, &bytes.Buffer{})
+	if err := update(&inst); err != nil {
+		t.Fatal(err)
+	}
+	if got["spawn:cost-limit"] != "6.0000" {
+		t.Errorf("spawn:cost-limit = %q, want 6.0000 (6h from launch at $1/h)", got["spawn:cost-limit"])
 	}
 }
