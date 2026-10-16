@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -108,7 +109,9 @@ func TestAuditTrailIsKeptOffTheTerminalButNotLost(t *testing.T) {
 			t.Errorf("audit record lost its content: %v", ev)
 		}
 	}
-	if fi, err := os.Stat(filepath.Join(dir, auditLogName)); err == nil && fi.Mode().Perm()&0o077 != 0 {
+	// POSIX mode bits only: Windows reports every writable file as 0666, and
+	// the profile directory's ACL is what keeps the file private there (#1002).
+	if fi, err := os.Stat(filepath.Join(dir, auditLogName)); err == nil && runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
 		t.Errorf("audit.log is readable by others (mode %v); it names the account", fi.Mode().Perm())
 	}
 }

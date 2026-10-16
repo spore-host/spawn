@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -156,6 +157,9 @@ func TestDirWorkspace_ResetRefusesOutsideRoot(t *testing.T) {
 // workspace would let any local account tamper with a live task's files, including
 // the .spawn-job.sh that Exec writes there and then executes.
 func TestDirWorkspace_NotWorldWritable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: asserts POSIX workspace modes; Windows has no mode bits (#1002)")
+	}
 	ws := &DirWorkspace{Root: t.TempDir()}
 	dir, err := ws.Acquire("nf-perms")
 	if err != nil {
@@ -182,6 +186,9 @@ func TestDirWorkspace_NotWorldWritable(t *testing.T) {
 // case: if a stale dir survives with loose perms, Acquire must still hand back a
 // 0700 workspace rather than silently inheriting them.
 func TestDirWorkspace_ReacquireResetsMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: asserts POSIX workspace modes; Windows has no mode bits (#1002)")
+	}
 	ws := &DirWorkspace{Root: t.TempDir()}
 	dir, err := ws.Acquire("nf-stale")
 	if err != nil {

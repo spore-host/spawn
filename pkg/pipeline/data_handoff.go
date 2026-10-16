@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -108,7 +109,11 @@ func (h *StageDataHandler) downloadFromStage(ctx context.Context, sourceStage st
 			// Skip if pattern specified and doesn't match
 			if dataInput.Pattern != "" {
 				relPath := strings.TrimPrefix(key, sourcePrefix)
-				matched, err := filepath.Match(dataInput.Pattern, relPath)
+				// path, not filepath: S3 keys are always /-separated. On Windows
+				// filepath.Match treats only \ as a separator, so * crossed /
+				// and a Windows spore pulled nested objects the pattern
+				// excludes (#998).
+				matched, err := path.Match(dataInput.Pattern, relPath)
 				if err != nil {
 					log.Printf("Warning: invalid pattern '%s': %v", dataInput.Pattern, err)
 				} else if !matched {
@@ -213,8 +218,9 @@ func (h *StageDataHandler) UploadStageOutputs(ctx context.Context, dataOutput *D
 			// Determine S3 key
 			relPath := filepath.Base(localPath)
 			if strings.HasPrefix(pattern, "/") {
-				// Absolute path - preserve directory structure
-				relPath = strings.TrimPrefix(localPath, "/")
+				// Absolute path - preserve directory structure. ToSlash: the
+				// key is /-separated even when Glob returned \ (Windows, #998).
+				relPath = strings.TrimPrefix(filepath.ToSlash(localPath), "/")
 			}
 			s3Key := outputPrefix + relPath
 

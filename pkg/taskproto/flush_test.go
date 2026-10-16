@@ -22,6 +22,10 @@ func flushSpec() *TaskSpec {
 // stderr plus the recorded `aws` argv lines.
 func runFlushHook(t *testing.T, script, reason string) (output string, awsCalls []string) {
 	t.Helper()
+	// Every caller, not just the two that failed there: the stub is put on a
+	// ':'-joined PATH that a Windows path breaks, so a test asserting the hook did
+	// NOT call aws would pass on Windows for the wrong reason.
+	skipOnWindows(t, "runs the Linux flush hook under bash with a stub aws on a POSIX PATH")
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}

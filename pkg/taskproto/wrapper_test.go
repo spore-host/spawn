@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,18 @@ import (
 // A fixed value keeps generated-script assertions deterministic; the real caller
 // passes a fresh UUID per launch.
 const testRunID = "11111111-2222-3333-4444-555555555555"
+
+// skipOnWindows skips a test that executes a generated script as a Linux
+// instance runs it. The wrapper and flush hook are bash for Linux spores, and
+// these tests lean on Linux specifics a Windows host does not have: numeric
+// `id -u`, a ':'-separated PATH of POSIX paths, /tmp as the script sees it, and a
+// Docker daemon that runs Linux images (#1002).
+func skipOnWindows(t *testing.T, why string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: " + why + " (#1002)")
+	}
+}
 
 // fullSpec exercises every wrapper section: env, inputs (file + prefix), a
 // command with shell-metachar args, and outputs.
@@ -233,6 +246,7 @@ func TestGenerateWrapper_ContainerRunsAsInvokingUser(t *testing.T) {
 // command substitution (e.g. a quoting mistake that leaves `$(id -u)` inside
 // single quotes, where it wouldn't expand at all).
 func TestGenerateWrapper_ContainerRunLineExecutesWithRealUID(t *testing.T) {
+	skipOnWindows(t, "compares the wrapper's $(id -u):$(id -g) under bash with the Go-side uid, which on Windows is a SID")
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
@@ -642,6 +656,7 @@ func TestGenerateWrapper_ChownRecursiveForPrefixInput(t *testing.T) {
 //
 // Skips cleanly if Docker isn't available (e.g. sandboxed CI).
 func TestGenerateWrapper_ChownFixesCrossUIDStickyUnlink_Docker(t *testing.T) {
+	skipOnWindows(t, "runs a Linux container, which a Windows Docker daemon cannot")
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")
 	}
@@ -899,6 +914,7 @@ func TestGenerateWrapper_ExplicitSetPlusE(t *testing.T) {
 // of riding to TTL — exactly the gap #566 reported ("neither box self-terminated
 // on failure — both sat until TTL").
 func TestGenerateWrapper_SurvivesEmbeddingAfterSetE(t *testing.T) {
+	skipOnWindows(t, "reads the /tmp/SPAWN_COMPLETE the script wrote, which is not the same file as Go's /tmp on Windows")
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -14,6 +15,9 @@ import (
 // called with, and returns the path of that record.
 func installFakeHook(t *testing.T, body string) (callLog string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: the task-flush hook is the Linux bash task wrapper's, and its writability check reads POSIX mode bits, which Windows synthesises as 0666 (#1002)")
+	}
 	dir := t.TempDir()
 	callLog = filepath.Join(dir, "calls.txt")
 	hook := filepath.Join(dir, "task-flush.sh")

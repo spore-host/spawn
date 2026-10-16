@@ -563,7 +563,6 @@ func statusComputeRate(config *provider.Config, isSpot bool) (float64, string) {
 // isSpot is whether the instance runs on the spot market (IMDS
 // instance-life-cycle); it decides which rate the cost figures use.
 func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provider.Identity, isSpot bool) *statusReport {
-	uptime := ag.GetUptime()
 	// Order matters and is now deliberate: IsIdle consumes a CPU sample, so the
 	// report's own read must come AFTER it and be reused, not taken fresh. Two
 	// calls microseconds apart is what produced `Not idle: CPU usage 100.00%`
@@ -584,6 +583,13 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		idleTime = time.Since(ag.GetLastActivityTime())
 	}
 
+	// Every clock reading is taken AFTER the samples above, never before. The
+	// samples are not instant: on Windows each is a PowerShell process, and the
+	// whole set takes seconds. Reading uptime before them and "now" after made
+	// startTime — and so the boot term and billed time — late by however long
+	// sampling took, so a status 47s after launch said 52s billed (#971).
+	uptime := ag.GetUptime()
+
 	// Calculate start time — this is the STATUS AGENT INVOCATION's own start
 	// (this process, which runs fresh on every `spored status` call), not the
 	// instance's. It is only ever used as a last-resort fallback below: using
@@ -594,8 +600,6 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 
 	launchTime, launchTimeSource := resolveLaunchTime(config.LaunchTime, identity.PendingTime, startTime)
 	elapsed := time.Since(launchTime)
-	computeSecs := ag.TotalComputeSeconds()
-	computeTime := time.Duration(computeSecs) * time.Second
 
 	// liveClock is whether computeTime is real running time. It is for the
 	// daemon, and for this status process once it has adopted the daemon's
@@ -605,6 +609,16 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 	// startTime is this process's own start, so the boot/stopped split below
 	// would be arithmetic on the wrong clock.
 	liveClock := ag.ComputeClockLive()
+	computeSecs := ag.TotalComputeSeconds()
+	if !liveClock {
+		// Exactly the checkpoint. TotalComputeSeconds adds this agent's own
+		// running time, which for an unadopted query agent is how long THIS
+		// status process has existed — not compute. On Windows, which publishes
+		// no clock and always takes this path (#916), that was the seconds spent
+		// sampling, reported "as of the last checkpoint" when none existed (#971).
+		computeSecs = ag.ComputeClock().BaseSeconds
+	}
+	computeTime := time.Duration(computeSecs) * time.Second
 
 	// Split the unaccounted remainder into BOOT and STOPPED rather than calling
 	// all of it stopped (#735).

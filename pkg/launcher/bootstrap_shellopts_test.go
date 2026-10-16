@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -109,6 +110,9 @@ func extractCommandOutcome(t *testing.T, script string) string {
 // still say errexit was on, that `set -uo pipefail` does not clear it, and how
 // to opt out. Runs the real outcome block with the log redirected.
 func TestFailedCommandLogNamesErrexit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: executes the Linux user-data bootstrap under bash; MSYS does not reproduce SIGPIPE's exit 141 (#1002)")
+	}
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}

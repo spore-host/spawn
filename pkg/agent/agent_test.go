@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -379,11 +380,23 @@ func writeFakeDCV(t *testing.T, sessionID string, output string, exitCode int) {
 	} else {
 		body = "#!/bin/sh\nexit 1\n"
 	}
+	// Windows runs a stub by extension, not shebang, and LookPath("dcv") finds
+	// dcv.bat via PATHEXT — the same lookup that finds dcv.exe on a Windows spore.
+	// So the fake is a batch file there, and the production exec path is what
+	// runs (#971).
+	if runtime.GOOS == "windows" {
+		script += ".bat"
+		if exitCode == 0 {
+			body = "@echo off\r\necho " + output + "\r\nexit /b 0\r\n"
+		} else {
+			body = "@echo off\r\nexit /b 1\r\n"
+		}
+	}
 
 	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
 		t.Fatalf("writeFakeDCV: %v", err)
 	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestDCVIdleSource_NoSessionID(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -241,6 +242,16 @@ func TestPrepareSnapshotImage_RawImagePassthrough(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("raw passthrough altered bytes: got %q want %q", got, want)
+	}
+
+	// Cleanup is the only release the caller performs (cmd/snapshot.go), so it
+	// must close the source. It was a no-op, leaking the handle — which on
+	// Windows also kept the file locked, failing this test's TempDir cleanup
+	// (#999).
+	prepared.Cleanup()
+	if _, err := prepared.Reader.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("reading after Cleanup returned %v, want os.ErrClosed: Cleanup must "+
+			"close the source", err)
 	}
 }
 

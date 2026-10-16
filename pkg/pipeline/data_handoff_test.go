@@ -3,7 +3,9 @@ package pipeline
 import (
 	"context"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -277,7 +279,7 @@ func TestPatternMatching(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matched, err := filepath.Match(tt.pattern, tt.relPath)
+			matched, err := path.Match(tt.pattern, tt.relPath) // as data_handoff.go does (#998)
 			if err != nil {
 				t.Fatalf("Pattern error: %v", err)
 			}
@@ -382,9 +384,12 @@ func TestS3KeyGeneration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			outputPrefix := tt.prefix + "/stages/" + tt.stageID + "/output/"
 
+			// Mirrors data_handoff.go. An absolute pattern is recognised by its
+			// leading /, not filepath.IsAbs: "/data/..." is an instance path,
+			// and is not absolute on a Windows host (#998).
 			relPath := filepath.Base(tt.localPath)
-			if tt.preservePath && filepath.IsAbs(tt.pattern) {
-				relPath = filepath.Clean(tt.localPath[1:]) // Remove leading /
+			if tt.preservePath && strings.HasPrefix(tt.pattern, "/") {
+				relPath = strings.TrimPrefix(filepath.ToSlash(tt.localPath), "/")
 			}
 
 			s3Key := outputPrefix + relPath

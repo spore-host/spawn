@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -154,6 +155,9 @@ func quoteAll(ss []string) string {
 
 func requireBash(t *testing.T) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: executes the Linux shell installer; the Windows installer is PowerShell, covered by windows_test.go (#1002)")
+	}
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}

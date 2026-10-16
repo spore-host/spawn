@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -83,9 +84,9 @@ type PluginRef struct {
 //   - name@v1.2.0             official registry, pinned to git tag
 //   - github:user/repo/name   custom GitHub repository
 //   - github:user/repo/name@v1.2.0  custom GitHub repository, pinned
-//   - ./path/to/plugin.yaml   local filesystem path
+//   - ./path/to/plugin.yaml   local filesystem path (also C:\path, .\path on Windows)
 func ParseRef(ref string) PluginRef {
-	if strings.HasPrefix(ref, "./") || strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "../") {
+	if isLocalRef(ref) {
 		return PluginRef{Host: "local", Name: ref}
 	}
 
@@ -117,6 +118,20 @@ func ParseRef(ref string) PluginRef {
 		Name:    name,
 		Version: version,
 	}
+}
+
+// isLocalRef reports whether ref names a file on this machine rather than a
+// registry entry. Besides ./, ../ and /, that includes an OS-absolute path and
+// the host-separator forms of ./ and ../: on Windows, C:\x.yaml and .\x.yaml
+// were otherwise looked up as registry names, over the network (#997).
+func isLocalRef(ref string) bool {
+	sep := string(filepath.Separator)
+	for _, p := range []string{"./", "../", "/", "." + sep, ".." + sep} {
+		if strings.HasPrefix(ref, p) {
+			return true
+		}
+	}
+	return filepath.IsAbs(ref)
 }
 
 // Default GitHub endpoints. Overridable on compositeResolver for tests.

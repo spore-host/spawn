@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -71,6 +72,9 @@ func (r mpiRun) record(t *testing.T, rel string) (completionRecord, bool) {
 // /tmp redirected to hosts/<ip>/, so each peer's files are separate.
 func runRank0(t *testing.T, mpiRC int, unreachable string) mpiRun {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: executes the Linux MPI user-data block (/tmp, /var/log) under bash (#1002)")
+	}
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}

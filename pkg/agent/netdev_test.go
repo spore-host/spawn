@@ -24,18 +24,23 @@ func netDevLine(name string, rx, tx string) string {
 // fakeSysClassNet builds a /sys/class/net in a temp dir. Physical interfaces get
 // a device symlink into a fake bus, as the kernel creates; virtual ones are a
 // bare directory, as the kernel creates for lo, bridges, veth pairs and tun.
+//
+// The bus and device directories are named like the kernel's ("pci0000:00",
+// "0000:27:00.0") but with "-" for ":", which Windows refuses in a file name
+// (#971). Nothing reads those names — the parser only asks whether a device
+// link resolves — so the fixture loses nothing by it.
 func fakeSysClassNet(t *testing.T, physical []string, virtual []string) string {
 	t.Helper()
 	root := t.TempDir()
 	classNet := filepath.Join(root, "class", "net")
-	bus := filepath.Join(root, "devices", "pci0000:00")
+	bus := filepath.Join(root, "devices", "pci0000-00")
 	for _, d := range []string{classNet, bus} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i, name := range physical {
-		dev := filepath.Join(bus, "0000:27:0"+string(rune('0'+i))+".0")
+		dev := filepath.Join(bus, "0000-27-0"+string(rune('0'+i))+".0")
 		if err := os.MkdirAll(dev, 0o755); err != nil {
 			t.Fatal(err)
 		}
