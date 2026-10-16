@@ -10,6 +10,7 @@ import (
 	"github.com/scttfrdmn/strata/spec"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/platform"
+	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/sshkey"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 	"gopkg.in/yaml.v3"
@@ -218,6 +219,23 @@ func windowsLifecycleGuard(config *aws.LaunchConfig) error {
 	// known: every path that resolves the OS (single launch, job array, sweep,
 	// --dry-run) calls this guard once it has.
 	return windowsUnsupportedFlags(config.TargetOS, launchFlags)
+}
+
+// windowsPluginGuard refuses --plugin (or config-file plugins) on a Windows
+// launch (#1001). The Windows bootstrap carries no plugin declarations, so the
+// flag was silently dropped; plugins are Linux-only (plugin.CheckSporeOS).
+func windowsPluginGuard(targetOS string, decls []plugin.Declaration) error {
+	if len(decls) == 0 {
+		return nil
+	}
+	if err := plugin.CheckSporeOS(targetOS); err != nil {
+		refs := make([]string, len(decls))
+		for i, d := range decls {
+			refs[i] = d.Ref
+		}
+		return fmt.Errorf("--plugin %s: %w\n  Drop --plugin for a Windows launch", strings.Join(refs, ", "), err)
+	}
+	return nil
 }
 
 // validateMPIFlags checks --mpi's own flag prerequisites (multiple nodes and a

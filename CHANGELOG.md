@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Plugins on a Windows instance are refused up front** (#1001). Plugins are
+  Linux-only (their steps are shell scripts, and every registry plugin requires
+  Linux), but `spawn plugin install` on a Windows spore ran local provision
+  steps and then failed on the instance at the first step, because a Windows
+  spore has no `sh`, and `spawn launch --os windows --plugin ...` dropped the
+  plugin silently. Both now stop before doing anything and say why. A Windows
+  spored also refuses an install request itself, so an older spawn reports
+  the reason too. See the Windows guide.
+
 ## [0.129.0] - 2026-10-16
 
 ### Added

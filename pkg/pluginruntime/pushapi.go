@@ -147,6 +147,14 @@ func (s *PushAPIServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: spec failed validation", http.StatusBadRequest)
 		return
 	}
+	// Refuse synchronously on a Windows spore so the controller (including an
+	// older spawn that does not check spawn:os itself) reports why, instead of
+	// a 202 followed by a failure at the first sh step (#1001).
+	if err := plugin.CheckSporeOS(hostGOOS); err != nil {
+		log.Printf("install refused for %s: %v", spec.Name, err)
+		http.Error(w, err.Error(), http.StatusNotImplemented)
+		return
+	}
 
 	// Run install in the background against the server's lifecycle context so it
 	// survives this request but is cancelled on spored shutdown. The result is

@@ -106,6 +106,9 @@ pushed by local steps are delivered before the remote configure phase runs.
 
 Requires SSH access to the instance (the same key used by 'spawn plugin status').
 
+Linux spores only: plugin steps are POSIX shell, so 'spawn plugin install'
+refuses a Windows spore (spawn:os=windows) before running anything.
+
 Plugin ref formats:
   name                  official registry (spore-host/spore-plugins)
   name@v1.2.0           pinned to git tag

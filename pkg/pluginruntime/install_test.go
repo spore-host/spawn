@@ -20,6 +20,7 @@ import (
 // without ever parking at WaitingForPush. The configure step writes the pushed
 // value to a file; the test asserts the file content.
 func TestInstallWithPushed_SeedsPushedBeforeConfigure(t *testing.T) {
+	posixSporeOnly(t)
 	rt := newTestRuntime(t)
 	out := filepath.Join(t.TempDir(), "configured")
 
@@ -64,6 +65,7 @@ func TestInstallWithPushed_SeedsPushedBeforeConfigure(t *testing.T) {
 // handed to the runtime is recorded in the plugin's on-instance state, so an
 // audit can read what was installed and how it was verified.
 func TestInstallWithProvenance_PersistsToState(t *testing.T) {
+	posixSporeOnly(t)
 	rt := newTestRuntime(t)
 	spec := &plugin.PluginSpec{
 		Name:        "provrec",
@@ -100,6 +102,7 @@ func TestInstallWithProvenance_PersistsToState(t *testing.T) {
 // no pushed value seeded, a configure step referencing {{ pushed.x }} parks the
 // plugin at WaitingForPush rather than failing.
 func TestInstall_MissingPushedParksWaiting(t *testing.T) {
+	posixSporeOnly(t)
 	rt := newTestRuntime(t)
 	spec := &plugin.PluginSpec{
 		Name:        "waits",
@@ -125,6 +128,7 @@ func TestInstall_MissingPushedParksWaiting(t *testing.T) {
 // POST a resolved spec + config + pushed, expect 202, then poll status to
 // Running.
 func TestHandleInstall_EndToEnd(t *testing.T) {
+	posixSporeOnly(t)
 	s, srv := newTestServer(t)
 	out := filepath.Join(t.TempDir(), "endtoend")
 

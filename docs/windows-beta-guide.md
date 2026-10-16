@@ -324,6 +324,19 @@ aws logout --profile sporehost
 
 ---
 
+## Not available on Windows: plugins
+
+`spawn plugin install` and `spawn launch --plugin` refuse a Windows instance,
+with an error saying so. Plugins (Docker, JupyterLab, rclone, Tailscale and
+the rest of [spore-host/spore-plugins](https://github.com/spore-host/spore-plugins))
+are Linux-only: their steps are shell scripts that use `sh`, `systemctl` and
+`tar`, every plugin in the registry requires a Linux instance, and their
+"run as your login user" steps assume a per-user account, but on Windows you
+log in as `Administrator`. Install software on a Windows instance yourself,
+over Remote Desktop or `spawn connect` (#1001).
+
+---
+
 ## When something goes wrong
 
 - **`spawn image verify` says REJECTED** — wrong ISO. Get the Enterprise
