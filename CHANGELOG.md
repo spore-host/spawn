@@ -84,14 +84,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Windows spored install script), and line-scoped `//lint:ignore`s, each
   with a reason.
 
-### Removed
-
-- The `make test-integration-scheduler` and `make test-integration-queue` targets,
-  with the tests they ran (#913). The scheduler tests wrote a DynamoDB schedule
-  schema that the scheduler has never read and waited for a trigger that doesn't
-  exist (schedules fire from EventBridge Scheduler), so they could not pass. The
-  queue tests were `t.Skip` placeholders.
-
 ### Deprecated
 
 - **`spawn collect-results --output`/`-o`** is now a deprecated alias for the new
@@ -101,6 +93,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   results.csv` set the output *format* and silently got `results.json`; the
   `spawn sweep` help example showed exactly that invocation, and now uses
   `--output-file` (#935).
+
+### Removed
+
+- The `make test-integration-scheduler` and `make test-integration-queue` targets,
+  with the tests they ran (#913). The scheduler tests wrote a DynamoDB schedule
+  schema that the scheduler has never read and waited for a trigger that doesn't
+  exist (schedules fire from EventBridge Scheduler), so they could not pass. The
+  queue tests were `t.Skip` placeholders.
 
 ### Fixed
 
