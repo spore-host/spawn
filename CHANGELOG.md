@@ -117,7 +117,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existed. The boot and billed figures were also late by however long the
   CPU/network sampling took, which on Windows (a PowerShell process per sample)
   is seconds: 47s after launch reported 52s billed.
-
 - `spawn sweep resume` accepts `--max-concurrent-auto` (#494), which until now
   only the deprecated `spawn resume` had, so following `spawn resume`'s
   deprecation notice lost the option. The two commands now declare their flags
@@ -348,6 +347,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`spawn snapshot --from <raw image>` closes the image when it is done**
   (#999). The source file (or S3 object stream) was never closed; on Windows that
   also kept the file locked until spawn exited.
+- **`-o/--output` rejects a value it does not render** (#975). It accepted
+  anything, and every command treats an unknown format as `table`, so a typo
+  (`-o jsno`) or a file name (`spawn sweep collect <id> --output results.csv`)
+  printed the table or wrote the default file and exited 0. It now exits 1
+  naming the valid formats (`table`, `json`), and on a command with
+  `--output-file` (or `--output-dir`) it suggests that flag instead. Commands
+  whose own `--output` is a file or directory are unaffected.
+- **`spawn app` subcommands honour `--profile`, `--region` and `--account`**
+  (found with #975). `spawn app`'s own `--catalog` hook replaced the root
+  command's, so for `spawn app list`/`launch` those flags never reached the
+  config layer and the profile/region came from the environment or config file
+  instead. Every ancestor's hook now runs.
 
 ### Security
 
