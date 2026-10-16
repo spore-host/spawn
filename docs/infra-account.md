@@ -61,7 +61,10 @@ code and it determines what breaks when a schedule is disabled.
 |---|---|---|
 | `spawn-dashboard-api` | `lambda/dashboard-api/` | the dashboard's REST backend |
 | `spawn-dashboard-websocket` | `lambda/dashboard-websocket/` | WebSocket connect/disconnect |
-| `spore-bot` | **not this repo** | `deployment/cloudformation/spore-bot.yaml` deploys it |
+
+`spore-bot` used to be listed here. It is not API Gateway-fronted — Slack, Teams,
+Discord and spored's `/notify` reach it through a Lambda Function URL — and its
+source is not in this repo; see [spore-bot](#spore-bot) below.
 
 ### Invoked directly by the CLI
 
@@ -88,6 +91,39 @@ orphans:
 | `spawn-ts-portal` | spawn-ts. **The only non-Go runtime: `nodejs20.x`** |
 | `prism-bot` | prism |
 | `spawn-dns-updater` | `lambda/dns-updater/` here, deployed by `scripts/deploy-custom-dns.sh` |
+| `spore-bot` | spore-host (umbrella) — see [spore-bot](#spore-bot) |
+
+### spore-bot
+
+**Per the spore-host repo, not measured from the account** (read 2026-10-15 at
+spore-host `a80e751`, spore-host#573; spawn#1043). The next `spawn footprint` run
+should confirm the function, its role and its tables, and replace this note with
+the measured facts.
+
+- **Code** is in spore-host's `lambda/spore-bot` and ships with `make deploy`
+  there: it asserts the account, builds the arm64 zip, uploads it to
+  `s3://spawn-binaries-us-east-1/spore-bot/function.zip`, runs
+  `update-function-code`, waits, and fails unless the live `CodeSha256` matches
+  the zip it built.
+- **Shape** — the `spore-bot-role` execution role, runtime (`provided.al2023`),
+  arch (`arm64`), memory, timeout and the public Function URL — is OpenTofu at
+  spore-host's `infra/tofu/spore-bot`. Tofu ignores code and environment.
+- **Environment variables** (the bot's secrets) are set out-of-band with
+  `aws lambda update-function-configuration`; neither of the above touches them.
+- **There is no CloudFormation stack.** The `spore-bot` stack was deleted on
+  2026-06-14 when Tofu adopted the function; creating one again would fight Tofu
+  for ownership.
+
+`deployment/cloudformation/spore-bot.yaml` in this repo is **only** the
+first-time setup for someone self-hosting the bot. It does not deploy, and must
+not be deployed into, this account. It was audited against the bot's code in
+spawn#1043; nothing gates the two together, because the code lives in another
+repo (spore-host#576 proposes a check there).
+
+Two leads from that audit are open and unmeasured: per spore-host's Tofu, the
+bot's role grants no access to `spore-sms-pending`, which its SMS notifications
+write (spore-host#576); and `spawn bot register` creates cross-account roles
+trusting the prism-bot function role rather than `spore-bot-role` (#1046).
 
 ### Code with no deployment
 
@@ -137,7 +173,7 @@ function. Tracked as #848.
 
 ## DynamoDB tables
 
-Mapped to the code that reads them. Three have **no reference in this repo** and
+Mapped to the code that reads them. Two have **no reference in this repo** and
 belong to adjacent projects.
 
 | table | read by |
@@ -147,16 +183,16 @@ belong to adjacent projects.
 | `spawn-sweep-orchestration` | `lambda/dashboard-api/models.go` |
 | `spawn-pipeline-orchestration` | `lambda/pipeline-orchestrator/` |
 | `spawn-websocket-connections` | `lambda/dashboard-websocket-processor/` |
-
 | `spawn-schedules`, `spawn-schedule-history` | `cmd/schedule.go`, `deployment/cloudformation/schedules-tables.yaml` |
 | `spawn-alert-preferences` | **nothing, since #794 removed `alert-evaluator`.** Still deployed and empty. Its template stays because `spawn-cost-history`, declared alongside it, is live |
 | `spawn-alerts`, `spawn-alert-history` | **nothing, since #783 removed the alerts path.** Still deployed and empty; the template that creates them stays because two of its four tables are live. Their removal belongs to the control-plane reaping in #653 |
 | `spawn-cost-history` | `cost-history-collector` |
 | `spawn-teams`, `spawn-team-memberships` | team sharing (#137) |
 | `spore-portal-accounts` | the reaper's `ACCOUNTS_TABLE` — which accounts it scans |
-| `spore-bot-{audit,registry,workspaces}` | `deployment/cloudformation/spore-bot.yaml`, `cmd/bot.go` |
+| `spore-bot-{audit,registry,workspaces}` | spore-bot (spore-host `lambda/spore-bot`); here, `cmd/bot.go` (registry, workspaces) and `lambda/dashboard-api/slack_oauth.go` (workspaces). `deployment/cloudformation/spore-bot.yaml` declares them for self-hosting only — the hosted tables are not in any stack (per spore-host repo) |
+| `spore-sms-pending` | written by spore-bot's SMS notifications, read by spore-host's `lambda/rest-api` for replies (per spore-host repo). Declared here only by the self-hosting `spore-bot.yaml` |
 | `lagotto-watches`, `lagotto-match-history` | lagotto; also read by `lambda/dashboard-api/watches.go` |
-| `prism-bot-audit`, `spore-api-keys`, `spore-sms-pending` | **no reference here** — adjacent projects |
+| `prism-bot-audit`, `spore-api-keys` | **no reference here** — adjacent projects |
 
 ## S3 buckets
 

@@ -122,7 +122,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   results.csv` set the output *format* and silently got `results.json`; the
   `spawn sweep` help example showed exactly that invocation, and now uses
   `--output-file` (#935).
-
 - **`pkg/aws.GenerateScopedS3Policy`** (#1049). Nothing calls it, in spawn or
   in spore-host-mcp, lagotto or calque, and it will be removed in a future
   minor release. Its signature is unchanged. Its results grants now name the
@@ -489,6 +488,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hundreds, and a new test checks that the tolerance still catches a clock. The
   id format is unchanged: a production collision needs the same
   `--job-array-name` on the same day, and is about 10⁻⁶ even at 100 such launches.
+- **The self-hosting `spore-bot.yaml` template matches the bot it deploys**
+  (#1043). Audited against spore-host's `lambda/spore-bot`: it now takes the
+  bot's secrets and settings as parameters (Discord public key, Slack signing
+  and OAuth secrets, Teams app, Twilio, slash command) instead of leaving a
+  self-hosted bot without them; creates the `spore-sms-pending` table and grants
+  the write SMS notifications make (it failed silently before); allows `GET` on
+  the Function URL for the OAuth install flow; turns on X-Ray tracing; and
+  defaults `LambdaCodeKey` to the key the bot's `make upload` writes. Secret
+  parameters are `NoEcho`; pass them with `UsePreviousValue` on stack updates.
+  The `bot-cross-account-role.yaml` example role ARN and a comment naming
+  `SPORE_BOT_NOTIFY_URL` (the variable is `SPORE_NOTIFY_URL`) are corrected.
 
 ### Security
 
@@ -551,6 +561,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/spored.service` already did. spored runs as root and needs no privilege
   escalation; the setting stops a hook or job it spawns from gaining privileges
   through a setuid binary or file capabilities.
+
+### Documentation
+
+- **`docs/infra-account.md` describes spore-bot's deployment correctly** (#1043).
+  It said a CloudFormation template in this repo deploys the bot. In fact its
+  code ships from spore-host's `lambda/spore-bot` with `make deploy`, its role,
+  runtime and Function URL are OpenTofu in spore-host's `infra/tofu/spore-bot`,
+  and there has been no stack since 2026-06-14; `spore-bot.yaml` is only for
+  self-hosting. The bot is no longer listed as API Gateway-fronted (it is a
+  Function URL), `spore-sms-pending` is attributed to it, and the new facts are
+  marked "per spore-host repo" until the next `spawn footprint` confirms them.
 
 ## [0.128.2] - 2026-10-13
 

@@ -1,6 +1,24 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: 'spore-bot — Slack/Teams chat interface for instance control (spore.host + prism)'
+Description: 'spore-bot — Slack/Teams/Discord/SMS chat interface for instance control (spore.host + prism)'
+
+# SELF-HOSTING ONLY. This is the first-time setup for running your own spore-bot.
+# It is NOT how hosted spore.host deploys it: there the bot's code lives in the
+# spore-host repo (lambda/spore-bot, shipped with `make deploy`), its shape
+# (role, runtime, arch, memory, timeout, Function URL) is OpenTofu-managed at
+# spore-host's infra/tofu/spore-bot, and there has been no CloudFormation stack
+# since 2026-06-14. Do not deploy this template into the hosted infra account.
+#
+# Audited against spore-host's lambda/spore-bot on 2026-10-15 (spawn#1043): every
+# env var the code reads is either a parameter below, set by the template, or
+# AWS_LAMBDA_FUNCTION_NAME (Lambda sets it). The code is in another repo, so no
+# gate here keeps the two in step — re-audit when the bot gains an env var or an
+# AWS call.
+#
+# Secrets are NoEcho parameters. On a stack UPDATE pass each one with
+# UsePreviousValue=true (or re-supply it): a parameter omitted from an update
+# resets to its default, which here is empty, and the bot fails closed without
+# it (see docs/infra-account.md, "Known traps").
 
 Parameters:
   Environment:
@@ -15,7 +33,85 @@ Parameters:
 
   LambdaCodeKey:
     Type: String
+    Default: spore-bot/function.zip  # what spore-host's lambda/spore-bot `make upload` writes
+    Description: S3 key of the Lambda zip within LambdaCodeBucket
+
+  # ── Bot configuration (env vars read by lambda/spore-bot) ────────────────────
+
+  SlashCommand:
+    Type: String
+    Default: /spore
+    Description: BOT_SLASH_COMMAND — fallback slash command when a payload carries none. Also selects TWILIO_NUMBER_<COMMAND> for SMS.
+
+  ConnectCodeTTLHours:
+    Type: String
+    Default: '24'
+    Description: BOT_CONNECT_CODE_TTL_HOURS — platform default; workspace admins can lower it per workspace.
+
+  DiscordPublicKey:
+    Type: String
     Default: ''
+    Description: DISCORD_PUBLIC_KEY — the Discord application's Ed25519 public key (hex). Empty disables Discord.
+
+  SlackSigningSecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: SLACK_SIGNING_SECRET — app-level fallback for OAuth-installed workspaces, which store no per-workspace secret. Signature verification fails closed when both are empty.
+
+  BotOAuthSecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: BOT_OAUTH_SECRET — HMAC key for the OAuth state parameter. Required for /<platform>/oauth; the flow fails closed when empty or "change-me".
+
+  SlackClientId:
+    Type: String
+    Default: ''
+    Description: SPORE_SLACK_CLIENT_ID — Slack OAuth client id for the /spore/oauth install flow. The code reads <PLATFORM>_SLACK_CLIENT_ID, so a second app (e.g. PRISM_*) needs its own env vars.
+
+  SlackClientSecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: SPORE_SLACK_CLIENT_SECRET — Slack OAuth client secret for the /spore/oauth install flow.
+
+  OAuthSuccessUrl:
+    Type: String
+    Default: ''
+    Description: SPORE_OAUTH_SUCCESS_URL — where the OAuth callback redirects. Empty means https://spore.host/dashboard.
+
+  TeamsAppId:
+    Type: String
+    Default: ''
+    Description: TEAMS_APP_ID — Microsoft Teams bot app id. Empty disables Teams.
+
+  TeamsAppSecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: TEAMS_APP_SECRET — Microsoft Teams bot app secret.
+
+  TeamsTenantId:
+    Type: String
+    Default: ''
+    Description: TEAMS_TENANT_ID — required for single-tenant Teams apps; empty uses botframework.com.
+
+  TwilioAccountSid:
+    Type: String
+    Default: ''
+    Description: TWILIO_ACCOUNT_SID — empty disables SMS notifications.
+
+  TwilioAuthToken:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: TWILIO_AUTH_TOKEN.
+
+  TwilioNumberSpore:
+    Type: String
+    Default: ''
+    Description: TWILIO_NUMBER_SPORE — the sending number for the /spore project (E.164).
 
 Conditions:
   DeployLambda: !Not [!Equals [!Ref LambdaCodeBucket, '']]
@@ -122,6 +218,32 @@ Resources:
         - Key: Component
           Value: audit
 
+  # ── DynamoDB: pending SMS replies ────────────────────────────────────────────
+  # sms_notify.go writes one item per outbound SMS (key "<from>#<to>", 15-minute
+  # ttl) so a reply can be matched to its instance. The reply side is spore-host's
+  # rest-api, not this bot. Missing before spawn#1043, so a self-hosted bot's
+  # PutItem failed — silently, because the caller discards the error.
+
+  SmsPendingTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spore-sms-pending
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pending_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pending_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spore-bot
+
   # ── Lambda ────────────────────────────────────────────────────────────────────
 
   SporeBotFunction:
@@ -134,6 +256,7 @@ Resources:
       Handler: bootstrap
       Timeout: 120  # start command polls up to 90s for instance to reach running state
       MemorySize: 256
+      Tracing: Active  # matches the hosted function; SAM adds the xray:Put* grants
       CodeUri:
         Bucket: !Ref LambdaCodeBucket
         Key: !Ref LambdaCodeKey
@@ -142,7 +265,20 @@ Resources:
           BOT_REGISTRY_TABLE: !Ref BotRegistryTable
           BOT_WORKSPACES_TABLE: !Ref BotWorkspacesTable
           BOT_AUDIT_TABLE: !Ref BotAuditTable
-          BOT_CONNECT_CODE_TTL_HOURS: '24'  # platform default; workspace admins can lower per workspace
+          BOT_CONNECT_CODE_TTL_HOURS: !Ref ConnectCodeTTLHours
+          BOT_SLASH_COMMAND: !Ref SlashCommand
+          DISCORD_PUBLIC_KEY: !Ref DiscordPublicKey
+          SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
+          BOT_OAUTH_SECRET: !Ref BotOAuthSecret
+          SPORE_SLACK_CLIENT_ID: !Ref SlackClientId
+          SPORE_SLACK_CLIENT_SECRET: !Ref SlackClientSecret
+          SPORE_OAUTH_SUCCESS_URL: !Ref OAuthSuccessUrl
+          TEAMS_APP_ID: !Ref TeamsAppId
+          TEAMS_APP_SECRET: !Ref TeamsAppSecret
+          TEAMS_TENANT_ID: !Ref TeamsTenantId
+          TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
+          TWILIO_AUTH_TOKEN: !Ref TwilioAuthToken
+          TWILIO_NUMBER_SPORE: !Ref TwilioNumberSpore
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref BotRegistryTable
@@ -151,6 +287,10 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref BotAuditTable
         - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt SmsPendingTable.Arn
             - Effect: Allow
               Action:
                 - sts:AssumeRole
@@ -173,13 +313,16 @@ Resources:
     Type: AWS::Lambda::Url
     Condition: DeployLambda
     Properties:
-      # trivy:ignore:AVD-AWS-0066 -- AuthType NONE is intentional; Slack request
-      # authentication is handled via HMAC-SHA256 signature verification in Lambda.
+      # trivy:ignore:AVD-AWS-0066 -- AuthType NONE is intentional; each route
+      # authenticates in the Lambda (Slack HMAC, Discord Ed25519, Teams JWT, the
+      # OAuth state HMAC).
       AuthType: NONE
       TargetFunctionArn: !GetAtt SporeBotFunction.Arn
       Cors:
         AllowOrigins: ['*']
-        AllowMethods: [POST]
+        # GET for /<platform>/oauth and /<platform>/oauth/callback; matches the
+        # hosted Function URL.
+        AllowMethods: [POST, GET]
 
   SporeBotFunctionUrlPermission:
     Type: AWS::Lambda::Permission
@@ -254,10 +397,15 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-audit-table'
 
+  SmsPendingTableName:
+    Value: !Ref SmsPendingTable
+    Export:
+      Name: !Sub '${AWS::StackName}-sms-pending-table'
+
   LambdaFunctionUrl:
     Condition: DeployLambda
     Value: !GetAtt SporeBotFunctionUrl.FunctionUrl
-    Description: 'Slack slash command Request URL — append /slack or /teams'
+    Description: 'Interactions endpoint base — append /slack, /teams, /discord or /notify (self-hosted spawn launches: set SPORE_NOTIFY_URL to this URL, no path)'
     Export:
       Name: !Sub '${AWS::StackName}-function-url'
 

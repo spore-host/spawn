@@ -11,7 +11,7 @@ Parameters:
     Type: String
     Description: >
       ARN of the spore-bot Lambda execution role in spore-host-infra.
-      Example: arn:aws:iam::966362334030:role/spore-bot-lambda
+      Example: arn:aws:iam::966362334030:role/spore-bot-role
     AllowedPattern: 'arn:aws:iam::\d{12}:role/.+'
     ConstraintDescription: Must be a valid IAM role ARN
 
