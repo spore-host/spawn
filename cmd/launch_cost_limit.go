@@ -112,6 +112,6 @@ func costLimitScopeNote(limit float64) string {
 	if limit <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("Cost limit:   $%.2f total (compute + storage; spored stops compute, "+
-		"but storage that outlives the instance is only reclaimed by the reaper)", limit)
+	return fmt.Sprintf("Cost limit:   $%.2f total (compute + storage; spored terminates the instance when "+
+		"compute + EBS reaches it, but storage that outlives the instance is only reclaimed by the reaper)", limit)
 }

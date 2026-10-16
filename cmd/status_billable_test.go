@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -165,10 +166,40 @@ func TestBillableResourcesMarksWhatOutlivesTheInstance(t *testing.T) {
 		t.Error("compute does not outlive the instance")
 	}
 	if !byKind["instance"].Capped {
-		t.Error("compute is the one thing --cost-limit governs")
+		t.Error("compute is counted by --cost-limit")
 	}
 	if byKind["fsx"].Capped || byKind["efs"].Capped {
-		t.Error("storage is NOT covered by --cost-limit; claiming otherwise is the #616 confusion")
+		t.Error("FSx/EFS are NOT counted by --cost-limit (terminating does not stop them billing); claiming otherwise is the #616 confusion")
+	}
+}
+
+// TestBillableResourcesEBSIsCappedByCostLimit: since #616 the cap is compute + EBS
+// (pkg/agent accumulatedComputeCost's doc comment is the contract), and the footer
+// of this same view says so. The JSON field must agree with both, running or
+// stopped — a stopped instance's EBS is exactly what the cap keeps counting (#959).
+func TestBillableResourcesEBSIsCappedByCostLimit(t *testing.T) {
+	for _, state := range []string{"running", "stopped"} {
+		res := billableResources(billableInstance(state, map[string]string{
+			"spawn:managed":         "true",
+			"spawn:price-per-hour":  "0.170000",
+			"spawn:ebs-hourly-cost": "0.002192",
+		}))
+		var ebs *billableResource
+		for i := range res {
+			if res[i].Kind == "ebs" {
+				ebs = &res[i]
+			}
+		}
+		if ebs == nil {
+			t.Fatalf("%s: no ebs row in %+v", state, res)
+		}
+		raw, err := json.Marshal(ebs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), `"capped_by_cost_limit":true`) {
+			t.Errorf("%s: EBS is counted by --cost-limit (#616) but the JSON says otherwise: %s", state, raw)
+		}
 	}
 }
 

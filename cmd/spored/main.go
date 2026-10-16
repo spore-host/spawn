@@ -514,7 +514,7 @@ type statusCost struct {
 
 	// CostLimit fields are omitted entirely when no limit is configured.
 	CostLimit          float64 `json:"cost_limit,omitempty"`
-	CostLimitUsed      float64 `json:"cost_limit_used,omitempty"` // compute-only, matches enforcement (spawn#540: "cost-limit consumed")
+	CostLimitUsed      float64 `json:"cost_limit_used,omitempty"` // compute + EBS, from the enforcement function (spawn#540: "cost-limit consumed"; #959)
 	CostLimitUsedPct   float64 `json:"cost_limit_used_pct,omitempty"`
 	CostLimitRemaining float64 `json:"cost_limit_remaining,omitempty"`
 }
@@ -757,13 +757,12 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 			}
 		}
 
-		if config.CostLimit > 0 && config.PricePerHour > 0 {
-			// The cost limit is enforced against the ON-DEMAND rate (spored uses
-			// PricePerHour × total compute time), so measure "used" the same way —
-			// not against the spot rate or displayTotal, either of which would
-			// misreport how close the instance is to the limit that actually
-			// terminates it.
-			used := math.Round(config.PricePerHour*computeTime.Hours()*100) / 100
+		if config.CostLimit > 0 {
+			// "Used" is read from the function the enforcement loop terminates on
+			// (compute + EBS since launch, #616), never re-derived here: a copy of
+			// that arithmetic went stale once already and overstated the headroom,
+			// worst on a stopped instance whose EBS kept accruing (#959).
+			used := math.Round(ag.CostLimitSpend()*100) / 100
 			cost.CostLimit = config.CostLimit
 			cost.CostLimitUsed = used
 			cost.CostLimitUsedPct = (used / config.CostLimit) * 100
@@ -974,7 +973,7 @@ func renderStatusTable(report *statusReport) error {
 		}
 
 		if cost.CostLimit > 0 {
-			fmt.Printf("  Cost limit:       $%.2f  ($%.2f compute used, %.0f%% — $%.2f remaining; compute-only, at the on-demand rate)\n",
+			fmt.Printf("  Cost limit:       $%.2f  ($%.2f used, compute + EBS, %.0f%% — $%.2f remaining)\n",
 				cost.CostLimit, cost.CostLimitUsed, cost.CostLimitUsedPct, cost.CostLimitRemaining)
 		}
 
