@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Custom DNS zones work end to end** (#891). A spore can register under your own
+  zone through your own updater, for example
+  `<name>.<base36-account>.spore.example.edu`. Until now nothing told spored about
+  either: it read a `SPORED_DNS_DOMAIN` that no launch set, so every spore
+  registered under spore.host. The launch now writes `spawn:dns-domain` and
+  `spawn:dns-endpoint` beside `spawn:dns-name`, and spored registers and renews
+  there. Set them with `--dns-domain` / `--dns-api-endpoint`,
+  `SPAWN_DNS_DOMAIN` / `SPAWN_DNS_API_ENDPOINT`, `dns.domain` /
+  `dns.api_endpoint` in `~/.spawn/config.yaml`, or, for every launch in an
+  account, the SSM parameters `/spawn/dns/domain` and `/spawn/dns/api_endpoint`.
+  Both are validated before launch and again by spored: the endpoint must be an
+  https Lambda Function URL, the only kind a SigV4-signed request can
+  authenticate to. A bad value is reported in `spawn:dns-status`, never
+  replaced with spore.host. `--dry-run` shows the target. `spawn dns register` /
+  `delete` act in the zone the instance's tags name (new `--endpoint` flag), and
+  `spawn dns list` shows each instance's own zone. See `docs/custom-dns.md`.
+- `scripts/deploy-custom-dns.sh` now creates the updater's Function URL
+  (`AuthType: AWS_IAM`) instead of only reading one, and grants
+  `lambda:InvokeFunctionUrl` to each `--allow-account` (default: the deploying
+  account). It never grants `lambda:InvokeFunction`, which would let a caller
+  forge the account the updater authorizes.
+
+### Changed
+
+- **`--dns-domain` and `--dns-api-endpoint` are no longer deprecated** (#891).
+  v0.129.0 deprecated them because nothing that registered DNS read them. They
+  now reach spored.
+
 ### Fixed
 
 - **`TestStatusScreen_UsesOneTimeFormat` no longer fails for part of every day.**
@@ -23,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin silently. Both now stop before doing anything and say why. A Windows
   spored also refuses an install request itself, so an older spawn reports
   the reason too. See the Windows guide.
+
+- **`deploy-custom-dns.sh` no longer breaks the updater it adds a zone to**
+  (#891). It replaced the role's Route53 grant with one on the new zone alone,
+  which on spore.host's shared updater would have revoked access to the
+  spore.host zone and failed every spore's DNS registration. It also overwrote
+  `DEFAULT_DOMAIN` and `HOSTED_ZONE_ID` with the new zone's. The grant now covers
+  every zone the updater serves, the defaults are set only when absent, and
+  `DNS_ALLOWED_ACCOUNTS` is merged rather than replaced. The live updater still
+  serves only the spore.host zone, so it was never used to add a second one.
+  The script's closing message also pointed at a `CUSTOM_DNS.md` that did not
+  exist.
 
 ## [0.129.0] - 2026-10-16
 

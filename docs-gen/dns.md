@@ -23,7 +23,8 @@ spawn dns
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--domain` |  | string |  | DNS domain for record registration (default: spore.host) |
+| `--domain` |  | string |  | DNS zone (default: the instance's spawn:dns-domain, else SPAWN_DNS_DOMAIN / ~/.spawn/config.yaml / SSM, else spore.host) |
+| `--endpoint` |  | string |  | Custom DNS updater Function URL (default: the instance's spawn:dns-endpoint, else the same chain, else spore.host's) |
 
 ### `spawn dns delete`
 

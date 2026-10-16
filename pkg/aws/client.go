@@ -190,6 +190,14 @@ type LaunchConfig struct {
 	CostLimit       float64
 	DNSName         string
 
+	// DNSDomain and DNSEndpoint point spored at a custom DNS deployment (#891):
+	// the zone to register under and the updater's Function URL. Empty means
+	// spore.host's, and writes no tag. Validated by the caller (dns.ValidateDomain,
+	// dns.ValidateEndpoint) and again by spored, which receives them as the
+	// spawn:dns-domain and spawn:dns-endpoint tags.
+	DNSDomain   string
+	DNSEndpoint string
+
 	// Pre-stop hook: runs before any lifecycle-triggered terminate/stop/hibernate
 	PreStop        string // Shell command to run before stopping (e.g., "aws s3 sync /results s3://bucket/")
 	PreStopTimeout string // Max time to wait for pre-stop command (default: 5m)

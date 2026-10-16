@@ -29,6 +29,7 @@ error() {
 # Parse command line arguments
 HOSTED_ZONE_ID=""
 DOMAIN=""
+ALLOW_ACCOUNTS=()
 REGION=$(aws configure get region || echo "us-east-1")
 
 while [[ $# -gt 0 ]]; do
@@ -45,6 +46,10 @@ while [[ $# -gt 0 ]]; do
       REGION="$2"
       shift 2
       ;;
+    --allow-account)
+      ALLOW_ACCOUNTS+=("$2")
+      shift 2
+      ;;
     --help)
       echo "Usage: $0 --hosted-zone-id Z123... --domain spore.example.edu [--region us-east-1]"
       echo ""
@@ -52,6 +57,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --hosted-zone-id    Route53 hosted zone ID (required)"
       echo "  --domain            DNS domain (required)"
       echo "  --region            AWS region (default: from AWS CLI config)"
+      echo "  --allow-account ID  AWS account whose spores may register (repeatable;"
+      echo "                      default: the account this script deploys into)"
       echo "  --help              Show this help message"
       exit 0
       ;;
@@ -106,6 +113,20 @@ if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
   exit 1
 fi
 echo ""
+
+# Accounts whose spores may call the updater (#891). Each gets an
+# lambda:InvokeFunctionUrl grant below and is added to DNS_ALLOWED_ACCOUNTS, the
+# updater's own allowlist. Default: this account only.
+if [ ${#ALLOW_ACCOUNTS[@]} -eq 0 ]; then
+  ALLOW_ACCOUNTS=("$ACCOUNT_ID")
+fi
+for a in "${ALLOW_ACCOUNTS[@]}"; do
+  if ! [[ "$a" =~ ^[0-9]{12}$ ]]; then
+    error "--allow-account $a is not a 12-digit AWS account ID"
+    exit 1
+  fi
+done
+info "Allowed accounts: ${ALLOW_ACCOUNTS[*]}"
 
 # Step 1: Build Lambda function
 echo "Step 1: Building Lambda function..."
@@ -188,6 +209,99 @@ fi
 info "Role ARN: $ROLE_ARN"
 echo ""
 
+# Build the environment by MERGING into the deployed one, never replacing it.
+#
+# `--environment` replaces the entire variable map. The update path below passed
+# Variables={HOSTED_ZONE_ID=...,DOMAIN=...}, so running this script against the
+# live function would have deleted DOMAIN_ZONES — the only variable it actually
+# has, and the one main.go prefers — leaving it on the legacy single-zone
+# fallback. It would also have silently dropped DNS_AUTHZ_MODE, i.e. turned
+# #835's enforcement off as a side effect of shipping unrelated code. That is the
+# #716 shape: a deploy quietly reverting configuration it never meant to touch.
+#
+# DOMAIN_ZONES is merged key-by-key rather than overwritten, so deploying one
+# domain cannot unregister the others in a multi-domain map. DOMAIN is no longer
+# written: main.go reads DEFAULT_DOMAIN, never DOMAIN, so the old variable was
+# inert.
+merge_lambda_env() {
+  # stdin: deployed Variables map as JSON. args: KEY=VALUE to set.
+  python3 -c '
+import json, sys
+try:
+    cur = json.load(sys.stdin) or {}
+except Exception:
+    cur = {}
+if not isinstance(cur, dict):
+    cur = {}
+for kv in sys.argv[1:]:
+    k, _, v = kv.partition("=")
+    if k.startswith("?"):
+        # Set only if absent: DEFAULT_DOMAIN and HOSTED_ZONE_ID belong to the first
+        # zone deployed. Overwriting them meant adding a zone to a
+        # shared updater made that zone the default (#891).
+        cur.setdefault(k[1:], v)
+    elif k.startswith("+"):
+        # Union of comma-separated values (DNS_ALLOWED_ACCOUNTS).
+        have = [x for x in (cur.get(k[1:]) or "").split(",") if x]
+        for x in v.split(","):
+            if x and x not in have:
+                have.append(x)
+        cur[k[1:]] = ",".join(have)
+    elif k == "DOMAIN_ZONES":
+        zones = {}
+        for e in (cur.get("DOMAIN_ZONES") or "").split(","):
+            d, _, z = e.strip().partition("=")
+            if d and z:
+                zones[d] = z
+        for e in v.split(","):
+            d, _, z = e.strip().partition("=")
+            if d and z:
+                zones[d] = z
+        cur["DOMAIN_ZONES"] = ",".join(f"{d}={z}" for d, z in sorted(zones.items()))
+    else:
+        cur[k] = v
+print(json.dumps({"Variables": cur}))
+' "$@"
+}
+
+# Only variables the operator actually set are passed through, so an unset
+# DNS_AUTHZ_MODE leaves the deployed value alone instead of clearing it.
+ENV_ARGS=(
+  "DOMAIN_ZONES=${DOMAIN}=${HOSTED_ZONE_ID}"
+  "?DEFAULT_DOMAIN=${DOMAIN}"
+  "?HOSTED_ZONE_ID=${HOSTED_ZONE_ID}"
+  "+DNS_ALLOWED_ACCOUNTS=$(printf '%s,' "${ALLOW_ACCOUNTS[@]}")"
+)
+for passthrough in DNS_AUTHZ_MODE DNS_ACCOUNTS_TABLE; do
+  if [ -n "${!passthrough:-}" ]; then
+    ENV_ARGS+=("${passthrough}=${!passthrough}")
+  fi
+done
+
+FUNCTION_NAME="spawn-dns-updater"
+DEPLOYED_ENV='{}'
+if aws lambda get-function --function-name "$FUNCTION_NAME" &>/dev/null; then
+  DEPLOYED_ENV=$(aws lambda get-function-configuration \
+    --function-name "$FUNCTION_NAME" \
+    --query 'Environment.Variables' --output json)
+  if [ -z "$DEPLOYED_ENV" ] || [ "$DEPLOYED_ENV" = "null" ]; then
+    DEPLOYED_ENV='{}'
+  fi
+fi
+MERGED_ENV=$(printf '%s' "$DEPLOYED_ENV" | merge_lambda_env "${ENV_ARGS[@]}")
+
+# The Route53 grant covers EVERY zone the updater serves, read from the merged
+# DOMAIN_ZONES — not just this run's --hosted-zone-id. put-role-policy replaces
+# the whole document, so granting only the new zone revoked every zone already
+# deployed: adding a domain to spore.host's shared updater would have broken
+# registration under spore.host for every spore (#891).
+ZONE_ARNS=$(printf '%s' "$MERGED_ENV" | python3 -c '
+import json, sys
+zones = json.load(sys.stdin)["Variables"].get("DOMAIN_ZONES", "")
+ids = sorted({e.partition("=")[2].strip() for e in zones.split(",") if "=" in e})
+print(json.dumps(["arn:aws:route53:::hostedzone/" + z for z in ids if z]))')
+info "Route53 zones served: $ZONE_ARNS"
+
 # Step 3: Create/update IAM policy
 echo "Step 3: Creating IAM policy..."
 
@@ -203,7 +317,7 @@ cat > /tmp/spawn-lambda-policy.json <<EOF
         "route53:ChangeResourceRecordSets",
         "route53:ListResourceRecordSets"
       ],
-      "Resource": "arn:aws:route53:::hostedzone/$HOSTED_ZONE_ID"
+      "Resource": $ZONE_ARNS
     },
     {
       "Sid": "EC2Permissions",
@@ -282,75 +396,9 @@ echo ""
 # Step 4: Create or update Lambda function
 echo "Step 4: Deploying Lambda function..."
 
-FUNCTION_NAME="spawn-dns-updater"
-
-# Build the environment by MERGING into the deployed one, never replacing it.
-#
-# `--environment` replaces the entire variable map. The update path below passed
-# Variables={HOSTED_ZONE_ID=...,DOMAIN=...}, so running this script against the
-# live function would have deleted DOMAIN_ZONES — the only variable it actually
-# has, and the one main.go prefers — leaving it on the legacy single-zone
-# fallback. It would also have silently dropped DNS_AUTHZ_MODE, i.e. turned
-# #835's enforcement off as a side effect of shipping unrelated code. That is the
-# #716 shape: a deploy quietly reverting configuration it never meant to touch.
-#
-# DOMAIN_ZONES is merged key-by-key rather than overwritten, so deploying one
-# domain cannot unregister the others in a multi-domain map. DOMAIN is no longer
-# written: main.go reads DEFAULT_DOMAIN, never DOMAIN, so the old variable was
-# inert.
-merge_lambda_env() {
-  # stdin: deployed Variables map as JSON. args: KEY=VALUE to set.
-  python3 -c '
-import json, sys
-try:
-    cur = json.load(sys.stdin) or {}
-except Exception:
-    cur = {}
-if not isinstance(cur, dict):
-    cur = {}
-for kv in sys.argv[1:]:
-    k, _, v = kv.partition("=")
-    if k == "DOMAIN_ZONES":
-        zones = {}
-        for e in (cur.get("DOMAIN_ZONES") or "").split(","):
-            d, _, z = e.strip().partition("=")
-            if d and z:
-                zones[d] = z
-        for e in v.split(","):
-            d, _, z = e.strip().partition("=")
-            if d and z:
-                zones[d] = z
-        cur["DOMAIN_ZONES"] = ",".join(f"{d}={z}" for d, z in sorted(zones.items()))
-    else:
-        cur[k] = v
-print(json.dumps({"Variables": cur}))
-' "$@"
-}
-
-# Only variables the operator actually set are passed through, so an unset
-# DNS_AUTHZ_MODE leaves the deployed value alone instead of clearing it.
-ENV_ARGS=(
-  "DOMAIN_ZONES=${DOMAIN}=${HOSTED_ZONE_ID}"
-  "DEFAULT_DOMAIN=${DOMAIN}"
-  "HOSTED_ZONE_ID=${HOSTED_ZONE_ID}"
-)
-for passthrough in DNS_AUTHZ_MODE DNS_ALLOWED_ACCOUNTS DNS_ACCOUNTS_TABLE; do
-  if [ -n "${!passthrough:-}" ]; then
-    ENV_ARGS+=("${passthrough}=${!passthrough}")
-  fi
-done
-
 # Check if function exists
 if aws lambda get-function --function-name "$FUNCTION_NAME" &>/dev/null; then
   warn "Lambda function $FUNCTION_NAME already exists, updating code..."
-
-  DEPLOYED_ENV=$(aws lambda get-function-configuration \
-    --function-name "$FUNCTION_NAME" \
-    --query 'Environment.Variables' --output json)
-  if [ -z "$DEPLOYED_ENV" ] || [ "$DEPLOYED_ENV" = "null" ]; then
-    DEPLOYED_ENV='{}'
-  fi
-  MERGED_ENV=$(printf '%s' "$DEPLOYED_ENV" | merge_lambda_env "${ENV_ARGS[@]}")
 
   aws lambda update-function-code \
     --function-name "$FUNCTION_NAME" \
@@ -384,7 +432,7 @@ else
     --zip-file fileb://lambda/dns-updater/function.zip \
     --timeout 30 \
     --memory-size 256 \
-    --environment "$(printf '{}' | merge_lambda_env "${ENV_ARGS[@]}")" \
+    --environment "$MERGED_ENV" \
     --description "DNS updater for spawn managed instances" \
     > /dev/null
 
@@ -453,31 +501,59 @@ echo ""
 #   - nothing consumed it. Neither /spawn/dns/* SSM parameter was set, and
 #     spored registers through the Function URL.
 #
-# Read the Function URL off the function rather than constructing it: AWS
-# assigns it and it cannot be derived from the function name.
+# Ensure the Function URL — the endpoint spored signs its requests for (#891).
 #
-# A function with no Function URL configured is a real state this script must
-# REPORT rather than abort on — the warn branch below says spored cannot register
-# DNS without one. Aborting here would make a recoverable misconfiguration look
-# like a deploy failure, after the code has already shipped. Kept on one line so
-# the marker sits immediately above the call, which is the only place the gate in
-# scripts/deploy_scripts_test.go honours it.
-# swallow-ok: absent Function URL is reported by the warn branch below, not fatal
-FUNCTION_URL=$(aws lambda get-function-url-config --function-name "$FUNCTION_NAME" --query 'FunctionUrl' --output text 2>/dev/null || true)
+# This used to only READ the URL and warn when there was none, so on a fresh
+# deployment every spore's registration had nowhere to go. It now creates one,
+# and only ever with AuthType AWS_IAM: the updater namespaces each record under
+# the SigV4-verified caller account and refuses a request with no IAM authorizer,
+# so a URL with AuthType NONE accepts nothing (#173). An existing URL with any
+# other AuthType is refused, not changed — rewriting a live endpoint's auth is
+# not something a deploy should do as a side effect.
+FUNCTION_URL=$(aws lambda get-function-url-config --function-name "$FUNCTION_NAME" \
+  --query 'FunctionUrl' --output text 2>/dev/null) || FUNCTION_URL=""
 if [ -z "$FUNCTION_URL" ] || [ "$FUNCTION_URL" = "None" ]; then
-  warn "no Function URL on $FUNCTION_NAME — spored cannot register DNS without one"
-  FUNCTION_URL="(none configured)"
-else
-  FUNCTION_URL_AUTH=$(aws lambda get-function-url-config \
+  info "Creating Function URL (AuthType AWS_IAM)..."
+  FUNCTION_URL=$(aws lambda create-function-url-config \
     --function-name "$FUNCTION_NAME" \
-    --query 'AuthType' --output text 2>/dev/null || echo UNKNOWN)
-  info "Function URL: $FUNCTION_URL (AuthType: $FUNCTION_URL_AUTH)"
-  if [ "$FUNCTION_URL_AUTH" != "AWS_IAM" ]; then
-    warn "AuthType is $FUNCTION_URL_AUTH, not AWS_IAM. The updater namespaces every"
-    warn "record under the SigV4-verified caller account, so anything other than"
-    warn "AWS_IAM leaves records unanchored to a verified caller (#173)."
-  fi
+    --auth-type AWS_IAM \
+    --query 'FunctionUrl' --output text)
 fi
+FUNCTION_URL_AUTH=$(aws lambda get-function-url-config --function-name "$FUNCTION_NAME" \
+  --query 'AuthType' --output text)
+if [ "$FUNCTION_URL_AUTH" != "AWS_IAM" ]; then
+  error "Function URL $FUNCTION_URL has AuthType $FUNCTION_URL_AUTH, not AWS_IAM."
+  error "The updater refuses every request without an IAM authorizer, so no spore can"
+  error "register through it. Fix it deliberately:"
+  error "  aws lambda update-function-url-config --function-name $FUNCTION_NAME --auth-type AWS_IAM"
+  exit 1
+fi
+info "Function URL: $FUNCTION_URL (AuthType: AWS_IAM)"
+
+# Let each allowed account invoke the URL — lambda:InvokeFunctionUrl, conditioned
+# on the AWS_IAM auth type, one statement per account. The same shape as the
+# spore.host deployment.
+#
+# Deliberately NOT lambda:InvokeFunction. A direct invocation lets the caller
+# write the whole event, including requestContext.authorizer.iam.accountId — the
+# value the updater trusts as "who is asking". Granting it would let any allowed
+# account register records under any other account's subdomain.
+for a in "${ALLOW_ACCOUNTS[@]}"; do
+  SID="FunctionURLAllow${a}"
+  if aws lambda get-policy --function-name "$FUNCTION_NAME" --query Policy --output text 2>/dev/null \
+       | grep -q "\"Sid\":\"${SID}\""; then
+    info "Invoke grant for $a already present"
+    continue
+  fi
+  aws lambda add-permission \
+    --function-name "$FUNCTION_NAME" \
+    --statement-id "$SID" \
+    --action lambda:InvokeFunctionUrl \
+    --principal "$a" \
+    --function-url-auth-type AWS_IAM \
+    > /dev/null
+  info "Granted lambda:InvokeFunctionUrl to $a"
+done
 echo ""
 
 # Summary
@@ -495,15 +571,27 @@ echo ""
 echo "1. Verify DNS delegation (if not already done):"
 echo "   dig NS $DOMAIN"
 echo ""
-echo "2. Point spored at this deployment. spored registers DNS in-instance, and"
-echo "   reads its domain and endpoint from SPORED_DNS_DOMAIN=$DOMAIN and"
-echo "   SPORE_DNS_URL=$FUNCTION_URL. spawn launch does not set either yet, so a"
-echo "   plain 'spawn launch --dns <name>' registers under spore.host, not here."
-echo "   (The CLI-side /spawn/dns/* SSM parameters were removed in #872: nothing"
-echo "   that registers DNS ever read them.)"
+echo "2. Point launches at this deployment — any ONE of:"
+echo "   - per launch:"
+echo "       spawn launch <name> --dns-domain $DOMAIN --dns-api-endpoint $FUNCTION_URL ..."
+echo "   - for this workstation, in ~/.spawn/config.yaml:"
+echo "       dns:"
+echo "         domain: $DOMAIN"
+echo "         api_endpoint: $FUNCTION_URL"
+echo "   - for every launch in an account and region (run in THAT account):"
+echo "       aws ssm put-parameter --region <region> --type String --name /spawn/dns/domain --value $DOMAIN"
+echo "       aws ssm put-parameter --region <region> --type String --name /spawn/dns/api_endpoint --value $FUNCTION_URL"
+echo "   spored on the instance registers through it; --dry-run shows the target."
 echo ""
-echo "3. (Optional) Enable DNSSEC:"
+echo "3. Test the deployment:"
+echo "   spawn launch dns-test --ttl 1h --dns-domain $DOMAIN --dns-api-endpoint $FUNCTION_URL"
+echo "   spawn status dns-test      # spawn:dns-status should read 'registered'"
+echo ""
+echo "4. (Optional) Enable DNSSEC:"
 echo "   ./scripts/enable-dnssec.sh --hosted-zone-id $HOSTED_ZONE_ID --domain $DOMAIN"
 echo ""
-echo "For more information, see CUSTOM_DNS.md"
+echo "Records in $DOMAIN are NOT covered by spore.host's TTL reaper DNS lease expiry;"
+echo "see docs/custom-dns.md."
+echo ""
+echo "For more information, see docs/custom-dns.md"
 echo ""

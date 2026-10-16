@@ -9,6 +9,7 @@ import (
 	"github.com/scttfrdmn/strata/pkg/strata"
 	"github.com/scttfrdmn/strata/spec"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/sshkey"
@@ -65,6 +66,37 @@ func resolveTargetOS(ctx context.Context, awsClient *aws.Client, region, amiID, 
 		return "windows"
 	}
 	return "linux"
+}
+
+// resolveLaunchDNSTarget fills config.DNSDomain and config.DNSEndpoint — the
+// custom DNS target spored registers with (#891) — from --dns-domain /
+// --dns-api-endpoint, SPAWN_DNS_*, ~/.spawn/config.yaml or the account's SSM
+// parameters, and validates them before anything is launched.
+//
+// Only for a launch that registers DNS (config.DNSName set, which --no-dns
+// withholds). A value equal to spore.host's default leaves the field empty, so
+// no tag is written for the common case.
+func resolveLaunchDNSTarget(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig) error {
+	if config.DNSName == "" {
+		return nil
+	}
+	t := awsClient.ResolveDNSTarget(ctx, config.Region, dnsDomain, dnsAPIEndpoint)
+	if t.Domain != "" {
+		if err := dns.ValidateDomain(t.Domain); err != nil {
+			return fmt.Errorf("DNS domain from %s: %w", t.DomainSource, err)
+		}
+		if t.Domain != dns.DefaultDomain {
+			config.DNSDomain = t.Domain
+		}
+	}
+	if t.Endpoint != "" {
+		ep, err := dns.ValidateEndpoint(t.Endpoint)
+		if err != nil {
+			return fmt.Errorf("DNS endpoint from %s: %w", t.EndpointSource, err)
+		}
+		config.DNSEndpoint = ep
+	}
+	return nil
 }
 
 // isAutoAMI reports whether --ami asks spawn to choose the image.

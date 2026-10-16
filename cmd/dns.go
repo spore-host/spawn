@@ -54,7 +54,8 @@ func init() {
 	dnsDeleteCmd.Flags().BoolVarP(&dnsDeleteYes, "yes", "y", false, "Skip the confirmation prompt")
 
 	// Flags
-	dnsCmd.PersistentFlags().StringVar(&dnsDomain, "domain", "", "DNS domain for record registration (default: spore.host)")
+	dnsCmd.PersistentFlags().StringVar(&dnsDomain, "domain", "", "DNS zone (default: the instance's spawn:dns-domain, else SPAWN_DNS_DOMAIN / ~/.spawn/config.yaml / SSM, else spore.host)")
+	dnsCmd.PersistentFlags().StringVar(&dnsAPIEndpoint, "endpoint", "", "Custom DNS updater Function URL (default: the instance's spawn:dns-endpoint, else the same chain, else spore.host's)")
 	dnsListCmd.Flags().BoolVarP(&dnsListAll, "all", "a", false, "Show all instances (including those without DNS)")
 
 	// Register completions
@@ -98,7 +99,12 @@ func runDNSList(cmd *cobra.Command, args []string) error {
 
 		fqdn := ""
 		if dnsName != "" {
-			fqdn = dns.GetFullDNSName(dnsName, accountID, resolveDNSDomain())
+			// The zone spored registered it under: its own tag (#891), else spore.host.
+			zone := instance.Tags["spawn:dns-domain"]
+			if zone == "" {
+				zone = dns.DefaultDomain
+			}
+			fqdn = dns.GetFullDNSName(dnsName, accountID, zone)
 		}
 
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
@@ -170,8 +176,11 @@ func runDNSRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get account ID: %w", err)
 	}
 
-	// Build FQDN
-	fqdn := dns.GetFullDNSName(dnsName, accountID, resolveDNSDomain())
+	domain, endpoint, err := dnsCommandTarget(ctx, awsClient, instance.Region, instance.Tags)
+	if err != nil {
+		return err
+	}
+	fqdn := dns.GetFullDNSName(dnsName, accountID, domain)
 
 	fmt.Fprintf(os.Stderr, "Registering DNS...\n")
 	fmt.Fprintf(os.Stderr, "  Short name: %s\n", dnsName)
@@ -179,7 +188,7 @@ func runDNSRegister(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// Create DNS client
-	dnsClient, err := dns.NewClient(ctx, resolveDNSDomain(), "")
+	dnsClient, err := dns.NewClient(ctx, domain, endpoint)
 	if err != nil {
 		return fmt.Errorf("failed to create DNS client: %w", err)
 	}
@@ -191,9 +200,16 @@ func runDNSRegister(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update instance tag
-	err = awsClient.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, map[string]string{
-		"spawn:dns-name": dnsName,
-	})
+	// Record the target beside the name, so `spawn dns list` / `delete` find the
+	// record where it is rather than under spore.host (#891).
+	regTags := map[string]string{"spawn:dns-name": dnsName}
+	if domain != dns.DefaultDomain {
+		regTags["spawn:dns-domain"] = domain
+	}
+	if endpoint != "" {
+		regTags["spawn:dns-endpoint"] = endpoint
+	}
+	err = awsClient.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, regTags)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Warning: DNS registered but failed to update instance tag: %v\n", err)
 	}
@@ -241,15 +257,18 @@ func runDNSDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get account ID: %w", err)
 	}
 
-	// Build FQDN
-	fqdn := dns.GetFullDNSName(dnsName, accountID, resolveDNSDomain())
+	domain, endpoint, err := dnsCommandTarget(ctx, awsClient, instance.Region, instance.Tags)
+	if err != nil {
+		return err
+	}
+	fqdn := dns.GetFullDNSName(dnsName, accountID, domain)
 
 	fmt.Fprintf(os.Stderr, "Instance: %s\n", instance.InstanceID)
 	fmt.Fprintf(os.Stderr, "DNS:      %s\n", fqdn)
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// Create DNS client
-	dnsClient, err := dns.NewClient(ctx, resolveDNSDomain(), "")
+	dnsClient, err := dns.NewClient(ctx, domain, endpoint)
 	if err != nil {
 		return fmt.Errorf("failed to create DNS client: %w", err)
 	}
@@ -278,11 +297,44 @@ func runDNSDelete(cmd *cobra.Command, args []string) error {
 
 // Helper functions
 
-func resolveDNSDomain() string {
-	if dnsDomain != "" {
-		return dnsDomain
+// dnsCommandTarget is where `spawn dns register` / `delete` send their request
+// (#891), per field: --domain / --endpoint, then the instance's own
+// spawn:dns-domain / spawn:dns-endpoint (where spored registered it), then the
+// launch chain — SPAWN_DNS_*, ~/.spawn/config.yaml, SSM — then spore.host's.
+// The endpoint is "" for spore.host's compiled-in updater.
+func dnsCommandTarget(ctx context.Context, awsClient *aws.Client, region string, tags map[string]string) (string, string, error) {
+	domainIn, endpointIn := dnsDomain, dnsAPIEndpoint
+	domainSrc, endpointSrc := "--domain", "--endpoint"
+	if domainIn == "" && tags["spawn:dns-domain"] != "" {
+		domainIn, domainSrc = tags["spawn:dns-domain"], "the instance's spawn:dns-domain tag"
 	}
-	return "spore.host"
+	if endpointIn == "" && tags["spawn:dns-endpoint"] != "" {
+		endpointIn, endpointSrc = tags["spawn:dns-endpoint"], "the instance's spawn:dns-endpoint tag"
+	}
+	t := awsClient.ResolveDNSTarget(ctx, region, domainIn, endpointIn)
+	if t.DomainSource == "flag" {
+		t.DomainSource = domainSrc
+	}
+	if t.EndpointSource == "flag" {
+		t.EndpointSource = endpointSrc
+	}
+
+	domain := dns.DefaultDomain
+	if t.Domain != "" {
+		if err := dns.ValidateDomain(t.Domain); err != nil {
+			return "", "", fmt.Errorf("DNS domain from %s: %w", t.DomainSource, err)
+		}
+		domain = t.Domain
+	}
+	endpoint := ""
+	if t.Endpoint != "" {
+		ep, err := dns.ValidateEndpoint(t.Endpoint)
+		if err != nil {
+			return "", "", fmt.Errorf("DNS endpoint from %s: %w", t.EndpointSource, err)
+		}
+		endpoint = ep
+	}
+	return domain, endpoint, nil
 }
 
 func isValidDNSName(name string) bool {
