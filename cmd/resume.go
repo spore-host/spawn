@@ -46,11 +46,20 @@ Examples:
 func init() {
 	resumeCmd.Flags().StringVar(&resumeSweepID, "sweep-id", "", "Sweep ID to resume (required)")
 	_ = resumeCmd.MarkFlagRequired("sweep-id")
-	resumeCmd.Flags().IntVar(&resumeMaxConcurrent, "max-concurrent", 0, "Override max concurrent instances (0 = use original)")
-	resumeCmd.Flags().BoolVar(&resumeMaxConcurrentAuto, "max-concurrent-auto", false, "Re-derive max concurrent instances from the account's real AWS quota headroom for the pending parameter sets' instance type(s)/region, instead of the original or a user-supplied number (spawn#494). Not yet supported with --detach.")
-	resumeCmd.Flags().BoolVar(&resumeDetach, "detach", false, "Run sweep orchestration in Lambda")
+	registerResumeFlags(resumeCmd)
 
 	rootCmd.AddCommand(resumeCmd)
+}
+
+// registerResumeFlags declares the flags runResume reads, on any command that
+// delegates to it. Both the deprecated `spawn resume` and its replacement
+// `spawn sweep resume` call this, so a flag added here reaches both spellings
+// and a user who follows the deprecation notice keeps every option (#935).
+// --sweep-id is not included: `spawn sweep resume` takes it positionally.
+func registerResumeFlags(c *cobra.Command) {
+	c.Flags().IntVar(&resumeMaxConcurrent, "max-concurrent", 0, "Override max concurrent instances (0 = use original)")
+	c.Flags().BoolVar(&resumeMaxConcurrentAuto, "max-concurrent-auto", false, "Re-derive max concurrent instances from the account's real AWS quota headroom for the pending parameter sets' instance type(s)/region, instead of the original or a user-supplied number (spawn#494). Not yet supported with --detach.")
+	c.Flags().BoolVar(&resumeDetach, "detach", false, "Run sweep orchestration in Lambda")
 }
 
 func runResume(cmd *cobra.Command, args []string) error {

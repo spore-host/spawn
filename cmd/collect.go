@@ -51,10 +51,10 @@ The result file should be a JSON object with metrics, e.g.:
 
 Examples:
   # Collect all results to JSON
-  spawn collect-results --sweep-id sweep-123 --output results.json
+  spawn collect-results --sweep-id sweep-123 --output-file results.json
 
   # Collect to CSV format
-  spawn collect-results --sweep-id sweep-123 --output results.csv --format csv
+  spawn collect-results --sweep-id sweep-123 --output-file results.csv --format csv
 
   # Find top 5 runs by accuracy (descending)
   spawn collect-results --sweep-id sweep-123 --metric accuracy --best 5
@@ -69,14 +69,29 @@ func init() {
 	rootCmd.AddCommand(collectCmd)
 
 	collectCmd.Flags().StringVar(&collectSweepID, "sweep-id", "", "Sweep ID to collect results from (required)")
+	registerCollectFlags(collectCmd)
+	// Deprecated alias for --output-file: it shadowed the root -o/--output format
+	// flag, and `spawn sweep collect` (which this command's deprecation points to)
+	// only has --output-file, so the old spelling there silently set the format
+	// instead of the file (#309, #935).
 	collectCmd.Flags().StringVarP(&collectOutputFile, "output", "o", "results.json", "Output file path")
-	collectCmd.Flags().StringVar(&collectFormat, "format", "json", "Output format: json, csv, jsonl")
-	collectCmd.Flags().StringVar(&collectS3Prefix, "s3-prefix", "", "Custom S3 prefix for results (default: auto-detect)")
-	collectCmd.Flags().StringVar(&collectMetric, "metric", "", "Metric to use for ranking results (e.g., accuracy, loss)")
-	collectCmd.Flags().IntVar(&collectBestN, "best", 0, "Show only top N results by metric (0 = all)")
-	collectCmd.Flags().StringSliceVarP(&collectRegions, "regions", "r", nil, "Regions to collect from (comma-separated or repeated; default: all)")
+	_ = collectCmd.Flags().MarkDeprecated("output", "use --output-file instead")
 
 	_ = collectCmd.MarkFlagRequired("sweep-id")
+}
+
+// registerCollectFlags declares the flags runCollectResults reads, on any
+// command that delegates to it: the deprecated `spawn collect-results` and its
+// replacement `spawn sweep collect` both call this, so neither spelling can
+// lose an option (#935). --sweep-id is not included: `spawn sweep collect`
+// takes it positionally.
+func registerCollectFlags(c *cobra.Command) {
+	c.Flags().StringVarP(&collectOutputFile, "output-file", "f", "results.json", "Output file path")
+	c.Flags().StringVar(&collectFormat, "format", "json", "Output format: json, csv, jsonl")
+	c.Flags().StringVar(&collectS3Prefix, "s3-prefix", "", "Custom S3 prefix for results (default: auto-detect)")
+	c.Flags().StringVar(&collectMetric, "metric", "", "Metric to rank results by (e.g. accuracy, loss)")
+	c.Flags().IntVar(&collectBestN, "best", 0, "Show only top N results by metric (0 = all)")
+	c.Flags().StringSliceVarP(&collectRegions, "regions", "r", nil, "Regions to collect from (comma-separated or repeated; default: all)")
 }
 
 // SweepResult represents a single result from a sweep instance

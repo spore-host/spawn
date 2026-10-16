@@ -21,10 +21,10 @@ The result file should be a JSON object with metrics, e.g.:
 
 Examples:
   # Collect all results to JSON
-  spawn collect-results --sweep-id sweep-123 --output results.json
+  spawn collect-results --sweep-id sweep-123 --output-file results.json
 
   # Collect to CSV format
-  spawn collect-results --sweep-id sweep-123 --output results.csv --format csv
+  spawn collect-results --sweep-id sweep-123 --output-file results.csv --format csv
 
   # Find top 5 runs by accuracy (descending)
   spawn collect-results --sweep-id sweep-123 --metric accuracy --best 5
@@ -42,8 +42,8 @@ spawn collect-results [flags]
 |------|-------|------|---------|-------------|
 | `--best` |  | int |  | Show only top N results by metric (0 = all) |
 | `--format` |  | string | `json` | Output format: json, csv, jsonl |
-| `--metric` |  | string |  | Metric to use for ranking results (e.g., accuracy, loss) |
-| `--output` | `-o` | string | `results.json` | Output file path |
+| `--metric` |  | string |  | Metric to rank results by (e.g. accuracy, loss) |
+| `--output-file` | `-f` | string | `results.json` | Output file path |
 | `--regions` | `-r` | stringSlice |  | Regions to collect from (comma-separated or repeated; default: all) |
 | `--s3-prefix` |  | string |  | Custom S3 prefix for results (default: auto-detect) |
 | `--sweep-id` |  | string |  | Sweep ID to collect results from (required) |
