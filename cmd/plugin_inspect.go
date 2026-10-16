@@ -173,12 +173,23 @@ func renderCleanup(out io.Writer, spec *plugin.PluginSpec) {
 	if len(spec.Local.Deprovision) == 0 && len(spec.Remote.Stop) == 0 {
 		return
 	}
+	// Say when each half runs, because "removal" and "instance stop" read as
+	// the same thing and are not (#1018): remote.stop runs only when spored
+	// removes the plugin (pluginruntime.Runtime.Remove), local.deprovision on
+	// the controller at remove and at terminate (runLocalDeprovision).
 	fmt.Fprintf(out, "On removal:\n")
 	for i, st := range spec.Remote.Stop {
-		fmt.Fprintf(out, "  [instance stop %d] %s\n", i+1, describeStep(st))
+		fmt.Fprintf(out, "  [instance %d] %s\n", i+1, describeStep(st))
 	}
 	for i, st := range spec.Local.Deprovision {
 		fmt.Fprintf(out, "  [controller %d] %s\n", i+1, describeStep(st))
+	}
+	if len(spec.Remote.Stop) > 0 {
+		fmt.Fprintf(out, "  Instance steps run on `spawn plugin remove` only, not when the instance\n")
+		fmt.Fprintf(out, "  stops, hibernates or terminates.\n")
+	}
+	if len(spec.Local.Deprovision) > 0 {
+		fmt.Fprintf(out, "  Controller steps run on `spawn plugin remove` and `spawn terminate`.\n")
 	}
 	fmt.Fprintln(out)
 }

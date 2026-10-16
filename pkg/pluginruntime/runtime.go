@@ -92,6 +92,7 @@ func (rt *Runtime) InstallWithProvenance(ctx context.Context, spec *plugin.Plugi
 		Outputs:     make(map[string]string),
 		Pushed:      seededPushed,
 		Provenance:  prov,
+		StopSteps:   spec.Remote.Stop,
 		InstalledAt: time.Now(),
 	}
 	if err := rt.store.Save(state); err != nil {
@@ -142,23 +143,59 @@ func (rt *Runtime) InstallWithProvenance(ctx context.Context, spec *plugin.Plugi
 	return nil
 }
 
-// Remove stops a plugin and deletes its persisted state.
+// ErrStopStepsFailed marks a Remove whose remote.stop steps failed. The plugin
+// is removed all the same; the error says what may still be running.
+var ErrStopStepsFailed = errors.New("stop steps failed")
+
+// Remove ends the plugin's health loop, runs its remote.stop steps, and
+// deletes its persisted state. This is `spawn plugin remove` (DELETE
+// /v1/plugins/{name}), the one time remote.stop runs (#1018).
+//
+// A failing stop step does not keep the plugin installed: the user asked for
+// it gone, and a plugin that cannot be removed until its stop step works
+// would leave them nothing to run. The removal completes and the returned
+// error wraps ErrStopStepsFailed, so the caller can say what may still be
+// running.
 func (rt *Runtime) Remove(ctx context.Context, name string) error {
-	if _, err := rt.store.Load(name); err != nil {
+	st, err := rt.store.Load(name)
+	if err != nil {
 		return err
 	}
 
+	// The health check first, so it does not see the service going down and
+	// mark the plugin degraded while it is being removed.
 	rt.stopHealthLoop(name)
 
+	var stopErr error
+	if len(st.StopSteps) > 0 {
+		log.Printf("Plugin %s: stop", name)
+		if err := rt.executor.RunSteps(ctx, st.StopSteps, rt.buildTemplateContext(st)); err != nil {
+			log.Printf("Plugin %s: stop steps failed: %v (removing it anyway)", name, err)
+			stopErr = fmt.Errorf("plugin %s: %w: %v", name, ErrStopStepsFailed, err)
+		}
+	}
+
 	if err := rt.store.Delete(name); err != nil {
+		// Not removed after all, so not ErrStopStepsFailed (which means it was);
+		// a stop failure is already in the log.
 		return fmt.Errorf("delete state: %w", err)
 	}
 
 	log.Printf("Plugin %s: removed", name)
-	return nil
+	return stopErr
 }
 
-// StopAll stops every running plugin. Called during agent Cleanup.
+// StopAll marks every running plugin stopped and ends its health loop. Called
+// during agent Cleanup, before a stop, hibernate or terminate.
+//
+// It does NOT run the plugins' remote.stop steps, and that is deliberate
+// (#1018). Nothing re-runs remote.start when the instance comes back, so a
+// stop step run here would outlast the stop: `tailscale down` keeps the node
+// off the tailnet after a `spawn start` (the Tailscale plugin relies on the
+// node reconnecting on boot), and `globusconnectpersonal -stop` leaves the
+// endpoint down. A stop or terminate shuts the OS down, which stops the
+// services anyway; a hibernate freezes them and resumes them as they were.
+// remote.stop is the undo of an install, run by Remove.
 func (rt *Runtime) StopAll(ctx context.Context) {
 	states, err := rt.store.List()
 	if err != nil {

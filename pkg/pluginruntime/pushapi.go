@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -222,13 +223,18 @@ func (s *PushAPIServer) handleRemove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid plugin name", http.StatusBadRequest)
 		return
 	}
-	if err := s.rt.Remove(r.Context(), name); err != nil {
+	resp := map[string]string{"status": "removed"}
+	if err := s.rt.Remove(r.Context(), name); errors.Is(err, ErrStopStepsFailed) {
+		// Removed, but its stop steps failed: say so, so the CLI can tell the
+		// user what may still be running (#1018).
+		resp["warning"] = err.Error()
+	} else if err != nil {
 		log.Printf("Remove error for plugin %s: %v", name, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "removed"})
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleList serves GET /v1/plugins

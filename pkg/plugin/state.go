@@ -61,6 +61,11 @@ type PluginState struct {
 	// nil for installs from a controller that didn't supply it (older spawn) or a
 	// local-file ref with no remote provenance.
 	Provenance *Provenance `json:"provenance,omitempty"`
+	// StopSteps is the spec's remote.stop, kept from the install so `spawn
+	// plugin remove` can run it: the runtime does not keep the spec, and
+	// without these the service a plugin started outlived its removal (#1018).
+	// Empty for a plugin installed by a spored older than this field.
+	StopSteps []Step `json:"stop_steps,omitempty"`
 }
 
 // StateStore manages plugin state persistence.

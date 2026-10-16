@@ -115,3 +115,54 @@ func TestRunPluginInspect_ResolvesLocalFile(t *testing.T) {
 		t.Errorf("runPluginInspect on local fixture: %v", err)
 	}
 }
+
+// "On removal" must say when each half runs (#1018): remote.stop runs on
+// `spawn plugin remove` only (pluginruntime.Runtime.Remove), never at an
+// instance stop (StopAll, see TestStopAllDoesNotRunTheStopSteps), and
+// local.deprovision runs at remove and at terminate.
+func TestRenderInspect_RemovalSaysWhenStepsRun(t *testing.T) {
+	spec, err := plugin.ParseSpec([]byte(`
+name: demo
+version: v1.0.0
+local:
+  deprovision:
+    - type: run
+      run: delete-endpoint
+remote:
+  start:
+    - type: run
+      run: systemctl start demo
+  stop:
+    - type: run
+      run: systemctl stop demo
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	renderCleanup(&buf, spec)
+	got := buf.String()
+	for _, w := range []string{
+		"[instance 1] run as root: systemctl stop demo",
+		"[controller 1]",
+		"Instance steps run on `spawn plugin remove` only, not when the instance\n  stops, hibernates or terminates.",
+		"Controller steps run on `spawn plugin remove` and `spawn terminate`.",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("removal section missing %q\n--- output ---\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "instance stop") {
+		t.Errorf("removal section still labels remote.stop as an instance stop:\n%s", got)
+	}
+}
+
+func TestRemoveWarning(t *testing.T) {
+	if got := removeWarning([]byte(`{"status":"removed","warning":"plugin x: stop steps failed: exit 3"}`)); got != "plugin x: stop steps failed: exit 3" {
+		t.Errorf("removeWarning = %q", got)
+	}
+	// An older spored sends no warning; neither does a clean remove.
+	if got := removeWarning([]byte(`{"status":"removed"}`)); got != "" {
+		t.Errorf("removeWarning of a clean remove = %q, want empty", got)
+	}
+}
