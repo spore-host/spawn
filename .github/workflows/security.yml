@@ -47,10 +47,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
-          fetch-depth: 0 # full history so leaked-then-removed secrets are caught
+          # Full history so leaked-then-removed secrets are caught. This also
+          # fetches every other branch; the scan below is scoped to HEAD so those
+          # are not scanned (#1024).
+          fetch-depth: 0
       # Run the gitleaks BINARY directly (MIT-licensed, free for orgs). The
       # gitleaks-action wrapper requires a paid license for GitHub organizations,
-      # which we don't use. `detect` scans full history; non-zero exit on leaks.
+      # which we don't use. Non-zero exit on leaks.
       # Verified before it runs (#885). This binary decides whether secrets are
       # present, and it ran as `curl | tar` with nothing checked — half a pin: a
       # pinned version with no pinned hash runs a replaced release asset
@@ -70,8 +73,16 @@ jobs:
           echo "$SHA256  /tmp/$T" | sha256sum -c -
           tar -xzf "/tmp/$T" -C /usr/local/bin gitleaks
           gitleaks version
-      - name: gitleaks detect
-        run: gitleaks detect --source . --redact --verbose --exit-code 1
+      # Scan every commit reachable from HEAD, and only those (#1024). With no
+      # --log-opts gitleaks runs `git log --all`, which with fetch-depth 0 is every
+      # branch in the repo: one open PR's finding (real or false positive) turned
+      # every other PR's Secret Scan red until that branch was force-pushed, and
+      # people learned to re-run the job until it passed. HEAD is the commit under
+      # test: on pull_request the refs/pull/N/merge commit, whose ancestry is main
+      # plus every commit in the PR (so a secret added and then removed inside the
+      # PR is still caught); on push and schedule, main's tip.
+      - name: gitleaks scan (history of HEAD)
+        run: gitleaks git --log-opts="HEAD" --redact --verbose --exit-code 1 .
 
   trivy:
     name: Trivy Security Scan
