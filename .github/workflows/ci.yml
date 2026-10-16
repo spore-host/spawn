@@ -251,11 +251,11 @@ jobs:
       # and fails when the copy has drifted. Re-vendor with the curl command the
       # failure prints.
       - name: spored notification events handled by spore-bot
-        run: go test -run 'TestSporedNotifyEventsHandledBySporeBot' -count=1 -v .
+        run: go test -exec "$RUNNER_TEMP/hermetic-exec" -run 'TestSporedNotifyEventsHandledBySporeBot' -count=1 -v .
       - name: spore-bot event list sync (fetches spore-host main)
         env:
           SPORE_BOT_EVENTS_SYNC: "1"
-        run: go test -run 'TestSporeBotEventsVendoredCopyIsCurrent' -count=1 -v .
+        run: go test -tags=spore_bot_sync -run 'TestSporeBotEventsVendoredCopyIsCurrent' -count=1 -v .
 
       # Nested modules: the root `go test ./...` does NOT descend into a
       # directory with its own go.mod, so their tests would otherwise never run
