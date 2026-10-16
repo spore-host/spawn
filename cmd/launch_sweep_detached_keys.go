@@ -80,6 +80,13 @@ func seedDetachedLaunchKeys(ctx context.Context, client *aws.Client, paramFormat
 		setDefault("ami", baseConfig.AMI)
 		return nil
 	}
+	// A file-level `defaults: ami:` covers every row without its own. Resolving
+	// one per row anyway would override it, since the orchestrator merges a row
+	// over the defaults — the user's AMI would never be launched (#1026, found
+	// when `spawn schedule create` started seeding through here).
+	if stringParam(paramFormat.Defaults, "ami") != "" {
+		return nil
+	}
 
 	// Memoized by (region, arch, gpu) like the foreground path, so a sweep of 50
 	// rows over three families makes three SSM lookups rather than 50.

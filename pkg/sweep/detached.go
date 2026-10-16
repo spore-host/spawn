@@ -178,10 +178,10 @@ func UploadParamsToS3(ctx context.Context, cfg aws.Config, paramFormat *ParamFil
 	s3Client := s3.NewFromConfig(cfg)
 
 	bucket := getS3BucketName(nil, region)
-	key := fmt.Sprintf("sweeps/%s/params.json", sweepID)
+	key := ParamsObjectKey(sweepID)
 
 	// Marshal params to JSON
-	data, err := json.Marshal(paramFormat)
+	data, err := EncodeParams(paramFormat)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal params: %w", err)
 	}
@@ -197,8 +197,7 @@ func UploadParamsToS3(ctx context.Context, cfg aws.Config, paramFormat *ParamFil
 		return "", fmt.Errorf("failed to upload to S3: %w", err)
 	}
 
-	s3Key := fmt.Sprintf("s3://%s/%s", bucket, key)
-	return s3Key, nil
+	return ParamsURI(bucket, key), nil
 }
 
 // CreateSweepRecord creates a new DynamoDB record for the sweep
@@ -245,10 +244,7 @@ func CreateSweepRecord(ctx context.Context, cfg aws.Config, record *SweepRecord)
 func InvokeSweepOrchestrator(ctx context.Context, cfg aws.Config, sweepID string) error {
 	lambdaClient := lambda.NewFromConfig(cfg)
 
-	payload, err := json.Marshal(map[string]interface{}{
-		"sweep_id":       sweepID,
-		"force_download": false,
-	})
+	payload, err := json.Marshal(OrchestratorEvent{SweepID: sweepID})
 	if err != nil {
 		return fmt.Errorf("failed to marshal payload: %w", err)
 	}

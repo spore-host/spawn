@@ -11,7 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `pkg/aws.CheckCostLimitEnforceable`, the check above, so callers can refuse
   before creating resources of their own.
-
 - **`spawn --version`** (spore-host/truffle#189). It was rejected as an unknown
   flag; it now prints the same version, commit and build date as
   `spawn version` (without the network update check, so scripts can probe the
@@ -146,7 +145,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Launch` caller, including those that don't set the target OS: the AMI is
   checked when a cost limit is present. A Windows launch without a cost limit no
   longer records the Linux rate as `spawn:price-per-hour`.
-
 - **`spored status` no longer counts its own run time as compute** (#971). On the
   checkpoint path — always, on Windows, which publishes no compute clock — the
   compute figure included how long the status command itself had been running,
@@ -419,6 +417,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/action-pins.txt`, a table of what every pinned SHA really is,
   regenerated from GitHub by `scripts/refresh-action-pins.sh` (run it, and
   commit the table, whenever a pin changes — including on a Dependabot bump).
+- **Scheduled sweeps can start** (#1026). Every one failed: when a schedule
+  fired, `scheduler-handler` invoked `spawn-sweep-orchestrator` with a sweep ID
+  for which it had written no record, so the orchestrator stopped at
+  `sweep <id> not found`. Behind that, the params it had were the user's YAML in
+  a bucket the orchestrator cannot read, under a bare key the orchestrator would
+  have parsed as bucket `schedules`, and the schedule recorded no account to
+  launch in. The handler now stages the params as JSON, writes the sweep record
+  and then invokes — through the same `pkg/sweep` code `spawn launch
+  --param-file` uses. `spawn schedule create` records the compute account and
+  resolves a per-row AMI (#749) before upload. **Schedules created before this
+  have no target account and are refused when they fire; recreate them.**
+  Requires redeploying `scheduler-handler` and its role
+  (`deployment/cloudformation/scheduler-handler-role.yaml`, which also still
+  named the pre-#812 `sweep-orchestrator`).
+- **A param file's `defaults: ami:` is honoured by detached sweeps** when
+  `--ami` is not passed. A per-row AMI was resolved for every row without one,
+  and the orchestrator merges a row over the defaults, so the file's AMI was
+  never launched (#1026).
 
 ### Security
 

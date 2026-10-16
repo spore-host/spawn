@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -217,13 +218,47 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unusable param-file keys")
 	}
 
+	// The account the sweep's instances launch in. accountID above is the INFRA
+	// account (the schedule lives there), and it was the only account the record
+	// carried, so the orchestrator had no target to assume a role in (#1026).
+	// Same source as `spawn launch --param-file`'s detached path.
+	computeCfg, err := spawnconfig.LoadComputeAWSConfig(ctx, scheduleRegion)
+	if err != nil {
+		return fmt.Errorf("failed to load compute AWS config: %w", err)
+	}
+	computeClient := aws.NewClientFromConfig(computeCfg)
+	computeAccountID, err := computeClient.GetAccountID(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get compute account ID: %w", err)
+	}
+
+	// Seed the launch keys the orchestrator cannot derive — above all a per-row
+	// AMI (#749) — exactly as the detached launch path does before its upload.
+	// What is uploaded is the seeded file, as JSON (which is also YAML).
+	seeded, err := seedScheduleParams(ctx, computeClient, params, scheduleRegion)
+	if err != nil {
+		return fmt.Errorf("scheduled sweep: %w", err)
+	}
+	seededFile, err := os.CreateTemp("", "spawn-schedule-params-*.json")
+	if err != nil {
+		return fmt.Errorf("stage seeded params: %w", err)
+	}
+	defer func() { _ = os.Remove(seededFile.Name()) }()
+	if _, err := seededFile.Write(seeded); err != nil {
+		_ = seededFile.Close()
+		return fmt.Errorf("stage seeded params: %w", err)
+	}
+	if err := seededFile.Close(); err != nil {
+		return fmt.Errorf("stage seeded params: %w", err)
+	}
+
 	// Generate schedule ID
 	scheduleID := scheduler.GenerateScheduleID()
 
 	// Upload parameter file to S3
 	fmt.Fprintf(os.Stderr, "📤 Uploading parameter file...\n")
 	stagingClient := staging.NewClient(cfg, accountID)
-	s3Bucket, s3Key, size, sha256, err := stagingClient.UploadScheduleParams(ctx, paramsFile, scheduleID, scheduleRegion)
+	s3Bucket, s3Key, size, sha256, err := stagingClient.UploadScheduleParams(ctx, seededFile.Name(), scheduleID, scheduleRegion)
 	if err != nil {
 		return fmt.Errorf("failed to upload parameter file: %w", err)
 	}
@@ -273,6 +308,7 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 		MaxConcurrent:      params.getMaxConcurrent(),
 		LaunchDelay:        params.getLaunchDelay(),
 		Region:             scheduleRegion,
+		AWSAccountID:       computeAccountID,
 		Status:             string(scheduler.ScheduleStatusActive),
 		ExecutionCount:     0,
 		MaxExecutions:      scheduleMaxExec,
@@ -535,6 +571,18 @@ type parsedParams struct {
 	// decoding a second time into a generic map for exactly the reason
 	// pkg/params/parser.go does.
 	unknownTopLevelKeys []string
+}
+
+// seedScheduleParams returns the schedule's params with the launch keys the
+// orchestrator needs seeded, encoded as the orchestrator reads them. The
+// scheduler-handler stages these bytes, converted only from YAML to JSON, so
+// whatever is not seeded here is not seeded at all.
+func seedScheduleParams(ctx context.Context, client *aws.Client, p *parsedParams, region string) ([]byte, error) {
+	pf := &ParamFileFormat{Defaults: p.defaults, Params: p.params}
+	if err := seedDetachedLaunchKeys(ctx, client, pf, &aws.LaunchConfig{}, region); err != nil {
+		return nil, err
+	}
+	return json.Marshal(pf)
 }
 
 func parseParamsFile(filename string) (*parsedParams, error) {

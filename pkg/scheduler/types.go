@@ -35,6 +35,13 @@ type ScheduleRecord struct {
 	MaxConcurrent  int    `dynamodbav:"max_concurrent"`
 	LaunchDelay    string `dynamodbav:"launch_delay"`
 	Region         string `dynamodbav:"region"`
+	// AWSAccountID is the compute account the sweep's instances launch in
+	// (#1026). UserID is the account that CREATED the schedule — the infra
+	// account, since `spawn schedule create` runs against it — so the
+	// orchestrator, which assumes SpawnSweepCrossAccountRole in this account,
+	// had nothing to go on. omitempty so older records unmarshal; the
+	// scheduler-handler refuses to start a sweep from one.
+	AWSAccountID string `dynamodbav:"aws_account_id,omitempty"`
 
 	// Execution limits
 	Status         string    `dynamodbav:"status"` // "active" | "paused" | "cancelled"
