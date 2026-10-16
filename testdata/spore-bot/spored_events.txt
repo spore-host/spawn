@@ -21,6 +21,7 @@ idle_warning
 idle_stopped
 idle_hibernated
 idle_stop_failed   # spawn#948 / spawn PR #977 (spore-host#558)
+completion_stop_failed  # spawn#978 / spawn PR #1005 (spore-host#563)
 completion
 spot_interrupt
 pre_stop_start
@@ -29,3 +30,4 @@ pre_stop_timeout
 region_vacated     # spawn#260
 fsx_mount_failed
 fsx_dra_failed     # spawn#194, #622
+spot_replacement_retired   # spawn#995 / spawn PR #1008
