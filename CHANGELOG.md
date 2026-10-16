@@ -457,6 +457,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tailnet after the next `spawn start`. `inspect` now says when each step
   runs. A plugin installed by an older spored has no stop steps on record, so
   removing it runs none, as before.
+- **A Windows launch refuses the flags Windows cannot honour, instead of
+  dropping them** (#1022). `--command`, `--user-data` and `--user-data-file`
+  were accepted for `--os windows` (or a Windows AMI) and silently ignored: the
+  Windows bootstrap runs no workload, so the job never started, `--on-complete`
+  never fired, and the instance billed until its TTL. The same was true of
+  `--plugin`/`--config`, `--session-timeout`, parameter sweeps
+  (`--params`/`--param-file`), `--batch-queue`/`--queue-template`, `--strata-*`,
+  `--mpi` and its options, and storage: `--efs-*`, `--attach-volume` (attached,
+  never mounted) and `--fsx-*` (`--fsx-create` created and billed a Lustre
+  filesystem nothing could mount). Each now fails the launch, and `--dry-run`,
+  with a message naming every such flag and why. Every other launch flag is
+  recorded as honoured on Windows, and a test fails when a new flag is added
+  without that decision.
 
 ### Security
 
