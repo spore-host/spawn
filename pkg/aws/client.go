@@ -475,7 +475,13 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// Resolve the on-demand price via truffle and store it in the
 	// spawn:price-per-hour tag so spored can compute effective cost without
 	// needing to know the instance type at runtime.
-	if err := resolvePricePerHour(ctx, truffleaws.NewClientFromConfig(c.cfg), &launchConfig); err != nil {
+	//
+	// Windows is priced differently (#1058), so it must be known here. TargetOS is
+	// set by the CLI launch path but not by every caller (sweeps, burst, app, other
+	// repos), and "" means Linux. When a cost limit makes the answer matter and
+	// TargetOS does not give it, ask the AMI — one DescribeImages, only then.
+	windows := launchIsWindowsForPricing(ctx, launchConfig, c.IsWindowsAMI)
+	if err := resolvePricePerHour(ctx, truffleaws.NewClientFromConfig(c.cfg), &launchConfig, windows); err != nil {
 		return nil, err
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
@@ -36,8 +37,25 @@ type onDemandPricer interface {
 // refusing to launch. If no cost limit was requested, the failure is
 // non-fatal: PricePerHour stays 0, which spored's cap-check already treats as
 // "rate unknown, no cap enforced" — never a fabricated number.
-func resolvePricePerHour(ctx context.Context, pricer onDemandPricer, cfg *LaunchConfig) error {
+//
+// windows is whether the instance runs Windows. truffle prices Linux only
+// (spore-host/truffle#185), so for Windows its figure omits the licence EC2
+// bills on top — m7i.xlarge in us-east-1 is $0.2016/hr Linux against $0.3856/hr
+// Windows. spored enforces --cost-limit as PricePerHour × compute hours, so a
+// Linux rate made a Windows cap fire after about twice the spend it promised
+// (#1058). A Windows rate cannot be priced honestly yet, so it is treated as
+// unpriceable: refused with a cost limit, left at 0 without one — the same two
+// outcomes as any other pricing failure, and never a figure known to be low.
+func resolvePricePerHour(ctx context.Context, pricer onDemandPricer, cfg *LaunchConfig, windows bool) error {
 	if cfg.PricePerHour != 0 {
+		return nil
+	}
+	if windows {
+		if err := CheckCostLimitEnforceable(*cfg, windows); err != nil {
+			return err
+		}
+		log.Printf("pricing: %s in %s not priced — Windows rates are not available (truffle#185); "+
+			"no spawn:price-per-hour is recorded rather than the lower Linux rate", cfg.InstanceType, cfg.Region)
 		return nil
 	}
 
@@ -66,6 +84,35 @@ func resolvePricePerHour(ctx context.Context, pricer onDemandPricer, cfg *Launch
 		log.Printf("pricing: %s in %s = $%.4f/hr (truffle)", cfg.InstanceType, cfg.Region, price)
 	}
 	return nil
+}
+
+// launchIsWindowsForPricing reports whether a launch must be priced as Windows
+// (#1058). TargetOS answers when set; "" (which callers other than the CLI leave
+// it as) is resolved from the AMI, but only when a cost limit makes the answer
+// matter and no rate was supplied, so an ordinary launch pays no extra
+// DescribeImages. isWindowsAMI is [Client.IsWindowsAMI] in production.
+func launchIsWindowsForPricing(ctx context.Context, cfg LaunchConfig, isWindowsAMI func(ctx context.Context, region, ami string) bool) bool {
+	if strings.EqualFold(strings.TrimSpace(cfg.TargetOS), "windows") {
+		return true
+	}
+	if cfg.TargetOS != "" || cfg.CostLimit <= 0 || cfg.PricePerHour != 0 {
+		return false
+	}
+	return isWindowsAMI(ctx, cfg.Region, cfg.AMI)
+}
+
+// CheckCostLimitEnforceable refuses a --cost-limit that spored could not enforce
+// honestly: one on a Windows instance with no caller-supplied PricePerHour, since
+// the only rate available is the Linux one, below what Windows bills (#1058).
+// Launch applies it; the CLI also calls it in preflight, so the refusal comes
+// before any resource is created rather than at RunInstances.
+func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error {
+	if !windows || cfg.CostLimit <= 0 || cfg.PricePerHour != 0 {
+		return nil
+	}
+	return fmt.Errorf("--cost-limit %.2f cannot be enforced on a Windows instance: on-demand pricing "+
+		"covers Linux only (spore-host/truffle#185), and enforcing the cap against the Linux rate would let "+
+		"%s spend well past it. Bound the instance with --ttl instead", cfg.CostLimit, cfg.InstanceType)
 }
 
 // DisplayPrice is an on-demand rate quoted to a human (an estimate, a dry-run
