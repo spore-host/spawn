@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`TestStatusScreen_UsesOneTimeFormat` no longer fails for part of every day.**
+  Contributor-facing: when a deadline fell after UTC midnight but before local
+  midnight, the status screen correctly showed the UTC date too ("(2026-10-17
+  00:20 UTC)"), and the test double-counted that date as a bare timestamp. It
+  now checks that no timestamp appears outside the local (UTC) form.
+
 - **Plugins on a Windows instance are refused up front** (#1001). Plugins are
   Linux-only (their steps are shell scripts, and every registry plugin requires
   Linux), but `spawn plugin install` on a Windows spore ran local provision

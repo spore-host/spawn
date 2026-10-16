@@ -146,8 +146,17 @@ func TestStatusScreen_UsesOneTimeFormat(t *testing.T) {
 
 	stamp := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}`)
 	full := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2} MST \((\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} UTC\)`)
-	if n, m := len(stamp.FindAllString(screen, -1)), len(full.FindAllString(screen, -1)); n == 0 || n != m {
-		t.Errorf("%d timestamps on screen but only %d in the local (UTC) format:\n%s", n, m, screen)
+	// Every timestamp must sit inside a full local (UTC) match. Strip the full
+	// matches and require that no bare timestamp is left, rather than comparing
+	// counts: when the UTC date differs from the local one the full form carries
+	// a second date ("(2026-10-17 00:20 UTC)"), which a count of stamps would
+	// double-count — so the test failed for the hours of every day when the
+	// deadline crossed UTC midnight before local midnight.
+	if len(full.FindAllString(screen, -1)) == 0 {
+		t.Fatalf("no timestamp in the local (UTC) format on screen:\n%s", screen)
+	}
+	if left := stamp.FindAllString(full.ReplaceAllString(screen, ""), -1); len(left) > 0 {
+		t.Errorf("timestamps outside the local (UTC) format: %q\n%s", left, screen)
 	}
 	if want := formatStatusTime(deadline, statusLocation()); strings.Count(screen, want) < 4 {
 		t.Errorf("the deadline does not read %q on every line that shows it:\n%s", want, screen)
