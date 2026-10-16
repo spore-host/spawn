@@ -28,8 +28,8 @@ var hostIsWindows = runtime.GOOS == "windows"
 //     into an allowed shape);
 //   - a path at or under a system directory (forbiddenReadRoots), compared
 //     case-insensitively, both as written and after resolving symlinks and
-//     junctions in the longest existing prefix (filepath.EvalSymlinks), so a
-//     link pointing into /etc or C:\Windows is caught;
+//     junctions in the longest existing prefix (resolveExisting), so a link
+//     pointing into /etc or C:\Windows is caught;
 //   - on Windows, shapes that bypass or confuse that comparison: UNC paths and
 //     the \\?\, \\.\ and \??\ prefixes, alternate data streams ("file:stream"),
 //     reserved device names (CON, NUL, COM1, ...), and elements ending in a dot
@@ -64,7 +64,11 @@ func ValidatePathForReading(p string) error {
 	if underAnyRoot(abs, roots, hostIsWindows) {
 		return errors.New("access to system paths not allowed")
 	}
-	if resolved := resolveExisting(abs); resolved != abs {
+	resolved, err := resolveExisting(abs)
+	if err != nil {
+		return errors.New("cannot validate path: " + err.Error())
+	}
+	if resolved != abs {
 		if hostIsWindows {
 			// A junction or mount point can resolve to a device or UNC form
 			// the prefix comparison would not recognise.
@@ -79,30 +83,12 @@ func ValidatePathForReading(p string) error {
 	return nil
 }
 
-// resolveExisting resolves symlinks and junctions in the longest prefix of the
-// absolute path abs that exists, and re-appends the rest. A path that does not
-// exist yet (or is a glob pattern) is still caught when a directory it sits
-// under links into a system directory.
-func resolveExisting(abs string) string {
-	cur, rest := abs, ""
-	for {
-		if r, err := filepath.EvalSymlinks(cur); err == nil {
-			if rest == "" {
-				return r
-			}
-			return filepath.Join(r, rest)
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return abs
-		}
-		if rest == "" {
-			rest = filepath.Base(cur)
-		} else {
-			rest = filepath.Join(filepath.Base(cur), rest)
-		}
-		cur = parent
+// joinRest prepends elem to the unresolved tail rest.
+func joinRest(elem, rest string) string {
+	if rest == "" {
+		return elem
 	}
+	return filepath.Join(elem, rest)
 }
 
 // isSep reports whether c separates path elements under the given rules.

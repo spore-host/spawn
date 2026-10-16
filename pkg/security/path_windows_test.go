@@ -119,3 +119,89 @@ func TestValidatePathForReading_WindowsShortName(t *testing.T) {
 		t.Errorf("ValidatePathForReading(%q) = nil; it is the short name of %s", p, sr)
 	}
 }
+
+// Directory and file symlinks into the Windows directory. Creating a symlink
+// needs SeCreateSymbolicLinkPrivilege or Developer Mode; CI's runner has it,
+// elsewhere the test skips.
+func TestValidatePathForReading_WindowsSymlink(t *testing.T) {
+	sr := systemRoot(t)
+	dir := t.TempDir()
+	dlink := filepath.Join(dir, "dirlink")
+	if err := os.Symlink(sr, dlink); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	flink := filepath.Join(dir, "filelink.txt")
+	if err := os.Symlink(filepath.Join(sr, "win.ini"), flink); err != nil {
+		t.Fatalf("file symlink: %v", err)
+	}
+	// A link to a link: the junction resolution must follow the whole chain.
+	chain := filepath.Join(dir, "chain")
+	if err := os.Symlink(dlink, chain); err != nil {
+		t.Fatalf("chained symlink: %v", err)
+	}
+	// A dangling link cannot be resolved, so it is refused rather than
+	// checked as the link's own name.
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(sr, "no-such-file-1000"), dangling); err != nil {
+		t.Fatalf("dangling symlink: %v", err)
+	}
+	for _, p := range []string{
+		dlink, filepath.Join(dlink, "win.ini"), filepath.Join(dlink, "System32", "config", "SAM"),
+		filepath.Join(dlink, "nope", "*.log"), flink, chain, filepath.Join(chain, "win.ini"), dangling,
+	} {
+		if err := ValidatePathForReading(p); err == nil {
+			t.Errorf("ValidatePathForReading(%q) = nil; it leads into %q", p, sr)
+		}
+	}
+	// A link that stays outside the system directories is fine.
+	ok := filepath.Join(dir, "ok")
+	if err := os.Mkdir(filepath.Join(dir, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "real"), ok); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{ok, filepath.Join(ok, "out.txt"), filepath.Join(ok, "*.log")} {
+		if err := ValidatePathForReading(p); err != nil {
+			t.Errorf("ValidatePathForReading(%q) = %v; it leads to the temp dir", p, err)
+		}
+	}
+}
+
+// A junction to an ordinary directory is allowed; resolution must not turn
+// every real path into a refusal.
+func TestValidatePathForReading_WindowsJunctionAllowed(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	j := filepath.Join(dir, "j")
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", j, target).CombinedOutput(); err != nil { //nolint:gosec // fixed command; both paths are this test's temp dir
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	for _, p := range []string{j, filepath.Join(j, "out.txt"), filepath.Join(j, "sub", "*.log")} {
+		if err := ValidatePathForReading(p); err != nil {
+			t.Errorf("ValidatePathForReading(%q) = %v; %q is a junction to a temp dir", p, err, j)
+		}
+	}
+}
+
+func TestNormaliseFinalPath(t *testing.T) {
+	for in, want := range map[string]string{
+		`\\?\C:\Windows\win.ini`:        `C:\Windows\win.ini`,
+		`\\?\c:\x`:                      `c:\x`,
+		`\\?\UNC\server\share\f.txt`:    `\\server\share\f.txt`,
+		`\\?\Volume{0000-1111}\Windows`: `\\?\Volume{0000-1111}\Windows`,
+		`C:\already\plain`:              `C:\already\plain`,
+	} {
+		if got := normaliseFinalPath(in); got != want {
+			t.Errorf("normaliseFinalPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// The forms left alone must still be refused by the shape check.
+	if windowsPathShapeError(`\\?\Volume{0000-1111}\Windows`) == nil {
+		t.Error("a volume-GUID final path passed the shape check")
+	}
+}
