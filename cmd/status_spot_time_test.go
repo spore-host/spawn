@@ -146,8 +146,16 @@ func TestStatusScreen_UsesOneTimeFormat(t *testing.T) {
 
 	stamp := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}`)
 	full := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2} MST \((\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} UTC\)`)
-	if n, m := len(stamp.FindAllString(screen, -1)), len(full.FindAllString(screen, -1)); n == 0 || n != m {
-		t.Errorf("%d timestamps on screen but only %d in the local (UTC) format:\n%s", n, m, screen)
+	// Strip every correctly formatted stamp and require nothing date-like left.
+	// Counting raw stamps against formatted ones failed whenever the local and
+	// UTC dates differ — 17:00-24:00 MST every day — because a formatted stamp
+	// then carries the UTC DATE in its parenthesis, which the raw count sees
+	// as a second timestamp.
+	if m := len(full.FindAllString(screen, -1)); m == 0 {
+		t.Fatalf("no timestamp on screen in the local (UTC) format:\n%s", screen)
+	}
+	if left := stamp.FindAllString(full.ReplaceAllString(screen, ""), -1); len(left) > 0 {
+		t.Errorf("%d timestamp(s) on screen not in the local (UTC) format: %v\n%s", len(left), left, screen)
 	}
 	if want := formatStatusTime(deadline, statusLocation()); strings.Count(screen, want) < 4 {
 		t.Errorf("the deadline does not read %q on every line that shows it:\n%s", want, screen)

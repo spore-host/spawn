@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `TestStatusScreen_UsesOneTimeFormat` no longer fails for seven hours a day
+  (00:00–07:00 UTC). It counted the UTC date inside a correctly formatted
+  `… MST (2026-10-17 00:35 UTC)` stamp as a second, unformatted timestamp,
+  so it failed whenever the MST and UTC dates differ. It now strips the
+  formatted stamps and requires that none is left. Reintroducing an
+  un-localized timestamp still fails it.
+
 ## [0.129.0] - 2026-10-16
 
 ### Added
