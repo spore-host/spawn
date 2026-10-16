@@ -359,6 +359,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command's, so for `spawn app list`/`launch` those flags never reached the
   config layer and the profile/region came from the environment or config file
   instead. Every ancestor's hook now runs.
+- **Per-region S3 buckets are reached in their own region** (#1015). Three
+  commands signed requests for one region against a bucket in another, which
+  real S3 answers with a redirect:
+  - `spawn schedule create --region <r>` worked `spawn-schedules-<r>` with a
+    us-east-1 client, so bucket creation or the parameter upload failed for any
+    region but us-east-1.
+  - `spawn collect-results` / `spawn sweep collect` read
+    `spawn-results-<account>-<r>` with a us-east-1 client, logged a warning,
+    and reported "No results found".
+  - `spawn validate --infrastructure --region <r>` reported the binaries and
+    schedules buckets as inaccessible.
 
 ### Security
 
