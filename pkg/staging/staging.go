@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	tm "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/spore-host/spawn/pkg/s3transfer"
 )
 
 // StagingMetadata represents metadata about staged data
@@ -164,8 +165,7 @@ func (c *Client) UploadScheduleParams(ctx context.Context, localPath, scheduleID
 	}
 
 	// Upload to S3
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	_, err = manager.NewUploader(c.s3For(region)).Upload(ctx, &s3.PutObjectInput{
+	_, err = s3transfer.New(c.s3For(region)).UploadObject(ctx, &tm.UploadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(s3Key),
 		Body:   file,

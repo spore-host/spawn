@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	tm "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -17,6 +17,7 @@ import (
 	ibtypes "github.com/aws/aws-sdk-go-v2/service/imagebuilder/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/spawn/pkg/s3transfer"
 )
 
 // imageBuilderServiceName is the AWS service principal used to create the
@@ -280,13 +281,11 @@ func (c *Client) UploadISOToS3(ctx context.Context, region, bucket, key, localPa
 		}
 	}
 
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	uploader := manager.NewUploader(s3Client, func(u *manager.Uploader) {
-		u.PartSize = 64 * 1024 * 1024 // 64 MiB parts
-		u.Concurrency = 4
-	})
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	if _, err := uploader.Upload(ctx, &s3.PutObjectInput{
+	uploader := s3transfer.New(s3Client,
+		s3transfer.WithPartSize(64*1024*1024), // 64 MiB parts
+		s3transfer.WithConcurrency(4),
+	)
+	if _, err := uploader.UploadObject(ctx, &tm.UploadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 		Body:   f,

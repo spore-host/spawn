@@ -13,20 +13,20 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	tm "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spore-host/spawn/pkg/queue"
+	"github.com/spore-host/spawn/pkg/s3transfer"
 	"github.com/spore-host/spawn/pkg/security"
 )
 
 // QueueRunner executes a batch job queue sequentially
 type QueueRunner struct {
-	config    *queue.QueueConfig
-	state     *QueueState
-	stateFile string
-	s3Client  *s3.Client
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	s3Uploader *manager.Uploader
+	config     *queue.QueueConfig
+	state      *QueueState
+	stateFile  string
+	s3Client   *s3.Client
+	s3Uploader *tm.Client
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 }
@@ -103,12 +103,11 @@ func NewQueueRunnerWithAWSConfig(ctx context.Context, queueFile, stateFile strin
 	runnerCtx, cancel := context.WithCancel(ctx)
 
 	return &QueueRunner{
-		config:    cfg,
-		state:     state,
-		stateFile: stateFile,
-		s3Client:  s3Client,
-		//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-		s3Uploader: manager.NewUploader(s3Client),
+		config:     cfg,
+		state:      state,
+		stateFile:  stateFile,
+		s3Client:   s3Client,
+		s3Uploader: s3transfer.New(s3Client),
 		ctx:        runnerCtx,
 		cancelFunc: cancel,
 	}, nil
@@ -397,8 +396,7 @@ func (r *QueueRunner) uploadFile(localPath, bucket, key string) error {
 	}
 	defer func() { _ = file.Close() }()
 
-	//lint:ignore SA1019 feature/s3/manager -> transfermanager is not a drop-in swap; migration tracked in #932
-	_, err = r.s3Uploader.Upload(r.ctx, &s3.PutObjectInput{
+	_, err = r.s3Uploader.UploadObject(r.ctx, &tm.UploadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 		Body:   file,
