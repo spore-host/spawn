@@ -373,6 +373,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, hibernate || config.HibernateOnIdle); err != nil {
 			return err
 		}
+		// The same refusal a real launch gives (#1058); an estimate must not report
+		// "complete" for a launch that will be rejected.
+		if err := aws.CheckCostLimitEnforceable(*config, isWindowsTarget(estimateTargetOS(ctx, awsClient, config))); err != nil {
+			return err
+		}
 		// Priced by truffle, the suite's pricing authority (#533) — never by
 		// libs/pricing's static per-family-size guess table, which is wrong by up
 		// to 38x for a type or size the table doesn't know (#543). A quote that
@@ -1286,6 +1291,11 @@ func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *a
 	// Reject burstable types for Windows (catches auto-detected Windows where the
 	// early --os default didn't apply); spend nothing on a launch that'd crawl (#95).
 	if err := guardWindowsInstanceType(config.TargetOS, config.InstanceType); err != nil {
+		return err
+	}
+	// A --cost-limit spored would enforce at the Linux rate (#1058). Launch refuses
+	// it too, but only after IAM, security group, key and any FSx are created.
+	if err := aws.CheckCostLimitEnforceable(*config, isWindowsTarget(config.TargetOS)); err != nil {
 		return err
 	}
 

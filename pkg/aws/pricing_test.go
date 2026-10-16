@@ -28,7 +28,7 @@ func TestResolvePricePerHour_Success(t *testing.T) {
 	cfg := &LaunchConfig{InstanceType: "g6e.xlarge", Region: "us-east-1"}
 	pricer := fakePricer{price: 1.861, source: truffleaws.PriceSourceLive}
 
-	if err := resolvePricePerHour(context.Background(), pricer, cfg); err != nil {
+	if err := resolvePricePerHour(context.Background(), pricer, cfg, false); err != nil {
 		t.Fatalf("resolvePricePerHour: unexpected error: %v", err)
 	}
 	if cfg.PricePerHour != 1.861 {
@@ -43,7 +43,7 @@ func TestResolvePricePerHour_StaticSourceStillSucceeds(t *testing.T) {
 	cfg := &LaunchConfig{InstanceType: "m5.large", Region: "us-east-1"}
 	pricer := fakePricer{price: 0.096, source: truffleaws.PriceSourceStatic}
 
-	if err := resolvePricePerHour(context.Background(), pricer, cfg); err != nil {
+	if err := resolvePricePerHour(context.Background(), pricer, cfg, false); err != nil {
 		t.Fatalf("resolvePricePerHour: unexpected error: %v", err)
 	}
 	if cfg.PricePerHour != 0.096 {
@@ -60,7 +60,7 @@ func TestResolvePricePerHour_FailureWithCostLimit(t *testing.T) {
 	cfg := &LaunchConfig{InstanceType: "p5.48xlarge", Region: "us-east-1", CostLimit: 8}
 	pricer := fakePricer{err: errors.New("no on-demand price found")}
 
-	err := resolvePricePerHour(context.Background(), pricer, cfg)
+	err := resolvePricePerHour(context.Background(), pricer, cfg, false)
 	if err == nil {
 		t.Fatal("resolvePricePerHour: expected an error when pricing fails with a cost limit requested, got nil")
 	}
@@ -82,7 +82,7 @@ func TestResolvePricePerHour_FailureWithoutCostLimit(t *testing.T) {
 	cfg := &LaunchConfig{InstanceType: "p5.48xlarge", Region: "us-east-1"}
 	pricer := fakePricer{err: errors.New("no on-demand price found")}
 
-	if err := resolvePricePerHour(context.Background(), pricer, cfg); err != nil {
+	if err := resolvePricePerHour(context.Background(), pricer, cfg, false); err != nil {
 		t.Fatalf("resolvePricePerHour: expected no error without a cost limit, got: %v", err)
 	}
 	if cfg.PricePerHour != 0 {
@@ -98,7 +98,7 @@ func TestResolvePricePerHour_ZeroPriceNoErrorTreatedAsFailure(t *testing.T) {
 	cfg := &LaunchConfig{InstanceType: "weird.type", Region: "us-east-1", CostLimit: 5}
 	pricer := fakePricer{price: 0, source: truffleaws.PriceSourceUnknown, err: nil}
 
-	if err := resolvePricePerHour(context.Background(), pricer, cfg); err == nil {
+	if err := resolvePricePerHour(context.Background(), pricer, cfg, false); err == nil {
 		t.Fatal("resolvePricePerHour: expected an error for a zero price with a cost limit requested, got nil")
 	}
 }
@@ -110,7 +110,7 @@ func TestResolvePricePerHour_ExplicitPriceIsNoOp(t *testing.T) {
 	cfg := &LaunchConfig{InstanceType: "m5.large", Region: "us-east-1", PricePerHour: 3.14}
 	pricer := fakePricer{price: 0.096, source: truffleaws.PriceSourceLive}
 
-	if err := resolvePricePerHour(context.Background(), pricer, cfg); err != nil {
+	if err := resolvePricePerHour(context.Background(), pricer, cfg, false); err != nil {
 		t.Fatalf("resolvePricePerHour: unexpected error: %v", err)
 	}
 	if cfg.PricePerHour != 3.14 {

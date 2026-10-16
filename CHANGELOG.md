@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `pkg/aws.CheckCostLimitEnforceable`, the check above, so callers can refuse
+  before creating resources of their own.
+
 - **`spawn --version`** (spore-host/truffle#189). It was rejected as an unknown
   flag; it now prints the same version, commit and build date as
   `spawn version` (without the network update check, so scripts can probe the
@@ -109,6 +112,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queue tests were `t.Skip` placeholders.
 
 ### Fixed
+
+- **A `--cost-limit` on a Windows instance is refused instead of enforced at
+  the Linux rate** (#1058). spored enforces the cap as the recorded hourly rate
+  × compute time, and the only rate available is Linux's. Windows bills its
+  licence on top: m7i.xlarge in us-east-1 is $0.2016/hr Linux against
+  $0.3856/hr Windows, so a `--cost-limit 10` Windows instance could spend about
+  $19 before the cap fired. Windows can't be priced until
+  spore-host/truffle#185, so the launch now refuses with an error that points
+  to `--ttl`. The refusal happens in preflight, before any resource is created,
+  and `--dry-run` and `--estimate-only` report it too. This covers every
+  `Launch` caller, including those that don't set the target OS: the AMI is
+  checked when a cost limit is present. A Windows launch without a cost limit no
+  longer records the Linux rate as `spawn:price-per-hour`.
 
 - **`spored status` no longer counts its own run time as compute** (#971). On the
   checkpoint path — always, on Windows, which publishes no compute clock — the

@@ -189,3 +189,82 @@ func TestEstimateTargetOSHonoursOSFlag(t *testing.T) {
 		t.Errorf("estimateTargetOS with no --os and AMI auto = %q, want linux", got)
 	}
 }
+
+// #1058: a Windows --cost-limit would be enforced at the Linux rate. Launch
+// refuses it, but only after IAM, security group, key and FSx exist, so the CLI
+// must refuse it in preflight — and the preview must report the same refusal.
+func TestWindowsCostLimitIsRefusedInPreflight(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	seedAL2023AMIParams(t, env)
+	client := spawnaws.NewClientFromConfig(env.AWSConfig)
+	stubDryRunPrice(t, 0.2016)
+
+	prevOS := osFlag
+	t.Cleanup(func() { osFlag = prevOS })
+
+	osFlag = "windows"
+	cfg := &spawnaws.LaunchConfig{InstanceType: "m7i.xlarge", Region: "us-east-1", AMI: "ami-0abc123",
+		TTL: "1h", CostLimit: 10, SecurityGroupIDs: []string{"sg-0123456789abcdef0"}}
+	var out bytes.Buffer
+	err := runLaunchDryRun(context.Background(), &out, client, cfg)
+	if err == nil {
+		t.Fatalf("a Windows --cost-limit passed preflight; spored would enforce it at the Linux rate:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "cost-limit") || !strings.Contains(err.Error(), "--ttl") {
+		t.Errorf("refusal is not actionable: %v", err)
+	}
+
+	osFlag = "linux"
+	cfg = &spawnaws.LaunchConfig{InstanceType: "m7i.large", Region: "us-east-1", AMI: "ami-0abc123", TTL: "1h", CostLimit: 10}
+	if err := runLaunchDryRun(context.Background(), &bytes.Buffer{}, client, cfg); err != nil {
+		t.Fatalf("a Linux --cost-limit was refused: %v", err)
+	}
+}
+
+// --estimate-only resolves no AMI and skips ensureAMIAndPreflight, so it needs
+// the check itself, inside its own block, with the OS it can actually resolve.
+func TestEstimateOnlyRefusesAWindowsCostLimit(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "launch_single.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found, blocks int
+	ast.Inspect(f, func(n ast.Node) bool {
+		ifs, ok := n.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		if id, ok := ifs.Cond.(*ast.Ident); !ok || id.Name != "estimateOnly" {
+			return true
+		}
+		blocks++
+		ast.Inspect(ifs.Body, func(m ast.Node) bool {
+			c, ok := m.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := c.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "CheckCostLimitEnforceable" || len(c.Args) != 2 {
+				return true
+			}
+			if w, ok := c.Args[1].(*ast.CallExpr); ok {
+				if id, ok := w.Fun.(*ast.Ident); ok && id.Name == "isWindowsTarget" && len(w.Args) == 1 {
+					if inner, ok := w.Args[0].(*ast.CallExpr); ok {
+						if iid, ok := inner.Fun.(*ast.Ident); ok && iid.Name == "estimateTargetOS" {
+							found++
+						}
+					}
+				}
+			}
+			return true
+		})
+		return true
+	})
+	if blocks == 0 {
+		t.Fatal("no `if estimateOnly {` block in launch_single.go; the gate is reading the wrong code")
+	}
+	if found == 0 {
+		t.Error("the --estimate-only block does not call aws.CheckCostLimitEnforceable(config, isWindowsTarget(estimateTargetOS(...)))")
+	}
+}
