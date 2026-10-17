@@ -98,7 +98,10 @@ const (
 	// launched a replacement instance (its original was terminated outside
 	// spawn) that the reaper could not terminate. The request has been
 	// cancelled, so nothing more launches, but the instance bills until a human
-	// ends it. It is logged every run until then.
+	// ends it. It is logged every run until then, with the account, the check
+	// and the command (strandedReplacementMessage). A human because #984 found
+	// no IAM condition that would let the reaper end it without also letting it
+	// end instances spawn does not own.
 	sentinelSpotReplacementStranded = "SPOT REPLACEMENT NOT TERMINATED"
 )
 

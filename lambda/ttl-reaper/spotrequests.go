@@ -160,11 +160,13 @@ func (r *reaper) evaluateSpotRequest(req ec2types.SpotInstanceRequest, inst *ec2
 // order, or the terminate would reopen the request.
 //
 // Terminating an untagged replacement is outside the tag-scoped
-// ec2:TerminateInstances grant, so it is expected to be refused. The sweep
-// still cancels the request (which is spawn-tagged and therefore granted), so
-// nothing further launches. It reports the replacement under
-// sentinelSpotReplacementStranded with the command to end it, every run until
-// someone does.
+// ec2:TerminateInstances grant, so it is expected to be refused, and #984
+// found no IAM condition that could safely widen it (see
+// strandedReplacementMessage). The sweep still cancels the request (which is
+// spawn-tagged and therefore granted), so nothing further launches. It reports
+// the replacement under sentinelSpotReplacementStranded with the commands to
+// confirm and end it, every run until someone does, and posts it to
+// REAPER_NOTIFY_URL once, on the run that found it.
 func (r *reaper) reapSpotRequestsRegion(ctx context.Context, acct account, region string, now time.Time, sum *Summary, outcome *accountOutcome) {
 	if acct.spotFor == nil || r.spotRequests == spotRequestsOff {
 		return
@@ -254,12 +256,15 @@ func (r *reaper) reapSpotRequestsRegion(ctx context.Context, acct account, regio
 					sum.Errors++
 				}
 				sum.SpotReplacementsStranded++
-				log.Printf("%s: %s/%s instance %s was launched by spawn's persistent spot request %s after its "+
-					"original instance was terminated outside spawn. The request is cancelled so nothing further "+
-					"launches, but the reaper could not terminate the instance (%v). It is untagged, so it is invisible "+
-					"to spawn list and to the reaper's tag-scoped grant, and it bills until someone runs: "+
-					"aws ec2 terminate-instances --region %s --instance-ids %s",
-					sentinelSpotReplacementStranded, acct.label, region, d.terminate, reqID, err, region, d.terminate)
+				msg := strandedReplacementMessage(acct, region, req, inst, d.terminate, err)
+				log.Print(msg)
+				// Notify once, on the run that cancelled the request, which is
+				// the run that discovered the replacement. Later runs repeat the
+				// log line, and the alarm counts those; a webhook post every ten
+				// minutes would only teach people to mute it.
+				if d.cancel {
+					r.notifyText(msg)
+				}
 				continue
 			}
 			log.Printf("TERMINATED spot replacement %s of request %s in %s/%s", d.terminate, reqID, acct.label, region)
@@ -267,6 +272,65 @@ func (r *reaper) reapSpotRequestsRegion(ctx context.Context, acct account, regio
 		}
 		r.notifySpot(reqID, d, acct.label, region, false)
 	}
+}
+
+// strandedReplacementMessage is the SPOT REPLACEMENT NOT TERMINATED line: what
+// the alarm points a person at, so it carries everything needed to act without
+// opening the reaper's source. That is the account to get credentials for, the
+// check that the instance really is the request's, and the command that ends it.
+//
+// Why a person, and not the reaper (#984). The replacement is untagged, and the
+// reaper's ec2:TerminateInstances and ec2:CreateTags are both conditioned on
+// spawn:managed=true, so it can neither terminate the instance nor adopt it by
+// tagging. Nothing in IAM can narrow a wider grant to "instances launched by a
+// spawn-tagged Spot request". The instance resource's condition keys include
+// nothing about its Spot request, and aws:ResourceTag on an instance action is
+// the instance's tags, never the request's. A grant that does not need the tag
+// would let the reaper terminate instances spawn does not own.
+func strandedReplacementMessage(acct account, region string, req ec2types.SpotInstanceRequest, inst *ec2types.Instance, instID string, err error) string {
+	reqID := aws.ToString(req.SpotInstanceRequestId)
+	accountID := acct.accountID
+	if accountID == "" {
+		accountID = acct.label
+	}
+
+	what := instID
+	if inst != nil {
+		var parts []string
+		if inst.InstanceType != "" {
+			parts = append(parts, string(inst.InstanceType))
+		}
+		if inst.State != nil {
+			parts = append(parts, string(inst.State.Name))
+		}
+		if inst.LaunchTime != nil {
+			parts = append(parts, "launched "+inst.LaunchTime.UTC().Format(time.RFC3339))
+		}
+		if len(parts) > 0 {
+			what += " (" + strings.Join(parts, ", ") + ")"
+		}
+	}
+	original := "its original instance"
+	if o := tagMap(req.Tags)[tagprefix.Tag("original-instance-id")]; o != "" && o != instID {
+		original = "its original instance " + o
+	}
+
+	why := "Its ec2:TerminateInstances grant is scoped to spawn:managed=true, and a replacement " +
+		"carries no tags; IAM has no condition key that ties an instance to its Spot request, so " +
+		"the grant cannot be widened safely (#984)."
+	if classifyScanError(err) != failureDenied {
+		why = "This was not an authorization refusal, so the reaper retries next run."
+	}
+
+	return fmt.Sprintf("%s: account %s region %s: instance %s was launched by spawn's persistent spot request %s "+
+		"after %s was terminated outside spawn. The request is cancelled, so nothing further launches. The reaper "+
+		"could not terminate the instance (%v). %s It is untagged, so spawn list does not show it, and it bills until "+
+		"it is terminated. With credentials for account %s, first check it is the request's instance: "+
+		"aws ec2 describe-instances --region %s --instance-ids %s --query 'Reservations[].Instances[].SpotInstanceRequestId' "+
+		"--output text (it must print %s); then end it: aws ec2 terminate-instances --region %s --instance-ids %s. "+
+		"This line repeats every run until the instance is gone.",
+		sentinelSpotReplacementStranded, accountID, region, what, reqID, original, err, why,
+		accountID, region, instID, reqID, region, instID)
 }
 
 // describeInstancesByID returns the requests' current instances, keyed by ID.
@@ -312,6 +376,11 @@ func (r *reaper) notifySpot(reqID string, d spotDecision, account, region string
 	if d.terminate != "" {
 		text += fmt.Sprintf(", and terminate replacement `%s`", d.terminate)
 	}
+	r.notifyText(text)
+}
+
+// notifyText posts text to REAPER_NOTIFY_URL, if one is set.
+func (r *reaper) notifyText(text string) {
 	if r.notifyURL == "" {
 		return
 	}
