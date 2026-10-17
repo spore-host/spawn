@@ -450,6 +450,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The policy now names the account literally, resolved at write time. A test
   runs every writer and checks what reached IAM, and a document still carrying
   the variable is refused before it is sent.
+- **An open SSH session, or a detached tmux or screen session, no longer keeps
+  `--idle-timeout` from ever firing on Linux** (#953). spored counted any
+  terminal that existed, and any login still open, as activity, however long
+  nobody had typed in it. Leaving a session open, or a job's tmux session
+  behind after the job finished, therefore kept the instance running until its
+  TTL. A terminal now counts only while someone is typing in it: spored reads
+  each terminal's last-input time, as `w` does, and a session with no input
+  for 5 minutes no longer blocks idle-stop. The same applies to `docker exec -t`
+  and SSM Session Manager shells. Output from a job does not count as input.
+  This also stops spored relying on the column layout of `w`, which differs
+  between distributions.
 
 ## [0.130.0] - 2026-10-16
 

@@ -20,8 +20,6 @@ func sysReadDiskIOBytes() int64                       { return -1 }
 func sysIsProcessRunning(string) bool                 { return false }
 func sysCountActiveSessions() int                     { return 0 }
 func sysCountActivePortConnections([]int) int         { return 0 }
-func sysHasActiveTerminals() bool                     { return false }
-func sysHasRecentUserActivity() bool                  { return false }
 func sysWarnUsers(string)                             {}
 func sysWriteConsole(string) error                    { return nil }
 

@@ -191,19 +191,6 @@ func sysCountActivePortConnections(ports []int) int {
 	return 0
 }
 
-// sysHasActiveTerminals reports interactive sessions present (console/RDP).
-// On Windows this is equivalent to having any active quser session.
-func sysHasActiveTerminals() bool {
-	return sysCountActiveSessions() > 0
-}
-
-// sysHasRecentUserActivity reports recent interactive logon activity. We treat
-// any Active session as recent activity (quser STATE), matching the
-// conservative intent of the Linux wtmp check.
-func sysHasRecentUserActivity() bool {
-	return sysCountActiveSessions() > 0
-}
-
 // sysWarnUsers broadcasts a message to interactive sessions via msg.exe.
 // sysWriteConsole is a no-op on Windows: there is no /dev/console, and the EC2
 // serial console for a Windows instance is not a writable character device

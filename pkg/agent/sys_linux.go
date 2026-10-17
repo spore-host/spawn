@@ -67,37 +67,10 @@ func sysIsProcessRunning(name string) bool {
 	return exec.Command("pgrep", "-x", name).Run() == nil
 }
 
-// sysCountActiveSessions returns login sessions with recent keyboard activity,
-// via `w -h -s` (idle column), falling back to `who` for raw presence.
+// sysCountActiveSessions returns the login sessions with keyboard input in the
+// last 5 minutes, from the idle time of each terminal (ttyidle.go, #953).
 func sysCountActiveSessions() int {
-	out, err := exec.Command("w", "-h", "-s").Output()
-	if err != nil {
-		who, werr := exec.Command("who").Output()
-		if werr != nil {
-			return 0
-		}
-		count := 0
-		for _, line := range strings.Split(strings.TrimSpace(string(who)), "\n") {
-			if strings.TrimSpace(line) != "" {
-				count++
-			}
-		}
-		return count
-	}
-	active := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		if isRecentActivity(fields[3], 5*time.Minute) {
-			active++
-		}
-	}
-	return active
+	return countTTYSessions(time.Now())
 }
 
 // sysCountActivePortConnections counts ESTABLISHED connections on the given
@@ -134,45 +107,6 @@ func sysCountActivePortConnections(ports []int) int {
 		}
 	}
 	return count
-}
-
-// sysHasActiveTerminals reports whether interactive PTYs exist (/dev/pts).
-func sysHasActiveTerminals() bool {
-	entries, err := os.ReadDir("/dev/pts")
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if entry.Name() == "ptmx" {
-			continue
-		}
-		if _, err := strconv.Atoi(entry.Name()); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-// sysHasRecentUserActivity reports recent logins (last 5 min) via `last`,
-// falling back to /var/log/wtmp mtime.
-func sysHasRecentUserActivity() bool {
-	output, err := exec.Command("last", "-s", "-5min", "-w").Output()
-	if err != nil {
-		fileInfo, serr := os.Stat("/var/log/wtmp")
-		if serr != nil {
-			return false
-		}
-		return time.Since(fileInfo.ModTime()) < 5*time.Minute
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "wtmp") && !strings.HasPrefix(line, "reboot") {
-			if !strings.Contains(line, "system boot") && !strings.Contains(line, "down") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // sysWarnUsers broadcasts a message to logged-in terminals (wall).
@@ -276,56 +210,3 @@ func sysBootTime() time.Time {
 // errEmptyProcStat: /proc/stat had no lines. Linux-only (#923): declared in the
 // OS-agnostic agent.go it was dead code on every other GOOS.
 var errEmptyProcStat = fmt.Errorf("empty cpu stat")
-
-// isRecentActivity returns true if the idle duration string from `w` is less than maxIdle.
-// Linux-only (#923): its one caller is sysCountActiveSessions above.
-func isRecentActivity(idle string, maxIdle time.Duration) bool {
-	// "?" means no tty activity measured — treat as not active
-	if idle == "?" {
-		return false
-	}
-	// Seconds only: "Xs"
-	if strings.HasSuffix(idle, "s") {
-		secs, err := strconv.ParseFloat(strings.TrimSuffix(idle, "s"), 64)
-		if err == nil {
-			return time.Duration(secs)*time.Second < maxIdle
-		}
-	}
-	// Minutes:seconds "MM:SS"
-	if strings.Contains(idle, ":") && !strings.Contains(idle, "m") {
-		parts := strings.Split(idle, ":")
-		if len(parts) == 2 {
-			mins, e1 := strconv.ParseFloat(parts[0], 64)
-			secs, e2 := strconv.ParseFloat(parts[1], 64)
-			if e1 == nil && e2 == nil {
-				d := time.Duration(mins)*time.Minute + time.Duration(secs)*time.Second
-				return d < maxIdle
-			}
-		}
-	}
-	// Minutes with suffix "MMm" or "HH:MMm"
-	if strings.HasSuffix(idle, "m") {
-		s := strings.TrimSuffix(idle, "m")
-		if strings.Contains(s, ":") {
-			parts := strings.Split(s, ":")
-			if len(parts) == 2 {
-				hrs, e1 := strconv.ParseFloat(parts[0], 64)
-				mins, e2 := strconv.ParseFloat(parts[1], 64)
-				if e1 == nil && e2 == nil {
-					d := time.Duration(hrs)*time.Hour + time.Duration(mins)*time.Minute
-					return d < maxIdle
-				}
-			}
-		}
-		mins, err := strconv.ParseFloat(s, 64)
-		if err == nil {
-			return time.Duration(mins)*time.Minute < maxIdle
-		}
-	}
-	// "Xdays" — definitely not recent
-	if strings.Contains(idle, "day") {
-		return false
-	}
-	// Unknown format — conservatively treat as recent to avoid false idle
-	return true
-}

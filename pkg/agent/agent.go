@@ -673,7 +673,9 @@ func countActivePortConnections(ports []int) int {
 
 // countActiveSessions returns the number of login sessions with recent keyboard
 // activity (input within the last 5 minutes), so idle SSH/RDP connections don't
-// block idle detection. OS-specific source.
+// block idle detection. OS-specific source: on Linux the idle time of each
+// terminal (ttyidle.go), on Windows quser's IDLE TIME. Presence alone, an open
+// login or a PTY nobody is typing in, must never count (#953).
 func countActiveSessions() int {
 	return sysCountActiveSessions()
 }
@@ -1240,23 +1242,9 @@ func (a *Agent) isIdle() bool {
 		return false
 	}
 
-	// Check for active terminals
-	if a.hasActiveTerminals() {
-		log.Printf("Not idle: Active terminals present")
-		return false
-	}
-
-	// Check for logged-in users
-	if a.hasLoggedInUsers() {
-		log.Printf("Not idle: Users logged in")
-		return false
-	}
-
-	// Check for recent user activity
-	if a.hasRecentUserActivity() {
-		log.Printf("Not idle: Recent user activity detected")
-		return false
-	}
+	// No presence check follows. The session check at the top already counted
+	// every terminal with recent input; a terminal that merely exists (an idle
+	// SSH login, a detached tmux) must not block idle-stop (#953).
 
 	log.Printf("System is idle (CPU: %.2f%%, Network: %d bytes, Disk: %d bytes, GPU: %.2f%%)",
 		cpuUsage, networkBytes, diskIO, gpuUtilization)
@@ -1476,19 +1464,6 @@ func (a *Agent) getDCVConnectionCount() int {
 		return -1
 	}
 	return n
-}
-
-func (a *Agent) hasLoggedInUsers() bool {
-	// Delegate to countActiveSessions which checks for recent keyboard activity, not just presence
-	return countActiveSessions() > 0
-}
-
-func (a *Agent) hasRecentUserActivity() bool {
-	return sysHasRecentUserActivity()
-}
-
-func (a *Agent) hasActiveTerminals() bool {
-	return sysHasActiveTerminals()
 }
 
 func (a *Agent) checkSpotInterruption(ctx context.Context) bool {
@@ -2180,17 +2155,4 @@ func (a *Agent) IsIdle() bool {
 
 func (a *Agent) GetLastActivityTime() time.Time {
 	return a.lastActivityTime
-}
-
-// UX detection methods
-func (a *Agent) HasActiveTerminals() bool {
-	return a.hasActiveTerminals()
-}
-
-func (a *Agent) HasLoggedInUsers() bool {
-	return a.hasLoggedInUsers()
-}
-
-func (a *Agent) HasRecentUserActivity() bool {
-	return a.hasRecentUserActivity()
 }
