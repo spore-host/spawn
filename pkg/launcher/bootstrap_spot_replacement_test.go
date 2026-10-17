@@ -78,7 +78,7 @@ func writeExec(t *testing.T, path, body string) {
 
 func (sb *spotSandbox) run(t *testing.T, script string) (string, error) {
 	t.Helper()
-	cmd := exec.Command("bash", "-c", sb.rw.Replace(script)) //nolint:gosec // nosemgrep: test-built script
+	cmd := exec.Command("bash", "-c", sb.rw.Replace(script)) //nolint:gosec // nosemgrep
 	cmd.Env = []string{"PATH=" + filepath.Join(sb.dir, "bin") + ":/usr/bin:/bin", "HOME=" + sb.dir}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
