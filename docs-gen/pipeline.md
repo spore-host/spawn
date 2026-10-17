@@ -132,9 +132,15 @@ Show the current status of a running or completed pipeline.
 
 Displays:
 - Overall pipeline status
+- The current run id, which 'spawn pipeline collect --run' takes, and the
+  pipeline's other runs found in its s3_bucket
 - Per-stage progress
 - Instance information
 - Cost tracking
+
+With --output json, prints the pipeline record with run_id and runs (every run
+id found in S3, oldest first; null, with runs_error, when they could not be
+listed).
 
 ```
 spawn pipeline status <pipeline-id>
