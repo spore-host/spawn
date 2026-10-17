@@ -49,6 +49,7 @@ func useFakeSuspend(t *testing.T) *fakeSuspend {
 // no network or disk traffic. The idle decision needs two samples of each.
 func quietCounters(t *testing.T) {
 	t.Helper()
+	noSessions(t) // a quiet machine has no active sessions either, on every OS
 	var mu sync.Mutex
 	var jiffies int64
 	cpu, net, disk := readCPUTimes, readNetworkBytes, readDiskIOBytes
