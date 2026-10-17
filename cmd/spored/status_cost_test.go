@@ -231,11 +231,17 @@ func TestStatusReport_RestartedInstanceDoesNotBillTheStop(t *testing.T) {
 	ag := queryAgent(t, cfg)
 	// The daemon on the second boot: 70s carried over from the first, counting
 	// this boot for 22s.
-	publishAndAdopt(t, ag, now.Add(-22*time.Second), 70)
+	bootStart := now.Add(-22 * time.Second)
+	publishAndAdopt(t, ag, bootStart, 70)
+	// Sampling inside buildStatusReport takes seconds on Windows (a PowerShell
+	// process per sample), so this boot's share is a window, not an instant.
+	before := time.Now()
 	r := buildStatusReport(ag, cfg, statusIdentity(), false)
+	after := time.Now()
 
-	if r.ComputeSeconds < 91 || r.ComputeSeconds > 94 {
-		t.Fatalf("compute = %.0fs, want the first run's 70s plus this boot's 22s", r.ComputeSeconds)
+	lo, hi := 70+before.Sub(bootStart).Seconds()-1, 70+after.Sub(bootStart).Seconds()+1
+	if r.ComputeSeconds < lo || r.ComputeSeconds > hi {
+		t.Fatalf("compute = %.0fs, want the first run's 70s plus this boot's 22s (%.0f–%.0fs)", r.ComputeSeconds, lo, hi)
 	}
 	if r.BilledSeconds > r.ComputeSeconds+1 {
 		t.Errorf("billed = %.0fs for %.0fs of compute: the stop was billed as boot time (boot term %.0fs)",
