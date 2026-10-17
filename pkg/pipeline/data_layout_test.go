@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -66,6 +67,9 @@ func filesUnder(t *testing.T, root string) []string {
 // and each of train's four instances' "/models/best.h5" at evaluate's
 // "/models/<index>/best.h5" (they overwrote each other; the last upload won).
 func TestMLTrainingExampleDataLandsWhereTheExampleReadsIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: models the Linux stage instance's /data filesystem; the stage runner runs only on Linux spores (#1002)")
+	}
 	def, err := LoadPipelineFromFile("../../examples/pipelines/ml-training.json")
 	if err != nil {
 		t.Fatal(err)
@@ -144,6 +148,9 @@ func TestMLTrainingExampleDataLandsWhereTheExampleReadsIt(t *testing.T) {
 // relative pattern, and the aggregate stage gathers three stages' outputs into
 // one dest_path without collision.
 func TestFanoutExamplePatternsSelectTheirChunks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: models the Linux stage instance's /data filesystem; the stage runner runs only on Linux spores (#1002)")
+	}
 	def, err := LoadPipelineFromFile("../../examples/pipelines/fanout-fanin.json")
 	if err != nil {
 		t.Fatal(err)

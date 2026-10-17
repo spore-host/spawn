@@ -373,8 +373,8 @@ func TestS3KeyGeneration(t *testing.T) {
 		{"/models", "2/best.h5", "/models/2/best.h5"},
 		{"", "a.csv", "a.csv"},
 	} {
-		if got := InputLocalPath(c.dest, c.rel); got != c.want {
-			t.Errorf("InputLocalPath(%q, %q) = %q, want %q", c.dest, c.rel, got, c.want)
+		if got, want := InputLocalPath(c.dest, c.rel), filepath.FromSlash(c.want); got != want { // a local path on the host that runs it
+			t.Errorf("InputLocalPath(%q, %q) = %q, want %q", c.dest, c.rel, got, want)
 		}
 	}
 	if got := StageInstanceOutputPrefix("p", "train", 1, 0); got != "p/stages/train/output/" {
