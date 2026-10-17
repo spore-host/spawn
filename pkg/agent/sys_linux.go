@@ -191,6 +191,12 @@ func shellQuoteArg(s string) string {
 // clears it and the next daemon start rewrites it.
 func sysComputeClockPath() string { return "/run/spored/compute-clock.json" }
 
+// sysIdleStatePath is where the daemon publishes each tick's idle evaluation
+// for `spored status` (#1090). On /run for the compute clock's reasons, and
+// because tmpfs writes are not disk I/O: a per-minute write to a disk would be
+// counted against idle itself.
+func sysIdleStatePath() string { return "/run/spored/idle-state.json" }
+
 // sysBootTime returns when the running kernel booted, from /proc/uptime, or the
 // zero time when it cannot be read.
 func sysBootTime() time.Time {

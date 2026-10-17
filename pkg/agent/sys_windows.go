@@ -228,6 +228,10 @@ func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) 
 func sysComputeClockPath() string { return "" }
 func sysBootTime() time.Time      { return time.Time{} }
 
+// sysIdleStatePath is "" on Windows, which has no boot-scoped tmpfs either;
+// `spored status` keeps its one-shot reading there and labels it (#1090).
+func sysIdleStatePath() string { return "" }
+
 // sysAcceleratorFamilies reports an NVIDIA GPU when nvidia-smi is installed: the
 // NVIDIA driver installs it into System32, and Windows instances have no
 // /sys to inspect. Other accelerators have no Windows driver on EC2 (#954).
