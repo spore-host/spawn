@@ -268,7 +268,7 @@ func TestIsIdle_NotIdleWhenRecentActivity(t *testing.T) {
 	a.lastActivityTime = time.Now()
 	// With a 100% CPU threshold, isIdle checks user sessions etc.
 	// On a test machine we just verify it returns a bool without panicking.
-	_ = a.IsIdle()
+	_ = a.isIdle()
 }
 
 func TestIsIdle_IdleAfterTimeout(t *testing.T) {
@@ -280,7 +280,7 @@ func TestIsIdle_IdleAfterTimeout(t *testing.T) {
 	a.lastActivityTime = time.Now().Add(-1 * time.Hour)
 	// Give the idle timeout a moment to elapse
 	time.Sleep(5 * time.Millisecond)
-	if !a.IsIdle() {
+	if !a.isIdle() {
 		t.Log("IsIdle() returned false — may depend on live CPU/user checks, acceptable in CI")
 	}
 }
@@ -428,7 +428,7 @@ func TestDCVIdleSource_ServerNotReady(t *testing.T) {
 		t.Errorf("getDCVConnectionCount() = %d when dcv exits non-zero, want -1", count)
 	}
 	// isIdle must return false (grace period — server not ready)
-	if a.IsIdle() {
+	if a.isIdle() {
 		t.Error("IsIdle() = true when DCV server not ready, want false")
 	}
 }
@@ -460,9 +460,9 @@ func TestDCVIdleSource_GraceBounded(t *testing.T) {
 	dcvAgent.config.DCVSessionID = "console"
 	dcvAgent.startTime = time.Now().Add(-(dcvGraceTimeout + time.Minute))
 	control := newTestAgent(t, cfg()) // no DCVSessionID → standard path
-	if dcvAgent.IsIdle() != control.IsIdle() {
+	if dcvAgent.isIdle() != control.isIdle() {
 		t.Errorf("past-grace DCV verdict (%v) != non-DCV control (%v) — did not fall through cleanly",
-			dcvAgent.IsIdle(), control.IsIdle())
+			dcvAgent.isIdle(), control.isIdle())
 	}
 }
 
@@ -478,7 +478,7 @@ func TestDCVIdleSource_ZeroClients(t *testing.T) {
 	if count != 0 {
 		t.Errorf("getDCVConnectionCount() = %d, want 0", count)
 	}
-	if !a.IsIdle() {
+	if !a.isIdle() {
 		t.Error("IsIdle() = false when DCV has 0 clients, want true")
 	}
 }
@@ -495,7 +495,7 @@ func TestDCVIdleSource_ActiveClients(t *testing.T) {
 	if count != 2 {
 		t.Errorf("getDCVConnectionCount() = %d, want 2", count)
 	}
-	if a.IsIdle() {
+	if a.isIdle() {
 		t.Error("IsIdle() = true when DCV has 2 active clients, want false")
 	}
 }

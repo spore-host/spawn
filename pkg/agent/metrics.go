@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -16,10 +17,20 @@ func (a *Agent) GetStartTime() time.Time {
 	return a.startTime
 }
 
-// GetCPUUsageContext returns CPU usage percentage (metrics interface with context)
+// GetCPUUsageContext returns the CPU usage the monitor loop measured on its
+// last tick. It takes no sample of its own: the scrape runs on the HTTP
+// server's goroutine, and sampling there raced the monitor loop and moved its
+// baseline (#952). An unmeasured reading is an error, so no sample is exported
+// rather than the assume-active 100%.
 func (a *Agent) GetCPUUsageContext(ctx context.Context) (float64, error) {
-	return a.getCPUUsage(), nil
+	cpu, measured := a.GetCPUUsageMeasured()
+	if !measured {
+		return 0, errCPUUnmeasured
+	}
+	return cpu, nil
 }
+
+var errCPUUnmeasured = errors.New("CPU usage not measured yet")
 
 // GetNetworkStats returns network statistics summed over the physical
 // interfaces. It returns an error, and so no sample, when none is found: a zero

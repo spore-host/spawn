@@ -70,6 +70,13 @@ type Agent struct {
 	diskUnknownWarned     bool      // "disk I/O cannot be measured" logged once, not every tick (#937)
 	idleWarned            bool      // send idle_warning notification only once
 
+	// idleMu guards idleSnap and lastActivityTime. The monitor loop writes them;
+	// the Prometheus scrape, the spot-interruption goroutine and status read
+	// them (#952). The prev* sample fields above are NOT guarded: only the owner
+	// of sampling touches them (sampleIdleSignals).
+	idleMu   sync.Mutex
+	idleSnap idleSnapshot
+
 	// DCV auth token verifier (embedded HTTP server for seamless browser auth)
 	dcvTokens          map[string]string // token → username
 	dcvTokensMu        sync.Mutex
@@ -619,11 +626,14 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 		}
 	}
 
-	// 4. Check idle
+	// 4. Check idle. The signals are sampled and the decision published on
+	// every tick, idle timeout or not, so the metrics endpoint and status read
+	// this tick's evaluation rather than taking samples of their own (#952).
+	snap := a.evaluateIdle()
 	if a.config.IdleTimeout > 0 {
-		idle := a.isIdle()
-		if idle {
-			idleTime := time.Since(a.lastActivityTime)
+		log.Print(snap.reason)
+		if snap.idle {
+			idleTime := time.Since(a.lastActivity())
 
 			if idleTime >= a.config.IdleTimeout {
 				log.Printf("Idle timeout reached (%v)", idleTime)
@@ -654,7 +664,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 			}
 		} else {
 			// Activity detected — reset idle timer and re-arm the warning
-			a.lastActivityTime = time.Now()
+			a.setLastActivity(time.Now())
 			a.idleWarned = false
 		}
 	}
@@ -677,8 +687,13 @@ func countActivePortConnections(ports []int) int {
 // terminal (ttyidle.go), on Windows quser's IDLE TIME. Presence alone, an open
 // login or a PTY nobody is typing in, must never count (#953).
 func countActiveSessions() int {
-	return sysCountActiveSessions()
+	return sessionCounter()
 }
+
+// sessionCounter is the OS session source behind countActiveSessions; a variable
+// so a test can make a host with no active sessions on every OS (on Windows the
+// real source is quser, which sees the CI runner's own console session).
+var sessionCounter = sysCountActiveSessions
 
 // findActiveProcess returns the first configured process name that is currently
 // running, or "" if none are found. OS-specific source.
@@ -1140,7 +1155,76 @@ func isAccessDenied(err error) bool {
 // spored reads its mtime to detect genuine user activity in DCV sessions.
 const x11ActivityFile = "/run/spore/x11-last-activity"
 
+// idleSnapshot is one evaluation of the idle signals: the counter readings,
+// taken together on one tick, and the decision made from them (#952).
+type idleSnapshot struct {
+	taken        time.Time // zero until the first evaluation
+	idle         bool
+	reason       string // the "Not idle: ..." or "System is idle ..." log line
+	cpu          float64
+	cpuMeasured  bool
+	net          int64
+	netMeasured  bool
+	netWhy       string
+	disk         int64
+	diskMeasured bool
+	diskWhy      string
+}
+
+// noSampleYet is the unknown reason a reader sees before the first evaluation.
+const noSampleYet = "no sample yet"
+
+// sampleIdleSignals reads every counter-based idle signal once.
+//
+// Sampling has exactly one owner: the monitor loop in the daemon, or the
+// one-shot `spored status`, which owns its own Agent. The prev* fields it
+// advances are touched by nothing else, so they need no lock, and readers on
+// other goroutines (the Prometheus scrape, the spot-interruption webhooks)
+// read the published idleSnapshot instead. Before #952 the scrape called
+// IsIdle and the CPU reader itself, from the HTTP goroutine: that was a data
+// race, and worse, it moved the sample baseline, so the monitor loop's next
+// delta covered only the seconds since the scrape and real traffic read as
+// under the per-tick threshold — a false idle-stop.
+//
+// All three are read on every call, before any check can return. When the
+// decision returned early (a session, a process, busy CPU), the network and
+// disk counters used to go unsampled, so the next delta spanned several ticks.
+func (a *Agent) sampleIdleSignals() idleSnapshot {
+	s := idleSnapshot{taken: time.Now()}
+	s.cpu, s.cpuMeasured = a.cpuUsage()
+	s.net, s.netMeasured, s.netWhy = a.networkBytes()
+	s.disk, s.diskMeasured, s.diskWhy = a.diskIOBytes()
+	return s
+}
+
+// evaluateIdle samples, decides and publishes the result for readers. Only the
+// owner of sampling may call it (see sampleIdleSignals).
+func (a *Agent) evaluateIdle() idleSnapshot {
+	s := a.sampleIdleSignals()
+	s.idle, s.reason = a.idleDecision(s)
+	a.idleMu.Lock()
+	a.idleSnap = s
+	a.idleMu.Unlock()
+	return s
+}
+
+// idleSnapshotNow returns the last published evaluation. Safe from any goroutine.
+func (a *Agent) idleSnapshotNow() idleSnapshot {
+	a.idleMu.Lock()
+	defer a.idleMu.Unlock()
+	return a.idleSnap
+}
+
+// isIdle is the monitor loop's evaluation, logged.
 func (a *Agent) isIdle() bool {
+	s := a.evaluateIdle()
+	log.Print(s.reason)
+	return s.idle
+}
+
+// idleDecision decides from one tick's readings plus the stateless signals
+// (DCV, sessions, processes, GPU). It takes no counter sample itself.
+func (a *Agent) idleDecision(r idleSnapshot) (bool, string) {
 	// DCV application streaming: use X11 activity file (written by kiosk-wm on
 	// key/mouse events) as the authoritative idle signal. Falls back to DCV
 	// connection count if the file doesn't exist (pre-kiosk-wm instances).
@@ -1164,13 +1248,11 @@ func (a *Agent) isIdle() bool {
 			time.Since(a.startTime), dcvGraceTimeout, a.config.IdleTimeout)
 		if !fallThrough {
 			if idle {
-				log.Printf("DCV session %s: idle (file=%v age=%v conns=%d)",
-					a.config.DCVSessionID, fileExists, activityAge.Round(time.Second), connCount)
-			} else {
-				log.Printf("Not idle: DCV session %s (file=%v age=%v conns=%d)",
+				return true, fmt.Sprintf("DCV session %s: idle (file=%v age=%v conns=%d)",
 					a.config.DCVSessionID, fileExists, activityAge.Round(time.Second), connCount)
 			}
-			return idle
+			return false, fmt.Sprintf("Not idle: DCV session %s (file=%v age=%v conns=%d)",
+				a.config.DCVSessionID, fileExists, activityAge.Round(time.Second), connCount)
 		}
 		log.Printf("DCV session %s never became ready within %v — falling back to standard idle checks",
 			a.config.DCVSessionID, dcvGraceTimeout)
@@ -1179,14 +1261,12 @@ func (a *Agent) isIdle() bool {
 
 	// Active SSH/terminal sessions reset the idle timer.
 	if sessions := countActiveSessions(); sessions > 0 {
-		log.Printf("Not idle: %d active session(s)", sessions)
-		return false
+		return false, fmt.Sprintf("Not idle: %d active session(s)", sessions)
 	}
 
 	// Check configured process names — if any are running, instance is not idle.
 	if proc := a.findActiveProcess(); proc != "" {
-		log.Printf("Not idle: process %q is running", proc)
-		return false
+		return false, fmt.Sprintf("Not idle: process %q is running", proc)
 	}
 
 	// Note: we intentionally do NOT check active port connections here.
@@ -1195,65 +1275,58 @@ func (a *Agent) isIdle() bool {
 	// block idle termination for abandoned tabs. The existing CPU and network
 	// delta checks correctly distinguish real activity from idle keep-alives.
 
-	// Check CPU usage.
-	//
-	// The "measured" flag is logged rather than acted on: an unknown reading is
-	// already the conservative 100%, so it correctly blocks an idle shutdown. But
-	// saying which it was stops the log line from looking like a contradiction of
-	// the status summary, which samples separately (#734).
-	cpuUsage, cpuMeasured := a.cpuUsage()
-	if cpuUsage >= a.config.IdleCPUPercent {
-		if cpuMeasured {
-			log.Printf("Not idle: CPU usage %.2f%% >= %.2f%%", cpuUsage, a.config.IdleCPUPercent)
-		} else {
-			log.Printf("Not idle: CPU usage could not be measured (no sample interval yet); "+
-				"assuming active (%.2f%%)", cpuUsage)
+	// CPU, network and disk come from r, sampled together this tick
+	// (sampleIdleSignals). An unmeasured reading is the conservative
+	// assume-active value and is logged as what it is, not as a number (#734,
+	// #919, #937).
+	if r.cpu >= a.config.IdleCPUPercent {
+		if r.cpuMeasured {
+			return false, fmt.Sprintf("Not idle: CPU usage %.2f%% >= %.2f%%", r.cpu, a.config.IdleCPUPercent)
 		}
-		return false
+		return false, fmt.Sprintf("Not idle: CPU usage could not be measured (no sample interval yet); "+
+			"assuming active (%.2f%%)", r.cpu)
 	}
 
-	// Check network traffic. An unmeasured reading is the conservative
-	// assume-active value, exactly as for CPU above, and is logged as what it is.
-	networkBytes, netMeasured, netWhy := a.networkBytes()
-	if !netMeasured {
-		log.Printf("Not idle: network traffic could not be measured (%s); assuming active", netWhy)
-		return false
+	if !r.netMeasured {
+		return false, fmt.Sprintf("Not idle: network traffic could not be measured (%s); assuming active", r.netWhy)
 	}
-	if networkBytes > 100000 { // 100KB/min threshold — filters out spored's own EC2/IMDS API calls (~25KB/min)
-		log.Printf("Not idle: Network traffic %d bytes", networkBytes)
-		return false
+	if r.net > 100000 { // 100KB per tick (one minute) — filters out spored's own EC2/IMDS API calls (~25KB/min)
+		return false, fmt.Sprintf("Not idle: Network traffic %d bytes", r.net)
 	}
 
-	// Check disk I/O, with the network check's semantics for an unknown (#937).
-	diskIO, diskMeasured, diskWhy := a.diskIOBytes()
-	if !diskMeasured {
-		log.Printf("Not idle: disk I/O could not be measured (%s); assuming active", diskWhy)
-		return false
+	if !r.diskMeasured {
+		return false, fmt.Sprintf("Not idle: disk I/O could not be measured (%s); assuming active", r.diskWhy)
 	}
-	if diskIO > idleDiskBytesThreshold {
-		log.Printf("Not idle: Disk I/O %d bytes", diskIO)
-		return false
+	if r.disk > idleDiskBytesThreshold {
+		return false, fmt.Sprintf("Not idle: Disk I/O %d bytes", r.disk)
 	}
 
 	// Check GPU utilization
 	gpuUtilization := a.getGPUUtilization()
 	if gpuUtilization > 5 { // 5% GPU usage threshold
-		log.Printf("Not idle: GPU utilization %.2f%%", gpuUtilization)
-		return false
+		return false, fmt.Sprintf("Not idle: GPU utilization %.2f%%", gpuUtilization)
 	}
 
 	// No presence check follows. The session check at the top already counted
 	// every terminal with recent input; a terminal that merely exists (an idle
 	// SSH login, a detached tmux) must not block idle-stop (#953).
 
-	log.Printf("System is idle (CPU: %.2f%%, Network: %d bytes, Disk: %d bytes, GPU: %.2f%%)",
-		cpuUsage, networkBytes, diskIO, gpuUtilization)
-	return true
+	return true, fmt.Sprintf("System is idle (CPU: %.2f%%, Network: %d bytes, Disk: %d bytes, GPU: %.2f%%)",
+		r.cpu, r.net, r.disk, gpuUtilization)
 }
 
-func (a *Agent) getCPUUsage() float64 {
-	usage, _ := a.cpuUsage()
-	return usage
+// lastActivity returns when the idle check last saw activity. Safe from any
+// goroutine (#952).
+func (a *Agent) lastActivity() time.Time {
+	a.idleMu.Lock()
+	defer a.idleMu.Unlock()
+	return a.lastActivityTime
+}
+
+func (a *Agent) setLastActivity(t time.Time) {
+	a.idleMu.Lock()
+	a.lastActivityTime = t
+	a.idleMu.Unlock()
 }
 
 // readCPUTimes is the CPU-times source, indirected through a var so the delta
@@ -1567,7 +1640,7 @@ func (a *Agent) emitSpotInterruptionWebhook(info *provider.InterruptionInfo) {
 		InterruptionDeadline: info.Time.UTC().Format(time.RFC3339),
 		NameTag:              a.identity.Name,
 		ComputeSeconds:       a.TotalComputeSeconds(),
-		LastActivityTime:     a.lastActivityTime.UTC().Format(time.RFC3339),
+		LastActivityTime:     a.lastActivity().UTC().Format(time.RFC3339),
 		Correlation:          cfg.WebhookCorrelation,
 		EmittedAt:            time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1653,7 +1726,7 @@ func (a *Agent) emitCompletionWebhook(ctx context.Context) {
 		NameTag:          a.identity.Name,
 		OnComplete:       cfg.OnComplete,
 		ComputeSeconds:   a.TotalComputeSeconds(),
-		LastActivityTime: a.lastActivityTime.UTC().Format(time.RFC3339),
+		LastActivityTime: a.lastActivity().UTC().Format(time.RFC3339),
 		Correlation:      cfg.WebhookCorrelation,
 		EmittedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
@@ -2104,8 +2177,11 @@ func (a *Agent) Reload(ctx context.Context) error {
 // GetPluginRuntime returns the agent's plugin runtime (always non-nil).
 func (a *Agent) GetPluginRuntime() *pluginruntime.Runtime { return a.pluginRuntime }
 
+// GetConfig returns the current config. The metrics scrape calls it from the
+// HTTP goroutine while the monitor loop swaps the config, so it reads under
+// configMu like every other off-loop reader (#175, #952).
 func (a *Agent) GetConfig() *provider.Config {
-	return a.config
+	return a.cfg()
 }
 
 func (a *Agent) GetIdentity() *provider.Identity {
@@ -2120,39 +2196,54 @@ func (a *Agent) GetUptime() time.Duration {
 	return time.Since(a.startTime)
 }
 
-// GetCPUUsageMeasured returns CPU utilisation and whether it is a real
-// measurement. Callers that DISPLAY the number should use this rather than
-// GetCPUUsage, so a "could not tell" is not printed as a reading (#734).
+// EvaluateIdle samples every idle signal and decides, as one monitor tick
+// does, and returns the decision. It is for a caller that owns its Agent and
+// runs no monitor loop — the one-shot `spored status` — and must never be
+// called while Monitor is running, because it takes samples (#952).
+func (a *Agent) EvaluateIdle() bool {
+	return a.evaluateIdle().idle
+}
+
+// The readers below return the last evaluation (a monitor tick, or
+// EvaluateIdle) and take no sample, so they are safe from any goroutine and
+// cannot shorten the monitor loop's measurement window (#952).
+
+// GetCPUUsageMeasured returns the last CPU utilisation reading and whether it
+// is a real measurement. A display must use the flag, so a "could not tell" is
+// not printed as a reading (#734).
 func (a *Agent) GetCPUUsageMeasured() (float64, bool) {
-	return a.cpuUsage()
+	s := a.idleSnapshotNow()
+	if s.taken.IsZero() {
+		return 100.0, false
+	}
+	return s.cpu, s.cpuMeasured
 }
 
-func (a *Agent) GetCPUUsage() float64 {
-	return a.getCPUUsage()
-}
-
-func (a *Agent) GetNetworkBytes() int64 {
-	bytes, _, _ := a.networkBytes()
-	return bytes
-}
-
-// GetNetworkBytesMeasured returns network bytes since the previous sample,
-// whether that is a real measurement, and if not, why. Callers that DISPLAY the
-// number should use this, so an assumption is not printed as traffic (#919).
+// GetNetworkBytesMeasured returns the network bytes over the last sample
+// interval, whether that is a real measurement, and if not, why (#919).
 func (a *Agent) GetNetworkBytesMeasured() (int64, bool, string) {
-	return a.networkBytes()
+	s := a.idleSnapshotNow()
+	if s.taken.IsZero() {
+		return networkAssumedActive, false, noSampleYet
+	}
+	return s.net, s.netMeasured, s.netWhy
 }
 
-// GetDiskIOBytesMeasured returns disk bytes read and written since the previous
-// sample, whether that is a real measurement, and if not, why (#937).
+// GetDiskIOBytesMeasured returns disk bytes read and written over the last
+// sample interval, whether that is a real measurement, and if not, why (#937).
 func (a *Agent) GetDiskIOBytesMeasured() (int64, bool, string) {
-	return a.diskIOBytes()
+	s := a.idleSnapshotNow()
+	if s.taken.IsZero() {
+		return diskAssumedActive, false, noSampleYet
+	}
+	return s.disk, s.diskMeasured, s.diskWhy
 }
 
+// IsIdle returns the last idle decision; false before the first one.
 func (a *Agent) IsIdle() bool {
-	return a.isIdle()
+	return a.idleSnapshotNow().idle
 }
 
 func (a *Agent) GetLastActivityTime() time.Time {
-	return a.lastActivityTime
+	return a.lastActivity()
 }
