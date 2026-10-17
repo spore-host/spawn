@@ -9,4 +9,3 @@
 # Everything NOT listed is tested on windows-latest by default: a new package is
 # included automatically, and has to be added here deliberately to escape.
 pkg/pluginruntime  #1001: plugin remote steps run via sh/su/tar, which a Windows spore lacks; its tests are sh fixtures
-pkg/security   #1000: the path validators are POSIX-only, so their tests assert Linux paths a Windows host rejects or ignores

@@ -654,6 +654,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/spored.service` already did. spored runs as root and needs no privilege
   escalation; the setting stops a hook or job it spawns from gaining privileges
   through a setuid binary or file capabilities.
+- **The local-file path guard works on Windows** (#1000). The check behind
+  `spawn launch --user-data-file` / `--user-data @file` and spored's queue
+  result uploads compared paths against `/etc`, `/proc`, ... only, so on Windows
+  it refused nothing. It now uses the host's rules: on Windows it refuses the
+  Windows directory, ProgramData and System Volume Information (any case, either
+  separator), UNC and `\\?\` / `\\.\` paths, alternate data streams
+  (`file:stream`), device names such as `NUL` and `CON`, and names ending in a
+  dot or space. On every OS it now follows symlinks (and Windows junctions) and
+  refuses a path that leads into a system directory, compares case-insensitively
+  (macOS's `/ETC` is `/etc`), and refuses any `..` element rather than only those
+  left after cleaning.
+- **Queue result uploads check every file a pattern matches** (#1000), not
+  just the pattern, so a wildcard such as `/e*c/passwd` or one through a
+  symlink can no longer upload a system file from the spore.
+- **On Windows the path guard follows directory junctions and mount points**
+  (#1000). Since Go 1.23 Go's own link resolution stops at a junction, so a
+  junction made with `mklink /J` (no privilege needed) to `C:\Windows` let
+  `--user-data-file` or a queue result pattern read the Windows directory,
+  including `System32\config\SAM`. The guard now asks Windows for the final path
+  of the longest existing prefix, which follows junctions, mount points,
+  symlinks and 8.3 short names, and refuses a link it cannot resolve.
 
 ### Documentation
 
