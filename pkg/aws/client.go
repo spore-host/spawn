@@ -474,6 +474,12 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		launchConfig.SpawnVersion = CallerVersion
 	}
 
+	// --on-idle hibernate / --on-complete hibernate imply hibernation
+	// configuration (#949). Before tags, block devices and the Spot options are
+	// built, so the encrypted RAM-sized root, HibernationOptions and a persistent
+	// request's hibernate interruption behaviour all follow from it.
+	c.prepareHibernation(ctx, &launchConfig)
+
 	// Get caller identity for per-user isolation tagging
 	accountID, userARN, err := c.GetCallerIdentityInfo(ctx)
 	if err != nil {
@@ -1128,8 +1134,12 @@ type InstanceInfo struct {
 	IdleTimeout      string
 	KeyName          string
 	SpotInstance     bool
-	Tags             map[string]string
-	IAMRole          string // IAM instance profile/role name
+	// HibernationConfigured is EC2's HibernationOptions.Configured: whether the
+	// instance can hibernate at all. A stop with Hibernate=true on one that is not
+	// configured is a plain stop (#949).
+	HibernationConfigured bool
+	Tags                  map[string]string
+	IAMRole               string // IAM instance profile/role name
 
 	// StateTransitionReason is EC2's own explanation of how the instance reached
 	// its current state — "User initiated", "Client.InstanceInitiatedShutdown",
@@ -1278,8 +1288,10 @@ func (c *Client) listInstancesInRegion(ctx context.Context, region string, state
 					PrivateIP:        valueOrEmpty(instance.PrivateIpAddress),
 					KeyName:          valueOrEmpty(instance.KeyName),
 					SpotInstance:     instance.InstanceLifecycle == types.InstanceLifecycleTypeSpot,
-					Tags:             make(map[string]string),
-					Parameters:       make(map[string]string),
+					HibernationConfigured: instance.HibernationOptions != nil &&
+						aws.ToBool(instance.HibernationOptions.Configured),
+					Tags:       make(map[string]string),
+					Parameters: make(map[string]string),
 					// EC2 populates this for terminated/stopped instances only;
 					// it is empty for a running one (#736).
 					StateTransitionReason: valueOrEmpty(instance.StateTransitionReason),

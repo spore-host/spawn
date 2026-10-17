@@ -69,7 +69,7 @@ spawn launch <name> [flags]
 | `--fsx-storage-capacity` |  | int32 | `1200` | FSx storage capacity in GB (1200, 2400, or increments of 2400) |
 | `--fsx-throughput` |  | int32 | `125` | FSx PERSISTENT_2 throughput in MB/s/TiB (125, 250, 500, or 1000; default: 125) |
 | `--fsx-ttl` |  | string |  | FSx time-to-live, required for --fsx-lifecycle=durable (e.g. 7d, 720h) — the filesystem is reaped this long after creation once no instance is using it |
-| `--hibernate` |  | bool |  | Enable hibernation |
+| `--hibernate` |  | bool |  | Configure the instance for hibernation (encrypted root sized for RAM). Implied by --on-idle hibernate and --on-complete hibernate |
 | `--iam-allow-full-access` |  | bool |  | Permit wildcard *:FullAccess --iam-policy templates (s3:*/dynamodb:*/sqs:* on all resources) on the instance role; off by default — prefer scoped ReadOnly/WriteOnly |
 | `--iam-managed-policies` |  | stringSlice |  | AWS managed policy ARNs |
 | `--iam-policy-file` |  | string |  | Custom IAM policy JSON file |

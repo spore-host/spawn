@@ -30,6 +30,10 @@ type fakeEC2 struct {
 	spotRequestID string
 	spotType      string // spawn:spot-request-type tag value; "" = untagged
 	cancelDenied  bool
+
+	// memMiB, when set, answers DescribeInstanceTypes with that memory (#949);
+	// otherwise the call is refused and the caller falls back.
+	memMiB string
 }
 
 func (f *fakeEC2) actions() []string {
@@ -98,6 +102,15 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 		_, _ = w.Write([]byte(`<CancelSpotInstanceRequestsResponse ` + ns + `><requestId>r</requestId><spotInstanceRequestSet><item>` +
 			`<spotInstanceRequestId>` + form.Get("SpotInstanceRequestId.1") + `</spotInstanceRequestId><state>cancelled</state></item></spotInstanceRequestSet></CancelSpotInstanceRequestsResponse>`))
+	case "DescribeInstanceTypes":
+		if f.memMiB == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`<Response><Errors><Error><Code>InvalidAction</Code><Message>not in this fake</Message></Error></Errors><RequestID>r</RequestID></Response>`))
+			return
+		}
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+		_, _ = w.Write([]byte(`<DescribeInstanceTypesResponse ` + ns + `><requestId>r</requestId><instanceTypeSet><item><instanceType>` +
+			form.Get("InstanceType.1") + `</instanceType><memoryInfo><sizeInMiB>` + f.memMiB + `</sizeInMiB></memoryInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>`))
 	case "TerminateInstances":
 		_, _ = w.Write([]byte(`<TerminateInstancesResponse ` + ns + `><requestId>r</requestId><instancesSet/></TerminateInstancesResponse>`))
 	default:
@@ -123,7 +136,12 @@ func newFakeEC2Client(t *testing.T, f *fakeEC2) *Client {
 // RunInstances form it sent.
 func launchSpot(t *testing.T, lc LaunchConfig) url.Values {
 	t.Helper()
-	f := &fakeEC2{}
+	return launchWith(t, &fakeEC2{}, lc)
+}
+
+// launchWith is launchSpot against a caller-configured fake.
+func launchWith(t *testing.T, f *fakeEC2, lc LaunchConfig) url.Values {
+	t.Helper()
 	c := newFakeEC2Client(t, f)
 	lc.InstanceType = "m8a.4xlarge"
 	lc.Region = "us-west-2"
@@ -190,7 +208,10 @@ func TestLaunch_SpotRequestShapeForEachLifecycle(t *testing.T) {
 		{"on-complete terminate", LaunchConfig{Spot: true, TTL: "1h", OnComplete: "terminate"}, "one-time", ""},
 		{"idle timeout zero is off", LaunchConfig{Spot: true, TTL: "1h", IdleTimeout: "0"}, "one-time", ""},
 		{"idle timeout (default action stop)", LaunchConfig{Spot: true, TTL: "1h", IdleTimeout: "15m"}, "persistent", "stop"},
-		{"on-idle hibernate, not configured for hibernation", LaunchConfig{Spot: true, IdleTimeout: "15m", HibernateOnIdle: true}, "persistent", "stop"},
+		// #949: --on-idle / --on-complete hibernate configure hibernation, so the
+		// persistent request is interrupted by hibernating, as the idle action is.
+		{"on-idle hibernate implies hibernation", LaunchConfig{Spot: true, IdleTimeout: "15m", HibernateOnIdle: true}, "persistent", "hibernate"},
+		{"on-complete hibernate implies hibernation", LaunchConfig{Spot: true, TTL: "1h", OnComplete: "hibernate"}, "persistent", "hibernate"},
 		{"on-idle hibernate with --hibernate", LaunchConfig{Spot: true, IdleTimeout: "15m", HibernateOnIdle: true, Hibernate: true}, "persistent", "hibernate"},
 		{"on-complete stop", LaunchConfig{Spot: true, TTL: "1h", OnComplete: "stop"}, "persistent", "stop"},
 		{"on-complete hibernate", LaunchConfig{Spot: true, TTL: "1h", OnComplete: "hibernate", Hibernate: true}, "persistent", "hibernate"},

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--on-idle hibernate` and `--on-complete hibernate` now hibernate** (#949).
+  EC2 hibernates only an instance launched configured for hibernation, and only
+  `--hibernate` configured it, so these two (and the deprecated
+  `--hibernate-on-idle`) launched an instance whose idle or completion hibernate
+  quietly became a plain stop, losing RAM. Each one now configures hibernation
+  as `--hibernate` does: an encrypted root volume and `HibernationOptions`. A
+  launch is refused up front when the type can't hibernate, and the error names
+  the flag that asked for it. With `--spot`, a persistent request is interrupted
+  by hibernating rather than stopping. The same applies to SDK callers that set
+  `LaunchConfig.HibernateOnIdle` or `OnComplete: "hibernate"`. When no
+  `--volume-size` is given, the root volume for any hibernation launch is now
+  sized from the type's real memory plus 10 GiB. Before, a per-family guess gave
+  an m7i.4xlarge (64 GiB) a 26 GiB root. `spawn status` now says an idle
+  timeout will stop, not hibernate, an instance that was launched before this
+  fix and is not configured for hibernation. New public API, additions only:
+  `LaunchConfig.HibernationRequested()` and `InstanceInfo.HibernationConfigured`.
+
 ## [0.130.0] - 2026-10-16
 
 ### Added
