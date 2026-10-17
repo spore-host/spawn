@@ -71,6 +71,14 @@ type fakeLambda struct {
 	codeUpdatePolls int
 	updating        int
 	updateFailed    bool
+
+	tags map[string]string // what TagResource last set
+}
+
+func (f *fakeLambda) TagResource(_ context.Context, in *lambda.TagResourceInput, _ ...func(*lambda.Options)) (*lambda.TagResourceOutput, error) {
+	f.calls = append(f.calls, "TagResource")
+	f.tags = in.Tags
+	return &lambda.TagResourceOutput{}, nil
 }
 
 func (f *fakeLambda) GetFunction(context.Context, *lambda.GetFunctionInput, ...func(*lambda.Options)) (*lambda.GetFunctionOutput, error) {
@@ -333,6 +341,49 @@ func TestRedeployStopsOnAFailedCodeUpdate(t *testing.T) {
 		if c == "UpdateFunctionConfiguration" {
 			t.Error("configuration was written after the code update failed")
 		}
+	}
+}
+
+// TestRedeployReportsWhatItDid is #1086: upgrading an armed reaper must report
+// it armed (the CLI told the operator it was in dry run and to arm it), move
+// spawn:version to the new release (tags were only set on create, so status and
+// the skew report read the first-deployed version forever), and not claim to
+// have created a bucket it reused or stamp ownership tags on it.
+func TestRedeployReportsWhatItDid(t *testing.T) {
+	lamF := &fakeLambda{exists: true, dryRun: "false"}
+	s3F := &fakeS3{bucketExists: true}
+	d := newTestDeployer(&fakeIAM{roleExists: true}, lamF, &fakeEvents{}, s3F)
+
+	res, err := d.Deploy(context.Background(), Options{
+		AccountID: "1", Region: "us-west-2", Version: "0.131.0", Artifact: "/tmp/x.zip",
+	})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if res.DryRun {
+		t.Error("an armed reaper that stayed armed is reported as dry run")
+	}
+	if got := lamF.tags["spawn:version"]; got != "0.131.0" {
+		t.Errorf("spawn:version on the upgraded function = %q, want 0.131.0", got)
+	}
+	for _, a := range res.Actions {
+		if strings.HasPrefix(a, "created artifact bucket") {
+			t.Errorf("reported %q for a bucket that already existed", a)
+		}
+	}
+	for _, c := range s3F.calls {
+		if c == "PutBucketTagging" {
+			t.Error("tagged an existing bucket: spawn:managed is teardown's proof spawn created it")
+		}
+	}
+
+	// A disarmed reaper stays disarmed and is reported so.
+	lamF = &fakeLambda{exists: true, dryRun: "true"}
+	d = newTestDeployer(&fakeIAM{roleExists: true}, lamF, &fakeEvents{}, &fakeS3{bucketExists: true})
+	if res, err = d.Deploy(context.Background(), Options{
+		AccountID: "1", Region: "us-west-2", Version: "0.131.0", Artifact: "/tmp/x.zip",
+	}); err != nil || !res.DryRun {
+		t.Errorf("redeploy of a dry-run reaper: DryRun=%v err=%v, want true", res != nil && res.DryRun, err)
 	}
 }
 

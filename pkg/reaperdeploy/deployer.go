@@ -41,6 +41,7 @@ type LambdaAPI interface {
 	GetFunction(context.Context, *lambda.GetFunctionInput, ...func(*lambda.Options)) (*lambda.GetFunctionOutput, error)
 	UpdateFunctionCode(context.Context, *lambda.UpdateFunctionCodeInput, ...func(*lambda.Options)) (*lambda.UpdateFunctionCodeOutput, error)
 	UpdateFunctionConfiguration(context.Context, *lambda.UpdateFunctionConfigurationInput, ...func(*lambda.Options)) (*lambda.UpdateFunctionConfigurationOutput, error)
+	TagResource(context.Context, *lambda.TagResourceInput, ...func(*lambda.Options)) (*lambda.TagResourceOutput, error)
 	AddPermission(context.Context, *lambda.AddPermissionInput, ...func(*lambda.Options)) (*lambda.AddPermissionOutput, error)
 	RemovePermission(context.Context, *lambda.RemovePermissionInput, ...func(*lambda.Options)) (*lambda.RemovePermissionOutput, error)
 	DeleteFunction(context.Context, *lambda.DeleteFunctionInput, ...func(*lambda.Options)) (*lambda.DeleteFunctionOutput, error)
@@ -190,7 +191,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Bucket == "" {
 		opts.Bucket = DefaultBucketName(opts.AccountID, opts.Region)
 	}
-	res := &Result{Bucket: opts.Bucket, Key: ObjectKey(opts.Version), DryRun: true}
+	res := &Result{Bucket: opts.Bucket, Key: ObjectKey(opts.Version)}
 
 	roleARN, created, err := d.ensureRole(ctx, opts)
 	if err != nil {
@@ -217,10 +218,11 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		}
 	}
 
-	if err := d.ensureBucket(ctx, opts.Bucket, opts.Region); err != nil {
+	bucketCreated, err := d.ensureBucket(ctx, opts.Bucket, opts.Region)
+	if err != nil {
 		return nil, err
 	}
-	res.Actions = append(res.Actions, actionWord(true, "artifact bucket", opts.Bucket))
+	res.Actions = append(res.Actions, actionWord(bucketCreated, "artifact bucket", opts.Bucket))
 
 	zip, err := d.fetchArtifact(ctx, opts)
 	if err != nil {
@@ -235,11 +237,12 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	}
 	res.Actions = append(res.Actions, fmt.Sprintf("uploaded artifact s3://%s/%s (%d bytes)", opts.Bucket, res.Key, len(zip)))
 
-	fnARN, fnCreated, err := d.ensureFunction(ctx, opts, roleARN, res.Key)
+	fnARN, fnCreated, dryRun, err := d.ensureFunction(ctx, opts, roleARN, res.Key)
 	if err != nil {
 		return nil, err
 	}
 	res.FunctionARN = fnARN
+	res.DryRun = dryRun
 	res.Actions = append(res.Actions, actionWord(fnCreated, "function", FunctionName))
 
 	if err := d.ensureSchedule(ctx, opts, fnARN); err != nil {
@@ -297,9 +300,13 @@ func (d *Deployer) ensureRole(ctx context.Context, opts Options) (string, bool, 
 	return arn, created, nil
 }
 
-func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) error {
+// ensureBucket reports whether it created the bucket. An existing bucket is
+// used as it is and deliberately not tagged: spawn:managed=true is teardown's
+// proof that spawn created the bucket, and --bucket can name one it did not
+// (#1086).
+func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) (bool, error) {
 	if _, err := d.S3.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: awssdk.String(bucket)}); err == nil {
-		return nil
+		return false, nil
 	}
 	in := &s3.CreateBucketInput{Bucket: awssdk.String(bucket)}
 	// us-east-1 must NOT carry a LocationConstraint; every other region must.
@@ -314,9 +321,9 @@ func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) erro
 		var owned *s3types.BucketAlreadyOwnedByYou
 		var exists *s3types.BucketAlreadyExists
 		if errors.As(err, &owned) || errors.As(err, &exists) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("reaperdeploy: create bucket %s: %w", bucket, err)
+		return false, fmt.Errorf("reaperdeploy: create bucket %s: %w", bucket, err)
 	}
 
 	// Stamp it at the creation site, so a later teardown can prove the bucket is
@@ -337,7 +344,7 @@ func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) erro
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  reaperdeploy: could not tag bucket %s (%v) — teardown will need --force-artifacts to remove it\n", bucket, err)
 	}
-	return nil
+	return true, nil
 }
 
 // artifactKeyPrefix is the only prefix the reaper writes under. Teardown refuses
@@ -472,11 +479,11 @@ func DefaultFetch(ctx context.Context, ref string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, 256<<20))
 }
 
-func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, key string) (string, bool, error) {
+func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, key string) (arn string, created, dryRun bool, err error) {
 	env := EnvVars(opts.Regions, true) // always deploy unarmed; `spawn reaper arm` flips it
 
-	out, err := d.Lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: awssdk.String(FunctionName)})
-	if err == nil {
+	out, gerr := d.Lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: awssdk.String(FunctionName)})
+	if gerr == nil {
 		// Update code first, then configuration. The reverse order can leave a
 		// function configured for an artifact it is not yet running.
 		if _, err := d.Lambda.UpdateFunctionCode(ctx, &lambda.UpdateFunctionCodeInput{
@@ -484,10 +491,10 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 			S3Bucket:     awssdk.String(opts.Bucket),
 			S3Key:        awssdk.String(key),
 		}); err != nil {
-			return "", false, fmt.Errorf("reaperdeploy: update function code: %w", err)
+			return "", false, false, fmt.Errorf("reaperdeploy: update function code: %w", err)
 		}
 		if err := d.waitForUpdate(ctx); err != nil {
-			return "", false, err
+			return "", false, false, err
 		}
 		// Preserve REAPER_DRY_RUN on an existing function: re-deploying must not
 		// silently DISARM a reaper an operator deliberately armed.
@@ -503,17 +510,27 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 			Timeout:      awssdk.Int32(900),
 			MemorySize:   awssdk.Int32(256),
 		}); err != nil {
-			return "", false, fmt.Errorf("reaperdeploy: update function configuration: %w", err)
+			return "", false, false, fmt.Errorf("reaperdeploy: update function configuration: %w", err)
 		}
-		return awssdk.ToString(out.Configuration.FunctionArn), false, nil
+		arn = awssdk.ToString(out.Configuration.FunctionArn)
+		// Tags are only set by CreateFunction, so without this an upgraded reaper
+		// kept the spawn:version it was first deployed with, and `spawn reaper
+		// status` and the skew report (#654) read the wrong version (#1086).
+		if _, err := d.Lambda.TagResource(ctx, &lambda.TagResourceInput{
+			Resource: awssdk.String(arn),
+			Tags:     Tags(opts.Version),
+		}); err != nil {
+			return "", false, false, fmt.Errorf("reaperdeploy: tag function: %w", err)
+		}
+		return arn, false, env["REAPER_DRY_RUN"] == "true", nil
 	}
 
 	var nf *lambdatypes.ResourceNotFoundException
-	if !errors.As(err, &nf) {
-		return "", false, fmt.Errorf("reaperdeploy: get function: %w", err)
+	if !errors.As(gerr, &nf) {
+		return "", false, false, fmt.Errorf("reaperdeploy: get function: %w", gerr)
 	}
 
-	created, err := d.Lambda.CreateFunction(ctx, &lambda.CreateFunctionInput{
+	fn, err := d.Lambda.CreateFunction(ctx, &lambda.CreateFunctionInput{
 		FunctionName:  awssdk.String(FunctionName),
 		Role:          awssdk.String(roleARN),
 		Runtime:       lambdatypes.RuntimeProvidedal2023,
@@ -527,9 +544,9 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 		Tags:          Tags(opts.Version),
 	})
 	if err != nil {
-		return "", false, fmt.Errorf("reaperdeploy: create function: %w", err)
+		return "", false, false, fmt.Errorf("reaperdeploy: create function: %w", err)
 	}
-	return awssdk.ToString(created.FunctionArn), true, nil
+	return awssdk.ToString(fn.FunctionArn), true, true, nil
 }
 
 func (d *Deployer) ensureSchedule(ctx context.Context, opts Options, fnARN string) error {

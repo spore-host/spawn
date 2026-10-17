@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn reaper deploy` reports an upgraded reaper accurately** (#1086).
+  Re-running it on an armed reaper printed "DRY RUN … then arm it" although the
+  reaper stayed armed. It never updated the function's `spawn:version` tag, so
+  `spawn reaper status` and the version-skew report kept showing the release it
+  was first deployed with. And it said it had created an artifact bucket it
+  had only reused. It now says whether the reaper is armed, tags the function
+  with the version it deployed, and says "converged" for an existing bucket.
+  An existing bucket is still not tagged `spawn:managed`: that tag is how
+  teardown knows spawn created the bucket.
 - **Re-running `spawn reaper deploy` to upgrade a deployed reaper no longer
   fails half-way** (#1084). It updated the function's configuration
   immediately after its code, and Lambda refuses that while the code update is

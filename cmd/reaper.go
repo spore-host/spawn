@@ -192,12 +192,24 @@ func runReaperDeploy(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "  + %s\n", a)
 	}
 
+	writeReaperDeployState(out, res.DryRun, region)
+	return nil
+}
+
+// writeReaperDeployState says whether the deployed reaper is armed. A redeploy
+// keeps an existing reaper's state, so an armed one must not be told it is in
+// dry run and needs arming (#1086).
+func writeReaperDeployState(out io.Writer, dryRun bool, region string) {
+	if !dryRun {
+		fmt.Fprintf(out, "\n✅ ARMED: kept armed from the existing deployment; it reclaims expired resources.\n")
+		fmt.Fprintf(out, "   Watch a cycle: aws logs tail /aws/lambda/%s --follow --region %s\n", reaperdeploy.FunctionName, region)
+		return
+	}
 	fmt.Fprintf(out, "\n⚠️  DRY RUN: it will log what it WOULD reclaim and touch nothing.\n")
 	fmt.Fprintf(out, "   Read a cycle, then arm it:\n")
 	fmt.Fprintf(out, "     aws logs tail /aws/lambda/%s --follow --region %s\n", reaperdeploy.FunctionName, region)
 	fmt.Fprintf(out, "     spawn reaper arm\n")
 	fmt.Fprintf(out, "\n   'spawn doctor' should now report this account as covered.\n")
-	return nil
 }
 
 func runReaperArm(cmd *cobra.Command, _ []string) error {
