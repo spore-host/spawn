@@ -302,6 +302,12 @@ type LaunchConfig struct {
 
 	// Pricing (populated at launch from AWS Pricing API)
 	PricePerHour float64 // actual on-demand rate; 0 means look it up
+	// PriceSource says where PricePerHour came from: "live" (the AWS Price
+	// List), "static" (truffle's fallback table), or "" (caller-supplied or
+	// unknown). Written as spawn:price-source, so a cost computed later from
+	// spawn:price-per-hour can say whether it rests on a live or a static rate
+	// (#1076; static prices must be labelled as static).
+	PriceSource string
 
 	// Metadata
 	Name string

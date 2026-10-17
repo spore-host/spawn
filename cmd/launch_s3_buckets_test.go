@@ -36,8 +36,12 @@ func TestS3BucketFlagsProduceScopedPolicy(t *testing.T) {
 		t.Errorf("policy mentions a bucket that was never named:\n%s", policy)
 	}
 	// A read bucket must not become writable.
-	if strings.Contains(policy, `"s3:PutObject"],"Resource":["arn:aws:s3:::my-inputs/*"]`) {
-		t.Errorf("a --s3-read bucket must not get write access:\n%s", policy)
+	// Parsed, not substring-matched: a literal fragment stops matching as soon as
+	// an action list changes, and the check then passes whatever the policy says.
+	for _, action := range []string{"s3:PutObject", "s3:PutObjectTagging", "s3:PutObjectAnnotation", "s3:DeleteObject"} {
+		if grantsOn(t, policy, action)["arn:aws:s3:::my-inputs/*"] {
+			t.Errorf("a --s3-read bucket must not get %s:\n%s", action, policy)
+		}
 	}
 }
 

@@ -85,6 +85,8 @@ func newRootCmd() *cobra.Command {
 		newCompleteCmd(),
 		// The bootstrap gates the user's workload on this exit code (#1007).
 		newIsSpotReplacementCmd(),
+		// The task wrapper records output regeneration cost and provenance (#1076).
+		newProvenanceCmd(),
 		// Explicit `version` subcommand preserves the historical contract
 		// (`spored version` → "spored version X"); cobra's --version flag alone
 		// would break callers that parse it: `spawn upgrade-spored`

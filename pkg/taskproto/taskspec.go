@@ -43,6 +43,14 @@ type TaskSpec struct {
 	// not create a bucket you named, because a typo would leave a stray bucket and
 	// still report success.
 	ResultsPrefix string `json:"results_prefix,omitempty"`
+
+	// Regenerable opts this task's outputs in to deletion by spawn's retention
+	// sweeper (#1076; owner decision 2026-10-17: deletion is opt-in per spec,
+	// tiering is automatic). Set it only for a deterministic task: one that
+	// produces the same outputs from the same inputs and recipe. spawn can't know
+	// that, and deletion is irreversible. Even when set, the sweeper re-verifies
+	// at deletion time that every input is unchanged and the recipe is readable.
+	Regenerable bool `json:"regenerable,omitempty"`
 }
 
 // ResourceRequest is what the sizer maps to an instance type.

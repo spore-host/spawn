@@ -1,6 +1,7 @@
 package taskproto
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"sort"
@@ -116,6 +117,7 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	// file, a record flushed by a TTL kill would have to either omit started_at or
 	// invent one. Best-effort — losing it costs one field, not the record.
 	p("printf '%%s' \"$STARTED_AT\" > %s 2>/dev/null || true\n", shQuote(StartedAtPath()))
+	writeProvenanceSetup(p, spec, runID)
 	// Phase markers. completion.json carries only started_at/ended_at, so the
 	// whole interval between them — stage-in, the Docker install, the image pull,
 	// the user command, stage-out — is one opaque number. Measured on a real task
@@ -244,6 +246,11 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 		p("fi\n")
 	}
 	p("spawn_phase \"stage-in done rc=$STAGE_RC\"\n")
+	// Record each input as it was read (#1076): the ETag/version a later
+	// deletion sweeper compares against. Never affects the task.
+	p("if [ \"$PROV_OK\" = 1 ] && [ \"$STAGE_RC\" -eq 0 ]; then\n")
+	p("  \"$SPORED\" provenance stage-in --spec \"$PROV_DIR/spec.json\" --state \"$PROV_DIR\" >/dev/null 2>&1 || true\n")
+	p("fi\n")
 	p("\n")
 
 	// ---- run user command ----
@@ -264,6 +271,13 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	p("  rc=$STAGE_RC\n")
 	p("fi\n")
 	p("ENDED_AT=\"$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\"\n\n")
+	// The run's cost and the provenance record (#1076). COST_USD is a number or
+	// empty; anything else is discarded so completion.json stays valid JSON.
+	p("COST_USD=''\n")
+	p("if [ \"$PROV_OK\" = 1 ]; then\n")
+	p("  COST_USD=\"$(SPAWN_RUN_ID=%s \"$SPORED\" provenance cost --spec \"$PROV_DIR/spec.json\" --state \"$PROV_DIR\" --started \"$STARTED_AT\" --ended \"$ENDED_AT\" 2>/dev/null)\" || COST_USD=''\n", shQuote(runID))
+	p("fi\n")
+	p("case \"$COST_USD\" in ''|*[!0-9.]*) COST_USD='' ;; esac\n\n")
 
 	// ---- stage-out (only when the command actually ran; runs even if it failed) ----
 	p("# ---- stage-out (runs even when the user command failed) ----\n")
@@ -272,7 +286,14 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 		p("if [ \"$STAGE_RC\" -eq 0 ]; then\n")
 		p("  spawn_phase 'stage-out start'\n")
 		for _, m := range spec.Outputs {
-			p("  aws s3 cp%s %s %s || OUT_RC=$?\n", recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
+			// spored uploads exactly where `aws s3 cp` would, with the provenance
+			// tags set in the same request and the record annotated (#1076). Without
+			// a spored that has the subcommand, it's plain `aws s3 cp`, as before.
+			p("  if [ \"$PROV_OK\" = 1 ]; then\n")
+			p("    \"$SPORED\" provenance upload --state \"$PROV_DIR\" %s %s || OUT_RC=$?\n", shQuote(m.Source), shQuote(m.Destination))
+			p("  else\n")
+			p("    aws s3 cp%s %s %s || OUT_RC=$?\n", recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
+			p("  fi\n")
 		}
 		p("  spawn_phase \"stage-out done rc=$OUT_RC\"\n")
 		p("fi\n")
@@ -308,6 +329,9 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 
 	// completion.json — the authoritative record. Built with a heredoc; all
 	// interpolated values are either shell ints (rc) or our own controlled strings.
+	// cost_estimate (#1076): present only when the rate was known.
+	p("COST_JSON=''\n")
+	p("if [ -n \"$COST_USD\" ]; then COST_JSON=\"\\\"cost_estimate\\\": $COST_USD,\"; fi\n")
 	p("cat > %s <<JSON\n", shQuote(CompletionRecordPath()))
 	p("{\n")
 	p("  \"task_id\": %s,\n", jsonStr(taskID))
@@ -324,6 +348,7 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	p("  \"state\": \"$STATE\",\n")
 	p("  \"started_at\": \"$STARTED_AT\",\n")
 	p("  \"ended_at\": \"$ENDED_AT\",\n")
+	p("  $COST_JSON\n")
 	p("  \"logs\": $LOGS_JSON,\n")
 	p("  \"retry_class\": \"$RETRY_CLASS\"\n")
 	p("}\n")
@@ -446,6 +471,8 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	}
 	p("  spawn_phase 'image pull start'\n")
 	p("  sudo docker pull %s\n", shQuote(image))
+	// The digest that actually ran, not what the tag pointed to (#1076).
+	p("  if [ \"$PROV_OK\" = 1 ]; then sudo docker inspect --format '{{index .RepoDigests 0}}' %s > \"$PROV_DIR/image-digest\" 2>/dev/null || true; fi\n", shQuote(image))
 	p("  spawn_phase 'image pull done; command start'\n")
 	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s %s\n", gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
 	p("  rc=$?\n")
@@ -596,4 +623,60 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// writeProvenanceSetup emits the provenance preamble (#1076). PROV_OK=1 only
+// when spored is present AND has the provenance subcommand. A new wrapper can
+// meet an older spored, and there `spored provenance upload` would exit
+// "unknown command" and fail the output upload, so everything falls back to
+// plain `aws s3 cp` unless the subcommand answers. The spec copy has env VALUES
+// stripped: they can hold secrets, and the record keeps names only.
+func writeProvenanceSetup(p func(string, ...interface{}), spec *TaskSpec, runID string) {
+	dirID := runID
+	if dirID == "" {
+		dirID = spec.TaskID
+	}
+	// SPAWN_SPORED_BIN exists for the wrapper's own execution tests; nothing sets
+	// it on an instance.
+	p("SPORED=\"${SPAWN_SPORED_BIN:-/usr/local/bin/spored}\"\n")
+	p("PROV_DIR=%s\n", shQuote("/tmp/spawn-provenance/"+safePathPart(dirID)))
+	p("PROV_OK=0\n")
+	p("if [ -x \"$SPORED\" ] && \"$SPORED\" provenance --help >/dev/null 2>&1 && mkdir -p \"$PROV_DIR\" 2>/dev/null; then\n")
+	p("  cat > \"$PROV_DIR/spec.json\" <<'SPAWN_PROVENANCE_SPEC'\n%s\nSPAWN_PROVENANCE_SPEC\n", provenanceSpecJSON(spec))
+	p("  [ -s \"$PROV_DIR/spec.json\" ] && PROV_OK=1\n")
+	p("fi\n\n")
+}
+
+// provenanceSpecJSON is the spec as the provenance record sees it: env values
+// blanked, names kept. One line, so it can never equal the heredoc delimiter.
+func provenanceSpecJSON(spec *TaskSpec) string {
+	cp := *spec
+	if len(spec.Env) > 0 {
+		cp.Env = make(map[string]string, len(spec.Env))
+		for k := range spec.Env {
+			cp.Env[k] = ""
+		}
+	}
+	b, err := json.Marshal(&cp)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// safePathPart keeps an id usable as one path segment.
+func safePathPart(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "run"
+	}
+	return b.String()
 }

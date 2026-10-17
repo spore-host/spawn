@@ -327,6 +327,9 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	// Always tag the on-demand price — used by spored for effective cost calculation.
 	if config.PricePerHour > 0 {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:price-per-hour"), Value: aws.String(fmt.Sprintf("%.6f", config.PricePerHour))})
+		if config.PriceSource != "" {
+			tags = append(tags, types.Tag{Key: aws.String(PriceSourceTag), Value: aws.String(config.PriceSource)})
+		}
 	}
 	if config.CostLimit > 0 {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:cost-limit"), Value: aws.String(fmt.Sprintf("%.4f", config.CostLimit))})

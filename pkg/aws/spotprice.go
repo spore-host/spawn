@@ -19,6 +19,10 @@ import (
 // can only overstate a spot instance's spend.
 const SpotPriceTag = "spawn:spot-price-per-hour"
 
+// PriceSourceTag records where spawn:price-per-hour came from: "live" or
+// "static" (#1076). See LaunchConfig.PriceSource.
+const PriceSourceTag = "spawn:price-source"
+
 // SpotPrice is one spot market price observation for an instance.
 type SpotPrice struct {
 	PricePerHour       float64
