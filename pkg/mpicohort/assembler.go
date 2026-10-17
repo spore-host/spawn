@@ -3,7 +3,6 @@ package mpicohort
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -19,8 +18,9 @@ import (
 
 // peersFilePath is the on-instance file the MPI user-data waits on and builds its
 // hostfile from (pkg/userdata/mpi.go). The control-plane Assembler writes it via
-// SSM instead of relying on the instance to self-discover peers.
-const peersFilePath = "/etc/spawn/job-array-peers.json"
+// SSM instead of relying on the instance to self-discover peers. It is the same
+// file spored maintains for hybrid members (provider.JobArrayPeersFile, #933).
+const peersFilePath = provider.JobArrayPeersFile
 
 // maxSSMPushConcurrency bounds how many nodes we push the peers file to at once.
 const maxSSMPushConcurrency = 16
@@ -50,7 +50,7 @@ func PeersJSON(members []cohort.Observation, accountBase36 string) ([]byte, erro
 	}
 	// Sort by index for stable, rank-ordered output.
 	sort.Slice(peers, func(i, j int) bool { return peers[i].Index < peers[j].Index })
-	return json.MarshalIndent(peers, "", "  ")
+	return provider.MarshalPeers(peers)
 }
 
 // indexFromName extracts the job-array index from a member name's trailing "-N"

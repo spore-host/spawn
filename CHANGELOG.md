@@ -106,6 +106,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`pkg/aws` `Client.GetSelfOwnedSpawnAMI`** (#924) returns the newest
   self-owned `spawn-*` AMI that fits an instance type (architecture, Linux, and
   GPU when the image is tagged `spawn:gpu`), or `""` when none does.
+- **Hybrid job-array members can read their peers** (#933). On a `spawn burst`
+  instance or a local node, spored now writes the job array's live members (EC2
+  instances and local nodes, each listed once) to
+  `/etc/spawn/job-array-peers.json`, the same file and format `spawn launch
+  --mpi` uses. It rewrites the file every minute, so members that join after
+  boot appear and members whose registry heartbeat lapses drop out. If a
+  refresh fails, the previous list is kept. Before this, spored discovered peers
+  once at boot and only logged how many it found. `spored status` (table and
+  `-o json`) now shows a job-array member's peers, when the list was last
+  refreshed, and whether it is stale. spored never writes the file on
+  `--mpi` instances, where its arrival is the signal the MPI setup waits for.
 
 ### Deprecated
 

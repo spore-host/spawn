@@ -120,6 +120,13 @@ type Agent struct {
 	// it isn't shared across agents and resets cleanly per instance (#175).
 	configRefreshTick int
 
+	// peerState is the hybrid peer list spored maintains (#933, peers.go).
+	peerState peerState
+
+	// peerRefreshInterval is the peers-file refresh period. Zero means the
+	// production default (PeerRefreshInterval); tests set it small.
+	peerRefreshInterval time.Duration
+
 	// regionVacatedSettle is how long the last-instance check waits before
 	// re-confirming the region is empty (#260). Zero means the production default
 	// (60s); tests set it small.
@@ -380,12 +387,19 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	}
 
 	if activate && config.JobArrayID != "" {
-		// Discover peers
-		peers, err := prov.DiscoverPeers(ctx, config.JobArrayID)
-		if err != nil {
-			log.Printf("Warning: Failed to discover peers: %v", err)
-		} else if len(peers) > 0 {
-			log.Printf("✓ Discovered %d peers in job array %s", len(peers), config.JobArrayID)
+		// Discover peers. A hybrid member's list is written to the peers file
+		// for its workload now, and refreshed by the monitor (#933). Any other
+		// member's discovery is diagnostic only: for --mpi the cohort Assembler
+		// owns that file (see MaintainsPeersFile).
+		if agent.MaintainsPeersFile() {
+			_ = agent.refreshPeers(ctx) // failures are logged and recorded
+		} else {
+			peers, err := prov.DiscoverPeers(ctx, config.JobArrayID)
+			if err != nil {
+				log.Printf("Warning: Failed to discover peers: %v", err)
+			} else if len(peers) > 0 {
+				log.Printf("✓ Discovered %d peers in job array %s", len(peers), config.JobArrayID)
+			}
 		}
 	}
 
@@ -426,6 +440,14 @@ func (a *Agent) Monitor(ctx context.Context) {
 	// forever (#65). So we start the lifecycle loop unconditionally and do the
 	// spot decision off the critical path.
 	go a.monitorSpotInterruptions(ctx)
+
+	// A hybrid member's peers file is refreshed off this loop too, for the same
+	// reason: discovery makes EC2 and DynamoDB calls (#933).
+	peerInterval := a.peerRefreshInterval
+	if peerInterval <= 0 {
+		peerInterval = PeerRefreshInterval
+	}
+	go a.maintainPeers(ctx, peerInterval)
 
 	// The async FSx mount (#194) is triggered from the monitor loop
 	// (maybeMountPendingFSx in checkAndAct), not once here: spawn:fsx-pending may
