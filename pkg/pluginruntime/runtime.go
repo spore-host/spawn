@@ -31,6 +31,19 @@ type Runtime struct {
 
 	mu            sync.Mutex
 	healthCancels map[string]context.CancelFunc
+	// healthSpecs is the health block each running loop was started with, and
+	// stopped is what the last StopAll stopped, so ResumeStopped can undo it
+	// when the shutdown it prepared for does not happen (#979). Both under mu.
+	healthSpecs map[string]plugin.HealthBlock
+	stopped     []stoppedPlugin
+}
+
+// stoppedPlugin is one plugin StopAll stopped: its status before, and its
+// health block if it had a running health loop.
+type stoppedPlugin struct {
+	name   string
+	status plugin.PluginStatus
+	health *plugin.HealthBlock
 }
 
 // NewRuntime creates a Runtime backed by the default disk state store.
@@ -38,8 +51,14 @@ type Runtime struct {
 // empty. localUser is the instance's local login user (spawn:local-username);
 // steps that opt into AsUser run as this user, and "" means always-root.
 func NewRuntime(identity *provider.Identity, localUser string) *Runtime {
+	return NewRuntimeWithStore(plugin.DefaultStateStore(), identity, localUser)
+}
+
+// NewRuntimeWithStore is NewRuntime with the plugin state kept in store rather
+// than the default spored state directory.
+func NewRuntimeWithStore(store plugin.StateStore, identity *provider.Identity, localUser string) *Runtime {
 	return &Runtime{
-		store:         plugin.DefaultStateStore(),
+		store:         store,
 		executor:      NewRemoteExecutor(localUser),
 		identity:      identity,
 		localUser:     localUser,
@@ -281,6 +300,8 @@ func (rt *Runtime) Remove(ctx context.Context, name string) error {
 // endpoint down. A stop or terminate shuts the OS down, which stops the
 // services anyway; a hibernate freezes them and resumes them as they were.
 // remote.stop is the undo of an install, run by Remove.
+//
+// It remembers what it stopped, for ResumeStopped (#979).
 func (rt *Runtime) StopAll(ctx context.Context) {
 	states, err := rt.store.List()
 	if err != nil {
@@ -288,14 +309,59 @@ func (rt *Runtime) StopAll(ctx context.Context) {
 		return
 	}
 
+	var stopped []stoppedPlugin
 	for _, st := range states {
 		if st.Status != plugin.StatusRunning && st.Status != plugin.StatusDegraded {
 			continue
 		}
-		rt.stopHealthLoop(st.Name)
+		sp := stoppedPlugin{name: st.Name, status: st.Status}
+		if h, ok := rt.stopHealthLoop(st.Name); ok {
+			sp.health = &h
+		}
 		log.Printf("Plugin %s: stopping (agent shutdown)", st.Name)
 		st.Status = plugin.StatusStopped
-		_ = rt.store.Save(st)
+		if err := rt.store.Save(st); err != nil {
+			log.Printf("Plugin %s: save stopped state: %v", st.Name, err)
+		}
+		stopped = append(stopped, sp)
+	}
+
+	rt.mu.Lock()
+	rt.stopped = append(rt.stopped, stopped...)
+	rt.mu.Unlock()
+}
+
+// ResumeStopped undoes the last StopAll: each plugin it stopped gets back its
+// previous status (running or degraded) and its health loop. spored calls it
+// when the stop or hibernate that StopAll prepared for failed, so the instance
+// is still running (#979). Before, every plugin stayed recorded as stopped on
+// a running instance and its health loop was gone, so a plugin that later
+// failed was never noticed.
+//
+// A plugin that is no longer recorded as stopped (removed, or reinstalled in
+// between) is left alone: something newer than StopAll decided its state.
+// StopAll ran no stop steps, so the plugin's own processes were never stopped
+// and nothing needs starting again.
+func (rt *Runtime) ResumeStopped(ctx context.Context) {
+	rt.mu.Lock()
+	stopped := rt.stopped
+	rt.stopped = nil
+	rt.mu.Unlock()
+
+	for _, sp := range stopped {
+		st, err := rt.store.Load(sp.name)
+		if err != nil || st.Status != plugin.StatusStopped {
+			continue
+		}
+		st.Status = sp.status
+		if err := rt.store.Save(st); err != nil {
+			log.Printf("Plugin %s: save resumed state: %v", sp.name, err)
+			continue
+		}
+		if sp.health != nil {
+			rt.startHealthLoop(ctx, sp.name, *sp.health)
+		}
+		log.Printf("Plugin %s: resumed (%s); the shutdown it was stopped for did not happen", sp.name, sp.status)
 	}
 }
 
@@ -423,15 +489,24 @@ func (rt *Runtime) startHealthLoop(ctx context.Context, name string, health plug
 
 	healthCtx, cancel := context.WithCancel(ctx)
 	rt.healthCancels[name] = cancel
+	if rt.healthSpecs == nil {
+		rt.healthSpecs = make(map[string]plugin.HealthBlock)
+	}
+	rt.healthSpecs[name] = health
 	go rt.healthLoop(healthCtx, name, health)
 }
 
-func (rt *Runtime) stopHealthLoop(name string) {
+// stopHealthLoop cancels the plugin's health loop, if one is running, and
+// returns the health block it was started with.
+func (rt *Runtime) stopHealthLoop(name string) (plugin.HealthBlock, bool) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
+	health, had := rt.healthSpecs[name]
+	delete(rt.healthSpecs, name)
 	if cancel, ok := rt.healthCancels[name]; ok {
 		cancel()
 		delete(rt.healthCancels, name)
 	}
+	return health, had
 }
