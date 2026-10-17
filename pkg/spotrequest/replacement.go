@@ -171,26 +171,59 @@ func DetectReplacement(ctx context.Context, api ReplacementAPI, instanceID strin
 	return d
 }
 
+// RetireAPI is what RetireReplacement needs: cancel the request, then terminate
+// the instance.
+type RetireAPI interface {
+	CancelAPI
+	TerminateInstances(ctx context.Context, in *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
+}
+
+// RetireOutcome is how a retired replacement ended.
+type RetireOutcome int
+
+const (
+	// RetiredTerminated: the instance terminated itself. Nothing is left.
+	RetiredTerminated RetireOutcome = iota + 1
+	// RetiredShutdown: the self-terminate was refused (a role from before #1080)
+	// and the OS was shut down instead. With EC2's default shutdown behaviour that
+	// STOPS the instance: it no longer computes, but it bills its EBS volume and
+	// nothing will end it, so it still needs terminating by hand.
+	RetiredShutdown
+)
+
 // RetireReplacement ends a replacement: it cancels the request so EC2 launches
-// nothing more from it, then calls shutdown (an OS shutdown; the replacement
-// has no spawn tags, so spored's tag-scoped TerminateInstances does not cover
-// it).
+// nothing more from it, then terminates instanceID (this instance) through the
+// API (#1080). The replacement has no spawn tags, so the tag-scoped terminate
+// grant does not cover it; the spored role's TerminateOnlySelf statement does.
+// Only if that is refused does it fall back to shutdown, an OS shutdown, which
+// usually leaves the instance STOPPED, and it says so in the outcome. Before
+// #1080 the shutdown was the only step, and every retired replacement was left
+// stopped, untagged and billing.
 //
-// It refuses unless d is [VerdictReplacement], and it does not shut down when
-// the cancel fails. A shutdown with the request still open could, if EC2
-// terminates the instance, reopen the request and launch yet another
-// replacement; leaving it running keeps it in the reaper's alarm instead.
-// A request that is already cancelled, or that EC2 no longer knows, cancels
-// successfully, so the shutdown still happens.
-func RetireReplacement(ctx context.Context, api CancelAPI, d Detection, shutdown func(context.Context) error) error {
+// It refuses unless d is [VerdictReplacement], and it neither terminates nor
+// shuts down when the cancel fails: a terminate with the request still open
+// reopens it, and EC2 launches yet another replacement. A request that is
+// already cancelled, or that EC2 no longer knows, cancels successfully.
+func RetireReplacement(ctx context.Context, api RetireAPI, d Detection, instanceID string, shutdown func(context.Context) error) (RetireOutcome, error) {
 	if d.Verdict != VerdictReplacement || d.RequestID == "" {
-		return fmt.Errorf("refusing to retire: verdict is %s (%s)", d.Verdict, d.Reason)
+		return 0, fmt.Errorf("refusing to retire: verdict is %s (%s)", d.Verdict, d.Reason)
+	}
+	// Checked before the cancel: a retire that cannot name the instance to end
+	// would cancel the request and then stop at the shutdown, which is #1080.
+	if instanceID == "" {
+		return 0, fmt.Errorf("refusing to retire: no instance id to terminate")
 	}
 	if err := Cancel(ctx, api, d.RequestID); err != nil {
-		return fmt.Errorf("not shutting down: %w", err)
+		return 0, fmt.Errorf("not terminating: %w", err)
+	}
+	_, termErr := api.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: []string{instanceID}})
+	if termErr == nil {
+		return RetiredTerminated, nil
 	}
 	if err := shutdown(ctx); err != nil {
-		return fmt.Errorf("cancelled Spot request %s, but the OS shutdown failed: %w", d.RequestID, err)
+		return 0, fmt.Errorf("cancelled Spot request %s; terminating %s was refused (%v) and the OS shutdown failed: %w",
+			d.RequestID, instanceID, termErr, err)
 	}
-	return nil
+	return RetiredShutdown, fmt.Errorf("terminating %s was refused (%v), so the OS was shut down instead, which leaves "+
+		"it STOPPED and billing its EBS volume", instanceID, termErr)
 }

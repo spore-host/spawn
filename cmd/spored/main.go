@@ -159,10 +159,12 @@ func runDaemon() {
 	// (#995). Off the critical path; it does nothing unless sure.
 	if ep, ok := prov.(*provider.EC2Provider); ok {
 		go replacementCheck{
-			r:        ep,
-			shutdown: powerOff,
-			notify:   replacementNotifier(identity),
-			sleep:    sleepCtx,
+			r:          ep,
+			instanceID: identity.InstanceID,
+			region:     identity.Region,
+			shutdown:   powerOff,
+			notify:     replacementNotifier(identity),
+			sleep:      sleepCtx,
 		}.run(ctx)
 	}
 

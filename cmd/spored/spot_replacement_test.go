@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +16,8 @@ type fakeRetirer struct {
 	verdicts []spotrequest.Detection // returned in order; the last repeats
 	detects  int
 	retired  []spotrequest.Detection
+	outcome  spotrequest.RetireOutcome // returned by RetireSpotReplacement; 0 means RetiredTerminated
+	err      error
 }
 
 func (f *fakeRetirer) DetectSpotReplacement(context.Context) spotrequest.Detection {
@@ -20,9 +26,12 @@ func (f *fakeRetirer) DetectSpotReplacement(context.Context) spotrequest.Detecti
 	return d
 }
 
-func (f *fakeRetirer) RetireSpotReplacement(_ context.Context, d spotrequest.Detection, _ func(context.Context) error) error {
+func (f *fakeRetirer) RetireSpotReplacement(_ context.Context, d spotrequest.Detection, _ func(context.Context) error) (spotrequest.RetireOutcome, error) {
 	f.retired = append(f.retired, d)
-	return nil
+	if f.outcome == 0 && f.err == nil {
+		return spotrequest.RetiredTerminated, nil
+	}
+	return f.outcome, f.err
 }
 
 func runCheck(f *fakeRetirer) (notified int) {
@@ -73,5 +82,36 @@ func TestNotifyConfigFromRequestTags(t *testing.T) {
 	})
 	if cfg.NotifyURL != "https://bot.example" || cfg.SlackWorkspaceID != "T1" {
 		t.Fatalf("config = %+v", cfg)
+	}
+}
+
+// When the self-terminate is refused (a role from before #1080), the instance is
+// only stopped. spored must say that, with the exact command that ends it,
+// naming this instance and region, rather than log that it retired.
+func TestReplacementCheck_StoppedFallbackSaysSoWithTheCommand(t *testing.T) {
+	repl := spotrequest.Detection{Verdict: spotrequest.VerdictReplacement, RequestID: "sir-1", OriginalInstanceID: "i-orig"}
+	f := &fakeRetirer{verdicts: []spotrequest.Detection{repl}, outcome: spotrequest.RetiredShutdown,
+		err: errors.New("terminating i-0repl was refused (UnauthorizedOperation), so the OS was shut down instead, which leaves it STOPPED")}
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	replacementCheck{
+		r: f, instanceID: "i-0repl", region: "eu-west-1",
+		shutdown: func(context.Context) error { return nil },
+		notify:   func(context.Context, spotrequest.Detection) {},
+		sleep:    func(context.Context, time.Duration) bool { return true },
+	}.run(context.Background())
+
+	out := buf.String()
+	for _, want := range []string{"STOPPED", "aws ec2 terminate-instances --region eu-west-1 --instance-ids i-0repl"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log does not contain %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "terminating itself") {
+		t.Errorf("the stopped fallback was logged as a self-terminate:\n%s", out)
 	}
 }
