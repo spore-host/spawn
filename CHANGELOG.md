@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Task outputs record what they would cost to regenerate** (#1076, phase 1
+  of [retention by regeneration cost](docs/recompute-tag-design.md); record
+  only, nothing is tiered or deleted). `spawn task run` and pooled workers now
+  upload each output tagged `spawn:regen-class` (`cheap` < $1 and < 1 h,
+  `expensive` ≥ $25 or ≥ 12 h, `moderate` between), `spawn:regen-usd`,
+  `spawn:regen-hours` and `spawn:run-id`, set in the same request as the upload.
+  Each output also gets an S3 object annotation, `spawn.provenance`, holding the
+  recipe (command, env names but never values, image and the digest that
+  actually ran, AMI, instance type, versions), each input's ETag and version as
+  it was read, and the cost with its rate source. `completion.json`'s
+  `cost_estimate`, defined but never written until now, is filled in. An
+  unknown rate means no class, so the output is kept rather than treated as
+  cheap. A static truffle rate is labelled `on-demand:static`, a Spot run uses
+  the price paid, and Windows is marked as a lower bound. Uploads go through
+  `spored provenance upload`, which keys objects exactly as `aws s3 cp` does
+  (pinned against the real CLI); with an older spored the wrapper falls back to
+  plain `aws s3 cp`, untagged.
+- **`regenerable` in a task spec** opts its outputs in to future deletion by
+  spawn's retention sweeper. Deletion is opt-in; tiering will be automatic.
+  It's recorded only when every input could be read, so the sweeper can later
+  prove the inputs unchanged.
+- **`spawn:price-source`** (`live` or `static`) is tagged beside
+  `spawn:price-per-hour`, so a cost computed later from it can say which it was.
+
 ### Fixed
 
 - **`spawn reaper deploy` reports an upgraded reaper accurately** (#1086).

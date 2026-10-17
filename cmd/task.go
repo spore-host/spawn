@@ -568,7 +568,7 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	// A private-ECR container image additionally needs ecr:ReadOnly to pull.
 	profile, err := client.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
 		TrustServices:    []string{"ec2"}, // an instance profile is assumed by EC2
-		InlinePolicyJSON: taskStagingPolicy(s3Buckets(spec.Inputs), s3Buckets(spec.Outputs), resultsBucket, s3Buckets2(spec.Resources.S3ReadWrite)),
+		InlinePolicyJSON: taskStagingPolicyFor(s3Buckets(spec.Inputs), s3Buckets(spec.Outputs), resultsBucket, s3Buckets2(spec.Resources.S3ReadWrite), true),
 		Policies:         taskExtraPolicies(spec),
 	})
 	if err != nil {
@@ -1153,6 +1153,16 @@ func taskExtraPolicies(spec *taskproto.TaskSpec) []string {
 // aws s3 cp needs, and no more (preferred over the wildcard s3:FullAccess
 // template). Modeled on GenerateScopedS3Policy.
 func taskStagingPolicy(inputBuckets, outputBuckets []string, resultsBucket string, readWriteBuckets []string) string {
+	return taskStagingPolicyFor(inputBuckets, outputBuckets, resultsBucket, readWriteBuckets, false)
+}
+
+// taskStagingPolicyFor is taskStagingPolicy, plus, when provenance is set, what
+// `spored provenance upload` needs on the WRITE buckets (#1076): an upload that
+// sets tags in the request requires s3:PutObjectTagging as well as PutObject,
+// and the provenance record is written with s3:PutObjectAnnotation. Both action
+// names are from AWS's machine-readable service reference. Only `spawn task
+// run` asks for it; `spawn launch --s3-write` and sweeps never tag.
+func taskStagingPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string, readWriteBuckets []string, provenance bool) string {
 	readB := dedupeBuckets(inputBuckets)
 	writeB := dedupeBuckets(append(append([]string{}, outputBuckets...), resultsBucket))
 	rwB := dedupeBuckets(readWriteBuckets)
@@ -1170,6 +1180,9 @@ func taskStagingPolicy(inputBuckets, outputBuckets []string, resultsBucket strin
 	// instance profile impossible to create and failed the entire launch.
 	if len(writeB) > 0 {
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
+		if provenance {
+			stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObjectTagging","s3:PutObjectAnnotation"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
+		}
 	}
 	// Full read-write buckets (e.g. Snakemake's S3 storage plugin, which lists,
 	// reads, writes, and deletes across its storage bucket): grant object-level

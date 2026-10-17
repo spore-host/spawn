@@ -139,7 +139,9 @@ func TestGenerateWrapper_QuotesMetacharArgs(t *testing.T) {
 func TestGenerateWrapper_StageOutAfterCommand(t *testing.T) {
 	w := genWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
 	runIdx := strings.Index(w, "rc=$?")
-	outIdx := strings.Index(w, "s3://out-bucket/out.bam")
+	// The shell-quoted argument, i.e. the stage-out command itself, not the URI
+	// anywhere: the embedded provenance spec JSON (#1076) mentions it earlier.
+	outIdx := strings.Index(w, "'s3://out-bucket/out.bam'")
 	recIdx := strings.Index(w, "completion.json")
 	if runIdx < 0 || outIdx < 0 || recIdx < 0 {
 		t.Fatalf("wrapper missing expected sections")

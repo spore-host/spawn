@@ -12,6 +12,7 @@ const AMI_AL2023_GPU_ARM
 const AMI_AL2023_GPU_X86
 const AMI_AL2023_X86
 const CreatedTagKey
+const PriceSourceTag
 const ReaperCoverageRoleName
 const SourceDir
 const SourceRawImage SnapshotSourceKind
@@ -228,6 +229,7 @@ field LaunchConfig.PlacementGroupPrefix string
 field LaunchConfig.PreStop string
 field LaunchConfig.PreStopTimeout string
 field LaunchConfig.PricePerHour float64
+field LaunchConfig.PriceSource string
 field LaunchConfig.ReadyHealthPath string
 field LaunchConfig.ReadyPort int
 field LaunchConfig.Region string
@@ -720,6 +722,7 @@ field TaskSpec.Inputs []Manifest
 field TaskSpec.Lifecycle Lifecycle
 field TaskSpec.Outputs []Manifest
 field TaskSpec.Placement Placement
+field TaskSpec.Regenerable bool
 field TaskSpec.Resources ResourceRequest
 field TaskSpec.ResultsPrefix string
 field TaskSpec.TaskID string

@@ -75,6 +75,7 @@ func resolvePricePerHour(ctx context.Context, pricer onDemandPricer, cfg *Launch
 	}
 
 	cfg.PricePerHour = price
+	cfg.PriceSource = string(source)
 	switch source {
 	case truffleaws.PriceSourceLive:
 		log.Printf("pricing: %s in %s = $%.4f/hr (truffle, live AWS Price List)", cfg.InstanceType, cfg.Region, price)
