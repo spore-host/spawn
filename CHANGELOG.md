@@ -431,7 +431,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   storage cost, because EBS bills while hibernated and compute does not. The
   minute or two EC2 bills while it saves memory to disk and restores it is
   counted as hibernated, so compute can be slightly low around a hibernation.
-  Windows still counts hibernated time as compute (#962).
+- **Time spent hibernated is no longer counted as compute on Windows** (#962).
+  spored on Windows measured running time on Go's monotonic clock, which on
+  Windows keeps counting through sleep and hibernation. So a hibernate and
+  resume added the whole hibernation to `spawn:compute-seconds`, to the
+  compute cost `spawn status` shows from it, and to the total `--cost-limit`
+  is enforced against. spored now measures it on Windows' unbiased interrupt
+  time, which excludes sleep and hibernation. This needs Windows Server 2016
+  or later; older versions count as before. It has not yet been checked
+  against a real EC2 hibernation of a Windows instance. `spored status` on
+  Windows still reads the last checkpoint and does not show hibernated time.
+  The resume-from-hibernation reset (#987) reads the same clocks, so it now
+  covers Windows instances too.
 
 ### Security
 

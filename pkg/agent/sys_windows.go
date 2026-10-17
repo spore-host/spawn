@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // Windows implementations of spored's OS-specific idle/metrics leaves (#77).
@@ -242,12 +245,61 @@ func sysAcceleratorFamilies() []string {
 func sysComputeCheckpointPath() string { return "" }
 func sysBootID() string                { return "" }
 
-// sysKernelClocks reports none on Windows, so compute there is measured from
-// the service's start through Go's monotonic reading. On Windows that reading
-// is the interrupt time, which keeps counting through sleep and hibernation,
-// unlike CLOCK_MONOTONIC on Linux. A hibernated Windows instance therefore
-// still counts the hibernation as compute (#962, found in #945), and resume
-// detection (#987), which reads the same clocks, sees no resume there: neither
-// this reading nor resumedBetween's wall-clock comparison moves.
-// QueryUnbiasedInterruptTime excludes it, and is the reading a fix would use.
-func sysKernelClocks() (kernelClocks, bool) { return kernelClocks{}, false }
+// sysKernelClocks reads the interrupt-time counts (#962), the Windows
+// counterparts of CLOCK_MONOTONIC and CLOCK_BOOTTIME. Microsoft's documentation:
+//
+//   - QueryUnbiasedInterruptTime (kernel32, Windows 7 / Server 2008 R2): "Gets
+//     the current unbiased interrupt-time count, in units of 100 nanoseconds.
+//     The unbiased interrupt-time count does not include time the system spends
+//     in sleep or hibernation." It "reflects only the time that the system is in
+//     the working state." That is the Monotonic role.
+//     https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryunbiasedinterrupttime
+//   - QueryInterruptTime (api-ms-win-core-realtime-l1-1-1.dll, Windows 10 /
+//     Server 2016; it is not a kernel32 export): "Gets the current
+//     interrupt-time count", in 100ns units. This is the biased count, which the
+//     unbiased one's page contrasts it with: the system uses it so "relative
+//     timers that would have expired during sleep expire immediately upon
+//     waking", so it keeps counting through sleep and hibernation. That is the
+//     Boottime role, and it is also what Go's monotonic clock reads on Windows
+//     (runtime nanotime, KUSER_SHARED_DATA.InterruptTime), which is why
+//     time.Since counted hibernations as compute there.
+//     https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryinterrupttime
+//
+// Both "begin at zero when the system starts", so they fit kernelClocks' {0, 0}
+// origin. GetTickCount64 also includes sleep, but in milliseconds and from the
+// tick count rather than the interrupt time, so subtracting the unbiased count
+// from it would not be exact; it is not used.
+//
+// The unbiased count is read first, so the pair can overstate suspended time by
+// the time between the calls, never understate running time. Where either proc
+// is missing (Windows before Server 2016), this reports no clocks and compute is
+// measured as before, through Go's monotonic reading.
+//
+// There is still no boot id or boot-scoped location on Windows, so the readings
+// are never published or checkpointed: they make the daemon's own count exclude
+// hibernation, which is what spawn:compute-seconds and --cost-limit read.
+//
+// Resume detection (#987) reads its suspended time through the same reader
+// (readSuspendedTime), so with these clocks a Windows hibernate-and-resume also
+// resets spored's per-boot state, as it does on Linux.
+func sysKernelClocks() (kernelClocks, bool) {
+	if procQueryUnbiasedInterruptTime.Find() != nil || procQueryInterruptTime.Find() != nil {
+		return kernelClocks{}, false
+	}
+	var unbiased, biased uint64
+	if r, _, _ := procQueryUnbiasedInterruptTime.Call(uintptr(unsafe.Pointer(&unbiased))); r == 0 {
+		return kernelClocks{}, false
+	}
+	_, _, _ = procQueryInterruptTime.Call(uintptr(unsafe.Pointer(&biased))) // VOID return
+	return interruptTimeClocks(unbiased, biased)
+}
+
+// Each proc is loaded from the DLL its documentation names. QueryInterruptTime
+// is exported only by the realtime API set, so looking it up in kernel32 fails
+// on every Windows version and silently disabled these clocks (#962).
+var (
+	kernel32                       = windows.NewLazySystemDLL("kernel32.dll")
+	realtimeAPISet                 = windows.NewLazySystemDLL("api-ms-win-core-realtime-l1-1-1.dll")
+	procQueryUnbiasedInterruptTime = kernel32.NewProc("QueryUnbiasedInterruptTime")
+	procQueryInterruptTime         = realtimeAPISet.NewProc("QueryInterruptTime")
+)
