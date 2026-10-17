@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -684,11 +685,15 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 		if err != nil {
 			return fmt.Errorf("failed to marshal inline policy: %w", err)
 		}
+		doc, err := c.sporedPolicyDoc(ctx, string(policyJSON))
+		if err != nil {
+			return err
+		}
 
 		_, err = iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 			RoleName:       aws.String(roleName),
 			PolicyName:     aws.String("spawn-inline-policy"),
-			PolicyDocument: aws.String(string(policyJSON)),
+			PolicyDocument: aws.String(doc),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to attach inline policy: %w", err)
@@ -752,10 +757,14 @@ func (c *Client) updateInlinePolicy(ctx context.Context, iamClient *iam.Client, 
 		if err != nil {
 			return fmt.Errorf("failed to marshal inline policy: %w", err)
 		}
+		doc, err := c.sporedPolicyDoc(ctx, string(policyJSON))
+		if err != nil {
+			return err
+		}
 		if _, err := iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 			RoleName:       aws.String(roleName),
 			PolicyName:     aws.String("spawn-inline-policy"),
-			PolicyDocument: aws.String(string(policyJSON)),
+			PolicyDocument: aws.String(doc),
 		}); err != nil {
 			return err
 		}
@@ -1053,10 +1062,55 @@ var sporedHybridRegistryActions = []string{
 }
 
 // sporedHybridRegistryResource is the registry table in the instance's OWN
-// account, any region. ${aws:PrincipalAccount} pins the account without the
-// policy needing to know it, so the static sporedDCVRolePolicy can carry the
-// same grant as the dynamic baseline.
-const sporedHybridRegistryResource = "arn:aws:dynamodb:*:${aws:PrincipalAccount}:table/spawn-hybrid-registry"
+// account, any region. The account is sporedAccountPlaceholder, bound to the
+// literal account ID when the policy is written (bindPolicyAccount).
+const sporedHybridRegistryResource = "arn:aws:dynamodb:*:" + sporedAccountPlaceholder + ":table/spawn-hybrid-registry"
+
+// sporedAccountPlaceholder stands for the role's own account ID in the spored
+// policy templates, and bindPolicyAccount replaces it before PutRolePolicy.
+//
+// It used to be ${aws:PrincipalAccount}, so the static sporedDCVRolePolicy could
+// carry the grant without knowing the account. IAM does not accept that variable
+// in a Resource: PutRolePolicy rejects the whole document with
+// "MalformedPolicyDocument: The policy failed legacy parsing", so every launch
+// that set up the spored role failed (#1069). IAM Access Analyzer and
+// simulate-custom-policy both accept the same document, which is why nothing
+// short of a real PutRolePolicy caught it. Deliberately not a 12-digit number and
+// not "*": an unbound document is refused by bindPolicyAccount rather than
+// written with an account that matches nothing, or every account.
+const sporedAccountPlaceholder = "SPAWN-ACCOUNT-ID"
+
+// accountIDPattern is a 12-digit AWS account ID.
+var accountIDPattern = regexp.MustCompile(`^[0-9]{12}$`)
+
+// bindPolicyAccount returns doc with sporedAccountPlaceholder replaced by
+// accountID. It refuses an account that is not 12 digits, and a document that
+// still carries ${aws:PrincipalAccount}, which PutRolePolicy rejects (#1069).
+func bindPolicyAccount(doc, accountID string) (string, error) {
+	if strings.Contains(doc, "${aws:PrincipalAccount}") {
+		return "", fmt.Errorf("policy uses ${aws:PrincipalAccount}, which IAM rejects as MalformedPolicyDocument (#1069)")
+	}
+	if !strings.Contains(doc, sporedAccountPlaceholder) {
+		return doc, nil
+	}
+	if !accountIDPattern.MatchString(accountID) {
+		return "", fmt.Errorf("cannot bind the spored policy to account %q: not a 12-digit account ID", accountID)
+	}
+	return strings.ReplaceAll(doc, sporedAccountPlaceholder, accountID), nil
+}
+
+// sporedPolicyDoc binds a spored policy template to the caller's account — the
+// account the role is created in — ready for PutRolePolicy.
+func (c *Client) sporedPolicyDoc(ctx context.Context, doc string) (string, error) {
+	if !strings.Contains(doc, sporedAccountPlaceholder) {
+		return bindPolicyAccount(doc, "")
+	}
+	acct, _, err := c.GetCallerIdentityInfo(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve the account for the spored policy: %w", err)
+	}
+	return bindPolicyAccount(doc, acct)
+}
 
 // sporedHybridRegistryStatement lets spored register a job-array member in the
 // hybrid registry (#905). Every spored whose instance carries spawn:job-array-id
@@ -1187,11 +1241,15 @@ func (c *Client) ensureSSMManagedPolicy(ctx context.Context, iamClient *iam.Clie
 // other two policy sources did, because it was attached per-branch instead of
 // unconditionally here).
 func (c *Client) ensureSporedBaselinePolicy(ctx context.Context, iamClient *iam.Client, roleName string) error {
-	err := retryIAM(func() error {
+	doc, err := c.sporedPolicyDoc(ctx, c.sporedBaselinePolicyDoc())
+	if err != nil {
+		return err
+	}
+	err = retryIAM(func() error {
 		_, e := iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 			RoleName:       aws.String(roleName),
 			PolicyName:     aws.String("spored-baseline-policy"),
-			PolicyDocument: aws.String(c.sporedBaselinePolicyDoc()),
+			PolicyDocument: aws.String(doc),
 		})
 		return e
 	})
@@ -1251,11 +1309,16 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 		}
 	}
 
-	// 2. Attach inline policy to role (sporedDCVRolePolicy, defined below).
+	// 2. Attach inline policy to role (sporedDCVRolePolicy, defined below),
+	// bound to this account (#1069).
+	dcvDoc, err := c.sporedPolicyDoc(ctx, sporedDCVRolePolicy)
+	if err != nil {
+		return "", err
+	}
 	_, err = iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 		RoleName:       aws.String(roleName),
 		PolicyName:     aws.String(policyName),
-		PolicyDocument: aws.String(sporedDCVRolePolicy),
+		PolicyDocument: aws.String(dcvDoc),
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to attach policy to role: %w", err)
