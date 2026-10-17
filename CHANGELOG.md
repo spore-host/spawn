@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A retired Spot replacement now terminates itself instead of being left
+  stopped** (#1080). When spored found it was running on a replacement that EC2
+  launched from a leaked persistent Spot request (#1008), it cancelled the
+  request and shut the OS down. With EC2's default shutdown behaviour that
+  STOPS the instance, leaving it untagged with its request cancelled. Nothing
+  would ever start it again, nothing would end it (the reaper's terminate is
+  tag-scoped, #984), it was invisible to `spawn list`, and its EBS volume
+  billed indefinitely. Observed live on v0.131.0. The spored role now carries a
+  `TerminateOnlySelf` grant (`ec2:TerminateInstances` where
+  `aws:ARN = ${ec2:SourceInstanceARN}`), and the replacement terminates itself
+  through the API after cancelling the request. The grant was proven on real
+  AWS before it was written: IAM stores it; from an untagged instance it
+  refuses terminating another instance, allows terminating itself, and refuses
+  both together. If the terminate is refused (a role from before this change),
+  spored falls back to the shutdown and now says the instance is stopped and
+  still needs terminating, with the command. Any `spawn launch` refreshes the
+  spored role.
+
 ## [0.131.0] - 2026-10-17
 
 ### Added

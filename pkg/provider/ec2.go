@@ -185,9 +185,10 @@ func (p *EC2Provider) DetectSpotReplacement(ctx context.Context) spotrequest.Det
 }
 
 // RetireSpotReplacement cancels a detected replacement's Spot request and then
-// calls shutdown. It refuses anything but a VerdictReplacement detection.
-func (p *EC2Provider) RetireSpotReplacement(ctx context.Context, d spotrequest.Detection, shutdown func(context.Context) error) error {
-	return spotrequest.RetireReplacement(ctx, p.ec2Client, d, shutdown)
+// terminates this instance, falling back to shutdown only if the terminate is
+// refused (#1080). It refuses anything but a VerdictReplacement detection.
+func (p *EC2Provider) RetireSpotReplacement(ctx context.Context, d spotrequest.Detection, shutdown func(context.Context) error) (spotrequest.RetireOutcome, error) {
+	return spotrequest.RetireReplacement(ctx, p.ec2Client, d, p.identity.InstanceID, shutdown)
 }
 
 func (p *EC2Provider) Stop(ctx context.Context, reason string) error {

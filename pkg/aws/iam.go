@@ -1044,6 +1044,7 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	})
 
 	statements = append(statements, sporedHybridRegistryStatement())
+	statements = append(statements, sporedSelfTerminateStatement())
 
 	return statements
 }
@@ -1135,6 +1136,48 @@ func sporedHybridRegistryStatement() map[string]interface{} {
 		"Action":   actions,
 		"Resource": sporedHybridRegistryResource,
 	}
+}
+
+// sporedSelfTerminateStatement lets an instance terminate ITSELF, and nothing
+// else, whatever its tags (#1080).
+//
+// The grant above is scoped to spawn:managed=true, which every instance spawn
+// launches carries. A replacement EC2 launches from a leaked persistent Spot
+// request does not: it has no tags at all. So when spored on a replacement
+// retired it (#1008) it could cancel the request but not terminate the
+// instance, and fell back to an OS shutdown. With EC2's default shutdown
+// behaviour that STOPS it: untagged, request cancelled, never started again,
+// beyond the reaper's tag-scoped terminate, and billing its EBS volume forever.
+//
+// aws:ARN is the resource's ARN and ec2:SourceInstanceARN is the instance the
+// calling credentials were issued to, so the condition holds only for a call
+// about the caller itself. Proven on real AWS before this was written: IAM's
+// PutRolePolicy accepts and stores the policy variable (unlike
+// ${aws:PrincipalAccount} in a Resource, #1069), and from an untagged instance a
+// dry-run terminate of another instance was refused, of itself allowed, of
+// itself plus another refused, and a real self-terminate succeeded.
+func sporedSelfTerminateStatement() map[string]interface{} {
+	return map[string]interface{}{
+		"Sid":      "TerminateOnlySelf",
+		"Effect":   "Allow",
+		"Action":   "ec2:TerminateInstances",
+		"Resource": "*",
+		"Condition": map[string]interface{}{
+			"StringEquals": map[string]interface{}{
+				"aws:ARN": "${ec2:SourceInstanceARN}",
+			},
+		},
+	}
+}
+
+// sporedSelfTerminateStatementJSON renders it for the static DCV policy, so the
+// two policies cannot drift on it.
+func sporedSelfTerminateStatementJSON() string {
+	b, err := json.Marshal(sporedSelfTerminateStatement())
+	if err != nil {
+		panic(err) // static content; cannot fail
+	}
+	return string(b)
 }
 
 // sporedHybridRegistryStatementJSON renders the same statement for the static
@@ -1611,9 +1654,10 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
         "arn:aws:s3:::spawn-binaries-*/*"
       ]
     },
+    %s,
     %s
   ]
-}`, reaperControlTagKeysJSON(), sporedHybridRegistryStatementJSON())
+}`, reaperControlTagKeysJSON(), sporedHybridRegistryStatementJSON(), sporedSelfTerminateStatementJSON())
 
 // waitForInstanceProfile polls until the instance profile is retrievable (IAM
 // is eventually consistent after creation), or a bounded deadline passes. It

@@ -16,7 +16,7 @@ import (
 // check uses, so the loop can be tested with a fake.
 type spotReplacementRetirer interface {
 	DetectSpotReplacement(ctx context.Context) spotrequest.Detection
-	RetireSpotReplacement(ctx context.Context, d spotrequest.Detection, shutdown func(context.Context) error) error
+	RetireSpotReplacement(ctx context.Context, d spotrequest.Detection, shutdown func(context.Context) error) (spotrequest.RetireOutcome, error)
 }
 
 // How often an inconclusive check is retried. At boot the instance profile's
@@ -32,10 +32,13 @@ const (
 
 // replacementCheck holds the dependencies of checkSpotReplacement.
 type replacementCheck struct {
-	r        spotReplacementRetirer
-	shutdown func(context.Context) error
-	notify   func(ctx context.Context, d spotrequest.Detection)
-	sleep    func(ctx context.Context, d time.Duration) bool // false if ctx ended
+	r spotReplacementRetirer
+	// instanceID and region name this instance in the hand-cleanup command,
+	// for the case where it can only be stopped (#1080).
+	instanceID, region string
+	shutdown           func(context.Context) error
+	notify             func(ctx context.Context, d spotrequest.Detection)
+	sleep              func(ctx context.Context, d time.Duration) bool // false if ctx ended
 }
 
 // run checks once at startup (with retries while inconclusive) whether this
@@ -72,18 +75,29 @@ func (c replacementCheck) run(ctx context.Context) spotrequest.Detection {
 	log.Printf("This instance was launched by spawn's persistent Spot request %s for instance %s,",
 		d.RequestID, d.OriginalInstanceID)
 	log.Printf("which was terminated outside spawn. It carries no spawn tags (no TTL) and nothing")
-	log.Printf("else will end it. spored is cancelling the request and shutting the OS down.")
+	log.Printf("else will end it. spored is cancelling the request and terminating this instance.")
 	log.Printf("====================================================================")
 	c.notify(ctx, d)
 	c.sleep(ctx, replacementNotifyGrace)
 
-	if err := c.r.RetireSpotReplacement(ctx, d, c.shutdown); err != nil {
+	outcome, err := c.r.RetireSpotReplacement(ctx, d, c.shutdown)
+	switch {
+	case outcome == spotrequest.RetiredTerminated:
+		log.Printf("Spot request %s cancelled; this instance is terminating itself", d.RequestID)
+	case outcome == spotrequest.RetiredShutdown:
+		// The request is cancelled, so nothing more launches, but the instance is
+		// not gone: a stopped, untagged instance whose request is cancelled is
+		// never started again and nothing ends it (#1080). Say so, with the
+		// command, rather than implying it was retired.
+		log.Printf("WARNING: Spot request %s cancelled, but %v.", d.RequestID, err)
+		log.Printf("WARNING: this role lacks spored's TerminateOnlySelf grant (re-run `spawn launch` once to refresh "+
+			"the spored role). End this instance by hand: aws ec2 terminate-instances --region %s --instance-ids %s",
+			c.region, c.instanceID)
+	default:
 		log.Printf("ERROR: could not retire Spot replacement: %v", err)
-		log.Printf("ERROR: end it by hand: aws ec2 cancel-spot-instance-requests --spot-instance-request-ids %s; "+
-			"then terminate this instance", d.RequestID)
-		return d
+		log.Printf("ERROR: end it by hand: aws ec2 cancel-spot-instance-requests --region %s --spot-instance-request-ids %s; "+
+			"then aws ec2 terminate-instances --region %s --instance-ids %s", c.region, d.RequestID, c.region, c.instanceID)
 	}
-	log.Printf("Spot request %s cancelled; OS shutdown requested", d.RequestID)
 	return d
 }
 
@@ -108,7 +122,7 @@ func replacementNotifier(identity *provider.Identity) func(context.Context, spot
 		// nobody registered this replacement's id (#1007).
 		n := agent.NewNotifier(notifyConfigFromTags(d.RequestTags), identity).WithOriginalInstance(d.OriginalInstanceID)
 		n.Notify(ctx, "spot_replacement_retired", fmt.Sprintf(
-			"replacement of %s launched by leaked Spot request %s; cancelling the request and shutting down",
+			"replacement of %s launched by leaked Spot request %s; cancelling the request and terminating it",
 			d.OriginalInstanceID, d.RequestID))
 	}
 }
