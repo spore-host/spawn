@@ -63,6 +63,14 @@ type fakeLambda struct {
 	dryRun  string // REAPER_DRY_RUN on the existing function
 	calls   []string
 	lastEnv map[string]string
+
+	// codeUpdatePolls models Lambda applying UpdateFunctionCode asynchronously
+	// (#1084): after a code update, this many GetFunction calls report
+	// LastUpdateStatus InProgress, and any other update meanwhile is refused with
+	// the 409 ResourceConflictException the real API returns.
+	codeUpdatePolls int
+	updating        int
+	updateFailed    bool
 }
 
 func (f *fakeLambda) GetFunction(context.Context, *lambda.GetFunctionInput, ...func(*lambda.Options)) (*lambda.GetFunctionOutput, error) {
@@ -70,9 +78,17 @@ func (f *fakeLambda) GetFunction(context.Context, *lambda.GetFunctionInput, ...f
 	if !f.exists {
 		return nil, &lambdatypes.ResourceNotFoundException{}
 	}
+	status := lambdatypes.LastUpdateStatusSuccessful
+	if f.updating > 0 {
+		f.updating--
+		status = lambdatypes.LastUpdateStatusInProgress
+	} else if f.updateFailed {
+		status = lambdatypes.LastUpdateStatusFailed
+	}
 	return &lambda.GetFunctionOutput{Configuration: &lambdatypes.FunctionConfiguration{
-		FunctionArn: awssdk.String("arn:aws:lambda:us-east-1:1:function/" + FunctionName),
-		Environment: &lambdatypes.EnvironmentResponse{Variables: map[string]string{"REAPER_DRY_RUN": f.dryRun}},
+		FunctionArn:      awssdk.String("arn:aws:lambda:us-east-1:1:function/" + FunctionName),
+		Environment:      &lambdatypes.EnvironmentResponse{Variables: map[string]string{"REAPER_DRY_RUN": f.dryRun}},
+		LastUpdateStatus: status,
 	}}, nil
 }
 func (f *fakeLambda) CreateFunction(_ context.Context, in *lambda.CreateFunctionInput, _ ...func(*lambda.Options)) (*lambda.CreateFunctionOutput, error) {
@@ -84,10 +100,14 @@ func (f *fakeLambda) CreateFunction(_ context.Context, in *lambda.CreateFunction
 }
 func (f *fakeLambda) UpdateFunctionCode(context.Context, *lambda.UpdateFunctionCodeInput, ...func(*lambda.Options)) (*lambda.UpdateFunctionCodeOutput, error) {
 	f.calls = append(f.calls, "UpdateFunctionCode")
+	f.updating = f.codeUpdatePolls
 	return &lambda.UpdateFunctionCodeOutput{}, nil
 }
 func (f *fakeLambda) UpdateFunctionConfiguration(_ context.Context, in *lambda.UpdateFunctionConfigurationInput, _ ...func(*lambda.Options)) (*lambda.UpdateFunctionConfigurationOutput, error) {
 	f.calls = append(f.calls, "UpdateFunctionConfiguration")
+	if f.updating > 0 {
+		return nil, &lambdatypes.ResourceConflictException{Message: awssdk.String("An update is in progress for resource")}
+	}
 	if in.Environment != nil {
 		f.lastEnv = in.Environment.Variables
 	}
@@ -273,6 +293,46 @@ func TestRedeployDoesNotDisarm(t *testing.T) {
 
 	if lamF.lastEnv["REAPER_DRY_RUN"] != "false" {
 		t.Errorf("re-deploying an ARMED reaper must not disarm it; REAPER_DRY_RUN=%q", lamF.lastEnv["REAPER_DRY_RUN"])
+	}
+}
+
+// TestRedeployWaitsForTheCodeUpdate is #1084: Lambda applies a code update
+// asynchronously and refuses a configuration update until it finishes, so a
+// redeploy that updated the configuration straight after the code failed
+// half-way, every time, with new code live and the configuration, schedule and
+// version tag never written.
+func TestRedeployWaitsForTheCodeUpdate(t *testing.T) {
+	lamF := &fakeLambda{exists: true, dryRun: "false", codeUpdatePolls: 3}
+	d := newTestDeployer(&fakeIAM{roleExists: true}, lamF, &fakeEvents{}, &fakeS3{bucketExists: true})
+	d.UpdatePoll = -1
+
+	if _, err := d.Deploy(context.Background(), Options{
+		AccountID: "1", Region: "us-east-1", Version: "0.131.0", Artifact: "/tmp/x.zip",
+	}); err != nil {
+		t.Fatalf("redeploy while the code update is in progress: %v", err)
+	}
+	if lamF.lastEnv["REAPER_DRY_RUN"] != "false" {
+		t.Errorf("configuration was not written after the wait; REAPER_DRY_RUN=%q", lamF.lastEnv["REAPER_DRY_RUN"])
+	}
+}
+
+// A code update that Lambda reports Failed stops the deploy with its reason,
+// instead of writing configuration for code that is not running.
+func TestRedeployStopsOnAFailedCodeUpdate(t *testing.T) {
+	lamF := &fakeLambda{exists: true, dryRun: "false", codeUpdatePolls: 1, updateFailed: true}
+	d := newTestDeployer(&fakeIAM{roleExists: true}, lamF, &fakeEvents{}, &fakeS3{bucketExists: true})
+	d.UpdatePoll = -1
+
+	_, err := d.Deploy(context.Background(), Options{
+		AccountID: "1", Region: "us-east-1", Version: "0.131.0", Artifact: "/tmp/x.zip",
+	})
+	if err == nil || !strings.Contains(err.Error(), "code update failed") {
+		t.Fatalf("Deploy = %v, want the failed code update reported", err)
+	}
+	for _, c := range lamF.calls {
+		if c == "UpdateFunctionConfiguration" {
+			t.Error("configuration was written after the code update failed")
+		}
 	}
 }
 
