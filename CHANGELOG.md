@@ -306,6 +306,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stoppable request** (#990, #922). The request type was chosen with Go's
   duration parser, which has no day unit, while spored arms the idle stop with
   the day-aware one, so the stop would have been refused by EC2.
+- **`spawn extend` after a stop/start raises the cost limit far enough**
+  (#992). EC2 resets an instance's launch time on every start, and extend
+  measured from it, for both the single-instance and the job-array path. The
+  raised `--cost-limit` therefore left out the compute from every earlier boot
+  and could still stop the instance before its new deadline, the #639 trap.
+  The cap now matches what spored counts: compute so far across every boot
+  (`spawn:compute-seconds`) plus running until the new deadline, and EBS from
+  the original launch (`spawn:launch-time`). Time spent stopped is no longer
+  priced as compute. `spawn:ttl` is again the total from the original launch,
+  not from the latest start. On an old instance with no deadline tag, extend
+  now adds to launch + TTL, the deadline that is actually enforced, rather
+  than to now + TTL.
 
 ### Security
 

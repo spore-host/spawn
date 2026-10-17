@@ -358,7 +358,12 @@ func TestComputeExtendedTTLTags_FloorPreventsImmediateReap(t *testing.T) {
 }
 
 // TestComputeExtendedTTLTags_NoDeadlineTagFallsBackToTTL covers an older
-// instance that predates the spawn:ttl-deadline tag.
+// instance that predates the spawn:ttl-deadline tag. Its current deadline is
+// launch + spawn:ttl, which spored synthesizes and the TTL reaper enforces
+// (#990), so extending adds to that, like any other extend ("adds to the
+// current deadline, not to the current clock time"). This test used to expect
+// now + 8h + 4h, which also gave back the 2h already elapsed since launch: it
+// codified the code rather than the stated intent (#992).
 func TestComputeExtendedTTLTags_NoDeadlineTagFallsBackToTTL(t *testing.T) {
 	now := time.Date(2026, 8, 18, 6, 0, 0, 0, time.UTC)
 	launch := now.Add(-2 * time.Hour)
@@ -371,7 +376,7 @@ func TestComputeExtendedTTLTags_NoDeadlineTagFallsBackToTTL(t *testing.T) {
 
 	tags, newDeadline := computeExtendedTTLTags(instance, "4h", 4*time.Hour, now)
 
-	wantDeadline := now.Add(8 * time.Hour).Add(4 * time.Hour)
+	wantDeadline := launch.Add(8 * time.Hour).Add(4 * time.Hour)
 	if !newDeadline.Equal(wantDeadline) {
 		t.Errorf("newDeadline = %v, want %v", newDeadline, wantDeadline)
 	}

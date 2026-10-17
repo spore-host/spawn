@@ -37,15 +37,25 @@ func (d costLimitDecision) Changed() bool { return d.NewValue > 0 && d.NewValue 
 // the cap.
 //
 // `needed` is the cap the new deadline requires, computed the way the agent's own
-// arithmetic works: rate x hours from LAUNCH to the new deadline. It includes the EBS
-// rate because the cap counts EBS too (#616) and because a cap that only covers
-// compute would bind early again — the same bug one layer down. Both rates come from
-// the instance's own tags (spawn:price-per-hour, spawn:ebs-hourly-cost), so this
-// cannot disagree with what is actually enforced.
+// arithmetic works (pkg/agent accumulatedComputeCost), assuming the instance runs
+// continuously from now to the new deadline — the worst case, so the cap cannot
+// fire first:
+//
+//	compute: spawn:price-per-hour x (compute so far + now..deadline)
+//	EBS:     spawn:ebs-hourly-cost x (original launch..deadline)
+//
+// Compute so far is the cumulative spawn:compute-seconds spored keeps across every
+// boot (#928), and EBS bills on wall clock from the ORIGINAL launch
+// (spawn:launch-time), stopped time included. This used to be rate x (deadline -
+// EC2 LaunchTime) — but EC2 resets LaunchTime on every start, so after a
+// stop/start it left out the compute of every earlier boot and the raised cap
+// could still fire before the new deadline: #639 again (#992). Both rates come
+// from the instance's own tags, so this cannot disagree with what is enforced. The
+// EBS rate is included because the cap counts EBS too (#616).
 //
 // It raises, never lowers: an extension is a decision to allow more spend, not less,
 // and silently tightening someone's cap would be its own surprise.
-func decideCostLimit(instance *aws.InstanceInfo, newDeadline time.Time, explicit float64, keep bool) costLimitDecision {
+func decideCostLimit(instance *aws.InstanceInfo, newDeadline, now time.Time, explicit float64, keep bool) costLimitDecision {
 	d := costLimitDecision{Current: parseTagFloat(instance.Tags["spawn:cost-limit"])}
 
 	if explicit > 0 {
@@ -69,26 +79,71 @@ func decideCostLimit(instance *aws.InstanceInfo, newDeadline time.Time, explicit
 		d.Reason = "left unchanged: no spawn:price-per-hour tag, so the required cap cannot be computed"
 		return d
 	}
-	rate += parseTagFloat(instance.Tags["spawn:ebs-hourly-cost"])
+	ebsRate := parseTagFloat(instance.Tags["spawn:ebs-hourly-cost"])
 
-	if instance.LaunchTime.IsZero() {
+	launch := originalLaunchTime(instance)
+	if launch.IsZero() {
 		d.Reason = "left unchanged: no launch time on the instance, so the required cap cannot be computed"
 		return d
 	}
-	hours := newDeadline.Sub(instance.LaunchTime).Hours()
-	if hours <= 0 {
+	if !newDeadline.After(launch) {
 		return d
 	}
-	d.Needed = rate * hours
+	remaining := newDeadline.Sub(now)
+	if remaining < 0 {
+		remaining = 0
+	}
+	compute := computeSoFar(instance, launch, now) + remaining
+	d.Needed = rate*compute.Hours() + ebsRate*newDeadline.Sub(launch).Hours()
 
 	if d.Current >= d.Needed {
 		// The existing cap already reaches the new deadline; nothing to do.
 		return d
 	}
 	d.NewValue = d.Needed
-	d.Reason = fmt.Sprintf("raised: $%.4f capped this instance at %s, so the new deadline was unreachable",
-		d.Current, formatDuration(time.Duration(d.Current/rate*float64(time.Hour))))
+	d.Reason = fmt.Sprintf("raised: $%.4f would have stopped this instance before the new deadline, which was unreachable",
+		d.Current)
 	return d
+}
+
+// originalLaunchTime is when the instance was first launched: the
+// spawn:launch-time tag, written once at launch, which is what spored, the TTL
+// reaper and `spored config set ttl` anchor to. EC2's LaunchTime is only the
+// fallback, for an instance without the tag, because EC2 resets it on every
+// start of a stopped instance (#992).
+func originalLaunchTime(instance *aws.InstanceInfo) time.Time {
+	if v := instance.Tags["spawn:launch-time"]; v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			return t
+		}
+	}
+	return instance.LaunchTime
+}
+
+// computeTagLag bounds how far spawn:compute-seconds can trail the agent's own
+// running total: spored rewrites it every minute for the first ten minutes of
+// a boot and every five minutes after (pkg/agent writeComputeSecondsTag), and
+// the flush on shutdown can be lost.
+const computeTagLag = 5 * time.Minute
+
+// computeSoFar is the compute time the cost limit has already counted, across
+// every boot: spawn:compute-seconds plus computeTagLag, never more than the
+// wall-clock time since the original launch (compute cannot exceed it). With no
+// usable tag it is that wall-clock bound — the most the instance can have run —
+// so a raised cap errs high, never low.
+func computeSoFar(instance *aws.InstanceInfo, launch, now time.Time) time.Duration {
+	wall := now.Sub(launch)
+	if wall < 0 {
+		wall = 0
+	}
+	secs, err := strconv.ParseInt(instance.Tags["spawn:compute-seconds"], 10, 64)
+	if err != nil || secs < 0 {
+		return wall
+	}
+	if c := time.Duration(secs)*time.Second + computeTagLag; c < wall {
+		return c
+	}
+	return wall
 }
 
 // renderCostLimitDecision is the line(s) `spawn extend` prints about the cap. Empty

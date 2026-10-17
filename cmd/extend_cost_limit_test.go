@@ -24,7 +24,7 @@ func TestDecideCostLimitReproducesTheReportedCase(t *testing.T) {
 	d := decideCostLimit(extendInstance(launch, map[string]string{
 		"spawn:cost-limit":     "0.6500",
 		"spawn:price-per-hour": "0.638080",
-	}), newDeadline, 0, false)
+	}), newDeadline, launch.Add(60*time.Minute), 0, false)
 
 	if !d.Changed() {
 		t.Fatalf("the cap must be raised: $%.4f covers only ~61m but the new deadline is 105m away", d.Current)
@@ -48,14 +48,14 @@ func TestDecideCostLimitIncludesEBS(t *testing.T) {
 	newDeadline := launch.Add(2 * time.Hour)
 	tags := map[string]string{"spawn:cost-limit": "0.10", "spawn:price-per-hour": "1.00"}
 
-	withoutEBS := decideCostLimit(extendInstance(launch, tags), newDeadline, 0, false)
+	withoutEBS := decideCostLimit(extendInstance(launch, tags), newDeadline, time.Now(), 0, false)
 
 	tagsEBS := map[string]string{}
 	for k, v := range tags {
 		tagsEBS[k] = v
 	}
 	tagsEBS["spawn:ebs-hourly-cost"] = "0.50"
-	withEBS := decideCostLimit(extendInstance(launch, tagsEBS), newDeadline, 0, false)
+	withEBS := decideCostLimit(extendInstance(launch, tagsEBS), newDeadline, time.Now(), 0, false)
 
 	if withEBS.NewValue <= withoutEBS.NewValue {
 		t.Errorf("the EBS rate must raise the required cap: without=%.4f with=%.4f",
@@ -76,7 +76,7 @@ func TestDecideCostLimitNeverLowers(t *testing.T) {
 	d := decideCostLimit(extendInstance(launch, map[string]string{
 		"spawn:cost-limit":     "100.00", // far more than 20m needs
 		"spawn:price-per-hour": "1.00",
-	}), newDeadline, 0, false)
+	}), newDeadline, time.Now(), 0, false)
 
 	if d.Changed() {
 		t.Errorf("a cap that already covers the new deadline must be left alone, got $%.4f -> $%.4f",
@@ -89,7 +89,7 @@ func TestDecideCostLimitExplicitWins(t *testing.T) {
 	d := decideCostLimit(extendInstance(launch, map[string]string{
 		"spawn:cost-limit":     "0.65",
 		"spawn:price-per-hour": "0.638080",
-	}), launch.Add(105*time.Minute), 5.00, false)
+	}), launch.Add(105*time.Minute), time.Now(), 5.00, false)
 
 	if d.NewValue != 5.00 {
 		t.Errorf("--cost-limit must win, got %.4f", d.NewValue)
@@ -107,7 +107,7 @@ func TestDecideCostLimitKeepFlagIsRespectedAndExplained(t *testing.T) {
 	d := decideCostLimit(extendInstance(launch, map[string]string{
 		"spawn:cost-limit":     "0.65",
 		"spawn:price-per-hour": "0.638080",
-	}), launch.Add(105*time.Minute), 0, true)
+	}), launch.Add(105*time.Minute), time.Now(), 0, true)
 
 	if d.Changed() {
 		t.Error("--keep-cost-limit must leave the tag alone")
@@ -124,7 +124,7 @@ func TestDecideCostLimitNoCapIsNotAProblem(t *testing.T) {
 	launch := time.Now().Add(-10 * time.Minute)
 	d := decideCostLimit(extendInstance(launch, map[string]string{
 		"spawn:price-per-hour": "1.00",
-	}), launch.Add(2*time.Hour), 0, false)
+	}), launch.Add(2*time.Hour), time.Now(), 0, false)
 
 	if d.Changed() {
 		t.Error("no cost limit means nothing to change")
@@ -140,7 +140,7 @@ func TestDecideCostLimitWithoutARateSaysSo(t *testing.T) {
 	launch := time.Now().Add(-10 * time.Minute)
 	d := decideCostLimit(extendInstance(launch, map[string]string{
 		"spawn:cost-limit": "0.65", // capped, but no price tag
-	}), launch.Add(2*time.Hour), 0, false)
+	}), launch.Add(2*time.Hour), time.Now(), 0, false)
 
 	if d.Changed() {
 		t.Error("without a rate the required cap is unknowable; it must not be invented")
