@@ -12,12 +12,25 @@ import (
 func newTestRuntime(t *testing.T) *Runtime {
 	t.Helper()
 	dir := t.TempDir()
-	return &Runtime{
+	rt := &Runtime{
 		store:         plugin.NewDiskStateStore(dir),
 		executor:      NewRemoteExecutor(""),
 		identity:      nil,
 		healthCancels: make(map[string]context.CancelFunc),
 	}
+	// Registered after t.TempDir, so it runs first (cleanups are LIFO): stop
+	// every health loop and wait for it, so an in-flight check cannot write a
+	// plugin's state while its directory is being removed ("unlinkat ...
+	// directory not empty", seen on CI in TestResumeStoppedRestoresStatusAndHealthLoop).
+	t.Cleanup(func() {
+		rt.mu.Lock()
+		for _, cancel := range rt.healthCancels {
+			cancel()
+		}
+		rt.mu.Unlock()
+		rt.healthLoops.Wait()
+	})
+	return rt
 }
 
 func saveState(t *testing.T, rt *Runtime, name string, status plugin.PluginStatus) {

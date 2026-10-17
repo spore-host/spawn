@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A plugin-runtime test no longer fails CI intermittently.** A health check
+  already in flight could still write a plugin's state while the test's temp
+  directory was being removed ("directory not empty"). Health loops are now
+  tracked, and the tests wait for them to exit before cleaning up. Test-only;
+  spored's behaviour is unchanged.
+
 ## [0.132.1] - 2026-10-17
 
 ### Fixed
