@@ -103,6 +103,7 @@ type resumeFixture struct {
 	store   *plugin.DiskStateStore
 	mu      sync.Mutex
 	dnsReqs []dns.DNSUpdateRequest
+	dnsURL  string
 }
 
 func (f *resumeFixture) dns() []dns.DNSUpdateRequest {
@@ -123,6 +124,7 @@ func newResumeFixture(t *testing.T, cfg *provider.Config) *resumeFixture {
 		_ = json.NewEncoder(w).Encode(dns.DNSUpdateResponse{Success: true})
 	}))
 	t.Cleanup(srv.Close)
+	f.dnsURL = srv.URL
 	t.Setenv("SPORE_DNS_SIGV4", "0")
 	client, err := dns.NewClient(context.Background(), "spore.host", srv.URL)
 	if err != nil {

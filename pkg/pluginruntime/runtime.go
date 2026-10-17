@@ -24,10 +24,14 @@ var hostGOOS = runtime.GOOS
 // Runtime manages plugins on an instance (the spored side).
 // It is safe for concurrent use.
 type Runtime struct {
-	store     plugin.StateStore
-	executor  *RemoteExecutor
-	identity  *provider.Identity // may be nil in tests
-	localUser string             // instance login user (spawn:local-username); exposed as {{ instance.login_user }}
+	store    plugin.StateStore
+	executor *RemoteExecutor
+	identity *provider.Identity // may be nil in tests
+	// publicIP, when set, is the instance's current public IP for
+	// {{ instance.ip }}; identity.PublicIP is only the boot-time one, and a
+	// resume from hibernation can change it (#1019). Under mu.
+	publicIP  func() string
+	localUser string // instance login user (spawn:local-username); exposed as {{ instance.login_user }}
 
 	mu            sync.Mutex
 	healthCancels map[string]context.CancelFunc
@@ -64,6 +68,31 @@ func NewRuntimeWithStore(store plugin.StateStore, identity *provider.Identity, l
 		localUser:     localUser,
 		healthCancels: make(map[string]context.CancelFunc),
 	}
+}
+
+// SetPublicIPSource makes {{ instance.ip }} render fn() rather than the
+// identity's boot-time public IP, so a step run after the IP changed (a
+// health check after a resume from hibernation, say) gets the current one
+// (#1019). spored passes its guarded current value.
+func (rt *Runtime) SetPublicIPSource(fn func() string) {
+	rt.mu.Lock()
+	rt.publicIP = fn
+	rt.mu.Unlock()
+}
+
+// InstanceIP is the public IP {{ instance.ip }} renders now: the source set by
+// SetPublicIPSource, else the identity's boot-time one ("" with no identity).
+func (rt *Runtime) InstanceIP() string {
+	rt.mu.Lock()
+	fn := rt.publicIP
+	rt.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	if rt.identity == nil {
+		return ""
+	}
+	return rt.identity.PublicIP
 }
 
 // Install runs install, configure, and start steps for a plugin, then starts
@@ -457,8 +486,8 @@ func (rt *Runtime) buildTemplateContext(st *plugin.PluginState) plugin.TemplateC
 	if rt.identity != nil {
 		tmplCtx.Instance["id"] = rt.identity.InstanceID
 		tmplCtx.Instance["name"] = rt.identity.Name
-		tmplCtx.Instance["ip"] = rt.identity.PublicIP
 	}
+	tmplCtx.Instance["ip"] = rt.InstanceIP()
 	// The instance's login user (spawn:local-username) — the same user `as_user`
 	// steps run as. Exposed so a plugin can name it in a file it writes (e.g. a
 	// systemd unit's User= or a chown target) rather than hardcoding "ec2-user".

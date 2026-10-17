@@ -84,10 +84,7 @@ func (a *Agent) maybeSetupWebReady(ctx context.Context) {
 		a.webProxyStarted = true
 	}
 
-	host := a.publicIP()
-	if a.config.DNSName != "" && a.dnsDomain != "" {
-		host = dns.GetFullDNSName(a.config.DNSName, a.identity.AccountID, a.dnsDomain)
-	}
+	host := a.readyHost()
 	tags := map[string]string{
 		"spawn:ready-url":    buildWebReadyURL(host, a.webToken),
 		"spawn:ready-status": "ready",
@@ -99,7 +96,50 @@ func (a *Agent) maybeSetupWebReady(ctx context.Context) {
 	if a.dcvReadyURLWritten {
 		log.Printf("web: spawn:ready-url written (port %d, host %s, auth %s)", a.config.ReadyPort, host, a.config.WebAuth)
 		a.webReadyDone = true
+		token := a.webToken
+		a.noteReadyURL(host, func(h string) string { return buildWebReadyURL(h, token) })
 	}
+}
+
+// readyHost is the host a spawn:ready-url names: the instance's FQDN when it
+// has a DNS name, else its CURRENT public IP, which a resume from hibernation
+// can change (#1019).
+func (a *Agent) readyHost() string {
+	if a.config.DNSName != "" && a.dnsDomain != "" {
+		return dns.GetFullDNSName(a.config.DNSName, a.identity.AccountID, a.dnsDomain)
+	}
+	return a.publicIP()
+}
+
+// noteReadyURL records the host the ready-url was written with, and how to
+// build the same URL for another host, so refreshReadyURL can rewrite it.
+func (a *Agent) noteReadyURL(host string, build func(host string) string) {
+	a.readyURLHost = host
+	a.readyURLBuild = build
+}
+
+// refreshReadyURL rewrites spawn:ready-url when the host it names is no longer
+// the instance's: written with the public IP (no DNS name), and the IP changed
+// across a hibernation. The handshake that wrote it runs once, so without this
+// the tag points at an address the instance has lost (#1019). Only the URL is
+// rewritten, with the same token; the handshake is not re-run, because its
+// give-up deadlines count from spored's start and would record a terminal
+// failure for an app that is merely slow to come back. Called every tick, and
+// cheap when nothing changed; a failed write is retried on the next.
+func (a *Agent) refreshReadyURL(ctx context.Context) {
+	if a.readyURLBuild == nil {
+		return
+	}
+	host := a.readyHost()
+	if host == "" || host == a.readyURLHost {
+		return
+	}
+	if err := a.tagger.putTags(ctx, a.identity.InstanceID, map[string]string{"spawn:ready-url": a.readyURLBuild(host)}); err != nil {
+		log.Printf("Warning: could not rewrite spawn:ready-url for %s: %v", host, err)
+		return
+	}
+	log.Printf("spawn:ready-url rewritten: host %s -> %s", a.readyURLHost, host)
+	a.readyURLHost = host
 }
 
 // buildWebReadyURL is the ready-url for a web app: the app is reached over the

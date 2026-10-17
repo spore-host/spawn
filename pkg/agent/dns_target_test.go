@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/provider"
@@ -117,5 +118,68 @@ func TestNewAgentRefusesAnInvalidTarget(t *testing.T) {
 	}
 	if got := fake.tags.tags["spawn:dns-error"]; !strings.Contains(got, "spawn:dns-endpoint") {
 		t.Errorf("spawn:dns-error = %q, want it to name the bad tag", got)
+	}
+}
+
+// The DNS client built later, when the public IP appears after boot (#1019),
+// is built from the same tags as the boot path's: the custom target when it
+// validates, and none at all when it does not (#891).
+func TestDNSClientBuiltAfterBootUsesTheTagTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		endpoint  string
+		wantBuilt bool
+	}{
+		{"custom target", customEndpoint, true},
+		{"invalid endpoint", "https://collector.example.net/", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SPORED_DNS_DOMAIN", "")
+			fake := installFakeActivation(t)
+			var built bool
+			var gotDomain, gotEndpoint string
+			inner := newDNSClient
+			newDNSClient = func(ctx context.Context, domain, endpoint string) (*dns.Client, error) {
+				built, gotDomain, gotEndpoint = true, domain, endpoint
+				return inner(ctx, domain, endpoint)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			p := queryProvider()
+			p.identity.PublicIP = "" // the first boot had none
+			p.config.DNSDomain = "spore.example.edu"
+			p.config.DNSEndpoint = tc.endpoint
+			a, err := NewAgent(ctx, p)
+			if err != nil {
+				t.Fatalf("NewAgent: %v", err)
+			}
+			if built {
+				t.Fatal("setup: a DNS client was built with no public IP")
+			}
+			a.lookupPublicIP = func(context.Context) (string, error) { return "198.51.100.7", nil }
+			a.nextDNSRefresh = time.Time{}
+			a.refreshDNSLease(ctx)
+
+			if built != tc.wantBuilt {
+				t.Fatalf("DNS client built = %v, want %v", built, tc.wantBuilt)
+			}
+			reqs := fake.dnsRequests()
+			if !tc.wantBuilt {
+				if len(reqs) != 0 || a.dnsClient != nil {
+					t.Errorf("an invalid endpoint still registered: client=%v, %d request(s)", a.dnsClient != nil, len(reqs))
+				}
+				if got := fake.tags.tags["spawn:dns-status"]; got != "failed" {
+					t.Errorf("spawn:dns-status = %q, want failed", got)
+				}
+				return
+			}
+			if gotDomain != "spore.example.edu" || gotEndpoint != customEndpoint {
+				t.Errorf("DNS client built for (%q, %q), want (spore.example.edu, %s)", gotDomain, gotEndpoint, customEndpoint)
+			}
+			if len(reqs) != 1 || reqs[0].Domain != "spore.example.edu" {
+				t.Errorf("DNS requests = %+v, want one naming spore.example.edu", reqs)
+			}
+		})
 	}
 }

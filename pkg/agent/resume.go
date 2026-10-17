@@ -162,13 +162,23 @@ func (a *Agent) publicIP() string {
 	return a.identity.PublicIP
 }
 
-// refreshPublicIP re-reads the public IP. On a failed read the old one is kept:
-// a stale name is better than none, and the hourly renewal tries again with it.
+// refreshPublicIP re-reads the public IP after a resume. On a failed read the
+// old one is kept: a stale name is better than none, and the hourly renewal
+// tries again with it.
 func (a *Agent) refreshPublicIP(ctx context.Context) {
+	if err := a.readPublicIP(ctx); err != nil {
+		log.Printf("Warning: could not re-read the public IP after a resume: %v; keeping %s", err, a.publicIP())
+	}
+}
+
+// readPublicIP reads the public IP and makes it the current value; on an
+// error the current value is unchanged. Not on EC2 (and with no test lookup),
+// it does nothing.
+func (a *Agent) readPublicIP(ctx context.Context) error {
 	lookup := a.lookupPublicIP
 	if lookup == nil {
 		if a.identity == nil || a.identity.Provider != "ec2" {
-			return
+			return nil
 		}
 		lookup = imdsPublicIP
 	}
@@ -176,15 +186,15 @@ func (a *Agent) refreshPublicIP(ctx context.Context) {
 	defer cancel()
 	ip, err := lookup(lctx)
 	if err != nil {
-		log.Printf("Warning: could not re-read the public IP after a resume: %v; keeping %s", err, a.publicIP())
-		return
+		return err
 	}
 	if old := a.publicIP(); ip != old {
-		log.Printf("Public IP changed across the hibernation: %s -> %s", old, ip)
+		log.Printf("Public IP changed: %q -> %q", old, ip)
 	}
 	a.ipMu.Lock()
 	a.currentIP, a.currentIPSet = ip, true
 	a.ipMu.Unlock()
+	return nil
 }
 
 // imdsPublicIP reads public-ipv4 from IMDS, as the EC2 provider does at boot.
