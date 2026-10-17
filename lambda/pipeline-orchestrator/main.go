@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -69,8 +70,27 @@ type stageEC2API interface {
 	TerminateInstances(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
 }
 
+// runInstancesAPI is the EC2 call that launches a stage instance.
+type runInstancesAPI interface {
+	RunInstances(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
+}
+
 // Seams over the AWS side effects, replaced in tests.
 var (
+	launchEC2ForRegion = func(ctx context.Context, region string) (runInstancesAPI, error) {
+		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+		if err != nil {
+			return nil, err
+		}
+		return ec2.NewFromConfig(cfg), nil
+	}
+	recommendedAMIFn = func(ctx context.Context, region, instanceType string) (string, error) {
+		awsClient, err := spawnaws.NewClient(ctx)
+		if err != nil {
+			return "", fmt.Errorf("create AWS client: %w", err)
+		}
+		return awsClient.GetRecommendedAMI(ctx, region, instanceType)
+	}
 	markers      markerAPI
 	ec2ForRegion = func(ctx context.Context, region string) (stageEC2API, error) {
 		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
@@ -84,6 +104,10 @@ var (
 	reinvokeFn   = reinvokeSelf
 	notifyFn     = sendNotification
 	cleanupNetFn = cleanupNetworkResources
+	putObjectFn  = func(ctx context.Context, in *s3.PutObjectInput) error {
+		_, err := s3Client.PutObject(ctx, in)
+		return err
+	}
 )
 
 // PipelineEvent is the Lambda input event
@@ -500,7 +524,7 @@ func pollOnce(ctx context.Context, state *pipeline.PipelineState, pipelineDef *p
 		case pipeline.StageStatusReady:
 			// Launch stage
 			log.Printf("Launching stage %s", stageID)
-			if err := launchStage(ctx, state, stageDef, stageState); err != nil {
+			if err := launchStage(ctx, state, pipelineDef, stageDef, stageState); err != nil {
 				log.Printf("Failed to launch stage %s: %v", stageID, err)
 				// Instances launched before the failing one are terminated
 				// by failStage rather than left running.
@@ -699,23 +723,58 @@ func dependenciesMet(state *pipeline.PipelineState, stageDef *pipeline.Stage) bo
 	return true
 }
 
-func launchStage(ctx context.Context, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState) error {
-	// Create spawn AWS client (for AMI lookup)
-	awsClient, err := spawnaws.NewClient(ctx)
+// putStageConfig writes the pipeline definition where the stage runner reads it:
+// s3://<s3_bucket>/<pipeline.StageConfigKey>, named by every stage instance's
+// s3-config-key tag.
+func putStageConfig(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline) error {
+	body, err := json.Marshal(pipelineDef)
 	if err != nil {
-		return fmt.Errorf("create AWS client: %w", err)
+		return fmt.Errorf("marshal stage config: %w", err)
 	}
+	key := pipeline.StageConfigKey(state.S3Prefix, state.PipelineID)
+	if err := putObjectFn(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(state.S3Bucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(body),
+		ContentType: aws.String("application/json"),
+	}); err != nil {
+		return fmt.Errorf("write stage config s3://%s/%s: %w", state.S3Bucket, key, err)
+	}
+	return nil
+}
 
+// stageConfigURL is the s3-config-key tag's value.
+func stageConfigURL(state *pipeline.PipelineState) string {
+	return fmt.Sprintf("s3://%s/%s", state.S3Bucket, pipeline.StageConfigKey(state.S3Prefix, state.PipelineID))
+}
+
+// stageInstanceProfile is the profile stage instances launch with: the one
+// `spawn pipeline launch` created for this pipeline's data, or the shared
+// default for a record written before it did.
+func stageInstanceProfile(state *pipeline.PipelineState) string {
+	if state.InstanceProfile != "" {
+		return state.InstanceProfile
+	}
+	return spawnaws.SporedInstanceProfileName
+}
+
+func launchStage(ctx context.Context, state *pipeline.PipelineState, pipelineDef *pipeline.Pipeline, stageDef *pipeline.Stage, stageState *pipeline.StageState) error {
 	// Get EC2 client for stage's region
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(stageRegion(stageDef)))
+	ec2Client, err := launchEC2ForRegion(ctx, stageRegion(stageDef))
 	if err != nil {
 		return fmt.Errorf("load config for region %s: %w", stageRegion(stageDef), err)
 	}
-	ec2Client := ec2.NewFromConfig(cfg)
+
+	// The stage runner reads the definition from the pipeline's own bucket
+	// (#910). Written on every stage launch, not once at setup, so a pipeline
+	// already in flight when this was deployed gets it too.
+	if err := putStageConfig(ctx, state, pipelineDef); err != nil {
+		return err
+	}
 
 	// Launch instances for this stage
 	for i := 0; i < stageDef.InstanceCount; i++ {
-		instanceInfo, err := launchStageInstance(ctx, awsClient, ec2Client, state, stageDef, stageState, i)
+		instanceInfo, err := launchStageInstance(ctx, ec2Client, state, stageDef, stageState, i)
 		if err != nil {
 			return fmt.Errorf("launch instance %d: %w", i, err)
 		}
@@ -726,7 +785,7 @@ func launchStage(ctx context.Context, state *pipeline.PipelineState, stageDef *p
 	return nil
 }
 
-func launchStageInstance(ctx context.Context, awsClient *spawnaws.Client, ec2Client *ec2.Client, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, index int) (*pipeline.InstanceInfo, error) {
+func launchStageInstance(ctx context.Context, ec2Client runInstancesAPI, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, index int) (*pipeline.InstanceInfo, error) {
 	region := stageRegion(stageDef)
 
 	// Determine AMI to use
@@ -735,7 +794,7 @@ func launchStageInstance(ctx context.Context, awsClient *spawnaws.Client, ec2Cli
 		// No AMI specified, get recommended AMI for region/instance type
 		log.Printf("No AMI specified for stage %s, looking up recommended AMI...", stageDef.StageID)
 		var err error
-		amiID, err = awsClient.GetRecommendedAMI(ctx, region, stageDef.InstanceType)
+		amiID, err = recommendedAMIFn(ctx, region, stageDef.InstanceType)
 		if err != nil {
 			return nil, fmt.Errorf("lookup recommended AMI: %w", err)
 		}
@@ -786,7 +845,7 @@ func buildStageRunInstancesInput(state *pipeline.PipelineState, stageDef *pipeli
 		ImageId:      aws.String(amiID),
 		UserData:     aws.String(userData),
 		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{
-			Name: aws.String(spawnaws.SporedInstanceProfileName),
+			Name: aws.String(stageInstanceProfile(state)),
 		},
 		// The user data halts the instance on every exit as its last resort
 		// (#912). With this, a halt is a terminate, which needs no IAM
@@ -849,6 +908,12 @@ func stageInstanceTags(state *pipeline.PipelineState, stageDef *pipeline.Stage, 
 		ec2types.Tag{Key: aws.String("spawn:stage-id"), Value: aws.String(stageDef.StageID)},
 		ec2types.Tag{Key: aws.String("spawn:stage-index"), Value: aws.String(fmt.Sprintf("%d", stageState.StageIndex))},
 		ec2types.Tag{Key: aws.String("spawn:instance-index"), Value: aws.String(fmt.Sprintf("%d", index))},
+		// What spored run-pipeline-stage reads to find its data and its
+		// definition (pkg/pipeline loadStageInfoFromTags). Without
+		// s3-config-key the runner refuses to start (#910).
+		ec2types.Tag{Key: aws.String("spawn:s3-bucket"), Value: aws.String(state.S3Bucket)},
+		ec2types.Tag{Key: aws.String("spawn:s3-prefix"), Value: aws.String(state.S3Prefix)},
+		ec2types.Tag{Key: aws.String("spawn:s3-config-key"), Value: aws.String(stageConfigURL(state))},
 	)
 	return tags
 }
@@ -899,27 +964,33 @@ func generatePipelineUserData(state *pipeline.PipelineState, stageDef *pipeline.
 		return strings.ReplaceAll(s, "'", "'\\''")
 	}
 
-	// The command's timeout, in seconds. Shared with the instance's TTL tag so
-	// the two cannot disagree.
+	// The stage's timeout, in seconds. Shared with the instance's TTL tag so
+	// the two cannot disagree. It now bounds the whole stage runner: input
+	// download, command and output upload.
 	timeout := fmt.Sprintf("%d", int(stageTimeout(stageDef).Seconds()))
 
-	// Build environment variables
-	envVars := ""
-	for k, v := range stageDef.Env {
-		envVars += fmt.Sprintf("export %s='%s'\n", k, shellEscape(v))
-	}
+	// The fallback FAILED marker, for when spored never ran or died without
+	// writing one. Rendered from the same pkg/pipeline function the runner and
+	// the orchestrator use, so the three cannot disagree on the key.
+	failedMarker := fmt.Sprintf("s3://%s/%s", state.S3Bucket,
+		pipeline.StageMarkerKey(state.S3Prefix, stageDef.StageID, pipeline.MarkerFailed))
 
 	// Generate user data script.
 	//
-	// The instance terminates itself on EVERY exit (#912). It used to do so
-	// only at the end of the success path: the failure branch, the stage
-	// timeout and any bootstrap failure under `set -e` all exited first and
-	// left the instance running. spawn_finish is installed as an EXIT trap
-	// before anything can fail, writes the FAILED marker unless COMPLETE was
-	// written, and then terminates the instance two ways: the API (the
-	// instance id from IMDSv2 via curl, because ec2-metadata exists only on
-	// Amazon Linux), and a halt, which RunInstances' InstanceInitiatedShutdown
-	// Behavior=terminate turns into a terminate with no IAM or AWS CLI needed.
+	// The stage itself is run by `spored run-pipeline-stage` (#910), which
+	// reads the stage from this instance's tags and the definition from S3,
+	// downloads data_input, runs the command, uploads data_output and writes
+	// the COMPLETE marker, or FAILED on any error. This script used to run the
+	// command inline and leave data_input/data_output as TODOs, so stages got
+	// no inputs and their outputs were lost (#911).
+	//
+	// The instance terminates itself on EVERY exit (#912). spawn_finish is
+	// installed as an EXIT trap before anything can fail, writes the FAILED
+	// marker unless the stage completed, and then terminates the instance two
+	// ways: the API (the instance id from IMDSv2 via curl, because ec2-metadata
+	// exists only on Amazon Linux), and a halt, which RunInstances'
+	// InstanceInitiatedShutdownBehavior=terminate turns into a terminate with
+	// no IAM or AWS CLI needed.
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
 
@@ -934,6 +1005,7 @@ export SPAWN_S3_PREFIX='%s'
 export SPAWN_RESULT_S3_BUCKET='%s'
 export SPAWN_RESULT_S3_PREFIX='%s'
 export SPAWN_REGION='%s'
+SPAWN_FAILED_MARKER='%s'
 
 # Terminate this instance however the script exits (#912).
 SPAWN_STAGE_RESULT=""
@@ -943,7 +1015,7 @@ spawn_finish() {
     trap - EXIT
     if [ "$SPAWN_STAGE_RESULT" != "complete" ]; then
         echo "Stage did not complete (exit $rc); writing FAILED marker"
-        echo "failed exit=$rc" | aws s3 cp - "s3://${SPAWN_S3_BUCKET}/${SPAWN_S3_PREFIX}/stages/${SPAWN_STAGE_ID}/FAILED" --region "$SPAWN_REGION"
+        echo "failed exit=$rc" | aws s3 cp - "$SPAWN_FAILED_MARKER" --region "$SPAWN_REGION"
     fi
     echo "Terminating instance in 60s..."
     sleep 60
@@ -1036,7 +1108,8 @@ fi
 echo "✅ Checksum verified"
 chmod +x /usr/local/bin/spored
 
-# Install AWS CLI if not present (needed for S3 operations)
+# Install AWS CLI if not present: spawn_finish uses it for the fallback FAILED
+# marker and the API terminate.
 if ! command -v aws &> /dev/null; then
     echo "Installing AWS CLI..."
     case "$ARCH" in
@@ -1051,46 +1124,32 @@ if ! command -v aws &> /dev/null; then
     rm -rf /tmp/aws /tmp/awscliv2.zip
 fi
 
-# User environment variables
-%s
+# spored's AWS clients take the region from here as well as from IMDS.
+export AWS_REGION="$SPAWN_REGION"
+export AWS_DEFAULT_REGION="$SPAWN_REGION"
 
-# Create working directory
+# Working directory: the stage command runs in it.
 WORK_DIR="/opt/spawn/pipeline/${SPAWN_PIPELINE_ID}/${SPAWN_STAGE_ID}"
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 
-# Download stage inputs from S3 if configured
-# TODO: Implement S3 input download based on data_input config
-
-# Run stage command with timeout
-STAGE_CMD='%s'
-
 echo "========================================"
-echo "Running stage command: $STAGE_CMD"
+echo "Running stage ${SPAWN_STAGE_ID} with spored run-pipeline-stage"
 echo "========================================"
-echo ""
 
-# Run command with timeout. -k: a command that ignores SIGTERM is killed.
+# The stage runner: inputs, command, outputs, then the COMPLETE marker (or
+# FAILED). -k: a runner that ignores SIGTERM is killed.
 set +e
-timeout -k 60 %s bash -c "$STAGE_CMD"
+timeout -k 60 %s /usr/local/bin/spored run-pipeline-stage
 EXIT_CODE=$?
 set -e
 if [ "$EXIT_CODE" -ne 0 ]; then
-    echo "Stage command failed with exit code: $EXIT_CODE"
-    # spawn_finish writes the FAILED marker and terminates the instance.
+    echo "Stage failed with exit code: $EXIT_CODE"
+    # spawn_finish writes the fallback FAILED marker and terminates the instance.
     exit "$EXIT_CODE"
 fi
 
-echo ""
-echo "========================================"
-echo "Stage command completed successfully"
-echo "========================================"
-
-# Upload stage outputs to S3 if configured
-# TODO: Implement S3 output upload based on data_output config
-
-# Write completion marker to S3
-echo "success" | aws s3 cp - "s3://${SPAWN_S3_BUCKET}/${SPAWN_S3_PREFIX}/stages/${SPAWN_STAGE_ID}/COMPLETE" --region "$SPAWN_REGION"
+# spored exits 0 only after its outputs are uploaded and COMPLETE is written.
 SPAWN_STAGE_RESULT="complete"
 
 echo "✅ Stage complete"
@@ -1106,14 +1165,11 @@ exit 0
 		shellEscape(state.ResultS3Bucket),
 		shellEscape(state.ResultS3Prefix),
 		shellEscape(region),
-		envVars,
-		// stageDef.Command appears ONCE, escaped. It used to be interpolated twice:
-		// escaped into STAGE_CMD='%s', and RAW into echo "Running stage command: %s".
-		// Inside those double quotes a command containing $(...) or backticks
-		// EXECUTED — and executed a second time when the stage actually ran, so a
-		// substitution with side effects happened twice. The echo now prints the
-		// already-quoted shell variable instead (#680).
-		shellEscape(stageDef.Command),
+		shellEscape(failedMarker),
+		// The stage command and env are no longer in the user data at all:
+		// the runner reads them from the definition and runs the command with
+		// exec, so there is nothing here for a command's $(...) or quotes to
+		// break (#680).
 		timeout,
 	)
 
@@ -1153,7 +1209,7 @@ const (
 //     write its marker;
 //   - if the stage has outlived its TTL, it failed.
 func checkStageOutcome(ctx context.Context, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, now time.Time) (stageOutcome, string, error) {
-	failed, err := markerExists(ctx, state, stageState.StageID, "FAILED")
+	failed, err := markerExists(ctx, state, stageState.StageID, pipeline.MarkerFailed)
 	if err != nil {
 		return stageStillRunning, "", err
 	}
@@ -1161,7 +1217,7 @@ func checkStageOutcome(ctx context.Context, state *pipeline.PipelineState, stage
 		return stageFailed, "stage command failed (FAILED marker written)", nil
 	}
 
-	completed, err := markerExists(ctx, state, stageState.StageID, "COMPLETE")
+	completed, err := markerExists(ctx, state, stageState.StageID, pipeline.MarkerComplete)
 	if err != nil {
 		return stageStillRunning, "", err
 	}
@@ -1187,7 +1243,7 @@ func checkStageOutcome(ctx context.Context, state *pipeline.PipelineState, stage
 // Only a not-found answer means absent; any other error is returned, so a
 // permissions or network problem is not read as "not finished yet".
 func markerExists(ctx context.Context, state *pipeline.PipelineState, stageID, marker string) (bool, error) {
-	key := fmt.Sprintf("%s/stages/%s/%s", state.S3Prefix, stageID, marker)
+	key := pipeline.StageMarkerKey(state.S3Prefix, stageID, marker)
 	_, err := markers.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(state.S3Bucket),
 		Key:    aws.String(key),

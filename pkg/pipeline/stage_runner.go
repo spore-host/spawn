@@ -14,6 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
@@ -72,33 +74,46 @@ func NewStageRunner(ctx context.Context) (*StageRunner, error) {
 	log.Printf("Running pipeline stage: pipeline=%s, stage=%s, index=%d",
 		stageInfo.PipelineID, stageInfo.StageID, stageInfo.StageIndex)
 
+	// The stage's S3 clients use the bucket's own region. The instance's region
+	// is right for EC2 but not for a bucket created elsewhere: a pipeline whose
+	// stages span regions shares one data bucket.
+	dataCfg := bucketRegionConfig(ctx, cfg, stageInfo.S3Bucket)
+
 	// Create data handler
-	dataHandler, err := NewStageDataHandler(ctx,
+	dataHandler, err := NewStageDataHandlerWithAWSConfig(ctx,
 		stageInfo.S3Bucket,
 		stageInfo.S3Prefix,
 		stageInfo.PipelineID,
 		stageInfo.StageID,
+		dataCfg,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create data handler: %w", err)
 	}
 
-	// Download pipeline definition from S3
-	pipelineDef, err := downloadPipelineDefinitionFromS3(ctx, stageInfo.S3ConfigKey)
+	// Download pipeline definition from S3. From here on a failure is
+	// reported as the stage's FAILED marker, since the handler can write it.
+	pipelineDef, err := downloadPipelineDefinitionFromS3(ctx, cfg, stageInfo.S3ConfigKey)
 	if err != nil {
-		return nil, fmt.Errorf("download pipeline definition: %w", err)
+		err = fmt.Errorf("download pipeline definition: %w", err)
+		dataHandler.reportFailure(ctx, err)
+		return nil, err
 	}
 
 	// Get stage definition
 	stageDef := pipelineDef.GetStage(stageInfo.StageID)
 	if stageDef == nil {
-		return nil, fmt.Errorf("stage %s not found in pipeline definition", stageInfo.StageID)
+		err := fmt.Errorf("stage %s not found in pipeline definition", stageInfo.StageID)
+		dataHandler.reportFailure(ctx, err)
+		return nil, err
 	}
 
-	// Generate peer discovery file for network streaming
+	// Generate peer discovery file for network streaming. With the
+	// region-bearing config: a bare default config has no region on an
+	// instance (#906).
 	log.Println("Generating peer discovery file...")
-	if err := GeneratePeerDiscoveryFile(ctx, stageInfo.PipelineID, stageInfo.StageID,
-		stageInfo.StageIndex, stageInfo.InstanceIndex, pipelineDef); err != nil {
+	if err := GeneratePeerDiscoveryFileWithAWSConfig(ctx, stageInfo.PipelineID, stageInfo.StageID,
+		stageInfo.StageIndex, stageInfo.InstanceIndex, pipelineDef, cfg); err != nil {
 		log.Printf("Warning: Failed to generate peer discovery file: %v", err)
 		// Not a fatal error - stage can still run without peer file
 	}
@@ -115,8 +130,18 @@ func NewStageRunner(ctx context.Context) (*StageRunner, error) {
 	}, nil
 }
 
-// Run executes the pipeline stage
+// Run executes the pipeline stage: download inputs, run the command, upload
+// outputs, then write COMPLETE. Any failure writes the FAILED marker instead,
+// which the orchestrator reads (StageMarkerKey).
 func (r *StageRunner) Run(ctx context.Context) error {
+	if err := r.run(ctx); err != nil {
+		r.dataHandler.reportFailure(ctx, err)
+		return err
+	}
+	return nil
+}
+
+func (r *StageRunner) run(ctx context.Context) error {
 	log.Printf("Starting pipeline stage execution: %s", r.stageID)
 
 	startTime := time.Now()
@@ -154,7 +179,9 @@ func (r *StageRunner) Run(ctx context.Context) error {
 	cmd.Env = env
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Dir = "/root" // Default working directory
+	// The working directory is the runner's own, which the stage user data
+	// creates and enters (/opt/spawn/pipeline/<pipeline>/<stage>), as the
+	// inline bash runner it replaces did. This was a fixed /root.
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("command failed: %w", err)
@@ -243,7 +270,7 @@ func loadStageInfoFromTags(ctx context.Context, client *ec2.Client, instanceID s
 	return info, nil
 }
 
-func downloadPipelineDefinitionFromS3(ctx context.Context, s3Key string) (*Pipeline, error) {
+func downloadPipelineDefinitionFromS3(ctx context.Context, cfg aws.Config, s3Key string) (*Pipeline, error) {
 	// Parse S3 key (format: s3://bucket/key)
 	parts := splitS3URL(s3Key)
 	if len(parts) != 2 {
@@ -251,13 +278,8 @@ func downloadPipelineDefinitionFromS3(ctx context.Context, s3Key string) (*Pipel
 	}
 	bucket, key := parts[0], parts[1]
 
-	// Download from S3
-	cfg, err := loadAWSConfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("load AWS config: %w", err)
-	}
-
-	s3Client := s3.NewFromConfig(cfg)
+	// Download from S3, in the bucket's region.
+	s3Client := s3.NewFromConfig(bucketRegionConfig(ctx, cfg, bucket))
 
 	result, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
@@ -339,4 +361,56 @@ func IsPipelineInstance(ctx context.Context) (bool, error) {
 	}
 
 	return len(output.Tags) > 0, nil
+}
+
+// bucketRegionConfig returns cfg in bucket's region. getBucketRegion is an
+// unsigned HeadBucket, so it needs no IAM grant; if it cannot answer, cfg is
+// returned unchanged and the call that follows reports the real error.
+func bucketRegionConfig(ctx context.Context, cfg aws.Config, bucket string) aws.Config {
+	if bucket == "" {
+		return cfg
+	}
+	region := getBucketRegion(ctx, s3.NewFromConfig(cfg), bucket)
+	if region == "" || region == cfg.Region {
+		return cfg
+	}
+	out := cfg.Copy()
+	out.Region = region
+	return out
+}
+
+// reportFailure writes the FAILED marker for err, best effort: the stage user
+// data writes one too if spored exits non-zero, so a marker that cannot be
+// written here is logged, not fatal.
+func (h *StageDataHandler) reportFailure(ctx context.Context, cause error) {
+	if err := h.WriteFailureMarker(ctx, cause.Error()); err != nil {
+		log.Printf("Warning: could not write FAILED marker: %v", err)
+	}
+}
+
+// getBucketRegion is an unsigned HeadBucket that returns the bucket's
+// x-amz-bucket-region header, or "" if the response carried none. It stands in
+// for the deprecated feature/s3/manager.GetBucketRegion, which pkg/s3transfer
+// replaced (#932). The header is read from error responses too: S3 sends it on
+// the 301 for a bucket in another region and on a 403.
+func getBucketRegion(ctx context.Context, client *s3.Client, bucket string) string {
+	var region string
+	capture := middleware.DeserializeMiddlewareFunc("CaptureBucketRegion",
+		func(ctx context.Context, in middleware.DeserializeInput, next middleware.DeserializeHandler) (middleware.DeserializeOutput, middleware.Metadata, error) {
+			out, md, err := next.HandleDeserialize(ctx, in)
+			if resp, ok := out.RawResponse.(*smithyhttp.Response); ok && resp != nil {
+				region = resp.Header.Get("X-Amz-Bucket-Region")
+			}
+			return out, md, err
+		})
+	// The error is deliberately ignored: a 301 or 403 still carries the header,
+	// and the capture sits innermost in the deserialize step, beneath the
+	// middleware that turns those statuses into errors.
+	_, _ = client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)}, func(o *s3.Options) {
+		o.Credentials = nil
+		o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+			return stack.Deserialize.Add(capture, middleware.After)
+		})
+	})
+	return region
 }

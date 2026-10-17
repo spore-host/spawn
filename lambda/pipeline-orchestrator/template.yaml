@@ -105,7 +105,9 @@ Resources:
                 - ec2:CreateTags
                 - ec2:TerminateInstances
               Resource: '*'
-        # IAM pass role for EC2 instances
+        # IAM pass role for EC2 instances. spawn-instance-* is the stage profile
+        # `spawn pipeline launch` creates, scoped to the pipeline's S3 data
+        # (spawn#911); the Lambda only passes it, it never creates IAM.
         - Statement:
             - Effect: Allow
               Action:
@@ -113,6 +115,10 @@ Resources:
               Resource:
                 - 'arn:aws:iam::*:role/spawnd-role'
                 - 'arn:aws:iam::*:role/spored-instance-role'
+                - 'arn:aws:iam::*:role/spawn-instance-*'
+              Condition:
+                StringEquals:
+                  iam:PassedToService: ec2.amazonaws.com
         # Lambda self-invocation (wildcard to avoid circular dependency)
         - Statement:
             - Effect: Allow

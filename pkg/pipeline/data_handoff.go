@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	tm "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
@@ -81,7 +82,7 @@ func (h *StageDataHandler) DownloadStageInputs(ctx context.Context, dataInput *D
 
 func (h *StageDataHandler) downloadFromStage(ctx context.Context, sourceStage string, dataInput *DataConfig) error {
 	// Build S3 prefix for source stage output
-	sourcePrefix := fmt.Sprintf("%s/stages/%s/output/", h.prefix, sourceStage)
+	sourcePrefix := StageOutputPrefix(h.prefix, sourceStage)
 
 	log.Printf("Downloading from s3://%s/%s", h.bucket, sourcePrefix)
 
@@ -177,7 +178,7 @@ func (h *StageDataHandler) UploadStageOutputs(ctx context.Context, dataOutput *D
 	log.Printf("Uploading outputs for stage %s", h.stageID)
 
 	// Build S3 prefix for this stage's output
-	outputPrefix := fmt.Sprintf("%s/stages/%s/output/", h.prefix, h.stageID)
+	outputPrefix := StageOutputPrefix(h.prefix, h.stageID)
 
 	uploadCount := 0
 	for _, pattern := range dataOutput.Paths {
@@ -254,36 +255,48 @@ func (h *StageDataHandler) uploadFile(ctx context.Context, localPath, s3Key stri
 	return nil
 }
 
-// WriteCompletionMarker writes a completion marker to S3
+// WriteCompletionMarker writes the stage's COMPLETE marker, at the key the
+// orchestrator reads (StageMarkerKey). Written only after the outputs are
+// uploaded, so a downstream stage never starts before its inputs exist.
 func (h *StageDataHandler) WriteCompletionMarker(ctx context.Context) error {
-	markerKey := fmt.Sprintf("%s/stages/%s/COMPLETE", h.prefix, h.stageID)
+	return h.writeMarker(ctx, MarkerComplete, "success")
+}
 
-	log.Printf("Writing completion marker: s3://%s/%s", h.bucket, markerKey)
+// WriteFailureMarker writes the stage's FAILED marker, at the key the
+// orchestrator reads. The orchestrator fails the stage on it, so the runner
+// writes it itself rather than leaving the stage user data to guess.
+func (h *StageDataHandler) WriteFailureMarker(ctx context.Context, reason string) error {
+	return h.writeMarker(ctx, MarkerFailed, reason)
+}
 
-	// Write empty marker file with metadata
+func (h *StageDataHandler) writeMarker(ctx context.Context, marker, body string) error {
+	markerKey := StageMarkerKey(h.prefix, h.stageID, marker)
+
+	log.Printf("Writing %s marker: s3://%s/%s", marker, h.bucket, markerKey)
+
 	metadata := map[string]string{
-		"pipeline-id":  h.pipelineID,
-		"stage-id":     h.stageID,
-		"completed-at": fmt.Sprintf("%d", os.Getpid()),
+		"pipeline-id": h.pipelineID,
+		"stage-id":    h.stageID,
+		"written-at":  time.Now().UTC().Format(time.RFC3339),
 	}
 
 	_, err := h.s3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:   aws.String(h.bucket),
 		Key:      aws.String(markerKey),
-		Body:     strings.NewReader(""),
+		Body:     strings.NewReader(body),
 		Metadata: metadata,
 	})
 	if err != nil {
-		return fmt.Errorf("write completion marker: %w", err)
+		return fmt.Errorf("write %s marker: %w", marker, err)
 	}
 
-	log.Printf("Completion marker written successfully")
+	log.Printf("%s marker written", marker)
 	return nil
 }
 
 // CheckCompletionMarker checks if a completion marker exists for a stage
 func (h *StageDataHandler) CheckCompletionMarker(ctx context.Context, stageID string) (bool, error) {
-	markerKey := fmt.Sprintf("%s/stages/%s/COMPLETE", h.prefix, stageID)
+	markerKey := StageMarkerKey(h.prefix, stageID, MarkerComplete)
 
 	_, err := h.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(h.bucket),

@@ -166,6 +166,14 @@ type PipelineState struct {
 	CurrentCostUSD    float64  `json:"current_cost_usd" dynamodbav:"current_cost_usd"`
 	NotificationEmail string   `json:"notification_email,omitempty" dynamodbav:"notification_email,omitempty"`
 
+	// InstanceProfile is the instance profile stage instances are launched
+	// with. `spawn pipeline launch` creates it, scoped to the pipeline's S3
+	// bucket and prefix (StageDataPolicy), because the shared default spored
+	// profile grants no access to pipeline data (#911). Empty on records
+	// written before it existed; the orchestrator then falls back to the
+	// default profile.
+	InstanceProfile string `json:"instance_profile,omitempty" dynamodbav:"instance_profile,omitempty"`
+
 	// Progress tracking
 	TotalStages     int `json:"total_stages" dynamodbav:"total_stages"`
 	CompletedStages int `json:"completed_stages" dynamodbav:"completed_stages"`
