@@ -14,6 +14,7 @@ import (
 
 func runProvenanceWrapper(t *testing.T, spored string) (record map[string]any, sporedLog, awsLog string) {
 	t.Helper()
+	skipOnWindows(t, "executes the bash wrapper against a fake spored and aws")
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
