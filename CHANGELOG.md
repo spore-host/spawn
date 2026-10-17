@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.130.0] - 2026-10-16
+
 ### Added
 
 - **Custom DNS zones work end to end** (#891). A spore can register under your own
@@ -53,10 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spored also refuses an install request itself, so an older spawn reports
   the reason too. See the Windows guide.
 - **`deploy-custom-dns.sh` no longer breaks the updater it adds a zone to**
-  (#891). It replaced the role's Route53 grant with one on the new zone alone,
-  which on spore.host's shared updater would have revoked access to the
-  spore.host zone and failed every spore's DNS registration. It also overwrote
-  `DEFAULT_DOMAIN` and `HOSTED_ZONE_ID` with the new zone's. The grant now covers
+  (#891). It overwrote `DEFAULT_DOMAIN` and `HOSTED_ZONE_ID` with the new zone's,
+  so adding a zone made it the default. It also replaced its Route53 grant
+  (`SpawnDNSPermissions`) with one on the new zone alone. On an updater the script
+  created, that grant is the only one, so adding a zone revoked access to every
+  zone added before it. spore.host's live updater happens to carry a second,
+  hand-made grant for its zone (`Route53DNSUpdate`), which would have masked
+  this there. The grant now covers
   every zone the updater serves, the defaults are set only when absent, and
   `DNS_ALLOWED_ACCOUNTS` is merged rather than replaced. The live updater still
   serves only the spore.host zone, so it was never used to add a second one.
@@ -88,6 +93,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a plugin that is not installed and 500 only for a real failure, on
   remove, push and status alike. `spawn plugin status` used to report a plugin
   whose state spored could not read as "not found"; it now reports the error.
+- **A plugin's remote pre-flight conditions are now checked** (#1040). The
+  `conditions.remote` block of a plugin spec, documented as "pre-flight checks
+  before install", was validated and then ignored, so a `type: command` check
+  such as "docker must already be present", or a `type: platform` OS
+  requirement, never ran. spored now evaluates them on the instance before the
+  plugin's install steps, and a failure marks the plugin failed with the
+  condition's message, which `spawn plugin install` and `spawn plugin status`
+  print. `spawn plugin install` also asks the instance to check them before it
+  runs the plugin's local steps, so a failing check stops the install before
+  anything is created on your machine (against an instance running an older
+  spored it warns that it cannot check them first). A condition of a type spawn
+  does not know now fails instead of being skipped, a platform `os` matches
+  regardless of case, and condition commands, local and remote, are rendered
+  with `{{ config.* }}` values like steps.
+
+### Security
+
+- **The local-file path guard works on Windows** (#1000). The check behind
+  `spawn launch --user-data-file` / `--user-data @file` and spored's queue
+  result uploads compared paths against `/etc`, `/proc`, ... only, so on Windows
+  it refused nothing. It now uses the host's rules: on Windows it refuses the
+  Windows directory, ProgramData and System Volume Information (any case, either
+  separator), UNC and `\\?\` / `\\.\` paths, alternate data streams
+  (`file:stream`), device names such as `NUL` and `CON`, and names ending in a
+  dot or space. On every OS it now follows symlinks (and Windows junctions) and
+  refuses a path that leads into a system directory, compares case-insensitively
+  (macOS's `/ETC` is `/etc`), and refuses any `..` element rather than only those
+  left after cleaning.
+- **Queue result uploads check every file a pattern matches** (#1000), not
+  just the pattern, so a wildcard such as `/e*c/passwd` or one through a
+  symlink can no longer upload a system file from the spore.
+- **On Windows the path guard follows directory junctions and mount points**
+  (#1000). Since Go 1.23 Go's own link resolution stops at a junction, so a
+  junction made with `mklink /J` (no privilege needed) to `C:\Windows` let
+  `--user-data-file` or a queue result pattern read the Windows directory,
+  including `System32\config\SAM`. The guard now asks Windows for the final path
+  of the longest existing prefix, which follows junctions, mount points,
+  symlinks and 8.3 short names, and refuses a link it cannot resolve.
 
 ## [0.129.0] - 2026-10-16
 
@@ -637,21 +680,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   way the CPU line does. The JSON output gains `network_measured` and
   `network_unknown`.
 
-- **A plugin's remote pre-flight conditions are now checked** (#1040). The
-  `conditions.remote` block of a plugin spec, documented as "pre-flight checks
-  before install", was validated and then ignored, so a `type: command` check
-  such as "docker must already be present", or a `type: platform` OS
-  requirement, never ran. spored now evaluates them on the instance before the
-  plugin's install steps, and a failure marks the plugin failed with the
-  condition's message, which `spawn plugin install` and `spawn plugin status`
-  print. `spawn plugin install` also asks the instance to check them before it
-  runs the plugin's local steps, so a failing check stops the install before
-  anything is created on your machine (against an instance running an older
-  spored it warns that it cannot check them first). A condition of a type spawn
-  does not know now fails instead of being skipped, a platform `os` matches
-  regardless of case, and condition commands, local and remote, are rendered
-  with `{{ config.* }}` values like steps.
-
 ### Security
 
 - **The unit tests no longer make real AWS and DNS calls with your credentials**
@@ -678,27 +706,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/spored.service` already did. spored runs as root and needs no privilege
   escalation; the setting stops a hook or job it spawns from gaining privileges
   through a setuid binary or file capabilities.
-- **The local-file path guard works on Windows** (#1000). The check behind
-  `spawn launch --user-data-file` / `--user-data @file` and spored's queue
-  result uploads compared paths against `/etc`, `/proc`, ... only, so on Windows
-  it refused nothing. It now uses the host's rules: on Windows it refuses the
-  Windows directory, ProgramData and System Volume Information (any case, either
-  separator), UNC and `\\?\` / `\\.\` paths, alternate data streams
-  (`file:stream`), device names such as `NUL` and `CON`, and names ending in a
-  dot or space. On every OS it now follows symlinks (and Windows junctions) and
-  refuses a path that leads into a system directory, compares case-insensitively
-  (macOS's `/ETC` is `/etc`), and refuses any `..` element rather than only those
-  left after cleaning.
-- **Queue result uploads check every file a pattern matches** (#1000), not
-  just the pattern, so a wildcard such as `/e*c/passwd` or one through a
-  symlink can no longer upload a system file from the spore.
-- **On Windows the path guard follows directory junctions and mount points**
-  (#1000). Since Go 1.23 Go's own link resolution stops at a junction, so a
-  junction made with `mklink /J` (no privilege needed) to `C:\Windows` let
-  `--user-data-file` or a queue result pattern read the Windows directory,
-  including `System32\config\SAM`. The guard now asks Windows for the final path
-  of the longest existing prefix, which follows junctions, mount points,
-  symlinks and 8.3 short names, and refuses a link it cannot resolve.
 
 ### Documentation
 
@@ -8940,7 +8947,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.129.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.130.0...HEAD
+[0.130.0]: https://github.com/spore-host/spawn/compare/v0.129.0...v0.130.0
 [0.129.0]: https://github.com/spore-host/spawn/compare/v0.128.2...v0.129.0
 [0.128.2]: https://github.com/spore-host/spawn/compare/v0.128.1...v0.128.2
 [0.128.1]: https://github.com/spore-host/spawn/compare/v0.128.0...v0.128.1
