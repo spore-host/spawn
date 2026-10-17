@@ -136,14 +136,26 @@ func computeSoFar(instance *aws.InstanceInfo, launch, now time.Time) time.Durati
 	if wall < 0 {
 		wall = 0
 	}
-	secs, err := strconv.ParseInt(instance.Tags["spawn:compute-seconds"], 10, 64)
-	if err != nil || secs < 0 {
+	secs, ok := taggedComputeSeconds(instance)
+	if !ok {
 		return wall
 	}
 	if c := time.Duration(secs)*time.Second + computeTagLag; c < wall {
 		return c
 	}
 	return wall
+}
+
+// taggedComputeSeconds is spawn:compute-seconds, spored's cumulative compute
+// across every boot (#928), and whether the tag holds a usable value. It is the
+// one reader of that tag for both `spawn extend`'s cost limit (#992) and the
+// stopped-instance `spawn status`.
+func taggedComputeSeconds(instance *aws.InstanceInfo) (int64, bool) {
+	secs, err := strconv.ParseInt(strings.TrimSpace(instance.Tags["spawn:compute-seconds"]), 10, 64)
+	if err != nil || secs < 0 {
+		return 0, false
+	}
+	return secs, true
 }
 
 // renderCostLimitDecision is the line(s) `spawn extend` prints about the cap. Empty

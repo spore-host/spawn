@@ -161,6 +161,7 @@ field InstanceInfo.PublicIP string
 field InstanceInfo.Region string
 field InstanceInfo.SpotInstance bool
 field InstanceInfo.State string
+field InstanceInfo.StateReason string
 field InstanceInfo.StateTransitionReason string
 field InstanceInfo.SweepID string
 field InstanceInfo.SweepIndex string

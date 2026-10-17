@@ -185,6 +185,9 @@ func runDaemon() {
 	// checkpoint, which is 0 on a brand-new instance (#896). Best-effort: a
 	// status without it falls back to the checkpoint and says so.
 	publishComputeClock(agent)
+	// Record this boot's compute start on disk now, not at the first tick, so a
+	// stop in the first minute still carries it into the next boot (#928).
+	agent.WriteComputeCheckpoint()
 
 	// Get config and identity for observability
 	agentConfig := agent.GetConfig()
@@ -726,7 +729,15 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 	// bootTime is directly computable: spored knows both the launch time and its
 	// own start. Whatever is left after that is stopped time, and only an
 	// instance with prior compute time carried over through the tag has any.
-	bootTime := startTime.Sub(launchTime)
+	//
+	// Since #928 the daemon counts each boot from the kernel's boot time, so
+	// the gap is launch → counting on the FIRST boot only. On a later boot the
+	// earlier boots are inside computeTime, and measuring from the original
+	// launch to this boot's start would bill the stopped interval as boot time.
+	var bootTime time.Duration
+	if !ag.HasPriorComputeTime() {
+		bootTime = ag.ComputeStart().Sub(launchTime)
+	}
 	if bootTime < 0 {
 		bootTime = 0 // clock skew between the tag and local uptime
 	}

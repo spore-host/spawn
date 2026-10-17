@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spore-host/spawn/pkg/sshtarget"
+
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -221,12 +223,17 @@ func shellQuoteArgs(args []string) string {
 // shared control socket (#56). Shared by the Linux and Windows (--ssh) paths.
 func sshToInstance(user, host, keyPath string, port int, remoteCmd string, tty bool) error {
 	sshArgs := buildSSHCommandArgs(user, host, keyPath, port, remoteCmd, tty)
+	// Refuse before announcing: an empty or loopback host would otherwise reach
+	// this machine's own sshd (#928).
+	sshCmd, err := sshtarget.Command(context.Background(), "ssh", sshArgs...)
+	if err != nil {
+		return err
+	}
 
 	fmt.Fprintf(os.Stderr, "%s\n\n", i18n.Tf("spawn.connect.connecting_ssh", map[string]interface{}{
 		"Command": "ssh " + strings.Join(sshArgs, " "),
 	}))
 
-	sshCmd := exec.Command("ssh", sshArgs...)
 	sshCmd.Stdin = os.Stdin
 	sshCmd.Stdout = os.Stdout
 	sshCmd.Stderr = os.Stderr

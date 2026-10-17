@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"time"
+
+	"github.com/spore-host/spawn/pkg/sshtarget"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/arrayrec"
@@ -215,7 +216,11 @@ func runArrayMemberCommand(ctx context.Context, client *aws.Client, instance *aw
 	// Resolved login user, not a hardcoded ec2-user (which fails on non-AL2023
 	// AMIs like Ubuntu — #581).
 	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", resolveSSHUser("", instance), instance.PublicIP), "sudo "+remoteCmd+" 2>&1")
-	output, err := exec.CommandContext(ctx, "ssh", sshArgs...).CombinedOutput()
+	sshCmd, err := sshtarget.Command(ctx, "ssh", sshArgs...)
+	if err != nil {
+		return "", err
+	}
+	output, err := sshCmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("ssh: %w\nOutput: %s", err, string(output))
 	}

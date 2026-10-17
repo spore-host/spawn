@@ -457,7 +457,7 @@ func TestStartReportsTheEnforcedDeadlineInsteadOfRestoringTTL(t *testing.T) {
 		"spawn:ttl-deadline":  deadline.Format(time.RFC3339),
 	}}
 	got := startDoesNotRestoreTTLNotice(inst)
-	for _, want := range []string{"40m", "does not pause", "2026-10-15 18:42 UTC", "spawn extend i-x"} {
+	for _, want := range []string{"40m", "keeps counting while stopped", "2026-10-15 18:42 UTC", "spawn extend i-x"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("notice missing %q:\n%s", want, got)
 		}

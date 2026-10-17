@@ -215,3 +215,45 @@ func TestStatusReport_NoRunningTimeClaimsNoSaving(t *testing.T) {
 		})
 	}
 }
+
+// #928: after a stop/start the restarted daemon carries the earlier boots'
+// compute in its base. The billed time must be that compute — the instance's
+// running time across boots — and not also the stretch from the ORIGINAL launch
+// to this boot's start, which includes the time it spent stopped. That stretch
+// is the stopped term, and stopped time bills EBS, not compute.
+func TestStatusReport_RestartedInstanceDoesNotBillTheStop(t *testing.T) {
+	now := time.Now()
+	cfg := &provider.Config{
+		LaunchTime:    now.Add(-(3*time.Minute + 17*time.Second)),
+		PricePerHour:  0.1078,
+		EBSHourlyCost: 0.0011,
+	}
+	ag := queryAgent(t, cfg)
+	// The daemon on the second boot: 70s carried over from the first, counting
+	// this boot for 22s.
+	bootStart := now.Add(-22 * time.Second)
+	publishAndAdopt(t, ag, bootStart, 70)
+	// Sampling inside buildStatusReport takes seconds on Windows (a PowerShell
+	// process per sample), so this boot's share is a window, not an instant.
+	before := time.Now()
+	r := buildStatusReport(ag, cfg, statusIdentity(), false)
+	after := time.Now()
+
+	lo, hi := 70+before.Sub(bootStart).Seconds()-1, 70+after.Sub(bootStart).Seconds()+1
+	if r.ComputeSeconds < lo || r.ComputeSeconds > hi {
+		t.Fatalf("compute = %.0fs, want the first run's 70s plus this boot's 22s (%.0f–%.0fs)", r.ComputeSeconds, lo, hi)
+	}
+	if r.BilledSeconds > r.ComputeSeconds+1 {
+		t.Errorf("billed = %.0fs for %.0fs of compute: the stop was billed as boot time (boot term %.0fs)",
+			r.BilledSeconds, r.ComputeSeconds, r.BootSeconds)
+	}
+	if r.StoppedSeconds < 100 {
+		t.Errorf("stopped = %.0fs, want the ~105s the instance was not running", r.StoppedSeconds)
+	}
+	if r.Cost == nil || r.Cost.EffectiveRate == nil {
+		t.Fatalf("no effective rate: %+v", r.Cost)
+	}
+	if *r.Cost.EffectiveRate >= 0.1078 {
+		t.Errorf("effective rate %.4f is not below the on-demand rate for an instance that ran 92s of 197s", *r.Cost.EffectiveRate)
+	}
+}

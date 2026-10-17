@@ -1147,6 +1147,13 @@ type InstanceInfo struct {
 	// instance used to be unable to give (#736).
 	StateTransitionReason string
 
+	// StateReason is EC2's StateReason message for a stopped/stopping/terminated
+	// instance — "Client.UserInitiatedShutdown: User initiated shutdown",
+	// "Client.InstanceInitiatedShutdown: ..." — the cause in words, where
+	// StateTransitionReason carries the moment. `spawn status` on a stopped
+	// instance shows both, from EC2 alone, without reaching the instance (#928).
+	StateReason string
+
 	// Job array fields
 	JobArrayID    string
 	JobArrayName  string
@@ -1294,6 +1301,9 @@ func (c *Client) listInstancesInRegion(ctx context.Context, region string, state
 					// EC2 populates this for terminated/stopped instances only;
 					// it is empty for a running one (#736).
 					StateTransitionReason: valueOrEmpty(instance.StateTransitionReason),
+				}
+				if instance.StateReason != nil {
+					info.StateReason = valueOrEmpty(instance.StateReason.Message)
 				}
 
 				if instance.LaunchTime != nil {

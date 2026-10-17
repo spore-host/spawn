@@ -3,8 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
+
+	"github.com/spore-host/spawn/pkg/sshtarget"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
@@ -89,7 +90,10 @@ func runConfig(cmd *cobra.Command, args []string) error {
 	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
 	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", resolveSSHUser("", instance), instance.PublicIP), sporedCmd)
 
-	sshCmd := exec.Command("ssh", sshArgs...)
+	sshCmd, err := sshtarget.Command(context.Background(), "ssh", sshArgs...)
+	if err != nil {
+		return err
+	}
 	output, err := sshCmd.CombinedOutput()
 	if err != nil {
 		// Check if it's just a non-zero exit code from spored

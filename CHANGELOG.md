@@ -117,6 +117,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `-o json`) now shows a job-array member's peers, when the list was last
   refreshed, and whether it is stale. spored never writes the file on
   `--mpi` instances, where its arrival is the signal the MPI setup waits for.
+- `aws.InstanceInfo.StateReason`: EC2's state-reason message for a
+  stopped or terminated instance (#928). This is an addition to the public
+  surface.
 
 ### Deprecated
 
@@ -374,6 +377,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now go through the same resolution as `spawn launch`. With none of the flags
   or `SPORE_*` variables set, nothing changes. A test now fails any command
   that loads AWS config directly.
+- **`spawn status` on a stopped instance no longer SSHes to your own machine**
+  (#928). A stopped instance has no public IP, and status ran
+  `ssh ec2-user@` with an empty host. ssh resolves that to localhost, so it
+  offered your keys to your own sshd (`::1`) and failed with "Too many
+  authentication failures". For an instance that is not running (stopped,
+  stopping, pending), status now reads EC2 data and tags instead of SSH or SSM.
+  It shows the state, when the instance stopped and why, the TTL deadline,
+  compute and cost so far across every boot, and the EBS cost that keeps
+  accruing while it is stopped. `--output json` returns the same facts with
+  `"source": "ec2"`. A running instance with no public IP now uses SSM.
+- **No spawn command connects to an empty, loopback or unspecified host**
+  (#928). This covers `connect`, `status`, `config`, `extend`, `queue`,
+  `plugin`, `service`, array commands and uploads. Every ssh and scp client now
+  starts in one place, which refuses `""`, `localhost`, `127.0.0.0/8`, `::1`,
+  `0.0.0.0` and `::`, including as a `-J` jump host or an scp operand. A test
+  fails the build if any code starts ssh or scp elsewhere. `spawn extend` on a
+  stopped instance no longer tries to reach it; spored reads the new deadline
+  when the instance starts.
+- **Compute from earlier boots is kept after a stop/start** (#928). An instance
+  that ran about a minute, was stopped, then restarted reported 22s of compute,
+  so its effective rate was meaningless for the stop/idle/restart pattern it is
+  meant to show. spored now also keeps its running total on the instance's own
+  disk (`/var/lib/spored/compute-checkpoint.json`). It writes that file every
+  minute and again first on shutdown, before the network write that a stop's
+  shutdown can lose. That network write (`spawn:compute-seconds`) is now
+  retried, and a failure is logged. The next boot carries over the larger of
+  the two totals. Each boot is now counted from when the kernel started, which
+  is closer to what EC2 bills: it includes OS and cloud-init time, not only the
+  time since spored started. A spored restart within one boot (an upgrade, a
+  crash) is not counted twice. A restarted instance's billed time no longer
+  includes the time it was stopped. That time is now shown as stopped, where
+  only EBS bills.
+- **`spawn stop` no longer says the TTL countdown pauses** (#928). It never did:
+  the deadline is fixed at launch and keeps counting while the instance is
+  stopped, as the docs say. `stop`, `hibernate` and `start` now print the
+  deadline (local time with UTC) and say it still applies. If the deadline has
+  already passed, they say starting will terminate the instance. `spawn start`
+  also stopped overwriting `spawn:ttl` with a "remaining TTL" saved at stop.
+  That tag is defined as the total from launch, and the overwrite changed its
+  meaning. The stop/start help and reference pages say the same, and a test
+  checks that no CLI string or doc in this repo says the TTL pauses.
 
 ### Security
 
