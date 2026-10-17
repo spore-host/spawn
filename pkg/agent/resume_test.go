@@ -18,16 +18,21 @@ import (
 	"github.com/spore-host/spawn/pkg/provider"
 )
 
-// fakeSuspend stands in for the kernel's suspended-time reading.
+// fakeSuspend stands in for the kernel clocks (readKernelClocks), the one
+// reader both resume detection and the compute clock use. Monotonic follows
+// real time since the fake was installed; Boottime runs ahead of it by the
+// simulated suspended time, as the kernel's does after a resume.
 type fakeSuspend struct {
-	mu sync.Mutex
-	d  time.Duration
+	mu    sync.Mutex
+	d     time.Duration
+	start time.Time
 }
 
-func (f *fakeSuspend) read() (time.Duration, bool) {
+func (f *fakeSuspend) read() (kernelClocks, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.d, true
+	mono := time.Hour + time.Since(f.start)
+	return kernelClocks{Monotonic: mono, Boottime: mono + f.d}, true
 }
 
 func (f *fakeSuspend) hibernate(d time.Duration) {
@@ -38,10 +43,10 @@ func (f *fakeSuspend) hibernate(d time.Duration) {
 
 func useFakeSuspend(t *testing.T) *fakeSuspend {
 	t.Helper()
-	f := &fakeSuspend{d: 3 * time.Second}
-	prev := readSuspendedTime
-	readSuspendedTime = f.read
-	t.Cleanup(func() { readSuspendedTime = prev })
+	f := &fakeSuspend{d: 3 * time.Second, start: time.Now()}
+	prev := readKernelClocks
+	readKernelClocks = f.read
+	t.Cleanup(func() { readKernelClocks = prev })
 	return f
 }
 

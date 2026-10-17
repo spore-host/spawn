@@ -30,9 +30,19 @@ import (
 // systemd sleep hook: a hook is another unit to install, and it only helps if
 // it runs. The kernel clocks need neither.
 
-// readSuspendedTime is sysSuspendedTime, a variable so tests can simulate a
-// hibernation.
-var readSuspendedTime = sysSuspendedTime
+// readSuspendedTime is how long this boot has spent suspended or hibernated:
+// CLOCK_BOOTTIME minus CLOCK_MONOTONIC on Linux. It is read through
+// readKernelClocks, the same kernel-clock reader that keeps hibernated time out
+// of compute (#945), so resume detection and the compute clock can never
+// disagree about whether, or for how long, the machine slept. Tests simulate a
+// hibernation by standing in for that one reader.
+func readSuspendedTime() (time.Duration, bool) {
+	k, ok := readKernelClocks()
+	if !ok {
+		return 0, false
+	}
+	return k.suspended(), true
+}
 
 const (
 	// resumeSuspendThreshold is how much the kernel's suspended time must grow

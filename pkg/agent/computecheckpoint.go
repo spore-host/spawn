@@ -40,6 +40,16 @@ type ComputeCheckpoint struct {
 	// TotalSeconds is BaseSeconds plus this boot's running time at WrittenAt.
 	TotalSeconds int64     `json:"total_seconds"`
 	WrittenAt    time.Time `json:"written_at"`
+	// KernelClock says CountFromMonotonicNS and CountFromBoottimeNS are set:
+	// the kernel's clocks when this boot's count started (#945). A restart
+	// within the boot resumes counting on CLOCK_MONOTONIC from there, which a
+	// hibernation does not advance. CountFrom, a wall time, cannot do that: a
+	// hibernated instance resumes into the same boot, and wall-now minus
+	// CountFrom includes the hibernation. False in a checkpoint written before
+	// #945.
+	KernelClock          bool  `json:"kernel_clock,omitempty"`
+	CountFromMonotonicNS int64 `json:"count_from_monotonic_ns,omitempty"`
+	CountFromBoottimeNS  int64 `json:"count_from_boottime_ns,omitempty"`
 }
 
 // ComputeCheckpointPath is where the daemon persists its checkpoint, or "" on
@@ -103,18 +113,38 @@ type computeStartInputs struct {
 	SporedAt   time.Time // when this spored started
 	TagSeconds int64     // spawn:compute-seconds
 	Checkpoint *ComputeCheckpoint
+	Kernel     kernelClocks // the kernel clocks at SporedAt
+	KernelOK   bool         // Kernel was read; false where the platform has no such clocks
 }
 
-// resolveComputeStart decides the compute carried in from earlier boots (base)
-// and when this boot's count starts (from), so that TotalComputeSeconds =
-// base + time.Since(from).
+// computeStart is resolveComputeStart's decision.
+type computeStart struct {
+	Base   int64     // compute carried in from earlier boots
+	From   time.Time // when this boot's count started, on the wall clock
+	Source string    // which rule decided, for the log
+	// Origin is the kernel clocks at From, when OriginKnown. Running time is
+	// then measured on CLOCK_MONOTONIC from Origin, so hibernated time is not
+	// counted (#945); without it, on the wall clock from From.
+	Origin      kernelClocks
+	OriginKnown bool
+}
+
+// resolveComputeStart decides the compute carried in from earlier boots (Base)
+// and when this boot's count starts (From, and Origin on the kernel clocks), so
+// that TotalComputeSeconds = Base + running time since then.
 //
 // The rules, each chosen so that the error, when there is one, undercounts
 // rather than counting a stretch twice:
 //
 //   - A checkpoint from THIS boot means spored restarted within the boot. Its
 //     base and start are reused as they are: the boot's running time is still
-//     being counted from where it began.
+//     being counted from where it began. The start is reused on the kernel's
+//     monotonic clock, never on the wall clock, because a hibernated instance
+//     resumes into the same boot and the wall clock counts the hibernation
+//     (#945). A same-boot checkpoint written before #945 has no kernel reading,
+//     so its TotalSeconds is carried and counting resumes from spored's start:
+//     that loses the seconds since its last write, which is the right way to
+//     be wrong.
 //   - A checkpoint from an EARLIER boot carries that boot's total. The tag may be
 //     newer (the file write failed) or older (the tag write was lost on
 //     shutdown, #928), and neither includes this boot, so the larger wins. This
@@ -124,31 +154,67 @@ type computeStartInputs struct {
 //   - No usable checkpoint but a non-zero tag: the tag may already include part
 //     of this boot (an older spored ran earlier in it), so this boot counts only
 //     from spored's own start. That is how every spored counted before #928.
-func resolveComputeStart(in computeStartInputs) (base int64, from time.Time, source string) {
-	bootStart := in.SporedAt
+//
+// "The kernel's boot time" is the reading {0, 0} on the kernel clocks, so a
+// hibernation before spored started (late in a boot) is not counted either.
+func resolveComputeStart(in computeStartInputs) computeStart {
+	// Counting from spored's own start: the kernel clocks as they read now.
+	atSpored := computeStart{From: in.SporedAt, Origin: in.Kernel, OriginKnown: in.KernelOK}
+
+	bootStart := atSpored
 	if !in.BootTime.IsZero() && !in.BootTime.After(in.SporedAt) {
-		bootStart = in.BootTime
-		if !in.LaunchTime.IsZero() && bootStart.Before(in.LaunchTime) {
-			bootStart = in.LaunchTime // clock skew; billing cannot predate launch
+		bootStart = computeStart{From: in.BootTime, OriginKnown: in.KernelOK}
+		if !in.LaunchTime.IsZero() && bootStart.From.Before(in.LaunchTime) {
+			// Clock skew; billing cannot predate launch. Move the kernel origin
+			// by the same amount, capped at now.
+			skew := in.LaunchTime.Sub(in.BootTime)
+			if in.KernelOK && skew > in.Kernel.Monotonic {
+				skew = in.Kernel.Monotonic
+			}
+			bootStart.From = in.LaunchTime
+			bootStart.Origin = kernelClocks{Monotonic: skew, Boottime: skew}
 		}
+	}
+	with := func(c computeStart, base int64, source string) computeStart {
+		c.Base, c.Source = base, source
+		return c
 	}
 
 	cp := in.Checkpoint
 	usable := cp != nil && in.BootID != "" && cp.BootID != "" && cp.InstanceID == in.InstanceID &&
 		cp.BaseSeconds >= 0 && cp.TotalSeconds >= cp.BaseSeconds
+	sameBoot := usable && cp.BootID == in.BootID
 	switch {
-	case usable && cp.BootID == in.BootID && !cp.CountFrom.IsZero() && !cp.CountFrom.After(in.SporedAt):
-		return cp.BaseSeconds, cp.CountFrom, "checkpoint (same boot)"
+	case sameBoot && cp.KernelClock && in.KernelOK:
+		origin := kernelClocks{
+			Monotonic: time.Duration(cp.CountFromMonotonicNS),
+			Boottime:  time.Duration(cp.CountFromBoottimeNS),
+		}
+		if !origin.validOrigin(in.Kernel) {
+			// Not a reading from earlier in this boot: carry what it recorded.
+			return with(atSpored, cp.TotalSeconds, "checkpoint (same boot, bad kernel reading)")
+		}
+		from := cp.CountFrom
+		if from.IsZero() || from.After(in.SporedAt) {
+			from = in.SporedAt.Add(-kernelRunningSince(origin, in.Kernel))
+		}
+		return computeStart{Base: cp.BaseSeconds, From: from, Origin: origin, OriginKnown: true,
+			Source: "checkpoint (same boot)"}
+	case sameBoot && in.KernelOK:
+		return with(atSpored, cp.TotalSeconds, "checkpoint (same boot, no kernel reading)")
+	case sameBoot && !cp.CountFrom.IsZero() && !cp.CountFrom.After(in.SporedAt):
+		// No kernel clocks here at all: the wall clock is all there is.
+		return computeStart{Base: cp.BaseSeconds, From: cp.CountFrom, Source: "checkpoint (same boot)"}
 	case usable && cp.BootID != in.BootID:
 		base := cp.TotalSeconds
 		if in.TagSeconds > base {
 			base = in.TagSeconds
 		}
-		return base, bootStart, "checkpoint (earlier boot)"
+		return with(bootStart, base, "checkpoint (earlier boot)")
 	case in.TagSeconds <= 0:
-		return 0, bootStart, "first boot"
+		return with(bootStart, 0, "first boot")
 	default:
-		return in.TagSeconds, in.SporedAt, "tag"
+		return with(atSpored, in.TagSeconds, "tag")
 	}
 }
 
@@ -158,7 +224,7 @@ func (a *Agent) computeCheckpoint() ComputeCheckpoint {
 	if a.identity != nil {
 		id = a.identity.InstanceID
 	}
-	return ComputeCheckpoint{
+	c := ComputeCheckpoint{
 		InstanceID:   id,
 		BootID:       a.bootID,
 		BaseSeconds:  a.computeSecondsBase,
@@ -166,6 +232,12 @@ func (a *Agent) computeCheckpoint() ComputeCheckpoint {
 		TotalSeconds: a.TotalComputeSeconds(),
 		WrittenAt:    time.Now().UTC(),
 	}
+	if a.kernelOriginKnown {
+		c.KernelClock = true
+		c.CountFromMonotonicNS = int64(a.kernelOrigin.Monotonic)
+		c.CountFromBoottimeNS = int64(a.kernelOrigin.Boottime)
+	}
+	return c
 }
 
 // WriteComputeCheckpoint persists the agent's cumulative compute to its local

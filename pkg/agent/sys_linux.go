@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // This file holds the Linux implementations of spored's OS-specific "leaf"
@@ -229,4 +231,18 @@ func sysBootID() string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// sysKernelClocks reads CLOCK_MONOTONIC and CLOCK_BOOTTIME (#945). Monotonic is
+// read first, so the pair can only overstate suspended time by the nanoseconds
+// between the two calls, never understate running time.
+func sysKernelClocks() (kernelClocks, bool) {
+	var mono, boot unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &mono); err != nil {
+		return kernelClocks{}, false
+	}
+	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &boot); err != nil {
+		return kernelClocks{}, false
+	}
+	return kernelClocks{Monotonic: time.Duration(mono.Nano()), Boottime: time.Duration(boot.Nano())}, true
 }

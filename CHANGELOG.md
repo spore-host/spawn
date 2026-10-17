@@ -418,6 +418,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   That tag is defined as the total from launch, and the overwrite changed its
   meaning. The stop/start help and reference pages say the same, and a test
   checks that no CLI string or doc in this repo says the TTL pauses.
+- **Time spent hibernated is no longer counted as compute on Linux** (#945).
+  A hibernated instance resumes into the same boot, so the compute clock in
+  `/run/spored` and the checkpoint on disk both survive. `spored status`, and
+  a spored restarted after the resume (an upgrade or a crash), measured from
+  timestamps written before the hibernation and counted the whole hibernation
+  as running time. That inflated compute cost and the total `--cost-limit` is
+  enforced against. spored now measures running time on the kernel's
+  monotonic clock, which stops while the instance is hibernated. `spored
+  status` shows the hibernated time beside boot and stopped time, for example
+  `(1m 0s compute · 10s boot · 8h 0m hibernated)`. It is included in the
+  storage cost, because EBS bills while hibernated and compute does not. The
+  minute or two EC2 bills while it saves memory to disk and restores it is
+  counted as hibernated, so compute can be slightly low around a hibernation.
+  Windows still counts hibernated time as compute (#962).
 
 ### Security
 

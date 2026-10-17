@@ -23,10 +23,23 @@ import (
 // The daemon knows the two numbers status needs — when it started and the
 // compute it inherited from earlier boots — so it writes them down once at
 // startup and status adopts them.
+//
+// StartedAt alone cannot be measured from in another process: it comes back
+// from JSON with no monotonic reading, so time.Since(StartedAt) is wall time,
+// and after a hibernate-and-resume — same boot, /run intact — that includes
+// the hibernation (#945). So the clock also carries the kernel's clocks at the
+// start, and status measures running time on CLOCK_MONOTONIC from there.
 type ComputeClock struct {
 	InstanceID  string    `json:"instance_id"`
 	StartedAt   time.Time `json:"started_at"`
 	BaseSeconds int64     `json:"base_seconds"`
+	// KernelClock says BootID, StartMonotonicNS and StartBoottimeNS are set
+	// (see kernelClocks). The readings mean nothing outside the boot that took
+	// them, so BootID travels with them. False in a clock published before #945.
+	KernelClock      bool   `json:"kernel_clock,omitempty"`
+	BootID           string `json:"boot_id,omitempty"`
+	StartMonotonicNS int64  `json:"start_monotonic_ns,omitempty"`
+	StartBoottimeNS  int64  `json:"start_boottime_ns,omitempty"`
 }
 
 // ComputeClockPath is where the daemon publishes its clock, or "" on platforms
@@ -40,7 +53,13 @@ func (a *Agent) ComputeClock() ComputeClock {
 	if a.identity != nil {
 		id = a.identity.InstanceID
 	}
-	return ComputeClock{InstanceID: id, StartedAt: a.computeFrom().UTC(), BaseSeconds: a.computeSecondsBase}
+	c := ComputeClock{InstanceID: id, StartedAt: a.computeFrom().UTC(), BaseSeconds: a.computeSecondsBase}
+	if a.kernelOriginKnown && a.bootID != "" {
+		c.KernelClock, c.BootID = true, a.bootID
+		c.StartMonotonicNS = int64(a.kernelOrigin.Monotonic)
+		c.StartBoottimeNS = int64(a.kernelOrigin.Boottime)
+	}
+	return c
 }
 
 // ComputeClockLive reports whether TotalComputeSeconds counts real running time
@@ -93,11 +112,31 @@ func ReadComputeClock(path string) (ComputeClock, error) {
 //   - a different instance id (an image baked from a running spore);
 //   - a start in the future, or none at all;
 //   - a start before the current kernel booted, when the boot time is knowable
-//     (a clock left over from before a stop/start).
+//     (a clock left over from before a stop/start);
+//   - kernel clock readings from another boot, or ones later than now.
+//
+// A clock with kernel readings is measured on CLOCK_MONOTONIC, so the time
+// the instance spent hibernated is not counted as compute and is reported by
+// HibernatedTime instead (#945). A clock without them, from a spored before
+// #945, is measured on the wall clock as it always was.
 //
 // bootTime is injected for tests; pass the zero time when it is unknown.
 func (a *Agent) AdoptComputeClock(c ComputeClock, bootTime time.Time) error {
 	now := time.Now()
+	var origin kernelClocks
+	if c.KernelClock {
+		origin = kernelClocks{Monotonic: time.Duration(c.StartMonotonicNS), Boottime: time.Duration(c.StartBoottimeNS)}
+		kernelNow, ok := readKernelClocks()
+		thisBoot := readBootID()
+		switch {
+		case !ok:
+			return errors.New("compute clock is on the kernel clocks, which cannot be read here")
+		case c.BootID == "" || thisBoot == "" || c.BootID != thisBoot:
+			return fmt.Errorf("compute clock is from boot %q, not this boot %q", c.BootID, thisBoot)
+		case !origin.validOrigin(kernelNow):
+			return errors.New("compute clock's kernel reading is not from earlier in this boot")
+		}
+	}
 	switch {
 	case c.StartedAt.IsZero():
 		return errors.New("compute clock has no start time")
@@ -113,6 +152,7 @@ func (a *Agent) AdoptComputeClock(c ComputeClock, bootTime time.Time) error {
 	}
 	a.computeStart = c.StartedAt
 	a.computeSecondsBase = c.BaseSeconds
+	a.kernelOrigin, a.kernelOriginKnown = origin, c.KernelClock
 	a.liveClock = true
 	return nil
 }
