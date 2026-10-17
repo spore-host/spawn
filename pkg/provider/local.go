@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -128,7 +127,7 @@ func NewLocalProvider(ctx context.Context) (*LocalProvider, error) {
 		identity:      identity,
 		config:        providerConfig,
 		configPath:    configPath,
-		registryTable: "spawn-hybrid-registry",
+		registryTable: HybridRegistryTable,
 	}
 
 	// Try to initialize DynamoDB client for hybrid coordination
@@ -219,38 +218,9 @@ func (p *LocalProvider) discoverPeersFromDynamoDB(ctx context.Context, jobArrayI
 		return nil, fmt.Errorf("DynamoDB client not available")
 	}
 
-	result, err := p.dynamoClient.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(p.registryTable),
-		KeyConditionExpression: aws.String("job_array_id = :job_array_id"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":job_array_id": &types.AttributeValueMemberS{Value: jobArrayID},
-		},
-	})
-
+	peers, err := queryRegistryPeers(ctx, p.dynamoClient, p.registryTable, jobArrayID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query DynamoDB registry: %w", err)
-	}
-
-	var peers []PeerInfo
-	now := time.Now().Unix()
-
-	for _, item := range result.Items {
-		// Check if instance is still alive (heartbeat within TTL)
-		expiresAt := getNumberValue(item["expires_at"])
-		if expiresAt < now {
-			// Instance expired, skip it
-			continue
-		}
-
-		peer := PeerInfo{
-			Index:      int(getNumberValue(item["index"])),
-			InstanceID: getStringValue(item["instance_id"]),
-			IP:         getStringValue(item["ip_address"]),
-			DNS:        "", // Can construct if needed
-			Provider:   getStringValue(item["provider"]),
-		}
-
-		peers = append(peers, peer)
+		return nil, err
 	}
 
 	log.Printf("Discovered %d peers from DynamoDB registry", len(peers))

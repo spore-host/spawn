@@ -193,3 +193,13 @@ func TestDiscoverPeersForJobArray(t *testing.T) {
 		t.Errorf("got %d peers, want 1", len(peers))
 	}
 }
+
+// TestTableNameAgreesWithProvider: pkg/provider reads the registry (local nodes
+// and, since #918, burst members) under its own constant, because it cannot
+// import this package. A rename here that missed it would leave readers on a
+// table nobody writes.
+func TestTableNameAgreesWithProvider(t *testing.T) {
+	if TableName != provider.HybridRegistryTable {
+		t.Fatalf("registry writes %q but pkg/provider reads %q", TableName, provider.HybridRegistryTable)
+	}
+}

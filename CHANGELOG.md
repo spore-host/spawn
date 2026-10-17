@@ -318,6 +318,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not from the latest start. On an old instance with no deadline tag, extend
   now adds to launch + TTL, the deadline that is actually enforced, rather
   than to now + TTL.
+- **`spawn burst` instances can see the local nodes they work with** (#918).
+  Peer discovery on EC2 only looked at instance tags, so a burst instance found
+  its EC2 siblings but never the local nodes of its job array, which are only
+  listed in the hybrid registry. Discovery worked one way: local nodes saw burst
+  instances, burst instances did not see local nodes. Burst instances
+  (`spawn:burst=true`) now also read the hybrid registry and merge its entries
+  with their tag-discovered peers, listing each instance once. If the registry
+  cannot be read, they keep their EC2 peers and log a warning. Ordinary
+  `spawn launch --count` members still discover peers by tag only.
 
 ### Security
 
