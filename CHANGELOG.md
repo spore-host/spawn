@@ -205,6 +205,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pipelines launched before this keep the old layout until they finish. The
   refusal needs only this CLI; run isolation also needs the
   `spawn-pipeline-orchestrator` Lambda redeployed.
+- **Pipeline stage outputs arrive where the examples say, and a multi-instance
+  stage's instances no longer overwrite each other's outputs** (#944).
+  - An absolute `data_output` path kept its whole path, so the
+    `/data/processed/a.csv` written by `preprocess` in
+    `examples/pipelines/ml-training.json` arrived in `train` as
+    `/data/input/data/processed/a.csv`, not `/data/input/a.csv`. Every output
+    file is now keyed by its path relative to the directory part of the pattern
+    that matched it. Absolute and relative patterns now behave alike, and a
+    relative pattern no longer flattens subdirectories to bare file names.
+  - With `instance_count > 1`, every instance uploaded to the same place, so
+    same-named outputs overwrote each other and the last upload won. Each
+    instance's outputs are now kept under its index, and arrive downstream as
+    `<dest_path>/<instance-index>/<file>`.
+  - Two outputs of one stage that map to the same name, or two `source_stages`
+    that deliver the same file name to one `dest_path`, now fail the stage
+    instead of one silently replacing the other. A downloaded key that would
+    land outside `dest_path` is refused.
+  - `data_input.pattern` is matched against that same relative path. For a
+    multi-instance source, it is matched within each instance's directory.
+    `spawn pipeline validate` now rejects an absolute pattern, which could never
+    match: the stage silently received nothing. An invalid pattern used to be
+    logged and then ignored, so every file was downloaded; it now fails.
+
+  The layout is documented in `examples/pipelines/README.md`.
+  `fanout-fanin.json` used absolute patterns and gave its three fan-in sources
+  colliding output names, and both are fixed. `ml-training.json`'s `evaluate`
+  now reads `/models/0/best.h5`. Stage instances download `spored` at boot, so
+  this takes effect once `spored` is released. Stages that are already running
+  keep the old layout.
 
 ### Security
 

@@ -5,7 +5,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -342,62 +341,47 @@ func TestFileOperationsErrorHandling(t *testing.T) {
 	})
 }
 
-// Test S3 key generation logic
+// The upload key of a data_output file, as examples/pipelines/README.md
+// documents it: the file's path relative to the directory part of the pattern
+// that matched it, absolute and relative patterns alike (#944). This test used
+// to re-implement the old rule in its own body, never calling the code, and it
+// asserted the bug: an absolute pattern kept the whole path, so
+// "/data/processed/a.csv" arrived as "<dest_path>/data/processed/a.csv".
 func TestS3KeyGeneration(t *testing.T) {
 	tests := []struct {
-		name         string
-		prefix       string
-		stageID      string
-		localPath    string
-		pattern      string
-		expectedKey  string
-		preservePath bool
+		pattern, match, want string
 	}{
-		{
-			name:        "simple filename",
-			prefix:      "pipelines/test",
-			stageID:     "stage1",
-			localPath:   "output.txt",
-			pattern:     "output.txt",
-			expectedKey: "pipelines/test/stages/stage1/output/output.txt",
-		},
-		{
-			name:         "absolute path preserved",
-			prefix:       "pipelines/test",
-			stageID:      "stage1",
-			localPath:    "/data/results/output.txt",
-			pattern:      "/data/results/*.txt",
-			expectedKey:  "pipelines/test/stages/stage1/output/data/results/output.txt",
-			preservePath: true,
-		},
-		{
-			name:        "relative path basename",
-			prefix:      "pipelines/test",
-			stageID:     "stage2",
-			localPath:   "subdir/file.txt",
-			pattern:     "*.txt",
-			expectedKey: "pipelines/test/stages/stage2/output/file.txt",
-		},
+		{"/data/processed/*", "/data/processed/a.csv", "a.csv"},
+		{"/data/*/part.csv", "/data/2026/part.csv", "2026/part.csv"},
+		{"/logs/training.log", "/logs/training.log", "training.log"},
+		{"out/*.csv", "out/a.csv", "a.csv"},
+		{"*.csv", "a.csv", "a.csv"},
+		{"/*.csv", "/a.csv", "a.csv"},
+		{"/models/*.h5", "/models/best.h5", "best.h5"},
+		{"/data/chunks/chunk-[12]-*", "/data/chunks/chunk-1-x", "chunk-1-x"},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			outputPrefix := tt.prefix + "/stages/" + tt.stageID + "/output/"
-
-			// Mirrors data_handoff.go. An absolute pattern is recognised by its
-			// leading /, not filepath.IsAbs: "/data/..." is an instance path,
-			// and is not absolute on a Windows host (#998).
-			relPath := filepath.Base(tt.localPath)
-			if tt.preservePath && strings.HasPrefix(tt.pattern, "/") {
-				relPath = strings.TrimPrefix(filepath.ToSlash(tt.localPath), "/")
-			}
-
-			s3Key := outputPrefix + relPath
-
-			if s3Key != tt.expectedKey {
-				t.Errorf("S3 key mismatch:\ngot:  %s\nwant: %s", s3Key, tt.expectedKey)
-			}
-		})
+		got, err := OutputRelPath(tt.pattern, tt.match)
+		if err != nil || got != tt.want {
+			t.Errorf("OutputRelPath(%q, %q) = %q, %v; want %q", tt.pattern, tt.match, got, err, tt.want)
+		}
+	}
+	for _, c := range []struct {
+		dest, rel, want string
+	}{
+		{"/data/input", "a.csv", "/data/input/a.csv"},
+		{"/models", "2/best.h5", "/models/2/best.h5"},
+		{"", "a.csv", "a.csv"},
+	} {
+		if got, want := InputLocalPath(c.dest, c.rel), filepath.FromSlash(c.want); got != want { // a local path on the host that runs it
+			t.Errorf("InputLocalPath(%q, %q) = %q, want %q", c.dest, c.rel, got, want)
+		}
+	}
+	if got := StageInstanceOutputPrefix("p", "train", 1, 0); got != "p/stages/train/output/" {
+		t.Errorf("single-instance output prefix = %q", got)
+	}
+	if got := StageInstanceOutputPrefix("p", "train", 4, 3); got != "p/stages/train/output/3/" {
+		t.Errorf("instance 3 of 4 output prefix = %q", got)
 	}
 }
 

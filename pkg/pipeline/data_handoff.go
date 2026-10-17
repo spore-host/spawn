@@ -29,6 +29,22 @@ type StageDataHandler struct {
 	// instanceIndex is this instance's index within its stage; its markers
 	// are per instance (StageInstanceMarkerKey, #930).
 	instanceIndex int
+
+	// pipelineDef is the pipeline definition, for every stage's
+	// instance_count: a stage with more than one instance uploads each
+	// instance's outputs under its own index (StageInstanceOutputPrefix,
+	// #944). nil means every stage has one instance.
+	pipelineDef *Pipeline
+}
+
+// instanceCount is stageID's instance_count, or 1 when it is not known.
+func (h *StageDataHandler) instanceCount(stageID string) int {
+	if h.pipelineDef != nil {
+		if st := h.pipelineDef.GetStage(stageID); st != nil && st.InstanceCount > 1 {
+			return st.InstanceCount
+		}
+	}
+	return 1
 }
 
 // NewStageDataHandler creates a new data handler using the default AWS credential chain.
@@ -74,9 +90,14 @@ func (h *StageDataHandler) DownloadStageInputs(ctx context.Context, dataInput *D
 
 	log.Printf("Downloading inputs from %d source stage(s)", len(sourceStages))
 
+	// Every local path written, and the key it came from: two source stages
+	// that both output a.csv would otherwise overwrite each other in dest_path,
+	// the last download winning (#944).
+	written := map[string]string{}
+
 	// Download from each source stage
 	for _, sourceStage := range sourceStages {
-		if err := h.downloadFromStage(ctx, sourceStage, dataInput); err != nil {
+		if err := h.downloadFromStage(ctx, sourceStage, dataInput, written); err != nil {
 			return fmt.Errorf("download from stage %s: %w", sourceStage, err)
 		}
 	}
@@ -84,9 +105,38 @@ func (h *StageDataHandler) DownloadStageInputs(ctx context.Context, dataInput *D
 	return nil
 }
 
-func (h *StageDataHandler) downloadFromStage(ctx context.Context, sourceStage string, dataInput *DataConfig) error {
-	// Build S3 prefix for source stage output
+// InputLocalPath is where a data_input file lands on the instance: dest_path
+// (or the working directory) joined with the file's path relative to its source
+// stage's output root, which is relPath. That path is the file's path relative
+// to the directory part of the data_output pattern that matched it
+// (OutputRelPath), prefixed with "<instance-index>/" when the source stage has
+// instance_count > 1. So a source's "/data/processed/*" output a.csv arrives as
+// "<dest_path>/a.csv", and instance 2's as "<dest_path>/2/a.csv".
+func InputLocalPath(destPath, relPath string) string {
+	if destPath == "" {
+		return filepath.FromSlash(relPath)
+	}
+	return filepath.Join(destPath, filepath.FromSlash(relPath))
+}
+
+// inputPatternSubject is the part of relPath a data_input pattern is matched
+// against: the path within the instance's own directory for a multi-instance
+// source, so "*.csv" selects every instance's CSVs.
+func inputPatternSubject(relPath string, namespaced bool) string {
+	if !namespaced {
+		return relPath
+	}
+	if i := strings.Index(relPath, "/"); i >= 0 {
+		return relPath[i+1:]
+	}
+	return relPath
+}
+
+func (h *StageDataHandler) downloadFromStage(ctx context.Context, sourceStage string, dataInput *DataConfig, written map[string]string) error {
+	// Build S3 prefix for source stage output. A multi-instance source's
+	// keys carry the instance index as their first path segment.
 	sourcePrefix := StageOutputPrefix(h.prefix, sourceStage)
+	namespaced := h.instanceCount(sourceStage) > 1
 
 	log.Printf("Downloading from s3://%s/%s", h.bucket, sourcePrefix)
 
@@ -106,27 +156,31 @@ func (h *StageDataHandler) downloadFromStage(ctx context.Context, sourceStage st
 		for _, obj := range page.Contents {
 			key := *obj.Key
 
+			relPath := strings.TrimPrefix(key, sourcePrefix)
+			if !filepath.IsLocal(filepath.FromSlash(relPath)) {
+				return fmt.Errorf("refusing s3://%s/%s: its path %q would land outside dest_path", h.bucket, key, relPath)
+			}
+
 			// Skip if pattern specified and doesn't match
 			if dataInput.Pattern != "" {
-				relPath := strings.TrimPrefix(key, sourcePrefix)
 				// path, not filepath: S3 keys are always /-separated. On Windows
 				// filepath.Match treats only \ as a separator, so * crossed /
 				// and a Windows spore pulled nested objects the pattern
 				// excludes (#998).
-				matched, err := path.Match(dataInput.Pattern, relPath)
+				matched, err := path.Match(dataInput.Pattern, inputPatternSubject(relPath, namespaced))
 				if err != nil {
-					log.Printf("Warning: invalid pattern '%s': %v", dataInput.Pattern, err)
+					return fmt.Errorf("invalid pattern '%s': %w", dataInput.Pattern, err)
 				} else if !matched {
 					continue
 				}
 			}
 
-			// Determine local path
-			relPath := strings.TrimPrefix(key, sourcePrefix)
-			localPath := relPath
-			if dataInput.DestPath != "" {
-				localPath = filepath.Join(dataInput.DestPath, relPath)
+			localPath := InputLocalPath(dataInput.DestPath, relPath)
+			if prev, dup := written[localPath]; dup {
+				return fmt.Errorf("both s3://%s/%s and s3://%s/%s would be written to %s; "+
+					"give the source stages' outputs distinct names", h.bucket, prev, h.bucket, key, localPath)
 			}
+			written[localPath] = key
 
 			// Create parent directories
 			if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
@@ -181,8 +235,13 @@ func (h *StageDataHandler) UploadStageOutputs(ctx context.Context, dataOutput *D
 
 	log.Printf("Uploading outputs for stage %s", h.stageID)
 
-	// Build S3 prefix for this stage's output
-	outputPrefix := StageOutputPrefix(h.prefix, h.stageID)
+	// Build S3 prefix for this stage's output: this instance's own when the
+	// stage has more than one (#944).
+	outputPrefix := StageInstanceOutputPrefix(h.prefix, h.stageID, h.instanceCount(h.stageID), h.instanceIndex)
+
+	// Every key this instance uploads, and the file it came from: two paths
+	// patterns that map to one key would otherwise overwrite each other.
+	uploaded := map[string]string{}
 
 	uploadCount := 0
 	for _, pattern := range dataOutput.Paths {
@@ -215,14 +274,20 @@ func (h *StageDataHandler) UploadStageOutputs(ctx context.Context, dataOutput *D
 				continue
 			}
 
-			// Determine S3 key
-			relPath := filepath.Base(localPath)
-			if strings.HasPrefix(pattern, "/") {
-				// Absolute path - preserve directory structure. ToSlash: the
-				// key is /-separated even when Glob returned \ (Windows, #998).
-				relPath = strings.TrimPrefix(filepath.ToSlash(localPath), "/")
+			// The key is the file's path relative to the pattern's directory
+			// part, absolute or relative alike. An absolute pattern used to
+			// keep the whole path, so "/data/processed/a.csv" arrived
+			// downstream as "<dest_path>/data/processed/a.csv" (#944).
+			relPath, err := OutputRelPath(pattern, localPath)
+			if err != nil {
+				return err
 			}
 			s3Key := outputPrefix + relPath
+			if prev, dup := uploaded[s3Key]; dup {
+				return fmt.Errorf("data_output: %s and %s would both be uploaded as %s; "+
+					"give them distinct names or put them under one pattern", prev, localPath, relPath)
+			}
+			uploaded[s3Key] = localPath
 
 			// Upload file
 			if err := h.uploadFile(ctx, localPath, s3Key); err != nil {
@@ -236,6 +301,42 @@ func (h *StageDataHandler) UploadStageOutputs(ctx context.Context, dataOutput *D
 
 	log.Printf("Uploaded %d file(s) for stage %s", uploadCount, h.stageID)
 	return nil
+}
+
+// globRoot is the directory part of a data_output pattern: every path segment
+// before the first one containing a glob metacharacter, or, for a pattern with
+// none (a literal file), its directory.
+func globRoot(pattern string) string {
+	clean := filepath.Clean(pattern)
+	segs := strings.Split(clean, string(filepath.Separator))
+	for i, seg := range segs {
+		if strings.ContainsAny(seg, `*?[\`) {
+			root := strings.Join(segs[:i], string(filepath.Separator))
+			switch {
+			case root == "" && strings.HasPrefix(clean, string(filepath.Separator)):
+				// A leading separator, not filepath.IsAbs: "/data/..." is an
+				// instance path, and is not absolute on a Windows host (#998).
+				return string(filepath.Separator)
+			case root == "":
+				return "."
+			}
+			return root
+		}
+	}
+	return filepath.Dir(clean)
+}
+
+// OutputRelPath is the key, below the stage's output prefix, of a file that the
+// data_output pattern matched: its slash-separated path relative to the
+// pattern's directory part (globRoot). "/data/processed/*" uploads
+// "/data/processed/a.csv" as "a.csv", "out/*/x.csv" uploads "out/b/x.csv" as
+// "b/x.csv", and the literal "/logs/training.log" as "training.log".
+func OutputRelPath(pattern, match string) (string, error) {
+	rel, err := filepath.Rel(globRoot(pattern), filepath.Clean(match))
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("data_output: %s is not under the directory of its pattern %q", match, pattern)
+	}
+	return filepath.ToSlash(rel), nil
 }
 
 func (h *StageDataHandler) uploadFile(ctx context.Context, localPath, s3Key string) error {
