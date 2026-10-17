@@ -131,3 +131,28 @@ func TestWrapperDiscardsANonNumericCost(t *testing.T) {
 		t.Errorf("a non-numeric cost reached completion.json: %v", rec["cost_estimate"])
 	}
 }
+
+// A spored whose provenance upload FAILS (as v0.132.0's did on every instance:
+// its S3 client had no region, #1094) must not lose the output. The wrapper
+// uploads it with plain `aws s3 cp`, untagged, and the task completes.
+func TestWrapperFallsBackWhenTheProvenanceUploadFails(t *testing.T) {
+	failing := strings.Replace(goodSpored, `"provenance cost") printf '0.123456' ;;`,
+		`"provenance cost") printf '0.123456' ;;
+  "provenance upload") exit 1 ;;`, 1)
+	rec, sporedLog, awsLog := runProvenanceWrapper(t, failing)
+	if !strings.Contains(sporedLog, "provenance upload") {
+		t.Fatalf("the provenance upload was never attempted:\n%s", sporedLog)
+	}
+	uploaded := false
+	for _, line := range strings.Split(awsLog, "\n") {
+		if strings.Contains(line, "s3 cp") && strings.Contains(line, "s3://out/out.txt") {
+			uploaded = true
+		}
+	}
+	if !uploaded {
+		t.Errorf("a failed provenance upload lost the output: no aws s3 cp fallback:\n%s", awsLog)
+	}
+	if rc, _ := rec["retry_class"].(string); rec["state"] != string(StateCompleted) || rc != "" {
+		t.Errorf("state=%v retry_class=%v; a delivered output must not fail the task", rec["state"], rec["retry_class"])
+	}
+}

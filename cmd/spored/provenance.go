@@ -54,7 +54,7 @@ func newProvenanceCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, _ []string) {
 			ctx := cmd.Context()
-			cfg, err := config.LoadDefaultConfig(ctx)
+			cfg, err := provAWSConfig(ctx)
 			if err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "provenance stage-in: %v\n", err)
 				return
@@ -70,7 +70,7 @@ func newProvenanceCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, _ []string) {
 			ctx := cmd.Context()
-			cfg, err := config.LoadDefaultConfig(ctx)
+			cfg, err := provAWSConfig(ctx)
 			if err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "provenance cost: %v\n", err)
 				return
@@ -93,7 +93,7 @@ func newProvenanceCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			cfg, err := config.LoadDefaultConfig(ctx)
+			cfg, err := provAWSConfig(ctx)
 			if err != nil {
 				return err
 			}
@@ -114,6 +114,16 @@ func newProvenanceCmd() *cobra.Command {
 	costCmd.Flags().StringVar(&ended, "ended", "", "Run end, RFC3339")
 	cmd.AddCommand(stageIn, costCmd, upload)
 	return cmd
+}
+
+// provAWSConfig is the AWS config every provenance subcommand uses. The region
+// comes from IMDS when nothing else sets it: the task wrapper exports no
+// AWS_REGION and an instance has no ~/.aws/config. The AWS CLI finds the region
+// in IMDS by itself, but the Go SDK only does when asked, so without this the S3
+// client had no region. Every output upload on v0.132.0 then failed with
+// "Invalid region" and the run was reported as output_delivery_error (#1094).
+func provAWSConfig(ctx context.Context) (aws.Config, error) {
+	return config.LoadDefaultConfig(ctx, config.WithEC2IMDSRegion())
 }
 
 func readSpec(path string) (*taskproto.TaskSpec, error) {

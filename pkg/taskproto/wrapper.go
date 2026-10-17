@@ -289,10 +289,20 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 			// spored uploads exactly where `aws s3 cp` would, with the provenance
 			// tags set in the same request and the record annotated (#1076). Without
 			// a spored that has the subcommand, it's plain `aws s3 cp`, as before.
+			//
+			// If spored's upload fails for ANY reason, the output still goes up with
+			// plain `aws s3 cp`, untagged, and untagged means kept. Provenance must
+			// never cost a researcher their output: on v0.132.0 spored's S3 client
+			// had no region on an instance (#1094), and with no fallback every task
+			// output was lost as output_delivery_error.
+			cp := fmt.Sprintf("aws s3 cp%s %s %s", recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
 			p("  if [ \"$PROV_OK\" = 1 ]; then\n")
-			p("    \"$SPORED\" provenance upload --state \"$PROV_DIR\" %s %s || OUT_RC=$?\n", shQuote(m.Source), shQuote(m.Destination))
+			p("    if ! \"$SPORED\" provenance upload --state \"$PROV_DIR\" %s %s; then\n", shQuote(m.Source), shQuote(m.Destination))
+			p("      spawn_phase 'provenance upload failed; uploading untagged with aws s3 cp'\n")
+			p("      %s || OUT_RC=$?\n", cp)
+			p("    fi\n")
 			p("  else\n")
-			p("    aws s3 cp%s %s %s || OUT_RC=$?\n", recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
+			p("    %s || OUT_RC=$?\n", cp)
 			p("  fi\n")
 		}
 		p("  spawn_phase \"stage-out done rc=$OUT_RC\"\n")
