@@ -184,7 +184,7 @@ func TestBurstUserDataIsBase64(t *testing.T) {
 				t.Fatalf("gunzip user-data: %v", err)
 			}
 		}
-		if string(script) != generateBurstUserData(params) {
+		if want, _ := buildBurstUserData(); string(script) != want {
 			t.Fatalf("decoded user-data is not the burst script:\n%s", script)
 		}
 	}

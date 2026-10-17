@@ -103,6 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run id found, oldest first (`null`, with `runs_error`, when they could not be
   listed). Listing the runs needs `s3:ListBucket` on the pipeline's
   `s3_bucket`; without it `status` warns and shows the rest.
+- **`pkg/aws` `Client.GetSelfOwnedSpawnAMI`** (#924) returns the newest
+  self-owned `spawn-*` AMI that fits an instance type (architecture, Linux, and
+  GPU when the image is tagged `spawn:gpu`), or `""` when none does.
 
 ### Deprecated
 
@@ -327,6 +330,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with their tag-discovered peers, listing each instance once. If the registry
   cannot be read, they keep their EC2 peers and log a warning. Ordinary
   `spawn launch --count` members still discover peers by tag only.
+- **`spawn burst` installs spored** (#924). Burst's boot script never
+  installed spored. It waited for an AMI that already had it, so on any other
+  image there was no idle termination, no on-complete, no hybrid-registry
+  registration and no DNS. Burst instances now boot with the same bootstrap as
+  `spawn launch`, which downloads spored, verifies it and refuses to boot an
+  unverified one, then starts it. Any Amazon Linux 2023 AMI works.
+- **`spawn burst` picks an AMI that fits the instance type** (#924). Without
+  `--ami`, burst took the newest self-owned `spawn-*` AMI of any architecture
+  or OS. It now takes one only if it matches the instance type's architecture,
+  is Linux, and matches GPU-ness. Otherwise it uses the Amazon Linux 2023 AMI
+  `spawn launch` would pick. `--ami` with a Windows AMI is refused before
+  anything is created.
+- **A launch with an EC2 key pair but no SSH public key keeps the key pair's
+  key** (#924). The shared Linux bootstrap (`pkg/launcher`) wrote an empty
+  `authorized_keys` when it was given no public key. That erased the key
+  cloud-init had installed from `KeyName`, so the key pair could not log in.
+  This affected `spawn burst --key-name` and `launcher.Provision` callers that
+  set `KeyName`. The bootstrap now leaves the file as it is when it has no key.
 
 ### Security
 

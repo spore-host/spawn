@@ -5,10 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spf13/cobra"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
@@ -26,7 +23,13 @@ and coordinate with local instances to process workloads.
 This enables "cloud bursting" where local compute capacity can be
 extended with on-demand cloud resources.
 
-Every instance gets a TTL (--ttl, default 8h) and terminates when it expires.`,
+Every instance gets a TTL (--ttl, default 8h) and terminates when it expires.
+
+Each instance installs and verifies spored at boot, the same way spawn launch
+does, so any Amazon Linux 2023 image works. Without --ami, burst uses the newest
+AMI this account owns whose name matches spawn-* and that fits the instance
+type (architecture, Linux, GPU), else the standard Amazon Linux 2023 AMI for the
+instance type, as spawn launch picks it.`,
 	Example: `  # Launch 10 instances to help process a job array
   spawn burst --count 10 --job-array-id my-array --instance-type c5.4xlarge
 
@@ -64,7 +67,7 @@ func init() {
 	burstCmd.Flags().StringVar(&burstJobArrayID, "job-array-id", "", "Job array ID to join (required)")
 	burstCmd.Flags().StringVar(&burstJobArrayName, "job-array-name", "", "Job array name, used by spawn array status/cancel (defaults to the job array ID)")
 	burstCmd.Flags().StringVar(&burstInstanceType, "instance-type", "t3.micro", "EC2 instance type")
-	burstCmd.Flags().StringVar(&burstAMI, "ami", "", "AMI ID (auto-detect if not specified)")
+	burstCmd.Flags().StringVar(&burstAMI, "ami", "", "Linux AMI ID (default: the newest self-owned spawn-* AMI that fits --instance-type, else Amazon Linux 2023)")
 	burstCmd.Flags().BoolVar(&burstSpot, "spot", false, "Use Spot instances")
 	burstCmd.Flags().StringVar(&burstKeyName, "key-name", "", "SSH key pair name")
 	burstCmd.Flags().StringVar(&burstSubnetID, "subnet-id", "", "Subnet ID")
@@ -107,12 +110,6 @@ func runBurst(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Ensure DynamoDB table exists
-	fmt.Fprintln(os.Stderr, "Ensuring DynamoDB registry table exists...")
-	if err := registry.EnsureTable(ctx); err != nil {
-		return fmt.Errorf("failed to ensure registry table: %w", err)
-	}
-
 	// Load AWS config
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -121,6 +118,21 @@ func runBurst(cmd *cobra.Command, args []string) error {
 	launchParams.Region = cfg.Region
 
 	awsClient := spawnaws.NewClientFromConfig(cfg)
+
+	// Choose (or check) the AMI before creating anything: a Windows --ami is
+	// refused here, not after the table and the IAM role exist (#924).
+	amiID, err := resolveBurstAMI(ctx, awsClient, launchParams.Region, launchParams.AMI, launchParams.InstanceType)
+	if err != nil {
+		return err
+	}
+	launchParams.AMI = amiID
+	fmt.Fprintf(os.Stderr, "Using AMI: %s\n", launchParams.AMI)
+
+	// Ensure DynamoDB table exists
+	fmt.Fprintln(os.Stderr, "Ensuring DynamoDB registry table exists...")
+	if err := registry.EnsureTable(ctx); err != nil {
+		return fmt.Errorf("failed to ensure registry table: %w", err)
+	}
 
 	// Resolve the instance profile BEFORE launching anything (#905). Burst
 	// members run spored, and spored without credentials can read none of its
@@ -133,16 +145,6 @@ func runBurst(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	launchParams.InstanceProfile = instanceProfile
-
-	// Auto-detect AMI if not specified
-	if launchParams.AMI == "" {
-		amiID, err := findLatestSpawnAMI(ctx, ec2.NewFromConfig(cfg))
-		if err != nil {
-			return fmt.Errorf("failed to find AMI: %w", err)
-		}
-		launchParams.AMI = amiID
-		fmt.Fprintf(os.Stderr, "Using AMI: %s\n", launchParams.AMI)
-	}
 
 	// Launch instances
 	fmt.Fprintf(os.Stderr, "Launching %d instances to join job array %s (TTL %s)...\n", launchParams.Count, launchParams.JobArrayID, launchParams.TTL)
@@ -283,11 +285,15 @@ func burstMemberConfigs(params *LaunchParams) ([]spawnaws.LaunchConfig, error) {
 		return nil, err
 	}
 
+	bootstrap, err := buildBurstUserData()
+	if err != nil {
+		return nil, err
+	}
 	// RunInstances rejects user-data that is not base64 ("Invalid BASE64
 	// encoding of user data", #127). Burst passed the raw script, so every
 	// burst failed at RunInstances. Same encoding as the launcher (gzip +
 	// base64; cloud-init gunzips).
-	userData := launcher.EncodeLinuxUserData(generateBurstUserData(params))
+	userData := launcher.EncodeLinuxUserData(bootstrap)
 
 	members := make([]spawnaws.LaunchConfig, 0, params.Count)
 	for i := 0; i < params.Count; i++ {
@@ -301,97 +307,87 @@ func burstMemberConfigs(params *LaunchParams) ([]spawnaws.LaunchConfig, error) {
 			SecurityGroupIDs:   params.SecurityGroups,
 			IamInstanceProfile: params.InstanceProfile,
 			UserData:           userData,
-			Spot:               params.Spot,
-			TTL:                params.TTL,
-			IdleTimeout:        params.IdleTimeout,
-			OnComplete:         "terminate",
-			JobArrayID:         params.JobArrayID,
-			JobArrayName:       params.JobArrayName,
-			JobArraySize:       params.Count,
-			JobArrayIndex:      i,
-			Tags:               map[string]string{tagprefix.Tag("burst"): "true"},
+			// The user the bootstrap sets up, written as spawn:local-username
+			// so spawn connect logs in as it (as launcher.Provision does).
+			Username:      burstUsername,
+			Spot:          params.Spot,
+			TTL:           params.TTL,
+			IdleTimeout:   params.IdleTimeout,
+			OnComplete:    "terminate",
+			JobArrayID:    params.JobArrayID,
+			JobArrayName:  params.JobArrayName,
+			JobArraySize:  params.Count,
+			JobArrayIndex: i,
+			Tags:          map[string]string{tagprefix.Tag("burst"): "true"},
 		})
 	}
 	return members, nil
 }
 
-func generateBurstUserData(params *LaunchParams) string {
-	// User data script that registers with DynamoDB on startup.
-	//
-	// The spored wait is BOUNDED (#752). It was:
-	//
-	//	while [ ! -f /usr/local/bin/spored ]; do sleep 5; done
-	//
-	// an unbounded loop, so a failed spored install — a bad download, a checksum
-	// mismatch, the wrong architecture, no network — hung the boot forever with no
-	// output and no failure record. That is the one shape every other generated
-	// script here deliberately avoids: pkg/userdata/queue.go caps the identical
-	// wait at 300s and exits with a message naming cloud-init, and
-	// pkg/launcher/bootstrap.go's readiness barrier caps at 600s and writes a
-	// named failure. This now matches queue.go, which is the closest sibling.
-	//
-	// Failing loudly matters more here than elsewhere: an instance with no spored
-	// has NO TTL, idle or cost enforcement in-instance (#50), so a silently hung
-	// boot is also a silently unbounded bill. Exiting non-zero makes cloud-init
-	// record the failure, which is what the reaper's max-age ceiling and
-	// `spawn status` can then be reconciled against.
-	return `#!/bin/bash
-# Spawn burst instance setup
+// burstUsername is the user burst's bootstrap configures: Amazon Linux's
+// default user, which a --key-name key pair's key is installed for. The
+// bootstrap leaves that key in place because burst passes no public key of its
+// own.
+const burstUsername = launcher.DefaultUsername
 
-# Wait for spored to be installed, bounded. An unbounded wait here hid a failed
-# install as a hung boot (#752).
-MAX_WAIT=300  # 5 minutes
-WAITED=0
-while [ ! -f /usr/local/bin/spored ] && [ $WAITED -lt $MAX_WAIT ]; do
-  sleep 5
-  WAITED=$((WAITED + 5))
-done
-
-if [ ! -f /usr/local/bin/spored ]; then
-  echo "ERROR: spored not installed after ${MAX_WAIT}s. Check cloud-init logs." >&2
-  echo "spawn: this instance has NO TTL/idle/cost enforcement; terminate it by hand" >&2
-  exit 1
-fi
-
-# Start spored with hybrid registry support
-systemctl enable spored
-systemctl start spored
-
-# Register with DynamoDB registry happens automatically via spored
-`
+// buildBurstUserData is a burst member's boot script: the shared spored
+// bootstrap from pkg/launcher, the one `spawn launch` uses (#924).
+//
+// Burst used to ship its own script, which never installed spored. It waited up
+// to 300s for /usr/local/bin/spored to appear and exited if it did not, so
+// spored ran only on an AMI that already contained it. The shared bootstrap
+// downloads spored from spawn-binaries-<region> for the instance's
+// architecture, verifies its sha256 and signature (pkg/sporedinstall), aborts
+// the boot rather than run an unverified agent, and starts spored under
+// systemd. Nothing burst-specific is added: spored itself registers the member
+// with the hybrid registry, from the spawn:burst and spawn:job-array-* tags.
+func buildBurstUserData() (string, error) {
+	script, err := launcher.BuildLinuxBootstrap(launcher.BootstrapConfig{Username: burstUsername})
+	if err != nil {
+		return "", fmt.Errorf("burst: build spored bootstrap: %w", err)
+	}
+	return script, nil
 }
 
-func findLatestSpawnAMI(ctx context.Context, client *ec2.Client) (string, error) {
-	// Find the latest spawn AMI
-	result, err := client.DescribeImages(ctx, &ec2.DescribeImagesInput{
-		Owners: []string{"self"},
-		Filters: []types.Filter{
-			{
-				Name:   aws.String("name"),
-				Values: []string{"spawn-*"},
-			},
-			{
-				Name:   aws.String("state"),
-				Values: []string{"available"},
-			},
-		},
-	})
+// burstAMIResolver is the AMI lookup burst does, on *spawnaws.Client.
+type burstAMIResolver interface {
+	GetSelfOwnedSpawnAMI(ctx context.Context, region, instanceType string) (string, error)
+	GetRecommendedAMI(ctx context.Context, region, instanceType string) (string, error)
+	IsWindowsAMI(ctx context.Context, region, amiID string) bool
+}
 
-	if err != nil {
-		return "", fmt.Errorf("failed to describe images: %w", err)
-	}
-
-	if len(result.Images) == 0 {
-		return "", fmt.Errorf("no spawn AMIs found (use --ami to specify)")
-	}
-
-	// Return the most recent AMI
-	latest := result.Images[0]
-	for _, img := range result.Images {
-		if *img.CreationDate > *latest.CreationDate {
-			latest = img
+// resolveBurstAMI picks the AMI burst members launch from (#924).
+//
+// With --ami, that image is used, unless it is Windows: burst's bootstrap is
+// the Linux one, so a Windows member would never run spored.
+//
+// Without --ami ("" or "auto", as for spawn launch), burst prefers the newest
+// self-owned spawn-* image that fits the instance type: its architecture,
+// Linux, and GPU-ness (pkg/aws GetSelfOwnedSpawnAMI). It used to take the
+// newest spawn-* image of any architecture or OS. When none fits, or the
+// lookup fails, it falls back to GetRecommendedAMI, the AL2023 resolution
+// `spawn launch` uses. Whether spored is baked into the image no longer
+// matters, because the bootstrap installs it.
+func resolveBurstAMI(ctx context.Context, r burstAMIResolver, region, ami, instanceType string) (string, error) {
+	if !isAutoAMI(ami) {
+		if r.IsWindowsAMI(ctx, region, ami) {
+			return "", fmt.Errorf("--ami %s is a Windows AMI: spawn burst installs spored with the Linux bootstrap, so it needs a Linux AMI", ami)
 		}
+		return ami, nil
 	}
 
-	return *latest.ImageId, nil
+	own, err := r.GetSelfOwnedSpawnAMI(ctx, region, instanceType)
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "Warning: could not look up self-owned spawn-* AMIs (%v); using the standard Amazon Linux 2023 AMI\n", err)
+	case own != "":
+		fmt.Fprintf(os.Stderr, "Using self-owned spawn AMI %s, which fits %s\n", own, instanceType)
+		return own, nil
+	}
+
+	rec, err := r.GetRecommendedAMI(ctx, region, instanceType)
+	if err != nil {
+		return "", fmt.Errorf("failed to find an AMI for %s in %s (pass --ami): %w", instanceType, region, err)
+	}
+	return rec, nil
 }

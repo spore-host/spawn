@@ -8,6 +8,12 @@ extended with on-demand cloud resources.
 
 Every instance gets a TTL (--ttl, default 8h) and terminates when it expires.
 
+Each instance installs and verifies spored at boot, the same way spawn launch
+does, so any Amazon Linux 2023 image works. Without --ami, burst uses the newest
+AMI this account owns whose name matches spawn-* and that fits the instance
+type (architecture, Linux, GPU), else the standard Amazon Linux 2023 AMI for the
+instance type, as spawn launch picks it.
+
 ```
 spawn burst [flags]
 ```
@@ -29,7 +35,7 @@ spawn burst [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--ami` |  | string |  | AMI ID (auto-detect if not specified) |
+| `--ami` |  | string |  | Linux AMI ID (default: the newest self-owned spawn-* AMI that fits --instance-type, else Amazon Linux 2023) |
 | `--count` |  | int | `1` | Number of instances to launch |
 | `--idle-timeout` |  | string |  | Also terminate an instance after it has been idle this long (e.g. 1h). Empty disables idle termination. |
 | `--instance-profile` |  | string |  | Attach this EXISTING IAM instance profile by name instead of the default spored-instance-profile, which spawn creates or reuses as spawn launch does. Its role must let spored read and write its own tags, terminate itself, and use the spawn-hybrid-registry table. |

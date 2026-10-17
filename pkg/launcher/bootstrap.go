@@ -54,9 +54,11 @@ type BootstrapConfig struct {
 	// Username is the local Linux user the instance creates (e.g. "ec2-user").
 	Username string
 	// PublicKey is the SSH public key (authorized_keys line, raw bytes) the
-	// instance trusts. May be empty for an SSM-only instance with no SSH key —
-	// the bootstrap then writes an empty authorized_keys (harmless), and a key
-	// can be injected later over SSM by `spawn connect`.
+	// instance trusts. May be empty for an SSM-only instance with no SSH key, or
+	// one whose key comes from an EC2 key pair (LaunchConfig.KeyName). The
+	// bootstrap then leaves the user's authorized_keys as it found it, creating
+	// it empty if absent, so a key pair's key installed by cloud-init survives
+	// (#924); a key can be injected later over SSM by `spawn connect`.
 	PublicKey []byte
 	// Plugins are spored plugin declarations written to /etc/spawn/plugins.json.
 	Plugins []plugin.Declaration
@@ -487,8 +489,16 @@ chmod 0440 /etc/sudoers.d/$LOCAL_USERNAME
 mkdir -p /home/$LOCAL_USERNAME/.ssh
 chmod 700 /home/$LOCAL_USERNAME/.ssh
 
-# Decode and write SSH public key
-echo "$LOCAL_SSH_KEY_BASE64" | base64 -d > /home/$LOCAL_USERNAME/.ssh/authorized_keys
+# Decode and write SSH public key. With no key (SSM-only, or a key that came from
+# an EC2 key pair, e.g. spawn burst --key-name) leave any existing keys alone:
+# cloud-init has already written the key pair's key into the default user's
+# authorized_keys before this script runs, and truncating it locked that user out
+# (#924).
+if [ -n "$LOCAL_SSH_KEY_BASE64" ]; then
+    echo "$LOCAL_SSH_KEY_BASE64" | base64 -d > /home/$LOCAL_USERNAME/.ssh/authorized_keys
+else
+    touch /home/$LOCAL_USERNAME/.ssh/authorized_keys
+fi
 chmod 600 /home/$LOCAL_USERNAME/.ssh/authorized_keys
 chown -R $LOCAL_USERNAME:$LOCAL_USERNAME /home/$LOCAL_USERNAME/.ssh
 
