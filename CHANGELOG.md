@@ -170,8 +170,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#929). It allowed tcp/22 from `0.0.0.0/0`. SSH, like the streaming ports, is
   now allowed only from the pipeline's own instances (the group itself).
 
-### Security
-
 - **The SAM-deployed TTL reaper's `ScanSelf=true` policy no longer grants
   unconditioned `ssm:SendCommand`** (#985). `lambda/ttl-reaper/template.yaml`
   kept its own copy of the scan-self permissions, and it had drifted from the
