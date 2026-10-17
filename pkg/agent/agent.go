@@ -687,8 +687,13 @@ func countActivePortConnections(ports []int) int {
 // terminal (ttyidle.go), on Windows quser's IDLE TIME. Presence alone, an open
 // login or a PTY nobody is typing in, must never count (#953).
 func countActiveSessions() int {
-	return sysCountActiveSessions()
+	return sessionCounter()
 }
+
+// sessionCounter is the OS session source behind countActiveSessions; a variable
+// so a test can make a host with no active sessions on every OS (on Windows the
+// real source is quser, which sees the CI runner's own console session).
+var sessionCounter = sysCountActiveSessions
 
 // findActiveProcess returns the first configured process name that is currently
 // running, or "" if none are found. OS-specific source.

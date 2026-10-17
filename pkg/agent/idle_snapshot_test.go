@@ -14,10 +14,12 @@ import (
 // machine running the tests cannot decide them.
 func noSessions(t *testing.T) {
 	t.Helper()
-	origRoot, origLines := sessionDevRoot, loginTTYLines
-	t.Cleanup(func() { sessionDevRoot, loginTTYLines = origRoot, origLines })
+	origRoot, origLines, origCounter := sessionDevRoot, loginTTYLines, sessionCounter
+	t.Cleanup(func() { sessionDevRoot, loginTTYLines, sessionCounter = origRoot, origLines, origCounter })
 	sessionDevRoot = t.TempDir()
 	loginTTYLines = func() []string { return nil }
+	// The Linux sources above are not the Windows one (quser); pin the count too.
+	sessionCounter = func() int { return 0 }
 }
 
 // counters is a fake host: cumulative CPU jiffies, network bytes and disk
