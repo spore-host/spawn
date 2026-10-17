@@ -254,7 +254,8 @@ func sysBootID() string                { return "" }
 //     in sleep or hibernation." It "reflects only the time that the system is in
 //     the working state." That is the Monotonic role.
 //     https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryunbiasedinterrupttime
-//   - QueryInterruptTime (kernel32, Windows 10 / Server 2016): "Gets the current
+//   - QueryInterruptTime (api-ms-win-core-realtime-l1-1-1.dll, Windows 10 /
+//     Server 2016; it is not a kernel32 export): "Gets the current
 //     interrupt-time count", in 100ns units. This is the biased count, which the
 //     unbiased one's page contrasts it with: the system uses it so "relative
 //     timers that would have expired during sleep expire immediately upon
@@ -293,8 +294,12 @@ func sysKernelClocks() (kernelClocks, bool) {
 	return interruptTimeClocks(unbiased, biased)
 }
 
+// Each proc is loaded from the DLL its documentation names. QueryInterruptTime
+// is exported only by the realtime API set, so looking it up in kernel32 fails
+// on every Windows version and silently disabled these clocks (#962).
 var (
 	kernel32                       = windows.NewLazySystemDLL("kernel32.dll")
+	realtimeAPISet                 = windows.NewLazySystemDLL("api-ms-win-core-realtime-l1-1-1.dll")
 	procQueryUnbiasedInterruptTime = kernel32.NewProc("QueryUnbiasedInterruptTime")
-	procQueryInterruptTime         = kernel32.NewProc("QueryInterruptTime")
+	procQueryInterruptTime         = realtimeAPISet.NewProc("QueryInterruptTime")
 )

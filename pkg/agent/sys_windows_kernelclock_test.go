@@ -12,9 +12,14 @@ import (
 // This cannot show that the unbiased count stops through an EC2 hibernation;
 // that needs a hibernated Windows instance.
 func TestSysKernelClocks_ReadsBothInterruptTimes(t *testing.T) {
+	for _, p := range []interface{ Find() error }{procQueryUnbiasedInterruptTime, procQueryInterruptTime} {
+		if err := p.Find(); err != nil {
+			t.Fatalf("proc not found: %v", err)
+		}
+	}
 	first, ok := sysKernelClocks()
 	if !ok {
-		t.Fatal("QueryUnbiasedInterruptTime/QueryInterruptTime unreadable")
+		t.Fatal("QueryUnbiasedInterruptTime/QueryInterruptTime found but the readings were rejected")
 	}
 	if first.Monotonic <= 0 || first.Boottime < first.Monotonic {
 		t.Errorf("readings %+v: want 0 < monotonic <= boottime", first)
