@@ -243,7 +243,9 @@ func TestResumedInstanceIsNotReHibernatedAndRunsPreStopAgain(t *testing.T) {
 		t.Fatalf("%d hibernate calls, want 2", f.sp.hibernateCalls)
 	}
 	b, _ := os.ReadFile(hookLog)
-	if n := strings.Count(string(b), "ran"); n != 2 {
+	// The hook runs under powershell on Windows, whose `>>` appends UTF-16;
+	// dropping the NULs reads either encoding of an ASCII "ran".
+	if n := strings.Count(strings.ReplaceAll(string(b), "\x00", ""), "ran"); n != 2 {
 		t.Errorf("pre-stop hook ran %d times over two hibernates, want 2", n)
 	}
 	var deleted []string
