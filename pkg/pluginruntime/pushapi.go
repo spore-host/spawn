@@ -246,7 +246,10 @@ func (s *PushAPIServer) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.rt.ReceivePush(r.Context(), name, body.Key, body.Value); err != nil {
+	if err := s.rt.ReceivePush(r.Context(), name, body.Key, body.Value); errors.Is(err, plugin.ErrNotInstalled) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
 		log.Printf("ReceivePush error for plugin %s: %v", name, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -264,9 +267,16 @@ func (s *PushAPIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 404 only when the plugin is not installed. Any other failure (a state
+	// file spored cannot read or decode) is a 500, not a "not found" that would
+	// send the user looking for a plugin that is in fact there (#1038).
 	st, err := s.rt.Status(name)
-	if err != nil {
+	if errors.Is(err, plugin.ErrNotInstalled) {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		log.Printf("Status error for plugin %s: %v", name, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -282,7 +292,14 @@ func (s *PushAPIServer) handleRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]string{"status": "removed"}
-	if err := s.rt.Remove(r.Context(), name); errors.Is(err, ErrStopStepsFailed) {
+	err := s.rt.Remove(r.Context(), name)
+	if errors.Is(err, plugin.ErrNotInstalled) {
+		// Nothing to remove: 404, which the CLI reports as "not found" rather
+		// than as a server error (#1038).
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, ErrStopStepsFailed) {
 		// Removed, but its stop steps failed: say so, so the CLI can tell the
 		// user what may still be running (#1018).
 		resp["warning"] = err.Error()

@@ -238,6 +238,9 @@ var ErrStopStepsFailed = errors.New("stop steps failed")
 // would leave them nothing to run. The removal completes and the returned
 // error wraps ErrStopStepsFailed, so the caller can say what may still be
 // running.
+//
+// Removing a plugin that is not installed returns an error wrapping
+// plugin.ErrNotInstalled, which the push API answers with 404 (#1038).
 func (rt *Runtime) Remove(ctx context.Context, name string) error {
 	st, err := rt.store.Load(name)
 	if err != nil {
@@ -296,7 +299,8 @@ func (rt *Runtime) StopAll(ctx context.Context) {
 	}
 }
 
-// Status returns the current persisted state of a named plugin.
+// Status returns the current persisted state of a named plugin. The error
+// wraps plugin.ErrNotInstalled when the plugin is not installed.
 func (rt *Runtime) Status(name string) (*plugin.PluginState, error) {
 	return rt.store.Load(name)
 }

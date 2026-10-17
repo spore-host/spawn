@@ -82,6 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spore-bot's role** (#1046). It had no default, and its example named a role
   that does not exist. Its `ExternalId` description no longer says the bot
   falls back to the shared value. It hasn't since spore-host#413.
+- **`spawn plugin remove` of a plugin that is not installed says
+  `plugin "<name>" not found on <instance>`** (#1038), instead of
+  `remove API: HTTP 500 — internal error`. spored's plugin API now answers 404
+  for a plugin that is not installed and 500 only for a real failure, on
+  remove, push and status alike. `spawn plugin status` used to report a plugin
+  whose state spored could not read as "not found"; it now reports the error.
 
 ## [0.129.0] - 2026-10-16
 
