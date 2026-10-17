@@ -65,6 +65,9 @@ type Agent struct {
 	prevNetTx             int64     // /proc/net/dev TX bytes at last getNetworkBytes call
 	netSampled            bool      // prevNetRx/prevNetTx hold a real sample (a counter can legitimately be 0, #919)
 	netUnknownWarned      bool      // "network cannot be measured" logged once, not every tick (#919)
+	prevDiskBytes         int64     // whole-disk bytes read+written at the last diskIOBytes call (#937)
+	diskSampled           bool      // prevDiskBytes holds a real sample (#937)
+	diskUnknownWarned     bool      // "disk I/O cannot be measured" logged once, not every tick (#937)
 	idleWarned            bool      // send idle_warning notification only once
 
 	// DCV auth token verifier (embedded HTTP server for seamless browser auth)
@@ -1197,9 +1200,13 @@ func (a *Agent) isIdle() bool {
 		return false
 	}
 
-	// Check disk I/O
-	diskIO := a.getDiskIO()
-	if diskIO > 100000 { // 100KB/min threshold
+	// Check disk I/O, with the network check's semantics for an unknown (#937).
+	diskIO, diskMeasured, diskWhy := a.diskIOBytes()
+	if !diskMeasured {
+		log.Printf("Not idle: disk I/O could not be measured (%s); assuming active", diskWhy)
+		return false
+	}
+	if diskIO > idleDiskBytesThreshold {
 		log.Printf("Not idle: Disk I/O %d bytes", diskIO)
 		return false
 	}
@@ -1293,6 +1300,13 @@ func (a *Agent) cpuUsage() (float64, bool) {
 		// on an unreadable counter.
 		return 100.0, false
 	}
+	if deltaTotal < 0 || deltaIdle < 0 || deltaIdle > deltaTotal {
+		// A counter went backwards (the kernel documents iowait, which is in the
+		// total, as able to decrease) or the two came from different time bases.
+		// The ratio means nothing, and the old code turned a negative one into a
+		// "usage" under every idle threshold (#937 audit).
+		return 100.0, false
+	}
 	return 100.0 - (float64(deltaIdle)/float64(deltaTotal))*100.0, true
 }
 
@@ -1347,8 +1361,53 @@ func (a *Agent) networkBytes() (bytes int64, measured bool, why string) {
 	return delta, true, ""
 }
 
-func (a *Agent) getDiskIO() int64 {
-	return sysReadDiskIOBytes()
+// readDiskIOBytes is the disk-counter source, indirected through a var for the
+// same reason as readNetworkBytes: the darwin stub always says "unknown".
+var readDiskIOBytes = func() int64 { return sysReadDiskIOBytes() }
+
+// idleDiskBytesThreshold is the disk I/O between samples (one monitor tick, a
+// minute) at or under which the disk counts as idle.
+const idleDiskBytesThreshold int64 = 100000
+
+// diskAssumedActive is what an unmeasured disk reading reports: far over
+// idleDiskBytesThreshold, so "could not tell" never reads as "idle".
+const diskAssumedActive int64 = 1000000
+
+// diskIOBytes returns disk bytes read and written since the previous sample and
+// whether that is a real MEASUREMENT. When measured is false the value is the
+// conservative diskAssumedActive and why says what was missing. Unknown has the
+// network check's semantics (networkBytes, #919): the idle decision treats it as
+// active, status shows it as unknown, and an unreadable counter is warned about
+// once.
+//
+// It used to be no delta at all (#937). The idle check compared the since-boot
+// total with a per-minute threshold, and the device filter dropped every NVMe
+// disk. So on Nitro it read 0 for ever, a dead signal that let a disk-bound,
+// low-CPU workload be idle-stopped; and on xvd/sd/vd hosts it read the boot-time
+// total, always over the threshold, so idle-stop could never fire.
+func (a *Agent) diskIOBytes() (bytes int64, measured bool, why string) {
+	total := readDiskIOBytes()
+	if total < 0 {
+		const reason = "no whole-disk I/O counters could be read"
+		if !a.diskUnknownWarned {
+			a.diskUnknownWarned = true
+			log.Printf("WARNING: %s; disk I/O is treated as active, so idle-stop "+
+				"will not trigger on this host (#937)", reason)
+		}
+		return diskAssumedActive, false, reason
+	}
+	prev, sampled := a.prevDiskBytes, a.diskSampled
+	a.prevDiskBytes, a.diskSampled = total, true
+	if !sampled {
+		return diskAssumedActive, false, "single sample"
+	}
+	delta := total - prev
+	if delta < 0 {
+		// A disk was detached (the counted set shrank) or a counter reset. The
+		// delta means nothing, and a negative one would read as idle.
+		return diskAssumedActive, false, "disk counters went backwards"
+	}
+	return delta, true, ""
 }
 
 func (a *Agent) getGPUUtilization() float64 {
@@ -2085,6 +2144,12 @@ func (a *Agent) GetNetworkBytes() int64 {
 // number should use this, so an assumption is not printed as traffic (#919).
 func (a *Agent) GetNetworkBytesMeasured() (int64, bool, string) {
 	return a.networkBytes()
+}
+
+// GetDiskIOBytesMeasured returns disk bytes read and written since the previous
+// sample, whether that is a real measurement, and if not, why (#937).
+func (a *Agent) GetDiskIOBytesMeasured() (int64, bool, string) {
+	return a.diskIOBytes()
 }
 
 func (a *Agent) IsIdle() bool {

@@ -144,3 +144,31 @@ func TestHasPriorComputeTime(t *testing.T) {
 		t.Error("carried-over compute time was not recognised")
 	}
 }
+
+// Counters that go backwards between samples carry no information. The old code
+// computed a ratio from them anyway and reported it as a measurement: 50%,
+// 150% and -200% for these three, the last under every idle threshold
+// (#937 audit).
+func TestCPUUsage_BackwardsCountersAreUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second [2]int64 // {idle, total}
+	}{
+		{"total went backwards", [2]int64{100, 1000}, [2]int64{50, 900}},
+		{"idle went backwards", [2]int64{500, 1000}, [2]int64{400, 1200}},
+		{"idle grew more than total", [2]int64{100, 1000}, [2]int64{400, 1100}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubCPUTimes(t, tc.first, tc.second)
+			a := newTestAgent(t, nil)
+			_, _ = a.cpuUsage()
+			usage, ok := a.cpuUsage()
+			if ok {
+				t.Errorf("backwards counters reported a measurement (%v%%)", usage)
+			}
+			if usage != 100.0 {
+				t.Errorf("usage = %v, want 100 (assume active)", usage)
+			}
+		})
+	}
+}

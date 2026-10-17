@@ -37,50 +37,19 @@ func (a *Agent) GetNetworkStats(ctx context.Context) (metrics.NetworkStats, erro
 	}, nil
 }
 
-// GetDiskStats returns disk I/O statistics
+// GetDiskStats returns disk I/O statistics summed over the whole disks. It
+// returns an error, and so no sample, when none is found: before #937 this
+// dropped every NVMe disk and reported a zero counter labelled "unknown" on
+// Nitro, and counted sda and sda1 both elsewhere.
 func (a *Agent) GetDiskStats(ctx context.Context) (metrics.DiskStats, error) {
-	data, err := os.ReadFile("/proc/diskstats")
+	read, written, devices, err := readDiskstatsBytes("/proc/diskstats", "/sys/block")
 	if err != nil {
 		return metrics.DiskStats{}, err
 	}
-
-	lines := strings.Split(string(data), "\n")
-	var sectorsRead, sectorsWritten uint64
-	var device string
-
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) < 14 {
-			continue
-		}
-
-		deviceName := fields[2]
-		if strings.HasPrefix(deviceName, "xvd") || strings.HasPrefix(deviceName, "nvme") ||
-			strings.HasPrefix(deviceName, "sd") || strings.HasPrefix(deviceName, "vd") {
-			// Skip partition numbers
-			if len(deviceName) > 4 && deviceName[len(deviceName)-1] >= '0' && deviceName[len(deviceName)-1] <= '9' {
-				continue
-			}
-
-			if device == "" {
-				device = deviceName
-			}
-
-			sr, _ := strconv.ParseUint(fields[5], 10, 64)
-			sw, _ := strconv.ParseUint(fields[9], 10, 64)
-			sectorsRead += sr
-			sectorsWritten += sw
-		}
-	}
-
-	if device == "" {
-		device = "unknown"
-	}
-
 	return metrics.DiskStats{
-		BytesRead:  sectorsRead * 512,
-		BytesWrite: sectorsWritten * 512,
-		Device:     device,
+		BytesRead:  uint64(read),
+		BytesWrite: uint64(written),
+		Device:     strings.Join(devices, ","),
 	}, nil
 }
 

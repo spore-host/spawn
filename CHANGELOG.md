@@ -679,6 +679,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it now prints `Network: unknown (single sample; assuming active)`, the same
   way the CPU line does. The JSON output gains `network_measured` and
   `network_unknown`.
+- **The idle check's disk I/O signal was wrong on every instance type** (#937).
+  It compared the total disk I/O since boot with a per-minute threshold, and its
+  device filter skipped every NVMe disk while counting partitions such as
+  `sda1` as extra disks. On Nitro instances the disk therefore always read 0,
+  so a disk-bound job with low CPU and network could be idle-stopped. On
+  instances with `xvd*`, `sd*` or `vd*` disks it always read as busy, so
+  `--idle-timeout` never fired and the log said `Not idle: Disk I/O N bytes`
+  every minute. spored now measures the I/O since the previous check, over
+  every whole disk, whatever it is called, without partitions, loop,
+  device-mapper, md RAID or zram devices. If the counters cannot be read or
+  go backwards, it treats the disk as active, and if they cannot be read it
+  logs one warning saying idle-stop will not trigger. The same applies on
+  Windows, where a missing disk counter used to read as no I/O.
+- **`spored status` now shows a `Disk I/O` line** (#937). It reads `unknown`,
+  with the reason, when nothing was measured. A one-shot status has only one
+  sample, so it is always unknown there. The JSON output gains
+  `disk_bytes_per_min`, `disk_measured` and `disk_unknown`.
+- **The Prometheus `spawn_disk_io_bytes_total` metric now counts NVMe disks** (#937).
+  Before, it read 0 on Nitro instances and double-counted `sda`/`vda` disks
+  with partitions. Its `device` label now lists every disk it counted, for
+  example `nvme0n1,nvme1n1`, so existing series change label.
+- **A CPU counter that goes backwards between samples now counts as unknown,
+  not as a reading** (#937). Before, it produced a percentage that could be
+  negative, which reads as idle.
 
 ### Security
 

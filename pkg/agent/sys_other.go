@@ -16,7 +16,7 @@ import (
 
 func sysReadCPUTimes() (idle, total int64, err error) { return 0, 0, errBadProcStat }
 func sysReadNetworkBytes() (rx, tx int64)             { return -1, -1 }
-func sysReadDiskIOBytes() int64                       { return 0 }
+func sysReadDiskIOBytes() int64                       { return -1 }
 func sysIsProcessRunning(string) bool                 { return false }
 func sysCountActiveSessions() int                     { return 0 }
 func sysCountActivePortConnections([]int) int         { return 0 }
