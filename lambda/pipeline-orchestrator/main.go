@@ -1223,8 +1223,6 @@ export SPAWN_INSTANCE_INDEX='%d'
 export SPAWN_S3_BUCKET='%s'
 export SPAWN_S3_PREFIX='%s'
 export SPAWN_RUN_ID='%s'
-export SPAWN_RESULT_S3_BUCKET='%s'
-export SPAWN_RESULT_S3_PREFIX='%s'
 export SPAWN_REGION='%s'
 SPAWN_FAILED_MARKER='%s'
 
@@ -1386,8 +1384,10 @@ exit 0
 		// writes; the pipeline's s3_prefix plus /runs/<run-id>.
 		shellEscape(state.DataPrefix()),
 		shellEscape(state.RunID),
-		shellEscape(state.ResultS3Bucket),
-		shellEscape(state.ResultS3Prefix),
+		// No SPAWN_RESULT_S3_BUCKET/PREFIX (#1013): result_s3_bucket is
+		// deprecated (#989), the stage's instance profile grants only
+		// s3_bucket/<s3_prefix>/*, and nothing collects from there, so a
+		// command that trusted them got AccessDenied.
 		shellEscape(region),
 		shellEscape(failedMarker),
 		// The stage command and env are no longer in the user data at all:

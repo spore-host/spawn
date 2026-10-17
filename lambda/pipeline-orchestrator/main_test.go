@@ -792,6 +792,35 @@ func TestUserDataFallbackMarkerIsTheOrchestratorsKey(t *testing.T) {
 	}
 }
 
+// #1013: the stage command must not be handed result_s3_bucket/prefix as
+// SPAWN_RESULT_S3_BUCKET/PREFIX. They are deprecated (#989): the stage's
+// instance profile grants only s3_bucket/<s3_prefix>/*, so a command that
+// wrote there got AccessDenied, and nothing would collect it anyway. The fake
+// spored dumps the environment the real one passes to the command
+// (os.Environ), so this checks what a command sees, not the script's text;
+// SPAWN_S3_BUCKET is the control that the dump works.
+func TestStageCommandIsNotGivenTheDeprecatedResultLocation(t *testing.T) {
+	state, def := twoStagePipeline("stop", time.Now())
+	state.ResultS3Bucket, state.ResultS3Prefix = "results-bkt", "results/pfx"
+	fake := filepath.Join(t.TempDir(), "spored")
+	if err := os.WriteFile(fake, []byte("#!/bin/bash\nenv | grep '^SPAWN_' >> \"$CALLS\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := execUserData(t, userDataRun{
+		state: state, stageDef: def.GetStage("train"), stageState: getStageState(state, "train"),
+		region: "eu-west-1", spored: fake,
+	})
+	if err != nil {
+		t.Fatalf("user data failed: %v", err)
+	}
+	if !regexp.MustCompile(`(?m)^SPAWN_S3_BUCKET=bkt$`).MatchString(calls) {
+		t.Fatalf("control: the stage environment does not carry SPAWN_S3_BUCKET=bkt; calls:\n%s", calls)
+	}
+	if m := regexp.MustCompile(`(?m)^SPAWN_RESULT_S3_\w+=.*$`).FindAllString(calls, -1); len(m) > 0 {
+		t.Errorf("the stage command sees the deprecated result location %q, which it cannot write to", m)
+	}
+}
+
 func keys(m map[string][]byte) []string {
 	var out []string
 	for k := range m {

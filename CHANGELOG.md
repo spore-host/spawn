@@ -102,9 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stage instances are granted only `s3_bucket/<s3_prefix>/*`, so they
   could not write anywhere else. `spawn pipeline collect` no longer reads them,
   and `validate`, `launch` and `collect` warn when they are set. Stage commands
-  still see them as `SPAWN_RESULT_S3_BUCKET` and `SPAWN_RESULT_S3_PREFIX`, and
-  still cannot write there. To keep a pipeline's results in a particular
-  bucket, make it the `s3_bucket`.
+  are no longer given them either (#1013, below). To keep a pipeline's results
+  in a particular bucket, make it the `s3_bucket`.
   The three examples that set them no longer do.
 
 ### Fixed
@@ -284,6 +283,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Downloads are laid out by stage, not by full S3 key as before, so scripts
   that read `./results/<s3_prefix>/stages/...` need the new paths.
+- **Pipeline stage commands are no longer given `SPAWN_RESULT_S3_BUCKET` and
+  `SPAWN_RESULT_S3_PREFIX`** (#1013). They carried the deprecated
+  `result_s3_bucket`/`result_s3_prefix`, a location the stage's instance
+  profile does not allow it to write and that `spawn pipeline collect` does not
+  read, so a command that trusted them failed with AccessDenied. Declare stage
+  results as `data_output`, which `collect` gathers. The `spawn-pipeline-orchestrator` Lambda has to be redeployed
+  for this to take effect.
 
 ### Security
 
