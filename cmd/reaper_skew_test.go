@@ -105,3 +105,20 @@ func TestStatusShowsVersionEvenWhenUnknown(t *testing.T) {
 			"rather than 'unknown':\n%s", out)
 	}
 }
+
+// An armed reaper that a redeploy kept armed must not be told it is in dry run
+// and needs `spawn reaper arm` (#1086); a dry-run one still is.
+func TestWriteReaperDeployState(t *testing.T) {
+	var armed, dry strings.Builder
+	writeReaperDeployState(&armed, false, "us-west-2")
+	writeReaperDeployState(&dry, true, "us-west-2")
+	if strings.Contains(armed.String(), "DRY RUN") || strings.Contains(armed.String(), "spawn reaper arm") {
+		t.Errorf("armed reaper reported as needing arming:\n%s", armed.String())
+	}
+	if !strings.Contains(armed.String(), "ARMED") {
+		t.Errorf("armed reaper not reported armed:\n%s", armed.String())
+	}
+	if !strings.Contains(dry.String(), "DRY RUN") || !strings.Contains(dry.String(), "spawn reaper arm") {
+		t.Errorf("dry-run reaper not told to arm:\n%s", dry.String())
+	}
+}
