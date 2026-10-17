@@ -38,6 +38,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn extend` warns when the new deadline is past it: from then on, a stop
   may not be restartable. And `spawn start` names the expired request as the
   likely cause when EC2 refuses to start the instance.
+- **spored retires a Spot replacement it finds itself running on** (#995).
+  EC2 launches a replacement from the request's launch specification, which
+  carries spawn's user data and instance profile, so spawn's bootstrap and
+  spored run there. But the replacement has no spawn tags, and with them no TTL.
+  At startup spored now checks whether it is on one. It is if this instance is
+  not tagged `spawn:managed`, and its Spot request is a spawn persistent request
+  whose `spawn:original-instance-id` names a different instance. If so, spored
+  logs `SPOT REPLACEMENT DETECTED`, sends a `spot_replacement_retired`
+  notification through the original's notification settings, cancels the
+  request and shuts the OS down. The original instance can never match: it is
+  tagged `spawn:managed`, and its request names it or is not yet tagged. If
+  anything can't be read, or the cancel fails, spored does nothing and the
+  reaper's alarm still applies. This needs no new IAM: `DescribeInstances`,
+  `DescribeTags` and the tag-scoped `CancelSpotInstanceRequests` were already
+  granted. Not yet verified against a real Spot replacement. Since the launch
+  specification can't carry a shutdown behaviour, an OS shutdown may stop the
+  replacement rather than terminate it. A stopped replacement bills only for
+  EBS, can't restart with its request cancelled, and the reaper still reports it.
 
 ### Fixed
 

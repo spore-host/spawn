@@ -164,6 +164,20 @@ func (p *EC2Provider) Terminate(ctx context.Context, reason string) error {
 	return nil
 }
 
+// DetectSpotReplacement reports whether this instance is a replacement EC2
+// launched from a leaked spawn persistent Spot request (#995). See
+// spotrequest.DetectReplacement for the rule; any read failure is
+// VerdictUnknown.
+func (p *EC2Provider) DetectSpotReplacement(ctx context.Context) spotrequest.Detection {
+	return spotrequest.DetectReplacement(ctx, p.ec2Client, p.identity.InstanceID)
+}
+
+// RetireSpotReplacement cancels a detected replacement's Spot request and then
+// calls shutdown. It refuses anything but a VerdictReplacement detection.
+func (p *EC2Provider) RetireSpotReplacement(ctx context.Context, d spotrequest.Detection, shutdown func(context.Context) error) error {
+	return spotrequest.RetireReplacement(ctx, p.ec2Client, d, shutdown)
+}
+
 func (p *EC2Provider) Stop(ctx context.Context, reason string) error {
 	log.Printf("Stopping EC2 instance %s (reason: %s)", p.identity.InstanceID, reason)
 

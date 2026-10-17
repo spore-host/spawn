@@ -656,13 +656,13 @@ func TestHandler_DeniedAccountIsStillAttemptedEveryRegion(t *testing.T) {
 		ec2For:    func(string) ec2API { return ec2c },
 	})
 
-	captureLogs(func() { rp.run(context.Background()) })
+	captureLogs(func() { _, _ = rp.run(context.Background()) })
 	if ec2c.calls != len(rp.regions) {
 		t.Errorf("DescribeInstances called %d times, want %d — quiescing means not COUNTING a denial as a surprise, never ceasing to look (#457)", ec2c.calls, len(rp.regions))
 	}
 
 	// And again next run: no state carries over to suppress it.
-	captureLogs(func() { rp.run(context.Background()) })
+	captureLogs(func() { _, _ = rp.run(context.Background()) })
 	if ec2c.calls != 2*len(rp.regions) {
 		t.Errorf("after a second run DescribeInstances called %d times, want %d — the account must never be silently dropped", ec2c.calls, 2*len(rp.regions))
 	}
@@ -819,7 +819,7 @@ func TestHandler_DeniedAccountCarriesRegistryCorroboration(t *testing.T) {
 	rp := failureReaper(deniedAccount("acct-dead", unmanagedID))
 	rp.registry = &fakeRegistry{rows: []accountlifecycle.Account{row(unmanagedID, accountlifecycle.StatusUnreachable)}}
 
-	out := captureLogs(func() { rp.run(context.Background()) })
+	out := captureLogs(func() { _, _ = rp.run(context.Background()) })
 
 	if !strings.Contains(out, accountlifecycle.StatusUnreachable) {
 		t.Errorf("the registry's verdict must be printed beside the denial; got:\n%s", out)
@@ -837,7 +837,7 @@ func TestHandler_DeniedAccountAbsentFromRegistryIsNotFabricatedAsActive(t *testi
 	rp := failureReaper(deniedAccount("acct-dead", "999999999999"))
 	rp.registry = &fakeRegistry{rows: []accountlifecycle.Account{row(unmanagedID, accountlifecycle.StatusDormant)}}
 
-	out := captureLogs(func() { rp.run(context.Background()) })
+	out := captureLogs(func() { _, _ = rp.run(context.Background()) })
 
 	if strings.Contains(out, accountlifecycle.StatusActive) {
 		t.Errorf("an absent row must never render as %q — AccountStatus() treats \"\" as active, so reading the zero value invents a verdict; got:\n%s", accountlifecycle.StatusActive, out)
@@ -874,7 +874,7 @@ func TestHandler_HealthyRunDoesNotScanTheRegistry(t *testing.T) {
 	})
 	rp.registry = reg
 
-	captureLogs(func() { rp.run(context.Background()) })
+	captureLogs(func() { _, _ = rp.run(context.Background()) })
 
 	if reg.calls != 0 {
 		t.Errorf("registry scanned %d times on a healthy run, want 0 — it is only consulted to annotate a denial", reg.calls)

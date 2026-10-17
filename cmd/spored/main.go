@@ -152,6 +152,18 @@ func runDaemon() {
 	identity, _ := prov.GetIdentity(ctx)
 	log.Printf("Running on provider: %s", identity.Provider)
 
+	// A replacement EC2 launched from a leaked spawn persistent Spot request runs
+	// this same bootstrap but has no spawn tags, so nothing else would end it
+	// (#995). Off the critical path; it does nothing unless sure.
+	if ep, ok := prov.(*provider.EC2Provider); ok {
+		go replacementCheck{
+			r:        ep,
+			shutdown: powerOff,
+			notify:   replacementNotifier(identity),
+			sleep:    sleepCtx,
+		}.run(ctx)
+	}
+
 	agent, err := agent.NewAgent(ctx, prov)
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
