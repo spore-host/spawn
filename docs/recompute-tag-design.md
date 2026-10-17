@@ -1,6 +1,6 @@
 # Retention by regeneration cost (#1076)
 
-**Status: DESIGN — awaiting decisions (end of this page).** No code yet.
+**Status: DESIGN — decided 2026-10-17 (see [Decisions](#decisions)).** Phase 1 in progress.
 
 ## The idea
 
@@ -131,21 +131,22 @@ The same discipline as every reaper sweep:
 4. **Delete.** The verifying sweeper, opt-in, after report runs have been
    read, as with `SpotRequests=reap`.
 
-## Decisions needed (owner)
+## Decisions
 
-1. **Class thresholds.** For example: `cheap` < \$1 **and** < 1 h;
-   `expensive` ≥ \$25 **or** ≥ 12 h; `moderate` in between. Both cost and
-   wall-clock count, because a cheap but slow job is still a researcher's day.
-2. **Deletion default.** Either every classified output is deletable by the
-   sweeper unless `retain=true` (opt-out), or only outputs whose spec says
-   `regenerable: true` are (opt-in). This page recommends **opt-in for
-   deletion, automatic for tiering**: tiering is recoverable and deletion
-   isn't, and the researcher knows whether a job is deterministic. spawn can't.
-3. **Tiering ages** *N* / *M* / *N′*. For example: 30 days to IA and 90 days to
-   Glacier IR for `cheap`, and 60 days to IA for `moderate`.
-4. **Scope of phase 1.** Task results only, as recommended. Or queue and
-   pipeline results too, tags and annotation only, since those buckets are the
-   user's.
+Made by the owner on 2026-10-17.
+
+1. **Class thresholds:** `cheap` is < \$1 **and** < 1 h. `expensive` is ≥ \$25
+   **or** ≥ 12 h. `moderate` is everything between. An unknown rate gives no class.
+2. **Deletion is opt-in per spec.** The verifying sweeper may delete only outputs
+   whose task spec says `regenerable: true`, and only after re-checking the inputs
+   and recipe at deletion time. **Tiering is automatic** by class.
+   `spawn:retain=true` excludes an object from both.
+3. **Tiering ages:** `cheap` goes to Standard-IA at 30 days and Glacier IR at 90.
+   `moderate` goes to Standard-IA at 60. `expensive`, unclassified and
+   `retain=true` objects are never tiered.
+4. **Phase 1 scope:** task results only (`spawn task run` and pooled workers).
+   Queue and pipeline results follow later, tags and annotation only, with no
+   rules on buckets the user owns.
 
 ## What exists today
 
