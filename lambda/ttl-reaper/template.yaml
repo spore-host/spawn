@@ -289,8 +289,10 @@ Resources:
         # grant fsx — so the gap only ever bit ScanSelf, and silently: the reaper
         # terminated instances fine while failing to delete the orphaned filesystem
         # the #210 ephemeral net exists to catch (and that #613 was reported for).
-        # pkg/reaperiam is now the single source for this set, with a test that reads
-        # the reaper's own *API interfaces and fails if a call has no grant.
+        # pkg/reaperiam is the single source for this set. Its
+        # TestSAMTemplateScanSelfPolicyMatchesReaperIAM parses this branch and fails
+        # unless every statement here equals ScanSelfStatements — actions, resources
+        # and conditions (#985). Edit reaperiam first, then mirror it here.
         - !If
             - ScanSelfEnabled
             - Statement:
@@ -320,6 +322,28 @@ Resources:
                   Action:
                     - ec2:DescribeSpotInstanceRequests
                   Resource: '*'
+                # #685 network-resource sweep: security groups and placement
+                # groups. Read-only; neither Describe has resource-level
+                # permissions. These were MISSING here (#985) — every sweep cycle
+                # of a SAM-deployed ScanSelf reaper hit AccessDenied.
+                - Effect: Allow
+                  Action:
+                    - ec2:DescribeSecurityGroups
+                    - ec2:DescribePlacementGroups
+                  Resource: '*'
+                # The destructive half, on the same tag rail as TerminateInstances.
+                # CreateTags lets the sweep stamp a spawn-managed resource with its
+                # first-seen time; tag-conditioned, so it cannot adopt a resource
+                # that is not already spawn:managed=true.
+                - Effect: Allow
+                  Action:
+                    - ec2:DeleteSecurityGroup
+                    - ec2:DeletePlacementGroup
+                    - ec2:CreateTags
+                  Resource: '*'
+                  Condition:
+                    StringEquals:
+                      ec2:ResourceTag/spawn:managed: 'true'
                 # #210 ephemeral-orphan net. FSx exposes no resource-tag condition
                 # key for DeleteFileSystem, so the guard is the reaper's own check
                 # (spawn:managed, no live lease, past the grace period) rather than
@@ -332,9 +356,28 @@ Resources:
                 # REAPER_GRACEFUL asks spored to shut down cleanly over SSM before an
                 # external terminate. Without these, graceful mode silently degrades
                 # to an immediate terminate.
+                #
+                # SendCommand is scoped to spawn-managed instances plus the one
+                # document the reaper names (#818, #985). It was Resource '*' with no
+                # condition, which is arbitrary root shell on ANY SSM-managed instance
+                # in the account. ssm:resourceTag, NOT ec2:ResourceTag: a condition key
+                # belongs to the service of the ACTION, and an ec2: key is absent from
+                # an ssm: request context (#652/#665).
                 - Effect: Allow
                   Action:
                     - ssm:SendCommand
+                  Resource: 'arn:aws:ec2:*:*:instance/*'
+                  Condition:
+                    StringEquals:
+                      ssm:resourceTag/spawn:managed: 'true'
+                # A document carries no spawn:managed tag, so it is scoped by name.
+                - Effect: Allow
+                  Action:
+                    - ssm:SendCommand
+                  Resource: 'arn:aws:ssm:*:*:document/AWS-RunShellScript'
+                # No resource-level ARN; it only reads a command this role sent.
+                - Effect: Allow
+                  Action:
                     - ssm:GetCommandInvocation
                   Resource: '*'
             - !Ref AWS::NoValue

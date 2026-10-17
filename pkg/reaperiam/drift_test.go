@@ -369,24 +369,22 @@ func TestCrossAccountRoleCoversEveryReaperAPICall(t *testing.T) {
 // an assumed role — so a grant added to one and not the other is the defect that
 // produced #622, #652, and lagotto#149/#151/#153.
 //
-// Intentionally ignores ec2:DescribeTags, which the cross-account role grants and
-// the reaper never calls (tags come from the DescribeInstances response). That is
-// a leftover rather than a drift, and TestPolicyGrantsNothingTheReaperDoesNotCall
-// already covers the scan-self side.
+// This compares action names only. TestCrossAccountRolePolicyMatchesReaperIAM
+// compares the full statements (resources and conditions too); this one stays as
+// the coarser, clearer message for the common case of a one-sided grant.
 func TestBothReaperRolesGrantTheSameTargetAccountActions(t *testing.T) {
 	self := GrantedActions()
 	cross := crossAccountGrantedActions(t)
-	ignore := map[string]bool{"ec2:DescribeTags": true}
 
 	for a := range self {
-		if !cross[a] && !ignore[a] {
+		if !cross[a] {
 			t.Errorf("scan-self grants %s but the cross-account role does not — the two roles "+
 				"perform the same per-account operations, so a one-sided grant means the "+
 				"feature works in one deployment mode and silently no-ops in the other", a)
 		}
 	}
 	for a := range cross {
-		if !self[a] && !ignore[a] {
+		if !self[a] {
 			t.Errorf("the cross-account role grants %s but scan-self does not — same problem, "+
 				"other direction (this is how #625's fsx:/ssm: gap arose)", a)
 		}

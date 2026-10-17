@@ -83,10 +83,18 @@ Resources:
             Version: '2012-10-17'
             Statement:
               # Describe across all regions to find expired instances.
+              #
+              # Every statement in this policy must equal one in
+              # pkg/reaperiam.ScanSelfStatements (actions, resources and
+              # conditions); TestCrossAccountRolePolicyMatchesReaperIAM parses this
+              # file and fails otherwise (#985). The one recorded exception is the
+              # fsx:DeleteFileSystem condition below.
+              #
+              # No ec2:DescribeTags: the reaper reads tags from the DescribeInstances
+              # response and never calls it (#985 removed the leftover grant).
               - Effect: Allow
                 Action:
                   - ec2:DescribeInstances
-                  - ec2:DescribeTags
                 Resource: '*'
               # Terminate — scoped to managed instances only. The reaper never
               # touches anything not tagged spawn:managed=true.
@@ -220,7 +228,7 @@ Resources:
                 Action:
                   - ssm:SendCommand
                 Resource:
-                  - !Sub 'arn:aws:ssm:*:*:document/AWS-RunShellScript'
+                  - 'arn:aws:ssm:*:*:document/AWS-RunShellScript'
               - Effect: Allow
                 Action:
                   - ssm:GetCommandInvocation
