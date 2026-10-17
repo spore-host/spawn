@@ -35,6 +35,10 @@ type Runtime struct {
 
 	mu            sync.Mutex
 	healthCancels map[string]context.CancelFunc
+	// healthLoops counts running health-loop goroutines, so a caller that is
+	// tearing down (tests removing the state directory) can wait for an
+	// in-flight check to finish writing state rather than race it.
+	healthLoops sync.WaitGroup
 	// healthSpecs is the health block each running loop was started with, and
 	// stopped is what the last StopAll stopped, so ResumeStopped can undo it
 	// when the shutdown it prepared for does not happen (#979). Both under mu.
@@ -522,7 +526,11 @@ func (rt *Runtime) startHealthLoop(ctx context.Context, name string, health plug
 		rt.healthSpecs = make(map[string]plugin.HealthBlock)
 	}
 	rt.healthSpecs[name] = health
-	go rt.healthLoop(healthCtx, name, health)
+	rt.healthLoops.Add(1)
+	go func() {
+		defer rt.healthLoops.Done()
+		rt.healthLoop(healthCtx, name, health)
+	}()
 }
 
 // stopHealthLoop cancels the plugin's health loop, if one is running, and

@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A plugin-runtime test no longer fails CI intermittently.** A health check
+  already in flight could still write a plugin's state while the test's temp
+  directory was being removed ("directory not empty"). Health loops are now
+  tracked, and the tests wait for them to exit before cleaning up. Test-only;
+  spored's behaviour is unchanged.
 - **`--idle-timeout` works again on Linux: an unused instance now stops**
   (#1093). It never could on any supported AMI, because both idle thresholds
   were 100 KB a minute and an instance nobody is using does more than that on
