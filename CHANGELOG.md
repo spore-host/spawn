@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A plugin's health loop is no longer lost after a failed stop or hibernate**
+  (#1091). A health check that finished just as spored stopped its plugins
+  could record the plugin as running again, overwriting "stopped". If the stop
+  then failed, spored resumed only the plugins recorded as stopped, so that one
+  never got its health loop back, and a later failure went unnoticed.
+
 ## [0.132.0] - 2026-10-17
 
 ### Added
@@ -36,12 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn:price-per-hour`, so a cost computed later from it can say which it was.
 
 ### Fixed
-
-- **A plugin's health loop is no longer lost after a failed stop or hibernate**
-  (#1091). A health check that finished just as spored stopped its plugins
-  could record the plugin as running again, overwriting "stopped". If the stop
-  then failed, spored resumed only the plugins recorded as stopped, so that one
-  never got its health loop back, and a later failure went unnoticed.
 
 - **`spawn reaper deploy` reports an upgraded reaper accurately** (#1086).
   Re-running it on an armed reaper printed "DRY RUN … then arm it" although the
