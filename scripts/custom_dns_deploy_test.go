@@ -14,8 +14,7 @@ import (
 // steps replace whole documents (`--environment`, put-role-policy), so each
 // must be built from what is already deployed. Before #891 neither was:
 // adding a zone made it the DEFAULT_DOMAIN and granted Route53 on it ALONE,
-// which would have revoked the updater's access to spore.host's zone and broken
-// every spore's DNS registration.
+// which on a role this script created revoked every zone added before it.
 //
 // Executed, not string-matched: the test lifts the script's own merge function
 // and zone computation out of the file and runs them with bash.

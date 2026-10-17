@@ -293,8 +293,9 @@ MERGED_ENV=$(printf '%s' "$DEPLOYED_ENV" | merge_lambda_env "${ENV_ARGS[@]}")
 # The Route53 grant covers EVERY zone the updater serves, read from the merged
 # DOMAIN_ZONES — not just this run's --hosted-zone-id. put-role-policy replaces
 # the whole document, so granting only the new zone revoked every zone already
-# deployed: adding a domain to spore.host's shared updater would have broken
-# registration under spore.host for every spore (#891).
+# deployed on a role this script created (#891). (spore.host's live role also has
+# a hand-made Route53DNSUpdate policy for its zone, which would have masked it
+# there; a grant that is only correct because of another one is not correct.)
 ZONE_ARNS=$(printf '%s' "$MERGED_ENV" | python3 -c '
 import json, sys
 zones = json.load(sys.stdin)["Variables"].get("DOMAIN_ZONES", "")
