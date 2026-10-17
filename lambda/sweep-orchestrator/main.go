@@ -25,6 +25,7 @@ import (
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"github.com/spore-host/spawn/pkg/availability"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 // Default configuration for shared infrastructure (with environment variable overrides)
@@ -730,7 +731,7 @@ func sweepRowLifecycleTags(config map[string]interface{}, now time.Time) []ec2ty
 		{Key: aws.String("spawn:managed"), Value: aws.String("true")},
 	}
 	if ttl := getStringParam(config, "ttl", ""); ttl != "" {
-		if d, err := time.ParseDuration(ttl); err == nil && d > 0 {
+		if d, err := ttlpkg.ParseDuration(ttl); err == nil && d > 0 {
 			tags = append(tags, ec2types.Tag{
 				Key:   aws.String("spawn:ttl-deadline"),
 				Value: aws.String(now.Add(d).UTC().Format(time.RFC3339)),

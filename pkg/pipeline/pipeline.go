@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spore-host/spawn/pkg/queue"
+	"github.com/spore-host/spawn/pkg/ttl"
 )
 
 // Pipeline represents a multi-stage workflow configuration
@@ -378,7 +379,7 @@ func (s *Stage) Validate(validStageIDs map[string]bool) error {
 
 	// Validate timeout format if provided
 	if s.Timeout != "" {
-		if _, err := time.ParseDuration(s.Timeout); err != nil {
+		if _, err := ttl.ParseTTL(s.Timeout); err != nil {
 			return fmt.Errorf("invalid timeout format '%s': %w", s.Timeout, err)
 		}
 	}

@@ -402,6 +402,7 @@ func (*LaunchError) Error() string
 func (*LaunchError) Unwrap() error
 func (DisplayPrice) SourceLabel() string
 func (LaunchConfig) HibernationRequested() bool
+func (LaunchConfig) ValidateDurations() error
 func (ManagedResource) IsRunningInstance() bool
 func (ReaperCoverage) Summary() string
 func AccountBase36(accountID string) string

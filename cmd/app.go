@@ -83,7 +83,7 @@ func init() {
 	appLaunchCmd.Flags().StringVar(&appLaunchInstanceType, "instance-type", "", "Override instance type (default: first catalog family + .xlarge)")
 	appLaunchCmd.Flags().StringVar(&appLaunchRegion, "region", "", "AWS region (default: from AWS config)")
 	appLaunchCmd.Flags().BoolVar(&appLaunchSpot, "spot", false, "Use Spot pricing")
-	appLaunchCmd.Flags().StringVar(&appLaunchTTL, "ttl", "", "Hard termination deadline (e.g. 4h, 8h)")
+	appLaunchCmd.Flags().StringVar(&appLaunchTTL, "ttl", "", "Hard termination deadline (e.g. 4h, 8h, 1d)")
 	appLaunchCmd.Flags().StringVar(&appLaunchIdleTimeout, "idle-timeout", "", "Stop when DCV has no clients for this duration (default: catalog default)")
 	appLaunchCmd.Flags().BoolVar(&appLaunchNoOpen, "no-open", false, "Write session file but do not open browser automatically")
 	appLaunchCmd.Flags().StringVar(&appLaunchVersion, "app-version", "", "App container image tag to launch (default: catalog default; see 'spawn app list')")
@@ -184,6 +184,16 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "Launching %s — %s\n", entry.Name, entry.Description)
+
+	// Reject an unparseable --ttl or idle timeout (flag or catalog default)
+	// before any AWS call, with the parser spored uses (#990).
+	idleForCheck := appLaunchIdleTimeout
+	if idleForCheck == "" {
+		idleForCheck = entry.IdleTimeoutDefault
+	}
+	if err := (spawnclient.LaunchConfig{TTL: appLaunchTTL, IdleTimeout: idleForCheck}).ValidateDurations(); err != nil {
+		return err
+	}
 
 	// 2. Create AWS client
 	client, err := spawnclient.NewClient(ctx)

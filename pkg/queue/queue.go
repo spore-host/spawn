@@ -3,6 +3,7 @@ package queue
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/spore-host/spawn/pkg/ttl"
 	"os"
 	"time"
 )
@@ -89,7 +90,7 @@ func ValidateQueue(cfg *QueueConfig) error {
 		if job.Timeout == "" {
 			return fmt.Errorf("timeout is required for job %s", job.JobID)
 		}
-		if _, err := time.ParseDuration(job.Timeout); err != nil {
+		if _, err := ttl.ParseDuration(job.Timeout); err != nil {
 			return fmt.Errorf("invalid timeout format for job %s: %w", job.JobID, err)
 		}
 
@@ -133,7 +134,7 @@ func ValidateQueue(cfg *QueueConfig) error {
 
 	// Validate global timeout
 	if cfg.GlobalTimeout != "" {
-		if _, err := time.ParseDuration(cfg.GlobalTimeout); err != nil {
+		if _, err := ttl.ParseTTL(cfg.GlobalTimeout); err != nil {
 			return fmt.Errorf("invalid global_timeout format: %w", err)
 		}
 	}

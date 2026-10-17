@@ -17,6 +17,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/taskproto"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 	"github.com/spore-host/spawn/pkg/userdata"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
@@ -411,7 +412,7 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 		fmt.Fprintf(out, "Cost limit:   $%.2f (lifecycle.cost_limit)\n", spec.Lifecycle.CostLimit)
 	}
 
-	if d, err := time.ParseDuration(spec.Lifecycle.TTL); err == nil && sized.OnDemandPrice > 0 {
+	if d, err := ttlpkg.ParseDuration(spec.Lifecycle.TTL); err == nil && sized.OnDemandPrice > 0 {
 		fmt.Fprintf(out, "Max cost:     ~$%.2f (on-demand rate × TTL; a completed task usually costs far less)\n", sized.OnDemandPrice*d.Hours())
 	}
 
@@ -663,7 +664,7 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 // waitDeadline returns now+TTL as the wait cutoff, defaulting to a generous cap
 // if the TTL can't be parsed (validation should have caught that).
 func waitDeadline(ttl string) time.Time {
-	d, err := time.ParseDuration(ttl)
+	d, err := ttlpkg.ParseDuration(ttl)
 	if err != nil || d <= 0 {
 		d = 24 * time.Hour
 	}

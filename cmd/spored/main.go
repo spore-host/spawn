@@ -1198,6 +1198,11 @@ func handleConfigGet(key string) error {
 func handleConfigSet(key, value string) error {
 	ctx := context.Background()
 
+	// Validate before the provider, IMDS or any AWS call (#990).
+	if _, _, err := configSetTag(key, value); err != nil {
+		return err
+	}
+
 	prov, err := provider.NewProvider(ctx)
 	if err != nil {
 		return fmt.Errorf("initialize provider: %w", err)
@@ -1231,33 +1236,9 @@ func handleConfigSet(key, value string) error {
 		return handleConfigSetTTL(ctx, ag, instanceID, region, value)
 	}
 
-	// Map key to tag name
-	tagKey := ""
-	switch key {
-	case "idle-timeout":
-		if _, err := time.ParseDuration(value); err != nil && value != "0" {
-			return fmt.Errorf("invalid duration: %s", value)
-		}
-		tagKey = "spawn:idle-timeout"
-	case "on-complete":
-		if value != "terminate" && value != "stop" && value != "hibernate" && value != "" {
-			return fmt.Errorf("on-complete must be: terminate, stop, hibernate, or empty to disable")
-		}
-		tagKey = "spawn:on-complete"
-	case "hibernate":
-		if value != "true" && value != "false" {
-			return fmt.Errorf("hibernate must be: true or false")
-		}
-		tagKey = "spawn:hibernate-on-idle"
-	case "completion-file":
-		tagKey = "spawn:completion-file"
-	case "completion-delay":
-		if _, err := time.ParseDuration(value); err != nil {
-			return fmt.Errorf("invalid duration: %s", value)
-		}
-		tagKey = "spawn:completion-delay"
-	default:
-		return fmt.Errorf("unknown config key: %s", key)
+	tagKey, value, err := configSetTag(key, value)
+	if err != nil {
+		return err
 	}
 
 	// Get EC2 client
@@ -1288,6 +1269,53 @@ func handleConfigSet(key, value string) error {
 
 	fmt.Printf("✓ Configuration updated: %s = %s\n", key, value)
 	return nil
+}
+
+// configSetTag validates a `spored config set <key> <value>` pair and returns
+// the tag it writes and the value to write. Pure, so handleConfigSet can call
+// it before any AWS call, and testable without an instance. Durations use
+// pkg/ttl's shared parser, the one the agent's tag reader uses (#990).
+func configSetTag(key, value string) (tagKey, tagValue string, err error) {
+	switch key {
+	case "ttl":
+		// Written by handleConfigSetTTL, which moves spawn:ttl-deadline too.
+		// The shared parser (#990): "1d" and "2d12h" work, as they do for
+		// `spawn launch --ttl` and `spawn extend`; "0" disables.
+		if value != "0" {
+			if _, err := ttl.ParseTTL(value); err != nil {
+				return "", "", fmt.Errorf("invalid duration: %s: %w", value, err)
+			}
+		}
+		return "spawn:ttl", value, nil
+	case "idle-timeout":
+		// The shared parser (#990), so "1d" is accepted here exactly when the
+		// agent's tag reader (pkg/provider) will honour it. "0" disables.
+		v, err := ttl.TagValue(value)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid duration: %s: %w", value, err)
+		}
+		return "spawn:idle-timeout", v, nil
+	case "on-complete":
+		if value != "terminate" && value != "stop" && value != "hibernate" && value != "" {
+			return "", "", fmt.Errorf("on-complete must be: terminate, stop, hibernate, or empty to disable")
+		}
+		return "spawn:on-complete", value, nil
+	case "hibernate":
+		if value != "true" && value != "false" {
+			return "", "", fmt.Errorf("hibernate must be: true or false")
+		}
+		return "spawn:hibernate-on-idle", value, nil
+	case "completion-file":
+		return "spawn:completion-file", value, nil
+	case "completion-delay":
+		v, err := ttl.TagValue(value)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid duration: %s: %w", value, err)
+		}
+		return "spawn:completion-delay", v, nil
+	default:
+		return "", "", fmt.Errorf("unknown config key: %s", key)
+	}
 }
 
 // handleConfigSetTTL implements `spored config set ttl <value>` (spawn#553).
@@ -1327,9 +1355,12 @@ func handleConfigSetTTL(ctx context.Context, ag *agent.Agent, instanceID, region
 			return fmt.Errorf("remove spawn:ttl-deadline tag: %w", err)
 		}
 	} else {
-		newTTL, err := time.ParseDuration(value)
+		// The shared parser (#990): "1d" and "2d12h" work, as they do for
+		// `spawn launch --ttl` and `spawn extend`. Must be positive; "0" is
+		// the disable case above.
+		newTTL, err := ttl.ParseTTL(value)
 		if err != nil {
-			return fmt.Errorf("invalid duration: %s", value)
+			return fmt.Errorf("invalid duration: %s: %w", value, err)
 		}
 
 		// Refuse rather than write a partial/incoherent update (spawn#553 fix

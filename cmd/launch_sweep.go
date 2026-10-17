@@ -115,6 +115,12 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// an explicit --ttl and stops substituting an unrelated 1h *idle* timeout.
 	appliedControls := applyCLISpendControlsToSweep(paramFormat)
 
+	// Every row's ttl/idle_timeout must parse before anything is launched or
+	// handed to the orchestrator (#990).
+	if err := validateSweepDurations(paramFormat); err != nil {
+		return err
+	}
+
 	// --volume-size used to be dropped on the floor for a sweep too (#544), the
 	// same bug class as #525/#539: it is registered and read on the
 	// single-instance launch path (cmd/launch_config.go) but launch_sweep.go
@@ -760,11 +766,9 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 // row: the row's own value if it has one, otherwise the sweep default. Pass a nil
 // row to read the defaults themselves.
 //
-// A non-string value (`ttl: 3600` rather than `ttl: 1h`) reads as absent, which
-// matches what buildLaunchConfigFromParams does with it — the type assertion
-// there fails and the field stays empty. Agreeing with the parser is the point:
-// it means the --no-detach guard refuses that file loudly instead of letting it
-// launch with a bound the parser quietly dropped.
+// A non-string value (`ttl: 3600` rather than `ttl: 1h`) reads as absent here.
+// It never reaches a launch: validateSweepDurations and
+// buildLaunchConfigFromParams both reject it (#990).
 func sweepRowBound(defaults, row map[string]interface{}) (ttl, idle string) {
 	pick := func(key string) string {
 		for _, m := range []map[string]interface{}{row, defaults} {

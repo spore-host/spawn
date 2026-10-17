@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -15,6 +14,7 @@ import (
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/registry"
 	"github.com/spore-host/spawn/pkg/tagprefix"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 var burstCmd = &cobra.Command{
@@ -194,10 +194,10 @@ type LaunchParams struct {
 }
 
 // validateBurstParams rejects a burst that would launch members spored cannot
-// bound. The TTL must parse with time.ParseDuration because that is how the
+// bound. The TTL must parse with pkg/ttl's shared parser because that is how the
 // shared tag builder (pkg/aws buildTags) computes spawn:ttl-deadline — the tag
-// the TTL reaper enforces. A TTL it cannot parse (e.g. "1d") would write
-// spawn:ttl with no deadline, which the reaper ignores.
+// the TTL reaper enforces — and buildTags refuses a TTL it cannot turn into a
+// deadline (#990). Checking here refuses it before anything launches.
 func validateBurstParams(params *LaunchParams) error {
 	if params.Count < 1 {
 		return fmt.Errorf("--count must be at least 1, got %d", params.Count)
@@ -205,15 +205,11 @@ func validateBurstParams(params *LaunchParams) error {
 	if params.TTL == "" {
 		return fmt.Errorf("--ttl is required: burst instances must have a TTL")
 	}
-	d, err := time.ParseDuration(params.TTL)
-	if err != nil {
-		return fmt.Errorf("--ttl %q: use a duration such as 30m, 2h or 36h: %w", params.TTL, err)
-	}
-	if d <= 0 {
-		return fmt.Errorf("--ttl must be positive, got %q", params.TTL)
+	if _, err := ttlpkg.ParseTTL(params.TTL); err != nil {
+		return fmt.Errorf("--ttl %q: use a duration such as 30m, 2h, 36h or 1d: %w", params.TTL, err)
 	}
 	if params.IdleTimeout != "" {
-		if _, err := time.ParseDuration(params.IdleTimeout); err != nil {
+		if _, err := ttlpkg.ParseTTL(params.IdleTimeout); err != nil {
 			return fmt.Errorf("--idle-timeout %q: use a duration such as 30m or 1h: %w", params.IdleTimeout, err)
 		}
 	}

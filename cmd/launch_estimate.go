@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 	"io"
 	"strings"
 	"time"
@@ -67,7 +68,7 @@ func renderInstanceCostEstimate(w io.Writer, instanceType, region, targetOS stri
 	if ttl == "" {
 		return
 	}
-	d, err := time.ParseDuration(ttl)
+	d, err := ttlpkg.ParseDuration(ttl)
 	if err != nil {
 		return
 	}

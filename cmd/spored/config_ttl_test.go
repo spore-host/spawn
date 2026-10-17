@@ -275,3 +275,32 @@ func TestConfigSetTTL_Shorten_FailWithoutPassWith(t *testing.T) {
 		}
 	})
 }
+
+// #990: `spored config set` validates durations with the shared parser before
+// any AWS call, accepts day units exactly where the agent's tag reader does,
+// and normalizes them so an older reader of the tag agrees.
+func TestConfigSetTag_Durations(t *testing.T) {
+	ok := []struct{ key, in, wantTag, wantVal string }{
+		{"ttl", "1d", "spawn:ttl", "1d"}, // handleConfigSetTTL writes the deadline-derived value
+		{"ttl", "0", "spawn:ttl", "0"},
+		{"idle-timeout", "1d", "spawn:idle-timeout", "24h0m0s"},
+		{"idle-timeout", "30m", "spawn:idle-timeout", "30m"},
+		{"idle-timeout", "0", "spawn:idle-timeout", "0"},
+		{"completion-delay", "45s", "spawn:completion-delay", "45s"},
+	}
+	for _, c := range ok {
+		k, v, err := configSetTag(c.key, c.in)
+		if err != nil || k != c.wantTag || v != c.wantVal {
+			t.Errorf("configSetTag(%s, %s) = %q, %q, %v; want %q, %q", c.key, c.in, k, v, err, c.wantTag, c.wantVal)
+		}
+	}
+	for _, c := range []struct{ key, in string }{
+		{"ttl", "1w"}, {"ttl", "-1h"}, {"ttl", "0s"}, {"ttl", ""},
+		{"idle-timeout", "soon"}, {"idle-timeout", "-5m"},
+		{"completion-delay", "30"},
+	} {
+		if _, _, err := configSetTag(c.key, c.in); err == nil {
+			t.Errorf("configSetTag(%s, %q) accepted an unparseable duration", c.key, c.in)
+		}
+	}
+}

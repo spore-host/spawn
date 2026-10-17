@@ -51,3 +51,19 @@ func TestIsOneTime(t *testing.T) {
 		t.Error("persistent-tagged instance reported one-time")
 	}
 }
+
+// TestNeedsStoppable_DayUnitIdleTimeout: spored reads spawn:idle-timeout with
+// pkg/ttl's day-aware parser (#990), so "1d" arms the idle monitor and its stop.
+// The launch must therefore ask for a persistent request, or EC2 refuses the stop.
+func TestNeedsStoppable_DayUnitIdleTimeout(t *testing.T) {
+	for _, v := range []string{"1d", "2d12h", "30m"} {
+		if !NeedsStoppable(v, "", false, false) {
+			t.Errorf("idle timeout %q: NeedsStoppable = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "0", "garbage"} {
+		if NeedsStoppable(v, "", false, false) {
+			t.Errorf("idle timeout %q: NeedsStoppable = true, want false", v)
+		}
+	}
+}

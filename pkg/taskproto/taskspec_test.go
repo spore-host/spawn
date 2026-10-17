@@ -89,6 +89,8 @@ func TestValidate_Failures(t *testing.T) {
 		{"no command", TaskSpec{TaskID: "t", Lifecycle: Lifecycle{TTL: "1h"}}, "command is required"},
 		{"no ttl", TaskSpec{TaskID: "t", Command: []string{"x"}}, "lifecycle.ttl is required"},
 		{"bad ttl", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "soon"}}, "not a valid duration"},
+		{"zero ttl (#990)", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "0"}}, "not a valid duration"},
+		{"week unit (#990)", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1w"}}, "not a valid duration"},
 		{"bad arch", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Resources: ResourceRequest{Architecture: "sparc"}}, "architecture"},
 		{"bad purchase", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Resources: ResourceRequest{Purchase: "layaway"}}, "purchase"},
 		{"bad on_complete", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h", OnComplete: "explode"}}, "on_complete"},
@@ -217,5 +219,16 @@ func TestValidate_PlacementAndS3ReadWrite(t *testing.T) {
 	}
 	if err := s.Validate(); err != nil {
 		t.Errorf("valid placement/s3_read_write spec rejected: %v", err)
+	}
+}
+
+// #990: lifecycle.ttl uses the shared parser, so day units work here exactly
+// as they do for `spawn launch --ttl` and in spored.
+func TestValidate_TTLDayUnits(t *testing.T) {
+	for _, ttl := range []string{"1d", "2d12h", "4h", "90m"} {
+		spec := TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: ttl}}
+		if err := spec.Validate(); err != nil {
+			t.Errorf("lifecycle.ttl %q: %v", ttl, err)
+		}
 	}
 }

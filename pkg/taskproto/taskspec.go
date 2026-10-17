@@ -14,7 +14,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"time"
+
+	"github.com/spore-host/spawn/pkg/ttl"
 )
 
 // TaskSpec is one unit of work to run on one ephemeral instance.
@@ -245,8 +246,10 @@ func (s *TaskSpec) Validate() error {
 	}
 	if strings.TrimSpace(s.Lifecycle.TTL) == "" {
 		add("lifecycle.ttl is required (e.g. 4h)")
-	} else if _, err := time.ParseDuration(s.Lifecycle.TTL); err != nil {
-		add("lifecycle.ttl %q is not a valid duration", s.Lifecycle.TTL)
+	} else if _, err := ttl.ParseTTL(s.Lifecycle.TTL); err != nil {
+		// The shared parser spored and the TTL reaper use (#990): Go syntax
+		// plus days ("1d", "2d12h"), and positive.
+		add("lifecycle.ttl %q is not a valid duration (e.g. 4h, 90m, 1d): %v", s.Lifecycle.TTL, err)
 	}
 	if s.Lifecycle.OnComplete != "" && !validOnComplete[s.Lifecycle.OnComplete] {
 		add("lifecycle.on_complete %q invalid (want terminate, stop, or hibernate)", s.Lifecycle.OnComplete)

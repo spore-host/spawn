@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
@@ -216,10 +215,16 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 		// spawn:ttl-deadline is writable from the instance and so cannot be the
 		// only bound (#76). Say so here rather than let the user discover it when
 		// the instance disappears early.
-		if d, err := time.ParseDuration(ttl); err == nil {
-			if w := ttlpkg.CeilingWarning(d); w != "" {
-				fmt.Fprintln(os.Stderr, w)
-			}
+		//
+		// Parsed with the shared parser (#990). This used to be
+		// time.ParseDuration, whose failure on "1d" only skipped the warning —
+		// and the launch then went ahead with spawn:ttl=1d and no deadline.
+		d, err := ttlpkg.ParseTTL(ttl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --ttl %q: %w (use a duration such as 8h, 90m, 1d or 2d12h)", ttl, err)
+		}
+		if w := ttlpkg.CeilingWarning(d); w != "" {
+			fmt.Fprintln(os.Stderr, w)
 		}
 	}
 	// --name implies DNS registration; --dns overrides the DNS portion only.
@@ -391,7 +396,30 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 		}
 	}
 
+	// Every lifecycle duration, including those from ~/.spawn/config.yaml
+	// defaults, must parse with the shared parser before anything touches AWS:
+	// a value spored cannot read is silently not enforced (#990).
+	if err := config.ValidateDurations(); err != nil {
+		return nil, err
+	}
+
 	return config, nil
+}
+
+// validateLaunchDurationFlags checks the duration flags of `spawn launch` with
+// the shared parser (#990). runLaunch calls it first, before its first AWS
+// call and before any sweep, batch-queue or wizard branch, so `--ttl 1w` fails
+// in the shell on every launch path. buildLaunchConfig then re-checks the
+// assembled config, which also covers ~/.spawn/config.yaml defaults.
+func validateLaunchDurationFlags() error {
+	return aws.LaunchConfig{
+		TTL:             ttl,
+		IdleTimeout:     idleTimeout,
+		PreStopTimeout:  preStopTimeout,
+		CompletionDelay: completionDelay,
+		WebhookTimeout:  webhookTimeout,
+		FSxTTL:          fsxTTL,
+	}.ValidateDurations()
 }
 
 // encodeUserData gzip-compresses the script and base64-encodes the result.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/spore-host/spawn/pkg/aws"
 	paramparser "github.com/spore-host/spawn/pkg/params"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 // SweepConfig represents a parameter sweep configuration
@@ -253,12 +254,19 @@ func buildLaunchConfigFromParams(base aws.LaunchConfig, defaults, params map[str
 			if b, ok := val.(bool); ok {
 				config.Hibernate = b
 			}
-		case "ttl":
-			if s, ok := val.(string); ok {
-				config.TTL = s
+		case "ttl", "idle_timeout":
+			// Like cost_limit below, these error on a value they cannot use
+			// rather than leaving the field empty (#990). An unparseable or
+			// non-string ttl used to be dropped or, worse, tagged without a
+			// deadline, so `ttl: 1d` launched a row bounded only by the
+			// reaper's 7-day max-age ceiling.
+			s, err := sweepDurationValue(key, val)
+			if err != nil {
+				return config, err
 			}
-		case "idle_timeout":
-			if s, ok := val.(string); ok {
+			if key == "ttl" {
+				config.TTL = s
+			} else {
 				config.IdleTimeout = s
 			}
 		case "cost_limit":
@@ -371,6 +379,46 @@ func buildLaunchConfigFromParams(base aws.LaunchConfig, defaults, params map[str
 	}
 
 	return config, nil
+}
+
+// sweepDurationValue returns a param-file ttl/idle_timeout value, or an error
+// when it is not a string the shared parser (pkg/ttl) accepts as a positive
+// duration (#990). YAML `ttl: 3600` is an int, not a duration, and is rejected
+// rather than read as "no TTL".
+func sweepDurationValue(key string, val interface{}) (string, error) {
+	s, ok := val.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a duration string such as \"8h\" or \"1d\", got %v (%T)", key, val, val)
+	}
+	if _, err := ttlpkg.ParseTTL(s); err != nil {
+		return "", fmt.Errorf("invalid %s %q: %w (use a duration such as 8h, 90m, 1d or 2d12h)", key, s, err)
+	}
+	return s, nil
+}
+
+// validateSweepDurations checks every ttl/idle_timeout in a param file —
+// defaults: and each row — before anything is launched or uploaded for the
+// Lambda orchestrator, which parses them with the same parser (#990). All the
+// problems are reported at once.
+func validateSweepDurations(paramFormat *ParamFileFormat) error {
+	var problems []string
+	check := func(where string, m map[string]interface{}) {
+		for _, key := range []string{"ttl", "idle_timeout"} {
+			if v, ok := m[key]; ok {
+				if _, err := sweepDurationValue(key, v); err != nil {
+					problems = append(problems, where+": "+err.Error())
+				}
+			}
+		}
+	}
+	check("defaults", paramFormat.Defaults)
+	for i, row := range paramFormat.Params {
+		check(fmt.Sprintf("row %d", i), row)
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid durations in the param file:\n  %s", strings.Join(problems, "\n  "))
+	}
+	return nil
 }
 
 // generateSweepID creates a unique sweep identifier

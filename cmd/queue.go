@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -20,6 +19,7 @@ import (
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/queue"
 	"github.com/spore-host/spawn/pkg/sshkey"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 var (
@@ -641,7 +641,7 @@ func runQueueTemplateInit(cmd *cobra.Command, args []string) error {
 		timeout := prompt("  Timeout (e.g., 5m, 1h, 30s)", "10m")
 
 		// Validate timeout format
-		if _, err := time.ParseDuration(timeout); err != nil {
+		if _, err := ttlpkg.ParseDuration(timeout); err != nil {
 			fmt.Fprintf(os.Stderr, "  ⚠️  Invalid timeout format, using default 10m\n")
 			timeout = "10m"
 		}
@@ -709,7 +709,7 @@ func runQueueTemplateInit(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "--- Global Settings ---\n\n")
 
 	globalTimeout := prompt("Global timeout (max queue execution time)", "2h")
-	if _, err := time.ParseDuration(globalTimeout); err != nil {
+	if _, err := ttlpkg.ParseDuration(globalTimeout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Invalid timeout format, using default 2h\n")
 		globalTimeout = "2h"
 	}

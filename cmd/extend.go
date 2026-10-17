@@ -6,8 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
-	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -88,8 +86,10 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	instanceIdentifier := args[0]
 	newTTL := args[1]
 
-	// Validate TTL format
-	if err := validateTTL(newTTL); err != nil {
+	// Parse the duration before any AWS call, with the shared parser spored
+	// and the reaper use (#990), so "1d" works and "1w" fails in the shell.
+	extendDuration, err := parseExtendDuration(newTTL)
+	if err != nil {
 		return fmt.Errorf("invalid TTL format: %w", err)
 	}
 
@@ -117,11 +117,6 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	// Extend the absolute deadline, anchored to the original launch time.
 	// TTL is always relative to first launch — extending adds to the current deadline,
 	// not to the current clock time.
-	extendDuration, err := time.ParseDuration(newTTL)
-	if err != nil {
-		return fmt.Errorf("invalid TTL duration %q: %w", newTTL, err)
-	}
-
 	tags, newDeadline, costDecision := extensionTags(instance, newTTL, extendDuration, time.Now(), extendCostLimit, extendKeepCostLimit)
 
 	// A persistent Spot request's end date was fixed at launch to the old
@@ -160,8 +155,9 @@ func runExtend(cmd *cobra.Command, args []string) error {
 }
 
 func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit.AuditLogger) error {
-	// Validate TTL format
-	if err := validateTTL(newTTL); err != nil {
+	// Parse before any AWS call and before anything is written (#990).
+	extendDuration, err := parseExtendDuration(newTTL)
+	if err != nil {
 		return fmt.Errorf("invalid TTL format: %w", err)
 	}
 
@@ -192,14 +188,6 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 			return fmt.Errorf("no instances found with job-array-id: %s", extendJobArrayID)
 		}
 		return fmt.Errorf("no instances found with job-array-name: %s", extendJobArrayName)
-	}
-
-	// Parse once, up front, so a duration validateTTL accepts but
-	// time.ParseDuration does not (e.g. "1d") fails before anything is written,
-	// as it does on the single-instance path.
-	extendDuration, err := time.ParseDuration(newTTL)
-	if err != nil {
-		return fmt.Errorf("invalid TTL duration %q: %w", newTTL, err)
 	}
 
 	// Display summary
@@ -383,7 +371,7 @@ func computeExtendedTTLTags(instance *aws.InstanceInfo, newTTL string, extendDur
 	}
 	if newDeadline.IsZero() {
 		// Older instance without deadline tag — best-effort from current TTL
-		if cur, err := time.ParseDuration(instance.TTL); err == nil {
+		if cur, err := ttlpkg.ParseDuration(instance.TTL); err == nil {
 			newDeadline = now.Add(cur).Add(extendDuration)
 		} else {
 			newDeadline = now.Add(extendDuration)
@@ -405,47 +393,30 @@ func computeExtendedTTLTags(instance *aws.InstanceInfo, newTTL string, extendDur
 	return ttlpkg.Tags(instance.LaunchTime, newDeadline), newDeadline
 }
 
-func validateTTL(ttl string) error {
-	// TTL format: <number><unit> where unit is s, m, h, or d
-	// Also supports multiple components like "3h30m"
-	pattern := regexp.MustCompile(`^(\d+[smhd])+$`)
-	if !pattern.MatchString(ttl) {
-		return fmt.Errorf("TTL must be in format <number><unit> (e.g., 2h, 30m, 1d)")
+// validateTTL reports whether s is a valid `spawn extend` duration.
+func validateTTL(s string) error {
+	_, err := parseExtendDuration(s)
+	return err
+}
+
+// parseExtendDuration parses a `spawn extend` duration with pkg/ttl's shared
+// parser, the one launch, spored and the TTL reaper use (#990): Go duration
+// syntax plus days ("2h", "90m", "1d", "2d12h", "1.5h"), and it must be
+// positive.
+//
+// This used to be a regex that accepted "1d" followed by time.ParseDuration,
+// which does not, so `spawn extend <id> 1d` passed validation and then failed
+// (and, on the job-array path before #983, wrote spawn:ttl=1d with no
+// deadline).
+func parseExtendDuration(s string) (time.Duration, error) {
+	d, err := ttlpkg.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("TTL must be in format <number><unit> (e.g., 2h, 30m, 1d, 2d12h): %w", err)
 	}
-
-	// Parse each component to ensure it's valid
-	componentPattern := regexp.MustCompile(`(\d+)([smhd])`)
-	matches := componentPattern.FindAllStringSubmatch(ttl, -1)
-
-	if len(matches) == 0 {
-		return fmt.Errorf("no valid duration components found")
+	if d <= 0 {
+		return 0, fmt.Errorf("TTL must be greater than 0")
 	}
-
-	totalSeconds := 0
-	for _, match := range matches {
-		value, err := strconv.Atoi(match[1])
-		if err != nil {
-			return fmt.Errorf("invalid number: %s", match[1])
-		}
-
-		unit := match[2]
-		switch unit {
-		case "s":
-			totalSeconds += value
-		case "m":
-			totalSeconds += value * 60
-		case "h":
-			totalSeconds += value * 3600
-		case "d":
-			totalSeconds += value * 86400
-		}
-	}
-
-	if totalSeconds <= 0 {
-		return fmt.Errorf("TTL must be greater than 0")
-	}
-
-	return nil
+	return d, nil
 }
 
 func triggerReload(instance *aws.InstanceInfo) error {

@@ -33,7 +33,9 @@ regions for instances tagged `spawn:managed=true` (running **and** stopped — a
 idle-stopped instance runs no daemon, so only the reaper will ever reclaim it,
 [#71]) and terminates any where **either**:
 
-1. `now > spawn:ttl-deadline` (the authoritative, launch-anchored deadline), or
+1. `now > spawn:ttl-deadline` (the authoritative, launch-anchored deadline) —
+   or, when that tag is missing or unparseable, `now > spawn:launch-time +
+   spawn:ttl`, the deadline spored itself enforces in that case ([#990]), or
 2. `now - spawn:launch-time > REAPER_MAX_AGE` — a hard ceiling that fires even
    for `--no-timeout` / missing / unparseable deadlines.
 
@@ -83,7 +85,7 @@ there and appending its ARN to the list.
 | `EC2_ROLE_ARN` | (unset) | Back-compat: a single role ARN, folded into the list |
 | `EC2_EXTERNAL_ID` | `spawn-ttl-reaper` | ExternalId for the assume-role |
 | `REAPER_REGIONS` | 11 release-bucket regions | Comma-separated regions to scan |
-| `REAPER_MAX_AGE` | `168h` (7d) | Hard max-age ceiling (Go duration) |
+| `REAPER_MAX_AGE` | `168h` (7d) | Hard max-age ceiling (Go duration, or days: `7d`) |
 | `REAPER_DRY_RUN` | `true` | When true, log `WOULD reap` + notify without terminating |
 | `REAPER_NOTIFY_URL` | (empty) | Slack-incoming-webhook URL; every reap is posted here |
 | `REAPER_DNS_ZONE_ID` | (empty) | Route53 hosted zone ID; with `REAPER_DNS_DOMAIN`, the reaper deletes a reaped instance's DNS records (#247) |
@@ -407,6 +409,7 @@ nothing — by design, since a partial live set could orphan a healthy record.
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71
 [#76]: https://github.com/spore-host/spawn/issues/76
+[#990]: https://github.com/spore-host/spawn/issues/990
 [#187]: https://github.com/spore-host/spawn/issues/187
 [#247]: https://github.com/spore-host/spawn/issues/247
 [#438]: https://github.com/spore-host/spawn/issues/438

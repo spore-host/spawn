@@ -9,7 +9,9 @@
 // BACKSTOP, not a replacement: spored remains the primary, graceful enforcer.
 //
 // It terminates an instance when EITHER:
-//   - now > spawn:ttl-deadline (the authoritative launch-anchored deadline), OR
+//   - now > spawn:ttl-deadline (the authoritative launch-anchored deadline) —
+//     or, with no usable deadline tag, now > spawn:launch-time + spawn:ttl,
+//     the deadline spored enforces in that case (#990), OR
 //   - now - spawn:launch-time > REAPER_MAX_AGE (a hard ceiling that fires even
 //     for --no-timeout / missing / far-future deadlines — defense against
 //     escape hatches and tag tampering).
@@ -59,6 +61,7 @@ import (
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 	"github.com/spore-host/spore-host/lambda/accountlifecycle"
 )
 
@@ -618,7 +621,7 @@ func parseMaxAge(env string) time.Duration {
 	if env == "" {
 		return defaultMaxAge
 	}
-	d, err := time.ParseDuration(env)
+	d, err := ttlpkg.ParseDuration(env)
 	if err != nil || d <= 0 {
 		log.Printf("invalid REAPER_MAX_AGE %q, using default %s", env, defaultMaxAge)
 		return defaultMaxAge
@@ -630,7 +633,7 @@ func parseGracefulWait(env string) time.Duration {
 	if env == "" {
 		return defaultGracefulWait
 	}
-	d, err := time.ParseDuration(env)
+	d, err := ttlpkg.ParseDuration(env)
 	if err != nil || d <= 0 {
 		log.Printf("invalid REAPER_GRACEFUL_MAX_WAIT %q, using default %s", env, defaultGracefulWait)
 		return defaultGracefulWait
@@ -740,7 +743,7 @@ type candidate struct {
 	name     string
 	account  string
 	region   string
-	reason   string // human-readable: "ttl-deadline" or "max-age"
+	reason   string // human-readable: "ttl-deadline", "ttl" (launch + spawn:ttl, no deadline tag) or "max-age"
 	deadline string // the deadline/launch-time that triggered it
 	age      time.Duration
 
@@ -958,14 +961,16 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 		dnsDomain:     tags[tagprefix.Tag("dns-domain")],
 	}
 	if pt := tags[tagprefix.Tag("pre-stop-timeout")]; pt != "" {
-		if d, err := time.ParseDuration(pt); err == nil {
+		if d, err := ttlpkg.ParseDuration(pt); err == nil {
 			base.preStopTimeout = d
 		}
 	}
 
 	// 1. spawn:ttl-deadline — the authoritative, launch-anchored deadline.
+	haveDeadline := false
 	if dl := tags[tagprefix.Tag("ttl-deadline")]; dl != "" {
 		if deadline, err := time.Parse(time.RFC3339, dl); err == nil {
+			haveDeadline = true
 			if now.After(deadline) {
 				c := base
 				c.reason, c.deadline, c.age = "ttl-deadline", dl, now.Sub(deadline)
@@ -989,7 +994,21 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 			// exceeds the default ceiling so this is not a surprise, and an
 			// operator who wants longer-lived instances raises MaxAge explicitly.
 		}
-		log.Printf("instance %s: unparseable ttl-deadline %q, falling back to max-age", id, dl)
+		log.Printf("instance %s: unparseable ttl-deadline %q, falling back to spawn:ttl, then max-age", id, dl)
+	}
+
+	// 1b. No usable deadline, but a spawn:ttl: the deadline spored itself
+	// enforces in that case (pkg/agent synthesizes launch-time + spawn:ttl),
+	// parsed with the same shared parser (#990). Without this the reaper and
+	// spored disagreed: `spawn launch --ttl 1d` used to tag spawn:ttl=1d and no
+	// deadline, and a STOPPED instance — which runs no spored — was then
+	// bounded only by the max-age ceiling below, days after its TTL.
+	if !haveDeadline {
+		if deadline, ok := ttlFallbackDeadline(tags, inst.LaunchTime); ok && now.After(deadline) {
+			c := base
+			c.reason, c.deadline, c.age = "ttl", deadline.UTC().Format(time.RFC3339), now.Sub(deadline)
+			return c, true
+		}
 	}
 
 	// 2. Hard max-age ceiling — fires for --no-timeout / missing / unparseable
@@ -1949,6 +1968,26 @@ func tagMap(tags []ec2types.Tag) map[string]string {
 // launchTime prefers the spawn:launch-time tag (RFC3339, anchored at launch and
 // stable across stop/start) and falls back to the EC2 API LaunchTime, which is
 // reset on each start and so is only a loose lower bound.
+// ttlFallbackDeadline is spawn:launch-time (else EC2 LaunchTime) + spawn:ttl,
+// the deadline spored synthesizes for an instance without spawn:ttl-deadline
+// (pkg/agent.NewAgent). ok is false when there is no positive spawn:ttl —
+// "0" is how `spored config set ttl 0` disables the TTL — or no launch time.
+func ttlFallbackDeadline(tags map[string]string, apiLaunch *time.Time) (time.Time, bool) {
+	raw := tags[tagprefix.Tag("ttl")]
+	if raw == "" {
+		return time.Time{}, false
+	}
+	d, err := ttlpkg.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return time.Time{}, false
+	}
+	launch := launchTime(tags[tagprefix.Tag("launch-time")], apiLaunch)
+	if launch.IsZero() {
+		return time.Time{}, false
+	}
+	return launch.Add(d), true
+}
+
 func launchTime(tagVal string, apiLaunch *time.Time) time.Time {
 	if tagVal != "" {
 		if t, err := time.Parse(time.RFC3339, tagVal); err == nil {

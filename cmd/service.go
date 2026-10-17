@@ -21,6 +21,7 @@ import (
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/service"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 // `spawn service` is the DCV-free long-lived-HTTP-service verb (spawn#409).
@@ -123,6 +124,11 @@ https://github.com/spore-host/spawn/blob/main/docs/service-readiness-contract.md
 		// renders an unusable plan is worse than no preview, since the whole point
 		// of --dry-run is to catch this class of mistake for free.
 		if err := validateServiceUpload(serviceUpload); err != nil {
+			return err
+		}
+		// Same reasoning, and before any AWS call: a TTL or idle timeout spored
+		// cannot parse is not enforced (#990).
+		if err := (aws.LaunchConfig{TTL: serviceTTL, IdleTimeout: serviceIdleTimeout}).ValidateDurations(); err != nil {
 			return err
 		}
 
@@ -235,7 +241,7 @@ func renderServiceDryRun(ctx context.Context, out io.Writer, args []string, addr
 			fmt.Fprintf(out, "Rate:        unavailable — %v\n", err)
 		} else {
 			fmt.Fprintf(out, "Rate:        $%.4f/hr on-demand (%s)\n", dp.PricePerHour, dp.SourceLabel())
-			if d, err := time.ParseDuration(cfg.TTL); err == nil && d > 0 {
+			if d, err := ttlpkg.ParseDuration(cfg.TTL); err == nil && d > 0 {
 				fmt.Fprintf(out, "Max cost:    ~$%.2f (rate × ttl)\n", dp.PricePerHour*d.Hours())
 			}
 		}

@@ -1152,7 +1152,7 @@ func stageRegion(stageDef *pipeline.Stage) string {
 // covers only a definition that skipped it.
 func stageTimeout(stageDef *pipeline.Stage) time.Duration {
 	if stageDef != nil && stageDef.Timeout != "" {
-		if d, err := time.ParseDuration(stageDef.Timeout); err == nil && d > 0 {
+		if d, err := ttl.ParseDuration(stageDef.Timeout); err == nil && d > 0 {
 			return d
 		}
 	}
