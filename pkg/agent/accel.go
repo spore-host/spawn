@@ -223,6 +223,7 @@ var runAccelTool = func(ctx context.Context, firstLine bool, name string, args .
 	}
 	ctx, cancel := context.WithTimeout(ctx, accelToolTimeout)
 	defer cancel()
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name and args come only from accelUtilisation's switch: four literal tool names (nvidia-smi, hl-smi, rocm-smi, neuron-monitor) with literal flags, chosen by the detected hardware family; no user or config input reaches here, and exec runs no shell.
 	cmd := exec.CommandContext(ctx, name, args...)
 	if !firstLine {
 		return cmd.Output()
