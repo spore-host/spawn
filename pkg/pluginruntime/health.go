@@ -39,14 +39,14 @@ func (rt *Runtime) healthLoop(ctx context.Context, name string, health plugin.He
 				log.Printf("Plugin %s: health check failed (%d/%d): %v",
 					name, failures, healthFailThreshold, err)
 				if failures >= healthFailThreshold {
-					rt.setPluginStatus(name, plugin.StatusDegraded, err.Error())
+					rt.setPluginStatus(ctx, name, plugin.StatusDegraded, err.Error())
 				}
 			} else {
 				if failures > 0 {
 					log.Printf("Plugin %s: health check recovered after %d failure(s)", name, failures)
 				}
 				failures = 0
-				rt.recordHealthOK(name)
+				rt.recordHealthOK(ctx, name)
 			}
 		}
 	}
@@ -63,9 +63,12 @@ func (rt *Runtime) runHealthCheck(ctx context.Context, name string, steps []plug
 }
 
 // recordHealthOK stamps the last_health time and clears degraded status.
-func (rt *Runtime) recordHealthOK(name string) {
+func (rt *Runtime) recordHealthOK(ctx context.Context, name string) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if loopStopped(ctx) {
+		return
+	}
 	st, err := rt.store.Load(name)
 	if err != nil {
 		return
@@ -80,9 +83,12 @@ func (rt *Runtime) recordHealthOK(name string) {
 }
 
 // setPluginStatus updates the status and optional error message in persisted state.
-func (rt *Runtime) setPluginStatus(name string, status plugin.PluginStatus, errMsg string) {
+func (rt *Runtime) setPluginStatus(ctx context.Context, name string, status plugin.PluginStatus, errMsg string) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if loopStopped(ctx) {
+		return
+	}
 	st, err := rt.store.Load(name)
 	if err != nil {
 		return
@@ -91,3 +97,14 @@ func (rt *Runtime) setPluginStatus(name string, status plugin.PluginStatus, errM
 	st.Error = errMsg
 	_ = rt.store.Save(st)
 }
+
+// loopStopped reports whether the health loop that ctx belongs to has been
+// stopped. Call it holding rt.mu: stopHealthLoop cancels under that lock, so a
+// tick that gets the lock after it sees the cancel and writes nothing.
+//
+// Without it, a tick blocked on rt.mu while StopAll stopped the loop got the
+// lock next, loaded "running" before StopAll saved "stopped" (that save is not
+// under rt.mu), and wrote "running" back over it. The plugin then read as
+// running after the agent shutdown, and ResumeStopped, which only resumes what
+// is recorded as stopped, never restored its health loop (#979).
+func loopStopped(ctx context.Context) bool { return ctx.Err() != nil }
