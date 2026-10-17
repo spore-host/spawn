@@ -487,6 +487,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registers the DNS name and job-array entry again, so the running instance
   keeps its name. This also applies to `--on-complete stop` and `hibernate`.
   The pre-stop hook still runs only once.
+- **A GPU that cannot be read no longer counts as an idle GPU, and Trainium,
+  Inferentia, Gaudi and AMD accelerators are now checked** (#954). When
+  `nvidia-smi` failed (for example a driver that no longer matched the kernel
+  after an update, or "No devices were found"), or printed only `[N/A]`, the
+  idle check read the GPU as 0% busy, so an instance running a GPU job with
+  little CPU or network could be stopped. Accelerators other than NVIDIA were
+  never measured. spored now finds accelerators from the hardware, not from
+  which tools are installed. It measures NVIDIA GPUs with `nvidia-smi`, AMD
+  GPUs with `rocm-smi`, Gaudi with `hl-smi`, and Trainium and Inferentia with
+  `neuron-monitor`. If an accelerator is present but its tool is missing,
+  fails, or prints something spored cannot read, it is treated as busy, and
+  spored logs one warning saying idle-stop will not trigger. A Deep Learning
+  AMI on an instance with no GPU is unaffected, although it has `nvidia-smi`.
 
 ## [0.130.0] - 2026-10-16
 

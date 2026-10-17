@@ -210,3 +210,9 @@ func sysBootTime() time.Time {
 // errEmptyProcStat: /proc/stat had no lines. Linux-only (#923): declared in the
 // OS-agnostic agent.go it was dead code on every other GOOS.
 var errEmptyProcStat = fmt.Errorf("empty cpu stat")
+
+// sysAcceleratorFamilies finds GPUs and Gaudi by PCI vendor and class, and
+// Neuron by its device nodes (accel.go, #954).
+func sysAcceleratorFamilies() []string {
+	return detectAccelerators("/sys/bus/pci/devices", "/dev")
+}

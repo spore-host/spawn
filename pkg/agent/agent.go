@@ -12,7 +12,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -49,28 +48,29 @@ type Agent struct {
 	notifier              *Notifier // Slack lifecycle notifications (nil if not configured)
 	startTime             time.Time
 	lastActivityTime      time.Time
-	preStopDone           bool      // guards against running pre-stop hook more than once
-	taskFlushDone         bool      // guards against writing the task terminal record twice (#632)
-	spotWebhookFired      bool      // fire-once guard for the spot-interruption webhook (#228); the spot monitor re-enters every 5s
-	prevCPUIdle           int64     // /proc/stat idle jiffies at last getCPUUsage call
-	prevCPUTotal          int64     // /proc/stat total jiffies at last getCPUUsage call
-	lastSessionTagWrite   time.Time // throttle spawn:logged-in-count tag writes
-	lastComputeTagWrite   time.Time // throttle spawn:compute-seconds tag writes
-	lastHeartbeatTagWrite time.Time // throttle spawn:last-heartbeat tag writes (#497)
-	nextDNSRefresh        time.Time // when the DNS lease is next renewed (pkg/dns/lease.go)
-	lastDNSStatus         string    // last spawn:dns-status written, so renewal only re-tags on change
-	computeSecondsBase    int64     // compute-seconds already accumulated before this spored start
-	liveClock             bool      // TotalComputeSeconds counts real running time (daemon, or a query that adopted its clock, #896)
-	prevNetRx             int64     // /proc/net/dev RX bytes at last getNetworkBytes call
-	prevNetTx             int64     // /proc/net/dev TX bytes at last getNetworkBytes call
-	netSampled            bool      // prevNetRx/prevNetTx hold a real sample (a counter can legitimately be 0, #919)
-	netUnknownWarned      bool      // "network cannot be measured" logged once, not every tick (#919)
-	prevDiskBytes         int64     // whole-disk bytes read+written at the last diskIOBytes call (#937)
-	diskSampled           bool      // prevDiskBytes holds a real sample (#937)
-	diskUnknownWarned     bool      // "disk I/O cannot be measured" logged once, not every tick (#937)
-	idleWarned            bool      // send idle_warning notification only once
-	idleActionFailures    int       // consecutive failed idle stop/hibernate attempts (#948)
-	idleActionRetryAt     time.Time // no idle stop/hibernate attempt before this (#948)
+	preStopDone           bool            // guards against running pre-stop hook more than once
+	taskFlushDone         bool            // guards against writing the task terminal record twice (#632)
+	spotWebhookFired      bool            // fire-once guard for the spot-interruption webhook (#228); the spot monitor re-enters every 5s
+	prevCPUIdle           int64           // /proc/stat idle jiffies at last getCPUUsage call
+	prevCPUTotal          int64           // /proc/stat total jiffies at last getCPUUsage call
+	lastSessionTagWrite   time.Time       // throttle spawn:logged-in-count tag writes
+	lastComputeTagWrite   time.Time       // throttle spawn:compute-seconds tag writes
+	lastHeartbeatTagWrite time.Time       // throttle spawn:last-heartbeat tag writes (#497)
+	nextDNSRefresh        time.Time       // when the DNS lease is next renewed (pkg/dns/lease.go)
+	lastDNSStatus         string          // last spawn:dns-status written, so renewal only re-tags on change
+	computeSecondsBase    int64           // compute-seconds already accumulated before this spored start
+	liveClock             bool            // TotalComputeSeconds counts real running time (daemon, or a query that adopted its clock, #896)
+	prevNetRx             int64           // /proc/net/dev RX bytes at last getNetworkBytes call
+	prevNetTx             int64           // /proc/net/dev TX bytes at last getNetworkBytes call
+	netSampled            bool            // prevNetRx/prevNetTx hold a real sample (a counter can legitimately be 0, #919)
+	netUnknownWarned      bool            // "network cannot be measured" logged once, not every tick (#919)
+	prevDiskBytes         int64           // whole-disk bytes read+written at the last diskIOBytes call (#937)
+	diskSampled           bool            // prevDiskBytes holds a real sample (#937)
+	diskUnknownWarned     bool            // "disk I/O cannot be measured" logged once, not every tick (#937)
+	idleWarned            bool            // send idle_warning notification only once
+	accelUnknownWarned    map[string]bool // accelerator families warned "cannot be measured", once each (#954)
+	idleActionFailures    int             // consecutive failed idle stop/hibernate attempts (#948)
+	idleActionRetryAt     time.Time       // no idle stop/hibernate attempt before this (#948)
 
 	// idleMu guards idleSnap and lastActivityTime. The monitor loop writes them;
 	// the Prometheus scrape, the spot-interruption goroutine and status read
@@ -1306,8 +1306,12 @@ func (a *Agent) idleDecision(r idleSnapshot) (bool, string) {
 	}
 
 	// Check GPU utilization
-	gpuUtilization := a.getGPUUtilization()
-	if gpuUtilization > 5 { // 5% GPU usage threshold
+	// GPU, Neuron, Gaudi: unknown is active, as for the counters (#954).
+	gpuUtilization, gpuMeasured, gpuWhy := a.gpuUtilization()
+	if !gpuMeasured {
+		return false, fmt.Sprintf("Not idle: accelerator utilization could not be measured (%s); assuming active", gpuWhy)
+	}
+	if gpuUtilization > idleGPUPercent {
 		return false, fmt.Sprintf("Not idle: GPU utilization %.2f%%", gpuUtilization)
 	}
 
@@ -1495,36 +1499,6 @@ func (a *Agent) diskIOBytes() (bytes int64, measured bool, why string) {
 		return diskAssumedActive, false, "disk counters went backwards"
 	}
 	return delta, true, ""
-}
-
-func (a *Agent) getGPUUtilization() float64 {
-	// Check if nvidia-smi is available
-	_, err := exec.LookPath("nvidia-smi")
-	if err != nil {
-		// No GPU or nvidia-smi not installed
-		return 0
-	}
-
-	// Query GPU utilization
-	// nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits
-	cmd := exec.Command("nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits")
-	output, err := cmd.Output()
-	if err != nil {
-		return 0
-	}
-
-	// Parse output (can have multiple GPUs, one per line)
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	var maxUtilization float64
-
-	for _, line := range lines {
-		utilization, err := strconv.ParseFloat(strings.TrimSpace(line), 64)
-		if err == nil && utilization > maxUtilization {
-			maxUtilization = utilization
-		}
-	}
-
-	return maxUtilization
 }
 
 // getDCVConnectionCount returns the DCV session's connected-client count, or -1

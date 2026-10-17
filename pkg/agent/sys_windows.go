@@ -224,3 +224,13 @@ func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) 
 // spawn:compute-seconds checkpoint there, and says so (#896).
 func sysComputeClockPath() string { return "" }
 func sysBootTime() time.Time      { return time.Time{} }
+
+// sysAcceleratorFamilies reports an NVIDIA GPU when nvidia-smi is installed: the
+// NVIDIA driver installs it into System32, and Windows instances have no
+// /sys to inspect. Other accelerators have no Windows driver on EC2 (#954).
+func sysAcceleratorFamilies() []string {
+	if _, err := exec.LookPath("nvidia-smi"); err == nil {
+		return []string{accelNVIDIA}
+	}
+	return nil
+}
