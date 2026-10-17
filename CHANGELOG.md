@@ -65,11 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacement it skips the command and stops there, so storage mounts, the
   container, custom user data and the MPI, batch-queue and pool-worker scripts
   don't run either; spored then retires the instance. Declared `--plugin`s are
-  still written before the stop, as spored reads them only at startup. Anything short of
-  a definite "replacement" runs the workload as before: an unreadable answer is
-  retried for up to a minute (not at all on an IAM refusal), then the workload
-  starts. Holding instead would leave every original stuck whenever EC2 or IMDS
-  is slow or a custom role can't read tags. A replacement that gets past the
+  unaffected: they are written before spored starts (#1023), ahead of the stop.
+  Anything short of a definite "replacement" runs the workload as before: an
+  unreadable answer is retried for up to a minute (not at all on an IAM
+  refusal), then the workload starts. Holding instead would leave every
+  original stuck whenever EC2 or IMDS is slow or a custom role can't read tags. A replacement that gets past the
   check is still retired by spored and reported by the reaper. The check usually
   answers on its first call, but it does add an EC2 round trip before the
   post-spored steps of every launch. The Windows bootstrap starts no workload

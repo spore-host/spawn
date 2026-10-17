@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,6 +41,9 @@ type spotSandbox struct {
 
 func newSpotSandbox(t *testing.T, stub sporedStub) *spotSandbox {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: executes the Linux user-data bootstrap (/run/spawn, /etc/spawn) under bash with stubbed spored and su (#1002)")
+	}
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
