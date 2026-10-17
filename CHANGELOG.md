@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The TTL reaper now cleans up orphaned persistent Spot requests** (#950).
+  When a `--spot` instance with a stop-based lifecycle is terminated outside
+  spawn (the EC2 console, `aws ec2 terminate-instances`), its persistent
+  request reopens and EC2 launches a replacement. That replacement carries no
+  spawn tags, so `spawn list` and the reaper never see it. A new sweep finds
+  spawn-tagged persistent requests and cancels any whose instance is gone,
+  replaced or past its deadline. It then terminates the replacement, always
+  cancelling first. The sweep never cancels the request of a live original
+  instance on the request's own deadline tag: `spawn extend` leaves that tag
+  stale, and cancelling would leave the instance unable to restart after its
+  next stop. The reaper's grant is tag-scoped, so an untagged replacement is
+  outside it. The sweep still cancels its request, then raises the alarmed
+  `SPOT REPLACEMENT NOT TERMINATED` with the command to end the instance, every
+  run until someone does. The sweep is staged like the network-resource sweep:
+  `SpotRequests` / `REAPER_SPOT_REQUESTS` is `report` by default, `reap` to act,
+  or `off`. It needs `ec2:DescribeSpotInstanceRequests`, newly granted to the
+  scan-self policy, the SAM template and the cross-account
+  `spawn-ttl-reaper-ec2` role. An account whose role lacks it raises
+  `REAPER SPOT REQUESTS UNREACHABLE`.
+- **Persistent Spot requests now expire at the instance's TTL deadline**
+  (#950). The deadline is sent as `ValidUntil`; with no TTL it is launch plus
+  the reaper's 7-day ceiling. Before, a request left open had no end date and
+  could keep launching replacements indefinitely. The instance and the request
+  carry `spawn:spot-valid-until`. After launch the request is also tagged with
+  `spawn:original-instance-id`, so the reaper can recognise a replacement even
+  if it inherited the tags. EC2 cannot move a request's end date. So
+  `spawn extend` warns when the new deadline is past it: from then on, a stop
+  may not be restartable. And `spawn start` names the expired request as the
+  likely cause when EC2 refuses to start the instance.
+
 ### Fixed
 
 - **`--on-idle hibernate` and `--on-complete hibernate` now hibernate** (#949).

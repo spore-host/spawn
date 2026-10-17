@@ -38,6 +38,9 @@ var apiServicePrefix = map[string]string{
 	// sweep needs (#685). Kept separate from ec2API so the instance scan's narrow
 	// interface, and every fake implementing it, stays untouched.
 	"netResource": "ec2",
+	// spotRequestAPI is the orphaned-Spot-request sweep's EC2 slice (#950),
+	// separate for the same reason.
+	"spotRequest": "ec2",
 	// registryAPI is accountlifecycle, not an AWS service: its ListAccounts reads
 	// DynamoDB through another package's client, so it grants nothing here.
 	"registry": "",

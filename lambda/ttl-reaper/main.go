@@ -88,6 +88,9 @@ type account struct {
 	// needs (spawn#685). Separate from ec2For so the instance scan's narrow
 	// two-method interface — and every test fake implementing it — is untouched.
 	netFor func(region string) netResourceAPI
+	// spotFor is the EC2 slice the orphaned-Spot-request sweep needs (#950),
+	// separate for the same reason as netFor.
+	spotFor func(region string) spotRequestAPI
 }
 
 // ec2API / fsxAPI are the slices of the EC2 and FSx clients the reaper uses.
@@ -140,6 +143,11 @@ type reaper struct {
 	// One of netResourcesOff / netResourcesReport / netResourcesReap. dryRun still
 	// wins: a dry run never deletes, whatever this says.
 	netResources string
+
+	// Orphaned persistent Spot requests (#950): one of spotRequestsOff /
+	// spotRequestsReport / spotRequestsReap, staged like netResources and for
+	// the same reason. dryRun still wins.
+	spotRequests string
 
 	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
@@ -249,6 +257,7 @@ func configure() {
 		expireDNS:    strings.EqualFold(os.Getenv("REAPER_DNS_EXPIRE"), "true"),
 		expireLeases: strings.EqualFold(os.Getenv("REAPER_DNS_LEASE_EXPIRE"), "true"),
 		netResources: parseNetResources(os.Getenv("REAPER_NET_RESOURCES")),
+		spotRequests: parseSpotRequests(os.Getenv("REAPER_SPOT_REQUESTS")),
 	}
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
 	// client when a zone is configured, so a deployment without DNS teardown
@@ -281,8 +290,8 @@ func configure() {
 		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
 		r.expireLeases = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -319,6 +328,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				return ec2.NewFromConfig(c)
 			},
 			netFor: func(region string) netResourceAPI {
+				c := base.Copy()
+				c.Region = region
+				return ec2.NewFromConfig(c)
+			},
+			spotFor: func(region string) spotRequestAPI {
 				c := base.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
@@ -366,6 +380,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ec2.NewFromConfig(c)
 			},
+			spotFor: func(region string) spotRequestAPI {
+				c := acctCfg.Copy()
+				c.Region = region
+				return ec2.NewFromConfig(c)
+			},
 			ssmFor: func(region string) *ssm.Client {
 				c := acctCfg.Copy()
 				c.Region = region
@@ -392,6 +411,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				return ec2.NewFromConfig(c)
 			},
 			netFor: func(region string) netResourceAPI {
+				c := base.Copy()
+				c.Region = region
+				return ec2.NewFromConfig(c)
+			},
+			spotFor: func(region string) spotRequestAPI {
 				c := base.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
@@ -535,6 +559,20 @@ type Summary struct {
 	// per-VPC quota, which bites at launch time.
 	NetReaped  int `json:"net_reaped"`
 	NetSkipped int `json:"net_skipped"` // would-reap (dry-run), still referenced, or age unknown
+
+	// Orphaned persistent Spot requests (#950).
+	SpotRequestsScanned        int `json:"spot_requests_scanned"`
+	SpotRequestsCancelled      int `json:"spot_requests_cancelled"`
+	SpotRequestsSkipped        int `json:"spot_requests_skipped"` // would-act (report mode / dry-run)
+	SpotReplacementsTerminated int `json:"spot_replacements_terminated"`
+	// SpotReplacementsStranded counts replacements the reaper could not
+	// terminate, normally because an untagged instance is outside its
+	// tag-scoped grant. Each is still billing; see sentinelSpotReplacementStranded.
+	SpotReplacementsStranded int `json:"spot_replacements_stranded"`
+	// SpotAccountsDenied counts accounts whose role refused every
+	// DescribeSpotInstanceRequests: a spawn-ttl-reaper-ec2 stack not yet
+	// redeployed with the #950 grant.
+	SpotAccountsDenied int `json:"spot_accounts_denied"`
 
 	// DNS sweep (#438): orphaned Route53 A-records reconciled against live IPs.
 	DNSScanned int `json:"dns_scanned"` // A-records examined under the account subdomains
@@ -682,6 +720,11 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 			// per-VPC quota that bites at LAUNCH time — and a rejected --mpi
 			// launch used to leave one of each behind on every attempt.
 			r.reapNetResourcesRegion(ctx, acct, region, start, &sum, &outcome)
+
+			// Orphaned persistent Spot requests (#950): after the instance
+			// reaps above, which cancel their own requests first, so what is
+			// left is a request whose instance was ended outside spawn.
+			r.reapSpotRequestsRegion(ctx, acct, region, start, &sum, &outcome)
 		}
 
 		// DNS reconciliation sweep (#438): after scanning all regions for this

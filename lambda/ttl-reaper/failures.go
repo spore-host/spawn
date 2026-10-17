@@ -85,6 +85,21 @@ const (
 	// still never have a filesystem reclaimed. Sharing the EC2 signal would let a
 	// successful EC2 scan mask this entirely, which is how #212 stayed invisible.
 	sentinelFSxDenied = "REAPER FSX UNREACHABLE"
+
+	// sentinelSpotRequestsDenied means an account's role refused every
+	// DescribeSpotInstanceRequests (#950), so orphaned persistent Spot requests
+	// there are not being found, and each can keep launching replacements. Its
+	// own signal for the FSx reason: it is a separate grant, so the instance
+	// scan can be working perfectly. The usual cause is a spawn-ttl-reaper-ec2
+	// stack not yet redeployed with the grant.
+	sentinelSpotRequestsDenied = "REAPER SPOT REQUESTS UNREACHABLE"
+
+	// sentinelSpotReplacementStranded means a persistent Spot request spawn made
+	// launched a replacement instance (its original was terminated outside
+	// spawn) that the reaper could not terminate. The request has been
+	// cancelled, so nothing more launches, but the instance bills until a human
+	// ends it. It is logged every run until then.
+	sentinelSpotReplacementStranded = "SPOT REPLACEMENT NOT TERMINATED"
 )
 
 // scanFailure is how a single AWS call failed, coarsely. The distinction is
@@ -164,6 +179,28 @@ type accountOutcome struct {
 	fsxRegions int
 	fsxReached int
 	fsxDenied  int
+
+	// The Spot-request sweep (#950), tracked like FSx: a separate grant.
+	spotRegions int
+	spotReached int
+	spotDenied  int
+}
+
+// recordSpot folds one region's DescribeSpotInstanceRequests result in.
+func (o *accountOutcome) recordSpot(err error) {
+	o.spotRegions++
+	switch classifyScanError(err) {
+	case failureNone:
+		o.spotReached++
+	case failureDenied:
+		o.spotDenied++
+	}
+}
+
+// spotDeniedEverywhere reports whether every Spot-request describe for this
+// account was refused and none succeeded.
+func (o *accountOutcome) spotDeniedEverywhere() bool {
+	return o.spotRegions > 0 && o.spotReached == 0 && o.spotDenied > 0
 }
 
 // record folds one region's instance-scan result in.
@@ -264,6 +301,12 @@ func reportOutcomes(outcomes []accountOutcome, sum *Summary, registryStatus func
 				sentinelFSxDenied, o.label, o.fsxRegions,
 				map[bool]string{true: "SUCCEEDED", false: "also failed"}[o.reached > 0],
 				registryHint(o.accountID, registryStatus))
+		}
+
+		if o.spotDeniedEverywhere() {
+			sum.SpotAccountsDenied++
+			log.Printf("%s: account %s refused every DescribeSpotInstanceRequests in all %d region(s) — redeploy its spawn-ttl-reaper-ec2 stack with the #950 grant. Until then orphaned persistent Spot requests there are not found, and each can keep launching replacement instances%s",
+				sentinelSpotRequestsDenied, o.label, o.spotRegions, registryHint(o.accountID, registryStatus))
 		}
 
 		if !o.deniedEverywhere() {

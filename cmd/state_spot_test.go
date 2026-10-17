@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -147,5 +148,23 @@ func TestIdleActionDescription(t *testing.T) {
 	block := lifecycleProtectionBlock(inst)
 	if strings.Contains(block, "stops the instance when idle") || !strings.Contains(block, "Idle timeout:          15m (cannot act") {
 		t.Errorf("status block misdescribes a one-time Spot idle timeout:\n%s", block)
+	}
+}
+
+// #950: a stopped persistent-Spot instance whose request passed the ValidUntil
+// spawn set at launch can't be started through it. EC2's error doesn't say
+// so; spawn start does.
+func TestStartFailedError_NamesAnExpiredSpotRequest(t *testing.T) {
+	vu := time.Date(2026, 10, 15, 15, 0, 0, 0, time.UTC)
+	inst := runningSpot(spotrequest.TypePersistent)
+	inst.Tags[spotrequest.ValidUntilTag] = vu.Format(time.RFC3339)
+	cause := errors.New("IncorrectSpotRequestState")
+
+	err := startFailedError(inst, cause, vu.Add(time.Hour))
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "Spot request expired at 2026-10-15 15:00 UTC") {
+		t.Errorf("after expiry: %v", err)
+	}
+	if err := startFailedError(inst, cause, vu.Add(-time.Hour)); strings.Contains(err.Error(), "expired") {
+		t.Errorf("before expiry the request is not the cause: %v", err)
 	}
 }
