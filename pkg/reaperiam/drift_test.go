@@ -41,6 +41,9 @@ var apiServicePrefix = map[string]string{
 	// spotRequestAPI is the orphaned-Spot-request sweep's EC2 slice (#950),
 	// separate for the same reason.
 	"spotRequest": "ec2",
+	// route53ZoneAPI is the one startup call that learns an extra zone's domain
+	// from its ID (#1065), separate so the route53API fakes need not grow.
+	"route53Zone": "route53",
 	// registryAPI is accountlifecycle, not an AWS service: its ListAccounts reads
 	// DynamoDB through another package's client, so it grants nothing here.
 	"registry": "",
@@ -173,6 +176,9 @@ var grantedElsewhere = map[string]string{
 	// FSx, where a hosted zone does not apply.
 	"route53:ChangeResourceRecordSets": "granted by template.yaml on the base credentials, scoped to DnsZoneId",
 	"route53:ListResourceRecordSets":   "granted by template.yaml on the base credentials, scoped to DnsZoneId",
+	// Called once per DnsExtraZoneIds entry at startup to read the zone's domain
+	// (#1065); granted in the same conditional statement as the extra zones.
+	"route53:GetHostedZone": "granted by template.yaml on the base credentials, scoped to DnsExtraZoneIds",
 }
 
 // TestPolicyCoversEveryReaperAPICall is the structural end of the drift class.

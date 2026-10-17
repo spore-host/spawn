@@ -62,6 +62,7 @@ SCAN_SELF?=false
 ROLE_ARNS?=arn:aws:iam::435415984226:role/spawn-ttl-reaper-ec2
 DNS_ZONE_ID?=
 DNS_DOMAIN?=
+DNS_EXTRA_ZONE_IDS?=
 DNS_SWEEP?=false
 # DNS expiry (#466): deletes records, so it is passed explicitly for the same reason
 # as DNS_SWEEP above — an omitted parameter is unreachable from here. Off by default.
@@ -99,6 +100,7 @@ PARAM_MAP = \
 	RoleArns:ROLE_ARNS \
 	DnsZoneId:DNS_ZONE_ID \
 	DnsDomain:DNS_DOMAIN \
+	DnsExtraZoneIds:DNS_EXTRA_ZONE_IDS \
 	DnsSweep:DNS_SWEEP \
 	DnsExpire:DNS_EXPIRE \
 	DnsLeaseExpire:DNS_LEASE_EXPIRE \
@@ -210,7 +212,7 @@ deploy: build
 	@# off — but never NotifyUrl, which is a Slack webhook secret. These are read
 	@# back from the MERGED file, so this shows what will actually be sent rather
 	@# than what this Makefile happens to default to.
-	@awk -F': ' '/^(DryRun|ScanSelf|DnsSweep|DnsExpire|DnsLeaseExpire|NetResources|SpotRequests|AlarmsEnabled|DnsZoneId|DnsDomain|AlarmTopicArn|MaxAge|Schedule|Version):/ \
+	@awk -F': ' '/^(DryRun|ScanSelf|DnsSweep|DnsExpire|DnsLeaseExpire|NetResources|SpotRequests|AlarmsEnabled|DnsZoneId|DnsDomain|DnsExtraZoneIds|AlarmTopicArn|MaxAge|Schedule|Version):/ \
 		{ printf "  %s %s\n", $$1, $$2 }' $(PARAMS_FILE)
 	sam deploy \
 		--template-file template.yaml \

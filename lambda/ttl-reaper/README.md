@@ -88,6 +88,7 @@ there and appending its ARN to the list.
 | `REAPER_NOTIFY_URL` | (empty) | Slack-incoming-webhook URL; every reap is posted here |
 | `REAPER_DNS_ZONE_ID` | (empty) | Route53 hosted zone ID; with `REAPER_DNS_DOMAIN`, the reaper deletes a reaped instance's DNS records (#247) |
 | `REAPER_DNS_DOMAIN` | (empty) | Domain for the zone above (e.g. `spore.host`); both empty = DNS teardown disabled |
+| `REAPER_DNS_EXTRA_ZONE_IDS` | (empty) | Comma-separated further hosted zone IDs to cover (#1065): custom zones spores register in with `--dns-domain` (#891). Each zone's domain is read from Route53 at startup. Teardown deletes in the zone the instance's `spawn:dns-domain` names (else the primary); the sweep, the unmanaged-subdomain report and lease expiry walk every zone. Needs the two above. Template parameter `DnsExtraZoneIds` / make variable `DNS_EXTRA_ZONE_IDS` |
 | `REAPER_DNS_SWEEP` | `false` | With a zone configured, also run a **DNS reconciliation sweep** (#438): delete `{base36}.{domain}` A-records whose IP has no live instance — catches records orphaned by abrupt exits the #247 teardown can't. Honors `REAPER_DRY_RUN`. Also emits the **unmanaged-subdomain** report (#457) |
 | `REAPER_DNS_EXPIRE` | `false` | With the sweep on, **delete** the A-records under an unmanaged subdomain whose account the portal registry has proven `dormant` or `offboarded` ([#466]). Requires `REAPER_DNS_SWEEP` (the walk runs inside the sweep) and honors `REAPER_DRY_RUN`. Read the report before enabling — see [DNS expiry](#dns-expiry-466) |
 | `REAPER_DNS_LEASE_EXPIRE` | `false` | With the sweep on, **delete** an A-record under an account subdomain this reaper does **not** cover when its owner has stopped renewing its DNS lease for longer than `pkg/dns.LeaseMaxAge` (6h), plus the lease itself, and any lease whose A-record is already gone. The only backstop for a record left by an abruptly terminated instance in an account the reaper holds no credentials in. Records with no lease (every spored before leases) and records in covered accounts are never touched. Requires `REAPER_DNS_SWEEP`, honors `REAPER_DRY_RUN`. See [DNS leases](#dns-leases) |
@@ -170,6 +171,8 @@ DNS knobs are needed:
 make deploy DRY_RUN=false ROLE_ARNS='...' \
   DNS_ZONE_ID=Z0341053304H0DQXF6U4X DNS_DOMAIN=spore.host DNS_SWEEP=true
 ```
+
+To also cover custom zones (#1065), add `DNS_EXTRA_ZONE_IDS=<zone-id>[,<zone-id>…]`.
 
 `ROLE_ARNS` must list **every** account that has records under the zone. The sweep
 is per-account (it derives each `{base36}` subdomain from the account ID), so an
