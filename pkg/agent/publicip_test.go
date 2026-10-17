@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -187,6 +188,9 @@ func TestNewAgentPluginRuntimeRendersTheCurrentIP(t *testing.T) {
 
 // ... and end to end: a step installed after the resume writes the new IP.
 func TestPluginStepAfterResumeGetsTheNewIP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("plugins are Linux-only: spored refuses them on a Windows spore (#1001)")
+	}
 	a := newTestAgent(t, &provider.Config{})
 	hermeticTicks(a)
 	a.attachPluginRuntime(pluginruntime.NewRuntimeWithStore(plugin.NewDiskStateStore(t.TempDir()), a.identity, ""))
