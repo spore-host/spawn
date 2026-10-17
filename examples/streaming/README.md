@@ -66,6 +66,19 @@ Each instance automatically gets a peer discovery file at `/etc/spawn/pipeline-p
 }
 ```
 
+### Network and regions
+
+The orchestrator puts a streaming pipeline's instances in a security group
+that admits TCP 50000-60000 and SSH, from the group's own members only. Pick
+`port` values in that range.
+
+**Streaming stages must run in the same region.** Each region has its own
+pipeline security group, and its stages run in that region's default VPC. Peer
+discovery publishes private IPs, and nothing connects one region's VPC to
+another's. `spawn pipeline validate` therefore rejects a `stream`-mode
+`data_input` whose `source_stage` is in another region (#956). Use `"mode":
+"s3"` between regions.
+
 ### Network Protocol
 
 These examples use a simple length-prefixed protocol:
@@ -216,7 +229,12 @@ for upstream in upstream_instances:
 
 1. **Use enhanced networking** - Instance types with ENA (c5, m5, p3, etc.)
 2. **Use placement groups** - For minimum latency within same AZ
-3. **Enable EFA** - For multi-instance MPI workloads (p4d, p5, c5n)
+3. **Enable EFA** - For multi-instance MPI workloads (p4d, p5, c5n). With
+   `"efa_enabled": true`, the stage's instances get an EFA network interface
+   and a cluster placement group, and the pipeline's group admits all traffic
+   between them. `spawn pipeline launch` checks that the instance type supports
+   EFA in the stage's region before it creates anything. Only the primary
+   network card gets an EFA interface, as with `spawn launch --efa`.
 4. **Tune TCP buffers**:
    ```bash
    sysctl -w net.core.rmem_max=134217728
@@ -301,7 +319,6 @@ wireshark capture.pcap
 
 ## See Also
 
-- [Pipeline Definition Reference](../../docs/pipeline-definition.md)
-- [Streaming Mode Guide](../../docs/streaming.md)
+- [Pipeline examples and the S3 data layout](../pipelines/README.md)
 - [TCP Helpers](../../pkg/streaming/tcp.go)
 - [Peer Discovery](../../pkg/pipeline/peer_discovery.go)

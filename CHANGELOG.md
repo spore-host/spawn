@@ -21,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn:dns-domain` names. A zone it cannot read is logged as not covered, and
   a spore in an uncovered zone is reported rather than guessed at. Deployments
   that don't set the parameter behave exactly as before.
-
 - **The TTL reaper now cleans up orphaned persistent Spot requests** (#950).
   When a `--spot` instance with a stop-based lifecycle is terminated outside
   spawn (the EC2 console, `aws ec2 terminate-instances`), its persistent
@@ -92,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field to reach the users registered for the original. Nobody registers the
   replacement's own id, so without it the bot could post only to channel
   webhooks.
+- `pkg/aws.EFANetworkInterface`, the RunInstances network interface that
+  attaches an EFA, shared by `spawn launch --efa` and pipeline EFA stages
+  (#956). This is an addition to the public `pkg/aws` surface.
 
 ### Fixed
 
@@ -234,13 +236,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now reads `/models/0/best.h5`. Stage instances download `spored` at boot, so
   this takes effect once `spored` is released. Stages that are already running
   keep the old layout.
+- **`efa_enabled` pipeline stages get an EFA interface** (#956). The
+  orchestrator added only the cluster placement group, so the stage's instances
+  had an ordinary ENA interface and `fi_info -p efa` found nothing. They are now
+  launched with an EFA network interface, built by the same code as
+  `spawn launch --efa`. The interface carries the pipeline's security group,
+  which in a region with an EFA stage now admits all traffic from itself, as EFA
+  requires. The group is created for EFA pipelines even when nothing streams.
+  `spawn pipeline launch` checks, before creating anything, that each EFA
+  stage's instance type supports EFA in its region. `ml-training.json` used
+  `p3.8xlarge`, which has no EFA, and now uses `p3dn.24xlarge`. The
+  `spawn-pipeline-orchestrator` Lambda has to be redeployed.
+- **`spawn pipeline validate` rejects streaming between stages in different
+  regions** (#956). Such a pipeline launched and then could not connect. Each
+  region's stages run in their own default VPC and security group, and nothing
+  connects them. A `stream`-mode `data_input` whose source stage is in another
+  region is now an error that says to use `s3` mode or one region. Cross-region
+  networking is not implemented.
 
 ### Security
 
 - **A streaming pipeline's security group no longer opens SSH to the internet**
   (#929). It allowed tcp/22 from `0.0.0.0/0`. SSH, like the streaming ports, is
   now allowed only from the pipeline's own instances (the group itself).
-
 - **The SAM-deployed TTL reaper's `ScanSelf=true` policy no longer grants
   unconditioned `ssm:SendCommand`** (#985). `lambda/ttl-reaper/template.yaml`
   kept its own copy of the scan-self permissions, and it had drifted from the

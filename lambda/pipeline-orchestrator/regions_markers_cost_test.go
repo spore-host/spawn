@@ -145,8 +145,8 @@ func TestNetworkResourcesAreCreatedAndUsedInEachStagesRegion(t *testing.T) {
 		st := def.GetStage(stageID)
 		in := buildStageRunInstancesInput(state, st, &pipeline.StageState{StageID: stageID}, 0, "ami-x", "ud", time.Now())
 		want := state.SecurityGroups[st.Region]
-		if len(in.SecurityGroupIds) != 1 || in.SecurityGroupIds[0] != want {
-			t.Errorf("stage %s (%s) launched with security groups %v, want [%s] from its own region", stageID, st.Region, in.SecurityGroupIds, want)
+		if got := launchGroups(in); len(got) != 1 || got[0] != want {
+			t.Errorf("stage %s (%s) launched with security groups %v, want [%s] from its own region", stageID, st.Region, got, want)
 		}
 	}
 	trainIn := buildStageRunInstancesInput(state, def.GetStage("train"), &pipeline.StageState{StageID: "train"}, 0, "ami-x", "ud", time.Now())
@@ -164,6 +164,15 @@ func TestNetworkResourcesAreCreatedAndUsedInEachStagesRegion(t *testing.T) {
 	if !f.has("us-west-2 delete-pg spawn-pipeline-pl-net") {
 		t.Errorf("placement group not deleted in us-west-2; calls %v", f.calls)
 	}
+}
+
+// launchGroups is the security groups a RunInstances request puts the instance
+// in: instance-level, or on its network interface (EFA stages, #956).
+func launchGroups(in *ec2.RunInstancesInput) []string {
+	if len(in.NetworkInterfaces) > 0 {
+		return in.NetworkInterfaces[0].Groups
+	}
+	return in.SecurityGroupIds
 }
 
 // #929: nothing in the streaming group is open to an address range. SSH was

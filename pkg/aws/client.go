@@ -569,23 +569,9 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 
 	// Add network configuration
 	if launchConfig.EFAEnabled {
-		// EFA requires specific network interface configuration
-		netInterface := types.InstanceNetworkInterfaceSpecification{
-			DeviceIndex:              aws.Int32(0),
-			AssociatePublicIpAddress: aws.Bool(true),
-			DeleteOnTermination:      aws.Bool(true),
-			InterfaceType:            aws.String("efa"), // EFA interface type
+		input.NetworkInterfaces = []types.InstanceNetworkInterfaceSpecification{
+			EFANetworkInterface(launchConfig.SubnetID, launchConfig.SecurityGroupIDs),
 		}
-
-		if launchConfig.SubnetID != "" {
-			netInterface.SubnetId = aws.String(launchConfig.SubnetID)
-		}
-
-		if len(launchConfig.SecurityGroupIDs) > 0 {
-			netInterface.Groups = launchConfig.SecurityGroupIDs
-		}
-
-		input.NetworkInterfaces = []types.InstanceNetworkInterfaceSpecification{netInterface}
 	} else {
 		// Always request a public IP via a NetworkInterface spec — this works
 		// even when the subnet has MapPublicIpOnLaunch=false (fixes #308).
