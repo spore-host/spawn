@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/provider"
@@ -38,5 +40,33 @@ func TestNewNotifier_PlatformDefault(t *testing.T) {
 func TestNewNotifier_NilWhenNoURL(t *testing.T) {
 	if n := NewNotifier(&provider.Config{NotifyPlatform: "discord"}, &provider.Identity{}); n != nil {
 		t.Error("expected nil Notifier when NotifyURL is empty")
+	}
+}
+
+// A Spot replacement's notification names the original instance (#1007), so
+// the bot can reach the users registered for it; every other notification
+// omits the field.
+func TestNotifierOriginalInstanceID(t *testing.T) {
+	base := NewNotifier(&provider.Config{NotifyURL: "https://x"}, &provider.Identity{InstanceID: "i-repl"})
+
+	body, _ := json.Marshal(base.request("ttl_warning", "", ""))
+	if strings.Contains(string(body), "original_instance_id") {
+		t.Errorf("an ordinary notification carries original_instance_id: %s", body)
+	}
+
+	r := base.WithOriginalInstance("i-orig").request("spot_replacement_retired", "d", "")
+	if r.OriginalInstanceID != "i-orig" || r.InstanceID != "i-repl" {
+		t.Errorf("request = %+v, want original i-orig and instance i-repl", r)
+	}
+	body, _ = json.Marshal(r)
+	if !strings.Contains(string(body), `"original_instance_id":"i-orig"`) {
+		t.Errorf("wire body lacks original_instance_id: %s", body)
+	}
+	if base.originalInstanceID != "" {
+		t.Error("WithOriginalInstance modified the receiver")
+	}
+	var nilN *Notifier
+	if nilN.WithOriginalInstance("i-x") != nil {
+		t.Error("WithOriginalInstance on nil must stay nil")
 	}
 }

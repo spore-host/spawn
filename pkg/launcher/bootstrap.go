@@ -203,6 +203,10 @@ LOCAL_SSH_KEY_BASE64=%s
 	// ship without any of it (GHSA-3x4q-99gh-fxhx).
 	script += sporedinstall.VerifiedInstallFunc()
 
+	// The Spot-replacement check the workload starts are gated on (#1007).
+	// Defined here, above the body, because the body's --command block calls it.
+	script += spotReplacementCheckFunc
+
 	// Embed the --command workload directly in user-data (#214/#246) instead of
 	// the 256-char-capped spawn:command tag. Written BEFORE linuxBootstrapBody so
 	// the file exists when the body's command-exec block reads it. A single-quoted
@@ -281,6 +285,15 @@ echo "Plugin declarations written: %d plugin(s)"
 
 	script += linuxBootstrapBody
 
+	// On a Spot replacement, stop here (#1007): spored is running and retires
+	// the instance, and nothing below this point (storage, the container,
+	// custom user data, and the MPI, queue-runner and pool-worker scripts
+	// callers append after this script) should start a workload on it.
+	//
+	// The plugin declarations are already written, above the body (#1023), so
+	// this check's EC2 round trip cannot make spored start without them.
+	script += spotReplacementStopScript
+
 	// Mount attached storage BEFORE the user's script, so the workload sees the
 	// volumes already live (#166). The storage script does its own mkdir + mount;
 	// keep `set -e` paused around it so a mount hiccup can't abort the whole
@@ -340,6 +353,66 @@ fi
 
 	return script, nil
 }
+
+// spotReplacementCheckFunc defines spawn_is_spot_replacement, which the
+// bootstrap calls before it starts any workload (#1007). It returns 0 only when
+// `spored is-spot-replacement` says this instance is a replacement EC2 launched
+// from a leaked spawn persistent Spot request (#995): such an instance boots
+// this same user data and would otherwise re-run the user's workload, side
+// effects included, before spored shuts it down.
+//
+// Every other outcome returns 1, so the workload runs. That covers "not a
+// replacement" (exit 1), "unknown" (exit 2, after spored's own bounded retry),
+// a spored without the subcommand (cobra exits 1), a missing binary, and a hang
+// cut off by timeout. Failing open is deliberate. Holding on "unknown" would
+// strand a real original whenever EC2 or IMDS is slow or its role cannot read
+// tags, and an original is far more common than a replacement. A replacement
+// that slips through still meets spored's own check, which retires it, and the
+// TTL reaper's alarm.
+//
+// Only definitive answers are cached, in /run/spawn (tmpfs, so a reboot asks
+// again), so the second caller does not pay for a second check.
+const spotReplacementCheckFunc = `
+# Spot replacement check (#1007); see pkg/launcher.spotReplacementCheckFunc.
+spawn_is_spot_replacement() {
+    local cache=/run/spawn/spot-replacement rc
+    if [ -s "$cache" ]; then
+        rc=$(cat "$cache")
+    else
+        if [ ! -x /usr/local/bin/spored ]; then
+            echo "spawn: spored missing; cannot check for a Spot replacement, running the workload" >&2
+            return 1
+        fi
+        rc=0
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 120 /usr/local/bin/spored is-spot-replacement >&2 || rc=$?
+        else
+            /usr/local/bin/spored is-spot-replacement >&2 || rc=$?
+        fi
+        case "$rc" in
+            0|1) mkdir -p /run/spawn && echo "$rc" > "$cache" ;;
+        esac
+    fi
+    case "$rc" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) echo "spawn: could not tell whether this is a Spot replacement (exit $rc); running the workload, as an original would" >&2
+           return 1 ;;
+    esac
+}
+`
+
+// spotReplacementStopScript ends the bootstrap on a Spot replacement, right
+// after spored has started (#1007). spored retires the instance; everything
+// after this point starts or prepares a workload.
+const spotReplacementStopScript = `
+# Spot replacement (#1007): spored is running and will cancel the request and
+# shut this instance down. Start nothing else.
+if spawn_is_spot_replacement; then
+    echo "⏭️  Spot replacement: skipping storage, the container, MPI, the task runner and custom user data; spored retires this instance (#1007)"
+    exit 0
+fi
+`
 
 // linuxBootstrapBody is the static, tag-driven remainder of the bootstrap. It
 // reads all behavior (session-timeout, job-array/sweep env, spawn:command,
@@ -716,6 +789,16 @@ EOFCMD
     # is the spored#65 failure (never block the ticker startup path) and is worse
     # than the bug this fixes. The subshell gives us the exit code without waiting.
     (
+        # A Spot replacement re-runs this user data, so without this it would
+        # re-run the user's workload, side effects and all, while spored works
+        # out that it is a replacement and shuts it down (#1007). Inside the
+        # backgrounded subshell, so the check never delays spored's start.
+        # Skipping writes no SPAWN_COMPLETE: nothing ran, so nothing completed.
+        if spawn_is_spot_replacement; then
+            echo "⏭️  --command NOT started: this instance is a Spot replacement; spored retires it (#1007)" | tee -a /var/log/spawn-command.log
+            exit 0
+        fi
+
         # Wait for prerequisites before running the workload (#668, #664).
         #
         # This MUST be inside the backgrounded subshell. Waiting out here would

@@ -66,6 +66,10 @@ type Detection struct {
 	RequestTags map[string]string
 	// Reason says why, for the log.
 	Reason string
+	// Err is the read error behind a VerdictUnknown, when there was one, so a
+	// caller can tell an IAM refusal (no retry will help) from a transient
+	// failure.
+	Err error
 }
 
 // ReplacementAPI is the slice of the EC2 client [DetectReplacement] uses.
@@ -98,7 +102,7 @@ func DetectReplacement(ctx context.Context, api ReplacementAPI, instanceID strin
 	}
 	out, err := api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{instanceID}})
 	if err != nil {
-		return Detection{Verdict: VerdictUnknown, Reason: fmt.Sprintf("describe own instance: %v", err)}
+		return Detection{Verdict: VerdictUnknown, Reason: fmt.Sprintf("describe own instance: %v", err), Err: err}
 	}
 	var self *types.Instance
 	for ri := range out.Reservations {
@@ -127,7 +131,7 @@ func DetectReplacement(ctx context.Context, api ReplacementAPI, instanceID strin
 		Filters: []types.Filter{{Name: aws.String("resource-id"), Values: []string{reqID}}},
 	})
 	if err != nil {
-		d.Verdict, d.Reason = VerdictUnknown, fmt.Sprintf("read tags of Spot request %s: %v", reqID, err)
+		d.Verdict, d.Reason, d.Err = VerdictUnknown, fmt.Sprintf("read tags of Spot request %s: %v", reqID, err), err
 		return d
 	}
 	tags := make(map[string]string, len(tagsOut.Tags))

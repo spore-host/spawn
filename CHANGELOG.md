@@ -56,6 +56,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   specification can't carry a shutdown behaviour, an OS shutdown may stop the
   replacement rather than terminate it. A stopped replacement bills only for
   EBS, can't restart with its request cancelled, and the reaper still reports it.
+- **A Spot replacement no longer re-runs your workload** (#1007). The
+  replacement boots the original's user data, so it used to start `--command`
+  again from the beginning, side effects included, while spored was still
+  deciding to retire it. The Linux bootstrap now asks the new
+  `spored is-spot-replacement` (exit 0 replacement, 1 not, 2 unknown) before it
+  starts `--command` or `spawn task` work, and again after spored starts. On a
+  replacement it skips the command and stops there, so storage mounts, the
+  container, custom user data and the MPI, batch-queue and pool-worker scripts
+  don't run either; spored then retires the instance. Declared `--plugin`s are
+  unaffected: they are written before spored starts (#1023), ahead of the stop.
+  Anything short of a definite "replacement" runs the workload as before: an
+  unreadable answer is retried for up to a minute (not at all on an IAM
+  refusal), then the workload starts. Holding instead would leave every
+  original stuck whenever EC2 or IMDS is slow or a custom role can't read tags. A replacement that gets past the
+  check is still retired by spored and reported by the reaper. The check usually
+  answers on its first call, but it does add an EC2 round trip before the
+  post-spored steps of every launch. The Windows bootstrap starts no workload
+  (it doesn't run `--command` at all), so it has nothing to gate.
+- **The `spot_replacement_retired` notification now names the original
+  instance** (#1007). It carries `original_instance_id`. spore-bot uses that
+  field to reach the users registered for the original. Nobody registers the
+  replacement's own id, so without it the bot could post only to channel
+  webhooks.
 
 ### Fixed
 

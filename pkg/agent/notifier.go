@@ -31,6 +31,11 @@ type notifyRequest struct {
 	Region                    string `json:"region"`
 	DNSName                   string `json:"dns_name,omitempty"`
 	Detail                    string `json:"detail,omitempty"`
+	// OriginalInstanceID is set only for spot_replacement_retired (#995,
+	// #1007): the instance a Spot replacement was launched for. The bot DMs
+	// the users registered for that instance, since nobody registers the
+	// replacement's own id.
+	OriginalInstanceID string `json:"original_instance_id,omitempty"`
 }
 
 // Notifier sends lifecycle event notifications to the spore-bot Lambda.
@@ -45,8 +50,11 @@ type Notifier struct {
 	instanceName string
 	region       string
 	dnsName      string
-	imdsClient   *imds.Client
-	httpClient   *http.Client
+	// originalInstanceID, when set, is sent as original_instance_id; see
+	// WithOriginalInstance.
+	originalInstanceID string
+	imdsClient         *imds.Client
+	httpClient         *http.Client
 }
 
 // NewNotifier creates a Notifier from the agent config and provider identity.
@@ -88,6 +96,18 @@ func NewNotifier(cfg *provider.Config, identity *provider.Identity) *Notifier {
 	}
 }
 
+// WithOriginalInstance returns a copy of n whose notifications name id as the
+// instance they are about (original_instance_id). Used by a Spot replacement,
+// whose own instance id nobody registered with the bot (#1007). Nil-safe.
+func (n *Notifier) WithOriginalInstance(id string) *Notifier {
+	if n == nil {
+		return nil
+	}
+	c := *n
+	c.originalInstanceID = id
+	return &c
+}
+
 // Notify sends a lifecycle event notification asynchronously.
 // Safe to call on a nil Notifier.
 func (n *Notifier) Notify(ctx context.Context, eventType, detail string) {
@@ -103,6 +123,23 @@ func (n *Notifier) Notify(ctx context.Context, eventType, detail string) {
 			log.Printf("spore-bot notify (%s) failed: %v", eventType, err)
 		}
 	}()
+}
+
+// request builds the /notify body.
+func (n *Notifier) request(eventType, detail, pkcs7 string) notifyRequest {
+	return notifyRequest{
+		PKCS7:              pkcs7,
+		Command:            n.command,
+		Platform:           n.platform,
+		WorkspaceID:        n.workspaceID,
+		EventType:          eventType,
+		InstanceName:       n.instanceName,
+		InstanceID:         n.instanceID,
+		Region:             n.region,
+		DNSName:            n.dnsName,
+		Detail:             detail,
+		OriginalInstanceID: n.originalInstanceID,
+	}
 }
 
 func (n *Notifier) send(ctx context.Context, eventType, detail string) error {
@@ -126,20 +163,7 @@ func (n *Notifier) send(ctx context.Context, eventType, detail string) error {
 		pkcs7DER = pkcs7Raw // fallback: use as-is if not base64
 	}
 
-	nr := notifyRequest{
-		PKCS7:        base64.StdEncoding.EncodeToString(pkcs7DER),
-		Command:      n.command,
-		Platform:     n.platform,
-		WorkspaceID:  n.workspaceID,
-		EventType:    eventType,
-		InstanceName: n.instanceName,
-		InstanceID:   n.instanceID,
-		Region:       n.region,
-		DNSName:      n.dnsName,
-		Detail:       detail,
-	}
-
-	body, err := json.Marshal(nr)
+	body, err := json.Marshal(n.request(eventType, detail, base64.StdEncoding.EncodeToString(pkcs7DER)))
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
