@@ -9,12 +9,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 // fakePCI builds a /sys/bus/pci/devices with one directory per device holding
 // the kernel's vendor and class files.
+// Directories are named like PCI addresses ("0000:00:1e.0") but with "-" for
+// ":", which Windows refuses in a file name; detectAccelerators never reads the
+// name (#971).
 func fakePCI(t *testing.T, devices map[string][2]string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -48,10 +52,10 @@ func fakeDevNodes(t *testing.T, names ...string) string {
 // found by vendor and class, Neuron by its device nodes.
 func TestDetectAccelerators_ByStructure(t *testing.T) {
 	baseline := map[string][2]string{
-		"0000:00:05.0": {"0x1d0f", "0x020000"}, // ENA
-		"0000:00:04.0": {"0x1d0f", "0x010802"}, // EBS NVMe
-		"0000:00:00.0": {"0x1022", "0x060000"}, // AMD EPYC host bridge
-		"0000:00:03.0": {"0x1d0f", "0x030000"}, // Nitro VGA (Annapurna)
+		"0000-00-05.0": {"0x1d0f", "0x020000"}, // ENA
+		"0000-00-04.0": {"0x1d0f", "0x010802"}, // EBS NVMe
+		"0000-00-00.0": {"0x1022", "0x060000"}, // AMD EPYC host bridge
+		"0000-00-03.0": {"0x1d0f", "0x030000"}, // Nitro VGA (Annapurna)
 	}
 	with := func(extra map[string][2]string) map[string][2]string {
 		m := map[string][2]string{}
@@ -70,12 +74,12 @@ func TestDetectAccelerators_ByStructure(t *testing.T) {
 		want []string
 	}{
 		{"plain instance", baseline, []string{"nvme0", "nvme0n1", "null"}, []string{}},
-		{"g4dn: NVIDIA T4 (3D controller)", with(map[string][2]string{"0000:00:1e.0": {"0x10de", "0x030200"}}), nil, []string{"nvidia"}},
-		{"g4ad: AMD Radeon Pro V520", with(map[string][2]string{"0000:00:1e.0": {"0x1002", "0x030000"}}), nil, []string{"amd"}},
-		{"dl1: Gaudi", with(map[string][2]string{"0000:10:1d.0": {"0x1da3", "0x120000"}}), nil, []string{"gaudi"}},
+		{"g4dn: NVIDIA T4 (3D controller)", with(map[string][2]string{"0000-00-1e.0": {"0x10de", "0x030200"}}), nil, []string{"nvidia"}},
+		{"g4ad: AMD Radeon Pro V520", with(map[string][2]string{"0000-00-1e.0": {"0x1002", "0x030000"}}), nil, []string{"amd"}},
+		{"dl1: Gaudi", with(map[string][2]string{"0000-10-1d.0": {"0x1da3", "0x120000"}}), nil, []string{"gaudi"}},
 		{"trn1: Neuron device nodes", baseline, []string{"neuron0", "neuron1"}, []string{"neuron"}},
 		{"neuron-like names that are not devices", baseline, []string{"neuron", "neuronx"}, []string{}},
-		{"NVIDIA audio function is not a GPU", with(map[string][2]string{"0000:00:1f.1": {"0x10de", "0x040300"}}), nil, []string{}},
+		{"NVIDIA audio function is not a GPU", with(map[string][2]string{"0000-00-1f.1": {"0x10de", "0x040300"}}), nil, []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := detectAccelerators(fakePCI(t, tc.pci), fakeDevNodes(t, tc.dev...))
@@ -260,6 +264,9 @@ func TestIdleDecision_UnmeasurableAcceleratorIsNotIdle(t *testing.T) {
 // neuron-monitor streams a report per period and never exits; the runner must
 // return the first report and kill it, not wait for it.
 func TestRunAccelTool_FirstLineOfAStreamingTool(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux-only: runs a #!/bin/sh fake neuron-monitor from PATH, which Windows does not execute (#1002)")
+	}
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
 	}
