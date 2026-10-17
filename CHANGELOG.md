@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--idle-timeout` works again on Linux: an unused instance now stops**
+  (#1093). It never could on any supported AMI, because both idle thresholds
+  were 100 KB a minute and an instance nobody is using does more than that on
+  its own. Measured untouched for 20 minutes on AL2023 (arm64 and x86_64) and
+  Ubuntu 24.04, disk I/O was 0.14–7.8 MB a minute, almost all
+  systemd-journald's own logging, and network was up to ~190 KB a minute from
+  the SSM agent and AL2023's telemetry agent. So every check read "Not idle:
+  Disk I/O …" and the instance ran to its TTL, including under the default
+  `--idle-timeout 1h`. Before v0.129.0 this was hidden: NVMe disks weren't
+  counted (#937), so disk read as zero. The thresholds are now 16 MiB of disk
+  I/O and 1 MiB of network a minute, set from those measurements. A job
+  writing or transferring data still clears them easily; CPU, open sessions
+  and accelerators are judged as before.
 - **Task outputs upload again on v0.132.0 spores** (#1094). On every instance,
   v0.132.0's output upload (`spored provenance upload`) failed with
   `Invalid region`, so every `spawn task run` and pooled task with outputs

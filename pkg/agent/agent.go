@@ -1428,7 +1428,7 @@ func (a *Agent) idleDecision(r idleSnapshot) (bool, string) {
 	if !r.netMeasured {
 		return false, fmt.Sprintf("Not idle: network traffic could not be measured (%s); assuming active", r.netWhy)
 	}
-	if r.net > 100000 { // 100KB per tick (one minute) — filters out spored's own EC2/IMDS API calls (~25KB/min)
+	if r.net > idleNetworkBytesThreshold {
 		return false, fmt.Sprintf("Not idle: Network traffic %d bytes", r.net)
 	}
 
@@ -1541,8 +1541,8 @@ func (a *Agent) cpuUsage() (float64, bool) {
 var readNetworkBytes = func() (rx, tx int64) { return sysReadNetworkBytes() }
 
 // networkAssumedActive is what an unmeasured network reading reports: far over
-// the 100KB/min idle threshold, so "could not tell" never reads as "idle".
-const networkAssumedActive int64 = 1000000
+// idleNetworkBytesThreshold, so "could not tell" never reads as "idle".
+const networkAssumedActive int64 = 64 * idleNetworkBytesThreshold
 
 // networkBytes returns network bytes since the previous sample and whether that
 // is a real MEASUREMENT. When measured is false the value is the conservative
@@ -1590,13 +1590,34 @@ func (a *Agent) networkBytes() (bytes int64, measured bool, why string) {
 // same reason as readNetworkBytes: the darwin stub always says "unknown".
 var readDiskIOBytes = func() int64 { return sysReadDiskIOBytes() }
 
-// idleDiskBytesThreshold is the disk I/O between samples (one monitor tick, a
-// minute) at or under which the disk counts as idle.
-const idleDiskBytesThreshold int64 = 100000
+// The per-tick (one minute) network and disk volumes at or under which those
+// signals count as idle. They are set from what an instance nobody is using
+// actually does, measured on the supported AMIs (#1093), not from what idle
+// ought to look like. Untouched for 20 minutes each:
+//
+//	                 disk I/O per minute   network per minute
+//	AL2023 arm64     1.3 - 7.8 MB          up to ~146 KB
+//	AL2023 x86_64    1.3 - 3.9 MB          up to ~148 KB
+//	Ubuntu 24.04     0.14 - 3.7 MB         21 - 55 KB
+//
+// The disk volume is almost all systemd-journald (rsyslog too on Ubuntu); the
+// network is the SSM agent, AL2023's chronicled and spored's own API calls.
+// Both thresholds used to be 100 KB, which every one of those minutes exceeded,
+// so --idle-timeout could never fire on any of them. Before #937 counted NVMe
+// disks the disk reading was ~0 on Nitro instances, which hid this.
+//
+// A minute over a threshold only restarts the idle window, so the thresholds
+// need to clear the steady background with margin, not every rare spike. Work
+// that a person or a job is actually doing clears them easily; CPU, sessions
+// and accelerators are judged separately.
+const (
+	idleNetworkBytesThreshold int64 = 1 << 20  // 1 MiB/min, ~5x the highest idle reading
+	idleDiskBytesThreshold    int64 = 16 << 20 // 16 MiB/min, ~2x the highest idle spike
+)
 
 // diskAssumedActive is what an unmeasured disk reading reports: far over
 // idleDiskBytesThreshold, so "could not tell" never reads as "idle".
-const diskAssumedActive int64 = 1000000
+const diskAssumedActive int64 = 64 * idleDiskBytesThreshold
 
 // diskIOBytes returns disk bytes read and written since the previous sample and
 // whether that is a real MEASUREMENT. When measured is false the value is the

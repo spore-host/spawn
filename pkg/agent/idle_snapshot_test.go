@@ -66,10 +66,11 @@ func scrape(a *Agent) {
 	}
 }
 
-// THE bug in #952. 200 KB of traffic in one tick is over the 100 KB idle
-// threshold. A scrape in the middle of the tick used to take its own sample, so
-// the monitor loop's delta covered only the 50 KB since the scrape and the
-// instance read as idle: a false idle-stop. The monitor loop must own sampling.
+// THE bug in #952. Traffic just over the idle threshold in one tick, three
+// quarters of it before a scrape. A scrape in the middle of the tick used to
+// take its own sample, so the monitor loop's delta covered only the quarter
+// since the scrape and the instance read as idle: a false idle-stop. The
+// monitor loop must own sampling.
 func TestScrapeDoesNotShortenTheMonitorLoopWindow(t *testing.T) {
 	noSessions(t)
 	c := installCounters(t)
@@ -77,17 +78,19 @@ func TestScrapeDoesNotShortenTheMonitorLoopWindow(t *testing.T) {
 
 	a.evaluateIdle() // first tick: baseline
 	c.idleCPUMinute()
-	c.net.Add(150_000)
+	total := idleNetworkBytesThreshold + idleNetworkBytesThreshold/4
+	before := total * 3 / 4
+	c.net.Add(before)
 	scrape(a) // a Prometheus scrape mid-tick
-	c.net.Add(50_000)
+	c.net.Add(total - before)
 
 	s := a.evaluateIdle()
-	if !s.netMeasured || s.net != 200_000 {
-		t.Fatalf("monitor tick measured %d network bytes (measured=%v), want all 200000 "+
-			"since the previous tick — the scrape moved the baseline (#952)", s.net, s.netMeasured)
+	if !s.netMeasured || s.net != total {
+		t.Fatalf("monitor tick measured %d network bytes (measured=%v), want all %d "+
+			"since the previous tick — the scrape moved the baseline (#952)", s.net, s.netMeasured, total)
 	}
 	if s.idle {
-		t.Errorf("200 KB of traffic in one tick read as idle (%s)", s.reason)
+		t.Errorf("%d bytes of traffic in one tick, over the %d threshold, read as idle (%s)", total, idleNetworkBytesThreshold, s.reason)
 	}
 }
 
@@ -150,7 +153,7 @@ func TestReadersBeforeTheFirstTickAreUnknown(t *testing.T) {
 	if _, measured := a.GetCPUUsageMeasured(); measured {
 		t.Error("CPU reported measured before any sample")
 	}
-	if v, measured, why := a.GetNetworkBytesMeasured(); measured || why == "" || v <= 100000 {
+	if v, measured, why := a.GetNetworkBytesMeasured(); measured || why == "" || v <= idleNetworkBytesThreshold {
 		t.Errorf("network before any sample = (%d, %v, %q), want unknown over the threshold", v, measured, why)
 	}
 	if v, measured, why := a.GetDiskIOBytesMeasured(); measured || why == "" || v <= idleDiskBytesThreshold {
