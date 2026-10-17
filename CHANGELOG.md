@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Re-running `spawn reaper deploy` to upgrade a deployed reaper no longer
+  fails half-way** (#1084). It updated the function's configuration
+  immediately after its code, and Lambda refuses that while the code update is
+  still being applied (`ResourceConflictException: An update is in progress`).
+  The new code went live but the configuration, schedule and `spawn:version`
+  tag were never written, so `spawn reaper status` kept reporting the old
+  version. The deploy now waits for the code update to finish, and stops with
+  Lambda's reason if it failed. An armed reaper stayed armed throughout.
+
 ## [0.131.1] - 2026-10-17
 
 ### Fixed

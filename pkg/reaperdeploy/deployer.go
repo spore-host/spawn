@@ -91,10 +91,63 @@ type Deployer struct {
 	// negative value to skip the wait entirely, which keeps the unit suite fast
 	// (it was 40s before this was injectable).
 	PropagationDelay time.Duration
+
+	// UpdatePoll is how often to check whether a code update has finished before
+	// updating the configuration (#1084). Zero uses DefaultUpdatePoll; tests set
+	// it negative to poll without sleeping.
+	UpdatePoll time.Duration
 }
 
 // DefaultPropagationDelay is the post-CreateRole wait.
 const DefaultPropagationDelay = 10 * time.Second
+
+// DefaultUpdatePoll and updateWaitLimit bound the wait for a code update.
+const (
+	DefaultUpdatePoll = 2 * time.Second
+	updateWaitLimit   = 3 * time.Minute
+)
+
+// waitForUpdate returns once the function's last update has finished. Lambda
+// applies UpdateFunctionCode asynchronously (LastUpdateStatus InProgress) and
+// refuses any other update with a 409 ResourceConflictException until it is
+// done, so updating the configuration straight after the code failed every
+// redeploy of an existing reaper half-way: new code live, configuration,
+// schedule and version tag never written (#1084).
+func (d *Deployer) waitForUpdate(ctx context.Context) error {
+	poll := d.UpdatePoll
+	if poll == 0 {
+		poll = DefaultUpdatePoll
+	}
+	deadline := time.Now().Add(updateWaitLimit)
+	for {
+		out, err := d.Lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: awssdk.String(FunctionName)})
+		if err != nil {
+			return fmt.Errorf("reaperdeploy: wait for code update: %w", err)
+		}
+		var cfg lambdatypes.FunctionConfiguration
+		if out.Configuration != nil {
+			cfg = *out.Configuration
+		}
+		switch cfg.LastUpdateStatus {
+		case lambdatypes.LastUpdateStatusInProgress:
+		case lambdatypes.LastUpdateStatusFailed:
+			return fmt.Errorf("reaperdeploy: code update failed: %s (%s)",
+				awssdk.ToString(cfg.LastUpdateStatusReason), cfg.LastUpdateStatusReasonCode)
+		default:
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("reaperdeploy: code update still in progress after %s", updateWaitLimit)
+		}
+		if poll > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(poll):
+			}
+		}
+	}
+}
 
 // Options are the inputs to a deploy.
 type Options struct {
@@ -432,6 +485,9 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 			S3Key:        awssdk.String(key),
 		}); err != nil {
 			return "", false, fmt.Errorf("reaperdeploy: update function code: %w", err)
+		}
+		if err := d.waitForUpdate(ctx); err != nil {
+			return "", false, err
 		}
 		// Preserve REAPER_DRY_RUN on an existing function: re-deploying must not
 		// silently DISARM a reaper an operator deliberately armed.
