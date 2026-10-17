@@ -443,82 +443,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows still reads the last checkpoint and does not show hibernated time.
   The resume-from-hibernation reset (#987) reads the same clocks, so it now
   covers Windows instances too.
-
-### Security
-
-- **`spawn pipeline collect` no longer writes outside `--output-dir`** (#989).
-  It wrote each object to `<output-dir>/<object key>` without checking the
-  key. Anyone able to write to the pipeline's `s3_bucket`, a stage command
-  among them, could name an object `.../output/../../../../.bashrc` and have
-  `collect` write it wherever that resolved on the machine that ran it. A key
-  that would land outside its stage's directory in `--output-dir` is now
-  refused, and then nothing is downloaded. Files are written through an
-  `os.Root`, so a symlink already in the directory cannot lead out of it either.
-- **A streaming pipeline's security group no longer opens SSH to the internet**
-  (#929). It allowed tcp/22 from `0.0.0.0/0`. SSH, like the streaming ports, is
-  now allowed only from the pipeline's own instances (the group itself).
-- **The SAM-deployed TTL reaper's `ScanSelf=true` policy no longer grants
-  unconditioned `ssm:SendCommand`** (#985). `lambda/ttl-reaper/template.yaml`
-  kept its own copy of the scan-self permissions, and it had drifted from the
-  one `spawn reaper deploy` uses: `ssm:SendCommand` was allowed on every
-  resource with no condition, which is root shell on any SSM-managed instance
-  in the account. It is now limited to `spawn:managed=true` instances and the
-  `AWS-RunShellScript` document, as #818 already did elsewhere. The same copy
-  also lacked the network-resource sweep's grants (#685), so that sweep hit
-  AccessDenied every cycle in a `ScanSelf=true` deployment; they are added.
-  A new gate parses the template and the cross-account role and fails unless
-  every statement matches `pkg/reaperiam` in actions, resources and
-  conditions. The cross-account role also drops `ec2:DescribeTags`, which the
-  reaper never calls. Production runs `ScanSelf=false`, so the operated
-  reaper's own role was not affected.
-- **`spawn launch --ttl 1d` now enforces a one-day TTL** (#990). It used to tag
-  `spawn:ttl=1d` and no `spawn:ttl-deadline`: the deadline was written only when
-  Go's duration parser accepted the value, and it has no day unit, and spored
-  read the tag the same way. The launch succeeded with nothing enforcing the
-  TTL, so the instance was bounded only by the TTL reaper's 7-day max-age
-  ceiling. Every TTL and lifecycle duration now goes through one parser, which
-  accepts Go durations plus days (`1d`, `2d12h`, `1.5d`). That covers `--ttl`,
-  `--idle-timeout`, `--pre-stop-timeout`, `--completion-delay`,
-  `--webhook-timeout`, `--fsx-ttl`, `spawn extend`, `spored config set
-  ttl/idle-timeout/completion-delay`, `spawn defaults set idle-timeout`, sweep
-  `ttl`/`idle_timeout` (CLI and the detached-sweep Lambda), `spawn task`
-  `lifecycle.ttl`, `spawn app`/`service`/`pool --ttl`, batch-queue and pipeline
-  timeouts, the wizard, and the readers: spored, the TTL reaper (including
-  `REAPER_MAX_AGE`), `spawn status` and cost estimates. Anything it cannot
-  parse, plus a zero TTL or idle timeout, is rejected before any AWS call. A
-  sweep `ttl: 3600` (a number, not a duration) is now an error rather than
-  being dropped. Day-unit values are stored in tags in Go form (`24h0m0s`) so
-  older readers agree.
-- **The TTL reaper enforces `spawn:ttl` on instances that have no deadline
-  tag** (#990): launch time + `spawn:ttl`, the deadline spored already applies
-  in that case. This catches instances launched with a day-unit `--ttl` before
-  this fix. A stopped instance runs no spored, so until now it lived until the
-  max-age ceiling. `spawn:ttl=0` (TTL disabled) is still exempt.
-- **The launch path can no longer write `spawn:ttl` without
-  `spawn:ttl-deadline`.** `buildTags` returns an error instead. The #983 gate
-  that every `spawn:ttl` writer also writes the deadline now requires the
-  deadline write on the same code path, not just somewhere in the function, so
-  the conditional write behind this bug fails it. A new test checks that every
-  accepted TTL spelling produces a deadline.
-- `pkg/aws.LaunchConfig.ValidateDurations` is new (an addition to the public
-  surface). `Client.Launch` and `launcher.Provision` call it first.
-
-## [0.130.1] - 2026-10-17
-
-### Fixed
-
-- **`spawn launch` works again: v0.129.0 and v0.130.0 failed every launch at
-  "Setting up IAM role"** (#1069), with `MalformedPolicyDocument: The policy
-  failed legacy parsing`, before creating any instance. #905 added a
-  hybrid-registry grant whose resource used the `${aws:PrincipalAccount}` policy
-  variable, which IAM's `PutRolePolicy` does not accept there. IAM Access
-  Analyzer and `simulate-custom-policy` both accept the same document, and the
-  emulator CI runs against does not model IAM's policy grammar. Every launch
-  that sets up the spored role was affected: plain launches, `--iam-policy`,
-  and `pkg/launcher.Provision` (lagotto, calque). `--instance-profile` was not.
-  The policy now names the account literally, resolved at write time. A test
-  runs every writer and checks what reached IAM, and a document still carrying
-  the variable is refused before it is sent.
+- **The idle check's disk I/O signal was wrong on every instance type** (#937).
+  It compared the total disk I/O since boot with a per-minute threshold, and its
+  device filter skipped every NVMe disk while counting partitions such as
+  `sda1` as extra disks. On Nitro instances the disk therefore always read 0,
+  so a disk-bound job with low CPU and network could be idle-stopped. On
+  instances with `xvd*`, `sd*` or `vd*` disks it always read as busy, so
+  `--idle-timeout` never fired and the log said `Not idle: Disk I/O N bytes`
+  every minute. spored now measures the I/O since the previous check, over
+  every whole disk, whatever it is called, without partitions, loop,
+  device-mapper, md RAID or zram devices. If the counters cannot be read or
+  go backwards, it treats the disk as active, and if they cannot be read it
+  logs one warning saying idle-stop will not trigger. The same applies on
+  Windows, where a missing disk counter used to read as no I/O.
+- **`spored status` now shows a `Disk I/O` line** (#937). It reads `unknown`,
+  with the reason, when nothing was measured. A one-shot status has only one
+  sample, so it is always unknown there. The JSON output gains
+  `disk_bytes_per_min`, `disk_measured` and `disk_unknown`.
+- **The Prometheus `spawn_disk_io_bytes_total` metric now counts NVMe disks** (#937).
+  Before, it read 0 on Nitro instances and double-counted `sda`/`vda` disks
+  with partitions. Its `device` label now lists every disk it counted, for
+  example `nvme0n1,nvme1n1`, so existing series change label.
+- **A CPU counter that goes backwards between samples now counts as unknown,
+  not as a reading** (#937). Before, it produced a percentage that could be
+  negative, which reads as idle.
 - **An open SSH session, or a detached tmux or screen session, no longer keeps
   `--idle-timeout` from ever firing on Linux** (#953). spored counted any
   terminal that existed, and any login still open, as activity, however long
@@ -627,6 +575,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails, or prints something spored cannot read, it is treated as busy, and
   spored logs one warning saying idle-stop will not trigger. A Deep Learning
   AMI on an instance with no GPU is unaffected, although it has `nvidia-smi`.
+
+### Security
+
+- **`spawn pipeline collect` no longer writes outside `--output-dir`** (#989).
+  It wrote each object to `<output-dir>/<object key>` without checking the
+  key. Anyone able to write to the pipeline's `s3_bucket`, a stage command
+  among them, could name an object `.../output/../../../../.bashrc` and have
+  `collect` write it wherever that resolved on the machine that ran it. A key
+  that would land outside its stage's directory in `--output-dir` is now
+  refused, and then nothing is downloaded. Files are written through an
+  `os.Root`, so a symlink already in the directory cannot lead out of it either.
+- **A streaming pipeline's security group no longer opens SSH to the internet**
+  (#929). It allowed tcp/22 from `0.0.0.0/0`. SSH, like the streaming ports, is
+  now allowed only from the pipeline's own instances (the group itself).
+- **The SAM-deployed TTL reaper's `ScanSelf=true` policy no longer grants
+  unconditioned `ssm:SendCommand`** (#985). `lambda/ttl-reaper/template.yaml`
+  kept its own copy of the scan-self permissions, and it had drifted from the
+  one `spawn reaper deploy` uses: `ssm:SendCommand` was allowed on every
+  resource with no condition, which is root shell on any SSM-managed instance
+  in the account. It is now limited to `spawn:managed=true` instances and the
+  `AWS-RunShellScript` document, as #818 already did elsewhere. The same copy
+  also lacked the network-resource sweep's grants (#685), so that sweep hit
+  AccessDenied every cycle in a `ScanSelf=true` deployment; they are added.
+  A new gate parses the template and the cross-account role and fails unless
+  every statement matches `pkg/reaperiam` in actions, resources and
+  conditions. The cross-account role also drops `ec2:DescribeTags`, which the
+  reaper never calls. Production runs `ScanSelf=false`, so the operated
+  reaper's own role was not affected.
+- **`spawn launch --ttl 1d` now enforces a one-day TTL** (#990). It used to tag
+  `spawn:ttl=1d` and no `spawn:ttl-deadline`: the deadline was written only when
+  Go's duration parser accepted the value, and it has no day unit, and spored
+  read the tag the same way. The launch succeeded with nothing enforcing the
+  TTL, so the instance was bounded only by the TTL reaper's 7-day max-age
+  ceiling. Every TTL and lifecycle duration now goes through one parser, which
+  accepts Go durations plus days (`1d`, `2d12h`, `1.5d`). That covers `--ttl`,
+  `--idle-timeout`, `--pre-stop-timeout`, `--completion-delay`,
+  `--webhook-timeout`, `--fsx-ttl`, `spawn extend`, `spored config set
+  ttl/idle-timeout/completion-delay`, `spawn defaults set idle-timeout`, sweep
+  `ttl`/`idle_timeout` (CLI and the detached-sweep Lambda), `spawn task`
+  `lifecycle.ttl`, `spawn app`/`service`/`pool --ttl`, batch-queue and pipeline
+  timeouts, the wizard, and the readers: spored, the TTL reaper (including
+  `REAPER_MAX_AGE`), `spawn status` and cost estimates. Anything it cannot
+  parse, plus a zero TTL or idle timeout, is rejected before any AWS call. A
+  sweep `ttl: 3600` (a number, not a duration) is now an error rather than
+  being dropped. Day-unit values are stored in tags in Go form (`24h0m0s`) so
+  older readers agree.
+- **The TTL reaper enforces `spawn:ttl` on instances that have no deadline
+  tag** (#990): launch time + `spawn:ttl`, the deadline spored already applies
+  in that case. This catches instances launched with a day-unit `--ttl` before
+  this fix. A stopped instance runs no spored, so until now it lived until the
+  max-age ceiling. `spawn:ttl=0` (TTL disabled) is still exempt.
+- **The launch path can no longer write `spawn:ttl` without
+  `spawn:ttl-deadline`.** `buildTags` returns an error instead. The #983 gate
+  that every `spawn:ttl` writer also writes the deadline now requires the
+  deadline write on the same code path, not just somewhere in the function, so
+  the conditional write behind this bug fails it. A new test checks that every
+  accepted TTL spelling produces a deadline.
+- `pkg/aws.LaunchConfig.ValidateDurations` is new (an addition to the public
+  surface). `Client.Launch` and `launcher.Provision` call it first.
+
+## [0.130.1] - 2026-10-17
+
+### Fixed
+
+- **`spawn launch` works again: v0.129.0 and v0.130.0 failed every launch at
+  "Setting up IAM role"** (#1069), with `MalformedPolicyDocument: The policy
+  failed legacy parsing`, before creating any instance. #905 added a
+  hybrid-registry grant whose resource used the `${aws:PrincipalAccount}` policy
+  variable, which IAM's `PutRolePolicy` does not accept there. IAM Access
+  Analyzer and `simulate-custom-policy` both accept the same document, and the
+  emulator CI runs against does not model IAM's policy grammar. Every launch
+  that sets up the spored role was affected: plain launches, `--iam-policy`,
+  and `pkg/launcher.Provision` (lagotto, calque). `--instance-profile` was not.
+  The policy now names the account literally, resolved at write time. A test
+  runs every writer and checks what reached IAM, and a document still carrying
+  the variable is refused before it is sent.
 
 ## [0.130.0] - 2026-10-16
 
@@ -1300,30 +1324,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it now prints `Network: unknown (single sample; assuming active)`, the same
   way the CPU line does. The JSON output gains `network_measured` and
   `network_unknown`.
-- **The idle check's disk I/O signal was wrong on every instance type** (#937).
-  It compared the total disk I/O since boot with a per-minute threshold, and its
-  device filter skipped every NVMe disk while counting partitions such as
-  `sda1` as extra disks. On Nitro instances the disk therefore always read 0,
-  so a disk-bound job with low CPU and network could be idle-stopped. On
-  instances with `xvd*`, `sd*` or `vd*` disks it always read as busy, so
-  `--idle-timeout` never fired and the log said `Not idle: Disk I/O N bytes`
-  every minute. spored now measures the I/O since the previous check, over
-  every whole disk, whatever it is called, without partitions, loop,
-  device-mapper, md RAID or zram devices. If the counters cannot be read or
-  go backwards, it treats the disk as active, and if they cannot be read it
-  logs one warning saying idle-stop will not trigger. The same applies on
-  Windows, where a missing disk counter used to read as no I/O.
-- **`spored status` now shows a `Disk I/O` line** (#937). It reads `unknown`,
-  with the reason, when nothing was measured. A one-shot status has only one
-  sample, so it is always unknown there. The JSON output gains
-  `disk_bytes_per_min`, `disk_measured` and `disk_unknown`.
-- **The Prometheus `spawn_disk_io_bytes_total` metric now counts NVMe disks** (#937).
-  Before, it read 0 on Nitro instances and double-counted `sda`/`vda` disks
-  with partitions. Its `device` label now lists every disk it counted, for
-  example `nvme0n1,nvme1n1`, so existing series change label.
-- **A CPU counter that goes backwards between samples now counts as unknown,
-  not as a reading** (#937). Before, it produced a percentage that could be
-  negative, which reads as idle.
 
 ### Security
 
