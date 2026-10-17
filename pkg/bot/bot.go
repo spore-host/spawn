@@ -23,11 +23,15 @@ import (
 
 // Registration is a bot registration item (registry table; key user_key+nickname).
 type Registration struct {
-	UserKey        string   `dynamodbav:"user_key" json:"user_key"`
-	Nickname       string   `dynamodbav:"nickname" json:"nickname"`
-	InstanceID     string   `dynamodbav:"instance_id" json:"instance_id"`
-	AWSAccountID   string   `dynamodbav:"aws_account_id" json:"aws_account_id"`
-	RoleARN        string   `dynamodbav:"role_arn,omitempty" json:"role_arn,omitempty"`
+	UserKey      string `dynamodbav:"user_key" json:"user_key"`
+	Nickname     string `dynamodbav:"nickname" json:"nickname"`
+	InstanceID   string `dynamodbav:"instance_id" json:"instance_id"`
+	AWSAccountID string `dynamodbav:"aws_account_id" json:"aws_account_id"`
+	RoleARN      string `dynamodbav:"role_arn,omitempty" json:"role_arn,omitempty"`
+	// ExternalID is the STS ExternalId spore-bot presents when assuming RoleARN.
+	// spore-bot refuses a registration without one (spore-host#413), so a
+	// registration that omits it cannot act on its instance.
+	ExternalID     string   `dynamodbav:"external_id,omitempty" json:"external_id,omitempty"`
 	DNSName        string   `dynamodbav:"dns_name,omitempty" json:"dns_name,omitempty"`
 	TagPrefix      string   `dynamodbav:"tag_prefix" json:"tag_prefix"`
 	AllowedActions []string `dynamodbav:"allowed_actions" json:"allowed_actions"`
@@ -106,26 +110,33 @@ func (c *Client) UpsertRegistration(ctx context.Context, reg *Registration) erro
 	for i, a := range reg.AllowedActions {
 		actions[i] = &types.AttributeValueMemberS{Value: a}
 	}
+	update := "SET instance_id = :iid, aws_account_id = :acct, role_arn = :role, " +
+		"tag_prefix = :pfx, allowed_actions = :acts, registered_by = :by, " +
+		"platform = :plat, created_at = if_not_exists(created_at, :cat)"
+	values := map[string]types.AttributeValue{
+		":iid":  &types.AttributeValueMemberS{Value: reg.InstanceID},
+		":acct": &types.AttributeValueMemberS{Value: reg.AWSAccountID},
+		":role": &types.AttributeValueMemberS{Value: reg.RoleARN},
+		":pfx":  &types.AttributeValueMemberS{Value: reg.TagPrefix},
+		":acts": &types.AttributeValueMemberL{Value: actions},
+		":by":   &types.AttributeValueMemberS{Value: reg.RegisteredBy},
+		":plat": &types.AttributeValueMemberS{Value: reg.Platform},
+		":cat":  &types.AttributeValueMemberS{Value: reg.CreatedAt},
+	}
+	// An empty ExternalID leaves any stored one alone, so re-registering with
+	// --role-arn and no --external-id does not erase a working ExternalId.
+	if reg.ExternalID != "" {
+		update += ", external_id = :xid"
+		values[":xid"] = &types.AttributeValueMemberS{Value: reg.ExternalID}
+	}
 	_, err := c.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(c.registryTable),
 		Key: map[string]types.AttributeValue{
 			"user_key": &types.AttributeValueMemberS{Value: reg.UserKey},
 			"nickname": &types.AttributeValueMemberS{Value: reg.Nickname},
 		},
-		UpdateExpression: aws.String(
-			"SET instance_id = :iid, aws_account_id = :acct, role_arn = :role, " +
-				"tag_prefix = :pfx, allowed_actions = :acts, registered_by = :by, " +
-				"platform = :plat, created_at = if_not_exists(created_at, :cat)"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":iid":  &types.AttributeValueMemberS{Value: reg.InstanceID},
-			":acct": &types.AttributeValueMemberS{Value: reg.AWSAccountID},
-			":role": &types.AttributeValueMemberS{Value: reg.RoleARN},
-			":pfx":  &types.AttributeValueMemberS{Value: reg.TagPrefix},
-			":acts": &types.AttributeValueMemberL{Value: actions},
-			":by":   &types.AttributeValueMemberS{Value: reg.RegisteredBy},
-			":plat": &types.AttributeValueMemberS{Value: reg.Platform},
-			":cat":  &types.AttributeValueMemberS{Value: reg.CreatedAt},
-		},
+		UpdateExpression:          aws.String(update),
+		ExpressionAttributeValues: values,
 	})
 	if err != nil {
 		return fmt.Errorf("write registration: %w", err)

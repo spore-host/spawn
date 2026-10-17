@@ -9,9 +9,14 @@ Description: >
 Parameters:
   BotLambdaRoleArn:
     Type: String
+    # Must equal DefaultBotLambdaRoleARN in pkg/config/endpoints.go (the
+    # principal `spawn notify register` trusts); bot_principal_test.go fails CI
+    # when they differ (#1046).
+    Default: arn:aws:iam::966362334030:role/spore-bot-role
     Description: >
-      ARN of the spore-bot Lambda execution role in spore-host-infra.
-      Example: arn:aws:iam::966362334030:role/spore-bot-role
+      ARN of the spore-bot Lambda execution role in spore-host-infra. The
+      default is the hosted spore-bot's role; override it only for a
+      self-hosted spore-bot.
     AllowedPattern: 'arn:aws:iam::\d{12}:role/.+'
     ConstraintDescription: Must be a valid IAM role ARN
 
@@ -36,12 +41,12 @@ Parameters:
     Default: ''
     Description: >
       STS ExternalId the spore-bot Lambda must present when assuming this role.
-      Leave EMPTY to use the legacy shared value (TagPrefix + "-bot", e.g.
-      "spawn-bot") that the Lambda falls back to. For per-account isolation
-      (recommended), set this to the high-entropy value shown when you run
-      `spawn bot register` (the register response returns `external_id`), and
-      register the instance with that same value. Each account should use its
-      own ExternalId.
+      Set it to a high-entropy value of your own (e.g. `openssl rand -hex 16`),
+      one per account, and register instances with that same value:
+      `spawn notify register --role-arn <RoleArn output> --external-id <value>`.
+      Leaving it EMPTY writes the legacy shared value (TagPrefix + "-bot", e.g.
+      "spawn-bot"), which spore-bot no longer presents (spore-host#413), so the
+      bot cannot assume a role created that way.
 
   ScopeStartStopByTag:
     Type: String
@@ -80,7 +85,8 @@ Resources:
             Condition:
               StringEquals:
                 # Per-account ExternalId when provided; otherwise the legacy
-                # shared "${TagPrefix}-bot" the Lambda still falls back to.
+                # shared "${TagPrefix}-bot", which spore-bot stopped presenting
+                # in spore-host#413 (see the ExternalId parameter).
                 sts:ExternalId: !If [UseCustomExternalId, !Ref ExternalId, !Sub '${TagPrefix}-bot']
       Policies:
         - PolicyName: BotEC2Policy

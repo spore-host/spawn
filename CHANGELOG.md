@@ -44,7 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   midnight, the status screen correctly showed the UTC date too ("(2026-10-17
   00:20 UTC)"), and the test double-counted that date as a bare timestamp. It
   now checks that no timestamp appears outside the local (UTC) form.
-
 - **Plugins on a Windows instance are refused up front** (#1001). Plugins are
   Linux-only (their steps are shell scripts, and every registry plugin requires
   Linux), but `spawn plugin install` on a Windows spore ran local provision
@@ -53,7 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin silently. Both now stop before doing anything and say why. A Windows
   spored also refuses an install request itself, so an older spawn reports
   the reason too. See the Windows guide.
-
 - **`deploy-custom-dns.sh` no longer breaks the updater it adds a zone to**
   (#891). It replaced the role's Route53 grant with one on the new zone alone,
   which on spore.host's shared updater would have revoked access to the
@@ -64,6 +62,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serves only the spore.host zone, so it was never used to add a second one.
   The script's closing message also pointed at a `CUSTOM_DNS.md` that did not
   exist.
+- **`spawn notify register` (alias `spawn bot register`) now creates a
+  cross-account role the bot can assume** (#1046). Without `--role-arn` it
+  created `SpawnBotCrossAccount` trusting the prism-bot stack's auto-generated
+  function role, which spore-bot no longer runs as, under the shared `spawn-bot`
+  ExternalId, which spore-bot stopped accepting (spore-host#413), and stored no
+  ExternalId in the registration. Every registration made that way was refused
+  by the bot. The role now trusts `spore-bot-role`, a fixed name that a stack
+  rebuild cannot change (`SPORE_BOT_LAMBDA_ROLE_ARN` still overrides it), under
+  a per-account ExternalId that is also stored in each registration.
+  An existing role with the old trust is no longer reused silently: register
+  stops and says what is wrong. **`--repair`** rewrites the trust policy of a
+  role spawn created, keeping a per-account ExternalId if it has one; it never
+  modifies a role spawn did not create, such as one from
+  `bot-cross-account-role.yaml`. After a repair, re-register the account's other
+  instances so their registrations carry the ExternalId. A new
+  **`--external-id`** flag goes with `--role-arn`.
+- **`bot-cross-account-role.yaml`'s `BotLambdaRoleArn` defaults to
+  spore-bot's role** (#1046). It had no default, and its example named a role
+  that does not exist. Its `ExternalId` description no longer says the bot
+  falls back to the shared value. It hasn't since spore-host#413.
 
 ## [0.129.0] - 2026-10-16
 
