@@ -63,7 +63,7 @@ func canonicalJSON(t *testing.T, v interface{}) string {
 	if err != nil {
 		t.Fatalf("marshal %v: %v", v, err)
 	}
-	var generic interface{}
+	var generic interface{} // nosemgrep: go.lang.security.deserialization.unsafe-deserialization-interface.go-unsafe-deserialization-interface -- test-only canonicalisation of JSON this test itself marshalled from the policy structs; no untrusted input
 	if err := json.Unmarshal(b, &generic); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -349,7 +349,7 @@ func checkNoScanSelfActionsOutsideBranch(t *testing.T, resource string, v interf
 			}
 		}
 	}
-	var generic interface{}
+	var generic interface{} // nosemgrep: go.lang.security.deserialization.unsafe-deserialization-interface.go-unsafe-deserialization-interface -- test-only canonicalisation of JSON this test itself marshalled from the policy structs; no untrusted input
 	_ = json.Unmarshal(b, &generic)
 	walk(generic)
 }
