@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The TTL reaper's DNS cleanup covers custom zones** (#1065). Its DNS teardown,
+  reconciliation sweep, unmanaged-subdomain report and lease expiry all worked
+  on exactly one zone, so a spore registered in a custom zone (#891) had no
+  backstop. A record its spored never deleted, after a crash or an out-of-band
+  terminate, stayed and pointed at a released IP. The new `DnsExtraZoneIds`
+  parameter (`DNS_EXTRA_ZONE_IDS`, env `REAPER_DNS_EXTRA_ZONE_IDS`) takes
+  further hosted zone IDs. The reaper reads each zone's domain from Route53 at
+  startup, so the IAM grant and the reaper are built from the same list. It
+  walks every zone, and tears an instance's records down in the zone its
+  `spawn:dns-domain` names. A zone it cannot read is logged as not covered, and
+  a spore in an uncovered zone is reported rather than guessed at. Deployments
+  that don't set the parameter behave exactly as before.
+
 - **The TTL reaper now cleans up orphaned persistent Spot requests** (#950).
   When a `--spot` instance with a stop-based lifecycle is terminated outside
   spawn (the EC2 console, `aws ec2 terminate-instances`), its persistent

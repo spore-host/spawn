@@ -70,6 +70,16 @@ Parameters:
     Default: ''
     Description: Domain for the hosted zone above (e.g. spore.host). Empty disables DNS teardown.
 
+  DnsExtraZoneIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >
+      Further Route53 hosted zone IDs the reaper's DNS work covers, beyond DnsZoneId
+      (#1065): custom zones spores register in with --dns-domain (#891). Each zone's
+      domain is read from the zone itself, so only IDs are given. Teardown, the DNS
+      sweep, the unmanaged-subdomain report and lease expiry all cover them. Needs
+      DnsZoneId and DnsDomain. Empty covers the primary zone only.
+
   DnsSweep:
     Type: String
     Default: 'false'
@@ -225,6 +235,9 @@ Conditions:
   DnsTeardownEnabled: !And
     - !Not [!Equals [!Ref DnsZoneId, '']]
     - !Not [!Equals [!Ref DnsDomain, '']]
+  DnsExtraZonesEnabled: !And
+    - !Condition DnsTeardownEnabled
+    - !Not [!Equals [!Join ['', !Ref DnsExtraZoneIds], '']]
   ObservabilityEnabled: !Equals [!Ref AlarmsEnabled, 'true']
   AlarmActionsEnabled: !And
     - !Not [!Equals [!Ref AlarmTopicArn, '']]
@@ -257,6 +270,7 @@ Resources:
           REAPER_NOTIFY_URL: !Ref NotifyUrl
           REAPER_DNS_ZONE_ID: !Ref DnsZoneId
           REAPER_DNS_DOMAIN: !Ref DnsDomain
+          REAPER_DNS_EXTRA_ZONE_IDS: !Join [',', !Ref DnsExtraZoneIds]
           REAPER_DNS_SWEEP: !Ref DnsSweep
           REAPER_NET_RESOURCES: !Ref NetResources
           REAPER_SPOT_REQUESTS: !Ref SpotRequests
@@ -394,6 +408,24 @@ Resources:
                     - route53:ChangeResourceRecordSets
                     - route53:ListResourceRecordSets
                   Resource: !Sub 'arn:aws:route53:::hostedzone/${DnsZoneId}'
+            - !Ref AWS::NoValue
+        # The extra zones (#1065), with the same two actions plus GetHostedZone,
+        # which the reaper calls once per zone at startup to learn its domain. One
+        # ARN per configured ID, built from the same list the reaper is given.
+        - !If
+            - DnsExtraZonesEnabled
+            - Statement:
+                - Effect: Allow
+                  Action:
+                    - route53:ChangeResourceRecordSets
+                    - route53:ListResourceRecordSets
+                    - route53:GetHostedZone
+                  Resource: !Split
+                    - ','
+                    - !Join
+                      - ''
+                      - - 'arn:aws:route53:::hostedzone/'
+                        - !Join [',arn:aws:route53:::hostedzone/', !Ref DnsExtraZoneIds]
             - !Ref AWS::NoValue
         # Portal registry read (#466): the lifecycle status that says whether an
         # unmanaged subdomain's account is provably dormant/offboarded. Scan only —

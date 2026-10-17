@@ -410,3 +410,60 @@ func TestCrossAccountRolePolicyMatchesReaperIAM(t *testing.T) {
 	diffGrants(t, crossAccountRolePath, got, crossAccountExceptions)
 	t.Logf("compared %d grants", len(got))
 }
+
+// grantedElsewhere is a list of claims that "template.yaml grants this". A claim
+// nothing checks can go stale silently — the action is added to the code, the
+// table, and never to the template (#1065 added route53:GetHostedZone). So every
+// route53 claim must be an Allow somewhere in the function's Policies, either arm
+// of any !If.
+func TestGrantedElsewhereRoute53IsInTheSAMTemplate(t *testing.T) {
+	tmpl := loadCFN(t, samTemplatePath)
+	resources, _ := tmpl["Resources"].(map[string]interface{})
+	allowed := map[string]bool{}
+	var walk func(interface{})
+	walk = func(x interface{}) {
+		switch y := x.(type) {
+		case map[string]interface{}:
+			if y["Effect"] == "Allow" {
+				for _, a := range asList(y["Action"]) {
+					if s, ok := a.(string); ok {
+						allowed[s] = true
+					}
+				}
+			}
+			for _, c := range y {
+				walk(c)
+			}
+		case []interface{}:
+			for _, c := range y {
+				walk(c)
+			}
+		}
+	}
+	var fns int
+	for _, raw := range resources {
+		res, _ := raw.(map[string]interface{})
+		if res["Type"] != "AWS::Serverless::Function" {
+			continue
+		}
+		fns++
+		props, _ := res["Properties"].(map[string]interface{})
+		walk(props["Policies"])
+	}
+	if fns == 0 || len(allowed) == 0 {
+		t.Fatalf("found %d functions and %d allowed actions in %s; the gate would pass vacuously", fns, len(allowed), samTemplatePath)
+	}
+	var checked int
+	for action := range grantedElsewhere {
+		if !strings.HasPrefix(action, "route53:") {
+			continue
+		}
+		checked++
+		if !allowed[action] {
+			t.Errorf("grantedElsewhere says template.yaml grants %s, but no Allow statement in its function Policies does", action)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no route53 entries in grantedElsewhere; the gate is reading the wrong table")
+	}
+}

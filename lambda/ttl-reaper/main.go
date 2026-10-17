@@ -162,6 +162,14 @@ type reaper struct {
 	dnsZoneID     string
 	dnsDomain     string
 
+	// dnsZones is every zone the reaper's DNS work covers, the primary
+	// (dnsZoneID/dnsDomain) first, then REAPER_DNS_EXTRA_ZONE_IDS (#1065). Teardown
+	// deletes a record in the zone its instance registered in (candidate.dnsDomain);
+	// the sweep, the unmanaged-subdomain report and lease expiry walk each zone.
+	// Before #1065 there was only the primary, so a spore registered in a custom
+	// zone (#891) had no backstop: a record its spored never deleted stayed.
+	dnsZones []dnsZone
+
 	// DNS reconciliation sweep (#438, opt-in via REAPER_DNS_SWEEP=true). The
 	// #247 teardown only deletes a record when the reaper still SEES the instance
 	// via DescribeInstances. A record whose instance died abruptly (hard crash,
@@ -190,6 +198,127 @@ type reaper struct {
 	// sweepDNS: an existing flag must never become destructive for a new class of
 	// record on upgrade. Needs the sweep on, like expireDNS.
 	expireLeases bool
+}
+
+// dnsZone is one hosted zone the reaper's DNS work covers.
+type dnsZone struct {
+	domain string // e.g. "spore.host", no trailing dot
+	zoneID string // e.g. "Z0341053304H0DQXF6U4X"
+}
+
+// inZone returns a copy of the reaper scoped to z: the zone-walking paths all
+// read r.dnsZoneID / r.dnsDomain, so running one per zone needs only this.
+func (r *reaper) inZone(z dnsZone) *reaper {
+	c := *r
+	c.dnsZoneID, c.dnsDomain = z.zoneID, z.domain
+	return &c
+}
+
+// configureDNSZones sets dnsZones: the primary, then each zone named in
+// extraIDs (REAPER_DNS_EXTRA_ZONE_IDS) that resolves (#1065). A zone that does
+// not is logged as not covered, and the rest still apply.
+func (r *reaper) configureDNSZones(ctx context.Context, g route53ZoneAPI, extraIDs string) {
+	primary := dnsZone{domain: r.dnsDomain, zoneID: r.dnsZoneID}
+	r.dnsZones = []dnsZone{primary}
+	extra, errs := resolveExtraZones(ctx, g, extraIDs, primary)
+	for _, e := range errs {
+		log.Printf("DNS: extra zone NOT covered: %v", e)
+	}
+	r.dnsZones = append(r.dnsZones, extra...)
+	names := make([]string, len(r.dnsZones))
+	for i, z := range r.dnsZones {
+		names[i] = z.domain
+	}
+	log.Printf("DNS zones covered: %s", strings.Join(names, ", "))
+}
+
+// sweepAccountDNSEveryZone runs the per-account record sweep in every covered
+// zone (#1065): an account's spores may have registered in any of them.
+func (r *reaper) sweepAccountDNSEveryZone(ctx context.Context, acct account, sum *Summary) {
+	for _, z := range r.zones() {
+		r.inZone(z).sweepAccountDNS(ctx, acct, sum)
+	}
+}
+
+// reportEveryZone runs the zone-wide walks — the unmanaged-subdomain report and
+// lease expiry — once per covered zone (#1065).
+func (r *reaper) reportEveryZone(ctx context.Context, sum *Summary, now time.Time) {
+	for _, z := range r.zones() {
+		zr := r.inZone(z)
+		zr.reportUnmanagedSubdomains(ctx, sum, now)
+		zr.reportLeases(ctx, sum, now)
+	}
+}
+
+// zones is every covered zone: dnsZones, or just the primary when dnsZones was
+// never populated (a reaper built from dnsZoneID/dnsDomain alone).
+func (r *reaper) zones() []dnsZone {
+	if len(r.dnsZones) > 0 {
+		return r.dnsZones
+	}
+	if r.dnsZoneID != "" && r.dnsDomain != "" {
+		return []dnsZone{{domain: r.dnsDomain, zoneID: r.dnsZoneID}}
+	}
+	return nil
+}
+
+// zoneFor returns the covered zone a record under domain lives in; "" means the
+// primary. ok is false when the domain is not one this reaper covers.
+func (r *reaper) zoneFor(domain string) (dnsZone, bool) {
+	if domain == "" {
+		domain = r.dnsDomain
+	}
+	for _, z := range r.zones() {
+		if strings.EqualFold(z.domain, domain) {
+			return z, true
+		}
+	}
+	return dnsZone{}, false
+}
+
+// route53ZoneAPI is the one call used to learn an extra zone's domain from its
+// ID at startup. Separate from route53API so the many fakes of that need not grow.
+type route53ZoneAPI interface {
+	GetHostedZone(ctx context.Context, in *route53.GetHostedZoneInput, optFns ...func(*route53.Options)) (*route53.GetHostedZoneOutput, error)
+}
+
+// resolveExtraZones turns REAPER_DNS_EXTRA_ZONE_IDS into zones, asking Route53
+// for each zone's name. Only IDs are configured — the template needs them for the
+// IAM grant, and a separately configured domain list could disagree with it — so
+// the domain is read from the zone itself. A zone that cannot be read, is private,
+// or duplicates the primary is skipped and named in the returned errors; the
+// others still apply.
+func resolveExtraZones(ctx context.Context, g route53ZoneAPI, raw string, primary dnsZone) ([]dnsZone, []error) {
+	var zones []dnsZone
+	var errs []error
+	seen := map[string]bool{strings.ToLower(primary.domain): true, primary.zoneID: true}
+	for _, id := range strings.Split(raw, ",") {
+		id = strings.TrimPrefix(strings.TrimSpace(id), "/hostedzone/")
+		if id == "" {
+			continue
+		}
+		out, err := g.GetHostedZone(ctx, &route53.GetHostedZoneInput{Id: aws.String(id)})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("zone %s: %w", id, err))
+			continue
+		}
+		if out.HostedZone == nil || out.HostedZone.Name == nil {
+			errs = append(errs, fmt.Errorf("zone %s: no name returned", id))
+			continue
+		}
+		if out.HostedZone.Config != nil && out.HostedZone.Config.PrivateZone {
+			errs = append(errs, fmt.Errorf("zone %s is private; spores register in public zones", id))
+			continue
+		}
+		domain := strings.ToLower(strings.TrimSuffix(aws.ToString(out.HostedZone.Name), "."))
+		if seen[domain] || seen[id] {
+			errs = append(errs, fmt.Errorf("zone %s (%s) is already covered", id, domain))
+			continue
+		}
+		seen[domain], seen[id] = true, true
+		zones = append(zones, dnsZone{domain: domain, zoneID: id})
+	}
+	return zones, errs
 }
 
 // route53API is the slice of *route53.Client the reaper uses: it lists record sets
@@ -263,7 +392,9 @@ func configure() {
 	// client when a zone is configured, so a deployment without DNS teardown
 	// stays a no-op (and needs no route53 IAM).
 	if r.dnsZoneID != "" && r.dnsDomain != "" {
-		r.route53Client = route53.NewFromConfig(cfg)
+		r53 := route53.NewFromConfig(cfg)
+		r.route53Client = r53
+		r.configureDNSZones(ctx, r53, os.Getenv("REAPER_DNS_EXTRA_ZONE_IDS"))
 		// The registry is wired whenever a zone is configured, NOT gated on
 		// expireDNS: the eligibility verdict is reported either way, and reporting
 		// it is how an operator decides whether turning expiry on is safe. The
@@ -633,6 +764,10 @@ type candidate struct {
 	dnsName       string // spawn:dns-name (empty = the instance registered no DNS)
 	accountBase36 string // spawn:account-base36 (the A-record's account subdomain)
 	accountName   string // spawn:account-name (the alias CNAME subdomain, #121; optional)
+	// dnsDomain is the zone spored registered in: spawn:dns-domain, written for a
+	// custom DNS target (#891). Empty means the reaper's primary zone, which is
+	// where every spore registered before #891.
+	dnsDomain string
 }
 
 // handler is the Lambda entrypoint. It delegates to run so the whole scan — in
@@ -735,7 +870,7 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 		// can't — the instance is already gone from the EC2 API. Opt-in + best-
 		// effort; never affects the terminate path above.
 		if r.sweepDNS {
-			r.sweepAccountDNS(ctx, acct, &sum)
+			r.sweepAccountDNSEveryZone(ctx, acct, &sum)
 		}
 
 		outcomes = append(outcomes, outcome)
@@ -755,8 +890,7 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 	// signal. Walk the zone once and report those. Deliberately after the loop:
 	// it needs the full configured set to diff against.
 	if r.sweepDNS {
-		r.reportUnmanagedSubdomains(ctx, &sum, start)
-		r.reportLeases(ctx, &sum, start)
+		r.reportEveryZone(ctx, &sum, start)
 	}
 
 	log.Printf("ttl-reaper done in %s: %+v", time.Since(start).Round(time.Millisecond), sum)
@@ -821,6 +955,7 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 		dnsName:       tags[tagprefix.Tag("dns-name")],
 		accountBase36: tags[tagprefix.Tag("account-base36")],
 		accountName:   tags[tagprefix.Tag("account-name")],
+		dnsDomain:     tags[tagprefix.Tag("dns-domain")],
 	}
 	if pt := tags[tagprefix.Tag("pre-stop-timeout")]; pt != "" {
 		if d, err := time.ParseDuration(pt); err == nil {
@@ -1264,6 +1399,16 @@ func (r *reaper) deleteDNS(ctx context.Context, c candidate) {
 	if r.route53Client == nil {
 		return // teardown disabled
 	}
+	// The zone the instance registered in (#1065): its spawn:dns-domain, else the
+	// primary. One this reaper does not cover is reported, not guessed at.
+	z, ok := r.zoneFor(c.dnsDomain)
+	if !ok {
+		if c.dnsName != "" {
+			log.Printf("DNS teardown: %s registered in %s, which this reaper does not cover — add its zone to REAPER_DNS_EXTRA_ZONE_IDS", c.id, c.dnsDomain)
+		}
+		return
+	}
+	r = r.inZone(z)
 	records := dnsRecordsToDelete(c, r.dnsDomain)
 	if records == nil && c.dnsName != "" && c.accountBase36 == "" {
 		log.Printf("DNS teardown: %s has spawn:dns-name=%q but no spawn:account-base36 tag — skipping", c.id, c.dnsName)

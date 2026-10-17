@@ -95,11 +95,24 @@ spored registered it, unless `--domain` / `--endpoint` say otherwise.
 
 ## Limits
 
-- **Lease expiry.** spore.host's TTL reaper expires leases in the spore.host
-  zone only (`lambda/ttl-reaper/lease_expiry.go`). A spore that terminates
-  cleanly deletes its own record. One that dies without doing so leaves its
-  record in your zone until something removes it. Run the reaper with your
-  zone's DNS parameters, or clean up with `spawn dns delete`. Tracked in #1065.
+- **The TTL reaper must be told about the zone.** A spore that terminates
+  cleanly deletes its own record. One that dies without doing so (a crash, an
+  out-of-band terminate) leaves it, and only the TTL reaper's DNS work —
+  teardown, the reconciliation sweep, lease expiry — removes it. That covers
+  the zone in `DnsZoneId` plus every zone in `DnsExtraZoneIds` (#1065), so add
+  your zone's ID there, or run a reaper of your own with your zone as
+  `DnsZoneId`:
+
+  ```bash
+  cd lambda/ttl-reaper && make deploy DNS_EXTRA_ZONE_IDS=Z0123456789ABCDEFGHIJ
+  ```
+
+  `make deploy` keeps every other live parameter, so that is the only change;
+  comma-separate several IDs. The reaper reads each zone's domain from Route53 at startup and logs
+  `DNS zones covered: …`. A zone it cannot read is logged as `NOT covered`, and
+  the others still apply. A spore registered in a zone the reaper doesn't
+  cover is logged at teardown and left alone. Until then, clean up with
+  `spawn dns delete`.
 - **Paths that bypass the launch preflight.** `spawn launch`, its `--count`
   arrays and `--mpi` cohorts resolve the target. Launches built elsewhere
   (batch queue, parameter sweeps, `spawn burst`) register under spore.host as
