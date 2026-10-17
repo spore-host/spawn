@@ -84,7 +84,7 @@ func (a *Agent) maybeSetupWebReady(ctx context.Context) {
 		a.webProxyStarted = true
 	}
 
-	host := a.identity.PublicIP
+	host := a.publicIP()
 	if a.config.DNSName != "" && a.dnsDomain != "" {
 		host = dns.GetFullDNSName(a.config.DNSName, a.identity.AccountID, a.dnsDomain)
 	}
