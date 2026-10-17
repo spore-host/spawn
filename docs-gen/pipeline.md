@@ -33,9 +33,20 @@ spawn pipeline cancel <pipeline-id> [flags]
 
 ### `spawn pipeline collect`
 
-Download all results from a completed pipeline.
+Download the stage outputs of a pipeline run.
 
-Downloads outputs from all stages to a local directory.
+Downloads every stage's data_output files from the pipeline's s3_bucket, under
+&lt;s3_prefix&gt;/runs/&lt;run-id&gt;/stages/&lt;stage&gt;/output/, to
+&lt;output-dir&gt;/&lt;stage&gt;/&lt;file&gt;. A stage with instance_count &gt; 1 keeps each
+instance's files under its index: &lt;output-dir&gt;/&lt;stage&gt;/&lt;index&gt;/&lt;file&gt;. Stage
+COMPLETE/FAILED markers are not downloaded.
+
+The pipeline's latest run is collected unless --run names another run of the
+same pipeline id. An object whose key would land outside --output-dir is
+refused, and nothing is downloaded.
+
+result_s3_bucket and result_s3_prefix are deprecated and ignored: nothing
+writes there (#989).
 
 ```
 spawn pipeline collect <pipeline-id> [flags]
@@ -46,6 +57,7 @@ spawn pipeline collect <pipeline-id> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--output-dir` |  | string | `./results` | Output directory for downloaded files |
+| `--run` |  | string |  | Run id to collect, as printed at launch (default: the pipeline's latest run) |
 | `--stage` |  | string |  | Download results from specific stage only |
 
 ### `spawn pipeline graph`

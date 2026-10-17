@@ -68,4 +68,27 @@ Under the pipeline's `s3_bucket`, each run (#943) has its own prefix:
   stages/<stage>/<instance-index>/FAILED
 ```
 
-`spawn pipeline collect <pipeline-id>` downloads the run's `stages/` tree.
+## Collecting results
+
+`spawn pipeline collect <pipeline-id>` downloads the latest run's stage
+outputs, every `stages/<stage>/output/` above, into `--output-dir` (default
+`./results`):
+
+| in S3 | downloaded as |
+|---|---|
+| `stages/<stage>/output/<file>` | `<output-dir>/<stage>/<file>` |
+| `stages/<stage>/output/<instance-index>/<file>` | `<output-dir>/<stage>/<instance-index>/<file>` |
+
+The `COMPLETE` and `FAILED` markers and the stage config are not downloaded.
+`--stage <stage>` collects one stage. `--run <run-id>` collects an earlier run
+of the same `pipeline_id`; the run id is printed at launch, and when a run has
+no outputs, `collect` lists the runs it can find. An object whose key would
+land outside `--output-dir` (a key containing `..`) is refused, and then
+nothing is downloaded.
+
+**`result_s3_bucket` and `result_s3_prefix` are deprecated and ignored.**
+Nothing ever wrote to them, and the stage instances are not allowed to: their
+instance profile is granted `s3_bucket/<s3_prefix>/*` only. `collect` used to
+read them, so on every example that set them it reported "No results found"
+(#989). To keep a pipeline's results in a particular bucket, make that its
+`s3_bucket`. `validate` and `launch` warn when a definition still sets them.

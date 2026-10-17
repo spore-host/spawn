@@ -18,9 +18,17 @@ type Pipeline struct {
 	Stages       []Stage `json:"stages"`
 
 	// S3 configuration
-	S3Bucket       string `json:"s3_bucket"`
-	S3Prefix       string `json:"s3_prefix"`
+	S3Bucket string `json:"s3_bucket"`
+	S3Prefix string `json:"s3_prefix"`
+
+	// Deprecated: nothing writes result_s3_bucket. Stage outputs stay in
+	// s3_bucket under the run's prefix, which is where `spawn pipeline
+	// collect` reads them; the stage instance profile is granted only that
+	// prefix. collect used to read this location instead and reported "No
+	// results found" for every pipeline that set it (#989). Still parsed,
+	// so existing definitions load, and reported by Deprecations.
 	ResultS3Bucket string `json:"result_s3_bucket"`
+	// Deprecated: see ResultS3Bucket.
 	ResultS3Prefix string `json:"result_s3_prefix"`
 
 	// Failure handling
@@ -253,6 +261,20 @@ func LoadPipelineFromJSON(data []byte) (*Pipeline, error) {
 }
 
 // Validate validates the pipeline configuration
+// Deprecations returns a warning for each deprecated field the definition
+// sets. They are warnings, not validation errors, so a definition that sets
+// them still launches.
+func (p *Pipeline) Deprecations() []string {
+	var out []string
+	if p.ResultS3Bucket != "" || p.ResultS3Prefix != "" {
+		out = append(out, "result_s3_bucket and result_s3_prefix are deprecated and ignored: "+
+			"nothing writes there. Stage outputs stay in s3_bucket under "+
+			"<s3_prefix>/runs/<run-id>/, and `spawn pipeline collect` downloads them from there. "+
+			"To keep results in a particular bucket, set s3_bucket and s3_prefix to it (#989)")
+	}
+	return out
+}
+
 func (p *Pipeline) Validate() error {
 	if p.PipelineID == "" {
 		return fmt.Errorf("pipeline_id is required")

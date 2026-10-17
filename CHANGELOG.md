@@ -95,6 +95,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attaches an EFA, shared by `spawn launch --efa` and pipeline EFA stages
   (#956). This is an addition to the public `pkg/aws` surface.
 
+### Deprecated
+
+- **`result_s3_bucket` and `result_s3_prefix` in a pipeline definition**
+  (#989). Nothing ever wrote to them: stage outputs stay in `s3_bucket`, and
+  the stage instances are granted only `s3_bucket/<s3_prefix>/*`, so they
+  could not write anywhere else. `spawn pipeline collect` no longer reads them,
+  and `validate`, `launch` and `collect` warn when they are set. Stage commands
+  still see them as `SPAWN_RESULT_S3_BUCKET` and `SPAWN_RESULT_S3_PREFIX`, and
+  still cannot write there. To keep a pipeline's results in a particular
+  bucket, make it the `s3_bucket`.
+  The three examples that set them no longer do.
+
 ### Fixed
 
 - **`--on-idle hibernate` and `--on-complete hibernate` now hibernate** (#949).
@@ -253,9 +265,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connects them. A `stream`-mode `data_input` whose source stage is in another
   region is now an error that says to use `s3` mode or one region. Cross-region
   networking is not implemented.
+- **`spawn pipeline collect` downloads the run's stage outputs** (#989). It
+  read `result_s3_bucket` whenever a definition set it, and nothing writes
+  there, so on `ml-training.json`, `fanout-fanin.json` and
+  `video-streaming.json` it printed "No results found". It now reads every
+  stage's `data_output` files from `s3_bucket`, under
+  `<s3_prefix>/runs/<run-id>/stages/<stage>/output/`, into
+  `<output-dir>/<stage>/<file>`, or `<output-dir>/<stage>/<instance-index>/<file>`
+  for a stage with `instance_count > 1`. Also:
+  - It collects every object, not just the first 1000. It made one listing
+    call and reported the first page as everything.
+  - The `COMPLETE` and `FAILED` markers are no longer downloaded as results.
+  - It collects the pipeline's latest run. The new `--run <run-id>` flag
+    collects an earlier run of the same `pipeline_id`. A run with no outputs
+    lists the runs that have data.
+  - A file that fails to download makes `collect` exit non-zero. It used to
+    print a warning and then report success.
+
+  Downloads are laid out by stage, not by full S3 key as before, so scripts
+  that read `./results/<s3_prefix>/stages/...` need the new paths.
 
 ### Security
 
+- **`spawn pipeline collect` no longer writes outside `--output-dir`** (#989).
+  It wrote each object to `<output-dir>/<object key>` without checking the
+  key. Anyone able to write to the pipeline's `s3_bucket`, a stage command
+  among them, could name an object `.../output/../../../../.bashrc` and have
+  `collect` write it wherever that resolved on the machine that ran it. A key
+  that would land outside its stage's directory in `--output-dir` is now
+  refused, and then nothing is downloaded. Files are written through an
+  `os.Root`, so a symlink already in the directory cannot lead out of it either.
 - **A streaming pipeline's security group no longer opens SSH to the internet**
   (#929). It allowed tcp/22 from `0.0.0.0/0`. SSH, like the streaming ports, is
   now allowed only from the pipeline's own instances (the group itself).

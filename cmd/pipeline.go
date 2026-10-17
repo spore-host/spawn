@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -101,9 +100,20 @@ Displays:
 var collectPipelineCmd = &cobra.Command{
 	Use:   "collect <pipeline-id>",
 	Short: "Download pipeline results",
-	Long: `Download all results from a completed pipeline.
+	Long: `Download the stage outputs of a pipeline run.
 
-Downloads outputs from all stages to a local directory.`,
+Downloads every stage's data_output files from the pipeline's s3_bucket, under
+<s3_prefix>/runs/<run-id>/stages/<stage>/output/, to
+<output-dir>/<stage>/<file>. A stage with instance_count > 1 keeps each
+instance's files under its index: <output-dir>/<stage>/<index>/<file>. Stage
+COMPLETE/FAILED markers are not downloaded.
+
+The pipeline's latest run is collected unless --run names another run of the
+same pipeline id. An object whose key would land outside --output-dir is
+refused, and nothing is downloaded.
+
+result_s3_bucket and result_s3_prefix are deprecated and ignored: nothing
+writes there (#989).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCollectPipeline,
 }
@@ -142,6 +152,7 @@ var (
 	flagStatusFilter string
 	flagCancelYes    bool
 	flagReplace      bool
+	flagCollectRun   string
 )
 
 func init() {
@@ -181,6 +192,8 @@ func init() {
 	collectPipelineCmd.Flags().StringVar(&flagOutputDir, "output", "./results", "Output directory for downloaded files")
 	_ = collectPipelineCmd.Flags().MarkDeprecated("output", "use --output-dir instead")
 	collectPipelineCmd.Flags().StringVar(&flagStage, "stage", "", "Download results from specific stage only")
+	collectPipelineCmd.Flags().StringVar(&flagCollectRun, "run", "",
+		"Run id to collect, as printed at launch (default: the pipeline's latest run)")
 
 	// List command flags
 	listPipelineCmd.Flags().StringVar(&flagStatusFilter, "status", "", "Filter by status (INITIALIZING, RUNNING, COMPLETED, FAILED, CANCELLED)")
@@ -201,6 +214,7 @@ func runValidatePipeline(cmd *cobra.Command, args []string) error {
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
+	warnPipelineDeprecations(p, os.Stderr)
 
 	_, _ = fmt.Fprintf(os.Stdout, "✓ Pipeline is valid\n\n")
 	_, _ = fmt.Fprintf(os.Stdout, "Pipeline: %s\n", p.PipelineName)
@@ -292,6 +306,14 @@ func runGraphPipeline(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// warnPipelineDeprecations prints a warning for each deprecated field the
+// definition sets.
+func warnPipelineDeprecations(p *pipeline.Pipeline, w io.Writer) {
+	for _, d := range p.Deprecations() {
+		fmt.Fprintf(w, "⚠️  %s\n", d)
+	}
+}
+
 // pipelineStageIAMConfig is the role config for a pipeline's stage instances:
 // the pipeline's S3 data grant. CreateOrGetInstanceProfile adds the spored
 // self-management baseline (tags, self-terminate) and SSM, and names the role
@@ -318,6 +340,7 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
+	warnPipelineDeprecations(p, os.Stderr)
 
 	fmt.Fprintf(os.Stderr, "🚀 Launching pipeline: %s\n", p.PipelineName)
 	fmt.Fprintf(os.Stderr, "   Pipeline ID: %s\n", p.PipelineID)
@@ -422,8 +445,6 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 		S3ConfigKey:     fmt.Sprintf("s3://%s/%s", bucketName, s3Key),
 		S3Bucket:        p.S3Bucket,
 		S3Prefix:        p.S3Prefix,
-		ResultS3Bucket:  p.ResultS3Bucket,
-		ResultS3Prefix:  p.ResultS3Prefix,
 		OnFailure:       p.OnFailure,
 		CurrentCostUSD:  0.0,
 		TotalStages:     len(p.Stages),
@@ -433,6 +454,10 @@ func runLaunchPipeline(cmd *cobra.Command, args []string) error {
 		MaxCostUSD:      p.MaxCostUSD,
 		InstanceProfile: instanceProfile,
 	}
+
+	// Recorded though deprecated, so collect can say the results are not there.
+	//lint:ignore SA1019 the deprecated fields are copied, not used (#989)
+	state.ResultS3Bucket, state.ResultS3Prefix = p.ResultS3Bucket, p.ResultS3Prefix
 
 	if err := createPipelineRecord(ctx, store, state, flagReplace, os.Stderr); err != nil {
 		// Nothing will read this run's definition.
@@ -756,99 +781,11 @@ func runCollectPipeline(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pipeline not found: %s", pipelineID)
 	}
 
-	// Get S3 result location
-	resultBucket := state.ResultS3Bucket
-	resultPrefix := state.ResultS3Prefix
-	if resultBucket == "" {
-		// Fall back to stage output locations
-		resultBucket = state.S3Bucket
-		// The run's own stage data (#943), not every run under s3_prefix.
-		resultPrefix = fmt.Sprintf("%s/stages", state.DataPrefix())
-	}
-
-	if resultBucket == "" {
-		return fmt.Errorf("no result bucket configured for pipeline")
-	}
-
-	fmt.Fprintf(os.Stderr, "📍 Source: s3://%s/%s\n\n", resultBucket, resultPrefix)
-
-	// Create output directory
-	if err := os.MkdirAll(flagOutputDir, 0755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
-	}
-
-	// Download from S3
-	s3Client := s3.NewFromConfig(cfg)
-
-	// List objects
-	fmt.Fprintf(os.Stderr, "🔍 Listing objects...\n")
-	listOutput, err := s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(resultBucket),
-		Prefix: aws.String(resultPrefix),
-	})
-	if err != nil {
-		return fmt.Errorf("list S3 objects: %w", err)
-	}
-
-	if len(listOutput.Contents) == 0 {
-		fmt.Fprintf(os.Stderr, "⚠️  No results found\n")
-		return nil
-	}
-
-	fmt.Fprintf(os.Stderr, "📥 Downloading %d objects...\n", len(listOutput.Contents))
-
-	// Download each object
-	downloadCount := 0
-	for _, obj := range listOutput.Contents {
-		// Skip directories (keys ending with /)
-		if len(*obj.Key) > 0 && (*obj.Key)[len(*obj.Key)-1] == '/' {
-			continue
-		}
-
-		// Filter by stage if specified
-		if flagStage != "" {
-			// Check if object key contains the stage ID
-			if !contains(*obj.Key, fmt.Sprintf("/stages/%s/", flagStage)) {
-				continue
-			}
-		}
-
-		// Download to local file
-		localPath := fmt.Sprintf("%s/%s", flagOutputDir, *obj.Key)
-		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
-			return fmt.Errorf("create directory for %s: %w", localPath, err)
-		}
-
-		getOutput, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(resultBucket),
-			Key:    obj.Key,
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Failed to download %s: %v\n", *obj.Key, err)
-			continue
-		}
-
-		// Write to file
-		file, err := os.Create(localPath)
-		if err != nil {
-			_ = getOutput.Body.Close()
-			return fmt.Errorf("create file %s: %w", localPath, err)
-		}
-
-		_, err = io.Copy(file, getOutput.Body)
-		_ = file.Close()
-		_ = getOutput.Body.Close()
-		if err != nil {
-			return fmt.Errorf("write file %s: %w", localPath, err)
-		}
-
-		downloadCount++
-		fmt.Fprintf(os.Stderr, "   ✓ %s\n", *obj.Key)
-	}
-
-	fmt.Fprintf(os.Stderr, "\n✅ Downloaded %d files to %s\n", downloadCount, flagOutputDir)
-
-	return nil
+	return pipeline.CollectRunOutputs(ctx, s3.NewFromConfig(cfg), state, pipeline.CollectOptions{
+		RunID:     flagCollectRun,
+		StageID:   flagStage,
+		OutputDir: flagOutputDir,
+	}, os.Stderr)
 }
 
 func runListPipeline(cmd *cobra.Command, args []string) error {
@@ -949,17 +886,4 @@ func runCancelPipeline(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "  spawn pipeline status %s\n", pipelineID)
 
 	return nil
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || indexString(s, substr) >= 0)
-}
-
-func indexString(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }
