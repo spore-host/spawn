@@ -103,6 +103,7 @@ type harness struct {
 	saved     int
 	reinvoked int
 	cleaned   int
+	prices    map[string]float64 // instance type -> $/h; negative = unpriceable
 }
 
 func newHarness(t *testing.T, state *pipeline.PipelineState) *harness {
@@ -111,12 +112,23 @@ func newHarness(t *testing.T, state *pipeline.PipelineState) *harness {
 		ec2:     &fakeEC2{states: map[string]string{}, terminated: map[string][]string{}},
 		markers: &fakeMarkers{present: map[string]bool{}},
 	}
-	oldMarkers, oldEC2, oldLoad, oldSave, oldReinvoke, oldNotify, oldNet :=
-		markers, ec2ForRegion, loadStateFn, saveStateFn, reinvokeFn, notifyFn, cleanupNetFn
+	oldMarkers, oldEC2, oldLoad, oldSave, oldReinvoke, oldNotify, oldNet, oldPrice :=
+		markers, ec2ForRegion, loadStateFn, saveStateFn, reinvokeFn, notifyFn, cleanupNetFn, priceFn
 	t.Cleanup(func() {
-		markers, ec2ForRegion, loadStateFn, saveStateFn, reinvokeFn, notifyFn, cleanupNetFn =
-			oldMarkers, oldEC2, oldLoad, oldSave, oldReinvoke, oldNotify, oldNet
+		markers, ec2ForRegion, loadStateFn, saveStateFn, reinvokeFn, notifyFn, cleanupNetFn, priceFn =
+			oldMarkers, oldEC2, oldLoad, oldSave, oldReinvoke, oldNotify, oldNet, oldPrice
 	})
+	// $1/instance-hour unless a test sets h.prices.
+	h.prices = map[string]float64{}
+	priceFn = func(_ context.Context, instanceType, _ string) (float64, string, error) {
+		if p, ok := h.prices[instanceType]; ok {
+			if p < 0 {
+				return 0, "", fmt.Errorf("no price for %s", instanceType)
+			}
+			return p, "test", nil
+		}
+		return 1, "test", nil
+	}
 	markers = h.markers
 	ec2ForRegion = func(_ context.Context, region string) (stageEC2API, error) {
 		return regionalEC2{f: h.ec2, region: region}, nil
@@ -173,7 +185,7 @@ func TestFailedMarkerFailsThePipelineAndTerminatesItsInstances(t *testing.T) {
 	state, def := twoStagePipeline("stop", time.Now())
 	h := newHarness(t, state)
 	h.ec2.states["i-train"] = "running" // the instance has NOT gone; only the marker says it failed
-	h.markers.present["pfx/stages/train/FAILED"] = true
+	h.markers.present[pipeline.StageInstanceMarkerKey("pfx", "train", 0, pipeline.MarkerFailed)] = true
 
 	done, err := pollOnce(context.Background(), state, def, mustOrder(t, def), time.Now())
 	if err != nil {
@@ -205,8 +217,8 @@ func TestFailedMarkerWinsOverComplete(t *testing.T) {
 	state, def := twoStagePipeline("stop", time.Now())
 	h := newHarness(t, state)
 	h.ec2.states["i-train"] = "running"
-	h.markers.present["pfx/stages/train/FAILED"] = true
-	h.markers.present["pfx/stages/train/COMPLETE"] = true
+	h.markers.present[pipeline.StageInstanceMarkerKey("pfx", "train", 0, pipeline.MarkerFailed)] = true
+	h.markers.present[pipeline.StageInstanceMarkerKey("pfx", "train", 0, pipeline.MarkerComplete)] = true
 
 	outcome, _, err := checkStageOutcome(context.Background(), state, def.GetStage("train"), getStageState(state, "train"), time.Now())
 	if err != nil {
@@ -378,7 +390,7 @@ func TestBudgetExceededTerminatesAndFinishes(t *testing.T) {
 	h := newHarness(t, state)
 	h.ec2.states["i-train"] = "running"
 	h.ec2.states["i-other"] = "running"
-	h.markers.present["pfx/stages/train/COMPLETE"] = true
+	h.markers.present[pipeline.StageInstanceMarkerKey("pfx", "train", 0, pipeline.MarkerComplete)] = true
 	trainLaunched := time.Now().Add(-10 * time.Hour)
 	getStageState(state, "train").LaunchedAt = &trainLaunched
 
@@ -498,6 +510,7 @@ type userDataRun struct {
 	stageDef     *pipeline.Stage
 	stageState   *pipeline.StageState
 	region       string
+	index        int      // the instance index within its stage
 	spored       string   // the file the fake curl serves as the spored binary
 	failDownload bool     // every binary download fails
 	env          []string // extra environment, e.g. AWS endpoints for a real spored
@@ -519,7 +532,7 @@ func execUserData(t *testing.T, r userDataRun) (string, error) {
 	if err != nil {
 		t.Skip("bash not available")
 	}
-	ud, err := generatePipelineUserData(r.state, r.stageDef, r.stageState, 0, r.region)
+	ud, err := generatePipelineUserData(r.state, r.stageDef, r.stageState, r.index, r.region)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +638,7 @@ func TestUserData_FailedStageTerminates(t *testing.T) {
 	if err == nil {
 		t.Error("script exited 0 for a failing stage")
 	}
-	if !strings.Contains(calls, "aws s3 cp - s3://bkt/"+pipeline.StageMarkerKey("pfx", "train", pipeline.MarkerFailed)) {
+	if !strings.Contains(calls, "aws s3 cp - s3://bkt/"+pipeline.StageInstanceMarkerKey("pfx", "train", 0, pipeline.MarkerFailed)) {
 		t.Errorf("fallback FAILED marker not written at the key the orchestrator reads; calls:\n%s", calls)
 	}
 	assertSelfTerminated(t, calls)
@@ -694,8 +707,13 @@ func TestLaunchStageGivesTheRunnerItsTagsConfigAndProfile(t *testing.T) {
 	var events []string
 	written := map[string][]byte{}
 	launcher := &fakeLauncher{events: &events}
-	oldPut, oldLaunch, oldAMI := putObjectFn, launchEC2ForRegion, recommendedAMIFn
-	t.Cleanup(func() { putObjectFn, launchEC2ForRegion, recommendedAMIFn = oldPut, oldLaunch, oldAMI })
+	oldPut, oldLaunch, oldAMI, oldPrice := putObjectFn, launchEC2ForRegion, recommendedAMIFn, priceFn
+	t.Cleanup(func() {
+		putObjectFn, launchEC2ForRegion, recommendedAMIFn, priceFn = oldPut, oldLaunch, oldAMI, oldPrice
+	})
+	// The stage is priced before launch (#930); the real priceFn calls the
+	// AWS Price List.
+	priceFn = func(context.Context, string, string) (float64, string, error) { return 1, "test", nil }
 	putObjectFn = func(_ context.Context, in *s3.PutObjectInput) error {
 		b, _ := io.ReadAll(in.Body)
 		written["s3://"+aws.ToString(in.Bucket)+"/"+aws.ToString(in.Key)] = b
@@ -765,7 +783,7 @@ func TestUserDataFallbackMarkerIsTheOrchestratorsKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := base64.StdEncoding.DecodeString(ud)
-	want := "SPAWN_FAILED_MARKER='s3://bkt/" + pipeline.StageMarkerKey("pfx", "train", pipeline.MarkerFailed) + "'"
+	want := "SPAWN_FAILED_MARKER='s3://bkt/" + pipeline.StageInstanceMarkerKey("pfx", "train", 0, pipeline.MarkerFailed) + "'"
 	if !strings.Contains(string(raw), "\n"+want+"\n") {
 		t.Errorf("user data does not assign %s", want)
 	}

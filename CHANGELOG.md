@@ -138,8 +138,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `spawn-pipeline-orchestrator` Lambda has to be redeployed (its template
   now lets it pass the stage profile), and pipelines have to be launched with
   this CLI.
+- **A stage with `instance_count > 1` completes only when every instance has**
+  (#930). Every instance wrote the same stage-level `COMPLETE` key. The first
+  one to finish marked the whole stage complete, its dependents launched while
+  the other instances were still running, and a sibling's later `FAILED` was
+  never read. Markers are now per instance
+  (`<prefix>/stages/<stage>/<instance-index>/COMPLETE|FAILED`). Any one instance
+  failing, or exiting without `COMPLETE`, fails the stage. Stage-level markers
+  from instances launched before the upgrade are still read.
+- **`max_cost_usd` is enforced against real prices, including running stages**
+  (#930). Every instance-hour was charged a flat $0.10 whatever the instance
+  type, and only once a stage finished. On a `p4d.24xlarge` (about $32/hour) a
+  $100 budget let roughly $30,000 through. Each stage is now priced at its
+  instance type's on-demand rate, through the same truffle pricing that
+  `--cost-limit` uses. Spot stages are also priced at on-demand, so the
+  estimate is an upper bound. The budget is checked on every poll against
+  finished stages plus the elapsed time of running ones. With a budget set, a
+  stage whose price cannot be determined fails before launching anything. The
+  figure is reported as an estimate everywhere: notifications, and
+  `spawn pipeline status`/`list` ("Estimated cost", "EST COST"). It excludes EBS
+  and data transfer.
+- **Streaming and EFA pipelines with stages outside the Lambda's region now
+  launch** (#929). The security group and placement group were created once,
+  in the orchestrator Lambda's region (us-east-1), and passed to `RunInstances`
+  in each stage's region, where they do not exist. One of each is now created
+  in every region that needs it, recorded per region, and deleted there.
 
 ### Security
+
+- **A streaming pipeline's security group no longer opens SSH to the internet**
+  (#929). It allowed tcp/22 from `0.0.0.0/0`. SSH, like the streaming ports, is
+  now allowed only from the pipeline's own instances (the group itself).
 
 - **The SAM-deployed TTL reaper's `ScanSelf=true` policy no longer grants
   unconditioned `ssm:SendCommand`** (#985). `lambda/ttl-reaper/template.yaml`

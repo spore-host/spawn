@@ -546,16 +546,16 @@ func runStatusPipeline(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "\n")
 
-	// Cost
-	_, _ = fmt.Fprintf(os.Stdout, "Cost: $%.2f", state.CurrentCostUSD)
+	// Cost: an estimate at on-demand rates (#930), and labelled as one.
+	_, _ = fmt.Fprintf(os.Stdout, "Estimated cost: $%.2f", state.CurrentCostUSD)
 	if state.MaxCostUSD != nil && *state.MaxCostUSD > 0 {
 		_, _ = fmt.Fprintf(os.Stdout, " / $%.2f", *state.MaxCostUSD)
 	}
-	_, _ = fmt.Fprintf(os.Stdout, "\n\n")
+	_, _ = fmt.Fprintf(os.Stdout, " (finished stages, at on-demand rates)\n\n")
 
 	// Stages table
 	if len(state.Stages) > 0 {
-		_, _ = fmt.Fprintf(os.Stdout, "STAGE                STATUS       INSTANCES  COST      DURATION\n")
+		_, _ = fmt.Fprintf(os.Stdout, "STAGE                STATUS       INSTANCES  EST COST  DURATION\n")
 		_, _ = fmt.Fprintf(os.Stdout, "─────────────────────────────────────────────────────────────────\n")
 		for _, stage := range state.Stages {
 			// Calculate duration
@@ -760,7 +760,7 @@ func runListPipeline(cmd *cobra.Command, args []string) error {
 	}
 
 	// Table output
-	_, _ = fmt.Fprintf(os.Stdout, "PIPELINE ID                    NAME                          STATUS       COST      CREATED\n")
+	_, _ = fmt.Fprintf(os.Stdout, "PIPELINE ID                    NAME                          STATUS       EST COST  CREATED\n")
 	_, _ = fmt.Fprintf(os.Stdout, "──────────────────────────────────────────────────────────────────────────────────────────────────\n")
 	for _, p := range pipelines {
 		// Format created time
