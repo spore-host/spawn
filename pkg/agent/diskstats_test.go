@@ -53,7 +53,7 @@ func fakeSysBlock(t *testing.T, disks ...sysBlockDisk) string {
 	for i, d := range disks {
 		var devDir string
 		if d.hardware {
-			bus := filepath.Join(root, "devices", "pci0000:00", "0000:00:0"+strconv.Itoa(i)+".0")
+			bus := filepath.Join(root, "devices", "pci0000-00", "0000-00-0"+strconv.Itoa(i)+".0") // "-" not ":": Windows rejects ":" in names, and nothing reads them (#971)
 			mkdir(bus)
 			devDir = filepath.Join(bus, "block", d.name)
 			mkdir(devDir)
