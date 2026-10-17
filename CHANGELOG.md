@@ -163,6 +163,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the orchestrator Lambda's region (us-east-1), and passed to `RunInstances`
   in each stage's region, where they do not exist. One of each is now created
   in every region that needs it, recorded per region, and deleted there.
+- **Launching a pipeline again no longer hijacks the run in flight, and runs
+  never read each other's results** (#943). `pipeline_id` comes from the
+  definition file, so launching the same file twice reused it, and two things
+  went wrong:
+  - The second launch replaced the running pipeline's record with an empty
+    one. The first run's instances were no longer listed anywhere, and two
+    orchestrators ran against one record. `spawn pipeline launch` now refuses
+    when the pipeline has a run in flight, and says how to proceed. The new
+    `--replace` flag cancels the run in flight, waits up to 5 minutes for its
+    instances to be terminated, and then starts the new run. The check is a
+    conditional write, so two concurrent launches cannot both pass it. A
+    finished pipeline (completed, failed or cancelled) can still be launched
+    again without `--replace`.
+  - Stage markers and outputs were keyed by `s3_prefix` alone, so a second run
+    under the same prefix found the first run's `COMPLETE` markers. Its stages
+    were marked complete before they had done anything, and its dependents
+    downloaded the first run's outputs. A stale `FAILED` failed a fresh run.
+    Every launch now gets a run id (printed at launch, and in the record as
+    `run_id`). A run's markers, outputs and stage config live under
+    `<s3_prefix>/runs/<run-id>/`, and `spawn pipeline collect` reads only that
+    run. The stage command sees the run's prefix as `SPAWN_S3_PREFIX`, and the
+    run id as `SPAWN_RUN_ID`.
+  - The orchestrator writes only over its own run's record. A run that has been
+    replaced terminates its own instances and stops. The security and placement
+    group names carry the run id.
+
+  Pipelines launched before this keep the old layout until they finish. The
+  refusal needs only this CLI; run isolation also needs the
+  `spawn-pipeline-orchestrator` Lambda redeployed.
 
 ### Security
 

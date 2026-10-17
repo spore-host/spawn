@@ -76,6 +76,15 @@ Launch a multi-stage pipeline.
 The pipeline definition will be uploaded to S3 and a Lambda orchestrator
 will be invoked to manage the pipeline execution.
 
+Each launch is a new run with its own run id. A run's stage markers, outputs
+and config live under &lt;s3_prefix&gt;/runs/&lt;run-id&gt;/, so a run never reads
+another run's results, even under the same s3_prefix.
+
+pipeline_id comes from the definition file, so launching the same file again
+reuses it. If that pipeline has a run still in flight, launch refuses rather
+than replacing the running pipeline's record. --replace cancels the run in
+flight (its instances are terminated) and then starts the new one.
+
 ```
 spawn pipeline launch <file> [flags]
 ```
@@ -85,6 +94,7 @@ spawn pipeline launch <file> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--region` |  | string |  | AWS region (default: from AWS config) |
+| `--replace` |  | bool |  | If the pipeline has a run in flight, cancel it (terminating its instances) and start a new run |
 | `--wait-timeout` |  | duration | `24h0m0s` | Give up waiting after this long (the pipeline keeps running; --wait then exits non-zero) |
 | `--wait` |  | bool |  | Block until the pipeline reaches a terminal state, and exit non-zero if it did not succeed |
 

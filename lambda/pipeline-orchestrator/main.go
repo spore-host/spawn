@@ -140,10 +140,19 @@ var (
 	}
 )
 
-// PipelineEvent is the Lambda input event
+// PipelineEvent is the Lambda input event. RunID is the run the invocation is
+// for: `spawn pipeline launch` and every re-invocation send it, and an
+// invocation for a run the record no longer holds exits (#943). Empty from a
+// CLI or an orchestrator from before run ids, and then not checked.
 type PipelineEvent struct {
 	PipelineID string `json:"pipeline_id"`
+	RunID      string `json:"run_id,omitempty"`
 }
+
+// errSuperseded is returned by savePipelineState when the record now belongs
+// to another run of the pipeline: this chain was replaced (#943) and must not
+// write over the new run's record.
+var errSuperseded = errors.New("the pipeline record belongs to another run")
 
 var (
 	awsCfg         aws.Config
@@ -189,6 +198,13 @@ func handler(ctx context.Context, event PipelineEvent) error {
 	state, err := loadPipelineState(ctx, event.PipelineID)
 	if err != nil {
 		return fmt.Errorf("failed to load pipeline state: %w", err)
+	}
+
+	// A re-invocation of a run that has since been replaced (`spawn pipeline
+	// launch --replace`). The new run has its own chain.
+	if event.RunID != "" && event.RunID != state.RunID {
+		log.Printf("Invocation is for run %q but the record is run %q; this run was replaced, exiting", event.RunID, state.RunID)
+		return nil
 	}
 
 	// Download pipeline definition from S3
@@ -255,14 +271,30 @@ func savePipelineState(ctx context.Context, state *pipeline.PipelineState) error
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
+	// Only over this run's own record (#943). This was an unconditional
+	// PutItem, so a chain whose run had been replaced wrote its stale state
+	// over the new run's record on every save.
+	in := &dynamodb.PutItemInput{
+		TableName:           aws.String(tableName),
+		Item:                item,
+		ConditionExpression: aws.String("attribute_not_exists(run_id)"),
+	}
+	if state.RunID != "" {
+		in.ConditionExpression = aws.String("run_id = :run")
+		in.ExpressionAttributeValues = map[string]types.AttributeValue{
+			":run": &types.AttributeValueMemberS{Value: state.RunID},
+		}
+	}
+
 	// Retry logic with exponential backoff
 	for retries := 0; retries < 3; retries++ {
-		_, err = dynamodbClient.PutItem(ctx, &dynamodb.PutItemInput{
-			TableName: aws.String(tableName),
-			Item:      item,
-		})
+		_, err = dynamodbClient.PutItem(ctx, in)
 		if err == nil {
 			return nil
+		}
+		var ccf *types.ConditionalCheckFailedException
+		if errors.As(err, &ccf) {
+			return errSuperseded
 		}
 		log.Printf("DynamoDB write failed (attempt %d/3): %v", retries+1, err)
 		time.Sleep(time.Duration(retries+1) * time.Second)
@@ -382,7 +414,7 @@ func setupNetworkResources(ctx context.Context, state *pipeline.PipelineState, p
 			if err != nil {
 				return fmt.Errorf("ec2 client for %s: %w", region, err)
 			}
-			pgName, err := createPlacementGroup(ctx, client, state.PipelineID)
+			pgName, err := createPlacementGroup(ctx, client, state)
 			if err != nil {
 				return fmt.Errorf("create placement group in %s: %w", region, err)
 			}
@@ -422,7 +454,7 @@ func stageRegions(pipelineDef *pipeline.Pipeline, keep func(*pipeline.Stage) boo
 // instances. SSH used to be open to 0.0.0.0/0 (#929).
 func createStreamingSecurityGroup(ctx context.Context, ec2Client networkEC2API, state *pipeline.PipelineState, region string) (string, error) {
 	pipelineID := state.PipelineID
-	sgName := fmt.Sprintf("spawn-pipeline-%s", pipelineID)
+	sgName := networkGroupName(state)
 	description := fmt.Sprintf("Security group for spawn pipeline %s", pipelineID)
 
 	// Create security group
@@ -483,8 +515,19 @@ func streamingIngress(sgID string) []ec2types.IpPermission {
 	}
 }
 
-func createPlacementGroup(ctx context.Context, ec2Client networkEC2API, pipelineID string) (string, error) {
-	pgName := fmt.Sprintf("spawn-pipeline-%s", pipelineID)
+// networkGroupName names the pipeline's security and placement groups. Per run
+// (#943): names are unique per VPC and per region, and a run replaced with
+// --replace may still be deleting its groups when the new run creates its own.
+func networkGroupName(state *pipeline.PipelineState) string {
+	if state.RunID == "" {
+		return fmt.Sprintf("spawn-pipeline-%s", state.PipelineID)
+	}
+	return fmt.Sprintf("spawn-pipeline-%s-%s", state.PipelineID, state.RunID)
+}
+
+func createPlacementGroup(ctx context.Context, ec2Client networkEC2API, state *pipeline.PipelineState) (string, error) {
+	pipelineID := state.PipelineID
+	pgName := networkGroupName(state)
 
 	_, err := ec2Client.CreatePlacementGroup(ctx, &ec2.CreatePlacementGroupInput{
 		GroupName: aws.String(pgName),
@@ -572,7 +615,7 @@ func runPipelinePollingLoop(ctx context.Context, state *pipeline.PipelineState, 
 			if err := saveStateFn(ctx, state); err != nil {
 				log.Printf("Failed to save state before re-invocation: %v", err)
 			}
-			return reinvokeFn(ctx, pipelineID)
+			return reinvokeFn(ctx, pipelineID, state.RunID)
 		}
 
 		// Wait for next poll
@@ -587,6 +630,16 @@ func pollOnce(ctx context.Context, state *pipeline.PipelineState, pipelineDef *p
 	currentState, err := loadStateFn(ctx, state.PipelineID)
 	if err != nil {
 		log.Printf("Failed to reload pipeline state: %v", err)
+	} else if currentState.RunID != state.RunID {
+		// The pipeline id was launched again with --replace while this run
+		// was in flight (#943). The record is the new run's now, so this
+		// chain must not write to it. Its instances are listed only in this
+		// chain's copy of the state, so it terminates them here rather than
+		// leaving them to their TTL, and stops.
+		log.Printf("Run %q was replaced by run %q; terminating this run's instances and stopping", state.RunID, currentState.RunID)
+		terminateAllInstances(ctx, state, pipelineDef)
+		cleanupNetFn(ctx, state)
+		return true, nil
 	} else if currentState.CancelRequested {
 		log.Println("Cancellation requested, stopping orchestration")
 		finishPipeline(ctx, state, pipelineDef, pipeline.StatusCancelled, "pipeline cancelled")
@@ -856,7 +909,7 @@ func putStageConfig(ctx context.Context, state *pipeline.PipelineState, pipeline
 	if err != nil {
 		return fmt.Errorf("marshal stage config: %w", err)
 	}
-	key := pipeline.StageConfigKey(state.S3Prefix, state.PipelineID)
+	key := pipeline.StageConfigKey(state.DataPrefix(), state.PipelineID)
 	if err := putObjectFn(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(state.S3Bucket),
 		Key:         aws.String(key),
@@ -870,7 +923,7 @@ func putStageConfig(ctx context.Context, state *pipeline.PipelineState, pipeline
 
 // stageConfigURL is the s3-config-key tag's value.
 func stageConfigURL(state *pipeline.PipelineState) string {
-	return fmt.Sprintf("s3://%s/%s", state.S3Bucket, pipeline.StageConfigKey(state.S3Prefix, state.PipelineID))
+	return fmt.Sprintf("s3://%s/%s", state.S3Bucket, pipeline.StageConfigKey(state.DataPrefix(), state.PipelineID))
 }
 
 // stageInstanceProfile is the profile stage instances launch with: the one
@@ -1044,9 +1097,15 @@ func stageInstanceTags(state *pipeline.PipelineState, stageDef *pipeline.Stage, 
 		// definition (pkg/pipeline loadStageInfoFromTags). Without
 		// s3-config-key the runner refuses to start (#910).
 		ec2types.Tag{Key: aws.String("spawn:s3-bucket"), Value: aws.String(state.S3Bucket)},
-		ec2types.Tag{Key: aws.String("spawn:s3-prefix"), Value: aws.String(state.S3Prefix)},
+		// The RUN's prefix (#943): the runner keys its markers, outputs and
+		// upstream inputs by this tag, so a runner of any version stays inside
+		// its own run.
+		ec2types.Tag{Key: aws.String("spawn:s3-prefix"), Value: aws.String(state.DataPrefix())},
 		ec2types.Tag{Key: aws.String("spawn:s3-config-key"), Value: aws.String(stageConfigURL(state))},
 	)
+	if state.RunID != "" {
+		tags = append(tags, ec2types.Tag{Key: aws.String("spawn:run-id"), Value: aws.String(state.RunID)})
+	}
 	return tags
 }
 
@@ -1105,7 +1164,7 @@ func generatePipelineUserData(state *pipeline.PipelineState, stageDef *pipeline.
 	// writing one. Rendered from the same pkg/pipeline function the runner and
 	// the orchestrator use, so the three cannot disagree on the key.
 	failedMarker := fmt.Sprintf("s3://%s/%s", state.S3Bucket,
-		pipeline.StageInstanceMarkerKey(state.S3Prefix, stageDef.StageID, instanceIndex, pipeline.MarkerFailed))
+		pipeline.StageInstanceMarkerKey(state.DataPrefix(), stageDef.StageID, instanceIndex, pipeline.MarkerFailed))
 
 	// Generate user data script.
 	//
@@ -1134,6 +1193,7 @@ export SPAWN_STAGE_INDEX='%d'
 export SPAWN_INSTANCE_INDEX='%d'
 export SPAWN_S3_BUCKET='%s'
 export SPAWN_S3_PREFIX='%s'
+export SPAWN_RUN_ID='%s'
 export SPAWN_RESULT_S3_BUCKET='%s'
 export SPAWN_RESULT_S3_PREFIX='%s'
 export SPAWN_REGION='%s'
@@ -1293,7 +1353,10 @@ exit 0
 		stageState.StageIndex,
 		instanceIndex,
 		shellEscape(state.S3Bucket),
-		shellEscape(state.S3Prefix),
+		// This run's stage-data prefix (#943), where the runner reads and
+		// writes; the pipeline's s3_prefix plus /runs/<run-id>.
+		shellEscape(state.DataPrefix()),
+		shellEscape(state.RunID),
 		shellEscape(state.ResultS3Bucket),
 		shellEscape(state.ResultS3Prefix),
 		shellEscape(region),
@@ -1349,7 +1412,7 @@ const (
 func checkStageOutcome(ctx context.Context, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, now time.Time) (stageOutcome, string, error) {
 	want := expectedInstances(stageDef, stageState)
 
-	legacyFailed, err := markerExists(ctx, state, pipeline.StageMarkerKey(state.S3Prefix, stageState.StageID, pipeline.MarkerFailed))
+	legacyFailed, err := markerExists(ctx, state, pipeline.StageMarkerKey(state.DataPrefix(), stageState.StageID, pipeline.MarkerFailed))
 	if err != nil {
 		return stageStillRunning, "", err
 	}
@@ -1360,14 +1423,14 @@ func checkStageOutcome(ctx context.Context, state *pipeline.PipelineState, stage
 	complete := make([]bool, want)
 	nComplete := 0
 	for i := 0; i < want; i++ {
-		failed, err := markerExists(ctx, state, pipeline.StageInstanceMarkerKey(state.S3Prefix, stageState.StageID, i, pipeline.MarkerFailed))
+		failed, err := markerExists(ctx, state, pipeline.StageInstanceMarkerKey(state.DataPrefix(), stageState.StageID, i, pipeline.MarkerFailed))
 		if err != nil {
 			return stageStillRunning, "", err
 		}
 		if failed {
 			return stageFailed, fmt.Sprintf("instance %d of %d failed (FAILED marker written)", i, want), nil
 		}
-		done, err := markerExists(ctx, state, pipeline.StageInstanceMarkerKey(state.S3Prefix, stageState.StageID, i, pipeline.MarkerComplete))
+		done, err := markerExists(ctx, state, pipeline.StageInstanceMarkerKey(state.DataPrefix(), stageState.StageID, i, pipeline.MarkerComplete))
 		if err != nil {
 			return stageStillRunning, "", err
 		}
@@ -1380,7 +1443,7 @@ func checkStageOutcome(ctx context.Context, state *pipeline.PipelineState, stage
 		return stageCompleted, "", nil
 	}
 	if want == 1 {
-		legacyDone, err := markerExists(ctx, state, pipeline.StageMarkerKey(state.S3Prefix, stageState.StageID, pipeline.MarkerComplete))
+		legacyDone, err := markerExists(ctx, state, pipeline.StageMarkerKey(state.DataPrefix(), stageState.StageID, pipeline.MarkerComplete))
 		if err != nil {
 			return stageStillRunning, "", err
 		}
@@ -1698,7 +1761,7 @@ func sortedKeys(m map[string]string) []string {
 	return out
 }
 
-func reinvokeSelf(ctx context.Context, pipelineID string) error {
+func reinvokeSelf(ctx context.Context, pipelineID, runID string) error {
 	functionName := os.Getenv("AWS_LAMBDA_FUNCTION_NAME")
 	if functionName == "" {
 		return fmt.Errorf("AWS_LAMBDA_FUNCTION_NAME not set")
@@ -1706,6 +1769,7 @@ func reinvokeSelf(ctx context.Context, pipelineID string) error {
 
 	payload, _ := json.Marshal(PipelineEvent{
 		PipelineID: pipelineID,
+		RunID:      runID,
 	})
 
 	_, err := lambdaClient.Invoke(ctx, &lambdasvc.InvokeInput{

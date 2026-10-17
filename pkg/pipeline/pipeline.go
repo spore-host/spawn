@@ -164,6 +164,14 @@ type PipelineState struct {
 	Status          PipelineStatus `json:"status" dynamodbav:"status"`
 	CancelRequested bool           `json:"cancel_requested" dynamodbav:"cancel_requested"`
 
+	// RunID identifies this run of the pipeline. pipeline_id comes from the
+	// definition file, so launching the same file twice reuses it; the run
+	// id does not repeat. It scopes the run's S3 keys (RunKeyPrefix), its
+	// network group names, and the orchestrator's writes: an orchestrator
+	// chain whose run id no longer matches the record has been superseded
+	// and stops (#943). Empty on records written before it existed.
+	RunID string `json:"run_id,omitempty" dynamodbav:"run_id,omitempty"`
+
 	// Configuration
 	S3ConfigKey       string   `json:"s3_config_key" dynamodbav:"s3_config_key"`
 	S3Bucket          string   `json:"s3_bucket" dynamodbav:"s3_bucket"`

@@ -498,3 +498,93 @@ func decodeUD(t *testing.T, ud string) string {
 	}
 	return string(raw)
 }
+
+// ---- #943: runs of one pipeline id are isolated -------------------------------
+
+// A previous run under the same s3_prefix left COMPLETE markers at every key a
+// stage of this run could have used before run ids. None may complete this
+// run's stage: a second run used to mark its stages complete as soon as they
+// reached running, before their instances had done anything.
+func TestStaleMarkersFromAnotherRunDoNotDecideThisOne(t *testing.T) {
+	state, def := twoStagePipeline("stop", time.Now())
+	state.RunID = "r2"
+	h := newHarness(t, state)
+	h.ec2.states["i-train"] = "running"
+	for _, prefix := range []string{"pfx", pipeline.RunKeyPrefix("pfx", "r1")} {
+		h.markers.present[pipeline.StageMarkerKey(prefix, "train", pipeline.MarkerComplete)] = true
+		h.markers.present[pipeline.StageInstanceMarkerKey(prefix, "train", 0, pipeline.MarkerComplete)] = true
+	}
+
+	outcome, reason, err := checkStageOutcome(context.Background(), state, def.GetStage("train"), getStageState(state, "train"), time.Now())
+	if err != nil || outcome != stageStillRunning {
+		t.Fatalf("outcome = %v (%q, %v) from another run's markers, want still running", outcome, reason, err)
+	}
+
+	// And this run's own marker does complete it.
+	h.markers.present[pipeline.StageInstanceMarkerKey(state.DataPrefix(), "train", 0, pipeline.MarkerComplete)] = true
+	if outcome, _, _ := checkStageOutcome(context.Background(), state, def.GetStage("train"), getStageState(state, "train"), time.Now()); outcome != stageCompleted {
+		t.Errorf("outcome = %v with this run's COMPLETE, want completed", outcome)
+	}
+}
+
+// Everything the stage instance reads its location from names this run: the
+// s3-prefix and s3-config-key tags, the fallback FAILED marker, and the network
+// group names, which must not collide with a replaced run still deleting its own.
+func TestStageInstancesAreLaunchedIntoTheirRun(t *testing.T) {
+	state, def := twoStagePipeline("stop", time.Now())
+	state.RunID = "r2"
+	stageDef := def.GetStage("train")
+	tags := tagMap(stageInstanceTags(state, stageDef, getStageState(state, "train"), 0, time.Now()))
+	if got := tags["spawn:s3-prefix"]; got != "pfx/runs/r2" {
+		t.Errorf("spawn:s3-prefix = %q, want the run's prefix pfx/runs/r2 (the runner keys everything by it)", got)
+	}
+	if got := tags["spawn:s3-config-key"]; got != "s3://bkt/pfx/runs/r2/config/pl-1.json" {
+		t.Errorf("spawn:s3-config-key = %q, want the run's own config", got)
+	}
+	if tags["spawn:run-id"] != "r2" {
+		t.Errorf("spawn:run-id = %q", tags["spawn:run-id"])
+	}
+	ud, err := generatePipelineUserData(state, stageDef, getStageState(state, "train"), 0, "eu-west-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw := decodeUD(t, ud); !strings.Contains(raw, "SPAWN_FAILED_MARKER='s3://bkt/pfx/runs/r2/stages/train/0/FAILED'") {
+		t.Error("the fallback FAILED marker is not under the run's prefix")
+	}
+	if got := networkGroupName(state); got != "spawn-pipeline-pl-1-r2" {
+		t.Errorf("network group name = %q, want it to carry the run id", got)
+	}
+	if got := networkGroupName(&pipeline.PipelineState{PipelineID: "pl-1"}); got != "spawn-pipeline-pl-1" {
+		t.Errorf("legacy network group name = %q", got)
+	}
+}
+
+// An orchestrator chain whose run was replaced (launch --replace) sees the
+// record move to another run: it terminates its own instances, which only it
+// still lists, writes nothing and stops without re-invoking itself.
+func TestReplacedRunTerminatesItsInstancesAndStops(t *testing.T) {
+	state, def := twoStagePipeline("stop", time.Now())
+	state.RunID = "r1"
+	h := newHarness(t, state)
+	h.ec2.states["i-train"] = "running"
+	loadStateFn = func(context.Context, string) (*pipeline.PipelineState, error) {
+		return &pipeline.PipelineState{PipelineID: "pl-1", RunID: "r2", Status: pipeline.StatusInitializing}, nil
+	}
+
+	done, err := pollOnce(context.Background(), state, def, mustOrder(t, def), time.Now())
+	if err != nil || !done {
+		t.Fatalf("pollOnce = %v, %v; want done", done, err)
+	}
+	if !h.ec2.terminatedIn("eu-west-1", "i-train") {
+		t.Error("the replaced run's instance was not terminated")
+	}
+	if h.saved != 0 {
+		t.Errorf("the replaced run's chain saved state %d time(s) over the new run's record", h.saved)
+	}
+	if h.cleaned != 1 {
+		t.Errorf("network cleanup ran %d times, want 1", h.cleaned)
+	}
+	if h.reinvoked != 0 {
+		t.Error("the replaced run's chain re-invoked itself")
+	}
+}

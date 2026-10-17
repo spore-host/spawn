@@ -98,6 +98,14 @@ type e2eStage struct {
 // stage's user data with the real spored.
 func runStageEndToEnd(t *testing.T, command string, index int) *e2eStage {
 	t.Helper()
+	return runStageEndToEndInRun(t, command, index, "")
+}
+
+// runStageEndToEndInRun is runStageEndToEnd for one run of the pipeline. With a
+// run id, a stale upstream output is also left where a previous run under the
+// same s3_prefix would have written it, which the stage must not receive.
+func runStageEndToEndInRun(t *testing.T, command string, index int, runID string) *e2eStage {
+	t.Helper()
 	spored := buildSpored(t)
 	env := testutil.SubstrateServer(t)
 	ctx := context.Background()
@@ -126,7 +134,7 @@ func runStageEndToEnd(t *testing.T, command string, index int) *e2eStage {
 	state := &pipeline.PipelineState{
 		PipelineID: def.PipelineID, PipelineName: def.PipelineName, S3Bucket: "bkt", S3Prefix: "pfx",
 		OnFailure: "stop", CreatedAt: now, Status: pipeline.StatusRunning, TotalStages: 2,
-		InstanceProfile: "spawn-instance-e2e",
+		InstanceProfile: "spawn-instance-e2e", RunID: runID,
 		Stages: []pipeline.StageState{
 			{StageID: "preprocess", StageIndex: 0, Status: pipeline.StageStatusCompleted},
 			{StageID: "train", StageIndex: 1, Status: pipeline.StageStatusRunning, LaunchedAt: &now},
@@ -139,10 +147,22 @@ func runStageEndToEnd(t *testing.T, command string, index int) *e2eStage {
 	// The upstream stage's output, where preprocess's runner would have put it.
 	if _, err := s3c.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("bkt"),
-		Key:    aws.String(pipeline.StageOutputPrefix("pfx", "preprocess") + "data.csv"),
+		Key:    aws.String(pipeline.StageOutputPrefix(state.DataPrefix(), "preprocess") + "data.csv"),
 		Body:   strings.NewReader("hello pipeline\n"),
 	}); err != nil {
 		t.Fatalf("seed upstream output: %v", err)
+	}
+	if runID != "" {
+		for _, stale := range []string{
+			pipeline.StageOutputPrefix("pfx", "preprocess") + "data.csv",
+			pipeline.StageOutputPrefix(pipeline.RunKeyPrefix("pfx", "previous-run"), "preprocess") + "data.csv",
+		} {
+			if _, err := s3c.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String("bkt"), Key: aws.String(stale), Body: strings.NewReader("STALE\n"),
+			}); err != nil {
+				t.Fatalf("seed stale output: %v", err)
+			}
+		}
 	}
 
 	// The orchestrator's side: the stage config, then the launch.
@@ -198,7 +218,7 @@ func (e *e2eStage) markerSeen(t *testing.T, marker string) bool {
 	old := markers
 	defer func() { markers = old }()
 	markers = e.s3
-	ok, err := markerExists(context.Background(), e.state, pipeline.StageInstanceMarkerKey("pfx", "train", e.index, marker))
+	ok, err := markerExists(context.Background(), e.state, pipeline.StageInstanceMarkerKey(e.state.DataPrefix(), "train", e.index, marker))
 	if err != nil {
 		t.Fatalf("markerExists(%s): %v", marker, err)
 	}
@@ -289,4 +309,30 @@ func TestStageRunnerEndToEnd_FailedCommandWritesFailed(t *testing.T) {
 		t.Errorf("a failed stage's outputs were uploaded for downstream stages: %d objects", len(list.Contents))
 	}
 	assertSelfTerminatedWith(t, e.calls, "us-east-1")
+}
+
+// #943: a stage of one run reads its inputs from, and reports into, that run
+// only. A previous run under the same s3_prefix left its outputs at the old
+// stage keys and under its own run; the real spored, given only its instance's
+// tags, must download this run's input and write COMPLETE under this run.
+func TestStageRunnerEndToEnd_StaysInsideItsRun(t *testing.T) {
+	e := runStageEndToEndInRun(t, `mkdir -p $OUT && cat $IN/data.csv > $OUT/result.txt`, 0, "20261015t120000z-0000beef")
+	if e.runErr != nil {
+		t.Fatalf("stage user data failed: %v\ncalls:\n%s", e.runErr, e.calls)
+	}
+	if b, err := os.ReadFile(filepath.Join(e.inDir, "data.csv")); err != nil || string(b) != "hello pipeline\n" {
+		t.Errorf("the stage received %q (%v), want this run's upstream output, not a previous run's", b, err)
+	}
+	if !e.markerSeen(t, pipeline.MarkerComplete) {
+		t.Error("COMPLETE not written under this run's prefix")
+	}
+	if _, ok := e.object(t, pipeline.StageInstanceMarkerKey("pfx", "train", 0, pipeline.MarkerComplete)); ok {
+		t.Error("COMPLETE written at the shared s3_prefix keys, where the next run would read it")
+	}
+	list, err := e.s3.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
+		Bucket: aws.String("bkt"), Prefix: aws.String(pipeline.StageOutputPrefix(e.state.DataPrefix(), "train")),
+	})
+	if err != nil || len(list.Contents) != 1 || !strings.HasSuffix(aws.ToString(list.Contents[0].Key), "/result.txt") {
+		t.Errorf("this run's outputs under %s: %v (%v), want result.txt", pipeline.StageOutputPrefix(e.state.DataPrefix(), "train"), list, err)
+	}
 }

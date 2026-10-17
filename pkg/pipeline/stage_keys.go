@@ -1,8 +1,11 @@
 package pipeline
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // The S3 layout a pipeline's stages share with the orchestrator. Both sides
@@ -13,6 +16,41 @@ import (
 // bash. Two hand-written copies of this layout is how a stage can report into
 // a key nobody reads (#910).
 
+// RunKeyPrefix is the key prefix under which one RUN of a pipeline keeps its
+// stage markers, outputs and stage config: "<prefix>/runs/<run-id>". Every
+// other key function takes this, not the bare s3_prefix, as its prefix.
+//
+// The layout used to be keyed by s3_prefix alone, so a second run under the
+// same prefix found the first run's COMPLETE markers and marked its stages
+// complete before they had done anything, and its dependents downloaded the
+// first run's outputs; a stale FAILED failed a fresh run (#943). A record
+// written before run ids existed has runID "", and keeps the old layout, so a
+// pipeline in flight across the upgrade still finds its markers.
+func RunKeyPrefix(prefix, runID string) string {
+	if runID == "" {
+		return prefix
+	}
+	return prefix + "/runs/" + runID
+}
+
+// DataPrefix is the key prefix of this run's stage data: RunKeyPrefix of the
+// pipeline's s3_prefix and run id.
+func (s *PipelineState) DataPrefix() string {
+	return RunKeyPrefix(s.S3Prefix, s.RunID)
+}
+
+// NewRunID returns a fresh run id: the UTC launch time, so runs sort by when
+// they started, and 32 random bits, so two launches in the same second still
+// differ. Lower case and [0-9a-z-] only, because it ends up in S3 keys, EC2
+// tag values and security and placement group names.
+func NewRunID(now time.Time) (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate run id: %w", err)
+	}
+	return now.UTC().Format("20060102t150405z") + "-" + hex.EncodeToString(b[:]), nil
+}
+
 // Stage outcome markers.
 const (
 	MarkerComplete = "COMPLETE"
@@ -22,7 +60,8 @@ const (
 // StageKeyPrefix is the S3 key prefix under which one stage's markers and
 // outputs live. The format is "<prefix>/stages/<stage-id>/", with prefix
 // joined verbatim, as it always has been, so an empty s3_prefix still yields
-// the keys existing pipelines use.
+// the keys existing pipelines use. prefix is the run's prefix (RunKeyPrefix),
+// not the bare s3_prefix.
 func StageKeyPrefix(prefix, stageID string) string {
 	return fmt.Sprintf("%s/stages/%s/", prefix, stageID)
 }
@@ -63,8 +102,9 @@ func StageConfigKey(prefix, pipelineID string) string {
 // outputs and markers, all under s3://bucket/prefix/, and list that prefix to
 // find upstream outputs. Nothing outside the prefix is granted.
 //
-// Every key above is "<prefix>/...", so "<prefix>/*" covers them, including
-// for an empty prefix (keys begin "/stages/").
+// Every key above is "<prefix>/..." or "<prefix>/runs/<run-id>/...", so
+// "<prefix>/*" covers them, including for an empty prefix (keys begin
+// "/runs/" or "/stages/").
 func StageDataPolicy(bucket, prefix string) string {
 	doc := map[string]interface{}{
 		"Version": "2012-10-17",
