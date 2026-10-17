@@ -108,9 +108,16 @@ func TestBothSporedPolicyPathsGrantTheHybridRegistry(t *testing.T) {
 func TestHybridRegistryGrantIsNarrow(t *testing.T) {
 	st := sporedHybridRegistryStatement()
 	res, _ := st["Resource"].(string)
-	want := "arn:aws:dynamodb:*:${aws:PrincipalAccount}:table/" + registryTableName(t)
-	if res != want {
-		t.Errorf("registry grant resource = %q, want exactly %q (one table, own account, no index or wildcard)", res, want)
+	// As written to IAM: bound to the role's own, literal account (#1069 — the
+	// ${aws:PrincipalAccount} this used to carry made PutRolePolicy reject the
+	// whole document).
+	bound, err := bindPolicyAccount(res, "123456789012")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "arn:aws:dynamodb:*:123456789012:table/" + registryTableName(t)
+	if bound != want {
+		t.Errorf("registry grant resource = %q, want exactly %q (one table, own account, no index or wildcard)", bound, want)
 	}
 
 	got := append([]string(nil), sporedHybridRegistryActions...)

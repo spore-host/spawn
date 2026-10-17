@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout will stop, not hibernate, an instance that was launched before this
   fix and is not configured for hibernation. New public API, additions only:
   `LaunchConfig.HibernationRequested()` and `InstanceInfo.HibernationConfigured`.
+- **`spawn launch` works again: v0.129.0 and v0.130.0 failed every launch at
+  "Setting up IAM role"** (#1069), with `MalformedPolicyDocument: The policy
+  failed legacy parsing`, before creating any instance. #905 added a
+  hybrid-registry grant whose resource used the `${aws:PrincipalAccount}` policy
+  variable, which IAM's `PutRolePolicy` does not accept there. IAM Access
+  Analyzer and `simulate-custom-policy` both accept the same document, and the
+  emulator CI runs against does not model IAM's policy grammar. Every launch
+  that sets up the spored role was affected: plain launches, `--iam-policy`,
+  and `pkg/launcher.Provision` (lagotto, calque). `--instance-profile` was not.
+  The policy now names the account literally, resolved at write time. A test
+  runs every writer and checks what reached IAM, and a document still carrying
+  the variable is refused before it is sent.
 
 ## [0.130.0] - 2026-10-16
 
