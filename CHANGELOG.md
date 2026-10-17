@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Task outputs upload again on v0.132.0 spores** (#1094). On every instance,
+  v0.132.0's output upload (`spored provenance upload`) failed with
+  `Invalid region`, so every `spawn task run` and pooled task with outputs
+  lost them and was reported as `output_delivery_error` even when the command
+  succeeded. spored now takes the region from instance metadata, as the AWS CLI
+  does. If the provenance upload fails for any other reason, the output is
+  uploaded untagged with `aws s3 cp` instead of being lost; untagged outputs are
+  kept, never tiered or deleted. Input provenance, which failed silently the
+  same way, is recorded again too.
+
 - **A plugin's health loop is no longer lost after a failed stop or hibernate**
   (#1091). A health check that finished just as spored stopped its plugins
   could record the plugin as running again, overwriting "stopped". If the stop
