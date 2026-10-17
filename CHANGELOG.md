@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.131.1] - 2026-10-17
+
 ### Fixed
 
 - **A retired Spot replacement now terminates itself instead of being left
@@ -9619,7 +9621,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.131.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.131.1...HEAD
+[0.131.1]: https://github.com/spore-host/spawn/compare/v0.131.0...v0.131.1
 [0.131.0]: https://github.com/spore-host/spawn/compare/v0.130.1...v0.131.0
 [0.130.1]: https://github.com/spore-host/spawn/compare/v0.130.0...v0.130.1
 [0.130.0]: https://github.com/spore-host/spawn/compare/v0.129.0...v0.130.0
