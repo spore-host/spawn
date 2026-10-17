@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/spf13/cobra"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
@@ -89,7 +88,7 @@ func init() {
 // teamStore returns a team store Client (default account/config) plus the
 // caller's IAM ARN, used for ownership/membership checks.
 func teamStore(ctx context.Context) (*team.Client, string, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return nil, "", fmt.Errorf("load AWS config: %w", err)
 	}
@@ -329,7 +328,7 @@ func runTeamDelete(cmd *cobra.Command, args []string) error {
 // resolveTeamName looks up the team name by ID. Returns empty string on failure.
 // Used by the launch path to tag instances with a human-readable team name.
 func resolveTeamName(ctx context.Context, teamID string) (string, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return "", err
 	}

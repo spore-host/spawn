@@ -277,17 +277,21 @@ type PeerInfo struct {
 	Provider   string
 }
 
-// EnsureTable creates the DynamoDB table if it doesn't exist
-func EnsureTable(ctx context.Context) error {
-	cfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %w", err)
+// EnsureTable creates the hybrid registry table, in cfg's account and region,
+// if it does not exist.
+//
+// The caller passes the config it launches members with, so the table is
+// created where those members look for it: spored reads the table in its own
+// instance's region. EnsureTable used to load the ambient default config, which
+// ignored `spawn burst --region` and `--profile` (#939).
+func EnsureTable(ctx context.Context, cfg aws.Config) error {
+	if cfg.Region == "" {
+		return fmt.Errorf("ensure %s: no AWS region in the config", TableName)
 	}
-
 	client := dynamodb.NewFromConfig(cfg)
 
 	// Check if table exists
-	_, err = client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+	_, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(TableName),
 	})
 

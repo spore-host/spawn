@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -60,7 +59,7 @@ func runCostBreakdown(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	sweepID := args[0]
 
-	cfg, err := config.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}

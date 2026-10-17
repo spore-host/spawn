@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/spore-host/libs/pricing"
 	"github.com/spore-host/spawn/pkg/aws"
 )
@@ -23,7 +22,7 @@ import (
 // table internally and reports which one answered, so there is no fallback to
 // build here: a result is either a real quote (live or static) or an error.
 var resolveSweepRowPrice = func(ctx context.Context, region, instanceType string) (aws.DisplayPrice, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	cfg, err := loadAWSConfig(ctx, region)
 	if err != nil {
 		return aws.DisplayPrice{}, fmt.Errorf("load AWS config for %s: %w", region, err)
 	}

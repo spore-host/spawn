@@ -348,6 +348,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cloud-init had installed from `KeyName`, so the key pair could not log in.
   This affected `spawn burst --key-name` and `launcher.Provision` callers that
   set `KeyName`. The bootstrap now leaves the file as it is when it has no key.
+- **`spawn burst` honours `--region`, `--profile` and `SPORE_REGION`** (#939).
+  Burst loaded its AWS config from the ambient chain only, so it launched its
+  instances, created the registry table and looked up the AMI in whatever
+  region `AWS_REGION` or the shared AWS config named, whatever `--region` said.
+  It now resolves region and profile the way `spawn launch` does: `--region`,
+  then `SPORE_REGION`, `AWS_REGION` and the spore config file, then the
+  profile's region. The table, the AMI lookup and every instance use the same
+  region, and burst stops before any AWS call if no region is set anywhere.
+- **Other commands that ignored `--profile` and `--region`** (#939). `spawn bot`,
+  `cancel` (instance termination), `cost`, `extend`, `fsx`, `onboard`,
+  `team`, `validate`, the `service` and sweep dry-run price lookups, and
+  instance-ID shell completion each loaded the ambient AWS config directly. They
+  now go through the same resolution as `spawn launch`. With none of the flags
+  or `SPORE_*` variables set, nothing changes. A test now fails any command
+  that loads AWS config directly.
 
 ### Security
 

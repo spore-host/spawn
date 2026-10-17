@@ -2,9 +2,15 @@ package registry
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/spore-host/spawn/pkg/provider"
 )
 
@@ -69,5 +75,74 @@ func TestNewPeerRegistry_LocalPlaceholderFallsBackToAmbient(t *testing.T) {
 				t.Fatalf("registry client region = %q, want the ambient eu-west-1", got)
 			}
 		})
+	}
+}
+
+// noAmbientRegion clears every source the SDK's default chain reads a region
+// from, as on an EC2 instance whose spored unit sets no AWS_REGION. It also
+// removes every credential source, so a regression that bypasses the test's
+// recorder cannot reach a real account.
+func noAmbientRegion(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+	} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+}
+
+// hostRecorder is an HTTP client that never reaches the network: it records the
+// host of every request and fails it before anything is sent.
+type hostRecorder struct {
+	mu    sync.Mutex
+	hosts []string
+}
+
+func (h *hostRecorder) Do(req *http.Request) (*http.Response, error) {
+	h.mu.Lock()
+	h.hosts = append(h.hosts, req.URL.Host)
+	h.mu.Unlock()
+	return nil, errors.New("hostRecorder: no network in tests")
+}
+
+// TestEnsureTableUsesTheCallersRegion is #939: EnsureTable loaded the ambient
+// default config, so `spawn burst --region us-west-2` created (or found) the
+// registry table wherever the ambient chain pointed. The table must be created
+// in the region of the config the caller passes, which is the region the
+// members launch into.
+func TestEnsureTableUsesTheCallersRegion(t *testing.T) {
+	noAmbientRegion(t)
+	t.Setenv("AWS_REGION", "eu-west-1") // ambient says one thing...
+
+	rec := &hostRecorder{}
+	cfg := aws.Config{
+		Region:      "us-west-2", // ...the caller says another
+		Credentials: credentials.NewStaticCredentialsProvider("AKID", "SECRET", ""),
+		HTTPClient:  rec,
+		Retryer:     func() aws.Retryer { return aws.NopRetryer{} },
+	}
+	_ = EnsureTable(context.Background(), cfg) // fails at the recorder; only the host matters
+
+	if len(rec.hosts) == 0 {
+		t.Fatal("EnsureTable made no DynamoDB request")
+	}
+	for _, h := range rec.hosts {
+		if !strings.Contains(h, "us-west-2") {
+			t.Errorf("EnsureTable sent a request to %s, want the caller's region us-west-2", h)
+		}
+	}
+}
+
+// TestEnsureTableRefusesAConfigWithNoRegion: with no region there is no table
+// a member could be pointed at, so fail with that rather than an SDK endpoint
+// error.
+func TestEnsureTableRefusesAConfigWithNoRegion(t *testing.T) {
+	err := EnsureTable(context.Background(), aws.Config{})
+	if err == nil || !strings.Contains(err.Error(), "no AWS region") {
+		t.Fatalf("EnsureTable(no region) = %v, want a no-region error", err)
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/spf13/cobra"
@@ -123,7 +122,7 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := loadAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
@@ -235,7 +234,7 @@ var botDeregisterCmd = &cobra.Command{
 			return fmt.Errorf("--platform, --user-id, --workspace-id, and --nickname are all required")
 		}
 		ctx := context.Background()
-		cfg, err := awsconfig.LoadDefaultConfig(ctx)
+		cfg, err := loadAWSConfig(ctx, "")
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
@@ -257,7 +256,7 @@ func botEnableDisable(enabled bool) func(cmd *cobra.Command, args []string) erro
 			return fmt.Errorf("--platform, --user-id, --workspace-id, and --nickname are all required")
 		}
 		ctx := context.Background()
-		cfg, err := awsconfig.LoadDefaultConfig(ctx)
+		cfg, err := loadAWSConfig(ctx, "")
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
@@ -301,7 +300,7 @@ var botListCmd = &cobra.Command{
 			return fmt.Errorf("--platform and --workspace-id are required")
 		}
 		ctx := context.Background()
-		cfg, err := awsconfig.LoadDefaultConfig(ctx)
+		cfg, err := loadAWSConfig(ctx, "")
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
@@ -377,7 +376,7 @@ Run this once after installing the Slack app in a workspace:
 			return fmt.Errorf("--signing-secret is required")
 		}
 		ctx := context.Background()
-		cfg, err := awsconfig.LoadDefaultConfig(ctx)
+		cfg, err := loadAWSConfig(ctx, "")
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
@@ -424,7 +423,7 @@ var botWorkspaceRemoveCmd = &cobra.Command{
 			return fmt.Errorf("aborted")
 		}
 		ctx := context.Background()
-		cfg, err := awsconfig.LoadDefaultConfig(ctx)
+		cfg, err := loadAWSConfig(ctx, "")
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
@@ -441,7 +440,7 @@ var botWorkspaceListCmd = &cobra.Command{
 	Short: "List registered workspaces",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
-		cfg, err := awsconfig.LoadDefaultConfig(ctx)
+		cfg, err := loadAWSConfig(ctx, "")
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
@@ -500,7 +499,7 @@ deleted automatically. Remove it separately with:
 			return fmt.Errorf("--platform and --workspace-id are required")
 		}
 		ctx := context.Background()
-		cfg, err := awsconfig.LoadDefaultConfig(ctx)
+		cfg, err := loadAWSConfig(ctx, "")
 		if err != nil {
 			return fmt.Errorf("load AWS config: %w", err)
 		}
