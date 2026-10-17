@@ -484,8 +484,8 @@ type statusReport struct {
 	NetworkBytesPerMin int64 `json:"network_bytes_per_min"`
 	// NetworkMeasured is CPUMeasured's twin: false when NetworkBytesPerMin is
 	// the assume-active placeholder, not a reading, and NetworkUnknown says why
-	// (#919). A one-shot `spored status` has no earlier sample, so this is the
-	// common case there.
+	// (#919). A one-shot reading (IdleReading.Source "one-shot") has no
+	// earlier sample, so it is the common case there; the daemon's is not.
 	NetworkMeasured bool   `json:"network_measured"`
 	NetworkUnknown  string `json:"network_unknown,omitempty"`
 	// DiskBytesPerMin, DiskMeasured and DiskUnknown are the disk I/O signal,
@@ -493,7 +493,11 @@ type statusReport struct {
 	DiskBytesPerMin int64  `json:"disk_bytes_per_min"`
 	DiskMeasured    bool   `json:"disk_measured"`
 	DiskUnknown     string `json:"disk_unknown,omitempty"`
-	PreStopHook     string `json:"pre_stop_hook,omitempty"`
+	// IdleReading says where the CPU, network and disk figures and the idle
+	// decision came from (#1090): the running daemon's last evaluation, or a
+	// one-shot sample by this process, which has no interval to measure over.
+	IdleReading statusIdleReading `json:"idle_reading"`
+	PreStopHook string            `json:"pre_stop_hook,omitempty"`
 
 	// Peers is the job-array peers file, for a job-array member only (#933).
 	Peers *statusPeers `json:"peers,omitempty"`
@@ -582,6 +586,39 @@ type statusIdle struct {
 	RemainingSeconds float64 `json:"remaining_seconds,omitempty"`
 }
 
+// statusIdleReading is the provenance of the idle signals (#1090).
+type statusIdleReading struct {
+	// Source is "daemon" (the monitor loop's last tick) or "one-shot".
+	Source string `json:"source"`
+	// AgeSeconds is how old the daemon's evaluation is; omitted for one-shot.
+	AgeSeconds float64 `json:"age_seconds,omitempty"`
+	// Reason is the daemon's verdict as spored logs it ("Not idle: Disk I/O
+	// 2883584 bytes"), so the screen says why an instance is not stopping.
+	Reason string `json:"reason,omitempty"`
+}
+
+// idleReadingLine says where the readings above came from and, from the
+// daemon, its verdict: the line that explains why an instance is or is not
+// idle-stopping, which was only in /var/log/spored.log (#1090).
+func idleReadingLine(r statusIdleReading) string {
+	if r.Source != "daemon" {
+		return "daemon reading unavailable; one-shot sample (no interval to measure over)"
+	}
+	age := time.Duration(r.AgeSeconds * float64(time.Second)).Round(time.Second)
+	return fmt.Sprintf("%s  (spored's last check, %s ago)", r.Reason, formatDuration(age))
+}
+
+// daemonIdleState returns the running daemon's last idle evaluation, if one
+// was published recently enough to describe the instance now. A variable so
+// tests can stand in for the daemon.
+var daemonIdleState = func(now time.Time) (agent.IdleState, bool) {
+	st, err := agent.ReadIdleState(agent.IdleStatePath())
+	if err != nil || !st.Fresh(now) {
+		return agent.IdleState{}, false
+	}
+	return st, true
+}
+
 type statusOnComplete struct {
 	Action          string `json:"action,omitempty"`
 	CompletionFile  string `json:"completion_file,omitempty"`
@@ -668,24 +705,50 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 	// One evaluation, and every figure below is read from it: the decision and
 	// the readings come from the same samples. Two samples microseconds apart is
 	// what produced `Not idle: CPU usage 100.00%` beside `CPU: 0.0%` in one
-	// status output (#734). This process owns its Agent and runs no monitor
-	// loop, so it is the sampler here (#952); a one-shot has one sample, so the
-	// counter readings are "unknown (single sample)".
-	isIdle := ag.EvaluateIdle()
-	cpuPercent, cpuMeasured := ag.GetCPUUsageMeasured()
-	netBytes, netMeasured, netUnknown := ag.GetNetworkBytesMeasured()
-	diskBytes, diskMeasured, diskUnknown := ag.GetDiskIOBytesMeasured()
+	// status output (#734).
+	//
+	// The running daemon's last tick is the reading to show (#1090): it is the
+	// one idle-stop acts on, and it covers a full minute. This process runs no
+	// monitor loop, so a sample of its own has no earlier one to measure
+	// against and every counter reads "unknown (single sample)" — which is
+	// what every status screen showed while the daemon logged real readings.
+	// Only when the daemon has published nothing fresh (not running, or a
+	// platform with nowhere to publish) does this process sample, and the
+	// report says so.
+	var (
+		isIdle                                 bool
+		idleTime                               time.Duration
+		cpuPercent                             float64
+		cpuMeasured, netMeasured, diskMeasured bool
+		netBytes, diskBytes                    int64
+		netUnknown, diskUnknown                string
+		reading                                statusIdleReading
+	)
+	if st, ok := daemonIdleState(time.Now()); ok {
+		isIdle = st.Idle
+		cpuPercent, cpuMeasured = st.CPUPercent, st.CPUMeasured
+		netBytes, netMeasured, netUnknown = st.NetworkBytes, st.NetworkMeasured, st.NetworkWhy
+		diskBytes, diskMeasured, diskUnknown = st.DiskBytes, st.DiskMeasured, st.DiskWhy
+		if isIdle && !st.LastActivity.IsZero() {
+			idleTime = time.Since(st.LastActivity)
+		}
+		reading = statusIdleReading{Source: "daemon", AgeSeconds: time.Since(st.Taken).Seconds(), Reason: st.Reason}
+	} else {
+		isIdle = ag.EvaluateIdle()
+		cpuPercent, cpuMeasured = ag.GetCPUUsageMeasured()
+		netBytes, netMeasured, netUnknown = ag.GetNetworkBytesMeasured()
+		diskBytes, diskMeasured, diskUnknown = ag.GetDiskIOBytesMeasured()
+		if isIdle {
+			idleTime = time.Since(ag.GetLastActivityTime())
+		}
+		reading = statusIdleReading{Source: "one-shot"}
+	}
 
 	completionFileExists := false
 	if config.CompletionFile != "" {
 		if _, err := os.Stat(config.CompletionFile); err == nil {
 			completionFileExists = true
 		}
-	}
-
-	var idleTime time.Duration
-	if isIdle {
-		idleTime = time.Since(ag.GetLastActivityTime())
 	}
 
 	// Every clock reading is taken AFTER the samples above, never before. The
@@ -816,6 +879,7 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		DiskBytesPerMin:    diskBytes,
 		DiskMeasured:       diskMeasured,
 		DiskUnknown:        diskUnknown,
+		IdleReading:        reading,
 		PreStopHook:        config.PreStop,
 	}
 
@@ -1158,8 +1222,8 @@ func renderStatusTable(report *statusReport) error {
 		fmt.Printf("  CPU:              %.1f%%\n", report.CPUPercent)
 	} else {
 		// An honest unknown beats a confident 0.0% on a box running at 100%.
-		// A one-shot `spored status` has no prior sample to delta against, so
-		// this is the COMMON case there, not an edge one.
+		// With the daemon's reading this is rare (its first tick); a one-shot
+		// fallback has no prior sample to delta against, so it is common there.
 		fmt.Printf("  CPU:              unknown (single sample; assuming active)\n")
 	}
 	if report.NetworkMeasured {
@@ -1173,6 +1237,7 @@ func renderStatusTable(report *statusReport) error {
 	} else {
 		fmt.Printf("  Disk I/O:         unknown (%s; assuming active)\n", report.DiskUnknown)
 	}
+	fmt.Printf("  Idle check:       %s\n", idleReadingLine(report.IdleReading))
 	if report.PreStopHook != "" {
 		fmt.Printf("  Pre-stop hook:    %s\n", report.PreStopHook)
 	}

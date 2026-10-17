@@ -97,6 +97,10 @@ type Agent struct {
 	idleMu   sync.Mutex
 	idleSnap idleSnapshot
 
+	// idleStateWarned limits a failing idle-state publish to one log line
+	// (#1090). Touched only by the monitor loop.
+	idleStateWarned bool
+
 	// DCV auth token verifier (embedded HTTP server for seamless browser auth)
 	dcvTokens          map[string]string // token → username
 	dcvTokensMu        sync.Mutex
@@ -751,6 +755,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// every tick, idle timeout or not, so the metrics endpoint and status read
 	// this tick's evaluation rather than taking samples of their own (#952).
 	snap := a.evaluateIdle()
+	a.publishIdleState(snap) // for `spored status`, which cannot sample (#1090)
 	if a.config.IdleTimeout > 0 {
 		log.Print(snap.reason)
 		if snap.idle {
