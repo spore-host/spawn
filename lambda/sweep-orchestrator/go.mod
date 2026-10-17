@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.39
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.3
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.335.0
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.2
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.90.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.4
@@ -40,9 +40,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.11.23 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.6 // indirect
-	github.com/aws/aws-sdk-go-v2/service/pricing v1.49.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/pricing v1.49.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi v1.33.3 // indirect
-	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.43.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.43.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.10.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sns v1.39.17 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.27 // indirect
@@ -102,8 +102,8 @@ require (
 	github.com/sigstore/sigstore-go v1.2.2 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.1.2 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/spore-host/libs v0.50.0 // indirect
-	github.com/spore-host/truffle v0.58.0 // indirect
+	github.com/spore-host/libs v0.51.1 // indirect
+	github.com/spore-host/truffle v0.59.0 // indirect
 	github.com/theupdateframework/go-tuf/v2 v2.4.2 // indirect
 	github.com/transparency-dev/formats v0.1.1 // indirect
 	github.com/transparency-dev/merkle v0.0.2 // indirect

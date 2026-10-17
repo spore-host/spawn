@@ -16,7 +16,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.73.0
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.3
 	github.com/aws/aws-sdk-go-v2/service/ebs v1.34.7
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.335.0
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.2
 	github.com/aws/aws-sdk-go-v2/service/efs v1.41.16
 	github.com/aws/aws-sdk-go-v2/service/eventbridge v1.55.0
 	github.com/aws/aws-sdk-go-v2/service/fsx v1.65.10
@@ -38,13 +38,13 @@ require (
 	github.com/mattn/go-runewidth v0.0.19
 	github.com/prometheus/client_golang v1.23.2
 	github.com/scttfrdmn/strata v0.22.0
-	github.com/scttfrdmn/substrate v0.120.0
+	github.com/scttfrdmn/substrate v0.124.0
 	github.com/sigstore/sigstore-go v1.2.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spore-host/cohort v0.2.0
-	github.com/spore-host/libs v0.50.0
-	github.com/spore-host/truffle v0.58.0
+	github.com/spore-host/libs v0.51.1
+	github.com/spore-host/truffle v0.59.0
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
@@ -68,8 +68,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.11.23 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.6 // indirect
-	github.com/aws/aws-sdk-go-v2/service/pricing v1.49.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.43.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/pricing v1.49.2 // indirect
+	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.43.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.10.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.4 // indirect
@@ -172,8 +172,8 @@ require (
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
-	modernc.org/libc v1.75.6 // indirect
+	modernc.org/libc v1.75.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
-	modernc.org/sqlite v1.58.0 // indirect
+	modernc.org/sqlite v1.59.0 // indirect
 )

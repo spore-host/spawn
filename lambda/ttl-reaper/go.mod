@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.335.0
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.2
 	github.com/aws/aws-sdk-go-v2/service/fsx v1.66.6
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.62.7
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.69.3
@@ -82,7 +82,7 @@ require (
 	github.com/sigstore/sigstore v1.10.8 // indirect
 	github.com/sigstore/sigstore-go v1.2.2 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.1.2 // indirect
-	github.com/spore-host/libs v0.50.0 // indirect
+	github.com/spore-host/libs v0.51.1 // indirect
 	github.com/theupdateframework/go-tuf/v2 v2.4.2 // indirect
 	github.com/transparency-dev/formats v0.1.1 // indirect
 	github.com/transparency-dev/merkle v0.0.2 // indirect

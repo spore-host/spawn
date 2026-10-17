@@ -121,6 +121,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopped or terminated instance (#928). This is an addition to the public
   surface.
 
+### Changed
+
+- **spawn now builds against libs v0.51.1 and truffle v0.59.0**, in the CLI
+  and in the Lambda modules that depend on them.
+
 ### Deprecated
 
 - **`result_s3_bucket` and `result_s3_prefix` in a pipeline definition**
