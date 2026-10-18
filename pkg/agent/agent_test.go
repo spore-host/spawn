@@ -642,8 +642,20 @@ func TestMonitor_SpotDetectionDoesNotGateTicker(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go a.Monitor(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); a.Monitor(ctx) }()
+	// Stop the loop and wait for it before the test ends. Cancelling alone left
+	// it running on its 10ms ticker into later tests, where each tick sampled
+	// through their package-level counter stubs: TestScrapeTakesNoSample saw
+	// "readers took 4 counter samples" on the slower Windows runner.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("Monitor did not return after its context was cancelled")
+		}
+	})
 
 	// Confirm the spot check really is blocking (the #65 hazard is present)...
 	select {
