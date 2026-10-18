@@ -234,6 +234,62 @@ func TestTheExecutedTagKeysAreDenied(t *testing.T) {
 	}
 }
 
+// The tags the reaper uses to BOUND an instance's lifetime must be denied too
+// (GHSA-c93q-4jh7-6pvj). The deadline itself is legitimately writable from the
+// instance, which is acceptable only because the max-age ceiling caps it and
+// the scan finds every managed instance. So whatever the ceiling measures age
+// from, and whatever the scan filters on, must be out of the instance's reach.
+//
+// Discovery, not a list (rule 4): it reads lambda/ttl-reaper for the tag keys
+// handed to launchTime() and to the EC2 instance-scan filters, and fails if it
+// finds none, or misses the two it is known to use.
+func TestTheLifetimeBoundingTagKeysAreDenied(t *testing.T) {
+	root := repoRootFromPkgAWS(t)
+	dir := filepath.Join(root, "lambda", "ttl-reaper")
+
+	ageKey := regexp.MustCompile(`launchTime\(tags\[tagprefix\.Tag\("([a-z0-9-]+)"\)\],\s*(?:inst\.LaunchTime|apiLaunch)\)`)
+	scanKey := regexp.MustCompile(`tagprefix\.FilterTag\("([a-z0-9-]+)"\)`)
+
+	found := map[string]string{} // spawn:key -> why
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // fixed repo subtree
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range ageKey.FindAllStringSubmatch(string(b), -1) {
+			found["spawn:"+m[1]] = name + ": the max-age ceiling measures age from it"
+		}
+		for _, m := range scanKey.FindAllStringSubmatch(string(b), -1) {
+			found["spawn:"+m[1]] = name + ": the instance scan filters on it"
+		}
+	}
+
+	if len(found) == 0 {
+		t.Fatal("found no lifetime-bounding tag keys in lambda/ttl-reaper. Discovery has broken — " +
+			"it has not proven the reaper's inputs are protected")
+	}
+	for _, sanity := range []string{"spawn:launch-time", "spawn:managed"} {
+		if _, ok := found[sanity]; !ok {
+			t.Fatalf("discovery did not find %s, which the reaper is known to use — the extraction "+
+				"is broken. Found: %v", sanity, found)
+		}
+	}
+	for key, why := range found {
+		if !containsStr(reaperControlTagKeys, key) {
+			t.Errorf("%s is writable by the instance role, but %s. An instance that rewrites or "+
+				"deletes it escapes the reaper; add it to reaperControlTagKeys", key, why)
+		}
+	}
+}
+
 func containsStr(hay []string, needle string) bool {
 	for _, h := range hay {
 		if h == needle {

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **An instance can no longer make itself unreapable** (GHSA-c93q-4jh7-6pvj).
+  The TTL reaper's 7-day max-age ceiling, which caps a deadline an instance
+  rewrites, measured age from the `spawn:launch-time` tag. It also found
+  instances only through `spawn:managed=true`. The instance role could write
+  both tags, so an instance could stay "young" forever, or drop out of every
+  reaper check.
+  - The instance role now denies writing or deleting `spawn:launch-time` and
+    `spawn:managed`, alongside the three keys GHSA-8q3p-qcv8-2pr4 protected.
+    Nothing on the instance writes either key. A role is updated the next time
+    `spawn launch` runs in its account, and the change applies to instances
+    already running.
+  - The reaper measures age from the **earlier** of the tag and EC2's launch
+    time. A forged later value is ignored, and a stopped-and-restarted
+    instance still counts from its first launch. This takes effect when the
+    reaper is redeployed (`spawn reaper deploy`, or the template deployment).
+  - A new gate discovers the tag keys the reaper bounds lifetime with from its
+    source, and fails if the instance role can write any of them.
+
 ## [0.135.0] - 2026-10-18
 
 ### Changed

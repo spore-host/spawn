@@ -1012,7 +1012,8 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 	}
 
 	// 2. Hard max-age ceiling — fires for --no-timeout / missing / unparseable
-	// deadlines. Anchored to spawn:launch-time, falling back to EC2 LaunchTime.
+	// deadlines. Anchored to the EARLIER of spawn:launch-time and EC2 LaunchTime,
+	// so an instance cannot make itself younger by rewriting the tag.
 	launch := launchTime(tags[tagprefix.Tag("launch-time")], inst.LaunchTime)
 	if !launch.IsZero() && now.Sub(launch) > r.maxAge {
 		c := base
@@ -1988,16 +1989,31 @@ func ttlFallbackDeadline(tags map[string]string, apiLaunch *time.Time) (time.Tim
 	return launch.Add(d), true
 }
 
+// launchTime is the earlier of a resource's launch-time tag and the time AWS
+// reports, whichever are present.
+//
+// The earlier, not the tag first (GHSA-c93q-4jh7-6pvj). The tag used to win
+// outright, and the max-age ceiling is the control that contains a tampered
+// deadline, so an instance that rewrote its own spawn:launch-time to "now" every
+// day was never older than the ceiling. The instance role now cannot write the
+// tag (reaperControlTagKeys in pkg/aws/iam.go), but the reaper must not depend on
+// that alone: the role may be one an older spawn created, or one a user wrote.
+//
+// Why not AWS's time alone: EC2 LaunchTime is the most recent START, so an
+// idle-stopped instance that was started again would look new. The tag, set
+// once by the CLI at launch, is the earlier of the two in that case. Taking the
+// minimum keeps the legitimate case and makes a forged later value harmless.
 func launchTime(tagVal string, apiLaunch *time.Time) time.Time {
+	var t time.Time
 	if tagVal != "" {
-		if t, err := time.Parse(time.RFC3339, tagVal); err == nil {
-			return t
+		if parsed, err := time.Parse(time.RFC3339, tagVal); err == nil {
+			t = parsed
 		}
 	}
-	if apiLaunch != nil {
-		return *apiLaunch
+	if apiLaunch != nil && !apiLaunch.IsZero() && (t.IsZero() || apiLaunch.Before(t)) {
+		t = *apiLaunch
 	}
-	return time.Time{}
+	return t
 }
 
 func main() {

@@ -1462,11 +1462,11 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 // the victim. Any unprivileged local user on any spore can reach the role's
 // credentials through IMDS, so this is a one-spore-to-whole-account pivot.
 //
-// Why only these three. The obvious longer list is wrong: spored legitimately
+// Why only these. The obvious longer list is wrong: spored legitimately
 // writes spawn:last-heartbeat (pkg/agent/agent.go) and both writes and deletes
 // spawn:ttl-deadline (the `spored ttl set` path, via ttl.SetTags), so denying
 // those keys would break idle detection and `spored ttl` rather than harden
-// anything. These three are read-only to the instance by construction: they are
+// anything. These are read-only to the instance by construction: they are
 // set once at launch by the CLI and nothing in pkg/agent or cmd/spored ever writes
 // them. Tampering with the deadline remains possible and remains contained by the
 // unconditional max-age ceiling instead (#76) — that is the right tool for it,
@@ -1476,10 +1476,22 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 // Allow, and these two policies have already diverged once in exactly that way:
 // the DCV copy granted ec2:CreateTags on "*" UNCONDITIONED while the dynamic
 // baseline was being scoped for #174.
+//
+// Two more keys, because "contained by the max-age ceiling" was only true while
+// the ceiling's own inputs were out of the instance's reach, and they weren't
+// (GHSA-c93q-4jh7-6pvj). The reaper measures age from spawn:launch-time, and it
+// scans only spawn:managed=true. An instance that rewrote the first stayed
+// forever young; one that deleted the second vanished from every reaper check.
+// Both are set once by the CLI at launch and nothing on the instance writes them
+// (TestNoDeniedTagKeyHasAnInInstanceWriter). Denying DeleteTags on
+// spawn:managed is safe for the same reason: the Allow above is conditioned on
+// that tag, so once it is gone the instance can no longer tag itself at all.
 var reaperControlTagKeys = []string{
 	"spawn:pre-stop",
 	"spawn:pre-stop-timeout",
 	"spawn:local-username",
+	"spawn:launch-time",
+	"spawn:managed",
 }
 
 // reaperControlTagDeny is the statement form for buildInlinePolicy.
