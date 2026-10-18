@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn results retention`: what task results cost to keep, and what
+  retention by regeneration cost would do** (#1076, phase 2; read only). For a
+  bucket (the account's results bucket by default, or `--bucket`/`--prefix`), it
+  reports run by run: what is stored and its monthly storage cost, what it would
+  cost once the decided tiering rules had moved it, and whether the deletion
+  sweeper could prove the run regenerable today, with every reason it can't. An
+  input you can't read counts as unproven, never as unchanged. Storage prices
+  are a static us-east-1 table from the AWS Price List API, labelled as such.
+  Nothing is tiered, tagged or deleted.
+
+### Changed
+
+- **Task outputs are tagged `spawn:retain=false` at upload** (#1076). Every
+  future tiering or deletion rule requires that tag, because an S3 lifecycle
+  filter can't negate: setting it to `true` will take an output out of every
+  rule. Outputs written before this match no rule and are kept.
+
 ## [0.132.2] - 2026-10-17
 
 ### Fixed

@@ -74,6 +74,14 @@ func TestTags(t *testing.T) {
 	if len(tags) > 10 {
 		t.Errorf("%d tags; S3 allows 10", len(tags))
 	}
+	// Every rule requires spawn:retain=false, because a lifecycle filter can't
+	// negate (design: What is recorded). An output written without it could never
+	// be tiered; one written with "true" could never be kept.
+	for _, rec := range []Record{r, {RunID: "r"}, {RunID: "r", Cost: cost(40, 30)}} {
+		if rec.Tags()[TagRetain] != "false" {
+			t.Errorf("Tags() for %+v: spawn:retain=%q, want \"false\" on every output", rec.Cost, rec.Tags()[TagRetain])
+		}
+	}
 	// Not opted in: no regenerable tag at all, so a delete rule keyed on it can't match.
 	if _, has := (Record{RunID: "r", Cost: cost(0.5, 0.1)}).Tags()[TagRegenerable]; has {
 		t.Error("a record without the opt-in carries spawn:regenerable")
