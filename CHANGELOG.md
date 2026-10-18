@@ -49,19 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`--idle-timeout` works again on Linux: an unused instance now stops**
-  (#1093). It never could on any supported AMI, because both idle thresholds
-  were 100 KB a minute and an instance nobody is using does more than that on
-  its own. Measured untouched for 20 minutes on AL2023 (arm64 and x86_64) and
-  Ubuntu 24.04, disk I/O was 0.14–7.8 MB a minute, almost all
-  systemd-journald's own logging, and network was up to ~190 KB a minute from
-  the SSM agent and AL2023's telemetry agent. So every check read "Not idle:
-  Disk I/O …" and the instance ran to its TTL, including under the default
-  `--idle-timeout 1h`. Before v0.129.0 this was hidden: NVMe disks weren't
-  counted (#937), so disk read as zero. The thresholds are now 16 MiB of disk
-  I/O and 1 MiB of network a minute, set from those measurements. A job
-  writing or transferring data still clears them easily; CPU, open sessions
-  and accelerators are judged as before.
 - **Task outputs upload again on v0.132.0 spores** (#1094). On every instance,
   v0.132.0's output upload (`spored provenance upload`) failed with
   `Invalid region`, so every `spawn task run` and pooled task with outputs
@@ -71,24 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uploaded untagged with `aws s3 cp` instead of being lost; untagged outputs are
   kept, never tiered or deleted. Input provenance, which failed silently the
   same way, is recorded again too.
+
 - **A plugin's health loop is no longer lost after a failed stop or hibernate**
   (#1091). A health check that finished just as spored stopped its plugins
   could record the plugin as running again, overwriting "stopped". If the stop
   then failed, spored resumed only the plugins recorded as stopped, so that one
   never got its health loop back, and a later failure went unnoticed.
-- **`spored status` and `spawn status` show real CPU, network and disk
-  readings, and why an instance is or isn't idle** (#1090). Every status
-  screen used to print all three as `unknown (single sample; assuming active)`
-  however long the instance had run. The status command took its own one-off
-  sample, with nothing earlier to measure against, while the daemon measured
-  every minute. spored now publishes each minute's idle evaluation (in
-  `/run/spored/idle-state.json`, so the write isn't itself disk I/O), and
-  status shows it. A new `Idle check:` line gives spored's own verdict, e.g.
-  `Not idle: Disk I/O 1204224 bytes (spored's last check, 20s ago)`, which
-  until now appeared only in `/var/log/spored.log`. JSON output gains
-  `idle_reading`. When the daemon has published nothing recent (not running,
-  or on Windows), status samples once as before and labels it
-  `daemon reading unavailable; one-shot sample`.
 
 ## [0.132.0] - 2026-10-17
 
