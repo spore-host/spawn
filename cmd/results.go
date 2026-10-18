@@ -48,9 +48,9 @@ This command reads a bucket and reports, run by run:
     ETag and version. Each reason a run can't be proven is listed. An input you
     can't read counts as unproven, never as unchanged.
 
-This command NEVER tiers, tags or deletes anything; it is a report. No tiering
-rule or sweeper exists yet. They come in later phases, after reports like this
-one have been read.
+This command NEVER tiers, tags or deletes anything; it is a report. The
+tiering rules are installed separately, and only on request, by
+'spawn results lifecycle --apply'. No deletion sweeper exists yet.
 
 Storage prices are a static us-east-1 table, and every dollar figure says so.
 Objects with no spawn:run-id tag are listed as untracked and kept: logs,
@@ -190,6 +190,10 @@ func renderRetention(w io.Writer, rep *provenance.Report, objects bool) {
 
 	fmt.Fprintf(w, "Total: %d object(s), %s. Storage %s/month now, %s/month once tiering has caught up.\n",
 		rep.Totals.Objects, sizeLabel(rep.Totals.Bytes), usdLabel(rep.Totals.MonthlyUSD), usdLabel(rep.Totals.TieredMonthlyUSD))
+	if rep.Totals.ObjectsToTier > 0 {
+		fmt.Fprintf(w, "Tiering would move %d object(s), a one-time %s in lifecycle transition requests (%s).\n",
+			rep.Totals.ObjectsToTier, usdLabel(rep.Totals.TransitionUSD), provenance.RequestPriceSource)
+	}
 	fmt.Fprintf(w, "Runs the deletion sweeper could prove regenerable today: %d of %d.\n\n", rep.Totals.ProvableRuns, len(rep.Runs))
 	fmt.Fprintf(w, "Storage $ are %s.\n", rep.PriceSource)
 

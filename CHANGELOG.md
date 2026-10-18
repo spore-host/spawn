@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn results lifecycle`: tier task outputs by what they cost to make
+  again** (#1076, phase 3; dry run unless `--apply`). It installs two S3
+  lifecycle rules on a bucket. `spawn:regen-class=cheap` outputs go to
+  Standard-IA at 30 days and Glacier Instant Retrieval at 90, and `moderate`
+  outputs to Standard-IA at 60. Every rule requires `spawn:retain=false` and at
+  least 128 KiB, so expensive, unclassified, retained and older outputs are never
+  moved. The rules only tier; nothing is deleted. It works on this account's
+  results bucket by default, or on any bucket you own with `--bucket`. The
+  bucket's other lifecycle rules and its transition minimum-size setting are
+  kept exactly as they are. Every call names your account as the expected
+  bucket owner, and the configuration is read back after writing. The dry run
+  shows the costs: request charges per object moved, retrieval per GB, and AWS's
+  minimum storage durations. Prices are a labelled, dated static table.
+  `--remove` takes spawn's rules out again. Nothing installs the rules
+  automatically.
+- **`spawn results retain <s3-uri>...`** marks outputs to keep
+  (`spawn:retain=true`), or with `--off` lets the rules apply. A URI ending in
+  `/` covers a prefix. It keeps every other tag, since S3 replaces the whole tag
+  set on a write, and only changes spawn outputs. `--off` is also how outputs
+  written before v0.133.0 are opted in to tiering.
+- **`spawn results retention` shows what tiering itself would cost**: the
+  one-time transition request charge for the objects the rules would move.
+
 ## [0.133.0] - 2026-10-17
 
 ### Added

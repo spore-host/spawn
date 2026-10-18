@@ -47,6 +47,38 @@ const (
 		"; static because truffle, the suite's pricing authority, prices EC2 only; other regions differ slightly"
 )
 
+// What tiering itself costs, from the AWS Price List API (service AmazonS3,
+// productFamily "API Request" and retrieval, us-east-1, list price), read on
+// RequestPricesAsOf. STATIC, labelled by RequestPriceSource. A lifecycle transition is billed as a PUT request
+// to the class it moves into, and reading an object back from a tiered class
+// costs per GB. AWS also bills a minimum storage duration: 30 days for
+// Standard-IA and 90 for Glacier IR, charged in full for an object deleted or
+// moved on sooner.
+var (
+	transitionRequestUSD = map[string]float64{
+		string(s3types.StorageClassStandardIa): 0.01 / 1000,
+		string(s3types.StorageClassGlacierIr):  0.02 / 1000,
+	}
+	retrievalUSDPerGB = map[string]float64{
+		string(s3types.StorageClassStandardIa): 0.01,
+		string(s3types.StorageClassGlacierIr):  0.03,
+	}
+)
+
+const (
+	RequestPricesAsOf  = "2026-10-18"
+	RequestPriceSource = "static us-east-1 S3 request and retrieval list prices, read from the AWS Price List API on " + RequestPricesAsOf +
+		"; static because truffle, the suite's pricing authority, prices EC2 only; other regions differ slightly"
+)
+
+// TransitionRequestUSD is the one-time request charge for a lifecycle rule to
+// move one object into storageClass, by the static table.
+func TransitionRequestUSD(storageClass string) float64 { return transitionRequestUSD[storageClass] }
+
+// RetrievalUSDPerGB is what reading back one GB from storageClass costs, by the
+// static table. Zero for Standard.
+func RetrievalUSDPerGB(storageClass string) float64 { return retrievalUSDPerGB[storageClass] }
+
 // minTransitionBytes: S3 lifecycle doesn't transition objects smaller than this
 // by default, and Standard-IA and Glacier IR bill anything smaller as this size.
 const minTransitionBytes = 128 * 1024
@@ -177,6 +209,9 @@ type RunSummary struct {
 	// TieredMonthlyUSD is the monthly cost once the rules have moved what they
 	// would have moved by now. Equal to MonthlyUSD when nothing moves.
 	TieredMonthlyUSD float64 `json:"tiered_monthly_storage_usd"`
+	// TransitionUSD is the one-time request charge for the moves TieredMonthlyUSD
+	// assumes.
+	TransitionUSD float64 `json:"transition_request_usd"`
 	// Provable is the deletion sweeper's check, run now without deleting.
 	Provable  bool            `json:"provable_regenerable"`
 	WhyNot    []string        `json:"why_not_provable,omitempty"`
@@ -208,6 +243,8 @@ type Report struct {
 		Bytes            int64   `json:"bytes"`
 		MonthlyUSD       float64 `json:"monthly_storage_usd"`
 		TieredMonthlyUSD float64 `json:"tiered_monthly_storage_usd"`
+		TransitionUSD    float64 `json:"transition_request_usd"`
+		ObjectsToTier    int     `json:"objects_to_tier"`
 		ProvableRuns     int     `json:"provable_runs"`
 	} `json:"totals"`
 	// Errors are objects whose tags couldn't be read. They're counted nowhere
@@ -307,6 +344,9 @@ func BuildReport(ctx context.Context, api ReportAPI, opt ReportOptions) (*Report
 		tiered := usd
 		if target != "" {
 			tiered, _ = MonthlyStorageUSD(target, bytes)
+			r.TransitionUSD += TransitionRequestUSD(target)
+			rep.Totals.TransitionUSD += TransitionRequestUSD(target)
+			rep.Totals.ObjectsToTier++
 		}
 		r.Objects++
 		r.Bytes += bytes
