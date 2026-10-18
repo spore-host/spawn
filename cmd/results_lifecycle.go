@@ -90,7 +90,9 @@ tags the rules match on. Only spawn outputs (objects tagged spawn:run-id) are
 changed. Anything else is listed and left alone.
 
 Needs s3:GetObjectTagging and s3:PutObjectTagging on the objects, and
-s3:ListBucket for a prefix.`,
+s3:ListBucket for a prefix. On a versioned bucket it also needs
+s3:PutObjectVersionTagging, because it writes the tags of the exact version it
+read.`,
 	Example: `  # Keep one output
   spawn results retain s3://my-lab-results/project-x/final.bam
 

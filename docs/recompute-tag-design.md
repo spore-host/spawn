@@ -4,8 +4,8 @@
 (record) shipped in v0.132.1 and was verified on a real instance. v0.132.0 lost
 task outputs for about an hour (#1094; see [Shipping notes](#shipping-notes)).
 Phase 2 (report: `spawn results retention`, read only) shipped in v0.133.0.
-Phase 3 (tiering: `spawn results lifecycle`, `spawn results retain`) is in
-progress, decided 2026-10-18 (Decisions 5 to 7). Phase 4 (the verifying
+Phase 3 (tiering: `spawn results lifecycle`, `spawn results retain`) shipped
+in v0.134.0, decided 2026-10-18 (Decisions 5 to 7). Phase 4 (the verifying
 sweeper) is not started.
 
 ## The idea
