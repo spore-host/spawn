@@ -181,6 +181,14 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if vpcID != "" {
 		config.VPCID = vpcID
 	}
+	// --efa without --mpi. The only assignment of EFAEnabled lived in
+	// resolveMPIPlacement, so a plain `spawn launch --efa` passed the EFA
+	// pre-flight and then launched with an ordinary ENA interface: no EFA device,
+	// fi_info -p efa empty, nothing warned. Heterogeneous EFA pairs (different
+	// instance types, so no MPI job array) depend on this path.
+	if efaEnabled {
+		config.EFAEnabled = true
+	}
 	if spot {
 		config.Spot = true
 	}

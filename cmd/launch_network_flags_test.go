@@ -113,3 +113,31 @@ func TestMergeManagedSecurityGroup(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildLaunchConfig_EFAWithoutMPI: --efa on a single (non-MPI) launch must
+// request an EFA interface. It was set only on the --mpi path, so the instance
+// came up with a plain ENA and no EFA device, silently.
+func TestBuildLaunchConfig_EFAWithoutMPI(t *testing.T) {
+	prevEFA, prevMPI, prevType := efaEnabled, mpiEnabled, instanceType
+	t.Cleanup(func() { efaEnabled, mpiEnabled, instanceType = prevEFA, prevMPI, prevType })
+	instanceType = "c8gn.16xlarge"
+	mpiEnabled = false
+
+	efaEnabled = true
+	cfg, err := buildLaunchConfig(nil)
+	if err != nil {
+		t.Fatalf("buildLaunchConfig: %v", err)
+	}
+	if !cfg.EFAEnabled {
+		t.Fatal("EFAEnabled = false with --efa and no --mpi: the instance would launch without an EFA interface")
+	}
+
+	efaEnabled = false
+	cfg, err = buildLaunchConfig(nil)
+	if err != nil {
+		t.Fatalf("buildLaunchConfig: %v", err)
+	}
+	if cfg.EFAEnabled {
+		t.Fatal("EFAEnabled = true without --efa")
+	}
+}

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`spawn launch --efa` without `--mpi` now attaches an EFA interface.**
+  `EFAEnabled` was set only on the `--mpi` path, so a single launch with
+  `--efa` passed the EFA pre-flight, printed nothing, and came up with a plain
+  ENA interface: no `/sys/class/infiniband` device and `fi_info -p efa` empty.
+  Any EFA pair of different instance types (a GPU client and a CPU proxy, say,
+  which cannot be one MPI job array) was affected. The flag now reaches the
+  launch config the way `--subnet-id` and `--security-group-ids` do since #667.
+
 ## [0.135.1] - 2026-10-18
 
 ### Security
