@@ -164,7 +164,8 @@ const SchemaVersion = 1
 // may not start with "aws" or "s3".
 const AnnotationName = "spawn.provenance"
 
-// Tag keys. S3 allows 10 tags per object; these use at most five.
+// Tag keys. S3 allows 10 tags per object; these use at most six. TagRetain is
+// in report.go.
 const (
 	TagClass       = "spawn:regen-class"
 	TagUSD         = "spawn:regen-usd"
@@ -175,9 +176,11 @@ const (
 
 // Tags returns the object tags for a run's outputs. With no known rate there is
 // no class, no USD and no hours tag, so no lifecycle rule can match.
-// spawn:regenerable appears only when the spec opted in.
+// spawn:regenerable appears only when the spec opted in. spawn:retain is always
+// "false" at upload: every lifecycle rule requires it, so the researcher setting
+// it to "true" takes the object out of every rule (see TagRetain).
 func (r Record) Tags() map[string]string {
-	t := map[string]string{TagRunID: r.RunID}
+	t := map[string]string{TagRunID: r.RunID, TagRetain: "false"}
 	if cls, ok := Classify(r.Cost); ok {
 		t[TagClass] = string(cls)
 		t[TagUSD] = strconv.FormatFloat(r.Cost.USD, 'f', 4, 64)
