@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--active-ports` help no longer claims open connections prevent idle
+  termination.** They never did, by design: an abandoned browser tab holds a
+  connection open forever, so spored counts the ports' connections (the
+  `spawn:logged-in-count` tag) without letting them block idle. The help now
+  says so and points to `--active-processes` for keeping a busy app alive.
+- **`spawn results retain` help names the permission a versioned bucket also
+  needs:** `s3:PutObjectVersionTagging`, because it writes the tags of the exact
+  version it read.
+
 - **Windows: paths on a mapped network drive are no longer refused** (#1107).
   `--user-data-file` and spored's result uploads refused every existing path
   on a drive mapped to a network share (`Z:\data\out.txt`), because Windows
@@ -21,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   That is decided by volume serial number, so a share on another machine whose
   system volume has the same serial (both cloned from one image) is refused
   too.
+
+### Documentation
+
+- README: the commands table lists the 23 commands it was missing (`task`,
+  `pool`, `array`, `results`, `reaper`, `logs`, `doctor`, `footprint` and
+  others), drops the removed `stage`, and uses `sweep cancel` and `cleanup` in
+  place of their deprecated spellings. Found in the documentation audit
+  (spore-host/spore-host#585).
 
 ## [0.134.0] - 2026-10-18
 

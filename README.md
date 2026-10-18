@@ -95,13 +95,35 @@ spawn list
 | `queue` | Batch job queue management |
 | `schedule` | Scheduled execution |
 | `sweep` | Parameter sweeps |
-| `cancel` | Cancel a running parameter sweep (`--sweep-id`) |
-| `stage` | Data staging to/from S3 |
+| `sweep cancel` | Cancel a running parameter sweep |
 | `notify` | Chat notification (Slack/Teams) |
 | `slurm` | Convert Slurm sbatch scripts |
 | `resources` | List all AWS resources spawn has created (tagged `spawn:managed`) |
 | `orphans` | Report spawn-managed resources that look abandoned (billable leaks) |
 | `cleanup` | Remove orphaned spawn-managed resources |
+| `task` | Inspect and diagnose individual tasks (instances) |
+| `pool` | Pooled execution: fungible workers drain a shared task queue (#70) |
+| `array` | Manage job arrays (status, collect, cancel) |
+| `pipeline` | Manage multi-stage pipelines |
+| `service` | Run a long-lived HTTP service on an instance and tunnel to it |
+| `results` | Inspect task results in S3 |
+| `logs` | Show a spore's command or spored log, including after it has terminated |
+| `cost` | Show cost breakdown for a sweep or a single instance |
+| `availability` | Display availability statistics for instance types across regions |
+| `capacity-block` | Purchase and manage EC2 Capacity Blocks for ML |
+| `fsx` | FSx filesystem management commands |
+| `dns` | Manage DNS records for spawn instances |
+| `plugin` | Manage plugins on spore instances |
+| `team` | Manage team-based resource sharing |
+| `burst` | Launch cloud instances to join local job array |
+| `instance-config` | Read or write runtime config on a running instance via SSH |
+| `defaults` | Manage default launch settings (~/.spawn/config.yaml) |
+| `upgrade-spored` | Upgrade the spored agent on a running instance in place |
+| `reaper` | Manage the out-of-band TTL reaper in your own AWS account |
+| `doctor` | Check that your environment is ready to launch a spore instance |
+| `footprint` | Report everything spawn has created in this account, including the control plane |
+| `onboard` | Bring this AWS account onto the spore.host portal (BYOA) |
+| `validate` | Validate compliance and infrastructure configuration |
 
 ### Conventions
 
@@ -128,7 +150,7 @@ To find money quietly leaking:
 
 ```bash
 spawn orphans          # billable leaks: detached volumes, stopped-instance EIPs, …
-spawn cleanup --force  # remove them (never touches running instances)
+spawn cleanup          # remove them (never touches running instances)
 ```
 
 `spawn status <instance>` also reports any Elastic IP attached to an instance —
