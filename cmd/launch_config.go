@@ -189,6 +189,12 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if efaEnabled {
 		config.EFAEnabled = true
 	}
+	// --placement-group without --mpi: same gap. The flag was applied only in
+	// resolveMPIPlacement, which returns early when --mpi is off, so an explicit
+	// cluster placement group was silently ignored on a single launch.
+	if mpiPlacementGroup != "" {
+		config.PlacementGroup = mpiPlacementGroup
+	}
 	if spot {
 		config.Spot = true
 	}

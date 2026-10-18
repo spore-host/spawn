@@ -141,3 +141,20 @@ func TestBuildLaunchConfig_EFAWithoutMPI(t *testing.T) {
 		t.Fatal("EFAEnabled = true without --efa")
 	}
 }
+
+// TestBuildLaunchConfig_PlacementGroupWithoutMPI: an explicit --placement-group
+// on a single launch must reach RunInstances; it was applied only under --mpi.
+func TestBuildLaunchConfig_PlacementGroupWithoutMPI(t *testing.T) {
+	prevPG, prevMPI, prevType := mpiPlacementGroup, mpiEnabled, instanceType
+	t.Cleanup(func() { mpiPlacementGroup, mpiEnabled, instanceType = prevPG, prevMPI, prevType })
+	instanceType = "c8gn.16xlarge"
+	mpiEnabled = false
+	mpiPlacementGroup = "adit-g0-cluster"
+	cfg, err := buildLaunchConfig(nil)
+	if err != nil {
+		t.Fatalf("buildLaunchConfig: %v", err)
+	}
+	if cfg.PlacementGroup != "adit-g0-cluster" {
+		t.Fatalf("PlacementGroup = %q, want the --placement-group value on a non-MPI launch", cfg.PlacementGroup)
+	}
+}
