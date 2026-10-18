@@ -77,6 +77,11 @@ func TestMonthlyStorageUSD(t *testing.T) {
 		t.Error("a class the static table doesn't price must report !ok, not a guess")
 	}
 	// The label must say static, why, and when (feedback: static pricing must be labelled).
+	for _, want := range []string{"static", "truffle", RequestPricesAsOf, "Price List API"} {
+		if !strings.Contains(RequestPriceSource, want) {
+			t.Errorf("RequestPriceSource %q doesn't say %q", RequestPriceSource, want)
+		}
+	}
 	for _, want := range []string{"static", "truffle", StoragePricesAsOf, "Price List API"} {
 		if !strings.Contains(StoragePriceSource, want) {
 			t.Errorf("StoragePriceSource %q doesn't say %q", StoragePriceSource, want)
@@ -248,6 +253,10 @@ func TestReportProvesOnlyWhatTheSweeperCouldVerifyNow(t *testing.T) {
 	// 2 GiB of cheap, 100 days old: Glacier IR by now.
 	if math.Abs(ok.MonthlyUSD-0.046) > 1e-9 || math.Abs(ok.TieredMonthlyUSD-0.008) > 1e-9 {
 		t.Errorf("ok run: monthly %v tiered %v, want 0.046 -> 0.008", ok.MonthlyUSD, ok.TieredMonthlyUSD)
+	}
+	// Moving them costs a request each, into Glacier IR: $0.02 per 1,000.
+	if math.Abs(ok.TransitionUSD-2*0.02/1000) > 1e-12 || rep.Totals.ObjectsToTier != 2 {
+		t.Errorf("ok run: transition cost %v for %d objects, want 2 x $0.00002", ok.TransitionUSD, rep.Totals.ObjectsToTier)
 	}
 	if !whyHas(runByID(t, rep, "changed"), "changed") {
 		t.Errorf("an input with a new ETag must block proof: %v", runByID(t, rep, "changed").WhyNot)

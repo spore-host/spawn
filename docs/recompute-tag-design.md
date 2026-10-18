@@ -3,9 +3,10 @@
 **Status: decided 2026-10-17 (see [Decisions](#decisions)).** Phase 1
 (record) shipped in v0.132.1 and was verified on a real instance. v0.132.0 lost
 task outputs for about an hour (#1094; see [Shipping notes](#shipping-notes)).
-Phase 2 (report: `spawn results retention`, read only) is merged (#1103) and
-ships in the next release. Phases 3 (tiering) and 4 (verifying sweeper) are not
-started.
+Phase 2 (report: `spawn results retention`, read only) shipped in v0.133.0.
+Phase 3 (tiering: `spawn results lifecycle`, `spawn results retain`) is in
+progress, decided 2026-10-18 (Decisions 5 to 7). Phase 4 (the verifying
+sweeper) is not started.
 
 ## The idea
 
@@ -188,8 +189,22 @@ Made by the owner on 2026-10-17.
    `moderate` goes to Standard-IA at 60. `expensive`, unclassified and
    `retain=true` objects are never tiered.
 4. **Phase 1 scope:** task results only (`spawn task run` and pooled workers).
-   Queue and pipeline results follow later, tags and annotation only, with no
-   rules on buckets the user owns.
+   Queue and pipeline results follow later, tags and annotation only. spawn
+   never puts rules on a bucket the user owns on its own initiative; see 6.
+
+Made by the owner on 2026-10-18, for phase 3:
+
+5. **Rules are applied only on request.** `spawn results lifecycle --apply`
+   installs them on a bucket, per account. Creating a `spawn-results-*` bucket
+   doesn't. That may change to automatic once real reports have been read.
+6. **A researcher may apply the same rules to their own bucket**, explicitly:
+   `spawn results lifecycle --bucket <theirs> --apply`. This amends Decision 4,
+   which kept rules off user buckets entirely. The user runs it; spawn never
+   does it for them. This needs documentation, beyond the command's own help.
+7. **Outputs written before `spawn:retain=false` existed** (v0.132.x) are not
+   tagged retroactively by any automatic step. They are kept. A researcher who
+   wants them tiered runs `spawn results retain --off <prefix>`, the same
+   merging command that sets `retain=true`, so no separate backfill exists.
 
 ## What existed before phase 1
 

@@ -33,3 +33,12 @@ func inputHeaders(cfg aws.Config) func(context.Context, string) InputHeader {
 		return c
 	}
 }
+
+// LifecycleClient is a real S3 client in the bucket's own region, for
+// PlanLifecycle, ApplyLifecycle and SetRetain.
+func LifecycleClient(ctx context.Context, cfg aws.Config, bucket string) interface {
+	LifecycleAPI
+	RetainAPI
+} {
+	return s3.NewFromConfig(s3transfer.BucketRegionConfig(ctx, cfg, bucket))
+}
