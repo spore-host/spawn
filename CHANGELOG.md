@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.134.0] - 2026-10-18
+
 ### Added
 
 - **`spawn results lifecycle`: tier task outputs by what they cost to make
@@ -9775,7 +9777,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.133.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.134.0...HEAD
+[0.134.0]: https://github.com/spore-host/spawn/compare/v0.133.0...v0.134.0
 [0.133.0]: https://github.com/spore-host/spawn/compare/v0.132.2...v0.133.0
 [0.132.2]: https://github.com/spore-host/spawn/compare/v0.132.1...v0.132.2
 [0.132.1]: https://github.com/spore-host/spawn/compare/v0.132.0...v0.132.1
