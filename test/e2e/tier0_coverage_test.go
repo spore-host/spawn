@@ -36,6 +36,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"resources": "tier0_cleanup_test.go (lists a launched instance via the tagging API)",
 		"orphans":   "tier0_cleanup_test.go (runs clean against a fresh account)",
 		"footprint": "tier0_footprint_test.go (runs against a fresh account: must print the explicit \"does NOT mean the account is empty\" wording rather than a bare zero, which is the #708 lesson it exists to honour). The name-matching half — which resources are claimed as spore.host's and, more importantly, which are NOT — is unit-tested in pkg/aws/footprint_test.go, including that an over-broad matcher fails.",
+		"results":   "tier0_results_test.go (retention: empty-bucket wording, untracked vs run-tagged, not-opted-in reported unprovable, and read-only: objects and tags unchanged). Annotation reads and input re-checks are unit-tested against a fake in pkg/provenance and were verified against real S3 (#1076)",
 		"cleanup":   "tier0_cleanup_test.go (--dry-run previews, deletes nothing; default execute needs real resources → Tier 2/3)",
 	}
 
