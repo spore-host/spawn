@@ -153,6 +153,58 @@ func TestEvaluate_FallsBackToAPILaunchTimeWhenTagMissing(t *testing.T) {
 	}
 }
 
+// The ceiling is the control that contains a forged deadline, so it must not
+// be defeatable by a forged launch time either (GHSA-c93q-4jh7-6pvj). Written
+// from the ceiling's own contract, "fires even for far-future deadlines —
+// defense against escape hatches and tag tampering": an instance that EC2 says
+// has run for 30 days is past a 7-day ceiling whatever its tags claim.
+func TestEvaluate_MaxAgeCeilingIgnoresARewrittenLaunchTimeTag(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	apiLaunch := now.Add(-30 * 24 * time.Hour)
+	for name, forged := range map[string]time.Time{
+		"rewritten to now":    now,
+		"set into the future": now.Add(365 * 24 * time.Hour),
+		"just inside ceiling": now.Add(-24 * time.Hour),
+	} {
+		t.Run(name, func(t *testing.T) {
+			inst := ec2types.Instance{
+				InstanceId: aws.String("i-forged-launch"),
+				LaunchTime: &apiLaunch,
+				Tags: []ec2types.Tag{
+					tag("spawn:managed", "true"),
+					tag("spawn:ttl-deadline", now.Add(70*365*24*time.Hour).Format(time.RFC3339)),
+					tag("spawn:launch-time", forged.Format(time.RFC3339)),
+				},
+			}
+			c, expired := newReaper().evaluate(inst, "us-east-1", now)
+			if !expired || c.reason != "max-age" {
+				t.Fatalf("an instance EC2 launched 30 days ago must be reaped by the max-age ceiling "+
+					"whatever its spawn:launch-time tag says; got expired=%t reason=%q", expired, c.reason)
+			}
+		})
+	}
+}
+
+// The other direction: EC2 LaunchTime is the most recent start, so a stopped
+// and restarted instance looks new to the API. The CLI's launch-time tag is the
+// true launch, and must still bound it.
+func TestEvaluate_RestartedInstanceKeepsItsOriginalLaunchTime(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	restarted := now.Add(-1 * time.Hour)
+	inst := ec2types.Instance{
+		InstanceId: aws.String("i-restarted"),
+		LaunchTime: &restarted,
+		Tags: []ec2types.Tag{
+			tag("spawn:managed", "true"),
+			tag("spawn:launch-time", now.Add(-8*24*time.Hour).Format(time.RFC3339)),
+		},
+	}
+	c, expired := newReaper().evaluate(inst, "us-east-1", now)
+	if !expired || c.reason != "max-age" {
+		t.Fatalf("a restart must not reset the instance's age; got expired=%t reason=%q", expired, c.reason)
+	}
+}
+
 func TestParseRegions(t *testing.T) {
 	if got := parseRegions(""); len(got) != len(defaultRegions) {
 		t.Errorf("empty should yield defaults (%d), got %d", len(defaultRegions), len(got))
