@@ -149,5 +149,5 @@ spawn launch <name> [flags]
 | `--wait` |  | bool |  | Wait for sweep/launch to complete (requires --detach) |
 | `--webhook-correlation` |  | string |  | Opaque blob echoed verbatim in the spot-webhook/completion-webhook payload so a consumer can correlate the event to its own record (never parsed by spawn) |
 | `--webhook-timeout` |  | string |  | Hard cap on the spot-webhook/completion-webhook POST so it can't eat the reclamation window or delay the completion action (default: 2s) |
-| `--yes` | `-y` | bool |  | Auto-approve cost estimate (skip confirmation) |
+| `--yes` | `-y` | bool |  | Skip confirmation prompts: the launch summary and maximum-cost question on an interactive terminal, the cross-region data-locality warning, and launching without a TTL. Non-interactive runs never ask, but always print the maximum cost |
 

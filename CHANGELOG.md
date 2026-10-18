@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`spawn launch` asks before spending money on an interactive terminal**
+  (#1115). It shows what it's about to launch (instance, or count and type for
+  an array; purchase; lifetime; rate) and the **maximum cost**, which is the
+  on-demand rate for the whole TTL, for every instance, plus any `--fsx-create`
+  filesystem. It then asks `[y/N]`; `--yes` skips the question. Previously
+  `--yes` was documented as "Auto-approve cost estimate", but a single launch
+  showed no estimate and asked nothing: `echo n | spawn launch …` launched.
+  Non-interactive runs (scripts, CI, pipes) launch exactly as before, without
+  asking, but every launch now prints its maximum cost to stderr. The `--yes`
+  help now lists what it actually skips.
+
 ### Fixed
 
 - **`spawn status` polish from the 0.134.0 demo rehearsal** (#1114):

@@ -432,6 +432,13 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Show what's about to be launched and its maximum cost, and on an
+	// interactive terminal ask; --yes skips the question (#1115).
+	if !confirmLaunchCost(ctx, awsClient, config) {
+		// Not success: a caller must tell "you said no" from "it launched" (#737).
+		return newAborted("launch cancelled")
+	}
+
 	// Launch with progress display
 	return launchWithProgress(ctx, awsClient, config, plat, auditLog)
 }
