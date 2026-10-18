@@ -7,12 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn results retention`: what task results cost to keep, and what
+  retention by regeneration cost would do** (#1076, phase 2; read only). For a
+  bucket (the account's results bucket by default, or `--bucket`/`--prefix`), it
+  reports run by run: what is stored and its monthly storage cost, what it would
+  cost once the decided tiering rules had moved it, and whether the deletion
+  sweeper could prove the run regenerable today, with every reason it can't. An
+  input you can't read counts as unproven, never as unchanged. Storage prices
+  are a static us-east-1 table from the AWS Price List API, labelled as such.
+  Nothing is tiered, tagged or deleted.
+
+### Changed
+
+- **Task outputs are tagged `spawn:retain=false` at upload** (#1076). Every
+  future tiering or deletion rule requires that tag, because an S3 lifecycle
+  filter can't negate: setting it to `true` will take an output out of every
+  rule. Outputs written before this match no rule and are kept.
+
 ### Fixed
 
 - **An idle-check test no longer fails intermittently on Windows CI.** A
   monitor-loop test cancelled its loop without waiting for it to exit, so on
   the slower Windows runner a final tick landed in the next test and counted as
   a sample it never took. The test now waits for the loop to stop. Test-only.
+
 - **A plugin-runtime test no longer fails CI intermittently.** A health check
   already in flight could still write a plugin's state while the test's temp
   directory was being removed ("directory not empty"). Health loops are now
@@ -45,10 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or on Windows), status samples once as before and labels it
   `daemon reading unavailable; one-shot sample`.
 
-## [0.132.1] - 2026-10-17
-
-### Fixed
-
 - **`--idle-timeout` works again on Linux: an unused instance now stops**
   (#1093). It never could on any supported AMI, because both idle thresholds
   were 100 KB a minute and an instance nobody is using does more than that on
@@ -62,20 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   I/O and 1 MiB of network a minute, set from those measurements. A job
   writing or transferring data still clears them easily; CPU, open sessions
   and accelerators are judged as before.
-- **Task outputs upload again on v0.132.0 spores** (#1094). On every instance,
-  v0.132.0's output upload (`spored provenance upload`) failed with
-  `Invalid region`, so every `spawn task run` and pooled task with outputs
-  lost them and was reported as `output_delivery_error` even when the command
-  succeeded. spored now takes the region from instance metadata, as the AWS CLI
-  does. If the provenance upload fails for any other reason, the output is
-  uploaded untagged with `aws s3 cp` instead of being lost; untagged outputs are
-  kept, never tiered or deleted. Input provenance, which failed silently the
-  same way, is recorded again too.
-- **A plugin's health loop is no longer lost after a failed stop or hibernate**
-  (#1091). A health check that finished just as spored stopped its plugins
-  could record the plugin as running again, overwriting "stopped". If the stop
-  then failed, spored resumed only the plugins recorded as stopped, so that one
-  never got its health loop back, and a later failure went unnoticed.
+
 - **`spored status` and `spawn status` show real CPU, network and disk
   readings, and why an instance is or isn't idle** (#1090). Every status
   screen used to print all three as `unknown (single sample; assuming active)`
@@ -89,6 +92,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `idle_reading`. When the daemon has published nothing recent (not running,
   or on Windows), status samples once as before and labels it
   `daemon reading unavailable; one-shot sample`.
+
+## [0.132.1] - 2026-10-17
+
+### Fixed
+
+- **Task outputs upload again on v0.132.0 spores** (#1094). On every instance,
+  v0.132.0's output upload (`spored provenance upload`) failed with
+  `Invalid region`, so every `spawn task run` and pooled task with outputs
+  lost them and was reported as `output_delivery_error` even when the command
+  succeeded. spored now takes the region from instance metadata, as the AWS CLI
+  does. If the provenance upload fails for any other reason, the output is
+  uploaded untagged with `aws s3 cp` instead of being lost; untagged outputs are
+  kept, never tiered or deleted. Input provenance, which failed silently the
+  same way, is recorded again too.
+
+- **A plugin's health loop is no longer lost after a failed stop or hibernate**
+  (#1091). A health check that finished just as spored stopped its plugins
+  could record the plugin as running again, overwriting "stopped". If the stop
+  then failed, spored resumed only the plugins recorded as stopped, so that one
+  never got its health loop back, and a later failure went unnoticed.
 
 ## [0.132.0] - 2026-10-17
 

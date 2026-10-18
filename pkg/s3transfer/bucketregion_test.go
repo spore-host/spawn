@@ -1,4 +1,4 @@
-package pipeline
+package s3transfer
 
 import (
 	"context"
@@ -29,7 +29,7 @@ func TestBucketRegionConfigUsesTheBucketsRegion(t *testing.T) {
 		BaseEndpoint: aws.String(srv.URL),
 		Credentials:  credentials.NewStaticCredentialsProvider("a", "b", ""),
 	}
-	got := bucketRegionConfig(context.Background(), cfg, "pipeline-bucket")
+	got := BucketRegionConfig(context.Background(), cfg, "pipeline-bucket")
 	if got.Region != "eu-west-2" {
 		t.Errorf("region = %q, want the bucket's eu-west-2", got.Region)
 	}
@@ -46,7 +46,7 @@ func TestBucketRegionConfigFallsBack(t *testing.T) {
 	}))
 	defer srv.Close()
 	cfg := aws.Config{Region: "us-west-2", BaseEndpoint: aws.String(srv.URL)}
-	if got := bucketRegionConfig(context.Background(), cfg, "missing"); got.Region != "us-west-2" {
+	if got := BucketRegionConfig(context.Background(), cfg, "missing"); got.Region != "us-west-2" {
 		t.Errorf("region = %q, want the unchanged us-west-2", got.Region)
 	}
 }
@@ -61,7 +61,7 @@ func TestBucketRegionConfigReadsTheRedirectsRegion(t *testing.T) {
 	}))
 	defer srv.Close()
 	cfg := aws.Config{Region: "us-west-2", BaseEndpoint: aws.String(srv.URL)}
-	if got := bucketRegionConfig(context.Background(), cfg, "elsewhere"); got.Region != "ap-southeast-2" {
+	if got := BucketRegionConfig(context.Background(), cfg, "elsewhere"); got.Region != "ap-southeast-2" {
 		t.Errorf("region = %q, want the redirect's ap-southeast-2", got.Region)
 	}
 }
