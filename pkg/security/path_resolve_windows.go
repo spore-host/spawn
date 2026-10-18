@@ -126,3 +126,73 @@ func normaliseFinalPath(s string) string {
 	}
 	return s
 }
+
+// onSystemVolume reports whether the longest existing prefix of p is on the
+// same volume as one of this machine's system directories, by volume serial
+// number. For a UNC path the serial is the one the server reports for the
+// volume the file is actually on, after the server has followed any junction,
+// so a loopback share (\\localhost\C$, a share of C:\Windows, or a share
+// holding a junction into it) matches the local system volume however it is
+// spelled (#1107).
+//
+// It errs towards refusing: a share whose volume merely shares a serial with
+// the system volume (a machine cloned from the same image) is refused too, and
+// so is any path when no system directory's serial can be read.
+func onSystemVolume(p string) (bool, error) {
+	s, err := existingVolumeSerial(p)
+	if err != nil {
+		return false, err
+	}
+	found := false
+	for _, r := range forbiddenReadRoots() {
+		rs, err := volumeSerial(r)
+		if err != nil {
+			continue
+		}
+		found = true
+		if rs == s {
+			return true, nil
+		}
+	}
+	if !found {
+		return false, errors.New("cannot read the volume serial of any system directory")
+	}
+	return false, nil
+}
+
+// existingVolumeSerial is volumeSerial of the longest prefix of p that exists.
+func existingVolumeSerial(p string) (uint32, error) {
+	cur := p
+	for {
+		s, err := volumeSerial(cur)
+		if err == nil {
+			return s, nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return 0, err
+		}
+		cur = parent
+	}
+}
+
+// volumeSerial opens p as finalPathName does, following every reparse point,
+// and returns the serial number of the volume the handle is on.
+func volumeSerial(p string) (uint32, error) {
+	name, err := windows.UTF16PtrFromString(p)
+	if err != nil {
+		return 0, err
+	}
+	h, err := windows.CreateFile(name, 0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer windows.CloseHandle(h) //nolint:errcheck // read-only query handle
+	var fi windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &fi); err != nil {
+		return 0, err
+	}
+	return fi.VolumeSerialNumber, nil
+}

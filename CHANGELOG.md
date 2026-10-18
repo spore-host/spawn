@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows: paths on a mapped network drive are no longer refused** (#1107).
+  `--user-data-file` and spored's result uploads refused every existing path
+  on a drive mapped to a network share (`Z:\data\out.txt`), because Windows
+  names such a file `\\server\share\data\out.txt` and the check from #1000
+  refused UNC paths outright. A path is now admitted when it stays on the share
+  its drive is mapped to. A link on the drive that leads anywhere else is still
+  refused, and so is a drive mapped to a share on this machine's own system
+  volume (`\\localhost\C$`, or a share of `C:\Windows`), which would
+  otherwise reach the system directories under a name no check recognises.
+  That is decided by volume serial number, so a share on another machine whose
+  system volume has the same serial (both cloned from one image) is refused
+  too.
+
 ## [0.134.0] - 2026-10-18
 
 ### Added
