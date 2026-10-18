@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An idle-check test no longer fails intermittently on Windows CI.** A
+  monitor-loop test cancelled its loop without waiting for it to exit, so on
+  the slower Windows runner a final tick landed in the next test and counted as
+  a sample it never took. The test now waits for the loop to stop. Test-only.
 - **A plugin-runtime test no longer fails CI intermittently.** A health check
   already in flight could still write a plugin's state while the test's temp
   directory was being removed ("directory not empty"). Health loops are now
