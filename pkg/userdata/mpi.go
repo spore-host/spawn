@@ -161,6 +161,7 @@ cat >> /root/.ssh/config <<'EOF'
 Host *
   StrictHostKeyChecking no
   UserKnownHostsFile=/dev/null
+  LogLevel ERROR
 EOF
 chmod 600 /root/.ssh/config
 # Wait for the control plane to push the peers file, bounded (spawn#684).

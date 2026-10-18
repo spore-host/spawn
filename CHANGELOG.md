@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn status` polish from the 0.134.0 demo rehearsal** (#1114):
+  - the idle line reads "idle for 1m 51s — stops in 3m 8s", not "stops for
+    1m 51s — stops in 3m 8s";
+  - for the first minute after a boot, before spored's first sample, it shows
+    one line, "Idle check: first reading pending …", instead of three
+    "unknown (single sample; assuming active)" readings (the JSON reports
+    `idle_reading.source: "pending"`);
+  - the compute-cost duration says it's billed time (compute plus boot), so it
+    no longer looks like it contradicts the elapsed line.
+- **`--mpi-command` output no longer starts with ssh "Permanently added … to the
+  list of known hosts" warnings** (#1114). The MPI cohort's ssh config now sets
+  `LogLevel ERROR`.
+- **`spawn upgrade-spored` help names `--allow-downgrade`**, the flag it
+  actually takes, instead of the deprecated `--force`.
+
 - **`--active-ports` help no longer claims open connections prevent idle
   termination.** They never did, by design: an abandoned browser tab holds a
   connection open forever, so spored counts the ports' connections (the

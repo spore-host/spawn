@@ -31,7 +31,7 @@ completion / pre-stop / idle / FSx config all live in EC2 tags that the new
 spored re-reads on boot).
 
 The default target is the latest released version; pin one with --version. A
-downgrade is refused unless --force is given. The swap is driven over SSM
+downgrade is refused unless --allow-downgrade is given. The swap is driven over SSM
 (keyless — works on private-subnet / no-public-IP instances), so the instance
 must have the SSM agent online and an instance profile (the spored role attaches
 AmazonSSMManagedInstanceCore, so spawn-launched instances already qualify).
@@ -89,7 +89,7 @@ func runUpgradeSpored(cmd *cobra.Command, args []string) error {
 
 	// What's running now? Prefer the tag (no exec); it's written by spored on boot
 	// (#234). Empty when an older spored that predates the tag is running — then we
-	// can't compare, so we proceed (and --force is not required).
+	// can't compare, so we proceed (and --allow-downgrade is not required).
 	running := instance.Tags["spawn:spored-version"]
 	if running != "" && !upgradeSporedForce {
 		if cmp := compareVersions(target, running); cmp == 0 {

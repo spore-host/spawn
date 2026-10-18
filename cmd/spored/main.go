@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -601,6 +602,9 @@ type statusIdleReading struct {
 // daemon, its verdict: the line that explains why an instance is or is not
 // idle-stopping, which was only in /var/log/spored.log (#1090).
 func idleReadingLine(r statusIdleReading) string {
+	if r.Source == "pending" {
+		return "first reading pending: spored samples once a minute, so it arrives about a minute after spored starts (if this persists, check 'systemctl status spored')"
+	}
 	if r.Source != "daemon" {
 		return "daemon reading unavailable; one-shot sample (no interval to measure over)"
 	}
@@ -611,6 +615,21 @@ func idleReadingLine(r statusIdleReading) string {
 // daemonIdleState returns the running daemon's last idle evaluation, if one
 // was published recently enough to describe the instance now. A variable so
 // tests can stand in for the daemon.
+// daemonIdleNotYetPublished reports whether the daemon has published no idle
+// state at all this boot. The state lives on boot-scoped tmpfs, so a missing
+// file means spored hasn't finished its first sample yet, as opposed to a
+// stale one, where it stopped ticking. Right after launch that is the normal
+// case, and three "unknown" readings read as a fault (#1114). A variable so
+// tests can stub it.
+var daemonIdleNotYetPublished = func() bool {
+	p := agent.IdleStatePath()
+	if p == "" {
+		return false
+	}
+	_, err := os.Stat(p)
+	return errors.Is(err, os.ErrNotExist)
+}
+
 var daemonIdleState = func(now time.Time) (agent.IdleState, bool) {
 	st, err := agent.ReadIdleState(agent.IdleStatePath())
 	if err != nil || !st.Fresh(now) {
@@ -742,6 +761,9 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 			idleTime = time.Since(ag.GetLastActivityTime())
 		}
 		reading = statusIdleReading{Source: "one-shot"}
+		if daemonIdleNotYetPublished() {
+			reading.Source = "pending"
+		}
 	}
 
 	completionFileExists := false
@@ -1127,8 +1149,10 @@ func renderStatusTable(report *statusReport) error {
 		idle := report.IdleTimeout
 		timeoutDur := time.Duration(idle.TimeoutSeconds * float64(time.Second))
 		if idle.IsIdle {
-			fmt.Printf("  Idle timeout:     %s  (%s for %s — %s in %s)\n",
-				formatDuration(timeoutDur), idle.Action, formatDuration(time.Duration(idle.IdleSeconds*float64(time.Second))),
+			// "idle for X — stops in Y": X is how long it has been idle, not how
+			// long it has been stopping (#1114).
+			fmt.Printf("  Idle timeout:     %s  (idle for %s — %s in %s)\n",
+				formatDuration(timeoutDur), formatDuration(time.Duration(idle.IdleSeconds*float64(time.Second))),
 				idle.Action, formatDuration(time.Duration(idle.RemainingSeconds*float64(time.Second))))
 		} else {
 			fmt.Printf("  Idle timeout:     %s  (currently active)\n", formatDuration(timeoutDur))
@@ -1157,10 +1181,13 @@ func renderStatusTable(report *statusReport) error {
 			// nothing has been recorded yet (#896).
 			fmt.Printf("  Compute cost:     —  (no running time recorded yet; %s)\n", rateLabel)
 		case !live:
-			fmt.Printf("  Compute cost:     $%.2f  (%s × %s, as of the last checkpoint)\n",
+			fmt.Printf("  Compute cost:     $%.2f  (%s billed × %s, as of the last checkpoint)\n",
 				cost.ComputeCost, formatDuration(billedTime), rateLabel)
 		default:
-			fmt.Printf("  Compute cost:     $%.2f  (%s × %s)\n",
+			// "billed": compute plus boot, which EC2 charges although spored
+			// wasn't up yet. Elapsed above splits the two, so an unlabelled
+			// duration here looked like it disagreed with "compute" (#1114).
+			fmt.Printf("  Compute cost:     $%.2f  (%s billed × %s)\n",
 				cost.ComputeCost, formatDuration(billedTime), rateLabel)
 		}
 		if notRunning := stoppedTime + hibernatedTime; notRunning >= time.Minute {
@@ -1218,24 +1245,29 @@ func renderStatusTable(report *statusReport) error {
 
 	// ── Live metrics (brief) ──────────────────────────────────────────────────
 	fmt.Println()
-	if report.CPUMeasured {
-		fmt.Printf("  CPU:              %.1f%%\n", report.CPUPercent)
-	} else {
-		// An honest unknown beats a confident 0.0% on a box running at 100%.
-		// With the daemon's reading this is rare (its first tick); a one-shot
-		// fallback has no prior sample to delta against, so it is common there.
-		fmt.Printf("  CPU:              unknown (single sample; assuming active)\n")
-	}
-	if report.NetworkMeasured {
-		fmt.Printf("  Network:          %s/min\n", formatBytes(report.NetworkBytesPerMin))
-	} else {
-		// Not "976.6 KB/min": that was the placeholder, printed as traffic (#919).
-		fmt.Printf("  Network:          unknown (%s; assuming active)\n", report.NetworkUnknown)
-	}
-	if report.DiskMeasured {
-		fmt.Printf("  Disk I/O:         %s/min\n", formatBytes(report.DiskBytesPerMin))
-	} else {
-		fmt.Printf("  Disk I/O:         unknown (%s; assuming active)\n", report.DiskUnknown)
+	// No daemon reading yet this boot: the Idle check line below says so, in
+	// place of three alarming unknowns from a one-shot sample with nothing to
+	// measure against (#1114).
+	if report.IdleReading.Source != "pending" {
+		if report.CPUMeasured {
+			fmt.Printf("  CPU:              %.1f%%\n", report.CPUPercent)
+		} else {
+			// An honest unknown beats a confident 0.0% on a box running at 100%.
+			// With the daemon's reading this is rare (its first tick); a one-shot
+			// fallback has no prior sample to delta against, so it is common there.
+			fmt.Printf("  CPU:              unknown (single sample; assuming active)\n")
+		}
+		if report.NetworkMeasured {
+			fmt.Printf("  Network:          %s/min\n", formatBytes(report.NetworkBytesPerMin))
+		} else {
+			// Not "976.6 KB/min": that was the placeholder, printed as traffic (#919).
+			fmt.Printf("  Network:          unknown (%s; assuming active)\n", report.NetworkUnknown)
+		}
+		if report.DiskMeasured {
+			fmt.Printf("  Disk I/O:         %s/min\n", formatBytes(report.DiskBytesPerMin))
+		} else {
+			fmt.Printf("  Disk I/O:         unknown (%s; assuming active)\n", report.DiskUnknown)
+		}
 	}
 	fmt.Printf("  Idle check:       %s\n", idleReadingLine(report.IdleReading))
 	if report.PreStopHook != "" {

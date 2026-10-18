@@ -14,5 +14,8 @@ import (
 // themselves.
 func TestMain(m *testing.M) {
 	daemonIdleState = func(time.Time) (agent.IdleState, bool) { return agent.IdleState{}, false }
+	// ...and not "pending" either: on a Linux host with no idle-state file
+	// every one-shot test would otherwise read as a first-minute instance.
+	daemonIdleNotYetPublished = func() bool { return false }
 	os.Exit(m.Run())
 }

@@ -7,7 +7,7 @@ completion / pre-stop / idle / FSx config all live in EC2 tags that the new
 spored re-reads on boot).
 
 The default target is the latest released version; pin one with --version. A
-downgrade is refused unless --force is given. The swap is driven over SSM
+downgrade is refused unless --allow-downgrade is given. The swap is driven over SSM
 (keyless — works on private-subnet / no-public-IP instances), so the instance
 must have the SSM agent online and an instance profile (the spored role attaches
 AmazonSSMManagedInstanceCore, so spawn-launched instances already qualify).
