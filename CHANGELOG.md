@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Launch progress no longer shows `?` for every running and skipped step**
+  (#1124). The progress display asked the symbol catalog for `running` and
+  `skipped`, keys it doesn't have (they're `progress` and `skip`), so each got
+  the unknown-symbol fallback: `?`, or `[?]` with `--no-emoji` or
+  `--accessibility`.
+- **Launch progress no longer lists steps for features you didn't ask for**
+  (#1124), such as `FSx Lustre filesystem` on a launch with no FSx, or
+  `Creating security group` when none is needed. Skipped steps aren't shown.
+
 - **`spawn status` polish from the 0.134.0 demo rehearsal** (#1114):
   - the idle line reads "idle for 1m 51s — stops in 3m 8s", not "stops for
     1m 51s — stops in 3m 8s";
