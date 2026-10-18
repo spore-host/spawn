@@ -3,7 +3,9 @@
 **Status: decided 2026-10-17 (see [Decisions](#decisions)).** Phase 1
 (record) shipped in v0.132.1 and was verified on a real instance. v0.132.0 lost
 task outputs for about an hour (#1094; see [Shipping notes](#shipping-notes)).
-Phase 2 (report) in progress.
+Phase 2 (report: `spawn results retention`, read only) is merged (#1103) and
+ships in the next release. Phases 3 (tiering) and 4 (verifying sweeper) are not
+started.
 
 ## The idea
 
