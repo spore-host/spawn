@@ -239,6 +239,12 @@ func (p *Progress) display() {
 	fmt.Println()
 
 	for i, step := range p.steps {
+		// A skipped step is one this launch doesn't do (no FSx, no security
+		// group needed). Listing it read as something the user had asked for,
+		// or as a failure (#1124), so it isn't shown.
+		if step.Status == "skipped" {
+			continue
+		}
 		symbol := getSymbol(step.Status)
 		duration := stepDuration(step)
 
@@ -272,7 +278,7 @@ func (p *Progress) displayPlain() {
 			}
 			p.started[step.Name] = true
 			fmt.Printf("  %s %s...\n", getSymbol(step.Status), step.Name)
-		case "complete", "error", "skipped":
+		case "complete", "error": // not "skipped": see display (#1124)
 			if p.printed[step.Name] {
 				continue
 			}
@@ -364,13 +370,15 @@ func getSymbol(status string) string {
 	case "pending":
 		return i18n.Symbol("pending") + " "
 	case "running":
-		return i18n.Symbol("running")
+		// The catalog's key is "progress"; "running" isn't one, so every running
+		// step printed the "?" fallback (#1114 demo, #1124).
+		return i18n.Symbol("progress")
 	case "complete":
 		return i18n.Symbol("success")
 	case "error":
 		return i18n.Symbol("error")
 	case "skipped":
-		return i18n.Symbol("skipped") + " "
+		return i18n.Symbol("skip") + " "
 	default:
 		return "  "
 	}
