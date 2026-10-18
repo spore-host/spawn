@@ -3,12 +3,15 @@
 package security
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func systemRoot(t *testing.T) string {
@@ -204,4 +207,222 @@ func TestNormaliseFinalPath(t *testing.T) {
 	if windowsPathShapeError(`\\?\Volume{0000-1111}\Windows`) == nil {
 		t.Error("a volume-GUID final path passed the shape check")
 	}
+}
+
+// A path on a mapped network drive resolves to \\server\share form, which
+// before #1107 was refused as UNC however legitimate it was. The share here is
+// a loopback one (\\localhost\...) on a scratch volume attached for the test,
+// because a loopback share on the system volume is refused by design; the
+// mapping is real, so GetFinalPathNameByHandle sees exactly what it sees for
+// a remote server.
+//
+// It needs an elevated shell (diskpart, New-SmbShare). The CI runner is one,
+// so there a fixture that cannot be built fails the test; elsewhere it skips
+// and says which step needed elevation.
+func TestValidatePathForReading_WindowsMappedNetworkDrive(t *testing.T) {
+	sr := systemRoot(t)
+	vol := attachScratchVolume(t)
+	dir := filepath.Join(vol+`\`, "share")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A junction inside the share into the Windows directory: the server
+	// follows it, so the client's final path still names the share.
+	j := filepath.Join(dir, "j")
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", j, sr).CombinedOutput(); err != nil { //nolint:gosec // fixed command; j is on this test's scratch volume, sr the system root
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	z := mapNetworkDrive(t, `\\localhost\`+smbShare(t, dir))
+
+	// The fixture is the shape #1107 is about: the drive resolves to UNC.
+	if r, _, err := finalPathName(z + `\data.txt`); err != nil || !isPlainUNC(r) {
+		t.Fatalf("finalPathName(%s\\data.txt) = %q, %v; want a \\\\server\\share path", z, r, err)
+	}
+	for _, p := range []string{z + `\data.txt`, z + `\`, z + `\new\x.txt`, z + `\*.log`} {
+		if err := ValidatePathForReading(p); err != nil {
+			t.Errorf("ValidatePathForReading(%q) = %v; it is on a share mapped to %s", p, err, z)
+		}
+	}
+	for _, p := range []string{j, z + `\j`, z + `\j\win.ini`, z + `\j\System32\config\SAM`, z + `\j\nope\*.log`} {
+		if err := ValidatePathForReading(p); err == nil {
+			t.Errorf("ValidatePathForReading(%q) = nil; it leads through a junction into %q", p, sr)
+		}
+	}
+
+	// A drive mapped to a loopback share of the Windows directory reaches it
+	// under a name no root matches; it must stay refused.
+	y := mapNetworkDrive(t, `\\localhost\`+smbShare(t, sr))
+	for _, p := range []string{y + `\win.ini`, y + `\System32\config\SAM`, y + `\nope\*.log`} {
+		if err := ValidatePathForReading(p); err == nil {
+			t.Errorf("ValidatePathForReading(%q) = nil; %s is a loopback share of %q", p, y, sr)
+		}
+	}
+}
+
+// A subst drive is a drive letter that is itself a link to a directory.
+// GetFinalPathNameByHandle names the directory, so a subst drive pointing at
+// the Windows directory must be refused and one pointing at an ordinary
+// directory admitted: resolving the drive's root (#1107) must not translate
+// the path back to the drive letter. subst needs no elevation.
+func TestValidatePathForReading_WindowsSubstDrive(t *testing.T) {
+	sr := systemRoot(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "data.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := substDrive(t, dir)
+	for _, p := range []string{s + `\data.txt`, s + `\`, s + `\new\x.txt`, s + `\*.log`} {
+		if err := ValidatePathForReading(p); err != nil {
+			t.Errorf("ValidatePathForReading(%q) = %v; %s is subst for a temp dir", p, err, s)
+		}
+	}
+	w := substDrive(t, sr)
+	for _, p := range []string{w + `\`, w + `\win.ini`, w + `\System32\config\SAM`, w + `\nope\*.log`} {
+		if err := ValidatePathForReading(p); err == nil {
+			t.Errorf("ValidatePathForReading(%q) = nil; %s is subst for %q", p, w, sr)
+		}
+	}
+}
+
+// fixtureUnavailable fails the test on CI, where the runner is elevated and
+// the fixture must be buildable, and otherwise skips naming the step.
+func fixtureUnavailable(t *testing.T, format string, args ...any) {
+	t.Helper()
+	msg := fmt.Sprintf(format, args...)
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		t.Fatalf("%s (the CI runner is elevated, so this fixture must be buildable)", msg)
+	}
+	t.Skipf("%s: this fixture needs an elevated shell", msg)
+}
+
+// freeDriveLetter returns an unused drive letter, as "X:".
+func freeDriveLetter(t *testing.T) string {
+	t.Helper()
+	used, err := windows.GetLogicalDrives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for c := 'Z'; c >= 'G'; c-- {
+		if used&(1<<uint(c-'A')) == 0 {
+			return string(c) + ":"
+		}
+	}
+	t.Fatal("no free drive letter")
+	return ""
+}
+
+// run runs a fixed fixture command and returns its combined output.
+func run(name string, args ...string) (string, error) {
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	out, err := exec.Command(name, args...).CombinedOutput() //nolint:gosec // test fixture commands; arguments are this test's temp paths and generated names
+	return string(out), err
+}
+
+// attachScratchVolume attaches a fresh 64 MB NTFS virtual disk and returns its
+// drive letter. Its volume serial is new, so a loopback share on it is not on
+// the system volume.
+func attachScratchVolume(t *testing.T) string {
+	t.Helper()
+	// The long form: given a path through an 8.3 name (the runner's temp dir
+	// is under C:\Users\RUNNER~1), diskpart attaches the disk but then reports
+	// it "already detached" and leaves it attached.
+	vhd := filepath.Join(longPath(t, t.TempDir()), "scratch.vhdx")
+	letter := freeDriveLetter(t)
+	script := filepath.Join(t.TempDir(), "attach.txt")
+	body := fmt.Sprintf("create vdisk file=\"%s\" maximum=64 type=expandable\r\nselect vdisk file=\"%s\"\r\nattach vdisk\r\ncreate partition primary\r\nformat fs=ntfs quick label=spawn1107\r\nassign letter=%s\r\n", vhd, vhd, letter[:1])
+	if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run("diskpart", "/s", script)
+	t.Cleanup(func() {
+		detach := filepath.Join(filepath.Dir(script), "detach.txt")
+		if err := os.WriteFile(detach, []byte(fmt.Sprintf("select vdisk file=\"%s\"\r\ndetach vdisk\r\n", vhd)), 0o600); err == nil {
+			if out, err := run("diskpart", "/s", detach); err != nil {
+				t.Errorf("diskpart detach: %v: %s", err, out)
+			}
+		}
+	})
+	if err != nil {
+		fixtureUnavailable(t, "diskpart could not attach a scratch volume: %v: %s", err, out)
+	}
+	if _, err := os.Stat(letter + `\`); err != nil {
+		t.Fatalf("diskpart reported success but %s is not there: %v: %s", letter, err, out)
+	}
+	return letter
+}
+
+// shareSeq numbers the shares one test process creates.
+var shareSeq int
+
+// longPath expands any 8.3 short names in the existing path p.
+func longPath(t *testing.T, p string) string {
+	t.Helper()
+	in, err := windows.UTF16PtrFromString(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]uint16, windows.MAX_PATH)
+	for {
+		n, err := windows.GetLongPathName(in, &buf[0], uint32(len(buf)))
+		if err != nil {
+			t.Fatalf("GetLongPathName(%s): %v", p, err)
+		}
+		if n < uint32(len(buf)) {
+			return windows.UTF16ToString(buf[:n])
+		}
+		buf = make([]uint16, n)
+	}
+}
+
+// smbShare shares dir with the current user and returns the share name.
+func smbShare(t *testing.T, dir string) string {
+	t.Helper()
+	shareSeq++
+	name := fmt.Sprintf("spawn1107-%d-%d", os.Getpid(), shareSeq)
+	out, err := run("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf("New-SmbShare -Name '%s' -Path '%s' -FullAccess ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) | Out-Null", name, dir))
+	if err != nil {
+		fixtureUnavailable(t, "New-SmbShare %s: %v: %s", dir, err, out)
+	}
+	t.Cleanup(func() {
+		if out, err := run("powershell", "-NoProfile", "-NonInteractive", "-Command",
+			fmt.Sprintf("Remove-SmbShare -Name '%s' -Force", name)); err != nil {
+			t.Logf("Remove-SmbShare %s: %v: %s", name, err, out)
+		}
+	})
+	return name
+}
+
+// mapNetworkDrive maps a free drive letter to the UNC path unc.
+func mapNetworkDrive(t *testing.T, unc string) string {
+	t.Helper()
+	letter := freeDriveLetter(t)
+	if out, err := run("net", "use", letter, unc, "/persistent:no"); err != nil {
+		fixtureUnavailable(t, "net use %s %s: %v: %s", letter, unc, err, out)
+	}
+	t.Cleanup(func() {
+		if out, err := run("net", "use", letter, "/delete", "/y"); err != nil {
+			t.Logf("net use %s /delete: %v: %s", letter, err, out)
+		}
+	})
+	return letter
+}
+
+// substDrive maps a free drive letter to dir with subst.
+func substDrive(t *testing.T, dir string) string {
+	t.Helper()
+	letter := freeDriveLetter(t)
+	if out, err := run("subst", letter, dir); err != nil {
+		t.Fatalf("subst %s %s: %v: %s", letter, dir, err, out)
+	}
+	t.Cleanup(func() {
+		if out, err := run("subst", letter, "/d"); err != nil {
+			t.Logf("subst %s /d: %v: %s", letter, err, out)
+		}
+	})
+	return letter
 }

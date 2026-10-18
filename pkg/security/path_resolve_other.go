@@ -26,3 +26,10 @@ func resolveExisting(abs string) (string, error) {
 		cur = parent
 	}
 }
+
+// onSystemVolume is only consulted for Windows paths on a mapped network
+// drive (mappedDriveError), which this host never resolves to. It answers
+// true, so a caller that reached it anyway would refuse.
+func onSystemVolume(string) (bool, error) {
+	return true, nil
+}

@@ -1,6 +1,7 @@
 package security
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,5 +265,99 @@ func TestSanitizePath(t *testing.T) {
 				t.Errorf("SanitizePath(%q) = %v, want %v", tt.path, result, tt.expected)
 			}
 		})
+	}
+}
+
+// A path on a mapped network drive resolves to the share's UNC form; it is
+// admitted when the drive's root resolves to that same share, and only then
+// (#1107). The resolver and the volume check are fakes, so the rule is tested
+// on every OS; path_windows_test.go maps a real share.
+func TestMappedDriveError(t *testing.T) {
+	drives := map[string]string{
+		`Z:\`: `\\server\share\`,
+		`Y:\`: `\\server\share\sub`,
+		`S:\`: `C:\Users\x\substituted`, // subst: a local directory
+		`V:\`: `\\?\Volume{0000-1111}\`,
+		`D:\`: `\\.\PhysicalDrive0`,
+		`Q:\`: `\\?\UNC`, // an extended form normaliseFinalPath could not shorten
+	}
+	resolve := func(p string) (string, error) { // drive letters ignore case
+		if r, ok := drives[strings.ToUpper(p)]; ok {
+			return r, nil
+		}
+		return "", errors.New("no such drive")
+	}
+	notSystem := func(string) (bool, error) { return false, nil }
+	tests := []struct {
+		name, abs, resolved string
+		wantErr             bool
+	}{
+		{"file on the mapped share", `Z:\data\x.txt`, `\\server\share\data\x.txt`, false},
+		{"the share's root", `Z:\`, `\\server\share\`, false},
+		{"case differs from the drive's root", `Z:\data`, `\\SERVER\Share\data`, false},
+		{"drive mapped to a folder in a share", `Y:\x`, `\\server\share\sub\x`, false},
+		{"lower-case drive letter", `z:\data\x`, `\\server\share\data\x`, false},
+
+		{"link on the drive to another share", `Z:\link\x`, `\\other\share\x`, true},
+		{"link on the drive to a sibling share", `Z:\link\x`, `\\server\share2\x`, true},
+		{"link out of the mapped folder", `Y:\link\x`, `\\server\share\secret\x`, true},
+		{"a local drive's link to a share", `C:\Users\x\link\f`, `\\server\share\f`, true},
+		{"subst drive", `S:\x`, `\\server\share\x`, true},
+		{"drive resolving to a volume GUID", `V:\x`, `\\server\share\x`, true},
+		{"drive resolving to a device", `D:\x`, `\\server\share\x`, true},
+		{"malformed UNC root", `Q:\x`, `\\?\UNC\x`, true},
+		{"unresolvable drive", `W:\x`, `\\server\share\x`, true},
+		{"not a drive path", `\\server\share\x`, `\\server\share\x`, true},
+		{"relative path", `x\y`, `\\server\share\x`, true},
+		{"stream on the share", `Z:\x`, `\\server\share\x:hidden`, true},
+		{"device name on the share", `Z:\nul`, `\\server\share\nul`, true},
+		{"trailing dot on the share", `Z:\x.`, `\\server\share\x.`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := mappedDriveError(tt.abs, tt.resolved, resolve, notSystem)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("mappedDriveError(%q, %q) = %v, wantErr %v", tt.abs, tt.resolved, err, tt.wantErr)
+			}
+		})
+	}
+
+	// A share on one of this machine's system volumes (a loopback mapping
+	// such as \\localhost\C$) is refused, and so is a share whose volume
+	// cannot be identified: both were refused before #1107.
+	ok := `\\server\share\data\x`
+	if err := mappedDriveError(`Z:\data\x`, ok, resolve, func(string) (bool, error) { return true, nil }); err == nil {
+		t.Error("a mapped drive on a system volume was admitted")
+	}
+	if err := mappedDriveError(`Z:\data\x`, ok, resolve, func(string) (bool, error) { return false, errors.New("boom") }); err == nil {
+		t.Error("a mapped drive whose volume could not be identified was admitted")
+	}
+	// The volume check is asked about the resolved path, not the drive
+	// letter: that is where a junction inside the share would have led.
+	var asked string
+	_ = mappedDriveError(`Z:\data\x`, ok, resolve, func(p string) (bool, error) { asked = p; return false, nil })
+	if asked != ok {
+		t.Errorf("onSystemVolume asked about %q, want the resolved path %q", asked, ok)
+	}
+}
+
+func TestIsPlainUNC(t *testing.T) {
+	for p, want := range map[string]bool{
+		`\\server\share`:       true,
+		`\\server\share\`:      true,
+		`\\server\share\x\y`:   true,
+		`\\server`:             false,
+		`\\server\`:            false,
+		`\\?\C:\x`:             false,
+		`\\?\UNC\server\share`: false,
+		`\\.\PhysicalDrive0`:   false,
+		`\\.\pipe\x`:           false,
+		`C:\x`:                 false,
+		`\x`:                   false,
+		``:                     false,
+	} {
+		if got := isPlainUNC(p); got != want {
+			t.Errorf("isPlainUNC(%q) = %v, want %v", p, got, want)
+		}
 	}
 }

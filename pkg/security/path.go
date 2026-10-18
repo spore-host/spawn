@@ -71,9 +71,13 @@ func ValidatePathForReading(p string) error {
 	if resolved != abs {
 		if hostIsWindows {
 			// A junction or mount point can resolve to a device or UNC form
-			// the prefix comparison would not recognise.
+			// the prefix comparison would not recognise. The one UNC form
+			// admitted is a path on a mapped network drive that stays on the
+			// share the drive is mapped to (#1107).
 			if err := windowsPathShapeError(resolved); err != nil {
-				return errors.New("path resolves to a disallowed location: " + err.Error())
+				if merr := mappedDriveError(abs, resolved, resolveExisting, onSystemVolume); merr != nil {
+					return errors.New("path resolves to a disallowed location: " + err.Error() + " (" + merr.Error() + ")")
+				}
 			}
 		}
 		if underAnyRoot(resolved, roots, hostIsWindows) {
@@ -110,6 +114,75 @@ func hasDotDotElement(p string, windows bool) bool {
 		}
 	}
 	return false
+}
+
+// mappedDriveError reports why resolved, the final path of abs, does not
+// qualify as a path on a mapped network drive, or nil if it does (#1107).
+//
+// A mapped drive Z: resolves to \\server\share, so every existing path on it
+// resolves to a UNC form that windowsPathShapeError refuses and that no
+// drive-letter root matches. The drive's ROOT is resolved through the same
+// resolution (resolve, which is resolveExisting outside tests), so both sides
+// are in \\server\share form, and resolved is admitted only when:
+//
+//   - abs is on a drive letter whose root resolves to a plain \\server\share
+//     (not \\?\ or \\.\, and never a drive form: a subst drive resolves to
+//     the local directory it names, and its paths are compared against the
+//     system directories as that directory, unchanged);
+//   - resolved is at or under that share, so no link on the drive led
+//     anywhere else, and the part after the share passes
+//     windowsPathShapeError;
+//   - resolved is not on a volume holding one of this machine's system
+//     directories (onSystemVolume). The prefix comparison cannot see through
+//     a loopback share: Z: mapped to \\localhost\C$, or to a share of
+//     C:\Windows, or a share holding a junction into it, reaches the system
+//     directories under a name no root matches, and before #1107 those were
+//     refused for being UNC. This keeps them refused.
+//
+// Nothing is translated back to the drive letter: resolved is checked as the
+// place it reaches, so a drive that is itself a link cannot admit more than
+// its target would. It is plain string handling apart from the two
+// functions, so it is tested on every OS with fakes.
+func mappedDriveError(abs, resolved string, resolve func(string) (string, error), onSystemVolume func(string) (bool, error)) error {
+	if len(abs) < 3 || !isASCIILetter(abs[0]) || abs[1] != ':' || !isSep(abs[2], true) {
+		return errors.New("not on a drive letter")
+	}
+	root, err := resolve(abs[:2] + `\`)
+	if err != nil {
+		return errors.New("cannot resolve drive " + abs[:2] + ": " + err.Error())
+	}
+	if !isPlainUNC(root) {
+		return errors.New("drive " + abs[:2] + " is not mapped to a network share")
+	}
+	if !underAnyRoot(resolved, []string{root}, true) {
+		return errors.New("it leaves the share drive " + abs[:2] + " is mapped to")
+	}
+	share := strings.TrimRight(root, `\`)
+	if err := windowsPathShapeError(resolved[len(share):]); err != nil {
+		return err
+	}
+	sys, err := onSystemVolume(resolved)
+	if err != nil {
+		return errors.New("cannot identify its volume: " + err.Error())
+	}
+	if sys {
+		return errors.New("it is on a volume holding this machine's system directories")
+	}
+	return nil
+}
+
+// isPlainUNC reports whether p is \\server\share or a path under it: not a
+// device (\\.\) or extended-length (\\?\) form, which normaliseFinalPath
+// leaves in place for what it cannot name.
+func isPlainUNC(p string) bool {
+	if len(p) < 2 || p[0] != '\\' || p[1] != '\\' {
+		return false
+	}
+	e := strings.Split(p[2:], `\`)
+	if len(e) < 2 || e[0] == "" || e[1] == "" || e[0] == "?" || e[0] == "." {
+		return false
+	}
+	return true
 }
 
 // windowsPathShapeError rejects Windows path forms that can reach a file the
