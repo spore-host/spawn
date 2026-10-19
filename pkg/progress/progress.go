@@ -2,6 +2,7 @@ package progress
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"time"
 	"unicode"
@@ -129,6 +130,12 @@ func newProgress(quiet bool) *Progress {
 	return p
 }
 
+// defaultProgress pre-registers the steps a single launch always runs, in
+// display order. Every one must be started by the launch, or it shows as
+// pending for good: "Installing spawn agent" sat here with an hourglass after
+// the agent was verified, because spored installs from user-data and no code
+// ever started that step; "Verifying spored agent" reports it (#1125).
+// TestEveryPreregisteredStepIsStarted keeps the list honest.
 func defaultProgress() *Progress {
 	return &Progress{
 		steps: []Step{
@@ -137,7 +144,6 @@ func defaultProgress() *Progress {
 			{Name: i18n.T("spawn.progress.setup_iam_role"), Status: "pending"},
 			{Name: i18n.T("spawn.progress.create_security_group"), Status: "pending"},
 			{Name: i18n.T("spawn.progress.launching_instance"), Status: "pending"},
-			{Name: i18n.T("spawn.progress.install_agent"), Status: "pending"},
 			{Name: i18n.T("spawn.progress.waiting_instance"), Status: "pending"},
 			{Name: i18n.T("spawn.progress.get_public_ip"), Status: "pending"},
 			{Name: i18n.T("spawn.progress.waiting_ssh"), Status: "pending"},
@@ -303,60 +309,104 @@ func stepDuration(step Step) string {
 	return ""
 }
 
+// SuccessSummary is what the launch summary shows. Empty optional fields are
+// omitted.
+type SuccessSummary struct {
+	InstanceID      string
+	PublicIP        string
+	InstanceProfile string // the resolved IAM instance profile (#550)
+	ConnectCommand  string
+	DNSRecord       string // the FQDN spored registered, if any
+	DNSConnect      string // how to connect by that name
+}
+
+// sectionRule closes each section of the launch summary.
+const sectionRule = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
 // DisplaySuccess shows the final success message
-func (p *Progress) DisplaySuccess(instanceID, publicIP, sshCommand string, config interface{}) {
+func (p *Progress) DisplaySuccess(s SuccessSummary, config interface{}) {
 	if p.quiet {
 		return
 	}
-	fmt.Println()
-	fmt.Println(boxTop)
-	fmt.Println(boxLine(i18n.Emoji("party"), i18n.T("spawn.progress.success.title")))
-	fmt.Println(boxBottom)
-	fmt.Println()
-	fmt.Println(i18n.T("spawn.progress.success.details"))
-	fmt.Println()
-	fmt.Printf("  %s  %s\n", i18n.T("spawn.progress.success.label.instance_id"), instanceID)
-	fmt.Printf("  %s    %s\n", i18n.T("spawn.progress.success.label.public_ip"), publicIP)
-	fmt.Printf("  %s       %s\n", i18n.T("spawn.progress.success.label.status"), i18n.T("spawn.progress.success.status_running"))
-	fmt.Println()
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println()
-	fmt.Printf("%s %s\n", i18n.Emoji("plug"), i18n.T("spawn.progress.success.connect_now"))
-	fmt.Println()
-	fmt.Printf("  %s\n", sshCommand)
-	fmt.Println()
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println()
+	renderSuccess(os.Stdout, s, config)
+}
+
+// renderSuccess writes the launch summary: a title box, then sections, each
+// closed by a rule. Every section owns its closing rule, so the summary always
+// ends on one and two rules are never adjacent. Before #1125 the rules were
+// printed between sections unconditionally: an absent section left two rules
+// back to back, and the IAM profile line, printed by the caller after the
+// final rule, opened a section nothing closed.
+func renderSuccess(w io.Writer, s SuccessSummary, config interface{}) {
+	section := func(lines ...string) {
+		for _, l := range lines {
+			_, _ = fmt.Fprintln(w, l)
+		}
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, sectionRule)
+		_, _ = fmt.Fprintln(w)
+	}
+
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, boxTop)
+	_, _ = fmt.Fprintln(w, boxLine(i18n.Emoji("party"), i18n.T("spawn.progress.success.title")))
+	_, _ = fmt.Fprintln(w, boxBottom)
+	_, _ = fmt.Fprintln(w)
+
+	details := []string{
+		i18n.T("spawn.progress.success.details"),
+		"",
+		fmt.Sprintf("  %s  %s", i18n.T("spawn.progress.success.label.instance_id"), s.InstanceID),
+		fmt.Sprintf("  %s    %s", i18n.T("spawn.progress.success.label.public_ip"), s.PublicIP),
+		fmt.Sprintf("  %s       %s", i18n.T("spawn.progress.success.label.status"), i18n.T("spawn.progress.success.status_running")),
+	}
+	if s.InstanceProfile != "" {
+		details = append(details, fmt.Sprintf("  IAM instance profile: %s", s.InstanceProfile))
+	}
+	section(details...)
+
+	connect := []string{
+		fmt.Sprintf("%s %s", i18n.Emoji("plug"), i18n.T("spawn.progress.success.connect_now")),
+		"",
+		"  " + s.ConnectCommand,
+	}
+	if s.DNSRecord != "" {
+		connect = append(connect, "", fmt.Sprintf("%s DNS: %s", i18n.Emoji("globe"), s.DNSRecord))
+		if s.DNSConnect != "" {
+			connect = append(connect, "   Connect: "+s.DNSConnect)
+		}
+	}
+	section(connect...)
 
 	// Show monitoring info if applicable
 	if launchConfig, ok := config.(LaunchConfigInterface); ok {
 		if launchConfig.GetTTL() != "" || launchConfig.GetIdleTimeout() != "" {
-			fmt.Printf("%s %s\n", i18n.Emoji("lightbulb"), i18n.T("spawn.progress.success.monitoring.title"))
-			fmt.Println()
+			monitoring := []string{
+				fmt.Sprintf("%s %s", i18n.Emoji("lightbulb"), i18n.T("spawn.progress.success.monitoring.title")),
+				"",
+			}
 			if ttl := launchConfig.GetTTL(); ttl != "" {
-				fmt.Printf("   %s %s\n", i18n.Emoji("clock"), i18n.Tf("spawn.progress.success.monitoring.ttl", map[string]interface{}{
+				monitoring = append(monitoring, fmt.Sprintf("   %s %s", i18n.Emoji("clock"), i18n.Tf("spawn.progress.success.monitoring.ttl", map[string]interface{}{
 					"TTL": ttl,
-				}))
+				})))
 			}
 			if idle := launchConfig.GetIdleTimeout(); idle != "" {
-				fmt.Printf("   %s %s\n", i18n.Emoji("zzz"), i18n.Tf("spawn.progress.success.monitoring.idle", map[string]interface{}{
+				monitoring = append(monitoring, fmt.Sprintf("   %s %s", i18n.Emoji("zzz"), i18n.Tf("spawn.progress.success.monitoring.idle", map[string]interface{}{
 					"Idle": idle,
-				}))
+				})))
 			}
-			fmt.Println()
-			fmt.Println(i18n.T("spawn.progress.success.monitoring.agent_active"))
-			fmt.Println(i18n.T("spawn.progress.success.monitoring.close_laptop"))
-			// Reassure the user the deadline is guaranteed even if the in-instance
-			// agent fails: a server-side reaper backstops it (spore-host/spawn#70).
-			// Literal (not i18n) to avoid a cross-repo libs release for one line;
-			// promote to an i18n key on the next libs bump.
-			fmt.Printf("   %s A server-side reaper enforces the deadline as a backstop, even if the agent fails.\n", i18n.Emoji("check"))
-			fmt.Println()
+			monitoring = append(monitoring, "",
+				i18n.T("spawn.progress.success.monitoring.agent_active"),
+				i18n.T("spawn.progress.success.monitoring.close_laptop"),
+				// Reassure the user the deadline is guaranteed even if the in-instance
+				// agent fails: a server-side reaper backstops it (spore-host/spawn#70).
+				// Literal (not i18n) to avoid a cross-repo libs release for one line;
+				// promote to an i18n key on the next libs bump.
+				fmt.Sprintf("   %s A server-side reaper enforces the deadline as a backstop, even if the agent fails.", i18n.Emoji("check")),
+			)
+			section(monitoring...)
 		}
 	}
-
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println()
 }
 
 // LaunchConfigInterface defines methods for getting launch config details

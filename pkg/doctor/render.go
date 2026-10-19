@@ -4,19 +4,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // RenderText writes a human-readable report and returns nothing; the caller
 // decides the exit code from Report.OK().
 func RenderText(w io.Writer, r *Report) {
 	for _, c := range r.Checks {
-		line := fmt.Sprintf("%s %s", c.Status.Symbol(), c.Name)
+		line := fmt.Sprintf("%s %s", c.Status.Symbol(), oneLine(c.Name))
 		if c.Detail != "" {
-			line += ": " + c.Detail
+			line += ": " + oneLine(c.Detail)
 		}
 		fmt.Fprintln(w, line)
 		if (c.Status == Warn || c.Status == Fail) && c.Fix != "" {
-			fmt.Fprintf(w, "    → %s\n", c.Fix)
+			fmt.Fprintf(w, "    → %s\n", oneLine(c.Fix))
 		}
 	}
 	pass, warn, fail, skip := r.Counts()
@@ -31,6 +32,23 @@ func RenderText(w io.Writer, r *Report) {
 		fmt.Fprintln(w, "\nNot ready — resolve the ✗ items above before launching. If you're on an")
 		fmt.Fprintln(w, "institution-managed account, send the IAM baseline to your cloud administrator.")
 	}
+}
+
+// oneLine folds a multi-line value onto one line. Every line of the text report
+// before the summary is a check (status symbol first) or its fix ("    → "),
+// which is what a reader, or a script, relies on; a detail carrying its own
+// newlines broke that (truffle's three-line --version, #1140).
+func oneLine(s string) string {
+	if !strings.ContainsAny(s, "\r\n") {
+		return s
+	}
+	var parts []string
+	for _, l := range strings.FieldsFunc(s, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		if l = strings.TrimSpace(l); l != "" {
+			parts = append(parts, l)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // RenderJSON writes the report as JSON for automation.

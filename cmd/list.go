@@ -71,11 +71,12 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	// List instances
 	if effectiveRegion != "" {
-		fmt.Fprintf(os.Stderr, "%s...\n", i18n.Tf("spawn.list.searching_region", map[string]interface{}{
+		// The catalogue strings carry their own ellipsis in every language (#1129).
+		fmt.Fprintf(os.Stderr, "%s\n", i18n.Tf("spawn.list.searching_region", map[string]interface{}{
 			"Region": effectiveRegion,
 		}))
 	} else {
-		fmt.Fprintf(os.Stderr, "%s...\n", i18n.T("spawn.list.searching_all_regions"))
+		fmt.Fprintf(os.Stderr, "%s\n", i18n.T("spawn.list.searching_all_regions"))
 	}
 
 	instances, err := client.ListInstances(ctx, effectiveRegion, listState)
