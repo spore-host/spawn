@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/spore-host/spawn/pkg/ttl"
 	"os"
@@ -141,8 +142,16 @@ func ValidateQueue(cfg *QueueConfig) error {
 			if job.Retry.MaxAttempts < 1 {
 				return fmt.Errorf("retry max_attempts must be >= 1 for job %s", job.JobID)
 			}
-			if job.Retry.Backoff != "fixed" && job.Retry.Backoff != "exponential" {
-				return fmt.Errorf("retry backoff must be 'fixed' or 'exponential' for job %s", job.JobID)
+			if job.Retry.Backoff == "" {
+				return fmt.Errorf("retry backoff is required for job %s (fixed, exponential or exponential-jitter)", job.JobID)
+			}
+			// The implementation is the source of truth for which strategies
+			// exist: probe it instead of keeping a second list here.
+			if _, err := CalculateBackoff(&RetryConfig{Backoff: job.Retry.Backoff}, 1); errors.Is(err, errUnknownBackoff) {
+				return fmt.Errorf("unknown retry backoff %q for job %s (fixed, exponential or exponential-jitter)", job.Retry.Backoff, job.JobID)
+			}
+			if job.Retry.Jitter < 0 || job.Retry.Jitter > 1 {
+				return fmt.Errorf("retry jitter must be between 0 and 1 for job %s, got %v", job.JobID, job.Retry.Jitter)
 			}
 		}
 
