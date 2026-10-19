@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -99,8 +100,8 @@ func TestCountTTYSessions_IdlePTYIsNotASession(t *testing.T) {
 	origRoot, origLines := sessionDevRoot, loginTTYLines
 	t.Cleanup(func() { sessionDevRoot, loginTTYLines = origRoot, origLines })
 	sessionDevRoot = fakeDev(t, now, map[string]time.Duration{"pts/0": 2 * time.Hour, "pts/1": 40 * time.Minute})
-	loginTTYLines = func() []string { return []string{"pts/0"} }
-	if n := countTTYSessions(now); n != 0 {
+	loginTTYLines = func(context.Context) []string { return []string{"pts/0"} }
+	if n := countTTYSessions(context.Background(), now); n != 0 {
 		t.Errorf("countTTYSessions = %d with only idle PTYs, want 0 (#953)", n)
 	}
 }

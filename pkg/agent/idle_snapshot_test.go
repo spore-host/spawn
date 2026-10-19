@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,9 +18,9 @@ func noSessions(t *testing.T) {
 	origRoot, origLines, origCounter := sessionDevRoot, loginTTYLines, sessionCounter
 	t.Cleanup(func() { sessionDevRoot, loginTTYLines, sessionCounter = origRoot, origLines, origCounter })
 	sessionDevRoot = t.TempDir()
-	loginTTYLines = func() []string { return nil }
+	loginTTYLines = func(context.Context) []string { return nil }
 	// The Linux sources above are not the Windows one (quser); pin the count too.
-	sessionCounter = func() int { return 0 }
+	sessionCounter = func(context.Context) int { return 0 }
 }
 
 // counters is a fake host: cumulative CPU jiffies, network bytes and disk
@@ -35,12 +36,12 @@ func installCounters(t *testing.T) *counters {
 	c := &counters{}
 	origCPU, origNet, origDisk := readCPUTimes, readNetworkBytes, readDiskIOBytes
 	t.Cleanup(func() { readCPUTimes, readNetworkBytes, readDiskIOBytes = origCPU, origNet, origDisk })
-	readCPUTimes = func() (int64, int64, error) {
+	readCPUTimes = func(context.Context) (int64, int64, error) {
 		c.reads.Add(1)
 		return c.cpuIdle.Load(), c.cpuTotal.Load(), nil
 	}
-	readNetworkBytes = func() (int64, int64) { c.reads.Add(1); return c.net.Load(), 0 }
-	readDiskIOBytes = func() int64 { c.reads.Add(1); return c.disk.Load() }
+	readNetworkBytes = func(context.Context) (int64, int64) { c.reads.Add(1); return c.net.Load(), 0 }
+	readDiskIOBytes = func(context.Context) int64 { c.reads.Add(1); return c.disk.Load() }
 	c.cpuTotal.Store(1000)
 	return c
 }
@@ -76,7 +77,7 @@ func TestScrapeDoesNotShortenTheMonitorLoopWindow(t *testing.T) {
 	c := installCounters(t)
 	a := newTestAgent(t, nil)
 
-	a.evaluateIdle() // first tick: baseline
+	a.evaluateIdle(context.Background()) // first tick: baseline
 	c.idleCPUMinute()
 	total := idleNetworkBytesThreshold + idleNetworkBytesThreshold/4
 	before := total * 3 / 4
@@ -84,7 +85,7 @@ func TestScrapeDoesNotShortenTheMonitorLoopWindow(t *testing.T) {
 	scrape(a) // a Prometheus scrape mid-tick
 	c.net.Add(total - before)
 
-	s := a.evaluateIdle()
+	s := a.evaluateIdle(context.Background())
 	if !s.netMeasured || s.net != total {
 		t.Fatalf("monitor tick measured %d network bytes (measured=%v), want all %d "+
 			"since the previous tick — the scrape moved the baseline (#952)", s.net, s.netMeasured, total)
@@ -100,7 +101,7 @@ func TestScrapeTakesNoSample(t *testing.T) {
 	noSessions(t)
 	c := installCounters(t)
 	a := newTestAgent(t, nil)
-	a.evaluateIdle()
+	a.evaluateIdle(context.Background())
 	before := c.reads.Load()
 	for i := 0; i < 3; i++ {
 		scrape(a)
@@ -121,19 +122,19 @@ func TestEveryTickSamplesEveryCounter(t *testing.T) {
 	noSessions(t)
 	c := installCounters(t)
 	a := newTestAgent(t, nil)
-	a.evaluateIdle()
+	a.evaluateIdle(context.Background())
 
 	c.busyCPUMinute()
 	c.net.Add(10_000_000) // a big transfer during the busy tick
 	c.disk.Add(10_000_000)
-	if s := a.evaluateIdle(); s.idle {
+	if s := a.evaluateIdle(context.Background()); s.idle {
 		t.Fatalf("busy tick read as idle: %s", s.reason)
 	}
 
 	c.idleCPUMinute()
 	c.net.Add(5_000)
 	c.disk.Add(4_096)
-	s := a.evaluateIdle()
+	s := a.evaluateIdle(context.Background())
 	if s.net != 5_000 || s.disk != 4_096 {
 		t.Errorf("quiet tick measured net=%d disk=%d, want 5000 and 4096: the window "+
 			"included the previous tick, which returned early at the CPU check", s.net, s.disk)
@@ -180,7 +181,7 @@ func TestMonitorTicksAndScrapesDoNotRace(t *testing.T) {
 		for i := 0; i < 50; i++ {
 			c.idleCPUMinute()
 			c.net.Add(1000)
-			a.evaluateIdle()
+			a.evaluateIdle(context.Background())
 			a.setLastActivity(time.Now())
 		}
 		close(stop)

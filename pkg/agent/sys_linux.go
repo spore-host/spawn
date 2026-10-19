@@ -20,7 +20,7 @@ import (
 // sys_other.go has conservative stubs so darwin/dev builds compile (#77).
 
 // sysReadCPUTimes returns cumulative idle and total CPU jiffies from /proc/stat.
-func sysReadCPUTimes() (idle, total int64, err error) {
+func sysReadCPUTimes(_ context.Context) (idle, total int64, err error) {
 	data, err := os.ReadFile("/proc/stat")
 	if err != nil {
 		return 0, 0, err
@@ -45,7 +45,7 @@ func sysReadCPUTimes() (idle, total int64, err error) {
 // sysReadNetworkBytes returns cumulative RX+TX bytes over the physical
 // interfaces, or -1, -1 ("unknown") when /proc/net/dev is unreadable or no
 // interface in it is backed by a device (#919).
-func sysReadNetworkBytes() (rx, tx int64) {
+func sysReadNetworkBytes(_ context.Context) (rx, tx int64) {
 	rx, tx, _, err := readNetDevBytes("/proc/net/dev", "/sys/class/net")
 	if err != nil {
 		return -1, -1
@@ -56,7 +56,7 @@ func sysReadNetworkBytes() (rx, tx int64) {
 // sysReadDiskIOBytes returns cumulative bytes read+written over the whole
 // disks, or -1 ("unknown") when /proc/diskstats is unreadable or no device in it
 // is a whole disk backed by hardware (#937).
-func sysReadDiskIOBytes() int64 {
+func sysReadDiskIOBytes(_ context.Context) int64 {
 	read, written, _, err := readDiskstatsBytes("/proc/diskstats", "/sys/block")
 	if err != nil {
 		return -1
@@ -65,20 +65,21 @@ func sysReadDiskIOBytes() int64 {
 }
 
 // sysIsProcessRunning reports whether a process with the exact name is running.
-func sysIsProcessRunning(name string) bool {
-	return exec.Command("pgrep", "-x", name).Run() == nil
+func sysIsProcessRunning(ctx context.Context, name string) bool {
+	_, err := probeOutput(ctx, "pgrep", "-x", name)
+	return err == nil
 }
 
 // sysCountActiveSessions returns the login sessions with keyboard input in the
 // last 5 minutes, from the idle time of each terminal (ttyidle.go, #953).
-func sysCountActiveSessions() int {
-	return countTTYSessions(time.Now())
+func sysCountActiveSessions(ctx context.Context) int {
+	return countTTYSessions(ctx, time.Now())
 }
 
 // sysCountActivePortConnections counts ESTABLISHED connections on the given
 // ports via /proc/net/tcp — catches browser app users (RStudio/Jupyter) that
 // don't show in `who`.
-func sysCountActivePortConnections(ports []int) int {
+func sysCountActivePortConnections(_ context.Context, ports []int) int {
 	if len(ports) == 0 {
 		return 0
 	}
@@ -112,8 +113,8 @@ func sysCountActivePortConnections(ports []int) int {
 }
 
 // sysWarnUsers broadcasts a message to logged-in terminals (wall).
-func sysWarnUsers(message string) {
-	_ = exec.Command("wall", message).Run()
+func sysWarnUsers(ctx context.Context, message string) {
+	_, _ = probeOutput(ctx, "wall", message)
 }
 
 // sysWriteConsole writes text to the serial console, where it survives the

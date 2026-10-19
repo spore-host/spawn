@@ -285,12 +285,12 @@ var acceleratorFamilies = func() []string { return sysAcceleratorFamilies() }
 // real measurement, and if not, why. No accelerator is a measured 0. An
 // accelerator that is busy decides "active" even if another cannot be read;
 // otherwise any unreadable one makes the whole reading unknown.
-func (a *Agent) gpuUtilization() (pct float64, measured bool, why string) {
+func (a *Agent) gpuUtilization(ctx context.Context) (pct float64, measured bool, why string) {
 	families := acceleratorFamilies()
 	measured = true
 	var whys []string
 	for _, f := range families {
-		r := readAccelerator(context.Background(), f)
+		r := readAccelerator(ctx, f)
 		if r.measured && r.pct > idleGPUPercent {
 			return r.pct, true, ""
 		}

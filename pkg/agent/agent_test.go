@@ -287,7 +287,7 @@ func TestIsIdle_NotIdleWhenRecentActivity(t *testing.T) {
 	a.lastActivityTime = time.Now()
 	// With a 100% CPU threshold, isIdle checks user sessions etc.
 	// On a test machine we just verify it returns a bool without panicking.
-	_ = a.isIdle()
+	_ = a.isIdle(context.Background())
 }
 
 func TestIsIdle_IdleAfterTimeout(t *testing.T) {
@@ -299,7 +299,7 @@ func TestIsIdle_IdleAfterTimeout(t *testing.T) {
 	a.lastActivityTime = time.Now().Add(-1 * time.Hour)
 	// Give the idle timeout a moment to elapse
 	time.Sleep(5 * time.Millisecond)
-	if !a.isIdle() {
+	if !a.isIdle(context.Background()) {
 		t.Log("IsIdle() returned false — may depend on live CPU/user checks, acceptable in CI")
 	}
 }
@@ -427,7 +427,7 @@ func TestDCVIdleSource_NoSessionID(t *testing.T) {
 		DCVSessionID:   "",
 	})
 	// getDCVConnectionCount with empty session ID — should return -1 without exec
-	count := a.getDCVConnectionCount()
+	count := a.getDCVConnectionCount(context.Background())
 	// With no real dcv binary and empty session the exec will fail → -1
 	if count > 0 {
 		t.Errorf("getDCVConnectionCount() = %d with empty DCVSessionID, want <= 0", count)
@@ -442,12 +442,12 @@ func TestDCVIdleSource_ServerNotReady(t *testing.T) {
 		IdleCPUPercent: 100.0,
 		DCVSessionID:   "console",
 	})
-	count := a.getDCVConnectionCount()
+	count := a.getDCVConnectionCount(context.Background())
 	if count != -1 {
 		t.Errorf("getDCVConnectionCount() = %d when dcv exits non-zero, want -1", count)
 	}
 	// isIdle must return false (grace period — server not ready)
-	if a.isIdle() {
+	if a.isIdle(context.Background()) {
 		t.Error("IsIdle() = true when DCV server not ready, want false")
 	}
 }
@@ -479,9 +479,9 @@ func TestDCVIdleSource_GraceBounded(t *testing.T) {
 	dcvAgent.config.DCVSessionID = "console"
 	dcvAgent.startTime = time.Now().Add(-(dcvGraceTimeout + time.Minute))
 	control := newTestAgent(t, cfg()) // no DCVSessionID → standard path
-	if dcvAgent.isIdle() != control.isIdle() {
+	if dcvAgent.isIdle(context.Background()) != control.isIdle(context.Background()) {
 		t.Errorf("past-grace DCV verdict (%v) != non-DCV control (%v) — did not fall through cleanly",
-			dcvAgent.isIdle(), control.isIdle())
+			dcvAgent.isIdle(context.Background()), control.isIdle(context.Background()))
 	}
 }
 
@@ -493,11 +493,11 @@ func TestDCVIdleSource_ZeroClients(t *testing.T) {
 		IdleCPUPercent: 100.0,
 		DCVSessionID:   "console",
 	})
-	count := a.getDCVConnectionCount()
+	count := a.getDCVConnectionCount(context.Background())
 	if count != 0 {
 		t.Errorf("getDCVConnectionCount() = %d, want 0", count)
 	}
-	if !a.isIdle() {
+	if !a.isIdle(context.Background()) {
 		t.Error("IsIdle() = false when DCV has 0 clients, want true")
 	}
 }
@@ -510,11 +510,11 @@ func TestDCVIdleSource_ActiveClients(t *testing.T) {
 		IdleCPUPercent: 100.0,
 		DCVSessionID:   "console",
 	})
-	count := a.getDCVConnectionCount()
+	count := a.getDCVConnectionCount(context.Background())
 	if count != 2 {
 		t.Errorf("getDCVConnectionCount() = %d, want 2", count)
 	}
-	if a.isIdle() {
+	if a.isIdle(context.Background()) {
 		t.Error("IsIdle() = true when DCV has 2 active clients, want false")
 	}
 }

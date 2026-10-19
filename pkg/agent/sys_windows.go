@@ -4,7 +4,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -22,9 +21,11 @@ import (
 // error it returns the "assume active / unknown" sentinel so spored never
 // falsely concludes a busy Windows desktop is idle.
 
-// psOutput runs a PowerShell one-liner and returns trimmed stdout.
-func psOutput(script string) (string, error) {
-	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
+// psOutput runs a PowerShell one-liner and returns trimmed stdout. ctx stops
+// it: a cold PowerShell start takes seconds, and a reader that ignored the
+// context held up Monitor's return for ~14s (#1104).
+func psOutput(ctx context.Context, script string) (string, error) {
+	out, err := probeOutput(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script)
 	if err != nil {
 		return "", err
 	}
@@ -32,8 +33,8 @@ func psOutput(script string) (string, error) {
 }
 
 // psInt64 runs a PowerShell one-liner expected to print a single integer.
-func psInt64(script string) (int64, bool) {
-	s, err := psOutput(script)
+func psInt64(ctx context.Context, script string) (int64, bool) {
+	s, err := psOutput(ctx, script)
 	if err != nil || s == "" {
 		return 0, false
 	}
@@ -53,8 +54,8 @@ func psInt64(script string) (int64, bool) {
 // cumulative idle counter and Timestamp_Sys100NS is the cumulative time base.
 // These are monotonic, exactly like /proc/stat's idle/total, so the shared
 // delta math in getCPUUsage (100 - deltaIdle/deltaTotal*100) yields CPU-busy %.
-func sysReadCPUTimes() (idle, total int64, err error) {
-	out, perr := psOutput(`$p = Get-CimInstance Win32_PerfRawData_PerfOS_Processor | Where-Object {$_.Name -eq "_Total"}; "$($p.PercentIdleTime) $($p.Timestamp_Sys100NS)"`)
+func sysReadCPUTimes(ctx context.Context) (idle, total int64, err error) {
+	out, perr := psOutput(ctx, `$p = Get-CimInstance Win32_PerfRawData_PerfOS_Processor | Where-Object {$_.Name -eq "_Total"}; "$($p.PercentIdleTime) $($p.Timestamp_Sys100NS)"`)
 	if perr != nil {
 		return 0, 0, perr
 	}
@@ -73,8 +74,8 @@ func sysReadCPUTimes() (idle, total int64, err error) {
 // sysReadNetworkBytes returns cumulative RX+TX bytes across adapters, or -1, -1
 // ("unknown") when there are none: the sum of nothing is $null, which [int64]
 // turns into a 0 that reads as a measured "no traffic" (#919).
-func sysReadNetworkBytes() (rx, tx int64) {
-	total, ok := psInt64(`$s = @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue); if ($s.Count -eq 0) { 'none' } else { [int64](($s | Measure-Object -Property ReceivedBytes -Sum).Sum) + [int64](($s | Measure-Object -Property SentBytes -Sum).Sum) }`)
+func sysReadNetworkBytes(ctx context.Context) (rx, tx int64) {
+	total, ok := psInt64(ctx, `$s = @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue); if ($s.Count -eq 0) { 'none' } else { [int64](($s | Measure-Object -Property ReceivedBytes -Sum).Sum) + [int64](($s | Measure-Object -Property SentBytes -Sum).Sum) }`)
 	if !ok {
 		return -1, -1
 	}
@@ -89,8 +90,8 @@ func sysReadNetworkBytes() (rx, tx int64) {
 // name, so the caller deltas it like /proc/diskstats. The _Total instance is
 // missing when perf counters are disabled or corrupt, and [int64]$null is a 0
 // that would read as a measured "no disk I/O" (#937, as #919 for network).
-func sysReadDiskIOBytes() int64 {
-	v, ok := psInt64(`$d = Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -ErrorAction SilentlyContinue | Where-Object {$_.Name -eq "_Total"}; if ($null -eq $d) { 'none' } else { [int64]$d.DiskBytesPersec }`)
+func sysReadDiskIOBytes(ctx context.Context) int64 {
+	v, ok := psInt64(ctx, `$d = Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -ErrorAction SilentlyContinue | Where-Object {$_.Name -eq "_Total"}; if ($null -eq $d) { 'none' } else { [int64]$d.DiskBytesPersec }`)
 	if !ok {
 		return -1
 	}
@@ -98,11 +99,11 @@ func sysReadDiskIOBytes() int64 {
 }
 
 // sysIsProcessRunning reports whether a process with the given name is running.
-func sysIsProcessRunning(name string) bool {
+func sysIsProcessRunning(ctx context.Context, name string) bool {
 	// Get-Process matches without the .exe suffix.
 	name = strings.TrimSuffix(strings.TrimSuffix(name, ".exe"), ".EXE")
 	safe := strings.ReplaceAll(name, "'", "")
-	out, err := psOutput("if (Get-Process -Name '" + safe + "' -ErrorAction SilentlyContinue) { 'Y' } else { 'N' }")
+	out, err := psOutput(ctx, "if (Get-Process -Name '"+safe+"' -ErrorAction SilentlyContinue) { 'Y' } else { 'N' }")
 	return err == nil && strings.TrimSpace(out) == "Y"
 }
 
@@ -110,8 +111,8 @@ func sysIsProcessRunning(name string) bool {
 // are in the Active state with recent input. Parses `quser`, whose columns are
 // USERNAME SESSIONNAME ID STATE IDLE-TIME LOGON-TIME. A session counts if STATE
 // is Active and IDLE TIME is "none"/"." or under 5 minutes.
-func sysCountActiveSessions() int {
-	out, err := exec.Command("quser").Output()
+func sysCountActiveSessions(ctx context.Context) int {
+	out, err := probeOutput(ctx, "quser")
 	if err != nil {
 		return 0
 	}
@@ -178,7 +179,7 @@ func quserIdleIsRecent(idle string) bool {
 // sysCountActivePortConnections counts ESTABLISHED TCP connections on the given
 // local ports via Get-NetTCPConnection — catches browser app users (RStudio,
 // Jupyter) the session list misses.
-func sysCountActivePortConnections(ports []int) int {
+func sysCountActivePortConnections(ctx context.Context, ports []int) int {
 	if len(ports) == 0 {
 		return 0
 	}
@@ -188,7 +189,7 @@ func sysCountActivePortConnections(ports []int) int {
 	}
 	script := "@(Get-NetTCPConnection -State Established -LocalPort " + strings.Join(portList, ",") +
 		" -ErrorAction SilentlyContinue).Count"
-	if c, ok := psInt64(script); ok {
+	if c, ok := psInt64(ctx, script); ok {
 		return int(c)
 	}
 	return 0
@@ -200,8 +201,8 @@ func sysCountActivePortConnections(ports []int) int {
 // (#736). A Windows workload's log has to travel by another route.
 func sysWriteConsole(string) error { return nil }
 
-func sysWarnUsers(message string) {
-	_ = exec.Command("msg", "*", message).Run()
+func sysWarnUsers(ctx context.Context, message string) {
+	_, _ = probeOutput(ctx, "msg", "*", message)
 }
 
 // sysShellCommand runs a user pre-stop hook through PowerShell on Windows. The
@@ -218,7 +219,7 @@ func sysShellCommand(ctx context.Context, command, user string) *exec.Cmd {
 func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) error {
 	_ = ctx
 	_, _, _ = dnsName, mountName, mountPoint
-	return fmt.Errorf("FSx Lustre mounting is not supported on Windows")
+	return errLustreUnsupported
 }
 
 // sysComputeClockPath is "" on Windows: there is no boot-scoped tmpfs to put the

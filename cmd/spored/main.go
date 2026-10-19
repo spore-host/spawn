@@ -753,7 +753,9 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		}
 		reading = statusIdleReading{Source: "daemon", AgeSeconds: time.Since(st.Taken).Seconds(), Reason: st.Reason}
 	} else {
-		isIdle = ag.EvaluateIdle()
+		// The one-shot status runs no monitor and nothing cancels it; each probe
+		// is still bounded by its own timeout.
+		isIdle = ag.EvaluateIdle(context.Background())
 		cpuPercent, cpuMeasured = ag.GetCPUUsageMeasured()
 		netBytes, netMeasured, netUnknown = ag.GetNetworkBytesMeasured()
 		diskBytes, diskMeasured, diskUnknown = ag.GetDiskIOBytesMeasured()

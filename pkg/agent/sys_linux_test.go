@@ -67,17 +67,17 @@ func TestIsIdle_IdlePTYDoesNotBlockIdleStop(t *testing.T) {
 	origRoot, origLines := sessionDevRoot, loginTTYLines
 	t.Cleanup(func() { sessionDevRoot, loginTTYLines = origRoot, origLines })
 	sessionDevRoot = fakeDev(t, now, map[string]time.Duration{"pts/0": 2 * time.Hour})
-	loginTTYLines = func() []string { return []string{"pts/0"} }
+	loginTTYLines = func(context.Context) []string { return []string{"pts/0"} }
 
 	stubCPUTimes(t, [2]int64{1000, 1000}, [2]int64{1990, 2000}, [2]int64{2980, 3000})
 	stubNetworkBytes(t, [2]int64{5000, 5000})
 	stubDiskIOBytes(t, 4096)
 	a := newTestAgent(t, nil)
-	_, _ = a.cpuUsage()
-	_, _, _ = a.networkBytes()
-	_, _, _ = a.diskIOBytes()
+	_, _ = a.cpuUsage(context.Background())
+	_, _, _ = a.networkBytes(context.Background())
+	_, _, _ = a.diskIOBytes(context.Background())
 
-	if !a.isIdle() {
+	if !a.isIdle(context.Background()) {
 		t.Error("an idle PTY blocked the idle decision (#953)")
 	}
 
@@ -85,7 +85,7 @@ func TestIsIdle_IdlePTYDoesNotBlockIdleStop(t *testing.T) {
 	if err := os.Chtimes(filepath.Join(sessionDevRoot, "pts", "0"), time.Now(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if a.isIdle() {
+	if a.isIdle(context.Background()) {
 		t.Error("a PTY with input just now did not count as an active session")
 	}
 }

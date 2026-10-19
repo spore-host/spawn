@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -29,7 +30,7 @@ func TestMeasuredIdleMinutesReadIdle(t *testing.T) {
 	a := newTestAgent(t, nil)
 	stubAccelerators(t, nil, func(string) ([]byte, error) { return nil, nil })
 	for _, m := range measuredIdleMinutes {
-		idle, reason := a.idleDecision(idleSnapshot{
+		idle, reason := a.idleDecision(context.Background(), idleSnapshot{
 			taken: time.Now(), cpu: 0.5, cpuMeasured: true,
 			net: m.net, netMeasured: true, disk: m.disk, diskMeasured: true,
 		})
@@ -54,7 +55,7 @@ func TestWorkloadMinutesReadActive(t *testing.T) {
 		{"a checkpoint flush", 512 << 20, 0},
 		{"syncing outputs to S3 at 100 KB/s", 0, 6 << 20},
 	} {
-		idle, _ := a.idleDecision(idleSnapshot{
+		idle, _ := a.idleDecision(context.Background(), idleSnapshot{
 			taken: time.Now(), cpu: 0.5, cpuMeasured: true,
 			net: w.net, netMeasured: true, disk: w.disk, diskMeasured: true,
 		})

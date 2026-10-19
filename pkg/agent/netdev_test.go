@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
 	"os"
@@ -176,7 +177,7 @@ func stubNetworkBytes(t *testing.T, samples ...[2]int64) {
 	t.Helper()
 	i := 0
 	orig := readNetworkBytes
-	readNetworkBytes = func() (int64, int64) {
+	readNetworkBytes = func(context.Context) (int64, int64) {
 		s := samples[len(samples)-1]
 		if i < len(samples) {
 			s = samples[i]
@@ -193,7 +194,7 @@ func TestNetworkBytes_FirstSampleIsUnknownThenMeasured(t *testing.T) {
 	stubNetworkBytes(t, [2]int64{217684698, 2925026}, [2]int64{217699919, 2963423})
 	a := newTestAgent(t, nil)
 
-	v, measured, why := a.networkBytes()
+	v, measured, why := a.networkBytes(context.Background())
 	if measured {
 		t.Error("the first sample reported a measurement; there is no delta to measure")
 	}
@@ -201,7 +202,7 @@ func TestNetworkBytes_FirstSampleIsUnknownThenMeasured(t *testing.T) {
 		t.Errorf("first sample = (%d, %q), want the assume-active value and a reason", v, why)
 	}
 
-	v, measured, _ = a.networkBytes()
+	v, measured, _ = a.networkBytes(context.Background())
 	if !measured {
 		t.Fatal("the second sample was not reported as a measurement")
 	}
@@ -217,9 +218,9 @@ func TestNetworkBytes_FirstSampleIsUnknownThenMeasured(t *testing.T) {
 func TestNetworkBytes_ZeroCountersAreNotAPermanentFirstSample(t *testing.T) {
 	stubNetworkBytes(t, [2]int64{0, 0}, [2]int64{0, 0}, [2]int64{0, 0})
 	a := newTestAgent(t, nil)
-	_, _, _ = a.networkBytes() // first sample
+	_, _, _ = a.networkBytes(context.Background()) // first sample
 	for i := 0; i < 2; i++ {
-		v, measured, why := a.networkBytes()
+		v, measured, why := a.networkBytes(context.Background())
 		if !measured || v != 0 {
 			t.Fatalf("sample %d = (%d, measured=%v, %q), want a measured 0 — "+
 				"a zero counter was taken for the first sample again (#919)", i+2, v, measured, why)
@@ -238,7 +239,7 @@ func TestNetworkBytes_UnknownIsAssumedActiveAndWarnedOnce(t *testing.T) {
 	a := newTestAgent(t, nil)
 	buf.Reset()
 	for i := 0; i < 3; i++ {
-		v, measured, why := a.networkBytes()
+		v, measured, why := a.networkBytes(context.Background())
 		if measured {
 			t.Fatalf("call %d: an unreadable counter reported a measurement", i+1)
 		}
@@ -259,8 +260,8 @@ func TestNetworkBytes_UnknownIsAssumedActiveAndWarnedOnce(t *testing.T) {
 func TestNetworkBytes_BackwardsCounterIsUnknown(t *testing.T) {
 	stubNetworkBytes(t, [2]int64{5000000, 5000000}, [2]int64{100, 100})
 	a := newTestAgent(t, nil)
-	_, _, _ = a.networkBytes()
-	if v, measured, _ := a.networkBytes(); measured || v < 0 {
+	_, _, _ = a.networkBytes(context.Background())
+	if v, measured, _ := a.networkBytes(context.Background()); measured || v < 0 {
 		t.Errorf("backwards counter = (%d, measured=%v), want unknown and assume-active", v, measured)
 	}
 }
