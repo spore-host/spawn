@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -129,13 +130,6 @@ func waitForSSHReady(ctx context.Context, host string, timeout time.Duration) er
 	}
 }
 
-// verifySporedReady polls `spored status` over SSM until the agent responds or
-// the deadline passes (#50). spored is installed asynchronously by cloud-init, so
-// this is the launch-time confirmation that it actually came up — a non-nil
-// return means it never did within the window (failed install, etc.), which the
-// caller treats as a launch failure (a spored-less instance has no TTL safety
-// net). Uses SSM RunShellScript so it works for both keyed and keyless instances;
-// an SSM error early on (agent still registering) is retried, not fatal.
 // sporedCheck is how a launch confirms spored came up on the instance.
 type sporedCheck int
 
@@ -198,58 +192,220 @@ func verifySporedReady(ctx context.Context, client *aws.Client, region, instance
 	return verifySporedReadyOn(ctx, client, region, instanceID, sporedCheckLinux, timeout)
 }
 
-// verifySporedReadyOn confirms spored is up, probing with the check that matches
-// the instance's OS.
+// verifySporedReadyOn confirms spored came up on a freshly launched instance
+// (#50). spored is installed asynchronously by the bootstrap, so a failed install
+// (bad download, signature or checksum mismatch, a bucket-less region) is
+// otherwise invisible to `spawn launch` — leaving a running instance with no TTL,
+// idle or cost enforcement. A non-nil return means it is not known to be up.
+//
+// The evidence is spored's own heartbeat tag (#1053): spored stamps
+// spawn:last-heartbeat on every tick, on Linux and Windows alike, so its
+// appearance proves spored is running without asking anything else on the
+// instance. It is read with ec2:DescribeInstances, which the IAM baseline already
+// grants. The SSM agent used to be the only channel, so an AMI that does not ship
+// amazon-ssm-agent (Rocky, RHEL) failed every launch with "spored never came
+// up" about a healthy spored. SSM is still consulted, as a second signal that
+// may answer first, but its absence or refusal is never the verdict.
 func verifySporedReadyOn(ctx context.Context, client *aws.Client, region, instanceID string, check sporedCheck, timeout time.Duration) error {
-	powershell, command := sporedProbe(check)
-	probe := func(ctx context.Context) (*aws.SSMRunResult, error) {
-		if powershell {
-			return client.RunPowerShell(ctx, region, instanceID, command, 30*time.Second)
-		}
-		return client.RunShellScript(ctx, region, instanceID, command, 30*time.Second)
-	}
-
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	return verifySporedWith(ctx, clientSporedSignals{client, region, instanceID, check}, timeout, realVerifyClock())
+}
 
-	// FIRST wait for the SSM agent to REGISTER (PingStatus=Online) before sending
-	// any command (#277). On a fresh AL2023/Graviton spot instance the agent can
-	// take a while to come up; sending `spored status` before then means every
-	// SendCommand fails until the whole gate times out with an opaque "context
-	// deadline exceeded". WaitForSSMOnline polls DescribeInstanceInformation and,
-	// crucially, fails FAST if the instance has no IAM instance profile (the agent
-	// can then never register) rather than waiting out the timeout. Give it the
-	// bulk of the budget; reserve time for the status poll below.
-	onlineTimeout := timeout - 30*time.Second
-	if onlineTimeout < 30*time.Second {
-		onlineTimeout = timeout / 2
+// sporedSignals is what verification may ask about an instance. It is the seam
+// the tests drive: each method is one AWS round trip.
+type sporedSignals interface {
+	// liveness is one ec2:DescribeInstances: heartbeat tag, profile, state.
+	liveness(ctx context.Context) (aws.SporedLiveness, error)
+	// ssmOnline is one ssm:DescribeInstanceInformation.
+	ssmOnline(ctx context.Context) (bool, error)
+	// probe runs the OS's spored check over SSM (SendCommand + GetCommandInvocation).
+	probe(ctx context.Context) (*aws.SSMRunResult, error)
+}
+
+type clientSporedSignals struct {
+	client     *aws.Client
+	region, id string
+	check      sporedCheck
+}
+
+func (s clientSporedSignals) liveness(ctx context.Context) (aws.SporedLiveness, error) {
+	return s.client.DescribeSporedLiveness(ctx, s.region, s.id)
+}
+
+func (s clientSporedSignals) ssmOnline(ctx context.Context) (bool, error) {
+	return s.client.SSMOnline(ctx, s.region, s.id)
+}
+
+func (s clientSporedSignals) probe(ctx context.Context) (*aws.SSMRunResult, error) {
+	powershell, command := sporedProbe(s.check)
+	if powershell {
+		return s.client.RunPowerShell(ctx, s.region, s.id, command, 30*time.Second)
 	}
-	if err := client.WaitForSSMOnline(ctx, region, instanceID, onlineTimeout); err != nil {
-		return fmt.Errorf("SSM agent never came online (can't verify spored): %w", err)
+	return s.client.RunShellScript(ctx, s.region, s.id, command, 30*time.Second)
+}
+
+// verifyClock is the time verification runs on, injectable so tests count polls
+// instead of measuring wall-clock time.
+type verifyClock struct {
+	now   func() time.Time
+	sleep func(ctx context.Context, d time.Duration) error
+}
+
+func realVerifyClock() verifyClock {
+	return verifyClock{
+		now: time.Now,
+		sleep: func(ctx context.Context, d time.Duration) error {
+			t := time.NewTimer(d)
+			defer t.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-t.C:
+				return nil
+			}
+		},
 	}
+}
 
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+// sporedVerifyPollInterval is the gap between polls. spored writes its first
+// heartbeat about a minute after it starts, so polling faster buys nothing.
+const sporedVerifyPollInterval = 10 * time.Second
 
-	var lastErr error
+// sporedUnverifiableError means verification could not be carried out — the
+// caller's credentials refused the call that reads the evidence. It says nothing
+// about the instance, so it must never be reported as "spored never came up"
+// (#1126).
+type sporedUnverifiableError struct{ err error }
+
+func (e *sporedUnverifiableError) Error() string {
+	return "can't verify spored: " + e.err.Error() + "; the instance itself may be fine"
+}
+
+func (e *sporedUnverifiableError) Unwrap() error { return e.err }
+
+// sporedTerminalStates are states from which spored can no longer report.
+var sporedTerminalStates = map[string]bool{
+	"shutting-down": true, "terminated": true, "stopping": true, "stopped": true,
+}
+
+// verifySporedWith polls the heartbeat tag (and, while it is usable, SSM) until
+// one of them shows spored up, or the budget runs out.
+func verifySporedWith(ctx context.Context, sig sporedSignals, timeout time.Duration, clk verifyClock) error {
+	start := clk.now()
+	deadline := start.Add(timeout)
+
+	var (
+		ssmDenied   error // SSM refused the caller; it is not asked again
+		ssmWasUp    bool  // the agent has registered at least once
+		lastProbe   error // the latest SSM probe failure, once registered
+		lastDescErr error // the latest non-authorization DescribeInstances failure
+	)
+
 	for {
-		// `spored status` exits 0 when the daemon is up and answering. Run it over
-		// SSM (the agent runs as root, so no sudo needed). The agent is Online by
-		// now, so SendCommand reaches it instead of timing out.
-		res, err := probe(ctx)
-		if err == nil && res.Status == "Success" {
+		l, err := sig.liveness(ctx)
+		switch {
+		case err != nil && aws.IsAccessDenied(err):
+			// The one channel that does not depend on the AMI is closed to
+			// the caller: nothing this loop can learn would be evidence.
+			return &sporedUnverifiableError{err: err}
+		case err != nil:
+			lastDescErr = err
+		case l.Heartbeat != "":
 			return nil
+		case sporedTerminalStates[l.State]:
+			return fmt.Errorf("instance is %s and spored never reported a heartbeat", l.State)
+		case !l.HasInstanceProfile:
+			// Without a profile spored has no credentials to tag with and the SSM
+			// agent none to register with: dead, not slow.
+			return fmt.Errorf("%w: instance has no IAM instance profile, so spored cannot write its heartbeat and the SSM agent cannot register — failing fast instead of waiting out %s",
+				aws.ErrSSMUnreachable, timeout)
 		}
-		if err != nil {
-			lastErr = err
-		} else {
-			lastErr = fmt.Errorf("spored status: %s: %s", res.Status,
-				strings.TrimSpace(strings.TrimSpace(res.Stdout)+" "+strings.TrimSpace(res.Stderr)))
+
+		// The second signal. SSM can answer before the first heartbeat, but on
+		// an AMI without the agent it never will, and a caller without the ssm:
+		// actions cannot ask; neither is a verdict on spored.
+		if ssmDenied == nil {
+			up := ssmWasUp
+			if !up {
+				var oerr error
+				up, oerr = sig.ssmOnline(ctx)
+				if aws.IsAccessDenied(oerr) {
+					ssmDenied, up = oerr, false
+				}
+				ssmWasUp = up
+			}
+			if up {
+				res, perr := sig.probe(ctx)
+				switch {
+				case aws.IsAccessDenied(perr):
+					ssmDenied = perr
+				case perr == nil && res.Status == "Success":
+					return nil
+				case perr != nil:
+					lastProbe = perr
+				default:
+					lastProbe = fmt.Errorf("spored status: %s: %s", res.Status,
+						strings.TrimSpace(strings.TrimSpace(res.Stdout)+" "+strings.TrimSpace(res.Stderr)))
+				}
+			}
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("spored did not become ready within %s: %w", timeout, lastErr)
-		case <-ticker.C:
+
+		if !clk.now().Before(deadline) {
+			return sporedTimeoutError(timeout, ssmDenied, ssmWasUp, lastProbe, lastDescErr)
+		}
+		wait := sporedVerifyPollInterval
+		if rem := deadline.Sub(clk.now()); rem < wait {
+			wait = rem
+		}
+		if err := clk.sleep(ctx, wait); err != nil {
+			return sporedTimeoutError(timeout, ssmDenied, ssmWasUp, lastProbe, lastDescErr)
 		}
 	}
+}
+
+// sporedTimeoutError is the "spored did not come up" verdict, with what each
+// channel saw so the reader can tell a dead spored from a quiet SSM.
+func sporedTimeoutError(timeout time.Duration, ssmDenied error, ssmWasUp bool, lastProbe, lastDescErr error) error {
+	msg := fmt.Sprintf("spored did not become ready within %s: no %s tag (spored writes it about a minute after it starts)",
+		timeout, aws.HeartbeatTag)
+	if lastDescErr != nil {
+		msg += fmt.Sprintf("; last DescribeInstances error: %v", lastDescErr)
+	}
+	switch {
+	case ssmDenied != nil:
+		msg += fmt.Sprintf("; SSM could not be used as a second check: %v", ssmDenied)
+	case !ssmWasUp:
+		msg += "; the SSM agent never registered either (expected on AMIs without amazon-ssm-agent)"
+	case lastProbe != nil:
+		msg += fmt.Sprintf("; over SSM: %v", lastProbe)
+	}
+	return errors.New(msg + ". Check the boot log with `spawn logs <instance-id> --console`")
+}
+
+// sporedVerificationFailure turns a failed verification into the launch's error,
+// terminating the instance first under --terminate-on-error. A verification the
+// caller's credentials refused is reported as exactly that (#1126): the instance
+// may be healthy, so it is not called "never came up".
+func sporedVerificationFailure(ctx context.Context, client *aws.Client, region, instanceID string, terminateOnError bool, err error) error {
+	var unverifiable *sporedUnverifiableError
+	what := "spored never came up"
+	if errors.As(err, &unverifiable) {
+		what = "spored could not be verified"
+	}
+	if terminateOnError {
+		fmt.Fprintf(os.Stderr, "\n⚠️  %s; terminating %s (--terminate-on-error)\n", what, instanceID)
+		if terr := client.Terminate(ctx, region, instanceID); terr != nil {
+			fmt.Fprintf(os.Stderr, "   terminate failed — DELETE IT MANUALLY (spawn terminate %s): %v\n", instanceID, terr)
+		}
+		return fmt.Errorf("instance %s launched but %s (terminated): %w", instanceID, what, err)
+	}
+	if unverifiable != nil {
+		return fmt.Errorf("instance %s launched but %s — until spored is confirmed, treat it as having no TTL/idle safety net; "+
+			"check it (spawn status %s) or terminate it (spawn terminate %s): %w",
+			instanceID, what, instanceID, instanceID, err)
+	}
+	return fmt.Errorf("instance %s launched but %s — it has NO TTL/idle safety net; "+
+		"inspect it (spawn connect %s) or terminate it (spawn terminate %s). Re-run with --terminate-on-error to auto-terminate: %w",
+		instanceID, what, instanceID, instanceID, err)
 }

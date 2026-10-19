@@ -144,7 +144,7 @@ spawn launch <name> [flags]
 | `--volume-size` |  | int32 |  | Root EBS volume size in GiB (0 = use AMI default) |
 | `--vpc` |  | string |  | VPC ID |
 | `--wait-for-running` |  | bool | `true` | Wait until running |
-| `--wait-for-ssh` |  | bool | `true` | Wait until SSH is ready |
+| `--wait-for-ssh` |  | bool | `true` | Wait until SSH is ready, then verify spored came up (false skips both) |
 | `--wait-timeout` |  | string |  | Timeout for --wait (e.g., 2h, 30m, 0=no timeout) |
 | `--wait` |  | bool |  | Wait for sweep/launch to complete (requires --detach) |
 | `--webhook-correlation` |  | string |  | Opaque blob echoed verbatim in the spot-webhook/completion-webhook payload so a consumer can correlate the event to its own record (never parsed by spawn) |

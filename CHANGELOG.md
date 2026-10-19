@@ -28,6 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exit 1); no instance at all, or a failed lookup, is `unknown` (exit 3). A
   task killed without a terminal flush used to read `running` forever.
 
+- **`spawn launch` verifies spored by its heartbeat tag, not only over SSM
+  (#1053).** spored stamps `spawn:last-heartbeat` about once a minute on Linux
+  and Windows. The launch now waits for that tag, read with
+  `ec2:DescribeInstances` (already in the IAM baseline; no new permission).
+  SSM is still asked as a second signal and can answer first, but a missing
+  SSM agent is no longer the verdict. Before, every launch on an AMI without
+  `amazon-ssm-agent` (official Rocky 8/9, RHEL) waited 4.5 minutes and then
+  exited 1 with "spored never came up", even when spored was healthy. A launch
+  with no heartbeat and no SSM answer inside the budget (5 min Linux, 10 min
+  Windows) still fails as before and exits 1. The message now says which
+  evidence was missing, and what SSM saw.
+- `spawn launch --wait-for-ssh=false` now prints that spored was not verified,
+  and the flag's help says it skips spored verification as well as the SSH
+  wait (#878).
+
 ### Fixed
 
 - **`spawn extend` reloads spored over SSM on keyless instances (#1113).**
@@ -58,6 +73,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   either, it checks the default `/tmp/SPAWN_COMPLETE`. These extra refreshes
   are capped at 5 per instance, so a workload that writes the file with no
   on-complete configured does not cost a DescribeTags call every minute.
+- `spawn launch --output json` reports `spored_verified`: `true` when the
+  launch confirmed spored came up, `false` when it did not check
+  (`--wait-for-ssh=false`).
+- Go API (`pkg/aws`): `HeartbeatTag`, `DescribeSporedLiveness`, `SSMOnline`,
+  `AccessDeniedError`, `IsAccessDenied` and `IAMBaselineURL`.
+
+- **A missing caller permission is no longer reported as "spored never came
+  up" (#1126).** An AccessDenied from `ssm:DescribeInstanceInformation` was
+  polled as "not online yet" until the timeout, and the launch then told the
+  user the instance had no safety net. AccessDenied from SSM
+  (`DescribeInstanceInformation`, `SendCommand`, `GetCommandInvocation`) now
+  returns at once as an error naming the action. During launch verification
+  it only disables the SSM signal, because the heartbeat tag still answers.
+  If `ec2:DescribeInstances` itself is refused, the launch stops at once with
+  "spored could not be verified" and the action's name. It does not say the
+  instance is broken. This also applies to `spawn connect`, the warm-AMI build
+  and MPI cohort assembly, which share `WaitForSSMOnline`.
 
 ## [0.135.2] - 2026-10-19
 
