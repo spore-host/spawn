@@ -50,6 +50,11 @@ type PluginDeclaration struct {
 	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
 }
 
+// DefaultCompletionFile is the completion-signal path spored watches when
+// on-complete is set without a completion-file, and the path every launch path
+// writes by default.
+const DefaultCompletionFile = "/tmp/SPAWN_COMPLETE"
+
 // Config represents the agent configuration
 type Config struct {
 	TTL         time.Duration

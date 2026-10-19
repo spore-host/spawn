@@ -737,7 +737,7 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 
 	// Set default completion file if on-complete is set but file isn't specified
 	if config.OnComplete != "" && config.CompletionFile == "" {
-		config.CompletionFile = "/tmp/SPAWN_COMPLETE"
+		config.CompletionFile = DefaultCompletionFile
 	}
 
 	// Set default completion delay if on-complete is set but delay isn't specified
