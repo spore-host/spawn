@@ -68,6 +68,13 @@ The artifact comes from the spawn GitHub Release matching --version (default: th
 binary's version). --artifact overrides that with a local path or an explicit URL, for
 mirrored or air-gapped environments.
 
+Re-running it upgrades an existing reaper in place and keeps its settings: the
+armed state, the scanned regions and every other REAPER_* variable stay as they
+are unless a flag here sets them. --spot-requests, --net-resources, --max-age and
+--notify-url set the matching variable; pass an empty value ("") to remove one
+and return the reaper to its default. The notify URL is never printed; pass "-"
+to read it from stdin instead of the command line.
+
 ```
 spawn reaper deploy [flags]
 ```
@@ -78,8 +85,12 @@ spawn reaper deploy [flags]
 |------|-------|------|---------|-------------|
 | `--artifact` |  | string |  | Use this Lambda zip instead of downloading a release asset (local path or URL) |
 | `--bucket` |  | string |  | S3 bucket in THIS account to hold the artifact (default: spawn-reaper-artifacts-&lt;account&gt;-&lt;region&gt;) |
-| `--regions` |  | string |  | Comma-separated regions for the reaper to scan (default: the deploy region) |
+| `--max-age` |  | string |  | Max-age ceiling, REAPER_MAX_AGE, e.g. 336h or 14d (default: keep; the reaper's default is 7d) |
+| `--net-resources` |  | string |  | Network-resource sweep, REAPER_NET_RESOURCES: off\|report\|reap (default: keep; the reaper's default is report) |
+| `--notify-url` |  | string |  | URL the reaper POSTs notifications to, REAPER_NOTIFY_URL; never printed. "-" reads it from stdin (default: keep) |
+| `--regions` |  | string |  | Comma-separated regions for the reaper to scan (default: keep the existing reaper's; the deploy region for a new one) |
 | `--schedule` |  | string | `rate(10 minutes)` | EventBridge schedule expression |
+| `--spot-requests` |  | string |  | Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--version` |  | string |  | spawn release to take the reaper artifact from (default: this binary's version) |
 
 ### `spawn reaper status`

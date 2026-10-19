@@ -58,6 +58,7 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/dns"
+	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
@@ -621,8 +622,8 @@ func parseMaxAge(env string) time.Duration {
 	if env == "" {
 		return defaultMaxAge
 	}
-	d, err := ttlpkg.ParseDuration(env)
-	if err != nil || d <= 0 {
+	d, err := reaperconfig.ParseMaxAge(env)
+	if err != nil {
 		log.Printf("invalid REAPER_MAX_AGE %q, using default %s", env, defaultMaxAge)
 		return defaultMaxAge
 	}

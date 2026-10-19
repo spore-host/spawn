@@ -126,6 +126,7 @@ func CeilingWarning(requested time.Duration) string {
 			"instance will be reclaimed at ~%s regardless of the deadline.\n"+
 			"  The ceiling applies even inside a live deadline because spawn:ttl-deadline is "+
 			"writable from the instance, so it cannot be the only bound.\n"+
-			"  For a longer-lived instance, raise REAPER_MAX_AGE on the reaper deployment.",
+			"  For a longer-lived instance, raise REAPER_MAX_AGE on the reaper deployment "+
+			"(spawn reaper deploy --max-age, for a reaper in your own account).",
 		requested, DefaultReaperMaxAge, DefaultReaperMaxAge)
 }

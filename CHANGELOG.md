@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `spawn task run`: a container task is now sized to at least 2 GiB of memory (`taskproto.ContainerMemoryFloorGiB`), including when `resources.memory_gib` is set lower. A container spec with only `resources.cpu` used to size to t4g.nano (0.5 GiB), where the boot-time `dnf install docker` was OOM-killed in 3 of 3 runs (#1180). The dry run says when the floor raised the request. A pinned `resources.instance_type` is still honoured as given, with a warning when it is below the floor. New `TaskSpec.SizingRequest()` returns the request to size against; Go callers of `taskproto.Size` should pass it instead of `spec.Resources`. `taskproto.Size` now also drops candidates whose known memory is below the requested memory, rather than trusting the finder to have filtered them.
 - `taskproto.RetryInstanceHealth` (`instance_health`) is now produced and is retryable (#1180).
 
+- **Re-running `spawn reaper deploy` keeps the existing reaper's settings
+  (#1154).** It used to carry over only `REAPER_DRY_RUN` and replace the rest of
+  the Lambda environment, so an upgrade silently dropped every other `REAPER_*`
+  variable, including a hand-set `REAPER_SPOT_REQUESTS=reap`, a raised
+  `REAPER_MAX_AGE` or a notify URL. It also reset the scanned regions to the
+  deploy region when `--regions` was omitted. Now every existing `REAPER_*`
+  variable is kept unless a flag sets it, and `--regions` defaults to the
+  existing reaper's regions (the deploy region only for a new reaper).
+
 ### Fixed
 
 - **`spawn extend` reloads spored over SSM on keyless instances (#1113).**
@@ -97,6 +106,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `spawn task run`: the Spot→on-demand fallback (`resources.fallback: on_demand`) now launches with the same storage mounts and terminal-flush hook as the Spot attempt. The retry passed empty launcher options, so a fallback instance came up without its EFS/FSx/volume mounts and without the hook that writes a completion record on a TTL kill (#1144).
 
 - `spawn task run`: when a container task's Docker install fails or its daemon never starts, the wrapper now skips the image pull and run and records `retry_class: instance_health` (retryable). It used to ignore the failure, run `sudo docker run` anyway, and record `app_error` (not retryable) for a command that never ran (#1180).
+- `spawn reaper deploy --spot-requests`, `--net-resources`, `--max-age` and
+  `--notify-url` set the in-account reaper's `REAPER_SPOT_REQUESTS`,
+  `REAPER_NET_RESOURCES`, `REAPER_MAX_AGE` and `REAPER_NOTIFY_URL`. Before
+  this, a CLI-deployed reaper's Spot-request and network sweeps could only stay
+  in `report`. Values are checked against what the reaper itself accepts
+  (`off|report|reap`, a positive duration, an http(s) URL) before anything is
+  touched; the reaper now parses these with the same code (`pkg/reaperconfig`),
+  so the two cannot disagree. An empty value removes the variable. The notify
+  URL is never printed, and `--notify-url -` reads it from stdin so it need not
+  appear on the command line (#1154).
 
 ## [0.135.2] - 2026-10-19
 

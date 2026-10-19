@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
+	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/reaperiam"
 )
 
@@ -161,7 +163,104 @@ type Options struct {
 	Artifact string
 	Bucket   string
 	Schedule string
-	Regions  string
+
+	// Regions is REAPER_REGIONS as passed explicitly (--regions). Empty means
+	// "not passed": a re-deploy keeps the existing function's regions, and only
+	// a function with none (a fresh one) gets DefaultRegions. Resetting them to
+	// the deploy region on every re-deploy silently stopped the reaper scanning
+	// every other region it had been given (#1154).
+	Regions string
+	// DefaultRegions is used when Regions is empty and the function has no
+	// REAPER_REGIONS of its own — normally the deploy region.
+	DefaultRegions string
+
+	// Settings are REAPER_* values this deploy sets explicitly, keyed by
+	// variable name; every key must be one of reaperconfig.Settable(). An empty
+	// value removes the variable, returning the reaper to its own default. Any
+	// REAPER_* variable already on the function and not named here is kept.
+	Settings map[string]string
+}
+
+// MergeEnv computes the environment a deploy writes, given the existing
+// function's environment (nil for a fresh function).
+//
+// UpdateFunctionConfiguration replaces the WHOLE environment, so anything not
+// carried over here is deleted. This used to carry over only REAPER_DRY_RUN,
+// which meant an upgrade wiped REAPER_SPOT_REQUESTS=reap, a raised
+// REAPER_MAX_AGE, the notify URL and everything else set by hand, and reset the
+// scan regions (#1154). Now every existing REAPER_* variable survives unless
+// this deploy explicitly sets it, and the only value a deploy forces is
+// REAPER_SCAN_SELF=true, which is the whole shape of this deployment.
+//
+// REAPER_DRY_RUN is preserved like the rest — re-deploying must not silently
+// DISARM a reaper an operator deliberately armed — and defaults to "true" only
+// when absent, because a fresh deploy lands unarmed.
+func MergeEnv(existing map[string]string, opts Options) map[string]string {
+	env := EnvVars("", true) // a fresh deploy lands unarmed; `spawn reaper arm` flips it
+	for k, v := range existing {
+		if strings.HasPrefix(k, "REAPER_") {
+			env[k] = v
+		}
+	}
+	for k, v := range ForcedEnv() {
+		env[k] = v
+	}
+	switch {
+	case strings.TrimSpace(opts.Regions) != "":
+		env["REAPER_REGIONS"] = opts.Regions
+	case strings.TrimSpace(env["REAPER_REGIONS"]) == "" && strings.TrimSpace(opts.DefaultRegions) != "":
+		env["REAPER_REGIONS"] = opts.DefaultRegions
+	}
+	for k, v := range opts.Settings {
+		if strings.TrimSpace(v) == "" {
+			delete(env, k)
+			continue
+		}
+		env[k] = strings.TrimSpace(v)
+	}
+	return env
+}
+
+// ForcedEnv is what every deploy writes regardless of the existing
+// environment.
+func ForcedEnv() map[string]string {
+	return map[string]string{"REAPER_SCAN_SELF": "true"}
+}
+
+// validateSettings rejects a setting the reaper would not understand before
+// anything is touched. The check is reaperconfig's, which is also what the
+// reaper parses with, so CLI and reaper cannot disagree about what is valid.
+func validateSettings(settings map[string]string) error {
+	for k, v := range settings {
+		if err := reaperconfig.Validate(k, v); err != nil {
+			return fmt.Errorf("reaperdeploy: %w", err)
+		}
+	}
+	return nil
+}
+
+// settingActions describes the explicit settings for the deploy report. A
+// secret's value is never included (REAPER_NOTIFY_URL is usually a webhook
+// whose path is the credential).
+func settingActions(settings map[string]string) []string {
+	keys := make([]string, 0, len(settings))
+	for k := range settings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []string
+	for _, k := range keys {
+		v := strings.TrimSpace(settings[k])
+		switch {
+		case v == "":
+			out = append(out, fmt.Sprintf("removed %s (the reaper's default applies)", k))
+		case reaperconfig.Secret(k):
+			out = append(out, fmt.Sprintf("set %s (value not shown)", k))
+		default:
+			out = append(out, fmt.Sprintf("set %s=%s", k, v))
+		}
+	}
+	return out
 }
 
 // Result records what a deploy did, so the command can print it and a test can
@@ -184,6 +283,9 @@ type Result struct {
 func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	if opts.AccountID == "" || opts.Region == "" {
 		return nil, errors.New("reaperdeploy: account ID and region are required")
+	}
+	if err := validateSettings(opts.Settings); err != nil {
+		return nil, err
 	}
 	if opts.Schedule == "" {
 		opts.Schedule = DefaultSchedule
@@ -244,6 +346,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	res.FunctionARN = fnARN
 	res.DryRun = dryRun
 	res.Actions = append(res.Actions, actionWord(fnCreated, "function", FunctionName))
+	res.Actions = append(res.Actions, settingActions(opts.Settings)...)
 
 	if err := d.ensureSchedule(ctx, opts, fnARN); err != nil {
 		return nil, err
@@ -480,8 +583,6 @@ func DefaultFetch(ctx context.Context, ref string) ([]byte, error) {
 }
 
 func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, key string) (arn string, created, dryRun bool, err error) {
-	env := EnvVars(opts.Regions, true) // always deploy unarmed; `spawn reaper arm` flips it
-
 	out, gerr := d.Lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: awssdk.String(FunctionName)})
 	if gerr == nil {
 		// Update code first, then configuration. The reverse order can leave a
@@ -496,13 +597,13 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 		if err := d.waitForUpdate(ctx); err != nil {
 			return "", false, false, err
 		}
-		// Preserve REAPER_DRY_RUN on an existing function: re-deploying must not
-		// silently DISARM a reaper an operator deliberately armed.
+		// Merge onto the existing environment: UpdateFunctionConfiguration
+		// replaces all of it, so anything not carried over is deleted (#1154).
+		var existing map[string]string
 		if cur := out.Configuration; cur != nil && cur.Environment != nil {
-			if v, ok := cur.Environment.Variables["REAPER_DRY_RUN"]; ok {
-				env["REAPER_DRY_RUN"] = v
-			}
+			existing = cur.Environment.Variables
 		}
+		env := MergeEnv(existing, opts)
 		if _, err := d.Lambda.UpdateFunctionConfiguration(ctx, &lambda.UpdateFunctionConfigurationInput{
 			FunctionName: awssdk.String(FunctionName),
 			Role:         awssdk.String(roleARN),
@@ -530,6 +631,7 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 		return "", false, false, fmt.Errorf("reaperdeploy: get function: %w", gerr)
 	}
 
+	env := MergeEnv(nil, opts)
 	fn, err := d.Lambda.CreateFunction(ctx, &lambda.CreateFunctionInput{
 		FunctionName:  awssdk.String(FunctionName),
 		Role:          awssdk.String(roleARN),
@@ -546,7 +648,7 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 	if err != nil {
 		return "", false, false, fmt.Errorf("reaperdeploy: create function: %w", err)
 	}
-	return awssdk.ToString(fn.FunctionArn), true, true, nil
+	return awssdk.ToString(fn.FunctionArn), true, env["REAPER_DRY_RUN"] == "true", nil
 }
 
 func (d *Deployer) ensureSchedule(ctx context.Context, opts Options, fnARN string) error {
