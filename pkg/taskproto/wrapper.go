@@ -475,6 +475,22 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	if gpu {
 		gpuFlag = "--gpus all "
 	}
+	// Task env reaches the CONTAINER, not only the host shell (#1059). The
+	// `export` block above sets it for the host wrapper; on its own it never
+	// reached `docker run`, so a container task silently ran without it. Each
+	// key is passed as one `-e KEY=VALUE` argv word holding the LITERAL value,
+	// single-quoted:
+	//   - not a bare `-e KEY`: sudo resets the environment by default, so
+	//     docker would never see the exported value;
+	//   - not `-e "KEY=$KEY"`: a key such as STAGE_RC or rc names a wrapper
+	//     variable that is reassigned after the export, and the container
+	//     would get the wrapper's value instead of the spec's.
+	// Keys are shell identifiers (Validate rejects anything else), and the value
+	// is inside single quotes, so neither can split the word or expand.
+	var envFlags strings.Builder
+	for _, k := range sortedKeys(spec.Env) {
+		fmt.Fprintf(&envFlags, "-e %s ", shQuote(k+"="+spec.Env[k]))
+	}
 	var mounts strings.Builder
 	for _, d := range containerMountDirs(spec) {
 		fmt.Fprintf(&mounts, "-v %s:%s ", shQuote(d), shQuote(d))
@@ -484,7 +500,7 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	// The digest that actually ran, not what the tag pointed to (#1076).
 	p("  if [ \"$PROV_OK\" = 1 ]; then sudo docker inspect --format '{{index .RepoDigests 0}}' %s > \"$PROV_DIR/image-digest\" 2>/dev/null || true; fi\n", shQuote(image))
 	p("  spawn_phase 'image pull done; command start'\n")
-	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s %s\n", gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
+	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s%s %s\n", envFlags.String(), gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
 	p("  rc=$?\n")
 	p("  spawn_phase \"command exit rc=$rc\"\n")
 }

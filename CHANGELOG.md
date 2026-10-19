@@ -57,6 +57,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first, with `queue_id is required`. A missing `queue_id` now gets a
   generated `queue-<timestamp>` ID.
 
+- **A container task now gets its `env`** (#1059). For a task with
+  `container`, the spec's `env` map was set in the host shell but never
+  passed to `docker run`, so the command ran without it. Each key is now
+  passed with `-e KEY=VALUE`. Host-mode tasks are unchanged. The values
+  appear on the instance's `docker run` command line, so they are visible
+  in its process list while the task runs.
+- **`spawn task run --wait` now exits non-zero when the task failed**
+  (#1143). If the command exited 0 but the task was still marked failed,
+  `--wait` exited 0. The common case is a declared output that failed to
+  upload (`retry_class: output_delivery_error`). `--wait` now exits 1 for
+  any state other than `completed`, matching
+  `task status --check-complete`. A non-zero command exit code is still
+  returned as before.
+
 ## [0.135.1] - 2026-10-18
 
 ### Security
