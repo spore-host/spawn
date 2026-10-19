@@ -84,7 +84,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	printResourceTable(cmd, found)
 
 	if len(addresses) > 0 {
-		fmt.Fprintf(os.Stderr, "\nℹ️  %d Elastic IP(s) shown are user-owned — spawn never releases an EIP. If unneeded, release each yourself:\n", len(addresses))
+		fmt.Fprintf(os.Stderr, "\nℹ️  %d Elastic IP(s) shown are user-owned — spawn never releases an EIP it did not allocate. If unneeded, release each yourself:\n", len(addresses))
 		for _, a := range addresses {
 			fmt.Fprintf(os.Stderr, "    aws ec2 release-address --allocation-id %s   # %s (%s)\n", a.ID, a.PublicIP, a.Region)
 		}
@@ -187,7 +187,9 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 // splitCleanupResources partitions a discovery sweep into the four buckets
 // cleanup's output depends on:
 //   - running: running/pending instances — never removed, gate cleanup unless --dry-run
-//   - addresses: Elastic IPs — spawn never allocates or releases them (#262)
+//   - addresses: user-owned Elastic IPs — spawn never releases them (#262). An
+//     unassociated Elastic IP spawn allocated for a multi-interface EFA launch
+//     (#661, aws.IsSpawnAllocatedAddress) is removable instead.
 //   - alreadyGone: resources whose State is already "deleted" — Resource Groups
 //     Tagging API tag mappings outlive the resources they describe, so a
 //     discovery sweep routinely returns ids for things no longer there.
@@ -206,6 +208,10 @@ func splitCleanupResources(found []aws.ManagedResource) (running, addresses, alr
 		switch {
 		case r.IsRunningInstance():
 			running = append(running, r)
+		case aws.IsSpawnAllocatedAddress(r) && r.State == "unassociated":
+			// An Elastic IP a multi-interface EFA launch allocated whose instance
+			// is gone (#661): spawn's, billing, and released here.
+			removable = append(removable, r)
 		case r.ResourceType == "address":
 			addresses = append(addresses, r)
 		case r.ResourceType == "placement-group" && r.State == "in-use":

@@ -31,10 +31,19 @@ type ManagedResource struct {
 	// running).
 	State string
 	// PublicIP / AssociationID are filled only for ResourceType == "address".
-	// spawn never allocates EIPs, so these describe a USER-owned address surfaced
-	// for visibility — spawn reports it, never releases it (#262).
+	// An address is USER-owned — surfaced for visibility, never released (#262)
+	// — unless IsSpawnAllocatedAddress: the Elastic IP a multi-interface EFA
+	// launch allocates for itself (#661), which cleanup releases once unassociated.
 	PublicIP      string
 	AssociationID string
+}
+
+// IsSpawnAllocatedAddress reports whether an address is an Elastic IP spawn
+// allocated for a multi-interface EFA launch (#661): tagged spawn:managed=true
+// and with the instance it was allocated for. Only these are spawn's to
+// release; every other Elastic IP is the user's (#262).
+func IsSpawnAllocatedAddress(r ManagedResource) bool {
+	return r.ResourceType == "address" && r.Tags["spawn:managed"] == "true" && r.Tags[ElasticIPInstanceTagKey] != ""
 }
 
 // IsRunningInstance reports whether this is an EC2 instance still running or
@@ -198,7 +207,16 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 	if err != nil {
 		return nil, 0, err
 	}
-	resources = append(resources, addrs...)
+	for _, a := range addrs {
+		// A spawn-allocated Elastic IP (#661) carries its launcher's
+		// spawn:iam-user, so --mine scopes it like an instance. User-owned
+		// addresses carry no such tag and are reported regardless, as before.
+		if opts.OnlyMine && IsSpawnAllocatedAddress(a) && !ownedByCaller(a.Tags, callerARN) {
+			skippedByScope++
+			continue
+		}
+		resources = append(resources, a)
+	}
 
 	// Placement groups are tagged spawn:managed=true but the tagging API does not
 	// return them either, so they were invisible to orphans and cleanup alike
@@ -620,10 +638,18 @@ func (c *Client) RemoveResource(ctx context.Context, r ManagedResource) error {
 		_, err := ec2c.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(r.ID)})
 		return ignoreNotFound(err, "InvalidVolume.NotFound")
 
+	case r.ResourceType == "address" && IsSpawnAllocatedAddress(r) && r.State == "unassociated":
+		// The Elastic IP a multi-interface EFA launch allocated (#661), left
+		// behind by an instance that ended without `spawn terminate`. Ours, and
+		// billing while attached to nothing.
+		ec2c := ec2.NewFromConfig(cfg)
+		_, err := ec2c.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: aws.String(r.ID)})
+		return ignoreNotFound(err, "InvalidAllocationID.NotFound")
+
 	case r.ResourceType == "address":
-		// spawn never allocates an Elastic IP, so it never releases one — the
-		// address is the user's. cleanup reports it (via orphans) but must not
-		// destroy it: releasing an EIP is irreversible and it isn't ours (#262).
+		// Any other Elastic IP is the user's. cleanup reports it (via orphans)
+		// but must not destroy it: releasing an EIP is irreversible and it isn't
+		// ours (#262).
 		return fmt.Errorf("refusing to release Elastic IP %s (%s) — spawn does not own it; "+
 			"release it yourself with 'aws ec2 release-address --allocation-id %s' if unneeded", r.ID, r.PublicIP, r.ID)
 

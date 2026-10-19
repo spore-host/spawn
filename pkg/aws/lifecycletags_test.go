@@ -62,7 +62,9 @@ func TestEveryNetResourceCreationIsTagged(t *testing.T) {
 	// pkg/mpicohort/adapter.go's interface SIGNATURE and its delegating call,
 	// both of which reach the tagged implementation in this package. A gate that
 	// cries wolf on indirection gets disabled.
-	creates := regexp.MustCompile(`Create(SecurityGroup|PlacementGroup)\(ctx, &ec2\.Create(SecurityGroup|PlacementGroup)Input\{`)
+	// AllocateAddress too (#661): a launch Elastic IP the reaper cannot age is
+	// one it cannot release, and an unassociated one bills by the hour.
+	creates := regexp.MustCompile(`(Create(SecurityGroup|PlacementGroup)|AllocateAddress)\(ctx, &ec2\.(Create(SecurityGroup|PlacementGroup)|AllocateAddress)Input\{`)
 
 	checked := 0
 	for _, root := range roots {

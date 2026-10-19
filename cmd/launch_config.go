@@ -194,6 +194,15 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if efaEnabled {
 		config.EFAEnabled = true
 	}
+	// --efa-interfaces (#661): 0 is resolved to the type's MaximumEfaInterfaces
+	// by resolveEFAInterfaces, which also rejects a count above it.
+	if efaInterfaces < 0 {
+		return nil, fmt.Errorf("--efa-interfaces must be 0 (every EFA the type supports) or a positive count, got %d", efaInterfaces)
+	}
+	if efaInterfaces != 0 && !efaEnabled {
+		return nil, fmt.Errorf("--efa-interfaces requires --efa")
+	}
+	config.EFAInterfaces = efaInterfaces
 	// --placement-group without --mpi: same gap. The flag was applied only in
 	// resolveMPIPlacement, which returns early when --mpi is off, so an explicit
 	// cluster placement group was silently ignored on a single launch.

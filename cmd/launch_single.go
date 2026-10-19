@@ -1393,5 +1393,37 @@ func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *a
 	if err := preflightInstanceConstraints(ctx, awsClient, config, mpiEnabled, efaEnabled, config.Hibernate); err != nil {
 		return err
 	}
+	// --efa: how many EFA interfaces (#661). Before any resource is created, so
+	// --efa-interfaces above what the type supports fails here.
+	if _, err := resolveEFAInterfaces(ctx, awsClient, config); err != nil {
+		return err
+	}
 	return nil
+}
+
+// efaCapacityFor reads an instance type's EFA capacity (DescribeInstanceTypes,
+// read-only). A package-level seam so tests need no AWS.
+var efaCapacityFor = func(ctx context.Context, awsClient *aws.Client, instanceType, region string) (aws.EFACapacity, error) {
+	return awsClient.EFACapacityInRegion(ctx, instanceType, region)
+}
+
+// resolveEFAInterfaces settles config.EFAInterfaces for an --efa launch (#661):
+// --efa-interfaces 0 (the default) becomes the type's MaximumEfaInterfaces, one
+// per network card; a count above it is an error. It runs on every --efa launch,
+// --mpi or not — the non-MPI path used to reach RunInstances having checked EFA
+// only through truffle's capability flag, which carries no count.
+func resolveEFAInterfaces(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig) (aws.EFACapacity, error) {
+	if !config.EFAEnabled {
+		return aws.EFACapacity{}, nil
+	}
+	capacity, err := efaCapacityFor(ctx, awsClient, config.InstanceType, config.Region)
+	if err != nil {
+		return aws.EFACapacity{}, fmt.Errorf("EFA validation: %w", err)
+	}
+	n, err := capacity.ResolveInterfaces(config.EFAInterfaces)
+	if err != nil {
+		return aws.EFACapacity{}, err
+	}
+	config.EFAInterfaces = n
+	return capacity, nil
 }

@@ -107,3 +107,24 @@ func TestSplitCleanupResources_InUsePlacementGroupIsSkippedNotBlocking(t *testin
 		}
 	}
 }
+
+// An Elastic IP spawn allocated for a multi-interface EFA launch (#661) is
+// spawn's to release once unassociated; every other Elastic IP — including one
+// merely tagged spawn:managed, and spawn's own while still attached — stays the
+// user's to release (#262).
+func TestSplitCleanupResources_SpawnAllocatedElasticIP(t *testing.T) {
+	ours := map[string]string{"spawn:managed": "true", aws.ElasticIPInstanceTagKey: "i-gone"}
+	found := []aws.ManagedResource{
+		{ResourceType: "address", ID: "eipalloc-ours", State: "unassociated", Tags: ours},
+		{ResourceType: "address", ID: "eipalloc-ours-attached", State: "assoc:stopped", Tags: ours},
+		{ResourceType: "address", ID: "eipalloc-user", State: "unassociated", Tags: map[string]string{"spawn:managed": "true"}},
+		{ResourceType: "address", ID: "eipalloc-untagged", State: "unassociated"},
+	}
+	_, addresses, _, _, removable := splitCleanupResources(found)
+	if len(removable) != 1 || removable[0].ID != "eipalloc-ours" {
+		t.Errorf("removable = %v, want only eipalloc-ours", idsOf(removable))
+	}
+	if len(addresses) != 3 {
+		t.Errorf("addresses (reported, never released) = %v, want the other three", idsOf(addresses))
+	}
+}

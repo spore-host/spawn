@@ -96,6 +96,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response that SSM's 24,000-character output limit cuts short is reported as
   truncated rather than parsed.
 
+- **`spawn launch --efa` now attaches one EFA interface per network card**
+  (#661). It attached exactly one interface, so a multi-card instance ran on a
+  fraction of its fabric: c8gn.48xlarge on 1 of 2 EFAs, p5en.48xlarge on 1 of
+  16, p5.48xlarge on 1 of 32. The primary interface (card 0, device 0) is
+  `efa`; each further card gets an `efa-only` interface at device 0, per AWS's
+  multi-card EFA guide. EC2 assigns no public IP to an instance with more than
+  one interface, so such a launch waits for the instance to run, allocates an
+  Elastic IP tagged `spawn:managed=true` / `spawn:instance-id=<id>` and
+  associates it to the primary interface; if that fails the instance is
+  terminated and the launch fails. `spawn terminate` releases the address,
+  `spawn cleanup` releases one left unassociated, and the TTL reaper releases
+  orphans. Single-card types (c5n.18xlarge, hpc7a) are unchanged. The launching
+  principal needs `ec2:AllocateAddress`, `ec2:AssociateAddress`,
+  `ec2:DescribeAddresses`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, and
+  `ec2:CreateTags` on `elastic-ip` with `ec2:CreateAction=AllocateAddress`.
+  `--efa-interfaces 1` restores the old single interface.
+
 ### Fixed
 
 - `spawn resume` panicked (`interface conversion: interface {} is nil, not
@@ -115,6 +132,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A TaskSpec whose user data is over EC2's 16 KiB limit no longer passes `spawn task run --dry-run` and then fails at `RunInstances` with HTTP 400 (#1063). Both the dry run and the real run now measure the generated user data the same way RunInstances does (after gzip, then base64), and refuse an oversized spec before any AWS call. The message says how big it is and suggests moving long inline scripts from `command` into a staged `inputs:` file. A trivial task already uses about 14,100 of the 16,384 bytes, so roughly 2 KB of compressed command and inputs remain.
 - Every launch path now refuses oversized user data before making any AWS call, instead of failing at RunInstances (#1063). This covers `spawn launch`, sweeps, job arrays, burst, pools, `launcher.Provision`, and the pipeline orchestrator Lambda (the Lambda only after it is redeployed). The check is in `Client.Launch`. `launcher.Provision` now builds the user data before its AMI lookup and IAM setup, so an oversized config creates nothing.
+- **`spawn launch --efa-interfaces N`** chooses how many EFA interfaces an
+  `--efa` launch attaches, one per network card: `0` (the default) is every EFA
+  the instance type supports, `1` is the single interface `--efa` used to
+  attach, and a count above the type's maximum is refused before anything is
+  created (#661). `spawn launch --dry-run` shows the interface layout and
+  whether an Elastic IP will be associated.
+
+- `pkg/aws`: `Client.EFACapacityInRegion`, `EFACapacity`, `EFANetworkCard`,
+  `EFANetworkInterfaces`, `EFALaunchInterfaces`, `NeedsLaunchElasticIP`,
+  `DescribeEFAInterface`, `IsSpawnAllocatedAddress`, `ElasticIPInstanceTagKey`,
+  `ElasticIPPurpose`, and `LaunchConfig.EFAInterfaces` (#661). Additions only;
+  `ValidateInstanceTypeForEFAInRegion` and `EFANetworkInterface` are unchanged,
+  and an SDK caller that does not set `EFAInterfaces` launches as before.
+
+- The TTL reaper releases Elastic IPs spawn allocated for a multi-interface EFA
+  launch once their instance is gone and they are unassociated (an instance that
+  self-terminates on TTL, idle or cost limit cannot release its own). It follows
+  the `NetResources` mode like the security-group and placement-group sweep:
+  `report` (the default) only logs `WOULD release`, `reap` releases. The reaper
+  role gains `ec2:DescribeAddresses` and `ec2:ReleaseAddress` (the latter on the
+  `spawn:managed=true` tag rail) in `pkg/reaperiam`, the SAM template and the
+  cross-account role template (#661).
 
 ## [0.137.0] - 2026-10-20
 

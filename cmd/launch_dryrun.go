@@ -80,6 +80,19 @@ func runLaunchDryRun(ctx context.Context, out io.Writer, awsClient *aws.Client, 
 	plan := describeLaunchPlan(config)
 	plan.CustomUserDataBytes = len(customUserData)
 
+	// EFA interface layout (#661): the same EFALaunchInterfaces Launch calls, on
+	// the capacity ensureAMIAndPreflight already validated the count against.
+	// DescribeInstanceTypes only — no Elastic IP is allocated here.
+	if config.EFAEnabled {
+		capacity, err := efaCapacityFor(ctx, awsClient, config.InstanceType, config.Region)
+		if err != nil {
+			return fmt.Errorf("EFA validation: %w", err)
+		}
+		if err := applyEFAPlan(&plan, *config, capacity); err != nil {
+			return err
+		}
+	}
+
 	// Priced by truffle, the suite's pricing authority (#533) — same call
 	// --estimate-only and `spawn service --dry-run` use. Read-only (a Pricing
 	// API / static-table lookup); best-effort — an unpriced type/region leaves
@@ -151,10 +164,17 @@ type launchPlan struct {
 	PlacementGroup              string   `json:"placement_group,omitempty"`
 	PlacementGroupPrefix        string   `json:"placement_group_prefix,omitempty"`
 	EFAEnabled                  bool     `json:"efa_enabled,omitempty"`
-	NestedVirtualization        bool     `json:"nested_virtualization,omitempty"`
-	Hibernate                   bool     `json:"hibernate,omitempty"`
-	JobArrayName                string   `json:"job_array_name,omitempty"`
-	Count                       int      `json:"count,omitempty"`
+	// EFAInterfaces / EFAMaxInterfaces / EFALayout / ElasticIP describe the
+	// network interfaces an --efa launch sends (#661); ElasticIP means the public
+	// IP comes from an Elastic IP associated after launch, not auto-assigned.
+	EFAInterfaces        int      `json:"efa_interfaces,omitempty"`
+	EFAMaxInterfaces     int      `json:"efa_max_interfaces,omitempty"`
+	EFALayout            []string `json:"efa_layout,omitempty"`
+	ElasticIP            bool     `json:"elastic_ip,omitempty"`
+	NestedVirtualization bool     `json:"nested_virtualization,omitempty"`
+	Hibernate            bool     `json:"hibernate,omitempty"`
+	JobArrayName         string   `json:"job_array_name,omitempty"`
+	Count                int      `json:"count,omitempty"`
 	// CustomUserDataBytes is the size of --user-data/--user-data-file's
 	// resolved content. It is NOT the full encoded bootstrap script a real
 	// launch would send to RunInstances (spored install + storage mounts +
@@ -217,6 +237,26 @@ func describeLaunchPlan(config *aws.LaunchConfig) launchPlan {
 	plan.IamInstanceProfile, plan.IamInstanceProfileIsPreview = previewIAMInstanceProfile(config)
 	plan.SecurityGroupPlan = previewSecurityGroupPlan(config)
 	return plan
+}
+
+// applyEFAPlan fills the plan's EFA fields from the interfaces Launch would
+// send. Pure, so the rendering is testable without AWS.
+func applyEFAPlan(plan *launchPlan, config aws.LaunchConfig, capacity aws.EFACapacity) error {
+	nis, err := aws.EFALaunchInterfaces(config, capacity)
+	if err != nil {
+		return err
+	}
+	plan.EFAInterfaces = config.EFAInterfaces
+	if plan.EFAInterfaces < 1 {
+		plan.EFAInterfaces = 1
+	}
+	plan.EFAMaxInterfaces = capacity.MaxInterfaces
+	plan.EFALayout = nil
+	for _, ni := range nis {
+		plan.EFALayout = append(plan.EFALayout, aws.DescribeEFAInterface(ni))
+	}
+	plan.ElasticIP = aws.NeedsLaunchElasticIP(nis)
+	return nil
 }
 
 // orAutoUnresolved reports an unset AMI as an explicit sentinel — the dry-run
@@ -374,7 +414,19 @@ func renderLaunchPlanTable(out io.Writer, p launchPlan) {
 		fmt.Fprintf(out, "Placement:    auto, per-AZ, prefix %s\n", p.PlacementGroupPrefix)
 	}
 	if p.EFAEnabled {
-		fmt.Fprintln(out, "EFA:          enabled")
+		if p.EFAInterfaces > 0 {
+			fmt.Fprintf(out, "EFA:          enabled, %d of %d EFA interface(s), one per network card\n", p.EFAInterfaces, p.EFAMaxInterfaces)
+			for _, l := range p.EFALayout {
+				fmt.Fprintf(out, "              %s\n", l)
+			}
+		} else {
+			fmt.Fprintln(out, "EFA:          enabled")
+		}
+		if p.ElasticIP {
+			fmt.Fprintln(out, "Public IP:    Elastic IP allocated after launch and associated to the primary interface")
+			fmt.Fprintln(out, "              (EC2 auto-assigns none with more than one interface; released by spawn terminate,")
+			fmt.Fprintln(out, "              or by the TTL reaper once the instance is gone; not allocated in --dry-run)")
+		}
 	}
 	if p.NestedVirtualization {
 		fmt.Fprintln(out, "Nested virt:  enabled")

@@ -144,6 +144,8 @@ Resources:
                 Action:
                   - ec2:DescribeSecurityGroups
                   - ec2:DescribePlacementGroups
+                  # The orphaned launch Elastic IP sweep (#661); read-only.
+                  - ec2:DescribeAddresses
                 # trivy:ignore:AVD-AWS-0057 -- Resource * required (neither Describe
                 # has a resource-level ARN); these are read-only.
                 Resource: '*'
@@ -155,6 +157,9 @@ Resources:
                 Action:
                   - ec2:DeleteSecurityGroup
                   - ec2:DeletePlacementGroup
+                  # Release a launch Elastic IP whose instance is gone (#661).
+                  # Tag-conditioned: a user's own Elastic IP is denied.
+                  - ec2:ReleaseAddress
                   # CreateTags so the sweep can stamp an UNTAGGED spawn-managed
                   # resource with its first-seen time and age it out on a later
                   # cycle. Without it the stamp fails and the resource is skipped

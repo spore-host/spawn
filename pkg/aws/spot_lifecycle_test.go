@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,17 @@ type fakeEC2 struct {
 	// runSpotRequestID, when set, is returned as the launched instance's
 	// spotInstanceRequestId (#950).
 	runSpotRequestID string
+
+	// eipAlloc / eipAssoc, when set, answer DescribeAddresses with a
+	// spawn-allocated launch Elastic IP (#661) for Terminate to release.
+	eipAlloc, eipAssoc string
+
+	// efaCards, when set, answers DescribeInstanceTypes with an EFA type of that
+	// many cards and DescribeInstances with a running instance and its primary
+	// interface, for the multi-interface launch path (#661). allocDenied fails
+	// AllocateAddress.
+	efaCards    int
+	allocDenied bool
 }
 
 func (f *fakeEC2) actions() []string {
@@ -95,6 +107,12 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.spotRequestID != "" {
 			b.WriteString(`<instanceLifecycle>spot</instanceLifecycle><spotInstanceRequestId>` + f.spotRequestID + `</spotInstanceRequestId>`)
 		}
+		if f.efaCards > 0 {
+			b.WriteString(`<instanceState><code>16</code><name>running</name></instanceState><networkInterfaceSet>` +
+				`<item><networkInterfaceId>eni-card1</networkInterfaceId><attachment><deviceIndex>0</deviceIndex><networkCardIndex>1</networkCardIndex></attachment></item>` +
+				`<item><networkInterfaceId>eni-primary</networkInterfaceId><attachment><deviceIndex>0</deviceIndex><networkCardIndex>0</networkCardIndex></attachment></item>` +
+				`</networkInterfaceSet>`)
+		}
 		b.WriteString(`<tagSet><item><key>spawn:managed</key><value>true</value></item>`)
 		if f.spotType != "" {
 			b.WriteString(`<item><key>` + spotrequest.TypeTag + `</key><value>` + f.spotType + `</value></item>`)
@@ -111,6 +129,17 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`<CancelSpotInstanceRequestsResponse ` + ns + `><requestId>r</requestId><spotInstanceRequestSet><item>` +
 			`<spotInstanceRequestId>` + form.Get("SpotInstanceRequestId.1") + `</spotInstanceRequestId><state>cancelled</state></item></spotInstanceRequestSet></CancelSpotInstanceRequestsResponse>`))
 	case "DescribeInstanceTypes":
+		if f.efaCards > 0 {
+			var b bytes.Buffer
+			b.WriteString(`<DescribeInstanceTypesResponse ` + ns + `><requestId>r</requestId><instanceTypeSet><item><instanceType>` + form.Get("InstanceType.1") +
+				`</instanceType><networkInfo><efaSupported>true</efaSupported><efaInfo><maximumEfaInterfaces>` + fmt.Sprint(f.efaCards) + `</maximumEfaInterfaces></efaInfo><networkCards>`)
+			for i := 0; i < f.efaCards; i++ {
+				b.WriteString(`<item><networkCardIndex>` + fmt.Sprint(i) + `</networkCardIndex><interfaceTypeSet><item>interface</item><item>efa</item><item>efa-only</item></interfaceTypeSet></item>`)
+			}
+			b.WriteString(`</networkCards></networkInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>`)
+			_, _ = w.Write(b.Bytes()) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+			return
+		}
 		if f.memMiB == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`<Response><Errors><Error><Code>InvalidAction</Code><Message>not in this fake</Message></Error></Errors><RequestID>r</RequestID></Response>`))
@@ -121,6 +150,31 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			form.Get("InstanceType.1") + `</instanceType><memoryInfo><sizeInMiB>` + f.memMiB + `</sizeInMiB></memoryInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>`))
 	case "TerminateInstances":
 		_, _ = w.Write([]byte(`<TerminateInstancesResponse ` + ns + `><requestId>r</requestId><instancesSet/></TerminateInstancesResponse>`))
+	case "DescribeAddresses":
+		var b bytes.Buffer
+		b.WriteString(`<DescribeAddressesResponse ` + ns + `><requestId>r</requestId><addressesSet>`)
+		if f.eipAlloc != "" {
+			b.WriteString(`<item><allocationId>` + f.eipAlloc + `</allocationId><publicIp>198.51.100.7</publicIp>`)
+			if f.eipAssoc != "" {
+				b.WriteString(`<associationId>` + f.eipAssoc + `</associationId>`)
+			}
+			b.WriteString(`</item>`)
+		}
+		b.WriteString(`</addressesSet></DescribeAddressesResponse>`)
+		_, _ = w.Write(b.Bytes()) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+	case "AllocateAddress":
+		if f.allocDenied {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>denied</Message></Error></Errors><RequestID>r</RequestID></Response>`))
+			return
+		}
+		_, _ = w.Write([]byte(`<AllocateAddressResponse ` + ns + `><requestId>r</requestId><allocationId>eipalloc-new</allocationId><publicIp>198.51.100.9</publicIp><domain>vpc</domain></AllocateAddressResponse>`))
+	case "AssociateAddress":
+		_, _ = w.Write([]byte(`<AssociateAddressResponse ` + ns + `><requestId>r</requestId><associationId>eipassoc-new</associationId></AssociateAddressResponse>`))
+	case "DisassociateAddress":
+		_, _ = w.Write([]byte(`<DisassociateAddressResponse ` + ns + `><requestId>r</requestId><return>true</return></DisassociateAddressResponse>`))
+	case "ReleaseAddress":
+		_, _ = w.Write([]byte(`<ReleaseAddressResponse ` + ns + `><requestId>r</requestId><return>true</return></ReleaseAddressResponse>`))
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`<Response><Errors><Error><Code>InvalidAction</Code><Message>not in this fake</Message></Error></Errors><RequestID>r</RequestID></Response>`))
@@ -308,8 +362,10 @@ func TestTerminate_CancelsSpotRequestFirst(t *testing.T) {
 	if err := c.Terminate(context.Background(), "us-west-2", "i-1"); err != nil {
 		t.Fatalf("Terminate: %v", err)
 	}
-	if got := strings.Join(f.actions(), ","); got != "DescribeInstances,CancelSpotInstanceRequests,TerminateInstances" {
-		t.Errorf("actions = %s, want describe, cancel, then terminate", got)
+	// DescribeAddresses last: the launch Elastic IP lookup runs after the
+	// terminate (#661).
+	if got := strings.Join(f.actions(), ","); got != "DescribeInstances,CancelSpotInstanceRequests,TerminateInstances,DescribeAddresses" {
+		t.Errorf("actions = %s, want describe, cancel, terminate, then the Elastic IP lookup", got)
 	}
 	if got := f.request("CancelSpotInstanceRequests").Get("SpotInstanceRequestId.1"); got != "sir-abc" {
 		t.Errorf("cancelled %q, want sir-abc", got)
@@ -346,7 +402,7 @@ func TestTerminate_OneTimeCancelRefusalStillTerminates(t *testing.T) {
 		if err := c.Terminate(context.Background(), "us-west-2", "i-1"); err != nil {
 			t.Errorf("type %q: Terminate: %v", typ, err)
 		}
-		if a := f.actions(); a[len(a)-1] != "TerminateInstances" {
+		if a := f.actions(); len(a) < 2 || a[len(a)-2] != "TerminateInstances" {
 			t.Errorf("type %q: actions %v, want a terminate", typ, a)
 		}
 	}
@@ -359,8 +415,33 @@ func TestTerminate_OnDemandMakesNoCancel(t *testing.T) {
 	if err := c.Terminate(context.Background(), "us-west-2", "i-1"); err != nil {
 		t.Fatalf("Terminate: %v", err)
 	}
-	if got := strings.Join(f.actions(), ","); got != "DescribeInstances,TerminateInstances" {
+	if got := strings.Join(f.actions(), ","); got != "DescribeInstances,TerminateInstances,DescribeAddresses" {
 		t.Errorf("actions = %s", got)
+	}
+}
+
+// A multi-interface EFA launch's Elastic IP (#661) is disassociated and
+// released by the terminate, after TerminateInstances — never before it, where a
+// terminate that then failed would leave a running instance without its address.
+func TestTerminate_ReleasesLaunchElasticIP(t *testing.T) {
+	f := &fakeEC2{eipAlloc: "eipalloc-1", eipAssoc: "eipassoc-1"}
+	c := newFakeEC2Client(t, f)
+	if err := c.Terminate(context.Background(), "us-west-2", "i-1"); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	if got := strings.Join(f.actions(), ","); got != "DescribeInstances,TerminateInstances,DescribeAddresses,DisassociateAddress,ReleaseAddress" {
+		t.Errorf("actions = %s", got)
+	}
+	d := f.request("DescribeAddresses")
+	filters := map[string]string{}
+	for i := 1; d.Get(fmt.Sprintf("Filter.%d.Name", i)) != ""; i++ {
+		filters[d.Get(fmt.Sprintf("Filter.%d.Name", i))] = d.Get(fmt.Sprintf("Filter.%d.Value.1", i))
+	}
+	if filters["tag:spawn:managed"] != "true" || filters["tag:"+ElasticIPInstanceTagKey] != "i-1" {
+		t.Errorf("DescribeAddresses filters = %v: must select only spawn's address for this instance, never a user's", filters)
+	}
+	if got := f.request("ReleaseAddress").Get("AllocationId"); got != "eipalloc-1" {
+		t.Errorf("released %q", got)
 	}
 }
 

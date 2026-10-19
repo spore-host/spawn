@@ -344,6 +344,8 @@ Resources:
                   Action:
                     - ec2:DescribeSecurityGroups
                     - ec2:DescribePlacementGroups
+                    # #661 orphaned launch Elastic IP sweep; read-only.
+                    - ec2:DescribeAddresses
                   Resource: '*'
                 # The destructive half, on the same tag rail as TerminateInstances.
                 # CreateTags lets the sweep stamp a spawn-managed resource with its
@@ -353,6 +355,8 @@ Resources:
                   Action:
                     - ec2:DeleteSecurityGroup
                     - ec2:DeletePlacementGroup
+                    # #661: release a launch Elastic IP whose instance is gone.
+                    - ec2:ReleaseAddress
                     - ec2:CreateTags
                   Resource: '*'
                   Condition:

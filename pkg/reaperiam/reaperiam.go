@@ -134,6 +134,9 @@ func ScanSelfStatements() []Statement {
 			Action: []string{
 				"ec2:DescribeSecurityGroups",
 				"ec2:DescribePlacementGroups",
+				// The orphaned launch Elastic IP sweep (#661). DescribeAddresses
+				// has no resource-level permissions either.
+				"ec2:DescribeAddresses",
 			},
 			Resource: "*",
 		},
@@ -155,6 +158,10 @@ func ScanSelfStatements() []Statement {
 			Action: []string{
 				"ec2:DeleteSecurityGroup",
 				"ec2:DeletePlacementGroup",
+				// Release a launch Elastic IP whose instance is gone (#661). On
+				// the same tag rail: an Elastic IP the user allocated carries no
+				// spawn:managed=true and is denied here, not merely skipped.
+				"ec2:ReleaseAddress",
 				// CreateTags, so the sweep can stamp an UNTAGGED spawn-managed
 				// resource with its first-seen time and age it out on a later
 				// cycle. Without this the stamp fails and the resource is skipped
