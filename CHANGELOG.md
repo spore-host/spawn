@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Windows CI flake in the on-complete retry test.** The test timed five completion ticks against a 300 ms grace period, and on the Windows runner the user-warning probes around the grace sleep made that wall-clock bound fail. It now counts the grace waits through a test seam instead of timing them.
 - **`spawn launch --efa` and `--placement-group` without `--mpi` now take effect.**
   `EFAEnabled` was set only on the `--mpi` path, so a single launch with
   `--efa` passed the EFA pre-flight, printed nothing, and came up with a plain

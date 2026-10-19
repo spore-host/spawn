@@ -52,12 +52,12 @@ func TestFailedCompletionStopIsAnnouncedOnceAndBacksOff(t *testing.T) {
 			const grace = 300 * time.Millisecond
 			a, sp, ev, hooks := completionAgent(t, action, grace, errOneTimeSpot)
 			calls := func() int { return sp.stopCalls + sp.hibernateCalls }
+			var waits []time.Duration
+			a.graceSleep = func(d time.Duration) { waits = append(waits, d) }
 
-			start := time.Now()
 			for i := 0; i < 5; i++ {
 				a.checkCompletion(context.Background())
 			}
-			elapsed := time.Since(start)
 
 			if n := ev.count("completion"); n != 1 {
 				t.Errorf("completion notification sent %d times over 5 ticks, want 1", n)
@@ -65,8 +65,8 @@ func TestFailedCompletionStopIsAnnouncedOnceAndBacksOff(t *testing.T) {
 			if n := atomic.LoadInt32(hooks); n != 1 {
 				t.Errorf("completion webhook POSTed %d times over 5 ticks, want 1", n)
 			}
-			if elapsed >= 2*grace {
-				t.Errorf("5 ticks took %v with a %v grace period: the grace sleep was repeated", elapsed, grace)
+			if len(waits) != 1 || waits[0] != grace {
+				t.Errorf("grace-period waits over 5 ticks = %v, want exactly one of %v: the grace sleep was repeated", waits, grace)
 			}
 			if n := calls(); n != 1 {
 				t.Errorf("%d %s attempts in 5 ticks inside the backoff, want 1", n, action)
