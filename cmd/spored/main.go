@@ -918,7 +918,9 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		idle := statusIdle{Configured: true, TimeoutSeconds: config.IdleTimeout.Seconds(), IsIdle: isIdle}
 		if isIdle {
 			idleAction := "stops"
-			if config.HibernateOnIdle {
+			if config.TerminateOnIdle {
+				idleAction = "terminates"
+			} else if config.HibernateOnIdle {
 				idleAction = "hibernates"
 			}
 			remaining := config.IdleTimeout - idleTime
@@ -1383,6 +1385,7 @@ func handleReload() error {
 	fmt.Printf("  Idle Timeout:     %v\n", config.IdleTimeout)
 	fmt.Printf("  On Complete:      %s\n", config.OnComplete)
 	fmt.Printf("  Hibernate:        %v\n", config.HibernateOnIdle)
+	fmt.Printf("  Terminate idle:   %v\n", config.TerminateOnIdle)
 	return nil
 }
 
@@ -1712,6 +1715,7 @@ func handleConfigList() error {
 	}
 
 	fmt.Printf("  hibernate:        %v\n", config.HibernateOnIdle)
+	fmt.Printf("  terminate-idle:   %v\n", config.TerminateOnIdle)
 
 	if config.CompletionFile != "" {
 		fmt.Printf("  completion-file:  %s\n", config.CompletionFile)

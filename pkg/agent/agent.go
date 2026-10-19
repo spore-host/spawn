@@ -357,8 +357,8 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	if activate {
 		log.Printf("Agent initialized for instance %s in %s (account: %s, provider: %s)",
 			identity.InstanceID, identity.Region, identity.AccountID, identity.Provider)
-		log.Printf("Config: TTL=%v, IdleTimeout=%v, Hibernate=%v",
-			config.TTL, config.IdleTimeout, config.HibernateOnIdle)
+		log.Printf("Config: TTL=%v, IdleTimeout=%v, Hibernate=%v, TerminateOnIdle=%v",
+			config.TTL, config.IdleTimeout, config.HibernateOnIdle, config.TerminateOnIdle)
 	}
 
 	// Look up actual EBS volume cost on first start; caches result in the
@@ -783,7 +783,9 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 				// Send event name that reflects the actual action.
 				// Default: stop the instance (compute billing pauses, instance preserved).
 				// --hibernate-on-idle: hibernate instead (RAM saved to disk).
-				// Only TTL causes termination — idle timeout never destroys data.
+				// spawn:terminate-on-idle (`spawn service`, pool workers):
+				// terminate, since those instances have nothing to come back to
+				// and a stopped one keeps billing its EBS volume (#1151, #1146).
 				//
 				// A failed stop is retried on a backoff, not every tick, and the
 				// "stopped" notification is sent only once EC2 has accepted the
@@ -2163,6 +2165,15 @@ func (a *Agent) idleTimeoutReached(ctx context.Context, now time.Time) {
 	}
 	log.Printf("Idle timeout reached (%v)", now.Sub(a.lastActivity()))
 
+	if a.config.TerminateOnIdle {
+		// Like the TTL's terminate, retried every tick on failure: there is
+		// nothing to back off to. No notification event of its own yet —
+		// spore-bot has no idle_terminated message; terminate warns logged-in
+		// users as the TTL path does.
+		a.terminate(ctx, "Idle timeout", taskproto.ExitIdleTimeout)
+		return
+	}
+
 	event := "idle_stopped"
 	at := stopAttempt{trigger: "idle", action: "stop", failEvent: "idle_stop_failed",
 		run: func() error { return a.stop(ctx, "Idle timeout", taskproto.ExitIdleTimeout) }}
@@ -2541,6 +2552,9 @@ func (a *Agent) Reload(ctx context.Context) error {
 	}
 	if newConfig.HibernateOnIdle != a.config.HibernateOnIdle {
 		log.Printf("Hibernate-on-idle changed: %v → %v", a.config.HibernateOnIdle, newConfig.HibernateOnIdle)
+	}
+	if newConfig.TerminateOnIdle != a.config.TerminateOnIdle {
+		log.Printf("Terminate-on-idle changed: %v → %v", a.config.TerminateOnIdle, newConfig.TerminateOnIdle)
 	}
 
 	// Update config (but keep startTime - TTL is absolute)

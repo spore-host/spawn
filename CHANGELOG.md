@@ -55,6 +55,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variable is kept unless a flag sets it, and `--regions` defaults to the
   existing reaper's regions (the deploy region only for a new reaper).
 
+- **`spawn app launch` now sets an 8h TTL when `--ttl` is not given (#1150).**
+  An app's idle action is still a stop, so a session can be restarted, but
+  before this an abandoned session stayed stopped, billing its EBS volume, with
+  no deadline at all. The TTL is printed at launch and in the ready summary,
+  `--ttl` still overrides it, and an explicitly empty `--ttl ""` is refused.
+  There is no `--no-timeout` for apps: pass a longer `--ttl` or use
+  `spawn extend`.
+- **`spawn service` instances are now terminated when idle, not stopped
+  (#1151).** `--idle-timeout`'s help already said "Terminate"; spored stopped
+  the instance instead, leaving a billable EBS volume for a service nothing
+  would restart. The dry run's `Lifetime:` line now names the idle action.
+- **`spawn pool` workers are now terminated when idle, not stopped** (refs
+  #1146). "Workers self-terminate on idle-timeout" was the documented
+  behaviour; a drained worker was stopped and billed its EBS volume until its
+  TTL.
+- `spawn status` and `spored status` say "terminates" for an instance with
+  `spawn:terminate-on-idle`.
+
 ### Fixed
 
 - **`spawn extend` reloads spored over SSM on keyless instances (#1113).**
@@ -116,6 +134,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the two cannot disagree. An empty value removes the variable. The notify
   URL is never printed, and `--notify-url -` reads it from stdin so it need not
   appear on the command line (#1154).
+- `aws.LaunchConfig.TerminateOnIdle` (Go API), written to the instance as
+  `spawn:terminate-on-idle=true`. spored then terminates the instance when its
+  idle timeout runs out, instead of stopping it; it takes precedence over
+  `HibernateOnIdle`. A Spot launch whose only stop-shaped setting is an idle
+  timeout with `TerminateOnIdle` stays a one-time request (#1151).
+
+- **Help and notices no longer say idle "terminates" where it stops (#1151,
+  #1132).** The auto-applied 1h idle-timeout notice said "Instance will
+  terminate after 1 hour of inactivity" on every launch path; it now names the
+  real action (stop, hibernate, or terminate for `spawn service`), and so does
+  the sweep's. Corrected: `spawn launch --idle-timeout`, `--active-ports` and
+  `--active-processes`, `spawn burst --idle-timeout`, `spawn app`, and
+  `spawn defaults` (`hibernate-on-idle`: "Hibernate instead of stopping on
+  idle"). A new test walks the whole command tree and fails when a command's
+  help says idle terminates but its launch config does not set
+  `TerminateOnIdle`.
+- `spawn notify workspace add --help` showed the deprecated `workspace-add`
+  spelling in its example, and two error messages named it too (#1132).
 
 ## [0.135.2] - 2026-10-19
 

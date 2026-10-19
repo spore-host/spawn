@@ -243,6 +243,32 @@ var poolCreateCmd = &cobra.Command{
 	},
 }
 
+// poolWorkerBaseConfig is the launch config every pool worker shares. Pure, so
+// the lifecycle it promises is testable without AWS.
+//
+// TerminateOnIdle: a pool worker that has drained has nothing to come back to,
+// and "Workers self-terminate on idle-timeout" is what the help promises. Before
+// #1146 spored's idle action was a stop, so a drained worker kept billing its
+// EBS volume until the TTL.
+func poolWorkerBaseConfig(region, ami, iamProfile, userData string) aws.LaunchConfig {
+	return aws.LaunchConfig{
+		InstanceType:       poolInstanceType,
+		Region:             region,
+		AMI:                ami,
+		IamInstanceProfile: iamProfile,
+		Spot:               poolSpot,
+		TTL:                poolTTL,
+		IdleTimeout:        poolIdleTimeout.String(),
+		TerminateOnIdle:    true,
+		OnComplete:         "terminate",
+		UserData:           userData,
+		Tags: map[string]string{
+			"spawn:pool-run-id": poolRunID,
+			"spawn:role":        "pool-worker",
+		},
+	}
+}
+
 // provisionPoolWorkers launches the worker cohort via taskcohort + cohort. Workers
 // are fungible, so one base config (with the pool-worker user-data) fits all; the
 // partial cohort gives best-effort/eventual semantics. Returns nil once the cohort
@@ -293,21 +319,7 @@ func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, sp
 		return fmt.Errorf("set up worker IAM instance profile: %w", err)
 	}
 
-	base := aws.LaunchConfig{
-		InstanceType:       poolInstanceType,
-		Region:             region,
-		AMI:                ami,
-		IamInstanceProfile: iamProfile,
-		Spot:               poolSpot,
-		TTL:                poolTTL,
-		IdleTimeout:        poolIdleTimeout.String(),
-		OnComplete:         "terminate",
-		UserData:           launcher.EncodeLinuxUserData(userData),
-		Tags: map[string]string{
-			"spawn:pool-run-id": poolRunID,
-			"spawn:role":        "pool-worker",
-		},
-	}
+	base := poolWorkerBaseConfig(region, ami, iamProfile, launcher.EncodeLinuxUserData(userData))
 
 	act := &taskcohort.Actuator{Client: awsClient, Region: region, BaseConfig: base}
 	obs := &taskcohort.Observer{Client: awsClient, Region: region}

@@ -72,6 +72,10 @@ type Config struct {
 	EBSHourlyCost   float64 // actual EBS cost per hour (queried at first start, tagged for reuse)
 	IdleTimeout     time.Duration
 	HibernateOnIdle bool
+	// TerminateOnIdle: the idle action is terminate, not stop
+	// (spawn:terminate-on-idle, set by `spawn service` and pool workers). It
+	// wins over HibernateOnIdle.
+	TerminateOnIdle bool
 	CostLimit       float64
 	PricePerHour    float64 // On-demand price per hour (recorded at launch; used for cost-limit enforcement)
 	// SpotPricePerHour is the spot market price spawn observed for this

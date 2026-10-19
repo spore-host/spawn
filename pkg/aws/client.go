@@ -193,6 +193,12 @@ type LaunchConfig struct {
 	TTL             string
 	IdleTimeout     string
 	HibernateOnIdle bool
+	// TerminateOnIdle makes spored's idle action a terminate instead of a stop
+	// (spawn:terminate-on-idle). Set by launch paths whose instances have
+	// nothing to come back to — `spawn service` and pool workers (#1146,
+	// #1151) — where a stopped instance only keeps billing its EBS volume.
+	// It takes precedence over HibernateOnIdle.
+	TerminateOnIdle bool
 	CostLimit       float64
 	DNSName         string
 

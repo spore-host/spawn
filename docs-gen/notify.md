@@ -152,7 +152,7 @@ spore-bot Lambda can verify incoming slash command requests.
 
 Run this once after installing the Slack app in a workspace:
 
-  spawn notify workspace-add \
+  spawn notify workspace add \
     --platform slack \
     --workspace-id T03NE3GTY \
     --workspace-name "My Workspace" \

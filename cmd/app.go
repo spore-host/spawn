@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	htmpl "html/template"
 	"os"
@@ -48,7 +49,7 @@ var appGroupCmd = &cobra.Command{
 	Long: `Launch streamable research applications in the cloud.
 
 Each application is pre-configured with the right instance type, NICE DCV
-for browser-based streaming, and automatic idle termination.
+for browser-based streaming, and an automatic stop when idle.
 
 Apps you can launch depend on your account: public images are available to
 everyone; private images appear only if your account can pull them. Bring your
@@ -83,7 +84,7 @@ func init() {
 	appLaunchCmd.Flags().StringVar(&appLaunchInstanceType, "instance-type", "", "Override instance type (default: first catalog family + .xlarge)")
 	appLaunchCmd.Flags().StringVar(&appLaunchRegion, "region", "", "AWS region (default: from AWS config)")
 	appLaunchCmd.Flags().BoolVar(&appLaunchSpot, "spot", false, "Use Spot pricing")
-	appLaunchCmd.Flags().StringVar(&appLaunchTTL, "ttl", "", "Hard termination deadline (e.g. 4h, 8h, 1d)")
+	appLaunchCmd.Flags().StringVar(&appLaunchTTL, "ttl", appDefaultTTL, "Hard termination deadline (e.g. 4h, 8h, 1d). Always set: idle only stops the instance, so the TTL is what ends an abandoned session")
 	appLaunchCmd.Flags().StringVar(&appLaunchIdleTimeout, "idle-timeout", "", "Stop when DCV has no clients for this duration (default: catalog default)")
 	appLaunchCmd.Flags().BoolVar(&appLaunchNoOpen, "no-open", false, "Write session file but do not open browser automatically")
 	appLaunchCmd.Flags().StringVar(&appLaunchVersion, "app-version", "", "App container image tag to launch (default: catalog default; see 'spawn app list')")
@@ -173,6 +174,17 @@ func runAppList(cmd *cobra.Command, args []string) error {
 
 // ── spawn app launch ──────────────────────────────────────────────────────────
 
+// appDefaultTTL is the TTL `spawn app launch` sets when --ttl is not given
+// (#1150). An app's idle action is a stop, so the session can be restarted;
+// without a TTL an abandoned session stayed stopped, billing its EBS volume,
+// with no deadline at all. 8h is a working day: nothing outlives it.
+const appDefaultTTL = "8h"
+
+// errAppTTLRequired refuses an app launch with an empty --ttl (`--ttl ""`).
+// There is no --no-timeout for apps: a session that needs longer passes a
+// longer --ttl, or runs `spawn extend`.
+var errAppTTLRequired = errors.New("spawn app launch requires a TTL: an app only stops when idle, so the TTL is what terminates an abandoned session — pass --ttl with a duration such as 4h, 8h or 1d (default " + appDefaultTTL + ")")
+
 func runAppLaunch(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	appArg := args[0]
@@ -184,6 +196,16 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "Launching %s — %s\n", entry.Name, entry.Description)
+
+	// Every app session has a TTL (#1150): the flag defaults to appDefaultTTL,
+	// and an explicitly empty one is refused rather than launching a session
+	// nothing ever terminates.
+	if strings.TrimSpace(appLaunchTTL) == "" {
+		return errAppTTLRequired
+	}
+	if !cmd.Flags().Changed("ttl") {
+		fmt.Fprintf(os.Stderr, "TTL: %s (default; the instance is terminated then — override with --ttl, or extend later with 'spawn extend <instance> <duration>')\n", appLaunchTTL)
+	}
 
 	// Reject an unparseable --ttl or idle timeout (flag or catalog default)
 	// before any AWS call, with the parser spored uses (#990).
@@ -535,6 +557,7 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stdout, "\n✅  %s is ready\n", entry.Name)
 		fmt.Fprintf(os.Stdout, "   URL:       %s\n", webURL)
 		fmt.Fprintf(os.Stdout, "   Instance:  %s\n", result.InstanceID)
+		fmt.Fprintf(os.Stdout, "   TTL:       %s (then terminated; extend with: spawn extend %s 4h)\n", appLaunchTTL, result.InstanceID)
 		fmt.Fprintf(os.Stdout, "   Reconnect: spawn connect %s\n\n", result.InstanceID)
 		if ready && !appLaunchNoOpen {
 			if err := openBrowser(webURL); err != nil {
@@ -552,6 +575,7 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stdout, "\n✅  %s is ready\n", entry.Name)
 		fmt.Fprintf(os.Stdout, "   Session: %s\n", sessionName)
 		fmt.Fprintf(os.Stdout, "   File:    %s\n", sessionFile)
+		fmt.Fprintf(os.Stdout, "   TTL:     %s (then terminated; extend with: spawn extend %s 4h)\n", appLaunchTTL, result.InstanceID)
 		fmt.Fprintf(os.Stdout, "   Reconnect: spawn app launch %s --name %s\n\n", entry.Name, sessionName)
 
 		// 15. Open in browser

@@ -81,7 +81,7 @@ func init() {
 	_ = burstCmd.Flags().MarkDeprecated("security-groups", "use --security-group-ids instead")
 	burstCmd.Flags().StringVar(&burstInstanceProfile, "instance-profile", "", "Attach this EXISTING IAM instance profile by name instead of the default spored-instance-profile, which spawn creates or reuses as spawn launch does. Its role must let spored read and write its own tags, terminate itself, and use the spawn-hybrid-registry table.")
 	burstCmd.Flags().StringVar(&burstTTL, "ttl", defaultBurstTTL, "Terminate each instance after this duration (e.g. 30m, 2h, 36h). Required to be positive: burst instances always have a TTL.")
-	burstCmd.Flags().StringVar(&burstIdleTimeout, "idle-timeout", "", "Also terminate an instance after it has been idle this long (e.g. 1h). Empty disables idle termination.")
+	burstCmd.Flags().StringVar(&burstIdleTimeout, "idle-timeout", "", "Also stop an instance after it has been idle this long (e.g. 1h); a stopped instance still bills its EBS volume until its TTL terminates it. Empty disables the idle stop.")
 
 	_ = burstCmd.MarkFlagRequired("job-array-id")
 }

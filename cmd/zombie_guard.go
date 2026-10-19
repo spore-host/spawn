@@ -25,10 +25,33 @@ func applyIdleTimeoutDefault(cfg *aws.LaunchConfig) bool {
 	return false
 }
 
+// idleActionVerb is what spored will do to an instance launched with cfg when its
+// idle timeout runs out — the order spored itself applies (pkg/agent
+// idleTimeoutReached): terminate-on-idle wins, then hibernate, else stop.
+//
+// The idle-default notice used to say "terminate" for every launch path, while
+// only `spawn service` and pool workers terminate on idle (#1151).
+func idleActionVerb(cfg *aws.LaunchConfig) string {
+	switch {
+	case cfg.TerminateOnIdle:
+		return "terminate"
+	case cfg.HibernateOnIdle:
+		return "hibernate"
+	default:
+		return "stop"
+	}
+}
+
+// idleDefaultNotice is the body of the notice that a 1h idle timeout was
+// auto-applied, naming the idle action the instances will really get.
+func idleDefaultNotice(verb string) string {
+	return fmt.Sprintf("   Instance will %s after 1 hour of inactivity.\n", verb)
+}
+
 // warnIdleTimeoutDefault prints the notice that a 1h idle timeout was auto-applied.
-func warnIdleTimeoutDefault() {
+func warnIdleTimeoutDefault(cfg *aws.LaunchConfig) {
 	fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h to prevent zombie instances\n")
-	fmt.Fprintf(os.Stderr, "   Instance will terminate after 1 hour of inactivity.\n")
+	fmt.Fprint(os.Stderr, idleDefaultNotice(idleActionVerb(cfg)))
 	fmt.Fprintf(os.Stderr, "   Override with --ttl, --idle-timeout, or --no-timeout\n")
 	fmt.Fprintf(os.Stderr, "\n")
 }
@@ -52,7 +75,7 @@ func warnNoTimeout() {
 // a declined or non-interactive prompt without --yes aborts the launch.
 func guardZombieInstance(cfg *aws.LaunchConfig) error {
 	if applyIdleTimeoutDefault(cfg) {
-		warnIdleTimeoutDefault()
+		warnIdleTimeoutDefault(cfg)
 		return nil
 	}
 	if noTimeout {
