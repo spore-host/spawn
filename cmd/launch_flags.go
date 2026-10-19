@@ -436,7 +436,7 @@ func init() {
 	launchCmd.Flags().BoolVar(&interactive, "interactive", false, "Force interactive wizard")
 	launchCmd.Flags().BoolVar(&quiet, "quiet", false, "Minimal output")
 	launchCmd.Flags().BoolVar(&waitForRunning, "wait-for-running", true, "Wait until running")
-	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", true, "Wait until SSH is ready")
+	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", true, "Wait until SSH is ready, then verify spored came up (false skips both)")
 	launchCmd.Flags().BoolVar(&skipRegionCheck, "skip-region-check", false, "Skip data locality region mismatch warnings")
 	launchCmd.Flags().BoolVar(&terminateOnError, "terminate-on-error", false, "If post-launch verification fails (e.g. spored didn't come up), terminate the instance instead of leaving it running")
 	// --dry-run (#569): resolves the same LaunchConfig a real launch would —

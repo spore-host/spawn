@@ -42,6 +42,9 @@ func (c *Client) RunPowerShell(ctx context.Context, region, instanceID, command 
 		Parameters:   map[string][]string{"commands": {command}},
 	})
 	if err != nil {
+		if d := denied("ssm:SendCommand", err); d != nil {
+			return nil, d
+		}
 		return nil, fmt.Errorf("ssm send-command: %w", err)
 	}
 	commandID := aws.ToString(send.Command.CommandId)
@@ -66,6 +69,10 @@ func (c *Client) RunPowerShell(ctx context.Context, region, instanceID, command 
 				}, nil
 			}
 			// Pending / InProgress / Delayed → keep polling.
+		} else if d := denied("ssm:GetCommandInvocation", err); d != nil {
+			// Not the brief InvocationDoesNotExist window: no number of polls
+			// will be allowed (#1126).
+			return nil, d
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("ssm command %s did not complete within %s", commandID, timeout)
@@ -94,6 +101,9 @@ func (c *Client) RunShellScript(ctx context.Context, region, instanceID, command
 		Parameters:   map[string][]string{"commands": {command}},
 	})
 	if err != nil {
+		if d := denied("ssm:SendCommand", err); d != nil {
+			return nil, d
+		}
 		return nil, fmt.Errorf("ssm send-command: %w", err)
 	}
 	commandID := aws.ToString(send.Command.CommandId)
@@ -118,6 +128,10 @@ func (c *Client) RunShellScript(ctx context.Context, region, instanceID, command
 				}, nil
 			}
 			// Pending / InProgress / Delayed → keep polling.
+		} else if d := denied("ssm:GetCommandInvocation", err); d != nil {
+			// Not the brief InvocationDoesNotExist window: no number of polls
+			// will be allowed (#1126).
+			return nil, d
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("ssm command %s did not complete within %s", commandID, timeout)
@@ -179,6 +193,9 @@ func (c *Client) WaitForSSMOnline(ctx context.Context, region, instanceID string
 func (c *Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceID string, timeout time.Duration, onProgress func(elapsed time.Duration)) error {
 	ssmClient := ssm.NewFromConfig(c.regionalConfig(region))
 
+	// An authorization failure is terminal: polling it until the deadline used to
+	// turn "you may not ask" into "the instance never registered" (#1126).
+	var deniedErr error
 	isOnline := func() bool {
 		out, err := ssmClient.DescribeInstanceInformation(ctx, &ssm.DescribeInstanceInformationInput{
 			Filters: []ssmtypes.InstanceInformationStringFilter{
@@ -186,6 +203,7 @@ func (c *Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceI
 			},
 		})
 		if err != nil {
+			deniedErr = denied("ssm:DescribeInstanceInformation", err)
 			return false
 		}
 		for _, info := range out.InstanceInformationList {
@@ -215,6 +233,9 @@ func (c *Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceI
 
 	// Up-front: if not already Online, a missing profile means it's dead — bail now.
 	if !isOnline() {
+		if deniedErr != nil {
+			return deniedErr
+		}
 		if err := deadIfNoProfile(0); err != nil {
 			return err
 		}
@@ -231,6 +252,9 @@ func (c *Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceI
 		now := time.Now()
 		if isOnline() {
 			return nil
+		}
+		if deniedErr != nil {
+			return deniedErr
 		}
 		if !recheckDone && now.After(structuralRecheckAt) {
 			recheckDone = true

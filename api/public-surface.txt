@@ -12,6 +12,8 @@ const AMI_AL2023_GPU_ARM
 const AMI_AL2023_GPU_X86
 const AMI_AL2023_X86
 const CreatedTagKey
+const HeartbeatTag
+const IAMBaselineURL
 const PriceSourceTag
 const ReaperCoverageRoleName
 const SourceDir
@@ -39,6 +41,8 @@ field AMIInfo.SnapshotIDs []string
 field AMIInfo.Stack string
 field AMIInfo.Tags map[string]string
 field AMIInfo.Version string
+field AccessDeniedError.Action string
+field AccessDeniedError.Err error
 field AttachVolumeSpec.MountPoint string
 field AttachVolumeSpec.ReadOnly bool
 field AttachVolumeSpec.SizeGiB int32
@@ -301,11 +305,16 @@ field SnapshotDetail.SnapshotID string
 field SnapshotDetail.StartTime time.Time
 field SnapshotDetail.State string
 field SnapshotDetail.VolumeSize int32
+field SporedLiveness.HasInstanceProfile bool
+field SporedLiveness.Heartbeat string
+field SporedLiveness.State string
 field SpotPrice.AvailabilityZone string
 field SpotPrice.InstanceType string
 field SpotPrice.PricePerHour float64
 field SpotPrice.ProductDescription string
 field SpotPrice.Timestamp time.Time
+func (*AccessDeniedError) Error() string
+func (*AccessDeniedError) Unwrap() error
 func (*Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*MountSnapshotResult, error)
 func (*Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotInput, image io.Reader) (*BuildSnapshotResult, error)
 func (*Client) CheckAMIHealth(ctx context.Context, ami AMIInfo, region string) (*AMIHealthCheck, error)
@@ -332,6 +341,7 @@ func (*Client) DeleteS3Object(ctx context.Context, region, bucket, key string) e
 func (*Client) DescribeAvailabilityZones(ctx context.Context, region string) ([]string, error)
 func (*Client) DescribeCapacityReservation(ctx context.Context, region, reservationID string) (*CapacityReservation, error)
 func (*Client) DescribeFSxBrief(ctx context.Context, filesystemID, region string) (FSxBrief, error)
+func (*Client) DescribeSporedLiveness(ctx context.Context, region, instanceID string) (SporedLiveness, error)
 func (*Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOptions) ([]ManagedResource, int, error)
 func (*Client) EFSMountTargetIP(ctx context.Context, filesystemID, region, subnetID, az string) (string, error)
 func (*Client) EnableTracing()
@@ -380,6 +390,7 @@ func (*Client) ResolveDNSTarget(ctx context.Context, region, flagDomain, flagEnd
 func (*Client) ResolveVPC(ctx context.Context, region, explicitVPC string) (string, error)
 func (*Client) RunPowerShell(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
 func (*Client) RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
+func (*Client) SSMOnline(ctx context.Context, region, instanceID string) (bool, error)
 func (*Client) ScanControlPlane(ctx context.Context, region string) ([]ControlPlaneResource, []string)
 func (*Client) ScanGlobalFootprint(ctx context.Context) ([]ControlPlaneResource, []string)
 func (*Client) SetWindowsAdminPasswordViaSSM(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error)
@@ -424,6 +435,7 @@ func GenerateScopedDynamoDBPolicy(region, accountID string) string
 func GenerateScopedS3Policy(region, accountID string) string
 func GenerateWindowsPassword(n int) (string, error)
 func GetEFSDNSName(filesystemID, region string) string
+func IsAccessDenied(err error) bool
 func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool
 func IsSharedSporedIdentity(r ManagedResource) bool
 func LifecycleTags(name, purpose string, now time.Time) []types.Tag
@@ -439,6 +451,7 @@ func SetPGDeleteWaitForTest(budget, interval time.Duration) func()
 func ValidatePolicyNames(policies []string, allowFullAccess bool) error
 type AMIHealthCheck struct
 type AMIInfo struct
+type AccessDeniedError struct
 type AttachVolumeSpec struct
 type BuildSnapshotInput struct
 type BuildSnapshotResult struct
@@ -470,6 +483,7 @@ type S3BucketConfig struct
 type SSMRunResult struct
 type SnapshotDetail struct
 type SnapshotSourceKind int
+type SporedLiveness struct
 type SpotPrice struct
 var CallerVersion
 var ErrS3NoSuchKey

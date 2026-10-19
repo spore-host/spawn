@@ -970,9 +970,9 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// checksum mismatch, arch/network) is invisible to `spawn launch` — leaving a
 	// "running" instance with NO lifecycle agent: no TTL enforcement, no idle stop,
 	// no completion handling. That's a cost-control hole (a TTL-less zombie). When
-	// we waited for readiness (--wait-for-ssh) confirm spored is up over SSM (works
-	// keyed or keyless) and fail loudly if not. (An environment where SSM genuinely
-	// can't be reached can skip this whole readiness path with --wait-for-ssh=false.)
+	// we waited for readiness (--wait-for-ssh) confirm spored is up — by its
+	// heartbeat tag, with SSM as a second signal (#1053) — and fail loudly if not.
+	// --wait-for-ssh=false skips it, and says so (#878).
 	//
 	// Decided by the INSTANCE's OS (config.TargetOS), never by plat.OS — that is
 	// the workstation's runtime.GOOS, and using it is #882. See sporedVerificationFor.
@@ -984,19 +984,13 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		prog.Start(step)
 		if err := verifySporedReadyOn(ctx, awsClient, config.Region, result.InstanceID, check, timeout); err != nil {
 			prog.Error(step, err)
-			if terminateOnError {
-				fmt.Fprintf(os.Stderr, "\n⚠️  spored did not come up; terminating %s (--terminate-on-error)\n", result.InstanceID)
-				if terr := awsClient.Terminate(ctx, config.Region, result.InstanceID); terr != nil {
-					fmt.Fprintf(os.Stderr, "   terminate failed — DELETE IT MANUALLY (spawn terminate %s): %v\n", result.InstanceID, terr)
-				}
-				return fmt.Errorf("instance %s launched but spored never came up (terminated): %w", result.InstanceID, err)
-			}
-			return fmt.Errorf("instance %s launched but spored never came up — it has NO TTL/idle safety net; "+
-				"inspect it (spawn connect %s) or terminate it (spawn terminate %s). Re-run with --terminate-on-error to auto-terminate: %w",
-				result.InstanceID, result.InstanceID, result.InstanceID, err)
+			return sporedVerificationFailure(ctx, awsClient, config.Region, result.InstanceID, terminateOnError, err)
 		}
 		prog.Complete(step)
 		sporedVerified = true
+	} else {
+		fmt.Fprintf(os.Stderr, "ℹ️  spored was not verified (--wait-for-ssh=false). Once running it tags %s with %s; "+
+			"until then the instance has no TTL/idle safety net.\n", result.InstanceID, aws.HeartbeatTag)
 	}
 
 	// Step 11: Report DNS (#872).
@@ -1037,6 +1031,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				"state":                "running",
 				"dns":                  dnsRecord,
 				"iam_instance_profile": config.IamInstanceProfile,
+				"spored_verified":      sporedVerified,
 			},
 		}
 		jsonBytes, err := json.MarshalIndent(out, "", "  ")
