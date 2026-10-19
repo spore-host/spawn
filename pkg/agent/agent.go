@@ -169,6 +169,11 @@ type Agent struct {
 	// small.
 	warnDelay time.Duration
 
+	// graceSleep is the completion grace-period wait. A seam so tests count the
+	// waits instead of timing them: on a slow runner the warnUsers probes around
+	// it take long enough that wall-clock bounds flake (#978's test on Windows).
+	graceSleep func(time.Duration)
+
 	// regionVacatedSettle is how long the last-instance check waits before
 	// re-confirming the region is empty (#260). Zero means the production default
 	// (60s); tests set it small.
@@ -1996,7 +2001,11 @@ func (a *Agent) announceCompletion(ctx context.Context) {
 	}))
 
 	log.Printf("Grace period: waiting %v before action", delay)
-	time.Sleep(delay)
+	if a.graceSleep != nil {
+		a.graceSleep(delay)
+	} else {
+		time.Sleep(delay)
+	}
 }
 
 func (a *Agent) shutdownWarnDelay() time.Duration {
