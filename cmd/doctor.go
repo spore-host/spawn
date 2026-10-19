@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/doctor"
 )
 
@@ -41,13 +44,25 @@ Examples:
 		// than a Go error.
 		client, err := aws.NewClientWithRegion(ctx, doctorRegion)
 		report := (*doctor.Report)(nil)
-		if err != nil {
+		var mismatch *spawnconfig.AccountMismatchError
+		switch {
+		case errors.As(err, &mismatch):
+			// The --account / SPORE_ACCOUNT guard (#1118) refused the client.
+			// The credentials work; they are for the wrong account, which is
+			// the finding. Nothing else is probed in an account the user said
+			// they did not mean.
+			report = &doctor.Report{Checks: []doctor.Check{
+				{Name: "AWS credentials", Status: doctor.Pass, Detail: "identity resolved"},
+				{Name: "account", Status: doctor.Fail, Detail: mismatch.Got, Fix: fmt.Sprintf(
+					"resolved account %s does not match the expected account %s (%s); spawn refuses to act until they agree", mismatch.Got, mismatch.Want, mismatch.Source)},
+			}}
+		case err != nil:
 			report = &doctor.Report{Checks: []doctor.Check{{
 				Name:   "AWS credentials",
 				Status: doctor.Fail,
 				Fix:    "could not initialize an AWS client — run `aws login` or set a profile: " + err.Error(),
 			}}}
-		} else {
+		default:
 			report = doctor.Run(ctx, doctor.NewAWSProber(client, version()))
 		}
 

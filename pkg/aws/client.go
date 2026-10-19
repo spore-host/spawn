@@ -93,6 +93,12 @@ func NewClientWithRegion(ctx context.Context, region string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
+	// --account / SPORE_ACCOUNT (#1118): refuse before handing out a client
+	// whose credentials belong to another account, so no call can be made with
+	// it. No account pinned = no STS call.
+	if err := spawnconfig.CheckAccount(ctx, cfg); err != nil {
+		return nil, err
+	}
 
 	return &Client{cfg: cfg}, nil
 }

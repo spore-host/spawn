@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"log"
 	"strconv"
 	"time"
@@ -63,6 +64,9 @@ func NewPeerRegistry(ctx context.Context, identity *provider.Identity) (*PeerReg
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+	if err := spawnconfig.CheckAccount(ctx, cfg); err != nil { // --account / SPORE_ACCOUNT (#1118)
+		return nil, err
 	}
 
 	client := dynamodb.NewFromConfig(cfg)

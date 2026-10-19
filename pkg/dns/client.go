@@ -104,6 +104,9 @@ func NewClient(ctx context.Context, domain, apiEndpoint string) (*Client, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
+	if err := spawnconfig.CheckAccount(ctx, cfg); err != nil { // --account / SPORE_ACCOUNT (#1118)
+		return nil, err
+	}
 
 	// Use defaults if not provided
 	if domain == "" {
