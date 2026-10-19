@@ -190,6 +190,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count as work, so Spot requests `CANCELLED`, replacements `TERMINATED` and
   DNS `EXPIRING` all counted as idle; every action the reaper logs now counts.
 
+- **`spawn connect` to an app session no longer opens another account's host
+  (#1152).** When there was neither a session file nor a ready-url, the DCV
+  fallback appended one hardcoded account's subdomain to the instance's DNS
+  name, so every other account opened a host that wasn't theirs or didn't
+  exist. The host is now the instance's own FQDN, built from its
+  `spawn:account-id` (or `spawn:account-base36`) and `spawn:dns-domain` tags,
+  so a custom DNS domain (#891) is honoured. Without them it falls back to the
+  public IP. A new test fails on any account subdomain of spore.host written
+  as a string literal in non-test Go code.
+
 ## [0.135.2] - 2026-10-19
 
 ### Added

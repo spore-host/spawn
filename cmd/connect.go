@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/sshkey"
 )
 
@@ -732,14 +733,46 @@ func connectDCV(ctx context.Context, client *aws.Client, instance *aws.InstanceI
 		fmt.Fprintf(os.Stderr, "Opening DCV: %s\n", readyURL)
 		return openBrowser(readyURL)
 	}
-	host := instance.PublicIP
-	if dns := instance.Tags["spawn:dns-name"]; dns != "" {
-		host = dns + ".c0zxr0ao.spore.host"
+	callerAccount := ""
+	if instance.Tags["spawn:account-id"] == "" && instance.Tags["spawn:account-base36"] == "" {
+		callerAccount, _ = client.GetAccountID(ctx) // best-effort; "" falls back to the IP
 	}
+	host := dcvFallbackHost(instance, callerAccount)
 	if host == "" {
 		return fmt.Errorf("instance has no public IP or DNS name")
 	}
 	return openBrowser(fmt.Sprintf("https://%s:8443", host))
+}
+
+// dcvFallbackHost is the host connectDCV opens when it has neither a session
+// file nor a ready-url: the instance's own FQDN, built the way spored registers
+// it — {dns-name}.{account-base36}.{zone} — else its public IP.
+//
+// It used to append one account's subdomain (".c0zxr0ao.spore.host") to every
+// instance's DNS name, so any other account opened a host that was not theirs
+// or did not exist (#1152). The account comes from the instance's own
+// spawn:account-id / spawn:account-base36 tags (callerAccount only when both
+// are missing), and the zone from spawn:dns-domain, so a custom DNS domain
+// (#891) is honoured as `spawn dns list` honours it.
+func dcvFallbackHost(instance *aws.InstanceInfo, callerAccount string) string {
+	name := instance.Tags["spawn:dns-name"]
+	if name == "" {
+		return instance.PublicIP
+	}
+	zone := instance.Tags["spawn:dns-domain"]
+	if zone == "" {
+		zone = dns.DefaultDomain
+	}
+	label := instance.Tags["spawn:account-base36"]
+	if acct := instance.Tags["spawn:account-id"]; acct != "" {
+		label = dns.EncodeAccountID(acct)
+	} else if label == "" && callerAccount != "" {
+		label = dns.EncodeAccountID(callerAccount)
+	}
+	if label == "" {
+		return instance.PublicIP // no account to build the FQDN from
+	}
+	return name + "." + label + "." + zone
 }
 
 // updateSessionHTMLToken rewrites the AUTH_TOKEN constant in a session HTML file.
