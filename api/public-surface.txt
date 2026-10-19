@@ -647,6 +647,7 @@ const ExitCostLimitExceeded ExitReason
 const ExitIdleTimeout ExitReason
 const ExitSpotInterruption ExitReason
 const ExitTTLExpired ExitReason
+const ExitUserTerminated ExitReason
 const PurchaseOnDemand
 const PurchaseSpot
 const RetryAppError RetryClass

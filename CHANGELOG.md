@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `taskproto.ExitUserTerminated` (`user_terminated`), the terminal-flush
+  reason `spawn terminate` passes to a task's flush hook (#802).
+
 ### Changed
 
 - **`spawn extend` now exits non-zero when spored could not be reloaded.**
@@ -16,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The job-array form also exits non-zero when any member was not updated or
   not reloaded (#1113).
 
+- **`spawn task status` no longer reports a task with no completion record as
+  running unless its instance is live (#802).** It now asks EC2: a live
+  instance is `running` (exit 2); a task whose instances are all terminated or shutting down is
+  `terminated (no completion record)` with EC2's reason (`--check-complete`
+  exit 1); no instance at all, or a failed lookup, is `unknown` (exit 3). A
+  task killed without a terminal flush used to read `running` forever.
+
 ### Fixed
 
 - **`spawn extend` reloads spored over SSM on keyless instances (#1113).**
@@ -24,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at its original cap. extend now runs the same `spored reload` via SSM
   `AWS-RunShellScript` when there is no key or public IP, or when SSH fails.
   The manual fallback it prints is now `spawn connect <id> -- 'sudo spored reload'`.
+
+- **`spawn terminate` flushes a task's log and completion record before
+  terminating (#802).** On a running `spawn task run` instance it first runs
+  the task's terminal-flush hook over SSM with reason `user_terminated`, the
+  same hook TTL and cost-limit kills run (#643), so `command.log` and a
+  `completion.json` (`state: failed`, `terminal_reason: user_terminated`)
+  reach S3 instead of being lost with the instance. The flush is bounded (45s
+  on the box, 75s SSM wait) and best-effort: if it fails, the instance is
+  terminated anyway. Job-array terminates flush all task members concurrently
+  before the first TerminateInstances call.
 
 ## [0.135.2] - 2026-10-19
 
