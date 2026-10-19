@@ -491,6 +491,7 @@ const ReadyGateTimeoutSecs
 const RequiredGatesFile
 const StorageReadyGate
 field BootstrapConfig.Command string
+field BootstrapConfig.CompletionFile string
 field BootstrapConfig.ContainerScript string
 field BootstrapConfig.CustomUserData string
 field BootstrapConfig.Plugins []plugin.Declaration

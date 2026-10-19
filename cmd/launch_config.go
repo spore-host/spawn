@@ -757,6 +757,8 @@ func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScr
 		// step ref), so only embed for a non-sweep launch — SweepID set means the
 		// tag path owns the command.
 		Command: nonSweepCommand(config),
+		// The --command wrapper must write the file spored watches (#1131).
+		CompletionFile: config.CompletionFile,
 	})
 }
 

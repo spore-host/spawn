@@ -56,18 +56,15 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 	} else if batchQueueFile != "" {
 		// Load from file
 		fmt.Fprintf(os.Stderr, "📋 Loading queue configuration...\n")
-		queueConfig, err = queue.LoadConfig(batchQueueFile)
+		// LoadUserConfig, not LoadConfig: a hand-written queue file may omit
+		// queue_id and get a generated one (#1131).
+		queueConfig, err = queue.LoadUserConfig(batchQueueFile)
 		if err != nil {
 			return fmt.Errorf("failed to load queue configuration: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "✓ Queue loaded: %d jobs\n", len(queueConfig.Jobs))
 	} else {
 		return fmt.Errorf("either --batch-queue or --queue-template is required")
-	}
-
-	// Generate queue ID if not set
-	if queueConfig.QueueID == "" {
-		queueConfig.QueueID = queue.GenerateQueueID()
 	}
 
 	// Validate required flags

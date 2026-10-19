@@ -41,8 +41,26 @@ type RetryConfig struct {
 	DontRetryOnCodes []int   `json:"dont_retry_on_codes,omitempty"` // Never retry these exit codes
 }
 
-// LoadConfig loads a queue configuration from a JSON file
+// LoadConfig loads a queue configuration from a JSON file.
+//
+// queue_id is required: this is the loader for a queue the CLI has already
+// assigned an ID to (the on-instance runner reads the copy spawn uploaded), and
+// inventing one here would diverge from the ID the CLI used for S3 and tags.
+// User-authored files go through LoadUserConfig, where queue_id is optional.
 func LoadConfig(filename string) (*QueueConfig, error) {
+	return loadConfig(filename, false)
+}
+
+// LoadUserConfig loads a user-authored queue file (`spawn launch --batch-queue`).
+// queue_id is optional there: when it is absent, one is generated with
+// GenerateQueueID BEFORE validation. The CLI always meant to do this, but
+// generated the ID only after LoadConfig had already rejected the empty
+// queue_id, so a file without one failed to load (#1131).
+func LoadUserConfig(filename string) (*QueueConfig, error) {
+	return loadConfig(filename, true)
+}
+
+func loadConfig(filename string, assignID bool) (*QueueConfig, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
@@ -51,6 +69,10 @@ func LoadConfig(filename string) (*QueueConfig, error) {
 	var config QueueConfig
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("parse json: %w", err)
+	}
+
+	if assignID && config.QueueID == "" {
+		config.QueueID = GenerateQueueID()
 	}
 
 	// Validate configuration
