@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -214,16 +215,22 @@ func TestPoolWorkerRoleNameFitsIAM(t *testing.T) {
 }
 
 type fakePoolIdentity struct {
-	live    int
+	live    []int // live workers on each successive check; the last repeats
 	listErr error
+	checks  int
 	deleted []string
 }
 
 func (f *fakePoolIdentity) LiveInstancesWithTag(_ context.Context, _, key, value string) ([]aws.InstanceInfo, error) {
+	f.checks++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	out := make([]aws.InstanceInfo, f.live)
+	n := 0
+	if len(f.live) > 0 {
+		n = f.live[min(f.checks, len(f.live))-1]
+	}
+	out := make([]aws.InstanceInfo, n)
 	for i := range out {
 		out[i].Tags = map[string]string{key: value}
 	}
@@ -246,11 +253,11 @@ func TestDrainRemovesThePoolRoleOnlyOnceNoWorkerNeedsIt(t *testing.T) {
 		wantDelete bool
 	}{
 		{"no live workers", &fakePoolIdentity{}, true},
-		{"workers still live", &fakePoolIdentity{live: 2}, false},
+		{"workers still live", &fakePoolIdentity{live: []int{2}}, false},
 		{"check failed", &fakePoolIdentity{listErr: fmt.Errorf("throttled")}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := removePoolWorkerIdentity(context.Background(), tc.api, "us-east-1", "run-a")
+			msg := removePoolWorkerIdentity(context.Background(), tc.api, "us-east-1", "run-a", 0, noSleep)
 			if got := len(tc.api.deleted) == 1 && tc.api.deleted[0] == poolWorkerRoleName("run-a"); got != tc.wantDelete {
 				t.Errorf("deleted %v, want delete=%v (message %q)", tc.api.deleted, tc.wantDelete, msg)
 			}
@@ -258,5 +265,33 @@ func TestDrainRemovesThePoolRoleOnlyOnceNoWorkerNeedsIt(t *testing.T) {
 				t.Errorf("kept role without saying how to remove it: %q", msg)
 			}
 		})
+	}
+}
+
+func noSleep(context.Context, time.Duration) bool { return true }
+
+// TestDrainWaitsForWorkersBeforeRemovingTheRole: workers terminate shortly
+// after their queue is deleted, and nf-spawn drains only once, so drain
+// re-checks within --wait and removes the role once the workers are gone,
+// instead of leaving one role behind per run. Counted through the sleep seam.
+func TestDrainWaitsForWorkersBeforeRemovingTheRole(t *testing.T) {
+	api := &fakePoolIdentity{live: []int{3, 1, 0}}
+	sleeps := 0
+	// Capped, so a drain that ignores --wait fails the test instead of hanging it.
+	sleep := func(context.Context, time.Duration) bool { sleeps++; return sleeps < 100 }
+	removePoolWorkerIdentity(context.Background(), api, "us-east-1", "run-a", time.Minute, sleep)
+	if len(api.deleted) != 1 || api.checks != 3 || sleeps != 2 {
+		t.Errorf("deleted %v after %d checks and %d sleeps, want the role deleted on the 3rd check after 2 sleeps", api.deleted, api.checks, sleeps)
+	}
+
+	// Bounded: workers that never go away exhaust --wait and the role is kept.
+	api = &fakePoolIdentity{live: []int{1}}
+	sleeps = 0
+	removePoolWorkerIdentity(context.Background(), api, "us-east-1", "run-a", time.Minute, sleep)
+	if len(api.deleted) != 0 {
+		t.Errorf("deleted the role of a pool whose workers never terminated")
+	}
+	if want := int(time.Minute / poolDrainWorkerPoll); sleeps != want {
+		t.Errorf("waited %d polls for a 1m --wait at %s per poll, want %d", sleeps, poolDrainWorkerPoll, want)
 	}
 }

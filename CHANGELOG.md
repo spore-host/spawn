@@ -138,9 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   profile, `spawn-pool-worker-<hash of run id>`, tagged `spawn:pool-run-id`.
   `spawn pool drain` deletes them once no worker of the pool is pending,
   running, stopping or stopped. A worker whose role is deleted loses its
-  credentials and spored can no longer terminate it, so while workers remain
-  drain keeps the role and says so. Re-run `spawn pool drain` after they
-  terminate to remove it. The old shared `spawn-pool-worker` role is no longer
+  credentials and spored can no longer terminate it. Workers terminate soon
+  after their queue is deleted, so drain re-checks for up to `--wait` (new,
+  default 2m) before removing the role. If workers remain after that, drain
+  keeps the role and says so; re-run `spawn pool drain` to remove it. The old shared `spawn-pool-worker` role is no longer
   used: `spawn orphans` lists it, and you can delete it.
 
 ### Fixed

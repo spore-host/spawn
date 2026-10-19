@@ -45,6 +45,7 @@ var (
 	poolS3Read       []string
 	poolS3Write      []string
 	poolCostLimit    float64
+	poolDrainWait    time.Duration
 )
 
 var poolGroupCmd = &cobra.Command{
@@ -167,26 +168,54 @@ type poolIdentityAPI interface {
 	DeleteInstanceProfileAndRole(ctx context.Context, name string) error
 }
 
+// poolDrainWorkerPoll is how often drain re-checks for live workers while it
+// waits to remove the pool's role.
+const poolDrainWorkerPoll = 10 * time.Second
+
 // removePoolWorkerIdentity deletes the pool's role and instance profile once
 // no worker can need them, so a drained pool leaves no IAM behind (#1147,
 // #653). It refuses while any worker is pending, running, stopping or stopped:
 // a worker whose role is deleted loses its credentials, and spored then cannot
-// terminate it. Draining deletes the queue and workers terminate shortly after,
-// so a second `pool drain` once they are gone removes the role. Returns the
-// line to print; never fails the drain, which has already done its job.
-func removePoolWorkerIdentity(ctx context.Context, api poolIdentityAPI, region, runID string) string {
-	name := poolWorkerRoleName(runID)
-	live, err := api.LiveInstancesWithTag(ctx, region, "spawn:pool-run-id", runID)
-	if err != nil {
-		return fmt.Sprintf("⚠️  kept IAM role %s: could not check for live workers (%v); re-run 'spawn pool drain --run-id %s' to remove it\n", name, err, runID)
+// terminate it. Workers terminate shortly after their queue is deleted, so it
+// re-checks every poolDrainWorkerPoll for up to wait; a caller that drains
+// once (nf-spawn does, at run end) still leaves nothing behind. If workers
+// remain after that, a later `pool drain` removes the role. sleep is the
+// pause between checks (nil = sleepCtx), a seam so tests count checks rather
+// than wait. Returns the line to print; never fails the drain, which has
+// already done its job.
+func removePoolWorkerIdentity(ctx context.Context, api poolIdentityAPI, region, runID string, wait time.Duration, sleep func(context.Context, time.Duration) bool) string {
+	if sleep == nil {
+		sleep = sleepCtx
 	}
-	if len(live) > 0 {
-		return fmt.Sprintf("   kept IAM role %s: %d worker(s) still use it; re-run 'spawn pool drain --run-id %s' once they have terminated to remove it\n", name, len(live), runID)
+	name := poolWorkerRoleName(runID)
+	for waited := time.Duration(0); ; waited += poolDrainWorkerPoll {
+		live, err := api.LiveInstancesWithTag(ctx, region, "spawn:pool-run-id", runID)
+		if err != nil {
+			return fmt.Sprintf("⚠️  kept IAM role %s: could not check for live workers (%v); re-run 'spawn pool drain --run-id %s' to remove it\n", name, err, runID)
+		}
+		if len(live) == 0 {
+			break
+		}
+		if waited >= wait || !sleep(ctx, poolDrainWorkerPoll) {
+			return fmt.Sprintf("   kept IAM role %s: %d worker(s) still use it; re-run 'spawn pool drain --run-id %s' once they have terminated to remove it\n", name, len(live), runID)
+		}
 	}
 	if err := api.DeleteInstanceProfileAndRole(ctx, name); err != nil {
 		return fmt.Sprintf("⚠️  could not delete IAM role %s: %v\n", name, err)
 	}
 	return fmt.Sprintf("   deleted IAM role and instance profile %s\n", name)
+}
+
+// sleepCtx sleeps d or until ctx is done; false if ctx ended first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // poolWorkerMaxRestarts bounds the restart-on-error loop so a hard crash-loop
@@ -541,7 +570,7 @@ var poolDrainCmd = &cobra.Command{
 		fmt.Fprint(os.Stderr, poolDrainMessage(poolRunID, alreadyGone))
 		// The role is removed on every drain, including an "already drained" one:
 		// re-running drain is how a role kept for live workers gets removed.
-		fmt.Fprint(os.Stderr, removePoolWorkerIdentity(ctx, awsClient, awsClient.Config().Region, poolRunID))
+		fmt.Fprint(os.Stderr, removePoolWorkerIdentity(ctx, awsClient, awsClient.Config().Region, poolRunID, poolDrainWait, nil))
 		return nil
 	},
 }
@@ -583,6 +612,8 @@ func init() {
 	poolCreateCmd.Flags().IntVar(&poolVisTimeout, "visibility-timeout", 900, "SQS claim window in seconds (must exceed the longest task runtime)")
 	poolCreateCmd.Flags().StringArrayVar(&poolS3Read, "s3-read", nil, "Extra S3 bucket the tasks read inputs from (repeatable) — beyond the results bucket workers always get")
 	poolCreateCmd.Flags().StringArrayVar(&poolS3Write, "s3-write", nil, "Extra S3 bucket the tasks write outputs to (repeatable) — beyond the results bucket")
+
+	poolDrainCmd.Flags().DurationVar(&poolDrainWait, "wait", 2*time.Minute, "How long to wait for the pool's workers to terminate before removing its IAM role (0 = check once)")
 
 	poolSubmitCmd.Flags().StringVar(&poolSpecPath, "spec", "", "Path to a TaskSpec JSON file to enqueue")
 }
