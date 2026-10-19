@@ -654,6 +654,7 @@ type WorkspaceProvider interface
 ## pkg/taskproto (imported by: spore-host-mcp)
 const ConsoleLogEndMarker
 const ConsoleLogStartPrefix
+const ContainerMemoryFloorGiB
 const DefaultEFSMountPoint
 const DefaultFSxMountPoint
 const ExitCompleted ExitReason
@@ -750,6 +751,7 @@ field WrapperOptions.Region string
 field WrapperOptions.ResultsPrefix string
 field WrapperOptions.RunID string
 func (*TaskSpec) EffectiveOnComplete() string
+func (*TaskSpec) SizingRequest() ResourceRequest
 func (*TaskSpec) Validate() error
 func (Placement) EffectiveEFSMountPoint() string
 func (Placement) EffectiveFSxMountPoint() string

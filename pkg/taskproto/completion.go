@@ -95,16 +95,24 @@ const (
 	// (of an artifact already sitting on disk before the box was reaped) fixes.
 	RetryOutputDeliveryError RetryClass = "output_delivery_error"
 
+	// RetryInstanceHealth (#1180): the instance could not provide what the task
+	// needs to run at all — today, a container task whose Docker install failed
+	// or whose daemon never came up (on a t4g.nano `dnf install docker` is
+	// OOM-killed). The user's command never ran, so this is not an app_error;
+	// it is retryable because a fresh instance usually succeeds, and since
+	// #1180 a container task is sized to at least ContainerMemoryFloorGiB.
+	RetryInstanceHealth RetryClass = "instance_health"
+
 	// Defined but not yet populated — these need spored-side signals or
 	// post-mortem instance inspection that a later increment adds:
 	RetrySpotInterruption RetryClass = "spot_interruption"
-	RetryInstanceHealth   RetryClass = "instance_health"
 	RetryTTLExpired       RetryClass = "ttl_expired"
 	RetryControllerLost   RetryClass = "controller_lost"
 )
 
-// Retryable reports whether a task in this class is worth retrying. Capacity and
-// spot-interruption are transient (retry elsewhere/later); an app error or a
+// Retryable reports whether a task in this class is worth retrying. Capacity,
+// spot-interruption and instance-health (#1180) are transient (retry
+// elsewhere/later, on a fresh instance); an app error or a
 // staging-in failure will recur unchanged, so they are not retryable. An
 // output-delivery failure (spawn#561) is grouped with the transient classes: the
 // compute already succeeded, so what's worth retrying is just re-delivering the
@@ -114,7 +122,7 @@ const (
 // are wired.
 func (r RetryClass) Retryable() bool {
 	switch r {
-	case RetryCapacity, RetrySpotInterruption, RetryOutputDeliveryError:
+	case RetryCapacity, RetrySpotInterruption, RetryOutputDeliveryError, RetryInstanceHealth:
 		return true
 	default:
 		return false

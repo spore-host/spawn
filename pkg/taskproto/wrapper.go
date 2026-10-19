@@ -256,6 +256,10 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	// ---- run user command ----
 	p("# ---- run user command ----\n")
 	p("rc=0\n")
+	// RUNTIME_RC: the host could not provide the container runtime (Docker
+	// install, daemon start). Set only by writeContainerRun; declared here so the
+	// classifier below reads a defined variable under `set -u` on the host path.
+	p("RUNTIME_RC=0\n")
 	p("if [ \"$STAGE_RC\" -eq 0 ]; then\n")
 	if spec.Container != "" {
 		writeContainerRun(p, spec, region, gpu)
@@ -321,8 +325,17 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	// was computed above and never read anywhere: a stage-out failure left
 	// STATE=completed/exit_code=0/retry_class="" even though a declared output
 	// never reached its destination.
+	//
+	// RUNTIME_RC sits between STAGE_RC and rc (#1180): when Docker could not be
+	// installed or its daemon never came up, the user's command never ran, so
+	// the non-zero rc is the host's failure, not the application's. On a
+	// t4g.nano `dnf install docker` is OOM-killed; that used to surface as
+	// `docker: command not found` from the run line and be classified app_error,
+	// telling an adapter not to retry an infrastructure failure.
 	p("if [ \"$STAGE_RC\" -ne 0 ]; then\n")
 	p("  STATE='failed'; RETRY_CLASS='%s'\n", RetryStagingError)
+	p("elif [ \"$RUNTIME_RC\" -ne 0 ]; then\n")
+	p("  STATE='failed'; RETRY_CLASS='%s'\n", RetryInstanceHealth)
 	p("elif [ \"$rc\" -ne 0 ]; then\n")
 	p("  STATE='failed'; RETRY_CLASS='%s'\n", RetryAppError)
 	p("elif [ \"$OUT_RC\" -ne 0 ]; then\n")
@@ -410,18 +423,32 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	// (AL2023's default user has passwordless sudo). The host path never needs this.
 
 	// Install Docker if absent (the task AMI is stock AL2023; no Docker baked in),
-	// then make sure the daemon is up before we pull. Failures are fatal to the
-	// container run — abort early with a non-zero rc so the completion record
-	// classifies it, rather than hanging on a `docker` call to a dead daemon.
+	// then make sure the daemon is up before we pull. Any failure here sets
+	// RUNTIME_RC, skips the pull and run, and is classified instance_health
+	// (#1180), never app_error: the user's command did not run. Before #1180
+	// each step's failure was ignored, so an OOM-killed `dnf install docker`
+	// fell through to `sudo docker run`, failed with "command not found", and
+	// was blamed on the application.
 	p("  spawn_phase 'docker install start'\n")
 	p("  if ! command -v docker >/dev/null 2>&1; then\n")
 	p("    echo 'spawn: installing docker...'\n")
-	p("    sudo dnf install -y docker\n")
+	p("    sudo dnf install -y docker || RUNTIME_RC=$?\n")
 	p("  fi\n")
-	p("  sudo systemctl enable --now docker\n")
-	// Wait for the socket (service start is async); bounded so we never hang.
-	p("  for _i in $(seq 1 30); do sudo docker info >/dev/null 2>&1 && break; sleep 2; done\n")
+	p("  if [ \"$RUNTIME_RC\" -eq 0 ]; then\n")
+	p("    sudo systemctl enable --now docker || RUNTIME_RC=$?\n")
+	p("  fi\n")
+	// Wait for the socket (service start is async); bounded so we never hang. A
+	// daemon that never answers is a runtime failure too.
+	p("  if [ \"$RUNTIME_RC\" -eq 0 ]; then\n")
+	p("    DOCKER_UP=0\n")
+	p("    for _i in $(seq 1 30); do if sudo docker info >/dev/null 2>&1; then DOCKER_UP=1; break; fi; sleep 2; done\n")
+	p("    if [ \"$DOCKER_UP\" -ne 1 ]; then echo 'spawn: docker daemon did not start' >&2; RUNTIME_RC=1; fi\n")
+	p("  fi\n")
 	p("  spawn_phase 'docker install done'\n")
+	p("  if [ \"$RUNTIME_RC\" -ne 0 ]; then\n")
+	p("    echo \"spawn: container runtime unavailable (rc=$RUNTIME_RC); skipping user command\" >&2\n")
+	p("    rc=$RUNTIME_RC\n")
+	p("  else\n")
 
 	// GPU instances: `docker run --gpus all` needs the NVIDIA Container Toolkit as
 	// a Docker runtime to bind-mount the host driver (incl. nvidia-smi) into the
@@ -503,6 +530,7 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s%s %s\n", envFlags.String(), gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
 	p("  rc=$?\n")
 	p("  spawn_phase \"command exit rc=$rc\"\n")
+	p("  fi\n") // closes the RUNTIME_RC guard opened after the Docker install
 }
 
 // manifestMountDirs returns the distinct host directories the wrapper's own

@@ -42,7 +42,12 @@ on_complete).
 
 If spec.container is set, the command runs inside that image (Docker is installed
 on demand; a private-ECR image is pulled with an ecr:ReadOnly grant, GPUs passed
-with --gpus all). Otherwise it runs on the host.
+with --gpus all). Otherwise it runs on the host. A container task is sized to at
+least 2 GiB of memory even when resources.memory_gib is lower or unset, because
+the Docker install is OOM-killed on smaller boxes; a pinned
+resources.instance_type is honoured as given, with a warning if it is below that.
+If Docker cannot be installed or its daemon does not start, the record reports
+retry_class instance_health (retryable), not app_error.
 
 What gets bind-mounted, and as whom: spawn pre-creates the parent directory of
 every inputs[].destination and outputs[].source — plus any EFS/FSx/volume mount

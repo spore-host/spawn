@@ -233,7 +233,12 @@ on_complete).
 
 If spec.container is set, the command runs inside that image (Docker is installed
 on demand; a private-ECR image is pulled with an ecr:ReadOnly grant, GPUs passed
-with --gpus all). Otherwise it runs on the host.
+with --gpus all). Otherwise it runs on the host. A container task is sized to at
+least 2 GiB of memory even when resources.memory_gib is lower or unset, because
+the Docker install is OOM-killed on smaller boxes; a pinned
+resources.instance_type is honoured as given, with a warning if it is below that.
+If Docker cannot be installed or its daemon does not start, the record reports
+retry_class instance_health (retryable), not app_error.
 
 What gets bind-mounted, and as whom: spawn pre-creates the parent directory of
 every inputs[].destination and outputs[].source — plus any EFS/FSx/volume mount
@@ -295,6 +300,7 @@ instead of reporting an earlier attempt's verdict (#608).
 			return fmt.Errorf("no region: pass --region or configure a default AWS region")
 		}
 		finder := truffleFinder{tc: truffleaws.NewClientFromConfig(awsClient.Config()), region: region}
+		warnIfContainerPinBelowFloor(cmd.Context(), awsClient, os.Stderr, region, spec)
 		if taskRunDryRun {
 			return renderTaskDryRun(cmd.Context(), os.Stdout, spec, finder, region)
 		}
@@ -357,7 +363,7 @@ func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.Resourc
 // from the RunE (which builds the AWS-backed finder) so it's unit-testable with a
 // fake finder — no AWS, no launch.
 func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSpec, finder taskproto.InstanceFinder, region string) error {
-	sized, err := taskproto.Size(ctx, finder, spec.Resources)
+	sized, err := taskproto.Size(ctx, finder, spec.SizingRequest())
 	if err != nil {
 		return err
 	}
@@ -384,6 +390,9 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	}
 	fmt.Fprintf(out, ")\n")
 	fmt.Fprintf(out, "              chosen as cheapest of %d matching type(s)\n", sized.Considered)
+	if note := containerMemoryFloorNote(spec); note != "" {
+		fmt.Fprintf(out, "              %s\n", note)
+	}
 	if note := oldGenerationNote(sized.Family); note != "" {
 		fmt.Fprintf(out, "              %s\n", note)
 	}
@@ -431,6 +440,57 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Re-run without --dry-run to launch this task.")
 	return nil
+}
+
+// containerMemoryFloorNote explains, in the dry run, that sizing raised the
+// memory request to the container floor (#1180), or returns "" when it did not.
+// Without it the plan would show a 2 GiB box for a spec that asked for none and
+// leave the author guessing why.
+func containerMemoryFloorNote(spec *taskproto.TaskSpec) string {
+	sizing := spec.SizingRequest()
+	if sizing.MemoryGiB == spec.Resources.MemoryGiB && sizing.MemoryHeadroomPercent == spec.Resources.MemoryHeadroomPercent {
+		return ""
+	}
+	return fmt.Sprintf("memory raised to the %.0f GiB container floor: Docker is installed at boot and is OOM-killed on smaller boxes (#1180)", taskproto.ContainerMemoryFloorGiB)
+}
+
+// renderContainerPinFloorWarning returns the warning for a container task whose
+// pinned resources.instance_type has less memory than the container floor, or
+// "" when there is nothing to say. Pure, so it is tested without AWS.
+//
+// A pin is honoured as-is (it is how nf-spawn's ext.instanceType reaches spawn),
+// so this warns rather than refuses: the author chose the type, and spawn cannot
+// prove the image's Docker install will not fit.
+func renderContainerPinFloorWarning(spec *taskproto.TaskSpec, memMiB int64) string {
+	pin := strings.TrimSpace(spec.Resources.InstanceType)
+	if spec.Container == "" || pin == "" || memMiB <= 0 {
+		return ""
+	}
+	gib := float64(memMiB) / 1024
+	if gib >= taskproto.ContainerMemoryFloorGiB {
+		return ""
+	}
+	return fmt.Sprintf("\n⚠️  resources.instance_type %s has %.1f GiB of memory, below the %.0f GiB spawn sizes a container task to.\n"+
+		"   The task installs Docker at boot, and on a 0.5 GiB box that install is OOM-killed (#1180); the\n"+
+		"   record then reports retry_class instance_health. The pin is honoured as given.\n",
+		pin, gib, taskproto.ContainerMemoryFloorGiB)
+}
+
+// warnIfContainerPinBelowFloor looks up a pinned container task's instance
+// memory and prints renderContainerPinFloorWarning. Best-effort: an unresolved
+// lookup says nothing rather than guessing.
+func warnIfContainerPinBelowFloor(ctx context.Context, client memoryLookup, w io.Writer, region string, spec *taskproto.TaskSpec) {
+	pin := strings.TrimSpace(spec.Resources.InstanceType)
+	if spec.Container == "" || pin == "" {
+		return
+	}
+	mem, ok := client.InstanceMemoryMiB(ctx, region, pin)
+	if !ok {
+		return
+	}
+	if msg := renderContainerPinFloorWarning(spec, mem); msg != "" {
+		fmt.Fprint(w, msg)
+	}
 }
 
 // oldGenerationFamilies notes instance families that are the cheapest match for
@@ -482,7 +542,7 @@ func taskAMIPlan(spec *taskproto.TaskSpec, instanceType string) string {
 // runs inside that image (Docker is installed on demand; a private-ECR image
 // gets an ecr:ReadOnly grant on the scoped profile).
 func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *taskproto.TaskSpec, finder taskproto.InstanceFinder, region string) error {
-	sized, err := taskproto.Size(ctx, finder, spec.Resources)
+	sized, err := taskproto.Size(ctx, finder, spec.SizingRequest())
 	if err != nil {
 		return err
 	}
