@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variable is kept unless a flag sets it, and `--regions` defaults to the
   existing reaper's regions (the deploy region only for a new reaper).
 
+- `aws.LaunchConfig.TerminateOnIdle` (Go API), written to the instance as
+  `spawn:terminate-on-idle=true`. spored then terminates the instance when its
+  idle timeout runs out, instead of stopping it; it takes precedence over
+  `HibernateOnIdle`. A Spot launch whose only stop-shaped setting is an idle
+  timeout with `TerminateOnIdle` stays a one-time request (#1151).
+
 - **`spawn app launch` now sets an 8h TTL when `--ttl` is not given (#1150).**
   An app's idle action is still a stop, so a session can be restarted, but
   before this an abandoned session stayed stopped, billing its EBS volume, with
