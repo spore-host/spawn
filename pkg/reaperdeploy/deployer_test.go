@@ -59,8 +59,11 @@ func (f *fakeIAM) DeleteRole(context.Context, *iam.DeleteRoleInput, ...func(*iam
 }
 
 type fakeLambda struct {
-	exists  bool
-	dryRun  string // REAPER_DRY_RUN on the existing function
+	exists bool
+	dryRun string // REAPER_DRY_RUN on the existing function
+	// env, when set, is the existing function's whole environment and
+	// overrides dryRun.
+	env     map[string]string
 	calls   []string
 	lastEnv map[string]string
 
@@ -93,9 +96,16 @@ func (f *fakeLambda) GetFunction(context.Context, *lambda.GetFunctionInput, ...f
 	} else if f.updateFailed {
 		status = lambdatypes.LastUpdateStatusFailed
 	}
+	vars := map[string]string{"REAPER_DRY_RUN": f.dryRun}
+	if f.env != nil {
+		vars = map[string]string{}
+		for k, v := range f.env {
+			vars[k] = v
+		}
+	}
 	return &lambda.GetFunctionOutput{Configuration: &lambdatypes.FunctionConfiguration{
 		FunctionArn:      awssdk.String("arn:aws:lambda:us-east-1:1:function/" + FunctionName),
-		Environment:      &lambdatypes.EnvironmentResponse{Variables: map[string]string{"REAPER_DRY_RUN": f.dryRun}},
+		Environment:      &lambdatypes.EnvironmentResponse{Variables: vars},
 		LastUpdateStatus: status,
 	}}, nil
 }

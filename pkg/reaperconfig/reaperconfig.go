@@ -1,0 +1,131 @@
+// Package reaperconfig is the ttl-reaper's environment contract: the names of
+// the settings a deployment may set and the values the reaper accepts for them.
+//
+// It exists so the reaper and `spawn reaper deploy` share one definition
+// (spawn#1154). The reaper (lambda/ttl-reaper, a separate Go module) parses its
+// environment with these functions, and the CLI validates its flags with the
+// same ones, so a value the CLI accepts is by construction a value the reaper
+// understands. Before this, the CLI could not set these at all, and a value
+// typed by hand was checked by nothing until the reaper silently fell back to
+// its default.
+//
+// It deliberately imports nothing but pkg/ttl: the reaper links it, and a Lambda
+// should not pull in a deploy tool's AWS clients to parse four variables.
+package reaperconfig
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/spore-host/spawn/pkg/ttl"
+)
+
+// The settings `spawn reaper deploy` can set.
+const (
+	EnvSpotRequests = "REAPER_SPOT_REQUESTS"
+	EnvNetResources = "REAPER_NET_RESOURCES"
+	EnvMaxAge       = "REAPER_MAX_AGE"
+	EnvNotifyURL    = "REAPER_NOTIFY_URL"
+)
+
+// The three states of a sweep that can be previewed before it is allowed to
+// delete: REAPER_SPOT_REQUESTS and REAPER_NET_RESOURCES.
+const (
+	// ModeOff skips the sweep entirely.
+	ModeOff = "off"
+	// ModeReport logs what the sweep WOULD reclaim and changes nothing. The
+	// reaper's default, and what any unrecognised value becomes.
+	ModeReport = "report"
+	// ModeReap lets the sweep act. Explicit opt-in.
+	ModeReap = "reap"
+)
+
+// Modes lists the accepted sweep modes, for help text and error messages.
+func Modes() []string { return []string{ModeOff, ModeReport, ModeReap} }
+
+// ParseMode maps a sweep-mode value onto its canonical form. ok is false for
+// anything unrecognised, including the empty string; the reaper treats that as
+// ModeReport (a typo must neither arm a sweep nor silently disable it), and the
+// CLI rejects it, because a value typed at a prompt can be corrected and one in
+// a Lambda environment cannot.
+func ParseMode(v string) (mode string, ok bool) {
+	switch m := strings.ToLower(strings.TrimSpace(v)); m {
+	case ModeOff, ModeReport, ModeReap:
+		return m, true
+	}
+	return "", false
+}
+
+// ParseMaxAge parses REAPER_MAX_AGE: a pkg/ttl duration ("72h", "3d") that must
+// be positive.
+func ParseMaxAge(v string) (time.Duration, error) {
+	d, err := ttl.ParseDuration(v)
+	if err != nil {
+		return 0, err
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("max age must be positive, got %s", d)
+	}
+	return d, nil
+}
+
+// ValidateNotifyURL checks REAPER_NOTIFY_URL, which the reaper POSTs its
+// notifications to. The URL is a secret (it is usually a webhook whose path is
+// the credential), so no error here ever contains it.
+func ValidateNotifyURL(v string) error {
+	u, err := url.Parse(strings.TrimSpace(v))
+	if err != nil {
+		return errors.New("notify URL does not parse")
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return errors.New("notify URL must be http:// or https://")
+	}
+	if u.Host == "" {
+		return errors.New("notify URL has no host")
+	}
+	return nil
+}
+
+// Validate checks a value for one of the settable variables. An empty value is
+// valid for every one of them: it means "remove the variable", which returns
+// the reaper to its own default.
+func Validate(name, value string) error {
+	if strings.TrimSpace(value) == "" {
+		if _, ok := settable[name]; ok {
+			return nil
+		}
+	}
+	switch name {
+	case EnvSpotRequests, EnvNetResources:
+		if _, ok := ParseMode(value); !ok {
+			return fmt.Errorf("%s: %q is not one of %s", name, value, strings.Join(Modes(), ", "))
+		}
+		return nil
+	case EnvMaxAge:
+		if _, err := ParseMaxAge(value); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return nil
+	case EnvNotifyURL:
+		if err := ValidateNotifyURL(value); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("%s is not a setting spawn reaper deploy can set", name)
+}
+
+var settable = map[string]struct{}{
+	EnvSpotRequests: {}, EnvNetResources: {}, EnvMaxAge: {}, EnvNotifyURL: {},
+}
+
+// Settable lists the variables Validate accepts.
+func Settable() []string {
+	return []string{EnvSpotRequests, EnvNetResources, EnvMaxAge, EnvNotifyURL}
+}
+
+// Secret reports whether a variable's value must never be printed.
+func Secret(name string) bool { return name == EnvNotifyURL }

@@ -9,6 +9,7 @@ import (
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
@@ -294,12 +295,12 @@ func netResourceAge(tags []ec2types.Tag, now time.Time) (time.Duration, bool) {
 const (
 	// netResourcesOff skips the sweep entirely. No describes, no cost, no log
 	// noise — for an account where someone else owns these resources.
-	netResourcesOff = "off"
+	netResourcesOff = reaperconfig.ModeOff
 	// netResourcesReport describes and logs what it WOULD reclaim, and deletes
 	// nothing. The default, so updating the Lambda is observable but inert.
-	netResourcesReport = "report"
+	netResourcesReport = reaperconfig.ModeReport
 	// netResourcesReap deletes. Explicit opt-in, once the report has been read.
-	netResourcesReap = "reap"
+	netResourcesReap = reaperconfig.ModeReap
 )
 
 // parseNetResources maps the env var onto a mode, defaulting to report.
@@ -307,16 +308,13 @@ const (
 // An unrecognised value becomes report rather than reap or an error: a typo in a
 // CloudFormation parameter must not arm a destructive sweep, and must not
 // silently disable one either — report is the only choice that is wrong in a
-// recoverable direction. The caller logs what it resolved to.
+// recoverable direction. The caller logs what it resolved to. The accepted set
+// is pkg/reaperconfig's, shared with `spawn reaper deploy` (#1154).
 func parseNetResources(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case netResourcesOff:
-		return netResourcesOff
-	case netResourcesReap:
-		return netResourcesReap
-	default:
-		return netResourcesReport
+	if m, ok := reaperconfig.ParseMode(v); ok {
+		return m
 	}
+	return netResourcesReport
 }
 
 // netReportOnly reports whether this cycle may delete network resources.

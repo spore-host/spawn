@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,8 +11,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/reaperdeploy"
 )
 
@@ -22,6 +26,11 @@ var (
 	reaperSchedule string
 	reaperRegions  string
 	reaperYes      bool
+
+	reaperSpotRequests string
+	reaperNetResources string
+	reaperMaxAge       string
+	reaperNotifyURL    string
 
 	reaperKeepArtifacts  bool
 	reaperForceArtifacts bool
@@ -76,7 +85,14 @@ Deploys with dry-run ON. Nothing is reclaimed until 'spawn reaper arm'.
 
 The artifact comes from the spawn GitHub Release matching --version (default: this
 binary's version). --artifact overrides that with a local path or an explicit URL, for
-mirrored or air-gapped environments.`,
+mirrored or air-gapped environments.
+
+Re-running it upgrades an existing reaper in place and keeps its settings: the
+armed state, the scanned regions and every other REAPER_* variable stay as they
+are unless a flag here sets them. --spot-requests, --net-resources, --max-age and
+--notify-url set the matching variable; pass an empty value ("") to remove one
+and return the reaper to its default. The notify URL is never printed; pass "-"
+to read it from stdin instead of the command line.`,
 	SilenceUsage: true,
 	RunE:         runReaperDeploy,
 }
@@ -120,11 +136,7 @@ func init() {
 
 	reaperCmd.PersistentFlags().StringVar(&reaperRegion, "region", "", "AWS region to operate in (default: resolved region)")
 
-	reaperDeployCmd.Flags().StringVar(&reaperVersion, "version", "", "spawn release to take the reaper artifact from (default: this binary's version)")
-	reaperDeployCmd.Flags().StringVar(&reaperArtifact, "artifact", "", "Use this Lambda zip instead of downloading a release asset (local path or URL)")
-	reaperDeployCmd.Flags().StringVar(&reaperBucket, "bucket", "", "S3 bucket in THIS account to hold the artifact (default: spawn-reaper-artifacts-<account>-<region>)")
-	reaperDeployCmd.Flags().StringVar(&reaperSchedule, "schedule", reaperdeploy.DefaultSchedule, "EventBridge schedule expression")
-	reaperDeployCmd.Flags().StringVar(&reaperRegions, "regions", "", "Comma-separated regions for the reaper to scan (default: the deploy region)")
+	registerReaperDeployFlags(reaperDeployCmd.Flags())
 
 	reaperArmCmd.Flags().BoolVar(&reaperYes, "yes", false, "Skip the confirmation prompt")
 
@@ -134,6 +146,24 @@ func init() {
 		"Only tear down if the reaper has reclaimed nothing for at least this long (e.g. 720h); otherwise report and exit 0")
 	reaperTeardownCmd.Flags().BoolVar(&reaperForceArtifacts, "force-artifacts", false,
 		"Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed)")
+}
+
+// registerReaperDeployFlags is split out so a test can bind the same flags to a
+// fresh FlagSet and parse a real command line.
+func registerReaperDeployFlags(fs *pflag.FlagSet) {
+	fs.StringVar(&reaperVersion, "version", "", "spawn release to take the reaper artifact from (default: this binary's version)")
+	fs.StringVar(&reaperArtifact, "artifact", "", "Use this Lambda zip instead of downloading a release asset (local path or URL)")
+	fs.StringVar(&reaperBucket, "bucket", "", "S3 bucket in THIS account to hold the artifact (default: spawn-reaper-artifacts-<account>-<region>)")
+	fs.StringVar(&reaperSchedule, "schedule", reaperdeploy.DefaultSchedule, "EventBridge schedule expression")
+	fs.StringVar(&reaperRegions, "regions", "", "Comma-separated regions for the reaper to scan (default: keep the existing reaper's; the deploy region for a new one)")
+	fs.StringVar(&reaperSpotRequests, "spot-requests", "",
+		"Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
+	fs.StringVar(&reaperNetResources, "net-resources", "",
+		"Network-resource sweep, REAPER_NET_RESOURCES: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
+	fs.StringVar(&reaperMaxAge, "max-age", "",
+		"Max-age ceiling, REAPER_MAX_AGE, e.g. 336h or 14d (default: keep; the reaper's default is 7d)")
+	fs.StringVar(&reaperNotifyURL, "notify-url", "",
+		"URL the reaper POSTs notifications to, REAPER_NOTIFY_URL; never printed. \"-\" reads it from stdin (default: keep)")
 }
 
 // newReaperDeployer builds a Deployer and resolves account/region. Split out so each
@@ -168,23 +198,15 @@ func runReaperDeploy(cmd *cobra.Command, _ []string) error {
 	if ver == "" {
 		ver = version()
 	}
-	regions := reaperRegions
-	if regions == "" {
-		regions = region
+	opts, err := reaperDeployOptions(cmd.Flags(), account, region, ver, os.Stdin)
+	if err != nil {
+		return err
 	}
 
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Deploying the TTL reaper into account %s (%s)\n", account, region)
 
-	res, err := d.Deploy(ctx, reaperdeploy.Options{
-		AccountID: account,
-		Region:    region,
-		Version:   ver,
-		Artifact:  reaperArtifact,
-		Bucket:    reaperBucket,
-		Schedule:  reaperSchedule,
-		Regions:   regions,
-	})
+	res, err := d.Deploy(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -194,6 +216,70 @@ func runReaperDeploy(cmd *cobra.Command, _ []string) error {
 
 	writeReaperDeployState(out, res.DryRun, region)
 	return nil
+}
+
+// reaperDeployFlags maps each settable REAPER_* variable to its flag.
+var reaperDeployFlags = map[string]struct {
+	flag string
+	val  *string
+}{
+	reaperconfig.EnvSpotRequests: {"spot-requests", &reaperSpotRequests},
+	reaperconfig.EnvNetResources: {"net-resources", &reaperNetResources},
+	reaperconfig.EnvMaxAge:       {"max-age", &reaperMaxAge},
+	reaperconfig.EnvNotifyURL:    {"notify-url", &reaperNotifyURL},
+}
+
+// reaperDeployOptions turns the flags into deploy options. Only flags the user
+// actually passed become settings, so a re-deploy without them keeps whatever
+// the existing reaper has (#1154). The same goes for --regions: omitted means
+// "keep", and the deploy region is only a default for a reaper that has none.
+func reaperDeployOptions(fs *pflag.FlagSet, account, region, ver string, stdin io.Reader) (reaperdeploy.Options, error) {
+	opts := reaperdeploy.Options{
+		AccountID:      account,
+		Region:         region,
+		Version:        ver,
+		Artifact:       reaperArtifact,
+		Bucket:         reaperBucket,
+		Schedule:       reaperSchedule,
+		Regions:        reaperRegions,
+		DefaultRegions: region,
+	}
+	for env, f := range reaperDeployFlags {
+		if !fs.Changed(f.flag) {
+			continue
+		}
+		v := *f.val
+		if env == reaperconfig.EnvNotifyURL && v == "-" {
+			line, err := readSecretLine(stdin)
+			if err != nil {
+				return opts, fmt.Errorf("--notify-url -: %w", err)
+			}
+			v = line
+		}
+		// reaperconfig's errors never contain a secret's value.
+		if err := reaperconfig.Validate(env, v); err != nil {
+			return opts, fmt.Errorf("--%s: %w", f.flag, err)
+		}
+		if opts.Settings == nil {
+			opts.Settings = map[string]string{}
+		}
+		opts.Settings[env] = v
+	}
+	return opts, nil
+}
+
+// readSecretLine reads one line, so a secret need not appear on the command
+// line (and so in shell history and the process list).
+func readSecretLine(in io.Reader) (string, error) {
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", errors.New("nothing on stdin")
+	}
+	return line, nil
 }
 
 // writeReaperDeployState says whether the deployed reaper is armed. A redeploy

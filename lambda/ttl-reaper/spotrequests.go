@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
@@ -32,22 +33,20 @@ type spotRequestAPI interface {
 // so a boolean would arm a new destructive sweep the moment the Lambda is
 // updated. 'report' (the default) logs what it would cancel and terminate.
 const (
-	spotRequestsOff    = "off"
-	spotRequestsReport = "report"
-	spotRequestsReap   = "reap"
+	spotRequestsOff    = reaperconfig.ModeOff
+	spotRequestsReport = reaperconfig.ModeReport
+	spotRequestsReap   = reaperconfig.ModeReap
 )
 
 // parseSpotRequests maps REAPER_SPOT_REQUESTS onto a mode. An unrecognised
 // value is 'report': a typo must neither arm the sweep nor silently disable it.
+// The accepted set is pkg/reaperconfig's, which `spawn reaper deploy` validates
+// against, so the CLI cannot set a value this would not recognise (#1154).
 func parseSpotRequests(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case spotRequestsOff:
-		return spotRequestsOff
-	case spotRequestsReap:
-		return spotRequestsReap
-	default:
-		return spotRequestsReport
+	if m, ok := reaperconfig.ParseMode(v); ok {
+		return m
 	}
+	return spotRequestsReport
 }
 
 // spotReportOnly reports whether this cycle may cancel and terminate. DryRun
