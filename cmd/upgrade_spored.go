@@ -206,7 +206,9 @@ NEW_VERSION=$(/usr/local/bin/spored version 2>/dev/null | awk '{print $NF}')
 if ! systemctl is-active --quiet spored || [ "$NEW_VERSION" != "$TARGET_VERSION" ]; then
   echo "Health check failed (active=$(systemctl is-active spored 2>/dev/null), version=${NEW_VERSION:-none}); rolling back" >&2
   systemctl stop spored 2>/dev/null || true
-  if [ -s "$BACKUP" ]; then mv -f "$BACKUP" /usr/local/bin/spored; fi
+  # The backup lives under /tmp; mv keeps its label, so relabel or an enforcing
+  # host cannot exec the rolled-back binary either (#1052).
+  if [ -s "$BACKUP" ]; then mv -f "$BACKUP" /usr/local/bin/spored && spore_selinux_relabel /usr/local/bin/spored; fi
   systemctl start spored 2>/dev/null || true
   exit 1
 fi

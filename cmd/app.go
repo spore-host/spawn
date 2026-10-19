@@ -716,6 +716,7 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOFSPORED
+spore_selinux_relabel /etc/systemd/system/spored.service
 systemctl daemon-reload
 systemctl enable spored
 systemctl start spored
@@ -889,6 +890,7 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOFSPORED
+spore_selinux_relabel /etc/systemd/system/spored.service
 systemctl daemon-reload
 systemctl enable spored
 systemctl start spored

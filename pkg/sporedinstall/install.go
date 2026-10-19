@@ -100,6 +100,18 @@ func dirOf(p string) string {
 // can assert that a script which downloads spored actually calls it.
 const FuncName = "spore_install_verified_spored"
 
+// CurlRetryFuncName is the portable retry wrapper VerifiedInstallFunc defines and
+// uses for every download (#1056). Every install path spawn generates runs on
+// whatever curl the AMI ships, down to curl 7.61.1 on EL8, so a curl option newer
+// than that cannot appear in it; this wrapper is how retry-on-any-error survives
+// without --retry-all-errors (curl 7.71+).
+const CurlRetryFuncName = "spore_curl_retry"
+
+// RelabelFuncName is the shell function VerifiedInstallFunc defines to reset a
+// file's SELinux label to the policy default (#1052). Callers that write the
+// spored systemd unit call it on the unit too; it is a no-op without SELinux.
+const RelabelFuncName = "spore_selinux_relabel"
+
 // VerifiedInstallFunc returns the definition of a shell function that downloads
 // and installs spored, failing closed at every step.
 //
@@ -111,7 +123,15 @@ const FuncName = "spore_install_verified_spored"
 // candidate instead of committing the install to it and hard-failing later
 // (#440). A sha256 is always required. The binary is made executable only after
 // every check has passed, and installed by atomic rename so an already-running
-// spored cannot cause ETXTBSY (#27).
+// spored cannot cause ETXTBSY (#27), then relabelled to the policy-default SELinux
+// context, because a rename keeps the /tmp label and systemd will not exec it on
+// an enforcing host (#1052). Rename + relabel rather than install(1): install
+// unlinks then writes in place, so for a moment there is no binary, or a partial
+// one, at Dest.
+//
+// Every download goes through CurlRetryFuncName, never a bare curl with retry
+// flags: the AMIs this runs on ship curl as old as 7.61.1 (EL8), so options newer
+// than that are unusable here (#1056).
 //
 // It returns non-zero on any failure and leaves the existing binary untouched,
 // so a caller may keep running whatever is already installed — but must not
@@ -124,6 +144,46 @@ func VerifiedInstallFunc() string {
 # Fails closed: a missing checksum, a missing signature (when verification is
 # on), or any mismatch aborts without installing anything. Do NOT append
 # "|| true" to a call site — that is the defect this function replaced.
+
+# Usage: %[4]s <retries> <delay-seconds> <curl args...>
+# Runs curl up to retries+1 times, sleeping delay-seconds between attempts, and
+# retries on ANY failure — the semantics of "curl --retry N --retry-delay D
+# --retry-all-errors" (#462: a transient "Empty reply from server" on one fetch
+# used to abort the whole install). It is a loop rather than that flag because
+# --retry-all-errors only exists from curl 7.71; EL8 ships 7.61.1, which exits 2
+# on the unknown option, so every source looked like a download failure and the
+# bootstrap aborted with no spored (#1056). Earlier attempts are quiet; the last
+# one keeps stderr, so a usage error no longer looks like a network failure.
+%[4]s() {
+    local retries="$1" delay="$2" n=0 rc=0
+    shift 2
+    while [ "$n" -lt "$retries" ]; do
+        rc=0
+        curl "$@" 2>/dev/null || rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        # 2 = curl did not understand its arguments; repeating cannot help.
+        [ "$rc" -eq 2 ] && break
+        n=$((n + 1))
+        sleep "$delay"
+    done
+    curl "$@"
+}
+
+# Usage: %[5]s <path> [path ...]
+# Resets each path to its SELinux policy-default label, for files that were moved
+# into place (mv keeps the source label; see #1052). A no-op where SELinux is not
+# in use: no restorecon (Ubuntu), or restorecon present but SELinux disabled.
+# Never fails the caller — a relabel failure is reported, not fatal, because the
+# binary is already installed and verified; on a permissive host it still runs.
+%[5]s() {
+    command -v restorecon >/dev/null 2>&1 || return 0
+    if command -v selinuxenabled >/dev/null 2>&1 && ! selinuxenabled; then
+        return 0
+    fi
+    restorecon -Fv "$@" || echo "WARNING: restorecon failed for $* — under SELinux enforcing, systemd may be unable to start spored (#1052)" >&2
+    return 0
+}
+
 %[1]s() {
     local binary="$1"; shift
     if [ -z "$binary" ] || [ $# -eq 0 ]; then
@@ -138,12 +198,12 @@ func VerifiedInstallFunc() string {
         bin_url="${base}/${binary}"
         sig_url="${base}/${binary}.sig"
         if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
-            if ! curl -fsI --retry 3 --retry-delay 1 --retry-all-errors "$sig_url" >/dev/null 2>&1; then
+            if ! %[4]s 3 1 -fsI "$sig_url" >/dev/null 2>&1; then
                 echo "No signature at ${base} — trying next source"
                 continue
             fi
         fi
-        if curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "$tmp" "$bin_url" 2>/dev/null; then
+        if %[4]s 5 2 -f -o "$tmp" "$bin_url"; then
             chosen="$base"
             echo "Downloaded spored from ${base}"
             break
@@ -165,7 +225,7 @@ func VerifiedInstallFunc() string {
     # "no check needed" lets an attacker who can delete objects opt us out of
     # verification entirely. That was the fail-open in cmd/upgrade_spored.go.
     echo "Verifying checksum..."
-    if ! curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "${tmp}.sha256" "${chosen}/${binary}.sha256" 2>/dev/null; then
+    if ! %[4]s 5 2 -f -o "${tmp}.sha256" "${chosen}/${binary}.sha256"; then
         echo "No checksum published at ${chosen}/${binary}.sha256 — refusing to install an unverified spored" >&2
         rm -f "$tmp" "${tmp}.sha256"
         return 1
@@ -185,7 +245,7 @@ func VerifiedInstallFunc() string {
     # from spawn, not from the bucket, so a bucket compromise can't forge it.
     if [ "${SPORED_SIG_VERIFY:-0}" = "1" ]; then
         echo "Verifying signature..."
-        if ! curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "${tmp}.sig" "${chosen}/${binary}.sig" 2>/dev/null; then
+        if ! %[4]s 5 2 -f -o "${tmp}.sig" "${chosen}/${binary}.sig"; then
             echo "Signature not found at ${chosen}/${binary}.sig — refusing to run an unsigned binary" >&2
             rm -f "$tmp" "${tmp}.sig"
             return 1
@@ -221,8 +281,13 @@ func VerifiedInstallFunc() string {
         rm -f "$tmp"
         return 1
     fi
+    # mv keeps the SOURCE's SELinux label. The temp file was created under /tmp,
+    # which cloud-init labels cloud_init_tmp_t, and systemd (init_t) may not exec
+    # that — so on an enforcing AMI (Rocky/RHEL 9) spored never started and the
+    # instance had no TTL or cost limit (#1052). Reset it to the policy default.
+    %[5]s %[3]s
     return 0
 }
 # --- end spored verified install -------------------------------------------
-`, FuncName, SigningKeyPath, Dest)
+`, FuncName, SigningKeyPath, Dest, CurlRetryFuncName, RelabelFuncName)
 }
