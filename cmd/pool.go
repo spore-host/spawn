@@ -46,6 +46,7 @@ var (
 	poolS3Write      []string
 	poolCostLimit    float64
 	poolDrainWait    time.Duration
+	poolContainers   []string
 )
 
 var poolGroupCmd = &cobra.Command{
@@ -87,6 +88,9 @@ func poolSpecBucket(account, region string) string {
 //     aren't knowable from the pool alone (they're per-task), so the operator (or
 //     nf-spawn, which knows its workdir/input buckets) declares them at create via
 //     --s3-read/--s3-write. Empty (default) = results bucket only, least-privilege.
+//   - The provenance actions on every bucket the worker writes (#1148): the
+//     pooled job script uploads outputs with `spored provenance upload`, as
+//     `spawn task run` does, and without them the outputs land untagged.
 func poolWorkerPolicy(account, region, specBucket, runID string, extraRead, extraWrite []string) string {
 	queueName := "spawn-pool-" + runID
 	queueARN := fmt.Sprintf("arn:aws:sqs:%s:%s:%s", region, account, queueName)
@@ -100,6 +104,7 @@ func poolWorkerPolicy(account, region, specBucket, runID string, extraRead, extr
 		fmt.Sprintf(`{"Effect":"Allow","Action":["sqs:GetQueueUrl","sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],"Resource":[%q]}`, queueARN),
 		fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject"],"Resource":[%q,%q]}`, binPrefix+"/*", specObj),
 		fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%q]}`, specObj),
+		fmt.Sprintf(`{"Effect":"Allow","Action":[%s],"Resource":[%q]}`, iamActionList(provenanceWriteActions), specObj),
 		fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%q,%q]}`, binPrefix, specBkt),
 	}
 	// Extra task input buckets (read-only object access + list).
@@ -110,6 +115,7 @@ func poolWorkerPolicy(account, region, specBucket, runID string, extraRead, extr
 	// Extra task output buckets (read+write+delete object access + list).
 	if objs, bkts := bucketResourceARNs(extraWrite); len(objs) > 0 {
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":[%s]}`, objs))
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":[%s],"Resource":[%s]}`, iamActionList(provenanceWriteActions), objs))
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bkts))
 	}
 	return `{"Version":"2012-10-17","Statement":[` + strings.Join(stmts, ",") + `]}`
@@ -151,12 +157,15 @@ func poolWorkerRoleName(runID string) string {
 
 // poolWorkerRoleConfig is the per-pool instance-profile request. The
 // spawn:pool-run-id tag says which pool a role belongs to, for `spawn orphans`
-// and for anyone reading the account.
-func poolWorkerRoleConfig(account, region, specBucket, runID string, extraRead, extraWrite []string) aws.IAMRoleConfig {
+// and for anyone reading the account. A private-ECR image needs a pull grant,
+// decided as for `spawn task run`; the pool learns its images from --container,
+// because specs arrive after create (#1148).
+func poolWorkerRoleConfig(account, region, specBucket, runID string, extraRead, extraWrite, containers []string) aws.IAMRoleConfig {
 	return aws.IAMRoleConfig{
 		RoleName:         poolWorkerRoleName(runID),
 		TrustServices:    []string{"ec2"},
 		InlinePolicyJSON: poolWorkerPolicy(account, region, specBucket, runID, extraRead, extraWrite),
+		Policies:         ecrPullPolicies(containers...),
 		Tags:             map[string]string{"spawn:pool-run-id": runID},
 	}
 }
@@ -422,7 +431,7 @@ func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, sp
 		return fmt.Errorf("resolve account id for worker policy: %w", err)
 	}
 	iamProfile, err := awsClient.CreateOrGetInstanceProfile(ctx,
-		poolWorkerRoleConfig(account, region, specBucket, poolRunID, poolS3Read, poolS3Write))
+		poolWorkerRoleConfig(account, region, specBucket, poolRunID, poolS3Read, poolS3Write, poolContainers))
 	if err != nil {
 		return fmt.Errorf("set up worker IAM instance profile: %w", err)
 	}
@@ -612,6 +621,7 @@ func init() {
 	poolCreateCmd.Flags().IntVar(&poolVisTimeout, "visibility-timeout", 900, "SQS claim window in seconds (must exceed the longest task runtime)")
 	poolCreateCmd.Flags().StringArrayVar(&poolS3Read, "s3-read", nil, "Extra S3 bucket the tasks read inputs from (repeatable) — beyond the results bucket workers always get")
 	poolCreateCmd.Flags().StringArrayVar(&poolS3Write, "s3-write", nil, "Extra S3 bucket the tasks write outputs to (repeatable) — beyond the results bucket")
+	poolCreateCmd.Flags().StringArrayVar(&poolContainers, "container", nil, "Container image the pool's tasks run (repeatable); a private-ECR image adds an ECR pull grant to the workers' role, as 'spawn task run' does")
 
 	poolDrainCmd.Flags().DurationVar(&poolDrainWait, "wait", 2*time.Minute, "How long to wait for the pool's workers to terminate before removing its IAM role (0 = check once)")
 

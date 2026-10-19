@@ -172,7 +172,7 @@ func TestConcurrentPoolCreatesKeepTheirOwnGrants(t *testing.T) {
 		go func(i int, run string) {
 			defer wg.Done()
 			profiles[i], errs[i] = c.CreateOrGetInstanceProfile(context.Background(),
-				poolWorkerRoleConfig(account, region, bucket, run, nil, nil))
+				poolWorkerRoleConfig(account, region, bucket, run, nil, nil, nil))
 		}(i, run)
 	}
 	wg.Wait()
