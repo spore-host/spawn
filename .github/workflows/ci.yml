@@ -20,6 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Release tags for TestChangelogReleasedSectionsMatchTheirTags (#1101),
+      # which compares every released CHANGELOG section with the same section at
+      # its tag. The checkout above is depth 1 with no tags, and under CI=true
+      # that test FAILS without them rather than skipping. Depth 1 is enough:
+      # it reads one file per tag (`git cat-file`), not history. ~285 MB, ~11s.
+      - name: Fetch release tags
+        run: git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*'
+
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -320,6 +328,12 @@ jobs:
         run: git config --global core.autocrlf false && git config --global core.eol lf
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The root package's tests run here too, so the released-CHANGELOG gate
+      # needs the tags on this runner as well (see the Test job, #1101).
+      - name: Fetch release tags
+        shell: bash
+        run: git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*'
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
