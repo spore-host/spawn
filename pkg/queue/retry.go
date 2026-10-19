@@ -1,11 +1,19 @@
 package queue
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/rand" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"time"
 )
+
+// errUnknownBackoff is returned by CalculateBackoff for a strategy it does not
+// implement. ValidateQueue asks CalculateBackoff rather than keeping its own
+// list, so the strategies a queue file may name are exactly the ones the retry
+// loop can run (#1119: validation once rejected "exponential-jitter", which the
+// switch below has always implemented).
+var errUnknownBackoff = errors.New("unknown backoff strategy")
 
 // CalculateBackoff calculates the retry delay based on the retry configuration
 func CalculateBackoff(cfg *RetryConfig, attempt int) (time.Duration, error) {
@@ -59,7 +67,7 @@ func CalculateBackoff(cfg *RetryConfig, attempt int) (time.Duration, error) {
 		delay = time.Duration(float64(exponential) * jitterFactor)
 
 	default:
-		return 0, fmt.Errorf("unknown backoff strategy: %s", cfg.Backoff)
+		return 0, fmt.Errorf("%w: %s", errUnknownBackoff, cfg.Backoff)
 	}
 
 	// Cap at max delay

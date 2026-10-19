@@ -104,6 +104,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `spawn doctor` reports the mismatch as a failed `account` check and stops
     there instead of probing an account you said you didn't mean.
 
+- **A queue file using `"backoff": "exponential-jitter"` now loads** (#1119).
+  The retry loop has always implemented it, but validation accepted only
+  `fixed` and `exponential`, so the documented example was refused at launch.
+  Validation now asks the retry implementation which strategies exist instead
+  of keeping its own list, rejects a `jitter` outside 0–1, and names the
+  supported strategies when it refuses one.
+
 ## [0.135.1] - 2026-10-18
 
 ### Security
