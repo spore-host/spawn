@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -27,6 +28,11 @@ var terminateCmd = &cobra.Command{
 	Long: `Permanently terminate an instance. This is irreversible: the instance is
 destroyed and any non-persisted volumes are deleted. Use stop or hibernate to
 keep EBS volumes.
+
+A running 'spawn task run' instance first has its command.log and a
+terminal completion record (terminal_reason user_terminated) flushed to S3
+over SSM, as a TTL or cost-limit kill does. The flush is bounded and
+best-effort: if it fails, the instance is terminated anyway.
 
 Terminate a single instance by ID or name, or an entire job array:
 
@@ -144,8 +150,7 @@ func terminateSingle(ctx context.Context, identifier string) error {
 	// its local mint step but has nothing to deprovision).
 	removeHostIdentityForIP(instance.PublicIP)
 
-	fmt.Fprintf(os.Stderr, "Requesting termination for instance %s...\n", instance.InstanceID)
-	if err := client.Terminate(ctx, instance.Region, instance.InstanceID); err != nil {
+	if err := terminateWithFlush(ctx, client.RunShellScript, client.Terminate, instance, os.Stderr); err != nil {
 		return fmt.Errorf("failed to terminate instance: %w", err)
 	}
 
@@ -200,23 +205,11 @@ func terminateJobArray(ctx context.Context) error {
 			len(arrayInstances), arrayName)
 	}
 
-	successCount := 0
-	var failedInstances []string
-	for _, inst := range arrayInstances {
-		if inst.State == "terminated" || inst.State == "shutting-down" {
-			fmt.Fprintf(os.Stderr, "⏭  Skipping %s (already %s)\n", inst.InstanceID, inst.State)
-			continue
-		}
-		deprovisionAllLocalPlugins(ctx, inst.InstanceID, inst.Name)
-		removeHostIdentityForIP(inst.PublicIP)
-		if err := client.Terminate(ctx, inst.Region, inst.InstanceID); err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Failed to terminate %s: %v\n", inst.InstanceID, err)
-			failedInstances = append(failedInstances, inst.InstanceID)
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "✅ Terminating %s\n", inst.InstanceID)
-		successCount++
-	}
+	successCount, failedInstances := terminateArrayMembers(ctx, arrayInstances, client.RunShellScript, client.Terminate,
+		func(inst *aws.InstanceInfo) {
+			deprovisionAllLocalPlugins(ctx, inst.InstanceID, inst.Name)
+			removeHostIdentityForIP(inst.PublicIP)
+		}, os.Stderr)
 
 	_, _ = fmt.Fprintf(os.Stdout, "\nTerminated %d of %d instances.\n", successCount, len(arrayInstances))
 	// One notice per distinct filesystem the array held a lease on (spawn#613) —
@@ -228,6 +221,42 @@ func terminateJobArray(ctx context.Context) error {
 		return fmt.Errorf("failed to terminate %d instance(s): %s", len(failedInstances), strings.Join(failedInstances, ", "))
 	}
 	return nil
+}
+
+// terminateWithFlush is the single-instance terminate: run the task flush (a
+// no-op for anything but a running task instance), then request termination.
+// The order is the point — after TerminateInstances there is nothing left to
+// flush from (spawn#802).
+func terminateWithFlush(ctx context.Context, run ssmShellRunner, terminate func(ctx context.Context, region, instanceID string) error, inst *aws.InstanceInfo, warn io.Writer) error {
+	flushTaskBeforeTerminate(ctx, run, inst, warn)
+	fmt.Fprintf(warn, "Requesting termination for instance %s...\n", inst.InstanceID)
+	return terminate(ctx, inst.Region, inst.InstanceID)
+}
+
+// terminateArrayMembers terminates every live member of a job array. Task
+// members are flushed first, concurrently, before any TerminateInstances call
+// (spawn#802). prepare runs per instance just before its terminate (local
+// plugin and ssh_config cleanup).
+func terminateArrayMembers(ctx context.Context, insts []aws.InstanceInfo, run ssmShellRunner,
+	terminate func(ctx context.Context, region, instanceID string) error,
+	prepare func(inst *aws.InstanceInfo), warn io.Writer) (successCount int, failedInstances []string) {
+	flushTasksBeforeTerminate(ctx, run, insts, warn)
+	for i := range insts {
+		inst := &insts[i]
+		if inst.State == "terminated" || inst.State == "shutting-down" {
+			fmt.Fprintf(warn, "⏭  Skipping %s (already %s)\n", inst.InstanceID, inst.State)
+			continue
+		}
+		prepare(inst)
+		if err := terminate(ctx, inst.Region, inst.InstanceID); err != nil {
+			fmt.Fprintf(warn, "⚠️  Failed to terminate %s: %v\n", inst.InstanceID, err)
+			failedInstances = append(failedInstances, inst.InstanceID)
+			continue
+		}
+		fmt.Fprintf(warn, "✅ Terminating %s\n", inst.InstanceID)
+		successCount++
+	}
+	return successCount, failedInstances
 }
 
 // confirmTerminate prompts for confirmation unless --yes was passed.

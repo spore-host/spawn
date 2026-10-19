@@ -29,6 +29,12 @@ const (
 	// The flush hook deliberately does nothing on this path: the wrapper has
 	// already written the authoritative record by the time spored sees the signal.
 	ExitCompleted ExitReason = "completed"
+	// ExitUserTerminated — a user ran `spawn terminate` on the task's instance.
+	// Not sent by spored: the CLI runs the flush hook with it over SSM just
+	// before TerminateInstances, so a task killed by hand (usually because it
+	// hung) keeps its command.log and gets a terminal record (spawn#802). It
+	// maps to no retry class — a deliberate kill is not a reason to re-run.
+	ExitUserTerminated ExitReason = "user_terminated"
 )
 
 // Note there is no "hibernated" or "stopped" reason, though both are things

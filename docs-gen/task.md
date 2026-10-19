@@ -98,8 +98,12 @@ spawn task run --spec <file> [flags]
 Read the completion record a 'spawn task run' task wrote to
 s3://spawn-results-&lt;account&gt;-&lt;region&gt;/tasks/&lt;task-id&gt;/completion.json.
 
-If the record isn't there yet the task is still running. With --check-complete,
-exit codes mirror 'spawn status': 0=completed, 1=failed, 2=running, 3=error.
+If the record isn't there, status asks EC2 about the task's instance: a live
+instance means the task is still running; a terminated one with no record is
+reported as terminated (killed without a terminal flush), never as running.
+With --check-complete, exit codes mirror 'spawn status': 0=completed,
+1=failed (including terminated without a record), 2=running, 3=error
+(including no record and no instance found).
 
 ```
 spawn task status <task-id> [flags]

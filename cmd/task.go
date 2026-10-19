@@ -933,8 +933,12 @@ var taskStatusCmd = &cobra.Command{
 	Long: `Read the completion record a 'spawn task run' task wrote to
 s3://spawn-results-<account>-<region>/tasks/<task-id>/completion.json.
 
-If the record isn't there yet the task is still running. With --check-complete,
-exit codes mirror 'spawn status': 0=completed, 1=failed, 2=running, 3=error.`,
+If the record isn't there, status asks EC2 about the task's instance: a live
+instance means the task is still running; a terminated one with no record is
+reported as terminated (killed without a terminal flush), never as running.
+With --check-complete, exit codes mirror 'spawn status': 0=completed,
+1=failed (including terminated without a record), 2=running, 3=error
+(including no record and no instance found).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
@@ -980,10 +984,16 @@ exit codes mirror 'spawn status': 0=completed, 1=failed, 2=running, 3=error.`,
 			return err
 		}
 		if !present {
+			// No record is NOT proof the task is running: an instance killed
+			// without spored's involvement never writes one (spawn#802). Ask
+			// EC2 what became of the instance.
+			code := reportTaskWithoutRecord(ctx, client.ListInstances, region, taskID, os.Stdout, taskStatusCheckDone)
 			if taskStatusCheckDone {
-				os.Exit(2) // running
+				os.Exit(code)
 			}
-			fmt.Printf("Task %s: running (no completion record yet)\n", taskID)
+			if code == taskStatusExitError {
+				return fmt.Errorf("task %s: no completion record, and its instance state could not be determined", taskID)
+			}
 			return nil
 		}
 
