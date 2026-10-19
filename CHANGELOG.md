@@ -47,6 +47,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminated anyway. Job-array terminates flush all task members concurrently
   before the first TerminateInstances call.
 
+- **spored acts on a short task's completion even when it finishes before
+  the `spawn:on-complete` tag is visible (#270).** spored reads on-complete from
+  EC2 tags, which are eventually consistent and were re-read only on tick 1
+  and every 5th tick. A task that wrote its completion file before the tag was
+  readable was ignored until the next scheduled refresh, and if that refresh
+  had already happened, the instance ran to its TTL. Now, when the
+  completion file is present and no on-complete action is known yet, spored
+  re-reads the tags on that tick. When the completion-file tag is not visible
+  either, it checks the default `/tmp/SPAWN_COMPLETE`. These extra refreshes
+  are capped at 5 per instance, so a workload that writes the file with no
+  on-complete configured does not cost a DescribeTags call every minute.
+
 ## [0.135.2] - 2026-10-19
 
 ### Added

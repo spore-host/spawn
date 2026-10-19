@@ -157,6 +157,14 @@ type Agent struct {
 	// it isn't shared across agents and resets cleanly per instance (#175).
 	configRefreshTick int
 
+	// earlyCompletionRefreshes counts tag refreshes triggered by a completion
+	// signal seen before on-complete was known (#270); capped at
+	// maxEarlyCompletionRefreshes.
+	earlyCompletionRefreshes int
+	// defaultCompletionFile replaces provider.DefaultCompletionFile when
+	// non-empty. Tests only, so they need not write to /tmp.
+	defaultCompletionFile string
+
 	// peerState is the hybrid peer list spored maintains (#933, peers.go).
 	peerState peerState
 
@@ -635,14 +643,18 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// visible within the seconds before spored starts. Refreshing here ensures
 	// on-complete, pre-stop, and other lifecycle tags are eventually picked up.
 	a.configRefreshTick++
+	refreshed := false
 	if a.configRefreshTick == 1 || a.configRefreshTick%5 == 0 {
-		if err := a.provider.RefreshConfig(ctx); err != nil {
-			log.Printf("Warning: failed to refresh config from tags: %v", err)
-		} else {
-			if fresh, err2 := a.provider.GetConfig(ctx); err2 == nil && fresh != nil {
-				a.setConfig(fresh)
-			}
-		}
+		a.refreshConfigFromTags(ctx)
+		refreshed = true
+	}
+
+	// 0'. A completion signal with no on-complete configured yet may only mean
+	// the spawn:on-complete tag was not visible at the last refresh: a short
+	// task can finish before it is (#270). Re-read the tags now rather than
+	// waiting up to five ticks, so step 1 below sees the action on this tick.
+	if !refreshed {
+		a.refreshForEarlyCompletion(ctx)
 	}
 
 	// 0a0. Mount a pending async-created FSx once spawn:fsx-pending is visible
@@ -1902,6 +1914,57 @@ func (a *Agent) warnUsers(ctx context.Context, message string) {
 	_ = os.WriteFile(filepath.Join(os.TempDir(), "SPAWN_WARNING"), []byte(message+"\n"), 0600) // nosemgrep: go.lang.security.bad_tmp.bad-tmp-file-creation
 
 	log.Printf("Warning sent to users: %s", message)
+}
+
+// refreshConfigFromTags re-reads the spawn:* tags and swaps in the result. A
+// failed read keeps the current config.
+func (a *Agent) refreshConfigFromTags(ctx context.Context) {
+	if err := a.provider.RefreshConfig(ctx); err != nil {
+		log.Printf("Warning: failed to refresh config from tags: %v", err)
+		return
+	}
+	if fresh, err := a.provider.GetConfig(ctx); err == nil && fresh != nil {
+		a.setConfig(fresh)
+	}
+}
+
+// maxEarlyCompletionRefreshes caps the out-of-cadence tag refreshes a
+// completion signal can trigger. Tag visibility settles in seconds, so a few
+// ticks covers the race; past that, a workload that writes the file with no
+// on-complete configured falls back to the normal every-5-ticks refresh rather
+// than costing a DescribeTags every minute forever.
+const maxEarlyCompletionRefreshes = 5
+
+// refreshForEarlyCompletion refreshes config from tags when the completion
+// signal is present but no on-complete action is known yet (#270).
+//
+// spored learns on-complete from EC2 tags, which are eventually consistent and
+// re-read only on tick 1 and every 5th tick. A task that writes its completion
+// file before spawn:on-complete is visible used to be ignored until the next
+// scheduled refresh, or, when that refresh was before the file appeared, ran
+// to its TTL. The signal itself is now the trigger to look again.
+//
+// The file checked is the configured one or, when the completion-file tag is
+// not visible either, the default every launch path uses. A custom
+// completion-file whose tag is also invisible is still picked up at the next
+// scheduled refresh.
+func (a *Agent) refreshForEarlyCompletion(ctx context.Context) {
+	if a.config.OnComplete != "" || a.earlyCompletionRefreshes >= maxEarlyCompletionRefreshes {
+		return
+	}
+	path := a.config.CompletionFile
+	if path == "" {
+		path = a.defaultCompletionFile
+		if path == "" {
+			path = provider.DefaultCompletionFile
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	a.earlyCompletionRefreshes++
+	log.Printf("Completion signal %s present but no on-complete action known yet; re-reading tags (#270)", path)
+	a.refreshConfigFromTags(ctx)
 }
 
 func (a *Agent) checkCompletion(ctx context.Context) bool {
