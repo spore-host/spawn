@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
 	"os"
@@ -187,7 +188,7 @@ func stubDiskIOBytes(t *testing.T, samples ...int64) {
 	t.Helper()
 	i := 0
 	orig := readDiskIOBytes
-	readDiskIOBytes = func() int64 {
+	readDiskIOBytes = func(context.Context) int64 {
 		s := samples[len(samples)-1]
 		if i < len(samples) {
 			s = samples[i]
@@ -207,7 +208,7 @@ func TestDiskIOBytes_IsADeltaAfterAFirstSample(t *testing.T) {
 	stubDiskIOBytes(t, boot, boot+4096, boot+4096, boot+4096+2_000_000)
 	a := newTestAgent(t, nil)
 
-	v, measured, why := a.diskIOBytes()
+	v, measured, why := a.diskIOBytes(context.Background())
 	if measured {
 		t.Error("the first sample reported a measurement; there is no delta to measure")
 	}
@@ -216,7 +217,7 @@ func TestDiskIOBytes_IsADeltaAfterAFirstSample(t *testing.T) {
 	}
 
 	for i, want := range []int64{4096, 0, 2_000_000} {
-		v, measured, why = a.diskIOBytes()
+		v, measured, why = a.diskIOBytes(context.Background())
 		if !measured {
 			t.Fatalf("sample %d was not a measurement (%q)", i+2, why)
 		}
@@ -231,9 +232,9 @@ func TestDiskIOBytes_IsADeltaAfterAFirstSample(t *testing.T) {
 func TestDiskIOBytes_ZeroCounterIsNotAPermanentFirstSample(t *testing.T) {
 	stubDiskIOBytes(t, 0, 0, 0)
 	a := newTestAgent(t, nil)
-	_, _, _ = a.diskIOBytes()
+	_, _, _ = a.diskIOBytes(context.Background())
 	for i := 0; i < 2; i++ {
-		if v, measured, why := a.diskIOBytes(); !measured || v != 0 {
+		if v, measured, why := a.diskIOBytes(context.Background()); !measured || v != 0 {
 			t.Fatalf("sample %d = (%d, measured=%v, %q), want a measured 0", i+2, v, measured, why)
 		}
 	}
@@ -245,11 +246,11 @@ func TestDiskIOBytes_ZeroCounterIsNotAPermanentFirstSample(t *testing.T) {
 func TestDiskIOBytes_BackwardsCounterIsUnknown(t *testing.T) {
 	stubDiskIOBytes(t, 5_000_000, 100, 100)
 	a := newTestAgent(t, nil)
-	_, _, _ = a.diskIOBytes()
-	if v, measured, why := a.diskIOBytes(); measured || v != diskAssumedActive || why == "" {
+	_, _, _ = a.diskIOBytes(context.Background())
+	if v, measured, why := a.diskIOBytes(context.Background()); measured || v != diskAssumedActive || why == "" {
 		t.Errorf("backwards counter = (%d, measured=%v, %q), want unknown, assume-active and a reason", v, measured, why)
 	}
-	if v, measured, _ := a.diskIOBytes(); !measured || v != 0 {
+	if v, measured, _ := a.diskIOBytes(context.Background()); !measured || v != 0 {
 		t.Errorf("after the reset = (%d, measured=%v), want a measured 0 against the new baseline", v, measured)
 	}
 }
@@ -265,7 +266,7 @@ func TestDiskIOBytes_UnknownIsAssumedActiveAndWarnedOnce(t *testing.T) {
 	a := newTestAgent(t, nil)
 	buf.Reset()
 	for i := 0; i < 3; i++ {
-		v, measured, why := a.diskIOBytes()
+		v, measured, why := a.diskIOBytes(context.Background())
 		if measured {
 			t.Fatalf("call %d: an unreadable counter reported a measurement", i+1)
 		}

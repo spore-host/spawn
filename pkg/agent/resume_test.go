@@ -58,14 +58,14 @@ func quietCounters(t *testing.T) {
 	var mu sync.Mutex
 	var jiffies int64
 	cpu, net, disk := readCPUTimes, readNetworkBytes, readDiskIOBytes
-	readCPUTimes = func() (int64, int64, error) {
+	readCPUTimes = func(context.Context) (int64, int64, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		jiffies += 100
 		return jiffies, jiffies, nil
 	}
-	readNetworkBytes = func() (int64, int64) { return 1000, 1000 }
-	readDiskIOBytes = func() int64 { return 5000 }
+	readNetworkBytes = func(context.Context) (int64, int64) { return 1000, 1000 }
+	readDiskIOBytes = func(context.Context) int64 { return 5000 }
 	t.Cleanup(func() { readCPUTimes, readNetworkBytes, readDiskIOBytes = cpu, net, disk })
 }
 
@@ -226,8 +226,8 @@ func TestResumedInstanceIsNotReHibernatedAndRunsPreStopAgain(t *testing.T) {
 	})
 	a := f.a
 	a.checkResume(context.Background())
-	a.evaluateIdle() // the counters' first samples, so the next tick reads idle
-	if s := a.evaluateIdle(); !s.idle {
+	a.evaluateIdle(context.Background()) // the counters' first samples, so the next tick reads idle
+	if s := a.evaluateIdle(context.Background()); !s.idle {
 		t.Fatalf("setup: the quiet machine does not read idle: %s", s.reason)
 	}
 	a.lastActivityTime = time.Now().Add(-time.Hour)

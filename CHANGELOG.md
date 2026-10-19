@@ -71,6 +71,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `task status --check-complete`. A non-zero command exit code is still
   returned as before.
 
+- **Windows spored shuts down promptly** (#1104). Every Windows idle and
+  session reader (CPU, network, disk, processes, `quser`, port connections) and
+  the `msg.exe` user warning started a fresh PowerShell or tool process that
+  nothing could stop, so a monitor tick in flight held up spored's shutdown,
+  hibernate preparation and resume handling until its readers finished: about
+  14 seconds on a CI runner. Each of these processes, and the Linux `who`,
+  `pgrep` and `wall` calls, now stops when spored's context is cancelled and is
+  bounded by a 30-second timeout otherwise. The accelerator and DCV probes on
+  the idle path now take the same context instead of a fresh one. A new test
+  fails if any file in `pkg/agent`, for any GOOS, starts a process with
+  `exec.Command`.
+
 ## [0.135.1] - 2026-10-18
 
 ### Security

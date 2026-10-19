@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -10,7 +11,7 @@ func stubCPUTimes(t *testing.T, samples ...[2]int64) {
 	t.Helper()
 	i := 0
 	orig := readCPUTimes
-	readCPUTimes = func() (int64, int64, error) {
+	readCPUTimes = func(context.Context) (int64, int64, error) {
 		if i >= len(samples) {
 			return samples[len(samples)-1][0], samples[len(samples)-1][1], nil
 		}
@@ -28,11 +29,11 @@ func stubCPUTimes(t *testing.T, samples ...[2]int64) {
 func TestCPUUsage_UnknownStatesAreReportedAsUnknown(t *testing.T) {
 	t.Run("unreadable source", func(t *testing.T) {
 		orig := readCPUTimes
-		readCPUTimes = func() (int64, int64, error) { return 0, 0, errors.New("no /proc/stat") }
+		readCPUTimes = func(context.Context) (int64, int64, error) { return 0, 0, errors.New("no /proc/stat") }
 		t.Cleanup(func() { readCPUTimes = orig })
 
 		a := newTestAgent(t, nil)
-		usage, ok := a.cpuUsage()
+		usage, ok := a.cpuUsage(context.Background())
 		if ok {
 			t.Error("an unreadable source reported a measurement")
 		}
@@ -44,7 +45,7 @@ func TestCPUUsage_UnknownStatesAreReportedAsUnknown(t *testing.T) {
 	t.Run("first call has no previous sample", func(t *testing.T) {
 		stubCPUTimes(t, [2]int64{100, 1000})
 		a := newTestAgent(t, nil)
-		usage, ok := a.cpuUsage()
+		usage, ok := a.cpuUsage(context.Background())
 		if ok {
 			t.Error("the first call reported a measurement; there is no delta to measure")
 		}
@@ -60,8 +61,8 @@ func TestCPUUsage_UnknownStatesAreReportedAsUnknown(t *testing.T) {
 	t.Run("zero elapsed time between samples", func(t *testing.T) {
 		stubCPUTimes(t, [2]int64{100, 1000}, [2]int64{100, 1000})
 		a := newTestAgent(t, nil)
-		_, _ = a.cpuUsage() // prime
-		usage, ok := a.cpuUsage()
+		_, _ = a.cpuUsage(context.Background()) // prime
+		usage, ok := a.cpuUsage(context.Background())
 		if ok {
 			t.Error("a zero-length interval reported a measurement")
 		}
@@ -93,8 +94,8 @@ func TestCPUUsage_RealDeltaIsMeasured(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stubCPUTimes(t, tc.first, tc.second)
 			a := newTestAgent(t, nil)
-			_, _ = a.cpuUsage()
-			usage, ok := a.cpuUsage()
+			_, _ = a.cpuUsage(context.Background())
+			usage, ok := a.cpuUsage(context.Background())
 			if !ok {
 				t.Fatal("a real delta was not reported as a measurement")
 			}
@@ -111,16 +112,16 @@ func TestCPUUsage_RealDeltaIsMeasured(t *testing.T) {
 func TestCPUUsage_RealZeroIsDistinguishableFromUnknown(t *testing.T) {
 	stubCPUTimes(t, [2]int64{100, 1000}, [2]int64{300, 1200})
 	a := newTestAgent(t, nil)
-	_, _ = a.cpuUsage()
-	measured, ok := a.cpuUsage()
+	_, _ = a.cpuUsage(context.Background())
+	measured, ok := a.cpuUsage(context.Background())
 	if !ok || measured != 0.0 {
 		t.Fatalf("precondition: got (%v, %v), want (0, true)", measured, ok)
 	}
 
 	stubCPUTimes(t, [2]int64{100, 1000}, [2]int64{100, 1000})
 	b := newTestAgent(t, nil)
-	_, _ = b.cpuUsage()
-	unknown, ok := b.cpuUsage()
+	_, _ = b.cpuUsage(context.Background())
+	unknown, ok := b.cpuUsage(context.Background())
 	if ok {
 		t.Fatal("the unknown case claimed to be measured")
 	}
@@ -161,8 +162,8 @@ func TestCPUUsage_BackwardsCountersAreUnknown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stubCPUTimes(t, tc.first, tc.second)
 			a := newTestAgent(t, nil)
-			_, _ = a.cpuUsage()
-			usage, ok := a.cpuUsage()
+			_, _ = a.cpuUsage(context.Background())
+			usage, ok := a.cpuUsage(context.Background())
 			if ok {
 				t.Errorf("backwards counters reported a measurement (%v%%)", usage)
 			}

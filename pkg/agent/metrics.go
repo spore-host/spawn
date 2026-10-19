@@ -145,8 +145,9 @@ func (a *Agent) GetMemoryStats(ctx context.Context) (metrics.MemoryStats, error)
 
 // GetTerminalCount returns the number of active terminal sessions
 func (a *Agent) GetTerminalCount() int {
-	cmd := exec.Command("ps", "aux")
-	output, err := cmd.Output()
+	// The metrics collector's interface carries no context; the probe timeout
+	// still bounds the scrape.
+	output, err := probeOutput(context.Background(), "ps", "aux")
 	if err != nil {
 		return 0
 	}
@@ -167,8 +168,7 @@ func (a *Agent) GetTerminalCount() int {
 
 // GetLoggedInUserCount returns the number of logged-in users
 func (a *Agent) GetLoggedInUserCount() int {
-	cmd := exec.Command("who")
-	output, err := cmd.Output()
+	output, err := probeOutput(context.Background(), "who")
 	if err != nil {
 		return 0
 	}

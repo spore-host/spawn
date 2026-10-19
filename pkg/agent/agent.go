@@ -663,7 +663,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	a.refreshReadyURL(ctx)
 
 	// 0a. Keep spawn:logged-in-count tag current (throttled to 5/min).
-	a.writeSessionCountTag(ctx, countActiveSessions()+countActivePortConnections(a.config.ActivePorts))
+	a.writeSessionCountTag(ctx, countActiveSessions(ctx)+countActivePortConnections(ctx, a.config.ActivePorts))
 
 	// 0b. Keep spawn:compute-seconds tag current (throttled to 5/min).
 	a.writeComputeSecondsTag(ctx)
@@ -717,7 +717,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 		// Warn once when 5 minutes remain before TTL
 		if remaining <= 5*time.Minute && !a.ttlWarned {
 			a.ttlWarned = true
-			a.warnUsers(i18n.Tf("spawn.agent.ttl_warning", map[string]interface{}{
+			a.warnUsers(ctx, i18n.Tf("spawn.agent.ttl_warning", map[string]interface{}{
 				"Duration": remaining.Round(time.Minute),
 			}))
 			a.notifier.Notify(ctx, "ttl_warning", remaining.Round(time.Minute).String())
@@ -743,7 +743,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 
 		// Warn when 90%+ of budget consumed
 		if accumulated/a.config.CostLimit >= 0.90 {
-			a.warnUsers(i18n.Tf("spawn.agent.cost_limit_warning", map[string]interface{}{
+			a.warnUsers(ctx, i18n.Tf("spawn.agent.cost_limit_warning", map[string]interface{}{
 				"Accumulated": fmt.Sprintf("%.4f", accumulated),
 				"Limit":       fmt.Sprintf("%.2f", a.config.CostLimit),
 				"Percentage":  fmt.Sprintf("%.0f", (accumulated/a.config.CostLimit)*100),
@@ -754,7 +754,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// 4. Check idle. The signals are sampled and the decision published on
 	// every tick, idle timeout or not, so the metrics endpoint and status read
 	// this tick's evaluation rather than taking samples of their own (#952).
-	snap := a.evaluateIdle()
+	snap := a.evaluateIdle(ctx)
 	a.publishIdleState(snap) // for `spored status`, which cannot sample (#1090)
 	if a.config.IdleTimeout > 0 {
 		log.Print(snap.reason)
@@ -779,7 +779,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 			remaining := a.config.IdleTimeout - idleTime
 			if remaining > 0 && remaining <= 5*time.Minute && !a.idleWarned {
 				a.idleWarned = true
-				a.warnUsers(i18n.Tf("spawn.agent.idle_warning", map[string]interface{}{
+				a.warnUsers(ctx, i18n.Tf("spawn.agent.idle_warning", map[string]interface{}{
 					"IdleDuration": idleTime.Round(time.Minute),
 					"Remaining":    remaining.Round(time.Minute),
 				}))
@@ -800,8 +800,8 @@ var errBadProcStat = fmt.Errorf("unexpected cpu stat format")
 // countActivePortConnections counts ESTABLISHED connections on the given ports —
 // detects browser-based app users (RStudio, Jupyter) that don't appear in the
 // session list because they connect via HTTP, not SSH. OS-specific source.
-func countActivePortConnections(ports []int) int {
-	return sysCountActivePortConnections(ports)
+func countActivePortConnections(ctx context.Context, ports []int) int {
+	return sysCountActivePortConnections(ctx, ports)
 }
 
 // countActiveSessions returns the number of login sessions with recent keyboard
@@ -809,8 +809,8 @@ func countActivePortConnections(ports []int) int {
 // block idle detection. OS-specific source: on Linux the idle time of each
 // terminal (ttyidle.go), on Windows quser's IDLE TIME. Presence alone, an open
 // login or a PTY nobody is typing in, must never count (#953).
-func countActiveSessions() int {
-	return sessionCounter()
+func countActiveSessions(ctx context.Context) int {
+	return sessionCounter(ctx)
 }
 
 // sessionCounter is the OS session source behind countActiveSessions; a variable
@@ -820,9 +820,9 @@ var sessionCounter = sysCountActiveSessions
 
 // findActiveProcess returns the first configured process name that is currently
 // running, or "" if none are found. OS-specific source.
-func (a *Agent) findActiveProcess() string {
+func (a *Agent) findActiveProcess(ctx context.Context) string {
 	for _, name := range a.config.ActiveProcesses {
-		if sysIsProcessRunning(name) {
+		if sysIsProcessRunning(ctx, name) {
 			return name
 		}
 	}
@@ -1327,19 +1327,19 @@ const noSampleYet = "no sample yet"
 // All three are read on every call, before any check can return. When the
 // decision returned early (a session, a process, busy CPU), the network and
 // disk counters used to go unsampled, so the next delta spanned several ticks.
-func (a *Agent) sampleIdleSignals() idleSnapshot {
+func (a *Agent) sampleIdleSignals(ctx context.Context) idleSnapshot {
 	s := idleSnapshot{taken: time.Now()}
-	s.cpu, s.cpuMeasured = a.cpuUsage()
-	s.net, s.netMeasured, s.netWhy = a.networkBytes()
-	s.disk, s.diskMeasured, s.diskWhy = a.diskIOBytes()
+	s.cpu, s.cpuMeasured = a.cpuUsage(ctx)
+	s.net, s.netMeasured, s.netWhy = a.networkBytes(ctx)
+	s.disk, s.diskMeasured, s.diskWhy = a.diskIOBytes(ctx)
 	return s
 }
 
 // evaluateIdle samples, decides and publishes the result for readers. Only the
 // owner of sampling may call it (see sampleIdleSignals).
-func (a *Agent) evaluateIdle() idleSnapshot {
-	s := a.sampleIdleSignals()
-	s.idle, s.reason = a.idleDecision(s)
+func (a *Agent) evaluateIdle(ctx context.Context) idleSnapshot {
+	s := a.sampleIdleSignals(ctx)
+	s.idle, s.reason = a.idleDecision(ctx, s)
 	a.idleMu.Lock()
 	a.idleSnap = s
 	a.idleMu.Unlock()
@@ -1354,15 +1354,15 @@ func (a *Agent) idleSnapshotNow() idleSnapshot {
 }
 
 // isIdle is the monitor loop's evaluation, logged.
-func (a *Agent) isIdle() bool {
-	s := a.evaluateIdle()
+func (a *Agent) isIdle(ctx context.Context) bool {
+	s := a.evaluateIdle(ctx)
 	log.Print(s.reason)
 	return s.idle
 }
 
 // idleDecision decides from one tick's readings plus the stateless signals
 // (DCV, sessions, processes, GPU). It takes no counter sample itself.
-func (a *Agent) idleDecision(r idleSnapshot) (bool, string) {
+func (a *Agent) idleDecision(ctx context.Context, r idleSnapshot) (bool, string) {
 	// DCV application streaming: use X11 activity file (written by kiosk-wm on
 	// key/mouse events) as the authoritative idle signal. Falls back to DCV
 	// connection count if the file doesn't exist (pre-kiosk-wm instances).
@@ -1380,7 +1380,7 @@ func (a *Agent) idleDecision(r idleSnapshot) (bool, string) {
 		}
 		connCount := -1
 		if !fileExists {
-			connCount = a.getDCVConnectionCount()
+			connCount = a.getDCVConnectionCount(ctx)
 		}
 		idle, fallThrough := dcvIdleDecision(fileExists, activityAge, connCount,
 			time.Since(a.startTime), dcvGraceTimeout, a.config.IdleTimeout)
@@ -1398,12 +1398,12 @@ func (a *Agent) idleDecision(r idleSnapshot) (bool, string) {
 	}
 
 	// Active SSH/terminal sessions reset the idle timer.
-	if sessions := countActiveSessions(); sessions > 0 {
+	if sessions := countActiveSessions(ctx); sessions > 0 {
 		return false, fmt.Sprintf("Not idle: %d active session(s)", sessions)
 	}
 
 	// Check configured process names — if any are running, instance is not idle.
-	if proc := a.findActiveProcess(); proc != "" {
+	if proc := a.findActiveProcess(ctx); proc != "" {
 		return false, fmt.Sprintf("Not idle: process %q is running", proc)
 	}
 
@@ -1441,7 +1441,7 @@ func (a *Agent) idleDecision(r idleSnapshot) (bool, string) {
 
 	// Check GPU utilization
 	// GPU, Neuron, Gaudi: unknown is active, as for the counters (#954).
-	gpuUtilization, gpuMeasured, gpuWhy := a.gpuUtilization()
+	gpuUtilization, gpuMeasured, gpuWhy := a.gpuUtilization(ctx)
 	if !gpuMeasured {
 		return false, fmt.Sprintf("Not idle: accelerator utilization could not be measured (%s); assuming active", gpuWhy)
 	}
@@ -1478,7 +1478,7 @@ func (a *Agent) setLastActivity(t time.Time) {
 // always returns errBadProcStat — so on the platform most development happens
 // on, every branch of cpuUsage except the first is unreachable, and the
 // zero-delta bug (#734) could not be reproduced locally at all.
-var readCPUTimes = func() (idle, total int64, err error) { return sysReadCPUTimes() }
+var readCPUTimes = sysReadCPUTimes
 
 // cpuUsage returns CPU utilisation and whether it is a real MEASUREMENT.
 //
@@ -1502,8 +1502,8 @@ var readCPUTimes = func() (idle, total int64, err error) { return sysReadCPUTime
 // spaces calls a second or more apart so deltaTotal > 0 and the branch is not
 // currently reachable from isIdle — but "one call site away from stopping a busy
 // instance" is not a property worth keeping.
-func (a *Agent) cpuUsage() (float64, bool) {
-	idle, total, err := readCPUTimes()
+func (a *Agent) cpuUsage(ctx context.Context) (float64, bool) {
+	idle, total, err := readCPUTimes(ctx)
 	if err != nil {
 		return 100.0, false // cannot read: assume active
 	}
@@ -1538,7 +1538,7 @@ func (a *Agent) cpuUsage() (float64, bool) {
 // readNetworkBytes is the network-counter source, indirected through a var for
 // the same reason as readCPUTimes: the darwin stub always says "unknown", so the
 // delta logic below is otherwise untestable where development happens.
-var readNetworkBytes = func() (rx, tx int64) { return sysReadNetworkBytes() }
+var readNetworkBytes = sysReadNetworkBytes
 
 // networkAssumedActive is what an unmeasured network reading reports: far over
 // idleNetworkBytesThreshold, so "could not tell" never reads as "idle".
@@ -1561,8 +1561,8 @@ const networkAssumedActive int64 = 64 * idleNetworkBytesThreshold
 // sample is tracked explicitly, a counter that cannot be read is reported as
 // unknown (and warned about once), and the reader picks interfaces by structure
 // (readNetDevBytes) so the unreadable case is genuinely exceptional.
-func (a *Agent) networkBytes() (bytes int64, measured bool, why string) {
-	rx, tx := readNetworkBytes()
+func (a *Agent) networkBytes(ctx context.Context) (bytes int64, measured bool, why string) {
+	rx, tx := readNetworkBytes(ctx)
 	if rx < 0 || tx < 0 {
 		const reason = "no physical network interface counters could be read"
 		if !a.netUnknownWarned {
@@ -1588,7 +1588,7 @@ func (a *Agent) networkBytes() (bytes int64, measured bool, why string) {
 
 // readDiskIOBytes is the disk-counter source, indirected through a var for the
 // same reason as readNetworkBytes: the darwin stub always says "unknown".
-var readDiskIOBytes = func() int64 { return sysReadDiskIOBytes() }
+var readDiskIOBytes = sysReadDiskIOBytes
 
 // The per-tick (one minute) network and disk volumes at or under which those
 // signals count as idle. They are set from what an instance nobody is using
@@ -1631,8 +1631,8 @@ const diskAssumedActive int64 = 64 * idleDiskBytesThreshold
 // disk. So on Nitro it read 0 for ever, a dead signal that let a disk-bound,
 // low-CPU workload be idle-stopped; and on xvd/sd/vd hosts it read the boot-time
 // total, always over the threshold, so idle-stop could never fire.
-func (a *Agent) diskIOBytes() (bytes int64, measured bool, why string) {
-	total := readDiskIOBytes()
+func (a *Agent) diskIOBytes(ctx context.Context) (bytes int64, measured bool, why string) {
+	total := readDiskIOBytes(ctx)
 	if total < 0 {
 		const reason = "no whole-disk I/O counters could be read"
 		if !a.diskUnknownWarned {
@@ -1660,8 +1660,8 @@ func (a *Agent) diskIOBytes() (bytes int64, measured bool, why string) {
 // when DCV isn't ready (binary missing, server down, or unparseable output) — the
 // caller's "unknown" signal. The parsing is in parseDCVConnections (pure/tested);
 // the shell-out goes through the dcvRunner seam so it's testable (#282).
-func (a *Agent) getDCVConnectionCount() int {
-	out, err := a.dcv.describeSession(context.Background(), a.config.DCVSessionID)
+func (a *Agent) getDCVConnectionCount(ctx context.Context) int {
+	out, err := a.dcv.describeSession(ctx, a.config.DCVSessionID)
 	if err != nil {
 		return -1 // DCV not ready or session not found
 	}
@@ -1694,7 +1694,7 @@ func (a *Agent) checkSpotInterruption(ctx context.Context) bool {
 	a.Cleanup(cleanupCtx)
 
 	// Alert users immediately
-	a.warnUsers(i18n.T("spawn.agent.spot_interruption.title") + "\n" +
+	a.warnUsers(ctx, i18n.T("spawn.agent.spot_interruption.title")+"\n"+
 		i18n.Tf("spawn.agent.spot_interruption.message", map[string]interface{}{
 			"Action": info.Action,
 			"Time":   info.Time.Format("15:04:05"),
@@ -1889,9 +1889,9 @@ func (a *Agent) sendSpotInterruptionNotification(action, interruptTime string) {
 	// For now, the notification file can be picked up by external monitoring
 }
 
-func (a *Agent) warnUsers(message string) {
+func (a *Agent) warnUsers(ctx context.Context, message string) {
 	// Broadcast to logged-in sessions (OS-specific: wall on Linux, msg on Windows).
-	sysWarnUsers(message)
+	sysWarnUsers(ctx, message)
 
 	// Also write a warning file in the OS temp dir for external pickup.
 	_ = os.WriteFile(filepath.Join(os.TempDir(), "SPAWN_WARNING"), []byte(message+"\n"), 0600) // nosemgrep: go.lang.security.bad_tmp.bad-tmp-file-creation
@@ -1990,7 +1990,7 @@ func (a *Agent) announceCompletion(ctx context.Context) {
 
 	// Warn users with grace period
 	delay := a.config.CompletionDelay
-	a.warnUsers(i18n.Tf("spawn.agent.workload_complete", map[string]interface{}{
+	a.warnUsers(ctx, i18n.Tf("spawn.agent.workload_complete", map[string]interface{}{
 		"Action": a.config.OnComplete,
 		"Delay":  delay,
 	}))
@@ -2140,7 +2140,7 @@ func (a *Agent) stop(ctx context.Context, reason string, why taskproto.ExitReaso
 	// Clean up DNS before stopping
 	a.Cleanup(ctx)
 
-	a.warnUsers(i18n.Tf("spawn.agent.stopping", map[string]interface{}{
+	a.warnUsers(ctx, i18n.Tf("spawn.agent.stopping", map[string]interface{}{
 		"Reason": reason,
 	}))
 
@@ -2164,7 +2164,7 @@ func (a *Agent) hibernate(ctx context.Context, why taskproto.ExitReason) error {
 	// Clean up DNS before hibernating
 	a.Cleanup(ctx)
 
-	a.warnUsers(i18n.T("spawn.agent.hibernating"))
+	a.warnUsers(ctx, i18n.T("spawn.agent.hibernating"))
 
 	// Wait a moment for users to see warning
 	time.Sleep(a.shutdownWarnDelay())
@@ -2294,7 +2294,7 @@ func (a *Agent) runPreStop(spotMode bool, why taskproto.ExitReason) {
 	} else {
 		log.Printf("Running pre-stop hook (timeout: %v): %s", timeout, a.config.PreStop)
 	}
-	a.warnUsers(i18n.Tf("spawn.agent.pre_stop_running", map[string]interface{}{
+	a.warnUsers(context.Background(), i18n.Tf("spawn.agent.pre_stop_running", map[string]interface{}{
 		"Timeout": timeout,
 	}))
 	a.notifier.Notify(context.Background(), "pre_stop_start", a.config.PreStop)
@@ -2319,11 +2319,11 @@ func (a *Agent) runPreStop(spotMode bool, why taskproto.ExitReason) {
 		detail := tail.String()
 		if ctx.Err() == context.DeadlineExceeded {
 			log.Printf("Pre-stop hook timed out after %v — proceeding with shutdown", timeout)
-			a.warnUsers(fmt.Sprintf("⚠️ Pre-stop task timed out after %v and was killed — output may be incomplete.", timeout))
+			a.warnUsers(context.Background(), fmt.Sprintf("⚠️ Pre-stop task timed out after %v and was killed — output may be incomplete.", timeout))
 			a.notifier.Notify(context.Background(), "pre_stop_timeout", preStopDetail(timeout.String(), detail))
 		} else {
 			log.Printf("Pre-stop hook exited with error: %v — proceeding with shutdown", err)
-			a.warnUsers(fmt.Sprintf("⚠️ Pre-stop task failed (%v) — output may not have been saved.", err))
+			a.warnUsers(context.Background(), fmt.Sprintf("⚠️ Pre-stop task failed (%v) — output may not have been saved.", err))
 			a.notifier.Notify(context.Background(), "pre_stop_failed", preStopDetail(err.Error(), detail))
 		}
 		return
@@ -2380,7 +2380,7 @@ func (a *Agent) terminate(ctx context.Context, reason string, why taskproto.Exit
 	// Clean up DNS before terminating
 	a.Cleanup(ctx)
 
-	a.warnUsers(i18n.Tf("spawn.agent.terminating", map[string]interface{}{
+	a.warnUsers(ctx, i18n.Tf("spawn.agent.terminating", map[string]interface{}{
 		"Reason": reason,
 	}))
 
@@ -2509,8 +2509,8 @@ func (a *Agent) GetUptime() time.Duration {
 // does, and returns the decision. It is for a caller that owns its Agent and
 // runs no monitor loop — the one-shot `spored status` — and must never be
 // called while Monitor is running, because it takes samples (#952).
-func (a *Agent) EvaluateIdle() bool {
-	return a.evaluateIdle().idle
+func (a *Agent) EvaluateIdle(ctx context.Context) bool {
+	return a.evaluateIdle(ctx).idle
 }
 
 // The readers below return the last evaluation (a monitor tick, or

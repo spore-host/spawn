@@ -187,7 +187,7 @@ func TestGPUUtilization_FailingToolIsUnknownAndWarnedOnce(t *testing.T) {
 
 	a := newTestAgent(t, nil)
 	for i := 0; i < 3; i++ {
-		pct, measured, why := a.gpuUtilization()
+		pct, measured, why := a.gpuUtilization(context.Background())
 		if measured || pct <= idleGPUPercent || why == "" {
 			t.Fatalf("call %d = (%v, measured=%v, %q), want unknown and assumed active", i+1, pct, measured, why)
 		}
@@ -204,7 +204,7 @@ func TestGPUUtilization_DeviceWithoutToolIsUnknown(t *testing.T) {
 			return nil, &exec.Error{Name: name, Err: exec.ErrNotFound}
 		})
 		a := newTestAgent(t, nil)
-		if _, measured, why := a.gpuUtilization(); measured || !strings.Contains(why, "not installed") {
+		if _, measured, why := a.gpuUtilization(context.Background()); measured || !strings.Contains(why, "not installed") {
 			t.Errorf("%s with no tool = (measured=%v, %q), want unknown, tool not installed", f, measured, why)
 		}
 	}
@@ -214,7 +214,7 @@ func TestGPUUtilization_Combinations(t *testing.T) {
 	t.Run("no accelerator is a measured 0, and runs no tool", func(t *testing.T) {
 		calls := stubAccelerators(t, nil, func(string) ([]byte, error) { t.Fatal("tool run"); return nil, nil })
 		a := newTestAgent(t, nil)
-		if pct, measured, _ := a.gpuUtilization(); !measured || pct != 0 || len(*calls) != 0 {
+		if pct, measured, _ := a.gpuUtilization(context.Background()); !measured || pct != 0 || len(*calls) != 0 {
 			t.Errorf("= (%v, %v), calls %v", pct, measured, *calls)
 		}
 	})
@@ -226,7 +226,7 @@ func TestGPUUtilization_Combinations(t *testing.T) {
 			return []byte(`{"neuron_runtime_data":[{"error":"","report":{"neuroncore_counters":{"neuroncores_in_use":{"0":{"neuroncore_utilization":90}}}}}]}` + "\n"), nil
 		})
 		a := newTestAgent(t, nil)
-		if pct, measured, _ := a.gpuUtilization(); !measured || pct != 90 {
+		if pct, measured, _ := a.gpuUtilization(context.Background()); !measured || pct != 90 {
 			t.Errorf("= (%v, %v), want measured 90", pct, measured)
 		}
 	})
@@ -235,7 +235,7 @@ func TestGPUUtilization_Combinations(t *testing.T) {
 			return []byte("0\n1\n"), nil
 		})
 		a := newTestAgent(t, nil)
-		if pct, measured, _ := a.gpuUtilization(); !measured || pct != 1 {
+		if pct, measured, _ := a.gpuUtilization(context.Background()); !measured || pct != 1 {
 			t.Errorf("= (%v, %v), want measured 1", pct, measured)
 		}
 	})
@@ -250,9 +250,9 @@ func TestIdleDecision_UnmeasurableAcceleratorIsNotIdle(t *testing.T) {
 		return []byte("No devices were found\n"), errors.New("exit status 6")
 	})
 	a := newTestAgent(t, nil)
-	a.evaluateIdle()
+	a.evaluateIdle(context.Background())
 	c.idleCPUMinute()
-	s := a.evaluateIdle()
+	s := a.evaluateIdle(context.Background())
 	if s.idle {
 		t.Fatalf("idle with nvidia-smi failing (%s); a failing tool must not read as 0%% (#954)", s.reason)
 	}

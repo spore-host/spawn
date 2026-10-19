@@ -1,8 +1,8 @@
 package agent
 
 import (
+	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -48,8 +48,8 @@ var loginTTYLines = whoLines
 // whoLines lists the LINE column of `who`, which is always the second field
 // (NAME LINE TIME [COMMENT]). An error or no utmp gives nil: the PTYs in
 // /dev/pts are still examined.
-func whoLines() []string {
-	out, err := exec.Command("who").Output()
+func whoLines(ctx context.Context) []string {
+	out, err := probeOutput(ctx, "who")
 	if err != nil {
 		return nil
 	}
@@ -132,6 +132,6 @@ func countActiveTTYs(paths []string, inputTime func(string) (time.Time, error), 
 
 // countTTYSessions is the Linux session count: terminals with input in the last
 // sessionMaxIdle.
-func countTTYSessions(now time.Time) int {
-	return countActiveTTYs(sessionTTYs(sessionDevRoot, loginTTYLines()), ttyInputTime, now, sessionMaxIdle)
+func countTTYSessions(ctx context.Context, now time.Time) int {
+	return countActiveTTYs(sessionTTYs(sessionDevRoot, loginTTYLines(ctx)), ttyInputTime, now, sessionMaxIdle)
 }

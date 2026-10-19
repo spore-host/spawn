@@ -4,7 +4,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 	"time"
 )
@@ -14,14 +13,14 @@ import (
 // green on a developer Mac without pretending to measure anything. Idle signals
 // return "active/unknown" so a dev build never falsely concludes idle (#77).
 
-func sysReadCPUTimes() (idle, total int64, err error) { return 0, 0, errBadProcStat }
-func sysReadNetworkBytes() (rx, tx int64)             { return -1, -1 }
-func sysReadDiskIOBytes() int64                       { return -1 }
-func sysIsProcessRunning(string) bool                 { return false }
-func sysCountActiveSessions() int                     { return 0 }
-func sysCountActivePortConnections([]int) int         { return 0 }
-func sysWarnUsers(string)                             {}
-func sysWriteConsole(string) error                    { return nil }
+func sysReadCPUTimes(context.Context) (idle, total int64, err error) { return 0, 0, errBadProcStat }
+func sysReadNetworkBytes(context.Context) (rx, tx int64)             { return -1, -1 }
+func sysReadDiskIOBytes(context.Context) int64                       { return -1 }
+func sysIsProcessRunning(context.Context, string) bool               { return false }
+func sysCountActiveSessions(context.Context) int                     { return 0 }
+func sysCountActivePortConnections(context.Context, []int) int       { return 0 }
+func sysWarnUsers(context.Context, string)                           {}
+func sysWriteConsole(string) error                                   { return nil }
 
 // sysShellCommand runs a pre-stop hook on non-linux/non-windows builds (dev /
 // darwin). It runs the hook as the given user via `su - <user> -c` when set,
@@ -33,12 +32,12 @@ func sysShellCommand(ctx context.Context, command, user string) *exec.Cmd {
 	return exec.CommandContext(ctx, "sh", "-c", command) // nosemgrep: dangerous-exec-command
 }
 
-// sysMountLustre is a no-op on non-linux/non-windows (dev/darwin) builds — spored
-// only mounts FSx Lustre on Linux instances (#194).
+// sysMountLustre fails on non-linux/non-windows (dev/darwin) builds — spored
+// only mounts FSx Lustre on Linux instances (#194). See errLustreUnsupported.
 func sysMountLustre(ctx context.Context, dnsName, mountName, mountPoint string) error {
 	_ = ctx
 	_, _, _ = dnsName, mountName, mountPoint
-	return fmt.Errorf("FSx Lustre mounting is only supported on Linux")
+	return errLustreUnsupported
 }
 
 // No compute clock outside Linux/Windows: spored does not run there for real.
