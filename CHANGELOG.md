@@ -111,6 +111,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of keeping its own list, rejects a `jitter` outside 0–1, and names the
   supported strategies when it refuses one.
 
+- **The `spawn launch` summary closes every section it opens** (#1125). The
+  `IAM instance profile` line came after the last rule, so the output ended
+  like a box with no bottom, and two rules sat back to back. The profile line
+  is now in the instance details, the DNS record and its connect hint are in
+  the connect section, and each section ends with one rule. The progress list
+  no longer leaves `Installing spawn agent` pending (⏳) after the agent is
+  verified. spored installs from user-data, nothing ever started that step,
+  and `Verifying spored agent` already reports it.
+- **`spawn list` prints `Searching all AWS regions...`, not six dots** (#1129).
+  It added `...` to a message that already ends in one, in all six languages.
+  A new check renders every localized formatted message in every supported
+  language and fails on a doubled ellipsis.
+- **`spawn doctor` shows truffle's version on one line** (#1140). It printed
+  all of `truffle --version` (version, `Git Commit:`, `Build Date:`), and the
+  extra two lines looked like checks without a status symbol. It now keeps the
+  first line, does the same for the AWS CLI, and folds any multi-line detail
+  or fix onto one line. Every line of the text report before the summary
+  starts with a status symbol or `→`.
+
 ## [0.135.1] - 2026-10-18
 
 ### Security

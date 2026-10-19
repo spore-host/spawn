@@ -37,7 +37,7 @@ func TestQuietProgress_NoStdout(t *testing.T) {
 		p.Start("spawn.progress.launching_instance")
 		p.Error("spawn.progress.launching_instance", errors.New("boom"))
 		p.Skip("spawn.progress.setup_ssh_key")
-		p.DisplaySuccess("i-123", "1.2.3.4", "ssh ec2-user@1.2.3.4", nil)
+		p.DisplaySuccess(SuccessSummary{InstanceID: "i-123", PublicIP: "1.2.3.4", ConnectCommand: "ssh ec2-user@1.2.3.4"}, nil)
 	})
 	if out != "" {
 		t.Errorf("quiet progress wrote to stdout:\n%q", out)

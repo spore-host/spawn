@@ -47,11 +47,24 @@ func (p *awsProber) TruffleAvailable() (string, error) {
 		return "", fmt.Errorf("truffle not found on PATH")
 	}
 	out, _ := exec.Command(path, "--version").Output()
-	v := strings.TrimSpace(string(out))
+	// truffle prints its version, then "Git Commit:" and "Build Date:" lines.
+	// Only the first is the detail; the rest read as unmarked checks in the
+	// text report (#1140).
+	v := firstLine(string(out))
 	if v == "" {
 		v = path
 	}
 	return v, nil
+}
+
+// firstLine is the first non-blank line of a tool's --version output, trimmed.
+func firstLine(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if l := strings.TrimSpace(line); l != "" {
+			return l
+		}
+	}
+	return ""
 }
 
 func (p *awsProber) AWSCLIAvailable() (string, error) {
@@ -60,7 +73,7 @@ func (p *awsProber) AWSCLIAvailable() (string, error) {
 		return "", fmt.Errorf("aws CLI not found on PATH")
 	}
 	out, _ := exec.Command(path, "--version").Output()
-	return strings.TrimSpace(string(out)), nil
+	return firstLine(string(out)), nil
 }
 
 func (p *awsProber) SSHKeyPresent() (string, error) {

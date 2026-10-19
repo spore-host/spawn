@@ -1057,26 +1057,28 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	} else {
 		connectCmd = fmt.Sprintf("spawn connect %s", config.Name)
 	}
-	prog.DisplaySuccess(result.InstanceID, result.PublicIP, connectCmd, config)
-
-	// Surface the RESOLVED IAM instance profile directly in launch's own output
-	// (#550) — previously this was visible nowhere except ec2:DescribeInstances,
-	// so a launch that silently attached the wrong (data-inaccessible) profile
-	// was undiagnosable without reading EC2 state out-of-band. `spawn list` and
-	// `spawn status` show the same field for an already-launched instance.
-	if config.IamInstanceProfile != "" {
-		_, _ = fmt.Fprintf(os.Stdout, "  IAM instance profile: %s\n", config.IamInstanceProfile)
+	summary := progress.SuccessSummary{
+		InstanceID:     result.InstanceID,
+		PublicIP:       result.PublicIP,
+		ConnectCommand: connectCmd,
+		// The RESOLVED IAM instance profile (#550): previously visible nowhere
+		// except ec2:DescribeInstances, so a launch that silently attached the
+		// wrong (data-inaccessible) profile was undiagnosable without reading
+		// EC2 state out-of-band. `spawn list` and `spawn status` show the same
+		// field for an already-launched instance. It sits in the instance
+		// details now; printed after the summary it opened a section nothing
+		// closed (#1125).
+		InstanceProfile: config.IamInstanceProfile,
+		DNSRecord:       dnsRecord,
 	}
-
-	// Show DNS info if registered
 	if dnsRecord != "" {
-		_, _ = fmt.Fprintf(os.Stdout, "\n🌐 DNS: %s\n", dnsRecord)
 		if config.TargetOS == "windows" {
-			_, _ = fmt.Fprintf(os.Stdout, "   Connect: spawn connect %s --rdp\n", config.Name)
+			summary.DNSConnect = fmt.Sprintf("spawn connect %s --rdp", config.Name)
 		} else {
-			_, _ = fmt.Fprintf(os.Stdout, "   Connect: ssh %s@%s\n", plat.GetUsername(), dnsRecord)
+			summary.DNSConnect = fmt.Sprintf("ssh %s@%s", plat.GetUsername(), dnsRecord)
 		}
 	}
+	prog.DisplaySuccess(summary, config)
 
 	return nil
 }
