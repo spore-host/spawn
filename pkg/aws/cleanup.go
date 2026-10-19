@@ -742,3 +742,39 @@ func IsSharedSporedIdentity(r ManagedResource) bool {
 func supersededByDedicatedScan(service, resourceType string) bool {
 	return service == "ec2" && resourceType == "placement-group"
 }
+
+// DeleteInstanceProfileAndRole deletes the instance profile named name and the
+// role of the same name (the pairing CreateOrGetInstanceProfile creates):
+// inline policies, managed attachments and profile membership first, then the
+// role. Already-deleted pieces count as success, so it is safe to repeat.
+//
+// The caller must know nothing still uses the role: an instance whose profile
+// loses its role loses its credentials, and spored then cannot terminate it.
+func (c *Client) DeleteInstanceProfileAndRole(ctx context.Context, name string) error {
+	if err := c.deleteInstanceProfile(ctx, c.cfg, name); err != nil {
+		return fmt.Errorf("delete instance profile %s: %w", name, err)
+	}
+	if err := c.deleteRole(ctx, c.cfg, name); err != nil {
+		return fmt.Errorf("delete role %s: %w", name, err)
+	}
+	return nil
+}
+
+// LiveInstancesWithTag returns the spawn-managed instances in region carrying
+// tag key=value that are pending, running, stopping or stopped, i.e. that may
+// still need their instance profile. Unlike ListInstances it returns the
+// describe error instead of skipping the region, because callers use an empty
+// result to decide that something is safe to delete.
+func (c *Client) LiveInstancesWithTag(ctx context.Context, region, key, value string) ([]InstanceInfo, error) {
+	all, err := c.listInstancesInRegion(ctx, region, "")
+	if err != nil {
+		return nil, err
+	}
+	var out []InstanceInfo
+	for _, in := range all {
+		if in.Tags[key] == value {
+			out = append(out, in)
+		}
+	}
+	return out, nil
+}
