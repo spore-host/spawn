@@ -28,7 +28,7 @@ type TaskSpec struct {
 	Outputs   []Manifest        `json:"outputs,omitempty"`
 	Placement Placement         `json:"placement,omitempty"` // optional launch-time knobs (AMI/AZ/volumes/FSx/EFS)
 	Lifecycle Lifecycle         `json:"lifecycle"`
-	Env       map[string]string `json:"env,omitempty"`
+	Env       map[string]string `json:"env,omitempty"` // exported in the wrapper shell; a container task also gets each key via docker run -e (#1059)
 
 	// ResultsPrefix overrides where this task's durable records go — an
 	// s3://bucket/prefix under which <task_id>/completion.json, /.exitcode and

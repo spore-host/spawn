@@ -91,7 +91,7 @@ spawn task run --spec <file> [flags]
 | `--poll-interval` |  | duration | `15s` | How often to poll for completion when --wait is set |
 | `--region` |  | string |  | Region to size against (default: the configured AWS region) |
 | `--spec` |  | string |  | Path to a TaskSpec JSON file (required) |
-| `--wait` |  | bool |  | Block until the task's completion record appears, then exit with its exit code |
+| `--wait` |  | bool |  | Block until the task's completion record appears, then exit with its exit code; a task whose state is not completed exits 1 even if its command exited 0 (e.g. a declared output failed to upload) |
 
 ### `spawn task status`
 

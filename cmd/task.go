@@ -631,7 +631,8 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	// --wait: poll the completion record until it appears or the TTL elapses. In
 	// JSON mode emit the CompletionRecord verbatim (so an adapter gets the full
 	// record from one `task run --wait -o json` call); in human mode print the
-	// launch summary then the record. Either way exit with the task's exit code.
+	// launch summary then the record. Either way exit with waitExitCode: the
+	// task's exit code, or 1 if it did not complete (#1143).
 	if !jsonOut {
 		fmt.Fprintf(out, "✅ Task launched: %s\n", spec.TaskID)
 		fmt.Fprintf(out, "Instance:     %s  (%s%s) in %s / %s\n", lr.InstanceID, lr.InstanceType, spotSuffix(lr.Spot), lr.Region, orDash(lr.AZ))
@@ -655,10 +656,30 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	} else {
 		printCompletion(out, rec)
 	}
-	if rec.ExitCode != 0 {
-		os.Exit(rec.ExitCode)
+	if code := waitExitCode(rec); code != 0 {
+		os.Exit(code)
 	}
 	return nil
+}
+
+// waitExitCode is the process exit code for `task run --wait` once the
+// completion record has arrived: the task's own exit code when it is non-zero,
+// otherwise 1 for any state other than completed.
+//
+// The exit code alone is not enough (#1143). When the command succeeds but a
+// declared output fails to upload, the wrapper writes state=failed,
+// retry_class=output_delivery_error and the COMMAND's exit_code, which is 0.
+// Exiting with that 0 let a script that trusts the exit status treat a task with
+// missing outputs as a success. 1 matches `task status --check-complete`, which
+// already exits 1 for a failed record.
+func waitExitCode(rec *taskproto.CompletionRecord) int {
+	if rec.ExitCode != 0 {
+		return rec.ExitCode
+	}
+	if rec.State != taskproto.StateCompleted {
+		return 1
+	}
+	return 0
 }
 
 // waitDeadline returns now+TTL as the wait cutoff, defaulting to a generous cap
@@ -1257,7 +1278,7 @@ func init() {
 	taskRunCmd.Flags().BoolVar(&taskRunDryRun, "dry-run", false, "Size and preview the task without launching")
 	taskRunCmd.Flags().StringVar(&taskRunRegion, "region", "", "Region to size against (default: the configured AWS region)")
 	taskRunCmd.Flags().StringVar(&taskRunAMI, "ami", "", "Pin a specific AMI (overrides auto-selection and placement.ami); empty = auto-select from the sized instance type (GPU DLAMI for GPU families)")
-	taskRunCmd.Flags().BoolVar(&taskRunWait, "wait", false, "Block until the task's completion record appears, then exit with its exit code")
+	taskRunCmd.Flags().BoolVar(&taskRunWait, "wait", false, "Block until the task's completion record appears, then exit with its exit code; a task whose state is not completed exits 1 even if its command exited 0 (e.g. a declared output failed to upload)")
 	taskRunCmd.Flags().DurationVar(&taskRunPollInterval, "poll-interval", 15*time.Second, "How often to poll for completion when --wait is set")
 
 	taskGroupCmd.AddCommand(taskStatusCmd)
