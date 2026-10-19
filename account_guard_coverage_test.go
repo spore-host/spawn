@@ -89,8 +89,13 @@ func spawnBinaryFiles(t *testing.T) []string {
 	t.Helper()
 	seen := map[string]bool{}
 	for _, goos := range []string{"linux", "darwin", "windows"} {
-		cmd := exec.Command("go", "list", "-deps", "-json", ".")
-		cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
+		// -e and GOPROXY=off: the hermetic test wrapper blocks the network, and a
+		// third-party module needed only for another GOOS (cobra's mousetrap on
+		// windows) may not be in the module cache. Such a package is reported
+		// with an Error instead of failing the whole listing; only an error on a
+		// spawn package fails the test, since that would hide its files.
+		cmd := exec.Command("go", "list", "-e", "-deps", "-json", ".")
+		cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0", "GOPROXY=off", "GOFLAGS=-mod=mod")
 		cmd.Stderr = os.Stderr
 		out, err := cmd.Output()
 		if err != nil {
@@ -103,6 +108,7 @@ func spawnBinaryFiles(t *testing.T) []string {
 				Dir        string
 				GoFiles    []string
 				Module     *struct{ Path string }
+				Error      *struct{ Err string }
 			}
 			if err := dec.Decode(&p); errors.Is(err, io.EOF) {
 				break
@@ -111,6 +117,9 @@ func spawnBinaryFiles(t *testing.T) []string {
 			}
 			if p.Module == nil || p.Module.Path != "github.com/spore-host/spawn" {
 				continue
+			}
+			if p.Error != nil {
+				t.Fatalf("go list (GOOS=%s): spawn package %s: %s", goos, p.ImportPath, p.Error.Err)
 			}
 			for _, f := range p.GoFiles {
 				seen[filepath.Join(p.Dir, f)] = true
