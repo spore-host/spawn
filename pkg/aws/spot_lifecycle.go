@@ -18,7 +18,17 @@ import (
 // an instance from a one-time request ("You can only stop Spot Instances
 // associated with persistent Spot Instance requests").
 func spotIsPersistent(lc LaunchConfig) bool {
-	return spotrequest.NeedsStoppable(lc.IdleTimeout, lc.OnComplete, lc.Hibernate, lc.HibernateOnIdle)
+	return spotrequest.NeedsStoppable(idleTimeoutIfStops(lc), lc.OnComplete, lc.Hibernate, lc.HibernateOnIdle && !lc.TerminateOnIdle)
+}
+
+// idleTimeoutIfStops is the idle timeout as far as stoppability is concerned:
+// an idle action of terminate (TerminateOnIdle) never asks EC2 to stop the
+// instance, so it does not need a persistent request.
+func idleTimeoutIfStops(lc LaunchConfig) string {
+	if lc.TerminateOnIdle {
+		return ""
+	}
+	return lc.IdleTimeout
 }
 
 // spotRequestType is the spawn:spot-request-type value for a Spot launch.

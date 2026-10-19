@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -461,14 +462,18 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// Zombie-instance guard: apply the 1h idle-timeout default across all sweep
 	// configs (shared per-config helper), warning once for the whole sweep.
 	hasDefaultApplied := false
+	var defaultedVerbs []string // the idle action each defaulted config really gets (#1151)
 	for _, cfg := range launchConfigs {
 		if applyIdleTimeoutDefault(cfg) {
 			hasDefaultApplied = true
+			if v := idleActionVerb(cfg); !slices.Contains(defaultedVerbs, v) {
+				defaultedVerbs = append(defaultedVerbs, v)
+			}
 		}
 	}
 	if hasDefaultApplied {
 		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h for all sweep instances\n")
-		fmt.Fprintf(os.Stderr, "   Instances will terminate after 1 hour of inactivity.\n")
+		fmt.Fprintf(os.Stderr, "   Instances will %s after 1 hour of inactivity.\n", strings.Join(defaultedVerbs, " or "))
 		fmt.Fprintf(os.Stderr, "   Override with --ttl, --idle-timeout, or --no-timeout\n\n")
 	} else if noTimeout {
 		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: --no-timeout specified for sweep\n")

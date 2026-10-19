@@ -307,7 +307,7 @@ func init() {
 	// Behavior
 	launchCmd.Flags().BoolVar(&hibernate, "hibernate", false, "Configure the instance for hibernation (encrypted root sized for RAM). Implied by --on-idle hibernate and --on-complete hibernate")
 	launchCmd.Flags().StringVar(&ttl, "ttl", "", "Auto-terminate after duration (e.g., 8h, 90m, 1d, 2d12h; defaults to 1h idle if not set)")
-	launchCmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "Auto-terminate if idle, e.g. 30m, 2h, 1d (defaults to 1h if neither --ttl nor --idle-timeout set)")
+	launchCmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "Stop the instance after this much idleness (see --on-idle), e.g. 30m, 2h, 1d (defaults to 1h if neither --ttl nor --idle-timeout set)")
 	launchCmd.Flags().BoolVar(&noTimeout, "no-timeout", false, "Disable automatic timeout (NOT RECOMMENDED: creates zombie risk)")
 	launchCmd.Flags().StringVar(&onIdle, "on-idle", "", "Action when the instance goes idle: stop (default) or hibernate. Mirrors --on-complete. NOTE: a stopped/hibernated instance keeps billing for its EBS volumes (and any attached Elastic IP) — for batch/headless work prefer --on-complete terminate so cost is fully bounded")
 	launchCmd.Flags().BoolVar(&hibernateOnIdle, "hibernate-on-idle", false, "Hibernate instead of stop when idle")
@@ -330,8 +330,8 @@ func init() {
 	launchCmd.Flags().StringVar(&dnsName, "dns", "", "Override DNS name if different from --name (advanced)")
 	launchCmd.Flags().StringVar(&slackWorkspaceID, "slack-workspace", "", "Slack workspace ID for lifecycle notifications (e.g. T03NE3GTY)")
 	launchCmd.Flags().StringVar(&notifyPlatform, "notify-platform", "", "Chat platform for lifecycle notifications: slack (default), teams, or discord")
-	launchCmd.Flags().StringVar(&activePorts, "active-ports", "", "TCP ports whose established connections are counted and reported (the spawn:logged-in-count tag). They do NOT prevent idle termination: an abandoned browser tab holds a connection open forever. To keep a busy app alive, use --active-processes (e.g. '8787' for RStudio, '8787,8888' for RStudio+Jupyter)")
-	launchCmd.Flags().StringVar(&activeProcesses, "active-processes", "", "Process names to monitor, prevents idle termination while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple)")
+	launchCmd.Flags().StringVar(&activePorts, "active-ports", "", "TCP ports whose established connections are counted and reported (the spawn:logged-in-count tag). They do NOT prevent the idle stop: an abandoned browser tab holds a connection open forever. To keep a busy app alive, use --active-processes (e.g. '8787' for RStudio, '8787,8888' for RStudio+Jupyter)")
+	launchCmd.Flags().StringVar(&activeProcesses, "active-processes", "", "Process names to monitor, prevents the idle stop while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple)")
 	// A custom DNS deployment (#891, scripts/deploy-custom-dns.sh). Both reach
 	// spored as the spawn:dns-domain / spawn:dns-endpoint tags. #872 deprecated
 	// them because, until then, nothing that registered DNS read either.

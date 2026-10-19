@@ -57,3 +57,15 @@ func TestConfigFromTags_TTLWithoutDeadline(t *testing.T) {
 		t.Errorf("launch + ttl = %v, want %v", got, want)
 	}
 }
+
+// spawn:terminate-on-idle (#1151, #1146) is how `spawn service` and pool workers
+// tell spored the idle action is terminate. pkg/aws's
+// TestBuildTags_TerminateOnIdle pins the same key on the writing side.
+func TestConfigFromTags_TerminateOnIdle(t *testing.T) {
+	if cfg, _ := configFromTags(tagDescs("spawn:terminate-on-idle", "true")); !cfg.TerminateOnIdle {
+		t.Error("spawn:terminate-on-idle=true did not set TerminateOnIdle: spored would stop, not terminate, an idle service")
+	}
+	if cfg, _ := configFromTags(tagDescs("spawn:idle-timeout", "1h")); cfg.TerminateOnIdle {
+		t.Error("TerminateOnIdle set with no spawn:terminate-on-idle tag: every idle instance would be terminated")
+	}
+}

@@ -182,7 +182,11 @@ func serviceLaunchConfig(name, region string) aws.LaunchConfig {
 		// stopped instance still holds a billable EBS volume, and "everything dies
 		// eventually" is about termination.
 		OnComplete: "terminate",
-		Tags:       map[string]string{"spawn:workload": "service"},
+		// And for the same reason idle terminates too (#1151): a service that
+		// has gone idle has nothing to be restarted for, and a stopped one keeps
+		// billing its EBS volume. --idle-timeout's help says "Terminate".
+		TerminateOnIdle: true,
+		Tags:            map[string]string{"spawn:workload": "service"},
 	}
 }
 
@@ -222,8 +226,8 @@ func renderServiceDryRun(ctx context.Context, out io.Writer, args []string, addr
 		if cfg.Spot {
 			fmt.Fprintln(out, "Purchase:    spot (cheaper; an interruption ends the service)")
 		}
-		fmt.Fprintf(out, "Lifetime:    ttl=%s idle=%s on-complete=%s\n",
-			orDash(cfg.TTL), orDash(cfg.IdleTimeout), cfg.OnComplete)
+		fmt.Fprintf(out, "Lifetime:    ttl=%s idle=%s (then %s) on-complete=%s\n",
+			orDash(cfg.TTL), orDash(cfg.IdleTimeout), idleActionVerb(&cfg), cfg.OnComplete)
 	}
 	fmt.Fprintf(out, "Command:     %s\n", serviceRemoteCommand(args, addrArgs))
 	if serviceUpload != "" {

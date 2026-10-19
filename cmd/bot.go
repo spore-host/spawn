@@ -356,7 +356,7 @@ spore-bot Lambda can verify incoming slash command requests.
 
 Run this once after installing the Slack app in a workspace:
 
-  spawn notify workspace-add \
+  spawn notify workspace add \
     --platform slack \
     --workspace-id T03NE3GTY \
     --workspace-name "My Workspace" \
@@ -584,10 +584,10 @@ func lookupSlackUserByEmail(ctx context.Context, cfg aws.Config, platform, works
 	client := botClient(cfg)
 	ws, err := client.GetWorkspace(ctx, platform, workspaceID)
 	if err != nil || ws == nil {
-		return "", fmt.Errorf("workspace %s/%s not registered (run spawn notify workspace-add first)", platform, workspaceID)
+		return "", fmt.Errorf("workspace %s/%s not registered (run spawn notify workspace add first)", platform, workspaceID)
 	}
 	if ws.BotToken == "" {
-		return "", fmt.Errorf("no bot token stored for workspace %s — re-run spawn notify workspace-add with --bot-token", workspaceID)
+		return "", fmt.Errorf("no bot token stored for workspace %s — re-run spawn notify workspace add with --bot-token", workspaceID)
 	}
 
 	// Refresh token if rotation is enabled and token is expired

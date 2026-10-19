@@ -601,6 +601,8 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 			}
 		case tagprefix.Tag("hibernate-on-idle"):
 			config.HibernateOnIdle = *tag.Value == "true"
+		case tagprefix.Tag("terminate-on-idle"):
+			config.TerminateOnIdle = *tag.Value == "true"
 		case tagprefix.Tag("cost-limit"):
 			if limit, err := strconv.ParseFloat(*tag.Value, 64); err == nil {
 				config.CostLimit = limit

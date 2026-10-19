@@ -135,6 +135,10 @@ func TestIdleActionDescription(t *testing.T) {
 		{"one-time spot", runningSpot(spotrequest.TypeOneTime), "can't be stopped", "stops the instance"},
 		{"persistent spot", runningSpot(spotrequest.TypePersistent), "stops the instance when idle", "can't"},
 		{"on-demand", &aws.InstanceInfo{Tags: map[string]string{}}, "stops the instance when idle", "can't"},
+		// #1151: `spawn service` and pool workers terminate on idle — on a
+		// one-time Spot instance too, since a terminate needs no stoppable request.
+		{"terminate-on-idle", &aws.InstanceInfo{Tags: map[string]string{"spawn:terminate-on-idle": "true"}}, "terminates the instance when idle", "stops"},
+		{"terminate-on-idle one-time spot", &aws.InstanceInfo{SpotInstance: true, Tags: map[string]string{"spawn:terminate-on-idle": "true", spotrequest.TypeTag: spotrequest.TypeOneTime}}, "terminates the instance when idle", "can't"},
 		{"on-demand hibernate-on-idle, configured", &aws.InstanceInfo{HibernationConfigured: true, Tags: map[string]string{"spawn:hibernate-on-idle": "true"}}, "hibernates", "stops"},
 		// #949: an instance not configured for hibernation is stopped, not
 		// hibernated — what --on-idle hibernate launched before the fix.

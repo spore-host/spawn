@@ -250,6 +250,9 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	if config.HibernateOnIdle {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:hibernate-on-idle"), Value: aws.String("true")})
 	}
+	if config.TerminateOnIdle {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:terminate-on-idle"), Value: aws.String("true")})
+	}
 
 	// Completion signal settings. spawn:completion-file is gated on OnComplete
 	// being set too, not just CompletionFile being non-empty: --completion-file

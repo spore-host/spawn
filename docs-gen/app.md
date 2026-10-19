@@ -3,7 +3,7 @@
 Launch streamable research applications in the cloud.
 
 Each application is pre-configured with the right instance type, NICE DCV
-for browser-based streaming, and automatic idle termination.
+for browser-based streaming, and an automatic stop when idle.
 
 Apps you can launch depend on your account: public images are available to
 everyone; private images appear only if your account can pull them. Bring your
@@ -48,7 +48,7 @@ spawn app launch <app-name> [flags]
 | `--no-web-auth` |  | bool |  | Disable the spored :443 access-token gate for a web app (the app must provide its own auth) |
 | `--region` |  | string |  | AWS region (default: from AWS config) |
 | `--spot` |  | bool |  | Use Spot pricing |
-| `--ttl` |  | string |  | Hard termination deadline (e.g. 4h, 8h, 1d) |
+| `--ttl` |  | string | `8h` | Hard termination deadline (e.g. 4h, 8h, 1d). Always set: idle only stops the instance, so the TTL is what ends an abandoned session |
 | `--web-arg` |  | stringArray |  | Extra argument for a web app's container, repeatable (e.g. --web-arg=--bind-addr=0.0.0.0:8080) |
 | `--web-port` |  | int |  | Launch --image as a web-UI app served on this container port (e.g. 8080 for code-server, 8888 for Jupyter); spored fronts it with TLS on :443 |
 

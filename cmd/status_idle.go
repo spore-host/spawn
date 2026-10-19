@@ -16,6 +16,11 @@ import (
 // one-time Spot instance with an idle timeout is one launched before that, or by
 // a launcher that still makes one-time requests.
 func idleActionDescription(instance *aws.InstanceInfo) string {
+	if instance.Tags["spawn:terminate-on-idle"] == "true" {
+		// `spawn service` and pool workers (#1151, #1146). Checked before the
+		// one-time Spot case: a terminate needs no stoppable request.
+		return "terminates the instance when idle"
+	}
 	if instance.SpotInstance && spotrequest.IsOneTime(instance.Tags) {
 		return "cannot act: a one-time Spot instance can't be stopped, so idling does not stop it — " +
 			"it runs until its termination deadline or 'spawn terminate'"

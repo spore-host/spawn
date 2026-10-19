@@ -254,6 +254,7 @@ field LaunchConfig.SweepSize int
 field LaunchConfig.TTL string
 field LaunchConfig.Tags map[string]string
 field LaunchConfig.TargetOS string
+field LaunchConfig.TerminateOnIdle bool
 field LaunchConfig.UserData string
 field LaunchConfig.Username string
 field LaunchConfig.VPCID string
