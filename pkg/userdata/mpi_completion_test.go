@@ -72,6 +72,14 @@ func (r mpiRun) record(t *testing.T, rel string) (completionRecord, bool) {
 // /tmp redirected to hosts/<ip>/, so each peer's files are separate.
 func runRank0(t *testing.T, mpiRC int, unreachable string) mpiRun {
 	t.Helper()
+	return runRank0With(t, mpiRC, unreachable, "")
+}
+
+// runRank0With is runRank0 with a --completion-file (#1170). A path under /tmp/
+// is relocated by the same rewrite as the default, so rank 0's record lands
+// under <root>/tmp/ and each peer's under hosts/<ip>/.
+func runRank0With(t *testing.T, mpiRC int, unreachable, completionFile string) mpiRun {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("Linux-only: executes the Linux MPI user-data block (/tmp, /var/log) under bash (#1002)")
 	}
@@ -81,6 +89,7 @@ func runRank0(t *testing.T, mpiRC int, unreachable string) mpiRun {
 	script, err := GenerateMPIUserData(MPIConfig{
 		Region: "us-east-1", JobArrayID: "arr-1",
 		JobArrayIndex: 0, JobArraySize: 3, MPICommand: "hostname",
+		CompletionFile: completionFile,
 	})
 	if err != nil {
 		t.Fatalf("GenerateMPIUserData: %v", err)

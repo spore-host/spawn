@@ -52,6 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--on-complete` never fired and the instance ran until its TTL. The wrapper
   now writes the configured path, creating its directory if needed. The
   default is unchanged.
+- **`--mpi-command` now honours a custom `--completion-file`** (#1170). The
+  MPI script wrote every completion record, on rank 0 and over ssh on each
+  peer, to `/tmp/SPAWN_COMPLETE`, while spored watched the file
+  `--completion-file` named. With any other path, no member of the cohort
+  fired `--on-complete` and every instance ran until its TTL. Each write now
+  targets the configured path, quoted for both rank 0's and the peer's shell,
+  creating its directory if needed. The default is unchanged.
 - **A `--batch-queue` file may omit `queue_id`** (#1131). spawn was meant to
   generate an ID when the file has none, but validation rejected the file
   first, with `queue_id is required`. A missing `queue_id` now gets a

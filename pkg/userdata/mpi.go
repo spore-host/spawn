@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template
+
+	"github.com/spore-host/spawn/pkg/security"
 )
 
 // MPIConfig contains configuration for MPI user-data generation
@@ -29,6 +31,42 @@ type MPIConfig struct {
 	// The path is passed in rather than imported from pkg/launcher so this stays
 	// a pure script generator with no dependency on the bootstrap assembler.
 	ReadyGate string
+	// CompletionFile is the path spored watches for the completion signal
+	// (--completion-file, LaunchConfig.CompletionFile). Every completion record
+	// this script writes, on rank 0 and over ssh on each peer, goes there, so the
+	// two must agree or --on-complete never fires and the cohort bills to TTL
+	// (#1170). Empty means /tmp/SPAWN_COMPLETE, the flag default.
+	CompletionFile string
+}
+
+// defaultCompletionFile is the completion sentinel used when no
+// --completion-file is given. It matches the flag default and spored's own.
+const defaultCompletionFile = "/tmp/SPAWN_COMPLETE"
+
+// mpiTemplateData is what the template renders: the config plus the completion
+// path pre-quoted in Go, so the template never interpolates a raw path.
+type mpiTemplateData struct {
+	MPIConfig
+	// CompletionPath is the completion file, shell-quoted for this script.
+	CompletionPath string
+	// RemoteCompletionWrite is the command rank 0 hands to ssh to write the
+	// record (read from stdin) on a peer, quoted once for the peer's shell and
+	// once more for this script's.
+	RemoteCompletionWrite string
+}
+
+func newMPITemplateData(config MPIConfig) mpiTemplateData {
+	p := config.CompletionFile
+	if p == "" {
+		p = defaultCompletionFile
+	}
+	q := security.ShellQuote(p)
+	remote := `mkdir -p "$(dirname -- ` + q + `)" || true; cat > ` + q
+	return mpiTemplateData{
+		MPIConfig:             config,
+		CompletionPath:        q,
+		RemoteCompletionWrite: security.ShellQuote(remote),
+	}
 }
 
 // GenerateMPIUserData generates the MPI setup script for inclusion in user-data
@@ -46,7 +84,7 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 	}
 
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, config); err != nil {
+	if err := tmpl.Execute(&buf, newMPITemplateData(config)); err != nil {
 		return "", fmt.Errorf("failed to execute MPI template: %w", err)
 	}
 
@@ -102,6 +140,15 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //
 // When rank 0 gives up waiting for peer SSH, it signals completion the same
 // way. The peers that can be reached stop then, and do not ride to TTL.
+//
+// Every record goes to the launch's --completion-file (MPIConfig.CompletionFile,
+// default /tmp/SPAWN_COMPLETE), not a hardcoded path: spored watches THAT file,
+// so with a custom path no member ever fired --on-complete (#1170, the MPI twin
+// of #1131). Each write is preceded by a mkdir of the file's directory, since a
+// custom path's directory may not exist and the write would fail under set -e.
+// The peer write pipes the record to ssh's stdin and runs a fixed command
+// quoted for the peer's shell (RemoteCompletionWrite), so the path is quoted at
+// both shells and the record is never re-parsed by either.
 //
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
@@ -169,7 +216,8 @@ SPAWN_PEERS_WAITED=0
 while [ ! -f /etc/spawn/job-array-peers.json ]; do
   if [ "$SPAWN_PEERS_WAITED" -ge 600 ]; then
     echo "spawn: no peers file after ${SPAWN_PEERS_WAITED}s; MPI wire-up never completed" >&2
-    echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > /tmp/SPAWN_COMPLETE
+    mkdir -p "$(dirname -- {{.CompletionPath}})" || true
+    echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > {{.CompletionPath}}
     exit 1
   fi
   sleep 2
@@ -231,13 +279,14 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
     echo "$1" > /tmp/SPAWN_EXITCODE
     for ip in $(awk '{print $1}' /tmp/mpi-hostfile); do
       case " $(hostname -I 2>/dev/null) " in *" $ip "*) continue ;; esac
-      ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ip" \
-        "echo '$rec' > /tmp/SPAWN_COMPLETE" ||
+      printf '%s\n' "$rec" | ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ip" \
+        {{.RemoteCompletionWrite}} ||
         echo "spawn: could not signal completion to $ip" | tee -a /var/log/spawn-command.log &
       pids="$pids $!"
     done
     [ -z "$pids" ] || wait $pids
-    echo "$rec" > /tmp/SPAWN_COMPLETE
+    mkdir -p "$(dirname -- {{.CompletionPath}})" || true
+    echo "$rec" > {{.CompletionPath}}
   }
 {{end}}
   SPAWN_PEERS_READY_WAITED=0
@@ -250,7 +299,7 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
     [ "$NOT_READY" -eq 0 ] && break
     if [ "$SPAWN_PEERS_READY_WAITED" -ge 600 ]; then
       echo "spawn: $NOT_READY peer(s) never accepted SSH after ${SPAWN_PEERS_READY_WAITED}s; MPI cannot start" | tee -a /var/log/spawn-command.log >&2
-      {{if .MPICommand}}spawn_mpi_done 1{{else}}echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > /tmp/SPAWN_COMPLETE{{end}}
+      {{if .MPICommand}}spawn_mpi_done 1{{else}}mkdir -p "$(dirname -- {{.CompletionPath}})" || true; echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > {{.CompletionPath}}{{end}}
       exit 1
     fi
     sleep 5

@@ -77,7 +77,7 @@ func TestMPIWaitsForPeerSSHBeforeMpirun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateMPIUserData: %v", err)
 	}
-	if !strings.Contains(bare[strings.Index(bare, readinessProbe):], "> /tmp/SPAWN_COMPLETE") {
+	if !strings.Contains(bare[strings.Index(bare, readinessProbe):], "> '/tmp/SPAWN_COMPLETE'") {
 		t.Error("without --mpi-command, a peer that never accepts SSH produces no SPAWN_COMPLETE failure record")
 	}
 
