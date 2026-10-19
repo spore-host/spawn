@@ -91,6 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance is broken. This also applies to `spawn connect`, the warm-AMI build
   and MPI cohort assembly, which share `WaitForSSMOnline`.
 
+- `spawn task run`: the Spot→on-demand fallback (`resources.fallback: on_demand`) now launches with the same storage mounts and terminal-flush hook as the Spot attempt. The retry passed empty launcher options, so a fallback instance came up without its EFS/FSx/volume mounts and without the hook that writes a completion record on a TTL kill (#1144).
+
 ## [0.135.2] - 2026-10-19
 
 ### Added

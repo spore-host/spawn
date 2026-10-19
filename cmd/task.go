@@ -584,17 +584,13 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		return fmt.Errorf("build task storage: %w", err)
 	}
 
-	result, err := launcher.Provision(ctx, client, cfg, launcher.Options{
+	opts := launcher.Options{
 		StorageScript:   storageScript,
 		TaskFlushScript: flushHook,
-	})
-	// Single-region spot→on-demand fallback (a minimal echo of lagotto's
-	// capacity fallthrough; AZ-spread is out of scope for this increment).
-	if err != nil && cfg.Spot && spec.Resources.Fallback == taskproto.PurchaseOnDemand && isCapacityErr(err) {
-		fmt.Fprintf(out, "⚠ spot capacity unavailable (%v); retrying on-demand per fallback...\n", classifyLaunchErr(err))
-		cfg.Spot = false
-		result, err = launcher.Provision(ctx, client, cfg, launcher.Options{})
 	}
+	result, err := provisionTask(out, func(c aws.LaunchConfig, o launcher.Options) (*aws.LaunchResult, error) {
+		return launcher.Provision(ctx, client, c, o)
+	}, &cfg, opts, spec.Resources.Fallback)
 	if err != nil {
 		return fmt.Errorf("launch task: %w", err)
 	}
@@ -1259,6 +1255,27 @@ func bucketObjectARNs(buckets []string) string {
 		arns[i] = fmt.Sprintf("%q", "arn:aws:s3:::"+b+"/*")
 	}
 	return strings.Join(arns, ",")
+}
+
+// provisionTask launches cfg with opts through provision and, when a Spot launch fails
+// for capacity and the spec asks for an on-demand fallback, retries once
+// on-demand (a minimal single-region echo of lagotto's capacity fallthrough;
+// AZ-spread is out of scope). cfg.Spot is cleared on fallback so the caller
+// reports the purchase option that actually launched.
+//
+// Both attempts receive the same opts, so the fallback instance gets the
+// same storage mounts and terminal-flush hook as the Spot attempt would have:
+// before #1144 the retry passed an empty Options{} and launched without its
+// EFS/FSx/volume mounts and without the hook that writes a completion record on
+// a TTL kill.
+func provisionTask(out io.Writer, provision func(aws.LaunchConfig, launcher.Options) (*aws.LaunchResult, error), cfg *aws.LaunchConfig, opts launcher.Options, fallback string) (*aws.LaunchResult, error) {
+	result, err := provision(*cfg, opts)
+	if err != nil && cfg.Spot && fallback == taskproto.PurchaseOnDemand && isCapacityErr(err) {
+		fmt.Fprintf(out, "⚠ spot capacity unavailable (%v); retrying on-demand per fallback...\n", classifyLaunchErr(err))
+		cfg.Spot = false
+		result, err = provision(*cfg, opts)
+	}
+	return result, err
 }
 
 // isCapacityErr reports whether a launch error is a capacity class (worth a
