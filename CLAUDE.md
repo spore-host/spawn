@@ -34,6 +34,29 @@ compare link. Both failure modes had already happened before the gate existed.
    breaking changes bump MINOR.)
 3. Update the comparison links at the bottom of the file.
 4. Tag `vX.Y.Z` — that triggers the GoReleaser release workflow.
+5. **Security advisories** (#828). For each advisory whose fix is **in this
+   release** (check, don't assume: `git merge-base --is-ancestor <fix> vX.Y.Z^{}`),
+   set `patched_versions`. A PATCH replaces the whole `vulnerabilities` array, so
+   build it from the advisory as read, changing only that field:
+
+   ```sh
+   gh api repos/spore-host/spawn/security-advisories/<GHSA> \
+     | jq --arg v X.Y.Z '{vulnerabilities: [.vulnerabilities[] | .patched_versions = $v]}' \
+     | gh api -X PATCH repos/spore-host/spawn/security-advisories/<GHSA> --input -
+   ```
+
+   Then re-read it, and drop any "not yet in a released version" note from its
+   description. An advisory whose fix is not in the release keeps an empty
+   `patched_versions`: a value there asserts a fix that does not exist.
+   **Publishing an advisory, or keeping it a private draft, is the owner's
+   decision**; the release only sets the field. `scripts/advisory-status.sh`
+   (read-only) flags a published advisory still empty after a release outside
+   its range, and a `patched_versions` naming a version with no tag.
+
+Once tagged, a section is frozen: `TestChangelogReleasedSectionsMatchTheirTags`
+fails if `## [X.Y.Z]` differs from `git show vX.Y.Z:CHANGELOG.md` (#1101). A PR
+opened before the release whose entry a merge drops into the new section moves
+it back to `## [Unreleased]`.
 
 GoReleaser auto-generates the **GitHub Release notes** from commit messages;
 `CHANGELOG.md` is the curated, human-facing companion and is the source of truth
