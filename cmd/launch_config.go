@@ -181,6 +181,20 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if vpcID != "" {
 		config.VPCID = vpcID
 	}
+	// --efa without --mpi. The only assignment of EFAEnabled lived in
+	// resolveMPIPlacement, so a plain `spawn launch --efa` passed the EFA
+	// pre-flight and then launched with an ordinary ENA interface: no EFA device,
+	// fi_info -p efa empty, nothing warned. Heterogeneous EFA pairs (different
+	// instance types, so no MPI job array) depend on this path.
+	if efaEnabled {
+		config.EFAEnabled = true
+	}
+	// --placement-group without --mpi: same gap. The flag was applied only in
+	// resolveMPIPlacement, which returns early when --mpi is off, so an explicit
+	// cluster placement group was silently ignored on a single launch.
+	if mpiPlacementGroup != "" {
+		config.PlacementGroup = mpiPlacementGroup
+	}
 	if spot {
 		config.Spot = true
 	}
