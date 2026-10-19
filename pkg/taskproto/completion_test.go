@@ -110,7 +110,7 @@ func TestRetryClass_Retryable(t *testing.T) {
 		RetryOutputDeliveryError: true, // spawn#561: compute succeeded, only delivery failed
 		RetryCapacity:            true,
 		RetrySpotInterruption:    true,
-		RetryInstanceHealth:      false,
+		RetryInstanceHealth:      true, // #1180: the host could not provide the container runtime
 		RetryTTLExpired:          false,
 		RetryControllerLost:      false,
 	}

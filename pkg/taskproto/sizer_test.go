@@ -192,3 +192,50 @@ func TestSize_PriceTiePrefersLessMemoryWhenVCPUsEqual(t *testing.T) {
 		t.Errorf("got %q, want c7i.2xlarge (same price + same vCPUs → less memory)", got.InstanceType)
 	}
 }
+
+// #1180: the container memory floor, from SizingRequest's documented rules.
+func TestSizingRequest_ContainerMemoryFloor(t *testing.T) {
+	const img = "quay.io/x/y:1"
+	cases := []struct {
+		name      string
+		container string
+		res       ResourceRequest
+		wantMem   float64 // EffectiveMemoryGiB of the result
+	}{
+		{"host task unchanged", "", ResourceRequest{CPU: 2}, 0},
+		{"container cpu only", img, ResourceRequest{CPU: 2}, ContainerMemoryFloorGiB},
+		{"container memory below floor", img, ResourceRequest{MemoryGiB: 1}, ContainerMemoryFloorGiB},
+		{"below floor even with headroom", img, ResourceRequest{MemoryGiB: 1, MemoryHeadroomPercent: 50}, ContainerMemoryFloorGiB},
+		{"headroom lifts it over the floor", img, ResourceRequest{MemoryGiB: 1.8, MemoryHeadroomPercent: 20}, 1.8 * 1.2},
+		{"container above floor unchanged", img, ResourceRequest{MemoryGiB: 4}, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &TaskSpec{Container: tc.container, Resources: tc.res}
+			got := s.SizingRequest()
+			if mem := EffectiveMemoryGiB(got); mem < tc.wantMem-1e-9 || mem > tc.wantMem+1e-9 {
+				t.Errorf("EffectiveMemoryGiB(SizingRequest()) = %v, want %v (req %+v)", mem, tc.wantMem, got)
+			}
+			if got.CPU != tc.res.CPU {
+				t.Errorf("CPU changed: %d -> %d", tc.res.CPU, got.CPU)
+			}
+		})
+	}
+}
+
+// Size enforces the request's memory itself, so a floor holds even when the
+// finder returns smaller types.
+func TestSize_FiltersCandidatesBelowRequestedMemory(t *testing.T) {
+	f := fakeFinder{cands: []Candidate{
+		{InstanceType: "t4g.nano", Family: "t4g", VCPUs: 2, MemoryGiB: 0.5, OnDemandPrice: 0.0042},
+		{InstanceType: "t4g.small", Family: "t4g", VCPUs: 2, MemoryGiB: 2, OnDemandPrice: 0.0168},
+	}}
+	s := &TaskSpec{Container: "quay.io/x/y:1", Resources: ResourceRequest{CPU: 2}}
+	got, err := Size(context.Background(), f, s.SizingRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InstanceType != "t4g.small" {
+		t.Errorf("sized %s, want t4g.small (nano is below the %.0f GiB container floor)", got.InstanceType, ContainerMemoryFloorGiB)
+	}
+}

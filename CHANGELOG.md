@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the flag's help says it skips spored verification as well as the SSH
   wait (#878).
 
+- `spawn task run`: a container task is now sized to at least 2 GiB of memory (`taskproto.ContainerMemoryFloorGiB`), including when `resources.memory_gib` is set lower. A container spec with only `resources.cpu` used to size to t4g.nano (0.5 GiB), where the boot-time `dnf install docker` was OOM-killed in 3 of 3 runs (#1180). The dry run says when the floor raised the request. A pinned `resources.instance_type` is still honoured as given, with a warning when it is below the floor. New `TaskSpec.SizingRequest()` returns the request to size against; Go callers of `taskproto.Size` should pass it instead of `spec.Resources`. `taskproto.Size` now also drops candidates whose known memory is below the requested memory, rather than trusting the finder to have filtered them.
+- `taskproto.RetryInstanceHealth` (`instance_health`) is now produced and is retryable (#1180).
+
 ### Fixed
 
 - **`spawn extend` reloads spored over SSM on keyless instances (#1113).**
@@ -92,6 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and MPI cohort assembly, which share `WaitForSSMOnline`.
 
 - `spawn task run`: the Spot→on-demand fallback (`resources.fallback: on_demand`) now launches with the same storage mounts and terminal-flush hook as the Spot attempt. The retry passed empty launcher options, so a fallback instance came up without its EFS/FSx/volume mounts and without the hook that writes a completion record on a TTL kill (#1144).
+
+- `spawn task run`: when a container task's Docker install fails or its daemon never starts, the wrapper now skips the image pull and run and records `retry_class: instance_health` (retryable). It used to ignore the failure, run `sudo docker run` anyway, and record `app_error` (not retryable) for a command that never ran (#1180).
 
 ## [0.135.2] - 2026-10-19
 

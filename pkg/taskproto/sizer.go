@@ -66,9 +66,16 @@ func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*Siz
 	}
 
 	allowed := familyAllowSet(req.Families)
+	minMem := EffectiveMemoryGiB(req)
 	matched := make([]Candidate, 0, len(cands))
 	for _, c := range cands {
 		if len(allowed) > 0 && !allowed[c.Family] {
+			continue
+		}
+		// The finder is asked for at least minMem, but the sizer enforces it too,
+		// so a memory floor (ContainerMemoryFloorGiB) holds whatever the finder
+		// returns. A candidate with unknown memory (0) is not excluded on a guess.
+		if c.MemoryGiB > 0 && c.MemoryGiB < minMem {
 			continue
 		}
 		if req.GPUs > 0 && c.GPUs < req.GPUs {
@@ -125,6 +132,50 @@ func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*Siz
 		OnDemandPrice: best.OnDemandPrice,
 		Considered:    len(matched),
 	}, nil
+}
+
+// ContainerMemoryFloorGiB is the least memory a container task is sized to
+// (#1180). A container task installs Docker at boot (`dnf install docker`, then
+// dockerd + containerd, then the image pull) before the user's command runs.
+//
+// Measured in experiment E1 (spawn#1171, us-east-1, 2026-10-19): a spec with only
+// resources.cpu sized to t4g.nano (0.5 GiB), where the Docker install was
+// OOM-killed 3 of 3 times; with 4 GiB (t4g.medium) all 3 runs succeeded, the
+// install taking ~66 s. Nothing between 0.5 and 4 GiB has been measured.
+//
+// 2 GiB rather than 1 GiB: 1 GiB is already the point below which spawn warns
+// that AL2023's own package transactions are unreliable (aws.SporedMemoryFloorMiB,
+// spawn#682), and a container task runs that transaction PLUS a resident Docker
+// daemon PLUS the workload, so sizing a container task at exactly the bare-dnf
+// line would leave the daemon and the workload no headroom. Not 4 GiB, because
+// the floor applies only when the spec asked for less, and it doubles the
+// cheapest container box for every such task on an unmeasured margin; 2 GiB is
+// the smallest standard size (t4g.small, t3.small) above that line. Raise it if
+// a measurement at 2 GiB fails.
+const ContainerMemoryFloorGiB = 2.0
+
+// SizingRequest is the ResourceRequest a spec is sized against: its Resources,
+// with the container memory floor applied. Callers size with
+// Size(ctx, finder, spec.SizingRequest()), never spec.Resources directly.
+//
+// The floor applies whenever spec.Container is set and the effective memory
+// request (memory_gib with headroom) is below ContainerMemoryFloorGiB, including
+// an explicit memory_gib lower than the floor: memory_gib describes what the
+// workload needs, and the Docker install needs its own on top, which the spec
+// author cannot be expected to know. It replaces memory_gib with the floor and
+// drops the headroom, so a floored request is exactly the floor, not floor plus
+// headroom. A pinned resources.instance_type is returned unchanged; Size honours
+// a pin verbatim, and the caller warns if the pin is below the floor.
+func (s *TaskSpec) SizingRequest() ResourceRequest {
+	req := s.Resources
+	if s.Container == "" || strings.TrimSpace(req.InstanceType) != "" {
+		return req
+	}
+	if EffectiveMemoryGiB(req) < ContainerMemoryFloorGiB {
+		req.MemoryGiB = ContainerMemoryFloorGiB
+		req.MemoryHeadroomPercent = 0
+	}
+	return req
 }
 
 // EffectiveMemoryGiB applies the headroom percentage to the requested memory, so
