@@ -182,6 +182,9 @@ func buildJobArrayMemberConfig(baseConfig *aws.LaunchConfig, mp memberParams, jo
 				// stall --command for the full timeout, and a signal with nothing
 				// waiting is simply inert.
 				ReadyGate: launcher.MPIReadyGate,
+				// Every completion record (rank 0's and the ones it writes on each
+				// peer) must go to the file spored watches (#1170).
+				CompletionFile: instanceConfig.CompletionFile,
 			}
 			mpiScript, err := userdata.GenerateMPIUserData(mpiConfig)
 			if err != nil {
