@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `spawn reaper deploy --spot-requests`, `--net-resources`, `--max-age` and
+  `--notify-url` set the in-account reaper's `REAPER_SPOT_REQUESTS`,
+  `REAPER_NET_RESOURCES`, `REAPER_MAX_AGE` and `REAPER_NOTIFY_URL`. Before
+  this, a CLI-deployed reaper's Spot-request and network sweeps could only stay
+  in `report`. Values are checked against what the reaper itself accepts
+  (`off|report|reap`, a positive duration, an http(s) URL) before anything is
+  touched; the reaper now parses these with the same code (`pkg/reaperconfig`),
+  so the two cannot disagree. An empty value removes the variable. The notify
+  URL is never printed, and `--notify-url -` reads it from stdin so it need not
+  appear on the command line (#1154).
+- `spawn reaper deploy --log-retention-days` (default 30) and
+  `spawn reaper teardown --keep-logs` (#1156).
 - `taskproto.ExitUserTerminated` (`user_terminated`), the terminal-flush
   reason `spawn terminate` passes to a task's flush hook (#802).
 
@@ -72,6 +84,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TTL.
 - `spawn status` and `spored status` say "terminates" for an instance with
   `spawn:terminate-on-idle`.
+- **`spawn reaper deploy` now creates the reaper's log group and sets a 30-day
+  retention, and `spawn reaper teardown` deletes the log group (#1156).** Before
+  this, `/aws/lambda/spawn-ttl-reaper-selfscan` was created by the first
+  invocation with no retention, kept its logs forever, and outlived a teardown.
+  `--keep-logs` leaves the group. The deploying credentials now also need
+  `logs:CreateLogGroup`, `logs:TagResource`, `logs:PutRetentionPolicy` and, for
+  teardown, `logs:DeleteLogGroup`.
+- **Every shell Lambda deploy now creates the log group before setting its
+  retention, and a failed retention call fails the deploy (#827).**
+  `put-retention-policy` creates nothing, so on a function never invoked it was
+  a tolerated no-op and the group Lambda created later had no retention.
+  `scripts/lambda-deploy-census.sh` now requires the `aws logs create-log-group`
+  invocation before the retention call, rejects a tolerated retention call, and
+  covers Go deploy paths too: any package that calls `CreateFunction` must call
+  `CreateLogGroup` and `PutRetentionPolicy`.
 
 ### Fixed
 
@@ -152,6 +179,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TerminateOnIdle`.
 - `spawn notify workspace add --help` showed the deprecated `workspace-add`
   spelling in its example, and two error messages named it too (#1132).
+
+- **`spawn reaper teardown --if-idle-for` and `spawn reaper status` measure
+  idleness correctly (#1155).** Any reaper that had run without reaping counted
+  as idle for the whole 30-day window. So a reaper deployed an hour ago could be
+  removed by `--if-idle-for 720h`, and a value above 30 days could never
+  trigger. Idleness is now measured from the first run still in the logs or the
+  deployment's creation (its role's creation date), whichever is later. Status
+  prints that duration instead of "at least 30 days". Only `REAPED` used to
+  count as work, so Spot requests `CANCELLED`, replacements `TERMINATED` and
+  DNS `EXPIRING` all counted as idle; every action the reaper logs now counts.
 
 ## [0.135.2] - 2026-10-19
 
