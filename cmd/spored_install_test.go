@@ -27,80 +27,116 @@ import (
 // signature of "this file installs spored".
 var sporedDownloader = regexp.MustCompile(`spored-linux-`)
 
-// No source file may download spored without calling the shared installer.
-//
-// Discovery, not a list (CLAUDE.md rule 4): it walks the tree for files
-// mentioning a spored artifact rather than naming the three known offenders, so a
-// fourth path cannot be added quietly. Fails if discovery finds nothing.
-func TestEverySporedDownloaderUsesTheVerifiedInstaller(t *testing.T) {
-	root := repoRootFromCmd(t)
+// installerCall matches an INVOCATION of the shell installer as a command, the
+// way every call site writes it (`if ! spore_install_verified_spored "$BIN" ...`),
+// not the bare name: a comment or a log line naming the function must not count
+// as calling it (CLAUDE.md rule 3).
+var installerCall = regexp.MustCompile(`(?m)^\s*(?:if\s+!\s+)?` + sporedinstall.FuncName + `\s+"`)
 
-	// Where generated install shell can live. pkg/sporedinstall is the
-	// implementation itself and is exempt.
-	roots := []string{
-		filepath.Join(root, "cmd"),
-		filepath.Join(root, "pkg"),
-	}
+// keySetupCall matches the Go call that emits SPORED_SIG_VERIFY and the signing
+// key. A script that calls the installer without it runs with verification OFF:
+// the function treats an unset SPORED_SIG_VERIFY as "no key", checks only the
+// sha256, and installs. That is the fail-open this file exists to prevent.
+var keySetupCall = regexp.MustCompile(`\bsporedinstall\.KeySetupScript\(\)`)
+
+// skipDirs are never source: VCS metadata and third-party trees.
+var skipDirs = map[string]bool{".git": true, "node_modules": true, "vendor": true}
+
+// discoverSporedDownloaders walks EVERY .go file in the repository, nested
+// modules included (lambda/*, scripts/), and returns the non-test files that
+// download spored, keyed by repo-relative path, with their contents.
+//
+// The whole repository, not cmd/ and pkg/: the first version walked only those
+// two, so the pipeline orchestrator Lambda, which generates the user data of
+// every pipeline stage instance, installed spored with its own inline curl and
+// a sha256 from the same bucket, never checking the signature, and the gate
+// never looked at it (#1173). Discovery, not a list (CLAUDE.md rule 4). Fails
+// if discovery finds nothing.
+func discoverSporedDownloaders(t *testing.T) map[string]string {
+	t.Helper()
+	root := repoRootFromCmd(t)
 	exempt := map[string]bool{
 		filepath.Join("pkg", "sporedinstall", "install.go"): true, // the implementation itself
 	}
 
-	found := map[string]bool{} // rel path -> calls the installer
-	for _, dir := range roots {
-		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			// Test files are not install paths. Without this the gate flagged
-			// ITSELF, since it names the artifact in order to look for it.
-			if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-				return nil
-			}
-			rel, relErr := filepath.Rel(root, path)
-			if relErr != nil {
-				return relErr
-			}
-			if exempt[rel] {
-				return nil
-			}
-			b, err := os.ReadFile(path) //nolint:gosec // walking a fixed repo subtree
-			if err != nil {
-				return err
-			}
-			body := string(b)
-			if !sporedDownloader.MatchString(body) {
-				return nil
-			}
-			// A file that merely names the artifact in a comment or a test
-			// expectation is not a downloader; require a fetch beside it.
-			if !strings.Contains(body, "curl") && !strings.Contains(body, sporedinstall.FuncName) {
-				return nil
-			}
-			found[rel] = strings.Contains(body, sporedinstall.FuncName)
-			return nil
-		})
+	found := map[string]string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			t.Fatalf("walk %s: %v", dir, err)
+			return err
 		}
+		if info.IsDir() {
+			if path != root && skipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Test files are not install paths. Without this the gate flagged
+		// ITSELF, since it names the artifact in order to look for it.
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		if exempt[rel] {
+			return nil
+		}
+		b, err := os.ReadFile(path) //nolint:gosec // walking the repo's own tree
+		if err != nil {
+			return err
+		}
+		body := string(b)
+		if !sporedDownloader.MatchString(body) {
+			return nil
+		}
+		// A file that merely names the artifact in a comment or a test
+		// expectation is not a downloader; require a fetch beside it.
+		if !strings.Contains(body, "curl") && !strings.Contains(body, sporedinstall.FuncName) {
+			return nil
+		}
+		found[rel] = body
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
 	}
-
 	if len(found) == 0 {
 		t.Fatal("found no file that downloads spored — discovery has broken, it has not proven the " +
 			"repo clean")
 	}
-	// The three known call sites plus pkg/launcher's bootstrap. A floor: if
-	// discovery drops below it, the match has stopped working rather than the
-	// paths having been removed.
+	// A floor: there are at least three call sites (cmd/app.go,
+	// cmd/upgrade_spored.go, pkg/launcher/bootstrap.go). If discovery drops below
+	// it, the match has stopped working rather than the paths having been removed.
 	if len(found) < 3 {
 		t.Errorf("found only %d spored downloaders (%v); there are at least three call sites, so the "+
-			"match has stopped finding some of them", len(found), found)
+			"match has stopped finding some of them", len(found), keysOf(found))
 	}
+	return found
+}
 
-	for rel, usesInstaller := range found {
-		if !usesInstaller {
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// No source file anywhere in the repository may download spored without calling
+// the shared installer, with the signing key set up.
+func TestEverySporedDownloaderUsesTheVerifiedInstaller(t *testing.T) {
+	for rel, body := range discoverSporedDownloaders(t) {
+		if !installerCall.MatchString(body) {
 			t.Errorf("%s downloads spored without calling %s. spored runs as root; every install path "+
 				"must verify the checksum AND the signature and fail closed, and there must be one "+
-				"implementation of that rather than one per call site (#819)", rel, sporedinstall.FuncName)
+				"implementation of that rather than one per call site (#819, #1173)", rel, sporedinstall.FuncName)
+			continue
+		}
+		if !keySetupCall.MatchString(body) {
+			t.Errorf("%s calls %s but never emits sporedinstall.KeySetupScript(), so SPORED_SIG_VERIFY "+
+				"is unset and the installer checks only the sha256: the signature is never verified", rel,
+				sporedinstall.FuncName)
 		}
 	}
 }
@@ -111,21 +147,15 @@ func TestEverySporedDownloaderUsesTheVerifiedInstaller(t *testing.T) {
 // even the install failing was discarded. A verified installer whose exit status
 // is ignored is not meaningfully better than no installer.
 func TestNoCallSiteSwallowsTheInstallerFailure(t *testing.T) {
-	root := repoRootFromCmd(t)
+	// Every discovered downloader, not a hand-written list of three: the list
+	// this replaced could not have included a fourth path nobody knew about
+	// (#1173). TestEverySporedDownloaderUsesTheVerifiedInstaller fails a
+	// downloader that does not call the installer; this checks how it calls it.
+	downloaders := discoverSporedDownloaders(t)
 	checked := 0
 
-	for _, rel := range []string{
-		filepath.Join("cmd", "app.go"),
-		filepath.Join("cmd", "upgrade_spored.go"),
-		filepath.Join("pkg", "launcher", "bootstrap.go"),
-	} {
-		b, err := os.ReadFile(filepath.Join(root, rel)) //nolint:gosec // fixed repo-relative path
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		body := string(b)
-		if !strings.Contains(body, sporedinstall.FuncName) {
-			t.Errorf("%s does not call %s", rel, sporedinstall.FuncName)
+	for rel, body := range downloaders {
+		if !installerCall.MatchString(body) {
 			continue
 		}
 		checked++
@@ -152,8 +182,9 @@ func TestNoCallSiteSwallowsTheInstallerFailure(t *testing.T) {
 		}
 	}
 
-	if checked != 3 {
-		t.Fatalf("checked %d of 3 call sites; the gate is looking at fewer files than it claims", checked)
+	if checked < 3 {
+		t.Fatalf("checked %d call sites, fewer than the three known ones (cmd/app.go, cmd/upgrade_spored.go, "+
+			"pkg/launcher/bootstrap.go); the gate is looking at fewer files than it claims", checked)
 	}
 }
 
