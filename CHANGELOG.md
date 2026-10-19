@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.135.2] - 2026-10-19
+
 ### Added
 
 - `launcher.BootstrapConfig.CompletionFile` (Go API, for headless callers such
@@ -16,7 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A Windows CI flake in the on-complete retry test.** The test timed five completion ticks against a 300 ms grace period, and on the Windows runner the user-warning probes around the grace sleep made that wall-clock bound fail. It now counts the grace waits through a test seam instead of timing them.
 - **`spawn launch --efa` and `--placement-group` without `--mpi` now take effect.**
   `EFAEnabled` was set only on the `--mpi` path, so a single launch with
   `--efa` passed the EFA pre-flight, printed nothing, and came up with a plain
@@ -137,6 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first line, does the same for the AWS CLI, and folds any multi-line detail
   or fix onto one line. Every line of the text report before the summary
   starts with a status symbol or `→`.
+
+- **A Windows CI flake in the on-complete retry test.** The test timed five completion ticks against a 300 ms grace period, and on the Windows runner the user-warning probes around the grace sleep made that wall-clock bound fail. It now counts the grace waits through a test seam instead of timing them.
 
 ### Security
 
@@ -10019,7 +10022,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.135.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.135.2...HEAD
+[0.135.2]: https://github.com/spore-host/spawn/compare/v0.135.1...v0.135.2
 [0.135.1]: https://github.com/spore-host/spawn/compare/v0.135.0...v0.135.1
 [0.135.0]: https://github.com/spore-host/spawn/compare/v0.134.0...v0.135.0
 [0.134.0]: https://github.com/spore-host/spawn/compare/v0.133.0...v0.134.0
