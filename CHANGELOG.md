@@ -18,6 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launch config the way `--subnet-id` and `--security-group-ids` do since #667.
   `--placement-group` had the same gap: applied only under `--mpi`, so an
   explicit cluster placement group was silently ignored on a single launch.
+- **spored now installs on Rocky Linux 8 and RHEL 8 (#1056).** Every download
+  in the spored installer used `curl --retry-all-errors`, an option added in
+  curl 7.71. EL8 ships curl 7.61.1, which rejects it, so every download failed,
+  the bootstrap aborted, and the instance ran with no spored. That meant no
+  TTL, no cost limit and no `--on-complete`. Downloads are now retried by a
+  portable loop with the same behaviour (up to 5 retries, 2 s apart, on any
+  network or HTTP error). curl's error message is no longer hidden on the
+  final attempt, so a usage error no longer looks like a network failure. A
+  new test runs the installer against a curl that accepts only curl 7.61.1's
+  options, and another checks every curl command spawn generates against that
+  option set.
+- **spored now starts on SELinux-enforcing AMIs such as Rocky Linux 9
+  (#1052).** The installer downloads spored to `/tmp` and moves it into
+  `/usr/local/bin`. A move keeps the file's SELinux label, here
+  `cloud_init_tmp_t`, and systemd is not allowed to run a file with that
+  label. spored failed with `status=203/EXEC` on every restart, and the
+  instance again had no TTL or cost limit. The installer now runs `restorecon`
+  on the binary after installing it, and on the spored systemd unit, and
+  `spawn upgrade-spored` does the same when it rolls back. Nothing changes on
+  hosts without SELinux (Ubuntu) or with it disabled.
 
 ## [0.135.1] - 2026-10-18
 

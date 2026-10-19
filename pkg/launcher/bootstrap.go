@@ -1022,6 +1022,9 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOFSERVICE
+# Policy-default SELinux label on the unit, as the installer did for the binary
+# (#1052). A no-op without SELinux.
+spore_selinux_relabel /etc/systemd/system/spored.service
 
 # Enable and start
 systemctl daemon-reload

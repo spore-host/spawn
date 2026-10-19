@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -40,6 +41,13 @@ type fixture struct {
 	bodies   map[string][]byte // path -> content; absent path = 404
 	srv      *httptest.Server
 	destPath string
+	// drops: path -> how many more requests for it to answer by closing the
+	// connection without a response (curl exit 52, "Empty reply from server" —
+	// the transient S3 failure of #462).
+	drops map[string]int
+	mu    sync.Mutex
+	// env is appended to the script's environment (e.g. a PATH carrying shims).
+	env []string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -79,7 +87,22 @@ func newFixture(t *testing.T) *fixture {
 			"/" + binaryName + ".sig":    []byte(base64.StdEncoding.EncodeToString(sig) + "\n"),
 		},
 	}
+	f.drops = map[string]int{}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		drop := f.drops[r.URL.Path] > 0
+		if drop {
+			f.drops[r.URL.Path]--
+		}
+		f.mu.Unlock()
+		if drop {
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+		}
 		body, ok := f.bodies[r.URL.Path]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -133,6 +156,7 @@ func (f *fixture) run(sigVerify bool, bases ...string) (int, string, bool) {
 	// the weaker check that let the #819 fail-open ship.
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.Command("bash", "-c", full) //nolint:gosec // this package's own generated script
+	cmd.Env = append(os.Environ(), f.env...)
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if err != nil {

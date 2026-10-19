@@ -325,8 +325,10 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 		"${S3_BASE_URL}/${PROJECT}",
 		"${FALLBACK_URL}/${PROJECT}",
 		// HEAD-probes the .sig up front when verifying (the crux of the fix).
-		// Retry flags tolerate a transient S3 hiccup on the probe (#462).
-		`curl -fsI --retry 3 --retry-delay 1 --retry-all-errors "$sig_url"`,
+		// Retried, to tolerate a transient S3 hiccup on the probe (#462) —
+		// through the portable wrapper, not --retry-all-errors, which EL8's
+		// curl 7.61 rejects (#1056).
+		sporedinstall.CurlRetryFuncName + ` 3 1 -fsI "$sig_url"`,
 		"trying next source",
 	} {
 		if !strings.Contains(script, want) {
@@ -341,11 +343,14 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 
 	// The binary + checksum fetches must RETRY (#462): a single-shot curl that
 	// dies on a transient S3 empty-reply hard-fails the whole install. Lock in the
-	// retry flags so a future edit can't silently drop them.
+	// retry wrapper so a future edit can't silently drop it. (That the wrapper
+	// really retries, and that no curl option is too new for EL8, is executed in
+	// pkg/sporedinstall — #1056.)
+	retry := sporedinstall.CurlRetryFuncName + " 5 2 -f -o "
 	for _, want := range []string{
-		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "$tmp"`,          // binary
-		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "${tmp}.sha256"`, // checksum
-		`curl -f --retry 5 --retry-delay 2 --retry-all-errors -o "${tmp}.sig"`,    // signature
+		retry + `"$tmp"`,          // binary
+		retry + `"${tmp}.sha256"`, // checksum
+		retry + `"${tmp}.sig"`,    // signature
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("generated bootstrap missing retry on a critical fetch: %q", want)
