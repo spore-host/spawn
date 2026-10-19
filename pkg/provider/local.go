@@ -142,6 +142,9 @@ func NewLocalProvider(ctx context.Context) (*LocalProvider, error) {
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, ddbOpts...)
 	if err == nil {
+		err = config.CheckAccount(ctx, cfg) // --account / SPORE_ACCOUNT (#1118)
+	}
+	if err == nil {
 		provider.dynamoClient = dynamodb.NewFromConfig(cfg)
 		log.Printf("DynamoDB client initialized for hybrid registry")
 	} else {

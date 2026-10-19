@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -18,6 +19,16 @@ import (
 // An explicit AWS_REGION or profile region still wins; IMDS is consulted only
 // when neither is set. Off EC2, with no region configured, the IMDS lookup fails
 // and the config is returned regionless, exactly as before.
+//
+// It is also subject to the --account / SPORE_ACCOUNT guard (#1118), a no-op
+// on an instance, where no expected account is configured.
 func loadAWSConfig(ctx context.Context) (aws.Config, error) {
-	return awsconfig.LoadDefaultConfig(ctx, awsconfig.WithEC2IMDSRegion())
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithEC2IMDSRegion())
+	if err != nil {
+		return aws.Config{}, err
+	}
+	if err := spawnconfig.CheckAccount(ctx, cfg); err != nil {
+		return aws.Config{}, err
+	}
+	return cfg, nil
 }

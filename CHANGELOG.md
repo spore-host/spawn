@@ -83,6 +83,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails if any file in `pkg/agent`, for any GOOS, starts a process with
   `exec.Command`.
 
+- **`--account` / `SPORE_ACCOUNT` now stops spawn acting in the wrong account**
+  (#1118). The flag was documented as an "optional guard" and the docs said
+  spawn "refuses to act if your credentials resolve to a different account",
+  but only `spawn doctor` read it. `spawn --account 111111111111 launch …` with
+  credentials for another account launched anyway. Now, when an account is
+  pinned by `--account`, `SPORE_ACCOUNT` or `account =` in
+  `~/.config/spore/config.toml`, spawn checks the credentials with STS
+  `GetCallerIdentity` before it uses them. It refuses, naming both accounts, on
+  a mismatch, and also when the account can't be determined. The messages match
+  truffle and lagotto.
+  - The check runs once per set of credentials, when spawn first needs them.
+    Commands that never touch AWS (`version`, `completion`, `help`) make no STS
+    call. With no account pinned nothing changes and there is no extra call.
+  - Credentials for spawn's control-plane account through a dedicated infra
+    profile (`SPAWN_INFRA_PROFILE`, default `spore-host-infra`) are exempt:
+    that account is separate by design. When infra resolves through your own
+    profile, it is checked like everything else. The compute profile, where
+    instances launch, is always checked.
+  - `spawn doctor` reports the mismatch as a failed `account` check and stops
+    there instead of probing an account you said you didn't mean.
+
 ## [0.135.1] - 2026-10-18
 
 ### Security

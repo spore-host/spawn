@@ -192,12 +192,24 @@ func LoadInfraAWSConfig(ctx context.Context, region string) (aws.Config, error) 
 	if region != "" {
 		opts = append(opts, awsconfig.WithRegion(region))
 	}
-	if profile := GetInfraProfile(); profile != "" {
+	profile := GetInfraProfile()
+	if profile != "" {
 		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return aws.Config{}, fmt.Errorf("load infra AWS config: %w", err)
+	}
+	// The account guard (#1118) names the account spawn acts in for you. A
+	// dedicated infra profile (SPAWN_INFRA_PROFILE, default spore-host-infra)
+	// is spawn's control-plane account, a different account by design, so
+	// guarding it would refuse every sweep/schedule/pipeline command that pins
+	// --account. When infra resolves through the same profile as everything
+	// else (SPAWN_INFRA_PROFILE="" or equal to it), it IS the user's account.
+	if profile == SharedProfile() {
+		if err := CheckAccount(ctx, cfg); err != nil {
+			return aws.Config{}, err
+		}
 	}
 	return cfg, nil
 }
@@ -215,6 +227,10 @@ func LoadComputeAWSConfig(ctx context.Context, region string) (aws.Config, error
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return aws.Config{}, fmt.Errorf("load compute AWS config: %w", err)
+	}
+	// Compute is where instances launch: always subject to the account guard.
+	if err := CheckAccount(ctx, cfg); err != nil {
+		return aws.Config{}, err
 	}
 	return cfg, nil
 }

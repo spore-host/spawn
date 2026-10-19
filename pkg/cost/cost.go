@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"os"
 	"sort"
 	"sync"
@@ -182,6 +183,10 @@ func (c *Client) onDemandPricerOrDefault(ctx context.Context) onDemandPricer {
 				// then fails fast per-instance below, which is reported as "unpriced"
 				// rather than a fabricated rate.
 				fmt.Fprintf(os.Stderr, "⚠️  cost: could not load AWS config for pricing (%v); compute costs will be reported as unpriced\n", err)
+				return
+			}
+			if err := spawnconfig.CheckAccount(ctx, cfg); err != nil { // --account / SPORE_ACCOUNT (#1118)
+				fmt.Fprintf(os.Stderr, "⚠️  cost: %v; compute costs will be reported as unpriced\n", err)
 				return
 			}
 			c.pricer = truffleaws.NewClientFromConfig(cfg)

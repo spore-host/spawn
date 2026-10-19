@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"io"
 	"log"
 	"os"
@@ -50,6 +51,9 @@ func NewEC2Provider(ctx context.Context) (*EC2Provider, error) {
 	cfg, err := config.LoadDefaultConfig(checkCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+	if err := spawnconfig.CheckAccount(checkCtx, cfg); err != nil { // --account / SPORE_ACCOUNT (#1118)
+		return nil, err
 	}
 
 	imdsClient := imds.NewFromConfig(cfg)
