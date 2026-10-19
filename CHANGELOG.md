@@ -137,6 +137,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or fix onto one line. Every line of the text report before the summary
   starts with a status symbol or `→`.
 
+### Security
+
+- **Pipeline stage instances now install spored through the verified
+  installer (#1173).** The pipeline orchestrator Lambda generated each stage
+  instance's user data with its own inline install: `curl` straight into
+  `/usr/local/bin/spored`, then a sha256 served from the same bucket as the
+  binary. It never checked the signature, so whoever could write to the
+  binaries bucket could run code as root on every pipeline stage instance.
+  This is the gap GHSA-3x4q-99gh-fxhx (#819) closed for the other install
+  paths. The stage user data now embeds the spore.host signing key and calls
+  the shared installer from `pkg/sporedinstall`, which requires the checksum
+  AND the signature, installs nothing on any failure, and fails the stage
+  (FAILED marker, instance terminated) rather than run an unverified agent.
+  The gate that checks every spored download path for the installer now scans
+  every `.go` file in the repository, nested Lambda modules included; it
+  previously looked only in `cmd/` and `pkg/`, which is how this path was
+  missed. Takes effect only once the pipeline-orchestrator Lambda is
+  redeployed.
+
 ## [0.135.1] - 2026-10-18
 
 ### Security

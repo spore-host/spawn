@@ -514,6 +514,9 @@ type userDataRun struct {
 	spored       string   // the file the fake curl serves as the spored binary
 	failDownload bool     // every binary download fails
 	env          []string // extra environment, e.g. AWS endpoints for a real spored
+	// sig is how the fake bucket signs spored (#1173). The zero value serves a
+	// valid signature from the key the user data embeds.
+	sig sigMode
 }
 
 // execUserData executes the generated user data under bash with every external
@@ -532,6 +535,11 @@ func execUserData(t *testing.T, r userDataRun) (string, error) {
 	if err != nil {
 		t.Skip("bash not available")
 	}
+	// The stage installs spored through the verified installer, which checks
+	// its signature with real openssl against the key compiled into the user
+	// data. Swap in a test key for the render, and sign the binary the fake
+	// bucket serves with it (or not, per r.sig).
+	sigFile := useTestSigningKey(t, r.spored, r.sig)
 	ud, err := generatePipelineUserData(r.state, r.stageDef, r.stageState, r.index, r.region)
 	if err != nil {
 		t.Fatal(err)
@@ -545,7 +553,7 @@ func execUserData(t *testing.T, r userDataRun) (string, error) {
 	bin := filepath.Join(dir, "fakebin")
 	root := filepath.Join(dir, "root")
 	logf := filepath.Join(dir, "calls.log")
-	for _, d := range []string{bin, filepath.Join(root, "usr/local/bin"), filepath.Join(root, "opt"), filepath.Join(root, "tmp")} {
+	for _, d := range []string{bin, filepath.Join(root, "usr/local/bin"), filepath.Join(root, "opt"), filepath.Join(root, "tmp"), filepath.Join(root, "etc")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -555,6 +563,7 @@ func execUserData(t *testing.T, r userDataRun) (string, error) {
 		"/usr/local/bin", root+"/usr/local/bin",
 		"/opt/spawn", root+"/opt/spawn",
 		"/tmp/", root+"/tmp/",
+		"/etc/spawn", root+"/etc/spawn",
 	).Replace(string(raw))
 
 	fakes := map[string]string{
@@ -572,6 +581,7 @@ case "$url" in
   */meta-data/instance-id) [ "$tok" = tok123 ] && echo i-0fromimds || exit 22;;
   */meta-data/placement/region) echo eu-west-1;;
   *.sha256) echo abc > "$out";;
+  *.sig) [ -n "$NO_SIG" ] && exit 22; [ -z "$out" ] && exit 0; cp "$SIG_SRC" "$out";;
   *) [ -n "$FAIL_DOWNLOAD" ] && exit 22; cp "$SPORED_SRC" "$out";;
 esac`,
 		"aws":       `[ "$1 $2" = "s3 cp" ] && cat >/dev/null; echo "aws $*" >> "$CALLS"`,
@@ -581,6 +591,7 @@ esac`,
 		"uname":     `echo x86_64`,
 		"sha256sum": `echo "abc  $1"`,
 		"timeout":   `[ "$1" = -k ] && shift 2; shift; exec "$@"`,
+		"systemctl": `echo "systemctl $*" >> "$CALLS"`,
 	}
 	for name, body := range fakes {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/bash\n"+body+"\n"), 0o755); err != nil {
@@ -590,7 +601,10 @@ esac`,
 	// ec2-metadata is deliberately absent, as on Ubuntu and Debian.
 	cmd := exec.Command(bash, "-c", script)
 	cmd.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin", "CALLS=" + logf, "HOME=" + dir,
-		"SPORED_SRC=" + r.spored}, r.env...)
+		"SPORED_SRC=" + r.spored, "SIG_SRC=" + sigFile}, r.env...)
+	if r.sig == sigMissing {
+		cmd.Env = append(cmd.Env, "NO_SIG=1")
+	}
 	if r.failDownload {
 		cmd.Env = append(cmd.Env, "FAIL_DOWNLOAD=1")
 	}

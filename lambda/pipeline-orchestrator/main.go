@@ -29,6 +29,7 @@ import (
 	"github.com/aws/smithy-go"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/pipeline"
+	"github.com/spore-host/spawn/pkg/sporedinstall"
 	"github.com/spore-host/spawn/pkg/ttl"
 )
 
@@ -1280,52 +1281,25 @@ case "$ARCH" in
         ;;
 esac
 
-# Download from S3
+# Download from S3 (public buckets, regional for low latency)
 S3_BASE_URL="https://spawn-binaries-${REGION}.s3.amazonaws.com"
 FALLBACK_URL="https://spawn-binaries-us-east-1.s3.amazonaws.com"
 PROJECT="spawn"
-
+%s
 echo "Downloading spored binary..."
-
-# Try regional bucket with project prefix first, then without prefix (legacy), then fallback to us-east-1
-if curl -f -o /usr/local/bin/spored "${S3_BASE_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
-    CHECKSUM_URL="${S3_BASE_URL}/${PROJECT}/${BINARY}.sha256"
-    echo "Downloaded from ${REGION}"
-elif curl -f -o /usr/local/bin/spored "${S3_BASE_URL}/${BINARY}" 2>/dev/null; then
-    CHECKSUM_URL="${S3_BASE_URL}/${BINARY}.sha256"
-    echo "Downloaded from ${REGION} (legacy path)"
-else
-    echo "Regional bucket unavailable, trying us-east-1..."
-    if curl -f -o /usr/local/bin/spored "${FALLBACK_URL}/${PROJECT}/${BINARY}" 2>/dev/null; then
-        CHECKSUM_URL="${FALLBACK_URL}/${PROJECT}/${BINARY}.sha256"
-    else
-        curl -f -o /usr/local/bin/spored "${FALLBACK_URL}/${BINARY}" || {
-            echo "Failed to download spored binary"
-            exit 1
-        }
-        CHECKSUM_URL="${FALLBACK_URL}/${BINARY}.sha256"
-    fi
-    echo "Downloaded from us-east-1"
-fi
-
-# Download and verify SHA256 checksum
-echo "Verifying checksum..."
-curl -f -o /tmp/spored.sha256 "${CHECKSUM_URL}" || {
-    echo "Failed to download checksum"
-    exit 1
-}
-
-cd /usr/local/bin
-EXPECTED_CHECKSUM=$(cat /tmp/spored.sha256)
-ACTUAL_CHECKSUM=$(sha256sum spored | awk '{print $1}')
-
-if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-    echo "❌ Checksum verification failed!"
+# Verified install, from pkg/sporedinstall: checksum AND signature, failing
+# closed, installed only after every check passes (#1173). Same candidates in
+# the same order as before: regional project-prefixed, regional legacy, then
+# both under us-east-1. No "|| true": a failure exits, and the EXIT trap writes
+# FAILED and terminates the instance.
+if ! spore_install_verified_spored "$BINARY" \
+      "${S3_BASE_URL}/${PROJECT}" \
+      "${S3_BASE_URL}" \
+      "${FALLBACK_URL}/${PROJECT}" \
+      "${FALLBACK_URL}"; then
+    echo "spored install failed; refusing to run an unverified agent"
     exit 1
 fi
-
-echo "✅ Checksum verified"
-chmod +x /usr/local/bin/spored
 
 # Install AWS CLI if not present: spawn_finish uses it for the fallback FAILED
 # marker and the API terminate.
@@ -1390,6 +1364,14 @@ exit 0
 		// command that trusted them got AccessDenied.
 		shellEscape(region),
 		shellEscape(failedMarker),
+		// The spored signing key and the one verified installer, shared with
+		// pkg/launcher, cmd/app.go and cmd/upgrade_spored.go. This script used
+		// to install spored with its own inline curl and a sha256 served from
+		// the same bucket, never checking the signature (#1173, the gap
+		// GHSA-3x4q-99gh-fxhx closed for the other paths). Passed as an
+		// argument, not spliced into the format string, because the generated
+		// shell contains % characters.
+		sporedinstall.KeySetupScript()+sporedinstall.VerifiedInstallFunc(),
 		// The stage command and env are no longer in the user data at all:
 		// the runner reads them from the definition and runs the command with
 		// exec, so there is nothing here for a command's $(...) or quotes to
