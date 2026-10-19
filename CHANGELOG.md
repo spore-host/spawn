@@ -137,7 +137,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the instance type supports, `1` is the single interface `--efa` used to
   attach, and a count above the type's maximum is refused before anything is
   created (#661). `spawn launch --dry-run` shows the interface layout and
-  whether an Elastic IP will be associated.
+  whether an Elastic IP will be associated. With more than one interface,
+  RunInstances needs a subnet on each, so spawn takes the `--az`'s subnet when no
+  `--subnet-id` is given, and asks for one of them otherwise.
 
 - `pkg/aws`: `Client.EFACapacityInRegion`, `EFACapacity`, `EFANetworkCard`,
   `EFANetworkInterfaces`, `EFALaunchInterfaces`, `NeedsLaunchElasticIP`,

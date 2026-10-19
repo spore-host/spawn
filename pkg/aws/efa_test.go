@@ -443,12 +443,31 @@ func TestLaunch_MultiEFAElasticIPFailureTerminates(t *testing.T) {
 	c := newFakeEC2Client(t, f)
 	_, err := c.Launch(context.Background(), LaunchConfig{
 		InstanceType: "c8gn.48xlarge", Region: "us-west-2", AMI: "ami-0123456789abcdef0", PricePerHour: 1,
-		EFAEnabled: true, EFAInterfaces: 2,
+		EFAEnabled: true, EFAInterfaces: 2, SubnetID: "subnet-1",
 	})
 	if err == nil || !strings.Contains(err.Error(), "terminated") {
 		t.Fatalf("err = %v, want a launch failure that says the instance was terminated", err)
 	}
 	if f.request("TerminateInstances") == nil {
 		t.Errorf("no TerminateInstances (actions %v): the instance would run unreachable", f.actions())
+	}
+}
+
+// RunInstances rejects a multi-interface request whose interfaces carry no subnet
+// ("Each network interface requires either a subnet or a network interface ID",
+// seen on a real c8gn.48xlarge launch). Without --subnet-id or --az the launch
+// must stop before RunInstances with a usable message.
+func TestLaunch_MultiEFANeedsSubnetOrAZ(t *testing.T) {
+	f := &fakeEC2{efaCards: 2}
+	c := newFakeEC2Client(t, f)
+	_, err := c.Launch(context.Background(), LaunchConfig{
+		InstanceType: "c8gn.48xlarge", Region: "us-west-2", AMI: "ami-0123456789abcdef0", PricePerHour: 1,
+		EFAEnabled: true, EFAInterfaces: 2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--subnet-id or --az") {
+		t.Fatalf("err = %v, want the subnet requirement", err)
+	}
+	if f.request("RunInstances") != nil {
+		t.Error("RunInstances was called without a subnet on every interface")
 	}
 }
