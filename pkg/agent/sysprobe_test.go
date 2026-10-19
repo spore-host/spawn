@@ -22,6 +22,10 @@ import (
 // slowProbeEnv set, TestHelperSlowProbe sleeps instead of testing anything.
 const slowProbeEnv = "SPAWN_AGENT_SLOW_PROBE"
 
+// slowProbePIDFileEnv names a file the "grandchild" helper writes its
+// grandchild's PID to, so the test can kill it in cleanup.
+const slowProbePIDFileEnv = "SPAWN_AGENT_SLOW_PROBE_PIDFILE"
+
 // slowProbeSleep is how long the helper child sleeps. Long enough that a probe
 // returning "promptly" cannot be the child exiting by itself.
 const slowProbeSleep = 30 * time.Second
@@ -43,6 +47,12 @@ func TestHelperSlowProbe(t *testing.T) {
 		gc.Stdout = os.Stdout
 		if err := gc.Start(); err != nil {
 			os.Exit(3)
+		}
+		// Tell the test which process to reap. An orphaned grandchild would keep
+		// the test binary's image open, and on Windows `go test` then cannot
+		// delete it ("unlinkat … agent.test.exe: Access is denied").
+		if f := os.Getenv(slowProbePIDFileEnv); f != "" {
+			_ = os.WriteFile(f, []byte(strconv.Itoa(gc.Process.Pid)), 0o600)
 		}
 	}
 	time.Sleep(slowProbeSleep)
@@ -103,6 +113,9 @@ func TestProbeOutput_TimesOut(t *testing.T) {
 // without WaitDelay Output waits for the grandchild too.
 func TestProbeOutput_GrandchildHoldingPipe(t *testing.T) {
 	name, args := slowProbe(t, "grandchild")
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	t.Setenv(slowProbePIDFileEnv, pidFile)
+	t.Cleanup(func() { killGrandchild(t, pidFile) })
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(500*time.Millisecond, cancel)
 	if err := probeReturns(t, ctx, name, args); err == nil {
@@ -242,5 +255,33 @@ func TestNoContextlessExecInAgent(t *testing.T) {
 	}
 	if len(platforms) != 3 {
 		t.Fatalf("scanned platform files %v, want sys_linux.go, sys_other.go and sys_windows.go", platforms)
+	}
+}
+
+// killGrandchild kills the helper's grandchild and waits for it to exit, so no
+// process outlives the test holding the test binary open.
+func killGrandchild(t *testing.T, pidFile string) {
+	t.Helper()
+	var pid int
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if b, err := os.ReadFile(pidFile); err == nil && len(b) > 0 {
+			pid, _ = strconv.Atoi(string(b))
+			break
+		}
+	}
+	if pid <= 0 {
+		t.Errorf("helper never reported its grandchild's PID; it may outlive the test")
+		return
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	_ = p.Kill()
+	done := make(chan struct{})
+	go func() { _, _ = p.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
 	}
 }
