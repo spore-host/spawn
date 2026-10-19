@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `launcher.BootstrapConfig.CompletionFile` (Go API, for headless callers such
+  as lagotto). It sets the path the `--command` wrapper writes its completion
+  record to. Pass the same value as `LaunchConfig.CompletionFile`, the file
+  spored watches. Empty means `/tmp/SPAWN_COMPLETE`, as before (#1131).
+
 ### Fixed
 
 - **`spawn launch --efa` and `--placement-group` without `--mpi` now take effect.**
@@ -38,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the binary after installing it, and on the spored systemd unit, and
   `spawn upgrade-spored` does the same when it rolls back. Nothing changes on
   hosts without SELinux (Ubuntu) or with it disabled.
+
+- **`--command` now honours a custom `--completion-file`** (#1131). The
+  wrapper always wrote its completion record to `/tmp/SPAWN_COMPLETE`, while
+  spored watched the file `--completion-file` named. With any other path,
+  `--on-complete` never fired and the instance ran until its TTL. The wrapper
+  now writes the configured path, creating its directory if needed. The
+  default is unchanged.
+- **A `--batch-queue` file may omit `queue_id`** (#1131). spawn was meant to
+  generate an ID when the file has none, but validation rejected the file
+  first, with `queue_id is required`. A missing `queue_id` now gets a
+  generated `queue-<timestamp>` ID.
 
 ## [0.135.1] - 2026-10-18
 

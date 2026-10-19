@@ -122,6 +122,26 @@ type BootstrapConfig struct {
 	// usually `echo ... >> /etc/fstab`, which returns 0 whether or not the mount
 	// succeeded, so there is no reliable status to read.
 	ReadyMountPoints []string
+	// CompletionFile is the path spored watches for the completion signal
+	// (--completion-file, LaunchConfig.CompletionFile). The --command wrapper
+	// writes its completion record there, so the two must agree or --on-complete
+	// never fires (#1131). Empty means /tmp/SPAWN_COMPLETE, the flag default.
+	CompletionFile string
+}
+
+// defaultCompletionFile is the completion sentinel used when no
+// --completion-file is given. It matches the flag default and spored's own.
+const defaultCompletionFile = "/tmp/SPAWN_COMPLETE"
+
+// completionFilePlaceholder marks where linuxBootstrapBody writes the
+// completion record; BuildLinuxBootstrap replaces it with the quoted path.
+const completionFilePlaceholder = "@@SPAWN_COMPLETION_FILE@@"
+
+func completionFileOrDefault(p string) string {
+	if p == "" {
+		return defaultCompletionFile
+	}
+	return p
 }
 
 // shellQuoteJoin renders paths as a single-quoted, space-separated list safe to
@@ -285,7 +305,10 @@ echo "Plugin declarations written: %d plugin(s)"
 `, string(declJSON), len(cfg.Plugins))
 	}
 
-	script += linuxBootstrapBody
+	// The --command wrapper inside the body signals completion by writing the
+	// file spored watches. Render the configured path into it (shell-quoted: the
+	// value comes from --completion-file) rather than a hardcoded default (#1131).
+	script += strings.ReplaceAll(linuxBootstrapBody, completionFilePlaceholder, security.ShellQuote(completionFileOrDefault(cfg.CompletionFile)))
 
 	// On a Spot replacement, stop here (#1007): spored is running and retires
 	// the instance, and nothing below this point (storage, the container,
@@ -852,7 +875,8 @@ EOFCMD
                 # silently wrong output, which costs more than a clear failure.
                 echo "❌ --command NOT started: prerequisites unmet (see above)" | tee -a /var/log/spawn-command.log
                 echo 1 > /tmp/SPAWN_EXITCODE
-                cat > /tmp/SPAWN_COMPLETE <<JSONEOF
+                mkdir -p "$(dirname -- @@SPAWN_COMPLETION_FILE@@)" || true
+                cat > @@SPAWN_COMPLETION_FILE@@ <<JSONEOF
 {"status": "failed", "exit_code": 1, "source": "command"}
 JSONEOF
                 exit 1
@@ -887,7 +911,15 @@ JSONEOF
         # instance for inspection uses --on-complete stop, or omits it.
         # Same JSON shape as the task wrapper (pkg/taskproto/wrapper.go) so one
         # reader handles both sources.
-        cat > /tmp/SPAWN_COMPLETE <<JSONEOF
+        #
+        # The path is the launch's --completion-file (default /tmp/SPAWN_COMPLETE),
+        # rendered by BuildLinuxBootstrap: spored watches THAT file, so writing a
+        # hardcoded default here meant a custom --completion-file never fired
+        # --on-complete and the instance billed to its TTL (#1131). The mkdir is
+        # for a custom path whose directory does not exist yet; without it the
+        # write fails and the same leak returns.
+        mkdir -p "$(dirname -- @@SPAWN_COMPLETION_FILE@@)" || true
+        cat > @@SPAWN_COMPLETION_FILE@@ <<JSONEOF
 {"status": "$CMD_STATE", "exit_code": $CMD_RC, "source": "command"}
 JSONEOF
     ) &
