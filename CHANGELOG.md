@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`spawn extend` now exits non-zero when spored could not be reloaded.**
+  The new TTL/cost limit is still written to the tags, but a reload that
+  reached no path used to print a warning and exit 0, so a script raising a
+  limit mid-run could not tell that spored was still enforcing the old one.
+  The job-array form also exits non-zero when any member was not updated or
+  not reloaded (#1113).
+
+### Fixed
+
+- **`spawn extend` reloads spored over SSM on keyless instances (#1113).**
+  The reload ran only over SSH, so on a `spawn task run` instance (SSM-only, no
+  launch key) the new limit was tagged but never applied and the run was killed
+  at its original cap. extend now runs the same `spored reload` via SSM
+  `AWS-RunShellScript` when there is no key or public IP, or when SSH fails.
+  The manual fallback it prints is now `spawn connect <id> -- 'sudo spored reload'`.
+
 ## [0.135.2] - 2026-10-19
 
 ### Added

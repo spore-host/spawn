@@ -147,15 +147,21 @@ func runExtend(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "\nInstance is %s; spored will read the new deadline from its tags when it next starts.\n", instance.State)
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "\nTriggering configuration reload on instance...\n")
-	if err := triggerReload(instance); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to trigger reload: %v\n", err)
-		fmt.Fprintf(os.Stderr, "   You may need to manually run: ssh %s@%s 'sudo spored reload'\n",
-			resolveSSHUser("", instance), instance.PublicIP)
-	} else {
-		_, _ = fmt.Fprintf(os.Stdout, "✓ Configuration reloaded on instance\n")
-	}
+	return reloadAfterExtend(instance, reloader(client), os.Stdout, os.Stderr)
+}
 
+// reloadAfterExtend applies the freshly written tags on a running instance and
+// turns a reload that reached no path into a non-zero exit. A warning and exit
+// 0 was #1113: the tags said one limit, spored enforced the old one, and the
+// caller had no signal that the extension had not taken effect (the #581
+// failure shape).
+func reloadAfterExtend(instance *aws.InstanceInfo, reload func(*aws.InstanceInfo) error, stdout, stderr io.Writer) error {
+	fmt.Fprintf(stderr, "\nTriggering configuration reload on instance...\n")
+	if err := reload(instance); err != nil {
+		fmt.Fprintf(stderr, "   Manual fallback: spawn connect %s -- 'sudo spored reload'\n", instance.InstanceID)
+		return fmt.Errorf("tags updated, but spored on %s did not reload, so it is still enforcing the previous TTL/cost limit until its next periodic tag refresh: %w", instance.InstanceID, err)
+	}
+	_, _ = fmt.Fprintf(stdout, "✓ Configuration reloaded on instance\n")
 	return nil
 }
 
@@ -231,7 +237,7 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 		},
 		newTTL, extendDuration, time.Now(), extendCostLimit, extendKeepCostLimit, os.Stderr)
 	successCount, failedInstances, reloadFailedInstances := extendJobArrayInstances(
-		jobArrayInstances, updateTags, triggerReload, os.Stderr)
+		jobArrayInstances, updateTags, reloader(client), os.Stderr)
 
 	// Display results
 	_, _ = fmt.Fprintf(os.Stdout, "\n✅ Job array TTL extended!\n")
@@ -267,6 +273,18 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 			}, nil)
 	}
 
+	return jobArrayExtendResult(failedInstances, reloadFailedInstances)
+}
+
+// jobArrayExtendResult is the exit status of a job-array extend: non-zero when
+// any instance's tags were not written OR were written but not reloaded. A
+// reload failure used to exit 0 (#1113), so a script extending an array could
+// not tell that some members were still enforcing their old limits.
+func jobArrayExtendResult(failedInstances, reloadFailedInstances []string) error {
+	if len(failedInstances) > 0 || len(reloadFailedInstances) > 0 {
+		return fmt.Errorf("job array extend incomplete: %d instance(s) not updated, %d updated but not reloaded",
+			len(failedInstances), len(reloadFailedInstances))
+	}
 	return nil
 }
 
@@ -281,8 +299,8 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 // a caller extending a job array of N instances had no way to tell which (if
 // any) actually picked up the new TTL on-instance vs. which are running on
 // stale config until the next periodic tag refresh (every 5 minutes in
-// production). This mirrors the single-instance path in runExtend, which
-// warns and prints a manual SSH fallback on a reload failure.
+// production). The caller turns any reload failure into a non-zero exit, as
+// the single-instance path does (#1113).
 func extendJobArrayInstances(
 	instances []aws.InstanceInfo,
 	updateTags func(inst *aws.InstanceInfo) error,
@@ -298,8 +316,8 @@ func extendJobArrayInstances(
 		successCount++
 		if err := reload(&inst); err != nil {
 			fmt.Fprintf(stderr, "⚠️  Tag updated for %s, but failed to trigger reload: %v\n", inst.InstanceID, err)
-			fmt.Fprintf(stderr, "   Until the next periodic tag refresh, it is running on stale config. Manual fallback: ssh %s@%s 'sudo spored reload'\n",
-				resolveSSHUser("", &inst), inst.PublicIP)
+			fmt.Fprintf(stderr, "   Until the next periodic tag refresh, it is running on stale config. Manual fallback: spawn connect %s -- 'sudo spored reload'\n",
+				inst.InstanceID)
 			reloadFailedInstances = append(reloadFailedInstances, inst.InstanceID)
 		}
 	}
@@ -431,24 +449,86 @@ func parseExtendDuration(s string) (time.Duration, error) {
 	return d, nil
 }
 
-func triggerReload(instance *aws.InstanceInfo) error {
-	// Find SSH key
-	keyPath, err := findSSHKey(instance.KeyName)
-	if err != nil {
-		return fmt.Errorf("failed to find SSH key: %w", err)
+// reloadSporedCommand is the on-instance command both reload paths run. It is
+// the same `spored reload` subcommand over SSH and over SSM, so the two paths
+// cannot drift into reloading different things.
+const reloadSporedCommand = "sudo /usr/local/bin/spored reload"
+
+// reloadTransport is the seam triggerReload runs through: where the launch key
+// is looked up, how the SSH command is executed, and how an SSM
+// AWS-RunShellScript invocation is sent. Production wiring is
+// newReloadTransport; tests substitute recording fakes.
+type reloadTransport struct {
+	findKey func(keyName string) (string, error)
+	runSSH  func(ctx context.Context, args []string) error
+	runSSM  func(ctx context.Context, region, instanceID, command string) (*aws.SSMRunResult, error)
+}
+
+func newReloadTransport(client *aws.Client) reloadTransport {
+	return reloadTransport{
+		findKey: findSSHKey,
+		runSSH: func(ctx context.Context, args []string) error {
+			cmd, err := sshtarget.Command(ctx, "ssh", args...)
+			if err != nil {
+				return err
+			}
+			if output, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("%w: %s", err, string(output))
+			}
+			return nil
+		},
+		runSSM: func(ctx context.Context, region, instanceID, command string) (*aws.SSMRunResult, error) {
+			return client.RunShellScript(ctx, region, instanceID, command, 60*time.Second)
+		},
+	}
+}
+
+// reloader returns the reload function the extend paths call for each
+// instance, bound to client for the SSM fallback.
+func reloader(client *aws.Client) func(*aws.InstanceInfo) error {
+	t := newReloadTransport(client)
+	return func(instance *aws.InstanceInfo) error {
+		return t.triggerReload(context.Background(), instance)
+	}
+}
+
+// triggerReload makes spored on instance re-read its tags, so a new TTL or
+// cost limit takes effect now rather than at the next periodic refresh.
+//
+// SSH is tried first when we hold the launch key and the instance has a public
+// address; otherwise — and when SSH fails — the same `spored reload` runs over
+// SSM. Before #1113 this was SSH-only, so on a keyless `spawn task run`
+// instance the new limit was tagged but never applied and the run died at its
+// original cap. An error is returned only when every path failed, and it names
+// each failure.
+func (t reloadTransport) triggerReload(ctx context.Context, instance *aws.InstanceInfo) error {
+	var sshErr error
+	keyPath, keyErr := t.findKey(instance.KeyName)
+	switch {
+	case keyErr != nil:
+		sshErr = fmt.Errorf("no SSH key: %w", keyErr)
+	case instance.PublicIP == "":
+		sshErr = fmt.Errorf("no public IP for SSH")
+	default:
+		if sshErr = t.runSSH(ctx, buildReloadSSHArgs(keyPath, instance)); sshErr == nil {
+			return nil
+		}
 	}
 
-	sshArgs := buildReloadSSHArgs(keyPath, instance)
-
-	cmd, err := sshtarget.Command(context.Background(), "ssh", sshArgs...)
-	if err != nil {
-		return err
+	res, err := t.runSSM(ctx, instance.Region, instance.InstanceID, reloadSporedCommand)
+	if err == nil && res != nil && res.Status == "Success" && res.ResponseCode == 0 {
+		return nil
 	}
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%w: %s", err, string(output))
+	var ssmErr error
+	switch {
+	case err != nil:
+		ssmErr = err
+	case res == nil:
+		ssmErr = fmt.Errorf("no result")
+	default:
+		ssmErr = fmt.Errorf("status %s, exit %d: %s", res.Status, res.ResponseCode, res.Stderr)
 	}
-
-	return nil
+	return fmt.Errorf("SSH: %v; SSM: %v", sshErr, ssmErr)
 }
 
 // buildReloadSSHArgs constructs the ssh argv `spawn extend` uses to run
@@ -463,6 +543,6 @@ func triggerReload(instance *aws.InstanceInfo) error {
 func buildReloadSSHArgs(keyPath string, instance *aws.InstanceInfo) []string {
 	user := resolveSSHUser("", instance)
 	sshArgs := append([]string{"-i", keyPath}, sporedSSHOptions()...)
-	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, instance.PublicIP), "sudo /usr/local/bin/spored reload")
+	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, instance.PublicIP), reloadSporedCommand)
 	return sshArgs
 }
