@@ -107,3 +107,26 @@ func TestReaperDeployNotifyURLFromStdin(t *testing.T) {
 		t.Errorf("Settings = %v", opts.Settings)
 	}
 }
+
+// --log-retention-days must reach the deploy (#1156). It is wired through
+// reaperDeployOptions, which two PRs edited; without this nothing failed when
+// the field was dropped.
+func TestReaperDeployLogRetentionReachesTheDeploy(t *testing.T) {
+	saved := reaperLogRetention
+	t.Cleanup(func() { reaperLogRetention = saved })
+	for args, want := range map[string]int32{"": 30, "90": 90} {
+		var fs *pflag.FlagSet
+		if args == "" {
+			fs = parseReaperDeploy(t)
+		} else {
+			fs = parseReaperDeploy(t, "--log-retention-days", args)
+		}
+		opts, err := reaperDeployOptions(fs, "1", "us-east-1", "0.136.0", strings.NewReader(""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opts.LogRetentionDays != want {
+			t.Errorf("--log-retention-days %q: LogRetentionDays = %d, want %d", args, opts.LogRetentionDays, want)
+		}
+	}
+}
