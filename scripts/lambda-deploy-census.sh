@@ -117,7 +117,7 @@ for s in $shell_deploys; do
     fi
     # The whole command: the invocation line plus its backslash continuations.
     put_cmd=$(awk -v n="$put_at" 'NR>=n { print; if ($0 !~ /\\[[:space:]]*$/) exit }' "$s")
-    if printf '%s\n' "$put_cmd" | grep -qE '\|\||2>/dev/null'; then
+    if grep -qE '\|\||2>/dev/null' <<<"$put_cmd"; then
       note "❌ $s tolerates a failed put-retention-policy (|| or 2>/dev/null on the call)"
       fail=1; ok=0
     fi
@@ -145,7 +145,10 @@ for dir in $(for f in $go_deploys; do dirname "$f"; done | sort -u); do
     grep -vE '^[[:space:]]*//')
   ok=1
   for call in CreateLogGroup PutRetentionPolicy; do
-    if ! printf '%s\n' "$code" | grep -qE "\.${call}\(ctx"; then
+    # A here-string, not printf | grep -q: under pipefail grep -q exits on the
+    # first match, printf then dies of SIGPIPE, and the pipeline reports failure
+    # for a call that IS present (it did, in CI, on a large package).
+    if ! grep -qE "\.${call}\(ctx" <<<"$code"; then
       note "❌ ${dir#./} creates a Lambda function from Go but never calls .${call}("
       fail=1; ok=0
     fi
