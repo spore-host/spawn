@@ -53,6 +53,9 @@ var (
 var idleTerminateProofs = map[string]func() aws.LaunchConfig{
 	"spawn service": func() aws.LaunchConfig { return serviceLaunchConfig("svc", "us-east-1") },
 	"spawn pool":    func() aws.LaunchConfig { return poolWorkerBaseConfig("us-east-1", "ami-x", "p", "") },
+	"spawn pool create": func() aws.LaunchConfig {
+		return poolWorkerBaseConfig("us-east-1", "ami-x", "p", "")
+	},
 	"spawn pool drain": func() aws.LaunchConfig {
 		return poolWorkerBaseConfig("us-east-1", "ami-x", "p", "")
 	},

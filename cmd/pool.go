@@ -42,6 +42,7 @@ var (
 	poolVisTimeout   int
 	poolS3Read       []string
 	poolS3Write      []string
+	poolCostLimit    float64
 )
 
 var poolGroupCmd = &cobra.Command{
@@ -55,7 +56,12 @@ boot per task, so short tasks self-terminate faster than new ones launch and
 concurrency can never reach N. A worker pool inverts this: N fungible workers pull
 tasks from a run-scoped SQS queue and reuse across jobs (per-job cost is stage+run
 only), degrading gracefully — ask for N workers, get M, and tasks drain through
-whatever pool came up. Workers self-terminate on idle-timeout (scale to zero).`,
+whatever pool came up.
+
+Workers TERMINATE (not stop) once there is nothing left for them to do: when the
+queue has been empty for --idle-timeout (scale to zero), or at once when
+'spawn pool drain' deletes the queue. --ttl and --cost-limit bound each worker
+regardless, and the reaper is the backstop.`,
 }
 
 // specBucketFor returns the per-account bucket staged task specs live in. Reuses
@@ -140,35 +146,47 @@ const poolWorkerMaxRestarts = 20
 // The worker used to run once at boot; any early exit — a transient AWS error, an
 // SQS blip, a spot pre-warm race — left a running-but-idle instance billing until
 // TTL. This wraps it so:
-//   - exit 0 (the worker idle-drained cleanly) → STOP and let spored's on_complete
-//     terminate the instance. Scale-to-zero is preserved.
+//   - exit 0 (the worker drained: idle, or its queue was deleted) → stop, and
+//     write the completion record so spored's on_complete terminates the
+//     instance (#1146). Without the record on_complete never fired and every
+//     worker billed until TTL.
 //   - non-zero exit → sleep (fixed 10s) and re-exec, up to poolWorkerMaxRestarts,
-//     so a transient failure recovers instead of stranding the worker.
+//     so a transient failure recovers instead of stranding the worker. A worker
+//     that exhausts its restarts writes a FAILED completion record: it can do no
+//     more work, and terminating it is cheaper than leaving it to the TTL.
 //
+// completionFile must be the file the launch config tells spored to watch.
 // The env exports precede the loop so every re-exec sees the same pool config.
-func buildPoolWorkerCommand(runID, specBucket, specPrefix, idleTimeout string) string {
-	return fmt.Sprintf(`export SPAWN_POOL_RUN_ID=%q
-export SPAWN_POOL_SPEC_BUCKET=%q
-export SPAWN_POOL_SPEC_PREFIX=%q
+func buildPoolWorkerCommand(runID, specBucket, specPrefix, idleTimeout, completionFile string) string {
+	return fmt.Sprintf(`export SPAWN_POOL_RUN_ID=%[1]q
+export SPAWN_POOL_SPEC_BUCKET=%[2]q
+export SPAWN_POOL_SPEC_PREFIX=%[3]q
 # Restart-on-error loop (#465): re-exec on a non-zero exit (transient failure),
-# stop on 0 (clean idle-drain → let on_complete terminate). Bounded so a hard
-# crash-loop can't busy-spin for the whole TTL.
+# stop on 0 (clean drain). Either way the loop ends by writing the completion
+# record spored watches, so on_complete terminates the worker (#1146). Bounded
+# so a hard crash-loop can't busy-spin for the whole TTL.
 _spawn_pool_attempt=0
 while :; do
-  spored pool-worker --idle-timeout %s
+  spored pool-worker --idle-timeout %[4]s
   _rc=$?
   if [ "$_rc" -eq 0 ]; then
     echo "pool-worker: clean drain (exit 0); not restarting"
+    cat > %[5]q <<JSONEOF
+{"status": "completed", "exit_code": 0, "source": "pool-worker"}
+JSONEOF
     break
   fi
   _spawn_pool_attempt=$((_spawn_pool_attempt + 1))
-  if [ "$_spawn_pool_attempt" -ge %d ]; then
-    echo "pool-worker: exited $_rc; hit max restarts (%d); giving up (TTL will reap)" >&2
+  if [ "$_spawn_pool_attempt" -ge %[6]d ]; then
+    echo "pool-worker: exited $_rc; hit max restarts (%[6]d); giving up" >&2
+    cat > %[5]q <<JSONEOF
+{"status": "failed", "exit_code": $_rc, "source": "pool-worker"}
+JSONEOF
     break
   fi
   echo "pool-worker: exited $_rc; restarting (attempt $_spawn_pool_attempt) in 10s" >&2
   sleep 10
-done`, runID, specBucket, specPrefix, idleTimeout, poolWorkerMaxRestarts, poolWorkerMaxRestarts)
+done`, runID, specBucket, specPrefix, idleTimeout, completionFile, poolWorkerMaxRestarts)
 }
 
 var poolCreateCmd = &cobra.Command{
@@ -184,6 +202,9 @@ var poolCreateCmd = &cobra.Command{
 		// Before any AWS call, with the parser spored uses (#990).
 		if err := (aws.LaunchConfig{TTL: poolTTL}).ValidateDurations(); err != nil {
 			return fmt.Errorf("--ttl: %w", err)
+		}
+		if poolCostLimit < 0 {
+			return fmt.Errorf("--cost-limit must be >= 0 (0 = disabled)")
 		}
 		ctx := cmd.Context()
 		awsClient, err := aws.NewClient(ctx)
@@ -205,7 +226,7 @@ var poolCreateCmd = &cobra.Command{
 		}
 
 		// Create the run-scoped queue. Visibility timeout must exceed the longest
-		// single-task runtime; default sized from the TTL, overridable.
+		// single-task runtime; a fixed 15m default, overridable.
 		vis := poolVisTimeout
 		if vis <= 0 {
 			vis = 900 // 15m default claim window
@@ -260,8 +281,14 @@ func poolWorkerBaseConfig(region, ami, iamProfile, userData string) aws.LaunchCo
 		TTL:                poolTTL,
 		IdleTimeout:        poolIdleTimeout.String(),
 		TerminateOnIdle:    true,
+		CostLimit:          poolCostLimit,
 		OnComplete:         "terminate",
-		UserData:           userData,
+		// Tagged explicitly, like `spawn task run`, so on_complete never depends on
+		// provider-side defaulting (spawn#406). The worker script writes this file
+		// when the worker loop exits (buildPoolWorkerCommand, #1146).
+		CompletionFile:  taskCompletionFile,
+		CompletionDelay: "10s",
+		UserData:        userData,
 		Tags: map[string]string{
 			"spawn:pool-run-id": poolRunID,
 			"spawn:role":        "pool-worker",
@@ -276,9 +303,10 @@ func poolWorkerBaseConfig(region, ami, iamProfile, userData string) aws.LaunchCo
 func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, specBucket string) error {
 	// The worker bootstrap runs `spored pool-worker` under a restart-on-error loop
 	// (see buildPoolWorkerCommand): a transient failure re-execs instead of
-	// stranding a billing-but-idle worker (#465), while a clean idle-drain (exit 0)
-	// lets the instance terminate (scale-to-zero preserved).
-	workerCmd := buildPoolWorkerCommand(poolRunID, specBucket, "staging", poolIdleTimeout.String())
+	// stranding a billing-but-idle worker (#465), while a clean drain (exit 0)
+	// writes taskCompletionFile — the file poolWorkerBaseConfig tells spored to
+	// watch — so on_complete terminates the instance (#1146).
+	workerCmd := buildPoolWorkerCommand(poolRunID, specBucket, "staging", poolIdleTimeout.String(), taskCompletionFile)
 
 	userData, err := launcher.BuildLinuxBootstrap(launcher.BootstrapConfig{
 		Username:       "ec2-user",
@@ -445,7 +473,7 @@ var poolStatusCmd = &cobra.Command{
 
 var poolDrainCmd = &cobra.Command{
 	Use:   "drain --run-id R",
-	Short: "Delete the pool's task queue (workers self-terminate on idle)",
+	Short: "Delete the pool's task queue; its workers then terminate",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if poolRunID == "" {
 			return fmt.Errorf("--run-id is required")
@@ -455,21 +483,22 @@ var poolDrainCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("init AWS client: %w", err)
 		}
-		region := awsClient.Config().Region
-		account, err := awsClient.GetAccountID(ctx)
-		if err != nil {
-			return fmt.Errorf("resolve account id: %w", err)
-		}
-		pool, err := openPool(ctx, awsClient, region, account)
+		alreadyGone, err := taskpool.DrainRunWithConfig(ctx, awsClient.Config(), poolRunID)
 		if err != nil {
 			return err
 		}
-		if err := pool.Drain(ctx); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "✅ Drained pool %s (queue deleted; idle workers self-terminate, reaper backstops)\n", poolRunID)
+		fmt.Fprint(os.Stderr, poolDrainMessage(poolRunID, alreadyGone))
 		return nil
 	},
+}
+
+// poolDrainMessage is what `pool drain` reports. A second drain of the same pool
+// is not an error (#1183): the queue is already gone, which is what was asked.
+func poolDrainMessage(runID string, alreadyGone bool) string {
+	if alreadyGone {
+		return fmt.Sprintf("✅ Pool %s already drained (no queue found)\n", runID)
+	}
+	return fmt.Sprintf("✅ Drained pool %s: queue deleted; each worker terminates at its next poll (TTL and the reaper are the backstops)\n", runID)
 }
 
 // openPool resolves an existing run-scoped pool (queue + spec store) for the
@@ -495,7 +524,8 @@ func init() {
 	poolCreateCmd.Flags().StringVar(&poolInstanceType, "instance-type", "", "Worker instance type (e.g. c7i.large)")
 	poolCreateCmd.Flags().BoolVar(&poolSpot, "spot", false, "Launch workers as Spot instances")
 	poolCreateCmd.Flags().StringVar(&poolTTL, "ttl", "4h", "Per-worker TTL backstop")
-	poolCreateCmd.Flags().DurationVar(&poolIdleTimeout, "idle-timeout", 5*time.Minute, "Workers drain after this long with an empty queue")
+	poolCreateCmd.Flags().DurationVar(&poolIdleTimeout, "idle-timeout", 5*time.Minute, "Workers terminate after this long with an empty queue")
+	poolCreateCmd.Flags().Float64Var(&poolCostLimit, "cost-limit", 0, "Spend ceiling in USD PER WORKER, covering compute and storage (0 = disabled); spored terminates a worker that reaches it, as with 'spawn launch --cost-limit'")
 	poolCreateCmd.Flags().IntVar(&poolVisTimeout, "visibility-timeout", 900, "SQS claim window in seconds (must exceed the longest task runtime)")
 	poolCreateCmd.Flags().StringArrayVar(&poolS3Read, "s3-read", nil, "Extra S3 bucket the tasks read inputs from (repeatable) — beyond the results bucket workers always get")
 	poolCreateCmd.Flags().StringArrayVar(&poolS3Write, "s3-write", nil, "Extra S3 bucket the tasks write outputs to (repeatable) — beyond the results bucket")

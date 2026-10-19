@@ -72,6 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   idle timeout runs out, instead of stopping it; it takes precedence over
   `HibernateOnIdle`. A Spot launch whose only stop-shaped setting is an idle
   timeout with `TerminateOnIdle` stays a one-time request (#1151).
+- **`spawn pool create --cost-limit`** sets a spend ceiling in USD per worker,
+  covering compute and storage, passed to spored as `spawn launch --cost-limit`
+  is. spored terminates a worker that reaches it. Before this a pool had no
+  spend bound except `--ttl` (#1183).
 
 - **`spawn app launch` now sets an 8h TTL when `--ttl` is not given (#1150).**
   An app's idle action is still a stop, so a session can be restarted, but
@@ -105,6 +109,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invocation before the retention call, rejects a tolerated retention call, and
   covers Go deploy paths too: any package that calls `CreateFunction` must call
   `CreateLogGroup` and `PutRetentionPolicy`.
+- **Pool workers that run out of work now finish and terminate (#1146).** A
+  cleanly drained worker wrote no completion record, so
+  `on_complete=terminate` never fired, and nothing retired a worker whose
+  queue was gone. Now:
+  - a worker that drains writes the completion record, and spored terminates
+    the instance;
+  - a worker whose queue is deleted (`spawn pool drain`) drains at its next
+    poll. It used to retry the missing queue once a second until its TTL;
+  - a worker whose every claim fails for `--idle-timeout` drains too, instead
+    of retrying until TTL;
+  - a worker that exhausts its 20 restarts writes a failed completion record
+    and terminates. It used to wait for the TTL.
+- **`spawn pool drain` is idempotent (#1183).** Draining a pool whose queue is
+  already gone reports "already drained" and exits 0, after one lookup. It
+  used to retry for about 30 s and exit 1.
 
 ### Fixed
 

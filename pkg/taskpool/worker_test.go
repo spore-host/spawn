@@ -26,7 +26,10 @@ type fakeSQS struct {
 	sendErr      error
 	recvErr      error
 	visDur       time.Duration
-	getURLMisses int // return NonExistentQueue this many times before resolving
+	getURLMisses int  // return NonExistentQueue this many times before resolving
+	queueDeleted bool // DeleteQueue ran: every queue call now fails NonExistentQueue
+	receives     int  // ReceiveMessage calls
+	getURLs      int  // GetQueueUrl calls
 }
 
 type fakeMsg struct {
@@ -46,6 +49,10 @@ func (f *fakeSQS) CreateQueue(_ context.Context, in *sqs.CreateQueueInput, _ ...
 func (f *fakeSQS) GetQueueUrl(_ context.Context, in *sqs.GetQueueUrlInput, _ ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.getURLs++
+	if f.queueDeleted {
+		return nil, &types.QueueDoesNotExist{}
+	}
 	// Simulate the create→GetQueueUrl consistency window: return NonExistentQueue
 	// for the first getURLMisses calls, then resolve.
 	if f.getURLMisses > 0 {
@@ -66,6 +73,13 @@ func (f *fakeSQS) SendMessage(_ context.Context, in *sqs.SendMessageInput, _ ...
 	return &sqs.SendMessageOutput{MessageId: aws.String(id)}, nil
 }
 func (f *fakeSQS) ReceiveMessage(_ context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	f.mu.Lock()
+	f.receives++
+	deleted := f.queueDeleted
+	f.mu.Unlock()
+	if deleted {
+		return nil, &types.QueueDoesNotExist{}
+	}
 	if f.recvErr != nil {
 		return nil, f.recvErr
 	}
@@ -113,6 +127,12 @@ func (f *fakeSQS) GetQueueAttributes(_ context.Context, _ *sqs.GetQueueAttribute
 	}}, nil
 }
 func (f *fakeSQS) DeleteQueue(_ context.Context, _ *sqs.DeleteQueueInput, _ ...func(*sqs.Options)) (*sqs.DeleteQueueOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.queueDeleted {
+		return nil, &types.QueueDoesNotExist{}
+	}
+	f.queueDeleted = true
 	return &sqs.DeleteQueueOutput{}, nil
 }
 
@@ -427,4 +447,156 @@ func TestOpenQueue_GivesUpAfterBudget(t *testing.T) {
 	if _, err := OpenQueue(context.Background(), f, "run-1"); err == nil {
 		t.Fatal("OpenQueue should error when the queue never appears within the budget")
 	}
+}
+
+// countingSleep replaces the worker's claim-error backoff: it counts the
+// retries and advances the fake clock by the backoff instead of waiting. It
+// cancels ctx after limit retries, so a worker that never stops retrying ends
+// the test (and fails it) rather than hanging it.
+func countingSleep(clk *clock, cancel context.CancelFunc, limit int, n *int) func(context.Context, time.Duration) bool {
+	return func(ctx context.Context, d time.Duration) bool {
+		*n++
+		clk.add(d)
+		if *n >= limit {
+			cancel()
+			return false
+		}
+		return ctx.Err() == nil
+	}
+}
+
+// TestWorker_QueueDeletedDrainsAtOnce is #1146: after `spawn pool drain`
+// deletes the queue, the worker used to retry every claim error once a second
+// until its TTL. A deleted queue never comes back, so the worker must drain on
+// the first NonExistentQueue — one ReceiveMessage, zero retries — and return
+// nil, which is what lets the bootstrap write the completion record.
+func TestWorker_QueueDeletedDrainsAtOnce(t *testing.T) {
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	f := newFakeSQS(clk.now)
+	w := newWorker(t, f, &recordingExecer{}, &countingWorkspace{}, clk, time.Hour)
+	if _, err := DrainRun(context.Background(), f, "run-1"); err != nil {
+		t.Fatalf("DrainRun: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	retries := 0
+	w.sleep = countingSleep(clk, cancel, 5, &retries)
+
+	_, err := w.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run on a deleted queue returned %v, want nil (a clean drain)", err)
+	}
+	if retries != 0 || f.receives != 1 {
+		t.Errorf("worker retried a deleted queue: %d retries, %d ReceiveMessage calls, want 0 and 1", retries, f.receives)
+	}
+}
+
+// TestWorker_ClaimErrorsHonourTheIdleDeadline is #1146's second half: a worker
+// whose every claim fails (throttle, network, denied) is idle, and must drain
+// once IdleTimeout has passed rather than retry until TTL. The backoff advances
+// the clock by 1s per retry, so a 10s idle window allows about 10 retries; the
+// counting sleep's limit of 50 is what ends a worker that ignores the deadline.
+func TestWorker_ClaimErrorsHonourTheIdleDeadline(t *testing.T) {
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	f := newFakeSQS(clk.now)
+	f.recvErr = fmt.Errorf("ThrottlingException: slow down")
+	w := newWorker(t, f, &recordingExecer{}, &countingWorkspace{}, clk, 10*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	retries := 0
+	w.sleep = countingSleep(clk, cancel, 50, &retries)
+
+	_, err := w.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run returned %v after only claim errors for the idle window, want nil (drain)", err)
+	}
+	if retries < 1 || retries > 11 {
+		t.Errorf("worker retried %d times across a 10s idle window with a 1s backoff, want 1..11", retries)
+	}
+}
+
+// TestWorker_TransientClaimErrorIsRetried: the deadline must not turn one
+// throttle into a drain — a worker with idle time left retries and goes on to
+// run the task.
+func TestWorker_TransientClaimErrorIsRetried(t *testing.T) {
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	f := newFakeSQS(clk.now)
+	ex := &recordingExecer{}
+	w := newWorker(t, f, ex, &countingWorkspace{}, clk, 10*time.Second)
+	if err := w.Queue.Submit(context.Background(), TaskRef{TaskID: "t1", SpecURI: "s3://b/x.json"}); err != nil {
+		t.Fatal(err)
+	}
+	f.recvErr = fmt.Errorf("ThrottlingException")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	retries := 0
+	w.sleep = func(ctx context.Context, d time.Duration) bool {
+		retries++
+		f.mu.Lock()
+		f.recvErr = nil // the throttle clears after one retry
+		f.mu.Unlock()
+		return true
+	}
+	ex.exitFor = func(int) (int, error) {
+		clk.add(time.Hour) // past idle once the task ran, so the next empty poll drains
+		return 0, nil
+	}
+	executed, err := w.Run(ctx)
+	if err != nil || executed != 1 || retries != 1 {
+		t.Errorf("Run = (%d, %v) after %d retries, want (1, nil) after 1", executed, err, retries)
+	}
+}
+
+// TestDrainRun_Idempotent is #1183: a second drain of the same pool reports
+// already-drained with a nil error after ONE lookup (it used to retry the
+// missing queue for ~30s and fail).
+func TestDrainRun_Idempotent(t *testing.T) {
+	f := newFakeSQS(time.Now)
+	gone, err := DrainRun(context.Background(), f, "run-1")
+	if err != nil || gone {
+		t.Fatalf("first drain = (gone %v, %v), want (false, nil)", gone, err)
+	}
+	before := f.getURLs
+	gone, err = DrainRun(context.Background(), f, "run-1")
+	if err != nil || !gone {
+		t.Fatalf("second drain = (gone %v, %v), want (true, nil)", gone, err)
+	}
+	if n := f.getURLs - before; n != 1 {
+		t.Errorf("second drain made %d GetQueueUrl calls, want 1 (no retry on a deleted queue)", n)
+	}
+}
+
+// TestDrainRun_OtherErrorsStillFail: idempotence is for a missing queue only.
+func TestDrainRun_OtherErrorsStillFail(t *testing.T) {
+	gone, err := DrainRun(context.Background(), errSQS{fmt.Errorf("AccessDenied")}, "run-1")
+	if err == nil || gone {
+		t.Fatalf("DrainRun with a non-NonExistentQueue error = (gone %v, %v), want an error", gone, err)
+	}
+}
+
+type errSQS struct{ err error }
+
+func (e errSQS) CreateQueue(context.Context, *sqs.CreateQueueInput, ...func(*sqs.Options)) (*sqs.CreateQueueOutput, error) {
+	return nil, e.err
+}
+func (e errSQS) GetQueueUrl(context.Context, *sqs.GetQueueUrlInput, ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error) {
+	return nil, e.err
+}
+func (e errSQS) SendMessage(context.Context, *sqs.SendMessageInput, ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
+	return nil, e.err
+}
+func (e errSQS) ReceiveMessage(context.Context, *sqs.ReceiveMessageInput, ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	return nil, e.err
+}
+func (e errSQS) DeleteMessage(context.Context, *sqs.DeleteMessageInput, ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
+	return nil, e.err
+}
+func (e errSQS) GetQueueAttributes(context.Context, *sqs.GetQueueAttributesInput, ...func(*sqs.Options)) (*sqs.GetQueueAttributesOutput, error) {
+	return nil, e.err
+}
+func (e errSQS) DeleteQueue(context.Context, *sqs.DeleteQueueInput, ...func(*sqs.Options)) (*sqs.DeleteQueueOutput, error) {
+	return nil, e.err
 }

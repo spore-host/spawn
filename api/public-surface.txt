@@ -621,6 +621,9 @@ func (*Worker) Run(ctx context.Context) (executed int, err error)
 func CreateForRun(ctx context.Context, sqsAPI SQSAPI, specs *SpecStore, runID string, visibilityTimeout int) (*Pool, error)
 func CreateForRunWithConfig(ctx context.Context, cfg awssdk.Config, runID, specBucket, specPrefix string, visibilityTimeout int) (*Pool, error)
 func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTimeout int) (*Queue, error)
+func DrainRun(ctx context.Context, client SQSAPI, runID string) (alreadyGone bool, err error)
+func DrainRunWithConfig(ctx context.Context, cfg awssdk.Config, runID string) (alreadyGone bool, err error)
+func IsQueueGone(err error) bool
 func OpenForRunWithConfig(ctx context.Context, cfg awssdk.Config, runID, specBucket, specPrefix string) (*Pool, error)
 func OpenQueue(ctx context.Context, client SQSAPI, runID string) (*Queue, error)
 func QueueName(runID string) string
