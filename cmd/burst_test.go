@@ -235,3 +235,22 @@ func TestResolveBurstInstanceProfile(t *testing.T) {
 		t.Fatal("setup returning an empty profile must be an error, not a credential-less launch")
 	}
 }
+
+// Every burst member terminates when idle (#1204): a stopped member would keep
+// billing its EBS volume until the TTL, with nothing ever restarting it.
+func TestBurstMembersTerminateOnIdle(t *testing.T) {
+	p := burstTestParams()
+	p.IdleTimeout = "30m"
+	members, err := burstMemberConfigs(p)
+	if err != nil {
+		t.Fatalf("burstMemberConfigs: %v", err)
+	}
+	if len(members) != p.Count {
+		t.Fatalf("got %d members, want %d", len(members), p.Count)
+	}
+	for i, m := range members {
+		if !m.TerminateOnIdle {
+			t.Errorf("member %d: TerminateOnIdle=false; an idle burst member would be stopped and keep billing", i)
+		}
+	}
+}
