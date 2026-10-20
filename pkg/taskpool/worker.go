@@ -68,19 +68,50 @@ type Worker struct {
 	Config    WorkerConfig
 	// now overrides time.Now for deterministic idle-timeout tests. Nil → time.Now.
 	now func() time.Time
+	// sleep overrides the claim-error backoff for tests, so they count retries
+	// instead of waiting them out. Nil → sleepCtx.
+	sleep func(ctx context.Context, d time.Duration) bool
 }
 
-// Run drives the pull loop until the queue is idle for the configured
-// IdleTimeout, then returns. It returns a non-nil error only for a condition that
-// should stop THIS worker (e.g. the queue vanished); a single task's failure is
-// NOT such a condition — the loop acks it and continues, because a worker pool's
-// job is to drain the queue, not to adjudicate task success (Nextflow's
-// errorStrategy / the completion record own that). Returns the count of tasks the
-// worker executed (for logs/tests).
+// claimErrorBackoff is the pause between Claim attempts after a claim error.
+const claimErrorBackoff = time.Second
+
+// IsQueueGone reports whether err (from any Queue call, wrapped or not) is SQS's
+// NonExistentQueue: the run's queue has been deleted, i.e. `spawn pool drain`
+// ran. A worker that sees it has nothing left to do and drains (#1146).
+//
+// SQS also reports a caller with no access to the queue as NonExistentQueue, so
+// this is true for a worker whose policy lacks the queue. Draining is the right
+// response there too: retrying cannot grant the permission, and a worker that
+// cannot reach its queue only bills.
+func IsQueueGone(err error) bool {
+	return err != nil && isNonExistentQueue(err)
+}
+
+// Run drives the pull loop until the worker has nothing left to do, then returns
+// nil so the caller exits cleanly and the instance's on_complete (terminate)
+// fires. The worker drains when:
+//
+//   - the queue has been empty for IdleTimeout (scale to zero);
+//   - the queue no longer exists (`spawn pool drain` deleted it, #1146) — at
+//     once, without retrying, since a deleted queue never comes back; or
+//   - every Claim has failed for IdleTimeout. A transient claim error (throttle,
+//     network) is retried, but a worker that has been unable to claim anything
+//     for a whole idle window is idle, and retrying it until TTL only bills.
+//
+// A single task's failure does NOT stop the loop — it acks the task and
+// continues, because a worker pool's job is to drain the queue, not to adjudicate
+// task success (Nextflow's errorStrategy / the completion record own that). The
+// only error Run returns is ctx's. Returns the count of tasks the worker executed
+// (for logs/tests).
 func (w *Worker) Run(ctx context.Context) (executed int, err error) {
 	now := w.now
 	if now == nil {
 		now = time.Now
+	}
+	sleep := w.sleep
+	if sleep == nil {
+		sleep = sleepCtx
 	}
 	idleDeadline := now().Add(w.Config.IdleTimeout)
 
@@ -91,11 +122,18 @@ func (w *Worker) Run(ctx context.Context) (executed int, err error) {
 
 		claimed, cerr := w.Queue.Claim(ctx, w.Config.PollWaitSeconds)
 		if cerr != nil {
-			// A claim error (throttle, transient) shouldn't kill the worker: log and
-			// retry after a short beat. A malformed message was already dropped by
-			// Claim, so this is a transport issue — keep the pool alive.
+			if IsQueueGone(cerr) {
+				w.logf("queue is gone (pool drained); draining: %v", cerr)
+				return executed, nil
+			}
+			if now().After(idleDeadline) {
+				w.logf("no task claimed for %s, only claim errors; draining: %v", w.Config.IdleTimeout, cerr)
+				return executed, nil
+			}
+			// A transient claim error shouldn't kill the worker: log and retry after
+			// a short beat. A malformed message was already dropped by Claim.
 			w.logf("claim error (continuing): %v", cerr)
-			if !sleepCtx(ctx, time.Second) {
+			if !sleep(ctx, claimErrorBackoff) {
 				return executed, ctx.Err()
 			}
 			continue

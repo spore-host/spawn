@@ -87,12 +87,44 @@ func (p *Pool) Enqueue(ctx context.Context, spec *taskproto.TaskSpec, specJSON [
 }
 
 // Drain deletes the run-scoped queue. Call it once the run is done (all completion
-// records observed). Workers self-terminate on idle-timeout independently, so this
-// is the queue-side cleanup, not a worker kill — the tag-reaper is the backstop for
-// any worker that outlives its idle window.
+// records observed). It is also what retires the workers: a worker whose queue is
+// gone drains at its next claim and exits cleanly, and the instance terminates
+// via on_complete (#1146). The tag-reaper and each worker's TTL are the backstops
+// for any worker that misses it.
 func (p *Pool) Drain(ctx context.Context) error {
 	p.logf("draining pool queue for run %s", p.RunID)
 	return p.Queue.Delete(ctx)
+}
+
+// DrainRun deletes runID's queue if it still exists. It is idempotent (#1183):
+// when the queue is already gone it returns alreadyGone=true and a nil error,
+// after ONE lookup — unlike OpenQueue, which retries a missing queue for ~30s to
+// ride out the create→lookup consistency window a booting worker can race.
+// Drain has no such race to wait out: it runs after create returned.
+func DrainRun(ctx context.Context, client SQSAPI, runID string) (alreadyGone bool, err error) {
+	name := QueueName(runID)
+	out, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: awssdk.String(name)})
+	if err != nil {
+		if IsQueueGone(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("resolve queue %s: %w", name, err)
+	}
+	q := &Queue{client: client, url: awssdk.ToString(out.QueueUrl), name: name}
+	if err := q.Delete(ctx); err != nil {
+		// Lost a race with another drain: the queue is gone either way.
+		if IsQueueGone(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+// DrainRunWithConfig is DrainRun with the SQS client built from an aws.Config,
+// keeping the SDK import inside pkg/ (the #326/#327 cmd-layer boundary).
+func DrainRunWithConfig(ctx context.Context, cfg awssdk.Config, runID string) (alreadyGone bool, err error) {
+	return DrainRun(ctx, sqs.NewFromConfig(cfg), runID)
 }
 
 // Depth reports the queue's visible + in-flight task counts — used to decide when

@@ -8,7 +8,12 @@ boot per task, so short tasks self-terminate faster than new ones launch and
 concurrency can never reach N. A worker pool inverts this: N fungible workers pull
 tasks from a run-scoped SQS queue and reuse across jobs (per-job cost is stage+run
 only), degrading gracefully — ask for N workers, get M, and tasks drain through
-whatever pool came up. Workers self-terminate on idle-timeout (scale to zero).
+whatever pool came up.
+
+Workers TERMINATE (not stop) once there is nothing left for them to do: when the
+queue has been empty for --idle-timeout (scale to zero), or at once when
+'spawn pool drain' deletes the queue. --ttl and --cost-limit bound each worker
+regardless, and the reaper is the backstop.
 
 ```
 spawn pool
@@ -32,7 +37,8 @@ spawn pool create --run-id R --workers N --instance-type T [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--idle-timeout` |  | duration | `5m0s` | Workers drain after this long with an empty queue |
+| `--cost-limit` |  | float64 |  | Spend ceiling in USD PER WORKER, covering compute and storage (0 = disabled); spored terminates a worker that reaches it, as with 'spawn launch --cost-limit' |
+| `--idle-timeout` |  | duration | `5m0s` | Workers terminate after this long with an empty queue |
 | `--instance-type` |  | string |  | Worker instance type (e.g. c7i.large) |
 | `--min-viable` |  | int | `1` | Minimum workers that must come up (best-effort: ask N, accept &gt;= this) |
 | `--s3-read` |  | stringArray |  | Extra S3 bucket the tasks read inputs from (repeatable) — beyond the results bucket workers always get |
@@ -44,7 +50,7 @@ spawn pool create --run-id R --workers N --instance-type T [flags]
 
 ### `spawn pool drain`
 
-Delete the pool's task queue (workers self-terminate on idle)
+Delete the pool's task queue; its workers then terminate
 
 ```
 spawn pool drain --run-id R

@@ -95,6 +95,14 @@ func runPoolWorker(ctx context.Context, o poolWorkerOpts) error {
 
 	q, err := taskpool.OpenQueue(ctx, sqsClient, o.runID)
 	if err != nil {
+		// The queue is gone: the pool was drained before (or while) this worker
+		// started, e.g. on a restart after `spawn pool drain`. There is nothing to
+		// do, so exit cleanly and let on_complete terminate the instance (#1146)
+		// instead of failing into the restart loop.
+		if taskpool.IsQueueGone(err) {
+			fmt.Fprintf(os.Stderr, "pool-worker: queue for run %s is gone (pool drained); exiting\n", o.runID)
+			return nil
+		}
 		return fmt.Errorf("open pool queue: %w", err)
 	}
 	specs := &taskpool.SpecStore{Client: s3Client, Bucket: o.specBucket, Prefix: o.specPrefix}
