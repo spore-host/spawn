@@ -343,6 +343,7 @@ echo "Plugin declarations written: %d plugin(s)"
 # which succeeds even when nothing mounted.
 mkdir -p %s
 SPAWN_GATE_MISSING=""
+# shellcheck disable=SC2041  # a list of shell-quoted mount points, often just one
 for SPAWN_MP in %s; do
     if ! mountpoint -q "$SPAWN_MP" 2>/dev/null && ! grep -q " $SPAWN_MP " /proc/mounts; then
         SPAWN_GATE_MISSING="$SPAWN_GATE_MISSING $SPAWN_MP"

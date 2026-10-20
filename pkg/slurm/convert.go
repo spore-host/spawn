@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/spore-host/spawn/pkg/security"
 )
 
 // SpawnConfig represents the spawn parameter file format
@@ -150,10 +152,13 @@ func generateArrayTaskScript(job *SlurmJob, taskID int) string {
 	fmt.Fprintf(&sb, "export SLURM_ARRAY_TASK_STEP=%d\n", job.Array.Step)
 
 	if job.JobName != "" {
-		fmt.Fprintf(&sb, "export SLURM_JOB_NAME=%s\n", job.JobName)
+		fmt.Fprintf(&sb, "export SLURM_JOB_NAME=%s\n", security.ShellQuote(job.JobName))
 	}
 	if job.WorkingDir != "" {
-		fmt.Fprintf(&sb, "cd %s\n", job.WorkingDir)
+		// Quoted, and fatal on failure as Slurm's --chdir is: unquoted, a
+		// directory with a space cd'd to its first word, and a failed cd ran
+		// the job body in the wrong directory (#689).
+		fmt.Fprintf(&sb, "cd %s || exit 1\n", security.ShellQuote(job.WorkingDir))
 	}
 	sb.WriteString("\n")
 
@@ -183,10 +188,13 @@ func generateMPIScript(job *SlurmJob) string {
 	fmt.Fprintf(&sb, "export SLURM_NTASKS_PER_NODE=%d\n", job.TasksPerNode)
 
 	if job.JobName != "" {
-		fmt.Fprintf(&sb, "export SLURM_JOB_NAME=%s\n", job.JobName)
+		fmt.Fprintf(&sb, "export SLURM_JOB_NAME=%s\n", security.ShellQuote(job.JobName))
 	}
 	if job.WorkingDir != "" {
-		fmt.Fprintf(&sb, "cd %s\n", job.WorkingDir)
+		// Quoted, and fatal on failure as Slurm's --chdir is: unquoted, a
+		// directory with a space cd'd to its first word, and a failed cd ran
+		// the job body in the wrong directory (#689).
+		fmt.Fprintf(&sb, "cd %s || exit 1\n", security.ShellQuote(job.WorkingDir))
 	}
 	sb.WriteString("\n")
 
@@ -213,10 +221,13 @@ func generateSingleTaskScript(job *SlurmJob) string {
 	sb.WriteString("export SLURM_JOB_ID=${SPAWN_INSTANCE_ID:-unknown}\n")
 
 	if job.JobName != "" {
-		fmt.Fprintf(&sb, "export SLURM_JOB_NAME=%s\n", job.JobName)
+		fmt.Fprintf(&sb, "export SLURM_JOB_NAME=%s\n", security.ShellQuote(job.JobName))
 	}
 	if job.WorkingDir != "" {
-		fmt.Fprintf(&sb, "cd %s\n", job.WorkingDir)
+		// Quoted, and fatal on failure as Slurm's --chdir is: unquoted, a
+		// directory with a space cd'd to its first word, and a failed cd ran
+		// the job body in the wrong directory (#689).
+		fmt.Fprintf(&sb, "cd %s || exit 1\n", security.ShellQuote(job.WorkingDir))
 	}
 	sb.WriteString("\n")
 
