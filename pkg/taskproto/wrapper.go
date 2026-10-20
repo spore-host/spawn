@@ -527,7 +527,15 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	// The digest that actually ran, not what the tag pointed to (#1076).
 	p("  if [ \"$PROV_OK\" = 1 ]; then sudo docker inspect --format '{{index .RepoDigests 0}}' %s > \"$PROV_DIR/image-digest\" 2>/dev/null || true; fi\n", shQuote(image))
 	p("  spawn_phase 'image pull done; command start'\n")
-	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s%s %s\n", envFlags.String(), gpuFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
+	// --shm-size (#1111): Docker's 64 MB /dev/shm is too small for many-rank MPI
+	// (SIGBUS in the first collective). Emitted only when resources.shm_gib is
+	// set, and before the image: everything after the image is the container's
+	// argv, so a flag placed there would be handed to the user's command instead.
+	shmFlag := ""
+	if f := shmSizeFlag(spec.Resources); f != "" {
+		shmFlag = f + " "
+	}
+	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s%s%s %s\n", envFlags.String(), gpuFlag, shmFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
 	p("  rc=$?\n")
 	p("  spawn_phase \"command exit rc=$rc\"\n")
 	p("  fi\n") // closes the RUNTIME_RC guard opened after the Docker install

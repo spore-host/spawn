@@ -246,6 +246,15 @@ resources.instance_type is honoured as given, with a warning if it is below that
 If Docker cannot be installed or its daemon does not start, the record reports
 retry_class instance_health (retryable), not app_error.
 
+A container gets Docker's default 64 MB /dev/shm, which many-rank MPI (Open MPI's
+shared-memory transport), PyTorch DataLoader workers and Ray outgrow: an Open MPI
+run with 64 ranks on one box dies with SIGBUS in its first collective. Set
+resources.shm_gib to raise it (passed as docker run --shm-size=<n>g). It must be
+a positive number of GiB, needs a container, and may not exceed the instance's
+memory: memory_gib with headroom (or the 2 GiB container floor) for a sized spec,
+the type's memory for a pinned instance_type. /dev/shm is RAM-backed, so size
+memory_gib to cover it as well as the workload.
+
 What gets bind-mounted, and as whom: spawn pre-creates the parent directory of
 every inputs[].destination and outputs[].source — plus any EFS/FSx/volume mount
 point from placement — as the instance user, and bind-mounts exactly those paths
@@ -307,6 +316,9 @@ instead of reporting an earlier attempt's verdict (#608).
 		}
 		finder := truffleFinder{tc: truffleaws.NewClientFromConfig(awsClient.Config()), region: region}
 		warnIfContainerPinBelowFloor(cmd.Context(), awsClient, os.Stderr, region, spec)
+		if err := checkPinnedShm(cmd.Context(), awsClient, region, spec); err != nil {
+			return err
+		}
 		if taskRunDryRun {
 			return renderTaskDryRun(cmd.Context(), os.Stdout, spec, finder, region)
 		}
@@ -417,6 +429,13 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	} else {
 		fmt.Fprintf(out, "Root disk:    AMI default (resources.disk_gib not set; see --volume-size in 'spawn launch --help')\n")
 	}
+	if spec.Container != "" {
+		if shm := spec.Resources.ShmGiB; shm != nil {
+			fmt.Fprintf(out, "/dev/shm:     %s GiB (resources.shm_gib)\n", strconv.FormatFloat(*shm, 'f', -1, 64))
+		} else {
+			fmt.Fprintf(out, "/dev/shm:     Docker default, 64 MB (resources.shm_gib not set)\n")
+		}
+	}
 	purchase := spec.Resources.Purchase
 	if purchase == "" {
 		purchase = taskproto.PurchaseOnDemand
@@ -497,6 +516,25 @@ func warnIfContainerPinBelowFloor(ctx context.Context, client memoryLookup, w io
 	if msg := renderContainerPinFloorWarning(spec, mem); msg != "" {
 		fmt.Fprint(w, msg)
 	}
+}
+
+// checkPinnedShm refuses a container task whose resources.shm_gib exceeds the
+// memory of its pinned resources.instance_type (#1111). Validate checks a sized
+// spec offline; a pin's memory needs a lookup, so it is checked here. An
+// unresolved lookup passes rather than guessing.
+func checkPinnedShm(ctx context.Context, client memoryLookup, region string, spec *taskproto.TaskSpec) error {
+	pin := strings.TrimSpace(spec.Resources.InstanceType)
+	if spec.Resources.ShmGiB == nil || pin == "" {
+		return nil
+	}
+	mem, ok := client.InstanceMemoryMiB(ctx, region, pin)
+	if !ok || mem <= 0 {
+		return nil
+	}
+	if msg := spec.CheckShmAgainstMemory(float64(mem) / 1024); msg != "" {
+		return fmt.Errorf("invalid task spec: %s (resources.instance_type %s)", msg, pin)
+	}
+	return nil
 }
 
 // oldGenerationFamilies notes instance families that are the cheapest match for

@@ -11,8 +11,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/spore-host/spawn/pkg/ttl"
@@ -75,6 +77,22 @@ type ResourceRequest struct {
 	// attaches separate reference-data volumes; DiskGiB is the root disk a task's
 	// staged inputs/outputs and working directory live on (#556).
 	DiskGiB int32 `json:"disk_gib,omitempty"`
+	// ShmGiB sizes a container task's /dev/shm, mapping onto `docker run
+	// --shm-size=<n>g` (#1111). Unset (nil) keeps Docker's default of 64 MB,
+	// which is too small for many-rank MPI on one box: Open MPI's shared-memory
+	// segments for 64 ranks do not fit, and the task dies with SIGBUS in its
+	// first collective. PyTorch DataLoader workers, MPICH and Ray hit the same
+	// ceiling.
+	//
+	// A pointer so that an explicit 0 is distinguishable from "not set" and can
+	// be rejected. When set it must be positive, the spec must have a container
+	// (the host path has no 64 MB limit to raise), and it may not exceed the
+	// instance's memory: for a sized spec, the effective memory request
+	// (memory_gib with headroom, or the container memory floor when that is
+	// larger); for a pinned instance_type, the type's memory, checked at launch.
+	// /dev/shm is RAM-backed, so its pages count against the same memory the
+	// workload uses.
+	ShmGiB *float64 `json:"shm_gib,omitempty"`
 	// S3ReadWrite lists s3://bucket[/prefix] URIs the task needs FULL scoped access
 	// to (ListBucket + Get/Put/Delete on the whole bucket), beyond the buckets
 	// implied by Inputs/Outputs manifests. For adapters whose own tooling does the
@@ -249,6 +267,9 @@ func (s *TaskSpec) Validate() error {
 	if s.Resources.DiskGiB < 0 {
 		add("resources.disk_gib must be non-negative")
 	}
+	if msg := s.shmProblem(); msg != "" {
+		add("%s", msg)
+	}
 	if s.Lifecycle.CostLimit < 0 {
 		add("lifecycle.cost_limit must be non-negative")
 	}
@@ -323,4 +344,48 @@ func (s *TaskSpec) EffectiveOnComplete() string {
 		return "terminate"
 	}
 	return s.Lifecycle.OnComplete
+}
+
+// shmProblem returns why resources.shm_gib is invalid, or "" (#1111). The
+// memory bound for a pinned instance_type cannot be checked offline; see
+// CheckShmAgainstMemory.
+func (s *TaskSpec) shmProblem() string {
+	shm := s.Resources.ShmGiB
+	if shm == nil {
+		return ""
+	}
+	if math.IsNaN(*shm) || math.IsInf(*shm, 0) || *shm <= 0 {
+		return fmt.Sprintf("resources.shm_gib %v must be a positive number of GiB (omit it to keep Docker's 64 MB default)", *shm)
+	}
+	if s.Container == "" {
+		return "resources.shm_gib applies only to a container task (set container, or remove shm_gib)"
+	}
+	if strings.TrimSpace(s.Resources.InstanceType) != "" {
+		return ""
+	}
+	return s.CheckShmAgainstMemory(EffectiveMemoryGiB(s.SizingRequest()))
+}
+
+// CheckShmAgainstMemory returns a non-empty message when resources.shm_gib
+// exceeds memGiB, the memory of the instance the task will run on (#1111).
+// Validate applies it to a sized spec using the effective memory request;
+// callers apply it to a pinned resources.instance_type once they know that
+// type's memory. Returns "" when shm_gib is unset or memGiB is unknown (<= 0).
+func (s *TaskSpec) CheckShmAgainstMemory(memGiB float64) string {
+	shm := s.Resources.ShmGiB
+	if shm == nil || memGiB <= 0 || *shm <= memGiB {
+		return ""
+	}
+	return fmt.Sprintf("resources.shm_gib %v exceeds the instance's %v GiB of memory (/dev/shm is RAM-backed; raise memory_gib or lower shm_gib)",
+		*shm, strconv.FormatFloat(memGiB, 'f', -1, 64))
+}
+
+// shmSizeFlag is the `docker run` flag for resources.shm_gib, or "" when it is
+// unset (#1111). 'f' formatting never produces an exponent, which Docker's size
+// parser would reject.
+func shmSizeFlag(r ResourceRequest) string {
+	if r.ShmGiB == nil {
+		return ""
+	}
+	return "--shm-size=" + strconv.FormatFloat(*r.ShmGiB, 'f', -1, 64) + "g"
 }
