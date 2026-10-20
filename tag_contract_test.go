@@ -199,6 +199,12 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 	// pass 1: parse, and collect string constants that hold a tag key, by
 	// "<dir>.<Name>", so a key spelled through a constant is still seen.
 	consts := map[string]string{}
+	type constAlias struct {
+		dir, name string
+		f         *ast.File
+		val       ast.Expr
+	}
+	var aliases []constAlias
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -238,6 +244,11 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 						if s, err := strconv.Unquote(lit.Value); err == nil && (tagKeyRe.MatchString(s) || strings.HasPrefix(s, "tag:spawn:")) {
 							consts[dir+"."+name.Name] = s
 						}
+					} else {
+						// A constant defined as another constant (const K =
+						// elasticip.InstanceIDTagKey): resolved after the walk,
+						// once every literal constant is known.
+						aliases = append(aliases, constAlias{dir: dir, name: name.Name, f: f, val: vs.Values[i]})
 					}
 				}
 			}
@@ -249,6 +260,44 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 	}
 	if len(files) == 0 {
 		t.Fatal("found no Go files")
+	}
+	// Resolve constants that alias other constants, in or across packages, until
+	// nothing changes, so a key spelled through an alias chain is still seen.
+	for changed := true; changed; {
+		changed = false
+		for _, al := range aliases {
+			if _, done := consts[al.dir+"."+al.name]; done {
+				continue
+			}
+			var target string
+			switch v := al.val.(type) {
+			case *ast.Ident:
+				target = al.dir + "." + v.Name
+			case *ast.SelectorExpr:
+				pkg, ok := v.X.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				for _, im := range al.f.Imports {
+					p, _ := strconv.Unquote(im.Path.Value)
+					rel, ok := strings.CutPrefix(p, "github.com/spore-host/spawn/")
+					if !ok {
+						continue
+					}
+					local := filepath.Base(rel)
+					if im.Name != nil {
+						local = im.Name.Name
+					}
+					if local == pkg.Name {
+						target = rel + "." + v.Sel.Name
+					}
+				}
+			}
+			if s, ok := consts[target]; ok {
+				consts[al.dir+"."+al.name] = s
+				changed = true
+			}
+		}
 	}
 
 	const module = "github.com/spore-host/spawn/"
