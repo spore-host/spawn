@@ -131,7 +131,7 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	// the more useful half.
 	p("LOGS_JSON='[]'\n")
 	p("if [ -f /var/log/spawn-command.log ]; then\n")
-	p("  if aws \"$AWS_REGION_ARG\" s3 cp /var/log/spawn-command.log \"$RESULTS_PREFIX/command.log\"; then\n")
+	p("  if aws \"$AWS_REGION_ARG\" s3 cp --no-progress /var/log/spawn-command.log \"$RESULTS_PREFIX/command.log\"; then\n")
 	p("    LOGS_JSON=\"[\\\"$RESULTS_PREFIX/command.log\\\"]\"\n")
 	p("  else\n")
 	p("    echo 'spawn: could not upload command.log' >&2\n")
@@ -162,10 +162,10 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	p("  \"terminal_reason\": \"$REASON\"\n")
 	p("}\n")
 	p("JSON\n")
-	p("aws \"$AWS_REGION_ARG\" s3 cp %s \"$RESULTS_PREFIX/completion.json\" || true\n\n", shQuote(localPath(terminalFileName)))
+	p("aws \"$AWS_REGION_ARG\" s3 cp --no-progress %s \"$RESULTS_PREFIX/completion.json\" || true\n\n", shQuote(localPath(terminalFileName)))
 
 	p("printf '%%s' '-1' > %s\n", shQuote(localPath(exitCodeFileName)))
-	p("aws \"$AWS_REGION_ARG\" s3 cp %s \"$RESULTS_PREFIX/.exitcode\" || true\n\n", shQuote(localPath(exitCodeFileName)))
+	p("aws \"$AWS_REGION_ARG\" s3 cp --no-progress %s \"$RESULTS_PREFIX/.exitcode\" || true\n\n", shQuote(localPath(exitCodeFileName)))
 
 	p("echo \"spawn: terminal record written for task $TASK_ID\"\n")
 	p("exit 0\n")

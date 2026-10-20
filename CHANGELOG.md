@@ -18,6 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   container floor, for a sized spec; the pinned type's memory at launch). The
   dry run prints the `/dev/shm` size. Go API: `ResourceRequest.ShmGiB` and
   `TaskSpec.CheckShmAgainstMemory`.
+- `taskproto.PhaseTimestampFormat`, the `date` format of the task wrapper's
+  phase markers (Go API, #1072).
+
+### Changed
+
+- **Task logs are quieter and their phase markers carry milliseconds (#1072).**
+  Every `aws s3 cp` the task wrapper runs (stage-in, stage-out and the record
+  uploads) passes `--no-progress`, so `command.log` keeps one line per staged
+  file and every error but no longer fills with about 20 progress lines per
+  file. The `spawn: [...]` phase markers are stamped
+  `2026-10-20T16:28:51.123Z` instead of to the second; `started_at`/`ended_at`
+  in `completion.json` are unchanged.
+
+- **A container task installs Docker while its inputs stage (#1072).** The
+  install (~66 s in E1, every launch) used to run after stage-in; it now starts
+  in the background before it, and the wrapper waits for it before starting the
+  daemon, pulling or running anything. A failed install is still
+  `instance_health`, and a failed stage-in still waits for the install to
+  finish. The install's output is printed as one block when it is waited for.
 
 ## [0.137.0] - 2026-10-20
 
