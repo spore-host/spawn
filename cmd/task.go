@@ -433,6 +433,12 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	if err != nil {
 		return err
 	}
+	// The user data this task would send, measured the way RunInstances
+	// measures it, so a spec that cannot launch fails its dry run (#1063).
+	userDataBytes, err := taskUserDataPreflight(spec, sized, region)
+	if err != nil {
+		return err
+	}
 
 	fmt.Fprintln(out, "DRY RUN — nothing will be launched.")
 	fmt.Fprintln(out)
@@ -493,6 +499,7 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	if spec.Lifecycle.CostLimit > 0 {
 		fmt.Fprintf(out, "Cost limit:   $%.2f (lifecycle.cost_limit)\n", spec.Lifecycle.CostLimit)
 	}
+	fmt.Fprintf(out, "User data:    %d of %d bytes after gzip (EC2 limit)\n", userDataBytes, aws.MaxUserDataBytes)
 
 	if d, err := ttlpkg.ParseDuration(spec.Lifecycle.TTL); err == nil && sized.OnDemandPrice > 0 {
 		fmt.Fprintf(out, "Max cost:     ~$%.2f (on-demand rate × TTL; a completed task usually costs far less)\n", sized.OnDemandPrice*d.Hours())
@@ -638,6 +645,11 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	if err != nil {
 		return err
 	}
+	// Before any AWS call that creates something (or any at all, beyond
+	// sizing): a spec whose user data is over EC2's limit cannot launch (#1063).
+	if _, err := taskUserDataPreflight(spec, sized, region); err != nil {
+		return err
+	}
 
 	account, err := client.GetAccountID(ctx)
 	if err != nil {
@@ -662,12 +674,6 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		}
 	}
 
-	// GPU-capable if the spec asked for GPUs or the sized instance is a GPU family
-	// (e.g. sized from families:["g5"] without an explicit gpus count) — same
-	// classifier that selects the GPU DLAMI. Drives `--gpus all` + NVIDIA Container
-	// Toolkit setup in the wrapper (spawn#601/#606).
-	gpu := spec.Resources.GPUs > 0 || aws.DetectGPUInstance(sized.InstanceType)
-
 	// Run identity for THIS attempt (spawn#608). Re-running a task_id overwrites
 	// the same tasks/<task_id>/completion.json key, so without an attempt id a
 	// record from a previous attempt is indistinguishable from this one's — and
@@ -690,31 +696,6 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		fmt.Fprintf(os.Stderr, "cleared any previous completion record for task %s (run_id %s)\n", spec.TaskID, runID)
 	}
 
-	// One options value for both generators, so the wrapper and the flush hook
-	// cannot disagree about the prefix or the run id they write (spawn#764).
-	wrapperOpts := taskproto.WrapperOptions{
-		ResultsPrefix: resultsPrefix,
-		Region:        region,
-		RunID:         runID,
-		GPU:           gpu,
-	}
-
-	wrapper, err := taskproto.GenerateWrapper(spec, wrapperOpts)
-	if err != nil {
-		return fmt.Errorf("build task wrapper: %w", err)
-	}
-
-	// The terminal-flush hook (spawn#632). The wrapper's log upload and
-	// completion-record write both sit after the user command, so a task killed by
-	// its own TTL/cost limit mid-command left nothing at all to re-size from. This
-	// script is installed root-owned and run by spored before it stops or
-	// terminates — i.e. while the network is still up — and no-ops when the wrapper
-	// already wrote the real record.
-	flushHook, err := taskproto.GenerateFlushScript(spec, wrapperOpts)
-	if err != nil {
-		return fmt.Errorf("build terminal-flush hook: %w", err)
-	}
-
 	// Scoped instance profile: the default spored role has no S3 write, so grant
 	// exactly the buckets this task reads (inputs) and writes (outputs + results).
 	// A private-ECR container image additionally needs ecr:ReadOnly to pull.
@@ -727,8 +708,6 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		return fmt.Errorf("create task instance profile: %w", err)
 	}
 
-	cfg := taskLaunchConfig(spec, sized, region, profile, wrapper)
-
 	// Build the storage mount script for any FSx/EFS/attached volumes the task
 	// placement requests (mounted before the workload; #166). Empty when none.
 	storageScript, err := taskStorageScript(ctx, client, spec, region)
@@ -736,10 +715,17 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 		return fmt.Errorf("build task storage: %w", err)
 	}
 
-	opts := launcher.Options{
-		StorageScript:   storageScript,
-		TaskFlushScript: flushHook,
+	cfg, opts, err := buildTaskLaunch(spec, sized, region, profile, resultsPrefix, runID, storageScript)
+	if err != nil {
+		return err
 	}
+	// The exact user data, now that the account, run id and storage are real.
+	// The preflight above measured it with same-length placeholders; this is the
+	// authoritative check, still before RunInstances (#1063).
+	if _, err := taskUserDataSize(cfg, opts); err != nil {
+		return err
+	}
+
 	result, err := provisionTask(out, func(c aws.LaunchConfig, o launcher.Options) (*aws.LaunchResult, error) {
 		return launcher.Provision(ctx, client, c, o)
 	}, &cfg, opts, spec.Resources.Fallback)
@@ -1222,6 +1208,19 @@ func taskLaunchConfig(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, reg
 // none. The script is threaded into the headless launcher via
 // launcher.Options.StorageScript and runs before the workload command (#166).
 func taskStorageScript(ctx context.Context, client *aws.Client, spec *taskproto.TaskSpec, region string) (string, error) {
+	return taskStorageScriptWith(spec, region, func(id string) (string, string, error) {
+		info, err := client.GetFSxFilesystem(ctx, id, region)
+		if err != nil {
+			return "", "", err
+		}
+		return info.DNSName, info.MountName, nil
+	})
+}
+
+// taskStorageScriptWith is taskStorageScript with the one AWS lookup it needs,
+// the FSx filesystem's DNS and mount names, supplied by the caller, so the user
+// data preflight can build the script without calling AWS.
+func taskStorageScriptWith(spec *taskproto.TaskSpec, region string, lookupFSx func(id string) (dnsName, mountName string, err error)) (string, error) {
 	p := spec.Placement
 	if len(p.Volumes) == 0 && p.EFSID == "" && p.FSxLustreID == "" {
 		return "", nil
@@ -1256,13 +1255,13 @@ func taskStorageScript(ctx context.Context, client *aws.Client, spec *taskproto.
 		sc.EFSMountOptions = opts
 	}
 	if p.FSxLustreID != "" {
-		info, err := client.GetFSxFilesystem(ctx, p.FSxLustreID, region)
+		dnsName, mountName, err := lookupFSx(p.FSxLustreID)
 		if err != nil {
 			return "", fmt.Errorf("look up FSx %s: %w", p.FSxLustreID, err)
 		}
 		sc.FSxLustreEnabled = true
-		sc.FSxFilesystemDNS = info.DNSName
-		sc.FSxMountName = info.MountName
+		sc.FSxFilesystemDNS = dnsName
+		sc.FSxMountName = mountName
 		// EffectiveFSxMountPoint: see the EFS comment above — same
 		// override-or-default resolution shared with wrapper.go.
 		sc.FSxMountPoint = p.EffectiveFSxMountPoint()
@@ -1490,4 +1489,106 @@ func init() {
 	taskStatusCmd.Flags().StringVar(&taskStatusRegion, "region", "", "Region the task ran in (default: the configured AWS region)")
 	taskStatusCmd.Flags().StringVar(&taskStatusResultsPrefix, "results-prefix", "", "s3://bucket/prefix the task's records were written under; required if the spec set results_prefix (default: spawn's own spawn-results-<account>-<region>/tasks)")
 	taskStatusCmd.Flags().BoolVar(&taskStatusCheckDone, "check-complete", false, "Exit 0=completed, 1=failed, 2=running, 3=error instead of printing")
+}
+
+// buildTaskLaunch assembles the launch config and launcher options for one task
+// attempt: the wrapper (the command, staged I/O and completion record), the
+// terminal-flush hook, and the storage script. Pure; the preflight and the real
+// launch both call it, so they measure the same user data.
+func buildTaskLaunch(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region, profile, resultsPrefix, runID, storageScript string) (aws.LaunchConfig, launcher.Options, error) {
+	// GPU-capable if the spec asked for GPUs or the sized instance is a GPU family
+	// (e.g. sized from families:["g5"] without an explicit gpus count) — same
+	// classifier that selects the GPU DLAMI. Drives `--gpus all` + NVIDIA Container
+	// Toolkit setup in the wrapper (spawn#601/#606).
+	gpu := spec.Resources.GPUs > 0 || aws.DetectGPUInstance(sized.InstanceType)
+
+	// One options value for both generators, so the wrapper and the flush hook
+	// cannot disagree about the prefix or the run id they write (spawn#764).
+	wrapperOpts := taskproto.WrapperOptions{
+		ResultsPrefix: resultsPrefix,
+		Region:        region,
+		RunID:         runID,
+		GPU:           gpu,
+	}
+
+	wrapper, err := taskproto.GenerateWrapper(spec, wrapperOpts)
+	if err != nil {
+		return aws.LaunchConfig{}, launcher.Options{}, fmt.Errorf("build task wrapper: %w", err)
+	}
+
+	// The terminal-flush hook (spawn#632). The wrapper's log upload and
+	// completion-record write both sit after the user command, so a task killed by
+	// its own TTL/cost limit mid-command left nothing at all to re-size from. This
+	// script is installed root-owned and run by spored before it stops or
+	// terminates — i.e. while the network is still up — and no-ops when the wrapper
+	// already wrote the real record.
+	flushHook, err := taskproto.GenerateFlushScript(spec, wrapperOpts)
+	if err != nil {
+		return aws.LaunchConfig{}, launcher.Options{}, fmt.Errorf("build terminal-flush hook: %w", err)
+	}
+
+	cfg := taskLaunchConfig(spec, sized, region, profile, wrapper)
+	opts := launcher.Options{
+		StorageScript:   storageScript,
+		TaskFlushScript: flushHook,
+	}
+	return cfg, opts, nil
+}
+
+// taskUserDataSize builds the user data launcher.Provision will send for cfg
+// and opts, the exact gzip+base64 bytes, and returns its decoded size (what
+// EC2's 16 KiB limit counts). Over a limit it returns a TaskSpec-specific error.
+func taskUserDataSize(cfg aws.LaunchConfig, opts launcher.Options) (int, error) {
+	encoded, err := launcher.BuildUserData(cfg, opts)
+	if err != nil {
+		return 0, err
+	}
+	if err := aws.CheckUserDataSize(encoded); err != nil {
+		return 0, taskUserDataTooLarge(err)
+	}
+	decoded, _ := aws.UserDataSize(encoded)
+	return decoded, nil
+}
+
+// taskUserDataTooLarge explains a user-data size failure in TaskSpec terms.
+func taskUserDataTooLarge(err error) error {
+	var tooLarge *aws.UserDataTooLargeError
+	if !errors.As(err, &tooLarge) {
+		return err
+	}
+	return fmt.Errorf("this task cannot launch: the generated wrapper and bootstrap are %d bytes after gzip, and EC2 allows %d bytes of user data (spawn#1063).\n"+
+		"The command, and every inputs/outputs entry, ride in the user data. Move long inline scripts out of `command` into a staged file under `inputs:`, "+
+		"and stage many per-file inputs as one directory prefix", tooLarge.DecodedBytes, aws.MaxUserDataBytes)
+}
+
+// Placeholders for the values the preflight cannot know without an AWS call.
+// Each has the same length as the real value, so the user data measures the
+// same size to within gzip's handling of a few different characters; the real
+// launch re-checks the exact bytes before RunInstances.
+const (
+	preflightAccountID = "000000000000"                         // 12 digits, like every AWS account ID
+	preflightRunID     = "00000000-0000-0000-0000-000000000000" // uuid.NewString() length
+	preflightProfile   = "spawn-task-preflight"                 // not in the user data
+)
+
+// taskUserDataPreflight measures the task's user data before any AWS call:
+// the same assembly runTaskReal performs (buildTaskLaunch, then
+// launcher.BuildUserData), with placeholders for the account ID, run ID and any
+// FSx names. It returns the decoded size, or an error when the spec cannot
+// launch because the user data is over EC2's limit.
+func taskUserDataPreflight(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string) (int, error) {
+	resultsPrefix := taskproto.EffectiveResultsPrefix(spec, preflightAccountID, region)
+	storageScript, err := taskStorageScriptWith(spec, region, func(id string) (string, string, error) {
+		// fs-<17 hex>.fsx.<region>.amazonaws.com and an 8-character mount name,
+		// the shapes FSx for Lustre returns.
+		return id + ".fsx." + region + ".amazonaws.com", "abcdefgh", nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("build task storage: %w", err)
+	}
+	cfg, opts, err := buildTaskLaunch(spec, sized, region, preflightProfile, resultsPrefix, preflightRunID, storageScript)
+	if err != nil {
+		return 0, err
+	}
+	return taskUserDataSize(cfg, opts)
 }
