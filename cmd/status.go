@@ -28,10 +28,12 @@ var (
 )
 
 var statusCmd = &cobra.Command{
-	Use:  "status <instance-id>",
-	RunE: runStatus,
-	Args: cobra.MaximumNArgs(1),
-	// Short and Long will be set after i18n initialization
+	Use: "status <instance-id>",
+	// No spawn.status.* keys exist in libs/i18n, so this is set here: before,
+	// `spawn --help` listed status with a blank description.
+	Short: "Show an instance's status as spored reports it, with lifecycle, cost and DNS notices",
+	RunE:  runStatus,
+	Args:  cobra.MaximumNArgs(1),
 }
 
 func init() {

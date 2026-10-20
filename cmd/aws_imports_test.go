@@ -31,7 +31,6 @@ func TestNoNewAWSSDKImportsInCmd(t *testing.T) {
 		"bot.go":          {"dynamodb", "iam"},
 		"collect.go":      {"dynamodb", "s3"},
 		"completion.go":   {"ec2"},
-		"cost.go":         {"dynamodb"},
 		"fsx.go":          {"fsx"},
 		"list-sweeps.go":  {"dynamodb"},
 		"onboard.go":      {"iam"},

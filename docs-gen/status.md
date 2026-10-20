@@ -1,5 +1,7 @@
 ## `spawn status`
 
+Show an instance's status as spored reports it, with lifecycle, cost and DNS notices
+
 ```
 spawn status <instance-id> [flags]
 ```

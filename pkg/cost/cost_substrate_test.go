@@ -67,7 +67,7 @@ func TestGetCostBreakdown_NotFound(t *testing.T) {
 	ctx := context.Background()
 	setupCostTable(t, env.DynamoClient())
 
-	client := NewClient(env.DynamoClient())
+	client := NewClient(env.AWSConfig)
 
 	if _, err := client.GetCostBreakdown(ctx, "nonexistent-sweep"); err == nil {
 		t.Error("GetCostBreakdown on missing sweep should return error")
@@ -79,7 +79,7 @@ func TestGetCostBreakdown_Simple(t *testing.T) {
 	ctx := context.Background()
 	setupCostTable(t, env.DynamoClient())
 
-	client := NewClient(env.DynamoClient())
+	client := NewClient(env.AWSConfig)
 	client.SetOnDemandPricer(substrateFakePricer{price: 0.0104})
 
 	launchedAt := time.Now().Add(-2 * time.Hour).Format(time.RFC3339)
@@ -123,7 +123,7 @@ func TestGetCostBreakdown_MultiRegion(t *testing.T) {
 	ctx := context.Background()
 	setupCostTable(t, env.DynamoClient())
 
-	client := NewClient(env.DynamoClient())
+	client := NewClient(env.AWSConfig)
 	client.SetOnDemandPricer(substrateFakePricer{price: 0.17})
 
 	launchedAt := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
@@ -169,7 +169,7 @@ func TestGetCostBreakdown_UnpricedInstanceIsExcludedNotFabricated(t *testing.T) 
 	ctx := context.Background()
 	setupCostTable(t, env.DynamoClient())
 
-	client := NewClient(env.DynamoClient())
+	client := NewClient(env.AWSConfig)
 	client.SetOnDemandPricer(unpricedTestPricer{})
 
 	launchedAt := time.Now().Add(-2 * time.Hour).Format(time.RFC3339)

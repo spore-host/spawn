@@ -9,11 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `dns.NewClientWithConfig`, `dns.Client.SetHTTPClient` and
+  `aws.Client.DeleteInstanceTags` (Go API).
+
 - `spawn list -o json` has a `first_launch_time` field: the instant the Age
   column is measured from (#1029). `launch_time` is still EC2's LaunchTime,
   the most recent start.
 
 ### Changed
+
+- **Go API:** `cost.NewClient` takes an `aws.Config` instead of a DynamoDB
+  client, and builds both the sweep-table client and the on-demand pricer from
+  it (#967).
 
 - **CI now runs golangci-lint, with a config that can only widen (#1028).**
   golangci-lint ran nowhere, and its defaults report ~500 findings on this repo
@@ -149,6 +156,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a function-ARN argument and return an error (#1121, #1158).
 
 ### Fixed
+
+- `spawn dns register` and `spawn dns delete` signed the DNS updater request
+  with the ambient AWS credentials, ignoring `--profile` and `SPORE_PROFILE`.
+  With `--profile` naming another account, the record was computed for one
+  account and the request signed by another. They now sign with the config
+  that resolved the instance (#967).
+- `spawn cost <sweep>` priced compute with the ambient credentials, so with
+  only `--profile`'s credentials usable every instance came back unpriced. The
+  pricer now uses the command's config (#967).
+- `spawn dns --help` listed `list`, `register` and `delete` with blank
+  descriptions, and `spawn --help` did the same for `status`. The long help said
+  names are registered "when launching with --dns flag" (they're registered
+  from `--name` by default) and gave `spawn dns delete` a DNS name rather than
+  an instance (#1159).
+- `spawn dns delete` blanked `spawn:dns-name` and left `spawn:dns-domain`,
+  `spawn:dns-endpoint` and spored's `spawn:dns-status` behind. It now removes
+  every `spawn:dns-*` tag (#1159).
+- `docs/custom-dns.md` said `spawn status` shows `spawn:dns-status:
+  registered`. It prints nothing on success, and the page now says how to read
+  the tag (#1159).
 
 - `spawn status`, `spawn list`'s TTL column and `spawn start`'s notice put the
   deadline of an instance with `spawn:ttl` but no `spawn:ttl-deadline` at EC2

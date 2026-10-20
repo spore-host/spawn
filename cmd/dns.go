@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -19,6 +20,28 @@ var (
 	dnsListAll   bool
 	dnsDeleteYes bool
 )
+
+// dnsLongHelp is `spawn dns`'s long help (see updateCommandDescriptions).
+const dnsLongHelp = `Manage DNS records for spawn instances.
+
+spored registers <name>.<account-base36>.<domain> itself when an instance
+boots: the name is --name (or --dns), unless the launch passed --no-dns, and the
+domain is spore.host unless the launch targeted a custom DNS deployment
+(--dns-domain; see docs/custom-dns.md).
+
+register and delete act on the zone and updater the instance's
+spawn:dns-domain / spawn:dns-endpoint tags name, unless --domain / --endpoint
+say otherwise.
+
+Examples:
+  # List DNS-enabled instances
+  spawn dns list
+
+  # Register a DNS name for an instance
+  spawn dns register i-1234567890abcdef0 my-server
+
+  # Delete an instance's DNS record and its DNS tags
+  spawn dns delete i-1234567890abcdef0`
 
 // dnsCmd represents the dns command group
 var dnsCmd = &cobra.Command{
@@ -191,10 +214,10 @@ func runDNSRegister(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// Create DNS client
-	dnsClient, err := dns.NewClient(ctx, domain, endpoint)
-	if err != nil {
-		return fmt.Errorf("failed to create DNS client: %w", err)
-	}
+	// Signed with the same config that resolved the instance and account, so
+	// --profile reaches the signature too (#967). dns.NewClient would sign with
+	// the ambient chain.
+	dnsClient := newDNSCommandClient(awsClient.Config(), domain, endpoint)
 
 	// Register DNS
 	resp, err := dnsClient.RegisterDNS(ctx, dnsName, instance.PublicIP)
@@ -271,10 +294,10 @@ func runDNSDelete(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// Create DNS client
-	dnsClient, err := dns.NewClient(ctx, domain, endpoint)
-	if err != nil {
-		return fmt.Errorf("failed to create DNS client: %w", err)
-	}
+	// Signed with the same config that resolved the instance and account, so
+	// --profile reaches the signature too (#967). dns.NewClient would sign with
+	// the ambient chain.
+	dnsClient := newDNSCommandClient(awsClient.Config(), domain, endpoint)
 
 	// Delete DNS
 	fmt.Fprintf(os.Stderr, "Deleting DNS record...\n")
@@ -283,12 +306,14 @@ func runDNSDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to delete DNS: %w", err)
 	}
 
-	// Remove instance tag
-	err = awsClient.UpdateInstanceTags(ctx, instance.Region, instance.InstanceID, map[string]string{
-		"spawn:dns-name": "",
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️  Warning: DNS deleted but failed to remove instance tag: %v\n", err)
+	// Remove the instance's DNS tags: the name, the zone and updater it was
+	// registered with, and spored's report of the registration. Leaving
+	// spawn:dns-domain / spawn:dns-endpoint behind (#1159) described a record
+	// that no longer exists, and an empty spawn:dns-name is still a tag.
+	if keys := dnsTagKeys(instance.Tags); len(keys) > 0 {
+		if err := awsClient.DeleteInstanceTags(ctx, instance.Region, instance.InstanceID, keys); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Warning: DNS deleted but failed to remove the instance's DNS tags (%s): %v\n", strings.Join(keys, ", "), err)
+		}
 	}
 
 	_, _ = fmt.Fprintf(os.Stdout, "\n✅ DNS deleted successfully!\n")
@@ -299,6 +324,25 @@ func runDNSDelete(cmd *cobra.Command, args []string) error {
 }
 
 // Helper functions
+
+// newDNSCommandClient builds the DNS client `spawn dns register` / `delete`
+// sign with: cfg is the config the command resolved the instance and account
+// with (#967). A variable so a test can serve the updater locally.
+var newDNSCommandClient = dns.NewClientWithConfig
+
+// dnsTagKeys is every spawn:dns-* tag on an instance, sorted: what a DNS
+// registration leaves on it, from the launch (spawn:dns-name, -domain,
+// -endpoint) and from spored (spawn:dns-status, -error).
+func dnsTagKeys(tags map[string]string) []string {
+	var keys []string
+	for k := range tags {
+		if strings.HasPrefix(k, "spawn:dns-") {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
 
 // dnsCommandTarget is where `spawn dns register` / `delete` send their request
 // (#891), per field: --domain / --endpoint, then the instance's own

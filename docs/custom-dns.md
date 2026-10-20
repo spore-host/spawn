@@ -119,12 +119,24 @@ endpoint alone sends requests for spore.host to that updater.
 spawn launch dns-test --ttl 1h --dns-domain spore.example.edu \
   --dns-api-endpoint https://<id>.lambda-url.us-east-1.on.aws/ \
   --dns-function-arn arn:aws:lambda:us-east-1:<updater account>:function:spawn-dns-updater
-spawn status dns-test        # spawn:dns-status: registered
+spawn status dns-test        # warns only if spored could not register
 spawn dns list               # FQDNs in each instance's own zone
+```
+
+spored records the outcome on the instance as `spawn:dns-status`: `registered`,
+or `failed` with the reason in `spawn:dns-error`. `spawn status` prints a
+warning with that reason on failure and nothing on success, so to confirm
+success read the tag:
+
+```bash
+aws ec2 describe-tags --region us-east-1 \
+  --filters Name=resource-id,Values=<instance-id> Name=key,Values=spawn:dns-status
 ```
 
 `spawn dns register` and `spawn dns delete` act where the instance's tags say
 spored registered it, unless `--domain` / `--endpoint` say otherwise.
+`spawn dns delete` removes the record and every `spawn:dns-*` tag on the
+instance: the name, the zone and updater, and spored's status.
 
 ## Limits
 

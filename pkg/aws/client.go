@@ -1117,6 +1117,26 @@ func (c *Client) UpdateInstanceTags(ctx context.Context, region, instanceID stri
 	return nil
 }
 
+// DeleteInstanceTags removes the tags named by keys from an EC2 instance,
+// whatever their values. Unlike UpdateInstanceTags with an empty value, the tags
+// are gone afterwards, not present and blank.
+func (c *Client) DeleteInstanceTags(ctx context.Context, region, instanceID string, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	tags := make([]types.Tag, 0, len(keys))
+	for _, k := range keys {
+		tags = append(tags, types.Tag{Key: aws.String(k)})
+	}
+	if _, err := c.regionalEC2(region).DeleteTags(ctx, &ec2.DeleteTagsInput{
+		Resources: []string{instanceID},
+		Tags:      tags,
+	}); err != nil {
+		return fmt.Errorf("failed to delete tags: %w", err)
+	}
+	return nil
+}
+
 // FindKeyPairByFingerprint searches for a key pair matching the given fingerprint
 // Returns the key name if found, empty string if not found
 func (c *Client) FindKeyPairByFingerprint(ctx context.Context, region, fingerprint string) (string, error) {
