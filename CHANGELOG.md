@@ -89,6 +89,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spored would refuse no longer leaves a controller-side footprint first.
   Every plugin in spore-host/spore-plugins passes `--strict`.
 
+- **`spawn onboard` re-runs keep the existing role's ExternalId and refresh its
+  policies.** A re-run without `--external-id` used to generate a new
+  ExternalId, leave the existing role trusting the old one, and register the new
+  one with the portal, which then could not assume the role. Now the ExternalId
+  is read from the role's trust policy. If it can't be determined (no ID, or
+  more than one), onboard refuses and asks for `--external-id`. Passing
+  `--external-id` updates the trust policy to that ID. Re-runs also rewrite the
+  trust policy and both inline policies (`PortalEC2Launch`,
+  `PortalPassSporedProfile`) to the current documents, so a role made by an
+  older spawn doesn't keep the grants it had before #817's scoping. Onboard
+  won't rewrite a `spore-portal-onboard` role that isn't tagged
+  `Purpose=spore-portal-onboard` (#1138).
+
 ### Fixed
 
 - `spawn status`, `spawn list`'s TTL column and `spawn start`'s notice put the
@@ -141,6 +154,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `plugin.CheckSporeOS` (the Windows-spore refusal) now reads the OS through
   `NormalizeOS`, the normaliser a `type: platform` condition uses, so the two
   cannot disagree about whether a spore runs Windows (#1055).
+
+- `spawn onboard` signs the portal phone-home for the region in the Function
+  URL's hostname instead of `--region`, so onboarding a region other than the
+  endpoint's no longer fails the signature check. `--region` is still sent in
+  the request body as the onboarded region. `-o json` now writes only the JSON
+  result to stdout, with progress lines on stderr (#1138).
 
 ## [0.136.0] - 2026-10-20
 
