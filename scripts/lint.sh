@@ -3,6 +3,10 @@
 # Run golangci-lint over every Go module in the repo: the root and each nested
 # one (#1028).
 #
+# GOOS defaults to linux (override with LINT_GOOS) so a local run on macOS lints
+# the same files CI does: linux-only files such as pkg/agent/atime_linux.go were
+# otherwise skipped locally and failed only in CI.
+#
 # Why every module: `golangci-lint run ./...` stops at a directory with its own
 # go.mod, exactly like `go test ./...` (#136), so linting only the root would
 # leave the nine modules under lambda/ and scripts/ — the ttl-reaper among them
@@ -36,7 +40,7 @@ fail=0
 for mod in $mods; do
   dir=$(dirname "$mod")
   group_open "$dir"
-  if ! ( cd "$dir" && golangci-lint run --config "$config" ./... ); then
+  if ! ( cd "$dir" && GOOS="${LINT_GOOS:-linux}" golangci-lint run --config "$config" ./... ); then
     echo "FAIL $dir" >&2
     fail=1
   fi
