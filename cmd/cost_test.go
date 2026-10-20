@@ -12,6 +12,8 @@ import (
 // cost (on-demand rate × runtime, from the spawn:price-per-hour tag — the same
 // data `spawn status` uses) rather than leaking a raw DynamoDB
 // ResourceNotFoundException from an absent sweep record.
+var costTestNow = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+
 func TestSingleInstanceCostReport(t *testing.T) {
 	t.Run("prices from the price-per-hour tag × runtime", func(t *testing.T) {
 		inst := &aws.InstanceInfo{
@@ -19,9 +21,10 @@ func TestSingleInstanceCostReport(t *testing.T) {
 			InstanceID:   "i-0abc123",
 			InstanceType: "m5.large",
 			State:        "running",
+			LaunchTime:   costTestNow.Add(-2 * time.Hour),
 			Tags:         map[string]string{"spawn:price-per-hour": "0.0960"},
 		}
-		out := singleInstanceCostReport(inst, 2*time.Hour)
+		out := singleInstanceCostReport(inst, costTestNow)
 
 		// 0.0960/hr × 2h = $0.192 → "$0.19".
 		for _, want := range []string{"lith-devbox", "i-0abc123", "m5.large", "$0.0960/hr", "Est. compute:", "$0.19"} {
@@ -42,7 +45,7 @@ func TestSingleInstanceCostReport(t *testing.T) {
 			State:        "stopped",
 			Tags:         map[string]string{},
 		}
-		out := singleInstanceCostReport(inst, time.Hour)
+		out := singleInstanceCostReport(inst, costTestNow)
 		if !strings.Contains(out, "cannot be estimated") {
 			t.Errorf("expected a clear cannot-be-estimated note; got:\n%s", out)
 		}

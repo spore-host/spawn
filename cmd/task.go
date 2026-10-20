@@ -77,7 +77,11 @@ var taskDiagnoseCmd = &cobra.Command{
 			return err
 		}
 
-		age := time.Since(inst.LaunchTime)
+		// Age is since the ORIGINAL launch and the cost is rate × compute time
+		// across every boot, not time since EC2's LaunchTime (the latest start,
+		// #1029).
+		rt := runtimeSoFar(inst, time.Now())
+		age := rt.Since
 		d := taskDiagnosis{
 			Name:         inst.Name,
 			InstanceID:   inst.InstanceID,
@@ -88,7 +92,7 @@ var taskDiagnoseCmd = &cobra.Command{
 			Spot:         inst.SpotInstance,
 			AgeHours:     age.Hours(),
 			TTL:          inst.TTL,
-			EstCostUSD:   estimateInstanceCost(inst, age),
+			EstCostUSD:   estimateInstanceCost(inst, rt.Compute),
 			IAMRole:      inst.IAMRole,
 			LikelyCause:  likelyCause(inst),
 		}
@@ -107,7 +111,7 @@ var taskDiagnoseCmd = &cobra.Command{
 			fmt.Printf("TTL:         %s\n", d.TTL)
 		}
 		if d.EstCostUSD > 0 {
-			fmt.Printf("Est. cost:   ~$%.2f (%s × $%.4f/hr, estimate)\n", d.EstCostUSD, age.Round(time.Minute), pricePerHour(inst))
+			fmt.Printf("Est. cost:   ~$%.2f (%s compute × $%.4f/hr, estimate)\n", d.EstCostUSD, rt.Compute.Round(time.Minute), pricePerHour(inst))
 		}
 		if jaName := inst.JobArrayName; jaName != "" {
 			fmt.Printf("Job array:   %s (index %s of %s)\n", jaName, orDash(inst.JobArrayIndex), orDash(inst.JobArraySize))
@@ -131,7 +135,7 @@ var taskDiagnoseCmd = &cobra.Command{
 }
 
 // estimateInstanceCost gives a rough compute-only cost from the price-per-hour
-// tag spawn stamps at launch × the instance's age. Standalone instances have no
+// tag spawn stamps at launch × a compute duration (runtimeSoFar). Standalone instances have no
 // DynamoDB cost record (that's keyed by sweep-id), so this is an on-the-fly
 // estimate, clearly labeled as such — not a billing figure. Returns 0 if the
 // rate is unknown.

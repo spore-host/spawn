@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `spawn list -o json` has a `first_launch_time` field: the instant the Age
+  column is measured from (#1029). `launch_time` is still EC2's LaunchTime,
+  the most recent start.
+
 ### Changed
 
 - **CI now runs golangci-lint, with a config that can only widen (#1028).**
@@ -20,6 +26,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record, adds path exclusions, or stops being run by CI. Enabling the floor
   meant small, behaviour-neutral cleanups: redundant loop-variable copies,
   conversions and initial assignments, and `reflect.Ptr` → `reflect.Pointer`.
+
+- **`spawn list` Age is now the time since the instance was first launched**,
+  across stops and starts — the age the TTL reaper's max-age ceiling acts on.
+  It used to be the time since EC2's LaunchTime, which resets on every start, so
+  an instance launched three days ago and restarted an hour ago showed `1h`. The
+  list is sorted by the same instant. `spawn task diagnose`'s Age is the same
+  figure (#1029).
+- **`spawn cost <instance>` reports cost so far across every boot.** Compute is
+  the on-demand rate × the instance's running time, from spored's
+  `spawn:compute-seconds` (the total `--cost-limit` is enforced against), since
+  compute bills only while running; with no such tag it is the wall clock since
+  first launch, labelled as an upper bound. When `spawn:ebs-hourly-cost` is set
+  it adds EBS over the time since first launch, which bills while stopped too.
+  It used to be rate × time since EC2's LaunchTime: the latest boot only, and
+  for a stopped instance the stopped time counted as compute. `spawn task
+  diagnose`'s estimate uses the same compute time (#1029).
+- Every age, TTL and cost figure in the CLI is measured from the earlier of the
+  `spawn:launch-time` tag and EC2's LaunchTime — the rule the TTL reaper
+  enforces with (GHSA-c93q-4jh7-6pvj) — through one shared helper
+  (`ttl.LaunchAnchor`), so what is shown is what is enforced (#1029).
+
+### Fixed
+
+- `spawn status`, `spawn list`'s TTL column and `spawn start`'s notice put the
+  deadline of an instance with `spawn:ttl` but no `spawn:ttl-deadline` at EC2
+  LaunchTime + TTL. After a stop/start that is later than the deadline spored
+  and the reaper enforce (`spawn:launch-time` + TTL); they now show that one
+  (#1029).
+- `spawn status`'s "Max compute cost" is now compute so far across every boot
+  plus the time to the deadline, as `spawn extend` sizes `--cost-limit`. It was
+  rate × (deadline − EC2 LaunchTime), which after a restart left out every
+  earlier boot (#1029).
 
 ## [0.136.0] - 2026-10-20
 

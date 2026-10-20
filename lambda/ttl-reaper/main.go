@@ -2004,16 +2004,13 @@ func ttlFallbackDeadline(tags map[string]string, apiLaunch *time.Time) (time.Tim
 // once by the CLI at launch, is the earlier of the two in that case. Taking the
 // minimum keeps the legitimate case and makes a forged later value harmless.
 func launchTime(tagVal string, apiLaunch *time.Time) time.Time {
-	var t time.Time
-	if tagVal != "" {
-		if parsed, err := time.Parse(time.RFC3339, tagVal); err == nil {
-			t = parsed
-		}
+	// The rule lives in pkg/ttl so the CLI's displays (spawn status/list/cost)
+	// measure age from the same instant this reaper enforces against (#1029).
+	var api time.Time
+	if apiLaunch != nil {
+		api = *apiLaunch
 	}
-	if apiLaunch != nil && !apiLaunch.IsZero() && (t.IsZero() || apiLaunch.Before(t)) {
-		t = *apiLaunch
-	}
-	return t
+	return ttlpkg.LaunchAnchor(tagVal, api)
 }
 
 func main() {

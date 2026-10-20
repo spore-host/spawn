@@ -264,7 +264,7 @@ func lifecycleProtectionBlockAt(instance *aws.InstanceInfo, rate statusRate) str
 				formatStatusTime(deadline, statusLocation()))
 		}
 
-		// Worst-case compute cost = on-demand rate × time from launch to deadline.
+		// Worst-case compute cost = rate × (compute so far + now to deadline).
 		// It's a ceiling (the idle timeout usually stops the instance well before),
 		// and it excludes EBS/network — labelled as such. Best-effort: skip if we
 		// can't price the type. Reads the spawn:price-per-hour tag rather than
@@ -277,8 +277,19 @@ func lifecycleProtectionBlockAt(instance *aws.InstanceInfo, rate statusRate) str
 		// the on-demand rate under a "(spot)" label. Spot prices move, and a spot
 		// instance's default max price is the on-demand rate, so that figure stays
 		// beside it as the bound.
-		if rate.PerHour > 0 && !instance.LaunchTime.IsZero() {
-			maxHours := deadline.Sub(instance.LaunchTime).Hours()
+		//
+		// The hours are compute so far across every boot (spawn:compute-seconds)
+		// plus now..deadline running continuously: the same worst case `spawn
+		// extend` sizes the cap with (decideCostLimit). They used to be deadline -
+		// EC2 LaunchTime, which after a stop/start left out every earlier boot
+		// (#1029).
+		if launch := originalLaunchTime(instance); rate.PerHour > 0 && !launch.IsZero() {
+			now := time.Now()
+			remaining := deadline.Sub(now)
+			if remaining < 0 {
+				remaining = 0
+			}
+			maxHours := (computeSoFar(instance, launch, now) + remaining).Hours()
 			if maxHours > 0 {
 				if rate.SpotPriced && rate.OnDemand > 0 {
 					fmt.Fprintf(&b, "  Max compute cost:      ~$%.2f by deadline at the %s (~$%.2f at on-demand); compute only, idle-stop usually ends it sooner\n",
@@ -302,17 +313,19 @@ func lifecycleProtectionBlockAt(instance *aws.InstanceInfo, rate statusRate) str
 
 // lifecycleDeadline resolves the instance's absolute termination deadline: the
 // launch-anchored spawn:ttl-deadline tag (authoritative, what the reaper reads),
-// falling back to LaunchTime + the TTL duration for older instances without the
-// tag. Returns ok=false when no deadline can be determined.
+// falling back to the original launch (originalLaunchTime) + the TTL duration
+// for older instances without the tag. Returns ok=false when no deadline can be determined.
 func lifecycleDeadline(instance *aws.InstanceInfo) (time.Time, bool) {
 	if dl, ok := instance.Tags["spawn:ttl-deadline"]; ok {
 		if parsed, err := time.Parse(time.RFC3339, dl); err == nil {
 			return parsed, true
 		}
 	}
-	if instance.TTL != "" && !instance.LaunchTime.IsZero() {
+	// The original launch, not EC2's LaunchTime (which resets on every start):
+	// the same spawn:launch-time + spawn:ttl the reaper and spored enforce (#1029).
+	if launch := originalLaunchTime(instance); instance.TTL != "" && !launch.IsZero() {
 		if d, err := ttlpkg.ParseDuration(instance.TTL); err == nil && d > 0 {
-			return instance.LaunchTime.Add(d), true
+			return launch.Add(d), true
 		}
 	}
 	return time.Time{}, false
