@@ -22,7 +22,7 @@ the reaper terminates instances, and that is not reversible.
 
   spawn doctor                 # does anything cover this account today?
   spawn reaper deploy          # install it, unarmed
-  spawn reaper status          # deployed? armed? on what schedule?
+  spawn reaper status          # deployed? armed? on what schedule? covered anyway?
   spawn reaper arm             # start actually reclaiming
   spawn reaper teardown        # remove it
 
@@ -119,6 +119,10 @@ ttl-reaper/; a bucket that fails either check is reported and kept, with
 --force-artifacts to override. So the liberty is only taken over a bucket that is
 provably spawn's and holds only spawn's artifacts.
 
+The bucket is the one deploy used. Deploy records it on the function
+(spawn:artifact-bucket); --bucket overrides that, and is needed for a reaper
+deployed with --bucket by a spawn older than that record.
+
 ```
 spawn reaper teardown [flags]
 ```
@@ -127,6 +131,7 @@ spawn reaper teardown [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
+| `--bucket` |  | string |  | Artifact bucket to remove (default: the one recorded on the function at deploy time, else spawn-reaper-artifacts-&lt;account&gt;-&lt;region&gt;) |
 | `--force-artifacts` |  | bool |  | Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed) |
 | `--if-idle-for` |  | duration | `0s` | Only tear down if the reaper has reclaimed nothing for at least this long (e.g. 720h); otherwise report and exit 0 |
 | `--keep-artifacts` |  | bool |  | Leave the artifact bucket in place (it is removed by default) |

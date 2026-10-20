@@ -66,15 +66,10 @@ import (
 	"github.com/spore-host/spore-host/lambda/accountlifecycle"
 )
 
-// defaultRegions is the set scanned when REAPER_REGIONS is unset. It mirrors the
-// 11 regions the release workflow publishes spored to (spawn-binaries-<region>),
-// i.e. where spawn actually operates. Override via REAPER_REGIONS for more/fewer.
-var defaultRegions = []string{
-	"us-east-1", "us-east-2", "us-west-1", "us-west-2",
-	"ca-central-1",
-	"eu-west-1", "eu-west-2", "eu-central-1",
-	"ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
-}
+// defaultRegions is the set scanned when REAPER_REGIONS is unset. Defined in
+// pkg/reaperconfig so the CLI's coverage check reads the same set (#1157).
+// Override via REAPER_REGIONS for more/fewer.
+var defaultRegions = reaperconfig.DefaultRegions()
 
 const defaultMaxAge = 7 * 24 * time.Hour
 
@@ -602,19 +597,7 @@ func accountIDFromRoleARN(arn string) string {
 }
 
 func parseRegions(env string) []string {
-	if env == "" {
-		return defaultRegions
-	}
-	var out []string
-	for _, p := range strings.Split(env, ",") {
-		if s := strings.TrimSpace(p); s != "" {
-			out = append(out, s)
-		}
-	}
-	if len(out) == 0 {
-		return defaultRegions
-	}
-	return out
+	return reaperconfig.ParseRegions(env)
 }
 
 func parseMaxAge(env string) time.Duration {

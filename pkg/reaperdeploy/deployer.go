@@ -639,6 +639,19 @@ func DefaultFetch(ctx context.Context, ref string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, 256<<20))
 }
 
+// ArtifactBucketTag records, on the function, the bucket its artifact was
+// uploaded to, so teardown removes that bucket rather than assuming the default
+// name — a deploy with --bucket used to leave its bucket behind (#1157).
+const ArtifactBucketTag = "spawn:artifact-bucket"
+
+func functionTags(opts Options) map[string]string {
+	t := Tags(opts.Version)
+	if opts.Bucket != "" {
+		t[ArtifactBucketTag] = opts.Bucket
+	}
+	return t
+}
+
 func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, key string) (arn string, created, dryRun bool, err error) {
 	out, gerr := d.Lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: awssdk.String(FunctionName)})
 	if gerr == nil {
@@ -676,7 +689,7 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 		// status` and the skew report (#654) read the wrong version (#1086).
 		if _, err := d.Lambda.TagResource(ctx, &lambda.TagResourceInput{
 			Resource: awssdk.String(arn),
-			Tags:     Tags(opts.Version),
+			Tags:     functionTags(opts),
 		}); err != nil {
 			return "", false, false, fmt.Errorf("reaperdeploy: tag function: %w", err)
 		}
@@ -700,7 +713,7 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 		Timeout:       awssdk.Int32(900),
 		MemorySize:    awssdk.Int32(256),
 		Description:   awssdk.String("spawn ttl-reaper, scanning this account (spawn#625)"),
-		Tags:          Tags(opts.Version),
+		Tags:          functionTags(opts),
 	})
 	if err != nil {
 		return "", false, false, fmt.Errorf("reaperdeploy: create function: %w", err)
@@ -776,6 +789,9 @@ type Info struct {
 	Schedule    string
 	RuleEnabled bool
 	FunctionARN string
+	// ArtifactBucket is the bucket recorded at deploy time (ArtifactBucketTag);
+	// empty for a reaper deployed before it was recorded.
+	ArtifactBucket string
 }
 
 // Inspect reports the deployed state without changing anything.
@@ -799,6 +815,7 @@ func (d *Deployer) Inspect(ctx context.Context) (Info, error) {
 	}
 	if out.Tags != nil {
 		info.Version = out.Tags["spawn:version"]
+		info.ArtifactBucket = out.Tags[ArtifactBucketTag]
 	}
 
 	if rule, err := d.Events.DescribeRule(ctx, &eventbridge.DescribeRuleInput{Name: awssdk.String(RuleName)}); err == nil {

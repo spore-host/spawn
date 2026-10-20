@@ -113,6 +113,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work without a default VPC. A region with no subnet at all still fails
   (#1161).
 
+- **Reaper coverage follows the regions the reaper scans** (`spawn doctor` and
+  the launch-time warning). It used to count any `spawn-ttl-reaper*` function
+  in the launch region as coverage. Now it reads the function's
+  `REAPER_REGIONS`, the same way the reaper does (unset means the reaper's 11
+  default regions). A function that doesn't scan the launch region doesn't
+  count. A function in another default region that does scan it counts. That
+  second check is up to ten extra `lambda:ListFunctions` calls, made only when
+  nothing in the launch region covers it. The member-role verdict now says that
+  the central reaper's regions can't be read from the member account. The
+  default region list moved to `pkg/reaperconfig` so the reaper and the CLI
+  share it (#1157).
+- **`spawn reaper status` reports coverage instead of NOT DEPLOYED** when this
+  region has no `spawn reaper deploy` reaper but something else covers the
+  account (the template reaper, a reaper in another region, or a member role).
+  It uses the same probe as `spawn doctor`. If coverage can't be determined,
+  status says that instead of claiming nothing is deployed (#1157).
+
 ### Fixed
 
 - `spawn status`, `spawn list`'s TTL column and `spawn start`'s notice put the
@@ -198,6 +215,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schedules aren't scanned), and they no longer call `scheduler-handler` a blind
   spot, since it is matched by exact name. `--all-regions` is described as the
   regions enabled in the account (#1161).
+- `spawn reaper teardown --bucket` names the artifact bucket to remove. Deploy
+  now records its bucket on the function (`spawn:artifact-bucket` tag), and
+  teardown removes that one by default (#1157).
+
+- `spawn reaper teardown` removes the artifact bucket chosen with `--bucket` at
+  deploy time. It used to target only the default bucket name, so a custom
+  bucket was left behind silently. For a reaper deployed before this release
+  with `--bucket`, pass the same `--bucket` to teardown (#1157).
+- `docs/infra-account.md` said `ACCOUNTS_TABLE` decides which accounts the
+  reaper scans. That is set by `REAPER_ROLE_ARNS` (and `REAPER_SCAN_SELF`); the
+  table only supplies the expiry verdict (#1157).
 
 ## [0.136.0] - 2026-10-20
 
