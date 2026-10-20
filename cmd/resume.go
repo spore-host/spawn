@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -126,6 +127,18 @@ func runResume(cmd *cobra.Command, args []string) error {
 			state.TotalParams, len(paramFormat.Params))
 	}
 
+	// Resolve the region of every launched instance and the fallback for
+	// pending ones (#495). This used to be an unchecked
+	// Defaults["region"].(string) — a panic for a param file with no region
+	// default — followed by a silent us-east-1 fallback, which reconciled
+	// against, and launched into, a region the sweep may never have used.
+	regions, err := resolveResumeRegions(state, paramFormat, spawnRegion, spawnconfig.SharedRegion())
+	if err != nil {
+		return err
+	}
+	// Resolved before any AWS client exists: a sweep with no knowable
+	// region is refused without touching the network.
+
 	// Initialize AWS client
 	awsClient, err := aws.NewClient(ctx)
 	if err != nil {
@@ -135,24 +148,14 @@ func runResume(cmd *cobra.Command, args []string) error {
 	// Query EC2 to reconcile state
 	fmt.Fprintf(os.Stderr, "🔍 Querying EC2 to reconcile instance states...\n")
 
-	// Determine region from existing instances
-	region := ""
-	for _, inst := range state.Instances {
-		if inst.InstanceID != "" {
-			// Get instance region (we'll query all instances in the same region)
-			region = paramFormat.Defaults["region"].(string)
-			break
+	// Query every region the sweep's instances live in.
+	var allInstances []aws.InstanceInfo
+	for _, r := range regions.distinct() {
+		found, err := awsClient.ListInstances(ctx, r, "")
+		if err != nil {
+			return fmt.Errorf("failed to query instances in %s: %w", r, err)
 		}
-	}
-
-	if region == "" {
-		region = "us-east-1" // Default
-	}
-
-	// Query all instances in sweep
-	allInstances, err := awsClient.ListInstances(ctx, region, "")
-	if err != nil {
-		return fmt.Errorf("failed to query instances: %w", err)
+		allInstances = append(allInstances, found...)
 	}
 
 	// Build map of instance ID -> current state
@@ -234,9 +237,16 @@ func runResume(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to build launch config for parameter set %d: %w", idx, err)
 		}
 
-		// Set region
+		// Set region: the parameter file's own (per-set or default) region
+		// wins, then the resolved fallback. With neither there is no region
+		// to launch into, and guessing one is how a sweep lands in the wrong
+		// account region (#495).
 		if config.Region == "" {
-			config.Region = region
+			config.Region = regions.fallback
+		}
+		if config.Region == "" {
+			return fmt.Errorf("cannot determine a region for pending parameter set %d: "+
+				"the parameter file sets no region and the sweep state records none — pass --region", idx)
 		}
 
 		// Set name
@@ -250,7 +260,8 @@ func runResume(cmd *cobra.Command, args []string) error {
 	// --max-concurrent-auto (#494): now that the pending launch configs are
 	// built (each with a resolved InstanceType/Region/Spot), derive a real
 	// quota-backed ceiling instead of the original or a user-typed number.
-	if resumeMaxConcurrentAuto {
+	if resumeMaxConcurrentAuto && len(launchConfigs) > 0 {
+		region := launchConfigs[0].Region
 		regionClient, rerr := aws.NewClientWithRegion(ctx, region)
 		if rerr != nil {
 			return fmt.Errorf("--max-concurrent-auto: create AWS client for %s: %w", region, rerr)
@@ -428,4 +439,94 @@ func resumeSweepDetached(ctx context.Context, sweepID string) error {
 	fmt.Fprintf(os.Stderr, "   Check status: spawn status --sweep-id %s\n\n", sweepID)
 
 	return nil
+}
+
+// resumeRegionSet is where a resumed sweep's instances live: the region of
+// each launched instance, and the region pending parameter sets that name none
+// of their own are launched into.
+type resumeRegionSet struct {
+	byInstance map[string]string
+	fallback   string
+}
+
+// distinct returns the regions to reconcile, sorted.
+func (r resumeRegionSet) distinct() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, reg := range r.byInstance {
+		if !seen[reg] {
+			seen[reg] = true
+			out = append(out, reg)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// paramSetRegion is the region parameter set idx asks for: its own "region",
+// else the file's default. Checked assertions — a missing or non-string value
+// is "no region", never a panic (#495).
+func paramSetRegion(pf *ParamFileFormat, idx int) string {
+	if pf != nil && idx >= 0 && idx < len(pf.Params) {
+		if r, ok := pf.Params[idx]["region"].(string); ok && r != "" {
+			return r
+		}
+	}
+	if pf != nil {
+		if r, ok := pf.Defaults["region"].(string); ok && r != "" {
+			return r
+		}
+	}
+	return ""
+}
+
+// resolveResumeRegions works out where a sweep being resumed lives (#495).
+//
+// flagRegion is --region as typed; configRegion is the resolved shared config
+// region (--region > SPORE_REGION/AWS_REGION > spore config), the same source
+// the original launch read (resolveLaunchRegion).
+//
+// A launched instance's region is, in order: the region recorded for it in the
+// sweep state (from its LaunchResult), the region its parameter set asks for,
+// or configRegion. If none of those exists the instance cannot be reconciled
+// and this is an error, not a guess.
+//
+// The fallback for pending sets that name no region is --region, else the
+// sweep's one recorded region if every launched instance agrees on it, else
+// configRegion. It may be empty; the caller then refuses to launch a set with
+// no region. There is no hard-coded default: us-east-1 was one (#495).
+func resolveResumeRegions(state *SweepState, pf *ParamFileFormat, flagRegion, configRegion string) (resumeRegionSet, error) {
+	set := resumeRegionSet{byInstance: map[string]string{}}
+	recorded := map[string]bool{}
+	for _, inst := range state.Instances {
+		if inst.InstanceID == "" {
+			continue
+		}
+		reg := inst.Region
+		if reg != "" {
+			recorded[reg] = true
+		}
+		if reg == "" {
+			reg = paramSetRegion(pf, inst.Index)
+		}
+		if reg == "" {
+			reg = configRegion
+		}
+		if reg == "" {
+			return set, fmt.Errorf("cannot determine the region of sweep instance %s (parameter set %d): "+
+				"the sweep state does not record it and the parameter file sets no region — pass --region",
+				inst.InstanceID, inst.Index)
+		}
+		set.byInstance[inst.InstanceID] = reg
+	}
+	set.fallback = flagRegion
+	if set.fallback == "" && len(recorded) == 1 {
+		for reg := range recorded {
+			set.fallback = reg
+		}
+	}
+	if set.fallback == "" {
+		set.fallback = configRegion
+	}
+	return set, nil
 }

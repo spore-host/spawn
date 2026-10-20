@@ -44,8 +44,13 @@ type SweepState struct {
 
 // InstanceState tracks the state of a single instance in a sweep
 type InstanceState struct {
-	Index        int       `json:"index"`
-	InstanceID   string    `json:"instance_id"`
+	Index      int    `json:"index"`
+	InstanceID string `json:"instance_id"`
+	// Region is the region the instance was launched into, from its
+	// LaunchResult. `spawn resume` reconciles each instance in this region
+	// rather than guessing one from the parameter file (#495). Empty in state
+	// files written before it was recorded.
+	Region       string    `json:"region,omitempty"`
 	State        string    `json:"state"`
 	LaunchedAt   time.Time `json:"launched_at"`
 	TerminatedAt time.Time `json:"terminated_at,omitempty"`
