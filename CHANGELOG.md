@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.138.0] - 2026-10-20
+
 ### Added
 
 - **`pkg/tasklaunch`: `spawn task run`'s plan-and-launch path as a public Go
@@ -10864,7 +10866,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.137.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.138.0...HEAD
+[0.138.0]: https://github.com/spore-host/spawn/compare/v0.137.0...v0.138.0
 [0.137.0]: https://github.com/spore-host/spawn/compare/v0.136.0...v0.137.0
 [0.136.0]: https://github.com/spore-host/spawn/compare/v0.135.2...v0.136.0
 [0.135.2]: https://github.com/spore-host/spawn/compare/v0.135.1...v0.135.2
