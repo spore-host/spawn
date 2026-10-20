@@ -16,8 +16,9 @@
 //     VisibilityTimeout, so the receiving worker "owns" it for that window.
 //   - Ack     → DeleteMessage after the task's completion record is durably
 //     written. If the worker dies / is Spot-reclaimed before it acks, the
-//     message reappears after the timeout and another worker retries it — which
-//     is exactly cohort's "reconcile replaces reaped workers" at the task level.
+//     message reappears after the timeout and another worker retries it. This
+//     is the only recovery from a lost worker: the pool does not replace
+//     workers after `spawn pool create` returns (#1149), it reruns their tasks.
 //
 // At-least-once, not exactly-once: a worker that finishes a task but dies before
 // DeleteMessage causes a redelivery. That is safe here because a task's outputs
@@ -86,8 +87,9 @@ func QueueName(runID string) string {
 // CreateQueue creates (idempotently) the run-scoped queue and returns a handle.
 // visibilityTimeout is how long a claimed task stays invisible to other workers —
 // it MUST exceed the longest expected single-task runtime, or a slow task would be
-// redelivered and double-run while still in flight. The caller sizes it from the
-// task TTL. A create for an existing name returns that queue (SQS CreateQueue is
+// redelivered and double-run while still in flight. `spawn pool create` passes
+// --visibility-timeout, a fixed 900s unless overridden; nothing derives it from
+// a task's TTL. A create for an existing name returns that queue (SQS CreateQueue is
 // idempotent when attributes match), so first-worker-or-submitter-wins is safe.
 func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTimeout int) (*Queue, error) {
 	name := QueueName(runID)

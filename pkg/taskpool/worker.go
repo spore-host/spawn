@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 // SpecFetcher loads a staged TaskSpec's raw JSON by its s3:// URI. Abstracted so
@@ -66,6 +68,15 @@ type Worker struct {
 	Execer    TaskExecer
 	Workspace WorkspaceProvider
 	Config    WorkerConfig
+	// Results writes the failed completion record for a task whose spec does not
+	// parse (#1149). The job script writes every other record, but it is rendered
+	// from the spec, so for an unparseable one nothing else ever will. AccountID
+	// and Region locate the default results prefix (spawn-results-<account>-
+	// <region>/tasks), the one `spawn task status` reads. Nil Results means no
+	// such record can be written: the worker logs that and still acks.
+	Results   ResultsAPI
+	AccountID string
+	Region    string
 	// now overrides time.Now for deterministic idle-timeout tests. Nil → time.Now.
 	now func() time.Time
 	// sleep overrides the claim-error backoff for tests, so they count retries
@@ -155,11 +166,18 @@ func (w *Worker) Run(ctx context.Context) (executed int, err error) {
 	}
 }
 
-// runOne fetches, executes, acks, and resets a single claimed task. Every failure
-// mode is contained: the task is ALWAYS acked (so it isn't redelivered forever on
-// a permanent failure) and the workspace is ALWAYS reset (so nothing leaks into
-// the next task). A task that legitimately failed still wrote a completion record
-// via the execer, which the submitter polls — the pool doesn't re-decide that.
+// runOne fetches, executes, acks, and resets a single claimed task. Once the spec
+// is fetched, the task is ALWAYS acked (so it isn't redelivered forever on a
+// permanent failure) and the workspace is ALWAYS reset (so nothing leaks into the
+// next task). Who writes the completion record the submitter polls depends on
+// how far the task got:
+//
+//   - the job script ran: the script wrote it, success or failure, and the pool
+//     doesn't re-decide that;
+//   - the spec does not parse: no script can be rendered, so the worker writes a
+//     failed spec_error record itself before acking (#1149);
+//   - the execer failed after parsing (could not render, write or start the
+//     script): NO record is written, and the task is acked anyway.
 func (w *Worker) runOne(ctx context.Context, c *Claimed) {
 	taskID := c.Ref.TaskID
 
@@ -186,10 +204,23 @@ func (w *Worker) runOne(ctx context.Context, c *Claimed) {
 		return
 	}
 
+	if _, perr := taskproto.ParseSpec(specJSON); perr != nil {
+		// The spec can never run, on this worker or any other, so redelivery would
+		// only spin. Write the failed record first so `task status` has an answer,
+		// then ack. A record write that fails is logged and the task acked anyway:
+		// retrying it would keep this worker busy (and billing) on a task that
+		// cannot run, and leaving the message would redeliver it every visibility
+		// timeout, resetting the idle clock so the pool never drains.
+		w.recordUnparseable(ctx, taskID, specJSON, perr)
+		w.ack(ctx, c)
+		return
+	}
+
 	exit, execErr := w.Execer.Exec(ctx, specJSON, dir)
 	if execErr != nil {
-		// The execer itself errored (couldn't even run the protocol). It should have
-		// written a failed completion record; regardless, ack so we don't spin on it.
+		// The execer itself errored before the job script ran, so no completion
+		// record exists for this attempt (see runOne's doc). Ack anyway so we don't
+		// spin on it.
 		w.logf("task %s: exec error (exit %d): %v", taskID, exit, execErr)
 	} else if exit != 0 {
 		w.logf("task %s: completed with non-zero exit %d", taskID, exit)
@@ -197,12 +228,35 @@ func (w *Worker) runOne(ctx context.Context, c *Claimed) {
 		w.logf("task %s: completed", taskID)
 	}
 
-	// Ack: the task ran and wrote its completion record (success or failure). We
-	// delete it so it isn't redelivered. A worker that dies BEFORE reaching here
-	// leaves the task on the queue → redelivered → retried elsewhere.
+	// Ack: delete the task so it isn't redelivered. A worker that dies BEFORE
+	// reaching here leaves the task on the queue → redelivered → retried elsewhere.
+	w.ack(ctx, c)
+}
+
+func (w *Worker) ack(ctx context.Context, c *Claimed) {
 	if ackErr := w.Queue.Ack(ctx, c); ackErr != nil {
-		w.logf("task %s: ack failed (may redeliver): %v", taskID, ackErr)
+		w.logf("task %s: ack failed (may redeliver): %v", c.Ref.TaskID, ackErr)
 	}
+}
+
+// recordUnparseable writes the spec_error completion record for a task whose
+// spec does not parse, logging rather than returning any failure (see runOne).
+func (w *Worker) recordUnparseable(ctx context.Context, taskID string, specJSON []byte, perr error) {
+	now := w.now
+	if now == nil {
+		now = time.Now
+	}
+	w.logf("task %s: spec does not parse, cannot run: %v", taskID, perr)
+	if w.Results == nil {
+		w.logf("task %s: no results writer configured; no completion record written", taskID)
+		return
+	}
+	uri, err := recordUnparseableSpec(ctx, w.Results, w.AccountID, w.Region, taskID, specJSON, now())
+	if err != nil {
+		w.logf("task %s: could not write the failed completion record: %v", taskID, err)
+		return
+	}
+	w.logf("task %s: wrote failed completion record %s (retry_class %s)", taskID, uri, taskproto.RetrySpecError)
 }
 
 func (w *Worker) logf(format string, a ...interface{}) {

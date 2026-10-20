@@ -103,6 +103,12 @@ const (
 	// #1180 a container task is sized to at least ContainerMemoryFloorGiB.
 	RetryInstanceHealth RetryClass = "instance_health"
 
+	// RetrySpecError (#1149): the task's staged spec does not parse, so nothing
+	// could be rendered, let alone run. A pooled worker writes this record itself
+	// before acking the task. Not retryable: the same bytes fail the same way on
+	// every worker.
+	RetrySpecError RetryClass = "spec_error"
+
 	// Defined but not yet populated — these need spored-side signals or
 	// post-mortem instance inspection that a later increment adds:
 	RetrySpotInterruption RetryClass = "spot_interruption"
