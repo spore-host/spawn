@@ -167,43 +167,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update state based on EC2 reality
-	var stillRunning []int
-	var completed []int
-	var failed []int
-	var pending []int
-
-	for i := 0; i < state.TotalParams; i++ {
-		// Find this parameter index in state
-		found := false
-		for _, inst := range state.Instances {
-			if inst.Index == i {
-				found = true
-				// Check if instance still running
-				if inst.InstanceID != "" {
-					ec2State, exists := instanceStates[inst.InstanceID]
-					if exists && (ec2State == "running" || ec2State == "pending") {
-						stillRunning = append(stillRunning, i)
-					} else if exists && ec2State == "terminated" {
-						completed = append(completed, i)
-					} else if exists {
-						// stopping, stopped, etc.
-						failed = append(failed, i)
-					} else {
-						// Instance not found in EC2 - assume terminated
-						completed = append(completed, i)
-					}
-				} else {
-					// Never launched successfully
-					failed = append(failed, i)
-				}
-				break
-			}
-		}
-		if !found {
-			// Parameter index not in state -> pending
-			pending = append(pending, i)
-		}
-	}
+	stillRunning, completed, failed, pending := reconcileSweepState(state, instanceStates)
 
 	fmt.Fprintf(os.Stderr, "✅ Reconciled state:\n")
 	fmt.Fprintf(os.Stderr, "   Still running: %d\n", len(stillRunning))
@@ -349,15 +313,8 @@ func runResume(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "🚀 Launching %d pending parameters with rolling queue...\n\n", len(pending))
 
 	// Call the rolling queue launcher
-	resumedInstances, failures, successCount, err := launchWithRollingQueue(
-		ctx,
-		awsClient,
-		launchConfigs,
-		state.SweepID,
-		state.SweepName,
-		maxConcurrent,
-		state.LaunchDelay,
-	)
+	state.Completed, state.Running, state.Failed = len(completed), len(stillRunning), len(failed)
+	resumedInstances, failures, successCount, err := relaunchPending(ctx, awsClient, state, launchConfigs, pending, maxConcurrent)
 
 	// Report results
 	fmt.Fprintf(os.Stderr, "\n✅ Resume complete!\n")
@@ -529,4 +486,56 @@ func resolveResumeRegions(state *SweepState, pf *ParamFileFormat, flagRegion, co
 		set.fallback = configRegion
 	}
 	return set, nil
+}
+
+// relaunchPending launches the pending parameter sets of a loaded sweep.
+// launchConfigs[i] is parameter set pending[i]. The new instances are merged
+// into state — the loaded one, never a fresh one — so the records of the
+// parameters that already ran, the sweep's TotalParams and its metadata all
+// survive; a fresh state here made a second resume relaunch completed work
+// (#1248).
+func relaunchPending(ctx context.Context, l sweepLauncher, state *SweepState, launchConfigs []*aws.LaunchConfig, pending []int, maxConcurrent int) ([]*aws.LaunchResult, []string, int, error) {
+	return launchWithRollingQueue(ctx, l, state, launchConfigs, pending, maxConcurrent, state.LaunchDelay)
+}
+
+// reconcileSweepState classifies every parameter index of the sweep against
+// the EC2 states of its recorded instances (instance ID -> state). An index
+// with no record is pending: it is what `spawn resume` launches. That is only
+// right if every launch, including a resume's, records its instance under the
+// parameter index it ran (#1248).
+func reconcileSweepState(state *SweepState, instanceStates map[string]string) (stillRunning, completed, failed, pending []int) {
+	for i := 0; i < state.TotalParams; i++ {
+		// Find this parameter index in state
+		found := false
+		for _, inst := range state.Instances {
+			if inst.Index == i {
+				found = true
+				// Check if instance still running
+				if inst.InstanceID != "" {
+					ec2State, exists := instanceStates[inst.InstanceID]
+					if exists && (ec2State == "running" || ec2State == "pending") {
+						stillRunning = append(stillRunning, i)
+					} else if exists && ec2State == "terminated" {
+						completed = append(completed, i)
+					} else if exists {
+						// stopping, stopped, etc.
+						failed = append(failed, i)
+					} else {
+						// Instance not found in EC2 - assume terminated
+						completed = append(completed, i)
+					}
+				} else {
+					// Never launched successfully
+					failed = append(failed, i)
+				}
+				break
+			}
+		}
+		if !found {
+			// Parameter index not in state -> pending
+			pending = append(pending, i)
+		}
+	}
+
+	return stillRunning, completed, failed, pending
 }
