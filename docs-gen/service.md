@@ -32,7 +32,9 @@ Examples:
 
   # A command with its own flags — this is why the "--" matters
   spawn service --instance-type m7i.large --ttl 1h -- python3 -m myapp.serve
-  spawn service --instance-type m7i.large --ttl 1h -- uvicorn app:app --port 0
+
+  # A service whose address flag isn't --addr: say how to pass it
+  spawn service --instance-type m7i.large --ttl 1h --addr-args "--listen 127.0.0.1:0" -- ./my-server
   spawn service --instance-type m7i.large --ttl 1h -- node --enable-source-maps server.js
 
   # Run something already baked into the AMI

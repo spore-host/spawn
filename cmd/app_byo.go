@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/spore-host/libs/catalog"
@@ -10,8 +12,11 @@ import (
 // BYO-image catalog support (spore-host#392). An app is shown/launchable for the
 // current account only if its image resolves: public images always; private-ECR
 // images only when owned by the caller's account (the common BYO case — your own
-// private registry). Cross-account private grants are possible but not assumed
-// for listing; launch surfaces the real pull error if a grant is missing.
+// private registry). A private-ECR image owned by another account is hidden
+// and refused at launch even if that account granted pull access: ownership is
+// the one thing checkable without AWS calls, and a launch whose pull fails
+// would leave a doomed, billing instance (#592). docs/catalog-schema.md's
+// visibility row says the same (#1153).
 
 // ecrImageAccount returns the AWS account that owns a private-ECR image, or ""
 // if the image isn't a private-ECR ref. Pure. Thin alias over pkg/ecrref, kept
@@ -65,9 +70,50 @@ func splitImageRef(ref string) (image, tag string) {
 	return ref, ""
 }
 
+// byoImageTag splits an --image ref into the image and the tag to launch: the
+// ref's own tag, else --app-version, else "latest" — what `docker pull` of a
+// bare ref means (#1153).
+func byoImageTag(ref, version string) (image, tag string) {
+	image, tag = splitImageRef(ref)
+	switch {
+	case tag != "":
+	case version != "":
+		tag = version
+	default:
+		tag = "latest"
+	}
+	return image, tag
+}
+
+// adhocAppName is what an app name not in the catalog must look like: it
+// becomes the start of the session's DNS name.
+var adhocAppName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
+
+// adhocWebEntry is the catalog entry for `spawn app launch <name> --image <ref>
+// --web-port <n>` when <name> is not in the catalog: a web app with no catalog
+// hardware spec, so --instance-type is required rather than guessed. The
+// bring-your-own-app guide and the README document this form as needing no
+// catalog entry; it used to fail "not found in catalog" (#1153).
+func adhocWebEntry(name, image string, webPort int, instanceType string) (*catalog.AppEntry, error) {
+	if image == "" || webPort <= 0 {
+		return nil, fmt.Errorf("application %q not found in catalog — run 'spawn app list' to see available apps, "+
+			"or launch your own web app image with --image <ref> --web-port <port> --instance-type <type>", name)
+	}
+	if !adhocAppName.MatchString(name) {
+		return nil, fmt.Errorf("app name %q must be lowercase letters, digits and hyphens (at most 40), since it names the session's DNS record", name)
+	}
+	if instanceType == "" {
+		return nil, fmt.Errorf("%q is not in the catalog, so it has no default hardware: pass --instance-type (e.g. m7i.large)", name)
+	}
+	return &catalog.AppEntry{
+		Name:        name,
+		Description: "your web app (" + image + ")",
+	}, nil
+}
+
 // App list status values (#392).
 const (
-	appStatusLaunchable = "launchable" // image resolves for this account, or legacy launch_command
+	appStatusLaunchable = "launchable" // image resolves for this account (or a desktop)
 	appStatusRecipe     = "recipe"     // buildable definition — public recipe, no bound image
 )
 

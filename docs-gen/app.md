@@ -9,11 +9,17 @@ Apps you can launch depend on your account: public images are available to
 everyone; private images appear only if your account can pull them. Bring your
 own image with --image, or add bindings in ~/.spawn/catalog.yaml (--catalog).
 
+Out of the box, code-server, jupyter, openrefine and desktop launch. The other
+apps (paraview, chimerax, qgis, ...) are "recipe available": spore.host ships
+the build recipe, and you supply the image you built with --image or a catalog
+binding. 'spawn app list' shows which is which for your account.
+
 Examples:
-  spawn app list                       # show apps launchable from your account
-  spawn app launch paraview            # launch ParaView on a GPU instance
-  spawn app launch igv --region us-west-2
-  spawn app launch paraview --spot --ttl 4h
+  spawn app list                       # show apps and whether each is launchable
+  spawn app launch jupyter             # JupyterLab in the browser
+  spawn app launch code-server --region us-west-2
+  spawn app launch desktop --spot --ttl 4h
+  # A recipe app, with the image you built from its recipe:
   spawn app launch paraview --image 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview:5.13.2
 
 ```

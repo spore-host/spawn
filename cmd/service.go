@@ -97,7 +97,9 @@ Examples:
 
   # A command with its own flags — this is why the "--" matters
   spawn service --instance-type m7i.large --ttl 1h -- python3 -m myapp.serve
-  spawn service --instance-type m7i.large --ttl 1h -- uvicorn app:app --port 0
+
+  # A service whose address flag isn't --addr: say how to pass it
+  spawn service --instance-type m7i.large --ttl 1h --addr-args "--listen 127.0.0.1:0" -- ./my-server
   spawn service --instance-type m7i.large --ttl 1h -- node --enable-source-maps server.js
 
   # Run something already baked into the AMI
@@ -213,7 +215,8 @@ func renderServiceDryRun(ctx context.Context, out io.Writer, args []string, addr
 	cfg := serviceLaunchConfig(serviceEffectiveName(), spawnRegion)
 	// Show the TTL default a real run would get, so a dry run doesn't
 	// under-report what bounds the spend.
-	if applyIdleTimeoutDefault(&cfg) {
+	// --host launches nothing, so no idle timeout is applied to anything (#1153).
+	if applyIdleTimeoutDefault(&cfg) && serviceExistingHost == "" {
 		defer fmt.Fprintln(out, "\nNote: with no --ttl or --idle-timeout, a 1h idle timeout is applied automatically.")
 	}
 

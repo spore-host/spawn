@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	htmpl "html/template"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,11 +57,17 @@ Apps you can launch depend on your account: public images are available to
 everyone; private images appear only if your account can pull them. Bring your
 own image with --image, or add bindings in ~/.spawn/catalog.yaml (--catalog).
 
+Out of the box, code-server, jupyter, openrefine and desktop launch. The other
+apps (paraview, chimerax, qgis, ...) are "recipe available": spore.host ships
+the build recipe, and you supply the image you built with --image or a catalog
+binding. 'spawn app list' shows which is which for your account.
+
 Examples:
-  spawn app list                       # show apps launchable from your account
-  spawn app launch paraview            # launch ParaView on a GPU instance
-  spawn app launch igv --region us-west-2
-  spawn app launch paraview --spot --ttl 4h
+  spawn app list                       # show apps and whether each is launchable
+  spawn app launch jupyter             # JupyterLab in the browser
+  spawn app launch code-server --region us-west-2
+  spawn app launch desktop --spot --ttl 4h
+  # A recipe app, with the image you built from its recipe:
   spawn app launch paraview --image 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview:5.13.2`,
 }
 
@@ -123,51 +131,116 @@ func runAppList(cmd *cobra.Command, args []string) error {
 			callerAccount = acct
 		}
 	}
-	all := catalog.List()
-	w := newTableWriter(os.Stdout)
-	fmt.Fprintln(w, "NAME\tDESCRIPTION\tGPU\tSTATUS\tVERSION\tFAMILIES")
-	shown, recipes := 0, 0
+	return writeAppList(os.Stdout, os.Stderr, appListRows(catalog.List(), callerAccount), getOutputFormat())
+}
+
+// writeAppList renders the list as JSON for -o json, else as the table. -o json
+// used to print the table (#1153).
+func writeAppList(out, errOut io.Writer, rows []appListRow, format string) error {
+	if format == "json" {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	}
+	return renderAppListTable(out, errOut, rows)
+}
+
+// applyWebFlags applies --web-port and --health-path to entry and returns the
+// launch kind. --web-port makes the launch a web app on that port; --health-path
+// applies to any web app, a catalog one included, and is refused for any other
+// kind. It used to be read only alongside --web-port and silently ignored
+// otherwise (#1153).
+func applyWebFlags(entry *catalog.AppEntry, webPort int, healthPath string) (string, error) {
+	kind := entry.Kind()
+	if webPort > 0 {
+		kind = catalog.KindWeb
+		entry.Port = webPort
+	}
+	if healthPath != "" {
+		if kind != catalog.KindWeb {
+			return "", fmt.Errorf("--health-path applies only to a web app, and %s is a %s app — pass --web-port with --image to launch it as one", entry.Name, kind)
+		}
+		entry.HealthPath = healthPath
+	}
+	return kind, nil
+}
+
+// appReconnectHint is the "Reconnect:" line printed once an app is ready. For a
+// DCV session it is `spawn connect`, which reopens the session and starts the
+// instance if it idle-stopped; it used to be `spawn app launch <app> --name
+// <session>`, which never looks for an existing session and so launched a
+// second instance (#1153). For a web app `spawn connect` opens an SSH shell,
+// not the app, so the hint is the URL.
+func appReconnectHint(isWeb bool, instanceID string) string {
+	if isWeb {
+		return "   Reconnect: open the URL above\n\n"
+	}
+	return fmt.Sprintf("   Reconnect: spawn connect %s\n\n", instanceID)
+}
+
+// appListRow is one app as `spawn app list` shows it to the caller's account.
+type appListRow struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	GPU         bool     `json:"gpu"`
+	Status      string   `json:"status"`            // "launchable" or "recipe"
+	Version     string   `json:"version,omitempty"` // default image tag, launchable containerized apps only
+	Versions    []string `json:"versions,omitempty"`
+	Families    []string `json:"instance_families"`
+}
+
+// appListRows is the per-account view (#392): an app is listed only if its
+// image resolves for this account. Pure.
+func appListRows(all []catalog.AppEntry, callerAccount string) []appListRow {
+	rows := []appListRow{}
 	for _, app := range all {
 		show, status := classifyForList(&app, callerAccount)
 		if !show {
 			continue // private image this account can't pull (#392)
 		}
-		shown++
+		r := appListRow{Name: app.Name, Description: app.Description, GPU: app.GPU, Status: status, Families: app.InstanceFamilies}
+		if status != appStatusRecipe && app.Containerized() {
+			r.Version = app.TagDefault
+			r.Versions = app.TagsAvailable
+		}
+		rows = append(rows, r)
+	}
+	return rows
+}
+
+func renderAppListTable(out, errOut io.Writer, rows []appListRow) error {
+	if len(rows) == 0 {
+		fmt.Fprintln(errOut, "No applications available for this account.")
+		return nil
+	}
+	w := newTableWriter(out)
+	fmt.Fprintln(w, "NAME\tDESCRIPTION\tGPU\tSTATUS\tVERSION\tFAMILIES")
+	recipes := 0
+	for _, r := range rows {
 		gpu := "no"
-		if app.GPU {
+		if r.GPU {
 			gpu = "yes"
 		}
 		// STATUS: "launchable" (image resolves / legacy command) vs "recipe"
 		// (buildable definition — bake it, then bind via overlay or --image, #392).
 		statusLabel := "launchable"
 		version := "—"
-		if status == appStatusRecipe {
+		if r.Status == appStatusRecipe {
 			statusLabel = "recipe available"
 			recipes++
-		} else if app.Containerized() {
-			version = app.TagDefault
-			if len(app.TagsAvailable) > 1 {
+		} else if r.Version != "" {
+			version = r.Version
+			if len(r.Versions) > 1 {
 				version += " (+)"
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			app.Name,
-			app.Description,
-			gpu,
-			statusLabel,
-			version,
-			strings.Join(app.InstanceFamilies, ", "),
-		)
-	}
-	if shown == 0 {
-		fmt.Fprintln(os.Stderr, "No applications available for this account.")
-		return nil
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Name, r.Description, gpu, statusLabel, version, strings.Join(r.Families, ", "))
 	}
 	if err := w.Flush(); err != nil {
 		return err
 	}
 	if recipes > 0 {
-		fmt.Fprintf(os.Stderr, "\n%d app(s) are \"recipe available\": build the image (see docs/bring-your-own-app.md),\nthen bind it in ~/.spawn/catalog.yaml or launch with --image <ref>.\n", recipes)
+		fmt.Fprintf(errOut, "\n%d app(s) are \"recipe available\": build the image (see docs/bring-your-own-app.md),\nthen bind it in ~/.spawn/catalog.yaml or launch with --image <ref>.\n", recipes)
 	}
 	return nil
 }
@@ -192,7 +265,11 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	// 1. Resolve catalog entry
 	entry, ok := catalog.Lookup(appArg)
 	if !ok {
-		return fmt.Errorf("application %q not found in catalog — run 'spawn app list' to see available apps", appArg)
+		adhoc, err := adhocWebEntry(appArg, appLaunchImage, appLaunchWebPort, appLaunchInstanceType)
+		if err != nil {
+			return err
+		}
+		entry = adhoc
 	}
 
 	fmt.Fprintf(os.Stderr, "Launching %s — %s\n", entry.Name, entry.Description)
@@ -250,13 +327,15 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	// edit. The ref may include a tag (image:tag); a bare ref uses --app-version
 	// or "latest". Sets visibility by inference so private ECR triggers auth.
 	if appLaunchImage != "" {
-		img, tag := splitImageRef(appLaunchImage)
+		img, tag := byoImageTag(appLaunchImage, appLaunchVersion)
 		entry.Image = img
 		entry.Visibility = "" // re-infer from the new host
-		if tag != "" {
-			entry.TagDefault = tag
-			entry.TagsAvailable = []string{tag}
-		}
+		// The image is the user's, so the catalog's tag list says nothing about
+		// it: the one tag is what they asked for. A recipe entry has no
+		// tag_default, so a bare ref used to fail "has no default image tag"
+		// despite this comment (#1153).
+		entry.TagDefault = tag
+		entry.TagsAvailable = []string{tag}
 	}
 
 	// 4c. Launch kind (#590/#591): application (a single GUI app over a DCV
@@ -264,13 +343,9 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 	// specific app), or web (an app that serves its own web UI on a port, fronted
 	// by a TLS reverse proxy — no DCV). --web-port turns an --image launch into an
 	// ad-hoc web app (BYO), overriding the catalog kind.
-	kind := entry.Kind()
-	if appLaunchWebPort > 0 {
-		kind = catalog.KindWeb
-		entry.Port = appLaunchWebPort
-		if appLaunchHealthPath != "" {
-			entry.HealthPath = appLaunchHealthPath
-		}
+	kind, err := applyWebFlags(entry, appLaunchWebPort, appLaunchHealthPath)
+	if err != nil {
+		return err
 	}
 	if kind == catalog.KindWeb && entry.Port <= 0 {
 		return fmt.Errorf("%s is a web app but no port is set — add `port:` to its catalog entry or pass --web-port <n>", entry.Name)
@@ -558,7 +633,7 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stdout, "   URL:       %s\n", webURL)
 		fmt.Fprintf(os.Stdout, "   Instance:  %s\n", result.InstanceID)
 		fmt.Fprintf(os.Stdout, "   TTL:       %s (then terminated; extend with: spawn extend %s 4h)\n", appLaunchTTL, result.InstanceID)
-		fmt.Fprintf(os.Stdout, "   Reconnect: spawn connect %s\n\n", result.InstanceID)
+		fmt.Fprint(os.Stdout, appReconnectHint(true, result.InstanceID))
 		if ready && !appLaunchNoOpen {
 			if err := openBrowser(webURL); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠️  Could not open browser automatically: %v\n   Open manually: %s\n", err, webURL)
@@ -576,7 +651,7 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stdout, "   Session: %s\n", sessionName)
 		fmt.Fprintf(os.Stdout, "   File:    %s\n", sessionFile)
 		fmt.Fprintf(os.Stdout, "   TTL:     %s (then terminated; extend with: spawn extend %s 4h)\n", appLaunchTTL, result.InstanceID)
-		fmt.Fprintf(os.Stdout, "   Reconnect: spawn app launch %s --name %s\n\n", entry.Name, sessionName)
+		fmt.Fprint(os.Stdout, appReconnectHint(false, result.InstanceID))
 
 		// 15. Open in browser
 		if !appLaunchNoOpen {
@@ -1115,17 +1190,18 @@ var sessionHTMLTemplate = `<!DOCTYPE html>
     document.getElementById('title').textContent = 'Session paused';
     document.getElementById('msg').textContent = reason || '{{.AppName}} was stopped due to inactivity.';
     const btn = document.getElementById('action-btn');
-    btn.textContent = 'Restart Session';
+    // A page cannot start the instance: no URL-scheme handler is registered
+    // (#1153). Say which command does, then wait for it to come back.
+    document.getElementById('msg').textContent += ' To start it again, run in a terminal: spawn connect {{.InstanceID}}';
+    btn.textContent = 'Connect when it is back';
     btn.style.display = 'inline-block';
     btn.onclick = (e) => {
       e.preventDefault();
-      btn.textContent = 'Starting…';
+      btn.textContent = 'Waiting…';
       btn.style.opacity = '0.6';
-      document.getElementById('msg').textContent = 'Starting {{.AppName}}…';
+      document.getElementById('msg').textContent = 'Waiting for {{.AppName}} (run: spawn connect {{.InstanceID}})…';
       document.getElementById('spinner').style.display = 'block';
-      document.getElementById('title').textContent = 'Restarting session';
-      // Try spawn:// URL scheme (registered at install time).
-      window.location.href = 'spawn://connect/{{.InstanceID}}';
+      document.getElementById('title').textContent = 'Waiting for the session';
       pollAndConnect();
     };
   }

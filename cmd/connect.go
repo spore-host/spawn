@@ -45,7 +45,7 @@ func init() {
 	connectCmd.Flags().StringVar(&connectUser, "user", "", "SSH username (default: the instance's spawn:local-username tag, else ec2-user)")
 	connectCmd.Flags().StringVar(&connectKey, "key", "", "SSH private key path")
 	connectCmd.Flags().IntVar(&connectPort, "port", 22, "SSH port")
-	connectCmd.Flags().BoolVar(&connectSessionMgr, "session-manager", false, "Use AWS Session Manager instead of SSH")
+	connectCmd.Flags().BoolVar(&connectSessionMgr, "session-manager", false, "Use AWS Session Manager instead of SSH. On a DCV app instance, opens a shell instead of the streaming session")
 	connectCmd.Flags().BoolVar(&connectNoStart, "no-start", false, "Do not automatically start a stopped/hibernated instance")
 	connectCmd.Flags().BoolVar(&connectRDP, "rdp", false, "Windows: open a Remote Desktop (RDP) connection (decrypts the Administrator password)")
 	connectCmd.Flags().BoolVar(&connectSSH, "ssh", false, "Windows: SSH in (as Administrator, over OpenSSH) instead of opening a PowerShell-over-SSM session — same SSH path as Linux")
@@ -79,7 +79,9 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	}))
 
 	// DCV application streaming session — open/focus browser instead of SSH.
-	if instance.Tags["spawn:dcv-session-id"] != "" {
+	// --session-manager opts out, for a shell on the box: a DCV app's security
+	// group has no port 22, and every DCV failure message points here (#1153).
+	if connectOpensDCV(instance, connectSessionMgr) {
 		return connectDCV(ctx, client, instance)
 	}
 
@@ -633,6 +635,13 @@ func findSSHKey(keyName string) (string, error) {
 // connectDCV handles reconnecting to a NICE DCV application streaming session.
 // It wakes a stopped instance, tries to focus an existing browser tab, then
 // falls back to opening the session HTML file or the raw DCV URL.
+// connectOpensDCV reports whether `spawn connect` opens the DCV streaming
+// session rather than a shell: on a DCV app instance, unless --session-manager
+// asked for a shell (#1153).
+func connectOpensDCV(instance *aws.InstanceInfo, sessionManager bool) bool {
+	return instance.Tags["spawn:dcv-session-id"] != "" && !sessionManager
+}
+
 func connectDCV(ctx context.Context, client *aws.Client, instance *aws.InstanceInfo) error {
 	appName := instance.Tags["spawn:app-name"]
 	if appName == "" {

@@ -47,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforces with (GHSA-c93q-4jh7-6pvj) — through one shared helper
   (`ttl.LaunchAnchor`), so what is shown is what is enforced (#1029).
 
+- `spawn connect <id> --session-manager` on a DCV app instance opens a shell
+  instead of the streaming session. Plain `spawn connect` there still opens the
+  session. A DCV instance's security group has no port 22, so this is the way to
+  a shell, and the DCV failure messages now say so (#1153).
+- `spawn app launch --health-path` applies to any web app, a catalog one
+  included, and is refused for a DCV or desktop app. It used to be read only
+  with `--web-port` and silently ignored otherwise (#1153).
+
 ### Fixed
 
 - `spawn status`, `spawn list`'s TTL column and `spawn start`'s notice put the
@@ -58,6 +66,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus the time to the deadline, as `spawn extend` sizes `--cost-limit`. It was
   rate × (deadline − EC2 LaunchTime), which after a restart left out every
   earlier boot (#1029).
+- `spawn app launch <name> --image <ref> --web-port <n> --instance-type <type>`
+  launches your own web-app image under a name that is not in the catalog, as
+  `docs/bring-your-own-app.md` and the README already showed. It used to fail
+  with "not found in catalog". `--instance-type` is required, because there is
+  no catalog hardware spec to default from (#1153).
+- `spawn app list -o json` prints the list as JSON. It used to print the table
+  (#1153).
+
+- `spawn app launch --image <ref>` with a bare ref (no `:tag`) launches
+  `:latest` (or `--app-version`), as its own comment said. On a recipe app it
+  failed with "has no default image tag" (#1153).
+- The "Reconnect:" hint after an app launch said `spawn app launch <app>
+  --name <session>`, which launches a second instance. It now says `spawn
+  connect <id>` for a DCV session. For a web app it says to open the URL,
+  because `spawn connect` opens a shell there (#1153).
+- DCV failure messages said "inspect: spawn connect <id>, then /var/log/…",
+  but on a DCV instance that opens the streaming session, not a shell. They now
+  say `spawn connect <id> --session-manager` (#1153).
+- The session page's "Restart Session" button navigated to a `spawn://` URL
+  that nothing registers. It now shows the command that restarts the session
+  and waits for it (#1153).
+- `spawn service --host <box> --dry-run` no longer says a 1h idle timeout is
+  applied, because `--host` launches nothing (#1153).
+- Help examples that could not run: `spawn app --help` launched paraview and
+  igv, which are recipe-only. `spawn service --help` showed a uvicorn example,
+  but uvicorn rejects the `--addr` spawn appends. `spawn slurm` showed a
+  `--spot` flag that doesn't exist and `spawn launch --params` (inline JSON)
+  with no name. The README and `docs/bring-your-own-app.md` had the same
+  problems (#1153).
+- `docs/catalog-schema.md` and `docs/catalog-overlay.example.yaml` called a
+  legacy `launch_command` launchable. They had no `args` row, and they said a
+  cross-account grant is enough for a private image, which `spawn app launch`
+  refuses (#1153).
+- `spawn task run`'s error for a malformed results prefix named
+  `resources.results_prefix`. The TaskSpec field is the top-level
+  `results_prefix` (#1145).
+- `spawn task --help` lists `run` and `status`, not only `diagnose` (#1145).
 
 ## [0.136.0] - 2026-10-20
 

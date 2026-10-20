@@ -2,6 +2,8 @@
 
 Work with a single launched instance as a "task".
 
+  spawn task run --spec &lt;file&gt;             launch a task from a TaskSpec (stage, run, completion record)
+  spawn task status &lt;task-id&gt;              read a task's durable completion record from S3
   spawn task diagnose &lt;name|instance-id&gt;   one-screen summary + likely cause
 
 ```
