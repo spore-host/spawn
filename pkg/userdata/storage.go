@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template
 
+	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/security"
 )
 
@@ -211,3 +212,22 @@ fi
 {{end}}
 {{end}}
 `
+
+// AttachedVolumesFrom maps the launch's attached-volume specs to the mount
+// script's entries, naming each device with aws.AttachDeviceName so the script
+// mounts the device the block-device mapping requested. Shared by `spawn
+// launch` and pkg/tasklaunch.
+func AttachedVolumesFrom(specs []aws.AttachVolumeSpec) []AttachedVolume {
+	if len(specs) == 0 {
+		return nil
+	}
+	vols := make([]AttachedVolume, 0, len(specs))
+	for i, s := range specs {
+		vols = append(vols, AttachedVolume{
+			DeviceName: aws.AttachDeviceName(i),
+			MountPoint: s.MountPoint,
+			ReadOnly:   s.ReadOnly,
+		})
+	}
+	return vols
+}

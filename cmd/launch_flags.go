@@ -148,7 +148,7 @@ var (
 	// needs, so spawn can grant exactly those (#614).
 	//
 	// `spawn task run` already does this: it derives a least-privilege policy from
-	// the spec's DECLARED inputs/outputs (cmd/task.go's taskStagingPolicy). A
+	// the spec's DECLARED inputs/outputs (pkg/taskiam's StagingPolicy). A
 	// --command is an opaque shell string, so nothing can be derived from it —
 	// which is why a launch reading the caller's own bucket used to 403, and why
 	// the only workarounds were --iam-policy s3:ReadOnly (Resource "*": every

@@ -67,18 +67,7 @@ func parseAttachVolumes(raw []string) ([]aws.AttachVolumeSpec, error) {
 // block-device mapping used (aws.AttachDeviceName), so the mount resolves the
 // right device (#144).
 func attachedVolumesUserData(specs []aws.AttachVolumeSpec) []userdata.AttachedVolume {
-	if len(specs) == 0 {
-		return nil
-	}
-	vols := make([]userdata.AttachedVolume, 0, len(specs))
-	for i, s := range specs {
-		vols = append(vols, userdata.AttachedVolume{
-			DeviceName: aws.AttachDeviceName(i),
-			MountPoint: s.MountPoint,
-			ReadOnly:   s.ReadOnly,
-		})
-	}
-	return vols
+	return userdata.AttachedVolumesFrom(specs)
 }
 
 func getEFSMountOptions() (string, error) {

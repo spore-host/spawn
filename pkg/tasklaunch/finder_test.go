@@ -1,4 +1,4 @@
-package cmd
+package tasklaunch
 
 import (
 	"bytes"
@@ -151,7 +151,7 @@ func TestSizingMakesAConstantNumberOfPricingCalls(t *testing.T) {
 		pl := &recordingPriceList{region: region, prices: table}
 		finder := truffleFinder{tc: fakeSearcher{results: results}, priceList: pl, region: region}
 		var out bytes.Buffer
-		if err := renderTaskDryRun(context.Background(), &out, spec, finder, region); err != nil {
+		if err := renderDryRun(context.Background(), &out, spec, finder, region); err != nil {
 			t.Fatalf("renderTaskDryRun: %v", err)
 		}
 		return pl, out.String()

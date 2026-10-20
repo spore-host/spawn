@@ -175,7 +175,7 @@ func TestValidate_S3OnlyManifestsStillValid(t *testing.T) {
 // TestPlacement_EffectiveMountPoints covers spawn#570 sub-issue 3: an unset
 // EFSMountPoint/FSxMountPoint resolves to the historical hardcoded default
 // ("/efs"/"/fsx"), and a spec-supplied override is honored verbatim — the
-// same resolution wrapper.go's containerMountDirs and cmd/task.go's
+// same resolution wrapper.go's containerMountDirs and pkg/tasklaunch's
 // taskStorageScript both now call, so the two can't independently hardcode
 // diverging defaults.
 func TestPlacement_EffectiveMountPoints(t *testing.T) {

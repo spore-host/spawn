@@ -7,21 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
-	awssdk "github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
-	"github.com/spore-host/spawn/pkg/launcher"
-	"github.com/spore-host/spawn/pkg/pricelist"
+	"github.com/spore-host/spawn/pkg/tasklaunch"
 	"github.com/spore-host/spawn/pkg/taskproto"
 	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
-	"github.com/spore-host/spawn/pkg/userdata"
-	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
 // The `spawn task` group aggregates the scattered signals about a single
@@ -316,497 +309,92 @@ instead of reporting an earlier attempt's verdict (#608).
 		if region == "" {
 			return fmt.Errorf("no region: pass --region or configure a default AWS region")
 		}
-		finder := newTruffleFinder(awsClient.Config(), region)
-		// Size once. A pinned type is looked up here (sizes + price, #1253), and
-		// the pin checks below read its memory from that same lookup instead of
-		// describing the type again.
-		sized, err := taskproto.Size(cmd.Context(), finder, spec.SizingRequest())
-		if err != nil {
-			return err
-		}
-		mem := sizedMemoryLookup{sized: sized, fallback: awsClient}
-		warnIfContainerPinBelowFloor(cmd.Context(), mem, os.Stderr, region, spec)
-		if err := checkPinnedShm(cmd.Context(), mem, region, spec); err != nil {
-			return err
-		}
+		finder := tasklaunch.NewFinder(awsClient.Config(), region, os.Stderr, verboseWriter())
+		// Planning and launching are pkg/tasklaunch, the code spore-host-mcp
+		// launches through too, so the two cannot drift (spore-host-mcp#60/#61).
 		if taskRunDryRun {
-			return renderTaskDryRunSized(os.Stdout, spec, sized, region)
+			return renderTaskDryRunWith(cmd.Context(), os.Stdout, taskDeps(awsClient, finder, os.Stdout), spec, region)
 		}
-		return runTaskRealSized(cmd.Context(), os.Stdout, awsClient, spec, sized, region)
+		return runTaskReal(cmd.Context(), os.Stdout, awsClient, spec, finder, region)
 	},
 }
 
-// truffleFinder adapts truffle's SearchInstanceTypes to taskproto.InstanceFinder.
-// It searches one region (region-spread is a later increment) and projects each
-// result down to a taskproto.Candidate. Read-only: offerings + pricing only.
-type truffleFinder struct {
-	tc instanceSearcher
-	// priceList prices the candidates: ONE region-wide table fetch per sizing,
-	// never a request per candidate (spawn#1181). See pkg/pricelist.
-	priceList pricelist.API
-	region    string
-	// warn receives the static-price note; verbose receives the -v timing
-	// breakdown. Either may be nil.
-	warn, verbose io.Writer
-}
-
-// instanceSearcher is the part of truffle's client sizing uses to enumerate
-// candidates; tests inject a fake.
-type instanceSearcher interface {
-	SearchInstanceTypes(ctx context.Context, regions []string, matcher *regexp.Regexp, opts truffleaws.FilterOptions) ([]truffleaws.InstanceTypeResult, error)
-}
-
-// newTruffleFinder builds the AWS-backed finder for task run / dry run.
-func newTruffleFinder(cfg awssdk.Config, region string) truffleFinder {
-	f := truffleFinder{
-		tc:        truffleaws.NewClientFromConfig(cfg),
-		priceList: pricelist.NewClient(cfg),
-		region:    region,
-		warn:      os.Stderr,
-	}
+// verboseWriter is where -v detail goes: stderr under -v, nowhere otherwise.
+func verboseWriter() io.Writer {
 	if spawnVerbose {
-		f.verbose = os.Stderr
+		return os.Stderr
 	}
-	return f
+	return nil
 }
 
-func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.ResourceRequest) ([]taskproto.Candidate, error) {
-	// Match all types; the resource minimums do the filtering. Family allow-list
-	// is applied by the sizer (truffle's FilterOptions has only a single family).
-	matcher := regexp.MustCompile(`.*`)
-	opts := truffleaws.FilterOptions{
-		Architecture: req.Architecture,
-		MinVCPUs:     req.CPU,
-		MinMemory:    taskproto.EffectiveMemoryGiB(req),
+// taskDeps is the tasklaunch dependencies `spawn task run` uses: finder for
+// sizing, client for everything else, launch progress to out and warnings to
+// stderr.
+func taskDeps(client *aws.Client, finder taskproto.InstanceFinder, out io.Writer) tasklaunch.Deps {
+	deps := tasklaunch.Deps{
+		Finder:  finder,
+		Out:     out,
+		Warn:    os.Stderr,
+		Verbose: verboseWriter(),
 	}
-	// A pinned type is looked up on its own (#1253): an exact matcher, which
-	// truffle turns into one DescribeInstanceTypes for that type, and no
-	// minimums, since a pin is honoured whatever the request says.
-	pin := strings.TrimSpace(req.InstanceType)
-	if pin != "" {
-		matcher = regexp.MustCompile("^" + regexp.QuoteMeta(pin) + "$")
-		opts = truffleaws.FilterOptions{}
+	// A nil client stays a nil interface rather than a typed nil.
+	if client != nil {
+		deps.AWS = client
+		deps.Provisioner = tasklaunch.LauncherProvisioner(client)
 	}
-	var timing sizingTiming
-	start := time.Now()
-	results, err := f.tc.SearchInstanceTypes(ctx, []string{f.region}, matcher, opts)
-	timing.search = time.Since(start)
-	if err != nil {
-		return nil, err
-	}
-	timing.candidates = len(results)
-
-	// SearchInstanceTypes does NOT populate on-demand price, so r.OnDemandPrice
-	// is 0 here. The sizer ranks on price — without it, "cheapest" degenerates
-	// to a size tie-break — so price every candidate from one region-wide table
-	// (live Price List, with the static table as an exact-match fallback only
-	// for a type it covers — truffle#114). A type neither table prices keeps
-	// price 0, and the sizer sorts unpriced options last, so a priced option
-	// always wins and we never silently pick a huge box because pricing was
-	// unavailable.
-	//
-	// The table is fetched once, whatever the candidate count: pricing each
-	// candidate separately cost 1325 Price List requests and minutes per launch
-	// (spawn#1181).
-	prices := &sizingPrices{region: f.region}
-	start = time.Now()
-	for _, r := range results {
-		if r.OnDemandPrice <= 0 {
-			switch {
-			case f.priceList == nil:
-			case pin != "":
-				// One type needs one rate, not the region's table.
-				prices.live, timing.priceRequests, prices.liveErr = pricelist.InstanceOnDemandPrices(ctx, f.priceList, f.region, pin)
-			default:
-				prices.live, timing.priceRequests, prices.liveErr = pricelist.RegionOnDemandPrices(ctx, f.priceList, f.region)
-			}
-			break
-		}
-	}
-	timing.pricing = time.Since(start)
-
-	cands := make([]taskproto.Candidate, 0, len(results))
-	for _, r := range results {
-		price := r.OnDemandPrice
-		if price <= 0 {
-			price = prices.price(r.InstanceType)
-		}
-		cands = append(cands, taskproto.Candidate{
-			InstanceType:  r.InstanceType,
-			Family:        r.InstanceFamily,
-			VCPUs:         int(r.VCPUs),
-			MemoryGiB:     float64(r.MemoryMiB) / 1024,
-			GPUs:          int(r.GPUs),
-			Architecture:  r.Architecture,
-			OnDemandPrice: price,
-		})
-	}
-	prices.report(f.warn)
-	timing.report(f.verbose)
-	return cands, nil
+	return deps
 }
 
-// renderTaskDryRun sizes the task via the given finder and prints the plan. Split
-// from the RunE (which builds the AWS-backed finder) so it's unit-testable with a
-// fake finder — no AWS, no launch.
+// renderTaskDryRun plans the task with finder and prints the plan, the dry
+// run. Split from the RunE (which builds the AWS-backed finder) so it's
+// unit-testable with a fake finder — no AWS, no launch.
 func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSpec, finder taskproto.InstanceFinder, region string) error {
-	sized, err := taskproto.Size(ctx, finder, spec.SizingRequest())
-	if err != nil {
-		return err
-	}
-	return renderTaskDryRunSized(out, spec, sized, region)
+	return renderTaskDryRunWith(ctx, out, tasklaunch.Deps{Finder: finder}, spec, region)
 }
 
-// renderTaskDryRunSized prints the plan for an already-sized task.
-func renderTaskDryRunSized(out io.Writer, spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string) error {
-	// The user data this task would send, measured the way RunInstances
-	// measures it, so a spec that cannot launch fails its dry run (#1063).
-	userDataBytes, err := taskUserDataPreflight(spec, sized, region)
+// renderTaskDryRunWith is renderTaskDryRun with every dependency supplied:
+// the plan's warnings go to deps.Warn, the plan to out.
+func renderTaskDryRunWith(ctx context.Context, out io.Writer, deps tasklaunch.Deps, spec *taskproto.TaskSpec, region string) error {
+	plan, err := tasklaunch.Plan(ctx, deps, spec, region)
 	if err != nil {
 		return err
 	}
-
-	fmt.Fprintln(out, "DRY RUN — nothing will be launched.")
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Task:         %s\n", spec.TaskID)
-	fmt.Fprintf(out, "Command:      %s\n", strings.Join(spec.Command, " "))
-	if spec.Container != "" {
-		mode := "container (docker run"
-		if spec.Resources.GPUs > 0 {
-			mode += ", --gpus all"
-		}
-		if ecrImageAccount(spec.Container) != "" {
-			mode += ", private ECR"
-		}
-		mode += ")"
-		fmt.Fprintf(out, "Container:    %s  [%s]\n", spec.Container, mode)
-	}
-	fmt.Fprintf(out, "Region:       %s\n", region)
-	fmt.Fprintf(out, "Instance:     %s  (%s)\n", sized.InstanceType, instanceSizeSummary(sized))
-	if sized.Pinned {
-		fmt.Fprintf(out, "              pinned by spec (resources.instance_type)\n")
-	} else {
-		fmt.Fprintf(out, "              chosen as cheapest of %d matching type(s)\n", sized.Considered)
-	}
-	if note := containerMemoryFloorNote(spec); note != "" {
-		fmt.Fprintf(out, "              %s\n", note)
-	}
-	if note := oldGenerationNote(sized.Family); note != "" {
-		fmt.Fprintf(out, "              %s\n", note)
-	}
-	// AMI: show what will actually be launched (spawn#601). Without this line an
-	// author could not tell a GPU spec would get the NVIDIA DLAMI vs the driverless
-	// default AL2023 — the issue's whole confusion. Classified OFFLINE from the
-	// sized type (no AWS): the real launch resolves the same choice via
-	// launcher.Provision → GetRecommendedAMI, which uses these same classifiers.
-	fmt.Fprintf(out, "AMI:          %s\n", taskAMIPlan(spec, sized.InstanceType))
-	// Root disk: show what will actually apply, whether that's the TaskSpec's
-	// explicit resources.disk_gib or the AMI default — the issue's complaint
-	// (#556) was that NOTHING in the preview tipped off an author who forgot to
-	// set it and got an 8 GiB root, so the AMI-default case is shown too.
-	if spec.Resources.DiskGiB > 0 {
-		fmt.Fprintf(out, "Root disk:    %d GiB (resources.disk_gib)\n", spec.Resources.DiskGiB)
-	} else {
-		fmt.Fprintf(out, "Root disk:    AMI default (resources.disk_gib not set; see --volume-size in 'spawn launch --help')\n")
-	}
-	if spec.Container != "" {
-		if shm := spec.Resources.ShmGiB; shm != nil {
-			fmt.Fprintf(out, "/dev/shm:     %s GiB (resources.shm_gib)\n", strconv.FormatFloat(*shm, 'f', -1, 64))
-		} else {
-			fmt.Fprintf(out, "/dev/shm:     Docker default, 64 MB (resources.shm_gib not set)\n")
+	if deps.Warn != nil {
+		for _, w := range plan.Warnings {
+			fmt.Fprint(deps.Warn, w)
 		}
 	}
-	purchase := spec.Resources.Purchase
-	if purchase == "" {
-		purchase = taskproto.PurchaseOnDemand
-	}
-	fmt.Fprintf(out, "Purchase:     %s\n", purchase)
-	fmt.Fprintf(out, "TTL:          %s   on-complete: %s\n", spec.Lifecycle.TTL, spec.EffectiveOnComplete())
-	if spec.Lifecycle.CostLimit > 0 {
-		fmt.Fprintf(out, "Cost limit:   $%.2f (lifecycle.cost_limit)\n", spec.Lifecycle.CostLimit)
-	}
-	fmt.Fprintf(out, "User data:    %d of %d bytes after gzip (EC2 limit)\n", userDataBytes, aws.MaxUserDataBytes)
-
-	if d, err := ttlpkg.ParseDuration(spec.Lifecycle.TTL); err == nil && sized.OnDemandPrice > 0 {
-		fmt.Fprintf(out, "Max cost:     ~$%.2f (on-demand rate × TTL; a completed task usually costs far less)\n", sized.OnDemandPrice*d.Hours())
-	}
-
-	if len(spec.Inputs) > 0 {
-		fmt.Fprintf(out, "Inputs:\n")
-		for _, m := range spec.Inputs {
-			fmt.Fprintf(out, "  %s → %s\n", m.Source, m.Destination)
-		}
-	}
-	if len(spec.Outputs) > 0 {
-		fmt.Fprintf(out, "Outputs:\n")
-		for _, m := range spec.Outputs {
-			fmt.Fprintf(out, "  %s → %s\n", m.Source, m.Destination)
-		}
-	}
+	tasklaunch.Render(out, plan)
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Re-run without --dry-run to launch this task.")
 	return nil
 }
 
-// instanceSizeSummary is the parenthesised part of the dry run's Instance line:
-// vCPUs, memory and the on-demand rate when known. A pinned type whose lookup
-// failed says so rather than printing zeros (#1253); its rate, if one was found
-// anyway, is still shown.
-func instanceSizeSummary(sized *taskproto.SizeResult) string {
-	var parts []string
-	if sized.SizesKnown() {
-		parts = append(parts, fmt.Sprintf("%d vCPU", sized.VCPUs), fmt.Sprintf("%.0f GiB", sized.MemoryGiB))
-	} else {
-		parts = append(parts, fmt.Sprintf("sizes unavailable: %v", sized.PinLookupErr))
-	}
-	if sized.OnDemandPrice > 0 {
-		parts = append(parts, fmt.Sprintf("$%.4f/hr on-demand", sized.OnDemandPrice))
-	}
-	return strings.Join(parts, ", ")
-}
-
-// sizedMemoryLookup answers the pin checks' memory question from the sizing
-// lookup, so a pinned type is described once (#1253). Only when that lookup
-// could not size the type does it ask fallback, whose own static table still
-// knows the tiny sizes the container-floor warning is about.
-type sizedMemoryLookup struct {
-	sized    *taskproto.SizeResult
-	fallback memoryLookup
-}
-
-func (m sizedMemoryLookup) InstanceMemoryMiB(ctx context.Context, region, instanceType string) (int64, bool) {
-	if m.sized != nil && m.sized.InstanceType == instanceType && m.sized.SizesKnown() && m.sized.MemoryGiB > 0 {
-		return int64(m.sized.MemoryGiB*1024 + 0.5), true
-	}
-	if m.fallback == nil {
-		return 0, false
-	}
-	return m.fallback.InstanceMemoryMiB(ctx, region, instanceType)
-}
-
-// containerMemoryFloorNote explains, in the dry run, that sizing raised the
-// memory request to the container floor (#1180), or returns "" when it did not.
-// Without it the plan would show a 2 GiB box for a spec that asked for none and
-// leave the author guessing why.
-func containerMemoryFloorNote(spec *taskproto.TaskSpec) string {
-	sizing := spec.SizingRequest()
-	if sizing.MemoryGiB == spec.Resources.MemoryGiB && sizing.MemoryHeadroomPercent == spec.Resources.MemoryHeadroomPercent {
-		return ""
-	}
-	return fmt.Sprintf("memory raised to the %.0f GiB container floor: Docker is installed at boot and is OOM-killed on smaller boxes (#1180)", taskproto.ContainerMemoryFloorGiB)
-}
-
-// renderContainerPinFloorWarning returns the warning for a container task whose
-// pinned resources.instance_type has less memory than the container floor, or
-// "" when there is nothing to say. Pure, so it is tested without AWS.
-//
-// A pin is honoured as-is (it is how nf-spawn's ext.instanceType reaches spawn),
-// so this warns rather than refuses: the author chose the type, and spawn cannot
-// prove the image's Docker install will not fit.
-func renderContainerPinFloorWarning(spec *taskproto.TaskSpec, memMiB int64) string {
-	pin := strings.TrimSpace(spec.Resources.InstanceType)
-	if spec.Container == "" || pin == "" || memMiB <= 0 {
-		return ""
-	}
-	gib := float64(memMiB) / 1024
-	if gib >= taskproto.ContainerMemoryFloorGiB {
-		return ""
-	}
-	return fmt.Sprintf("\n⚠️  resources.instance_type %s has %.1f GiB of memory, below the %.0f GiB spawn sizes a container task to.\n"+
-		"   The task installs Docker at boot, and on a 0.5 GiB box that install is OOM-killed (#1180); the\n"+
-		"   record then reports retry_class instance_health. The pin is honoured as given.\n",
-		pin, gib, taskproto.ContainerMemoryFloorGiB)
-}
-
-// warnIfContainerPinBelowFloor looks up a pinned container task's instance
-// memory and prints renderContainerPinFloorWarning. Best-effort: an unresolved
-// lookup says nothing rather than guessing.
-func warnIfContainerPinBelowFloor(ctx context.Context, client memoryLookup, w io.Writer, region string, spec *taskproto.TaskSpec) {
-	pin := strings.TrimSpace(spec.Resources.InstanceType)
-	if spec.Container == "" || pin == "" {
-		return
-	}
-	mem, ok := client.InstanceMemoryMiB(ctx, region, pin)
-	if !ok {
-		return
-	}
-	if msg := renderContainerPinFloorWarning(spec, mem); msg != "" {
-		fmt.Fprint(w, msg)
-	}
-}
-
-// checkPinnedShm refuses a container task whose resources.shm_gib exceeds the
-// memory of its pinned resources.instance_type (#1111). Validate checks a sized
-// spec offline; a pin's memory needs a lookup, so it is checked here. An
-// unresolved lookup passes rather than guessing.
-func checkPinnedShm(ctx context.Context, client memoryLookup, region string, spec *taskproto.TaskSpec) error {
-	pin := strings.TrimSpace(spec.Resources.InstanceType)
-	if spec.Resources.ShmGiB == nil || pin == "" {
-		return nil
-	}
-	mem, ok := client.InstanceMemoryMiB(ctx, region, pin)
-	if !ok || mem <= 0 {
-		return nil
-	}
-	if msg := spec.CheckShmAgainstMemory(float64(mem) / 1024); msg != "" {
-		return fmt.Errorf("invalid task spec: %s (resources.instance_type %s)", msg, pin)
-	}
-	return nil
-}
-
-// oldGenerationFamilies notes instance families that are the cheapest match for
-// a bare "arm64" (or similarly unconstrained x86_64) resource request but are an
-// older, materially-slower-per-vCPU generation — "cheapest that fits" can pick
-// them over a modern equivalent that would cost about the same per job (#556).
-// Not an error: families is the documented escape hatch (e.g.
-// resources.families: ["c8g"]) — this is just a dry-run nudge to make the
-// generation visible before launch rather than after.
-var oldGenerationFamilies = map[string]string{
-	"a1": "Graviton 1 (2018) — likely slower per vCPU than a current Graviton family (e.g. c8g/m8g/r8g); pin resources.families if that matters",
-}
-
-// oldGenerationNote returns a dry-run annotation if family is a known older
-// generation, or "" otherwise.
-func oldGenerationNote(family string) string {
-	if note, ok := oldGenerationFamilies[family]; ok {
-		return "instance family: " + family + " — " + note
-	}
-	return ""
-}
-
-// taskAMIPlan describes the AMI a task will launch with, for the dry-run preview
-// (spawn#601). It mirrors — offline, without an AWS call — the choice the real
-// launch makes: an explicit spec/flag AMI wins; otherwise a GPU-family instance
-// gets the AL2023 NVIDIA DLAMI (so `docker run --gpus all` finds a driver) and
-// everything else gets the standard AL2023 for the type's architecture. It reuses
-// the SAME aws.DetectGPUInstance / aws.DetectArchitecture classifiers that
-// GetRecommendedAMI (the real resolver) uses, so the preview cannot drift from
-// what gets launched.
-func taskAMIPlan(spec *taskproto.TaskSpec, instanceType string) string {
-	if ami := strings.TrimSpace(spec.Placement.AMI); ami != "" {
-		return ami + "  (explicit: --ami / placement.ami)"
-	}
-	arch := aws.DetectArchitecture(instanceType)
-	if aws.DetectGPUInstance(instanceType) {
-		return fmt.Sprintf("AL2023 GPU DLAMI — NVIDIA driver, %s (auto-selected for GPU instance %s; spawn#601)", arch, instanceType)
-	}
-	return fmt.Sprintf("AL2023 default — %s (auto-selected)", arch)
-}
-
-// runTaskReal launches a task for real: it sizes the instance (same as dry-run),
-// ensures the per-account results bucket exists, generates the on-instance
-// wrapper (stage-in → command → stage-out → durable completion record), creates
-// a scoped instance profile granting the S3 access the wrapper needs, and
-// launches via launcher.Provision (keyless/SSM, auto AMI+IAM+user-data). It
-// returns as soon as the instance is launched — the caller polls the S3
-// completion record (or passes --wait). When spec.Container is set the command
-// runs inside that image (Docker is installed on demand; a private-ECR image
-// gets an ecr:ReadOnly grant on the scoped profile).
+// runTaskReal launches a task for real through tasklaunch.Launch, which sizes
+// the instance (same as dry-run), ensures the per-account results bucket exists,
+// generates the on-instance wrapper (stage-in → command → stage-out → durable
+// completion record), creates a scoped instance profile granting the S3 access
+// the wrapper needs, and launches via launcher.Provision (keyless/SSM, auto
+// AMI+IAM+user-data). It returns as soon as the instance is launched — the
+// caller polls the S3 completion record (or passes --wait). When spec.Container
+// is set the command runs inside that image (Docker is installed on demand; a
+// private-ECR image gets an ecr:ReadOnly grant on the scoped profile).
 func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *taskproto.TaskSpec, finder taskproto.InstanceFinder, region string) error {
-	sized, err := taskproto.Size(ctx, finder, spec.SizingRequest())
+	launched, err := tasklaunch.Launch(ctx, taskDeps(client, finder, out), spec, region)
 	if err != nil {
 		return err
 	}
-	return runTaskRealSized(ctx, out, client, spec, sized, region)
-}
-
-// runTaskRealSized is runTaskReal for an already-sized task.
-func runTaskRealSized(ctx context.Context, out io.Writer, client *aws.Client, spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string) error {
-	// Before any AWS call that creates something (or any at all, beyond
-	// sizing): a spec whose user data is over EC2's limit cannot launch (#1063).
-	if _, err := taskUserDataPreflight(spec, sized, region); err != nil {
-		return err
-	}
-
-	account, err := client.GetAccountID(ctx)
-	if err != nil {
-		return fmt.Errorf("resolve account id: %w", err)
-	}
-	// One resolution of where this task's records go, shared by the wrapper, the
-	// flush hook, the instance policy and the --wait poll (spawn#646). A spec's
-	// results_prefix overrides it; empty keeps
-	// s3://spawn-results-<account>-<region>/tasks/<task_id>.
-	resultsPrefix := taskproto.EffectiveResultsPrefix(spec, account, region)
-	resultsBucket, resultsKeyPrefix, ok := taskproto.SplitS3URI(resultsPrefix)
-	if !ok {
-		return fmt.Errorf("results_prefix %q is not an s3://bucket/prefix URI", spec.ResultsPrefix)
-	}
-
-	// Create the bucket only when it is the one spawn manages. A caller who names
-	// their own bucket gets an error if it does not exist, rather than having a
-	// stray bucket created from a typo and the run reported as a success.
-	if taskproto.IsDefaultResultsBucket(resultsBucket, account, region) {
-		if err := client.CreateS3BucketIfNotExists(ctx, resultsBucket, region); err != nil {
-			return fmt.Errorf("ensure results bucket %s: %w", resultsBucket, err)
-		}
-	}
-
-	// Run identity for THIS attempt (spawn#608). Re-running a task_id overwrites
-	// the same tasks/<task_id>/completion.json key, so without an attempt id a
-	// record from a previous attempt is indistinguishable from this one's — and
-	// --wait returned it as the answer while the new instance was still running,
-	// reporting a fixed task as still failing. The id is stamped into the record by
-	// the wrapper and checked by pollCompletion below.
-	runID := uuid.NewString()
-
-	// Belt (the structural half of the fix): clear the previous attempt's
-	// completion artifacts BEFORE the instance can exist, so there is no stale
-	// record to mis-read in the first place. Best-effort by design — a delete
-	// failure must not abort a launch, because the run-id check below is the
-	// suspenders that catches whatever survives. Deleting an absent key is a
-	// success in S3 (the overwhelmingly common first-run case), so this is silent
-	// unless something actually went wrong.
-	if err := clearStaleCompletion(ctx, client, region, resultsBucket, resultsKeyPrefix); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not clear a previous attempt's completion record for task %s: %v\n", spec.TaskID, err)
-		fmt.Fprintf(os.Stderr, "         (harmless: --wait verifies run_id, so a leftover record is ignored rather than reported)\n")
-	} else if spawnVerbose {
-		fmt.Fprintf(os.Stderr, "cleared any previous completion record for task %s (run_id %s)\n", spec.TaskID, runID)
-	}
-
-	// Scoped instance profile: the default spored role has no S3 write, so grant
-	// exactly the buckets this task reads (inputs) and writes (outputs + results).
-	// A private-ECR container image additionally needs ecr:ReadOnly to pull.
-	profile, err := client.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
-		TrustServices:    []string{"ec2"}, // an instance profile is assumed by EC2
-		InlinePolicyJSON: taskStagingPolicyFor(s3Buckets(spec.Inputs), s3Buckets(spec.Outputs), resultsBucket, s3Buckets2(spec.Resources.S3ReadWrite), true),
-		Policies:         taskExtraPolicies(spec),
-	})
-	if err != nil {
-		return fmt.Errorf("create task instance profile: %w", err)
-	}
-
-	// Build the storage mount script for any FSx/EFS/attached volumes the task
-	// placement requests (mounted before the workload; #166). Empty when none.
-	storageScript, err := taskStorageScript(ctx, client, spec, region)
-	if err != nil {
-		return fmt.Errorf("build task storage: %w", err)
-	}
-
-	cfg, opts, err := buildTaskLaunch(spec, sized, region, profile, resultsPrefix, runID, storageScript)
-	if err != nil {
-		return err
-	}
-	// The exact user data, now that the account, run id and storage are real.
-	// The preflight above measured it with same-length placeholders; this is the
-	// authoritative check, still before RunInstances (#1063).
-	if _, err := taskUserDataSize(cfg, opts); err != nil {
-		return err
-	}
-
-	result, err := provisionTask(out, func(c aws.LaunchConfig, o launcher.Options) (*aws.LaunchResult, error) {
-		return launcher.Provision(ctx, client, c, o)
-	}, &cfg, opts, spec.Resources.Fallback)
-	if err != nil {
-		return fmt.Errorf("launch task: %w", err)
-	}
+	runID := launched.RunID
+	resultsPrefix := launched.ResultsPrefix
+	resultsBucket, resultsKeyPrefix := launched.ResultsBucket, launched.ResultsKeyPrefix
 
 	lr := taskproto.LaunchResult{
-		TaskID:       spec.TaskID,
-		InstanceID:   result.InstanceID,
-		Region:       result.Region,
-		AZ:           result.AvailabilityZone,
-		InstanceType: sized.InstanceType,
-		Spot:         cfg.Spot,
+		TaskID:       launched.TaskID,
+		InstanceID:   launched.InstanceID,
+		Region:       launched.Region,
+		AZ:           launched.AvailabilityZone,
+		InstanceType: launched.InstanceType,
+		Spot:         launched.Spot,
 	}
 	jsonOut := getOutputFormat() == "json"
 
@@ -905,80 +493,12 @@ type taskResultStore interface {
 	DeleteS3Object(ctx context.Context, region, bucket, key string) error
 }
 
-// completionKey / exitCodeKey are the two per-task result objects the on-instance
-// wrapper writes (pkg/taskproto/wrapper.go). Both are keyed by task_id ALONE, so
-// both are overwritten by every run of the same task_id — which is why both have
-// to be cleared at launch.
-//
-// The key names are deliberately NOT versioned per run (the issue floats
-// completion-<runid>.json): tasks/<task_id>/completion.json is the published
-// workflow-adapter contract that six adapter repos poll (nf-spawn, miniwdl-spawn,
-// cwl-spawn, snakemake-executor-plugin-spawn, airflow-spawn, pegasus-spawn).
-// Renaming it would break all six; the additive run_id field inside the JSON is
-// invisible to them.
-// completionKey is the object key of a task's completion record, relative to the
-// results bucket.
-//
-// taskPrefix is the KEY PORTION of taskproto.EffectiveResultsPrefix, which
-// already ends in the task id. It must not be appended again — doing so was
-// spawn#715: EffectiveResultsPrefix returns ".../tasks/<task_id>", so a builder
-// that added the id produced
-//
-//	tasks/<task_id>/<task_id>/completion.json
-//
-// while the writer, which formats the prefix directly, put the object at
-//
-//	tasks/<task_id>/completion.json
-//
-// Nothing read a completion record for four releases (v0.117.0 through
-// v0.121.0): `task status` reported every finished task as "running" and
-// `--wait` polled to TTL and exited 1 on tasks that had succeeded in seconds.
-// Both halves — EffectiveResultsPrefix gaining the task id, and these builders
-// appending it — arrived in the same commit (#658), so neither looked wrong on
-// its own.
-//
-// The parameter is named taskPrefix, and the task id is no longer a parameter at
-// all, so the same mistake cannot be made by passing the wrong thing.
+// completionKey is the object key of a task's completion record, relative to
+// the results bucket, given the key portion of its results prefix. It is
+// tasklaunch.CompletionKey, which the launch's stale-record clear uses too, so
+// the reader and the clear cannot disagree about the key (#715).
 func completionKey(taskPrefix string) string {
-	return joinTaskKey(taskPrefix, "completion.json")
-}
-
-func exitCodeKey(taskPrefix string) string {
-	return joinTaskKey(taskPrefix, ".exitcode")
-}
-
-// joinTaskKey appends a file name to a task's key prefix. An empty prefix means
-// the bucket root, which only arises from a results_prefix of bare "s3://bucket"
-// — rare, but it must not produce a leading slash.
-func joinTaskKey(taskPrefix, name string) string {
-	if taskPrefix == "" {
-		return name
-	}
-	return taskPrefix + "/" + name
-}
-
-// staleResultKeys lists every result object a previous run of this task could
-// have left behind at a key this run will reuse.
-func staleResultKeys(taskPrefix string) []string {
-	return []string{completionKey(taskPrefix), exitCodeKey(taskPrefix)}
-}
-
-// clearStaleCompletion deletes the completion artifacts of any PREVIOUS run of
-// taskID, so this run cannot be answered with an earlier attempt's verdict
-// (spawn#608). Deleting an absent key is a no-op success in S3, so the normal
-// first-run case returns nil without the caller special-casing anything. Errors
-// are joined and returned for the caller to log — never to abort a launch on.
-// taskPrefix, not (prefix, taskID): the task id is already in the prefix, and a
-// vestigial id parameter is how #715 happened — a caller passing the wrong one of
-// two plausible things with no compiler or vet complaint.
-func clearStaleCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, taskPrefix string) error {
-	var errs []error
-	for _, key := range staleResultKeys(taskPrefix) {
-		if err := store.DeleteS3Object(ctx, region, resultsBucket, key); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
+	return tasklaunch.CompletionKey(taskPrefix)
 }
 
 // completionRunVerdict is pollCompletion's decision about a completion record it
@@ -1212,331 +732,9 @@ With --check-complete, exit codes mirror 'spawn status': 0=completed,
 	},
 }
 
-// taskCompletionFile is the on-instance file the generated wrapper writes and
-// spored watches to fire on_complete. It matches the wrapper's SPAWN_COMPLETE
-// path and provider/ec2.go's default, but we tag it EXPLICITLY at launch (below)
-// so on-complete teardown never depends on provider-side defaulting that is
-// gated on the spawn:on-complete tag being visible when spored first boots
-// (EC2 tag eventual-consistency); see spawn#406.
-const taskCompletionFile = "/tmp/SPAWN_COMPLETE"
-
-// buildLaunchConfig maps a sized TaskSpec to the minimal aws.LaunchConfig for one
-// task instance. AMI, UserData, and KeyName are deliberately left empty for
-// launcher.Provision to fill (auto AMI, keyless/SSM, wrapper-as-user-data); the
-// scoped instance profile is set so Provision skips its default-role step.
-func taskLaunchConfig(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region, iamProfile, wrapper string) aws.LaunchConfig {
-	cfg := aws.LaunchConfig{
-		InstanceType:    sized.InstanceType,
-		Region:          region,
-		JobArrayCommand: wrapper, // Provision embeds this via /etc/spawn/command
-		Spot:            spec.Resources.Purchase == taskproto.PurchaseSpot,
-		TTL:             spec.Lifecycle.TTL,
-		OnComplete:      spec.EffectiveOnComplete(),
-		// Tag the completion file + a short grace explicitly so spored watches the
-		// wrapper's SPAWN_COMPLETE regardless of tag-visibility timing (spawn#406).
-		CompletionFile:     taskCompletionFile,
-		CompletionDelay:    "10s",
-		Name:               spec.TaskID,
-		IamInstanceProfile: iamProfile,
-		Tags:               map[string]string{"spawn:task-id": spec.TaskID},
-	}
-	// Optional launch-time placement (nf-spawn's ext.* analogs): a specific AMI/AZ
-	// and attached EBS reference-data volumes. FSx/EFS mounting is threaded via the
-	// launcher's StorageScript (built in runTaskReal), not here.
-	cfg.AMI = spec.Placement.AMI
-	cfg.AvailabilityZone = spec.Placement.AvailabilityZone
-	for _, v := range spec.Placement.Volumes {
-		cfg.AttachVolumes = append(cfg.AttachVolumes, aws.AttachVolumeSpec{
-			SnapshotID: v.Snapshot,
-			MountPoint: v.MountPath,
-			ReadOnly:   v.ReadOnly,
-		})
-	}
-	// resources.disk_gib / lifecycle.cost_limit are the TaskSpec equivalents of
-	// --volume-size / --cost-limit on the regular launch path (#556): both flow
-	// into the SAME aws.LaunchConfig fields the CLI flags populate
-	// (cmd/launch_config.go), so a task and a plain launch converge on identical
-	// downstream behavior. Left unset (zero) when omitted from the spec — same
-	// "0 = use AMI default" / "0 = disabled" convention --volume-size and
-	// --cost-limit already use, so an unset TaskSpec field never changes
-	// existing behavior.
-	if spec.Resources.DiskGiB > 0 {
-		cfg.RootVolumeSizeGiB = spec.Resources.DiskGiB
-	}
-	if spec.Lifecycle.CostLimit > 0 {
-		cfg.CostLimit = spec.Lifecycle.CostLimit
-	}
-	return cfg
-}
-
-// taskStorageScript builds the boot-time mount script for a task's placement
-// storage: attached EBS volumes (from snapshots), an existing EFS filesystem, and
-// an existing FSx for Lustre filesystem. Returns "" when the placement requests
-// none. The script is threaded into the headless launcher via
-// launcher.Options.StorageScript and runs before the workload command (#166).
-func taskStorageScript(ctx context.Context, client *aws.Client, spec *taskproto.TaskSpec, region string) (string, error) {
-	return taskStorageScriptWith(spec, region, func(id string) (string, string, error) {
-		info, err := client.GetFSxFilesystem(ctx, id, region)
-		if err != nil {
-			return "", "", err
-		}
-		return info.DNSName, info.MountName, nil
-	})
-}
-
-// taskStorageScriptWith is taskStorageScript with the one AWS lookup it needs,
-// the FSx filesystem's DNS and mount names, supplied by the caller, so the user
-// data preflight can build the script without calling AWS.
-func taskStorageScriptWith(spec *taskproto.TaskSpec, region string, lookupFSx func(id string) (dnsName, mountName string, err error)) (string, error) {
-	p := spec.Placement
-	if len(p.Volumes) == 0 && p.EFSID == "" && p.FSxLustreID == "" {
-		return "", nil
-	}
-	sc := userdata.StorageConfig{}
-
-	// Reuse the CLI's device-name assignment so the mount script's DeviceName
-	// matches the block-device mapping cfg.AttachVolumes produces.
-	var volSpecs []aws.AttachVolumeSpec
-	for _, v := range p.Volumes {
-		volSpecs = append(volSpecs, aws.AttachVolumeSpec{
-			SnapshotID: v.Snapshot,
-			MountPoint: v.MountPath,
-			ReadOnly:   v.ReadOnly,
-		})
-	}
-	sc.AttachedVolumes = attachedVolumesUserData(volSpecs)
-	if p.EFSID != "" {
-		opts, err := getEFSMountOptions()
-		if err != nil {
-			return "", fmt.Errorf("EFS mount options: %w", err)
-		}
-		sc.EFSEnabled = true
-		sc.EFSFilesystemDNS = aws.GetEFSDNSName(p.EFSID, region)
-		// EffectiveEFSMountPoint (spawn#570 sub-issue 3): honors
-		// Placement.EFSMountPoint when the spec overrides it, defaulting to
-		// "/efs" otherwise — the SAME default+override resolution
-		// wrapper.go's containerMountDirs uses, so a containerized task's
-		// `docker run -v` always bind-mounts wherever this script actually
-		// mounted the filesystem, not a second, independently hardcoded path.
-		sc.EFSMountPoint = p.EffectiveEFSMountPoint()
-		sc.EFSMountOptions = opts
-	}
-	if p.FSxLustreID != "" {
-		dnsName, mountName, err := lookupFSx(p.FSxLustreID)
-		if err != nil {
-			return "", fmt.Errorf("look up FSx %s: %w", p.FSxLustreID, err)
-		}
-		sc.FSxLustreEnabled = true
-		sc.FSxFilesystemDNS = dnsName
-		sc.FSxMountName = mountName
-		// EffectiveFSxMountPoint: see the EFS comment above — same
-		// override-or-default resolution shared with wrapper.go.
-		sc.FSxMountPoint = p.EffectiveFSxMountPoint()
-	}
-	return userdata.GenerateStorageUserData(sc)
-}
-
-// s3Buckets extracts the distinct S3 bucket names from a manifest list's s3://
-// endpoints (source or destination, whichever is the s3 side). Non-s3 entries
-// (local paths) are skipped.
-func s3Buckets(manifests []taskproto.Manifest) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, m := range manifests {
-		for _, ep := range []string{m.Source, m.Destination} {
-			if b := s3Bucket(ep); b != "" && !seen[b] {
-				seen[b] = true
-				out = append(out, b)
-			}
-		}
-	}
-	return out
-}
-
-// s3Buckets2 extracts distinct bucket names from a list of s3:// URIs (e.g.
-// spec.Resources.S3ReadWrite).
-func s3Buckets2(uris []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, u := range uris {
-		if b := s3Bucket(u); b != "" && !seen[b] {
-			seen[b] = true
-			out = append(out, b)
-		}
-	}
-	return out
-}
-
-// s3Bucket returns the bucket name from an s3://bucket/key URI, or "" if uri is
-// not an s3:// URI (e.g. a local path).
-func s3Bucket(uri string) string {
-	const p = "s3://"
-	if !strings.HasPrefix(uri, p) {
-		return ""
-	}
-	rest := uri[len(p):]
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		return rest[:i]
-	}
-	return rest
-}
-
-// taskExtraPolicies returns the IAM policy-template names (beyond the scoped S3
-// staging policy) a task's instance profile needs. A private-ECR container image
-// needs ecr:ReadOnly to pull; public images and non-container tasks need nothing
-// extra. The names resolve to buildInlinePolicy templates (pkg/aws/iam.go);
-// ecrImageAccount is the shared pure helper in cmd/app_byo.go.
-func taskExtraPolicies(spec *taskproto.TaskSpec) []string {
-	return ecrPullPolicies(spec.Container)
-}
-
-// ecrPullPolicies returns the ecr:ReadOnly policy template when any of images
-// is a private-ECR ref, and nil otherwise. Shared by `spawn task run` (one
-// image per task) and `spawn pool create` (the images its tasks run, #1148).
-func ecrPullPolicies(images ...string) []string {
-	for _, img := range images {
-		if img != "" && ecrImageAccount(img) != "" {
-			return []string{"ecr:ReadOnly"}
-		}
-	}
-	return nil
-}
-
-// provenanceWriteActions is what `spored provenance upload` needs on a write
-// bucket beyond s3:PutObject (#1076): an upload that sets tags in the request
-// needs s3:PutObjectTagging, and the provenance record is written with
-// s3:PutObjectAnnotation. Both names are from AWS's machine-readable service
-// reference. Used by `spawn task run` and pool workers, whose job scripts both
-// upload with provenance.
-var provenanceWriteActions = []string{"s3:PutObjectTagging", "s3:PutObjectAnnotation"}
-
-// iamActionList renders actions as the elements of a JSON array.
-func iamActionList(actions []string) string {
-	q := make([]string, len(actions))
-	for i, a := range actions {
-		q[i] = fmt.Sprintf("%q", a)
-	}
-	return strings.Join(q, ",")
-}
-
-// taskStagingPolicy builds a scoped S3 policy granting read on the input buckets
-// and write on the output + results buckets — the exact access the wrapper's
-// aws s3 cp needs, and no more (preferred over the wildcard s3:FullAccess
-// template). Modeled on GenerateScopedS3Policy.
-func taskStagingPolicy(inputBuckets, outputBuckets []string, resultsBucket string, readWriteBuckets []string) string {
-	return taskStagingPolicyFor(inputBuckets, outputBuckets, resultsBucket, readWriteBuckets, false)
-}
-
-// taskStagingPolicyFor is taskStagingPolicy, plus, when provenance is set, what
-// `spored provenance upload` needs on the WRITE buckets (#1076): an upload that
-// sets tags in the request requires s3:PutObjectTagging as well as PutObject,
-// and the provenance record is written with s3:PutObjectAnnotation. Both action
-// names are from AWS's machine-readable service reference. Only `spawn task
-// run` asks for it; `spawn launch --s3-write` and sweeps never tag.
-func taskStagingPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string, readWriteBuckets []string, provenance bool) string {
-	readB := dedupeBuckets(inputBuckets)
-	writeB := dedupeBuckets(append(append([]string{}, outputBuckets...), resultsBucket))
-	rwB := dedupeBuckets(readWriteBuckets)
-
-	var stmts []string
-	if len(readB) > 0 {
-		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":[%s]}`, bucketObjectARNs(readB)))
-		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bucketARNs(readB)))
-	}
-	// Only grant write when there is somewhere to write (#669). This statement
-	// used to be unconditional, but on the launch path outputBuckets is empty and
-	// resultsBucket is "" — and dedupeBuckets drops empty strings — so
-	// `--s3-read bucket` alone shipped {"Action":["s3:PutObject"],"Resource":[]}.
-	// IAM rejects the WHOLE document for that, so a read-only grant made the
-	// instance profile impossible to create and failed the entire launch.
-	if len(writeB) > 0 {
-		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
-		if provenance {
-			stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":[%s],"Resource":[%s]}`, iamActionList(provenanceWriteActions), bucketObjectARNs(writeB)))
-		}
-	}
-	// Full read-write buckets (e.g. Snakemake's S3 storage plugin, which lists,
-	// reads, writes, and deletes across its storage bucket): grant object-level
-	// Get/Put/Delete + bucket-level List/GetLocation on the whole bucket.
-	if len(rwB) > 0 {
-		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:PutObject","s3:DeleteObject"],"Resource":[%s]}`, bucketObjectARNs(rwB)))
-		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bucketARNs(rwB)))
-	}
-	// A document with no statements is MalformedPolicyDocument just as surely as
-	// one with an empty Resource, so guarding the write statement alone would
-	// have swapped one invalid policy for another. Return nothing instead: both
-	// PutRolePolicy call sites in pkg/aws/iam.go are guarded on
-	// InlinePolicyJSON != "", so an empty document is simply not attached.
-	if len(stmts) == 0 {
-		return ""
-	}
-	return `{"Version":"2012-10-17","Statement":[` + strings.Join(stmts, ",") + `]}`
-}
-
-func dedupeBuckets(buckets []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, b := range buckets {
-		if b != "" && !seen[b] {
-			seen[b] = true
-			out = append(out, b)
-		}
-	}
-	return out
-}
-
-func bucketARNs(buckets []string) string {
-	arns := make([]string, len(buckets))
-	for i, b := range buckets {
-		arns[i] = fmt.Sprintf("%q", "arn:aws:s3:::"+b)
-	}
-	return strings.Join(arns, ",")
-}
-
-func bucketObjectARNs(buckets []string) string {
-	arns := make([]string, len(buckets))
-	for i, b := range buckets {
-		arns[i] = fmt.Sprintf("%q", "arn:aws:s3:::"+b+"/*")
-	}
-	return strings.Join(arns, ",")
-}
-
-// provisionTask launches cfg with opts through provision and, when a Spot launch fails
-// for capacity and the spec asks for an on-demand fallback, retries once
-// on-demand (a minimal single-region echo of lagotto's capacity fallthrough;
-// AZ-spread is out of scope). cfg.Spot is cleared on fallback so the caller
-// reports the purchase option that actually launched.
-//
-// Both attempts receive the same opts, so the fallback instance gets the
-// same storage mounts and terminal-flush hook as the Spot attempt would have:
-// before #1144 the retry passed an empty Options{} and launched without its
-// EFS/FSx/volume mounts and without the hook that writes a completion record on
-// a TTL kill.
-func provisionTask(out io.Writer, provision func(aws.LaunchConfig, launcher.Options) (*aws.LaunchResult, error), cfg *aws.LaunchConfig, opts launcher.Options, fallback string) (*aws.LaunchResult, error) {
-	result, err := provision(*cfg, opts)
-	if err != nil && cfg.Spot && fallback == taskproto.PurchaseOnDemand && isCapacityErr(err) {
-		fmt.Fprintf(out, "⚠ spot capacity unavailable (%v); retrying on-demand per fallback...\n", classifyLaunchErr(err))
-		cfg.Spot = false
-		result, err = provision(*cfg, opts)
-	}
-	return result, err
-}
-
-// isCapacityErr reports whether a launch error is a capacity class (worth a
-// fallback retry), keyed on the AWS error code carried by aws.LaunchError.
-func isCapacityErr(err error) bool {
-	return classifyLaunchErr(err) == taskproto.RetryCapacity
-}
-
-// classifyLaunchErr extracts the AWS error code from a launch error and maps it
-// to a taskproto RetryClass.
-func classifyLaunchErr(err error) taskproto.RetryClass {
-	var le *aws.LaunchError
-	if errors.As(err, &le) {
-		return taskproto.ClassifyLaunchError(le.Code)
-	}
-	return taskproto.RetryNone
-}
+// taskCompletionFile is the on-instance file the task wrapper writes and spored
+// watches to fire on_complete (tasklaunch.CompletionFile, spawn#406).
+const taskCompletionFile = tasklaunch.CompletionFile
 
 func init() {
 	rootCmd.AddCommand(taskGroupCmd)
@@ -1556,106 +754,4 @@ func init() {
 	taskStatusCmd.Flags().StringVar(&taskStatusRegion, "region", "", "Region the task ran in (default: the configured AWS region)")
 	taskStatusCmd.Flags().StringVar(&taskStatusResultsPrefix, "results-prefix", "", "s3://bucket/prefix the task's records were written under; required if the spec set results_prefix (default: spawn's own spawn-results-<account>-<region>/tasks)")
 	taskStatusCmd.Flags().BoolVar(&taskStatusCheckDone, "check-complete", false, "Exit 0=completed, 1=failed, 2=running, 3=error instead of printing")
-}
-
-// buildTaskLaunch assembles the launch config and launcher options for one task
-// attempt: the wrapper (the command, staged I/O and completion record), the
-// terminal-flush hook, and the storage script. Pure; the preflight and the real
-// launch both call it, so they measure the same user data.
-func buildTaskLaunch(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region, profile, resultsPrefix, runID, storageScript string) (aws.LaunchConfig, launcher.Options, error) {
-	// GPU-capable if the spec asked for GPUs or the sized instance is a GPU family
-	// (e.g. sized from families:["g5"] without an explicit gpus count) — same
-	// classifier that selects the GPU DLAMI. Drives `--gpus all` + NVIDIA Container
-	// Toolkit setup in the wrapper (spawn#601/#606).
-	gpu := spec.Resources.GPUs > 0 || aws.DetectGPUInstance(sized.InstanceType)
-
-	// One options value for both generators, so the wrapper and the flush hook
-	// cannot disagree about the prefix or the run id they write (spawn#764).
-	wrapperOpts := taskproto.WrapperOptions{
-		ResultsPrefix: resultsPrefix,
-		Region:        region,
-		RunID:         runID,
-		GPU:           gpu,
-	}
-
-	wrapper, err := taskproto.GenerateWrapper(spec, wrapperOpts)
-	if err != nil {
-		return aws.LaunchConfig{}, launcher.Options{}, fmt.Errorf("build task wrapper: %w", err)
-	}
-
-	// The terminal-flush hook (spawn#632). The wrapper's log upload and
-	// completion-record write both sit after the user command, so a task killed by
-	// its own TTL/cost limit mid-command left nothing at all to re-size from. This
-	// script is installed root-owned and run by spored before it stops or
-	// terminates — i.e. while the network is still up — and no-ops when the wrapper
-	// already wrote the real record.
-	flushHook, err := taskproto.GenerateFlushScript(spec, wrapperOpts)
-	if err != nil {
-		return aws.LaunchConfig{}, launcher.Options{}, fmt.Errorf("build terminal-flush hook: %w", err)
-	}
-
-	cfg := taskLaunchConfig(spec, sized, region, profile, wrapper)
-	opts := launcher.Options{
-		StorageScript:   storageScript,
-		TaskFlushScript: flushHook,
-	}
-	return cfg, opts, nil
-}
-
-// taskUserDataSize builds the user data launcher.Provision will send for cfg
-// and opts, the exact gzip+base64 bytes, and returns its decoded size (what
-// EC2's 16 KiB limit counts). Over a limit it returns a TaskSpec-specific error.
-func taskUserDataSize(cfg aws.LaunchConfig, opts launcher.Options) (int, error) {
-	encoded, err := launcher.BuildUserData(cfg, opts)
-	if err != nil {
-		return 0, err
-	}
-	if err := aws.CheckUserDataSize(encoded); err != nil {
-		return 0, taskUserDataTooLarge(err)
-	}
-	decoded, _ := aws.UserDataSize(encoded)
-	return decoded, nil
-}
-
-// taskUserDataTooLarge explains a user-data size failure in TaskSpec terms.
-func taskUserDataTooLarge(err error) error {
-	var tooLarge *aws.UserDataTooLargeError
-	if !errors.As(err, &tooLarge) {
-		return err
-	}
-	return fmt.Errorf("this task cannot launch: the generated wrapper and bootstrap are %d bytes after gzip, and EC2 allows %d bytes of user data (spawn#1063).\n"+
-		"The command, and every inputs/outputs entry, ride in the user data. Move long inline scripts out of `command` into a staged file under `inputs:`, "+
-		"and stage many per-file inputs as one directory prefix", tooLarge.DecodedBytes, aws.MaxUserDataBytes)
-}
-
-// Placeholders for the values the preflight cannot know without an AWS call.
-// Each has the same length as the real value, so the user data measures the
-// same size to within gzip's handling of a few different characters; the real
-// launch re-checks the exact bytes before RunInstances.
-const (
-	preflightAccountID = "000000000000"                         // 12 digits, like every AWS account ID
-	preflightRunID     = "00000000-0000-0000-0000-000000000000" // uuid.NewString() length
-	preflightProfile   = "spawn-task-preflight"                 // not in the user data
-)
-
-// taskUserDataPreflight measures the task's user data before any AWS call:
-// the same assembly runTaskReal performs (buildTaskLaunch, then
-// launcher.BuildUserData), with placeholders for the account ID, run ID and any
-// FSx names. It returns the decoded size, or an error when the spec cannot
-// launch because the user data is over EC2's limit.
-func taskUserDataPreflight(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string) (int, error) {
-	resultsPrefix := taskproto.EffectiveResultsPrefix(spec, preflightAccountID, region)
-	storageScript, err := taskStorageScriptWith(spec, region, func(id string) (string, string, error) {
-		// fs-<17 hex>.fsx.<region>.amazonaws.com and an 8-character mount name,
-		// the shapes FSx for Lustre returns.
-		return id + ".fsx." + region + ".amazonaws.com", "abcdefgh", nil
-	})
-	if err != nil {
-		return 0, fmt.Errorf("build task storage: %w", err)
-	}
-	cfg, opts, err := buildTaskLaunch(spec, sized, region, preflightProfile, resultsPrefix, preflightRunID, storageScript)
-	if err != nil {
-		return 0, err
-	}
-	return taskUserDataSize(cfg, opts)
 }

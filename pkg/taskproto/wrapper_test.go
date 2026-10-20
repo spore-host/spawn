@@ -532,7 +532,7 @@ func TestGenerateWrapper_PlacementMountOverrideHonored(t *testing.T) {
 // guard for spawn#570's resolution of the #564 invariant tension: placement
 // mount points (EFS/FSx/volume) must appear in the docker `-v` mount list
 // (proven above) but must NOT be `mkdir -p`'d by the stage-in preamble. Those
-// paths are mounted by the boot-time storage script (cmd/task.go's
+// paths are mounted by the boot-time storage script (pkg/tasklaunch's
 // taskStorageScript) BEFORE this wrapper runs; mkdir'ing them here risks
 // racing that mount (a plain local directory created first would then be
 // silently shadowed once the real mount lands) rather than the harmless
