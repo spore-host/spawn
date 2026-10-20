@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is. spored terminates a worker that reaches it. Before this a pool had no
   spend bound except `--ttl` (#1183).
 
+- **`spawn pool create --container IMAGE`** (repeatable) declares the images
+  the pool's tasks run. If any of them is a private-ECR image, the workers' role
+  gets the ECR pull grant `spawn task run` gives (`ecr:ReadOnly`). Before this a
+  private-ECR image could not run in a pool (#1148).
+
 ### Changed
 
 - **`spawn extend` now exits non-zero when spored could not be reloaded.**
@@ -146,6 +151,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pooled task outputs are tagged again (#1148).** The pooled job script
+  uploads outputs with `spored provenance upload`, as `spawn task run` does,
+  but the pool worker policy granted only `s3:PutObject`. Without
+  `s3:PutObjectTagging` and `s3:PutObjectAnnotation`, pooled outputs fell back
+  to untagged uploads, out of reach of the results-retention lifecycle (#1076).
+  The worker policy now grants both on the results bucket and on every
+  `--s3-write` bucket, and not on read-only buckets.
 - **`spawn extend` reloads spored over SSM on keyless instances (#1113).**
   The reload ran only over SSH, so on a `spawn task run` instance (SSM-only, no
   launch key) the new limit was tagged but never applied and the run was killed

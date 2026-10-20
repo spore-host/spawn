@@ -37,6 +37,7 @@ spawn pool create --run-id R --workers N --instance-type T [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
+| `--container` |  | stringArray |  | Container image the pool's tasks run (repeatable); a private-ECR image adds an ECR pull grant to the workers' role, as 'spawn task run' does |
 | `--cost-limit` |  | float64 |  | Spend ceiling in USD PER WORKER, covering compute and storage (0 = disabled); spored terminates a worker that reaches it, as with 'spawn launch --cost-limit' |
 | `--idle-timeout` |  | duration | `5m0s` | Workers terminate after this long with an empty queue |
 | `--instance-type` |  | string |  | Worker instance type (e.g. c7i.large) |

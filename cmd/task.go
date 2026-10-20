@@ -1229,10 +1229,36 @@ func s3Bucket(uri string) string {
 // extra. The names resolve to buildInlinePolicy templates (pkg/aws/iam.go);
 // ecrImageAccount is the shared pure helper in cmd/app_byo.go.
 func taskExtraPolicies(spec *taskproto.TaskSpec) []string {
-	if spec.Container != "" && ecrImageAccount(spec.Container) != "" {
-		return []string{"ecr:ReadOnly"}
+	return ecrPullPolicies(spec.Container)
+}
+
+// ecrPullPolicies returns the ecr:ReadOnly policy template when any of images
+// is a private-ECR ref, and nil otherwise. Shared by `spawn task run` (one
+// image per task) and `spawn pool create` (the images its tasks run, #1148).
+func ecrPullPolicies(images ...string) []string {
+	for _, img := range images {
+		if img != "" && ecrImageAccount(img) != "" {
+			return []string{"ecr:ReadOnly"}
+		}
 	}
 	return nil
+}
+
+// provenanceWriteActions is what `spored provenance upload` needs on a write
+// bucket beyond s3:PutObject (#1076): an upload that sets tags in the request
+// needs s3:PutObjectTagging, and the provenance record is written with
+// s3:PutObjectAnnotation. Both names are from AWS's machine-readable service
+// reference. Used by `spawn task run` and pool workers, whose job scripts both
+// upload with provenance.
+var provenanceWriteActions = []string{"s3:PutObjectTagging", "s3:PutObjectAnnotation"}
+
+// iamActionList renders actions as the elements of a JSON array.
+func iamActionList(actions []string) string {
+	q := make([]string, len(actions))
+	for i, a := range actions {
+		q[i] = fmt.Sprintf("%q", a)
+	}
+	return strings.Join(q, ",")
 }
 
 // taskStagingPolicy builds a scoped S3 policy granting read on the input buckets
@@ -1268,7 +1294,7 @@ func taskStagingPolicyFor(inputBuckets, outputBuckets []string, resultsBucket st
 	if len(writeB) > 0 {
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
 		if provenance {
-			stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObjectTagging","s3:PutObjectAnnotation"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
+			stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":[%s],"Resource":[%s]}`, iamActionList(provenanceWriteActions), bucketObjectARNs(writeB)))
 		}
 	}
 	// Full read-write buckets (e.g. Snakemake's S3 storage plugin, which lists,
