@@ -2,7 +2,6 @@ package plugin
 
 import (
 	"errors"
-	"strings"
 )
 
 // ErrWindowsSporeUnsupported is returned when a plugin would be installed on a
@@ -23,9 +22,12 @@ var ErrWindowsSporeUnsupported = errors.New("plugins are not supported on Window
 	"plugin steps are POSIX shell (sh, su, tar) and every registry plugin requires a Linux instance (#1001)")
 
 // CheckSporeOS returns ErrWindowsSporeUnsupported when goos (a GOOS value or a
-// spawn:os tag value; "" means Linux) names Windows, and nil otherwise.
+// spawn:os tag value; "" means Linux) names Windows, and nil otherwise. It reads
+// goos through NormalizeOS, the normaliser a platform condition uses, so the
+// blanket refusal and a spec's conditions.remote os: check cannot disagree about
+// which OS a spore runs (#1055).
 func CheckSporeOS(goos string) error {
-	if strings.EqualFold(strings.TrimSpace(goos), "windows") {
+	if NormalizeOS(goos) == "windows" {
 		return ErrWindowsSporeUnsupported
 	}
 	return nil

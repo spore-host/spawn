@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -71,5 +73,29 @@ func TestWindowsPluginGuard(t *testing.T) {
 		if err := windowsPluginGuard(osName, decls); err != nil {
 			t.Errorf("windowsPluginGuard(%q, plugins) = %v, want nil", osName, err)
 		}
+	}
+}
+
+// A spec that fails validation is refused before any local step runs (#1130):
+// spored would refuse it on receipt, so running local provision first would
+// leave a controller-side footprint for an install that cannot happen.
+func TestRunPluginInstall_InvalidSpecRunsNoLocalStep(t *testing.T) {
+	withPluginInstance(t, &aws.InstanceInfo{Tags: map[string]string{"spawn:os": "linux"}})
+	dir := t.TempDir()
+	t.Chdir(dir)
+	marker := filepath.Join(dir, "provisioned")
+	spec := "name: bad\nversion: v1.0.0\ndescription: d\n" +
+		"local:\n  provision:\n    - type: run\n      run: touch " + marker + "\n" +
+		"remote:\n  install:\n    - type: run\n      run: \"true\"\n      capture:\n        x: .y\n"
+	if err := os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte(spec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runPluginInstall(context.Background(), "./bad.yaml", "box", nil)
+	if err == nil || !strings.Contains(err.Error(), "capture") {
+		t.Fatalf("runPluginInstall = %v, want the validation error for capture on a remote step", err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Error("the local provision step ran before the spec was validated")
 	}
 }

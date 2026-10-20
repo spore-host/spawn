@@ -122,23 +122,24 @@ type Step struct {
 	Src        string            `yaml:"src"`
 	Key        string            `yaml:"key"`
 	Value      string            `yaml:"value"`
-	Background bool              `yaml:"background"`
-	Capture    map[string]string `yaml:"capture"` // varname -> jmespath into stdout JSON
+	Background bool              `yaml:"background"` // remote run steps only
+	Capture    map[string]string `yaml:"capture"`    // local provision run steps only: varname -> dot path into stdout JSON
 	Env        map[string]string `yaml:"env"`
 	// AsUser runs a remote "run" step as the instance's local login user (via a
 	// login shell) instead of root. Needed for tools that refuse to run as root
 	// or that store per-user state — notably Globus Connect Personal, which
 	// aborts with "Running Globus Connect Personal as root is not supported" and
-	// writes its config under the user's ~/.globusonline. Ignored for local
-	// steps (already run as the controller user) and non-run step types.
+	// writes its config under the user's ~/.globusonline. Remote run steps
+	// only: Validate rejects it on a local step (those run as the controller
+	// user) and on other step types.
 	AsUser bool `yaml:"as_user"`
 	// SHA256 is an optional expected checksum for a "fetch" step's downloaded
 	// content, as a lowercase 64-char hex digest. When set, spored hashes the
 	// downloaded bytes and fails the install if they don't match — closing the
 	// "unverified transitive download" gap for a fetch URL that (unlike the
 	// pinned plugin.yaml) is not itself checksummed by the registry manifest.
-	// Optional in the spec; the registry's publish-time CI requires it on
-	// official plugins' fetch steps. Ignored for non-fetch step types.
+	// Optional: nothing requires it, the registry's CI included. Validate
+	// rejects it on any step other than a remote fetch.
 	SHA256 string `yaml:"sha256,omitempty"`
 }
 

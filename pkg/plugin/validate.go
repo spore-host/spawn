@@ -3,22 +3,97 @@ package plugin
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 )
 
-// Valid type sets, kept in sync with the executors and spec:
-//   - remote step types: remote_executor.go runStep
-//   - local step types:  local_executor.go RunProvision
+// Valid type sets, kept in sync with the evaluators and spec:
+//   - step types and fields: stepSchemas below
 //   - condition types:   conditions.go evalCondition (local and remote)
 //   - config param types: spec.go ConfigParam
 var (
-	validRemoteStepTypes = map[string]bool{"run": true, "fetch": true, "extract": true}
-	validLocalStepTypes  = map[string]bool{"run": true, "push": true}
-	validConditionTypes  = map[string]bool{"command": true, "platform": true}
-	validConfigTypes     = map[string]bool{"": true, "string": true, "int": true, "bool": true}
+	validConditionTypes = map[string]bool{"command": true, "platform": true}
+	validConfigTypes    = map[string]bool{"": true, "string": true, "int": true, "bool": true}
 )
+
+// stepSchema maps each step type a section accepts to the Step fields (by yaml
+// key, type excluded) that the section's executor reads for that type. A step
+// whose type is missing, or that sets any other field, is rejected: the
+// executor would refuse the type at run time, or ignore the field (#1130).
+type stepSchema map[string][]string
+
+var (
+	// local.provision: LocalExecutor.RunProvision. A run step's capture:
+	// values become {{ outputs.* }} for later steps and are recorded for the
+	// plugin's teardown steps; a push step hands key/value to spored.
+	localProvisionSchema = stepSchema{
+		"run":  {"run", "env", "capture"},
+		"push": {"key", "value"},
+	}
+	// local.deprovision and local.reconcile: LocalExecutor.RunDeprovision, run
+	// only. Nothing follows a teardown step to receive a push or a capture.
+	localTeardownSchema = stepSchema{
+		"run": {"run", "env"},
+	}
+	// Every remote section: pluginruntime RemoteExecutor.RunSteps. spored does
+	// not capture a remote step's output (it streams to spored's log), so
+	// capture: is local-only.
+	remoteSchema = stepSchema{
+		"run":     {"run", "env", "background", "as_user"},
+		"fetch":   {"url", "dest", "sha256"},
+		"extract": {"src", "dest"},
+	}
+)
+
+// stepSections pairs every step list in a spec with its label and schema.
+func (s *PluginSpec) stepSections() []struct {
+	label  string
+	steps  []Step
+	schema stepSchema
+} {
+	return []struct {
+		label  string
+		steps  []Step
+		schema stepSchema
+	}{
+		{"local.provision", s.Local.Provision, localProvisionSchema},
+		{"local.deprovision", s.Local.Deprovision, localTeardownSchema},
+		{"local.reconcile", s.Local.Reconcile, localTeardownSchema},
+		{"remote.install", s.Remote.Install, remoteSchema},
+		{"remote.configure", s.Remote.Configure, remoteSchema},
+		{"remote.start", s.Remote.Start, remoteSchema},
+		{"remote.stop", s.Remote.Stop, remoteSchema},
+		{"remote.health.steps", s.Remote.Health.Steps, remoteSchema},
+	}
+}
+
+func (sc stepSchema) types() []string {
+	out := make([]string, 0, len(sc))
+	for t := range sc {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// setStepFields returns the yaml keys of st's set fields, type excluded. An
+// empty map counts as unset: re-marshalling a Step writes capture: {} and
+// env: {} for absent ones.
+func setStepFields(st Step) []string {
+	var out []string
+	v := reflect.ValueOf(st)
+	for i := 0; i < v.NumField(); i++ {
+		key := strings.Split(v.Type().Field(i).Tag.Get("yaml"), ",")[0]
+		f := v.Field(i)
+		if key == "type" || f.IsZero() || (f.Kind() == reflect.Map && f.Len() == 0) {
+			continue
+		}
+		out = append(out, key)
+	}
+	return out
+}
 
 // ConditionTypes returns the condition types a spec may declare (the set
 // Validate accepts), sorted. Tests discover the set from here rather than
@@ -161,32 +236,30 @@ func (s *PluginSpec) Validate(dirName string) error {
 		}
 	}
 
-	// Steps: remote vs local accept different type sets.
-	checkSteps := func(label string, steps []Step, valid map[string]bool, want string) {
-		for i, st := range steps {
-			if !valid[st.Type] {
-				add("%s[%d]: invalid step type %q (want %s)", label, i, st.Type, want)
+	// Steps: each section accepts only the types its executor runs, and for
+	// each type only the fields the executor reads.
+	for _, sec := range s.stepSections() {
+		for i, st := range sec.steps {
+			fields, ok := sec.schema[st.Type]
+			if !ok {
+				add("%s[%d]: invalid step type %q (want %s)", sec.label, i, st.Type, strings.Join(sec.schema.types(), ", "))
+				continue
 			}
-			// sha256 is a fetch-only integrity field; when set, it must be a
-			// bare 64-char lowercase hex digest, and it's meaningless on any
-			// other step type.
-			if st.SHA256 != "" {
-				if st.Type != "fetch" {
-					add("%s[%d]: sha256 is only valid on a fetch step, not %q", label, i, st.Type)
-				} else if !sha256HexRe.MatchString(st.SHA256) {
-					add("%s[%d]: invalid sha256 %q (want 64 lowercase hex chars)", label, i, st.SHA256)
+			allowed := map[string]bool{}
+			for _, f := range fields {
+				allowed[f] = true
+			}
+			for _, f := range setStepFields(st) {
+				if !allowed[f] {
+					add("%s[%d]: %s has no effect on a %s step in %s, which takes only: %s", sec.label, i, f, st.Type, sec.label, strings.Join(fields, ", "))
 				}
+			}
+			// sha256, when set, must be a bare 64-char lowercase hex digest.
+			if st.SHA256 != "" && allowed["sha256"] && !sha256HexRe.MatchString(st.SHA256) {
+				add("%s[%d]: invalid sha256 %q (want 64 lowercase hex chars)", sec.label, i, st.SHA256)
 			}
 		}
 	}
-	checkSteps("local.provision", s.Local.Provision, validLocalStepTypes, "run or push")
-	checkSteps("local.deprovision", s.Local.Deprovision, validLocalStepTypes, "run or push")
-	checkSteps("local.reconcile", s.Local.Reconcile, validLocalStepTypes, "run or push")
-	checkSteps("remote.install", s.Remote.Install, validRemoteStepTypes, "run, fetch, or extract")
-	checkSteps("remote.configure", s.Remote.Configure, validRemoteStepTypes, "run, fetch, or extract")
-	checkSteps("remote.start", s.Remote.Start, validRemoteStepTypes, "run, fetch, or extract")
-	checkSteps("remote.stop", s.Remote.Stop, validRemoteStepTypes, "run, fetch, or extract")
-	checkSteps("remote.health.steps", s.Remote.Health.Steps, validRemoteStepTypes, "run, fetch, or extract")
 
 	// Every template action must be a canonical {{ namespace.key }} reference
 	// (namespace ∈ instance/config/outputs/pushed) or a control keyword. This

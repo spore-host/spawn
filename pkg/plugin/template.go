@@ -162,9 +162,10 @@ func shellQuoteValue(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// shellEscapeContext returns a copy of ctx where Config, Outputs, and Pushed
-// values are single-quote-escaped for safe interpolation into shell commands.
-// Instance values are trusted (from EC2 metadata) and left unescaped.
+// shellEscapeContext returns a copy of ctx where every value (instance, config,
+// outputs and pushed alike) is single-quote-escaped for safe interpolation into
+// shell commands. Instance values are quoted too: the instance name is
+// user-chosen, so none of them is treated as trusted.
 func shellEscapeContext(ctx TemplateContext) TemplateContext {
 	escaped := TemplateContext{
 		Instance: make(map[string]string, len(ctx.Instance)),
@@ -187,8 +188,8 @@ func shellEscapeContext(ctx TemplateContext) TemplateContext {
 	return escaped
 }
 
-// RenderShellStep renders a step for use as a shell command. Values from the
-// config, outputs, and pushed namespaces are single-quote-escaped to prevent
+// RenderShellStep renders a step for use as a shell command. Values from every
+// namespace (instance, config, outputs, pushed) are single-quote-escaped to prevent
 // shell injection. Use this instead of RenderStep for "run" steps.
 func RenderShellStep(step Step, ctx TemplateContext) (Step, error) {
 	return RenderStep(step, shellEscapeContext(ctx))

@@ -70,6 +70,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     used to be passed through and ignored. The error lists the keys the
     plugin accepts.
 
+- **`spawn plugin validate` (and spored, which validates every spec it is
+  sent) rejects a step that its executor would refuse or partly ignore
+  (#1130).** Each section now accepts only the step types its executor runs,
+  and for each type only the fields that executor reads:
+  - `local.provision`: `run` (`run`, `env`, `capture`) and `push` (`key`,
+    `value`);
+  - `local.deprovision` and `local.reconcile`: `run` (`run`, `env`). A `push`
+    there used to pass validation and then fail at teardown; `capture:` was
+    parsed and discarded;
+  - every `remote.*` section: `run` (`run`, `env`, `background`, `as_user`),
+    `fetch` (`url`, `dest`, `sha256`) and `extract` (`src`, `dest`).
+    `capture:` on a remote step used to be silently ignored.
+
+  So `background:`/`as_user:` on a local step, `url:`/`dest:` on a `run`
+  step, and the like, are now errors that name the field. `spawn plugin
+  install` also validates the spec before running any local step, so a spec
+  spored would refuse no longer leaves a controller-side footprint first.
+  Every plugin in spore-host/spore-plugins passes `--strict`.
+
 ### Fixed
 
 - `spawn status`, `spawn list`'s TTL column and `spawn start`'s notice put the
@@ -118,6 +137,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `resources.results_prefix`. The TaskSpec field is the top-level
   `results_prefix` (#1145).
 - `spawn task --help` lists `run` and `status`, not only `diagnose` (#1145).
+
+- `plugin.CheckSporeOS` (the Windows-spore refusal) now reads the OS through
+  `NormalizeOS`, the normaliser a `type: platform` condition uses, so the two
+  cannot disagree about whether a spore runs Windows (#1055).
 
 ## [0.136.0] - 2026-10-20
 

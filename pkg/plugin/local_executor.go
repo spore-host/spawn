@@ -157,7 +157,9 @@ func (e *LocalExecutor) RunProvision(ctx context.Context, pluginName string, ste
 	return tmplCtx.Outputs, nil
 }
 
-// RunDeprovision runs the local deprovision steps.
+// RunDeprovision runs local teardown steps: a spec's local.deprovision, and its
+// local.reconcile (replayed by `spawn start` after the instance's IP changes,
+// see cmd/plugin.go reconcileAllLocalPlugins). Only "run" steps are supported.
 func (e *LocalExecutor) RunDeprovision(ctx context.Context, steps []Step, tmplCtx TemplateContext) error {
 	for i, step := range steps {
 		if step.Type != "run" {
@@ -167,15 +169,27 @@ func (e *LocalExecutor) RunDeprovision(ctx context.Context, steps []Step, tmplCt
 		if err != nil {
 			return fmt.Errorf("step[%d] render: %w", i, err)
 		}
-		if _, err := e.runCapture(ctx, rendered); err != nil {
+		// Teardown steps capture nothing: there is no later step or record to
+		// hand an output to, so the validator rejects capture here.
+		if _, err := e.runLocal(ctx, rendered); err != nil {
 			return fmt.Errorf("step[%d] run %q: %w", i, rendered.Run, err)
 		}
 	}
 	return nil
 }
 
-// runCapture executes a shell command and extracts captured values from JSON stdout.
+// runCapture runs a step and extracts its capture: values from the JSON it
+// prints on stdout.
 func (e *LocalExecutor) runCapture(ctx context.Context, step Step) (map[string]string, error) {
+	stdout, err := e.runLocal(ctx, step)
+	if err != nil {
+		return nil, err
+	}
+	return captureOutputs(step.Capture, stdout)
+}
+
+// runLocal executes a run step's shell command and returns its stdout.
+func (e *LocalExecutor) runLocal(ctx context.Context, step Step) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", step.Run) // nosemgrep: dangerous-exec-command -- plugin step defined by plugin author
 	// Initialize with a minimal safe environment to avoid inheriting parent
 	// credentials (AWS_*, tokens, …). PATH and HOME are NOT secrets and are
@@ -217,19 +231,23 @@ func (e *LocalExecutor) runCapture(ctx context.Context, step Step) (map[string]s
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%w\nstderr: %s", err, strings.TrimSpace(stderr.String()))
 	}
+	return stdout.Bytes(), nil
+}
 
+// captureOutputs extracts each capture (varname -> path) from stdout as JSON.
+func captureOutputs(capture map[string]string, stdout []byte) (map[string]string, error) {
 	captures := make(map[string]string)
-	if len(step.Capture) == 0 {
+	if len(capture) == 0 {
 		return captures, nil
 	}
 
 	// Parse stdout as JSON for capture expressions.
 	var jsonData interface{} // nosemgrep: go.lang.security.deserialization.unsafe-deserialization-interface.go-unsafe-deserialization-interface
-	if err := json.Unmarshal(stdout.Bytes(), &jsonData); err != nil {
+	if err := json.Unmarshal(stdout, &jsonData); err != nil {
 		return nil, fmt.Errorf("capture: stdout is not valid JSON: %w", err)
 	}
 
-	for varName, path := range step.Capture {
+	for varName, path := range capture {
 		value, err := extractJSONPath(jsonData, path)
 		if err != nil {
 			return nil, fmt.Errorf("capture %q via path %q: %w", varName, path, err)
