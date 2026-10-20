@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	sdkaws "github.com/aws/aws-sdk-go-v2/aws"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/reaperdeploy"
@@ -64,7 +65,7 @@ the reaper terminates instances, and that is not reversible.
 
   spawn doctor                 # does anything cover this account today?
   spawn reaper deploy          # install it, unarmed
-  spawn reaper status          # deployed? armed? on what schedule?
+  spawn reaper status          # deployed? armed? on what schedule? covered anyway?
   spawn reaper arm             # start actually reclaiming
   spawn reaper teardown        # remove it
 
@@ -129,7 +130,11 @@ The original concern is answered rather than overruled. The bucket is removed
 only when it is tagged spawn:managed=true AND contains nothing outside
 ttl-reaper/; a bucket that fails either check is reported and kept, with
 --force-artifacts to override. So the liberty is only taken over a bucket that is
-provably spawn's and holds only spawn's artifacts.`,
+provably spawn's and holds only spawn's artifacts.
+
+The bucket is the one deploy used. Deploy records it on the function
+(spawn:artifact-bucket); --bucket overrides that, and is needed for a reaper
+deployed with --bucket by a spawn older than that record.`,
 	SilenceUsage: true,
 	RunE:         runReaperTeardown,
 }
@@ -144,6 +149,8 @@ func init() {
 
 	reaperArmCmd.Flags().BoolVar(&reaperYes, "yes", false, "Skip the confirmation prompt")
 
+	reaperTeardownCmd.Flags().StringVar(&reaperBucket, "bucket", "",
+		"Artifact bucket to remove (default: the one recorded on the function at deploy time, else spawn-reaper-artifacts-<account>-<region>)")
 	reaperTeardownCmd.Flags().BoolVar(&reaperKeepLogs, "keep-logs", false,
 		"Leave the reaper's CloudWatch log group in place (it is removed by default)")
 	reaperTeardownCmd.Flags().BoolVar(&reaperKeepArtifacts, "keep-artifacts", false,
@@ -177,20 +184,31 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 // newReaperDeployer builds a Deployer and resolves account/region. Split out so each
 // command shares one construction path.
 func newReaperDeployer(ctx context.Context) (*reaperdeploy.Deployer, string, string, error) {
+	d, account, region, _, err := newReaperDeployerWithConfig(ctx)
+	return d, account, region, err
+}
+
+// newReaperDeployerWithConfig is a seam so status/teardown can be tested with
+// fake clients.
+var newReaperDeployerWithConfig = func(ctx context.Context) (*reaperdeploy.Deployer, string, string, sdkaws.Config, error) {
 	client, err := spawnaws.NewClientWithRegion(ctx, reaperRegion)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("initialize AWS client: %w", err)
+		return nil, "", "", sdkaws.Config{}, fmt.Errorf("initialize AWS client: %w", err)
 	}
 	region := client.Config().Region
 	if region == "" {
-		return nil, "", "", fmt.Errorf("no region resolved; pass --region or set AWS_REGION")
+		return nil, "", "", sdkaws.Config{}, fmt.Errorf("no region resolved; pass --region or set AWS_REGION")
 	}
 	accountID, _, err := client.GetCallerIdentityInfo(ctx)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("resolve account: %w", err)
+		return nil, "", "", sdkaws.Config{}, fmt.Errorf("resolve account: %w", err)
 	}
-	return reaperdeploy.New(client.Config()), accountID, region, nil
+	return reaperdeploy.New(client.Config()), accountID, region, client.Config(), nil
 }
+
+// reaperCoverage is a seam over aws.DetectReaperCoverage — the same probe
+// `spawn doctor` uses — so status can be tested without AWS.
+var reaperCoverage = spawnaws.DetectReaperCoverage
 
 func runReaperDeploy(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
@@ -337,7 +355,7 @@ func runReaperStatus(cmd *cobra.Command, _ []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	d, account, region, err := newReaperDeployer(ctx)
+	d, account, region, cfg, err := newReaperDeployerWithConfig(ctx)
 	if err != nil {
 		return err
 	}
@@ -346,7 +364,16 @@ func runReaperStatus(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	out := cmd.OutOrStdout()
-	fmt.Fprint(out, renderReaperStatus(info, account, region))
+	// No reaper of our own here is not the same as no reaper: the template
+	// reaper, one in another region, or a member role for a central one may
+	// cover this account. Ask the probe doctor uses before saying NOT DEPLOYED
+	// (#1157).
+	var coverage *spawnaws.ReaperCoverage
+	if !info.Deployed {
+		c := reaperCoverage(ctx, cfg)
+		coverage = &c
+	}
+	fmt.Fprint(out, renderReaperStatusWithCoverage(info, account, region, coverage))
 
 	// Idleness last, and only when something is actually deployed: "this reaper
 	// has had nothing to do" is meaningless for an account that has none
@@ -366,19 +393,43 @@ func runReaperStatus(cmd *cobra.Command, _ []string) error {
 
 // renderReaperStatus is pure, so the output contract is testable.
 func renderReaperStatus(info reaperdeploy.Info, account, region string) string {
-	return renderReaperStatusWithCLI(info, account, region, version())
+	return renderReaperStatusWithCoverage(info, account, region, nil)
+}
+
+// renderReaperStatusWithCoverage adds the coverage verdict for an account
+// with no `spawn reaper deploy` reaper. nil means coverage was not checked.
+func renderReaperStatusWithCoverage(info reaperdeploy.Info, account, region string, coverage *spawnaws.ReaperCoverage) string {
+	return renderReaperStatusWithCLI(info, account, region, version(), coverage)
 }
 
 // renderReaperStatusWithCLI takes the CLI version explicitly so the skew wording
 // is testable without depending on how this binary was built (spawn#654).
-func renderReaperStatusWithCLI(info reaperdeploy.Info, account, region, cliVersion string) string {
+func renderReaperStatusWithCLI(info reaperdeploy.Info, account, region, cliVersion string, coverage *spawnaws.ReaperCoverage) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "TTL reaper in account %s (%s)\n", account, region)
 	if !info.Deployed {
-		fmt.Fprintf(&b, "  NOT DEPLOYED — nothing out-of-band reclaims expired instances or orphaned\n")
-		fmt.Fprintf(&b, "  filesystems here. spored still enforces TTL from inside each instance, but it\n")
-		fmt.Fprintf(&b, "  cannot act on a stopped instance and does nothing if it dies.\n")
-		fmt.Fprintf(&b, "    spawn reaper deploy\n")
+		switch {
+		case coverage != nil && coverage.Covered:
+			// Covered by something other than `spawn reaper deploy` — the
+			// template reaper, a reaper in another region, or a member role.
+			// Saying NOT DEPLOYED here contradicted `spawn doctor` (#1157).
+			fmt.Fprintf(&b, "  No reaper from 'spawn reaper deploy' (%s) in this region, but this\n", reaperdeploy.FunctionName)
+			fmt.Fprintf(&b, "  account is COVERED: %s.\n", coverage.How)
+			fmt.Fprintf(&b, "  Nothing to deploy. 'spawn doctor' reports the same verdict.\n")
+		case coverage != nil && !coverage.Determined:
+			fmt.Fprintf(&b, "  No reaper from 'spawn reaper deploy' (%s) in this region, and whether\n", reaperdeploy.FunctionName)
+			fmt.Fprintf(&b, "  another one covers this account could not be determined (%s).\n", coverage.Why)
+			fmt.Fprintf(&b, "  If nothing does, deploy one:\n")
+			fmt.Fprintf(&b, "    spawn reaper deploy\n")
+		default:
+			fmt.Fprintf(&b, "  NOT DEPLOYED — nothing out-of-band reclaims expired instances or orphaned\n")
+			fmt.Fprintf(&b, "  filesystems here. spored still enforces TTL from inside each instance, but it\n")
+			fmt.Fprintf(&b, "  cannot act on a stopped instance and does nothing if it dies.\n")
+			if coverage != nil && coverage.How != "" {
+				fmt.Fprintf(&b, "  Found, but not scanning %s: %s.\n", region, coverage.How)
+			}
+			fmt.Fprintf(&b, "    spawn reaper deploy\n")
+		}
 		return b.String()
 	}
 	fmt.Fprintf(&b, "  Function:  %s\n", reaperdeploy.FunctionName)
@@ -467,8 +518,13 @@ func runReaperTeardown(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "Idle for at least %s — tearing down.\n", reaperIfIdleFor)
 	}
 
+	// The artifact bucket is whatever deploy used: --bucket here, else the
+	// bucket the function was tagged with at deploy time, else the default.
+	// Teardown used to assume the default, so a reaper deployed with --bucket
+	// left its bucket behind while reporting a clean teardown (#1157).
+	bucket := reaperTeardownBucket(ctx, cmd.Flags(), d, account, region)
 	removed, err := d.Teardown(ctx, reaperdeploy.TeardownOptions{
-		Bucket:         reaperdeploy.DefaultBucketName(account, region),
+		Bucket:         bucket,
 		KeepArtifacts:  reaperKeepArtifacts,
 		ForceArtifacts: reaperForceArtifacts,
 		KeepLogs:       reaperKeepLogs,
@@ -485,6 +541,17 @@ func runReaperTeardown(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(out, "\nNothing out-of-band reclaims resources in this account now — 'spawn doctor' will say so.\n")
 	return nil
+}
+
+// reaperTeardownBucket picks the artifact bucket teardown removes.
+func reaperTeardownBucket(ctx context.Context, fs *pflag.FlagSet, d *reaperdeploy.Deployer, account, region string) string {
+	if fs.Changed("bucket") && strings.TrimSpace(reaperBucket) != "" {
+		return strings.TrimSpace(reaperBucket)
+	}
+	if info, err := d.Inspect(ctx); err == nil && info.ArtifactBucket != "" {
+		return info.ArtifactBucket
+	}
+	return reaperdeploy.DefaultBucketName(account, region)
 }
 
 // confirmReaperArm requires an explicit "yes". Arming makes a scheduled process

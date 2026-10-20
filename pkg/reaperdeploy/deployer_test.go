@@ -81,7 +81,9 @@ type fakeLambda struct {
 	updating        int
 	updateFailed    bool
 
-	tags map[string]string // what TagResource last set
+	tags       map[string]string // what TagResource last set
+	createTags map[string]string // what CreateFunction set
+	getTags    map[string]string // what GetFunction reports
 }
 
 func (f *fakeLambda) TagResource(_ context.Context, in *lambda.TagResourceInput, _ ...func(*lambda.Options)) (*lambda.TagResourceOutput, error) {
@@ -109,7 +111,7 @@ func (f *fakeLambda) GetFunction(context.Context, *lambda.GetFunctionInput, ...f
 			vars[k] = v
 		}
 	}
-	return &lambda.GetFunctionOutput{Configuration: &lambdatypes.FunctionConfiguration{
+	return &lambda.GetFunctionOutput{Tags: f.getTags, Configuration: &lambdatypes.FunctionConfiguration{
 		FunctionArn:      awssdk.String("arn:aws:lambda:us-east-1:1:function/" + FunctionName),
 		Environment:      &lambdatypes.EnvironmentResponse{Variables: vars},
 		LastUpdateStatus: status,
@@ -117,6 +119,7 @@ func (f *fakeLambda) GetFunction(context.Context, *lambda.GetFunctionInput, ...f
 }
 func (f *fakeLambda) CreateFunction(_ context.Context, in *lambda.CreateFunctionInput, _ ...func(*lambda.Options)) (*lambda.CreateFunctionOutput, error) {
 	f.calls = append(f.calls, "CreateFunction")
+	f.createTags = in.Tags
 	if in.Environment != nil {
 		f.lastEnv = in.Environment.Variables
 	}

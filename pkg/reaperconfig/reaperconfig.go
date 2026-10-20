@@ -129,3 +129,37 @@ func Settable() []string {
 
 // Secret reports whether a variable's value must never be printed.
 func Secret(name string) bool { return name == EnvNotifyURL }
+
+// EnvRegions is the comma-separated list of regions the reaper scans.
+const EnvRegions = "REAPER_REGIONS"
+
+// DefaultRegions is the set the reaper scans when REAPER_REGIONS is unset. It
+// mirrors the 11 regions the release workflow publishes spored to
+// (spawn-binaries-<region>), i.e. where spawn actually operates.
+//
+// It lives here, not in the reaper, so the CLI's coverage check (#1157) reads
+// the same answer the reaper acts on: a launch in a region the reaper does not
+// scan is not covered by it, wherever the function happens to live.
+func DefaultRegions() []string {
+	return []string{
+		"us-east-1", "us-east-2", "us-west-1", "us-west-2",
+		"ca-central-1",
+		"eu-west-1", "eu-west-2", "eu-central-1",
+		"ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
+	}
+}
+
+// ParseRegions is how the reaper reads REAPER_REGIONS: comma-separated and
+// trimmed, with an unset or empty value meaning DefaultRegions.
+func ParseRegions(env string) []string {
+	var out []string
+	for _, p := range strings.Split(env, ",") {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return DefaultRegions()
+	}
+	return out
+}

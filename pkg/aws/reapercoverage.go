@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+
+	"github.com/spore-host/spawn/pkg/reaperconfig"
 )
 
 // ReaperCoverageRoleName is the conventional name of the role an operator creates
@@ -32,7 +35,9 @@ type ReaperCoverage struct {
 	// permission), in which case nothing may be claimed either way.
 	Determined bool
 	// How names the evidence, e.g. "in-account reaper spawn-ttl-reaper-production"
-	// or "cross-account role spawn-ttl-reaper-ec2".
+	// or "cross-account role spawn-ttl-reaper-ec2". When Covered is false and
+	// Determined is true, a non-empty How names reapers found that do not scan
+	// the region (#1157).
 	How string
 	// Why explains an undetermined result.
 	Why string
@@ -43,6 +48,9 @@ func (c ReaperCoverage) Summary() string {
 	switch {
 	case c.Covered:
 		return "covered (" + c.How + ")"
+	case c.Determined && c.How != "":
+		// A reaper exists but does not scan this region (#1157).
+		return "NOT covered in this region — " + c.How + ", and no " + ReaperCoverageRoleName + " role grants another reaper access"
 	case c.Determined:
 		return "NOT covered — no reaper runs here and no " + ReaperCoverageRoleName + " role grants one access"
 	default:
@@ -72,47 +80,172 @@ func (c ReaperCoverage) Summary() string {
 // so an undetermined result is reported as undetermined rather than as "not
 // covered".
 func DetectReaperCoverage(ctx context.Context, cfg awssdk.Config) ReaperCoverage {
-	var probeErrs []string
+	listerFor := func(region string) reaperFunctionLister {
+		c := cfg.Copy()
+		if region != "" {
+			c.Region = region
+		}
+		return lambda.NewFromConfig(c)
+	}
+	return detectReaperCoverage(ctx, cfg.Region, listerFor, iam.NewFromConfig(cfg))
+}
 
-	// 1. A reaper running in this account.
-	lam := lambda.NewFromConfig(cfg)
+type reaperFunctionLister interface {
+	ListFunctions(context.Context, *lambda.ListFunctionsInput, ...func(*lambda.Options)) (*lambda.ListFunctionsOutput, error)
+}
+
+type reaperRoleGetter interface {
+	GetRole(context.Context, *iam.GetRoleInput, ...func(*iam.Options)) (*iam.GetRoleOutput, error)
+}
+
+// reaperFunction is an in-account reaper Lambda and the regions it scans.
+type reaperFunction struct {
+	name, home string
+	regions    []string
+	// readable is false when the function's environment could not be read, so
+	// its regions are unknown.
+	readable bool
+}
+
+func (f reaperFunction) scans(region string) bool {
+	if !f.readable || region == "" {
+		return true
+	}
+	for _, r := range f.regions {
+		if r == region {
+			return true
+		}
+	}
+	return false
+}
+
+// listReaperFunctions finds spawn-ttl-reaper* functions through one regional
+// Lambda client, with the regions each is configured to scan (REAPER_REGIONS,
+// read the way the reaper reads it).
+func listReaperFunctions(ctx context.Context, lam reaperFunctionLister, home string) ([]reaperFunction, error) {
+	var found []reaperFunction
 	var marker *string
 	for page := 0; page < 10; page++ { // bounded: an account with 500+ functions is not worth paging forever
 		out, err := lam.ListFunctions(ctx, &lambda.ListFunctionsInput{Marker: marker})
 		if err != nil {
-			probeErrs = append(probeErrs, "lambda:ListFunctions: "+err.Error())
-			break
+			return found, err
 		}
 		for _, fn := range out.Functions {
-			if strings.HasPrefix(awssdk.ToString(fn.FunctionName), reaperFunctionPrefix) {
-				return ReaperCoverage{
-					Covered:    true,
-					Determined: true,
-					How:        "in-account reaper " + awssdk.ToString(fn.FunctionName),
-				}
+			name := awssdk.ToString(fn.FunctionName)
+			if !strings.HasPrefix(name, reaperFunctionPrefix) {
+				continue
 			}
+			f := reaperFunction{name: name, home: home, readable: true}
+			switch {
+			case fn.Environment == nil:
+				f.regions = reaperconfig.ParseRegions("")
+			case fn.Environment.Error != nil:
+				f.readable = false
+			default:
+				f.regions = reaperconfig.ParseRegions(fn.Environment.Variables[reaperconfig.EnvRegions])
+			}
+			found = append(found, f)
 		}
 		if out.NextMarker == nil || awssdk.ToString(out.NextMarker) == "" {
 			break
 		}
 		marker = out.NextMarker
 	}
+	return found, nil
+}
 
-	// 2. A role here granting a reaper elsewhere access.
-	iamCli := iam.NewFromConfig(cfg)
-	_, err := iamCli.GetRole(ctx, &iam.GetRoleInput{RoleName: awssdk.String(ReaperCoverageRoleName)})
+// detectReaperCoverage is DetectReaperCoverage with its AWS clients injected.
+//
+// Coverage is per REGION, not per account (#1157). The reaper scans the regions
+// in its REAPER_REGIONS, wherever the function itself lives: one deployed in
+// us-east-1 with --regions us-east-1,us-west-2 covers a us-west-2 launch, and
+// one in eu-west-1 whose list omits eu-west-1 does not cover a launch beside
+// it. The check used to be "is there a function in this region", which got both
+// wrong. So the function's configured regions decide, and when nothing in the
+// launch region covers it, the reaper's default regions are searched for a
+// function that does.
+func detectReaperCoverage(ctx context.Context, region string, listerFor func(string) reaperFunctionLister, roles reaperRoleGetter) ReaperCoverage {
+	var probeErrs []string
+	var excluded []string
+
+	consider := func(fns []reaperFunction) *ReaperCoverage {
+		for _, f := range fns {
+			if !f.scans(region) {
+				excluded = append(excluded, fmt.Sprintf("%s (%s) scans only %s", f.name, f.home, strings.Join(f.regions, ",")))
+				continue
+			}
+			how := "in-account reaper " + f.name
+			if f.home != region && f.home != "" {
+				how += " in " + f.home
+			}
+			switch {
+			case !f.readable:
+				how += ", whose scanned regions could not be read"
+			case region != "":
+				how += ", scanning " + region
+			}
+			return &ReaperCoverage{Covered: true, Determined: true, How: how}
+		}
+		return nil
+	}
+
+	// 1. A reaper running in this account, in the launch region.
+	local, err := listReaperFunctions(ctx, listerFor(region), region)
+	if err != nil {
+		probeErrs = append(probeErrs, "lambda:ListFunctions: "+err.Error())
+	}
+	if c := consider(local); c != nil {
+		return *c
+	}
+
+	// 1b. A reaper in this account but another region, configured to scan this
+	// one. Only the reaper's default regions are searched: that is where a
+	// deploy puts it, and searching every region on every launch is not.
+	if region != "" && len(probeErrs) == 0 {
+		var others []string
+		for _, r := range reaperconfig.DefaultRegions() {
+			if r != region {
+				others = append(others, r)
+			}
+		}
+		results := make([][]reaperFunction, len(others))
+		errs := make([]error, len(others))
+		var wg sync.WaitGroup
+		for i, r := range others {
+			wg.Add(1)
+			go func(i int, r string) {
+				defer wg.Done()
+				results[i], errs[i] = listReaperFunctions(ctx, listerFor(r), r)
+			}(i, r)
+		}
+		wg.Wait()
+		for i, r := range others {
+			if errs[i] != nil {
+				probeErrs = append(probeErrs, fmt.Sprintf("lambda:ListFunctions (%s): %v", r, errs[i]))
+				continue
+			}
+			if c := consider(results[i]); c != nil {
+				return *c
+			}
+		}
+	}
+
+	// 2. A role here granting a reaper elsewhere access. Which regions that
+	// reaper scans is set on it, in the account that assumes the role, and
+	// cannot be read from here; the role itself is not region-scoped.
+	_, err = roles.GetRole(ctx, &iam.GetRoleInput{RoleName: awssdk.String(ReaperCoverageRoleName)})
 	switch {
 	case err == nil:
 		return ReaperCoverage{
 			Covered:    true,
 			Determined: true,
-			How:        "cross-account role " + ReaperCoverageRoleName,
+			How:        "cross-account role " + ReaperCoverageRoleName + "; the regions it scans are set on the reaper that assumes it and cannot be read from this account",
 		}
 	case isNoSuchEntity(err):
 		// Definitive absence. Combined with probe 1, this is a real "not covered"
 		// — but only if probe 1 actually ran.
 		if len(probeErrs) == 0 {
-			return ReaperCoverage{Determined: true}
+			return ReaperCoverage{Determined: true, How: strings.Join(excluded, "; ")}
 		}
 	default:
 		probeErrs = append(probeErrs, "iam:GetRole: "+err.Error())
