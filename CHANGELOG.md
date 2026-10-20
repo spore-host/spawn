@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `taskproto.ExitUserTerminated` (`user_terminated`), the terminal-flush
   reason `spawn terminate` passes to a task's flush hook (#802).
 
+- `aws.Client.DeleteInstanceProfileAndRole` and
+  `aws.Client.LiveInstancesWithTag` (Go API). Unlike `ListInstances`,
+  `LiveInstancesWithTag` returns the describe error rather than skipping the
+  region, because callers delete things when the result is empty.
+
+- **`spawn pool create --cost-limit`** sets a spend ceiling in USD per worker,
+  covering compute and storage, passed to spored as `spawn launch --cost-limit`
+  is. spored terminates a worker that reaches it. Before this a pool had no
+  spend bound except `--ttl` (#1183).
+
 ### Changed
 
 - **`spawn extend` now exits non-zero when spored could not be reloaded.**
@@ -72,10 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   idle timeout runs out, instead of stopping it; it takes precedence over
   `HibernateOnIdle`. A Spot launch whose only stop-shaped setting is an idle
   timeout with `TerminateOnIdle` stays a one-time request (#1151).
-- **`spawn pool create --cost-limit`** sets a spend ceiling in USD per worker,
-  covering compute and storage, passed to spored as `spawn launch --cost-limit`
-  is. spored terminates a worker that reaches it. Before this a pool had no
-  spend bound except `--ttl` (#1183).
 
 - **`spawn app launch` now sets an 8h TTL when `--ttl` is not given (#1150).**
   An app's idle action is still a stop, so a session can be restarted, but
@@ -124,6 +130,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`spawn pool drain` is idempotent (#1183).** Draining a pool whose queue is
   already gone reports "already drained" and exits 0, after one lookup. It
   used to retry for about 30 s and exit 1.
+
+- **Each pool now gets its own worker IAM role (#1147).** All pools shared the
+  role `spawn-pool-worker`, whose one inline policy is scoped to a single run's
+  queue. A second `spawn pool create` overwrote it and cut the first pool's
+  workers off from their queue. Each pool now gets its own role and instance
+  profile, `spawn-pool-worker-<hash of run id>`, tagged `spawn:pool-run-id`.
+  `spawn pool drain` deletes them once no worker of the pool is pending,
+  running, stopping or stopped. A worker whose role is deleted loses its
+  credentials and spored can no longer terminate it. Workers terminate soon
+  after their queue is deleted, so drain re-checks for up to `--wait` (new,
+  default 2m) before removing the role. If workers remain after that, drain
+  keeps the role and says so; re-run `spawn pool drain` to remove it. The old shared `spawn-pool-worker` role is no longer
+  used: `spawn orphans` lists it, and you can delete it.
 
 ### Fixed
 

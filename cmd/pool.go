@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -43,6 +45,7 @@ var (
 	poolS3Read       []string
 	poolS3Write      []string
 	poolCostLimit    float64
+	poolDrainWait    time.Duration
 )
 
 var poolGroupCmd = &cobra.Command{
@@ -133,6 +136,86 @@ func bucketResourceARNs(names []string) (objARNs, bktARNs string) {
 		bkts = append(bkts, fmt.Sprintf("%q", "arn:aws:s3:::"+n))
 	}
 	return strings.Join(objs, ","), strings.Join(bkts, ",")
+}
+
+// poolWorkerRoleName is the IAM role (and instance profile, same name) for one
+// pool's workers. One per pool, not one shared role (#1147): the inline policy
+// is scoped to a single run's queue, and CreateOrGetInstanceProfile overwrites a
+// role's inline policy, so a second `pool create` on a shared role cut the first
+// pool's workers off from their queue. The run id is hashed, not embedded,
+// because a role name is capped at 64 characters and a run id is not.
+func poolWorkerRoleName(runID string) string {
+	sum := sha256.Sum256([]byte(runID))
+	return "spawn-pool-worker-" + hex.EncodeToString(sum[:])[:16]
+}
+
+// poolWorkerRoleConfig is the per-pool instance-profile request. The
+// spawn:pool-run-id tag says which pool a role belongs to, for `spawn orphans`
+// and for anyone reading the account.
+func poolWorkerRoleConfig(account, region, specBucket, runID string, extraRead, extraWrite []string) aws.IAMRoleConfig {
+	return aws.IAMRoleConfig{
+		RoleName:         poolWorkerRoleName(runID),
+		TrustServices:    []string{"ec2"},
+		InlinePolicyJSON: poolWorkerPolicy(account, region, specBucket, runID, extraRead, extraWrite),
+		Tags:             map[string]string{"spawn:pool-run-id": runID},
+	}
+}
+
+// poolIdentityAPI is what removing a pool's IAM identity needs; *aws.Client
+// satisfies it, and tests fake it.
+type poolIdentityAPI interface {
+	LiveInstancesWithTag(ctx context.Context, region, key, value string) ([]aws.InstanceInfo, error)
+	DeleteInstanceProfileAndRole(ctx context.Context, name string) error
+}
+
+// poolDrainWorkerPoll is how often drain re-checks for live workers while it
+// waits to remove the pool's role.
+const poolDrainWorkerPoll = 10 * time.Second
+
+// removePoolWorkerIdentity deletes the pool's role and instance profile once
+// no worker can need them, so a drained pool leaves no IAM behind (#1147,
+// #653). It refuses while any worker is pending, running, stopping or stopped:
+// a worker whose role is deleted loses its credentials, and spored then cannot
+// terminate it. Workers terminate shortly after their queue is deleted, so it
+// re-checks every poolDrainWorkerPoll for up to wait; a caller that drains
+// once (nf-spawn does, at run end) still leaves nothing behind. If workers
+// remain after that, a later `pool drain` removes the role. sleep is the
+// pause between checks (nil = sleepCtx), a seam so tests count checks rather
+// than wait. Returns the line to print; never fails the drain, which has
+// already done its job.
+func removePoolWorkerIdentity(ctx context.Context, api poolIdentityAPI, region, runID string, wait time.Duration, sleep func(context.Context, time.Duration) bool) string {
+	if sleep == nil {
+		sleep = sleepCtx
+	}
+	name := poolWorkerRoleName(runID)
+	for waited := time.Duration(0); ; waited += poolDrainWorkerPoll {
+		live, err := api.LiveInstancesWithTag(ctx, region, "spawn:pool-run-id", runID)
+		if err != nil {
+			return fmt.Sprintf("⚠️  kept IAM role %s: could not check for live workers (%v); re-run 'spawn pool drain --run-id %s' to remove it\n", name, err, runID)
+		}
+		if len(live) == 0 {
+			break
+		}
+		if waited >= wait || !sleep(ctx, poolDrainWorkerPoll) {
+			return fmt.Sprintf("   kept IAM role %s: %d worker(s) still use it; re-run 'spawn pool drain --run-id %s' once they have terminated to remove it\n", name, len(live), runID)
+		}
+	}
+	if err := api.DeleteInstanceProfileAndRole(ctx, name); err != nil {
+		return fmt.Sprintf("⚠️  could not delete IAM role %s: %v\n", name, err)
+	}
+	return fmt.Sprintf("   deleted IAM role and instance profile %s\n", name)
+}
+
+// sleepCtx sleeps d or until ctx is done; false if ctx ended first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // poolWorkerMaxRestarts bounds the restart-on-error loop so a hard crash-loop
@@ -320,8 +403,8 @@ func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, sp
 	// The taskcohort Actuator calls aws.Client.Launch directly (RunInstances), which
 	// — unlike the launcher.Provision path used by `spawn task run` — does NOT
 	// auto-fill these. RunInstances requires an ImageId, so an empty AMI fails every
-	// worker with MissingParameter. Workers are homogeneous, so one AMI + one shared
-	// spored profile fits all of them (resolve once, reuse across the cohort).
+	// worker with MissingParameter. Workers are homogeneous, so one AMI + one
+	// per-pool profile fits all of them (resolve once, reuse across the cohort).
 	ami, err := awsClient.GetRecommendedAMI(ctx, region, poolInstanceType)
 	if err != nil {
 		return fmt.Errorf("auto-detect worker AMI for %s in %s: %w", poolInstanceType, region, err)
@@ -338,11 +421,8 @@ func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, sp
 	if err != nil {
 		return fmt.Errorf("resolve account id for worker policy: %w", err)
 	}
-	iamProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
-		RoleName:         "spawn-pool-worker",
-		TrustServices:    []string{"ec2"},
-		InlinePolicyJSON: poolWorkerPolicy(account, region, specBucket, poolRunID, poolS3Read, poolS3Write),
-	})
+	iamProfile, err := awsClient.CreateOrGetInstanceProfile(ctx,
+		poolWorkerRoleConfig(account, region, specBucket, poolRunID, poolS3Read, poolS3Write))
 	if err != nil {
 		return fmt.Errorf("set up worker IAM instance profile: %w", err)
 	}
@@ -488,6 +568,9 @@ var poolDrainCmd = &cobra.Command{
 			return err
 		}
 		fmt.Fprint(os.Stderr, poolDrainMessage(poolRunID, alreadyGone))
+		// The role is removed on every drain, including an "already drained" one:
+		// re-running drain is how a role kept for live workers gets removed.
+		fmt.Fprint(os.Stderr, removePoolWorkerIdentity(ctx, awsClient, awsClient.Config().Region, poolRunID, poolDrainWait, nil))
 		return nil
 	},
 }
@@ -529,6 +612,8 @@ func init() {
 	poolCreateCmd.Flags().IntVar(&poolVisTimeout, "visibility-timeout", 900, "SQS claim window in seconds (must exceed the longest task runtime)")
 	poolCreateCmd.Flags().StringArrayVar(&poolS3Read, "s3-read", nil, "Extra S3 bucket the tasks read inputs from (repeatable) — beyond the results bucket workers always get")
 	poolCreateCmd.Flags().StringArrayVar(&poolS3Write, "s3-write", nil, "Extra S3 bucket the tasks write outputs to (repeatable) — beyond the results bucket")
+
+	poolDrainCmd.Flags().DurationVar(&poolDrainWait, "wait", 2*time.Minute, "How long to wait for the pool's workers to terminate before removing its IAM role (0 = check once)")
 
 	poolSubmitCmd.Flags().StringVar(&poolSpecPath, "spec", "", "Path to a TaskSpec JSON file to enqueue")
 }

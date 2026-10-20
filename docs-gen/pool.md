@@ -53,8 +53,14 @@ spawn pool create --run-id R --workers N --instance-type T [flags]
 Delete the pool's task queue; its workers then terminate
 
 ```
-spawn pool drain --run-id R
+spawn pool drain --run-id R [flags]
 ```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--wait` |  | duration | `2m0s` | How long to wait for the pool's workers to terminate before removing its IAM role (0 = check once) |
 
 ### `spawn pool status`
 

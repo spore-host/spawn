@@ -336,6 +336,7 @@ func (*Client) CurrentSpotPrice(ctx context.Context, region, instanceID string) 
 func (*Client) DeleteAMI(ctx context.Context, region, amiID string) (*DeleteAMIResult, error)
 func (*Client) DeleteFSxFilesystem(ctx context.Context, filesystemID, region string) error
 func (*Client) DeleteISOFromS3(ctx context.Context, region, bucket, key string, alsoBucketIfEmpty bool) error
+func (*Client) DeleteInstanceProfileAndRole(ctx context.Context, name string) error
 func (*Client) DeletePlacementGroup(ctx context.Context, name, region string) error
 func (*Client) DeletePlacementGroupWithRetry(ctx context.Context, name, region string) error
 func (*Client) DeleteS3Object(ctx context.Context, region, bucket, key string) error
@@ -382,6 +383,7 @@ func (*Client) IsWindowsAMI(ctx context.Context, region, amiID string) bool
 func (*Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error)
 func (*Client) ListAMIs(ctx context.Context, region string, filters map[string]string) ([]AMIInfo, error)
 func (*Client) ListInstances(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error)
+func (*Client) LiveInstancesWithTag(ctx context.Context, region, key, value string) ([]InstanceInfo, error)
 func (*Client) OpenImageSource(ctx context.Context, source, region string) (io.ReadCloser, error)
 func (*Client) PrepareSnapshotImage(ctx context.Context, source, region string, maxBytes int64, tempDir string) (*PreparedImage, error)
 func (*Client) PurchaseCapacityBlock(ctx context.Context, region, offeringID, platform string, dryRun bool, tags map[string]string) (string, error)
