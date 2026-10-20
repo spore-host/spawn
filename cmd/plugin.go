@@ -64,11 +64,11 @@ var pluginListCmd = &cobra.Command{
 		if pluginInstance == "" {
 			return fmt.Errorf("--instance is required")
 		}
-		sshHost, err := resolvePluginSSHHost(cmd.Context(), pluginInstance)
+		push, err := pluginTransportFor(cmd.Context(), pluginInstance)
 		if err != nil {
 			return err
 		}
-		states, err := remotePluginList(cmd.Context(), sshHost)
+		states, err := remotePluginList(cmd.Context(), push)
 		if err != nil {
 			return err
 		}
@@ -105,7 +105,10 @@ Runs the plugin's full lifecycle: local provision steps on this controller
 install/configure/start steps on the instance via spored. Values captured and
 pushed by local steps are delivered before the remote configure phase runs.
 
-Requires SSH access to the instance (the same key used by 'spawn plugin status').
+spored's push API listens on the instance's loopback only. spawn reaches it over
+SSH when the instance has a public IP and SSH works, and otherwise runs the
+request on the instance over SSM (keyless or SSM-only instances, no public IP).
+The same applies to 'spawn plugin list', 'status' and 'remove'.
 
 Linux spores only: plugin steps are POSIX shell, so 'spawn plugin install'
 refuses a Windows spore (spawn:os=windows) before running anything.
@@ -246,9 +249,9 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	// credential or creates an endpoint for it.
 	hasRemote := len(spec.Remote.Install) > 0 || len(spec.Remote.Configure) > 0 ||
 		len(spec.Remote.Start) > 0
-	var sshHost string
+	var push pushTransport
 	if hasRemote || len(spec.Conditions.Remote) > 0 {
-		sshHost, err = resolvePluginSSHHost(ctx, instance)
+		push, err = pluginTransportFor(ctx, instance)
 		if err != nil {
 			return err
 		}
@@ -267,7 +270,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	}
 	if len(spec.Conditions.Remote) > 0 {
 		fmt.Printf("Checking %d remote condition(s) on the instance...\n", len(spec.Conditions.Remote))
-		if err := remotePluginPreflight(ctx, sshHost, spec, resolvedCfg); err != nil {
+		if err := remotePluginPreflight(ctx, push, spec, resolvedCfg); err != nil {
 			if !errors.Is(err, errPreflightUnsupported) {
 				return err
 			}
@@ -317,7 +320,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	// spored, handing over the resolved config and any buffered pushed values.
 	if hasRemote {
 		fmt.Println("Running remote install steps on the instance...")
-		if err := remotePluginInstall(ctx, sshHost, spec, resolvedCfg, pushBuf.Values(), prov); err != nil {
+		if err := remotePluginInstall(ctx, push, spec, resolvedCfg, pushBuf.Values(), prov); err != nil {
 			return fmt.Errorf("remote install: %w", err)
 		}
 		// Record provenance on the instance's EC2 tags so an audit can answer
@@ -329,7 +332,7 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 		// Best-effort: a tagging failure never fails the install.
 		recordPluginProvenanceTag(ctx, instance, spec, prov)
 
-		if err := waitForPluginReady(ctx, sshHost, spec.Name); err != nil {
+		if err := waitForPluginReady(ctx, push, instance, spec.Name); err != nil {
 			return err
 		}
 	}
@@ -699,12 +702,28 @@ func deprovisionAllLocalPlugins(ctx context.Context, instanceKeys ...string) {
 // remotePluginInstall sends the resolved spec, config, and buffered pushed
 // values to spored's install endpoint over an SSH tunnel. spored runs the
 // install asynchronously and returns 202; the outcome is polled separately.
-func remotePluginInstall(ctx context.Context, instance string, spec *plugin.PluginSpec, cfg, pushed map[string]string, prov *plugin.Provenance) error {
+func remotePluginInstall(ctx context.Context, t pushTransport, spec *plugin.PluginSpec, cfg, pushed map[string]string, prov *plugin.Provenance) error {
+	payload, err := pluginInstallPayload(spec, cfg, pushed, prov)
+	if err != nil {
+		return err
+	}
+	status, body, err := t.call(ctx, http.MethodPost, "/v1/plugins/install", payload)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusAccepted {
+		return fmt.Errorf("install API: HTTP %d: %s", status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+// pluginInstallPayload is the body of POST /v1/plugins/install, the same over
+// every transport.
+func pluginInstallPayload(spec *plugin.PluginSpec, cfg, pushed map[string]string, prov *plugin.Provenance) ([]byte, error) {
 	specYAML, err := yaml.Marshal(spec)
 	if err != nil {
-		return fmt.Errorf("marshal spec: %w", err)
+		return nil, fmt.Errorf("marshal spec: %w", err)
 	}
-
 	payload, err := json.Marshal(map[string]interface{}{
 		"spec":       string(specYAML),
 		"config":     cfg,
@@ -712,34 +731,9 @@ func remotePluginInstall(ctx context.Context, instance string, spec *plugin.Plug
 		"provenance": prov,
 	})
 	if err != nil {
-		return fmt.Errorf("encode install request: %w", err)
+		return nil, fmt.Errorf("encode install request: %w", err)
 	}
-
-	token, err := sshReadToken(ctx, instance, pluginKeyPath)
-	if err != nil {
-		return err
-	}
-
-	_, err = withSSHTunnel(ctx, instance, pluginKeyPath, func() (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			"http://127.0.0.1:7777/v1/plugins/install", bytes.NewReader(payload))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusAccepted {
-			body, _ := io.ReadAll(resp.Body)
-			return resp, fmt.Errorf("install API: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		}
-		return resp, nil
-	})
-	return err
+	return payload, nil
 }
 
 // errPreflightUnsupported means the instance's spored predates
@@ -753,7 +747,7 @@ var errRemoteCondition = errors.New("remote condition failed on the instance")
 
 // remotePluginPreflight asks spored to evaluate spec's conditions.remote on the
 // instance, installing nothing (#1040).
-func remotePluginPreflight(ctx context.Context, instance string, spec *plugin.PluginSpec, cfg map[string]string) error {
+func remotePluginPreflight(ctx context.Context, t pushTransport, spec *plugin.PluginSpec, cfg map[string]string) error {
 	specYAML, err := yaml.Marshal(spec)
 	if err != nil {
 		return fmt.Errorf("marshal spec: %w", err)
@@ -762,36 +756,27 @@ func remotePluginPreflight(ctx context.Context, instance string, spec *plugin.Pl
 	if err != nil {
 		return fmt.Errorf("encode preflight request: %w", err)
 	}
-	token, err := sshReadToken(ctx, instance, pluginKeyPath)
-	if err != nil {
-		return err
-	}
-	_, err = withSSHTunnel(ctx, instance, pluginKeyPath, func() (*http.Response, error) {
-		return postPluginPreflight(ctx, http.DefaultClient, "http://127.0.0.1:7777", token, payload)
-	})
-	return err
+	return pluginPreflightVia(ctx, t, payload)
 }
 
 // postPluginPreflight sends a preflight request to spored's push API at baseURL
-// and maps the answer to an error: nil when every remote condition passed, one
-// wrapping errRemoteCondition (and naming the condition's message) when one
-// failed, and errPreflightUnsupported for a spored without the endpoint.
+// directly; see pluginPreflightVia.
 func postPluginPreflight(ctx context.Context, client *http.Client, baseURL, token string, payload []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/plugins/preflight", bytes.NewReader(payload))
+	return nil, pluginPreflightVia(ctx, httpPush{client: client, baseURL: baseURL, token: token}, payload)
+}
+
+// pluginPreflightVia sends a preflight request over t and maps the answer to
+// an error: nil when every remote condition passed, one wrapping
+// errRemoteCondition (and naming the condition's message) when one failed,
+// and errPreflightUnsupported for a spored without the endpoint.
+func pluginPreflightVia(ctx context.Context, t pushTransport, payload []byte) error {
+	status, body, err := t.call(ctx, http.MethodPost, "/v1/plugins/preflight", payload)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	switch resp.StatusCode {
+	switch status {
 	case http.StatusOK:
-		return resp, nil
+		return nil
 	case http.StatusPreconditionFailed:
 		var pr struct {
 			Error string `json:"error"`
@@ -800,22 +785,22 @@ func postPluginPreflight(ctx context.Context, client *http.Client, baseURL, toke
 		if json.Unmarshal(body, &pr) == nil && pr.Error != "" {
 			msg = pr.Error
 		}
-		return resp, fmt.Errorf("%w: %s", errRemoteCondition, msg)
+		return fmt.Errorf("%w: %s", errRemoteCondition, msg)
 	case http.StatusNotFound, http.StatusMethodNotAllowed:
-		return resp, errPreflightUnsupported
+		return errPreflightUnsupported
 	default:
-		return resp, fmt.Errorf("preflight API: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("preflight API: HTTP %d: %s", status, strings.TrimSpace(string(body)))
 	}
 }
 
 // waitForPluginReady polls the remote plugin status until it reaches a terminal
 // state (running or failed) or the timeout elapses. It returns an error if the
 // plugin failed or never became ready.
-func waitForPluginReady(ctx context.Context, instance, name string) error {
+func waitForPluginReady(ctx context.Context, t pushTransport, instance, name string) error {
 	deadline := time.Now().Add(3 * time.Minute)
 	var last plugin.PluginStatus
 	for time.Now().Before(deadline) {
-		st, err := remotePluginStatus(ctx, instance, name)
+		st, err := remotePluginStatus(ctx, t, instance, name)
 		if err == nil {
 			if st.Status != last {
 				fmt.Printf("  %s...\n", st.Status)
@@ -862,11 +847,11 @@ credentials it captures only to push to the instance.`,
 			return fmt.Errorf("--instance is required")
 		}
 
-		sshHost, err := resolvePluginSSHHost(cmd.Context(), pluginInstance)
+		push, err := pluginTransportFor(cmd.Context(), pluginInstance)
 		if err != nil {
 			return err
 		}
-		st, err := remotePluginStatus(cmd.Context(), sshHost, args[0])
+		st, err := remotePluginStatus(cmd.Context(), push, pluginInstance, args[0])
 		if err != nil {
 			return err
 		}
@@ -905,36 +890,15 @@ var pluginRemoveCmd = &cobra.Command{
 			}
 		}
 
-		sshHost, err := resolvePluginSSHHost(cmd.Context(), pluginInstance)
+		push, err := pluginTransportFor(cmd.Context(), pluginInstance)
 		if err != nil {
 			return err
 		}
-
-		token, err := sshReadToken(cmd.Context(), sshHost, pluginKeyPath)
+		status, body, err := push.call(cmd.Context(), http.MethodDelete, fmt.Sprintf("/v1/plugins/%s", name), nil)
 		if err != nil {
-			return fmt.Errorf("read token: %w", err)
+			return err
 		}
-
-		var respErr error
-		var warning string
-		_, err = withSSHTunnel(cmd.Context(), sshHost, pluginKeyPath, func() (*http.Response, error) {
-			url := fmt.Sprintf("http://127.0.0.1:7777/v1/plugins/%s", name)
-			req, err := http.NewRequestWithContext(cmd.Context(), http.MethodDelete, url, nil)
-			if err != nil {
-				return nil, err
-			}
-			req.Header.Set("Authorization", "Bearer "+token)
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return nil, err
-			}
-			body, _ := io.ReadAll(resp.Body)
-			warning, respErr = removeOutcome(resp.StatusCode, body, name, pluginInstance)
-			return resp, nil
-		})
-		if err != nil {
-			return fmt.Errorf("SSH tunnel: %w", err)
-		}
+		warning, respErr := removeOutcome(status, body, name, pluginInstance)
 		if respErr != nil {
 			return respErr
 		}
@@ -1072,60 +1036,31 @@ type pluginStateResponse struct {
 	Provenance *plugin.Provenance  `json:"provenance,omitempty"`
 }
 
-func remotePluginList(ctx context.Context, instance string) ([]*pluginStateResponse, error) {
-	token, err := sshReadToken(ctx, instance, pluginKeyPath)
+func remotePluginList(ctx context.Context, t pushTransport) ([]*pluginStateResponse, error) {
+	status, body, err := t.call(ctx, http.MethodGet, "/v1/plugins", nil)
 	if err != nil {
 		return nil, err
 	}
-
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("list plugins: HTTP %d", status)
+	}
 	var states []*pluginStateResponse
-	_, err = withSSHTunnel(ctx, instance, pluginKeyPath, func() (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:7777/v1/plugins", nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusOK {
-			return resp, fmt.Errorf("list plugins: HTTP %d", resp.StatusCode)
-		}
-		return resp, json.NewDecoder(resp.Body).Decode(&states)
-	})
-	return states, err
+	return states, json.Unmarshal(body, &states)
 }
 
-func remotePluginStatus(ctx context.Context, instance, name string) (*pluginStateResponse, error) {
-	token, err := sshReadToken(ctx, instance, pluginKeyPath)
+func remotePluginStatus(ctx context.Context, t pushTransport, instance, name string) (*pluginStateResponse, error) {
+	status, body, err := t.call(ctx, http.MethodGet, fmt.Sprintf("/v1/plugins/%s/status", name), nil)
 	if err != nil {
 		return nil, err
 	}
-
+	if status == http.StatusNotFound {
+		return nil, fmt.Errorf("plugin %q not found on %s", name, instance)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("status API: HTTP %d", status)
+	}
 	var st pluginStateResponse
-	_, err = withSSHTunnel(ctx, instance, pluginKeyPath, func() (*http.Response, error) {
-		url := fmt.Sprintf("http://127.0.0.1:7777/v1/plugins/%s/status", name)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode == http.StatusNotFound {
-			return resp, fmt.Errorf("plugin %q not found on %s", name, instance)
-		}
-		if resp.StatusCode != http.StatusOK {
-			return resp, fmt.Errorf("status API: HTTP %d", resp.StatusCode)
-		}
-		return resp, json.NewDecoder(resp.Body).Decode(&st)
-	})
-	return &st, err
+	return &st, json.Unmarshal(body, &st)
 }
 
 // sshReadToken reads the push bearer token from the remote instance.
@@ -1166,7 +1101,7 @@ func withSSHTunnel(ctx context.Context, instance, keyPath string, fn func() (*ht
 		return nil, err
 	}
 	if err := tunnel.Start(); err != nil {
-		return nil, fmt.Errorf("start SSH tunnel: %w", err)
+		return nil, fmt.Errorf("%w: start SSH tunnel: %v", errPushUnreachable, err)
 	}
 
 	// Wait for the port-forward to become ready (max 5 s).
@@ -1286,28 +1221,6 @@ func ensureInstanceReady(ctx context.Context, region, instanceID string, timeout
 		return fmt.Errorf("aws client: %w", err)
 	}
 	return verifySporedReady(ctx, client, region, instanceID, timeout)
-}
-
-// resolvePluginSSHHost turns the --instance value into a host SSH can reach. It
-// is resolved via spawn (never AWS directly) to user@public-ip, since the plugin
-// push API is only reachable over SSH. A value that is already a hostname/IP (or
-// user@host) — i.e. not something spawn can resolve — is returned unchanged.
-//
-// The SSH user defaults to ec2-user (matching `spawn connect`), since that is
-// the account the EC2 key pair authorizes; --user overrides it.
-func resolvePluginSSHHost(ctx context.Context, instance string) (string, error) {
-	inst := resolveInstanceViaSpawn(ctx, instance)
-	if inst == nil {
-		return instance, nil // not spawn-resolvable — treat as a raw hostname/IP/user@host
-	}
-	if inst.PublicIP == "" {
-		return "", fmt.Errorf("instance %s has no public IP to SSH to (plugin commands need SSH access)", instance)
-	}
-	user := pluginSSHUser
-	if user == "" {
-		user = "ec2-user"
-	}
-	return user + "@" + inst.PublicIP, nil
 }
 
 // parseKeyValuePairs converts []string{"k=v"} to map[string]string.
