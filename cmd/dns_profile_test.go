@@ -43,6 +43,9 @@ type signedCall struct {
 type signingRecorder struct {
 	mu    sync.Mutex
 	calls []signedCall
+	// denySSM answers every SSM GetParameter with AccessDeniedException instead
+	// of passing it to Substrate, which has no way to deny one.
+	denySSM bool
 }
 
 func (r *signingRecorder) record(req *http.Request, body []byte) {
@@ -86,6 +89,15 @@ func profileOverSubstrate(t *testing.T) (*testutil.TestEnv, *signingRecorder) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		body, _ := io.ReadAll(req.Body)
 		rec.record(req, body)
+		rec.mu.Lock()
+		deny := rec.denySSM
+		rec.mu.Unlock()
+		if deny && req.Header.Get("X-Amz-Target") == "AmazonSSM.GetParameter" {
+			w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"__type":"AccessDeniedException","message":"not authorized to perform: ssm:GetParameter"}`)
+			return
+		}
 		req.Body = io.NopCloser(strings.NewReader(string(body)))
 		proxy.ServeHTTP(w, req)
 	}))
@@ -200,6 +212,48 @@ func TestDNSDeleteSignsWithTheProfileAndRemovesTheDNSTags(t *testing.T) {
 	}
 	if !left["Project"] || !left["spawn:managed"] {
 		t.Errorf("dns delete removed a non-DNS tag; left: %v", left)
+	}
+}
+
+// #1121 on the dns commands, combined with #967: with nothing naming the zone
+// but the account's SSM setting, an AccessDenied reading it (as --profile other)
+// refuses `spawn dns delete`, naming the parameter and this command's own flag.
+// Nothing is sent to an updater and no tag is touched.
+func TestDNSDeleteRefusesWhenTheAccountsDNSSettingIsUnreadable(t *testing.T) {
+	env, aws := profileOverSubstrate(t)
+	updater := fakeUpdater(t)
+	t.Cleanup(func() { dnsDomain, dnsAPIEndpoint = "", "" })
+	id := seedInstance(t, ec2.NewFromConfig(env.AWSConfig), map[string]string{"spawn:dns-name": "web", "spawn:dns-status": "registered"})
+	aws.mu.Lock()
+	aws.denySSM = true
+	aws.mu.Unlock()
+
+	err := runRootForTest(t, "dns", "delete", id, "--yes", "--profile", "other")
+	if err == nil {
+		t.Fatal("an AccessDenied on /spawn/dns/domain did not refuse dns delete; it would act on spore.host")
+	}
+	for _, want := range []string{"/spawn/dns/domain", "ssm:GetParameter", "--domain"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
+		}
+	}
+	if n := len(updater.snapshot()); n != 0 {
+		t.Errorf("the updater got %d requests after the refusal", n)
+	}
+	var sawSSM bool
+	for _, c := range aws.snapshot() {
+		if c.action == "DeleteTags" || c.action == "CreateTags" {
+			t.Errorf("a refused dns delete still sent %s", c.action)
+		}
+		if c.target == "AmazonSSM.GetParameter" {
+			sawSSM = true
+			if c.key != profileKey {
+				t.Errorf("the SSM read was signed by %q, want --profile other's %s", c.key, profileKey)
+			}
+		}
+	}
+	if !sawSSM {
+		t.Error("dns delete never read the account's SSM setting")
 	}
 }
 
