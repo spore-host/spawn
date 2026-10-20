@@ -126,17 +126,21 @@ echo "stamped spawn:version=$SPAWN_VERSION"
 # holding 51 MB, the only control-plane artifact measured to grow without bound.
 # The three SAM-deployed functions declare a group with a retention; the
 # script-deployed ones did not, which is exactly why theirs were among the ten.
-#
-# put-retention-policy is idempotent and creates nothing: if the group does not
-# exist yet (first deploy, never invoked) it fails, which is why the failure is
-# tolerated rather than fatal — the next deploy after a first invocation sets it.
 LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
+# Create the group BEFORE setting its retention (#827). put-retention-policy
+# creates nothing, and the group Lambda makes on first invocation has no
+# retention, so a deploy that only set retention left every never-invoked
+# function to start with none. Lambda writes to an existing group rather than
+# making its own, so this is safe and idempotent.
+aws logs create-log-group \
+  --log-group-name "/aws/lambda/$FUNCTION_NAME" \
+  --region "$REGION" 2>/dev/null || true  # swallow-ok: already exists; any other failure fails put-retention-policy next
+# Fatal now: with the group created above, a failure here is real.
 aws logs put-retention-policy \
   --log-group-name "/aws/lambda/$FUNCTION_NAME" \
   --retention-in-days "$LOG_RETENTION_DAYS" \
-  --region "$REGION"  2>/dev/null \
-  && echo "log retention: ${LOG_RETENTION_DAYS}d on /aws/lambda/$FUNCTION_NAME" \
-  || echo "log retention: could not set it yet (group not created until first invocation)"
+  --region "$REGION"
+echo "log retention: ${LOG_RETENTION_DAYS}d on /aws/lambda/$FUNCTION_NAME"
 
 rm function.zip
 

@@ -102,10 +102,58 @@ for s in $shell_deploys; do
   if ! grep -qE "^[[:space:]]*aws logs put-retention-policy" "$s"; then
     note "❌ $s deploys a function but never sets log retention"
     fail=1; ok=0
+  else
+    # Setting retention is not enough: put-retention-policy creates nothing, so
+    # on a never-invoked function (no group yet) it is a no-op, and the group
+    # Lambda then creates has none (#827). The census used to pass exactly that
+    # script. So the group must be CREATED first — the invocation, anchored, on
+    # an earlier line — and the retention call must not be tolerated, since a
+    # tolerated failure is how the no-op went unnoticed.
+    create_at=$(grep -nE "^[[:space:]]*aws logs create-log-group" "$s" | head -1 | cut -d: -f1)
+    put_at=$(grep -nE "^[[:space:]]*aws logs put-retention-policy" "$s" | head -1 | cut -d: -f1)
+    if [ -z "$create_at" ] || [ "$create_at" -ge "$put_at" ]; then
+      note "❌ $s sets log retention without first running 'aws logs create-log-group'"
+      fail=1; ok=0
+    fi
+    # The whole command: the invocation line plus its backslash continuations.
+    put_cmd=$(awk -v n="$put_at" 'NR>=n { print; if ($0 !~ /\\[[:space:]]*$/) exit }' "$s")
+    if grep -qE '\|\||2>/dev/null' <<<"$put_cmd"; then
+      note "❌ $s tolerates a failed put-retention-policy (|| or 2>/dev/null on the call)"
+      fail=1; ok=0
+    fi
   fi
   # The full path, not basename: four different scripts are called deploy.sh,
   # so a basename tells the reader nothing about which one passed.
   [ "$ok" = "1" ] && note "✅ ${s#./} (shell deploy)"
+done
+
+# Go deploy paths (#1156). `spawn reaper deploy` (pkg/reaperdeploy) creates a
+# function from Go, and the shell and SAM halves above cannot see it — which is
+# how it shipped setting no retention at all while #653's CHANGELOG said every
+# deploy path did. DISCOVERED by the invocation: any non-test Go file calling
+# .CreateFunction( is a deploy path, and its package must invoke both
+# .CreateLogGroup( and .PutRetentionPolicy(. Comment lines are dropped first so
+# a sentence about the calls cannot stand in for them.
+go_deploys=$(grep -rlE '\.CreateFunction\(' --include='*.go' . 2>/dev/null |
+  grep -v '_test\.go$' | grep -v '^\./\.git/' | sort)
+if [ -z "$go_deploys" ]; then
+  echo "found no Go file calling .CreateFunction( — the discovery is broken (pkg/reaperdeploy has one)" >&2
+  exit 1
+fi
+for dir in $(for f in $go_deploys; do dirname "$f"; done | sort -u); do
+  code=$(for f in "$dir"/*.go; do case "$f" in *_test.go) ;; *) cat "$f" ;; esac; done |
+    grep -vE '^[[:space:]]*//')
+  ok=1
+  for call in CreateLogGroup PutRetentionPolicy; do
+    # A here-string, not printf | grep -q: under pipefail grep -q exits on the
+    # first match, printf then dies of SIGPIPE, and the pipeline reports failure
+    # for a call that IS present (it did, in CI, on a large package).
+    if ! grep -qE "\.${call}\(ctx" <<<"$code"; then
+      note "❌ ${dir#./} creates a Lambda function from Go but never calls .${call}("
+      fail=1; ok=0
+    fi
+  done
+  [ "$ok" = "1" ] && note "✅ ${dir#./} (Go deploy)"
 done
 
 if [ "$fail" -ne 0 ]; then
@@ -115,7 +163,9 @@ if [ "$fail" -ne 0 ]; then
   echo "independently (#654). Stamp it: a SAM template takes a Version parameter" >&2
   echo "and a spawn:version tag; a shell deploy calls 'aws lambda tag-resource'." >&2
   echo "For retention: a SAM template declares an AWS::Logs::LogGroup with" >&2
-  echo "RetentionInDays; a shell deploy calls 'aws logs put-retention-policy'." >&2
+  echo "RetentionInDays; a shell deploy runs 'aws logs create-log-group' and then" >&2
+  echo "'aws logs put-retention-policy' (not tolerated); a Go deploy calls" >&2
+  echo "CreateLogGroup then PutRetentionPolicy." >&2
   exit 1
 fi
 

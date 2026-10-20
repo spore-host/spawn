@@ -13,6 +13,7 @@ import (
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	cwlogs "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
 	ebtypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -75,8 +76,10 @@ type S3API interface {
 
 // Deployer converges the reaper's resources in one account.
 type Deployer struct {
-	// Logs is optional: only the idle check uses it, and a nil Logs reports
-	// "undetermined" rather than failing, so existing callers keep working.
+	// Logs is needed by Deploy (log group + retention, #1156) and by the idle
+	// check. A nil Logs makes Deploy fail rather than leave the reaper's logs
+	// unretained, makes the idle check report "undetermined", and makes
+	// Teardown say it left the log group.
 	Logs   LogsAPI
 	IAM    IAMAPI
 	Lambda LambdaAPI
@@ -179,6 +182,11 @@ type Options struct {
 	// value removes the variable, returning the reaper to its own default. Any
 	// REAPER_* variable already on the function and not named here is kept.
 	Settings map[string]string
+
+	// LogRetentionDays is the retention set on the function's log group. Zero
+	// uses DefaultLogRetentionDays. CloudWatch accepts only certain values
+	// (1, 3, 5, 7, 14, 30, 60, 90, ...) and rejects others itself.
+	LogRetentionDays int32
 }
 
 // MergeEnv computes the environment a deploy writes, given the existing
@@ -263,6 +271,48 @@ func settingActions(settings map[string]string) []string {
 	return out
 }
 
+// DefaultLogRetentionDays is the retention a deploy sets, matching every other
+// spore.host Lambda (#653, #770) and the idle check's window.
+const DefaultLogRetentionDays = 30
+
+// ensureLogGroup creates the function's log group and sets its retention.
+//
+// Created here rather than left to Lambda, because the group Lambda creates on
+// first invocation has NO retention and keeps logs forever, and a retention
+// call cannot act on a group that does not exist yet (#827). So a deploy that
+// only set retention would leave every fresh reaper unretained, and this one
+// set none at all (#1156). Lambda writes to an existing group rather than
+// creating its own, so creating it first is safe and idempotent.
+func (d *Deployer) ensureLogGroup(ctx context.Context, days int32, version string) (string, error) {
+	if d.Logs == nil {
+		return "", errors.New("reaperdeploy: no CloudWatch Logs client, so log retention cannot be set")
+	}
+	if days == 0 {
+		days = DefaultLogRetentionDays
+	}
+	if days < 0 {
+		return "", fmt.Errorf("reaperdeploy: log retention must be positive, got %d", days)
+	}
+	created := true
+	if _, err := d.Logs.CreateLogGroup(ctx, &cwlogs.CreateLogGroupInput{
+		LogGroupName: awssdk.String(LogGroupName()),
+		Tags:         Tags(version),
+	}); err != nil {
+		var exists *cwtypes.ResourceAlreadyExistsException
+		if !errors.As(err, &exists) {
+			return "", fmt.Errorf("reaperdeploy: create log group %s: %w", LogGroupName(), err)
+		}
+		created = false
+	}
+	if _, err := d.Logs.PutRetentionPolicy(ctx, &cwlogs.PutRetentionPolicyInput{
+		LogGroupName:    awssdk.String(LogGroupName()),
+		RetentionInDays: awssdk.Int32(days),
+	}); err != nil {
+		return "", fmt.Errorf("reaperdeploy: set log retention on %s: %w", LogGroupName(), err)
+	}
+	return fmt.Sprintf("%s (retention %d days)", actionWord(created, "log group", LogGroupName()), days), nil
+}
+
 // Result records what a deploy did, so the command can print it and a test can
 // assert it without parsing output.
 type Result struct {
@@ -338,6 +388,13 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("reaperdeploy: upload artifact: %w", err)
 	}
 	res.Actions = append(res.Actions, fmt.Sprintf("uploaded artifact s3://%s/%s (%d bytes)", opts.Bucket, res.Key, len(zip)))
+
+	// Before the function, so the group exists before anything can invoke it.
+	logAction, err := d.ensureLogGroup(ctx, opts.LogRetentionDays, opts.Version)
+	if err != nil {
+		return nil, err
+	}
+	res.Actions = append(res.Actions, logAction)
 
 	fnARN, fnCreated, dryRun, err := d.ensureFunction(ctx, opts, roleARN, res.Key)
 	if err != nil {
@@ -763,6 +820,10 @@ type TeardownOptions struct {
 	// ForceArtifacts removes the bucket even when it is not tagged
 	// spawn:managed=true. Needed for buckets created before the tag existed.
 	ForceArtifacts bool
+	// KeepLogs leaves the function's log group in place. Opt-out, like
+	// KeepArtifacts: an orphaned group is a trace (#1156), but it is also the
+	// only record of what the reaper did, which someone may want to keep.
+	KeepLogs bool
 }
 
 // Teardown removes what Deploy created, most-dependent first, and now the
@@ -831,6 +892,18 @@ func (d *Deployer) Teardown(ctx context.Context, opts TeardownOptions) ([]string
 	_, err = d.IAM.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: awssdk.String(RoleName)})
 	note("role "+RoleName, err)
 
+	// The log group after the function, so nothing can invoke it and have
+	// Lambda recreate the group (unretained) behind us.
+	switch {
+	case opts.KeepLogs:
+		removed = append(removed, fmt.Sprintf("kept log group %s (--keep-logs)", LogGroupName()))
+	case d.Logs == nil:
+		removed = append(removed, fmt.Sprintf("left log group %s (no CloudWatch Logs client)", LogGroupName()))
+	default:
+		_, err = d.Logs.DeleteLogGroup(ctx, &cwlogs.DeleteLogGroupInput{LogGroupName: awssdk.String(LogGroupName())})
+		note("log group "+LogGroupName(), err)
+	}
+
 	// The bucket LAST: it is the only step whose failure should not stop the
 	// rest, and the rest is what actually disarms the reaper. A teardown that
 	// refused to remove the function because a bucket tag was missing would be
@@ -855,7 +928,8 @@ func isNotFound(err error) bool {
 	var iamNF *iamtypes.NoSuchEntityException
 	var lamNF *lambdatypes.ResourceNotFoundException
 	var ebNF *ebtypes.ResourceNotFoundException
-	return errors.As(err, &iamNF) || errors.As(err, &lamNF) || errors.As(err, &ebNF)
+	var logsNF *cwtypes.ResourceNotFoundException
+	return errors.As(err, &iamNF) || errors.As(err, &lamNF) || errors.As(err, &ebNF) || errors.As(err, &logsNF)
 }
 
 func iamTags(version string) []iamtypes.Tag {

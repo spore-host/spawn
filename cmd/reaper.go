@@ -31,6 +31,8 @@ var (
 	reaperNetResources string
 	reaperMaxAge       string
 	reaperNotifyURL    string
+	reaperLogRetention int32
+	reaperKeepLogs     bool
 
 	reaperKeepArtifacts  bool
 	reaperForceArtifacts bool
@@ -79,7 +81,8 @@ var reaperDeployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Deploy the TTL reaper into this AWS account (unarmed)",
 	Long: `Create the reaper's execution role, upload its Lambda artifact to a bucket in
-this account, create the function, and put it on a schedule.
+this account, create its log group with a retention (30 days by default), create
+the function, and put it on a schedule.
 
 Deploys with dry-run ON. Nothing is reclaimed until 'spawn reaper arm'.
 
@@ -114,8 +117,9 @@ var reaperStatusCmd = &cobra.Command{
 var reaperTeardownCmd = &cobra.Command{
 	Use:   "teardown",
 	Short: "Remove the reaper from this account, including its artifact bucket",
-	Long: `Remove the reaper from this account: the schedule, the Lambda, its role, and
-the S3 bucket holding its artifact.
+	Long: `Remove the reaper from this account: the schedule, the Lambda, its role, its
+CloudWatch log group, and the S3 bucket holding its artifact. --keep-logs leaves the
+log group, which is the only record of what the reaper did.
 
 The bucket used to be left behind deliberately (#653). Under "leave no trace"
 that is wrong — an idle reaper that tidied everything except a bucket has left a
@@ -140,6 +144,8 @@ func init() {
 
 	reaperArmCmd.Flags().BoolVar(&reaperYes, "yes", false, "Skip the confirmation prompt")
 
+	reaperTeardownCmd.Flags().BoolVar(&reaperKeepLogs, "keep-logs", false,
+		"Leave the reaper's CloudWatch log group in place (it is removed by default)")
 	reaperTeardownCmd.Flags().BoolVar(&reaperKeepArtifacts, "keep-artifacts", false,
 		"Leave the artifact bucket in place (it is removed by default)")
 	reaperTeardownCmd.Flags().DurationVar(&reaperIfIdleFor, "if-idle-for", 0,
@@ -156,6 +162,8 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&reaperBucket, "bucket", "", "S3 bucket in THIS account to hold the artifact (default: spawn-reaper-artifacts-<account>-<region>)")
 	fs.StringVar(&reaperSchedule, "schedule", reaperdeploy.DefaultSchedule, "EventBridge schedule expression")
 	fs.StringVar(&reaperRegions, "regions", "", "Comma-separated regions for the reaper to scan (default: keep the existing reaper's; the deploy region for a new one)")
+	fs.Int32Var(&reaperLogRetention, "log-retention-days", reaperdeploy.DefaultLogRetentionDays,
+		"Days CloudWatch keeps the reaper's logs (a value CloudWatch accepts: 1, 3, 5, 7, 14, 30, 60, 90, ...). Below 30, 'teardown --if-idle-for' can see at most that much history")
 	fs.StringVar(&reaperSpotRequests, "spot-requests", "",
 		"Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperNetResources, "net-resources", "",
@@ -243,6 +251,8 @@ func reaperDeployOptions(fs *pflag.FlagSet, account, region, ver string, stdin i
 		Schedule:       reaperSchedule,
 		Regions:        reaperRegions,
 		DefaultRegions: region,
+
+		LogRetentionDays: reaperLogRetention,
 	}
 	for env, f := range reaperDeployFlags {
 		if !fs.Changed(f.flag) {
@@ -461,6 +471,7 @@ func runReaperTeardown(cmd *cobra.Command, _ []string) error {
 		Bucket:         reaperdeploy.DefaultBucketName(account, region),
 		KeepArtifacts:  reaperKeepArtifacts,
 		ForceArtifacts: reaperForceArtifacts,
+		KeepLogs:       reaperKeepLogs,
 	})
 	for _, r := range removed {
 		fmt.Fprintf(out, "  - %s\n", r)

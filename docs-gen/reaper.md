@@ -60,7 +60,8 @@ spawn reaper arm [flags]
 ### `spawn reaper deploy`
 
 Create the reaper's execution role, upload its Lambda artifact to a bucket in
-this account, create the function, and put it on a schedule.
+this account, create its log group with a retention (30 days by default), create
+the function, and put it on a schedule.
 
 Deploys with dry-run ON. Nothing is reclaimed until 'spawn reaper arm'.
 
@@ -85,6 +86,7 @@ spawn reaper deploy [flags]
 |------|-------|------|---------|-------------|
 | `--artifact` |  | string |  | Use this Lambda zip instead of downloading a release asset (local path or URL) |
 | `--bucket` |  | string |  | S3 bucket in THIS account to hold the artifact (default: spawn-reaper-artifacts-&lt;account&gt;-&lt;region&gt;) |
+| `--log-retention-days` |  | int32 | `30` | Days CloudWatch keeps the reaper's logs (a value CloudWatch accepts: 1, 3, 5, 7, 14, 30, 60, 90, ...). Below 30, 'teardown --if-idle-for' can see at most that much history |
 | `--max-age` |  | string |  | Max-age ceiling, REAPER_MAX_AGE, e.g. 336h or 14d (default: keep; the reaper's default is 7d) |
 | `--net-resources` |  | string |  | Network-resource sweep, REAPER_NET_RESOURCES: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--notify-url` |  | string |  | URL the reaper POSTs notifications to, REAPER_NOTIFY_URL; never printed. "-" reads it from stdin (default: keep) |
@@ -103,8 +105,9 @@ spawn reaper status
 
 ### `spawn reaper teardown`
 
-Remove the reaper from this account: the schedule, the Lambda, its role, and
-the S3 bucket holding its artifact.
+Remove the reaper from this account: the schedule, the Lambda, its role, its
+CloudWatch log group, and the S3 bucket holding its artifact. --keep-logs leaves the
+log group, which is the only record of what the reaper did.
 
 The bucket used to be left behind deliberately (#653). Under "leave no trace"
 that is wrong — an idle reaper that tidied everything except a bucket has left a
@@ -127,4 +130,5 @@ spawn reaper teardown [flags]
 | `--force-artifacts` |  | bool |  | Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed) |
 | `--if-idle-for` |  | duration | `0s` | Only tear down if the reaper has reclaimed nothing for at least this long (e.g. 720h); otherwise report and exit 0 |
 | `--keep-artifacts` |  | bool |  | Leave the artifact bucket in place (it is removed by default) |
+| `--keep-logs` |  | bool |  | Leave the reaper's CloudWatch log group in place (it is removed by default) |
 

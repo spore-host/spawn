@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
@@ -23,6 +24,7 @@ type fakeIAM struct {
 	roleExists bool
 	calls      []string
 	policyDoc  string
+	created    time.Time // the role's CreateDate; zero leaves it unset
 }
 
 func (f *fakeIAM) GetRole(context.Context, *iam.GetRoleInput, ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
@@ -30,7 +32,11 @@ func (f *fakeIAM) GetRole(context.Context, *iam.GetRoleInput, ...func(*iam.Optio
 	if !f.roleExists {
 		return nil, &iamtypes.NoSuchEntityException{}
 	}
-	return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: awssdk.String(RoleName)}}, nil
+	role := &iamtypes.Role{RoleName: awssdk.String(RoleName)}
+	if !f.created.IsZero() {
+		role.CreateDate = awssdk.Time(f.created)
+	}
+	return &iam.GetRoleOutput{Role: role}, nil
 }
 func (f *fakeIAM) CreateRole(context.Context, *iam.CreateRoleInput, ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
 	f.calls = append(f.calls, "CreateRole")
@@ -239,7 +245,7 @@ func zipBytes() []byte { return []byte("PK\x03\x04 pretend this is a lambda") }
 
 func newTestDeployer(iamF *fakeIAM, lamF *fakeLambda, evF *fakeEvents, s3F *fakeS3) *Deployer {
 	return &Deployer{
-		IAM: iamF, Lambda: lamF, Events: evF, S3: s3F,
+		IAM: iamF, Lambda: lamF, Events: evF, S3: s3F, Logs: &fakeLogs{},
 		Fetch: func(context.Context, string) ([]byte, error) { return zipBytes(), nil },
 		// Negative skips the IAM-propagation wait: without this the unit suite spends
 		// 10s per role-creating test (40s total) sleeping.

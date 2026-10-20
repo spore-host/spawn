@@ -3,6 +3,7 @@ package reaperdeploy
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -12,28 +13,106 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 )
 
+// fakeLogs is a small CloudWatch Logs: it holds events and evaluates the filter
+// patterns DetectIdleness sends — a quoted term, or ?"A" ?"B" OR terms — as a
+// substring match, which is how CloudWatch treats them. Matching the real
+// semantics rather than keying on the exact pattern string is what lets a test
+// see a sentinel word inside a line that is not an action.
 type fakeLogs struct {
-	// byPattern maps a filter pattern to the event timestamps it should return.
-	byPattern map[string][]time.Time
-	err       error
-	calls     []string
+	events []logEvent
+	err    error
+	calls  []string
+
+	groupExists  bool
+	createErr    error
+	retention    int32
+	deleted      bool
+	deleteErr    error
+	createdGroup bool
 }
+
+type logEvent struct {
+	at  time.Time
+	msg string
+}
+
+var quotedTerm = regexp.MustCompile(`"([^"]+)"`)
 
 func (f *fakeLogs) FilterLogEvents(_ context.Context, in *cwlogs.FilterLogEventsInput, _ ...func(*cwlogs.Options)) (*cwlogs.FilterLogEventsOutput, error) {
 	pat := awssdk.ToString(in.FilterPattern)
-	f.calls = append(f.calls, pat)
+	f.calls = append(f.calls, "FilterLogEvents "+pat)
 	if f.err != nil {
 		return nil, f.err
 	}
+	var terms []string
+	for _, m := range quotedTerm.FindAllStringSubmatch(pat, -1) {
+		terms = append(terms, m[1])
+	}
 	out := &cwlogs.FilterLogEventsOutput{}
-	for _, t := range f.byPattern[pat] {
-		ms := t.UnixMilli()
-		out.Events = append(out.Events, cwtypes.FilteredLogEvent{Timestamp: &ms})
+	for _, e := range f.events {
+		if in.StartTime != nil && e.at.UnixMilli() < *in.StartTime {
+			continue
+		}
+		for _, term := range terms {
+			if strings.Contains(e.msg, term) {
+				ms, msg := e.at.UnixMilli(), e.msg
+				out.Events = append(out.Events, cwtypes.FilteredLogEvent{Timestamp: &ms, Message: &msg})
+				break
+			}
+		}
 	}
 	return out, nil
 }
 
-func idleDeployer(l LogsAPI) *Deployer { return &Deployer{Logs: l} }
+func (f *fakeLogs) CreateLogGroup(context.Context, *cwlogs.CreateLogGroupInput, ...func(*cwlogs.Options)) (*cwlogs.CreateLogGroupOutput, error) {
+	f.calls = append(f.calls, "CreateLogGroup")
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	if f.groupExists {
+		return nil, &cwtypes.ResourceAlreadyExistsException{Message: awssdk.String("The specified log group already exists")}
+	}
+	f.groupExists, f.createdGroup = true, true
+	return &cwlogs.CreateLogGroupOutput{}, nil
+}
+
+func (f *fakeLogs) PutRetentionPolicy(_ context.Context, in *cwlogs.PutRetentionPolicyInput, _ ...func(*cwlogs.Options)) (*cwlogs.PutRetentionPolicyOutput, error) {
+	f.calls = append(f.calls, "PutRetentionPolicy")
+	// The real API creates nothing: retention on an absent group fails (#827).
+	if !f.groupExists {
+		return nil, &cwtypes.ResourceNotFoundException{Message: awssdk.String("The specified log group does not exist")}
+	}
+	f.retention = awssdk.ToInt32(in.RetentionInDays)
+	return &cwlogs.PutRetentionPolicyOutput{}, nil
+}
+
+func (f *fakeLogs) DeleteLogGroup(context.Context, *cwlogs.DeleteLogGroupInput, ...func(*cwlogs.Options)) (*cwlogs.DeleteLogGroupOutput, error) {
+	f.calls = append(f.calls, "DeleteLogGroup")
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	if !f.groupExists {
+		return nil, &cwtypes.ResourceNotFoundException{Message: awssdk.String("The specified log group does not exist")}
+	}
+	f.groupExists, f.deleted = false, true
+	return &cwlogs.DeleteLogGroupOutput{}, nil
+}
+
+// runs returns one "ttl-reaper done" summary line every interval from first to
+// last, inclusive — what a healthy schedule writes.
+func runs(first, last time.Time, every time.Duration) []logEvent {
+	var out []logEvent
+	for t := first; !t.After(last); t = t.Add(every) {
+		out = append(out, logEvent{t, "2026/10/19 12:00:00 ttl-reaper done in 1.2s: {Scanned:3 Reaped:0}"})
+	}
+	return out
+}
+
+// idleDeployer has a role created long ago, so the creation bound does not
+// interfere unless a test sets one.
+func idleDeployer(l LogsAPI) *Deployer {
+	return &Deployer{Logs: l, IAM: &fakeIAM{roleExists: true, created: time.Now().Add(-365 * 24 * time.Hour)}}
+}
 
 // TestIdlenessDistinguishesNotRunningFromFindingNothing is the property that
 // makes this safe to act on.
@@ -46,10 +125,7 @@ func TestIdlenessDistinguishesNotRunningFromFindingNothing(t *testing.T) {
 	now := time.Now()
 
 	t.Run("ran regularly, reclaimed nothing", func(t *testing.T) {
-		d := idleDeployer(&fakeLogs{byPattern: map[string][]time.Time{
-			`"ttl-reaper done"`: {now.Add(-10 * time.Minute)},
-			`"REAPED"`:          nil,
-		}})
+		d := idleDeployer(&fakeLogs{events: runs(now.Add(-40*time.Minute), now.Add(-10*time.Minute), 10*time.Minute)})
 		got := d.DetectIdleness(context.Background(), now)
 		if !got.Determined || got.EverWorked || !got.Ran {
 			t.Fatalf("want determined/idle/running, got %+v", got)
@@ -64,7 +140,7 @@ func TestIdlenessDistinguishesNotRunningFromFindingNothing(t *testing.T) {
 	})
 
 	t.Run("never ran", func(t *testing.T) {
-		d := idleDeployer(&fakeLogs{byPattern: map[string][]time.Time{}})
+		d := idleDeployer(&fakeLogs{})
 		got := d.DetectIdleness(context.Background(), now)
 		if got.Ran {
 			t.Fatal("Ran should be false when no invocation was logged")
@@ -85,10 +161,10 @@ func TestIdlenessDistinguishesNotRunningFromFindingNothing(t *testing.T) {
 
 	t.Run("reclaimed something", func(t *testing.T) {
 		when := now.Add(-2 * time.Hour)
-		d := idleDeployer(&fakeLogs{byPattern: map[string][]time.Time{
-			`"ttl-reaper done"`: {now.Add(-10 * time.Minute)},
-			`"REAPED"`:          {when.Add(-time.Hour), when},
-		}})
+		d := idleDeployer(&fakeLogs{events: append(runs(now.Add(-4*time.Hour), now.Add(-10*time.Minute), 10*time.Minute),
+			logEvent{when.Add(-time.Hour), "2026/10/19 10:00:00 REAPED i-1 (spore) in self/us-east-1 — expired"},
+			logEvent{when, "2026/10/19 11:00:00 REAPED i-2 (spore) in self/us-east-1 — expired"},
+		)})
 		got := d.DetectIdleness(context.Background(), now)
 		if !got.EverWorked {
 			t.Fatal("EverWorked should be true")
@@ -180,7 +256,7 @@ func TestIdleForRequiresDeterminedIndependently(t *testing.T) {
 	}
 	// And the determined equivalent must be non-zero, or the test above would
 	// pass against a method that always returns 0.
-	if got := (Idleness{Determined: true, Ran: true}).IdleFor(now); got == 0 {
+	if got := (Idleness{Determined: true, Ran: true, FirstRan: now.Add(-time.Hour)}).IdleFor(now); got == 0 {
 		t.Error("IdleFor on a determined, running, never-worked Idleness = 0; the previous " +
 			"assertion would then prove nothing")
 	}
