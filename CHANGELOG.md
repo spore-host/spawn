@@ -109,6 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `launcher.ImageStateCleanupScript`, `launcher.CommandRanMarkerDir`,
   `launcher.ImageCleanOK` and `launcher.ImageCleanCommandRunning` (Go API).
 
+- `spawn task run` (and its `--dry-run`) no longer spends minutes sizing an instance type before launching (#1181). Sizing priced every matching type with its own AWS Price List request: a `cpu: 2` spec matched 1325 types in us-east-1, and experiment E1 measured 149-256 s before `RunInstances`. It now fetches the region's On-Demand table once, in about 14 paged requests whatever the spec matches, which also puts much less load on the throttled Price List API (truffle#182). When the live table is unavailable, candidates are priced from the static table by exact match, as before, and the output now says so and gives the table's collection date. `-v` prints how long the instance search and the pricing took and how many Price List requests were made.
+
 ## [0.137.0] - 2026-10-20
 
 ### Added

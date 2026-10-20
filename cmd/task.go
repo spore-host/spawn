@@ -12,10 +12,12 @@ import (
 	"strings"
 	"time"
 
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
+	"github.com/spore-host/spawn/pkg/pricelist"
 	"github.com/spore-host/spawn/pkg/taskproto"
 	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 	"github.com/spore-host/spawn/pkg/userdata"
@@ -314,7 +316,7 @@ instead of reporting an earlier attempt's verdict (#608).
 		if region == "" {
 			return fmt.Errorf("no region: pass --region or configure a default AWS region")
 		}
-		finder := truffleFinder{tc: truffleaws.NewClientFromConfig(awsClient.Config()), region: region}
+		finder := newTruffleFinder(awsClient.Config(), region)
 		warnIfContainerPinBelowFloor(cmd.Context(), awsClient, os.Stderr, region, spec)
 		if err := checkPinnedShm(cmd.Context(), awsClient, region, spec); err != nil {
 			return err
@@ -330,8 +332,34 @@ instead of reporting an earlier attempt's verdict (#608).
 // It searches one region (region-spread is a later increment) and projects each
 // result down to a taskproto.Candidate. Read-only: offerings + pricing only.
 type truffleFinder struct {
-	tc     *truffleaws.Client
-	region string
+	tc instanceSearcher
+	// priceList prices the candidates: ONE region-wide table fetch per sizing,
+	// never a request per candidate (spawn#1181). See pkg/pricelist.
+	priceList pricelist.API
+	region    string
+	// warn receives the static-price note; verbose receives the -v timing
+	// breakdown. Either may be nil.
+	warn, verbose io.Writer
+}
+
+// instanceSearcher is the part of truffle's client sizing uses to enumerate
+// candidates; tests inject a fake.
+type instanceSearcher interface {
+	SearchInstanceTypes(ctx context.Context, regions []string, matcher *regexp.Regexp, opts truffleaws.FilterOptions) ([]truffleaws.InstanceTypeResult, error)
+}
+
+// newTruffleFinder builds the AWS-backed finder for task run / dry run.
+func newTruffleFinder(cfg awssdk.Config, region string) truffleFinder {
+	f := truffleFinder{
+		tc:        truffleaws.NewClientFromConfig(cfg),
+		priceList: pricelist.NewClient(cfg),
+		region:    region,
+		warn:      os.Stderr,
+	}
+	if spawnVerbose {
+		f.verbose = os.Stderr
+	}
+	return f
 }
 
 func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.ResourceRequest) ([]taskproto.Candidate, error) {
@@ -343,26 +371,44 @@ func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.Resourc
 		MinVCPUs:     req.CPU,
 		MinMemory:    taskproto.EffectiveMemoryGiB(req),
 	}
+	var timing sizingTiming
+	start := time.Now()
 	results, err := f.tc.SearchInstanceTypes(ctx, []string{f.region}, matcher, opts)
+	timing.search = time.Since(start)
 	if err != nil {
 		return nil, err
 	}
+	timing.candidates = len(results)
+
+	// SearchInstanceTypes does NOT populate on-demand price, so r.OnDemandPrice
+	// is 0 here. The sizer ranks on price — without it, "cheapest" degenerates
+	// to a size tie-break — so price every candidate from one region-wide table
+	// (live Price List, with the static table as an exact-match fallback only
+	// for a type it covers — truffle#114). A type neither table prices keeps
+	// price 0, and the sizer sorts unpriced options last, so a priced option
+	// always wins and we never silently pick a huge box because pricing was
+	// unavailable.
+	//
+	// The table is fetched once, whatever the candidate count: pricing each
+	// candidate separately cost 1325 Price List requests and minutes per launch
+	// (spawn#1181).
+	prices := &sizingPrices{region: f.region}
+	start = time.Now()
+	for _, r := range results {
+		if r.OnDemandPrice <= 0 {
+			if f.priceList != nil {
+				prices.live, timing.priceRequests, prices.liveErr = pricelist.RegionOnDemandPrices(ctx, f.priceList, f.region)
+			}
+			break
+		}
+	}
+	timing.pricing = time.Since(start)
+
 	cands := make([]taskproto.Candidate, 0, len(results))
 	for _, r := range results {
-		// SearchInstanceTypes does NOT populate on-demand price (that's a separate
-		// pricing call), so r.OnDemandPrice is 0 here. The sizer ranks on price —
-		// without it, "cheapest" degenerates to a name tie-break and can pick the
-		// LARGEST type. So look the price up explicitly, via truffle's default
-		// pricer (live Price List, falling back to its built-in table only for a
-		// type and region that table actually covers — truffle#114). A miss now
-		// errors rather than returning a family guess; that leaves price 0, and the
-		// sizer sorts unpriced options last, so a priced option always wins and we
-		// never silently pick a huge box because pricing was unavailable.
 		price := r.OnDemandPrice
 		if price <= 0 {
-			if p, perr := f.tc.OnDemandPrice(ctx, r.InstanceType, f.region); perr == nil {
-				price = p
-			}
+			price = prices.price(r.InstanceType)
 		}
 		cands = append(cands, taskproto.Candidate{
 			InstanceType:  r.InstanceType,
@@ -374,6 +420,8 @@ func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.Resourc
 			OnDemandPrice: price,
 		})
 	}
+	prices.report(f.warn)
+	timing.report(f.verbose)
 	return cands, nil
 }
 
