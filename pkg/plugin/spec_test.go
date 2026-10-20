@@ -103,11 +103,11 @@ func TestResolvedConfig_RejectsUndeclaredKeys(t *testing.T) {
 			"name": {Required: true},
 		},
 	}
-	got, err := spec.ResolvedConfig(map[string]string{"name": "ep", "nmae": "typo", "auth_key": "x"})
+	got, err := spec.ResolvedConfig(map[string]string{"name": "ep", "name_typo": "typo", "auth_key": "x"})
 	if err == nil {
 		t.Fatalf("ResolvedConfig = %v, nil; want an error for the undeclared keys", got)
 	}
-	for _, want := range []string{"auth_key, nmae", "it accepts: dir, name"} {
+	for _, want := range []string{"auth_key, name_typo", "it accepts: dir, name"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}
