@@ -157,6 +157,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field is filled by some tag.
 
 ### Fixed
+
+- **A pinned `resources.instance_type` shows its real sizes and cost in the
+  task dry run (#1253).** The plan printed `(0 vCPU, 0 GiB` for a pinned type,
+  described it as "chosen as cheapest of 1 matching type(s)", and dropped the
+  `Max cost` line, because sizing never looked the pin up. Sizing now looks the
+  pinned type up once (one DescribeInstanceTypes and one Price List request for
+  that type) and the plan prints e.g. `r8g.2xlarge  (8 vCPU, 64 GiB,
+  $0.4713/hr on-demand)`, "pinned by spec (resources.instance_type)" and
+  `Max cost`. If the lookup fails the pin still launches as given and the plan
+  says "sizes unavailable" instead of zeros. The container-floor warning and the
+  `shm_gib` check for a pin read the type's memory from that same lookup. Go
+  API: `taskproto.SizeResult` gains `Pinned`, `PinLookupErr` and `SizesKnown()`.
 - **`spawn resume` no longer relaunches parameters that already ran (#1248).**
   A resume launched only the pending parameter sets but saved a fresh sweep
   state: each new instance was recorded by its position in the pending list,

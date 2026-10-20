@@ -91,10 +91,27 @@ func regionOnDemandFilters(region string) []pricingtypes.Filter {
 // took. On an error partway through it returns what it had read so far along
 // with the error.
 func RegionOnDemandPrices(ctx context.Context, api API, region string) (map[string]float64, int, error) {
+	return onDemandPrices(ctx, api, region, regionOnDemandFilters(region))
+}
+
+// InstanceOnDemandPrices is RegionOnDemandPrices narrowed to one instance type:
+// a single GetProducts request filtered by instanceType as well, for a caller
+// that needs one rate rather than the region's table (a pinned
+// resources.instance_type, spawn#1253). The map holds at most that one type.
+func InstanceOnDemandPrices(ctx context.Context, api API, region, instanceType string) (map[string]float64, int, error) {
+	filters := append(regionOnDemandFilters(region), pricingtypes.Filter{
+		Type:  pricingtypes.FilterTypeTermMatch,
+		Field: awssdk.String("instanceType"),
+		Value: awssdk.String(instanceType),
+	})
+	return onDemandPrices(ctx, api, region, filters)
+}
+
+func onDemandPrices(ctx context.Context, api API, region string, filters []pricingtypes.Filter) (map[string]float64, int, error) {
 	pager := pricing.NewGetProductsPaginator(api, &pricing.GetProductsInput{
 		ServiceCode:   awssdk.String("AmazonEC2"),
 		FormatVersion: awssdk.String("aws_v1"),
-		Filters:       regionOnDemandFilters(region),
+		Filters:       filters,
 		MaxResults:    awssdk.Int32(PageSize),
 	})
 	out := make(map[string]float64)

@@ -2,6 +2,7 @@ package taskproto
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -36,12 +37,15 @@ func TestSize_PicksCheapest(t *testing.T) {
 }
 
 func TestSize_ExactInstanceTypePin(t *testing.T) {
-	// An exact pin bypasses the finder entirely (would panic if consulted) and
-	// returns the type verbatim with its derived family.
-	f := fakeFinder{err: context.Canceled} // must NOT be called
+	// An exact pin bypasses candidate ranking and returns the type verbatim with
+	// its derived family, even when looking its sizes up fails (spawn#1253).
+	f := fakeFinder{err: context.Canceled}
 	got, err := Size(context.Background(), f, ResourceRequest{InstanceType: "t3.medium", Families: []string{"c7i"}, CPU: 99})
 	if err != nil {
 		t.Fatalf("exact pin should not error: %v", err)
+	}
+	if !got.Pinned || got.SizesKnown() || !errors.Is(got.PinLookupErr, context.Canceled) {
+		t.Errorf("failed pin lookup: Pinned=%v SizesKnown=%v PinLookupErr=%v", got.Pinned, got.SizesKnown(), got.PinLookupErr)
 	}
 	if got.InstanceType != "t3.medium" {
 		t.Errorf("pin = %q, want t3.medium (verbatim, ignoring families/cpu)", got.InstanceType)
@@ -237,5 +241,46 @@ func TestSize_FiltersCandidatesBelowRequestedMemory(t *testing.T) {
 	}
 	if got.InstanceType != "t4g.small" {
 		t.Errorf("sized %s, want t4g.small (nano is below the %.0f GiB container floor)", got.InstanceType, ContainerMemoryFloorGiB)
+	}
+}
+
+// recordingSizeFinder records each request and returns a fixed list.
+type recordingSizeFinder struct {
+	cands []Candidate
+	got   []ResourceRequest
+}
+
+func (f *recordingSizeFinder) FindCandidates(_ context.Context, req ResourceRequest) ([]Candidate, error) {
+	f.got = append(f.got, req)
+	return f.cands, nil
+}
+
+// spawn#1253: a pin is looked up once through the finder, asking for exactly
+// the pinned type, and its sizes and price come from that lookup, not zero. The
+// ranking filters do not apply: a pin below the request's cpu is still taken.
+func TestSize_PinLooksUpSizesAndPrice(t *testing.T) {
+	f := &recordingSizeFinder{cands: []Candidate{
+		{InstanceType: "r8g.xlarge", Family: "r8g", VCPUs: 4, MemoryGiB: 32, OnDemandPrice: 0.2357},
+		{InstanceType: "r8g.2xlarge", Family: "r8g", VCPUs: 8, MemoryGiB: 64, OnDemandPrice: 0.4713},
+	}}
+	got, err := Size(context.Background(), f, ResourceRequest{InstanceType: "r8g.2xlarge", CPU: 99, MemoryGiB: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.got) != 1 || f.got[0].InstanceType != "r8g.2xlarge" || f.got[0].CPU != 0 || f.got[0].MemoryGiB != 0 {
+		t.Fatalf("finder requests = %+v, want one lookup of exactly r8g.2xlarge with no minimums", f.got)
+	}
+	if !got.Pinned || !got.SizesKnown() || got.VCPUs != 8 || got.MemoryGiB != 64 || got.OnDemandPrice != 0.4713 {
+		t.Errorf("pinned size = %+v, want r8g.2xlarge 8 vCPU / 64 GiB / $0.4713", got)
+	}
+
+	// The finder answering without the pinned type is a failed lookup, not a
+	// different type and not an error.
+	miss, err := Size(context.Background(), &recordingSizeFinder{cands: f.cands[:1]}, ResourceRequest{InstanceType: "r8g.2xlarge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miss.InstanceType != "r8g.2xlarge" || miss.SizesKnown() || miss.PinLookupErr == nil || miss.VCPUs != 0 {
+		t.Errorf("pin absent from the lookup: %+v", miss)
 	}
 }

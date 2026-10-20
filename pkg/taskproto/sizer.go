@@ -23,6 +23,12 @@ type Candidate struct {
 // InstanceFinder returns candidate instance types meeting the minimum vCPU /
 // memory / architecture constraints. The real implementation wraps truffle's
 // SearchInstanceTypes; tests inject a fake so the sizer needs no AWS.
+//
+// When req.InstanceType is set the sizer is looking up that one pinned type
+// (spawn#1253): the finder should return it, with its sizes and on-demand
+// price, or nothing if it is not offered. Size picks the matching candidate
+// out of whatever comes back, so a finder that ignores InstanceType is still
+// correct, only slower.
 type InstanceFinder interface {
 	FindCandidates(ctx context.Context, req ResourceRequest) ([]Candidate, error)
 }
@@ -35,6 +41,22 @@ type SizeResult struct {
 	MemoryGiB     float64
 	OnDemandPrice float64 // $/hr (0 if unknown)
 	Considered    int     // how many candidates matched before picking cheapest
+
+	// Pinned is set when the spec named resources.instance_type, so the type
+	// was taken verbatim rather than chosen by price.
+	Pinned bool
+	// PinLookupErr is why a pinned type's sizes could not be looked up; VCPUs,
+	// MemoryGiB and OnDemandPrice are then zero because they are unknown, not
+	// because the type is empty. A failed lookup never fails sizing: the pin is
+	// still launched as given (spawn#1253).
+	PinLookupErr error
+}
+
+// SizesKnown reports whether VCPUs and MemoryGiB describe the chosen type.
+// False only for a pin whose lookup failed, which a caller renders as "sizes
+// unavailable" rather than as zeros.
+func (r *SizeResult) SizesKnown() bool {
+	return !r.Pinned || r.PinLookupErr == nil
 }
 
 // Size picks the cheapest instance type satisfying a ResourceRequest. It applies
@@ -53,11 +75,7 @@ func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*Siz
 	// caller asked for this specific type (e.g. nf-spawn's ext.instanceType), so
 	// honor it verbatim. Family/cpu/memory are ignored when a pin is set.
 	if pin := strings.TrimSpace(req.InstanceType); pin != "" {
-		return &SizeResult{
-			InstanceType: pin,
-			Family:       familyOf(pin),
-			Considered:   1,
-		}, nil
+		return sizePinned(ctx, finder, pin), nil
 	}
 
 	cands, err := finder.FindCandidates(ctx, req)
@@ -132,6 +150,44 @@ func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*Siz
 		OnDemandPrice: best.OnDemandPrice,
 		Considered:    len(matched),
 	}, nil
+}
+
+// sizePinned returns a pinned type verbatim, with its vCPUs, memory and
+// on-demand price looked up once through the finder (spawn#1253). Before, the
+// pin path filled only the type and family, so a dry run printed "0 vCPU,
+// 0 GiB" and dropped its Max cost line exactly when the user had chosen a
+// (possibly large) type. A failed or empty lookup is recorded in PinLookupErr
+// and is not an error: the pin is honoured whether or not its sizes are known.
+func sizePinned(ctx context.Context, finder InstanceFinder, pin string) *SizeResult {
+	res := &SizeResult{
+		InstanceType: pin,
+		Family:       familyOf(pin),
+		Considered:   1,
+		Pinned:       true,
+	}
+	if finder == nil {
+		res.PinLookupErr = fmt.Errorf("no instance finder to look up %s", pin)
+		return res
+	}
+	cands, err := finder.FindCandidates(ctx, ResourceRequest{InstanceType: pin})
+	if err != nil {
+		res.PinLookupErr = fmt.Errorf("look up %s: %w", pin, err)
+		return res
+	}
+	for _, c := range cands {
+		if c.InstanceType != pin {
+			continue
+		}
+		res.VCPUs = c.VCPUs
+		res.MemoryGiB = c.MemoryGiB
+		res.OnDemandPrice = c.OnDemandPrice
+		if c.Family != "" {
+			res.Family = c.Family
+		}
+		return res
+	}
+	res.PinLookupErr = fmt.Errorf("%s was not found in the region's instance types", pin)
+	return res
 }
 
 // ContainerMemoryFloorGiB is the least memory a container task is sized to
