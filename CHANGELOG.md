@@ -201,6 +201,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RELEASED` line counts as reaper activity for `spawn reaper teardown
   --if-idle-for`, like `REAPED`.
 
+- **A pooled task whose spec does not parse now gets a completion record
+  (#1149).** The pool worker acked such a task without writing one, so
+  `spawn task status` reported it unknown forever. The worker now writes a
+  failed record (`exit_code` -1, `retry_class` `spec_error`) to the key
+  `task status` reads, then acks. A spec that is valid JSON but fails
+  validation has its `results_prefix` honoured. The pooled-execution design doc
+  no longer claims a reconcile loop tops the pool up or replaces reclaimed Spot
+  workers: `pool create` provisions once, and a lost worker's task is rerun by a
+  surviving worker after the visibility timeout.
+
 ### Security
 
 - **The spored instance role may release its own launch Elastic IP, and only
@@ -222,6 +232,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before this keep their old role policy until a launch refreshes it, and
   addresses allocated before this carry no `spawn:instance-arn`; the reaper
   releases both kinds.
+- `retry_class` has a new value, `spec_error` (not retryable): the task's spec
+  does not parse, so nothing ran (#1149). Go API: `taskproto.RetrySpecError`,
+  and `taskpool.Worker` gains `Results`, `AccountID` and `Region` fields plus the
+  `taskpool.ResultsAPI` interface.
 
 ## [0.137.0] - 2026-10-20
 

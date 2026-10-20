@@ -62,7 +62,8 @@ budget, and the boot tax compounds it.
 
 1. **Best-effort + eventual.** "Ask for N, get M now, top up toward N by a
    deadline." Fewer workers ⇒ lower parallelism, **never failure**. An
-   interactive/stage demo must never hang.
+   interactive/stage demo must never hang. (As shipped, the "top up" half is
+   not implemented: provisioning is one-shot, see §4.)
 2. **Warm pool with idle timeout.** Fungible workers pull tasks from a queue;
    reused workers skip per-task boot *and* keep the shared FSx mount hot
    (compounds with nf-spawn#67/#69). Idle-timeout drain preserves the
@@ -119,8 +120,14 @@ between jobs. This is the "many tasks, few reusable workers" inverse of today's
 ```
 
 - **Best-effort/eventual** = cohort's `PartialCohort`: dispatch proceeds against
-  whatever workers exist; the reconcile loop tops up toward N and replaces reaped
-  Spot workers; a short pool just means lower parallelism.
+  whatever workers exist; a short pool just means lower parallelism. **As
+  shipped, provisioning is one-shot:** `pool create` runs a single cohort
+  `Reconcile` (launch up to N, within the cohort's retry budget and capacity
+  chain) and returns once at least min-viable workers are up. There is no
+  standing reconcile loop: nothing tops a short pool up toward N afterwards, and
+  a worker that is Spot-reclaimed or dies is **not** replaced (spawn#1149). What
+  survives a lost worker is the *task*: it was never acked, so it reappears
+  after the visibility timeout and a remaining worker runs it.
 - **Warm pool** = workers persist across jobs (queue pull loop), so per-job cost
   is stage + run only — no boot, no container re-pull, FSx stays mounted.
 - **Idle-timeout + tag-reaper** = scale-to-zero preserved; missed teardown still
@@ -209,7 +216,7 @@ pattern (mirrors #69 option 1).
 |---|---|
 | **Workdir isolation on reuse** — a reused worker carries prior `*.bam`/`*.vcf.gz`. | Worker resets a clean per-task workspace between jobs (pool runner). |
 | **Staggered readiness** — bulk-launched workers reach ready at different times. | cohort per-entity `Observation`; scheduler hands work to each worker as it's ready, never waits for all N. |
-| **Spot reclamation mid-run.** | cohort reconcile replaces reaped workers; the in-flight task retries via Nextflow `errorStrategy` (task) + pool (worker). |
+| **Spot reclamation mid-run.** | The reclaimed worker is not replaced (provisioning is one-shot, see §4), so the pool runs on with lower parallelism. Its in-flight task was never acked, so SQS redelivers it to a surviving worker after the visibility timeout; Nextflow `errorStrategy` covers the task on top of that. |
 | **Per-entity vs collective placement.** | Task fan-out is the *easy* case — per-entity placement is fine, no EFA/placement-group fabric (unlike `mpicohort`). |
 | **Teardown reaping.** | Idle-timeout drain + tag-based reaper backstop (spore.host lifecycle invariant). |
 

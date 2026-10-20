@@ -162,7 +162,10 @@ func (f fakeFetcher) Fetch(_ context.Context, uri string) ([]byte, error) {
 	if b, ok := f.byURI[uri]; ok {
 		return b, nil
 	}
-	return []byte(`{"task_id":"x"}`), nil
+	// A spec that parses: the worker now validates the spec before running it
+	// (#1149), so a default that failed ParseSpec would route every test task
+	// down the unparseable-spec path instead of to the execer.
+	return []byte(`{"task_id":"x","command":["true"],"resources":{"purchase":"spot"},"lifecycle":{"ttl":"1h"}}`), nil
 }
 
 // recordingExecer records the workspace dir each task ran in and returns a
@@ -363,7 +366,7 @@ func TestWorker_FailedTaskIsAckedNotRequeued(t *testing.T) {
 
 // TestWorker_WorkspaceAcquireFailureLeavesForRedelivery: if a worker can't get a
 // clean workspace it must NOT ack — the task stays on the queue to redeliver to a
-// healthier worker. Models the "reconcile replaces reaped workers" retry at the
+// healthier worker. Models the redelivery-after-a-lost-worker retry at the
 // task level.
 func TestWorker_WorkspaceAcquireFailureLeavesForRedelivery(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}

@@ -105,24 +105,33 @@ func runPoolWorker(ctx context.Context, o poolWorkerOpts) error {
 		}
 		return fmt.Errorf("open pool queue: %w", err)
 	}
-	specs := &taskpool.SpecStore{Client: s3Client, Bucket: o.specBucket, Prefix: o.specPrefix}
-	resultsBucket := taskproto.DefaultResultsBucket(id.AccountID, region)
+	worker := newPoolWorker(q, s3Client, id.AccountID, region, o)
+	executed, err := worker.Run(ctx)
+	fmt.Fprintf(os.Stderr, "pool-worker: drained after %d task(s)\n", executed)
+	return err
+}
 
-	worker := &taskpool.Worker{
+// newPoolWorker wires the production seams into a taskpool.Worker. s3Client
+// serves both sides of S3: fetching staged specs and, for a spec that does not
+// parse, writing the failed completion record the job script never will
+// (#1149) — which is why Results must be set here.
+func newPoolWorker(q *taskpool.Queue, s3Client *s3.Client, accountID, region string, o poolWorkerOpts) *taskpool.Worker {
+	specs := &taskpool.SpecStore{Client: s3Client, Bucket: o.specBucket, Prefix: o.specPrefix}
+	resultsBucket := taskproto.DefaultResultsBucket(accountID, region)
+	return &taskpool.Worker{
 		Queue:     q,
 		Fetcher:   specs,
-		Execer:    &taskpool.ScriptExecer{ResultsBucket: resultsBucket, AccountID: id.AccountID, Region: region, Stdout: os.Stdout, Stderr: os.Stderr},
+		Execer:    &taskpool.ScriptExecer{ResultsBucket: resultsBucket, AccountID: accountID, Region: region, Stdout: os.Stdout, Stderr: os.Stderr},
 		Workspace: &taskpool.DirWorkspace{Root: o.workRoot},
+		Results:   s3Client,
+		AccountID: accountID,
+		Region:    region,
 		Config: taskpool.WorkerConfig{
 			PollWaitSeconds: 20, // max SQS long-poll — fewest empty round-trips
 			IdleTimeout:     o.idleTimeout,
 			Log:             os.Stderr,
 		},
 	}
-
-	executed, err := worker.Run(ctx)
-	fmt.Fprintf(os.Stderr, "pool-worker: drained after %d task(s)\n", executed)
-	return err
 }
 
 // orEnv returns v if non-empty, else the value of env var key.

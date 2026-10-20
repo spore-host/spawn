@@ -641,10 +641,13 @@ field SpecStore.Client S3API
 field SpecStore.Prefix string
 field TaskRef.SpecURI string
 field TaskRef.TaskID string
+field Worker.AccountID string
 field Worker.Config WorkerConfig
 field Worker.Execer TaskExecer
 field Worker.Fetcher SpecFetcher
 field Worker.Queue *Queue
+field Worker.Region string
+field Worker.Results ResultsAPI
 field Worker.Workspace WorkspaceProvider
 field WorkerConfig.IdleTimeout time.Duration
 field WorkerConfig.Log io.Writer
@@ -673,6 +676,7 @@ func IsQueueGone(err error) bool
 func OpenForRunWithConfig(ctx context.Context, cfg awssdk.Config, runID, specBucket, specPrefix string) (*Pool, error)
 func OpenQueue(ctx context.Context, client SQSAPI, runID string) (*Queue, error)
 func QueueName(runID string) string
+method ResultsAPI.PutObject (ctx context.Context, in *s3.PutObjectInput, opts ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 method S3API.GetObject (ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 method S3API.PutObject (ctx context.Context, in *s3.PutObjectInput, opts ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 method SQSAPI.CreateQueue (ctx context.Context, in *sqs.CreateQueueInput, opts ...func(*sqs.Options)) (*sqs.CreateQueueOutput, error)
@@ -690,6 +694,7 @@ type Claimed struct
 type DirWorkspace struct
 type Pool struct
 type Queue struct
+type ResultsAPI interface
 type S3API interface
 type SQSAPI interface
 type ScriptExecer struct
@@ -722,6 +727,7 @@ const RetryControllerLost RetryClass
 const RetryInstanceHealth RetryClass
 const RetryNone RetryClass
 const RetryOutputDeliveryError RetryClass
+const RetrySpecError RetryClass
 const RetrySpotInterruption RetryClass
 const RetryStagingError RetryClass
 const RetryTTLExpired RetryClass
