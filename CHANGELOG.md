@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`pkg/tasklaunch`: `spawn task run`'s plan-and-launch path as a public Go
+  package (refs spore-host-mcp#60, spore-host-mcp#61).** spore-host-mcp
+  re-implemented the task launch and drifted from the CLI. It called
+  `launcher.Provision` with empty Options, so its launches had no storage
+  mounts and no terminal-flush hook (the #1144 class). It never retried
+  On-Demand on a Spot capacity error, and it sized with `spec.Resources`, which
+  skipped the container memory floor (#1180). The package exports
+  `Plan(ctx, deps, spec, region)` (sizing via `SizingRequest()`, the pinned-type
+  lookup, the pinned-type checks and the 16 KiB user-data preflight),
+  `Render(w, plan)` (the dry run as the CLI prints it) and
+  `Launch(ctx, deps, spec, region)` (results bucket, stale-record clear, scoped
+  instance profile, storage script, wrapper and flush hook, and the On-Demand
+  fallback with identical Options). Dependencies (`Deps`: finder, AWS client,
+  provisioner) are interfaces, so callers and tests can inject fakes, and
+  `NewDeps(client, region, warn)` builds the real ones. `spawn task run` now
+  runs through it and behaves as before. `pkg/tasklaunch` joins the
+  public-surface snapshot.
 - **`resources.shm_gib` sizes a container task's `/dev/shm` (#1111).** Docker
   gives every container 64 MB, too small for Open MPI's shared-memory segments
   at many ranks: a 64-rank LAMMPS run on one box died with SIGBUS in its first

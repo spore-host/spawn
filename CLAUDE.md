@@ -64,7 +64,7 @@ for "what changed." Keep both — they serve different readers.
 
 ## The public surface (other repos compile against it)
 
-Most of `pkg/` is internal by convention. **These eight packages are not** — they
+Most of `pkg/` is internal by convention. **These nine packages are not** — they
 are imported by other repositories, so an exported symbol in them is a wire
 contract:
 
@@ -73,6 +73,7 @@ contract:
 | `pkg/aws` | spore-host-mcp, lagotto, calque |
 | `pkg/launcher` | spore-host-mcp, lagotto, calque |
 | `pkg/taskproto` | spore-host-mcp |
+| `pkg/tasklaunch` | spore-host-mcp |
 | `pkg/ecrref` | spore-host-mcp |
 | `pkg/launchererr` | lagotto |
 | `pkg/taskcohort` | calque |

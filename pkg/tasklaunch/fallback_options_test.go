@@ -1,11 +1,13 @@
-package cmd
+package tasklaunch
 
 import (
 	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/aws"
@@ -78,17 +80,35 @@ func TestProvisionTask_NoFallbackNoRetry(t *testing.T) {
 }
 
 // The fake above proves provisionTask forwards one Options to both attempts;
-// this proves runTaskReal routes its launch through provisionTask and forwards
-// the Options it is handed. Every launcher.Provision invocation in cmd/task.go
-// must be inside a func literal and pass that literal's launcher.Options
-// parameter — a direct launcher.Provision(..., launcher.Options{}) beside it
-// (the #1144 shape) fails this.
-func TestTaskGo_ProvisionForwardsSeamOptions(t *testing.T) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "task.go", nil, 0)
+// this proves the package's real launcher.Provision call forwards the Options
+// it is handed. Every launcher.Provision invocation in this package must be
+// inside a func literal and pass that literal's launcher.Options parameter — a
+// direct launcher.Provision(..., launcher.Options{}) beside it (the #1144
+// shape) fails this. (It used to scan cmd/task.go; the launch moved here.)
+func TestTaskLaunch_ProvisionForwardsSeamOptions(t *testing.T) {
+	names, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	fset := token.NewFileSet()
+	found := 0
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found += checkProvisionCalls(t, fset, f)
+	}
+	if found == 0 {
+		t.Fatal("found no launcher.Provision call in pkg/tasklaunch; the discovery is broken")
+	}
+}
+
+func checkProvisionCalls(t *testing.T, fset *token.FileSet, f *ast.File) int {
+	t.Helper()
 	found := 0
 	var stack []ast.Node
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -118,7 +138,7 @@ func TestTaskGo_ProvisionForwardsSeamOptions(t *testing.T) {
 			}
 		}
 		if lit == nil || len(call.Args) != 4 {
-			t.Errorf("%s: launcher.Provision must be called only from the provisionTask seam closure", pos)
+			t.Errorf("%s: launcher.Provision must be called only from a provisioner closure", pos)
 			return true
 		}
 		arg, ok := call.Args[3].(*ast.Ident)
@@ -133,7 +153,5 @@ func TestTaskGo_ProvisionForwardsSeamOptions(t *testing.T) {
 		}
 		return true
 	})
-	if found == 0 {
-		t.Fatal("found no launcher.Provision call in task.go; the discovery is broken")
-	}
+	return found
 }

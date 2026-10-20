@@ -1,4 +1,4 @@
-package cmd
+package tasklaunch
 
 import (
 	"bytes"
@@ -132,7 +132,7 @@ func TestTaskRunRefusesUserDataOverTheEC2Limit(t *testing.T) {
 
 	t.Run("dry run refuses the oversized spec", func(t *testing.T) {
 		var out bytes.Buffer
-		err := renderTaskDryRun(context.Background(), &out, over, userDataTestFinder(), "us-east-1")
+		err := renderDryRun(context.Background(), &out, over, userDataTestFinder(), "us-east-1")
 		if err == nil {
 			t.Fatalf("dry run accepted a spec whose user data is %d bytes\n%s", overBytes, out.String())
 		}
@@ -145,7 +145,7 @@ func TestTaskRunRefusesUserDataOverTheEC2Limit(t *testing.T) {
 
 	t.Run("dry run passes and reports the spec just under", func(t *testing.T) {
 		var out bytes.Buffer
-		if err := renderTaskDryRun(context.Background(), &out, under, userDataTestFinder(), "us-east-1"); err != nil {
+		if err := renderDryRun(context.Background(), &out, under, userDataTestFinder(), "us-east-1"); err != nil {
 			t.Fatalf("dry run refused a spec whose user data is %d bytes: %v", underBytes, err)
 		}
 		want := fmt.Sprintf("User data:    %d of 16384 bytes", underBytes)
@@ -205,4 +205,11 @@ func TestTaskUserDataPreflightMatchesTheLaunch(t *testing.T) {
 	if want, _ := aws.UserDataSize(enc); got != want {
 		t.Errorf("preflight measured %d bytes, the launch would send %d", got, want)
 	}
+}
+
+// runTaskReal launches spec through Launch with client's real dependencies and
+// finder, as `spawn task run` does.
+func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *taskproto.TaskSpec, finder taskproto.InstanceFinder, region string) error {
+	_, err := Launch(ctx, Deps{Finder: finder, AWS: client, Provisioner: LauncherProvisioner(client), Out: out}, spec, region)
+	return err
 }

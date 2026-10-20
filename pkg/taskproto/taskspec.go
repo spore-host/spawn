@@ -118,7 +118,7 @@ type Placement struct {
 	// FSxLustreID (spawn#570 sub-issue 3). Empty means the default ("/efs",
 	// "/fsx") — use DefaultEFSMountPoint/DefaultFSxMountPoint or the
 	// Effective*MountPoint helpers below rather than the raw field, so every
-	// caller (the boot-time storage script in cmd/task.go AND the
+	// caller (the boot-time storage script in pkg/tasklaunch AND the
 	// container-mount list in wrapper.go) resolves the SAME path for a given
 	// spec instead of each hardcoding "/efs"/"/fsx" independently.
 	EFSMountPoint string `json:"efs_mount_point,omitempty"`
@@ -127,7 +127,7 @@ type Placement struct {
 
 // DefaultEFSMountPoint/DefaultFSxMountPoint are the mount paths used when a
 // Placement doesn't override them. Exported as named constants (rather than
-// each caller repeating the literal "/efs"/"/fsx") so cmd/task.go's boot-time
+// each caller repeating the literal "/efs"/"/fsx") so pkg/tasklaunch's boot-time
 // mount script and wrapper.go's container `docker run -v` list can never
 // silently drift onto different defaults (spawn#570).
 const (

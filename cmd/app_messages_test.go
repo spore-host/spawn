@@ -211,13 +211,14 @@ func TestTaskResultsPrefixErrorNamesTheField(t *testing.T) {
 		t.Fatal("TaskSpec has no ResultsPrefix field")
 	}
 	tag, _, _ := strings.Cut(f.Tag.Get("json"), ",")
-	src, err := os.ReadFile("task.go")
+	// The launch, and with it this error, moved from task.go to pkg/tasklaunch.
+	src, err := os.ReadFile(filepath.Join("..", "pkg", "tasklaunch", "tasklaunch.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := regexp.MustCompile(`fmt\.Errorf\("([a-z_.]+) %q is not an s3://bucket/prefix URI", spec\.ResultsPrefix\)`).FindStringSubmatch(string(src))
 	if m == nil {
-		t.Fatal("the results_prefix URI error is not in task.go; the discovery is broken")
+		t.Fatal("the results_prefix URI error is not in pkg/tasklaunch/tasklaunch.go; the discovery is broken")
 	}
 	if m[1] != tag {
 		t.Errorf("the error names %q, but the TaskSpec field is %q", m[1], tag)

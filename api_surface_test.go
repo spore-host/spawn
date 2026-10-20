@@ -49,6 +49,7 @@ var publicPackages = map[string][]string{
 	"pkg/aws":         {"spore-host-mcp", "lagotto", "calque"},
 	"pkg/launcher":    {"spore-host-mcp", "lagotto", "calque"},
 	"pkg/taskproto":   {"spore-host-mcp"},
+	"pkg/tasklaunch":  {"spore-host-mcp"},
 	"pkg/ecrref":      {"spore-host-mcp"},
 	"pkg/launchererr": {"lagotto"},
 	"pkg/taskcohort":  {"calque"},

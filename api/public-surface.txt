@@ -623,6 +623,57 @@ type Classifier struct
 type LaunchAPI interface
 type Observer struct
 
+## pkg/tasklaunch (imported by: spore-host-mcp)
+const CompletionFile
+field Deps.AWS AWS
+field Deps.Finder taskproto.InstanceFinder
+field Deps.Out io.Writer
+field Deps.Provisioner Provisioner
+field Deps.Verbose io.Writer
+field Deps.Warn io.Writer
+field Result.AvailabilityZone string
+field Result.InstanceID string
+field Result.InstanceType string
+field Result.Plan *TaskPlan
+field Result.Region string
+field Result.ResultsBucket string
+field Result.ResultsKeyPrefix string
+field Result.ResultsPrefix string
+field Result.RunID string
+field Result.Spot bool
+field Result.TaskID string
+field TaskPlan.AMI string
+field TaskPlan.MaxCost float64
+field TaskPlan.MaxCostKnown bool
+field TaskPlan.Notes []string
+field TaskPlan.Purchase string
+field TaskPlan.Region string
+field TaskPlan.Sized *taskproto.SizeResult
+field TaskPlan.Spec *taskproto.TaskSpec
+field TaskPlan.UserDataBytes int
+field TaskPlan.Warnings []string
+func (ProvisionerFunc) Provision(ctx context.Context, cfg aws.LaunchConfig, opts launcher.Options) (*aws.LaunchResult, error)
+func CompletionKey(taskPrefix string) string
+func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region string) (*Result, error)
+func LauncherProvisioner(client *aws.Client) Provisioner
+func NewDeps(client *aws.Client, region string, warn io.Writer) Deps
+func NewFinder(cfg awssdk.Config, region string, warn, verbose io.Writer) taskproto.InstanceFinder
+func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region string) (*TaskPlan, error)
+func Render(out io.Writer, p *TaskPlan)
+method AWS.CreateOrGetInstanceProfile (ctx context.Context, config aws.IAMRoleConfig) (string, error)
+method AWS.CreateS3BucketIfNotExists (ctx context.Context, bucketName, region string) error
+method AWS.DeleteS3Object (ctx context.Context, region, bucket, key string) error
+method AWS.GetAccountID (ctx context.Context) (string, error)
+method AWS.GetFSxFilesystem (ctx context.Context, filesystemID, region string) (*aws.FSxInfo, error)
+method AWS.InstanceMemoryMiB (ctx context.Context, region, instanceType string) (int64, bool)
+method Provisioner.Provision (ctx context.Context, cfg aws.LaunchConfig, opts launcher.Options) (*aws.LaunchResult, error)
+type AWS interface
+type Deps struct
+type Provisioner interface
+type ProvisionerFunc func(ctx context.Context, cfg aws.LaunchConfig, opts launcher.Options) (*aws.LaunchResult, error)
+type Result struct
+type TaskPlan struct
+
 ## pkg/taskpool (imported by: calque)
 field Claimed.Ref TaskRef
 field DirWorkspace.Root string

@@ -165,7 +165,7 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	// Deliberately NOT containerMountDirs (spawn#570): that function ALSO
 	// includes Placement's EFS/FSx/volume mount points, which this loop must
 	// NOT mkdir. Those paths are mounted onto by the boot-time storage script
-	// (cmd/task.go's taskStorageScript, which runs before this wrapper) —
+	// (pkg/tasklaunch's taskStorageScript, which runs before this wrapper) —
 	// mkdir -p on top of an already-live NFS/Lustre mount is a harmless no-op,
 	// but mkdir -p BEFORE that mount lands would create a plain local directory
 	// at the mount point, which the later mount then shadows: any file this
@@ -647,7 +647,7 @@ func manifestMountDirs(spec *TaskSpec) []string {
 // containerMountDirs returns the distinct host directories to bind-mount into
 // the container via `docker run -v`: manifestMountDirs (manifest-derived
 // input/output parents) PLUS every Placement mount point the spec's boot-time
-// storage script (cmd/task.go's taskStorageScript) already mounted on the
+// storage script (pkg/tasklaunch's taskStorageScript) already mounted on the
 // host — each Placement.Volumes[].MountPath, the EFS mount point (when
 // Placement.EFSID is set), and the FSx mount point (when
 // Placement.FSxLustreID is set). Sorted for a stable wrapper; "/", "." and

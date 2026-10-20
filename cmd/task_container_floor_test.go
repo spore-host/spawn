@@ -103,14 +103,19 @@ func TestRunTaskReal_ContainerAsksFinderForFloor(t *testing.T) {
 	}
 }
 
-// Every taskproto.Size call in cmd sizes spec.SizingRequest(), never
-// spec.Resources: the behavioural tests above cover the two call sites that
-// exist today; this discovers any new one.
+// Every taskproto.Size call in cmd, and in pkg/tasklaunch where task sizing now
+// lives, sizes spec.SizingRequest(), never spec.Resources: the behavioural tests
+// above cover the call sites that exist today; this discovers any new one.
 func TestCmd_TaskprotoSizeUsesSizingRequest(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	lib, err := filepath.Glob(filepath.Join("..", "pkg", "tasklaunch", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files = append(files, lib...)
 	fset := token.NewFileSet()
 	found := 0
 	for _, name := range files {
@@ -155,45 +160,6 @@ func TestCmd_TaskprotoSizeUsesSizingRequest(t *testing.T) {
 		})
 	}
 	if found == 0 {
-		t.Fatal("found no taskproto.Size call in cmd; the discovery is broken")
-	}
-}
-
-// A pinned type is honoured, but a container pin below the floor is warned about.
-func TestContainerPinBelowFloorWarns(t *testing.T) {
-	spec := containerCPUOnlySpec()
-	spec.Resources.InstanceType = "t4g.nano"
-
-	var buf bytes.Buffer
-	f := &fakeMemoryLookup{mib: 512, ok: true}
-	warnIfContainerPinBelowFloor(context.Background(), f, &buf, "us-east-1", spec)
-	if f.seen != "t4g.nano" {
-		t.Errorf("looked up %q, want the pinned type", f.seen)
-	}
-	if !strings.Contains(buf.String(), "t4g.nano has 0.5 GiB") || !strings.Contains(buf.String(), "#1180") {
-		t.Errorf("missing pin warning:\n%s", buf.String())
-	}
-
-	if got := spec.SizingRequest(); got.InstanceType != "t4g.nano" || got.MemoryGiB != 0 {
-		t.Errorf("SizingRequest altered a pinned request: %+v", got)
-	}
-
-	for name, tc := range map[string]struct {
-		mutate func(*taskproto.TaskSpec)
-		mib    int64
-	}{
-		"at floor":       {func(*taskproto.TaskSpec) {}, 2048},
-		"host task":      {func(s *taskproto.TaskSpec) { s.Container = "" }, 512},
-		"no pin":         {func(s *taskproto.TaskSpec) { s.Resources.InstanceType = "" }, 512},
-		"memory unknown": {func(*taskproto.TaskSpec) {}, 0},
-	} {
-		s := containerCPUOnlySpec()
-		s.Resources.InstanceType = "t4g.nano"
-		tc.mutate(s)
-		buf.Reset()
-		warnIfContainerPinBelowFloor(context.Background(), &fakeMemoryLookup{mib: tc.mib, ok: tc.mib > 0}, &buf, "us-east-1", s)
-		if buf.Len() != 0 {
-			t.Errorf("%s: unexpected warning:\n%s", name, buf.String())
-		}
+		t.Fatal("found no taskproto.Size call in cmd or pkg/tasklaunch; the discovery is broken")
 	}
 }
