@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -130,4 +131,125 @@ func f() { config.LoadDefaultConfig(nil) }`, 0},
 			}
 		})
 	}
+}
+
+// sanctionedPkgLoaders are the pkg/ functions that call LoadDefaultConfig and
+// apply the shared config (--profile/--region/SPORE_*) themselves, through an
+// options slice the scan below cannot see into. Everything else is discovered.
+var sanctionedPkgLoaders = map[string]bool{
+	"github.com/spore-host/spawn/pkg/aws.NewClientWithRegion":     true,
+	"github.com/spore-host/spawn/pkg/config.LoadInfraAWSConfig":   true,
+	"github.com/spore-host/spawn/pkg/config.LoadComputeAWSConfig": true,
+}
+
+// TestCommandsCallNoAmbientPkgLoader extends #939's gate one level into pkg/
+// (#967): `spawn dns` signed its requests through dns.NewClient, which loads the
+// ambient chain itself, so --profile reached the instance lookup but not the
+// signature. Every exported top-level pkg/ function whose body calls
+// LoadDefaultConfig — without explicit credentials, and not one of the shared
+// loaders above — is discovered, and package cmd may call none of them.
+//
+// One level only: an unexported method that loads its own config behind an
+// exported one (pkg/cost's pricer was one) is not found here; the behaviour
+// tests in dns_profile_test.go cover those two commands end to end.
+func TestCommandsCallNoAmbientPkgLoader(t *testing.T) {
+	const module = "github.com/spore-host/spawn/"
+	ambient := map[string]bool{} // import path + "." + func
+	err := filepath.WalkDir("../pkg", func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return err
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
+		if err != nil {
+			return err
+		}
+		loads := bareSDKConfigLoadCalls(f)
+		pkgPath := module + filepath.ToSlash(filepath.Dir(strings.TrimPrefix(p, "../")))
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || fd.Recv != nil || !fd.Name.IsExported() {
+				continue
+			}
+			for _, call := range loads {
+				if call.Pos() >= fd.Body.Pos() && call.Pos() < fd.Body.End() && !passesCredentials(call) {
+					if name := pkgPath + "." + fd.Name.Name; !sanctionedPkgLoaders[name] {
+						ambient[name] = true
+					}
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ambient) == 0 {
+		t.Fatal("discovered no ambient loaders in pkg/ (dns.NewClient is one, for spored): the scan is broken")
+	}
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		local := map[string]string{} // import name -> path
+		for _, imp := range f.Imports {
+			path, _ := strconv.Unquote(imp.Path.Value)
+			n := path[strings.LastIndex(path, "/")+1:]
+			if imp.Name != nil {
+				n = imp.Name.Name
+			}
+			local[n] = path
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := sel.X.(*ast.Ident); ok && ambient[local[id.Name]+"."+sel.Sel.Name] {
+				t.Errorf("%s: uses %s.%s, which loads the ambient AWS config and so ignores --profile/SPORE_PROFILE (#967); "+
+					"pass the config the command loaded instead", fset.Position(sel.Pos()), id.Name, sel.Sel.Name)
+			}
+			return true
+		})
+	}
+}
+
+// bareSDKConfigLoadCalls is bareSDKConfigLoads returning the calls themselves.
+func bareSDKConfigLoadCalls(f *ast.File) []*ast.CallExpr {
+	positions := map[token.Pos]bool{}
+	for _, p := range bareSDKConfigLoads(f) {
+		positions[p] = true
+	}
+	var calls []*ast.CallExpr
+	ast.Inspect(f, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok && positions[c.Pos()] {
+			calls = append(calls, c)
+		}
+		return true
+	})
+	return calls
+}
+
+// passesCredentials reports whether a LoadDefaultConfig call names its
+// credentials (WithCredentialsProvider): then the ambient chain is not used for
+// them, whatever profile is configured.
+func passesCredentials(call *ast.CallExpr) bool {
+	for _, a := range call.Args {
+		if c, ok := a.(*ast.CallExpr); ok {
+			if s, ok := c.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "WithCredentialsProvider" {
+				return true
+			}
+		}
+	}
+	return false
 }

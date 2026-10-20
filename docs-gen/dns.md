@@ -2,21 +2,27 @@
 
 Manage DNS records for spawn instances.
 
-DNS names are automatically registered when launching with --dns flag.
-Format: &lt;name&gt;.&lt;account-base36&gt;.spore.host
+spored registers &lt;name&gt;.&lt;account-base36&gt;.&lt;domain&gt; itself when an instance
+boots: the name is --name (or --dns), unless the launch passed --no-dns, and the
+domain is spore.host unless the launch targeted a custom DNS deployment
+(--dns-domain; see docs/custom-dns.md).
+
+register and delete act on the zone and updater the instance's
+spawn:dns-domain / spawn:dns-endpoint tags name, unless --domain / --endpoint
+say otherwise.
 
 Examples:
   # List DNS-enabled instances
   spawn dns list
 
-  # Register DNS name
+  # Register a DNS name for an instance
   spawn dns register i-1234567890abcdef0 my-server
 
-  # Delete DNS record
-  spawn dns delete my-server
+  # Delete an instance's DNS record and its DNS tags
+  spawn dns delete i-1234567890abcdef0
 
 ```
-spawn dns
+spawn dns [flags]
 ```
 
 **Flags:**
@@ -27,6 +33,8 @@ spawn dns
 | `--endpoint` |  | string |  | Custom DNS updater Function URL (default: the instance's spawn:dns-endpoint, else the same chain, else spore.host's) |
 
 ### `spawn dns delete`
+
+Delete DNS record for an instance
 
 ```
 spawn dns delete <instance-id> [flags]
@@ -40,6 +48,8 @@ spawn dns delete <instance-id> [flags]
 
 ### `spawn dns list`
 
+List DNS-enabled spawn instances
+
 ```
 spawn dns list [flags]
 ```
@@ -51,6 +61,8 @@ spawn dns list [flags]
 | `--all` | `-a` | bool |  | Show all instances (including those without DNS) |
 
 ### `spawn dns register`
+
+Register DNS name for an instance
 
 ```
 spawn dns register <instance-id> <dns-name>

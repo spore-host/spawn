@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/cost"
@@ -66,8 +65,9 @@ func runCostBreakdown(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
 
-	dbClient := dynamodb.NewFromConfig(cfg)
-	costClient := cost.NewClient(dbClient)
+	// The sweep table and the on-demand pricer both use cfg, so --profile
+	// reaches the pricing calls too (#967).
+	costClient := cost.NewClient(cfg)
 
 	breakdown, err := costClient.GetCostBreakdown(ctx, sweepID)
 	if err != nil {

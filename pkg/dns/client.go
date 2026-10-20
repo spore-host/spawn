@@ -91,13 +91,20 @@ type Client struct {
 // Empty (the default) means base36 only.
 func (c *Client) SetAccountName(slug string) { c.accountName = slug }
 
+// SetHTTPClient replaces the client's HTTP transport. For tests that serve the
+// updater locally; requests are still built and signed as in production.
+func (c *Client) SetHTTPClient(h *http.Client) { c.httpClient = h }
+
 // SetRenewing declares that the caller will re-register at LeaseRefreshInterval
 // for as long as the record should exist, so registrations may carry a lease.
 // Only call this from something that actually renews — see the renewing field.
 func (c *Client) SetRenewing(renewing bool) { c.renewing = renewing }
 
-// NewClient creates a new DNS client with optional custom domain and API endpoint
-// If domain or apiEndpoint are empty, defaults are used
+// NewClient creates a DNS client that signs with the ambient AWS credentials —
+// on an instance, its role. For spored, which has no flags. A CLI command must
+// use NewClientWithConfig with the config it loaded through the shared loader,
+// or --profile and SPORE_PROFILE do not reach the signature (#967).
+// If domain or apiEndpoint are empty, defaults are used.
 func NewClient(ctx context.Context, domain, apiEndpoint string) (*Client, error) {
 	// Ambient AWS config: the credentials that sign the request.
 	cfg, err := config.LoadDefaultConfig(ctx)
@@ -107,7 +114,16 @@ func NewClient(ctx context.Context, domain, apiEndpoint string) (*Client, error)
 	if err := spawnconfig.CheckAccount(ctx, cfg); err != nil { // --account / SPORE_ACCOUNT (#1118)
 		return nil, err
 	}
+	return NewClientWithConfig(cfg, domain, apiEndpoint), nil
+}
 
+// NewClientWithConfig creates a DNS client whose requests are signed with cfg's
+// credentials (#967). cfg is the caller's: `spawn dns register` and `spawn dns
+// delete` pass the config they resolved the instance and account with, so the
+// record is computed for, and the request signed by, the same identity. The
+// caller is responsible for any account check (spawn's shared loader makes one).
+// If domain or apiEndpoint are empty, defaults are used.
+func NewClientWithConfig(cfg aws.Config, domain, apiEndpoint string) *Client {
 	// Use defaults if not provided
 	if domain == "" {
 		domain = defaultDomain
@@ -124,9 +140,9 @@ func NewClient(ctx context.Context, domain, apiEndpoint string) (*Client, error)
 		apiEndpoint: apiEndpoint,
 	}
 
-	// SigV4-sign DNS requests (#173), by DEFAULT (#883). Credentials come from the
-	// ambient chain — the instance role on EC2 — which is the principal the
-	// AuthType: AWS_IAM Function URL authorizes.
+	// SigV4-sign DNS requests (#173), by DEFAULT (#883). Credentials come from
+	// cfg — the instance role on EC2 — which is the principal the AuthType:
+	// AWS_IAM Function URL authorizes.
 	//
 	// This used to be opt-in via SPORE_DNS_SIGV4, so a signing client could ship
 	// before the Function URL was flipped to AWS_IAM; the comment here said "the
@@ -142,7 +158,7 @@ func NewClient(ctx context.Context, domain, apiEndpoint string) (*Client, error)
 		c.signer = v4.NewSigner()
 	}
 
-	return c, nil
+	return c
 }
 
 // sigV4Enabled reports whether DNS requests are SigV4-signed: always, unless

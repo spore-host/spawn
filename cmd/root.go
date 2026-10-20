@@ -217,10 +217,20 @@ func updateCommandDescriptions() {
 		cmd.Long = i18n.T("spawn.list.long")
 	}
 
-	// DNS command
+	// DNS command. The long text is spawn's own: libs' spawn.dns.long says names
+	// are registered "when launching with --dns flag" (they are registered from
+	// --name by default) and that `spawn dns delete` takes a DNS name (it takes
+	// an instance), in every language (#1159).
 	if cmd, _, err := rootCmd.Find([]string{"dns"}); err == nil && cmd != nil {
 		cmd.Short = i18n.T("spawn.dns.short")
-		cmd.Long = i18n.T("spawn.dns.long")
+		cmd.Long = dnsLongHelp
+	}
+	// Its subcommands: the keys exist in libs and were never applied, so
+	// `spawn dns --help` listed all three with blank descriptions (#1159).
+	for _, sub := range []string{"list", "register", "delete"} {
+		if cmd, _, err := rootCmd.Find([]string{"dns", sub}); err == nil && cmd != nil && cmd.Name() == sub {
+			cmd.Short = i18n.T("spawn.dns." + sub + ".short")
+		}
 	}
 
 	// Extend command

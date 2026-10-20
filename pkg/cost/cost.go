@@ -4,14 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	spawnconfig "github.com/spore-host/spawn/pkg/config"
-	"os"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -155,41 +152,37 @@ type onDemandPricer interface {
 type Client struct {
 	db dynamoGetItemAPI
 
+	// cfg is the caller's AWS config, which the default pricer is built from.
+	// Not the ambient chain: `spawn cost --profile x` must price with x (#967).
+	cfg aws.Config
+
 	pricerOnce sync.Once
 	pricer     onDemandPricer
 }
 
-// NewClient creates a new cost client
-func NewClient(db *dynamodb.Client) *Client {
-	return &Client{db: db}
+// NewClient creates a cost client that reads the sweep table through, and
+// prices on-demand compute with, cfg — the config the caller resolved through
+// spawn's shared loader, so --profile, SPORE_PROFILE and the #1118 account
+// guard all apply to both (#967).
+func NewClient(cfg aws.Config) *Client {
+	return &Client{db: dynamodb.NewFromConfig(cfg), cfg: cfg}
 }
 
 // SetOnDemandPricer overrides the on-demand pricer GetCostBreakdown uses.
 // Primarily for tests that want a deterministic, offline price source; pass
-// nil to reset to the default (a truffle client built from the ambient AWS
-// credential chain, lazily on first use).
+// nil to reset to the default (a truffle client built from the client's
+// config, lazily on first use).
 func (c *Client) SetOnDemandPricer(p onDemandPricer) {
 	c.pricerOnce.Do(func() {}) // mark as initialized so the default is not installed later
 	c.pricer = p
 }
 
-// onDemandPricer lazily builds the default pricer if none was injected.
+// onDemandPricerOrDefault lazily builds the default pricer from c.cfg if none was
+// injected.
 func (c *Client) onDemandPricerOrDefault(ctx context.Context) onDemandPricer {
 	c.pricerOnce.Do(func() {
 		if c.pricer == nil {
-			cfg, err := awsconfig.LoadDefaultConfig(ctx)
-			if err != nil {
-				// No usable AWS config: leave c.pricer nil. Every OnDemandPrice call
-				// then fails fast per-instance below, which is reported as "unpriced"
-				// rather than a fabricated rate.
-				fmt.Fprintf(os.Stderr, "⚠️  cost: could not load AWS config for pricing (%v); compute costs will be reported as unpriced\n", err)
-				return
-			}
-			if err := spawnconfig.CheckAccount(ctx, cfg); err != nil { // --account / SPORE_ACCOUNT (#1118)
-				fmt.Fprintf(os.Stderr, "⚠️  cost: %v; compute costs will be reported as unpriced\n", err)
-				return
-			}
-			c.pricer = truffleaws.NewClientFromConfig(cfg)
+			c.pricer = truffleaws.NewClientFromConfig(c.cfg)
 		}
 	})
 	return c.pricer

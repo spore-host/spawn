@@ -338,6 +338,7 @@ func (*Client) DeleteAMI(ctx context.Context, region, amiID string) (*DeleteAMIR
 func (*Client) DeleteFSxFilesystem(ctx context.Context, filesystemID, region string) error
 func (*Client) DeleteISOFromS3(ctx context.Context, region, bucket, key string, alsoBucketIfEmpty bool) error
 func (*Client) DeleteInstanceProfileAndRole(ctx context.Context, name string) error
+func (*Client) DeleteInstanceTags(ctx context.Context, region, instanceID string, keys []string) error
 func (*Client) DeletePlacementGroup(ctx context.Context, name, region string) error
 func (*Client) DeletePlacementGroupWithRetry(ctx context.Context, name, region string) error
 func (*Client) DeleteS3Object(ctx context.Context, region, bucket, key string) error
