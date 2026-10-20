@@ -190,6 +190,7 @@ field LaunchConfig.CostLimit float64
 field LaunchConfig.DCVSessionID string
 field LaunchConfig.DNSDomain string
 field LaunchConfig.DNSEndpoint string
+field LaunchConfig.DNSFunctionARN string
 field LaunchConfig.DNSName string
 field LaunchConfig.EBSEncrypted bool
 field LaunchConfig.EBSKMSKeyID string
@@ -347,6 +348,7 @@ func (*Client) DescribeSporedLiveness(ctx context.Context, region, instanceID st
 func (*Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOptions) ([]ManagedResource, int, error)
 func (*Client) EFSMountTargetIP(ctx context.Context, filesystemID, region, subnetID, az string) (string, error)
 func (*Client) EnableTracing()
+func (*Client) EnsureDNSInvokeGrant(ctx context.Context, roleName, functionARN string) error
 func (*Client) EnsureImageBuilderSLR(ctx context.Context) (string, error)
 func (*Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImportInfrastructureInput) (string, error)
 func (*Client) EnsureLustrePorts(ctx context.Context, region, sgID string) error
@@ -389,7 +391,7 @@ func (*Client) PrepareSnapshotImage(ctx context.Context, source, region string, 
 func (*Client) PurchaseCapacityBlock(ctx context.Context, region, offeringID, platform string, dryRun bool, tags map[string]string) (string, error)
 func (*Client) RecallFSxFilesystem(ctx context.Context, stackName, region string) (*FSxInfo, error)
 func (*Client) RemoveResource(ctx context.Context, r ManagedResource) error
-func (*Client) ResolveDNSTarget(ctx context.Context, region, flagDomain, flagEndpoint string) spawnconfig.DNSTarget
+func (*Client) ResolveDNSTarget(ctx context.Context, region, flagDomain, flagEndpoint, flagFunctionARN string) (spawnconfig.DNSTarget, error)
 func (*Client) ResolveVPC(ctx context.Context, region, explicitVPC string) (string, error)
 func (*Client) RunPowerShell(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
 func (*Client) RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
@@ -426,6 +428,7 @@ func (ReaperCoverage) Summary() string
 func AccountBase36(accountID string) string
 func AttachDeviceName(i int) string
 func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error
+func DNSInvokePolicyName(functionARN string) string
 func DecryptWindowsPassword(passwordData, privateKeyPath string) (string, error)
 func DeletionOrder(resources []ManagedResource) []ManagedResource
 func DescribeInstanceWithRetry(ctx context.Context, ec2Client *ec2.Client, instanceID string) (*types.Instance, error)

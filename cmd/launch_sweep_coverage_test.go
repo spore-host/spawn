@@ -96,6 +96,7 @@ var sweepFlagCoverage = map[string]struct {
 	// param file IS the sweep route and these three have nothing to do (#549).
 	"dns":                   {sweepNA, "#549 — the param file's dns:/dns_name: key is the sweep route"},
 	"dns-api-endpoint":      {sweepNA, "#549 — only consulted when a row registers DNS"},
+	"dns-function-arn":      {sweepNA, "#1158 — only consulted with a custom --dns-api-endpoint, which sweeps do not resolve"},
 	"dns-domain":            {sweepNA, "#549 — only consulted when a row registers DNS"},
 	"no-dns":                {sweepNA, "#549 — sweeps never register DNS: a row gets spawn:dns-name only if the param file sets dns:/dns_name:, and spored skips registration without that tag. Nothing to disable, so this is not a gap"},
 	"efs-id":                {sweepHonoured, "#697 — a sweep cannot mount EFS AT ALL"},

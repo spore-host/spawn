@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	smithy "github.com/aws/smithy-go"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
 // SporedRoleName and SporedInstanceProfileName are the SHARED, long-lived IAM
@@ -987,14 +988,12 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	// dns-updater function ARN (account-pinned; region wildcard mirrors the
 	// existing setup-spawnd-iam-role.sh grant). Harmless before the AuthType flip
 	// (the NONE URL doesn't check it) and required after it.
-	sporedDNSInvoke := map[string]interface{}{
-		"Effect": "Allow",
-		"Action": []interface{}{
-			"lambda:InvokeFunctionUrl",
-		},
-		"Resource": "arn:aws:lambda:*:966362334030:function:spawn-dns-updater",
-	}
-	statements = append(statements, sporedDNSInvoke)
+	//
+	// This is spore.host's updater only. A custom updater's grant (#1158) is a
+	// separate inline policy, added by EnsureDNSInvokeGrant: these roles are
+	// shared between launches, so a launch-specific Resource here would be
+	// overwritten by the next launch to use a different updater.
+	statements = append(statements, sporedDNSInvokeStatement(spawnconfig.DefaultDNSFunctionARN))
 
 	// Allow spored to mount an async-created ephemeral FSx (#194/#221). The mount
 	// path polls fsx:DescribeFileSystems until AVAILABLE and sets up the S3 export
@@ -1136,6 +1135,68 @@ func sporedHybridRegistryStatement() map[string]interface{} {
 		"Action":   actions,
 		"Resource": sporedHybridRegistryResource,
 	}
+}
+
+// sporedDNSInvokeStatement lets the instance role call a DNS updater's Function
+// URL under AWS_IAM auth (#173). functionARN is spore.host's in both baseline
+// policies, and a custom updater's in the policy EnsureDNSInvokeGrant adds.
+func sporedDNSInvokeStatement(functionARN string) map[string]interface{} {
+	return map[string]interface{}{
+		"Effect":   "Allow",
+		"Action":   []interface{}{"lambda:InvokeFunctionUrl"},
+		"Resource": functionARN,
+	}
+}
+
+// DNSInvokePolicyName is the inline policy EnsureDNSInvokeGrant writes for
+// functionARN: one per function, so grants for different updaters accumulate on
+// a shared role instead of replacing each other.
+func DNSInvokePolicyName(functionARN string) string {
+	sum := sha256.Sum256([]byte(functionARN))
+	return fmt.Sprintf("spored-dns-invoke-%x", sum[:4])
+}
+
+// EnsureDNSInvokeGrant lets roleName's instances register DNS through a custom
+// updater (#1158): it writes an inline policy granting lambda:InvokeFunctionUrl
+// on functionARN. A Function URL call across accounts needs an allow in both the
+// function's resource policy and the caller's identity policy, and the role's
+// baselines grant only spore.host's function, so without this a self-hosted
+// updater answers 403 and spored records spawn:dns-status=failed.
+//
+// A separate policy, not an edit to the baseline: spored-instance-role and the
+// spawn-instance-<hash> roles are shared by every launch with the same IAM
+// configuration, and the baselines are rewritten on each one, so a
+// launch-specific Resource there would be replaced by the next launch through a
+// different updater, cutting off the instances already running. Idempotent.
+func (c *Client) EnsureDNSInvokeGrant(ctx context.Context, roleName, functionARN string) error {
+	if functionARN == "" {
+		return fmt.Errorf("EnsureDNSInvokeGrant: no function ARN")
+	}
+	b, err := json.Marshal(map[string]interface{}{
+		"Version":   "2012-10-17",
+		"Statement": []interface{}{sporedDNSInvokeStatement(functionARN)},
+	})
+	if err != nil {
+		return err
+	}
+	doc, err := c.sporedPolicyDoc(ctx, string(b))
+	if err != nil {
+		return err
+	}
+	iamClient := iam.NewFromConfig(c.cfg)
+	name := DNSInvokePolicyName(functionARN)
+	err = retryIAM(func() error {
+		_, e := iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+			RoleName:       aws.String(roleName),
+			PolicyName:     aws.String(name),
+			PolicyDocument: aws.String(doc),
+		})
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("grant %s lambda:InvokeFunctionUrl on the DNS updater %s: %w", roleName, functionARN, err)
+	}
+	return nil
 }
 
 // sporedSelfTerminateStatement lets an instance terminate ITSELF, and nothing
@@ -1618,7 +1679,7 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
     {
       "Effect": "Allow",
       "Action": ["lambda:InvokeFunctionUrl"],
-      "Resource": "arn:aws:lambda:*:966362334030:function:spawn-dns-updater"
+      "Resource": %q
     },
     {
       "Effect": "Allow",
@@ -1669,7 +1730,7 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
     %s,
     %s
   ]
-}`, reaperControlTagKeysJSON(), sporedHybridRegistryStatementJSON(), sporedSelfTerminateStatementJSON())
+}`, reaperControlTagKeysJSON(), spawnconfig.DefaultDNSFunctionARN, sporedHybridRegistryStatementJSON(), sporedSelfTerminateStatementJSON())
 
 // waitForInstanceProfile polls until the instance profile is retrievable (IAM
 // is eventually consistent after creation), or a bounded deadline passes. It

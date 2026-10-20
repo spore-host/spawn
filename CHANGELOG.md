@@ -130,6 +130,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It uses the same probe as `spawn doctor`. If coverage can't be determined,
   status says that instead of claiming nothing is deployed (#1157).
 
+- **A launch is refused when the account's `/spawn/dns/*` SSM setting can't be
+  read.** A missing parameter still means "not set". Any other error
+  (AccessDenied, throttling, the network) now refuses `spawn launch`,
+  `spawn dns register` and `spawn dns delete`, naming the parameter and
+  `ssm:GetParameter`. Before this, the error was treated as "not set", so a
+  launcher without the read permission in an account that publishes a custom
+  DNS deployment registered under spore.host's updater without any warning. If
+  you can't be granted the read, set the value by flag, environment or config
+  file instead; that skips the lookup (#1121).
+- **A custom `--dns-api-endpoint` now needs the updater's function ARN.**
+  The instance role's invoke grant was pinned to spore.host's function, so a
+  self-hosted updater answered every spore with 403 and spored set
+  `spawn:dns-status=failed`. The ARN can't be derived from a Function URL,
+  so a custom endpoint without one is refused before anything is launched,
+  unless `--instance-profile` names a role spawn doesn't manage (#1158).
+- **Go API:** `aws.Client.ResolveDNSTarget` and `config.ResolveDNSTarget` take
+  a function-ARN argument and return an error (#1121, #1158).
+
 ### Fixed
 
 - `spawn status`, `spawn list`'s TTL column and `spawn start`'s notice put the
@@ -226,6 +244,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/infra-account.md` said `ACCOUNTS_TABLE` decides which accounts the
   reaper scans. That is set by `REAPER_ROLE_ARNS` (and `REAPER_SCAN_SELF`); the
   table only supplies the expiry verdict (#1157).
+- `spawn launch --dns-function-arn` (also `SPAWN_DNS_FUNCTION_ARN`,
+  `dns.function_arn` in `~/.spawn/config.yaml`, SSM `/spawn/dns/function_arn`)
+  names the Lambda function behind a custom `--dns-api-endpoint`. The launch
+  grants the instance role `lambda:InvokeFunctionUrl` on it, in its own inline
+  policy `spored-dns-invoke-<hash>`, so spored can register through a
+  self-hosted updater in another account. `--dry-run` shows the grant, and
+  `-o json` carries `dns_function_arn` (#1158).
+- `aws.Client.EnsureDNSInvokeGrant`, `aws.DNSInvokePolicyName`,
+  `aws.LaunchConfig.DNSFunctionARN`, `config.DefaultDNSFunctionARN`,
+  `config.SSMDNSFunctionARNPath`, `config.DNSSettingUnreadableError` and
+  `dns.ValidateFunctionARN` (Go API).
 
 ## [0.136.0] - 2026-10-20
 

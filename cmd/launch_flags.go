@@ -55,6 +55,7 @@ var (
 	dnsName          string
 	dnsDomain        string
 	dnsAPIEndpoint   string
+	dnsFunctionARN   string
 	noDNS            bool
 	noTimeout        bool
 	slackWorkspaceID string // for lifecycle notifications via spore-bot
@@ -337,6 +338,7 @@ func init() {
 	// them because, until then, nothing that registered DNS read either.
 	launchCmd.Flags().StringVar(&dnsDomain, "dns-domain", "", "Register DNS under this zone instead of spore.host (needs an updater serving it; see docs/custom-dns.md). Also SPAWN_DNS_DOMAIN, dns.domain in ~/.spawn/config.yaml, or SSM /spawn/dns/domain")
 	launchCmd.Flags().StringVar(&dnsAPIEndpoint, "dns-api-endpoint", "", "Lambda Function URL of a custom DNS updater (https://<id>.lambda-url.<region>.on.aws/). Also SPAWN_DNS_API_ENDPOINT, dns.api_endpoint in ~/.spawn/config.yaml, or SSM /spawn/dns/api_endpoint")
+	launchCmd.Flags().StringVar(&dnsFunctionARN, "dns-function-arn", "", "ARN of the Lambda function behind --dns-api-endpoint; the instance role is granted lambda:InvokeFunctionUrl on it (required with a custom endpoint). Also SPAWN_DNS_FUNCTION_ARN, dns.function_arn in ~/.spawn/config.yaml, or SSM /spawn/dns/function_arn")
 	launchCmd.Flags().BoolVar(&noDNS, "no-dns", false, "Do not register DNS for this instance (by default spored registers the --name/--dns name). Overrides dns.enabled in ~/.spawn/config.yaml for this launch (#549)")
 
 	// Job array
