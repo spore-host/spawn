@@ -77,6 +77,15 @@ var dnsEndpointURLs = map[Environment]string{
 	EnvInteg: "https://zqonqra6blwh7342ujuxv3bwei0wnpyq.lambda-url.us-east-1.on.aws/", // update when integ stack exists
 }
 
+// DefaultDNSFunctionARN is the Lambda function behind spore.host's DNS updater
+// endpoint (dnsEndpointURLs). Every spored role spawn writes grants
+// lambda:InvokeFunctionUrl on it (#173); a custom updater's function is named by
+// SPAWN_DNS_FUNCTION_ARN / dns.function_arn / SSM /spawn/dns/function_arn
+// instead (#1158), because a Function URL's hostname does not contain it. The
+// region is a wildcard: the grant predates per-region deployments and the
+// function name and account already pin it to the one updater.
+const DefaultDNSFunctionARN = "arn:aws:lambda:*:966362334030:function:spawn-dns-updater"
+
 // GetNotifyURL returns the notification Lambda callback URL.
 // Precedence: SPORE_NOTIFY_URL → environment-specific default.
 func GetNotifyURL() string {

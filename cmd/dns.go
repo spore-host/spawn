@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/dns"
 )
 
@@ -311,7 +314,17 @@ func dnsCommandTarget(ctx context.Context, awsClient *aws.Client, region string,
 	if endpointIn == "" && tags["spawn:dns-endpoint"] != "" {
 		endpointIn, endpointSrc = tags["spawn:dns-endpoint"], "the instance's spawn:dns-endpoint tag"
 	}
-	t := awsClient.ResolveDNSTarget(ctx, region, domainIn, endpointIn)
+	// No function ARN: this request is signed by the caller's own credentials,
+	// not an instance role spawn grants.
+	t, err := awsClient.ResolveDNSTarget(ctx, region, domainIn, endpointIn, "")
+	if err != nil {
+		// Name this command's flags, not spawn launch's (#1121).
+		var unreadable *spawnconfig.DNSSettingUnreadableError
+		if errors.As(err, &unreadable) {
+			unreadable.Flag = strings.NewReplacer("--dns-domain", "--domain", "--dns-api-endpoint", "--endpoint").Replace(unreadable.Flag)
+		}
+		return "", "", err
+	}
 	if t.DomainSource == "flag" {
 		t.DomainSource = domainSrc
 	}

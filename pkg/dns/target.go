@@ -67,3 +67,25 @@ func ValidateEndpoint(u string) (string, error) {
 	}
 	return "https://" + host + "/", nil
 }
+
+// functionARN is a Lambda function ARN without a qualifier: partition, region,
+// a 12-digit account and the function name. No wildcards and no policy
+// variables — it becomes the Resource of the instance role's
+// lambda:InvokeFunctionUrl grant (#1158), and IAM rejects a policy variable there
+// (#1069).
+var functionARN = regexp.MustCompile(`^arn:aws(-[a-z]+)*:lambda:([a-z0-9-]+):([0-9]{12}):function:([A-Za-z0-9_-]{1,64})$`)
+
+// ValidateFunctionARN reports whether arn can name the Lambda function behind
+// endpoint (already validated by ValidateEndpoint): a plain function ARN in the
+// region the endpoint's hostname names, since a Function URL belongs to a
+// function in its own region.
+func ValidateFunctionARN(arn, endpoint string) error {
+	m := functionARN.FindStringSubmatch(strings.TrimSpace(arn))
+	if m == nil {
+		return fmt.Errorf("invalid DNS updater function ARN %q: must be arn:aws:lambda:<region>:<account>:function:<name>", arn)
+	}
+	if want := signingRegion(endpoint, ""); m[2] != want {
+		return fmt.Errorf("DNS updater function ARN %q is in %s, but the endpoint %s is in %s: a Function URL belongs to a function in its own region", arn, m[2], endpoint, want)
+	}
+	return nil
+}

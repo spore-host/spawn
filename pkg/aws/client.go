@@ -209,6 +209,11 @@ type LaunchConfig struct {
 	// spawn:dns-domain and spawn:dns-endpoint tags.
 	DNSDomain   string
 	DNSEndpoint string
+	// DNSFunctionARN is the Lambda function behind a custom DNSEndpoint (#1158).
+	// Not a tag: the launch grants the instance role lambda:InvokeFunctionUrl on
+	// it (Client.EnsureDNSInvokeGrant). Empty for spore.host's updater, which the
+	// role's baseline policy already grants.
+	DNSFunctionARN string
 
 	// Pre-stop hook: runs before any lifecycle-triggered terminate/stop/hibernate
 	PreStop        string // Shell command to run before stopping (e.g., "aws s3 sync /results s3://bucket/")

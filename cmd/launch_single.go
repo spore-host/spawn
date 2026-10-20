@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -1129,6 +1130,7 @@ func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.La
 		if instanceProfile != "" {
 			config.IamInstanceProfile = instanceProfile
 			auditLog.LogOperation("create_iam_role", instanceProfile, "success", nil)
+			warnUnmanagedProfileDNSGrant(os.Stderr, config)
 			prog.Complete("Setting up IAM role")
 			return nil
 		}
@@ -1178,6 +1180,11 @@ func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.La
 				auditLog.LogOperation("create_iam_role", iamConfig.RoleName, "failed", err)
 				return fmt.Errorf("failed to create IAM instance profile: %w", err)
 			}
+			// CreateOrGetInstanceProfile names the profile after its role.
+			if err := ensureDNSInvokeGrant(ctx, awsClient, config, instanceProfile); err != nil {
+				prog.Error("Setting up IAM role", err)
+				return err
+			}
 			config.IamInstanceProfile = instanceProfile
 			auditLog.LogOperationWithData("create_iam_role", iamConfig.RoleName, "success",
 				map[string]interface{}{
@@ -1191,12 +1198,42 @@ func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.La
 				auditLog.LogOperation("create_iam_role", "spored-instance-role", "failed", err)
 				return err
 			}
+			if err := ensureDNSInvokeGrant(ctx, awsClient, config, aws.SporedRoleName); err != nil {
+				prog.Error("Setting up IAM role", err)
+				return err
+			}
 			config.IamInstanceProfile = instanceProfile
 			auditLog.LogOperation("create_iam_role", "spored-instance-role", "success", nil)
 		}
+	} else {
+		warnUnmanagedProfileDNSGrant(os.Stderr, config)
 	}
 	prog.Complete("Setting up IAM role")
 	return nil
+}
+
+// ensureDNSInvokeGrant gives roleName lambda:InvokeFunctionUrl on a custom DNS
+// updater's function (#1158), so spored can register through it. A no-op for
+// spore.host's updater, which every spored baseline policy already grants.
+func ensureDNSInvokeGrant(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, roleName string) error {
+	if config.DNSFunctionARN == "" {
+		return nil
+	}
+	return awsClient.EnsureDNSInvokeGrant(ctx, roleName, config.DNSFunctionARN)
+}
+
+// warnUnmanagedProfileDNSGrant: spawn does not edit a role it did not create, so
+// with a custom DNS updater the caller's own profile must carry the grant.
+func warnUnmanagedProfileDNSGrant(w io.Writer, config *aws.LaunchConfig) {
+	if config.DNSEndpoint == "" || isDefaultDNSEndpoint(config.DNSEndpoint) {
+		return
+	}
+	fn := config.DNSFunctionARN
+	if fn == "" {
+		fn = "the updater's function"
+	}
+	_, _ = fmt.Fprintf(w, "%s instance profile %s is not managed by spawn: it must grant lambda:InvokeFunctionUrl on %s, or spored cannot register DNS through %s\n",
+		i18n.Symbol("warning"), config.IamInstanceProfile, fn, config.DNSEndpoint)
 }
 
 // mergeManagedSecurityGroup adds a spawn-managed security group alongside any

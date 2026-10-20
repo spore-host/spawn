@@ -145,8 +145,9 @@ var windowsLaunchFlags = map[string]windowsFlagRule{
 	"notify-platform":        honouredOnWindows(whySporedTag),
 	"dns":                    honouredOnWindows(whySporedTag),
 	"no-dns":                 honouredOnWindows(whySporedTag),
-	"dns-domain":             honouredOnWindows(whyDeprecatedNo),
-	"dns-api-endpoint":       honouredOnWindows(whyDeprecatedNo),
+	"dns-domain":             honouredOnWindows(whySporedTag),
+	"dns-api-endpoint":       honouredOnWindows(whySporedTag),
+	"dns-function-arn":       honouredOnWindows(whyIAM),
 
 	// Job arrays: plain arrays launch N Windows instances. The array-specific
 	// parts that need the bootstrap (MPI, storage) are refused above.

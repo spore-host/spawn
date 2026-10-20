@@ -56,3 +56,28 @@ func TestAValidatedEndpointSignsForItsOwnRegion(t *testing.T) {
 		t.Errorf("signingRegion = %q, want ap-southeast-2", got)
 	}
 }
+
+// #1158: the ARN becomes the Resource of the instance role's invoke grant, so it
+// must be one function, with no wildcard or policy variable (#1069), in the
+// endpoint's own region.
+func TestValidateFunctionARN(t *testing.T) {
+	const ep = "https://abc123.lambda-url.eu-west-1.on.aws/"
+	ok := "arn:aws:lambda:eu-west-1:111122223333:function:spawn-dns-updater"
+	if err := ValidateFunctionARN(ok, ep); err != nil {
+		t.Errorf("%s: %v", ok, err)
+	}
+	for _, bad := range []string{
+		"",
+		"spawn-dns-updater",
+		"arn:aws:lambda:*:111122223333:function:spawn-dns-updater",
+		"arn:aws:lambda:eu-west-1:*:function:spawn-dns-updater",
+		"arn:aws:lambda:eu-west-1:${aws:PrincipalAccount}:function:spawn-dns-updater",
+		"arn:aws:lambda:eu-west-1:111122223333:function:*",
+		"arn:aws:lambda:eu-west-1:111122223333:function:spawn-dns-updater:prod",
+		"arn:aws:lambda:us-east-1:111122223333:function:spawn-dns-updater", // another region
+	} {
+		if err := ValidateFunctionARN(bad, ep); err == nil {
+			t.Errorf("ValidateFunctionARN(%q) accepted it", bad)
+		}
+	}
+}

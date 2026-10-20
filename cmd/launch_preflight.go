@@ -9,6 +9,7 @@ import (
 	"github.com/scttfrdmn/strata/pkg/strata"
 	"github.com/scttfrdmn/strata/spec"
 	"github.com/spore-host/spawn/pkg/aws"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/plugin"
@@ -68,19 +69,27 @@ func resolveTargetOS(ctx context.Context, awsClient *aws.Client, region, amiID, 
 	return "linux"
 }
 
-// resolveLaunchDNSTarget fills config.DNSDomain and config.DNSEndpoint — the
-// custom DNS target spored registers with (#891) — from --dns-domain /
-// --dns-api-endpoint, SPAWN_DNS_*, ~/.spawn/config.yaml or the account's SSM
-// parameters, and validates them before anything is launched.
+// resolveLaunchDNSTarget fills config.DNSDomain, config.DNSEndpoint and
+// config.DNSFunctionARN — the custom DNS target spored registers with (#891) and
+// the function its role must be allowed to invoke (#1158) — from --dns-domain /
+// --dns-api-endpoint / --dns-function-arn, SPAWN_DNS_*, ~/.spawn/config.yaml or
+// the account's SSM parameters, and validates them before anything is launched.
 //
 // Only for a launch that registers DNS (config.DNSName set, which --no-dns
 // withholds). A value equal to spore.host's default leaves the field empty, so
 // no tag is written for the common case.
+//
+// Refuses the launch when an SSM parameter cannot be read for any reason but its
+// absence (#1121): falling back to spore.host would register the instance with
+// the updater the account's setting exists to avoid.
 func resolveLaunchDNSTarget(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig) error {
 	if config.DNSName == "" {
 		return nil
 	}
-	t := awsClient.ResolveDNSTarget(ctx, config.Region, dnsDomain, dnsAPIEndpoint)
+	t, err := awsClient.ResolveDNSTarget(ctx, config.Region, dnsDomain, dnsAPIEndpoint, dnsFunctionARN)
+	if err != nil {
+		return fmt.Errorf("DNS target: %w", err)
+	}
 	if t.Domain != "" {
 		if err := dns.ValidateDomain(t.Domain); err != nil {
 			return fmt.Errorf("DNS domain from %s: %w", t.DomainSource, err)
@@ -96,7 +105,41 @@ func resolveLaunchDNSTarget(ctx context.Context, awsClient *aws.Client, config *
 		}
 		config.DNSEndpoint = ep
 	}
+	return resolveDNSFunctionARN(config, t)
+}
+
+// resolveDNSFunctionARN sets config.DNSFunctionARN for a custom endpoint (#1158).
+//
+// spore.host's endpoint needs nothing: the role's baseline already grants its
+// function. A custom one needs the function's ARN, which cannot be read off the
+// URL — the hostname's id is opaque — and without the grant spored's requests
+// are refused with 403. So a custom endpoint with no ARN is refused here rather
+// than launched into a DNS failure, unless --instance-profile names a role spawn
+// does not manage, whose grants are the caller's.
+func resolveDNSFunctionARN(config *aws.LaunchConfig, t spawnconfig.DNSTarget) error {
+	if config.DNSEndpoint == "" || isDefaultDNSEndpoint(config.DNSEndpoint) {
+		return nil
+	}
+	if t.FunctionARN == "" {
+		if instanceProfile != "" {
+			return nil
+		}
+		return fmt.Errorf("the custom DNS endpoint %s (from %s) needs the ARN of its Lambda function, so the instance role can be granted lambda:InvokeFunctionUrl on it.\n"+
+			"  Set --dns-function-arn, SPAWN_DNS_FUNCTION_ARN, dns.function_arn in ~/.spawn/config.yaml, or SSM %s "+
+			"(scripts/deploy-custom-dns.sh names the function spawn-dns-updater: arn:aws:lambda:<region>:<updater account>:function:spawn-dns-updater)",
+			config.DNSEndpoint, t.EndpointSource, spawnconfig.SSMDNSFunctionARNPath)
+	}
+	if err := dns.ValidateFunctionARN(t.FunctionARN, config.DNSEndpoint); err != nil {
+		return fmt.Errorf("DNS updater function from %s: %w", t.FunctionARNSource, err)
+	}
+	config.DNSFunctionARN = strings.TrimSpace(t.FunctionARN)
 	return nil
+}
+
+// isDefaultDNSEndpoint reports whether ep (canonical) is spore.host's updater.
+func isDefaultDNSEndpoint(ep string) bool {
+	def, err := dns.ValidateEndpoint(spawnconfig.GetDNSEndpointURL())
+	return err == nil && def == ep
 }
 
 // isAutoAMI reports whether --ami asks spawn to choose the image.

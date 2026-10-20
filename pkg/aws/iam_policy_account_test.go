@@ -93,3 +93,29 @@ func TestBindPolicyAccount(t *testing.T) {
 		t.Errorf("no-placeholder doc = (%q, %v)", got, err)
 	}
 }
+
+// #1158: the custom-updater grant is written as its own policy, which a real
+// PutRolePolicy accepts (#1069 is why that is checked by writing it), and which
+// leaves the baseline's spore.host grant alone.
+func TestEnsureDNSInvokeGrantIsWrittenBesideTheBaseline(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	ctx := context.Background()
+	c := NewClientFromConfig(env.AWSConfig)
+	ic := env.IAMClient()
+	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
+		t.Fatalf("SetupSporedIAMRole: %v", err)
+	}
+	const fn = "arn:aws:lambda:eu-west-1:111122223333:function:spawn-dns-updater"
+	if err := c.EnsureDNSInvokeGrant(ctx, SporedRoleName, fn); err != nil {
+		t.Fatalf("EnsureDNSInvokeGrant: %v", err)
+	}
+	if doc := storedPolicy(t, ic, SporedRoleName, DNSInvokePolicyName(fn)); !strings.Contains(doc, `"Resource":"`+fn+`"`) {
+		t.Errorf("custom grant = %s, want Resource %s", doc, fn)
+	}
+	if doc := storedPolicy(t, ic, SporedRoleName, "spored-policy"); strings.Contains(doc, fn) {
+		t.Errorf("the custom function reached the shared baseline, where the next launch would overwrite it:\n%s", doc)
+	}
+	if DNSInvokePolicyName(fn) == DNSInvokePolicyName("arn:aws:lambda:eu-west-1:444455556666:function:spawn-dns-updater") {
+		t.Error("two updaters share a policy name, so one grant would replace the other")
+	}
+}

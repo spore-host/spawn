@@ -20,15 +20,19 @@ import (
 
 const testEndpoint = "https://abc123.lambda-url.eu-west-1.on.aws/"
 
-type dnsFlags struct{ domain, endpoint string }
+type dnsFlags struct{ domain, endpoint, function string }
+
+const testFunction = "arn:aws:lambda:eu-west-1:111122223333:function:spawn-dns-updater"
 
 func dryRunDNSPlan(t *testing.T, env *testutil.TestEnv, f dnsFlags, dnsRecord string) (launchPlan, error) {
 	t.Helper()
 	client := spawnaws.NewClientFromConfig(env.AWSConfig)
 	stubDryRunPrice(t, 0.1)
-	prevD, prevE, prevOS, prevOut := dnsDomain, dnsAPIEndpoint, osFlag, spawnOutputFormat
-	t.Cleanup(func() { dnsDomain, dnsAPIEndpoint, osFlag, spawnOutputFormat = prevD, prevE, prevOS, prevOut })
-	dnsDomain, dnsAPIEndpoint, osFlag, spawnOutputFormat = f.domain, f.endpoint, "linux", "json"
+	prevD, prevE, prevF, prevOS, prevOut := dnsDomain, dnsAPIEndpoint, dnsFunctionARN, osFlag, spawnOutputFormat
+	t.Cleanup(func() {
+		dnsDomain, dnsAPIEndpoint, dnsFunctionARN, osFlag, spawnOutputFormat = prevD, prevE, prevF, prevOS, prevOut
+	})
+	dnsDomain, dnsAPIEndpoint, dnsFunctionARN, osFlag, spawnOutputFormat = f.domain, f.endpoint, f.function, "linux", "json"
 
 	cfg := &spawnaws.LaunchConfig{Name: "web", InstanceType: "m7i.large", Region: "us-east-1",
 		AMI: "ami-0abc123", TTL: "1h", DNSName: dnsRecord}
@@ -48,6 +52,7 @@ func isolateDNSEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SPAWN_DNS_DOMAIN", "")
 	t.Setenv("SPAWN_DNS_API_ENDPOINT", "")
+	t.Setenv("SPAWN_DNS_FUNCTION_ARN", "")
 }
 
 func TestLaunchCarriesTheCustomDNSTarget(t *testing.T) {
@@ -55,22 +60,22 @@ func TestLaunchCarriesTheCustomDNSTarget(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	seedAL2023AMIParams(t, env)
 
-	p, err := dryRunDNSPlan(t, env, dnsFlags{"spore.example.edu", "https://ABC123.lambda-url.eu-west-1.on.aws"}, "web")
+	p, err := dryRunDNSPlan(t, env, dnsFlags{"spore.example.edu", "https://ABC123.lambda-url.eu-west-1.on.aws", testFunction}, "web")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.DNSDomain != "spore.example.edu" || p.DNSEndpoint != testEndpoint {
-		t.Errorf("plan DNS target = (%q, %q), want (spore.example.edu, %s)", p.DNSDomain, p.DNSEndpoint, testEndpoint)
+	if p.DNSDomain != "spore.example.edu" || p.DNSEndpoint != testEndpoint || p.DNSFunctionARN != testFunction {
+		t.Errorf("plan DNS target = (%q, %q, %q), want (spore.example.edu, %s, %s)", p.DNSDomain, p.DNSEndpoint, p.DNSFunctionARN, testEndpoint, testFunction)
 	}
 
 	// spore.host spelled out is the default: no tag for the common case.
-	p, err = dryRunDNSPlan(t, env, dnsFlags{"spore.host", ""}, "web")
+	p, err = dryRunDNSPlan(t, env, dnsFlags{"spore.host", "", ""}, "web")
 	if err != nil || p.DNSDomain != "" || p.DNSEndpoint != "" {
 		t.Errorf("--dns-domain spore.host = (%q, %q, %v), want no custom target", p.DNSDomain, p.DNSEndpoint, err)
 	}
 
 	// No DNS name (e.g. --no-dns): nothing to point anywhere.
-	p, err = dryRunDNSPlan(t, env, dnsFlags{"spore.example.edu", testEndpoint}, "")
+	p, err = dryRunDNSPlan(t, env, dnsFlags{"spore.example.edu", testEndpoint, ""}, "")
 	if err != nil || p.DNSDomain != "" || p.DNSEndpoint != "" {
 		t.Errorf("no DNS name = (%q, %q, %v), want no custom target", p.DNSDomain, p.DNSEndpoint, err)
 	}
@@ -83,7 +88,7 @@ func TestLaunchRefusesAnInvalidDNSTarget(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	seedAL2023AMIParams(t, env)
 
-	_, err := dryRunDNSPlan(t, env, dnsFlags{"", "https://f4gm19tl70.execute-api.us-east-1.amazonaws.com/prod/update-dns"}, "web")
+	_, err := dryRunDNSPlan(t, env, dnsFlags{"", "https://f4gm19tl70.execute-api.us-east-1.amazonaws.com/prod/update-dns", ""}, "web")
 	if err == nil || !strings.Contains(err.Error(), "Function URL") || !strings.Contains(err.Error(), "flag") {
 		t.Errorf("API Gateway endpoint: err = %v, want a refusal naming the flag", err)
 	}
@@ -100,7 +105,7 @@ func TestLaunchUsesTheAccountsSSMDNSTarget(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	seedAL2023AMIParams(t, env)
 	ssmc := ssm.NewFromConfig(env.AWSConfig)
-	for k, v := range map[string]string{"/spawn/dns/domain": "spore.example.edu", "/spawn/dns/api_endpoint": testEndpoint} {
+	for k, v := range map[string]string{"/spawn/dns/domain": "spore.example.edu", "/spawn/dns/api_endpoint": testEndpoint, "/spawn/dns/function_arn": testFunction} {
 		if _, err := ssmc.PutParameter(context.Background(), &ssm.PutParameterInput{
 			Name: aws.String(k), Value: aws.String(v), Type: ssmtypes.ParameterTypeString}); err != nil {
 			t.Fatal(err)
@@ -110,11 +115,11 @@ func TestLaunchUsesTheAccountsSSMDNSTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.DNSDomain != "spore.example.edu" || p.DNSEndpoint != testEndpoint {
-		t.Errorf("plan DNS target from SSM = (%q, %q)", p.DNSDomain, p.DNSEndpoint)
+	if p.DNSDomain != "spore.example.edu" || p.DNSEndpoint != testEndpoint || p.DNSFunctionARN != testFunction {
+		t.Errorf("plan DNS target from SSM = (%q, %q, %q)", p.DNSDomain, p.DNSEndpoint, p.DNSFunctionARN)
 	}
 	// The flag still wins.
-	p, err = dryRunDNSPlan(t, env, dnsFlags{"other.example.org", ""}, "web")
+	p, err = dryRunDNSPlan(t, env, dnsFlags{"other.example.org", "", ""}, "web")
 	if err != nil || p.DNSDomain != "other.example.org" || p.DNSEndpoint != testEndpoint {
 		t.Errorf("flag over SSM = (%q, %q, %v)", p.DNSDomain, p.DNSEndpoint, err)
 	}

@@ -138,8 +138,9 @@ type launchPlan struct {
 	CompletionFile              string   `json:"completion_file,omitempty"`
 	PreStop                     string   `json:"pre_stop,omitempty"`
 	DNSName                     string   `json:"dns_name,omitempty"`
-	DNSDomain                   string   `json:"dns_domain,omitempty"`   // custom zone (#891); empty = spore.host
-	DNSEndpoint                 string   `json:"dns_endpoint,omitempty"` // custom updater (#891); empty = spore.host's
+	DNSDomain                   string   `json:"dns_domain,omitempty"`       // custom zone (#891); empty = spore.host
+	DNSEndpoint                 string   `json:"dns_endpoint,omitempty"`     // custom updater (#891); empty = spore.host's
+	DNSFunctionARN              string   `json:"dns_function_arn,omitempty"` // the role is granted invoke on it (#1158)
 	KeyName                     string   `json:"key_name,omitempty"`
 	IamInstanceProfile          string   `json:"iam_instance_profile"`
 	IamInstanceProfileIsPreview bool     `json:"iam_instance_profile_is_preview"`
@@ -197,6 +198,7 @@ func describeLaunchPlan(config *aws.LaunchConfig) launchPlan {
 		DNSName:              config.DNSName,
 		DNSDomain:            config.DNSDomain,
 		DNSEndpoint:          config.DNSEndpoint,
+		DNSFunctionARN:       config.DNSFunctionARN,
 		KeyName:              config.KeyName,
 		SecurityGroupIDs:     config.SecurityGroupIDs,
 		SubnetID:             config.SubnetID,
@@ -342,6 +344,9 @@ func renderLaunchPlanTable(out io.Writer, p launchPlan) {
 		}
 		if p.DNSEndpoint != "" {
 			fmt.Fprintf(out, "DNS updater:  %s\n", p.DNSEndpoint)
+			if p.DNSFunctionARN != "" {
+				fmt.Fprintf(out, "DNS grant:    lambda:InvokeFunctionUrl on %s\n", p.DNSFunctionARN)
+			}
 		}
 	}
 	if p.KeyName != "" {

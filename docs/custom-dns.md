@@ -51,13 +51,13 @@ updater trusts, so it would let one allowed account register records as another.
 
 Each value resolves independently, first match wins:
 
-| | domain | endpoint |
-|---|---|---|
-| flag | `--dns-domain` | `--dns-api-endpoint` |
-| environment | `SPAWN_DNS_DOMAIN` | `SPAWN_DNS_API_ENDPOINT` |
-| `~/.spawn/config.yaml` | `dns.domain` | `dns.api_endpoint` |
-| SSM, in the launch's account and region | `/spawn/dns/domain` | `/spawn/dns/api_endpoint` |
-| default | `spore.host` | spore.host's updater |
+| | domain | endpoint | updater function |
+|---|---|---|---|
+| flag | `--dns-domain` | `--dns-api-endpoint` | `--dns-function-arn` |
+| environment | `SPAWN_DNS_DOMAIN` | `SPAWN_DNS_API_ENDPOINT` | `SPAWN_DNS_FUNCTION_ARN` |
+| `~/.spawn/config.yaml` | `dns.domain` | `dns.api_endpoint` | `dns.function_arn` |
+| SSM, in the launch's account and region | `/spawn/dns/domain` | `/spawn/dns/api_endpoint` | `/spawn/dns/function_arn` |
+| default | `spore.host` | spore.host's updater | spore.host's updater |
 
 SSM is the way to set it once for everyone launching in an account:
 
@@ -66,7 +66,38 @@ aws ssm put-parameter --region us-east-1 --type String \
   --name /spawn/dns/domain --value spore.example.edu
 aws ssm put-parameter --region us-east-1 --type String \
   --name /spawn/dns/api_endpoint --value https://<id>.lambda-url.us-east-1.on.aws/
+aws ssm put-parameter --region us-east-1 --type String \
+  --name /spawn/dns/function_arn \
+  --value arn:aws:lambda:us-east-1:<updater account>:function:spawn-dns-updater
 ```
+
+Reading those parameters needs `ssm:GetParameter` on
+`arn:aws:ssm:<region>:<account>:parameter/spawn/dns/*`. A parameter that doesn't
+exist means "not set" and the chain moves on. Any other failure (AccessDenied,
+throttling, the network) **refuses the launch** and names the parameter. spawn
+never falls back to spore.host's updater because it couldn't read the account's
+setting. If you can't be granted the read, supply the value another way (flag,
+environment or config file); that skips the lookup.
+
+### The updater function
+
+A spore signs its DNS requests with its instance role, and a Function URL call
+from another account needs an allow in both the function's resource policy
+(`--allow-account` above) and the caller's own IAM policy. So the launch grants
+the instance role `lambda:InvokeFunctionUrl` on the updater's function. A
+Function URL's hostname doesn't name the function or its account, so with a
+custom endpoint you must name the function. `deploy-custom-dns.sh` always
+creates `spawn-dns-updater`, so the ARN is
+`arn:aws:lambda:<region>:<updater account>:function:spawn-dns-updater`, in the
+endpoint's region. A custom endpoint without one is refused before anything is
+launched. spore.host's own endpoint needs nothing, because every spored role
+already grants its function.
+
+The grant is a separate inline policy on the role, `spored-dns-invoke-<hash>`,
+one per function. The roles are shared between launches, so grants for
+different updaters build up side by side and never replace each other or the
+baseline's grant on spore.host's function. With `--instance-profile`, spawn
+doesn't edit the role. It warns, and the grant is up to you.
 
 Both are validated before anything is launched. The domain must be a lowercase
 domain name. The endpoint must be an `https://<id>.lambda-url.<region>.on.aws/`
@@ -79,13 +110,15 @@ A domain alone is fine when the updater you already use serves that zone. An
 endpoint alone sends requests for spore.host to that updater.
 
 `spawn launch --dry-run` shows the target (`DNS: web under spore.example.edu`,
-`DNS updater: …`), and `-o json` carries `dns_domain` / `dns_endpoint`.
+`DNS updater: …`, `DNS grant: …`), and `-o json` carries `dns_domain` /
+`dns_endpoint` / `dns_function_arn`.
 
 ## 3. Check it
 
 ```bash
 spawn launch dns-test --ttl 1h --dns-domain spore.example.edu \
-  --dns-api-endpoint https://<id>.lambda-url.us-east-1.on.aws/
+  --dns-api-endpoint https://<id>.lambda-url.us-east-1.on.aws/ \
+  --dns-function-arn arn:aws:lambda:us-east-1:<updater account>:function:spawn-dns-updater
 spawn status dns-test        # spawn:dns-status: registered
 spawn dns list               # FQDNs in each instance's own zone
 ```
