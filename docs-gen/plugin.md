@@ -104,7 +104,10 @@ Runs the plugin's full lifecycle: local provision steps on this controller
 install/configure/start steps on the instance via spored. Values captured and
 pushed by local steps are delivered before the remote configure phase runs.
 
-Requires SSH access to the instance (the same key used by 'spawn plugin status').
+spored's push API listens on the instance's loopback only. spawn reaches it over
+SSH when the instance has a public IP and SSH works, and otherwise runs the
+request on the instance over SSM (keyless or SSM-only instances, no public IP).
+The same applies to 'spawn plugin list', 'status' and 'remove'.
 
 Linux spores only: plugin steps are POSIX shell, so 'spawn plugin install'
 refuses a Windows spore (spawn:os=windows) before running anything.

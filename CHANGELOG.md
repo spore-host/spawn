@@ -81,6 +81,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance ID, an instance launched from the image still runs its own
   `--command`. Delete the marker to re-run a command on purpose.
 
+- **`spawn plugin install`, `list`, `status` and `remove` work on keyless,
+  SSM-only instances (#855).** spored's plugin push API listens on the
+  instance's loopback, so these commands reached it only through an SSH
+  port-forward. An instance with no public IP or no usable SSH key could not
+  take a plugin. Now an instance with no public IP is reached over SSM: spawn
+  runs the request on the instance with `curl` to the loopback API, and the
+  token is read there and never leaves the box. An instance with a public IP
+  is tried over SSH first. If SSH cannot reach the API, the call and every
+  later one in the command go over SSM. A request that SSH delivered is never
+  repeated over SSM, so an install cannot run twice. If both SSH and SSM fail,
+  the command exits non-zero with an error that names both failures. A
+  request larger than one SendCommand can carry is staged in chunks, and a
+  response that SSM's 24,000-character output limit cuts short is reported as
+  truncated rather than parsed.
+
 ### Fixed
 
 - `spawn resume` panicked (`interface conversion: interface {} is nil, not
