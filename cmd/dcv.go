@@ -102,14 +102,19 @@ func dcvStatusTerminal(status string) bool {
 // dcvFailureMessage turns a ready-status into an actionable CLI line naming the
 // failing layer and a remediation — replacing the single opaque
 // "(timed out — DCV login screen will appear)" that made this feature churn.
+//
+// A DCV instance's inspect hint is `spawn connect <id> --session-manager`:
+// plain connect opens the streaming session there, and the DCV security group
+// has no port 22. A web app's security group does allow 22, so plain connect is
+// a shell for those (#1153).
 func dcvFailureMessage(status, instanceID string) string {
 	switch status {
 	case dcvStatusNotInstalled:
-		return fmt.Sprintf(" ✗ the Amazon DCV server isn't installed — its boot-time install (spore-host#286/#389) didn't complete; inspect: spawn connect %s, then /var/log/cloud-init-output.log.", instanceID)
+		return fmt.Sprintf(" ✗ the Amazon DCV server isn't installed — its boot-time install (spore-host#286/#389) didn't complete; inspect: spawn connect %s --session-manager, then /var/log/cloud-init-output.log.", instanceID)
 	case dcvStatusServerNotRunning:
-		return fmt.Sprintf(" ✗ the DCV server failed to start — inspect it: spawn connect %s, then `systemctl status dcvserver` / `journalctl -u dcvserver`.", instanceID)
+		return fmt.Sprintf(" ✗ the DCV server failed to start — inspect it: spawn connect %s --session-manager, then `systemctl status dcvserver` / `journalctl -u dcvserver`.", instanceID)
 	case dcvStatusSessionNotCreated:
-		return fmt.Sprintf(" ✗ DCV is up but the session was never created — check the app launch command: spawn connect %s, then /var/log/spored.log.", instanceID)
+		return fmt.Sprintf(" ✗ DCV is up but the session was never created — check the app launch command: spawn connect %s --session-manager, then /var/log/spored.log.", instanceID)
 	case dcvStatusTagWriteDenied:
 		return " ✗ spored couldn't write its ready tag (instance role missing ec2:CreateTags) — re-launch to refresh the role, or check the spored IAM policy."
 	case webStatusNotResponding:
@@ -117,8 +122,8 @@ func dcvFailureMessage(status, instanceID string) string {
 	case webStatusProxyFailed:
 		return fmt.Sprintf(" ✗ the TLS reverse proxy couldn't start (likely the wildcard cert wasn't provisioned) — inspect: spawn connect %s, then /var/log/spored.log.", instanceID)
 	case dcvStatusWaiting, "":
-		return fmt.Sprintf(" (timed out waiting for DCV — inspect with: spawn connect %s, then /var/log/spored.log)", instanceID)
+		return fmt.Sprintf(" (timed out waiting for DCV — inspect with: spawn connect %s --session-manager, then /var/log/spored.log)", instanceID)
 	default:
-		return fmt.Sprintf(" (DCV not ready: %s — inspect with: spawn connect %s)", status, instanceID)
+		return fmt.Sprintf(" (DCV not ready: %s — inspect with: spawn connect %s --session-manager)", status, instanceID)
 	}
 }

@@ -15,8 +15,9 @@
 #
 # What `spawn app list` shows for an app:
 #   launchable        — its image resolves for your account (public, or private
-#                       ECR your account owns), or it has a legacy launch_command
-#   recipe available  — a buildable definition with no bound image (bind one here)
+#                       ECR your account owns)
+#   recipe available  — a buildable definition with no bound image (bind one
+#                       here); a legacy launch_command alone also lands here
 #   (hidden)          — a private image owned by another account you can't pull
 
 apps:

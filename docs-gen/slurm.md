@@ -7,13 +7,13 @@ with minimal changes. Supports array jobs, MPI jobs, and GPU jobs.
 
 Examples:
   # Convert Slurm script to spawn parameters
-  spawn slurm convert job.sbatch --output params.yaml
+  spawn slurm convert job.sbatch --output-file params.yaml
 
   # Estimate cost before running
   spawn slurm estimate job.sbatch
 
-  # Convert and submit in one step
-  spawn slurm submit job.sbatch --spot
+  # Convert and submit in one step (for spot, put "#SPAWN --spot=true" in the script)
+  spawn slurm submit job.sbatch
 
 ```
 spawn slurm
@@ -41,8 +41,8 @@ Custom #SPAWN directives (optional):
   #SPAWN --ami=AMI_ID          → Override AMI
 
 Example:
-  spawn slurm convert train.sbatch --output params.yaml
-  spawn launch --params params.yaml
+  spawn slurm convert train.sbatch --output-file params.yaml
+  spawn launch train --param-file params.yaml
 
 ```
 spawn slurm convert <script.sbatch> [flags]
@@ -81,8 +81,10 @@ Parse a Slurm batch script, convert to spawn parameters, and launch immediately.
 This is a convenience command that combines 'convert' and 'launch' in one step.
 For complex jobs, consider using 'convert' first to review the generated parameters.
 
+Spot instances come from the script ("#SPAWN --spot=true"); there is no --spot flag.
+
 Example:
-  spawn slurm submit train.sbatch --spot --yes
+  spawn slurm submit train.sbatch --yes
 
 ```
 spawn slurm submit <script.sbatch> [flags]

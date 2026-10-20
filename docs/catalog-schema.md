@@ -57,13 +57,14 @@ apps:
 | `port` | int | For a `web` app, the container's HTTP port (e.g. `8888` for Jupyter, `8080` for code-server). **Required when `kind: web`**; ignored otherwise. |
 | `health_path` | string | For a `web` app, the HTTP path probed for readiness. Defaults to `/`. |
 | `idle_timeout_default` | string | Recommended idle timeout (e.g. `20m`). Applied unless overridden with `--idle-timeout`; the instance stops when idle this long. |
-| `launch_command` | string | Full path to the application binary on the AMI, for a **legacy** (non-containerized) app. Prefer `image`. |
+| `args` | list of string | Extra arguments appended to the container run, after the image (e.g. `[--bind-addr, "0.0.0.0:8080"]`). `--web-arg` adds more at launch. |
+| `launch_command` | string | **Legacy, not launchable.** Path to the app binary on a baked per-app AMI, a model retired in #389. An entry with only a `launch_command` is listed as "recipe available" and refused at launch until an `image` is bound. Use `image`. |
 | `aliases` | list of string | Alternative names that resolve to this entry (e.g. `pv` → `paraview`). |
 | `license` | string | Licensing model: `open-source`, `commercial`, or `needs-conversation`. |
 | `image` | string | Container image (without tag) the app runs from, e.g. `public.ecr.aws/spore-host/paraview`. Empty for a not-yet-containerized app. |
 | `tag_default` | string | Image tag launched when `--app-version` is not given (e.g. `5.13.2`). |
 | `tags_available` | list of string | Image tags a user may select via `--app-version`; used to validate the flag before launch. Always implicitly includes `tag_default`. |
-| `visibility` | string | `public` (anonymously pullable by any account) or `private` (needs registry auth + a cross-account grant). When empty it is **inferred** from `image`: `public.ecr.aws/*` → public, `*.dkr.ecr.<region>.amazonaws.com/*` (private ECR) → private. Set it explicitly only to override the guess. |
+| `visibility` | string | `public` (anonymously pullable by any account) or `private` (needs registry auth). A private-ECR image is launchable only from the account that owns it: one owned by another account is hidden from `spawn app list` and refused by `spawn app launch`, even if that account has granted you pull access. When empty it is **inferred** from `image`: `public.ecr.aws/*` → public, `*.dkr.ecr.<region>.amazonaws.com/*` (private ECR) → private. Set it explicitly only to override the guess. |
 | `recipe` | string | Path to the **public** build instructions for this app's image (e.g. `infra/amis/containers/paraview` in the spore-host repo). An entry with a `recipe` but no `image` is a buildable *definition*, shown as "recipe available" until someone binds a built image. |
 | `base_amis` | map region→AMI ID | **Optional** per-region base-AMI pin. Normally leave unset — see [Base AMIs](#base-amis). |
 | `amis` | map region→AMI ID | **Deprecated** (#290): per-app baked AMIs, superseded by container `image` + the SSM-resolved base. Do not set on new entries. |
@@ -74,7 +75,7 @@ apps:
 
 - **`application`** *(default)* — a single Linux GUI app streamed over an Amazon
   DCV virtual session to a browser tab. This is also what a legacy `dcv: true`
-  entry means. Needs `image` (or a legacy `launch_command`).
+  entry means. Needs `image` (a legacy `launch_command` alone is not launchable).
 - **`desktop`** — a bare Linux desktop (GNOME) over DCV, no specific app. Needs
   no `image` or `launch_command`: a desktop environment and DCV are installed at
   boot. Launch with `spawn app launch desktop`.
@@ -83,7 +84,8 @@ apps:
   fronts the app with a built-in TLS reverse proxy on `:443`, then hands you the
   `https://<host>/` URL. Requires `port`; optionally set `health_path`. You can
   also launch a `web` app ad hoc without a catalog entry:
-  `spawn app launch <name> --image <ref> --web-port <n> [--health-path <path>]`.
+  `spawn app launch <name> --image <ref> --web-port <n> --instance-type <type> [--health-path <path>]`
+  (`--instance-type` is required: a name not in the catalog has no hardware spec).
 
 ### Base AMIs
 

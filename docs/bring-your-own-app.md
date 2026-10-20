@@ -3,11 +3,15 @@
 `spawn app launch` streams two kinds of app: **DCV** GUI apps and **web** apps
 (ones that serve their own HTTP UI — Jupyter, code-server, OpenRefine…). If your
 web app has a good public container image, launch it directly — no catalog entry
-needed:
+needed, just the port it serves on and an instance type (there is no catalog
+hardware spec to default from):
 
 ```sh
-spawn app launch myapp --image someorg/myapp --web-port 8080
+spawn app launch myapp --image someorg/myapp --web-port 8080 --instance-type m7i.large
 ```
+
+A bare ref (no `:tag`) launches `:latest`. Add `--health-path /healthz` if the
+app's readiness check is not `/`.
 
 ## When there's no official image
 

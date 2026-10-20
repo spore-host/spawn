@@ -72,13 +72,13 @@ with minimal changes. Supports array jobs, MPI jobs, and GPU jobs.
 
 Examples:
   # Convert Slurm script to spawn parameters
-  spawn slurm convert job.sbatch --output params.yaml
+  spawn slurm convert job.sbatch --output-file params.yaml
 
   # Estimate cost before running
   spawn slurm estimate job.sbatch
 
-  # Convert and submit in one step
-  spawn slurm submit job.sbatch --spot
+  # Convert and submit in one step (for spot, put "#SPAWN --spot=true" in the script)
+  spawn slurm submit job.sbatch
 `,
 }
 
@@ -106,8 +106,8 @@ Custom #SPAWN directives (optional):
   #SPAWN --ami=AMI_ID          → Override AMI
 
 Example:
-  spawn slurm convert train.sbatch --output params.yaml
-  spawn launch --params params.yaml
+  spawn slurm convert train.sbatch --output-file params.yaml
+  spawn launch train --param-file params.yaml
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runSlurmConvert,
@@ -138,8 +138,10 @@ var slurmSubmitCmd = &cobra.Command{
 This is a convenience command that combines 'convert' and 'launch' in one step.
 For complex jobs, consider using 'convert' first to review the generated parameters.
 
+Spot instances come from the script ("#SPAWN --spot=true"); there is no --spot flag.
+
 Example:
-  spawn slurm submit train.sbatch --spot --yes
+  spawn slurm submit train.sbatch --yes
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runSlurmSubmit,
@@ -278,8 +280,8 @@ func runSlurmEstimate(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "\n📝 Next Steps:\n")
 	fmt.Fprintf(os.Stderr, "  1. Review the estimate above\n")
-	fmt.Fprintf(os.Stderr, "  2. Convert: spawn slurm convert %s --output params.yaml\n", scriptPath)
-	fmt.Fprintf(os.Stderr, "  3. Launch:  spawn launch --params params.yaml\n")
+	fmt.Fprintf(os.Stderr, "  2. Convert: spawn slurm convert %s --output-file params.yaml\n", scriptPath)
+	fmt.Fprintf(os.Stderr, "  3. Launch:  spawn launch <name> --param-file params.yaml\n")
 	fmt.Fprintf(os.Stderr, "\n  Or submit directly: spawn slurm submit %s --yes\n", scriptPath)
 
 	return nil

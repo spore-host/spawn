@@ -33,9 +33,11 @@ var taskDiagnoseJSON bool
 
 var taskGroupCmd = &cobra.Command{
 	Use:   "task",
-	Short: "Inspect and diagnose individual tasks (instances)",
+	Short: "Run tasks from a TaskSpec, read their completion records, and diagnose them",
 	Long: `Work with a single launched instance as a "task".
 
+  spawn task run --spec <file>             launch a task from a TaskSpec (stage, run, completion record)
+  spawn task status <task-id>              read a task's durable completion record from S3
   spawn task diagnose <name|instance-id>   one-screen summary + likely cause`,
 }
 
@@ -562,7 +564,7 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	resultsPrefix := taskproto.EffectiveResultsPrefix(spec, account, region)
 	resultsBucket, resultsKeyPrefix, ok := taskproto.SplitS3URI(resultsPrefix)
 	if !ok {
-		return fmt.Errorf("resources.results_prefix %q is not an s3://bucket/prefix URI", spec.ResultsPrefix)
+		return fmt.Errorf("results_prefix %q is not an s3://bucket/prefix URI", spec.ResultsPrefix)
 	}
 
 	// Create the bucket only when it is the one spawn manages. A caller who names

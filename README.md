@@ -170,14 +170,19 @@ like `spawn launch`.
 # See what you can launch (public apps + anything your account can pull)
 spawn app list
 
-# 1. A single GUI app streamed to a browser tab (the default kind)
-spawn app launch paraview            # e.g. ParaView, ChimeraX — on a GPU instance
+# 1. A single GUI app streamed to a browser tab (the default kind). ParaView,
+#    ChimeraX and the other GUI apps are "recipe available": build the image
+#    from the recipe, then launch it (on a GPU instance)
+spawn app launch paraview --image 123456789012.dkr.ecr.us-east-1.amazonaws.com/paraview:5.13.2
 
 # 2. A bare Linux desktop over DCV — "open a terminal and run anything"
 spawn app launch desktop
 
-# 3. A web app that serves its own UI on a port (Jupyter, code-server, …) — no DCV
-spawn app launch my-jupyter --image 123456789012.dkr.ecr.us-east-1.amazonaws.com/jupyter --web-port 8888
+# 3. A web app that serves its own UI on a port — no DCV. jupyter, code-server
+#    and openrefine are in the catalog; any other image needs only a port and
+#    an instance type
+spawn app launch jupyter
+spawn app launch my-notebook --image 123456789012.dkr.ecr.us-east-1.amazonaws.com/jupyter --web-port 8888 --instance-type m7i.large
 ```
 
 **Three launch kinds** (set by the catalog entry's `kind`, or inferred):
