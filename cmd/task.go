@@ -317,14 +317,22 @@ instead of reporting an earlier attempt's verdict (#608).
 			return fmt.Errorf("no region: pass --region or configure a default AWS region")
 		}
 		finder := newTruffleFinder(awsClient.Config(), region)
-		warnIfContainerPinBelowFloor(cmd.Context(), awsClient, os.Stderr, region, spec)
-		if err := checkPinnedShm(cmd.Context(), awsClient, region, spec); err != nil {
+		// Size once. A pinned type is looked up here (sizes + price, #1253), and
+		// the pin checks below read its memory from that same lookup instead of
+		// describing the type again.
+		sized, err := taskproto.Size(cmd.Context(), finder, spec.SizingRequest())
+		if err != nil {
+			return err
+		}
+		mem := sizedMemoryLookup{sized: sized, fallback: awsClient}
+		warnIfContainerPinBelowFloor(cmd.Context(), mem, os.Stderr, region, spec)
+		if err := checkPinnedShm(cmd.Context(), mem, region, spec); err != nil {
 			return err
 		}
 		if taskRunDryRun {
-			return renderTaskDryRun(cmd.Context(), os.Stdout, spec, finder, region)
+			return renderTaskDryRunSized(os.Stdout, spec, sized, region)
 		}
-		return runTaskReal(cmd.Context(), os.Stdout, awsClient, spec, finder, region)
+		return runTaskRealSized(cmd.Context(), os.Stdout, awsClient, spec, sized, region)
 	},
 }
 
@@ -371,6 +379,14 @@ func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.Resourc
 		MinVCPUs:     req.CPU,
 		MinMemory:    taskproto.EffectiveMemoryGiB(req),
 	}
+	// A pinned type is looked up on its own (#1253): an exact matcher, which
+	// truffle turns into one DescribeInstanceTypes for that type, and no
+	// minimums, since a pin is honoured whatever the request says.
+	pin := strings.TrimSpace(req.InstanceType)
+	if pin != "" {
+		matcher = regexp.MustCompile("^" + regexp.QuoteMeta(pin) + "$")
+		opts = truffleaws.FilterOptions{}
+	}
 	var timing sizingTiming
 	start := time.Now()
 	results, err := f.tc.SearchInstanceTypes(ctx, []string{f.region}, matcher, opts)
@@ -396,7 +412,12 @@ func (f truffleFinder) FindCandidates(ctx context.Context, req taskproto.Resourc
 	start = time.Now()
 	for _, r := range results {
 		if r.OnDemandPrice <= 0 {
-			if f.priceList != nil {
+			switch {
+			case f.priceList == nil:
+			case pin != "":
+				// One type needs one rate, not the region's table.
+				prices.live, timing.priceRequests, prices.liveErr = pricelist.InstanceOnDemandPrices(ctx, f.priceList, f.region, pin)
+			default:
 				prices.live, timing.priceRequests, prices.liveErr = pricelist.RegionOnDemandPrices(ctx, f.priceList, f.region)
 			}
 			break
@@ -433,6 +454,11 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	if err != nil {
 		return err
 	}
+	return renderTaskDryRunSized(out, spec, sized, region)
+}
+
+// renderTaskDryRunSized prints the plan for an already-sized task.
+func renderTaskDryRunSized(out io.Writer, spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string) error {
 	// The user data this task would send, measured the way RunInstances
 	// measures it, so a spec that cannot launch fails its dry run (#1063).
 	userDataBytes, err := taskUserDataPreflight(spec, sized, region)
@@ -456,12 +482,12 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 		fmt.Fprintf(out, "Container:    %s  [%s]\n", spec.Container, mode)
 	}
 	fmt.Fprintf(out, "Region:       %s\n", region)
-	fmt.Fprintf(out, "Instance:     %s  (%d vCPU, %.0f GiB", sized.InstanceType, sized.VCPUs, sized.MemoryGiB)
-	if sized.OnDemandPrice > 0 {
-		fmt.Fprintf(out, ", $%.4f/hr on-demand", sized.OnDemandPrice)
+	fmt.Fprintf(out, "Instance:     %s  (%s)\n", sized.InstanceType, instanceSizeSummary(sized))
+	if sized.Pinned {
+		fmt.Fprintf(out, "              pinned by spec (resources.instance_type)\n")
+	} else {
+		fmt.Fprintf(out, "              chosen as cheapest of %d matching type(s)\n", sized.Considered)
 	}
-	fmt.Fprintf(out, ")\n")
-	fmt.Fprintf(out, "              chosen as cheapest of %d matching type(s)\n", sized.Considered)
 	if note := containerMemoryFloorNote(spec); note != "" {
 		fmt.Fprintf(out, "              %s\n", note)
 	}
@@ -520,6 +546,42 @@ func renderTaskDryRun(ctx context.Context, out io.Writer, spec *taskproto.TaskSp
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Re-run without --dry-run to launch this task.")
 	return nil
+}
+
+// instanceSizeSummary is the parenthesised part of the dry run's Instance line:
+// vCPUs, memory and the on-demand rate when known. A pinned type whose lookup
+// failed says so rather than printing zeros (#1253); its rate, if one was found
+// anyway, is still shown.
+func instanceSizeSummary(sized *taskproto.SizeResult) string {
+	var parts []string
+	if sized.SizesKnown() {
+		parts = append(parts, fmt.Sprintf("%d vCPU", sized.VCPUs), fmt.Sprintf("%.0f GiB", sized.MemoryGiB))
+	} else {
+		parts = append(parts, fmt.Sprintf("sizes unavailable: %v", sized.PinLookupErr))
+	}
+	if sized.OnDemandPrice > 0 {
+		parts = append(parts, fmt.Sprintf("$%.4f/hr on-demand", sized.OnDemandPrice))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// sizedMemoryLookup answers the pin checks' memory question from the sizing
+// lookup, so a pinned type is described once (#1253). Only when that lookup
+// could not size the type does it ask fallback, whose own static table still
+// knows the tiny sizes the container-floor warning is about.
+type sizedMemoryLookup struct {
+	sized    *taskproto.SizeResult
+	fallback memoryLookup
+}
+
+func (m sizedMemoryLookup) InstanceMemoryMiB(ctx context.Context, region, instanceType string) (int64, bool) {
+	if m.sized != nil && m.sized.InstanceType == instanceType && m.sized.SizesKnown() && m.sized.MemoryGiB > 0 {
+		return int64(m.sized.MemoryGiB*1024 + 0.5), true
+	}
+	if m.fallback == nil {
+		return 0, false
+	}
+	return m.fallback.InstanceMemoryMiB(ctx, region, instanceType)
 }
 
 // containerMemoryFloorNote explains, in the dry run, that sizing raised the
@@ -645,6 +707,11 @@ func runTaskReal(ctx context.Context, out io.Writer, client *aws.Client, spec *t
 	if err != nil {
 		return err
 	}
+	return runTaskRealSized(ctx, out, client, spec, sized, region)
+}
+
+// runTaskRealSized is runTaskReal for an already-sized task.
+func runTaskRealSized(ctx context.Context, out io.Writer, client *aws.Client, spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string) error {
 	// Before any AWS call that creates something (or any at all, beyond
 	// sizing): a spec whose user data is over EC2's limit cannot launch (#1063).
 	if _, err := taskUserDataPreflight(spec, sized, region); err != nil {

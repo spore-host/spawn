@@ -789,6 +789,8 @@ field SizeResult.Family string
 field SizeResult.InstanceType string
 field SizeResult.MemoryGiB float64
 field SizeResult.OnDemandPrice float64
+field SizeResult.PinLookupErr error
+field SizeResult.Pinned bool
 field SizeResult.VCPUs int
 field TaskSpec.Command []string
 field TaskSpec.Container string
@@ -808,6 +810,7 @@ field WrapperOptions.GPU bool
 field WrapperOptions.Region string
 field WrapperOptions.ResultsPrefix string
 field WrapperOptions.RunID string
+func (*SizeResult) SizesKnown() bool
 func (*TaskSpec) CheckShmAgainstMemory(memGiB float64) string
 func (*TaskSpec) EffectiveOnComplete() string
 func (*TaskSpec) SizingRequest() ResourceRequest
