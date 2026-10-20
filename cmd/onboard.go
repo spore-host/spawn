@@ -3,11 +3,13 @@ package cmd
 // `spawn onboard` — the CLI path for bringing your AWS account onto the spore.host
 // portal (the equivalent of the web CloudFormation quick-create). It:
 //   1. resolves the caller's account via STS,
-//   2. generates a high-entropy per-account ExternalId (confused-deputy guard),
-//   3. creates (idempotently) the `spore-portal-onboard` cross-account role that
-//      trusts the portal phone-home Lambda role under that ExternalId, with the
-//      EC2 launch + SSM + scoped iam:PassRole permissions the portal needs, and
-//   4. SigV4-POSTs {roleArn, externalId, region} to the phone-home Function URL
+//   2. creates the `spore-portal-onboard` cross-account role that trusts the
+//      portal phone-home Lambda role under a high-entropy per-account ExternalId
+//      (confused-deputy guard), with the EC2 launch + SSM + scoped iam:PassRole
+//      permissions the portal needs. On a re-run the existing role's ExternalId
+//      is kept (read from its trust policy) and its policies are rewritten to
+//      the current documents (#1138), and
+//   3. SigV4-POSTs {roleArn, externalId, region} to the phone-home Function URL
 //      so the portal auto-registers the account — no copy-paste.
 //
 // The phone-home endpoint is AuthType: AWS_IAM, so the signed POST lets the
@@ -25,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -35,6 +38,7 @@ import (
 	"github.com/spf13/cobra"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/dns"
 )
 
 const portalOnboardRoleName = "spore-portal-onboard"
@@ -56,8 +60,32 @@ var onboardCmd = &cobra.Command{
 manage EC2 in this account, and register it with the portal.
 
 Run with credentials for the account you want to onboard (SSO, profile, or keys).
-This is the CLI equivalent of the web CloudFormation quick-create.`,
+This is the CLI equivalent of the web CloudFormation quick-create.
+
+Re-running is safe: an existing role keeps the ExternalId it already trusts
+(pass --external-id to change it), and its trust and inline policies are
+rewritten to the current documents. With -o json, stdout carries only the JSON
+result; progress goes to stderr.`,
 	RunE: runOnboard,
+}
+
+// Seams for the hermetic tests: the IAM calls, the caller-identity lookup and
+// the phone-home HTTP client. Production values talk to AWS; the tests swap in
+// recording fakes so nothing reaches IAM or the real portal endpoint.
+var (
+	onboardIAMClient = func(cfg aws.Config) onboardIAMAPI { return iam.NewFromConfig(cfg) }
+	onboardCaller    = func(ctx context.Context, cfg aws.Config) (string, string, error) {
+		return spawnaws.NewClientFromConfig(cfg).GetCallerIdentityInfo(ctx)
+	}
+	onboardHTTPClient = func() *http.Client { return http.DefaultClient }
+)
+
+// onboardIAMAPI is the slice of the IAM client spawn onboard uses.
+type onboardIAMAPI interface {
+	GetRole(ctx context.Context, in *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error)
+	CreateRole(ctx context.Context, in *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error)
+	UpdateAssumeRolePolicy(ctx context.Context, in *iam.UpdateAssumeRolePolicyInput, optFns ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error)
+	PutRolePolicy(ctx context.Context, in *iam.PutRolePolicyInput, optFns ...func(*iam.Options)) (*iam.PutRolePolicyOutput, error)
 }
 
 func runOnboard(cmd *cobra.Command, args []string) error {
@@ -75,8 +103,16 @@ func runOnboard(cmd *cobra.Command, args []string) error {
 		region = "us-east-1"
 	}
 
+	jsonOut := onboardJSONOutput || getOutputFormat() == "json"
+	// Progress goes to stderr under -o json, so stdout carries exactly one JSON
+	// document and nothing else (#1138).
+	progress := cmd.OutOrStdout()
+	if jsonOut {
+		progress = cmd.ErrOrStderr()
+	}
+
 	// Who are we onboarding?
-	accountID, callerARN, err := spawnaws.NewClientFromConfig(cfg).GetCallerIdentityInfo(ctx)
+	accountID, callerARN, err := onboardCaller(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("get caller identity: %w", err)
 	}
@@ -88,15 +124,6 @@ func runOnboard(cmd *cobra.Command, args []string) error {
 	}
 	if phoneHomeRole == "" {
 		return fmt.Errorf("no phone-home Lambda role ARN — set --phone-home-role or SPORE_PORTAL_PHONE_HOME_ROLE_ARN")
-	}
-
-	// Per-account ExternalId (confused-deputy guard). Reuse if supplied (re-runs).
-	externalID := onboardExternalID
-	if externalID == "" {
-		externalID, err = generateExternalID()
-		if err != nil {
-			return fmt.Errorf("generate external id: %w", err)
-		}
 	}
 
 	// iam:PassRole names a ROLE. This defaulted to "spored-instance-profile" — an
@@ -112,12 +139,14 @@ func runOnboard(cmd *cobra.Command, args []string) error {
 		sporedRole = spawnaws.SporedRoleName
 	}
 
-	fmt.Printf("Onboarding account %s (region %s)…\n", accountID, region)
-	roleARN, err := ensurePortalOnboardRole(ctx, cfg, accountID, phoneHomeRole, externalID, sporedRole)
+	fmt.Fprintf(progress, "Onboarding account %s (region %s)…\n", accountID, region)
+	// The ExternalId is decided inside ensurePortalOnboardRole: an existing role
+	// already trusts one, and a re-run must keep presenting THAT one (#1138).
+	roleARN, externalID, err := ensurePortalOnboardRole(ctx, onboardIAMClient(cfg), progress, accountID, phoneHomeRole, onboardExternalID, sporedRole)
 	if err != nil {
 		return fmt.Errorf("ensure onboarding role: %w", err)
 	}
-	fmt.Printf("  ✓ Role: %s\n", roleARN)
+	fmt.Fprintf(progress, "  ✓ Role: %s\n", roleARN)
 
 	// Register with the portal (unless skipped).
 	phoneHomeURL := onboardPhoneHomeURL
@@ -126,17 +155,17 @@ func runOnboard(cmd *cobra.Command, args []string) error {
 	}
 	if onboardSkipPhoneHome || phoneHomeURL == "" {
 		if !onboardSkipPhoneHome {
-			fmt.Println("  ! No phone-home URL (set --phone-home-url or SPORE_PORTAL_PHONE_HOME_URL) — skipping auto-registration.")
-			fmt.Println("    Register manually in the portal with the role ARN + ExternalId below.")
+			fmt.Fprintln(progress, "  ! No phone-home URL (set --phone-home-url or SPORE_PORTAL_PHONE_HOME_URL) — skipping auto-registration.")
+			fmt.Fprintln(progress, "    Register manually in the portal with the role ARN + ExternalId below.")
 		}
 	} else {
 		if err := phoneHome(ctx, cfg, phoneHomeURL, region, roleARN, externalID); err != nil {
 			return fmt.Errorf("register with portal (phone-home): %w", err)
 		}
-		fmt.Println("  ✓ Registered with the portal")
+		fmt.Fprintln(progress, "  ✓ Registered with the portal")
 	}
 
-	if onboardJSONOutput || getOutputFormat() == "json" {
+	if jsonOut {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{
 			"accountId":  accountID,
 			"roleArn":    roleARN,
@@ -145,10 +174,11 @@ func runOnboard(cmd *cobra.Command, args []string) error {
 			"caller":     callerARN,
 		})
 	}
-	fmt.Printf("\nDone. Account %s is onboarded.\n", accountID)
-	fmt.Printf("  Role ARN:    %s\n", roleARN)
-	fmt.Printf("  ExternalId:  %s\n", externalID)
-	fmt.Println("Keep the ExternalId safe — it's the guard the portal presents when assuming the role.")
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "\nDone. Account %s is onboarded.\n", accountID)
+	fmt.Fprintf(out, "  Role ARN:    %s\n", roleARN)
+	fmt.Fprintf(out, "  ExternalId:  %s\n", externalID)
+	fmt.Fprintln(out, "Keep the ExternalId safe — it's the guard the portal presents when assuming the role.")
 	return nil
 }
 
@@ -161,24 +191,10 @@ func generateExternalID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// ensurePortalOnboardRole creates the spore-portal-onboard role (idempotently)
-// trusting phoneHomeRole under externalID, with the portal launch permissions.
-// Returns the role ARN. If the role already exists, returns it unchanged (re-run
-// safe) — note an existing role keeps its original trust/ExternalId.
-func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, phoneHomeRole, externalID, sporedRole string) (string, error) {
-	client := iam.NewFromConfig(cfg)
-
-	if existing, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(portalOnboardRoleName)}); err == nil {
-		fmt.Printf("  ! Role %s already exists — leaving its trust policy unchanged.\n", portalOnboardRoleName)
-		return *existing.Role.Arn, nil
-	} else {
-		var notFound *iamtypes.NoSuchEntityException
-		if !errors.As(err, &notFound) {
-			return "", fmt.Errorf("get role: %w", err)
-		}
-	}
-
-	trustPolicy := fmt.Sprintf(`{
+// portalTrustPolicy is the onboarding role's trust policy: the portal
+// phone-home Lambda role, under this account's ExternalId.
+func portalTrustPolicy(phoneHomeRole, externalID string) string {
+	return fmt.Sprintf(`{
 		"Version": "2012-10-17",
 		"Statement": [{
 			"Effect": "Allow",
@@ -187,20 +203,148 @@ func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, pho
 			"Condition": {"StringEquals": {"sts:ExternalId": %q}}
 		}]
 	}`, phoneHomeRole, externalID)
+}
 
-	created, err := client.CreateRole(ctx, &iam.CreateRoleInput{
-		RoleName:                 aws.String(portalOnboardRoleName),
-		AssumeRolePolicyDocument: aws.String(trustPolicy),
-		Description:              aws.String("Allows the spore.host portal to launch + manage EC2 in this account"),
-		Tags: []iamtypes.Tag{
-			{Key: aws.String("spawn:managed"), Value: aws.String("false")},
-			{Key: aws.String("Purpose"), Value: aws.String("spore-portal-onboard")},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("create role: %w", err)
+// trustedExternalIDs returns every sts:ExternalId value an IAM trust policy
+// document conditions on (any operator, string or list form). GetRole returns
+// the document URL-encoded; both forms are accepted.
+func trustedExternalIDs(doc string) ([]string, error) {
+	if dec, err := neturl.QueryUnescape(doc); err == nil {
+		doc = dec
+	}
+	var parsed struct {
+		Statement json.RawMessage `json:"Statement"`
+	}
+	if err := json.Unmarshal([]byte(doc), &parsed); err != nil {
+		return nil, fmt.Errorf("parse trust policy: %w", err)
+	}
+	var stmts []struct {
+		Condition map[string]map[string]json.RawMessage `json:"Condition"`
+	}
+	if err := json.Unmarshal(parsed.Statement, &stmts); err != nil {
+		// A single statement may be an object rather than a list.
+		var one struct {
+			Condition map[string]map[string]json.RawMessage `json:"Condition"`
+		}
+		if err2 := json.Unmarshal(parsed.Statement, &one); err2 != nil {
+			return nil, fmt.Errorf("parse trust policy statements: %w", err)
+		}
+		stmts = append(stmts, one)
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, st := range stmts {
+		for _, byKey := range st.Condition {
+			for k, raw := range byKey {
+				if !strings.EqualFold(k, "sts:ExternalId") {
+					continue
+				}
+				var vals []string
+				var one string
+				if err := json.Unmarshal(raw, &one); err == nil {
+					vals = []string{one}
+				} else if err := json.Unmarshal(raw, &vals); err != nil {
+					return nil, fmt.Errorf("parse sts:ExternalId condition: %w", err)
+				}
+				for _, v := range vals {
+					if !seen[v] {
+						seen[v] = true
+						ids = append(ids, v)
+					}
+				}
+			}
+		}
+	}
+	return ids, nil
+}
+
+// ensurePortalOnboardRole makes the spore-portal-onboard role match what this
+// version of spawn grants, and returns its ARN and the ExternalId it trusts.
+//
+// On a first run it creates the role under externalID, generating one when
+// none was supplied. On a re-run (#1138) the role already trusts an ExternalId,
+// and the portal must be told THAT one — so without --external-id it is read
+// from the existing trust policy (refusing if it cannot be determined), and with
+// --external-id the trust policy is updated to it. Either way the trust policy
+// and both inline policies are rewritten to the current documents, so a role
+// created by an older spawn (before #817's scoping) does not keep its old grants.
+func ensurePortalOnboardRole(ctx context.Context, client onboardIAMAPI, progress io.Writer, accountID, phoneHomeRole, requestedExternalID, sporedRole string) (string, string, error) {
+	var roleARN, externalID string
+
+	existing, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(portalOnboardRoleName)})
+	switch {
+	case err == nil:
+		role := existing.Role
+		if !hasTag(role.Tags, "Purpose", "spore-portal-onboard") {
+			return "", "", fmt.Errorf("a role named %s exists but is not tagged Purpose=spore-portal-onboard, so spawn did not create it — refusing to rewrite its trust or policies", portalOnboardRoleName)
+		}
+		roleARN = aws.ToString(role.Arn)
+		trusted, perr := trustedExternalIDs(aws.ToString(role.AssumeRolePolicyDocument))
+		switch {
+		case requestedExternalID != "":
+			externalID = requestedExternalID
+		case perr != nil:
+			return "", "", fmt.Errorf("role %s exists but its trust policy could not be read (%v) — re-run with --external-id set to the ExternalId the portal holds", portalOnboardRoleName, perr)
+		case len(trusted) != 1:
+			return "", "", fmt.Errorf("role %s exists and its trust policy names %d ExternalIds, not one — re-run with --external-id set to the ExternalId the portal holds", portalOnboardRoleName, len(trusted))
+		default:
+			externalID = trusted[0]
+		}
+		if _, err := client.UpdateAssumeRolePolicy(ctx, &iam.UpdateAssumeRolePolicyInput{
+			RoleName:       aws.String(portalOnboardRoleName),
+			PolicyDocument: aws.String(portalTrustPolicy(phoneHomeRole, externalID)),
+		}); err != nil {
+			return "", "", fmt.Errorf("update trust policy: %w", err)
+		}
+		if len(trusted) == 1 && trusted[0] == externalID {
+			fmt.Fprintf(progress, "  ! Role %s already exists — keeping its ExternalId and refreshing its policies.\n", portalOnboardRoleName)
+		} else {
+			fmt.Fprintf(progress, "  ! Role %s already exists — its trust policy now requires the supplied ExternalId; the portal must be re-registered with it.\n", portalOnboardRoleName)
+		}
+	default:
+		var notFound *iamtypes.NoSuchEntityException
+		if !errors.As(err, &notFound) {
+			return "", "", fmt.Errorf("get role: %w", err)
+		}
+		externalID = requestedExternalID
+		if externalID == "" {
+			if externalID, err = generateExternalID(); err != nil {
+				return "", "", fmt.Errorf("generate external id: %w", err)
+			}
+		}
+		created, err := client.CreateRole(ctx, &iam.CreateRoleInput{
+			RoleName:                 aws.String(portalOnboardRoleName),
+			AssumeRolePolicyDocument: aws.String(portalTrustPolicy(phoneHomeRole, externalID)),
+			Description:              aws.String("Allows the spore.host portal to launch + manage EC2 in this account"),
+			Tags: []iamtypes.Tag{
+				{Key: aws.String("spawn:managed"), Value: aws.String("false")},
+				{Key: aws.String("Purpose"), Value: aws.String("spore-portal-onboard")},
+			},
+		})
+		if err != nil {
+			return "", "", fmt.Errorf("create role: %w", err)
+		}
+		roleARN = aws.ToString(created.Role.Arn)
 	}
 
+	if err := putPortalOnboardPolicies(ctx, client, accountID, sporedRole); err != nil {
+		return "", "", err
+	}
+	return roleARN, externalID, nil
+}
+
+func hasTag(tags []iamtypes.Tag, key, value string) bool {
+	for _, t := range tags {
+		if aws.ToString(t.Key) == key && aws.ToString(t.Value) == value {
+			return true
+		}
+	}
+	return false
+}
+
+// putPortalOnboardPolicies writes the role's two inline policies. PutRolePolicy
+// replaces a policy of the same name, so this is what reconciles a re-run.
+func putPortalOnboardPolicies(ctx context.Context, client onboardIAMAPI, accountID, sporedRole string) error {
 	// EC2 launch + lifecycle + SSM. Every action that can affect an instance is
 	// scoped to spawn:managed; the unconditioned grants are read-only or create-only.
 	//
@@ -248,7 +392,7 @@ func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, pho
 		PolicyName:     aws.String("PortalEC2Launch"),
 		PolicyDocument: aws.String(launchPolicy),
 	}); err != nil {
-		return "", fmt.Errorf("attach launch policy: %w", err)
+		return fmt.Errorf("attach launch policy: %w", err)
 	}
 
 	// iam:PassRole scoped to the single spored ROLE + PassedToService ec2.
@@ -265,10 +409,9 @@ func ensurePortalOnboardRole(ctx context.Context, cfg aws.Config, accountID, pho
 		PolicyName:     aws.String("PortalPassSporedProfile"),
 		PolicyDocument: aws.String(passPolicy),
 	}); err != nil {
-		return "", fmt.Errorf("attach passrole policy: %w", err)
+		return fmt.Errorf("attach passrole policy: %w", err)
 	}
-
-	return *created.Role.Arn, nil
+	return nil
 }
 
 // phoneHome SigV4-signs (lambda service) and POSTs the registration to the
@@ -297,11 +440,16 @@ func phoneHome(ctx context.Context, cfg aws.Config, url, region, roleARN, extern
 		return fmt.Errorf("resolved AWS credentials are empty — the AWS_IAM phone-home URL will reject an unsigned request")
 	}
 	sum := sha256.Sum256(body)
-	if err := v4.NewSigner().SignHTTP(ctx, creds, httpReq, hex.EncodeToString(sum[:]), "lambda", region, time.Now()); err != nil {
+	// Sign for the endpoint's region, read from the Function URL host — not the
+	// onboarding region, which is only data in the body. The portal's Function
+	// URL lives in one region; signing for --region made every other --region
+	// fail the signature check (#1138). Same rule as pkg/dns.
+	signRegion := dns.SigningRegion(url, "")
+	if err := v4.NewSigner().SignHTTP(ctx, creds, httpReq, hex.EncodeToString(sum[:]), "lambda", signRegion, time.Now()); err != nil {
 		return fmt.Errorf("sign phone-home request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := onboardHTTPClient().Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("POST phone-home: %w", err)
 	}
@@ -331,7 +479,7 @@ func init() {
 	if err := onboardCmd.Flags().MarkDeprecated("spored-profile", "use --spored-role; iam:PassRole names a role, not an instance profile"); err != nil {
 		panic(err)
 	}
-	onboardCmd.Flags().StringVar(&onboardExternalID, "external-id", "", "Reuse a specific ExternalId (default: generate a new one)")
+	onboardCmd.Flags().StringVar(&onboardExternalID, "external-id", "", "ExternalId the role must trust (default: the existing role's, else a new one)")
 	onboardCmd.Flags().BoolVar(&onboardSkipPhoneHome, "skip-phone-home", false, "Create the role but don't auto-register with the portal")
 	onboardCmd.Flags().BoolVar(&onboardJSONOutput, "json", false, "Output the result as JSON")
 	// Canonical JSON output is the root -o/--output json; keep --json as a

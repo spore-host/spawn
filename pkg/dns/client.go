@@ -184,6 +184,14 @@ func signingRegion(endpoint, fallback string) string {
 	return "us-east-1"
 }
 
+// SigningRegion is signingRegion for callers outside this package that sign for
+// a spore.host Function URL themselves (spawn onboard's phone-home, #1138): the
+// region a SigV4 signature must be scoped to is the endpoint's own, read from its
+// hostname, never the caller's working region.
+func SigningRegion(endpoint, fallback string) string {
+	return signingRegion(endpoint, fallback)
+}
+
 // RegisterDNS registers a DNS record for the current instance
 func (c *Client) RegisterDNS(ctx context.Context, recordName, ipAddress string) (*DNSUpdateResponse, error) {
 	// Validate record name
