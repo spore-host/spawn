@@ -38,6 +38,8 @@ type LogsAPI interface {
 	// (#1156). These run under the caller's credentials, not the function's.
 	CreateLogGroup(context.Context, *cwlogs.CreateLogGroupInput, ...func(*cwlogs.Options)) (*cwlogs.CreateLogGroupOutput, error)
 	PutRetentionPolicy(context.Context, *cwlogs.PutRetentionPolicyInput, ...func(*cwlogs.Options)) (*cwlogs.PutRetentionPolicyOutput, error)
+	// A re-deploy without --log-retention-days keeps the live retention (#1214).
+	DescribeLogGroups(context.Context, *cwlogs.DescribeLogGroupsInput, ...func(*cwlogs.Options)) (*cwlogs.DescribeLogGroupsOutput, error)
 	DeleteLogGroup(context.Context, *cwlogs.DeleteLogGroupInput, ...func(*cwlogs.Options)) (*cwlogs.DeleteLogGroupOutput, error)
 }
 
@@ -50,6 +52,11 @@ func LogGroupName() string { return "/aws/lambda/" + FunctionName }
 // is a different claim. A shorter retention only makes the answer smaller,
 // because idleness is measured from the first run still in the logs.
 const idleWindow = DefaultLogRetentionDays * 24 * time.Hour
+
+// IdleWindow is the longest idleness the check can ever report: IdleFor is
+// measured within this window, so `teardown --if-idle-for` above it could never
+// fire, and is refused instead (#1215).
+func IdleWindow() time.Duration { return idleWindow }
 
 // ActionSentinels are the words the reaper logs, one line per resource, when it
 // actually reclaims something: an instance or filesystem REAPED, a Spot

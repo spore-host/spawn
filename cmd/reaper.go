@@ -156,7 +156,7 @@ func init() {
 	reaperTeardownCmd.Flags().BoolVar(&reaperKeepArtifacts, "keep-artifacts", false,
 		"Leave the artifact bucket in place (it is removed by default)")
 	reaperTeardownCmd.Flags().DurationVar(&reaperIfIdleFor, "if-idle-for", 0,
-		"Only tear down if the reaper has reclaimed nothing for at least this long (e.g. 720h); otherwise report and exit 0")
+		"Only tear down if the reaper has reclaimed nothing for at least this long, at most 720h (the logs it reads); otherwise report and exit 0")
 	reaperTeardownCmd.Flags().BoolVar(&reaperForceArtifacts, "force-artifacts", false,
 		"Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed)")
 }
@@ -167,10 +167,10 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&reaperVersion, "version", "", "spawn release to take the reaper artifact from (default: this binary's version)")
 	fs.StringVar(&reaperArtifact, "artifact", "", "Use this Lambda zip instead of downloading a release asset (local path or URL)")
 	fs.StringVar(&reaperBucket, "bucket", "", "S3 bucket in THIS account to hold the artifact (default: spawn-reaper-artifacts-<account>-<region>)")
-	fs.StringVar(&reaperSchedule, "schedule", reaperdeploy.DefaultSchedule, "EventBridge schedule expression")
+	fs.StringVar(&reaperSchedule, "schedule", "", "EventBridge schedule expression (default: keep the existing reaper's; "+reaperdeploy.DefaultSchedule+" for a new one)")
 	fs.StringVar(&reaperRegions, "regions", "", "Comma-separated regions for the reaper to scan (default: keep the existing reaper's; the deploy region for a new one)")
-	fs.Int32Var(&reaperLogRetention, "log-retention-days", reaperdeploy.DefaultLogRetentionDays,
-		"Days CloudWatch keeps the reaper's logs (a value CloudWatch accepts: 1, 3, 5, 7, 14, 30, 60, 90, ...). Below 30, 'teardown --if-idle-for' can see at most that much history")
+	fs.Int32Var(&reaperLogRetention, "log-retention-days", 0,
+		"Days CloudWatch keeps the reaper's logs, a value CloudWatch accepts: 1, 3, 5, 7, 14, 30, 60, 90, ... (default: keep the existing reaper's; 30 for a new one). Below 30, 'teardown --if-idle-for' can see at most that much history")
 	fs.StringVar(&reaperSpotRequests, "spot-requests", "",
 		"Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperNetResources, "net-resources", "",
@@ -471,7 +471,12 @@ func runReaperTeardown(cmd *cobra.Command, _ []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	d, account, region, err := newReaperDeployer(ctx)
+	// Refused before any AWS call: idleness is measured within the log window,
+	// so a longer --if-idle-for could never fire and would no-op forever (#1215).
+	if err := checkIfIdleFor(reaperIfIdleFor); err != nil {
+		return err
+	}
+	d, account, region, err := reaperTeardownDeployer(ctx)
 	if err != nil {
 		return err
 	}
@@ -552,6 +557,20 @@ func reaperTeardownBucket(ctx context.Context, fs *pflag.FlagSet, d *reaperdeplo
 		return info.ArtifactBucket
 	}
 	return reaperdeploy.DefaultBucketName(account, region)
+}
+
+// reaperTeardownDeployer is newReaperDeployer, as a seam so a test can count
+// whether teardown reached AWS.
+var reaperTeardownDeployer = newReaperDeployer
+
+// checkIfIdleFor refuses an --if-idle-for the idle check can never satisfy.
+func checkIfIdleFor(d time.Duration) error {
+	if w := reaperdeploy.IdleWindow(); d > w {
+		return fmt.Errorf("--if-idle-for %s can never trigger: idleness is read from the reaper's logs, "+
+			"which cover at most %s (%d days), so it is never reported idle for longer. Use %s or less",
+			d, w, int(w.Hours()/24), w)
+	}
+	return nil
 }
 
 // confirmReaperArm requires an explicit "yes". Arming makes a scheduled process

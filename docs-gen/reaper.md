@@ -86,12 +86,12 @@ spawn reaper deploy [flags]
 |------|-------|------|---------|-------------|
 | `--artifact` |  | string |  | Use this Lambda zip instead of downloading a release asset (local path or URL) |
 | `--bucket` |  | string |  | S3 bucket in THIS account to hold the artifact (default: spawn-reaper-artifacts-&lt;account&gt;-&lt;region&gt;) |
-| `--log-retention-days` |  | int32 | `30` | Days CloudWatch keeps the reaper's logs (a value CloudWatch accepts: 1, 3, 5, 7, 14, 30, 60, 90, ...). Below 30, 'teardown --if-idle-for' can see at most that much history |
+| `--log-retention-days` |  | int32 |  | Days CloudWatch keeps the reaper's logs, a value CloudWatch accepts: 1, 3, 5, 7, 14, 30, 60, 90, ... (default: keep the existing reaper's; 30 for a new one). Below 30, 'teardown --if-idle-for' can see at most that much history |
 | `--max-age` |  | string |  | Max-age ceiling, REAPER_MAX_AGE, e.g. 336h or 14d (default: keep; the reaper's default is 7d) |
 | `--net-resources` |  | string |  | Network-resource sweep, REAPER_NET_RESOURCES: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--notify-url` |  | string |  | URL the reaper POSTs notifications to, REAPER_NOTIFY_URL; never printed. "-" reads it from stdin (default: keep) |
 | `--regions` |  | string |  | Comma-separated regions for the reaper to scan (default: keep the existing reaper's; the deploy region for a new one) |
-| `--schedule` |  | string | `rate(10 minutes)` | EventBridge schedule expression |
+| `--schedule` |  | string |  | EventBridge schedule expression (default: keep the existing reaper's; rate(10 minutes) for a new one) |
 | `--spot-requests` |  | string |  | Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--version` |  | string |  | spawn release to take the reaper artifact from (default: this binary's version) |
 
@@ -133,7 +133,7 @@ spawn reaper teardown [flags]
 |------|-------|------|---------|-------------|
 | `--bucket` |  | string |  | Artifact bucket to remove (default: the one recorded on the function at deploy time, else spawn-reaper-artifacts-&lt;account&gt;-&lt;region&gt;) |
 | `--force-artifacts` |  | bool |  | Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed) |
-| `--if-idle-for` |  | duration | `0s` | Only tear down if the reaper has reclaimed nothing for at least this long (e.g. 720h); otherwise report and exit 0 |
+| `--if-idle-for` |  | duration | `0s` | Only tear down if the reaper has reclaimed nothing for at least this long, at most 720h (the logs it reads); otherwise report and exit 0 |
 | `--keep-artifacts` |  | bool |  | Leave the artifact bucket in place (it is removed by default) |
 | `--keep-logs` |  | bool |  | Leave the reaper's CloudWatch log group in place (it is removed by default) |
 

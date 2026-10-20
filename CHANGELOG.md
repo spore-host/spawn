@@ -155,6 +155,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Go API:** `aws.Client.ResolveDNSTarget` and `config.ResolveDNSTarget` take
   a function-ARN argument and return an error (#1121, #1158).
 
+- **A re-deploy keeps the reaper's schedule and log retention (#1214).**
+  `spawn reaper deploy` reapplied `--schedule` (default `rate(10 minutes)`)
+  and `--log-retention-days` (default 30) every time, so re-running it without
+  the flags reset a custom schedule or retention. Like the `REAPER_*` settings
+  since #1154, they now change only when the flag is passed. Otherwise the
+  live rule's schedule and the log group's retention are kept, and the defaults
+  apply only to a new reaper (or a log group with no retention). Deploying now
+  also reads the group with `logs:DescribeLogGroups`.
+
 ### Fixed
 
 - `spawn dns register` and `spawn dns delete` signed the DNS updater request
@@ -282,6 +291,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aws.LaunchConfig.DNSFunctionARN`, `config.DefaultDNSFunctionARN`,
   `config.SSMDNSFunctionARNPath`, `config.DNSSettingUnreadableError` and
   `dns.ValidateFunctionARN` (Go API).
+
+- **`spawn reaper teardown --if-idle-for` refuses a value it can never
+  satisfy (#1215).** Idleness is read from the reaper's logs, which cover at
+  most 30 days, so a larger value (e.g. `1000h`) silently never fired. It is
+  now rejected with an error before any AWS call.
 
 ## [0.136.0] - 2026-10-20
 

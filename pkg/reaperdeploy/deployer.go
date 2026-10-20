@@ -165,6 +165,8 @@ type Options struct {
 	// mirrored or air-gapped environments work.
 	Artifact string
 	Bucket   string
+	// Schedule is the EventBridge expression. Empty keeps the existing rule's,
+	// and uses DefaultSchedule only when there is none (#1214).
 	Schedule string
 
 	// Regions is REAPER_REGIONS as passed explicitly (--regions). Empty means
@@ -184,7 +186,8 @@ type Options struct {
 	Settings map[string]string
 
 	// LogRetentionDays is the retention set on the function's log group. Zero
-	// uses DefaultLogRetentionDays. CloudWatch accepts only certain values
+	// keeps the existing group's retention, and uses DefaultLogRetentionDays only
+	// for a group with none (#1214). CloudWatch accepts only certain values
 	// (1, 3, 5, 7, 14, 30, 60, 90, ...) and rejects others itself.
 	LogRetentionDays int32
 }
@@ -287,9 +290,6 @@ func (d *Deployer) ensureLogGroup(ctx context.Context, days int32, version strin
 	if d.Logs == nil {
 		return "", errors.New("reaperdeploy: no CloudWatch Logs client, so log retention cannot be set")
 	}
-	if days == 0 {
-		days = DefaultLogRetentionDays
-	}
 	if days < 0 {
 		return "", fmt.Errorf("reaperdeploy: log retention must be positive, got %d", days)
 	}
@@ -304,6 +304,21 @@ func (d *Deployer) ensureLogGroup(ctx context.Context, days int32, version strin
 		}
 		created = false
 	}
+	if days == 0 {
+		// Not asked for: keep what the live group has, so a re-deploy does not
+		// reset a retention chosen earlier (#1214). The default applies only to
+		// a group with none — a fresh one, or one Lambda created (#827).
+		days = DefaultLogRetentionDays
+		if !created {
+			live, err := d.liveRetention(ctx)
+			if err != nil {
+				return "", err
+			}
+			if live > 0 {
+				return fmt.Sprintf("%s (kept retention %d days)", actionWord(false, "log group", LogGroupName()), live), nil
+			}
+		}
+	}
 	if _, err := d.Logs.PutRetentionPolicy(ctx, &cwlogs.PutRetentionPolicyInput{
 		LogGroupName:    awssdk.String(LogGroupName()),
 		RetentionInDays: awssdk.Int32(days),
@@ -311,6 +326,33 @@ func (d *Deployer) ensureLogGroup(ctx context.Context, days int32, version strin
 		return "", fmt.Errorf("reaperdeploy: set log retention on %s: %w", LogGroupName(), err)
 	}
 	return fmt.Sprintf("%s (retention %d days)", actionWord(created, "log group", LogGroupName()), days), nil
+}
+
+// liveRetention reads the existing log group's retention; 0 means none.
+func (d *Deployer) liveRetention(ctx context.Context) (int32, error) {
+	out, err := d.Logs.DescribeLogGroups(ctx, &cwlogs.DescribeLogGroupsInput{
+		LogGroupNamePrefix: awssdk.String(LogGroupName()),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("reaperdeploy: read log group %s: %w", LogGroupName(), err)
+	}
+	for _, g := range out.LogGroups {
+		if awssdk.ToString(g.LogGroupName) == LogGroupName() {
+			return awssdk.ToInt32(g.RetentionInDays), nil
+		}
+	}
+	return 0, nil
+}
+
+// liveSchedule is the existing rule's schedule, or DefaultSchedule when there
+// is no rule (a fresh deploy) or it has none. A re-deploy without --schedule
+// keeps it rather than resetting it to the default (#1214).
+func (d *Deployer) liveSchedule(ctx context.Context) string {
+	rule, err := d.Events.DescribeRule(ctx, &eventbridge.DescribeRuleInput{Name: awssdk.String(RuleName)})
+	if err == nil && strings.TrimSpace(awssdk.ToString(rule.ScheduleExpression)) != "" {
+		return awssdk.ToString(rule.ScheduleExpression)
+	}
+	return DefaultSchedule
 }
 
 // Result records what a deploy did, so the command can print it and a test can
@@ -336,9 +378,6 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	}
 	if err := validateSettings(opts.Settings); err != nil {
 		return nil, err
-	}
-	if opts.Schedule == "" {
-		opts.Schedule = DefaultSchedule
 	}
 	if opts.Bucket == "" {
 		opts.Bucket = DefaultBucketName(opts.AccountID, opts.Region)
@@ -405,6 +444,9 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	res.Actions = append(res.Actions, actionWord(fnCreated, "function", FunctionName))
 	res.Actions = append(res.Actions, settingActions(opts.Settings)...)
 
+	if opts.Schedule == "" {
+		opts.Schedule = d.liveSchedule(ctx)
+	}
 	if err := d.ensureSchedule(ctx, opts, fnARN); err != nil {
 		return nil, err
 	}
