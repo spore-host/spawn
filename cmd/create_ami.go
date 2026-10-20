@@ -18,7 +18,11 @@ var (
 	createAMITags        []string
 	createAMIReboot      bool
 	createAMIWait        bool
+	createAMIForce       bool
 )
+
+// createAMIForceHelp is shared by `spawn create-ami` and `spawn ami create`.
+const createAMIForceHelp = "Create the image even if spawn could not remove its --command run-state files (completion file, exit code, the embedded command) from the instance first; they will be baked into the AMI"
 
 var createAMICmd = &cobra.Command{
 	Use:   "create-ami <instance-id-or-name>",
@@ -26,6 +30,13 @@ var createAMICmd = &cobra.Command{
 	Long: `Create an AMI from a running instance with automatic tagging.
 
 The AMI will be tagged with spawn metadata for easy discovery and management.
+
+Before imaging, spawn removes its --command run state from the instance over
+SSM: the completion file, /tmp/SPAWN_* (the exit code), the rendered and
+embedded command, and the sweep environment. Otherwise an instance launched
+from the image starts with a stale SPAWN_COMPLETE and --on-complete fires at
+boot. If that cannot be done (no SSM, the instance is stopped, the command is
+still running), the image is not created; --force creates it anyway.
 
 Examples:
   # Create AMI from instance
@@ -56,6 +67,7 @@ func init() {
 	createAMICmd.Flags().StringArrayVar(&createAMITags, "tag", []string{}, "Tags in key=value format (can be specified multiple times)")
 	createAMICmd.Flags().BoolVar(&createAMIReboot, "reboot", false, "Reboot instance before creating AMI (default: no-reboot)")
 	createAMICmd.Flags().BoolVar(&createAMIWait, "wait", false, "Wait for AMI to become available")
+	createAMICmd.Flags().BoolVar(&createAMIForce, "force", false, createAMIForceHelp)
 
 	_ = createAMICmd.MarkFlagRequired("name")
 }
@@ -135,15 +147,15 @@ func runCreateAMI(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "(no-reboot mode - instance will not be rebooted)\n")
 	}
 
-	amiID, err := client.CreateAMI(ctx, instance.Region, aws.CreateAMIInput{
+	amiID, err := newAMIImager(client).createFromInstance(ctx, instance, aws.CreateAMIInput{
 		InstanceID:  instance.InstanceID,
 		Name:        createAMIName,
 		Description: description,
 		Tags:        tags,
 		NoReboot:    !createAMIReboot,
-	})
+	}, createAMIForce, os.Stderr)
 	if err != nil {
-		return fmt.Errorf("failed to create AMI: %w", err)
+		return err
 	}
 
 	_, _ = fmt.Fprintf(os.Stdout, "\n✅ AMI creation initiated!\n")

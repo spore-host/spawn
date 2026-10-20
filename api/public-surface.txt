@@ -506,7 +506,10 @@ func AuthHost(image, fallbackRegion string) (host, region string, ok bool)
 func RegistryHost(image string) string
 
 ## pkg/launcher (imported by: spore-host-mcp, lagotto, calque)
+const CommandRanMarkerDir
 const DefaultUsername
+const ImageCleanCommandRunning
+const ImageCleanOK
 const MPIReadyGate
 const ReadyDir
 const ReadyGateTimeoutSecs
@@ -532,6 +535,7 @@ field Options.TaskFlushScript string
 field Options.Username string
 func BuildLinuxBootstrap(cfg BootstrapConfig) (string, error)
 func EncodeLinuxUserData(script string) string
+func ImageStateCleanupScript(instanceID, completionFile string) string
 func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig, opts Options) (*aws.LaunchResult, error)
 type BootstrapConfig struct
 type Options struct

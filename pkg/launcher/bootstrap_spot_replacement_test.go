@@ -65,6 +65,7 @@ func newSpotSandbox(t *testing.T, stub sporedStub) *spotSandbox {
 		"/run/spawn", filepath.Join(dir, "run", "spawn"),
 		"/etc/spawn/", filepath.Join(dir, "etc", "spawn")+"/",
 		"/var/log/", filepath.Join(dir, "var", "log")+"/",
+		"/var/lib/spawn", filepath.Join(dir, "var", "lib", "spawn"),
 		"/tmp/", filepath.Join(dir, "tmp")+"/",
 	)}
 }

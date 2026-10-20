@@ -57,12 +57,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of reconciling against, and launching into, a region the sweep never
   used. Sweeps whose instances span regions are reconciled in each.
 
+- **`spawn ami create` removes the instance's `--command` run state before
+  imaging (#1057).** On a distro whose `/tmp` is on the root volume (Rocky 9
+  Base), the completion file and `/tmp/SPAWN_EXITCODE` were baked into the AMI,
+  so an instance launched from it started with a stale `SPAWN_COMPLETE` and
+  `--on-complete` fired at boot. The embedded command (`/etc/spawn/command`)
+  was baked in too, and a later launch from the image re-ran it even without
+  `--command`. Now, before CreateImage, spawn removes over SSM: the
+  completion file (the launch's `--completion-file` and the default), every
+  `/tmp/SPAWN_*` file, `/tmp/spawn-command.sh`, `/etc/spawn/command`, the
+  sweep environment and the ready-gate list. If that cannot be done (the
+  instance has no SSM, is stopped, or its `--command` is still running),
+  **the image is not created** unless `--force` is given. Imaging a stopped
+  Linux instance therefore now needs `--force`. Windows instances run no
+  `--command`, so nothing is removed from them.
+
+- **The Linux bootstrap runs `--command` once per instance (#1057).** It
+  writes `/var/lib/spawn/command-ran-<instance-id>` before starting the
+  command and skips the command if that file already exists. A command that
+  ends with `cloud-init clean` used to run a second time on the source
+  instance during the CreateImage reboot of `spawn ami create --reboot`,
+  overwriting what it had uploaded. Because the marker is keyed on the
+  instance ID, an instance launched from the image still runs its own
+  `--command`. Delete the marker to re-run a command on purpose.
+
 ### Fixed
 
 - `spawn resume` panicked (`interface conversion: interface {} is nil, not
   string`) on a sweep whose parameter file has no `region` in its defaults —
   every sweep launched with `--region` alone — once any instance had launched
   (#495).
+- `spawn ami create --force` (and `spawn create-ami --force`): create the image
+  even when spawn could not remove its run-state files from the instance first
+  (#1057).
+
+- `launcher.ImageStateCleanupScript`, `launcher.CommandRanMarkerDir`,
+  `launcher.ImageCleanOK` and `launcher.ImageCleanCommandRunning` (Go API).
 
 ## [0.137.0] - 2026-10-20
 
