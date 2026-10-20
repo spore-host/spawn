@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`resources.shm_gib` sizes a container task's `/dev/shm` (#1111).** Docker
+  gives every container 64 MB, too small for Open MPI's shared-memory segments
+  at many ranks: a 64-rank LAMMPS run on one box died with SIGBUS in its first
+  collective. The field maps to `docker run --shm-size=<n>g`; unset keeps the
+  64 MB default. It must be a positive number of GiB, needs `container`, and
+  may not exceed the instance's memory (the effective `memory_gib`, or the
+  container floor, for a sized spec; the pinned type's memory at launch). The
+  dry run prints the `/dev/shm` size. Go API: `ResourceRequest.ShmGiB` and
+  `TaskSpec.CheckShmAgainstMemory`.
+
 ## [0.137.0] - 2026-10-20
 
 ### Added

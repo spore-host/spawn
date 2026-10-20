@@ -51,6 +51,15 @@ resources.instance_type is honoured as given, with a warning if it is below that
 If Docker cannot be installed or its daemon does not start, the record reports
 retry_class instance_health (retryable), not app_error.
 
+A container gets Docker's default 64 MB /dev/shm, which many-rank MPI (Open MPI's
+shared-memory transport), PyTorch DataLoader workers and Ray outgrow: an Open MPI
+run with 64 ranks on one box dies with SIGBUS in its first collective. Set
+resources.shm_gib to raise it (passed as docker run --shm-size=&lt;n&gt;g). It must be
+a positive number of GiB, needs a container, and may not exceed the instance's
+memory: memory_gib with headroom (or the 2 GiB container floor) for a sized spec,
+the type's memory for a pinned instance_type. /dev/shm is RAM-backed, so size
+memory_gib to cover it as well as the workload.
+
 What gets bind-mounted, and as whom: spawn pre-creates the parent directory of
 every inputs[].destination and outputs[].source — plus any EFS/FSx/volume mount
 point from placement — as the instance user, and bind-mounts exactly those paths

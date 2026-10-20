@@ -736,6 +736,7 @@ field ResourceRequest.MemoryGiB float64
 field ResourceRequest.MemoryHeadroomPercent int
 field ResourceRequest.Purchase string
 field ResourceRequest.S3ReadWrite []string
+field ResourceRequest.ShmGiB *float64
 field SizeResult.Considered int
 field SizeResult.Family string
 field SizeResult.InstanceType string
@@ -760,6 +761,7 @@ field WrapperOptions.GPU bool
 field WrapperOptions.Region string
 field WrapperOptions.ResultsPrefix string
 field WrapperOptions.RunID string
+func (*TaskSpec) CheckShmAgainstMemory(memGiB float64) string
 func (*TaskSpec) EffectiveOnComplete() string
 func (*TaskSpec) SizingRequest() ResourceRequest
 func (*TaskSpec) Validate() error
