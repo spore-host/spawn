@@ -27,9 +27,11 @@ For a parameter sweep or job array, shows the full breakdown:
 - Cost by region and instance type
 
 For a single instance launched with 'spawn launch' (which has no sweep cost
-record), shows an on-the-fly compute-cost estimate — the instance's on-demand
-rate (spawn:price-per-hour tag) × its runtime — the same figure 'spawn status'
-reports (#578).
+record), shows an on-the-fly estimate of its cost so far: the on-demand rate
+(spawn:price-per-hour tag) × its compute time across every stop and start
+(spored's spawn:compute-seconds; compute bills only while running), plus EBS
+over the time since first launch when spawn:ebs-hourly-cost is set (EBS bills
+while stopped too).
 
 Examples:
   spawn cost sweep-20260124-140530
@@ -75,7 +77,7 @@ func runCostBreakdown(cmd *cobra.Command, args []string) error {
 		// ResourceNotFoundException (#578).
 		if errors.Is(err, cost.ErrNoSweepRecord) {
 			if inst := resolveInstanceForCost(ctx, sweepID); inst != nil {
-				fmt.Print(singleInstanceCostReport(inst, time.Since(inst.LaunchTime)))
+				fmt.Print(singleInstanceCostReport(inst, time.Now()))
 				return nil
 			}
 			return fmt.Errorf("no cost record for %q: it is neither a known sweep/job-array "+
@@ -229,14 +231,48 @@ func resolveInstanceForCost(ctx context.Context, identifier string) *aws.Instanc
 	return inst
 }
 
-// singleInstanceCostReport renders the compute-cost estimate for one instance:
+// instanceRuntime is what a single instance's "so far" figures are measured
+// over, across every stop/start (#1029):
+//
+//   - Since is the wall clock since the ORIGINAL launch (originalLaunchTime —
+//     the rule the TTL reaper enforces with). EBS bills on it, stopped time
+//     included.
+//   - Compute is the time the instance has actually RUN, which is all EC2 bills
+//     compute for: spored's cumulative spawn:compute-seconds, the same total
+//     --cost-limit is enforced against (pkg/agent accumulatedComputeCost). With
+//     no usable tag (no spored, or an older one) it is Since, the most the
+//     instance can have run, and ComputeFromTag says so.
+//
+// It used to be time.Since(EC2 LaunchTime) for both, which is the latest boot
+// only: after a stop/start it dropped every earlier boot, and for a stopped
+// instance it counted the stopped time as compute.
+type instanceRuntime struct {
+	Launch         time.Time
+	Since          time.Duration
+	Compute        time.Duration
+	ComputeFromTag bool
+}
+
+func runtimeSoFar(inst *aws.InstanceInfo, now time.Time) instanceRuntime {
+	r := instanceRuntime{Launch: originalLaunchTime(inst)}
+	if !r.Launch.IsZero() && now.After(r.Launch) {
+		r.Since = now.Sub(r.Launch)
+	}
+	r.Compute = r.Since
+	if secs, ok := taggedComputeSeconds(inst); ok {
+		r.Compute, r.ComputeFromTag = time.Duration(secs)*time.Second, true
+	}
+	return r
+}
+
+// singleInstanceCostReport renders the cost-so-far estimate for one instance:
 // its on-demand rate (the spawn:price-per-hour tag truffle resolved at launch,
-// #533) × the given runtime. This is the same rate × time `spawn status` and
-// `spawn task diagnose` show — a standalone instance has no DynamoDB cost
-// record (that table is keyed by sweep id), so this is an on-the-fly estimate,
-// clearly labelled, not a billing figure. age is normally time.Since(launch);
-// it's a parameter so the output is deterministically testable.
-func singleInstanceCostReport(inst *aws.InstanceInfo, age time.Duration) string {
+// #533) × its compute time across every boot (runtimeSoFar), plus EBS over the
+// wall clock since first launch when the spawn:ebs-hourly-cost tag is present.
+// A standalone instance has no DynamoDB cost record (that table is keyed by
+// sweep id), so this is an on-the-fly estimate, clearly labelled, not a billing
+// figure. now is a parameter so the output is deterministically testable.
+func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 	var b strings.Builder
 	title := inst.Name
 	if title == "" {
@@ -246,23 +282,39 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, age time.Duration) string 
 	fmt.Fprintln(&b, strings.Repeat("━", 60))
 	fmt.Fprintln(&b)
 
+	rt := runtimeSoFar(inst, now)
 	fmt.Fprintf(&b, "Type:            %s%s\n", inst.InstanceType, spotSuffix(inst.SpotInstance))
 	fmt.Fprintf(&b, "State:           %s\n", inst.State)
-	if age > 0 {
-		fmt.Fprintf(&b, "Runtime:         %s (since launch)\n", formatDuration(age))
+	if rt.Since > 0 {
+		fmt.Fprintf(&b, "Since launch:    %s (first launch, across stops and starts)\n", formatDuration(rt.Since))
+	}
+	if rt.ComputeFromTag {
+		fmt.Fprintf(&b, "Compute time:    %s (running time across every boot, from spored's spawn:compute-seconds;\n", formatDuration(rt.Compute))
+		fmt.Fprintln(&b, "                 up to 5 min behind while running)")
+	} else if rt.Compute > 0 {
+		fmt.Fprintf(&b, "Compute time:    at most %s (no spawn:compute-seconds tag, so this is the wall clock\n", formatDuration(rt.Compute))
+		fmt.Fprintln(&b, "                 since first launch; compute bills only while running)")
 	}
 
 	rate := pricePerHour(inst)
 	if rate <= 0 {
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, "No spawn:price-per-hour tag on this instance, so its compute cost")
-		fmt.Fprintln(&b, "cannot be estimated. Its cost ≈ on-demand rate × runtime.")
+		fmt.Fprintln(&b, "cannot be estimated. Its cost ≈ on-demand rate × compute time.")
 		return b.String()
 	}
 
 	fmt.Fprintf(&b, "Rate:            $%.4f/hr (spawn:price-per-hour)\n", rate)
-	est := estimateInstanceCost(inst, age)
-	fmt.Fprintf(&b, "Est. compute:    ~$%.2f (rate × runtime, compute only; excludes EBS/network)\n", est)
+	est := estimateInstanceCost(inst, rt.Compute)
+	if rt.ComputeFromTag {
+		fmt.Fprintf(&b, "Est. compute:    ~$%.2f (rate × compute time; excludes EBS/network)\n", est)
+	} else {
+		fmt.Fprintf(&b, "Est. compute:    at most ~$%.2f (rate × wall clock; excludes EBS/network)\n", est)
+	}
+	if ebs := parseTagFloat(inst.Tags["spawn:ebs-hourly-cost"]); ebs > 0 && rt.Since > 0 {
+		fmt.Fprintf(&b, "Est. storage:    ~$%.2f (spawn:ebs-hourly-cost × time since launch; EBS bills while stopped too)\n",
+			ebs*rt.Since.Hours())
+	}
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "Note: a single instance has no sweep cost record — this is an on-the-fly")
 	fmt.Fprintln(&b, "estimate from the instance's own tags, not a billing figure.")

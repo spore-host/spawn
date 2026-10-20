@@ -130,3 +130,35 @@ func CeilingWarning(requested time.Duration) string {
 			"(spawn reaper deploy --max-age, for a reaper in your own account).",
 		requested, DefaultReaperMaxAge, DefaultReaperMaxAge)
 }
+
+// LaunchAnchor is the instant an instance's age, TTL and wall-clock cost are
+// measured from: the EARLIER of its spawn:launch-time tag (tagValue, RFC3339)
+// and the EC2 LaunchTime (ec2Launch), whichever are present and parseable.
+// The zero time means neither is.
+//
+// It is the one rule for both enforcement (the TTL reaper's max-age ceiling and
+// its spawn:launch-time + spawn:ttl fallback deadline) and display (`spawn
+// status`, `spawn list`, `spawn cost`, `spawn extend`), so the age a user is
+// shown is the age the reaper acts on (#1029).
+//
+// Why not EC2's LaunchTime alone: it is the most recent START, so it resets on
+// every start of a stopped instance and an instance launched three days ago
+// would look an hour old. The tag, written once by the CLI at launch, is the
+// earlier of the two in that case.
+//
+// Why not the tag alone (GHSA-c93q-4jh7-6pvj): an instance that rewrote its
+// own spawn:launch-time to "now" would never age past the max-age ceiling.
+// Taking the minimum keeps the legitimate case and makes a forged later value
+// harmless.
+func LaunchAnchor(tagValue string, ec2Launch time.Time) time.Time {
+	var t time.Time
+	if tagValue != "" {
+		if parsed, err := time.Parse(time.RFC3339, tagValue); err == nil {
+			t = parsed
+		}
+	}
+	if !ec2Launch.IsZero() && (t.IsZero() || ec2Launch.Before(t)) {
+		t = ec2Launch
+	}
+	return t
+}

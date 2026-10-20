@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 // costLimitDecision is what `spawn extend` should do to spawn:cost-limit, and why.
@@ -106,18 +107,18 @@ func decideCostLimit(instance *aws.InstanceInfo, newDeadline, now time.Time, exp
 	return d
 }
 
-// originalLaunchTime is when the instance was first launched: the
-// spawn:launch-time tag, written once at launch, which is what spored, the TTL
-// reaper and `spored config set ttl` anchor to. EC2's LaunchTime is only the
-// fallback, for an instance without the tag, because EC2 resets it on every
-// start of a stopped instance (#992).
+// originalLaunchTime is when the instance was first launched, and the ONE
+// place in cmd/ that reads EC2's LaunchTime for a duration: every age, TTL
+// fallback and wall-clock cost figure is measured from it (#1029).
+//
+// It is pkg/ttl.LaunchAnchor — the earlier of the spawn:launch-time tag (written
+// once at launch) and EC2's LaunchTime — which is the same rule the TTL reaper
+// enforces with (GHSA-c93q-4jh7-6pvj), so what spawn shows is what is enforced.
+// EC2's LaunchTime alone would be wrong: EC2 resets it on every start of a
+// stopped instance (#992). TestNoDisplayDurationFromRawLaunchTime keeps every
+// other cmd/ reader off the raw field.
 func originalLaunchTime(instance *aws.InstanceInfo) time.Time {
-	if v := instance.Tags["spawn:launch-time"]; v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			return t
-		}
-	}
-	return instance.LaunchTime
+	return ttlpkg.LaunchAnchor(instance.Tags["spawn:launch-time"], instance.LaunchTime)
 }
 
 // computeTagLag bounds how far spawn:compute-seconds can trail the agent's own

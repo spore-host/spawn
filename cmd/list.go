@@ -105,9 +105,9 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Sort by launch time (newest first)
+	// Sort by first launch (newest first), the same anchor as the Age column.
 	sort.Slice(instances, func(i, j int) bool {
-		return instances[i].LaunchTime.After(instances[j].LaunchTime)
+		return originalLaunchTime(&instances[i]).After(originalLaunchTime(&instances[j]))
 	})
 
 	// Output format: --json flag or global --output json
@@ -268,7 +268,10 @@ func displayStandaloneInstances(instances []aws.InstanceInfo, hasOtherGroups boo
 	)
 
 	for _, inst := range instances {
-		age := formatDuration(time.Since(inst.LaunchTime))
+		// Age is time since the instance was FIRST launched, across stops and
+		// starts — the age the TTL reaper's max-age ceiling acts on — not since
+		// EC2's LaunchTime, which resets on every start (#1029).
+		age := formatDuration(time.Since(originalLaunchTime(&inst)))
 		ttl := ttlRemaining(inst, time.Now())
 		name := inst.Name
 		if name == "" {
@@ -439,6 +442,7 @@ func outputJSON(instances []aws.InstanceInfo) error {
 			"public_ip":             inst.PublicIP,
 			"private_ip":            inst.PrivateIP,
 			"launch_time":           inst.LaunchTime.Format(time.RFC3339),
+			"first_launch_time":     rfc3339OrEmpty(originalLaunchTime(&inst)),
 			"ttl":                   inst.TTL,
 			"ttl_deadline":          deadlineRFC3339(inst),
 			"ttl_remaining_seconds": ttlRemainingSeconds(inst, now),
@@ -634,4 +638,12 @@ func filterInstances(instances []aws.InstanceInfo) []aws.InstanceInfo {
 	}
 
 	return filtered
+}
+
+// rfc3339OrEmpty formats t for JSON output, "" for the zero time.
+func rfc3339OrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
