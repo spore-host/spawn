@@ -411,7 +411,11 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		if err := windowsLifecycleGuard(cfg); err != nil {
 			return err
 		}
-		if err := windowsPluginGuard(cfg.TargetOS, collectPluginDeclarations()); err != nil {
+		decls, err := collectPluginDeclarations()
+		if err != nil {
+			return err
+		}
+		if err := windowsPluginGuard(cfg.TargetOS, decls); err != nil {
 			return err
 		}
 	}

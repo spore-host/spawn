@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -197,11 +199,28 @@ func (s *PluginSpec) ResolvedConfig(userConfig map[string]string) (map[string]st
 		}
 	}
 
-	// Pass through any extra user-supplied keys not declared in spec.
-	for k, v := range userConfig {
-		if _, ok := result[k]; !ok {
-			result[k] = v
+	// A key the spec does not declare is an error, not a pass-through (#1116).
+	// The validator refuses a template that references an undeclared key, so
+	// passing one through only hid a typo or a stale key behind an install that
+	// then ignored it.
+	var unknown []string
+	for k := range userConfig {
+		if _, ok := s.Config[k]; !ok {
+			unknown = append(unknown, k)
 		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		declared := make([]string, 0, len(s.Config))
+		for k := range s.Config {
+			declared = append(declared, k)
+		}
+		sort.Strings(declared)
+		accepts := "it declares no config parameters"
+		if len(declared) > 0 {
+			accepts = "it accepts: " + strings.Join(declared, ", ")
+		}
+		return nil, fmt.Errorf("plugin %s: unknown config parameter(s) %s (%s)", s.Name, strings.Join(unknown, ", "), accepts)
 	}
 
 	return result, nil
