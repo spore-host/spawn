@@ -154,7 +154,7 @@ func TestValidate_Problems(t *testing.T) {
 		{
 			name:    "sha256 only on fetch",
 			spec:    "name: p\nversion: v1.0.0\ndescription: d\nremote:\n  install:\n    - type: run\n      run: echo hi\n      sha256: " + strings.Repeat("a", 64) + "\n",
-			wantSub: "sha256 is only valid on a fetch step",
+			wantSub: "sha256 has no effect on a run step",
 		},
 	}
 	for _, tc := range cases {

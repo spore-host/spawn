@@ -202,6 +202,13 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 		fmt.Printf("  checksum-manifest verified\n")
 	}
 
+	// spored validates the spec when it receives it and refuses one that fails.
+	// Validate here too, before any local step runs, so a spec spored would
+	// refuse does not first leave a controller-side footprint (#1130).
+	if err := spec.Validate(""); err != nil {
+		return fmt.Errorf("plugin %s failed validation: %w", spec.Name, err)
+	}
+
 	resolvedCfg, err := spec.ResolvedConfig(cfg)
 	if err != nil {
 		return err
