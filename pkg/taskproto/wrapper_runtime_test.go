@@ -157,14 +157,51 @@ func TestGenerateWrapper_ContainerCommandFailureStaysAppError(t *testing.T) {
 func runtimeStandInBin(t *testing.T) string {
 	t.Helper()
 	binDir := t.TempDir()
-	for _, tool := range []string{"date", "seq", "mkdir", "cat", "id", "rm", "chown", "tee", "dirname", "basename", "env"} {
+	for _, tool := range []string{"seq", "mkdir", "cat", "id", "rm", "chown", "tee", "dirname", "basename", "env"} {
 		if p, err := exec.LookPath(tool); err == nil {
 			if err := os.Symlink(p, filepath.Join(binDir, tool)); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
+	installStandInDate(t, binDir)
 	writeFakeExe(t, filepath.Join(binDir, "sleep"), "#!/bin/bash\nexit 0\n")
 	writeFakeExe(t, filepath.Join(binDir, "aws"), "#!/bin/bash\nexit 0\n")
 	return binDir
+}
+
+// installStandInDate puts a `date` that understands the phase markers' %3N
+// (PhaseTimestampFormat, #1072) into binDir. A GNU date, AL2023's, is used as
+// is, which is the case on Linux CI. BSD date (macOS) prints "3N" literally, so
+// there the stand-in is GNU's gdate when installed, else a shim that fills the
+// milliseconds with 000 and hands the rest to the real date.
+func installStandInDate(t *testing.T, binDir string) {
+	t.Helper()
+	real, err := exec.LookPath("date")
+	if err != nil {
+		t.Skip("date not available")
+	}
+	link := func(p string) {
+		if err := os.Symlink(p, filepath.Join(binDir, "date")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gnuDate(real) {
+		link(real)
+		return
+	}
+	if g, err := exec.LookPath("gdate"); err == nil && gnuDate(g) {
+		link(g)
+		return
+	}
+	writeFakeExe(t, filepath.Join(binDir, "date"),
+		"#!/bin/bash\nargs=()\nfor a in \"$@\"; do args+=(\"${a//\\%3N/000}\"); done\nexec "+shQuote(real)+" \"${args[@]}\"\n")
+}
+
+// gnuDate reports whether the date at path expands %3N to three digits.
+func gnuDate(path string) bool {
+	// nosemgrep
+	out, err := exec.Command(path, "-u", "+%3N").Output()
+	s := strings.TrimSpace(string(out))
+	return err == nil && len(s) == 3 && strings.Trim(s, "0123456789") == ""
 }

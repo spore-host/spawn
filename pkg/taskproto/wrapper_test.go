@@ -55,8 +55,8 @@ func TestGenerateWrapper_Structure(t *testing.T) {
 		"set +e -u -o pipefail", // safe flags present, +e explicit (spawn#566)
 		"RESULTS_PREFIX='s3://spawn-results-123-us-east-1/tasks/align-42'",
 		"rc=$?", // exit-code capture
-		"aws s3 cp " + shQuote(CompletionRecordPath()) + " \"$RESULTS_PREFIX/completion.json\"",
-		"aws s3 cp " + shQuote(localPath(exitCodeFileName)) + " \"$RESULTS_PREFIX/.exitcode\"",
+		"aws s3 cp --no-progress " + shQuote(CompletionRecordPath()) + " \"$RESULTS_PREFIX/completion.json\"",
+		"aws s3 cp --no-progress " + shQuote(localPath(exitCodeFileName)) + " \"$RESULTS_PREFIX/.exitcode\"",
 		"> /tmp/SPAWN_COMPLETE", // spored signal
 		"exit $rc",
 		"--recursive",         // prefix input gets --recursive
@@ -91,8 +91,8 @@ func TestGeneratePooledJobScript_OmitsSelfTerminate(t *testing.T) {
 	}
 	// The durable record is still written — the submitter polls completion.json.
 	for _, sub := range []string{
-		"aws s3 cp " + shQuote(CompletionRecordPath()) + " \"$RESULTS_PREFIX/completion.json\"",
-		"aws s3 cp " + shQuote(localPath(exitCodeFileName)) + " \"$RESULTS_PREFIX/.exitcode\"",
+		"aws s3 cp --no-progress " + shQuote(CompletionRecordPath()) + " \"$RESULTS_PREFIX/completion.json\"",
+		"aws s3 cp --no-progress " + shQuote(localPath(exitCodeFileName)) + " \"$RESULTS_PREFIX/.exitcode\"",
 		"exit $rc",
 	} {
 		if !strings.Contains(pooled, sub) {
@@ -196,7 +196,7 @@ func TestGenerateWrapper_PublicContainer(t *testing.T) {
 		"'quay.io/biocontainers/bwa:0.7.18' 'bwa' 'mem' '/data/ref.fa'", // image + argv
 		"-v '/data':'/data'",                                            // input dir mount
 		"-v '/work':'/work'",                                            // output dir mount
-		"aws s3 cp 's3://in/ref.fa' '/data/ref.fa'",                     // stage-in still on host
+		"aws s3 cp --no-progress 's3://in/ref.fa' '/data/ref.fa'",       // stage-in still on host
 		"completion.json",                                               // record unchanged
 	}
 	for _, sub := range mustContain {
@@ -426,7 +426,7 @@ func TestGenerateWrapper_MkdirCoversOutputOnlyDir(t *testing.T) {
 	// The mkdir loop must run BEFORE any docker/user-command execution, so the
 	// directory exists by the time anything tries to write into it.
 	mkdirIdx := strings.Index(w, "mkdir -p '/tmp/out'")
-	stageIdx := strings.Index(w, "aws s3 cp 's3://in/ref.fa'")
+	stageIdx := strings.Index(w, "aws s3 cp --no-progress 's3://in/ref.fa'")
 	if mkdirIdx < 0 || stageIdx < 0 || mkdirIdx > stageIdx {
 		t.Errorf("mkdir -p '/tmp/out' must precede stage-in/command execution; mkdirIdx=%d stageIdx=%d\n---\n%s", mkdirIdx, stageIdx, w)
 	}
@@ -593,7 +593,7 @@ func TestGenerateWrapper_ChownsStagedInputToInvokingUID(t *testing.T) {
 	}
 	w := genWrapper(spec, "b", "us-east-1", false, testRunID)
 
-	stageLine := `aws s3 cp 's3://in/ref.fa' '/data/ref.fa' || STAGE_RC=$?`
+	stageLine := `aws s3 cp --no-progress 's3://in/ref.fa' '/data/ref.fa' || STAGE_RC=$?`
 	chownLine := `sudo chown "$(id -u):$(id -g)" '/data/ref.fa'`
 	if !strings.Contains(w, stageLine) {
 		t.Fatalf("wrapper missing expected stage-in line %q\n---\n%s", stageLine, w)
@@ -1151,7 +1151,7 @@ func TestGenerateWrapper_StampsRunID(t *testing.T) {
 	// It must be inside the completion.json heredoc, i.e. before the record is
 	// copied to S3 — not somewhere decorative.
 	runIdx := strings.Index(w, `"run_id"`)
-	cpIdx := strings.Index(w, "aws s3 cp "+shQuote(CompletionRecordPath()))
+	cpIdx := strings.Index(w, "aws s3 cp --no-progress "+shQuote(CompletionRecordPath()))
 	if runIdx < 0 || cpIdx < 0 || runIdx > cpIdx {
 		t.Errorf("run_id must be written into the record before it is uploaded (run_id@%d, upload@%d)", runIdx, cpIdx)
 	}

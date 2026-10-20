@@ -673,6 +673,7 @@ const ExitIdleTimeout ExitReason
 const ExitSpotInterruption ExitReason
 const ExitTTLExpired ExitReason
 const ExitUserTerminated ExitReason
+const PhaseTimestampFormat
 const PurchaseOnDemand
 const PurchaseSpot
 const RetryAppError RetryClass

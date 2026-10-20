@@ -127,7 +127,12 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	// stdout rather than a second structured artifact: nothing parses command.log
 	// (cmd/service.go's readiness grep is the service path, not this wrapper), and
 	// a log a human can read is the thing that was missing.
-	p("spawn_phase() { echo \"spawn: [$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] $*\"; }\n")
+	//
+	// Milliseconds (#1072): a 1 s stamp could not time the short phases, such as
+	// a 3.8-4.5 s container start. %3N is GNU date (AL2023's coreutils). Only
+	// these markers change: started_at/ended_at in completion.json keep their
+	// whole-second form, which adapters and the cost estimate parse.
+	p("spawn_phase() { echo \"spawn: [$(date -u %s)] $*\"; }\n", PhaseTimestampFormat)
 	p("spawn_phase 'wrapper start'\n\n")
 
 	// ---- env ----
@@ -137,6 +142,11 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 			p("export %s=%s\n", k, shQuote(spec.Env[k]))
 		}
 		p("\n")
+	}
+
+	// ---- container runtime install, overlapping stage-in ----
+	if spec.Container != "" {
+		writeDockerInstallStart(p)
 	}
 
 	// ---- stage-in ----
@@ -214,7 +224,7 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	p("\n")
 	for _, m := range spec.Inputs {
 		p("if [ \"$STAGE_RC\" -eq 0 ]; then\n")
-		p("  aws s3 cp%s %s %s || STAGE_RC=$?\n", recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
+		p("  %s%s %s %s || STAGE_RC=$?\n", s3Cp, recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
 		// chown the staged path to the invoking uid:gid right after it lands
 		// (spawn#565). Host /tmp is 1777 (sticky): a container that later needs
 		// to unlink a staged file may only do so if it OWNS THAT FILE — sharing
@@ -272,6 +282,12 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	}
 	p("else\n")
 	p("  echo 'spawn: stage-in failed; skipping user command' >&2\n")
+	if spec.Container != "" {
+		// Never leave the background install running: a pooled worker's next job
+		// would collide with its dnf lock, and a test would leave a child behind.
+		p("  wait \"$DOCKER_INSTALL_PID\" 2>/dev/null || true\n")
+		p("  rm -f \"$DOCKER_INSTALL_LOG\"\n")
+	}
 	p("  rc=$STAGE_RC\n")
 	p("fi\n")
 	p("ENDED_AT=\"$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\"\n\n")
@@ -299,7 +315,7 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 			// never cost a researcher their output: on v0.132.0 spored's S3 client
 			// had no region on an instance (#1094), and with no fallback every task
 			// output was lost as output_delivery_error.
-			cp := fmt.Sprintf("aws s3 cp%s %s %s", recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
+			cp := fmt.Sprintf("%s%s %s %s", s3Cp, recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
 			p("  if [ \"$PROV_OK\" = 1 ]; then\n")
 			p("    if ! \"$SPORED\" provenance upload --state \"$PROV_DIR\" %s %s; then\n", shQuote(m.Source), shQuote(m.Destination))
 			p("      spawn_phase 'provenance upload failed; uploading untagged with aws s3 cp'\n")
@@ -346,7 +362,7 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 
 	// Best-effort copy of the command log; populates logs[] when it succeeds.
 	p("LOGS_JSON='[]'\n")
-	p("if aws s3 cp /var/log/spawn-command.log \"$RESULTS_PREFIX/command.log\"; then\n")
+	p("if %s /var/log/spawn-command.log \"$RESULTS_PREFIX/command.log\"; then\n", s3Cp)
 	p("  LOGS_JSON=\"[\\\"$RESULTS_PREFIX/command.log\\\"]\"\n")
 	p("fi\n\n")
 
@@ -376,11 +392,11 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	p("  \"retry_class\": \"$RETRY_CLASS\"\n")
 	p("}\n")
 	p("JSON\n")
-	p("aws s3 cp %s \"$RESULTS_PREFIX/completion.json\" || true\n\n", shQuote(CompletionRecordPath()))
+	p("%s %s \"$RESULTS_PREFIX/completion.json\" || true\n\n", s3Cp, shQuote(CompletionRecordPath()))
 
 	// .exitcode — the plain-integer legacy signal the RFC names.
 	p("printf '%%s' \"$rc\" > %s\n", shQuote(localPath(exitCodeFileName)))
-	p("aws s3 cp %s \"$RESULTS_PREFIX/.exitcode\" || true\n\n", shQuote(localPath(exitCodeFileName)))
+	p("%s %s \"$RESULTS_PREFIX/.exitcode\" || true\n\n", s3Cp, shQuote(localPath(exitCodeFileName)))
 
 	// ---- signal spored ---- so on_complete fires and `spawn status --check-complete` works.
 	// A pooled worker (signalComplete=false) SKIPS this: writing SPAWN_COMPLETE would
@@ -396,6 +412,46 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	p("exit $rc\n")
 
 	return b.String()
+}
+
+// PhaseTimestampFormat is the `date` format of the wrapper's spawn_phase
+// markers in command.log: UTC with milliseconds, e.g. 2026-10-20T16:28:51.123Z
+// (#1072). %3N needs GNU date, which AL2023 ships.
+const PhaseTimestampFormat = "+%Y-%m-%dT%H:%M:%S.%3NZ"
+
+// s3Cp is how every wrapper copy to or from S3 starts (#1072). --no-progress
+// drops the \r-separated progress meter, about 20 lines per file of a
+// multi-MB object, which buried the task's own output and the phase markers in
+// command.log. It keeps the one "download:/upload:" line per file and every
+// error, unlike --only-show-errors, so the log still says what was staged.
+const s3Cp = "aws s3 cp --no-progress"
+
+// writeDockerInstallStart starts a container task's Docker install in the
+// background, before stage-in, so the two overlap (#1072). Measured in E1
+// (spawn#1171) the install takes ~66 s and is paid on every launch; input
+// staging is usually shorter, so a task's wait before `docker pull` drops from
+// install + staging to roughly the longer of the two.
+//
+// Only the package install moves. Its output goes to a file, printed in one
+// block when writeContainerRun waits for it, so dnf's lines do not interleave
+// with staging's in command.log. Its exit status is the subshell's: dnf's, or 0
+// when Docker is already present. Starting the daemon, the GPU toolkit and the
+// pull stay after the wait, in order.
+//
+// The overlap means dnf and `aws s3 cp` now share memory. At the 2 GiB
+// container floor that is expected to fit, but it is not measured; if dnf is
+// OOM-killed the task fails as instance_health (retryable), as it did inline.
+func writeDockerInstallStart(p func(string, ...interface{})) {
+	p("# ---- container runtime: install Docker in the background, overlapping stage-in (#1072) ----\n")
+	p("spawn_phase 'docker install start'\n")
+	p("DOCKER_INSTALL_LOG=\"${TMPDIR:-/tmp}/spawn-docker-install.$$.log\"\n")
+	p("(\n")
+	p("  if ! command -v docker >/dev/null 2>&1; then\n")
+	p("    echo 'spawn: installing docker...'\n")
+	p("    sudo dnf install -y docker\n")
+	p("  fi\n")
+	p(") > \"$DOCKER_INSTALL_LOG\" 2>&1 &\n")
+	p("DOCKER_INSTALL_PID=$!\n\n")
 }
 
 // quoteArgv single-quotes each argv element and joins with spaces, so the result
@@ -429,11 +485,15 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	// each step's failure was ignored, so an OOM-killed `dnf install docker`
 	// fell through to `sudo docker run`, failed with "command not found", and
 	// was blamed on the application.
-	p("  spawn_phase 'docker install start'\n")
-	p("  if ! command -v docker >/dev/null 2>&1; then\n")
-	p("    echo 'spawn: installing docker...'\n")
-	p("    sudo dnf install -y docker || RUNTIME_RC=$?\n")
-	p("  fi\n")
+	//
+	// The install itself was started in the background before stage-in
+	// (writeDockerInstallStart, #1072); this waits for it, so nothing below runs
+	// before it has finished, and its exit status is RUNTIME_RC exactly as the
+	// inline install's was.
+	p("  spawn_phase 'docker install wait'\n")
+	p("  wait \"$DOCKER_INSTALL_PID\" || RUNTIME_RC=$?\n")
+	p("  cat \"$DOCKER_INSTALL_LOG\" 2>/dev/null || true\n")
+	p("  rm -f \"$DOCKER_INSTALL_LOG\"\n")
 	p("  if [ \"$RUNTIME_RC\" -eq 0 ]; then\n")
 	p("    sudo systemctl enable --now docker || RUNTIME_RC=$?\n")
 	p("  fi\n")
