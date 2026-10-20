@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/observability"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
@@ -177,7 +178,47 @@ func (p *EC2Provider) Terminate(ctx context.Context, reason string) error {
 	}
 
 	log.Printf("Terminate request sent")
+
+	// The launch Elastic IP (#661), released only now: before the terminate,
+	// losing the address would cut the egress the TerminateInstances call
+	// itself needs, and an instance that failed to terminate would run on
+	// without it. Never fails the terminate.
+	p.ReleaseOwnElasticIPs(ctx)
 	return nil
+}
+
+// ReleaseOwnElasticIPs releases the Elastic IP a multi-interface EFA launch
+// allocated for this instance (#661), if there is one. Only `spawn terminate`
+// used to release it, so an instance ending by its TTL, idle or cost limit,
+// on-complete or a Spot reclaim left it allocated and billing.
+//
+// One ReleaseAddress per address and no DisassociateAddress: the instance
+// reaches EC2 through that address, so after a disassociate it could not send
+// the release. In a default VPC the release disassociates too; in a nondefault
+// VPC EC2 answers InUse and the address is left to the TTL reaper, which
+// releases it once EC2 has detached it. Best-effort and logged, never an error:
+// it runs while the instance is going away.
+func (p *EC2Provider) ReleaseOwnElasticIPs(ctx context.Context) {
+	if p.ec2Client == nil || p.identity == nil {
+		return
+	}
+	releaseOwnElasticIPs(ctx, p.ec2Client, p.identity.InstanceID)
+}
+
+func releaseOwnElasticIPs(ctx context.Context, api elasticip.API, instanceID string) {
+	// Bounded: this runs on the way down, and a hung call must not hold it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	res, err := elasticip.ReleaseForInstance(ctx, api, instanceID)
+	for _, a := range res.Released {
+		log.Printf("Released Elastic IP %s allocated for %s", a, instanceID)
+	}
+	for _, a := range res.InUse {
+		log.Printf("Elastic IP %s is still associated (nondefault VPC); the TTL reaper releases it once %s is gone", a, instanceID)
+	}
+	if err != nil {
+		log.Printf("Warning: could not release the Elastic IP allocated for %s: %v (the TTL reaper releases it later)", instanceID, err)
+	}
 }
 
 // DetectSpotReplacement reports whether this instance is a replacement EC2

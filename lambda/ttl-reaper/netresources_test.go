@@ -24,6 +24,21 @@ type fakeNetAPI struct {
 	deletedPG []string
 	sgDelErr  error
 	pgDelErr  error
+	// The launch Elastic IP sweep (#661).
+	addrs      []ec2types.Address
+	released   []string
+	releaseErr error
+}
+
+func (f *fakeNetAPI) DescribeAddresses(context.Context, *ec2.DescribeAddressesInput, ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error) {
+	return &ec2.DescribeAddressesOutput{Addresses: f.addrs}, nil
+}
+func (f *fakeNetAPI) ReleaseAddress(_ context.Context, in *ec2.ReleaseAddressInput, _ ...func(*ec2.Options)) (*ec2.ReleaseAddressOutput, error) {
+	if f.releaseErr != nil {
+		return nil, f.releaseErr
+	}
+	f.released = append(f.released, awssdk.ToString(in.AllocationId))
+	return &ec2.ReleaseAddressOutput{}, nil
 }
 
 func (f *fakeNetAPI) CreateTags(_ context.Context, in *ec2.CreateTagsInput, _ ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error) {

@@ -133,25 +133,12 @@ func EFANetworkInterface(subnetID string, securityGroupIDs []string) types.Insta
 // querying the EC2 API in the specified launch region. Some instance types
 // (e.g. hpc6a.48xlarge) only exist in certain regions and DescribeInstanceTypes
 // returns InvalidInstanceType when queried from a different region.
+//
+// It is [Client.EFACapacityInRegion] with the capacity discarded; call that
+// instead when the number of EFA interfaces matters (#661).
 func (c *Client) ValidateInstanceTypeForEFAInRegion(ctx context.Context, instanceType, region string) error {
-	ec2Client := c.regionalEC2(region)
-
-	output, err := ec2Client.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{
-		InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)},
-	})
-	if err != nil {
-		return fmt.Errorf("describe instance type %s: %w", instanceType, err)
-	}
-	if len(output.InstanceTypes) == 0 {
-		return fmt.Errorf("instance type %s not found", instanceType)
-	}
-
-	info := output.InstanceTypes[0]
-	if info.NetworkInfo == nil || !aws.ToBool(info.NetworkInfo.EfaSupported) {
-		return fmt.Errorf("instance type %s does not support EFA", instanceType)
-	}
-
-	return nil
+	_, err := c.EFACapacityInRegion(ctx, instanceType, region)
+	return err
 }
 
 // ValidateInstanceTypeForNestedVirtualization checks that the instance type

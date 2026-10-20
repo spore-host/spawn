@@ -96,6 +96,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response that SSM's 24,000-character output limit cuts short is reported as
   truncated rather than parsed.
 
+- **`spawn launch --efa` now attaches one EFA interface per network card**
+  (#661). It attached exactly one interface, so a multi-card instance ran on a
+  fraction of its fabric: c8gn.48xlarge on 1 of 2 EFAs, p5en.48xlarge on 1 of
+  16, p5.48xlarge on 1 of 32. The primary interface (card 0, device 0) is
+  `efa`; each further card gets an `efa-only` interface at device 0, per AWS's
+  multi-card EFA guide. EC2 assigns no public IP to an instance with more than
+  one interface, so such a launch waits for the instance to run, allocates an
+  Elastic IP tagged `spawn:managed=true` / `spawn:instance-id=<id>` and
+  associates it to the primary interface; if that fails the instance is
+  terminated and the launch fails. `spawn terminate` releases the address,
+  `spawn cleanup` releases one left unassociated, and the TTL reaper releases
+  orphans. Single-card types (c5n.18xlarge, hpc7a) are unchanged. The launching
+  principal needs `ec2:AllocateAddress`, `ec2:AssociateAddress`,
+  `ec2:DescribeAddresses`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, and
+  `ec2:CreateTags` on `elastic-ip` with `ec2:CreateAction=AllocateAddress`.
+  `--efa-interfaces 1` restores the old single interface.
+
+- **`spawn launch --efa` now attaches one EFA interface per network card**
+  (#661). It attached exactly one interface, so a multi-card instance ran on a
+  fraction of its fabric: c8gn.48xlarge on 1 of 2 EFAs, p5en.48xlarge on 1 of
+  16, p5.48xlarge on 1 of 32. The primary interface (card 0, device 0) is
+  `efa`; each further card gets an `efa-only` interface at device 0, per AWS's
+  multi-card EFA guide. EC2 assigns no public IP to an instance with more than
+  one interface, so such a launch waits for the instance to run, allocates an
+  Elastic IP tagged `spawn:managed=true` / `spawn:instance-id=<id>` and
+  associates it to the primary interface; if that fails the instance is
+  terminated and the launch fails. Every ending releases the address:
+  `spawn terminate` does; spored does after its own terminate (TTL, idle,
+  cost limit, on-complete) and 20 seconds before a Spot terminate interruption;
+  the TTL reaper does for instances it terminates and for any left orphaned;
+  and `spawn cleanup` releases one left unassociated. From the instance this
+  works in a default VPC only: in a nondefault VPC EC2 refuses to release an
+  associated address and the instance cannot disassociate it without losing
+  the egress the release needs, so the reaper releases it once EC2 detaches it.
+  Single-card types (c5n.18xlarge, hpc7a) are unchanged. The launching
+  principal needs `ec2:AllocateAddress`, `ec2:AssociateAddress`,
+  `ec2:DescribeAddresses`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, and
+  `ec2:CreateTags` on `elastic-ip` with `ec2:CreateAction=AllocateAddress`.
+  `--efa-interfaces 1` restores the old single interface.
+
 ### Fixed
 
 - `spawn resume` panicked (`interface conversion: interface {} is nil, not
@@ -115,6 +155,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A TaskSpec whose user data is over EC2's 16 KiB limit no longer passes `spawn task run --dry-run` and then fails at `RunInstances` with HTTP 400 (#1063). Both the dry run and the real run now measure the generated user data the same way RunInstances does (after gzip, then base64), and refuse an oversized spec before any AWS call. The message says how big it is and suggests moving long inline scripts from `command` into a staged `inputs:` file. A trivial task already uses about 14,100 of the 16,384 bytes, so roughly 2 KB of compressed command and inputs remain.
 - Every launch path now refuses oversized user data before making any AWS call, instead of failing at RunInstances (#1063). This covers `spawn launch`, sweeps, job arrays, burst, pools, `launcher.Provision`, and the pipeline orchestrator Lambda (the Lambda only after it is redeployed). The check is in `Client.Launch`. `launcher.Provision` now builds the user data before its AMI lookup and IAM setup, so an oversized config creates nothing.
+- **`spawn launch --efa-interfaces N`** chooses how many EFA interfaces an
+  `--efa` launch attaches, one per network card: `0` (the default) is every EFA
+  the instance type supports, `1` is the single interface `--efa` used to
+  attach, and a count above the type's maximum is refused before anything is
+  created (#661). `spawn launch --dry-run` shows the interface layout and
+  whether an Elastic IP will be associated. With more than one interface,
+  RunInstances needs a subnet on each, so spawn takes the `--az`'s subnet when no
+  `--subnet-id` is given, and asks for one of them otherwise.
+
+- `pkg/aws`: `Client.EFACapacityInRegion`, `EFACapacity`, `EFANetworkCard`,
+  `EFANetworkInterfaces`, `EFALaunchInterfaces`, `NeedsLaunchElasticIP`,
+  `DescribeEFAInterface`, `IsSpawnAllocatedAddress`, `ElasticIPInstanceTagKey`,
+  `ElasticIPPurpose`, `ElasticIPQuota`, `Client.ElasticIPQuotaInRegion`,
+  `CheckElasticIPHeadroom`, `ElasticIPQuotaCode`, and
+  `LaunchConfig.EFAInterfaces` (#661). Additions only;
+  `ValidateInstanceTypeForEFAInRegion` and `EFANetworkInterface` are unchanged,
+  and an SDK caller that does not set `EFAInterfaces` launches as before.
+
+- **A multi-interface EFA launch checks the Elastic IP quota first** (#661).
+  Each such instance needs an Elastic IP, and the region quota ("EC2-VPC Elastic
+  IPs", `L-0263D0A3`, 5 by default) used to surface only at AllocateAddress,
+  after the instance had booted and had to be terminated. The launch, and its
+  `--dry-run`, now stops before creating anything with "N of M Elastic IPs in
+  use in <region>", counting one per `--count` instance, and says that
+  `--efa-interfaces 1` needs no address. If the quota cannot be read the launch
+  warns and goes on; the terminate-on-AllocateAddress-failure still backs it
+  up. The caller needs `servicequotas:GetServiceQuota` and
+  `servicequotas:GetAWSDefaultServiceQuota` for the check (without them it only
+  warns).
+
+- **The TTL reaper releases launch Elastic IPs** (#661). Its net-resources sweep
+  releases an address spawn allocated for a multi-interface EFA launch once it
+  is unassociated, its instance is gone and it is 15 minutes old, and the reaper
+  releases the address of an instance it has just terminated. Unlike the
+  security-group and placement-group sweep, this one releases in `report`, the
+  default, as well as in `reap`: the address is selected by
+  `spawn:managed=true`, `spawn:purpose=efa-public-ip` and `spawn:instance-id`,
+  which only spawn writes and the instance role is denied from writing, nothing
+  references it, and it bills by the hour (the first field use leaked two in
+  seven minutes). `off` and `REAPER_DRY_RUN` still hold it back. The reaper
+  role gains `ec2:DescribeAddresses` and `ec2:ReleaseAddress` (the latter on the
+  `spawn:managed=true` tag rail) in `pkg/reaperiam`, the SAM template and the
+  cross-account role template; a deployed reaper needs a redeploy for both. A
+  `RELEASED` line counts as reaper activity for `spawn reaper teardown
+  --if-idle-for`, like `REAPED`.
+
+### Security
+
+- **The spored instance role may release its own launch Elastic IP, and only
+  that** (#661). Both spored policies (the per-launch baseline and the shared
+  `spored-instance-role` policy) gain `ec2:DescribeAddresses` on `*`
+  (read-only; the action has no resource-level permissions) and
+  `ec2:ReleaseAddress` conditioned on `ec2:ResourceTag/spawn:managed=true` AND
+  `ec2:ResourceTag/spawn:instance-arn` equal to `${ec2:SourceInstanceARN}`, the
+  ARN of the instance whose credentials signed the request. Launch writes
+  `spawn:instance-arn` on the address at allocation. This is a widening, and it
+  is justified by the cost leak it closes: without it an instance ending any way
+  but `spawn terminate` left its address billing until someone noticed. An
+  instance cannot release another instance's address or a user's, and a
+  request not signed with instance credentials matches nothing. Because the
+  instance role may tag any `spawn:managed=true` resource, which includes these
+  addresses, `spawn:instance-arn` and `spawn:instance-id` join the keys the
+  role is denied from writing or deleting (with `spawn:pre-stop` and the rest),
+  so an instance cannot forge its ARN onto another's address. Instances launched
+  before this keep their old role policy until a launch refreshes it, and
+  addresses allocated before this carry no `spawn:instance-arn`; the reaper
+  releases both kinds.
 
 ## [0.137.0] - 2026-10-20
 

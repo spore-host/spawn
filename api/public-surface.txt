@@ -12,6 +12,9 @@ const AMI_AL2023_GPU_ARM
 const AMI_AL2023_GPU_X86
 const AMI_AL2023_X86
 const CreatedTagKey
+const ElasticIPInstanceTagKey
+const ElasticIPPurpose
+const ElasticIPQuotaCode
 const HeartbeatTag
 const IAMBaselineURL
 const MaxEncodedUserDataBytes
@@ -99,8 +102,17 @@ field DiscoverOptions.OnlyMine bool
 field DiscoverOptions.Region string
 field DisplayPrice.PricePerHour float64
 field DisplayPrice.Source string
+field EFACapacity.Cards []EFANetworkCard
+field EFACapacity.InstanceType string
+field EFACapacity.MaxInterfaces int
+field EFANetworkCard.EFA bool
+field EFANetworkCard.EFAOnly bool
+field EFANetworkCard.Index int32
 field ElasticIP.AllocationID string
 field ElasticIP.PublicIP string
+field ElasticIPQuota.InUse int
+field ElasticIPQuota.Limit int
+field ElasticIPQuota.LimitSource string
 field EnsureImportInfrastructureInput.InstanceType string
 field EnsureImportInfrastructureInput.Region string
 field EnsureImportInfrastructureInput.SecurityGroupID []string
@@ -197,6 +209,7 @@ field LaunchConfig.DNSName string
 field LaunchConfig.EBSEncrypted bool
 field LaunchConfig.EBSKMSKeyID string
 field LaunchConfig.EFAEnabled bool
+field LaunchConfig.EFAInterfaces int
 field LaunchConfig.EFSID string
 field LaunchConfig.EFSMountPoint string
 field LaunchConfig.FSxExportPath string
@@ -351,7 +364,9 @@ func (*Client) DescribeCapacityReservation(ctx context.Context, region, reservat
 func (*Client) DescribeFSxBrief(ctx context.Context, filesystemID, region string) (FSxBrief, error)
 func (*Client) DescribeSporedLiveness(ctx context.Context, region, instanceID string) (SporedLiveness, error)
 func (*Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOptions) ([]ManagedResource, int, error)
+func (*Client) EFACapacityInRegion(ctx context.Context, instanceType, region string) (EFACapacity, error)
 func (*Client) EFSMountTargetIP(ctx context.Context, filesystemID, region, subnetID, az string) (string, error)
+func (*Client) ElasticIPQuotaInRegion(ctx context.Context, region string) (ElasticIPQuota, error)
 func (*Client) EnableTracing()
 func (*Client) EnsureDNSInvokeGrant(ctx context.Context, roleName, functionARN string) error
 func (*Client) EnsureImageBuilderSLR(ctx context.Context) (string, error)
@@ -428,6 +443,7 @@ func (*LaunchError) Error() string
 func (*LaunchError) Unwrap() error
 func (*UserDataTooLargeError) Error() string
 func (DisplayPrice) SourceLabel() string
+func (EFACapacity) ResolveInterfaces(requested int) (int, error)
 func (LaunchConfig) HibernationRequested() bool
 func (LaunchConfig) ValidateDurations() error
 func (LaunchConfig) ValidateUserDataSize() error
@@ -436,15 +452,19 @@ func (ReaperCoverage) Summary() string
 func AccountBase36(accountID string) string
 func AttachDeviceName(i int) string
 func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error
+func CheckElasticIPHeadroom(q ElasticIPQuota, region string, need int) error
 func CheckUserDataSize(encoded string) error
 func DNSInvokePolicyName(functionARN string) string
 func DecryptWindowsPassword(passwordData, privateKeyPath string) (string, error)
 func DeletionOrder(resources []ManagedResource) []ManagedResource
+func DescribeEFAInterface(ni types.InstanceNetworkInterfaceSpecification) string
 func DescribeInstanceWithRetry(ctx context.Context, ec2Client *ec2.Client, instanceID string) (*types.Instance, error)
 func DetectArchitecture(instanceType string) string
 func DetectGPUInstance(instanceType string) bool
 func DetectReaperCoverage(ctx context.Context, cfg awssdk.Config) ReaperCoverage
+func EFALaunchInterfaces(cfg LaunchConfig, capacity EFACapacity) ([]types.InstanceNetworkInterfaceSpecification, error)
 func EFANetworkInterface(subnetID string, securityGroupIDs []string) types.InstanceNetworkInterfaceSpecification
+func EFANetworkInterfaces(subnetID string, securityGroupIDs []string, capacity EFACapacity, n int) ([]types.InstanceNetworkInterfaceSpecification, error)
 func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string
 func GenerateScopedDynamoDBPolicy(region, accountID string) string
 func GenerateScopedS3Policy(region, accountID string) string
@@ -453,8 +473,10 @@ func GetEFSDNSName(filesystemID, region string) string
 func IsAccessDenied(err error) bool
 func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool
 func IsSharedSporedIdentity(r ManagedResource) bool
+func IsSpawnAllocatedAddress(r ManagedResource) bool
 func LifecycleTags(name, purpose string, now time.Time) []types.Tag
 func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool
+func NeedsLaunchElasticIP(interfaces []types.InstanceNetworkInterfaceSpecification) bool
 func NewClient(ctx context.Context) (*Client, error)
 func NewClientFromConfig(cfg aws.Config) *Client
 func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
@@ -479,7 +501,10 @@ type CreateAMIInput struct
 type DeleteAMIResult struct
 type DiscoverOptions struct
 type DisplayPrice struct
+type EFACapacity struct
+type EFANetworkCard struct
 type ElasticIP struct
+type ElasticIPQuota struct
 type EnsureImportInfrastructureInput struct
 type FSxBrief struct
 type FSxConfig struct

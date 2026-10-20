@@ -29,6 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	smithy "github.com/aws/smithy-go"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
@@ -188,6 +189,14 @@ type LaunchConfig struct {
 	// (<prefix>-<az>) under AZ fallback. Empty for non-cohort / fixed-PG launches.
 	PlacementGroupPrefix string
 	EFAEnabled           bool // If true, attach an Elastic Fabric Adapter network interface
+	// EFAInterfaces is how many EFA interfaces to attach under EFAEnabled, one
+	// per network card (#661). 0 or 1 is the single primary EFA interface with an
+	// auto-assigned public IP, as before. More than 1 lays out one interface per
+	// card (see EFANetworkInterfaces) and, because EC2 auto-assigns no public IP
+	// to a multi-interface instance, Launch waits for running and associates a
+	// spawn-tagged Elastic IP to the primary interface; Terminate releases it.
+	// The CLI resolves `--efa` to the type's MaximumEfaInterfaces.
+	EFAInterfaces int
 
 	// spawn-specific tags
 	TTL             string
@@ -605,7 +614,31 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	}
 
 	// Add network configuration
-	if launchConfig.EFAEnabled {
+	if launchConfig.EFAEnabled && launchConfig.EFAInterfaces > 1 {
+		capacity, err := c.EFACapacityInRegion(ctx, launchConfig.InstanceType, launchConfig.Region)
+		if err != nil {
+			return nil, fmt.Errorf("EFA validation: %w", err)
+		}
+		// RunInstances wants an explicit subnet on every interface once there is
+		// more than one ("Each network interface requires either a subnet or a
+		// network interface ID"); a single interface may leave it to EC2.
+		cfg := launchConfig
+		if cfg.SubnetID == "" {
+			if cfg.AvailabilityZone == "" {
+				return nil, fmt.Errorf("%d EFA interfaces need a subnet: pass --subnet-id or --az (or --efa-interfaces 1)", cfg.EFAInterfaces)
+			}
+			subnet, err := c.GetSubnetForAZ(ctx, cfg.Region, cfg.AvailabilityZone, cfg.VPCID)
+			if err != nil {
+				return nil, fmt.Errorf("subnet for %d EFA interfaces in %s: %w", cfg.EFAInterfaces, cfg.AvailabilityZone, err)
+			}
+			cfg.SubnetID = subnet
+		}
+		nis, err := EFALaunchInterfaces(cfg, capacity)
+		if err != nil {
+			return nil, err
+		}
+		input.NetworkInterfaces = nis
+	} else if launchConfig.EFAEnabled {
 		input.NetworkInterfaces = []types.InstanceNetworkInterfaceSpecification{
 			EFANetworkInterface(launchConfig.SubnetID, launchConfig.SecurityGroupIDs),
 		}
@@ -714,7 +747,35 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		recordLaunchSpotPrice(ctx, ec2Client, result.Instances[0])
 	}
 
-	return newLaunchResult(result.Instances[0], launchConfig.Name, launchConfig.Region, launchConfig.KeyName), nil
+	launched := newLaunchResult(result.Instances[0], launchConfig.Name, launchConfig.Region, launchConfig.KeyName)
+
+	// Multi-interface EFA (#661): no public IP was requested, because EC2 refuses
+	// one on a multi-interface instance. Associate an Elastic IP to the primary
+	// interface once the instance is running, so SSH, `spawn connect`, DNS and
+	// spored all see a public address as on any other launch. If that fails the
+	// instance is terminated rather than left running unreachable.
+	if NeedsLaunchElasticIP(input.NetworkInterfaces) {
+		// The ARN tag is what lets spored release the address itself (#661);
+		// RunInstances reports the owning account, so no extra call is needed.
+		instanceARN := ""
+		if owner := aws.ToString(result.OwnerId); owner != "" {
+			instanceARN = elasticip.InstanceARN(launchConfig.Region, owner, launched.InstanceID)
+		}
+		ip, alloc, eerr := attachLaunchElasticIP(ctx, ec2Client, launchConfig.Name, launched.InstanceID, instanceARN, tags)
+		if eerr != nil {
+			if terr := c.Terminate(ctx, launchConfig.Region, launched.InstanceID); terr != nil {
+				return nil, fmt.Errorf("instance %s launched with %d network interfaces but its Elastic IP could not be attached (%w); "+
+					"terminating it ALSO failed — terminate it by hand (spawn terminate %s): %v",
+					launched.InstanceID, len(input.NetworkInterfaces), eerr, launched.InstanceID, terr)
+			}
+			return nil, fmt.Errorf("instance %s launched with %d network interfaces but its Elastic IP could not be attached, so it was terminated: %w",
+				launched.InstanceID, len(input.NetworkInterfaces), eerr)
+		}
+		launched.PublicIP = ip
+		launched.State = string(types.InstanceStateNameRunning)
+		fmt.Fprintf(os.Stderr, "Elastic IP %s (%s) associated to the primary interface; released on spawn terminate\n", ip, alloc)
+	}
+	return launched, nil
 }
 
 // propagateSnapshotTagsToVolumes copies each attached snapshot's CUSTOM tags onto
@@ -1106,6 +1167,18 @@ func (c *Client) Terminate(ctx context.Context, region, instanceID string) error
 	})
 	if err != nil {
 		return fmt.Errorf("failed to terminate instance: %w", err)
+	}
+
+	// A multi-interface EFA launch holds a spawn-allocated Elastic IP (#661),
+	// which keeps billing once the instance is gone. Release it now; never fail
+	// the terminate over it — the TTL reaper's orphan-EIP sweep is the backstop.
+	released, rerr := releaseInstanceElasticIPs(ctx, ec2Client, instanceID)
+	for _, alloc := range released {
+		fmt.Fprintf(os.Stderr, "Released Elastic IP %s allocated for %s\n", alloc, instanceID)
+	}
+	if rerr != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  could not release the Elastic IP spawn allocated for %s: %v\n"+
+			"   The TTL reaper releases it later; or: aws ec2 release-address --allocation-id <id> --region %s\n", instanceID, rerr, region)
 	}
 
 	return nil

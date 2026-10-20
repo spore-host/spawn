@@ -96,6 +96,7 @@ var windowsLaunchFlags = map[string]windowsFlagRule{
 	"placement-group":        honouredOnWindows(whyEC2Param),
 	"auto-placement-group":   honouredOnWindows("acts only with --mpi, which is refused on Windows"),
 	"efa":                    honouredOnWindows(whyEC2Param + " (an EFA network interface)"),
+	"efa-interfaces":         honouredOnWindows(whyEC2Param + " (one EFA network interface per card)"),
 
 	// Instance shape, network and purchase: EC2 parameters.
 	"instance-type":         honouredOnWindows(whyEC2Param),

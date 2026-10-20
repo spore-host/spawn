@@ -58,6 +58,7 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/dns"
+	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/spotrequest"
@@ -1381,11 +1382,44 @@ func (r *reaper) terminate(ctx context.Context, acct account, c candidate) error
 	if err != nil {
 		// Already gone is success (idempotent).
 		if strings.Contains(err.Error(), "InvalidInstanceID.NotFound") {
+			r.releaseLaunchElasticIPs(ctx, acct, c)
 			return nil
 		}
 		return err
 	}
+	r.releaseLaunchElasticIPs(ctx, acct, c)
 	return nil
+}
+
+// releaseLaunchElasticIPs releases the Elastic IP a multi-interface EFA launch
+// allocated for an instance the reaper has just terminated (#661). The instance
+// cannot: the reaper only reaches instances whose spored failed to end them.
+//
+// ReleaseAddress alone, as spored does: in a default VPC it disassociates too.
+// In a nondefault VPC EC2 answers InUse until it deletes the primary interface,
+// and the orphan sweep releases the address on a later cycle once it is
+// unassociated. That leaves DisassociateAddress out of the reaper role, whose
+// authorization also touches the network interface, which carries no
+// spawn:managed tag for the tag rail to match.
+//
+// Best-effort and never an error: the terminate is what the hard deadline (#72)
+// is about. Skipped when the net-resources sweep is off, since an account set to
+// off is one where someone else owns these resources.
+func (r *reaper) releaseLaunchElasticIPs(ctx context.Context, acct account, c candidate) {
+	if acct.netFor == nil || r.netResources == netResourcesOff {
+		return
+	}
+	res, err := elasticip.ReleaseForInstance(ctx, acct.netFor(c.region), c.id)
+	for _, a := range res.Released {
+		log.Printf("RELEASED Elastic IP %s of terminated instance %s in %s/%s", a, c.id, acct.label, c.region)
+	}
+	for _, a := range res.InUse {
+		log.Printf("Elastic IP %s of terminated instance %s in %s/%s is still associated; the net-resources sweep releases it once EC2 detaches it",
+			a, c.id, acct.label, c.region)
+	}
+	if err != nil {
+		log.Printf("account %s region %s: release Elastic IP of %s: %v (the net-resources sweep retries)", acct.label, c.region, c.id, err)
+	}
 }
 
 // deleteDNS removes the Route53 records the instance registered, since spored's
