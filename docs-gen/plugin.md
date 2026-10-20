@@ -212,7 +212,13 @@ spawn plugin search [query] [flags]
 
 ### `spawn plugin status`
 
-Show status of a plugin on an instance
+Show a plugin's status on an instance, and its declared outputs.
+
+Outputs are the values a plugin's local provision steps capture under a name its
+spec declares in outputs: (for example a Globus endpoint ID). They are recorded
+on the machine that ran 'spawn plugin install', so they are shown only there.
+Values a plugin captures without declaring them are never shown: they are often
+credentials it captures only to push to the instance.
 
 ```
 spawn plugin status <name> [flags]

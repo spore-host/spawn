@@ -307,7 +307,9 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	// down the mutagen sync or delete the Globus endpoint). We persist the
 	// captured outputs because a deprovision step may reference them
 	// (e.g. {{ outputs.endpoint_id }}) and they live only here on the controller.
-	if len(spec.Local.Deprovision) > 0 || len(spec.Local.Reconcile) > 0 {
+	// A plugin that declares outputs gets a record too, so `spawn plugin
+	// status` can show them (#1117).
+	if pluginNeedsLocalRecord(spec) {
 		saveLocalPluginRecord(instance, ref, spec, prov, tmplCtx.Instance, resolvedCfg, localOutputs)
 	}
 
@@ -333,8 +335,86 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	}
 
 	fmt.Printf("Plugin %s installed on %s.\n", spec.Name, instance)
+	renderPluginOutputs(os.Stdout, plugin.DeclaredOutputValues(spec.Outputs, localOutputs))
 	fmt.Printf("Use 'spawn plugin status %s --instance %s' to check status.\n", spec.Name, instance)
 	return nil
+}
+
+// renderPluginOutputs prints a plugin's declared outputs and their values.
+func renderPluginOutputs(out io.Writer, outputs []plugin.OutputValue) {
+	if len(outputs) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "Outputs:\n")
+	for _, o := range outputs {
+		v := o.Value
+		if !o.Recorded {
+			v = "(not recorded: no local provision step captures it)"
+		}
+		fmt.Fprintf(out, "  %s: %s\n", o.Name, v)
+		if o.Description != "" {
+			fmt.Fprintf(out, "      %s\n", o.Description)
+		}
+	}
+}
+
+// recordedPluginOutputs returns the declared outputs recorded on this
+// controller for plugin name on instance, or nil if there is no record (the
+// plugin was installed from another machine, or declares none).
+func recordedPluginOutputs(instance, name string) []plugin.OutputValue {
+	store, err := plugin.DefaultLocalStore()
+	if err != nil {
+		return nil
+	}
+	rec, err := store.Load(instance, name)
+	if err != nil {
+		return nil
+	}
+	return plugin.DeclaredOutputValues(rec.DeclaredOutputs, rec.Outputs)
+}
+
+// mergePluginOutputs adds the recorded declared outputs to st.Outputs, for
+// --output json. spored's own outputs map, if it has values, is kept.
+func mergePluginOutputs(st *pluginStateResponse, outputs []plugin.OutputValue) {
+	for _, o := range outputs {
+		if !o.Recorded {
+			continue
+		}
+		if st.Outputs == nil {
+			st.Outputs = map[string]string{}
+		}
+		if _, ok := st.Outputs[o.Name]; !ok {
+			st.Outputs[o.Name] = o.Value
+		}
+	}
+}
+
+// writePluginStatus writes `spawn plugin status`, as JSON or for a human.
+func writePluginStatus(out io.Writer, st *pluginStateResponse, outputs []plugin.OutputValue, asJSON bool) error {
+	if asJSON {
+		mergePluginOutputs(st, outputs)
+		return json.NewEncoder(out).Encode(st)
+	}
+	printPluginStatus(out, st, outputs)
+	return nil
+}
+
+// printPluginStatus renders `spawn plugin status` for a human.
+func printPluginStatus(out io.Writer, st *pluginStateResponse, outputs []plugin.OutputValue) {
+	fmt.Fprintf(out, "Plugin:  %s\n", st.Name)
+	fmt.Fprintf(out, "Version: %s\n", st.Version)
+	fmt.Fprintf(out, "Status:  %s\n", st.Status)
+	fmt.Fprintf(out, "Updated: %s\n", st.UpdatedAt.Format(time.RFC3339))
+	if st.Error != "" {
+		fmt.Fprintf(out, "Error:   %s\n", st.Error)
+	}
+	if st.LastHealth != nil {
+		fmt.Fprintf(out, "Health:  last OK %s\n", st.LastHealth.Format(time.RFC3339))
+	}
+	if p := st.Provenance; p != nil {
+		fmt.Fprintf(out, "Source:  %s\n", describeProvenance(p))
+	}
+	renderPluginOutputs(out, outputs)
 }
 
 // pluginProvenanceTagValue builds the compact EC2-tag value recording a plugin's
@@ -395,16 +475,17 @@ func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, prov *
 		return
 	}
 	rec := &plugin.LocalRecord{
-		Name:           spec.Name,
-		Ref:            ref,
-		InstanceID:     instance,
-		Instance:       instanceVars,
-		Config:         cfg,
-		Outputs:        outputs,
-		Deprovision:    spec.Local.Deprovision,
-		Reconcile:      spec.Local.Reconcile,
-		EnvPassthrough: spec.Local.EnvPassthrough,
-		InstalledAt:    time.Now(),
+		Name:            spec.Name,
+		Ref:             ref,
+		InstanceID:      instance,
+		Instance:        instanceVars,
+		Config:          cfg,
+		Outputs:         recordOutputs(spec, outputs),
+		DeclaredOutputs: spec.Outputs,
+		Deprovision:     spec.Local.Deprovision,
+		Reconcile:       spec.Local.Reconcile,
+		EnvPassthrough:  spec.Local.EnvPassthrough,
+		InstalledAt:     time.Now(),
 	}
 	if prov != nil {
 		rec.ResolvedRef = prov.RequestedRef
@@ -414,6 +495,34 @@ func saveLocalPluginRecord(instance, ref string, spec *plugin.PluginSpec, prov *
 	if err := store.Save(rec); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not record local plugin state for %s: %v\n", spec.Name, err)
 	}
+}
+
+// pluginNeedsLocalRecord reports whether `spawn plugin install` must leave a
+// controller-side record: for teardown steps to replay, or declared outputs
+// for `spawn plugin status` to show.
+func pluginNeedsLocalRecord(spec *plugin.PluginSpec) bool {
+	return hasLocalTeardown(spec) || len(spec.Outputs) > 0
+}
+
+func hasLocalTeardown(spec *plugin.PluginSpec) bool {
+	return len(spec.Local.Deprovision) > 0 || len(spec.Local.Reconcile) > 0
+}
+
+// recordOutputs is what a local record keeps of a plugin's captures. A plugin
+// with teardown steps keeps them all, since those steps may reference any of
+// them. One recorded only for its declared outputs keeps only those, so a
+// credential captured to push to the instance is not left on disk for nothing.
+func recordOutputs(spec *plugin.PluginSpec, captured map[string]string) map[string]string {
+	if hasLocalTeardown(spec) {
+		return captured
+	}
+	kept := map[string]string{}
+	for name := range spec.Outputs {
+		if v, ok := captured[name]; ok {
+			kept[name] = v
+		}
+	}
+	return kept
 }
 
 // templateContextFromRecord rebuilds the template context a recorded plugin was
@@ -739,8 +848,15 @@ func waitForPluginReady(ctx context.Context, instance, name string) error {
 
 var pluginStatusCmd = &cobra.Command{
 	Use:   "status <name>",
-	Short: "Show status of a plugin on an instance",
-	Args:  cobra.ExactArgs(1),
+	Short: "Show status and outputs of a plugin on an instance",
+	Long: `Show a plugin's status on an instance, and its declared outputs.
+
+Outputs are the values a plugin's local provision steps capture under a name its
+spec declares in outputs: (for example a Globus endpoint ID). They are recorded
+on the machine that ran 'spawn plugin install', so they are shown only there.
+Values a plugin captures without declaring them are never shown: they are often
+credentials it captures only to push to the instance.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if pluginInstance == "" {
 			return fmt.Errorf("--instance is required")
@@ -755,24 +871,10 @@ var pluginStatusCmd = &cobra.Command{
 			return err
 		}
 
-		if pluginJSONOutput || getOutputFormat() == "json" {
-			return json.NewEncoder(os.Stdout).Encode(st)
-		}
-
-		fmt.Printf("Plugin:  %s\n", st.Name)
-		fmt.Printf("Version: %s\n", st.Version)
-		fmt.Printf("Status:  %s\n", st.Status)
-		fmt.Printf("Updated: %s\n", st.UpdatedAt.Format(time.RFC3339))
-		if st.Error != "" {
-			fmt.Printf("Error:   %s\n", st.Error)
-		}
-		if st.LastHealth != nil {
-			fmt.Printf("Health:  last OK %s\n", st.LastHealth.Format(time.RFC3339))
-		}
-		if p := st.Provenance; p != nil {
-			fmt.Printf("Source:  %s\n", describeProvenance(p))
-		}
-		return nil
+		// Outputs are captured on the controller at install, so they come from
+		// this machine's local record rather than from spored (#1117).
+		outputs := recordedPluginOutputs(pluginInstance, args[0])
+		return writePluginStatus(os.Stdout, st, outputs, pluginJSONOutput || getOutputFormat() == "json")
 	},
 }
 

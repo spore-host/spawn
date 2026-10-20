@@ -160,6 +160,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   endpoint's no longer fails the signature check. `--region` is still sent in
   the request body as the onboarded region. `-o json` now writes only the JSON
   result to stdout, with progress lines on stderr (#1138).
+- **Plugin outputs are now surfaced (#1117).** `spawn plugin inspect` promised
+  "Outputs (surfaced after install)", but nothing ever showed them. A plugin's
+  declared `outputs:` are now printed at the end of `spawn plugin install`, and
+  `spawn plugin status` (text, and the `outputs` map in `-o json`) shows them
+  afterwards. An output's value is the `local.provision` capture of the same
+  name. An output nothing captures is listed as not recorded. Captures the
+  spec does not declare as outputs are never shown, because they are often
+  credentials captured only to push to the instance. Outputs are recorded
+  on the machine that ran the install, so `status` shows them only there.
+  `outputs:` entries may carry a `description:`, which the registry already
+  uses, and `inspect` and `status` now print it.
 
 ## [0.136.0] - 2026-10-20
 
