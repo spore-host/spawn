@@ -180,7 +180,16 @@ func (p *awsProber) VPCAndSubnet(ctx context.Context) (string, error) {
 	region := p.cfg.Region
 	vpcID, err := p.client.GetDefaultVPC(ctx, region)
 	if err != nil || vpcID == "" {
-		return "", fmt.Errorf("no default VPC in %s", region)
+		// Without a default VPC a launch needs --subnet-id; whether that can
+		// work depends on there being any subnet at all (#1161).
+		out, serr := ec2.NewFromConfig(p.cfg).DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{MaxResults: awssdk.Int32(5)})
+		if serr == nil && len(out.Subnets) > 0 {
+			return "", fmt.Errorf("%w in %s (subnets exist, e.g. %s)", ErrNoDefaultVPC, region, awssdk.ToString(out.Subnets[0].SubnetId))
+		}
+		if serr != nil {
+			return "", fmt.Errorf("no default VPC in %s, and its subnets could not be listed: %w", region, serr)
+		}
+		return "", fmt.Errorf("no default VPC and no subnet found in %s", region)
 	}
 	subnets, err := p.client.GetSubnets(ctx, region, vpcID)
 	if err != nil || len(subnets) == 0 {

@@ -11,6 +11,7 @@ import (
 	cwlogs "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
+	ebtypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -177,12 +178,17 @@ func (c *Client) ScanControlPlane(ctx context.Context, region string) ([]Control
 		}
 	}
 
-	// --- EventBridge rules --------------------------------------------------
+	// --- EventBridge rules (default event bus) -------------------------------
+	//
+	// Rules on the default bus only — not EventBridge Scheduler schedules, which
+	// are a different service and are not scanned here. Every page is read: one
+	// ListRules call returns at most 100 rules, so an account with more silently
+	// lost the rest before #1161.
 	ec := eventbridge.NewFromConfig(cfg)
-	if rules, err := ec.ListRules(ctx, &eventbridge.ListRulesInput{}); err != nil {
+	if rules, err := listAllRules(ctx, ec); err != nil {
 		notes = append(notes, fmt.Sprintf("events: %v", err))
 	} else {
-		for _, r := range rules.Rules {
+		for _, r := range rules {
 			name := aws.ToString(r.Name)
 			if !matchesFootprintName(name) {
 				continue
@@ -221,6 +227,29 @@ func (c *Client) ScanControlPlane(ctx context.Context, region string) ([]Control
 		return out[i].Name < out[j].Name
 	})
 	return out, notes
+}
+
+// rulesLister is the ListRules call listAllRules pages through.
+type rulesLister interface {
+	ListRules(ctx context.Context, in *eventbridge.ListRulesInput, optFns ...func(*eventbridge.Options)) (*eventbridge.ListRulesOutput, error)
+}
+
+// listAllRules reads every page of the default bus's rules. The SDK has no
+// paginator for ListRules, so the NextToken loop is written out.
+func listAllRules(ctx context.Context, c rulesLister) ([]ebtypes.Rule, error) {
+	var all []ebtypes.Rule
+	in := &eventbridge.ListRulesInput{}
+	for {
+		page, err := c.ListRules(ctx, in)
+		if err != nil {
+			return all, err
+		}
+		all = append(all, page.Rules...)
+		if aws.ToString(page.NextToken) == "" {
+			return all, nil
+		}
+		in = &eventbridge.ListRulesInput{NextToken: page.NextToken}
+	}
 }
 
 // ScanGlobalFootprint enumerates the account-wide (non-regional) control plane:

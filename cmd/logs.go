@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,7 +53,8 @@ is answerable after the fact without knowing that get-console-output exists.
 
 The serial console capture is not immediate — allow about five minutes after
 termination. Fetched dumps are cached under ~/.spawn/cache/console for 7 days and
-pruned on each run.`,
+pruned on each run. Once EC2 has stopped listing the instance, the cache is
+still found by name or instance ID.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
@@ -86,7 +88,7 @@ pruned on each run.`,
 		}
 
 		// Gone. Fall back to the console, which outlives the instance.
-		return showTerminatedLog(ctx, client, args[0])
+		return showTerminatedLog(ctx, client, args[0], os.Stdout, os.Stderr)
 	},
 }
 
@@ -102,7 +104,7 @@ pruned on each run.`,
 // "User initiated (2026-10-08 16:48:02 GMT)". It is not always present, so a
 // zero time means "do not guess" rather than "just now".
 func findRecentlyGone(ctx context.Context, client *aws.Client, identifier string) (*aws.InstanceInfo, time.Time) {
-	all, err := client.ListInstances(ctx, "", "all")
+	all, err := listInstancesForLookup(ctx, client, lookupRegion(), "all")
 	if err != nil {
 		return nil, time.Time{}
 	}
@@ -135,54 +137,82 @@ func parseTransitionTime(reason string) time.Time {
 
 // showTerminatedLog reads a terminated instance's console output and prints the
 // command-log block spored wrote before it died.
-func showTerminatedLog(ctx context.Context, client *aws.Client, identifier string) error {
+//
+// When EC2 no longer lists the instance at all, the local cache is consulted by
+// ID or name before giving up (#1160). That is the case the cache exists for —
+// keeping the diagnostic after AWS forgets the instance — so it must not sit
+// behind a lookup that requires AWS to remember it.
+func showTerminatedLog(ctx context.Context, client *aws.Client, identifier string, stdout, stderr io.Writer) error {
 	gone, when := findRecentlyGone(ctx, client, identifier)
 	if gone == nil {
-		return fmt.Errorf("no instance found matching %q, alive or recently terminated", identifier)
+		if !logsNoCache {
+			if id, raw, ok := cachedConsoleFor(identifier); ok {
+				fmt.Fprintf(stderr, "EC2 no longer lists %s; showing the console output cached for %s\n(from the local cache)\n", identifier, id)
+				printConsoleLog(stdout, stderr, raw, time.Time{})
+				return nil
+			}
+		}
+		return fmt.Errorf("no instance found matching %q, alive or recently terminated, and nothing cached for it under ~/.spawn/cache/console", identifier)
 	}
 
-	fmt.Fprintf(os.Stderr, "%s (%s) is %s", gone.Name, gone.InstanceID, gone.State)
+	fmt.Fprintf(stderr, "%s (%s) is %s", gone.Name, gone.InstanceID, gone.State)
 	if reason := strings.TrimSpace(gone.StateTransitionReason); reason != "" {
-		fmt.Fprintf(os.Stderr, ": %s", reason)
+		fmt.Fprintf(stderr, ": %s", reason)
 	}
-	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(stderr)
 
-	raw, cached, err := consoleOutputCached(ctx, client, gone.Region, gone.InstanceID)
+	raw, cached, err := consoleOutputCached(ctx, client, gone.Region, gone.InstanceID, gone.Name)
 	if err != nil {
-		return fmt.Errorf("read console output: %w", err)
+		return consoleReadError(err)
 	}
 	if cached {
-		fmt.Fprintf(os.Stderr, "(from the local cache)\n")
+		fmt.Fprintf(stderr, "(from the local cache)\n")
 	}
+	printConsoleLog(stdout, stderr, raw, when)
+	return nil
+}
 
+// consoleReadError wraps a console-output failure, naming the permission when it
+// is a denial: ec2:GetConsoleOutput is not in the minimal IAM baseline (the site
+// lists it as an optional addition), so "access denied" is the expected failure
+// for a least-privilege user and should say what to add (#1160).
+func consoleReadError(err error) error {
+	if aws.IsAccessDenied(err) {
+		return fmt.Errorf("read console output: %w\n\nReading a terminated spore's log needs ec2:GetConsoleOutput, which the minimal spawn IAM policy does not include — add it to read logs after termination", err)
+	}
+	return fmt.Errorf("read console output: %w", err)
+}
+
+// printConsoleLog prints the command-log block of a console dump (or the whole
+// dump under --console). when is the termination time, zero when unknown.
+func printConsoleLog(stdout, stderr io.Writer, raw string, when time.Time) {
 	if logsConsole {
-		fmt.Print(raw)
-		return nil
+		fmt.Fprint(stdout, raw)
+		return
 	}
 
 	body, ok := taskproto.ExtractConsoleLog(raw)
 	if ok {
-		fmt.Fprintf(os.Stderr, "\n")
-		fmt.Println(body)
-		return nil
+		fmt.Fprintf(stderr, "\n")
+		fmt.Fprintln(stdout, body)
+		return
 	}
 
 	// No block. Two very different causes, and saying the wrong one sends the
 	// user down the wrong path — so distinguish them by how long ago it died
 	// rather than reporting a flat "no log".
 	if !when.IsZero() && time.Since(when) < 6*time.Minute {
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(stderr,
 			"\nNo log yet. The serial console capture takes about five minutes after\n"+
 				"termination to appear, and this instance went away %s ago — try again shortly.\n",
 			time.Since(when).Round(time.Second))
-		return nil
+		return
 	}
-	fmt.Fprintf(os.Stderr,
+	fmt.Fprintf(stderr,
 		"\nNo command log on the console. spored writes one only when the workload\n"+
 			"FAILED, so this usually means the job succeeded or never ran a --command.\n"+
 			"Use --console to see the raw boot output (%d bytes), which covers\n"+
 			"failures that happened before the workload started.\n", len(raw))
-	return nil
 }
 
 // consoleOutputCached returns a console dump, from ~/.spawn/cache when fresh.
@@ -192,7 +222,7 @@ func showTerminatedLog(ctx context.Context, client *aws.Client, identifier strin
 // eventually drops it. Never cached EMPTY: an empty dump means the capture has
 // not populated yet, and caching that would pin the "no log yet" answer for a
 // week.
-func consoleOutputCached(ctx context.Context, client *aws.Client, region, instanceID string) (string, bool, error) {
+func consoleOutputCached(ctx context.Context, client *aws.Client, region, instanceID, name string) (string, bool, error) {
 	path := consoleCachePath(instanceID)
 	if !logsNoCache && path != "" {
 		if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
@@ -203,13 +233,74 @@ func consoleOutputCached(ctx context.Context, client *aws.Client, region, instan
 	if err != nil {
 		return "", false, err
 	}
-	if path != "" && raw != "" {
-		if mkErr := os.MkdirAll(filepath.Dir(path), 0o700); mkErr == nil {
-			// Best-effort: an unwritable cache must not fail the read.
-			_ = os.WriteFile(path, []byte(raw), 0o600)
-		}
+	if raw != "" {
+		writeConsoleCache(instanceID, name, raw)
 	}
 	return raw, false, nil
+}
+
+// writeConsoleCache stores a dump as <id>.log, and the instance's name beside it
+// as <id>.name so a later `spawn logs <name>` can find it once EC2 has forgotten
+// the instance (#1160). Best-effort: an unwritable cache must not fail the read.
+func writeConsoleCache(instanceID, name, raw string) {
+	path := consoleCachePath(instanceID)
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		return
+	}
+	if name != "" {
+		_ = os.WriteFile(strings.TrimSuffix(path, ".log")+".name", []byte(name), 0o600)
+	}
+}
+
+// cachedConsoleFor finds a cached dump by instance ID, or by the name recorded
+// beside it — the newest dump when several instances shared the name.
+func cachedConsoleFor(identifier string) (instanceID, raw string, ok bool) {
+	if strings.HasPrefix(identifier, "i-") {
+		path := consoleCachePath(identifier)
+		if path == "" {
+			return "", "", false
+		}
+		if b, err := os.ReadFile(path); err == nil && len(b) > 0 { //nolint:gosec // path under ~/.spawn/cache, ID from the caller
+			return identifier, string(b), true
+		}
+		return "", "", false
+	}
+	dir := filepath.Dir(consoleCachePath("x"))
+	if dir == "." {
+		return "", "", false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", "", false
+	}
+	var newest time.Time
+	for _, e := range entries {
+		id, isName := strings.CutSuffix(e.Name(), ".name")
+		if !isName {
+			continue
+		}
+		n, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec // entry of our own cache dir
+		if err != nil || !strings.EqualFold(strings.TrimSpace(string(n)), identifier) {
+			continue
+		}
+		logPath := filepath.Join(dir, id+".log")
+		info, err := os.Stat(logPath)
+		if err != nil || info.Size() == 0 || (ok && !info.ModTime().After(newest)) {
+			continue
+		}
+		b, err := os.ReadFile(logPath) //nolint:gosec // entry of our own cache dir
+		if err != nil {
+			continue
+		}
+		instanceID, raw, ok, newest = id, string(b), true, info.ModTime()
+	}
+	return instanceID, raw, ok
 }
 
 func consoleCachePath(instanceID string) string {

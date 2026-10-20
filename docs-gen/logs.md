@@ -12,7 +12,8 @@ is answerable after the fact without knowing that get-console-output exists.
 
 The serial console capture is not immediate — allow about five minutes after
 termination. Fetched dumps are cached under ~/.spawn/cache/console for 7 days and
-pruned on each run.
+pruned on each run. Once EC2 has stopped listing the instance, the cache is
+still found by name or instance ID.
 
 ```
 spawn logs <name-or-instance-id> [flags]
