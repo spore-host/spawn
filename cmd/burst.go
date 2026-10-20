@@ -81,7 +81,7 @@ func init() {
 	_ = burstCmd.Flags().MarkDeprecated("security-groups", "use --security-group-ids instead")
 	burstCmd.Flags().StringVar(&burstInstanceProfile, "instance-profile", "", "Attach this EXISTING IAM instance profile by name instead of the default spored-instance-profile, which spawn creates or reuses as spawn launch does. Its role must let spored read and write its own tags, terminate itself, and use the spawn-hybrid-registry table.")
 	burstCmd.Flags().StringVar(&burstTTL, "ttl", defaultBurstTTL, "Terminate each instance after this duration (e.g. 30m, 2h, 36h). Required to be positive: burst instances always have a TTL.")
-	burstCmd.Flags().StringVar(&burstIdleTimeout, "idle-timeout", "", "Also stop an instance after it has been idle this long (e.g. 1h); a stopped instance still bills its EBS volume until its TTL terminates it. Empty disables the idle stop.")
+	burstCmd.Flags().StringVar(&burstIdleTimeout, "idle-timeout", "", "Also terminate an instance after it has been idle this long (e.g. 1h). Empty disables the idle terminate.")
 
 	_ = burstCmd.MarkFlagRequired("job-array-id")
 }
@@ -322,16 +322,21 @@ func burstMemberConfigs(params *LaunchParams) ([]spawnaws.LaunchConfig, error) {
 			UserData:           userData,
 			// The user the bootstrap sets up, written as spawn:local-username
 			// so spawn connect logs in as it (as launcher.Provision does).
-			Username:      burstUsername,
-			Spot:          params.Spot,
-			TTL:           params.TTL,
-			IdleTimeout:   params.IdleTimeout,
-			OnComplete:    "terminate",
-			JobArrayID:    params.JobArrayID,
-			JobArrayName:  params.JobArrayName,
-			JobArraySize:  params.Count,
-			JobArrayIndex: i,
-			Tags:          map[string]string{tagprefix.Tag("burst"): "true"},
+			Username:    burstUsername,
+			Spot:        params.Spot,
+			TTL:         params.TTL,
+			IdleTimeout: params.IdleTimeout,
+			// An idle burst member terminates rather than stops (#1204): a
+			// member has nothing to come back to, and a stopped one bills its
+			// EBS volume until the TTL. Same mechanism as pool workers and
+			// services (#1200).
+			TerminateOnIdle: true,
+			OnComplete:      "terminate",
+			JobArrayID:      params.JobArrayID,
+			JobArrayName:    params.JobArrayName,
+			JobArraySize:    params.Count,
+			JobArrayIndex:   i,
+			Tags:            map[string]string{tagprefix.Tag("burst"): "true"},
 		})
 	}
 	return members, nil

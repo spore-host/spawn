@@ -59,6 +59,13 @@ var idleTerminateProofs = map[string]func() aws.LaunchConfig{
 	"spawn pool drain": func() aws.LaunchConfig {
 		return poolWorkerBaseConfig("us-east-1", "ami-x", "p", "")
 	},
+	"spawn burst": func() aws.LaunchConfig {
+		members, err := burstMemberConfigs(burstTestParams())
+		if err != nil || len(members) == 0 {
+			return aws.LaunchConfig{}
+		}
+		return members[0]
+	},
 }
 
 func idleTerminateClaims(c *cobra.Command) []string {

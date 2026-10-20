@@ -41,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Idle `spawn burst` members now terminate instead of stopping** (#1204).
+  A burst member has nothing to come back to, and a stopped one kept billing its
+  EBS volume until its TTL. `--idle-timeout` now ends the member, like pool
+  workers and `spawn service` (#1200). An instance needs a spored that includes
+  #1200; an older spored still stops it.
+
 - **`spawn extend` now exits non-zero when spored could not be reloaded.**
   The new TTL/cost limit is still written to the tags, but a reload that
   reached no path used to print a warning and exit 0, so a script raising a

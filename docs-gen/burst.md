@@ -42,7 +42,7 @@ spawn burst [flags]
 |------|-------|------|---------|-------------|
 | `--ami` |  | string |  | Linux AMI ID (default: the newest self-owned spawn-* AMI that fits --instance-type, else Amazon Linux 2023) |
 | `--count` |  | int | `1` | Number of instances to launch |
-| `--idle-timeout` |  | string |  | Also stop an instance after it has been idle this long (e.g. 1h); a stopped instance still bills its EBS volume until its TTL terminates it. Empty disables the idle stop. |
+| `--idle-timeout` |  | string |  | Also terminate an instance after it has been idle this long (e.g. 1h). Empty disables the idle terminate. |
 | `--instance-profile` |  | string |  | Attach this EXISTING IAM instance profile by name instead of the default spored-instance-profile, which spawn creates or reuses as spawn launch does. Its role must let spored read and write its own tags, terminate itself, and use the spawn-hybrid-registry table. |
 | `--instance-type` |  | string | `t3.micro` | EC2 instance type |
 | `--job-array-id` |  | string |  | Job array ID to join (required) |
