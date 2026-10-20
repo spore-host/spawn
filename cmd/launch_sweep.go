@@ -501,7 +501,20 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 
 	if maxConcurrent > 0 && maxConcurrent < len(launchConfigs) {
 		// Rolling queue mode
-		launchedInstances, failures, successCount, err = launchWithRollingQueue(ctx, awsClient, launchConfigs, sweepID, name, maxConcurrent, launchDelay)
+		indices := make([]int, len(launchConfigs))
+		for i := range indices {
+			indices[i] = i
+		}
+		fresh := &SweepState{
+			SweepID:       sweepID,
+			SweepName:     name,
+			CreatedAt:     time.Now(),
+			ParamFile:     paramFile,
+			TotalParams:   len(launchConfigs),
+			MaxConcurrent: maxConcurrent,
+			LaunchDelay:   launchDelay,
+		}
+		launchedInstances, failures, successCount, err = launchWithRollingQueue(ctx, awsClient, fresh, launchConfigs, indices, maxConcurrent, launchDelay)
 		if err != nil {
 			return err
 		}
@@ -597,8 +610,30 @@ func launchAllAtOnce(ctx context.Context, awsClient *aws.Client, launchConfigs [
 	return launchedInstances, failures, successCount
 }
 
-// launchWithRollingQueue launches instances with rolling queue orchestration
-func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchConfigs []*aws.LaunchConfig, sweepID, sweepName string, maxConcurrent int, launchDelay string) ([]*aws.LaunchResult, []string, int, error) {
+// sweepLauncher is the slice of *aws.Client the rolling queue uses; a seam so
+// tests can drive it without EC2.
+type sweepLauncher interface {
+	Launch(ctx context.Context, cfg aws.LaunchConfig) (*aws.LaunchResult, error)
+	ListInstances(ctx context.Context, region string, stateFilter string) ([]aws.InstanceInfo, error)
+}
+
+// rollingQueuePollInterval is how often the rolling queue checks for finished
+// instances. A var so tests need not wait on it.
+var rollingQueuePollInterval = 10 * time.Second
+
+// launchWithRollingQueue launches instances with rolling queue orchestration.
+//
+// launchConfigs[i] is parameter set paramIndices[i]: every instance is recorded
+// under its parameter index, not its position in launchConfigs. New records
+// are appended to state, which is saved as it goes. A fresh launch passes a new
+// state and the identity indices; `spawn resume` passes the loaded state and
+// only the pending indices, so the records of parameters that already ran, and
+// the sweep's TotalParams, survive the resume (#1248).
+func launchWithRollingQueue(ctx context.Context, awsClient sweepLauncher, state *SweepState, launchConfigs []*aws.LaunchConfig, paramIndices []int, maxConcurrent int, launchDelay string) ([]*aws.LaunchResult, []string, int, error) {
+	if len(paramIndices) != len(launchConfigs) {
+		return nil, nil, 0, fmt.Errorf("internal error: %d launch configs but %d parameter indices", len(launchConfigs), len(paramIndices))
+	}
+	sweepID := state.SweepID
 	fmt.Fprintf(os.Stderr, "\n🚀 Launching parameter sweep with rolling queue...\n")
 	fmt.Fprintf(os.Stderr, "   Max concurrent: %d\n", maxConcurrent)
 	fmt.Fprintf(os.Stderr, "   Launch delay: %s\n\n", launchDelay)
@@ -628,12 +663,12 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 	for i := 0; i < initialBatch; i++ {
 		result, err := awsClient.Launch(ctx, *launchConfigs[i])
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("Parameter set %d: %v", i, err))
+			failures = append(failures, fmt.Sprintf("Parameter set %d: %v", paramIndices[i], err))
 		} else {
 			launchedInstances[i] = result
 			activeInstances[i] = result.InstanceID
 			successCount++
-			fmt.Fprintf(os.Stderr, "✓ Launched %s (parameter set %d/%d)\n", result.Name, i+1, len(launchConfigs))
+			fmt.Fprintf(os.Stderr, "✓ Launched %s (parameter set %d/%d)\n", result.Name, paramIndices[i]+1, state.TotalParams)
 		}
 
 		// Apply launch delay between initial launches
@@ -643,26 +678,16 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 	}
 	nextToLaunch = initialBatch
 
-	// Save initial state
-	state := &SweepState{
-		SweepID:       sweepID,
-		SweepName:     sweepName,
-		CreatedAt:     time.Now(),
-		ParamFile:     paramFile,
-		TotalParams:   len(launchConfigs),
-		MaxConcurrent: maxConcurrent,
-		LaunchDelay:   launchDelay,
-		Completed:     0,
-		Running:       len(activeInstances),
-		Pending:       len(launchConfigs) - nextToLaunch,
-		Failed:        len(failures),
-		Instances:     make([]InstanceState, 0, len(launchConfigs)),
-	}
+	// Save initial state, on top of whatever the caller's state already holds.
+	baseRunning, baseFailed := state.Running, state.Failed
+	state.Running = baseRunning + len(activeInstances)
+	state.Pending = len(launchConfigs) - nextToLaunch
+	state.Failed = baseFailed + len(failures)
 
 	for i, instance := range launchedInstances {
 		if instance != nil {
 			state.Instances = append(state.Instances, InstanceState{
-				Index:      i,
+				Index:      paramIndices[i],
 				InstanceID: instance.InstanceID,
 				Region:     instance.Region,
 				State:      "running",
@@ -680,7 +705,7 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 		fmt.Fprintf(os.Stderr, "\nMonitoring instances and launching next in queue...\n")
 		fmt.Fprintf(os.Stderr, "Press Ctrl-C to stop (sweep can be resumed later)\n\n")
 
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(rollingQueuePollInterval)
 		defer ticker.Stop()
 
 		for nextToLaunch < len(launchConfigs) {
@@ -736,22 +761,22 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 					if nextToLaunch < len(launchConfigs) {
 						result, err := awsClient.Launch(ctx, *launchConfigs[nextToLaunch])
 						if err != nil {
-							failures = append(failures, fmt.Sprintf("Parameter set %d: %v", nextToLaunch, err))
-							fmt.Fprintf(os.Stderr, "✗ Failed to launch parameter set %d: %v\n", nextToLaunch+1, err)
+							failures = append(failures, fmt.Sprintf("Parameter set %d: %v", paramIndices[nextToLaunch], err))
+							fmt.Fprintf(os.Stderr, "✗ Failed to launch parameter set %d: %v\n", paramIndices[nextToLaunch]+1, err)
 						} else {
 							launchedInstances[nextToLaunch] = result
 							activeInstances[nextToLaunch] = result.InstanceID
 							successCount++
 							fmt.Fprintf(os.Stderr, "✓ Launched %s (parameter set %d/%d) [%d active, %d pending]\n",
-								result.Name, nextToLaunch+1, len(launchConfigs),
+								result.Name, paramIndices[nextToLaunch]+1, state.TotalParams,
 								len(activeInstances), len(launchConfigs)-nextToLaunch-1)
 
 							// Update state file
-							state.Running = len(activeInstances)
+							state.Running = baseRunning + len(activeInstances)
 							state.Pending = len(launchConfigs) - nextToLaunch - 1
-							state.Failed = len(failures)
+							state.Failed = baseFailed + len(failures)
 							state.Instances = append(state.Instances, InstanceState{
-								Index:      nextToLaunch,
+								Index:      paramIndices[nextToLaunch],
 								InstanceID: result.InstanceID,
 								Region:     result.Region,
 								State:      "running",
