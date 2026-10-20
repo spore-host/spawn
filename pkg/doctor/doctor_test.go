@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -225,5 +226,68 @@ func TestNitroCoveragePassReportsTheSpread(t *testing.T) {
 		if !strings.Contains(c.Detail, want) {
 			t.Errorf("detail %q does not mention %q", c.Detail, want)
 		}
+	}
+}
+
+// #1161: when credentials fail, every AWS-dependent check must be listed as
+// skipped. The expected set is discovered from a passing run — every check
+// after "AWS credentials" — not written out, so a new check cannot be forgotten.
+func TestSkippedListNamesEveryAWSCheck(t *testing.T) {
+	pass := Run(context.Background(), mockProber{acct: "123456789012"})
+	var want []string
+	after := false
+	for _, c := range pass.Checks {
+		if after {
+			want = append(want, c.Name)
+		}
+		if c.Name == "AWS credentials" {
+			after = true
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("found no checks after AWS credentials — the discovery is broken")
+	}
+	failed := Run(context.Background(), mockProber{credErr: errors.New("no creds")})
+	for _, name := range want {
+		if c := find(failed, name); c == nil || c.Status != Skip {
+			t.Errorf("check %q runs when credentials are valid but is not listed as skipped when they fail (got %+v)", name, c)
+		}
+	}
+}
+
+// #1161: the VPC hint names the real flag, and an account with no default VPC
+// but with subnets is a Warn — launches passing --subnet-id work there.
+func TestVPCHintNamesTheRealFlagAndNoDefaultVPCIsAWarn(t *testing.T) {
+	r := Run(context.Background(), mockProber{acct: "123456789012", vpcErr: fmt.Errorf("%w in us-east-1", ErrNoDefaultVPC)})
+	c := find(r, "VPC & subnet")
+	if c == nil || c.Status != Warn {
+		t.Fatalf("no default VPC with subnets present should Warn, got %+v", c)
+	}
+	if !r.OK() {
+		t.Error("a missing default VPC alone must not block: launches can pass --subnet-id")
+	}
+	for _, err := range []error{fmt.Errorf("%w in us-east-1", ErrNoDefaultVPC), errors.New("no default VPC and no subnet found in us-east-1")} {
+		c := find(Run(context.Background(), mockProber{acct: "1", vpcErr: err}), "VPC & subnet")
+		if !strings.Contains(c.Fix, "--subnet-id") || strings.Contains(c.Fix+" ", "--subnet ") || strings.Contains(c.Fix, "--subnet:") {
+			t.Errorf("VPC hint must name --subnet-id (the launch flag), got %q", c.Fix)
+		}
+	}
+	if c := find(Run(context.Background(), mockProber{acct: "1", vpcErr: errors.New("no default VPC and no subnet found in us-east-1")}), "VPC & subnet"); c.Status != Fail {
+		t.Errorf("a region with no subnet at all cannot launch anything; want Fail, got %v", c.Status)
+	}
+}
+
+// #1161: --dns goes through the spore.host DNS updater, so missing Route 53
+// access in the user's account must not be reported as breaking it.
+func TestRoute53HintDoesNotClaimDNSBreaks(t *testing.T) {
+	c := find(Run(context.Background(), mockProber{acct: "1", route53Err: errors.New("AccessDenied")}), "Route 53 (DNS)")
+	if c == nil || c.Status != Warn {
+		t.Fatalf("route53 should Warn, got %+v", c)
+	}
+	if strings.Contains(c.Fix, "won't work") {
+		t.Errorf("hint claims --dns breaks without Route 53 access; it does not: %q", c.Fix)
+	}
+	if !strings.Contains(c.Fix, "DNS updater") {
+		t.Errorf("hint should say --dns goes through the DNS updater: %q", c.Fix)
 	}
 }

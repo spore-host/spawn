@@ -170,11 +170,27 @@ func confirmTypedPhrase(reader *bufio.Reader, prompt, want string) bool {
 	return strings.TrimSpace(line) == want
 }
 
+// lookupRegion is the region instance lookups by name or ID search: the global
+// --region when it was given, else "" (every region). Before #1160 the lookups
+// always searched every region, so --region narrowed nothing for logs, connect
+// or any other command resolving an instance by name.
+func lookupRegion() string { return spawnRegion }
+
+// listInstancesForLookup is the ListInstances call behind instance lookups — a
+// seam so the region they search can be tested without AWS.
+var listInstancesForLookup = func(ctx context.Context, client *aws.Client, region, stateFilter string) ([]aws.InstanceInfo, error) {
+	return client.ListInstances(ctx, region, stateFilter)
+}
+
 // resolveInstance finds an instance by ID or name
 func resolveInstance(ctx context.Context, client *aws.Client, identifier string) (*aws.InstanceInfo, error) {
-	fmt.Fprintf(os.Stderr, "Looking up instance %s...\n", identifier)
+	if r := lookupRegion(); r != "" {
+		fmt.Fprintf(os.Stderr, "Looking up instance %s in %s...\n", identifier, r)
+	} else {
+		fmt.Fprintf(os.Stderr, "Looking up instance %s...\n", identifier)
+	}
 
-	instances, err := client.ListInstances(ctx, "", "")
+	instances, err := listInstancesForLookup(ctx, client, lookupRegion(), "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list instances: %w", err)
 	}
@@ -290,7 +306,7 @@ func truncate(s string, maxLen int) string {
 // that is already being returned, so a failure here must never turn a clear
 // not-found into an error about a second lookup.
 func recentlyGoneHint(ctx context.Context, client *aws.Client, identifier string) string {
-	all, err := client.ListInstances(ctx, "", "all")
+	all, err := listInstancesForLookup(ctx, client, lookupRegion(), "all")
 	if err != nil {
 		return ""
 	}

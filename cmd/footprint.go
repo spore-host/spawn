@@ -25,8 +25,9 @@ var footprintCmd = &cobra.Command{
 'spawn orphans' covers the DATA plane: volumes, security groups, placement
 groups, Elastic IPs — the things a launch creates and that a launch's end should
 reclaim. This covers the CONTROL plane as well: the Lambdas, their log groups and
-execution roles, EventBridge schedules, state tables, and the buckets spawn
-auto-creates. The TTL reaper is the backstop for instances; nothing is the
+execution roles, EventBridge rules on the default event bus, state tables, and
+the buckets spawn auto-creates. EventBridge Scheduler schedules (what 'spawn
+schedule' creates) are not scanned. The TTL reaper is the backstop for instances; nothing is the
 backstop for the reaper (#653), so the honest first step is making the footprint
 visible rather than deleting anything.
 
@@ -39,13 +40,15 @@ Resources are found two ways, and each row says which:
          of the control plane predates being tagged
 
 The name half has a known blind spot, stated rather than hidden: it cannot find a
-resource named differently. One live Lambda is called 'scheduler-handler', with no
-prefix at all. So the totals below are a floor, not a guarantee — three separate
-hand-built footprint lists during #653 were each incomplete.`,
+resource named differently. A few known spore.host names with no prefix (such as
+the 'scheduler-handler' Lambda) are matched by exact name, but any other
+differently-named resource is missed. So the totals below are a floor, not a
+guarantee — three separate hand-built footprint lists during #653 were each
+incomplete.`,
 	Example: `  # This region, including the control plane
   spawn footprint
 
-  # Every region spawn knows about
+  # Every region enabled in this account
   spawn footprint --all-regions
 
   # Machine-readable
@@ -55,7 +58,7 @@ hand-built footprint lists during #653 were each incomplete.`,
 
 func init() {
 	footprintCmd.Flags().StringVar(&footprintRegion, "region", "", "AWS region (default: configured region)")
-	footprintCmd.Flags().BoolVar(&footprintAllRegions, "all-regions", false, "Scan every region spawn supports")
+	footprintCmd.Flags().BoolVar(&footprintAllRegions, "all-regions", false, "Scan every region enabled in this account (DescribeRegions), not just the configured one")
 	rootCmd.AddCommand(footprintCmd)
 }
 
@@ -190,8 +193,8 @@ func renderFootprint(w io.Writer, rep footprintReport) {
 	renderFootprintNotes(w, rep)
 
 	fmt.Fprintf(w, "The name-matched rows are a FLOOR, not a complete list: a resource named\n")
-	fmt.Fprintf(w, "outside the known prefixes does not appear. One live Lambda is called\n")
-	fmt.Fprintf(w, "'scheduler-handler', with no prefix at all.\n")
+	fmt.Fprintf(w, "outside the known prefixes and exact names does not appear. EventBridge\n")
+	fmt.Fprintf(w, "rules are the default bus only; Scheduler schedules are not scanned.\n")
 }
 
 func renderFootprintNotes(w io.Writer, rep footprintReport) {

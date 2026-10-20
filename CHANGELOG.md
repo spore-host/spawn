@@ -102,6 +102,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   won't rewrite a `spore-portal-onboard` role that isn't tagged
   `Purpose=spore-portal-onboard` (#1138).
 
+- **The global `--region` now narrows instance lookups by name or ID.**
+  `spawn logs`, `connect` and the other commands that resolve an instance used
+  to search every region even when `--region` was given. With `--region` set,
+  they now search only that region (#1160).
+- **`spawn doctor` no longer fails an account just because it has no default
+  VPC.** If the region has subnets, the "VPC & subnet" check now warns and tells
+  you to pass `--subnet-id` on every launch, or to create a default VPC. Doctor
+  can't know whether every launch will pass `--subnet-id`, and launches that do
+  work without a default VPC. A region with no subnet at all still fails
+  (#1161).
+
 ### Fixed
 
 - `spawn status`, `spawn list`'s TTL column and `spawn start`'s notice put the
@@ -171,6 +182,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the machine that ran the install, so `status` shows them only there.
   `outputs:` entries may carry a `description:`, which the registry already
   uses, and `inspect` and `status` now print it.
+
+- `spawn logs` falls back to its console cache, by name or instance ID, after
+  EC2 stops listing the instance. Before, it failed with "no instance found"
+  before checking the cache, though keeping the log after AWS drops the instance
+  is why the cache exists. Cached dumps now record the instance name beside them
+  (`<id>.name`). When reading the console output is denied, the error now names
+  `ec2:GetConsoleOutput`, which the minimal IAM baseline leaves out (#1160).
+- `spawn doctor` hints: the VPC hint names `--subnet-id` (it said `--subnet`).
+  The Route 53 hint no longer says `--dns` breaks without Route 53 access,
+  because records are registered through the spore.host DNS updater. "Nitro
+  fleet" now appears among the skipped checks when credentials fail (#1161).
+- `spawn footprint` reads every page of EventBridge rules instead of only the
+  first 100. Its help and footer now say these are default-bus rules (Scheduler
+  schedules aren't scanned), and they no longer call `scheduler-handler` a blind
+  spot, since it is matched by exact name. `--all-regions` is described as the
+  regions enabled in the account (#1161).
 
 ## [0.136.0] - 2026-10-20
 

@@ -6,6 +6,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -138,6 +139,10 @@ type Prober interface {
 	NitroCoverage(ctx context.Context) (detail string, err error)
 }
 
+// ErrNoDefaultVPC is wrapped by a VPCAndSubnet probe when the region has no
+// default VPC but does have subnets, so launches passing --subnet-id still work.
+var ErrNoDefaultVPC = errors.New("no default VPC")
+
 // Run executes every check in dependency order and returns the report. Checks
 // that depend on a failed prerequisite are marked Skip rather than run (so a bad
 // credential doesn't produce a cascade of confusing permission failures).
@@ -175,11 +180,13 @@ func Run(ctx context.Context, p Prober) *Report {
 	acct, credErr := p.Credentials(ctx)
 	if credErr != nil {
 		add("AWS credentials", Fail, "", "run `aws login` (or configure a profile/keys): "+errText(credErr))
-		// Everything AWS-dependent is skipped.
+		// Everything AWS-dependent is skipped. TestSkippedListNamesEveryAWSCheck
+		// derives the expected set from a passing run, so a new check that is
+		// missing here fails the test (Nitro fleet was, #1161).
 		for _, name := range []string{
 			"account", "region", "EC2 describe permission", "EC2 launch permission",
 			"IAM instance-profile permission", "spored role", "VPC & subnet",
-			"Session Manager", "TTL reaper backstop", "Route 53 (DNS)",
+			"Session Manager", "TTL reaper backstop", "Route 53 (DNS)", "Nitro fleet",
 		} {
 			add(name, Skip, "", "requires valid credentials")
 		}
@@ -224,8 +231,14 @@ func Run(ctx context.Context, p Prober) *Report {
 		add("spored role", Pass, detail, "")
 	}
 
-	if detail, err := p.VPCAndSubnet(ctx); err != nil {
-		add("VPC & subnet", Fail, "", "no usable VPC/subnet in this region; create a default VPC or pass --subnet: "+errText(err))
+	// No default VPC is a Warn, not a Fail, when the region has subnets (#1161):
+	// launches that pass --subnet-id work, and doctor cannot know whether every
+	// launch will. With no subnet anywhere in the region nothing can launch, so
+	// that stays a Fail.
+	if detail, err := p.VPCAndSubnet(ctx); errors.Is(err, ErrNoDefaultVPC) {
+		add("VPC & subnet", Warn, "", errText(err)+"; pass --subnet-id on every launch, or create a default VPC (aws ec2 create-default-vpc)")
+	} else if err != nil {
+		add("VPC & subnet", Fail, "", "no usable VPC/subnet in this region; create a default VPC, or a subnet to pass with --subnet-id: "+errText(err))
 	} else {
 		add("VPC & subnet", Pass, detail, "")
 	}
@@ -249,7 +262,7 @@ func Run(ctx context.Context, p Prober) *Report {
 	}
 
 	if detail, err := p.Route53Available(ctx); err != nil {
-		add("Route 53 (DNS)", Warn, "", "Route 53 access unavailable; --dns subdomains won't work (optional): "+errText(err))
+		add("Route 53 (DNS)", Warn, "", "Route 53 is not readable with these credentials. --dns does not need it: spored registers records through the spore.host DNS updater, not this account's Route 53. Only deploying your own updater (custom DNS) uses it (optional): "+errText(err))
 	} else {
 		add("Route 53 (DNS)", Pass, detail, "")
 	}
