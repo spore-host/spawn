@@ -149,9 +149,36 @@ type HealthBlock struct {
 	Steps    []Step `yaml:"steps"`
 }
 
-// OutputSpec describes a plugin output value.
+// OutputSpec describes a plugin output value. An output's value is the
+// local.provision capture of the same name; `spawn plugin install` prints it
+// and `spawn plugin status` shows it afterwards (#1117). An output nothing
+// captures is listed as not recorded.
 type OutputSpec struct {
-	Source string `yaml:"source"` // local_capture, pushed
+	Source      string `yaml:"source" json:"source,omitempty"` // informational: local_capture, pushed
+	Description string `yaml:"description" json:"description,omitempty"`
+}
+
+// OutputValue is one declared output and the value recorded for it.
+type OutputValue struct {
+	Name        string
+	Description string
+	Value       string
+	Recorded    bool // false: nothing captured a value under this name
+}
+
+// DeclaredOutputValues pairs each declared output with its value in values
+// (a plugin's local provision captures), sorted by name. Captures the spec does
+// not declare as outputs are never returned: those are often credentials a
+// plugin captures only to push to the instance (tailscale's authkey, Globus's
+// setup_key), so they must not be printed.
+func DeclaredOutputValues(decls map[string]OutputSpec, values map[string]string) []OutputValue {
+	out := make([]OutputValue, 0, len(decls))
+	for name, d := range decls {
+		v, ok := values[name]
+		out = append(out, OutputValue{Name: name, Description: d.Description, Value: v, Recorded: ok})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // Declaration represents a plugin reference with user-supplied config,

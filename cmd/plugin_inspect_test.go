@@ -71,7 +71,7 @@ func TestRenderInspect_Sections(t *testing.T) {
 		"download https://example.com/app.tgz → /opt/app.tgz",
 		"run as login user (background): /opt/app/serve --port 8080",
 		"Health check (every 10s)",
-		"Outputs (surfaced after install)",
+		"Outputs (printed by 'spawn plugin install' and shown by 'spawn plugin status')",
 		"root=true network=true ports=[8080]",
 		"commands=[jq]",
 	}

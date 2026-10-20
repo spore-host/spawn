@@ -31,17 +31,20 @@ type LocalRecord struct {
 	// Resolved provenance of the installed spec (pinning / audit). CommitSHA is
 	// best-effort (may be empty); SpecSHA256 is always the hash of the exact
 	// plugin.yaml bytes that were installed.
-	ResolvedRef    string            `json:"resolved_ref,omitempty"` // requested tag/branch ("" = default branch)
-	CommitSHA      string            `json:"commit_sha,omitempty"`   // immutable commit the ref resolved to
-	SpecSHA256     string            `json:"spec_sha256,omitempty"`  // sha256 of the fetched plugin.yaml
-	InstanceID     string            `json:"instance_id"`
-	Instance       map[string]string `json:"instance"` // instance.* template values used at provision (id/name/ip)
-	Config         map[string]string `json:"config"`
-	Outputs        map[string]string `json:"outputs"`
-	Deprovision    []Step            `json:"deprovision"`               // spec's local deprovision steps, captured at install
-	Reconcile      []Step            `json:"reconcile,omitempty"`       // spec's local reconcile steps (re-point on IP change)
-	EnvPassthrough []string          `json:"env_passthrough,omitempty"` // controller env vars deprovision/reconcile may read
-	InstalledAt    time.Time         `json:"installed_at"`
+	ResolvedRef string            `json:"resolved_ref,omitempty"` // requested tag/branch ("" = default branch)
+	CommitSHA   string            `json:"commit_sha,omitempty"`   // immutable commit the ref resolved to
+	SpecSHA256  string            `json:"spec_sha256,omitempty"`  // sha256 of the fetched plugin.yaml
+	InstanceID  string            `json:"instance_id"`
+	Instance    map[string]string `json:"instance"` // instance.* template values used at provision (id/name/ip)
+	Config      map[string]string `json:"config"`
+	Outputs     map[string]string `json:"outputs"`
+	// DeclaredOutputs is the spec's outputs: block, so `spawn plugin status`
+	// can show which captures are outputs without re-resolving the spec (#1117).
+	DeclaredOutputs map[string]OutputSpec `json:"declared_outputs,omitempty"`
+	Deprovision     []Step                `json:"deprovision"`               // spec's local deprovision steps, captured at install
+	Reconcile       []Step                `json:"reconcile,omitempty"`       // spec's local reconcile steps (re-point on IP change)
+	EnvPassthrough  []string              `json:"env_passthrough,omitempty"` // controller env vars deprovision/reconcile may read
+	InstalledAt     time.Time             `json:"installed_at"`
 }
 
 // LocalStore persists LocalRecords on the controller under a root directory,

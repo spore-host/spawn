@@ -203,9 +203,17 @@ func renderOutputs(out io.Writer, spec *plugin.PluginSpec) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	fmt.Fprintf(out, "Outputs (surfaced after install):\n")
+	fmt.Fprintf(out, "Outputs (printed by 'spawn plugin install' and shown by 'spawn plugin status'):\n")
 	for _, n := range names {
-		fmt.Fprintf(out, "  %s (%s)\n", n, orNone(spec.Outputs[n].Source))
+		o := spec.Outputs[n]
+		line := "  " + n
+		if o.Source != "" {
+			line += " (" + o.Source + ")"
+		}
+		if o.Description != "" {
+			line += ": " + o.Description
+		}
+		fmt.Fprintln(out, line)
 	}
 	fmt.Fprintln(out)
 }
