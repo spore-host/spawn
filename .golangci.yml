@@ -1,0 +1,66 @@
+# golangci-lint configuration: a RATCHET, not a policy (#1028).
+#
+# golangci-lint's built-in defaults report ~500 findings on this repo (mostly
+# errcheck on fmt.Fprint* to a terminal). Rather than fix them all at once or
+# leave the linter unrun, this file enables exactly the linters that pass today,
+# CI runs it on every module (`make lint`), and the set only ever grows:
+#
+#   - docs/lint-ratchet.md records the enabled set (the floor) and, for every
+#     linter still off, its measured finding count and the plan for it.
+#   - lint_ratchet_test.go fails if this file's enabled set differs from that
+#     record, so a linter cannot be dropped without editing the record in the
+#     same reviewed PR, and enabling one means moving it into the floor.
+#
+# To widen: fix a disabled linter's findings, add it to `enable` below, move it
+# into the "Enabled" list in docs/lint-ratchet.md, and run `make lint`.
+#
+# No path exclusions and no blanket //nolint: narrowing is done by choosing
+# linters, and any per-linter setting below says why it exists.
+version: "2"
+
+linters:
+  # Start from nothing, so a golangci-lint upgrade that changes its defaults
+  # cannot silently add (or drop) checks. Bumping the version pinned in the
+  # Makefile and CI can still add checks inside an enabled linter.
+  default: none
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - copyloopvar
+    - durationcheck
+    - exptostd
+    - fatcontext
+    - gocheckcompilerdirectives
+    - gochecksumtype
+    - govet
+    - ineffassign
+    - loggercheck
+    - makezero
+    - mirror
+    - misspell
+    - nolintlint
+    - reassign
+    - recvcheck
+    - sloglint
+    - testifylint
+    - tparallel
+    - unconvert
+    - wastedassign
+  settings:
+    misspell:
+      # Each of these is a DELIBERATE misspelling, not a typo to fix:
+      #   runing    pkg/aws/helpers_test.go: an invalid --state value the test
+      #             asserts is rejected.
+      #   platfrom  pkg/plugin/conditions_test.go: an unknown condition type the
+      #             test asserts is refused.
+      #   ther      pkg/security/path_test.go: misspell reads `\\other\share` (a
+      #             Windows UNC path in a raw string) as containing "ther".
+      ignore-rules:
+        - runing
+        - platfrom
+        - ther
+
+formatters:
+  enable:
+    - gofmt

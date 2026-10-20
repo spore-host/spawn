@@ -37,7 +37,7 @@ var amiParameters = map[string]string{
 // GetAL2023AMI returns the latest Amazon Linux 2023 AMI for the specified architecture and GPU support
 func (c *Client) GetAL2023AMI(ctx context.Context, region string, arch string, gpu bool) (string, error) {
 	// Determine AMI type
-	amiType := ""
+	var amiType string
 
 	if gpu {
 		if arch == "arm64" {

@@ -36,7 +36,6 @@ func (f *fakeVolumeAPI) DescribeVolumes(_ context.Context, in *ec2.DescribeVolum
 	}
 	var vols []ec2types.Volume
 	for _, id := range in.VolumeIds {
-		id := id
 		vols = append(vols, ec2types.Volume{VolumeId: &id, State: ec2types.VolumeState(f.states[id])})
 	}
 	return &ec2.DescribeVolumesOutput{Volumes: vols}, nil
@@ -283,7 +282,6 @@ func (f *fakeInstanceAPI) DescribeInstances(_ context.Context, in *ec2.DescribeI
 		if !ok {
 			continue // aged out: EC2 just omits it, no error (spawn#516)
 		}
-		id := id
 		reservations = append(reservations, ec2types.Reservation{
 			Instances: []ec2types.Instance{{
 				InstanceId: &id,

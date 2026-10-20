@@ -490,7 +490,6 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 		roleARNs = append(roleARNs, legacy)
 	}
 	for _, roleARN := range dedup(roleARNs) {
-		roleARN := roleARN
 		log.Printf("will assume cross-account EC2 role: %s", roleARN)
 		creds := stscreds.NewAssumeRoleProvider(stsClient, roleARN, func(o *stscreds.AssumeRoleOptions) {
 			o.RoleSessionName = "spawn-ttl-reaper"
@@ -1794,7 +1793,7 @@ func (r *reaper) registryStatusFunc(ctx context.Context, sum *Summary) func(stri
 			// actually holds.
 			return ""
 		}
-		return string(acct.AccountStatus())
+		return acct.AccountStatus()
 	}
 }
 

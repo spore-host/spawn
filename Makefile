@@ -229,6 +229,8 @@ check:
 	@$(MAKE) --no-print-directory check-goos
 	@echo "3. Running staticcheck..."
 	@$(MAKE) --no-print-directory check-staticcheck
+	@echo "3b. Running golangci-lint (every module)..."
+	@$(MAKE) --no-print-directory check-lint
 	@echo "4. Running short tests (hermetic: no credentials, no network)..."
 	@$(MAKE) --no-print-directory test-hermetic
 	@echo "5. Nested modules (build + vet + test)..."
@@ -274,6 +276,35 @@ check-staticcheck:
 		staticcheck ./...; \
 	else \
 		echo "staticcheck not installed, skipping (CI runs the version pinned in .github/workflows/ci.yml)"; \
+	fi
+
+# golangci-lint over every module, root and nested, via the SAME script CI runs
+# (#1028). .golangci.yml is a ratchet — it enables only the linters that pass
+# today, and lint_ratchet_test.go keeps it from narrowing; see
+# docs/lint-ratchet.md for what is still off and why.
+#
+# Keep GOLANGCI_LINT_VERSION in step with the pin (version AND sha256) in the
+# Lint step of .github/workflows/ci.yml. A different local version can report
+# different findings, so it warns rather than failing.
+#
+# `make lint` fails when golangci-lint is missing — you asked for it.
+# `make check` runs `check-lint`, which skips a missing binary the same way
+# check-staticcheck does; CI installs the pinned one and runs `make lint`, so
+# that skip cannot hide a finding from a PR.
+GOLANGCI_LINT_VERSION := 2.15.0
+.PHONY: lint check-lint
+lint:
+	@command -v golangci-lint >/dev/null 2>&1 || { \
+		echo "golangci-lint not installed (CI pins v$(GOLANGCI_LINT_VERSION)): https://golangci-lint.run/" >&2; \
+		exit 1; }
+	@golangci-lint version 2>/dev/null | grep -q "version $(GOLANGCI_LINT_VERSION) " || \
+		echo "warning: CI pins golangci-lint $(GOLANGCI_LINT_VERSION); local $$(golangci-lint version 2>/dev/null | awk '{print $$4}') may report different findings"
+	@scripts/lint.sh
+check-lint:
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		$(MAKE) --no-print-directory lint; \
+	else \
+		echo "golangci-lint not installed, skipping (CI runs v$(GOLANGCI_LINT_VERSION), pinned in .github/workflows/ci.yml)"; \
 	fi
 
 # Every nested module, via the SAME script CI runs (#136). Deliberately not a

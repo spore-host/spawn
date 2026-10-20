@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI now runs golangci-lint, with a config that can only widen (#1028).**
+  golangci-lint ran nowhere, and its defaults report ~500 findings on this repo
+  (mostly `errcheck` on `fmt.Fprint*`). A new `.golangci.yml` enables the 23
+  linters and the formatter that pass today; a new Lint job runs `make lint`
+  (golangci-lint v2.15.0, pinned by version and sha256) over the root and every
+  nested module, and `make check` runs it when golangci-lint is installed.
+  `docs/lint-ratchet.md` records every linter still off with its finding count,
+  and `lint_ratchet_test.go` fails if the config enables fewer linters than that
+  record, adds path exclusions, or stops being run by CI. Enabling the floor
+  meant small, behaviour-neutral cleanups: redundant loop-variable copies,
+  conversions and initial assignments, and `reflect.Ptr` → `reflect.Pointer`.
+
 ## [0.136.0] - 2026-10-20
 
 ### Added

@@ -422,7 +422,7 @@ func sortResultsForTest(results []SweepResult, metric string, descending bool) {
 			val1 := getMetricValue(results[j], metric)
 			val2 := getMetricValue(results[j+1], metric)
 
-			shouldSwap := false
+			var shouldSwap bool
 			if descending {
 				shouldSwap = val1 < val2
 			} else {

@@ -1266,7 +1266,6 @@ func (p *ec2TagPutter) putTags(ctx context.Context, instanceID string, tags map[
 	client := ec2.NewFromConfig(cfg)
 	var ec2Tags []ec2types.Tag
 	for k, v := range tags {
-		k, v := k, v
 		ec2Tags = append(ec2Tags, ec2types.Tag{Key: aws.String(k), Value: aws.String(v)})
 	}
 	_, err = client.CreateTags(ctx, &ec2.CreateTagsInput{
@@ -1287,7 +1286,6 @@ func (p *ec2TagPutter) deleteTags(ctx context.Context, instanceID string, keys [
 	client := ec2.NewFromConfig(cfg)
 	ec2Tags := make([]ec2types.Tag, 0, len(keys))
 	for _, k := range keys {
-		k := k
 		ec2Tags = append(ec2Tags, ec2types.Tag{Key: aws.String(k)})
 	}
 	_, err = client.DeleteTags(ctx, &ec2.DeleteTagsInput{

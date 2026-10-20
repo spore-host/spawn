@@ -29,7 +29,6 @@ func seedInstance(t *testing.T, ec2Client *ec2.Client, tags map[string]string) s
 
 	ec2Tags := []ec2types.Tag{{Key: aws.String("spawn:managed"), Value: aws.String("true")}}
 	for k, v := range tags {
-		k, v := k, v
 		ec2Tags = append(ec2Tags, ec2types.Tag{Key: aws.String(k), Value: aws.String(v)})
 	}
 	if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{

@@ -84,7 +84,7 @@ func (c *Client) checkBaseAMI(ctx context.Context, region string, baseAMIID stri
 
 	// Get current recommended AMI for this architecture/GPU combination
 	// We need to pass the architecture to get the right AMI
-	instanceType := ""
+	var instanceType string
 	if arch == "arm64" {
 		instanceType = "m7g.large" // Graviton instance for arm64
 	} else if gpu {

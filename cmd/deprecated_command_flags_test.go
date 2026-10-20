@@ -112,12 +112,12 @@ func lookupFlag(c *cobra.Command, name string) *pflag.Flag {
 // *int); slice values are a struct holding a pointer to the slice.
 func boundAddr(v pflag.Value) uintptr {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return 0
 	}
 	if e := rv.Elem(); e.Kind() == reflect.Struct {
 		for i := 0; i < e.NumField(); i++ {
-			if e.Field(i).Kind() == reflect.Ptr {
+			if e.Field(i).Kind() == reflect.Pointer {
 				return e.Field(i).Pointer()
 			}
 		}

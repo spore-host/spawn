@@ -66,7 +66,7 @@ func LoadComplianceConfig(ctx context.Context, flagMode string, flagStrict bool)
 	fileConfig, err := loadFromFile()
 	if err == nil && fileConfig != nil {
 		if fileConfig.Compliance.Mode != "" {
-			cfg.Mode = ComplianceMode(fileConfig.Compliance.Mode)
+			cfg.Mode = fileConfig.Compliance.Mode
 		}
 		cfg.EnforceEncryptedEBS = fileConfig.Compliance.EnforceEncryptedEBS
 		cfg.EnforceIMDSv2 = fileConfig.Compliance.EnforceIMDSv2

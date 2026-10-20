@@ -297,6 +297,50 @@ jobs:
       - name: Build-tag compile gate
         run: make check-build-tags
 
+  # Lint gate (#1028). golangci-lint ran nowhere, so ~500 findings accumulated
+  # unseen and anyone running it locally got failures unrelated to their change.
+  # .golangci.yml enables only the linters that pass today and is a ratchet: it
+  # can widen, not narrow (lint_ratchet_test.go, docs/lint-ratchet.md). Runs the
+  # same `make lint` contributors do, over every module (scripts/lint.sh).
+  #
+  # Its own job so it runs in parallel with Test rather than lengthening it.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.9'
+
+      # Verified the same way as staticcheck and gitleaks (#885): pinned version
+      # AND pinned hash, the hash held here rather than read from the release's
+      # checksums file, because a file fetched alongside the download can be
+      # replaced alongside it. Cross-checked against
+      # golangci-lint-2.15.0-checksums.txt and a local sha256 of the downloaded
+      # tarball when pinned. Keep VER in step with GOLANGCI_LINT_VERSION in the
+      # Makefile. A bump can add checks inside an enabled linter; fix the
+      # findings in the same PR.
+      - name: Install golangci-lint
+        run: |
+          VER=2.15.0
+          SHA256=9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea
+          T="golangci-lint-${VER}-linux-amd64.tar.gz"
+          # No sudo: install into the job's own temp dir and put it on PATH, so
+          # this works on a self-hosted runner as well as a GitHub-hosted one.
+          D="$RUNNER_TEMP/golangci-lint-$VER"
+          mkdir -p "$D"
+          curl -sSLf -o "$D/$T" "https://github.com/golangci/golangci-lint/releases/download/v${VER}/$T"
+          echo "$SHA256  $D/$T" | sha256sum -c -
+          tar -xzf "$D/$T" -C "$D" --strip-components=1 "golangci-lint-${VER}-linux-amd64/golangci-lint"
+          echo "$D" >> "$GITHUB_PATH"
+          "$D/golangci-lint" version
+
+      - name: Lint gate
+        run: make lint
+
   # Unit tests on Windows (#971). spawn ships a Windows spored (CPU, network,
   # disk and kernel-clock readings in pkg/agent/sys_windows.go), and until this
   # job its Windows-only tests were compiled at best and never run, so bugs that
