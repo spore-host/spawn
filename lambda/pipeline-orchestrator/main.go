@@ -1007,6 +1007,11 @@ func launchStageInstance(ctx context.Context, ec2Client runInstancesAPI, state *
 	if err != nil {
 		return nil, fmt.Errorf("generate user data: %w", err)
 	}
+	// EC2 refuses user data over 16 KiB with a 400; say so plainly instead
+	// (spawn#1063). The stage command is embedded in it.
+	if err := spawnaws.CheckUserDataSize(userData); err != nil {
+		return nil, fmt.Errorf("stage %s: %w", stageDef.StageID, err)
+	}
 
 	input := buildStageRunInstancesInput(state, stageDef, stageState, index, amiID, userData, time.Now())
 

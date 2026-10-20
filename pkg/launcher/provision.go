@@ -72,8 +72,10 @@ type Options struct {
 //  2. IAM: if config.IamInstanceProfile is empty, set up the shared spored
 //     instance profile (also attaches AmazonSSMManagedInstanceCore, so an
 //     SSM-only / keyless instance is still reachable).
-//  3. User-data: if config.UserData is empty, build the spored Linux bootstrap.
-//     A caller that pre-set UserData (e.g. a fully custom script) is left alone.
+//  3. User-data: if config.UserData is empty, build the spored Linux bootstrap
+//     ([BuildUserData]). A caller that pre-set UserData (e.g. a fully custom
+//     script) is left alone. Done before 1 and 2, and the result checked against
+//     EC2's user-data size limit, so an oversized one fails before any AWS call.
 //  4. Launch.
 //
 // Windows is out of scope here (no spored-on-Windows headless path yet, #77);
@@ -92,6 +94,25 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 	}
 	if config.TargetOS == "windows" {
 		return nil, fmt.Errorf("provision: Windows is not supported by the headless launcher (build Windows user-data via the CLI)")
+	}
+
+	// 3, done first. User data is pure (it depends on opts and the config, never
+	// on the AMI or the instance profile), so it is built and its size checked
+	// before the AMI lookup and the IAM setup: a spec over EC2's user-data limit
+	// fails here with nothing created, instead of at RunInstances (#1063).
+	if config.UserData == "" {
+		userData, err := BuildUserData(config, opts)
+		if err != nil {
+			return nil, err
+		}
+		config.UserData = userData
+		// Tag the primary user so spored runs the pre-stop hook as them, not root (#63).
+		if config.Username == "" {
+			config.Username = effectiveUsername(opts)
+		}
+	}
+	if err := config.ValidateUserDataSize(); err != nil {
+		return nil, fmt.Errorf("provision: %w", err)
 	}
 
 	// 1. AMI auto-detection (lagotto#19 issue #1). GetRecommendedAMI derives the
@@ -114,41 +135,6 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 			return nil, fmt.Errorf("provision: set up spored IAM role: %w", err)
 		}
 		config.IamInstanceProfile = profile
-	}
-
-	// 3. spored bootstrap user-data (lagotto#19 issues #2/#3 root cause). This is
-	// the script that installs spored and makes the spawn:command / on-complete /
-	// pre-stop / idle tags actually do something.
-	if config.UserData == "" {
-		username := opts.Username
-		if username == "" {
-			username = DefaultUsername
-		}
-		bootstrap, err := BuildLinuxBootstrap(BootstrapConfig{
-			Username:        username,
-			PublicKey:       opts.PublicKey,
-			Plugins:         opts.Plugins,
-			StorageScript:   opts.StorageScript,
-			ContainerScript: opts.ContainerScript,
-			CustomUserData:  opts.CustomUserData,
-			TaskFlushScript: opts.TaskFlushScript,
-			// Embed the workload command in user-data, not the 256-char-capped
-			// spawn:command tag (#214/#246). The headless path is never a sweep.
-			Command: config.JobArrayCommand,
-			// The --command wrapper must write the file spored watches (#1131).
-			CompletionFile: config.CompletionFile,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("provision: build bootstrap: %w", err)
-		}
-		// RunInstances requires base64 user-data (cloud-init also gunzips it).
-		// Encode here — assigning the raw script makes RunInstances fail with
-		// "Invalid BASE64 encoding of user data" (#127).
-		config.UserData = EncodeLinuxUserData(bootstrap)
-		// Tag the primary user so spored runs the pre-stop hook as them, not root (#63).
-		if config.Username == "" {
-			config.Username = username
-		}
 	}
 
 	// 3.5. Ephemeral FSx — validate the request BEFORE launching (#213). The FSx
@@ -317,4 +303,44 @@ func createAndAttachEphemeralFSx(ctx context.Context, client *aws.Client, config
 	config.FSxExportPath = exportPath
 	config.FSxMountPoint = mountPoint
 	return nil
+}
+
+func effectiveUsername(opts Options) string {
+	if opts.Username != "" {
+		return opts.Username
+	}
+	return DefaultUsername
+}
+
+// BuildUserData returns the encoded user data [Provision] sends for config and
+// opts when config.UserData is empty: the spored Linux bootstrap, gzipped and
+// base64-encoded by [EncodeLinuxUserData]. These are the exact bytes
+// RunInstances receives, so a caller can measure them (aws.CheckUserDataSize)
+// before launching — `spawn task run --dry-run` does (#1063). It makes no AWS
+// call.
+func BuildUserData(config aws.LaunchConfig, opts Options) (string, error) {
+	// spored bootstrap user-data (lagotto#19 issues #2/#3 root cause). This is
+	// the script that installs spored and makes the spawn:command / on-complete /
+	// pre-stop / idle tags actually do something.
+	bootstrap, err := BuildLinuxBootstrap(BootstrapConfig{
+		Username:        effectiveUsername(opts),
+		PublicKey:       opts.PublicKey,
+		Plugins:         opts.Plugins,
+		StorageScript:   opts.StorageScript,
+		ContainerScript: opts.ContainerScript,
+		CustomUserData:  opts.CustomUserData,
+		TaskFlushScript: opts.TaskFlushScript,
+		// Embed the workload command in user-data, not the 256-char-capped
+		// spawn:command tag (#214/#246). The headless path is never a sweep.
+		Command: config.JobArrayCommand,
+		// The --command wrapper must write the file spored watches (#1131).
+		CompletionFile: config.CompletionFile,
+	})
+	if err != nil {
+		return "", fmt.Errorf("provision: build bootstrap: %w", err)
+	}
+	// RunInstances requires base64 user-data (cloud-init also gunzips it).
+	// Encode here — assigning the raw script makes RunInstances fail with
+	// "Invalid BASE64 encoding of user data" (#127).
+	return EncodeLinuxUserData(bootstrap), nil
 }

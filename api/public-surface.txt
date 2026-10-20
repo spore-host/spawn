@@ -14,6 +14,8 @@ const AMI_AL2023_X86
 const CreatedTagKey
 const HeartbeatTag
 const IAMBaselineURL
+const MaxEncodedUserDataBytes
+const MaxUserDataBytes
 const PriceSourceTag
 const ReaperCoverageRoleName
 const SourceDir
@@ -315,6 +317,8 @@ field SpotPrice.InstanceType string
 field SpotPrice.PricePerHour float64
 field SpotPrice.ProductDescription string
 field SpotPrice.Timestamp time.Time
+field UserDataTooLargeError.DecodedBytes int
+field UserDataTooLargeError.EncodedBytes int
 func (*AccessDeniedError) Error() string
 func (*AccessDeniedError) Unwrap() error
 func (*Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*MountSnapshotResult, error)
@@ -422,14 +426,17 @@ func (*Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceID 
 func (*Client) WaitForStopped(ctx context.Context, region, instanceID string, timeout time.Duration) error
 func (*LaunchError) Error() string
 func (*LaunchError) Unwrap() error
+func (*UserDataTooLargeError) Error() string
 func (DisplayPrice) SourceLabel() string
 func (LaunchConfig) HibernationRequested() bool
 func (LaunchConfig) ValidateDurations() error
+func (LaunchConfig) ValidateUserDataSize() error
 func (ManagedResource) IsRunningInstance() bool
 func (ReaperCoverage) Summary() string
 func AccountBase36(accountID string) string
 func AttachDeviceName(i int) string
 func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error
+func CheckUserDataSize(encoded string) error
 func DNSInvokePolicyName(functionARN string) string
 func DecryptWindowsPassword(passwordData, privateKeyPath string) (string, error)
 func DeletionOrder(resources []ManagedResource) []ManagedResource
@@ -456,6 +463,7 @@ func ReaperCoverageAdvice(c ReaperCoverage, onComplete, fsxLifecycle string) str
 func ResolveDisplayPrice(ctx context.Context, cfg aws.Config, instanceType, region string) (DisplayPrice, error)
 func RetryPlacementGroupDelete(ctx context.Context, name string, del func() error) error
 func SetPGDeleteWaitForTest(budget, interval time.Duration) func()
+func UserDataSize(encoded string) (decoded, encodedLen int)
 func ValidatePolicyNames(policies []string, allowFullAccess bool) error
 type AMIHealthCheck struct
 type AMIInfo struct
@@ -493,6 +501,7 @@ type SnapshotDetail struct
 type SnapshotSourceKind int
 type SporedLiveness struct
 type SpotPrice struct
+type UserDataTooLargeError struct
 var CallerVersion
 var ErrS3NoSuchKey
 var ErrSSMUnreachable
@@ -534,6 +543,7 @@ field Options.StorageScript string
 field Options.TaskFlushScript string
 field Options.Username string
 func BuildLinuxBootstrap(cfg BootstrapConfig) (string, error)
+func BuildUserData(config aws.LaunchConfig, opts Options) (string, error)
 func EncodeLinuxUserData(script string) string
 func ImageStateCleanupScript(instanceID, completionFile string) string
 func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig, opts Options) (*aws.LaunchResult, error)
