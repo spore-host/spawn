@@ -48,6 +48,7 @@ func init() {
 	amiCreateCmd.Flags().StringArrayVar(&createAMITags, "tag", []string{}, "Tags in key=value format")
 	amiCreateCmd.Flags().BoolVar(&createAMIReboot, "reboot", false, "Reboot instance before creating AMI (default: no-reboot)")
 	amiCreateCmd.Flags().BoolVar(&createAMIWait, "wait", false, "Wait for AMI to become available")
+	amiCreateCmd.Flags().BoolVar(&createAMIForce, "force", false, createAMIForceHelp)
 
 	// Deprecate old top-level AMI commands
 	listAMIsCmd.Deprecated = "use 'spawn ami list' instead"

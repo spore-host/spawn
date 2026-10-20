@@ -24,6 +24,7 @@ spawn ami create <instance-id-or-name> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--description` |  | string |  | Description for the AMI |
+| `--force` |  | bool |  | Create the image even if spawn could not remove its --command run-state files (completion file, exit code, the embedded command) from the instance first; they will be baked into the AMI |
 | `--name` |  | string |  | Name for the AMI (required) |
 | `--reboot` |  | bool |  | Reboot instance before creating AMI (default: no-reboot) |
 | `--tag` |  | stringArray |  | Tags in key=value format |

@@ -832,6 +832,22 @@ EOFCMD
             exit 0
         fi
 
+        # Once per instance (#1057). A command that prepares an image usually
+        # ends with 'cloud-init clean', so the reboot 'spawn ami create --reboot'
+        # (CreateImage) does is treated as a first boot and this user data runs
+        # again — re-running the workload on the source instance, overwriting
+        # what it uploaded, while the snapshot is being taken. The marker is
+        # keyed on the instance ID, so it survives that reboot but not into a
+        # NEW instance launched from the image, which runs its own --command.
+        # To re-run deliberately, delete the marker. Skipping writes no
+        # completion file: nothing ran, so nothing completed.
+        if [ -e "/var/lib/spawn/command-ran-$INSTANCE_ID" ]; then
+            echo "⏭️  --command NOT started: it already ran on this instance ($INSTANCE_ID); the bootstrap ran again (cloud-init clean + reboot?). Delete /var/lib/spawn/command-ran-$INSTANCE_ID to re-run it (#1057)" | tee -a /var/log/spawn-command.log
+            exit 0
+        fi
+        mkdir -p /var/lib/spawn
+        date -u +%Y-%m-%dT%H:%M:%SZ > "/var/lib/spawn/command-ran-$INSTANCE_ID"
+
         # Wait for prerequisites before running the workload (#668, #664).
         #
         # This MUST be inside the backgrounded subshell. Waiting out here would
