@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
 
 	"github.com/spore-host/spawn/pkg/reaperconfig"
+	"github.com/spore-host/spawn/pkg/reaperdeploy"
 )
 
 // parseReaperDeploy parses a real `spawn reaper deploy` command line through
@@ -114,7 +118,9 @@ func TestReaperDeployNotifyURLFromStdin(t *testing.T) {
 func TestReaperDeployLogRetentionReachesTheDeploy(t *testing.T) {
 	saved := reaperLogRetention
 	t.Cleanup(func() { reaperLogRetention = saved })
-	for args, want := range map[string]int32{"": 30, "90": 90} {
+	// Omitted is 0, which the deploy reads as "keep the live retention"
+	// (#1214); the 30-day default applies only to a group with none.
+	for args, want := range map[string]int32{"": 0, "90": 90} {
 		var fs *pflag.FlagSet
 		if args == "" {
 			fs = parseReaperDeploy(t)
@@ -125,8 +131,41 @@ func TestReaperDeployLogRetentionReachesTheDeploy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if args == "" && opts.Schedule != "" {
+			t.Errorf("no --schedule: Schedule = %q; a non-empty default resets a live custom schedule (#1214)", opts.Schedule)
+		}
 		if opts.LogRetentionDays != want {
 			t.Errorf("--log-retention-days %q: LogRetentionDays = %d, want %d", args, opts.LogRetentionDays, want)
 		}
+	}
+}
+
+// #1215: idleness is measured inside the log window, so an --if-idle-for above
+// it could never fire. It is refused before teardown reaches AWS — counted
+// through the deployer seam, which is where the first AWS call happens.
+func TestTeardownRefusesIfIdleForBeyondTheWindowBeforeAnyAWSCall(t *testing.T) {
+	savedIdle, savedNew := reaperIfIdleFor, reaperTeardownDeployer
+	t.Cleanup(func() { reaperIfIdleFor, reaperTeardownDeployer = savedIdle, savedNew })
+	calls := 0
+	reaperTeardownDeployer = func(context.Context) (*reaperdeploy.Deployer, string, string, error) {
+		calls++
+		return nil, "", "", errors.New("stub: no AWS in tests")
+	}
+
+	window := reaperdeploy.IdleWindow()
+	reaperIfIdleFor = window + time.Hour
+	err := runReaperTeardown(reaperTeardownCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "can never trigger") {
+		t.Errorf("--if-idle-for %s: want a 'can never trigger' error, got %v", reaperIfIdleFor, err)
+	}
+	if calls != 0 {
+		t.Errorf("--if-idle-for beyond the window reached AWS (%d deployer builds) before being refused", calls)
+	}
+
+	// At the window it is allowed through, so the count above is not vacuous.
+	reaperIfIdleFor = window
+	_ = runReaperTeardown(reaperTeardownCmd, nil)
+	if calls != 1 {
+		t.Errorf("--if-idle-for %s (the window) should proceed to AWS; deployer builds = %d", window, calls)
 	}
 }

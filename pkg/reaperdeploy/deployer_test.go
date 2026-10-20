@@ -153,10 +153,17 @@ func (f *fakeLambda) DeleteFunction(context.Context, *lambda.DeleteFunctionInput
 	return &lambda.DeleteFunctionOutput{}, nil
 }
 
-type fakeEvents struct{ calls []string }
+type fakeEvents struct {
+	calls []string
+	// schedule is the live rule's ScheduleExpression ("" = no rule);
+	// putSchedule is what PutRule last wrote.
+	schedule    string
+	putSchedule string
+}
 
-func (f *fakeEvents) PutRule(context.Context, *eventbridge.PutRuleInput, ...func(*eventbridge.Options)) (*eventbridge.PutRuleOutput, error) {
+func (f *fakeEvents) PutRule(_ context.Context, in *eventbridge.PutRuleInput, _ ...func(*eventbridge.Options)) (*eventbridge.PutRuleOutput, error) {
 	f.calls = append(f.calls, "PutRule")
+	f.putSchedule = awssdk.ToString(in.ScheduleExpression)
 	return &eventbridge.PutRuleOutput{}, nil
 }
 func (f *fakeEvents) PutTargets(context.Context, *eventbridge.PutTargetsInput, ...func(*eventbridge.Options)) (*eventbridge.PutTargetsOutput, error) {
@@ -165,7 +172,10 @@ func (f *fakeEvents) PutTargets(context.Context, *eventbridge.PutTargetsInput, .
 }
 func (f *fakeEvents) DescribeRule(context.Context, *eventbridge.DescribeRuleInput, ...func(*eventbridge.Options)) (*eventbridge.DescribeRuleOutput, error) {
 	f.calls = append(f.calls, "DescribeRule")
-	return &eventbridge.DescribeRuleOutput{}, nil
+	if f.schedule == "" {
+		return &eventbridge.DescribeRuleOutput{}, nil
+	}
+	return &eventbridge.DescribeRuleOutput{ScheduleExpression: awssdk.String(f.schedule)}, nil
 }
 func (f *fakeEvents) RemoveTargets(context.Context, *eventbridge.RemoveTargetsInput, ...func(*eventbridge.Options)) (*eventbridge.RemoveTargetsOutput, error) {
 	f.calls = append(f.calls, "RemoveTargets")

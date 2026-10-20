@@ -86,6 +86,19 @@ func (f *fakeLogs) PutRetentionPolicy(_ context.Context, in *cwlogs.PutRetention
 	return &cwlogs.PutRetentionPolicyOutput{}, nil
 }
 
+func (f *fakeLogs) DescribeLogGroups(context.Context, *cwlogs.DescribeLogGroupsInput, ...func(*cwlogs.Options)) (*cwlogs.DescribeLogGroupsOutput, error) {
+	f.calls = append(f.calls, "DescribeLogGroups")
+	out := &cwlogs.DescribeLogGroupsOutput{}
+	if f.groupExists {
+		g := cwtypes.LogGroup{LogGroupName: awssdk.String(LogGroupName())}
+		if f.retention > 0 {
+			g.RetentionInDays = awssdk.Int32(f.retention)
+		}
+		out.LogGroups = []cwtypes.LogGroup{g}
+	}
+	return out, nil
+}
+
 func (f *fakeLogs) DeleteLogGroup(context.Context, *cwlogs.DeleteLogGroupInput, ...func(*cwlogs.Options)) (*cwlogs.DeleteLogGroupOutput, error) {
 	f.calls = append(f.calls, "DeleteLogGroup")
 	if f.deleteErr != nil {
