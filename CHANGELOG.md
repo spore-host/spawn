@@ -136,6 +136,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ec2:CreateTags` on `elastic-ip` with `ec2:CreateAction=AllocateAddress`.
   `--efa-interfaces 1` restores the old single interface.
 
+- **CI now shellchecks every script spawn generates (#689).** The spored
+  bootstrap, MPI/storage/container/queue user-data, the task wrapper, pooled
+  job script and flush hook, the app templates, the pool worker loop, the
+  pipeline stage runner, `upgrade-spored`, the verified spored installer and
+  the Slurm conversions are each rendered and run through
+  `shellcheck -S warning`, including any script they write through a quoted
+  heredoc. The generators are discovered from source: a function holding a
+  shell shebang that no test shellchecks fails the build. The Test job installs
+  shellcheck v0.11.0, pinned by version and sha256, and the gate fails under
+  `CI=true` if shellcheck is missing. Intentional patterns carry a scoped
+  `# shellcheck disable=` with a reason.
+
+- **A tag contract gate (#689).** Every `spawn:*` tag `buildTags` writes at
+  launch must be read somewhere in the repo, and every tag read must be written
+  somewhere. Both sides are discovered from source, and the few keys written
+  outside spawn's code are allow-listed with their writer named. A Substrate
+  round trip checks that each launch tag reaches `ListInstances` in exactly one
+  place (a named field or `Tags`), and that every tag-sourced `InstanceInfo`
+  field is filled by some tag.
+
 ### Fixed
 
 - `spawn resume` panicked (`interface conversion: interface {} is nil, not
@@ -210,6 +230,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer claims a reconcile loop tops the pool up or replaces reclaimed Spot
   workers: `pool create` provisions once, and a lost worker's task is rerun by a
   surviving worker after the visibility timeout.
+
+- **`spawn slurm convert` quotes the job name and working directory (#689).**
+  `#SBATCH --job-name` with a space exported only its first word, and
+  `--chdir` with a space made `cd` fail. Because the script has no `set -e`,
+  the job body then ran in the wrong directory. Both values are now
+  shell-quoted, and a failed `cd` stops the job, as Slurm's `--chdir` does.
 
 ### Security
 

@@ -108,7 +108,6 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	// on every embedder to never set -e upstream of it.
 	p("set +e -u -o pipefail\n\n")
 
-	p("TASK_ID=%s\n", shQuote(taskID))
 	p("RESULTS_PREFIX=%s\n", shQuote(resultsPrefix))
 	p("STARTED_AT=\"$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\"\n")
 	// Persist STARTED_AT where the terminal-flush hook can read it (spawn#632).
@@ -585,6 +584,9 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	p("  spawn_phase 'image pull start'\n")
 	p("  sudo docker pull %s\n", shQuote(image))
 	// The digest that actually ran, not what the tag pointed to (#1076).
+	// The redirect runs as the wrapper's user on purpose: it created $PROV_DIR
+	// above, and only docker needs root.
+	p("  # shellcheck disable=SC2024  # $PROV_DIR is the wrapper user's own; only docker needs sudo\n")
 	p("  if [ \"$PROV_OK\" = 1 ]; then sudo docker inspect --format '{{index .RepoDigests 0}}' %s > \"$PROV_DIR/image-digest\" 2>/dev/null || true; fi\n", shQuote(image))
 	p("  spawn_phase 'image pull done; command start'\n")
 	// --shm-size (#1111): Docker's 64 MB /dev/shm is too small for many-rank MPI

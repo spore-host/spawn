@@ -169,10 +169,14 @@ echo "Skipping MPI installation (--skip-mpi-install specified)"
 {{if .EFAEnabled}}
 # Install EFA driver
 echo "Installing EFA driver..."
-cd /tmp
+# Each cd is checked explicitly rather than left to the bootstrap's set -e
+# (#689): this fragment must not run ./efa_installer.sh from the wrong
+# directory if it is ever emitted without errexit. Failure stays fatal, as it
+# was under set -e.
+cd /tmp || exit 1
 curl -O https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz
 tar -xf aws-efa-installer-latest.tar.gz
-cd aws-efa-installer
+cd aws-efa-installer || exit 1
 ./efa_installer.sh -y -g
 
 # Configure libfabric for EFA
@@ -194,6 +198,7 @@ source /etc/profile.d/mpi.sh
 # half over SSM before any node is released (spawn#684).
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
+# shellcheck disable=SC2050  # the rank is fixed at render time: one script per member
 if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   if [ ! -f /root/.ssh/id_rsa ]; then
     ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa -q
@@ -252,6 +257,7 @@ cat > /etc/spawn/mpi-command <<'EOFMPICMD'
 EOFMPICMD
 chmod 600 /etc/spawn/mpi-command
 {{end}}
+# shellcheck disable=SC2050  # the rank is fixed at render time: one script per member
 if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   # Every peer must accept a non-interactive SSH before mpirun, which SSHes to
   # all of them (#752).

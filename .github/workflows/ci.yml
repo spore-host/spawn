@@ -159,6 +159,28 @@ jobs:
         # used to be invisible here.
         run: go build -o "$RUNNER_TEMP/hermetic-exec" ./test/hermetic
 
+      # shellcheck for the generated-script gate (#689). internal/shellcheckgate
+      # FAILS under CI=true when the binary is missing, so this step must run
+      # before Test. Verified the same way as staticcheck: pinned version AND
+      # pinned hash, held here rather than read from a file fetched alongside
+      # the download. Cross-checked against the GitHub release asset digest for
+      # shellcheck-v0.11.0.linux.x86_64.tar.xz when pinned.
+      #
+      # A shellcheck bump can add checks; fix the generator (or add a scoped,
+      # justified `# shellcheck disable=`) in the same PR.
+      - name: Install shellcheck
+        run: |
+          VER=v0.11.0
+          SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          T="shellcheck-${VER}.linux.x86_64.tar.xz"
+          D="$RUNNER_TEMP/shellcheck-$VER"
+          mkdir -p "$D"
+          curl -sSLf -o "$D/$T" "https://github.com/koalaman/shellcheck/releases/download/${VER}/$T"
+          echo "$SHA256  $D/$T" | sha256sum -c -
+          tar -xJf "$D/$T" -C "$D" "shellcheck-${VER}/shellcheck"
+          echo "$D/shellcheck-${VER}" >> "$GITHUB_PATH"
+          "$D/shellcheck-${VER}/shellcheck" --version
+
       - name: Test
         run: go test -short -exec "$RUNNER_TEMP/hermetic-exec" -coverprofile=coverage.out ./...
 
