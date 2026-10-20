@@ -157,6 +157,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field is filled by some tag.
 
 ### Fixed
+- **`spawn resume` no longer relaunches parameters that already ran (#1248).**
+  A resume launched only the pending parameter sets but saved a fresh sweep
+  state: each new instance was recorded by its position in the pending list,
+  not its parameter index, and the sweep's size shrank to the pending count.
+  The next resume then read the wrong parameters as done and launched
+  completed work again. Relaunched instances are now recorded under their own
+  parameter index and merged into the existing state, which keeps its
+  completed records, its size and its sweep metadata.
 
 - `spawn resume` panicked (`interface conversion: interface {} is nil, not
   string`) on a sweep whose parameter file has no `region` in its defaults —
