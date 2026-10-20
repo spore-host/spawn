@@ -114,6 +114,12 @@ Parameters:
       an account where someone else owns these resources. An unrecognised value
       resolves to 'report' — a typo must not arm a delete. DryRun always wins.
 
+      One exception (#661): an Elastic IP spawn allocated for a multi-interface
+      EFA launch is RELEASED in 'report' as well as 'reap', once it is
+      unassociated, its instance is gone and it is 15 minutes old. It is selected
+      by tags only spawn writes, it is referenced by nothing, and unlike these
+      groups it bills by the hour. 'off' and DryRun still hold it back.
+
   SpotRequests:
     Type: String
     Default: 'report'

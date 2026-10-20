@@ -69,7 +69,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/pricing v1.49.2
-	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.43.2 // indirect
+	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.43.2
 	github.com/aws/aws-sdk-go-v2/service/signin v1.10.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.4 // indirect

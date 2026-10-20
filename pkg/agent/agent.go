@@ -186,6 +186,15 @@ type Agent struct {
 	// re-confirming the region is empty (#260). Zero means the production default
 	// (60s); tests set it small.
 	regionVacatedSettle time.Duration
+
+	// The launch Elastic IP release on a Spot terminate notice (#661): a
+	// fire-once guard (the spot monitor re-enters every 5s), and seams for the
+	// clock, the wait, and how the release goroutine is started. nil means
+	// time.Now, sleepCtx and `go`.
+	spotEIPScheduled bool
+	spotEIPNow       func() time.Time
+	spotEIPSleep     func(context.Context, time.Duration)
+	spotEIPGo        func(func())
 }
 
 // cfg returns the current config under a read lock. Callers get a stable pointer
@@ -1736,11 +1745,85 @@ func (a *Agent) checkSpotInterruption(ctx context.Context) bool {
 		a.emitSpotInterruptionWebhook(info)
 	}
 
+	// Release the launch Elastic IP (#661) near the end of the window, once the
+	// survival work above is done. Last, because the instance loses its public
+	// address with it.
+	a.scheduleSpotElasticIPRelease(ctx, info)
+
 	// Log for posterity
 	log.Printf("Spot interruption: action=%s, time=%s", info.Action, info.Time.Format(time.RFC3339))
 
 	// Continue monitoring for remaining time
 	return false // Return false to allow normal monitoring to continue
+}
+
+// elasticIPReleaser is the optional provider capability to release the
+// instance's own launch Elastic IP (#661). EC2Provider implements it; the local
+// provider has no address to release.
+type elasticIPReleaser interface {
+	ReleaseOwnElasticIPs(ctx context.Context)
+}
+
+// spotEIPReleaseLead is how long before the interruption time spored releases
+// its launch Elastic IP. The address carries the instance's only egress on a
+// multi-interface instance, so releasing it at the notice would cut off, for up
+// to two minutes, anything the user's own checkpoint logic is still sending.
+// Releasing it after the instance is gone is impossible from here. This is the
+// compromise: most of the window keeps its network, and 20s leaves room for the
+// call. A miss is not a leak: the TTL reaper releases it.
+const spotEIPReleaseLead = 20 * time.Second
+
+// scheduleSpotElasticIPRelease releases the launch Elastic IP once per
+// interruption, and only for a terminate: a stop or hibernate interruption
+// brings the instance back, and it keeps its address while stopped.
+//
+// It waits until spotEIPReleaseLead before info.Time, or less if spored is
+// being shut down first (ctx done), which on a reclaim means the OS is already
+// going away. Off the monitor goroutine, through a.spotEIPGo, so the wait never
+// delays the next poll.
+func (a *Agent) scheduleSpotElasticIPRelease(ctx context.Context, info *provider.InterruptionInfo) {
+	if info == nil || !strings.EqualFold(info.Action, "terminate") || a.spotEIPScheduled {
+		return
+	}
+	releaser, ok := a.provider.(elasticIPReleaser)
+	if !ok {
+		return
+	}
+	a.spotEIPScheduled = true
+	now := time.Now
+	if a.spotEIPNow != nil {
+		now = a.spotEIPNow
+	}
+	wait := info.Time.Add(-spotEIPReleaseLead).Sub(now())
+	if wait < 0 {
+		wait = 0
+	}
+	run := func() {
+		if wait > 0 {
+			sleep := a.spotEIPSleep
+			if sleep == nil {
+				sleep = sleepCtx
+			}
+			sleep(ctx, wait) // returns early when spored is stopping
+		}
+		log.Printf("Spot interruption: releasing the launch Elastic IP (%s before the interruption time)", spotEIPReleaseLead)
+		releaser.ReleaseOwnElasticIPs(context.WithoutCancel(ctx))
+	}
+	if a.spotEIPGo != nil {
+		a.spotEIPGo(run)
+		return
+	}
+	go run()
+}
+
+// sleepCtx sleeps for d or until ctx is done.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // spotWebhookPayload is the fixed, stable on-node fact-struct spored POSTs on a

@@ -272,7 +272,7 @@ func TestAttachLaunchElasticIP_AllocatesTagsAndAssociatesPrimary(t *testing.T) {
 		assocErr: []error{errors.New("InvalidNetworkInterfaceID.NotFound: not yet")}, // eventual consistency, retried
 	}
 	instTags := []types.Tag{{Key: aws.String("spawn:iam-user"), Value: aws.String("arn:aws:iam::1:user/u")}}
-	ip, alloc, err := attachLaunchElasticIP(context.Background(), f, "proxy-1", "i-1", instTags)
+	ip, alloc, err := attachLaunchElasticIP(context.Background(), f, "proxy-1", "i-1", "arn:aws:ec2:us-east-1:111122223333:instance/i-1", instTags)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,6 +289,9 @@ func TestAttachLaunchElasticIP_AllocatesTagsAndAssociatesPrimary(t *testing.T) {
 	for k, want := range map[string]string{
 		"spawn:managed": "true", ElasticIPInstanceTagKey: "i-1", "spawn:purpose": ElasticIPPurpose,
 		"Name": "proxy-1", "spawn:iam-user": "arn:aws:iam::1:user/u",
+		// What the instance role's ReleaseAddress grant compares with
+		// ${ec2:SourceInstanceARN}; without it spored cannot release its own.
+		"spawn:instance-arn": "arn:aws:ec2:us-east-1:111122223333:instance/i-1",
 	} {
 		if tags[k] != want {
 			t.Errorf("tag %s = %q, want %q", k, tags[k], want)
@@ -307,7 +310,7 @@ func TestAttachLaunchElasticIP_FailureReleasesWhatItAllocated(t *testing.T) {
 		states:   []types.InstanceStateName{types.InstanceStateNameRunning},
 		assocErr: []error{errors.New("UnauthorizedOperation")},
 	}
-	if _, _, err := attachLaunchElasticIP(context.Background(), f, "", "i-1", nil); err == nil {
+	if _, _, err := attachLaunchElasticIP(context.Background(), f, "", "i-1", "", nil); err == nil {
 		t.Fatal("no error from a failed association")
 	}
 	if len(f.allocated) != 1 || len(f.released) != 1 || f.released[0] != f.allocated[0] {
@@ -319,7 +322,7 @@ func TestAttachLaunchElasticIP_FailureReleasesWhatItAllocated(t *testing.T) {
 func TestAttachLaunchElasticIP_InstanceEndedAllocatesNothing(t *testing.T) {
 	fastEIPPolling(t)
 	f := &fakeEIPAPI{states: []types.InstanceStateName{types.InstanceStateNamePending, types.InstanceStateNameTerminated}}
-	if _, _, err := attachLaunchElasticIP(context.Background(), f, "", "i-1", nil); err == nil {
+	if _, _, err := attachLaunchElasticIP(context.Background(), f, "", "i-1", "", nil); err == nil {
 		t.Fatal("no error for an instance that terminated before running")
 	}
 	if len(f.allocated) != 0 {
@@ -335,7 +338,7 @@ func TestAttachLaunchElasticIP_ReusesExisting(t *testing.T) {
 		states: []types.InstanceStateName{types.InstanceStateNameRunning},
 		addrs:  []types.Address{{AllocationId: aws.String("eipalloc-old"), PublicIp: aws.String("203.0.113.9")}},
 	}
-	ip, alloc, err := attachLaunchElasticIP(context.Background(), f, "", "i-1", nil)
+	ip, alloc, err := attachLaunchElasticIP(context.Background(), f, "", "i-1", "", nil)
 	if err != nil || alloc != "eipalloc-old" || ip != "203.0.113.9" {
 		t.Fatalf("= %s, %s, %v; want the existing address", ip, alloc, err)
 	}
@@ -432,6 +435,21 @@ func TestLaunch_MultiEFAAssociatesElasticIP(t *testing.T) {
 	}
 	if res.PublicIP != "198.51.100.9" {
 		t.Errorf("PublicIP = %q, want the Elastic IP", res.PublicIP)
+	}
+	// The ARN tag is built from RunInstances' ownerId and the launch's own
+	// instance: the instance role may release the address only when it equals
+	// ${ec2:SourceInstanceARN}, so a wrong value means spored can never release
+	// it and only the reaper can.
+	alloc := f.request("AllocateAddress")
+	tags := map[string]string{}
+	for i := 1; alloc.Get(fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)) != ""; i++ {
+		tags[alloc.Get(fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i))] = alloc.Get(fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i))
+	}
+	if got, want := tags["spawn:instance-arn"], "arn:aws:ec2:us-west-2:111122223333:instance/i-new"; got != want {
+		t.Errorf("spawn:instance-arn = %q, want %q (tags %v)", got, want, tags)
+	}
+	if got := tags[ElasticIPInstanceTagKey]; got != "i-new" {
+		t.Errorf("%s = %q, want i-new", ElasticIPInstanceTagKey, got)
 	}
 }
 

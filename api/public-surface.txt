@@ -14,6 +14,7 @@ const AMI_AL2023_X86
 const CreatedTagKey
 const ElasticIPInstanceTagKey
 const ElasticIPPurpose
+const ElasticIPQuotaCode
 const HeartbeatTag
 const IAMBaselineURL
 const MaxEncodedUserDataBytes
@@ -109,6 +110,9 @@ field EFANetworkCard.EFAOnly bool
 field EFANetworkCard.Index int32
 field ElasticIP.AllocationID string
 field ElasticIP.PublicIP string
+field ElasticIPQuota.InUse int
+field ElasticIPQuota.Limit int
+field ElasticIPQuota.LimitSource string
 field EnsureImportInfrastructureInput.InstanceType string
 field EnsureImportInfrastructureInput.Region string
 field EnsureImportInfrastructureInput.SecurityGroupID []string
@@ -362,6 +366,7 @@ func (*Client) DescribeSporedLiveness(ctx context.Context, region, instanceID st
 func (*Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOptions) ([]ManagedResource, int, error)
 func (*Client) EFACapacityInRegion(ctx context.Context, instanceType, region string) (EFACapacity, error)
 func (*Client) EFSMountTargetIP(ctx context.Context, filesystemID, region, subnetID, az string) (string, error)
+func (*Client) ElasticIPQuotaInRegion(ctx context.Context, region string) (ElasticIPQuota, error)
 func (*Client) EnableTracing()
 func (*Client) EnsureDNSInvokeGrant(ctx context.Context, roleName, functionARN string) error
 func (*Client) EnsureImageBuilderSLR(ctx context.Context) (string, error)
@@ -447,6 +452,7 @@ func (ReaperCoverage) Summary() string
 func AccountBase36(accountID string) string
 func AttachDeviceName(i int) string
 func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error
+func CheckElasticIPHeadroom(q ElasticIPQuota, region string, need int) error
 func CheckUserDataSize(encoded string) error
 func DNSInvokePolicyName(functionARN string) string
 func DecryptWindowsPassword(passwordData, privateKeyPath string) (string, error)
@@ -498,6 +504,7 @@ type DisplayPrice struct
 type EFACapacity struct
 type EFANetworkCard struct
 type ElasticIP struct
+type ElasticIPQuota struct
 type EnsureImportInfrastructureInput struct
 type FSxBrief struct
 type FSxConfig struct

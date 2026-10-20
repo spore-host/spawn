@@ -1398,7 +1398,40 @@ func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *a
 	if _, err := resolveEFAInterfaces(ctx, awsClient, config); err != nil {
 		return err
 	}
+	// More than one EFA interface means an Elastic IP per instance (#661):
+	// check the region has that many left before anything is created.
+	if err := preflightElasticIPQuota(ctx, awsClient, config, count, os.Stderr); err != nil {
+		return err
+	}
 	return nil
+}
+
+// elasticIPQuotaFor reads the region's Elastic IP usage and quota (read-only).
+// A package-level seam so tests need no AWS.
+var elasticIPQuotaFor = func(ctx context.Context, awsClient *aws.Client, region string) (aws.ElasticIPQuota, error) {
+	return awsClient.ElasticIPQuotaInRegion(ctx, region)
+}
+
+// preflightElasticIPQuota refuses a multi-interface EFA launch that would run
+// out of Elastic IPs, saying how many are in use of how many and that
+// --efa-interfaces 1 needs none. Each instance of the launch (`--count`) needs
+// one. When the quota cannot be read (no servicequotas:GetServiceQuota, say) it
+// warns and lets the launch go on: Launch still terminates an instance whose
+// AllocateAddress fails, so the check is an early answer, not the only guard.
+func preflightElasticIPQuota(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, instances int, warn io.Writer) error {
+	if !config.EFAEnabled || config.EFAInterfaces <= 1 {
+		return nil
+	}
+	need := instances
+	if need < 1 {
+		need = 1
+	}
+	q, err := elasticIPQuotaFor(ctx, awsClient, config.Region)
+	if err != nil {
+		fmt.Fprintf(warn, "⚠️  could not check the Elastic IP quota in %s (%v); a launch past it fails at AllocateAddress and terminates the instance\n", config.Region, err)
+		return nil
+	}
+	return aws.CheckElasticIPHeadroom(q, config.Region, need)
 }
 
 // efaCapacityFor reads an instance type's EFA capacity (DescribeInstanceTypes,

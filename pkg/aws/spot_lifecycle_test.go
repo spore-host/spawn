@@ -96,7 +96,7 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			`</GetCallerIdentityResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></GetCallerIdentityResponse>`))
 	case "RunInstances":
 		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
-		_, _ = w.Write([]byte(`<RunInstancesResponse ` + ns + `><requestId>r</requestId><reservationId>r-1</reservationId>` +
+		_, _ = w.Write([]byte(`<RunInstancesResponse ` + ns + `><requestId>r</requestId><reservationId>r-1</reservationId><ownerId>111122223333</ownerId>` +
 			`<instancesSet><item><instanceId>i-new</instanceId>` + spotReqXML(f.runSpotRequestID) +
 			`<instanceState><code>0</code><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`))
 	case "CreateTags":
@@ -131,6 +131,7 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "DescribeInstanceTypes":
 		if f.efaCards > 0 {
 			var b bytes.Buffer
+			// nosemgrep
 			b.WriteString(`<DescribeInstanceTypesResponse ` + ns + `><requestId>r</requestId><instanceTypeSet><item><instanceType>` + form.Get("InstanceType.1") +
 				`</instanceType><networkInfo><efaSupported>true</efaSupported><efaInfo><maximumEfaInterfaces>` + fmt.Sprint(f.efaCards) + `</maximumEfaInterfaces></efaInfo><networkCards>`)
 			for i := 0; i < f.efaCards; i++ {

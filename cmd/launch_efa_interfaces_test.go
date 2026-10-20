@@ -166,3 +166,92 @@ func TestLaunchDryRunSingleEFAHasNoElasticIP(t *testing.T) {
 		t.Errorf("single-interface preview:\n%s", out)
 	}
 }
+
+// stubElasticIPQuota replaces the quota read with a canned answer and counts
+// the calls, so a test can see whether the preflight asked at all.
+func stubElasticIPQuota(t *testing.T, q spawnaws.ElasticIPQuota, err error) *int {
+	t.Helper()
+	calls := 0
+	prev := elasticIPQuotaFor
+	elasticIPQuotaFor = func(context.Context, *spawnaws.Client, string) (spawnaws.ElasticIPQuota, error) {
+		calls++
+		return q, err
+	}
+	t.Cleanup(func() { elasticIPQuotaFor = prev })
+	return &calls
+}
+
+// #661 field note 2: the 9th multi-card box of a fleet failed at AllocateAddress
+// after it had booted. The preflight refuses it before anything is created, with
+// "N of M Elastic IPs in use in <region>" and the --efa-interfaces 1 way out.
+func TestPreflightElasticIPQuota_RefusesPastTheQuota(t *testing.T) {
+	calls := stubElasticIPQuota(t, spawnaws.ElasticIPQuota{InUse: 10, Limit: 10, LimitSource: "applied"}, nil)
+	cfg := &spawnaws.LaunchConfig{Region: "us-west-2", EFAEnabled: true, EFAInterfaces: 2}
+	err := preflightElasticIPQuota(context.Background(), nil, cfg, 1, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "10 of 10 Elastic IPs in use in us-west-2") || !strings.Contains(err.Error(), "--efa-interfaces 1") {
+		t.Fatalf("err = %v, want the counts, the region and the --efa-interfaces 1 hint", err)
+	}
+	if *calls != 1 {
+		t.Errorf("quota read %d times, want 1", *calls)
+	}
+}
+
+// --count N needs N addresses.
+func TestPreflightElasticIPQuota_CountsEveryInstance(t *testing.T) {
+	stubElasticIPQuota(t, spawnaws.ElasticIPQuota{InUse: 7, Limit: 10}, nil)
+	cfg := &spawnaws.LaunchConfig{Region: "us-west-2", EFAEnabled: true, EFAInterfaces: 2}
+	if err := preflightElasticIPQuota(context.Background(), nil, cfg, 3, &bytes.Buffer{}); err != nil {
+		t.Errorf("7+3 of 10 refused: %v", err)
+	}
+	if err := preflightElasticIPQuota(context.Background(), nil, cfg, 4, &bytes.Buffer{}); err == nil {
+		t.Error("7+4 of 10 allowed")
+	}
+}
+
+// A single interface needs no Elastic IP, so nothing is asked of AWS.
+func TestPreflightElasticIPQuota_SingleInterfaceAsksNothing(t *testing.T) {
+	calls := stubElasticIPQuota(t, spawnaws.ElasticIPQuota{InUse: 10, Limit: 10}, nil)
+	for _, cfg := range []*spawnaws.LaunchConfig{
+		{Region: "us-west-2", EFAEnabled: true, EFAInterfaces: 1},
+		{Region: "us-west-2", EFAEnabled: false, EFAInterfaces: 0},
+	} {
+		if err := preflightElasticIPQuota(context.Background(), nil, cfg, 1, &bytes.Buffer{}); err != nil {
+			t.Errorf("%+v: %v", cfg, err)
+		}
+	}
+	if *calls != 0 {
+		t.Errorf("quota read %d times for launches that allocate no Elastic IP", *calls)
+	}
+}
+
+// An unreadable quota warns and lets the launch go on: Launch's terminate on
+// AllocateAddress failure is still the backstop.
+func TestPreflightElasticIPQuota_UnreadableQuotaWarns(t *testing.T) {
+	stubElasticIPQuota(t, spawnaws.ElasticIPQuota{}, fmt.Errorf("AccessDeniedException"))
+	var warn bytes.Buffer
+	cfg := &spawnaws.LaunchConfig{Region: "us-west-2", EFAEnabled: true, EFAInterfaces: 2}
+	if err := preflightElasticIPQuota(context.Background(), nil, cfg, 1, &warn); err != nil {
+		t.Fatalf("an unreadable quota refused the launch: %v", err)
+	}
+	if !strings.Contains(warn.String(), "Elastic IP quota") {
+		t.Errorf("no warning: %q", warn.String())
+	}
+}
+
+// The preflight is wired into ensureAMIAndPreflight, the step every launch and
+// dry run takes before creating anything.
+func TestEnsureAMIAndPreflightRunsTheElasticIPQuotaCheck(t *testing.T) {
+	src, err := os.ReadFile("launch_single.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func ensureAMIAndPreflight(")
+	if start < 0 {
+		t.Fatal("ensureAMIAndPreflight not found")
+	}
+	end := strings.Index(body[start:], "\n}\n")
+	if !strings.Contains(body[start:start+end], "preflightElasticIPQuota(ctx, awsClient, config, count, ") {
+		t.Error("ensureAMIAndPreflight does not call preflightElasticIPQuota(ctx, awsClient, config, count, …): a launch past the Elastic IP quota boots an instance and then terminates it")
+	}
+}

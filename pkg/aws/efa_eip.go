@@ -10,6 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
+	"github.com/spore-host/spawn/pkg/elasticip"
 )
 
 // A multi-interface EFA launch (#661) cannot ask EC2 for a public IP: EC2
@@ -25,10 +27,10 @@ import (
 // instance it was allocated for. With spawn:managed=true it is what marks an
 // address as spawn's to release: an Elastic IP without it is user-owned and
 // spawn never releases it (#262).
-const ElasticIPInstanceTagKey = "spawn:instance-id"
+const ElasticIPInstanceTagKey = elasticip.InstanceIDTagKey
 
 // ElasticIPPurpose is the spawn:purpose of a launch Elastic IP.
-const ElasticIPPurpose = "efa-public-ip"
+const ElasticIPPurpose = elasticip.Purpose
 
 // launchElasticIPAPI is the slice of EC2 the launch Elastic IP needs. *ec2.Client
 // satisfies it; tests fake it.
@@ -152,10 +154,16 @@ func findInstanceElasticIPs(ctx context.Context, api elasticIPReleaseAPI, instan
 }
 
 // launchElasticIPOwnerTags are the tags a launch Elastic IP carries beyond
-// LifecycleTags: the instance it belongs to, and the launching principal when
-// known (so `spawn cleanup`'s --mine scope covers it).
-func launchElasticIPOwnerTags(instanceID string, instanceTags []types.Tag) []types.Tag {
+// LifecycleTags: the instance it belongs to, the same instance as an ARN when
+// known (the instance role's ReleaseAddress grant compares that tag with
+// ${ec2:SourceInstanceARN}, so without it spored cannot release the address
+// and only the reaper can), and the launching principal when known (so `spawn
+// cleanup`'s --mine scope covers it).
+func launchElasticIPOwnerTags(instanceID, instanceARN string, instanceTags []types.Tag) []types.Tag {
 	tags := []types.Tag{{Key: aws.String(ElasticIPInstanceTagKey), Value: aws.String(instanceID)}}
+	if instanceARN != "" {
+		tags = append(tags, types.Tag{Key: aws.String(elasticip.InstanceARNTagKey), Value: aws.String(instanceARN)})
+	}
 	for _, t := range instanceTags {
 		if aws.ToString(t.Key) == "spawn:iam-user" {
 			tags = append(tags, types.Tag{Key: t.Key, Value: t.Value})
@@ -172,7 +180,7 @@ func launchElasticIPOwnerTags(instanceID string, instanceTags []types.Tag) []typ
 // instance): an address already tagged for the instance is reused rather than a
 // second allocated. On failure everything this call allocated is released again,
 // so the caller has only the instance to clean up.
-func attachLaunchElasticIP(ctx context.Context, api launchElasticIPAPI, name, instanceID string, instanceTags []types.Tag) (publicIP, allocationID string, err error) {
+func attachLaunchElasticIP(ctx context.Context, api launchElasticIPAPI, name, instanceID, instanceARN string, instanceTags []types.Tag) (publicIP, allocationID string, err error) {
 	eni, err := waitForPrimaryInterface(ctx, api, instanceID, eipRunningTimeout)
 	if err != nil {
 		return "", "", err
@@ -195,7 +203,7 @@ func attachLaunchElasticIP(ctx context.Context, api launchElasticIPAPI, name, in
 			TagSpecifications: []types.TagSpecification{{
 				ResourceType: types.ResourceTypeElasticIp,
 				Tags: append(LifecycleTags(name, ElasticIPPurpose, time.Now()),
-					launchElasticIPOwnerTags(instanceID, instanceTags)...),
+					launchElasticIPOwnerTags(instanceID, instanceARN, instanceTags)...),
 			}},
 		})
 		if aerr != nil {

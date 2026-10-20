@@ -29,6 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	smithy "github.com/aws/smithy-go"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
@@ -754,7 +755,13 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// spored all see a public address as on any other launch. If that fails the
 	// instance is terminated rather than left running unreachable.
 	if NeedsLaunchElasticIP(input.NetworkInterfaces) {
-		ip, alloc, eerr := attachLaunchElasticIP(ctx, ec2Client, launchConfig.Name, launched.InstanceID, tags)
+		// The ARN tag is what lets spored release the address itself (#661);
+		// RunInstances reports the owning account, so no extra call is needed.
+		instanceARN := ""
+		if owner := aws.ToString(result.OwnerId); owner != "" {
+			instanceARN = elasticip.InstanceARN(launchConfig.Region, owner, launched.InstanceID)
+		}
+		ip, alloc, eerr := attachLaunchElasticIP(ctx, ec2Client, launchConfig.Name, launched.InstanceID, instanceARN, tags)
 		if eerr != nil {
 			if terr := c.Terminate(ctx, launchConfig.Region, launched.InstanceID); terr != nil {
 				return nil, fmt.Errorf("instance %s launched with %d network interfaces but its Elastic IP could not be attached (%w); "+

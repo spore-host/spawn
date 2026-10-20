@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	smithy "github.com/aws/smithy-go"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/elasticip"
 )
 
 // SporedRoleName and SporedInstanceProfileName are the SHARED, long-lived IAM
@@ -1044,6 +1045,7 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 
 	statements = append(statements, sporedHybridRegistryStatement())
 	statements = append(statements, sporedSelfTerminateStatement())
+	statements = append(statements, sporedOwnElasticIPStatements()...)
 
 	return statements
 }
@@ -1229,6 +1231,71 @@ func sporedSelfTerminateStatement() map[string]interface{} {
 			},
 		},
 	}
+}
+
+// sporedOwnElasticIPStatements let spored release the Elastic IP a
+// multi-interface EFA launch allocated for it (#661), and no other address.
+//
+// Why spored needs it: only `spawn terminate` released the address, so every
+// other way an instance ends (TTL, idle, cost limit, on-complete, a Spot
+// reclaim) left it allocated and billing. spored makes one ReleaseAddress after
+// its own TerminateInstances and on a Spot terminate notice
+// (pkg/elasticip.ReleaseForInstance).
+//
+// The scope. DescribeAddresses has no resource-level permissions, so it is on
+// "*" like the other Describes here; it is read-only. ReleaseAddress is the
+// widening, and it is conditioned on BOTH tags, so it is not a grant on spawn's
+// addresses in general:
+//
+//   - ec2:ResourceTag/spawn:instance-arn must equal ${ec2:SourceInstanceARN},
+//     the ARN of the instance whose role credentials signed the request. Launch
+//     writes that tag at allocation, from RunInstances' own answer. Another
+//     instance's address carries another ARN; a user's address carries none.
+//     A request not made with instance credentials has no SourceInstanceARN,
+//     the variable resolves to nothing, and StringEquals does not match.
+//   - ec2:ResourceTag/spawn:managed must be true.
+//
+// The instance cannot forge the first tag on someone else's address: CreateTags
+// is allowed on any spawn:managed=true resource, which includes these addresses,
+// so spawn:instance-arn and spawn:instance-id are in reaperControlTagKeys and
+// the Deny below covers them. The variable is in a Condition, never a Resource,
+// which is what PutRolePolicy rejected in #1069; it is the same variable the
+// TerminateOnlySelf statement uses, which was proven on real AWS (#1080).
+func sporedOwnElasticIPStatements() []interface{} {
+	return []interface{}{
+		map[string]interface{}{
+			"Sid":      "DescribeElasticIPs",
+			"Effect":   "Allow",
+			"Action":   "ec2:DescribeAddresses",
+			"Resource": "*",
+		},
+		map[string]interface{}{
+			"Sid":      "ReleaseOnlyOwnElasticIP",
+			"Effect":   "Allow",
+			"Action":   "ec2:ReleaseAddress",
+			"Resource": "*",
+			"Condition": map[string]interface{}{
+				"StringEquals": map[string]interface{}{
+					"ec2:ResourceTag/" + elasticip.ManagedTagKey:     "true",
+					"ec2:ResourceTag/" + elasticip.InstanceARNTagKey: "${ec2:SourceInstanceARN}",
+				},
+			},
+		},
+	}
+}
+
+// sporedOwnElasticIPStatementsJSON renders them for the static DCV policy, so
+// the two policies cannot drift on them.
+func sporedOwnElasticIPStatementsJSON() string {
+	parts := make([]string, 0, 2)
+	for _, st := range sporedOwnElasticIPStatements() {
+		b, err := json.Marshal(st)
+		if err != nil {
+			panic(err) // static content; cannot fail
+		}
+		parts = append(parts, string(b))
+	}
+	return strings.Join(parts, ",\n    ")
 }
 
 // sporedSelfTerminateStatementJSON renders it for the static DCV policy, so the
@@ -1547,12 +1614,22 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 // (TestNoDeniedTagKeyHasAnInInstanceWriter). Denying DeleteTags on
 // spawn:managed is safe for the same reason: the Allow above is conditioned on
 // that tag, so once it is gone the instance can no longer tag itself at all.
+//
+// And the two that say which instance a launch Elastic IP belongs to (#661).
+// The instance role may release an address whose spawn:instance-arn is its own
+// ARN (sporedOwnElasticIPStatements), and these addresses carry
+// spawn:managed=true, so the CreateTags Allow reaches them: without the Deny, a
+// spore could write its own ARN onto another instance's address and release it.
+// spawn:instance-id is what the reaper's sweep and `spawn terminate` select by.
+// Launch writes both, from the workstation, and nothing on the instance does.
 var reaperControlTagKeys = []string{
 	"spawn:pre-stop",
 	"spawn:pre-stop-timeout",
 	"spawn:local-username",
 	"spawn:launch-time",
 	"spawn:managed",
+	elasticip.InstanceIDTagKey,
+	elasticip.InstanceARNTagKey,
 }
 
 // reaperControlTagDeny is the statement form for buildInlinePolicy.
@@ -1728,9 +1805,10 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
       ]
     },
     %s,
+    %s,
     %s
   ]
-}`, reaperControlTagKeysJSON(), spawnconfig.DefaultDNSFunctionARN, sporedHybridRegistryStatementJSON(), sporedSelfTerminateStatementJSON())
+}`, reaperControlTagKeysJSON(), spawnconfig.DefaultDNSFunctionARN, sporedHybridRegistryStatementJSON(), sporedSelfTerminateStatementJSON(), sporedOwnElasticIPStatementsJSON())
 
 // waitForInstanceProfile polls until the instance profile is retrievable (IAM
 // is eventually consistent after creation), or a bounded deadline passes. It
