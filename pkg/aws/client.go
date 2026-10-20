@@ -1036,6 +1036,21 @@ func (c *Client) WaitForRunning(ctx context.Context, region, instanceID string, 
 	return nil
 }
 
+// WaitForStopped blocks until the instance reaches the "stopped" state or the
+// timeout elapses, using the SDK's instance-stopped waiter. EC2 refuses
+// StartInstances on a "stopping" instance (IncorrectInstanceState), so a
+// caller that wants to start one has to wait for the stop to land first
+// (spawn#57).
+func (c *Client) WaitForStopped(ctx context.Context, region, instanceID string, timeout time.Duration) error {
+	waiter := ec2.NewInstanceStoppedWaiter(c.regionalEC2(region))
+	if err := waiter.Wait(ctx, &ec2.DescribeInstancesInput{
+		InstanceIds: []string{instanceID},
+	}, timeout); err != nil {
+		return fmt.Errorf("waiting for instance %s to stop: %w", instanceID, err)
+	}
+	return nil
+}
+
 // WaitForPublicIP blocks until the instance has a public IP or the timeout
 // elapses, returning the address.
 //

@@ -85,33 +85,13 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return connectDCV(ctx, client, instance)
 	}
 
-	// Auto-start stopped/hibernated instances unless --no-start is set.
-	if instance.State == "stopped" || instance.State == "stopping" {
-		if connectNoStart {
-			return fmt.Errorf("instance is %s — use --no-start=false or start it manually with: spawn start %s", instance.State, instanceIdentifier)
-		}
-		fmt.Fprintf(os.Stderr, "Instance is %s — starting it...\n", instance.State)
-		if err := client.StartInstance(ctx, instance.Region, instance.InstanceID); err != nil {
-			return fmt.Errorf("start instance: %w", err)
-		}
-		// WaitForRunning rather than a hand-rolled loop (#752). It wraps the
-		// SDK's instance-running waiter, absorbs the #78 NotFound window, and
-		// returns the moment the state flips. What it replaces polled a
-		// WHOLE-REGION describe every 5s, `continue`d on error with no
-		// ctx.Done() case — so Ctrl-C was ignored for 2.5 minutes — and slept
-		// before its first check, charging 5s to an instance already running.
-		fmt.Fprintf(os.Stderr, "Waiting for instance to reach running state...")
-		if err := client.WaitForRunning(ctx, instance.Region, instance.InstanceID, 2*time.Minute); err != nil {
-			fmt.Fprintf(os.Stderr, "\n")
-			return fmt.Errorf("instance did not reach running state: %w", err)
-		}
-		// One refresh, for the public IP and tags a stop/start reassigns.
-		refreshed, err := resolveInstance(ctx, client, instance.InstanceID)
-		if err != nil {
-			return fmt.Errorf("re-read instance after start: %w", err)
-		}
-		instance = refreshed
-		fmt.Fprintf(os.Stderr, " running\n\n")
+	// Auto-start stopped/hibernated instances unless --no-start is set. One
+	// helper for every connect path (#57).
+	instance, err = wakeForConnect(ctx, client, instance, connectNoStart, instanceIdentifier, os.Stderr, func(ctx context.Context, id string) (*aws.InstanceInfo, error) {
+		return resolveInstance(ctx, client, id)
+	})
+	if err != nil {
+		return err
 	}
 
 	// Non-startable states (pending, shutting-down, terminated)
@@ -648,24 +628,15 @@ func connectDCV(ctx context.Context, client *aws.Client, instance *aws.InstanceI
 		appName = "app"
 	}
 
-	// Wake the instance if it has been stopped by idle timeout.
-	if instance.State == "stopped" {
-		fmt.Fprintf(os.Stderr, "Instance is stopped — starting it back up...\n")
-		if err := client.StartInstance(ctx, instance.Region, instance.InstanceID); err != nil {
-			return fmt.Errorf("start instance: %w", err)
-		}
-		// Same as above (#752): the waiter, then one refresh.
-		fmt.Fprintf(os.Stderr, "Waiting for instance to reach running state...")
-		if err := client.WaitForRunning(ctx, instance.Region, instance.InstanceID, 2*time.Minute); err != nil {
-			fmt.Fprintf(os.Stderr, "\n")
-			return fmt.Errorf("instance did not reach running state: %w", err)
-		}
-		refreshed, err := resolveInstance(ctx, client, instance.InstanceID)
-		if err != nil {
-			return fmt.Errorf("re-read instance after start: %w", err)
-		}
-		instance = refreshed
-		fmt.Fprintf(os.Stderr, " running\n")
+	// Wake the instance if it has been stopped or hibernated by idle timeout:
+	// the same helper, and the same --no-start opt-out, as the shell path
+	// (#57). This path used to start only "stopped" — a "stopping" instance
+	// fell through to a five-minute wait for a ready URL that could not come.
+	instance, err := wakeForConnect(ctx, client, instance, connectNoStart, instance.InstanceID, os.Stderr, func(ctx context.Context, id string) (*aws.InstanceInfo, error) {
+		return resolveInstance(ctx, client, id)
+	})
+	if err != nil {
+		return err
 	}
 
 	// Wait for spored to write a fresh spawn:ready-url (new token after restart)

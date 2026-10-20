@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `aws.Client.WaitForStopped` (Go API): the SDK's instance-stopped waiter.
+
+### Changed
+
+- **`spawn connect` wakes a stopped, hibernated or stopping instance on every
+  connect path (#57).** The shell/one-shot path and the DCV app path each had
+  their own auto-start; the app path started only a `stopped` instance and
+  ignored `--no-start`. Both now share one helper. A `stopping` instance is
+  waited out and then started (EC2 refuses to start one mid-stop, so this
+  used to fail on the shell path and fall through to a five-minute ready-URL
+  wait on the app path). A hibernated instance is reported as "hibernated —
+  resuming it", and the wait for it to run is now up to five minutes rather
+  than two, since a resume restores RAM from disk.
+
+- **`spawn resume` no longer guesses us-east-1 (#495).** It reconciles each
+  launched instance in the region recorded for it in the sweep state (new
+  `region` field, written at launch), else the region its parameter set or the
+  file's defaults name, else `--region`/`SPORE_REGION`/`AWS_REGION`/spore
+  config. With none of those it stops with an error asking for `--region`,
+  instead of reconciling against, and launching into, a region the sweep never
+  used. Sweeps whose instances span regions are reconciled in each.
+
+### Fixed
+
+- `spawn resume` panicked (`interface conversion: interface {} is nil, not
+  string`) on a sweep whose parameter file has no `region` in its defaults —
+  every sweep launched with `--region` alone — once any instance had launched
+  (#495).
+
 ## [0.137.0] - 2026-10-20
 
 ### Added

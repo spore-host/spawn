@@ -419,6 +419,7 @@ func (*Client) WaitForPublicIP(ctx context.Context, region, instanceID string, t
 func (*Client) WaitForRunning(ctx context.Context, region, instanceID string, timeout time.Duration) error
 func (*Client) WaitForSSMOnline(ctx context.Context, region, instanceID string, timeout time.Duration) error
 func (*Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceID string, timeout time.Duration, onProgress func(elapsed time.Duration)) error
+func (*Client) WaitForStopped(ctx context.Context, region, instanceID string, timeout time.Duration) error
 func (*LaunchError) Error() string
 func (*LaunchError) Unwrap() error
 func (DisplayPrice) SourceLabel() string

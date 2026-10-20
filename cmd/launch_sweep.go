@@ -541,6 +541,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 			state.Instances = append(state.Instances, InstanceState{
 				Index:      i,
 				InstanceID: instance.InstanceID,
+				Region:     instance.Region,
 				State:      "running",
 				LaunchedAt: time.Now(),
 			})
@@ -663,6 +664,7 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 			state.Instances = append(state.Instances, InstanceState{
 				Index:      i,
 				InstanceID: instance.InstanceID,
+				Region:     instance.Region,
 				State:      "running",
 				LaunchedAt: time.Now(),
 			})
@@ -751,6 +753,7 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 							state.Instances = append(state.Instances, InstanceState{
 								Index:      nextToLaunch,
 								InstanceID: result.InstanceID,
+								Region:     result.Region,
 								State:      "running",
 								LaunchedAt: time.Now(),
 							})
