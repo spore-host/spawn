@@ -187,7 +187,10 @@ func TestTaskRunRefusesUserDataOverTheEC2Limit(t *testing.T) {
 // bytes the real launch sends. With a results_prefix given (so no placeholder
 // account is involved) and the run id the preflight uses, the two are equal.
 func TestTaskUserDataPreflightMatchesTheLaunch(t *testing.T) {
-	spec := userDataSpec(2000)
+	// Any size under the limit will do; this compares two measurements, it does
+	// not probe the limit (the bisection above does). 2000 stopped fitting when
+	// the wrapper's IMDS lookup (spawn#1260) added ~200 bytes.
+	spec := userDataSpec(1500)
 	spec.ResultsPrefix = "s3://my-bucket/tasks/x"
 	got, err := taskUserDataPreflight(spec, userDataTestSized, "us-east-1")
 	if err != nil {

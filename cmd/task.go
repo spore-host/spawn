@@ -570,8 +570,9 @@ func pollCompletion(ctx context.Context, store taskResultStore, region, resultsB
 	}
 	var notedStale bool
 	for {
-		rec, present, err := fetchCompletion(ctx, store, region, resultsBucket, keyPrefix, taskID)
-		if err != nil {
+		rec, _, err := tasklaunch.ReadCompletionAt(ctx, store, region, resultsBucket, keyPrefix)
+		present := err == nil
+		if err != nil && !errors.Is(err, tasklaunch.ErrNoCompletionRecord) {
 			return nil, err
 		}
 		if present {
@@ -603,25 +604,6 @@ func pollCompletion(ctx context.Context, store taskResultStore, region, resultsB
 	}
 }
 
-// fetchCompletion reads and parses tasks/<taskID>/completion.json from the
-// results bucket. present=false (nil error) means the record isn't there yet —
-// the task is still running. It does NOT judge run identity: `task status` has no
-// run id to compare against, so that check lives in pollCompletion.
-func fetchCompletion(ctx context.Context, store taskResultStore, region, resultsBucket, keyPrefix, taskID string) (rec *taskproto.CompletionRecord, present bool, err error) {
-	data, err := store.GetS3Object(ctx, region, resultsBucket, completionKey(keyPrefix))
-	if err != nil {
-		if errors.Is(err, aws.ErrS3NoSuchKey) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	rec, err = taskproto.ParseCompletionRecord(data)
-	if err != nil {
-		return nil, false, err
-	}
-	return rec, true, nil
-}
-
 // printCompletion renders a CompletionRecord as human text.
 func printCompletion(out io.Writer, rec *taskproto.CompletionRecord) {
 	fmt.Fprintf(out, "Task:       %s\n", rec.TaskID)
@@ -632,6 +614,9 @@ func printCompletion(out io.Writer, rec *taskproto.CompletionRecord) {
 	}
 	fmt.Fprintf(out, "State:      %s\n", rec.State)
 	fmt.Fprintf(out, "Exit code:  %d\n", rec.ExitCode)
+	if rec.InstanceType != "" || rec.Purchase != "" {
+		fmt.Fprintf(out, "Instance:   %s %s\n", orDash(rec.InstanceType), orDash(rec.Purchase))
+	}
 	if rec.StartedAt != "" {
 		fmt.Fprintf(out, "Started:    %s\n", rec.StartedAt)
 	}
@@ -675,29 +660,15 @@ With --check-complete, exit codes mirror 'spawn status': 0=completed,
 		if region == "" {
 			return fmt.Errorf("no region: pass --region or configure a default AWS region")
 		}
-		account, err := client.GetAccountID(ctx)
-		if err != nil {
-			if taskStatusCheckDone {
-				os.Exit(3)
-			}
-			return fmt.Errorf("resolve account id: %w", err)
-		}
 		// `task status` is given a task id, not a spec, so it cannot infer a
 		// results_prefix the spec set (spawn#646). --results-prefix is how a caller
 		// that moved its records tells status where to look; without it this stays
 		// on spawn's default, which is where every existing task's records are.
-		statusPrefix := &taskproto.TaskSpec{TaskID: taskID, ResultsPrefix: taskStatusResultsPrefix}
-		fullPrefix := taskproto.EffectiveResultsPrefix(statusPrefix, account, region)
-		resultsBucket, keyPrefix, ok := taskproto.SplitS3URI(fullPrefix)
-		if !ok {
-			if taskStatusCheckDone {
-				os.Exit(3)
-			}
-			return fmt.Errorf("--results-prefix %q is not an s3://bucket/prefix URI", taskStatusResultsPrefix)
-		}
-
-		rec, present, err := fetchCompletion(ctx, client, region, resultsBucket, keyPrefix, taskID)
-		if err != nil {
+		// tasklaunch.ReadCompletion is the one reader of completion records, which
+		// the MCP server calls too (spawn#1260).
+		rec, _, err := tasklaunch.ReadCompletion(ctx, client, taskID, taskStatusResultsPrefix, region)
+		present := err == nil
+		if err != nil && !errors.Is(err, tasklaunch.ErrNoCompletionRecord) {
 			if taskStatusCheckDone {
 				fmt.Fprintf(os.Stderr, "task status: %v\n", err)
 				os.Exit(3)

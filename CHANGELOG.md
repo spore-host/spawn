@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`pkg/tasklaunch`: `ReadCompletion`, the one reader of task completion
+  records (#1260).** `tasklaunch.ReadCompletion(ctx, store, taskID,
+  resultsPrefix, region)` resolves the record's location exactly as the launch
+  does (`EffectiveResultsPrefix`, honouring a spec's `results_prefix` as
+  `spawn task status --results-prefix` does), reads it and parses it, and
+  returns the record with its `s3://` URI. A missing record wraps the new
+  sentinel `tasklaunch.ErrNoCompletionRecord` (test with `errors.Is`), so a
+  caller can tell "no record yet" from a failed read or a malformed record.
+  `ReadCompletionAt(ctx, s3, region, bucket, taskPrefix)` is the same read for a
+  caller that already holds the resolved location. `spawn task status` and
+  `spawn task run --wait` now read through them, and spore-host-mcp can drop
+  its copy of the chain, so front ends cannot drift from the writer again (the
+  #715 class). A test fails if `cmd/` reads a completion record any other way.
+- **Completion records carry `instance_type` and `purchase` (#1260).** The task
+  wrapper asks IMDS for the instance's type and life cycle when the task starts,
+  and writes `instance_type` (for example `m7i.large`) and `purchase` (`spot` or
+  `on_demand`) into `completion.json`. The terminal-flush hook's record carries
+  the same two fields. A reader can now price a record that has no
+  `cost_estimate` after EC2 has stopped listing the terminated instance. Both
+  fields are additive and omitted when IMDS does not answer, and records written
+  before this release still parse. `spawn task status` prints them. The lookup
+  adds about 200 bytes to the task's 16 KiB user-data budget.
+  `taskproto.SetIMDSBaseForTest` lets exec-based tests outside the package keep
+  the generated wrapper off the real IMDS address.
+
 ## [0.138.0] - 2026-10-20
 
 ### Added

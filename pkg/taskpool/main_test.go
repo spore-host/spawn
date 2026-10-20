@@ -26,6 +26,9 @@ func TestMain(m *testing.M) {
 		panic("create temp record dir: " + err.Error())
 	}
 	restore := taskproto.SetLocalRecordDirForTest(dir)
+	// Never ask the real IMDS from a test (spawn#1260): loopback is refused
+	// at once and is outside the hermetic recorder's proxy (#968).
+	restoreIMDS := taskproto.SetIMDSBaseForTest("http://127.0.0.1:9/latest")
 
 	binDir, err := os.MkdirTemp("", "taskpool-bin-")
 	if err != nil {
@@ -38,6 +41,7 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	code := m.Run()
+	restoreIMDS()
 	restore()
 	_ = os.RemoveAll(dir)
 	_ = os.RemoveAll(binDir)

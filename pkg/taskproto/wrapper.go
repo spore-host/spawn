@@ -116,6 +116,7 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	// file, a record flushed by a TTL kill would have to either omit started_at or
 	// invent one. Best-effort — losing it costs one field, not the record.
 	p("printf '%%s' \"$STARTED_AT\" > %s 2>/dev/null || true\n", shQuote(StartedAtPath()))
+	writeInstanceFacts(p)
 	writeProvenanceSetup(p, spec, runID)
 	// Phase markers. completion.json carries only started_at/ended_at, so the
 	// whole interval between them — stage-in, the Docker install, the image pull,
@@ -387,6 +388,7 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	p("  \"started_at\": \"$STARTED_AT\",\n")
 	p("  \"ended_at\": \"$ENDED_AT\",\n")
 	p("  $COST_JSON\n")
+	p("  $INSTANCE_JSON\n")
 	p("  \"logs\": $LOGS_JSON,\n")
 	p("  \"retry_class\": \"$RETRY_CLASS\"\n")
 	p("}\n")
@@ -803,4 +805,47 @@ func safePathPart(id string) string {
 		return "run"
 	}
 	return b.String()
+}
+
+// imdsBase is the instance metadata service the wrapper asks for its instance
+// type and life cycle. A generate-time value, like localRecordDir, so the
+// exec-based tests of this package and pkg/taskpool can point it at loopback:
+// under the hermetic test wrapper (#968) a request to the real address goes to
+// the recorder and fails the package.
+var imdsBase = "http://169.254.169.254/latest"
+
+// SetIMDSBaseForTest points the generated wrapper's IMDS lookups at base (the
+// part before /api/token and /meta-data/) for the rest of this test binary's
+// run, and returns a function restoring the previous value. Exported for
+// pkg/taskpool's exec tests, as SetLocalRecordDirForTest is.
+func SetIMDSBaseForTest(base string) (restore func()) {
+	prev := imdsBase
+	imdsBase = base
+	return func() { imdsBase = prev }
+}
+
+// writeInstanceFacts emits the IMDS lookup that fills completion.json's
+// instance_type and purchase (spawn#1260): INSTANCE_JSON is those two members,
+// each with its trailing comma, or nothing for one IMDS did not answer. It is
+// also persisted to instanceFactsPath for the terminal-flush hook, which runs
+// against a deadline and so does not ask IMDS itself.
+//
+// IMDSv2 only, as spawn launches require it. Best-effort and bounded: off EC2,
+// or with IMDS unreachable, the token request gives up after one second, the
+// two reads are skipped, and the record omits the fields rather than guessing. Only a plain instance type
+// ([a-z0-9.-]) and a life cycle of exactly spot or on-demand reach the record,
+// so no IMDS answer can break the completion.json heredoc.
+//
+// Kept terse on purpose: every byte here rides in the instance's user data,
+// which EC2 caps at 16 KiB after gzip (spawn#1063).
+func writeInstanceFacts(p func(string, ...interface{})) {
+	p("IMDS_TOKEN=\"$(curl -sfm1 -XPUT %s -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)\"\n", imdsBase+"/api/token")
+	p("imds() { [ -n \"$IMDS_TOKEN\" ] && curl -sfm1 -H \"X-aws-ec2-metadata-token: $IMDS_TOKEN\" \"%s/meta-data/$1\" 2>/dev/null; }\n", imdsBase)
+	p("INSTANCE_JSON=''; IT=\"$(imds instance-type)\"\n")
+	p("case \"$IT\" in ''|*[!a-z0-9.-]*) ;; *) INSTANCE_JSON=\"\\\"instance_type\\\": \\\"$IT\\\",\" ;; esac\n")
+	p("case \"$(imds instance-life-cycle)\" in\n")
+	p("  spot) INSTANCE_JSON=\"$INSTANCE_JSON \\\"purchase\\\": \\\"%s\\\",\" ;;\n", PurchaseSpot)
+	p("  on-demand) INSTANCE_JSON=\"$INSTANCE_JSON \\\"purchase\\\": \\\"%s\\\",\" ;;\n", PurchaseOnDemand)
+	p("esac\n")
+	p("printf '%%s' \"$INSTANCE_JSON\" > %s 2>/dev/null\n\n", shQuote(instanceFactsPath()))
 }

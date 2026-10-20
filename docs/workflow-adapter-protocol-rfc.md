@@ -84,7 +84,10 @@ InputManifest / OutputManifest
 
 LaunchResult       { instance_id, region, az, instance_type, spot }
 TaskState          submitted | launching | running | completed | failed | cancelled
-CompletionRecord   { exit_code, state, started_at, ended_at, cost_estimate, logs[] }
+CompletionRecord   { exit_code, state, started_at, ended_at, cost_estimate, logs[],
+                     instance_type, purchase }
+                   # instance_type / purchase (spot | on_demand): additive,
+                   # omitted when unknown; from IMDS on the instance (spawn#1260)
 Cancellation       { task_id, reason }
 RetryClassification  app_error | capacity | spot_interruption | staging_error |
                      output_delivery_error | instance_health | spec_error |

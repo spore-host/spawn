@@ -60,6 +60,20 @@ type CompletionRecord struct {
 	// and a record from a pre-#632 instance still parses with this empty. A reader
 	// can treat a non-empty value as "this task was cut short, not completed".
 	TerminalReason ExitReason `json:"terminal_reason,omitempty"`
+
+	// InstanceType and Purchase are the instance the task ran on, as the
+	// instance itself reported them through IMDS at run time (spawn#1260):
+	// instance-type, and instance-life-cycle mapped to PurchaseSpot or
+	// PurchaseOnDemand. They are what a reader needs to price a record that
+	// carries no cost_estimate once EC2 has stopped listing the terminated
+	// instance, about an hour after it ends.
+	//
+	// Both are additive and omitempty, like RunID and TerminalReason: a field
+	// is left out when IMDS did not answer, or answered with a life cycle that
+	// is neither spot nor on-demand, rather than guessed. A record written by a
+	// pre-#1260 wrapper parses with both empty.
+	InstanceType string `json:"instance_type,omitempty"`
+	Purchase     string `json:"purchase,omitempty"` // PurchaseSpot | PurchaseOnDemand
 }
 
 // ParseCompletionRecord unmarshals a CompletionRecord from the bytes of a
