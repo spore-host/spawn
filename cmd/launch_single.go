@@ -915,7 +915,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	result.PublicIP = publicIP
 	prog.Complete("Getting public IP")
 
-	sshUnreachableReason := ""
+	var sshUnreachableReason string
 
 	// Step 10: Wait for the instance to be usable. For Windows, SSH (22) won't
 	// answer until late and the real "usable" signal is the Administrator password

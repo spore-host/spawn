@@ -116,7 +116,6 @@ func NewSSMAssembler(client LaunchAPI, region, accountBase36 string, ssmOnlineTi
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(maxSSMPushConcurrency)
 		for _, m := range members {
-			m := m
 			if m.ProviderID == "" {
 				return fmt.Errorf("member %s has no instance ID for SSM push", m.ID)
 			}

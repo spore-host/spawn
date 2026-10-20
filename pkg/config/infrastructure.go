@@ -97,7 +97,7 @@ func LoadInfrastructureConfig(ctx context.Context, flagMode string) (*Infrastruc
 	fileConfig, err := loadFromFile()
 	if err == nil && fileConfig != nil {
 		if fileConfig.Infrastructure.Mode != "" {
-			cfg.Mode = InfrastructureMode(fileConfig.Infrastructure.Mode)
+			cfg.Mode = fileConfig.Infrastructure.Mode
 		}
 
 		// DynamoDB

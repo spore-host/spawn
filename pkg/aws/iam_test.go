@@ -32,7 +32,7 @@ func TestGenerateScopedS3Policy(t *testing.T) {
 	}
 
 	// Verify policy contains scoped resources
-	policyStr := string(policy)
+	policyStr := policy
 	if !strings.Contains(policyStr, "spawn-binaries-"+region) {
 		t.Error("Policy does not include spawn-binaries bucket for region")
 	}
@@ -81,7 +81,7 @@ func TestGenerateScopedDynamoDBPolicy(t *testing.T) {
 	}
 
 	// Verify policy contains spawn tables
-	policyStr := string(policy)
+	policyStr := policy
 	requiredTables := []string{
 		"spawn-alerts",
 		"spawn-alert-history",
@@ -127,7 +127,7 @@ func TestGenerateScopedCloudWatchLogsPolicy(t *testing.T) {
 	}
 
 	// Verify policy contains audit log group
-	policyStr := string(policy)
+	policyStr := policy
 	if !strings.Contains(policyStr, "/aws/spawn/audit") {
 		t.Error("Policy does not include audit log group")
 	}

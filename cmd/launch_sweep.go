@@ -611,7 +611,7 @@ func launchWithRollingQueue(ctx context.Context, awsClient *aws.Client, launchCo
 
 	// Track active instances (index -> instance ID)
 	activeInstances := make(map[int]string)
-	nextToLaunch := 0
+	var nextToLaunch int
 
 	// Launch first batch
 	initialBatch := maxConcurrent
