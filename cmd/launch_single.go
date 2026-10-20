@@ -1317,7 +1317,11 @@ func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *a
 	if err := windowsLifecycleGuard(config); err != nil {
 		return err
 	}
-	if err := windowsPluginGuard(config.TargetOS, collectPluginDeclarations()); err != nil {
+	decls, err := collectPluginDeclarations()
+	if err != nil {
+		return err
+	}
+	if err := windowsPluginGuard(config.TargetOS, decls); err != nil {
 		return err
 	}
 	// Reject burstable types for Windows (catches auto-detected Windows where the

@@ -55,6 +55,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   included, and is refused for a DCV or desktop app. It used to be read only
   with `--web-port` and silently ignored otherwise (#1153).
 
+- **Plugin declarations are now strict (#1116).** Each of these used to be
+  accepted silently, so a plugin was not installed or was misconfigured with no
+  word; each is now an error:
+  - `spawn launch --config FILE` where FILE is missing or does not parse. The
+    error was dropped and the instance launched with no plugins. It is now
+    reported before any AWS work, `--dry-run` included.
+  - A key the launch config does not have, at the top level
+    (`instance_type:`, `ttl:`) or in a `plugins:` entry (`name:` instead of
+    `ref:`), and a `plugins:` entry with no `ref`. The file is decoded with
+    unknown fields refused, and the error names the line.
+  - A plugin config key the plugin's spec does not declare
+    (`spawn plugin install --config`, or a launch config's `config:` map). It
+    used to be passed through and ignored. The error lists the keys the
+    plugin accepts.
+
 ### Fixed
 
 - `spawn status`, `spawn list`'s TTL column and `spawn start`'s notice put the

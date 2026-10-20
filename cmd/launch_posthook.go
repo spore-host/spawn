@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -21,14 +23,27 @@ type LaunchConfig struct {
 }
 
 // loadLaunchConfig reads a launch config YAML file.
+//
+// Decoding is strict (#1116): a key the file format does not have — a top-level
+// instance_type:, or a plugins entry written as name: instead of ref: — is an
+// error naming the line, not a silently ignored field. So is a plugins entry
+// with no ref, which used to decode to an empty declaration that installed
+// nothing.
 func loadLaunchConfig(path string) (*LaunchConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read launch config %s: %w", path, err)
 	}
 	var cfg LaunchConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse launch config %s: %w", path, err)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parse launch config %s: %w\n  A launch config holds only a plugins: list, and each entry takes ref: and an optional config: map", path, err)
+	}
+	for i, d := range cfg.Plugins {
+		if strings.TrimSpace(d.Ref) == "" {
+			return nil, fmt.Errorf("launch config %s: plugins[%d] has no ref (each entry needs ref: <plugin>, e.g. ref: rstudio-server)", path, i)
+		}
 	}
 	return &cfg, nil
 }

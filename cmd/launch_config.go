@@ -115,6 +115,11 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if err := validateOnIdle(onIdle); err != nil {
 		return nil, err
 	}
+	// A bad --config file fails here, before any AWS work, on every path that
+	// builds a config (single, sweep, pipe and --dry-run) (#1116).
+	if _, err := collectPluginDeclarations(); err != nil {
+		return nil, err
+	}
 
 	// From truffle input
 	if truffleInput != nil {
@@ -744,10 +749,15 @@ func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScr
 	// all-or-nothing and never take that path.
 	readyGates := readyGatesForLaunch(mpiEnabled)
 
+	pluginDecls, err := collectPluginDeclarations()
+	if err != nil {
+		return "", err
+	}
+
 	return launcher.BuildLinuxBootstrap(launcher.BootstrapConfig{
 		Username:         username,
 		PublicKey:        publicKey,
-		Plugins:          collectPluginDeclarations(),
+		Plugins:          pluginDecls,
 		StorageScript:    storageScript,
 		ReadyMountPoints: readyMountPoints,
 		ReadyGates:       readyGates,
@@ -774,14 +784,20 @@ func nonSweepCommand(config *aws.LaunchConfig) string {
 }
 
 // collectPluginDeclarations merges plugin refs from --plugin flags and --config file.
-func collectPluginDeclarations() []plugin.Declaration {
+//
+// A --config file that cannot be read or parsed is an error, never an empty
+// plugin list (#1116): the error used to be dropped here, so a typo'd path
+// launched an instance with none of the plugins it named.
+func collectPluginDeclarations() ([]plugin.Declaration, error) {
 	var decls []plugin.Declaration
 
 	// From --config YAML file.
 	if launchConfigFile != "" {
-		if cfg, err := loadLaunchConfig(launchConfigFile); err == nil {
-			decls = append(decls, cfg.Plugins...)
+		cfg, err := loadLaunchConfig(launchConfigFile)
+		if err != nil {
+			return nil, fmt.Errorf("--config: %w", err)
 		}
+		decls = append(decls, cfg.Plugins...)
 	}
 
 	// From --plugin flags (simple refs without per-plugin config).
@@ -789,5 +805,5 @@ func collectPluginDeclarations() []plugin.Declaration {
 		decls = append(decls, plugin.Declaration{Ref: ref})
 	}
 
-	return decls
+	return decls, nil
 }

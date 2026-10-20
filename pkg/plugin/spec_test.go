@@ -1,6 +1,7 @@
 package plugin_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/plugin"
@@ -88,5 +89,35 @@ func TestResolvedConfig(t *testing.T) {
 				t.Errorf("dir = %q, want %q", got["dir"], tc.wantDir)
 			}
 		})
+	}
+}
+
+// A config key the spec does not declare is refused, naming the keys it does
+// accept (#1116). It used to be passed through, so a typo or a stale key was
+// silently ignored by an install that never read it.
+func TestResolvedConfig_RejectsUndeclaredKeys(t *testing.T) {
+	spec := &plugin.PluginSpec{
+		Name: "p",
+		Config: map[string]plugin.ConfigParam{
+			"dir":  {Default: "/data"},
+			"name": {Required: true},
+		},
+	}
+	got, err := spec.ResolvedConfig(map[string]string{"name": "ep", "name_typo": "typo", "auth_key": "x"})
+	if err == nil {
+		t.Fatalf("ResolvedConfig = %v, nil; want an error for the undeclared keys", got)
+	}
+	for _, want := range []string{"auth_key, name_typo", "it accepts: dir, name"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+
+	none := &plugin.PluginSpec{Name: "q"}
+	if _, err := none.ResolvedConfig(map[string]string{"x": "1"}); err == nil || !strings.Contains(err.Error(), "declares no config parameters") {
+		t.Errorf("spec with no config: err = %v, want it to say it declares none", err)
+	}
+	if got, err := none.ResolvedConfig(nil); err != nil || len(got) != 0 {
+		t.Errorf("spec with no config, no input: = %v, %v; want empty, nil", got, err)
 	}
 }
