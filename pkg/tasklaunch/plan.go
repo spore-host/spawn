@@ -2,6 +2,7 @@ package tasklaunch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -32,6 +33,10 @@ type TaskPlan struct {
 	// false when either is unknown.
 	MaxCost      float64
 	MaxCostKnown bool
+	// Network is where the instance will go: placement.subnet_id, or the
+	// region's default VPC. Plan fails a spec that names no subnet in a region
+	// with no default VPC, before anything launches (spawn#1267).
+	Network string
 	// UserDataBytes is the size of the user data the launch would send, as
 	// EC2's 16 KiB limit counts it (#1063). Plan fails a spec over the limit.
 	UserDataBytes int
@@ -52,8 +57,10 @@ type TaskPlan struct {
 // through deps.Finder (#1253), and the pinned-type checks (the container floor
 // warning and the shm_gib bound, #1111) read its memory from that lookup,
 // asking deps.AWS only if it failed. The user data is measured before any AWS
-// call (#1063), so an oversized spec fails here. deps.Finder is required;
-// deps.AWS may be nil.
+// call (#1063), so an oversized spec fails here. A spec without
+// placement.subnet_id fails here too when the region has no default VPC
+// (spawn#1267), checked through deps.AWS. deps.Finder is required; deps.AWS
+// may be nil, and then neither check that needs it runs.
 func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region string) (*TaskPlan, error) {
 	sized, err := taskproto.Size(ctx, deps.Finder, spec.SizingRequest())
 	if err != nil {
@@ -75,12 +82,18 @@ func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region strin
 		return nil, err
 	}
 
+	network, err := planNetwork(ctx, deps.AWS, spec, region)
+	if err != nil {
+		return nil, err
+	}
+
 	p := &TaskPlan{
 		Spec:          spec,
 		Region:        region,
 		Sized:         sized,
 		AMI:           taskAMIPlan(spec, sized.InstanceType),
 		Purchase:      spec.Resources.Purchase,
+		Network:       network,
 		UserDataBytes: userDataBytes,
 	}
 	if p.Purchase == "" {
@@ -121,6 +134,7 @@ func Render(out io.Writer, p *TaskPlan) {
 		fmt.Fprintf(out, "Container:    %s  [%s]\n", p.Spec.Container, mode)
 	}
 	fmt.Fprintf(out, "Region:       %s\n", p.Region)
+	fmt.Fprintf(out, "Network:      %s\n", p.Network)
 	fmt.Fprintf(out, "Instance:     %s  (%s)\n", p.Sized.InstanceType, instanceSizeSummary(p.Sized))
 	if p.Sized.Pinned {
 		fmt.Fprintf(out, "              pinned by spec (resources.instance_type)\n")
@@ -175,6 +189,60 @@ func Render(out io.Writer, p *TaskPlan) {
 			fmt.Fprintf(out, "  %s → %s\n", m.Source, m.Destination)
 		}
 	}
+}
+
+// defaultVPCLookup is the question Plan asks when a spec names no subnet;
+// *aws.Client satisfies it. Plan type-asserts Deps.AWS for it rather than
+// adding it to AWS, so an embedder's AWS implementation still compiles; one
+// without it gets an unchecked plan, as every plan was before spawn#1267.
+type defaultVPCLookup interface {
+	DefaultVPCOrSubnets(ctx context.Context, region string, max int) (string, []aws.SubnetHint, error)
+}
+
+// subnetHintLimit is how many subnets the no-default-VPC error suggests.
+const subnetHintLimit = 5
+
+// planNetwork is the plan's Network line. A spec with placement.subnet_id
+// launches there. One without it launches into the default VPC, so in a region
+// that has none, which is usual for Control Tower and Landing Zone Accelerator
+// accounts, it fails here, naming subnets to use, instead of at RunInstances
+// (spawn#1267). When EC2 cannot be asked, the launch goes ahead as it always
+// has and EC2 gives the final answer.
+func planNetwork(ctx context.Context, client AWS, spec *taskproto.TaskSpec, region string) (string, error) {
+	if id := spec.Placement.SubnetID; id != "" {
+		return id + " (placement.subnet_id)", nil
+	}
+	lookup, ok := client.(defaultVPCLookup)
+	if !ok {
+		return "default VPC (placement.subnet_id not set)", nil
+	}
+	vpcID, hints, err := lookup.DefaultVPCOrSubnets(ctx, region, subnetHintLimit)
+	if err != nil {
+		return fmt.Sprintf("default VPC (placement.subnet_id not set; could not check it exists: %v)", err), nil
+	}
+	if vpcID != "" {
+		return fmt.Sprintf("default VPC %s (placement.subnet_id not set)", vpcID), nil
+	}
+	return "", noDefaultVPCError(region, hints)
+}
+
+// noDefaultVPCError says why a spec without placement.subnet_id cannot launch
+// in region and which subnets it could name instead.
+func noDefaultVPCError(region string, hints []aws.SubnetHint) error {
+	if len(hints) == 0 {
+		return fmt.Errorf("no default VPC and no subnets in %s: this task cannot launch there. Create a VPC with a subnet and set placement.subnet_id, or create a default VPC (aws ec2 create-default-vpc --region %s)", region, region)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "no default VPC in %s, so this task needs placement.subnet_id. Subnets in the region:", region)
+	for _, h := range hints {
+		public := ""
+		if h.MapPublicIPOnLaunch {
+			public = ", maps public IPs"
+		}
+		fmt.Fprintf(&b, "\n  %s  (%s, %s%s)", h.SubnetID, h.VPCID, h.AvailabilityZone, public)
+	}
+	b.WriteString("\nThe subnet needs a route to S3 and the EC2 API, through an internet gateway, a NAT gateway or VPC endpoints: the task stages its data through S3, and spored reads its settings from EC2.")
+	return errors.New(b.String())
 }
 
 // memoryLookup is the one AWS question the pinned-type checks ask; *aws.Client

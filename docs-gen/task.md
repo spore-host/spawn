@@ -87,6 +87,11 @@ driver (spawn#601), and everything else gets the standard AL2023 for the type's
 architecture. Pin a specific AMI with --ami (or placement.ami in the spec); an
 explicit AMI always wins over auto-selection.
 
+A task launches into the region's default VPC unless the spec names a subnet
+with placement.subnet_id, as --subnet-id does for spawn launch. In a region with
+no default VPC, usual for Control Tower and Landing Zone Accelerator accounts, a
+spec without one fails before launching and lists subnets to use (spawn#1267).
+
 Re-running the same task_id is safe with --wait: the results of the previous
 attempt are cleared at launch, and every run stamps a run_id into its completion
 record, so --wait ignores any record that isn't from the run it just launched
