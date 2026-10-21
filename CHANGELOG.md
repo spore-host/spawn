@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`spawn version` and `spawn --version` describe spawn as "ephemeral compute
+  for AWS"**, in line with the project's own description, instead of "EC2
+  Instance Lifecycle Manager".
+
 ## [0.140.0] - 2026-10-20
 
 ### Added
