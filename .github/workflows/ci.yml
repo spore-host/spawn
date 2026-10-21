@@ -31,7 +31,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: '1.26.10'
 
       # Formatting gate. Runs first because it's the cheapest check and the
       # fastest to act on. CI had no formatting check at all, and `make check`
@@ -335,7 +335,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: '1.26.10'
 
       # Verified the same way as staticcheck and gitleaks (#885): pinned version
       # AND pinned hash, the hash held here rather than read from the release's
@@ -404,7 +404,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: '1.26.10'
 
       - name: Unit tests (Windows)
         shell: bash
@@ -423,7 +423,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: '1.26.10'
 
       - name: Build spawn binary
         run: go build -o bin/spawn .
