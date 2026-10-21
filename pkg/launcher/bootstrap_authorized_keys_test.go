@@ -23,7 +23,9 @@ import (
 // instead of /home, so it can run for real under bash.
 func authorizedKeysStep(t *testing.T, script, homeRoot string) string {
 	t.Helper()
-	start := strings.Index(script, "# Decode and write SSH public key")
+	// Anchored on code, not on the comment above it: the bootstrap ships
+	// without comments (#1246).
+	start := strings.Index(script, "if [ -n \"$LOCAL_SSH_KEY_BASE64\" ]; then")
 	if start < 0 {
 		t.Fatal("bootstrap has no authorized_keys step")
 	}
