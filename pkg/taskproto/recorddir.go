@@ -40,6 +40,7 @@ const (
 	terminalFileName = "spawn-completion-terminal.json"
 	exitCodeFileName = "spawn.exitcode"
 	startedAtName    = "spawn-task-started-at"
+	instanceName     = "spawn-task-instance"
 )
 
 // CompletionRecordPath is where the generated wrapper writes its local copy of
@@ -51,6 +52,11 @@ func CompletionRecordPath() string { return localPath(completionFileName) }
 // separate process that cannot see the wrapper's shell variables — reports the
 // same start time the normal record would have carried.
 func StartedAtPath() string { return localPath(startedAtName) }
+
+// instanceFactsPath is where the wrapper persists the completion.json members
+// it built from IMDS (instance_type and purchase, spawn#1260), so the flush
+// hook's record carries the same two fields without asking IMDS again.
+func instanceFactsPath() string { return localPath(instanceName) }
 
 // SetLocalRecordDirForTest points the generated scripts' local artifact paths at
 // dir for the rest of this test binary's run, and returns a function restoring

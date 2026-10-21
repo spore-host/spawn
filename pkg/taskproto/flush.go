@@ -125,6 +125,12 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	// honest about not knowing rather than inventing "now".
 	p("STARTED_AT=\"$(cat %s 2>/dev/null)\"\n", shQuote(StartedAtPath()))
 	p("ENDED_AT=\"$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\"\n\n")
+	// instance_type and purchase (spawn#1260): the record members the wrapper
+	// built from IMDS, read back from its file rather than asked of IMDS again,
+	// because this hook runs against a deadline. No file, no fields. The file is
+	// the task user's to write, but so is the wrapper's own completion.json, so
+	// reading it grants nothing new.
+	p("INSTANCE_JSON=\"$(cat %s 2>/dev/null)\"\n\n", shQuote(instanceFactsPath()))
 
 	// The log is the artifact that actually answers "how far did it get" — upload
 	// it FIRST, before the record, so a hook that runs out of time still salvages
@@ -157,6 +163,7 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	p("  \"state\": %s,\n", jsonStr(string(StateFailed)))
 	p("  \"started_at\": \"$STARTED_AT\",\n")
 	p("  \"ended_at\": \"$ENDED_AT\",\n")
+	p("  $INSTANCE_JSON\n")
 	p("  \"logs\": $LOGS_JSON,\n")
 	p("  \"retry_class\": \"$RETRY_CLASS\",\n")
 	p("  \"terminal_reason\": \"$REASON\"\n")

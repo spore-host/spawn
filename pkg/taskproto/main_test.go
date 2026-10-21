@@ -23,7 +23,11 @@ func TestMain(m *testing.M) {
 		panic("create temp record dir: " + err.Error())
 	}
 	restore := SetLocalRecordDirForTest(dir)
+	// Never ask the real IMDS from a test (spawn#1260): loopback is refused
+	// at once and is outside the hermetic recorder's proxy (#968).
+	restoreIMDS := SetIMDSBaseForTest("http://127.0.0.1:9/latest")
 	code := m.Run()
+	restoreIMDS()
 	restore()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

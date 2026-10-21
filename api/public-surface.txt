@@ -659,6 +659,8 @@ func LauncherProvisioner(client *aws.Client) Provisioner
 func NewDeps(client *aws.Client, region string, warn io.Writer) Deps
 func NewFinder(cfg awssdk.Config, region string, warn, verbose io.Writer) taskproto.InstanceFinder
 func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region string) (*TaskPlan, error)
+func ReadCompletion(ctx context.Context, store CompletionStore, taskID, resultsPrefix, region string) (rec *taskproto.CompletionRecord, uri string, err error)
+func ReadCompletionAt(ctx context.Context, store CompletionGetter, region, resultsBucket, taskPrefix string) (rec *taskproto.CompletionRecord, uri string, err error)
 func Render(out io.Writer, p *TaskPlan)
 method AWS.CreateOrGetInstanceProfile (ctx context.Context, config aws.IAMRoleConfig) (string, error)
 method AWS.CreateS3BucketIfNotExists (ctx context.Context, bucketName, region string) error
@@ -666,13 +668,19 @@ method AWS.DeleteS3Object (ctx context.Context, region, bucket, key string) erro
 method AWS.GetAccountID (ctx context.Context) (string, error)
 method AWS.GetFSxFilesystem (ctx context.Context, filesystemID, region string) (*aws.FSxInfo, error)
 method AWS.InstanceMemoryMiB (ctx context.Context, region, instanceType string) (int64, bool)
+method CompletionGetter.GetS3Object (ctx context.Context, region, bucket, key string) ([]byte, error)
+method CompletionStore.GetAccountID (ctx context.Context) (string, error)
+method CompletionStore.embeds CompletionGetter
 method Provisioner.Provision (ctx context.Context, cfg aws.LaunchConfig, opts launcher.Options) (*aws.LaunchResult, error)
 type AWS interface
+type CompletionGetter interface
+type CompletionStore interface
 type Deps struct
 type Provisioner interface
 type ProvisionerFunc func(ctx context.Context, cfg aws.LaunchConfig, opts launcher.Options) (*aws.LaunchResult, error)
 type Result struct
 type TaskPlan struct
+var ErrNoCompletionRecord
 
 ## pkg/taskpool (imported by: calque)
 field Claimed.Ref TaskRef
@@ -798,7 +806,9 @@ field Candidate.VCPUs int
 field CompletionRecord.CostEstimate float64
 field CompletionRecord.EndedAt string
 field CompletionRecord.ExitCode int
+field CompletionRecord.InstanceType string
 field CompletionRecord.Logs []string
+field CompletionRecord.Purchase string
 field CompletionRecord.RetryClass RetryClass
 field CompletionRecord.RunID string
 field CompletionRecord.StartedAt string
@@ -885,6 +895,7 @@ func ParseCompletionRecord(data []byte) (*CompletionRecord, error)
 func ParseSpec(data []byte) (*TaskSpec, error)
 func ParseSpecFile(path string) (*TaskSpec, error)
 func SetFlushScriptPathForTest(path string) (restore func())
+func SetIMDSBaseForTest(base string) (restore func())
 func SetLocalRecordDirForTest(dir string) (restore func())
 func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*SizeResult, error)
 func SplitS3URI(uri string) (bucket, key string, ok bool)
