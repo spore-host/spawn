@@ -46,6 +46,9 @@ func taskLaunchConfig(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, reg
 	// launcher's StorageScript (built in Launch), not here.
 	cfg.AMI = spec.Placement.AMI
 	cfg.AvailabilityZone = spec.Placement.AvailabilityZone
+	// Empty launches into the region's default VPC; Plan refuses that up front
+	// when the region has none (spawn#1267).
+	cfg.SubnetID = spec.Placement.SubnetID
 	for _, v := range spec.Placement.Volumes {
 		cfg.AttachVolumes = append(cfg.AttachVolumes, aws.AttachVolumeSpec{
 			SnapshotID: v.Snapshot,

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`placement.subnet_id` in a TaskSpec launches a task into that subnet and
+  its VPC** (#1267). Tasks could not launch in a region with no default VPC,
+  which Control Tower and Landing Zone Accelerator accounts usually lack:
+  `spawn launch --subnet-id` covered plain launches, but a TaskSpec had no
+  subnet field, so `spawn task run` and spore-host-mcp's `spawn_task_run`
+  always launched into the default VPC. The value must be a `subnet-` id; the
+  subnet fixes the AZ, so `placement.availability_zone`, if set, must match it.
+- **A task with no `placement.subnet_id` in a region with no default VPC now
+  fails before anything is created** (#1267), including in `--dry-run`, and the
+  error lists up to five subnets to use, those that map public IPs first. It
+  used to fail at RunInstances. If EC2 cannot be asked, the launch goes ahead
+  as before. The dry run gains a `Network:` line saying where the task will go.
+  New in `pkg/aws`: `Client.DefaultVPCOrSubnets` and `SubnetHint`; in
+  `pkg/tasklaunch`: `TaskPlan.Network`. `spawn doctor`'s no-default-VPC
+  warning now mentions `placement.subnet_id` alongside `--subnet-id`.
+
 ## [0.139.1] - 2026-10-20
 
 ### Security

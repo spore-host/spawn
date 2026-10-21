@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -282,6 +283,64 @@ func (c *Client) GetDefaultVPC(ctx context.Context, region string) (string, erro
 	}
 
 	return *result.Vpcs[0].VpcId, nil
+}
+
+// SubnetHint is a subnet worth naming to someone who must pick one: the
+// region has no default VPC, so a launch needs an explicit subnet.
+type SubnetHint struct {
+	SubnetID         string
+	VPCID            string
+	AvailabilityZone string
+	// MapPublicIPOnLaunch is the subnet's own setting. spawn requests a public
+	// IP on every launch regardless (#308); this only orders the hints, since a
+	// subnet that maps public IPs is the likelier one to route to the internet.
+	MapPublicIPOnLaunch bool
+}
+
+// DefaultVPCOrSubnets returns the region's default VPC, or, when it has none,
+// up to max subnets to suggest instead, those that map public IPs first
+// (spawn#1267). It errors only when EC2 could not answer, so a caller can tell
+// "there is no default VPC" (vpcID "", err nil) from "could not find out".
+func (c *Client) DefaultVPCOrSubnets(ctx context.Context, region string, max int) (string, []SubnetHint, error) {
+	ec2Client := c.regionalEC2(region)
+	vpcs, err := ec2Client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{
+		Filters: []types.Filter{{Name: aws.String("is-default"), Values: []string{"true"}}},
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("describe VPCs in %s: %w", region, err)
+	}
+	if len(vpcs.Vpcs) > 0 {
+		return aws.ToString(vpcs.Vpcs[0].VpcId), nil, nil
+	}
+	subnets, err := ec2Client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{})
+	if err != nil {
+		return "", nil, fmt.Errorf("describe subnets in %s: %w", region, err)
+	}
+	return "", subnetHints(subnets.Subnets, max), nil
+}
+
+// subnetHints orders subnets for DefaultVPCOrSubnets: those that map public IPs
+// first, then by ID so the suggestion is stable, keeping at most max.
+func subnetHints(subnets []types.Subnet, max int) []SubnetHint {
+	hints := make([]SubnetHint, 0, len(subnets))
+	for _, sn := range subnets {
+		hints = append(hints, SubnetHint{
+			SubnetID:            aws.ToString(sn.SubnetId),
+			VPCID:               aws.ToString(sn.VpcId),
+			AvailabilityZone:    aws.ToString(sn.AvailabilityZone),
+			MapPublicIPOnLaunch: aws.ToBool(sn.MapPublicIpOnLaunch),
+		})
+	}
+	sort.SliceStable(hints, func(i, j int) bool {
+		if hints[i].MapPublicIPOnLaunch != hints[j].MapPublicIPOnLaunch {
+			return hints[i].MapPublicIPOnLaunch
+		}
+		return hints[i].SubnetID < hints[j].SubnetID
+	})
+	if max >= 0 && len(hints) > max {
+		hints = hints[:max]
+	}
+	return hints
 }
 
 // sgHasUDP8443 reports whether a security group already has an ingress rule

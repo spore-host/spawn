@@ -102,6 +102,7 @@ func TestValidate_Failures(t *testing.T) {
 		{"env key with space", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Env: map[string]string{"a b": "v"}}, "env key"},
 		{"bad s3_read_write", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Resources: ResourceRequest{S3ReadWrite: []string{"my-bucket"}}}, "s3_read_write"},
 		{"bad volume snapshot", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Placement: Placement{Volumes: []VolumeRef{{Snapshot: "vol-x", MountPath: "/ref"}}}}, "snapshot"},
+		{"bad subnet_id", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Placement: Placement{SubnetID: "vpc-0abc"}}, "subnet_id"},
 		{"volume no mount", TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: Lifecycle{TTL: "1h"}, Placement: Placement{Volumes: []VolumeRef{{Snapshot: "snap-abc"}}}}, "mount_path"},
 	}
 	for _, tc := range cases {

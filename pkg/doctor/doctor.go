@@ -236,7 +236,7 @@ func Run(ctx context.Context, p Prober) *Report {
 	// launch will. With no subnet anywhere in the region nothing can launch, so
 	// that stays a Fail.
 	if detail, err := p.VPCAndSubnet(ctx); errors.Is(err, ErrNoDefaultVPC) {
-		add("VPC & subnet", Warn, "", errText(err)+"; pass --subnet-id on every launch, or create a default VPC (aws ec2 create-default-vpc)")
+		add("VPC & subnet", Warn, "", errText(err)+"; pass --subnet-id on every launch (placement.subnet_id in a TaskSpec), or create a default VPC (aws ec2 create-default-vpc)")
 	} else if err != nil {
 		add("VPC & subnet", Fail, "", "no usable VPC/subnet in this region; create a default VPC, or a subnet to pass with --subnet-id: "+errText(err))
 	} else {

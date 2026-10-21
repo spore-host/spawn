@@ -114,6 +114,12 @@ type Placement struct {
 	Volumes          []VolumeRef `json:"volumes,omitempty"`           // EBS volumes from snapshots, mounted at a path
 	FSxLustreID      string      `json:"fsx_lustre_id,omitempty"`     // existing FSx for Lustre filesystem id (fs-...) to mount
 	EFSID            string      `json:"efs_id,omitempty"`            // existing EFS filesystem id (fs-...) to mount
+	// SubnetID launches the task into this subnet, and so into its VPC
+	// (spawn#1267). Empty uses the region's default VPC, which accounts built by
+	// Control Tower or Landing Zone Accelerator usually do not have; `spawn
+	// launch --subnet-id` is the same choice for a plain launch. A subnet pins
+	// its AZ, so availability_zone, if also set, must be the subnet's.
+	SubnetID string `json:"subnet_id,omitempty"`
 	// EFSMountPoint/FSxMountPoint override the default mount path for EFSID/
 	// FSxLustreID (spawn#570 sub-issue 3). Empty means the default ("/efs",
 	// "/fsx") — use DefaultEFSMountPoint/DefaultFSxMountPoint or the
@@ -315,6 +321,9 @@ func (s *TaskSpec) Validate() error {
 		if !strings.HasPrefix(u, "s3://") {
 			add("resources.s3_read_write[%d] %q must be an s3:// URI", i, u)
 		}
+	}
+	if id := s.Placement.SubnetID; id != "" && !strings.HasPrefix(id, "subnet-") {
+		add("placement.subnet_id %q must be a subnet- id", id)
 	}
 	for i, v := range s.Placement.Volumes {
 		if !strings.HasPrefix(v.Snapshot, "snap-") {

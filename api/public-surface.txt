@@ -330,6 +330,10 @@ field SpotPrice.InstanceType string
 field SpotPrice.PricePerHour float64
 field SpotPrice.ProductDescription string
 field SpotPrice.Timestamp time.Time
+field SubnetHint.AvailabilityZone string
+field SubnetHint.MapPublicIPOnLaunch bool
+field SubnetHint.SubnetID string
+field SubnetHint.VPCID string
 field UserDataTooLargeError.DecodedBytes int
 field UserDataTooLargeError.EncodedBytes int
 func (*AccessDeniedError) Error() string
@@ -351,6 +355,7 @@ func (*Client) CreatePlacementGroup(ctx context.Context, name, region string) er
 func (*Client) CreateS3BucketIfNotExists(ctx context.Context, bucketName, region string) error
 func (*Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConfig) error
 func (*Client) CurrentSpotPrice(ctx context.Context, region, instanceID string) (SpotPrice, error)
+func (*Client) DefaultVPCOrSubnets(ctx context.Context, region string, max int) (string, []SubnetHint, error)
 func (*Client) DeleteAMI(ctx context.Context, region, amiID string) (*DeleteAMIResult, error)
 func (*Client) DeleteFSxFilesystem(ctx context.Context, filesystemID, region string) error
 func (*Client) DeleteISOFromS3(ctx context.Context, region, bucket, key string, alsoBucketIfEmpty bool) error
@@ -526,6 +531,7 @@ type SnapshotDetail struct
 type SnapshotSourceKind int
 type SporedLiveness struct
 type SpotPrice struct
+type SubnetHint struct
 type UserDataTooLargeError struct
 var CallerVersion
 var ErrS3NoSuchKey
@@ -645,6 +651,7 @@ field Result.TaskID string
 field TaskPlan.AMI string
 field TaskPlan.MaxCost float64
 field TaskPlan.MaxCostKnown bool
+field TaskPlan.Network string
 field TaskPlan.Notes []string
 field TaskPlan.Purchase string
 field TaskPlan.Region string
@@ -832,6 +839,7 @@ field Placement.EFSID string
 field Placement.EFSMountPoint string
 field Placement.FSxLustreID string
 field Placement.FSxMountPoint string
+field Placement.SubnetID string
 field Placement.Volumes []VolumeRef
 field ResourceRequest.Architecture string
 field ResourceRequest.CPU int
