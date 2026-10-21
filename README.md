@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/spawn-hero.png" alt="spawn — launch and manage ephemeral EC2 instances" width="820">
+  <img src="docs/assets/spawn-hero.png" alt="spawn — ephemeral compute for AWS" width="820">
 </p>
 
 # spawn
@@ -10,7 +10,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21439888.svg)](https://doi.org/10.5281/zenodo.21439888)
 
-Launch and manage EC2 instances with automatic lifecycle management.
+Ephemeral compute for AWS.
 
 Instances terminate themselves via TTL, idle detection, or completion signal — no forgotten bills.
 

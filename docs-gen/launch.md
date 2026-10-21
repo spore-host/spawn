@@ -14,7 +14,7 @@ Examples:
   spawn launch
 
   # From truffle
-  truffle search m7i.large | spawn launch
+  truffle find m7i.large | spawn launch
 
   # Direct
   spawn launch --instance-type m7i.large --region us-east-1

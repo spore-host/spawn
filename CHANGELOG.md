@@ -8,9 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+
 - **`spawn version` and `spawn --version` describe spawn as "ephemeral compute
   for AWS"**, in line with the project's own description, instead of "EC2
   Instance Lifecycle Manager".
+- **spawn's help text and package descriptions say "ephemeral compute for
+  AWS"**. `spawn --help` (from libs v0.51.3, in all six languages), the
+  Homebrew, Scoop and Linux package descriptions, and the README tagline
+  described an EC2 instance launcher or "lifecycle management". libs v0.51.3
+  also brings `spawn launch --help`'s truffle example up to date:
+  `truffle find`, not the deprecated `truffle search`.
 
 ## [0.140.0] - 2026-10-20
 
