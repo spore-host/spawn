@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.140.0] - 2026-10-20
+
 ### Added
 - **`placement.subnet_id` in a TaskSpec launches a task into that subnet and
   its VPC** (#1267). Tasks could not launch in a region with no default VPC,
@@ -10919,7 +10921,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.139.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.140.0...HEAD
+[0.140.0]: https://github.com/spore-host/spawn/compare/v0.139.1...v0.140.0
 [0.139.1]: https://github.com/spore-host/spawn/compare/v0.139.0...v0.139.1
 [0.139.0]: https://github.com/spore-host/spawn/compare/v0.138.0...v0.139.0
 [0.138.0]: https://github.com/spore-host/spawn/compare/v0.137.0...v0.138.0
