@@ -69,7 +69,7 @@ var versionCmd = &cobra.Command{
 func versionText() string {
 	commit, date := versionDetail()
 	var b strings.Builder
-	fmt.Fprintf(&b, "🌱 Spawn - EC2 Instance Lifecycle Manager\n\n")
+	fmt.Fprintf(&b, "🌱 spawn - ephemeral compute for AWS\n\n")
 	fmt.Fprintf(&b, "Version:    %s\n", version())
 	fmt.Fprintf(&b, "Git Commit: %s\n", commit)
 	fmt.Fprintf(&b, "Build Date: %s\n", date)
