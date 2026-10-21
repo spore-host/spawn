@@ -140,7 +140,7 @@ nfpms:
     vendor: spore.host
     homepage: https://spore.host
     maintainer: "spore.host <hello@spore.host>"
-    description: "Launch ephemeral AWS EC2 instances effortlessly"
+    description: "Ephemeral compute for AWS"
     license: Apache-2.0
     formats:
       - deb
@@ -151,7 +151,7 @@ nfpms:
         dst: /usr/share/doc/spawn/copyright
         type: doc
     rpm:
-      summary: "Launch ephemeral AWS EC2 instances effortlessly"
+      summary: "Ephemeral compute for AWS"
 
   - id: spored-pkg
     package_name: spored
@@ -184,7 +184,7 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
     homepage: https://github.com/spore-host/spawn
-    description: "Launch ephemeral AWS EC2 instances effortlessly"
+    description: "Ephemeral compute for AWS"
     license: Apache-2.0
     dependencies:
       - name: spore-host/tap/truffle
@@ -205,7 +205,7 @@ scoops:
       token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
     directory: bucket
     homepage: https://github.com/spore-host/spawn
-    description: "Launch ephemeral AWS EC2 instances effortlessly"
+    description: "Ephemeral compute for AWS"
     license: Apache-2.0
     depends:
       - spore-host/truffle
