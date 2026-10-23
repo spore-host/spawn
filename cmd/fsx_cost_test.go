@@ -71,7 +71,7 @@ func TestRenderFSxCostEstimate_DurableNamesItsTTL(t *testing.T) {
 	if !strings.Contains(out, "2400 GiB") || !strings.Contains(out, "250 MB/s/TiB") {
 		t.Errorf("durable estimate lost capacity/throughput; got:\n%s", out)
 	}
-	if !strings.Contains(out, "$696.00/month") { // 2400 * 0.29
+	if !strings.Contains(out, "$504.00/month") { // 2400 * 0.21
 		t.Errorf("durable estimate priced the 250 MB/s/TiB tier wrong; got:\n%s", out)
 	}
 	if !strings.Contains(out, "7d") {
@@ -102,12 +102,25 @@ func TestFSxLustreMonthlyUSD(t *testing.T) {
 		want       float64
 	}{
 		{1200, 125, 174}, // the filesystem in spawn#613
-		{1200, 250, 348}, // the tier is folded into the per-GiB price
+		{1200, 250, 252}, // the tier is folded into the per-GiB price
 		{1200, 999, 174}, // unknown tier falls back to the 125 rate
 		{0, 125, 0},      // unknown capacity prices nothing rather than guessing
 	} {
 		if got := fsxLustreMonthlyUSD(tc.capacity, tc.throughput); got != tc.want {
 			t.Errorf("fsxLustreMonthlyUSD(%d, %d) = %.2f, want %.2f", tc.capacity, tc.throughput, got, tc.want)
+		}
+	}
+}
+
+// Every FSx price says it is static, why, and from when (the static-pricing
+// rule; #1165).
+func TestRenderFSxCostEstimate_LabelsTheStaticRate(t *testing.T) {
+	plan, _ := fsxCreatePlanFromFlags(true, 1200, 125, "ephemeral", "", "/fsx")
+	var buf bytes.Buffer
+	renderFSxCostEstimate(&buf, plan)
+	for _, want := range []string{"static", fsxLustreRatesAsOf, "no live FSx price lookup"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("FSx estimate does not say %q:\n%s", want, buf.String())
 		}
 	}
 }

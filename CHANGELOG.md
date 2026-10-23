@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also brings `spawn launch --help`'s truffle example up to date:
   `truffle find`, not the deprecated `truffle search`.
 
+### Fixed
+- **FSx for Lustre cost estimates for the 250, 500 and 1000 MB/s/TiB tiers were
+  1.4 to 1.9 times the list price** (#1165). The table had 0.290, 0.580 and
+  1.160 $/GiB-month; the AWS Price List (us-east-1, Persistent SSD) gives
+  0.210, 0.340 and 0.600. 0.290 is the PERSISTENT_1 200 MB/s/TiB rate. A
+  4.8 TiB 1000-tier file system was reported at about $5,700/month instead of
+  $2,950, which also skewed `--cost-limit` sizing for FSx launches. Every FSx
+  price spawn prints now says it is a static us-east-1 list price, from when,
+  and that spawn has no live FSx price lookup yet; a test pins the table to the
+  Price List values.
+- **`spawn task run --dry-run` showed instance types under 1 GiB as "0 GiB"**
+  (#1276). Memory is now printed as it is: a t4g.nano shows 0.5 GiB.
+
 ## [0.140.0] - 2026-10-20
 
 ### Added

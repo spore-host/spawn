@@ -8,20 +8,33 @@ import (
 // FSx Lustre storage rates (spawn#613).
 //
 // These are APPROXIMATIONS, kept in exactly one place so no other file grows its
-// own magic number. Source: the AWS FSx for Lustre pricing page, PERSISTENT_2
-// SSD, us-east-1, as read in September 2026. For PERSISTENT_2 the throughput
-// tier is folded into the per-GiB-month storage price, so the rate is keyed by
-// MB/s/TiB rather than added on top.
+// own magic number. Source: the AWS Price List API (`aws pricing get-products
+// --service-code AmazonFSx`, us-east-1, deploymentOption Persistent, storageType
+// SSD, usagetype USE1-Storage.SSD.<tier>), read on fsxLustreRatesAsOf. For
+// PERSISTENT_2 the throughput tier is folded into the per-GiB-month storage
+// price, so the rate is keyed by MB/s/TiB rather than added on top.
+//
+// The 250/500/1000 rates were 0.290/0.580/1.160 until #1165, 1.4 to 1.9 times
+// the list price: 0.290 is the PERSISTENT_1 200 MB/s/TiB rate, and the others
+// doubled from it.
 //
 // Other regions are higher (typically 0–25%), and this deliberately ignores
 // compression savings, backups, and data-repository traffic. It exists so a
 // ~$174/month resource is not reported as $0 — not to be an invoice.
 var fsxLustreUSDPerGiBMonthByThroughput = map[int32]float64{
 	125:  0.145,
-	250:  0.290,
-	500:  0.580,
-	1000: 1.160,
+	250:  0.210,
+	500:  0.340,
+	1000: 0.600,
 }
+
+// fsxLustreRatesAsOf is when the rates above were read from the Price List.
+// Every price printed from them says so, since they are static (spawn does not
+// look FSx prices up live).
+const fsxLustreRatesAsOf = "2026-10-23"
+
+// fsxLustreRateLabel is what every FSx price shown to a user is labelled with.
+const fsxLustreRateLabel = "approximate: static us-east-1 list price from " + fsxLustreRatesAsOf + " (spawn has no live FSx price lookup yet, #1165)"
 
 // fsxLustreDefaultUSDPerGiBMonth is used when the throughput tier is unknown or
 // not one spawn can create (it matches --fsx-throughput's own default of 125).
@@ -95,8 +108,8 @@ func renderFSxCostEstimate(w io.Writer, plan fsxCreatePlan) {
 	fmt.Fprintf(w, "\n📁 FSx Lustre filesystem (created by this launch)\n")
 	fmt.Fprintf(w, "   Capacity:   %d GiB PERSISTENT_2 @ %d MB/s/TiB\n", plan.CapacityGiB, plan.ThroughputMBpsPerTiB)
 	if monthly > 0 {
-		fmt.Fprintf(w, "   Storage:    ~$%.2f/month (~$%.4f/hr) at ~$%.3f/GiB-month — approximate, us-east-1 list price\n",
-			monthly, monthly/730, rate)
+		fmt.Fprintf(w, "   Storage:    ~$%.2f/month (~$%.4f/hr) at ~$%.3f/GiB-month — %s\n",
+			monthly, monthly/730, rate, fsxLustreRateLabel)
 	}
 	switch plan.Lifecycle {
 	case "ephemeral":

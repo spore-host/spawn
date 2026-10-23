@@ -258,7 +258,7 @@ type memoryLookup interface {
 func instanceSizeSummary(sized *taskproto.SizeResult) string {
 	var parts []string
 	if sized.SizesKnown() {
-		parts = append(parts, fmt.Sprintf("%d vCPU", sized.VCPUs), fmt.Sprintf("%.0f GiB", sized.MemoryGiB))
+		parts = append(parts, fmt.Sprintf("%d vCPU", sized.VCPUs), strconv.FormatFloat(sized.MemoryGiB, 'f', -1, 64)+" GiB")
 	} else {
 		parts = append(parts, fmt.Sprintf("sizes unavailable: %v", sized.PinLookupErr))
 	}
