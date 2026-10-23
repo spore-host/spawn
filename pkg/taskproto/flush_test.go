@@ -388,7 +388,7 @@ func TestFlushHookStagingFileIsNotTheInterlockFile(t *testing.T) {
 	if !strings.Contains(script, "if [ -f "+shQuote(CompletionRecordPath())+" ]") {
 		t.Errorf("missing the wrapper-record interlock\n---\n%s", script)
 	}
-	if !strings.Contains(script, "cat > "+shQuote(localPath(terminalFileName))) {
+	if !strings.Contains(script, "\"$REC\" > "+shQuote(localPath(terminalFileName))) {
 		t.Errorf("the record must be staged to %s\n---\n%s", localPath(terminalFileName), script)
 	}
 }

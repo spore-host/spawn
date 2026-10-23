@@ -687,6 +687,7 @@ type Provisioner interface
 type ProvisionerFunc func(ctx context.Context, cfg aws.LaunchConfig, opts launcher.Options) (*aws.LaunchResult, error)
 type Result struct
 type TaskPlan struct
+var ErrEmptyCompletionRecord
 var ErrNoCompletionRecord
 
 ## pkg/taskpool (imported by: calque)

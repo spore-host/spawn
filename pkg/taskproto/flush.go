@@ -155,24 +155,15 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	//
 	// exit_code is -1 to mean "the process never returned a status", which is the
 	// honest distinction from a real 0 or a real non-zero exit.
-	p("cat > %s <<JSON\n", shQuote(localPath(terminalFileName)))
-	p("{\n")
-	p("  \"task_id\": %s,\n", jsonStr(taskID))
-	p("  \"run_id\": %s,\n", jsonStr(runID))
-	p("  \"exit_code\": -1,\n")
-	p("  \"state\": %s,\n", jsonStr(string(StateFailed)))
-	p("  \"started_at\": \"$STARTED_AT\",\n")
-	p("  \"ended_at\": \"$ENDED_AT\",\n")
-	p("  $INSTANCE_JSON\n")
-	p("  \"logs\": $LOGS_JSON,\n")
-	p("  \"retry_class\": \"$RETRY_CLASS\",\n")
-	p("  \"terminal_reason\": \"$REASON\"\n")
-	p("}\n")
-	p("JSON\n")
-	p("aws \"$AWS_REGION_ARG\" s3 cp --no-progress %s \"$RESULTS_PREFIX/completion.json\" || true\n\n", shQuote(localPath(terminalFileName)))
-
-	p("printf '%%s' '-1' > %s\n", shQuote(localPath(exitCodeFileName)))
-	p("aws \"$AWS_REGION_ARG\" s3 cp --no-progress %s \"$RESULTS_PREFIX/.exitcode\" || true\n\n", shQuote(localPath(exitCodeFileName)))
+	//
+	// Built in memory and written by writeRecordFile, exactly as the wrapper's
+	// record is, so a full /tmp cannot turn it into an empty object (#1179).
+	p("printf -v REC %s %s %s \"$STARTED_AT\" \"$ENDED_AT\" \"$INSTANCE_JSON\" \"$LOGS_JSON\" \"$RETRY_CLASS\" \"$REASON\"\n",
+		shQuote(`{\n  "task_id": %s,\n  "run_id": %s,\n  "exit_code": -1,\n  "state": "`+string(StateFailed)+`",\n  "started_at": "%s",\n  "ended_at": "%s",\n  %s\n  "logs": %s,\n  "retry_class": "%s",\n  "terminal_reason": "%s"\n}`),
+		shQuote(jsonStr(taskID)), shQuote(jsonStr(runID)))
+	const flushCp = "aws \"$AWS_REGION_ARG\" s3 cp --no-progress"
+	writeRecordFile(p, flushCp, "$REC", localPath(terminalFileName), "\"$RESULTS_PREFIX/completion.json\"")
+	writeRecordFile(p, flushCp, "-1", localPath(exitCodeFileName), "\"$RESULTS_PREFIX/.exitcode\"")
 
 	p("echo \"spawn: terminal record written for task $TASK_ID\"\n")
 	p("exit 0\n")

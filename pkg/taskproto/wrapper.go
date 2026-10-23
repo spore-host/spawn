@@ -366,14 +366,15 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	p("  LOGS_JSON=\"[\\\"$RESULTS_PREFIX/command.log\\\"]\"\n")
 	p("fi\n\n")
 
-	// completion.json — the authoritative record. Built with a heredoc; all
-	// interpolated values are either shell ints (rc) or our own controlled strings.
+	// completion.json — the authoritative record. Built in memory with
+	// `printf -v` (a builtin: no fork, no heredoc temp file, no disk), then written
+	// and uploaded by writeRecordFile, which uploads from memory when the local
+	// write did not stick (#1179). All interpolated values are shell ints (rc),
+	// our own controlled strings, or Go-quoted JSON passed as printf ARGUMENTS,
+	// never as part of the format.
 	// cost_estimate (#1076): present only when the rate was known.
 	p("COST_JSON=''\n")
 	p("if [ -n \"$COST_USD\" ]; then COST_JSON=\"\\\"cost_estimate\\\": $COST_USD,\"; fi\n")
-	p("cat > %s <<JSON\n", shQuote(CompletionRecordPath()))
-	p("{\n")
-	p("  \"task_id\": %s,\n", jsonStr(taskID))
 	// run_id — the attempt identity (spawn#608). Emitted unconditionally (even
 	// when empty) so the shape of the record is the same for every run and a
 	// reader can distinguish "this wrapper stamps run ids and this one was
@@ -382,22 +383,13 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	// it to the id it launched with and keeps polling on a mismatch, so a record
 	// left behind by a previous attempt of the same task_id can never be reported
 	// as this run's verdict.
-	p("  \"run_id\": %s,\n", jsonStr(runID))
-	p("  \"exit_code\": $rc,\n")
-	p("  \"state\": \"$STATE\",\n")
-	p("  \"started_at\": \"$STARTED_AT\",\n")
-	p("  \"ended_at\": \"$ENDED_AT\",\n")
-	p("  $COST_JSON\n")
-	p("  $INSTANCE_JSON\n")
-	p("  \"logs\": $LOGS_JSON,\n")
-	p("  \"retry_class\": \"$RETRY_CLASS\"\n")
-	p("}\n")
-	p("JSON\n")
-	p("%s %s \"$RESULTS_PREFIX/completion.json\" || true\n\n", s3Cp, shQuote(CompletionRecordPath()))
+	p("printf -v REC %s %s %s \"$rc\" \"$STATE\" \"$STARTED_AT\" \"$ENDED_AT\" \"$COST_JSON\" \"$INSTANCE_JSON\" \"$LOGS_JSON\" \"$RETRY_CLASS\"\n",
+		shQuote(`{\n  "task_id": %s,\n  "run_id": %s,\n  "exit_code": %s,\n  "state": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  %s\n  %s\n  "logs": %s,\n  "retry_class": "%s"\n}`),
+		shQuote(jsonStr(taskID)), shQuote(jsonStr(runID)))
+	writeRecordFile(p, s3Cp, "$REC", CompletionRecordPath(), "\"$RESULTS_PREFIX/completion.json\"")
 
 	// .exitcode — the plain-integer legacy signal the RFC names.
-	p("printf '%%s' \"$rc\" > %s\n", shQuote(localPath(exitCodeFileName)))
-	p("%s %s \"$RESULTS_PREFIX/.exitcode\" || true\n\n", s3Cp, shQuote(localPath(exitCodeFileName)))
+	writeRecordFile(p, s3Cp, "$rc", localPath(exitCodeFileName), "\"$RESULTS_PREFIX/.exitcode\"")
 
 	// ---- signal spored ---- so on_complete fires and `spawn status --check-complete` works.
 	// A pooled worker (signalComplete=false) SKIPS this: writing SPAWN_COMPLETE would
@@ -426,6 +418,24 @@ const PhaseTimestampFormat = "+%Y-%m-%dT%H:%M:%S.%3NZ"
 // command.log. It keeps the one "download:/upload:" line per file and every
 // error, unlike --only-show-errors, so the log still says what was staged.
 const s3Cp = "aws s3 cp --no-progress"
+
+// writeRecordFile emits the write and upload of one terminal record file: the
+// local copy at local, then that copy to dest. value is the shell expression
+// holding the content ("$REC", "$rc"); dest is a shell word; cp is how the
+// upload starts (s3Cp, or the flush hook's region-pinned form).
+//
+// The local copy lives on /tmp (recorddir.go), which a container task's
+// staging can fill. A write to a full disk leaves an EMPTY file, and before
+// #1179 that empty file was uploaded as the task's completion.json and
+// .exitcode, so the record every reader parses said nothing. So the copy is
+// read back and compared with value, and when it does not match, value is
+// piped straight to `aws s3 cp -`, which needs no local disk.
+func writeRecordFile(p func(string, ...interface{}), cp, value, local, dest string) {
+	l := shQuote(local)
+	p("printf '%%s' \"%s\" > %s\n", value, l)
+	p("if [ \"$(cat %s 2>/dev/null)\" = \"%s\" ]; then %s %s %s || true\n", l, value, cp, l, dest)
+	p("else echo 'spawn: could not write (disk full?), uploading from memory:' %s >&2; printf '%%s' \"%s\" | %s - %s || true; fi\n\n", l, value, cp, dest)
+}
 
 // writeDockerInstallStart starts a container task's Docker install in the
 // background, before stage-in, so the two overlap (#1072). Measured in E1

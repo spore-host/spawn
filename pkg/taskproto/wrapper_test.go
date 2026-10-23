@@ -1144,9 +1144,20 @@ func TestGenerateWrapper_PhaseMarkersContainerPath(t *testing.T) {
 // deliberately not renamed per run).
 func TestGenerateWrapper_StampsRunID(t *testing.T) {
 	w := genWrapper(fullSpec(), "b", "us-east-1", false, testRunID)
-	want := fmt.Sprintf("  \"run_id\": %q,", testRunID)
-	if !strings.Contains(w, want) {
-		t.Errorf("wrapper heredoc missing %q\n---\n%s", want, w)
+	// The record is built by `printf -v REC <format> <task_id> <run_id> ...`
+	// (#1179), so the run id is the format's second %s and the second argument.
+	recLine := func(script string) string {
+		for _, l := range strings.Split(script, "\n") {
+			if strings.HasPrefix(l, "printf -v REC ") {
+				return l
+			}
+		}
+		return ""
+	}
+	want := "printf -v REC " + shQuote(`{\n  "task_id": %s,\n  "run_id": %s,`)
+	wantArgs := " " + shQuote(jsonStr(fullSpec().TaskID)) + " " + shQuote(jsonStr(testRunID)) + " "
+	if l := recLine(w); !strings.HasPrefix(l, strings.TrimSuffix(want, "'")) || !strings.Contains(l, wantArgs) {
+		t.Errorf("wrapper record missing run_id %q (want format prefix %q, args %q)\n---\n%s", testRunID, want, wantArgs, l)
 	}
 	// It must be inside the completion.json heredoc, i.e. before the record is
 	// copied to S3 — not somewhere decorative.
@@ -1159,8 +1170,8 @@ func TestGenerateWrapper_StampsRunID(t *testing.T) {
 	// key on every execution of a task_id, so its records need attempt identity for
 	// the same reason.
 	pooled := genPooled(fullSpec(), "b", "us-east-1", false, testRunID)
-	if !strings.Contains(pooled, want) {
-		t.Errorf("pooled job script missing %q\n---\n%s", want, pooled)
+	if l := recLine(pooled); !strings.HasPrefix(l, strings.TrimSuffix(want, "'")) || !strings.Contains(l, wantArgs) {
+		t.Errorf("pooled job script record missing run_id %q\n---\n%s", testRunID, l)
 	}
 }
 
