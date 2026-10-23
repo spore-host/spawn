@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/spore-host/spawn/internal/shellmin"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
@@ -217,17 +218,17 @@ LOCAL_SSH_KEY_BASE64=%s
 	// against a key carried by spawn (trusted), not one served from the same S3
 	// bucket as the binary. When no key is compiled in yet, verification stays
 	// off and the body falls back to sha256-only (honestly logged).
-	script += sporedinstall.KeySetupScript()
+	script += shellmin.Strip(sporedinstall.KeySetupScript())
 
 	// The one implementation of download-verify-install, shared with
 	// cmd/app.go and cmd/upgrade_spored.go. It used to live inline in
 	// linuxBootstrapBody below, which is why the other two paths were able to
 	// ship without any of it (GHSA-3x4q-99gh-fxhx).
-	script += sporedinstall.VerifiedInstallFunc()
+	script += shellmin.Strip(sporedinstall.VerifiedInstallFunc())
 
 	// The Spot-replacement check the workload starts are gated on (#1007).
 	// Defined here, above the body, because the body's --command block calls it.
-	script += spotReplacementCheckFunc
+	script += shellmin.Strip(spotReplacementCheckFunc)
 
 	// Embed the --command workload directly in user-data (#214/#246) instead of
 	// the 256-char-capped spawn:command tag. Written BEFORE linuxBootstrapBody so
@@ -308,7 +309,10 @@ echo "Plugin declarations written: %d plugin(s)"
 	// The --command wrapper inside the body signals completion by writing the
 	// file spored watches. Render the configured path into it (shell-quoted: the
 	// value comes from --completion-file) rather than a hardcoded default (#1131).
-	script += strings.ReplaceAll(linuxBootstrapBody, completionFilePlaceholder, security.ShellQuote(completionFileOrDefault(cfg.CompletionFile)))
+	//
+	// Stripped before the substitution: the path is caller input, and only
+	// spawn's own text is stripped (#1246).
+	script += strings.ReplaceAll(shellmin.Strip(linuxBootstrapBody), completionFilePlaceholder, security.ShellQuote(completionFileOrDefault(cfg.CompletionFile)))
 
 	// On a Spot replacement, stop here (#1007): spored is running and retires
 	// the instance, and nothing below this point (storage, the container,
@@ -317,7 +321,7 @@ echo "Plugin declarations written: %d plugin(s)"
 	//
 	// The plugin declarations are already written, above the body (#1023), so
 	// this check's EC2 round trip cannot make spored start without them.
-	script += spotReplacementStopScript
+	script += shellmin.Strip(spotReplacementStopScript)
 
 	// Mount attached storage BEFORE the user's script, so the workload sees the
 	// volumes already live (#166). The storage script does its own mkdir + mount;

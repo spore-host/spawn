@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The spored bootstrap no longer sends its comments to EC2, which roughly
+  quadruples the room a task has for its own command** (#1246). EC2 allows
+  16 KiB of user data, and the bootstrap's static parts carried 16.5 KB of
+  inline documentation. A trivial `spawn task run` used 14,711 of the 16,384
+  bytes after gzip, leaving about 1.7 KB, and specs that launched on 0.131.1
+  were refused on 0.138+. Comment and blank lines are now stripped from
+  spawn's own script templates when the user data is built (heredoc bodies and
+  every other line are kept byte for byte); the same task now uses 9,149
+  bytes, leaving about 7.2 KB. The bare bootstrap is 7,253 bytes gzipped, down
+  from 12,829. Caller-supplied scripts (the command, storage, container and
+  custom user data) are not touched. A test parses each template with
+  mvdan.cc/sh before and after stripping and requires the same syntax tree,
+  and another holds the bare bootstrap to an 8 KiB gzipped budget.
 - **`spawn version` and `spawn --version` describe spawn as "ephemeral compute
   for AWS"**, in line with the project's own description, instead of "EC2
   Instance Lifecycle Manager".

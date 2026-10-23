@@ -139,7 +139,7 @@ func TestCommandSkippedOnlyOnASpotReplacement(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(sb.dir, "etc", "spawn", "command"), []byte("echo "+workloadMarker+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			block := between(t, script, "if [ -s /etc/spawn/command ]; then\n    WORKFLOW_COMMAND=", "\n# Create login banner")
+			block := between(t, script, "if [ -s /etc/spawn/command ]; then\n    WORKFLOW_COMMAND=", "\necho \"Creating login banner...\"")
 			out, err := sb.run(t, "set -e\nLOCAL_USERNAME=tester\n"+checkFunc(t, script)+block+"\nwait\n")
 			if err != nil {
 				t.Fatalf("command block failed: %v\n%s", err, out)

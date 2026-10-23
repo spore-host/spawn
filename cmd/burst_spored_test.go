@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/shellmin"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
@@ -51,7 +52,7 @@ func TestBurstMembersInstallAndVerifySpored(t *testing.T) {
 
 	for _, m := range launchedBurst(t, burstTestParams()) {
 		script := decodedBurstUserData(t, m.UserData)
-		if !strings.Contains(script, sporedinstall.VerifiedInstallFunc()) {
+		if !strings.Contains(script, shellmin.Strip(sporedinstall.VerifiedInstallFunc())) {
 			t.Error("burst user-data does not define the shared verified spored install (pkg/sporedinstall)")
 		}
 		if !install.MatchString(script) {
