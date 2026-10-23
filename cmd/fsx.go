@@ -254,8 +254,8 @@ func runFSxInfo(cmd *cobra.Command, args []string) error {
 		throughput = *fs.LustreConfiguration.PerUnitStorageThroughput
 	}
 	if capacityGiB > 0 {
-		fmt.Printf("\nEstimated Cost:     $%.2f/month (~$%.4f/GiB-month at %d MB/s/TiB — approximate, us-east-1 list price)\n",
-			fsxLustreMonthlyUSD(capacityGiB, throughput), fsxLustreUSDPerGiBMonth(throughput), throughput)
+		fmt.Printf("\nEstimated Cost:     $%.2f/month (~$%.4f/GiB-month at %d MB/s/TiB — %s)\n",
+			fsxLustreMonthlyUSD(capacityGiB, throughput), fsxLustreUSDPerGiBMonth(throughput), throughput, fsxLustreRateLabel)
 	} else {
 		fmt.Printf("\nEstimated Cost:     unknown (storage capacity not reported yet)\n")
 	}

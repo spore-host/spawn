@@ -83,3 +83,19 @@ func TestFSxRateIsPersistent2NotPersistent1(t *testing.T) {
 		t.Errorf("1200 GiB at 125 MB/s/TiB = $%.2f/month, want ~$174 (the old 0.22 rate gave $264)", got)
 	}
 }
+
+// The table matches the AWS Price List as read on fsxLustreRatesAsOf (#1165):
+// us-east-1, Persistent, SSD, usagetype USE1-Storage.SSD.<tier>. The 250, 500
+// and 1000 tiers were 1.4 to 1.9 times these. Re-read the Price List and move
+// fsxLustreRatesAsOf with any change here.
+func TestFSxLustreRatesMatchThePriceList(t *testing.T) {
+	want := map[int32]float64{125: 0.145, 250: 0.210, 500: 0.340, 1000: 0.600}
+	if len(fsxLustreUSDPerGiBMonthByThroughput) != len(want) {
+		t.Errorf("rate table has %d tiers, want %d", len(fsxLustreUSDPerGiBMonthByThroughput), len(want))
+	}
+	for tier, rate := range want {
+		if got := fsxLustreUSDPerGiBMonth(tier); got != rate {
+			t.Errorf("%d MB/s/TiB: $%.3f/GiB-month, want the Price List's $%.3f", tier, got, rate)
+		}
+	}
+}

@@ -150,3 +150,14 @@ func TestTaskLaunchConfig_SubnetID(t *testing.T) {
 		t.Errorf("SubnetID = %q", cfg.SubnetID)
 	}
 }
+
+// Memory prints as it is, not rounded to a whole GiB (#1276): a t4g.nano's
+// 0.5 GiB read "0 GiB".
+func TestInstanceSizeSummary_FractionalMemory(t *testing.T) {
+	for mem, want := range map[float64]string{0.5: "0.5 GiB", 1.5: "1.5 GiB", 64: "64 GiB"} {
+		got := instanceSizeSummary(&taskproto.SizeResult{InstanceType: "x", VCPUs: 2, MemoryGiB: mem})
+		if !strings.Contains(got, ", "+want) {
+			t.Errorf("MemoryGiB %v: summary %q, want it to contain %q", mem, got, want)
+		}
+	}
+}
