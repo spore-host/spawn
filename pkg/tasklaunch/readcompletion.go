@@ -1,6 +1,7 @@
 package tasklaunch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,14 @@ import (
 // instance killed without spored's involvement never writes one (spawn#802), so
 // a caller that cares must ask EC2 what became of the instance.
 var ErrNoCompletionRecord = errors.New("no completion record")
+
+// ErrEmptyCompletionRecord is returned, wrapped, by ReadCompletion and
+// ReadCompletionAt when the completion record exists but is empty (spawn#1179).
+// The task did end: the wrapper writes the record as its last step. But a
+// wrapper older than the #1179 fix wrote it to the instance's /tmp first, and
+// a task that filled that disk left an empty file, which was uploaded as-is.
+// What happened is in the task's command.log, which the error names.
+var ErrEmptyCompletionRecord = errors.New("completion record is empty")
 
 // CompletionGetter is the S3 read ReadCompletionAt needs. *aws.Client satisfies
 // it; GetS3Object must wrap aws.ErrS3NoSuchKey for a missing object, as
@@ -39,9 +48,9 @@ type CompletionStore interface {
 //
 // uri is the completion record's s3:// location whenever it could be resolved,
 // including when err wraps ErrNoCompletionRecord, so a caller can say where it
-// looked. Every other error is a real failure: the account id could not be
-// resolved, resultsPrefix is not an s3://bucket/prefix URI, the read failed, or
-// the record does not parse.
+// looked. An empty record wraps ErrEmptyCompletionRecord. Every other error is
+// a real failure: the account id could not be resolved, resultsPrefix is not an
+// s3://bucket/prefix URI, the read failed, or the record does not parse.
 //
 // This is the one reader of completion records (spawn#1260). `spawn task status`
 // and the MCP server both call it, so the key the reader builds cannot drift
@@ -73,6 +82,10 @@ func ReadCompletionAt(ctx context.Context, store CompletionGetter, region, resul
 	}
 	if err != nil {
 		return nil, uri, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, uri, fmt.Errorf("%w at %s (the instance's disk was probably full when the task ended); see the task's log at s3://%s/%s",
+			ErrEmptyCompletionRecord, uri, resultsBucket, joinTaskKey(taskPrefix, "command.log"))
 	}
 	rec, err = taskproto.ParseCompletionRecord(data)
 	if err != nil {

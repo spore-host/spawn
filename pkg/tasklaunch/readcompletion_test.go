@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/aws"
@@ -173,5 +174,29 @@ func TestReadCompletion_BadResultsPrefix(t *testing.T) {
 	}
 	if len(store.reads) != 0 {
 		t.Errorf("read %v with an unusable prefix", store.reads)
+	}
+}
+
+// An empty completion.json is what a pre-#1179 wrapper uploaded when the task
+// had filled the instance's /tmp. The task is over, so it is not "no record
+// yet"; it must be the typed empty-record error, naming where the task's log
+// is, never a bare "unexpected end of JSON input".
+func TestReadCompletion_EmptyRecord(t *testing.T) {
+	const at = "s3://spawn-results-111122223333-us-east-1/tasks/align-sample-42/"
+	for _, body := range []string{"", "\n"} {
+		store := &fakeCompletionStore{account: rcAccount, objects: map[string][]byte{at + "completion.json": []byte(body)}}
+		rec, _, err := ReadCompletion(context.Background(), store, rcTask, "", rcRegion)
+		if !errors.Is(err, ErrEmptyCompletionRecord) {
+			t.Fatalf("body %q: err = %v, want errors.Is ErrEmptyCompletionRecord", body, err)
+		}
+		if errors.Is(err, ErrNoCompletionRecord) {
+			t.Errorf("body %q: an empty record was reported as absent: %v", body, err)
+		}
+		if rec != nil {
+			t.Errorf("body %q: rec = %+v with an error", body, rec)
+		}
+		if !strings.Contains(err.Error(), at+"command.log") {
+			t.Errorf("body %q: error does not name the task's log %scommand.log: %v", body, at, err)
+		}
 	}
 }

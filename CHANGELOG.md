@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `truffle find`, not the deprecated `truffle search`.
 
 ### Fixed
+
 - **FSx for Lustre cost estimates for the 250, 500 and 1000 MB/s/TiB tiers were
   1.4 to 1.9 times the list price** (#1165). The table had 0.290, 0.580 and
   1.160 $/GiB-month; the AWS Price List (us-east-1, Persistent SSD) gives
@@ -44,6 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Price List values.
 - **`spawn task run --dry-run` showed instance types under 1 GiB as "0 GiB"**
   (#1276). Memory is now printed as it is: a t4g.nano shows 0.5 GiB.
+
+- **A task that fills the instance's `/tmp` still leaves a readable completion
+  record** (#1179). The task wrapper and the terminal-flush hook wrote
+  `completion.json` and `.exitcode` to `/tmp` and uploaded those files; when the
+  task had filled `/tmp` (a container task's staging lives there too) both came
+  out empty and were uploaded empty, so `spawn task status` failed with
+  "unexpected end of JSON input" although the task's failure was in
+  `command.log`. Each record is now built in memory and checked after it is
+  written; if the local copy did not take, the record is streamed to S3 from
+  memory instead. A record left empty by an older instance is now reported by
+  `spawn task status` and `spawn task run --wait` as an empty record, probably
+  from a full disk, with the location of the task's `command.log`.
 
 ## [0.140.0] - 2026-10-20
 
