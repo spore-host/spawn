@@ -391,10 +391,9 @@ func configure() {
 		sweepDNS:     strings.EqualFold(os.Getenv("REAPER_DNS_SWEEP"), "true"),
 		expireDNS:    strings.EqualFold(os.Getenv("REAPER_DNS_EXPIRE"), "true"),
 		expireLeases: strings.EqualFold(os.Getenv("REAPER_DNS_LEASE_EXPIRE"), "true"),
-		netResources: parseNetResources(os.Getenv("REAPER_NET_RESOURCES")),
 		spotRequests: parseSpotRequests(os.Getenv("REAPER_SPOT_REQUESTS")),
-		elasticIPs:   parseElasticIPs(os.Getenv("REAPER_ELASTIC_IPS")),
 	}
+	r.netResources, r.elasticIPs = netSweepModesFromEnv()
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
 	// client when a zone is configured, so a deployment without DNS teardown
 	// stays a no-op (and needs no route53 IAM).
@@ -2052,4 +2051,13 @@ func launchTime(tagVal string, apiLaunch *time.Time) time.Time {
 func main() {
 	configure()
 	lambda.Start(handler)
+}
+
+// netSweepModesFromEnv resolves REAPER_NET_RESOURCES and REAPER_ELASTIC_IPS.
+// Together, because an unset REAPER_ELASTIC_IPS follows the resolved
+// REAPER_NET_RESOURCES (off stays off), as it did before #1232 gave the Elastic
+// IP sweep its own switch. A separate function so that wiring is testable.
+func netSweepModesFromEnv() (netResources, elasticIPs string) {
+	netResources = parseNetResources(os.Getenv("REAPER_NET_RESOURCES"))
+	return netResources, parseElasticIPs(os.Getenv("REAPER_ELASTIC_IPS"), netResources)
 }

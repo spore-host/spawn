@@ -119,20 +119,25 @@ Parameters:
 
   ElasticIps:
     Type: String
-    Default: 'report'
-    AllowedValues: ['off', 'report', 'reap']
+    Default: ''
+    AllowedValues: ['', 'off', 'report', 'reap']
     Description: >
       The orphaned launch Elastic IP sweep (#661, #1232), independent of
       NetResources. It selects addresses tagged spawn:managed=true,
-      spawn:purpose=efa-public-ip and spawn:instance-id, and acts on one only
+      spawn:purpose=efa-public-ip and spawn:instance-id, and releases one only
       when it is unassociated, its instance is terminated or gone, and its
-      spawn:created stamp is at least 15 minutes old. Such an address bills by
-      the hour and counts against the per-region Elastic IP quota; a Spot reclaim
-      of a multi-interface EFA instance leaves one behind every time. 'report'
-      (default) logs each address 'reap' would release and releases nothing.
-      'reap' releases it, and also releases the address of an instance the
-      reaper has just terminated. 'off' skips both. An unrecognised value
-      resolves to 'report'. DryRun always wins.
+      spawn:created stamp (or, without one, the reaper's own first-seen stamp)
+      is at least 15 minutes old. Such an address bills by the hour and counts
+      against the per-region Elastic IP quota; a Spot reclaim of a
+      multi-interface EFA instance leaves one behind every time.
+
+      '' (default) keeps the behaviour from before this parameter existed:
+      'reap', unless NetResources is 'off', in which case 'off'. So a stack
+      redeployed without naming it behaves exactly as it did. 'reap' releases
+      the address, and also releases the address of an instance the reaper has
+      just terminated. 'report' logs each address 'reap' would release and
+      releases nothing. 'off' skips both. An unrecognised value resolves to
+      'report'. DryRun always wins.
 
   SpotRequests:
     Type: String

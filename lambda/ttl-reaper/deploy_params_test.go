@@ -792,13 +792,14 @@ func TestTemplateEnvironmentIsReadByTheReaper(t *testing.T) {
 
 // TestElasticIpsSurvivesAMakeDeploy is #1232's preservation property, end to
 // end through the Makefile's real emission and the real merge script: a stack
-// armed with ElasticIps=reap stays armed across a `make deploy` that does not
+// set to ElasticIps=report keeps it across a `make deploy` that does not
 // mention it (the #650 class), a stack that predates the parameter gets the
-// template default (report), and `make deploy ELASTIC_IPS=reap` arms it.
+// template default (the empty string: what it did before the parameter existed),
+// and `make deploy ELASTIC_IPS=off` sets it.
 func TestElasticIpsSurvivesAMakeDeploy(t *testing.T) {
 	summary := templateSummaryFromTemplate(t)
 	armed := strings.Replace(liveParams, "\n]",
-		",\n  {\"ParameterKey\":\"ElasticIps\",\"ParameterValue\":\"reap\"}\n]", 1)
+		",\n  {\"ParameterKey\":\"ElasticIps\",\"ParameterValue\":\"report\"}\n]", 1)
 	if armed == liveParams {
 		t.Fatal("could not add ElasticIps to the live fixture")
 	}
@@ -812,19 +813,20 @@ func TestElasticIpsSurvivesAMakeDeploy(t *testing.T) {
 
 	plain, _ := explicitFromMakefile(t)
 	got, _ := runMerge(t, summary, armed, toExplicit(plain))
-	if got["ElasticIps"] != "reap" {
-		t.Errorf("plain make deploy over a stack with ElasticIps=reap sent %q: an armed "+
-			"Elastic IP sweep was disarmed by a deploy that did not mention it", got["ElasticIps"])
+	if got["ElasticIps"] != "report" {
+		t.Errorf("plain make deploy over a stack with ElasticIps=report sent %q: a deploy "+
+			"that did not mention it changed it", got["ElasticIps"])
 	}
 
 	got, _ = runMerge(t, summary, liveParams, toExplicit(plain))
-	if got["ElasticIps"] != "report" {
-		t.Errorf("a stack predating ElasticIps got %q, want the template default report", got["ElasticIps"])
+	if got["ElasticIps"] != "" {
+		t.Errorf("a stack predating ElasticIps got %q, want the template default '' (reap, or "+
+			"off under NetResources=off: what it did before the parameter existed)", got["ElasticIps"])
 	}
 
-	set, _ := explicitFromMakefile(t, "ELASTIC_IPS=reap")
-	got, _ = runMerge(t, summary, liveParams, toExplicit(set))
-	if got["ElasticIps"] != "reap" {
-		t.Errorf("make deploy ELASTIC_IPS=reap sent %q", got["ElasticIps"])
+	set, _ := explicitFromMakefile(t, "ELASTIC_IPS=off")
+	got, _ = runMerge(t, summary, armed, toExplicit(set))
+	if got["ElasticIps"] != "off" {
+		t.Errorf("make deploy ELASTIC_IPS=off sent %q", got["ElasticIps"])
 	}
 }

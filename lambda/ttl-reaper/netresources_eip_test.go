@@ -168,9 +168,10 @@ func TestEIPSweepAsksEC2ForEveryLiveState(t *testing.T) {
 	}
 }
 
-// TestEIPSweepModes: `reap` releases; `report` (the default) and a dry run log
-// exactly the address reap would release and release nothing; `off` makes no
-// Elastic IP call at all. Every mode that examines the address counts it.
+// TestEIPSweepModes: `reap` (the default, as it was before the switch existed)
+// releases; `report` and a dry run log exactly the address reap would release
+// and release nothing; `off` makes no Elastic IP call at all. Every mode that
+// examines the address counts it.
 func TestEIPSweepModes(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {
@@ -182,8 +183,9 @@ func TestEIPSweepModes(t *testing.T) {
 	}{
 		{"reap", false, elasticIPsReap, true, false},
 		{"report", false, elasticIPsReport, false, true},
-		{"unset resolves to report", false, parseElasticIPs(""), false, true},
-		{"a typo resolves to report", false, parseElasticIPs("reep"), false, true},
+		{"unset resolves to reap", false, parseElasticIPs("", netResourcesReport), true, false},
+		{"unset with net-resources off resolves to off", false, parseElasticIPs("", netResourcesOff), false, false},
+		{"a typo resolves to report", false, parseElasticIPs("reep", netResourcesReport), false, true},
 		{"dry run beats reap", true, elasticIPsReap, false, true},
 		{"off", false, elasticIPsOff, false, false},
 	} {
@@ -203,6 +205,9 @@ func TestEIPSweepModes(t *testing.T) {
 			}
 			if sum.ElasticIPsWouldRelease != wantWould {
 				t.Errorf("ElasticIPsWouldRelease = %d, want %d", sum.ElasticIPsWouldRelease, wantWould)
+			}
+			if tc.wantRelease && !strings.Contains(out, "RELEASED Elastic IP eipalloc-orphan") {
+				t.Errorf("no RELEASED line; log:\n%s", out)
 			}
 			if tc.mode == elasticIPsOff {
 				if f.describeAddrCalls != 0 || sum.ElasticIPsScanned != 0 {
@@ -260,22 +265,46 @@ func TestEIPSwitchIsIndependentOfNetResources(t *testing.T) {
 	}
 }
 
-// The default is `report` (#1232: a report-only period before arming), in the
-// template and in the reaper's own fallback, and the two agree.
-func TestEIPDefaultIsReport(t *testing.T) {
-	if got := parseElasticIPs(""); got != elasticIPsReport {
-		t.Errorf("parseElasticIPs(\"\") = %q, want report", got)
+// The default is `reap`, in the template and in the reaper's own handling of an
+// unset variable: since v0.138.0 (#661) these addresses were released by
+// default, and adding a switch for them (#1232) must not turn that off on the
+// next redeploy. An unset variable still follows REAPER_NET_RESOURCES=off, which
+// used to turn this sweep off too.
+func TestEIPDefaultIsReap(t *testing.T) {
+	for net, want := range map[string]string{
+		netResourcesReport: elasticIPsReap,
+		netResourcesReap:   elasticIPsReap,
+		netResourcesOff:    elasticIPsOff,
+	} {
+		for _, unset := range []string{"", "  "} {
+			if got := parseElasticIPs(unset, net); got != want {
+				t.Errorf("parseElasticIPs(%q, net-resources=%s) = %q, want %q", unset, net, got, want)
+			}
+		}
+	}
+	// An explicit value wins over the net-resources coupling.
+	if got := parseElasticIPs("reap", netResourcesOff); got != elasticIPsReap {
+		t.Errorf("explicit reap with net-resources off = %q, want reap", got)
 	}
 	b, err := os.ReadFile("template.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?m)^  ElasticIps:\n    Type: String\n    Default: '([a-z]+)'`).FindSubmatch(b)
+	// The template's default is the empty string, so the function sees REAPER_ELASTIC_IPS
+	// unset and applies the rule above: reap, or off when NetResources=off. A
+	// literal 'reap' default would start releasing in a stack running
+	// NetResources=off; 'report' would stop releasing everywhere else.
+	m := regexp.MustCompile(`(?m)^  ElasticIps:\n    Type: String\n    Default: '([a-z]*)'`).FindSubmatch(b)
 	if m == nil {
 		t.Fatal("template.yaml declares no ElasticIps parameter with a Default")
 	}
-	if string(m[1]) != elasticIPsReport {
-		t.Errorf("template ElasticIps default = %q, want report", m[1])
+	if got := parseElasticIPs(string(m[1]), netResourcesReport); got != elasticIPsReap {
+		t.Errorf("template ElasticIps default %q resolves to %q, want reap: a stack redeployed "+
+			"without the parameter would stop releasing addresses it releases today", m[1], got)
+	}
+	if got := parseElasticIPs(string(m[1]), netResourcesOff); got != elasticIPsOff {
+		t.Errorf("template ElasticIps default %q with NetResources=off resolves to %q, want off: "+
+			"that stack has never released Elastic IPs", m[1], got)
 	}
 	if !regexp.MustCompile(`(?m)^\s+REAPER_ELASTIC_IPS:\s+!Ref\s+ElasticIps\s*$`).Match(b) {
 		t.Error("template.yaml does not pass ElasticIps to the function as REAPER_ELASTIC_IPS")
@@ -304,10 +333,10 @@ func (e *eipTerminateNet) ReleaseAddress(ctx context.Context, in *ec2.ReleaseAdd
 }
 
 // #661: an instance the reaper terminates is one whose spored failed to end it,
-// so nothing on the instance released its launch Elastic IP. In `reap` the
-// reaper does, after the terminate, and only that instance's. In `report` (the
-// default) and `off` it does not; the sweep reports the address later.
-// REAPER_NET_RESOURCES has no say in it.
+// so nothing on the instance released its launch Elastic IP. In `reap`, the
+// default, the reaper does, after the terminate, and only that instance's. In
+// `report` and `off` it does not; the sweep reports the address later.
+// REAPER_NET_RESOURCES matters only through an unset REAPER_ELASTIC_IPS.
 func TestReapTerminateReleasesTheInstancesLaunchElasticIP(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {
@@ -321,7 +350,8 @@ func TestReapTerminateReleasesTheInstancesLaunchElasticIP(t *testing.T) {
 		{"reap with net-resources off", elasticIPsReap, netResourcesOff, false, "terminate,describe-addresses,release eipalloc-mine"},
 		// Nondefault VPC: InUse until EC2 detaches it; the sweep finishes it.
 		{"reap, still associated", elasticIPsReap, netResourcesReport, true, "terminate,describe-addresses,release eipalloc-mine"},
-		{"default (unset) is report", "", netResourcesReap, false, "terminate"},
+		{"default (unset) is reap", "", netResourcesReport, false, "terminate,describe-addresses,release eipalloc-mine"},
+		{"unset with net-resources off", "", netResourcesOff, false, "terminate"},
 		{"report", elasticIPsReport, netResourcesReap, false, "terminate"},
 		{"off", elasticIPsOff, netResourcesReap, false, "terminate"},
 	} {
@@ -335,7 +365,7 @@ func TestReapTerminateReleasesTheInstancesLaunchElasticIP(t *testing.T) {
 				calls: &ec2c.calls,
 				inUse: tc.inUse,
 			}
-			r := &reaper{netResources: tc.netMode, elasticIPs: parseElasticIPs(tc.eipMode)}
+			r := &reaper{netResources: tc.netMode, elasticIPs: parseElasticIPs(tc.eipMode, tc.netMode)}
 			acct := account{label: "acct", ec2For: func(string) ec2API { return ec2c }, netFor: func(string) netResourceAPI { return net }}
 			if err := r.terminate(context.Background(), acct, candidate{id: "i-spot", region: "us-east-1"}); err != nil {
 				t.Fatalf("terminate: %v (an Elastic IP problem must never fail the reap)", err)
@@ -360,5 +390,71 @@ func TestEIPSweepReleaseFailureIsNotFatal(t *testing.T) {
 	sum, _ := runEIPSweep(t, f, false, netResourcesOff, elasticIPsReap)
 	if sum.ElasticIPsReleased != 0 || sum.ElasticIPsSkipped != 2 {
 		t.Errorf("ElasticIPsReleased/Skipped = %d/%d, want 0/2 (both attempted)", sum.ElasticIPsReleased, sum.ElasticIPsSkipped)
+	}
+}
+
+// An address with no usable spawn:created stamp (a pre-release build, a
+// hand-edited tag) is neither skipped forever nor released on a guessed age:
+// reap stamps it with the reaper's first-seen tag and releases it once that is
+// past the grace. Report and dry run write nothing and say what reap would do.
+func TestEIPWithoutCreatedStampIsAgedFromFirstSeen(t *testing.T) {
+	now := time.Now()
+	noStamp := func() ec2types.Address {
+		return withoutTag(launchEIP("eipalloc-x", "i-gone", time.Hour, now, ""), tagprefix.Tag("created"))
+	}
+	seen := func(age time.Duration) ec2types.Address {
+		return withTag(noStamp(), discoveryTagKey, now.Add(-age).Format(time.RFC3339))
+	}
+	for _, tc := range []struct {
+		name        string
+		addr        ec2types.Address
+		dryRun      bool
+		mode        string
+		wantStamp   bool
+		wantRelease bool
+		wantWould   bool
+	}{
+		{"first sight: stamped, not released", noStamp(), false, elasticIPsReap, true, false, false},
+		{"first-seen past the grace: released", seen(eipGrace + time.Minute), false, elasticIPsReap, false, true, false},
+		{"first-seen inside the grace: waits", seen(eipGrace - time.Minute), false, elasticIPsReap, false, false, false},
+		{"unparseable stamp falls back too", withTag(noStamp(), tagprefix.Tag("created"), "yesterday"), false, elasticIPsReap, true, false, false},
+		{"report writes nothing", noStamp(), false, elasticIPsReport, false, false, true},
+		{"dry run writes nothing", noStamp(), true, elasticIPsReap, false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeNetAPI{addrs: []ec2types.Address{tc.addr}}
+			sum, out := runEIPSweep(t, f, tc.dryRun, netResourcesOff, tc.mode)
+			if got := len(f.tagged) == 1 && f.tagged[0] == "eipalloc-x"; got != tc.wantStamp {
+				t.Errorf("stamped %v, want stamp=%v", f.tagged, tc.wantStamp)
+			}
+			if got := len(f.released) == 1; got != tc.wantRelease {
+				t.Errorf("released %v, want release=%v", f.released, tc.wantRelease)
+			}
+			if got := sum.ElasticIPsWouldRelease == 1 && strings.Contains(out, "WOULD release Elastic IP eipalloc-x"); got != tc.wantWould {
+				t.Errorf("would-release=%v (count %d), want %v; log:\n%s", got, sum.ElasticIPsWouldRelease, tc.wantWould, out)
+			}
+		})
+	}
+}
+
+// The handler resolves the two switches from its environment together: an
+// unset REAPER_ELASTIC_IPS follows REAPER_NET_RESOURCES=off and is reap
+// otherwise, and an explicit value wins.
+func TestNetSweepModesFromEnv(t *testing.T) {
+	for _, tc := range []struct{ net, eip, wantNet, wantEIP string }{
+		{"", "", netResourcesReport, elasticIPsReap},
+		{"report", "", netResourcesReport, elasticIPsReap},
+		{"off", "", netResourcesOff, elasticIPsOff},
+		{"OFF", "", netResourcesOff, elasticIPsOff},
+		{"off", "reap", netResourcesOff, elasticIPsReap},
+		{"reap", "report", netResourcesReap, elasticIPsReport},
+		{"reap", "reep", netResourcesReap, elasticIPsReport},
+	} {
+		t.Setenv("REAPER_NET_RESOURCES", tc.net)
+		t.Setenv("REAPER_ELASTIC_IPS", tc.eip)
+		gotNet, gotEIP := netSweepModesFromEnv()
+		if gotNet != tc.wantNet || gotEIP != tc.wantEIP {
+			t.Errorf("NET_RESOURCES=%q ELASTIC_IPS=%q -> %s/%s, want %s/%s", tc.net, tc.eip, gotNet, gotEIP, tc.wantNet, tc.wantEIP)
+		}
 	}
 }

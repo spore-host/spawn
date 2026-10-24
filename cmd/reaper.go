@@ -177,7 +177,7 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&reaperNetResources, "net-resources", "",
 		"Network-resource sweep, REAPER_NET_RESOURCES: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperElasticIPs, "elastic-ips", "",
-		"Orphaned launch Elastic IP sweep, REAPER_ELASTIC_IPS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
+		"Orphaned launch Elastic IP sweep, REAPER_ELASTIC_IPS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is reap, or off when REAPER_NET_RESOURCES=off)")
 	fs.StringVar(&reaperMaxAge, "max-age", "",
 		"Max-age ceiling, REAPER_MAX_AGE, e.g. 336h or 14d (default: keep; the reaper's default is 7d)")
 	fs.StringVar(&reaperNotifyURL, "notify-url", "",

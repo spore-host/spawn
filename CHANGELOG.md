@@ -99,6 +99,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--elastic-ips reap`) therefore stops releasing these addresses and reports
   them instead. `REAPER_NET_RESOURCES=off` no longer turns the Elastic IP sweep
   off, and Elastic IPs are no longer counted in `net_reaped` / `net_skipped`.
+- **The TTL reaper's launch Elastic IP sweep has its own switch,
+  `REAPER_ELASTIC_IPS`** (#1232): `off`, `report` or `reap`, set as the SAM
+  parameter `ElasticIps`, `make deploy ELASTIC_IPS=...`, or
+  `spawn reaper deploy --elastic-ips`. What a reaper does by default is
+  unchanged: unset (the template default is `''`) means `reap`, or `off` when
+  `REAPER_NET_RESOURCES=off`, exactly as before. The switch is independent of
+  `REAPER_NET_RESOURCES`, so the release can be held in `report` or turned `off`
+  without touching the security-group and placement-group sweep, and kept on
+  while that sweep is off. It also governs the release of an instance the
+  reaper has just terminated. `report` logs a `WOULD release Elastic IP` line
+  for each address `reap` would release. The run summary gains
+  `elastic_ips_scanned`, `elastic_ips_released`, `elastic_ips_would_release`
+  and `elastic_ips_skipped`. A deploy that does not name the setting keeps the
+  deployed value, on all three deploy paths. No IAM change.
+
+- **The reaper's Elastic IP sweep checks an instance's state itself and ages
+  unstamped addresses instead of skipping them** (#1232). An address whose
+  instance is still listed as `terminated` was already treated as orphaned
+  through the `DescribeInstances` filter; the reaper now also checks the state
+  itself rather than relying only on the filter. An address with no usable
+  `spawn:created` stamp used to be skipped on every cycle, so it billed until
+  someone released it. Every release since 0.138.0 writes the stamp in the same
+  call that allocates the address, so this affects only addresses from
+  pre-release builds or hand-edited tags. Such an address is now stamped
+  `spawn:reaper-first-seen` on first sight and released 15 minutes later, if
+  every other condition still holds.
+- **Elastic IPs are no longer counted in the reaper summary's `net_reaped` /
+  `net_skipped`**; they have their own `elastic_ips_*` fields (#1232).
 
 ## [0.141.0] - 2026-10-23
 

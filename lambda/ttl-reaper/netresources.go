@@ -171,9 +171,11 @@ var eipInstanceTagKey = tagprefix.Tag("instance-id")
 // termination time is not used instead: once the instance is gone from
 // DescribeInstances (about an hour after it terminates) there is nothing to read
 // it from, and before then it exists only inside StateTransitionReason's free
-// text. An address with no stamp is skipped and logged rather than guessed at;
-// the stamp is written in the same call as the spawn:purpose tag the sweep
-// selects on, so a launch address without one is not something spawn makes.
+// text. The stamp is written in the same call as the spawn:purpose tag the sweep
+// selects on, by every release since the first that allocated these addresses
+// (v0.138.0). An address without a usable one (a pre-release build, a hand-edited
+// tag) is aged from the reaper's own first-seen stamp instead of guessed at or
+// skipped forever.
 const eipGrace = 15 * time.Minute
 
 // reapLaunchElasticIPs releases the Elastic IPs a multi-interface EFA launch
@@ -226,10 +228,26 @@ func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, a
 		}
 		age, ok := netResourceAge(a.Tags, now)
 		if !ok {
-			log.Printf("net-resources: %s/%s: Elastic IP %s (%s) for %s has no %s stamp — skipped",
-				acct.label, region, alloc, ip, instanceID, tagprefix.Tag("created"))
-			sum.ElasticIPsSkipped++
-			continue
+			// No usable spawn:created stamp. Every launch since the sweep's
+			// first release writes it in the AllocateAddress call itself, so
+			// this is a pre-release build or a hand-edited tag. Skipping would
+			// leave it billing forever; guessing an age could release an address
+			// a launch is about to associate. So age it from the reaper's own
+			// first-seen stamp instead, written on first sight, exactly as the
+			// group sweep does for its untagged resources.
+			age, ok = untaggedAge(a.Tags, now)
+			if !ok {
+				if r.elasticIPsReportOnly() {
+					log.Printf("WOULD release Elastic IP %s (%s) in %s/%s — its instance %s is gone; it has no %s stamp, "+
+						"so reap mode would first stamp it with %s and release it %s later (held back: %s)",
+						alloc, ip, acct.label, region, instanceID, tagprefix.Tag("created"), discoveryTagKey, eipGrace, r.elasticIPsHeldBy())
+					sum.ElasticIPsWouldRelease++
+					continue
+				}
+				r.stampEIPDiscovery(ctx, cli, alloc, acct, region)
+				sum.ElasticIPsSkipped++
+				continue
+			}
 		}
 		if age < eipGrace {
 			continue
@@ -254,6 +272,24 @@ func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, a
 	}
 }
 
+// stampEIPDiscovery writes the reaper's first-seen tag on an Elastic IP that
+// has no spawn:created stamp, so a later cycle can age it out. Best-effort: a
+// failure means it is stamped next cycle instead. The CreateTags grant is on
+// the spawn:managed=true rail, which these addresses carry.
+func (r *reaper) stampEIPDiscovery(ctx context.Context, cli netResourceAPI, alloc string, acct account, region string) {
+	log.Printf("net-resources: %s/%s: Elastic IP %s has no %s stamp — stamping %s so a later cycle can age it out",
+		acct.label, region, alloc, tagprefix.Tag("created"), discoveryTagKey)
+	if _, err := cli.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{alloc},
+		Tags: []ec2types.Tag{{
+			Key:   awssdk.String(discoveryTagKey),
+			Value: awssdk.String(time.Now().UTC().Format(time.RFC3339)),
+		}},
+	}); err != nil {
+		log.Printf("net-resources: %s/%s: could not stamp %s with %s: %v", acct.label, region, alloc, discoveryTagKey, err)
+	}
+}
+
 // isLaunchElasticIP reports whether an address is one spawn allocated for a
 // launch: spawn:managed=true, spawn:purpose=efa-public-ip and an instance tag.
 // The describe filter asks for the first two, but a filter is the API's
@@ -269,26 +305,39 @@ func isLaunchElasticIP(tags []ec2types.Tag) bool {
 // The launch Elastic IP sweep's own switch, REAPER_ELASTIC_IPS (#1232), with
 // the same three values as REAPER_NET_RESOURCES and independent of it.
 //
-// It used to ride on REAPER_NET_RESOURCES and release in `report` as well as
-// `reap` (#661). It now has its own setting so that it can be armed, or held in
-// report, without also arming the security-group and placement-group deletes,
-// and so that it gets the same observe-then-arm period every other destructive
-// sweep here had (SpotRequests was armed only after a report period and a
-// controlled test, spawn#1075). Arm it with ElasticIps=reap.
+// Until #1232 the sweep rode on REAPER_NET_RESOURCES and released in `report`
+// as well as `reap` (#661), because unlike the groups the address is
+// unambiguously spawn's, referenced by nothing, and bills by the hour. That
+// default is kept: unset means reap. The separate switch exists so the release
+// can be held in `report` or turned `off` without touching the group sweep, and
+// armed without arming the group deletes.
 const (
 	// elasticIPsOff skips the Elastic IP sweep and the post-terminate release.
 	elasticIPsOff = reaperconfig.ModeOff
-	// elasticIPsReport logs what it WOULD release and releases nothing. The
-	// default.
+	// elasticIPsReport logs what it WOULD release and releases nothing.
 	elasticIPsReport = reaperconfig.ModeReport
-	// elasticIPsReap releases.
+	// elasticIPsReap releases. The default.
 	elasticIPsReap = reaperconfig.ModeReap
 )
 
-// parseElasticIPs maps REAPER_ELASTIC_IPS onto a mode. An unrecognised value
-// becomes report, for the same reason as parseNetResources: a typo must neither
-// arm a release nor silently disable the report.
-func parseElasticIPs(v string) string {
+// parseElasticIPs maps REAPER_ELASTIC_IPS onto a mode, given the resolved
+// REAPER_NET_RESOURCES.
+//
+//   - Unset (or empty) keeps the behaviour from before the variable existed:
+//     reap, unless REAPER_NET_RESOURCES=off, which used to switch this sweep off
+//     too. An account that said "someone else owns these resources" must not
+//     start losing addresses because the reaper was upgraded.
+//   - off / report / reap (any case) mean what they say.
+//   - Anything else becomes report: a typo must neither arm a release nor
+//     silently disable the report. The accepted set is pkg/reaperconfig's,
+//     shared with `spawn reaper deploy`.
+func parseElasticIPs(v, netResources string) string {
+	if strings.TrimSpace(v) == "" {
+		if netResources == netResourcesOff {
+			return elasticIPsOff
+		}
+		return elasticIPsReap
+	}
 	if m, ok := reaperconfig.ParseMode(v); ok {
 		return m
 	}
@@ -296,7 +345,8 @@ func parseElasticIPs(v string) string {
 }
 
 // elasticIPsReportOnly reports whether this cycle may only REPORT orphaned
-// launch Elastic IPs. dryRun wins over reap, as everywhere else.
+// launch Elastic IPs. dryRun wins over reap, as everywhere else. The zero value
+// is report-only; the handler always sets the field through parseElasticIPs.
 func (r *reaper) elasticIPsReportOnly() bool {
 	return r.dryRun || r.elasticIPs != elasticIPsReap
 }
@@ -305,9 +355,6 @@ func (r *reaper) elasticIPsReportOnly() bool {
 func (r *reaper) elasticIPsHeldBy() string {
 	if r.dryRun {
 		return "REAPER_DRY_RUN=true"
-	}
-	if r.elasticIPs == "" {
-		return "REAPER_ELASTIC_IPS=" + elasticIPsReport
 	}
 	return "REAPER_ELASTIC_IPS=" + r.elasticIPs
 }
