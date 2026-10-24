@@ -171,7 +171,9 @@ func reloadAfterExtend(instance *aws.InstanceInfo, reload func(*aws.InstanceInfo
 		fmt.Fprintf(stderr, "   Manual fallback: spawn connect %s -- 'sudo spored reload'\n", instance.InstanceID)
 		return fmt.Errorf("tags updated, but spored on %s did not reload, so it is still enforcing the previous TTL/cost limit until its next periodic tag refresh: %w", instance.InstanceID, err)
 	}
-	_, _ = fmt.Fprintf(stdout, "✓ Configuration reloaded on instance\n")
+	// `spored reload` exits 0 only when the running daemon acknowledged that it
+	// refreshed (#1278), so this line now means the daemon has the new config.
+	_, _ = fmt.Fprintf(stdout, "✓ spored on the instance reloaded its configuration\n")
 	return nil
 }
 
@@ -461,7 +463,8 @@ func parseExtendDuration(s string) (time.Duration, error) {
 
 // reloadSporedCommand is the on-instance command both reload paths run. It is
 // the same `spored reload` subcommand over SSH and over SSM, so the two paths
-// cannot drift into reloading different things.
+// cannot drift into reloading different things. It signals the running daemon
+// and exits non-zero unless the daemon acknowledges the refresh (#1278).
 const reloadSporedCommand = "sudo /usr/local/bin/spored reload"
 
 // reloadTransport is the seam triggerReload runs through: where the launch key

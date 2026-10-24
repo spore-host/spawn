@@ -4,7 +4,9 @@ package agent
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -232,6 +234,17 @@ func sysBootTime() time.Time      { return time.Time{} }
 // sysIdleStatePath is "" on Windows, which has no boot-scoped tmpfs either;
 // `spored status` keeps its one-shot reading there and labels it (#1090).
 func sysIdleStatePath() string { return "" }
+
+// sysReloadMarkerPath is where the daemon acknowledges a reload (#1278), beside
+// spored.log under %PROGRAMDATA%\spored. Unlike the compute clock it may outlive
+// a boot: `spored reload` trusts it only when its pid is the running service's.
+func sysReloadMarkerPath() string {
+	base := os.Getenv("PROGRAMDATA")
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "spored", "reloaded.json")
+}
 
 // sysAcceleratorFamilies reports an NVIDIA GPU when nvidia-smi is installed: the
 // NVIDIA driver installs it into System32, and Windows instances have no

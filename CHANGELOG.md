@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
 - **A container task can run a workflow engine that starts its own containers:
   `container_docker_socket: true`** (#1231). Cromwell's local backend, miniwdl
   and Nextflow with `docker.enabled` start each workflow task as a sibling
@@ -23,6 +24,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regenerable, since the images the engine started are not recorded. Adds
   `TaskSpec.ContainerDockerSocket` and `TaskSpec.ValidatePooled` to
   `pkg/taskproto`.
+
+### Fixed
+
+- **`spored reload` now reaches the running daemon** (#1278). It used to
+  reload a throwaway agent in its own short-lived process and print that
+  agent's config, so the daemon kept its old TTL, cost limit and other
+  settings until its periodic tag refresh, up to about 5 minutes later. It now
+  signals the daemon (SIGHUP to the systemd unit's main process on Linux, the
+  ParamChange service control on Windows), which re-reads its tags on its
+  monitor loop and publishes an acknowledgement to `/run/spored/reloaded.json`
+  (`%PROGRAMDATA%\spored\reloaded.json` on Windows). `reload` waits up to
+  about 15 seconds for it and prints the config the daemon now enforces. It
+  exits non-zero when spored is not running, does not acknowledge, or could
+  not refresh, and it does not signal a running spored that predates this
+  change (SIGHUP would stop it). `spored config set` notifies the daemon the
+  same way, and `spawn extend`'s "reloaded" line now means the daemon has the
+  new config. `Agent.Reload` also reads and swaps the config under its lock.
 
 ## [0.142.0] - 2026-10-23
 
