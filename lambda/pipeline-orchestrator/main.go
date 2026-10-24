@@ -27,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/spawn/internal/shellmin"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/pipeline"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
@@ -1376,7 +1377,7 @@ exit 0
 		// GHSA-3x4q-99gh-fxhx closed for the other paths). Passed as an
 		// argument, not spliced into the format string, because the generated
 		// shell contains % characters.
-		sporedinstall.KeySetupScript()+sporedinstall.VerifiedInstallFunc(),
+		shellmin.Strip(sporedinstall.KeySetupScript())+shellmin.Strip(sporedinstall.VerifiedInstallFunc()),
 		// The stage command and env are no longer in the user data at all:
 		// the runner reads them from the definition and runs the command with
 		// exec, so there is nothing here for a command's $(...) or quotes to

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"sort"
@@ -289,11 +288,11 @@ func runResume(cmd *cobra.Command, args []string) error {
 
 	// Build user-data for each config
 	for _, cfg := range launchConfigs {
-		userDataScript, err := buildUserData(plat, cfg, "", nil)
+		userData, err := resumeUserData(plat, cfg)
 		if err != nil {
-			return fmt.Errorf("failed to build user data: %w", err)
+			return err
 		}
-		cfg.UserData = base64.StdEncoding.EncodeToString([]byte(userDataScript))
+		cfg.UserData = userData
 	}
 
 	// Continue rolling queue from checkpoint
@@ -538,4 +537,16 @@ func reconcileSweepState(state *SweepState, instanceStates map[string]string) (s
 	}
 
 	return stillRunning, completed, failed, pending
+}
+
+// resumeUserData builds a resumed sweep member's user data, encoded the way
+// every other launch path encodes it. It used to be base64 of the plain script,
+// with no gzip, and the inline bootstrap alone is about 25 KB, so every resumed
+// Linux launch was over EC2's limits and RunInstances refused it (#1274).
+func resumeUserData(plat *platform.Platform, cfg *aws.LaunchConfig) (string, error) {
+	script, err := buildUserData(plat, cfg, "", nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to build user data: %w", err)
+	}
+	return encodeUserDataForOS(script, cfg.TargetOS), nil
 }

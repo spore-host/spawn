@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/catalog"
+	"github.com/spore-host/spawn/internal/shellmin"
 	spawnclient "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
@@ -1275,5 +1276,5 @@ const sporedInstallerSentinel = "# __SPORED_INSTALLER__"
 // generated output, not this function.
 func spliceSporedInstaller(script string) string {
 	return strings.Replace(script, sporedInstallerSentinel,
-		sporedinstall.KeySetupScript()+sporedinstall.VerifiedInstallFunc(), 1)
+		shellmin.Strip(sporedinstall.KeySetupScript())+shellmin.Strip(sporedinstall.VerifiedInstallFunc()), 1)
 }

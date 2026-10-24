@@ -161,6 +161,29 @@ jobs:
             echo "⚠️  SPORED_SIGNING_KEY_ID unset — publishing sha256 only (no publisher signature)"
           fi
 
+          # The static Linux bootstrap body (#1274). A release build of spawn puts
+          # only a stub in user data; the stub fetches
+          # spawn/versions/${VERSION}/bootstrap.sh from the instance's regional
+          # bucket (us-east-1 fallback), and runs it only if its sha256 is the one
+          # that build expects AND its .sig verifies against the key compiled into
+          # spawn. Printed by THIS release's own spawn binary, so the published
+          # bytes are the bytes its stub expects. Not optional, unlike the spored
+          # signature above: an unpublished or unsigned body makes every launch by
+          # this release's CLI stop at boot, so the release fails instead.
+          spawn_bin="dist/spawn_linux_amd64_v1/spawn"
+          SPORE_NO_UPDATE_CHECK=1 "$spawn_bin" bootstrap-body > bootstrap.sh
+          if [ ! -s bootstrap.sh ]; then
+            echo "::error::spawn bootstrap-body printed nothing; refusing to publish a release whose launches cannot boot (#1274)"
+            exit 1
+          fi
+          sha256sum bootstrap.sh | awk '{print $1}' > bootstrap.sh.sha256
+          if [ "$SIGN" != "1" ]; then
+            echo "::error::SPORED_SIGNING_KEY_ID unset: the bootstrap body must be signed, or every launch by this release stops at boot (#1274)"
+            exit 1
+          fi
+          sign_blob bootstrap.sh bootstrap.sh.sig
+          echo "🔏 Signed the bootstrap body ($(cat bootstrap.sh.sha256))"
+
           # Emit every copy as a NUL-separated "src<NUL>dest" pair stream, then run
           # them all through a bounded parallel pool. The copies are independent;
           # serially they cost full latency each, in parallel ~seconds. xargs -0 -n2
@@ -207,6 +230,13 @@ jobs:
                 printf '%s\0%s\0' "spored-windows-amd64.exe.sig" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe.sig"
               fi
             done
+            # The bootstrap body (#1274), versioned only: each spawn release's
+            # stub names its own version, so there is no "latest" to keep.
+            for bucket in "${BUCKETS[@]}"; do
+              printf '%s\0%s\0' "bootstrap.sh" "s3://${bucket}/${PROJECT}/versions/${VERSION}/bootstrap.sh"
+              printf '%s\0%s\0' "bootstrap.sh.sig" "s3://${bucket}/${PROJECT}/versions/${VERSION}/bootstrap.sh.sig"
+              printf '%s\0%s\0' "bootstrap.sh.sha256" "s3://${bucket}/${PROJECT}/versions/${VERSION}/bootstrap.sh.sha256"
+            done
           }
 
           # One copy: dest's region is the segment after "spawn-binaries-" in the
@@ -221,7 +251,7 @@ jobs:
 
           emit_copies | xargs -0 -P 16 -n 2 bash -c 'do_copy "$1" "$2"' _
 
-          echo "✅ Uploaded spored ${VERSION} (linux+windows) to ${#BUCKETS[@]} regions (parallel)"
+          echo "✅ Uploaded spored ${VERSION} (linux+windows) and the bootstrap body to ${#BUCKETS[@]} regions (parallel)"
 
       # Nudge the umbrella docs repo to vendor this release's generated reference
       # (docs/gen/spawn/). Fires repository_dispatch → sync-cli-docs.yaml, which

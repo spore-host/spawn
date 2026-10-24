@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/internal/shellcheckgate"
@@ -38,6 +39,23 @@ func TestBootstrap_Shellcheck(t *testing.T) {
 			// linuxBootstrapBody is spliced into the script above and has no
 			// other renderer; it is named separately so discovery sees it covered.
 			shellcheckgate.Check(t, "pkg/launcher.linuxBootstrapBody", script)
+			// So is bootstrapPrefix, which holds the shebang (#1274).
+			shellcheckgate.Check(t, "pkg/launcher.bootstrapPrefix", script)
+
+			// The same launch as a release build runs it: the verifying stub in
+			// place of the body (#1274), followed by the body it sources at that
+			// point. Checked together because they are one shell: on its own the
+			// stub only assigns the variables the body reads.
+			body := BootstrapBody()
+			fetch := bodyStub("0.143.0", body)
+			stub, err := buildLinuxBootstrap(cfg, "0.143.0", body)
+			if err != nil {
+				t.Fatalf("buildLinuxBootstrap (stub): %v", err)
+			}
+			if strings.Count(stub, fetch) != 1 {
+				t.Fatal("the stub does not carry its fetch block exactly once")
+			}
+			shellcheckgate.Check(t, "pkg/launcher.BuildLinuxBootstrap", strings.Replace(stub, fetch, fetch+body, 1))
 		})
 	}
 }

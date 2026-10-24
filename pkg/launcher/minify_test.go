@@ -7,6 +7,8 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,6 +27,7 @@ func staticTemplates() map[string]string {
 		"spotReplacementCheckFunc":            spotReplacementCheckFunc,
 		"linuxBootstrapBody":                  linuxBootstrapBody,
 		"spotReplacementStopScript":           spotReplacementStopScript,
+		"bodyStubTemplate":                    bodyStubTemplate,
 	}
 }
 
@@ -161,4 +164,80 @@ func TestBareBootstrapFitsItsBudget(t *testing.T) {
 		t.Errorf("the bare bootstrap is %d bytes gzipped, over its %d-byte budget (#1246); every byte over comes out of a task's command and manifests", b.Len(), bootstrapGzipBudget)
 	}
 	t.Logf("bare bootstrap: %d bytes raw, %d gzipped (budget %d, EC2 limit 16384)", len(script), b.Len(), bootstrapGzipBudget)
+}
+
+// TestEverySplicedInstallerIsStripped: the verified spored installer is
+// spliced into user data by more than this package (cmd/app.go, the pipeline
+// orchestrator, the SSM upgrade), and each copy costs those paths about 1.6 KB
+// of gzipped comments (#1274). Every call of the two generators outside
+// pkg/sporedinstall must be the direct argument of shellmin.Strip, whose
+// safety TestMinifiedTemplatesParseTheSame proves for both. Found by walking
+// the repo's source, so a new splice site is covered without a list.
+func TestEverySplicedInstallerIsStripped(t *testing.T) {
+	root := filepath.Join("..", "..")
+	fset := token.NewFileSet()
+	sites := 0
+	err := filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case ".git", "node_modules", "vendor", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
+			filepath.ToSlash(filepath.Dir(path)) == "../../pkg/sporedinstall" {
+			return nil
+		}
+		f, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			return perr
+		}
+		var stack []ast.Node
+		ast.Inspect(f, func(n ast.Node) bool {
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return true
+			}
+			if call, ok := n.(*ast.CallExpr); ok && isInstallerGenerator(call) {
+				sites++
+				stripped := false
+				if len(stack) > 0 {
+					if parent, ok := stack[len(stack)-1].(*ast.CallExpr); ok && isSelector(parent.Fun, "shellmin", "Strip") {
+						stripped = true
+					}
+				}
+				if !stripped {
+					t.Errorf("%s splices %s unstripped; wrap it in shellmin.Strip (#1274)",
+						fset.Position(call.Pos()), call.Fun.(*ast.SelectorExpr).Sel.Name)
+				}
+			}
+			stack = append(stack, n)
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sites < 4 {
+		t.Fatalf("found %d installer splice sites; the source walk has broken", sites)
+	}
+}
+
+func isInstallerGenerator(call *ast.CallExpr) bool {
+	return len(call.Args) == 0 &&
+		(isSelector(call.Fun, "sporedinstall", "VerifiedInstallFunc") || isSelector(call.Fun, "sporedinstall", "KeySetupScript"))
+}
+
+func isSelector(e ast.Expr, pkg, name string) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == pkg
 }

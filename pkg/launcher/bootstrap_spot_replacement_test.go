@@ -108,6 +108,18 @@ func between(t *testing.T, s, start, end string) string {
 	return s[i : i+j]
 }
 
+// completionAssignment is the script's own assignment of the completion-file
+// variable the --command block writes to (#1274), for a test that runs the
+// block on its own.
+func completionAssignment(t *testing.T, script string) string {
+	t.Helper()
+	m := completionAssignRe.FindAllString(script, -1)
+	if len(m) != 1 {
+		t.Fatalf("the bootstrap assigns %s %d times, want once", completionFileVar, len(m))
+	}
+	return m[0] + "\n"
+}
+
 // checkFunc is the generated spawn_is_spot_replacement definition.
 func checkFunc(t *testing.T, script string) string {
 	t.Helper()
@@ -140,7 +152,7 @@ func TestCommandSkippedOnlyOnASpotReplacement(t *testing.T) {
 				t.Fatal(err)
 			}
 			block := between(t, script, "if [ -s /etc/spawn/command ]; then\n    WORKFLOW_COMMAND=", "\necho \"Creating login banner...\"")
-			out, err := sb.run(t, "set -e\nLOCAL_USERNAME=tester\n"+checkFunc(t, script)+block+"\nwait\n")
+			out, err := sb.run(t, "set -e\nLOCAL_USERNAME=tester\n"+completionAssignment(t, script)+checkFunc(t, script)+block+"\nwait\n")
 			if err != nil {
 				t.Fatalf("command block failed: %v\n%s", err, out)
 			}
