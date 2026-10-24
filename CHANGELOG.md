@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn list` and `spawn status` warn about orphaned spawn Elastic IPs, and
+  print the command that releases them** (#1232). A multi-interface EFA launch
+  allocates an Elastic IP; when its instance ends without `spawn terminate`
+  (a Spot reclaim, for one), the address stays allocated, billing and counting
+  toward the region's Elastic IP limit. The warning gives the count, the
+  region, the allocation IDs (first five) and the command. `list` checks every
+  region it searched, `status` the instance's region: one
+  `ec2:DescribeAddresses` each, plus one `ec2:DescribeInstances` only when a
+  spawn address is unassociated. It goes to stderr, and a failed lookup prints
+  nothing and never fails the command.
+- **`spawn cleanup --elastic-ips` releases only orphaned spawn Elastic IPs**
+  (#1232): tagged `spawn:managed=true` and `spawn:instance-id`, attached to
+  nothing, and whose instance is terminated or no longer exists. Nothing else
+  is touched, so running instances do not block it (a plain `spawn cleanup`
+  refuses while any run). `--dry-run`, `--yes` and `--all` work as for
+  `cleanup`; `--all` is needed for addresses another principal launched.
+
 ### Changed
 
 - **`spawn extend` no longer raises an instance's cost limit unless asked**
@@ -47,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `staging_error`, and the command does not run. A spec that relied on an
   empty prefix must set the new per-input field `allow_empty: true`. Validate
   rejects `allow_empty` on a single-object input and on outputs.
+
+- **`spawn cleanup` no longer releases a spawn Elastic IP whose instance still
+  exists** (#1232). It released every unassociated spawn-tagged address,
+  including one a launch had allocated and not yet associated. It now requires
+  the instance to be terminated or gone, as the TTL reaper's sweep does, and
+  lists the others as not removed with the instance's state. An Elastic IP
+  attached to a network interface but not an instance is no longer reported
+  as unassociated.
 
 ## [0.141.0] - 2026-10-23
 

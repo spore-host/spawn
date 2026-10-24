@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
 )
 
@@ -19,6 +20,7 @@ var (
 	cleanupDryRun     bool
 	cleanupYes        bool
 	cleanupAll        bool
+	cleanupElasticIPs bool
 )
 
 var cleanupCmd = &cobra.Command{
@@ -32,6 +34,13 @@ skipped, since EC2 refuses to delete one — re-run once those instances are gon
 Preview what would be removed with --dry-run; otherwise cleanup prompts for
 confirmation (skip with --yes) and then deletes. By default it acts only on
 resources you created; --all widens to every principal in the account.
+
+--elastic-ips releases only the Elastic IPs spawn allocated for multi-interface
+EFA launches whose instance is gone (terminated, or no longer known to EC2) and
+that are attached to nothing. Each one bills and counts toward the region's
+Elastic IP limit. This mode touches nothing else, so running instances do not
+block it. spawn list and spawn status warn about these addresses and print the
+command.
 
 A log of everything removed is written to ~/.spawn/cleanup-<timestamp>.log.`,
 	RunE: runCleanup,
@@ -48,6 +57,7 @@ func init() {
 	_ = cleanupCmd.Flags().MarkDeprecated("force", "cleanup now executes by default; use --dry-run to preview")
 	cleanupCmd.Flags().BoolVarP(&cleanupYes, "yes", "y", false, "Skip the confirmation prompt")
 	cleanupCmd.Flags().BoolVar(&cleanupAll, "all", false, "Include resources created by other principals (default: only yours)")
+	cleanupCmd.Flags().BoolVar(&cleanupElasticIPs, "elastic-ips", false, "Release only orphaned spawn launch Elastic IPs (unassociated, instance gone); nothing else is touched")
 }
 
 func runCleanup(cmd *cobra.Command, args []string) error {
@@ -62,6 +72,10 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	onlyMine := !cleanupAll
+
+	if cleanupElasticIPs {
+		return runCleanupElasticIPs(ctx, cmd, client, regions, onlyMine)
+	}
 
 	var found []aws.ManagedResource
 	for _, region := range regions {
@@ -114,6 +128,8 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 				reason = "shared infrastructure reused by every launch — never removed"
 			case r.ResourceType == "placement-group":
 				reason = "still has members; deletable once those instances are gone"
+			case aws.IsSpawnAllocatedAddress(r):
+				reason = launchAddressNotYetReason(r)
 			}
 			fmt.Fprintf(os.Stderr, "    %s (%s) — %s\n", r.ID, r.Region, reason)
 		}
@@ -188,8 +204,9 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 // cleanup's output depends on:
 //   - running: running/pending instances — never removed, gate cleanup unless --dry-run
 //   - addresses: user-owned Elastic IPs — spawn never releases them (#262). An
-//     unassociated Elastic IP spawn allocated for a multi-interface EFA launch
-//     (#661, aws.IsSpawnAllocatedAddress) is removable instead.
+//     Elastic IP spawn allocated for a multi-interface EFA launch (#661) is
+//     removable once orphaned (aws.IsOrphanedSpawnAddress: unassociated, its
+//     instance gone), and notYet while unassociated with its instance alive.
 //   - alreadyGone: resources whose State is already "deleted" — Resource Groups
 //     Tagging API tag mappings outlive the resources they describe, so a
 //     discovery sweep routinely returns ids for things no longer there.
@@ -208,10 +225,15 @@ func splitCleanupResources(found []aws.ManagedResource) (running, addresses, alr
 		switch {
 		case r.IsRunningInstance():
 			running = append(running, r)
-		case aws.IsSpawnAllocatedAddress(r) && r.State == "unassociated":
+		case aws.IsOrphanedSpawnAddress(r):
 			// An Elastic IP a multi-interface EFA launch allocated whose instance
 			// is gone (#661): spawn's, billing, and released here.
 			removable = append(removable, r)
+		case aws.IsSpawnAllocatedAddress(r) && r.State == "unassociated":
+			// Spawn's, unassociated, but its instance still exists (or could not
+			// be looked up): a launch between allocating and associating it, or
+			// a briefly detached address. Not an orphan, so not released (#1232).
+			notYet = append(notYet, r)
 		case r.ResourceType == "address":
 			addresses = append(addresses, r)
 		case r.ResourceType == "placement-group" && r.State == "in-use":
@@ -264,4 +286,113 @@ func writeCleanupLog(f *os.File, line string) {
 		return
 	}
 	_, _ = f.WriteString(strings.TrimRight(line, "\n") + "\n")
+}
+
+func launchAddressNotYetReason(r aws.ManagedResource) string {
+	inst := r.Tags[aws.ElasticIPInstanceTagKey]
+	if r.LaunchInstanceState == "" {
+		return fmt.Sprintf("spawn's, but its instance %s could not be checked; not released", inst)
+	}
+	return fmt.Sprintf("spawn's, but its instance %s is still %s; not released", inst, r.LaunchInstanceState)
+}
+
+// cleanupEIPAPI is what `spawn cleanup --elastic-ips` needs; *aws.Client is it.
+type cleanupEIPAPI interface {
+	FindOrphanedSpawnAddresses(ctx context.Context, region string) ([]aws.ManagedResource, error)
+	GetCallerIdentityInfo(ctx context.Context) (string, string, error)
+	RemoveResource(ctx context.Context, r aws.ManagedResource) error
+}
+
+// runCleanupElasticIPs releases the orphaned launch Elastic IPs in regions
+// (aws.IsOrphanedSpawnAddress, the definition `spawn list`/`status` warn by) and
+// nothing else (#1232). It is not gated on running instances: releasing an
+// address no instance holds cannot affect one.
+func runCleanupElasticIPs(ctx context.Context, cmd *cobra.Command, api cleanupEIPAPI, regions []string, onlyMine bool) error {
+	out := cmd.OutOrStdout()
+	var callerARN string
+	if onlyMine {
+		_, arn, err := api.GetCallerIdentityInfo(ctx)
+		if err != nil {
+			return fmt.Errorf("resolve caller identity for the default scope (or pass --all): %w", err)
+		}
+		callerARN = arn
+	}
+
+	var orphans []aws.ManagedResource
+	hidden, unchecked := 0, 0
+	for _, region := range regions {
+		rs, err := api.FindOrphanedSpawnAddresses(ctx, region)
+		if err != nil {
+			unchecked++
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s  %s: %v\n", i18n.Symbol("warning"), region, err)
+			continue
+		}
+		for _, r := range rs {
+			if onlyMine && !r.OwnedBy(callerARN) {
+				hidden++
+				continue
+			}
+			orphans = append(orphans, r)
+		}
+	}
+
+	if len(orphans) == 0 {
+		fmt.Fprintf(out, "No orphaned spawn Elastic IPs in %s.", displayCleanupRegions(regions))
+		if hidden > 0 {
+			fmt.Fprintf(out, " %d launched by other principals were skipped (--all includes them).", hidden)
+		}
+		fmt.Fprintln(out)
+		if unchecked > 0 {
+			return fmt.Errorf("%d region(s) could not be checked", unchecked)
+		}
+		return nil
+	}
+
+	fmt.Fprintf(out, "%d orphaned spawn Elastic IP(s) (unassociated, instance gone):\n", len(orphans))
+	for _, r := range orphans {
+		fmt.Fprintf(out, "  %s  %s  %s  instance %s %s\n", r.ID, r.PublicIP, r.Region, r.Tags[aws.ElasticIPInstanceTagKey], r.LaunchInstanceState)
+	}
+	if hidden > 0 {
+		fmt.Fprintf(out, "%d more launched by other principals were skipped (--all includes them).\n", hidden)
+	}
+
+	if cleanupDryRun {
+		fmt.Fprintf(out, "\nDry run: %d Elastic IP(s) would be released. Re-run without --dry-run to release.\n", len(orphans))
+		return nil
+	}
+	if !confirmYes(cleanupYes, fmt.Sprintf("Release %d Elastic IP(s)?", len(orphans))) {
+		return newAborted("aborted: no Elastic IP was released (re-run with --yes)")
+	}
+
+	logPath, logFile := openCleanupLog()
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
+	}
+	released, failed := 0, 0
+	for _, r := range orphans {
+		if err := api.RemoveResource(ctx, r); err != nil {
+			failed++
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ✗ %s (%s): %v\n", r.ID, r.Region, err)
+			writeCleanupLog(logFile, fmt.Sprintf("FAILED %s\t%s\taddress\t%v", r.ID, r.Region, err))
+			continue
+		}
+		released++
+		fmt.Fprintf(out, "  ✓ released %s (%s)\n", r.ID, r.Region)
+		writeCleanupLog(logFile, fmt.Sprintf("REMOVED %s\t%s\taddress", r.ID, r.Region))
+	}
+	fmt.Fprintf(out, "\nReleased %d Elastic IP(s)", released)
+	if failed > 0 {
+		fmt.Fprintf(out, ", %d failed", failed)
+	}
+	if logPath != "" {
+		fmt.Fprintf(out, " — log: %s", logPath)
+	}
+	fmt.Fprintln(out, ".")
+	switch {
+	case failed > 0:
+		return fmt.Errorf("%d Elastic IP(s) could not be released", failed)
+	case unchecked > 0:
+		return fmt.Errorf("%d region(s) could not be checked", unchecked)
+	}
+	return nil
 }

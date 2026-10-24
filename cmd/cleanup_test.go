@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/aws"
@@ -109,20 +110,28 @@ func TestSplitCleanupResources_InUsePlacementGroupIsSkippedNotBlocking(t *testin
 }
 
 // An Elastic IP spawn allocated for a multi-interface EFA launch (#661) is
-// spawn's to release once unassociated; every other Elastic IP — including one
-// merely tagged spawn:managed, and spawn's own while still attached — stays the
-// user's to release (#262).
+// spawn's to release once orphaned — unassociated with its instance terminated
+// or gone (#1232); every other Elastic IP — including one merely tagged
+// spawn:managed, and spawn's own while still attached — stays the user's to
+// release (#262). Spawn's own, unassociated, with its instance still there (a
+// launch between allocate and associate) or not looked up, is held back.
 func TestSplitCleanupResources_SpawnAllocatedElasticIP(t *testing.T) {
 	ours := map[string]string{"spawn:managed": "true", aws.ElasticIPInstanceTagKey: "i-gone"}
 	found := []aws.ManagedResource{
-		{ResourceType: "address", ID: "eipalloc-ours", State: "unassociated", Tags: ours},
+		{ResourceType: "address", ID: "eipalloc-ours", State: "unassociated", Tags: ours, LaunchInstanceState: aws.LaunchInstanceGone},
+		{ResourceType: "address", ID: "eipalloc-ours-terminated", State: "unassociated", Tags: ours, LaunchInstanceState: "terminated"},
+		{ResourceType: "address", ID: "eipalloc-ours-live", State: "unassociated", Tags: ours, LaunchInstanceState: "running"},
+		{ResourceType: "address", ID: "eipalloc-ours-unchecked", State: "unassociated", Tags: ours},
 		{ResourceType: "address", ID: "eipalloc-ours-attached", State: "assoc:stopped", Tags: ours},
 		{ResourceType: "address", ID: "eipalloc-user", State: "unassociated", Tags: map[string]string{"spawn:managed": "true"}},
 		{ResourceType: "address", ID: "eipalloc-untagged", State: "unassociated"},
 	}
-	_, addresses, _, _, removable := splitCleanupResources(found)
-	if len(removable) != 1 || removable[0].ID != "eipalloc-ours" {
-		t.Errorf("removable = %v, want only eipalloc-ours", idsOf(removable))
+	_, addresses, _, notYet, removable := splitCleanupResources(found)
+	if got := strings.Join(idsOf(removable), ","); got != "eipalloc-ours,eipalloc-ours-terminated" {
+		t.Errorf("removable = %v, want only the two whose instance is gone", idsOf(removable))
+	}
+	if got := strings.Join(idsOf(notYet), ","); got != "eipalloc-ours-live,eipalloc-ours-unchecked" {
+		t.Errorf("notYet = %v, want spawn's unassociated addresses whose instance is not known gone", idsOf(notYet))
 	}
 	if len(addresses) != 3 {
 		t.Errorf("addresses (reported, never released) = %v, want the other three", idsOf(addresses))

@@ -17,6 +17,7 @@ const ElasticIPPurpose
 const ElasticIPQuotaCode
 const HeartbeatTag
 const IAMBaselineURL
+const LaunchInstanceGone
 const MaxEncodedUserDataBytes
 const MaxUserDataBytes
 const PriceSourceTag
@@ -290,6 +291,7 @@ field LaunchResult.State string
 field ManagedResource.ARN string
 field ManagedResource.AssociationID string
 field ManagedResource.ID string
+field ManagedResource.LaunchInstanceState string
 field ManagedResource.PublicIP string
 field ManagedResource.Region string
 field ManagedResource.ResourceType string
@@ -379,6 +381,7 @@ func (*Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImportIn
 func (*Client) EnsureLustrePorts(ctx context.Context, region, sgID string) error
 func (*Client) FindCapacityBlockOffering(ctx context.Context, region, offeringID, instanceType string, instanceCount, durationHours int32) (*CapacityBlockOffering, error)
 func (*Client) FindKeyPairByFingerprint(ctx context.Context, region, fingerprint string) (string, error)
+func (*Client) FindOrphanedSpawnAddresses(ctx context.Context, region string) ([]ManagedResource, error)
 func (*Client) GetAL2023AMI(ctx context.Context, region string, arch string, gpu bool) (string, error)
 func (*Client) GetAMISnapshots(ctx context.Context, region, amiID string) ([]SnapshotDetail, error)
 func (*Client) GetAccountID(ctx context.Context) (string, error)
@@ -410,6 +413,7 @@ func (*Client) IsWindowsAMI(ctx context.Context, region, amiID string) bool
 func (*Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error)
 func (*Client) ListAMIs(ctx context.Context, region string, filters map[string]string) ([]AMIInfo, error)
 func (*Client) ListInstances(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error)
+func (*Client) ListInstancesInRegions(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, []string, error)
 func (*Client) LiveInstancesWithTag(ctx context.Context, region, key, value string) ([]InstanceInfo, error)
 func (*Client) OpenImageSource(ctx context.Context, source, region string) (io.ReadCloser, error)
 func (*Client) PrepareSnapshotImage(ctx context.Context, source, region string, maxBytes int64, tempDir string) (*PreparedImage, error)
@@ -453,6 +457,7 @@ func (LaunchConfig) HibernationRequested() bool
 func (LaunchConfig) ValidateDurations() error
 func (LaunchConfig) ValidateUserDataSize() error
 func (ManagedResource) IsRunningInstance() bool
+func (ManagedResource) OwnedBy(callerARN string) bool
 func (ReaperCoverage) Summary() string
 func AccountBase36(accountID string) string
 func AttachDeviceName(i int) string
@@ -477,6 +482,7 @@ func GenerateWindowsPassword(n int) (string, error)
 func GetEFSDNSName(filesystemID, region string) string
 func IsAccessDenied(err error) bool
 func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool
+func IsOrphanedSpawnAddress(r ManagedResource) bool
 func IsSharedSporedIdentity(r ManagedResource) bool
 func IsSpawnAllocatedAddress(r ManagedResource) bool
 func LifecycleTags(name, purpose string, now time.Time) []types.Tag

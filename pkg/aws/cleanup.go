@@ -36,6 +36,11 @@ type ManagedResource struct {
 	// launch allocates for itself (#661), which cleanup releases once unassociated.
 	PublicIP      string
 	AssociationID string
+	// LaunchInstanceState is the state of the instance a spawn-allocated,
+	// unassociated address is tagged for ("running", "terminated", …, or
+	// LaunchInstanceGone), filled by discovery; empty when not looked up.
+	// IsOrphanedSpawnAddress decides on it (#1232).
+	LaunchInstanceState string
 }
 
 // IsSpawnAllocatedAddress reports whether an address is an Elastic IP spawn
@@ -255,21 +260,18 @@ func (c *Client) scanAddresses(ctx context.Context, cfg aws.Config, region strin
 		}
 	}
 
-	var api describeAddressesAPI = ec2.NewFromConfig(cfg)
+	var api orphanAddressAPI = ec2.NewFromConfig(cfg)
 	out, err := api.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{})
 	if err != nil {
 		return nil, fmt.Errorf("describe elastic IPs in %s: %w", region, err)
 	}
-	eipTags := make([]map[string]string, len(out.Addresses))
-	for i, a := range out.Addresses {
-		eipTags[i] = map[string]string{}
-		for _, t := range a.Tags {
-			if k := aws.ToString(t.Key); k != "" {
-				eipTags[i][k] = aws.ToString(t.Value)
-			}
-		}
+	addrs := classifyAddresses(out.Addresses, addressTags(out.Addresses), instState, region)
+	// A spawn-allocated address is cleanup's to release only once its instance
+	// is gone (IsOrphanedSpawnAddress), the same rule `spawn list` warns by.
+	if err := resolveLaunchAddressInstances(ctx, api, addrs); err != nil {
+		return nil, fmt.Errorf("%s: %w", region, err)
 	}
-	return classifyAddresses(out.Addresses, eipTags, instState, region), nil
+	return addrs, nil
 }
 
 // classifyAddresses is the pure decision core of scanAddresses (testable without
@@ -283,7 +285,7 @@ func classifyAddresses(addresses []ec2types.Address, eipTags []map[string]string
 
 		var state string
 		switch {
-		case instID == "" && assoc == "":
+		case instID == "" && assoc == "" && aws.ToString(a.NetworkInterfaceId) == "":
 			skipAddress := false
 			for k := range eipTags[idx] {
 				if strings.HasPrefix(k, "aws:") {
@@ -638,7 +640,7 @@ func (c *Client) RemoveResource(ctx context.Context, r ManagedResource) error {
 		_, err := ec2c.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(r.ID)})
 		return ignoreNotFound(err, "InvalidVolume.NotFound")
 
-	case r.ResourceType == "address" && IsSpawnAllocatedAddress(r) && r.State == "unassociated":
+	case IsOrphanedSpawnAddress(r):
 		// The Elastic IP a multi-interface EFA launch allocated (#661), left
 		// behind by an instance that ended without `spawn terminate`. Ours, and
 		// billing while attached to nothing.
