@@ -86,6 +86,15 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Orphaned launch Elastic IPs in this instance's region (#1232), after the
+	// status, to stderr. Not in --check-complete mode, whose paths exit the
+	// process and whose callers are polling, not reading.
+	if !statusCheckComplete {
+		defer func() {
+			fmt.Fprint(cmd.ErrOrStderr(), orphanedAddressWarning(ctx, client, []string{instance.Region}))
+		}()
+	}
+
 	// Only a running instance has a spored to ask. Anything else is answered
 	// from EC2 and its tags, with no SSH and no SSM: a stopped instance has no
 	// public IP, and ssh to the empty host it left reached this machine's own

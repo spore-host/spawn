@@ -79,10 +79,16 @@ func runList(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "%s\n", i18n.T("spawn.list.searching_all_regions"))
 	}
 
-	instances, err := client.ListInstances(ctx, effectiveRegion, listState)
+	instances, regions, err := client.ListInstancesInRegions(ctx, effectiveRegion, listState)
 	if err != nil {
 		return i18n.Te("spawn.list.error.list_failed", err)
 	}
+	// Orphaned launch Elastic IPs (#1232), over the regions just searched, after
+	// whatever the listing prints, and to stderr so --json stays parseable. An
+	// orphan is most likely exactly when there is nothing left to list.
+	defer func() {
+		fmt.Fprint(cmd.ErrOrStderr(), orphanedAddressWarning(ctx, client, regions))
+	}()
 
 	if len(instances) == 0 {
 		if listJSON || getOutputFormat() == "json" {

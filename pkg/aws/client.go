@@ -1331,8 +1331,17 @@ func validateStateFilter(stateFilter string) error {
 
 // ListInstances returns all spawn-managed instances, optionally filtered by region and state
 func (c *Client) ListInstances(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error) {
+	instances, _, err := c.ListInstancesInRegions(ctx, region, stateFilter)
+	return instances, err
+}
+
+// ListInstancesInRegions is ListInstances that also returns the regions it
+// searched, so a caller can make its own per-region calls over exactly the same
+// set (`spawn list`'s orphaned Elastic IP warning, #1232) without a second
+// DescribeRegions.
+func (c *Client) ListInstancesInRegions(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, []string, error) {
 	if err := validateStateFilter(stateFilter); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var allInstances []InstanceInfo
@@ -1346,7 +1355,7 @@ func (c *Client) ListInstances(ctx context.Context, region string, stateFilter s
 		var err error
 		regions, err = c.getAllRegions(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get regions: %w", err)
+			return nil, nil, fmt.Errorf("failed to get regions: %w", err)
 		}
 	}
 
@@ -1360,7 +1369,7 @@ func (c *Client) ListInstances(ctx context.Context, region string, stateFilter s
 		allInstances = append(allInstances, instances...)
 	}
 
-	return allInstances, nil
+	return allInstances, regions, nil
 }
 
 func (c *Client) listInstancesInRegion(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error) {
