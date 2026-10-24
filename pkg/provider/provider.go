@@ -91,6 +91,11 @@ type Config struct {
 	PreStopTimeout time.Duration // Max time to wait (default: 5m)
 	LocalUsername  string        // Instance's primary user; pre-stop runs as this user, not root (#63). Empty = run as root (older instances).
 
+	// TaskID is spawn:task-id, set on a `spawn task run` instance. spored uses it
+	// only to tell "no flush hook because this is not a task" (silent) from "a
+	// task whose flush hook is missing" (reported, #1186).
+	TaskID string
+
 	// Spot-interruption webhook (#228): a fire-once, best-effort POST spored emits
 	// when a spot interruption notice arrives, so an off-node consumer learns about
 	// the reclamation inside the ~2-minute window. All populated from spawn:* tags.

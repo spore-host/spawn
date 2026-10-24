@@ -16,6 +16,11 @@
 //     for --no-timeout / missing / far-future deadlines — defense against
 //     escape hatches and tag tampering).
 //
+// A RUNNING instance whose spawn:last-heartbeat is fresh gets REAPER_TTL_GRACE
+// (default 10m) past its TTL deadline, so spored can end it itself and flush
+// the task record first (#1186); see leaveToSpored. A task instance the reaper
+// does terminate has its flush hook run over SSM first (tryTaskFlush).
+//
 // It scans running AND stopped instances: an idle-stopped instance runs no
 // daemon, so its TTL can never fire locally (#71) — the reaper is the only
 // thing that will ever reap it.
@@ -63,6 +68,7 @@ import (
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
+	"github.com/spore-host/spawn/pkg/taskproto"
 	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 	"github.com/spore-host/spore-host/lambda/accountlifecycle"
 )
@@ -82,7 +88,7 @@ type account struct {
 	label     string
 	accountID string // 12-digit AWS account ID (for the {base36}.domain subdomain)
 	ec2For    func(region string) ec2API
-	ssmFor    func(region string) *ssm.Client
+	ssmFor    func(region string) ssmAPI
 	fsxFor    func(region string) fsxAPI
 	// netFor is the wider EC2 slice the security-group/placement-group sweep
 	// needs (spawn#685). Separate from ec2For so the instance scan's narrow
@@ -114,6 +120,13 @@ type ec2API interface {
 	CancelSpotInstanceRequests(ctx context.Context, in *ec2.CancelSpotInstanceRequestsInput, optFns ...func(*ec2.Options)) (*ec2.CancelSpotInstanceRequestsOutput, error)
 }
 
+// ssmAPI is the slice of the SSM client the graceful pre-stop and task flush
+// paths use. An interface so the task flush (#1186) can be driven in tests.
+type ssmAPI interface {
+	SendCommand(ctx context.Context, in *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error)
+	GetCommandInvocation(ctx context.Context, in *ssm.GetCommandInvocationInput, optFns ...func(*ssm.Options)) (*ssm.GetCommandInvocationOutput, error)
+}
+
 type fsxAPI interface {
 	DescribeFileSystems(ctx context.Context, in *fsx.DescribeFileSystemsInput, optFns ...func(*fsx.Options)) (*fsx.DescribeFileSystemsOutput, error)
 	DeleteFileSystem(ctx context.Context, in *fsx.DeleteFileSystemInput, optFns ...func(*fsx.Options)) (*fsx.DeleteFileSystemOutput, error)
@@ -130,6 +143,17 @@ type reaper struct {
 	notifyURL    string
 	graceful     bool          // REAPER_GRACEFUL=true: attempt a pre-stop flush via SSM before terminate (#187)
 	gracefulWait time.Duration // hard cap on the per-instance graceful flush (REAPER_GRACEFUL_MAX_WAIT)
+
+	// ttlGrace (REAPER_TTL_GRACE, #1186): how long past its TTL deadline a
+	// RUNNING instance with a fresh spawn:last-heartbeat is left for spored,
+	// which enforces the deadline itself and flushes the task record on the way
+	// out. Zero reaps at the deadline. A stale or missing heartbeat always reaps
+	// at the deadline: then the reaper is the only enforcer.
+	ttlGrace time.Duration
+
+	// taskFlushPoll is the GetCommandInvocation poll interval for the task
+	// flush. Zero means 5 s; tests set it small.
+	taskFlushPoll time.Duration
 
 	// Network-resource reclamation (#685), staged independently of dryRun.
 	//
@@ -386,6 +410,7 @@ func configure() {
 		notifyURL:    strings.TrimRight(os.Getenv("REAPER_NOTIFY_URL"), "/"),
 		graceful:     strings.EqualFold(os.Getenv("REAPER_GRACEFUL"), "true"),
 		gracefulWait: parseGracefulWait(os.Getenv("REAPER_GRACEFUL_MAX_WAIT")),
+		ttlGrace:     parseTTLGrace(os.Getenv("REAPER_TTL_GRACE")),
 		dnsZoneID:    strings.TrimSpace(os.Getenv("REAPER_DNS_ZONE_ID")),
 		dnsDomain:    strings.TrimSpace(os.Getenv("REAPER_DNS_DOMAIN")),
 		sweepDNS:     strings.EqualFold(os.Getenv("REAPER_DNS_SWEEP"), "true"),
@@ -474,7 +499,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ec2.NewFromConfig(c)
 			},
-			ssmFor: func(region string) *ssm.Client {
+			ssmFor: func(region string) ssmAPI {
 				c := base.Copy()
 				c.Region = region
 				return ssm.NewFromConfig(c)
@@ -521,7 +546,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ec2.NewFromConfig(c)
 			},
-			ssmFor: func(region string) *ssm.Client {
+			ssmFor: func(region string) ssmAPI {
 				c := acctCfg.Copy()
 				c.Region = region
 				return ssm.NewFromConfig(c)
@@ -556,7 +581,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ec2.NewFromConfig(c)
 			},
-			ssmFor: func(region string) *ssm.Client {
+			ssmFor: func(region string) ssmAPI {
 				c := base.Copy()
 				c.Region = region
 				return ssm.NewFromConfig(c)
@@ -627,6 +652,21 @@ func parseGracefulWait(env string) time.Duration {
 	if err != nil || d <= 0 {
 		log.Printf("invalid REAPER_GRACEFUL_MAX_WAIT %q, using default %s", env, defaultGracefulWait)
 		return defaultGracefulWait
+	}
+	return d
+}
+
+// parseTTLGrace reads REAPER_TTL_GRACE with pkg/reaperconfig's parser, so the
+// value `spawn reaper deploy --ttl-grace` accepts is the value used here. Unset
+// or invalid means reaperconfig.DefaultTTLGrace.
+func parseTTLGrace(env string) time.Duration {
+	if strings.TrimSpace(env) == "" {
+		return reaperconfig.DefaultTTLGrace
+	}
+	d, err := reaperconfig.ParseTTLGrace(env)
+	if err != nil {
+		log.Printf("invalid REAPER_TTL_GRACE %q (%v), using default %s", env, err, reaperconfig.DefaultTTLGrace)
+		return reaperconfig.DefaultTTLGrace
 	}
 	return d
 }
@@ -754,6 +794,7 @@ type candidate struct {
 	// Graceful-tier inputs (#187): if the instance is running and has a pre-stop
 	// hook, the reaper tries to flush it via SSM before the hard terminate.
 	running        bool
+	taskID         string        // spawn:task-id: a `spawn task run` instance, whose flush hook the reaper runs first (#1186)
 	preStop        string        // spawn:pre-stop hook command (empty = nothing to flush)
 	preStopTimeout time.Duration // spawn:pre-stop-timeout (0 = use default)
 	localUsername  string        // spawn:local-username (run the hook as this user, #63)
@@ -825,6 +866,12 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 				// failed to reap gracefully itself. Strictly best-effort and bounded;
 				// the terminate below ALWAYS runs regardless of the outcome, so the
 				// hard-deadline guarantee (#72) is preserved.
+				// Task flush (#1186): a `spawn task run` instance gets its
+				// command.log and terminal completion record uploaded before the
+				// kill, as a spored-mediated exit would. Not gated on
+				// REAPER_GRACEFUL: it runs only spawn's own root-owned hook, and
+				// it is what leaves the task an answer. Bounded, best-effort.
+				r.tryTaskFlush(ctx, acct, c)
 				if r.graceful {
 					r.tryGracefulPreStop(ctx, acct, c)
 				}
@@ -951,6 +998,7 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 		id: id, name: name, region: region,
 		spotRequestID: aws.ToString(inst.SpotInstanceRequestId),
 		running:       inst.State != nil && inst.State.Name == ec2types.InstanceStateNameRunning,
+		taskID:        tags[tagprefix.Tag("task-id")],
 		preStop:       tags[tagprefix.Tag("pre-stop")],
 		localUsername: tags[tagprefix.Tag("local-username")],
 		dnsName:       tags[tagprefix.Tag("dns-name")],
@@ -969,7 +1017,7 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 	if dl := tags[tagprefix.Tag("ttl-deadline")]; dl != "" {
 		if deadline, err := time.Parse(time.RFC3339, dl); err == nil {
 			haveDeadline = true
-			if now.After(deadline) {
+			if now.After(deadline) && !r.leaveToSpored(base, tags, deadline, now) {
 				c := base
 				c.reason, c.deadline, c.age = "ttl-deadline", dl, now.Sub(deadline)
 				return c, true
@@ -1002,7 +1050,7 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 	// deadline, and a STOPPED instance — which runs no spored — was then
 	// bounded only by the max-age ceiling below, days after its TTL.
 	if !haveDeadline {
-		if deadline, ok := ttlFallbackDeadline(tags, inst.LaunchTime); ok && now.After(deadline) {
+		if deadline, ok := ttlFallbackDeadline(tags, inst.LaunchTime); ok && now.After(deadline) && !r.leaveToSpored(base, tags, deadline, now) {
 			c := base
 			c.reason, c.deadline, c.age = "ttl", deadline.UTC().Format(time.RFC3339), now.Sub(deadline)
 			return c, true
@@ -1019,6 +1067,35 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 		return c, true
 	}
 	return candidate{}, false
+}
+
+// leaveToSpored reports whether an instance just past its TTL deadline should
+// be left one more cycle for spored to end itself (#1186).
+//
+// spored enforces the same deadline from inside the instance, and on the way
+// out it runs the task flush hook that uploads command.log and the terminal
+// completion record (up to 45 s, then a warning delay). A reaper cycle that
+// lands in that window terminated the instance first, and the record was lost.
+// So while the instance is running, its heartbeat is fresh and it is less than
+// ttlGrace past the deadline, the reaper waits. Anything else reaps at the
+// deadline as before: a stale or missing heartbeat means spored is not there to
+// do it, and a stopped instance runs no spored at all (#71).
+//
+// The heartbeat is instance-writable, so this lets an instance live at most
+// ttlGrace (capped at reaperconfig.MaxTTLGrace) past its deadline; the max-age
+// ceiling below still applies.
+func (r *reaper) leaveToSpored(c candidate, tags map[string]string, deadline, now time.Time) bool {
+	if r.ttlGrace <= 0 || !c.running || !now.Before(deadline.Add(r.ttlGrace)) {
+		return false
+	}
+	state, age := classifyHeartbeat(tags, now)
+	if state != heartbeatFresh {
+		return false
+	}
+	log.Printf("instance %s: %s past its TTL deadline, but spored checked in %s ago — leaving it "+
+		"up to %s for spored to flush and terminate it (REAPER_TTL_GRACE)",
+		c.id, now.Sub(deadline).Round(time.Second), age.Round(time.Second), r.ttlGrace)
+	return true
 }
 
 // reapFSxRegion scans spawn-managed FSx Lustre filesystems in one account+region
@@ -1320,6 +1397,79 @@ func (r *reaper) tryGracefulPreStop(ctx context.Context, acct account, c candida
 				ssmtypes.CommandInvocationStatusCancelled,
 				ssmtypes.CommandInvocationStatusTimedOut:
 				log.Printf("graceful pre-stop: hook %s on %s — terminating anyway", out.Status, c.id)
+				return
+			}
+		}
+	}
+}
+
+// taskFlushWait bounds the reaper's task flush per instance: the hook's own
+// 45 s cap (taskproto.FlushHookSeconds) plus SSM delivery and polling.
+const taskFlushWait = 60 * time.Second
+
+// tryTaskFlush runs a task instance's terminal-flush hook over SSM before the
+// reaper terminates it (#1186), with the same command `spawn terminate` sends
+// (taskproto.FlushCommand). spored runs the hook itself on every exit it
+// mediates; the reaper only reaches an instance whose spored did not end it,
+// and before this a task reaped here left an empty results prefix.
+//
+// Only for a running instance tagged spawn:task-id. The tag is
+// instance-writable, but that grants nothing: the command is a constant that
+// runs /etc/spawn/task-flush.sh only if it is a root-owned, owner-writable
+// regular file, so a forged tag runs spawn's own hook or nothing. Every
+// failure (not SSM-managed, hook failed, timed out) is logged and swallowed;
+// the terminate always follows.
+func (r *reaper) tryTaskFlush(ctx context.Context, acct account, c candidate) {
+	if c.taskID == "" || !c.running || acct.ssmFor == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, taskFlushWait)
+	defer cancel()
+
+	client := acct.ssmFor(c.region)
+	send, err := client.SendCommand(ctx, &ssm.SendCommandInput{
+		InstanceIds:  []string{c.id},
+		DocumentName: aws.String("AWS-RunShellScript"),
+		Parameters: map[string][]string{
+			"commands":         {taskproto.FlushCommand(taskproto.ExitTTLExpired)},
+			"executionTimeout": {fmt.Sprintf("%d", int(taskFlushWait.Seconds()))},
+		},
+	})
+	if err != nil {
+		log.Printf("task flush: %s (task %s) not reachable via SSM (%v) — terminating without flush", c.id, c.taskID, err)
+		return
+	}
+	cmdID := aws.ToString(send.Command.CommandId)
+	log.Printf("task flush: running the flush hook on %s (task %s, cmd %s)", c.id, c.taskID, cmdID)
+
+	poll := r.taskFlushPoll
+	if poll <= 0 {
+		poll = 5 * time.Second
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("task flush: %s (task %s) did not finish within %s — terminating anyway", c.id, c.taskID, taskFlushWait)
+			return
+		case <-ticker.C:
+			out, err := client.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+				CommandId:  aws.String(cmdID),
+				InstanceId: aws.String(c.id),
+			})
+			if err != nil {
+				continue // the invocation may not be registered yet
+			}
+			switch out.Status {
+			case ssmtypes.CommandInvocationStatusSuccess:
+				log.Printf("task flush: %s (task %s) flushed — terminating", c.id, c.taskID)
+				return
+			case ssmtypes.CommandInvocationStatusFailed,
+				ssmtypes.CommandInvocationStatusCancelled,
+				ssmtypes.CommandInvocationStatusTimedOut:
+				log.Printf("task flush: %s (task %s) %s (exit %d): %s — terminating anyway", c.id, c.taskID,
+					out.Status, out.ResponseCode, strings.TrimSpace(aws.ToString(out.StandardErrorContent)))
 				return
 			}
 		}

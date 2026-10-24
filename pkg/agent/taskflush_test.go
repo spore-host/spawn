@@ -48,7 +48,7 @@ func hookCalls(t *testing.T, callLog string) []string {
 // hook's retry-class mapping is driven entirely by this argument.
 func TestFlushTaskRecordPassesTheReasonToken(t *testing.T) {
 	callLog := installFakeHook(t, "exit 0\n")
-	a := &Agent{}
+	a := &Agent{consoleWriter: discardConsole}
 
 	a.flushTaskRecord(taskproto.ExitTTLExpired)
 
@@ -68,7 +68,7 @@ func TestFlushTaskRecordPassesTheReasonToken(t *testing.T) {
 // and in the hook itself.
 func TestFlushTaskRecordSkipsTheCompletedPath(t *testing.T) {
 	callLog := installFakeHook(t, "exit 0\n")
-	a := &Agent{}
+	a := &Agent{consoleWriter: discardConsole}
 
 	a.flushTaskRecord(taskproto.ExitCompleted)
 
@@ -84,7 +84,7 @@ func TestFlushTaskRecordNoOpsWithoutAHook(t *testing.T) {
 	t.Cleanup(taskproto.SetFlushScriptPathForTest(
 		filepath.Join(t.TempDir(), "definitely-absent.sh")))
 
-	a := &Agent{}
+	a := &Agent{consoleWriter: discardConsole}
 	a.flushTaskRecord(taskproto.ExitTTLExpired) // must not panic
 
 	if a.taskFlushDone {
@@ -97,7 +97,7 @@ func TestFlushTaskRecordNoOpsWithoutAHook(t *testing.T) {
 // second run would re-upload and could race the first.
 func TestFlushTaskRecordRunsAtMostOnce(t *testing.T) {
 	callLog := installFakeHook(t, "exit 0\n")
-	a := &Agent{}
+	a := &Agent{consoleWriter: discardConsole}
 
 	a.flushTaskRecord(taskproto.ExitSpotInterruption)
 	a.flushTaskRecord(taskproto.ExitTTLExpired)
@@ -113,7 +113,7 @@ func TestFlushTaskRecordRunsAtMostOnce(t *testing.T) {
 // the termination.
 func TestFlushTaskRecordSurvivesAFailingHook(t *testing.T) {
 	callLog := installFakeHook(t, "echo 'hook broke' >&2\nexit 9\n")
-	a := &Agent{}
+	a := &Agent{consoleWriter: discardConsole}
 
 	a.flushTaskRecord(taskproto.ExitCostLimitExceeded) // must return, not panic
 
@@ -161,7 +161,7 @@ func TestFlushTaskRecordRefusesATamperableHook(t *testing.T) {
 				t.Fatalf("chmod: %v", err)
 			}
 
-			a := &Agent{}
+			a := &Agent{consoleWriter: discardConsole}
 			a.flushTaskRecord(taskproto.ExitTTLExpired)
 
 			ran := len(hookCalls(t, callLog)) > 0
@@ -194,7 +194,7 @@ func TestFlushTaskRecordRefusesASymlinkedHook(t *testing.T) {
 	}
 	t.Cleanup(taskproto.SetFlushScriptPathForTest(link))
 
-	a := &Agent{}
+	a := &Agent{consoleWriter: discardConsole}
 	a.flushTaskRecord(taskproto.ExitTTLExpired)
 
 	if calls := hookCalls(t, callLog); len(calls) != 0 {
@@ -271,3 +271,7 @@ func TestFlushRunsBeforeTheUserPreStopHook(t *testing.T) {
 			"instance with no user pre-stop hook configured (the common case) never flushes at all")
 	}
 }
+
+// discardConsole keeps a failure-path test from writing to the real
+// /dev/console of the machine running it (#1186 reports flush failures there).
+func discardConsole(string) error { return nil }

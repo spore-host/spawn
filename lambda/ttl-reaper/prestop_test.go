@@ -26,8 +26,7 @@ func readReaperSource(t *testing.T) string {
 // instance (GHSA-8q3p-qcv8-2pr4).
 //
 // Written against buildPreStopCommand rather than tryGracefulPreStop because
-// ssmFor returns a concrete *ssm.Client and cannot be faked — and because the
-// guard belongs to the command construction, not to the SSM plumbing (CLAUDE.md
+// the guard belongs to the command construction, not to the SSM plumbing (CLAUDE.md
 // rule 2). A test driven through the caller would also have to get past a
 // five-condition early return to reach it.
 func TestBuildPreStopCommandNeverRunsAsRoot(t *testing.T) {

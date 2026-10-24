@@ -94,6 +94,7 @@ spawn reaper deploy [flags]
 | `--regions` |  | string |  | Comma-separated regions for the reaper to scan (default: keep the existing reaper's; the deploy region for a new one) |
 | `--schedule` |  | string |  | EventBridge schedule expression (default: keep the existing reaper's; rate(10 minutes) for a new one) |
 | `--spot-requests` |  | string |  | Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: off\|report\|reap (default: keep; the reaper's default is report) |
+| `--ttl-grace` |  | string |  | How long past its TTL deadline a running instance whose spored still checks in is left for spored to end itself, REAPER_TTL_GRACE, 0 to 1h (default: keep; the reaper's default is 10m) |
 | `--version` |  | string |  | spawn release to take the reaper artifact from (default: this binary's version) |
 
 ### `spawn reaper status`

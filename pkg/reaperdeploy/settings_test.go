@@ -240,6 +240,7 @@ func TestEveryReaperSettingSurvivesARedeploy(t *testing.T) {
 		reaperconfig.EnvNetResources: "off",
 		reaperconfig.EnvElasticIPs:   "reap",
 		reaperconfig.EnvMaxAge:       "14d",
+		reaperconfig.EnvTTLGrace:     "5m",
 		reaperconfig.EnvNotifyURL:    secretURL,
 	}
 	for k := range settable {

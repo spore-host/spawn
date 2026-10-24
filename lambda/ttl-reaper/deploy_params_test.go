@@ -585,7 +585,7 @@ func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	// DryRun first because it is the one that silently stops the reaper
 	// terminating anything.
 	keys := []string{
-		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
+		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
 	}
@@ -828,5 +828,45 @@ func TestElasticIpsSurvivesAMakeDeploy(t *testing.T) {
 	got, _ = runMerge(t, summary, armed, toExplicit(set))
 	if got["ElasticIps"] != "off" {
 		t.Errorf("make deploy ELASTIC_IPS=off sent %q", got["ElasticIps"])
+	}
+}
+
+// TestTtlGraceSurvivesAMakeDeploy is #1186's preservation property, end to end
+// through the Makefile's real emission and the real merge script, the same
+// shape as TestElasticIpsSurvivesAMakeDeploy: a stack set to TtlGrace=0 keeps
+// it across a `make deploy` that does not mention it, a stack that predates the
+// parameter gets the template default (”, the reaper's 10m), and `make deploy
+// TTL_GRACE=5m` sets it.
+func TestTtlGraceSurvivesAMakeDeploy(t *testing.T) {
+	summary := templateSummaryFromTemplate(t)
+	set0 := strings.Replace(liveParams, "\n]",
+		",\n  {\"ParameterKey\":\"TtlGrace\",\"ParameterValue\":\"0\"}\n]", 1)
+	if set0 == liveParams {
+		t.Fatal("could not add TtlGrace to the live fixture")
+	}
+	toExplicit := func(m map[string]string) string {
+		var b strings.Builder
+		for k, v := range m {
+			b.WriteString(k + "=" + v + "\n")
+		}
+		return b.String()
+	}
+
+	plain, _ := explicitFromMakefile(t)
+	got, _ := runMerge(t, summary, set0, toExplicit(plain))
+	if got["TtlGrace"] != "0" {
+		t.Errorf("plain make deploy over a stack with TtlGrace=0 sent %q: a deploy that did "+
+			"not mention it changed it", got["TtlGrace"])
+	}
+
+	got, _ = runMerge(t, summary, liveParams, toExplicit(plain))
+	if got["TtlGrace"] != "" {
+		t.Errorf("a stack predating TtlGrace got %q, want the template default ''", got["TtlGrace"])
+	}
+
+	set, _ := explicitFromMakefile(t, "TTL_GRACE=5m")
+	got, _ = runMerge(t, summary, set0, toExplicit(set))
+	if got["TtlGrace"] != "5m" {
+		t.Errorf("make deploy TTL_GRACE=5m sent %q", got["TtlGrace"])
 	}
 }

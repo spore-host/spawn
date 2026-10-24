@@ -624,6 +624,8 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 			if t, err := time.Parse(time.RFC3339, *tag.Value); err == nil {
 				config.TTLDeadline = t
 			}
+		case tagprefix.Tag("task-id"):
+			config.TaskID = *tag.Value
 		case tagprefix.Tag("launch-time"):
 			if t, err := time.Parse(time.RFC3339, *tag.Value); err == nil {
 				config.LaunchTime = t

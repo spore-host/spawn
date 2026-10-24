@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The TTL reaper leaves a running instance whose spored is still checking in
+  up to 10 minutes past its TTL deadline, and runs a task's flush hook before
+  it terminates one** (#1186). spored enforces the deadline itself and uploads
+  the task's `command.log` and `completion.json` on the way out; a reaper cycle
+  landing in that window terminated the instance first. A running instance
+  with a `spawn:last-heartbeat` under 10 minutes old now gets `REAPER_TTL_GRACE`
+  (default `10m`, `0` to `1h`, `0` restores reaping at the deadline) past its
+  deadline. A stale or missing heartbeat, or a stopped instance, is still
+  reaped at the deadline, and `REAPER_MAX_AGE` still applies. Set it with
+  `spawn reaper deploy --ttl-grace`, the `TtlGrace` template parameter or
+  `make deploy TTL_GRACE=…`; a deploy that does not name it keeps the deployed
+  value. Separately, before terminating a running instance tagged
+  `spawn:task-id`, the reaper now runs the task's flush hook over SSM (bounded
+  at 60 s, the same command `spawn terminate` sends, whatever
+  `REAPER_GRACEFUL` says), using the SSM grants the reaper roles already hold.
+
+### Fixed
+
+- **A task's terminal flush no longer fails invisibly** (#1186). A TTL-killed
+  task could leave its results prefix empty, with the reason only in spored's
+  journal, which dies with the instance. spored now logs the flush hook's full
+  output and exit status, records the outcome in a `spawn:flush-status` tag
+  (`ok`, `failed:<reason>` or `skipped:<reason>`; readable for about an hour
+  after termination), and on a failure or skip (no hook on a task instance, a
+  refused hook, a timeout, failed uploads, any other non-zero exit) writes the
+  reason and the hook's output, followed by the command log's tail, to the
+  serial console (`aws ec2 get-console-output`) and sends a `pre_stop_failed`
+  notification naming the flush. The hook now retries each upload up to three
+  times with backoff inside its 45 s budget, prints the aws CLI's error on the last
+  failure, still uploads `completion.json` and `.exitcode` when `command.log`
+  fails, and exits 3 when an upload did not land. A completion record the
+  wrapper wrote locally but never got to S3 is now uploaded by the hook
+  instead of being taken as proof the record existed (an incomplete local copy
+  from a full `/tmp` is not). spored also bounds the hook's output pipes, so
+  an `aws` child left running cannot hold termination past the timeout.
+
 ## [0.143.0] - 2026-10-24
 
 ### Added

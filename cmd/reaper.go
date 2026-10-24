@@ -31,6 +31,7 @@ var (
 	reaperSpotRequests string
 	reaperNetResources string
 	reaperElasticIPs   string
+	reaperTTLGrace     string
 	reaperMaxAge       string
 	reaperNotifyURL    string
 	reaperLogRetention int32
@@ -178,6 +179,8 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 		"Network-resource sweep, REAPER_NET_RESOURCES: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperElasticIPs, "elastic-ips", "",
 		"Orphaned launch Elastic IP sweep, REAPER_ELASTIC_IPS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is reap, or off when REAPER_NET_RESOURCES=off)")
+	fs.StringVar(&reaperTTLGrace, "ttl-grace", "",
+		"How long past its TTL deadline a running instance whose spored still checks in is left for spored to end itself, REAPER_TTL_GRACE, 0 to "+shortDuration(reaperconfig.MaxTTLGrace)+" (default: keep; the reaper's default is "+shortDuration(reaperconfig.DefaultTTLGrace)+")")
 	fs.StringVar(&reaperMaxAge, "max-age", "",
 		"Max-age ceiling, REAPER_MAX_AGE, e.g. 336h or 14d (default: keep; the reaper's default is 7d)")
 	fs.StringVar(&reaperNotifyURL, "notify-url", "",
@@ -256,6 +259,7 @@ var reaperDeployFlags = map[string]struct {
 	reaperconfig.EnvNetResources: {"net-resources", &reaperNetResources},
 	reaperconfig.EnvElasticIPs:   {"elastic-ips", &reaperElasticIPs},
 	reaperconfig.EnvMaxAge:       {"max-age", &reaperMaxAge},
+	reaperconfig.EnvTTLGrace:     {"ttl-grace", &reaperTTLGrace},
 	reaperconfig.EnvNotifyURL:    {"notify-url", &reaperNotifyURL},
 }
 
@@ -586,4 +590,9 @@ func confirmReaperArm(in io.Reader, out io.Writer) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(answer), "yes")
+}
+
+// shortDuration prints a whole-minute duration the way a user types it: 1h, 10m.
+func shortDuration(d time.Duration) string {
+	return strings.NewReplacer("h0m0s", "h", "m0s", "m").Replace(d.String())
 }

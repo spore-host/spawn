@@ -112,6 +112,7 @@ PARAM_MAP = \
 	AlarmsEnabled:ALARMS_ENABLED \
 	AlarmTopicArn:ALARM_TOPIC_ARN \
 	MaxAge:MAX_AGE \
+	TtlGrace:TTL_GRACE \
 	Regions:REGIONS \
 	Schedule:SCHEDULE \
 	Version:VERSION \
@@ -150,8 +151,8 @@ endef
 #
 # Keep this list tiny and never put a mode-setting parameter in it. A parameter
 # here cannot be left alone by a deploy, which is exactly wrong for DryRun,
-# NetResources, SpotRequests, ElasticIps, ScanSelf, DnsSweep, DnsExpire, NotifyUrl or
-# AlarmTopicArn.
+# NetResources, SpotRequests, ElasticIps, TtlGrace, ScanSelf, DnsSweep, DnsExpire,
+# NotifyUrl or AlarmTopicArn.
 # TestAlwaysAssertContainsOnlySafeParameters pins the membership so that adding
 # one is a deliberate, reviewed edit rather than a convenience.
 ALWAYS_ASSERT = Version:VERSION LogRetentionDays:LOG_RETENTION_DAYS
@@ -214,7 +215,7 @@ deploy: build
 	@# off — but never NotifyUrl, which is a Slack webhook secret. These are read
 	@# back from the MERGED file, so this shows what will actually be sent rather
 	@# than what this Makefile happens to default to.
-	@awk -F': ' '/^(DryRun|ScanSelf|DnsSweep|DnsExpire|DnsLeaseExpire|NetResources|SpotRequests|ElasticIps|AlarmsEnabled|DnsZoneId|DnsDomain|DnsExtraZoneIds|AlarmTopicArn|MaxAge|Schedule|Version):/ \
+	@awk -F': ' '/^(DryRun|ScanSelf|DnsSweep|DnsExpire|DnsLeaseExpire|NetResources|SpotRequests|ElasticIps|AlarmsEnabled|DnsZoneId|DnsDomain|DnsExtraZoneIds|AlarmTopicArn|MaxAge|TtlGrace|Schedule|Version):/ \
 		{ printf "  %s %s\n", $$1, $$2 }' $(PARAMS_FILE)
 	sam deploy \
 		--template-file template.yaml \
