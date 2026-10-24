@@ -44,6 +44,9 @@ type TaskPlan struct {
 	// the task wrapper and flush hook (#1274), or 0 when they ride in the user
 	// data, as they do from a dev build. Not counted in UserDataBytes.
 	StagedBytes int
+	// NotStaged says why a release build keeps this task's wrapper and flush
+	// hook in the user data instead of staging them, or is "".
+	NotStaged string
 	// Notes annotate the sizing choice (the container memory floor, an
 	// old-generation family). Render prints them under the Instance line.
 	Notes []string
@@ -81,7 +84,7 @@ func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region strin
 	}
 	// The user data this task would send, measured the way RunInstances
 	// measures it, so a spec that cannot launch fails its dry run (#1063).
-	userDataBytes, stagedBytes, err := taskUserDataPreflight(spec, sized, region, stagesFiles(deps.AWS))
+	userDataBytes, stagedBytes, notStaged, err := taskUserDataPreflight(spec, sized, region, stagesFiles(deps.AWS))
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +103,7 @@ func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region strin
 		Network:       network,
 		UserDataBytes: userDataBytes,
 		StagedBytes:   stagedBytes,
+		NotStaged:     notStaged,
 	}
 	if p.Purchase == "" {
 		p.Purchase = taskproto.PurchaseOnDemand

@@ -277,11 +277,13 @@ const (
 
 // taskUserDataPreflight measures the task's user data before any AWS call:
 // the same assembly Launch performs (buildTaskLaunch, staging when stage is
-// set, then launcher.BuildUserData), with placeholders for the account ID, run
-// ID and any FSx names. It returns the decoded size and the size of the staged
-// object (0 when nothing is staged), or an error when the spec cannot launch
-// because the user data is over EC2's limit.
-func taskUserDataPreflight(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string, stage bool) (userData, staged int, err error) {
+// set and the task may be staged, then launcher.BuildUserData), with
+// placeholders for the account ID, run ID and any FSx names. It returns the
+// decoded size, the size of the staged object (0 when nothing is staged), why
+// a task that would otherwise be staged is not ("" when it is, or when stage is
+// unset), or an error when the spec cannot launch because the user data is
+// over EC2's limit.
+func taskUserDataPreflight(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string, stage bool) (userData, staged int, notStaged string, err error) {
 	resultsPrefix := taskproto.EffectiveResultsPrefix(spec, preflightAccountID, region)
 	storageScript, err := taskStorageScriptWith(spec, region, func(id string) (string, string, error) {
 		// fs-<17 hex>.fsx.<region>.amazonaws.com and an 8-character mount name,
@@ -289,19 +291,23 @@ func taskUserDataPreflight(spec *taskproto.TaskSpec, sized *taskproto.SizeResult
 		return id + ".fsx." + region + ".amazonaws.com", "abcdefgh", nil
 	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("build task storage: %w", err)
+		return 0, 0, "", fmt.Errorf("build task storage: %w", err)
 	}
 	cfg, opts, err := buildTaskLaunch(spec, sized, region, preflightProfile, resultsPrefix, preflightRunID, storageScript)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, "", err
+	}
+	bucket, keyPrefix, ok := taskproto.SplitS3URI(resultsPrefix)
+	if !ok {
+		return 0, 0, "", fmt.Errorf("results_prefix %q is not an s3://bucket/prefix URI", spec.ResultsPrefix)
 	}
 	if stage {
-		bucket, keyPrefix, ok := taskproto.SplitS3URI(resultsPrefix)
-		if !ok {
-			return 0, 0, fmt.Errorf("results_prefix %q is not an s3://bucket/prefix URI", spec.ResultsPrefix)
+		// The account is a placeholder here, so a default results bucket is
+		// matched by its shape: the plan errs towards inline.
+		if notStaged = stagingRefusal(spec, bucket, region, false); notStaged == "" {
+			staged = len(stageTaskFiles(cfg.JobArrayCommand, &opts, region, bucket, keyPrefix).Body)
 		}
-		staged = len(stageTaskFiles(cfg.JobArrayCommand, &opts, region, bucket, keyPrefix).Body)
 	}
 	userData, err = taskUserDataSize(cfg, opts)
-	return userData, staged, err
+	return userData, staged, notStaged, notStagedError(err, notStaged)
 }

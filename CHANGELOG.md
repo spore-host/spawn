@@ -115,9 +115,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy gains `s3:GetObject` on `bootstrap-<64 characters>.sh` objects in the
   results bucket only. It is not limited to the task's own prefix, because
   roles are named by a hash of their policy and a per-task grant would create a
-  role per task_id. Tasks that share a results bucket share a role already, and
-  could already overwrite each other's records; now they can also read each
-  other's staged wrappers. The policy change means the next task run per set
+  role per task_id. That is safe because a task role cannot list the results
+  bucket, and each staged key is the sha256 of bytes that include the
+  attempt's random run id, so one task cannot name another's object. A task
+  whose role can list its results bucket (the bucket is one of its `inputs`,
+  for example another task's outputs, or is in `resources.s3_read_write`) is
+  never staged: it launches inline, with a note, or is refused with the reason
+  when it does not fit inline. Such a role, like a pool worker's or any
+  principal with read on the whole bucket, can still read every staged object
+  in that bucket. The policy change means the next task run per set
   of buckets creates a new `spawn-instance-*` role. A re-run of a task_id
   deletes earlier attempts' staged objects along with the stale completion
   record. When the upload fails (the launching principal now needs
@@ -130,7 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `launcher.NewStagedFiles`, `BootstrapConfig.StagedFiles` and
   `Options.StagedFiles`, `aws.Client.PutS3Object` and `ListS3Keys`, and
   `taskiam.TaskRunPolicyFor`, `StagedFilesKey`, `StagedFilesKeyPrefix` and
-  `StagedFilesResources`. Pool workers are unchanged: their tasks arrive
+  `StagedFilesResources`, and `tasklaunch.TaskPlan.StagedBytes` and
+  `NotStaged`. Pool workers are unchanged: their tasks arrive
   through the queue, not user data.
 
 ### Fixed

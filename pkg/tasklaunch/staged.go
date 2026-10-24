@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/taskiam"
+	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 // A task's wrapper and terminal-flush hook are the per-launch half of its user
@@ -49,6 +52,47 @@ func stagesFiles(client AWS) bool {
 	}
 	_, ok := client.(stagedFilesStore)
 	return ok
+}
+
+// stagingRefusal says why the task must not be staged, or returns "" when it
+// may be. The staged objects are readable by every task role that uses the
+// results bucket (taskiam.StagedFilesResources), which is safe only because
+// those roles cannot list the bucket and each key is a sha256 over bytes that
+// include the attempt's random run id, so no task can find another's object.
+// A task whose role CAN list its results bucket, because the bucket is one of
+// its inputs (StagingPolicyFor grants input buckets s3:ListBucket) or is in
+// resources.s3_read_write, is never staged: its files stay in the user data.
+//
+// accountKnown is false in the plan, where the account is a placeholder: there
+// any default-shaped results bucket (spawn-results-<12 digits>-<region>) among
+// the listable buckets counts, so the plan never promises staging the launch
+// would refuse.
+func stagingRefusal(spec *taskproto.TaskSpec, resultsBucket, region string, accountKnown bool) string {
+	defaultShape := regexp.MustCompile(`^spawn-results-[0-9]{12}-` + regexp.QuoteMeta(region) + `$`)
+	usesDefault := strings.TrimSpace(spec.ResultsPrefix) == ""
+	for _, src := range []struct {
+		field   string
+		buckets []string
+	}{
+		{"inputs", taskiam.S3Buckets(spec.Inputs)},
+		{"resources.s3_read_write", taskiam.S3BucketsFromURIs(spec.Resources.S3ReadWrite)},
+	} {
+		for _, b := range src.buckets {
+			if b == resultsBucket || (!accountKnown && usesDefault && defaultShape.MatchString(b)) {
+				return fmt.Sprintf("%s names the results bucket %s, so the task's role can list it, and a role that can list the bucket must not share it with staged files (#1274)", src.field, b)
+			}
+		}
+	}
+	return ""
+}
+
+// notStagedError adds to a user-data size error why the files were not
+// staged, when that is why they did not fit.
+func notStagedError(err error, notStaged string) error {
+	if err == nil || notStaged == "" {
+		return err
+	}
+	return fmt.Errorf("%w.\nThe wrapper and flush hook were not staged in S3 to make room: %s. Read the other task's outputs from a different bucket, or give this task a results_prefix in a bucket it does not read", err, notStaged)
 }
 
 // stagedObject is a staged object to upload before RunInstances.
@@ -120,6 +164,9 @@ func uploadStagedFiles(ctx context.Context, store stagedFilesStore, warn io.Writ
 
 // stagedFilesNote is the dry run's note under the User data line.
 func stagedFilesNote(p *TaskPlan) string {
+	if p.NotStaged != "" {
+		return "the task wrapper and flush hook ride in the user data, not staged in S3: " + p.NotStaged
+	}
 	if p.StagedBytes == 0 {
 		return ""
 	}
