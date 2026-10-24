@@ -150,6 +150,74 @@ func StagingPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string
 	return `{"Version":"2012-10-17","Statement":[` + strings.Join(stmts, ",") + `]}`
 }
 
+// TaskRunPolicyFor is the instance policy of a `spawn task run` task:
+// StagingPolicyFor with provenance, plus s3:GetObject on the staged objects
+// its launcher uploads to the results bucket (#1274): the command and flush
+// hook, which the bootstrap fetches with the instance role instead of carrying
+// them in the user data. See StagedFilesResources for exactly which keys.
+func TaskRunPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string, readWriteBuckets []string) string {
+	pol := StagingPolicyFor(inputBuckets, outputBuckets, resultsBucket, readWriteBuckets, true)
+	if resultsBucket == "" {
+		return pol
+	}
+	stmt := fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject"],"Resource":[%s]}`, quotedList(StagedFilesResources(resultsBucket)))
+	// resultsBucket is set, so StagingPolicyFor granted it PutObject and the
+	// document is not empty: append to its statement list.
+	return strings.TrimSuffix(pol, "]}") + "," + stmt + "]}"
+}
+
+// stagedFilesSHA256Len is the length of the hex sha256 in a staged object's
+// name.
+const stagedFilesSHA256Len = 64
+
+// StagedFilesKey is the key of a task's staged command and flush hook (#1274):
+// bootstrap-<sha256>.sh beside its completion record, under taskPrefix, the
+// key part of the task's results prefix (empty for the bucket root).
+func StagedFilesKey(taskPrefix, sha256Hex string) string {
+	name := StagedFilesKeyPrefix("") + sha256Hex + ".sh"
+	if taskPrefix == "" {
+		return name
+	}
+	return taskPrefix + "/" + name
+}
+
+// StagedFilesKeyPrefix is what every staged object key under taskPrefix starts
+// with, for listing a previous attempt's.
+func StagedFilesKeyPrefix(taskPrefix string) string {
+	if taskPrefix == "" {
+		return "bootstrap-"
+	}
+	return taskPrefix + "/bootstrap-"
+}
+
+// StagedFilesResources are the object ARNs a task's role may GetObject for its
+// staged files: a bootstrap-<64 characters>.sh object at the bucket root or
+// under any prefix of resultsBucket.
+//
+// Not the one task's own prefix, although that is the only object the role
+// needs. Roles are shared: CreateOrGetInstanceProfile names a role by the hash
+// of its policy, so every task with the same buckets gets the same role, and a
+// grant naming the task's prefix would give each task_id a role of its own
+// (thousands for one workflow fan-out, against an account quota of 1,000 by
+// default, and nothing deletes them). Within one role, IAM cannot tell its
+// instances apart anyway. So the grant is the narrowest that does not vary by
+// task: the staged objects' own name shape, in the results bucket only.
+func StagedFilesResources(resultsBucket string) []string {
+	name := "bootstrap-" + strings.Repeat("?", stagedFilesSHA256Len) + ".sh"
+	return []string{
+		"arn:aws:s3:::" + resultsBucket + "/" + name,
+		"arn:aws:s3:::" + resultsBucket + "/*/" + name,
+	}
+}
+
+func quotedList(items []string) string {
+	q := make([]string, len(items))
+	for i, s := range items {
+		q[i] = fmt.Sprintf("%q", s)
+	}
+	return strings.Join(q, ",")
+}
+
 func DedupeBuckets(buckets []string) []string {
 	seen := map[string]bool{}
 	var out []string

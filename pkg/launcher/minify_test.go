@@ -29,6 +29,7 @@ func staticTemplates() map[string]string {
 		"spotReplacementStopScript":           spotReplacementStopScript,
 		"bodyStubTemplate":                    bodyStubTemplate,
 		"fatalRetireFunc":                     fatalRetireFunc,
+		"stagedFilesTemplate":                 stagedFilesTemplate,
 	}
 }
 
