@@ -73,9 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`aws s3 cp --region <task region>`, 6 tries), checks the sha256, and writes
   `/etc/spawn/command` (0600) and the flush hook (root, 0700) exactly as the
   inline user data did. A missing object, a wrong sha256 or no aws CLI retires
-  the instance. A trivial task's user data drops from 3,965 to 2,075 bytes
+  the instance. A trivial task's user data drops from 3,965 to 2,070 bytes
   gzipped; a task with a 20 KB inline command, which could not launch before
-  (16,533 bytes), now sends 2,071. `spawn task run --dry-run` reports the user
+  (16,533 bytes), now sends 2,076. `spawn task run --dry-run` reports the user
   data actually sent and says when the files are staged. The task's instance
   policy gains `s3:GetObject` on `<task_id>/bootstrap-<64 characters>.sh` in the
   staging bucket, and nothing else there: no policy spawn generates lists the
