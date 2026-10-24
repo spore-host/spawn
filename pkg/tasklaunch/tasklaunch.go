@@ -196,18 +196,19 @@ func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region str
 	} else if deps.Verbose != nil {
 		fmt.Fprintf(deps.Verbose, "cleared any previous completion record for task %s (run_id %s)\n", spec.TaskID, runID)
 	}
-	// And a previous attempt's staged wrapper and flush hook (#1274): each
-	// attempt stages its own, under a name that is its sha256, so nothing
-	// overwrites the last one.
+	// The staging bucket (#1274): made sure of before anything is staged in
+	// it, and a previous attempt's staged files cleared from it. Each attempt
+	// stages its own, under a name that is its sha256, so nothing overwrites
+	// the last one. A bucket that cannot be made ready means no staging: the
+	// files go inline if they fit (below).
+	stagingBucket := taskproto.StagingBucket(account, region)
 	stage := stagesFiles(client)
-	notStaged := ""
+	var stagingErr error
 	if stage {
-		if notStaged = stagingRefusal(spec, resultsBucket, region, true); notStaged != "" {
-			stage = false
-		}
-	}
-	if stage {
-		if err := clearStaleStagedFiles(ctx, client.(stagedFilesClearer), region, resultsBucket, resultsKeyPrefix); err != nil {
+		store := client.(stagedFilesStore)
+		if err := store.EnsureStagingBucket(ctx, stagingBucket, region, account); err != nil {
+			stage, stagingErr = false, err
+		} else if err := clearStaleStagedFiles(ctx, store, region, stagingBucket, account, spec.TaskID); err != nil {
 			fmt.Fprintf(warn, "warning: could not clear a previous attempt's staged task files for task %s: %v\n", spec.TaskID, err)
 		}
 	}
@@ -217,7 +218,7 @@ func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region str
 	// A private-ECR container image additionally needs ecr:ReadOnly to pull.
 	profile, err := client.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
 		TrustServices:    []string{"ec2"}, // an instance profile is assumed by EC2
-		InlinePolicyJSON: taskiam.TaskRunPolicyFor(taskiam.S3Buckets(spec.Inputs), taskiam.S3Buckets(spec.Outputs), resultsBucket, taskiam.S3BucketsFromURIs(spec.Resources.S3ReadWrite)),
+		InlinePolicyJSON: taskiam.TaskRunPolicyFor(taskiam.S3Buckets(spec.Inputs), taskiam.S3Buckets(spec.Outputs), resultsBucket, taskiam.S3BucketsFromURIs(spec.Resources.S3ReadWrite), stagingBucket),
 		Policies:         taskiam.ExtraPolicies(spec),
 	})
 	if err != nil {
@@ -237,7 +238,11 @@ func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region str
 	}
 	var staged *stagedObject
 	if stage {
-		staged = stageTaskFiles(cfg.JobArrayCommand, &opts, region, resultsBucket, resultsKeyPrefix)
+		staged = stageTaskFiles(cfg.JobArrayCommand, &opts, region, stagingBucket, spec.TaskID)
+	} else if stagingErr != nil {
+		if opts, err = inlineInstead(warn, fmt.Errorf("staging bucket: %w", stagingErr), cfg, opts); err != nil {
+			return nil, err
+		}
 	}
 	// The exact user data, now that the account, run id and storage are real.
 	// The preflight in Plan measured it with same-length placeholders; this is
@@ -245,11 +250,8 @@ func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region str
 	if _, err := taskUserDataSize(cfg, opts); err != nil {
 		return nil, err
 	}
-	if notStaged != "" {
-		fmt.Fprintf(warn, "note: the task wrapper and flush hook ride in the user data, not staged in S3: %s\n", notStaged)
-	}
 	if staged != nil {
-		if opts, err = uploadStagedFiles(ctx, client.(stagedFilesStore), warn, region, staged, cfg, opts); err != nil {
+		if opts, err = uploadStagedFiles(ctx, client.(stagedFilesStore), warn, region, account, staged, cfg, opts); err != nil {
 			return nil, err
 		}
 	}

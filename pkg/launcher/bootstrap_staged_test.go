@@ -21,7 +21,7 @@ import (
 // These are the gates for #1274's second half: a task's command and flush hook
 // staged in S3 instead of carried in the user data.
 
-const stagedURI = "s3://spawn-results-123456789012-eu-west-1/tasks/t1/bootstrap-x.sh"
+const stagedURI = "s3://spawn-staging-123456789012-eu-west-1/t1/bootstrap-x.sh"
 
 // stagedConfigs are the launch shapes that stage: a command, a flush hook, or
 // both, with the per-launch content that sits around them.
