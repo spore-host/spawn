@@ -171,6 +171,11 @@ type VolumeRef struct {
 type Manifest struct {
 	Source      string `json:"source"`
 	Destination string `json:"destination"`
+	// AllowEmpty lets a directory input (a source ending in "/") stage nothing
+	// (#1207). Without it, a prefix that is empty or missing fails stage-in as
+	// staging_error, because that is usually an upstream task that never wrote
+	// its output. Valid only on a directory input.
+	AllowEmpty bool `json:"allow_empty,omitempty"`
 }
 
 // Lifecycle controls how the launched instance ends.
@@ -308,6 +313,8 @@ func (s *TaskSpec) Validate() error {
 			add("inputs[%d]: source and destination are both required", i)
 		} else if !strings.HasPrefix(m.Source, "s3://") {
 			add("inputs[%d].source %q must be an s3:// URI (stage-in only supports S3 → local; a path on a mounted placement filesystem is already directly accessible without a manifest entry)", i, m.Source)
+		} else if m.AllowEmpty && recursiveFlag(m.Source) == "" {
+			add("inputs[%d].allow_empty applies only to a directory input (a source ending in \"/\"); %q is a single object, which always fails stage-in when missing", i, m.Source)
 		}
 	}
 	for i, m := range s.Outputs {
@@ -315,6 +322,9 @@ func (s *TaskSpec) Validate() error {
 			add("outputs[%d]: source and destination are both required", i)
 		} else if !strings.HasPrefix(m.Destination, "s3://") {
 			add("outputs[%d].destination %q must be an s3:// URI (stage-out only supports local → S3; a path on a mounted placement filesystem is already directly accessible without a manifest entry)", i, m.Destination)
+		}
+		if m.AllowEmpty {
+			add("outputs[%d].allow_empty is not supported (it applies only to directory inputs)", i)
 		}
 	}
 	for i, u := range s.Resources.S3ReadWrite {

@@ -259,7 +259,17 @@ whatever the image happens to declare; every staged input is also chown'd to tha
 uid so it can be deleted as well as read (spawn#565). Practical upshot: any
 absolute path works, the image's USER is irrelevant, and you do not need to keep
 staged paths flat in /tmp. A manifest path ending in "/" is a directory and is
-staged recursively in both directions (spawn#564).
+staged recursively in both directions (spawn#564). A directory input that copies
+no objects (its prefix is empty or missing, often because the task that writes
+it failed) fails stage-in as staging_error; set allow_empty: true on that input
+if an empty directory is expected (spawn#1207).
+
+A container's /tmp is its own tmpfs (docker run --tmpfs), RAM-backed and capped
+at half of instance memory like the host's AL2023 /tmp, so scratch written there
+uses memory, not the root disk; staged directories under /tmp are mounted on top
+of it. The exception is a manifest path directly in /tmp (such as /tmp/run.sh):
+then the host's /tmp is bind-mounted instead, as before (spawn#1270). command.log
+says which.
 
 Staging space is NOT resources.disk_gib unless you stage onto the root
 filesystem. disk_gib sizes the root EBS volume, which is where an ordinary path

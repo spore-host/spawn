@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -222,9 +223,11 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 		p("fi\n")
 	}
 	p("\n")
+	writeEmptyDirInputCheckFunc(p, spec)
 	for _, m := range spec.Inputs {
 		p("if [ \"$STAGE_RC\" -eq 0 ]; then\n")
 		p("  %s%s %s %s || STAGE_RC=$?\n", s3Cp, recursiveFlag(m.Source), shQuote(m.Source), shQuote(m.Destination))
+		writeEmptyDirInputCheck(p, m)
 		// chown the staged path to the invoking uid:gid right after it lands
 		// (spawn#565). Host /tmp is 1777 (sticky): a container that later needs
 		// to unlink a staged file may only do so if it OWNS THAT FILE — sharing
@@ -590,8 +593,37 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 		fmt.Fprintf(&envFlags, "-e %s ", shQuote(k+"="+spec.Env[k]))
 	}
 	var mounts strings.Builder
-	for _, d := range containerMountDirs(spec) {
+	dirs := containerMountDirs(spec)
+	for _, d := range dirs {
 		fmt.Fprintf(&mounts, "-v %s:%s ", shQuote(d), shQuote(d))
+	}
+	// The container's own /tmp (#1270). Without this its /tmp was the image's
+	// overlay, so scratch landed on the root EBS disk (20 GiB by default) unless
+	// some manifest path happened to sit directly in /tmp. PLINK 2 on a 128 GiB
+	// box died with ENOSPC writing its intermediates there.
+	//
+	// So the container gets a tmpfs sized as AL2023 sizes the host's: systemd's
+	// tmp.mount uses size=50%, which the kernel resolves to half of RAM at mount
+	// time, on the instance, so nothing needs computing in the wrapper. It is a
+	// SEPARATE tmpfs, not a bind of the host's /tmp: the wrapper's record files
+	// and spored's signal files live there (recorddir.go, spawn#66), and the
+	// container runs as the wrapper's own uid (--user), so it could overwrite
+	// them.
+	// `exec` is explicit because Docker's --tmpfs defaults to noexec, which
+	// breaks a script or a compiled tool run from /tmp. Staged directories under
+	// /tmp still appear inside: Docker mounts parents before children whatever
+	// the argv order, so each -v /tmp/x lands on top of the tmpfs.
+	//
+	// When /tmp itself is a mount dir (a manifest path directly in /tmp, such as
+	// /tmp/run.sh), it stays bind-mounted as before and gets no tmpfs: Docker
+	// refuses the pair ("Duplicate mount point: /tmp"). That /tmp is the host's
+	// tmpfs, so scratch is RAM-backed and half of RAM either way.
+	tmpFlag := ""
+	if slices.Contains(dirs, "/tmp") {
+		p("  echo 'spawn: container /tmp is the host /tmp (bind-mounted: a manifest path is directly in /tmp)'\n")
+	} else {
+		tmpFlag = "--tmpfs " + shQuote("/tmp:"+containerTmpfsOptions) + " "
+		p("  echo \"spawn: container /tmp is tmpfs, size=50%% of RAM ($(awk '/^MemTotal:/{printf \"%%.1f\", $2/2097152}' /proc/meminfo 2>/dev/null) GiB)\"\n")
 	}
 	p("  spawn_phase 'image pull start'\n")
 	p("  sudo docker pull %s\n", shQuote(image))
@@ -609,10 +641,46 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	if f := shmSizeFlag(spec.Resources); f != "" {
 		shmFlag = f + " "
 	}
-	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s%s%s %s\n", envFlags.String(), gpuFlag, shmFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
+	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s%s%s%s %s\n", envFlags.String(), gpuFlag, shmFlag, tmpFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
 	p("  rc=$?\n")
 	p("  spawn_phase \"command exit rc=$rc\"\n")
 	p("  fi\n") // closes the RUNTIME_RC guard opened after the Docker install
+}
+
+// containerTmpfsOptions are the mount options of a container task's /tmp
+// (#1270): those of AL2023's own /tmp (systemd tmp.mount) plus exec, which
+// Docker's --tmpfs would otherwise turn off. See writeContainerRun.
+const containerTmpfsOptions = "rw,exec,nosuid,nodev,mode=1777,size=50%"
+
+// checksEmptyDirInput reports whether stage-in fails when input m copies
+// nothing (#1207): a directory input (source ending in "/") without
+// allow_empty. `aws s3 cp --recursive` of an empty or missing prefix exits 0,
+// so a task whose upstream never wrote its input used to start on an empty
+// directory and fail much later, or succeed on nothing.
+func checksEmptyDirInput(m Manifest) bool {
+	return recursiveFlag(m.Source) != "" && !m.AllowEmpty
+}
+
+// writeEmptyDirInputCheckFunc emits spawn_nonempty, once, when some input
+// needs it. It checks what landed, a regular file under the destination,
+// rather than parsing CLI output. A prefix holding only a zero-byte folder
+// marker counts as empty: the CLI skips such keys on download, creating at
+// most a directory. A destination another input already filled cannot be told
+// apart from a copy that worked, so the check passes there.
+func writeEmptyDirInputCheckFunc(p func(string, ...interface{}), spec *TaskSpec) {
+	if !slices.ContainsFunc(spec.Inputs, checksEmptyDirInput) {
+		return
+	}
+	p("spawn_nonempty() { [ -n \"$(find \"$2\" -type f 2>/dev/null | head -n 1)\" ] || { echo \"spawn: input $1 copied no objects: the prefix is empty or missing (set allow_empty: true on this input if that is expected)\" >&2; STAGE_RC=1; }; }\n")
+}
+
+// writeEmptyDirInputCheck emits the call for input m, inside the input's
+// `if [ "$STAGE_RC" -eq 0 ]` block, so the failure is classified staging_error
+// like a missing single object.
+func writeEmptyDirInputCheck(p func(string, ...interface{}), m Manifest) {
+	if checksEmptyDirInput(m) {
+		p("  [ \"$STAGE_RC\" -ne 0 ] || spawn_nonempty %s %s\n", shQuote(m.Source), shQuote(m.Destination))
+	}
 }
 
 // manifestMountDirs returns the distinct host directories the wrapper's own
