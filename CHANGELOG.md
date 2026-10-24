@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+
 - **`spawn extend` no longer raises an instance's cost limit unless asked**
   (#1262). Since #639 it raised `spawn:cost-limit` to whatever the new
   deadline needed, so `--cost-limit` was not a ceiling for any instance that
@@ -20,6 +21,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value. `--keep-cost-limit` is now the default, and is deprecated but still
   accepted. `--cost-limit` together with `--raise-cost-limit`, or either with
   `--keep-cost-limit`, is refused.
+
+- **A container task's /tmp is now its own RAM-backed tmpfs, half of instance
+  memory, instead of the root disk** (#1270). Unless a manifest path sat
+  directly in /tmp, the container's /tmp was the image overlay on the root EBS
+  volume (20 GiB by default), so a task staging only directories such as
+  /tmp/in/ wrote its scratch to disk: PLINK 2 died with ENOSPC on a 128 GiB box.
+  `docker run` now gets `--tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,size=50%`,
+  the size AL2023 gives the host's /tmp, with staged directories mounted on
+  top. It is a separate tmpfs, not the host's /tmp, which holds spored's files.
+  This is a behaviour change: scratch now uses RAM, so a task that writes more
+  than about half of RAM to /tmp now fails with ENOSPC on the tmpfs where it
+  used to fill the root disk, and memory written there is not available to the
+  workload; size memory_gib for it, or write large scratch elsewhere. A spec
+  with a manifest path directly in /tmp (such as /tmp/run.sh) keeps today's
+  bind mount of the host's /tmp, since Docker refuses both on one path.
+  command.log says which /tmp the container got.
+- **A directory input whose prefix is empty or missing now fails stage-in**
+  (#1207). `aws s3 cp --recursive` of a prefix with no objects exits 0, so a
+  task whose upstream never wrote its input started on an empty directory and
+  failed much later inside its own command, or succeeded on nothing. When an
+  input with a source ending in `/` stages no regular file (a prefix holding
+  only a zero-byte folder marker counts as empty), the task now fails with
+  `input s3://… copied no objects: the prefix is empty or missing`, classified
+  `staging_error`, and the command does not run. A spec that relied on an
+  empty prefix must set the new per-input field `allow_empty: true`. Validate
+  rejects `allow_empty` on a single-object input and on outputs.
 
 ## [0.141.0] - 2026-10-23
 

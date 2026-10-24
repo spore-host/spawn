@@ -157,7 +157,7 @@ func TestGenerateWrapper_ContainerCommandFailureStaysAppError(t *testing.T) {
 func runtimeStandInBin(t *testing.T) string {
 	t.Helper()
 	binDir := t.TempDir()
-	for _, tool := range []string{"seq", "mkdir", "cat", "id", "rm", "chown", "tee", "dirname", "basename", "env"} {
+	for _, tool := range []string{"seq", "mkdir", "cat", "id", "rm", "chown", "tee", "dirname", "basename", "env", "find", "head", "awk", "touch"} {
 		if p, err := exec.LookPath(tool); err == nil {
 			if err := os.Symlink(p, filepath.Join(binDir, tool)); err != nil {
 				t.Fatal(err)

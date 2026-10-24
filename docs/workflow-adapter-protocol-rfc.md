@@ -79,8 +79,11 @@ ResourceRequest    what truffle sizes against
   memory_headroom_percent
 
 InputManifest / OutputManifest
-  source           s3://… or local path
+  source           s3://… or local path   # a trailing "/" is a directory (recursive)
   destination      local path or s3://…
+  allow_empty      inputs only, directory sources only: stage an empty or
+                   missing prefix as an empty directory instead of failing
+                   stage-in as staging_error (spawn#1207)
 
 LaunchResult       { instance_id, region, az, instance_type, spot }
 TaskState          submitted | launching | running | completed | failed | cancelled

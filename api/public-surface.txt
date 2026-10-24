@@ -832,6 +832,7 @@ field LaunchResult.TaskID string
 field Lifecycle.CostLimit float64
 field Lifecycle.OnComplete string
 field Lifecycle.TTL string
+field Manifest.AllowEmpty bool
 field Manifest.Destination string
 field Manifest.Source string
 field Placement.AMI string
