@@ -16,21 +16,33 @@ import (
 // write itself, so a comment naming /tmp/SPAWN_COMPLETE cannot satisfy it.
 var completionWriteRe = regexp.MustCompile(`(?m)^\s*cat > (.+) <<JSONEOF$`)
 
+// completionAssignRe matches the one assignment of the variable the
+// completion writes target (#1274): the body is published once per release, so
+// the path is a variable set ahead of it rather than text rendered into it.
+var completionAssignRe = regexp.MustCompile(`(?m)^` + completionFileVar + `=(.+)$`)
+
 // completionWriteTargets discovers the write targets rather than listing the
 // sites by hand, and fails if discovery finds none: a wrapper with no
-// completion write has broken, not proven itself clean.
+// completion write has broken, not proven itself clean. A target that is the
+// completion variable is resolved to the value the script assigns it, so the
+// result is the path each write actually lands at.
 func completionWriteTargets(t *testing.T, cfg BootstrapConfig) []string {
 	t.Helper()
 	s, err := BuildLinuxBootstrap(cfg)
 	if err != nil {
 		t.Fatalf("BuildLinuxBootstrap: %v", err)
 	}
-	if strings.Contains(s, completionFilePlaceholder) {
-		t.Fatalf("the completion-file placeholder %q reached the generated script unrendered", completionFilePlaceholder)
-	}
+	assigns := completionAssignRe.FindAllStringSubmatch(s, -1)
 	var out []string
 	for _, m := range completionWriteRe.FindAllStringSubmatch(s, -1) {
-		out = append(out, m[1])
+		target := m[1]
+		if target == `"$`+completionFileVar+`"` {
+			if len(assigns) != 1 {
+				t.Fatalf("the completion write targets $%s, which the script assigns %d times, want exactly once", completionFileVar, len(assigns))
+			}
+			target = assigns[0][1]
+		}
+		out = append(out, target)
 	}
 	if len(out) == 0 {
 		t.Fatal("found no `cat > ... <<JSONEOF` completion write in the --command wrapper")
@@ -96,7 +108,11 @@ func TestCommandCompletionFileIsQuoted(t *testing.T) {
 
 	for _, target := range completionWriteTargets(t, cfg) {
 		_ = os.RemoveAll(filepath.Join(dir, "new dir"))
-		frag := "set -e\nmkdir -p \"$(dirname -- " + target + ")\"\ncat > " + target + " <<JSONEOF\n{\"status\": \"completed\"}\nJSONEOF\n"
+		// The assignment and the write exactly as the script renders them.
+		frag := "set -e\n" + completionFileVar + "=" + target + "\nmkdir -p \"$(dirname -- \"$" + completionFileVar + "\")\"\ncat > \"$" + completionFileVar + "\" <<JSONEOF\n{\"status\": \"completed\"}\nJSONEOF\n"
+		if !strings.Contains(s, "mkdir -p \"$(dirname -- \"$"+completionFileVar+"\")\" || true\n") {
+			t.Fatal("the script's completion mkdir is not the one this fragment runs")
+		}
 		c := exec.Command(bash, "-c", frag)
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("running the rendered write failed: %v\n%s", err, out)

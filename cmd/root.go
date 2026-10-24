@@ -11,6 +11,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/buildinfo"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/launcher"
 )
 
 // Version is the release version, injected at build time by GoReleaser
@@ -66,6 +67,9 @@ func Execute() {
 	// import cmd to resolve this itself, so it's pushed in here once at
 	// startup.
 	aws.CallerVersion = version()
+	// And so a release build's user data fetches the bootstrap body published
+	// for exactly this release (#1274); pkg/launcher cannot import cmd either.
+	launcher.CallerVersion = version()
 
 	// Start async update check (non-blocking, respects SPORE_NO_UPDATE_CHECK).
 	updateCh := startUpdateCheck(version())

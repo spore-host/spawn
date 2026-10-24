@@ -30,10 +30,15 @@ func TestBuildUserDataHonoursCompletionFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildUserData: %v", err)
 	}
-	if !strings.Contains(s, "cat > '/data/done' <<JSONEOF") {
-		t.Error("the --command wrapper does not write the configured --completion-file /data/done; spored would never see completion (#1131)")
+	// The wrapper writes to a variable the script assigns at the top, so the
+	// static body can be published once per release (#1274).
+	if !strings.Contains(s, `cat > "$SPAWN_CMD_COMPLETION_FILE" <<JSONEOF`) {
+		t.Error("the --command wrapper does not write the completion-file variable")
 	}
-	if strings.Contains(s, "cat > '/tmp/SPAWN_COMPLETE' <<JSONEOF") || strings.Contains(s, "cat > /tmp/SPAWN_COMPLETE <<JSONEOF") {
+	if !strings.Contains(s, "\nSPAWN_CMD_COMPLETION_FILE='/data/done'\n") {
+		t.Error("the --command wrapper's completion file is not the configured --completion-file /data/done; spored would never see completion (#1131)")
+	}
+	if strings.Contains(s, "SPAWN_CMD_COMPLETION_FILE='/tmp/SPAWN_COMPLETE'") || strings.Contains(s, "cat > /tmp/SPAWN_COMPLETE <<JSONEOF") {
 		t.Error("the --command wrapper still writes the default /tmp/SPAWN_COMPLETE despite --completion-file /data/done")
 	}
 }

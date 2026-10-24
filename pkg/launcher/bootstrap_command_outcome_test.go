@@ -67,33 +67,32 @@ func TestCommandSuccessClaimIsGone(t *testing.T) {
 	}
 }
 
-// TestCommandStaysBackgroundedBeforeSpored is the spored#65 guard, and the reason
-// the exit code is captured in a SUBSHELL rather than by waiting.
+// TestSporedStartsBeforeTheCommandWhichStaysBackgrounded is the spored#65
+// guard, restated for #1274.
 //
-// spored is installed and started LATER in the bootstrap. If the command block ever
-// stops being backgrounded, cloud-init blocks on it, spored never starts, and TTL /
-// idle / cost enforcement are all unarmed for as long as the command runs — a worse
-// failure than the one #614 fixed, and silent. Anyone "simplifying" the `&` away must
-// fail this test.
-func TestCommandStaysBackgroundedBeforeSpored(t *testing.T) {
+// spored used to start AFTER the --command block, so the block had to be
+// backgrounded or TTL/idle/cost enforcement stayed unarmed for the command's
+// whole run. #1274 moved spored's start ahead of every optional step, the
+// command included, because a failure between the two (an OOM-killed dnf on a
+// t4g.nano) left the workload running with no spored at all. The command must
+// still be backgrounded: blocking cloud-init on it would hold back the storage,
+// container and custom user data that follow, and the exit code is captured in
+// the subshell rather than by waiting.
+func TestSporedStartsBeforeTheCommandWhichStaysBackgrounded(t *testing.T) {
 	s := commandBootstrap(t)
 
 	cmdIdx := strings.Index(s, "/tmp/spawn-command.sh'")
 	sporedIdx := strings.Index(s, "systemctl start spored")
-	if cmdIdx < 0 || sporedIdx < 0 {
-		t.Fatalf("could not locate both markers (command=%d spored=%d)", cmdIdx, sporedIdx)
+	startedIdx := strings.Index(s, "--command started in the background")
+	if cmdIdx < 0 || sporedIdx < 0 || startedIdx < 0 {
+		t.Fatalf("could not locate the markers (command=%d spored=%d started=%d)", cmdIdx, sporedIdx, startedIdx)
 	}
-	if cmdIdx > sporedIdx {
-		t.Fatal("the --command block now runs AFTER spored starts; if that is deliberate, this guard " +
-			"and the subshell it protects can be revisited")
+	if sporedIdx > cmdIdx {
+		t.Fatal("spored starts after the --command block again; a failure between them leaves the workload running with no TTL (#1274)")
 	}
-
-	// The subshell wrapping the command must be backgrounded. Look between the
-	// command invocation and spored's start for the closing `) &`.
-	between := s[cmdIdx:sporedIdx]
-	if !strings.Contains(between, ") &") {
+	if !strings.Contains(s[cmdIdx:startedIdx], ") &") {
 		t.Error("the command subshell is no longer backgrounded — cloud-init will block on the " +
-			"command and spored will not start, leaving TTL/idle/cost unenforced for its whole duration (spored#65)")
+			"command, and the rest of the bootstrap waits for it to finish (spored#65)")
 	}
 }
 

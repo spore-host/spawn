@@ -14,6 +14,20 @@ jobs:
   goreleaser:
     name: Release
     runs-on: ubuntu-latest
+    env:
+      # Every region spawn publishes spored and the bootstrap body to.
+      SPAWN_BINARY_BUCKETS: >-
+        spawn-binaries-us-east-1
+        spawn-binaries-us-east-2
+        spawn-binaries-us-west-1
+        spawn-binaries-us-west-2
+        spawn-binaries-ca-central-1
+        spawn-binaries-eu-west-1
+        spawn-binaries-eu-west-2
+        spawn-binaries-eu-central-1
+        spawn-binaries-ap-southeast-1
+        spawn-binaries-ap-southeast-2
+        spawn-binaries-ap-northeast-1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,6 +59,70 @@ jobs:
       - name: Release version guard
         run: scripts/check-release-version.sh "${GITHUB_REF_NAME}"
 
+      # The static Linux bootstrap body (#1274), published BEFORE GoReleaser
+      # publishes the CLI and the taps. A release build of spawn puts only a stub
+      # in user data; the stub fetches spawn/versions/<v>/bootstrap.sh from the
+      # instance's regional bucket (us-east-1 fallback) and runs it only if its
+      # sha256 is the one that build expects AND its .sig verifies against the key
+      # compiled into spawn; otherwise the instance terminates itself. So no
+      # installable spawn may exist before its body does. Generated from the
+      # tagged source with the release's version ldflag; after GoReleaser, the
+      # "released spawn prints the published body" step proves the shipped
+      # binary prints the same bytes. Not optional, unlike the spored signature
+      # below: an unsigned or missing body would retire every launch.
+      - name: Configure AWS credentials (bootstrap body)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::966362334030:role/GitHubActions-spore-host-release
+          role-session-name: bootstrap-body-upload
+          aws-region: us-east-1
+
+      - name: Publish the bootstrap body to S3
+        env:
+          SPORED_SIGNING_KEY_ID: ${{ vars.SPORED_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          read -ra BUCKETS <<< "$SPAWN_BINARY_BUCKETS"
+          if [ "${#BUCKETS[@]}" -eq 0 ]; then
+            echo "::error::SPAWN_BINARY_BUCKETS is empty"
+            exit 1
+          fi
+          if [ -z "${SPORED_SIGNING_KEY_ID:-}" ]; then
+            echo "::error::SPORED_SIGNING_KEY_ID unset: the bootstrap body must be signed, or every launch by this release retires itself at boot (#1274)"
+            exit 1
+          fi
+          # Outside the checkout: GoReleaser refuses a dirty tree.
+          out="${RUNNER_TEMP}/spawn-bootstrap-body"
+          mkdir -p "$out"
+          SPORE_NO_UPDATE_CHECK=1 CGO_ENABLED=0 go run -ldflags "-X github.com/spore-host/spawn/cmd.Version=${VERSION}" . bootstrap-body > "$out/bootstrap.sh"
+          if [ ! -s "$out/bootstrap.sh" ]; then
+            echo "::error::spawn bootstrap-body printed nothing (#1274)"
+            exit 1
+          fi
+          sha256sum "$out/bootstrap.sh" | awk '{print $1}' > "$out/bootstrap.sh.sha256"
+          # KMS signs the 32-byte digest (--message-type DIGEST); the result
+          # verifies with `openssl dgst -sha256 -verify`, as spored's does.
+          openssl dgst -sha256 -binary "$out/bootstrap.sh" > "$out/bootstrap.sh.digest"
+          aws kms sign \
+            --key-id "$SPORED_SIGNING_KEY_ID" \
+            --message-type DIGEST \
+            --signing-algorithm ECDSA_SHA_256 \
+            --message "fileb://$out/bootstrap.sh.digest" \
+            --query Signature --output text \
+            > "$out/bootstrap.sh.sig"
+          if [ ! -s "$out/bootstrap.sh.sig" ]; then
+            echo "::error::KMS returned no signature for the bootstrap body (#1274)"
+            exit 1
+          fi
+          for bucket in "${BUCKETS[@]}"; do
+            region="${bucket#spawn-binaries-}"
+            for f in bootstrap.sh bootstrap.sh.sig bootstrap.sh.sha256; do
+              aws s3 cp "$out/$f" "s3://${bucket}/spawn/versions/${VERSION}/$f" --region "$region" --only-show-errors
+            done
+          done
+          echo "✅ Published the bootstrap body ($(cat "$out/bootstrap.sh.sha256")) to ${#BUCKETS[@]} regions"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
@@ -55,6 +133,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           SCOOP_BUCKET_GITHUB_TOKEN: ${{ secrets.SCOOP_BUCKET_GITHUB_TOKEN }}
+
+      # The shipped linux binary must print exactly the body published above:
+      # its stub refuses any other bytes, so a mismatch would retire every launch
+      # it makes. Runs even when GoReleaser failed late (the tap push), because
+      # the binaries are published by then.
+      - name: Check the released spawn prints the published body
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/spawn-bootstrap-body"
+          want="$(cat "$out/bootstrap.sh.sha256")"
+          got="$(SPORE_NO_UPDATE_CHECK=1 dist/spawn_linux_amd64_v1/spawn bootstrap-body | sha256sum | awk '{print $1}')"
+          if [ -z "$want" ] || [ "$got" != "$want" ]; then
+            echo "::error::the released spawn prints a bootstrap body with sha256 ${got}, but ${want:-nothing} was published; every launch by this release would retire itself at boot (#1274)"
+            exit 1
+          fi
+          echo "✅ The released spawn's bootstrap body matches the published one ($got)"
 
       # SLSA build provenance for the CLI release archives (complements the cosign
       # signature — signature authenticates the publisher, attestation records how/
@@ -101,19 +196,9 @@ jobs:
           # then the .sig lookup failed, hard-failing spored install region-wide
           # (#440). Keeping every regional bucket current with the signed binary
           # removes that failure mode. us-east-1 must stay (it IS the fallback).
-          BUCKETS=(
-            spawn-binaries-us-east-1
-            spawn-binaries-us-east-2
-            spawn-binaries-us-west-1
-            spawn-binaries-us-west-2
-            spawn-binaries-ca-central-1
-            spawn-binaries-eu-west-1
-            spawn-binaries-eu-west-2
-            spawn-binaries-eu-central-1
-            spawn-binaries-ap-southeast-1
-            spawn-binaries-ap-southeast-2
-            spawn-binaries-ap-northeast-1
-          )
+          # The list is the job's SPAWN_BINARY_BUCKETS, shared with the bootstrap
+          # body upload so the two can never disagree about where to publish.
+          read -ra BUCKETS <<< "$SPAWN_BINARY_BUCKETS"
 
           # Checksums (computed once).
           amd_src="dist/spored_linux_amd64_v1/spored"

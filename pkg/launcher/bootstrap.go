@@ -8,7 +8,9 @@
 // The two entry points:
 //
 //   - BuildLinuxBootstrap builds the spored bootstrap user-data as a pure
-//     function of (username, public key, plugins). All runtime behavior
+//     function of (username, public key, plugins) and the spawn release that
+//     built it: a release build carries a stub that fetches and verifies the
+//     static body that release published (#1274). All runtime behavior
 //     (command, on-complete, pre-stop, idle-timeout, TTL) is driven by the
 //     spawn:* EC2 tags that aws.buildTags writes from the LaunchConfig — the
 //     script reads them at boot — so this function needs no disk, no
@@ -22,9 +24,13 @@ package launcher
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"runtime/debug"
 	"strings"
 
 	"github.com/spore-host/spawn/internal/shellmin"
@@ -128,15 +134,28 @@ type BootstrapConfig struct {
 	// writes its completion record there, so the two must agree or --on-complete
 	// never fires (#1131). Empty means /tmp/SPAWN_COMPLETE, the flag default.
 	CompletionFile string
+	// InlineBody puts the whole static bootstrap body into the user data, as
+	// every launch did before #1274, instead of the small stub that fetches the
+	// body this spawn release published and verifies it before running it.
+	//
+	// It is also what happens, whatever this says, when no published body can
+	// match the build: a dev or pseudo-version build (there is no release to
+	// fetch from), or one with no signing key compiled in (nothing to verify
+	// against). See [PublishedBodyVersion].
+	InlineBody bool
 }
 
 // defaultCompletionFile is the completion sentinel used when no
 // --completion-file is given. It matches the flag default and spored's own.
 const defaultCompletionFile = "/tmp/SPAWN_COMPLETE"
 
-// completionFilePlaceholder marks where linuxBootstrapBody writes the
-// completion record; BuildLinuxBootstrap replaces it with the quoted path.
-const completionFilePlaceholder = "@@SPAWN_COMPLETION_FILE@@"
+// completionFileVar is the shell variable linuxBootstrapBody writes the
+// completion record to. BuildLinuxBootstrap assigns it, shell-quoted, at the
+// top of the script, ahead of the body, so the body itself carries no
+// per-launch text and can be published once per release (#1274). Not
+// SPAWN_COMPLETION_FILE: pkg/userdata's queue runner, appended after this
+// script, already gives that name its own meaning.
+const completionFileVar = "SPAWN_CMD_COMPLETION_FILE"
 
 func completionFileOrDefault(p string) string {
 	if p == "" {
@@ -186,7 +205,50 @@ const (
 // BuildLinuxBootstrap returns the cloud-init user-data script that installs
 // spored and configures the instance. It is the single source of truth for the
 // Linux bootstrap, shared by the `spawn launch` CLI and headless SDK callers.
+//
+// By default the static part of the bootstrap ([BootstrapBody]) is not in the
+// script at all (#1274). The script carries a small stub instead, which fetches
+// the body this spawn release published beside spored, checks it against the
+// sha256 this build expects and the spore.host signature, and only then runs it.
+// The per-launch parts (key, command, flush hook, readiness gates, plugins,
+// storage, container, custom user data) stay inline, in the same order around
+// the body as before. A build that cannot match a published body, or a caller
+// that sets InlineBody, gets the body inline instead.
 func BuildLinuxBootstrap(cfg BootstrapConfig) (string, error) {
+	version := ""
+	if !cfg.InlineBody {
+		version = PublishedBodyVersion()
+	}
+	return buildLinuxBootstrap(cfg, version, BootstrapBody())
+}
+
+// buildLinuxBootstrap is BuildLinuxBootstrap with the release and body made
+// explicit, so tests can build the stub without a release build. An empty
+// version means inline.
+func buildLinuxBootstrap(cfg BootstrapConfig, version, body string) (string, error) {
+	prefix, err := bootstrapPrefix(cfg)
+	if err != nil {
+		return "", err
+	}
+	pre, err := perLaunchPreBody(cfg)
+	if err != nil {
+		return "", err
+	}
+	post := perLaunchPostBody(cfg)
+
+	if version == "" {
+		// The body's function definitions sit above the per-launch files, where
+		// they always have; nothing in those files calls them, so the stub path,
+		// which defines them inside the fetched body, runs the same commands.
+		return prefix + bodyFuncs() + pre + bodyMain() + post, nil
+	}
+	return prefix + pre + bodyStub(version, body) + post, nil
+}
+
+// bootstrapPrefix is the top of every bootstrap: the per-launch variables the
+// body reads, and the signing key both the stub and the spored install verify
+// against.
+func bootstrapPrefix(cfg BootstrapConfig) (string, error) {
 	username := cfg.Username
 	if username == "" {
 		return "", fmt.Errorf("bootstrap: username is required")
@@ -205,30 +267,104 @@ func BuildLinuxBootstrap(cfg BootstrapConfig) (string, error) {
 		}
 	}
 
+	// The --command wrapper inside the body signals completion by writing the
+	// file spored watches. It is a variable, assigned here, rather than text
+	// rendered into the body (#1131, #1274): shell-quoted, because the value
+	// comes from --completion-file.
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
 
 # User configuration
 LOCAL_USERNAME=%s
 LOCAL_SSH_KEY_BASE64=%s
-`, security.ShellQuote(username), security.ShellQuote(publicKeyBase64))
+%s=%s
+`, security.ShellQuote(username), security.ShellQuote(publicKeyBase64),
+		completionFileVar, security.ShellQuote(completionFileOrDefault(cfg.CompletionFile)))
 
 	// spored binary authenticity (spore-host#440): embed the spore.host signing
 	// PUBLIC key so the bootstrap can verify the downloaded spored's signature
 	// against a key carried by spawn (trusted), not one served from the same S3
 	// bucket as the binary. When no key is compiled in yet, verification stays
-	// off and the body falls back to sha256-only (honestly logged).
+	// off and the body falls back to sha256-only (honestly logged). The stub
+	// verifies the body against the same key (#1274).
 	script += shellmin.Strip(sporedinstall.KeySetupScript())
 
-	// The one implementation of download-verify-install, shared with
-	// cmd/app.go and cmd/upgrade_spored.go. It used to live inline in
-	// linuxBootstrapBody below, which is why the other two paths were able to
-	// ship without any of it (GHSA-3x4q-99gh-fxhx).
-	script += shellmin.Strip(sporedinstall.VerifiedInstallFunc())
+	// Defined first, because every abort before spored is running calls it:
+	// the stub's (no verified body) and the body's own (no spored).
+	script += shellmin.Strip(fatalRetireFunc)
+	return script, nil
+}
 
-	// The Spot-replacement check the workload starts are gated on (#1007).
-	// Defined here, above the body, because the body's --command block calls it.
-	script += shellmin.Strip(spotReplacementCheckFunc)
+// fatalRetireFunc defines spawn_fatal_retire, for every abort that happens
+// before spored is running (#1274). An instance whose bootstrap stops there has
+// nothing enforcing its TTL, idle timeout or cost limit, so leaving it running
+// is a cost leak that only the TTL reaper, in accounts that deploy one, would
+// ever end. So after saying why, loudly (stderr and so cloud-init-output.log,
+// the console, the journal), it terminates the instance.
+//
+// The terminate uses the instance role's TerminateOnlySelf grant
+// (pkg/aws sporedSelfTerminateStatement: ec2:TerminateInstances when aws:ARN
+// equals ${ec2:SourceInstanceARN}, i.e. only the caller itself), which every
+// spored role carries, with the instance ID and region from IMDSv2. Retried
+// briefly, bounded by the CLI's own timeouts. When that cannot work (no aws
+// CLI on the AMI, no egress, a caller-supplied profile without the grant) it
+// falls back to an OS shutdown. spawn sets no InstanceInitiatedShutdownBehavior,
+// so that STOPS the instance rather than terminating it: its volumes still
+// bill, but stopped is far cheaper than running, and the log line says which
+// happened.
+const fatalRetireFunc = `
+# spawn_fatal_retire <reason>: spored is not running, so nothing would enforce
+# this instance's TTL. Report why, then terminate it (#1274).
+spawn_fatal_say() {
+    echo "spawn: $1" >&2
+    echo "spawn: $1" >> /dev/console 2>/dev/null || true
+    logger -p user.crit -t spawn-bootstrap "$1" 2>/dev/null || true
+}
+spawn_fatal_retire() {
+    local tok id region n=0
+    trap - EXIT
+    spawn_fatal_say "FATAL: $1 (#1274)"
+    tok=$(curl -sf --connect-timeout 5 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
+    id=$(curl -sf --connect-timeout 5 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
+    region=$(curl -sf --connect-timeout 5 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)
+    if [ -n "$id" ] && [ -n "$region" ] && command -v aws >/dev/null 2>&1; then
+        while [ "$n" -lt 3 ]; do
+            if aws ec2 terminate-instances --region "$region" --instance-ids "$id" --cli-connect-timeout 10 --cli-read-timeout 30 >/dev/null 2>&1; then
+                spawn_fatal_say "terminating $id: with no spored, nothing would enforce its TTL"
+                exit 1
+            fi
+            n=$((n + 1))
+            sleep 5
+        done
+    fi
+    # No InstanceInitiatedShutdownBehavior is set, so this STOPS the instance.
+    spawn_fatal_say "could not terminate this instance (no aws CLI, instance ID or permission); shutting down instead, which STOPS it (spawn sets no InstanceInitiatedShutdownBehavior): its volumes still bill, it no longer runs"
+    shutdown -h now 2>/dev/null || poweroff 2>/dev/null || true
+    exit 1
+}
+# Safety net: ANY exit of this script before spored is running retires the
+# instance, not only the aborts that call spawn_fatal_retire themselves. The
+# body sets SPAWN_SPORED_UP=1 once spored has started.
+SPAWN_SPORED_UP=0
+SPAWN_MAIN_PID=$$
+SPAWN_LAST_FAILED="none"
+trap 'SPAWN_LAST_FAILED="line $LINENO: $BASH_COMMAND"' ERR
+spawn_exit_guard() {
+    local rc=$?
+    # Only the bootstrap shell itself: a subshell, such as the backgrounded
+    # --command, exits on its own terms and must never retire the instance.
+    [ "${BASHPID:-$$}" = "$SPAWN_MAIN_PID" ] || return 0
+    [ "$SPAWN_SPORED_UP" = 1 ] && return 0
+    spawn_fatal_retire "the bootstrap exited (status $rc) before spored started; last failed command: $SPAWN_LAST_FAILED"
+}
+trap spawn_exit_guard EXIT
+`
+
+// perLaunchPreBody is the per-launch content that must be on disk before the
+// body runs: the body's --command block reads the command, the flush hook and
+// the readiness gates, and spored reads plugins.json once at startup.
+func perLaunchPreBody(cfg BootstrapConfig) (string, error) {
+	var script string
 
 	// Embed the --command workload directly in user-data (#214/#246) instead of
 	// the 256-char-capped spawn:command tag. Written BEFORE linuxBootstrapBody so
@@ -305,23 +441,14 @@ chmod 644 /etc/spawn/plugins.json
 echo "Plugin declarations written: %d plugin(s)"
 `, string(declJSON), len(cfg.Plugins))
 	}
+	return script, nil
+}
 
-	// The --command wrapper inside the body signals completion by writing the
-	// file spored watches. Render the configured path into it (shell-quoted: the
-	// value comes from --completion-file) rather than a hardcoded default (#1131).
-	//
-	// Stripped before the substitution: the path is caller input, and only
-	// spawn's own text is stripped (#1246).
-	script += strings.ReplaceAll(shellmin.Strip(linuxBootstrapBody), completionFilePlaceholder, security.ShellQuote(completionFileOrDefault(cfg.CompletionFile)))
-
-	// On a Spot replacement, stop here (#1007): spored is running and retires
-	// the instance, and nothing below this point (storage, the container,
-	// custom user data, and the MPI, queue-runner and pool-worker scripts
-	// callers append after this script) should start a workload on it.
-	//
-	// The plugin declarations are already written, above the body (#1023), so
-	// this check's EC2 round trip cannot make spored start without them.
-	script += shellmin.Strip(spotReplacementStopScript)
+// perLaunchPostBody is the per-launch content that runs after the body: after
+// spored has started, and only on an instance that is not a Spot replacement,
+// because the body ends by exiting on one (#1007).
+func perLaunchPostBody(cfg BootstrapConfig) string {
+	var script string
 
 	// Mount attached storage BEFORE the user's script, so the workload sees the
 	// volumes already live (#166). The storage script does its own mkdir + mount;
@@ -381,7 +508,177 @@ fi
 		script += cfg.CustomUserData
 	}
 
-	return script, nil
+	return script
+}
+
+// bodyFuncs is the part of the static body that only defines shell functions.
+func bodyFuncs() string {
+	// The one implementation of download-verify-install, shared with
+	// cmd/app.go and cmd/upgrade_spored.go. It used to live inline in
+	// linuxBootstrapBody below, which is why the other two paths were able to
+	// ship without any of it (GHSA-3x4q-99gh-fxhx).
+	//
+	// Then the Spot-replacement check the workload starts are gated on (#1007).
+	// Defined above the body, because the body's --command block calls it.
+	return shellmin.Strip(sporedinstall.VerifiedInstallFunc()) + shellmin.Strip(spotReplacementCheckFunc)
+}
+
+// bodyMain is the part of the static body that runs: spored's install and
+// start, the session/array/sweep/hostname setup, the --command launch, and the
+// Spot-replacement stop.
+func bodyMain() string {
+	// On a Spot replacement, stop after the body (#1007): spored is running and
+	// retires the instance, and nothing after this point (storage, the
+	// container, custom user data, and the MPI, queue-runner and pool-worker
+	// scripts callers append after this script) should start a workload on it.
+	//
+	// The plugin declarations are already written, above the body (#1023), so
+	// this check's EC2 round trip cannot make spored start without them.
+	return shellmin.Strip(linuxBootstrapBody) + shellmin.Strip(spotReplacementStopScript)
+}
+
+// BootstrapBody returns the static part of the Linux bootstrap: every byte of
+// it that does not depend on the launch. The release workflow publishes exactly
+// these bytes, signed, as spawn/versions/<version>/[BootstrapBodyName] in each
+// spawn-binaries bucket (`spawn bootstrap-body` prints them), and the stub a
+// release build puts in user data fetches them and refuses anything else.
+//
+// It reads its per-launch inputs from shell variables the stub sets first
+// (LOCAL_USERNAME, LOCAL_SSH_KEY_BASE64, SPAWN_CMD_COMPLETION_FILE,
+// SPORED_SIG_VERIFY) and from files the stub writes first (/etc/spawn/command,
+// the flush hook, the readiness gates, plugins.json).
+func BootstrapBody() string {
+	return bodyFuncs() + bodyMain()
+}
+
+// BootstrapBodyName is the published body's object name, beside spored under
+// spawn/versions/<version>/ in every spawn-binaries-<region> bucket. Its
+// detached signature is BootstrapBodyName+".sig" (base64 DER, ECDSA_SHA_256,
+// the spored signing key) and its checksum BootstrapBodyName+".sha256".
+const BootstrapBodyName = "bootstrap.sh"
+
+// BootstrapBodyKey is the object key of the body published for version, in
+// every spawn-binaries-<region> bucket.
+func BootstrapBodyKey(version string) string {
+	return "spawn/versions/" + version + "/" + BootstrapBodyName
+}
+
+// bodyPath is where the stub saves the body before verifying and running it.
+// A literal, not a variable, so shellcheck can see what is sourced.
+const bodyPath = "/etc/spawn/bootstrap-body.sh"
+
+// CallerVersion is the version of the spawn CLI running, which the CLI sets
+// once at startup (as it does aws.CallerVersion): pkg/launcher cannot import
+// cmd to read the version injected there. Library callers (lagotto, the MCP
+// server) leave it empty, and the version of the spawn module they were built
+// against is used instead.
+var CallerVersion string
+
+// releaseVersionRe is the shape of a published spawn release: the release
+// workflow publishes the body for exactly these. A pseudo-version, a +dirty
+// build or "dev" matches no published body, so it would fail every launch.
+var releaseVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// PublishedBodyVersion returns the spawn release whose published body the stub
+// should fetch, or "" when the bootstrap must be inline: not a release build, or
+// no signing key compiled in to verify the body with.
+func PublishedBodyVersion() string {
+	info, _ := debug.ReadBuildInfo()
+	return publishedBodyVersion(CallerVersion, info, sporedinstall.VerificationEnabled())
+}
+
+// spawnModulePath is the module whose release publishes the body.
+const spawnModulePath = "github.com/spore-host/spawn"
+
+func publishedBodyVersion(caller string, info *debug.BuildInfo, keyed bool) string {
+	if !keyed {
+		return ""
+	}
+	v := strings.TrimSpace(caller)
+	if v == "" && info != nil {
+		if info.Main.Path == spawnModulePath {
+			v = info.Main.Version
+		} else {
+			for _, d := range info.Deps {
+				// A replaced spawn is not the published one, whatever it says.
+				if d.Path == spawnModulePath && d.Replace == nil {
+					v = d.Version
+				}
+			}
+		}
+	}
+	v = strings.TrimPrefix(v, "v")
+	if !releaseVersionRe.MatchString(v) {
+		return ""
+	}
+	return v
+}
+
+// bodyStubTemplate fetches, verifies and runs the published body (#1274).
+// Filled in by bodyStub: the version, then the body's expected sha256.
+//
+// Both checks are required and either failing is fatal. The sha256 is the
+// body this spawn build would have inlined, so the instance runs exactly that
+// and nothing else, even a different release's body signed by the same key.
+// The signature is the spore.host key the stub carries (written by
+// KeySetupScript above), so a bucket that serves the right bytes was also
+// written by the release workflow. Each source is tried until one passes both;
+// if none does, the bootstrap runs nothing from the body (no spored, no
+// workload) and calls spawn_fatal_retire, which reports why and terminates the
+// instance: running without spored, it would bill with no TTL.
+//
+// Uses only curl flags curl 7.61.1 (EL8) has, and its own retry loop for the
+// same reason as spore_curl_retry (#1056), which is defined in the body and so
+// not available yet.
+const bodyStubTemplate = `
+# Fetch, verify and run this spawn release's bootstrap body (#1274).
+SPAWN_BS_VERSION=%s
+SPAWN_BS_SHA256=%s
+SPAWN_BS_TOKEN=$(curl -sf --connect-timeout 5 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
+SPAWN_BS_REGION=$(curl -sf --connect-timeout 5 -H "X-aws-ec2-metadata-token: $SPAWN_BS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)
+SPAWN_BS_OK=0
+mkdir -p /etc/spawn
+for SPAWN_BS_BASE in "https://spawn-binaries-${SPAWN_BS_REGION:-us-east-1}.s3.amazonaws.com" "https://spawn-binaries-us-east-1.s3.amazonaws.com"; do
+    SPAWN_BS_URL="$SPAWN_BS_BASE/spawn/versions/$SPAWN_BS_VERSION/bootstrap.sh"
+    for SPAWN_BS_TRY in 1 2 3 4; do
+        rm -f %[3]s %[3]s.sig %[3]s.der
+        if curl -fsS --connect-timeout 10 --max-time 60 -o %[3]s "$SPAWN_BS_URL" &&
+            curl -fsS --connect-timeout 10 --max-time 60 -o %[3]s.sig "$SPAWN_BS_URL.sig"; then
+            break
+        fi
+        [ "$SPAWN_BS_TRY" = 4 ] || sleep 2
+    done
+    if [ ! -s %[3]s ] || [ ! -s %[3]s.sig ]; then
+        echo "spawn: no bootstrap body or signature at $SPAWN_BS_URL" >&2
+        continue
+    fi
+    if [ "$(sha256sum %[3]s | cut -d ' ' -f 1)" != "$SPAWN_BS_SHA256" ]; then
+        echo "spawn: bootstrap body at $SPAWN_BS_URL is not the one spawn $SPAWN_BS_VERSION expects (sha256)" >&2
+        continue
+    fi
+    if base64 -d < %[3]s.sig > %[3]s.der 2>/dev/null &&
+        openssl dgst -sha256 -verify %[4]s -signature %[3]s.der %[3]s >/dev/null 2>&1; then
+        SPAWN_BS_OK=1
+        break
+    fi
+    echo "spawn: bootstrap body signature at $SPAWN_BS_URL.sig does not verify" >&2
+done
+rm -f %[3]s.sig %[3]s.der
+if [ "$SPAWN_BS_OK" != 1 ]; then
+    rm -f %[3]s
+    spawn_fatal_retire "no verified bootstrap body for spawn $SPAWN_BS_VERSION; not running an unverified bootstrap, so spored is not installed and no workload starts"
+fi
+echo "Bootstrap body verified (spawn $SPAWN_BS_VERSION, sha256 $SPAWN_BS_SHA256)"
+. %[3]s
+`
+
+// bodyStub is the user-data part that stands in for body: it fetches the body
+// published for version and runs it only if it is byte-identical to body and
+// signed by the spore.host key.
+func bodyStub(version, body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return fmt.Sprintf(shellmin.Strip(bodyStubTemplate),
+		security.ShellQuote(version), hex.EncodeToString(sum[:]), bodyPath, sporedinstall.SigningKeyPath)
 }
 
 // spotReplacementCheckFunc defines spawn_is_spot_replacement, which the
@@ -446,8 +743,9 @@ fi
 
 // linuxBootstrapBody is the static, tag-driven remainder of the bootstrap. It
 // reads all behavior (session-timeout, job-array/sweep env, spawn:command,
-// on-complete, etc.) from spawn:* EC2 tags at boot, so it is independent of any
-// LaunchConfig value beyond the username/key spliced in above.
+// on-complete, etc.) from spawn:* EC2 tags at boot, and its per-launch inputs
+// (username, key, completion file) from shell variables set ahead of it, so it
+// is the same for every launch and is published once per release (#1274).
 const linuxBootstrapBody = `
 
 # Detect architecture
@@ -473,8 +771,7 @@ case "$ARCH" in
         BINARY="spored-linux-arm64"
         ;;
     *)
-        echo "Unsupported architecture: $ARCH"
-        exit 1
+        spawn_fatal_retire "unsupported architecture $ARCH: there is no spored for it"
         ;;
 esac
 
@@ -495,9 +792,62 @@ if ! spore_install_verified_spored "$BINARY" \
       "${S3_BASE_URL}" \
       "${FALLBACK_URL}/${PROJECT}" \
       "${FALLBACK_URL}"; then
-    echo "spored install failed — aborting bootstrap rather than running an unverified agent"
-    exit 1
+    # Without spored nothing enforces the TTL, so this retires the instance
+    # rather than leave it billing (#1274).
+    spawn_fatal_retire "spored install failed; not running an unverified agent"
 fi
+
+# Create systemd service
+cat > /etc/systemd/system/spored.service <<'EOFSERVICE'
+[Unit]
+Description=Spawn Agent - Instance self-monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# SigV4-sign DNS registration requests (#173). This is now REQUIRED, not
+# anticipatory: the DNS Function URL is AuthType: AWS_IAM (verified against the
+# live function 2026-10-11), so an unsigned request is rejected at the URL and the
+# instance never registers. The comment here said the URL "is still AuthType:
+# NONE, which ignores the signature" long after the cutover landed, which reads as
+# though this variable were optional — it is load-bearing.
+#
+# The staged rollout it describes did work as intended: signing shipped first so a
+# fleet was already signing before the flip, and old non-signing instances aged
+# out under their TTLs ("everything dies").
+Environment=SPORE_DNS_SIGV4=1
+ExecStart=/usr/local/bin/spored
+# on-failure (not always) prevents restart attempts during graceful shutdown
+Restart=on-failure
+RestartSec=10
+# Give spored time to deregister DNS and clean up before SIGKILL
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+# Do NOT set PrivateTmp=true: spored must see the host /tmp/SPAWN_COMPLETE
+# completion file written by users / spawn connect / nf-spawn. PrivateTmp
+# isolates the daemon's /tmp and silently breaks --on-complete/--pre-stop (#66).
+
+[Install]
+WantedBy=multi-user.target
+EOFSERVICE
+# Policy-default SELinux label on the unit, as the installer did for the binary
+# (#1052). A no-op without SELinux.
+spore_selinux_relabel /etc/systemd/system/spored.service
+
+# Enable and start. As early as it can be (#1274): right after the verified
+# install, before every optional step below, so a failure in one of those can
+# no longer leave the instance without TTL, idle and cost enforcement. Its one
+# input written by this script, plugins.json, is already on disk (#1023).
+systemctl daemon-reload
+systemctl enable spored
+systemctl start spored
+# From here a failure no longer retires the instance: spored enforces its TTL.
+SPAWN_SPORED_UP=1
+
+echo "spored installation complete"
 
 # Setup local user account
 echo "Setting up user: $LOCAL_USERNAME"
@@ -821,11 +1171,12 @@ EOFCMD
     # "Action when workload signals completion") never fired on this path and the
     # instance burned its whole TTL whether the command succeeded or failed.
     #
-    # MUST STAY BACKGROUNDED: spored is installed and started LATER in this script.
-    # Waiting here blocks cloud-init, so spored would not start — and TTL, idle and
-    # cost enforcement would all be unarmed — for as long as the command runs. That
-    # is the spored#65 failure (never block the ticker startup path) and is worse
-    # than the bug this fixes. The subshell gives us the exit code without waiting.
+    # MUST STAY BACKGROUNDED: waiting here blocks cloud-init, so the storage,
+    # container and custom user data after this point would not run for as long
+    # as the command does. It was worse when spored started after this block
+    # (the spored#65 failure, never block the ticker startup path); spored now
+    # starts earlier (#1274), but the rest of the bootstrap still waits on this.
+    # The subshell gives us the exit code without waiting.
     (
         # A Spot replacement re-runs this user data, so without this it would
         # re-run the user's workload, side effects and all, while spored works
@@ -896,8 +1247,8 @@ EOFCMD
                 # silently wrong output, which costs more than a clear failure.
                 echo "❌ --command NOT started: prerequisites unmet (see above)" | tee -a /var/log/spawn-command.log
                 echo 1 > /tmp/SPAWN_EXITCODE
-                mkdir -p "$(dirname -- @@SPAWN_COMPLETION_FILE@@)" || true
-                cat > @@SPAWN_COMPLETION_FILE@@ <<JSONEOF
+                mkdir -p "$(dirname -- "$SPAWN_CMD_COMPLETION_FILE")" || true
+                cat > "$SPAWN_CMD_COMPLETION_FILE" <<JSONEOF
 {"status": "failed", "exit_code": 1, "source": "command"}
 JSONEOF
                 exit 1
@@ -934,13 +1285,13 @@ JSONEOF
         # reader handles both sources.
         #
         # The path is the launch's --completion-file (default /tmp/SPAWN_COMPLETE),
-        # rendered by BuildLinuxBootstrap: spored watches THAT file, so writing a
+        # assigned by BuildLinuxBootstrap: spored watches THAT file, so writing a
         # hardcoded default here meant a custom --completion-file never fired
         # --on-complete and the instance billed to its TTL (#1131). The mkdir is
         # for a custom path whose directory does not exist yet; without it the
         # write fails and the same leak returns.
-        mkdir -p "$(dirname -- @@SPAWN_COMPLETION_FILE@@)" || true
-        cat > @@SPAWN_COMPLETION_FILE@@ <<JSONEOF
+        mkdir -p "$(dirname -- "$SPAWN_CMD_COMPLETION_FILE")" || true
+        cat > "$SPAWN_CMD_COMPLETION_FILE" <<JSONEOF
 {"status": "$CMD_STATE", "exit_code": $CMD_RC, "source": "command"}
 JSONEOF
     ) &
@@ -1035,54 +1386,15 @@ chmod 644 /etc/motd
 echo "✅ Login banner created"
 
 # Install acpid so AWS stop/terminate signals trigger a graceful shutdown
-# rather than a hard kill after the ACPI timeout.
-dnf install -y acpid 2>/dev/null || yum install -y acpid 2>/dev/null || true
-systemctl enable --now acpid
-
-# Create systemd service
-cat > /etc/systemd/system/spored.service <<'EOFSERVICE'
-[Unit]
-Description=Spawn Agent - Instance self-monitoring
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-# SigV4-sign DNS registration requests (#173). This is now REQUIRED, not
-# anticipatory: the DNS Function URL is AuthType: AWS_IAM (verified against the
-# live function 2026-10-11), so an unsigned request is rejected at the URL and the
-# instance never registers. The comment here said the URL "is still AuthType:
-# NONE, which ignores the signature" long after the cutover landed, which reads as
-# though this variable were optional — it is load-bearing.
-#
-# The staged rollout it describes did work as intended: signing shipped first so a
-# fleet was already signing before the flip, and old non-signing instances aged
-# out under their TTLs ("everything dies").
-Environment=SPORE_DNS_SIGV4=1
-ExecStart=/usr/local/bin/spored
-# on-failure (not always) prevents restart attempts during graceful shutdown
-Restart=on-failure
-RestartSec=10
-# Give spored time to deregister DNS and clean up before SIGKILL
-TimeoutStopSec=30
-StandardOutput=journal
-StandardError=journal
-NoNewPrivileges=true
-# Do NOT set PrivateTmp=true: spored must see the host /tmp/SPAWN_COMPLETE
-# completion file written by users / spawn connect / nf-spawn. PrivateTmp
-# isolates the daemon's /tmp and silently breaks --on-complete/--pre-stop (#66).
-
-[Install]
-WantedBy=multi-user.target
-EOFSERVICE
-# Policy-default SELinux label on the unit, as the installer did for the binary
-# (#1052). A no-op without SELinux.
-spore_selinux_relabel /etc/systemd/system/spored.service
-
-# Enable and start
-systemctl daemon-reload
-systemctl enable spored
-systemctl start spored
-
-echo "spored installation complete"
+# rather than a hard kill after the ACPI timeout. Optional, so never fatal: on a
+# 0.5 GiB instance (t4g.nano) dnf was OOM-killed here, the install failed
+# quietly, and the enable that used to follow then failed under set -e. That
+# was after the --command had started and before spored did, so the workload
+# ran on an instance with no TTL (#1274). spored is started above now, and a
+# failure here is reported, not fatal.
+if dnf install -y acpid 2>/dev/null || yum install -y acpid 2>/dev/null; then
+    systemctl enable --now acpid 2>/dev/null || echo "acpid installed but not started; stop/terminate will not shut down gracefully"
+else
+    echo "acpid not installed; stop/terminate will not shut down gracefully"
+fi
 `

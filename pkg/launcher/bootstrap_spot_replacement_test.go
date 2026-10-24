@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/shellmin"
 	"github.com/spore-host/spawn/pkg/plugin"
 )
 
@@ -108,6 +109,18 @@ func between(t *testing.T, s, start, end string) string {
 	return s[i : i+j]
 }
 
+// completionAssignment is the script's own assignment of the completion-file
+// variable the --command block writes to (#1274), for a test that runs the
+// block on its own.
+func completionAssignment(t *testing.T, script string) string {
+	t.Helper()
+	m := completionAssignRe.FindAllString(script, -1)
+	if len(m) != 1 {
+		t.Fatalf("the bootstrap assigns %s %d times, want once", completionFileVar, len(m))
+	}
+	return m[0] + "\n"
+}
+
 // checkFunc is the generated spawn_is_spot_replacement definition.
 func checkFunc(t *testing.T, script string) string {
 	t.Helper()
@@ -140,7 +153,7 @@ func TestCommandSkippedOnlyOnASpotReplacement(t *testing.T) {
 				t.Fatal(err)
 			}
 			block := between(t, script, "if [ -s /etc/spawn/command ]; then\n    WORKFLOW_COMMAND=", "\necho \"Creating login banner...\"")
-			out, err := sb.run(t, "set -e\nLOCAL_USERNAME=tester\n"+checkFunc(t, script)+block+"\nwait\n")
+			out, err := sb.run(t, "set -e\nLOCAL_USERNAME=tester\n"+completionAssignment(t, script)+checkFunc(t, script)+block+"\nwait\n")
 			if err != nil {
 				t.Fatalf("command block failed: %v\n%s", err, out)
 			}
@@ -187,12 +200,18 @@ func TestNothingAfterSporedStartsOnASpotReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			const start = "systemctl start spored\n"
+			// From the Spot-replacement stop at the end of the body: spored now
+			// starts early in the body (#1274), so what follows it there is the
+			// body's own setup, not the post-body content this test is about.
+			start := shellmin.Strip(spotReplacementStopScript)
 			i := strings.Index(script, start)
 			if i < 0 {
-				t.Fatal("systemctl start spored not found")
+				t.Fatal("the Spot-replacement stop was not found")
 			}
-			tail := script[i+len(start):] + "\necho " + appendedMarker + "\n"
+			if j := strings.Index(script, "systemctl start spored\n"); j < 0 || j > i {
+				t.Fatal("spored does not start before the Spot-replacement stop")
+			}
+			tail := script[i:] + "\necho " + appendedMarker + "\n"
 
 			sb := newSpotSandbox(t, tc.stub)
 			out, err := sb.run(t, "set -e\n"+checkFunc(t, script)+tail)

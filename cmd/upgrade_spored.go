@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/libs/update"
+	"github.com/spore-host/spawn/internal/shellmin"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
@@ -214,7 +215,7 @@ if ! systemctl is-active --quiet spored || [ "$NEW_VERSION" != "$TARGET_VERSION"
 fi
 rm -f "$BACKUP"
 echo "spored upgraded to v${NEW_VERSION}"
-`, version, sporedinstall.KeySetupScript()+sporedinstall.VerifiedInstallFunc())
+`, version, shellmin.Strip(sporedinstall.KeySetupScript())+shellmin.Strip(sporedinstall.VerifiedInstallFunc()))
 }
 
 // compareVersions returns -1 if a < b, 0 if equal, 1 if a > b, comparing bare

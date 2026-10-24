@@ -57,8 +57,10 @@ func discoverRunState(t *testing.T, script string) []string {
 		writes[m[2]] = true
 	}
 	// The completion file is shell-quoted with a space in it; find it by value.
+	// The writes target a variable assigned it at the top (#1274).
 	quotedCF := "'" + testCompletionFile + "'"
-	if strings.Contains(script, "> "+quotedCF) {
+	if strings.Contains(script, "> "+quotedCF) ||
+		(strings.Contains(script, `> "$`+completionFileVar+`"`) && strings.Contains(script, "\n"+completionFileVar+"="+quotedCF+"\n")) {
 		writes[testCompletionFile] = true
 	}
 	set := map[string]bool{}
@@ -216,7 +218,7 @@ func TestCommandRunsOncePerInstanceID(t *testing.T) {
 	block := between(t, script, "if [ -s /etc/spawn/command ]; then\n    WORKFLOW_COMMAND=", "\necho \"Creating login banner...\"")
 	runAs := func(id string) {
 		t.Helper()
-		out, err := sb.run(t, "set -e\nLOCAL_USERNAME=tester\nINSTANCE_ID="+id+"\n"+checkFunc(t, script)+block+"\nwait\n")
+		out, err := sb.run(t, "set -e\nLOCAL_USERNAME=tester\nINSTANCE_ID="+id+"\n"+completionAssignment(t, script)+checkFunc(t, script)+block+"\nwait\n")
 		if err != nil {
 			t.Fatalf("command block on %s failed: %v\n%s", id, err, out)
 		}

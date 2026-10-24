@@ -552,6 +552,7 @@ func AuthHost(image, fallbackRegion string) (host, region string, ok bool)
 func RegistryHost(image string) string
 
 ## pkg/launcher (imported by: spore-host-mcp, lagotto, calque)
+const BootstrapBodyName
 const CommandRanMarkerDir
 const DefaultUsername
 const ImageCleanCommandRunning
@@ -565,6 +566,7 @@ field BootstrapConfig.Command string
 field BootstrapConfig.CompletionFile string
 field BootstrapConfig.ContainerScript string
 field BootstrapConfig.CustomUserData string
+field BootstrapConfig.InlineBody bool
 field BootstrapConfig.Plugins []plugin.Declaration
 field BootstrapConfig.PublicKey []byte
 field BootstrapConfig.ReadyGates []string
@@ -579,13 +581,17 @@ field Options.PublicKey []byte
 field Options.StorageScript string
 field Options.TaskFlushScript string
 field Options.Username string
+func BootstrapBody() string
+func BootstrapBodyKey(version string) string
 func BuildLinuxBootstrap(cfg BootstrapConfig) (string, error)
 func BuildUserData(config aws.LaunchConfig, opts Options) (string, error)
 func EncodeLinuxUserData(script string) string
 func ImageStateCleanupScript(instanceID, completionFile string) string
 func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig, opts Options) (*aws.LaunchResult, error)
+func PublishedBodyVersion() string
 type BootstrapConfig struct
 type Options struct
+var CallerVersion string
 var ErrPostLaunch
 
 ## pkg/launchererr (imported by: lagotto)
