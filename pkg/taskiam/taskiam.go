@@ -151,18 +151,20 @@ func StagingPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string
 }
 
 // TaskRunPolicyFor is the instance policy of a `spawn task run` task:
-// StagingPolicyFor with provenance, plus s3:GetObject on the staged objects
-// its launcher uploads to the results bucket (#1274): the command and flush
-// hook, which the bootstrap fetches with the instance role instead of carrying
-// them in the user data. See StagedFilesResources for exactly which keys.
-func TaskRunPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string, readWriteBuckets []string) string {
+// StagingPolicyFor with provenance, plus s3:GetObject on the staged objects in
+// stagingBucket (#1274): the command and flush hook its launcher uploads there,
+// which the bootstrap fetches with the instance role instead of carrying them
+// in the user data. See StagedFilesResources for exactly which keys. An empty
+// stagingBucket adds nothing.
+func TaskRunPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string, readWriteBuckets []string, stagingBucket string) string {
 	pol := StagingPolicyFor(inputBuckets, outputBuckets, resultsBucket, readWriteBuckets, true)
-	if resultsBucket == "" {
+	if stagingBucket == "" {
 		return pol
 	}
-	stmt := fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject"],"Resource":[%s]}`, quotedList(StagedFilesResources(resultsBucket)))
-	// resultsBucket is set, so StagingPolicyFor granted it PutObject and the
-	// document is not empty: append to its statement list.
+	stmt := fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject"],"Resource":[%s]}`, quotedList(StagedFilesResources(stagingBucket)))
+	if pol == "" {
+		return `{"Version":"2012-10-17","Statement":[` + stmt + `]}`
+	}
 	return strings.TrimSuffix(pol, "]}") + "," + stmt + "]}"
 }
 
@@ -170,58 +172,40 @@ func TaskRunPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string
 // name.
 const stagedFilesSHA256Len = 64
 
-// StagedFilesKey is the key of a task's staged command and flush hook (#1274):
-// bootstrap-<sha256>.sh beside its completion record, under taskPrefix, the
-// key part of the task's results prefix (empty for the bucket root).
-func StagedFilesKey(taskPrefix, sha256Hex string) string {
-	name := StagedFilesKeyPrefix("") + sha256Hex + ".sh"
-	if taskPrefix == "" {
-		return name
-	}
-	return taskPrefix + "/" + name
+// StagedFilesKey is the key, in the staging bucket, of a task's staged command
+// and flush hook (#1274): <task_id>/bootstrap-<sha256>.sh.
+func StagedFilesKey(taskID, sha256Hex string) string {
+	return StagedFilesKeyPrefix(taskID) + sha256Hex + ".sh"
 }
 
-// StagedFilesKeyPrefix is what every staged object key under taskPrefix starts
-// with, for listing a previous attempt's.
-func StagedFilesKeyPrefix(taskPrefix string) string {
-	if taskPrefix == "" {
-		return "bootstrap-"
-	}
-	return taskPrefix + "/bootstrap-"
+// StagedFilesKeyPrefix is what every staged object key of taskID starts with,
+// for clearing a previous attempt's.
+func StagedFilesKeyPrefix(taskID string) string {
+	return taskID + "/bootstrap-"
 }
 
 // StagedFilesResources are the object ARNs a task's role may GetObject for its
-// staged files: a bootstrap-<64 characters>.sh object at the bucket root or
-// under any prefix of resultsBucket.
+// staged files: <task_id>/bootstrap-<64 characters>.sh in stagingBucket
+// (taskproto.StagingBucket), and nothing else in it.
 //
-// Not the one task's own prefix, although that is the only object the role
-// needs. Roles are shared: CreateOrGetInstanceProfile names a role by the hash
-// of its policy, so every task with the same buckets gets the same role, and a
-// grant naming the task's prefix would give each task_id a role of its own
-// (thousands for one workflow fan-out, against an account quota of 1,000 by
-// default, and nothing deletes them). Within one role, IAM cannot tell its
-// instances apart anyway. So the grant is the narrowest that does not vary by
-// task: the staged objects' own name shape, in the results bucket only.
+// Trust model. The staging bucket is dedicated: it holds only staged files,
+// and every object in it expires after a day (aws.Client.EnsureStagingBucket).
+// No policy spawn generates grants s3:ListBucket on it, and no spec or flag may
+// name it (taskproto.Validate, the --s3-read/--s3-write checks), so a task
+// role can only GetObject a key it already knows. Each key is the sha256 of
+// bytes that include the attempt's random run id, and only that attempt's user
+// data carries it. So, although roles are shared and this grant covers every
+// task's key, a task's role reads only its own object in practice.
 //
-// Trust model. Every task role on a results bucket can GetObject every staged
-// object in it, given its key. That is safe because such a role cannot list
-// the bucket (StagingPolicyFor grants the results bucket only PutObject) and
-// each key is the sha256 of bytes that include the attempt's random run id
-// (tasklaunch.TestStagedKeyIsUnguessablePerRun), so no task can name another's
-// object. A task whose role CAN list its results bucket, because the bucket is
-// one of its inputs or in resources.s3_read_write, is never staged
-// (tasklaunch.stagingRefusal). Such a role also gets GetObject on the whole
-// bucket, so it can read every staged object there whether or not it is staged
-// itself, as can any other principal with read on the bucket (a pool worker,
-// whose spec bucket is the default results bucket, or `spawn launch --s3-read`
-// on it): the guard keeps that task's own files out of the bucket, it does not
-// hide other tasks' files from it.
-func StagedFilesResources(resultsBucket string) []string {
+// The grant is not narrowed to the one task's key, the only object a role
+// needs. CreateOrGetInstanceProfile names a role by the hash of its policy, so
+// every task with the same buckets shares a role, and a per-task grant would
+// give each task_id a role of its own (thousands for one workflow fan-out,
+// against an account quota of 1,000 by default, and nothing deletes them).
+// Within one role, IAM cannot tell its instances apart anyway.
+func StagedFilesResources(stagingBucket string) []string {
 	name := "bootstrap-" + strings.Repeat("?", stagedFilesSHA256Len) + ".sh"
-	return []string{
-		"arn:aws:s3:::" + resultsBucket + "/" + name,
-		"arn:aws:s3:::" + resultsBucket + "/*/" + name,
-	}
+	return []string{"arn:aws:s3:::" + stagingBucket + "/*/" + name}
 }
 
 func quotedList(items []string) string {

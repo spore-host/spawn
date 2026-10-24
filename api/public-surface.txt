@@ -29,6 +29,8 @@ const SporedInstanceProfileName
 const SporedMemoryFloorMiB int64
 const SporedRoleName
 const SpotPriceTag
+const StagingLifecycleRuleID
+const StagingObjectExpiryDays
 field AMIHealthCheck.BaseAMIAge time.Duration
 field AMIHealthCheck.BaseAMIOutdated bool
 field AMIHealthCheck.CurrentBaseAMI string
@@ -379,6 +381,7 @@ func (*Client) EnsureDNSInvokeGrant(ctx context.Context, roleName, functionARN s
 func (*Client) EnsureImageBuilderSLR(ctx context.Context) (string, error)
 func (*Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImportInfrastructureInput) (string, error)
 func (*Client) EnsureLustrePorts(ctx context.Context, region, sgID string) error
+func (*Client) EnsureStagingBucket(ctx context.Context, bucket, region, ownerAccount string) error
 func (*Client) FindCapacityBlockOffering(ctx context.Context, region, offeringID, instanceType string, instanceCount, durationHours int32) (*CapacityBlockOffering, error)
 func (*Client) FindKeyPairByFingerprint(ctx context.Context, region, fingerprint string) (string, error)
 func (*Client) FindOrphanedSpawnAddresses(ctx context.Context, region string) ([]ManagedResource, error)
@@ -414,12 +417,12 @@ func (*Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchRe
 func (*Client) ListAMIs(ctx context.Context, region string, filters map[string]string) ([]AMIInfo, error)
 func (*Client) ListInstances(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error)
 func (*Client) ListInstancesInRegions(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, []string, error)
-func (*Client) ListS3Keys(ctx context.Context, region, bucket, prefix string) ([]string, error)
+func (*Client) ListS3Keys(ctx context.Context, region, bucket, prefix, expectedOwner string) ([]string, error)
 func (*Client) LiveInstancesWithTag(ctx context.Context, region, key, value string) ([]InstanceInfo, error)
 func (*Client) OpenImageSource(ctx context.Context, source, region string) (io.ReadCloser, error)
 func (*Client) PrepareSnapshotImage(ctx context.Context, source, region string, maxBytes int64, tempDir string) (*PreparedImage, error)
 func (*Client) PurchaseCapacityBlock(ctx context.Context, region, offeringID, platform string, dryRun bool, tags map[string]string) (string, error)
-func (*Client) PutS3Object(ctx context.Context, region, bucket, key string, body []byte) error
+func (*Client) PutS3Object(ctx context.Context, region, bucket, key, expectedOwner string, body []byte) error
 func (*Client) RecallFSxFilesystem(ctx context.Context, stackName, region string) (*FSxInfo, error)
 func (*Client) RemoveResource(ctx context.Context, r ManagedResource) error
 func (*Client) ResolveDNSTarget(ctx context.Context, region, flagDomain, flagEndpoint, flagFunctionARN string) (spawnconfig.DNSTarget, error)
@@ -674,7 +677,6 @@ field TaskPlan.AMI string
 field TaskPlan.MaxCost float64
 field TaskPlan.MaxCostKnown bool
 field TaskPlan.Network string
-field TaskPlan.NotStaged string
 field TaskPlan.Notes []string
 field TaskPlan.Purchase string
 field TaskPlan.Region string
@@ -824,6 +826,7 @@ const RetrySpecError RetryClass
 const RetrySpotInterruption RetryClass
 const RetryStagingError RetryClass
 const RetryTTLExpired RetryClass
+const StagingBucketPrefix
 const StateCancelled TaskState
 const StateCompleted TaskState
 const StateFailed TaskState
@@ -930,6 +933,7 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error)
 func GeneratePooledJobScript(spec *TaskSpec, opts WrapperOptions) (string, error)
 func GenerateWrapper(spec *TaskSpec, opts WrapperOptions) (string, error)
 func IsDefaultResultsBucket(bucket, accountID, region string) bool
+func IsStagingBucket(bucket string) bool
 func ParseCompletionRecord(data []byte) (*CompletionRecord, error)
 func ParseSpec(data []byte) (*TaskSpec, error)
 func ParseSpecFile(path string) (*TaskSpec, error)
@@ -938,6 +942,8 @@ func SetIMDSBaseForTest(base string) (restore func())
 func SetLocalRecordDirForTest(dir string) (restore func())
 func Size(ctx context.Context, finder InstanceFinder, req ResourceRequest) (*SizeResult, error)
 func SplitS3URI(uri string) (bucket, key string, ok bool)
+func StagingBucket(accountID, region string) string
+func StagingBucketUses(spec *TaskSpec) []string
 func StartedAtPath() string
 method InstanceFinder.FindCandidates (ctx context.Context, req ResourceRequest) ([]Candidate, error)
 type Candidate struct

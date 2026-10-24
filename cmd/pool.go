@@ -298,6 +298,9 @@ var poolCreateCmd = &cobra.Command{
 		if poolCostLimit < 0 {
 			return fmt.Errorf("--cost-limit must be >= 0 (0 = disabled)")
 		}
+		if err := refuseStagingBucketGrants(poolS3Read, poolS3Write); err != nil {
+			return err
+		}
 		ctx := cmd.Context()
 		awsClient, err := aws.NewClient(ctx)
 		if err != nil {
