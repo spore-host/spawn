@@ -509,6 +509,11 @@ var poolSubmitCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// Refuse what a pool can't run before any AWS call (#1231); Enqueue
+		// checks it again for library callers.
+		if err := spec.ValidatePooled(); err != nil {
+			return err
+		}
 		awsClient, err := aws.NewClient(ctx)
 		if err != nil {
 			return fmt.Errorf("init AWS client: %w", err)

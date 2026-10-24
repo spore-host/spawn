@@ -75,6 +75,11 @@ func (p *Pool) Enqueue(ctx context.Context, spec *taskproto.TaskSpec, specJSON [
 	if spec.TaskID == "" {
 		return fmt.Errorf("taskpool: spec has no task_id")
 	}
+	// Refuse what a shared worker must not run (#1231) here, at submission,
+	// rather than leaving the worker to fail it after the spec was staged.
+	if err := spec.ValidatePooled(); err != nil {
+		return err
+	}
 	uri, err := p.Specs.Stage(ctx, p.RunID, spec.TaskID, specJSON)
 	if err != nil {
 		return err

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A container task can run a workflow engine that starts its own containers:
+  `container_docker_socket: true`** (#1231). Cromwell's local backend, miniwdl
+  and Nextflow with `docker.enabled` start each workflow task as a sibling
+  container through the host's Docker socket, which a container task could not
+  reach. The new TaskSpec field adds `-v /var/run/docker.sock:/var/run/docker.sock`
+  and `--group-add` with the socket's group to `docker run`; `--user` is
+  unchanged. Off by default, because access to the socket is root-equivalent on
+  the instance. It needs `container`, and is refused for pooled tasks, where
+  one task could control the others on a shared worker: by `spawn pool
+  submit`, by `taskpool.Pool.Enqueue`, and by the worker for a spec staged some
+  other way (recorded as `spec_error`). The provenance recipe records
+  `docker_socket`, and the retention report never proves such a run
+  regenerable, since the images the engine started are not recorded. Adds
+  `TaskSpec.ContainerDockerSocket` and `TaskSpec.ValidatePooled` to
+  `pkg/taskproto`.
+
 ## [0.142.0] - 2026-10-23
 
 ### Added

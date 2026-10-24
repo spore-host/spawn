@@ -271,6 +271,19 @@ of it. The exception is a manifest path directly in /tmp (such as /tmp/run.sh):
 then the host's /tmp is bind-mounted instead, as before (spawn#1270). command.log
 says which.
 
+A workflow engine that starts its own task containers (Cromwell's local
+backend, miniwdl, Nextflow with docker.enabled) can run as a container task with
+container_docker_socket: true. It bind-mounts the host's /var/run/docker.sock
+into the container and adds the socket's group; --user is unchanged. This is
+ROOT-EQUIVALENT ON THE INSTANCE: anything that can reach dockerd can start a
+privileged container that mounts the host's /, so set it only for an image you
+trust. It needs container, and is refused for a pooled task, where one task
+could control the others on the shared worker. The containers the engine starts
+are siblings on the host, so paths it hands them must be host paths: use the
+staged or placement-mounted directories, not the engine container's own /tmp.
+The provenance record notes the socket, and such a run is never proven
+regenerable, because the engine's images are not recorded (spawn#1231).
+
 Staging space is NOT resources.disk_gib unless you stage onto the root
 filesystem. disk_gib sizes the root EBS volume, which is where an ordinary path
 like /work lives — so that is the knob for a large staged input. /tmp is

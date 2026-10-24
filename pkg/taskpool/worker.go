@@ -204,7 +204,11 @@ func (w *Worker) runOne(ctx context.Context, c *Claimed) {
 		return
 	}
 
-	if _, perr := taskproto.ParseSpec(specJSON); perr != nil {
+	// ValidatePooled as well as the parse (#1231): a spec staged by an older
+	// CLI, or written to the spec prefix directly, never went through
+	// Pool.Enqueue's check, and a refused spec can no more run here than an
+	// unparseable one.
+	if perr := parsePooledSpec(specJSON); perr != nil {
 		// The spec can never run, on this worker or any other, so redelivery would
 		// only spin. Write the failed record first so `task status` has an answer,
 		// then ack. A record write that fails is logged and the task acked anyway:
@@ -241,12 +245,21 @@ func (w *Worker) ack(ctx context.Context, c *Claimed) {
 
 // recordUnparseable writes the spec_error completion record for a task whose
 // spec does not parse, logging rather than returning any failure (see runOne).
+// parsePooledSpec parses specJSON and applies the pooled-task restrictions.
+func parsePooledSpec(specJSON []byte) error {
+	spec, err := taskproto.ParseSpec(specJSON)
+	if err != nil {
+		return err
+	}
+	return spec.ValidatePooled()
+}
+
 func (w *Worker) recordUnparseable(ctx context.Context, taskID string, specJSON []byte, perr error) {
 	now := w.now
 	if now == nil {
 		now = time.Now
 	}
-	w.logf("task %s: spec does not parse, cannot run: %v", taskID, perr)
+	w.logf("task %s: spec does not parse or is refused on a pool, cannot run: %v", taskID, perr)
 	if w.Results == nil {
 		w.logf("task %s: no results writer configured; no completion record written", taskID)
 		return

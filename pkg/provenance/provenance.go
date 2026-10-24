@@ -141,6 +141,12 @@ type Recipe struct {
 	InstanceType  string   `json:"instance_type,omitempty"`
 	SpawnVersion  string   `json:"spawn_version,omitempty"`
 	SporedVersion string   `json:"spored_version,omitempty"`
+
+	// DockerSocket records that the container had the host's Docker socket
+	// (TaskSpec.ContainerDockerSocket, #1231). ImageDigest then names only the
+	// engine image: the containers it started through the socket are not
+	// recorded, so the recipe is not the whole of what ran.
+	DockerSocket bool `json:"docker_socket,omitempty"`
 }
 
 // Record is the provenance annotation (AnnotationName) on every output a run

@@ -209,3 +209,25 @@ func TestProvUpload(t *testing.T) {
 }
 
 func t0() time.Time { return time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC) }
+
+// #1231: a run whose container had the host Docker socket says so in its
+// recipe, since the engine's own containers are not in it; one without does not.
+func TestProvCostRecordsTheDockerSocket(t *testing.T) {
+	for _, sock := range []bool{true, false} {
+		dir := t.TempDir()
+		spec := writeSpec(t, dir, taskproto.TaskSpec{TaskID: "wdl", Command: []string{"cromwell"}, Container: "cromwell:86",
+			ContainerDockerSocket: sock})
+		if _, err := provCost(context.Background(), fakeFacts(map[string]string{}), spec, dir,
+			"2026-10-17T12:00:00Z", "2026-10-17T12:30:00Z", "0"); err != nil {
+			t.Fatal(err)
+		}
+		var rec provenance.Record
+		b, _ := os.ReadFile(filepath.Join(dir, provRecordFile))
+		if err := json.Unmarshal(b, &rec); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Recipe.DockerSocket != sock {
+			t.Errorf("container_docker_socket=%v: recipe docker_socket = %v", sock, rec.Recipe.DockerSocket)
+		}
+	}
+}

@@ -64,6 +64,10 @@ TaskSpec           one unit of work to run on one ephemeral instance
   task_id          stable id (adapter-assigned; used for logs/idempotency)
   command []string argv (no shell unless the adapter wraps it)
   container        optional image ref (digest preferred over tag)
+  container_docker_socket  optional bool, needs container: bind-mount the host
+                   Docker socket (and its group) so an engine image can start
+                   sibling containers. ROOT-EQUIVALENT on the host; refused
+                   for pooled tasks (spawn#1231)
   resources        ResourceRequest
   inputs  []InputManifest
   outputs []OutputManifest
