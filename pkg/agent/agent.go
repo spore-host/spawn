@@ -152,6 +152,21 @@ type Agent struct {
 	// default (1 minute); tests set it small to exercise the loop quickly.
 	monitorInterval time.Duration
 
+	// reloadReqs carries `spored reload` requests into the monitor loop (#1278):
+	// the daemon's SIGHUP handler (or, on Windows, the SCM ParamChange control)
+	// calls RequestReload, and Monitor refreshes the config on its own goroutine
+	// and publishes reloadMarkerPath. Created lazily by reloadRequests.
+	reloadOnce sync.Once
+	reloadReqs chan struct{}
+	// reloadMarkerPath is where Monitor publishes its ReloadMarker; "" (a query
+	// agent, an unsupported platform) publishes nothing.
+	reloadMarkerPath string
+	// reloadSeq counts reload requests handled. Touched only by Monitor.
+	reloadSeq uint64
+	// reloadHandled, when non-nil, runs after each handled reload request.
+	// Tests only: it lets a test wait for the request without a timing bound.
+	reloadHandled func()
+
 	// configRefreshTick counts monitoring cycles for the periodic tag refresh
 	// (tags are re-read every 5 ticks). Per-Agent rather than a package global so
 	// it isn't shared across agents and resets cleanly per instance (#175).
@@ -336,6 +351,7 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 		}
 	}
 	if activate {
+		agent.reloadMarkerPath = ReloadMarkerPath() // #1278
 		kernelNow, kernelOK := readKernelClocks()
 		start := resolveComputeStart(computeStartInputs{
 			InstanceID: identity.InstanceID,
@@ -578,6 +594,12 @@ func (a *Agent) Monitor(ctx context.Context) {
 	// The clocks' baseline for resume detection (#987).
 	a.checkResume(ctx)
 
+	// Tell `spored reload` this process takes reload requests (#1278): it
+	// signals only a daemon whose pid is in the marker, so it never sends
+	// SIGHUP to an older spored, for which SIGHUP's default action is exit.
+	reloads := a.reloadRequests()
+	a.publishReloadMarker(nil)
+
 	// Spot-interruption monitoring runs in its own goroutine and must NEVER gate
 	// the main lifecycle ticker below. Spot detection (IsSpotInstance) makes a
 	// blocking IMDS call; if that ever stalls, gating the ticker on it silently
@@ -609,6 +631,9 @@ func (a *Agent) Monitor(ctx context.Context) {
 
 		case <-ticker.C:
 			a.checkAndAct(ctx)
+
+		case <-reloads:
+			a.handleReloadRequest(ctx)
 		}
 	}
 }
@@ -2612,9 +2637,12 @@ func (a *Agent) Reload(ctx context.Context) error {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
 
-	// Log changes
-	if newConfig.TTL != a.config.TTL {
-		log.Printf("TTL changed: %v → %v", a.config.TTL, newConfig.TTL)
+	// Log changes. Read and swap under configMu: the daemon's monitor loop
+	// runs this while the metrics scrape and other goroutines read the config
+	// (#175, #1278).
+	old := a.cfg()
+	if newConfig.TTL != old.TTL {
+		log.Printf("TTL changed: %v → %v", old.TTL, newConfig.TTL)
 	}
 	// TTLDeadline is the field enforcement actually reads (see the remaining-
 	// time calculation below in monitorLoop) — log it separately from
@@ -2622,24 +2650,24 @@ func (a *Agent) Reload(ctx context.Context) error {
 	// (the exact spawn#553 symptom, before that command was fixed to write
 	// both together) is visible in the daemon's own log, not just inferred
 	// from its absence.
-	if !newConfig.TTLDeadline.Equal(a.config.TTLDeadline) {
-		log.Printf("TTL deadline changed: %v → %v", a.config.TTLDeadline, newConfig.TTLDeadline)
+	if !newConfig.TTLDeadline.Equal(old.TTLDeadline) {
+		log.Printf("TTL deadline changed: %v → %v", old.TTLDeadline, newConfig.TTLDeadline)
 	}
-	if newConfig.IdleTimeout != a.config.IdleTimeout {
-		log.Printf("Idle timeout changed: %v → %v", a.config.IdleTimeout, newConfig.IdleTimeout)
+	if newConfig.IdleTimeout != old.IdleTimeout {
+		log.Printf("Idle timeout changed: %v → %v", old.IdleTimeout, newConfig.IdleTimeout)
 	}
-	if newConfig.OnComplete != a.config.OnComplete {
-		log.Printf("On-complete changed: %s → %s", a.config.OnComplete, newConfig.OnComplete)
+	if newConfig.OnComplete != old.OnComplete {
+		log.Printf("On-complete changed: %s → %s", old.OnComplete, newConfig.OnComplete)
 	}
-	if newConfig.HibernateOnIdle != a.config.HibernateOnIdle {
-		log.Printf("Hibernate-on-idle changed: %v → %v", a.config.HibernateOnIdle, newConfig.HibernateOnIdle)
+	if newConfig.HibernateOnIdle != old.HibernateOnIdle {
+		log.Printf("Hibernate-on-idle changed: %v → %v", old.HibernateOnIdle, newConfig.HibernateOnIdle)
 	}
-	if newConfig.TerminateOnIdle != a.config.TerminateOnIdle {
-		log.Printf("Terminate-on-idle changed: %v → %v", a.config.TerminateOnIdle, newConfig.TerminateOnIdle)
+	if newConfig.TerminateOnIdle != old.TerminateOnIdle {
+		log.Printf("Terminate-on-idle changed: %v → %v", old.TerminateOnIdle, newConfig.TerminateOnIdle)
 	}
 
 	// Update config (but keep startTime - TTL is absolute)
-	a.config = newConfig
+	a.setConfig(newConfig)
 
 	log.Printf("Configuration reloaded successfully")
 	log.Printf("New config: TTL=%v, IdleTimeout=%v, OnComplete=%s, Hibernate=%v",

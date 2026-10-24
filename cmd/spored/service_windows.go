@@ -17,8 +17,36 @@ const serviceName = "spored"
 // Service Control Manager. It satisfies svc.Handler.
 type sporedService struct{}
 
+// serviceAccepts is the controls spored takes from the SCM. ParamChange is
+// `spored reload` (#1278).
+const serviceAccepts = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptParamChange
+
+// controlAction is what the service handler does with one SCM control.
+type controlAction int
+
+const (
+	controlIgnore controlAction = iota
+	controlInterrogate
+	controlStop
+	controlReload
+)
+
+// serviceControlAction maps an SCM control to the handler's action. Pure, so
+// the mapping is tested without a service manager.
+func serviceControlAction(c svc.Cmd) controlAction {
+	switch c {
+	case svc.Interrogate:
+		return controlInterrogate
+	case svc.Stop, svc.Shutdown:
+		return controlStop
+	case svc.ParamChange:
+		return controlReload
+	}
+	return controlIgnore
+}
+
 func (s *sporedService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
-	const accepted = svc.AcceptStop | svc.AcceptShutdown
+	const accepted = serviceAccepts
 	changes <- svc.Status{State: svc.StartPending}
 
 	// Run the lifecycle daemon in the background; it blocks in waitForShutdown
@@ -37,10 +65,15 @@ func (s *sporedService) Execute(args []string, r <-chan svc.ChangeRequest, chang
 			changes <- svc.Status{State: svc.StopPending}
 			return false, 0
 		case c := <-r:
-			switch c.Cmd {
-			case svc.Interrogate:
+			switch serviceControlAction(c.Cmd) {
+			case controlInterrogate:
 				changes <- c.CurrentStatus
-			case svc.Stop, svc.Shutdown:
+			case controlReload:
+				// The daemon's monitor loop refreshes and publishes the
+				// reload marker that `spored reload` waits for (#1278).
+				requestReload()
+				changes <- c.CurrentStatus
+			case controlStop:
 				changes <- svc.Status{State: svc.StopPending}
 				requestStop() // unblock runDaemon → graceful cleanup
 				// Give cleanup a moment to run (agent.Cleanup uses a 10s budget).

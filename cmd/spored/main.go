@@ -121,6 +121,11 @@ func main() {
 
 // runDaemon is the lifecycle-monitoring daemon (the bare `spored` invocation).
 func runDaemon() {
+	// Subscribe to reload requests before anything else, so one that arrives
+	// during startup waits for the monitor loop instead of stopping the
+	// process (#1278).
+	reloads := notifyReload()
+
 	// Setup logging (platform-specific path: /var/log on Unix, %PROGRAMDATA% on Windows).
 	logFile, err := os.OpenFile(sporedLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
@@ -243,7 +248,8 @@ func runDaemon() {
 		}
 	}
 
-	// Start monitoring
+	// Start monitoring. `spored reload` reaches the loop through reloads.
+	go forwardReloads(ctx, reloads, agent.RequestReload)
 	go agent.Monitor(ctx)
 
 	// Block until a stop is requested. On Unix this is SIGINT/SIGTERM; on Windows
@@ -312,9 +318,14 @@ func newRunPipelineStageCmd() *cobra.Command {
 func newReloadCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "reload",
-		Short: "Reload configuration from EC2 tags",
-		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, args []string) error { return handleReload() },
+		Short: "Make the running spored re-read its EC2 tags now",
+		Long: `Signals the running spored daemon (SIGHUP on Linux, the service's
+ParamChange control on Windows) to re-read its spawn:* tags now instead of at
+its next periodic refresh, waits up to about 15 seconds for it to acknowledge,
+and prints the configuration the daemon now enforces. Exits non-zero when
+spored is not running, does not acknowledge, or could not refresh.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error { return handleReload() },
 	}
 }
 
@@ -1357,36 +1368,21 @@ func checkCompleteCode(completionFile string) int {
 	return 0
 }
 
+// handleReload asks the running daemon to re-read its tags and prints the
+// config the DAEMON now has (#1278). It fails when no daemon acknowledged.
 func handleReload() error {
-	ctx := context.Background()
+	return reloadDaemon(context.Background(), newDaemonReloader(), os.Stdout)
+}
 
-	prov, err := provider.NewProvider(ctx)
+// notifyDaemonOfTagChange is `spored config set`'s reload: the tag is already
+// written, so a daemon that does not acknowledge is reported as such.
+func notifyDaemonOfTagChange(ctx context.Context) (agent.ReloadMarker, error) {
+	fmt.Println("Reloading the running spored...")
+	m, err := newDaemonReloader().reload(ctx)
 	if err != nil {
-		return fmt.Errorf("initialize provider: %w", err)
+		return m, fmt.Errorf("tag updated, but the running spored did not reload: %w", err)
 	}
-
-	ag, err := agent.NewAgentForQuery(ctx, prov)
-	if err != nil {
-		return fmt.Errorf("initialize agent: %w", err)
-	}
-
-	fmt.Println("Reloading configuration...")
-
-	if err := ag.Reload(ctx); err != nil {
-		return fmt.Errorf("reload configuration: %w", err)
-	}
-
-	fmt.Println("✓ Configuration reloaded successfully")
-
-	// Show new config
-	config := ag.GetConfig()
-	fmt.Println("\nCurrent configuration:")
-	fmt.Printf("  TTL:              %v\n", config.TTL)
-	fmt.Printf("  Idle Timeout:     %v\n", config.IdleTimeout)
-	fmt.Printf("  On Complete:      %s\n", config.OnComplete)
-	fmt.Printf("  Hibernate:        %v\n", config.HibernateOnIdle)
-	fmt.Printf("  Terminate idle:   %v\n", config.TerminateOnIdle)
-	return nil
+	return m, nil
 }
 
 func handleConfigGet(key string) error {
@@ -1516,10 +1512,8 @@ func handleConfigSet(key, value string) error {
 		return fmt.Errorf("update tag: %w", err)
 	}
 
-	// Reload configuration
-	fmt.Println("Reloading configuration...")
-	if err := ag.Reload(ctx); err != nil {
-		return fmt.Errorf("reload configuration: %w", err)
+	if _, err := notifyDaemonOfTagChange(ctx); err != nil {
+		return err
 	}
 
 	fmt.Printf("✓ Configuration updated: %s = %s\n", key, value)
@@ -1641,19 +1635,17 @@ func handleConfigSetTTL(ctx context.Context, ag *agent.Agent, instanceID, region
 		}
 	}
 
-	// Reload configuration
-	fmt.Println("Reloading configuration...")
-	if err := ag.Reload(ctx); err != nil {
-		return fmt.Errorf("reload configuration: %w", err)
+	m, err := notifyDaemonOfTagChange(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Never report success without reading back the field enforcement
-	// actually uses (spawn#553 fix #4): re-fetch the config the daemon just
-	// reloaded and print what it now believes the deadline to be — via the
-	// same formatTTLLine `config get ttl` uses — instead of echoing the
-	// input value back at the operator. A checkmark here means the deadline
-	// actually moved.
-	fmt.Printf("✓ Configuration updated: ttl = %s\n", formatTTLLine(ag.GetConfig(), time.Now()))
+	// actually uses (spawn#553 fix #4): print the deadline the RUNNING daemon
+	// now enforces, from its reload marker (#1278) — via the same
+	// formatTTLLine `config get ttl` uses — instead of echoing the input value
+	// back at the operator. A checkmark here means the deadline actually moved.
+	fmt.Printf("✓ Configuration updated: ttl = %s\n", formatTTLLine(markerConfig(m), time.Now()))
 	return nil
 }
 

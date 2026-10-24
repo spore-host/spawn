@@ -198,6 +198,10 @@ func sysComputeClockPath() string { return "/run/spored/compute-clock.json" }
 // counted against idle itself.
 func sysIdleStatePath() string { return "/run/spored/idle-state.json" }
 
+// sysReloadMarkerPath is where the daemon acknowledges a reload (#1278). On
+// /run with the compute clock: the pid it records means nothing after a boot.
+func sysReloadMarkerPath() string { return "/run/spored/reloaded.json" }
+
 // sysBootTime returns when the running kernel booted, from /proc/uptime, or the
 // zero time when it cannot be read.
 func sysBootTime() time.Time {
