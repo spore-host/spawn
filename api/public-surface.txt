@@ -674,6 +674,7 @@ field TaskPlan.AMI string
 field TaskPlan.MaxCost float64
 field TaskPlan.MaxCostKnown bool
 field TaskPlan.Network string
+field TaskPlan.NotStaged string
 field TaskPlan.Notes []string
 field TaskPlan.Purchase string
 field TaskPlan.Region string

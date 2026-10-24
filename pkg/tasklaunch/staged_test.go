@@ -207,7 +207,8 @@ func TestStagedUserDataSizes(t *testing.T) {
 	}{{"trivial task", 0}, {"20 KB command", largeCommandBytes}} {
 		spec := userDataSpec(tc.n)
 		measure := func(stage bool) (int, int, error) {
-			return taskUserDataPreflight(spec, userDataTestSized, "us-east-1", stage)
+			n, obj, _, err := taskUserDataPreflight(spec, userDataTestSized, "us-east-1", stage)
+			return n, obj, err
 		}
 		asDev(t)
 		devBytes, _, devErr := measure(false)
@@ -447,4 +448,99 @@ func TestStagedGrantKeepsTheRoleShared(t *testing.T) {
 	if aws.PredictedInstanceRoleName(a) != aws.PredictedInstanceRoleName(b) {
 		t.Errorf("two tasks with the same buckets get different roles:\n%s\n%s", a.InlinePolicyJSON, b.InlinePolicyJSON)
 	}
+}
+
+// TestStagedKeyIsUnguessablePerRun: the shared GetObject grant is safe only
+// because no task can name another's object, so every attempt's key must be
+// new, even for the identical spec: the hashed bytes carry the attempt's
+// random run id.
+func TestStagedKeyIsUnguessablePerRun(t *testing.T) {
+	asRelease(t)
+	store := &stagingAWS{}
+	var keys []string
+	for i := 0; i < 2; i++ {
+		prov := &recordingProvisioner{}
+		res, err := Launch(context.Background(), Deps{Finder: userDataTestFinder(), AWS: store, Provisioner: prov}, userDataSpec(100), "us-east-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := taskiam.StagedFilesKey(res.ResultsKeyPrefix, prov.opts.StagedFiles.SHA256)
+		if !bytes.Contains(store.puts[res.ResultsBucket+"/"+key], []byte(res.RunID)) {
+			t.Errorf("the staged object does not carry the attempt's run id %s", res.RunID)
+		}
+		keys = append(keys, key)
+	}
+	if keys[0] == keys[1] {
+		t.Errorf("two launches of the same spec staged the same key %s; the key must be unguessable per run", keys[0])
+	}
+}
+
+// TestTaskThatCanListItsResultsBucketIsNotStaged: a task whose role can list
+// its results bucket (the bucket is among its inputs, which get s3:ListBucket,
+// or in resources.s3_read_write) never stages. It launches inline when it fits,
+// saying why, and is refused, saying why, when it does not, by the dry run and
+// by Launch.
+func TestTaskThatCanListItsResultsBucketIsNotStaged(t *testing.T) {
+	asRelease(t)
+	const results = "spawn-results-123456789012-us-east-1"
+	for name, grant := range map[string]func(*taskproto.TaskSpec){
+		"inputs read another task's outputs from the default bucket": func(s *taskproto.TaskSpec) {
+			s.Inputs = []taskproto.Manifest{{Source: "s3://" + results + "/tasks/upstream/out/", Destination: "/data/"}}
+		},
+		"s3_read_write on the default bucket": func(s *taskproto.TaskSpec) {
+			s.Resources.S3ReadWrite = []string{"s3://" + results}
+		},
+		"inputs from a custom results bucket": func(s *taskproto.TaskSpec) {
+			s.ResultsPrefix = "s3://lab-results/runs"
+			s.Inputs = []taskproto.Manifest{{Source: "s3://lab-results/runs/upstream/out.csv", Destination: "/data/in.csv"}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			small := userDataSpec(100)
+			grant(small)
+			var out bytes.Buffer
+			if err := renderDryRun(context.Background(), &out, small, userDataTestFinder(), "us-east-1"); err != nil {
+				t.Fatalf("dry run: %v", err)
+			}
+			if !strings.Contains(out.String(), "not staged in S3") || strings.Contains(out.String(), "are staged in S3") {
+				t.Errorf("the dry run does not say the files stay inline\n%s", out.String())
+			}
+
+			store := &stagingAWS{}
+			prov := &recordingProvisioner{}
+			var warn bytes.Buffer
+			if _, err := Launch(context.Background(), Deps{Finder: userDataTestFinder(), AWS: store, Provisioner: prov, Warn: &warn}, small, "us-east-1"); err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if prov.opts.StagedFiles != nil || len(store.puts) != 0 {
+				t.Errorf("staged a task whose role can list its results bucket: %v", store.calls)
+			}
+			if !strings.Contains(warn.String(), "can list it") {
+				t.Errorf("no note saying why it was not staged: %q", warn.String())
+			}
+
+			large := userDataSpec(largeCommandBytes)
+			grant(large)
+			if err := renderDryRun(context.Background(), &bytes.Buffer{}, large, userDataTestFinder(), "us-east-1"); err == nil || !strings.Contains(err.Error(), "were not staged") {
+				t.Errorf("dry run of a large listing task = %v, want a refusal that says why it was not staged", err)
+			}
+			prov = &recordingProvisioner{}
+			_, err := Launch(context.Background(), Deps{Finder: userDataTestFinder(), AWS: &stagingAWS{}, Provisioner: prov}, large, "us-east-1")
+			if err == nil || !strings.Contains(err.Error(), "were not staged") || !strings.Contains(err.Error(), "16384") || prov.n != 0 {
+				t.Errorf("Launch of a large listing task = %v after %d launches, want a refusal that says why", err, prov.n)
+			}
+		})
+	}
+
+	t.Run("an unrelated input bucket still stages", func(t *testing.T) {
+		spec := userDataSpec(100)
+		spec.Inputs = []taskproto.Manifest{{Source: "s3://inputs-bucket/data/", Destination: "/data/"}}
+		prov := &recordingProvisioner{}
+		if _, err := Launch(context.Background(), Deps{Finder: userDataTestFinder(), AWS: &stagingAWS{}, Provisioner: prov}, spec, "us-east-1"); err != nil {
+			t.Fatal(err)
+		}
+		if prov.opts.StagedFiles == nil {
+			t.Error("a task with no list access on its results bucket was not staged")
+		}
+	})
 }

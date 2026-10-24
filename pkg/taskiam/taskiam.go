@@ -202,6 +202,20 @@ func StagedFilesKeyPrefix(taskPrefix string) string {
 // default, and nothing deletes them). Within one role, IAM cannot tell its
 // instances apart anyway. So the grant is the narrowest that does not vary by
 // task: the staged objects' own name shape, in the results bucket only.
+//
+// Trust model. Every task role on a results bucket can GetObject every staged
+// object in it, given its key. That is safe because such a role cannot list
+// the bucket (StagingPolicyFor grants the results bucket only PutObject) and
+// each key is the sha256 of bytes that include the attempt's random run id
+// (tasklaunch.TestStagedKeyIsUnguessablePerRun), so no task can name another's
+// object. A task whose role CAN list its results bucket, because the bucket is
+// one of its inputs or in resources.s3_read_write, is never staged
+// (tasklaunch.stagingRefusal). Such a role also gets GetObject on the whole
+// bucket, so it can read every staged object there whether or not it is staged
+// itself, as can any other principal with read on the bucket (a pool worker,
+// whose spec bucket is the default results bucket, or `spawn launch --s3-read`
+// on it): the guard keeps that task's own files out of the bucket, it does not
+// hide other tasks' files from it.
 func StagedFilesResources(resultsBucket string) []string {
 	name := "bootstrap-" + strings.Repeat("?", stagedFilesSHA256Len) + ".sh"
 	return []string{

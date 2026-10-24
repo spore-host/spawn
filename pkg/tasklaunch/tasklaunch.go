@@ -200,6 +200,12 @@ func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region str
 	// attempt stages its own, under a name that is its sha256, so nothing
 	// overwrites the last one.
 	stage := stagesFiles(client)
+	notStaged := ""
+	if stage {
+		if notStaged = stagingRefusal(spec, resultsBucket, region, true); notStaged != "" {
+			stage = false
+		}
+	}
 	if stage {
 		if err := clearStaleStagedFiles(ctx, client.(stagedFilesClearer), region, resultsBucket, resultsKeyPrefix); err != nil {
 			fmt.Fprintf(warn, "warning: could not clear a previous attempt's staged task files for task %s: %v\n", spec.TaskID, err)
@@ -238,6 +244,9 @@ func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region str
 	// the authoritative check, still before RunInstances (#1063).
 	if _, err := taskUserDataSize(cfg, opts); err != nil {
 		return nil, err
+	}
+	if notStaged != "" {
+		fmt.Fprintf(warn, "note: the task wrapper and flush hook ride in the user data, not staged in S3: %s\n", notStaged)
 	}
 	if staged != nil {
 		if opts, err = uploadStagedFiles(ctx, client.(stagedFilesStore), warn, region, staged, cfg, opts); err != nil {
