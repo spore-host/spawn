@@ -66,7 +66,7 @@ func (a *Agent) writeCommandLogToConsole(reason string) {
 	}
 	b.WriteString(taskproto.ConsoleLogEndMarker + "\n")
 
-	if err := sysWriteConsole(b.String()); err != nil {
+	if err := a.writeConsole(b.String()); err != nil {
 		log.Printf("console diagnostic: could not write to the serial console: %v", err)
 		return
 	}
@@ -75,6 +75,14 @@ func (a *Agent) writeCommandLogToConsole(reason string) {
 	log.Printf("console diagnostic: copied the last %d lines of %s to the serial console; "+
 		"read it with `aws ec2 get-console-output --instance-id <id>` (allow ~5 minutes "+
 		"after termination for the capture to appear)", consoleTailLines, commandLogPath)
+}
+
+// writeConsole writes text to the serial console, or to the test seam when set.
+func (a *Agent) writeConsole(text string) error {
+	if a.consoleWriter != nil {
+		return a.consoleWriter(text)
+	}
+	return sysWriteConsole(text)
 }
 
 // tailFile returns the last n lines of a file.

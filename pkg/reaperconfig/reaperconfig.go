@@ -31,6 +31,7 @@ const (
 	EnvElasticIPs   = "REAPER_ELASTIC_IPS"
 	EnvMaxAge       = "REAPER_MAX_AGE"
 	EnvNotifyURL    = "REAPER_NOTIFY_URL"
+	EnvTTLGrace     = "REAPER_TTL_GRACE"
 )
 
 // The three states of a sweep that can be previewed before it is allowed to
@@ -70,6 +71,35 @@ func ParseMaxAge(v string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("max age must be positive, got %s", d)
+	}
+	return d, nil
+}
+
+// DefaultTTLGrace is how long past spawn:ttl-deadline the reaper waits before
+// reaping a running instance whose spored is still checking in (#1186).
+//
+// spored enforces the deadline itself and runs the task flush hook on the way
+// out, which takes up to 45 s plus a warning delay. A reaper run that lands in
+// that window used to terminate the instance under spored's feet, and the
+// task's command.log and completion record were lost with it. A fresh
+// spawn:last-heartbeat is the evidence that spored is alive to do the job.
+const DefaultTTLGrace = 10 * time.Minute
+
+// MaxTTLGrace caps REAPER_TTL_GRACE. The grace only applies while the
+// instance's own heartbeat is fresh, and that tag is instance-writable, so a
+// large grace would let an instance extend its life past its deadline by
+// asserting it is alive. An hour bounds that.
+const MaxTTLGrace = time.Hour
+
+// ParseTTLGrace parses REAPER_TTL_GRACE: a pkg/ttl duration from 0 (no grace:
+// reap at the deadline, as before #1186) to MaxTTLGrace.
+func ParseTTLGrace(v string) (time.Duration, error) {
+	d, err := ttl.ParseDuration(strings.TrimSpace(v))
+	if err != nil {
+		return 0, err
+	}
+	if d < 0 || d > MaxTTLGrace {
+		return 0, fmt.Errorf("TTL grace must be between 0 and %s, got %s", MaxTTLGrace, d)
 	}
 	return d, nil
 }
@@ -116,12 +146,18 @@ func Validate(name, value string) error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		return nil
+	case EnvTTLGrace:
+		if _, err := ParseTTLGrace(value); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return nil
 	}
 	return fmt.Errorf("%s is not a setting spawn reaper deploy can set", name)
 }
 
 var settable = map[string]struct{}{
 	EnvSpotRequests: {}, EnvNetResources: {}, EnvElasticIPs: {}, EnvMaxAge: {}, EnvNotifyURL: {},
+	EnvTTLGrace: {},
 }
 
 // Settable lists the variables Validate accepts, sorted. Derived from the same

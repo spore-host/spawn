@@ -26,6 +26,14 @@ would be arbitrary root execution on any spawn-managed instance in the account
 (GHSA-8q3p-qcv8-2pr4). Skipping cannot weaken the deadline guarantee: termination
 happens either way.
 
+A running `spawn task run` instance (tagged `spawn:task-id`) is different: before
+terminating it, the reaper always runs the task's terminal-flush hook over SSM
+([#1186]), the same command `spawn terminate` sends, so the task's `command.log`
+and `completion.json` reach its results prefix. It is bounded at 60 s, runs only
+spawn's own root-owned `/etc/spawn/task-flush.sh` after the same trust check
+spored applies (nothing from a tag is interpolated), and the terminate follows
+whatever happens.
+
 ## What it does
 
 Every schedule tick (`rate(10 minutes)` by default) it scans the configured
@@ -38,6 +46,12 @@ idle-stopped instance runs no daemon, so only the reaper will ever reclaim it,
    spawn:ttl`, the deadline spored itself enforces in that case ([#990]), or
 2. `now - spawn:launch-time > REAPER_MAX_AGE` — a hard ceiling that fires even
    for `--no-timeout` / missing / unparseable deadlines.
+
+For (1) there is one grace ([#1186]): a **running** instance whose
+`spawn:last-heartbeat` is fresh (spored checked in within 10 minutes) is left up
+to `REAPER_TTL_GRACE` (default 10m) past its deadline, because spored is alive to
+enforce that deadline itself and flushes the task record on the way out. A stale
+or missing heartbeat, or a stopped instance, is reaped at the deadline.
 
 Note that (2) is a genuine **ceiling**, not a fallback: it applies to an instance
 whose deadline is still in the future. A within-deadline instance older than
@@ -86,6 +100,7 @@ there and appending its ARN to the list.
 | `EC2_EXTERNAL_ID` | `spawn-ttl-reaper` | ExternalId for the assume-role |
 | `REAPER_REGIONS` | 11 release-bucket regions | Comma-separated regions to scan |
 | `REAPER_MAX_AGE` | `168h` (7d) | Hard max-age ceiling (Go duration, or days: `7d`) |
+| `REAPER_TTL_GRACE` | `10m` | How long past its TTL deadline a running instance with a fresh `spawn:last-heartbeat` is left for spored to end itself ([#1186]). `0` to `1h`; `0` reaps at the deadline. Template parameter `TtlGrace` (default `''`, i.e. `10m`) / make variable `TTL_GRACE` / `spawn reaper deploy --ttl-grace`; a deploy that does not name it keeps the deployed value. The heartbeat is instance-writable, which is why the grace is capped; `REAPER_MAX_AGE` still applies |
 | `REAPER_DRY_RUN` | `true` | When true, log `WOULD reap` + notify without terminating |
 | `REAPER_NOTIFY_URL` | (empty) | Slack-incoming-webhook URL; every reap is posted here |
 | `REAPER_DNS_ZONE_ID` | (empty) | Route53 hosted zone ID; with `REAPER_DNS_DOMAIN`, the reaper deletes a reaped instance's DNS records (#247) |
@@ -408,6 +423,7 @@ nothing — by design, since a partial live set could orphan a healthy record.
 [#661]: https://github.com/spore-host/spawn/issues/661
 [#950]: https://github.com/spore-host/spawn/issues/950
 [#1232]: https://github.com/spore-host/spawn/issues/1232
+[#1186]: https://github.com/spore-host/spawn/issues/1186
 [#984]: https://github.com/spore-host/spawn/issues/984
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71

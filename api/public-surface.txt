@@ -797,6 +797,8 @@ const ExitIdleTimeout ExitReason
 const ExitSpotInterruption ExitReason
 const ExitTTLExpired ExitReason
 const ExitUserTerminated ExitReason
+const FlushExitUploadFailed
+const FlushHookSeconds
 const PhaseTimestampFormat
 const PurchaseOnDemand
 const PurchaseSpot
@@ -910,6 +912,7 @@ func DefaultResultsBucket(accountID, region string) string
 func EffectiveMemoryGiB(req ResourceRequest) float64
 func EffectiveResultsPrefix(spec *TaskSpec, accountID, region string) string
 func ExtractConsoleLog(consoleOutput string) (string, bool)
+func FlushCommand(why ExitReason) string
 func FlushScriptPath() string
 func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error)
 func GeneratePooledJobScript(spec *TaskSpec, opts WrapperOptions) (string, error)

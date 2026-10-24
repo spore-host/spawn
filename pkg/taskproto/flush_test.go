@@ -73,6 +73,9 @@ func runFlushHook(t *testing.T, script, reason string) (output string, awsCalls 
 // runPreStop() -> this hook. So the hook runs on EVERY normally-completed task
 // too. Without the interlock it would relabel every one of them
 // failed/exit_code -1, i.e. turn a working fleet's records into garbage.
+//
+// Since #1186 the interlock asks S3 whether the record arrived (head-object),
+// so the gate is "no upload", not "no aws call at all".
 func TestFlushHookNeverOverwritesTheWrapperRecord(t *testing.T) {
 	// Stand in for the wrapper having already written its record.
 	const sentinel = `{"task_id":"ttl-no-record-demo","state":"completed","exit_code":0}`
@@ -84,9 +87,9 @@ func TestFlushHookNeverOverwritesTheWrapperRecord(t *testing.T) {
 	script := genFlush(flushSpec(), "results-bucket", "us-east-1", "run-1")
 	out, awsCalls := runFlushHook(t, script, string(ExitTTLExpired))
 
-	if len(awsCalls) != 0 {
-		t.Errorf("the hook must not touch S3 when the wrapper already wrote a record; aws was called:\n%s\noutput: %s",
-			strings.Join(awsCalls, "\n"), out)
+	if ups := uploads(awsCalls); len(ups) != 0 {
+		t.Errorf("the hook must not upload when the wrapper's record is already in S3; uploads:\n%s\noutput: %s",
+			strings.Join(ups, "\n"), out)
 	}
 	after, err := os.ReadFile(CompletionRecordPath())
 	if err != nil {
@@ -97,6 +100,199 @@ func TestFlushHookNeverOverwritesTheWrapperRecord(t *testing.T) {
 	}
 	if !strings.Contains(out, "already wrote its completion record") {
 		t.Errorf("the hook should say why it did nothing, got: %s", out)
+	}
+}
+
+// uploads returns the recorded aws calls that are S3 copies.
+func uploads(calls []string) []string {
+	var out []string
+	for _, c := range calls {
+		if strings.Contains(c, " s3 cp ") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// flushRun is one execution of a generated hook under a scripted `aws` and a
+// recording `sleep`.
+type flushRun struct {
+	out      string
+	exitCode int
+	aws      []string // argv of every aws call, in order
+	sleeps   []string // argv of every sleep call
+}
+
+// runFlushHookWith runs script with awsBody as the stand-in `aws` (a bash
+// body; $CALLS is its call log) and a `sleep` that only records, so the
+// retry backoff is counted rather than waited out.
+func runFlushHookWith(t *testing.T, script, reason, awsBody string) flushRun {
+	t.Helper()
+	skipOnWindows(t, "runs the Linux flush hook under bash with stubs on a POSIX PATH")
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "task-flush.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil { //nolint:gosec // test fixture, needs +x
+		t.Fatalf("write flush script: %v", err)
+	}
+	binDir := t.TempDir()
+	awsLog, sleepLog := filepath.Join(dir, "aws.log"), filepath.Join(dir, "sleep.log")
+	writeFakeExe(t, filepath.Join(binDir, "aws"),
+		"#!/bin/bash\nCALLS="+awsLog+"\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n"+awsBody)
+	writeFakeExe(t, filepath.Join(binDir, "sleep"),
+		"#!/bin/bash\nprintf '%s\\n' \"$*\" >> "+sleepLog+"\n")
+
+	cmd := exec.Command("bash", scriptPath, reason)
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
+	b, err := cmd.CombinedOutput()
+	r := flushRun{out: string(b)}
+	if ee, ok := err.(*exec.ExitError); ok {
+		r.exitCode = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("run hook: %v", err)
+	}
+	r.aws, r.sleeps = readLines(awsLog), readLines(sleepLog)
+	return r
+}
+
+func readLines(path string) []string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func countContaining(lines []string, sub string) int {
+	n := 0
+	for _, l := range lines {
+		if strings.Contains(l, sub) {
+			n++
+		}
+	}
+	return n
+}
+
+// awsHeadMissing answers head-object with S3's 404 and succeeds every copy.
+const awsHeadMissing = `case "$*" in *head-object*) echo 'An error occurred (404) when calling the HeadObject operation: Not Found' >&2; exit 254 ;; esac
+exit 0
+`
+
+// TestFlushHookUploadsALocalOnlyRecord is #1186's interlock half. The wrapper
+// wrote completion.json locally but its upload never landed, so the results
+// prefix was empty — and the hook, seeing the local file, exited 0 without
+// uploading anything. The interlock exists so the hook never REPLACES the
+// wrapper's record; it is not a reason to leave that record off S3.
+func TestFlushHookUploadsALocalOnlyRecord(t *testing.T) {
+	const wrapperRec = `{"task_id":"ttl-no-record-demo","state":"completed","exit_code":0}`
+	if err := os.WriteFile(CompletionRecordPath(), []byte(wrapperRec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(CompletionRecordPath()) })
+	_ = os.Remove(localPath(terminalFileName))
+
+	r := runFlushHookWith(t, genFlush(flushSpec(), "results-bucket", "us-east-1", "run-1"), string(ExitTTLExpired), awsHeadMissing)
+
+	want := CompletionRecordPath() + " s3://results-bucket/tasks/ttl-no-record-demo/completion.json"
+	if countContaining(r.aws, want) != 1 {
+		t.Errorf("the wrapper's local-only record must be uploaded as completion.json; aws calls:\n%s\noutput: %s",
+			strings.Join(r.aws, "\n"), r.out)
+	}
+	if _, err := os.Stat(localPath(terminalFileName)); err == nil {
+		t.Error("the hook wrote its own terminal record although the wrapper's existed — that relabels the task")
+	}
+	if b, _ := os.ReadFile(CompletionRecordPath()); string(b) != wrapperRec {
+		t.Errorf("the wrapper's record was modified: %s", b)
+	}
+	if r.exitCode != 0 {
+		t.Errorf("exit %d, want 0: every upload succeeded\n%s", r.exitCode, r.out)
+	}
+}
+
+// TestFlushHookDoesNotUploadATruncatedLocalRecord: a full /tmp leaves the
+// wrapper's local copy empty or cut short, and the wrapper then uploads from
+// memory (#1179). The head-object probe normally answers 403 on a write-only
+// results bucket, so uploading that local copy would overwrite a good record
+// with a broken one.
+func TestFlushHookDoesNotUploadATruncatedLocalRecord(t *testing.T) {
+	for name, content := range map[string]string{"empty": "", "cut short": `{"task_id":"ttl-no-rec`} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(CompletionRecordPath(), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Remove(CompletionRecordPath()) })
+			r := runFlushHookWith(t, genFlush(flushSpec(), "results-bucket", "us-east-1", "run-1"), string(ExitTTLExpired), awsHeadMissing)
+			if ups := uploads(r.aws); len(ups) != 0 {
+				t.Errorf("an incomplete local record must not be uploaded; uploads:\n%s", strings.Join(ups, "\n"))
+			}
+		})
+	}
+}
+
+// TestFlushHookRetriesAFailedUpload (#1186): each upload was tried once, so a
+// single throttled or reset PUT lost the record. Two failures then a success
+// must end with the record in S3, after exactly two backoff sleeps.
+func TestFlushHookRetriesAFailedUpload(t *testing.T) {
+	_ = os.Remove(CompletionRecordPath())
+	r := runFlushHookWith(t, genFlush(flushSpec(), "results-bucket", "us-east-1", "run-1"), string(ExitTTLExpired), `case "$*" in
+  *completion.json*)
+    n=$(grep -c 'completion.json' "$CALLS")
+    if [ "$n" -le 2 ]; then echo "upload failed: Connection reset by peer (attempt $n)" >&2; exit 1; fi ;;
+esac
+exit 0
+`)
+	if n := countContaining(r.aws, "/completion.json"); n != 3 {
+		t.Errorf("completion.json upload attempted %d times, want 3 (two failures, then success)\n%s", n, r.out)
+	}
+	if len(r.sleeps) != 2 {
+		t.Errorf("backoff sleeps = %v, want two", r.sleeps)
+	}
+	if r.exitCode != 0 {
+		t.Errorf("exit %d after a successful retry, want 0\n%s", r.exitCode, r.out)
+	}
+}
+
+// TestFlushHookReportsAPersistentUploadFailure: when retries run out the hook
+// must say so in its exit status and print the aws CLI's own error, because
+// spored turns exactly those into the console line, tag and notification that
+// survive the instance. And the log failing must not cost the record: the
+// completion.json and .exitcode uploads are still made.
+func TestFlushHookReportsAPersistentUploadFailure(t *testing.T) {
+	_ = os.Remove(CompletionRecordPath())
+	logFile := filepath.Join(t.TempDir(), "spawn-command.log")
+	if err := os.WriteFile(logFile, []byte("spawn_phase command start\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := flushCommandLogPath
+	flushCommandLogPath = logFile
+	t.Cleanup(func() { flushCommandLogPath = prev })
+
+	r := runFlushHookWith(t, genFlush(flushSpec(), "results-bucket", "us-east-1", "run-1"), string(ExitTTLExpired), `case "$*" in
+  *command.log*) echo 'upload failed: An error occurred (AccessDenied) when calling the PutObject operation' >&2; exit 1 ;;
+esac
+exit 0
+`)
+	if r.exitCode != FlushExitUploadFailed {
+		t.Errorf("exit %d, want FlushExitUploadFailed (%d)\n%s", r.exitCode, FlushExitUploadFailed, r.out)
+	}
+	if n := countContaining(r.aws, "/command.log"); n != flushUploadAttempts {
+		t.Errorf("command.log attempted %d times, want %d", n, flushUploadAttempts)
+	}
+	if !strings.Contains(r.out, "AccessDenied") {
+		t.Errorf("the aws error text must be in the hook's output for spored to report it:\n%s", r.out)
+	}
+	for _, key := range []string{"/completion.json", "/.exitcode"} {
+		if countContaining(r.aws, key) == 0 {
+			t.Errorf("%s was not uploaded after the log failed:\n%s", key, strings.Join(r.aws, "\n"))
+		}
 	}
 }
 

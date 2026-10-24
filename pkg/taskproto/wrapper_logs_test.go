@@ -12,10 +12,12 @@ import (
 
 // s3CopyInvocation matches an `aws s3 cp|sync` INVOCATION in generated shell:
 // the command word at the start of a line or after if/then/!/;/&&/||, with an
-// optional quoted global argument (the flush script's "$AWS_REGION_ARG"). It
+// optional quoted global argument (the flush script's "$AWS_REGION_ARG") and
+// --cli-*-timeout options, and behind the flush script's spawn_up retry helper
+// (#1186). It
 // does not match the words inside a message, such as the provenance fallback's
 // 'uploading untagged with aws s3 cp'.
-var s3CopyInvocation = regexp.MustCompile(`(?:^|\bif\s+(?:!\s+)?|\bthen\s+|;\s*|&&\s*|\|\|\s*)aws(?:\s+"[^"]*")?\s+s3\s+(?:cp|sync)\b(.*)$`)
+var s3CopyInvocation = regexp.MustCompile(`(?:^|\bif\s+(?:!\s+)?|\bthen\s+|;\s*|&&\s*|\|\|\s*)(?:spawn_up\s+)?aws(?:\s+"[^"]*"|\s+--cli-[a-z-]+\s+\d+)*\s+s3\s+(?:cp|sync)\b(.*)$`)
 
 // #1072: every S3 copy in the generated scripts runs without the progress
 // meter, which filled command.log with ~20 \r-separated lines per file. The

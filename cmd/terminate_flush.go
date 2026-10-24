@@ -17,7 +17,7 @@ import (
 // box; the extra margin is SSM delivery and polling.
 const (
 	terminateFlushTimeout = 75 * time.Second
-	taskFlushHookSeconds  = 45
+	taskFlushHookSeconds  = taskproto.FlushHookSeconds
 )
 
 // ssmShellRunner is the one SSM call the terminate flush makes. It is
@@ -25,18 +25,11 @@ const (
 type ssmShellRunner func(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*aws.SSMRunResult, error)
 
 // taskFlushCommand is the shell the CLI sends over SSM to run a task's
-// terminal-flush hook with the user_terminated reason. It applies the same
-// trust check spored's flushTaskRecord does before exec'ing the hook as root
-// (regular file, not a symlink, root-owned, not group/world-writable), and
-// caps the hook with timeout(1) so a wedged upload cannot hold up the
-// termination. A missing hook — a non-task launch, or a spored older than
-// 0.116.0 — is a clean no-op.
+// terminal-flush hook with the user_terminated reason. The command itself,
+// trust check and on-box bound included, is taskproto.FlushCommand, shared
+// with the TTL reaper (#1186).
 func taskFlushCommand() string {
-	h := taskproto.FlushScriptPath()
-	return fmt.Sprintf(`H=%s
-if [ ! -e "$H" ]; then echo "spawn: no task flush hook on this instance"; exit 0; fi
-if [ -L "$H" ] || [ ! -f "$H" ] || [ ! -O "$H" ] || [ -n "$(find "$H" -perm /022)" ]; then echo "spawn: refusing to run untrusted $H" >&2; exit 2; fi
-exec timeout %d "$H" %s`, h, taskFlushHookSeconds, string(taskproto.ExitUserTerminated))
+	return taskproto.FlushCommand(taskproto.ExitUserTerminated)
 }
 
 // needsTaskFlush reports whether inst is a running `spawn task run` instance,

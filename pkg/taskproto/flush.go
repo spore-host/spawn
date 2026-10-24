@@ -29,6 +29,74 @@ func SetFlushScriptPathForTest(path string) (restore func()) {
 	return func() { flushScriptPath = prev }
 }
 
+// FlushHookSeconds caps the hook when something other than spored runs it (the
+// CLI's `spawn terminate`, the TTL reaper), matching spored's own 45 s bound.
+const FlushHookSeconds = 45
+
+// FlushCommand is the shell that runs the hook with reason why over SSM
+// (AWS-RunShellScript, as root). It applies the same trust check spored's
+// flushTaskRecord does before exec'ing the hook (a regular file, not a symlink,
+// owned by the caller, not group- or world-writable) and caps it with
+// timeout(1). A missing hook (a non-task launch, or a spored older than
+// 0.116.0) is a clean no-op. Nothing from the instance's tags is interpolated:
+// the path and why are this package's constants.
+func FlushCommand(why ExitReason) string {
+	h := FlushScriptPath()
+	return fmt.Sprintf(`H=%s
+if [ ! -e "$H" ]; then echo "spawn: no task flush hook on this instance"; exit 0; fi
+if [ -L "$H" ] || [ ! -f "$H" ] || [ ! -O "$H" ] || [ -n "$(find "$H" -perm /022)" ]; then echo "spawn: refusing to run untrusted $H" >&2; exit 2; fi
+exec timeout %d "$H" %s`, h, FlushHookSeconds, string(why))
+}
+
+// flushCommandLogPath is the command log the hook uploads: where the bootstrap
+// tees the wrapper's output. A variable only so tests can give the hook a log
+// to upload; nothing outside this package's tests writes it.
+var flushCommandLogPath = "/var/log/spawn-command.log"
+
+// FlushExitUploadFailed is the terminal-flush hook's exit status when it ran
+// but at least one of its S3 uploads still failed after its retries (#1186).
+// spored reports it as such; any other non-zero status means the hook itself
+// broke.
+const FlushExitUploadFailed = 3
+
+// flushCp is how every hook upload starts. The connect and read timeouts are
+// there because the aws CLI's defaults are 60 s each, so a single hung attempt
+// could spend the hook's whole 45 s budget (pkg/agent taskFlushTimeout) and
+// leave no time for the retries or for the record after the log.
+const flushCp = "aws \"$AWS_REGION_ARG\" --cli-connect-timeout 5 --cli-read-timeout 15 s3 cp --no-progress"
+
+// Retry bounds for spawn_up. Three attempts with 1 s and 2 s backoff, and no new
+// attempt once the hook has run flushRetryBudget seconds, so retrying the log
+// cannot starve the completion record that follows it inside the 45 s cap.
+const (
+	flushUploadAttempts = 3
+	flushRetryBudget    = 25
+)
+
+// writeFlushUploader emits spawn_up, which runs one upload command (its
+// arguments) and retries it (#1186). Before this, each upload was tried once
+// and a failure left only a line in spored's journal, which goes with the
+// instance. On the last failure it prints the command and the aws CLI's own
+// error text, which spored captures, and sets UPLOAD_FAILED so the hook exits
+// FlushExitUploadFailed. An upload reading stdin ("-") has its input buffered
+// first, because a retry would otherwise read an already-drained pipe and
+// upload an empty object.
+func writeFlushUploader(p func(string, ...interface{})) {
+	p("UPLOAD_FAILED=0\n")
+	p("spawn_up() {\n")
+	p("  local n=1 out in='' pipe=0 a\n")
+	p("  for a; do [ \"$a\" = - ] && pipe=1; done\n")
+	p("  [ \"$pipe\" = 1 ] && in=\"$(cat)\"\n")
+	p("  while :; do\n")
+	p("    if [ \"$pipe\" = 1 ]; then out=\"$(printf '%%s' \"$in\" | \"$@\" 2>&1)\"; else out=\"$(\"$@\" 2>&1)\"; fi && { [ -z \"$out\" ] || echo \"$out\"; return 0; }\n")
+	p("    if [ \"$n\" -ge %d ] || [ \"$SECONDS\" -ge %d ]; then\n", flushUploadAttempts, flushRetryBudget)
+	p("      echo \"spawn: upload failed after $n attempt(s): ${*: -1}: $out\" >&2; UPLOAD_FAILED=1; return 1\n")
+	p("    fi\n")
+	p("    sleep \"$n\"; n=$((n+1))\n")
+	p("  done\n")
+	p("}\n\n")
+}
+
 // GenerateFlushScript builds the terminal-flush hook for one task (spawn#632).
 //
 // The problem it solves: a task killed by its own TTL left NOTHING. Both the
@@ -98,14 +166,47 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	p("AWS_REGION_ARG=%s\n", shQuote("--region="+region))
 	p("REASON=\"${1:-unknown}\"\n\n")
 
+	// One upload, retried (#1186). See writeFlushUploader.
+	writeFlushUploader(p)
+
 	// The interlock. Without this the hook would overwrite the completion record
 	// of every task that finished normally: the success path is command returns ->
 	// wrapper writes completion.json -> wrapper signals SPAWN_COMPLETE -> spored
 	// acts on on_complete -> terminate() -> runPreStop() -> this script. Relabelling
 	// a completed task "failed/ttl_expired" would be a far worse bug than the one
-	// being fixed, so the guard comes first and bails hardest.
-	p("if [ -f %s ]; then\n", shQuote(CompletionRecordPath()))
-	p("  echo \"spawn: task $TASK_ID already wrote its completion record; nothing to flush\"\n")
+	// being fixed, so the guard comes first and never writes a record of its own.
+	//
+	// What it protects is the wrapper's record, not the wrapper's UPLOAD of it
+	// (#1186). A local record whose S3 copy never landed — the upload failed, or
+	// the limit fired between the wrapper's local write and its upload — used to
+	// end here with exit 0, leaving the prefix empty. Now the hook uploads that
+	// same local record: the wrapper's own content, so nothing is relabelled.
+	//
+	// head-object needs s3:GetObject, which a task role normally does not hold on
+	// its results bucket (write-only), so in practice it answers 403 and the
+	// local record is re-uploaded. That is safe: the bytes are the wrapper's own.
+	// The one thing that is NOT safe is uploading a local copy a full /tmp left
+	// empty or cut short (#1179) — the wrapper then uploaded from memory, and
+	// this would overwrite that good object with a truncated one. So the local
+	// copy is uploaded only when it is complete, i.e. ends with the record's
+	// closing brace.
+	rec := shQuote(CompletionRecordPath())
+	logPath := shQuote(flushCommandLogPath)
+	p("if [ -f %s ]; then\n", rec)
+	if bucket, key, ok := SplitS3URI(resultsPrefix); ok {
+		p("  if aws \"$AWS_REGION_ARG\" s3api head-object --bucket %s --key %s >/dev/null 2>&1; then\n",
+			shQuote(bucket), shQuote(strings.TrimPrefix(key+"/completion.json", "/")))
+		p("    echo \"spawn: task $TASK_ID already wrote its completion record; nothing to flush\"; exit 0\n")
+		p("  fi\n")
+	}
+	p("  if [ \"$(tail -c 1 %s 2>/dev/null)\" != '}' ]; then\n", rec)
+	p("    echo \"spawn: task $TASK_ID's local completion record is incomplete; not uploading it\" >&2; exit 0\n")
+	p("  fi\n")
+	p("  echo \"spawn: task $TASK_ID wrote its completion record, but it is not in S3; uploading it (reason: $REASON)\"\n")
+	p("  [ -f %s ] && spawn_up %s %s \"$RESULTS_PREFIX/command.log\"\n", logPath, flushCp, logPath)
+	p("  spawn_up %s %s \"$RESULTS_PREFIX/completion.json\"\n", flushCp, rec)
+	p("  [ -f %s ] && spawn_up %s %s \"$RESULTS_PREFIX/.exitcode\"\n", shQuote(localPath(exitCodeFileName)), flushCp, shQuote(localPath(exitCodeFileName)))
+	p("  [ \"$UPLOAD_FAILED\" = 0 ] || exit %d\n", FlushExitUploadFailed)
 	p("  exit 0\n")
 	p("fi\n\n")
 
@@ -136,14 +237,12 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	// it FIRST, before the record, so a hook that runs out of time still salvages
 	// the more useful half.
 	p("LOGS_JSON='[]'\n")
-	p("if [ -f /var/log/spawn-command.log ]; then\n")
-	p("  if aws \"$AWS_REGION_ARG\" s3 cp --no-progress /var/log/spawn-command.log \"$RESULTS_PREFIX/command.log\"; then\n")
+	p("if [ -f %s ]; then\n", logPath)
+	p("  if spawn_up %s %s \"$RESULTS_PREFIX/command.log\"; then\n", flushCp, logPath)
 	p("    LOGS_JSON=\"[\\\"$RESULTS_PREFIX/command.log\\\"]\"\n")
-	p("  else\n")
-	p("    echo 'spawn: could not upload command.log' >&2\n")
 	p("  fi\n")
 	p("else\n")
-	p("  echo 'spawn: no /var/log/spawn-command.log to upload' >&2\n")
+	p("  echo 'spawn: no %s to upload' >&2\n", flushCommandLogPath)
 	p("fi\n\n")
 
 	// state is "failed", NOT a new "terminated" value. CompletionRecord.State is
@@ -161,10 +260,14 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	p("printf -v REC %s %s %s \"$STARTED_AT\" \"$ENDED_AT\" \"$INSTANCE_JSON\" \"$LOGS_JSON\" \"$RETRY_CLASS\" \"$REASON\"\n",
 		shQuote(`{\n  "task_id": %s,\n  "run_id": %s,\n  "exit_code": -1,\n  "state": "`+string(StateFailed)+`",\n  "started_at": "%s",\n  "ended_at": "%s",\n  %s\n  "logs": %s,\n  "retry_class": "%s",\n  "terminal_reason": "%s"\n}`),
 		shQuote(jsonStr(taskID)), shQuote(jsonStr(runID)))
-	const flushCp = "aws \"$AWS_REGION_ARG\" s3 cp --no-progress"
-	writeRecordFile(p, flushCp, "$REC", localPath(terminalFileName), "\"$RESULTS_PREFIX/completion.json\"")
-	writeRecordFile(p, flushCp, "-1", localPath(exitCodeFileName), "\"$RESULTS_PREFIX/.exitcode\"")
+	writeRecordFile(p, "spawn_up "+flushCp, "UPLOAD_FAILED=1", "$REC", localPath(terminalFileName), "\"$RESULTS_PREFIX/completion.json\"")
+	writeRecordFile(p, "spawn_up "+flushCp, "UPLOAD_FAILED=1", "-1", localPath(exitCodeFileName), "\"$RESULTS_PREFIX/.exitcode\"")
 
+	// A failed upload is an exit status, not just a line on stderr (#1186):
+	// spored turns a non-zero exit into a console message, a tag and a
+	// notification, which is the only way a flush that did not reach S3 is ever
+	// seen once the instance is gone.
+	p("if [ \"$UPLOAD_FAILED\" != 0 ]; then echo \"spawn: terminal record for task $TASK_ID did NOT fully reach S3\" >&2; exit %d; fi\n", FlushExitUploadFailed)
 	p("echo \"spawn: terminal record written for task $TASK_ID\"\n")
 	p("exit 0\n")
 

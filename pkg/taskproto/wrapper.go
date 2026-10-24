@@ -393,10 +393,10 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	p("printf -v REC %s %s %s \"$rc\" \"$STATE\" \"$STARTED_AT\" \"$ENDED_AT\" \"$COST_JSON\" \"$INSTANCE_JSON\" \"$LOGS_JSON\" \"$RETRY_CLASS\"\n",
 		shQuote(`{\n  "task_id": %s,\n  "run_id": %s,\n  "exit_code": %s,\n  "state": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  %s\n  %s\n  "logs": %s,\n  "retry_class": "%s"\n}`),
 		shQuote(jsonStr(taskID)), shQuote(jsonStr(runID)))
-	writeRecordFile(p, s3Cp, "$REC", CompletionRecordPath(), "\"$RESULTS_PREFIX/completion.json\"")
+	writeRecordFile(p, s3Cp, "true", "$REC", CompletionRecordPath(), "\"$RESULTS_PREFIX/completion.json\"")
 
 	// .exitcode — the plain-integer legacy signal the RFC names.
-	writeRecordFile(p, s3Cp, "$rc", localPath(exitCodeFileName), "\"$RESULTS_PREFIX/.exitcode\"")
+	writeRecordFile(p, s3Cp, "true", "$rc", localPath(exitCodeFileName), "\"$RESULTS_PREFIX/.exitcode\"")
 
 	// ---- signal spored ---- so on_complete fires and `spawn status --check-complete` works.
 	// A pooled worker (signalComplete=false) SKIPS this: writing SPAWN_COMPLETE would
@@ -429,7 +429,10 @@ const s3Cp = "aws s3 cp --no-progress"
 // writeRecordFile emits the write and upload of one terminal record file: the
 // local copy at local, then that copy to dest. value is the shell expression
 // holding the content ("$REC", "$rc"); dest is a shell word; cp is how the
-// upload starts (s3Cp, or the flush hook's region-pinned form).
+// upload starts (s3Cp, or the flush hook's region-pinned form); onFail is the
+// command run when the upload fails ("true" in the wrapper; the flush hook
+// records the failure, #1186 — in a pipeline its uploader runs in a subshell
+// and cannot set the flag itself).
 //
 // The local copy lives on /tmp (recorddir.go), which a container task's
 // staging can fill. A write to a full disk leaves an EMPTY file, and before
@@ -437,11 +440,11 @@ const s3Cp = "aws s3 cp --no-progress"
 // .exitcode, so the record every reader parses said nothing. So the copy is
 // read back and compared with value, and when it does not match, value is
 // piped straight to `aws s3 cp -`, which needs no local disk.
-func writeRecordFile(p func(string, ...interface{}), cp, value, local, dest string) {
+func writeRecordFile(p func(string, ...interface{}), cp, onFail, value, local, dest string) {
 	l := shQuote(local)
 	p("printf '%%s' \"%s\" > %s\n", value, l)
-	p("if [ \"$(cat %s 2>/dev/null)\" = \"%s\" ]; then %s %s %s || true\n", l, value, cp, l, dest)
-	p("else echo 'spawn: could not write (disk full?), uploading from memory:' %s >&2; printf '%%s' \"%s\" | %s - %s || true; fi\n\n", l, value, cp, dest)
+	p("if [ \"$(cat %s 2>/dev/null)\" = \"%s\" ]; then %s %s %s || %s\n", l, value, cp, l, dest, onFail)
+	p("else echo 'spawn: could not write (disk full?), uploading from memory:' %s >&2; printf '%%s' \"%s\" | %s - %s || %s; fi\n\n", l, value, cp, dest, onFail)
 }
 
 // writeDockerInstallStart starts a container task's Docker install in the

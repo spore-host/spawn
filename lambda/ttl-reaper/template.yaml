@@ -40,6 +40,19 @@ Parameters:
     Default: '168h'
     Description: Hard max-age ceiling (Go duration); reaps ANY instance older than this, including one inside a far-future spawn:ttl-deadline — the deadline is instance-writable, so the ceiling is the tamper defence
 
+  TtlGrace:
+    Type: String
+    Default: ''
+    Description: >
+      How long past its TTL deadline a RUNNING instance whose spored still
+      checks in (spawn:last-heartbeat under 10 minutes old) is left for spored
+      to end itself, which it does after flushing the task's command.log and
+      completion record (#1186). A pkg/ttl duration from 0 to 1h. '' (default)
+      is 10m; 0 reaps at the deadline, as before this parameter existed. A
+      stale or missing heartbeat, or a stopped instance, is always reaped at
+      the deadline, and MaxAge still applies. An invalid value means the
+      default.
+
   DryRun:
     Type: String
     Default: 'true'
@@ -291,6 +304,7 @@ Resources:
           EC2_EXTERNAL_ID: spawn-ttl-reaper
           REAPER_REGIONS: !Ref Regions
           REAPER_MAX_AGE: !Ref MaxAge
+          REAPER_TTL_GRACE: !Ref TtlGrace
           REAPER_DRY_RUN: !Ref DryRun
           REAPER_NOTIFY_URL: !Ref NotifyUrl
           REAPER_DNS_ZONE_ID: !Ref DnsZoneId

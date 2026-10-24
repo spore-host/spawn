@@ -137,6 +137,12 @@ type Agent struct {
 	// without real EC2 (spawn#282 phase 3).
 	tagger tagPutter
 
+	// The task flush report's seams (#1186). taskFlushWaitDelay is the hook's
+	// exec.Cmd.WaitDelay (zero means the taskFlushWaitDelay constant);
+	// consoleWriter replaces sysWriteConsole when non-nil. Tests only.
+	taskFlushWaitDelay time.Duration
+	consoleWriter      func(string) error
+
 	// fsxMountStarted guards the async FSx mount (#194/#221) to run at most once.
 	// The mount is (re)triggered from the monitor loop whenever spawn:fsx-pending
 	// becomes visible — it may not be set at spored startup, because the headless
