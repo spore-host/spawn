@@ -288,8 +288,64 @@ LOCAL_SSH_KEY_BASE64=%s
 	// off and the body falls back to sha256-only (honestly logged). The stub
 	// verifies the body against the same key (#1274).
 	script += shellmin.Strip(sporedinstall.KeySetupScript())
+
+	// Defined first, because every abort before spored is running calls it:
+	// the stub's (no verified body) and the body's own (no spored).
+	script += shellmin.Strip(fatalRetireFunc)
 	return script, nil
 }
+
+// FatalRetireFuncName is the shell function a bootstrap calls when it cannot
+// get spored running.
+const FatalRetireFuncName = "spawn_fatal_retire"
+
+// fatalRetireFunc defines spawn_fatal_retire, for every abort that happens
+// before spored is running (#1274). An instance whose bootstrap stops there has
+// nothing enforcing its TTL, idle timeout or cost limit, so leaving it running
+// is a cost leak that only the TTL reaper, in accounts that deploy one, would
+// ever end. So after saying why, loudly (stderr and so cloud-init-output.log,
+// the console, the journal), it terminates the instance.
+//
+// The terminate uses the instance role's TerminateOnlySelf grant
+// (pkg/aws sporedSelfTerminateStatement: ec2:TerminateInstances when aws:ARN
+// equals ${ec2:SourceInstanceARN}, i.e. only the caller itself), which every
+// spored role carries, with the instance ID and region from IMDSv2. Retried
+// briefly, bounded by the CLI's own timeouts. When that cannot work (no aws
+// CLI on the AMI, no egress, a caller-supplied profile without the grant) it
+// falls back to an OS shutdown. spawn sets no InstanceInitiatedShutdownBehavior,
+// so that STOPS the instance rather than terminating it: its volumes still
+// bill, but stopped is far cheaper than running, and the log line says which
+// happened.
+const fatalRetireFunc = `
+# spawn_fatal_retire <reason>: spored is not running, so nothing would enforce
+# this instance's TTL. Report why, then terminate it (#1274).
+spawn_fatal_say() {
+    echo "spawn: $1" >&2
+    echo "spawn: $1" >> /dev/console 2>/dev/null || true
+    logger -p user.crit -t spawn-bootstrap "$1" 2>/dev/null || true
+}
+spawn_fatal_retire() {
+    local tok id region n=0
+    spawn_fatal_say "FATAL: $1 (#1274)"
+    tok=$(curl -sf --connect-timeout 5 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
+    id=$(curl -sf --connect-timeout 5 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
+    region=$(curl -sf --connect-timeout 5 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)
+    if [ -n "$id" ] && [ -n "$region" ] && command -v aws >/dev/null 2>&1; then
+        while [ "$n" -lt 3 ]; do
+            if aws ec2 terminate-instances --region "$region" --instance-ids "$id" --cli-connect-timeout 10 --cli-read-timeout 30 >/dev/null 2>&1; then
+                spawn_fatal_say "terminating $id: with no spored, nothing would enforce its TTL"
+                exit 1
+            fi
+            n=$((n + 1))
+            sleep 5
+        done
+    fi
+    # No InstanceInitiatedShutdownBehavior is set, so this STOPS the instance.
+    spawn_fatal_say "could not terminate this instance (no aws CLI, instance ID or permission); shutting down instead, which STOPS it (spawn sets no InstanceInitiatedShutdownBehavior): its volumes still bill, it no longer runs"
+    shutdown -h now 2>/dev/null || poweroff 2>/dev/null || true
+    exit 1
+}
+`
 
 // perLaunchPreBody is the per-launch content that must be on disk before the
 // body runs: the body's --command block reads the command, the flush hook and
@@ -554,10 +610,9 @@ func publishedBodyVersion(caller string, info *debug.BuildInfo, keyed bool) stri
 // The signature is the spore.host key the stub carries (written by
 // KeySetupScript above), so a bucket that serves the right bytes was also
 // written by the release workflow. Each source is tried until one passes both;
-// if none does, the bootstrap stops before running anything: no spored, no
-// workload, and a message in the journal, on the console and in
-// cloud-init-output.log. An instance without spored is still reaped by the TTL
-// reaper; an instance running an unverified bootstrap as root is not safe.
+// if none does, the bootstrap runs nothing from the body (no spored, no
+// workload) and calls spawn_fatal_retire, which reports why and terminates the
+// instance: running without spored, it would bill with no TTL.
 //
 // Uses only curl flags curl 7.61.1 (EL8) has, and its own retry loop for the
 // same reason as spore_curl_retry (#1056), which is defined in the body and so
@@ -566,13 +621,6 @@ const bodyStubTemplate = `
 # Fetch, verify and run this spawn release's bootstrap body (#1274).
 SPAWN_BS_VERSION=%s
 SPAWN_BS_SHA256=%s
-spawn_bootstrap_abort() {
-    rm -f %[3]s
-    echo "spawn: FATAL: $1. Not running an unverified bootstrap: spored is not installed and no workload starts (#1274)" >&2
-    echo "spawn: FATAL: $1 (#1274)" > /dev/console 2>/dev/null || true
-    logger -p user.crit -t spawn-bootstrap "FATAL: $1 (#1274)" 2>/dev/null || true
-    exit 1
-}
 SPAWN_BS_TOKEN=$(curl -sf --connect-timeout 5 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
 SPAWN_BS_REGION=$(curl -sf --connect-timeout 5 -H "X-aws-ec2-metadata-token: $SPAWN_BS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)
 SPAWN_BS_OK=0
@@ -603,7 +651,10 @@ for SPAWN_BS_BASE in "https://spawn-binaries-${SPAWN_BS_REGION:-us-east-1}.s3.am
     echo "spawn: bootstrap body signature at $SPAWN_BS_URL.sig does not verify" >&2
 done
 rm -f %[3]s.sig %[3]s.der
-[ "$SPAWN_BS_OK" = 1 ] || spawn_bootstrap_abort "no verified bootstrap body for spawn $SPAWN_BS_VERSION"
+if [ "$SPAWN_BS_OK" != 1 ]; then
+    rm -f %[3]s
+    spawn_fatal_retire "no verified bootstrap body for spawn $SPAWN_BS_VERSION; not running an unverified bootstrap, so spored is not installed and no workload starts"
+fi
 echo "Bootstrap body verified (spawn $SPAWN_BS_VERSION, sha256 $SPAWN_BS_SHA256)"
 . %[3]s
 `

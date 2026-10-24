@@ -28,6 +28,7 @@ func staticTemplates() map[string]string {
 		"linuxBootstrapBody":                  linuxBootstrapBody,
 		"spotReplacementStopScript":           spotReplacementStopScript,
 		"bodyStubTemplate":                    bodyStubTemplate,
+		"fatalRetireFunc":                     fatalRetireFunc,
 	}
 }
 

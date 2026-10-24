@@ -330,6 +330,8 @@ func newStubServer(t *testing.T, region string) *stubServer {
 			body, ok = []byte("tok"), true
 		case r.URL.Path == "/imds/latest/meta-data/placement/region":
 			body, ok = []byte(region), true
+		case r.URL.Path == "/imds/latest/meta-data/instance-id":
+			body, ok = []byte("i-0test"), true
 		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -355,21 +357,133 @@ func (s *stubServer) hit(region, key string) int {
 	return s.hits["/b/"+region+"/"+key]
 }
 
-// TestStubRunsOnlyAVerifiedBody executes the real stub under bash, against a
-// stand-in bucket and the real curl and openssl, with a test signing key in
-// place of the spore.host one. The body runs only when it is the exact body
-// this build expects AND carries a valid signature; in every other case the
-// bootstrap stops before running anything at all, loudly.
-func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
+// awsMode is how the stand-in aws CLI behaves in a boot sandbox.
+type awsMode int
+
+const (
+	awsTerminates awsMode = iota // terminate-instances succeeds
+	awsFails                     // every call fails (no permission, no egress)
+	awsAbsent                    // no aws CLI on the AMI
+)
+
+// bootSandbox runs generated user data under bash with a PATH holding only
+// the tools it needs and stand-ins for everything that would touch the
+// machine or AWS: sleep is counted, logger, aws, shutdown and poweroff are
+// recorded. Nothing real can be terminated, shut down or called.
+type bootSandbox struct {
+	t   *testing.T
+	dir string
+	srv *stubServer
+}
+
+func newBootSandbox(t *testing.T, srv *stubServer, aws awsMode, standIns map[string]string) *bootSandbox {
+	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("Linux-only: executes the Linux user-data stub under bash")
+		t.Skip("Linux-only: executes the Linux user data under bash")
 	}
-	for _, tool := range []string{"bash", "curl", "openssl", "base64"} {
-		if _, err := exec.LookPath(tool); err != nil {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	for _, d := range []string{bin, filepath.Join(dir, "tmp"), filepath.Join(dir, "etc", "spawn")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tool := range []string{"bash", "curl", "openssl", "base64", "cut", "rm", "mkdir", "cat", "uname", "mktemp", "awk", "chmod", "mv", "dirname", "tr", "sed", "grep", "head", "cp", "shasum", "perl", "env"} {
+		if p, err := exec.LookPath(tool); err == nil {
+			if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
+				t.Fatal(err)
+			}
+		} else if tool == "bash" || tool == "curl" || tool == "openssl" || tool == "base64" {
 			t.Skipf("%s not available", tool)
 		}
 	}
+	standInSha256sum(t, bin)
+	rec := func(name string) string {
+		return "#!/bin/bash\necho \"$*\" >> " + filepath.Join(dir, name) + "\n"
+	}
+	writeExec(t, filepath.Join(bin, "sleep"), rec("sleeps"))
+	writeExec(t, filepath.Join(bin, "logger"), rec("journal"))
+	writeExec(t, filepath.Join(bin, "shutdown"), rec("shutdowns"))
+	writeExec(t, filepath.Join(bin, "poweroff"), rec("shutdowns"))
+	switch aws {
+	case awsTerminates:
+		writeExec(t, filepath.Join(bin, "aws"), rec("aws-calls")+"exit 0\n")
+	case awsFails:
+		writeExec(t, filepath.Join(bin, "aws"), rec("aws-calls")+"exit 255\n")
+	}
+	for name, body := range standIns {
+		_ = os.Remove(filepath.Join(bin, name))
+		writeExec(t, filepath.Join(bin, name), body)
+	}
+	return &bootSandbox{t: t, dir: dir, srv: srv}
+}
 
+func (sb *bootSandbox) run(script string) (string, error) {
+	sb.t.Helper()
+	rw := strings.NewReplacer(
+		"/etc/spawn", filepath.Join(sb.dir, "etc", "spawn"),
+		"/tmp/", filepath.Join(sb.dir, "tmp")+"/",
+		"/dev/console", filepath.Join(sb.dir, "console"),
+		"/usr/local/bin/spored", filepath.Join(sb.dir, "spored"),
+		"http://169.254.169.254", sb.srv.srv.URL+"/imds",
+		"https://spawn-binaries-", sb.srv.srv.URL+"/b/",
+		".s3.amazonaws.com", "",
+	)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	cmd := exec.Command(filepath.Join(sb.dir, "bin", "bash"), "-c", rw.Replace(script)) //nolint:gosec // this package's own generated script
+	cmd.Env = []string{"PATH=" + filepath.Join(sb.dir, "bin"), "HOME=" + sb.dir}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func (sb *bootSandbox) read(name string) string { return string(readOr(filepath.Join(sb.dir, name))) }
+
+const selfTerminateCall = "ec2 terminate-instances --region eu-west-1 --instance-ids i-0test"
+
+// assertRetired checks that a bootstrap that could not get spored running
+// said why everywhere a person would look, and then terminated the instance
+// it runs on (or, with no way to terminate, shut it down).
+func assertRetired(t *testing.T, sb *bootSandbox, out string, err error, reason string, aws awsMode) {
+	t.Helper()
+	if err == nil {
+		t.Errorf("the bootstrap exited 0 after a fatal failure\n%s", out)
+	}
+	for where, b := range map[string]string{"stderr": out, "console": sb.read("console"), "journal": sb.read("journal")} {
+		if !strings.Contains(b, reason) {
+			t.Errorf("the abort (%q) did not reach the %s: %q", reason, where, b)
+		}
+	}
+	calls := sb.read("aws-calls")
+	switch aws {
+	case awsTerminates:
+		if strings.Count(calls, selfTerminateCall) != 1 {
+			t.Errorf("the instance did not terminate itself once; aws calls: %q", calls)
+		}
+		if sb.read("shutdowns") != "" {
+			t.Errorf("shut down after a successful terminate: %q", sb.read("shutdowns"))
+		}
+	case awsFails:
+		if n := strings.Count(calls, selfTerminateCall); n != 3 {
+			t.Errorf("the self-terminate was tried %d times, want 3 (bounded retry): %q", n, calls)
+		}
+		fallthrough
+	case awsAbsent:
+		if !strings.Contains(sb.read("shutdowns"), "-h now") {
+			t.Errorf("with no working terminate, the instance was not shut down; shutdowns: %q", sb.read("shutdowns"))
+		}
+		if !strings.Contains(out, "STOPS") {
+			t.Errorf("the shutdown fallback does not say it only stops the instance\n%s", out)
+		}
+	}
+}
+
+// TestStubRunsOnlyAVerifiedBody executes the real stub under bash, against a
+// stand-in bucket and IMDS and the real curl and openssl, with a test signing
+// key in place of the spore.host one. The body runs only when it is the exact
+// body this build expects AND carries a valid signature; in every other case
+// the bootstrap runs nothing from it, says why, and terminates the instance,
+// which would otherwise bill with no spored to enforce its TTL.
+func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -390,8 +504,8 @@ func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 		return []byte(base64.StdEncoding.EncodeToString(sig) + "\n")
 	}
 
-	// The body this build expects, and the user data that expects it.
-	// $HOME is the sandbox: the fetched body is not rewritten as the script is.
+	// The body this build expects, and the user data that expects it. $HOME is
+	// the sandbox: the fetched body is not rewritten as the script is.
 	body := []byte("echo body > \"$HOME/BODY_RAN\"\n")
 	other := []byte("echo other > \"$HOME/BODY_RAN\"\n")
 	key := BootstrapBodyKey(testRelease)
@@ -401,22 +515,26 @@ func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	const reason = "no verified bootstrap body for spawn " + testRelease
 
 	cases := map[string]struct {
 		regional, fallback [2][]byte // body, sig; nil = 404
 		wantRun            bool
+		aws                awsMode
 	}{
-		"verified regional body runs":                {[2][]byte{body, sign(body)}, [2][]byte{}, true},
-		"tampered regional falls back to us-east-1":  {[2][]byte{other, sign(body)}, [2][]byte{body, sign(body)}, true},
-		"tampered body":                              {[2][]byte{other, sign(body)}, [2][]byte{other, sign(body)}, false},
-		"bad signature":                              {[2][]byte{body, sign(other)}, [2][]byte{body, sign(other)}, false},
-		"another release's body, validly signed":     {[2][]byte{other, sign(other)}, [2][]byte{other, sign(other)}, false},
-		"no signature published":                     {[2][]byte{body, nil}, [2][]byte{body, nil}, false},
-		"nothing published":                          {[2][]byte{}, [2][]byte{}, false},
-		"signature that is not base64 DER at all":    {[2][]byte{body, []byte("not a signature")}, [2][]byte{}, false},
-		"empty regional object, us-east-1 good":      {[2][]byte{{}, {}}, [2][]byte{body, sign(body)}, true},
-		"good body, signature by a key spawn lacks":  {[2][]byte{body, otherKeySig(t, body)}, [2][]byte{}, false},
-		"regional good even when us-east-1 tampered": {[2][]byte{body, sign(body)}, [2][]byte{other, sign(other)}, true},
+		"verified regional body runs":                {[2][]byte{body, sign(body)}, [2][]byte{}, true, awsTerminates},
+		"tampered regional falls back to us-east-1":  {[2][]byte{other, sign(body)}, [2][]byte{body, sign(body)}, true, awsTerminates},
+		"tampered body":                              {[2][]byte{other, sign(body)}, [2][]byte{other, sign(body)}, false, awsTerminates},
+		"bad signature":                              {[2][]byte{body, sign(other)}, [2][]byte{body, sign(other)}, false, awsTerminates},
+		"another release's body, validly signed":     {[2][]byte{other, sign(other)}, [2][]byte{other, sign(other)}, false, awsTerminates},
+		"no signature published":                     {[2][]byte{body, nil}, [2][]byte{body, nil}, false, awsTerminates},
+		"nothing published":                          {[2][]byte{}, [2][]byte{}, false, awsTerminates},
+		"signature that is not base64 DER at all":    {[2][]byte{body, []byte("not a signature")}, [2][]byte{}, false, awsTerminates},
+		"empty regional object, us-east-1 good":      {[2][]byte{{}, {}}, [2][]byte{body, sign(body)}, true, awsTerminates},
+		"good body, signature by a key spawn lacks":  {[2][]byte{body, otherKeySig(t, body)}, [2][]byte{}, false, awsTerminates},
+		"regional good even when us-east-1 tampered": {[2][]byte{body, sign(body)}, [2][]byte{other, sign(other)}, true, awsTerminates},
+		"tampered, and the terminate fails":          {[2][]byte{other, sign(body)}, [2][]byte{}, false, awsFails},
+		"tampered, and no aws CLI on the AMI":        {[2][]byte{other, sign(body)}, [2][]byte{}, false, awsAbsent},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -429,43 +547,22 @@ func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 					srv.put(region, key+".sig", obj[1])
 				}
 			}
+			sb := newBootSandbox(t, srv, tc.aws, nil)
+			out, err := sb.run(script)
 
-			dir := t.TempDir()
-			for _, d := range []string{"bin", "tmp", "etc/spawn"} {
-				if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
-			// sleep is counted, not slept; logger records the journal line.
-			writeExec(t, filepath.Join(dir, "bin", "sleep"), "#!/bin/bash\necho x >> "+filepath.Join(dir, "sleeps")+"\n")
-			writeExec(t, filepath.Join(dir, "bin", "logger"), "#!/bin/bash\necho \"$*\" >> "+filepath.Join(dir, "journal")+"\n")
-			standInSha256sum(t, filepath.Join(dir, "bin"))
-			rw := strings.NewReplacer(
-				"/etc/spawn", filepath.Join(dir, "etc", "spawn"),
-				"/tmp/", filepath.Join(dir, "tmp")+"/",
-				"/dev/console", filepath.Join(dir, "console"),
-				"http://169.254.169.254", srv.srv.URL+"/imds",
-				"https://spawn-binaries-", srv.srv.URL+"/b/",
-				".s3.amazonaws.com", "",
-			)
-			// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-			cmd := exec.Command("bash", "-c", rw.Replace(script)) //nolint:gosec // this package's own generated script
-			cmd.Env = []string{"PATH=" + filepath.Join(dir, "bin") + ":/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin", "HOME=" + dir}
-			out, err := cmd.CombinedOutput()
-
-			ran := fileExists(filepath.Join(dir, "BODY_RAN"))
-			post := fileExists(filepath.Join(dir, "tmp", "POST_RAN"))
+			ran := fileExists(filepath.Join(sb.dir, "BODY_RAN"))
+			post := fileExists(filepath.Join(sb.dir, "tmp", "POST_RAN"))
 			if tc.wantRun {
 				if err != nil || !ran || !post {
 					t.Fatalf("a verified body did not run: err=%v body=%v post=%v\n%s", err, ran, post, out)
 				}
-				if got, _ := os.ReadFile(filepath.Join(dir, "BODY_RAN")); string(got) != "body\n" {
+				if got := sb.read("BODY_RAN"); got != "body\n" {
 					t.Errorf("the body that ran wrote %q, want the expected body's output", got)
 				}
+				if c := sb.read("aws-calls"); c != "" {
+					t.Errorf("a verified boot called aws: %q", c)
+				}
 				return
-			}
-			if err == nil {
-				t.Errorf("the bootstrap exited 0 without a verified body\n%s", out)
 			}
 			if ran {
 				t.Errorf("an unverified body ran\n%s", out)
@@ -473,11 +570,10 @@ func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 			if post {
 				t.Errorf("the launch's own user data ran after the body failed verification\n%s", out)
 			}
-			for where, b := range map[string][]byte{"stderr": out, "console": readOr(filepath.Join(dir, "console")), "journal": readOr(filepath.Join(dir, "journal"))} {
-				if !bytes.Contains(b, []byte("no verified bootstrap body for spawn "+testRelease)) {
-					t.Errorf("the abort did not reach the %s: %q", where, b)
-				}
+			if fileExists(filepath.Join(sb.dir, "etc", "spawn", "bootstrap-body.sh")) {
+				t.Error("the unverified body was left on disk")
 			}
+			assertRetired(t, sb, out, err, reason, tc.aws)
 			// Both sources were tried before giving up.
 			if srv.hit("us-east-1", key) == 0 {
 				t.Error("the us-east-1 fallback was never tried")
@@ -489,21 +585,8 @@ func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 		srv := newStubServer(t, "eu-west-1")
 		srv.put("us-east-1", key, body)
 		srv.put("us-east-1", key+".sig", sign(body))
-		dir := t.TempDir()
-		for _, d := range []string{"bin", "tmp", "etc/spawn"} {
-			if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}
-		writeExec(t, filepath.Join(dir, "bin", "sleep"), "#!/bin/bash\n")
-		standInSha256sum(t, filepath.Join(dir, "bin"))
-		rw := strings.NewReplacer("/etc/spawn", filepath.Join(dir, "etc", "spawn"), "/tmp/", filepath.Join(dir, "tmp")+"/",
-			"/dev/console", filepath.Join(dir, "console"), "http://169.254.169.254", srv.srv.URL+"/imds",
-			"https://spawn-binaries-", srv.srv.URL+"/b/", ".s3.amazonaws.com", "")
-		// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-		cmd := exec.Command("bash", "-c", rw.Replace(script)) //nolint:gosec // this package's own generated script
-		cmd.Env = []string{"PATH=" + filepath.Join(dir, "bin") + ":/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin", "HOME=" + dir}
-		if out, err := cmd.CombinedOutput(); err != nil {
+		sb := newBootSandbox(t, srv, awsTerminates, nil)
+		if out, err := sb.run(script); err != nil {
 			t.Fatalf("%v\n%s", err, out)
 		}
 		if n := srv.hit("eu-west-1", key); n < 2 {
@@ -522,10 +605,11 @@ func standInSha256sum(t *testing.T, binDir string) {
 		}
 		return
 	}
-	if _, err := exec.LookPath("shasum"); err != nil {
+	sh, err := exec.LookPath("shasum")
+	if err != nil {
 		t.Skip("neither sha256sum nor shasum available")
 	}
-	writeExec(t, filepath.Join(binDir, "sha256sum"), "#!/bin/bash\nexec shasum -a 256 \"$@\"\n")
+	writeExec(t, filepath.Join(binDir, "sha256sum"), "#!/bin/bash\nexec "+sh+" -a 256 \"$@\"\n")
 }
 
 func otherKeySig(t *testing.T, b []byte) []byte {
