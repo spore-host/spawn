@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"go/ast"
 	"go/parser"
@@ -383,12 +384,15 @@ func newBootSandbox(t *testing.T, srv *stubServer, aws awsMode, standIns map[str
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
-	for _, d := range []string{bin, filepath.Join(dir, "tmp"), filepath.Join(dir, "etc", "spawn")} {
+	for _, d := range []string{bin, filepath.Join(dir, "tmp"), filepath.Join(dir, "etc", "spawn"),
+		filepath.Join(dir, "etc", "sudoers.d"), filepath.Join(dir, "etc", "profile.d"), filepath.Join(dir, "etc", "ssh"),
+		filepath.Join(dir, "etc", "systemd", "system"), filepath.Join(dir, "home"), filepath.Join(dir, "var", "log"),
+		filepath.Join(dir, "var", "lib"), filepath.Join(dir, "run", "spawn")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, tool := range []string{"bash", "curl", "openssl", "base64", "cut", "rm", "mkdir", "cat", "uname", "mktemp", "awk", "chmod", "mv", "dirname", "tr", "sed", "grep", "head", "cp", "shasum", "perl", "env"} {
+	for _, tool := range []string{"bash", "curl", "openssl", "base64", "cut", "rm", "mkdir", "cat", "uname", "mktemp", "awk", "chmod", "mv", "dirname", "tr", "sed", "grep", "head", "cp", "shasum", "perl", "env", "tee", "touch", "date"} {
 		if p, err := exec.LookPath(tool); err == nil {
 			if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
 				t.Fatal(err)
@@ -421,7 +425,10 @@ func newBootSandbox(t *testing.T, srv *stubServer, aws awsMode, standIns map[str
 func (sb *bootSandbox) run(script string) (string, error) {
 	sb.t.Helper()
 	rw := strings.NewReplacer(
-		"/etc/spawn", filepath.Join(sb.dir, "etc", "spawn"),
+		"/etc/", filepath.Join(sb.dir, "etc")+"/",
+		"/home/", filepath.Join(sb.dir, "home")+"/",
+		"/var/", filepath.Join(sb.dir, "var")+"/",
+		"/run/", filepath.Join(sb.dir, "run")+"/",
 		"/tmp/", filepath.Join(sb.dir, "tmp")+"/",
 		"/dev/console", filepath.Join(sb.dir, "console"),
 		"/usr/local/bin/spored", filepath.Join(sb.dir, "spored"),
@@ -506,8 +513,10 @@ func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 
 	// The body this build expects, and the user data that expects it. $HOME is
 	// the sandbox: the fetched body is not rewritten as the script is.
-	body := []byte("echo body > \"$HOME/BODY_RAN\"\n")
-	other := []byte("echo other > \"$HOME/BODY_RAN\"\n")
+	// Like the real body, it marks spored as started (SPAWN_SPORED_UP=1), or the
+	// exit guard would retire the instance at the end of the script.
+	body := []byte("echo body > \"$HOME/BODY_RAN\"\nSPAWN_SPORED_UP=1\n")
+	other := []byte("echo other > \"$HOME/BODY_RAN\"\nSPAWN_SPORED_UP=1\n")
 	key := BootstrapBodyKey(testRelease)
 	script, err := buildLinuxBootstrap(BootstrapConfig{
 		Username: "tester", CustomUserData: "echo post > /tmp/POST_RAN\n",
@@ -663,3 +672,120 @@ func otherKeySig(t *testing.T, b []byte) []byte {
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 func readOr(p string) []byte { b, _ := os.ReadFile(p); return b }
+
+// fullBoot runs the whole inline bootstrap, spored install included, in a
+// boot sandbox: a test-key-signed fake spored is served from the stand-in
+// bucket, and every command that would change the machine is a stand-in.
+// failSystemctl names systemctl arguments that fail (e.g. "acpid").
+func fullBoot(t *testing.T, cfg BootstrapConfig, failSystemctl string) (*bootSandbox, string, error) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevKey := sporedinstall.SigningKeyPEM
+	t.Cleanup(func() { sporedinstall.SigningKeyPEM = prevKey })
+	sporedinstall.SigningKeyPEM = strings.TrimSpace(string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})))
+
+	// The fake spored answers the Spot-replacement check "original".
+	spored := []byte("#!/bin/bash\n[ \"$1\" = is-spot-replacement ] && exit 1\nexit 0\n")
+	sum := sha256.Sum256(spored)
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, sum[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newStubServer(t, "eu-west-1")
+	srv.put("eu-west-1", "spawn/spored-linux-amd64", spored)
+	srv.put("eu-west-1", "spawn/spored-linux-amd64.sha256", []byte(hex.EncodeToString(sum[:])+"\n"))
+	srv.put("eu-west-1", "spawn/spored-linux-amd64.sig", []byte(base64.StdEncoding.EncodeToString(sig)+"\n"))
+
+	script, err := buildLinuxBootstrap(cfg, "", BootstrapBody())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := "#!/bin/bash\nexit 0\n"
+	sb := newBootSandbox(t, srv, awsTerminates, map[string]string{
+		"uname": "#!/bin/bash\necho x86_64\n",
+		// describe-tags finds no tag; terminate-instances is recorded.
+		"aws":          "#!/bin/bash\necho \"$*\" >> \"$HOME/aws-calls\"\n[ \"$2\" = describe-tags ] && echo None\nexit 0\n",
+		"ec2-metadata": "#!/bin/bash\necho 'instance-id: i-0test'\n",
+		"systemctl": "#!/bin/bash\necho \"$*\" >> \"$HOME/systemctl-calls\"\n" +
+			"if [ -n '" + failSystemctl + "' ] && [[ \"$*\" == *'" + failSystemctl + "'* ]]; then exit 1; fi\nexit 0\n",
+		// The 0.5 GiB instance: the package manager is OOM-killed.
+		"dnf": "#!/bin/bash\nexit 137\n", "yum": "#!/bin/bash\nexit 137\n",
+		"id": "#!/bin/bash\nexit 1\n", "useradd": ok, "usermod": ok, "chown": ok,
+		"su": "#!/bin/bash\nexec bash \"$4\"\n",
+	})
+	out, err := sb.run(script)
+	return sb, out, err
+}
+
+func sporedStarted(sb *bootSandbox) bool {
+	return strings.Contains(sb.read("systemctl-calls"), "start spored")
+}
+
+func retired(sb *bootSandbox) bool {
+	return strings.Contains(sb.read("aws-calls"), "terminate-instances")
+}
+
+// TestSporedStartsAndNoFailureLeavesAnInstanceWithoutIt is the #1274 live
+// finding. On a t4g.nano, dnf was OOM-killed installing acpid, the
+// `systemctl enable --now acpid` after it failed under set -e, and the body
+// stopped before `systemctl start spored`: the --command (already running in
+// the background) ran on an instance with no spored, no TTL and no
+// on-complete. spored now starts before every optional step, and any exit of
+// the bootstrap before spored is running retires the instance.
+func TestSporedStartsAndNoFailureLeavesAnInstanceWithoutIt(t *testing.T) {
+	t.Run("a failing optional step does not stop spored starting", func(t *testing.T) {
+		sb, out, err := fullBoot(t, BootstrapConfig{Username: "tester", CustomUserData: "echo post > /tmp/POST_RAN\n"}, "acpid")
+		if err != nil {
+			t.Fatalf("the bootstrap failed on an optional step: %v\n%s", err, out)
+		}
+		if !sporedStarted(sb) {
+			t.Fatalf("spored was never started\n%s", out)
+		}
+		if retired(sb) {
+			t.Error("a healthy instance with spored running was terminated")
+		}
+		if !fileExists(filepath.Join(sb.dir, "tmp", "POST_RAN")) {
+			t.Error("the custom user data did not run")
+		}
+	})
+	t.Run("an unhandled failure before spored starts retires the instance", func(t *testing.T) {
+		for _, fail := range []string{"daemon-reload", "start spored"} {
+			sb, out, err := fullBoot(t, BootstrapConfig{Username: "tester", CustomUserData: "echo post > /tmp/POST_RAN\n"}, fail)
+			assertRetired(t, sb, out, err, "before spored started", awsTerminates)
+			if !strings.Contains(out, "last failed command: line ") {
+				t.Errorf("%s: the retire does not name the failing command\n%s", fail, out)
+			}
+			if fileExists(filepath.Join(sb.dir, "tmp", "POST_RAN")) {
+				t.Errorf("%s: the custom user data ran after the bootstrap failed", fail)
+			}
+		}
+	})
+	t.Run("a --command that fails in the background does not retire the instance", func(t *testing.T) {
+		sb, out, err := fullBoot(t, BootstrapConfig{Username: "tester", Command: "echo running; exit 3"}, "")
+		if err != nil {
+			t.Fatalf("the bootstrap failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(sb.read("var/log/spawn-command.log"), "running") {
+			t.Fatalf("the command never ran\n%s", out)
+		}
+		if !strings.Contains(sb.read("tmp/SPAWN_COMPLETE"), `"exit_code": 3`) {
+			t.Fatalf("the command's failure was not recorded: %q\n%s", sb.read("tmp/SPAWN_COMPLETE"), out)
+		}
+		if retired(sb) {
+			t.Errorf("the instance was terminated because its workload failed\n%s", out)
+		}
+	})
+	t.Run("a normal boot does not retire the instance", func(t *testing.T) {
+		sb, out, err := fullBoot(t, BootstrapConfig{Username: "tester", Command: "true"}, "")
+		if err != nil || !sporedStarted(sb) || retired(sb) {
+			t.Fatalf("err=%v spored=%v retired=%v\n%s", err, sporedStarted(sb), retired(sb), out)
+		}
+	})
+}

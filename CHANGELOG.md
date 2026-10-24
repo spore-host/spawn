@@ -42,8 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permission) it shuts down, which stops the instance. The per-launch parts (key, command, task flush
   hook, readiness gates, plugins, storage, container, custom user data) stay
   inline, in the same order around the body as before. User data shrinks from
-  7,253 to 1,586 bytes gzipped for a bare launch, and from 9,324 to 3,791 for a
-  trivial `spawn task run`, which leaves a task about 12.6 KB of EC2's 16 KiB.
+  7,253 to 1,771 bytes gzipped for a bare launch, and from 9,324 to 3,968 for a
+  trivial `spawn task run`, which leaves a task about 12.4 KB of EC2's 16 KiB.
   Every launch path gets the stub: `spawn launch` (single, array, sweep, batch
   queue, resume), `spawn task run`, `burst`, `pool`, and `launcher.Provision`
   (lagotto, the MCP server), which uses the spawn release it was built against.
@@ -61,6 +61,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A low-memory instance (e.g. t4g.nano) could run its workload with no spored,
+  and so no TTL and no on-complete, when an optional package install was
+  OOM-killed** (#1274). The bootstrap installed acpid with dnf before starting
+  spored; on a 0.5 GiB instance dnf was killed, `systemctl enable --now acpid`
+  then failed, `set -e` ended the bootstrap, and `systemctl start spored` never
+  ran, while the `--command` started earlier kept running and the instance kept
+  billing. spored now starts right after its verified install, before every
+  optional step (acpid, which is no longer fatal, the login banner, session
+  timeouts, the user, hostname and array/sweep setup, and the `--command`).
+  And any exit of the bootstrap before spored is running, for any reason, now
+  retires the instance, naming the command that failed.
 - **`spored reload` now reaches the running daemon** (#1278). It used to
   reload a throwaway agent in its own short-lived process and print that
   agent's config, so the daemon kept its old TTL, cost limit and other

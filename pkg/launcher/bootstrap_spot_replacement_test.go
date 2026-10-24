@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/shellmin"
 	"github.com/spore-host/spawn/pkg/plugin"
 )
 
@@ -199,12 +200,18 @@ func TestNothingAfterSporedStartsOnASpotReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			const start = "systemctl start spored\n"
+			// From the Spot-replacement stop at the end of the body: spored now
+			// starts early in the body (#1274), so what follows it there is the
+			// body's own setup, not the post-body content this test is about.
+			start := shellmin.Strip(spotReplacementStopScript)
 			i := strings.Index(script, start)
 			if i < 0 {
-				t.Fatal("systemctl start spored not found")
+				t.Fatal("the Spot-replacement stop was not found")
 			}
-			tail := script[i+len(start):] + "\necho " + appendedMarker + "\n"
+			if j := strings.Index(script, "systemctl start spored\n"); j < 0 || j > i {
+				t.Fatal("spored does not start before the Spot-replacement stop")
+			}
+			tail := script[i:] + "\necho " + appendedMarker + "\n"
 
 			sb := newSpotSandbox(t, tc.stub)
 			out, err := sb.run(t, "set -e\n"+checkFunc(t, script)+tail)

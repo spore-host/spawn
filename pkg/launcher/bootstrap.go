@@ -322,6 +322,7 @@ spawn_fatal_say() {
 }
 spawn_fatal_retire() {
     local tok id region n=0
+    trap - EXIT
     spawn_fatal_say "FATAL: $1 (#1274)"
     tok=$(curl -sf --connect-timeout 5 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
     id=$(curl -sf --connect-timeout 5 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
@@ -341,6 +342,22 @@ spawn_fatal_retire() {
     shutdown -h now 2>/dev/null || poweroff 2>/dev/null || true
     exit 1
 }
+# Safety net: ANY exit of this script before spored is running retires the
+# instance, not only the aborts that call spawn_fatal_retire themselves. The
+# body sets SPAWN_SPORED_UP=1 once spored has started.
+SPAWN_SPORED_UP=0
+SPAWN_MAIN_PID=$$
+SPAWN_LAST_FAILED="none"
+trap 'SPAWN_LAST_FAILED="line $LINENO: $BASH_COMMAND"' ERR
+spawn_exit_guard() {
+    local rc=$?
+    # Only the bootstrap shell itself: a subshell, such as the backgrounded
+    # --command, exits on its own terms and must never retire the instance.
+    [ "${BASHPID:-$$}" = "$SPAWN_MAIN_PID" ] || return 0
+    [ "$SPAWN_SPORED_UP" = 1 ] && return 0
+    spawn_fatal_retire "the bootstrap exited (status $rc) before spored started; last failed command: $SPAWN_LAST_FAILED"
+}
+trap spawn_exit_guard EXIT
 `
 
 // perLaunchPreBody is the per-launch content that must be on disk before the
@@ -780,6 +797,58 @@ if ! spore_install_verified_spored "$BINARY" \
     spawn_fatal_retire "spored install failed; not running an unverified agent"
 fi
 
+# Create systemd service
+cat > /etc/systemd/system/spored.service <<'EOFSERVICE'
+[Unit]
+Description=Spawn Agent - Instance self-monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# SigV4-sign DNS registration requests (#173). This is now REQUIRED, not
+# anticipatory: the DNS Function URL is AuthType: AWS_IAM (verified against the
+# live function 2026-10-11), so an unsigned request is rejected at the URL and the
+# instance never registers. The comment here said the URL "is still AuthType:
+# NONE, which ignores the signature" long after the cutover landed, which reads as
+# though this variable were optional — it is load-bearing.
+#
+# The staged rollout it describes did work as intended: signing shipped first so a
+# fleet was already signing before the flip, and old non-signing instances aged
+# out under their TTLs ("everything dies").
+Environment=SPORE_DNS_SIGV4=1
+ExecStart=/usr/local/bin/spored
+# on-failure (not always) prevents restart attempts during graceful shutdown
+Restart=on-failure
+RestartSec=10
+# Give spored time to deregister DNS and clean up before SIGKILL
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+# Do NOT set PrivateTmp=true: spored must see the host /tmp/SPAWN_COMPLETE
+# completion file written by users / spawn connect / nf-spawn. PrivateTmp
+# isolates the daemon's /tmp and silently breaks --on-complete/--pre-stop (#66).
+
+[Install]
+WantedBy=multi-user.target
+EOFSERVICE
+# Policy-default SELinux label on the unit, as the installer did for the binary
+# (#1052). A no-op without SELinux.
+spore_selinux_relabel /etc/systemd/system/spored.service
+
+# Enable and start. As early as it can be (#1274): right after the verified
+# install, before every optional step below, so a failure in one of those can
+# no longer leave the instance without TTL, idle and cost enforcement. Its one
+# input written by this script, plugins.json, is already on disk (#1023).
+systemctl daemon-reload
+systemctl enable spored
+systemctl start spored
+# From here a failure no longer retires the instance: spored enforces its TTL.
+SPAWN_SPORED_UP=1
+
+echo "spored installation complete"
+
 # Setup local user account
 echo "Setting up user: $LOCAL_USERNAME"
 
@@ -1102,11 +1171,12 @@ EOFCMD
     # "Action when workload signals completion") never fired on this path and the
     # instance burned its whole TTL whether the command succeeded or failed.
     #
-    # MUST STAY BACKGROUNDED: spored is installed and started LATER in this script.
-    # Waiting here blocks cloud-init, so spored would not start — and TTL, idle and
-    # cost enforcement would all be unarmed — for as long as the command runs. That
-    # is the spored#65 failure (never block the ticker startup path) and is worse
-    # than the bug this fixes. The subshell gives us the exit code without waiting.
+    # MUST STAY BACKGROUNDED: waiting here blocks cloud-init, so the storage,
+    # container and custom user data after this point would not run for as long
+    # as the command does. It was worse when spored started after this block
+    # (the spored#65 failure, never block the ticker startup path); spored now
+    # starts earlier (#1274), but the rest of the bootstrap still waits on this.
+    # The subshell gives us the exit code without waiting.
     (
         # A Spot replacement re-runs this user data, so without this it would
         # re-run the user's workload, side effects and all, while spored works
@@ -1316,54 +1386,15 @@ chmod 644 /etc/motd
 echo "✅ Login banner created"
 
 # Install acpid so AWS stop/terminate signals trigger a graceful shutdown
-# rather than a hard kill after the ACPI timeout.
-dnf install -y acpid 2>/dev/null || yum install -y acpid 2>/dev/null || true
-systemctl enable --now acpid
-
-# Create systemd service
-cat > /etc/systemd/system/spored.service <<'EOFSERVICE'
-[Unit]
-Description=Spawn Agent - Instance self-monitoring
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-# SigV4-sign DNS registration requests (#173). This is now REQUIRED, not
-# anticipatory: the DNS Function URL is AuthType: AWS_IAM (verified against the
-# live function 2026-10-11), so an unsigned request is rejected at the URL and the
-# instance never registers. The comment here said the URL "is still AuthType:
-# NONE, which ignores the signature" long after the cutover landed, which reads as
-# though this variable were optional — it is load-bearing.
-#
-# The staged rollout it describes did work as intended: signing shipped first so a
-# fleet was already signing before the flip, and old non-signing instances aged
-# out under their TTLs ("everything dies").
-Environment=SPORE_DNS_SIGV4=1
-ExecStart=/usr/local/bin/spored
-# on-failure (not always) prevents restart attempts during graceful shutdown
-Restart=on-failure
-RestartSec=10
-# Give spored time to deregister DNS and clean up before SIGKILL
-TimeoutStopSec=30
-StandardOutput=journal
-StandardError=journal
-NoNewPrivileges=true
-# Do NOT set PrivateTmp=true: spored must see the host /tmp/SPAWN_COMPLETE
-# completion file written by users / spawn connect / nf-spawn. PrivateTmp
-# isolates the daemon's /tmp and silently breaks --on-complete/--pre-stop (#66).
-
-[Install]
-WantedBy=multi-user.target
-EOFSERVICE
-# Policy-default SELinux label on the unit, as the installer did for the binary
-# (#1052). A no-op without SELinux.
-spore_selinux_relabel /etc/systemd/system/spored.service
-
-# Enable and start
-systemctl daemon-reload
-systemctl enable spored
-systemctl start spored
-
-echo "spored installation complete"
+# rather than a hard kill after the ACPI timeout. Optional, so never fatal: on a
+# 0.5 GiB instance (t4g.nano) dnf was OOM-killed here, the install failed
+# quietly, and the enable that used to follow then failed under set -e. That
+# was after the --command had started and before spored did, so the workload
+# ran on an instance with no TTL (#1274). spored is started above now, and a
+# failure here is reported, not fatal.
+if dnf install -y acpid 2>/dev/null || yum install -y acpid 2>/dev/null; then
+    systemctl enable --now acpid 2>/dev/null || echo "acpid installed but not started; stop/terminate will not shut down gracefully"
+else
+    echo "acpid not installed; stop/terminate will not shut down gracefully"
+fi
 `
