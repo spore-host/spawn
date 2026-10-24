@@ -67,6 +67,10 @@ func GeneratePooledJobScript(spec *TaskSpec, opts WrapperOptions) (string, error
 	if err := opts.Validate(); err != nil {
 		return "", err
 	}
+	// A pooled job never gets the host's Docker socket (#1231): see ValidatePooled.
+	if msg := spec.pooledProblem(); msg != "" {
+		return "", fmt.Errorf("invalid task spec:\n  - %s", msg)
+	}
 	return generateWrapper(spec, opts.ResultsPrefix, opts.Region, false, opts.GPU, opts.RunID), nil
 }
 
@@ -641,7 +645,16 @@ func writeContainerRun(p func(string, ...interface{}), spec *TaskSpec, region st
 	if f := shmSizeFlag(spec.Resources); f != "" {
 		shmFlag = f + " "
 	}
-	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s%s%s%s %s\n", envFlags.String(), gpuFlag, shmFlag, tmpFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
+	// container_docker_socket (#1231): the host's dockerd socket plus its group,
+	// so an engine image can start sibling containers while still running as the
+	// wrapper's uid (--user stays). Root-equivalent on the host, hence opt-in;
+	// ValidatePooled keeps it off shared workers.
+	sockFlag := ""
+	if spec.ContainerDockerSocket {
+		sockFlag = "-v /var/run/docker.sock:/var/run/docker.sock --group-add \"$(stat -c %g /var/run/docker.sock)\" "
+		p("  echo 'spawn: container_docker_socket: the host Docker socket is mounted (root-equivalent on this instance)'\n")
+	}
+	p("  sudo docker run --rm --user \"$(id -u):$(id -g)\" %s%s%s%s%s%s%s %s\n", envFlags.String(), gpuFlag, shmFlag, tmpFlag, sockFlag, mounts.String(), shQuote(image), quoteArgv(spec.Command))
 	p("  rc=$?\n")
 	p("  spawn_phase \"command exit rc=$rc\"\n")
 	p("  fi\n") // closes the RUNTIME_RC guard opened after the Docker install

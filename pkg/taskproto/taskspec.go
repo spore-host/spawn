@@ -53,6 +53,17 @@ type TaskSpec struct {
 	// that, and deletion is irreversible. Even when set, the sweeper re-verifies
 	// at deletion time that every input is unchanged and the recipe is readable.
 	Regenerable bool `json:"regenerable,omitempty"`
+
+	// ContainerDockerSocket bind-mounts the host's Docker socket into the
+	// container and adds the socket's group, so a workflow engine image
+	// (Cromwell's local backend, miniwdl, Nextflow with docker.enabled) can
+	// start its own task containers as siblings (#1231). Off by default and
+	// opt-in per spec because access to the socket is ROOT-EQUIVALENT on the
+	// host: anything that can talk to dockerd can start a privileged container
+	// that mounts /. Requires container; refused for a pooled task, where one
+	// task could then control the other tasks on its shared worker
+	// (ValidatePooled). Recorded in the provenance recipe.
+	ContainerDockerSocket bool `json:"container_docker_socket,omitempty"`
 }
 
 // ResourceRequest is what the sizer maps to an instance type.
@@ -281,6 +292,9 @@ func (s *TaskSpec) Validate() error {
 	if msg := s.shmProblem(); msg != "" {
 		add("%s", msg)
 	}
+	if s.ContainerDockerSocket && s.Container == "" {
+		add("container_docker_socket applies only to a container task (set container, or remove container_docker_socket)")
+	}
 	if s.Lifecycle.CostLimit < 0 {
 		add("lifecycle.cost_limit must be non-negative")
 	}
@@ -354,6 +368,34 @@ func (s *TaskSpec) Validate() error {
 		return fmt.Errorf("invalid task spec:\n  - %s", strings.Join(probs, "\n  - "))
 	}
 	return nil
+}
+
+// ValidatePooled is Validate plus the restrictions of a POOLED task, which runs
+// on a worker shared with other tasks (#70) rather than on an instance of its
+// own. Every pooled entry point checks it: submission (taskpool.Pool.Enqueue),
+// the worker before it runs a staged spec, and GeneratePooledJobScript.
+//
+// container_docker_socket is refused (#1231): the socket is root-equivalent on
+// the worker, so one task could read, alter or kill the other tasks running
+// there, and their staged inputs and outputs.
+func (s *TaskSpec) ValidatePooled() error {
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	if msg := s.pooledProblem(); msg != "" {
+		return fmt.Errorf("invalid task spec:\n  - %s", msg)
+	}
+	return nil
+}
+
+// pooledProblem returns why s can't run on a shared pool worker, or "".
+// GeneratePooledJobScript checks it too, so no pooled job script can carry
+// what a pool refuses.
+func (s *TaskSpec) pooledProblem() string {
+	if s.ContainerDockerSocket {
+		return "container_docker_socket is not allowed for a pooled task: the Docker socket is root-equivalent on the shared worker, so this task could control the other tasks running there; run it with 'spawn task run' on its own instance instead"
+	}
+	return ""
 }
 
 // EffectiveOnComplete returns the configured on_complete or the safe default

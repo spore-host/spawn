@@ -425,6 +425,9 @@ func prove(ctx context.Context, r *RunSummary, rec *Record, recWhy string, heade
 	if rec.Recipe.Image != "" && rec.Recipe.ImageDigest == "" {
 		why = append(why, "image "+rec.Recipe.Image+" was not pinned: no digest was recorded, so a rerun may not use the same image")
 	}
+	if rec.Recipe.DockerSocket {
+		why = append(why, "the container had the host Docker socket (container_docker_socket): the images it started are not recorded, so a rerun may not use the same ones")
+	}
 	if len(rec.Recipe.Command) == 0 {
 		why = append(why, "no command recorded")
 	}

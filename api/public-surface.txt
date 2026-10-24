@@ -871,6 +871,7 @@ field SizeResult.Pinned bool
 field SizeResult.VCPUs int
 field TaskSpec.Command []string
 field TaskSpec.Container string
+field TaskSpec.ContainerDockerSocket bool
 field TaskSpec.Env map[string]string
 field TaskSpec.Inputs []Manifest
 field TaskSpec.Lifecycle Lifecycle
@@ -892,6 +893,7 @@ func (*TaskSpec) CheckShmAgainstMemory(memGiB float64) string
 func (*TaskSpec) EffectiveOnComplete() string
 func (*TaskSpec) SizingRequest() ResourceRequest
 func (*TaskSpec) Validate() error
+func (*TaskSpec) ValidatePooled() error
 func (Placement) EffectiveEFSMountPoint() string
 func (Placement) EffectiveFSxMountPoint() string
 func (RetryClass) Retryable() bool
