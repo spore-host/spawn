@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`spawn extend` no longer raises an instance's cost limit unless asked**
+  (#1262). Since #639 it raised `spawn:cost-limit` to whatever the new
+  deadline needed, so `--cost-limit` was not a ceiling for any instance that
+  was extended. In #1262 eight c8gn.48xlarge launched with `--cost-limit 25`
+  were extended twice, their caps were raised to about $46, and each ran to
+  about $29 with no cost-limit termination. Now the cap is kept. When it will
+  terminate the instance before the new deadline, `extend` prints a ⚠️ warning
+  with about when, what running to the deadline costs, and the flag to allow
+  it. `--raise-cost-limit` restores the old raise; `--cost-limit N` sets a
+  value. `--keep-cost-limit` is now the default, and is deprecated but still
+  accepted. `--cost-limit` together with `--raise-cost-limit`, or either with
+  `--keep-cost-limit`, is refused.
+
 ## [0.141.0] - 2026-10-23
 
 ### Changed

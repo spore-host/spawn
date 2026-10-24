@@ -537,9 +537,10 @@ func TestJobArrayExtendMovesEachInstancesDeadline(t *testing.T) {
 }
 
 // TestJobArrayExtendRaisesEachInstancesCostLimit: with the deadline now moved
-// per instance, the #639 cost-limit decision applies per instance too, instead
-// of the old "extend those individually" warning.
-func TestJobArrayExtendRaisesEachInstancesCostLimit(t *testing.T) {
+// per instance, the cost-limit decision applies per instance too, instead
+// of the old "extend those individually" warning: with --raise-cost-limit each
+// instance's cap is raised to what its own deadline needs.
+func TestJobArrayExtendRaisesEachInstancesCostLimitWhenAsked(t *testing.T) {
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	launch := now.Add(-1 * time.Hour)
 	inst := aws.InstanceInfo{InstanceID: "i-capped", Region: "us-east-1", LaunchTime: launch, TTL: "2h",
@@ -550,11 +551,37 @@ func TestJobArrayExtendRaisesEachInstancesCostLimit(t *testing.T) {
 		}}
 	var got map[string]string
 	update := jobArrayTagUpdater(func(_, _ string, tags map[string]string) error { got = tags; return nil },
-		"4h", 4*time.Hour, now, 0, false, &bytes.Buffer{})
+		"4h", 4*time.Hour, now, 0, true, &bytes.Buffer{})
 	if err := update(&inst); err != nil {
 		t.Fatal(err)
 	}
 	if got["spawn:cost-limit"] != "6.0000" {
 		t.Errorf("spawn:cost-limit = %q, want 6.0000 (6h from launch at $1/h)", got["spawn:cost-limit"])
+	}
+}
+
+// The job-array path keeps each cap by default and warns per instance, the
+// same as the single-instance path (#1262).
+func TestJobArrayExtendKeepsEachCostLimitByDefault(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	launch := now.Add(-1 * time.Hour)
+	inst := aws.InstanceInfo{InstanceID: "i-capped", Region: "us-east-1", LaunchTime: launch, TTL: "2h",
+		Tags: map[string]string{
+			"spawn:ttl-deadline":   launch.Add(2 * time.Hour).Format(time.RFC3339),
+			"spawn:cost-limit":     "2.0000",
+			"spawn:price-per-hour": "1.0",
+		}}
+	var got map[string]string
+	var out bytes.Buffer
+	update := jobArrayTagUpdater(func(_, _ string, tags map[string]string) error { got = tags; return nil },
+		"4h", 4*time.Hour, now, 0, false, &out)
+	if err := update(&inst); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := got["spawn:cost-limit"]; ok {
+		t.Errorf("spawn:cost-limit written as %q; extend must not move a cap it was not asked to", v)
+	}
+	if !strings.Contains(out.String(), "will terminate this instance") {
+		t.Errorf("no per-instance warning that the kept cap fires first:\n%s", out.String())
 	}
 }

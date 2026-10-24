@@ -30,20 +30,27 @@ var extendCmd = &cobra.Command{
 }
 
 var (
-	extendCostLimit     float64
-	extendKeepCostLimit bool
+	extendCostLimit      float64
+	extendKeepCostLimit  bool
+	extendRaiseCostLimit bool
 )
 
 func init() {
 	rootCmd.AddCommand(extendCmd)
 
-	// spawn:cost-limit fires independently of the TTL ("first-to-fire wins"), so
-	// moving only the TTL left extend a no-op for anyone whose cap was sized to it
-	// (#639). By default the cap is raised to whatever the new deadline needs.
+	// spawn:cost-limit fires independently of the TTL ("first-to-fire wins").
+	// extend leaves it alone unless told otherwise (#1262): a cost limit is a
+	// ceiling the user set, and extending a TTL is not consent to spend past it.
+	// When the cap will terminate the instance before the new deadline, extend
+	// says when and how to raise it, which is what #639's "extend did nothing"
+	// was really missing.
 	extendCmd.Flags().Float64Var(&extendCostLimit, "cost-limit", 0,
-		"Set the instance's cost limit to this amount in USD, instead of raising it to what the new TTL needs")
+		"Set the instance's cost limit to this amount in USD. Without it (or --raise-cost-limit) the existing cost limit is kept, and spored terminates the instance when it is reached, even before the new deadline.")
+	extendCmd.Flags().BoolVar(&extendRaiseCostLimit, "raise-cost-limit", false,
+		"Raise the instance's cost limit to what running until the new deadline costs, if it is lower. spored terminates the instance when the cost limit is reached.")
 	extendCmd.Flags().BoolVar(&extendKeepCostLimit, "keep-cost-limit", false,
-		"Extend the TTL and leave the cost limit alone. spored will still terminate the instance when the existing cap is reached, which may be before the new deadline.")
+		"Leave the cost limit alone. This is now the default; the flag is accepted for scripts written before #1262.")
+	_ = extendCmd.Flags().MarkDeprecated("keep-cost-limit", "the cost limit is now kept by default; use --raise-cost-limit or --cost-limit to change it")
 
 	// Register completion for instance ID argument
 	extendCmd.ValidArgsFunction = completeInstanceID
@@ -55,6 +62,9 @@ func init() {
 
 func runExtend(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
+	if err := checkExtendCostLimitFlags(extendCostLimit, extendRaiseCostLimit, extendKeepCostLimit); err != nil {
+		return err
+	}
 
 	// Get user identity for audit logging
 	cfg, err := loadAWSConfig(ctx, "")
@@ -116,7 +126,7 @@ func runExtend(cmd *cobra.Command, args []string) error {
 	// Extend the absolute deadline, anchored to the original launch time.
 	// TTL is always relative to first launch — extending adds to the current deadline,
 	// not to the current clock time.
-	tags, newDeadline, costDecision := extensionTags(instance, newTTL, extendDuration, time.Now(), extendCostLimit, extendKeepCostLimit)
+	tags, newDeadline, costDecision := extensionTags(instance, newTTL, extendDuration, time.Now(), extendCostLimit, extendRaiseCostLimit)
 
 	// A persistent Spot request's end date was fixed at launch to the old
 	// deadline (#950), and EC2 cannot move it. Say so before extending past it.
@@ -235,7 +245,7 @@ func extendJobArrayWithAudit(ctx context.Context, newTTL string, auditLog *audit
 		func(region, instanceID string, tags map[string]string) error {
 			return client.UpdateInstanceTags(ctx, region, instanceID, tags)
 		},
-		newTTL, extendDuration, time.Now(), extendCostLimit, extendKeepCostLimit, os.Stderr)
+		newTTL, extendDuration, time.Now(), extendCostLimit, extendRaiseCostLimit, os.Stderr)
 	successCount, failedInstances, reloadFailedInstances := extendJobArrayInstances(
 		jobArrayInstances, updateTags, reloader(client), os.Stderr)
 
@@ -332,10 +342,10 @@ func extendJobArrayInstances(
 func jobArrayTagUpdater(
 	write func(region, instanceID string, tags map[string]string) error,
 	newTTL string, extendDuration time.Duration, now time.Time,
-	explicitCostLimit float64, keepCostLimit bool, out io.Writer,
+	explicitCostLimit float64, raiseCostLimit bool, out io.Writer,
 ) func(inst *aws.InstanceInfo) error {
 	return func(inst *aws.InstanceInfo) error {
-		tags, newDeadline, costDecision := extensionTags(inst, newTTL, extendDuration, now, explicitCostLimit, keepCostLimit)
+		tags, newDeadline, costDecision := extensionTags(inst, newTTL, extendDuration, now, explicitCostLimit, raiseCostLimit)
 		if err := write(inst.Region, inst.InstanceID, tags); err != nil {
 			return err
 		}
@@ -347,14 +357,14 @@ func jobArrayTagUpdater(
 
 // extensionTags is the complete tag set `spawn extend` writes for one
 // instance, shared by the single-instance and job-array paths so the two
-// cannot drift (#983): the TTL pair from computeExtendedTTLTags plus, when the
-// cost limit would otherwise fire before the new deadline, a raised
-// spawn:cost-limit. The cost limit is a SECOND, independent deadline; leave it
-// alone and the extension silently fails for every instance whose cap was
-// sized to its TTL (#639).
-func extensionTags(instance *aws.InstanceInfo, newTTL string, extendDuration time.Duration, now time.Time, explicitCostLimit float64, keepCostLimit bool) (map[string]string, time.Time, costLimitDecision) {
+// cannot drift (#983): the TTL pair from computeExtendedTTLTags plus a new
+// spawn:cost-limit only when one was asked for (--cost-limit, or
+// --raise-cost-limit when the cap would fire before the new deadline). The
+// cost limit is a SECOND, independent deadline; decideCostLimit says when it
+// will bind (#1262, #639).
+func extensionTags(instance *aws.InstanceInfo, newTTL string, extendDuration time.Duration, now time.Time, explicitCostLimit float64, raiseCostLimit bool) (map[string]string, time.Time, costLimitDecision) {
 	tags, newDeadline := computeExtendedTTLTags(instance, newTTL, extendDuration, now)
-	costDecision := decideCostLimit(instance, newDeadline, now, explicitCostLimit, keepCostLimit)
+	costDecision := decideCostLimit(instance, newDeadline, now, explicitCostLimit, raiseCostLimit)
 	if costDecision.Changed() {
 		tags["spawn:cost-limit"] = costLimitTagValue(costDecision.NewValue)
 	}

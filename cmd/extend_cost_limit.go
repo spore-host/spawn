@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -20,22 +21,49 @@ type costLimitDecision struct {
 	NewValue float64
 	// Reason explains the decision in the user's terms.
 	Reason string
+	// Binds is set when the cap is kept and will terminate the instance before
+	// the new deadline. FiresAt is about when, assuming it runs continuously.
+	Binds   bool
+	FiresAt time.Time
+	// InstanceID names the instance in the command the warning suggests, and
+	// PerHour is its compute plus EBS rate, which prices that command's extra
+	// minute.
+	InstanceID string
+	PerHour    float64
 }
 
 // Changed reports whether the tag should be written.
 func (d costLimitDecision) Changed() bool { return d.NewValue > 0 && d.NewValue != d.Current }
 
-// decideCostLimit works out whether extending the TTL also requires raising the cost
-// limit, and to what (spawn#639).
+// checkExtendCostLimitFlags rejects contradictory cost-limit flags.
+// --keep-cost-limit is the default now and only conflicts with asking for a
+// change.
+func checkExtendCostLimitFlags(explicit float64, raise, keep bool) error {
+	if explicit < 0 {
+		return fmt.Errorf("--cost-limit must be positive, got %.2f", explicit)
+	}
+	if explicit > 0 && raise {
+		return fmt.Errorf("--cost-limit and --raise-cost-limit both set the cost limit; pass one")
+	}
+	if keep && (explicit > 0 || raise) {
+		return fmt.Errorf("--keep-cost-limit contradicts --cost-limit/--raise-cost-limit; pass one")
+	}
+	return nil
+}
+
+// decideCostLimit works out whether the instance's cost limit will stop it
+// before the new deadline, and what, if anything, to write.
 //
-// The bug this fixes: `spawn extend` moved spawn:ttl and spawn:ttl-deadline and
-// nothing else, while spored enforces the cost cap INDEPENDENTLY —
-// "first-to-fire wins" (pkg/agent/agent.go). So for anyone who sized their cap to
-// their TTL, which is what the cost guidance tells you to do, extend was a no-op by
-// construction: the limit that was just left alone is always the tighter one. The
-// instance died at almost exactly the old deadline and the natural reading was
-// "extend didn't work", not "a second limit fired" — nothing in the output mentioned
-// the cap.
+// The cost limit is a ceiling the user chose, and spored enforces it
+// independently of the TTL ("first-to-fire wins", pkg/agent). Extending a TTL
+// is not consent to spend past it, so by default the cap is KEPT (#1262). That
+// reverses #639, which raised it automatically to whatever the new deadline
+// needed: in #1262 eight c8gn.48xlarge launched with --cost-limit 25 were each
+// extended twice, the cap was raised to about $46 each time without anyone
+// asking, and they ran to about $29 each with no cost-limit termination. What
+// #639 actually lacked was being told, so when the kept cap will fire before
+// the new deadline the decision says so (Binds, FiresAt) and how to raise it.
+// raise restores #639's raise for a user who asks.
 //
 // `needed` is the cap the new deadline requires, computed the way the agent's own
 // arithmetic works (pkg/agent accumulatedComputeCost), assuming the instance runs
@@ -54,18 +82,13 @@ func (d costLimitDecision) Changed() bool { return d.NewValue > 0 && d.NewValue 
 // from the instance's own tags, so this cannot disagree with what is enforced. The
 // EBS rate is included because the cap counts EBS too (#616).
 //
-// It raises, never lowers: an extension is a decision to allow more spend, not less,
-// and silently tightening someone's cap would be its own surprise.
-func decideCostLimit(instance *aws.InstanceInfo, newDeadline, now time.Time, explicit float64, keep bool) costLimitDecision {
-	d := costLimitDecision{Current: parseTagFloat(instance.Tags["spawn:cost-limit"])}
+// It never lowers: a cap that already covers the new deadline is left alone.
+func decideCostLimit(instance *aws.InstanceInfo, newDeadline, now time.Time, explicit float64, raise bool) costLimitDecision {
+	d := costLimitDecision{Current: parseTagFloat(instance.Tags["spawn:cost-limit"]), InstanceID: instance.InstanceID}
 
 	if explicit > 0 {
 		d.NewValue = explicit
 		d.Reason = "set explicitly with --cost-limit"
-		return d
-	}
-	if keep {
-		d.Reason = "left unchanged (--keep-cost-limit)"
 		return d
 	}
 	// No cap means nothing binds early; extending the TTL is the whole story.
@@ -77,14 +100,14 @@ func decideCostLimit(instance *aws.InstanceInfo, newDeadline, now time.Time, exp
 	if rate <= 0 {
 		// Without a rate we cannot compute what the new deadline costs. Say so rather
 		// than guess — an invented cap is how #533's cap stopped being enforceable.
-		d.Reason = "left unchanged: no spawn:price-per-hour tag, so the required cap cannot be computed"
+		d.Reason = "left unchanged: no spawn:price-per-hour tag, so whether it stops this instance before the new deadline cannot be computed"
 		return d
 	}
 	ebsRate := parseTagFloat(instance.Tags["spawn:ebs-hourly-cost"])
 
 	launch := originalLaunchTime(instance)
 	if launch.IsZero() {
-		d.Reason = "left unchanged: no launch time on the instance, so the required cap cannot be computed"
+		d.Reason = "left unchanged: no launch time on the instance, so whether it stops this instance before the new deadline cannot be computed"
 		return d
 	}
 	if !newDeadline.After(launch) {
@@ -94,16 +117,26 @@ func decideCostLimit(instance *aws.InstanceInfo, newDeadline, now time.Time, exp
 	if remaining < 0 {
 		remaining = 0
 	}
-	compute := computeSoFar(instance, launch, now) + remaining
-	d.Needed = rate*compute.Hours() + ebsRate*newDeadline.Sub(launch).Hours()
+	soFar := computeSoFar(instance, launch, now)
+	d.Needed = rate*(soFar+remaining).Hours() + ebsRate*newDeadline.Sub(launch).Hours()
 
 	if d.Current >= d.Needed {
 		// The existing cap already reaches the new deadline; nothing to do.
 		return d
 	}
-	d.NewValue = d.Needed
-	d.Reason = fmt.Sprintf("raised: $%.4f would have stopped this instance before the new deadline, which was unreachable",
-		d.Current)
+	if raise {
+		d.NewValue = d.Needed
+		d.Reason = fmt.Sprintf("raised with --raise-cost-limit: $%.4f would have terminated this instance before the new deadline", d.Current)
+		return d
+	}
+	d.Binds = true
+	d.PerHour = rate + ebsRate
+	spent := rate*soFar.Hours() + ebsRate*now.Sub(launch).Hours()
+	d.FiresAt = now
+	if left := d.Current - spent; left > 0 {
+		d.FiresAt = now.Add(time.Duration(left / (rate + ebsRate) * float64(time.Hour)))
+	}
+	d.Reason = "kept"
 	return d
 }
 
@@ -169,8 +202,22 @@ func renderCostLimitDecision(d costLimitDecision) string {
 		if d.Reason != "" {
 			fmt.Fprintf(&b, "                 (%s)\n", d.Reason)
 		}
+	case d.Binds:
+		// The case #1262 and #639 are both about: say it loudly, with the time and
+		// the way out, so an instance that dies early is never a mystery and a
+		// cap is never moved without being asked.
+		when := "now: it has already reached it"
+		if d.FiresAt.After(time.Now()) {
+			when = "at about " + d.FiresAt.UTC().Format("2006-01-02 15:04 UTC")
+		}
+		fmt.Fprintf(&b, "⚠️  Cost limit:  $%.4f is kept, and spored will terminate this instance %s,\n", d.Current, when)
+		fmt.Fprintf(&b, "                 before the new deadline. Running to the deadline needs about $%.2f.\n", d.Needed)
+		// extend has no "change only the cap" form, so the suggestion extends by
+		// one more minute; --cost-limit on the original command avoids that.
+		fmt.Fprintf(&b, "                 To allow it: spawn extend %s 1m --cost-limit %.2f (or --raise-cost-limit),\n", d.InstanceID, math.Ceil((d.Needed+d.PerHour/60)*100)/100)
+		fmt.Fprintf(&b, "                 or pass either flag with the extension next time.\n")
 	case d.Current > 0 && d.Reason != "":
-		// A cap exists and we deliberately did not change it — say which, so a user
+		// A cap exists and we could not tell whether it binds — say so, so a user
 		// whose instance then dies early is not left guessing again.
 		fmt.Fprintf(&b, "   Cost limit:   $%.4f, %s\n", d.Current, d.Reason)
 	case d.Current > 0:

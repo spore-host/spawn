@@ -21,8 +21,8 @@ spawn extend <instance-id-or-name> <duration> [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
-| `--cost-limit` |  | float64 |  | Set the instance's cost limit to this amount in USD, instead of raising it to what the new TTL needs |
+| `--cost-limit` |  | float64 |  | Set the instance's cost limit to this amount in USD. Without it (or --raise-cost-limit) the existing cost limit is kept, and spored terminates the instance when it is reached, even before the new deadline. |
 | `--job-array-id` |  | string |  | Extend TTL for all instances in job array by ID |
 | `--job-array-name` |  | string |  | Extend TTL for all instances in job array by name |
-| `--keep-cost-limit` |  | bool |  | Extend the TTL and leave the cost limit alone. spored will still terminate the instance when the existing cap is reached, which may be before the new deadline. |
+| `--raise-cost-limit` |  | bool |  | Raise the instance's cost limit to what running until the new deadline costs, if it is lower. spored terminates the instance when the cost limit is reached. |
 
