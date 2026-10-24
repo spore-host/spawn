@@ -149,6 +149,12 @@ type reaper struct {
 	// the same reason. dryRun still wins.
 	spotRequests string
 
+	// Orphaned launch Elastic IPs (#661, #1232): one of elasticIPsOff /
+	// elasticIPsReport / elasticIPsReap, from REAPER_ELASTIC_IPS. Independent of
+	// netResources, so the release can be armed without arming the group
+	// deletes. dryRun still wins.
+	elasticIPs string
+
 	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
 	// cross-account role — so route53Client uses the base credentials. dnsDomain
@@ -387,6 +393,7 @@ func configure() {
 		expireLeases: strings.EqualFold(os.Getenv("REAPER_DNS_LEASE_EXPIRE"), "true"),
 		netResources: parseNetResources(os.Getenv("REAPER_NET_RESOURCES")),
 		spotRequests: parseSpotRequests(os.Getenv("REAPER_SPOT_REQUESTS")),
+		elasticIPs:   parseElasticIPs(os.Getenv("REAPER_ELASTIC_IPS")),
 	}
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
 	// client when a zone is configured, so a deployment without DNS teardown
@@ -421,8 +428,8 @@ func configure() {
 		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
 		r.expireLeases = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -677,6 +684,14 @@ type Summary struct {
 	// per-VPC quota, which bites at launch time.
 	NetReaped  int `json:"net_reaped"`
 	NetSkipped int `json:"net_skipped"` // would-reap (dry-run), still referenced, or age unknown
+
+	// Orphaned launch Elastic IPs (#661, #1232), counted apart from NetReaped /
+	// NetSkipped because they have their own switch (REAPER_ELASTIC_IPS) and,
+	// unlike the groups, bill by the hour.
+	ElasticIPsScanned      int `json:"elastic_ips_scanned"`       // launch Elastic IPs examined
+	ElasticIPsReleased     int `json:"elastic_ips_released"`      // released by the sweep
+	ElasticIPsWouldRelease int `json:"elastic_ips_would_release"` // qualified, but report mode or a dry run held it back
+	ElasticIPsSkipped      int `json:"elastic_ips_skipped"`       // no creation stamp, or the release failed
 
 	// Orphaned persistent Spot requests (#950).
 	SpotRequestsScanned        int `json:"spot_requests_scanned"`
@@ -1403,10 +1418,14 @@ func (r *reaper) terminate(ctx context.Context, acct account, c candidate) error
 // spawn:managed tag for the tag rail to match.
 //
 // Best-effort and never an error: the terminate is what the hard deadline (#72)
-// is about. Skipped when the net-resources sweep is off, since an account set to
-// off is one where someone else owns these resources.
+// is about. Governed by REAPER_ELASTIC_IPS like the sweep (#1232): only `reap`
+// releases here. In `report` (the default) nothing is released and nothing is
+// logged at terminate time, because most terminated instances have no launch
+// Elastic IP and finding out costs a describe; the sweep reports the address as
+// WOULD release on a later cycle, once it is unassociated and past the grace.
+// `off` skips it, for an account where someone else owns these addresses.
 func (r *reaper) releaseLaunchElasticIPs(ctx context.Context, acct account, c candidate) {
-	if acct.netFor == nil || r.netResources == netResourcesOff {
+	if acct.netFor == nil || r.elasticIPsReportOnly() {
 		return
 	}
 	res, err := elasticip.ReleaseForInstance(ctx, acct.netFor(c.region), c.id)

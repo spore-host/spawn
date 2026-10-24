@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,12 +28,13 @@ import (
 const (
 	EnvSpotRequests = "REAPER_SPOT_REQUESTS"
 	EnvNetResources = "REAPER_NET_RESOURCES"
+	EnvElasticIPs   = "REAPER_ELASTIC_IPS"
 	EnvMaxAge       = "REAPER_MAX_AGE"
 	EnvNotifyURL    = "REAPER_NOTIFY_URL"
 )
 
 // The three states of a sweep that can be previewed before it is allowed to
-// delete: REAPER_SPOT_REQUESTS and REAPER_NET_RESOURCES.
+// delete: REAPER_SPOT_REQUESTS, REAPER_NET_RESOURCES and REAPER_ELASTIC_IPS.
 const (
 	// ModeOff skips the sweep entirely.
 	ModeOff = "off"
@@ -99,7 +101,7 @@ func Validate(name, value string) error {
 		}
 	}
 	switch name {
-	case EnvSpotRequests, EnvNetResources:
+	case EnvSpotRequests, EnvNetResources, EnvElasticIPs:
 		if _, ok := ParseMode(value); !ok {
 			return fmt.Errorf("%s: %q is not one of %s", name, value, strings.Join(Modes(), ", "))
 		}
@@ -119,12 +121,20 @@ func Validate(name, value string) error {
 }
 
 var settable = map[string]struct{}{
-	EnvSpotRequests: {}, EnvNetResources: {}, EnvMaxAge: {}, EnvNotifyURL: {},
+	EnvSpotRequests: {}, EnvNetResources: {}, EnvElasticIPs: {}, EnvMaxAge: {}, EnvNotifyURL: {},
 }
 
-// Settable lists the variables Validate accepts.
+// Settable lists the variables Validate accepts, sorted. Derived from the same
+// set Validate consults, so the two cannot disagree: a variable added to one
+// copy and not the other was settable by `spawn reaper deploy` and missing from
+// its flags and its census tests, or the reverse.
 func Settable() []string {
-	return []string{EnvSpotRequests, EnvNetResources, EnvMaxAge, EnvNotifyURL}
+	out := make([]string, 0, len(settable))
+	for k := range settable {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Secret reports whether a variable's value must never be printed.

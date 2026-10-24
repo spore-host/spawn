@@ -3,7 +3,8 @@ package main
 import (
 	"context"
 	"errors"
-	"sort"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,41 @@ func launchEIP(alloc, instanceID string, age time.Duration, now time.Time, assoc
 	return a
 }
 
+// withoutTag / withTag edit one tag of an address, for the criterion table.
+func withoutTag(a ec2types.Address, key string) ec2types.Address {
+	var tags []ec2types.Tag
+	for _, t := range a.Tags {
+		if awssdk.ToString(t.Key) != key {
+			tags = append(tags, t)
+		}
+	}
+	a.Tags = tags
+	return a
+}
+
+func withTag(a ec2types.Address, key, value string) ec2types.Address {
+	a = withoutTag(a, key)
+	a.Tags = append(a.Tags, ec2types.Tag{Key: awssdk.String(key), Value: awssdk.String(value)})
+	return a
+}
+
+func eipInst(id string, state ec2types.InstanceStateName) ec2types.Instance {
+	return ec2types.Instance{InstanceId: awssdk.String(id), State: &ec2types.InstanceState{Name: state}}
+}
+
+// runEIPSweep runs the net-resources region sweep with the two switches set
+// independently, returning the summary and the log.
+func runEIPSweep(t *testing.T, f *fakeNetAPI, dryRun bool, netMode, eipMode string) (*Summary, string) {
+	t.Helper()
+	r := &reaper{dryRun: dryRun, netResources: netMode, elasticIPs: eipMode}
+	acct := account{label: "self", netFor: func(string) netResourceAPI { return f }}
+	sum := &Summary{}
+	out := captureLogs(func() {
+		r.reapNetResourcesRegion(context.Background(), acct, "us-east-1", time.Now(), sum, &accountOutcome{})
+	})
+	return sum, out
+}
+
 // The eipInstanceTagKey this module computes must be the tag pkg/aws writes.
 // The reaper does not import pkg/aws, so the two can drift silently; a drift
 // would make every launch Elastic IP invisible to the sweep, and they bill.
@@ -40,98 +76,209 @@ func TestEIPInstanceTagMatchesWhatLaunchWrites(t *testing.T) {
 	}
 }
 
-// TestEIPSweepReleasesOnlyOrphans: an Elastic IP is released only when it is
-// spawn's (managed + instance tag), unassociated, past the grace, and its
-// instance is gone. Every other combination is spared.
-func TestEIPSweepReleasesOnlyOrphans(t *testing.T) {
+// TestEIPSweepEachCriterionIsRequired is #1232's reap criteria, one at a time.
+// The baseline is released in `reap`; each row removes exactly one criterion and
+// must be spared. Released is irreversible (the number goes back to the pool),
+// so every condition carries its own row.
+func TestEIPSweepEachCriterionIsRequired(t *testing.T) {
 	now := time.Now()
 	old := eipGrace + time.Hour
-	userOwned := ec2types.Address{
-		AllocationId: awssdk.String("eipalloc-user"),
-		// Old and managed, so only the missing instance tag spares it.
-		Tags: append(createdTag(old, now),
-			ec2types.Tag{Key: awssdk.String(tagprefix.Tag("managed")), Value: awssdk.String("true")}),
-	}
-	// Managed and tagged for a gone instance, but not the launch purpose: some
-	// other spawn address, which the default-on release must not reach.
-	otherPurpose := launchEIP("eipalloc-otherpurpose", "i-gone", old, now, "")
-	for i, tg := range otherPurpose.Tags {
-		if awssdk.ToString(tg.Key) == tagprefix.Tag("purpose") {
-			otherPurpose.Tags[i].Value = awssdk.String("something-else")
-		}
-	}
-	f := &fakeNetAPI{
-		instances: []ec2types.Instance{{InstanceId: awssdk.String("i-live")}},
-		addrs: []ec2types.Address{
-			otherPurpose,
-			launchEIP("eipalloc-orphan", "i-gone", old, now, ""),
-			launchEIP("eipalloc-live", "i-live", old, now, ""),               // instance still exists
-			launchEIP("eipalloc-attached", "i-gone", old, now, "eipassoc-1"), // still associated
-			launchEIP("eipalloc-young", "i-gone2", eipGrace-time.Minute, now, ""),
-			userOwned, // no instance tag: the user's (#262), never released
-		},
-	}
-	sum, _ := runNetSweep(t, f, false)
+	orphan := func() ec2types.Address { return launchEIP("eipalloc-x", "i-gone", old, now, "") }
 
-	sort.Strings(f.released)
-	if strings.Join(f.released, ",") != "eipalloc-orphan" {
-		t.Fatalf("released = %v, want only eipalloc-orphan", f.released)
-	}
-	if sum.NetReaped != 1 {
-		t.Errorf("NetReaped = %d, want 1", sum.NetReaped)
+	for _, tc := range []struct {
+		name      string
+		addr      ec2types.Address
+		instances []ec2types.Instance
+		release   bool
+	}{
+		{"baseline: every criterion holds, instance absent", orphan(), nil, true},
+		{"baseline: instance terminated but still listed", orphan(),
+			[]ec2types.Instance{eipInst("i-gone", ec2types.InstanceStateNameTerminated)}, true},
+
+		{"no spawn:managed tag", withoutTag(orphan(), tagprefix.Tag("managed")), nil, false},
+		{"spawn:managed=false", withTag(orphan(), tagprefix.Tag("managed"), "false"), nil, false},
+		{"no instance tag (a user's address, #262)", withoutTag(orphan(), eipInstanceTagKey), nil, false},
+		{"empty instance tag", withTag(orphan(), eipInstanceTagKey, ""), nil, false},
+		{"no purpose tag", withoutTag(orphan(), tagprefix.Tag("purpose")), nil, false},
+		{"another purpose", withTag(orphan(), tagprefix.Tag("purpose"), "something-else"), nil, false},
+
+		{"associated", launchEIP("eipalloc-x", "i-gone", old, now, "eipassoc-1"), nil, false},
+		{"association id only", func() ec2types.Address {
+			a := orphan()
+			a.AssociationId = awssdk.String("eipassoc-1")
+			return a
+		}(), nil, false},
+		{"network interface only", func() ec2types.Address {
+			a := orphan()
+			a.NetworkInterfaceId = awssdk.String("eni-1")
+			return a
+		}(), nil, false},
+
+		{"instance running", orphan(), []ec2types.Instance{eipInst("i-gone", ec2types.InstanceStateNameRunning)}, false},
+		{"instance pending (mid-launch)", orphan(), []ec2types.Instance{eipInst("i-gone", ec2types.InstanceStateNamePending)}, false},
+		{"instance shutting-down", orphan(), []ec2types.Instance{eipInst("i-gone", ec2types.InstanceStateNameShuttingDown)}, false},
+		{"instance stopped", orphan(), []ec2types.Instance{eipInst("i-gone", ec2types.InstanceStateNameStopped)}, false},
+
+		{"inside the grace", launchEIP("eipalloc-x", "i-gone", eipGrace-time.Minute, now, ""), nil, false},
+		{"no creation stamp", withoutTag(orphan(), tagprefix.Tag("created")), nil, false},
+		{"unparseable creation stamp", withTag(orphan(), tagprefix.Tag("created"), "yesterday"), nil, false},
+		{"creation stamp in the future", withTag(orphan(), tagprefix.Tag("created"),
+			now.Add(time.Hour).Format(time.RFC3339)), nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeNetAPI{instances: tc.instances, addrs: []ec2types.Address{tc.addr}}
+			sum, _ := runEIPSweep(t, f, false, netResourcesOff, elasticIPsReap)
+			if got := len(f.released) == 1; got != tc.release {
+				t.Fatalf("released %v, want release=%v", f.released, tc.release)
+			}
+			if tc.release && sum.ElasticIPsReleased != 1 {
+				t.Errorf("ElasticIPsReleased = %d, want 1", sum.ElasticIPsReleased)
+			}
+			if !tc.release && sum.ElasticIPsReleased != 0 {
+				t.Errorf("ElasticIPsReleased = %d for a spared address", sum.ElasticIPsReleased)
+			}
+		})
 	}
 }
 
-// #661: unlike security and placement groups, an orphaned launch Elastic IP is
-// released in `report`, the default, as well as in `reap`: it is unambiguously
-// spawn's, its instance is provably gone, and it bills until someone notices
-// (two leaked in the first field use). A dry run still releases nothing, and
-// `off` skips the sweep altogether.
-func TestEIPSweepReleasesByDefault(t *testing.T) {
+// The "instance is gone" criterion rests on the region's DescribeInstances,
+// which must ask for every state that still owns its address and NOT for
+// terminated. A filter that dropped stopped or shutting-down would make a live
+// instance's address look orphaned.
+func TestEIPSweepAsksEC2ForEveryLiveState(t *testing.T) {
+	f := &fakeNetAPI{}
+	runEIPSweep(t, f, false, netResourcesOff, elasticIPsReap)
+	var states []string
+	for _, fl := range f.instanceFilters {
+		if awssdk.ToString(fl.Name) == "instance-state-name" {
+			states = fl.Values
+		}
+	}
+	got := map[string]bool{}
+	for _, s := range states {
+		got[s] = true
+	}
+	for _, s := range []string{"pending", "running", "shutting-down", "stopping", "stopped"} {
+		if !got[s] {
+			t.Errorf("instance filter %v omits %q: an address of a %s instance would be released", states, s, s)
+		}
+	}
+	if got["terminated"] {
+		t.Errorf("instance filter %v includes terminated: an orphan would never be released", states)
+	}
+}
+
+// TestEIPSweepModes: `reap` releases; `report` (the default) and a dry run log
+// exactly the address reap would release and release nothing; `off` makes no
+// Elastic IP call at all. Every mode that examines the address counts it.
+func TestEIPSweepModes(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {
 		name        string
 		dryRun      bool
 		mode        string
 		wantRelease bool
+		wantWould   bool
 	}{
-		{"report mode (the default)", false, netResourcesReport, true},
-		{"unset mode resolves to report", false, parseNetResources(""), true},
-		{"reap mode", false, netResourcesReap, true},
-		{"dry run beats report", true, netResourcesReport, false},
-		{"dry run beats reap", true, netResourcesReap, false},
-		{"off skips the sweep", false, netResourcesOff, false},
+		{"reap", false, elasticIPsReap, true, false},
+		{"report", false, elasticIPsReport, false, true},
+		{"unset resolves to report", false, parseElasticIPs(""), false, true},
+		{"a typo resolves to report", false, parseElasticIPs("reep"), false, true},
+		{"dry run beats reap", true, elasticIPsReap, false, true},
+		{"off", false, elasticIPsOff, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeNetAPI{addrs: []ec2types.Address{launchEIP("eipalloc-orphan", "i-gone", eipGrace+time.Hour, now, "")}}
-			sum, _ := runNetSweepMode(t, f, tc.dryRun, tc.mode)
+			sum, out := runEIPSweep(t, f, tc.dryRun, netResourcesOff, tc.mode)
 			if got := len(f.released) == 1; got != tc.wantRelease {
-				t.Fatalf("released %v in %s, want release=%v", f.released, tc.name, tc.wantRelease)
+				t.Fatalf("released %v, want release=%v", f.released, tc.wantRelease)
 			}
-			if tc.wantRelease && sum.NetReaped != 1 {
-				t.Errorf("NetReaped = %d, want 1", sum.NetReaped)
+			would := strings.Contains(out, "WOULD release Elastic IP eipalloc-orphan (198.51.100.1) in self/us-east-1 — its instance i-gone is gone")
+			if would != tc.wantWould {
+				t.Errorf("WOULD-release line present=%v, want %v; log:\n%s", would, tc.wantWould, out)
 			}
-			if tc.dryRun && sum.NetSkipped != 1 {
-				t.Errorf("NetSkipped = %d, want 1 (the would-release)", sum.NetSkipped)
+			wantWould := 0
+			if tc.wantWould {
+				wantWould = 1
+			}
+			if sum.ElasticIPsWouldRelease != wantWould {
+				t.Errorf("ElasticIPsWouldRelease = %d, want %d", sum.ElasticIPsWouldRelease, wantWould)
+			}
+			if tc.mode == elasticIPsOff {
+				if f.describeAddrCalls != 0 || sum.ElasticIPsScanned != 0 {
+					t.Errorf("off made %d DescribeAddresses calls, scanned %d", f.describeAddrCalls, sum.ElasticIPsScanned)
+				}
+			} else if sum.ElasticIPsScanned != 1 {
+				t.Errorf("ElasticIPsScanned = %d, want 1", sum.ElasticIPsScanned)
+			}
+			// Elastic IPs have their own counters; the group counters stay theirs.
+			if sum.NetReaped != 0 || sum.NetSkipped != 0 {
+				t.Errorf("NetReaped/NetSkipped = %d/%d; Elastic IPs must not be counted there", sum.NetReaped, sum.NetSkipped)
 			}
 		})
 	}
 }
 
-// The security-group and placement-group sweep keeps its staging: report mode
-// still deletes no group. The EIP default must not leak into them.
-func TestEIPDefaultDoesNotArmTheGroupSweep(t *testing.T) {
+// The two switches are independent (#1232): arming Elastic IPs must not arm the
+// group deletes, holding Elastic IPs in report must not hold the groups back,
+// and either half runs with the other off.
+func TestEIPSwitchIsIndependentOfNetResources(t *testing.T) {
 	now := time.Now()
-	f := &fakeNetAPI{
-		sgs:   []ec2types.SecurityGroup{sg("sg-old", "spawn-mpi-x", netResourceGrace+time.Hour, now)},
-		addrs: []ec2types.Address{launchEIP("eipalloc-orphan", "i-gone", eipGrace+time.Hour, now, "")},
+	fixture := func() *fakeNetAPI {
+		return &fakeNetAPI{
+			sgs:   []ec2types.SecurityGroup{sg("sg-old", "spawn-mpi-x", netResourceGrace+time.Hour, now)},
+			addrs: []ec2types.Address{launchEIP("eipalloc-orphan", "i-gone", eipGrace+time.Hour, now, "")},
+		}
 	}
-	runNetSweepMode(t, f, false, netResourcesReport)
-	if len(f.deletedSG) != 0 {
-		t.Errorf("report mode deleted security groups %v", f.deletedSG)
+	for _, tc := range []struct {
+		net, eip            string
+		wantSGDel, wantRel  bool
+		wantSGCall, wantEIP bool
+	}{
+		{netResourcesOff, elasticIPsReap, false, true, false, true},
+		{netResourcesReport, elasticIPsReap, false, true, true, true},
+		{netResourcesReap, elasticIPsReport, true, false, true, true},
+		{netResourcesReap, elasticIPsOff, true, false, true, false},
+		{netResourcesOff, elasticIPsOff, false, false, false, false},
+	} {
+		t.Run(tc.net+"/"+tc.eip, func(t *testing.T) {
+			f := fixture()
+			runEIPSweep(t, f, false, tc.net, tc.eip)
+			if got := len(f.deletedSG) == 1; got != tc.wantSGDel {
+				t.Errorf("security group deleted=%v, want %v", got, tc.wantSGDel)
+			}
+			if got := len(f.released) == 1; got != tc.wantRel {
+				t.Errorf("Elastic IP released=%v, want %v", got, tc.wantRel)
+			}
+			if got := f.describeSGCalls > 0; got != tc.wantSGCall {
+				t.Errorf("DescribeSecurityGroups called=%v, want %v", got, tc.wantSGCall)
+			}
+			if got := f.describeAddrCalls > 0; got != tc.wantEIP {
+				t.Errorf("DescribeAddresses called=%v, want %v", got, tc.wantEIP)
+			}
+		})
 	}
-	if len(f.released) != 1 {
-		t.Errorf("report mode released %v, want the orphaned Elastic IP", f.released)
+}
+
+// The default is `report` (#1232: a report-only period before arming), in the
+// template and in the reaper's own fallback, and the two agree.
+func TestEIPDefaultIsReport(t *testing.T) {
+	if got := parseElasticIPs(""); got != elasticIPsReport {
+		t.Errorf("parseElasticIPs(\"\") = %q, want report", got)
+	}
+	b, err := os.ReadFile("template.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^  ElasticIps:\n    Type: String\n    Default: '([a-z]+)'`).FindSubmatch(b)
+	if m == nil {
+		t.Fatal("template.yaml declares no ElasticIps parameter with a Default")
+	}
+	if string(m[1]) != elasticIPsReport {
+		t.Errorf("template ElasticIps default = %q, want report", m[1])
+	}
+	if !regexp.MustCompile(`(?m)^\s+REAPER_ELASTIC_IPS:\s+!Ref\s+ElasticIps\s*$`).Match(b) {
+		t.Error("template.yaml does not pass ElasticIps to the function as REAPER_ELASTIC_IPS")
 	}
 }
 
@@ -157,21 +304,26 @@ func (e *eipTerminateNet) ReleaseAddress(ctx context.Context, in *ec2.ReleaseAdd
 }
 
 // #661: an instance the reaper terminates is one whose spored failed to end it,
-// so nothing on the instance released its launch Elastic IP. The reaper does,
-// after the terminate, and only that instance's.
+// so nothing on the instance released its launch Elastic IP. In `reap` the
+// reaper does, after the terminate, and only that instance's. In `report` (the
+// default) and `off` it does not; the sweep reports the address later.
+// REAPER_NET_RESOURCES has no say in it.
 func TestReapTerminateReleasesTheInstancesLaunchElasticIP(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {
 		name      string
-		mode      string
+		eipMode   string
+		netMode   string
 		inUse     bool
 		wantCalls string
 	}{
-		{"default mode", "", false, "terminate,describe-addresses,release eipalloc-mine"},
-		{"reap mode", netResourcesReap, false, "terminate,describe-addresses,release eipalloc-mine"},
+		{"reap", elasticIPsReap, netResourcesReport, false, "terminate,describe-addresses,release eipalloc-mine"},
+		{"reap with net-resources off", elasticIPsReap, netResourcesOff, false, "terminate,describe-addresses,release eipalloc-mine"},
 		// Nondefault VPC: InUse until EC2 detaches it; the sweep finishes it.
-		{"still associated", netResourcesReport, true, "terminate,describe-addresses,release eipalloc-mine"},
-		{"off", netResourcesOff, false, "terminate"},
+		{"reap, still associated", elasticIPsReap, netResourcesReport, true, "terminate,describe-addresses,release eipalloc-mine"},
+		{"default (unset) is report", "", netResourcesReap, false, "terminate"},
+		{"report", elasticIPsReport, netResourcesReap, false, "terminate"},
+		{"off", elasticIPsOff, netResourcesReap, false, "terminate"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ec2c := &spotEC2{}
@@ -183,7 +335,7 @@ func TestReapTerminateReleasesTheInstancesLaunchElasticIP(t *testing.T) {
 				calls: &ec2c.calls,
 				inUse: tc.inUse,
 			}
-			r := &reaper{netResources: parseNetResources(tc.mode)}
+			r := &reaper{netResources: tc.netMode, elasticIPs: parseElasticIPs(tc.eipMode)}
 			acct := account{label: "acct", ec2For: func(string) ec2API { return ec2c }, netFor: func(string) netResourceAPI { return net }}
 			if err := r.terminate(context.Background(), acct, candidate{id: "i-spot", region: "us-east-1"}); err != nil {
 				t.Fatalf("terminate: %v (an Elastic IP problem must never fail the reap)", err)
@@ -199,11 +351,14 @@ func TestReapTerminateReleasesTheInstancesLaunchElasticIP(t *testing.T) {
 func TestEIPSweepReleaseFailureIsNotFatal(t *testing.T) {
 	now := time.Now()
 	f := &fakeNetAPI{
-		addrs:      []ec2types.Address{launchEIP("eipalloc-orphan", "i-gone", eipGrace+time.Hour, now, "")},
+		addrs: []ec2types.Address{
+			launchEIP("eipalloc-a", "i-gone", eipGrace+time.Hour, now, ""),
+			launchEIP("eipalloc-b", "i-gone2", eipGrace+time.Hour, now, ""),
+		},
 		releaseErr: errors.New("UnauthorizedOperation"),
 	}
-	sum, _ := runNetSweep(t, f, false)
-	if sum.NetReaped != 0 || sum.NetSkipped != 1 {
-		t.Errorf("NetReaped/NetSkipped = %d/%d, want 0/1", sum.NetReaped, sum.NetSkipped)
+	sum, _ := runEIPSweep(t, f, false, netResourcesOff, elasticIPsReap)
+	if sum.ElasticIPsReleased != 0 || sum.ElasticIPsSkipped != 2 {
+		t.Errorf("ElasticIPsReleased/Skipped = %d/%d, want 0/2 (both attempted)", sum.ElasticIPsReleased, sum.ElasticIPsSkipped)
 	}
 }

@@ -28,9 +28,15 @@ type fakeNetAPI struct {
 	addrs      []ec2types.Address
 	released   []string
 	releaseErr error
+	// Call counts and the instance filter, so a test can assert what the sweep
+	// asked EC2 for and whether a switched-off half made any call at all.
+	describeAddrCalls int
+	describeSGCalls   int
+	instanceFilters   []ec2types.Filter
 }
 
 func (f *fakeNetAPI) DescribeAddresses(context.Context, *ec2.DescribeAddressesInput, ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error) {
+	f.describeAddrCalls++
 	return &ec2.DescribeAddressesOutput{Addresses: f.addrs}, nil
 }
 func (f *fakeNetAPI) ReleaseAddress(_ context.Context, in *ec2.ReleaseAddressInput, _ ...func(*ec2.Options)) (*ec2.ReleaseAddressOutput, error) {
@@ -49,10 +55,12 @@ func (f *fakeNetAPI) CreateTags(_ context.Context, in *ec2.CreateTagsInput, _ ..
 	return &ec2.CreateTagsOutput{}, nil
 }
 
-func (f *fakeNetAPI) DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+func (f *fakeNetAPI) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+	f.instanceFilters = in.Filters
 	return &ec2.DescribeInstancesOutput{Reservations: []ec2types.Reservation{{Instances: f.instances}}}, nil
 }
 func (f *fakeNetAPI) DescribeSecurityGroups(context.Context, *ec2.DescribeSecurityGroupsInput, ...func(*ec2.Options)) (*ec2.DescribeSecurityGroupsOutput, error) {
+	f.describeSGCalls++
 	return &ec2.DescribeSecurityGroupsOutput{SecurityGroups: f.sgs}, nil
 }
 func (f *fakeNetAPI) DeleteSecurityGroup(_ context.Context, in *ec2.DeleteSecurityGroupInput, _ ...func(*ec2.Options)) (*ec2.DeleteSecurityGroupOutput, error) {
@@ -102,7 +110,9 @@ func runNetSweep(t *testing.T, f *fakeNetAPI, dryRun bool) (*Summary, *accountOu
 
 func runNetSweepMode(t *testing.T, f *fakeNetAPI, dryRun bool, mode string) (*Summary, *accountOutcome) {
 	t.Helper()
-	r := &reaper{dryRun: dryRun, netResources: mode}
+	// The Elastic IP sweep has its own switch (#1232); these tests are about the
+	// group sweep, so it is off here unless a test asks for it.
+	r := &reaper{dryRun: dryRun, netResources: mode, elasticIPs: elasticIPsOff}
 	acct := account{label: "self", netFor: func(string) netResourceAPI { return f }}
 	sum := &Summary{}
 	out := &accountOutcome{}

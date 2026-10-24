@@ -30,6 +30,7 @@ var (
 
 	reaperSpotRequests string
 	reaperNetResources string
+	reaperElasticIPs   string
 	reaperMaxAge       string
 	reaperNotifyURL    string
 	reaperLogRetention int32
@@ -175,6 +176,8 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 		"Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperNetResources, "net-resources", "",
 		"Network-resource sweep, REAPER_NET_RESOURCES: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
+	fs.StringVar(&reaperElasticIPs, "elastic-ips", "",
+		"Orphaned launch Elastic IP sweep, REAPER_ELASTIC_IPS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperMaxAge, "max-age", "",
 		"Max-age ceiling, REAPER_MAX_AGE, e.g. 336h or 14d (default: keep; the reaper's default is 7d)")
 	fs.StringVar(&reaperNotifyURL, "notify-url", "",
@@ -251,6 +254,7 @@ var reaperDeployFlags = map[string]struct {
 }{
 	reaperconfig.EnvSpotRequests: {"spot-requests", &reaperSpotRequests},
 	reaperconfig.EnvNetResources: {"net-resources", &reaperNetResources},
+	reaperconfig.EnvElasticIPs:   {"elastic-ips", &reaperElasticIPs},
 	reaperconfig.EnvMaxAge:       {"max-age", &reaperMaxAge},
 	reaperconfig.EnvNotifyURL:    {"notify-url", &reaperNotifyURL},
 }

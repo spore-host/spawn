@@ -90,8 +90,13 @@ const netResourceUntaggedGrace = 30 * 24 * time.Hour
 // Membership is asked of EC2 rather than inferred from spawn's own instances,
 // because ANY member blocks the delete — including one spawn did not create.
 // Inferring would report a group as empty and then fail to delete it.
+//
+// The launch Elastic IP sweep shares the one DescribeInstances but has its own
+// switch (REAPER_ELASTIC_IPS, #1232), so either half runs when the other is off.
 func (r *reaper) reapNetResourcesRegion(ctx context.Context, acct account, region string, now time.Time, sum *Summary, outcome *accountOutcome) {
-	if acct.netFor == nil || r.netResources == netResourcesOff {
+	groups := r.netResources != netResourcesOff
+	eips := r.elasticIPs != elasticIPsOff
+	if acct.netFor == nil || (!groups && !eips) {
 		return
 	}
 	cli := acct.netFor(region)
@@ -117,6 +122,12 @@ func (r *reaper) reapNetResourcesRegion(ctx context.Context, acct account, regio
 		}
 		for _, res := range page.Reservations {
 			for _, inst := range res.Instances {
+				// The filter already excludes terminated instances; this is the
+				// check the Elastic IP sweep relies on, so it is also made here
+				// rather than trusted to the API (#1232).
+				if inst.State != nil && inst.State.Name == ec2types.InstanceStateNameTerminated {
+					continue
+				}
 				if id := awssdk.ToString(inst.InstanceId); id != "" {
 					liveInstance[id] = true
 				}
@@ -134,9 +145,13 @@ func (r *reaper) reapNetResourcesRegion(ctx context.Context, acct account, regio
 		}
 	}
 
-	r.reapSecurityGroups(ctx, cli, acct, region, now, occupiedSG, sum, outcome)
-	r.reapPlacementGroups(ctx, cli, acct, region, now, occupiedPG, sum, outcome)
-	r.reapLaunchElasticIPs(ctx, cli, acct, region, now, liveInstance, sum)
+	if groups {
+		r.reapSecurityGroups(ctx, cli, acct, region, now, occupiedSG, sum, outcome)
+		r.reapPlacementGroups(ctx, cli, acct, region, now, occupiedPG, sum, outcome)
+	}
+	if eips {
+		r.reapLaunchElasticIPs(ctx, cli, acct, region, now, liveInstance, sum)
+	}
 }
 
 // eipInstanceTagKey names the instance a spawn-allocated Elastic IP was
@@ -149,6 +164,16 @@ var eipInstanceTagKey = tagprefix.Tag("instance-id")
 // already visible to DescribeInstances; the grace only absorbs that call's
 // eventual consistency. Short, because unlike a security group an unassociated
 // Elastic IP bills by the hour.
+//
+// The age is the spawn:created stamp Launch writes in the AllocateAddress call
+// itself (pkg/aws.LifecycleTags), because EC2 reports no allocation time for an
+// address: ec2types.Address has no timestamp field at all. The instance's
+// termination time is not used instead: once the instance is gone from
+// DescribeInstances (about an hour after it terminates) there is nothing to read
+// it from, and before then it exists only inside StateTransitionReason's free
+// text. An address with no stamp is skipped and logged rather than guessed at;
+// the stamp is written in the same call as the spawn:purpose tag the sweep
+// selects on, so a launch address without one is not something spawn makes.
 const eipGrace = 15 * time.Minute
 
 // reapLaunchElasticIPs releases the Elastic IPs a multi-interface EFA launch
@@ -156,16 +181,24 @@ const eipGrace = 15 * time.Minute
 //
 // `spawn terminate` releases the address itself, but an instance that ends any
 // other way cannot: spored's TTL/idle/cost-limit self-terminate would cut its own
-// connectivity by disassociating, and a console or reaper terminate never knew.
-// EC2 disassociates the address when the instance's primary interface is
-// deleted, so what remains is an unassociated, billing address tagged for an
-// instance that no longer exists — exactly what this releases.
+// connectivity by disassociating, a Spot reclaim gives it no chance (#1232), and
+// a console or reaper terminate never knew. EC2 disassociates the address when
+// the instance's primary interface is deleted, so what remains is an
+// unassociated, billing address tagged for an instance that no longer exists —
+// exactly what this releases.
 //
-// Three conditions, all required: tagged spawn:managed=true AND carrying the
-// instance tag (an Elastic IP without it is user-owned, #262, and is never
-// touched); unassociated; and its instance not pending/running/stopping/stopped/
-// shutting-down. A stopped instance keeps its address — it is still attached, so
-// the unassociated check already spares it.
+// Four conditions, all required: tagged spawn:managed=true, spawn:purpose=
+// efa-public-ip AND carrying the instance tag (an Elastic IP without it is
+// user-owned, #262, and is never touched); unassociated; its instance not
+// pending/running/stopping/stopped/shutting-down (terminated, or absent from
+// DescribeInstances altogether); and older than eipGrace. A stopped instance
+// keeps its address — it is still attached, so the unassociated check already
+// spares it.
+//
+// Whether a qualifying address is released or only reported is
+// REAPER_ELASTIC_IPS (elasticIPsReportOnly). The report line names exactly the
+// address a reap would release, and both are counted in the summary's
+// ElasticIPs* fields.
 func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, acct account, region string, now time.Time, live map[string]bool, sum *Summary) {
 	out, err := cli.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{
 		Filters: []ec2types.Filter{
@@ -183,6 +216,7 @@ func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, a
 		if alloc == "" || !isLaunchElasticIP(a.Tags) {
 			continue
 		}
+		sum.ElasticIPsScanned++
 		if awssdk.ToString(a.AssociationId) != "" || awssdk.ToString(a.InstanceId) != "" || awssdk.ToString(a.NetworkInterfaceId) != "" {
 			continue // attached: in use, or held by a stopped instance
 		}
@@ -194,16 +228,16 @@ func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, a
 		if !ok {
 			log.Printf("net-resources: %s/%s: Elastic IP %s (%s) for %s has no %s stamp — skipped",
 				acct.label, region, alloc, ip, instanceID, tagprefix.Tag("created"))
-			sum.NetSkipped++
+			sum.ElasticIPsSkipped++
 			continue
 		}
 		if age < eipGrace {
 			continue
 		}
-		if r.eipReportOnly() {
-			log.Printf("WOULD release Elastic IP %s (%s) in %s/%s — its instance %s is gone",
-				alloc, ip, acct.label, region, instanceID)
-			sum.NetSkipped++
+		if r.elasticIPsReportOnly() {
+			log.Printf("WOULD release Elastic IP %s (%s) in %s/%s — its instance %s is gone (held back: %s)",
+				alloc, ip, acct.label, region, instanceID, r.elasticIPsHeldBy())
+			sum.ElasticIPsWouldRelease++
 			continue
 		}
 		if _, rerr := cli.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: awssdk.String(alloc)}); rerr != nil {
@@ -211,55 +245,71 @@ func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, a
 				continue // released between the describe and now
 			}
 			log.Printf("net-resources: %s/%s: release Elastic IP %s: %v", acct.label, region, alloc, rerr)
-			sum.NetSkipped++
+			sum.ElasticIPsSkipped++
 			continue
 		}
 		log.Printf("RELEASED Elastic IP %s (%s) in %s/%s — its instance %s is gone",
 			alloc, ip, acct.label, region, instanceID)
-		sum.NetReaped++
+		sum.ElasticIPsReleased++
 	}
 }
 
 // isLaunchElasticIP reports whether an address is one spawn allocated for a
 // launch: spawn:managed=true, spawn:purpose=efa-public-ip and an instance tag.
 // The describe filter asks for the first two, but a filter is the API's
-// promise; this is ours. The purpose is required because the sweep releases by
-// default (eipReportOnly): only the one kind of address spawn allocates for
-// itself qualifies, not anything else a future path might tag managed.
+// promise; this is ours. The purpose is required so that only the one kind of
+// address spawn allocates for itself qualifies, not anything else a future path
+// might tag managed.
 func isLaunchElasticIP(tags []ec2types.Tag) bool {
 	return tagValue(tags, tagprefix.Tag("managed")) == "true" &&
 		tagValue(tags, tagprefix.Tag("purpose")) == elasticip.Purpose &&
 		tagValue(tags, eipInstanceTagKey) != ""
 }
 
-// eipReportOnly reports whether this cycle may only REPORT orphaned launch
-// Elastic IPs. Unlike the security-group and placement-group sweep it is not
-// gated on `reap`: in `report`, the default, it releases too (#661). Only a dry
-// run, and `off` (which skips the whole net-resources sweep), hold it back.
+// The launch Elastic IP sweep's own switch, REAPER_ELASTIC_IPS (#1232), with
+// the same three values as REAPER_NET_RESOURCES and independent of it.
 //
-// Why the launch Elastic IP is treated differently:
-//
-//   - It is unambiguously spawn's. It is selected by spawn:managed=true,
-//     spawn:purpose=efa-public-ip and spawn:instance-id, tags only Launch writes
-//     and the instance role is denied from writing (pkg/aws
-//     reaperControlTagKeys). A user's Elastic IP carries none of them.
-//   - Its owner is provably gone. It must be unassociated AND its instance
-//     absent from a DescribeInstances that just succeeded (any error returns
-//     before the sweep). An associated address, one held by a stopped instance,
-//     or one mid-launch is never touched, whatever the mode.
-//   - It bills by the hour from the moment its instance ends, and nothing else
-//     reclaims it: every instance ending other than `spawn terminate` leaves it
-//     (spored releases its own only in a default VPC). In report mode the
-//     first field use leaked two in seven minutes.
-//   - The SG/PG reasons for staging do not apply. Report mode exists there
-//     because those sweeps guessed at membership and age and deleting a group
-//     breaks whatever references it; an unassociated address is referenced by
-//     nothing, and its age is the allocation stamp Launch wrote.
-//
-// Releasing is irreversible (the number goes back to the pool), which is the
-// cost of being wrong. Each condition above is required, and each is tested.
-func (r *reaper) eipReportOnly() bool {
-	return r.dryRun
+// It used to ride on REAPER_NET_RESOURCES and release in `report` as well as
+// `reap` (#661). It now has its own setting so that it can be armed, or held in
+// report, without also arming the security-group and placement-group deletes,
+// and so that it gets the same observe-then-arm period every other destructive
+// sweep here had (SpotRequests was armed only after a report period and a
+// controlled test, spawn#1075). Arm it with ElasticIps=reap.
+const (
+	// elasticIPsOff skips the Elastic IP sweep and the post-terminate release.
+	elasticIPsOff = reaperconfig.ModeOff
+	// elasticIPsReport logs what it WOULD release and releases nothing. The
+	// default.
+	elasticIPsReport = reaperconfig.ModeReport
+	// elasticIPsReap releases.
+	elasticIPsReap = reaperconfig.ModeReap
+)
+
+// parseElasticIPs maps REAPER_ELASTIC_IPS onto a mode. An unrecognised value
+// becomes report, for the same reason as parseNetResources: a typo must neither
+// arm a release nor silently disable the report.
+func parseElasticIPs(v string) string {
+	if m, ok := reaperconfig.ParseMode(v); ok {
+		return m
+	}
+	return elasticIPsReport
+}
+
+// elasticIPsReportOnly reports whether this cycle may only REPORT orphaned
+// launch Elastic IPs. dryRun wins over reap, as everywhere else.
+func (r *reaper) elasticIPsReportOnly() bool {
+	return r.dryRun || r.elasticIPs != elasticIPsReap
+}
+
+// elasticIPsHeldBy names what held a release back, for the report line.
+func (r *reaper) elasticIPsHeldBy() string {
+	if r.dryRun {
+		return "REAPER_DRY_RUN=true"
+	}
+	if r.elasticIPs == "" {
+		return "REAPER_ELASTIC_IPS=" + elasticIPsReport
+	}
+	return "REAPER_ELASTIC_IPS=" + r.elasticIPs
 }
 
 func tagValue(tags []ec2types.Tag, key string) string {

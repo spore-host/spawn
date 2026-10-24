@@ -74,6 +74,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lists the others as not removed with the instance's state. An Elastic IP
   attached to a network interface but not an instance is no longer reported
   as unassociated.
+- **The TTL reaper's launch Elastic IP sweep has its own setting,
+  `REAPER_ELASTIC_IPS`** (#1232): `off`, `report` (default) or `reap`, set as
+  the SAM parameter `ElasticIps`, `make deploy ELASTIC_IPS=...`, or
+  `spawn reaper deploy --elastic-ips`. It is independent of
+  `REAPER_NET_RESOURCES`, so the address release can be armed without arming
+  the security-group and placement-group deletes. An address qualifies only
+  when it is tagged `spawn:managed=true`, `spawn:purpose=efa-public-ip` and
+  `spawn:instance-id`, is unassociated, its instance is terminated or gone, and
+  its `spawn:created` stamp is at least 15 minutes old. `report` logs a
+  `WOULD release Elastic IP` line for each address `reap` would release. The
+  run summary gains `elastic_ips_scanned`, `elastic_ips_released`,
+  `elastic_ips_would_release` and `elastic_ips_skipped`. A deploy that does not
+  name the setting keeps the deployed value, on all three deploy paths. No IAM
+  change: the reaper role already has `ec2:DescribeAddresses` and the
+  tag-conditioned `ec2:ReleaseAddress` (#661).
+
+- **The TTL reaper no longer releases launch Elastic IPs unless
+  `REAPER_ELASTIC_IPS=reap`** (#1232). Since 0.138.0 the release rode on
+  `REAPER_NET_RESOURCES` and ran in `report` as well as `reap`; it now has its
+  own setting, which defaults to `report`, for a report-only period before it
+  is armed. This also applies to the release of an instance the reaper has just
+  terminated. A reaper redeployed without `ElasticIps=reap` (or
+  `--elastic-ips reap`) therefore stops releasing these addresses and reports
+  them instead. `REAPER_NET_RESOURCES=off` no longer turns the Elastic IP sweep
+  off, and Elastic IPs are no longer counted in `net_reaped` / `net_skipped`.
 
 ## [0.141.0] - 2026-10-23
 
