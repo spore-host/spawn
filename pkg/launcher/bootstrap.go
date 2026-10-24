@@ -143,6 +143,43 @@ type BootstrapConfig struct {
 	// fetch from), or one with no signing key compiled in (nothing to verify
 	// against). See [PublishedBodyVersion].
 	InlineBody bool
+	// StagedFiles, when set, says Command and TaskFlushScript are not to be
+	// written into the user data: the launcher has uploaded them, as the bytes
+	// [StagedFilesObject] returns, to an S3 object the instance's role can read,
+	// and the bootstrap fetches that object with the aws CLI, checks its sha256
+	// and only then writes the two files, exactly where and how the inline
+	// bootstrap does (#1274). Command and TaskFlushScript must still be set: the
+	// build checks that they are what was staged.
+	StagedFiles *StagedFiles
+}
+
+// StagedFiles is a per-launch object holding a launch's command and task
+// flush hook, uploaded by the launcher before RunInstances (#1274), so neither
+// takes room in the 16 KiB of user data. The bootstrap fetches it with the
+// instance role and refuses it unless it hashes to SHA256.
+type StagedFiles struct {
+	// URI is the object, s3://bucket/key.
+	URI string
+	// Region is passed to the aws CLI as --region.
+	Region string
+	// SHA256 is the lowercase hex sha256 of the object's bytes.
+	SHA256 string
+}
+
+// StagedFilesObject returns the bytes of the staged object for a launch's
+// command and task flush hook: the same shell the inline bootstrap carries to
+// write them, so the bootstrap runs it in the same place and the files end up
+// identical, path, mode and owner included. The launcher uploads exactly these
+// bytes, and the bootstrap verifies exactly these bytes.
+func StagedFilesObject(command, taskFlushScript string) []byte {
+	return []byte(perLaunchFiles(BootstrapConfig{Command: command, TaskFlushScript: taskFlushScript}))
+}
+
+// NewStagedFiles returns the reference to the staged object for command and
+// taskFlushScript at uri, read in region, with its sha256.
+func NewStagedFiles(uri, region, command, taskFlushScript string) StagedFiles {
+	sum := sha256.Sum256(StagedFilesObject(command, taskFlushScript))
+	return StagedFiles{URI: uri, Region: region, SHA256: hex.EncodeToString(sum[:])}
 }
 
 // defaultCompletionFile is the completion sentinel used when no
@@ -360,10 +397,9 @@ spawn_exit_guard() {
 trap spawn_exit_guard EXIT
 `
 
-// perLaunchPreBody is the per-launch content that must be on disk before the
-// body runs: the body's --command block reads the command, the flush hook and
-// the readiness gates, and spored reads plugins.json once at startup.
-func perLaunchPreBody(cfg BootstrapConfig) (string, error) {
+// perLaunchFiles writes the launch's command and task flush hook. It is
+// either inline in the user data or the staged object (#1274), byte for byte.
+func perLaunchFiles(cfg BootstrapConfig) string {
 	var script string
 
 	// Embed the --command workload directly in user-data (#214/#246) instead of
@@ -397,6 +433,24 @@ EOFSPAWNTASKFLUSH
 chown root:root %s
 chmod 700 %s
 `, taskproto.FlushScriptPath(), cfg.TaskFlushScript, taskproto.FlushScriptPath(), taskproto.FlushScriptPath())
+	}
+
+	return script
+}
+
+// perLaunchPreBody is the per-launch content that must be on disk before the
+// body runs: the body's --command block reads the command, the flush hook and
+// the readiness gates, and spored reads plugins.json once at startup.
+func perLaunchPreBody(cfg BootstrapConfig) (string, error) {
+	var script string
+	if st := cfg.StagedFiles; st != nil {
+		block, err := stagedFilesFetch(cfg, *st)
+		if err != nil {
+			return "", err
+		}
+		script += block
+	} else {
+		script += perLaunchFiles(cfg)
 	}
 
 	// Declare the --command readiness gates BEFORE the body, which is where
@@ -679,6 +733,68 @@ func bodyStub(version, body string) string {
 	sum := sha256.Sum256([]byte(body))
 	return fmt.Sprintf(shellmin.Strip(bodyStubTemplate),
 		security.ShellQuote(version), hex.EncodeToString(sum[:]), bodyPath, sporedinstall.SigningKeyPath)
+}
+
+// stagedFilesPath is where the bootstrap saves the staged object before
+// verifying and running it. A literal, so shellcheck can see what is sourced.
+const stagedFilesPath = "/etc/spawn/staged-files.sh"
+
+// stagedFilesTemplate fetches, verifies and runs a launch's staged object
+// (#1274): the command and task flush hook its launcher uploaded instead of
+// putting them in the user data. Filled in by stagedFilesFetch: the URI, the
+// region and the sha256.
+//
+// The object is private, so it is fetched with the aws CLI and the instance
+// role, which the task wrapper already needs for its own staging. Retried, for
+// a role whose new policy has not reached every IAM endpoint yet. Saved 0600
+// (it holds the command), checked against the sha256 this user data carries,
+// so nothing but the bytes the launcher staged can run, and then sourced:
+// it writes the two files exactly as the inline bootstrap would. Any failure
+// calls spawn_fatal_retire. spored is not running yet (the body that starts it
+// comes after this), so an instance that cannot get its command would
+// otherwise bill with nothing enforcing its TTL.
+const stagedFilesTemplate = `
+# Fetch, verify and write this launch's staged command and flush hook (#1274).
+SPAWN_ST_URI=%s
+SPAWN_ST_REGION=%s
+SPAWN_ST_SHA256=%s
+command -v aws >/dev/null 2>&1 || spawn_fatal_retire "no aws CLI to fetch this launch's staged files from $SPAWN_ST_URI"
+mkdir -p /etc/spawn
+for SPAWN_ST_TRY in 1 2 3 4 5 6; do
+    rm -f %[4]s
+    if (umask 077 && aws s3 cp --only-show-errors --region "$SPAWN_ST_REGION" --cli-connect-timeout 10 --cli-read-timeout 30 "$SPAWN_ST_URI" %[4]s); then
+        break
+    fi
+    [ "$SPAWN_ST_TRY" = 6 ] || sleep 5
+done
+if [ ! -s %[4]s ]; then
+    rm -f %[4]s
+    spawn_fatal_retire "could not fetch this launch's staged files from $SPAWN_ST_URI"
+fi
+if [ "$(sha256sum %[4]s | cut -d ' ' -f 1)" != "$SPAWN_ST_SHA256" ]; then
+    rm -f %[4]s
+    spawn_fatal_retire "the staged files at $SPAWN_ST_URI are not the ones this launch staged (sha256)"
+fi
+. %[4]s
+rm -f %[4]s
+`
+
+// stagedFilesFetch is the user-data block that stands in for
+// perLaunchFiles(cfg) when the launcher has staged them as st. It refuses a
+// reference whose sha256 is not that of cfg's own files, so the bootstrap can
+// only ever accept the object [StagedFilesObject] makes from this config.
+func stagedFilesFetch(cfg BootstrapConfig, st StagedFiles) (string, error) {
+	if cfg.Command == "" && cfg.TaskFlushScript == "" {
+		return "", fmt.Errorf("bootstrap: staged files set, but there is no command or flush hook to stage")
+	}
+	if !strings.HasPrefix(st.URI, "s3://") || st.Region == "" {
+		return "", fmt.Errorf("bootstrap: staged files need an s3:// URI and a region, got %q in %q", st.URI, st.Region)
+	}
+	if want := NewStagedFiles(st.URI, st.Region, cfg.Command, cfg.TaskFlushScript).SHA256; st.SHA256 != want {
+		return "", fmt.Errorf("bootstrap: staged files sha256 %q is not that of this launch's command and flush hook (%s)", st.SHA256, want)
+	}
+	return fmt.Sprintf(shellmin.Strip(stagedFilesTemplate),
+		security.ShellQuote(st.URI), security.ShellQuote(st.Region), st.SHA256, stagedFilesPath), nil
 }
 
 // spotReplacementCheckFunc defines spawn_is_spot_replacement, which the

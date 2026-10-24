@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -278,4 +279,40 @@ func (c *Client) DeleteS3Object(ctx context.Context, region, bucket, key string)
 		return fmt.Errorf("delete s3://%s/%s: %w", bucket, key, err)
 	}
 	return nil
+}
+
+// PutS3Object writes body to bucket/key, replacing any object already there.
+// `spawn task run` stages a launch's command and flush hook with it (#1274).
+func (c *Client) PutS3Object(ctx context.Context, region, bucket, key string, body []byte) error {
+	s3Client := s3.NewFromConfig(c.regionalConfig(region))
+	if _, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(bucket),
+		Key:           aws.String(key),
+		Body:          bytes.NewReader(body),
+		ContentLength: aws.Int64(int64(len(body))),
+	}); err != nil {
+		return fmt.Errorf("put s3://%s/%s: %w", bucket, key, err)
+	}
+	return nil
+}
+
+// ListS3Keys returns the key of every object in bucket whose key starts with
+// prefix, following pagination.
+func (c *Client) ListS3Keys(ctx context.Context, region, bucket, prefix string) ([]string, error) {
+	s3Client := s3.NewFromConfig(c.regionalConfig(region))
+	var keys []string
+	p := s3.NewListObjectsV2Paginator(s3Client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix),
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list s3://%s/%s: %w", bucket, prefix, err)
+		}
+		for _, o := range page.Contents {
+			keys = append(keys, aws.ToString(o.Key))
+		}
+	}
+	return keys, nil
 }

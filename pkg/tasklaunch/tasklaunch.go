@@ -126,10 +126,12 @@ type Result struct {
 // In order, it: refuses a spec whose user data is over EC2's limit, before
 // any AWS call (#1063); resolves the results prefix and creates spawn's own
 // results bucket if needed; mints a run id and clears a previous attempt's
-// records (#608); creates an instance profile scoped to the spec's buckets
-// (plus ecr:ReadOnly for a private-ECR image); builds the boot-time storage
-// mount script, the wrapper and the terminal-flush hook (#632); re-checks the
-// exact user data; and provisions. A Spot launch that fails for capacity
+// records (#608) and staged files (#1274); creates an instance profile scoped
+// to the spec's buckets (plus ecr:ReadOnly for a private-ECR image); builds
+// the boot-time storage mount script, the wrapper and the terminal-flush hook
+// (#632); re-checks the exact user data; from a release build, uploads the
+// wrapper and flush hook to the results prefix, so the user data carries only
+// a verified reference to them (#1274); and provisions. A Spot launch that fails for capacity
 // with resources.fallback "on_demand" is retried once On-Demand with the same
 // config and Options (#1144).
 func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region string) (*Result, error) {
@@ -194,13 +196,22 @@ func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region str
 	} else if deps.Verbose != nil {
 		fmt.Fprintf(deps.Verbose, "cleared any previous completion record for task %s (run_id %s)\n", spec.TaskID, runID)
 	}
+	// And a previous attempt's staged wrapper and flush hook (#1274): each
+	// attempt stages its own, under a name that is its sha256, so nothing
+	// overwrites the last one.
+	stage := stagesFiles(client)
+	if stage {
+		if err := clearStaleStagedFiles(ctx, client.(stagedFilesClearer), region, resultsBucket, resultsKeyPrefix); err != nil {
+			fmt.Fprintf(warn, "warning: could not clear a previous attempt's staged task files for task %s: %v\n", spec.TaskID, err)
+		}
+	}
 
 	// Scoped instance profile: the default spored role has no S3 write, so grant
 	// exactly the buckets this task reads (inputs) and writes (outputs + results).
 	// A private-ECR container image additionally needs ecr:ReadOnly to pull.
 	profile, err := client.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
 		TrustServices:    []string{"ec2"}, // an instance profile is assumed by EC2
-		InlinePolicyJSON: taskiam.StagingPolicyFor(taskiam.S3Buckets(spec.Inputs), taskiam.S3Buckets(spec.Outputs), resultsBucket, taskiam.S3BucketsFromURIs(spec.Resources.S3ReadWrite), true),
+		InlinePolicyJSON: taskiam.TaskRunPolicyFor(taskiam.S3Buckets(spec.Inputs), taskiam.S3Buckets(spec.Outputs), resultsBucket, taskiam.S3BucketsFromURIs(spec.Resources.S3ReadWrite)),
 		Policies:         taskiam.ExtraPolicies(spec),
 	})
 	if err != nil {
@@ -218,11 +229,20 @@ func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region str
 	if err != nil {
 		return nil, err
 	}
+	var staged *stagedObject
+	if stage {
+		staged = stageTaskFiles(cfg.JobArrayCommand, &opts, region, resultsBucket, resultsKeyPrefix)
+	}
 	// The exact user data, now that the account, run id and storage are real.
 	// The preflight in Plan measured it with same-length placeholders; this is
 	// the authoritative check, still before RunInstances (#1063).
 	if _, err := taskUserDataSize(cfg, opts); err != nil {
 		return nil, err
+	}
+	if staged != nil {
+		if opts, err = uploadStagedFiles(ctx, client.(stagedFilesStore), warn, region, staged, cfg, opts); err != nil {
+			return nil, err
+		}
 	}
 
 	result, err := provisionTask(orDiscard(deps.Out), func(c aws.LaunchConfig, o launcher.Options) (*aws.LaunchResult, error) {

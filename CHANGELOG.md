@@ -58,6 +58,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spliced into user data** (#1274): `spawn app launch`, the pipeline
   orchestrator's stage instances and `spawn upgrade-spored`, about 1.6 KB
   gzipped each.
+- **A release build's `spawn task run` stages the task wrapper and flush hook
+  in S3 instead of putting them in user data, so a task's user data no longer
+  grows with its command and manifests** (#1274). Before RunInstances the
+  launch uploads both, as one object, to
+  `<results_prefix>/bootstrap-<sha256>.sh` beside the task's completion record.
+  The user data carries only the object's URI and sha256. At boot, before the
+  bootstrap body and spored, the instance fetches it with its own role
+  (`aws s3 cp --region <task region>`, 6 tries), checks the sha256, and writes
+  `/etc/spawn/command` (0600) and the flush hook (root, 0700) exactly as the
+  inline user data did. A missing object, a wrong sha256 or no aws CLI retires
+  the instance. A trivial task's user data drops from 3,965 to 2,075 bytes
+  gzipped; a task with a 20 KB inline command, which could not launch before
+  (16,533 bytes), now sends 2,071. `spawn task run --dry-run` reports the user
+  data actually sent and says when the files are staged. The task's instance
+  policy gains `s3:GetObject` on `bootstrap-<64 characters>.sh` objects in the
+  results bucket only. It is not limited to the task's own prefix, because
+  roles are named by a hash of their policy and a per-task grant would create a
+  role per task_id. Tasks that share a results bucket share a role already, and
+  could already overwrite each other's records; now they can also read each
+  other's staged wrappers. The policy change means the next task run per set
+  of buckets creates a new `spawn-instance-*` role. A re-run of a task_id
+  deletes earlier attempts' staged objects along with the stale completion
+  record. When the upload fails (the launching principal now needs
+  `s3:PutObject` on the results bucket, and `s3:ListBucket` to clear old
+  objects), a task that fits inline launches inline with a warning. The
+  objects are untagged, so the retention report lists them as untracked and
+  lifecycle tiering never moves them. Dev builds, and an embedder whose
+  `tasklaunch.AWS` has no `PutS3Object`/`ListS3Keys`, keep everything inline.
+  Adds `launcher.StagedFiles`, `launcher.StagedFilesObject`,
+  `launcher.NewStagedFiles`, `BootstrapConfig.StagedFiles` and
+  `Options.StagedFiles`, `aws.Client.PutS3Object` and `ListS3Keys`, and
+  `taskiam.TaskRunPolicyFor`, `StagedFilesKey`, `StagedFilesKeyPrefix` and
+  `StagedFilesResources`. Pool workers are unchanged: their tasks arrive
+  through the queue, not user data.
 
 ### Fixed
 
