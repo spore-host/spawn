@@ -23,6 +23,15 @@ func TestReaperParsersAgreeWithReaperconfig(t *testing.T) {
 		if got := parseNetResources(v); got != want {
 			t.Errorf("parseNetResources(%q) = %q, reaperconfig says %q", v, got, want)
 		}
+		// REAPER_ELASTIC_IPS differs only for an unset value, which means reap
+		// (TestEIPDefaultIsReap); everything else is the same contract.
+		eipWant := want
+		if v == "" {
+			eipWant = elasticIPsReap
+		}
+		if got := parseElasticIPs(v, netResourcesReport); got != eipWant {
+			t.Errorf("parseElasticIPs(%q) = %q, want %q", v, got, eipWant)
+		}
 	}
 
 	for _, v := range []string{"", "0", "2h", "3d", "336h", "1w", "-1h", "forever", "90m"} {

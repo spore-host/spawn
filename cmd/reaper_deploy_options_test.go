@@ -18,10 +18,11 @@ import (
 func parseReaperDeploy(t *testing.T, args ...string) *pflag.FlagSet {
 	t.Helper()
 	saved := []string{reaperVersion, reaperArtifact, reaperBucket, reaperSchedule, reaperRegions,
-		reaperSpotRequests, reaperNetResources, reaperMaxAge, reaperNotifyURL}
+		reaperSpotRequests, reaperNetResources, reaperMaxAge, reaperNotifyURL, reaperElasticIPs}
 	t.Cleanup(func() {
 		reaperVersion, reaperArtifact, reaperBucket, reaperSchedule, reaperRegions = saved[0], saved[1], saved[2], saved[3], saved[4]
 		reaperSpotRequests, reaperNetResources, reaperMaxAge, reaperNotifyURL = saved[5], saved[6], saved[7], saved[8]
+		reaperElasticIPs = saved[9]
 	})
 	fs := pflag.NewFlagSet("deploy", pflag.ContinueOnError)
 	registerReaperDeployFlags(fs)
@@ -52,7 +53,7 @@ func TestReaperDeployWithoutFlagsKeepsRegionsAndSettings(t *testing.T) {
 
 func TestReaperDeployFlagsBecomeSettings(t *testing.T) {
 	fs := parseReaperDeploy(t, "--regions", "us-west-2,eu-west-1", "--spot-requests", "REAP",
-		"--net-resources", "off", "--max-age", "14d", "--notify-url", "")
+		"--net-resources", "off", "--elastic-ips", "reap", "--max-age", "14d", "--notify-url", "")
 	opts, err := reaperDeployOptions(fs, "1", "us-east-1", "0.136.0", strings.NewReader(""))
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +64,7 @@ func TestReaperDeployFlagsBecomeSettings(t *testing.T) {
 	want := map[string]string{
 		reaperconfig.EnvSpotRequests: "REAP",
 		reaperconfig.EnvNetResources: "off",
+		reaperconfig.EnvElasticIPs:   "reap",
 		reaperconfig.EnvMaxAge:       "14d",
 		reaperconfig.EnvNotifyURL:    "", // explicit empty: remove
 	}
@@ -72,10 +74,19 @@ func TestReaperDeployFlagsBecomeSettings(t *testing.T) {
 			t.Errorf("Settings[%s] = %q (present %v), want %q", k, got, ok, v)
 		}
 	}
-	// Every settable variable has a flag.
+	// Every settable variable has a flag, and every flag sets a settable
+	// variable (one missing from Settable() cannot be removed with an empty
+	// value, and is invisible to the redeploy census in pkg/reaperdeploy).
+	settable := map[string]bool{}
 	for _, k := range reaperconfig.Settable() {
+		settable[k] = true
 		if _, ok := reaperDeployFlags[k]; !ok {
 			t.Errorf("%s is settable but spawn reaper deploy has no flag for it", k)
+		}
+	}
+	for k, f := range reaperDeployFlags {
+		if !settable[k] {
+			t.Errorf("--%s sets %s, which reaperconfig.Settable() does not list", f.flag, k)
 		}
 	}
 }
@@ -83,6 +94,7 @@ func TestReaperDeployFlagsBecomeSettings(t *testing.T) {
 func TestReaperDeployRejectsBadValuesWithoutEchoingTheURL(t *testing.T) {
 	for _, args := range [][]string{
 		{"--spot-requests", "reep"},
+		{"--elastic-ips", "release"},
 		{"--max-age", "forever"},
 		{"--notify-url", "ftp://s3cr3t@host/x"},
 	} {

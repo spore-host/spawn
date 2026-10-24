@@ -578,13 +578,38 @@ func TestVersionReachesCloudFormation(t *testing.T) {
 func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	explicit, raw := explicitFromMakefile(t)
 
-	// These are the parameters whose DEPLOYED value must win. DryRun first because
-	// it is the one that silently stops the reaper terminating anything.
-	for _, k := range []string{
-		"DryRun", "NetResources", "SpotRequests", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
+	// These are the parameters whose DEPLOYED value must win: every PARAM_MAP
+	// entry outside ALWAYS_ASSERT, discovered from the Makefile so a parameter
+	// added later (ElasticIps, #1232) is covered without editing this list. The
+	// named ones are a floor, so a discovery that silently shrank still fails.
+	// DryRun first because it is the one that silently stops the reaper
+	// terminating anything.
+	keys := []string{
+		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
-	} {
+	}
+	mk, err := os.ReadFile("Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	always := map[string]bool{}
+	if m := regexp.MustCompile(`(?m)^ALWAYS_ASSERT\s*=(.*)$`).FindSubmatch(mk); m != nil {
+		for _, pair := range strings.Fields(string(m[1])) {
+			k, _, _ := strings.Cut(pair, ":")
+			always[k] = true
+		}
+	}
+	discovered := regexp.MustCompile(`(?m)^\t([A-Z][A-Za-z0-9]*):[A-Z][A-Z0-9_]*\s*\\?$`).FindAllSubmatch(mk, -1)
+	if len(discovered) < len(keys) {
+		t.Fatalf("discovered only %d PARAM_MAP entries — the extraction has broken", len(discovered))
+	}
+	for _, m := range discovered {
+		if k := string(m[1]); !always[k] {
+			keys = append(keys, k)
+		}
+	}
+	for _, k := range keys {
 		if v, ok := explicit[k]; ok {
 			t.Errorf("a plain `make deploy` emits %s=%q. It must not: an unspecified parameter "+
 				"has to inherit the deployed value, and for DryRun asserting the Makefile's "+
@@ -718,5 +743,90 @@ func TestEveryTemplateParameterIsReferenced(t *testing.T) {
 			t.Errorf("template parameter %s is declared but never referenced, so no value of it "+
 				"reaches the function (a REAPER_* environment line missing?)", m[1])
 		}
+	}
+}
+
+// TestTemplateEnvironmentIsReadByTheReaper: every REAPER_* variable the SAM
+// template sets on the function must be one the reaper reads. A typo on either
+// side (REAPER_ELASTIC_IP for REAPER_ELASTIC_IPS, #1232) passes every gate
+// above: the parameter is declared, mapped, referenced and deployed, and the
+// reaper silently runs on its fallback. The reads are discovered from the
+// reaper's source, matched on the call (os.Getenv("...")), not the bare name.
+func TestTemplateEnvironmentIsReadByTheReaper(t *testing.T) {
+	read := map[string]bool{}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	getenv := regexp.MustCompile(`os\.(?:Getenv|LookupEnv)\("(REAPER_[A-Z0-9_]+)"\)`)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range getenv.FindAllStringSubmatch(string(b), -1) {
+			read[m[1]] = true
+		}
+	}
+	if len(read) < 5 {
+		t.Fatalf("found only %d REAPER_* reads — the discovery is broken", len(read))
+	}
+
+	tmpl, err := os.ReadFile("template.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := regexp.MustCompile(`(?m)^\s+(REAPER_[A-Z0-9_]+):\s+!`).FindAllStringSubmatch(string(tmpl), -1)
+	if len(set) < 5 {
+		t.Fatalf("found only %d REAPER_* variables in template.yaml — the extraction is broken", len(set))
+	}
+	for _, m := range set {
+		if !read[m[1]] {
+			t.Errorf("template.yaml sets %s on the function but the reaper never reads it", m[1])
+		}
+	}
+}
+
+// TestElasticIpsSurvivesAMakeDeploy is #1232's preservation property, end to
+// end through the Makefile's real emission and the real merge script: a stack
+// set to ElasticIps=report keeps it across a `make deploy` that does not
+// mention it (the #650 class), a stack that predates the parameter gets the
+// template default (the empty string: what it did before the parameter existed),
+// and `make deploy ELASTIC_IPS=off` sets it.
+func TestElasticIpsSurvivesAMakeDeploy(t *testing.T) {
+	summary := templateSummaryFromTemplate(t)
+	armed := strings.Replace(liveParams, "\n]",
+		",\n  {\"ParameterKey\":\"ElasticIps\",\"ParameterValue\":\"report\"}\n]", 1)
+	if armed == liveParams {
+		t.Fatal("could not add ElasticIps to the live fixture")
+	}
+	toExplicit := func(m map[string]string) string {
+		var b strings.Builder
+		for k, v := range m {
+			b.WriteString(k + "=" + v + "\n")
+		}
+		return b.String()
+	}
+
+	plain, _ := explicitFromMakefile(t)
+	got, _ := runMerge(t, summary, armed, toExplicit(plain))
+	if got["ElasticIps"] != "report" {
+		t.Errorf("plain make deploy over a stack with ElasticIps=report sent %q: a deploy "+
+			"that did not mention it changed it", got["ElasticIps"])
+	}
+
+	got, _ = runMerge(t, summary, liveParams, toExplicit(plain))
+	if got["ElasticIps"] != "" {
+		t.Errorf("a stack predating ElasticIps got %q, want the template default '' (reap, or "+
+			"off under NetResources=off: what it did before the parameter existed)", got["ElasticIps"])
+	}
+
+	set, _ := explicitFromMakefile(t, "ELASTIC_IPS=off")
+	got, _ = runMerge(t, summary, armed, toExplicit(set))
+	if got["ElasticIps"] != "off" {
+		t.Errorf("make deploy ELASTIC_IPS=off sent %q", got["ElasticIps"])
 	}
 }

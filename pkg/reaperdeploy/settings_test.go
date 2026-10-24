@@ -238,6 +238,7 @@ func TestEveryReaperSettingSurvivesARedeploy(t *testing.T) {
 	valid := map[string]string{
 		reaperconfig.EnvSpotRequests: "reap",
 		reaperconfig.EnvNetResources: "off",
+		reaperconfig.EnvElasticIPs:   "reap",
 		reaperconfig.EnvMaxAge:       "14d",
 		reaperconfig.EnvNotifyURL:    secretURL,
 	}
