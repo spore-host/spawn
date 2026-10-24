@@ -35,20 +35,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stub downloads the body for its own release from the instance's regional
   bucket (us-east-1 fallback, with retries) and runs it only if its sha256 is
   the one that spawn build expects and its signature verifies against the key
-  compiled into spawn. On any failure the boot stops before running anything:
-  no spored and no workload, with the reason in the journal, on the console and
-  in `cloud-init-output.log`. The per-launch parts (key, command, task flush
+  compiled into spawn. On any failure it runs nothing from the body (no spored,
+  no workload), logs the reason to the journal, the console and
+  `cloud-init-output.log`, and terminates the instance through the role's
+  existing self-only terminate grant; where that cannot work (no aws CLI, no
+  permission) it shuts down, which stops the instance. The per-launch parts (key, command, task flush
   hook, readiness gates, plugins, storage, container, custom user data) stay
   inline, in the same order around the body as before. User data shrinks from
-  7,253 to 1,222 bytes gzipped for a bare launch, and from 9,324 to 3,454 for a
-  trivial `spawn task run`, which leaves a task about 12.9 KB of EC2's 16 KiB.
+  7,253 to 1,586 bytes gzipped for a bare launch, and from 9,324 to 3,791 for a
+  trivial `spawn task run`, which leaves a task about 12.6 KB of EC2's 16 KiB.
   Every launch path gets the stub: `spawn launch` (single, array, sweep, batch
   queue, resume), `spawn task run`, `burst`, `pool`, and `launcher.Provision`
   (lagotto, the MCP server), which uses the spawn release it was built against.
   A dev or pseudo-version build, a build with no signing key, and a caller that
   sets the new `launcher.BootstrapConfig.InlineBody` keep the full inline
-  bootstrap. The release fails if the body cannot be generated, signed or
-  uploaded. The bootstrap's completion-file path is now a shell variable,
+  bootstrap. The release publishes the body to every bucket before GoReleaser
+  publishes the CLI and the taps, so no installable spawn exists without its
+  body. It fails if the body cannot be generated, signed or uploaded, or if the
+  released binary's `spawn bootstrap-body` differs from what it published. The bootstrap's completion-file path is now a shell variable,
   `SPAWN_CMD_COMPLETION_FILE`, assigned at the top of the script.
 - **The verified spored installer is stripped of comments wherever it is
   spliced into user data** (#1274): `spawn app launch`, the pipeline
@@ -72,6 +76,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way, and `spawn extend`'s "reloaded" line now means the daemon has the
   new config. `Agent.Reload` also reads and swaps the config under its lock.
 
+- **A bootstrap that cannot install spored terminates its instance instead of
+  leaving it running with no TTL enforcement** (#1274). When the spored install
+  failed, or the architecture had no spored, the bootstrap exited and the
+  instance kept running and billing with nothing to stop it, unless a TTL
+  reaper was deployed in the account. It now reports why and terminates itself;
+  if it cannot (no aws CLI, no permission, no egress), it shuts down, which
+  stops it, because spawn sets no instance-initiated shutdown behaviour.
 - **`spawn resume` sent its relaunched sweep members' user data without gzip,
   over EC2's limit** (#1274). It base64-encoded the plain bootstrap, about
   25 KB, so RunInstances refused every resumed Linux member ("User data is

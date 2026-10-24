@@ -295,10 +295,6 @@ LOCAL_SSH_KEY_BASE64=%s
 	return script, nil
 }
 
-// FatalRetireFuncName is the shell function a bootstrap calls when it cannot
-// get spored running.
-const FatalRetireFuncName = "spawn_fatal_retire"
-
 // fatalRetireFunc defines spawn_fatal_retire, for every abort that happens
 // before spored is running (#1274). An instance whose bootstrap stops there has
 // nothing enforcing its TTL, idle timeout or cost limit, so leaving it running
