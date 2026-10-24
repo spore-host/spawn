@@ -595,6 +595,40 @@ func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 	})
 }
 
+// TestInlineBootstrapRetiresAnInstanceWithoutSpored is the same leak in the
+// inline bootstrap (#1274): its aborts before spored starts (no spored could
+// be installed, or the architecture has no spored) exited 1 and left the
+// instance running with nothing enforcing its TTL. Runs the real inline
+// bootstrap against an empty bucket.
+func TestInlineBootstrapRetiresAnInstanceWithoutSpored(t *testing.T) {
+	script, err := buildLinuxBootstrap(BootstrapConfig{
+		Username: "tester", CustomUserData: "echo post > /tmp/POST_RAN\n",
+	}, "", BootstrapBody())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		uname  string
+		reason string
+		aws    awsMode
+	}{
+		"no spored to install":           {"x86_64", "spored install failed", awsTerminates},
+		"no spored, terminate fails":     {"x86_64", "spored install failed", awsFails},
+		"no spored for the architecture": {"sparc64", "unsupported architecture sparc64", awsTerminates},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := newStubServer(t, "eu-west-1")
+			sb := newBootSandbox(t, srv, tc.aws, map[string]string{"uname": "#!/bin/bash\necho " + tc.uname + "\n"})
+			out, err := sb.run(script)
+			if fileExists(filepath.Join(sb.dir, "tmp", "POST_RAN")) || strings.Contains(out, "spored installation complete") {
+				t.Errorf("the bootstrap carried on without spored\n%s", out)
+			}
+			assertRetired(t, sb, out, err, tc.reason, tc.aws)
+		})
+	}
+}
+
 // standInSha256sum puts a sha256sum into binDir: the real one where there is
 // one (Linux), else shasum's (macOS), so the gate runs for whoever edits it.
 func standInSha256sum(t *testing.T, binDir string) {

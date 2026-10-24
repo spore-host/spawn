@@ -758,8 +758,7 @@ case "$ARCH" in
         BINARY="spored-linux-arm64"
         ;;
     *)
-        echo "Unsupported architecture: $ARCH"
-        exit 1
+        spawn_fatal_retire "unsupported architecture $ARCH: there is no spored for it"
         ;;
 esac
 
@@ -780,8 +779,9 @@ if ! spore_install_verified_spored "$BINARY" \
       "${S3_BASE_URL}" \
       "${FALLBACK_URL}/${PROJECT}" \
       "${FALLBACK_URL}"; then
-    echo "spored install failed — aborting bootstrap rather than running an unverified agent"
-    exit 1
+    # Without spored nothing enforces the TTL, so this retires the instance
+    # rather than leave it billing (#1274).
+    spawn_fatal_retire "spored install failed; not running an unverified agent"
 fi
 
 # Setup local user account
