@@ -12,31 +12,63 @@ func extendInstance(launch time.Time, tags map[string]string) *aws.InstanceInfo 
 	return &aws.InstanceInfo{InstanceID: "i-test", LaunchTime: launch, Tags: tags}
 }
 
-// TestDecideCostLimitReproducesTheReportedCase is spawn#639 with the reporter's own
-// numbers: a 60m TTL capped at $0.65 on a $0.63808/hr instance (61 minutes of spend),
-// extended by 45m. Before this, the TTL moved to 105m and the cap stayed at $0.65, so
-// the instance still died at ~61m — one minute after the ORIGINAL deadline — and the
-// output said nothing about why.
-func TestDecideCostLimitReproducesTheReportedCase(t *testing.T) {
+// TestExtendKeepsTheCostLimitByDefault is spawn#1262 with the reporter's
+// numbers: an on-demand c8gn.48xlarge at $11.376/hr, launched with --ttl 2h
+// --cost-limit 25, extended by 1h at 47 minutes. #639's default raised the cap
+// to cover the new deadline, so it never fired and the instances ran to about
+// $29 each. Now the cap is kept, and the decision says when it fires (about
+// 132 minutes after launch) and what raising it would take.
+func TestExtendKeepsTheCostLimitByDefault(t *testing.T) {
+	launch := time.Date(2026, 10, 20, 21, 14, 0, 0, time.UTC)
+	now := launch.Add(47 * time.Minute)
+	inst := extendInstance(launch, map[string]string{
+		"spawn:cost-limit":      "25.0000",
+		"spawn:price-per-hour":  "11.376000",
+		"spawn:compute-seconds": "2820", // 47 minutes
+	})
+	d := decideCostLimit(inst, launch.Add(3*time.Hour), now, 0, false)
+
+	if d.Changed() {
+		t.Fatalf("the cap was moved from $%.2f to $%.2f without being asked", d.Current, d.NewValue)
+	}
+	if !d.Binds {
+		t.Fatal("a $25 cap at $11.376/hr fires about 132m in, before the 3h deadline: Binds must be set")
+	}
+	// spored counts compute-seconds plus up to computeTagLag, so the estimate may
+	// come up to 5 minutes early; it must never come late.
+	fires := d.FiresAt.Sub(launch)
+	if fires < 126*time.Minute || fires > 132*time.Minute {
+		t.Errorf("FiresAt = launch+%v, want about launch+132m (never later)", fires)
+	}
+	out := renderCostLimitDecision(d)
+	for _, want := range []string{"⚠️", "25.0000", "is kept", "will terminate this instance", "spawn extend i-test 1m --cost-limit 34.", "--raise-cost-limit"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the warning is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestDecideCostLimitRaisesWhenAsked is spawn#639's case with --raise-cost-limit:
+// a 60m TTL capped at $0.65 on a $0.63808/hr instance, extended by 45m. The cap
+// is raised to what 105 minutes costs, and the reason names the flag.
+func TestDecideCostLimitRaisesWhenAsked(t *testing.T) {
 	launch := time.Date(2026, 10, 3, 3, 14, 0, 0, time.UTC)
 	newDeadline := launch.Add(105 * time.Minute)
 
 	d := decideCostLimit(extendInstance(launch, map[string]string{
 		"spawn:cost-limit":     "0.6500",
 		"spawn:price-per-hour": "0.638080",
-	}), newDeadline, launch.Add(60*time.Minute), 0, false)
+	}), newDeadline, launch.Add(60*time.Minute), 0, true)
 
 	if !d.Changed() {
-		t.Fatalf("the cap must be raised: $%.4f covers only ~61m but the new deadline is 105m away", d.Current)
+		t.Fatalf("--raise-cost-limit must raise the cap: $%.4f covers only ~61m but the new deadline is 105m away", d.Current)
 	}
 	// 105 minutes at $0.63808/hr = $1.1166.
 	if d.NewValue < 1.10 || d.NewValue > 1.13 {
 		t.Errorf("NewValue = %.4f, want ~1.1166 (105m at $0.63808/hr)", d.NewValue)
 	}
-	// It must explain itself: the reporter's complaint was as much about silence as
-	// about the no-op.
-	if !strings.Contains(d.Reason, "raised") || !strings.Contains(d.Reason, "unreachable") {
-		t.Errorf("Reason must say what was raised and why: %q", d.Reason)
+	if !strings.Contains(d.Reason, "--raise-cost-limit") {
+		t.Errorf("Reason must name the flag that raised it: %q", d.Reason)
 	}
 }
 
@@ -48,14 +80,14 @@ func TestDecideCostLimitIncludesEBS(t *testing.T) {
 	newDeadline := launch.Add(2 * time.Hour)
 	tags := map[string]string{"spawn:cost-limit": "0.10", "spawn:price-per-hour": "1.00"}
 
-	withoutEBS := decideCostLimit(extendInstance(launch, tags), newDeadline, time.Now(), 0, false)
+	withoutEBS := decideCostLimit(extendInstance(launch, tags), newDeadline, time.Now(), 0, true)
 
 	tagsEBS := map[string]string{}
 	for k, v := range tags {
 		tagsEBS[k] = v
 	}
 	tagsEBS["spawn:ebs-hourly-cost"] = "0.50"
-	withEBS := decideCostLimit(extendInstance(launch, tagsEBS), newDeadline, time.Now(), 0, false)
+	withEBS := decideCostLimit(extendInstance(launch, tagsEBS), newDeadline, time.Now(), 0, true)
 
 	if withEBS.NewValue <= withoutEBS.NewValue {
 		t.Errorf("the EBS rate must raise the required cap: without=%.4f with=%.4f",
@@ -99,22 +131,27 @@ func TestDecideCostLimitExplicitWins(t *testing.T) {
 	}
 }
 
-// TestDecideCostLimitKeepFlagIsRespectedAndExplained: opting out is allowed, but the
-// output must still say the cap was left alone — otherwise the user is back to an
-// instance dying early for an unstated reason, which is the original bug.
-func TestDecideCostLimitKeepFlagIsRespectedAndExplained(t *testing.T) {
-	launch := time.Now().Add(-10 * time.Minute)
-	d := decideCostLimit(extendInstance(launch, map[string]string{
-		"spawn:cost-limit":     "0.65",
-		"spawn:price-per-hour": "0.638080",
-	}), launch.Add(105*time.Minute), time.Now(), 0, true)
-
-	if d.Changed() {
-		t.Error("--keep-cost-limit must leave the tag alone")
+// The flags cannot ask for two different things.
+func TestCheckExtendCostLimitFlags(t *testing.T) {
+	cases := []struct {
+		explicit    float64
+		raise, keep bool
+		ok          bool
+	}{
+		{0, false, false, true},
+		{5, false, false, true},
+		{0, true, false, true},
+		{0, false, true, true}, // the old opt-out, now the default
+		{5, true, false, false},
+		{5, false, true, false},
+		{0, true, true, false},
+		{-1, false, false, false},
 	}
-	out := renderCostLimitDecision(d)
-	if !strings.Contains(out, "0.6500") || !strings.Contains(out, "unchanged") {
-		t.Errorf("the output must state that the cap was left as-is:\n%s", out)
+	for _, tc := range cases {
+		err := checkExtendCostLimitFlags(tc.explicit, tc.raise, tc.keep)
+		if (err == nil) != tc.ok {
+			t.Errorf("checkExtendCostLimitFlags(%v, %v, %v) = %v, want ok=%v", tc.explicit, tc.raise, tc.keep, err, tc.ok)
+		}
 	}
 }
 

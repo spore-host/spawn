@@ -1,5 +1,8 @@
 package cmd
 
+// The raise arithmetic below is what --raise-cost-limit writes; the default
+// keeps the cap (#1262).
+
 import (
 	"strconv"
 	"testing"
@@ -63,7 +66,7 @@ func TestExtendCostLimitCountsComputeFromEveryBoot(t *testing.T) {
 	})
 	newDeadline := now.Add(6 * time.Hour) // original launch + 16h
 
-	d := decideCostLimit(inst, newDeadline, now, 0, false)
+	d := decideCostLimit(inst, newDeadline, now, 0, true)
 
 	// What the agent will have counted at the new deadline if the instance runs
 	// until then: compute (7h so far + 6h more) at $1, EBS over 16h of wall
@@ -96,7 +99,7 @@ func TestExtendCostLimitDoesNotBillStoppedTimeAsCompute(t *testing.T) {
 			"spawn:price-per-hour":  "1.000000",
 		},
 	}
-	d := decideCostLimit(inst, now.Add(4*time.Hour), now, 0, false)
+	d := decideCostLimit(inst, now.Add(4*time.Hour), now, 0, true)
 	want := 1.0 * (2 + 4)
 	if d.NewValue < want || d.NewValue > want+computeTagLag.Hours() {
 		t.Errorf("cap = $%.4f, want ~$%.2f (2h of compute so far + 4h to the deadline)", d.NewValue, want)
@@ -116,7 +119,7 @@ func TestExtendCostLimitWithoutComputeTagUsesWallClockFromOriginalLaunch(t *test
 			"spawn:price-per-hour": "1.000000",
 		},
 	}
-	d := decideCostLimit(inst, now.Add(2*time.Hour), now, 0, false)
+	d := decideCostLimit(inst, now.Add(2*time.Hour), now, 0, true)
 	if want := 12.0; d.NewValue < want-1e-9 {
 		t.Errorf("cap = $%.4f, want >= $%.2f (12h from the original launch); anchoring to the latest start gives $3", d.NewValue, want)
 	}
@@ -141,7 +144,7 @@ func TestOriginalLaunchTime(t *testing.T) {
 func TestJobArrayExtendUsesTheOriginalLaunchToo(t *testing.T) {
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	inst := restartedInstance(now, map[string]string{"spawn:cost-limit": "5.0000", "spawn:price-per-hour": "1.000000"})
-	tags, _, d := extensionTags(inst, "4h", 4*time.Hour, now, 0, false)
+	tags, _, d := extensionTags(inst, "4h", 4*time.Hour, now, 0, true)
 	if tags["spawn:ttl"] != (16 * time.Hour).String() {
 		t.Errorf("spawn:ttl = %q, want 16h0m0s", tags["spawn:ttl"])
 	}
