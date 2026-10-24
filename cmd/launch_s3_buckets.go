@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 // s3BucketNamePattern is AWS's bucket-naming grammar, narrowed: 3-63 chars of
@@ -52,9 +54,32 @@ func validateS3BucketName(flag, name string) error {
 		return fmt.Errorf("%s %q: pass just the bucket name, not an ARN", flag, name)
 	case strings.Contains(trimmed, "/"):
 		return fmt.Errorf("%s %q: pass just the bucket name, not a bucket/key path", flag, name)
+	case taskproto.IsStagingBucket(trimmed):
+		return fmt.Errorf("%s %q: that is a spawn staging bucket, which holds every task's staged wrapper; no instance may be granted access to it (spawn#1274)", flag, name)
 	case !s3BucketNamePattern.MatchString(trimmed):
 		return fmt.Errorf("%s %q: not a valid S3 bucket name (3-63 chars, lowercase letters, "+
 			"digits, dots and hyphens, starting and ending alphanumeric)", flag, name)
+	}
+	return nil
+}
+
+// refuseStagingBucketGrants refuses --s3-read/--s3-write values that name a
+// spawn staging bucket (spawn#1274), for commands that do not run the full
+// validateS3BucketFlags. An s3:// URI is reduced to its bucket first.
+func refuseStagingBucketGrants(read, write []string) error {
+	for _, group := range []struct {
+		flag    string
+		buckets []string
+	}{
+		{"--s3-read", read},
+		{"--s3-write", write},
+	} {
+		for _, b := range group.buckets {
+			name := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(b), "s3://"), "/", 2)[0]
+			if taskproto.IsStagingBucket(name) {
+				return fmt.Errorf("%s %q: that is a spawn staging bucket, which holds every task's staged wrapper; no instance may be granted access to it (spawn#1274)", group.flag, b)
+			}
+		}
 	}
 	return nil
 }

@@ -40,6 +40,10 @@ type TaskPlan struct {
 	// UserDataBytes is the size of the user data the launch would send, as
 	// EC2's 16 KiB limit counts it (#1063). Plan fails a spec over the limit.
 	UserDataBytes int
+	// StagedBytes is the size of the object the launch stages in S3 in place of
+	// the task wrapper and flush hook (#1274), or 0 when they ride in the user
+	// data, as they do from a dev build. Not counted in UserDataBytes.
+	StagedBytes int
 	// Notes annotate the sizing choice (the container memory floor, an
 	// old-generation family). Render prints them under the Instance line.
 	Notes []string
@@ -62,6 +66,9 @@ type TaskPlan struct {
 // (spawn#1267), checked through deps.AWS. deps.Finder is required; deps.AWS
 // may be nil, and then neither check that needs it runs.
 func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region string) (*TaskPlan, error) {
+	if err := stagingBucketRefusal(spec); err != nil {
+		return nil, err
+	}
 	sized, err := taskproto.Size(ctx, deps.Finder, spec.SizingRequest())
 	if err != nil {
 		return nil, err
@@ -77,7 +84,7 @@ func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region strin
 	}
 	// The user data this task would send, measured the way RunInstances
 	// measures it, so a spec that cannot launch fails its dry run (#1063).
-	userDataBytes, err := taskUserDataPreflight(spec, sized, region)
+	userDataBytes, stagedBytes, err := taskUserDataPreflight(spec, sized, region, stagesFiles(deps.AWS))
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +102,7 @@ func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region strin
 		Purchase:      spec.Resources.Purchase,
 		Network:       network,
 		UserDataBytes: userDataBytes,
+		StagedBytes:   stagedBytes,
 	}
 	if p.Purchase == "" {
 		p.Purchase = taskproto.PurchaseOnDemand
@@ -172,6 +180,9 @@ func Render(out io.Writer, p *TaskPlan) {
 		fmt.Fprintf(out, "Cost limit:   $%.2f (lifecycle.cost_limit)\n", p.Spec.Lifecycle.CostLimit)
 	}
 	fmt.Fprintf(out, "User data:    %d of %d bytes after gzip (EC2 limit)\n", p.UserDataBytes, aws.MaxUserDataBytes)
+	if note := stagedFilesNote(p); note != "" {
+		fmt.Fprintf(out, "              %s\n", note)
+	}
 
 	if p.MaxCostKnown {
 		fmt.Fprintf(out, "Max cost:     ~$%.2f (on-demand rate × TTL; a completed task usually costs far less)\n", p.MaxCost)

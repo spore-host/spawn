@@ -276,11 +276,12 @@ const (
 )
 
 // taskUserDataPreflight measures the task's user data before any AWS call:
-// the same assembly Launch performs (buildTaskLaunch, then
-// launcher.BuildUserData), with placeholders for the account ID, run ID and any
-// FSx names. It returns the decoded size, or an error when the spec cannot
-// launch because the user data is over EC2's limit.
-func taskUserDataPreflight(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string) (int, error) {
+// the same assembly Launch performs (buildTaskLaunch, staging when stage is
+// set, then launcher.BuildUserData), with placeholders for the account ID, run
+// ID and any FSx names. It returns the decoded size and the size of the staged
+// object (0 when nothing is staged), or an error when the spec cannot launch
+// because the user data is over EC2's limit.
+func taskUserDataPreflight(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, region string, stage bool) (userData, staged int, err error) {
 	resultsPrefix := taskproto.EffectiveResultsPrefix(spec, preflightAccountID, region)
 	storageScript, err := taskStorageScriptWith(spec, region, func(id string) (string, string, error) {
 		// fs-<17 hex>.fsx.<region>.amazonaws.com and an 8-character mount name,
@@ -288,11 +289,15 @@ func taskUserDataPreflight(spec *taskproto.TaskSpec, sized *taskproto.SizeResult
 		return id + ".fsx." + region + ".amazonaws.com", "abcdefgh", nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("build task storage: %w", err)
+		return 0, 0, fmt.Errorf("build task storage: %w", err)
 	}
 	cfg, opts, err := buildTaskLaunch(spec, sized, region, preflightProfile, resultsPrefix, preflightRunID, storageScript)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return taskUserDataSize(cfg, opts)
+	if stage {
+		staged = len(stageTaskFiles(cfg.JobArrayCommand, &opts, region, taskproto.StagingBucket(preflightAccountID, region), spec.TaskID).Body)
+	}
+	userData, err = taskUserDataSize(cfg, opts)
+	return userData, staged, err
 }

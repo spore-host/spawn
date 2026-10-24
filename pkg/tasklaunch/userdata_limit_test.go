@@ -192,7 +192,7 @@ func TestTaskUserDataPreflightMatchesTheLaunch(t *testing.T) {
 	// the wrapper's IMDS lookup (spawn#1260) added ~200 bytes.
 	spec := userDataSpec(1500)
 	spec.ResultsPrefix = "s3://my-bucket/tasks/x"
-	got, err := taskUserDataPreflight(spec, userDataTestSized, "us-east-1")
+	got, _, err := taskUserDataPreflight(spec, userDataTestSized, "us-east-1", false)
 	if err != nil {
 		t.Fatalf("preflight: %v", err)
 	}

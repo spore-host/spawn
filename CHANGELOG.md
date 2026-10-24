@@ -60,6 +60,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spliced into user data** (#1274): `spawn app launch`, the pipeline
   orchestrator's stage instances and `spawn upgrade-spored`, about 1.6 KB
   gzipped each.
+- **A release build's `spawn task run` stages the task wrapper and flush hook
+  in S3 instead of putting them in user data, so a task's user data no longer
+  grows with its command and manifests** (#1274). Before RunInstances the
+  launch uploads both, as one object, `<task_id>/bootstrap-<sha256>.sh`, to a
+  dedicated bucket, `spawn-staging-<account>-<region>`, which it creates on
+  first use: Block Public Access on, SSE-S3, BucketOwnerEnforced, tagged
+  `spawn:managed=true`, and a lifecycle rule that expires every object and
+  aborts incomplete uploads after one day. An existing staging bucket without
+  that rule gets the whole configuration re-applied; one owned by another
+  account is never written to (every call sets the expected bucket owner). The
+  user data carries only the object's URI and sha256. At boot, before the
+  bootstrap body and spored, the instance fetches it with its own role
+  (`aws s3 cp --region <task region>`, 6 tries), checks the sha256, and writes
+  `/etc/spawn/command` (0600) and the flush hook (root, 0700) exactly as the
+  inline user data did. A missing object, a wrong sha256 or no aws CLI retires
+  the instance. A trivial task's user data drops from 3,965 to 2,070 bytes
+  gzipped; a task with a 20 KB inline command, which could not launch before
+  (16,533 bytes), now sends 2,076. `spawn task run --dry-run` reports the user
+  data actually sent and says when the files are staged. The task's instance
+  policy gains `s3:GetObject` on `<task_id>/bootstrap-<64 characters>.sh` in the
+  staging bucket, and nothing else there: no policy spawn generates lists the
+  staging bucket, and a TaskSpec (inputs, outputs, `resources.s3_read_write`,
+  `results_prefix`) or a `--s3-read`/`--s3-write` naming a `spawn-staging-*`
+  bucket is refused. Roles are shared by tasks with the same buckets, so the
+  grant covers every task's key, but each key is the sha256 of bytes holding
+  the attempt's random run id and appears only in that attempt's user data, so
+  a task's role can read only its own object in practice. The policy change
+  means the next task run per set of buckets and region creates a new
+  `spawn-instance-*` role. A re-run of a task_id deletes earlier attempts'
+  staged objects. The launching principal needs, on the staging bucket,
+  `s3:ListBucket`, `s3:CreateBucket`, `s3:PutBucketPublicAccessBlock`,
+  `s3:PutEncryptionConfiguration`, `s3:PutBucketOwnershipControls`,
+  `s3:PutLifecycleConfiguration`, `s3:GetLifecycleConfiguration` and
+  `s3:PutBucketTagging`, and `s3:PutObject` and `s3:DeleteObject` on its
+  objects. When the bucket cannot be made ready or the upload fails, a task
+  that fits inline launches inline with a warning. Dev builds, and an embedder
+  whose `tasklaunch.AWS` lacks the staging methods, keep everything inline.
+  Adds `launcher.StagedFiles`, `launcher.StagedFilesObject`,
+  `launcher.NewStagedFiles`, `BootstrapConfig.StagedFiles` and
+  `Options.StagedFiles`; `aws.Client.EnsureStagingBucket`, `PutS3Object` and
+  `ListS3Keys`, `aws.StagingLifecycleRuleID` and `StagingObjectExpiryDays`;
+  `taskproto.StagingBucket`, `IsStagingBucket`,
+  `StagingBucketUses` and `StagingBucketPrefix`; `taskiam.TaskRunPolicyFor`,
+  `StagedFilesKey`, `StagedFilesKeyPrefix` and `StagedFilesResources`; and
+  `tasklaunch.TaskPlan.StagedBytes`. Pool workers are unchanged: their tasks
+  arrive through the queue, not user data.
 
 ### Fixed
 
