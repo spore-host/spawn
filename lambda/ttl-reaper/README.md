@@ -121,10 +121,11 @@ organization principal. Order matters, because the bus policy names the
 forwarder roles:
 
 ```bash
-# 1. In each member account: the role stack (now also creates spawn-ttl-reaper-ec2-events)
+# 1. In each member account: the role stack with InstanceEvents=on, which
+#    creates the forwarder role spawn-ttl-reaper-ec2-events (off by default)
 aws cloudformation deploy --region us-east-1 --stack-name spawn-ttl-reaper-ec2 \
   --template-file ../../deployment/cloudformation/ttl-reaper-cross-account-role.yaml \
-  --capabilities CAPABILITY_NAMED_IAM
+  --capabilities CAPABILITY_NAMED_IAM --parameter-overrides InstanceEvents=on
 # 2. In each member account: the rule, in every launch region
 make member-events-deploy            # MEMBER_REGIONS=... to override
 # 3. In the infra account: create the bus, its policy and rule
@@ -133,8 +134,11 @@ make deploy INSTANCE_EVENTS=on
 
 `InstanceEvents` defaults to `off`, and a `make deploy` that does not name it
 keeps the deployed value. To remove it all: `make deploy INSTANCE_EVENTS=off`
-(or delete the stack), `make member-events-teardown` in each member account, and
-the forwarder role goes with the `spawn-ttl-reaper-ec2` stack. `spawn reaper
+(or delete the stack), then `make member-events-teardown` in each member account,
+then redeploy its `spawn-ttl-reaper-ec2` stack with `--parameter-overrides
+InstanceEvents=off`, which deletes the forwarder role (an account that never
+turned it on never had one). `aws cloudformation deploy` keeps a parameter it is
+not given, so a later redeploy of the role stack leaves the setting as it is. `spawn reaper
 teardown` removes the self-hosted rule. `spawn footprint` lists the buses and
 the rules on them.
 

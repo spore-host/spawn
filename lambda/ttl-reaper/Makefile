@@ -229,15 +229,17 @@ deploy: build
 # The member-account half of InstanceEvents=on (#1287): the regional rule that
 # forwards "EC2 Instance State-change Notification" (state terminated) to this
 # reaper's event bus. Run with credentials for the MEMBER account, after its
-# spawn-ttl-reaper-ec2 stack (ttl-reaper-cross-account-role.yaml) is current,
-# since the rule forwards through the forwarder role that stack creates.
+# spawn-ttl-reaper-ec2 stack (ttl-reaper-cross-account-role.yaml) is deployed
+# with InstanceEvents=on, since the rule forwards through the forwarder role
+# that stack creates only then.
 #
 # EventBridge rules are regional, so this deploys one stack per region in
 # MEMBER_REGIONS, which defaults to the reaper's own Regions default (pinned by
 # TestMemberRegionsDefaultIsTheReapersRegions). If the reaper scans other
 # regions, pass the same list here: a region without the rule falls back to
 # the sweep. member-events-teardown deletes every one of them (leave no trace);
-# deleting the spawn-ttl-reaper-ec2 stack removes the forwarder role.
+# redeploying the spawn-ttl-reaper-ec2 stack with InstanceEvents=off (or
+# deleting it) removes the forwarder role.
 MEMBER_REGIONS?=us-east-1,us-east-2,us-west-1,us-west-2,ca-central-1,eu-west-1,eu-west-2,eu-central-1,ap-southeast-1,ap-southeast-2,ap-northeast-1
 MEMBER_EVENTS_STACK=spawn-ttl-reaper-instance-events
 REAPER_ACCOUNT_ID?=966362334030

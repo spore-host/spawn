@@ -7,8 +7,8 @@ Description: >
 
   EventBridge rules are regional: deploy this in EVERY region spores launch in,
   in every account that has a spawn-ttl-reaper-ec2 stack
-  (ttl-reaper-cross-account-role.yaml, which creates the forwarder role this
-  rule uses). `make member-events-deploy` in lambda/ttl-reaper does all regions;
+  (ttl-reaper-cross-account-role.yaml deployed with InstanceEvents=on, which
+  creates the forwarder role this rule uses). `make member-events-deploy` in lambda/ttl-reaper does all regions;
   `make member-events-teardown` removes them. The reaper must be deployed with
   InstanceEvents=on for the events to be accepted.
 

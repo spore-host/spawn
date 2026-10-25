@@ -296,3 +296,116 @@ func TestInstanceEventRulesMatchOnlyTerminatedStateChanges(t *testing.T) {
 		}
 	}
 }
+
+// evalCondition evaluates a CloudFormation condition with the given
+// parameter values. Unknown forms fail the test rather than guess.
+func evalCondition(t *testing.T, tmpl map[string]interface{}, v interface{}, params map[string]string) bool {
+	t.Helper()
+	conds, _ := tmpl["Conditions"].(map[string]interface{})
+	val := func(x interface{}) string {
+		if m, ok := x.(map[string]interface{}); ok {
+			if ref, ok := m["Ref"].(string); ok {
+				p, ok := params[ref]
+				if !ok {
+					t.Fatalf("condition references parameter %s with no test value", ref)
+				}
+				return p
+			}
+			t.Fatalf("cannot evaluate %v in a condition", x)
+		}
+		s, _ := x.(string)
+		return s
+	}
+	switch x := v.(type) {
+	case string: // a condition name
+		c, ok := conds[x]
+		if !ok {
+			t.Fatalf("no condition %s", x)
+		}
+		return evalCondition(t, tmpl, c, params)
+	case map[string]interface{}:
+		if c, ok := x["Condition"].(string); ok {
+			return evalCondition(t, tmpl, c, params)
+		}
+		if a, ok := x["Fn::Equals"].([]interface{}); ok && len(a) == 2 {
+			return val(a[0]) == val(a[1])
+		}
+		if a, ok := x["Fn::Not"].([]interface{}); ok && len(a) == 1 {
+			return !evalCondition(t, tmpl, a[0], params)
+		}
+		if a, ok := x["Fn::And"].([]interface{}); ok {
+			for _, e := range a {
+				if !evalCondition(t, tmpl, e, params) {
+					return false
+				}
+			}
+			return true
+		}
+		if a, ok := x["Fn::Or"].([]interface{}); ok {
+			for _, e := range a {
+				if evalCondition(t, tmpl, e, params) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	t.Fatalf("cannot evaluate condition %v", v)
+	return false
+}
+
+// TestForwarderRoleExistsOnlyWithInstanceEventsOn: leave no trace. A member
+// account that has not turned instance events on, or has turned them off, has
+// no forwarder role, and nothing in the stack refers to one that is absent.
+// With them on, the role is there with the trust and policy
+// TestInstanceEventsForwarderRole holds.
+func TestForwarderRoleExistsOnlyWithInstanceEventsOn(t *testing.T) {
+	tmpl := loadCFN(t, crossAccountRolePath)
+	if got := paramDefault(t, tmpl, "InstanceEvents"); got != "off" {
+		t.Errorf("member InstanceEvents defaults to %q, want off (the reaper's default too)", got)
+	}
+	resources, _ := tmpl["Resources"].(map[string]interface{})
+	outputs, _ := tmpl["Outputs"].(map[string]interface{})
+	exists := func(on string, entry map[string]interface{}) bool {
+		c, ok := entry["Condition"]
+		if !ok {
+			return true
+		}
+		return evalCondition(t, tmpl, c, map[string]string{"InstanceEvents": on})
+	}
+	role, _ := resources["InstanceEventsForwarderRole"].(map[string]interface{})
+	if role == nil {
+		t.Fatal("no InstanceEventsForwarderRole")
+	}
+	if exists("off", role) {
+		t.Error("InstanceEvents=off still creates the forwarder role")
+	}
+	if !exists("on", role) {
+		t.Error("InstanceEvents=on does not create the forwarder role")
+	}
+	if !exists("off", resources["TTLReaperCrossAccountRole"].(map[string]interface{})) {
+		t.Error("InstanceEvents=off removes the reaper role itself")
+	}
+	// Anything referring to the role must be absent whenever it is, or the
+	// stack fails to deploy with InstanceEvents=off.
+	refs := 0
+	for kind, set := range map[string]map[string]interface{}{"resource": resources, "output": outputs} {
+		for name, raw := range set {
+			entry, _ := raw.(map[string]interface{})
+			if name == "InstanceEventsForwarderRole" {
+				continue
+			}
+			b, _ := json.Marshal(entry)
+			if !strings.Contains(string(b), "InstanceEventsForwarderRole") {
+				continue
+			}
+			refs++
+			if exists("off", entry) {
+				t.Errorf("%s %s refers to the forwarder role but exists with InstanceEvents=off", kind, name)
+			}
+		}
+	}
+	if refs == 0 {
+		t.Error("found nothing referring to the forwarder role; its ForwarderRoleArn output has gone, or the discovery has")
+	}
+}

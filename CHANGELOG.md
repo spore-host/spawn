@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which creates an event bus whose policy admits `events:PutEvents` only from
   the forwarder role of each account in `RoleArns`. Member accounts get the
   forwarder role `spawn-ttl-reaper-ec2-events` from
-  `ttl-reaper-cross-account-role.yaml` and a forwarding rule per launch region
+  `ttl-reaper-cross-account-role.yaml` only when its new `InstanceEvents`
+  parameter is `on` (default `off`; turning it off deletes the role), and a forwarding rule per launch region
   from the new `ttl-reaper-instance-events.yaml` (`make member-events-deploy` /
   `member-events-teardown`). `spawn reaper deploy` adds a same-account rule in
   the deploy region, `spawn reaper teardown` removes it, and `spawn reaper
