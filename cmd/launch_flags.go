@@ -172,6 +172,7 @@ var (
 	quiet            bool
 	waitForRunning   bool
 	waitForSSH       bool
+	waitForSSHSet    bool // --wait-for-ssh was given at all (#1296); set in runLaunch
 	skipRegionCheck  bool
 	terminateOnError bool
 
@@ -440,7 +441,7 @@ func init() {
 	launchCmd.Flags().BoolVar(&interactive, "interactive", false, "Force interactive wizard")
 	launchCmd.Flags().BoolVar(&quiet, "quiet", false, "Minimal output")
 	launchCmd.Flags().BoolVar(&waitForRunning, "wait-for-running", true, "Wait until running")
-	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", true, "Wait until SSH is ready, then verify spored came up (false skips both)")
+	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", false, "Linux: also wait (up to 2 min) for SSH on port 22; refused at once if no attached security group allows tcp/22. Off by default: `spawn connect` uses SSM, and spored is verified either way. --wait-for-ssh=false, given explicitly, skips the spored check too (Windows: skips the password wait)")
 	launchCmd.Flags().BoolVar(&skipRegionCheck, "skip-region-check", false, "Skip data locality region mismatch warnings")
 	launchCmd.Flags().BoolVar(&terminateOnError, "terminate-on-error", false, "If post-launch verification fails (e.g. spored didn't come up), terminate the instance instead of leaving it running")
 	// --dry-run (#569): resolves the same LaunchConfig a real launch would —

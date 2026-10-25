@@ -27,6 +27,7 @@ import (
 
 func runLaunch(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
+	waitForSSHSet = cmd.Flags().Changed("wait-for-ssh")
 
 	// An explicit --os windows is known before anything is resolved, so refuse
 	// the flags Windows can't honour here, before any AWS call and ahead of every dispatch below (#1022).
@@ -916,83 +917,15 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	result.PublicIP = publicIP
 	prog.Complete("Getting public IP")
 
-	var sshUnreachableReason string
-
-	// Step 10: Wait for the instance to be usable. For Windows, SSH (22) won't
-	// answer until late and the real "usable" signal is the Administrator password
-	// becoming available (after EC2Launch runs, post-Sysprep), so wait on that
-	// instead of probing port 22 (#95). For Linux, probe SSH as before.
-	if config.TargetOS == "windows" {
-		prog.Start("Waiting for Windows (password available, up to 12 min)")
-		if waitForSSH {
-			// WaitForPasswordData polls GetPasswordData; it's the earliest reliable
-			// "Windows finished first boot" signal. Best-effort: don't fail the
-			// launch if it's slow — the instance is up and self-managing via spored.
-			if _, err := awsClient.WaitForPasswordData(ctx, config.Region, result.InstanceID, 12*time.Minute); err != nil {
-				fmt.Fprintf(os.Stderr, "\n⚠️  Windows is still finishing first boot (Sysprep). The instance is up; `spawn connect %s` will wait for the password.\n", config.Name)
-			}
-		}
-		prog.Complete("Waiting for Windows (password available, up to 12 min)")
-	} else {
-		prog.Start("Waiting for SSH")
-		switch {
-		case !waitForSSH:
-			prog.Skip("Waiting for SSH")
-		case result.PublicIP == "":
-			// No public address to probe. Previously this skipped the wait and
-			// still reported ✅, which is the same false claim by a different
-			// route (#740). SSM-only access is a legitimate configuration, so say
-			// so rather than implying SSH was checked.
-			sshUnreachableReason = "the instance has no public IP (SSM-only access)"
-			prog.Skip("Waiting for SSH")
-			fmt.Fprintf(os.Stderr, "ℹ️  Skipping the SSH readiness check: %s\n", sshUnreachableReason)
-		default:
-			if err := waitForSSHReady(ctx, result.PublicIP, 2*time.Minute); err != nil {
-				// NOT fatal: the instance is running and spored is enforcing its
-				// own TTL/idle/cost limits, so failing the launch here would
-				// destroy a working spore over a connectivity problem. But it must
-				// be SAID, and it must gate the SSH-dependent steps below — that
-				// is the whole of #740.
-				prog.Error("Waiting for SSH", err)
-				fmt.Fprintf(os.Stderr,
-					"\n⚠️  SSH never became reachable (%v)\n"+
-						"   The instance is up and spored is enforcing its lifecycle. Check the\n"+
-						"   security group's port-22 ingress, or use `spawn connect %s`, which\n"+
-						"   falls back to SSM when SSH is unavailable.\n",
-					err, config.Name)
-			} else {
-				prog.Complete("Waiting for SSH")
-			}
-		}
+	// Steps 10 and 10b: wait for the instance to be usable, then verify spored
+	// (#1296: SSH is waited for only when asked; spored is verified regardless).
+	plan := resolvePostLaunchPlan(config.TargetOS, waitForSSHSet, waitForSSH)
+	post := runPostLaunchChecks(ctx, os.Stderr, prog, clientPostLaunchSteps(awsClient, config.Region, result.InstanceID),
+		plan, config.TargetOS, result.PublicIP, config.Name, result.InstanceID)
+	if post.sporedErr != nil {
+		return sporedVerificationFailure(ctx, awsClient, config.Region, result.InstanceID, terminateOnError, post.sporedErr)
 	}
-
-	// Step 10b: Verify spored actually came up (#50). The bootstrap installs
-	// spored asynchronously via cloud-init, so a failed install (bad download,
-	// checksum mismatch, arch/network) is invisible to `spawn launch` — leaving a
-	// "running" instance with NO lifecycle agent: no TTL enforcement, no idle stop,
-	// no completion handling. That's a cost-control hole (a TTL-less zombie). When
-	// we waited for readiness (--wait-for-ssh) confirm spored is up — by its
-	// heartbeat tag, with SSM as a second signal (#1053) — and fail loudly if not.
-	// --wait-for-ssh=false skips it, and says so (#878).
-	//
-	// Decided by the INSTANCE's OS (config.TargetOS), never by plat.OS — that is
-	// the workstation's runtime.GOOS, and using it is #882. See sporedVerificationFor.
-	sporedVerified := false
-	if check := sporedVerificationFor(waitForSSH, config.TargetOS); check != sporedCheckNone {
-		timeout := sporedVerifyTimeout(check)
-		// One label for Start/Error/Complete: progress matches steps by name (#739).
-		step := fmt.Sprintf("Verifying spored agent (up to %d min)", int(timeout.Minutes()))
-		prog.Start(step)
-		if err := verifySporedReadyOn(ctx, awsClient, config.Region, result.InstanceID, check, timeout); err != nil {
-			prog.Error(step, err)
-			return sporedVerificationFailure(ctx, awsClient, config.Region, result.InstanceID, terminateOnError, err)
-		}
-		prog.Complete(step)
-		sporedVerified = true
-	} else {
-		fmt.Fprintf(os.Stderr, "ℹ️  spored was not verified (--wait-for-ssh=false). Once running it tags %s with %s; "+
-			"until then the instance has no TTL/idle safety net.\n", result.InstanceID, aws.HeartbeatTag)
-	}
+	sporedVerified := post.sporedVerified
 
 	// Step 11: Report DNS (#872).
 	//
@@ -1068,9 +1001,12 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		DNSRecord:       dnsRecord,
 	}
 	if dnsRecord != "" {
-		if config.TargetOS == "windows" {
+		switch {
+		case config.TargetOS == "windows":
 			summary.DNSConnect = fmt.Sprintf("spawn connect %s --rdp", config.Name)
-		} else {
+		case post.sshClosed:
+			// The groups admit no SSH, so an `ssh` line would only time out (#1296).
+		default:
 			summary.DNSConnect = fmt.Sprintf("ssh %s@%s", plat.GetUsername(), dnsRecord)
 		}
 	}

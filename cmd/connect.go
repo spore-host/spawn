@@ -48,7 +48,7 @@ func init() {
 	connectCmd.Flags().BoolVar(&connectSessionMgr, "session-manager", false, "Use AWS Session Manager instead of SSH. On a DCV app instance, opens a shell instead of the streaming session")
 	connectCmd.Flags().BoolVar(&connectNoStart, "no-start", false, "Do not automatically start a stopped/hibernated instance")
 	connectCmd.Flags().BoolVar(&connectRDP, "rdp", false, "Windows: open a Remote Desktop (RDP) connection (decrypts the Administrator password)")
-	connectCmd.Flags().BoolVar(&connectSSH, "ssh", false, "Windows: SSH in (as Administrator, over OpenSSH) instead of opening a PowerShell-over-SSM session — same SSH path as Linux")
+	connectCmd.Flags().BoolVar(&connectSSH, "ssh", false, "Use SSH. Linux: skip the security-group check and SSH even when no group appears to allow the port (by default connect uses SSM then). Windows: SSH in (as Administrator, over OpenSSH) instead of opening a PowerShell-over-SSM session")
 	connectCmd.Flags().BoolVar(&connectViaSSM, "via-ssm", false, "Windows --rdp: tunnel RDP over an SSM port-forwarding session instead of connecting to the public IP")
 	connectCmd.Flags().IntVar(&connectRDPPort, "rdp-port", 13389, "Windows --rdp --via-ssm: local port for the SSM RDP tunnel")
 	connectCmd.Flags().BoolVarP(&connectTTY, "tty", "t", false, "Allocate a pseudo-terminal (ssh -t) for the remote command. Line-buffers remote stdout so a long-running command's progress streams live instead of appearing only when it exits (useful when watching a multi-minute run, or so output isn't lost if the instance auto-terminates mid-run). Off by default: a PTY MERGES stdout and stderr and can mangle binary/structured output, so leave it off when piping such output through connect.")
@@ -108,8 +108,20 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return connectWindows(ctx, client, instance, args[1:])
 	}
 
-	// Use Session Manager if requested or if no public IP
-	if connectSessionMgr || instance.PublicIP == "" {
+	// Session Manager when asked, when there is no public IP, or when the
+	// instance's security groups cannot admit SSH (#1296) — checked before any
+	// key is looked up or injected, so a closed port costs no ssh timeout.
+	transport, note, err := linuxConnectTransport(ctx, connectSessionMgr, connectSSH, len(args) > 1, instance.PublicIP, int32(connectPort), //nolint:gosec // a TCP port
+		func(ctx context.Context, port int32) (aws.PortIngress, error) {
+			return client.InstancePortIngress(ctx, instance.Region, instance.InstanceID, port)
+		})
+	if err != nil {
+		return err
+	}
+	if note != "" {
+		fmt.Fprint(os.Stderr, note)
+	}
+	if transport == connectTransportSSM {
 		return connectViaSessionManager(instance.InstanceID, instance.Region)
 	}
 
@@ -152,6 +164,48 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	}
 
 	return sshToInstance(user, instance.PublicIP, keyPath, connectPort, remoteCmd, connectTTY)
+}
+
+// connectTransport is how a Linux `spawn connect` reaches the instance.
+type connectTransport int
+
+const (
+	connectTransportSSH connectTransport = iota
+	connectTransportSSM
+)
+
+// linuxConnectTransport picks SSH or SSM for a Linux instance (#1296), and any
+// note to print about the choice.
+//
+//   - --session-manager, or no public IP: SSM, as before.
+//   - --ssh: SSH, as before, without reading the security groups.
+//   - otherwise the groups are read once: if none can admit the SSH port, SSM
+//     straight away, saying why. If they might (or cannot be read), SSH as
+//     before. "Might" is generous — any rule on the port from any source — so
+//     an instance SSH could reach is never sent to SSM (see aws.PortIngress).
+//
+// A one-shot command (`connect x -- cmd`) on a closed port is an error, at
+// once: the SSM path here is an interactive session, which would ignore the
+// command and wait on stdin, and SSH would only time out.
+func linuxConnectTransport(ctx context.Context, sessionMgr, forceSSH, oneShot bool, publicIP string, port int32,
+	ingress func(ctx context.Context, port int32) (aws.PortIngress, error)) (connectTransport, string, error) {
+	if sessionMgr || publicIP == "" {
+		return connectTransportSSM, "", nil
+	}
+	if forceSSH {
+		return connectTransportSSH, "", nil
+	}
+	ing, err := ingress(ctx, port)
+	if err != nil || ing.Open {
+		return connectTransportSSH, "", nil
+	}
+	groups := strings.Join(ing.Groups, ", ")
+	if oneShot {
+		return connectTransportSSH, "", fmt.Errorf("no security group on this instance allows inbound tcp/%d (%s), so a one-shot command cannot run over SSH; "+
+			"open the port (or pass --ssh to try anyway), or run `spawn connect` without a command for an SSM session", port, groups)
+	}
+	return connectTransportSSM, fmt.Sprintf("%s no security group on this instance allows inbound tcp/%d (%s); using SSM Session Manager. Pass --ssh to try SSH anyway.\n",
+		i18n.Symbol("info"), port, groups), nil
 }
 
 // buildRemoteCommand turns the post-`--` arguments into the command string ssh

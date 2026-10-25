@@ -110,8 +110,8 @@ func writeOutputID(id, filepath string) error {
 //
 // A timeout returns a non-nil error and is NOT fatal — the instance is up and
 // spored is enforcing its lifecycle — but the caller must know, because the
-// steps after this one (DNS registration, #741) reach the instance over SSH and
-// cannot work if this failed.
+// steps after this one used to reach the instance over SSH (DNS registration,
+// #741; now done by spored, #872).
 //
 // It used to return nothing at all, which made the timeout path and the success
 // path the same statement and the failure literally unrepresentable (#740). The
@@ -166,8 +166,11 @@ const (
 // that terminates it. From a Windows workstation, a Linux instance got no check
 // at all. The workstation's OS is deliberately not a parameter here, so it cannot
 // creep back in.
-func sporedVerificationFor(waitForSSH bool, targetOS string) sporedCheck {
-	if !waitForSSH {
+//
+// verify is postLaunchPlan.verifySpored: false only for an explicit
+// --wait-for-ssh=false (#1296).
+func sporedVerificationFor(verify bool, targetOS string) sporedCheck {
+	if !verify {
 		return sporedCheckNone
 	}
 	if strings.EqualFold(targetOS, "windows") {
