@@ -303,6 +303,9 @@ field ManagedResource.Tags map[string]string
 field MountSnapshotResult.DeviceName string
 field MountSnapshotResult.InstanceID string
 field MountSnapshotResult.VolumeID string
+field PortIngress.Groups []string
+field PortIngress.Open bool
+field PortIngress.Port int32
 field PreparedImage.Cleanup func()
 field PreparedImage.Reader io.ReadCloser
 field ReaperCoverage.Covered bool
@@ -411,6 +414,7 @@ func (*Client) GetSubnets(ctx context.Context, region, vpcID string) ([]string, 
 func (*Client) ImportKeyPair(ctx context.Context, region, keyName string, publicKey []byte) error
 func (*Client) ImportWindowsISO(ctx context.Context, in ImportWindowsISOInput) (string, error)
 func (*Client) InstanceMemoryMiB(ctx context.Context, region, instanceType string) (mib int64, ok bool)
+func (*Client) InstancePortIngress(ctx context.Context, region, instanceID string, port int32) (PortIngress, error)
 func (*Client) InstanceTypeOfferedInRegion(ctx context.Context, region, instanceType string) (bool, error)
 func (*Client) IsWindowsAMI(ctx context.Context, region, amiID string) bool
 func (*Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error)
@@ -480,6 +484,7 @@ func DetectReaperCoverage(ctx context.Context, cfg awssdk.Config) ReaperCoverage
 func EFALaunchInterfaces(cfg LaunchConfig, capacity EFACapacity) ([]types.InstanceNetworkInterfaceSpecification, error)
 func EFANetworkInterface(subnetID string, securityGroupIDs []string) types.InstanceNetworkInterfaceSpecification
 func EFANetworkInterfaces(subnetID string, securityGroupIDs []string, capacity EFACapacity, n int) ([]types.InstanceNetworkInterfaceSpecification, error)
+func EvaluatePortIngress(groups []types.SecurityGroup, port int32) PortIngress
 func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string
 func GenerateScopedDynamoDBPolicy(region, accountID string) string
 func GenerateScopedS3Policy(region, accountID string) string
@@ -534,6 +539,7 @@ type LaunchError struct
 type LaunchResult struct
 type ManagedResource struct
 type MountSnapshotResult struct
+type PortIngress struct
 type PreparedImage struct
 type ReaperCoverage struct
 type S3BucketConfig struct

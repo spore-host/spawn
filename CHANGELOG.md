@@ -47,6 +47,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaper to terminated-instance events. It releases launch Elastic IPs under the
   reaper's existing `REAPER_ELASTIC_IPS` mode; no IAM change.
 
+- **`spawn launch` on Linux no longer waits for SSH by default; spored is still
+  verified, and a closed port 22 is reported at once** (#1296). spawn creates
+  no security group for a plain Linux launch, so the instance gets the VPC's
+  default group, which in an unmodified default VPC admits nothing on tcp/22;
+  every such launch spent the two-minute SSH wait and then printed an error
+  about a healthy instance. `--wait-for-ssh` now defaults to off, and spored is
+  verified either way (heartbeat tag, SSM as a second signal), since it never
+  needed SSH. Passing `--wait-for-ssh` waits as before, except that when no
+  attached security group has an ingress rule on tcp/22 (or all traffic) from
+  any source other than the group itself, the launch says so immediately,
+  naming the groups, and points at `spawn connect` (SSM) or
+  `--security-group-ids`, instead of waiting. An explicit
+  `--wait-for-ssh=false` keeps its old meaning, skipping both the wait and the
+  spored check. A default launch whose groups admit no SSH says so too and no
+  longer prints an `ssh user@<dns-name>` line. Windows launches are unchanged.
+  `spawn connect` on a Linux instance whose groups admit no SSH goes straight
+  to SSM Session Manager instead of trying SSH; `--ssh` (previously
+  Windows-only) forces SSH, and a one-shot `spawn connect <i> -- <cmd>` to such
+  an instance fails at once with the reason. The check needs
+  `ec2:DescribeSecurityGroups`; if it is denied, launch and connect behave as
+  before.
+- **`spawn launch` terminates the instance when the launch fails after
+  RunInstances succeeded, unless `--keep-on-error`** (#1298). That covers
+  spored never coming up (or not being verifiable), WaitForRunning failing,
+  the public-IP lookup failing, the ephemeral FSx failing to start, and any
+  other error the launch returns once the instance exists. An ephemeral FSx
+  the launch created for the instance is deleted with it. Previously the
+  instance was kept unless `--terminate-on-error`, so a caller saw a failed
+  launch while the instance kept billing with nothing enforcing its TTL or
+  cost limit: one ran 74 hours past a 4 h TTL. `--keep-on-error` keeps it and
+  warns that it has no TTL, idle or cost-limit enforcement until spored is
+  confirmed. `--terminate-on-error` is still accepted but deprecated, since it
+  is now the default; `--terminate-on-error=false` keeps the instance, as it
+  always did. Also, every launch now warns when the reaper probe positively
+  finds that no out-of-band reaper scans the launch region, not only
+  `--on-complete stop`/`hibernate` and ephemeral-FSx launches. The probe now
+  checks the `--region` being launched into rather than the client's default
+  region, and an inconclusive probe stays silent for those launches.
+
 ## [0.144.0] - 2026-10-24
 
 ### Changed

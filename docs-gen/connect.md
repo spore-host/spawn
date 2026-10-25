@@ -27,7 +27,7 @@ spawn connect <instance-id> [-- <command>...] [flags]
 | `--rdp-port` |  | int | `13389` | Windows --rdp --via-ssm: local port for the SSM RDP tunnel |
 | `--rdp` |  | bool |  | Windows: open a Remote Desktop (RDP) connection (decrypts the Administrator password) |
 | `--session-manager` |  | bool |  | Use AWS Session Manager instead of SSH. On a DCV app instance, opens a shell instead of the streaming session |
-| `--ssh` |  | bool |  | Windows: SSH in (as Administrator, over OpenSSH) instead of opening a PowerShell-over-SSM session — same SSH path as Linux |
+| `--ssh` |  | bool |  | Use SSH. Linux: skip the security-group check and SSH even when no group appears to allow the port (by default connect uses SSM then). Windows: SSH in (as Administrator, over OpenSSH) instead of opening a PowerShell-over-SSM session |
 | `--tty` | `-t` | bool |  | Allocate a pseudo-terminal (ssh -t) for the remote command. Line-buffers remote stdout so a long-running command's progress streams live instead of appearing only when it exits (useful when watching a multi-minute run, or so output isn't lost if the instance auto-terminates mid-run). Off by default: a PTY MERGES stdout and stderr and can mangle binary/structured output, so leave it off when piping such output through connect. |
 | `--user` |  | string |  | SSH username (default: the instance's spawn:local-username tag, else ec2-user) |
 | `--via-ssm` |  | bool |  | Windows --rdp: tunnel RDP over an SSM port-forwarding session instead of connecting to the public IP |

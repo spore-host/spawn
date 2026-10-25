@@ -145,7 +145,7 @@ func TestVerifySpored_NoHeartbeatTimesOut(t *testing.T) {
 	if want := int(testVerifyTimeout/sporedVerifyPollInterval) + 1; f.livenessCalls != want {
 		t.Errorf("liveness polled %d times, want %d (every interval across the budget)", f.livenessCalls, want)
 	}
-	launchErr := sporedVerificationFailure(context.Background(), nil, "us-west-2", "i-1", false, err)
+	launchErr := sporedVerificationError(err)
 	if !strings.Contains(launchErr.Error(), "spored never came up") {
 		t.Errorf("launch error %q, want the existing \"spored never came up\" verdict", launchErr)
 	}
@@ -191,7 +191,7 @@ func TestVerifySpored_DescribeDeniedIsUnverifiableAndNamed(t *testing.T) {
 	if f.livenessCalls != 1 || clk.sleeps != 0 {
 		t.Errorf("liveness=%d sleeps=%d, want 1/0: a refusal is terminal, not polled", f.livenessCalls, clk.sleeps)
 	}
-	launchErr := sporedVerificationFailure(context.Background(), nil, "us-west-2", "i-1", false, err)
+	launchErr := sporedVerificationError(err)
 	if strings.Contains(launchErr.Error(), "never came up") {
 		t.Errorf("launch error %q blames the instance for the caller's missing permission", launchErr)
 	}
@@ -281,7 +281,7 @@ func TestHeartbeatTagIsWhatSporedWritesOnEveryOS(t *testing.T) {
 // decides verification has an else branch that writes a notice naming the
 // heartbeat tag; without it a skipped check reads exactly like a passed one.
 func TestSkippedSporedVerificationIsAnnounced(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "launch_single.go", nil, 0)
+	f, err := parser.ParseFile(token.NewFileSet(), "launch_postchecks.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,17 @@ func TestSkippedSporedVerificationIsAnnounced(t *testing.T) {
 				if !ok || sel.Sel.Name != "Fprintf" || len(call.Args) < 2 {
 					return true
 				}
-				if id, ok := call.Args[0].(*ast.SelectorExpr); !ok || id.Sel.Name != "Stderr" {
+				// os.Stderr, or w — runPostLaunchChecks's writer, os.Stderr at the call site.
+				switch dst := call.Args[0].(type) {
+				case *ast.SelectorExpr:
+					if dst.Sel.Name != "Stderr" {
+						return true
+					}
+				case *ast.Ident:
+					if dst.Name != "w" {
+						return true
+					}
+				default:
 					return true
 				}
 				for _, a := range call.Args[2:] {
@@ -328,11 +338,11 @@ func TestSkippedSporedVerificationIsAnnounced(t *testing.T) {
 			})
 		}
 		if !announces {
-			t.Error("launch_single skips spored verification without telling the user (no stderr notice naming HeartbeatTag in the else branch)")
+			t.Error("runPostLaunchChecks skips spored verification without telling the user (no stderr notice naming HeartbeatTag in the else branch)")
 		}
 		return true
 	})
 	if found != 1 {
-		t.Fatalf("found %d verification decisions in launch_single.go, want 1", found)
+		t.Fatalf("found %d verification decisions in launch_postchecks.go, want 1", found)
 	}
 }

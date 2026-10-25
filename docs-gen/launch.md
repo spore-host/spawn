@@ -85,6 +85,7 @@ spawn launch <name> [flags]
 | `--instance-type` |  | string |  | Instance type |
 | `--interactive` |  | bool |  | Force interactive wizard |
 | `--job-array-name` |  | string |  | Job array group name (required if --count &gt; 1) |
+| `--keep-on-error` |  | bool |  | If the launch fails after the instance was created (spored never came up, it never reached running, ...), keep the instance instead of terminating it. It then has no TTL/idle/cost-limit enforcement until spored is confirmed running |
 | `--key-name` |  | string |  | SSH key pair name (EC2 KeyName) |
 | `--launch-delay` |  | string | `0s` | Delay between instance launches (e.g., 5s) |
 | `--max-concurrent-auto` |  | bool |  | Derive --max-concurrent from the account's real AWS quota headroom for the sweep's instance type(s)/region, instead of a user-supplied number (spawn#492) |
@@ -139,14 +140,13 @@ spawn launch <name> [flags]
 | `--tag` |  | stringArray |  | Custom tag key=value on the instance and its created volumes (repeatable). The spawn: prefix is reserved. |
 | `--team` |  | string |  | Team ID: tag instance with spawn:team-id for team-shared access |
 | `--template-var` |  | stringToString |  | Template variables (key=value) |
-| `--terminate-on-error` |  | bool |  | If post-launch verification fails (e.g. spored didn't come up), terminate the instance instead of leaving it running |
 | `--ttl` |  | string |  | Auto-terminate after duration (e.g., 8h, 90m, 1d, 2d12h; defaults to 1h idle if not set) |
 | `--user-data-file` |  | string |  | User data file |
 | `--user-data` |  | string |  | User data (@file or inline) |
 | `--volume-size` |  | int32 |  | Root EBS volume size in GiB (0 = use AMI default) |
 | `--vpc` |  | string |  | VPC ID |
 | `--wait-for-running` |  | bool | `true` | Wait until running |
-| `--wait-for-ssh` |  | bool | `true` | Wait until SSH is ready, then verify spored came up (false skips both) |
+| `--wait-for-ssh` |  | bool |  | Linux: also wait (up to 2 min) for SSH on port 22; refused at once if no attached security group allows tcp/22. Off by default: `spawn connect` uses SSM, and spored is verified either way. --wait-for-ssh=false, given explicitly, skips the spored check too (Windows: skips the password wait) |
 | `--wait-timeout` |  | string |  | Timeout for --wait (e.g., 2h, 30m, 0=no timeout) |
 | `--wait` |  | bool |  | Wait for sweep/launch to complete (requires --detach) |
 | `--webhook-correlation` |  | string |  | Opaque blob echoed verbatim in the spot-webhook/completion-webhook payload so a consumer can correlate the event to its own record (never parsed by spawn) |

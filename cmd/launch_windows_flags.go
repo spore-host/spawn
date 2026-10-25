@@ -195,6 +195,7 @@ var windowsLaunchFlags = map[string]windowsFlagRule{
 	"wait-for-ssh":             honouredOnWindows("waits for the Windows Administrator password instead of SSH"),
 	"skip-region-check":        honouredOnWindows(whyCLISide),
 	"terminate-on-error":       honouredOnWindows(whyCLISide),
+	"keep-on-error":            honouredOnWindows(whyCLISide),
 	"dry-run":                  honouredOnWindows(whyCLISide),
 	"print-config":             honouredOnWindows(whyCLISide),
 	"output-id":                honouredOnWindows(whyCLISide),

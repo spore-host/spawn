@@ -55,55 +55,81 @@ func TestSporedProbeMatchesTheCheck(t *testing.T) {
 // `config.TargetOS` belonged — and a behavioural test of sporedVerificationFor
 // cannot see which value the CALLER passes. Matched as a call expression, so a
 // comment naming plat.OS (there is one, explaining this) cannot trip it (rule 3).
+//
+// The decision moved out of launch_single.go into runPostLaunchChecks (#1296), so
+// the gate follows the value across the hop: launch_single must hand
+// config.TargetOS to runPostLaunchChecks and resolvePostLaunchPlan, and
+// runPostLaunchChecks must hand its own targetOS parameter, untouched, to
+// sporedVerificationFor.
 func TestLaunchDecidesSporedVerificationByTargetOS(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "launch_single.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
+	// targetArg is where each hop takes the instance's OS, and what it must be.
+	hops := map[string]struct {
+		arg  int
+		want string
+	}{
+		"runPostLaunchChecks":   {5, "TargetOS"},
+		"resolvePostLaunchPlan": {0, "TargetOS"},
+		"sporedVerificationFor": {1, "targetOS"},
 	}
-	var decisions, verifies int
-	var passesTarget bool
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+	seen := map[string]bool{}
+	var verifies int
+	for _, file := range []string{"launch_single.go", "launch_postchecks.go"} {
+		f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		id, ok := call.Fun.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		switch id.Name {
-		case "verifySporedReady":
-			t.Error("launch_single calls verifySporedReady, which always runs the LINUX probe; " +
-				"it must call verifySporedReadyOn with the check chosen for the instance's OS")
-		case "verifySporedReadyOn":
-			verifies++
-		case "sporedVerificationFor":
-			decisions++
-			if len(call.Args) == 2 {
-				if sel, ok := call.Args[1].(*ast.SelectorExpr); ok && sel.Sel.Name == "TargetOS" {
-					passesTarget = true
-				}
-				ast.Inspect(call.Args[1], func(m ast.Node) bool {
-					if s, ok := m.(*ast.SelectorExpr); ok {
-						if x, ok := s.X.(*ast.Ident); ok && x.Name == "plat" {
-							t.Errorf("sporedVerificationFor is passed plat.%s — the WORKSTATION's OS. "+
-								"The instance's OS is config.TargetOS (#882)", s.Sel.Name)
-						}
-					}
-					return true
-				})
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
-		}
-		return true
-	})
+			id, ok := call.Fun.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			switch id.Name {
+			case "verifySporedReady":
+				t.Errorf("%s calls verifySporedReady, which always runs the LINUX probe; "+
+					"it must call verifySporedReadyOn with the check chosen for the instance's OS", file)
+			case "verifySporedReadyOn":
+				verifies++
+			}
+			hop, ok := hops[id.Name]
+			if !ok || len(call.Args) <= hop.arg {
+				return true
+			}
+			arg := call.Args[hop.arg]
+			switch a := arg.(type) {
+			case *ast.SelectorExpr:
+				if a.Sel.Name == hop.want {
+					if x, ok := a.X.(*ast.Ident); ok && x.Name == "config" {
+						seen[id.Name] = true
+					}
+				}
+			case *ast.Ident:
+				if a.Name == hop.want {
+					seen[id.Name] = true
+				}
+			}
+			ast.Inspect(arg, func(m ast.Node) bool {
+				if s, ok := m.(*ast.SelectorExpr); ok {
+					if x, ok := s.X.(*ast.Ident); ok && x.Name == "plat" {
+						t.Errorf("%s is passed plat.%s — the WORKSTATION's OS. "+
+							"The instance's OS is config.TargetOS (#882)", id.Name, s.Sel.Name)
+					}
+				}
+				return true
+			})
+			return true
+		})
+	}
 	if verifies == 0 {
-		t.Fatal("launch_single no longer verifies spored at all")
+		t.Fatal("the launch no longer verifies spored at all")
 	}
-	if decisions == 0 {
-		t.Fatal("launch_single verifies spored without sporedVerificationFor deciding how")
-	}
-	if !passesTarget {
-		t.Error("sporedVerificationFor is not passed config.TargetOS, the instance's OS")
+	for name, hop := range hops {
+		if !seen[name] {
+			t.Errorf("%s is not passed %s (argument %d), the instance's OS", name, hop.want, hop.arg)
+		}
 	}
 }
 
