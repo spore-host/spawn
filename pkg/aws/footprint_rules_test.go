@@ -38,7 +38,7 @@ func (p *pagedRules) ListRules(_ context.Context, in *eventbridge.ListRulesInput
 // the first page, so a spawn rule on page two was silently absent.
 func TestFootprintReadsEveryPageOfRules(t *testing.T) {
 	p := &pagedRules{pages: [][]string{{"other-1", "other-2"}, {"other-3"}, {"spawn-ttl-reaper"}}}
-	rules, err := listAllRules(context.Background(), p)
+	rules, err := listAllRules(context.Background(), p, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,5 +82,64 @@ func TestFootprintTextDoesNotCallAMatchedNameABlindSpot(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Log("cmd/footprint.go quotes no exact-match name; nothing to check")
+	}
+}
+
+// busFootprint is an account with the TTL reaper's instance-event bus (#1287).
+type busFootprint struct {
+	rules map[string][]string // bus ("" = default) -> rule names
+	buses []string
+}
+
+func (b *busFootprint) ListRules(_ context.Context, in *eventbridge.ListRulesInput, _ ...func(*eventbridge.Options)) (*eventbridge.ListRulesOutput, error) {
+	out := &eventbridge.ListRulesOutput{}
+	for _, n := range b.rules[awssdk.ToString(in.EventBusName)] {
+		out.Rules = append(out.Rules, ebtypes.Rule{Name: awssdk.String(n)})
+	}
+	return out, nil
+}
+
+func (b *busFootprint) ListEventBuses(context.Context, *eventbridge.ListEventBusesInput, ...func(*eventbridge.Options)) (*eventbridge.ListEventBusesOutput, error) {
+	out := &eventbridge.ListEventBusesOutput{}
+	for _, n := range b.buses {
+		out.EventBuses = append(out.EventBuses, ebtypes.EventBus{Name: awssdk.String(n)})
+	}
+	return out, nil
+}
+
+// TestFootprintSeesTheReapersEventBusAndItsRule (#1287): the footprint read
+// rules on the default bus only, so the instance-event bus the reaper stack
+// creates, and the rule on it, were invisible to it.
+func TestFootprintSeesTheReapersEventBusAndItsRule(t *testing.T) {
+	f := &busFootprint{
+		buses: []string{"default", "spawn-ttl-reaper-production-instance-events", "someone-elses-bus"},
+		rules: map[string][]string{
+			"": {"spawn-ttl-reaper-instance-terminated", "unrelated"},
+			"spawn-ttl-reaper-production-instance-events": {"spawn-ttl-reaper-production-instance-terminated"},
+			"someone-elses-bus":                           {"their-rule"},
+		},
+	}
+	rows, notes := scanEvents(context.Background(), f, "us-east-1")
+	if len(notes) != 0 {
+		t.Fatalf("notes %v", notes)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Kind+" "+r.Name] = r.Detail
+	}
+	for _, want := range []string{
+		"event-bus spawn-ttl-reaper-production-instance-events",
+		"rule spawn-ttl-reaper-production-instance-terminated",
+		"rule spawn-ttl-reaper-instance-terminated",
+	} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("footprint is missing %s; got %v", want, got)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("footprint reported %d rows, want exactly the 3 spawn ones: %v", len(got), got)
+	}
+	if d := got["rule spawn-ttl-reaper-production-instance-terminated"]; !strings.Contains(d, "on bus spawn-ttl-reaper-production-instance-events") {
+		t.Errorf("a custom-bus rule does not say which bus: %q", d)
 	}
 }

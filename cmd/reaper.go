@@ -85,7 +85,9 @@ var reaperDeployCmd = &cobra.Command{
 	Short: "Deploy the TTL reaper into this AWS account (unarmed)",
 	Long: `Create the reaper's execution role, upload its Lambda artifact to a bucket in
 this account, create its log group with a retention (30 days by default), create
-the function, and put it on a schedule.
+the function, and put it on a schedule. A second rule in this region invokes it
+when EC2 reports an instance terminated, so a launch Elastic IP is released at
+once rather than on the next sweep; other scanned regions rely on the sweep.
 
 Deploys with dry-run ON. Nothing is reclaimed until 'spawn reaper arm'.
 
@@ -120,8 +122,9 @@ var reaperStatusCmd = &cobra.Command{
 var reaperTeardownCmd = &cobra.Command{
 	Use:   "teardown",
 	Short: "Remove the reaper from this account, including its artifact bucket",
-	Long: `Remove the reaper from this account: the schedule, the Lambda, its role, its
-CloudWatch log group, and the S3 bucket holding its artifact. --keep-logs leaves the
+	Long: `Remove the reaper from this account: the schedule, the terminated-instance
+rule, the Lambda, its role, its CloudWatch log group, and the S3 bucket holding
+its artifact. --keep-logs leaves the
 log group, which is the only record of what the reaper did.
 
 The bucket used to be left behind deliberately (#653). Under "leave no trace"
@@ -470,6 +473,13 @@ func renderReaperStatusWithCLI(info reaperdeploy.Info, account, region, cliVersi
 	}
 	if info.Regions != "" {
 		fmt.Fprintf(&b, "  Scanning:  %s\n", info.Regions)
+	}
+	// #1287: whether a terminated instance's launch Elastic IP is released at
+	// once or waits for the next sweep.
+	if info.InstanceEvents {
+		fmt.Fprintf(&b, "  Events:    terminated instances here release their launch Elastic IP at once\n")
+	} else {
+		fmt.Fprintf(&b, "  Events:    none — launch Elastic IPs wait for the sweep; spawn reaper deploy adds the rule\n")
 	}
 	return b.String()
 }

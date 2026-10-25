@@ -72,6 +72,10 @@ type fakeLambda struct {
 	env     map[string]string
 	calls   []string
 	lastEnv map[string]string
+	// permitted / unpermitted record AddPermission inputs and the
+	// RemovePermission statement IDs (#1287).
+	permitted   []*lambda.AddPermissionInput
+	unpermitted []string
 
 	// codeUpdatePolls models Lambda applying UpdateFunctionCode asynchronously
 	// (#1084): after a code update, this many GetFunction calls report
@@ -140,12 +144,14 @@ func (f *fakeLambda) UpdateFunctionConfiguration(_ context.Context, in *lambda.U
 	}
 	return &lambda.UpdateFunctionConfigurationOutput{}, nil
 }
-func (f *fakeLambda) AddPermission(context.Context, *lambda.AddPermissionInput, ...func(*lambda.Options)) (*lambda.AddPermissionOutput, error) {
+func (f *fakeLambda) AddPermission(_ context.Context, in *lambda.AddPermissionInput, _ ...func(*lambda.Options)) (*lambda.AddPermissionOutput, error) {
 	f.calls = append(f.calls, "AddPermission")
+	f.permitted = append(f.permitted, in)
 	return &lambda.AddPermissionOutput{}, nil
 }
-func (f *fakeLambda) RemovePermission(context.Context, *lambda.RemovePermissionInput, ...func(*lambda.Options)) (*lambda.RemovePermissionOutput, error) {
+func (f *fakeLambda) RemovePermission(_ context.Context, in *lambda.RemovePermissionInput, _ ...func(*lambda.Options)) (*lambda.RemovePermissionOutput, error) {
 	f.calls = append(f.calls, "RemovePermission")
+	f.unpermitted = append(f.unpermitted, awssdk.ToString(in.StatementId))
 	return &lambda.RemovePermissionOutput{}, nil
 }
 func (f *fakeLambda) DeleteFunction(context.Context, *lambda.DeleteFunctionInput, ...func(*lambda.Options)) (*lambda.DeleteFunctionOutput, error) {
@@ -159,15 +165,29 @@ type fakeEvents struct {
 	// putSchedule is what PutRule last wrote.
 	schedule    string
 	putSchedule string
+	// rules records each PutRule by name, and targeted / untargeted /
+	// deleted the rules PutTargets, RemoveTargets and DeleteRule named, so a
+	// test can tell the schedule rule from the instance-event rule (#1287).
+	rules      map[string]*eventbridge.PutRuleInput
+	targeted   []string
+	untargeted []string
+	deleted    []string
 }
 
 func (f *fakeEvents) PutRule(_ context.Context, in *eventbridge.PutRuleInput, _ ...func(*eventbridge.Options)) (*eventbridge.PutRuleOutput, error) {
 	f.calls = append(f.calls, "PutRule")
-	f.putSchedule = awssdk.ToString(in.ScheduleExpression)
+	if f.rules == nil {
+		f.rules = map[string]*eventbridge.PutRuleInput{}
+	}
+	f.rules[awssdk.ToString(in.Name)] = in
+	if awssdk.ToString(in.Name) == RuleName {
+		f.putSchedule = awssdk.ToString(in.ScheduleExpression)
+	}
 	return &eventbridge.PutRuleOutput{}, nil
 }
-func (f *fakeEvents) PutTargets(context.Context, *eventbridge.PutTargetsInput, ...func(*eventbridge.Options)) (*eventbridge.PutTargetsOutput, error) {
+func (f *fakeEvents) PutTargets(_ context.Context, in *eventbridge.PutTargetsInput, _ ...func(*eventbridge.Options)) (*eventbridge.PutTargetsOutput, error) {
 	f.calls = append(f.calls, "PutTargets")
+	f.targeted = append(f.targeted, awssdk.ToString(in.Rule))
 	return &eventbridge.PutTargetsOutput{}, nil
 }
 func (f *fakeEvents) DescribeRule(context.Context, *eventbridge.DescribeRuleInput, ...func(*eventbridge.Options)) (*eventbridge.DescribeRuleOutput, error) {
@@ -177,12 +197,14 @@ func (f *fakeEvents) DescribeRule(context.Context, *eventbridge.DescribeRuleInpu
 	}
 	return &eventbridge.DescribeRuleOutput{ScheduleExpression: awssdk.String(f.schedule)}, nil
 }
-func (f *fakeEvents) RemoveTargets(context.Context, *eventbridge.RemoveTargetsInput, ...func(*eventbridge.Options)) (*eventbridge.RemoveTargetsOutput, error) {
+func (f *fakeEvents) RemoveTargets(_ context.Context, in *eventbridge.RemoveTargetsInput, _ ...func(*eventbridge.Options)) (*eventbridge.RemoveTargetsOutput, error) {
 	f.calls = append(f.calls, "RemoveTargets")
+	f.untargeted = append(f.untargeted, awssdk.ToString(in.Rule))
 	return &eventbridge.RemoveTargetsOutput{}, nil
 }
-func (f *fakeEvents) DeleteRule(context.Context, *eventbridge.DeleteRuleInput, ...func(*eventbridge.Options)) (*eventbridge.DeleteRuleOutput, error) {
+func (f *fakeEvents) DeleteRule(_ context.Context, in *eventbridge.DeleteRuleInput, _ ...func(*eventbridge.Options)) (*eventbridge.DeleteRuleOutput, error) {
 	f.calls = append(f.calls, "DeleteRule")
+	f.deleted = append(f.deleted, awssdk.ToString(in.Name))
 	return &eventbridge.DeleteRuleOutput{}, nil
 }
 

@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Forwards this region's "EC2 Instance State-change Notification" events with
+  state terminated to the spawn TTL reaper's event bus, so the reaper releases a
+  terminated spawn instance's launch Elastic IP at once (spore-host/spawn#1287).
+  In a nondefault VPC spored cannot release that address itself.
+
+  EventBridge rules are regional: deploy this in EVERY region spores launch in,
+  in every account that has a spawn-ttl-reaper-ec2 stack
+  (ttl-reaper-cross-account-role.yaml deployed with InstanceEvents=on, which
+  creates the forwarder role this rule uses). `make member-events-deploy` in lambda/ttl-reaper does all regions;
+  `make member-events-teardown` removes them. The reaper must be deployed with
+  InstanceEvents=on for the events to be accepted.
+
+  No IAM here. The rule only forwards; what the reaper does with the event is
+  the ElasticIps mode of its own stack, through the existing reaper role.
+
+Parameters:
+  ReaperAccountId:
+    Type: String
+    Default: '966362334030'
+    Description: Account holding the TTL reaper and its event bus.
+    AllowedPattern: '\d{12}'
+    ConstraintDescription: Must be a 12-digit AWS account id
+
+  ReaperRegion:
+    Type: String
+    Default: us-east-1
+    Description: Region of the reaper's event bus.
+
+  ReaperEventBus:
+    Type: String
+    Default: spawn-ttl-reaper-production-instance-events
+    Description: Name of the reaper's event bus (spawn-ttl-reaper-<Environment>-instance-events).
+
+  ForwarderRoleName:
+    Type: String
+    Default: spawn-ttl-reaper-ec2-events
+    Description: >
+      The forwarder role ttl-reaper-cross-account-role.yaml creates (its
+      RoleName with "-events" appended).
+
+Resources:
+  InstanceTerminatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      # Fixed: the forwarder role's trust names rules of exactly this name.
+      Name: spawn-ttl-reaper-instance-terminated
+      Description: Forwards terminated-instance events to the spawn TTL reaper (spawn#1287)
+      EventPattern:
+        source: [aws.ec2]
+        detail-type: [EC2 Instance State-change Notification]
+        detail:
+          state: [terminated]
+      State: ENABLED
+      Targets:
+        - Id: spawn-ttl-reaper
+          Arn: !Sub 'arn:aws:events:${ReaperRegion}:${ReaperAccountId}:event-bus/${ReaperEventBus}'
+          RoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ForwarderRoleName}'

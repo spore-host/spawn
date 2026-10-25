@@ -61,7 +61,9 @@ spawn reaper arm [flags]
 
 Create the reaper's execution role, upload its Lambda artifact to a bucket in
 this account, create its log group with a retention (30 days by default), create
-the function, and put it on a schedule.
+the function, and put it on a schedule. A second rule in this region invokes it
+when EC2 reports an instance terminated, so a launch Elastic IP is released at
+once rather than on the next sweep; other scanned regions rely on the sweep.
 
 Deploys with dry-run ON. Nothing is reclaimed until 'spawn reaper arm'.
 
@@ -107,8 +109,9 @@ spawn reaper status
 
 ### `spawn reaper teardown`
 
-Remove the reaper from this account: the schedule, the Lambda, its role, its
-CloudWatch log group, and the S3 bucket holding its artifact. --keep-logs leaves the
+Remove the reaper from this account: the schedule, the terminated-instance
+rule, the Lambda, its role, its CloudWatch log group, and the S3 bucket holding
+its artifact. --keep-logs leaves the
 log group, which is the only record of what the reaper did.
 
 The bucket used to be left behind deliberately (#653). Under "leave no trace"

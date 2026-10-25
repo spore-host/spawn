@@ -44,6 +44,14 @@ const (
 	// lagotto#170-style authorization bug to hide in.
 	RuleName = "spawn-ttl-reaper-selfscan-schedule"
 
+	// InstanceEventRuleName is the rule on this account's default event bus, in
+	// the deploy region, that invokes the reaper when EC2 reports an instance
+	// terminated, so a launch Elastic IP is released at once instead of on the
+	// next sweep (#1287). Same account, no trust: a rule invokes a function in
+	// its own account through a Lambda resource-policy statement, as the
+	// schedule does.
+	InstanceEventRuleName = "spawn-ttl-reaper-selfscan-instance-terminated"
+
 	// PolicyName is the inline policy carrying pkg/reaperiam's statements.
 	PolicyName = "spawn-ttl-reaper-selfscan-policy"
 
@@ -54,6 +62,12 @@ const (
 	artifactAsset = "ttl-reaper_lambda_linux_arm64.zip"
 	releaseRepo   = "spore-host/spawn"
 )
+
+// InstanceEventPattern matches exactly the terminated state change, the same
+// pattern as the operated reaper's rules in lambda/ttl-reaper/template.yaml and
+// deployment/cloudformation/ttl-reaper-instance-events.yaml (a test holds the
+// three equal).
+const InstanceEventPattern = `{"source":["aws.ec2"],"detail-type":["EC2 Instance State-change Notification"],"detail":{"state":["terminated"]}}`
 
 // ArtifactURL returns the GitHub Release download URL for the reaper Lambda zip at
 // the given version. Pure, so it is unit-testable without network.

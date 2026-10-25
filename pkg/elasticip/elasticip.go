@@ -102,14 +102,13 @@ type Result struct {
 	InUse []string
 }
 
-// ReleaseForInstance releases every launch Elastic IP tagged for instanceID with
-// a single ReleaseAddress each, never DisassociateAddress (see the package doc
-// for why). Errors other than InUse and NotFound are joined and returned; one
-// address's failure does not stop the rest.
-func ReleaseForInstance(ctx context.Context, api API, instanceID string) (Result, error) {
-	var res Result
+// AddressesForInstance returns the launch Elastic IPs tagged for instanceID:
+// the addresses ReleaseForInstance would release. A caller that may only report
+// (the TTL reaper in report mode, #1287) uses it so that what it reports is
+// exactly what a release would touch.
+func AddressesForInstance(ctx context.Context, api API, instanceID string) ([]types.Address, error) {
 	if instanceID == "" {
-		return res, nil
+		return nil, nil
 	}
 	out, err := api.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{
 		Filters: []types.Filter{
@@ -118,16 +117,33 @@ func ReleaseForInstance(ctx context.Context, api API, instanceID string) (Result
 		},
 	})
 	if err != nil {
-		return res, fmt.Errorf("describe Elastic IPs for %s: %w", instanceID, err)
+		return nil, fmt.Errorf("describe Elastic IPs for %s: %w", instanceID, err)
 	}
-	var errs []error
+	var addrs []types.Address
 	for _, a := range out.Addresses {
-		alloc := aws.ToString(a.AllocationId)
-		// The filter is the API's promise; this is ours. Never release an
+		// The filter is the API's promise; this is ours. Never return an
 		// address that is not a launch address for exactly this instance.
-		if alloc == "" || !IsLaunchAddress(a.Tags) || tagValue(a.Tags, InstanceIDTagKey) != instanceID {
+		if aws.ToString(a.AllocationId) == "" || !IsLaunchAddress(a.Tags) || tagValue(a.Tags, InstanceIDTagKey) != instanceID {
 			continue
 		}
+		addrs = append(addrs, a)
+	}
+	return addrs, nil
+}
+
+// ReleaseForInstance releases every launch Elastic IP tagged for instanceID with
+// a single ReleaseAddress each, never DisassociateAddress (see the package doc
+// for why). Errors other than InUse and NotFound are joined and returned; one
+// address's failure does not stop the rest.
+func ReleaseForInstance(ctx context.Context, api API, instanceID string) (Result, error) {
+	var res Result
+	addrs, err := AddressesForInstance(ctx, api, instanceID)
+	if err != nil {
+		return res, err
+	}
+	var errs []error
+	for _, a := range addrs {
+		alloc := aws.ToString(a.AllocationId)
 		_, rerr := api.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: aws.String(alloc)})
 		switch {
 		case rerr == nil || strings.Contains(rerr.Error(), "InvalidAllocationID.NotFound"):

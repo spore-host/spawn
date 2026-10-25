@@ -585,7 +585,7 @@ func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	// DryRun first because it is the one that silently stops the reaper
 	// terminating anything.
 	keys := []string{
-		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
+		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "InstanceEvents", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
 	}
@@ -868,5 +868,89 @@ func TestTtlGraceSurvivesAMakeDeploy(t *testing.T) {
 	got, _ = runMerge(t, summary, set0, toExplicit(set))
 	if got["TtlGrace"] != "5m" {
 		t.Errorf("make deploy TTL_GRACE=5m sent %q", got["TtlGrace"])
+	}
+}
+
+// TestInstanceEventsSurvivesAMakeDeploy is #1287's preservation property, the
+// same shape as TestTtlGraceSurvivesAMakeDeploy: a stack set to
+// InstanceEvents=on keeps it across a `make deploy` that does not mention it
+// (otherwise a code-only redeploy would delete the bus and its policy), a
+// stack that predates the parameter gets the template default ('off', so an
+// upgrade creates no cross-account grant by itself), and
+// `make deploy INSTANCE_EVENTS=on` sets it.
+func TestInstanceEventsSurvivesAMakeDeploy(t *testing.T) {
+	summary := templateSummaryFromTemplate(t)
+	setOn := strings.Replace(liveParams, "\n]",
+		",\n  {\"ParameterKey\":\"InstanceEvents\",\"ParameterValue\":\"on\"}\n]", 1)
+	if setOn == liveParams {
+		t.Fatal("could not add InstanceEvents to the live fixture")
+	}
+	toExplicit := func(m map[string]string) string {
+		var b strings.Builder
+		for k, v := range m {
+			b.WriteString(k + "=" + v + "\n")
+		}
+		return b.String()
+	}
+
+	plain, _ := explicitFromMakefile(t)
+	got, _ := runMerge(t, summary, setOn, toExplicit(plain))
+	if got["InstanceEvents"] != "on" {
+		t.Errorf("plain make deploy over a stack with InstanceEvents=on sent %q: a deploy that did "+
+			"not mention it would delete the event bus", got["InstanceEvents"])
+	}
+
+	got, _ = runMerge(t, summary, liveParams, toExplicit(plain))
+	if got["InstanceEvents"] != "off" {
+		t.Errorf("a stack predating InstanceEvents got %q, want the template default 'off'", got["InstanceEvents"])
+	}
+
+	set, _ := explicitFromMakefile(t, "INSTANCE_EVENTS=on")
+	got, _ = runMerge(t, summary, liveParams, toExplicit(set))
+	if got["InstanceEvents"] != "on" {
+		t.Errorf("make deploy INSTANCE_EVENTS=on sent %q", got["InstanceEvents"])
+	}
+}
+
+// TestMemberRegionsDefaultIsTheReapersRegions: `make member-events-deploy`
+// puts the forwarding rule in MEMBER_REGIONS, and the reaper only acts on an
+// event from a region in its own Regions. The two defaults must be the same
+// list, or a default deployment has regions whose terminations are forwarded
+// and ignored, or scanned and never forwarded (#1287).
+func TestMemberRegionsDefaultIsTheReapersRegions(t *testing.T) {
+	mk, err := os.ReadFile("Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^MEMBER_REGIONS\?=(\S+)$`).FindSubmatch(mk)
+	if m == nil {
+		t.Fatal("Makefile has no MEMBER_REGIONS?= default")
+	}
+	tmpl, err := os.ReadFile("template.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := regexp.MustCompile(`(?m)^  Regions:\n(?:    .*\n)*?    Default: '([^']+)'`).FindSubmatch(tmpl)
+	if d == nil {
+		t.Fatal("template.yaml has no Regions Default")
+	}
+	if string(m[1]) != string(d[1]) {
+		t.Errorf("MEMBER_REGIONS defaults to %s, the reaper's Regions to %s", m[1], d[1])
+	}
+	// Every region in the loop gets an explicit --region, and teardown covers
+	// the same list as deploy.
+	for _, target := range []string{"member-events-deploy", "member-events-teardown"} {
+		body := regexp.MustCompile(`(?ms)^` + target + `:\n(.*?)\n\n`).FindSubmatch(mk)
+		if body == nil {
+			t.Fatalf("no %s target", target)
+		}
+		if !strings.Contains(string(body[1]), "$(subst $(comma), ,$(MEMBER_REGIONS))") {
+			t.Errorf("%s does not loop over MEMBER_REGIONS", target)
+		}
+		for _, line := range regexp.MustCompile(`(?m)^\s*aws cloudformation .*$`).FindAllString(string(body[1]), -1) {
+			if !strings.Contains(line, "--region $$r") {
+				t.Errorf("%s: %q has no --region $$r", target, strings.TrimSpace(line))
+			}
+		}
 	}
 }

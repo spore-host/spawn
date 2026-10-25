@@ -90,6 +90,58 @@ per account (`REAPER_ROLE_ARNS`), and optionally scanning its own account
 (`REAPER_SCAN_SELF`). Add a new account by deploying the cross-account role
 there and appending its ARN to the list.
 
+## Terminated-instance events ([#1287])
+
+In a **nondefault VPC**, EC2 refuses to release an associated Elastic IP
+(`InvalidIPAddress.InUse`). On a multi-interface EFA instance the launch Elastic
+IP is the instance's only egress, so spored cannot disassociate and then release
+it: it is left to the reaper. Without events that means the next sweep after a
+15-minute grace, holding a slot of the region's Elastic IP quota (5 by default)
+while a fan-out relaunches.
+
+With events, EC2's own `EC2 Instance State-change Notification` (state
+`terminated`) invokes the reaper for that one instance, which asks EC2 to confirm
+the termination and releases the instance's launch Elastic IPs through the same
+`pkg/elasticip` release and tag checks as everything else, with no grace. It
+retries an address EC2 still reports in use a few times, then leaves it to the
+sweep. An event never runs the full scan. The release follows
+`REAPER_ELASTIC_IPS` and `REAPER_DRY_RUN` exactly as the sweep does (`report`
+logs `WOULD release Elastic IP ...`). An event from an account or region the
+reaper is not configured for is ignored.
+
+| Deploy path | What carries the events | Regions |
+|---|---|---|
+| `spawn reaper deploy` (self-hosted) | a rule on the account's default bus, `spawn-ttl-reaper-selfscan-instance-terminated`, targeting the function | the deploy region only; others wait for the sweep |
+| operated reaper (`make deploy INSTANCE_EVENTS=on`) | member rule `spawn-ttl-reaper-instance-terminated` in each launch region → the reaper account's bus `spawn-ttl-reaper-<env>-instance-events` → rule → function | every region in `MEMBER_REGIONS` (default: the reaper's `Regions`) |
+
+The operated reaper's bus admits `events:PutEvents` only from the forwarder role
+of each account in `RoleArns` (that ARN with `-events` appended), so it admits
+exactly the accounts the reaper already assumes into. No wildcard and no
+organization principal. Order matters, because the bus policy names the
+forwarder roles:
+
+```bash
+# 1. In each member account: the role stack with InstanceEvents=on, which
+#    creates the forwarder role spawn-ttl-reaper-ec2-events (off by default)
+aws cloudformation deploy --region us-east-1 --stack-name spawn-ttl-reaper-ec2 \
+  --template-file ../../deployment/cloudformation/ttl-reaper-cross-account-role.yaml \
+  --capabilities CAPABILITY_NAMED_IAM --parameter-overrides InstanceEvents=on
+# 2. In each member account: the rule, in every launch region
+make member-events-deploy            # MEMBER_REGIONS=... to override
+# 3. In the infra account: create the bus, its policy and rule
+make deploy INSTANCE_EVENTS=on
+```
+
+`InstanceEvents` defaults to `off`, and a `make deploy` that does not name it
+keeps the deployed value. To remove it all: `make deploy INSTANCE_EVENTS=off`
+(or delete the stack), then `make member-events-teardown` in each member account,
+then redeploy its `spawn-ttl-reaper-ec2` stack with `--parameter-overrides
+InstanceEvents=off`, which deletes the forwarder role (an account that never
+turned it on never had one). `aws cloudformation deploy` keeps a parameter it is
+not given, so a later redeploy of the role stack leaves the setting as it is. `spawn reaper
+teardown` removes the self-hosted rule. `spawn footprint` lists the buses and
+the rules on them.
+
 ## Configuration (env vars)
 
 | Var | Default | Meaning |
@@ -110,7 +162,7 @@ there and appending its ARN to the list.
 | `REAPER_DNS_EXPIRE` | `false` | With the sweep on, **delete** the A-records under an unmanaged subdomain whose account the portal registry has proven `dormant` or `offboarded` ([#466]). Requires `REAPER_DNS_SWEEP` (the walk runs inside the sweep) and honors `REAPER_DRY_RUN`. Read the report before enabling — see [DNS expiry](#dns-expiry-466) |
 | `REAPER_DNS_LEASE_EXPIRE` | `false` | With the sweep on, **delete** an A-record under an account subdomain this reaper does **not** cover when its owner has stopped renewing its DNS lease for longer than `pkg/dns.LeaseMaxAge` (6h), plus the lease itself, and any lease whose A-record is already gone. The only backstop for a record left by an abruptly terminated instance in an account the reaper holds no credentials in. Records with no lease (every spored before leases) and records in covered accounts are never touched. Requires `REAPER_DNS_SWEEP`, honors `REAPER_DRY_RUN`. See [DNS leases](#dns-leases) |
 | `REAPER_NET_RESOURCES` | `report` | Reclaim spawn-managed **security groups** and **cluster placement groups** with no instance referencing them, older than **7 days** ([#685]). `report` logs what it *would* reclaim and deletes nothing; `reap` deletes; `off` skips the sweep entirely. Launch Elastic IPs are **not** governed by this; see `REAPER_ELASTIC_IPS`. Three values and **not** folded into `REAPER_DRY_RUN` on purpose — production runs with the dry run off, so a boolean would arm a new destructive sweep on upgrade and the only preview would be disarming the live instance reaper. A typo resolves to `report`; `REAPER_DRY_RUN` always wins |
-| `REAPER_ELASTIC_IPS` | unset: `reap`, or `off` when `REAPER_NET_RESOURCES=off` | The orphaned launch **Elastic IP** sweep ([#661], [#1232]), independent of `REAPER_NET_RESOURCES`. Template parameter `ElasticIps` (default `''`, i.e. unset) / make variable `ELASTIC_IPS` / `spawn reaper deploy --elastic-ips`. Unset keeps the behaviour from before the variable existed, so a redeploy that does not name it changes nothing. Selects addresses tagged `spawn:managed=true`, `spawn:purpose=efa-public-ip` and `spawn:instance-id` (a multi-interface EFA launch allocates one), and releases one only when **all** hold: it is unassociated; its instance is terminated or absent from `DescribeInstances`; and its `spawn:created` stamp is at least **15 minutes** old. EC2 reports no allocation time for an address; one without a usable stamp is stamped `spawn:reaper-first-seen` on first sight and aged from that. Such an address bills by the hour and counts against the per-region Elastic IP quota, and a Spot reclaim leaves one behind every time. `reap` releases them, and also releases the address of an instance the reaper has just terminated; `report` logs `WOULD release Elastic IP <alloc> (<ip>) ...` for exactly the addresses `reap` would release and changes nothing; `off` skips both. Counted in the run summary as `elastic_ips_scanned`, `elastic_ips_released`, `elastic_ips_would_release` and `elastic_ips_skipped`. A typo resolves to `report`; `REAPER_DRY_RUN` always wins |
+| `REAPER_ELASTIC_IPS` | unset: `reap`, or `off` when `REAPER_NET_RESOURCES=off` | The orphaned launch **Elastic IP** sweep ([#661], [#1232]), independent of `REAPER_NET_RESOURCES`. Template parameter `ElasticIps` (default `''`, i.e. unset) / make variable `ELASTIC_IPS` / `spawn reaper deploy --elastic-ips`. Unset keeps the behaviour from before the variable existed, so a redeploy that does not name it changes nothing. Selects addresses tagged `spawn:managed=true`, `spawn:purpose=efa-public-ip` and `spawn:instance-id` (a multi-interface EFA launch allocates one), and releases one only when **all** hold: it is unassociated; its instance is terminated or absent from `DescribeInstances`; and its `spawn:created` stamp is at least **15 minutes** old, or `DescribeInstances` lists its instance as `terminated` ([#1287]: the grace exists for an instance not yet visible, which a terminated one is not). EC2 reports no allocation time for an address; one without a usable stamp is stamped `spawn:reaper-first-seen` on first sight and aged from that. Such an address bills by the hour and counts against the per-region Elastic IP quota, and a Spot reclaim leaves one behind every time. `reap` releases them, and also releases the address of an instance the reaper has just terminated; `report` logs `WOULD release Elastic IP <alloc> (<ip>) ...` for exactly the addresses `reap` would release and changes nothing; `off` skips both. Counted in the run summary as `elastic_ips_scanned`, `elastic_ips_released`, `elastic_ips_would_release` and `elastic_ips_skipped`. A typo resolves to `report`; `REAPER_DRY_RUN` always wins |
 | `REAPER_SPOT_REQUESTS` | `report` | The orphaned persistent **Spot request** sweep ([#950]). Cancels spawn-tagged persistent requests whose instance is terminated or gone, has been replaced (EC2 launched a new instance after the original was terminated outside spawn) or has expired, and terminates a replacement after cancelling its request. A request whose original instance is alive is left to the instance scan: the request's own `spawn:ttl-deadline` goes stale after `spawn extend`, and cancelling would strand a stopped instance. An untagged replacement is outside the tag-scoped terminate grant. It is reported as `SPOT REPLACEMENT NOT TERMINATED` (alarmed, and posted to `REAPER_NOTIFY_URL` once) with the account, a `describe-instances` check that the instance is the request's, and the `terminate-instances` command. No IAM condition key ties an instance to its Spot request, so this needs a person ([#984]). `report` / `reap` / `off` as for `REAPER_NET_RESOURCES`, and `REAPER_DRY_RUN` always wins |
 | `ACCOUNTS_TABLE` | `spore-portal-accounts` | The portal registry supplying the expiry verdict. Read-only: the reaper only `Scan`s it, and the prober owns every write |
 
@@ -424,6 +476,7 @@ nothing — by design, since a partial live set could orphan a healthy record.
 [#950]: https://github.com/spore-host/spawn/issues/950
 [#1232]: https://github.com/spore-host/spawn/issues/1232
 [#1186]: https://github.com/spore-host/spawn/issues/1186
+[#1287]: https://github.com/spore-host/spawn/issues/1287
 [#984]: https://github.com/spore-host/spawn/issues/984
 [#65]: https://github.com/spore-host/spawn/issues/65
 [#71]: https://github.com/spore-host/spawn/issues/71

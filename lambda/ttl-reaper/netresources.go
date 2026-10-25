@@ -193,7 +193,8 @@ const eipGrace = 15 * time.Minute
 // efa-public-ip AND carrying the instance tag (an Elastic IP without it is
 // user-owned, #262, and is never touched); unassociated; its instance not
 // pending/running/stopping/stopped/shutting-down (terminated, or absent from
-// DescribeInstances altogether); and older than eipGrace. A stopped instance
+// DescribeInstances altogether); and older than eipGrace, unless EC2 lists
+// the instance as terminated, which the grace is not for (#1287). A stopped instance
 // keeps its address — it is still attached, so the unassociated check already
 // spares it.
 //
@@ -212,6 +213,7 @@ func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, a
 		log.Printf("net-resources: %s/%s: describe addresses: %v", acct.label, region, err)
 		return
 	}
+	terminated := terminatedCheck{}
 	for _, a := range out.Addresses {
 		alloc := awssdk.ToString(a.AllocationId)
 		ip := awssdk.ToString(a.PublicIp)
@@ -227,6 +229,14 @@ func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, a
 			continue // mid-launch (allocated, not yet associated) or briefly detached
 		}
 		age, ok := netResourceAge(a.Tags, now)
+		// The grace absorbs DescribeInstances' eventual consistency for an
+		// instance it does not list: absent could mean not yet visible. An
+		// instance EC2 reports as terminated is not that case, so its address
+		// is released without waiting (#1287). Asked only for an address the
+		// grace would hold back, so the common case costs no extra call.
+		if (!ok || age < eipGrace) && terminated.confirmed(ctx, cli, instanceID) {
+			ok, age = true, eipGrace
+		}
 		if !ok {
 			// No usable spawn:created stamp. Every launch since the sweep's
 			// first release writes it in the AllocateAddress call itself, so
@@ -270,6 +280,23 @@ func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, a
 			alloc, ip, acct.label, region, instanceID)
 		sum.ElasticIPsReleased++
 	}
+}
+
+// terminatedCheck answers, once per instance and cycle, whether EC2 reports an
+// instance as terminated. The region's DescribeInstances asks only for the
+// states that still own an address, so terminated has to be asked for.
+type terminatedCheck map[string]bool
+
+// confirmed is true only when DescribeInstances lists the instance as
+// terminated. An instance it does not list, or a failed call, is not
+// confirmed, and keeps the grace.
+func (c terminatedCheck) confirmed(ctx context.Context, cli netResourceAPI, id string) bool {
+	if v, ok := c[id]; ok {
+		return v
+	}
+	state, err := instanceState(ctx, cli, id)
+	c[id] = err == nil && state == ec2types.InstanceStateNameTerminated
+	return c[id]
 }
 
 // stampEIPDiscovery writes the reaper's first-seen tag on an Elastic IP that
