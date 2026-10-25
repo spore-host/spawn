@@ -122,3 +122,18 @@ func TestWriteReaperDeployState(t *testing.T) {
 		t.Errorf("dry-run reaper not told to arm:\n%s", dry.String())
 	}
 }
+
+// TestStatusSaysWhetherTerminatedInstancesAreSubscribed (#1287): a reaper
+// deployed before the terminated-instance rule existed is told how to get it.
+func TestStatusSaysWhetherTerminatedInstancesAreSubscribed(t *testing.T) {
+	base := reaperdeploy.Info{Deployed: true, Schedule: "rate(10 minutes)", RuleEnabled: true}
+	off := renderReaperStatus(base, "123456789012", "us-west-2")
+	base.InstanceEvents = true
+	on := renderReaperStatus(base, "123456789012", "us-west-2")
+	if !strings.Contains(off, "spawn reaper deploy adds the rule") {
+		t.Errorf("a reaper without the rule is not told how to add it:\n%s", off)
+	}
+	if !strings.Contains(on, "release their launch Elastic IP at once") || strings.Contains(on, "adds the rule") {
+		t.Errorf("a subscribed reaper is not reported as subscribed:\n%s", on)
+	}
+}

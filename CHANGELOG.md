@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The TTL reaper can release a launch Elastic IP the moment EC2 reports its
+  instance terminated, in any VPC** (#1287). In a nondefault VPC EC2 refuses to
+  release an associated address (`InvalidIPAddress.InUse`), and on a
+  multi-interface EFA instance that address is the only egress, so spored can
+  never release it; it waited for the next sweep and its 15-minute grace while
+  holding a slot of the region's Elastic IP quota. Now an `EC2 Instance
+  State-change Notification` with state `terminated` invokes the reaper for that
+  one instance, which confirms the state with EC2 and releases only addresses
+  tagged `spawn:managed=true`, `spawn:purpose=efa-public-ip` and
+  `spawn:instance-id` for that instance, through the account's existing reaper
+  role, with no grace. It follows `REAPER_ELASTIC_IPS` and `REAPER_DRY_RUN`; an
+  event from an account or region the reaper is not configured for is ignored,
+  and an event never runs the full scan. The operated reaper gets this with the
+  new template parameter `InstanceEvents` (`off` by default; `make deploy
+  INSTANCE_EVENTS=on`; a deploy that does not name it keeps the deployed value),
+  which creates an event bus whose policy admits `events:PutEvents` only from
+  the forwarder role of each account in `RoleArns`. Member accounts get the
+  forwarder role `spawn-ttl-reaper-ec2-events` from
+  `ttl-reaper-cross-account-role.yaml` and a forwarding rule per launch region
+  from the new `ttl-reaper-instance-events.yaml` (`make member-events-deploy` /
+  `member-events-teardown`). `spawn reaper deploy` adds a same-account rule in
+  the deploy region, `spawn reaper teardown` removes it, and `spawn reaper
+  status` reports it. `spawn footprint` now lists custom event buses and the
+  rules on every bus.
+
+### Changed
+
+- **The reaper's Elastic IP sweep no longer waits out its 15-minute grace for an
+  address whose instance EC2 lists as `terminated`** (#1287). The grace covers an
+  instance `DescribeInstances` does not list yet; it still applies to an absent
+  instance, and to an address whose instance check fails.
+- **`spawn reaper deploy` now also creates the rule
+  `spawn-ttl-reaper-selfscan-instance-terminated`** on the default event bus of
+  the deploy region (#1287), so a redeploy subscribes an existing self-hosted
+  reaper to terminated-instance events. It releases launch Elastic IPs under the
+  reaper's existing `REAPER_ELASTIC_IPS` mode; no IAM change.
+
 ## [0.144.0] - 2026-10-24
 
 ### Changed

@@ -382,6 +382,9 @@ var crossAccountExceptions = map[grant]grant{
 	},
 }
 
+// crossAccountReaperRole is the logical ID of the role the reaper assumes.
+const crossAccountReaperRole = "TTLReaperCrossAccountRole"
+
 // TestCrossAccountRolePolicyMatchesReaperIAM holds the production role (ScanSelf
 // is false in production, so this is the policy the operated reaper actually runs
 // under) to the same full comparison.
@@ -390,13 +393,20 @@ func TestCrossAccountRolePolicyMatchesReaperIAM(t *testing.T) {
 	resources, _ := tmpl["Resources"].(map[string]interface{})
 	var stmts []interface{}
 	var roles int
-	for _, raw := range resources {
+	for name, raw := range resources {
 		res, _ := raw.(map[string]interface{})
 		if res["Type"] != "AWS::IAM::Role" {
 			continue
 		}
-		roles++
 		props, _ := res["Properties"].(map[string]interface{})
+		if name != crossAccountReaperRole {
+			// The instance-event forwarder (#1287) and anything after it: none
+			// may grant what the reaper role grants, or this comparison would not
+			// see it. TestInstanceEventsForwarderRole holds the forwarder itself.
+			checkNoScanSelfActionsOutsideBranch(t, name, props["Policies"])
+			continue
+		}
+		roles++
 		for _, p := range asList(props["Policies"]) {
 			pm, _ := p.(map[string]interface{})
 			doc, _ := pm["PolicyDocument"].(map[string]interface{})
@@ -404,7 +414,7 @@ func TestCrossAccountRolePolicyMatchesReaperIAM(t *testing.T) {
 		}
 	}
 	if roles != 1 {
-		t.Fatalf("found %d AWS::IAM::Role resources in %s, want 1", roles, crossAccountRolePath)
+		t.Fatalf("found %d %s roles in %s, want 1", roles, crossAccountReaperRole, crossAccountRolePath)
 	}
 	got := explode(t, crossAccountRolePath, stmts)
 	diffGrants(t, crossAccountRolePath, got, crossAccountExceptions)

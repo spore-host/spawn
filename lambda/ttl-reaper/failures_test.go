@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -889,18 +890,26 @@ func TestHandler_DelegatesToRun(t *testing.T) {
 	prev := r
 	defer func() { r = prev }()
 
-	r = failureReaper(deniedAccount("acct-a", "111111111111"))
+	// Every payload that is not an EC2 event runs the full scan (#1287): the
+	// schedule's own event, a manual invoke with {}, and one with none.
+	for _, payload := range []string{
+		`{"version":"0","source":"aws.events","detail-type":"Scheduled Event","detail":{}}`,
+		`{}`,
+		``,
+	} {
+		r = failureReaper(deniedAccount("acct-a", "111111111111"))
 
-	var sum Summary
-	out := captureLogs(func() { sum, _ = handler(context.Background()) })
+		var sum Summary
+		out := captureLogs(func() { sum, _ = handler(context.Background(), json.RawMessage(payload)) })
 
-	if sum.Accounts != 1 {
-		t.Errorf("accounts = %d, want 1 — handler must run the configured reaper, not return an empty Summary", sum.Accounts)
-	}
-	if sum.AccountsDenied != 1 {
-		t.Errorf("accounts_denied = %d, want 1 — the entrypoint must reach the classification path", sum.AccountsDenied)
-	}
-	if !strings.Contains(out, sentinelAllAccountsFailed) {
-		t.Errorf("the entrypoint must emit the sentinels the alarms match; got:\n%s", out)
+		if sum.Accounts != 1 {
+			t.Errorf("payload %q: accounts = %d, want 1 — handler must run the configured reaper, not return an empty Summary", payload, sum.Accounts)
+		}
+		if sum.AccountsDenied != 1 {
+			t.Errorf("payload %q: accounts_denied = %d, want 1 — the entrypoint must reach the classification path", payload, sum.AccountsDenied)
+		}
+		if !strings.Contains(out, sentinelAllAccountsFailed) {
+			t.Errorf("payload %q: the entrypoint must emit the sentinels the alarms match; got:\n%s", payload, out)
+		}
 	}
 }

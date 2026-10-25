@@ -452,6 +452,12 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	}
 	res.Actions = append(res.Actions, fmt.Sprintf("scheduled %s (%s)", RuleName, opts.Schedule))
 
+	if err := d.ensureInstanceEventRule(ctx, opts, fnARN); err != nil {
+		return nil, err
+	}
+	res.Actions = append(res.Actions, fmt.Sprintf("subscribed %s to terminated-instance events in %s "+
+		"(releases a launch Elastic IP at once; other regions wait for the sweep)", InstanceEventRuleName, opts.Region))
+
 	return res, nil
 }
 
@@ -799,6 +805,42 @@ func (d *Deployer) ensureSchedule(ctx context.Context, opts Options, fnARN strin
 	return nil
 }
 
+// ensureInstanceEventRule converges the terminated-instance rule (#1287) in
+// the deploy region. Rules are regional, and a rule targets a function directly
+// only in its own region, so the other REAPER_REGIONS are left to the sweep,
+// which since #1287 releases a terminated instance's address without waiting
+// out the grace. The release follows REAPER_ELASTIC_IPS and REAPER_DRY_RUN.
+func (d *Deployer) ensureInstanceEventRule(ctx context.Context, opts Options, fnARN string) error {
+	if _, err := d.Events.PutRule(ctx, &eventbridge.PutRuleInput{
+		Name:         awssdk.String(InstanceEventRuleName),
+		EventPattern: awssdk.String(InstanceEventPattern),
+		State:        ebtypes.RuleStateEnabled,
+		Description:  awssdk.String("Releases a terminated spawn instance's launch Elastic IPs (spawn#1287)"),
+	}); err != nil {
+		return fmt.Errorf("reaperdeploy: put instance-event rule: %w", err)
+	}
+	// Permission before target, for the reason ensureSchedule gives.
+	if _, err := d.Lambda.AddPermission(ctx, &lambda.AddPermissionInput{
+		FunctionName: awssdk.String(FunctionName),
+		StatementId:  awssdk.String(InstanceEventRuleName),
+		Action:       awssdk.String("lambda:InvokeFunction"),
+		Principal:    awssdk.String("events.amazonaws.com"),
+		SourceArn:    awssdk.String(fmt.Sprintf("arn:aws:events:%s:%s:rule/%s", opts.Region, opts.AccountID, InstanceEventRuleName)),
+	}); err != nil {
+		var exists *lambdatypes.ResourceConflictException
+		if !errors.As(err, &exists) {
+			return fmt.Errorf("reaperdeploy: add instance-event invoke permission: %w", err)
+		}
+	}
+	if _, err := d.Events.PutTargets(ctx, &eventbridge.PutTargetsInput{
+		Rule:    awssdk.String(InstanceEventRuleName),
+		Targets: []ebtypes.Target{{Id: awssdk.String("reaper"), Arn: awssdk.String(fnARN)}},
+	}); err != nil {
+		return fmt.Errorf("reaperdeploy: put instance-event targets: %w", err)
+	}
+	return nil
+}
+
 // Arm flips REAPER_DRY_RUN to false on the deployed function.
 func (d *Deployer) Arm(ctx context.Context) error {
 	out, err := d.Lambda.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: awssdk.String(FunctionName)})
@@ -831,6 +873,8 @@ type Info struct {
 	Schedule    string
 	RuleEnabled bool
 	FunctionARN string
+	// InstanceEvents: the terminated-instance rule (#1287) exists and is enabled.
+	InstanceEvents bool
 	// ArtifactBucket is the bucket recorded at deploy time (ArtifactBucketTag);
 	// empty for a reaper deployed before it was recorded.
 	ArtifactBucket string
@@ -863,6 +907,9 @@ func (d *Deployer) Inspect(ctx context.Context) (Info, error) {
 	if rule, err := d.Events.DescribeRule(ctx, &eventbridge.DescribeRuleInput{Name: awssdk.String(RuleName)}); err == nil {
 		info.Schedule = awssdk.ToString(rule.ScheduleExpression)
 		info.RuleEnabled = rule.State == ebtypes.RuleStateEnabled
+	}
+	if rule, err := d.Events.DescribeRule(ctx, &eventbridge.DescribeRuleInput{Name: awssdk.String(InstanceEventRuleName)}); err == nil {
+		info.InstanceEvents = rule.State == ebtypes.RuleStateEnabled
 	}
 	return info, nil
 }
@@ -933,6 +980,20 @@ func (d *Deployer) Teardown(ctx context.Context, opts TeardownOptions) ([]string
 		FunctionName: awssdk.String(FunctionName), StatementId: awssdk.String(RuleName),
 	})
 	note("invoke permission", err)
+
+	// The terminated-instance rule (#1287), the same three steps.
+	_, err = d.Events.RemoveTargets(ctx, &eventbridge.RemoveTargetsInput{
+		Rule: awssdk.String(InstanceEventRuleName), Ids: []string{"reaper"},
+	})
+	note("instance-event rule target", err)
+	if _, derr := d.Events.DescribeRule(ctx, &eventbridge.DescribeRuleInput{Name: awssdk.String(InstanceEventRuleName)}); derr == nil {
+		_, err = d.Events.DeleteRule(ctx, &eventbridge.DeleteRuleInput{Name: awssdk.String(InstanceEventRuleName)})
+		note("rule "+InstanceEventRuleName, err)
+	}
+	_, err = d.Lambda.RemovePermission(ctx, &lambda.RemovePermissionInput{
+		FunctionName: awssdk.String(FunctionName), StatementId: awssdk.String(InstanceEventRuleName),
+	})
+	note("instance-event invoke permission", err)
 
 	_, err = d.Lambda.DeleteFunction(ctx, &lambda.DeleteFunctionInput{FunctionName: awssdk.String(FunctionName)})
 	note("function "+FunctionName, err)

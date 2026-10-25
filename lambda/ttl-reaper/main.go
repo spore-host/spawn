@@ -151,6 +151,11 @@ type reaper struct {
 	// at the deadline: then the reaper is the only enforcer.
 	ttlGrace time.Duration
 
+	// eventInUseWait is the pause between release attempts on the instance
+	// event path when EC2 still reports the address in use (#1287). Zero means
+	// defaultEventInUseWait; tests set it negative to retry without sleeping.
+	eventInUseWait time.Duration
+
 	// taskFlushPoll is the GetCommandInvocation poll interval for the task
 	// flush. Zero means 5 s; tests set it small.
 	taskFlushPoll time.Duration
@@ -673,6 +678,12 @@ func parseTTLGrace(env string) time.Duration {
 
 // Summary is returned to CloudWatch and is handy for assertions in tests.
 type Summary struct {
+	// Event is set on an invocation by an EC2 state-change event (#1287),
+	// which releases one instance's launch Elastic IPs and scans nothing else.
+	// Empty on a scheduled run. EventInstance is the instance it named.
+	Event         string `json:"event,omitempty"`
+	EventInstance string `json:"event_instance,omitempty"`
+
 	Accounts int `json:"accounts"`
 	Scanned  int `json:"scanned"`
 	Expired  int `json:"expired"`
@@ -817,7 +828,13 @@ type candidate struct {
 // can be driven against fakes in tests (#469). Reaching those paths through the
 // package-level reaper is not possible, and a failure-observability change that
 // cannot itself be observed failing is the one thing this must not be.
-func handler(ctx context.Context) (Summary, error) {
+//
+// An EC2 state-change event (#1287) takes its own path, which touches only the
+// one instance it names; every other payload runs the full scan.
+func handler(ctx context.Context, raw json.RawMessage) (Summary, error) {
+	if ev, ok := parseInstanceEvent(raw); ok {
+		return r.handleInstanceEvent(ctx, ev), nil
+	}
 	return r.run(ctx)
 }
 

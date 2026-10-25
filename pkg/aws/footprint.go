@@ -178,28 +178,10 @@ func (c *Client) ScanControlPlane(ctx context.Context, region string) ([]Control
 		}
 	}
 
-	// --- EventBridge rules (default event bus) -------------------------------
-	//
-	// Rules on the default bus only — not EventBridge Scheduler schedules, which
-	// are a different service and are not scanned here. Every page is read: one
-	// ListRules call returns at most 100 rules, so an account with more silently
-	// lost the rest before #1161.
-	ec := eventbridge.NewFromConfig(cfg)
-	if rules, err := listAllRules(ctx, ec); err != nil {
-		notes = append(notes, fmt.Sprintf("events: %v", err))
-	} else {
-		for _, r := range rules {
-			name := aws.ToString(r.Name)
-			if !matchesFootprintName(name) {
-				continue
-			}
-			out = append(out, ControlPlaneResource{
-				Service: "events", Kind: "rule", Name: name, Region: region,
-				Detail: fmt.Sprintf("%s, %s", aws.ToString(r.ScheduleExpression), r.State),
-				Why:    "name",
-			})
-		}
-	}
+	// --- EventBridge buses and rules ----------------------------------------
+	evRows, evNotes := scanEvents(ctx, eventbridge.NewFromConfig(cfg), region)
+	out = append(out, evRows...)
+	notes = append(notes, evNotes...)
 
 	// --- DynamoDB tables ----------------------------------------------------
 	dc := dynamodb.NewFromConfig(cfg)
@@ -234,11 +216,92 @@ type rulesLister interface {
 	ListRules(ctx context.Context, in *eventbridge.ListRulesInput, optFns ...func(*eventbridge.Options)) (*eventbridge.ListRulesOutput, error)
 }
 
-// listAllRules reads every page of the default bus's rules. The SDK has no
-// paginator for ListRules, so the NextToken loop is written out.
-func listAllRules(ctx context.Context, c rulesLister) ([]ebtypes.Rule, error) {
+// eventsScanner is what scanEvents needs: the buses, and each bus's rules.
+type eventsScanner interface {
+	rulesLister
+	ListEventBuses(ctx context.Context, in *eventbridge.ListEventBusesInput, optFns ...func(*eventbridge.Options)) (*eventbridge.ListEventBusesOutput, error)
+}
+
+// scanEvents enumerates spore.host's EventBridge footprint in one region:
+// custom event buses by name, and rules by name on EVERY bus, default and
+// custom. Only the default bus was read before #1287, which put the TTL
+// reaper's instance-event bus and the rule on it out of sight; a footprint
+// that cannot see a resource cannot report it left behind.
+//
+// Rules on the default bus only — not EventBridge Scheduler schedules, which
+// are a different service and are not scanned here.
+func scanEvents(ctx context.Context, c eventsScanner, region string) ([]ControlPlaneResource, []string) {
+	var out []ControlPlaneResource
+	var notes []string
+	buses := []string{""} // the default bus
+	if bs, err := listAllBuses(ctx, c); err != nil {
+		notes = append(notes, fmt.Sprintf("events buses: %v", err))
+	} else {
+		for _, b := range bs {
+			name := aws.ToString(b.Name)
+			if name == "" || name == "default" {
+				continue
+			}
+			buses = append(buses, name)
+			if matchesFootprintName(name) {
+				out = append(out, ControlPlaneResource{
+					Service: "events", Kind: "event-bus", Name: name, Region: region, Why: "name",
+				})
+			}
+		}
+	}
+	for _, bus := range buses {
+		rules, err := listAllRules(ctx, c, bus)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("events: %v", err))
+			continue
+		}
+		for _, r := range rules {
+			name := aws.ToString(r.Name)
+			if !matchesFootprintName(name) {
+				continue
+			}
+			detail := aws.ToString(r.ScheduleExpression)
+			if detail == "" {
+				detail = "event pattern"
+			}
+			detail = fmt.Sprintf("%s, %s", detail, r.State)
+			if bus != "" {
+				detail += ", on bus " + bus
+			}
+			out = append(out, ControlPlaneResource{
+				Service: "events", Kind: "rule", Name: name, Region: region, Detail: detail, Why: "name",
+			})
+		}
+	}
+	return out, notes
+}
+
+// listAllBuses reads every page of ListEventBuses (no SDK paginator either).
+func listAllBuses(ctx context.Context, c eventsScanner) ([]ebtypes.EventBus, error) {
+	var all []ebtypes.EventBus
+	in := &eventbridge.ListEventBusesInput{}
+	for {
+		page, err := c.ListEventBuses(ctx, in)
+		if err != nil {
+			return all, err
+		}
+		all = append(all, page.EventBuses...)
+		if aws.ToString(page.NextToken) == "" {
+			return all, nil
+		}
+		in = &eventbridge.ListEventBusesInput{NextToken: page.NextToken}
+	}
+}
+
+// listAllRules reads every page of one bus's rules ("" is the default bus).
+// The SDK has no paginator for ListRules, so the NextToken loop is written out.
+func listAllRules(ctx context.Context, c rulesLister, bus string) ([]ebtypes.Rule, error) {
 	var all []ebtypes.Rule
 	in := &eventbridge.ListRulesInput{}
+	if bus != "" {
+		in.EventBusName = aws.String(bus)
+	}
 	for {
 		page, err := c.ListRules(ctx, in)
 		if err != nil {
@@ -248,7 +311,7 @@ func listAllRules(ctx context.Context, c rulesLister) ([]ebtypes.Rule, error) {
 		if aws.ToString(page.NextToken) == "" {
 			return all, nil
 		}
-		in = &eventbridge.ListRulesInput{NextToken: page.NextToken}
+		in = &eventbridge.ListRulesInput{NextToken: page.NextToken, EventBusName: in.EventBusName}
 	}
 }
 

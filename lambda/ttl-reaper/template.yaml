@@ -140,7 +140,8 @@ Parameters:
       spawn:purpose=efa-public-ip and spawn:instance-id, and releases one only
       when it is unassociated, its instance is terminated or gone, and its
       spawn:created stamp (or, without one, the reaper's own first-seen stamp)
-      is at least 15 minutes old. Such an address bills by the hour and counts
+      is at least 15 minutes old, or EC2 lists its instance as terminated
+      (#1287). InstanceEvents releases it at the termination instead. Such an address bills by the hour and counts
       against the per-region Elastic IP quota; a Spot reclaim of a
       multi-interface EFA instance leaves one behind every time.
 
@@ -151,6 +152,32 @@ Parameters:
       just terminated. 'report' logs each address 'reap' would release and
       releases nothing. 'off' skips both. An unrecognised value resolves to
       'report'. DryRun always wins.
+
+  InstanceEvents:
+    Type: String
+    Default: 'off'
+    AllowedValues: ['off', 'on']
+    Description: >
+      Release a launch Elastic IP as soon as EC2 reports its instance terminated
+      (#1287), instead of on the next sweep after a 15-minute grace. In a
+      nondefault VPC spored cannot release the address itself, so without this
+      it holds a slot of the region's Elastic IP quota for up to 25 minutes.
+
+      'on' creates an event bus (spawn-ttl-reaper-<Environment>-instance-events),
+      a rule on it that invokes this function for "EC2 Instance State-change
+      Notification" events with state terminated, and a bus policy that admits
+      events:PutEvents ONLY from the forwarder roles of the accounts in RoleArns
+      (each role ARN with "-events" appended, the role
+      ttl-reaper-cross-account-role.yaml creates beside the reaper role). No
+      other account, no wildcard and no organization principal is admitted.
+      Each member account forwards with a rule from
+      ttl-reaper-instance-events.yaml in every launch region. The release
+      itself follows ElasticIps and DryRun, exactly as the sweep does.
+
+      Deploy the member stacks first: the bus policy names their forwarder
+      roles. 'off' (default) creates none of this and removes it from a stack
+      that had it; the sweep still releases the address, without the grace
+      when EC2 lists the instance as terminated.
 
   SpotRequests:
     Type: String
@@ -276,6 +303,11 @@ Conditions:
   DnsExtraZonesEnabled: !And
     - !Condition DnsTeardownEnabled
     - !Not [!Equals [!Join ['', !Ref DnsExtraZoneIds], '']]
+  # #1287. Needs at least one member role: the bus policy's principals are
+  # derived from RoleArns, and an empty list would derive a nonsense ARN.
+  InstanceEventsEnabled: !And
+    - !Equals [!Ref InstanceEvents, 'on']
+    - !Not [!Equals [!Join ['', !Ref RoleArns], '']]
   ObservabilityEnabled: !Equals [!Ref AlarmsEnabled, 'true']
   AlarmActionsEnabled: !And
     - !Not [!Equals [!Ref AlarmTopicArn, '']]
@@ -505,6 +537,74 @@ Resources:
           Properties:
             Schedule: !Ref Schedule
             Enabled: true
+
+  # ---------------------------------------------------------------------------
+  # Event-driven launch Elastic IP release (#1287), when InstanceEvents=on.
+  #
+  # Member account rule (ttl-reaper-instance-events.yaml, one per launch region)
+  #   -> this bus, admitting only the RoleArns accounts' forwarder roles
+  #   -> InstanceEventRule -> this function, which releases that one
+  #      instance's launch Elastic IPs through the account's reaper role.
+  # Removed with the stack, or by redeploying with InstanceEvents=off.
+  # ---------------------------------------------------------------------------
+  InstanceEventBus:
+    Type: AWS::Events::EventBus
+    Condition: InstanceEventsEnabled
+    Properties:
+      Name: !Sub spawn-ttl-reaper-${Environment}-instance-events
+      Tags:
+        - Key: spawn:managed
+          Value: 'true'
+        - Key: spawn:component
+          Value: ttl-reaper
+        - Key: spawn:version
+          Value: !Ref Version
+
+  # Who may put events on the bus: exactly the forwarder role of each account in
+  # RoleArns, the accounts this reaper already assumes into. The principal list
+  # is DERIVED from RoleArns (each ARN with "-events" appended, the name
+  # ttl-reaper-cross-account-role.yaml gives its forwarder role), so it cannot
+  # name an account the reaper is not configured for, and adding or removing an
+  # account in RoleArns changes both together. Never a wildcard or an
+  # organization principal; pkg/reaperiam's TestInstanceEventBusPolicy gates it.
+  InstanceEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Condition: InstanceEventsEnabled
+    Properties:
+      EventBusName: !Ref InstanceEventBus
+      StatementId: spawn-ttl-reaper-member-forwarders
+      Statement:
+        Effect: Allow
+        Principal:
+          AWS: !Split [',', !Join ['', [!Join ['-events,', !Ref RoleArns], '-events']]]
+        Action: events:PutEvents
+        Resource: !GetAtt InstanceEventBus.Arn
+
+  InstanceEventRule:
+    Type: AWS::Events::Rule
+    Condition: InstanceEventsEnabled
+    Properties:
+      Name: !Sub spawn-ttl-reaper-${Environment}-instance-terminated
+      Description: Releases a terminated spawn instance's launch Elastic IPs (spawn#1287)
+      EventBusName: !Ref InstanceEventBus
+      EventPattern:
+        source: [aws.ec2]
+        detail-type: [EC2 Instance State-change Notification]
+        detail:
+          state: [terminated]
+      State: ENABLED
+      Targets:
+        - Id: ttl-reaper
+          Arn: !GetAtt TTLReaperFunction.Arn
+
+  InstanceEventInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: InstanceEventsEnabled
+    Properties:
+      FunctionName: !Ref TTLReaperFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InstanceEventRule.Arn
 
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -908,3 +1008,7 @@ Outputs:
   FunctionRoleArn:
     Description: Execution role ARN (trust this in the dev-account cross-account role)
     Value: !GetAtt TTLReaperFunctionRole.Arn
+  InstanceEventBusArn:
+    Condition: InstanceEventsEnabled
+    Description: The bus member accounts forward terminated-instance events to (#1287)
+    Value: !GetAtt InstanceEventBus.Arn

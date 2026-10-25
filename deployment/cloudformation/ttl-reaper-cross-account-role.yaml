@@ -9,6 +9,11 @@ Description: >
   the caller's credentials point at). Collect each stack's RoleArn output into
   the reaper Lambda's REAPER_ROLE_ARNS (comma-separated). See spore-host/spawn#70.
 
+  It also creates <RoleName>-events, the role EventBridge uses to forward this
+  account's terminated-instance events to the reaper's event bus (#1287), used
+  by the regional rules in ttl-reaper-instance-events.yaml. It can only put
+  events on that one bus.
+
 Parameters:
   ReaperAccountId:
     Type: String
@@ -53,7 +58,24 @@ Parameters:
   RoleName:
     Type: String
     Default: spawn-ttl-reaper-ec2
-    Description: Name of the cross-account IAM role to create
+    Description: >
+      Name of the cross-account IAM role to create. The instance-event forwarder
+      role is this name with "-events" appended, which is how the reaper's event
+      bus policy derives it from the reaper's RoleArns (#1287).
+
+  ReaperRegion:
+    Type: String
+    Default: us-east-1
+    Description: >
+      Region of the reaper's stack, and so of its instance-event bus (#1287).
+
+  ReaperEventBus:
+    Type: String
+    Default: spawn-ttl-reaper-production-instance-events
+    Description: >
+      Name of the reaper's instance-event bus (spawn-ttl-reaper-<Environment>-instance-events
+      in lambda/ttl-reaper/template.yaml). The forwarder role may put events on
+      this one bus only.
 
 Resources:
   TTLReaperCrossAccountRole:
@@ -246,6 +268,49 @@ Resources:
         - Key: Purpose
           Value: spawn-ttl-reaper-cross-account
 
+  # The instance-event forwarder (#1287). EventBridge assumes it to deliver this
+  # account's "EC2 Instance State-change Notification" (state terminated) events
+  # to the reaper's event bus, from the rule ttl-reaper-instance-events.yaml
+  # creates in each launch region. The reaper then releases that instance's
+  # launch Elastic IP through the role above; in a nondefault VPC spored cannot.
+  #
+  # Direction: this account -> the reaper account's one bus, nothing else. It
+  # grants only events:PutEvents on that bus, is assumable only by EventBridge
+  # on behalf of this account's own rule of that name, and has no access to any
+  # resource here. Inert without the regional rules; removed with this stack.
+  InstanceEventsForwarderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${RoleName}-events'
+      Description: !Sub 'Forwards terminated-instance events to the spawn TTL reaper bus ${ReaperEventBus}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EventBridgeForThisAccountsRule
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:events:*:${AWS::AccountId}:rule/spawn-ttl-reaper-instance-terminated'
+      Policies:
+        - PolicyName: ForwardInstanceEvents
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !Sub 'arn:aws:events:${ReaperRegion}:${ReaperAccountId}:event-bus/${ReaperEventBus}'
+      Tags:
+        - Key: !Sub '${TagPrefix}:managed'
+          Value: 'false'
+        - Key: Purpose
+          Value: spawn-ttl-reaper-instance-events
+
 Outputs:
   RoleArn:
     Description: Set this as EC2_ROLE_ARN on the reaper Lambda.
@@ -255,3 +320,6 @@ Outputs:
   ExternalId:
     Description: External ID required when assuming this role (set as EC2_EXTERNAL_ID on the Lambda).
     Value: !Sub '${TagPrefix}-ttl-reaper'
+  ForwarderRoleArn:
+    Description: The role the regional instance-event rules forward through (#1287).
+    Value: !GetAtt InstanceEventsForwarderRole.Arn
