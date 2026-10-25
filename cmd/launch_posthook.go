@@ -162,8 +162,8 @@ const (
 // RUNNING spawn. So the instance's verification depended on the user's laptop.
 // From macOS, a Windows instance got the Linux check — SSM refused it with
 // UnsupportedPlatformType and the launch reported "spored never came up" about a
-// spore that was healthy (observed, i-061da267b7a9442de); with --terminate-on-error
-// that terminates it. From a Windows workstation, a Linux instance got no check
+// spore that was healthy (observed, i-061da267b7a9442de); a failed launch now
+// terminates it (#1298). From a Windows workstation, a Linux instance got no check
 // at all. The workstation's OS is deliberately not a parameter here, so it cannot
 // creep back in.
 //
@@ -401,29 +401,14 @@ func sporedTimeoutError(timeout time.Duration, ssmDenied error, ssmWasUp bool, l
 	return errors.New(msg + ". Check the boot log with `spawn logs <instance-id> --console`")
 }
 
-// sporedVerificationFailure turns a failed verification into the launch's error,
-// terminating the instance first under --terminate-on-error. A verification the
-// caller's credentials refused is reported as exactly that (#1126): the instance
-// may be healthy, so it is not called "never came up".
-func sporedVerificationFailure(ctx context.Context, client *aws.Client, region, instanceID string, terminateOnError bool, err error) error {
+// sporedVerificationError turns a failed verification into the launch's error;
+// finishLaunch then terminates the instance unless --keep-on-error (#1298). A
+// verification the caller's credentials refused is reported as exactly that
+// (#1126): the instance may be healthy, so it is not called "never came up".
+func sporedVerificationError(err error) error {
 	var unverifiable *sporedUnverifiableError
-	what := "spored never came up"
 	if errors.As(err, &unverifiable) {
-		what = "spored could not be verified"
+		return fmt.Errorf("spored could not be verified, so the instance has no confirmed TTL/idle safety net: %w", err)
 	}
-	if terminateOnError {
-		fmt.Fprintf(os.Stderr, "\n⚠️  %s; terminating %s (--terminate-on-error)\n", what, instanceID)
-		if terr := client.Terminate(ctx, region, instanceID); terr != nil {
-			fmt.Fprintf(os.Stderr, "   terminate failed — DELETE IT MANUALLY (spawn terminate %s): %v\n", instanceID, terr)
-		}
-		return fmt.Errorf("instance %s launched but %s (terminated): %w", instanceID, what, err)
-	}
-	if unverifiable != nil {
-		return fmt.Errorf("instance %s launched but %s — until spored is confirmed, treat it as having no TTL/idle safety net; "+
-			"check it (spawn status %s) or terminate it (spawn terminate %s): %w",
-			instanceID, what, instanceID, instanceID, err)
-	}
-	return fmt.Errorf("instance %s launched but %s — it has NO TTL/idle safety net; "+
-		"inspect it (spawn connect %s) or terminate it (spawn terminate %s). Re-run with --terminate-on-error to auto-terminate: %w",
-		instanceID, what, instanceID, instanceID, err)
+	return fmt.Errorf("spored never came up — the instance has NO TTL/idle safety net: %w", err)
 }

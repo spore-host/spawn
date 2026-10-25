@@ -10,8 +10,17 @@ import (
 
 // detectReaperCoverage is a package-level seam (like resolveLaunchDryRunPrice and
 // resolveSweepRowPrice) so tests can supply a verdict without touching AWS.
-var detectReaperCoverage = func(ctx context.Context, client *aws.Client) aws.ReaperCoverage {
-	return aws.DetectReaperCoverage(ctx, client.Config())
+//
+// region is the LAUNCH region (--region), which need not be the client's: the
+// coverage question is whether a reaper scans the region the instance will run
+// in (#1298 — the instance that ran 74 hours was in a region its account's
+// reaper did not scan).
+var detectReaperCoverage = func(ctx context.Context, client *aws.Client, region string) aws.ReaperCoverage {
+	cfg := client.Config().Copy()
+	if region != "" {
+		cfg.Region = region
+	}
+	return aws.DetectReaperCoverage(ctx, cfg)
 }
 
 // launchLeansOnReaper reports whether this launch's flags make the out-of-band
@@ -47,12 +56,35 @@ func launchLeansOnReaper() bool {
 // no reaper covers the account. It is best-effort and never blocks a launch: the
 // user asked for an instance, and a coverage probe failing is not a reason to
 // refuse one.
-func warnIfReaperWontCover(ctx context.Context, client *aws.Client, out io.Writer) {
-	if !launchLeansOnReaper() || client == nil {
+//
+// Every other launch — --on-complete terminate, or none — leans on the reaper
+// too, but only if spored never starts or dies (#1298): TTL and --cost-limit are
+// enforced by spored alone, from inside the instance. That is warned about only
+// on positive evidence that no reaper scans the launch region, never on an
+// undetermined probe, which would print on every launch by a caller without the
+// lambda/iam read permissions — the noise that made the old always-on check
+// worthless.
+func warnIfReaperWontCover(ctx context.Context, client *aws.Client, region string, out io.Writer) {
+	if client == nil {
 		return
 	}
-	coverage := detectReaperCoverage(ctx, client)
-	if msg := aws.ReaperCoverageAdvice(coverage, onComplete, fsxLifecycle); msg != "" {
+	coverage := detectReaperCoverage(ctx, client, region)
+	if msg := launchReaperAdvice(coverage, launchLeansOnReaper(), onComplete, fsxLifecycle); msg != "" {
 		fmt.Fprintf(out, "\n%s\n\n", msg)
 	}
+}
+
+// launchReaperAdvice is the warning for a launch given the reaper verdict, or
+// "" for none. leans is launchLeansOnReaper. Pure, so the decision is testable.
+func launchReaperAdvice(c aws.ReaperCoverage, leans bool, onComplete, fsxLifecycle string) string {
+	if leans {
+		return aws.ReaperCoverageAdvice(c, onComplete, fsxLifecycle)
+	}
+	if c.Covered || !c.Determined {
+		return ""
+	}
+	return "⚠️  No out-of-band TTL reaper scans this launch's region. This instance's TTL and any\n" +
+		"   --cost-limit are enforced only by spored, from INSIDE the instance: if spored never starts, or\n" +
+		"   dies, nothing terminates it. (A launch whose spored is not confirmed is terminated unless\n" +
+		"   --keep-on-error.) Deploy a reaper covering the region: spawn reaper deploy."
 }

@@ -145,7 +145,7 @@ func TestVerifySpored_NoHeartbeatTimesOut(t *testing.T) {
 	if want := int(testVerifyTimeout/sporedVerifyPollInterval) + 1; f.livenessCalls != want {
 		t.Errorf("liveness polled %d times, want %d (every interval across the budget)", f.livenessCalls, want)
 	}
-	launchErr := sporedVerificationFailure(context.Background(), nil, "us-west-2", "i-1", false, err)
+	launchErr := sporedVerificationError(err)
 	if !strings.Contains(launchErr.Error(), "spored never came up") {
 		t.Errorf("launch error %q, want the existing \"spored never came up\" verdict", launchErr)
 	}
@@ -191,7 +191,7 @@ func TestVerifySpored_DescribeDeniedIsUnverifiableAndNamed(t *testing.T) {
 	if f.livenessCalls != 1 || clk.sleeps != 0 {
 		t.Errorf("liveness=%d sleeps=%d, want 1/0: a refusal is terminal, not polled", f.livenessCalls, clk.sleeps)
 	}
-	launchErr := sporedVerificationFailure(context.Background(), nil, "us-west-2", "i-1", false, err)
+	launchErr := sporedVerificationError(err)
 	if strings.Contains(launchErr.Error(), "never came up") {
 		t.Errorf("launch error %q blames the instance for the caller's missing permission", launchErr)
 	}

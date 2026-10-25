@@ -78,6 +78,7 @@ var sweepFlagCoverage = map[string]struct {
 	"config":             {sweepNA, "plugin declarations file, resolved before dispatch"},
 	"template-var":       {sweepNA, "queue-template substitution"},
 	"terminate-on-error": {sweepNA, "batch-queue error policy"},
+	"keep-on-error":      {sweepNA, "single-launch post-RunInstances error policy (#1298)"},
 	"cartesian":          {sweepKnownGap, "#674 — parsed and read by nothing at all, so the sweep run COUNT is wrong"},
 	"skip-region-check":  {sweepNA, "pre-dispatch validation toggle"},
 	"quiet":              {sweepNA, "output verbosity, applied by the printer not the config"},

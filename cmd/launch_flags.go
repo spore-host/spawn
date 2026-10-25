@@ -175,6 +175,8 @@ var (
 	waitForSSHSet    bool // --wait-for-ssh was given at all (#1296); set in runLaunch
 	skipRegionCheck  bool
 	terminateOnError bool
+	keepOnError      bool // resolved in runLaunch from --keep-on-error / --terminate-on-error (#1298)
+	keepOnErrorFlag  bool
 
 	// Workflow integration
 	outputIDFile string
@@ -443,7 +445,9 @@ func init() {
 	launchCmd.Flags().BoolVar(&waitForRunning, "wait-for-running", true, "Wait until running")
 	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", false, "Linux: also wait (up to 2 min) for SSH on port 22; refused at once if no attached security group allows tcp/22. Off by default: `spawn connect` uses SSM, and spored is verified either way. --wait-for-ssh=false, given explicitly, skips the spored check too (Windows: skips the password wait)")
 	launchCmd.Flags().BoolVar(&skipRegionCheck, "skip-region-check", false, "Skip data locality region mismatch warnings")
-	launchCmd.Flags().BoolVar(&terminateOnError, "terminate-on-error", false, "If post-launch verification fails (e.g. spored didn't come up), terminate the instance instead of leaving it running")
+	launchCmd.Flags().BoolVar(&keepOnErrorFlag, "keep-on-error", false, "If the launch fails after the instance was created (spored never came up, it never reached running, ...), keep the instance instead of terminating it. It then has no TTL/idle/cost-limit enforcement until spored is confirmed running")
+	launchCmd.Flags().BoolVar(&terminateOnError, "terminate-on-error", false, "Terminate the instance if the launch fails after it was created (now the default)")
+	_ = launchCmd.Flags().MarkDeprecated("terminate-on-error", "terminating on a failed launch is now the default; use --keep-on-error to keep the instance instead")
 	// --dry-run (#569): resolves the same LaunchConfig a real launch would —
 	// flags, --config plugin merge, AMI auto-detection, IAM/tag/user-data
 	// assembly — and prints it (table or -o json), making ZERO AWS mutation

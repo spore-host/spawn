@@ -28,6 +28,12 @@ import (
 func runLaunch(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	waitForSSHSet = cmd.Flags().Changed("wait-for-ssh")
+	var kerr error
+	keepOnError, kerr = resolveKeepOnError(cmd.Flags().Changed("keep-on-error"), keepOnErrorFlag,
+		cmd.Flags().Changed("terminate-on-error"), terminateOnError)
+	if kerr != nil {
+		return kerr
+	}
 
 	// An explicit --os windows is known before anything is resolved, so refuse
 	// the flags Windows can't honour here, before any AWS call and ahead of every dispatch below (#1022).
@@ -378,10 +384,9 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// surfaces, and a reaper that will not reclaim an ephemeral filesystem or a
 	// stopped instance is precisely a cost the preview should mention.
 	//
-	// Deliberately NOT on every launch — see launchLeansOnReaper. The previous
-	// version of this check fired unconditionally in every account and therefore
-	// told the user nothing.
-	warnIfReaperWontCover(ctx, awsClient, os.Stderr)
+	// Not unconditional — see warnIfReaperWontCover. The previous version of
+	// this check fired in every account and therefore told the user nothing.
+	warnIfReaperWontCover(ctx, awsClient, config.Region, os.Stderr)
 
 	if launchDryRun {
 		return runLaunchDryRun(ctx, os.Stdout, awsClient, config)
@@ -445,7 +450,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	return launchWithProgress(ctx, awsClient, config, plat, auditLog)
 }
 
-func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, plat *platform.Platform, auditLog *audit.AuditLogger) error {
+func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, plat *platform.Platform, auditLog *audit.AuditLogger) (err error) {
 	// In JSON mode, suppress the TUI so stdout carries only the JSON object (#21).
 	var prog *progress.Progress
 	if getOutputFormat() == "json" {
@@ -453,6 +458,14 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	} else {
 		prog = progress.NewProgress()
 	}
+
+	// Once RunInstances has succeeded, any failure terminates the instance
+	// (and the ephemeral FSx made for it) unless --keep-on-error (#1298).
+	// Deferred here, above the launch, so every return after it is covered.
+	var launchedID, launchedFSx string
+	defer func() {
+		err = finishLaunch(ctx, os.Stderr, awsClient, config.Region, launchedID, launchedFSx, keepOnError, err)
+	}()
 
 	// Step 0: pure flag validation, before anything is created (#685).
 	//
@@ -505,7 +518,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 
 	// Step 4.5: Create or get FSx Lustre filesystem
 	var fsxInfo *aws.FSxInfo
-	var err error
 
 	// For an EPHEMERAL --fsx-create, the filesystem is created AFTER the launch
 	// succeeds (#213) — a capacity-failed launch then never creates an FSx, so
@@ -619,6 +631,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				return fmt.Errorf("failed to start FSx filesystem creation: %w", cerr)
 			}
 			config.FSxPending = fsID
+			launchedFSx = fsID
 			config.FSxImportPath = importPath
 			config.FSxExportPath = exportPath
 			if config.FSxMountPoint == "" {
@@ -838,6 +851,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		// construction — no orphan, no create/teardown churn on retries (#210).
 		return err
 	}
+	launchedID = result.InstanceID
 	auditLog.LogOperationWithData("launch_instance", result.InstanceID, "success",
 		map[string]interface{}{
 			"instance_type": config.InstanceType,
@@ -923,7 +937,7 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	post := runPostLaunchChecks(ctx, os.Stderr, prog, clientPostLaunchSteps(awsClient, config.Region, result.InstanceID),
 		plan, config.TargetOS, result.PublicIP, config.Name, result.InstanceID)
 	if post.sporedErr != nil {
-		return sporedVerificationFailure(ctx, awsClient, config.Region, result.InstanceID, terminateOnError, post.sporedErr)
+		return sporedVerificationError(post.sporedErr)
 	}
 	sporedVerified := post.sporedVerified
 
