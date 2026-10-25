@@ -305,6 +305,9 @@ func (s *TaskSpec) Validate() error {
 		// plus days ("1d", "2d12h"), and positive.
 		add("lifecycle.ttl %q is not a valid duration (e.g. 4h, 90m, 1d): %v", s.Lifecycle.TTL, err)
 	}
+	for _, u := range StagingBucketUses(s) {
+		add("%s names a spawn staging bucket (%s*), which holds other tasks' staged wrappers; no task may read, write or list it (spawn#1274)", u, StagingBucketPrefix)
+	}
 	if s.Lifecycle.OnComplete != "" && !validOnComplete[s.Lifecycle.OnComplete] {
 		add("lifecycle.on_complete %q invalid (want terminate, stop, or hibernate)", s.Lifecycle.OnComplete)
 	}
