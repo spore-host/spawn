@@ -18,7 +18,9 @@ import (
 // Substrate's DynamoDB and KMS, and read the item back RAW, so they see what is
 // actually at rest rather than what the client chooses to return.
 
-const testSigningSecret = "0123456789abcdef0123456789abcdef" // shape of a Slack secret, not one
+// Worded rather than a hex blob so secret scanners do not flag it (see
+// lambda/dashboard-api/authz_gates_test.go).
+const testSigningSecret = "not-a-real-signing-secret-bot-store-fixture"
 
 func newKMSTestClient(t *testing.T) (*Client, *dynamodb.Client) {
 	t.Helper()

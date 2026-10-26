@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/spore-host/spawn/pkg/botsecret"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/security"
@@ -118,6 +119,13 @@ func NewClient(db *dynamodb.Client) *Client {
 		registryTable:   spawnconfig.GetBotRegistryTable(),
 		workspacesTable: spawnconfig.GetBotWorkspacesTable(),
 	}
+}
+
+// NewClientFromConfig is NewClientWithTableNames over clients built from cfg,
+// with workspace signing secrets sealed by KMS under botsecret.KeyID().
+func NewClientFromConfig(cfg aws.Config, registryTable, workspacesTable string) *Client {
+	return NewClientWithTableNames(dynamodb.NewFromConfig(cfg), registryTable, workspacesTable).
+		WithSecretsKMS(kms.NewFromConfig(cfg), "")
 }
 
 // NewClientWithTableNames returns a Client with explicit table names. An empty
