@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // sdkConfigImport is the AWS SDK package whose LoadDefaultConfig reads only the
@@ -157,10 +159,16 @@ func TestCommandsCallNoAmbientPkgLoader(t *testing.T) {
 	ambient := map[string]bool{} // import path + "." + func
 	err := filepath.WalkDir("../pkg", func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			if treewalk.Vanished("../pkg", p, err) {
+				return nil
+			}
 			return err
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
 		if err != nil {
+			if treewalk.Vanished("../pkg", p, err) {
+				return nil
+			}
 			return err
 		}
 		loads := bareSDKConfigLoadCalls(f)

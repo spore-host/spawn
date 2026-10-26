@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // The agent and the launch user-data must agree on where the TLS certs live
@@ -63,6 +65,9 @@ func TestAgentDoesNotUseTheSupersededDCVCertPath(t *testing.T) {
 
 	err := filepath.Walk(filepath.Join(root, "pkg"), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if treewalk.Vanished(filepath.Join(root, "pkg"), path, err) {
+				return nil
+			}
 			return err
 		}
 		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

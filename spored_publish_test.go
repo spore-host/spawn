@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // spored is published to S3 by the release workflow and by nothing else (#876).
@@ -102,6 +104,9 @@ func TestOnlyTheReleaseWorkflowPublishesSpored(t *testing.T) {
 	var offenders []string
 	err := filepath.Walk(".", func(path string, info os.FileInfo, werr error) error {
 		if werr != nil {
+			if treewalk.Vanished(".", path, werr) {
+				return nil
+			}
 			return werr
 		}
 		if info.IsDir() {

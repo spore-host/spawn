@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/treewalk"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
 
@@ -62,6 +63,9 @@ func discoverSporedDownloaders(t *testing.T) map[string]string {
 	found := map[string]string{}
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
 			return err
 		}
 		if info.IsDir() {

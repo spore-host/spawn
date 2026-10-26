@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/treewalk"
 	"github.com/spore-host/spawn/pkg/reaperiam"
 )
 
@@ -47,11 +48,14 @@ func TestNoGeneratedPolicyReachesTheStagingBucket(t *testing.T) {
 	var arns int
 	err := filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
 		if werr != nil {
+			if treewalk.Vanished(root, path, werr) {
+				return nil
+			}
 			return werr
 		}
 		if info.IsDir() {
 			switch info.Name() {
-			case ".git", "node_modules", "vendor", "testdata":
+			case ".git", "node_modules", "vendor", "testdata", "dist":
 				return filepath.SkipDir
 			}
 			return nil

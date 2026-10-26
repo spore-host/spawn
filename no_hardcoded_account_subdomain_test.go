@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/treewalk"
 	"github.com/spore-host/spawn/pkg/dns"
 )
 
@@ -48,6 +49,9 @@ func TestNoHardcodedAccountSubdomain(t *testing.T) {
 	scanned := 0
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(".", path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

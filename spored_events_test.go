@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // Every notification event spored sends must be one spore-bot handles (#1004).
@@ -119,6 +121,9 @@ func discoverSporedNotifyEvents(root string) (map[string][]string, error) {
 	var files []*ast.File
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

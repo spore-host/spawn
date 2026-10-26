@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // Everything shipped under deployment/ must be reachable from something a reader
@@ -70,6 +72,9 @@ func referenceHaystack(t *testing.T) string {
 	var b strings.Builder
 	err := filepath.Walk(".", func(path string, info os.FileInfo, werr error) error {
 		if werr != nil {
+			if treewalk.Vanished(".", path, werr) {
+				return nil
+			}
 			return werr
 		}
 		if info.IsDir() {

@@ -25,10 +25,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/treewalk"
+
+	"mvdan.cc/sh/v3/syntax"
+
 	"github.com/spore-host/spawn/internal/shellmin"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // These are the gates for #1274: a release build's user data carries a stub in
@@ -250,6 +253,9 @@ func TestEveryBootstrapCallerGetsTheStub(t *testing.T) {
 	var optOuts []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
 		if werr != nil {
+			if treewalk.Vanished(root, path, werr) {
+				return nil
+			}
 			return werr
 		}
 		if info.IsDir() {

@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // The spawn:* tags a launch writes and the keys spawn's readers parse must be
@@ -200,6 +202,9 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 	var aliases []constAlias
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

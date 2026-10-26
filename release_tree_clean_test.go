@@ -52,14 +52,15 @@ func TestReleaseBuildLeavesTheTreeClean(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var probes []string
-	for _, p := range outputs {
-		probes = append(probes, createProbe(t, p))
-	}
-
-	t.Logf("probing %v", probes)
-	args := append([]string{"status", "--porcelain", "--untracked-files=all", "--"}, probes...)
-	out, err := exec.Command("git", args...).CombinedOutput()
+	tree, probes := probeReleaseTree(t, outputs)
+	t.Logf("probing %v in %s", probes, tree)
+	args := append([]string{"--git-dir=" + gitDir(t), "--work-tree=" + tree,
+		"status", "--porcelain", "--untracked-files=all", "--"}, probes...)
+	cmd := exec.Command("git", args...)
+	// status must not refresh the shared index on the way: the work tree it
+	// sees is not the checkout's.
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git status: %v: %s", err, out)
 	}
@@ -182,31 +183,107 @@ func hookOutputs(cmd, dir string) ([]string, error) {
 	return outs, nil
 }
 
-// createProbe makes an empty file at rel (unless something is already there,
-// which is then what gets checked), and registers cleanup that removes only
-// what it created, so a developer's real dist/ or build output survives.
-func createProbe(t *testing.T, rel string) string {
+// probeReleaseTree builds, in a temporary directory, a work tree holding the
+// checkout's tracked .gitignore files and a probe file at every release output,
+// and returns it with the probe paths. git status then runs against the
+// checkout's own index and excludes but this work tree.
+//
+// The probes must not go into the checkout itself (#1334): `go test ./...`
+// runs packages in parallel, and a dozen gates in other packages walk the
+// whole tree. Creating and removing dist/ and the before-hook outputs under
+// them made those walks fail on entries that vanished between ReadDir and
+// Lstat.
+func probeReleaseTree(t *testing.T, outputs []string) (string, []string) {
 	t.Helper()
-	p := filepath.FromSlash(rel)
-	if _, err := os.Lstat(p); err == nil {
-		return rel
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		t.Fatal(err)
+	tree := t.TempDir()
+	out, err := exec.Command("git", "ls-files", "-z", "--", ":(glob)**/.gitignore").Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
 	}
-	// The outermost missing ancestor is what to remove afterwards.
-	top := p
-	for d := filepath.Dir(p); d != "." && d != string(filepath.Separator); d = filepath.Dir(d) {
-		if _, err := os.Lstat(d); err == nil {
-			break
+	ignores := strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
+	if len(ignores) == 0 || ignores[0] == "" {
+		t.Fatal("found no tracked .gitignore; the discovery has broken")
+	}
+	for _, rel := range ignores {
+		b, err := os.ReadFile(filepath.FromSlash(rel)) //nolint:gosec // the repo's own tracked file
+		if err != nil {
+			t.Fatal(err)
 		}
-		top = d
+		writeProbe(t, filepath.Join(tree, filepath.FromSlash(rel)), b)
 	}
+	var probes []string
+	for _, rel := range outputs {
+		// Something already at the path in the checkout (a developer's real
+		// dist/, a tracked file) is what gets checked, so carry its content.
+		var b []byte
+		if fi, err := os.Lstat(filepath.FromSlash(rel)); err == nil && fi.Mode().IsRegular() {
+			if b, err = os.ReadFile(filepath.FromSlash(rel)); err != nil { //nolint:gosec // path from the repo's release config
+				t.Fatal(err)
+			}
+		}
+		writeProbe(t, filepath.Join(tree, filepath.FromSlash(rel)), b)
+		probes = append(probes, rel)
+	}
+	return tree, probes
+}
+
+func writeProbe(t *testing.T, p string, b []byte) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(p, nil, 0o600); err != nil {
+	if err := os.WriteFile(p, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(top) })
-	return rel
+}
+
+// gitDir is the checkout's git directory (a linked worktree's own, so its
+// index is the one consulted).
+func gitDir(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("git", "rev-parse", "--absolute-git-dir").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse --absolute-git-dir: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestReleaseTreeProbesStayOutOfTheCheckout holds probeReleaseTree to writing
+// nothing into the checkout, the property that keeps the release gate from
+// racing every tree-walking test in the other packages (#1334). Every output
+// path, and every ancestor directory of one, that was absent before must be
+// absent after.
+func TestReleaseTreeProbesStayOutOfTheCheckout(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("git not on PATH in CI; this gate must run there")
+		}
+		t.Skip("git not available")
+	}
+	outputs, err := releaseTreeOutputs(".goreleaser.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var absent []string
+	for _, rel := range outputs {
+		for p := filepath.FromSlash(rel); p != "." && p != string(filepath.Separator); p = filepath.Dir(p) {
+			if _, err := os.Lstat(p); errors.Is(err, fs.ErrNotExist) {
+				absent = append(absent, p)
+			}
+		}
+	}
+	if len(absent) == 0 {
+		t.Skip("every release output already exists in this checkout; nothing to observe")
+	}
+	tree, _ := probeReleaseTree(t, outputs)
+	for _, p := range absent {
+		if _, err := os.Lstat(p); err == nil {
+			t.Errorf("probing the release tree created %s in the checkout; probes belong in %s (#1334)", p, tree)
+		}
+	}
+	for _, rel := range outputs {
+		if _, err := os.Lstat(filepath.Join(tree, filepath.FromSlash(rel))); err != nil {
+			t.Errorf("probe tree has no %s: %v", rel, err)
+		}
+	}
 }

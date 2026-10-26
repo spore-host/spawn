@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // Test fixtures must not be fabricated, and a test must not skip because its own
@@ -108,6 +110,9 @@ func goTestFiles(t *testing.T) []string {
 	var out []string
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if treewalk.Vanished(".", path, err) {
+				return nil
+			}
 			return err
 		}
 		if info.IsDir() {

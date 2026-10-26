@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/treewalk"
+
 	"github.com/spf13/cobra"
 )
 
@@ -57,6 +59,9 @@ func userFacingLiterals(t *testing.T, repoRoot string, dirs ...string) []literal
 	for _, dir := range dirs {
 		err := filepath.Walk(filepath.Join(repoRoot, dir), func(path string, info os.FileInfo, err error) error {
 			if err != nil {
+				if treewalk.Vanished(filepath.Join(repoRoot, dir), path, err) {
+					return nil
+				}
 				return err
 			}
 			if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

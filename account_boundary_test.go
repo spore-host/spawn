@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // No ARN anywhere in shipped source, policy or template may name an AWS account
@@ -69,6 +71,9 @@ func TestNoARNNamesAnAccountWeDoNotOwn(t *testing.T) {
 
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, werr error) error {
 		if werr != nil {
+			if treewalk.Vanished(root, path, werr) {
+				return nil
+			}
 			return werr
 		}
 		if d.IsDir() {
