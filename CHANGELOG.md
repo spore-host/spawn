@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`spawn launch --efa --efa-group NAME`: a shared EFA security group for
+  launches that are not one MPI job array** (#1168). EFA needs a group that
+  admits all traffic from itself, and spawn made one only for `--mpi`, so a
+  fleet of different instance types (a GPU client plus EFA proxies) needed a
+  hand-built group that someone had to remember to delete. `--efa-group NAME`
+  creates or joins `spawn-efa-NAME` with the same self-referencing all-traffic
+  rules as the MPI group (an existing group is brought up to date), adds it to
+  the launch's other groups, and opens nothing to the outside. It is tagged
+  `spawn:managed=true` with a creation stamp, and the TTL reaper's managed
+  network sweep deletes it once no instance has used it for 7 days. Launch the
+  fleet in one AZ; EFA does not cross AZs. Requires `--efa`. No new permission.
+
 - **spawn now removes its own empty buckets** (#1301). `spawn cleanup
   --buckets` and, optionally, the TTL reaper delete
   `spawn-staging-<account>-<region>` and `spawn-results-<account>-<region>`
@@ -304,6 +316,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An instance whose spored predates this keeps its old enforcement until
   `spawn upgrade-spored`. `spawn status` and `spawn cost` say when IPv4 is not
   counted for that reason.
+- **Security: an MPI cohort launched from an image of a rank-0 instance no
+  longer reuses the parent cohort's root SSH key** (#1338). Rank 0 minted the
+  cluster key only when `/root/.ssh/id_rsa` was missing, and every
+  `authorized_keys` write appended, so a child cohort reused the parent's
+  private key, every member authorized it, and root's `authorized_keys` kept
+  the parent's public key: whoever held the parent's key could ssh in as root.
+  Rank 0 now mints a fresh key unless `/root/.ssh/spawn-mpi-key-owner` names
+  its own instance (so a reboot of the same instance keeps it), every cluster
+  key carries the comment `spawn-mpi-cohort`, and each install replaces the
+  lines carrying it instead of appending; rank 0 also drops the line matching
+  the key it replaces, which covers images made before this release. The
+  control plane reads rank 0's public key only once the owner file names that
+  instance, so the inherited key cannot be handed out before `ssh-keygen` runs.
+  The `Host *` block in root's ssh config is written once rather than on
+  every run. Behaviour change: a `/root/.ssh/id_rsa` already on a custom
+  image is replaced on MPI rank 0 (it used to be adopted as the cluster key
+  and authorized on every member). Still open: on a peer image made by an
+  earlier release, the old untagged cluster-key line cannot be told from a
+  user's key and stays (#1343).
 
 - **`spawn cleanup` no longer offers spawn's S3 buckets for removal and then
   fails on them** (#1301). With `--all` it listed a `spawn:managed` bucket as

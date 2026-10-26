@@ -89,6 +89,7 @@ var (
 	mpiAutoPlacementGroup bool
 	efaEnabled            bool
 	efaInterfaces         int
+	efaGroup              string
 
 	// Shared storage
 	efsID           string
@@ -386,6 +387,7 @@ func init() {
 	launchCmd.Flags().BoolVar(&mpiAutoPlacementGroup, "auto-placement-group", true, "Automatically create placement group for MPI job arrays (default: true)")
 	launchCmd.Flags().BoolVar(&efaEnabled, "efa", false, "Enable Elastic Fabric Adapter for ultra-low latency MPI (requires supported instance types)")
 	launchCmd.Flags().IntVar(&efaInterfaces, "efa-interfaces", 0, "With --efa: number of EFA interfaces, one per network card (0 = every EFA the instance type supports; 1 = a single interface). More than one gets its public IP from an Elastic IP, released on terminate")
+	launchCmd.Flags().StringVar(&efaGroup, "efa-group", "", "With --efa: create or join the security group spawn-efa-NAME, which admits all traffic between its members, so separate launches (different instance types, no --mpi) can share one EFA fabric. Launch them in one AZ. Unused groups are deleted by the reaper")
 
 	// Shared storage
 	launchCmd.Flags().StringVar(&efsID, "efs-id", "", "EFS filesystem ID to mount (fs-xxx)")

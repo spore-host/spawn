@@ -71,7 +71,7 @@ var sweepFlagCoverage = map[string]struct {
 	"mpi":            {sweepNA, "MPI is an all-or-nothing cohort, not a sweep"},
 	"mpi-command":    {sweepNA, "see mpi"}, "mpi-processes-per-node": {sweepNA, "see mpi"},
 	"skip-mpi-install": {sweepNA, "see mpi"}, "auto-placement-group": {sweepNA, "see mpi"},
-	"placement-group": {sweepNA, "see mpi"}, "efa": {sweepNA, "EFA is for MPI cohorts"}, "efa-interfaces": {sweepNA, "see efa"},
+	"placement-group": {sweepNA, "see mpi"}, "efa": {sweepNA, "EFA is for MPI cohorts"}, "efa-interfaces": {sweepNA, "see efa"}, "efa-group": {sweepNA, "see efa"},
 	"interactive":        {sweepNA, "a sweep is non-interactive by definition"},
 	"dry-run":            {sweepNA, "explicitly refused on the sweep path (#569)"},
 	"print-config":       {sweepNA, "alias of dry-run"},

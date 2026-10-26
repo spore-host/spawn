@@ -312,6 +312,22 @@ func previewIAMInstanceProfile(config *aws.LaunchConfig) (name string, isPredict
 // previewSecurityGroupPlan describes what ensureSecurityGroup would do,
 // without calling EC2. Mirrors its own branching exactly.
 func previewSecurityGroupPlan(config *aws.LaunchConfig) string {
+	plan := previewBaseSecurityGroupPlan(config)
+	if efaGroup == "" {
+		return plan
+	}
+	efa := fmt.Sprintf("create-or-join %s%s (all traffic between EFA members)", aws.EFAGroupPrefix, efaGroup)
+	if plan == defaultSecurityGroupPlan {
+		// The EFA group replaces the default group: an instance launched with
+		// any group named gets only the groups named.
+		return efa
+	}
+	return plan + "; " + efa
+}
+
+const defaultSecurityGroupPlan = "use the account/VPC default security group"
+
+func previewBaseSecurityGroupPlan(config *aws.LaunchConfig) string {
 	if mpiEnabled {
 		return fmt.Sprintf("create-or-reuse spawn-mpi-%s (MPI inter-node ports)", jobArrayName)
 	}
@@ -321,7 +337,7 @@ func previewSecurityGroupPlan(config *aws.LaunchConfig) string {
 	if len(config.SecurityGroupIDs) > 0 {
 		return "use the explicitly given security group(s)"
 	}
-	return "use the account/VPC default security group"
+	return defaultSecurityGroupPlan
 }
 
 // renderLaunchPlanTable prints the plan in the same plain key:value style

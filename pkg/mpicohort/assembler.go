@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/spore-host/cohort"
 	"github.com/spore-host/spawn/pkg/provider"
+	"github.com/spore-host/spawn/pkg/userdata"
 )
 
 // peersFilePath is the on-instance file the MPI user-data waits on and builds its
@@ -224,14 +226,14 @@ func readRankZeroPubKey(ctx context.Context, client LaunchAPI, region, instanceI
 	for {
 		// (ctx, region, instanceID, command, timeout) — instanceID BEFORE the
 		// command. Both are strings, so the wrong order compiles silently.
-		res, err := client.RunShellScript(ctx, region, instanceID,
-			fmt.Sprintf("test -s %s && cat %s", rankZeroPubKeyPath, rankZeroPubKeyPath),
-			runTimeout)
+		res, err := client.RunShellScript(ctx, region, instanceID, readPubKeyCommand(instanceID), runTimeout)
 		if err == nil && res.Status == "Success" && res.ResponseCode == 0 {
 			key := strings.TrimSpace(res.Stdout)
-			// An ssh public key is "<type> <base64>[ comment]"; require at least
-			// the first two fields so a partial read is not distributed.
-			if fields := strings.Fields(key); len(fields) >= 2 && strings.HasPrefix(fields[0], "ssh-") {
+			// An ssh public key is "<type> <base64> <comment>". Require the
+			// type, and the spawn comment as the last field so a partial read,
+			// or a key this script did not mint, is never distributed (#1338).
+			if fields := strings.Fields(key); len(fields) >= 3 && strings.HasPrefix(fields[0], "ssh-") &&
+				fields[len(fields)-1] == userdata.MPIClusterKeyComment {
 				return key, nil
 			}
 			last = fmt.Sprintf("unusable key content (%d bytes)", len(key))
@@ -253,18 +255,49 @@ func readRankZeroPubKey(ctx context.Context, client LaunchAPI, region, instanceI
 	}
 }
 
-// installPubKeyCommand appends pubKey to root's authorized_keys, idempotently.
+// instanceIDRe is an EC2 instance ID, the only thing readPubKeyCommand puts
+// into a shell command besides constants.
+var instanceIDRe = regexp.MustCompile(`^i-[0-9a-f]+$`)
+
+// readPubKeyCommand prints rank 0's public key, but only once the MPI user data
+// has recorded that THIS instance minted it (#1338). On an instance launched
+// from an image of an earlier rank 0, id_rsa.pub is present from the start and
+// is the parent cohort's; with MPI already installed, enrollment passes before
+// the user data reaches ssh-keygen, and the inherited key would be handed to
+// every member.
+func readPubKeyCommand(instanceID string) string {
+	if !instanceIDRe.MatchString(instanceID) {
+		// Never interpolate an unexpected value; a command that cannot succeed
+		// makes the read wait out its budget and fail with this ID in the error.
+		return "false"
+	}
+	return fmt.Sprintf("grep -qxF %s %s && test -s %s && cat %s",
+		instanceID, userdata.MPIClusterKeyOwnerFile, rankZeroPubKeyPath, rankZeroPubKeyPath)
+}
+
+// installPubKeyCommand makes pubKey the ONE spawn cluster key in root's
+// authorized_keys (#1338).
+//
+// Every line ending in userdata.MPIClusterKeyComment is spawn-managed and is
+// dropped before pubKey is added, so a node launched from an image of a member
+// of another cohort stops authorizing that cohort's key, and a retried assembly
+// leaves exactly one copy. Appending (with a duplicate guard, as before) kept
+// the image's line for the life of every instance launched from it. Other lines
+// are kept byte for byte, and if grep fails for any reason other than "no lines
+// left" the file is not rewritten at all.
 //
 // Base64-encoded for the same reason the peers file is: an ssh key's own base64
-// payload plus an optional comment must not be re-parsed by the shell. The grep
-// guard keeps a retried assembly from appending duplicates.
+// payload plus an optional comment must not be re-parsed by the shell.
 func installPubKeyCommand(pubKey string) string {
 	b64 := base64.StdEncoding.EncodeToString([]byte(pubKey + "\n"))
+	ak := authorizedKeysPath
 	return fmt.Sprintf(
 		"set -e; mkdir -p /root/.ssh; chmod 700 /root/.ssh; "+
-			"touch %s; chmod 600 %s; "+
-			"printf %%s %s | base64 -d > /tmp/.spawn-cluster-key; "+
-			"grep -qxFf /tmp/.spawn-cluster-key %s || cat /tmp/.spawn-cluster-key >> %s; "+
-			"rm -f /tmp/.spawn-cluster-key",
-		authorizedKeysPath, authorizedKeysPath, b64, authorizedKeysPath, authorizedKeysPath)
+			"touch %[1]s; chmod 600 %[1]s; "+
+			"printf %%s %[2]s | base64 -d > /tmp/.spawn-cluster-key; "+
+			"{ grep -v ' %[3]s$' %[1]s || [ $? -eq 1 ]; } > %[1]s.spawn-new; "+
+			"cat /tmp/.spawn-cluster-key >> %[1]s.spawn-new; "+
+			"cat %[1]s.spawn-new > %[1]s; "+
+			"rm -f /tmp/.spawn-cluster-key %[1]s.spawn-new",
+		ak, b64, userdata.MPIClusterKeyComment)
 }

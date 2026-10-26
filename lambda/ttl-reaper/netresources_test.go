@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +35,7 @@ type fakeNetAPI struct {
 	describeAddrCalls int
 	describeSGCalls   int
 	instanceFilters   []ec2types.Filter
+	sgFilters         []ec2types.Filter
 }
 
 func (f *fakeNetAPI) DescribeAddresses(context.Context, *ec2.DescribeAddressesInput, ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error) {
@@ -59,8 +62,9 @@ func (f *fakeNetAPI) DescribeInstances(_ context.Context, in *ec2.DescribeInstan
 	f.instanceFilters = in.Filters
 	return &ec2.DescribeInstancesOutput{Reservations: []ec2types.Reservation{{Instances: f.instances}}}, nil
 }
-func (f *fakeNetAPI) DescribeSecurityGroups(context.Context, *ec2.DescribeSecurityGroupsInput, ...func(*ec2.Options)) (*ec2.DescribeSecurityGroupsOutput, error) {
+func (f *fakeNetAPI) DescribeSecurityGroups(_ context.Context, in *ec2.DescribeSecurityGroupsInput, _ ...func(*ec2.Options)) (*ec2.DescribeSecurityGroupsOutput, error) {
 	f.describeSGCalls++
+	f.sgFilters = in.Filters
 	return &ec2.DescribeSecurityGroupsOutput{SecurityGroups: f.sgs}, nil
 }
 func (f *fakeNetAPI) DeleteSecurityGroup(_ context.Context, in *ec2.DeleteSecurityGroupInput, _ ...func(*ec2.Options)) (*ec2.DeleteSecurityGroupOutput, error) {
@@ -504,5 +508,73 @@ func TestNetSweepCountsAFailedDeleteAsAnError(t *testing.T) {
 					out.regions, out.reached, out.denied)
 			}
 		})
+	}
+}
+
+// TestNetSweepReapsAnUnusedEFAGroup is #1168's deleter. `spawn launch --efa
+// --efa-group NAME` creates spawn-efa-NAME (pkg/aws.CreateOrGetEFASecurityGroup)
+// tagged spawn:managed=true, spawn:created and spawn:purpose=efa-group; nothing
+// in the CLI deletes it, because several launches share it and none of them
+// knows it is the last. This sweep is that deleter: it must select the group
+// with the filter it sends EC2, delete it once unused past the grace, and spare
+// it while any instance holds it. pkg/aws's
+// TestEFAGroupCarriesWhatTheReaperSweepSelectsAndAges pins the other half (the
+// tags the CLI writes); this module does not import pkg/aws.
+func TestNetSweepReapsAnUnusedEFAGroup(t *testing.T) {
+	now := time.Now()
+	efaGroup := func(age time.Duration) ec2types.SecurityGroup {
+		g := sg("sg-efa", "spawn-efa-fleet", age, now)
+		g.Tags = append(g.Tags,
+			ec2types.Tag{Key: awssdk.String(tagprefix.Tag("managed")), Value: awssdk.String("true")},
+			ec2types.Tag{Key: awssdk.String(tagprefix.Tag("purpose")), Value: awssdk.String("efa-group")},
+			ec2types.Tag{Key: awssdk.String("Name"), Value: awssdk.String("spawn-efa-fleet")},
+		)
+		return g
+	}
+
+	// The sweep's selector, evaluated against the group's tags the way EC2
+	// evaluates a tag:K filter. The fake returns every group regardless, so
+	// without this a selector that missed the group would still pass.
+	f := &fakeNetAPI{sgs: []ec2types.SecurityGroup{efaGroup(netResourceGrace + time.Hour)}}
+	runNetSweep(t, f, false)
+	if len(f.sgFilters) == 0 {
+		t.Fatal("the sweep sent no security-group filter; it would sweep every group in the account")
+	}
+	tags := map[string]string{}
+	for _, tg := range f.sgs[0].Tags {
+		tags[awssdk.ToString(tg.Key)] = awssdk.ToString(tg.Value)
+	}
+	for _, flt := range f.sgFilters {
+		key, ok := strings.CutPrefix(awssdk.ToString(flt.Name), "tag:")
+		if !ok {
+			t.Fatalf("filter %q is not a tag filter; extend this check", awssdk.ToString(flt.Name))
+		}
+		if !slices.Contains(flt.Values, tags[key]) {
+			t.Errorf("the sweep selects %s in %v; the EFA group has %q, so it is never swept", key, flt.Values, tags[key])
+		}
+	}
+	if len(f.deletedSG) != 1 || f.deletedSG[0] != "sg-efa" {
+		t.Errorf("unused EFA group past the grace: deleted %v, want [sg-efa]", f.deletedSG)
+	}
+
+	// Held by an instance (one launch of the fleet still running): spared.
+	held := &fakeNetAPI{
+		sgs: []ec2types.SecurityGroup{efaGroup(netResourceGrace + time.Hour)},
+		instances: []ec2types.Instance{{
+			InstanceId:     awssdk.String("i-proxy"),
+			State:          &ec2types.InstanceState{Name: ec2types.InstanceStateNameRunning},
+			SecurityGroups: []ec2types.GroupIdentifier{{GroupId: awssdk.String("sg-efa")}},
+		}},
+	}
+	runNetSweep(t, held, false)
+	if len(held.deletedSG) != 0 {
+		t.Errorf("EFA group in use: deleted %v, want it spared", held.deletedSG)
+	}
+
+	// Inside the grace (a fleet relaunched within the week): spared.
+	fresh := &fakeNetAPI{sgs: []ec2types.SecurityGroup{efaGroup(time.Hour)}}
+	runNetSweep(t, fresh, false)
+	if len(fresh.deletedSG) != 0 {
+		t.Errorf("EFA group inside the grace: deleted %v, want it spared", fresh.deletedSG)
 	}
 }

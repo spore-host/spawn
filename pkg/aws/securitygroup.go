@@ -72,80 +72,14 @@ func ensureMPIClusterRules(ctx context.Context, ec2Client *ec2.Client, sgID stri
 // MPI clusters. The group allows ALL traffic between its own members, which EFA
 // requires (#659), plus SSH from outside for user access.
 func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error) {
-	// Refuse a name with no cluster-specific suffix (#685).
-	//
-	// Callers build this as "spawn-mpi-" + jobArrayName. With an empty name the
-	// result was the bare prefix, so EVERY such launch shared ONE group — and
-	// since #659 that group allows ALL protocols between its members, making
-	// accidental sharing worse than it was before. The caller-side ordering fix
-	// makes this unreachable from the CLI; this is the guard that keeps it
-	// unreachable from anywhere else.
-	if groupName == "" || strings.HasSuffix(groupName, "-") {
-		return "", fmt.Errorf("refusing to create MPI security group %q: the name has no "+
-			"cluster-specific suffix, so unrelated clusters would share one all-traffic "+
-			"group (#685)", groupName)
-	}
-
-	ec2Client := c.regionalEC2(region)
-
-	// Try to find existing security group
-	describeResult, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
-		Filters: []types.Filter{
-			{
-				Name:   aws.String("group-name"),
-				Values: []string{groupName},
-			},
-			{
-				Name:   aws.String("vpc-id"),
-				Values: []string{vpcID},
-			},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to describe security groups: %w", err)
-	}
-
-	// If security group exists, reuse it — but bring its rules up to date first
-	// (#659). Returning it unexamined meant every spawn-mpi-* group created
-	// before the all-traffic fix kept only the old tcp rule, so upgrading spawn
-	// fixed nothing for anyone who had already run an MPI launch. The only
-	// workaround was deleting the group by hand, which fails while any instance
-	// still references it.
-	if len(describeResult.SecurityGroups) > 0 {
-		existingID := *describeResult.SecurityGroups[0].GroupId
-		if err := ensureMPIClusterRules(ctx, ec2Client, existingID); err != nil {
-			return "", err
-		}
-		return existingID, nil
-	}
-
-	// Create new security group
-	createResult, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
-		GroupName:   aws.String(groupName),
-		Description: aws.String("Security group for MPI cluster inter-node communication"),
-		VpcId:       aws.String(vpcID),
-		TagSpecifications: []types.TagSpecification{
-			{
-				ResourceType: types.ResourceTypeSecurityGroup,
-				// LifecycleTags adds spawn:created, which the reaper's sweep needs
-				// and which nothing used to write — see the #685 follow-up.
-				Tags: LifecycleTags(groupName, "mpi-cluster", time.Now()),
-			},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to create security group: %w", err)
-	}
-
-	sgID := *createResult.GroupId
-
-	// Allow ALL traffic between cluster nodes, not just TCP (#659).
-	if err := ensureMPIClusterRules(ctx, ec2Client, sgID); err != nil {
-		return "", err
+	sgID, created, err := c.createOrGetClusterGroup(ctx, region, vpcID, groupName,
+		"Security group for MPI cluster inter-node communication", "mpi-cluster")
+	if err != nil || !created {
+		return sgID, err
 	}
 
 	// Add ingress rule: allow SSH from anywhere (for user access)
-	_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+	_, err = c.regionalEC2(region).AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 		GroupId: aws.String(sgID),
 		IpPermissions: []types.IpPermission{
 			{
@@ -167,6 +101,113 @@ func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID,
 	}
 
 	return sgID, nil
+}
+
+// EFAGroupPrefix prefixes the security group `spawn launch --efa-group NAME`
+// creates or joins (#1168).
+const EFAGroupPrefix = "spawn-efa-"
+
+// EFAGroupPurpose is the spawn:purpose tag on an --efa-group security group.
+const EFAGroupPurpose = "efa-group"
+
+// CreateOrGetEFASecurityGroup creates or gets the security group several
+// `spawn launch --efa --efa-group NAME` calls share (#1168): a fleet of
+// different instance types (a GPU client plus EFA proxies, say) cannot be one
+// MPI job array, so it has no spawn-mpi-* group, and EFA needs a group that
+// admits all traffic from itself in both directions.
+//
+// The rules are exactly the MPI group's (ensureMPIClusterRules), and an existing
+// group is brought up to date the same way. Unlike the MPI group it opens no
+// SSH: a plain launch gets no outside SSH from the VPC default group either, so
+// joining an EFA group leaves reachability as it was, and --security-group-ids
+// still adds a group that opens it.
+//
+// The group is tagged spawn:managed=true with a spawn:created stamp
+// (LifecycleTags). Its deleter is the reaper's managed-network sweep
+// (lambda/ttl-reaper netresources.go, reapSecurityGroups), which removes it once
+// no instance has used it for the grace period.
+func (c *Client) CreateOrGetEFASecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error) {
+	sgID, _, err := c.createOrGetClusterGroup(ctx, region, vpcID, groupName,
+		"spawn EFA group: all traffic between its members", EFAGroupPurpose)
+	return sgID, err
+}
+
+// createOrGetClusterGroup finds groupName in vpcID or creates it, and makes
+// sure it carries the all-traffic self rules either way. created reports a new
+// group.
+func (c *Client) createOrGetClusterGroup(ctx context.Context, region, vpcID, groupName, description, purpose string) (sgID string, created bool, err error) {
+	// Refuse a name with no cluster-specific suffix (#685).
+	//
+	// Callers build this as a prefix + a cluster name ("spawn-mpi-" +
+	// jobArrayName). With an empty name the result was the bare prefix, so EVERY
+	// such launch shared ONE group — and since #659 that group allows ALL
+	// protocols between its members, making accidental sharing worse than it was
+	// before. The caller-side ordering fix makes this unreachable from the CLI;
+	// this is the guard that keeps it unreachable from anywhere else.
+	if groupName == "" || strings.HasSuffix(groupName, "-") {
+		return "", false, fmt.Errorf("refusing to create cluster security group %q: the name has no "+
+			"cluster-specific suffix, so unrelated clusters would share one all-traffic "+
+			"group (#685)", groupName)
+	}
+
+	ec2Client := c.regionalEC2(region)
+
+	// Try to find existing security group
+	describeResult, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+		Filters: []types.Filter{
+			{
+				Name:   aws.String("group-name"),
+				Values: []string{groupName},
+			},
+			{
+				Name:   aws.String("vpc-id"),
+				Values: []string{vpcID},
+			},
+		},
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("failed to describe security groups: %w", err)
+	}
+
+	// If security group exists, reuse it — but bring its rules up to date first
+	// (#659). Returning it unexamined meant every spawn-mpi-* group created
+	// before the all-traffic fix kept only the old tcp rule, so upgrading spawn
+	// fixed nothing for anyone who had already run an MPI launch. The only
+	// workaround was deleting the group by hand, which fails while any instance
+	// still references it.
+	if len(describeResult.SecurityGroups) > 0 {
+		existingID := *describeResult.SecurityGroups[0].GroupId
+		if err := ensureMPIClusterRules(ctx, ec2Client, existingID); err != nil {
+			return "", false, err
+		}
+		return existingID, false, nil
+	}
+
+	// Create new security group
+	createResult, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
+		GroupName:   aws.String(groupName),
+		Description: aws.String(description),
+		VpcId:       aws.String(vpcID),
+		TagSpecifications: []types.TagSpecification{
+			{
+				ResourceType: types.ResourceTypeSecurityGroup,
+				// LifecycleTags adds spawn:created, which the reaper's sweep needs
+				// and which nothing used to write — see the #685 follow-up.
+				Tags: LifecycleTags(groupName, purpose, time.Now()),
+			},
+		},
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("failed to create security group: %w", err)
+	}
+
+	sgID = *createResult.GroupId
+
+	// Allow ALL traffic between cluster nodes, not just TCP (#659).
+	if err := ensureMPIClusterRules(ctx, ec2Client, sgID); err != nil {
+		return "", true, err
+	}
+	return sgID, true, nil
 }
 
 // CreateOrGetWindowsSecurityGroup creates or gets a security group for Windows

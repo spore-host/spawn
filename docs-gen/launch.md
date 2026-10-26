@@ -52,6 +52,7 @@ spawn launch <name> [flags]
 | `--dns-function-arn` |  | string |  | ARN of the Lambda function behind --dns-api-endpoint; the instance role is granted lambda:InvokeFunctionUrl on it (required with a custom endpoint). Also SPAWN_DNS_FUNCTION_ARN, dns.function_arn in ~/.spawn/config.yaml, or SSM /spawn/dns/function_arn |
 | `--dns` |  | string |  | Override DNS name if different from --name (advanced) |
 | `--dry-run` |  | bool |  | Resolve and print the launch configuration without launching anything (no AWS mutation) |
+| `--efa-group` |  | string |  | With --efa: create or join the security group spawn-efa-NAME, which admits all traffic between its members, so separate launches (different instance types, no --mpi) can share one EFA fabric. Launch them in one AZ. Unused groups are deleted by the reaper |
 | `--efa-interfaces` |  | int |  | With --efa: number of EFA interfaces, one per network card (0 = every EFA the instance type supports; 1 = a single interface). More than one gets its public IP from an Elastic IP, released on terminate |
 | `--efa` |  | bool |  | Enable Elastic Fabric Adapter for ultra-low latency MPI (requires supported instance types) |
 | `--efs-id` |  | string |  | EFS filesystem ID to mount (fs-xxx) |
