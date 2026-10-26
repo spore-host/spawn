@@ -832,6 +832,7 @@ const ExitTTLExpired ExitReason
 const ExitUserTerminated ExitReason
 const FlushExitUploadFailed
 const FlushHookSeconds
+const FlushOutputsSlackSeconds
 const FlushStatusOK
 const FlushStatusTag
 const MaxFlushOutputsSeconds
@@ -963,6 +964,7 @@ func EffectiveMemoryGiB(req ResourceRequest) float64
 func EffectiveResultsPrefix(spec *TaskSpec, accountID, region string) string
 func ExtractConsoleLog(consoleOutput string) (string, bool)
 func FlushCommand(why ExitReason) string
+func FlushCommandWithOutputs(why ExitReason, maxGrant int) string
 func FlushHookOutputSeconds(head []byte) int
 func FlushScriptPath() string
 func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error)

@@ -36,6 +36,11 @@ func SetFlushScriptPathForTest(path string) (restore func()) {
 // CLI's `spawn terminate`, the TTL reaper), matching spored's own 45 s bound.
 const FlushHookSeconds = 45
 
+// FlushOutputsSlackSeconds is what a hook granted output seconds may run past
+// its base FlushHookSeconds plus that grant (spawn#1297): timeout(1)'s 2 s kill
+// grace and a retry's last backoff. Every caller sizes its bound with it.
+const FlushOutputsSlackSeconds = 5
+
 // FlushCommand is the shell that runs the hook with reason why over SSM
 // (AWS-RunShellScript, as root). It applies the same trust check spored's
 // flushTaskRecord does before exec'ing the hook (a regular file, not a symlink,
@@ -43,13 +48,42 @@ const FlushHookSeconds = 45
 // timeout(1). A missing hook (a non-task launch, or a spored older than
 // 0.116.0) is a clean no-op. Nothing from the instance's tags is interpolated:
 // the path and why are this package's constants.
+//
+// It grants no output seconds: the hook stages no outputs. See
+// FlushCommandWithOutputs.
 func FlushCommand(why ExitReason) string {
+	return FlushCommandWithOutputs(why, 0)
+}
+
+// FlushCommandWithOutputs is FlushCommand granting the hook up to maxGrant
+// seconds to stage the task's declared outputs (spawn#1312). It grants what the
+// hook declares in its header line (the one FlushHookOutputSeconds reads), at
+// most maxGrant and MaxFlushOutputsSeconds, passes it as $2 as spored does,
+// and bounds the hook by FlushHookSeconds plus the grant plus
+// FlushOutputsSlackSeconds. A hook declaring none, from before #1297, or a
+// maxGrant of 0 runs exactly as FlushCommand always ran it: 45 s, no $2.
+//
+// The caller's wait must cover the largest bound this can produce:
+// FlushHookSeconds + maxGrant + FlushOutputsSlackSeconds.
+func FlushCommandWithOutputs(why ExitReason, maxGrant int) string {
 	h := FlushScriptPath()
-	return fmt.Sprintf(`H=%s
+	cmd := fmt.Sprintf(`H=%s
 if [ ! -e "$H" ]; then echo "spawn: no task flush hook on this instance"; exit 0; fi
 if [ -L "$H" ] || [ ! -f "$H" ] || [ ! -O "$H" ] || [ -n "$(find "$H" -perm /022)" ]; then echo "spawn: refusing to run untrusted $H" >&2; exit 2; fi
-exec timeout %d "$H" %s`, h, FlushHookSeconds, string(why))
+`, h)
+	if maxGrant = min(maxGrant, MaxFlushOutputsSeconds); maxGrant > 0 {
+		// The header is the generator's own decimal; anything else grants 0.
+		cmd += fmt.Sprintf(`G=$(head -c %d "$H" | sed -n 's/^%s[[:space:]]*\([1-9][0-9]\{0,3\}\)[[:space:]]*$/\1/p' | head -n 1)
+[ -n "$G" ] && [ "$G" -gt 0 ] || G=0; [ "$G" -le %d ] || G=%d
+[ "$G" = 0 ] || exec timeout $((%d+G+%d)) "$H" %s "$G"
+`, flushHookHeadBytes, flushOutputsHeader, maxGrant, maxGrant, FlushHookSeconds, FlushOutputsSlackSeconds, string(why))
+	}
+	return cmd + fmt.Sprintf(`exec timeout %d "$H" %s`, FlushHookSeconds, string(why))
 }
+
+// flushHookHeadBytes is how much of the hook is read for its declared budget,
+// spored's hookHeadBytes.
+const flushHookHeadBytes = 4096
 
 // flushCommandLogPath is the command log the hook uploads: where the bootstrap
 // tees the wrapper's output. A variable only so tests can give the hook a log
@@ -338,10 +372,11 @@ func flushOutputsBudget(spec *TaskSpec) int {
 // spored's state, and untagged means kept.
 //
 // Bounded twice. The seconds come from spored as $2, which it grants from the
-// budget declared in the header line and shortens on a Spot interruption; the
-// hook never takes more than the spec allows. With no $2 (run over SSM by
-// `spawn terminate` or the reaper, whose waits leave no room, or by an older
-// spored with a 45 s timeout) the budget is 0 and nothing is attempted. Each
+// budget declared in the header line and shortens on a Spot interruption, or
+// over SSM from `spawn terminate` and the TTL reaper (FlushCommandWithOutputs,
+// spawn#1312), the reaper capping it; the hook never takes more than the spec
+// allows. With no $2 (an older spored with a 45 s timeout, or a reaper
+// invocation near its deadline) the budget is 0 and nothing is attempted. Each
 // copy then runs under timeout(1) with what is left, so a large or hung upload
 // is cut off at the deadline and the record still follows. Retried like
 // spawn_up, but not through it: spawn_up runs its command in a command

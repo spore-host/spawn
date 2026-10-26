@@ -102,7 +102,7 @@ func TestFlushOutcomeIsVisibleAfterTermination(t *testing.T) {
 			}
 			a, s := flushAgent(t, "cookbook-su2-real-probe0-b")
 
-			a.flushTaskRecord(taskproto.ExitTTLExpired)
+			a.flushTaskRecord(taskproto.ExitTTLExpired, time.Time{})
 
 			if got := s.tagger.tags[flushStatusTag]; got != tc.wantTag {
 				t.Errorf("%s = %q, want %q", flushStatusTag, got, tc.wantTag)
@@ -126,7 +126,7 @@ func TestFlushSuccessIsTaggedQuietly(t *testing.T) {
 	installFakeHook(t, "echo 'spawn: terminal record written'\nexit 0\n")
 	a, s := flushAgent(t, "t1")
 
-	a.flushTaskRecord(taskproto.ExitTTLExpired)
+	a.flushTaskRecord(taskproto.ExitTTLExpired, time.Time{})
 
 	if got := s.tagger.tags[flushStatusTag]; got != flushOK {
 		t.Errorf("%s = %q, want %q", flushStatusTag, got, flushOK)
@@ -146,7 +146,7 @@ func TestNoHookOnAPlainLaunchStaysSilent(t *testing.T) {
 	t.Cleanup(taskproto.SetFlushScriptPathForTest(filepath.Join(t.TempDir(), "definitely-absent.sh")))
 	a, s := flushAgent(t, "")
 
-	a.flushTaskRecord(taskproto.ExitTTLExpired)
+	a.flushTaskRecord(taskproto.ExitTTLExpired, time.Time{})
 
 	if s.tagger.calls != 0 || s.consoleText() != "" || len(s.eventsNamed("pre_stop_failed")) != 0 {
 		t.Errorf("a plain launch must report nothing: tags=%v console=%q events=%v",
@@ -202,7 +202,7 @@ func TestFlushHookOutputPipeIsBounded(t *testing.T) {
 	t.Cleanup(killChild)
 
 	done := make(chan struct{})
-	go func() { defer close(done); a.flushTaskRecord(taskproto.ExitTTLExpired) }()
+	go func() { defer close(done); a.flushTaskRecord(taskproto.ExitTTLExpired, time.Time{}) }()
 
 	select {
 	case <-done:

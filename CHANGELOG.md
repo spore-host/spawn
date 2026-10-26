@@ -90,6 +90,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from a workstation, checking every enabled region, with `--dry-run`, and
   `spawn footprint` names these two as the roles' deleters. `DELETED` is now an
   action word for `spawn reaper teardown --if-idle-for`.
+- `taskproto.FlushCommandWithOutputs` and `taskproto.FlushOutputsSlackSeconds`
+  (#1312): the SSM flush command with an output grant, and the slack every
+  caller adds to its bound.
+
+- **A Spot pre-stop now fits inside the 2-minute notice (#1311).** The task
+  flush and the user's `--pre-stop` hook used to have separate bounds, up to 90
+  s each, so together they could outlast the notice. The hook ran last, so EC2's
+  reclaim cut it off and nothing reported it. Both now share one deadline: the
+  interruption time minus 25 s, which leaves room for the Elastic IP release and
+  the notifications. The task flush is sized first: its record gets 45 s, then
+  the declared outputs get what is left (at most 45 s, previously 40 s). The
+  user's hook then gets at most the time remaining, even when
+  `--pre-stop-timeout` is set. If no time remains, the hook is not started and a
+  `pre_stop_failed` notification says so. A flush whose deadline has already
+  passed is not started either; it is recorded as
+  `spawn:flush-status=skipped:no-time-left`.
+- **`spawn terminate` and the TTL reaper now stage a task's declared outputs
+  (#1312).** Their flushes over SSM used to grant no output seconds, so they
+  recorded `outputs_staged: "skipped"`. The hook now gets the budget it declares
+  in its `# spawn-flush-outputs-seconds:` header as `$2`, the same grant spored
+  passes. `spawn terminate` grants up to the task's own
+  `lifecycle.flush_outputs_seconds` and waits for the hook's on-box bound (45 s
+  plus the grant plus 5 s, and SSM slack), which can be up to about 6 minutes
+  for a task that declares the maximum. The reaper ends instances one after
+  another inside its 900 s invocation, so it grants at most 30 s, and none once
+  fewer than 5 minutes of the invocation remain. A hook with no header, which
+  includes every hook written before v0.146.0, runs as before. The reaper change
+  takes effect when the reaper is redeployed.
 
 ### Fixed
 

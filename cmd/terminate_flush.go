@@ -13,11 +13,19 @@ import (
 )
 
 // terminateFlushTimeout bounds the SSM wait for the task flush that runs ahead
-// of `spawn terminate`. The hook itself is capped at taskFlushHookSeconds on the
-// box; the extra margin is SSM delivery and polling.
+// of `spawn terminate`. The hook itself is capped on the box at
+// taskFlushHookSeconds plus the output seconds it is granted (spawn#1312) plus
+// taskproto.FlushOutputsSlackSeconds; the extra 30 s is SSM delivery and
+// polling. The wait ends as soon as the hook does, so it is this long only
+// for a hook that uses its whole budget or an agent that never answers.
+//
+// terminateFlushOutputsSeconds is the most the CLI grants: whatever the task
+// declared (lifecycle.flush_outputs_seconds), up to its maximum. A user
+// terminate is the one SSM flush with no other instances waiting behind it.
 const (
-	terminateFlushTimeout = 75 * time.Second
-	taskFlushHookSeconds  = taskproto.FlushHookSeconds
+	taskFlushHookSeconds         = taskproto.FlushHookSeconds
+	terminateFlushOutputsSeconds = taskproto.MaxFlushOutputsSeconds
+	terminateFlushTimeout        = time.Duration(taskFlushHookSeconds+terminateFlushOutputsSeconds+taskproto.FlushOutputsSlackSeconds)*time.Second + 30*time.Second
 )
 
 // ssmShellRunner is the one SSM call the terminate flush makes. It is
@@ -25,11 +33,12 @@ const (
 type ssmShellRunner func(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*aws.SSMRunResult, error)
 
 // taskFlushCommand is the shell the CLI sends over SSM to run a task's
-// terminal-flush hook with the user_terminated reason. The command itself,
-// trust check and on-box bound included, is taskproto.FlushCommand, shared
-// with the TTL reaper (#1186).
+// terminal-flush hook with the user_terminated reason, granting the hook its
+// declared output seconds (spawn#1312). The command itself, trust check,
+// grant and on-box bound included, is taskproto.FlushCommandWithOutputs,
+// shared with the TTL reaper (#1186).
 func taskFlushCommand() string {
-	return taskproto.FlushCommand(taskproto.ExitUserTerminated)
+	return taskproto.FlushCommandWithOutputs(taskproto.ExitUserTerminated, terminateFlushOutputsSeconds)
 }
 
 // needsTaskFlush reports whether inst is a running `spawn task run` instance,
@@ -52,7 +61,7 @@ func flushTaskBeforeTerminate(ctx context.Context, run ssmShellRunner, inst *aws
 	if !needsTaskFlush(inst) {
 		return false
 	}
-	fmt.Fprintf(warn, "Flushing task %s's log and completion record before terminating...\n", inst.Tags["spawn:task-id"])
+	fmt.Fprintf(warn, "Flushing task %s's log, declared outputs and completion record before terminating...\n", inst.Tags["spawn:task-id"])
 	res, err := run(ctx, inst.Region, inst.InstanceID, taskFlushCommand(), terminateFlushTimeout)
 	switch {
 	case err != nil:

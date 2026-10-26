@@ -1494,12 +1494,36 @@ func (r *reaper) tryGracefulPreStop(ctx context.Context, acct account, c candida
 }
 
 // taskFlushWait bounds the reaper's task flush per instance: the hook's own
-// 45 s cap (taskproto.FlushHookSeconds) plus SSM delivery and polling.
+// 45 s cap (taskproto.FlushHookSeconds) plus SSM delivery and polling. A flush
+// granted output seconds waits that grant and taskproto.FlushOutputsSlackSeconds
+// longer (taskFlushBudget).
 const taskFlushWait = 60 * time.Second
 
+// The reaper's output grant (#1312). The reaper ends instances one after
+// another inside one invocation (the function's Timeout, 900 s in
+// template.yaml), so it grants far less than a task may declare (up to
+// taskproto.MaxFlushOutputsSeconds): at most reaperFlushOutputsSeconds, and
+// none once the invocation has less than reaperOutputsReserve left, so staging
+// outputs never costs a later instance its terminate.
+const (
+	reaperFlushOutputsSeconds = 30
+	reaperOutputsReserve      = 5 * time.Minute
+)
+
+// taskFlushBudget returns the output seconds the reaper grants a task flush
+// and how long it waits for it, given the invocation's ctx.
+func taskFlushBudget(ctx context.Context) (grant int, wait time.Duration) {
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < reaperOutputsReserve {
+		return 0, taskFlushWait
+	}
+	grant = reaperFlushOutputsSeconds
+	return grant, taskFlushWait + time.Duration(grant+taskproto.FlushOutputsSlackSeconds)*time.Second
+}
+
 // tryTaskFlush runs a task instance's terminal-flush hook over SSM before the
-// reaper terminates it (#1186), with the same command `spawn terminate` sends
-// (taskproto.FlushCommand). spored runs the hook itself on every exit it
+// reaper terminates it (#1186), with the command `spawn terminate` sends
+// (taskproto.FlushCommandWithOutputs) under the reaper's own output grant
+// (taskFlushBudget, #1312). spored runs the hook itself on every exit it
 // mediates; the reaper only reaches an instance whose spored did not end it,
 // and before this a task reaped here left an empty results prefix.
 //
@@ -1513,7 +1537,11 @@ func (r *reaper) tryTaskFlush(ctx context.Context, acct account, c candidate) {
 	if c.taskID == "" || !c.running || acct.ssmFor == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, taskFlushWait)
+	grant, wait := taskFlushBudget(ctx)
+	if grant == 0 {
+		log.Printf("task flush: %s (task %s): the invocation is near its deadline, so no outputs are staged", c.id, c.taskID)
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 
 	client := acct.ssmFor(c.region)
@@ -1521,8 +1549,8 @@ func (r *reaper) tryTaskFlush(ctx context.Context, acct account, c candidate) {
 		InstanceIds:  []string{c.id},
 		DocumentName: aws.String("AWS-RunShellScript"),
 		Parameters: map[string][]string{
-			"commands":         {taskproto.FlushCommand(taskproto.ExitTTLExpired)},
-			"executionTimeout": {fmt.Sprintf("%d", int(taskFlushWait.Seconds()))},
+			"commands":         {taskproto.FlushCommandWithOutputs(taskproto.ExitTTLExpired, grant)},
+			"executionTimeout": {fmt.Sprintf("%d", int(wait.Seconds()))},
 		},
 	})
 	if err != nil {
@@ -1541,7 +1569,7 @@ func (r *reaper) tryTaskFlush(ctx context.Context, acct account, c candidate) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("task flush: %s (task %s) did not finish within %s — terminating anyway", c.id, c.taskID, taskFlushWait)
+			log.Printf("task flush: %s (task %s) did not finish within %s — terminating anyway", c.id, c.taskID, wait)
 			return
 		case <-ticker.C:
 			out, err := client.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{

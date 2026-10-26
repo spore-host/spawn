@@ -152,3 +152,26 @@ func TestTaskFlushCommand_TrustCheckAndBound(t *testing.T) {
 		t.Errorf("SSM wait %s must exceed the on-box hook cap %ds", terminateFlushTimeout, taskFlushHookSeconds)
 	}
 }
+
+// spawn#1312: `spawn terminate`'s flush stages the task's declared outputs as
+// a lifecycle kill does. The command sent grants the hook its declared
+// budget as $2, and the SSM wait covers the longest bound that grant can give
+// the hook on the box, so the CLI does not terminate under a running upload.
+func TestTerminateFlushGrantsOutputsAndWaitsForThem(t *testing.T) {
+	var sent string
+	var wait time.Duration
+	run := func(_ context.Context, _, _, command string, timeout time.Duration) (*aws.SSMRunResult, error) {
+		sent, wait = command, timeout
+		return &aws.SSMRunResult{Status: "Success"}, nil
+	}
+	inst := taskInst("i-1", "running")
+	flushTaskBeforeTerminate(context.Background(), run, &inst, &bytes.Buffer{})
+
+	if !strings.Contains(sent, `"$H" `+string(taskproto.ExitUserTerminated)+` "$G"`) {
+		t.Errorf("the flush grants the hook no output seconds:\n%s", sent)
+	}
+	longest := time.Duration(taskproto.FlushHookSeconds+taskproto.MaxFlushOutputsSeconds+taskproto.FlushOutputsSlackSeconds) * time.Second
+	if wait <= longest {
+		t.Errorf("SSM wait %v does not cover a hook granted the maximum %d s (on-box bound %v)", wait, taskproto.MaxFlushOutputsSeconds, longest)
+	}
+}
