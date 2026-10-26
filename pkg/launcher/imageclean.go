@@ -3,6 +3,7 @@ package launcher
 import (
 	"fmt"
 
+	"github.com/spore-host/spawn/pkg/instancestate"
 	"github.com/spore-host/spawn/pkg/security"
 )
 
@@ -32,6 +33,12 @@ const ImageCleanCommandRunning = 3
 // distro whose /tmp is on the root volume rather than a tmpfs (Rocky 9), all
 // of these were baked in, and a later launch from the image started with a
 // stale SPAWN_COMPLETE — so --on-complete fired at boot.
+//
+// It records this instance as the owner of the per-instance state on the
+// volume (instancestate.OwnerFile, #1241), so an instance launched from the
+// image discards the plugins, peers, queue and flush hook it inherits, at its
+// first boot, while this instance keeps them. They are not removed here: the
+// source goes on running after the snapshot and still needs them.
 //
 // The command-ran marker of THIS instance is kept: the CreateImage reboot
 // runs the bootstrap again after a 'cloud-init clean', and the marker is what
@@ -67,6 +74,8 @@ for m in "$R%s"/command-ran-*; do
     [ "$m" = "$MARKER" ] && continue
     rm -f -- "$m"
 done
+OWNER="$R%s"
+mkdir -p "${OWNER%%/*}" && printf '%%s\n' "$ID" > "$OWNER"
 LEFT=""
 for f in "$@" "$R"/tmp/SPAWN_* "$R%s"/command-ran-*; do
     [ -e "$f" ] || continue
@@ -75,6 +84,10 @@ for f in "$@" "$R"/tmp/SPAWN_* "$R%s"/command-ran-*; do
 done
 if [ -n "$LEFT" ]; then
     echo "spawn: could not remove:$LEFT" >&2
+    exit 1
+fi
+if [ "$(cat "$OWNER" 2>/dev/null)" != "$ID" ]; then
+    echo "spawn: could not record $ID as the owner of this volume's state in $OWNER" >&2
     exit 1
 fi
 echo %s
@@ -86,6 +99,7 @@ echo %s
 		defaultCompletionFile,
 		RequiredGatesFile,
 		CommandRanMarkerDir,
+		instancestate.OwnerFile,
 		CommandRanMarkerDir,
 		security.ShellQuote(ImageCleanOK),
 	)

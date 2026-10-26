@@ -225,6 +225,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the first 24,000 characters of stdout and 8,000 of stderr (connect warns when
   output may have been cut), stdin is not forwarded, `--tty` has no effect, and
   the command is limited to an hour.
+- **An instance launched from an image no longer inherits its source
+  instance's plugins, job-array identity, peers, queue or flush hook** (#1241).
+  `spawn ami create` (or any CreateImage) snapshotted the per-instance state
+  the bootstrap and spored write on the root volume, so a child loaded the
+  parent's `/etc/spawn/plugins.json` and plugin state, sourced the parent's
+  `job-array.sh`, found the parent's `job-array-peers.json` (so MPI built its
+  hostfile from the parent cohort's addresses without waiting for its own),
+  and carried the parent's queue, command, push token and task flush hook,
+  which writes to the parent's results prefix. spored now records the
+  instance that owns this state in `/var/lib/spawn/instance-owner`; on an
+  instance where it names another instance, the state written before the
+  current boot is discarded and the new owner recorded, while anything written
+  during this boot (the launch's own plugins and command, a peers file pushed
+  over SSM) is kept. The bootstrap runs this as `spored
+  discard-inherited-state` right after installing spored, before spored or
+  any workload starts, and the daemon does it at startup, which covers images
+  launched by something other than spawn. `spawn ami create` records the
+  source as the owner before the snapshot, so images of instances launched by
+  older releases are covered too; the source keeps its state. The paths are
+  discovered from the source by a gate, not listed by hand. Not covered: an
+  image of an older instance, made outside `spawn ami create`, booted without
+  spawn's bootstrap and with that older spored, and Windows instances.
+- **A flaky gate, `TestNoGeneratedPolicyReachesTheStagingBucket`, failed `make
+  check` on an unmodified tree** (#1334). `TestReleaseBuildLeavesTheTreeClean`
+  created and removed `dist/` and the before-hook outputs inside the checkout
+  while tests in other packages walked it, so a walk could list an entry and
+  fail to stat it (11 failures in 50 concurrent runs). The release gate now
+  probes a temporary work tree against the checkout's own index and ignore
+  rules, and every test that walks the source tree (33 of them, found by a
+  gate that parses every test's walk callback) skips an entry that vanishes
+  mid-walk.
 - **`spawn cleanup` no longer offers spawn's S3 buckets for removal and then
   fails on them** (#1301). With `--all` it listed a `spawn:managed` bucket as
   removable and the delete failed with "don't know how to remove"; buckets are
