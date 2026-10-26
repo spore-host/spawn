@@ -42,6 +42,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/pricing v1.49.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi v1.33.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/scheduler v1.17.24 // indirect
 	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.43.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.10.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sns v1.39.17 // indirect

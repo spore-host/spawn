@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`spawn list` shows instances that are shutting down** (#1167). The default
+  listing left out `shutting-down`, so a GPU instance that sits in that state
+  for up to half an hour after terminate, still billing and holding Spot vCPU
+  quota, was missing from `spawn list --output json`, and a teardown check built
+  on it passed while the instance was still there. The default (also `--state
+  live`) is now pending, running, stopping, stopped and shutting-down; the table
+  colours `shutting-down` and ends with a note that those instances are still
+  billed. `--state active` gives the previous listing. Only `spawn list`
+  changes: the commands that act on an instance (terminate, extend, connect,
+  resume, the cohort adapters) keep skipping shutting-down instances.
+- **`spawn footprint` lists EventBridge Scheduler schedules** (#1219), the
+  schedules `spawn schedule` creates and that keep launching instances while
+  they exist. It lists every schedule group and identifies spawn's by their
+  target (the `scheduler-handler` Lambda), a spore.host name or group, or, for
+  a schedule named like spawn's (`sched-YYYYMMDD-HHMMSS`), spawn's description.
+  This needs `scheduler:ListSchedules` (and `scheduler:GetSchedule` for the
+  description check); without them the report says so under "Could not read"
+  and lists everything else.
+- **The TTL reaper counts a failed security group or placement group delete as
+  an error** (#1211). It recorded the describe call's nil error instead, so a
+  failed delete, including a denied `ec2:DeleteSecurityGroup` or
+  `ec2:DeletePlacementGroup`, was counted as a successfully reached region and
+  never reached `Summary.Errors`. It now counts as an operational error, and the
+  `nilnesserr` linter that found it is enabled. Takes effect when the reaper is
+  redeployed.
+- **The self-hosted monitoring doc no longer tells you to run `spawn launch
+  --tag spawn:metrics-enabled=true`** (#1244), which spawn refuses because the
+  `spawn:` prefix is reserved. It now shows the route that works: tag the
+  instance after launch with `aws ec2 create-tags` and restart spored. A launch
+  flag is tracked in #1308.
+
 ## [0.145.0] - 2026-10-24
 
 ### Added

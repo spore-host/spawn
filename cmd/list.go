@@ -42,7 +42,7 @@ func init() {
 	listCmd.Flags().StringVar(&listRegion, "region", "", "Filter by AWS region (default: all regions)")
 	listCmd.Flags().StringSliceVarP(&listRegions, "regions", "r", nil, "Filter by regions (comma-separated, e.g. us-east-1,us-west-2)")
 	listCmd.Flags().StringVar(&listAZ, "az", "", "Filter by availability zone")
-	listCmd.Flags().StringVar(&listState, "state", "", "Filter by instance state (running, stopped, etc.), or all/any for no filter (includes terminated)")
+	listCmd.Flags().StringVar(&listState, "state", "", "Filter by instance state. Default (or \"live\"): pending, running, stopping, stopped and shutting-down (everything not yet terminated; shutting-down still bills). \"active\": the same without shutting-down. Or one EC2 state (running, stopped, ...), or all/any for no filter (includes terminated)")
 	listCmd.Flags().StringVar(&listInstanceType, "instance-type", "", "Filter by exact instance type (e.g., t3.micro)")
 	listCmd.Flags().StringVar(&listInstanceFamily, "instance-family", "", "Filter by instance family (e.g., m7i, t3)")
 	listCmd.Flags().StringArrayVar(&listTag, "tag", []string{}, "Filter by tag (key=value format, can be specified multiple times)")
@@ -79,7 +79,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "%s\n", i18n.T("spawn.list.searching_all_regions"))
 	}
 
-	instances, regions, err := client.ListInstancesInRegions(ctx, effectiveRegion, listState)
+	instances, regions, err := fetchListInstances(ctx, client, effectiveRegion, listState)
 	if err != nil {
 		return i18n.Te("spawn.list.error.list_failed", err)
 	}
@@ -121,7 +121,64 @@ func runList(cmd *cobra.Command, args []string) error {
 		return outputJSON(instances)
 	}
 
-	return outputTable(instances)
+	if err := outputTable(instances); err != nil {
+		return err
+	}
+	fmt.Fprint(cmd.ErrOrStderr(), shuttingDownNote(instances))
+	return nil
+}
+
+// listInstancesForList is the ListInstancesInRegions call behind `spawn list`,
+// a seam so the state filter it asks EC2 for can be tested without AWS.
+var listInstancesForList = func(ctx context.Context, client *aws.Client, region, stateFilter string) ([]aws.InstanceInfo, []string, error) {
+	return client.ListInstancesInRegions(ctx, region, stateFilter)
+}
+
+// fetchListInstances lists instances for `spawn list` under its --state flag.
+//
+// The default ("" or "live") is every state that still bills or holds quota:
+// pending, running, stopping, stopped AND shutting-down. The shared
+// ListInstances default leaves shutting-down out, and that is right for the
+// commands that act on an instance (terminate, extend, connect...), but not for
+// a listing people read as "is anything left?": a GPU instance can sit in
+// shutting-down for half an hour after terminate, billing and holding spot
+// quota, while a teardown check built on `spawn list --output json` saw nothing
+// (#1167). The shared default is unchanged, so "live" asks for every state and
+// drops only terminated. "active" is the old listing (the shared default).
+func fetchListInstances(ctx context.Context, client *aws.Client, region, stateFlag string) ([]aws.InstanceInfo, []string, error) {
+	switch stateFlag {
+	case "", "live":
+		instances, regions, err := listInstancesForList(ctx, client, region, "all")
+		if err != nil {
+			return nil, nil, err
+		}
+		live := instances[:0]
+		for _, inst := range instances {
+			if inst.State != "terminated" {
+				live = append(live, inst)
+			}
+		}
+		return live, regions, nil
+	case "active":
+		return listInstancesForList(ctx, client, region, "")
+	default:
+		return listInstancesForList(ctx, client, region, stateFlag)
+	}
+}
+
+// shuttingDownNote labels shutting-down instances in the table output: they
+// are terminating, but not gone, and are billed until EC2 finishes (#1167).
+func shuttingDownNote(instances []aws.InstanceInfo) string {
+	n := 0
+	for _, inst := range instances {
+		if inst.State == "shutting-down" {
+			n++
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\nNote: %d instance(s) shutting-down: terminating but not gone yet; still billed and counted against quota until EC2 finishes. Use --state active to hide them.\n", n)
 }
 
 func outputTable(instances []aws.InstanceInfo) error {
@@ -428,6 +485,8 @@ func colorizeState(state string) string {
 		return "\033[33m" + state + "\033[0m" // Yellow
 	case "pending":
 		return "\033[36m" + state + "\033[0m" // Cyan
+	case "shutting-down":
+		return "\033[31m" + state + "\033[0m" // Red: terminating, still billing (#1167)
 	default:
 		return state
 	}

@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
+	spawnscheduler "github.com/spore-host/spawn/pkg/scheduler"
 )
 
 // ControlPlaneResource is one long-lived thing spawn created that is NOT a
@@ -29,8 +32,8 @@ type ControlPlaneResource struct {
 	// and without them the payload was snake_case at the top level and PascalCase
 	// inside it — `control_plane[].Service`. A consumer should not have to know
 	// which half of the struct it is reading.
-	Service string `json:"service"` // lambda, logs, s3, iam, events, dynamodb
-	Kind    string `json:"kind"`    // function, log-group, bucket, role, instance-profile, rule, table
+	Service string `json:"service"` // lambda, logs, s3, iam, events, scheduler, dynamodb
+	Kind    string `json:"kind"`    // function, log-group, bucket, role, instance-profile, event-bus, rule, schedule, table
 	Name    string `json:"name"`
 	Region  string `json:"region"` // empty for global (IAM, and S3 bucket names that carry no region)
 	// Detail is the one fact that matters for this kind: a log group's retention,
@@ -183,6 +186,11 @@ func (c *Client) ScanControlPlane(ctx context.Context, region string) ([]Control
 	out = append(out, evRows...)
 	notes = append(notes, evNotes...)
 
+	// --- EventBridge Scheduler schedules (what `spawn schedule` creates) ------
+	schRows, schNotes := scanSchedules(ctx, scheduler.NewFromConfig(cfg), region)
+	out = append(out, schRows...)
+	notes = append(notes, schNotes...)
+
 	// --- DynamoDB tables ----------------------------------------------------
 	dc := dynamodb.NewFromConfig(cfg)
 	dp := dynamodb.NewListTablesPaginator(dc, &dynamodb.ListTablesInput{})
@@ -228,8 +236,8 @@ type eventsScanner interface {
 // reaper's instance-event bus and the rule on it out of sight; a footprint
 // that cannot see a resource cannot report it left behind.
 //
-// Rules on the default bus only — not EventBridge Scheduler schedules, which
-// are a different service and are not scanned here.
+// EventBridge Scheduler schedules are a different service; scanSchedules
+// covers them.
 func scanEvents(ctx context.Context, c eventsScanner, region string) ([]ControlPlaneResource, []string) {
 	var out []ControlPlaneResource
 	var notes []string
@@ -275,6 +283,100 @@ func scanEvents(ctx context.Context, c eventsScanner, region string) ([]ControlP
 		}
 	}
 	return out, notes
+}
+
+// schedulesScanner is what scanSchedules needs from EventBridge Scheduler.
+type schedulesScanner interface {
+	ListSchedules(ctx context.Context, in *scheduler.ListSchedulesInput, optFns ...func(*scheduler.Options)) (*scheduler.ListSchedulesOutput, error)
+	GetSchedule(ctx context.Context, in *scheduler.GetScheduleInput, optFns ...func(*scheduler.Options)) (*scheduler.GetScheduleOutput, error)
+}
+
+// spawnScheduleID is the shape of the names `spawn schedule` gives its
+// schedules (pkg/scheduler.GenerateScheduleID: sched-YYYYMMDD-HHMMSS).
+var spawnScheduleID = regexp.MustCompile(`^sched-\d{8}-\d{6}$`)
+
+// scanSchedules enumerates spore.host's EventBridge Scheduler schedules in one
+// region, in every schedule group (#1219). `spawn schedule` names them
+// sched-YYYYMMDD-HHMMSS in the default group, which no name prefix matches, so
+// a schedule is identified by, in order:
+//
+//	target       its target is a spore.host Lambda (scheduler-handler, by
+//	             footprintExactNames)
+//	name         its name or its group carries a spore.host prefix
+//	description  it has spawn's ID shape and its Description opens with
+//	             pkg/scheduler.ScheduleDescriptionPrefix (one GetSchedule each,
+//	             only for those candidates: the summary carries no description)
+//
+// A schedule that outlives its intent keeps launching instances, so a
+// footprint that cannot see schedules hides the one control-plane resource
+// that spends. scheduler:ListSchedules (and GetSchedule for the description
+// check) is not in every principal's grant; a refusal becomes a note naming
+// the permission, never an abort.
+func scanSchedules(ctx context.Context, c schedulesScanner, region string) ([]ControlPlaneResource, []string) {
+	var out []ControlPlaneResource
+	var notes []string
+	in := &scheduler.ListSchedulesInput{} // no GroupName: every group
+	for {
+		page, err := c.ListSchedules(ctx, in)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("scheduler: %v (listing schedules needs scheduler:ListSchedules)", err))
+			break
+		}
+		for _, s := range page.Schedules {
+			name := aws.ToString(s.Name)
+			group := aws.ToString(s.GroupName)
+			target := ""
+			if s.Target != nil {
+				target = aws.ToString(s.Target.Arn)
+			}
+			var why string
+			switch {
+			case matchesFootprintName(lambdaFunctionFromARN(target)):
+				why = "target"
+			case matchesFootprintName(name) || matchesFootprintName(group):
+				why = "name"
+			case spawnScheduleID.MatchString(name):
+				got, gerr := c.GetSchedule(ctx, &scheduler.GetScheduleInput{Name: s.Name, GroupName: s.GroupName})
+				if gerr != nil {
+					notes = append(notes, fmt.Sprintf("scheduler: schedule %s/%s: %v (reading its description needs scheduler:GetSchedule)", group, name, gerr))
+					continue
+				}
+				if !strings.HasPrefix(aws.ToString(got.Description), spawnscheduler.ScheduleDescriptionPrefix) {
+					continue
+				}
+				why = "description"
+			default:
+				continue
+			}
+			detail := fmt.Sprintf("%s, group %s", s.State, group)
+			if target != "" {
+				detail += ", target " + target
+			}
+			r := ControlPlaneResource{
+				Service: "scheduler", Kind: "schedule", Name: name, Region: region, Detail: detail, Why: why,
+			}
+			if s.CreationDate != nil {
+				r.Created = *s.CreationDate
+			}
+			out = append(out, r)
+		}
+		if aws.ToString(page.NextToken) == "" {
+			break
+		}
+		in = &scheduler.ListSchedulesInput{NextToken: page.NextToken}
+	}
+	return out, notes
+}
+
+// lambdaFunctionFromARN is the function name in a Lambda ARN
+// (arn:aws:lambda:REGION:ACCOUNT:function:NAME[:QUALIFIER]), or "" for any
+// other ARN.
+func lambdaFunctionFromARN(arn string) string {
+	parts := strings.Split(arn, ":")
+	if len(parts) < 7 || parts[2] != "lambda" || parts[5] != "function" {
+		return ""
+	}
+	return parts[6]
 }
 
 // listAllBuses reads every page of ListEventBuses (no SDK paginator either).

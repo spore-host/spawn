@@ -1372,6 +1372,24 @@ func (c *Client) ListInstancesInRegions(ctx context.Context, region string, stat
 	return allInstances, regions, nil
 }
 
+// instanceStateFilterValues is the instance-state-name filter ListInstances
+// sends for stateFilter, or nil for no filter ("all"/"any": every state,
+// including terminated). The default ("") is pending, running, stopping and
+// stopped: it leaves out shutting-down and terminated, and about fifteen
+// callers that act on an instance (terminate, extend, resume, the cohort
+// adapters...) rely on that. `spawn list` widens its own default instead of
+// this one (#1167).
+func instanceStateFilterValues(stateFilter string) []string {
+	switch stateFilter {
+	case "all", "any":
+		return nil
+	case "":
+		return []string{"pending", "running", "stopping", "stopped"}
+	default:
+		return []string{stateFilter}
+	}
+}
+
 func (c *Client) listInstancesInRegion(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error) {
 	ec2Client := c.regionalEC2(region)
 
@@ -1388,19 +1406,10 @@ func (c *Client) listInstancesInRegion(ctx context.Context, region string, state
 	// so it's expressed by omitting the instance-state-name filter entirely
 	// rather than passing "all" through as a literal (and unmatchable) EC2
 	// filter value (spawn#527).
-	switch stateFilter {
-	case "all", "any":
-		// No state filter: every instance-state-name, including terminated.
-	case "":
-		// Default: show running and stopped instances (not terminated)
+	if values := instanceStateFilterValues(stateFilter); values != nil {
 		filters = append(filters, types.Filter{
 			Name:   aws.String("instance-state-name"),
-			Values: []string{"pending", "running", "stopping", "stopped"},
-		})
-	default:
-		filters = append(filters, types.Filter{
-			Name:   aws.String("instance-state-name"),
-			Values: []string{stateFilter},
+			Values: values,
 		})
 	}
 

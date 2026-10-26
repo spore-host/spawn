@@ -470,3 +470,39 @@ func TestStampFailureIsNotFatal(t *testing.T) {
 			out.opErrors, out.denied)
 	}
 }
+
+// TestNetSweepCountsAFailedDeleteAsAnError is #1211: a security or placement
+// group delete that fails for any reason the sweep does not tolerate must
+// reach errorsToCount() (Summary.Errors, which alarms), denied deletes
+// included, and must not be counted as a reached region.
+func TestNetSweepCountsAFailedDeleteAsAnError(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"denied", errors.New("UnauthorizedOperation: You are not authorized to perform this operation.")},
+		{"operational", errors.New("InternalError: boom")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeNetAPI{
+				sgs:      []ec2types.SecurityGroup{sg("sg-old", "spawn-mpi-x", netResourceGrace+time.Hour, now)},
+				pgs:      []ec2types.PlacementGroup{pgrp("pg-old", netResourceGrace+time.Hour, now)},
+				sgDelErr: tc.err,
+				pgDelErr: tc.err,
+			}
+			sum, out := runNetSweep(t, f, false)
+			if sum.NetReaped != 0 {
+				t.Errorf("NetReaped = %d for two failed deletes, want 0", sum.NetReaped)
+			}
+			if got := out.errorsToCount(); got != 2 {
+				t.Errorf("errorsToCount() = %d, want 2 (one failed SG delete + one failed PG delete); "+
+					"regions=%d reached=%d denied=%d", got, out.regions, out.reached, out.denied)
+			}
+			if out.regions != 0 || out.reached != 0 || out.denied != 0 {
+				t.Errorf("a failed delete changed the per-region scan counters: regions=%d reached=%d denied=%d, want 0/0/0",
+					out.regions, out.reached, out.denied)
+			}
+		})
+	}
+}
