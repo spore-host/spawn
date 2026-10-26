@@ -2289,7 +2289,8 @@ func (a *Agent) idleTimeoutReached(ctx context.Context, now time.Time) {
 		// because spore-bot lists no idle_terminated event (its Slack and
 		// Discord formatters keep one only for older spored, and SMS has none).
 		// idle_stopped would be worse: it tells the user the instance can be
-		// woken. Switch to idle_terminated once spore-bot lists it.
+		// woken. Switch to idle_terminated once spore-bot lists it
+		// (spore-host/spore-host#612).
 		if err := a.terminate(ctx, "Idle timeout", taskproto.ExitIdleTimeout); err == nil {
 			a.notifier.Notify(ctx, "ttl_expired", "idle timeout reached")
 		}
