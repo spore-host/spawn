@@ -338,6 +338,38 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		tags = append(tags, types.Tag{Key: aws.String("spawn:cost-limit"), Value: aws.String(fmt.Sprintf("%.4f", config.CostLimit))})
 	}
 
+	// spored settings it reads at boot and nothing else could set (#1308): the
+	// idle CPU threshold, and metrics and tracing. Refused rather than written
+	// when spored would ignore them.
+	if err := config.ValidateSporedSettings(); err != nil {
+		return nil, err
+	}
+	if config.IdleCPUPercent > 0 {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:idle-cpu"), Value: aws.String(strconv.FormatFloat(config.IdleCPUPercent, 'f', -1, 64))})
+	}
+	if obs := config.Observability; obs.MetricsEnabled {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:metrics-enabled"), Value: aws.String("true")})
+		if obs.MetricsPort != 0 {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:metrics-port"), Value: aws.String(strconv.Itoa(obs.MetricsPort))})
+		}
+		if obs.MetricsBind != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:metrics-bind"), Value: aws.String(obs.MetricsBind)})
+		}
+		if obs.MetricsPath != "" {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:metrics-path"), Value: aws.String(obs.MetricsPath)})
+		}
+	}
+	if obs := config.Observability; obs.TracingEnabled {
+		// The exporter is always written: spored's own default is xray, which
+		// the instance role cannot reach (SporedObservability.TracingExporter).
+		tags = append(tags,
+			types.Tag{Key: aws.String("spawn:tracing-enabled"), Value: aws.String("true")},
+			types.Tag{Key: aws.String("spawn:tracing-exporter"), Value: aws.String(TracingExporterStdout)})
+		if obs.TracingSampling != nil {
+			tags = append(tags, types.Tag{Key: aws.String("spawn:tracing-sampling"), Value: aws.String(strconv.FormatFloat(*obs.TracingSampling, 'f', -1, 64))})
+		}
+	}
+
 	// Session management
 	if config.SessionTimeout != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:session-timeout"), Value: aws.String(config.SessionTimeout)})

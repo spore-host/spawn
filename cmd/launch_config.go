@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spore-host/spawn/pkg/aws"
@@ -104,6 +105,11 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if err := validateOnIdle(onIdle); err != nil {
 		return nil, err
 	}
+	idleCPU, obs, err := sporedSettingsFromFlags()
+	if err != nil {
+		return nil, err
+	}
+	config.IdleCPUPercent, config.Observability = idleCPU, obs
 	// A bad --config file fails here, before any AWS work, on every path that
 	// builds a config (single, sweep, pipe and --dry-run) (#1116).
 	if _, err := collectPluginDeclarations(); err != nil {
@@ -421,6 +427,42 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 
 	return config, nil
+}
+
+// sporedSettingsFromFlags turns the spored-settings flags into the launch
+// config's IdleCPUPercent and Observability, validated (#1308). A flag that
+// would do nothing (a --metrics-* without --metrics) is an error, not ignored.
+func sporedSettingsFromFlags() (float64, aws.SporedObservability, error) {
+	obs := aws.SporedObservability{
+		MetricsEnabled:  metricsEnabled,
+		MetricsPort:     metricsPort,
+		MetricsBind:     metricsBind,
+		MetricsPath:     metricsPath,
+		TracingEnabled:  tracingEnabled,
+		TracingExporter: tracingExporter,
+	}
+	if tracingSampling != "" {
+		v, err := strconv.ParseFloat(tracingSampling, 64)
+		if err != nil {
+			return 0, obs, fmt.Errorf("invalid --tracing-sampling %q: must be a number between 0 and 1", tracingSampling)
+		}
+		obs.TracingSampling = &v
+	}
+	var idleCPU float64
+	if idleCPUThreshold != "" {
+		v, err := strconv.ParseFloat(idleCPUThreshold, 64)
+		if err != nil || !(v > 0) {
+			// 0 would mean the CPU is never below the threshold, so the idle
+			// stop could never fire.
+			return 0, obs, fmt.Errorf("invalid --idle-cpu-threshold %q: must be a percentage above 0 and at most 100", idleCPUThreshold)
+		}
+		idleCPU = v
+	}
+	cfg := aws.LaunchConfig{IdleCPUPercent: idleCPU, Observability: obs}
+	if err := cfg.ValidateSporedSettings(); err != nil {
+		return 0, obs, err
+	}
+	return idleCPU, obs, nil
 }
 
 // validateLaunchDurationFlags checks the duration flags of `spawn launch` with

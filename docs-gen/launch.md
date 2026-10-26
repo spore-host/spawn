@@ -79,6 +79,7 @@ spawn launch <name> [flags]
 | `--iam-role-tags` |  | stringSlice |  | Tags for IAM role (key=value format) |
 | `--iam-role` |  | string |  | IAM role name (creates if doesn't exist) |
 | `--iam-trust-services` |  | stringSlice | `[ec2]` | Services that can assume role |
+| `--idle-cpu-threshold` |  | string |  | CPU percentage below which spored counts the instance as idle (above 0, at most 100; default 5). Sets spawn:idle-cpu |
 | `--idle-timeout` |  | string |  | Stop the instance after this much idleness (see --on-idle), e.g. 30m, 2h, 1d (defaults to 1h if neither --ttl nor --idle-timeout set) |
 | `--instance-names` |  | string |  | Instance name template (e.g., 'worker-{index}', default: '{job-array-name}-{index}') |
 | `--instance-profile` |  | string |  | Attach this EXISTING IAM instance profile by name, bypassing all --iam-role/--iam-policy/--iam-policy-file resolution and the spored-instance-profile default entirely. Use when you need a deterministic, auditable choice instead of spawn's create/reuse heuristic (#550) — e.g. a profile you've already scoped to a specific data bucket. |
@@ -91,6 +92,10 @@ spawn launch <name> [flags]
 | `--max-concurrent-auto` |  | bool |  | Derive --max-concurrent from the account's real AWS quota headroom for the sweep's instance type(s)/region, instead of a user-supplied number (spawn#492) |
 | `--max-concurrent-per-region` |  | int |  | Max instances running simultaneously per region (0 = unlimited) |
 | `--max-concurrent` |  | int |  | Max instances running simultaneously (0 = unlimited) |
+| `--metrics-bind` |  | string |  | With --metrics: the address to listen on, an IP address or localhost (default localhost; 0.0.0.0 for a scraper on another host) |
+| `--metrics-path` |  | string |  | With --metrics: the HTTP path to serve metrics on (default /metrics) |
+| `--metrics-port` |  | int |  | With --metrics: the metrics server's port, 1024-65535 (default 9090) |
+| `--metrics` |  | bool |  | Start spored's Prometheus metrics server and tag the instance spawn:metrics-enabled=true, which deployment/prometheus's EC2 discovery matches. It listens on localhost unless --metrics-bind is set, and the security group must admit the scraper (see docs/self-hosted-monitoring.md) |
 | `--min-viable` |  | int | `1` | Job array: minimum members that must launch for success (default 1; ignored for --mpi) |
 | `--mode` |  | string | `balanced` | Distribution mode: balanced (fair share) or opportunistic (prioritize available regions) |
 | `--mpi-command` |  | string |  | Command to run via mpirun across the MPI cohort (alternative to --command). Rank 0 runs mpirun as root. Its output goes to /var/log/spawn-command.log on rank 0 (read it with 'spawn array logs &lt;name&gt; --index 0'), and its exit code is recorded to /tmp/SPAWN_EXITCODE there. When it exits, pass or fail, every member is signalled, so --on-complete fires across the whole cohort. |
@@ -140,6 +145,9 @@ spawn launch <name> [flags]
 | `--tag` |  | stringArray |  | Custom tag key=value on the instance and its created volumes (repeatable). The spawn: prefix is reserved. |
 | `--team` |  | string |  | Team ID: tag instance with spawn:team-id for team-shared access |
 | `--template-var` |  | stringToString |  | Template variables (key=value) |
+| `--tracing-exporter` |  | string |  | With --tracing: where spans go. Only stdout (the default) is available; xray is refused, because the instance role spawn creates does not grant xray:PutTraceSegments |
+| `--tracing-sampling` |  | string |  | With --tracing: the fraction of traces kept, 0 to 1 (default 0.1) |
+| `--tracing` |  | bool |  | Turn on spored's OpenTelemetry tracing. Spans go to spored's journal (the stdout exporter) |
 | `--ttl` |  | string |  | Auto-terminate after duration (e.g., 8h, 90m, 1d, 2d12h; defaults to 1h idle if not set) |
 | `--user-data-file` |  | string |  | User data file |
 | `--user-data` |  | string |  | User data (@file or inline) |

@@ -84,8 +84,15 @@ var sweepFlagCoverage = map[string]struct {
 	"quiet":              {sweepNA, "output verbosity, applied by the printer not the config"},
 
 	// --- Known gaps: should work on a sweep and do not. All #697.
-	"active-ports":             {sweepHonoured, "#697 — idle-detection input; without it idle detection uses defaults"},
-	"active-processes":         {sweepHonoured, "#697 — see active-ports"},
+	"active-ports":     {sweepHonoured, "#697 — idle-detection input; without it idle detection uses defaults"},
+	"active-processes": {sweepHonoured, "#697 — see active-ports"},
+	// spored settings (#1308): set on the config by buildLaunchConfig, which
+	// every sweep row starts from.
+	"idle-cpu-threshold": {sweepHonoured, "#1308"},
+	"metrics":            {sweepHonoured, "#1308"}, "metrics-port": {sweepHonoured, "#1308"},
+	"metrics-bind": {sweepHonoured, "#1308"}, "metrics-path": {sweepHonoured, "#1308"},
+	"tracing": {sweepHonoured, "#1308"}, "tracing-exporter": {sweepHonoured, "#1308"},
+	"tracing-sampling":         {sweepHonoured, "#1308"},
 	"allow-cidr":               {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
 	"allow-cost-limit-overrun": {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
 	"attach-volume":            {sweepHonoured, "#697 — no way to attach a data volume to a sweep row"},

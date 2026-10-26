@@ -74,3 +74,33 @@ func fencedCommands(md string) []string {
 	}
 	return out
 }
+
+// #1308: the monitoring doc's launch example uses the launch flags, and every
+// flag it passes to `spawn launch` exists, so the documented route to a
+// scrapeable instance is a command that runs.
+func TestMonitoringDocLaunchesWithMetricsFlags(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRootFromCmd(t), "docs", "self-hosted-monitoring.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch := regexp.MustCompile(`^\s*(\$\s*)?spawn\s+launch\b`)
+	flag := regexp.MustCompile(`(?:^|\s)--([a-z0-9-]+)`)
+	withMetrics := 0
+	for _, line := range fencedCommands(string(b)) {
+		if !launch.MatchString(line) {
+			continue
+		}
+		for _, m := range flag.FindAllStringSubmatch(line, -1) {
+			if launchCmd.Flags().Lookup(m[1]) == nil {
+				t.Errorf("the monitoring doc runs `spawn launch --%s`, which is not a launch flag: %s", m[1], strings.TrimSpace(line))
+			}
+			if m[1] == "metrics" {
+				withMetrics++
+			}
+		}
+	}
+	if withMetrics == 0 {
+		t.Error("docs/self-hosted-monitoring.md has no `spawn launch ... --metrics` example; " +
+			"the launch flag is the documented way to enable metrics and discovery (#1308)")
+	}
+}

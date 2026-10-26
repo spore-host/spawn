@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -45,7 +46,7 @@ func init() {
 	connectCmd.Flags().StringVar(&connectUser, "user", "", "SSH username (default: the instance's spawn:local-username tag, else ec2-user)")
 	connectCmd.Flags().StringVar(&connectKey, "key", "", "SSH private key path")
 	connectCmd.Flags().IntVar(&connectPort, "port", 22, "SSH port")
-	connectCmd.Flags().BoolVar(&connectSessionMgr, "session-manager", false, "Use AWS Session Manager instead of SSH. On a DCV app instance, opens a shell instead of the streaming session")
+	connectCmd.Flags().BoolVar(&connectSessionMgr, "session-manager", false, "Use AWS Session Manager instead of SSH. On a DCV app instance, opens a shell instead of the streaming session. A one-shot command (after --) runs over SSM RunCommand instead (as the SSH user, with its exit status; no stdin, output when it exits), as it does whenever connect cannot use SSH")
 	connectCmd.Flags().BoolVar(&connectNoStart, "no-start", false, "Do not automatically start a stopped/hibernated instance")
 	connectCmd.Flags().BoolVar(&connectRDP, "rdp", false, "Windows: open a Remote Desktop (RDP) connection (decrypts the Administrator password)")
 	connectCmd.Flags().BoolVar(&connectSSH, "ssh", false, "Use SSH. Linux: skip the security-group check and SSH even when no group appears to allow the port (by default connect uses SSM then). Windows: SSH in (as Administrator, over OpenSSH) instead of opening a PowerShell-over-SSM session")
@@ -121,8 +122,15 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	if note != "" {
 		fmt.Fprint(os.Stderr, note)
 	}
+	// One-shot mode: args[1:] (after --) form the remote command. Over SSM it
+	// runs through RunCommand rather than an interactive session, which would
+	// drop it and wait on stdin (#1306).
+	var remoteCmd string
+	if len(args) > 1 {
+		remoteCmd = buildRemoteCommand(args[1:])
+	}
 	if transport == connectTransportSSM {
-		return connectViaSessionManager(instance.InstanceID, instance.Region)
+		return connectOverSSM(ctx, client.RunShellScript, connectViaSessionManager, instance, resolveSSHUser(connectUser, instance), remoteCmd)
 	}
 
 	// Determine SSH user: prefer the instance's local-matching user (the
@@ -151,16 +159,12 @@ func runConnect(cmd *cobra.Command, args []string) error {
 					"KeyName": instance.KeyName,
 				}), err)
 				fmt.Fprintf(os.Stderr, "   key injection over SSM unavailable: %v\n", ierr)
-				fmt.Fprintf(os.Stderr, "%s\n\n", i18n.T("spawn.connect.fallback_session_manager"))
-				return connectViaSessionManager(instance.InstanceID, instance.Region)
+				if remoteCmd == "" {
+					fmt.Fprintf(os.Stderr, "%s\n\n", i18n.T("spawn.connect.fallback_session_manager"))
+				}
+				return connectOverSSM(ctx, client.RunShellScript, connectViaSessionManager, instance, user, remoteCmd)
 			}
 		}
-	}
-
-	// One-shot mode: args[1:] (after --) form the remote command.
-	var remoteCmd string
-	if len(args) > 1 {
-		remoteCmd = buildRemoteCommand(args[1:])
 	}
 
 	return sshToInstance(user, instance.PublicIP, keyPath, connectPort, remoteCmd, connectTTY)
@@ -184,9 +188,10 @@ const (
 //     before. "Might" is generous — any rule on the port from any source — so
 //     an instance SSH could reach is never sent to SSM (see aws.PortIngress).
 //
-// A one-shot command (`connect x -- cmd`) on a closed port is an error, at
-// once: the SSM path here is an interactive session, which would ignore the
-// command and wait on stdin, and SSH would only time out.
+// A one-shot command (`connect x -- cmd`) on a closed port goes to SSM too,
+// where runConnect runs it with RunCommand (#1306). It used to be an error,
+// because the SSM path was only ever an interactive session, which ignored the
+// command and waited on stdin.
 func linuxConnectTransport(ctx context.Context, sessionMgr, forceSSH, oneShot bool, publicIP string, port int32,
 	ingress func(ctx context.Context, port int32) (aws.PortIngress, error)) (connectTransport, string, error) {
 	if sessionMgr || publicIP == "" {
@@ -200,12 +205,12 @@ func linuxConnectTransport(ctx context.Context, sessionMgr, forceSSH, oneShot bo
 		return connectTransportSSH, "", nil
 	}
 	groups := strings.Join(ing.Groups, ", ")
+	via := "using SSM Session Manager"
 	if oneShot {
-		return connectTransportSSH, "", fmt.Errorf("no security group on this instance allows inbound tcp/%d (%s), so a one-shot command cannot run over SSH; "+
-			"open the port (or pass --ssh to try anyway), or run `spawn connect` without a command for an SSM session", port, groups)
+		via = "running the command over SSM"
 	}
-	return connectTransportSSM, fmt.Sprintf("%s no security group on this instance allows inbound tcp/%d (%s); using SSM Session Manager. Pass --ssh to try SSH anyway.\n",
-		i18n.Symbol("info"), port, groups), nil
+	return connectTransportSSM, fmt.Sprintf("%s no security group on this instance allows inbound tcp/%d (%s); %s. Pass --ssh to try SSH anyway.\n",
+		i18n.Symbol("info"), port, groups, via), nil
 }
 
 // buildRemoteCommand turns the post-`--` arguments into the command string ssh
@@ -274,7 +279,18 @@ func sshToInstance(user, host, keyPath string, port int, remoteCmd string, tty b
 	sshCmd.Stdin = os.Stdin
 	sshCmd.Stdout = os.Stdout
 	sshCmd.Stderr = os.Stderr
-	return sshCmd.Run()
+	return remoteExit(sshCmd.Run())
+}
+
+// remoteExit turns ssh's non-zero exit into a remoteExitError, so `spawn
+// connect` exits with the remote command's status (ssh's own failures are
+// 255, as with ssh) rather than a flat 1 (#1306). Other errors pass through.
+func remoteExit(err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() > 0 {
+		return &remoteExitError{code: ee.ExitCode()}
+	}
+	return err
 }
 
 // buildSSHCommandArgs constructs the ssh argument vector. remoteCmd, if

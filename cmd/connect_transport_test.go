@@ -75,20 +75,24 @@ func TestConnectSessionManagerAndNoPublicIPUseSSM(t *testing.T) {
 }
 
 // The port checked is the one SSH would use (--port), and a one-shot command on
-// a closed port is an immediate error — the interactive SSM session would
-// ignore the command and sit on stdin.
-func TestConnectChecksTheSSHPortAndRefusesOneShotWhenClosed(t *testing.T) {
+// a closed port goes to SSM, where runConnect runs it with RunCommand (#1306).
+// It used to be an immediate error, because the only SSM path was an
+// interactive session that ignored the command.
+func TestConnectChecksTheSSHPortAndSendsOneShotToSSMWhenClosed(t *testing.T) {
 	var asked int32
 	read := func(_ context.Context, port int32) (aws.PortIngress, error) {
 		asked = port
 		return aws.PortIngress{Groups: []string{"sg-1 (x)"}}, nil
 	}
-	_, _, err := linuxConnectTransport(context.Background(), false, false, true, "203.0.113.10", 2222, read)
+	tr, note, err := linuxConnectTransport(context.Background(), false, false, true, "203.0.113.10", 2222, read)
 	if asked != 2222 {
 		t.Errorf("checked port %d, want --port 2222", asked)
 	}
-	if err == nil || !strings.Contains(err.Error(), "tcp/2222") {
-		t.Errorf("one-shot on a closed port: err = %v, want an immediate error naming tcp/2222", err)
+	if err != nil || tr != connectTransportSSM {
+		t.Fatalf("one-shot on a closed port: transport = %v, err = %v; want SSM, no error", tr, err)
+	}
+	if !strings.Contains(note, "tcp/2222") || !strings.Contains(note, "running the command over SSM") {
+		t.Errorf("note %q should name tcp/2222 and say the command runs over SSM", note)
 	}
 }
 
@@ -99,7 +103,7 @@ func TestRunConnectUsesLinuxConnectTransport(t *testing.T) {
 	if !strings.Contains(src, "\ttransport, note, err := linuxConnectTransport(ctx, connectSessionMgr, connectSSH, len(args) > 1, instance.PublicIP, int32(connectPort),") {
 		t.Error("runConnect does not decide the Linux transport with linuxConnectTransport")
 	}
-	if !strings.Contains(src, "\tif transport == connectTransportSSM {\n\t\treturn connectViaSessionManager(instance.InstanceID, instance.Region)") {
-		t.Error("runConnect does not go to Session Manager on an SSM verdict")
+	if !strings.Contains(src, "\tif transport == connectTransportSSM {\n\t\treturn connectOverSSM(ctx, ") {
+		t.Error("runConnect does not go to SSM (connectOverSSM) on an SSM verdict")
 	}
 }

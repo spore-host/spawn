@@ -41,6 +41,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `empty_buckets_would_delete`. `spawn footprint` shows a bucket's
   `spawn:empty-since` stamp and the date it becomes deletable.
 
+- **`spawn launch` can set spored's metrics, tracing and idle CPU threshold**
+  (#1308). `--metrics` starts spored's Prometheus metrics server and tags the
+  instance `spawn:metrics-enabled=true`, which the EC2 discovery in
+  `deployment/prometheus` matches from the first scrape; `--metrics-port`,
+  `--metrics-bind` and `--metrics-path` set the rest. `--tracing` turns on
+  tracing with spans in spored's journal, and `--tracing-sampling` sets the
+  fraction kept. `--idle-cpu-threshold` sets the CPU percentage below which
+  spored counts the instance as idle (default 5). They write the tags spored
+  already read at boot and nothing could set, so the only route was
+  `aws ec2 create-tags` and a spored restart; that route stays documented for
+  running instances in `docs/self-hosted-monitoring.md`. A setting spored would
+  ignore is refused: a `--metrics-*` without `--metrics`, a port outside
+  1024-65535, a bind that is not an IP address or `localhost`, a sampling rate
+  outside 0-1, a threshold of 0. `--tracing-exporter xray` is refused too,
+  because the instance role spawn creates does not grant
+  `xray:PutTraceSegments` (#1335). SDK callers set
+  `LaunchConfig.Observability` and `LaunchConfig.IdleCPUPercent`, checked by
+  `LaunchConfig.ValidateSporedSettings`.
+
 ### Changed
 
 - **Task stage-in and stage-out use the AWS CLI's CRT transfer client, sized to
@@ -190,6 +209,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in each member account, `scripts/setup-sweep-cross-account-role.sh` re-run: its
   role may now pass `spored-instance-role` (and `spawnd-role`, as before) to EC2,
   and nothing else.
+- **`spawn connect <i> -- <cmd>` over SSH exits with the remote command's
+  status** (#1306) instead of 1 for any failure, the same as over SSM; ssh's
+  own failures exit 255, as with ssh.
+
+- **`spawn connect <linux> -- <cmd>` runs the command when connect uses SSM**
+  (#1306). With no public IP, `--session-manager`, a failed key injection, or
+  security groups closed to SSH, it opened an interactive Session Manager
+  session, which dropped the command and waited on stdin; v0.145.0 made the
+  closed-port case an immediate error instead. It now runs the command with SSM
+  RunCommand (`AWS-RunShellScript`), as the same user SSH would log in as, in
+  their home directory with their login shell, and exits with the command's
+  status, with stdout and stderr kept apart. It does not need the AWS CLI or the
+  session-manager-plugin. Output arrives when the command exits, SSM keeps only
+  the first 24,000 characters of stdout and 8,000 of stderr (connect warns when
+  output may have been cut), stdin is not forwarded, `--tty` has no effect, and
+  the command is limited to an hour.
 - **`spawn cleanup` no longer offers spawn's S3 buckets for removal and then
   fails on them** (#1301). With `--all` it listed a `spawn:managed` bucket as
   removable and the delete failed with "don't know how to remove"; buckets are
