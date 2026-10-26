@@ -41,6 +41,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `empty_buckets_would_delete`. `spawn footprint` shows a bucket's
   `spawn:empty-since` stamp and the date it becomes deletable.
 
+### Changed
+
+- **Task stage-in and stage-out use the AWS CLI's CRT transfer client, sized to
+  the instance's network** (#1256). Every `aws s3 cp` in the task wrapper ran at
+  the CLI's defaults (classic client, 10 concurrent requests, 8 MiB parts),
+  which measured 179-293 MB/s on Graviton4 boxes with 15-30 Gb/s NICs; staging
+  was up to 96% of a task's bill. The wrapper now writes a per-run AWS CLI
+  config (mktemp, deleted at the end of the run) selecting
+  `preferred_transfer_client = crt`, a `target_bandwidth` from the instance
+  type's NIC class (read from IMDS, so pooled workers get it too) and 16 MiB
+  parts. The same copies done that way ran at 1.53-2.68 GB/s, 5-15x faster.
+  Only the wrapper's own `aws` calls see the file: the user's command does not
+  inherit `AWS_CONFIG_FILE`. Instances with under ~8 GiB of RAM, and AWS CLIs
+  older than 2.14.0 (where `crt` was experimental), keep the classic client
+  with 32 concurrent requests and 16 MiB parts. If the task supplies its own
+  CLI config (`AWS_CONFIG_FILE`, `AWS_PROFILE` or `AWS_DEFAULT_PROFILE` in the
+  spec's `env`, or an existing `~/.aws/config`), nothing is changed and
+  `command.log` says so. The terminal-flush hook writes its own config pinned
+  to the classic client, because the CRT client does not honour the
+  connect/read timeouts that keep the hook inside its 45 s deadline; this also
+  stops AWS CLI 2.38+, whose `auto` picks CRT on every host, from dropping
+  them. Output uploads that go through spored's provenance uploader are not
+  affected.
+
 ### Fixed
 
 - **`spawn cleanup` no longer offers spawn's S3 buckets for removal and then

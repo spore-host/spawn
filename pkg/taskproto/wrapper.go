@@ -149,6 +149,10 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 		p("\n")
 	}
 
+	// S3 transfer tuning (#1256), after the task env so a spec that sets
+	// AWS_CONFIG_FILE or AWS_PROFILE is seen and respected.
+	writeS3Config(p, true)
+
 	// ---- container runtime install, overlapping stage-in ----
 	if spec.Container != "" {
 		writeDockerInstallStart(p)
@@ -398,6 +402,9 @@ func generateWrapper(spec *TaskSpec, resultsPrefix, region string, signalComplet
 	// .exitcode — the plain-integer legacy signal the RFC names.
 	writeRecordFile(p, s3Cp, "true", "$rc", localPath(exitCodeFileName), "\"$RESULTS_PREFIX/.exitcode\"")
 
+	// The per-run CLI config is this run's alone, and a pooled worker runs many.
+	p("[ -z \"$S3CFG\" ] || rm -f \"$S3CFG\"\n\n")
+
 	// ---- signal spored ---- so on_complete fires and `spawn status --check-complete` works.
 	// A pooled worker (signalComplete=false) SKIPS this: writing SPAWN_COMPLETE would
 	// trigger spored's on_complete (terminate/stop) after the FIRST task, killing the
@@ -424,7 +431,8 @@ const PhaseTimestampFormat = "+%Y-%m-%dT%H:%M:%S.%3NZ"
 // multi-MB object, which buried the task's own output and the phase markers in
 // command.log. It keeps the one "download:/upload:" line per file and every
 // error, unlike --only-show-errors, so the log still says what was staged.
-const s3Cp = "aws s3 cp --no-progress"
+// spawn_aws applies the per-run transfer settings (#1256, s3config.go).
+const s3Cp = "spawn_aws s3 cp --no-progress"
 
 // writeRecordFile emits the write and upload of one terminal record file: the
 // local copy at local, then that copy to dest. value is the shell expression

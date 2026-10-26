@@ -17,7 +17,7 @@ import (
 // (#1186). It
 // does not match the words inside a message, such as the provenance fallback's
 // 'uploading untagged with aws s3 cp'.
-var s3CopyInvocation = regexp.MustCompile(`(?:^|\bif\s+(?:!\s+)?|\bthen\s+|;\s*|&&\s*|\|\|\s*)(?:spawn_up\s+)?aws(?:\s+"[^"]*"|\s+--cli-[a-z-]+\s+\d+)*\s+s3\s+(?:cp|sync)\b(.*)$`)
+var s3CopyInvocation = regexp.MustCompile(`(?:^|\bif\s+(?:!\s+)?|\bthen\s+|;\s*|&&\s*|\|\|\s*)(?:spawn_up\s+)?(?:spawn_)?aws(?:\s+"[^"]*"|\s+--cli-[a-z-]+\s+\d+)*\s+s3\s+(?:cp|sync)\b(.*)$`)
 
 // #1072: every S3 copy in the generated scripts runs without the progress
 // meter, which filled command.log with ~20 \r-separated lines per file. The
