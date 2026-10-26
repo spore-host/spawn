@@ -62,6 +62,7 @@ var (
 	burstInstanceProfile string
 	burstTTL             string
 	burstIdleTimeout     string
+	burstKeepOnError     bool
 )
 
 func init() {
@@ -82,6 +83,7 @@ func init() {
 	burstCmd.Flags().StringVar(&burstInstanceProfile, "instance-profile", "", "Attach this EXISTING IAM instance profile by name instead of the default spored-instance-profile, which spawn creates or reuses as spawn launch does. Its role must let spored read and write its own tags, terminate itself, and use the spawn-hybrid-registry table.")
 	burstCmd.Flags().StringVar(&burstTTL, "ttl", defaultBurstTTL, "Terminate each instance after this duration (e.g. 30m, 2h, 36h). Required to be positive: burst instances always have a TTL.")
 	burstCmd.Flags().StringVar(&burstIdleTimeout, "idle-timeout", "", "Also terminate an instance after it has been idle this long (e.g. 1h). Empty disables the idle terminate.")
+	burstCmd.Flags().BoolVar(&burstKeepOnError, "keep-on-error", false, "Keep instances instead of terminating them when the burst fails after launching some, or when an instance's spored never comes up. A kept instance whose spored is not confirmed has no TTL/idle enforcement")
 
 	_ = burstCmd.MarkFlagRequired("job-array-id")
 }
@@ -161,10 +163,14 @@ func runBurst(cmd *cobra.Command, args []string) error {
 
 	// Launch instances
 	fmt.Fprintf(os.Stderr, "Launching %d instances to join job array %s (TTL %s)...\n", launchParams.Count, launchParams.JobArrayID, launchParams.TTL)
-	instanceIDs, err := launchBurstInstances(ctx, awsClient, launchParams)
+	// Every member's spored is verified (#1305); a member whose spored never
+	// came up is terminated, and a burst that fails part way terminates the
+	// members it launched, unless --keep-on-error.
+	guard := newFleetGuard("burst", os.Stderr, awsClient, clientFleetVerifier(awsClient), burstKeepOnError)
+	instanceIDs, err := runBurstLaunch(ctx, awsClient, guard, launchParams)
 	if err != nil {
 		if len(instanceIDs) > 0 {
-			fmt.Printf("Launched %d of %d instances before the failure (each has TTL %s):\n", len(instanceIDs), launchParams.Count, launchParams.TTL)
+			fmt.Printf("Kept %d of %d instances, each with spored verified and TTL %s:\n", len(instanceIDs), launchParams.Count, launchParams.TTL)
 			for i, id := range instanceIDs {
 				fmt.Printf("  [%d] %s\n", i, id)
 			}
@@ -275,6 +281,34 @@ func launchBurstInstances(ctx context.Context, client burstLauncher, params *Lau
 		instanceIDs = append(instanceIDs, result.InstanceID)
 	}
 	return instanceIDs, nil
+}
+
+// runBurstLaunch launches the burst's members, records each in guard, and
+// verifies their spored. It returns the IDs of the members kept. A launch that
+// stops part way is a failed burst: guard.finish terminates what it launched.
+// A member whose spored never came up is terminated by the verification and
+// the rest are kept, each enforcing its own TTL.
+func runBurstLaunch(ctx context.Context, client burstLauncher, guard *fleetGuard, params *LaunchParams) (_ []string, err error) {
+	defer func() { err = guard.finish(ctx, err) }()
+	ids, err := launchBurstInstances(ctx, client, params)
+	members := make([]fleetMember, len(ids))
+	for i, id := range ids {
+		members[i] = fleetMember{label: fmt.Sprintf("burst member %d", i), instanceID: id, region: params.Region}
+		guard.launched(members[i])
+	}
+	if err != nil {
+		return nil, err
+	}
+	verified := guard.verifyAll(ctx, members)
+	fmt.Fprintf(os.Stderr, "   %s\n", guard.summary())
+	kept := make([]string, len(verified))
+	for i, m := range verified {
+		kept[i] = m.instanceID
+	}
+	if len(kept) < len(ids) {
+		return kept, partial(fmt.Errorf("spored never came up on %d of %d burst instances", len(ids)-len(kept), len(ids)))
+	}
+	return kept, nil
 }
 
 // burstMemberConfigs builds the launch config for each burst member.

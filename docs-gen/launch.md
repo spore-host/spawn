@@ -85,7 +85,7 @@ spawn launch <name> [flags]
 | `--instance-type` |  | string |  | Instance type |
 | `--interactive` |  | bool |  | Force interactive wizard |
 | `--job-array-name` |  | string |  | Job array group name (required if --count &gt; 1) |
-| `--keep-on-error` |  | bool |  | If the launch fails after the instance was created (spored never came up, it never reached running, ...), keep the instance instead of terminating it. It then has no TTL/idle/cost-limit enforcement until spored is confirmed running |
+| `--keep-on-error` |  | bool |  | If the launch fails after the instance was created (spored never came up, it never reached running, ...), keep the instance instead of terminating it. For a job array or sweep, keep every member when the launch fails part way, and keep a member whose spored never came up. A kept instance has no TTL/idle/cost-limit enforcement until spored is confirmed running |
 | `--key-name` |  | string |  | SSH key pair name (EC2 KeyName) |
 | `--launch-delay` |  | string | `0s` | Delay between instance launches (e.g., 5s) |
 | `--max-concurrent-auto` |  | bool |  | Derive --max-concurrent from the account's real AWS quota headroom for the sweep's instance type(s)/region, instead of a user-supplied number (spawn#492) |

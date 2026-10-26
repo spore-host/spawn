@@ -142,7 +142,7 @@ func TestCohortFailureAlwaysDrains(t *testing.T) {
 	}
 
 	// And the drain must be reachable on the failure path, not behind a condition.
-	drainIdx := strings.Index(s, "drainJobArray(ctx, awsClient, baseConfig.Region, jobArrayID)")
+	drainIdx := strings.Index(s, "drainJobArray(ctx, api, a.region, a.jobArrayID)")
 	if drainIdx < 0 {
 		t.Fatal("the failure path no longer drains at all")
 	}

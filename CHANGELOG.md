@@ -72,6 +72,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task succeeded and no record, exit code or log reached S3. `GenerateWrapper`,
   `GeneratePooledJobScript` and `GenerateFlushScript` now return the new
   `ErrInvalidResultsPrefix`; pass `EffectiveResultsPrefix`'s result.
+- **Job arrays, MPI clusters, parameter sweeps, `spawn resume` and `spawn burst`
+  now verify every member's spored, and terminate what a failed launch leaves
+  behind** (#1305), as a single `spawn launch` has since v0.145.0 (#1298).
+  Each member gets the single-launch check (the `spawn:last-heartbeat` tag, with
+  SSM as a second signal), run in parallel against one shared deadline, so a
+  fleet waits about as long as one instance. A member whose spored never comes
+  up is terminated and reported; its verified siblings are kept, since each is
+  enforcing its own TTL. In a sweep that member counts as a failed parameter
+  set, and `spawn resume` no longer reads it as completed. A failure that ends
+  the launch after instances exist, such as a `ListInstances` error after a job
+  array came up (which left every member running), a failed cohort member the
+  job-array-id drain missed, or a burst that stopped part way, terminates every
+  member launched so far. Each launch prints how many members were verified and
+  which were terminated. `--keep-on-error` keeps them instead (`spawn launch`,
+  and new on `spawn burst` and `spawn resume`); an explicit `--wait-for-ssh=false`
+  skips verification, as on a single launch.
+
+- **A rolling-queue sweep whose parameter sets span regions now tracks each
+  member in its own region** (#1251). The queue polled only the first set's
+  region, so a member elsewhere was missing from the result and was taken as
+  finished at once: the queue launched past `--max-concurrent`. It now makes one
+  `ListInstances` call per region with active members on each tick, and a region
+  whose call fails decides nothing about its members that tick.
 
 ## [0.145.0] - 2026-10-24
 

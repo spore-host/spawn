@@ -47,6 +47,7 @@ spawn burst [flags]
 | `--instance-type` |  | string | `t3.micro` | EC2 instance type |
 | `--job-array-id` |  | string |  | Job array ID to join (required) |
 | `--job-array-name` |  | string |  | Job array name, used by spawn array status/cancel (defaults to the job array ID) |
+| `--keep-on-error` |  | bool |  | Keep instances instead of terminating them when the burst fails after launching some, or when an instance's spored never comes up. A kept instance whose spored is not confirmed has no TTL/idle enforcement |
 | `--key-name` |  | string |  | SSH key pair name |
 | `--security-group-ids` |  | stringSlice |  | Security group IDs (comma-separated or repeated) |
 | `--spot` |  | bool |  | Use Spot instances |

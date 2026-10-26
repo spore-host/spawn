@@ -76,6 +76,7 @@ spawn sweep resume <sweep-id> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--detach` |  | bool |  | Run sweep orchestration in Lambda |
+| `--keep-on-error` |  | bool |  | Keep a relaunched instance whose spored never came up instead of terminating it. It then has no TTL/idle/cost-limit enforcement until spored is confirmed running |
 | `--max-concurrent-auto` |  | bool |  | Re-derive max concurrent instances from the account's real AWS quota headroom for the pending parameter sets' instance type(s)/region, instead of the original or a user-supplied number (spawn#494). Not yet supported with --detach. |
 | `--max-concurrent` |  | int |  | Override max concurrent instances (0 = use original) |
 
