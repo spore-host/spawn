@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn task status` shows the outcome of spored's terminal flush** (#1295).
+  spored has recorded it in the instance's `spawn:flush-status` tag since
+  v0.144.0 (#1186), but nothing in the CLI read it. A task that terminated with
+  no completion record now gets a `Flush:` line naming the tag (`ok`,
+  `failed:<reason>` or `skipped:<reason>`): for a failure, the
+  `aws ec2 get-console-output` command that shows the hook's output; for `ok`,
+  a pointer to `--results-prefix`, since the record was written somewhere
+  status did not look; with no tag, that the instance ended without spored's
+  flush. A task with a record gets a compact `Flush:` line under it. Once EC2
+  stops listing the instance, about an hour after it ends, status says the
+  flush status is no longer available. The tag is read from the instance list
+  status already fetched, so a task with no record costs no new EC2 call; a
+  task with a record now costs one `DescribeInstances` (best-effort: a failed
+  lookup leaves the line out). `tasklaunch.ReadFlushStatus` is the exported
+  reader, for the MCP server too, with `taskproto.FlushStatusTag`.
+
 ### Changed
 
 - **A task killed by a lifecycle limit now stages out its declared outputs,
@@ -95,6 +113,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finished at once: the queue launched past `--max-concurrent`. It now makes one
   `ListInstances` call per region with active members on each tick, and a region
   whose call fails decides nothing about its members that tick.
+- **A pool worker whose job script never started now writes a failed
+  completion record before it acks the task** (#1237). If the script could not
+  be rendered, written to the workspace (a full disk, a bad workspace) or
+  started (bash missing), the worker acked the task with no record, so
+  `spawn task status` reported it unknown forever, as #1149 did for an
+  unparseable spec. The record has `state` failed, `exit_code` -1 and
+  `retry_class` `spec_error` (not retryable) for a script that cannot be
+  rendered, or `instance_health` (retryable: a fresh worker usually succeeds)
+  for one that cannot be written or started. A failure after the script
+  started still writes nothing, because the script may already have written
+  its own record.
 
 ## [0.145.0] - 2026-10-24
 

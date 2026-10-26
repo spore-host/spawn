@@ -2,6 +2,7 @@ package taskpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -176,8 +177,11 @@ func (w *Worker) Run(ctx context.Context) (executed int, err error) {
 //     doesn't re-decide that;
 //   - the spec does not parse: no script can be rendered, so the worker writes a
 //     failed spec_error record itself before acking (#1149);
-//   - the execer failed after parsing (could not render, write or start the
-//     script): NO record is written, and the task is acked anyway.
+//   - the execer failed before the script started (could not render, write or
+//     start it): the worker writes a failed record with the class the execer
+//     names (spec_error or instance_health) before acking (#1237);
+//   - the execer failed after the script started: NO record is written, since
+//     the script may already have written its own, and the task is acked.
 func (w *Worker) runOne(ctx context.Context, c *Claimed) {
 	taskID := c.Ref.TaskID
 
@@ -215,16 +219,23 @@ func (w *Worker) runOne(ctx context.Context, c *Claimed) {
 		// retrying it would keep this worker busy (and billing) on a task that
 		// cannot run, and leaving the message would redeliver it every visibility
 		// timeout, resetting the idle clock so the pool never drains.
-		w.recordUnparseable(ctx, taskID, specJSON, perr)
+		w.logf("task %s: spec does not parse or is refused on a pool, cannot run: %v", taskID, perr)
+		w.recordFailedBeforeRun(ctx, taskID, specJSON, taskproto.RetrySpecError)
 		w.ack(ctx, c)
 		return
 	}
 
 	exit, execErr := w.Execer.Exec(ctx, specJSON, dir)
-	if execErr != nil {
-		// The execer itself errored before the job script ran, so no completion
-		// record exists for this attempt (see runOne's doc). Ack anyway so we don't
-		// spin on it.
+	var notRun *notStartedError
+	if errors.As(execErr, &notRun) {
+		// The job script never started, so nothing wrote a record for this
+		// attempt. Write one before the ack, as for an unparseable spec (#1237).
+		w.logf("task %s: job script did not start: %v", taskID, execErr)
+		w.recordFailedBeforeRun(ctx, taskID, specJSON, notRun.class)
+	} else if execErr != nil {
+		// The script started, then failed to finish in a way that is not an exit
+		// code. It may have written its record, so the worker must not overwrite
+		// it (see runOne's doc). Ack anyway so we don't spin on it.
 		w.logf("task %s: exec error (exit %d): %v", taskID, exit, execErr)
 	} else if exit != 0 {
 		w.logf("task %s: completed with non-zero exit %d", taskID, exit)
@@ -243,8 +254,6 @@ func (w *Worker) ack(ctx context.Context, c *Claimed) {
 	}
 }
 
-// recordUnparseable writes the spec_error completion record for a task whose
-// spec does not parse, logging rather than returning any failure (see runOne).
 // parsePooledSpec parses specJSON and applies the pooled-task restrictions.
 func parsePooledSpec(specJSON []byte) error {
 	spec, err := taskproto.ParseSpec(specJSON)
@@ -254,22 +263,23 @@ func parsePooledSpec(specJSON []byte) error {
 	return spec.ValidatePooled()
 }
 
-func (w *Worker) recordUnparseable(ctx context.Context, taskID string, specJSON []byte, perr error) {
+// recordFailedBeforeRun writes the failed completion record for a task whose
+// job script never ran, logging rather than returning any failure (see runOne).
+func (w *Worker) recordFailedBeforeRun(ctx context.Context, taskID string, specJSON []byte, class taskproto.RetryClass) {
 	now := w.now
 	if now == nil {
 		now = time.Now
 	}
-	w.logf("task %s: spec does not parse or is refused on a pool, cannot run: %v", taskID, perr)
 	if w.Results == nil {
 		w.logf("task %s: no results writer configured; no completion record written", taskID)
 		return
 	}
-	uri, err := recordUnparseableSpec(ctx, w.Results, w.AccountID, w.Region, taskID, specJSON, now())
+	uri, err := recordFailedBeforeRun(ctx, w.Results, w.AccountID, w.Region, taskID, specJSON, class, now())
 	if err != nil {
 		w.logf("task %s: could not write the failed completion record: %v", taskID, err)
 		return
 	}
-	w.logf("task %s: wrote failed completion record %s (retry_class %s)", taskID, uri, taskproto.RetrySpecError)
+	w.logf("task %s: wrote failed completion record %s (retry_class %s)", taskID, uri, class)
 }
 
 func (w *Worker) logf(format string, a ...interface{}) {

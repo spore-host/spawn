@@ -39,14 +39,35 @@ type ScriptExecer struct {
 	Stdout, Stderr *os.File
 }
 
+// notStartedError is an Exec failure that happened before the job script
+// started (#1237), so no completion record exists for the attempt and the
+// worker must write one itself before it acks. class is the retry_class that
+// record carries. A failure after the script started (a non-ExitError from
+// Wait) is deliberately NOT one of these: the script may already have written
+// its record, and the worker must not overwrite it.
+type notStartedError struct {
+	class taskproto.RetryClass
+	err   error
+}
+
+func (e *notStartedError) Error() string { return e.err.Error() }
+func (e *notStartedError) Unwrap() error { return e.err }
+
+func notStarted(class taskproto.RetryClass, format string, a ...any) error {
+	return &notStartedError{class: class, err: fmt.Errorf(format, a...)}
+}
+
 // Exec renders and runs the pooled job script for one task in workspaceDir.
 // It returns the script's exit code. A non-nil error means the script could not
 // be launched at all (e.g. bad spec, bash missing) — distinct from the script
-// running and exiting non-zero (a task failure, exitCode!=0, err==nil).
+// running and exiting non-zero (a task failure, exitCode!=0, err==nil). Every
+// error from before the script started wraps a *notStartedError naming the
+// record's retry_class: spec_error for a spec that cannot be parsed or rendered,
+// instance_health for a script this worker could not write or start.
 func (e *ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir string) (int, error) {
 	spec, err := taskproto.ParseSpec(specJSON)
 	if err != nil {
-		return -1, fmt.Errorf("parse task spec: %w", err)
+		return -1, notStarted(taskproto.RetrySpecError, "parse task spec: %w", err)
 	}
 
 	// Preserve the pre-#606 pooled behavior: --gpus all only when the spec asked
@@ -77,14 +98,14 @@ func (e *ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir s
 		GPU:           gpu,
 	})
 	if err != nil {
-		return -1, fmt.Errorf("build job script: %w", err)
+		return -1, notStarted(taskproto.RetrySpecError, "build job script: %w", err)
 	}
 
 	// Write the script into the workspace and run it there, so its relative paths
 	// and any scratch files land in the isolated dir (which the worker resets after).
 	scriptPath := filepath.Join(workspaceDir, ".spawn-job.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
-		return -1, fmt.Errorf("write job script: %w", err)
+		return -1, notStarted(taskproto.RetryInstanceHealth, "write job script: %w", err)
 	}
 
 	bash := e.Bash
@@ -98,7 +119,7 @@ func (e *ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir s
 	cmd.Stderr = e.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return -1, fmt.Errorf("start job script: %w", err)
+		return -1, notStarted(taskproto.RetryInstanceHealth, "start job script: %w", err)
 	}
 	werr := cmd.Wait()
 	if werr == nil {

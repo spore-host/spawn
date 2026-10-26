@@ -668,6 +668,9 @@ field Deps.Out io.Writer
 field Deps.Provisioner Provisioner
 field Deps.Verbose io.Writer
 field Deps.Warn io.Writer
+field FlushStatus.InstanceID string
+field FlushStatus.InstanceState string
+field FlushStatus.Value string
 field Result.AvailabilityZone string
 field Result.InstanceID string
 field Result.InstanceType string
@@ -691,8 +694,13 @@ field TaskPlan.Spec *taskproto.TaskSpec
 field TaskPlan.StagedBytes int
 field TaskPlan.UserDataBytes int
 field TaskPlan.Warnings []string
+func (FlushStatus) Available() bool
+func (FlushStatus) Ended() bool
+func (FlushStatus) Recorded() bool
+func (FlushStatus) String() string
 func (ProvisionerFunc) Provision(ctx context.Context, cfg aws.LaunchConfig, opts launcher.Options) (*aws.LaunchResult, error)
 func CompletionKey(taskPrefix string) string
+func FlushStatusOf(insts []aws.InstanceInfo) FlushStatus
 func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region string) (*Result, error)
 func LauncherProvisioner(client *aws.Client) Provisioner
 func NewDeps(client *aws.Client, region string, warn io.Writer) Deps
@@ -700,7 +708,9 @@ func NewFinder(cfg awssdk.Config, region string, warn, verbose io.Writer) taskpr
 func Plan(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region string) (*TaskPlan, error)
 func ReadCompletion(ctx context.Context, store CompletionStore, taskID, resultsPrefix, region string) (rec *taskproto.CompletionRecord, uri string, err error)
 func ReadCompletionAt(ctx context.Context, store CompletionGetter, region, resultsBucket, taskPrefix string) (rec *taskproto.CompletionRecord, uri string, err error)
+func ReadFlushStatus(ctx context.Context, list InstanceLister, region, taskID string) (FlushStatus, error)
 func Render(out io.Writer, p *TaskPlan)
+func TaskInstances(all []aws.InstanceInfo, taskID string) []aws.InstanceInfo
 method AWS.CreateOrGetInstanceProfile (ctx context.Context, config aws.IAMRoleConfig) (string, error)
 method AWS.CreateS3BucketIfNotExists (ctx context.Context, bucketName, region string) error
 method AWS.DeleteS3Object (ctx context.Context, region, bucket, key string) error
@@ -715,6 +725,8 @@ type AWS interface
 type CompletionGetter interface
 type CompletionStore interface
 type Deps struct
+type FlushStatus struct
+type InstanceLister func(ctx context.Context, region, stateFilter string) ([]aws.InstanceInfo, error)
 type Provisioner interface
 type ProvisionerFunc func(ctx context.Context, cfg aws.LaunchConfig, opts launcher.Options) (*aws.LaunchResult, error)
 type Result struct
@@ -820,6 +832,8 @@ const ExitTTLExpired ExitReason
 const ExitUserTerminated ExitReason
 const FlushExitUploadFailed
 const FlushHookSeconds
+const FlushStatusOK
+const FlushStatusTag
 const MaxFlushOutputsSeconds
 const OutputFailed
 const OutputMissing
