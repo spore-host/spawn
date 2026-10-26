@@ -206,6 +206,31 @@ Parameters:
       empty_buckets_scanned, empty_buckets_stamped, empty_buckets_deleted,
       empty_buckets_would_delete and empty_buckets_failed.
 
+  InstanceRoles:
+    Type: String
+    Default: 'report'
+    AllowedValues: ['off', 'report', 'reap']
+    Description: >
+      The per-task IAM role sweep (#1300). spawn names a task's role and
+      instance profile spawn-instance-<hash of its policy>, one pair per
+      distinct set of buckets, and nothing else deletes them, so a fan-out
+      walks the account towards the IAM role quota. Once per member account per
+      run (IAM is global), the sweep deletes such a role and its profile only
+      when all hold: both are tagged spawn:managed=true; no instance in any
+      region enabled in the account (ec2:DescribeRegions, not only Regions),
+      pending through stopped, has the profile attached; the role and profile
+      are at least 24 hours old; and IAM last saw the role used at least 24
+      hours ago. If any region cannot be read, nothing is deleted.
+      spored-instance-role, the shared default, is never touched, and IAM
+      denies the deletes on any other name. 'report' (default) logs
+      'WOULD delete role ...' for each role 'reap' would delete and changes
+      nothing: this is new deletion behaviour, so it starts report-only.
+      'reap' deletes. 'off' skips it. An unrecognised value resolves to
+      'report'. DryRun always wins. The member accounts' role stack
+      (ttl-reaper-cross-account-role.yaml) must be redeployed for the grant;
+      until then the run summary counts the account in
+      instance_roles_accounts_denied.
+
   SpotRequests:
     Type: String
     Default: 'report'
@@ -373,6 +398,7 @@ Resources:
           REAPER_NET_RESOURCES: !Ref NetResources
           REAPER_SPOT_REQUESTS: !Ref SpotRequests
           REAPER_ELASTIC_IPS: !Ref ElasticIps
+          REAPER_INSTANCE_ROLES: !Ref InstanceRoles
           REAPER_EMPTY_BUCKETS: !Ref EmptyBuckets
           REAPER_DNS_EXPIRE: !Ref DnsExpire
           REAPER_DNS_LEASE_EXPIRE: !Ref DnsLeaseExpire
@@ -446,6 +472,8 @@ Resources:
                     - ec2:DescribePlacementGroups
                     # #661 orphaned launch Elastic IP sweep; read-only.
                     - ec2:DescribeAddresses
+                    # #1300 role sweep: every enabled region; read-only.
+                    - ec2:DescribeRegions
                   Resource: '*'
                 # The destructive half, on the same tag rail as TerminateInstances.
                 # CreateTags lets the sweep stamp a spawn-managed resource with its
@@ -515,6 +543,43 @@ Resources:
                   Action:
                     - ssm:GetCommandInvocation
                   Resource: '*'
+                # #1300 per-task IAM role sweep (InstanceRoles). ListRoles has no
+                # resource-level ARN; reads are limited to spawn-instance-* names
+                # and the deletes also need spawn:managed=true, so
+                # spored-instance-role and every other role are denied.
+                - Effect: Allow
+                  Action:
+                    - iam:ListRoles
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - iam:GetRole
+                    - iam:ListInstanceProfilesForRole
+                    - iam:ListRolePolicies
+                    - iam:ListAttachedRolePolicies
+                  Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/spawn-instance-*'
+                - Effect: Allow
+                  Action:
+                    - iam:GetInstanceProfile
+                  Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/spawn-instance-*'
+                - Effect: Allow
+                  Action:
+                    - iam:RemoveRoleFromInstanceProfile
+                    - iam:DeleteRolePolicy
+                    - iam:DetachRolePolicy
+                    - iam:DeleteRole
+                  Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/spawn-instance-*'
+                  Condition:
+                    StringEquals:
+                      iam:ResourceTag/spawn:managed: 'true'
+                - Effect: Allow
+                  Action:
+                    - iam:RemoveRoleFromInstanceProfile
+                    - iam:DeleteInstanceProfile
+                  Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/spawn-instance-*'
+                  Condition:
+                    StringEquals:
+                      iam:ResourceTag/spawn:managed: 'true'
             - !Ref AWS::NoValue
         # DNS teardown (#247): delete a reaped instance's Route53 records, since
         # spored's graceful DeleteDNS never ran. Scoped to the single configured

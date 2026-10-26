@@ -31,6 +31,16 @@ re-creates either bucket the next time it needs it. Every call names your
 account as the expected bucket owner. --dry-run writes nothing, not even the
 tag. The TTL reaper can do the same on its own schedule (REAPER_EMPTY_BUCKETS).
 
+--instance-roles deletes only the per-task spawn-instance-&lt;hash&gt; IAM roles and
+instance profiles that 'spawn task run' and --iam-policy launches create, one
+per distinct set of permissions. A role goes only when it and its profile are
+tagged spawn:managed=true, no instance in any enabled region (pending through
+stopped) has the profile attached, the role and profile are at least 24 hours
+old, and the role is unused for 24 hours. The shared spored-instance-role is never touched. IAM is
+global, so this always checks every enabled region whatever --region says, and
+covers every principal's roles. The TTL reaper applies the same rule
+(REAPER_INSTANCE_ROLES).
+
 A log of everything removed is written to ~/.spawn/cleanup-&lt;timestamp&gt;.log.
 
 ```
@@ -46,6 +56,7 @@ spawn cleanup [flags]
 | `--buckets` |  | bool |  | Delete only spawn's own staging and results buckets that have been empty for 7 days; no object is ever deleted and nothing else is touched |
 | `--dry-run` |  | bool |  | Preview what would be removed without deleting anything |
 | `--elastic-ips` |  | bool |  | Release only orphaned spawn launch Elastic IPs (unassociated, instance gone); nothing else is touched |
+| `--instance-roles` |  | bool |  | Delete only unused per-task spawn-instance-* IAM roles and instance profiles (no instance uses them, 24h old and unused); nothing else is touched |
 | `--region` |  | string |  | AWS region (default: current region from AWS config) |
 | `--yes` | `-y` | bool |  | Skip the confirmation prompt |
 

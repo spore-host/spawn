@@ -44,6 +44,9 @@ var apiServicePrefix = map[string]string{
 	// route53ZoneAPI is the one startup call that learns an extra zone's domain
 	// from its ID (#1065), separate so the route53API fakes need not grow.
 	"route53Zone": "route53",
+	// regionsAPI lists the account's enabled regions for the #1300 role
+	// sweep's in-use check, separate so the ec2API fakes need not grow.
+	"regions": "ec2",
 	// registryAPI is accountlifecycle, not an AWS service: its ListAccounts reads
 	// DynamoDB through another package's client, so it grants nothing here.
 	"registry": "",
@@ -54,6 +57,8 @@ var apiServicePrefix = map[string]string{
 // refuses to guess about.
 var knownAWSServices = map[string]bool{
 	"ec2": true, "fsx": true, "ssm": true, "route53": true, "sts": true, "s3": true,
+	// The per-task IAM role sweep (#1300).
+	"iam": true,
 }
 
 // iamActionFor maps an SDK method to the IAM action that authorizes it, where

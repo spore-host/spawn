@@ -64,6 +64,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops AWS CLI 2.38+, whose `auto` picks CRT on every host, from dropping
   them. Output uploads that go through spored's provenance uploader are not
   affected.
+- **The TTL reaper and `spawn cleanup --instance-roles` delete per-task
+  `spawn-instance-*` IAM roles once nothing uses them** (#1300). A task's role
+  and instance profile are named after a hash of its policy, so every distinct
+  set of buckets minted a new pair and nothing deleted them, walking an account
+  towards the IAM role quota. A role and its profile are now deleted only when
+  both are tagged `spawn:managed=true`, no instance in any region enabled in
+  the account (pending through stopped; `ec2:DescribeRegions`, not only the
+  regions the reaper scans) has the profile attached, the role and its profile
+  are at least 24 hours old, and the role is unused for 24 hours; if the region
+  list or any region cannot be read nothing is deleted. `spored-instance-role` is never touched, and IAM itself denies
+  the reaper any other name: the new grants in `pkg/reaperiam`, the SAM
+  template and `ttl-reaper-cross-account-role.yaml` allow the deletes only on
+  `spawn-instance-*` roles and profiles tagged `spawn:managed=true`, and add
+  `ec2:DescribeRegions` (read-only) for the region list. The
+  reaper's sweep has its own switch, `REAPER_INSTANCE_ROLES` (template
+  `InstanceRoles`, make `INSTANCE_ROLES`, `spawn reaper deploy
+  --instance-roles`): `off`, `report` or `reap`, default **`report`**, which
+  logs `WOULD delete role ...` and deletes nothing; a deploy that does not
+  name it keeps the deployed value. The run summary gains
+  `instance_roles_scanned`, `_deleted`, `_would_delete`, `_skipped` and
+  `_accounts_denied`. Member accounts need the role stack redeployed for the
+  grant; until then they are counted in `instance_roles_accounts_denied`.
+  `spawn cleanup --instance-roles` applies the same rule (`pkg/instancerole`)
+  from a workstation, checking every enabled region, with `--dry-run`, and
+  `spawn footprint` names these two as the roles' deleters. `DELETED` is now an
+  action word for `spawn reaper teardown --if-idle-for`.
 
 ### Fixed
 
@@ -77,6 +103,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the ISO import bucket, tagged every bucket `spawn:fsx-backing-bucket=true`.
   It now tags them `spawn:managed=true`, plus `spawn:purpose=task-results` on the
   results bucket. FSx buckets keep their tags.
+
+- **A reused instance profile with no role in it is repaired before launch**
+  (#1318). `CreateOrGetInstanceProfile` returned an existing
+  `spawn-instance-*` profile as it found it, so a profile left empty (a
+  cleanup or reaper delete that had removed the role but not yet the profile,
+  or a launch that died between creating the profile and attaching the role)
+  booted an instance with no credentials, and spored could not read its tags
+  or end itself. It now re-attaches the role, and refuses a profile that holds
+  a different role.
 
 ## [0.146.0] - 2026-10-25
 

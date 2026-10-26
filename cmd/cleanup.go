@@ -13,6 +13,7 @@ import (
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/bucketsweep"
+	"github.com/spore-host/spawn/pkg/instancerole"
 )
 
 var (
@@ -23,6 +24,7 @@ var (
 	cleanupYes        bool
 	cleanupAll        bool
 	cleanupElasticIPs bool
+	cleanupInstRoles  bool
 	cleanupBuckets    bool
 )
 
@@ -60,6 +62,16 @@ re-creates either bucket the next time it needs it. Every call names your
 account as the expected bucket owner. --dry-run writes nothing, not even the
 tag. The TTL reaper can do the same on its own schedule (REAPER_EMPTY_BUCKETS).
 
+--instance-roles deletes only the per-task spawn-instance-<hash> IAM roles and
+instance profiles that 'spawn task run' and --iam-policy launches create, one
+per distinct set of permissions. A role goes only when it and its profile are
+tagged spawn:managed=true, no instance in any enabled region (pending through
+stopped) has the profile attached, the role and profile are at least 24 hours
+old, and the role is unused for 24 hours. The shared spored-instance-role is never touched. IAM is
+global, so this always checks every enabled region whatever --region says, and
+covers every principal's roles. The TTL reaper applies the same rule
+(REAPER_INSTANCE_ROLES).
+
 A log of everything removed is written to ~/.spawn/cleanup-<timestamp>.log.`,
 	RunE: runCleanup,
 }
@@ -76,6 +88,7 @@ func init() {
 	cleanupCmd.Flags().BoolVarP(&cleanupYes, "yes", "y", false, "Skip the confirmation prompt")
 	cleanupCmd.Flags().BoolVar(&cleanupAll, "all", false, "Include resources created by other principals (default: only yours)")
 	cleanupCmd.Flags().BoolVar(&cleanupElasticIPs, "elastic-ips", false, "Release only orphaned spawn launch Elastic IPs (unassociated, instance gone); nothing else is touched")
+	cleanupCmd.Flags().BoolVar(&cleanupInstRoles, "instance-roles", false, "Delete only unused per-task spawn-instance-* IAM roles and instance profiles (no instance uses them, 24h old and unused); nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupBuckets, "buckets", false, "Delete only spawn's own staging and results buckets that have been empty for "+bucketGraceDays()+"; no object is ever deleted and nothing else is touched")
 }
 
@@ -84,6 +97,16 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	client, err := aws.NewClient(ctx)
 	if err != nil {
 		return err
+	}
+	if cleanupInstRoles {
+		// IAM is global: a role is in use if an instance in ANY enabled
+		// region has its profile, so the in-use check is never narrowed to
+		// --region (instancerole.EnabledRegions, as the reaper does).
+		iamc, ec2s, err := instancerole.NewClients(ctx, client.Config())
+		if err != nil {
+			return fmt.Errorf("list enabled regions (needed to check which roles instances use): %w", err)
+		}
+		return runCleanupInstanceRoles(ctx, cmd, iamc, ec2s, time.Now())
 	}
 
 	regions, err := resolveCleanupRegions(ctx, client, cleanupRegion, cleanupAllRegions)
@@ -535,4 +558,94 @@ func printBucketResult(out, errOut io.Writer, res bucketsweep.Result, writes boo
 	case bucketsweep.Failed:
 		fmt.Fprintf(errOut, "%s  %s (%s): %s: %v\n", i18n.Symbol("warning"), b.Name, b.Region, res.Reason, res.Err)
 	}
+}
+
+// runCleanupInstanceRoles deletes the per-task spawn-instance-* roles and
+// profiles that instancerole.Decide says are no longer needed (#1300): the
+// rule the reaper applies, from the same package. It previews first, asks,
+// then sweeps again with reap on, so each role is re-decided at the moment it
+// is deleted rather than trusted from the preview.
+func runCleanupInstanceRoles(ctx context.Context, cmd *cobra.Command, iamc instancerole.API, ec2s map[string]instancerole.EC2Describer, now time.Time) error {
+	out := cmd.OutOrStdout()
+	inUse, err := instancerole.ProfilesInUse(ctx, ec2s)
+	if err != nil {
+		return fmt.Errorf("could not list instances, so no role can be shown to be unused: %w", err)
+	}
+	preview, err := instancerole.Sweep(ctx, iamc, inUse, now, false)
+	if err != nil {
+		return err
+	}
+	scanned, _, would, _ := preview.Count()
+	if scanned == 0 {
+		fmt.Fprintf(out, "No %s* IAM roles in this account.\n", instancerole.NamePrefix)
+		return nil
+	}
+	fmt.Fprintf(out, "%d %s* role(s), checked against instances in %d region(s):\n", scanned, instancerole.NamePrefix, len(ec2s))
+	tw := newTableWriter(out)
+	fmt.Fprintf(tw, "  ROLE\tACTION\tCREATED\tLAST USED\tWHY KEPT\n")
+	for _, d := range preview.Decisions {
+		action, why := "keep", d.Reason
+		if d.Err != nil {
+			why = fmt.Sprintf("%s: %v", d.Reason, d.Err)
+		}
+		if d.Delete {
+			action, why = "delete", ""
+		}
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", d.Name, action, roleDay(d.Created), roleDay(d.LastUsed), why)
+	}
+	tw.Flush()
+
+	if would == 0 {
+		fmt.Fprintln(out, "\nNothing to delete.")
+		return nil
+	}
+	if cleanupDryRun {
+		fmt.Fprintf(out, "\nDry run: %d role(s) and their instance profiles would be deleted. Re-run without --dry-run to delete.\n", would)
+		return nil
+	}
+	if !confirmYes(cleanupYes, fmt.Sprintf("Delete %d IAM role(s) and their instance profiles?", would)) {
+		return newAborted("aborted: no IAM role was deleted (re-run with --yes)")
+	}
+
+	res, err := instancerole.Sweep(ctx, iamc, inUse, now, true)
+	if err != nil {
+		return err
+	}
+	logPath, logFile := openCleanupLog()
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
+	}
+	_, deleted, _, _ := res.Count()
+	failed := 0
+	for _, d := range res.Decisions {
+		switch {
+		case d.Deleted:
+			fmt.Fprintf(out, "  ✓ deleted role and instance profile %s\n", d.Name)
+			writeCleanupLog(logFile, fmt.Sprintf("REMOVED %s\tiam\trole+instance-profile", d.Name))
+		case d.Delete && d.Err != nil:
+			failed++
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ✗ %s: %v\n", d.Name, d.Err)
+			writeCleanupLog(logFile, fmt.Sprintf("FAILED %s\tiam\trole+instance-profile\t%v", d.Name, d.Err))
+		}
+	}
+	fmt.Fprintf(out, "\nDeleted %d role(s)", deleted)
+	if failed > 0 {
+		fmt.Fprintf(out, ", %d failed", failed)
+	}
+	if logPath != "" {
+		fmt.Fprintf(out, " — log: %s", logPath)
+	}
+	fmt.Fprintln(out, ".")
+	if failed > 0 {
+		return fmt.Errorf("%d IAM role(s) could not be deleted", failed)
+	}
+	return nil
+}
+
+// roleDay is a date for the role table; "never" for a zero time.
+func roleDay(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return t.UTC().Format("2006-01-02")
 }

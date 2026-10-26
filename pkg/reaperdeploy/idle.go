@@ -61,8 +61,8 @@ func IdleWindow() time.Duration { return idleWindow }
 // ActionSentinels are the words the reaper logs, one line per resource, when it
 // actually reclaims something: an instance or filesystem REAPED, a Spot
 // request CANCELLED, a Spot replacement TERMINATED, a subdomain or DNS lease
-// EXPIRING, a launch Elastic IP RELEASED (#661), an empty spawn bucket
-// DELETED (#1301). Matching only REAPED counted every Spot and DNS action as idle
+// EXPIRING, a launch Elastic IP RELEASED (#661), an empty spawn bucket or a
+// per-task IAM role DELETED (#1301, #1300). Matching only REAPED counted every Spot and DNS action as idle
 // (#1155). TestActionSentinelsCoverTheReapersLogLines discovers the sentinels
 // from the reaper's source and fails on one that is not classified here.
 var ActionSentinels = []string{"REAPED", "CANCELLED", "TERMINATED", "EXPIRING", "RELEASED", "DELETED"}

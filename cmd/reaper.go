@@ -31,6 +31,7 @@ var (
 	reaperSpotRequests string
 	reaperNetResources string
 	reaperElasticIPs   string
+	reaperInstRoles    string
 	reaperTTLGrace     string
 	reaperEmptyBuckets string
 	reaperMaxAge       string
@@ -183,6 +184,8 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 		"Network-resource sweep, REAPER_NET_RESOURCES: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperElasticIPs, "elastic-ips", "",
 		"Orphaned launch Elastic IP sweep, REAPER_ELASTIC_IPS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is reap, or off when REAPER_NET_RESOURCES=off)")
+	fs.StringVar(&reaperInstRoles, "instance-roles", "",
+		"Unused per-task spawn-instance-* IAM role sweep, REAPER_INSTANCE_ROLES: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperEmptyBuckets, "empty-buckets", "",
 		"Empty spawn-staging/spawn-results bucket sweep, REAPER_EMPTY_BUCKETS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperTTLGrace, "ttl-grace", "",
@@ -261,13 +264,14 @@ var reaperDeployFlags = map[string]struct {
 	flag string
 	val  *string
 }{
-	reaperconfig.EnvSpotRequests: {"spot-requests", &reaperSpotRequests},
-	reaperconfig.EnvNetResources: {"net-resources", &reaperNetResources},
-	reaperconfig.EnvElasticIPs:   {"elastic-ips", &reaperElasticIPs},
-	reaperconfig.EnvMaxAge:       {"max-age", &reaperMaxAge},
-	reaperconfig.EnvTTLGrace:     {"ttl-grace", &reaperTTLGrace},
-	reaperconfig.EnvEmptyBuckets: {"empty-buckets", &reaperEmptyBuckets},
-	reaperconfig.EnvNotifyURL:    {"notify-url", &reaperNotifyURL},
+	reaperconfig.EnvSpotRequests:  {"spot-requests", &reaperSpotRequests},
+	reaperconfig.EnvNetResources:  {"net-resources", &reaperNetResources},
+	reaperconfig.EnvElasticIPs:    {"elastic-ips", &reaperElasticIPs},
+	reaperconfig.EnvMaxAge:        {"max-age", &reaperMaxAge},
+	reaperconfig.EnvTTLGrace:      {"ttl-grace", &reaperTTLGrace},
+	reaperconfig.EnvEmptyBuckets:  {"empty-buckets", &reaperEmptyBuckets},
+	reaperconfig.EnvInstanceRoles: {"instance-roles", &reaperInstRoles},
+	reaperconfig.EnvNotifyURL:     {"notify-url", &reaperNotifyURL},
 }
 
 // reaperDeployOptions turns the flags into deploy options. Only flags the user
