@@ -424,9 +424,9 @@ func TestCrossAccountRolePolicyMatchesReaperIAM(t *testing.T) {
 // grantedElsewhere is a list of claims that "template.yaml grants this". A claim
 // nothing checks can go stale silently — the action is added to the code, the
 // table, and never to the template (#1065 added route53:GetHostedZone). So every
-// route53 claim must be an Allow somewhere in the function's Policies, either arm
-// of any !If.
-func TestGrantedElsewhereRoute53IsInTheSAMTemplate(t *testing.T) {
+// claim must be an Allow somewhere in the function's Policies, either arm of any
+// !If.
+func TestGrantedElsewhereIsInTheSAMTemplate(t *testing.T) {
 	tmpl := loadCFN(t, samTemplatePath)
 	resources, _ := tmpl["Resources"].(map[string]interface{})
 	allowed := map[string]bool{}
@@ -463,17 +463,12 @@ func TestGrantedElsewhereRoute53IsInTheSAMTemplate(t *testing.T) {
 	if fns == 0 || len(allowed) == 0 {
 		t.Fatalf("found %d functions and %d allowed actions in %s; the gate would pass vacuously", fns, len(allowed), samTemplatePath)
 	}
-	var checked int
+	if len(grantedElsewhere) == 0 {
+		t.Fatal("grantedElsewhere is empty; the gate is reading the wrong table")
+	}
 	for action := range grantedElsewhere {
-		if !strings.HasPrefix(action, "route53:") {
-			continue
-		}
-		checked++
 		if !allowed[action] {
 			t.Errorf("grantedElsewhere says template.yaml grants %s, but no Allow statement in its function Policies does", action)
 		}
-	}
-	if checked == 0 {
-		t.Fatal("no route53 entries in grantedElsewhere; the gate is reading the wrong table")
 	}
 }

@@ -76,10 +76,23 @@ POLICY_DOCUMENT=$(cat <<EOF
         "ec2:DescribeSecurityGroups",
         "ec2:DescribeSubnets",
         "ec2:DescribeVpcs",
+        "ec2:DescribeAvailabilityZones",
         "ec2:CreateTags",
         "ec2:TerminateInstances"
       ],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DeletePlacementGroup"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
     },
     {
       "Effect": "Allow",

@@ -541,6 +541,8 @@ func ReaperCoverageAdvice(c ReaperCoverage, onComplete, fsxLifecycle string) str
 func ResolveDisplayPrice(ctx context.Context, cfg aws.Config, instanceType, region string) (DisplayPrice, error)
 func RetryPlacementGroupDelete(ctx context.Context, name string, del func() error) error
 func SetPGDeleteWaitForTest(budget, interval time.Duration) func()
+func SporedBaselinePolicyDocument() string
+func SporedInstanceRolePolicyDocument() string
 func UserDataSize(encoded string) (decoded, encodedLen int)
 func ValidatePolicyNames(policies []string, allowFullAccess bool) error
 type AMIHealthCheck struct

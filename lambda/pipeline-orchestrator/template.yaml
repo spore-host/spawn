@@ -94,6 +94,7 @@ Resources:
                 - ec2:DescribeInstances
                 - ec2:DescribeInstanceStatus
                 - ec2:DescribeAvailabilityZones
+                - ec2:DescribeInstanceTypes
                 - ec2:DescribeSecurityGroups
                 - ec2:CreateSecurityGroup
                 - ec2:DeleteSecurityGroup
@@ -133,6 +134,18 @@ Resources:
               Action:
                 - pricing:GetProducts
               Resource: '*'
+        # Pipeline notifications: the per-pipeline topic the orchestrator
+        # creates, subscribes the notification email to, and publishes to
+        # (getOrCreateNotificationTopic, ensureEmailSubscription,
+        # sendNotification). Found missing by the IAM coverage gate (#254).
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sns:CreateTopic
+                - sns:Subscribe
+                - sns:ListSubscriptionsByTopic
+                - sns:Publish
+              Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:spawn-pipeline-*'
         # SSM parameter access for AMI lookup
         - Statement:
             - Effect: Allow

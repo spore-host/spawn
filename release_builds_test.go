@@ -52,7 +52,9 @@ func TestEveryCommandIsBuiltByARelease(t *testing.T) {
 			// lambda/* are separate modules deployed by their own scripts, not by
 			// GoReleaser; test/ holds harnesses; docs-gen is generated.
 			switch info.Name() {
-			case ".git", "lambda", "test", "docs-gen", "node_modules", "web":
+			// testdata: the go tool never builds it, so a `package main` there
+			// is a test fixture (internal/iamcoverage's), not a command.
+			case ".git", "lambda", "test", "docs-gen", "node_modules", "web", "testdata":
 				return filepath.SkipDir
 			}
 			return nil

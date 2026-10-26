@@ -2,195 +2,89 @@ package reaperiam
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/iamcoverage"
 )
 
-// reaperSource is the reaper's own code, which this test reads so the gate cannot be
-// satisfied by a hand-maintained list that has gone stale — the failure mode behind
-// spawn#622 and lagotto #149/#151/#153.
+// reaperSource is the reaper's module, whose code this test analyses so the gate
+// cannot be satisfied by a hand-maintained list that has gone stale — the failure
+// mode behind spawn#622 and lagotto #149/#151/#153.
 const reaperSource = "../../lambda/ttl-reaper"
 
-// apiServicePrefix maps the reaper's *API interface names and SDK client variables
-// to the IAM service prefix their methods belong to, where the name alone is not
-// the prefix.
+var (
+	reaperCallsOnce sync.Once
+	reaperCallsVal  map[string]bool
+	reaperCallsErr  error
+)
+
+// reaperAWSCalls returns every IAM action the reaper's code can call.
 //
-// This used to be the whole list — ec2, fsx, ssm, netResource — and the regex
-// below was anchored on the same four. The reaper has a route53API interface and a
-// route53Client, so every Route53 action it calls was INVISIBLE to its own
-// coverage gate: the gate asserts that everything the reaper calls is granted, and
-// silently excluded a whole service from "everything". A hand-written list reports
-// a clean bill of health for what it forgot (CLAUDE.md rule 4).
+// This used to be a regex over the reaper's own files: methods declared on its
+// `type xAPI interface` blocks, plus `xClient.Method(` calls, with a
+// hand-written table mapping each interface name to a service. That table is
+// how route53 was invisible to this gate (#254): an unrecognised name resolved
+// to "" and was skipped. It also could not see a call in another package —
+// pkg/bucketsweep, pkg/instancerole, pkg/spotrequest, pkg/elasticip and the
+// portal registry all make calls on the reaper's behalf — and it read method
+// declarations rather than calls, so a declared-but-unused method counted.
 //
-// That hid no live defect — the SAM template grants Route53 scoped to the hosted
-// zone, the live production role has it, and `spawn reaper deploy` exposes no DNS
-// features so ScanSelfPolicyDocument omitting it is consistent. The gate would not
-// have told us either way, which is the problem.
-//
-// Only exceptions live here now; service names are discovered, and an unmapped one
-// fails rather than resolving to "".
-var apiServicePrefix = map[string]string{
-	// netResourceAPI is the wider EC2 slice the security-group/placement-group
-	// sweep needs (#685). Kept separate from ec2API so the instance scan's narrow
-	// interface, and every fake implementing it, stays untouched.
-	"netResource": "ec2",
-	// spotRequestAPI is the orphaned-Spot-request sweep's EC2 slice (#950),
-	// separate for the same reason.
-	"spotRequest": "ec2",
-	// route53ZoneAPI is the one startup call that learns an extra zone's domain
-	// from its ID (#1065), separate so the route53API fakes need not grow.
-	"route53Zone": "route53",
-	// regionsAPI lists the account's enabled regions for the #1300 role
-	// sweep's in-use check, separate so the ec2API fakes need not grow.
-	"regions": "ec2",
-	// registryAPI is accountlifecycle, not an AWS service: its ListAccounts reads
-	// DynamoDB through another package's client, so it grants nothing here.
-	"registry": "",
-}
-
-// knownAWSServices is every AWS service the reaper could be talking to. A
-// discovered name that is neither here nor in apiServicePrefix is what the gate
-// refuses to guess about.
-var knownAWSServices = map[string]bool{
-	"ec2": true, "fsx": true, "ssm": true, "route53": true, "sts": true, "s3": true,
-	// The per-task IAM role sweep (#1300).
-	"iam": true,
-}
-
-// iamActionFor maps an SDK method to the IAM action that authorizes it, where
-// the two differ. For EC2, FSx, SSM and Route53 they never do; for S3 they
-// often do, and a method missing here maps to itself, which is no IAM action at
-// all, so the coverage gates below fail on it rather than pass.
-var iamActionFor = map[string]string{
-	"s3:HeadBucket":                      "s3:ListBucket",
-	"s3:ListObjectVersions":              "s3:ListBucketVersions",
-	"s3:ListMultipartUploads":            "s3:ListBucketMultipartUploads",
-	"s3:GetBucketLifecycleConfiguration": "s3:GetLifecycleConfiguration",
-	"s3:DeleteBucketTagging":             "s3:PutBucketTagging",
-}
-
-func iamAction(call string) string {
-	if a, ok := iamActionFor[call]; ok {
-		return a
-	}
-	return call
-}
-
-// serviceFor resolves a discovered interface or client name to an IAM service
-// prefix, reporting whether it is mapped at all.
-func serviceFor(name string) (string, bool) {
-	if v, ok := apiServicePrefix[name]; ok {
-		return v, true
-	}
-	if knownAWSServices[name] {
-		return name, true
-	}
-	return "", false
-}
-
-// methodCall matches a call on any of the reaper's SDK clients, e.g.
-// `ssmClient.SendCommand(` or `route53Client.ChangeResourceRecordSets(`. The
-// service half is captured rather than enumerated, so a new client cannot slip
-// past unseen — serviceFor decides whether it is understood.
-var methodCall = regexp.MustCompile(`\b([a-z][a-zA-Z0-9]*)Client\.([A-Z][A-Za-z0-9]+)\(`)
-
-// ifaceMethod matches a method line inside a `type xAPI interface { … }` block.
-var ifaceMethod = regexp.MustCompile(`^\s*([A-Z][A-Za-z0-9]+)\(ctx context\.Context`)
-
-var ifaceOpen = regexp.MustCompile(`^type ([a-zA-Z0-9]+)API interface \{`)
-
-// reaperAWSCalls returns every AWS API action the reaper's source calls, as
-// "service:Action", discovered from (a) the methods declared on its *API interfaces
-// and (b) direct calls on its SDK client variables.
+// It now uses internal/iamcoverage, the same discovery every other spore.host
+// principal is held to: the reaper's whole program is type-checked, a call
+// graph is built from its entry points, and every AWS SDK operation reachable
+// from them is mapped to its IAM action. An operation the mapping does not know
+// fails the gate rather than being skipped.
 func reaperAWSCalls(t *testing.T) map[string]bool {
 	t.Helper()
-
-	entries, err := os.ReadDir(reaperSource)
-	if err != nil {
-		t.Fatalf("read %s: %v", reaperSource, err)
-	}
-
-	calls := map[string]bool{}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(reaperSource, name))
+	reaperCallsOnce.Do(func() {
+		prog, err := iamcoverage.Load(iamcoverage.LoadConfig{
+			Dir: reaperSource, GOOS: "linux", GOARCH: "arm64", Patterns: []string{"."}, Root: "../..",
+		})
 		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+			reaperCallsErr = err
+			return
 		}
-		src := string(b)
-
-		// (a) *API interface method declarations.
-		var svc string
-		for _, line := range strings.Split(src, "\n") {
-			if m := ifaceOpen.FindStringSubmatch(line); m != nil {
-				mapped, ok := serviceFor(m[1])
-				if !ok {
-					t.Errorf("%s declares type %sAPI, which maps to no IAM service. Add it to "+
-						"knownAWSServices, or to apiServicePrefix with the prefix its methods belong "+
-						"to (or \"\" if it is not an AWS service). Leaving it unmapped is what "+
-						"excluded route53 from this gate entirely.", name, m[1])
-				}
-				svc = mapped
-				continue
-			}
-			if svc == "" {
-				continue
-			}
-			if strings.HasPrefix(strings.TrimSpace(line), "}") {
-				svc = ""
-				continue
-			}
-			if m := ifaceMethod.FindStringSubmatch(line); m != nil {
-				calls[iamAction(svc+":"+m[1])] = true
-			}
+		inv := prog.Calls(prog.Mains(), nil)
+		if len(inv.Unmapped) > 0 {
+			reaperCallsErr = fmt.Errorf("the reaper makes AWS calls with no IAM action mapped, which no "+
+				"coverage check can see: %s", strings.Join(inv.Unmapped, "; "))
+			return
 		}
-
-		// (b) direct client calls.
-		for _, m := range methodCall.FindAllStringSubmatch(src, -1) {
-			mapped, ok := serviceFor(m[1])
-			if !ok {
-				t.Errorf("%s calls %sClient.%s, but %q maps to no IAM service — so this call is "+
-					"invisible to the coverage gate below. Add it to knownAWSServices or "+
-					"apiServicePrefix.", name, m[1], m[2], m[1])
-				continue
-			}
-			if mapped == "" {
-				continue // deliberately not an AWS service
-			}
-			calls[iamAction(mapped+":"+m[2])] = true
+		reaperCallsVal = map[string]bool{}
+		for a := range inv.Actions {
+			reaperCallsVal[a] = true
 		}
+	})
+	if reaperCallsErr != nil {
+		t.Fatal(reaperCallsErr)
 	}
-
-	if len(calls) == 0 {
+	if len(reaperCallsVal) == 0 {
 		t.Fatalf("discovered no AWS calls in %s — the gate would pass vacuously", reaperSource)
 	}
-	return calls
+	return reaperCallsVal
 }
 
 // grantedElsewhere are actions the reaper calls that these two policies
-// deliberately do not cover. Each needs a reason, and each reason is a scope
-// boundary rather than a judgement call — which is what distinguishes this from
-// the allowlist CLAUDE.md rule 6 warns about, where the list is what is normal and
-// the rule is what is wrong. Here the rule ("every called action must be granted")
-// is right, and these are the edges of what each policy is for.
+// deliberately do not cover, because they run on the reaper's own (base)
+// credentials in the infra account rather than in the scanned account. Each
+// needs a reason, and each reason is a scope boundary rather than a judgement
+// call — which is what distinguishes this from the allowlist CLAUDE.md rule 6
+// warns about, where the list is what is normal and the rule is what is wrong.
+// Here the rule ("every called action must be granted") is right, and these are
+// the edges of what each policy is for. TestGrantedElsewhereIsInTheSAMTemplate
+// holds each claim to the template, and TestPolicyCoversEveryReaperAPICall
+// fails on an entry the reaper no longer calls.
 //
-// All three only became visible when apiServicePrefix stopped being a hand-written
-// list of four services. Before that they were silently excluded, which is why
-// none of them had ever been reasoned about.
+// sts:GetCallerIdentity used to be here. It needs no IAM permission at all
+// (proven: the live role grants none and the reaper calls it every invocation),
+// and internal/iamcoverage maps it to no action, so it is never a gap.
 var grantedElsewhere = map[string]string{
-	// GetCallerIdentity needs no IAM permission at all. Proven rather than
-	// assumed: the live production role grants only sts:AssumeRole (for the
-	// cross-account role), the reaper calls GetCallerIdentity on every invocation,
-	// and it has been succeeding every ten minutes.
-	"sts:GetCallerIdentity": "requires no permission; the live role grants no sts:GetCallerIdentity and the reaper works",
-
 	// Route53 runs on the reaper's BASE credentials in the infra account, not the
 	// assumed member-account role (main.go: "cross-account role — so route53Client
 	// uses the base credentials"). template.yaml grants it scoped to the configured
@@ -203,6 +97,12 @@ var grantedElsewhere = map[string]string{
 	// Called once per DnsExtraZoneIds entry at startup to read the zone's domain
 	// (#1065); granted in the same conditional statement as the extra zones.
 	"route53:GetHostedZone": "granted by template.yaml on the base credentials, scoped to DnsExtraZoneIds",
+	// Assuming each member account's role is, by definition, done with the base
+	// credentials (resolveAccounts).
+	"sts:AssumeRole": "granted by template.yaml on the base credentials, scoped to RoleArns",
+	// The portal account registry read (#466), through accountlifecycle's client
+	// on the base credentials; invisible to the regex this gate used to be.
+	"dynamodb:Scan": "granted by template.yaml on the base credentials, scoped to AccountsTable",
 }
 
 // TestPolicyCoversEveryReaperAPICall is the structural end of the drift class.
@@ -228,6 +128,12 @@ func TestPolicyCoversEveryReaperAPICall(t *testing.T) {
 		missing = append(missing, call)
 	}
 	sort.Strings(missing)
+
+	for action := range grantedElsewhere {
+		if !calls[action] {
+			t.Errorf("grantedElsewhere names %s, which the reaper no longer calls — delete the entry", action)
+		}
+	}
 
 	if len(missing) > 0 {
 		t.Errorf("the reaper calls AWS actions the scan-self policy does not grant: %s\n"+

@@ -15,6 +15,7 @@ var (
 	ecrPullPolicies        = taskiam.ECRPullPolicies
 	iamActionList          = taskiam.IAMActionList
 	provenanceWriteActions = taskiam.ProvenanceWriteActions
+	objectWriteActions     = taskiam.ObjectWriteActions
 	s3Buckets              = taskiam.S3Buckets
 	s3Buckets2             = taskiam.S3BucketsFromURIs
 	s3Bucket               = taskiam.S3Bucket

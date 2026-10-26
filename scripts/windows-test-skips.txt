@@ -9,3 +9,4 @@
 # Everything NOT listed is tested on windows-latest by default: a new package is
 # included automatically, and has to be added here deliberately to escape.
 pkg/pluginruntime  #1001: plugin remote steps run via sh/su/tar, which a Windows spore lacks; its tests are sh fixtures
+internal/iamcoverage  #254: static analysis that loads every principal's build for linux, darwin and windows from source; OS-independent, run once on Linux, and too slow for the Windows runner

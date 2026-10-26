@@ -155,8 +155,11 @@ func StageDataPolicy(bucket, prefix string) string {
 		"Version": "2012-10-17",
 		"Statement": []interface{}{
 			map[string]interface{}{
-				"Effect":   "Allow",
-				"Action":   []string{"s3:GetObject", "s3:PutObject"},
+				"Effect": "Allow",
+				// AbortMultipartUpload: the stage hand-off uploads with the
+				// SDK's transfer manager, which aborts a failed multipart upload;
+				// denied, the parts stay in the bucket, billed (#254).
+				"Action":   []string{"s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"},
 				"Resource": fmt.Sprintf("arn:aws:s3:::%s/%s/*", bucket, prefix),
 			},
 			map[string]interface{}{
