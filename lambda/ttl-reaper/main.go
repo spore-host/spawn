@@ -57,6 +57,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/fsx"
 	fsxtypes "github.com/aws/aws-sdk-go-v2/service/fsx/types"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -98,6 +99,12 @@ type account struct {
 	// spotFor is the EC2 slice the orphaned-Spot-request sweep needs (#950),
 	// separate for the same reason as netFor.
 	spotFor func(region string) spotRequestAPI
+	// iamFor is the account's IAM client for the per-task role sweep (#1300).
+	// IAM is global, so it takes no region. nil skips the sweep.
+	iamFor func() iamAPI
+	// regionsFor lists the account's enabled regions for that sweep's in-use
+	// check. nil skips the sweep (fail closed).
+	regionsFor func() regionsAPI
 	// s3For is the S3 slice the empty-bucket sweep needs (#1301).
 	s3For func(region string) s3API
 }
@@ -191,6 +198,11 @@ type reaper struct {
 	// emptyBucketsOff / emptyBucketsReport / emptyBucketsReap, from
 	// REAPER_EMPTY_BUCKETS. dryRun still wins.
 	emptyBuckets string
+
+	// Per-task spawn-instance-* IAM roles (#1300): one of instanceRolesOff /
+	// instanceRolesReport / instanceRolesReap, from REAPER_INSTANCE_ROLES.
+	// Unset is report: new deletion behaviour starts report-only. dryRun wins.
+	instanceRoles string
 
 	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
@@ -430,7 +442,9 @@ func configure() {
 		expireDNS:    strings.EqualFold(os.Getenv("REAPER_DNS_EXPIRE"), "true"),
 		expireLeases: strings.EqualFold(os.Getenv("REAPER_DNS_LEASE_EXPIRE"), "true"),
 		spotRequests: parseSpotRequests(os.Getenv("REAPER_SPOT_REQUESTS")),
-		emptyBuckets: parseEmptyBuckets(os.Getenv("REAPER_EMPTY_BUCKETS")),
+		// #1300: the per-task IAM role sweep.
+		instanceRoles: parseInstanceRoles(os.Getenv("REAPER_INSTANCE_ROLES")),
+		emptyBuckets:  parseEmptyBuckets(os.Getenv("REAPER_EMPTY_BUCKETS")),
 	}
 	r.netResources, r.elasticIPs = netSweepModesFromEnv()
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
@@ -466,8 +480,8 @@ func configure() {
 		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
 		r.expireLeases = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -528,6 +542,8 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return fsx.NewFromConfig(c)
 			},
+			iamFor:     func() iamAPI { return iam.NewFromConfig(base) },
+			regionsFor: func() regionsAPI { return ec2.NewFromConfig(base) },
 		})
 	}
 
@@ -580,6 +596,8 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return fsx.NewFromConfig(c)
 			},
+			iamFor:     func() iamAPI { return iam.NewFromConfig(acctCfg) },
+			regionsFor: func() regionsAPI { return ec2.NewFromConfig(acctCfg) },
 		})
 	}
 
@@ -620,6 +638,8 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return fsx.NewFromConfig(c)
 			},
+			iamFor:     func() iamAPI { return iam.NewFromConfig(base) },
+			regionsFor: func() regionsAPI { return ec2.NewFromConfig(base) },
 		})
 	}
 	return accounts
@@ -774,6 +794,17 @@ type Summary struct {
 	EmptyBucketsDeleted     int `json:"empty_buckets_deleted"`      // empty for the grace, and deleted
 	EmptyBucketsWouldDelete int `json:"empty_buckets_would_delete"` // qualified, but report mode or a dry run held it back
 	EmptyBucketsFailed      int `json:"empty_buckets_failed"`       // an S3 call failed (AccessDenied: the role predates #1301)
+
+	// Per-task spawn-instance-* IAM roles and instance profiles (#1300), under
+	// REAPER_INSTANCE_ROLES. Skipped is a role kept for any reason (in use,
+	// within the 24h grace, untagged, unreadable, or a failed delete).
+	InstanceRolesScanned     int `json:"instance_roles_scanned"`
+	InstanceRolesDeleted     int `json:"instance_roles_deleted"`
+	InstanceRolesWouldDelete int `json:"instance_roles_would_delete"` // qualified, but report mode or a dry run held it back
+	InstanceRolesSkipped     int `json:"instance_roles_skipped"`
+	// InstanceRolesAccountsDenied counts accounts whose role refused the IAM
+	// listing: a member role not yet redeployed with the #1300 grant.
+	InstanceRolesAccountsDenied int `json:"instance_roles_accounts_denied"`
 
 	// Orphaned persistent Spot requests (#950).
 	SpotRequestsScanned        int `json:"spot_requests_scanned"`
@@ -963,6 +994,11 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 			// anything is kept.
 			r.reapEmptyBucketsRegion(ctx, acct, region, start, &sum)
 		}
+
+		// Per-task IAM roles (#1300). Once per account: IAM is global. After
+		// the regional scans, so an instance the reaper just terminated is
+		// already shutting-down (still counted as using its role this run).
+		r.reapInstanceRolesAccount(ctx, acct, start, &sum)
 
 		// DNS reconciliation sweep (#438): after scanning all regions for this
 		// account, reconcile the account's {base36}.{domain} A-records against the

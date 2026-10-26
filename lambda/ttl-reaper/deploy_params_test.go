@@ -585,7 +585,7 @@ func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	// DryRun first because it is the one that silently stops the reaper
 	// terminating anything.
 	keys := []string{
-		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "EmptyBuckets", "InstanceEvents", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
+		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "EmptyBuckets", "InstanceEvents", "InstanceRoles", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
 	}
@@ -949,6 +949,47 @@ func TestEmptyBucketsSurvivesAMakeDeploy(t *testing.T) {
 	got, _ = runMerge(t, summary, setReap, toExplicit(set))
 	if got["EmptyBuckets"] != "off" {
 		t.Errorf("make deploy EMPTY_BUCKETS=off sent %q", got["EmptyBuckets"])
+	}
+}
+
+// TestInstanceRolesSurvivesAMakeDeploy is #1300's preservation property, the
+// same shape as TestInstanceEventsSurvivesAMakeDeploy: a stack set to
+// InstanceRoles=reap keeps it across a `make deploy` that does not mention it
+// (a code-only redeploy must not disarm, or arm, the role sweep), a stack that
+// predates the parameter gets the template default 'report' (an upgrade
+// deletes nothing by itself), and `make deploy INSTANCE_ROLES=off` sets it.
+func TestInstanceRolesSurvivesAMakeDeploy(t *testing.T) {
+	summary := templateSummaryFromTemplate(t)
+	setReap := strings.Replace(liveParams, "\n]",
+		",\n  {\"ParameterKey\":\"InstanceRoles\",\"ParameterValue\":\"reap\"}\n]", 1)
+	if setReap == liveParams {
+		t.Fatal("could not add InstanceRoles to the live fixture")
+	}
+	toExplicit := func(m map[string]string) string {
+		var b strings.Builder
+		for k, v := range m {
+			b.WriteString(k + "=" + v + "\n")
+		}
+		return b.String()
+	}
+
+	plain, _ := explicitFromMakefile(t)
+	got, _ := runMerge(t, summary, setReap, toExplicit(plain))
+	if got["InstanceRoles"] != "reap" {
+		t.Errorf("plain make deploy over a stack with InstanceRoles=reap sent %q: a deploy that did "+
+			"not mention it changed it", got["InstanceRoles"])
+	}
+
+	got, _ = runMerge(t, summary, liveParams, toExplicit(plain))
+	if got["InstanceRoles"] != "report" {
+		t.Errorf("a stack predating InstanceRoles got %q, want the template default 'report': "+
+			"new deletion behaviour must start report-only", got["InstanceRoles"])
+	}
+
+	set, _ := explicitFromMakefile(t, "INSTANCE_ROLES=off")
+	got, _ = runMerge(t, summary, setReap, toExplicit(set))
+	if got["InstanceRoles"] != "off" {
+		t.Errorf("make deploy INSTANCE_ROLES=off sent %q", got["InstanceRoles"])
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/aws"
 )
 
 // #1161: --all-regions scans the regions ENABLED in the account
@@ -45,5 +47,25 @@ func TestFootprintSaysRulesNotSchedules(t *testing.T) {
 	}
 	if strings.Contains(long, "not scanned") {
 		t.Error("footprint help still says something is not scanned")
+	}
+}
+
+// #1300: the footprint names who deletes the per-task spawn-instance-* roles,
+// and counts only those: the shared spored-instance-role and the reaper's own
+// role are not per-task and must not be counted as reapable.
+func TestFootprintNamesTheDeleterOfPerTaskRoles(t *testing.T) {
+	var b strings.Builder
+	renderFootprint(&b, footprintReport{Global: []aws.ControlPlaneResource{
+		{Service: "iam", Kind: "role", Name: "spawn-instance-af541989", Why: "name"},
+		{Service: "iam", Kind: "instance-profile", Name: "spawn-instance-af541989", Why: "name"},
+		{Service: "iam", Kind: "role", Name: "spored-instance-role", Why: "name"},
+		{Service: "iam", Kind: "role", Name: "spawn-ttl-reaper-ec2", Why: "name"},
+	}})
+	out := b.String()
+	if !strings.Contains(out, "1 per-task spawn-instance-* role(s)") {
+		t.Errorf("footprint does not count exactly the one per-task role:\n%s", out)
+	}
+	if !strings.Contains(out, "spawn cleanup --instance-roles") || !strings.Contains(out, "REAPER_INSTANCE_ROLES") {
+		t.Errorf("footprint does not name the deleters:\n%s", out)
 	}
 }

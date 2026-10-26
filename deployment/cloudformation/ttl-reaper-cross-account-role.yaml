@@ -184,6 +184,8 @@ Resources:
                   - ec2:DescribePlacementGroups
                   # The orphaned launch Elastic IP sweep (#661); read-only.
                   - ec2:DescribeAddresses
+                  # The #1300 role sweep checks every enabled region; read-only.
+                  - ec2:DescribeRegions
                 # trivy:ignore:AVD-AWS-0057 -- Resource * required (neither Describe
                 # has a resource-level ARN); these are read-only.
                 Resource: '*'
@@ -304,6 +306,50 @@ Resources:
                 # trivy:ignore:AVD-AWS-0057 -- GetCommandInvocation has no
                 # resource-level ARN; it only reads a command this role issued.
                 Resource: '*'
+              # The per-task IAM role sweep (#1300): spawn-instance-<hash> roles
+              # and instance profiles that no instance uses, deleted under the
+              # reaper's InstanceRoles setting. ListRoles has no resource-level
+              # ARN and returns names only.
+              - Effect: Allow
+                Action:
+                  - iam:ListRoles
+                # trivy:ignore:AVD-AWS-0057 -- ListRoles has no resource-level ARN; read-only.
+                Resource: '*'
+              # Reading a candidate: unconditioned, so the reaper can learn an
+              # untagged role is not spawn's, but only spawn-instance-* names.
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:ListInstanceProfilesForRole
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/spawn-instance-*'
+              - Effect: Allow
+                Action:
+                  - iam:GetInstanceProfile
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/spawn-instance-*'
+              # The deletes: spawn-instance-* names only AND tagged
+              # spawn:managed=true. spored-instance-role, this role and every
+              # role a user made are denied. iam:ResourceTag is IAM's own key,
+              # the service of these actions.
+              - Effect: Allow
+                Action:
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:DeleteRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/spawn-instance-*'
+                Condition:
+                  StringEquals:
+                    iam:ResourceTag/spawn:managed: 'true'
+              - Effect: Allow
+                Action:
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:DeleteInstanceProfile
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:instance-profile/spawn-instance-*'
+                Condition:
+                  StringEquals:
+                    iam:ResourceTag/spawn:managed: 'true'
       Tags:
         - Key: !Sub '${TagPrefix}:managed'
           Value: 'false'

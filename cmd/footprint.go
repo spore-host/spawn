@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/instancerole"
 )
 
 var (
@@ -187,6 +188,19 @@ func renderFootprint(w io.Writer, rep footprintReport) {
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", r.Service, r.Kind, r.Name, age, r.Why)
 		}
 		tw.Flush()
+		// Name the deleter of the per-task roles (#1300), so the rows above are
+		// not read as clutter nothing will ever remove.
+		perTask := 0
+		for _, r := range rep.Global {
+			if r.Service == "iam" && r.Kind == "role" && instancerole.IsCandidate(r.Name) {
+				perTask++
+			}
+		}
+		if perTask > 0 {
+			fmt.Fprintf(w, "  %d per-task %s* role(s): each is deleted with its instance profile once no\n", perTask, instancerole.NamePrefix)
+			fmt.Fprintf(w, "  instance uses it and it has been unused for 24h, by the TTL reaper\n")
+			fmt.Fprintf(w, "  (REAPER_INSTANCE_ROLES=reap) or 'spawn cleanup --instance-roles'.\n")
+		}
 		fmt.Fprintln(w)
 	}
 

@@ -56,6 +56,24 @@ var ManagedSSMTagCondition = map[string]map[string]string{
 	"StringEquals": {"ssm:resourceTag/spawn:managed": "true"},
 }
 
+// ManagedIAMTagCondition is the same rail for iam: actions (#1300): IAM's own
+// service key, for the same reason as ManagedSSMTagCondition.
+var ManagedIAMTagCondition = map[string]map[string]string{
+	"StringEquals": {"iam:ResourceTag/spawn:managed": "true"},
+}
+
+// InstanceRoleARN and InstanceProfileARN are the only IAM resources the reaper
+// may change: spawn's per-task spawn-instance-<hash> roles and instance
+// profiles (pkg/instancerole.NamePrefix). Neither matches the shared
+// spored-instance-role / spored-instance-profile, the reaper's own role, or
+// any role a user made. The account is '*' because a policy can only ever act
+// in its own account; ${aws:PrincipalAccount} in a Resource is rejected by
+// PutRolePolicy (#1069).
+const (
+	InstanceRoleARN    = "arn:aws:iam::*:role/spawn-instance-*"
+	InstanceProfileARN = "arn:aws:iam::*:instance-profile/spawn-instance-*"
+)
+
 // Statement is the minimal IAM statement shape emitted here.
 type Statement struct {
 	Effect    string      `json:"Effect"`
@@ -137,6 +155,10 @@ func ScanSelfStatements() []Statement {
 				// The orphaned launch Elastic IP sweep (#661). DescribeAddresses
 				// has no resource-level permissions either.
 				"ec2:DescribeAddresses",
+				// The per-task IAM role sweep (#1300) checks every region
+				// enabled in the account for an instance holding a role's
+				// profile, not only the scanned ones. Read-only.
+				"ec2:DescribeRegions",
 			},
 			Resource: "*",
 		},
@@ -262,6 +284,63 @@ func ScanSelfStatements() []Statement {
 			Effect:   "Allow",
 			Action:   []string{"ssm:GetCommandInvocation"},
 			Resource: "*",
+		},
+		{
+			// The per-task IAM role sweep (#1300, pkg/instancerole). ListRoles
+			// has no resource-level ARN; it returns names only (no tags), and
+			// everything the reaper does with a name is in the grants below.
+			Effect:   "Allow",
+			Action:   []string{"iam:ListRoles"},
+			Resource: "*",
+		},
+		{
+			// Reading one candidate role: its tags, creation date and
+			// RoleLastUsed (GetRole), the profiles it is in, and its policies so
+			// they can be removed first. Read-only, and unconditioned on
+			// purpose: the reaper has to read an untagged role to learn that it
+			// must keep it.
+			Effect: "Allow",
+			Action: []string{
+				"iam:GetRole",
+				"iam:ListInstanceProfilesForRole",
+				"iam:ListRolePolicies",
+				"iam:ListAttachedRolePolicies",
+			},
+			Resource: InstanceRoleARN,
+		},
+		{
+			Effect:   "Allow",
+			Action:   []string{"iam:GetInstanceProfile"},
+			Resource: InstanceProfileARN,
+		},
+		{
+			// The deletes, contained twice: by name to spawn-instance-* roles,
+			// and by tag to ones spawn marked spawn:managed=true. So the shared
+			// spored-instance-role, the reaper's own role and every role a user
+			// made are denied by IAM, not merely skipped by code.
+			//
+			// RemoveRoleFromInstanceProfile appears here and in the profile
+			// statement below. Its resource is the instance profile; granting
+			// it on the role too, under the same rails, costs nothing and keeps
+			// the sweep working if IAM also authorizes it against the role.
+			Effect: "Allow",
+			Action: []string{
+				"iam:RemoveRoleFromInstanceProfile",
+				"iam:DeleteRolePolicy",
+				"iam:DetachRolePolicy",
+				"iam:DeleteRole",
+			},
+			Resource:  InstanceRoleARN,
+			Condition: ManagedIAMTagCondition,
+		},
+		{
+			Effect: "Allow",
+			Action: []string{
+				"iam:RemoveRoleFromInstanceProfile",
+				"iam:DeleteInstanceProfile",
+			},
+			Resource:  InstanceProfileARN,
+			Condition: ManagedIAMTagCondition,
 		},
 	}
 }

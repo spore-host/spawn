@@ -588,23 +588,61 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 		return "", fmt.Errorf("instance profile not available")
 	}
 
+	// An existing profile is only usable if it holds this role (#1318). One
+	// can exist empty: a cleanup or reaper delete (pkg/instancerole) that
+	// removed the role and had not yet deleted the profile, or an earlier
+	// launch that died between CreateInstanceProfile and AddRoleToInstanceProfile.
+	// Handed to RunInstances as it was, it booted an instance with no
+	// credentials, so spored could not read its tags or end itself. Re-add.
+	if profileExists {
+		if err := ensureRoleInProfile(ctx, iamClient, profileName, roleName, profile.InstanceProfile.Roles); err != nil {
+			return "", err
+		}
+	}
+
 	// Return the profile name, not the ARN — EC2 RunInstances iamInstanceProfile.name
 	// expects the bare name, not "arn:aws:iam::ACCOUNT:instance-profile/NAME".
 	return profileName, nil
 }
 
+// ensureRoleInProfile makes sure the existing instance profile name holds
+// roleName, adding it when the profile is empty (#1318). A profile holding a
+// different role is an error rather than something to repair: a profile has
+// one role, and replacing someone else's would take their instance's
+// credentials away.
+func ensureRoleInProfile(ctx context.Context, iamClient *iam.Client, profileName, roleName string, roles []types.Role) error {
+	for _, r := range roles {
+		if aws.ToString(r.RoleName) == roleName {
+			return nil
+		}
+	}
+	if len(roles) > 0 {
+		return fmt.Errorf("instance profile %s holds role %s, not %s", profileName, aws.ToString(roles[0].RoleName), roleName)
+	}
+	err := retryIAM(func() error {
+		_, e := iamClient.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
+			InstanceProfileName: aws.String(profileName),
+			RoleName:            aws.String(roleName),
+		})
+		return e
+	})
+	// LimitExceeded: a concurrent launch re-added it first, which is the
+	// outcome wanted. Anything else is a real failure.
+	if err != nil && !strings.Contains(err.Error(), "LimitExceeded") {
+		return fmt.Errorf("re-attach role %s to instance profile %s: %w", roleName, profileName, err)
+	}
+	waitForInstanceProfile(ctx, iamClient, profileName)
+	return nil
+}
+
 // generateRoleName creates a deterministic role name based on policies.
 //
-// Note (#550): spawn-instance-<hash> roles/profiles this creates are never
-// garbage-collected — nothing deletes one when its last referencing instance
-// terminates. This is a deliberate safe-reuse default (a role in active use by
-// another still-running instance must never be deleted out from under it, and
-// this function has no way to know whether that's the case), not an oversight,
-// but it does mean an account accumulates one of these per distinct
-// policy-config hash ever launched with, indefinitely. Deleting them
-// pre-emptively is IAM deletion, a different risk class than anything else in
-// this file — deliberately out of scope here; see spawn#550 for the follow-up
-// if this needs addressing.
+// Note (#550, #1300): this function never deletes a spawn-instance-<hash>
+// role/profile — it cannot know whether another running instance uses one.
+// pkg/instancerole is the deleter: the TTL reaper (REAPER_INSTANCE_ROLES) and
+// `spawn cleanup --instance-roles` remove a pair once it and its profile are
+// tagged spawn:managed=true (buildIAMTags), no instance has the profile
+// attached, and the role is 24h old and unused for 24h.
 func (c *Client) generateRoleName(config IAMRoleConfig) string {
 	return PredictedInstanceRoleName(config)
 }

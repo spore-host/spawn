@@ -90,6 +90,7 @@ spawn reaper deploy [flags]
 | `--bucket` |  | string |  | S3 bucket in THIS account to hold the artifact (default: spawn-reaper-artifacts-&lt;account&gt;-&lt;region&gt;) |
 | `--elastic-ips` |  | string |  | Orphaned launch Elastic IP sweep, REAPER_ELASTIC_IPS: off\|report\|reap (default: keep; the reaper's default is reap, or off when REAPER_NET_RESOURCES=off) |
 | `--empty-buckets` |  | string |  | Empty spawn-staging/spawn-results bucket sweep, REAPER_EMPTY_BUCKETS: off\|report\|reap (default: keep; the reaper's default is report) |
+| `--instance-roles` |  | string |  | Unused per-task spawn-instance-* IAM role sweep, REAPER_INSTANCE_ROLES: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--log-retention-days` |  | int32 |  | Days CloudWatch keeps the reaper's logs, a value CloudWatch accepts: 1, 3, 5, 7, 14, 30, 60, 90, ... (default: keep the existing reaper's; 30 for a new one). Below 30, 'teardown --if-idle-for' can see at most that much history |
 | `--max-age` |  | string |  | Max-age ceiling, REAPER_MAX_AGE, e.g. 336h or 14d (default: keep; the reaper's default is 7d) |
 | `--net-resources` |  | string |  | Network-resource sweep, REAPER_NET_RESOURCES: off\|report\|reap (default: keep; the reaper's default is report) |
