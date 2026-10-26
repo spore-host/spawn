@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/treewalk"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -289,6 +291,9 @@ func windowsOnlyTestFiles(t *testing.T) []string {
 	var out []string
 	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(".", path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

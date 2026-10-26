@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/treewalk"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,6 +43,9 @@ func TestEveryCommandIsBuiltByARelease(t *testing.T) {
 	found := map[string]bool{}
 	err = filepath.Walk(".", func(path string, info os.FileInfo, werr error) error {
 		if werr != nil {
+			if treewalk.Vanished(".", path, werr) {
+				return nil
+			}
 			return werr
 		}
 		if info.IsDir() {

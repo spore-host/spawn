@@ -19,6 +19,8 @@
 package scripts
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -79,6 +81,11 @@ func shellScripts(t *testing.T) []string {
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			// An entry another package's test removed mid-walk (#1334). This
+			// module cannot import internal/treewalk, so its rule is inline.
+			if errors.Is(err, fs.ErrNotExist) && path != root {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

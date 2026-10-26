@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spore-host/spawn/internal/treewalk"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -58,6 +60,9 @@ func TestEveryFlagVariableIsReadSomewhere(t *testing.T) {
 
 	err := filepath.Walk(filepath.Join(root, "cmd"), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if treewalk.Vanished(filepath.Join(root, "cmd"), path, err) {
+				return nil
+			}
 			return err
 		}
 		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

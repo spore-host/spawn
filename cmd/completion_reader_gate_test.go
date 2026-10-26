@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // TestCmdReadsCompletionRecordsOnlyThroughTasklaunch is the spawn#1260 gate:
@@ -37,6 +39,9 @@ func TestCmdReadsCompletionRecordsOnlyThroughTasklaunch(t *testing.T) {
 
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(".", path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

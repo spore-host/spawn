@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // Every Lambda function name hardcoded in Go source must be a name some deploy
@@ -278,6 +280,9 @@ func walkRepoFiles(t *testing.T, root string, fn func(path, rel string)) {
 	skip := map[string]bool{".git": true, "node_modules": true, "docs-gen": true, "vendor": true, "web": true}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

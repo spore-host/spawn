@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // sporedUnit is one systemd unit definition for spored found in the repo: either
@@ -39,6 +41,9 @@ func discoverSporedUnits(t *testing.T, repoRoot string) []sporedUnit {
 	var units []sporedUnit
 	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(repoRoot, path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

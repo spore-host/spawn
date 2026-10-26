@@ -12,9 +12,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/treewalk"
+
+	"mvdan.cc/sh/v3/syntax"
+
 	"github.com/spore-host/spawn/internal/shellmin"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // staticTemplates are the script texts BuildLinuxBootstrap runs through
@@ -181,6 +184,9 @@ func TestEverySplicedInstallerIsStripped(t *testing.T) {
 	sites := 0
 	err := filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
 		if werr != nil {
+			if treewalk.Vanished(root, path, werr) {
+				return nil
+			}
 			return werr
 		}
 		if info.IsDir() {

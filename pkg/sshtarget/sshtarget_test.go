@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // The exact argv `spawn status` built for the stopped instance in #928: the
@@ -152,6 +154,9 @@ func TestEverySSHExecGoesThroughTheGuard(t *testing.T) {
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

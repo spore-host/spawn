@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // A doc that names a file must either name one that exists, or say it is
@@ -39,6 +41,9 @@ func TestDocsDoNotCitePathsThatDoNotExist(t *testing.T) {
 	var docs []string
 	err := filepath.Walk("docs", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if treewalk.Vanished("docs", path, err) {
+				return nil
+			}
 			return err
 		}
 		if !info.IsDir() && strings.HasSuffix(path, ".md") {

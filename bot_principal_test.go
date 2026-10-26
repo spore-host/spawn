@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/internal/treewalk"
+
 	"gopkg.in/yaml.v3"
 
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
@@ -131,6 +133,9 @@ func TestEveryBotPrincipalARNInTheRepoIsTheDefault(t *testing.T) {
 	agreeing, scanned := 0, 0
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(".", path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

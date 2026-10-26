@@ -86,6 +86,8 @@ func newRootCmd() *cobra.Command {
 		newCompleteCmd(),
 		// The bootstrap gates the user's workload on this exit code (#1007).
 		newIsSpotReplacementCmd(),
+		// The bootstrap discards state inherited from an image before anything reads it (#1241).
+		newDiscardInheritedStateCmd(),
 		// The task wrapper records output regeneration cost and provenance (#1076).
 		newProvenanceCmd(),
 		// Explicit `version` subcommand preserves the historical contract

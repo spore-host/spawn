@@ -957,6 +957,9 @@ spore_selinux_relabel /etc/systemd/system/spored.service
 # install, before every optional step below, so a failure in one of those can
 # no longer leave the instance without TTL, idle and cost enforcement. Its one
 # input written by this script, plugins.json, is already on disk (#1023).
+# Discard state inherited from an image of another instance, before anything
+# reads it; what this boot wrote is kept (#1241).
+/usr/local/bin/spored discard-inherited-state || true
 systemctl daemon-reload
 systemctl enable spored
 systemctl start spored

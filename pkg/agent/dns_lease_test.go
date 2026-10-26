@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spore-host/spawn/internal/treewalk"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/provider"
 )
@@ -79,6 +80,9 @@ func TestOnlyARenewingCallerMayRequestALease(t *testing.T) {
 	files := 0
 	err := filepath.Walk(root, func(path string, info os.FileInfo, werr error) error {
 		if werr != nil {
+			if treewalk.Vanished(root, path, werr) {
+				return nil
+			}
 			return werr
 		}
 		if info.IsDir() {

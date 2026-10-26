@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/spawn/pkg/elasticip"
+	"github.com/spore-host/spawn/pkg/instancestate"
 	"github.com/spore-host/spawn/pkg/observability"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
@@ -67,6 +69,10 @@ func NewEC2Provider(ctx context.Context) (*EC2Provider, error) {
 
 	instanceID := idDoc.InstanceID
 	region := idDoc.Region
+
+	// Before anything below reads plugins.json or the peers file: discard the
+	// per-instance state an instance launched from an image inherits (#1241).
+	discardInheritedState(instanceID)
 	accountID := idDoc.AccountID
 	availabilityZone := idDoc.AvailabilityZone
 
@@ -791,6 +797,31 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 	}
 
 	return config, instanceName
+}
+
+// reconcileInstanceState is instancestate.ReconcileHost, and the two
+// predicates below the platform checks; variables so tests can count the calls.
+var (
+	reconcileInstanceState = instancestate.ReconcileHost
+	stateOnLinux           = runtime.GOOS == "linux"
+	stateAsRoot            = func() bool { return os.Geteuid() == 0 }
+)
+
+// discardInheritedState removes the state this instance inherited from the
+// image it was launched from (#1241). Linux only, where those paths are, and
+// only as root: an unprivileged `spored` subcommand could not remove them, and
+// the daemon and the bootstrap run as root.
+func discardInheritedState(instanceID string) {
+	if !stateOnLinux || !stateAsRoot() {
+		return
+	}
+	removed, from, err := reconcileInstanceState(instanceID)
+	if from != "" {
+		log.Printf("%s was launched from an image of %s; discarded %d inherited state file(s): %v", instanceID, from, len(removed), removed)
+	}
+	if err != nil {
+		log.Printf("Warning: checking for inherited instance state: %v", err)
+	}
 }
 
 // loadPluginDeclarations reads /etc/spawn/plugins.json if present.

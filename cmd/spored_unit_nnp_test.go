@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // nnpUnitHeredoc matches a shell line that writes the spored unit through a
@@ -38,6 +40,9 @@ func findSporedUnitBodies(t *testing.T) []nnpUnit {
 	var units []nnpUnit
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // The spored instance role must not be able to write the tags the reaper acts on.
@@ -176,6 +178,9 @@ func TestNoDeniedTagKeyHasAnInInstanceWriter(t *testing.T) {
 	for _, dir := range sources {
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
+				if treewalk.Vanished(dir, path, err) {
+					return nil
+				}
 				return err
 			}
 			if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
