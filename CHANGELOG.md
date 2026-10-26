@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaper run over SSM still stages no outputs (their waits leave no room), and
   records `skipped`. A hook from before this release is run exactly as before.
 
+- **Release binaries and CI are now built with Go 1.27.3** (was 1.26.10), per
+  spore-host/spore-host#609. `go.mod` still declares `go 1.26.0`, so programs
+  that import spawn's packages are not forced onto Go 1.27. The pinned linters
+  (staticcheck 2026.2.2, golangci-lint 2.15.0, govulncheck v1.3.0) were
+  verified under 1.27.3 and are unchanged.
+
 ### Fixed
 
 - **`spawn list` shows instances that are shutting down** (#1167). The default
@@ -124,6 +130,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for one that cannot be written or started. A failure after the script
   started still writes nothing, because the script may already have written
   its own record.
+- **Release binaries are no longer stamped `+dirty`** (#1266). GoReleaser
+  writes `dist/` inside the checkout and it was not gitignored, so Go's VCS
+  stamping saw an untracked file and recorded `vcs.modified=true`: the
+  embedded module version of v0.139.1 read `v0.139.1+dirty`, misreporting the
+  build to SBOM and provenance tooling. `--version` and the published
+  checksums were always correct. A new test probes every path a release
+  writes into the tree (discovered from `.goreleaser.yaml`) and fails if git
+  reports any of them.
 
 ## [0.145.0] - 2026-10-24
 
