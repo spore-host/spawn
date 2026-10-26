@@ -7,6 +7,11 @@
 // tags are the on-the-wire format shared with the separate spore-bot Lambda repo
 // (the authoritative writer) and the dashboard-api Lambda, so the tag values and
 // table names must not change.
+//
+// Workspace.SigningSecret is the one field not mapped by its struct tag: it is
+// sealed with KMS on write and stored as found on read, both through
+// pkg/botsecret (#868). Marshalling a Workspace yourself therefore never writes
+// it; use PutWorkspace, and Client.SigningSecret to recover the plaintext.
 package bot
 
 import (
@@ -18,7 +23,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/spore-host/spawn/pkg/botsecret"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/security"
 )
 
 // Registration is a bot registration item (registry table; key user_key+nickname).
@@ -44,9 +51,12 @@ type Registration struct {
 // Workspace is a chat-platform workspace registration (workspaces table; key
 // workspace_key = "<platform>#<workspace-id>").
 type Workspace struct {
-	WorkspaceKey        string   `dynamodbav:"workspace_key" json:"workspace_key"`
-	BotToken            string   `dynamodbav:"bot_token" json:"bot_token"`
-	SigningSecret       string   `dynamodbav:"signing_secret" json:"signing_secret"`
+	WorkspaceKey string `dynamodbav:"workspace_key" json:"workspace_key"`
+	BotToken     string `dynamodbav:"bot_token" json:"bot_token"`
+	// SigningSecret is the plaintext to store on PutWorkspace. It is NOT filled
+	// on read (the stored form may be ciphertext); call Client.SigningSecret.
+	// The "-" tag keeps every marshaller but pkg/botsecret away from it.
+	SigningSecret       string   `dynamodbav:"-" json:"signing_secret"`
 	Platform            string   `dynamodbav:"platform" json:"platform"`
 	WorkspaceName       string   `dynamodbav:"workspace_name,omitempty" json:"workspace_name,omitempty"`
 	InstalledBy         string   `dynamodbav:"installed_by" json:"installed_by"`
@@ -58,7 +68,15 @@ type Workspace struct {
 	RefreshToken        string   `dynamodbav:"refresh_token,omitempty" json:"refresh_token,omitempty"`
 	TokenExpiresAt      int64    `dynamodbav:"token_expires_at,omitempty" json:"token_expires_at,omitempty"`
 	TokenRotation       bool     `dynamodbav:"token_rotation,omitempty" json:"token_rotation,omitempty"`
+
+	// storedSigningSecret is the signing_secret attribute as read: sealed, or
+	// a legacy plaintext.
+	storedSigningSecret string
 }
+
+// HasSigningSecret reports whether the item read from DynamoDB carries a
+// signing secret, without decrypting it.
+func (ws *Workspace) HasSigningSecret() bool { return ws.storedSigningSecret != "" }
 
 // ConnectCode is a transient connect-code item stored in the workspaces table
 // under workspace_key = "connect#<code>", with a DynamoDB TTL.
@@ -75,6 +93,21 @@ type Client struct {
 	db              *dynamodb.Client
 	registryTable   string
 	workspacesTable string
+
+	// kms seals and opens workspace signing secrets (see WithSecretsKMS). Nil
+	// means PutWorkspace refuses a non-empty secret rather than storing it in
+	// the clear.
+	kms      security.KMSAPI
+	kmsKeyID string
+}
+
+// WithSecretsKMS sets the KMS client (and key; "" means botsecret.KeyID())
+// used to encrypt workspace signing secrets on write and decrypt them in
+// SigningSecret. It returns c for chaining.
+func (c *Client) WithSecretsKMS(kmsClient security.KMSAPI, keyID string) *Client {
+	c.kms = kmsClient
+	c.kmsKeyID = keyID
+	return c
 }
 
 // NewClient returns a Client using the env-resolved default table names
@@ -237,11 +270,16 @@ func (c *Client) BatchDeleteRegistrations(ctx context.Context, regs []Registrati
 
 // ── workspaces ────────────────────────────────────────────────────────────
 
-// PutWorkspace writes a workspace registration.
+// PutWorkspace writes a workspace registration, replacing any existing one.
+// The signing secret is stored KMS-encrypted; without a KMS client (see
+// WithSecretsKMS) a non-empty secret is an error, never a plaintext write.
 func (c *Client) PutWorkspace(ctx context.Context, ws *Workspace) error {
 	item, err := attributevalue.MarshalMap(ws)
 	if err != nil {
 		return fmt.Errorf("marshal workspace: %w", err)
+	}
+	if err := botsecret.Put(ctx, c.kms, c.kmsKeyID, item, ws.WorkspaceKey, ws.SigningSecret); err != nil {
+		return fmt.Errorf("workspace %s: %w", ws.WorkspaceKey, err)
 	}
 	if _, err := c.db.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(c.workspacesTable),
@@ -284,7 +322,15 @@ func (c *Client) GetWorkspace(ctx context.Context, platform, workspaceID string)
 	if err := attributevalue.UnmarshalMap(result.Item, &ws); err != nil {
 		return nil, fmt.Errorf("unmarshal workspace: %w", err)
 	}
+	ws.storedSigningSecret = botsecret.Stored(result.Item)
 	return &ws, nil
+}
+
+// SigningSecret returns the plaintext signing secret of a workspace read by
+// GetWorkspace or ListWorkspaces: decrypted when stored sealed, as is when it
+// is a legacy plaintext value. Decryption needs WithSecretsKMS.
+func (c *Client) SigningSecret(ctx context.Context, ws *Workspace) (string, error) {
+	return botsecret.Open(ctx, c.kms, ws.WorkspaceKey, ws.storedSigningSecret)
 }
 
 // ListWorkspaces returns all workspaces, optionally filtered to one platform
@@ -307,6 +353,7 @@ func (c *Client) ListWorkspaces(ctx context.Context, platform string) ([]Workspa
 		if err := attributevalue.UnmarshalMap(item, &ws); err != nil {
 			continue
 		}
+		ws.storedSigningSecret = botsecret.Stored(item)
 		wss = append(wss, ws)
 	}
 	return wss, nil

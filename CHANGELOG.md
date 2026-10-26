@@ -265,6 +265,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sweep with `InstanceRoles=reap` (its default is `report`), once they are
   unused (#1300).
 
+- **`pkg/security`: `EncryptSecret` and `DecryptSecret` take a small `KMSAPI`
+  interface (which `*kms.Client` satisfies) and an encryption-context map.**
+  They had no caller before this release. **Removed `ValidateMountPath` and
+  `ValidateCommand`**, both uncalled and both unsafe to start calling:
+  `ValidateMountPath` rejected `spawn launch`'s own default mount points
+  (`/efs`, `/fsx`), and `ValidateCommand` is a metacharacter denylist that
+  would reject legitimate `--pre-stop` shell hooks; quote with `ShellQuote`
+  and validate users with `ValidateUsername` instead. `MaskSecret`, `MaskURL`,
+  `SanitizeForLog` and `SanitizePath` are kept, now documented as having no
+  caller and why (#868).
+
 ### Fixed
 
 - **A pool nobody drains no longer keeps its IAM role forever** (#1319).
@@ -568,6 +579,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn:managed=true`, which the orchestrator calls on `spawn-mpi-*` groups
   when a sweep ends. Re-run `scripts/setup-sweep-cross-account-role.sh` in each
   member account.
+
+### Security
+
+- **The chat-bot workspace signing secret is now encrypted at rest with KMS**,
+  using the existing `pkg/security` helpers through a new `pkg/botsecret`,
+  the only code that reads or writes the `signing_secret` attribute of
+  `spore-bot-workspaces`. `spawn notify workspace add` and the dashboard's
+  Slack OAuth install both write through it; values are bound to their item
+  by encryption context. Items written earlier, in plaintext, still read, and
+  are encrypted on their next write. Writing a secret now **requires the KMS
+  key `alias/spore-bot-secrets`** (or `SPORE_BOT_SECRETS_KMS_KEY`): without it
+  the write fails with a message naming the key, rather than storing the
+  value in the clear. `deployment/cloudformation/spore-bot.yaml` creates the
+  key and grants the bot function `kms:Encrypt`/`kms:Decrypt` on it;
+  `lambda/dashboard-api/scripts/setup-dashboard-lambda-role.sh` grants the
+  dashboard role the same, scoped to that key and purpose. A source gate fails
+  if any other Go code names the attribute (#868).
 
 ## [0.146.0] - 2026-10-25
 

@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/spf13/cobra"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/bot"
@@ -50,8 +51,11 @@ var (
 // botClient builds a bot store Client from the given config, honoring the
 // per-command table overrides (--table/--registry-table and --workspaces-table).
 // Empty overrides fall back to the env-resolved defaults inside the store.
+// Workspace signing secrets are KMS-encrypted on write with the key
+// botsecret.KeyID() names (#868).
 func botClient(cfg aws.Config) *bot.Client {
-	return bot.NewClientWithTableNames(dynamodb.NewFromConfig(cfg), botTable, botWorkspacesTable)
+	return bot.NewClientWithTableNames(dynamodb.NewFromConfig(cfg), botTable, botWorkspacesTable).
+		WithSecretsKMS(kms.NewFromConfig(cfg), "")
 }
 
 var botCmd = &cobra.Command{

@@ -23,6 +23,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/spore-host/spawn/pkg/botsecret"
 )
 
 const (
@@ -244,20 +246,29 @@ func storeSlackWorkspace(ctx context.Context, cfg aws.Config, tableName string, 
 		workspaceKey = "slack#" + token.Team.ID + "#" + token.AppID
 	}
 
-	// Preserve existing signing_secret — look up both key formats.
-	legacyKey := "slack#" + token.Team.ID
-	existing, _ := client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(tableName),
-		Key: map[string]dynamodbtypes.AttributeValue{
-			"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: legacyKey},
-		},
-	})
+	// The signing secret is stored KMS-encrypted, through pkg/botsecret, the
+	// one place that reads or writes that attribute (#868).
+	kmsClient := kms.NewFromConfig(cfg)
 
 	// Signing secret is app-level — from Secrets Manager (env fallback), auto-populated for all workspaces
 	signingSecret := slackSigningSecret()
-	if signingSecret == "" && existing != nil && existing.Item != nil {
-		if v, ok := existing.Item["signing_secret"].(*dynamodbtypes.AttributeValueMemberS); ok {
-			signingSecret = v.Value
+	if signingSecret == "" {
+		// Preserve the existing secret from the legacy-keyed item. It may be
+		// sealed (decrypt it under the key it was sealed for) or a pre-#868
+		// plaintext; either way it is re-sealed for workspaceKey below.
+		legacyKey := "slack#" + token.Team.ID
+		existing, _ := client.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName: aws.String(tableName),
+			Key: map[string]dynamodbtypes.AttributeValue{
+				"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: legacyKey},
+			},
+		})
+		if existing != nil && existing.Item != nil {
+			prev, err := botsecret.Open(ctx, kmsClient, legacyKey, botsecret.Stored(existing.Item))
+			if err != nil {
+				return fmt.Errorf("preserve signing secret: %w", err)
+			}
+			signingSecret = prev
 		}
 	}
 
@@ -265,7 +276,6 @@ func storeSlackWorkspace(ctx context.Context, cfg aws.Config, tableName string, 
 		"workspace_key":  workspaceKey,
 		"app_id":         token.AppID,
 		"bot_token":      token.BotToken,
-		"signing_secret": signingSecret,
 		"platform":       "slack",
 		"workspace_name": token.Team.Name,
 		"installed_by":   "oauth:" + token.AuthedUser.ID,
@@ -290,6 +300,9 @@ func storeSlackWorkspace(ctx context.Context, cfg aws.Config, tableName string, 
 	item, err := attributevalue.MarshalMap(ws)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
+	}
+	if err := botsecret.Put(ctx, kmsClient, "", item, workspaceKey, signingSecret); err != nil {
+		return err
 	}
 	_, err = client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(tableName),

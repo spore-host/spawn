@@ -284,6 +284,46 @@ if [ "$ATTACHMENTS" = "0" ]; then
     fi
 fi
 
+# Workspace signing secrets in spore-bot-workspaces are KMS-encrypted (#868).
+# The Slack OAuth install (slack_oauth.go, via pkg/botsecret) encrypts the
+# secret it stores and, when Secrets Manager holds none, decrypts the one it
+# preserves. Scoped to the key behind alias/spore-bot-secrets
+# (pkg/botsecret.DefaultKeyAlias) and to the "purpose" encryption context that
+# package always sets. put-role-policy replaces the inline policy, so a re-run
+# updates an existing role (the create-policy above does not).
+echo "→ Granting use of the spore-bot signing-secret KMS key..."
+cat > /tmp/dashboard-bot-secrets-kms.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SporeBotSigningSecretKMS",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Encrypt",
+        "kms:Decrypt"
+      ],
+      "Resource": "arn:aws:kms:*:${ACCOUNT_ID}:key/*",
+      "Condition": {
+        "StringEquals": {
+          "kms:EncryptionContext:purpose": "spore-bot-signing-secret"
+        },
+        "ForAnyValue:StringEquals": {
+          "kms:ResourceAliases": "alias/spore-bot-secrets"
+        }
+      }
+    }
+  ]
+}
+EOF
+aws iam put-role-policy \
+    --profile "$PROFILE" \
+    --role-name "$ROLE_NAME" \
+    --policy-name "SporeBotSigningSecretKMS" \
+    --policy-document file:///tmp/dashboard-bot-secrets-kms.json
+
+echo -e "  ${GREEN}✓${NC} KMS grant attached (inline policy SporeBotSigningSecretKMS)"
+
 # Clean up temp files
 rm -f /tmp/trust-policy.json
 
