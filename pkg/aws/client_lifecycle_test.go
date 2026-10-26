@@ -274,3 +274,25 @@ func TestClient_ConfigAccessors(t *testing.T) {
 		t.Fatalf("GetConfig: %v", err)
 	}
 }
+
+// TestInstanceStateFilterValues_DefaultExcludesShuttingDown pins the SHARED
+// ListInstances default: `spawn list` now shows shutting-down instances (#1167),
+// but it does so by widening its own query, not this default, which the
+// commands that act on an instance (terminate, extend, resume, the cohort
+// adapters) rely on to skip an instance that is already going away.
+func TestInstanceStateFilterValues_DefaultExcludesShuttingDown(t *testing.T) {
+	def := instanceStateFilterValues("")
+	if def == nil {
+		t.Fatal(`instanceStateFilterValues("") = nil (no filter); the shared default must filter`)
+	}
+	for _, s := range def {
+		if s == "shutting-down" || s == "terminated" {
+			t.Errorf("shared default state filter %v includes %q; it must exclude shutting-down and terminated", def, s)
+		}
+	}
+	for _, alias := range []string{"all", "any"} {
+		if v := instanceStateFilterValues(alias); v != nil {
+			t.Errorf("instanceStateFilterValues(%q) = %v, want nil (no filter)", alias, v)
+		}
+	}
+}

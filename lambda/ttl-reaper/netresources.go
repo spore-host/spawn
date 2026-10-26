@@ -453,7 +453,7 @@ func (r *reaper) reapSecurityGroups(ctx context.Context, cli netResourceAPI, acc
 				continue
 			}
 			log.Printf("net-resources: %s/%s: delete security group %s: %v", acct.label, region, id, derr)
-			outcome.record(err)
+			recordDeleteFailure(outcome)
 			continue
 		}
 		log.Printf("REAPED security group %s (%s) in %s/%s — unused for %s",
@@ -514,13 +514,30 @@ func (r *reaper) reapPlacementGroups(ctx context.Context, cli netResourceAPI, ac
 				continue
 			}
 			log.Printf("net-resources: %s/%s: delete placement group %s: %v", acct.label, region, name, derr)
-			outcome.record(err)
+			recordDeleteFailure(outcome)
 			continue
 		}
 		log.Printf("REAPED placement group %s in %s/%s — unused for %s",
 			name, acct.label, region, age.Round(time.Hour))
 		sum.NetReaped++
 	}
+}
+
+// recordDeleteFailure counts a security or placement group delete that failed
+// for any reason the caller does not tolerate (DependencyViolation and
+// InvalidPlacementGroup.InUse are handled before it) as an operational error, so
+// it reaches Summary.Errors and alarms.
+//
+// It is not routed through record(), which counts one region SCAN: the describe
+// that found the group already succeeded, so the region was reached, and
+// counting the delete there would add a region per failed delete. A denied
+// delete is counted here too, not as a denied region: the account answered, so
+// this is a missing ec2:Delete* grant (a permission regression), not the
+// "refused everywhere" account #469 makes quiet. Before #1211 the call sites
+// passed the nil describe error to record(), so every failed delete was counted
+// as a successfully reached region and nothing that alarms saw it.
+func recordDeleteFailure(outcome *accountOutcome) {
+	outcome.opErrors++
 }
 
 // netResourceAge returns how long ago the resource was created, from spawn's own

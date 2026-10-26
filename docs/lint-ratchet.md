@@ -25,7 +25,7 @@ floor.
 
 One linter per PR keeps each review about one kind of change. If a finding is a
 real bug rather than a style point, fix it in its own PR with a test, and leave
-the linter off until then (see `nilnesserr`).
+the linter off until then (as `nilnesserr` was until #1211).
 
 ## Enabled (the floor)
 
@@ -45,6 +45,7 @@ the linter off until then (see `nilnesserr`).
 - `makezero`
 - `mirror`
 - `misspell`
+- `nilnesserr`
 - `nolintlint`
 - `reassign`
 - `recvcheck`
@@ -90,7 +91,6 @@ without this config sees them.
 
 | linter | root | nested | notes |
 |---|---:|---:|---|
-| `nilnesserr` | 0 | 2 | Real bug: ttl-reaper records the nil describe error instead of a failed delete's error, so delete failures never count (#1211). Enable with that fix. |
 | `nosprintfhostport` | 2 | 0 | `cmd/connect.go`, `pkg/agent/dcv.go`: `https://%s:port` URLs; an IPv6 host would need brackets. |
 | `canonicalheader` | 1 | 0 | One test header spelled as AWS spells it. |
 | `bodyclose` | 7 | 0 | `cmd/plugin.go` and its test; check each before trusting it — bodyclose has false positives on bodies closed elsewhere. |

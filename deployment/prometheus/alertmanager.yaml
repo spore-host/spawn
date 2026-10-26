@@ -14,8 +14,9 @@
 # Note that the metrics these alerts fire on are OPT-IN: spored's metrics server
 # defaults to disabled (pkg/observability.DefaultConfig) and must be enabled in
 # the agent config, and nothing in spawn sets the `spawn:metrics-enabled` tag
-# that prometheus.yaml's EC2 service discovery filters on — tag your instances
-# yourself with `--tag spawn:metrics-enabled=true`.
+# that prometheus.yaml's EC2 service discovery filters on. `spawn launch --tag`
+# refuses spawn: keys, so tag instances after launch with `aws ec2 create-tags`
+# (docs/self-hosted-monitoring.md; launch flag: spawn#1308).
 
 global:
   resolve_timeout: 5m

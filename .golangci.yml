@@ -39,6 +39,7 @@ linters:
     - makezero
     - mirror
     - misspell
+    - nilnesserr
     - nolintlint
     - reassign
     - recvcheck

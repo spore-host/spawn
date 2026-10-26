@@ -29,12 +29,21 @@ func TestFootprintAllRegionsHelpMatchesTheResolver(t *testing.T) {
 	}
 }
 
-// #1161: the help and footer must not call default-bus rules "schedules".
+// #1161: the help and footer must not call EventBridge rules "schedules".
+// #1219: Scheduler schedules ARE scanned now, so the help must say so and must
+// no longer claim they are not.
 func TestFootprintSaysRulesNotSchedules(t *testing.T) {
-	if strings.Contains(footprintCmd.Long, "EventBridge schedules") {
-		t.Error("footprint help says it reports EventBridge schedules; it lists default-bus rules")
+	long := strings.Join(strings.Fields(footprintCmd.Long), " ")
+	if strings.Contains(long, "EventBridge schedules") {
+		t.Error("footprint help says it reports \"EventBridge schedules\"; rules and Scheduler schedules are different things")
 	}
-	if !strings.Contains(footprintCmd.Long, "default event bus") {
-		t.Error("footprint help does not say the EventBridge rows are default-bus rules")
+	if !strings.Contains(long, "default event bus") {
+		t.Error("footprint help does not say which buses the EventBridge rules come from")
+	}
+	if !strings.Contains(long, "EventBridge Scheduler schedules (what 'spawn schedule' creates") {
+		t.Error("footprint help does not say it scans the Scheduler schedules 'spawn schedule' creates")
+	}
+	if strings.Contains(long, "not scanned") {
+		t.Error("footprint help still says something is not scanned")
 	}
 }

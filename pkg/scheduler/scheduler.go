@@ -63,6 +63,11 @@ func NewClientWithTableName(cfg aws.Config, lambdaARN, roleARN, accountID, table
 	}
 }
 
+// ScheduleDescriptionPrefix opens the Description of every EventBridge
+// Scheduler schedule CreateSchedule makes. `spawn footprint` identifies a
+// schedule as spawn's by it when the target does not say so (#1219).
+const ScheduleDescriptionPrefix = "Spawn scheduled execution: "
+
 // GenerateScheduleID creates a unique schedule ID
 func GenerateScheduleID() string {
 	return fmt.Sprintf("sched-%s", time.Now().Format("20060102-150405"))
@@ -73,7 +78,7 @@ func (c *Client) CreateSchedule(ctx context.Context, record *ScheduleRecord) (st
 	// Create EventBridge schedule
 	scheduleInput := &scheduler.CreateScheduleInput{
 		Name:               aws.String(record.ScheduleID),
-		Description:        aws.String(fmt.Sprintf("Spawn scheduled execution: %s", record.ScheduleName)),
+		Description:        aws.String(ScheduleDescriptionPrefix + record.ScheduleName),
 		ScheduleExpression: aws.String(record.ScheduleExpression),
 		FlexibleTimeWindow: &schedulertypes.FlexibleTimeWindow{
 			Mode: schedulertypes.FlexibleTimeWindowModeOff,

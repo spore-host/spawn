@@ -26,17 +26,29 @@ observability:
 `spored` logs `Starting metrics server on <bind>:<port><path>` when it does start
 one, so that line's absence is the check.
 
-**2. Nothing sets the discovery tag.** `deployment/prometheus/prometheus.yaml`'s
+**2. Nothing sets the discovery tag, and `--tag` cannot.** `deployment/prometheus/prometheus.yaml`'s
 `spawn-ec2` job uses EC2 service discovery filtered on
-`tag:spawn:metrics-enabled = true`. No spawn launch path sets that tag — it is
-read in one place (`pkg/provider/ec2.go`) and written nowhere. Tag at launch:
+`tag:spawn:metrics-enabled = true`. No spawn launch path sets that tag: it is
+read in one place (`pkg/provider/ec2.go`) and written nowhere. `spawn launch
+--tag` will not set it either, because every `spawn:` key is reserved and
+`--tag spawn:metrics-enabled=true` is refused. Until a launch flag exists
+([#1308](https://github.com/spore-host/spawn/issues/1308)), set it after launch
+with the AWS CLI:
 
 ```sh
-spawn launch my-worker --instance-type c7g.large \
-  --tag spawn:metrics-enabled=true
+spawn launch my-worker --instance-type c7g.large
+aws ec2 create-tags --region <region> --resources <instance-id> \
+  --tags Key=spawn:metrics-enabled,Value=true Key=spawn:metrics-bind,Value=0.0.0.0
+spawn connect my-worker -- sudo systemctl restart spored
 ```
 
-Without it, EC2 service discovery matches nothing and Prometheus reports a
+`spored` also reads these tags as its metrics config, but only when it starts,
+which is why the restart is there: `spawn:metrics-enabled` turns the server on
+and `spawn:metrics-bind` makes it listen beyond `localhost` (the default) so a
+scraper can reach it. If step 1's agent config already enables the server, the
+first tag alone is enough for discovery and the restart is not needed.
+
+Without the tag, EC2 service discovery matches nothing and Prometheus reports a
 healthy config with zero targets.
 
 You also need the scraper to reach port 9090 on the instance, which the default
