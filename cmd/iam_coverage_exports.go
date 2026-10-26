@@ -15,3 +15,8 @@ func PoolWorkerPolicy(account, region, specBucket, runID string, extraRead, extr
 func RootCommand() *cobra.Command {
 	return rootCmd
 }
+
+// BatchQueuePolicy is the inline policy of a batch queue's role (#1344).
+func BatchQueuePolicy(scheduleBucket, resultsBucket, resultsPrefix string) (string, error) {
+	return batchQueuePolicy(scheduleBucket, resultsBucket, resultsPrefix)
+}

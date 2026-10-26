@@ -263,6 +263,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaper's grants do not reach: `spawn cleanup --instance-roles` removes those
   under the same rule (and only the exact `spawn-pool-worker-<16 hex>` name
   its run-id tag hashes to), and `spawn pool drain` removes both names.
+- **`spawn launch --batch-queue` can upload its results** (#1344). With no
+  `--iam-role` or `--instance-profile`, a batch queue ran on the shared
+  `spored-instance-role`, which may write to no user bucket, so every results
+  and final-state upload from `spored run-queue` failed with AccessDenied
+  unless you brought your own role. A queue now gets a `spawn-instance-*` role,
+  as `spawn task run` does: the spored baseline, plus `s3:PutObject` and
+  `s3:AbortMultipartUpload` on `arn:aws:s3:::<result_s3_bucket>/<result_s3_prefix>/*`
+  and `s3:GetObject` on the queue files in the schedules bucket
+  (`schedules/*/params.yaml`). Queues with the same results location share one
+  role, and the reaper deletes it once no instance uses it (#1300). A
+  `result_s3_bucket` that is not a plain bucket name, or a `result_s3_prefix`
+  containing `*`, `?` or `$`, is now refused before anything is launched.
+  `--iam-role` and `--instance-profile` are still attached as given.
+- **The dashboard Lambdas' role script now grants what the Lambdas call**
+  (#1344). `lambda/dashboard-api/scripts/setup-dashboard-lambda-role.sh`
+  granted reads on two tables and one `UpdateItem`, far behind dashboard-api,
+  dashboard-websocket, dashboard-websocket-processor and cost-history-collector,
+  so running it would not have reproduced the hand-managed live role. It now
+  writes one inline policy with `put-role-policy`, so a re-run converges on it.
+  Every statement is scoped to the tables, indexes and keys the code uses:
+  the user-accounts, sweep, team, membership, WebSocket ticket and connection,
+  cost-history, lagotto watch/history and Slack workspace tables (names follow
+  the Lambdas' env overrides); the processor's two DynamoDB streams; `GetObject`
+  on the strata registry and `PutObject` on its `locks/` prefix
+  (`STRATA_REGISTRY_BUCKET`, default `strata-registry`). Two grants are written
+  only when their resource exists: `secretsmanager:GetSecretValue` on the
+  `SLACK_SECRETS_ARN` secret (from the env or the deployed function's
+  configuration), and `execute-api:ManageConnections` on the
+  `spawn-dashboard-websocket` API's `@connections`. It detaches, and if nothing
+  else uses it deletes, the customer-managed policy earlier versions created.
+- **The dashboard's member-account read role is read-only and narrow**
+  (#1344). `setup-cross-account-role.sh` attached the AWS-managed
+  `AmazonEC2ReadOnlyAccess` and `AmazonDynamoDBReadOnlyAccess`. Every
+  signed-in dashboard user can assume this role directly, so any of them could
+  read every EC2 resource and every DynamoDB table in the member account. The
+  role now carries one inline `ec2:DescribeInstances` grant, the only EC2 call
+  the dashboard makes on it, and the script detaches the two managed policies.
+  Its trust names `Cognito_SpawnDashboard_Auth_Role`, as the production role's
+  does, instead of the whole infra account.
+- **Terminating from the dashboard in a member account explains why it
+  cannot** (#1344). The read role does not grant terminate, and should not:
+  every dashboard user can assume it directly, so a terminate grant would skip
+  the dashboard's ownership check. The dashboard now answers 403 with the
+  `spawn terminate <id>` command instead of a raw 500. Choosing a terminate
+  path is spawn#1349.
 
 - **`spawn slurm submit` works** (#1217). It handed off to `spawn launch
   --param-file` without a spore name, which launch refuses, so every submit

@@ -308,6 +308,9 @@ func handleTerminateInstance(ctx context.Context, cfg aws.Config, callerCreds aw
 
 		foundRegion = region
 		if err := terminateCancellingSpot(ctx, ec2Client, instance); err != nil {
+			if isEC2Denied(err) {
+				return errorResponse(403, terminateDeniedMessage(instanceID)), nil
+			}
 			return errorResponse(500, fmt.Sprintf("Failed to terminate instance: %v", err)), nil
 		}
 		break
@@ -369,4 +372,21 @@ func getTagValue(tags []types.Tag, key string) string {
 		}
 	}
 	return ""
+}
+
+// isEC2Denied reports whether err is EC2 refusing the call for lack of
+// permission.
+func isEC2Denied(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "UnauthorizedOperation") || strings.Contains(msg, "AccessDenied")
+}
+
+// terminateDeniedMessage is what the dashboard says when the member account's
+// read role refuses the terminate, which it does by design today: every
+// signed-in dashboard user can assume that role directly, so a terminate grant
+// on it would let any of them terminate any spore in the account (#1344,
+// spawn#1349). The CLI terminates as the user.
+func terminateDeniedMessage(instanceID string) string {
+	return fmt.Sprintf("Terminating from the dashboard is not available for this account yet (spawn#1349). "+
+		"Terminate it from the CLI: spawn terminate %s", instanceID)
 }

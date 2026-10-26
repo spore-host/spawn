@@ -25,7 +25,11 @@ fi
 
 echo "Setting up cross-account role in dev account..."
 
-# Create trust policy document
+# The trust names the dashboard's Cognito authenticated role, the identity the
+# browser (spore-host web/js/main.js) and dashboard-api (#815) assume this role
+# with. It used to name the whole infra account's root, which let any principal
+# there that was granted sts:AssumeRole read this account; the role production
+# runs with names Cognito_SpawnDashboard_Auth_Role (lambda/dashboard-api/cross_account.go).
 TRUST_POLICY=$(cat <<EOF
 {
   "Version": "2012-10-17",
@@ -33,7 +37,7 @@ TRUST_POLICY=$(cat <<EOF
     {
       "Effect": "Allow",
       "Principal": {
-        "AWS": "arn:aws:iam::${INFRA_ACCOUNT_ID}:root"
+        "AWS": "arn:aws:iam::${INFRA_ACCOUNT_ID}:role/Cognito_SpawnDashboard_Auth_Role"
       },
       "Action": "sts:AssumeRole"
     }
@@ -42,29 +46,60 @@ TRUST_POLICY=$(cat <<EOF
 EOF
 )
 
-# Create role
-aws iam create-role \
+if aws iam get-role --profile "$PROFILE" --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+  aws iam update-assume-role-policy \
+    --profile "$PROFILE" \
+    --role-name "$ROLE_NAME" \
+    --policy-document "$TRUST_POLICY"
+else
+  aws iam create-role \
+    --profile "$PROFILE" \
+    --role-name "$ROLE_NAME" \
+    --assume-role-policy-document "$TRUST_POLICY" \
+    --description "Cross-account read access for spawn dashboard API" \
+    --tags Key=spawn:managed,Value=true Key=spawn:purpose,Value=dashboard-read
+fi
+
+# What the dashboard reads in this account, and only that (#1344): every EC2
+# call made on this role, by dashboard-api and by the browser, is
+# DescribeInstances. Every signed-in dashboard user can assume this role
+# directly, so it must stay read-only and narrow. It used to carry the
+# AWS-managed AmazonEC2ReadOnlyAccess and AmazonDynamoDBReadOnlyAccess, which
+# let any of them read every EC2 resource and every DynamoDB table here. Same
+# inline policy name as spore-host's scripts/setup-dashboard-cross-account-role.sh,
+# so both converge on one document. Terminate is deliberately NOT granted:
+# see spawn#1349.
+READ_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DescribeInstances",
+      "Effect": "Allow",
+      "Action": ["ec2:DescribeInstances"],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+)
+aws iam put-role-policy \
   --profile "$PROFILE" \
   --role-name "$ROLE_NAME" \
-  --assume-role-policy-document "$TRUST_POLICY" \
-  --description "Cross-account read access for spawn dashboard API" \
-  2>/dev/null || echo "Role already exists"
+  --policy-name "SpawnDashboardEC2ReadAccess" \
+  --policy-document "$READ_POLICY"
 
-# Attach read-only EC2 policy
-aws iam attach-role-policy \
-  --profile "$PROFILE" \
-  --role-name "$ROLE_NAME" \
-  --policy-arn "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess" \
- 
+# Detach the AWS-managed policies earlier versions attached.
+for MANAGED in AmazonEC2ReadOnlyAccess AmazonDynamoDBReadOnlyAccess; do
+  ARN="arn:aws:iam::aws:policy/$MANAGED"
+  if aws iam list-attached-role-policies --profile "$PROFILE" --role-name "$ROLE_NAME" \
+      --query "AttachedPolicies[?PolicyArn=='$ARN'].PolicyArn" --output text | grep -q .; then
+    aws iam detach-role-policy --profile "$PROFILE" --role-name "$ROLE_NAME" --policy-arn "$ARN"
+    echo "✓ Detached $MANAGED"
+  fi
+done
 
-# Attach read-only DynamoDB policy
-aws iam attach-role-policy \
-  --profile "$PROFILE" \
-  --role-name "$ROLE_NAME" \
-  --policy-arn "arn:aws:iam::aws:policy/AmazonDynamoDBReadOnlyAccess" \
- 
-
-echo "✓ Cross-account role created: arn:aws:iam::435415984226:role/$ROLE_NAME"
+echo "✓ Cross-account role ready: arn:aws:iam::${ACCOUNT_ID}:role/$ROLE_NAME"
 echo ""
 echo "Verify with:"
 echo "  aws iam get-role --profile $PROFILE --role-name $ROLE_NAME"
