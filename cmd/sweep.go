@@ -336,12 +336,18 @@ func buildLaunchConfigFromParams(base aws.LaunchConfig, defaults, params map[str
 				config.Tags["spawn:step"] = s
 			}
 		case "command", "user_command":
-			// Store command for user-data execution
+			// The row's command. A short one-liner rides the spawn:command tag
+			// as before; one the tag cannot carry (over EC2's 256-char value
+			// cap, or multi-line, like a converted Slurm script, #1242) is
+			// embedded in the row's user data instead — see embeddedCommand.
 			if s, ok := val.(string); ok {
-				if config.Tags == nil {
-					config.Tags = make(map[string]string)
+				config.JobArrayCommand = s
+				if commandFitsTag(s) {
+					if config.Tags == nil {
+						config.Tags = make(map[string]string)
+					}
+					config.Tags["spawn:command"] = s
 				}
-				config.Tags["spawn:command"] = s
 			}
 		case "user_data":
 			if s, ok := val.(string); ok {

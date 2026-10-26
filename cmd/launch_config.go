@@ -761,24 +761,32 @@ func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScr
 		ReadyGates:       readyGates,
 		CustomUserData:   customUserData,
 		// Embed --command in user-data instead of the 256-char spawn:command tag
-		// (#214/#246). Sweeps deliver per-instance commands via the tag (a short
-		// step ref), so only embed for a non-sweep launch — SweepID set means the
-		// tag path owns the command.
-		Command: nonSweepCommand(config),
+		// (#214/#246). A sweep row's short command still rides the tag; see
+		// embeddedCommand.
+		Command: embeddedCommand(config),
 		// The --command wrapper must write the file spored watches (#1131).
 		CompletionFile: config.CompletionFile,
 	})
 }
 
-// nonSweepCommand returns the --command to embed in user-data, or "" when the
-// command should ride the spawn:command tag instead (the parameter-sweep path,
-// which sets a short per-instance command tag). Embedding lifts the 256-char tag
-// cap for the common single-launch case (#214/#246).
-func nonSweepCommand(config *aws.LaunchConfig) string {
-	if config.SweepID != "" {
+// embeddedCommand returns the command to embed in user-data, or "" when it
+// rides the spawn:command tag instead. A single launch always embeds, which
+// lifts the 256-char tag cap (#214/#246). A sweep row keeps the tag for a short
+// one-line command (the per-instance step ref the tag path was built for), and
+// embeds one the tag cannot carry: before #1242 such a row reached
+// RunInstances with an oversized tag and was refused.
+func embeddedCommand(config *aws.LaunchConfig) string {
+	if config.SweepID != "" && commandFitsTag(config.JobArrayCommand) {
 		return ""
 	}
 	return config.JobArrayCommand
+}
+
+// commandFitsTag reports whether command can ride the spawn:command tag: EC2
+// caps a tag value at 256 characters, and the bootstrap reads it back as a
+// single line.
+func commandFitsTag(command string) bool {
+	return len(command) <= 256 && !strings.ContainsAny(command, "\r\n")
 }
 
 // collectPluginDeclarations merges plugin refs from --plugin flags and --config file.

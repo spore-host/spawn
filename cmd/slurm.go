@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
@@ -96,7 +98,7 @@ Supported Slurm directives:
   --mem=XGB            → Memory requirement for instance selection
   --cpus-per-task=N    → CPU requirement for instance selection
   --gres=gpu:N         → GPU requirement and instance selection
-  --nodes=N            → Multi-node MPI job (requires --mpi flag)
+  --nodes=N            → Refused when N > 1 (launch with spawn launch --mpi)
   --job-name=NAME      → Instance name prefix
 
 Custom #SPAWN directives (optional):
@@ -105,9 +107,16 @@ Custom #SPAWN directives (optional):
   #SPAWN --spot=true           → Enable spot instances
   #SPAWN --ami=AMI_ID          → Override AMI
 
+Each array task (or the single job) becomes one row whose command: is the
+job script, with SLURM_* variables exported. Multi-node MPI jobs (--nodes > 1)
+cannot be expressed as a parameter file and are refused.
+
+Launch the file in the foreground (--no-detach): a detached sweep does not run
+row commands yet. An --array=...%N limit becomes --max-concurrent N.
+
 Example:
   spawn slurm convert train.sbatch --output-file params.yaml
-  spawn launch train --param-file params.yaml
+  spawn launch train --param-file params.yaml --no-detach
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runSlurmConvert,
@@ -202,7 +211,7 @@ func runSlurmConvert(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to write output file: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "\n✅ Conversion complete!\n")
-		fmt.Fprintf(os.Stderr, "\nTo launch: spawn launch --params %s\n", slurmOutputFile)
+		fmt.Fprintf(os.Stderr, "\nTo launch: spawn %s\n", strings.Join(slurmLaunchArgs(job, slurmOutputFile), " "))
 	} else {
 		// Write to stdout
 		fmt.Println(string(yamlData))
@@ -281,7 +290,7 @@ func runSlurmEstimate(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "\n📝 Next Steps:\n")
 	fmt.Fprintf(os.Stderr, "  1. Review the estimate above\n")
 	fmt.Fprintf(os.Stderr, "  2. Convert: spawn slurm convert %s --output-file params.yaml\n", scriptPath)
-	fmt.Fprintf(os.Stderr, "  3. Launch:  spawn launch <name> --param-file params.yaml\n")
+	fmt.Fprintf(os.Stderr, "  3. Launch:  spawn %s\n", strings.Join(slurmLaunchArgs(job, "params.yaml"), " "))
 	fmt.Fprintf(os.Stderr, "\n  Or submit directly: spawn slurm submit %s --yes\n", scriptPath)
 
 	return nil
@@ -299,6 +308,13 @@ func runSlurmSubmit(cmd *cobra.Command, args []string) error {
 
 	// Print job summary
 	printJobSummary(job)
+
+	// Convert before asking: a job that cannot be launched (an MPI job) must
+	// fail before the user is asked to approve its cost, not after.
+	config, err := slurm.ConvertToSpawn(job)
+	if err != nil {
+		return fmt.Errorf("failed to convert to spawn format: %w", err)
+	}
 
 	// Estimate cost. This gates a real, billable launch, so the figure comes from
 	// live AWS pricing — a stale estimate here is what a user says yes to.
@@ -326,12 +342,10 @@ func runSlurmSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Convert to spawn parameters
-	fmt.Fprintf(os.Stderr, "Converting to spawn parameter format...\n")
-	config, err := slurm.ConvertToSpawn(job)
-	if err != nil {
-		return fmt.Errorf("failed to convert to spawn format: %w", err)
-	}
+	// Launch where the cost was quoted. The estimate's region already honours
+	// --region over the script's #SPAWN --region; without this the file's own
+	// region (or launch's auto-detect) would pick a region nobody priced.
+	config.Defaults["region"] = est.Region
 
 	// Write to temporary file
 	tmpFile, err := os.CreateTemp("", "spawn-slurm-*.yaml")
@@ -360,13 +374,9 @@ func runSlurmSubmit(cmd *cobra.Command, args []string) error {
 		self = "spawn"
 	}
 
-	launchArgs := []string{"launch", "--param-file", tmpFile.Name()}
+	launchArgs := slurmLaunchArgs(job, tmpFile.Name())
 	if slurmForceYes {
 		launchArgs = append(launchArgs, "--yes")
-	}
-	// Propagate the spot flag if set
-	if spot {
-		launchArgs = append(launchArgs, "--spot")
 	}
 
 	launchCmd := exec.CommandContext(context.Background(), self, launchArgs...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
@@ -374,6 +384,24 @@ func runSlurmSubmit(cmd *cobra.Command, args []string) error {
 	launchCmd.Stdout = os.Stdout
 	launchCmd.Stderr = os.Stderr
 	return launchCmd.Run()
+}
+
+// slurmLaunchArgs is the spawn command line that launches the param file
+// converted from job, without the leading binary name.
+//
+//   - The spore name is required by launch (#1217: submit used to pass none, so
+//     every submit failed after the user approved the cost). It comes from
+//     slurm.SporeName, which makes a valid DNS label of the job name.
+//   - --no-detach, because a detached sweep launches its rows with no user data
+//     and so never runs their command (#1323); the foreground path runs it.
+//   - --max-concurrent carries --array's %N limit, which launch accepts only as
+//     a flag.
+func slurmLaunchArgs(job *slurm.SlurmJob, paramFile string) []string {
+	args := []string{"launch", slurm.SporeName(job), "--param-file", paramFile, "--no-detach"}
+	if job.IsArrayJob() && job.Array.MaxRunning > 0 {
+		args = append(args, "--max-concurrent", strconv.Itoa(job.Array.MaxRunning))
+	}
+	return args
 }
 
 // printJobSummary prints a summary of the parsed Slurm job
