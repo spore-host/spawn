@@ -26,8 +26,8 @@ type costLimitDecision struct {
 	Binds   bool
 	FiresAt time.Time
 	// InstanceID names the instance in the command the warning suggests, and
-	// PerHour is its compute plus EBS rate, which prices that command's extra
-	// minute.
+	// PerHour is its running rate as the cap counts it (compute + EBS + public
+	// IPv4, enforcedFootprint), which prices that command's extra minute.
 	InstanceID string
 	PerHour    float64
 }
@@ -70,8 +70,13 @@ func checkExtendCostLimitFlags(explicit float64, raise, keep bool) error {
 // continuously from now to the new deadline — the worst case, so the cap cannot
 // fire first:
 //
-//	compute: spawn:price-per-hour x (compute so far + now..deadline)
-//	EBS:     spawn:ebs-hourly-cost x (original launch..deadline)
+//	compute:              spawn:price-per-hour x (compute so far + now..deadline)
+//	EBS:                  spawn:ebs-hourly-cost x (original launch..deadline)
+//	auto-assigned IPv4:   $0.005/hr x spawn:public-ipv4-count x compute hours
+//	Elastic IPs:          $0.005/hr x spawn:elastic-ipv4-count x (original launch..deadline)
+//
+// all through costLimitSpend (pkg/costmodel.Accrue), the function the agent
+// enforces with, so the two cannot drift (#51).
 //
 // Compute so far is the cumulative spawn:compute-seconds spored keeps across every
 // boot (#928), and EBS bills on wall clock from the ORIGINAL launch
@@ -103,8 +108,6 @@ func decideCostLimit(instance *aws.InstanceInfo, newDeadline, now time.Time, exp
 		d.Reason = "left unchanged: no spawn:price-per-hour tag, so whether it stops this instance before the new deadline cannot be computed"
 		return d
 	}
-	ebsRate := parseTagFloat(instance.Tags["spawn:ebs-hourly-cost"])
-
 	launch := originalLaunchTime(instance)
 	if launch.IsZero() {
 		d.Reason = "left unchanged: no launch time on the instance, so whether it stops this instance before the new deadline cannot be computed"
@@ -118,7 +121,7 @@ func decideCostLimit(instance *aws.InstanceInfo, newDeadline, now time.Time, exp
 		remaining = 0
 	}
 	soFar := computeSoFar(instance, launch, now)
-	d.Needed = rate*(soFar+remaining).Hours() + ebsRate*newDeadline.Sub(launch).Hours()
+	d.Needed = costLimitSpend(instance, soFar+remaining, newDeadline.Sub(launch)).Total
 
 	if d.Current >= d.Needed {
 		// The existing cap already reaches the new deadline; nothing to do.
@@ -130,11 +133,11 @@ func decideCostLimit(instance *aws.InstanceInfo, newDeadline, now time.Time, exp
 		return d
 	}
 	d.Binds = true
-	d.PerHour = rate + ebsRate
-	spent := rate*soFar.Hours() + ebsRate*now.Sub(launch).Hours()
+	d.PerHour = enforcedFootprint(instance).RunningPerHour()
+	spent := costLimitSpend(instance, soFar, now.Sub(launch)).Total
 	d.FiresAt = now
 	if left := d.Current - spent; left > 0 {
-		d.FiresAt = now.Add(time.Duration(left / (rate + ebsRate) * float64(time.Hour)))
+		d.FiresAt = now.Add(time.Duration(left / d.PerHour * float64(time.Hour)))
 	}
 	d.Reason = "kept"
 	return d

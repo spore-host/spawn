@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/cost"
+	"github.com/spore-host/spawn/pkg/costmodel"
 )
 
 var costCmd = &cobra.Command{
@@ -30,7 +31,9 @@ record), shows an on-the-fly estimate of its cost so far: the on-demand rate
 (spawn:price-per-hour tag) × its compute time across every stop and start
 (spored's spawn:compute-seconds; compute bills only while running), plus EBS
 over the time since first launch when spawn:ebs-hourly-cost is set (EBS bills
-while stopped too).
+while stopped too), plus $0.005/hr for each public IPv4 address spored has
+recorded (an Elastic IP bills while stopped too). The total is the figure
+--cost-limit is enforced against.
 
 Examples:
   spawn cost sweep-20260124-140530
@@ -307,14 +310,28 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 	fmt.Fprintf(&b, "Rate:            $%.4f/hr (spawn:price-per-hour)\n", rate)
 	est := estimateInstanceCost(inst, rt.Compute)
 	if rt.ComputeFromTag {
-		fmt.Fprintf(&b, "Est. compute:    ~$%.2f (rate × compute time; excludes EBS/network)\n", est)
+		fmt.Fprintf(&b, "Est. compute:    ~$%.2f (rate × compute time)\n", est)
 	} else {
-		fmt.Fprintf(&b, "Est. compute:    at most ~$%.2f (rate × wall clock; excludes EBS/network)\n", est)
+		fmt.Fprintf(&b, "Est. compute:    at most ~$%.2f (rate × wall clock)\n", est)
 	}
-	if ebs := parseTagFloat(inst.Tags["spawn:ebs-hourly-cost"]); ebs > 0 && rt.Since > 0 {
+	// The rest, and the total, through the function --cost-limit is enforced
+	// with (costLimitSpend, pkg/costmodel), so this cannot disagree with it (#51).
+	spend := costLimitSpend(inst, rt.Compute, rt.Since)
+	fp := enforcedFootprint(inst)
+	if fp.EBSPerHour > 0 && rt.Since > 0 {
 		fmt.Fprintf(&b, "Est. storage:    ~$%.2f (spawn:ebs-hourly-cost × time since launch; EBS bills while stopped too)\n",
-			ebs*rt.Since.Hours())
+			spend.EBS)
 	}
+	switch {
+	case !costmodel.IPv4Measured(inst.Tags, "spawn"):
+		if inst.PublicIP != "" {
+			fmt.Fprintln(&b, "Public IPv4:     not recorded by spored (it predates #51), so not counted; AWS bills $0.005/hr per address")
+		}
+	case fp.PublicIPv4+fp.ElasticIPv4 > 0:
+		fmt.Fprintf(&b, "Public IPv4:     ~$%.2f (%d auto-assigned + %d Elastic × $%.3f/hr, static rate as of %s)\n",
+			spend.PublicIPv4, fp.PublicIPv4, fp.ElasticIPv4, costmodel.PublicIPv4PerHour, costmodel.RatesAsOf)
+	}
+	fmt.Fprintf(&b, "Est. total:      ~$%.2f (what --cost-limit counts; excludes network)\n", spend.Total)
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "Note: a single instance has no sweep cost record — this is an on-the-fly")
 	fmt.Fprintln(&b, "estimate from the instance's own tags, not a billing figure.")

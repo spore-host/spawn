@@ -174,7 +174,7 @@ func TestSporedBaselinePolicyDoc(t *testing.T) {
 		t.Fatalf("baseline policy is not valid JSON:\n%s", doc)
 	}
 	// ec2:DescribeVolumes is required alongside ec2:DescribeInstances for
-	// LookupAndTagEBSCost (pkg/provider/ec2.go) to price the instance's EBS
+	// MeasureCostFootprint (pkg/provider/ec2.go) to price the instance's EBS
 	// volumes; its absence 403'd the EBS cost lookup on every instance
 	// carrying this policy (spawn#517).
 	for _, want := range []string{"ec2:DescribeTags", "ec2:DescribeInstances", "ec2:DescribeVolumes", "ec2:TerminateInstances", "ec2:CreateTags"} {

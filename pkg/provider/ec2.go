@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/spawn/pkg/costmodel"
 	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/instancestate"
 	"github.com/spore-host/spawn/pkg/observability"
@@ -466,25 +467,6 @@ func (p *EC2Provider) GetProviderType() string {
 	return "ec2"
 }
 
-// ebsPricePerGBMonth returns the approximate per-GB-month price for common EBS volume types.
-// Prices are for us-east-1; other regions are within ~10% of these.
-func ebsPricePerGBMonth(volumeType string) float64 {
-	switch strings.ToLower(volumeType) {
-	case "gp3":
-		return 0.08
-	case "gp2":
-		return 0.10
-	case "io1", "io2":
-		return 0.125
-	case "st1":
-		return 0.045
-	case "sc1":
-		return 0.015
-	default:
-		return 0.08 // gp3 default
-	}
-}
-
 // CountOtherManagedInstances counts spawn:managed instances in this region that
 // are running or pending, excluding this instance (#260).
 func (p *EC2Provider) CountOtherManagedInstances(ctx context.Context) int {
@@ -510,32 +492,35 @@ func (p *EC2Provider) CountOtherManagedInstances(ctx context.Context) int {
 	return count
 }
 
-// LookupAndTagEBSCost queries the instance's attached volumes, calculates the hourly
-// EBS storage cost, and stores it as spawn:ebs-hourly-cost. Called once at first
-// spored start; subsequent starts read the tag instead of re-querying.
+// MeasureCostFootprint measures what this instance pays for by the hour
+// beside compute — every attached EBS volume (size, IOPS, throughput) and every
+// public IPv4 address on any of its interfaces — and records it in the
+// spawn:ebs-hourly-cost, spawn:public-ipv4-count and spawn:elastic-ipv4-count
+// tags that --cost-limit is enforced from (pkg/costmodel, #51).
 //
-// The bool return distinguishes a real measurement from the safe fallback: a
-// fallback used to be a bare 0.003 indistinguishable from an actual measured
-// rate, so the caller's log line stated an unmeasured constant as fact
-// (spawn#517). measured is false whenever any part of the lookup could not
-// complete (DescribeInstances denied/failed, DescribeVolumes denied/failed) —
-// including when it is denied by the very IAM policy spored itself provisions
-// (fixed in the same issue by granting ec2:DescribeVolumes).
-func (p *EC2Provider) LookupAndTagEBSCost(ctx context.Context) (float64, bool) {
-	if p.config.EBSHourlyCost > 0 {
-		return p.config.EBSHourlyCost, true // already known from tag
-	}
-
-	// Describe the instance to get block device mappings
+// It measures every time it is called, not once: a volume attached or an
+// Elastic IP associated after the first boot (the launch EIP of a
+// multi-interface EFA launch is associated once the instance is running, so
+// spored's first look can precede it) used to be missed for the instance's
+// whole life. A recorded value never goes DOWN: the cost model prices the
+// current footprint over the instance's whole life, so lowering it after a
+// detach would retroactively forgive cost already incurred, and the cap would
+// fire late. Keeping the maximum can overstate after a detach — the safe
+// direction.
+//
+// The bool distinguishes a real measurement from a failure (spawn#517):
+// measured is false whenever DescribeInstances or DescribeVolumes failed or the
+// instance had no volumes, and nothing is tagged then.
+func (p *EC2Provider) MeasureCostFootprint(ctx context.Context) (CostFootprint, bool) {
 	descOut, err := p.ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{p.identity.InstanceID},
 	})
 	if err != nil || len(descOut.Reservations) == 0 || len(descOut.Reservations[0].Instances) == 0 {
-		log.Printf("Warning: could not describe instance for EBS cost lookup: %v", err)
-		return 0.003, false // safe fallback, NOT a measurement
+		log.Printf("Warning: could not describe instance for cost footprint: %v", err)
+		return CostFootprint{}, false
 	}
-
 	inst := descOut.Reservations[0].Instances[0]
+
 	var volumeIDs []string
 	for _, bdm := range inst.BlockDeviceMappings {
 		if bdm.Ebs != nil && bdm.Ebs.VolumeId != nil {
@@ -543,41 +528,102 @@ func (p *EC2Provider) LookupAndTagEBSCost(ctx context.Context) (float64, bool) {
 		}
 	}
 	if len(volumeIDs) == 0 {
-		return 0.003, false
+		return CostFootprint{}, false
 	}
-
-	// Describe volumes to get sizes and types
-	volOut, err := p.ec2Client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
-		VolumeIds: volumeIDs,
-	})
+	volOut, err := p.ec2Client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{VolumeIds: volumeIDs})
 	if err != nil {
-		log.Printf("Warning: could not describe volumes for EBS cost lookup: %v", err)
-		return 0.003, false
+		log.Printf("Warning: could not describe volumes for cost footprint: %v", err)
+		return CostFootprint{}, false
 	}
 
-	const hoursPerMonth = 730.0
-	var totalHourlyCost float64
-	for _, vol := range volOut.Volumes {
-		sizeGB := float64(aws.ToInt32(vol.Size))
-		pricePerGBMonth := ebsPricePerGBMonth(string(vol.VolumeType))
-		totalHourlyCost += sizeGB * pricePerGBMonth / hoursPerMonth
+	fp := costFootprintOf(inst, volOut.Volumes)
+	log.Printf("Cost footprint: %d vol(s) $%.4f/hr EBS, %d auto-assigned + %d Elastic public IPv4",
+		len(volOut.Volumes), fp.EBSHourlyCost, fp.PublicIPv4, fp.ElasticIPv4)
+
+	tags := make([]types.Tag, 0, 3)
+	for _, t := range footprintTagWrites(fp, inst.Tags) {
+		tags = append(tags, types.Tag{Key: aws.String(t[0]), Value: aws.String(t[1])})
 	}
+	if len(tags) > 0 {
+		_, _ = p.ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
+			Resources: []string{p.identity.InstanceID},
+			Tags:      tags,
+		})
+	}
+	return fp, true
+}
 
-	log.Printf("EBS volumes: %d vol(s), hourly cost = $%.4f/hr", len(volOut.Volumes), totalHourlyCost)
+// CostFootprint is the non-compute part of what an instance pays for by the
+// hour, as MeasureCostFootprint measured it.
+type CostFootprint struct {
+	EBSHourlyCost float64
+	PublicIPv4    int // auto-assigned (Amazon-owned)
+	ElasticIPv4   int
+}
 
-	// Store as a tag so subsequent spored starts don't need to re-query
-	_, _ = p.ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
-		Resources: []string{p.identity.InstanceID},
-		Tags: []types.Tag{
-			{
-				Key:   aws.String(tagprefix.Tag("ebs-hourly-cost")),
-				Value: aws.String(strconv.FormatFloat(totalHourlyCost, 'f', 6, 64)),
-			},
-		},
-	})
+// costFootprintOf prices an instance's volumes and counts its public IPv4
+// addresses from what DescribeInstances and DescribeVolumes returned. Split out
+// so the counting is testable without EC2.
+func costFootprintOf(inst types.Instance, vols []types.Volume) CostFootprint {
+	var fp CostFootprint
+	for _, v := range vols {
+		fp.EBSHourlyCost += costmodel.VolumeHourly(costmodel.Volume{
+			Type:       string(v.VolumeType),
+			SizeGiB:    aws.ToInt32(v.Size),
+			IOPS:       aws.ToInt32(v.Iops),
+			Throughput: aws.ToInt32(v.Throughput),
+		})
+	}
+	fp.PublicIPv4, fp.ElasticIPv4 = costmodel.CountIPv4(instanceAddresses(inst))
+	return fp
+}
 
-	p.config.EBSHourlyCost = totalHourlyCost
-	return totalHourlyCost, true
+// instanceAddresses lists every public IPv4 association on every interface of
+// the instance, primary and secondary private addresses alike. With no
+// interfaces reported it falls back to the instance's PublicIpAddress, owner
+// unknown (counted as Elastic, i.e. billing on the wall clock: the safe side).
+func instanceAddresses(inst types.Instance) []costmodel.Address {
+	var out []costmodel.Address
+	for _, ni := range inst.NetworkInterfaces {
+		if ni.Association != nil {
+			out = append(out, costmodel.Address{PublicIP: aws.ToString(ni.Association.PublicIp), IPOwnerID: aws.ToString(ni.Association.IpOwnerId)})
+		}
+		for _, pa := range ni.PrivateIpAddresses {
+			if pa.Association != nil {
+				out = append(out, costmodel.Address{PublicIP: aws.ToString(pa.Association.PublicIp), IPOwnerID: aws.ToString(pa.Association.IpOwnerId)})
+			}
+		}
+	}
+	if len(inst.NetworkInterfaces) == 0 && aws.ToString(inst.PublicIpAddress) != "" {
+		out = append(out, costmodel.Address{PublicIP: aws.ToString(inst.PublicIpAddress)})
+	}
+	return out
+}
+
+// footprintTagWrites is the tags (key, value) to write for a measured
+// footprint: each one whose value would RISE above what the instance already
+// carries (see MeasureCostFootprint for why it never falls), or is absent.
+func footprintTagWrites(fp CostFootprint, current []types.Tag) [][2]string {
+	have := map[string]string{}
+	for _, t := range current {
+		have[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	var out [][2]string
+	ebsKey := tagprefix.Tag(costmodel.TagEBSHourlyCost)
+	old, ok := have[ebsKey]
+	if oldV, err := strconv.ParseFloat(old, 64); !ok || err != nil || fp.EBSHourlyCost > oldV {
+		out = append(out, [2]string{ebsKey, strconv.FormatFloat(fp.EBSHourlyCost, 'f', 6, 64)})
+	}
+	for _, c := range []struct {
+		key string
+		n   int
+	}{{tagprefix.Tag(costmodel.TagPublicIPv4), fp.PublicIPv4}, {tagprefix.Tag(costmodel.TagElasticIPv4), fp.ElasticIPv4}} {
+		old, ok := have[c.key]
+		if oldN, err := strconv.Atoi(old); !ok || err != nil || c.n > oldN {
+			out = append(out, [2]string{c.key, strconv.Itoa(c.n)})
+		}
+	}
+	return out
 }
 
 // loadConfigFromEC2Tags loads configuration from EC2 instance tags.
@@ -640,9 +686,17 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 			if s, err := strconv.ParseInt(*tag.Value, 10, 64); err == nil {
 				config.ComputeSeconds = s
 			}
-		case tagprefix.Tag("ebs-hourly-cost"):
+		case tagprefix.Tag(costmodel.TagEBSHourlyCost):
 			if f, err := strconv.ParseFloat(*tag.Value, 64); err == nil {
 				config.EBSHourlyCost = f
+			}
+		case tagprefix.Tag(costmodel.TagPublicIPv4):
+			if n, err := strconv.Atoi(*tag.Value); err == nil && n > 0 {
+				config.PublicIPv4Count = n
+			}
+		case tagprefix.Tag(costmodel.TagElasticIPv4):
+			if n, err := strconv.Atoi(*tag.Value); err == nil && n > 0 {
+				config.ElasticIPv4Count = n
 			}
 		case tagprefix.Tag("idle-timeout"):
 			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {

@@ -113,5 +113,5 @@ func costLimitScopeNote(limit float64) string {
 		return ""
 	}
 	return fmt.Sprintf("Cost limit:   $%.2f total (compute + storage; spored terminates the instance when "+
-		"compute + EBS reaches it, but storage that outlives the instance is only reclaimed by the reaper)", limit)
+		"compute + EBS + public IPv4 reaches it, but storage that outlives the instance is only reclaimed by the reaper)", limit)
 }

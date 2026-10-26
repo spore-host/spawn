@@ -69,9 +69,14 @@ type Config struct {
 	// will not auto-terminate" when the truth is "TTL: could not be read").
 	ConfigLoadError string
 	ComputeSeconds  int64   // accumulated compute seconds since launch (updated by spored)
-	EBSHourlyCost   float64 // actual EBS cost per hour (queried at first start, tagged for reuse)
-	IdleTimeout     time.Duration
-	HibernateOnIdle bool
+	EBSHourlyCost   float64 // EBS cost per hour of every attached volume (spawn:ebs-hourly-cost, measured by spored, #51)
+	// PublicIPv4Count and ElasticIPv4Count are the instance's public IPv4
+	// addresses, auto-assigned and Elastic (spawn:public-ipv4-count,
+	// spawn:elastic-ipv4-count): $0.005/hr each, counted by --cost-limit (#51).
+	PublicIPv4Count  int
+	ElasticIPv4Count int
+	IdleTimeout      time.Duration
+	HibernateOnIdle  bool
 	// TerminateOnIdle: the idle action is terminate, not stop
 	// (spawn:terminate-on-idle, set by `spawn service` and pool workers). It
 	// wins over HibernateOnIdle.
@@ -226,14 +231,11 @@ type Provider interface {
 	// GetProviderType returns the provider type ("ec2" or "local")
 	GetProviderType() string
 
-	// LookupAndTagEBSCost returns the hourly EBS storage cost, querying AWS if
-	// not already cached in the spawn:ebs-hourly-cost tag. The bool reports
-	// whether the value was actually measured (DescribeInstances/DescribeVolumes
-	// both succeeded and returned volumes) as opposed to an un-measured
-	// fallback — the two cases must be distinguishable to the caller, since a
-	// fallback logged in the same shape as a measurement is indistinguishable
-	// from real data (spawn#517).
-	LookupAndTagEBSCost(ctx context.Context) (cost float64, measured bool)
+	// MeasureCostFootprint measures the instance's EBS volumes and public IPv4
+	// addresses and records them in the tags --cost-limit is enforced from
+	// (#51). The bool reports whether it was actually measured, as opposed to
+	// a failed lookup (spawn#517).
+	MeasureCostFootprint(ctx context.Context) (fp CostFootprint, measured bool)
 
 	// CountOtherManagedInstances returns the number of spawn:managed instances in
 	// this instance's region that are running or pending, EXCLUDING this one.

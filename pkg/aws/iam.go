@@ -951,7 +951,7 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 
 	// Describe* are read-only and stay on "*" (Describe APIs don't support
 	// resource-level IAM scoping). DescribeVolumes is required alongside
-	// DescribeInstances for LookupAndTagEBSCost (pkg/provider/ec2.go): it reads
+	// DescribeInstances for MeasureCostFootprint (pkg/provider/ec2.go): it reads
 	// the block-device mappings from DescribeInstances, then needs
 	// DescribeVolumes for the actual sizes/types to price them. Without it, the
 	// EBS cost lookup 403s on every instance whose role carries this policy —

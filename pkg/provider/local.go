@@ -264,8 +264,8 @@ func (p *LocalProvider) GetProviderType() string {
 	return "local"
 }
 
-func (p *LocalProvider) LookupAndTagEBSCost(_ context.Context) (float64, bool) {
-	return 0, false // no EBS on local provider
+func (p *LocalProvider) MeasureCostFootprint(_ context.Context) (CostFootprint, bool) {
+	return CostFootprint{}, false // no EBS or public IPv4 on the local provider
 }
 
 // CountOtherManagedInstances is not meaningful for the local provider — there's
