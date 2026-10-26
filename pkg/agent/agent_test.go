@@ -44,6 +44,8 @@ type stubProvider struct {
 	// Spot instance (#948); the call counts record every attempt.
 	stopErr, hibernateErr     error
 	stopCalls, hibernateCalls int
+	// terminateErr makes Terminate fail (#1205).
+	terminateErr error
 }
 
 func (s *stubProvider) GetIdentity(_ context.Context) (*provider.Identity, error) {
@@ -52,8 +54,14 @@ func (s *stubProvider) GetIdentity(_ context.Context) (*provider.Identity, error
 func (s *stubProvider) GetConfig(_ context.Context) (*provider.Config, error) {
 	return s.config, nil
 }
-func (s *stubProvider) RefreshConfig(_ context.Context) error       { return s.refreshConfigErr }
-func (s *stubProvider) Terminate(_ context.Context, _ string) error { s.terminated = true; return nil }
+func (s *stubProvider) RefreshConfig(_ context.Context) error { return s.refreshConfigErr }
+func (s *stubProvider) Terminate(_ context.Context, _ string) error {
+	if s.terminateErr != nil {
+		return s.terminateErr
+	}
+	s.terminated = true
+	return nil
+}
 func (s *stubProvider) Stop(_ context.Context, _ string) error {
 	s.stopCalls++
 	if s.stopErr != nil {
