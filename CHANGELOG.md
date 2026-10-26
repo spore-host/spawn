@@ -110,14 +110,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#1312).** Their flushes over SSM used to grant no output seconds, so they
   recorded `outputs_staged: "skipped"`. The hook now gets the budget it declares
   in its `# spawn-flush-outputs-seconds:` header as `$2`, the same grant spored
-  passes. `spawn terminate` grants up to the task's own
-  `lifecycle.flush_outputs_seconds` and waits for the hook's on-box bound (45 s
-  plus the grant plus 5 s, and SSM slack), which can be up to about 6 minutes
-  for a task that declares the maximum. The reaper ends instances one after
-  another inside its 900 s invocation, so it grants at most 30 s, and none once
-  fewer than 5 minutes of the invocation remain. A hook with no header, which
-  includes every hook written before v0.146.0, runs as before. The reaper change
-  takes effect when the reaper is redeployed.
+  passes. `spawn terminate` grants what the task declares in
+  `lifecycle.flush_outputs_seconds`, up to that field's 60 s default rather than
+  its 300 s maximum, because the instance bills for the whole wait. It waits for
+  the hook's on-box bound (45 s plus the grant plus 5 s) and 30 s of SSM slack,
+  so at most about 2.3 minutes, and it prints how long it may wait, then the
+  remaining wait every 30 s. The reaper ends instances one after another inside
+  its 900 s invocation, so it grants at most 30 s, and none once fewer than 5
+  minutes of the invocation remain. A hook with no header, which includes every
+  hook written before v0.146.0, runs as before. The reaper change takes effect
+  when the reaper is redeployed.
 
 ### Fixed
 
