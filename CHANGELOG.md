@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A task killed by a lifecycle limit now stages out its declared outputs,
+  best-effort and time-boxed** (#1297). A TTL, `lifecycle.cost_limit`, idle or
+  Spot kill used to upload `command.log` and `completion.json` but none of the
+  spec's `outputs`, so a capped run's partial evidence (a tool's own log, its
+  counters) was lost with the disk. The terminal-flush hook now copies each
+  declared output as the wrapper does (`aws s3 cp`, `--recursive` for a
+  directory, untagged), after the log and before the record, within a budget
+  set by the new `lifecycle.flush_outputs_seconds` (default 60, `0` disables
+  it, at most 300). spored grants that budget and extends the hook's 45 s
+  timeout by it plus 5 s, so the log and record still land; on a Spot
+  interruption it grants at most 40 s, so the whole flush stays within 90 s of
+  the 2-minute notice. The record states the outcome in the new
+  `outputs_staged` (`complete`, `partial`, `skipped` or `disabled`) and names
+  each output that did not land in `outputs_not_staged`, with its reason
+  (`missing`, `failed` or `timeout`). Both fields are additive and omitted when
+  the spec declares no outputs; a reader must treat their absence (any older
+  record) as not reported. `terminal_reason` is unchanged. **The seconds are
+  billed: on a `cost_limit` kill they are a bounded overshoot of the limit**,
+  at most `flush_outputs_seconds` plus 5 s of the instance's rate; set it to
+  `0` to keep the old behaviour. The flush that `spawn terminate` and the TTL
+  reaper run over SSM still stages no outputs (their waits leave no room), and
+  records `skipped`. A hook from before this release is run exactly as before.
+
 ### Fixed
 
 - **`spawn list` shows instances that are shutting down** (#1167). The default
@@ -39,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn:` prefix is reserved. It now shows the route that works: tag the
   instance after launch with `aws ec2 create-tags` and restart spored. A launch
   flag is tracked in #1308.
+
+- **`WrapperOptions.Validate` rejects a `ResultsPrefix` that is not an
+  `s3://bucket[/prefix]` URI** (#1258). Only an empty prefix was rejected, so a
+  bare bucket name passed, and the wrapper copied the completion record to a
+  relative path on the instance's disk, where it was deleted at termination: the
+  task succeeded and no record, exit code or log reached S3. `GenerateWrapper`,
+  `GeneratePooledJobScript` and `GenerateFlushScript` now return the new
+  `ErrInvalidResultsPrefix`; pass `EffectiveResultsPrefix`'s result.
 
 ## [0.145.0] - 2026-10-24
 

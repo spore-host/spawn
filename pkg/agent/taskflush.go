@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +20,57 @@ import (
 // (a hung `aws` call against a throttled endpoint) cannot delay the shutdown it
 // is attached to. Deliberately well under the spot window's ~2 minutes, because
 // this runs ahead of any user pre-stop hook on that path too.
+//
+// That is the hook's base: its log and record. A hook that stages outputs
+// (spawn#1297) gets the seconds it grants on top; see flushBudget.
 const taskFlushTimeout = 45 * time.Second
+
+// The output budget's bounds in spored (spawn#1297).
+//
+// taskFlushOutputsSlack covers what the hook spends past its own output
+// deadline: timeout(1)'s 2 s kill grace and a retry's last backoff.
+//
+// spotFlushCap bounds the whole flush on a Spot interruption. EC2 gives a
+// 2-minute notice; spored sees it up to 5 s late (its poll) and spends a few
+// more on DNS cleanup and the wall before runPreStop, and the stop itself
+// needs the rest. 90 s is the figure spored already holds a Spot pre-stop
+// to. So on Spot the outputs get at most 90-45-5 = 40 s.
+const (
+	taskFlushOutputsSlack = 5 * time.Second
+	spotFlushCap          = 90 * time.Second
+)
+
+// flushBudget returns the seconds of output stage-out spored grants the hook
+// (passed as its $2) and the timeout it runs the hook under. declared is the
+// hook's own budget (taskproto.FlushHookOutputSeconds), 0 for a hook with no
+// outputs or from before #1297, which then keeps the 45 s bound.
+func flushBudget(why taskproto.ExitReason, declared int) (grant int, timeout time.Duration) {
+	grant = min(max(declared, 0), taskproto.MaxFlushOutputsSeconds)
+	if why == taskproto.ExitSpotInterruption {
+		grant = min(grant, int((spotFlushCap-taskFlushTimeout-taskFlushOutputsSlack)/time.Second))
+	}
+	timeout = taskFlushTimeout
+	if grant > 0 {
+		timeout += time.Duration(grant)*time.Second + taskFlushOutputsSlack
+	}
+	return grant, timeout
+}
+
+// hookHeadBytes is how much of the hook spored reads for its declared budget.
+const hookHeadBytes = 4096
+
+// hookOutputSeconds reads the output budget the hook at path declares.
+// Unreadable means none, so the hook keeps the base bound.
+func hookOutputSeconds(path string) int {
+	f, err := os.Open(path) //nolint:gosec // the hook path is a package constant, trust-checked by the caller
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = f.Close() }()
+	head := make([]byte, hookHeadBytes)
+	n, _ := io.ReadFull(f, head)
+	return taskproto.FlushHookOutputSeconds(head[:n])
+}
 
 // flushTaskRecord runs the task terminal-flush hook, if this instance has one.
 //
@@ -94,10 +146,15 @@ func (a *Agent) flushTaskRecord(why taskproto.ExitReason) {
 
 	a.taskFlushDone = true
 
-	ctx, cancel := context.WithTimeout(context.Background(), taskFlushTimeout)
+	grant, timeout := flushBudget(why, hookOutputSeconds(hook))
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	log.Printf("task flush: writing a terminal completion record (reason: %s)", why)
+	log.Printf("task flush: writing a terminal completion record (reason: %s, output budget %d s, timeout %v)", why, grant, timeout)
+	args := []string{string(why)}
+	if grant > 0 {
+		args = append(args, strconv.Itoa(grant))
+	}
 
 	// Run as root (spored's own identity) and NOT via `su` to the instance user,
 	// unlike the user pre-stop hook. The hook's job is to reach S3 with the
@@ -107,7 +164,8 @@ func (a *Agent) flushTaskRecord(why taskproto.ExitReason) {
 	//
 	// The reason token is passed as a separate argv element, never interpolated
 	// into a shell string: it originates in this package as a typed constant, and
-	// keeping it out of a shell means it stays that way.
+	// keeping it out of a shell means it stays that way. The output grant, when
+	// there is one, is argv[2], a decimal spored formats itself.
 	//
 	// Semgrep's dangerous-exec-command fires here because the path is not a
 	// literal. It is a package variable whose ONLY writer is
@@ -121,7 +179,7 @@ func (a *Agent) flushTaskRecord(why taskproto.ExitReason) {
 	// trustworthy. The suppression must sit on the line immediately above the
 	// call; anything further up is silently ignored.
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	cmd := exec.CommandContext(ctx, hook, string(why))
+	cmd := exec.CommandContext(ctx, hook, args...)
 	// WaitDelay (#1186): the context kills the hook, but not an `aws` child it
 	// started, and that child holds the output pipe open, so without this Wait
 	// blocks until the child exits and the 45 s cap does not bound anything.

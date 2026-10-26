@@ -811,6 +811,7 @@ const ConsoleLogStartPrefix
 const ContainerMemoryFloorGiB
 const DefaultEFSMountPoint
 const DefaultFSxMountPoint
+const DefaultFlushOutputsSeconds
 const ExitCompleted ExitReason
 const ExitCostLimitExceeded ExitReason
 const ExitIdleTimeout ExitReason
@@ -819,6 +820,14 @@ const ExitTTLExpired ExitReason
 const ExitUserTerminated ExitReason
 const FlushExitUploadFailed
 const FlushHookSeconds
+const MaxFlushOutputsSeconds
+const OutputFailed
+const OutputMissing
+const OutputTimedOut
+const OutputsComplete OutputsStaged
+const OutputsDisabled OutputsStaged
+const OutputsPartial OutputsStaged
+const OutputsSkipped OutputsStaged
 const PhaseTimestampFormat
 const PurchaseOnDemand
 const PurchaseSpot
@@ -851,6 +860,8 @@ field CompletionRecord.EndedAt string
 field CompletionRecord.ExitCode int
 field CompletionRecord.InstanceType string
 field CompletionRecord.Logs []string
+field CompletionRecord.OutputsNotStaged []OutputNotStaged
+field CompletionRecord.OutputsStaged OutputsStaged
 field CompletionRecord.Purchase string
 field CompletionRecord.RetryClass RetryClass
 field CompletionRecord.RunID string
@@ -865,11 +876,14 @@ field LaunchResult.Region string
 field LaunchResult.Spot bool
 field LaunchResult.TaskID string
 field Lifecycle.CostLimit float64
+field Lifecycle.FlushOutputsSeconds *int
 field Lifecycle.OnComplete string
 field Lifecycle.TTL string
 field Manifest.AllowEmpty bool
 field Manifest.Destination string
 field Manifest.Source string
+field OutputNotStaged.Reason string
+field OutputNotStaged.Source string
 field Placement.AMI string
 field Placement.AvailabilityZone string
 field Placement.EFSID string
@@ -923,6 +937,7 @@ func (*TaskSpec) EffectiveOnComplete() string
 func (*TaskSpec) SizingRequest() ResourceRequest
 func (*TaskSpec) Validate() error
 func (*TaskSpec) ValidatePooled() error
+func (Lifecycle) FlushOutputsBudget() int
 func (Placement) EffectiveEFSMountPoint() string
 func (Placement) EffectiveFSxMountPoint() string
 func (RetryClass) Retryable() bool
@@ -934,6 +949,7 @@ func EffectiveMemoryGiB(req ResourceRequest) float64
 func EffectiveResultsPrefix(spec *TaskSpec, accountID, region string) string
 func ExtractConsoleLog(consoleOutput string) (string, bool)
 func FlushCommand(why ExitReason) string
+func FlushHookOutputSeconds(head []byte) int
 func FlushScriptPath() string
 func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error)
 func GeneratePooledJobScript(spec *TaskSpec, opts WrapperOptions) (string, error)
@@ -959,6 +975,8 @@ type InstanceFinder interface
 type LaunchResult struct
 type Lifecycle struct
 type Manifest struct
+type OutputNotStaged struct
+type OutputsStaged string
 type Placement struct
 type ResourceRequest struct
 type RetryClass string
@@ -967,5 +985,6 @@ type TaskSpec struct
 type TaskState string
 type VolumeRef struct
 type WrapperOptions struct
+var ErrInvalidResultsPrefix
 var ErrMissingResultsPrefix
 var ErrMissingRunID

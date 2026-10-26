@@ -151,3 +151,53 @@ func TestGPUIsReadByTheContainerGeneratorsOnly(t *testing.T) {
 			"container; either the dependency is a bug or the field doc is now wrong")
 	}
 }
+
+// TestValidateRequiresAnS3ResultsPrefix is spawn#1258. Validate rejected only an
+// empty ResultsPrefix, so spore-host-mcp's bare bucket name passed, and the
+// wrapper's `aws s3 cp ... "$RESULTS_PREFIX/completion.json"` copied the
+// record to a relative path on the instance's disk. Every generator must
+// refuse, and EffectiveResultsPrefix's own output must be accepted.
+func TestValidateRequiresAnS3ResultsPrefix(t *testing.T) {
+	gens := map[string]func(*TaskSpec, WrapperOptions) (string, error){
+		"GenerateWrapper":         GenerateWrapper,
+		"GeneratePooledJobScript": GeneratePooledJobScript,
+		"GenerateFlushScript":     GenerateFlushScript,
+	}
+	for _, tc := range []struct {
+		prefix string
+		ok     bool
+	}{
+		{"spawn-results-123456789012-us-east-1", false}, // the MCP bug
+		{"bucket/tasks/t1", false},
+		{"s3://", false},
+		{"s3:///tasks/t1", false},
+		{"S3://bucket/tasks/t1", false},
+		{"https://bucket.s3.amazonaws.com/tasks/t1", false},
+		{"/tmp/results", false},
+		{" s3://bucket/tasks/t1", false},
+		{"s3://bucket/tasks/t1\n", false},
+		{"s3://bucket", true},
+		{"s3://bucket/tasks/t1", true},
+		{EffectiveResultsPrefix(optsSpec(), "123456789012", "us-east-1"), true},
+		{EffectiveResultsPrefix(&TaskSpec{TaskID: "t1", ResultsPrefix: "s3://mine/runs/"}, "1", "r"), true},
+	} {
+		opts := validOpts()
+		opts.ResultsPrefix = tc.prefix
+		err := opts.Validate()
+		if tc.ok {
+			if err != nil {
+				t.Errorf("Validate(%q) = %v, want nil", tc.prefix, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrInvalidResultsPrefix) {
+			t.Errorf("Validate(%q) = %v, want ErrInvalidResultsPrefix", tc.prefix, err)
+		}
+		for name, gen := range gens {
+			if script, err := gen(optsSpec(), opts); !errors.Is(err, ErrInvalidResultsPrefix) || script != "" {
+				t.Errorf("%s with ResultsPrefix %q: err=%v, script empty=%v; want ErrInvalidResultsPrefix and no script",
+					name, tc.prefix, err, script == "")
+			}
+		}
+	}
+}

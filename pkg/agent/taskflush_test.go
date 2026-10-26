@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
@@ -275,3 +276,77 @@ func TestFlushRunsBeforeTheUserPreStopHook(t *testing.T) {
 // discardConsole keeps a failure-path test from writing to the real
 // /dev/console of the machine running it (#1186 reports flush failures there).
 func discardConsole(string) error { return nil }
+
+// TestFlushBudget pins spawn#1297's numbers: the hook's base 45 s for log and
+// record, plus the output seconds granted and a slack, and on a Spot
+// interruption a whole flush that fits the 2-minute notice.
+func TestFlushBudget(t *testing.T) {
+	for _, tc := range []struct {
+		why      taskproto.ExitReason
+		declared int
+		grant    int
+		timeout  time.Duration
+	}{
+		{taskproto.ExitTTLExpired, 0, 0, 45 * time.Second},
+		{taskproto.ExitCostLimitExceeded, 60, 60, 110 * time.Second},
+		{taskproto.ExitIdleTimeout, 9999, taskproto.MaxFlushOutputsSeconds, 350 * time.Second},
+		{taskproto.ExitSpotInterruption, 60, 40, 90 * time.Second},
+		{taskproto.ExitSpotInterruption, 20, 20, 70 * time.Second},
+		{taskproto.ExitSpotInterruption, 0, 0, 45 * time.Second},
+	} {
+		grant, timeout := flushBudget(tc.why, tc.declared)
+		if grant != tc.grant || timeout != tc.timeout {
+			t.Errorf("flushBudget(%s, %d) = %d, %v; want %d, %v", tc.why, tc.declared, grant, timeout, tc.grant, tc.timeout)
+		}
+	}
+	// Whatever a hook declares, a Spot flush leaves the notice's last 30 s
+	// for spored's detection lag and the stop.
+	if _, timeout := flushBudget(taskproto.ExitSpotInterruption, taskproto.MaxFlushOutputsSeconds); timeout > 90*time.Second {
+		t.Errorf("a Spot flush may run %v, more than fits a 2-minute notice", timeout)
+	}
+}
+
+// TestFlushTaskRecordGrantsTheDeclaredBudget: spored reads the hook's declared
+// output budget and passes what it grants as argv[2], shortened on Spot. A
+// hook declaring none (no outputs, or from before #1297) is called exactly as
+// before.
+func TestFlushTaskRecordGrantsTheDeclaredBudget(t *testing.T) {
+	for _, tc := range []struct {
+		header string
+		why    taskproto.ExitReason
+		want   string
+	}{
+		{"# spawn-flush-outputs-seconds: 60\n", taskproto.ExitCostLimitExceeded, "cost_limit_exceeded 60"},
+		{"# spawn-flush-outputs-seconds: 60\n", taskproto.ExitSpotInterruption, "spot_interruption 40"},
+		{"# spawn-flush-outputs-seconds: 0\n", taskproto.ExitTTLExpired, "ttl_expired"},
+		{"", taskproto.ExitTTLExpired, "ttl_expired"},
+	} {
+		callLog := installFakeHook(t, tc.header+"exit 0\n")
+		a := &Agent{consoleWriter: discardConsole}
+		a.flushTaskRecord(tc.why)
+		if calls := hookCalls(t, callLog); len(calls) != 1 || calls[0] != tc.want {
+			t.Errorf("header %q, %s: hook argv = %v, want [%q]", tc.header, tc.why, calls, tc.want)
+		}
+	}
+}
+
+// TestHookOutputSecondsReadsAGeneratedHook: spored and the generator agree on
+// where the budget is declared.
+func TestHookOutputSecondsReadsAGeneratedHook(t *testing.T) {
+	spec := &taskproto.TaskSpec{TaskID: "t1", Command: []string{"true"},
+		Outputs: []taskproto.Manifest{{Source: "/tmp/o/", Destination: "s3://b/o/"}}}
+	hook, err := taskproto.GenerateFlushScript(spec, taskproto.WrapperOptions{ResultsPrefix: "s3://b/tasks/t1", RunID: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "task-flush.sh")
+	if err := os.WriteFile(path, []byte(hook), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := hookOutputSeconds(path); got != taskproto.DefaultFlushOutputsSeconds {
+		t.Errorf("hookOutputSeconds = %d, want %d", got, taskproto.DefaultFlushOutputsSeconds)
+	}
+	if got := hookOutputSeconds(filepath.Join(t.TempDir(), "absent")); got != 0 {
+		t.Errorf("a missing hook declares %d, want 0", got)
+	}
+}

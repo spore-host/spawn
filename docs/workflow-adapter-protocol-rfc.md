@@ -71,7 +71,14 @@ TaskSpec           one unit of work to run on one ephemeral instance
   resources        ResourceRequest
   inputs  []InputManifest
   outputs []OutputManifest
-  lifecycle        { ttl, on_complete }        # always terminate-backed
+  lifecycle        { ttl, on_complete, cost_limit, flush_outputs_seconds }
+                   # always terminate-backed. A lifecycle kill (ttl, cost_limit,
+                   # idle, spot) stages the declared outputs for up to
+                   # flush_outputs_seconds (default 60, 0 disables, max 300;
+                   # at most 40 s on a Spot interruption) before writing the
+                   # record (spawn#1297). Those seconds are billed, so a
+                   # cost_limit kill can overshoot the limit by at most
+                   # flush_outputs_seconds + 5 s of compute.
   env    map                                    # task environment
 
 ResourceRequest    what truffle sizes against
@@ -95,6 +102,10 @@ CompletionRecord   { exit_code, state, started_at, ended_at, cost_estimate, logs
                      instance_type, purchase }
                    # instance_type / purchase (spot | on_demand): additive,
                    # omitted when unknown; from IMDS on the instance (spawn#1260)
+                   # terminal_reason, outputs_staged (complete | partial |
+                   # skipped | disabled), outputs_not_staged [{source, reason}]:
+                   # only on a record written after a lifecycle kill; an absent
+                   # outputs_staged means not reported (spawn#1297)
 Cancellation       { task_id, reason }
 RetryClassification  app_error | capacity | spot_interruption | staging_error |
                      output_delivery_error | instance_health | spec_error |

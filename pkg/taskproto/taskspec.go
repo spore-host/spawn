@@ -200,7 +200,41 @@ type Lifecycle struct {
 	// launched-instance mechanism (aws.LaunchConfig.CostLimit / spored's
 	// cap-check) — set here so a task's cost ceiling doesn't have to be
 	// expressed indirectly by shortening the TTL (#556).
+	//
+	// The kill is not instant: the terminal flush, which stages the declared
+	// outputs for up to FlushOutputsSeconds, runs before the instance stops,
+	// and those seconds are billed. So a cost_limit kill can overshoot the
+	// limit by at most FlushOutputsSeconds + 5 s of compute (spawn#1297).
 	CostLimit float64 `json:"cost_limit,omitempty"`
+
+	// FlushOutputsSeconds bounds how long a lifecycle kill (ttl, cost limit,
+	// idle, Spot interruption) spends staging the task's declared outputs
+	// before the instance goes (spawn#1297). The terminal-flush hook uploads
+	// command.log, then the outputs within this budget, then the completion
+	// record, which states what happened in outputs_staged. Unset means
+	// DefaultFlushOutputsSeconds; 0 disables it; at most
+	// MaxFlushOutputsSeconds. On a Spot interruption spored grants less, so
+	// the whole flush fits the 2-minute notice. The seconds are billed: after
+	// a cost_limit kill they are a bounded overshoot of the limit.
+	FlushOutputsSeconds *int `json:"flush_outputs_seconds,omitempty"`
+}
+
+// The bounds of Lifecycle.FlushOutputsSeconds (spawn#1297). 60 s stages a
+// task's logs and counters, the usual diagnostic outputs, without making a
+// kill expensive; 300 s caps what a spec can add to every kill.
+const (
+	DefaultFlushOutputsSeconds = 60
+	MaxFlushOutputsSeconds     = 300
+)
+
+// FlushOutputsBudget is the effective output budget of a lifecycle kill, in
+// seconds: FlushOutputsSeconds, or DefaultFlushOutputsSeconds when unset,
+// clamped to 0..MaxFlushOutputsSeconds.
+func (l Lifecycle) FlushOutputsBudget() int {
+	if l.FlushOutputsSeconds == nil {
+		return DefaultFlushOutputsSeconds
+	}
+	return min(max(*l.FlushOutputsSeconds, 0), MaxFlushOutputsSeconds)
 }
 
 // TaskState is the coarse execution state of a task.
@@ -297,6 +331,9 @@ func (s *TaskSpec) Validate() error {
 	}
 	if s.Lifecycle.CostLimit < 0 {
 		add("lifecycle.cost_limit must be non-negative")
+	}
+	if f := s.Lifecycle.FlushOutputsSeconds; f != nil && (*f < 0 || *f > MaxFlushOutputsSeconds) {
+		add("lifecycle.flush_outputs_seconds must be 0-%d (0 disables staging outputs on a lifecycle kill)", MaxFlushOutputsSeconds)
 	}
 	if strings.TrimSpace(s.Lifecycle.TTL) == "" {
 		add("lifecycle.ttl is required (e.g. 4h)")
