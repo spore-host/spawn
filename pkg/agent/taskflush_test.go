@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spore-host/spawn/pkg/provider"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -51,7 +52,7 @@ func TestFlushTaskRecordPassesTheReasonToken(t *testing.T) {
 	callLog := installFakeHook(t, "exit 0\n")
 	a := &Agent{consoleWriter: discardConsole}
 
-	a.flushTaskRecord(taskproto.ExitTTLExpired)
+	a.flushTaskRecord(taskproto.ExitTTLExpired, time.Time{})
 
 	calls := hookCalls(t, callLog)
 	if len(calls) != 1 {
@@ -71,7 +72,7 @@ func TestFlushTaskRecordSkipsTheCompletedPath(t *testing.T) {
 	callLog := installFakeHook(t, "exit 0\n")
 	a := &Agent{consoleWriter: discardConsole}
 
-	a.flushTaskRecord(taskproto.ExitCompleted)
+	a.flushTaskRecord(taskproto.ExitCompleted, time.Time{})
 
 	if calls := hookCalls(t, callLog); len(calls) != 0 {
 		t.Errorf("the hook must not run on the completed path, got: %v", calls)
@@ -86,7 +87,7 @@ func TestFlushTaskRecordNoOpsWithoutAHook(t *testing.T) {
 		filepath.Join(t.TempDir(), "definitely-absent.sh")))
 
 	a := &Agent{consoleWriter: discardConsole}
-	a.flushTaskRecord(taskproto.ExitTTLExpired) // must not panic
+	a.flushTaskRecord(taskproto.ExitTTLExpired, time.Time{}) // must not panic
 
 	if a.taskFlushDone {
 		t.Error("a missing hook must not consume the once-guard — it never ran")
@@ -100,8 +101,8 @@ func TestFlushTaskRecordRunsAtMostOnce(t *testing.T) {
 	callLog := installFakeHook(t, "exit 0\n")
 	a := &Agent{consoleWriter: discardConsole}
 
-	a.flushTaskRecord(taskproto.ExitSpotInterruption)
-	a.flushTaskRecord(taskproto.ExitTTLExpired)
+	a.flushTaskRecord(taskproto.ExitSpotInterruption, time.Time{})
+	a.flushTaskRecord(taskproto.ExitTTLExpired, time.Time{})
 
 	if calls := hookCalls(t, callLog); len(calls) != 1 {
 		t.Errorf("expected one invocation across two calls, got %d: %v", len(calls), calls)
@@ -116,7 +117,7 @@ func TestFlushTaskRecordSurvivesAFailingHook(t *testing.T) {
 	callLog := installFakeHook(t, "echo 'hook broke' >&2\nexit 9\n")
 	a := &Agent{consoleWriter: discardConsole}
 
-	a.flushTaskRecord(taskproto.ExitCostLimitExceeded) // must return, not panic
+	a.flushTaskRecord(taskproto.ExitCostLimitExceeded, time.Time{}) // must return, not panic
 
 	if calls := hookCalls(t, callLog); len(calls) != 1 {
 		t.Errorf("the hook should still have been attempted, got: %v", calls)
@@ -163,7 +164,7 @@ func TestFlushTaskRecordRefusesATamperableHook(t *testing.T) {
 			}
 
 			a := &Agent{consoleWriter: discardConsole}
-			a.flushTaskRecord(taskproto.ExitTTLExpired)
+			a.flushTaskRecord(taskproto.ExitTTLExpired, time.Time{})
 
 			ran := len(hookCalls(t, callLog)) > 0
 			if ran != tc.ok {
@@ -196,7 +197,7 @@ func TestFlushTaskRecordRefusesASymlinkedHook(t *testing.T) {
 	t.Cleanup(taskproto.SetFlushScriptPathForTest(link))
 
 	a := &Agent{consoleWriter: discardConsole}
-	a.flushTaskRecord(taskproto.ExitTTLExpired)
+	a.flushTaskRecord(taskproto.ExitTTLExpired, time.Time{})
 
 	if calls := hookCalls(t, callLog); len(calls) != 0 {
 		t.Errorf("a symlinked hook must not be executed, got: %v", calls)
@@ -242,8 +243,8 @@ func TestEveryLifecycleExitPathCarriesAReasonToken(t *testing.T) {
 
 	// The flush must be invoked from runPreStop, not from each exit site — that is
 	// what makes a newly added exit path get the record for free.
-	if !strings.Contains(string(src), "a.flushTaskRecord(why)") {
-		t.Error("runPreStop must call a.flushTaskRecord(why) so every exit path is covered by construction")
+	if !strings.Contains(string(src), "a.flushTaskRecord(why, ") {
+		t.Error("runPreStop must call a.flushTaskRecord(why, ...) so every exit path is covered by construction")
 	}
 }
 
@@ -262,7 +263,7 @@ func TestFlushRunsBeforeTheUserPreStopHook(t *testing.T) {
 		t.Fatal("runPreStop not found")
 	}
 	body := s[fnIdx:]
-	flushIdx := strings.Index(body, "a.flushTaskRecord(why)")
+	flushIdx := strings.Index(body, "a.flushTaskRecord(why, ")
 	gateIdx := strings.Index(body, "a.config.PreStop == \"\"")
 	if flushIdx < 0 || gateIdx < 0 {
 		t.Fatalf("expected both the flush call and the PreStop gate (flush@%d gate@%d)", flushIdx, gateIdx)
@@ -278,55 +279,80 @@ func TestFlushRunsBeforeTheUserPreStopHook(t *testing.T) {
 func discardConsole(string) error { return nil }
 
 // TestFlushBudget pins spawn#1297's numbers: the hook's base 45 s for log and
-// record, plus the output seconds granted and a slack, and on a Spot
-// interruption a whole flush that fits the 2-minute notice.
+// record, plus the output seconds granted and a slack. Bounded (a Spot
+// pre-stop, #1311), the record's 45 s come first, the outputs get only what
+// is left after it, and the whole flush never outlasts what is left.
 func TestFlushBudget(t *testing.T) {
 	for _, tc := range []struct {
-		why      taskproto.ExitReason
 		declared int
+		bounded  bool
+		left     time.Duration
 		grant    int
 		timeout  time.Duration
 	}{
-		{taskproto.ExitTTLExpired, 0, 0, 45 * time.Second},
-		{taskproto.ExitCostLimitExceeded, 60, 60, 110 * time.Second},
-		{taskproto.ExitIdleTimeout, 9999, taskproto.MaxFlushOutputsSeconds, 350 * time.Second},
-		{taskproto.ExitSpotInterruption, 60, 40, 90 * time.Second},
-		{taskproto.ExitSpotInterruption, 20, 20, 70 * time.Second},
-		{taskproto.ExitSpotInterruption, 0, 0, 45 * time.Second},
+		{0, false, 0, 0, 45 * time.Second},
+		{60, false, 0, 60, 110 * time.Second},
+		{9999, false, 0, taskproto.MaxFlushOutputsSeconds, 350 * time.Second},
+		{60, true, 95 * time.Second, 45, 95 * time.Second},
+		{20, true, 95 * time.Second, 20, 70 * time.Second},
+		{0, true, 95 * time.Second, 0, 45 * time.Second},
+		{60, true, 50 * time.Second, 0, 45 * time.Second},
+		{60, true, 30 * time.Second, 0, 30 * time.Second},
 	} {
-		grant, timeout := flushBudget(tc.why, tc.declared)
+		grant, timeout := flushBudget(tc.declared, tc.bounded, tc.left)
 		if grant != tc.grant || timeout != tc.timeout {
-			t.Errorf("flushBudget(%s, %d) = %d, %v; want %d, %v", tc.why, tc.declared, grant, timeout, tc.grant, tc.timeout)
+			t.Errorf("flushBudget(%d, %v, %v) = %d, %v; want %d, %v", tc.declared, tc.bounded, tc.left, grant, timeout, tc.grant, tc.timeout)
 		}
 	}
-	// Whatever a hook declares, a Spot flush leaves the notice's last 30 s
-	// for spored's detection lag and the stop.
-	if _, timeout := flushBudget(taskproto.ExitSpotInterruption, taskproto.MaxFlushOutputsSeconds); timeout > 90*time.Second {
-		t.Errorf("a Spot flush may run %v, more than fits a 2-minute notice", timeout)
+	// Whatever a hook declares and whatever is left, a bounded flush ends in it.
+	for left := time.Second; left <= 400*time.Second; left += 7 * time.Second {
+		if _, timeout := flushBudget(taskproto.MaxFlushOutputsSeconds, true, left); timeout > left {
+			t.Errorf("with %v left the flush may run %v", left, timeout)
+		}
 	}
 }
 
 // TestFlushTaskRecordGrantsTheDeclaredBudget: spored reads the hook's declared
-// output budget and passes what it grants as argv[2], shortened on Spot. A
-// hook declaring none (no outputs, or from before #1297) is called exactly as
-// before.
+// output budget and passes what it grants as argv[2], shortened by a Spot
+// deadline. A hook declaring none (no outputs, or from before #1297) is
+// called exactly as before.
 func TestFlushTaskRecordGrantsTheDeclaredBudget(t *testing.T) {
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
-		header string
-		why    taskproto.ExitReason
-		want   string
+		header   string
+		why      taskproto.ExitReason
+		deadline time.Time
+		want     string
 	}{
-		{"# spawn-flush-outputs-seconds: 60\n", taskproto.ExitCostLimitExceeded, "cost_limit_exceeded 60"},
-		{"# spawn-flush-outputs-seconds: 60\n", taskproto.ExitSpotInterruption, "spot_interruption 40"},
-		{"# spawn-flush-outputs-seconds: 0\n", taskproto.ExitTTLExpired, "ttl_expired"},
-		{"", taskproto.ExitTTLExpired, "ttl_expired"},
+		{"# spawn-flush-outputs-seconds: 60\n", taskproto.ExitCostLimitExceeded, time.Time{}, "cost_limit_exceeded 60"},
+		{"# spawn-flush-outputs-seconds: 60\n", taskproto.ExitSpotInterruption, now.Add(80 * time.Second), "spot_interruption 30"},
+		{"# spawn-flush-outputs-seconds: 0\n", taskproto.ExitTTLExpired, time.Time{}, "ttl_expired"},
+		{"", taskproto.ExitTTLExpired, time.Time{}, "ttl_expired"},
 	} {
 		callLog := installFakeHook(t, tc.header+"exit 0\n")
-		a := &Agent{consoleWriter: discardConsole}
-		a.flushTaskRecord(tc.why)
+		a := &Agent{consoleWriter: discardConsole, spotNow: func() time.Time { return now }}
+		a.flushTaskRecord(tc.why, tc.deadline)
 		if calls := hookCalls(t, callLog); len(calls) != 1 || calls[0] != tc.want {
 			t.Errorf("header %q, %s: hook argv = %v, want [%q]", tc.header, tc.why, calls, tc.want)
 		}
+	}
+}
+
+// A flush whose Spot deadline has already passed is not started: it could
+// only be cut off by the reclaim. It is reported, so the missing record is
+// explained.
+func TestFlushTaskRecordPastTheSpotDeadlineDoesNotRun(t *testing.T) {
+	callLog := installFakeHook(t, "exit 0\n")
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	tags := &fakeTagPutter{}
+	a := &Agent{consoleWriter: discardConsole, spotNow: func() time.Time { return now },
+		tagger: tags, identity: &provider.Identity{InstanceID: "i-1"}}
+	a.flushTaskRecord(taskproto.ExitSpotInterruption, now.Add(-time.Second))
+	if calls := hookCalls(t, callLog); len(calls) != 0 {
+		t.Errorf("the hook ran past the deadline: %v", calls)
+	}
+	if got := tags.tags[flushStatusTag]; got != "skipped:no-time-left" {
+		t.Errorf("%s = %q, want skipped:no-time-left", flushStatusTag, got)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spore-host/spawn/pkg/provider"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -25,31 +26,52 @@ import (
 // (spawn#1297) gets the seconds it grants on top; see flushBudget.
 const taskFlushTimeout = 45 * time.Second
 
-// The output budget's bounds in spored (spawn#1297).
-//
 // taskFlushOutputsSlack covers what the hook spends past its own output
-// deadline: timeout(1)'s 2 s kill grace and a retry's last backoff.
-//
-// spotFlushCap bounds the whole flush on a Spot interruption. EC2 gives a
-// 2-minute notice; spored sees it up to 5 s late (its poll) and spends a few
-// more on DNS cleanup and the wall before runPreStop, and the stop itself
-// needs the rest. 90 s is the figure spored already holds a Spot pre-stop
-// to. So on Spot the outputs get at most 90-45-5 = 40 s.
-const (
-	taskFlushOutputsSlack = 5 * time.Second
-	spotFlushCap          = 90 * time.Second
-)
+// deadline (spawn#1297): timeout(1)'s 2 s kill grace and a retry's last backoff.
+const taskFlushOutputsSlack = taskproto.FlushOutputsSlackSeconds * time.Second
+
+// spotPreStopMargin is how much of a Spot notice the pre-stop path leaves
+// unused (spawn#1311): the pre-stop deadline is the interruption time minus
+// this. It holds the launch Elastic IP release, which runs spotEIPReleaseLead
+// before the interruption and takes the instance's egress with it on a
+// multi-interface instance, plus 5 s for the notifications that follow the
+// pre-stop and for clock error. EC2 gives 2 minutes and spored sees the notice
+// up to 5 s late, so the pre-stop as a whole gets about 90 s.
+const spotPreStopMargin = spotEIPReleaseLead + 5*time.Second
+
+// spotPreStopDeadline is the one deadline a Spot pre-stop shares (spawn#1311).
+// The task flush and the user's PreStop hook used to be bounded separately
+// (up to 90 s each), so together they could outlast the notice, and whatever
+// ran last was cut off by the reclaim with nothing saying so.
+func spotPreStopDeadline(info *provider.InterruptionInfo) time.Time {
+	return info.Time.Add(-spotPreStopMargin)
+}
+
+// spotClock is the clock the Spot notice handler measures its deadline with.
+func (a *Agent) spotClock() time.Time {
+	if a.spotNow != nil {
+		return a.spotNow()
+	}
+	return time.Now()
+}
 
 // flushBudget returns the seconds of output stage-out spored grants the hook
 // (passed as its $2) and the timeout it runs the hook under. declared is the
 // hook's own budget (taskproto.FlushHookOutputSeconds), 0 for a hook with no
 // outputs or from before #1297, which then keeps the 45 s bound.
-func flushBudget(why taskproto.ExitReason, declared int) (grant int, timeout time.Duration) {
+//
+// bounded says the flush must end within left, the time remaining before a
+// Spot pre-stop deadline (spawn#1311). The record's 45 s are taken first,
+// because the record is the run's TTL and accounting evidence; outputs get
+// only what remains after it and the slack, and a flush with less than 45 s
+// left runs under what there is.
+func flushBudget(declared int, bounded bool, left time.Duration) (grant int, timeout time.Duration) {
 	grant = min(max(declared, 0), taskproto.MaxFlushOutputsSeconds)
-	if why == taskproto.ExitSpotInterruption {
-		grant = min(grant, int((spotFlushCap-taskFlushTimeout-taskFlushOutputsSlack)/time.Second))
-	}
 	timeout = taskFlushTimeout
+	if bounded {
+		timeout = min(taskFlushTimeout, max(left, 0))
+		grant = min(grant, max(0, int((left-taskFlushTimeout-taskFlushOutputsSlack)/time.Second)))
+	}
 	if grant > 0 {
 		timeout += time.Duration(grant)*time.Second + taskFlushOutputsSlack
 	}
@@ -95,7 +117,11 @@ func hookOutputSeconds(path string) int {
 // over SSM instead: `spawn terminate` (#802) and the TTL reaper (#1186) both
 // send taskproto.FlushCommand. A direct `aws ec2 terminate-instances` or a hard
 // host failure still gets nothing.
-func (a *Agent) flushTaskRecord(why taskproto.ExitReason) {
+//
+// deadline is the Spot pre-stop deadline (spotPreStopDeadline), or the zero
+// time on every other path. With one, the flush is sized to end by it, and is
+// not run at all once it has passed.
+func (a *Agent) flushTaskRecord(why taskproto.ExitReason, deadline time.Time) {
 	if a.taskFlushDone {
 		return
 	}
@@ -146,7 +172,16 @@ func (a *Agent) flushTaskRecord(why taskproto.ExitReason) {
 
 	a.taskFlushDone = true
 
-	grant, timeout := flushBudget(why, hookOutputSeconds(hook))
+	bounded := !deadline.IsZero()
+	var left time.Duration
+	if bounded {
+		if left = deadline.Sub(a.spotClock()); left <= 0 {
+			a.reportFlushOutcome(why, flushOutcome{status: flushSkipped, reason: "no-time-left",
+				output: fmt.Sprintf("the Spot notice's pre-stop deadline %s had passed", deadline.Format(time.RFC3339))})
+			return
+		}
+	}
+	grant, timeout := flushBudget(hookOutputSeconds(hook), bounded, left)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

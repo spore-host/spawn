@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -121,11 +122,13 @@ func (f *taskFlushEC2) TerminateInstances(_ context.Context, in *ec2.TerminateIn
 type taskFlushSSM struct {
 	events   *[]string
 	commands []string
+	timeouts []string // each SendCommand's executionTimeout
 }
 
 func (f *taskFlushSSM) SendCommand(_ context.Context, in *ssm.SendCommandInput, _ ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
 	*f.events = append(*f.events, "ssm:"+strings.Join(in.InstanceIds, ","))
 	f.commands = append(f.commands, strings.Join(in.Parameters["commands"], "\n"))
+	f.timeouts = append(f.timeouts, strings.Join(in.Parameters["executionTimeout"], ""))
 	return &ssm.SendCommandOutput{Command: &ssmtypes.Command{CommandId: aws.String("cmd-1")}}, nil
 }
 
@@ -174,7 +177,62 @@ func TestReaperFlushesOnlyTaskInstancesBeforeTerminating(t *testing.T) {
 	if got := strings.Join(events, ","); got != want {
 		t.Errorf("calls = %s\nwant    %s", got, want)
 	}
-	if len(s.commands) == 1 && s.commands[0] != taskproto.FlushCommand(taskproto.ExitTTLExpired) {
+	if len(s.commands) == 1 && s.commands[0] != taskproto.FlushCommandWithOutputs(taskproto.ExitTTLExpired, reaperFlushOutputsSeconds) {
 		t.Errorf("the reaper sent a different command from the shared, trust-checked one:\n%s", s.commands[0])
+	}
+}
+
+// #1312: the reaper's flush stages the task's declared outputs too, under a
+// grant capped well below what a task may declare, because one invocation
+// ends instances in sequence; and with the invocation near its deadline it
+// grants none, so the flush is the 45 s one it always was. The SSM
+// executionTimeout covers the on-box bound the grant gives the hook.
+func TestReaperTaskFlushGrantsCappedOutputs(t *testing.T) {
+	if reaperFlushOutputsSeconds <= 0 || reaperFlushOutputsSeconds >= taskproto.MaxFlushOutputsSeconds {
+		t.Fatalf("reaperFlushOutputsSeconds = %d, want a cap in (0, %d)", reaperFlushOutputsSeconds, taskproto.MaxFlushOutputsSeconds)
+	}
+	expired := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	inst := ec2types.Instance{InstanceId: aws.String("i-task"), State: &ec2types.InstanceState{Name: ec2types.InstanceStateNameRunning},
+		Tags: []ec2types.Tag{tag("spawn:managed", "true"), tag("spawn:ttl-deadline", expired), tag("spawn:task-id", "t1")}}
+	for _, tc := range []struct {
+		name    string
+		left    time.Duration // the invocation's remaining time; 0 = no deadline
+		grant   int
+		minWait int
+	}{
+		{"no deadline", 0, reaperFlushOutputsSeconds, taskproto.FlushHookSeconds + reaperFlushOutputsSeconds + taskproto.FlushOutputsSlackSeconds},
+		{"plenty left", time.Hour, reaperFlushOutputsSeconds, taskproto.FlushHookSeconds + reaperFlushOutputsSeconds + taskproto.FlushOutputsSlackSeconds},
+		{"near the deadline", reaperOutputsReserve / 2, 0, taskproto.FlushHookSeconds},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			e := &taskFlushEC2{events: &events, insts: []ec2types.Instance{inst}}
+			s := &taskFlushSSM{events: &events}
+			r := &reaper{
+				accounts: []account{{label: "acct", accountID: "111111111111",
+					ec2For: func(string) ec2API { return e },
+					ssmFor: func(string) ssmAPI { return s },
+				}},
+				regions: []string{"us-west-2"}, maxAge: defaultMaxAge, taskFlushPoll: time.Millisecond,
+			}
+			ctx := context.Background()
+			if tc.left > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.left)
+				defer cancel()
+			}
+			if _, err := r.run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if len(s.commands) != 1 {
+				t.Fatalf("sent %d flush commands, want 1", len(s.commands))
+			}
+			if want := taskproto.FlushCommandWithOutputs(taskproto.ExitTTLExpired, tc.grant); s.commands[0] != want {
+				t.Errorf("flush command does not grant %d output seconds:\n%s", tc.grant, s.commands[0])
+			}
+			if got, _ := strconv.Atoi(s.timeouts[0]); got <= tc.minWait {
+				t.Errorf("executionTimeout %s s does not exceed the hook's on-box bound %d s", s.timeouts[0], tc.minWait)
+			}
+		})
 	}
 }

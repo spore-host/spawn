@@ -13,11 +13,21 @@ import (
 )
 
 // terminateFlushTimeout bounds the SSM wait for the task flush that runs ahead
-// of `spawn terminate`. The hook itself is capped at taskFlushHookSeconds on the
-// box; the extra margin is SSM delivery and polling.
+// of `spawn terminate`. The hook itself is capped on the box at
+// taskFlushHookSeconds plus the output seconds it is granted (spawn#1312) plus
+// taskproto.FlushOutputsSlackSeconds; the extra 30 s is SSM delivery and
+// polling. The wait ends as soon as the hook does, so it is this long only
+// for a hook that uses its whole budget or an agent that never answers.
+//
+// terminateFlushOutputsSeconds is the most the CLI grants: what the task
+// declared (lifecycle.flush_outputs_seconds), up to the field's default of
+// 60 s. Not its 300 s maximum: the instance bills for the whole wait, and an
+// SSM agent that registered but never answers holds the CLI for all of it
+// (about 2.3 minutes at 60 s, against about 6.3 at 300).
 const (
-	terminateFlushTimeout = 75 * time.Second
-	taskFlushHookSeconds  = taskproto.FlushHookSeconds
+	taskFlushHookSeconds         = taskproto.FlushHookSeconds
+	terminateFlushOutputsSeconds = taskproto.DefaultFlushOutputsSeconds
+	terminateFlushTimeout        = time.Duration(taskFlushHookSeconds+terminateFlushOutputsSeconds+taskproto.FlushOutputsSlackSeconds)*time.Second + 30*time.Second
 )
 
 // ssmShellRunner is the one SSM call the terminate flush makes. It is
@@ -25,11 +35,12 @@ const (
 type ssmShellRunner func(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*aws.SSMRunResult, error)
 
 // taskFlushCommand is the shell the CLI sends over SSM to run a task's
-// terminal-flush hook with the user_terminated reason. The command itself,
-// trust check and on-box bound included, is taskproto.FlushCommand, shared
-// with the TTL reaper (#1186).
+// terminal-flush hook with the user_terminated reason, granting the hook its
+// declared output seconds (spawn#1312). The command itself, trust check,
+// grant and on-box bound included, is taskproto.FlushCommandWithOutputs,
+// shared with the TTL reaper (#1186).
 func taskFlushCommand() string {
-	return taskproto.FlushCommand(taskproto.ExitUserTerminated)
+	return taskproto.FlushCommandWithOutputs(taskproto.ExitUserTerminated, terminateFlushOutputsSeconds)
 }
 
 // needsTaskFlush reports whether inst is a running `spawn task run` instance,
@@ -52,8 +63,10 @@ func flushTaskBeforeTerminate(ctx context.Context, run ssmShellRunner, inst *aws
 	if !needsTaskFlush(inst) {
 		return false
 	}
-	fmt.Fprintf(warn, "Flushing task %s's log and completion record before terminating...\n", inst.Tags["spawn:task-id"])
+	fmt.Fprintf(warn, "Flushing task %s's log, declared outputs and completion record before terminating...\n", inst.Tags["spawn:task-id"])
+	stop := flushProgress(warn, inst.InstanceID, terminateFlushTimeout)
 	res, err := run(ctx, inst.Region, inst.InstanceID, taskFlushCommand(), terminateFlushTimeout)
+	stop()
 	switch {
 	case err != nil:
 		fmt.Fprintf(warn, "⚠️  Could not flush task record over SSM (%v); terminating anyway — command.log may be lost.\n", err)
@@ -97,4 +110,34 @@ func (l lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// flushProgressEvery is how often a waiting terminate flush says it is still
+// waiting.
+const flushProgressEvery = 30 * time.Second
+
+// flushProgress tells the user how long the flush may take, then repeats the
+// remaining wait every flushProgressEvery until stop is called, so a flush
+// waiting on a slow or silent SSM agent is not a silent pause.
+func flushProgress(w io.Writer, instanceID string, wait time.Duration) (stop func()) {
+	fmt.Fprintf(w, "   Waiting up to %s for %s's flush over SSM...\n", wait, instanceID)
+	start := time.Now()
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(flushProgressEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if left := wait - time.Since(start); left > 0 {
+					fmt.Fprintf(w, "   still flushing %s (up to %s left)...\n", instanceID, left.Round(time.Second))
+				}
+			}
+		}
+	}()
+	return func() { close(done); <-finished }
 }

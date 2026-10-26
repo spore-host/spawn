@@ -112,7 +112,7 @@ spawn launch <name> [flags]
 | `--params` |  | string |  | Inline JSON parameters for sweep |
 | `--placement-group` |  | string |  | AWS Placement Group for MPI instances (auto-created if not specified) |
 | `--plugin` |  | stringArray |  | Plugin to install at launch (ref[@version], repeatable) |
-| `--pre-stop-timeout` |  | string |  | Max time to wait for --pre-stop command (default: 5m, spot: 90s) |
+| `--pre-stop-timeout` |  | string |  | Max time to wait for --pre-stop command (default: 5m, spot: 90s; on spot never past the interruption) |
 | `--pre-stop` |  | string |  | Shell command to run on the instance before any lifecycle-triggered stop/terminate (e.g., "aws s3 sync /results s3://bucket/") |
 | `--print-config` |  | bool |  | Alias for --dry-run |
 | `--queue-template` |  | string |  | Queue template name (use 'spawn queue template list' to see options) |

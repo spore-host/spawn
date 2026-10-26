@@ -211,9 +211,10 @@ type Agent struct {
 	// The launch Elastic IP release on a Spot terminate notice (#661): a
 	// fire-once guard (the spot monitor re-enters every 5s), and seams for the
 	// clock, the wait, and how the release goroutine is started. nil means
-	// time.Now, sleepCtx and `go`.
+	// time.Now, sleepCtx and `go`. spotNow is also the clock the Spot
+	// pre-stop measures its deadline with (#1311).
 	spotEIPScheduled bool
-	spotEIPNow       func() time.Time
+	spotNow          func() time.Time
 	spotEIPSleep     func(context.Context, time.Duration)
 	spotEIPGo        func(func())
 }
@@ -1757,8 +1758,9 @@ func (a *Agent) checkSpotInterruption(ctx context.Context) bool {
 			"Time":   info.Time.Format("15:04:05"),
 		}))
 
-	// Run pre-stop hook with shortened timeout (stay within the 2-min window)
-	a.runPreStop(true, taskproto.ExitSpotInterruption)
+	// Run the pre-stop path against one deadline taken from the notice, so the
+	// task flush and the user's hook together end inside it (#1311).
+	a.runPreStop(spotPreStopDeadline(info), taskproto.ExitSpotInterruption)
 
 	// Send Slack notification
 	a.notifier.Notify(cleanupCtx, "spot_interrupt",
@@ -1822,8 +1824,8 @@ func (a *Agent) scheduleSpotElasticIPRelease(ctx context.Context, info *provider
 	}
 	a.spotEIPScheduled = true
 	now := time.Now
-	if a.spotEIPNow != nil {
-		now = a.spotEIPNow
+	if a.spotNow != nil {
+		now = a.spotNow
 	}
 	wait := info.Time.Add(-spotEIPReleaseLead).Sub(now())
 	if wait < 0 {
@@ -2330,7 +2332,7 @@ func (a *Agent) restoreAfterCleanup(ctx context.Context) {
 func (a *Agent) stop(ctx context.Context, reason string, why taskproto.ExitReason) error {
 	log.Printf("Stopping instance (reason: %s)", reason)
 
-	a.runPreStop(false, why)
+	a.runPreStop(time.Time{}, why)
 
 	// Clean up DNS before stopping
 	a.Cleanup(ctx)
@@ -2354,7 +2356,7 @@ func (a *Agent) stop(ctx context.Context, reason string, why taskproto.ExitReaso
 func (a *Agent) hibernate(ctx context.Context, why taskproto.ExitReason) error {
 	log.Printf("Hibernating instance")
 
-	a.runPreStop(false, why)
+	a.runPreStop(time.Time{}, why)
 
 	// Clean up DNS before hibernating
 	a.Cleanup(ctx)
@@ -2446,6 +2448,12 @@ func (a *Agent) Cleanup(ctx context.Context) {
 // lifecycle-triggered shutdown. It runs at most once (guarded by preStopDone).
 // The default timeout is 5 minutes; spot interruptions use 90 seconds.
 //
+// spotDeadline is the Spot notice's pre-stop deadline (spotPreStopDeadline),
+// or the zero time on every other path. With one, the flush and the user's
+// hook share it (#1311): the flush is sized to it first, then the hook gets
+// at most what the flush left, and none once it has passed. That holds even
+// for a configured PreStopTimeout, since nothing can run past the reclaim.
+//
 // It also runs the task terminal-flush hook (spawn#632) first. `why` is a stable
 // token, not the human reason string spored logs, so a reworded log message can
 // never change a recorded retry class.
@@ -2456,19 +2464,19 @@ func (a *Agent) Cleanup(ctx context.Context) {
 // apart. It goes BEFORE the user's hook because that hook is allowed to take
 // minutes (PreStopTimeout) and may itself fail — the diagnostics should already
 // be in S3 by then.
-func (a *Agent) runPreStop(spotMode bool, why taskproto.ExitReason) {
-	a.flushTaskRecord(why)
+func (a *Agent) runPreStop(spotDeadline time.Time, why taskproto.ExitReason) {
+	a.flushTaskRecord(why, spotDeadline)
 
 	if a.config.PreStop == "" || a.preStopDone {
 		return
 	}
 	a.preStopDone = true
 
-	timeout := 5 * time.Minute
-	if a.config.PreStopTimeout > 0 {
-		timeout = a.config.PreStopTimeout
-	} else if spotMode {
-		timeout = 90 * time.Second // stay within the 2-min spot window
+	timeout, ok := preStopTimeout(a.config.PreStopTimeout, spotDeadline, a.spotClock())
+	if !ok {
+		log.Printf("Pre-stop hook skipped: the Spot notice left no time after the task flush (deadline %s)", spotDeadline.Format(time.RFC3339))
+		a.notifier.Notify(context.Background(), "pre_stop_failed", "skipped: the Spot interruption notice left no time after the task flush")
+		return
 	}
 
 	// Run the hook as the instance's primary user (not root) so ~/$HOME/PATH and
@@ -2527,6 +2535,30 @@ func (a *Agent) runPreStop(spotMode bool, why taskproto.ExitReason) {
 	log.Printf("Pre-stop hook completed successfully")
 }
 
+// spotPreStopTimeout is the user hook's default bound on a Spot notice.
+const spotPreStopTimeout = 90 * time.Second
+
+// preStopTimeout is how long the user's pre-stop hook may run: the configured
+// timeout, or 5 minutes, or on a Spot notice spotPreStopTimeout, and on a Spot
+// notice never past spotDeadline (#1311). ok is false when that deadline
+// leaves less than a second, and the hook is then not started.
+func preStopTimeout(configured time.Duration, spotDeadline, now time.Time) (timeout time.Duration, ok bool) {
+	timeout = 5 * time.Minute
+	if configured > 0 {
+		timeout = configured
+	} else if !spotDeadline.IsZero() {
+		timeout = spotPreStopTimeout
+	}
+	if spotDeadline.IsZero() {
+		return timeout, true
+	}
+	left := spotDeadline.Sub(now).Truncate(time.Second)
+	if left < time.Second {
+		return 0, false
+	}
+	return min(timeout, left), true
+}
+
 // tailBuffer is a thread-safe io.Writer that retains only the last `max` bytes
 // written to it (a ring of sorts) — used to capture the tail of a pre-stop
 // hook's output for a failure notification without unbounded memory if the hook
@@ -2570,7 +2602,7 @@ func preStopDetail(summary, outputTail string) string {
 func (a *Agent) terminate(ctx context.Context, reason string, why taskproto.ExitReason) {
 	log.Printf("Terminating instance (reason: %s)", reason)
 
-	a.runPreStop(false, why)
+	a.runPreStop(time.Time{}, why)
 
 	// Clean up DNS before terminating
 	a.Cleanup(ctx)

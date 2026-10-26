@@ -28,7 +28,7 @@ func spotEIPAgent(t *testing.T, now time.Time) (*Agent, *releasingProvider, *[]t
 	p := &releasingProvider{stubProvider: *a.provider.(*stubProvider)}
 	a.provider = p
 	var waits []time.Duration
-	a.spotEIPNow = func() time.Time { return now }
+	a.spotNow = func() time.Time { return now }
 	a.spotEIPSleep = func(_ context.Context, d time.Duration) { waits = append(waits, d) }
 	a.spotEIPGo = func(f func()) { f() }
 	return a, p, &waits

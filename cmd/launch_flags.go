@@ -318,7 +318,7 @@ func init() {
 	launchCmd.Flags().BoolVar(&hibernateOnIdle, "hibernate-on-idle", false, "Hibernate instead of stop when idle")
 	_ = launchCmd.Flags().MarkDeprecated("hibernate-on-idle", "use --on-idle hibernate")
 	launchCmd.Flags().StringVar(&preStop, "pre-stop", "", "Shell command to run on the instance before any lifecycle-triggered stop/terminate (e.g., \"aws s3 sync /results s3://bucket/\")")
-	launchCmd.Flags().StringVar(&preStopTimeout, "pre-stop-timeout", "", "Max time to wait for --pre-stop command (default: 5m, spot: 90s)")
+	launchCmd.Flags().StringVar(&preStopTimeout, "pre-stop-timeout", "", "Max time to wait for --pre-stop command (default: 5m, spot: 90s; on spot never past the interruption)")
 	launchCmd.Flags().StringVar(&spotWebhookURL, "spot-webhook-url", "", "On spot interruption, spored POSTs a fire-once, best-effort notice to this URL within the ~2-min window (off-node consumers; empty = disabled)")
 	launchCmd.Flags().StringVar(&completionWebhookURL, "completion-webhook-url", "", "On workload completion (--completion-file detected), spored POSTs a fire-once, best-effort notice to this URL (spawn#497) — lets a caller wait on its own webhook/queue instead of polling an artifact against a pre-guessed deadline; empty = disabled")
 	launchCmd.Flags().StringVar(&webhookCorrelation, "webhook-correlation", "", "Opaque blob echoed verbatim in the spot-webhook/completion-webhook payload so a consumer can correlate the event to its own record (never parsed by spawn)")

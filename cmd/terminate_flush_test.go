@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -150,5 +151,39 @@ func TestTaskFlushCommand_TrustCheckAndBound(t *testing.T) {
 	}
 	if terminateFlushTimeout <= time.Duration(taskFlushHookSeconds)*time.Second {
 		t.Errorf("SSM wait %s must exceed the on-box hook cap %ds", terminateFlushTimeout, taskFlushHookSeconds)
+	}
+}
+
+// spawn#1312: `spawn terminate`'s flush stages the task's declared outputs as
+// a lifecycle kill does, granting the hook its declared budget as $2 up to
+// flush_outputs_seconds' default (60 s), not its 300 s maximum, because the
+// instance bills for the whole wait. The SSM wait covers the longest on-box
+// bound that grant gives the hook, and the user is told how long it may be.
+func TestTerminateFlushGrantsOutputsAndWaitsForThem(t *testing.T) {
+	var sent string
+	var wait time.Duration
+	run := func(_ context.Context, _, _, command string, timeout time.Duration) (*aws.SSMRunResult, error) {
+		sent, wait = command, timeout
+		return &aws.SSMRunResult{Status: "Success"}, nil
+	}
+	inst := taskInst("i-1", "running")
+	var out bytes.Buffer
+	flushTaskBeforeTerminate(context.Background(), run, &inst, &out)
+
+	if !strings.Contains(sent, `"$H" `+string(taskproto.ExitUserTerminated)+` "$G"`) {
+		t.Errorf("the flush grants the hook no output seconds:\n%s", sent)
+	}
+	if !strings.Contains(sent, fmt.Sprintf(`[ "$G" -le %d ] || G=%d`, taskproto.DefaultFlushOutputsSeconds, taskproto.DefaultFlushOutputsSeconds)) {
+		t.Errorf("the flush does not cap the grant at the %d s default:\n%s", taskproto.DefaultFlushOutputsSeconds, sent)
+	}
+	longest := time.Duration(taskproto.FlushHookSeconds+taskproto.DefaultFlushOutputsSeconds+taskproto.FlushOutputsSlackSeconds) * time.Second
+	if wait <= longest {
+		t.Errorf("SSM wait %v does not cover a hook granted %d s (on-box bound %v)", wait, taskproto.DefaultFlushOutputsSeconds, longest)
+	}
+	if wait > longest+time.Minute {
+		t.Errorf("SSM wait %v is far past the on-box bound %v: a silent agent holds the user, and the bill, for all of it", wait, longest)
+	}
+	if want := "Waiting up to " + wait.String(); !strings.Contains(out.String(), want) {
+		t.Errorf("the user is not told how long the flush may take (want %q):\n%s", want, out.String())
 	}
 }

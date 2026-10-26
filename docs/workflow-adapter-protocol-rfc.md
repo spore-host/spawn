@@ -75,8 +75,9 @@ TaskSpec           one unit of work to run on one ephemeral instance
                    # always terminate-backed. A lifecycle kill (ttl, cost_limit,
                    # idle, spot) stages the declared outputs for up to
                    # flush_outputs_seconds (default 60, 0 disables, max 300;
-                   # at most 40 s on a Spot interruption) before writing the
-                   # record (spawn#1297). Those seconds are billed, so a
+                   # on a Spot interruption only what the notice leaves after
+                   # the record, at most 45 s) before writing the record
+                   # (spawn#1297, #1311). Those seconds are billed, so a
                    # cost_limit kill can overshoot the limit by at most
                    # flush_outputs_seconds + 5 s of compute.
   env    map                                    # task environment
