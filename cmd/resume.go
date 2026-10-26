@@ -19,6 +19,7 @@ var (
 	resumeMaxConcurrent     int
 	resumeMaxConcurrentAuto bool
 	resumeDetach            bool
+	resumeKeepOnError       bool
 )
 
 var resumeCmd = &cobra.Command{
@@ -60,6 +61,7 @@ func registerResumeFlags(c *cobra.Command) {
 	c.Flags().IntVar(&resumeMaxConcurrent, "max-concurrent", 0, "Override max concurrent instances (0 = use original)")
 	c.Flags().BoolVar(&resumeMaxConcurrentAuto, "max-concurrent-auto", false, "Re-derive max concurrent instances from the account's real AWS quota headroom for the pending parameter sets' instance type(s)/region, instead of the original or a user-supplied number (spawn#494). Not yet supported with --detach.")
 	c.Flags().BoolVar(&resumeDetach, "detach", false, "Run sweep orchestration in Lambda")
+	c.Flags().BoolVar(&resumeKeepOnError, "keep-on-error", false, "Keep a relaunched instance whose spored never came up instead of terminating it. It then has no TTL/idle/cost-limit enforcement until spored is confirmed running")
 }
 
 func runResume(cmd *cobra.Command, args []string) error {
@@ -313,7 +315,9 @@ func runResume(cmd *cobra.Command, args []string) error {
 
 	// Call the rolling queue launcher
 	state.Completed, state.Running, state.Failed = len(completed), len(stillRunning), len(failed)
-	resumedInstances, failures, successCount, err := relaunchPending(ctx, awsClient, state, launchConfigs, pending, maxConcurrent)
+	// Each relaunched member's spored is verified, as on a fresh sweep (#1305).
+	guard := newFleetGuard("sweep resume", os.Stderr, awsClient, clientFleetVerifier(awsClient), resumeKeepOnError)
+	resumedInstances, failures, successCount, err := relaunchPending(ctx, awsClient, state, launchConfigs, pending, maxConcurrent, guard)
 
 	// Report results
 	fmt.Fprintf(os.Stderr, "\n✅ Resume complete!\n")
@@ -333,8 +337,10 @@ func runResume(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	fmt.Fprintf(os.Stderr, "   %s\n", guard.summary())
+
 	if err != nil {
-		return fmt.Errorf("sweep resumed with errors: %w", err)
+		return guard.finish(ctx, fmt.Errorf("sweep resumed with errors: %w", err))
 	}
 
 	return nil
@@ -493,8 +499,11 @@ func resolveResumeRegions(state *SweepState, pf *ParamFileFormat, flagRegion, co
 // parameters that already ran, the sweep's TotalParams and its metadata all
 // survive; a fresh state here made a second resume relaunch completed work
 // (#1248).
-func relaunchPending(ctx context.Context, l sweepLauncher, state *SweepState, launchConfigs []*aws.LaunchConfig, pending []int, maxConcurrent int) ([]*aws.LaunchResult, []string, int, error) {
-	return launchWithRollingQueue(ctx, l, state, launchConfigs, pending, maxConcurrent, state.LaunchDelay)
+//
+// guard verifies each relaunched member's spored and terminates one that never
+// comes up, as on a fresh sweep (#1305); the caller defers guard.finish.
+func relaunchPending(ctx context.Context, l sweepLauncher, state *SweepState, launchConfigs []*aws.LaunchConfig, pending []int, maxConcurrent int, guard *fleetGuard) ([]*aws.LaunchResult, []string, int, error) {
+	return launchWithRollingQueue(ctx, l, guard, state, launchConfigs, pending, maxConcurrent, state.LaunchDelay)
 }
 
 // reconcileSweepState classifies every parameter index of the sweep against
@@ -510,7 +519,11 @@ func reconcileSweepState(state *SweepState, instanceStates map[string]string) (s
 			if inst.Index == i {
 				found = true
 				// Check if instance still running
-				if inst.InstanceID != "" {
+				if inst.InstanceID != "" && inst.State == sweepInstanceFailed {
+					// Launched, but spored never came up and it was terminated
+					// (#1305): a failure, not a completion.
+					failed = append(failed, i)
+				} else if inst.InstanceID != "" {
 					ec2State, exists := instanceStates[inst.InstanceID]
 					if exists && (ec2State == "running" || ec2State == "pending") {
 						stillRunning = append(stillRunning, i)

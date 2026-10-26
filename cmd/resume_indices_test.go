@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"sort"
 	"testing"
 	"time"
@@ -35,6 +36,14 @@ func (f *fakeSweepLauncher) Launch(_ context.Context, cfg aws.LaunchConfig) (*aw
 
 func (f *fakeSweepLauncher) ListInstances(context.Context, string, string) ([]aws.InstanceInfo, error) {
 	return f.results, nil
+}
+
+func (f *fakeSweepLauncher) Terminate(context.Context, string, string) error { return nil }
+
+// unverifiedGuard is a fleet guard with verification off, for tests about the
+// queue's bookkeeping rather than spored.
+func unverifiedGuard() *fleetGuard {
+	return newFleetGuard("sweep", io.Discard, &fakeSweepLauncher{}, nil, false)
 }
 
 func fastRollingQueue(t *testing.T) {
@@ -85,7 +94,7 @@ func TestResume_RelaunchRecordsParameterIndicesAndMergesState(t *testing.T) {
 	launcher := &fakeSweepLauncher{}
 	// maxConcurrent 1: set 3 launches in the initial batch and set 7 from the
 	// rolling loop, so both recording paths are exercised.
-	if _, failures, n, err := relaunchPending(context.Background(), launcher, state, configs, pending, 1); err != nil || n != 2 || len(failures) != 0 {
+	if _, failures, n, err := relaunchPending(context.Background(), launcher, state, configs, pending, 1, unverifiedGuard()); err != nil || n != 2 || len(failures) != 0 {
 		t.Fatalf("relaunchPending: n=%d failures=%v err=%v", n, failures, err)
 	}
 	if fmt.Sprint(launcher.launched) != "[sweep-3 sweep-7]" {
@@ -146,7 +155,7 @@ func TestLaunchWithRollingQueue_FreshSweepRecordsEveryIndex(t *testing.T) {
 
 	configs := []*aws.LaunchConfig{{Name: "s-0"}, {Name: "s-1"}, {Name: "s-2"}}
 	state := &SweepState{SweepID: "fresh", SweepName: "s", TotalParams: len(configs), LaunchDelay: "0s"}
-	if _, _, n, err := launchWithRollingQueue(context.Background(), &fakeSweepLauncher{}, state, configs, []int{0, 1, 2}, 1, "0s"); err != nil || n != 3 {
+	if _, _, n, err := launchWithRollingQueue(context.Background(), &fakeSweepLauncher{}, unverifiedGuard(), state, configs, []int{0, 1, 2}, 1, "0s"); err != nil || n != 3 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
 	saved, err := loadSweepState("fresh")

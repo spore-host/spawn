@@ -376,12 +376,20 @@ func instanceBelongsToJobArray(in aws.InstanceInfo, jobArrayID string) bool {
 	return in.JobArrayID == jobArrayID
 }
 
-func drainJobArray(ctx context.Context, awsClient *aws.Client, region, jobArrayID string) {
+// jobArrayDrainAPI is what drainJobArray calls.
+type jobArrayDrainAPI interface {
+	ListInstances(ctx context.Context, region, stateFilter string) ([]aws.InstanceInfo, error)
+	Terminate(ctx context.Context, region, instanceID string) error
+}
+
+// drainJobArray terminates every instance tagged with the job array's id and
+// returns the IDs it terminated.
+func drainJobArray(ctx context.Context, awsClient jobArrayDrainAPI, region, jobArrayID string) []string {
 	insts, err := awsClient.ListInstances(ctx, region, "")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️  drain: list instances failed: %v — RUN `spawn list` "+
-			"AND TERMINATE BY HAND; a failed cohort's instances are still billing\n", err)
-		return
+		fmt.Fprintf(os.Stderr, "⚠️  drain: list instances failed: %v — terminating the members this launch "+
+			"recorded instead; check `spawn list` for any it could not\n", err)
+		return nil
 	}
 
 	// Report what was found and done, always. This path is the only thing between
@@ -391,6 +399,7 @@ func drainJobArray(ctx context.Context, awsClient *aws.Client, region, jobArrayI
 	// member terminated, one left running, and no indication which had happened
 	// (#683).
 	var drained, failed int
+	var terminated []string
 	for _, in := range insts {
 		// in.JobArrayID, NOT in.Tags["spawn:job-array-id"] (#683).
 		//
@@ -415,6 +424,7 @@ func drainJobArray(ctx context.Context, awsClient *aws.Client, region, jobArrayI
 			continue
 		}
 		drained++
+		terminated = append(terminated, in.InstanceID)
 		fmt.Fprintf(os.Stderr, "   drained %s (%s)\n", in.InstanceID, in.State)
 	}
 
@@ -432,6 +442,7 @@ func drainJobArray(ctx context.Context, awsClient *aws.Client, region, jobArrayI
 	default:
 		fmt.Fprintf(os.Stderr, "   drain: terminated %d instance(s)\n", drained)
 	}
+	return terminated
 }
 
 // launchMPICohort launches an MPI cluster as an all-or-nothing cohort
@@ -631,13 +642,11 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 	// Provider seam over the real AWS client. PlacementGroupPrefix (set by
 	// runLaunch for the auto-PG case) makes the Actuator create a per-AZ cluster PG
 	// on demand as the cohort advances AZs.
-	act := &mpicohort.Actuator{
-		Client:               awsClient,
-		Region:               baseConfig.Region,
-		BaseConfig:           *baseConfig,
-		Configs:              cfgs,
-		PlacementGroupPrefix: baseConfig.PlacementGroupPrefix,
-	}
+	//
+	// Every instance the Actuator launches is recorded in the fleet guard
+	// (#1305), so a failure from here on terminates exactly what was created.
+	guard := newFleetGuard(kind, os.Stderr, awsClient, launchFleetVerifier(awsClient), keepOnError)
+	act := newArrayActuator(awsClient, guard, baseConfig, cfgs)
 	obs := &mpicohort.Observer{Client: awsClient, Region: baseConfig.Region}
 
 	// Domain seam. MPI runs a real readiness barrier (Enroller: probe mpirun/EFA
@@ -676,11 +685,90 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 		return fmt.Errorf("build cohort: %w", err)
 	}
 
-	prog.Start(fmt.Sprintf("Reconciling %d-instance cohort", n))
-	outcome, err := r.Reconcile(ctx, c)
+	launched, err := runArrayCohort(ctx, awsClient, guard, func(ctx context.Context) (cohort.Outcome, error) {
+		return r.Reconcile(ctx, c)
+	}, arrayRun{
+		prog: prog, auditLog: auditLog, kind: kind, region: baseConfig.Region, jobArrayID: jobArrayID,
+		memberIDs: memberIDs, mpi: spec.mpi, minViable: minViableCount, targetOS: baseConfig.TargetOS,
+	})
 	if err != nil {
-		prog.Error("Reconciling cohort", err)
-		return fmt.Errorf("cohort reconcile: %w", err)
+		return err
+	}
+	if len(launched) > 0 {
+		keepAZ = launched[0].AvailabilityZone // all members share one AZ (collective PG invariant)
+	}
+	return renderJobArrayResult(launched, baseConfig, mp, jobArrayID, createdAt, plat)
+}
+
+// recordingLaunchAPI is the Actuator's client with every successful launch
+// recorded in the fleet guard, so a failure later in the job-array launch knows
+// exactly which instances exist (#1305). The cohort Outcome carries no
+// instance IDs, and re-deriving them from ListInstances is no help when it is
+// ListInstances that failed.
+type recordingLaunchAPI struct {
+	mpicohort.LaunchAPI
+	guard    *fleetGuard
+	targetOS string
+}
+
+func (r recordingLaunchAPI) Launch(ctx context.Context, cfg aws.LaunchConfig) (*aws.LaunchResult, error) {
+	res, err := r.LaunchAPI.Launch(ctx, cfg)
+	if err == nil && res != nil {
+		region := res.Region
+		if region == "" {
+			region = cfg.Region
+		}
+		r.guard.launched(fleetMember{label: cfg.Name, instanceID: res.InstanceID, region: region, targetOS: r.targetOS})
+	}
+	return res, err
+}
+
+// newArrayActuator builds the cohort Actuator over client, recording launches
+// in guard.
+func newArrayActuator(client mpicohort.LaunchAPI, guard *fleetGuard, baseConfig *aws.LaunchConfig, cfgs map[cohort.EntityID]aws.LaunchConfig) *mpicohort.Actuator {
+	return &mpicohort.Actuator{
+		Client:               recordingLaunchAPI{LaunchAPI: client, guard: guard, targetOS: baseConfig.TargetOS},
+		Region:               baseConfig.Region,
+		BaseConfig:           *baseConfig,
+		Configs:              cfgs,
+		PlacementGroupPrefix: baseConfig.PlacementGroupPrefix,
+	}
+}
+
+// arrayFleetAPI is what a job-array launch calls from the reconcile on. A seam:
+// *aws.Client in a launch, a fake in tests.
+type arrayFleetAPI interface {
+	ListInstances(ctx context.Context, region, stateFilter string) ([]aws.InstanceInfo, error)
+	GetInstancePublicIP(ctx context.Context, region, instanceID string) (string, error)
+	Terminate(ctx context.Context, region, instanceID string) error
+}
+
+// arrayRun is the rest of what runArrayCohort needs.
+type arrayRun struct {
+	prog       *progress.Progress
+	auditLog   *audit.AuditLogger
+	kind       string
+	region     string
+	jobArrayID string
+	memberIDs  []cohort.EntityID // launch order
+	mpi        bool
+	minViable  int
+	targetOS   string
+}
+
+// runArrayCohort is a job-array launch from the reconcile on: reconcile, drain
+// a failed cohort, find the members, verify their spored. Every return after
+// the first RunInstances is covered by guard.finish (#1305): a failure here
+// terminates each launched member exactly once, unless --keep-on-error.
+func runArrayCohort(ctx context.Context, api arrayFleetAPI, guard *fleetGuard, reconcile func(context.Context) (cohort.Outcome, error), a arrayRun) (_ []*aws.LaunchResult, err error) {
+	defer func() { err = guard.finish(ctx, err) }()
+	n := len(a.memberIDs)
+
+	a.prog.Start(fmt.Sprintf("Reconciling %d-instance cohort", n))
+	outcome, err := reconcile(ctx)
+	if err != nil {
+		a.prog.Error("Reconciling cohort", err)
+		return nil, fmt.Errorf("cohort reconcile: %w", err)
 	}
 
 	if !outcome.Ready {
@@ -704,15 +792,20 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 		// with nothing launched it is a no-op costing one DescribeInstances — against a
 		// missed drain costing $15/hr. Always draining is the only defensible default.
 		//
+		// What the drain terminated is marked in the guard; the guard's finish then
+		// terminates whatever was launched and the tag scan missed (#1305).
+		//
 		// cleanupAbandonedPGs is deferred, so it runs after this. Termination is
 		// asynchronous, so a PG delete may still race a shutting-down instance; that
 		// stays best-effort, since an empty placement group is free.
 		fmt.Fprintf(os.Stderr, "⚠️  Cohort failed; draining any launched instances...\n")
-		drainJobArray(ctx, awsClient, baseConfig.Region, jobArrayID)
+		for _, id := range drainJobArray(ctx, api, a.region, a.jobArrayID) {
+			guard.markGone(id)
+		}
 
 		successCount, failureCount := 0, 0
 		var details []string
-		for _, id := range memberIDs {
+		for _, id := range a.memberIDs {
 			rec := outcome.Records[id]
 			if rec.Succeeded() {
 				successCount++
@@ -721,51 +814,47 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 				details = append(details, fmt.Sprintf("%s: %s", id, rec.Summary()))
 			}
 		}
-		prog.Error(fmt.Sprintf("Reconciling %d-instance cohort", n),
+		a.prog.Error(fmt.Sprintf("Reconciling %d-instance cohort", n),
 			fmt.Errorf("%d/%d members failed", failureCount, n))
-		auditLog.LogOperationWithData("launch_job_array", jobArrayID, "failed",
+		a.auditLog.LogOperationWithData("launch_job_array", a.jobArrayID, "failed",
 			map[string]interface{}{
 				"success_count": successCount,
 				"failure_count": failureCount,
 			}, fmt.Errorf("%d/%d members failed", failureCount, n))
-		return fmt.Errorf("job array launch failed (%d/%d members):\n  %s",
+		return nil, fmt.Errorf("job array launch failed (%d/%d members):\n  %s",
 			failureCount, n, strings.Join(details, "\n  "))
 	}
-	prog.Complete(fmt.Sprintf("Reconciling %d-instance cohort", n))
-
-	auditLog.LogOperationWithData("launch_job_array", jobArrayID, "success",
-		map[string]interface{}{"instance_count": n}, nil)
+	a.prog.Complete(fmt.Sprintf("Reconciling %d-instance cohort", n))
 
 	// The Outcome carries no instance IDs/IPs (cohort Records are state-only), so
 	// re-derive the launched set from EC2 by Name and fetch public IPs — the same
 	// surface the legacy path rendered.
-	prog.Start("Getting public IPs")
-	insts, err := awsClient.ListInstances(ctx, baseConfig.Region, "")
+	a.prog.Start("Getting public IPs")
+	insts, err := api.ListInstances(ctx, a.region, "")
 	if err != nil {
-		prog.Error("Getting public IPs", err)
-		return fmt.Errorf("list instances after reconcile: %w", err)
+		a.prog.Error("Getting public IPs", err)
+		return nil, fmt.Errorf("list instances after reconcile: %w", err)
 	}
 	byName := make(map[string]aws.InstanceInfo, len(insts))
 	for _, in := range insts {
 		byName[in.Name] = in
 	}
-	launchedInstances := make([]*aws.LaunchResult, 0, n)
-	for _, id := range memberIDs { // launch order
+	launched := make([]*aws.LaunchResult, 0, n)
+	for _, id := range a.memberIDs { // launch order
 		in, ok := byName[string(id)]
 		if !ok {
 			continue
 		}
-		keepAZ = in.AvailabilityZone // all members share one AZ (collective PG invariant)
 		publicIP := in.PublicIP
 		if publicIP == "" {
-			if ip, ipErr := awsClient.GetInstancePublicIP(ctx, baseConfig.Region, in.InstanceID); ipErr == nil {
+			if ip, ipErr := api.GetInstancePublicIP(ctx, a.region, in.InstanceID); ipErr == nil {
 				publicIP = ip
 			}
 		}
-		launchedInstances = append(launchedInstances, &aws.LaunchResult{
+		launched = append(launched, &aws.LaunchResult{
 			InstanceID:       in.InstanceID,
 			Name:             in.Name,
-			Region:           baseConfig.Region,
+			Region:           a.region,
 			PublicIP:         publicIP,
 			PrivateIP:        in.PrivateIP,
 			AvailabilityZone: in.AvailabilityZone,
@@ -773,9 +862,50 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 			LaunchTime:       in.LaunchTime,
 		})
 	}
-	prog.Complete("Getting public IPs")
+	a.prog.Complete("Getting public IPs")
 
-	return renderJobArrayResult(launchedInstances, baseConfig, mp, jobArrayID, createdAt, plat)
+	// Verify spored on every member, as a single launch does (#1305). A member
+	// whose spored never came up has been terminated (unless --keep-on-error).
+	members := make([]fleetMember, len(launched))
+	for i, l := range launched {
+		members[i] = fleetMember{label: l.Name, instanceID: l.InstanceID, region: a.region, targetOS: a.targetOS}
+		guard.launched(members[i])
+	}
+	verified := guard.verifyAll(ctx, members)
+	kept := make([]*aws.LaunchResult, 0, len(verified))
+	ok := make(map[string]bool, len(verified))
+	for _, m := range verified {
+		ok[m.instanceID] = true
+	}
+	for _, l := range launched {
+		if ok[l.InstanceID] {
+			kept = append(kept, l)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "   %s\n", guard.summary())
+
+	// An MPI cluster missing a rank is useless; a plain array must still have its
+	// --min-viable members. Below that the launch failed, and finish tears down
+	// what is left.
+	need := n
+	if !a.mpi {
+		need = a.minViable
+		if need < 1 {
+			need = 1
+		}
+		if need > n {
+			need = n
+		}
+	}
+	if len(kept) < need {
+		a.auditLog.LogOperationWithData("launch_job_array", a.jobArrayID, "failed",
+			map[string]interface{}{"verified_count": len(kept)},
+			fmt.Errorf("%d of %d members have spored verified, need %d", len(kept), n, need))
+		return nil, fmt.Errorf("%s launch failed: spored verified on %d of %d members, %d needed", a.kind, len(kept), n, need)
+	}
+	a.auditLog.LogOperationWithData("launch_job_array", a.jobArrayID, "success",
+		map[string]interface{}{"instance_count": len(kept)}, nil)
+	return kept, nil
 }
 
 // buildCohort constructs the right cohort for the spec: an all-or-nothing MPI

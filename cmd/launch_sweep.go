@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -494,54 +495,86 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		cfg.UserData = encodeUserDataForOS(userDataScript, cfg.TargetOS)
 	}
 
-	// Launch instances with rolling queue or all at once
+	// Launch, verify and report (#1305): every member's spored is verified, a
+	// member whose spored never came up is terminated and counted failed, and a
+	// failure that ends the launch terminates every member launched so far.
+	guard := newFleetGuard("sweep", os.Stderr, awsClient, launchFleetVerifier(awsClient), keepOnError)
+	return runSweepLaunch(ctx, awsClient, guard, sweepRun{
+		sweepID: sweepID, name: name, paramFile: paramFile, totalParams: len(paramFormat.Params),
+		maxConcurrent: maxConcurrent, launchDelay: launchDelay, configs: launchConfigs,
+	})
+}
+
+// sweepRun is what runSweepLaunch needs about the sweep.
+type sweepRun struct {
+	sweepID, name, paramFile string
+	totalParams              int
+	maxConcurrent            int
+	launchDelay              string
+	configs                  []*aws.LaunchConfig
+}
+
+// runSweepLaunch launches a foreground sweep's parameter sets — through the
+// rolling queue, or all at once — verifies each member's spored, and reports.
+//
+// Parameter sets are independent. A set that failed to launch, or whose spored
+// never came up (that member is terminated unless --keep-on-error), is a failed
+// set: the sweep exits non-zero and says which, and the verified members are
+// kept, since each is enforcing its own TTL. Any other failure after the first
+// RunInstances is the launch itself failing, and guard.finish terminates every
+// member launched so far (#1305).
+func runSweepLaunch(ctx context.Context, l sweepLauncher, guard *fleetGuard, s sweepRun) (err error) {
+	defer func() { err = guard.finish(ctx, err) }()
+	launchConfigs := s.configs
+
 	var launchedInstances []*aws.LaunchResult
 	var failures []string
 	var successCount int
 
-	if maxConcurrent > 0 && maxConcurrent < len(launchConfigs) {
+	if s.maxConcurrent > 0 && s.maxConcurrent < len(launchConfigs) {
 		// Rolling queue mode
 		indices := make([]int, len(launchConfigs))
 		for i := range indices {
 			indices[i] = i
 		}
 		fresh := &SweepState{
-			SweepID:       sweepID,
-			SweepName:     name,
+			SweepID:       s.sweepID,
+			SweepName:     s.name,
 			CreatedAt:     time.Now(),
-			ParamFile:     paramFile,
+			ParamFile:     s.paramFile,
 			TotalParams:   len(launchConfigs),
-			MaxConcurrent: maxConcurrent,
-			LaunchDelay:   launchDelay,
+			MaxConcurrent: s.maxConcurrent,
+			LaunchDelay:   s.launchDelay,
 		}
-		launchedInstances, failures, successCount, err = launchWithRollingQueue(ctx, awsClient, fresh, launchConfigs, indices, maxConcurrent, launchDelay)
+		launchedInstances, failures, successCount, err = launchWithRollingQueue(ctx, l, guard, fresh, launchConfigs, indices, s.maxConcurrent, s.launchDelay)
 		if err != nil {
 			return err
 		}
 	} else {
 		// All-at-once mode (maxConcurrent == 0 or >= total params)
 		fmt.Fprintf(os.Stderr, "\n🚀 Launching %d instances in parallel...\n\n", len(launchConfigs))
-		launchedInstances, failures, successCount = launchAllAtOnce(ctx, awsClient, launchConfigs)
+		launchedInstances, failures, successCount = launchAllAtOnce(ctx, l, guard, launchConfigs)
 	}
+	fmt.Fprintf(os.Stderr, "   %s\n", guard.summary())
 
 	// Handle failures
 	if len(failures) > 0 {
-		fmt.Fprintf(os.Stderr, "\n⚠️  Some instances failed to launch:\n")
+		fmt.Fprintf(os.Stderr, "\n⚠️  Some parameter sets failed (to launch, or spored never came up):\n")
 		for _, failure := range failures {
 			fmt.Fprintf(os.Stderr, "   • %s\n", failure)
 		}
-		return fmt.Errorf("%d/%d instances failed to launch", len(failures), len(launchConfigs))
+		return partial(fmt.Errorf("%d/%d parameter sets failed; %d launched and kept", len(failures), len(launchConfigs), successCount))
 	}
 
 	// Save sweep state
 	state := &SweepState{
-		SweepID:       sweepID,
-		SweepName:     name,
+		SweepID:       s.sweepID,
+		SweepName:     s.name,
 		CreatedAt:     time.Now(),
-		ParamFile:     paramFile,
-		TotalParams:   len(paramFormat.Params),
-		MaxConcurrent: maxConcurrent,
-		LaunchDelay:   launchDelay,
+		ParamFile:     s.paramFile,
+		TotalParams:   s.totalParams,
+		MaxConcurrent: s.maxConcurrent,
+		LaunchDelay:   s.launchDelay,
 		Completed:     0,
 		Running:       successCount,
 		Pending:       0,
@@ -567,8 +600,8 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 
 	// Display success
 	fmt.Fprintf(os.Stderr, "\n✅ Parameter sweep launched successfully!\n\n")
-	fmt.Fprintf(os.Stderr, "Sweep ID:   %s\n", sweepID)
-	fmt.Fprintf(os.Stderr, "Sweep Name: %s\n", name)
+	fmt.Fprintf(os.Stderr, "Sweep ID:   %s\n", s.sweepID)
+	fmt.Fprintf(os.Stderr, "Sweep Name: %s\n", s.name)
 	fmt.Fprintf(os.Stderr, "Instances:  %d\n\n", successCount)
 
 	fmt.Fprintf(os.Stderr, "Instances:\n")
@@ -579,15 +612,35 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 
 	fmt.Fprintf(os.Stderr, "\nTo view sweep status:\n")
-	fmt.Fprintf(os.Stderr, "  spawn list --sweep-id %s\n", sweepID)
+	fmt.Fprintf(os.Stderr, "  spawn list --sweep-id %s\n", s.sweepID)
 
 	return nil
 }
 
-// launchAllAtOnce launches all instances in parallel (no rolling queue)
-func launchAllAtOnce(ctx context.Context, awsClient *aws.Client, launchConfigs []*aws.LaunchConfig) ([]*aws.LaunchResult, []string, int) {
+// sweepMember is parameter set paramIndex's instance as a fleet member.
+func sweepMember(paramIndex int, cfg *aws.LaunchConfig, res *aws.LaunchResult) fleetMember {
+	region := res.Region
+	if region == "" {
+		region = cfg.Region
+	}
+	return fleetMember{
+		label:      fmt.Sprintf("parameter set %d (%s)", paramIndex, res.Name),
+		instanceID: res.InstanceID,
+		region:     region,
+		targetOS:   cfg.TargetOS,
+	}
+}
+
+// launchAllAtOnce launches all instances in parallel (no rolling queue), then
+// verifies each one's spored. A set whose launch or verification failed is
+// returned as a failure, its slot in the result nil.
+func launchAllAtOnce(ctx context.Context, l sweepLauncher, guard *fleetGuard, launchConfigs []*aws.LaunchConfig) ([]*aws.LaunchResult, []string, int) {
 	results := runLaunchBatch(len(launchConfigs), func(idx int) (*aws.LaunchResult, error) {
-		return awsClient.Launch(ctx, *launchConfigs[idx])
+		res, err := l.Launch(ctx, *launchConfigs[idx])
+		if err == nil && res != nil {
+			guard.launched(sweepMember(idx, launchConfigs[idx], res))
+		}
+		return res, err
 	})
 
 	// Collect results. Parameter sets are independent, so failures are recorded
@@ -595,31 +648,58 @@ func launchAllAtOnce(ctx context.Context, awsClient *aws.Client, launchConfigs [
 	// surfaces which sets failed.
 	launchedInstances := make([]*aws.LaunchResult, len(launchConfigs))
 	var failures []string
-	successCount := 0
+	var members []fleetMember
+	byID := map[string]int{}
 
 	for _, result := range results {
 		if result.err != nil {
 			failures = append(failures, fmt.Sprintf("Parameter set %d: %v", result.index, result.err))
 		} else {
 			launchedInstances[result.index] = result.result
-			successCount++
+			m := sweepMember(result.index, launchConfigs[result.index], result.result)
+			members = append(members, m)
+			byID[m.instanceID] = result.index
 			fmt.Fprintf(os.Stderr, "✓ Launched %s (parameter set %d/%d)\n", result.result.Name, result.index+1, len(launchConfigs))
 		}
+	}
+
+	// Verify spored on every launched member; one that never came up is a
+	// failed set (#1305), terminated unless --keep-on-error.
+	verified := map[string]bool{}
+	for _, m := range guard.verifyAll(ctx, members) {
+		verified[m.instanceID] = true
+	}
+	successCount := 0
+	for _, m := range members {
+		idx := byID[m.instanceID]
+		if verified[m.instanceID] {
+			successCount++
+			continue
+		}
+		failures = append(failures, fmt.Sprintf("Parameter set %d: %v", idx, guard.failure(m.instanceID)))
+		launchedInstances[idx] = nil
 	}
 
 	return launchedInstances, failures, successCount
 }
 
-// sweepLauncher is the slice of *aws.Client the rolling queue uses; a seam so
-// tests can drive it without EC2.
+// sweepLauncher is the slice of *aws.Client a sweep uses; a seam so tests can
+// drive it without EC2.
 type sweepLauncher interface {
 	Launch(ctx context.Context, cfg aws.LaunchConfig) (*aws.LaunchResult, error)
 	ListInstances(ctx context.Context, region string, stateFilter string) ([]aws.InstanceInfo, error)
+	Terminate(ctx context.Context, region, instanceID string) error
 }
 
 // rollingQueuePollInterval is how often the rolling queue checks for finished
 // instances. A var so tests need not wait on it.
 var rollingQueuePollInterval = 10 * time.Second
+
+// sweepVerifyResult is one member's verification, reported to the queue.
+type sweepVerifyResult struct {
+	idx int
+	err error
+}
 
 // launchWithRollingQueue launches instances with rolling queue orchestration.
 //
@@ -629,7 +709,16 @@ var rollingQueuePollInterval = 10 * time.Second
 // state and the identity indices; `spawn resume` passes the loaded state and
 // only the pending indices, so the records of parameters that already ran, and
 // the sweep's TotalParams, survive the resume (#1248).
-func launchWithRollingQueue(ctx context.Context, awsClient sweepLauncher, state *SweepState, launchConfigs []*aws.LaunchConfig, paramIndices []int, maxConcurrent int, launchDelay string) ([]*aws.LaunchResult, []string, int, error) {
+//
+// Each member's spored is verified as it launches, in the background (#1305).
+// A member whose spored never came up is terminated (unless --keep-on-error),
+// recorded as failed — so `spawn resume` does not count it completed — and its
+// slot goes to the next set. The queue returns once every member it launched
+// has been verified or has failed.
+//
+// Completions are polled in every region the active members run in, one
+// ListInstances per region per tick (#1251).
+func launchWithRollingQueue(ctx context.Context, awsClient sweepLauncher, guard *fleetGuard, state *SweepState, launchConfigs []*aws.LaunchConfig, paramIndices []int, maxConcurrent int, launchDelay string) ([]*aws.LaunchResult, []string, int, error) {
 	if len(paramIndices) != len(launchConfigs) {
 		return nil, nil, 0, fmt.Errorf("internal error: %d launch configs but %d parameter indices", len(launchConfigs), len(paramIndices))
 	}
@@ -653,6 +742,89 @@ func launchWithRollingQueue(ctx context.Context, awsClient sweepLauncher, state 
 	activeInstances := make(map[int]string)
 	var nextToLaunch int
 
+	baseRunning, baseFailed := state.Running, state.Failed
+	saveState := func() {
+		state.Running = baseRunning + len(activeInstances)
+		state.Pending = len(launchConfigs) - nextToLaunch
+		state.Failed = baseFailed + len(failures)
+		if err := saveSweepState(state); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to save sweep state: %v\n", err)
+		}
+	}
+
+	// Verification runs beside the queue; results come back on verified.
+	verified := make(chan sweepVerifyResult, len(launchConfigs))
+	verifying := 0
+
+	// launchOne launches set i and starts verifying it. It reports whether the
+	// launch succeeded.
+	launchOne := func(i int) bool {
+		result, err := awsClient.Launch(ctx, *launchConfigs[i])
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("Parameter set %d: %v", paramIndices[i], err))
+			fmt.Fprintf(os.Stderr, "✗ Failed to launch parameter set %d: %v\n", paramIndices[i]+1, err)
+			return false
+		}
+		launchedInstances[i] = result
+		activeInstances[i] = result.InstanceID
+		successCount++
+		state.Instances = append(state.Instances, InstanceState{
+			Index:      paramIndices[i],
+			InstanceID: result.InstanceID,
+			Region:     result.Region,
+			State:      "running",
+			LaunchedAt: time.Now(),
+		})
+		m := sweepMember(paramIndices[i], launchConfigs[i], result)
+		guard.launched(m)
+		verifying++
+		at := time.Now()
+		go func() { verified <- sweepVerifyResult{idx: i, err: guard.verifyOne(ctx, m, at)} }()
+		return true
+	}
+
+	// settle records a finished verification. A failed one is a failed set;
+	// it frees its slot (returns true) once the member is gone.
+	settle := func(r sweepVerifyResult) bool {
+		verifying--
+		if r.err == nil {
+			return false
+		}
+		res := launchedInstances[r.idx]
+		failures = append(failures, fmt.Sprintf("Parameter set %d: %v", paramIndices[r.idx], r.err))
+		successCount--
+		for k := range state.Instances {
+			if state.Instances[k].InstanceID == res.InstanceID {
+				state.Instances[k].State = sweepInstanceFailed
+				state.Instances[k].ErrorMessage = r.err.Error()
+			}
+		}
+		launchedInstances[r.idx] = nil
+		_, active := activeInstances[r.idx]
+		freed := active && !guard.keep
+		if freed {
+			delete(activeInstances, r.idx)
+		}
+		saveState()
+		return freed
+	}
+
+	// fill launches the next pending set for each freed slot.
+	fill := func(slots int) {
+		for ; slots > 0 && nextToLaunch < len(launchConfigs); slots-- {
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+			if launchOne(nextToLaunch) {
+				fmt.Fprintf(os.Stderr, "✓ Launched %s (parameter set %d/%d) [%d active, %d pending]\n",
+					launchedInstances[nextToLaunch].Name, paramIndices[nextToLaunch]+1, state.TotalParams,
+					len(activeInstances), len(launchConfigs)-nextToLaunch-1)
+			}
+			nextToLaunch++
+			saveState()
+		}
+	}
+
 	// Launch first batch
 	initialBatch := maxConcurrent
 	if initialBatch > len(launchConfigs) {
@@ -661,14 +833,8 @@ func launchWithRollingQueue(ctx context.Context, awsClient sweepLauncher, state 
 
 	fmt.Fprintf(os.Stderr, "Launching initial batch of %d instances...\n", initialBatch)
 	for i := 0; i < initialBatch; i++ {
-		result, err := awsClient.Launch(ctx, *launchConfigs[i])
-		if err != nil {
-			failures = append(failures, fmt.Sprintf("Parameter set %d: %v", paramIndices[i], err))
-		} else {
-			launchedInstances[i] = result
-			activeInstances[i] = result.InstanceID
-			successCount++
-			fmt.Fprintf(os.Stderr, "✓ Launched %s (parameter set %d/%d)\n", result.Name, paramIndices[i]+1, state.TotalParams)
+		if launchOne(i) {
+			fmt.Fprintf(os.Stderr, "✓ Launched %s (parameter set %d/%d)\n", launchedInstances[i].Name, paramIndices[i]+1, state.TotalParams)
 		}
 
 		// Apply launch delay between initial launches
@@ -679,25 +845,17 @@ func launchWithRollingQueue(ctx context.Context, awsClient sweepLauncher, state 
 	nextToLaunch = initialBatch
 
 	// Save initial state, on top of whatever the caller's state already holds.
-	baseRunning, baseFailed := state.Running, state.Failed
-	state.Running = baseRunning + len(activeInstances)
-	state.Pending = len(launchConfigs) - nextToLaunch
-	state.Failed = baseFailed + len(failures)
+	saveState()
 
-	for i, instance := range launchedInstances {
-		if instance != nil {
-			state.Instances = append(state.Instances, InstanceState{
-				Index:      paramIndices[i],
-				InstanceID: instance.InstanceID,
-				Region:     instance.Region,
-				State:      "running",
-				LaunchedAt: time.Now(),
-			})
+	// interrupted waits out the verifications in flight (each ends promptly on
+	// the cancelled context, terminating its member), then reports.
+	interrupted := func() ([]*aws.LaunchResult, []string, int, error) {
+		for verifying > 0 {
+			settle(<-verified)
 		}
-	}
-
-	if err := saveSweepState(state); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to save sweep state: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\n⚠️  Interrupted. Progress saved to sweep state.\n")
+		fmt.Fprintf(os.Stderr, "Resume with: spawn resume --sweep-id %s\n", sweepID)
+		return launchedInstances, failures, successCount, partial(ctx.Err())
 	}
 
 	// Rolling queue: poll for completions and launch next
@@ -711,92 +869,88 @@ func launchWithRollingQueue(ctx context.Context, awsClient sweepLauncher, state 
 		for nextToLaunch < len(launchConfigs) {
 			select {
 			case <-ctx.Done():
-				fmt.Fprintf(os.Stderr, "\n⚠️  Interrupted. Progress saved to sweep state.\n")
-				fmt.Fprintf(os.Stderr, "Resume with: spawn resume --sweep-id %s\n", sweepID)
-				return launchedInstances, failures, successCount, ctx.Err()
+				return interrupted()
+
+			case r := <-verified:
+				if settle(r) {
+					fill(1)
+				}
 
 			case <-ticker.C:
-				// Query instance states
-				instanceIDs := make([]string, 0, len(activeInstances))
-				for _, id := range activeInstances {
-					instanceIDs = append(instanceIDs, id)
-				}
-
-				if len(instanceIDs) == 0 {
+				if len(activeInstances) == 0 {
+					// Every slot is free (all launches in it failed): refill.
+					fill(maxConcurrent)
 					continue
 				}
-
-				// Get instance states
-				instances, err := awsClient.ListInstances(ctx, launchConfigs[0].Region, "")
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to query instance states: %v\n", err)
-					continue
-				}
-
-				// Build state map
-				stateMap := make(map[string]string)
-				for _, inst := range instances {
-					stateMap[inst.InstanceID] = inst.State
-				}
-
-				// Check for terminated instances
-				var toRemove []int
-				for idx, instID := range activeInstances {
-					state, exists := stateMap[instID]
-					if !exists || state == "terminated" || state == "stopping" || state == "stopped" {
-						toRemove = append(toRemove, idx)
-					}
-				}
-
-				// Remove terminated instances and launch next
-				for _, idx := range toRemove {
-					delete(activeInstances, idx)
-
-					// Wait launch delay if specified
-					if delay > 0 {
-						time.Sleep(delay)
-					}
-
-					// Launch next pending instance
-					if nextToLaunch < len(launchConfigs) {
-						result, err := awsClient.Launch(ctx, *launchConfigs[nextToLaunch])
-						if err != nil {
-							failures = append(failures, fmt.Sprintf("Parameter set %d: %v", paramIndices[nextToLaunch], err))
-							fmt.Fprintf(os.Stderr, "✗ Failed to launch parameter set %d: %v\n", paramIndices[nextToLaunch]+1, err)
-						} else {
-							launchedInstances[nextToLaunch] = result
-							activeInstances[nextToLaunch] = result.InstanceID
-							successCount++
-							fmt.Fprintf(os.Stderr, "✓ Launched %s (parameter set %d/%d) [%d active, %d pending]\n",
-								result.Name, paramIndices[nextToLaunch]+1, state.TotalParams,
-								len(activeInstances), len(launchConfigs)-nextToLaunch-1)
-
-							// Update state file
-							state.Running = baseRunning + len(activeInstances)
-							state.Pending = len(launchConfigs) - nextToLaunch - 1
-							state.Failed = baseFailed + len(failures)
-							state.Instances = append(state.Instances, InstanceState{
-								Index:      paramIndices[nextToLaunch],
-								InstanceID: result.InstanceID,
-								Region:     result.Region,
-								State:      "running",
-								LaunchedAt: time.Now(),
-							})
-
-							if err := saveSweepState(state); err != nil {
-								fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to save sweep state: %v\n", err)
-							}
-						}
-						nextToLaunch++
-					}
-				}
+				fill(len(finishedSweepMembers(ctx, awsClient, activeInstances, launchedInstances, launchConfigs)))
 			}
 		}
 
 		fmt.Fprintf(os.Stderr, "\n✅ All instances launched. Waiting for final batch to complete...\n")
 	}
 
+	// Every member launched must be verified before the queue reports.
+	for verifying > 0 {
+		select {
+		case <-ctx.Done():
+			return interrupted()
+		case r := <-verified:
+			settle(r)
+		}
+	}
+
 	return launchedInstances, failures, successCount, nil
+}
+
+// sweepInstanceFailed is the sweep-state record of a member that failed after
+// it launched — its spored never came up (#1305). reconcileSweepState counts
+// it failed, never completed, whatever EC2 now says.
+const sweepInstanceFailed = "failed"
+
+// finishedSweepMembers removes from active, and returns, the members that have
+// stopped running. It polls each region the active members run in once
+// (#1251): a sweep can span regions, and polling only the first left the
+// others' instances looking active for ever. A region whose poll fails decides
+// nothing about its members this tick.
+func finishedSweepMembers(ctx context.Context, l sweepLauncher, active map[int]string, launched []*aws.LaunchResult, cfgs []*aws.LaunchConfig) []int {
+	byRegion := map[string][]int{}
+	for idx := range active {
+		region := cfgs[idx].Region
+		if launched[idx] != nil && launched[idx].Region != "" {
+			region = launched[idx].Region
+		}
+		byRegion[region] = append(byRegion[region], idx)
+	}
+	regions := make([]string, 0, len(byRegion))
+	for r := range byRegion {
+		regions = append(regions, r)
+	}
+	sort.Strings(regions)
+
+	var done []int
+	for _, region := range regions {
+		instances, err := l.ListInstances(ctx, region, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Warning: Failed to query instance states in %s: %v\n", region, err)
+			continue
+		}
+		stateMap := make(map[string]string, len(instances))
+		for _, inst := range instances {
+			stateMap[inst.InstanceID] = inst.State
+		}
+		idxs := byRegion[region]
+		sort.Ints(idxs)
+		for _, idx := range idxs {
+			st, exists := stateMap[active[idx]]
+			if !exists || st == "terminated" || st == "stopping" || st == "stopped" {
+				done = append(done, idx)
+			}
+		}
+	}
+	for _, idx := range done {
+		delete(active, idx)
+	}
+	return done
 }
 
 // sweepRowBound returns the TTL and idle timeout that will actually apply to one

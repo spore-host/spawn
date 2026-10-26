@@ -445,7 +445,7 @@ func init() {
 	launchCmd.Flags().BoolVar(&waitForRunning, "wait-for-running", true, "Wait until running")
 	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", false, "Linux: also wait (up to 2 min) for SSH on port 22; refused at once if no attached security group allows tcp/22. Off by default: `spawn connect` uses SSM, and spored is verified either way. --wait-for-ssh=false, given explicitly, skips the spored check too (Windows: skips the password wait)")
 	launchCmd.Flags().BoolVar(&skipRegionCheck, "skip-region-check", false, "Skip data locality region mismatch warnings")
-	launchCmd.Flags().BoolVar(&keepOnErrorFlag, "keep-on-error", false, "If the launch fails after the instance was created (spored never came up, it never reached running, ...), keep the instance instead of terminating it. It then has no TTL/idle/cost-limit enforcement until spored is confirmed running")
+	launchCmd.Flags().BoolVar(&keepOnErrorFlag, "keep-on-error", false, "If the launch fails after the instance was created (spored never came up, it never reached running, ...), keep the instance instead of terminating it. For a job array or sweep, keep every member when the launch fails part way, and keep a member whose spored never came up. A kept instance has no TTL/idle/cost-limit enforcement until spored is confirmed running")
 	launchCmd.Flags().BoolVar(&terminateOnError, "terminate-on-error", false, "Terminate the instance if the launch fails after it was created (now the default)")
 	_ = launchCmd.Flags().MarkDeprecated("terminate-on-error", "terminating on a failed launch is now the default; use --keep-on-error to keep the instance instead")
 	// --dry-run (#569): resolves the same LaunchConfig a real launch would —
