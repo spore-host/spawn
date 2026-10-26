@@ -174,6 +174,16 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	p("AWS_REGION_ARG=%s\n", shQuote("--region="+region))
 	p("REASON=\"${1:-unknown}\"\n\n")
 
+	// The hook's own CLI config (#1256), root's and removed on exit: it never
+	// reads the wrapper's, which the task user could have rewritten. Classic
+	// client only, so the timeouts in flushCp hold. Exported, not applied
+	// through spawn_aws as in the wrapper, because spawn_out runs the CLI under
+	// timeout(1), which cannot call a shell function; the hook runs no user
+	// command for the export to leak into. See s3config.go.
+	writeS3Config(p, false)
+	p("trap '[ -z \"$S3CFG\" ] || rm -f \"$S3CFG\"' EXIT\n")
+	p("[ -z \"$S3CFG\" ] || export AWS_CONFIG_FILE=\"$S3CFG\"\n\n")
+
 	// One upload, retried (#1186). See writeFlushUploader.
 	writeFlushUploader(p)
 
