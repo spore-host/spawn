@@ -66,4 +66,10 @@ lambda/*/.deploy-params.yaml
 
 # Build artifacts
 bin/
+
+# GoReleaser output. It is written inside the checkout before the builds run,
+# and Go's VCS stamping counts an untracked file as a modification, so without
+# this every release binary was stamped vcs.modified=true / vX.Y.Z+dirty (#1266).
+# TestReleaseBuildLeavesTheTreeClean probes it, and every before-hook output.
+/dist/
 .DS_Store
