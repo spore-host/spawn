@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.146.0] - 2026-10-25
+
 ### Added
 
 - **`spawn task status` shows the outcome of spored's terminal flush** (#1295).
@@ -11461,7 +11463,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.145.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.146.0...HEAD
+[0.146.0]: https://github.com/spore-host/spawn/compare/v0.145.0...v0.146.0
 [0.145.0]: https://github.com/spore-host/spawn/compare/v0.144.0...v0.145.0
 [0.144.0]: https://github.com/spore-host/spawn/compare/v0.143.0...v0.144.0
 [0.143.0]: https://github.com/spore-host/spawn/compare/v0.142.0...v0.143.0
