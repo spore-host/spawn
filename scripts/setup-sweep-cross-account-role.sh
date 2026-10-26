@@ -54,7 +54,13 @@ aws iam create-role \
   --description "Cross-account role for spawn sweep orchestrator to launch EC2 instances" \
   2>/dev/null || echo "Role already exists"
 
-# Create inline policy for EC2 operations
+# Create inline policy for EC2 operations.
+#
+# iam:PassRole: the orchestrator launches each sweep member with an instance
+# profile, because spored needs its credentials (#1323). The CLI ensures
+# spored-instance-profile, whose role is spored-instance-role, and seeds it for
+# every member without an iam_role of its own; spawnd-role is the profile this
+# script family made before. Exactly those two roles, and only to EC2.
 POLICY_DOCUMENT=$(cat <<EOF
 {
   "Version": "2012-10-17",
@@ -80,7 +86,15 @@ POLICY_DOCUMENT=$(cat <<EOF
       "Action": [
         "iam:PassRole"
       ],
-      "Resource": "arn:aws:iam::${CURRENT_ACCOUNT_ID}:role/spawnd-role"
+      "Resource": [
+        "arn:aws:iam::${CURRENT_ACCOUNT_ID}:role/spored-instance-role",
+        "arn:aws:iam::${CURRENT_ACCOUNT_ID}:role/spawnd-role"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
+        }
+      }
     },
     {
       "Effect": "Allow",

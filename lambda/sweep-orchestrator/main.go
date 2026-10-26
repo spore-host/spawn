@@ -551,7 +551,7 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 	}
 }
 
-func countActiveInstances(ctx context.Context, ec2Client *ec2.Client, state *SweepRecord) (int, error) {
+func countActiveInstances(ctx context.Context, ec2Client ec2InstancesAPI, state *SweepRecord) (int, error) {
 	// Build instance IDs list
 	var instanceIDs []string
 	for _, inst := range state.Instances {
@@ -572,21 +572,31 @@ func countActiveInstances(ctx context.Context, ec2Client *ec2.Client, state *Swe
 		return 0, fmt.Errorf("describe instances failed: %w", err)
 	}
 
+	// A member whose spored never came up is terminated and counted failed, not
+	// active (#1313).
+	nowT := clock()
+	var described []ec2types.Instance
+	for _, reservation := range result.Reservations {
+		described = append(described, reservation.Instances...)
+	}
+	killed := terminateUnverifiedMembers(ctx, ec2Client, state, described, nowT)
+
 	// Build a map of current AWS states
 	awsStates := make(map[string]string)
 	activeCount := 0
-	for _, reservation := range result.Reservations {
-		for _, instance := range reservation.Instances {
-			instanceState := string(instance.State.Name)
-			awsStates[aws.ToString(instance.InstanceId)] = instanceState
-			if instance.State.Name == ec2types.InstanceStateNamePending || instance.State.Name == ec2types.InstanceStateNameRunning {
-				activeCount++
-			}
+	for _, instance := range described {
+		instanceState := string(instance.State.Name)
+		awsStates[aws.ToString(instance.InstanceId)] = instanceState
+		if _, dead := killed[aws.ToString(instance.InstanceId)]; dead {
+			continue
+		}
+		if instance.State.Name == ec2types.InstanceStateNamePending || instance.State.Name == ec2types.InstanceStateNameRunning {
+			activeCount++
 		}
 	}
 
 	// Update state history for changed instances
-	now := time.Now().Format(time.RFC3339)
+	now := nowT.Format(time.RFC3339)
 	for i := range state.Instances {
 		inst := &state.Instances[i]
 		if inst.InstanceID == "" {
@@ -605,6 +615,7 @@ func countActiveInstances(ctx context.Context, ec2Client *ec2.Client, state *Swe
 			inst.State = awsState
 		}
 	}
+	recordSporedFailures(state, killed, nowT)
 
 	return activeCount, nil
 }
@@ -706,7 +717,8 @@ func launchInstance(ctx context.Context, ec2Client *ec2.Client, state *SweepReco
 // Two consequences, and together they removed every lifetime guarantee:
 //
 //   - No UserData, so no spored: no TTL, idle or cost enforcement in-instance.
-//     That is NOT fixed here; it needs the config to reach this Lambda at all.
+//     Not fixed here; #1323 fixed it later (spored.go): members now boot the
+//     spored bootstrap the CLI renders.
 //   - No spawn:managed tag, so the reaper could not touch them either. Its
 //     ec2:TerminateInstances grant is conditioned on
 //     ec2:ResourceTag/spawn:managed=true — deliberately, as the rail that keeps
@@ -716,10 +728,8 @@ func launchInstance(ctx context.Context, ec2Client *ec2.Client, state *SweepReco
 // and no permission to act outside. That inverts the project's lifecycle
 // invariant (#70/#72), where spored enforces and the reaper backstops.
 //
-// Stamping these two tags restores the BACKSTOP. It does not restore in-instance
-// enforcement, so a row still runs until the reaper's next cycle rather than
-// honouring its TTL to the minute — but "reaped within the hour" and "runs until
-// a human notices" are different kinds of problem, and this closes the second.
+// Stamping these two tags restores the BACKSTOP. In-instance enforcement is
+// spored's, which reads spawn:ttl-deadline from these same tags (#1323).
 //
 // spawn:ttl-deadline is only stamped when the sweep actually carries a ttl. An
 // absent deadline is correct rather than guessed: the reaper falls back to its
@@ -743,44 +753,9 @@ func sweepRowLifecycleTags(config map[string]interface{}, now time.Time) []ec2ty
 
 // tryLaunchInstanceSingleRegion attempts to launch with specific instance type (single-region sweeps)
 func tryLaunchInstanceSingleRegion(ctx context.Context, ec2Client *ec2.Client, state *SweepRecord, config map[string]interface{}, paramIndex int, instanceType string, instanceTypePattern string) error {
-	// Extract launch configuration
-	ami := getStringParam(config, "ami", "")
-	keyName := getStringParam(config, "key_name", "")
-	iamRole := getStringParam(config, "iam_role", "spawnd-role")
-	spot := getBoolParam(config, "spot", false)
-
-	// Build RunInstances input
-	input := &ec2.RunInstancesInput{
-		MinCount:     aws.Int32(1),
-		MaxCount:     aws.Int32(1),
-		InstanceType: ec2types.InstanceType(instanceType),
-		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{
-			Name: aws.String(iamRole),
-		},
-		TagSpecifications: []ec2types.TagSpecification{
-			{
-				ResourceType: ec2types.ResourceTypeInstance,
-				Tags: append([]ec2types.Tag{
-					{Key: aws.String("spawn:sweep-id"), Value: aws.String(state.SweepID)},
-					{Key: aws.String("spawn:sweep-index"), Value: aws.String(fmt.Sprintf("%d", paramIndex))},
-					{Key: aws.String("Name"), Value: aws.String(fmt.Sprintf("%s-%d", state.SweepName, paramIndex))},
-				}, sweepRowLifecycleTags(config, time.Now())...),
-			},
-		},
-	}
-
-	if ami != "" {
-		input.ImageId = aws.String(ami)
-	}
-
-	if keyName != "" {
-		input.KeyName = aws.String(keyName)
-	}
-
-	if spot {
-		input.InstanceMarketOptions = &ec2types.InstanceMarketOptionsRequest{
-			MarketType: ec2types.MarketTypeSpot,
-		}
+	input, err := buildRunInstancesInput(state, config, paramIndex, instanceType, clock())
+	if err != nil {
+		return err
 	}
 
 	// Launch
@@ -1259,8 +1234,12 @@ func runMultiRegionPollingLoop(ctx context.Context, state *SweepRecord, params *
 		}
 
 		if allDone && totalActive == 0 {
-			log.Println("All instances launched and completed")
-			state.Status = "COMPLETED"
+			// Same decision as the single-region loop (#749): a sweep none of
+			// whose members launched, or whose every member's spored never came
+			// up (#1313), did not complete.
+			state.Status = completionStatus(state.Launched, state.Failed)
+			log.Printf("All instances launched and finished: %s (%d launched, %d failed)",
+				state.Status, state.Launched, state.Failed)
 			state.CompletedAt = time.Now().Format(time.RFC3339)
 			// Final cost update before completion
 			updateRegionalCosts(state)
@@ -1287,20 +1266,43 @@ func runMultiRegionPollingLoop(ctx context.Context, state *SweepRecord, params *
 
 // queryActiveInstancesByRegion queries active instance counts per region concurrently
 func queryActiveInstancesByRegion(ctx context.Context, orchestrator *RegionalOrchestrator, state *SweepRecord) map[string]int {
+	clients := make(map[string]ec2InstancesAPI, len(orchestrator.ec2Clients))
+	for r, c := range orchestrator.ec2Clients {
+		clients[r] = c
+	}
+	activeByRegion, killed := countActiveByRegion(ctx, clients, state, clock())
+	// Saved at once, because the polling loop reloads state from DynamoDB on its
+	// next tick and would otherwise forget these failures.
+	if len(killed) > 0 {
+		if err := saveSweepState(ctx, state); err != nil {
+			log.Printf("Failed to save spored failures: %v", err)
+		}
+	}
+	return activeByRegion
+}
+
+// countActiveByRegion counts each region's active members concurrently,
+// terminating and recording as failed any whose spored never came up (#1313).
+// It returns the counts and the members it terminated.
+func countActiveByRegion(ctx context.Context, clients map[string]ec2InstancesAPI, state *SweepRecord, now time.Time) (map[string]int, map[string]time.Duration) {
 	activeByRegion := make(map[string]int)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	killed := map[string]time.Duration{}
 
-	for region, client := range orchestrator.ec2Clients {
+	for region, client := range clients {
 		wg.Add(1)
-		go func(r string, c *ec2.Client) {
+		go func(r string, c ec2InstancesAPI) {
 			defer wg.Done()
-			count, err := countActiveInstancesInRegion(ctx, c, state, r)
+			count, dead, err := countActiveInstancesInRegion(ctx, c, state, r, now)
 			if err != nil {
 				log.Printf("Failed to query instances in %s: %v", r, err)
 				return
 			}
 			mu.Lock()
+			for id, b := range dead {
+				killed[id] = b
+			}
 			activeByRegion[r] = count
 			// Update region status
 			if state.RegionStatus[r] != nil {
@@ -1311,11 +1313,15 @@ func queryActiveInstancesByRegion(ctx context.Context, orchestrator *RegionalOrc
 	}
 	wg.Wait()
 
-	return activeByRegion
+	// Written after every region's goroutine is done: they read state.Instances.
+	recordSporedFailures(state, killed, now)
+	return activeByRegion, killed
 }
 
-// countActiveInstancesInRegion counts active instances in a specific region
-func countActiveInstancesInRegion(ctx context.Context, ec2Client *ec2.Client, state *SweepRecord, region string) (int, error) {
+// countActiveInstancesInRegion counts active instances in a specific region,
+// terminating any whose spored never came up (#1313). It returns those, for the
+// caller to record once every region is done; they are not counted as active.
+func countActiveInstancesInRegion(ctx context.Context, ec2Client ec2InstancesAPI, state *SweepRecord, region string, now time.Time) (int, map[string]time.Duration, error) {
 	// Build instance IDs list for this region
 	var instanceIDs []string
 	for _, inst := range state.Instances {
@@ -1325,7 +1331,7 @@ func countActiveInstancesInRegion(ctx context.Context, ec2Client *ec2.Client, st
 	}
 
 	if len(instanceIDs) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	// Query instance states
@@ -1333,20 +1339,27 @@ func countActiveInstancesInRegion(ctx context.Context, ec2Client *ec2.Client, st
 		InstanceIds: instanceIDs,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("describe instances failed: %w", err)
+		return 0, nil, fmt.Errorf("describe instances failed: %w", err)
 	}
 
-	activeCount := 0
+	var described []ec2types.Instance
 	for _, reservation := range result.Reservations {
-		for _, instance := range reservation.Instances {
-			state := instance.State.Name
-			if state == ec2types.InstanceStateNamePending || state == ec2types.InstanceStateNameRunning {
-				activeCount++
-			}
+		described = append(described, reservation.Instances...)
+	}
+	killed := terminateUnverifiedMembers(ctx, ec2Client, state, described, now)
+
+	activeCount := 0
+	for _, instance := range described {
+		if _, dead := killed[aws.ToString(instance.InstanceId)]; dead {
+			continue
+		}
+		state := instance.State.Name
+		if state == ec2types.InstanceStateNamePending || state == ec2types.InstanceStateNameRunning {
+			activeCount++
 		}
 	}
 
-	return activeCount, nil
+	return activeCount, killed, nil
 }
 
 // sortRegionsByAvailability sorts regions based on availability stats for opportunistic mode
@@ -1560,45 +1573,9 @@ func launchInstanceInRegion(ctx context.Context, ec2Client *ec2.Client, state *S
 
 // tryLaunchInstance attempts to launch with specific instance type
 func tryLaunchInstance(ctx context.Context, ec2Client *ec2.Client, state *SweepRecord, config map[string]interface{}, paramIndex int, region string, instanceType string, instanceTypePattern string) error {
-	// Extract launch configuration
-	// instanceType is provided as parameter
-	ami := getStringParam(config, "ami", "")
-	keyName := getStringParam(config, "key_name", "")
-	iamRole := getStringParam(config, "iam_role", "spawnd-role")
-	spot := getBoolParam(config, "spot", false)
-
-	// Build RunInstances input
-	input := &ec2.RunInstancesInput{
-		MinCount:     aws.Int32(1),
-		MaxCount:     aws.Int32(1),
-		InstanceType: ec2types.InstanceType(instanceType),
-		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{
-			Name: aws.String(iamRole),
-		},
-		TagSpecifications: []ec2types.TagSpecification{
-			{
-				ResourceType: ec2types.ResourceTypeInstance,
-				Tags: append([]ec2types.Tag{
-					{Key: aws.String("spawn:sweep-id"), Value: aws.String(state.SweepID)},
-					{Key: aws.String("spawn:sweep-index"), Value: aws.String(fmt.Sprintf("%d", paramIndex))},
-					{Key: aws.String("Name"), Value: aws.String(fmt.Sprintf("%s-%d", state.SweepName, paramIndex))},
-				}, sweepRowLifecycleTags(config, time.Now())...),
-			},
-		},
-	}
-
-	if ami != "" {
-		input.ImageId = aws.String(ami)
-	}
-
-	if keyName != "" {
-		input.KeyName = aws.String(keyName)
-	}
-
-	if spot {
-		input.InstanceMarketOptions = &ec2types.InstanceMarketOptionsRequest{
-			MarketType: ec2types.MarketTypeSpot,
-		}
+	input, err := buildRunInstancesInput(state, config, paramIndex, instanceType, clock())
+	if err != nil {
+		return err
 	}
 
 	// Launch

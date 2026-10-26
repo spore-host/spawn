@@ -154,6 +154,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also now wins over a CLI `--command`, as the documented row > flag precedence
   says; before, the CLI value took the tag.
 
+- **The sweep orchestrator refuses a detached sweep member that carries no
+  spored bootstrap** (#1323). Such a member would run with no in-instance TTL,
+  so it is recorded as a failed row instead of launched. Sweeps and schedules
+  created by an older spawn have no bootstrap in their params: once the
+  orchestrator is redeployed, re-run them, or re-create the schedule, with this
+  spawn. `spawn schedule create` now builds every member's launch config, so a
+  schedule row key that `spawn launch --param-file` would reject (a misspelled
+  spawn key, for example) is now rejected here too. A file may not set
+  `spawn_user_data`, which is spawn's own key.
+- **The orchestrator's fallback instance profile is now `spored-instance-profile`**,
+  the one spawn creates, instead of `spawnd-role`, which only a hand-run script
+  made. The CLI now ensures `spored-instance-profile` for every detached or
+  scheduled member that names no `iam_role`, as the foreground path does.
+
+- **P0: detached sweep members had no in-instance TTL** (#1323, #1313). A
+  parameter sweep runs detached by default, launched by the sweep-orchestrator
+  Lambda, and it launched every member with no user data, so spored never ran
+  on one: no TTL, idle stop, cost limit or completion handling inside the
+  instance. Only the TTL reaper ended them, on its next cycle and only in the
+  regions it covers. Members now boot the same spored bootstrap a foreground
+  sweep member gets: the CLI builds it with the same code and ships it in the
+  sweep's params (a release build fetches that release's published body; a dev
+  build carries it inline), and the Lambda launches each member with it and with
+  an instance profile. The orchestrator also checks each member's spored as the
+  CLI does for its fleets (#1305): a member still running with no
+  `spawn:last-heartbeat` 5 minutes after launch (10 on Windows) is terminated and
+  counted as a failed row, so it frees its `--max-concurrent` slot, and a sweep
+  in which no member came up records FAILED, in multi-region sweeps too. Needs
+  the sweep-orchestrator redeployed (`scripts/deploy-sweep-orchestrator.sh`) and,
+  in each member account, `scripts/setup-sweep-cross-account-role.sh` re-run: its
+  role may now pass `spored-instance-role` (and `spawnd-role`, as before) to EC2,
+  and nothing else.
 - **`spawn cleanup` no longer offers spawn's S3 buckets for removal and then
   fails on them** (#1301). With `--all` it listed a `spawn:managed` bucket as
   removable and the delete failed with "don't know how to remove"; buckets are
