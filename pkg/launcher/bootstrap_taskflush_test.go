@@ -54,7 +54,7 @@ func TestTaskFlushHookIsInstalledRootOwnedAndNotWorldWritable(t *testing.T) {
 func TestTaskFlushHookHeredocDoesNotCollideWithItsOwnBody(t *testing.T) {
 	hook, err := taskproto.GenerateFlushScript(
 		&taskproto.TaskSpec{TaskID: "t1", Command: []string{"true"}},
-		taskproto.WrapperOptions{ResultsPrefix: "bucket", Region: "us-east-1", RunID: "run-1"})
+		taskproto.WrapperOptions{ResultsPrefix: "s3://bucket/tasks/t1", Region: "us-east-1", RunID: "run-1"})
 	if err != nil {
 		t.Fatalf("GenerateFlushScript: %v", err)
 	}

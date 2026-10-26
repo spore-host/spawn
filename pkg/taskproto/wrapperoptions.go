@@ -1,6 +1,10 @@
 package taskproto
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // WrapperOptions carries the per-launch inputs the generated scripts need, for
 // GenerateWrapper, GeneratePooledJobScript and GenerateFlushScript.
@@ -72,6 +76,13 @@ type WrapperOptions struct {
 var (
 	ErrMissingRunID         = errors.New("taskproto: WrapperOptions.RunID is empty; pass a freshly minted id per launch (spawn#608)")
 	ErrMissingResultsPrefix = errors.New("taskproto: WrapperOptions.ResultsPrefix is empty; pass EffectiveResultsPrefix's result (spawn#646)")
+
+	// ErrInvalidResultsPrefix (spawn#1258): a ResultsPrefix that is not an
+	// s3://bucket[/prefix] URI. A bare bucket name used to pass, and the
+	// wrapper's `aws s3 cp ... "$RESULTS_PREFIX/completion.json"` then copied
+	// the record to a relative path on the instance's disk, which went with
+	// the instance: the task succeeded and nothing reached S3.
+	ErrInvalidResultsPrefix = errors.New("taskproto: WrapperOptions.ResultsPrefix is not an s3://bucket[/prefix] URI; pass EffectiveResultsPrefix's result (spawn#1258)")
 )
 
 // Validate reports whether the options can produce a correct script.
@@ -81,6 +92,11 @@ var (
 func (o WrapperOptions) Validate() error {
 	if o.ResultsPrefix == "" {
 		return ErrMissingResultsPrefix
+	}
+	// SplitS3URI trims spaces, but the scripts use the value as given, and
+	// " s3://..." is a local path to the aws CLI.
+	if _, _, ok := SplitS3URI(o.ResultsPrefix); !ok || strings.TrimSpace(o.ResultsPrefix) != o.ResultsPrefix {
+		return fmt.Errorf("%w: got %q", ErrInvalidResultsPrefix, o.ResultsPrefix)
 	}
 	if o.RunID == "" {
 		return ErrMissingRunID

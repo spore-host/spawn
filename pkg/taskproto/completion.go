@@ -74,7 +74,47 @@ type CompletionRecord struct {
 	// pre-#1260 wrapper parses with both empty.
 	InstanceType string `json:"instance_type,omitempty"`
 	Purchase     string `json:"purchase,omitempty"` // PurchaseSpot | PurchaseOnDemand
+
+	// OutputsStaged says whether a lifecycle kill staged the task's declared
+	// outputs (spawn#1297), and OutputsNotStaged names each one that did not
+	// land, with why. Set only on a record written by the terminal-flush hook
+	// for a task that declares outputs; the wrapper's own record leaves both
+	// out, as its retry_class already reports a failed stage-out. Additive and
+	// omitempty like the fields above: a reader must treat an absent value
+	// (any record from before #1297) as "not reported", not as "none staged".
+	OutputsStaged    OutputsStaged     `json:"outputs_staged,omitempty"`
+	OutputsNotStaged []OutputNotStaged `json:"outputs_not_staged,omitempty"`
 }
+
+// OutputsStaged is the outcome of a lifecycle kill's output stage-out
+// (spawn#1297).
+type OutputsStaged string
+
+const (
+	// OutputsComplete: every declared output was uploaded.
+	OutputsComplete OutputsStaged = "complete"
+	// OutputsPartial: some were uploaded; OutputsNotStaged lists the rest.
+	OutputsPartial OutputsStaged = "partial"
+	// OutputsSkipped: none was uploaded. Either each failed, timed out or did
+	// not exist yet (listed), or the hook was given no time: run over SSM by
+	// `spawn terminate` or the TTL reaper, or by a spored older than #1297.
+	OutputsSkipped OutputsStaged = "skipped"
+	// OutputsDisabled: lifecycle.flush_outputs_seconds is 0.
+	OutputsDisabled OutputsStaged = "disabled"
+)
+
+// OutputNotStaged is one declared output a lifecycle kill did not upload.
+type OutputNotStaged struct {
+	Source string `json:"source"` // the output's source, as in the spec
+	Reason string `json:"reason"` // OutputMissing | OutputFailed | OutputTimedOut
+}
+
+// The reasons in OutputNotStaged.
+const (
+	OutputMissing  = "missing" // the source did not exist on the instance yet
+	OutputFailed   = "failed"  // every upload attempt failed
+	OutputTimedOut = "timeout" // the output budget ran out first
+)
 
 // ParseCompletionRecord unmarshals a CompletionRecord from the bytes of a
 // completion.json object.
