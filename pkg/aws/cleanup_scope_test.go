@@ -124,7 +124,7 @@ func TestRGTPlacementGroupRowsAreDropped(t *testing.T) {
 	for _, tc := range [][2]string{
 		{"ec2", "security-group"}, {"ec2", "instance"}, {"ec2", "volume"},
 		{"ec2", "key-pair"}, {"iam", "role"}, {"iam", "instance-profile"},
-		{"logs", "log-group"}, {"dynamodb", "table"}, {"s3", ""},
+		{"logs", "log-group"}, {"dynamodb", "table"}, {"s3", "bucket"},
 	} {
 		if supersededByDedicatedScan(tc[0], tc[1]) {
 			t.Errorf("%s:%s is dropped from discovery but has no dedicated scan to replace "+

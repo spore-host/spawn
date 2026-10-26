@@ -179,6 +179,33 @@ Parameters:
       that had it; the sweep still releases the address, without the grace
       when EC2 lists the instance as terminated.
 
+  EmptyBuckets:
+    Type: String
+    Default: 'report'
+    AllowedValues: ['off', 'report', 'reap']
+    Description: >
+      The empty-bucket sweep (#1301). In each scanned account and region it
+      looks at exactly two buckets, spawn-staging-<account>-<region> and
+      spawn-results-<account>-<region>, and deletes one only when it is
+      spawn's (tagged spawn:managed=true, or an untagged results bucket on
+      that exact name), every call naming the account as the expected bucket
+      owner; holds nothing at all (no object, version, delete marker or
+      multipart upload in progress); carries no FSx stack configuration and,
+      for a results bucket, no lifecycle rules; and has been empty for 7
+      days. S3 records no "empty since", so the sweep tags a bucket
+      spawn:empty-since the first time it finds it empty and removes the tag
+      when it finds it in use; a launch removes it too. The staging bucket
+      is never listed (no spawn role may list it, #1274): S3's refusal to
+      delete a bucket that is not empty is its emptiness check. No object
+      is ever deleted, and spawn re-creates either bucket on next use.
+
+      'report' (default) logs what 'reap' would do and writes nothing, not
+      even the tag, so the 7 days start when 'reap' is armed. 'reap' stamps
+      and deletes. 'off' skips the sweep. An unrecognised value resolves to
+      'report'. DryRun always wins. Counted in the run summary as
+      empty_buckets_scanned, empty_buckets_stamped, empty_buckets_deleted,
+      empty_buckets_would_delete and empty_buckets_failed.
+
   SpotRequests:
     Type: String
     Default: 'report'
@@ -346,6 +373,7 @@ Resources:
           REAPER_NET_RESOURCES: !Ref NetResources
           REAPER_SPOT_REQUESTS: !Ref SpotRequests
           REAPER_ELASTIC_IPS: !Ref ElasticIps
+          REAPER_EMPTY_BUCKETS: !Ref EmptyBuckets
           REAPER_DNS_EXPIRE: !Ref DnsExpire
           REAPER_DNS_LEASE_EXPIRE: !Ref DnsLeaseExpire
           ACCOUNTS_TABLE: !Ref AccountsTable
@@ -434,6 +462,23 @@ Resources:
                   Condition:
                     StringEquals:
                       ec2:ResourceTag/spawn:managed: 'true'
+                # #1301 empty-bucket sweep: spawn-staging-* and spawn-results-* only.
+                - Effect: Allow
+                  Action:
+                    - s3:GetBucketTagging
+                    - s3:PutBucketTagging
+                    - s3:DeleteBucket
+                  Resource: 'arn:aws:s3:::spawn-staging-*'
+                - Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                    - s3:ListBucketVersions
+                    - s3:ListBucketMultipartUploads
+                    - s3:GetBucketTagging
+                    - s3:PutBucketTagging
+                    - s3:GetLifecycleConfiguration
+                    - s3:DeleteBucket
+                  Resource: 'arn:aws:s3:::spawn-results-*'
                 # #210 ephemeral-orphan net. FSx exposes no resource-tag condition
                 # key for DeleteFileSystem, so the guard is the reaper's own check
                 # (spawn:managed, no live lease, past the grace period) rather than

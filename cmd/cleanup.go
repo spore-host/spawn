@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/bucketsweep"
 )
 
 var (
@@ -21,6 +23,7 @@ var (
 	cleanupYes        bool
 	cleanupAll        bool
 	cleanupElasticIPs bool
+	cleanupBuckets    bool
 )
 
 var cleanupCmd = &cobra.Command{
@@ -42,6 +45,21 @@ Elastic IP limit. This mode touches nothing else, so running instances do not
 block it. spawn list and spawn status warn about these addresses and print the
 command.
 
+--buckets removes only spawn's own spawn-staging-<account>-<region> and
+spawn-results-<account>-<region> buckets, and only once they have been empty
+for 7 days. It never deletes an object: a bucket holding anything at all
+(objects, old versions, delete markers, an unfinished multipart upload) is
+kept. S3 records no "empty since", so the first run that finds a bucket empty
+tags it spawn:empty-since and a later run deletes it once that tag is 7 days
+old; a run that finds it in use removes the tag, and so does a launch that
+uses it. A results bucket with lifecycle rules (spawn results lifecycle
+--apply) is kept, since a re-created one would not get them back. The
+staging bucket is never listed (no spawn role may list it): S3 itself refuses
+to delete it if it holds anything. spawn
+re-creates either bucket the next time it needs it. Every call names your
+account as the expected bucket owner. --dry-run writes nothing, not even the
+tag. The TTL reaper can do the same on its own schedule (REAPER_EMPTY_BUCKETS).
+
 A log of everything removed is written to ~/.spawn/cleanup-<timestamp>.log.`,
 	RunE: runCleanup,
 }
@@ -58,6 +76,7 @@ func init() {
 	cleanupCmd.Flags().BoolVarP(&cleanupYes, "yes", "y", false, "Skip the confirmation prompt")
 	cleanupCmd.Flags().BoolVar(&cleanupAll, "all", false, "Include resources created by other principals (default: only yours)")
 	cleanupCmd.Flags().BoolVar(&cleanupElasticIPs, "elastic-ips", false, "Release only orphaned spawn launch Elastic IPs (unassociated, instance gone); nothing else is touched")
+	cleanupCmd.Flags().BoolVar(&cleanupBuckets, "buckets", false, "Delete only spawn's own staging and results buckets that have been empty for "+bucketGraceDays()+"; no object is ever deleted and nothing else is touched")
 }
 
 func runCleanup(cmd *cobra.Command, args []string) error {
@@ -73,8 +92,18 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 	onlyMine := !cleanupAll
 
+	if cleanupElasticIPs && cleanupBuckets {
+		return fmt.Errorf("--elastic-ips and --buckets each select one kind of resource; run them separately")
+	}
 	if cleanupElasticIPs {
 		return runCleanupElasticIPs(ctx, cmd, client, regions, onlyMine)
+	}
+	if cleanupBuckets {
+		account, err := client.GetAccountID(ctx)
+		if err != nil {
+			return fmt.Errorf("resolve your account (the expected owner of every bucket): %w", err)
+		}
+		return runCleanupBuckets(ctx, cmd, account, regions, bucketsweep.ClientsFor(client.Config()), time.Now())
 	}
 
 	var found []aws.ManagedResource
@@ -128,6 +157,8 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 				reason = "shared infrastructure reused by every launch — never removed"
 			case r.ResourceType == "placement-group":
 				reason = "still has members; deletable once those instances are gone"
+			case r.Service == "s3":
+				reason = "an S3 bucket; never removed here (spawn cleanup --buckets removes spawn's staging and results buckets once empty for " + bucketGraceDays() + ")"
 			case aws.IsSpawnAllocatedAddress(r):
 				reason = launchAddressNotYetReason(r)
 			}
@@ -237,6 +268,11 @@ func splitCleanupResources(found []aws.ManagedResource) (running, addresses, alr
 		case r.ResourceType == "address":
 			addresses = append(addresses, r)
 		case r.ResourceType == "placement-group" && r.State == "in-use":
+			notYet = append(notYet, r)
+		case r.Service == "s3":
+			// A bucket may hold data, and RemoveResource cannot delete one, so
+			// offering it was a promise ending in "don't know how to remove".
+			// --buckets removes spawn's EMPTY staging and results buckets (#1301).
 			notYet = append(notYet, r)
 		case aws.IsSharedSporedIdentity(r):
 			// The shared spored role/profile are created once and reused by every
@@ -395,4 +431,108 @@ func runCleanupElasticIPs(ctx context.Context, cmd *cobra.Command, api cleanupEI
 		return fmt.Errorf("%d region(s) could not be checked", unchecked)
 	}
 	return nil
+}
+
+// bucketGraceDays is bucketsweep.Grace in days, for help text.
+func bucketGraceDays() string {
+	return fmt.Sprintf("%d days", int(bucketsweep.Grace.Hours()/24))
+}
+
+// runCleanupBuckets is `spawn cleanup --buckets` (#1301): spawn's staging and
+// results buckets for account in each region, through bucketsweep.
+//
+// Two passes. The first may write only the spawn:empty-since tag (and nothing
+// under --dry-run) and reports what qualifies; the second, after the
+// confirmation, re-runs the whole check on each qualifying bucket with deletion
+// allowed, so a bucket that changed in between is judged on what it is now.
+func runCleanupBuckets(ctx context.Context, cmd *cobra.Command, account string, regions []string, s3For func(region string) bucketsweep.API, now time.Time) error {
+	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	writes := !cleanupDryRun
+	var due []bucketsweep.Result
+	failed := 0
+	for _, region := range regions {
+		api := s3For(region)
+		for _, b := range bucketsweep.Buckets(account, region) {
+			res := bucketsweep.Sweep(ctx, api, b, bucketsweep.Options{Account: account, Now: now, Writes: writes})
+			printBucketResult(out, errOut, res, writes, now)
+			switch res.Action {
+			case bucketsweep.WouldDelete:
+				due = append(due, res)
+			case bucketsweep.Failed:
+				failed++
+			}
+		}
+	}
+
+	if cleanupDryRun || len(due) == 0 {
+		if cleanupDryRun {
+			fmt.Fprintf(out, "\nDry run: %d empty bucket(s) would be deleted; nothing was changed.\n", len(due))
+		} else {
+			fmt.Fprintf(out, "\nNo bucket has been empty for %s yet; nothing was deleted.\n", bucketGraceDays())
+		}
+		if failed > 0 {
+			return fmt.Errorf("%d bucket(s) could not be checked", failed)
+		}
+		return nil
+	}
+
+	if !confirmYes(cleanupYes, fmt.Sprintf("Delete %d empty bucket(s)?", len(due))) {
+		return newAborted("aborted: no bucket was deleted (re-run with --yes)")
+	}
+	logPath, logFile := openCleanupLog()
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
+	}
+	deleted := 0
+	for _, d := range due {
+		res := bucketsweep.Sweep(ctx, s3For(d.Bucket.Region), d.Bucket, bucketsweep.Options{Account: account, Now: now, Writes: true, Delete: true})
+		switch res.Action {
+		case bucketsweep.Deleted:
+			deleted++
+			fmt.Fprintf(out, "  ✓ deleted %s (%s)\n", d.Bucket.Name, d.Bucket.Region)
+			writeCleanupLog(logFile, fmt.Sprintf("REMOVED arn:aws:s3:::%s\t%s\tbucket", d.Bucket.Name, d.Bucket.Region))
+		case bucketsweep.Failed:
+			failed++
+			fmt.Fprintf(errOut, "  ✗ %s (%s): %s: %v\n", d.Bucket.Name, d.Bucket.Region, res.Reason, res.Err)
+			writeCleanupLog(logFile, fmt.Sprintf("FAILED arn:aws:s3:::%s\t%s\tbucket\t%v", d.Bucket.Name, d.Bucket.Region, res.Err))
+		default:
+			fmt.Fprintf(out, "  - kept %s (%s): %s %s\n", d.Bucket.Name, d.Bucket.Region, res.Action, res.Reason)
+		}
+	}
+	fmt.Fprintf(out, "\nDeleted %d bucket(s)", deleted)
+	if logPath != "" {
+		fmt.Fprintf(out, " — log: %s", logPath)
+	}
+	fmt.Fprintln(out, ".")
+	if failed > 0 {
+		return fmt.Errorf("%d bucket(s) could not be checked or deleted", failed)
+	}
+	return nil
+}
+
+func printBucketResult(out, errOut io.Writer, res bucketsweep.Result, writes bool, now time.Time) {
+	b := res.Bucket
+	would := ""
+	if !writes {
+		would = "would be "
+	}
+	switch res.Action {
+	case bucketsweep.Absent:
+		return
+	case bucketsweep.Kept:
+		fmt.Fprintf(out, "  %s (%s): kept, %s\n", b.Name, b.Region, res.Reason)
+	case bucketsweep.InUse:
+		fmt.Fprintf(out, "  %s (%s): in use (%s)\n", b.Name, b.Region, res.Reason)
+	case bucketsweep.Stamped:
+		fmt.Fprintf(out, "  %s (%s): empty; %stagged %s=%s, deletable after %s\n", b.Name, b.Region, would,
+			bucketsweep.EmptySinceTagKey, res.EmptySince.Format(time.RFC3339), res.EmptySince.Add(bucketsweep.Grace).Format("2006-01-02"))
+	case bucketsweep.Waiting:
+		fmt.Fprintf(out, "  %s (%s): empty since %s; deletable after %s\n", b.Name, b.Region,
+			res.EmptySince.Format(time.RFC3339), res.EmptySince.Add(bucketsweep.Grace).Format("2006-01-02"))
+	case bucketsweep.WouldDelete:
+		fmt.Fprintf(out, "  %s (%s): empty since %s (%d days); will be deleted\n", b.Name, b.Region,
+			res.EmptySince.Format(time.RFC3339), int(now.Sub(res.EmptySince).Hours()/24))
+	case bucketsweep.Failed:
+		fmt.Fprintf(errOut, "%s  %s (%s): %s: %v\n", i18n.Symbol("warning"), b.Name, b.Region, res.Reason, res.Err)
+	}
 }

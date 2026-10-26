@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
+	"github.com/spore-host/spawn/pkg/bucketsweep"
 	spawnscheduler "github.com/spore-host/spawn/pkg/scheduler"
 )
 
@@ -476,6 +477,8 @@ func (c *Client) ScanGlobalFootprint(ctx context.Context) ([]ControlPlaneResourc
 	if bs, err := sc.ListBuckets(ctx, &s3.ListBucketsInput{}); err != nil {
 		notes = append(notes, fmt.Sprintf("s3: %v", err))
 	} else {
+		var account string
+		accountResolved := false
 		for _, b := range bs.Buckets {
 			name := aws.ToString(b.Name)
 			if !matchesFootprintName(name) {
@@ -486,6 +489,13 @@ func (c *Client) ScanGlobalFootprint(ctx context.Context) ([]ControlPlaneResourc
 			}
 			if b.CreationDate != nil {
 				res.Created = *b.CreationDate
+			}
+			if bucketsweep.IsSweptName(name) {
+				if !accountResolved {
+					account, _ = c.GetAccountID(ctx)
+					accountResolved = true
+				}
+				res.Detail = c.sweptBucketDetail(ctx, name, aws.ToString(b.BucketRegion), account)
 			}
 			out = append(out, res)
 		}
@@ -498,4 +508,35 @@ func (c *Client) ScanGlobalFootprint(ctx context.Context) ([]ControlPlaneResourc
 		return out[i].Name < out[j].Name
 	})
 	return out, notes
+}
+
+// sweptBucketDetail reads a spawn staging or results bucket's
+// spawn:empty-since stamp (#1301), so the footprint shows which of them the
+// empty-bucket sweep is aging toward deletion. "" when it carries none, or its
+// tags cannot be read as this account's.
+func (c *Client) sweptBucketDetail(ctx context.Context, bucket, region, account string) string {
+	if account == "" || region == "" {
+		return ""
+	}
+	out, err := s3.NewFromConfig(c.regionalConfig(region)).GetBucketTagging(ctx, &s3.GetBucketTaggingInput{
+		Bucket: aws.String(bucket), ExpectedBucketOwner: aws.String(account),
+	})
+	if err != nil {
+		return ""
+	}
+	tags := map[string]string{}
+	for _, t := range out.TagSet {
+		tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	return emptySinceDetail(tags)
+}
+
+// emptySinceDetail is the footprint Detail for a bucket's tags.
+func emptySinceDetail(tags map[string]string) string {
+	ts, ok := bucketsweep.EmptySince(tags[bucketsweep.EmptySinceTagKey])
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("empty since %s (%s); deleted from %s if still empty", ts.Format(time.RFC3339),
+		bucketsweep.EmptySinceTagKey, ts.Add(bucketsweep.Grace).Format("2006-01-02"))
 }

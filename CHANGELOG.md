@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **spawn now removes its own empty buckets** (#1301). `spawn cleanup
+  --buckets` and, optionally, the TTL reaper delete
+  `spawn-staging-<account>-<region>` and `spawn-results-<account>-<region>`
+  once they have been empty for 7 days. Before this nothing ever removed
+  either. **No object is ever deleted**: a bucket holding anything (an object,
+  an old version, a delete marker, an unfinished multipart upload) is kept,
+  and deleting results data stays opt-in (#1076). A bucket is deleted only if
+  it has spawn's exact name for the account and region, is tagged
+  `spawn:managed=true` (or is an untagged results bucket on that exact name),
+  belongs to your account (every call sends it as the expected bucket owner),
+  carries no FSx stack configuration, and, for a results bucket, has no
+  lifecycle rules, since a re-created bucket would not get back the tiering
+  `spawn results lifecycle --apply` installed. S3 records no "empty since",
+  so the first sweep that finds a bucket empty tags it `spawn:empty-since`; a
+  sweep that finds it in use removes the tag, and so does a launch that uses
+  it. The staging bucket is never listed, since no role spawn makes may list
+  it (#1274): S3's refusal to delete a bucket that is not empty is the check
+  there. spawn re-creates either bucket the next time it needs it.
+  `spawn cleanup --buckets --dry-run` writes nothing, not even the tag.
+  The reaper's sweep is `REAPER_EMPTY_BUCKETS` (template parameter
+  `EmptyBuckets`, make variable `EMPTY_BUCKETS`, `spawn reaper deploy
+  --empty-buckets`): `off`, `report` (the default, which logs what it would
+  do and writes nothing) or `reap`; a deploy that does not name it keeps the
+  deployed value. It needs new S3 grants, scoped to `arn:aws:s3:::spawn-staging-*`
+  (bucket tagging and `DeleteBucket` only) and `arn:aws:s3:::spawn-results-*`, which the `spawn-ttl-reaper-ec2` member
+  stack, the ScanSelf policy and `spawn reaper deploy` now carry: redeploy the
+  member stacks before arming it, or the sweep logs each bucket it could not
+  read with what to redeploy (`empty_buckets_failed`). The run summary counts
+  `empty_buckets_scanned`, `empty_buckets_stamped`, `empty_buckets_deleted`
+  and `empty_buckets_would_delete`. `spawn footprint` shows a bucket's
+  `spawn:empty-since` stamp and the date it becomes deletable.
+
+### Fixed
+
+- **`spawn cleanup` no longer offers spawn's S3 buckets for removal and then
+  fails on them** (#1301). With `--all` it listed a `spawn:managed` bucket as
+  removable and the delete failed with "don't know how to remove"; buckets are
+  now reported as not removed, with a pointer to `--buckets`. Discovery also
+  names a bucket by its name instead of reporting the name as its type.
+- **The results bucket is no longer tagged as an FSx backing bucket** (#1301).
+  `CreateS3BucketIfNotExists`, which creates `spawn-results-<account>-<region>`
+  and the ISO import bucket, tagged every bucket `spawn:fsx-backing-bucket=true`.
+  It now tags them `spawn:managed=true`, plus `spawn:purpose=task-results` on the
+  results bucket. FSx buckets keep their tags.
+
 ## [0.146.0] - 2026-10-25
 
 ### Added

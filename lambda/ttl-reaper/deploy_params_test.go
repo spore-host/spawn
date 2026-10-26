@@ -585,7 +585,7 @@ func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	// DryRun first because it is the one that silently stops the reaper
 	// terminating anything.
 	keys := []string{
-		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "InstanceEvents", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
+		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "EmptyBuckets", "InstanceEvents", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
 	}
@@ -909,6 +909,46 @@ func TestInstanceEventsSurvivesAMakeDeploy(t *testing.T) {
 	got, _ = runMerge(t, summary, liveParams, toExplicit(set))
 	if got["InstanceEvents"] != "on" {
 		t.Errorf("make deploy INSTANCE_EVENTS=on sent %q", got["InstanceEvents"])
+	}
+}
+
+// TestEmptyBucketsSurvivesAMakeDeploy is #1301's preservation property, the
+// same shape as TestTtlGraceSurvivesAMakeDeploy: a stack set to
+// EmptyBuckets=reap keeps it across a `make deploy` that does not mention it, a
+// stack that predates the parameter gets the template default ('report', which
+// deletes nothing and writes nothing), and `make deploy EMPTY_BUCKETS=off` sets
+// it.
+func TestEmptyBucketsSurvivesAMakeDeploy(t *testing.T) {
+	summary := templateSummaryFromTemplate(t)
+	setReap := strings.Replace(liveParams, "\n]",
+		",\n  {\"ParameterKey\":\"EmptyBuckets\",\"ParameterValue\":\"reap\"}\n]", 1)
+	if setReap == liveParams {
+		t.Fatal("could not add EmptyBuckets to the live fixture")
+	}
+	toExplicit := func(m map[string]string) string {
+		var b strings.Builder
+		for k, v := range m {
+			b.WriteString(k + "=" + v + "\n")
+		}
+		return b.String()
+	}
+
+	plain, _ := explicitFromMakefile(t)
+	got, _ := runMerge(t, summary, setReap, toExplicit(plain))
+	if got["EmptyBuckets"] != "reap" {
+		t.Errorf("plain make deploy over a stack with EmptyBuckets=reap sent %q: a deploy that did "+
+			"not mention it changed it", got["EmptyBuckets"])
+	}
+
+	got, _ = runMerge(t, summary, liveParams, toExplicit(plain))
+	if got["EmptyBuckets"] != "report" {
+		t.Errorf("a stack predating EmptyBuckets got %q, want the template default 'report'", got["EmptyBuckets"])
+	}
+
+	set, _ := explicitFromMakefile(t, "EMPTY_BUCKETS=off")
+	got, _ = runMerge(t, summary, setReap, toExplicit(set))
+	if got["EmptyBuckets"] != "off" {
+		t.Errorf("make deploy EMPTY_BUCKETS=off sent %q", got["EmptyBuckets"])
 	}
 }
 

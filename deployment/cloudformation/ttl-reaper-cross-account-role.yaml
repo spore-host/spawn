@@ -214,6 +214,32 @@ Resources:
                 Condition:
                   StringEquals:
                     ec2:ResourceTag/spawn:managed: 'true'
+              # The empty-bucket sweep (#1301): spawn's own staging and results
+              # buckets, which it deletes once empty for 7 days and never
+              # empties itself. Scoped to the two name prefixes, so no other
+              # bucket in this account can be listed, retagged or deleted with
+              # these. The sweep's own checks are the rest of the guard
+              # (pkg/bucketsweep): exact names for this account and region,
+              # spawn:managed=true, ExpectedBucketOwner on every call.
+              # No list action on spawn-staging-*: no role spawn makes may list
+              # it (#1274); S3's refusal to delete a non-empty bucket is the
+              # sweep's emptiness check there.
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketTagging
+                  - s3:PutBucketTagging
+                  - s3:DeleteBucket
+                Resource: 'arn:aws:s3:::spawn-staging-*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                  - s3:ListBucketMultipartUploads
+                  - s3:GetBucketTagging
+                  - s3:PutBucketTagging
+                  - s3:GetLifecycleConfiguration
+                  - s3:DeleteBucket
+                Resource: 'arn:aws:s3:::spawn-results-*'
               # Describe FSx filesystems across all regions to find expired /
               # orphaned ephemeral filesystems (#192/#210). DescribeFileSystems has
               # no resource-level ARN, so it must be Resource '*'. Without this the

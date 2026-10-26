@@ -177,6 +177,26 @@ func ScanSelfStatements() []Statement {
 			Condition: ManagedTagCondition,
 		},
 		{
+			// The empty-bucket sweep (#1301), one statement per bucket family.
+			// The ARN prefix is the IAM rail: no other bucket in the account
+			// can be listed, retagged or deleted with these. The rest of the
+			// guard is the sweep's own checks (pkg/bucketsweep): it deletes
+			// only an empty, spawn-tagged bucket named exactly for the account
+			// and region, every call naming the account as the expected owner.
+			//
+			// The staging bucket gets no list action at all: no role spawn
+			// makes may list it (#1274), so the sweep never does, and S3's
+			// refusal to delete a non-empty bucket is its emptiness check.
+			Effect:   "Allow",
+			Action:   StagingBucketSweepActions(),
+			Resource: "arn:aws:s3:::spawn-staging-*",
+		},
+		{
+			Effect:   "Allow",
+			Action:   ResultsBucketSweepActions(),
+			Resource: "arn:aws:s3:::spawn-results-*",
+		},
+		{
 			// FSx: the #210 ephemeral-orphan net. DescribeFileSystems is read-only.
 			//
 			// DeleteFileSystem is NOT tag-conditioned here, unlike ec2:TerminateInstances
@@ -243,6 +263,31 @@ func ScanSelfStatements() []Statement {
 			Action:   []string{"ssm:GetCommandInvocation"},
 			Resource: "*",
 		},
+	}
+}
+
+// StagingBucketSweepActions are what the empty-bucket sweep (#1301) needs on
+// spawn-staging-*: read and write the bucket's tags, and delete it. Nothing
+// that lists it or reads an object in it.
+func StagingBucketSweepActions() []string {
+	return []string{"s3:GetBucketTagging", "s3:PutBucketTagging", "s3:DeleteBucket"}
+}
+
+// ResultsBucketSweepActions are what the sweep needs on spawn-results-*, as
+// IAM names. They differ from the SDK method names in five places: HeadBucket
+// is s3:ListBucket, ListObjectVersions s3:ListBucketVersions,
+// ListMultipartUploads s3:ListBucketMultipartUploads,
+// GetBucketLifecycleConfiguration s3:GetLifecycleConfiguration, and
+// DeleteBucketTagging is authorized as s3:PutBucketTagging. No object is read.
+func ResultsBucketSweepActions() []string {
+	return []string{
+		"s3:ListBucket",
+		"s3:ListBucketVersions",
+		"s3:ListBucketMultipartUploads",
+		"s3:GetBucketTagging",
+		"s3:PutBucketTagging",
+		"s3:GetLifecycleConfiguration",
+		"s3:DeleteBucket",
 	}
 }
 

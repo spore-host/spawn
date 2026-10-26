@@ -26,6 +26,9 @@ type fakeStagingS3 struct {
 	encryption *types.ServerSideEncryptionConfiguration
 	rules      []types.LifecycleRule
 	tags       []types.Tag
+
+	// existingTags is the tag set GetBucketTagging returns (nil = none).
+	existingTags []types.Tag
 }
 
 func (f *fakeStagingS3) rec(call string, owner *string) {
@@ -73,6 +76,18 @@ func (f *fakeStagingS3) PutBucketTagging(_ context.Context, in *s3.PutBucketTagg
 	f.rec("PutBucketTagging", in.ExpectedBucketOwner)
 	f.tags = in.Tagging.TagSet
 	return &s3.PutBucketTaggingOutput{}, nil
+}
+
+func (f *fakeStagingS3) GetBucketTagging(_ context.Context, in *s3.GetBucketTaggingInput, _ ...func(*s3.Options)) (*s3.GetBucketTaggingOutput, error) {
+	f.rec("GetBucketTagging", in.ExpectedBucketOwner)
+	if f.existingTags == nil {
+		return nil, &smithy.GenericAPIError{Code: "NoSuchTagSet"}
+	}
+	return &s3.GetBucketTaggingOutput{TagSet: f.existingTags}, nil
+}
+func (f *fakeStagingS3) DeleteBucketTagging(_ context.Context, in *s3.DeleteBucketTaggingInput, _ ...func(*s3.Options)) (*s3.DeleteBucketTaggingOutput, error) {
+	f.rec("DeleteBucketTagging", in.ExpectedBucketOwner)
+	return &s3.DeleteBucketTaggingOutput{}, nil
 }
 
 const (

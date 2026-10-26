@@ -53,7 +53,26 @@ var apiServicePrefix = map[string]string{
 // discovered name that is neither here nor in apiServicePrefix is what the gate
 // refuses to guess about.
 var knownAWSServices = map[string]bool{
-	"ec2": true, "fsx": true, "ssm": true, "route53": true, "sts": true,
+	"ec2": true, "fsx": true, "ssm": true, "route53": true, "sts": true, "s3": true,
+}
+
+// iamActionFor maps an SDK method to the IAM action that authorizes it, where
+// the two differ. For EC2, FSx, SSM and Route53 they never do; for S3 they
+// often do, and a method missing here maps to itself, which is no IAM action at
+// all, so the coverage gates below fail on it rather than pass.
+var iamActionFor = map[string]string{
+	"s3:HeadBucket":                      "s3:ListBucket",
+	"s3:ListObjectVersions":              "s3:ListBucketVersions",
+	"s3:ListMultipartUploads":            "s3:ListBucketMultipartUploads",
+	"s3:GetBucketLifecycleConfiguration": "s3:GetLifecycleConfiguration",
+	"s3:DeleteBucketTagging":             "s3:PutBucketTagging",
+}
+
+func iamAction(call string) string {
+	if a, ok := iamActionFor[call]; ok {
+		return a
+	}
+	return call
 }
 
 // serviceFor resolves a discovered interface or client name to an IAM service
@@ -124,7 +143,7 @@ func reaperAWSCalls(t *testing.T) map[string]bool {
 				continue
 			}
 			if m := ifaceMethod.FindStringSubmatch(line); m != nil {
-				calls[svc+":"+m[1]] = true
+				calls[iamAction(svc+":"+m[1])] = true
 			}
 		}
 
@@ -140,7 +159,7 @@ func reaperAWSCalls(t *testing.T) map[string]bool {
 			if mapped == "" {
 				continue // deliberately not an AWS service
 			}
-			calls[mapped+":"+m[2]] = true
+			calls[iamAction(mapped+":"+m[2])] = true
 		}
 	}
 
@@ -321,7 +340,7 @@ func crossAccountGrantedActions(t *testing.T) map[string]bool {
 	// `                  - ec2:DescribeInstances` — a list item that looks like an
 	// IAM action. Condition keys (ec2:ResourceTag/...) are excluded by requiring
 	// no slash.
-	re := regexp.MustCompile(`(?m)^\s*-\s+((?:ec2|fsx|ssm|sts|iam|dynamodb|kms|route53):[A-Za-z]+)\s*$`)
+	re := regexp.MustCompile(`(?m)^\s*-\s+((?:ec2|fsx|ssm|sts|iam|dynamodb|kms|route53|s3):[A-Za-z]+)\s*$`)
 	out := map[string]bool{}
 	for _, m := range re.FindAllStringSubmatch(string(b), -1) {
 		out[m[1]] = true
@@ -518,6 +537,8 @@ func TestEveryDestructiveActionIsContained(t *testing.T) {
 		"ec2:CreateTags":           true,
 		"ssm:SendCommand":          true,
 		"fsx:DeleteFileSystem":     true,
+		"s3:DeleteBucket":          true,
+		"s3:PutBucketTagging":      true,
 	}
 
 	// fsx:DeleteFileSystem is knowingly uncontained, and the reasoning is in

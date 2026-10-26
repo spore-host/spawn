@@ -96,6 +96,7 @@ func TestParseARN(t *testing.T) {
 		{"arn:aws:iam::123456789012:instance-profile/spored-profile", "iam", "instance-profile", "spored-profile"},
 		{"arn:aws:dynamodb:us-east-1:123456789012:table/spore-installs", "dynamodb", "table", "spore-installs"},
 		{"arn:aws:logs:us-east-1:123456789012:log-group:spawn-foo:*", "logs", "log-group", "spawn-foo:*"},
+		{"arn:aws:s3:::spawn-staging-123456789012-us-east-1", "s3", "bucket", "spawn-staging-123456789012-us-east-1"},
 		{"garbage", "", "", ""},
 	}
 	for _, tt := range tests {
