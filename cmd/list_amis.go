@@ -98,8 +98,7 @@ func runListAMIs(cmd *cobra.Command, args []string) error {
 	// Filter spawn-managed AMIs and apply user filters
 	spawnAMIs := []aws.AMIInfo{}
 	for _, ami := range allAMIs {
-		// Only include spawn-managed AMIs (those with spawn:managed tag or stack tag)
-		if ami.Tags["spawn:managed"] != "true" && ami.Stack == "" {
+		if !aws.IsSpawnManagedAMI(ami) {
 			continue
 		}
 

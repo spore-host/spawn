@@ -11,6 +11,7 @@ const AMI_AL2023_ARM
 const AMI_AL2023_GPU_ARM
 const AMI_AL2023_GPU_X86
 const AMI_AL2023_X86
+const CopiedFromTagKey
 const CreatedTagKey
 const EFAGroupPrefix
 const EFAGroupPurpose
@@ -52,6 +53,9 @@ field AMIInfo.SnapshotIDs []string
 field AMIInfo.Stack string
 field AMIInfo.Tags map[string]string
 field AMIInfo.Version string
+field AMIWaitOptions.Interval time.Duration
+field AMIWaitOptions.MaxPolls int
+field AMIWaitOptions.Progress func(state string, poll, maxPolls int)
 field AccessDeniedError.Action string
 field AccessDeniedError.Err error
 field AttachVolumeSpec.MountPoint string
@@ -93,6 +97,19 @@ field ControlPlaneResource.Region string
 field ControlPlaneResource.Service string
 field ControlPlaneResource.Warn string
 field ControlPlaneResource.Why string
+field CopyAMIInput.KMSKeyID string
+field CopyAMIInput.Name string
+field CopyAMIInput.SourceAMI string
+field CopyAMIInput.SourceRegion string
+field CopyAMIInput.TargetRegion string
+field CopyAMIResult.AMIID string
+field CopyAMIResult.Encrypted bool
+field CopyAMIResult.KMSKeyID string
+field CopyAMIResult.Name string
+field CopyAMIResult.SourceAMIID string
+field CopyAMIResult.SourceRegion string
+field CopyAMIResult.Tags map[string]string
+field CopyAMIResult.TargetRegion string
 field CreateAMIInput.Description string
 field CreateAMIInput.InstanceID string
 field CreateAMIInput.Name string
@@ -362,6 +379,7 @@ func (*Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotInpu
 func (*Client) CheckAMIHealth(ctx context.Context, ami AMIInfo, region string) (*AMIHealthCheck, error)
 func (*Client) CheckKeyPairExists(ctx context.Context, region, keyName string) (bool, error)
 func (*Client) Config() aws.Config
+func (*Client) CopyAMI(ctx context.Context, in CopyAMIInput) (*CopyAMIResult, error)
 func (*Client) CreateAMI(ctx context.Context, region string, input CreateAMIInput) (string, error)
 func (*Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig) (*FSxInfo, error)
 func (*Client) CreateFSxLustreFilesystemAsync(ctx context.Context, config FSxConfig) (filesystemID string, err error)
@@ -463,6 +481,7 @@ func (*Client) ValidateInstanceTypeForNestedVirtualization(ctx context.Context, 
 func (*Client) ValidateInstanceTypeForPlacementGroup(ctx context.Context, instanceType string) error
 func (*Client) ValidateSubnetInVPC(ctx context.Context, region, subnetID, vpcID string) error
 func (*Client) WaitForAMI(ctx context.Context, region string, amiID string, timeout time.Duration) error
+func (*Client) WaitForAMICopy(ctx context.Context, region, amiID string, opts AMIWaitOptions) error
 func (*Client) WaitForImage(ctx context.Context, region, imageBuildVersionArn string, timeout time.Duration, progressCb func(status string)) (string, error)
 func (*Client) WaitForPasswordData(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error)
 func (*Client) WaitForPublicIP(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error)
@@ -510,6 +529,7 @@ func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool
 func IsOrphanedSpawnAddress(r ManagedResource) bool
 func IsSharedSporedIdentity(r ManagedResource) bool
 func IsSpawnAllocatedAddress(r ManagedResource) bool
+func IsSpawnManagedAMI(ami AMIInfo) bool
 func LifecycleTags(name, purpose string, now time.Time) []types.Tag
 func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool
 func NeedsLaunchElasticIP(interfaces []types.InstanceNetworkInterfaceSpecification) bool
@@ -525,6 +545,7 @@ func UserDataSize(encoded string) (decoded, encodedLen int)
 func ValidatePolicyNames(policies []string, allowFullAccess bool) error
 type AMIHealthCheck struct
 type AMIInfo struct
+type AMIWaitOptions struct
 type AccessDeniedError struct
 type AttachVolumeSpec struct
 type BuildSnapshotInput struct
@@ -533,6 +554,8 @@ type CapacityBlockOffering struct
 type CapacityReservation struct
 type Client struct
 type ControlPlaneResource struct
+type CopyAMIInput struct
+type CopyAMIResult struct
 type CreateAMIInput struct
 type DeleteAMIResult struct
 type DiscoverOptions struct
@@ -567,6 +590,8 @@ type SpotPrice struct
 type SubnetHint struct
 type UserDataTooLargeError struct
 var CallerVersion
+var ErrAMIWaitExhausted
+var ErrNotSpawnManagedAMI
 var ErrS3NoSuchKey
 var ErrSSMUnreachable
 var ErrWaitTimeout
