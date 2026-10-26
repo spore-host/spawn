@@ -38,7 +38,8 @@ func NewTemplateContext() TemplateContext {
 
 // Render renders a template string using the given context.
 //
-// Template syntax: {{ namespace.key }}
+// Template syntax: {{ namespace.key }}. Local steps (run on the controller) and
+// remote steps (run by spored) get the same instance.* variables.
 //
 //	{{ instance.id }}         EC2 instance ID
 //	{{ instance.name }}       instance Name tag

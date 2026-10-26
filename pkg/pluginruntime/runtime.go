@@ -456,6 +456,8 @@ func (rt *Runtime) LoadFromDeclarations(ctx context.Context, declarations []plug
 			spec, err := resolver.Resolve(ctx, d.Ref)
 			if err != nil {
 				log.Printf("Plugin %s: resolve spec: %v", d.Ref, err)
+				ref := plugin.ParseRef(d.Ref)
+				rt.recordDeclarationFailure(ref.Name, ref.Version, fmt.Errorf("resolve spec %q: %w", d.Ref, err))
 				return
 			}
 
@@ -468,10 +470,43 @@ func (rt *Runtime) LoadFromDeclarations(ctx context.Context, declarations []plug
 				return
 			}
 
+			// Resolve the config here as well as in Install, which refuses it
+			// before recording any state: on this path nobody is waiting for
+			// Install's error, so without a state the plugin read as "not
+			// installed" and the reason was only in spored's log (#1226).
+			if _, err := spec.ResolvedConfig(d.Config); err != nil {
+				log.Printf("Plugin %s: resolve config: %v", spec.Name, err)
+				rt.recordDeclarationFailure(spec.Name, spec.Version, fmt.Errorf("resolve config: %w", err))
+				return
+			}
+
 			if err := rt.Install(ctx, spec, d.Config); err != nil {
 				log.Printf("Plugin %s: install failed: %v", spec.Name, err)
 			}
 		}(decl)
+	}
+}
+
+// recordDeclarationFailure saves a failed state for a launch-time plugin that
+// could not be installed at all — its spec or its config did not resolve — so
+// `spawn plugin status` and `spawn plugin list` report the error rather than
+// "not installed" (#1226). A plugin recorded as running or degraded is left
+// alone: a reboot whose spec fetch fails has not stopped what is running. A
+// ref with no usable plugin name cannot be recorded, and stays in the log.
+func (rt *Runtime) recordDeclarationFailure(name, version string, cause error) {
+	if existing, err := rt.store.Load(name); err == nil &&
+		(existing.Status == plugin.StatusRunning || existing.Status == plugin.StatusDegraded) {
+		return
+	}
+	st := &plugin.PluginState{
+		Name:        name,
+		Version:     version,
+		Status:      plugin.StatusFailed,
+		Error:       cause.Error(),
+		InstalledAt: time.Now(),
+	}
+	if err := rt.store.Save(st); err != nil {
+		log.Printf("Plugin %s: record failed state: %v", name, err)
 	}
 }
 

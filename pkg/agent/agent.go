@@ -2281,10 +2281,19 @@ func (a *Agent) idleTimeoutReached(ctx context.Context, now time.Time) {
 
 	if a.config.TerminateOnIdle {
 		// Like the TTL's terminate, retried every tick on failure: there is
-		// nothing to back off to. No notification event of its own yet —
-		// spore-bot has no idle_terminated message; terminate warns logged-in
-		// users as the TTL path does.
-		a.terminate(ctx, "Idle timeout", taskproto.ExitIdleTimeout)
+		// nothing to back off to. Announced, like the stop, only once EC2 has
+		// accepted the request, so a failing terminate is not reported as done
+		// and a retry that succeeds is (#1205).
+		//
+		// The event is ttl_expired, spore-bot's one "has terminated" message,
+		// because spore-bot lists no idle_terminated event (its Slack and
+		// Discord formatters keep one only for older spored, and SMS has none).
+		// idle_stopped would be worse: it tells the user the instance can be
+		// woken. Switch to idle_terminated once spore-bot lists it
+		// (spore-host/spore-host#612).
+		if err := a.terminate(ctx, "Idle timeout", taskproto.ExitIdleTimeout); err == nil {
+			a.notifier.Notify(ctx, "ttl_expired", "idle timeout reached")
+		}
 		return
 	}
 
@@ -2599,7 +2608,9 @@ func preStopDetail(summary, outputTail string) string {
 	return summary + " — " + outputTail
 }
 
-func (a *Agent) terminate(ctx context.Context, reason string, why taskproto.ExitReason) {
+// terminate runs the pre-stop hook and cleanup, then asks the provider to
+// terminate the instance, returning the provider's error.
+func (a *Agent) terminate(ctx context.Context, reason string, why taskproto.ExitReason) error {
 	log.Printf("Terminating instance (reason: %s)", reason)
 
 	a.runPreStop(time.Time{}, why)
@@ -2623,6 +2634,7 @@ func (a *Agent) terminate(ctx context.Context, reason string, why taskproto.Exit
 	if err != nil {
 		log.Printf("Failed to terminate: %v", err)
 	}
+	return err
 }
 
 // checkRegionVacated fires a region_vacated notification when this is the last

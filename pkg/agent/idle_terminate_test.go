@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -35,6 +36,41 @@ func TestIdleActionHonoursTerminateOnIdle(t *testing.T) {
 			if sp.terminated != tc.wantTerminated || sp.stopped != tc.wantStopped || sp.hibernated != tc.wantHib {
 				t.Errorf("terminated=%v stopped=%v hibernated=%v, want %v/%v/%v",
 					sp.terminated, sp.stopped, sp.hibernated, tc.wantTerminated, tc.wantStopped, tc.wantHib)
+			}
+		})
+	}
+}
+
+// An idle terminate is announced to spore-bot subscribers, as the idle stop
+// and hibernate are (#1205), and only once EC2 has accepted it: a terminate
+// that failed must not be reported as done. The announcement is a "has
+// terminated" event, never idle_stopped/idle_hibernated, which tell the user
+// the instance can be woken.
+func TestIdleTerminateIsAnnouncedOnceAccepted(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		name := map[bool]string{false: "accepted", true: "refused"}[fail]
+		t.Run(name, func(t *testing.T) {
+			a, sp, ev := idleAgent(t, &provider.Config{
+				IdleTimeout: 30 * time.Minute, IdleCPUPercent: 5, TerminateOnIdle: true,
+			}, nil)
+			if fail {
+				sp.terminateErr = errors.New("api error: terminate refused")
+			}
+			a.regionVacatedSettle = time.Millisecond
+			a.idleTimeoutReached(context.Background(), time.Now())
+
+			want := 1
+			if fail {
+				want = 0
+			}
+			if n := ev.count("ttl_expired"); n != want {
+				t.Errorf("terminate %s: the \"has terminated\" event (ttl_expired) sent %d times, want %d; events=%v",
+					name, n, want, ev.events)
+			}
+			for _, e := range []string{"idle_stopped", "idle_hibernated"} {
+				if n := ev.count(e); n != 0 {
+					t.Errorf("%q sent %d times for a terminate: it says the instance can be woken", e, n)
+				}
 			}
 		})
 	}

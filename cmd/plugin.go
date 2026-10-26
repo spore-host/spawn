@@ -185,7 +185,8 @@ func refusePluginsOnWindowsSpore(inst *aws.InstanceInfo, instance string) error 
 func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]string) error {
 	// Before resolving the plugin, so nothing is fetched and no local provision
 	// step runs for an install that cannot succeed.
-	if err := refusePluginsOnWindowsSpore(pluginInstanceLookup(ctx, instance), instance); err != nil {
+	inst := pluginInstanceLookup(ctx, instance)
+	if err := refusePluginsOnWindowsSpore(inst, instance); err != nil {
 		return err
 	}
 
@@ -230,14 +231,12 @@ func runPluginInstall(ctx context.Context, ref, instance string, cfg map[string]
 	// (instance.ip is resolved just below; SSH identity for local steps is set up
 	// there once we have the IP.)
 
-	// Build template context with instance info and resolved config.
+	// Build template context with instance info and resolved config. The
+	// instance vars are saved in the local record below, so reconcile and
+	// deprovision render against the same ones.
 	tmplCtx := plugin.NewTemplateContext()
-	instName, instIP := lookupInstanceInfo(ctx, instance)
-	tmplCtx.Instance["id"] = instance
-	tmplCtx.Instance["name"] = instName
-	if instIP != "" {
-		tmplCtx.Instance["ip"] = instIP
-	}
+	tmplCtx.Instance = pluginInstanceVars(instance, inst)
+	instIP := tmplCtx.Instance["ip"]
 	for k, v := range resolvedCfg {
 		tmplCtx.Config[k] = v
 	}
@@ -1177,22 +1176,34 @@ func pluginSSHArgs(keyPath string) []string {
 	return args
 }
 
-// lookupInstanceInfo returns the Name and public IP for an instance identifier
-// (ID or name), resolved through spawn's own instance lookup — the plugin layer
-// never talks to AWS directly. On any failure it falls back to the given
-// identifier as the name with an empty IP, so callers degrade gracefully (the
-// template context simply won't have instance.ip set, and any step that needs it
-// fails loudly at render time).
-func lookupInstanceInfo(ctx context.Context, instance string) (name, publicIP string) {
-	inst := resolveInstanceViaSpawn(ctx, instance)
+// pluginInstanceVars is the {{ instance.* }} namespace a plugin's local steps
+// render against: the same keys spored gives remote steps (#1225), taken from
+// the instance as spawn resolved it (inst may be nil). Before, local steps got
+// only id, name and ip, so {{ instance.login_user }} did not render on the
+// controller and spore-sync hardcoded ec2-user, which is wrong on Ubuntu.
+//
+//   - id is the EC2 instance ID, falling back to the identifier given.
+//   - name is the Name tag, falling back to the identifier given.
+//   - ip is the public IP, left unset when there is none, so a step that needs
+//     it fails at render time rather than running against "".
+//   - login_user is spawn:local-username, else ec2-user, as on the instance
+//     and as `spawn connect` resolves it (resolveSSHUser).
+func pluginInstanceVars(instance string, inst *aws.InstanceInfo) map[string]string {
+	vars := map[string]string{"id": instance, "name": instance, "login_user": "ec2-user"}
 	if inst == nil {
-		return instance, ""
+		return vars
 	}
-	name = inst.Name
-	if name == "" {
-		name = instance
+	if inst.InstanceID != "" {
+		vars["id"] = inst.InstanceID
 	}
-	return name, inst.PublicIP
+	if inst.Name != "" {
+		vars["name"] = inst.Name
+	}
+	if inst.PublicIP != "" {
+		vars["ip"] = inst.PublicIP
+	}
+	vars["login_user"] = resolveSSHUser("", inst)
+	return vars
 }
 
 // resolveInstanceViaSpawn resolves an instance identifier (ID or Name) to

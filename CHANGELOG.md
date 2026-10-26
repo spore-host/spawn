@@ -132,6 +132,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   land in a region nobody quoted, and it passes `--no-detach`, because a
   detached sweep does not run row commands yet (#1323). An `--array=...%N`
   limit becomes `--max-concurrent N`.
+- **`{{ instance.id }}` in plugin local steps is the EC2 instance ID** (#1225).
+  It was the `--instance` value as typed, which for `--instance my-box` is a
+  name. It is now the ID when spawn can resolve the instance, as it is in
+  remote steps, and the typed value only when it cannot.
 
 ### Fixed
 
@@ -196,6 +200,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the ISO import bucket, tagged every bucket `spawn:fsx-backing-bucket=true`.
   It now tags them `spawn:managed=true`, plus `spawn:purpose=task-results` on the
   results bucket. FSx buckets keep their tags.
+- **A launch-time plugin that cannot be installed now shows as failed, with
+  the reason** (#1226). When a `spawn launch` plugin's spec or config did not
+  resolve (a missing required key, an undeclared one such as tailscale's old
+  `auth_key`, or a spec that could not be fetched), spored only logged it, so
+  `spawn plugin status` said "not installed". It now records a `failed` state
+  carrying the error, which `spawn plugin status` and `spawn plugin list`
+  show. A plugin already running is left alone if its spec cannot be fetched
+  on a later boot.
+- **Plugin local steps get `{{ instance.login_user }}`** (#1225). Provision,
+  reconcile and deprovision steps run on the controller got only
+  `instance.id`, `instance.name` and `instance.ip`, so a plugin that SSHes to
+  the instance had to hardcode `ec2-user`, which is wrong on Ubuntu. They now
+  get every `instance.*` variable remote steps get: `login_user` is the
+  instance's `spawn:local-username` tag, else `ec2-user`, and is kept in the
+  local record for later reconcile and deprovision.
+- **spored's idle terminate (`spawn:terminate-on-idle`) now sends a
+  notification** (#1205). `spawn service` instances and pool workers that
+  terminated at their idle timeout sent no Slack, Discord or SMS message. They
+  now send one once EC2 has accepted the terminate. It is spore-bot's
+  "has terminated" message (`ttl_expired`), which names the scheduled end time
+  as the reason, until spore-bot lists an idle-terminate event.
 
 - **A reused instance profile with no role in it is repaired before launch**
   (#1318). `CreateOrGetInstanceProfile` returned an existing
