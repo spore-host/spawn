@@ -32,10 +32,14 @@ const (
 	EnvMaxAge       = "REAPER_MAX_AGE"
 	EnvNotifyURL    = "REAPER_NOTIFY_URL"
 	EnvTTLGrace     = "REAPER_TTL_GRACE"
+	// EnvEmptyBuckets is the empty spawn-staging / spawn-results bucket sweep
+	// (#1301): off|report|reap, default report.
+	EnvEmptyBuckets = "REAPER_EMPTY_BUCKETS"
 )
 
 // The three states of a sweep that can be previewed before it is allowed to
-// delete: REAPER_SPOT_REQUESTS, REAPER_NET_RESOURCES and REAPER_ELASTIC_IPS.
+// delete: REAPER_SPOT_REQUESTS, REAPER_NET_RESOURCES, REAPER_ELASTIC_IPS and
+// REAPER_EMPTY_BUCKETS.
 const (
 	// ModeOff skips the sweep entirely.
 	ModeOff = "off"
@@ -131,7 +135,7 @@ func Validate(name, value string) error {
 		}
 	}
 	switch name {
-	case EnvSpotRequests, EnvNetResources, EnvElasticIPs:
+	case EnvSpotRequests, EnvNetResources, EnvElasticIPs, EnvEmptyBuckets:
 		if _, ok := ParseMode(value); !ok {
 			return fmt.Errorf("%s: %q is not one of %s", name, value, strings.Join(Modes(), ", "))
 		}
@@ -157,7 +161,7 @@ func Validate(name, value string) error {
 
 var settable = map[string]struct{}{
 	EnvSpotRequests: {}, EnvNetResources: {}, EnvElasticIPs: {}, EnvMaxAge: {}, EnvNotifyURL: {},
-	EnvTTLGrace: {},
+	EnvTTLGrace: {}, EnvEmptyBuckets: {},
 }
 
 // Settable lists the variables Validate accepts, sorted. Derived from the same

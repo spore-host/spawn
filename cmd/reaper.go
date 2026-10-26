@@ -32,6 +32,7 @@ var (
 	reaperNetResources string
 	reaperElasticIPs   string
 	reaperTTLGrace     string
+	reaperEmptyBuckets string
 	reaperMaxAge       string
 	reaperNotifyURL    string
 	reaperLogRetention int32
@@ -182,6 +183,8 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 		"Network-resource sweep, REAPER_NET_RESOURCES: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperElasticIPs, "elastic-ips", "",
 		"Orphaned launch Elastic IP sweep, REAPER_ELASTIC_IPS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is reap, or off when REAPER_NET_RESOURCES=off)")
+	fs.StringVar(&reaperEmptyBuckets, "empty-buckets", "",
+		"Empty spawn-staging/spawn-results bucket sweep, REAPER_EMPTY_BUCKETS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperTTLGrace, "ttl-grace", "",
 		"How long past its TTL deadline a running instance whose spored still checks in is left for spored to end itself, REAPER_TTL_GRACE, 0 to "+shortDuration(reaperconfig.MaxTTLGrace)+" (default: keep; the reaper's default is "+shortDuration(reaperconfig.DefaultTTLGrace)+")")
 	fs.StringVar(&reaperMaxAge, "max-age", "",
@@ -263,6 +266,7 @@ var reaperDeployFlags = map[string]struct {
 	reaperconfig.EnvElasticIPs:   {"elastic-ips", &reaperElasticIPs},
 	reaperconfig.EnvMaxAge:       {"max-age", &reaperMaxAge},
 	reaperconfig.EnvTTLGrace:     {"ttl-grace", &reaperTTLGrace},
+	reaperconfig.EnvEmptyBuckets: {"empty-buckets", &reaperEmptyBuckets},
 	reaperconfig.EnvNotifyURL:    {"notify-url", &reaperNotifyURL},
 }
 

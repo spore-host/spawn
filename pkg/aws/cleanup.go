@@ -510,6 +510,11 @@ func parseARN(arn string) (service, resourceType, id string) {
 	}
 	service = parts[2]
 	tail := parts[5]
+	// An S3 bucket ARN is just the name (arn:aws:s3:::spawn-staging-…), which
+	// used to come back as a resource TYPE named after the bucket and no id.
+	if service == "s3" && !strings.Contains(tail, "/") {
+		return service, "bucket", tail
+	}
 	// tail is "type/id", "type/id/sub", or "type:id".
 	sep := strings.IndexAny(tail, "/:")
 	if sep < 0 {

@@ -16,6 +16,21 @@ Elastic IP limit. This mode touches nothing else, so running instances do not
 block it. spawn list and spawn status warn about these addresses and print the
 command.
 
+--buckets removes only spawn's own spawn-staging-&lt;account&gt;-&lt;region&gt; and
+spawn-results-&lt;account&gt;-&lt;region&gt; buckets, and only once they have been empty
+for 7 days. It never deletes an object: a bucket holding anything at all
+(objects, old versions, delete markers, an unfinished multipart upload) is
+kept. S3 records no "empty since", so the first run that finds a bucket empty
+tags it spawn:empty-since and a later run deletes it once that tag is 7 days
+old; a run that finds it in use removes the tag, and so does a launch that
+uses it. A results bucket with lifecycle rules (spawn results lifecycle
+--apply) is kept, since a re-created one would not get them back. The
+staging bucket is never listed (no spawn role may list it): S3 itself refuses
+to delete it if it holds anything. spawn
+re-creates either bucket the next time it needs it. Every call names your
+account as the expected bucket owner. --dry-run writes nothing, not even the
+tag. The TTL reaper can do the same on its own schedule (REAPER_EMPTY_BUCKETS).
+
 A log of everything removed is written to ~/.spawn/cleanup-&lt;timestamp&gt;.log.
 
 ```
@@ -28,6 +43,7 @@ spawn cleanup [flags]
 |------|-------|------|---------|-------------|
 | `--all-regions` |  | bool |  | Clean up every enabled region |
 | `--all` |  | bool |  | Include resources created by other principals (default: only yours) |
+| `--buckets` |  | bool |  | Delete only spawn's own staging and results buckets that have been empty for 7 days; no object is ever deleted and nothing else is touched |
 | `--dry-run` |  | bool |  | Preview what would be removed without deleting anything |
 | `--elastic-ips` |  | bool |  | Release only orphaned spawn launch Elastic IPs (unassociated, instance gone); nothing else is touched |
 | `--region` |  | string |  | AWS region (default: current region from AWS config) |

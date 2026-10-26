@@ -59,6 +59,7 @@ import (
 	fsxtypes "github.com/aws/aws-sdk-go-v2/service/fsx/types"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -97,6 +98,8 @@ type account struct {
 	// spotFor is the EC2 slice the orphaned-Spot-request sweep needs (#950),
 	// separate for the same reason as netFor.
 	spotFor func(region string) spotRequestAPI
+	// s3For is the S3 slice the empty-bucket sweep needs (#1301).
+	s3For func(region string) s3API
 }
 
 // ec2API / fsxAPI are the slices of the EC2 and FSx clients the reaper uses.
@@ -183,6 +186,11 @@ type reaper struct {
 	// netResources, so the release can be armed without arming the group
 	// deletes. dryRun still wins.
 	elasticIPs string
+
+	// Empty spawn-staging-* / spawn-results-* buckets (#1301): one of
+	// emptyBucketsOff / emptyBucketsReport / emptyBucketsReap, from
+	// REAPER_EMPTY_BUCKETS. dryRun still wins.
+	emptyBuckets string
 
 	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
@@ -422,6 +430,7 @@ func configure() {
 		expireDNS:    strings.EqualFold(os.Getenv("REAPER_DNS_EXPIRE"), "true"),
 		expireLeases: strings.EqualFold(os.Getenv("REAPER_DNS_LEASE_EXPIRE"), "true"),
 		spotRequests: parseSpotRequests(os.Getenv("REAPER_SPOT_REQUESTS")),
+		emptyBuckets: parseEmptyBuckets(os.Getenv("REAPER_EMPTY_BUCKETS")),
 	}
 	r.netResources, r.elasticIPs = netSweepModesFromEnv()
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
@@ -457,8 +466,8 @@ func configure() {
 		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
 		r.expireLeases = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -503,6 +512,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c := base.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
+			},
+			s3For: func(region string) s3API {
+				c := base.Copy()
+				c.Region = region
+				return s3.NewFromConfig(c)
 			},
 			ssmFor: func(region string) ssmAPI {
 				c := base.Copy()
@@ -551,6 +565,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return ec2.NewFromConfig(c)
 			},
+			s3For: func(region string) s3API {
+				c := acctCfg.Copy()
+				c.Region = region
+				return s3.NewFromConfig(c)
+			},
 			ssmFor: func(region string) ssmAPI {
 				c := acctCfg.Copy()
 				c.Region = region
@@ -585,6 +604,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c := base.Copy()
 				c.Region = region
 				return ec2.NewFromConfig(c)
+			},
+			s3For: func(region string) s3API {
+				c := base.Copy()
+				c.Region = region
+				return s3.NewFromConfig(c)
 			},
 			ssmFor: func(region string) ssmAPI {
 				c := base.Copy()
@@ -742,6 +766,14 @@ type Summary struct {
 	ElasticIPsReleased     int `json:"elastic_ips_released"`      // released by the sweep
 	ElasticIPsWouldRelease int `json:"elastic_ips_would_release"` // qualified, but report mode or a dry run held it back
 	ElasticIPsSkipped      int `json:"elastic_ips_skipped"`       // no creation stamp, or the release failed
+
+	// Empty spawn-staging-* / spawn-results-* buckets (#1301), from
+	// REAPER_EMPTY_BUCKETS. Scanned counts the buckets that exist.
+	EmptyBucketsScanned     int `json:"empty_buckets_scanned"`
+	EmptyBucketsStamped     int `json:"empty_buckets_stamped"`      // first seen empty: spawn:empty-since written
+	EmptyBucketsDeleted     int `json:"empty_buckets_deleted"`      // empty for the grace, and deleted
+	EmptyBucketsWouldDelete int `json:"empty_buckets_would_delete"` // qualified, but report mode or a dry run held it back
+	EmptyBucketsFailed      int `json:"empty_buckets_failed"`       // an S3 call failed (AccessDenied: the role predates #1301)
 
 	// Orphaned persistent Spot requests (#950).
 	SpotRequestsScanned        int `json:"spot_requests_scanned"`
@@ -925,6 +957,11 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 			// reaps above, which cancel their own requests first, so what is
 			// left is a request whose instance was ended outside spawn.
 			r.reapSpotRequestsRegion(ctx, acct, region, start, &sum, &outcome)
+
+			// Empty spawn-staging / spawn-results buckets (#1301), deleted
+			// once empty for a week. Never an object: a bucket holding
+			// anything is kept.
+			r.reapEmptyBucketsRegion(ctx, acct, region, start, &sum)
 		}
 
 		// DNS reconciliation sweep (#438): after scanning all regions for this

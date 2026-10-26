@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/spawn/pkg/bucketsweep"
 )
 
 // S3BucketConfig contains configuration for creating/tagging S3 buckets
@@ -24,27 +26,108 @@ type S3BucketConfig struct {
 	ExportPath      string
 }
 
-// CreateS3BucketIfNotExists creates an S3 bucket if it doesn't already exist
+// CreateS3BucketIfNotExists creates an S3 bucket if it doesn't already exist.
+//
+// A bucket it creates is tagged spawn:managed=true, and spawn's own results
+// bucket (spawn-results-<account>-<region>) also spawn:purpose=task-results.
+// Everything else is S3's default for a new bucket: Block Public Access on,
+// SSE-S3, BucketOwnerEnforced, and no lifecycle rules (tiering the results
+// bucket is opt-in, `spawn results lifecycle --apply`). That is all spawn has
+// ever given it, so a results bucket deleted while empty (#1301) comes back
+// exactly as it was first made.
+//
+// For a bucket that exists, spawn-staging-* or spawn-results-* loses any
+// spawn:empty-since stamp, since the caller is about to use it (#1301).
 func (c *Client) CreateS3BucketIfNotExists(ctx context.Context, bucketName, region string) error {
-	return c.CreateS3BucketWithTags(ctx, S3BucketConfig{
-		BucketName: bucketName,
-		Region:     region,
-	})
+	return createPlainBucket(ctx, s3.NewFromConfig(c.regionalConfig(region)), bucketName, region)
+}
+
+func createPlainBucket(ctx context.Context, api bucketCreateS3, bucketName, region string) error {
+	return createBucketIfNotExists(ctx, api, bucketName, region, plainBucketTags(bucketName))
 }
 
 // CreateS3BucketWithTags creates an S3 bucket with FSx configuration tags
 func (c *Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConfig) error {
-	bucketName := config.BucketName
-	region := config.Region
-	s3Client := s3.NewFromConfig(c.regionalConfig(region))
+	return createBucketIfNotExists(ctx, s3.NewFromConfig(c.regionalConfig(config.Region)), config.BucketName, config.Region, fsxBucketTags(config))
+}
 
+// resultsBucketPurpose is the spawn:purpose tag on spawn's results bucket.
+const resultsBucketPurpose = "task-results"
+
+// plainBucketTags tags a bucket CreateS3BucketIfNotExists makes. It used to
+// get the FSx tag set, spawn:fsx-backing-bucket=true included, whatever it was
+// for: the results bucket and the ISO import bucket claimed to back an FSx
+// filesystem they had nothing to do with.
+func plainBucketTags(bucket string) []types.Tag {
+	tags := []types.Tag{{Key: aws.String("spawn:managed"), Value: aws.String("true")}}
+	if strings.HasPrefix(bucket, "spawn-results-") {
+		tags = append(tags, types.Tag{Key: aws.String("spawn:purpose"), Value: aws.String(resultsBucketPurpose)})
+	}
+	return tags
+}
+
+// fsxBucketTags identifies a spawn-managed bucket and stores FSx config.
+func fsxBucketTags(config S3BucketConfig) []types.Tag {
+	tags := []types.Tag{
+		{
+			Key:   aws.String("spawn:managed"),
+			Value: aws.String("true"),
+		},
+		{
+			Key:   aws.String("spawn:fsx-backing-bucket"),
+			Value: aws.String("true"),
+		},
+	}
+
+	// Add FSx configuration tags if provided
+	if config.StackName != "" {
+		tags = append(tags, types.Tag{
+			Key:   aws.String("spawn:fsx-stack-name"),
+			Value: aws.String(config.StackName),
+		})
+	}
+	if config.StorageCapacity > 0 {
+		tags = append(tags, types.Tag{
+			Key:   aws.String("spawn:fsx-storage-capacity"),
+			Value: aws.String(fmt.Sprintf("%d", config.StorageCapacity)),
+		})
+	}
+	if config.ImportPath != "" {
+		tags = append(tags, types.Tag{
+			Key:   aws.String("spawn:fsx-import-path"),
+			Value: aws.String(config.ImportPath),
+		})
+	}
+	if config.ExportPath != "" {
+		tags = append(tags, types.Tag{
+			Key:   aws.String("spawn:fsx-export-path"),
+			Value: aws.String(config.ExportPath),
+		})
+	}
+	return tags
+}
+
+// bucketCreateS3 is the S3 slice createBucketIfNotExists uses.
+type bucketCreateS3 interface {
+	HeadBucket(context.Context, *s3.HeadBucketInput, ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
+	CreateBucket(context.Context, *s3.CreateBucketInput, ...func(*s3.Options)) (*s3.CreateBucketOutput, error)
+	PutBucketTagging(context.Context, *s3.PutBucketTaggingInput, ...func(*s3.Options)) (*s3.PutBucketTaggingOutput, error)
+	GetBucketTagging(context.Context, *s3.GetBucketTaggingInput, ...func(*s3.Options)) (*s3.GetBucketTaggingOutput, error)
+	DeleteBucketTagging(context.Context, *s3.DeleteBucketTaggingInput, ...func(*s3.Options)) (*s3.DeleteBucketTaggingOutput, error)
+}
+
+func createBucketIfNotExists(ctx context.Context, s3Client bucketCreateS3, bucketName, region string, tags []types.Tag) error {
 	// Check if bucket exists
 	_, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(bucketName),
 	})
 
 	if err == nil {
-		// Bucket exists
+		// Bucket exists. If it is one the empty-bucket sweep looks at, the
+		// caller is about to use it: best-effort, take off its empty stamp.
+		if bucketsweep.IsSweptName(bucketName) {
+			_ = bucketsweep.ClearEmptySince(ctx, s3Client, bucketName, "")
+		}
 		return nil
 	}
 
@@ -76,44 +159,6 @@ func (c *Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConf
 			_, err = s3Client.CreateBucket(ctx, createInput)
 			if err != nil {
 				return fmt.Errorf("failed to create S3 bucket: %w", err)
-			}
-
-			// Add tags to identify spawn-managed bucket and store FSx config
-			tags := []types.Tag{
-				{
-					Key:   aws.String("spawn:managed"),
-					Value: aws.String("true"),
-				},
-				{
-					Key:   aws.String("spawn:fsx-backing-bucket"),
-					Value: aws.String("true"),
-				},
-			}
-
-			// Add FSx configuration tags if provided
-			if config.StackName != "" {
-				tags = append(tags, types.Tag{
-					Key:   aws.String("spawn:fsx-stack-name"),
-					Value: aws.String(config.StackName),
-				})
-			}
-			if config.StorageCapacity > 0 {
-				tags = append(tags, types.Tag{
-					Key:   aws.String("spawn:fsx-storage-capacity"),
-					Value: aws.String(fmt.Sprintf("%d", config.StorageCapacity)),
-				})
-			}
-			if config.ImportPath != "" {
-				tags = append(tags, types.Tag{
-					Key:   aws.String("spawn:fsx-import-path"),
-					Value: aws.String(config.ImportPath),
-				})
-			}
-			if config.ExportPath != "" {
-				tags = append(tags, types.Tag{
-					Key:   aws.String("spawn:fsx-export-path"),
-					Value: aws.String(config.ExportPath),
-				})
 			}
 
 			_, err = s3Client.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
@@ -367,6 +412,8 @@ type stagingS3 interface {
 	PutBucketLifecycleConfiguration(context.Context, *s3.PutBucketLifecycleConfigurationInput, ...func(*s3.Options)) (*s3.PutBucketLifecycleConfigurationOutput, error)
 	GetBucketLifecycleConfiguration(context.Context, *s3.GetBucketLifecycleConfigurationInput, ...func(*s3.Options)) (*s3.GetBucketLifecycleConfigurationOutput, error)
 	PutBucketTagging(context.Context, *s3.PutBucketTaggingInput, ...func(*s3.Options)) (*s3.PutBucketTaggingOutput, error)
+	GetBucketTagging(context.Context, *s3.GetBucketTaggingInput, ...func(*s3.Options)) (*s3.GetBucketTaggingOutput, error)
+	DeleteBucketTagging(context.Context, *s3.DeleteBucketTaggingInput, ...func(*s3.Options)) (*s3.DeleteBucketTaggingOutput, error)
 }
 
 func ensureStagingBucket(ctx context.Context, api stagingS3, bucket, region, owner string) error {
@@ -376,6 +423,14 @@ func ensureStagingBucket(ctx context.Context, api stagingS3, bucket, region, own
 	_, err := api.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket), ExpectedBucketOwner: aws.String(owner)})
 	switch {
 	case err == nil:
+		// A launch is about to use it, so it is not an unused empty bucket:
+		// take off any spawn:empty-since stamp, or `spawn cleanup --buckets`
+		// and the reaper (#1301) could delete it while this task's staged
+		// files are in flight, having found it empty on two sweeps either
+		// side of a launch whose objects had since expired. Best-effort: a
+		// failure leaves the stamp, and the sweep still never deletes a
+		// bucket that holds anything.
+		_ = bucketsweep.ClearEmptySince(ctx, api, bucket, owner)
 		if stagingLifecycleOK(ctx, api, bucket, owner) {
 			return nil
 		}

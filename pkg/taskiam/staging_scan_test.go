@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/reaperiam"
 )
 
 // s3ARNInLiteral finds S3 ARNs (or ARN patterns) inside a string literal.
@@ -27,6 +29,14 @@ var fmtVerb = regexp.MustCompile(`%(\[\d+\])?[sqvd]`)
 // Printf verb or concatenation come from callers, and the spec and flag checks
 // refuse a staging bucket there (taskproto.Validate, cmd's --s3-read/--s3-write
 // checks). Found by walking the source, not listed.
+//
+// One file is checked by what it grants rather than by its text:
+// pkg/reaperiam/reaperiam.go, the TTL reaper's policy, whose empty-bucket
+// sweep (#1301) may tag and delete an empty spawn-staging-* bucket. That
+// pattern does reach the staging bucket, and what this gate protects is
+// list and read on it, so TestReaperPolicyCannotListOrReadTheStagingBucket
+// checks every reaper statement reaching it grants neither. The reaper's two
+// YAML copies are held to reaperiam's statements by its drift gates.
 func TestNoGeneratedPolicyReachesTheStagingBucket(t *testing.T) {
 	root := filepath.Join("..", "..")
 	targets := []string{
@@ -48,6 +58,9 @@ func TestNoGeneratedPolicyReachesTheStagingBucket(t *testing.T) {
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
+		}
+		if filepath.ToSlash(path) == reaperPolicyFile {
+			return nil // checked structurally, below
 		}
 		f, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {
@@ -80,6 +93,43 @@ func TestNoGeneratedPolicyReachesTheStagingBucket(t *testing.T) {
 	}
 	if arns < 10 {
 		t.Fatalf("found %d S3 ARNs in the source; the walk has broken", arns)
+	}
+}
+
+const reaperPolicyFile = "../../pkg/reaperiam/reaperiam.go"
+
+// TestReaperPolicyCannotListOrReadTheStagingBucket is the structural half for
+// the reaper's policy: a statement whose resource reaches the staging bucket
+// or an object in it may grant no list and no object read (#1274), and nothing
+// broader than the actions it names.
+func TestReaperPolicyCannotListOrReadTheStagingBucket(t *testing.T) {
+	targets := []string{
+		"arn:aws:s3:::spawn-staging-123456789012-us-east-1",
+		"arn:aws:s3:::spawn-staging-123456789012-us-east-1/t1/bootstrap-" + strings.Repeat("a", 64) + ".sh",
+	}
+	reaching := 0
+	for _, st := range reaperiam.ScanSelfStatements() {
+		hits := false
+		for _, target := range targets {
+			if arnGlob(st.Resource, target) {
+				hits = true
+			}
+		}
+		if !hits {
+			continue
+		}
+		reaching++
+		for _, a := range st.Action {
+			if strings.Contains(a, "*") || strings.HasPrefix(a, "s3:List") || strings.HasPrefix(a, "s3:GetObject") {
+				t.Errorf("the reaper is granted %s on %s, which reaches the staging bucket: no spawn role may list it or read an object in it", a, st.Resource)
+			}
+		}
+	}
+	if reaching == 0 {
+		t.Fatal("no reaper statement reaches the staging bucket; if the #1301 sweep grant was removed, drop the exemption in TestNoGeneratedPolicyReachesTheStagingBucket")
+	}
+	if _, err := os.Stat(reaperPolicyFile); err != nil {
+		t.Fatalf("the exempted file %s does not exist: %v", reaperPolicyFile, err)
 	}
 }
 
