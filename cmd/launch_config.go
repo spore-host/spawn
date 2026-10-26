@@ -773,6 +773,9 @@ func userDataOSGuard(config *aws.LaunchConfig) error {
 		if custom != "" {
 			return fmt.Errorf("--user-data is not supported on Windows: the Windows bootstrap would drop it (#1022)")
 		}
+		if config.CustomUserData != "" {
+			return fmt.Errorf("a sweep row's user_data: is not supported on Windows: the Windows bootstrap would drop it (#1022, #1327)")
+		}
 	}
 	return nil
 }
@@ -796,6 +799,9 @@ func buildUserDataForKey(plat *platform.Platform, config *aws.LaunchConfig, publ
 	if err != nil {
 		return "", err
 	}
+	// A sweep row's own user_data: (#1327), after --user-data's, so a row can
+	// build on a sweep-wide script.
+	customUserData = joinCustomUserData(customUserData, config.CustomUserData)
 
 	// Delegate to the shared, headless bootstrap builder (pkg/launcher) so the
 	// CLI and SDK consumers (lagotto, cohort) emit identical spored user-data.
@@ -827,6 +833,21 @@ func buildUserDataForKey(plat *platform.Platform, config *aws.LaunchConfig, publ
 		// The --command wrapper must write the file spored watches (#1131).
 		CompletionFile: config.CompletionFile,
 	})
+}
+
+// joinCustomUserData appends a config's own script to --user-data's, each on
+// its own lines.
+func joinCustomUserData(flag, own string) string {
+	switch {
+	case own == "":
+		return flag
+	case flag == "":
+		return own
+	case strings.HasSuffix(flag, "\n"):
+		return flag + own
+	default:
+		return flag + "\n" + own
+	}
 }
 
 // embeddedCommand returns the command to embed in user-data, or "" when it

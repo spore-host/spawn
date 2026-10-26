@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/platform"
+	"github.com/spore-host/spawn/pkg/spotrequest"
 )
 
 // The spored bootstrap for a detached sweep's members (#1323).
@@ -36,6 +39,13 @@ import (
 // TestDetachedSweepSeedsEveryKeyTheLambdaReads holds the two together.
 const detachedUserDataKey = "spawn_user_data"
 
+// detachedTagsKey is the param key carrying a member's instance tags, rendered
+// by the tag builder a foreground launch uses (#1330). It must equal tagsParam
+// in lambda/sweep-orchestrator/spored.go; TestDetachedSweepSeedsEveryKeyTheLambdaReads
+// holds the two together. Always per row: every member's differs, if only in
+// spawn:sweep-index.
+const detachedTagsKey = "spawn_tags"
+
 // scheduledSweepIDPlaceholder stands in for the sweep ID of a schedule's runs,
 // which scheduler-handler mints when the schedule fires. The bootstrap only asks
 // whether the launch is a sweep's (nonSweepCommand: a sweep's command rides its
@@ -55,13 +65,27 @@ type detachedBootstrap struct {
 	// osOf returns a member's target OS ("linux" or "windows") from its region
 	// and AMI, as the foreground path's resolveTargetOS does.
 	osOf func(region, ami string) string
+	// tagsOf renders a member's instance tags as a foreground launch of cfg
+	// would write them: aws.LaunchTagger in production.
+	tagsOf func(cfg aws.LaunchConfig) (map[string]string, error)
 }
 
 // newDetachedBootstrap returns the production detachedBootstrap: the local
 // platform, and the target OS resolved per (region, AMI) with client, memoized.
 func newDetachedBootstrap(ctx context.Context, client *aws.Client, plat *platform.Platform) detachedBootstrap {
 	cache := map[string]string{}
+	var tagger *aws.LaunchTagger
 	return detachedBootstrap{
+		tagsOf: func(cfg aws.LaunchConfig) (map[string]string, error) {
+			if tagger == nil {
+				t, err := client.NewLaunchTagger(ctx)
+				if err != nil {
+					return nil, err
+				}
+				tagger = t
+			}
+			return tagger.TagValues(ctx, cfg)
+		},
 		plat: plat,
 		osOf: func(region, ami string) string {
 			k := region + "|" + ami
@@ -87,19 +111,33 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 	if pf.Defaults == nil {
 		pf.Defaults = map[string]interface{}{}
 	}
-	delete(pf.Defaults, detachedUserDataKey)
-	for _, row := range pf.Params {
-		delete(row, detachedUserDataKey)
+	for _, k := range []string{detachedUserDataKey, detachedTagsKey} {
+		delete(pf.Defaults, k)
+		for _, row := range pf.Params {
+			delete(row, k)
+		}
 	}
 	if len(pf.Params) == 0 {
 		return nil
 	}
 
 	userData := make([]string, len(pf.Params))
+	memberTags := make([]map[string]interface{}, len(pf.Params))
+	var defaultedVerbs []string
 	for i, row := range pf.Params {
 		cfg, err := buildLaunchConfigFromParams(base, pf.Defaults, row, sweepID, sweepName, i, len(pf.Params))
 		if err != nil {
 			return fmt.Errorf("param set %d: %w", i, err)
+		}
+		// The foreground loop's per-member defaults, the 1h idle timeout for a
+		// member with no ttl and no idle_timeout among them (#1330).
+		if defaultSweepMember(&cfg, base, sweepName, i) {
+			if v := idleActionVerb(&cfg); !slices.Contains(defaultedVerbs, v) {
+				defaultedVerbs = append(defaultedVerbs, v)
+			}
+		}
+		if !orchestratorPassableProfile(cfg.IamInstanceProfile) {
+			return unpassableProfileError(fmt.Sprintf("param set %d", i), cfg.IamInstanceProfile)
 		}
 		cfg.TargetOS = b.osOf(cfg.Region, cfg.AMI)
 		if err := windowsLifecycleGuard(&cfg); err != nil {
@@ -117,6 +155,27 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 			return fmt.Errorf("param set %d: build spored user data: %w", i, err)
 		}
 		userData[i] = ud
+
+		tags, err := b.tagsOf(cfg)
+		if err != nil {
+			return fmt.Errorf("param set %d: build instance tags: %w", i, err)
+		}
+		if err := detachedSpotGuard(tags); err != nil {
+			return fmt.Errorf("param set %d: %w", i, err)
+		}
+		memberTags[i] = encodeDetachedTags(tags)
+	}
+	if len(defaultedVerbs) > 0 {
+		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h for sweep members with no ttl or idle_timeout\n")
+		fmt.Fprintf(os.Stderr, "   They will %s after 1 hour of inactivity.\n", strings.Join(defaultedVerbs, " or "))
+		fmt.Fprintf(os.Stderr, "   Override with --ttl, --idle-timeout, or --no-timeout\n\n")
+	}
+
+	for i := range pf.Params {
+		if pf.Params[i] == nil {
+			pf.Params[i] = map[string]interface{}{}
+		}
+		pf.Params[i][detachedTagsKey] = memberTags[i]
 	}
 
 	same := true
@@ -131,12 +190,38 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 		return nil
 	}
 	for i := range pf.Params {
-		if pf.Params[i] == nil {
-			pf.Params[i] = map[string]interface{}{}
-		}
 		pf.Params[i][detachedUserDataKey] = userData[i]
 	}
 	return nil
+}
+
+// encodeDetachedTags is a member's tags as the orchestrator reads them: one
+// JSON object, key to value.
+func encodeDetachedTags(tags map[string]string) map[string]interface{} {
+	out := make(map[string]interface{}, len(tags))
+	for k, v := range tags {
+		out[k] = v
+	}
+	return out
+}
+
+// detachedSpotGuard refuses a Spot member whose lifecycle needs a persistent
+// Spot request. A foreground launch makes one when the instance may be stopped
+// (an idle timeout that stops, on_complete stop or hibernate, #922), because EC2
+// cannot stop an instance from a one-time request. The orchestrator makes
+// one-time requests only: it has no way to cancel a persistent one before
+// terminating its instance, and a persistent request whose instance is
+// terminated launches a replacement. So such a member would run with a stop
+// that EC2 refuses.
+func detachedSpotGuard(tags map[string]string) error {
+	if tags[spotrequest.TypeTag] != spotrequest.TypePersistent {
+		return nil
+	}
+	return fmt.Errorf("this Spot member would need a persistent Spot request, because its lifecycle stops " +
+		"the instance (an idle timeout, including the 1h default for a member with no ttl, or on_complete " +
+		"stop/hibernate), and a detached sweep launches one-time Spot requests, which EC2 cannot stop. " +
+		"Give it a ttl (ttl: or --ttl) and no idle_timeout, and on_complete: terminate if it has an " +
+		"on_complete, or run the sweep with --no-detach")
 }
 
 // detachedMemberUserData is a member's encoded user data: what the foreground

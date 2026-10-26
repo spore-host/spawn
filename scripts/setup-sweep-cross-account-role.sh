@@ -60,7 +60,12 @@ aws iam create-role \
 # profile, because spored needs its credentials (#1323). The CLI ensures
 # spored-instance-profile, whose role is spored-instance-role, and seeds it for
 # every member without an iam_role of its own; spawnd-role is the profile this
-# script family made before. Exactly those two roles, and only to EC2.
+# script family made before. spawn-instance-* are the per-policy roles spawn
+# creates for --iam-policy, --iam-policy-file, --iam-managed-policies and
+# --s3-read/--s3-write (#1331), the same grant the pipeline orchestrator has.
+# Only roles spawn creates, and only to EC2: the CLI refuses a detached sweep
+# naming any other profile, since a grant broad enough to pass an arbitrary
+# role would let the orchestrator hand any role in the account to an instance.
 POLICY_DOCUMENT=$(cat <<EOF
 {
   "Version": "2012-10-17",
@@ -101,7 +106,8 @@ POLICY_DOCUMENT=$(cat <<EOF
       ],
       "Resource": [
         "arn:aws:iam::${CURRENT_ACCOUNT_ID}:role/spored-instance-role",
-        "arn:aws:iam::${CURRENT_ACCOUNT_ID}:role/spawnd-role"
+        "arn:aws:iam::${CURRENT_ACCOUNT_ID}:role/spawnd-role",
+        "arn:aws:iam::${CURRENT_ACCOUNT_ID}:role/spawn-instance-*"
       ],
       "Condition": {
         "StringEquals": {

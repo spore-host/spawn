@@ -44,7 +44,7 @@ func TestDetachedSweepSeedsEveryKeyTheLambdaReads(t *testing.T) {
 	// A key is read either as a literal or through a named constant
 	// (userDataParam); a constant is resolved to its value, and one that cannot
 	// be resolved fails rather than being skipped.
-	re := regexp.MustCompile(`get(?:String|Bool|Int)Param\(config, (?:"([a-z_]+)"|([A-Za-z_][A-Za-z0-9_]*))`)
+	re := regexp.MustCompile(`get(?:String|Bool|Int|Map)Param\(config, (?:"([a-z_]+)"|([A-Za-z_][A-Za-z0-9_]*))`)
 	found := map[string]bool{}
 	for _, m := range re.FindAllStringSubmatch(src, -1) {
 		if m[1] != "" {

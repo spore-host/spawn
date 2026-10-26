@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/platform"
@@ -30,7 +31,25 @@ func testDetachedBootstrap(t *testing.T) detachedBootstrap {
 	return detachedBootstrap{
 		plat: &platform.Platform{OS: "linux", HomeDir: dir, SSHPubKeyPath: pub},
 		osOf: func(string, string) string { return "linux" },
+		// Launch's own builder, with an identity and price fixed so the test
+		// needs no AWS (aws.LaunchTagger supplies both in production).
+		tagsOf: testMemberTags,
 	}
+}
+
+// testMemberTags is what aws.LaunchTagger renders for cfg, with a fixed caller
+// and price.
+func testMemberTags(cfg aws.LaunchConfig) (map[string]string, error) {
+	tags, err := testMemberTagList(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return tagsAsMap(tags), nil
+}
+
+func testMemberTagList(cfg aws.LaunchConfig) ([]ec2types.Tag, error) {
+	cfg.PricePerHour, cfg.PriceSource = 0.0416, "live"
+	return aws.BuildLaunchTags(cfg, "111122223333", "arn:aws:iam::111122223333:user/u", "")
 }
 
 // decodedScript reverses encodeUserData (gzip, then base64).

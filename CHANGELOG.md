@@ -138,6 +138,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are reported together, so the wrapper's untagged `aws s3 cp` fallback still
   runs. Not yet measured on real hardware: an A/B on a #1256 workload with a
   large output is needed before release.
+- **A detached sweep refuses an instance profile its orchestrator cannot
+  pass** (#1331). `--instance-profile NAME`, `--iam-role NAME` and a
+  `defaults:` or row `iam_role:` naming a profile other than the ones spawn
+  creates (`spored-instance-profile`, `spawnd-role`, `spawn-instance-*`) are
+  refused before anything is created, with a message pointing at
+  `--iam-policy` (without `--iam-role`) or `--no-detach`. Before, the sweep
+  was uploaded and every member failed at RunInstances. A grant broad enough
+  to pass an arbitrary role would let the orchestrator hand any role in the
+  account, admin included, to an instance, so the refusal is deliberate.
+- **A detached sweep member with no `ttl` and no `idle_timeout` now gets the
+  1h idle timeout** a foreground member gets (#1330). Before, such a member
+  had no bound at all except the reaper's max-age ceiling. `--no-timeout`
+  still opts out, as in the foreground.
+- **A detached Spot member whose lifecycle stops the instance is refused**
+  (#1330). A foreground launch makes such a member a persistent Spot request
+  (#922); the orchestrator makes one-time requests, which EC2 cannot stop, and
+  it has no way to cancel a persistent one before terminating its instance.
+  This includes a Spot row with no `ttl`, which gets the 1h idle default:
+  give it a `ttl`, or use `--no-detach`.
+
 - **Task stage-in and stage-out use the AWS CLI's CRT transfer client, sized to
   the instance's network** (#1256). Every `aws s3 cp` in the task wrapper ran at
   the CLI's defaults (classic client, 10 concurrent requests, 8 MiB parts),
@@ -308,6 +328,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the dashboard's ownership check. The dashboard now answers 403 with the
   `spawn terminate <id>` command instead of a raw 500. Choosing a terminate
   path is spawn#1349.
+- **A detached sweep member now gets its configuration** (#1330). The sweep
+  orchestrator wrote five tags of its own (`spawn:sweep-id`,
+  `spawn:sweep-index`, `Name`, `spawn:managed`, and `spawn:ttl-deadline` for
+  a row with a `ttl`), while spored and the bootstrap read everything else
+  from tags. So a member booted spored and then ran nothing: a row's
+  `command:` (the `spawn:command` tag) and its `PARAM_*` values never reached
+  it, and `idle_timeout`, `cost_limit`, `on_complete`, `completion_file`,
+  `completion_delay`, `session_timeout`, `dns`, `--pre-stop`, `--tag` and the
+  rest were not enforced. A `cost_limit: 8` capped nothing. The CLI now
+  renders each member's tags with the code a foreground launch uses
+  (`aws.LaunchTagger`, after the foreground's per-member defaults) and ships
+  them in the params as `spawn_tags`. The orchestrator tags the instance and
+  its volumes with them, anchors `spawn:launch-time` and `spawn:ttl-deadline`
+  at the real launch (so a TTL counts from when the member started, not from
+  when the CLI ran), and sets the sweep ID itself, since a schedule's run gets
+  its ID only when it fires. It refuses a member with no rendered tags, so
+  sweeps and schedules created by an older CLI must be re-created. Each
+  instance type is priced once per sweep, not once per member.
+- **`--iam-policy`, `--iam-policy-file`, `--iam-managed-policies`,
+  `--s3-read` and `--s3-write` now work on a detached sweep** (#1331). They
+  give members a `spawn-instance-<hash>` profile, and the orchestrator's
+  cross-account role could not pass its role, so EC2 refused every member.
+  `scripts/setup-sweep-cross-account-role.sh` now grants `iam:PassRole` on
+  `role/spawn-instance-*` too, still only to EC2
+  (`iam:PassedToService=ec2.amazonaws.com`). **Re-run it in each member
+  account.**
+- **A sweep row's `user_data:` now runs** (#1327). It was parsed and then
+  overwritten by the foreground path and ignored by the detached one. It runs
+  after spored's bootstrap and after `--user-data`, on both paths, and on
+  `spawn resume`. A Windows member with one is refused, since its bootstrap
+  would drop it.
 
 - **`spawn slurm submit` works** (#1217). It handed off to `spawn launch
   --param-file` without a spore name, which launch refuses, so every submit
