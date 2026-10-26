@@ -247,6 +247,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pool nobody drains no longer keeps its IAM role forever** (#1319).
+  `spawn pool drain` was the only thing that deleted a pool's worker role and
+  instance profile, so a pool whose caller crashed, or whose run-end hook
+  never fired, left them in the account after its workers hit their TTL.
+  `spawn pool create` now names them `spawn-instance-pool-<hash of the run
+  id>` (was `spawn-pool-worker-<hash>`), inside the per-task family the TTL
+  reaper (`REAPER_INSTANCE_ROLES`) and `spawn cleanup --instance-roles`
+  already remove (#1300), under the same rule: tagged `spawn:managed=true`,
+  no instance in any enabled region holding the profile, the role and profile
+  at least 24 hours old and the role unused for 24 hours. A pool role must
+  also carry a `spawn:pool-run-id` tag that hashes to its name. No new IAM
+  grant: the reaper's existing `spawn-instance-*` grants cover the new name.
+  Roles of pools created before this release keep the old name, which the
+  reaper's grants do not reach: `spawn cleanup --instance-roles` removes those
+  under the same rule (and only the exact `spawn-pool-worker-<16 hex>` name
+  its run-id tag hashes to), and `spawn pool drain` removes both names.
+
 - **`spawn slurm submit` works** (#1217). It handed off to `spawn launch
   --param-file` without a spore name, which launch refuses, so every submit
   failed after the user had approved the cost. It now passes a name made from

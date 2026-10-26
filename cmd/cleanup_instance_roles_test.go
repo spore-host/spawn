@@ -32,6 +32,7 @@ func (f cleanupRoleEC2) DescribeInstances(context.Context, *ec2.DescribeInstance
 type cleanupRoleIAM struct {
 	names []string
 	calls []string
+	tags  map[string]map[string]string // extra role tags, by role name
 }
 
 func (f *cleanupRoleIAM) mutating() []string {
@@ -59,7 +60,11 @@ func (f *cleanupRoleIAM) ListRoles(context.Context, *iam.ListRolesInput, ...func
 }
 func (f *cleanupRoleIAM) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
 	f.calls = append(f.calls, "GetRole "+awssdk.ToString(in.RoleName))
-	return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName, Tags: tagsManaged(),
+	tags := tagsManaged()
+	for k, v := range f.tags[awssdk.ToString(in.RoleName)] {
+		tags = append(tags, iamtypes.Tag{Key: awssdk.String(k), Value: awssdk.String(v)})
+	}
+	return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName, Tags: tags,
 		CreateDate: awssdk.Time(cleanupNow.Add(-72 * time.Hour))}}, nil
 }
 func (f *cleanupRoleIAM) GetInstanceProfile(_ context.Context, in *iam.GetInstanceProfileInput, _ ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error) {
@@ -154,5 +159,32 @@ func TestCleanupInstanceRoles(t *testing.T) {
 		if strings.Contains(c, instancerole.SharedRoleName) || strings.Contains(c, "my-own-role") {
 			t.Errorf("cleanup touched %q", c)
 		}
+	}
+}
+
+// A pool created before #1319 has a spawn-pool-worker-<hash> role, which the
+// reaper's grants cannot reach; `spawn cleanup --instance-roles` is its
+// deleter, under the same rule, and only for the exact name its run-id tag
+// hashes to.
+func TestCleanupInstanceRolesRemovesLegacyPoolRoles(t *testing.T) {
+	abandoned := instancerole.LegacyPoolWorkerRoleName("old-run")
+	mislabelled := instancerole.LegacyPoolWorkerRoleName("other-run")
+	iamc := &cleanupRoleIAM{
+		names: []string{abandoned, mislabelled, "spawn-pool-worker-handmade"},
+		tags: map[string]map[string]string{
+			abandoned:   {instancerole.PoolRunIDTagKey: "old-run"},
+			mislabelled: {instancerole.PoolRunIDTagKey: "not-other-run"},
+		},
+	}
+	if _, err := runRolesCleanup(t, iamc, false); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"RemoveRoleFromInstanceProfile " + abandoned,
+		"DeleteInstanceProfile " + abandoned,
+		"DeleteRole " + abandoned,
+	}
+	if got := iamc.mutating(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("cleanup changed %q, want %q", got, want)
 	}
 }

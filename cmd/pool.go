@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/cohort"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/taskcohort"
 	"github.com/spore-host/spawn/pkg/taskpool"
@@ -150,9 +149,13 @@ func bucketResourceARNs(names []string) (objARNs, bktARNs string) {
 // role's inline policy, so a second `pool create` on a shared role cut the first
 // pool's workers off from their queue. The run id is hashed, not embedded,
 // because a role name is capped at 64 characters and a run id is not.
+//
+// The name is spawn-instance-pool-<hash> (#1319), inside the per-task family
+// pkg/instancerole deletes, so a pool nobody drains still loses its role once
+// its workers are gone: `spawn pool drain` is the prompt deleter, the TTL
+// reaper and `spawn cleanup --instance-roles` the backstop.
 func poolWorkerRoleName(runID string) string {
-	sum := sha256.Sum256([]byte(runID))
-	return "spawn-pool-worker-" + hex.EncodeToString(sum[:])[:16]
+	return instancerole.PoolWorkerRoleName(runID)
 }
 
 // poolWorkerRoleConfig is the per-pool instance-profile request. The
@@ -166,7 +169,7 @@ func poolWorkerRoleConfig(account, region, specBucket, runID string, extraRead, 
 		TrustServices:    []string{"ec2"},
 		InlinePolicyJSON: poolWorkerPolicy(account, region, specBucket, runID, extraRead, extraWrite),
 		Policies:         ecrPullPolicies(containers...),
-		Tags:             map[string]string{"spawn:pool-run-id": runID},
+		Tags:             map[string]string{instancerole.PoolRunIDTagKey: runID},
 	}
 }
 
@@ -197,6 +200,7 @@ func removePoolWorkerIdentity(ctx context.Context, api poolIdentityAPI, region, 
 		sleep = sleepCtx
 	}
 	name := poolWorkerRoleName(runID)
+	legacy := instancerole.LegacyPoolWorkerRoleName(runID)
 	for waited := time.Duration(0); ; waited += poolDrainWorkerPoll {
 		live, err := api.LiveInstancesWithTag(ctx, region, "spawn:pool-run-id", runID)
 		if err != nil {
@@ -212,7 +216,15 @@ func removePoolWorkerIdentity(ctx context.Context, api poolIdentityAPI, region, 
 	if err := api.DeleteInstanceProfileAndRole(ctx, name); err != nil {
 		return fmt.Sprintf("⚠️  could not delete IAM role %s: %v\n", name, err)
 	}
-	return fmt.Sprintf("   deleted IAM role and instance profile %s\n", name)
+	// A pool created before #1319 has its role under the old name. Deleting a
+	// name that does not exist succeeds, so both are always removed.
+	// A principal that never made old-style pools may not be allowed to touch
+	// that name; that is not a failure of this drain, so it is only noted.
+	msg := fmt.Sprintf("   deleted IAM role and instance profile %s\n", name)
+	if err := api.DeleteInstanceProfileAndRole(ctx, legacy); err != nil {
+		msg += fmt.Sprintf("   note: could not remove a pre-v0.147 pool role %s, if one exists (%v); 'spawn cleanup --instance-roles' also removes it\n", legacy, err)
+	}
+	return msg
 }
 
 // sleepCtx sleeps d or until ctx is done; false if ctx ended first.

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/instancerole"
 )
 
 // fakeIAM is a stateful IAM + STS Query API that records every write. It holds
@@ -205,7 +207,7 @@ func TestConcurrentPoolCreatesKeepTheirOwnGrants(t *testing.T) {
 func TestPoolWorkerRoleNameFitsIAM(t *testing.T) {
 	long := strings.Repeat("x", 200)
 	for _, run := range []string{"a", long, long + "y"} {
-		if n := poolWorkerRoleName(run); len(n) > 64 || !strings.HasPrefix(n, "spawn-pool-worker-") {
+		if n := poolWorkerRoleName(run); len(n) > 64 || !instancerole.IsCandidate(n) {
 			t.Errorf("poolWorkerRoleName(%d chars) = %q (%d chars)", len(run), n, len(n))
 		}
 	}
@@ -258,7 +260,7 @@ func TestDrainRemovesThePoolRoleOnlyOnceNoWorkerNeedsIt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			msg := removePoolWorkerIdentity(context.Background(), tc.api, "us-east-1", "run-a", 0, noSleep)
-			if got := len(tc.api.deleted) == 1 && tc.api.deleted[0] == poolWorkerRoleName("run-a"); got != tc.wantDelete {
+			if got := slices.Contains(tc.api.deleted, poolWorkerRoleName("run-a")); got != tc.wantDelete {
 				t.Errorf("deleted %v, want delete=%v (message %q)", tc.api.deleted, tc.wantDelete, msg)
 			}
 			if !tc.wantDelete && !strings.Contains(msg, "re-run 'spawn pool drain") {
@@ -280,7 +282,7 @@ func TestDrainWaitsForWorkersBeforeRemovingTheRole(t *testing.T) {
 	// Capped, so a drain that ignores --wait fails the test instead of hanging it.
 	sleep := func(context.Context, time.Duration) bool { sleeps++; return sleeps < 100 }
 	removePoolWorkerIdentity(context.Background(), api, "us-east-1", "run-a", time.Minute, sleep)
-	if len(api.deleted) != 1 || api.checks != 3 || sleeps != 2 {
+	if !slices.Contains(api.deleted, poolWorkerRoleName("run-a")) || api.checks != 3 || sleeps != 2 {
 		t.Errorf("deleted %v after %d checks and %d sleeps, want the role deleted on the 3rd check after 2 sleeps", api.deleted, api.checks, sleeps)
 	}
 
@@ -293,5 +295,49 @@ func TestDrainWaitsForWorkersBeforeRemovingTheRole(t *testing.T) {
 	}
 	if want := int(time.Minute / poolDrainWorkerPoll); sleeps != want {
 		t.Errorf("waited %d polls for a 1m --wait at %s per poll, want %d", sleeps, poolDrainWorkerPoll, want)
+	}
+}
+
+// TestAbandonedPoolRoleHasADeleter (#1319): `spawn pool drain` is not the only
+// deleter of a pool's role. The role pool create asks for, tagged as
+// CreateOrGetInstanceProfile tags it, is one pkg/instancerole's default rule
+// (the TTL reaper's) deletes once no worker holds it and it has been unused
+// for the grace, and keeps while a worker holds it.
+func TestAbandonedPoolRoleHasADeleter(t *testing.T) {
+	cfg := poolWorkerRoleConfig("123456789012", "us-east-1", "spawn-pool-specs", "nf-run-1", nil, nil, nil)
+	tags := map[string]string{instancerole.ManagedTagKey: instancerole.ManagedTagValue}
+	for k, v := range cfg.Tags {
+		tags[k] = v
+	}
+	now := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * instancerole.Grace)
+	f := instancerole.Facts{
+		Name: cfg.RoleName, RoleTags: tags,
+		ProfileExists: true, ProfileTags: tags, ProfileCreated: old,
+		Created: old, LastUsed: old,
+	}
+	if ok, why := instancerole.Decide(f, now); !ok {
+		t.Errorf("an undrained pool's role %s is kept forever: %s", cfg.RoleName, why)
+	}
+	f.InUse = true
+	if ok, _ := instancerole.Decide(f, now); ok {
+		t.Errorf("the role of a pool with a live worker would be deleted")
+	}
+}
+
+// TestDrainAlsoRemovesThePrePoolRenameRole: a pool created before #1319 has its
+// role under spawn-pool-worker-<hash>; draining it with this version removes
+// that one too, and a failure to (a principal never granted the old name) is
+// a note, not a failed removal of the current role.
+func TestDrainAlsoRemovesThePrePoolRenameRole(t *testing.T) {
+	api := &fakePoolIdentity{}
+	msg := removePoolWorkerIdentity(context.Background(), api, "us-east-1", "run-a", 0, noSleep)
+	for _, want := range []string{poolWorkerRoleName("run-a"), instancerole.LegacyPoolWorkerRoleName("run-a")} {
+		if !slices.Contains(api.deleted, want) {
+			t.Errorf("drain did not delete %s (deleted %v)", want, api.deleted)
+		}
+	}
+	if strings.Contains(msg, "⚠️") {
+		t.Errorf("clean drain warned: %q", msg)
 	}
 }

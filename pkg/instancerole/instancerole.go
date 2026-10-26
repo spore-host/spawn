@@ -26,9 +26,18 @@
 //
 //   - spored-instance-role / spored-instance-profile, the shared default
 //     identity every IAM-flag-free launch uses. Not per-task, never deleted.
-//   - spawn-pool-worker-<hash> roles, which `spawn pool drain` already removes
-//     (cmd/pool.go removePoolWorkerIdentity).
 //   - a role a user named with --iam-role. It does not carry the prefix.
+//
+// Pool workers (#1319). `spawn pool create` makes one role per pool, named
+// spawn-instance-pool-<hash of the run id> (PoolWorkerRoleName), and `spawn
+// pool drain` deletes it. A pool nobody drains used to keep its role forever,
+// so pool roles now live inside NamePrefix and fall under the same rule: once
+// no instance holds the profile and it has been unused for Grace, the pool has
+// no workers left and the role goes. Decide additionally requires a pool role's
+// spawn:pool-run-id tag to hash to its name. Roles made before #1319 are named
+// spawn-pool-worker-<hash> (LegacyPoolWorkerPrefix); they are outside the
+// reaper's IAM grants, so only `spawn cleanup --instance-roles` sweeps them
+// (Options.LegacyPoolWorkers), under the same rule plus that exact name check.
 //
 // Untagged spawn-instance-* roles are kept. spawn has tagged these roles and
 // profiles spawn:managed=true since the commit that introduced the
@@ -39,6 +48,8 @@ package instancerole
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -57,6 +68,24 @@ const (
 	// (pkg/aws.PredictedInstanceRoleName). The IAM grants for the deletes are
 	// scoped to exactly this prefix.
 	NamePrefix = "spawn-instance-"
+
+	// PoolWorkerPrefix names a pool's worker role and profile (#1319). It is
+	// inside NamePrefix, so the reaper's existing spawn-instance-* grants and
+	// this package's rule cover it without widening either.
+	PoolWorkerPrefix = NamePrefix + "pool-"
+
+	// LegacyPoolWorkerPrefix is the name pool roles had before #1319. Only
+	// swept when Options.LegacyPoolWorkers is set, and only names of exactly
+	// this prefix plus poolHashLen lowercase hex digits.
+	LegacyPoolWorkerPrefix = "spawn-pool-worker-"
+
+	// PoolRunIDTagKey is the tag `spawn pool create` writes on a pool's role,
+	// its profile and its workers: the pool's run id.
+	PoolRunIDTagKey = "spawn:pool-run-id"
+
+	// poolHashLen is how many hex digits of sha256(run id) a pool role's name
+	// carries. A role name is capped at 64 characters and a run id is not.
+	poolHashLen = 16
 
 	// ManagedTagKey/ManagedTagValue mark a role or profile as spawn's. Literal,
 	// not tagprefix-derived: pkg/aws.buildIAMTags writes this literal key, and
@@ -94,7 +123,61 @@ const (
 	KeepNoCreateDate    = "role creation time unknown"
 	KeepYoung           = "role younger than the 24h grace"
 	KeepRecentlyUsed    = "role used within the 24h grace"
+	KeepPoolUnmatched   = "pool role's spawn:pool-run-id tag does not match its name"
 )
+
+// PoolWorkerRoleName is the role (and instance profile, same name) for one
+// pool's workers: PoolWorkerPrefix + the first 16 hex digits of sha256(runID).
+// One per pool, so each pool's inline policy can be scoped to its own queue
+// (#1147). Defined here, not in cmd, so the name the CLI creates and the name
+// this package deletes cannot drift apart.
+func PoolWorkerRoleName(runID string) string {
+	return PoolWorkerPrefix + poolHash(runID)
+}
+
+// LegacyPoolWorkerRoleName is the name PoolWorkerRoleName returned before
+// #1319, for the pools created then.
+func LegacyPoolWorkerRoleName(runID string) string {
+	return LegacyPoolWorkerPrefix + poolHash(runID)
+}
+
+func poolHash(runID string) string {
+	sum := sha256.Sum256([]byte(runID))
+	return hex.EncodeToString(sum[:])[:poolHashLen]
+}
+
+// IsLegacyPoolWorker reports whether name has exactly the shape of a pre-#1319
+// pool role: LegacyPoolWorkerPrefix followed by 16 lowercase hex digits and
+// nothing else.
+func IsLegacyPoolWorker(name string) bool {
+	h, ok := strings.CutPrefix(name, LegacyPoolWorkerPrefix)
+	if !ok || len(h) != poolHashLen {
+		return false
+	}
+	for _, c := range h {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// Options widen a sweep beyond the per-task roles. The zero value is what the
+// reaper uses.
+type Options struct {
+	// LegacyPoolWorkers also sweeps pre-#1319 spawn-pool-worker-<hash> roles.
+	// The reaper's IAM grants do not reach those names, so only the CLI,
+	// running as a principal that created them, sets it.
+	LegacyPoolWorkers bool
+}
+
+// poolRoleMatches reports whether a pool role's run-id tag hashes to its name
+// (for either naming), so a hand-made role that happens to share a prefix is
+// never taken for a pool's.
+func poolRoleMatches(name string, tags map[string]string) bool {
+	id := tags[PoolRunIDTagKey]
+	return id != "" && (name == PoolWorkerRoleName(id) || name == LegacyPoolWorkerRoleName(id))
+}
 
 // liveStates are the instance states in which an instance may still need its
 // profile: anything not yet terminated.
@@ -134,13 +217,25 @@ type Facts struct {
 }
 
 // Decide is THE predicate. It returns true only when every condition holds,
-// and otherwise the first reason to keep the role.
+// and otherwise the first reason to keep the role. It never deletes a
+// pre-#1319 pool role; DecideWith does, when opts allow it.
 func Decide(f Facts, now time.Time) (bool, string) {
+	return DecideWith(f, now, Options{})
+}
+
+// DecideWith is Decide with opts. The only difference opts make is whether a
+// LegacyPoolWorkerPrefix name is considered at all; every other condition is
+// the same for every role.
+func DecideWith(f Facts, now time.Time, opts Options) (bool, string) {
+	legacy := opts.LegacyPoolWorkers && IsLegacyPoolWorker(f.Name)
+	pool := legacy || strings.HasPrefix(f.Name, PoolWorkerPrefix)
 	switch {
 	case f.Name == SharedRoleName || f.Name == SharedProfileName:
 		return false, KeepShared
-	case !IsCandidate(f.Name):
+	case !legacy && !IsCandidate(f.Name):
 		return false, KeepNotPerTask
+	case pool && !poolRoleMatches(f.Name, f.RoleTags):
+		return false, KeepPoolUnmatched
 	case f.RoleTags[ManagedTagKey] != ManagedTagValue:
 		return false, KeepUntagged
 	case f.ProfileExists && f.ProfileTags[ManagedTagKey] != ManagedTagValue:
@@ -207,7 +302,9 @@ func ProfilesInUse(ctx context.Context, regions map[string]EC2Describer) (map[st
 					if inst.IamInstanceProfile == nil {
 						continue
 					}
-					if n := ProfileNameFromARN(aws.ToString(inst.IamInstanceProfile.Arn)); IsCandidate(n) {
+					// Legacy pool profiles are recorded too: a sweep with
+					// Options.LegacyPoolWorkers must see them in use.
+					if n := ProfileNameFromARN(aws.ToString(inst.IamInstanceProfile.Arn)); IsCandidate(n) || IsLegacyPoolWorker(n) {
 						inUse[n] = true
 					}
 				}
@@ -302,7 +399,7 @@ type Decision struct {
 	Err     error
 }
 
-// Result is a sweep's outcome. Scanned counts spawn-instance-* roles examined.
+// Result is a sweep's outcome. Scanned counts the roles examined.
 type Result struct {
 	Decisions []Decision
 }
@@ -330,6 +427,12 @@ func (r Result) Count() (scanned, deleted, wouldDelete, skipped int) {
 // Decide allows. With reap false nothing is changed: the result says what
 // reap would delete.
 func Sweep(ctx context.Context, api API, inUse map[string]bool, now time.Time, reap bool) (Result, error) {
+	return SweepWith(ctx, api, inUse, now, reap, Options{})
+}
+
+// SweepWith is Sweep with opts: with Options.LegacyPoolWorkers it also lists
+// and decides (DecideWith) the pre-#1319 spawn-pool-worker-<hash> roles.
+func SweepWith(ctx context.Context, api API, inUse map[string]bool, now time.Time, reap bool, opts Options) (Result, error) {
 	var res Result
 	p := iam.NewListRolesPaginator(api, &iam.ListRolesInput{})
 	var names []string
@@ -339,7 +442,7 @@ func Sweep(ctx context.Context, api API, inUse map[string]bool, now time.Time, r
 			return res, fmt.Errorf("list roles: %w", err)
 		}
 		for _, role := range page.Roles {
-			if n := aws.ToString(role.RoleName); IsCandidate(n) {
+			if n := aws.ToString(role.RoleName); IsCandidate(n) || (opts.LegacyPoolWorkers && IsLegacyPoolWorker(n)) {
 				names = append(names, n)
 			}
 		}
@@ -354,7 +457,7 @@ func Sweep(ctx context.Context, api API, inUse map[string]bool, now time.Time, r
 			continue
 		}
 		d.Created, d.LastUsed = f.Created, f.LastUsed
-		d.Delete, d.Reason = Decide(f, now)
+		d.Delete, d.Reason = DecideWith(f, now, opts)
 		if d.Delete && reap {
 			if err := Delete(ctx, api, name, f.ProfileExists); err != nil {
 				d.Err = err

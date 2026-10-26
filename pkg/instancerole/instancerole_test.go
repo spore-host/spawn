@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -406,5 +407,149 @@ func TestEnabledRegions(t *testing.T) {
 	}
 	if _, err := EnabledRegions(context.Background(), &fakeRegionLister{}, "us-east-1"); err == nil {
 		t.Error("an empty region list must be an error even with extra regions")
+	}
+}
+
+// poolRole is a pool worker role every condition allows deleting, named name
+// and tagged with runID.
+func poolRole(runID string) *fakeRole {
+	r := oldRole()
+	r.tags[PoolRunIDTagKey] = runID
+	r.profileTags[PoolRunIDTagKey] = runID
+	return r
+}
+
+// A pool's role (#1319) is a per-task role: once no instance holds it and it
+// has been unused for the grace, the default rule (the reaper's) deletes it,
+// whether or not anyone ran `spawn pool drain`. Its run-id tag must hash to
+// its name, so a hand-made role sharing the prefix is kept.
+func TestDecidePoolWorkerRoles(t *testing.T) {
+	name := PoolWorkerRoleName("nf-run-7")
+	if !strings.HasPrefix(name, NamePrefix) || !IsCandidate(name) {
+		t.Fatalf("pool role %q is outside %s*, which is all the reaper may touch", name, NamePrefix)
+	}
+	f := deletable()
+	f.Name = name
+	f.RoleTags[PoolRunIDTagKey] = "nf-run-7"
+	if ok, why := Decide(f, now); !ok {
+		t.Fatalf("abandoned pool role kept: %s", why)
+	}
+	for _, c := range []struct {
+		name   string
+		mutate func(*Facts)
+		want   string
+	}{
+		{"its workers are live", func(f *Facts) { f.InUse = true }, KeepInUse},
+		{"used within the grace", func(f *Facts) { f.LastUsed = now.Add(-time.Hour) }, KeepRecentlyUsed},
+		{"no run-id tag", func(f *Facts) { delete(f.RoleTags, PoolRunIDTagKey) }, KeepPoolUnmatched},
+		{"another pool's run id", func(f *Facts) { f.RoleTags[PoolRunIDTagKey] = "nf-run-8" }, KeepPoolUnmatched},
+		{"not tagged spawn:managed", func(f *Facts) { delete(f.RoleTags, ManagedTagKey) }, KeepUntagged},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := f
+			g.RoleTags = map[string]string{}
+			for k, v := range f.RoleTags {
+				g.RoleTags[k] = v
+			}
+			c.mutate(&g)
+			if ok, why := Decide(g, now); ok || why != c.want {
+				t.Errorf("Decide = %v, %q; want kept for %q", ok, why, c.want)
+			}
+		})
+	}
+}
+
+// Pre-#1319 spawn-pool-worker-<hash> roles are outside the reaper's grants:
+// the default rule never considers them, and the CLI's opt-in considers only
+// the exact old shape whose run-id tag hashes to the name.
+func TestDecideLegacyPoolWorkerRoles(t *testing.T) {
+	name := LegacyPoolWorkerRoleName("nf-run-7")
+	if IsCandidate(name) {
+		t.Fatalf("legacy name %q must not be a default candidate (the reaper cannot read it)", name)
+	}
+	f := deletable()
+	f.Name = name
+	f.RoleTags[PoolRunIDTagKey] = "nf-run-7"
+	if ok, why := Decide(f, now); ok || why != KeepNotPerTask {
+		t.Errorf("default Decide on a legacy pool role = %v, %q; want kept, %q", ok, why, KeepNotPerTask)
+	}
+	legacy := Options{LegacyPoolWorkers: true}
+	if ok, why := DecideWith(f, now, legacy); !ok {
+		t.Errorf("legacy pool role kept under LegacyPoolWorkers: %s", why)
+	}
+	g := f
+	g.RoleTags = map[string]string{ManagedTagKey: ManagedTagValue, PoolRunIDTagKey: "other"}
+	if ok, why := DecideWith(g, now, legacy); ok || why != KeepPoolUnmatched {
+		t.Errorf("legacy role with a mismatched run id = %v, %q; want kept, %q", ok, why, KeepPoolUnmatched)
+	}
+	g = f
+	g.InUse = true
+	if ok, _ := DecideWith(g, now, legacy); ok {
+		t.Error("deleted a legacy pool role an instance still holds")
+	}
+	// Exact shape only: nothing else with the old prefix is ever considered.
+	for _, n := range []string{
+		LegacyPoolWorkerPrefix + "custom",
+		name + "0",
+		name[:len(name)-1],
+		strings.ToUpper(name[:len(LegacyPoolWorkerPrefix)]) + name[len(LegacyPoolWorkerPrefix):],
+		LegacyPoolWorkerPrefix + "0123456789ABCDEF",
+		"x" + name,
+	} {
+		if IsLegacyPoolWorker(n) {
+			t.Errorf("IsLegacyPoolWorker(%q) = true", n)
+		}
+		h := f
+		h.Name = n
+		if ok, _ := DecideWith(h, now, legacy); ok {
+			t.Errorf("DecideWith deleted %q", n)
+		}
+	}
+}
+
+// The sweep a reaper runs (Sweep) deletes an abandoned pool's role and never
+// even reads a legacy one; the CLI's SweepWith(LegacyPoolWorkers) deletes both
+// and still keeps a legacy role that a live instance holds.
+func TestSweepPoolWorkerRoles(t *testing.T) {
+	roles := func() map[string]*fakeRole {
+		return map[string]*fakeRole{
+			PoolWorkerRoleName("a"):       poolRole("a"),
+			LegacyPoolWorkerRoleName("b"): poolRole("b"),
+			LegacyPoolWorkerRoleName("c"): poolRole("c"),
+		}
+	}
+	east := &fakeEC2{arns: []string{"arn:aws:iam::111122223333:instance-profile/" + LegacyPoolWorkerRoleName("c")}}
+	inUse, err := ProfilesInUse(context.Background(), map[string]EC2Describer{"us-east-1": east})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	def := &fakeIAM{roles: roles()}
+	if _, err := Sweep(context.Background(), def, inUse, now, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range def.calls {
+		if strings.Contains(c, LegacyPoolWorkerPrefix) {
+			t.Errorf("the default sweep touched a legacy pool role (outside the reaper's grants): %s", c)
+		}
+	}
+	if !slices.Contains(def.mutations(), "DeleteRole "+PoolWorkerRoleName("a")) {
+		t.Errorf("the default sweep did not delete the abandoned pool's role: %q", def.mutations())
+	}
+
+	cli := &fakeIAM{roles: roles()}
+	if _, err := SweepWith(context.Background(), cli, inUse, now, true, Options{LegacyPoolWorkers: true}); err != nil {
+		t.Fatal(err)
+	}
+	m := cli.mutations()
+	for _, want := range []string{"DeleteRole " + PoolWorkerRoleName("a"), "DeleteRole " + LegacyPoolWorkerRoleName("b")} {
+		if !slices.Contains(m, want) {
+			t.Errorf("legacy-aware sweep missed %q: %q", want, m)
+		}
+	}
+	for _, c := range m {
+		if strings.Contains(c, LegacyPoolWorkerRoleName("c")) {
+			t.Errorf("deleted a legacy pool role a live instance holds: %s", c)
+		}
 	}
 }

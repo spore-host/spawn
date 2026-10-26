@@ -64,7 +64,10 @@ tag. The TTL reaper can do the same on its own schedule (REAPER_EMPTY_BUCKETS).
 
 --instance-roles deletes only the per-task spawn-instance-<hash> IAM roles and
 instance profiles that 'spawn task run' and --iam-policy launches create, one
-per distinct set of permissions. A role goes only when it and its profile are
+per distinct set of permissions, and the per-pool spawn-instance-pool-<hash>
+ones 'spawn pool create' makes (and spawn-pool-worker-<hash>, their name
+before v0.147.0) when the pool was never drained; a pool role also needs its
+spawn:pool-run-id tag to match its name. A role goes only when it and its profile are
 tagged spawn:managed=true, no instance in any enabled region (pending through
 stopped) has the profile attached, the role and profile are at least 24 hours
 old, and the role is unused for 24 hours. The shared spored-instance-role is never touched. IAM is
@@ -88,7 +91,7 @@ func init() {
 	cleanupCmd.Flags().BoolVarP(&cleanupYes, "yes", "y", false, "Skip the confirmation prompt")
 	cleanupCmd.Flags().BoolVar(&cleanupAll, "all", false, "Include resources created by other principals (default: only yours)")
 	cleanupCmd.Flags().BoolVar(&cleanupElasticIPs, "elastic-ips", false, "Release only orphaned spawn launch Elastic IPs (unassociated, instance gone); nothing else is touched")
-	cleanupCmd.Flags().BoolVar(&cleanupInstRoles, "instance-roles", false, "Delete only unused per-task spawn-instance-* IAM roles and instance profiles (no instance uses them, 24h old and unused); nothing else is touched")
+	cleanupCmd.Flags().BoolVar(&cleanupInstRoles, "instance-roles", false, "Delete only unused per-task and per-pool spawn-instance-* (and pre-v0.147 spawn-pool-worker-*) IAM roles and instance profiles (no instance uses them, 24h old and unused); nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupBuckets, "buckets", false, "Delete only spawn's own staging and results buckets that have been empty for "+bucketGraceDays()+"; no object is ever deleted and nothing else is touched")
 }
 
@@ -571,16 +574,19 @@ func runCleanupInstanceRoles(ctx context.Context, cmd *cobra.Command, iamc insta
 	if err != nil {
 		return fmt.Errorf("could not list instances, so no role can be shown to be unused: %w", err)
 	}
-	preview, err := instancerole.Sweep(ctx, iamc, inUse, now, false)
+	// The CLI also sweeps pre-v0.147 spawn-pool-worker-<hash> pool roles
+	// (#1319), which the reaper's grants do not reach.
+	opts := instancerole.Options{LegacyPoolWorkers: true}
+	preview, err := instancerole.SweepWith(ctx, iamc, inUse, now, false, opts)
 	if err != nil {
 		return err
 	}
 	scanned, _, would, _ := preview.Count()
 	if scanned == 0 {
-		fmt.Fprintf(out, "No %s* IAM roles in this account.\n", instancerole.NamePrefix)
+		fmt.Fprintf(out, "No %s* or %s* IAM roles in this account.\n", instancerole.NamePrefix, instancerole.LegacyPoolWorkerPrefix)
 		return nil
 	}
-	fmt.Fprintf(out, "%d %s* role(s), checked against instances in %d region(s):\n", scanned, instancerole.NamePrefix, len(ec2s))
+	fmt.Fprintf(out, "%d %s* or %s* role(s), checked against instances in %d region(s):\n", scanned, instancerole.NamePrefix, instancerole.LegacyPoolWorkerPrefix, len(ec2s))
 	tw := newTableWriter(out)
 	fmt.Fprintf(tw, "  ROLE\tACTION\tCREATED\tLAST USED\tWHY KEPT\n")
 	for _, d := range preview.Decisions {
@@ -607,7 +613,7 @@ func runCleanupInstanceRoles(ctx context.Context, cmd *cobra.Command, iamc insta
 		return newAborted("aborted: no IAM role was deleted (re-run with --yes)")
 	}
 
-	res, err := instancerole.Sweep(ctx, iamc, inUse, now, true)
+	res, err := instancerole.SweepWith(ctx, iamc, inUse, now, true, opts)
 	if err != nil {
 		return err
 	}
