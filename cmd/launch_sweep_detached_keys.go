@@ -10,7 +10,7 @@ import (
 
 // detachedParamKeys are the param keys the spawn-sweep-orchestrator Lambda reads
 // when it composes RunInstances. Keep in sync with
-// lambda/sweep-orchestrator/main.go's getStringParam/getBoolParam calls —
+// lambda/sweep-orchestrator's getStringParam/getBoolParam calls —
 // TestDetachedSweepSeedsEveryKeyTheLambdaReads enforces that mechanically.
 //
 // The list exists because the two sides disagreed silently (#749). The Lambda
@@ -28,6 +28,9 @@ var detachedParamKeys = []string{
 	"key_name",
 	"spot",
 	"ttl",
+	// The member's spored bootstrap (#1323), rendered by seedDetachedBootstrap
+	// rather than seedDetachedLaunchKeys, since it needs every other key first.
+	detachedUserDataKey,
 }
 
 // NOTE: `region` is deliberately NOT in the list above, and the gate caught me
@@ -59,7 +62,7 @@ func seedDetachedLaunchKeys(ctx context.Context, client *aws.Client, paramFormat
 
 	// Sweep-wide keys the Lambda reads. Each is only set when the CLI actually
 	// has a value, so an unset flag leaves the Lambda's own default in place
-	// (iam_role falls back to "spawnd-role" there).
+	// (ensureDetachedInstanceProfile fills iam_role in afterwards).
 	setDefault := func(key string, val interface{}) {
 		if val == nil || val == "" || val == false {
 			return

@@ -696,22 +696,8 @@ func readyGatesForLaunch(mpi bool) []string {
 // the paths --command must see mounted before it starts (#668); pass nil when
 // there is no storage script, since there is then nothing to wait for.
 func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScript string, readyMountPoints []string) (string, error) {
-	// The Windows bootstrap runs no workload: buildWindowsUserData takes only the
-	// key. The launch guards refuse --command and --user-data for Windows
-	// (#1022); this is the backstop at the point where they would be dropped, so
-	// a caller that skips the guards gets an error instead of an instance that
-	// never runs its workload and never fires --on-complete.
-	if config.TargetOS == "windows" {
-		if config.JobArrayCommand != "" {
-			return "", fmt.Errorf("--command is not supported on Windows: the Windows bootstrap would not run it (#1022)")
-		}
-		custom, err := resolveCustomUserData()
-		if err != nil {
-			return "", err
-		}
-		if custom != "" {
-			return "", fmt.Errorf("--user-data is not supported on Windows: the Windows bootstrap would drop it (#1022)")
-		}
+	if err := userDataOSGuard(config); err != nil {
+		return "", err
 	}
 
 	// Inject the PUBLIC key of the same keypair we registered with EC2
@@ -720,7 +706,35 @@ func buildUserData(plat *platform.Platform, config *aws.LaunchConfig, storageScr
 	if err != nil {
 		return "", err
 	}
+	return buildUserDataForKey(plat, config, publicKey, storageScript, readyMountPoints)
+}
 
+// userDataOSGuard refuses workload inputs the target OS's bootstrap would drop.
+func userDataOSGuard(config *aws.LaunchConfig) error {
+	// The Windows bootstrap runs no workload: buildWindowsUserData takes only the
+	// key. The launch guards refuse --command and --user-data for Windows
+	// (#1022); this is the backstop at the point where they would be dropped, so
+	// a caller that skips the guards gets an error instead of an instance that
+	// never runs its workload and never fires --on-complete.
+	if config.TargetOS == "windows" {
+		if config.JobArrayCommand != "" {
+			return fmt.Errorf("--command is not supported on Windows: the Windows bootstrap would not run it (#1022)")
+		}
+		custom, err := resolveCustomUserData()
+		if err != nil {
+			return err
+		}
+		if custom != "" {
+			return fmt.Errorf("--user-data is not supported on Windows: the Windows bootstrap would drop it (#1022)")
+		}
+	}
+	return nil
+}
+
+// buildUserDataForKey is buildUserData with the instance's trusted public key
+// already resolved; an empty key is a keyless (SSM-only) instance. The caller
+// has run userDataOSGuard.
+func buildUserDataForKey(plat *platform.Platform, config *aws.LaunchConfig, publicKey []byte, storageScript string, readyMountPoints []string) (string, error) {
 	// Windows uses a completely different bootstrap: EC2Launch runs a
 	// <powershell> block, not bash. It installs SSH and spored and nothing else;
 	// the workload inputs were refused above (#1022).

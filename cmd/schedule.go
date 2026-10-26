@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/scheduler"
 	"github.com/spore-host/spawn/pkg/staging"
 	"gopkg.in/yaml.v3"
@@ -235,7 +236,12 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	// Seed the launch keys the orchestrator cannot derive — above all a per-row
 	// AMI (#749) — exactly as the detached launch path does before its upload.
 	// What is uploaded is the seeded file, as JSON (which is also YAML).
-	seeded, err := seedScheduleParams(ctx, computeClient, params, scheduleRegion)
+	plat, err := platform.Detect()
+	if err != nil {
+		return fmt.Errorf("failed to detect platform: %w", err)
+	}
+	seeded, err := seedScheduleParams(ctx, computeClient, params, scheduleRegion,
+		computeClient, newDetachedBootstrap(ctx, computeClient, plat))
 	if err != nil {
 		return fmt.Errorf("scheduled sweep: %w", err)
 	}
@@ -577,13 +583,39 @@ type parsedParams struct {
 // orchestrator needs seeded, encoded as the orchestrator reads them. The
 // scheduler-handler stages these bytes, converted only from YAML to JSON, so
 // whatever is not seeded here is not seeded at all.
-func seedScheduleParams(ctx context.Context, client *aws.Client, p *parsedParams, region string) ([]byte, error) {
+//
+// That includes each member's spored bootstrap and instance profile (#1323): a
+// schedule's members launch through the same orchestrator as any detached
+// sweep, which refuses a member with no bootstrap.
+func seedScheduleParams(ctx context.Context, client *aws.Client, p *parsedParams, region string, profiles sporedProfileEnsurer, boot detachedBootstrap) ([]byte, error) {
 	pf := &ParamFileFormat{Defaults: p.defaults, Params: p.params}
 	if err := seedDetachedLaunchKeys(ctx, client, pf, &aws.LaunchConfig{}, region); err != nil {
 		return nil, err
 	}
+	if err := ensureDetachedInstanceProfile(ctx, profiles, pf); err != nil {
+		return nil, err
+	}
+	// The schedule's own settings sit in defaults: beside the launch keys
+	// (getSweepName, getMaxConcurrent, getLaunchDelay); they are not member
+	// settings, so the member configs are built without them.
+	view := &ParamFileFormat{Defaults: map[string]interface{}{}, Params: pf.Params}
+	for k, v := range pf.Defaults {
+		if !scheduleOnlyKeys[k] {
+			view.Defaults[k] = v
+		}
+	}
+	if err := seedDetachedBootstrap(view, aws.LaunchConfig{}, scheduledSweepIDPlaceholder, p.getSweepName(), boot); err != nil {
+		return nil, err
+	}
+	delete(pf.Defaults, detachedUserDataKey)
+	if ud, ok := view.Defaults[detachedUserDataKey]; ok {
+		pf.Defaults[detachedUserDataKey] = ud
+	}
 	return json.Marshal(pf)
 }
+
+// scheduleOnlyKeys are the defaults: keys a schedule reads for itself.
+var scheduleOnlyKeys = map[string]bool{"sweep_name": true, "max_concurrent": true, "launch_delay": true}
 
 func parseParamsFile(filename string) (*parsedParams, error) {
 	data, err := os.ReadFile(filename)

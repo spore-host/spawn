@@ -299,7 +299,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 
 	// Check for detached mode (Lambda orchestration)
 	if detach && maxConcurrent > 0 {
-		return launchSweepDetached(ctx, paramFormat, baseConfig, sweepID, name, maxConcurrent, launchDelay)
+		return launchSweepDetached(ctx, paramFormat, baseConfig, plat, sweepID, name, maxConcurrent, launchDelay)
 	}
 
 	// Build launch configs for each parameter set
@@ -1206,7 +1206,7 @@ func reportSweepBudget(totalCost float64, partial bool) {
 }
 
 // launchSweepDetached launches a parameter sweep in detached mode (Lambda orchestration)
-func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, baseConfig *aws.LaunchConfig, sweepID, sweepName string, maxConcurrent int, launchDelay string) error {
+func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, baseConfig *aws.LaunchConfig, plat *platform.Platform, sweepID, sweepName string, maxConcurrent int, launchDelay string) error {
 	// Determine region (auto-detect if not specified)
 	sweepRegion := baseConfig.Region
 	if sweepRegion == "" {
@@ -1256,6 +1256,11 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	if err := seedDetachedLaunchKeys(ctx, regionClient, paramFormat, baseConfig, sweepRegion); err != nil {
 		return fmt.Errorf("detached sweep: %w", err)
 	}
+	// Each member's spored bootstrap, built as the foreground path builds it
+	// (#1323). After the launch keys, which settle each member's AMI and key.
+	if err := seedDetachedBootstrap(paramFormat, *baseConfig, sweepID, sweepName, newDetachedBootstrap(ctx, regionClient, plat)); err != nil {
+		return fmt.Errorf("detached sweep: %w", err)
+	}
 
 	// Convert ParamFileFormat to sweep.ParamFileFormat
 	sweepParamFormat := &sweep.ParamFileFormat{
@@ -1295,6 +1300,12 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 			return nil
 		}
 		fmt.Fprintf(os.Stderr, "\n")
+	}
+
+	// spored's instance profile, for members with none (#1323). After the
+	// prompt, so a declined launch creates nothing.
+	if err := ensureDetachedInstanceProfile(ctx, regionClient, paramFormat); err != nil {
+		return fmt.Errorf("detached sweep: %w", err)
 	}
 
 	// Upload parameters to S3

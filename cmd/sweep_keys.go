@@ -108,6 +108,10 @@ var reservedRowKeys = map[string]string{
 	"terminate_on_complete": "use on_complete: terminate",
 	"no_timeout":            "--no-timeout is a command-line flag; there is no param-file equivalent (omit ttl:/idle_timeout: instead — but a sweep row with no bound is how zombie instances happen)",
 
+	// spawn's own: carries a detached sweep's spored bootstrap to the
+	// orchestrator (#1323). A value from the file would boot in place of spored.
+	detachedUserDataKey: "it is written by spawn itself (a detached sweep's spored bootstrap, #1323); use --user-data to add your own script",
+
 	// Sweep-level settings that are CLI flags, not per-row values.
 	"max_concurrent": "--max-concurrent is a command-line flag, not a param-file key (spawn schedule reads max_concurrent from defaults:, but the launch path does not)",
 	"launch_delay":   "--launch-delay is a command-line flag, not a param-file key",

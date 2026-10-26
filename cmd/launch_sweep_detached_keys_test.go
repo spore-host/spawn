@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -23,14 +24,38 @@ import (
 // Greps the Lambda source rather than trusting a hand-maintained list, because a
 // hand-maintained list is exactly what failed.
 func TestDetachedSweepSeedsEveryKeyTheLambdaReads(t *testing.T) {
-	src, err := os.ReadFile("../lambda/sweep-orchestrator/main.go")
-	if err != nil {
-		t.Skipf("cannot read the orchestrator source: %v", err)
+	// Every non-test source: the RunInstances input is built in spored.go.
+	files, err := filepath.Glob("../lambda/sweep-orchestrator/*.go")
+	if err != nil || len(files) == 0 {
+		t.Skipf("cannot find the orchestrator sources: %v", err)
 	}
-	re := regexp.MustCompile(`get(?:String|Bool|Int)Param\(config, "([a-z_]+)"`)
+	var b strings.Builder
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		b.Write(data)
+	}
+	src := b.String()
+	// A key is read either as a literal or through a named constant
+	// (userDataParam); a constant is resolved to its value, and one that cannot
+	// be resolved fails rather than being skipped.
+	re := regexp.MustCompile(`get(?:String|Bool|Int)Param\(config, (?:"([a-z_]+)"|([A-Za-z_][A-Za-z0-9_]*))`)
 	found := map[string]bool{}
-	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
-		found[m[1]] = true
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
+		if m[1] != "" {
+			found[m[1]] = true
+			continue
+		}
+		c := regexp.MustCompile(`(?m)^\s*(?:const\s+)?` + m[2] + `\s*=\s*"([a-z_]+)"`).FindStringSubmatch(src)
+		if c == nil {
+			t.Fatalf("the orchestrator reads a param through %s, whose value this gate cannot resolve", m[2])
+		}
+		found[c[1]] = true
 	}
 	if len(found) == 0 {
 		t.Fatal("parsed zero param keys from the orchestrator — the regex no longer matches, " +

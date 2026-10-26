@@ -52,7 +52,7 @@ func TestSeedScheduleParams_UploadsSeededJSON(t *testing.T) {
 			t.Fatalf("seeding tried to resolve an AMI the row already supplies: %v", r)
 		}
 	}()
-	data, err := seedScheduleParams(context.Background(), nil, p, "eu-west-1")
+	data, err := seedScheduleParams(context.Background(), nil, p, "eu-west-1", &fakeProfileEnsurer{}, testDetachedBootstrap(t))
 	if err != nil {
 		t.Fatalf("seedScheduleParams: %v", err)
 	}

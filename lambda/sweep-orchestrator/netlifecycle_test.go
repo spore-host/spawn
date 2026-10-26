@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -108,13 +109,29 @@ func TestBothLaunchPathsStampTheTags(t *testing.T) {
 	}
 }
 
+// readMainForTest returns every non-test Go source of the orchestrator,
+// concatenated: the launch input is built in spored.go, the calls are in main.go.
 func readMainForTest(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile("main.go")
+	files, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("read main.go: %v", err)
+		t.Fatal(err)
 	}
-	return string(b)
+	var b strings.Builder
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		b.Write(src)
+	}
+	if b.Len() == 0 {
+		t.Fatal("found no orchestrator sources")
+	}
+	return b.String()
 }
 
 // TestCompletionStatusReflectsFailures is #749's worst half: this branch used to
