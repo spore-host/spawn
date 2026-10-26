@@ -49,6 +49,10 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if err := validateLaunchDurationFlags(); err != nil {
 		return err
 	}
+	// And a spored setting spored would ignore (#1308).
+	if _, _, err := sporedSettingsFromFlags(); err != nil {
+		return err
+	}
 
 	// Get the account ID for audit logging. This is best-effort and resilient:
 	// it uses the AWS client's GetAccountID, which falls back to IMDS if STS is

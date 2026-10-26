@@ -205,3 +205,26 @@ func paramKeysOf(tags []tagPair) []string {
 	}
 	return out
 }
+
+// The monitoring setup docs/self-hosted-monitoring.md documents (metrics on,
+// bound beyond localhost) plus an idle CPU threshold still fits on a maximal
+// launch (#1308). Every spored setting at once does not: that is 54 tags, which
+// RunInstances refuses like any other launch over the limit.
+func TestMonitoringSettingsFitOnAMaximalLaunch(t *testing.T) {
+	cfg := maximalConfig()
+	cfg.IdleCPUPercent = 10
+	cfg.Observability = SporedObservability{MetricsEnabled: true, MetricsBind: "0.0.0.0"}
+	tags := builtTags(t, cfg)
+	if len(tags) > awsMaxTagsPerResource {
+		t.Errorf("maximal launch + --metrics --metrics-bind --idle-cpu-threshold = %d tags, over AWS's %d", len(tags), awsMaxTagsPerResource)
+	}
+	have := map[string]string{}
+	for _, tg := range tags {
+		have[tg.Key] = tg.Value
+	}
+	for k, v := range map[string]string{"spawn:metrics-enabled": "true", "spawn:metrics-bind": "0.0.0.0", "spawn:idle-cpu": "10"} {
+		if have[k] != v {
+			t.Errorf("%s = %q, want %q", k, have[k], v)
+		}
+	}
+}

@@ -63,6 +63,16 @@ var (
 	activePorts      string // comma-separated ports to monitor for active connections (e.g. "8787,8888")
 	activeProcesses  string // comma-separated process names to monitor (e.g. "rsession,jupyter")
 
+	// spored settings it reads from tags at boot (#1308)
+	idleCPUThreshold string // "" = spored's 5%; a string so an explicit 0 is seen and refused
+	metricsEnabled   bool
+	metricsPort      int
+	metricsBind      string
+	metricsPath      string
+	tracingEnabled   bool
+	tracingExporter  string
+	tracingSampling  string // "" = spored's 0.1; a string so an explicit 0 is kept
+
 	// Job array
 	count         int
 	jobArrayName  string
@@ -337,6 +347,16 @@ func init() {
 	launchCmd.Flags().StringVar(&notifyPlatform, "notify-platform", "", "Chat platform for lifecycle notifications: slack (default), teams, or discord")
 	launchCmd.Flags().StringVar(&activePorts, "active-ports", "", "TCP ports whose established connections are counted and reported (the spawn:logged-in-count tag). They do NOT prevent the idle stop: an abandoned browser tab holds a connection open forever. To keep a busy app alive, use --active-processes (e.g. '8787' for RStudio, '8787,8888' for RStudio+Jupyter)")
 	launchCmd.Flags().StringVar(&activeProcesses, "active-processes", "", "Process names to monitor, prevents the idle stop while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple)")
+	launchCmd.Flags().StringVar(&idleCPUThreshold, "idle-cpu-threshold", "", "CPU percentage below which spored counts the instance as idle (above 0, at most 100; default 5). Sets spawn:idle-cpu")
+	// spored's metrics and tracing (#1308), written as the tags spored reads
+	// when it starts, so they apply from the first boot. docs/self-hosted-monitoring.md.
+	launchCmd.Flags().BoolVar(&metricsEnabled, "metrics", false, "Start spored's Prometheus metrics server and tag the instance spawn:metrics-enabled=true, which deployment/prometheus's EC2 discovery matches. It listens on localhost unless --metrics-bind is set, and the security group must admit the scraper (see docs/self-hosted-monitoring.md)")
+	launchCmd.Flags().IntVar(&metricsPort, "metrics-port", 0, "With --metrics: the metrics server's port, 1024-65535 (default 9090)")
+	launchCmd.Flags().StringVar(&metricsBind, "metrics-bind", "", "With --metrics: the address to listen on, an IP address or localhost (default localhost; 0.0.0.0 for a scraper on another host)")
+	launchCmd.Flags().StringVar(&metricsPath, "metrics-path", "", "With --metrics: the HTTP path to serve metrics on (default /metrics)")
+	launchCmd.Flags().BoolVar(&tracingEnabled, "tracing", false, "Turn on spored's OpenTelemetry tracing. Spans go to spored's journal (the stdout exporter)")
+	launchCmd.Flags().StringVar(&tracingExporter, "tracing-exporter", "", "With --tracing: where spans go. Only stdout (the default) is available; xray is refused, because the instance role spawn creates does not grant xray:PutTraceSegments")
+	launchCmd.Flags().StringVar(&tracingSampling, "tracing-sampling", "", "With --tracing: the fraction of traces kept, 0 to 1 (default 0.1)")
 	// A custom DNS deployment (#891, scripts/deploy-custom-dns.sh). Both reach
 	// spored as the spawn:dns-domain / spawn:dns-endpoint tags. #872 deprecated
 	// them because, until then, nothing that registered DNS read either.

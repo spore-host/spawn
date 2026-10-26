@@ -211,6 +211,14 @@ type LaunchConfig struct {
 	CostLimit       float64
 	DNSName         string
 
+	// IdleCPUPercent is spored's idle CPU threshold, written as spawn:idle-cpu:
+	// the instance counts as idle while CPU use is below it. 0 keeps spored's
+	// 5% (#1308).
+	IdleCPUPercent float64
+	// Observability is spored's metrics and tracing configuration, written as
+	// spawn:metrics-* / spawn:tracing-* tags (#1308).
+	Observability SporedObservability
+
 	// DNSDomain and DNSEndpoint point spored at a custom DNS deployment (#891):
 	// the zone to register under and the updater's Function URL. Empty means
 	// spore.host's, and writes no tag. Validated by the caller (dns.ValidateDomain,

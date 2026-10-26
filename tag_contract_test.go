@@ -108,16 +108,9 @@ var externallyWrittenTags = map[string]string{
 	"spawn:deprecated": "set by the user via `spawn create-ami --tag spawn:deprecated=true`",
 	// Legacy: `spawn stop` wrote it before #928; start still explains it.
 	"spawn:ttl-remaining": "written by spawn stop before #928, read for instances an older spawn stopped",
-	// spored observability config: no spawn path can set these (#1308).
-	"spawn:idle-cpu":         "set out of band with aws ec2 create-tags (#1308)",
-	"spawn:metrics-enabled":  "set out of band with aws ec2 create-tags (#1308)",
-	"spawn:metrics-port":     "set out of band with aws ec2 create-tags (#1308)",
-	"spawn:metrics-bind":     "set out of band with aws ec2 create-tags (#1308)",
-	"spawn:metrics-path":     "set out of band with aws ec2 create-tags (#1308)",
-	"spawn:tracing-enabled":  "set out of band with aws ec2 create-tags (#1308)",
-	"spawn:tracing-exporter": "set out of band with aws ec2 create-tags (#1308)",
-	"spawn:tracing-sampling": "set out of band with aws ec2 create-tags (#1308)",
-	"spawn:tracing-endpoint": "set out of band with aws ec2 create-tags (#1308)",
+	// Read by spored and used by nothing: no exporter consults an endpoint, so
+	// #1308 added no launch flag for it.
+	"spawn:tracing-endpoint": "set out of band with aws ec2 create-tags; no tracing exporter reads it (#1335)",
 }
 
 // readOutsideThisRepo are keys buildTags writes that no reader in this repo

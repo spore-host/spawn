@@ -31,6 +31,7 @@ const SporedRoleName
 const SpotPriceTag
 const StagingLifecycleRuleID
 const StagingObjectExpiryDays
+const TracingExporterStdout
 field AMIHealthCheck.BaseAMIAge time.Duration
 field AMIHealthCheck.BaseAMIOutdated bool
 field AMIHealthCheck.CurrentBaseAMI string
@@ -232,6 +233,7 @@ field LaunchConfig.HibernateOnIdle bool
 field LaunchConfig.IMDSv2Enforced bool
 field LaunchConfig.IMDSv2HopLimit int
 field LaunchConfig.IamInstanceProfile string
+field LaunchConfig.IdleCPUPercent float64
 field LaunchConfig.IdleTimeout string
 field LaunchConfig.InstanceType string
 field LaunchConfig.JobArrayCommand string
@@ -245,6 +247,7 @@ field LaunchConfig.NestedVirtualization bool
 field LaunchConfig.NotifyCommand string
 field LaunchConfig.NotifyPlatform string
 field LaunchConfig.NotifyURL string
+field LaunchConfig.Observability SporedObservability
 field LaunchConfig.OnComplete string
 field LaunchConfig.Parameters map[string]string
 field LaunchConfig.PlacementGroup string
@@ -332,6 +335,13 @@ field SnapshotDetail.VolumeSize int32
 field SporedLiveness.HasInstanceProfile bool
 field SporedLiveness.Heartbeat string
 field SporedLiveness.State string
+field SporedObservability.MetricsBind string
+field SporedObservability.MetricsEnabled bool
+field SporedObservability.MetricsPath string
+field SporedObservability.MetricsPort int
+field SporedObservability.TracingEnabled bool
+field SporedObservability.TracingExporter string
+field SporedObservability.TracingSampling *float64
 field SpotPrice.AvailabilityZone string
 field SpotPrice.InstanceType string
 field SpotPrice.PricePerHour float64
@@ -464,10 +474,12 @@ func (DisplayPrice) SourceLabel() string
 func (EFACapacity) ResolveInterfaces(requested int) (int, error)
 func (LaunchConfig) HibernationRequested() bool
 func (LaunchConfig) ValidateDurations() error
+func (LaunchConfig) ValidateSporedSettings() error
 func (LaunchConfig) ValidateUserDataSize() error
 func (ManagedResource) IsRunningInstance() bool
 func (ManagedResource) OwnedBy(callerARN string) bool
 func (ReaperCoverage) Summary() string
+func (SporedObservability) Validate() error
 func AccountBase36(accountID string) string
 func AttachDeviceName(i int) string
 func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error
@@ -547,6 +559,7 @@ type SSMRunResult struct
 type SnapshotDetail struct
 type SnapshotSourceKind int
 type SporedLiveness struct
+type SporedObservability struct
 type SpotPrice struct
 type SubnetHint struct
 type UserDataTooLargeError struct

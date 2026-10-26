@@ -63,6 +63,9 @@ func exitForError(err error) int {
 		return 0
 	case isAborted(err):
 		return ExitCodeAborted
+	case remoteExitCode(err) > 0:
+		// `spawn connect <i> -- <cmd>`: the remote command's own status (#1306).
+		return remoteExitCode(err)
 	default:
 		return 1
 	}
