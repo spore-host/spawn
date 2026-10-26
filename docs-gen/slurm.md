@@ -31,7 +31,7 @@ Supported Slurm directives:
   --mem=XGB            → Memory requirement for instance selection
   --cpus-per-task=N    → CPU requirement for instance selection
   --gres=gpu:N         → GPU requirement and instance selection
-  --nodes=N            → Multi-node MPI job (requires --mpi flag)
+  --nodes=N            → Refused when N &gt; 1 (launch with spawn launch --mpi)
   --job-name=NAME      → Instance name prefix
 
 Custom #SPAWN directives (optional):
@@ -40,9 +40,16 @@ Custom #SPAWN directives (optional):
   #SPAWN --spot=true           → Enable spot instances
   #SPAWN --ami=AMI_ID          → Override AMI
 
+Each array task (or the single job) becomes one row whose command: is the
+job script, with SLURM_* variables exported. Multi-node MPI jobs (--nodes &gt; 1)
+cannot be expressed as a parameter file and are refused.
+
+Launch the file in the foreground (--no-detach): a detached sweep does not run
+row commands yet. An --array=...%N limit becomes --max-concurrent N.
+
 Example:
   spawn slurm convert train.sbatch --output-file params.yaml
-  spawn launch train --param-file params.yaml
+  spawn launch train --param-file params.yaml --no-detach
 
 ```
 spawn slurm convert <script.sbatch> [flags]

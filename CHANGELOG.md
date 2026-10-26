@@ -120,8 +120,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minutes of the invocation remain. A hook with no header, which includes every
   hook written before v0.146.0, runs as before. The reaper change takes effect
   when the reaper is redeployed.
+- **`spawn slurm convert` and `spawn slurm submit` refuse multi-node MPI jobs**
+  (#1242). Every param-file row is one independent instance, so a
+  `--nodes=N` job used to convert to a single row and launch one instance with
+  no MPI setup, after a cost estimate that priced all N nodes. They now stop
+  with an error pointing at `spawn launch --mpi --count N`. `submit` converts
+  before asking for confirmation, so this comes before the cost prompt.
+- **`spawn slurm submit` launches in the region it priced, in the foreground**
+  (#1217). It pins the converted file to the estimate's region (`--region`, else
+  `#SPAWN --region`, else your AWS config region), so the launch can no longer
+  land in a region nobody quoted, and it passes `--no-detach`, because a
+  detached sweep does not run row commands yet (#1323). An `--array=...%N`
+  limit becomes `--max-concurrent N`.
 
 ### Fixed
+
+- **`spawn slurm submit` works** (#1217). It handed off to `spawn launch
+  --param-file` without a spore name, which launch refuses, so every submit
+  failed after the user had approved the cost. It now passes a name made from
+  the script's `--job-name` (else the script's file name) and reduced to a valid
+  DNS label, since launch registers the name in DNS and uses it as the hostname.
+- **`spawn slurm convert` output can be launched** (#1242). It wrote each job
+  script under a `script:` key, which `spawn launch` rejects (and nothing on the
+  instance would have run). The script now goes under `command:`, array members
+  get distinct valid names, and the `%N` limit is no longer written as the
+  `max_concurrent:` key launch rejects. The printed launch line now names the
+  spore and uses `--param-file` (it said `--params`, which is not implemented).
+- **A parameter-sweep row's `command:` reaches the instance when it is long or
+  multi-line** (#1242). It rode only the `spawn:command` tag, which EC2 caps at
+  256 characters, so such a row was refused by RunInstances. A command the tag
+  cannot carry is now embedded in the row's user data, as `--command` is on a
+  single launch; short one-line commands keep the tag. A row's own `command:`
+  also now wins over a CLI `--command`, as the documented row > flag precedence
+  says; before, the CLI value took the tag.
 
 - **`spawn cleanup` no longer offers spawn's S3 buckets for removal and then
   fails on them** (#1301). With `--all` it listed a `spawn:managed` bucket as

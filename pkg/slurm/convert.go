@@ -3,6 +3,7 @@ package slurm
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -56,9 +57,14 @@ func ConvertToSpawn(job *SlurmJob) (*SpawnConfig, error) {
 		return convertArrayJob(job, config)
 	}
 
-	// Handle MPI jobs
+	// A multi-node MPI job has no param-file form: every row is one
+	// independent instance, so a row cannot stand for an N-node cohort. This
+	// used to emit a single row with mpi/count passed through as PARAM_*
+	// values, which launched one instance (not N) and set up no MPI at all.
 	if job.IsMPIJob() {
-		return convertMPIJob(job, config)
+		return nil, fmt.Errorf("multi-node MPI jobs (--nodes=%d) cannot be converted to a parameter file: "+
+			"each row launches one independent instance, so it cannot express an MPI cohort; "+
+			"launch it with 'spawn launch --mpi --count %d' instead", job.Nodes, job.Nodes)
 	}
 
 	// Handle single-task job
@@ -72,44 +78,22 @@ func convertArrayJob(job *SlurmJob, config *SpawnConfig) (*SpawnConfig, error) {
 		param := make(map[string]interface{})
 		param["index"] = i
 
-		// Generate script with SLURM environment variables
-		script := generateArrayTaskScript(job, i)
-		param["script"] = script
+		// The task script rides `command:`, the row key spawn launch runs on
+		// the instance. It used to be `script:`, which launch treats as a
+		// PARAM_* passthrough and refuses because the value has newlines
+		// (#1242) — and nothing on the instance would have run it anyway.
+		param["command"] = generateArrayTaskScript(job, i)
 
-		// Set job name with array index
-		if job.JobName != "" {
-			param["name"] = fmt.Sprintf("%s-%d", job.JobName, i)
-		}
+		// Every row gets its own valid spore name, so array members are
+		// told apart (the Name tag, hostname and DNS label come from it).
+		param["name"] = arrayMemberName(SporeName(job), i)
 
 		config.Params = append(config.Params, param)
 	}
 
-	// Handle max concurrent with launch settings
-	if job.Array.MaxRunning > 0 {
-		config.Defaults["max_concurrent"] = job.Array.MaxRunning
-	}
-
-	return config, nil
-}
-
-// convertMPIJob converts a multi-node MPI job to spawn parameters
-func convertMPIJob(job *SlurmJob, config *SpawnConfig) (*SpawnConfig, error) {
-	// Add MPI-specific settings
-	config.Defaults["mpi"] = true
-	config.Defaults["count"] = job.Nodes
-
-	// Add single parameter set with the script
-	param := make(map[string]interface{})
-
-	// Generate script with SLURM environment variables
-	script := generateMPIScript(job)
-	param["script"] = script
-
-	if job.JobName != "" {
-		param["name"] = job.JobName
-	}
-
-	config.Params = append(config.Params, param)
+	// --array=...%N is NOT written to the file: max_concurrent is a launch
+	// flag, and launch rejects it as a param-file key. Callers pass
+	// job.Array.MaxRunning as --max-concurrent (see LaunchFlags).
 
 	return config, nil
 }
@@ -118,17 +102,68 @@ func convertMPIJob(job *SlurmJob, config *SpawnConfig) (*SpawnConfig, error) {
 func convertSingleJob(job *SlurmJob, config *SpawnConfig) (*SpawnConfig, error) {
 	param := make(map[string]interface{})
 
-	// Generate script with SLURM environment variables
-	script := generateSingleTaskScript(job)
-	param["script"] = script
+	// The job script rides `command:`, the row key spawn launch runs on the
+	// instance (#1242; see convertArrayJob).
+	param["command"] = generateSingleTaskScript(job)
 
 	if job.JobName != "" {
-		param["name"] = job.JobName
+		param["name"] = SporeName(job)
 	}
 
 	config.Params = append(config.Params, param)
 
 	return config, nil
+}
+
+// maxSporeNameLen is the longest spore name that is still one DNS label
+// (RFC 1035): launch registers the name as {name}.{account}.spore.host and
+// uses it as the hostname.
+const maxSporeNameLen = 63
+
+// SporeName returns the spore name to launch job under: the job's --job-name,
+// else the script's file name without its extension, else "slurm-job" —
+// reduced to a valid DNS label (lowercase [a-z0-9-], no leading or trailing
+// hyphen, at most 63 characters), because spawn launch registers the name in
+// DNS and sets the hostname from it. A Slurm job name can be anything.
+func SporeName(job *SlurmJob) string {
+	for _, candidate := range []string{
+		job.JobName,
+		strings.TrimSuffix(filepath.Base(job.FilePath), filepath.Ext(job.FilePath)),
+	} {
+		if n := dnsLabel(candidate, maxSporeNameLen); n != "" {
+			return n
+		}
+	}
+	return "slurm-job"
+}
+
+// arrayMemberName is base with "-<index>" appended, shortening base so the
+// result is still a valid spore name.
+func arrayMemberName(base string, index int) string {
+	suffix := fmt.Sprintf("-%d", index)
+	if trimmed := dnsLabel(base, maxSporeNameLen-len(suffix)); trimmed != "" {
+		return trimmed + suffix
+	}
+	return "slurm-job" + suffix
+}
+
+// dnsLabel lowercases s, maps every run of other characters to one hyphen,
+// trims hyphens from both ends and caps it at max characters. It returns ""
+// when nothing usable is left.
+func dnsLabel(s string, max int) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else if b.Len() > 0 && !strings.HasSuffix(b.String(), "-") {
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > max {
+		out = strings.Trim(out[:max], "-")
+	}
+	return out
 }
 
 // generateArrayTaskScript generates the script for an array task

@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/slurm"
@@ -16,6 +17,7 @@ func TestSlurmConvert(t *testing.T) {
 		name        string
 		script      string
 		wantErr     bool
+		convertErr  bool // conversion must be refused
 		checkOutput bool
 	}{
 		{
@@ -55,8 +57,8 @@ python train.py
 
 mpirun ./simulation
 `,
-			wantErr:     false,
-			checkOutput: true,
+			// A param file cannot express a multi-node cohort.
+			convertErr: true,
 		},
 	}
 
@@ -82,8 +84,11 @@ mpirun ./simulation
 
 			// Convert to spawn format
 			config, err := slurm.ConvertToSpawn(job)
+			if (err != nil) != tt.convertErr {
+				t.Errorf("ConvertToSpawn() error = %v, want error %v", err, tt.convertErr)
+				return
+			}
 			if err != nil {
-				t.Errorf("ConvertToSpawn() error = %v", err)
 				return
 			}
 
@@ -278,7 +283,10 @@ func TestSlurmGPUDirective(t *testing.T) {
 	}
 }
 
-// TestSlurmMPIJob tests conversion of MPI jobs
+// TestSlurmMPIJob: a multi-node MPI job is refused rather than converted. A
+// param-file row is one independent instance, so the old conversion (one row,
+// mpi/count as PARAM_* passthroughs) launched a single instance with no MPI
+// setup while the estimate priced all the nodes.
 func TestSlurmMPIJob(t *testing.T) {
 	script := `#!/bin/bash
 #SBATCH --job-name=mpi-test
@@ -299,17 +307,12 @@ mpirun ./my_program
 	}
 
 	config, err := slurm.ConvertToSpawn(job)
-	if err != nil {
-		t.Fatalf("ConvertToSpawn() error = %v", err)
+	if err == nil {
+		t.Fatalf("ConvertToSpawn() accepted an 8-node MPI job: %+v", config)
 	}
-
-	// Verify MPI configuration
-	if config == nil {
-		t.Fatal("config is nil")
+	if !strings.Contains(err.Error(), "--mpi --count 8") {
+		t.Errorf("error should point at the launch that can run it, got: %v", err)
 	}
-
-	// Would check for MPI-specific fields here
-	t.Logf("Successfully converted MPI job")
 }
 
 // TestSlurmEstimate tests cost estimation for Slurm jobs
