@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -98,7 +99,10 @@ func newProvenanceCmd() *cobra.Command {
 				return err
 			}
 			cli := s3.NewFromConfig(cfg)
-			return provUpload(ctx, s3transfer.New(cli), cli, stateDir, args[0], args[1], cmd.ErrOrStderr())
+			tune := stageOutTuning(ctx, instanceFacts{imds: imds.NewFromConfig(cfg)}, runtime.NumCPU(), meminfoPath)
+			fmt.Fprintf(cmd.ErrOrStderr(), "spored provenance: upload up to %d files at once, %d part requests of %d MiB\n",
+				tune.Workers, tune.Requests, tune.PartSize>>20)
+			return provUpload(ctx, s3transfer.New(cli), cli, stateDir, args[0], args[1], tune, cmd.ErrOrStderr())
 		},
 		SilenceUsage: true,
 	}
@@ -298,7 +302,7 @@ func provCost(ctx context.Context, f instanceFacts, specPath, stateDir, started,
 // provUpload uploads one output, tagged and annotated from record.json. With no
 // record (the cost step failed or never ran) it still uploads, untagged, exactly
 // as `aws s3 cp` did: provenance must never cost a researcher their output.
-func provUpload(ctx context.Context, up provenance.Uploader, ann provenance.Annotator, stateDir, src, dst string, errw io.Writer) error {
+func provUpload(ctx context.Context, up provenance.Uploader, ann provenance.Annotator, stateDir, src, dst string, tune provenance.UploadTuning, errw io.Writer) error {
 	var tags map[string]string
 	var payload []byte
 	if b, err := os.ReadFile(filepath.Join(stateDir, provRecordFile)); err == nil { //nolint:gosec // the wrapper's own state file
@@ -307,7 +311,7 @@ func provUpload(ctx context.Context, up provenance.Uploader, ann provenance.Anno
 			tags, payload = rec.Tags(), b
 		}
 	}
-	written, err := provenance.UploadOutput(ctx, up, ann, src, dst, tags, payload)
+	written, err := provenance.UploadOutput(ctx, up, ann, src, dst, tags, payload, tune)
 	for _, w := range written {
 		if w.AnnotateErr != nil {
 			fmt.Fprintf(errw, "provenance: s3://%s/%s uploaded and tagged; annotation failed: %v\n", w.Bucket, w.Key, w.AnnotateErr)
@@ -325,4 +329,37 @@ func writeJSON(path string, v any) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0o600)
+}
+
+// meminfoPath is read for MemTotal when sizing an output upload.
+const meminfoPath = "/proc/meminfo"
+
+// stageOutTuning sizes `provenance upload` for this box (#1324): the NIC class
+// of its instance type (the wrapper's table, taskproto.NICTargetGbps), its
+// vCPUs and its MemTotal. Anything unreadable leaves that input unknown, which
+// TuneUpload treats conservatively; IMDS gets two seconds, since a missing
+// figure costs speed and a hung one costs the whole stage-out.
+func stageOutTuning(ctx context.Context, f instanceFacts, vcpus int, meminfo string) provenance.UploadTuning {
+	ictx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	gbps := taskproto.NICTargetGbps(f.meta(ictx, "instance-type"))
+	return provenance.TuneUpload(gbps, vcpus, memTotalKiB(meminfo))
+}
+
+// memTotalKiB is MemTotal from a /proc/meminfo, or 0.
+func memTotalKiB(path string) int64 {
+	b, err := os.ReadFile(path) //nolint:gosec // /proc/meminfo, or a test's copy
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if rest, ok := strings.CutPrefix(line, "MemTotal:"); ok {
+			fields := strings.Fields(rest)
+			if len(fields) > 0 {
+				n, _ := strconv.ParseInt(fields[0], 10, 64)
+				return n
+			}
+		}
+	}
+	return 0
 }

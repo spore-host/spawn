@@ -62,6 +62,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Task stage-out through `spored provenance upload` uploads files
+  concurrently, with larger parts, sized to the instance** (#1324). On a
+  release build every task output goes through spored, not `aws s3 cp`, so
+  #1256's CLI tuning did not reach stage-out: a directory output was uploaded
+  one file at a time with 5 concurrent 5 MiB parts. It now uploads up to 4-32
+  files at once sharing 32-512 part requests of 8-16 MiB, chosen from the same
+  NIC-class table the wrapper uses for the CRT client (new
+  `taskproto.NICTargetGbps`), capped per vCPU, and with the worst-case part
+  buffer held to an eighth of MemTotal; a small box falls back to the old
+  setting, never below it. Each object is still tagged in its own upload and
+  annotated bound to its ETag, and the result keeps the walk's order. One
+  change in failure handling: a failed file no longer stops the rest of the
+  output (as `aws s3 cp --recursive`); every file is attempted and the failures
+  are reported together, so the wrapper's untagged `aws s3 cp` fallback still
+  runs. Not yet measured on real hardware: an A/B on a #1256 workload with a
+  large output is needed before release.
 - **Task stage-in and stage-out use the AWS CLI's CRT transfer client, sized to
   the instance's network** (#1256). Every `aws s3 cp` in the task wrapper ran at
   the CLI's defaults (classic client, 10 concurrent requests, 8 MiB parts),

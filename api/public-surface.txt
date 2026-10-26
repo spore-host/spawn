@@ -985,6 +985,7 @@ func GeneratePooledJobScript(spec *TaskSpec, opts WrapperOptions) (string, error
 func GenerateWrapper(spec *TaskSpec, opts WrapperOptions) (string, error)
 func IsDefaultResultsBucket(bucket, accountID, region string) bool
 func IsStagingBucket(bucket string) bool
+func NICTargetGbps(instanceType string) int
 func ParseCompletionRecord(data []byte) (*CompletionRecord, error)
 func ParseSpec(data []byte) (*TaskSpec, error)
 func ParseSpecFile(path string) (*TaskSpec, error)

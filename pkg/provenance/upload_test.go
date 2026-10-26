@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,6 +15,7 @@ import (
 )
 
 type fakeS3 struct {
+	mu          sync.Mutex
 	uploads     []tm.UploadObjectInput
 	bodies      map[string]string
 	annotations []s3.PutObjectAnnotationInput
@@ -24,6 +26,8 @@ type fakeS3 struct {
 
 func (f *fakeS3) UploadObject(_ context.Context, in *tm.UploadObjectInput, _ ...func(*tm.Options)) (*tm.UploadObjectOutput, error) {
 	key := aws.ToString(in.Key)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if key == f.uploadErrOn {
 		return nil, errors.New("AccessDenied")
 	}
@@ -38,6 +42,8 @@ func (f *fakeS3) UploadObject(_ context.Context, in *tm.UploadObjectInput, _ ...
 
 func (f *fakeS3) PutObjectAnnotation(_ context.Context, in *s3.PutObjectAnnotationInput, _ ...func(*s3.Options)) (*s3.PutObjectAnnotationOutput, error) {
 	b, _ := io.ReadAll(in.AnnotationPayload)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.payloads == nil {
 		f.payloads = map[string]string{}
 	}
@@ -65,7 +71,7 @@ func TestUploadOutputRecursiveTagsAtWriteAndAnnotatesWhatItWrote(t *testing.T) {
 	d := tree(t)
 	f := &fakeS3{}
 	tags := map[string]string{TagRunID: "r1", TagClass: "cheap"}
-	ws, err := UploadOutput(context.Background(), f, f, filepath.Join(d, "out")+"/", "s3://bkt/results/run1", tags, []byte(`{"schema":1}`))
+	ws, err := UploadOutput(context.Background(), f, f, filepath.Join(d, "out")+"/", "s3://bkt/results/run1", tags, []byte(`{"schema":1}`), UploadTuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +107,7 @@ func TestUploadOutputSingleFileKeysLikeAWSS3Cp(t *testing.T) {
 	file := filepath.Join(d, "out", "a.txt")
 	for dst, wantKey := range map[string]string{"s3://bkt/f1/named.txt": "f1/named.txt", "s3://bkt/f2/prefix/": "f2/prefix/a.txt"} {
 		f := &fakeS3{}
-		ws, err := UploadOutput(context.Background(), f, f, file, dst, nil, nil)
+		ws, err := UploadOutput(context.Background(), f, f, file, dst, nil, nil, UploadTuning{})
 		if err != nil || len(ws) != 1 || ws[0].Key != wantKey {
 			t.Errorf("%s: wrote %+v (%v), want key %s", dst, ws, err, wantKey)
 		}
@@ -114,26 +120,26 @@ func TestUploadOutputSingleFileKeysLikeAWSS3Cp(t *testing.T) {
 	}
 }
 
-// An upload failure stops and is returned, like a failing `aws s3 cp`; an
+// An upload failure is returned, like a failing `aws s3 cp`; an
 // annotation failure is recorded and does not stop the upload.
 func TestUploadOutputFailures(t *testing.T) {
 	d := tree(t)
 	f := &fakeS3{uploadErrOn: "p/sub/b.txt"}
-	ws, err := UploadOutput(context.Background(), f, f, filepath.Join(d, "out")+"/", "s3://bkt/p", nil, []byte("{}"))
+	ws, err := UploadOutput(context.Background(), f, f, filepath.Join(d, "out")+"/", "s3://bkt/p", nil, []byte("{}"), UploadTuning{})
 	if err == nil || len(ws) != 1 {
 		t.Fatalf("upload failure: (%d written, %v), want 1 written then the error", len(ws), err)
 	}
 
 	g := &fakeS3{annotateErr: errors.New("AccessDenied")}
-	ws, err = UploadOutput(context.Background(), g, g, filepath.Join(d, "out")+"/", "s3://bkt/p", nil, []byte("{}"))
+	ws, err = UploadOutput(context.Background(), g, g, filepath.Join(d, "out")+"/", "s3://bkt/p", nil, []byte("{}"), UploadTuning{})
 	if err != nil || len(ws) != 2 || ws[0].AnnotateErr == nil {
 		t.Fatalf("annotation failure: (%+v, %v), want both uploaded with AnnotateErr set", ws, err)
 	}
 
-	if _, err := UploadOutput(context.Background(), g, g, filepath.Join(d, "missing.txt"), "s3://bkt/p", nil, nil); err == nil {
+	if _, err := UploadOutput(context.Background(), g, g, filepath.Join(d, "missing.txt"), "s3://bkt/p", nil, nil, UploadTuning{}); err == nil {
 		t.Error("a missing source uploaded nothing and reported success")
 	}
-	if _, err := UploadOutput(context.Background(), g, g, filepath.Join(d, "out"), "s3://bkt/p", nil, nil); err == nil {
+	if _, err := UploadOutput(context.Background(), g, g, filepath.Join(d, "out"), "s3://bkt/p", nil, nil, UploadTuning{}); err == nil {
 		t.Error("a directory without a trailing / was accepted as a single file")
 	}
 }

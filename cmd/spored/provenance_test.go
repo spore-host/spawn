@@ -188,7 +188,7 @@ func TestProvUpload(t *testing.T) {
 	_ = os.WriteFile(f, []byte("x"), 0o600)
 
 	up := &recUploader{}
-	if err := provUpload(context.Background(), up, noAnnotate{}, dir, f, "s3://b/o.txt", io.Discard); err != nil || len(up.tagging) != 1 || up.tagging[0] != "" {
+	if err := provUpload(context.Background(), up, noAnnotate{}, dir, f, "s3://b/o.txt", provenance.UploadTuning{}, io.Discard); err != nil || len(up.tagging) != 1 || up.tagging[0] != "" {
 		t.Fatalf("no record: err=%v tagging=%q, want an untagged upload", err, up.tagging)
 	}
 
@@ -197,7 +197,7 @@ func TestProvUpload(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, provRecordFile), b, 0o600)
 	up = &recUploader{}
 	var errw bytes.Buffer
-	if err := provUpload(context.Background(), up, noAnnotate{}, dir, f, "s3://b/o.txt", &errw); err != nil {
+	if err := provUpload(context.Background(), up, noAnnotate{}, dir, f, "s3://b/o.txt", provenance.UploadTuning{}, &errw); err != nil {
 		t.Fatalf("an annotation failure failed the upload: %v", err)
 	}
 	if len(up.tagging) != 1 || !strings.Contains(up.tagging[0], "spawn%3Aregen-class=cheap") {
@@ -229,5 +229,28 @@ func TestProvCostRecordsTheDockerSocket(t *testing.T) {
 		if rec.Recipe.DockerSocket != sock {
 			t.Errorf("container_docker_socket=%v: recipe docker_socket = %v", sock, rec.Recipe.DockerSocket)
 		}
+	}
+}
+
+// #1324: the upload is sized from the box's instance type (through the
+// wrapper's NIC-class table), vCPUs and MemTotal; whatever can't be read is
+// unknown, not guessed.
+func TestStageOutTuningReadsTheBox(t *testing.T) {
+	dir := t.TempDir()
+	mi := filepath.Join(dir, "meminfo")
+	_ = os.WriteFile(mi, []byte("MemFree:  100 kB\nMemTotal:       16384000 kB\nSwapTotal: 0 kB\n"), 0o600)
+	if got := memTotalKiB(mi); got != 16384000 {
+		t.Fatalf("MemTotal = %d", got)
+	}
+	if got := memTotalKiB(filepath.Join(dir, "missing")); got != 0 {
+		t.Errorf("missing meminfo: %d, want 0", got)
+	}
+	ctx := context.Background()
+	got := stageOutTuning(ctx, instanceFacts{imds: fakeIMDS{"instance-type": "c7gn.16xlarge"}}, 64, mi)
+	if want := provenance.TuneUpload(taskproto.NICTargetGbps("c7gn.16xlarge"), 64, 16384000); got != want || want == provenance.TuneUpload(0, 64, 16384000) {
+		t.Errorf("c7gn.16xlarge: %+v, want %+v (its NIC class, not the unknown row)", got, want)
+	}
+	if got, want := stageOutTuning(ctx, instanceFacts{imds: fakeIMDS{}}, 4, filepath.Join(dir, "missing")), provenance.TuneUpload(0, 4, 0); got != want {
+		t.Errorf("no IMDS, no meminfo: %+v, want %+v", got, want)
 	}
 }
