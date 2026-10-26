@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/tasklaunch"
+	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 // `spawn task status --check-complete` exit codes, mirroring `spawn status`.
@@ -18,25 +20,11 @@ const (
 )
 
 // instanceLister is (*aws.Client).ListInstances, a seam for tests.
-type instanceLister func(ctx context.Context, region, stateFilter string) ([]aws.InstanceInfo, error)
+type instanceLister = tasklaunch.InstanceLister
 
-// taskInstances returns every instance (any state) that ran taskID. The
-// spawn:task-id tag is authoritative; the Name tag is the fallback for
-// instances launched before the tag existed (task run sets Name = task id).
+// taskInstances returns every instance (any state) that ran taskID.
 func taskInstances(all []aws.InstanceInfo, taskID string) []aws.InstanceInfo {
-	var out []aws.InstanceInfo
-	for _, inst := range all {
-		if id, ok := inst.Tags["spawn:task-id"]; ok {
-			if id == taskID {
-				out = append(out, inst)
-			}
-			continue
-		}
-		if inst.Name == taskID {
-			out = append(out, inst)
-		}
-	}
-	return out
+	return tasklaunch.TaskInstances(all, taskID)
 }
 
 // reportTaskWithoutRecord decides what `task status` says when there is no
@@ -50,6 +38,10 @@ func taskInstances(all []aws.InstanceInfo, taskID string) []aws.InstanceInfo {
 //   - any live instance (pending/running/stopping/stopped) → running
 //   - only terminated/shutting-down instances → terminated, no record (failed)
 //   - no instance at all (never launched, or EC2 has forgotten it) → unknown
+//
+// For an ended instance it also names the spawn:flush-status tag spored wrote
+// (#1295), and once EC2 has forgotten the instance it says that the flush
+// status is gone with it, rather than leaving the user to guess.
 //
 // Returns the --check-complete exit code; prints a line unless quiet.
 func reportTaskWithoutRecord(ctx context.Context, list instanceLister, region, taskID string, out io.Writer, quiet bool) int {
@@ -90,13 +82,39 @@ func reportTaskWithoutRecord(ctx context.Context, list instanceLister, region, t
 				why = ": " + r
 			}
 			fmt.Fprintf(out, "Task %s: terminated (no completion record) — instance %s is %s%s\n", taskID, gone.InstanceID, gone.State, why)
-			fmt.Fprintf(out, "  It was stopped without a terminal flush, so its command.log may not have been saved.\n")
+			printFlushWithoutRecord(out, tasklaunch.FlushStatusOf([]aws.InstanceInfo{*gone}), region)
 		}
 		return taskStatusExitFailed
 	default:
 		if !quiet {
 			fmt.Fprintf(out, "Task %s: unknown (no completion record, and no instance for it in %s)\n", taskID, region)
+			fmt.Fprintf(out, "  Flush: %s.\n", tasklaunch.FlushStatus{})
 		}
 		return taskStatusExitError
 	}
+}
+
+// printFlushWithoutRecord explains a terminated task's missing record from its
+// flush status (#1295).
+func printFlushWithoutRecord(out io.Writer, fs tasklaunch.FlushStatus, region string) {
+	switch {
+	case !fs.Recorded():
+		fmt.Fprintf(out, "  Flush: %s.\n", fs)
+		fmt.Fprintf(out, "  It was stopped without a terminal flush, so its command.log may not have been saved.\n")
+	case fs.Value == taskproto.FlushStatusOK:
+		fmt.Fprintf(out, "  Flush: %s — the flush wrote a record, so it is probably under another results prefix (pass --results-prefix).\n", fs.Value)
+	default:
+		fmt.Fprintf(out, "  Flush: %s — the flush hook's output is on the serial console: aws ec2 get-console-output --instance-id %s --region %s\n", fs.Value, fs.InstanceID, region)
+	}
+}
+
+// printRecordFlushStatus adds the compact `Flush:` line under a completion
+// record (#1295). Best-effort: the record is the answer, so a failed lookup
+// prints nothing rather than failing the command.
+func printRecordFlushStatus(ctx context.Context, out io.Writer, list instanceLister, region, taskID string) {
+	fs, err := tasklaunch.ReadFlushStatus(ctx, list, region, taskID)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(out, "Flush:      %s\n", fs)
 }

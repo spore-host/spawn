@@ -669,7 +669,9 @@ s3://spawn-results-<account>-<region>/tasks/<task-id>/completion.json.
 
 If the record isn't there, status asks EC2 about the task's instance: a live
 instance means the task is still running; a terminated one with no record is
-reported as terminated (killed without a terminal flush), never as running.
+reported as terminated, never as running, with the outcome of spored's
+terminal flush (the spawn:flush-status tag) while EC2 still lists the
+instance, about an hour after it ends. A record is followed by a Flush: line.
 With --check-complete, exit codes mirror 'spawn status': 0=completed,
 1=failed (including terminated without a record), 2=running, 3=error
 (including no record and no instance found).`,
@@ -727,6 +729,7 @@ With --check-complete, exit codes mirror 'spawn status': 0=completed,
 			return json.NewEncoder(os.Stdout).Encode(rec)
 		}
 		printCompletion(os.Stdout, rec)
+		printRecordFlushStatus(ctx, os.Stdout, client.ListInstances, region, taskID)
 		return nil
 	},
 }

@@ -20,21 +20,26 @@ type ResultsAPI interface {
 	PutObject(ctx context.Context, in *s3.PutObjectInput, opts ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 }
 
-// recordUnparseableSpec writes the failed completion record (and its .exitcode
-// sibling) for a task whose staged spec does not parse (#1149). The job script
-// is what normally writes these, and it is rendered FROM the spec, so a spec
-// that fails to parse would otherwise be acked with no record at all and
-// `spawn task status` would report the task unknown forever.
+// recordFailedBeforeRun writes the failed completion record (and its .exitcode
+// sibling) for a task the worker acks without its job script ever running. The
+// job script is what normally writes these, so without this the task would be
+// acked with no record at all and `spawn task status` would report it unknown
+// forever. Two routes reach it:
+//
+//   - the staged spec does not parse, or is refused on a pool (#1149): class is
+//     spec_error, which is not retryable, because the same bytes fail the same
+//     way on any worker;
+//   - the execer failed before the script started (#1237): the script could
+//     not be rendered (spec_error), or could not be written or started on this
+//     worker (instance_health, retryable: a fresh worker usually succeeds).
 //
 // The record mirrors the one the terminal-flush hook writes when a task never
-// returned a status: state "failed", exit_code -1. Its retry_class is
-// spec_error, which is not retryable: the same bytes will fail the same way on
-// any worker.
+// returned a status: state "failed", exit_code -1, with class as retry_class.
 //
 // The key is the one `task status` reads. A spec that is valid JSON but fails
 // validation can still name its results_prefix, so that is honoured when it can
 // be read; otherwise the record goes to the default results prefix.
-func recordUnparseableSpec(ctx context.Context, client ResultsAPI, accountID, region, taskID string, specJSON []byte, now time.Time) (string, error) {
+func recordFailedBeforeRun(ctx context.Context, client ResultsAPI, accountID, region, taskID string, specJSON []byte, class taskproto.RetryClass, now time.Time) (string, error) {
 	var loose struct {
 		ResultsPrefix string `json:"results_prefix"`
 	}
@@ -55,7 +60,7 @@ func recordUnparseableSpec(ctx context.Context, client ResultsAPI, accountID, re
 		State:      taskproto.StateFailed,
 		StartedAt:  ts,
 		EndedAt:    ts,
-		RetryClass: taskproto.RetrySpecError,
+		RetryClass: class,
 	}
 	body, err := json.Marshal(rec)
 	if err != nil {
