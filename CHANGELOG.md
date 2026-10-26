@@ -22,6 +22,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fleet in one AZ; EFA does not cross AZs. Requires `--efa`. No new permission.
 
 - `spawn ami copy <ami-id|name> --to-region <region> [--name] [--kms-key] [--wait]` copies a spawn-managed AMI to another region inside spawn's inventory: the source's tags go onto the new AMI and every snapshot backing it (atomically, via CopyImage TagSpecifications), plus `spawn:copied-from=<ami>@<region>`, so `spawn ami list --region`, `spawn footprint` and `spawn ami delete --region` cover the copy. An encrypted source is copied encrypted with the target region's default EBS key unless `--kms-key` names one there; `Ec2ImageBuilderArn` is not copied, so deleting a copy cannot delete the source's Image Builder image. AMIs without `spawn:managed=true` are refused. `--wait` polls a bounded number of times (`--wait-timeout`, default 1h) with a progress line. Deleting the source does not delete its copies. Needs `ec2:DescribeImages`, `ec2:CopyImage` and `ec2:CreateTags`; a denial names the missing action (#1169)
+- **`spawn launch --nested-spawn`: let a spore launch its own children**
+  (#39), e.g. a workflow head node dispatching tasks. Opt-in: the instance gets
+  a dedicated role, `spawn-instance-nested-<hash>`, and the default
+  `spored-instance-role` is unchanged (a test snapshots it before and after).
+  The role grants what `spawn launch`, `list`, `status`, `extend`, `connect`
+  and `terminate` call, as discovered from their source by a test: reads on
+  `*` (AWS has no resource-level permissions for them); `RunInstances` only
+  for an instance and volumes tagged `spawn:managed=true` at creation, plus
+  the resource types it references (AMI, subnet, security group, key pair,
+  network interface, placement group, Spot request, capacity reservation);
+  `ImportKeyPair`, `CreateSecurityGroup` and `CreatePlacementGroup` only when
+  tagged `spawn:managed=true`; start, stop, terminate, SSM commands and
+  sessions only on `spawn:managed=true` resources; and `iam:PassRole` only for
+  `spored-instance-role` and `spawn-instance-*` roles, only to EC2. It grants
+  no IAM write, so a CLI running as the role never writes IAM: children use
+  `spored-instance-profile` (the parent launch makes sure it exists), an
+  existing `--instance-profile`, or with `--nested-spawn` the parent's own
+  role, and `--iam-*`/`--s3-*` flags, a custom DNS updater and `--no-timeout`
+  are refused on a nested spore with a message saying why. FSx creation,
+  staging buckets, sweeps and multi-card EFA public IPs are not granted.
+  `--nested-spawn` requires `--ttl`, and is refused with `--no-timeout`,
+  `--instance-profile`, IAM flags, sweeps and batch queues. Children get their
+  own TTL (or the 1h idle default) and spored as any launch does. The role is
+  in the `spawn-instance-*` family, so the instance-role sweep (#1300: the
+  TTL reaper's `REAPER_INSTANCE_ROLES` and `spawn cleanup --instance-roles`)
+  deletes it once nothing uses it.
+
 - **spawn now removes its own empty buckets** (#1301). `spawn cleanup
   --buckets` and, optionally, the TTL reaper delete
   `spawn-staging-<account>-<region>` and `spawn-results-<account>-<region>`

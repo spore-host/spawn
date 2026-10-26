@@ -88,6 +88,10 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		name = args[0]
 	}
 
+	if err := validateNestedSpawnFlags(); err != nil {
+		return err
+	}
+
 	if batchQueueFile != "" || queueTemplate != "" {
 		// --dry-run/--print-config (#569) is not wired into the batch-queue path
 		// yet — refuse rather than silently falling through to a real launch,
@@ -186,6 +190,9 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// Whatever produced the config (the wizard included), its durations must
 	// parse before the security-group, key-pair and FSx work below (#990).
 	if err := config.ValidateDurations(); err != nil {
+		return err
+	}
+	if err := requireNestedSpawnTTL(config); err != nil {
 		return err
 	}
 
@@ -1085,6 +1092,18 @@ func ensureIAMProfile(ctx context.Context, awsClient *aws.Client, config *aws.La
 			config.IamInstanceProfile = instanceProfile
 			auditLog.LogOperation("create_iam_role", instanceProfile, "success", nil)
 			warnUnmanagedProfileDNSGrant(os.Stderr, config)
+			prog.Complete("Setting up IAM role")
+			return nil
+		}
+		// Nested spawn (#39): on a nested spore no IAM is written at all; with
+		// --nested-spawn the opt-in role is created or reused. Neither touches
+		// the default branch below.
+		if handled, err := ensureNestedSpawnProfile(ctx, awsClient, config); handled || err != nil {
+			if err != nil {
+				prog.Error("Setting up IAM role", err)
+				return err
+			}
+			auditLog.LogOperation("create_iam_role", config.IamInstanceProfile, "success", nil)
 			prog.Complete("Setting up IAM role")
 			return nil
 		}

@@ -64,6 +64,7 @@ var sweepFlagCoverage = map[string]struct {
 
 	// --- Not applicable: a different launch shape, or meaningless per-row.
 	"batch-queue":    {sweepNA, "batch-queue is its own launch path; refused with --param-file"},
+	"nested-spawn":   {sweepNA, "refused with --param-file/--params (#39)"},
 	"queue-template": {sweepNA, "see batch-queue"},
 	"job-array-name": {sweepNA, "job arrays and sweeps are different shapes"},
 	"instance-names": {sweepNA, "job-array naming; rows are named from the sweep index"},

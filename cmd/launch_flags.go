@@ -177,6 +177,10 @@ var (
 	// run. This flag makes the choice explicit and deterministic instead of
 	// relying on the heuristic converging the way the caller expects.
 	instanceProfile string
+	// nestedSpawn (--nested-spawn, #39) attaches the opt-in role that lets a
+	// spawn CLI on the instance launch and manage children. See
+	// pkg/aws.NestedSpawnRolePrefix.
+	nestedSpawn bool
 
 	// Mode
 	interactive      bool
@@ -460,6 +464,7 @@ func init() {
 	launchCmd.Flags().StringSliceVar(&iamTrustServices, "iam-trust-services", []string{"ec2"}, "Services that can assume role")
 	launchCmd.Flags().StringSliceVar(&iamRoleTags, "iam-role-tags", []string{}, "Tags for IAM role (key=value format)")
 	launchCmd.Flags().StringVar(&instanceProfile, "instance-profile", "", "Attach this EXISTING IAM instance profile by name, bypassing all --iam-role/--iam-policy/--iam-policy-file resolution and the spored-instance-profile default entirely. Use when you need a deterministic, auditable choice instead of spawn's create/reuse heuristic (#550) — e.g. a profile you've already scoped to a specific data bucket.")
+	launchCmd.Flags().BoolVar(&nestedSpawn, "nested-spawn", false, "Give the instance an IAM role that lets a spawn CLI running on it launch, list, connect to, extend and terminate its own child instances (e.g. a workflow head node). Opt-in: the default spored-instance-role never gets these grants. Children are tagged spawn:managed=true and get their own TTL and spored; a nested spore cannot create IAM roles, so children use the default profile, an existing --instance-profile, or --nested-spawn. Requires --ttl.")
 
 	// Mode
 	launchCmd.Flags().BoolVar(&interactive, "interactive", false, "Force interactive wizard")
