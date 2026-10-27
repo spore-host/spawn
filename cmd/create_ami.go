@@ -38,6 +38,15 @@ from the image starts with a stale SPAWN_COMPLETE and --on-complete fires at
 boot. If that cannot be done (no SSM, the instance is stopped, the command is
 still running), the image is not created; --force creates it anyway.
 
+Root's authorized_keys on the source is left as it is. An image of an MPI
+cohort member (--mpi) carries the cohort's cluster key there; an instance
+launched from the image removes every line ending in spawn-mpi-cohort at its
+first boot and keeps every other line. A non-zero rank imaged with spawn before
+v0.147.0 also carries rank 0's key without that tag, which cannot be told from
+your own keys, so an image like that should be rebuilt: launch from it, delete
+the root@ip-... line in /root/.ssh/authorized_keys that is not yours, and image
+that instance.
+
 Examples:
   # Create AMI from instance
   spawn create-ami my-instance --name pytorch-2.2-cuda12

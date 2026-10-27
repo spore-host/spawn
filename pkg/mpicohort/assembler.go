@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -111,8 +112,6 @@ func NewSSMAssembler(client LaunchAPI, region, accountBase36 string, ssmOnlineTi
 		if err != nil {
 			return fmt.Errorf("read cluster SSH key: %w", err)
 		}
-		keyCmd := installPubKeyCommand(pubKey)
-
 		cmd := pushPeersCommand(data)
 
 		g, gctx := errgroup.WithContext(ctx)
@@ -128,7 +127,7 @@ func NewSSMAssembler(client LaunchAPI, region, accountBase36 string, ssmOnlineTi
 				// Cluster SSH key first, then the peers file — the peers file is
 				// the release signal, and the key must already be installed when
 				// a node acts on it (#684).
-				kres, err := client.RunShellScript(gctx, region, m.ProviderID, keyCmd, runTimeout)
+				kres, err := client.RunShellScript(gctx, region, m.ProviderID, installPubKeyCommand(pubKey, m.ProviderID), runTimeout)
 				if err != nil {
 					return fmt.Errorf("install cluster SSH key on %s (%s): %w", m.ID, m.ProviderID, err)
 				}
@@ -288,9 +287,22 @@ func readPubKeyCommand(instanceID string) string {
 //
 // Base64-encoded for the same reason the peers file is: an ssh key's own base64
 // payload plus an optional comment must not be re-parsed by the shell.
-func installPubKeyCommand(pubKey string) string {
+//
+// It then records instanceID in userdata.MPIClusterKeyStripOwnerFile (#1343),
+// so the boot-time strip of inherited cluster keys
+// (instancestate.StripClusterKeys, run by the bootstrap and by spored at
+// startup) treats this instance's root authorized_keys as already done and
+// never removes the key installed here. On an image with MPI preinstalled,
+// enrollment can pass, and this install run, before the bootstrap gets to the
+// strip. An instance ID that is not one is not recorded.
+func installPubKeyCommand(pubKey, instanceID string) string {
 	b64 := base64.StdEncoding.EncodeToString([]byte(pubKey + "\n"))
 	ak := authorizedKeysPath
+	owner := ""
+	if instanceIDRe.MatchString(instanceID) {
+		owner = fmt.Sprintf("; mkdir -p %s; echo %s > %s",
+			path.Dir(userdata.MPIClusterKeyStripOwnerFile), instanceID, userdata.MPIClusterKeyStripOwnerFile)
+	}
 	return fmt.Sprintf(
 		"set -e; mkdir -p /root/.ssh; chmod 700 /root/.ssh; "+
 			"touch %[1]s; chmod 600 %[1]s; "+
@@ -298,6 +310,6 @@ func installPubKeyCommand(pubKey string) string {
 			"{ grep -v ' %[3]s$' %[1]s || [ $? -eq 1 ]; } > %[1]s.spawn-new; "+
 			"cat /tmp/.spawn-cluster-key >> %[1]s.spawn-new; "+
 			"cat %[1]s.spawn-new > %[1]s; "+
-			"rm -f /tmp/.spawn-cluster-key %[1]s.spawn-new",
-		ak, b64, userdata.MPIClusterKeyComment)
+			"rm -f /tmp/.spawn-cluster-key %[1]s.spawn-new%[4]s",
+		ak, b64, userdata.MPIClusterKeyComment, owner)
 }

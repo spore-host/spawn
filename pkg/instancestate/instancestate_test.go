@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spore-host/spawn/internal/treewalk"
+	"github.com/spore-host/spawn/pkg/userdata"
 )
 
 const parent, child = "i-0parent", "i-0child"
@@ -202,11 +203,12 @@ func TestBootTimeFrom(t *testing.T) {
 // notInstanceState is every path under the state roots that spawn's source
 // names and that is deliberately NOT discarded, with why.
 var notInstanceState = map[string]string{
-	"/etc/spawn/spored-signing-key.pem": "spore.host's public signing key, the same on every instance",
-	"/etc/spawn/local.yaml":             "operator-written spored config; spawn reads it and never writes it",
-	"/etc/profile.d/mpi.sh":             "environment for the MPI install on the volume, which the image keeps",
-	"/etc/profile.d/efa.sh":             "environment for the EFA install on the volume, which the image keeps",
-	OwnerFile:                           "the owner record itself",
+	"/etc/spawn/spored-signing-key.pem":  "spore.host's public signing key, the same on every instance",
+	"/etc/spawn/local.yaml":              "operator-written spored config; spawn reads it and never writes it",
+	"/etc/profile.d/mpi.sh":              "environment for the MPI install on the volume, which the image keeps",
+	"/etc/profile.d/efa.sh":              "environment for the EFA install on the volume, which the image keeps",
+	OwnerFile:                            "the owner record itself",
+	userdata.MPIClusterKeyStripOwnerFile: "StripClusterKeys's own owner record (#1343); naming another instance is what makes it strip",
 }
 
 // stateRoots are the directories spawn's per-instance state lives in on the

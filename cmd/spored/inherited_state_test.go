@@ -39,3 +39,31 @@ func TestDiscardInheritedStateReconcilesTheIMDSInstance(t *testing.T) {
 		t.Errorf("with no instance ID: reconciled %v, output %q", got, w.String())
 	}
 }
+
+// #1343: the bootstrap's `spored discard-inherited-state` also strips the MPI
+// cluster key root's authorized_keys inherited, for THIS instance, and says
+// how many lines went without printing a key.
+func TestDiscardInheritedStateStripsInheritedClusterKeys(t *testing.T) {
+	saved := stripClusterKeys
+	t.Cleanup(func() { stripClusterKeys = saved })
+	var got []string
+	stripClusterKeys = func(id string) (int, error) {
+		got = append(got, id)
+		return 2, nil
+	}
+	reconcile := func(string) ([]string, string, error) { return nil, "", nil }
+	var w bytes.Buffer
+	discardInheritedState(context.Background(), &w, func(context.Context) (string, error) { return "i-0child", nil }, reconcile)
+	if len(got) != 1 || got[0] != "i-0child" {
+		t.Fatalf("stripped for %v, want [i-0child]", got)
+	}
+	if !strings.Contains(w.String(), "removed 2 inherited MPI cluster-key line(s)") {
+		t.Errorf("output does not give the count: %q", w.String())
+	}
+
+	// No instance ID: no strip (the record would be wrong).
+	discardInheritedState(context.Background(), &w, func(context.Context) (string, error) { return "", errors.New("no IMDS") }, reconcile)
+	if len(got) != 1 {
+		t.Errorf("stripped with no instance ID: %v", got)
+	}
+}

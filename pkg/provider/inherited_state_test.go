@@ -56,9 +56,17 @@ func TestNewEC2ProviderDiscardsInheritedStateBeforeLoadingIt(t *testing.T) {
 }
 
 func TestDiscardInheritedStateReconcilesThisInstance(t *testing.T) {
-	saved, savedLinux, savedRoot := reconcileInstanceState, stateOnLinux, stateAsRoot
-	t.Cleanup(func() { reconcileInstanceState, stateOnLinux, stateAsRoot = saved, savedLinux, savedRoot })
-	var got []string
+	saved, savedLinux, savedRoot, savedStrip := reconcileInstanceState, stateOnLinux, stateAsRoot, stripClusterKeys
+	t.Cleanup(func() {
+		reconcileInstanceState, stateOnLinux, stateAsRoot, stripClusterKeys = saved, savedLinux, savedRoot, savedStrip
+	})
+	var got, stripped []string
+	// #1343: the inherited MPI cluster key is stripped here too, for the
+	// same instance, so a launch from the image outside spawn is covered.
+	stripClusterKeys = func(id string) (int, error) {
+		stripped = append(stripped, id)
+		return 1, nil
+	}
 	reconcileInstanceState = func(id string) ([]string, string, error) {
 		got = append(got, id)
 		return []string{"/etc/spawn/plugins.json"}, "i-0parent", errors.New("partial")
@@ -69,13 +77,16 @@ func TestDiscardInheritedStateReconcilesThisInstance(t *testing.T) {
 	if len(got) != 1 || got[0] != "i-0child" {
 		t.Fatalf("reconciled %v, want [i-0child]", got)
 	}
+	if len(stripped) != 1 || stripped[0] != "i-0child" {
+		t.Fatalf("stripped cluster keys for %v, want [i-0child]", stripped)
+	}
 
 	// Not root (a `spored` subcommand run by a user), or not Linux: nothing.
 	stateAsRoot = func() bool { return false }
 	discardInheritedState("i-0child")
 	stateOnLinux, stateAsRoot = false, func() bool { return true }
 	discardInheritedState("i-0child")
-	if len(got) != 1 {
-		t.Errorf("reconciled %d times, want 1", len(got))
+	if len(got) != 1 || len(stripped) != 1 {
+		t.Errorf("reconciled %d and stripped %d times, want 1 each", len(got), len(stripped))
 	}
 }

@@ -371,6 +371,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still created, untagged, with a warning that only `spawn pool drain` will
   delete its queue.
 
+- **An instance launched from an image of an MPI cohort member no longer
+  authorizes that cohort's cluster key for root** (#1343). The bootstrap's
+  `spored discard-inherited-state`, and spored when it starts, now remove
+  every line of `/root/.ssh/authorized_keys` whose last field is exactly
+  `spawn-mpi-cohort`. They do this once per instance, recorded in
+  `/var/lib/spawn/root-ak-owner`, so a source whose bootstrap runs again
+  (`cloud-init clean` and the CreateImage reboot) keeps its live cohort's
+  key. Every other line is kept byte for byte, and the log gives only the
+  count. For `--mpi` the strip runs before the MPI script installs this
+  cohort's key. The SSM key install records the instance too, so a strip that
+  comes after the install leaves the new key alone. `spawn ami create` does
+  not touch the source's keys. **Rebuild images made before this release
+  from a non-zero MPI rank**: releases before #1338 installed rank 0's key
+  untagged (`root@ip-...`), and nothing on the instance tells that line from
+  a user's key. Nor can spawn find such images: an image records only
+  `spawn:managed`, `spawn:created`, `spawn:created-from`,
+  `spawn:source-region`, `spawn:arch`, `spawn:gpu`, `spawn:base-ami` and your
+  `--tag`s, not the source's MPI tags or spawn version (#1364 tracks recording
+  them). To rebuild, launch from the image, delete the `root@ip-...` line in
+  `/root/.ssh/authorized_keys` that is not yours, then run `spawn ami create`
+  again.
+
 - **A pool nobody drains no longer keeps its IAM role forever** (#1319).
   `spawn pool drain` was the only thing that deleted a pool's worker role and
   instance profile, so a pool whose caller crashed, or whose run-end hook
@@ -610,9 +632,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `Host *` block in root's ssh config is written once rather than on
   every run. Behaviour change: a `/root/.ssh/id_rsa` already on a custom
   image is replaced on MPI rank 0 (it used to be adopted as the cluster key
-  and authorized on every member). Still open: on a peer image made by an
-  earlier release, the old untagged cluster-key line cannot be told from a
-  user's key and stays (#1343).
+  and authorized on every member). A peer image made by an earlier release
+  still carries the old untagged line; see the #1343 entry.
 
 - **`spawn cleanup` no longer offers spawn's S3 buckets for removal and then
   fails on them** (#1301). With `--all` it listed a `spawn:managed` bucket as
