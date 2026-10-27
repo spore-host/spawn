@@ -41,7 +41,8 @@ var tagClock = time.Now
 // buildTags returns an error, rather than a partial tag set, when a lifecycle
 // duration cannot be parsed: a spawn:ttl with no spawn:ttl-deadline, or a
 // spawn:idle-timeout spored cannot read, launches an instance that nothing
-// stops (#990).
+// stops (#990). Likewise a [*TagLimitError] when the tags would not fit in
+// AWS's 50-tag limit (#1336).
 func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) ([]types.Tag, error) {
 	// buildTags assembles the spawn: metadata tag set in sections:
 	//   1. Base identity (always present): managed/root/created-by/version/account/iam-user.
@@ -411,8 +412,18 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	// Sorted so the set is deterministic, and deduped against spawn's own keys:
 	// the --tag help states the spawn: prefix is reserved, so a collision is a
 	// caller error rather than an override.
+	beforeCustom := len(tags)
 	for _, k := range sortedKeys(config.Tags) {
 		tags = appendTagUnique(tags, k, config.Tags[k])
+	}
+
+	// Everything above is kept whatever the count, so a set that does not fit
+	// is refused here, before any AWS call the caller has yet to make, rather
+	// than by RunInstances after the launch's security groups, IAM and FSx
+	// exist (#1336). The count includes the tags spawn adds after the launch
+	// (postLaunchTags).
+	if err := checkTagLimit(config, tags, len(tags)-beforeCustom); err != nil {
+		return nil, err
 	}
 
 	// --- Section 8: sweep parameter tags, LAST and budgeted (#477) ---
@@ -435,7 +446,7 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	// convenience record of the sweep point, and the sweep manifest remains
 	// authoritative — so a truncated tag set beats a launch that cannot start.
 	if config.SweepID != "" && len(config.Parameters) > 0 {
-		budget := awsMaxTagsPerResource - len(tags)
+		budget := launchTagLimit(config) - len(tags)
 		if budget < 0 {
 			budget = 0
 		}
@@ -454,10 +465,11 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		if dropped := len(keys) - emitted; dropped > 0 {
 			fmt.Fprintf(os.Stderr,
 				"⚠️  %d of %d sweep parameters were not tagged: the launch already uses %d of "+
-					"AWS's %d tags per resource.\n   The instance still runs with the full "+
-					"parameter set in its environment; only the spawn:param:* record is "+
-					"truncated (first %d by name kept).\n",
-				dropped, len(keys), len(tags)-emitted, awsMaxTagsPerResource, emitted)
+					"the %d tags per resource it may use (AWS's %d, less %d spawn writes after launch).\n"+
+					"   The instance still runs with the full parameter set in its environment; only the "+
+					"spawn:param:* record is truncated (first %d by name kept).\n",
+				dropped, len(keys), len(tags)-emitted, launchTagLimit(config), awsMaxTagsPerResource,
+				len(postLaunchTags(config)), emitted)
 		}
 	}
 

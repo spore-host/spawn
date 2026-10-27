@@ -119,6 +119,12 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 	if err := config.ValidateUserDataSize(); err != nil {
 		return nil, fmt.Errorf("provision: %w", err)
 	}
+	// And tags over AWS's 50-tag limit, which RunInstances would refuse after
+	// the AMI lookup and the IAM setup below (#1336). Counted with the
+	// username above, and the ephemeral FSx's tags if one is to be created.
+	if err := config.ValidateTagCount(); err != nil {
+		return nil, fmt.Errorf("provision: %w", err)
+	}
 
 	// 1. AMI auto-detection (lagotto#19 issue #1). GetRecommendedAMI derives the
 	// CPU architecture and GPU-ness from the instance type, so a g5/arm64 type

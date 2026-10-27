@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -244,5 +245,24 @@ func TestCompletionStatusUsesOnlyKnownValues(t *testing.T) {
 			t.Errorf("completionStatus(%d, %d) = %q, which is not an existing sweep status",
 				pair[0], pair[1], s)
 		}
+	}
+}
+
+// A member whose shipped tags would not fit in AWS's 50-tag limit is refused
+// before RunInstances, which would reject it (#1336). The CLI refuses it first;
+// this is the orchestrator's own backstop. At the limit it launches.
+func TestMemberOverTheTagLimitIsRefused(t *testing.T) {
+	now := time.Now()
+	shipped := cliTags(nil)
+	for i := 0; len(shipped) < maxInstanceTags; i++ {
+		shipped[fmt.Sprintf("user%02d", i)] = "v"
+	}
+	if tags := mustMemberTags(t, map[string]interface{}{tagsParam: shipped}, now); len(tags) != maxInstanceTags {
+		t.Fatalf("a member at the limit got %d tags, want %d", len(tags), maxInstanceTags)
+	}
+	shipped["one-more"] = "v"
+	_, err := memberTags(&SweepRecord{SweepID: "s", SweepName: "sw"}, map[string]interface{}{tagsParam: shipped}, 0, now)
+	if err == nil || !strings.Contains(err.Error(), "51 instance tags") {
+		t.Fatalf("a member with 51 tags: err=%v, want a refusal naming the count", err)
 	}
 }

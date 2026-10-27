@@ -731,7 +731,7 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// RunInstances tags all volumes uniformly, so per-volume snapshot tags must be
 	// applied here. Never fatal — a tagging failure must not fail the launch.
 	if len(launchConfig.AttachVolumes) > 0 {
-		if err := c.propagateSnapshotTagsToVolumes(ctx, ec2Client, result.Instances[0], launchConfig.AttachVolumes); err != nil {
+		if err := c.propagateSnapshotTagsToVolumes(ctx, ec2Client, result.Instances[0], launchConfig.AttachVolumes, tags); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  could not propagate snapshot tags to attached volumes: %v\n", err)
 		}
 	}
@@ -780,7 +780,11 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 // snapshot's name (which would confuse Cost Explorer / cleanup tooling). The
 // attach specs map to device names via AttachDeviceName in the same order as
 // buildBlockDevices, so volume i is found at AttachDeviceName(i).
-func (c *Client) propagateSnapshotTagsToVolumes(ctx context.Context, ec2Client *ec2.Client, instance types.Instance, specs []AttachVolumeSpec) error {
+//
+// volumeTags is the set RunInstances already put on every volume. The volume's
+// 50-tag limit is shared with it, and CreateTags fails the whole call when it
+// is exceeded, so only what fits is added, provenance first (#1336).
+func (c *Client) propagateSnapshotTagsToVolumes(ctx context.Context, ec2Client *ec2.Client, instance types.Instance, specs []AttachVolumeSpec, volumeTags []types.Tag) error {
 	// Map device name → created volume ID from the launch response.
 	volByDevice := map[string]string{}
 	for _, bdm := range instance.BlockDeviceMappings {
@@ -802,6 +806,14 @@ func (c *Client) propagateSnapshotTagsToVolumes(ctx context.Context, ec2Client *
 			for _, s := range desc.Snapshots {
 				tags = append(tags, propagatableSnapshotTags(s.Tags)...)
 			}
+		}
+		tags, dropped := fitVolumeTags(volumeTags, tags)
+		if len(dropped) > 0 {
+			fmt.Fprintf(os.Stderr, "⚠️  volume %s: %d snapshot tag(s) not copied, over AWS's %d tags per volume: %s\n",
+				volID, len(dropped), awsMaxTagsPerResource, strings.Join(dropped, ", "))
+		}
+		if len(tags) == 0 {
+			continue
 		}
 		if _, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 			Resources: []string{volID},

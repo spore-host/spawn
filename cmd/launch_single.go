@@ -225,6 +225,13 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// AWS's 50-tag limit (#1336), before the Strata upload below and everything
+	// launchWithProgress creates: the --tag values are in, and preflightLaunchTags
+	// stands in for the tags those steps add.
+	if err := preflightLaunchTags(config); err != nil {
+		return err
+	}
+
 	// Strata software environment selection. Skipped under --dry-run/--print-config
 	// (#569): resolveStrataEnvironment's UploadLockfile writes to S3 — an actual
 	// AWS mutation — so a dry run must not call it. Note the tag as unresolved
