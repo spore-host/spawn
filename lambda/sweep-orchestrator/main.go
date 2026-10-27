@@ -832,6 +832,15 @@ func getStringParam(params map[string]interface{}, key, defaultValue string) str
 	return defaultValue
 }
 
+func getBoolParam(params map[string]interface{}, key string, defaultValue bool) bool {
+	if v, ok := params[key]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return defaultValue
+}
+
 // getRawParam returns params[key] undecoded, and whether it is present.
 func getRawParam(params map[string]interface{}, key string) (interface{}, bool) {
 	v, ok := params[key]

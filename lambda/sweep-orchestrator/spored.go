@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -96,7 +97,7 @@ func buildRunInstancesInput(state *SweepRecord, config map[string]interface{}, p
 	if keyName := getStringParam(config, "key_name", ""); keyName != "" {
 		input.KeyName = aws.String(keyName)
 	}
-	if err := applyMemberLaunchSettings(input, config, paramIndex); err != nil {
+	if err := applyMemberLaunchSettings(input, state, config, paramIndex); err != nil {
 		return nil, err
 	}
 	return input, nil
@@ -110,20 +111,40 @@ func buildRunInstancesInput(state *SweepRecord, config map[string]interface{}, p
 // holds the two together.
 const launchSettingsParam = "spawn_launch_settings"
 
+// legacySpotParam is the bare Spot flag a CLI older than #1353 uploads, and
+// the only RunInstances-side setting this Lambda applied before it.
+const legacySpotParam = "spot"
+
+// legacyLogged records the sweeps already logged as launching from legacy
+// params, so the line is written once per sweep in an execution environment
+// rather than once per member.
+var legacyLogged sync.Map
+
 // applyMemberLaunchSettings applies member paramIndex's launch settings to
 // input, composed as a foreground launch composes them (spawnaws.LaunchSettings.Apply).
 //
 // This Lambda used to set only a bare Spot market option here, so everything
-// else a member asked RunInstances for was dropped (#1353). A member without
-// settings, or with settings this build cannot fully apply (a newer schema, a
-// field it does not know), is refused rather than launched without them.
-func applyMemberLaunchSettings(input *ec2.RunInstancesInput, config map[string]interface{}, paramIndex int) error {
+// else a member asked RunInstances for was dropped (#1353).
+//
+// Params without launchSettingsParam come from a CLI older than #1353, or from
+// a schedule such a CLI created, whose params are replayed as uploaded for the
+// schedule's whole life. They launch as they did before: the bare Spot flag and
+// nothing else. This Lambda is shared, hosted infrastructure, and refusing them
+// would break every such sweep and schedule when it is redeployed.
+//
+// Params that do carry settings are held to them: a member whose settings this
+// build cannot fully apply (a missing or other schema, a field it does not
+// know) is refused rather than launched without them.
+func applyMemberLaunchSettings(input *ec2.RunInstancesInput, state *SweepRecord, config map[string]interface{}, paramIndex int) error {
 	raw, ok := getRawParam(config, launchSettingsParam)
 	if !ok {
-		return fmt.Errorf("param set %d carries no launch settings (%s), so its volume size, network, placement, "+
-			"Spot and hibernation settings would all be dropped; it was not launched. The sweep was created by a "+
-			"spawn CLI older than this orchestrator: re-run it, or re-create the schedule, with a current spawn (#1353)",
-			paramIndex, launchSettingsParam)
+		logLegacySettings(state, config)
+		if getBoolParam(config, legacySpotParam, false) {
+			input.InstanceMarketOptions = &ec2types.InstanceMarketOptionsRequest{
+				MarketType: ec2types.MarketTypeSpot,
+			}
+		}
+		return nil
 	}
 	settings, err := spawnaws.DecodeLaunchSettings(raw)
 	if err != nil {
@@ -133,6 +154,22 @@ func applyMemberLaunchSettings(input *ec2.RunInstancesInput, config map[string]i
 		return fmt.Errorf("param set %d: %w; it was not launched", paramIndex, err)
 	}
 	return nil
+}
+
+// logLegacySettings logs, once per sweep, that its members launch from legacy
+// params, naming the spawn that rendered them when its tags say.
+func logLegacySettings(state *SweepRecord, config map[string]interface{}) {
+	if _, done := legacyLogged.LoadOrStore(state.SweepID, true); done {
+		return
+	}
+	version := "not recorded"
+	if v, ok := getMapParam(config, tagsParam)["spawn:version"].(string); ok && v != "" {
+		version = v
+	}
+	log.Printf("Sweep %s: params carry no %s (spawn CLI version: %s, older than #1353), so its members launch "+
+		"as before, with only the bare spot flag: volume size, network, placement, Spot max price and "+
+		"hibernation settings are not carried. Re-run the sweep, or re-create the schedule, with a current spawn "+
+		"to carry them", state.SweepID, launchSettingsParam, version)
 }
 
 // sporedBudget is how long inst may run without a heartbeat.

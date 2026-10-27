@@ -26,8 +26,10 @@ var detachedParamKeys = []string{
 	"iam_role",
 	"instance_type",
 	"key_name",
-	// spot is not read since #1353: it reaches the orchestrator in
-	// detachedLaunchSettingsKey with the rest of the RunInstances-side settings.
+	// spot is read only from legacy params, which carry no
+	// detachedLaunchSettingsKey (#1353); still seeded, since the cost estimator
+	// reads it too.
+	"spot",
 	// ttl is not read since #1330: it reaches the orchestrator as spawn:ttl in
 	// detachedTagsKey, which the Lambda turns into spawn:ttl-deadline.
 	// The member's spored bootstrap (#1323), rendered by seedDetachedBootstrap
