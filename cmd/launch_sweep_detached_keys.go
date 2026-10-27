@@ -27,10 +27,13 @@ var detachedParamKeys = []string{
 	"instance_type",
 	"key_name",
 	"spot",
-	"ttl",
+	// ttl is not read since #1330: it reaches the orchestrator as spawn:ttl in
+	// detachedTagsKey, which the Lambda turns into spawn:ttl-deadline.
 	// The member's spored bootstrap (#1323), rendered by seedDetachedBootstrap
 	// rather than seedDetachedLaunchKeys, since it needs every other key first.
 	detachedUserDataKey,
+	// The member's instance tags (#1330), rendered beside its user data.
+	detachedTagsKey,
 }
 
 // NOTE: `region` is deliberately NOT in the list above, and the gate caught me

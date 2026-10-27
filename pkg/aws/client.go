@@ -32,7 +32,6 @@ import (
 	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
-	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
 // Client wraps an AWS SDK configuration and provides EC2 lifecycle operations
@@ -174,8 +173,13 @@ type LaunchConfig struct {
 	// default VPC, which is what every call site assumed unconditionally
 	// before #673 — so `--vpc` was accepted and the instance launched in the
 	// default VPC anyway.
-	VPCID          string
-	UserData       string // User-data, already base64-encoded (passed verbatim to RunInstances, which rejects non-base64 — #127). CLI uses encodeUserDataForOS; SDK callers use launcher.EncodeLinuxUserData.
+	VPCID    string
+	UserData string // User-data, already base64-encoded (passed verbatim to RunInstances, which rejects non-base64 — #127). CLI uses encodeUserDataForOS; SDK callers use launcher.EncodeLinuxUserData.
+	// CustomUserData is the caller's own script, run after spawn's bootstrap,
+	// that the CLI's user-data builder appends after --user-data's (a sweep
+	// row's user_data:, #1327). Never sent to EC2 as is: UserData carries the
+	// built result.
+	CustomUserData string
 	ClientToken    string // Optional RunInstances idempotency token; deterministic in (cluster,entity,generation) for callers like cohort (#108). Empty = today's behavior.
 	Spot           bool   // If true, launch as a Spot instance
 	SpotMaxPrice   string // Optional Spot max price in $/hr, e.g. "0.50"; empty = on-demand cap
@@ -531,32 +535,15 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// request's hibernate interruption behaviour all follow from it.
 	c.prepareHibernation(ctx, &launchConfig)
 
-	// Get caller identity for per-user isolation tagging
-	accountID, userARN, err := c.GetCallerIdentityInfo(ctx)
+	// Tags, through the code that also renders a detached sweep member's (#1330):
+	// caller identity, account name, the on-demand price via truffle (#533,
+	// stored in spawn:price-per-hour so spored can compute effective cost; see
+	// [resolvePricePerHour]), then buildTags.
+	tagger, err := c.NewLaunchTagger(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get caller identity: %w", err)
-	}
-
-	// Resolve the on-demand price via truffle and store it in the
-	// spawn:price-per-hour tag so spored can compute effective cost without
-	// needing to know the instance type at runtime.
-	//
-	// Windows is priced differently (#1058), so it must be known here. TargetOS is
-	// set by the CLI launch path but not by every caller (sweeps, burst, app, other
-	// repos), and "" means Linux. When a cost limit makes the answer matter and
-	// TargetOS does not give it, ask the AMI — one DescribeImages, only then.
-	windows := launchIsWindowsForPricing(ctx, launchConfig, c.IsWindowsAMI)
-	if err := resolvePricePerHour(ctx, truffleaws.NewClientFromConfig(c.cfg), &launchConfig, windows); err != nil {
 		return nil, err
 	}
-
-	// Resolve the account's friendly name into a DNS-safe slug for a legible
-	// FQDN ({name}.{account-name}.spore.host). Best-effort: empty when unset or
-	// not permitted, in which case the DNS updater falls back to base36 (#121).
-	accountNameSlug := slugifyDNSLabel(c.GetAccountName(ctx))
-
-	// Build tags (including account and user tags for per-user isolation)
-	tags, err := buildTags(launchConfig, accountID, userARN, accountNameSlug)
+	tags, err := tagger.tags(ctx, &launchConfig)
 	if err != nil {
 		return nil, err
 	}

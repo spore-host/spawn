@@ -67,6 +67,11 @@ func buildRunInstancesInput(state *SweepRecord, config map[string]interface{}, p
 			paramIndex, userDataParam)
 	}
 
+	tags, err := memberTags(state, config, paramIndex, now)
+	if err != nil {
+		return nil, err
+	}
+
 	input := &ec2.RunInstancesInput{
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
@@ -78,15 +83,11 @@ func buildRunInstancesInput(state *SweepRecord, config map[string]interface{}, p
 		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{
 			Name: aws.String(getStringParam(config, "iam_role", spawnaws.SporedInstanceProfileName)),
 		},
+		// The member's tags as a foreground launch writes them, on the instance
+		// and its volumes, as a foreground launch puts them (#1330).
 		TagSpecifications: []ec2types.TagSpecification{
-			{
-				ResourceType: ec2types.ResourceTypeInstance,
-				Tags: append([]ec2types.Tag{
-					{Key: aws.String("spawn:sweep-id"), Value: aws.String(state.SweepID)},
-					{Key: aws.String("spawn:sweep-index"), Value: aws.String(fmt.Sprintf("%d", paramIndex))},
-					{Key: aws.String("Name"), Value: aws.String(fmt.Sprintf("%s-%d", state.SweepName, paramIndex))},
-				}, sweepRowLifecycleTags(config, now)...),
-			},
+			{ResourceType: ec2types.ResourceTypeInstance, Tags: tags},
+			{ResourceType: ec2types.ResourceTypeVolume, Tags: tags},
 		},
 	}
 	if ami := getStringParam(config, "ami", ""); ami != "" {

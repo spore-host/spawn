@@ -293,6 +293,15 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// iam_role from there too (lambda/sweep-orchestrator/main.go). A row's own
 	// iam_role: still wins — same precedence already established for spend
 	// controls: row's own params: > CLI flag > file's defaults:.
+	//
+	// A detached sweep's members are launched by the orchestrator, which may
+	// pass only the roles spawn creates (#1331): refuse any other profile here,
+	// before applyCLIIAMToSweep creates a role for a sweep that cannot use it.
+	if detach && maxConcurrent > 0 {
+		if err := refuseUnpassableDetachedProfiles(paramFormat); err != nil {
+			return err
+		}
+	}
 	if err := applyCLIIAMToSweep(ctx, awsClient, paramFormat, auditLog); err != nil {
 		return err
 	}
@@ -304,24 +313,21 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 
 	// Build launch configs for each parameter set
 	launchConfigs := make([]*aws.LaunchConfig, 0, len(paramFormat.Params))
+	hasDefaultApplied := false
+	var defaultedVerbs []string // the idle action each defaulted config really gets (#1151)
 	for i, paramSet := range paramFormat.Params {
 		config, err := buildLaunchConfigFromParams(*baseConfig, paramFormat.Defaults, paramSet, sweepID, name, i, len(paramFormat.Params))
 		if err != nil {
 			return fmt.Errorf("failed to build launch config for parameter set %d: %w", i, err)
 		}
 
-		// Copy base config fields that weren't in params. instance_type is a
-		// per-entry override (#372): if an entry omits it, fall back to the
-		// top-level --instance-type so a mixed file can leave some rows on the
-		// CLI default.
-		if config.Region == "" {
-			config.Region = baseConfig.Region
-		}
-		if config.InstanceType == "" {
-			config.InstanceType = baseConfig.InstanceType
-		}
-		if config.Name == "" {
-			config.Name = fmt.Sprintf("%s-%d", name, i)
+		// The per-member defaults, shared with the detached path's tag and user
+		// data rendering (#1330), so a member is the same config either way.
+		if defaultSweepMember(&config, *baseConfig, name, i) {
+			hasDefaultApplied = true
+			if v := idleActionVerb(&config); !slices.Contains(defaultedVerbs, v) {
+				defaultedVerbs = append(defaultedVerbs, v)
+			}
 		}
 
 		launchConfigs = append(launchConfigs, &config)
@@ -464,18 +470,8 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 	prog.Complete("Setting up IAM role")
 
-	// Zombie-instance guard: apply the 1h idle-timeout default across all sweep
-	// configs (shared per-config helper), warning once for the whole sweep.
-	hasDefaultApplied := false
-	var defaultedVerbs []string // the idle action each defaulted config really gets (#1151)
-	for _, cfg := range launchConfigs {
-		if applyIdleTimeoutDefault(cfg) {
-			hasDefaultApplied = true
-			if v := idleActionVerb(cfg); !slices.Contains(defaultedVerbs, v) {
-				defaultedVerbs = append(defaultedVerbs, v)
-			}
-		}
-	}
+	// Zombie-instance guard: the 1h idle-timeout default was applied to every
+	// config with no bound (defaultSweepMember, above); warn once for the sweep.
 	if hasDefaultApplied {
 		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h for all sweep instances\n")
 		fmt.Fprintf(os.Stderr, "   Instances will %s after 1 hour of inactivity.\n", strings.Join(defaultedVerbs, " or "))
@@ -503,6 +499,25 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		sweepID: sweepID, name: name, paramFile: paramFile, totalParams: len(paramFormat.Params),
 		maxConcurrent: maxConcurrent, launchDelay: launchDelay, configs: launchConfigs,
 	})
+}
+
+// defaultSweepMember fills in what a sweep member's config takes from outside
+// its row, on both orchestration paths: the CLI's region and instance type (an
+// entry may omit instance_type and fall back to --instance-type, #372), the
+// name <sweep>-<index>, and the 1h idle timeout for a member with no ttl and no
+// idle_timeout (applyIdleTimeoutDefault). It reports whether that default was
+// applied.
+func defaultSweepMember(cfg *aws.LaunchConfig, base aws.LaunchConfig, sweepName string, index int) bool {
+	if cfg.Region == "" {
+		cfg.Region = base.Region
+	}
+	if cfg.InstanceType == "" {
+		cfg.InstanceType = base.InstanceType
+	}
+	if cfg.Name == "" {
+		cfg.Name = fmt.Sprintf("%s-%d", sweepName, index)
+	}
+	return applyIdleTimeoutDefault(cfg)
 }
 
 // sweepRun is what runSweepLaunch needs about the sweep.

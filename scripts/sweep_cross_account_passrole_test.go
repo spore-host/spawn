@@ -19,9 +19,11 @@ import (
 // the Lambda assumes in the member account, SpawnSweepCrossAccountRole. It used
 // to name only spawnd-role, so every member would have been refused.
 //
-// The grant must name spored's role (read from pkg/aws, not written here), stay
-// exact (no wildcard: a PassRole on role/* lets the orchestrator hand any role
-// in the account to an instance), and stay limited to EC2.
+// The grant must name spored's role (read from pkg/aws, not written here) and
+// the spawn-instance-* roles spawn creates for --iam-policy and friends (#1331,
+// the prefix read from pkg/instancerole), stay otherwise exact (no other
+// wildcard: a PassRole on role/* lets the orchestrator hand any role in the
+// account to an instance), and stay limited to EC2.
 func TestSweepCrossAccountRoleMayPassSporedsRole(t *testing.T) {
 	src, err := os.ReadFile("setup-sweep-cross-account-role.sh")
 	if err != nil {
@@ -54,6 +56,15 @@ func TestSweepCrossAccountRoleMayPassSporedsRole(t *testing.T) {
 		t.Fatal("cannot read SporedRoleName from pkg/aws/iam.go")
 	}
 	sporedRole := "arn:aws:iam::111122223333:role/" + string(rm[1])
+	irGo, err := os.ReadFile(filepath.Join(repoRoot(t), "pkg", "instancerole", "instancerole.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pm := regexp.MustCompile(`(?m)^\s*NamePrefix\s*=\s*"([^"]+)"`).FindSubmatch(irGo)
+	if pm == nil {
+		t.Fatal("cannot read NamePrefix from pkg/instancerole/instancerole.go")
+	}
+	perPolicy := "arn:aws:iam::111122223333:role/" + string(pm[1]) + "*"
 
 	list := func(v interface{}) []string {
 		switch x := v.(type) {
@@ -84,10 +95,14 @@ func TestSweepCrossAccountRoleMayPassSporedsRole(t *testing.T) {
 		passStatements++
 		res := list(st.Resource)
 		sort.Strings(res)
-		hasSpored := false
+		hasSpored, hasPerPolicy := false, false
 		for _, r := range res {
+			if r == perPolicy {
+				hasPerPolicy = true
+				continue
+			}
 			if strings.Contains(r, "*") {
-				t.Errorf("PassRole resource %q is a wildcard", r)
+				t.Errorf("PassRole resource %q is a wildcard other than spawn's %s", r, perPolicy)
 			}
 			if r == sporedRole {
 				hasSpored = true
@@ -95,6 +110,9 @@ func TestSweepCrossAccountRoleMayPassSporedsRole(t *testing.T) {
 		}
 		if !hasSpored {
 			t.Errorf("PassRole resources %v do not include %s: every detached member's RunInstances is refused", res, sporedRole)
+		}
+		if !hasPerPolicy {
+			t.Errorf("PassRole resources %v do not include %s: a detached sweep with --iam-policy has every member refused (#1331)", res, perPolicy)
 		}
 		if got := st.Condition["StringEquals"]["iam:PassedToService"]; got != "ec2.amazonaws.com" {
 			t.Errorf("PassRole is not limited to EC2 (iam:PassedToService = %q)", got)

@@ -33,6 +33,11 @@ func propagatableSnapshotTags(snapTags []types.Tag) []types.Tag {
 	return out
 }
 
+// tagClock is the instant buildTags records as the launch, a variable so a test
+// can render the same config at two instants and see which tags move
+// (TestAnchorLaunchTagsMovesEveryInstant).
+var tagClock = time.Now
+
 // buildTags returns an error, rather than a partial tag set, when a lifecycle
 // duration cannot be parsed: a spawn:ttl with no spawn:ttl-deadline, or a
 // spawn:idle-timeout spored cannot read, launches an instance that nothing
@@ -87,7 +92,7 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 
 	// --- Section 3: lifecycle ---
 	// Record the absolute launch time once — survives stop/wake cycles.
-	launchAt := time.Now().UTC()
+	launchAt := tagClock().UTC()
 	launchTime := launchAt.Format(time.RFC3339)
 	tags = append(tags, types.Tag{Key: aws.String("spawn:launch-time"), Value: aws.String(launchTime)})
 	var ttlDeadline time.Time // zero when there is no TTL; read by the Spot ValidUntil below
@@ -382,7 +387,7 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		tags = append(tags, types.Tag{Key: aws.String("spawn:job-array-name"), Value: aws.String(config.JobArrayName)})
 		tags = append(tags, types.Tag{Key: aws.String("spawn:job-array-size"), Value: aws.String(fmt.Sprintf("%d", config.JobArraySize))})
 		tags = append(tags, types.Tag{Key: aws.String("spawn:job-array-index"), Value: aws.String(fmt.Sprintf("%d", config.JobArrayIndex))})
-		tags = append(tags, types.Tag{Key: aws.String("spawn:job-array-created"), Value: aws.String(time.Now().Format(time.RFC3339))})
+		tags = append(tags, types.Tag{Key: aws.String("spawn:job-array-created"), Value: aws.String(launchAt.Format(time.RFC3339))})
 	}
 
 	// Parameter sweep tags

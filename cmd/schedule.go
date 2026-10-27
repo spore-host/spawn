@@ -292,10 +292,7 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	nextExecTime := calculateNextExecution(scheduleExpr, scheduleTimezone)
 
 	// Determine sweep name
-	sweepName := scheduleName
-	if sweepName == "" {
-		sweepName = params.getSweepName()
-	}
+	sweepName := scheduleSweepName(params)
 
 	// Create schedule record
 	record := &scheduler.ScheduleRecord{
@@ -589,6 +586,9 @@ type parsedParams struct {
 // sweep, which refuses a member with no bootstrap.
 func seedScheduleParams(ctx context.Context, client *aws.Client, p *parsedParams, region string, profiles sporedProfileEnsurer, boot detachedBootstrap) ([]byte, error) {
 	pf := &ParamFileFormat{Defaults: p.defaults, Params: p.params}
+	if err := refuseUnpassableDetachedProfiles(pf); err != nil {
+		return nil, err
+	}
 	if err := seedDetachedLaunchKeys(ctx, client, pf, &aws.LaunchConfig{}, region); err != nil {
 		return nil, err
 	}
@@ -604,7 +604,7 @@ func seedScheduleParams(ctx context.Context, client *aws.Client, p *parsedParams
 			view.Defaults[k] = v
 		}
 	}
-	if err := seedDetachedBootstrap(view, aws.LaunchConfig{}, scheduledSweepIDPlaceholder, p.getSweepName(), boot); err != nil {
+	if err := seedDetachedBootstrap(view, aws.LaunchConfig{}, scheduledSweepIDPlaceholder, scheduleSweepName(p), boot); err != nil {
 		return nil, err
 	}
 	delete(pf.Defaults, detachedUserDataKey)
@@ -612,6 +612,15 @@ func seedScheduleParams(ctx context.Context, client *aws.Client, p *parsedParams
 		pf.Defaults[detachedUserDataKey] = ud
 	}
 	return json.Marshal(pf)
+}
+
+// scheduleSweepName is the sweep name a schedule's runs carry: --name, else the
+// file's defaults: sweep_name.
+func scheduleSweepName(p *parsedParams) string {
+	if scheduleName != "" {
+		return scheduleName
+	}
+	return p.getSweepName()
 }
 
 // scheduleOnlyKeys are the defaults: keys a schedule reads for itself.

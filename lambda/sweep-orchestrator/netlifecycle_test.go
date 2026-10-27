@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,92 +21,142 @@ func tagValue(tags []ec2types.Tag, key string) (string, bool) {
 	return "", false
 }
 
-// TestSweepRowIsReapable is spawn#725.
-//
-// A detached sweep is the DEFAULT — launchParameterSweep auto-enables it — and
-// these rows carried only spawn:sweep-id, spawn:sweep-index and Name. With no
-// UserData there is no spored, so nothing in-instance enforces TTL, idle or
-// cost; and with no spawn:managed tag the reaper could not act either, because
-// its ec2:TerminateInstances grant is conditioned on
-// ec2:ResourceTag/spawn:managed=true.
-//
-// So the rows could be stopped by NOTHING: no enforcement inside, no permission
-// outside. That inverts the lifecycle invariant (#70/#72). This tag restores the
-// backstop.
-func TestSweepRowIsReapable(t *testing.T) {
-	tags := sweepRowLifecycleTags(map[string]interface{}{}, time.Now())
-
-	v, ok := tagValue(tags, "spawn:managed")
-	if !ok {
-		t.Fatal("no spawn:managed tag — the reaper's terminate is conditioned on exactly " +
-			"this tag, so without it a detached sweep row cannot be stopped by anything")
+// cliTags is a member's tags as the CLI ships them (encodeDetachedTags): the
+// baseline buildTags always writes, rendered at some earlier instant, plus
+// extra.
+func cliTags(extra map[string]string) map[string]interface{} {
+	m := map[string]interface{}{
+		"spawn:managed":     "true",
+		"spawn:root":        "true",
+		"spawn:created-by":  "spawn",
+		"spawn:launch-time": "2026-01-01T00:00:00Z",
+		"Name":              "sw-3",
+		"spawn:sweep-id":    "scheduled",
+		"spawn:sweep-name":  "sw",
+		"spawn:sweep-size":  "4",
+		"spawn:sweep-index": "3",
 	}
-	if v != "true" {
-		t.Errorf("spawn:managed = %q, want \"true\" — the condition is StringEquals, so any "+
-			"other value is an implicitDeny and the instance is unreapable", v)
+	for k, v := range extra {
+		m[k] = v
 	}
+	return m
 }
 
-// TestSweepRowCarriesTheTTLDeadlineWhenThereIsOne: the reaper prefers
-// spawn:ttl-deadline over its own max-age ceiling, so passing the sweep's ttl
-// through means a row is reclaimed near when the user asked rather than at the
-// global ceiling.
-func TestSweepRowCarriesTheTTLDeadlineWhenThereIsOne(t *testing.T) {
-	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
-	tags := sweepRowLifecycleTags(map[string]interface{}{"ttl": "45m"}, now)
-
-	v, ok := tagValue(tags, "spawn:ttl-deadline")
-	if !ok {
-		t.Fatal("no spawn:ttl-deadline despite ttl=45m in the sweep's defaults — the CLI " +
-			"already writes ttl there (applyCLISpendControlsToSweep) and it reaches this " +
-			"Lambda, so there is nothing to plumb")
-	}
-	got, err := time.Parse(time.RFC3339, v)
+func mustMemberTags(t *testing.T, config map[string]interface{}, now time.Time) []ec2types.Tag {
+	t.Helper()
+	tags, err := memberTags(&SweepRecord{SweepID: "sw-20261026", SweepName: "sw"}, config, 3, now)
 	if err != nil {
-		t.Fatalf("spawn:ttl-deadline = %q, which the reaper parses as RFC3339: %v", v, err)
+		t.Fatal(err)
 	}
-	if want := now.Add(45 * time.Minute); !got.Equal(want) {
-		t.Errorf("deadline = %v, want %v", got, want)
-	}
+	return tags
 }
 
-// TestSweepRowOmitsTheDeadlineWhenThereIsNoTTL: an absent deadline is correct
-// rather than guessed. The reaper falls back to REAPER_MAX_AGE, which still
-// bounds the instance — whereas a fabricated deadline would terminate work the
-// user never put a clock on.
-func TestSweepRowOmitsTheDeadlineWhenThereIsNoTTL(t *testing.T) {
-	for _, cfg := range []map[string]interface{}{
-		{},                        // no ttl at all
-		{"ttl": ""},               // present but empty
-		{"ttl": "not-a-duration"}, // unparseable
-		{"ttl": "0s"},             // zero
+// TestSweepRowIsReapable is spawn#725: spawn:managed=true is the rail the TTL
+// reaper's terminate is conditioned on (ec2:ResourceTag/spawn:managed), so a
+// member without it can be stopped by nothing out of band. The Lambda owns it:
+// a member carries it whatever the shipped tags say.
+func TestSweepRowIsReapable(t *testing.T) {
+	missing := cliTags(nil)
+	delete(missing, "spawn:managed")
+	for name, shipped := range map[string]map[string]interface{}{
+		"absent": missing, "false": cliTags(map[string]string{"spawn:managed": "false"}),
 	} {
-		tags := sweepRowLifecycleTags(cfg, time.Now())
-		if v, ok := tagValue(tags, "spawn:ttl-deadline"); ok {
-			t.Errorf("config %v produced a deadline %q; a guessed deadline would terminate "+
-				"work the user never put a clock on", cfg, v)
-		}
-		// managed must still be present — reapability does not depend on a ttl.
-		if _, ok := tagValue(tags, "spawn:managed"); !ok {
-			t.Errorf("config %v lost spawn:managed; the backstop must not depend on a ttl", cfg)
+		v, ok := tagValue(mustMemberTags(t, map[string]interface{}{tagsParam: shipped}, time.Now()), "spawn:managed")
+		if !ok || v != "true" {
+			t.Errorf("shipped spawn:managed %s: got %q (present %v), want \"true\": the reaper's StringEquals "+
+				"condition leaves any other value unreapable", name, v, ok)
 		}
 	}
 }
 
-// TestBothLaunchPathsStampTheTags: the orchestrator has TWO RunInstances call
-// sites — single-region and multi-region. Fixing one and not the other would
-// leave the tags depending on which sweep shape a caller used, which is exactly
-// the kind of half-fix that hides.
-func TestBothLaunchPathsStampTheTags(t *testing.T) {
-	src := readMainForTest(t)
-	runs := strings.Count(src, "ec2types.ResourceTypeInstance")
-	stamps := strings.Count(src, "sweepRowLifecycleTags(config,")
-	if runs == 0 {
-		t.Fatal("found no instance tag specifications; the matcher is stale")
+// TestMemberTTLCountsFromTheRealLaunch is #1330's deadline half: a member with
+// a ttl carries spawn:ttl-deadline, measured from when this Lambda launched it,
+// not from when the CLI rendered its tags (a scheduled member launches days
+// later), and its spawn:launch-time is that same instant. Day units parse as
+// the CLI's do (#990).
+func TestMemberTTLCountsFromTheRealLaunch(t *testing.T) {
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	for ttl, want := range map[string]time.Duration{"45m": 45 * time.Minute, "24h0m0s": 24 * time.Hour, "1d": 24 * time.Hour, "2d12h": 60 * time.Hour} {
+		shipped := cliTags(map[string]string{"spawn:ttl": ttl, "spawn:ttl-deadline": "2026-01-01T00:45:00Z"})
+		tags := mustMemberTags(t, map[string]interface{}{tagsParam: shipped}, now)
+		v, ok := tagValue(tags, "spawn:ttl-deadline")
+		if !ok {
+			t.Errorf("ttl %q: no spawn:ttl-deadline", ttl)
+			continue
+		}
+		if got, err := time.Parse(time.RFC3339, v); err != nil || !got.Equal(now.Add(want)) {
+			t.Errorf("ttl %q: deadline %q, want %v (the launch plus the ttl)", ttl, v, now.Add(want))
+		}
+		if lt, _ := tagValue(tags, "spawn:launch-time"); lt != now.Format(time.RFC3339) {
+			t.Errorf("ttl %q: spawn:launch-time %q, want the real launch %s", ttl, lt, now.Format(time.RFC3339))
+		}
 	}
-	if stamps != runs {
-		t.Errorf("%d instance tag specification(s) but only %d call sweepRowLifecycleTags — "+
-			"a row's reapability would depend on which launch path ran", runs, stamps)
+
+	// A ttl the deadline cannot be derived from refuses the member: it would
+	// otherwise launch with no deadline.
+	_, err := memberTags(&SweepRecord{SweepID: "s"}, map[string]interface{}{tagsParam: cliTags(map[string]string{"spawn:ttl": "soon"})}, 0, now)
+	if err == nil {
+		t.Error("a member whose spawn:ttl cannot be parsed was given tags; it would run with no deadline")
+	}
+
+	// No ttl, no deadline: one would terminate work the user put no clock on.
+	// (The CLI gives such a member the 1h idle default, in its shipped tags.)
+	tags := mustMemberTags(t, map[string]interface{}{tagsParam: cliTags(map[string]string{"spawn:idle-timeout": "1h"})}, now)
+	if v, ok := tagValue(tags, "spawn:ttl-deadline"); ok {
+		t.Errorf("a member with no ttl got a deadline %q", v)
+	}
+	if v, _ := tagValue(tags, "spawn:idle-timeout"); v != "1h" {
+		t.Errorf("spawn:idle-timeout = %q, want the CLI's 1h", v)
+	}
+}
+
+// TestMemberLaunchesWithTheCLIsTags is #1330's Lambda half: RunInstances tags
+// the instance and its volumes with exactly the CLI's rendered set, re-anchored
+// (spawnaws.AnchorLaunchTags), with the sweep identity this Lambda owns. The
+// CLI half (cmd/launch_sweep_detached_bootstrap_test.go) proves the rendered
+// set is what a foreground launch of the member writes.
+func TestMemberLaunchesWithTheCLIsTags(t *testing.T) {
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	shipped := cliTags(map[string]string{
+		"spawn:command": "python train.py", "spawn:param:alpha": "0.1", "spawn:cost-limit": "8.0000",
+		"spawn:on-complete": "terminate", "spawn:ttl": "2h", "spawn:ttl-deadline": "2026-01-01T02:00:00Z",
+	})
+	state := &SweepRecord{SweepID: "sw-20261026", SweepName: "sw"}
+	in, err := buildRunInstancesInput(state, map[string]interface{}{userDataParam: "x", tagsParam: shipped}, 3, "t3.micro", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{}
+	for k, v := range shipped {
+		want[k] = v.(string)
+	}
+	want["spawn:sweep-id"] = "sw-20261026" // a schedule's run gets its ID when it fires
+	want["spawn:launch-time"] = now.Format(time.RFC3339)
+	want["spawn:ttl-deadline"] = now.Add(2 * time.Hour).Format(time.RFC3339)
+
+	specs := map[ec2types.ResourceType]bool{}
+	for _, spec := range in.TagSpecifications {
+		specs[spec.ResourceType] = true
+		got := map[string]string{}
+		for _, tg := range spec.Tags {
+			if _, dup := got[awssdk.ToString(tg.Key)]; dup {
+				t.Errorf("%s: duplicate tag %s, which fails RunInstances", spec.ResourceType, awssdk.ToString(tg.Key))
+			}
+			got[awssdk.ToString(tg.Key)] = awssdk.ToString(tg.Value)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s tags =\n  %v\nwant\n  %v", spec.ResourceType, got, want)
+		}
+	}
+	if !specs[ec2types.ResourceTypeInstance] || !specs[ec2types.ResourceTypeVolume] {
+		t.Errorf("tag specifications cover %v, want the instance and its volumes, as a foreground launch", specs)
+	}
+
+	// No rendered tags: refused, as for a missing bootstrap.
+	in, err = buildRunInstancesInput(state, map[string]interface{}{userDataParam: "x"}, 0, "t3.micro", now)
+	if err == nil || in != nil || !strings.Contains(err.Error(), tagsParam) {
+		t.Errorf("a member with no rendered tags: input=%v err=%v, want a refusal naming %s", in, err, tagsParam)
 	}
 }
 
@@ -192,24 +243,6 @@ func TestCompletionStatusUsesOnlyKnownValues(t *testing.T) {
 		if s := completionStatus(pair[0], pair[1]); !known[s] {
 			t.Errorf("completionStatus(%d, %d) = %q, which is not an existing sweep status",
 				pair[0], pair[1], s)
-		}
-	}
-}
-
-// #990: the CLI accepts day units for a sweep's ttl, and so must the Lambda,
-// with the same parser. time.ParseDuration rejected "1d", so a detached sweep
-// row with `ttl: 1d` got no deadline and lived until the reaper's 7-day
-// max-age ceiling.
-func TestSweepRowDeadlineAcceptsDayUnits(t *testing.T) {
-	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
-	for ttl, want := range map[string]time.Duration{"1d": 24 * time.Hour, "2d12h": 60 * time.Hour, "1.5d": 36 * time.Hour} {
-		v, ok := tagValue(sweepRowLifecycleTags(map[string]interface{}{"ttl": ttl}, now), "spawn:ttl-deadline")
-		if !ok {
-			t.Errorf("ttl %q: no spawn:ttl-deadline", ttl)
-			continue
-		}
-		if got, err := time.Parse(time.RFC3339, v); err != nil || !got.Equal(now.Add(want)) {
-			t.Errorf("ttl %q: deadline %q, want %v", ttl, v, now.Add(want))
 		}
 	}
 }

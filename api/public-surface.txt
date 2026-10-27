@@ -225,6 +225,7 @@ field LaunchConfig.CompletionDelay string
 field LaunchConfig.CompletionFile string
 field LaunchConfig.CompletionWebhookURL string
 field LaunchConfig.CostLimit float64
+field LaunchConfig.CustomUserData string
 field LaunchConfig.DCVSessionID string
 field LaunchConfig.DNSDomain string
 field LaunchConfig.DNSEndpoint string
@@ -455,6 +456,7 @@ func (*Client) ListInstances(ctx context.Context, region string, stateFilter str
 func (*Client) ListInstancesInRegions(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, []string, error)
 func (*Client) ListS3Keys(ctx context.Context, region, bucket, prefix, expectedOwner string) ([]string, error)
 func (*Client) LiveInstancesWithTag(ctx context.Context, region, key, value string) ([]InstanceInfo, error)
+func (*Client) NewLaunchTagger(ctx context.Context) (*LaunchTagger, error)
 func (*Client) OpenImageSource(ctx context.Context, source, region string) (io.ReadCloser, error)
 func (*Client) PrepareSnapshotImage(ctx context.Context, source, region string, maxBytes int64, tempDir string) (*PreparedImage, error)
 func (*Client) PurchaseCapacityBlock(ctx context.Context, region, offeringID, platform string, dryRun bool, tags map[string]string) (string, error)
@@ -493,6 +495,8 @@ func (*Client) WaitForSSMOnlineProgress(ctx context.Context, region, instanceID 
 func (*Client) WaitForStopped(ctx context.Context, region, instanceID string, timeout time.Duration) error
 func (*LaunchError) Error() string
 func (*LaunchError) Unwrap() error
+func (*LaunchTagger) TagValues(ctx context.Context, lc LaunchConfig) (map[string]string, error)
+func (*LaunchTagger) Tags(ctx context.Context, lc LaunchConfig) ([]types.Tag, error)
 func (*UserDataTooLargeError) Error() string
 func (DisplayPrice) SourceLabel() string
 func (EFACapacity) ResolveInterfaces(requested int) (int, error)
@@ -505,7 +509,9 @@ func (ManagedResource) OwnedBy(callerARN string) bool
 func (ReaperCoverage) Summary() string
 func (SporedObservability) Validate() error
 func AccountBase36(accountID string) string
+func AnchorLaunchTags(tags []types.Tag, launchAt time.Time) ([]types.Tag, error)
 func AttachDeviceName(i int) string
+func BuildLaunchTags(lc LaunchConfig, accountID, userARN, accountNameSlug string) ([]types.Tag, error)
 func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error
 func CheckElasticIPHeadroom(q ElasticIPQuota, region string, need int) error
 func CheckUserDataSize(encoded string) error
@@ -582,6 +588,7 @@ type InstanceInfo struct
 type LaunchConfig struct
 type LaunchError struct
 type LaunchResult struct
+type LaunchTagger struct
 type ManagedResource struct
 type MountSnapshotResult struct
 type PortIngress struct

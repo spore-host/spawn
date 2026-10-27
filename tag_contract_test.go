@@ -118,11 +118,10 @@ var externallyWrittenTags = map[string]string{
 // readOutsideThisRepo are keys buildTags writes that no reader in this repo
 // parses. Add one only with the reader named, or the issue deciding its fate.
 var readOutsideThisRepo = map[string]string{
-	"spawn:created-by":        "descriptive, no spawn reader (#1245)",
-	"spawn:root":              "descriptive, no spawn reader (#1245)",
-	"spawn:job-array-created": "descriptive, no spawn reader (#1245)",
-	"spawn:efs-mount-point":   "descriptive, no spawn reader (#1245)",
-	"spawn:fsx-mount-name":    "descriptive, no spawn reader (#1245)",
+	"spawn:created-by":      "descriptive, no spawn reader (#1245)",
+	"spawn:root":            "descriptive, no spawn reader (#1245)",
+	"spawn:efs-mount-point": "descriptive, no spawn reader (#1245)",
+	"spawn:fsx-mount-name":  "descriptive, no spawn reader (#1245)",
 }
 
 // isTagPrefix reports whether key is a family prefix rather than a key: one

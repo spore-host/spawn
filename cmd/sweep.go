@@ -350,8 +350,13 @@ func buildLaunchConfigFromParams(base aws.LaunchConfig, defaults, params map[str
 				}
 			}
 		case "user_data":
+			// The row's own script, run after spored's bootstrap and after
+			// --user-data, on both orchestration paths. It used to be stored in
+			// config.UserData, which the foreground loop then overwrote with the
+			// built bootstrap, and the detached path never read: accepted, listed
+			// as recognised, and dropped (#1327).
 			if s, ok := val.(string); ok {
-				config.UserData = s
+				config.CustomUserData = s
 			}
 		case "iam_role":
 			if s, ok := val.(string); ok {
