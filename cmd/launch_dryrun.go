@@ -295,6 +295,10 @@ func previewIAMInstanceProfile(config *aws.LaunchConfig) (name string, isPredict
 	if instanceProfile != "" {
 		return instanceProfile, false
 	}
+	if nestedSpawn {
+		// Deterministic from the grant document, no AWS call (#39).
+		return aws.NestedSpawnRoleName(), true
+	}
 	if iamRole != "" {
 		return iamRole, false
 	}

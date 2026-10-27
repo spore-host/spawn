@@ -479,6 +479,14 @@ var PolicyTemplates = map[string]string{
 // commands now also print whichever profile actually got resolved, so the
 // divergence is visible without reading ec2:DescribeInstances by hand.
 func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleConfig) (string, error) {
+	return c.createOrGetInstanceProfile(ctx, config, c.sporedBaselinePolicyDoc())
+}
+
+// createOrGetInstanceProfile is CreateOrGetInstanceProfile with the baseline
+// document as a parameter: every caller gets the spored baseline except the
+// --nested-spawn role, whose baseline differs in one condition (#39, see
+// nestedSpawnBaselinePolicyDoc).
+func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleConfig, baselineDoc string) (string, error) {
 	iamClient := iam.NewFromConfig(c.cfg)
 
 	// Generate role name if not provided
@@ -522,7 +530,7 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 	// PolicyFile path had never received the spawn#406 fix that the other two
 	// policy sources did; this makes the guarantee independent of the branch
 	// taken instead of per-branch, so a future policy source can't reopen it).
-	if err := c.ensureSporedBaselinePolicy(ctx, iamClient, roleName); err != nil {
+	if err := c.ensureSporedBaselinePolicy(ctx, iamClient, roleName, baselineDoc); err != nil {
 		return "", err
 	}
 
@@ -1449,8 +1457,8 @@ func (c *Client) ensureSSMManagedPolicy(ctx context.Context, iamClient *iam.Clie
 // (spawn#502 — the PolicyFile path never received the spawn#406 fix that the
 // other two policy sources did, because it was attached per-branch instead of
 // unconditionally here).
-func (c *Client) ensureSporedBaselinePolicy(ctx context.Context, iamClient *iam.Client, roleName string) error {
-	doc, err := c.sporedPolicyDoc(ctx, c.sporedBaselinePolicyDoc())
+func (c *Client) ensureSporedBaselinePolicy(ctx context.Context, iamClient *iam.Client, roleName, baselineDoc string) error {
+	doc, err := c.sporedPolicyDoc(ctx, baselineDoc)
 	if err != nil {
 		return err
 	}

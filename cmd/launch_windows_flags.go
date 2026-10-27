@@ -191,6 +191,7 @@ var windowsLaunchFlags = map[string]windowsFlagRule{
 	"iam-trust-services":    honouredOnWindows(whyIAM),
 	"iam-role-tags":         honouredOnWindows(whyIAM),
 	"instance-profile":      honouredOnWindows(whyIAM),
+	"nested-spawn":          honouredOnWindows(whyIAM),
 	"s3-read":               honouredOnWindows(whyIAM),
 	"s3-write":              honouredOnWindows(whyIAM),
 

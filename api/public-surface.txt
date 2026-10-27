@@ -23,6 +23,7 @@ const IAMBaselineURL
 const LaunchInstanceGone
 const MaxEncodedUserDataBytes
 const MaxUserDataBytes
+const NestedSpawnRolePrefix
 const PriceSourceTag
 const ReaperCoverageRoleName
 const SourceDir
@@ -468,6 +469,7 @@ func (*Client) SSMOnline(ctx context.Context, region, instanceID string) (bool, 
 func (*Client) ScanControlPlane(ctx context.Context, region string) ([]ControlPlaneResource, []string)
 func (*Client) ScanGlobalFootprint(ctx context.Context) ([]ControlPlaneResource, []string)
 func (*Client) SetWindowsAdminPasswordViaSSM(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error)
+func (*Client) SetupNestedSpawnProfile(ctx context.Context) (string, error)
 func (*Client) SetupSporedIAMRole(ctx context.Context) (string, error)
 func (*Client) StartInstance(ctx context.Context, region, instanceID string) error
 func (*Client) StopInstance(ctx context.Context, region, instanceID string, hibernate bool) error
@@ -526,6 +528,7 @@ func GenerateWindowsPassword(n int) (string, error)
 func GetEFSDNSName(filesystemID, region string) string
 func IsAccessDenied(err error) bool
 func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool
+func IsNestedSpawnRole(roleName string) bool
 func IsOrphanedSpawnAddress(r ManagedResource) bool
 func IsSharedSporedIdentity(r ManagedResource) bool
 func IsSpawnAllocatedAddress(r ManagedResource) bool
@@ -533,6 +536,8 @@ func IsSpawnManagedAMI(ami AMIInfo) bool
 func LifecycleTags(name, purpose string, now time.Time) []types.Tag
 func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool
 func NeedsLaunchElasticIP(interfaces []types.InstanceNetworkInterfaceSpecification) bool
+func NestedSpawnRoleFromCallerARN(arn string) (string, bool)
+func NestedSpawnRoleName() string
 func NewClient(ctx context.Context) (*Client, error)
 func NewClientFromConfig(cfg aws.Config) *Client
 func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
