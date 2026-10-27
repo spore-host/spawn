@@ -144,6 +144,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Sweeps and schedules from a spawn CLI at v0.146.0 or older keep launching
+  on the redeployed sweep orchestrator, now with spored** (#1368). Such a CLI
+  uploads only `ami`, `iam_role`, `instance_type`, `key_name`, `spot` and
+  `ttl` per member, and an existing schedule replays those params on every
+  firing, so neither carries `spawn_user_data` or `spawn_tags`. The
+  orchestrator now renders both for those members itself, with the builders a
+  CLI launch uses (`launcher.BuildUserData`, `aws.BuildLaunchTags`): a stub
+  that fetches and verifies the bootstrap body published for the
+  orchestrator's own release, and the full tag set (`spawn:managed`,
+  `spawn:root`, `spawn:iam-user` and `spawn:account-id` from the sweep record,
+  `spawn:ttl` and `spawn:ttl-deadline` anchored at the launch, `spawn:version`,
+  the sweep tags). The member runs spored, with in-instance TTL, idle and cost
+  enforcement, and passes the no-heartbeat check (#1313); the reaper, `spawn
+  list`, `spawn cost` and the dashboard treat it like any member. A member
+  with no `ttl` gets the 1h idle timeout a CLI sweep member gets (terminate on
+  Spot, which a one-time request cannot stop); one with no `iam_role` gets
+  `spored-instance-profile`, not `spawnd-role`, which cannot write spored's
+  heartbeat tag. The bootstrap is Linux's, other row keys are ignored as
+  before, and no `spawn:price-per-hour` is written (legacy params carry no
+  cost limit). Params carrying both keys are unchanged; params carrying only
+  one are refused, as damaged. `scripts/deploy-sweep-orchestrator.sh` now
+  deploys only a clean release tag whose published body matches the one
+  compiled in, injects that release (`-X main.Version`), and builds the
+  package: it built `main.go` alone, which no longer compiles.
 - **Task stage-out through `spored provenance upload` uploads files
   concurrently, with larger parts, sized to the instance** (#1324). On a
   release build every task output goes through spored, not `aws s3 cp`, so
@@ -320,9 +344,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spot` flag and nothing else), with one log line per sweep. So do the
   members of a schedule an older CLI created: scheduler-handler replays the
   params uploaded at `spawn schedule create` on every firing, so such a
-  schedule stays on the old behaviour until it is re-created. (Params with no
-  `spawn_user_data` or `spawn_tags` are still refused, as since #1323/#1330;
-  see #1368.) What the orchestrator cannot honour is refused at `spawn launch
+  schedule stays on the old behaviour until it is re-created. (Such params
+  also carry no `spawn_user_data` or `spawn_tags`; the orchestrator renders
+  those itself, #1368.) What the orchestrator cannot honour is refused at `spawn launch
   --detach`, with the remedy: `--fsx-create`, `--fsx-recall`,
   `--efa-interfaces` above 1, a customer-managed EBS KMS key, `--vpc` without
   `--subnet`, and hibernation with an instance-type pattern (a foreground
@@ -496,8 +520,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its volumes with them, anchors `spawn:launch-time` and `spawn:ttl-deadline`
   at the real launch (so a TTL counts from when the member started, not from
   when the CLI ran), and sets the sweep ID itself, since a schedule's run gets
-  its ID only when it fires. It refuses a member with no rendered tags, so
-  sweeps and schedules created by an older CLI must be re-created. Each
+  its ID only when it fires. Params from an older CLI carry no rendered tags;
+  the orchestrator renders those members' tags itself (#1368). Each
   instance type is priced once per sweep, not once per member.
 - **`--iam-policy`, `--iam-policy-file`, `--iam-managed-policies`,
   `--s3-read` and `--s3-write` now work on a detached sweep** (#1331). They
@@ -532,12 +556,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also now wins over a CLI `--command`, as the documented row > flag precedence
   says; before, the CLI value took the tag.
 
-- **The sweep orchestrator refuses a detached sweep member that carries no
-  spored bootstrap** (#1323). Such a member would run with no in-instance TTL,
-  so it is recorded as a failed row instead of launched. Sweeps and schedules
-  created by an older spawn have no bootstrap in their params: once the
-  orchestrator is redeployed, re-run them, or re-create the schedule, with this
-  spawn. `spawn schedule create` now builds every member's launch config, so a
+- **The sweep orchestrator never launches a detached sweep member without a
+  spored bootstrap** (#1323). The CLI renders it into the params; for params
+  from an older spawn, which carry none, the orchestrator renders it (#1368).
+  `spawn schedule create` now builds every member's launch config, so a
   schedule row key that `spawn launch --param-file` would reject (a misspelled
   spawn key, for example) is now rejected here too. A file may not set
   `spawn_user_data`, which is spawn's own key.

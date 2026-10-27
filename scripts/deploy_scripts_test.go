@@ -627,3 +627,60 @@ func commandFlagValue(cmd, flag string) string {
 	}
 	return ""
 }
+
+// goBuild is a `go build` invocation in a script, and goBuildFiles one whose
+// target is a list of .go files rather than a package.
+var (
+	goBuild      = regexp.MustCompile(`(?m)^[^#\n]*\bgo build\b[^\n]*$`)
+	goBuildFiles = regexp.MustCompile(`\s\S+\.go\s*$`)
+)
+
+// A Lambda is built as a package, never as a list of files. `go build main.go`
+// compiles only main.go, so a function that grows a second file stops
+// building: deploy-sweep-orchestrator.sh did exactly that once the orchestrator
+// gained spored.go, tags.go and cancel.go, and no deploy could have run (#1368).
+func TestLambdaBuildsArePackages(t *testing.T) {
+	builds := 0
+	for _, f := range shellScripts(t) {
+		for _, line := range goBuild.FindAllString(readRel(t, f), -1) {
+			builds++
+			if goBuildFiles.MatchString(line) {
+				t.Errorf("%s builds a file list, which compiles only the files named: %s", f, strings.TrimSpace(line))
+			}
+		}
+	}
+	if builds == 0 {
+		t.Fatal("found no go build in any script; the discovery is broken, not the repo")
+	}
+}
+
+// The orchestrator renders the spored bootstrap of legacy sweep members, whose
+// stub fetches the body published for the release it was built from (#1368).
+// So the deploy refuses anything but a clean release tag, refuses a release
+// whose body is not published or is not the one compiled in, and injects that
+// release into the build.
+func TestDeploySweepOrchestratorDeploysOnlyAPublishedRelease(t *testing.T) {
+	s := read(t, "deploy-sweep-orchestrator.sh")
+	for what, re := range map[string]string{
+		"take the version from the exact release tag":   `(?m)^SPAWN_VERSION=\$\(git describe --tags --exact-match `,
+		"refuse a version that is not X.Y.Z":            `(?m)^if ! \[\[ "\$SPAWN_VERSION" =~ \^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$ \]\]; then\n\s+echo[^\n]*\n\s+exit 1`,
+		"refuse a dirty tree":                           `(?m)^if \[ -n "\$\(git status --porcelain\)" \]; then\n\s+echo[^\n]*\n\s+exit 1`,
+		"hash the body this release compiles in":        `(?m)^if ! WANT_BODY_SHA=\$\( \(cd \.\./\.\. && [^\n]*go run \. bootstrap-body\)`,
+		"fetch the body published for the version":      `(?m)^BODY_URL="https://spawn-binaries-us-east-1\.s3\.amazonaws\.com/spawn/versions/\$\{SPAWN_VERSION\}/bootstrap\.sh"`,
+		"refuse a body that differs":                    `(?m)^if \[ "\$GOT_BODY_SHA" != "\$WANT_BODY_SHA" \]; then\n\s+echo[^\n]*\n\s+exit 1`,
+		"inject the version into the build":             `(?m)^GOOS=linux [^\n]*go build [^\n]*-ldflags "-X main\.Version=\$\{SPAWN_VERSION\}"`,
+		"stamp the version it built, not a re-describe": `--tags "[^"]*spawn:version=\$SPAWN_VERSION"`,
+	} {
+		if !regexp.MustCompile(re).MatchString(s) {
+			t.Errorf("deploy-sweep-orchestrator.sh does not %s", what)
+		}
+	}
+	// The stamp is the checked version; a second assignment would let it drift.
+	if n := len(regexp.MustCompile(`(?m)^\s*SPAWN_VERSION=`).FindAllString(s, -1)); n != 1 {
+		t.Errorf("SPAWN_VERSION is assigned %d times, want once", n)
+	}
+	// And the checks come before the build.
+	if strings.Index(s, "GOT_BODY_SHA\" != ") > strings.Index(s, "go build") {
+		t.Error("the body check runs after the build")
+	}
+}

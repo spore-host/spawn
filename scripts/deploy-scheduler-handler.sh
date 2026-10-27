@@ -97,7 +97,7 @@ echo "🔨 Building Lambda function..."
 # linux/amd64 host links against that host's glibc — which is why this function
 # could sit on provided.al2 (glibc 2.26) while every other Go lambda moved to
 # provided.al2023 (2.34). Static first, then the runtime bump is safe (#716).
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags lambda.norpc -o bootstrap main.go
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags lambda.norpc -o bootstrap .
 
 # Create deployment package
 echo "📦 Creating deployment package..."
