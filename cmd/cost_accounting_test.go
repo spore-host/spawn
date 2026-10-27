@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spore-host/spawn/internal/treewalk"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/costmodel"
 )
@@ -117,6 +118,9 @@ func TestNoCostRateTagReadOutsideTheModel(t *testing.T) {
 	var bad []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() && (d.Name() == "vendor" || d.Name() == "testdata" || strings.HasPrefix(d.Name(), ".")) && path != root {
