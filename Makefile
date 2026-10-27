@@ -19,6 +19,14 @@ gen-docs:
 check-docs: gen-docs
 	git diff --exit-code docs-gen/ || { echo "::error::docs-gen/ is stale — run 'make gen-docs' and commit"; exit 1; }
 
+# Regenerate docs/reference/cli-iam-actions.md, the IAM actions each spawn
+# command can call, discovered from the code (internal/iamcoverage, #254). The
+# test of the same name fails when the committed copy is stale.
+.PHONY: cli-iam-actions
+cli-iam-actions:
+	go test ./internal/iamcoverage -run TestCLIActionInventoryIsCurrent -update -count=1
+	@echo "docs/reference/cli-iam-actions.md regenerated — review the diff before committing."
+
 # Regenerate the committed snapshot of the exported API that OTHER REPOS compile
 # against (api/public-surface.txt). Run when a change to one of those packages is
 # intended, and commit the result in the same change — the gate in

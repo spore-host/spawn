@@ -72,6 +72,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `xray:PutTraceSegments` (#1335). SDK callers set
   `LaunchConfig.Observability` and `LaunchConfig.IdleCPUPercent`, checked by
   `LaunchConfig.ValidateSporedSettings`.
+- **A CI gate holds every spore.host role to the AWS calls its code makes**
+  (#254, spore-host#610). `internal/iamcoverage` type-checks each principal's
+  program (spored, its pool-worker, pipeline-stage, provenance and batch-queue
+  subcommands, and every Lambda), builds its call graph, finds every AWS SDK
+  operation reachable from its entry points (direct calls, calls through
+  interfaces, method values, paginators, waiters, the S3 transfer manager,
+  STS assume-role providers and hand-signed Function URL requests), maps each
+  to its IAM action, and fails unless the policy spore.host provisions for
+  that role grants it by name. A wildcard does not count, an operation it
+  cannot map fails rather than being skipped, and every main package in the
+  repository must be registered as a principal. Gaps that need a decision are
+  recorded in a ledger with the issue that tracks them (#1344), and the gate
+  fails on a ledger entry that is no longer a gap. The TTL reaper's own drift
+  gates (`pkg/reaperiam`) now use the same discovery instead of a regex, which
+  could not see calls made in other packages and had skipped Route53 entirely.
+- **`docs/reference/cli-iam-actions.md` lists the IAM actions each spawn
+  command can call** (spore-host#610), generated from the code by
+  `make cli-iam-actions`. The CLI runs with the user's own credentials, so this
+  is the permission set a user's identity needs, per command. A test fails
+  when the committed copy is stale.
 
 ### Changed
 
@@ -184,6 +204,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It was the `--instance` value as typed, which for `--instance my-box` is a
   name. It is now the ID when spawn can resolve the instance, as it is in
   remote steps, and the typed value only when it cannot.
+
+- **Generated S3 write grants now include `s3:AbortMultipartUpload`** (#254).
+  The task, `--s3-write`, pipeline-stage and pool-worker policies granted
+  `s3:PutObject` alone. The SDK's transfer manager (`spored provenance upload`,
+  the pipeline stage hand-off) and `aws s3 cp` split large files into parts
+  and abort the upload when a part fails, and that abort is a separate action.
+  Without it, a failed upload's parts stayed in the bucket, billed, until a
+  lifecycle rule removed them. The action is added on the same object ARNs as
+  `s3:PutObject`. Because `spawn-instance-*` role names are a hash of their
+  policy, the first launch after upgrading creates new roles. The old ones
+  are removed by `spawn cleanup --instance-roles`, or by the reaper's role
+  sweep with `InstanceRoles=reap` (its default is `report`), once they are
+  unused (#1300).
 
 ### Fixed
 
@@ -377,6 +410,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   booted an instance with no credentials, and spored could not read its tags
   or end itself. It now re-attaches the role, and refuses a profile that holds
   a different role.
+
+- **The pipeline orchestrator can send its notifications** (#254). Its SAM
+  template granted no SNS actions, so creating a pipeline's
+  `spawn-pipeline-<id>` topic, subscribing the notification email and
+  publishing to it were all denied. It now grants `sns:CreateTopic`,
+  `sns:Subscribe`, `sns:ListSubscriptionsByTopic` and `sns:Publish` on
+  `spawn-pipeline-*` topics in its own account and region, plus
+  `ec2:DescribeInstanceTypes`, which the AMI architecture lookup calls.
+  Redeploy the stack to pick it up.
+- **Multi-region sweeps can validate their regions, and clean up their
+  placement groups, under `SpawnSweepCrossAccountRole`** (#254). The
+  orchestrator checks each region with `ec2:DescribeAvailabilityZones` on the
+  assumed role and marks every parameter in a region that refuses it as
+  failed ("Region access denied"); the role's setup script did not grant it.
+  The script now grants it, and `ec2:DeletePlacementGroup` scoped to
+  `spawn:managed=true`, which the orchestrator calls on `spawn-mpi-*` groups
+  when a sweep ends. Re-run `scripts/setup-sweep-cross-account-role.sh` in each
+  member account.
 
 ## [0.146.0] - 2026-10-25
 

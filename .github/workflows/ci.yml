@@ -181,6 +181,22 @@ jobs:
           echo "$D/shellcheck-${VER}" >> "$GITHUB_PATH"
           "$D/shellcheck-${VER}/shellcheck" --version
 
+      # The IAM coverage gate (internal/iamcoverage, #254) and pkg/reaperiam
+      # type-check the lambda modules from source, offline (GOPROXY=off, under
+      # the hermetic wrapper), so those modules' dependencies must be in the
+      # module cache before the root tests run. The nested-modules step would
+      # fetch them, but only after.
+      - name: Download nested module dependencies
+        shell: bash
+        run: |
+          mods=$(find . -mindepth 2 -name go.mod -not -path './.git/*' | sort)
+          [ -n "$mods" ] || { echo "found no nested modules — the discovery is broken" >&2; exit 1; }
+          for m in $mods; do (cd "$(dirname "$m")" && go mod download); done
+          # internal/iamcoverage type-checks the CLI and spored for every
+          # GOOS offline (GOPROXY=off), so the platform-only deps a Linux
+          # build never fetches (e.g. mousetrap on windows) must be cached.
+          for os in linux darwin windows; do GOOS=$os go list -deps -test ./... >/dev/null; done
+
       - name: Test
         run: go test -short -exec "$RUNNER_TEMP/hermetic-exec" -coverprofile=coverage.out ./...
 
@@ -405,6 +421,22 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.3'
+
+      # The IAM coverage gate (internal/iamcoverage, #254) and pkg/reaperiam
+      # type-check the lambda modules from source, offline (GOPROXY=off, under
+      # the hermetic wrapper), so those modules' dependencies must be in the
+      # module cache before the root tests run. The nested-modules step would
+      # fetch them, but only after.
+      - name: Download nested module dependencies
+        shell: bash
+        run: |
+          mods=$(find . -mindepth 2 -name go.mod -not -path './.git/*' | sort)
+          [ -n "$mods" ] || { echo "found no nested modules — the discovery is broken" >&2; exit 1; }
+          for m in $mods; do (cd "$(dirname "$m")" && go mod download); done
+          # internal/iamcoverage type-checks the CLI and spored for every
+          # GOOS offline (GOPROXY=off), so the platform-only deps a Linux
+          # build never fetches (e.g. mousetrap on windows) must be cached.
+          for os in linux darwin windows; do GOOS=$os go list -deps -test ./... >/dev/null; done
 
       - name: Unit tests (Windows)
         shell: bash

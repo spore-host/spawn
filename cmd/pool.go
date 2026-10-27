@@ -103,7 +103,7 @@ func poolWorkerPolicy(account, region, specBucket, runID string, extraRead, extr
 	stmts := []string{
 		fmt.Sprintf(`{"Effect":"Allow","Action":["sqs:GetQueueUrl","sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],"Resource":[%q]}`, queueARN),
 		fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject"],"Resource":[%q,%q]}`, binPrefix+"/*", specObj),
-		fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%q]}`, specObj),
+		fmt.Sprintf(`{"Effect":"Allow","Action":[%s],"Resource":[%q]}`, iamActionList(objectWriteActions), specObj),
 		fmt.Sprintf(`{"Effect":"Allow","Action":[%s],"Resource":[%q]}`, iamActionList(provenanceWriteActions), specObj),
 		fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%q,%q]}`, binPrefix, specBkt),
 	}
@@ -114,7 +114,7 @@ func poolWorkerPolicy(account, region, specBucket, runID string, extraRead, extr
 	}
 	// Extra task output buckets (read+write+delete object access + list).
 	if objs, bkts := bucketResourceARNs(extraWrite); len(objs) > 0 {
-		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":[%s]}`, objs))
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject",%s,"s3:DeleteObject"],"Resource":[%s]}`, iamActionList(objectWriteActions), objs))
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":[%s],"Resource":[%s]}`, iamActionList(provenanceWriteActions), objs))
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bkts))
 	}

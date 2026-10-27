@@ -87,6 +87,15 @@ func ECRPullPolicies(images ...string) []string {
 // upload with provenance.
 var ProvenanceWriteActions = []string{"s3:PutObjectTagging", "s3:PutObjectAnnotation"}
 
+// ObjectWriteActions is what writing an object needs. s3:PutObject covers a
+// single PUT and every part of a multipart upload, but aborting one is its own
+// action: the SDK's transfer manager (`spored provenance upload`, the pipeline
+// stage hand-off) and `aws s3 cp` both split large files into parts and call
+// AbortMultipartUpload when a part fails. Without it the abort is denied and
+// the uploaded parts stay in the bucket, billed, until a lifecycle rule
+// removes them. Found by the IAM coverage gate (internal/iamcoverage, #254).
+var ObjectWriteActions = []string{"s3:PutObject", "s3:AbortMultipartUpload"}
+
 // IAMActionList renders actions as the elements of a JSON array.
 func IAMActionList(actions []string) string {
 	q := make([]string, len(actions))
@@ -127,7 +136,7 @@ func StagingPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string
 	// IAM rejects the WHOLE document for that, so a read-only grant made the
 	// instance profile impossible to create and failed the entire launch.
 	if len(writeB) > 0 {
-		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:PutObject"],"Resource":[%s]}`, bucketObjectARNs(writeB)))
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":[%s],"Resource":[%s]}`, IAMActionList(ObjectWriteActions), bucketObjectARNs(writeB)))
 		if provenance {
 			stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":[%s],"Resource":[%s]}`, IAMActionList(ProvenanceWriteActions), bucketObjectARNs(writeB)))
 		}
@@ -136,7 +145,7 @@ func StagingPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string
 	// reads, writes, and deletes across its storage bucket): grant object-level
 	// Get/Put/Delete + bucket-level List/GetLocation on the whole bucket.
 	if len(rwB) > 0 {
-		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:PutObject","s3:DeleteObject"],"Resource":[%s]}`, bucketObjectARNs(rwB)))
+		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion",%s,"s3:DeleteObject"],"Resource":[%s]}`, IAMActionList(ObjectWriteActions), bucketObjectARNs(rwB)))
 		stmts = append(stmts, fmt.Sprintf(`{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":[%s]}`, bucketARNs(rwB)))
 	}
 	// A document with no statements is MalformedPolicyDocument just as surely as
