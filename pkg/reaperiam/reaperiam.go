@@ -74,6 +74,16 @@ const (
 	InstanceProfileARN = "arn:aws:iam::*:instance-profile/spawn-instance-*"
 )
 
+// PoolQueueARN is the only SQS resource the reaper may read or delete:
+// spawn's run-scoped pool queues (pkg/poolqueue.NamePrefix), in any region
+// of the account the policy is in (#1351).
+const PoolQueueARN = "arn:aws:sqs:*:*:spawn-pool-*"
+
+// PoolSpecsARN is the only S3 object prefix the reaper may delete in: the
+// task specs `spawn pool submit` stages in the results bucket
+// (pkg/poolqueue.SpecsRoot). No other object in any bucket.
+const PoolSpecsARN = "arn:aws:s3:::spawn-results-*/staging/pool-specs/*"
+
 // Statement is the minimal IAM statement shape emitted here.
 type Statement struct {
 	Effect    string      `json:"Effect"`
@@ -341,6 +351,37 @@ func ScanSelfStatements() []Statement {
 			},
 			Resource:  InstanceProfileARN,
 			Condition: ManagedIAMTagCondition,
+		},
+		{
+			// The abandoned-pool sweep (#1351, pkg/poolqueue). ListQueues has
+			// no resource-level ARN; it returns queue URLs only, and the sweep
+			// asks it for the spawn-pool- prefix.
+			Effect:   "Allow",
+			Action:   []string{"sqs:ListQueues"},
+			Resource: "*",
+		},
+		{
+			// Reading a pool queue (its tags, creation time and message
+			// counts) and deleting it, on spawn-pool-* names only. Not
+			// tag-conditioned, as for fsx:DeleteFileSystem: that SQS
+			// populates aws:ResourceTag for DeleteQueue has not been proven
+			// against a live account, and an unproven condition fails closed
+			// silently. The sweep's own checks are the rest of the guard: it
+			// deletes only a queue tagged spawn:managed=true whose
+			// spawn:pool-run-id tag matches its name, empty, a day old, with
+			// no instance holding the pool's workers' profile or tag.
+			Effect:   "Allow",
+			Action:   []string{"sqs:GetQueueAttributes", "sqs:ListQueueTags", "sqs:DeleteQueue"},
+			Resource: PoolQueueARN,
+		},
+		{
+			// The pools' staged specs (#1351): delete only, and only under
+			// staging/pool-specs/ in spawn's results buckets. Listing them is
+			// the results-bucket statement's s3:ListBucket. A results object
+			// outside that prefix cannot be deleted by the reaper.
+			Effect:   "Allow",
+			Action:   []string{"s3:DeleteObject"},
+			Resource: PoolSpecsARN,
 		},
 	}
 }

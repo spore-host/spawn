@@ -95,6 +95,7 @@ spawn reaper deploy [flags]
 | `--max-age` |  | string |  | Max-age ceiling, REAPER_MAX_AGE, e.g. 336h or 14d (default: keep; the reaper's default is 7d) |
 | `--net-resources` |  | string |  | Network-resource sweep, REAPER_NET_RESOURCES: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--notify-url` |  | string |  | URL the reaper POSTs notifications to, REAPER_NOTIFY_URL; never printed. "-" reads it from stdin (default: keep) |
+| `--pool-queues` |  | string |  | Abandoned pool SQS queue and staged-spec sweep, REAPER_POOL_QUEUES: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--regions` |  | string |  | Comma-separated regions for the reaper to scan (default: keep the existing reaper's; the deploy region for a new one) |
 | `--schedule` |  | string |  | EventBridge schedule expression (default: keep the existing reaper's; rate(10 minutes) for a new one) |
 | `--spot-requests` |  | string |  | Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: off\|report\|reap (default: keep; the reaper's default is report) |

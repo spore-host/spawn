@@ -38,11 +38,14 @@ const (
 	// EnvInstanceRoles is the per-task spawn-instance-* IAM role sweep
 	// (#1300). Unset means report, not reap: it is new deletion behaviour.
 	EnvInstanceRoles = "REAPER_INSTANCE_ROLES"
+	// EnvPoolQueues is the abandoned pool queue and staged-spec sweep
+	// (#1351). Unset means report, not reap: it is new deletion behaviour.
+	EnvPoolQueues = "REAPER_POOL_QUEUES"
 )
 
 // The three states of a sweep that can be previewed before it is allowed to
 // delete: REAPER_SPOT_REQUESTS, REAPER_NET_RESOURCES, REAPER_ELASTIC_IPS,
-// REAPER_EMPTY_BUCKETS and REAPER_INSTANCE_ROLES.
+// REAPER_EMPTY_BUCKETS, REAPER_INSTANCE_ROLES and REAPER_POOL_QUEUES.
 const (
 	// ModeOff skips the sweep entirely.
 	ModeOff = "off"
@@ -138,7 +141,7 @@ func Validate(name, value string) error {
 		}
 	}
 	switch name {
-	case EnvSpotRequests, EnvNetResources, EnvElasticIPs, EnvEmptyBuckets, EnvInstanceRoles:
+	case EnvSpotRequests, EnvNetResources, EnvElasticIPs, EnvEmptyBuckets, EnvInstanceRoles, EnvPoolQueues:
 		if _, ok := ParseMode(value); !ok {
 			return fmt.Errorf("%s: %q is not one of %s", name, value, strings.Join(Modes(), ", "))
 		}
@@ -164,7 +167,7 @@ func Validate(name, value string) error {
 
 var settable = map[string]struct{}{
 	EnvSpotRequests: {}, EnvNetResources: {}, EnvElasticIPs: {}, EnvMaxAge: {}, EnvNotifyURL: {},
-	EnvTTLGrace: {}, EnvEmptyBuckets: {}, EnvInstanceRoles: {},
+	EnvTTLGrace: {}, EnvEmptyBuckets: {}, EnvInstanceRoles: {}, EnvPoolQueues: {},
 }
 
 // Settable lists the variables Validate accepts, sorted. Derived from the same

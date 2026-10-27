@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`spawn cleanup --pool-queues` and the reaper's `REAPER_POOL_QUEUES`:
+  abandoned pools' SQS queues and staged specs now have a deleter** (#1351).
+  `pkg/poolqueue` holds the one rule both apply. A `spawn-pool-<run id>` queue
+  is deleted only when it is tagged `spawn:managed=true` with a
+  `spawn:pool-run-id` tag matching its name, no instance in any enabled region
+  (pending through stopped) holds the pool's worker profile or tag, it holds no
+  messages, and it is at least 24 hours old; a region that cannot be read
+  means nothing is deleted. The specs `spawn pool submit` staged under
+  `staging/pool-specs/<run id>/` in the results bucket go once the queue is
+  gone, no instance is the pool's, and the newest is 24 hours old; nothing
+  else in the bucket is touched. Queues made before this release are untagged
+  and kept (`spawn pool drain` deletes one). Reaper: template parameter
+  `PoolQueues` / `make deploy POOL_QUEUES=` / `spawn reaper deploy
+  --pool-queues`, `off|report|reap`, default `report` (logs `WOULD delete pool
+  queue ...` and changes nothing), and a deploy that does not name it keeps the
+  deployed value. New grants, scoped by name: `sqs:ListQueues`;
+  `sqs:GetQueueAttributes`, `sqs:ListQueueTags`, `sqs:DeleteQueue` on
+  `spawn-pool-*`; `s3:DeleteObject` on `spawn-results-*/staging/pool-specs/*`.
+  The member-account role stack (`ttl-reaper-cross-account-role.yaml`) must be
+  redeployed; until then the account is counted in
+  `pool_queues_accounts_denied`.
+
 - **`spawn launch --efa --efa-group NAME`: a shared EFA security group for
   launches that are not one MPI job array** (#1168). EFA needs a group that
   admits all traffic from itself, and spawn made one only for `--mpi`, so a
@@ -331,6 +353,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason, and the total as "at least" (`termination_time_unknown` in JSON).
   Running and stopped instances are unchanged; `--cost-limit` enforcement is
   unaffected.
+- **`spawn pool create` tags its SQS queue** (`spawn:managed=true`,
+  `spawn:pool-run-id`), so an undrained pool's queue can be recognised and
+  deleted (#1351). Tagging on create needs `sqs:TagQueue`; without it the pool
+  is still created, untagged, with a warning that only `spawn pool drain` will
+  delete its queue.
 
 - **A pool nobody drains no longer keeps its IAM role forever** (#1319).
   `spawn pool drain` was the only thing that deleted a pool's worker role and

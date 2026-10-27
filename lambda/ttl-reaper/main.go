@@ -61,6 +61,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -107,6 +108,10 @@ type account struct {
 	regionsFor func() regionsAPI
 	// s3For is the S3 slice the empty-bucket sweep needs (#1301).
 	s3For func(region string) s3API
+	// sqsFor and specsFor are the abandoned-pool sweep's SQS and S3 slices
+	// (#1351). nil sqsFor skips the sweep; nil specsFor skips its spec half.
+	sqsFor   func(region string) sqsAPI
+	specsFor func(region string) poolSpecsAPI
 }
 
 // ec2API / fsxAPI are the slices of the EC2 and FSx clients the reaper uses.
@@ -203,6 +208,11 @@ type reaper struct {
 	// instanceRolesReport / instanceRolesReap, from REAPER_INSTANCE_ROLES.
 	// Unset is report: new deletion behaviour starts report-only. dryRun wins.
 	instanceRoles string
+
+	// Abandoned pool queues and their staged specs (#1351): one of
+	// poolQueuesOff / poolQueuesReport / poolQueuesReap, from
+	// REAPER_POOL_QUEUES. Unset is report. dryRun wins.
+	poolQueues string
 
 	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
@@ -444,7 +454,9 @@ func configure() {
 		spotRequests: parseSpotRequests(os.Getenv("REAPER_SPOT_REQUESTS")),
 		// #1300: the per-task IAM role sweep.
 		instanceRoles: parseInstanceRoles(os.Getenv("REAPER_INSTANCE_ROLES")),
-		emptyBuckets:  parseEmptyBuckets(os.Getenv("REAPER_EMPTY_BUCKETS")),
+		// #1351: abandoned pool queues and their staged specs.
+		poolQueues:   parsePoolQueues(os.Getenv("REAPER_POOL_QUEUES")),
+		emptyBuckets: parseEmptyBuckets(os.Getenv("REAPER_EMPTY_BUCKETS")),
 	}
 	r.netResources, r.elasticIPs = netSweepModesFromEnv()
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
@@ -480,8 +492,8 @@ func configure() {
 		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
 		r.expireLeases = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s, pool-queues=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles, r.poolQueues)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -544,6 +556,16 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 			},
 			iamFor:     func() iamAPI { return iam.NewFromConfig(base) },
 			regionsFor: func() regionsAPI { return ec2.NewFromConfig(base) },
+			sqsFor: func(region string) sqsAPI {
+				c := base.Copy()
+				c.Region = region
+				return sqs.NewFromConfig(c)
+			},
+			specsFor: func(region string) poolSpecsAPI {
+				c := base.Copy()
+				c.Region = region
+				return s3.NewFromConfig(c)
+			},
 		})
 	}
 
@@ -598,6 +620,16 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 			},
 			iamFor:     func() iamAPI { return iam.NewFromConfig(acctCfg) },
 			regionsFor: func() regionsAPI { return ec2.NewFromConfig(acctCfg) },
+			sqsFor: func(region string) sqsAPI {
+				c := acctCfg.Copy()
+				c.Region = region
+				return sqs.NewFromConfig(c)
+			},
+			specsFor: func(region string) poolSpecsAPI {
+				c := acctCfg.Copy()
+				c.Region = region
+				return s3.NewFromConfig(c)
+			},
 		})
 	}
 
@@ -640,6 +672,16 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 			},
 			iamFor:     func() iamAPI { return iam.NewFromConfig(base) },
 			regionsFor: func() regionsAPI { return ec2.NewFromConfig(base) },
+			sqsFor: func(region string) sqsAPI {
+				c := base.Copy()
+				c.Region = region
+				return sqs.NewFromConfig(c)
+			},
+			specsFor: func(region string) poolSpecsAPI {
+				c := base.Copy()
+				c.Region = region
+				return s3.NewFromConfig(c)
+			},
 		})
 	}
 	return accounts
@@ -805,6 +847,21 @@ type Summary struct {
 	// InstanceRolesAccountsDenied counts accounts whose role refused the IAM
 	// listing: a member role not yet redeployed with the #1300 grant.
 	InstanceRolesAccountsDenied int `json:"instance_roles_accounts_denied"`
+
+	// Abandoned pool queues and their staged specs (#1351), under
+	// REAPER_POOL_QUEUES. Skipped is a queue kept for any reason (workers,
+	// messages, within the 24h grace, untagged, unreadable, a failed delete).
+	PoolQueuesScanned     int `json:"pool_queues_scanned"`
+	PoolQueuesDeleted     int `json:"pool_queues_deleted"`
+	PoolQueuesWouldDelete int `json:"pool_queues_would_delete"` // qualified, but report mode or a dry run held it back
+	PoolQueuesSkipped     int `json:"pool_queues_skipped"`
+	// PoolSpecs* count runs' staged-spec sets, not objects.
+	PoolSpecsDeleted     int `json:"pool_specs_deleted"`
+	PoolSpecsWouldDelete int `json:"pool_specs_would_delete"`
+	PoolSpecsFailed      int `json:"pool_specs_failed"` // an S3 call failed (AccessDenied: the role predates #1351)
+	// PoolQueuesAccountsDenied counts accounts whose role refused the SQS
+	// listing: a member role not yet redeployed with the #1351 grant.
+	PoolQueuesAccountsDenied int `json:"pool_queues_accounts_denied"`
 
 	// Orphaned persistent Spot requests (#950).
 	SpotRequestsScanned        int `json:"spot_requests_scanned"`
@@ -999,6 +1056,11 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 		// the regional scans, so an instance the reaper just terminated is
 		// already shutting-down (still counted as using its role this run).
 		r.reapInstanceRolesAccount(ctx, acct, start, &sum)
+
+		// Abandoned pool queues and staged specs (#1351). Once per account,
+		// after the regional scans, like the role sweep: its worker check
+		// covers every enabled region.
+		r.reapPoolQueuesAccount(ctx, acct, start, &sum)
 
 		// DNS reconciliation sweep (#438): after scanning all regions for this
 		// account, reconcile the account's {base36}.{domain} A-records against the

@@ -231,6 +231,33 @@ Parameters:
       until then the run summary counts the account in
       instance_roles_accounts_denied.
 
+  PoolQueues:
+    Type: String
+    Default: 'report'
+    AllowedValues: ['off', 'report', 'reap']
+    Description: >
+      The abandoned-pool sweep (#1351). 'spawn pool create' makes an SQS queue
+      spawn-pool-<run id> and 'spawn pool submit' stages each task's spec under
+      staging/pool-specs/<run id>/ in spawn-results-<account>-<region>; only
+      'spawn pool drain' removed the queue, and nothing removed the specs. Once
+      per member account per run, in each of Regions, the sweep deletes a
+      queue only when all hold: it is tagged spawn:managed=true with a
+      spawn:pool-run-id tag matching its name (queues made before v0.147.0 are
+      untagged and kept); no instance in any region enabled in the account
+      (ec2:DescribeRegions), pending through stopped, holds the pool's worker
+      profile or tag; it holds no messages (visible, in flight or delayed);
+      and it is at least 24 hours old. A run's specs are deleted once its
+      queue is gone, no instance is the pool's, and the newest was staged 24
+      hours ago. If any region cannot be read, nothing is deleted. 'report'
+      (default) logs 'WOULD delete pool queue ...' and 'WOULD delete ...
+      staged pool spec(s)' for exactly what 'reap' would delete and changes
+      nothing: this is new deletion behaviour, so it starts report-only.
+      'reap' deletes. 'off' skips it. An unrecognised value resolves to
+      'report'. DryRun always wins. The member accounts' role stack
+      (ttl-reaper-cross-account-role.yaml) must be redeployed for the SQS
+      and spec grants; until then the run summary counts the account in
+      pool_queues_accounts_denied.
+
   SpotRequests:
     Type: String
     Default: 'report'
@@ -399,6 +426,7 @@ Resources:
           REAPER_SPOT_REQUESTS: !Ref SpotRequests
           REAPER_ELASTIC_IPS: !Ref ElasticIps
           REAPER_INSTANCE_ROLES: !Ref InstanceRoles
+          REAPER_POOL_QUEUES: !Ref PoolQueues
           REAPER_EMPTY_BUCKETS: !Ref EmptyBuckets
           REAPER_DNS_EXPIRE: !Ref DnsExpire
           REAPER_DNS_LEASE_EXPIRE: !Ref DnsLeaseExpire
@@ -580,6 +608,24 @@ Resources:
                   Condition:
                     StringEquals:
                       iam:ResourceTag/spawn:managed: 'true'
+                # #1351 abandoned-pool sweep (PoolQueues). ListQueues has no
+                # resource-level ARN; reads and the delete are on spawn-pool-*
+                # queues only, and the staged specs can be deleted only under
+                # staging/pool-specs/ in spawn-results-*.
+                - Effect: Allow
+                  Action:
+                    - sqs:ListQueues
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - sqs:GetQueueAttributes
+                    - sqs:ListQueueTags
+                    - sqs:DeleteQueue
+                  Resource: !Sub 'arn:aws:sqs:*:${AWS::AccountId}:spawn-pool-*'
+                - Effect: Allow
+                  Action:
+                    - s3:DeleteObject
+                  Resource: 'arn:aws:s3:::spawn-results-*/staging/pool-specs/*'
             - !Ref AWS::NoValue
         # DNS teardown (#247): delete a reaped instance's Route53 records, since
         # spored's graceful DeleteDNS never ran. Scoped to the single configured

@@ -44,6 +44,19 @@ global, so this always checks every enabled region whatever --region says, and
 covers every principal's roles. The TTL reaper applies the same rule
 (REAPER_INSTANCE_ROLES).
 
+--pool-queues deletes only the SQS queues of pools nobody drained
+(spawn-pool-&lt;run id&gt;) and the task specs their submitters staged in the
+results bucket (staging/pool-specs/&lt;run id&gt;/). A queue goes only when it is
+tagged spawn:managed=true with a spawn:pool-run-id tag matching its name, no
+instance in any enabled region (pending through stopped) holds the pool's
+worker profile or tag, it holds no messages, and it is at least 24 hours old.
+A run's specs go once its queue is gone, no instance is the pool's, and the
+newest was staged 24 hours ago. Queues made before v0.147.0 are untagged and
+kept; 'spawn pool drain --run-id &lt;id&gt;' deletes one. Queues are regional, so
+--region / --all-regions choose where to look; the worker check always
+covers every enabled region. The TTL reaper applies the same rule
+(REAPER_POOL_QUEUES).
+
 A log of everything removed is written to ~/.spawn/cleanup-&lt;timestamp&gt;.log.
 
 ```
@@ -60,6 +73,7 @@ spawn cleanup [flags]
 | `--dry-run` |  | bool |  | Preview what would be removed without deleting anything |
 | `--elastic-ips` |  | bool |  | Release only orphaned spawn launch Elastic IPs (unassociated, instance gone); nothing else is touched |
 | `--instance-roles` |  | bool |  | Delete only unused per-task and per-pool spawn-instance-* (and pre-v0.147 spawn-pool-worker-*) IAM roles and instance profiles (no instance uses them, 24h old and unused); nothing else is touched |
+| `--pool-queues` |  | bool |  | Delete only the SQS queues (and staged task specs) of pools nobody drained: spawn-tagged, empty, 24h old, no instance is the pool's; nothing else is touched |
 | `--region` |  | string |  | AWS region (default: current region from AWS config) |
 | `--yes` | `-y` | bool |  | Skip the confirmation prompt |
 
