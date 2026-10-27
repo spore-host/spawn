@@ -26,6 +26,9 @@ var detachedParamKeys = []string{
 	"iam_role",
 	"instance_type",
 	"key_name",
+	// spot is read only from legacy params, which carry no
+	// detachedLaunchSettingsKey (#1353); still seeded, since the cost estimator
+	// reads it too.
 	"spot",
 	// ttl is not read since #1330: it reaches the orchestrator as spawn:ttl in
 	// detachedTagsKey, which the Lambda turns into spawn:ttl-deadline.
@@ -34,6 +37,8 @@ var detachedParamKeys = []string{
 	detachedUserDataKey,
 	// The member's instance tags (#1330), rendered beside its user data.
 	detachedTagsKey,
+	// The member's RunInstances-side settings (#1353), resolved beside its tags.
+	detachedLaunchSettingsKey,
 }
 
 // NOTE: `region` is deliberately NOT in the list above, and the gate caught me

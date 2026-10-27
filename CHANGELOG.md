@@ -301,6 +301,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   batch queue too, before its upload, key pair and IAM role. `spawn schedule
   create` has neither flag, so a scheduled sweep cannot drop them.
 
+- **A detached sweep member now launches with its RunInstances settings**
+  (#1353). The sweep orchestrator sent RunInstances only the instance type,
+  AMI, key, profile, user data and tags, so a detached member dropped
+  `volume_size`/`--volume-size` (and the AMI-snapshot minimum),
+  `--security-group`, `--subnet`, `az`, `spot_max_price`, hibernation
+  (`hibernate`, `--on-idle hibernate`, `on_complete: hibernate`, with its
+  RAM-sized encrypted root), `--efa`, `--placement-group`,
+  `--reservation-id`/`--capacity-block`, `--nested-virtualization` and
+  `--attach-volume`, and got no public-IP network interface. The CLI now
+  resolves each member's settings as a foreground launch does and ships them
+  as `spawn_launch_settings`, a versioned schema (`aws.LaunchSettings`);
+  the orchestrator applies them with the code `Client.Launch` uses. Params
+  that carry settings are held to them: the orchestrator refuses a member
+  whose settings are of another schema version, hold a field it does not
+  know, or cannot be applied, rather than launching without them. Params with
+  no `spawn_launch_settings`, from an older CLI, launch as before (the bare
+  `spot` flag and nothing else), with one log line per sweep. So do the
+  members of a schedule an older CLI created: scheduler-handler replays the
+  params uploaded at `spawn schedule create` on every firing, so such a
+  schedule stays on the old behaviour until it is re-created. (Params with no
+  `spawn_user_data` or `spawn_tags` are still refused, as since #1323/#1330;
+  see #1368.) What the orchestrator cannot honour is refused at `spawn launch
+  --detach`, with the remedy: `--fsx-create`, `--fsx-recall`,
+  `--efa-interfaces` above 1, a customer-managed EBS KMS key, `--vpc` without
+  `--subnet`, and hibernation with an instance-type pattern (a foreground
+  sweep also drops the first two and `--vpc`, #1366). Deploy the orchestrator
+  before or with the CLI release: an older orchestrator ignores the settings.
 - **Cancelling a sweep from the dashboard now terminates its instances**
   (#1349). The dashboard's cancel assumed `SpawnSweepCrossAccountRole`, whose
   trust names only the sweep orchestrator, so the assume was always denied: the

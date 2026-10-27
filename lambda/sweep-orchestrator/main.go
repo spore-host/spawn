@@ -841,6 +841,12 @@ func getBoolParam(params map[string]interface{}, key string, defaultValue bool) 
 	return defaultValue
 }
 
+// getRawParam returns params[key] undecoded, and whether it is present.
+func getRawParam(params map[string]interface{}, key string) (interface{}, bool) {
+	v, ok := params[key]
+	return v, ok
+}
+
 // parseInstanceTypePattern parses instance type pattern into list
 // Supports:
 // - Single: "c5.large"

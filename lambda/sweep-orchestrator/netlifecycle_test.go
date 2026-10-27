@@ -123,7 +123,7 @@ func TestMemberLaunchesWithTheCLIsTags(t *testing.T) {
 		"spawn:on-complete": "terminate", "spawn:ttl": "2h", "spawn:ttl-deadline": "2026-01-01T02:00:00Z",
 	})
 	state := &SweepRecord{SweepID: "sw-20261026", SweepName: "sw"}
-	in, err := buildRunInstancesInput(state, map[string]interface{}{userDataParam: "x", tagsParam: shipped}, 3, "t3.micro", now)
+	in, err := buildRunInstancesInput(state, map[string]interface{}{userDataParam: "x", tagsParam: shipped, launchSettingsParam: cliSettings(t, nil)}, 3, "t3.micro", now)
 	if err != nil {
 		t.Fatal(err)
 	}
