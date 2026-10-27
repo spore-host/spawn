@@ -66,6 +66,12 @@ aws iam create-role \
 # Only roles spawn creates, and only to EC2: the CLI refuses a detached sweep
 # naming any other profile, since a grant broad enough to pass an arbitrary
 # role would let the orchestrator hand any role in the account to an instance.
+#
+# ec2:CancelSpotInstanceRequests: cancelling a sweep terminates its members
+# here (#1349), and a Spot member's request is cancelled before its instance,
+# as on every spawn terminate path (#922). The members' requests are untagged,
+# so the grant cannot take the spawn:managed condition; it is no wider than the
+# unconditioned TerminateInstances beside it, and cancelling never terminates.
 POLICY_DOCUMENT=$(cat <<EOF
 {
   "Version": "2012-10-17",
@@ -83,7 +89,8 @@ POLICY_DOCUMENT=$(cat <<EOF
         "ec2:DescribeVpcs",
         "ec2:DescribeAvailabilityZones",
         "ec2:CreateTags",
-        "ec2:TerminateInstances"
+        "ec2:TerminateInstances",
+        "ec2:CancelSpotInstanceRequests"
       ],
       "Resource": "*"
     },

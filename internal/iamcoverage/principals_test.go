@@ -273,9 +273,13 @@ var principals = []principal{
 	},
 	{
 		// EC2 reads in a member account are made AS THE CALLER (#815): the
-		// caller's credentials assume SpawnDashboardCrossAccountReadRole.
+		// caller's credentials assume SpawnDashboardCrossAccountReadRole. That
+		// AssumeRole is the caller's, not SpawnDashboardLambdaRole's, so its one
+		// function is cut (#1349); the caller's own role is the dashboard's
+		// Cognito role, provisioned outside this repository.
 		name:  "dashboard-api",
 		build: build{dir: "lambda/dashboard-api", pkg: ".", goos: []string{"linux"}},
+		cuts:  []string{"github.com/spore-host/spawn/lambda/dashboard-api.callerAssumeRoleProvider"},
 		contexts: []credContext{
 			{name: "member account", services: []string{"ec2"}, variants: []variant{
 				{"SpawnDashboardCrossAccountReadRole", shellPolicy("lambda/dashboard-api/scripts/setup-cross-account-role.sh")},

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -80,6 +81,27 @@ func TestAssumeRoleUsesTheCallerNotTheLambda(t *testing.T) {
 	if !strings.Contains(src, "if callerCreds == nil") {
 		t.Error("there is no nil guard on callerCreds; a nil provider would fall through to the " +
 			"ambient credential chain, i.e. this Lambda's role")
+	}
+}
+
+// callerAssumeRoleProvider is cut out of the IAM coverage gate's inventory for
+// SpawnDashboardLambdaRole, because its AssumeRole runs as the caller (#1349).
+// So it must stay exactly that: an STS client on the caller's credentials and
+// the assume-role provider. Any other client built in it would be hidden from
+// the gate.
+func TestCallerAssumeRoleProviderBuildsOnlyTheCallersSTSClient(t *testing.T) {
+	body := funcBody(t, readDashboardFile(t, "cross_account.go"), "func callerAssumeRoleProvider(")
+	got := regexp.MustCompile(`\b(\w+)\.(New\w*)\(`).FindAllStringSubmatch(body, -1)
+	var ctors []string
+	for _, m := range got {
+		ctors = append(ctors, m[1]+"."+m[2])
+	}
+	if strings.Join(ctors, ",") != "sts.NewFromConfig,stscreds.NewAssumeRoleProvider" {
+		t.Errorf("callerAssumeRoleProvider builds %v; want only sts.NewFromConfig then "+
+			"stscreds.NewAssumeRoleProvider (internal/iamcoverage cuts this function)", ctors)
+	}
+	if !strings.Contains(body, "o.Credentials = callerCreds") {
+		t.Error("callerAssumeRoleProvider's STS client is not on the caller's credentials")
 	}
 }
 

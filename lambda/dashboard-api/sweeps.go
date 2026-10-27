@@ -5,21 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"regexp"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
+	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
+	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 )
-
-// awsAccountIDRe matches a valid 12-digit AWS account ID.
-var awsAccountIDRe = regexp.MustCompile(`^\d{12}$`)
 
 const (
 	dynamoSweepTable = "spawn-sweep-orchestration"
@@ -159,20 +154,21 @@ func handleGetSweep(ctx context.Context, cfg aws.Config, sweepID, cliIamArn stri
 	completedAt, _ := time.Parse(time.RFC3339, sweep.CompletedAt)
 
 	sweepInfo := SweepDetailInfo{
-		SweepID:         sweep.SweepID,
-		SweepName:       sweep.SweepName,
-		Status:          sweep.Status,
-		TotalParams:     sweep.TotalParams,
-		Launched:        sweep.Launched,
-		Failed:          sweep.Failed,
-		Region:          sweep.Region,
-		CreatedAt:       createdAt,
-		UpdatedAt:       updatedAt,
-		EstimatedCost:   sweep.EstimatedCost,
-		MaxConcurrent:   sweep.MaxConcurrent,
-		LaunchDelay:     sweep.LaunchDelay,
-		NextToLaunch:    sweep.NextToLaunch,
-		CancelRequested: sweep.CancelRequested,
+		SweepID:          sweep.SweepID,
+		SweepName:        sweep.SweepName,
+		Status:           sweep.Status,
+		TotalParams:      sweep.TotalParams,
+		Launched:         sweep.Launched,
+		Failed:           sweep.Failed,
+		Region:           sweep.Region,
+		CreatedAt:        createdAt,
+		UpdatedAt:        updatedAt,
+		EstimatedCost:    sweep.EstimatedCost,
+		MaxConcurrent:    sweep.MaxConcurrent,
+		LaunchDelay:      sweep.LaunchDelay,
+		NextToLaunch:     sweep.NextToLaunch,
+		CancelRequested:  sweep.CancelRequested,
+		CancelTerminated: sweep.CancelTerminated,
 	}
 
 	if !completedAt.IsZero() {
@@ -269,29 +265,31 @@ func handleCancelSweep(ctx context.Context, cfg aws.Config, sweepID, cliIamArn s
 		return errorResponse(500, fmt.Sprintf("Failed to update sweep: %v", err)), nil
 	}
 
-	// Terminate running instances using cross-account role
-	var instanceIDs []string
+	// The members are not terminated here (#1349). Only the sweep orchestrator
+	// may act in the member account: SpawnSweepCrossAccountRole trusts
+	// SpawnSweepOrchestratorRole alone, and the owner decided against giving
+	// this Lambda a terminate path of its own. The record now says CANCELLED;
+	// invoking the orchestrator makes it terminate the sweep's live members
+	// even when no invocation of it is running to notice the flag.
+	pending := 0
 	for _, inst := range sweep.Instances {
-		if inst.State == "running" && inst.InstanceID != "" {
-			instanceIDs = append(instanceIDs, inst.InstanceID)
+		if inst.InstanceID != "" && liveMemberState[inst.State] {
+			pending++
 		}
 	}
 
-	if len(instanceIDs) > 0 {
-		err = terminateSweepInstancesCrossAccount(ctx, cfg, sweep.AWSAccountID, sweep.Region, instanceIDs)
-		if err != nil {
-			log.Printf("warning: failed to terminate instances: %v", err)
-			// Don't fail the request - sweep is still marked as cancelled
-		} else {
-			log.Printf("terminated %d instances", len(instanceIDs))
-		}
+	message := "Sweep cancelled. The sweep orchestrator is terminating its instances."
+	if err := invokeSweepOrchestrator(ctx, cfg, sweepID); err != nil {
+		log.Printf("warning: sweep %s cancelled, but invoking %s failed: %v", sweepID, sweepOrchestratorFunction(), err)
+		message = fmt.Sprintf("Sweep cancelled. The sweep orchestrator could not be started to terminate its "+
+			"instances; if they are still running in a few minutes, run: spawn cancel %s", sweepID)
 	}
 
-	// Build response
 	response := CancelSweepResponse{
-		Success:             true,
-		Message:             "Sweep cancelled successfully",
-		InstancesTerminated: len(instanceIDs),
+		Success:              true,
+		Message:              message,
+		InstancesTerminated:  0,
+		InstancesToTerminate: pending,
 	}
 
 	return successResponse(response)
@@ -389,56 +387,36 @@ func handleCleanupSweeps(ctx context.Context, cfg aws.Config, body string, cliIa
 	return successResponse(response)
 }
 
-// terminateSweepInstancesCrossAccount terminates instances using cross-account role assumption
-func terminateSweepInstancesCrossAccount(ctx context.Context, cfg aws.Config, accountID, region string, instanceIDs []string) error {
-	if len(instanceIDs) == 0 {
-		return nil
+// liveMemberState are the states the orchestrator terminates on a cancel.
+var liveMemberState = map[string]bool{"pending": true, "running": true, "stopping": true, "stopped": true}
+
+// defaultSweepOrchestratorFunction is the function scripts/deploy-sweep-orchestrator.sh
+// creates, the name the CLI and scheduler-handler invoke.
+const defaultSweepOrchestratorFunction = "spawn-sweep-orchestrator"
+
+// sweepOrchestratorFunction is the orchestrator to invoke, overridable as in
+// scheduler-handler.
+func sweepOrchestratorFunction() string {
+	return getEnvOrDefault("SPAWN_ORCHESTRATOR_FUNCTION_NAME", defaultSweepOrchestratorFunction)
+}
+
+// orchestratorEvent is the orchestrator's input (pkg/sweep.OrchestratorEvent).
+type orchestratorEvent struct {
+	SweepID string `json:"sweep_id"`
+}
+
+// invokeSweepOrchestrator starts the orchestrator for sweepID asynchronously,
+// as `spawn launch --detach` does, with this Lambda's own credentials
+// (lambda:InvokeFunction, setup-dashboard-lambda-role.sh).
+func invokeSweepOrchestrator(ctx context.Context, cfg aws.Config, sweepID string) error {
+	payload, err := json.Marshal(orchestratorEvent{SweepID: sweepID})
+	if err != nil {
+		return err
 	}
-
-	// Validate account ID format before constructing ARN.
-	if !awsAccountIDRe.MatchString(accountID) {
-		return fmt.Errorf("invalid AWS account ID %q", accountID)
-	}
-
-	// Assume cross-account role
-	stsClient := sts.NewFromConfig(cfg)
-	roleArn := fmt.Sprintf("arn:aws:iam::%s:role/SpawnSweepCrossAccountRole", accountID)
-
-	assumeResult, err := stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
-		RoleArn:         aws.String(roleArn),
-		RoleSessionName: aws.String("dashboard-cancel-" + time.Now().Format("20060102-150405")),
-		DurationSeconds: aws.Int32(900), // 15 minutes
+	_, err = lambdasvc.NewFromConfig(cfg).Invoke(ctx, &lambdasvc.InvokeInput{
+		FunctionName:   aws.String(sweepOrchestratorFunction()),
+		InvocationType: lambdatypes.InvocationTypeEvent,
+		Payload:        payload,
 	})
-	if err != nil {
-		return fmt.Errorf("failed to assume role: %w", err)
-	}
-
-	// Create EC2 client with assumed role credentials
-	creds := assumeResult.Credentials
-	ec2Cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(region),
-		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
-			return aws.Credentials{
-				AccessKeyID:     *creds.AccessKeyId,
-				SecretAccessKey: *creds.SecretAccessKey,
-				SessionToken:    *creds.SessionToken,
-				Source:          "AssumeRole",
-			}, nil
-		})),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create config: %w", err)
-	}
-
-	ec2Client := ec2.NewFromConfig(ec2Cfg)
-
-	// Terminate instances
-	_, err = ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
-		InstanceIds: instanceIDs,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to terminate instances: %w", err)
-	}
-
-	return nil
+	return err
 }
