@@ -86,5 +86,15 @@ func memberTags(state *SweepRecord, config map[string]interface{}, paramIndex in
 	if err != nil {
 		return nil, fmt.Errorf("param set %d: %w; it was not launched", paramIndex, err)
 	}
+	// The CLI refuses a member over the limit when it renders the tags
+	// (#1336); this is the backstop for params it did not render, since
+	// RunInstances would reject the member anyway.
+	if len(anchored) > maxInstanceTags {
+		return nil, fmt.Errorf("param set %d carries %d instance tags, over AWS's %d per resource, so RunInstances "+
+			"would reject it; it was not launched (#1336)", paramIndex, len(anchored), maxInstanceTags)
+	}
 	return anchored, nil
 }
+
+// maxInstanceTags is AWS's per-resource tag limit.
+const maxInstanceTags = 50

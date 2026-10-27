@@ -372,6 +372,11 @@ field SubnetHint.AvailabilityZone string
 field SubnetHint.MapPublicIPOnLaunch bool
 field SubnetHint.SubnetID string
 field SubnetHint.VPCID string
+field TagLimitError.Count int
+field TagLimitError.CustomTags int
+field TagLimitError.Limit int
+field TagLimitError.PostLaunch []string
+field TagLimitError.SporedSettings []string
 field UserDataTooLargeError.DecodedBytes int
 field UserDataTooLargeError.EncodedBytes int
 func (*AccessDeniedError) Error() string
@@ -497,12 +502,14 @@ func (*LaunchError) Error() string
 func (*LaunchError) Unwrap() error
 func (*LaunchTagger) TagValues(ctx context.Context, lc LaunchConfig) (map[string]string, error)
 func (*LaunchTagger) Tags(ctx context.Context, lc LaunchConfig) ([]types.Tag, error)
+func (*TagLimitError) Error() string
 func (*UserDataTooLargeError) Error() string
 func (DisplayPrice) SourceLabel() string
 func (EFACapacity) ResolveInterfaces(requested int) (int, error)
 func (LaunchConfig) HibernationRequested() bool
 func (LaunchConfig) ValidateDurations() error
 func (LaunchConfig) ValidateSporedSettings() error
+func (LaunchConfig) ValidateTagCount() error
 func (LaunchConfig) ValidateUserDataSize() error
 func (ManagedResource) IsRunningInstance() bool
 func (ManagedResource) OwnedBy(callerARN string) bool
@@ -602,6 +609,7 @@ type SporedLiveness struct
 type SporedObservability struct
 type SpotPrice struct
 type SubnetHint struct
+type TagLimitError struct
 type UserDataTooLargeError struct
 var CallerVersion
 var ErrAMIWaitExhausted

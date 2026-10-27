@@ -298,6 +298,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in a member account stays as it is: the 403 names `spawn terminate <id>`
   (owner decision).
 
+- **A launch over AWS's 50-tag limit is refused before anything is created**
+  (#1336). spawn only budgeted the droppable `spawn:param:*` tags, so a launch
+  with many `--tag` values, or a maximal launch with every spored setting
+  (`--idle-cpu-threshold`, `--metrics` and its port, bind and path,
+  `--tracing` and its sampling: 54 tags), reached RunInstances, which rejected
+  it after the key pair, IAM role, security groups, Strata lockfile or durable
+  FSx had been created. Now `spawn launch`, a parameter sweep (foreground and
+  detached), `--estimate-only` and `--dry-run`, and `launcher.Provision` (task
+  runs, services, SDK callers) refuse it before their first AWS call, with an
+  error giving the count and the limit and naming what can be dropped: the
+  number of `--tag` values and each spored setting that added a tag. The
+  count includes the tags spawn writes after RunInstances: a Spot instance's
+  `spawn:spot-price-per-hour` (on a persistent request, the request's
+  `spawn:original-instance-id`), and an ephemeral FSx's four mount tags. A
+  Spot sweep member therefore keeps one fewer `spawn:param:*` tag when
+  parameters are dropped to fit. The documented monitoring setup
+  (`--metrics --metrics-bind 0.0.0.0 --idle-cpu-threshold`) still fits on a
+  maximal launch. Snapshot tags copied onto an attached volume are now
+  limited to what fits beside the launch's tags (the rest are named in a
+  warning), and the sweep orchestrator refuses a member carrying more than 50
+  tags. New in `pkg/aws`: `LaunchConfig.ValidateTagCount` and `TagLimitError`.
 - **A pool nobody drains no longer keeps its IAM role forever** (#1319).
   `spawn pool drain` was the only thing that deleted a pool's worker role and
   instance profile, so a pool whose caller crashed, or whose run-end hook

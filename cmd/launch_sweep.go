@@ -192,6 +192,15 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 	sweepID := generateSweepID(name)
 
+	// Every member's tags must fit in AWS's 50-tag limit (#1336). Checked
+	// before anything else, so --estimate-only reports the same refusal and a
+	// real sweep fails before applyCLIIAMToSweep creates a role, a key pair is
+	// imported or the params are uploaded: RunInstances (or the orchestrator's)
+	// would reject the member after all of that.
+	if err := preflightSweepTags(*baseConfig, paramFormat, sweepID, name); err != nil {
+		return err
+	}
+
 	// Write sweep ID to file for workflow integration
 	if err := writeOutputID(sweepID, outputIDFile); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Failed to write sweep ID to file: %v\n", err)
