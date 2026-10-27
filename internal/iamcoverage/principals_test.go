@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	spawncmd "github.com/spore-host/spawn/cmd"
+	"github.com/spore-host/spawn/internal/treewalk"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/pipeline"
 	"github.com/spore-host/spawn/pkg/reaperiam"
@@ -550,6 +551,9 @@ func TestEveryMainPackageIsAPrincipal(t *testing.T) {
 	var found []string
 	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if treewalk.Vanished(repoRoot, path, err) {
+				return nil
+			}
 			return err
 		}
 		rel, _ := filepath.Rel(repoRoot, path)

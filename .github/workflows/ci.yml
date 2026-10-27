@@ -192,6 +192,10 @@ jobs:
           mods=$(find . -mindepth 2 -name go.mod -not -path './.git/*' | sort)
           [ -n "$mods" ] || { echo "found no nested modules — the discovery is broken" >&2; exit 1; }
           for m in $mods; do (cd "$(dirname "$m")" && go mod download); done
+          # internal/iamcoverage type-checks the CLI and spored for every
+          # GOOS offline (GOPROXY=off), so the platform-only deps a Linux
+          # build never fetches (e.g. mousetrap on windows) must be cached.
+          for os in linux darwin windows; do GOOS=$os go list -deps -test ./... >/dev/null; done
 
       - name: Test
         run: go test -short -exec "$RUNNER_TEMP/hermetic-exec" -coverprofile=coverage.out ./...
@@ -429,6 +433,10 @@ jobs:
           mods=$(find . -mindepth 2 -name go.mod -not -path './.git/*' | sort)
           [ -n "$mods" ] || { echo "found no nested modules — the discovery is broken" >&2; exit 1; }
           for m in $mods; do (cd "$(dirname "$m")" && go mod download); done
+          # internal/iamcoverage type-checks the CLI and spored for every
+          # GOOS offline (GOPROXY=off), so the platform-only deps a Linux
+          # build never fetches (e.g. mousetrap on windows) must be cached.
+          for os in linux darwin windows; do GOOS=$os go list -deps -test ./... >/dev/null; done
 
       - name: Unit tests (Windows)
         shell: bash
