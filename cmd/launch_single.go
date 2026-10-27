@@ -53,6 +53,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if _, _, err := sporedSettingsFromFlags(); err != nil {
 		return err
 	}
+	// And a malformed or reserved-prefix --tag, before any AWS call and the
+	// dispatch below, on every path (#1356).
+	if _, err := parseKVTags(launchTags); err != nil {
+		return err
+	}
 
 	// Get the account ID for audit logging. This is best-effort and resilient:
 	// it uses the AWS client's GetAccountID, which falls back to IMDS if STS is
@@ -124,18 +129,9 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		// each param row overrides it. Its validation applies to sweeps too,
 		// which is the point rather than a side effect: --fsx-create without
 		// --fsx-s3-bucket was previously accepted-and-ignored on a sweep.
-		config, err := buildLaunchConfig(nil)
+		config, err := sweepBaseConfig(ctx)
 		if err != nil {
 			return err
-		}
-		// Keep the two fields the old dispatch set explicitly. Region may have
-		// been resolved from config/defaults rather than the flag, and
-		// InstanceType is legitimately empty on a sweep whose rows set it.
-		if config.Region == "" {
-			config.Region = region
-		}
-		if config.InstanceType == "" {
-			config.InstanceType = instanceType
 		}
 		return launchParameterSweep(ctx, config, plat, auditLog)
 	}
@@ -198,31 +194,10 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 
 	// Apply custom --tag key=value tags to the instance + its created volumes,
 	// so ephemeral spores and their --attach-volume data volumes are attributable
-	// in Cost Explorer / cleanup scripts (#161). Set first so spawn-managed tags
-	// (team, strata, the buildTags baseline) take precedence over user tags.
-	if len(launchTags) > 0 {
-		userTags, err := parseKVTags(launchTags)
-		if err != nil {
-			return err
-		}
-		if config.Tags == nil {
-			config.Tags = make(map[string]string)
-		}
-		for k, v := range userTags {
-			config.Tags[k] = v
-		}
-	}
-
-	// Apply team tags if --team specified
-	if launchTeamID != "" {
-		if config.Tags == nil {
-			config.Tags = make(map[string]string)
-		}
-		config.Tags["spawn:team-id"] = launchTeamID
-		// Resolve team name from DynamoDB for the human-readable tag
-		if teamName, err := resolveTeamName(ctx, launchTeamID); err == nil && teamName != "" {
-			config.Tags["spawn:team-name"] = teamName
-		}
+	// in Cost Explorer / cleanup scripts (#161), and --team's spawn:team-id. The
+	// sweep and batch-queue paths above apply the same (#1356).
+	if err := applyLaunchFlagTags(ctx, config); err != nil {
+		return err
 	}
 
 	// AWS's 50-tag limit (#1336), before the Strata upload below and everything
@@ -1442,4 +1417,27 @@ func resolveEFAInterfaces(ctx context.Context, awsClient *aws.Client, config *aw
 	}
 	config.EFAInterfaces = n
 	return capacity, nil
+}
+
+// sweepBaseConfig is the config every member of a parameter sweep starts from,
+// foreground or detached: the one a single launch would build, with --tag and
+// --team merged in (#1356). Each param row overrides it.
+func sweepBaseConfig(ctx context.Context) (*aws.LaunchConfig, error) {
+	config, err := buildLaunchConfig(nil)
+	if err != nil {
+		return nil, err
+	}
+	// Keep the two fields the old dispatch set explicitly. Region may have
+	// been resolved from config/defaults rather than the flag, and
+	// InstanceType is legitimately empty on a sweep whose rows set it.
+	if config.Region == "" {
+		config.Region = region
+	}
+	if config.InstanceType == "" {
+		config.InstanceType = instanceType
+	}
+	if err := applyLaunchFlagTags(ctx, config); err != nil {
+		return nil, err
+	}
+	return config, nil
 }

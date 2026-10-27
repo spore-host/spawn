@@ -75,6 +75,18 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		return err
 	}
 
+	// The instance's config, with --tag and --team (#1356). Its region, AMI and
+	// user data are filled in below. Built here so a tag set over AWS's 50-tag
+	// limit is refused before the region lookup, the queue upload, the key pair
+	// and the IAM role (#1336).
+	launchConfig, err := batchQueueLaunchConfig(ctx, queueConfig)
+	if err != nil {
+		return err
+	}
+	if err := preflightLaunchTags(launchConfig); err != nil {
+		return err
+	}
+
 	// Auto-detect region if not specified
 	queueRegion := region
 	if queueRegion == "" {
@@ -172,32 +184,7 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		}
 	}
 
-	// Build launch config
-	instanceName := name
-	if instanceName == "" {
-		instanceName = fmt.Sprintf("%s-%s", queueConfig.QueueName, queueConfig.QueueID)
-	}
-	launchConfig := &aws.LaunchConfig{
-		Name:         instanceName,
-		InstanceType: instanceType,
-		Region:       queueRegion,
-		AMI:          resolvedAMI,
-		KeyName:      keyPair,
-		UserData:     queueUserData,
-		Spot:         spot,
-		SpotMaxPrice: spotMaxPrice,
-		Hibernate:    hibernate,
-		TTL:          queueConfig.GlobalTimeout, // Use global timeout as TTL
-		DNSName:      instanceName,
-	}
-
-	// Add network config if specified (sgIDs may be empty — let spawn auto-create)
-	if len(sgIDs) > 0 {
-		launchConfig.SecurityGroupIDs = sgIDs
-	}
-	if subnetID != "" {
-		launchConfig.SubnetID = subnetID
-	}
+	launchConfig.Region, launchConfig.AMI, launchConfig.UserData = queueRegion, resolvedAMI, queueUserData
 
 	// Zombie-instance guard (shared helper).
 	if err := guardZombieInstance(launchConfig); err != nil {
@@ -258,4 +245,37 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 	fmt.Fprintf(os.Stderr, "\n")
 
 	return nil
+}
+
+// batchQueueLaunchConfig is the batch-queue instance's launch config, with
+// --tag and --team merged in as a single launch merges them (#1356). The
+// caller sets its region, AMI and user data.
+func batchQueueLaunchConfig(ctx context.Context, queueConfig *queue.QueueConfig) (*aws.LaunchConfig, error) {
+	instanceName := name
+	if instanceName == "" {
+		instanceName = fmt.Sprintf("%s-%s", queueConfig.QueueName, queueConfig.QueueID)
+	}
+	launchConfig := &aws.LaunchConfig{
+		Name:         instanceName,
+		InstanceType: instanceType,
+		KeyName:      keyPair,
+		Spot:         spot,
+		SpotMaxPrice: spotMaxPrice,
+		Hibernate:    hibernate,
+		TTL:          queueConfig.GlobalTimeout, // Use global timeout as TTL
+		DNSName:      instanceName,
+	}
+
+	// Add network config if specified (sgIDs may be empty — let spawn auto-create)
+	if len(sgIDs) > 0 {
+		launchConfig.SecurityGroupIDs = sgIDs
+	}
+	if subnetID != "" {
+		launchConfig.SubnetID = subnetID
+	}
+
+	if err := applyLaunchFlagTags(ctx, launchConfig); err != nil {
+		return nil, err
+	}
+	return launchConfig, nil
 }
