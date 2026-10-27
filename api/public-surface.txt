@@ -836,6 +836,7 @@ func (*Queue) Claim(ctx context.Context, waitSeconds int32) (*Claimed, error)
 func (*Queue) Delete(ctx context.Context) error
 func (*Queue) Depth(ctx context.Context) (visible, inFlight int, err error)
 func (*Queue) Submit(ctx context.Context, ref TaskRef) error
+func (*Queue) TagErr() error
 func (*Queue) URL() string
 func (*ScriptExecer) Exec(ctx context.Context, specJSON []byte, workspaceDir string) (int, error)
 func (*SpecStore) Fetch(ctx context.Context, specURI string) ([]byte, error)

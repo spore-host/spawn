@@ -251,7 +251,7 @@ func crossAccountGrantedActions(t *testing.T) map[string]bool {
 	// `                  - ec2:DescribeInstances` — a list item that looks like an
 	// IAM action. Condition keys (ec2:ResourceTag/...) are excluded by requiring
 	// no slash.
-	re := regexp.MustCompile(`(?m)^\s*-\s+((?:ec2|fsx|ssm|sts|iam|dynamodb|kms|route53|s3):[A-Za-z]+)\s*$`)
+	re := regexp.MustCompile(`(?m)^\s*-\s+((?:ec2|fsx|ssm|sts|iam|dynamodb|kms|route53|s3|sqs):[A-Za-z]+)\s*$`)
 	out := map[string]bool{}
 	for _, m := range re.FindAllStringSubmatch(string(b), -1) {
 		out[m[1]] = true

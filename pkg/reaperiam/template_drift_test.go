@@ -319,7 +319,7 @@ func samScanSelfStatements(t *testing.T) []interface{} {
 	return stmts
 }
 
-// checkNoScanSelfActionsOutsideBranch fails on an ec2:/fsx:/ssm:/iam: action anywhere in
+// checkNoScanSelfActionsOutsideBranch fails on an ec2:/fsx:/ssm:/iam:/sqs: action anywhere in
 // v. Those services belong to the ScanSelf branch only; the rest of the function's
 // policies are sts, route53, dynamodb and kms on the base credentials.
 func checkNoScanSelfActionsOutsideBranch(t *testing.T, resource string, v interface{}) {
@@ -333,7 +333,7 @@ func checkNoScanSelfActionsOutsideBranch(t *testing.T, resource string, v interf
 				if k == "Action" {
 					for _, a := range asList(c) {
 						s, _ := a.(string)
-						for _, svc := range []string{"ec2:", "fsx:", "ssm:", "iam:"} {
+						for _, svc := range []string{"ec2:", "fsx:", "ssm:", "iam:", "sqs:"} {
 							if strings.HasPrefix(s, svc) {
 								t.Errorf("%s grants %s outside the ScanSelf branch, where the "+
 									"reaperiam comparison does not see it", resource, s)

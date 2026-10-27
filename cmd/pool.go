@@ -12,6 +12,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/launcher"
+	"github.com/spore-host/spawn/pkg/poolqueue"
 	"github.com/spore-host/spawn/pkg/taskcohort"
 	"github.com/spore-host/spawn/pkg/taskpool"
 	"github.com/spore-host/spawn/pkg/taskproto"
@@ -70,7 +71,7 @@ regardless, and the reaper is the backstop.`,
 // specBucketFor returns the per-account bucket staged task specs live in. Reuses
 // the results-bucket naming so a pool run needs no new bucket wiring.
 func poolSpecBucket(account, region string) string {
-	return fmt.Sprintf("spawn-results-%s-%s", account, region)
+	return poolqueue.SpecBucket(account, region)
 }
 
 // poolWorkerPolicy builds the scoped inline IAM policy a pool worker's instance
@@ -91,7 +92,7 @@ func poolSpecBucket(account, region string) string {
 //     pooled job script uploads outputs with `spored provenance upload`, as
 //     `spawn task run` does, and without them the outputs land untagged.
 func poolWorkerPolicy(account, region, specBucket, runID string, extraRead, extraWrite []string) string {
-	queueName := "spawn-pool-" + runID
+	queueName := taskpool.QueueName(runID)
 	queueARN := fmt.Sprintf("arn:aws:sqs:%s:%s:%s", region, account, queueName)
 	binPrefix := "arn:aws:s3:::spawn-binaries-*"
 	specObj := fmt.Sprintf("arn:aws:s3:::%s/*", specBucket)
@@ -338,9 +339,12 @@ var poolCreateCmd = &cobra.Command{
 		if vis <= 0 {
 			vis = 900 // 15m default claim window
 		}
-		pool, err := taskpool.CreateForRunWithConfig(ctx, awsClient.Config(), poolRunID, specBucket, "staging", vis)
+		pool, err := taskpool.CreateForRunWithConfig(ctx, awsClient.Config(), poolRunID, specBucket, poolqueue.SpecPrefix, vis)
 		if err != nil {
 			return fmt.Errorf("create pool queue: %w", err)
+		}
+		if terr := pool.Queue.TagErr(); terr != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  the pool's queue was created without its spawn tags (%v): 'spawn cleanup --pool-queues' and the reaper cannot recognise it, so only 'spawn pool drain --run-id %s' will delete it. Grant sqs:TagQueue to tag future pools.\n", terr, poolRunID)
 		}
 
 		// Provision the workers as a partial cohort: ask for N, accept >= minViable
@@ -413,7 +417,7 @@ func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, sp
 	// stranding a billing-but-idle worker (#465), while a clean drain (exit 0)
 	// writes taskCompletionFile — the file poolWorkerBaseConfig tells spored to
 	// watch — so on_complete terminates the instance (#1146).
-	workerCmd := buildPoolWorkerCommand(poolRunID, specBucket, "staging", poolIdleTimeout.String(), taskCompletionFile)
+	workerCmd := buildPoolWorkerCommand(poolRunID, specBucket, poolqueue.SpecPrefix, poolIdleTimeout.String(), taskCompletionFile)
 
 	userData, err := launcher.BuildLinuxBootstrap(launcher.BootstrapConfig{
 		Username:       "ec2-user",
@@ -617,7 +621,7 @@ func poolDrainMessage(runID string, alreadyGone bool) string {
 // submit/status/drain commands. Client construction lives in pkg/taskpool so cmd/
 // doesn't import the SQS/S3 SDK directly (#326/#327 boundary).
 func openPool(ctx context.Context, awsClient *aws.Client, region, account string) (*taskpool.Pool, error) {
-	pool, err := taskpool.OpenForRunWithConfig(ctx, awsClient.Config(), poolRunID, poolSpecBucket(account, region), "staging")
+	pool, err := taskpool.OpenForRunWithConfig(ctx, awsClient.Config(), poolRunID, poolSpecBucket(account, region), poolqueue.SpecPrefix)
 	if err != nil {
 		return nil, err
 	}

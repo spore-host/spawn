@@ -585,7 +585,7 @@ func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	// DryRun first because it is the one that silently stops the reaper
 	// terminating anything.
 	keys := []string{
-		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "EmptyBuckets", "InstanceEvents", "InstanceRoles", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
+		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "EmptyBuckets", "InstanceEvents", "InstanceRoles", "PoolQueues", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
 	}
@@ -990,6 +990,46 @@ func TestInstanceRolesSurvivesAMakeDeploy(t *testing.T) {
 	got, _ = runMerge(t, summary, setReap, toExplicit(set))
 	if got["InstanceRoles"] != "off" {
 		t.Errorf("make deploy INSTANCE_ROLES=off sent %q", got["InstanceRoles"])
+	}
+}
+
+// TestPoolQueuesSurvivesAMakeDeploy is #1351's preservation property, the
+// same shape as TestInstanceRolesSurvivesAMakeDeploy: a stack set to
+// PoolQueues=reap keeps it across a `make deploy` that does not mention it, a
+// stack that predates the parameter gets the template default 'report' (an
+// upgrade deletes nothing by itself), and `make deploy POOL_QUEUES=off` sets it.
+func TestPoolQueuesSurvivesAMakeDeploy(t *testing.T) {
+	summary := templateSummaryFromTemplate(t)
+	setReap := strings.Replace(liveParams, "\n]",
+		",\n  {\"ParameterKey\":\"PoolQueues\",\"ParameterValue\":\"reap\"}\n]", 1)
+	if setReap == liveParams {
+		t.Fatal("could not add PoolQueues to the live fixture")
+	}
+	toExplicit := func(m map[string]string) string {
+		var b strings.Builder
+		for k, v := range m {
+			b.WriteString(k + "=" + v + "\n")
+		}
+		return b.String()
+	}
+
+	plain, _ := explicitFromMakefile(t)
+	got, _ := runMerge(t, summary, setReap, toExplicit(plain))
+	if got["PoolQueues"] != "reap" {
+		t.Errorf("plain make deploy over a stack with PoolQueues=reap sent %q: a deploy that did "+
+			"not mention it changed it", got["PoolQueues"])
+	}
+
+	got, _ = runMerge(t, summary, liveParams, toExplicit(plain))
+	if got["PoolQueues"] != "report" {
+		t.Errorf("a stack predating PoolQueues got %q, want the template default 'report': "+
+			"new deletion behaviour must start report-only", got["PoolQueues"])
+	}
+
+	set, _ := explicitFromMakefile(t, "POOL_QUEUES=off")
+	got, _ = runMerge(t, summary, setReap, toExplicit(set))
+	if got["PoolQueues"] != "off" {
+		t.Errorf("make deploy POOL_QUEUES=off sent %q", got["PoolQueues"])
 	}
 }
 

@@ -350,6 +350,26 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:ResourceTag/spawn:managed: 'true'
+              # The abandoned-pool sweep (#1351): spawn-pool-<run id> SQS
+              # queues of pools nobody drained, deleted under the reaper's
+              # PoolQueues setting, and the specs their submitters staged.
+              - Effect: Allow
+                Action:
+                  - sqs:ListQueues
+                # trivy:ignore:AVD-AWS-0057 -- ListQueues has no resource-level ARN; read-only.
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                  - sqs:ListQueueTags
+                  - sqs:DeleteQueue
+                Resource: !Sub 'arn:aws:sqs:*:${AWS::AccountId}:spawn-pool-*'
+              # Delete only, and only staged pool specs: no other object in
+              # spawn-results-* (or anywhere) can be deleted with this.
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                Resource: 'arn:aws:s3:::spawn-results-*/staging/pool-specs/*'
       Tags:
         - Key: !Sub '${TagPrefix}:managed'
           Value: 'false'

@@ -199,7 +199,9 @@ How to read it:
 - **Some permissions are implied by a call's parameters, and are not listed.**
   ` + "`ec2:RunInstances`" + ` with an instance profile also needs ` + "`iam:PassRole`" + ` on that
   role, and with tags ` + "`ec2:CreateTags`" + `; an S3 upload that sets tags also needs
-  ` + "`s3:PutObjectTagging`" + `.
+  ` + "`s3:PutObjectTagging`" + `; ` + "`spawn pool create`" + ` tags its SQS queue, which needs
+  ` + "`sqs:TagQueue`" + ` (without it the queue is created untagged and only
+  ` + "`spawn pool drain`" + ` deletes it).
 - **Calls made through the AWS CLI** (` + "`aws ssm start-session`" + `, ` + "`aws s3 cp`" + ` in
   generated scripts) are not Go SDK calls and are not listed.
 - ` + "`sts:GetCallerIdentity`" + ` needs no permission and is omitted.

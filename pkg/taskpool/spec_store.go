@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/spore-host/spawn/pkg/poolqueue"
 )
 
 // S3API is the slice of the S3 SDK the spec store needs — an interface so tests
@@ -29,12 +30,10 @@ type SpecStore struct {
 }
 
 // specKey is the object key for a run's task spec.
+// The layout is poolqueue.SpecKey's, so the prefix the abandoned-pool sweep
+// deletes (#1351) is the one specs are written under.
 func (s *SpecStore) specKey(runID, taskID string) string {
-	p := s.Prefix
-	if p != "" && p[len(p)-1] == '/' {
-		p = p[:len(p)-1]
-	}
-	return fmt.Sprintf("%s/pool-specs/%s/%s.json", p, runID, sanitize(taskID))
+	return poolqueue.SpecKey(s.Prefix, runID, sanitize(taskID))
 }
 
 // Stage writes a task's spec JSON to S3 and returns its s3:// URI, to be carried

@@ -4,19 +4,25 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/pkg/poolqueue"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
 // TestS3GrantsAreScopedToSpawnsTwoBucketFamilies: the empty-bucket sweep
 // (#1301) can delete a bucket, so every s3: action the reaper holds is granted
 // on spawn's staging and results bucket prefixes and nothing else — never "*",
-// never another name. The prefixes are derived from the names spawn creates,
+// never another name. The one object-level grant is s3:DeleteObject on the
+// pools' staged specs under the results bucket (#1351), and nothing more. The prefixes are derived from the names spawn creates,
 // not typed here. The SAM and cross-account copies are held to these
 // statements by the template drift gates.
 func TestS3GrantsAreScopedToSpawnsTwoBucketFamilies(t *testing.T) {
+	resultsARN := "arn:aws:s3:::" + strings.TrimSuffix(taskproto.DefaultResultsBucket("", ""), "-") + "*"
+	// #1351: the one object grant, delete-only, on the pools' staged specs.
+	specsARN := resultsARN + "/" + poolqueue.SpecsRoot() + "*"
 	want := map[string]bool{
-		"arn:aws:s3:::" + taskproto.StagingBucketPrefix + "*":                                   true,
-		"arn:aws:s3:::" + strings.TrimSuffix(taskproto.DefaultResultsBucket("", ""), "-") + "*": true,
+		"arn:aws:s3:::" + taskproto.StagingBucketPrefix + "*": true,
+		resultsARN: true,
+		specsARN:   true,
 	}
 	seen := map[string]bool{}
 	for _, st := range ScanSelfStatements() {
@@ -40,6 +46,9 @@ func TestS3GrantsAreScopedToSpawnsTwoBucketFamilies(t *testing.T) {
 			}
 		}
 		wantActions := ResultsBucketSweepActions()
+		if st.Resource == specsARN {
+			wantActions = []string{"s3:DeleteObject"}
+		}
 		if strings.Contains(st.Resource, taskproto.StagingBucketPrefix) {
 			wantActions = StagingBucketSweepActions()
 			// #1274: no role spawn makes may list the staging bucket or read

@@ -14,6 +14,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/bucketsweep"
 	"github.com/spore-host/spawn/pkg/instancerole"
+	"github.com/spore-host/spawn/pkg/poolqueue"
 )
 
 var (
@@ -26,6 +27,7 @@ var (
 	cleanupElasticIPs bool
 	cleanupInstRoles  bool
 	cleanupBuckets    bool
+	cleanupPoolQueues bool
 )
 
 var cleanupCmd = &cobra.Command{
@@ -75,6 +77,19 @@ global, so this always checks every enabled region whatever --region says, and
 covers every principal's roles. The TTL reaper applies the same rule
 (REAPER_INSTANCE_ROLES).
 
+--pool-queues deletes only the SQS queues of pools nobody drained
+(spawn-pool-<run id>) and the task specs their submitters staged in the
+results bucket (staging/pool-specs/<run id>/). A queue goes only when it is
+tagged spawn:managed=true with a spawn:pool-run-id tag matching its name, no
+instance in any enabled region (pending through stopped) holds the pool's
+worker profile or tag, it holds no messages, and it is at least 24 hours old.
+A run's specs go once its queue is gone, no instance is the pool's, and the
+newest was staged 24 hours ago. Queues made before v0.147.0 are untagged and
+kept; 'spawn pool drain --run-id <id>' deletes one. Queues are regional, so
+--region / --all-regions choose where to look; the worker check always
+covers every enabled region. The TTL reaper applies the same rule
+(REAPER_POOL_QUEUES).
+
 A log of everything removed is written to ~/.spawn/cleanup-<timestamp>.log.`,
 	RunE: runCleanup,
 }
@@ -92,6 +107,7 @@ func init() {
 	cleanupCmd.Flags().BoolVar(&cleanupAll, "all", false, "Include resources created by other principals (default: only yours)")
 	cleanupCmd.Flags().BoolVar(&cleanupElasticIPs, "elastic-ips", false, "Release only orphaned spawn launch Elastic IPs (unassociated, instance gone); nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupInstRoles, "instance-roles", false, "Delete only unused per-task and per-pool spawn-instance-* (and pre-v0.147 spawn-pool-worker-*) IAM roles and instance profiles (no instance uses them, 24h old and unused); nothing else is touched")
+	cleanupCmd.Flags().BoolVar(&cleanupPoolQueues, "pool-queues", false, "Delete only the SQS queues (and staged task specs) of pools nobody drained: spawn-tagged, empty, 24h old, no instance is the pool's; nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupBuckets, "buckets", false, "Delete only spawn's own staging and results buckets that have been empty for "+bucketGraceDays()+"; no object is ever deleted and nothing else is touched")
 }
 
@@ -118,8 +134,21 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 	onlyMine := !cleanupAll
 
-	if cleanupElasticIPs && cleanupBuckets {
-		return fmt.Errorf("--elastic-ips and --buckets each select one kind of resource; run them separately")
+	if n := countTrue(cleanupElasticIPs, cleanupBuckets, cleanupPoolQueues); n > 1 {
+		return fmt.Errorf("--elastic-ips, --buckets and --pool-queues each select one kind of resource; run them separately")
+	}
+	if cleanupPoolQueues {
+		account, err := client.GetAccountID(ctx)
+		if err != nil {
+			return fmt.Errorf("resolve your account (the expected owner of the specs bucket): %w", err)
+		}
+		// A worker in any enabled region keeps its pool's queue, whatever
+		// --region says (poolqueue.WorkersInUse, as the reaper does).
+		clients, err := poolqueue.NewClients(ctx, client.Config())
+		if err != nil {
+			return fmt.Errorf("list enabled regions (needed to check which pools have workers): %w", err)
+		}
+		return runCleanupPoolQueues(ctx, cmd, account, regions, clients, time.Now())
 	}
 	if cleanupElasticIPs {
 		return runCleanupElasticIPs(ctx, cmd, client, regions, onlyMine)
@@ -654,4 +683,131 @@ func roleDay(t time.Time) string {
 		return "never"
 	}
 	return t.UTC().Format("2006-01-02")
+}
+
+func countTrue(bs ...bool) int {
+	n := 0
+	for _, b := range bs {
+		if b {
+			n++
+		}
+	}
+	return n
+}
+
+// runCleanupPoolQueues is `spawn cleanup --pool-queues` (#1351): abandoned
+// pools' queues and staged specs in each region, through poolqueue, the rule
+// the reaper applies. It previews, asks, then sweeps again with deletion on,
+// so each queue is re-decided at the moment it is deleted.
+func runCleanupPoolQueues(ctx context.Context, cmd *cobra.Command, account string, regions []string, c poolqueue.Clients, now time.Time) error {
+	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	inUse, err := poolqueue.WorkersInUse(ctx, c.EC2)
+	if err != nil {
+		return fmt.Errorf("could not list instances, so no pool can be shown to be abandoned: %w", err)
+	}
+	sweep := func(del bool) ([]poolqueue.Result, int) {
+		var results []poolqueue.Result
+		failed := 0
+		for _, region := range regions {
+			res, err := poolqueue.Sweep(ctx, c.SQS(region), c.S3(region), inUse,
+				poolqueue.Options{Account: account, Region: region, Now: now, Delete: del})
+			if err != nil {
+				fmt.Fprintf(errOut, "%s  %s: %v\n", i18n.Symbol("warning"), region, err)
+				failed++
+				continue
+			}
+			results = append(results, res)
+		}
+		return results, failed
+	}
+
+	preview, failed := sweep(false)
+	would := 0
+	for _, res := range preview {
+		for _, d := range res.Queues {
+			action, why := "keep", d.Reason
+			if d.Err != nil {
+				why = fmt.Sprintf("%s: %v", d.Reason, d.Err)
+				failed++
+			}
+			if d.Delete {
+				action, why = "delete", ""
+				would++
+			}
+			fmt.Fprintf(out, "  queue %s (%s): %s %s\n", d.Name, res.Region, action, why)
+		}
+		for _, d := range res.Specs {
+			switch {
+			case d.Err != nil:
+				failed++
+				fmt.Fprintf(errOut, "  specs s3://%s/%s: %s: %v\n", d.Bucket, d.Prefix, d.Reason, d.Err)
+			case d.Delete:
+				would++
+				fmt.Fprintf(out, "  specs s3://%s/%s (%d object(s)): delete\n", d.Bucket, d.Prefix, d.Objects)
+			default:
+				fmt.Fprintf(out, "  specs s3://%s/%s: keep %s\n", d.Bucket, d.Prefix, d.Reason)
+			}
+		}
+		if res.SpecsErr != nil {
+			failed++
+			fmt.Fprintf(errOut, "%s  %s: staged specs not checked: %v\n", i18n.Symbol("warning"), res.Region, res.SpecsErr)
+		}
+	}
+
+	if would == 0 || cleanupDryRun {
+		if cleanupDryRun {
+			fmt.Fprintf(out, "\nDry run: %d abandoned pool queue(s) or spec set(s) would be deleted; nothing was changed.\n", would)
+		} else {
+			fmt.Fprintf(out, "\nNo abandoned pool queue or staged specs in %s; nothing was deleted.\n", displayCleanupRegions(regions))
+		}
+		if failed > 0 {
+			return fmt.Errorf("%d pool queue(s), spec set(s) or region(s) could not be checked", failed)
+		}
+		return nil
+	}
+	if !confirmYes(cleanupYes, fmt.Sprintf("Delete %d abandoned pool queue(s) and spec set(s)?", would)) {
+		return newAborted("aborted: no pool queue was deleted (re-run with --yes)")
+	}
+
+	logPath, logFile := openCleanupLog()
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
+	}
+	results, failed := sweep(true)
+	deleted := 0
+	for _, res := range results {
+		for _, d := range res.Queues {
+			switch {
+			case d.Deleted:
+				deleted++
+				fmt.Fprintf(out, "  ✓ deleted queue %s (%s)\n", d.Name, res.Region)
+				writeCleanupLog(logFile, fmt.Sprintf("REMOVED %s\t%s\tsqs-queue", d.Name, res.Region))
+			case d.Delete && d.Err != nil:
+				failed++
+				fmt.Fprintf(errOut, "  ✗ queue %s (%s): %v\n", d.Name, res.Region, d.Err)
+				writeCleanupLog(logFile, fmt.Sprintf("FAILED %s\t%s\tsqs-queue\t%v", d.Name, res.Region, d.Err))
+			}
+		}
+		for _, d := range res.Specs {
+			switch {
+			case d.Deleted:
+				deleted++
+				fmt.Fprintf(out, "  ✓ deleted %d staged spec(s) under s3://%s/%s\n", d.Objects, d.Bucket, d.Prefix)
+				writeCleanupLog(logFile, fmt.Sprintf("REMOVED s3://%s/%s\t%s\tpool-specs", d.Bucket, d.Prefix, res.Region))
+			case d.Delete && d.Err != nil:
+				failed++
+				fmt.Fprintf(errOut, "  ✗ specs s3://%s/%s: %v\n", d.Bucket, d.Prefix, d.Err)
+				writeCleanupLog(logFile, fmt.Sprintf("FAILED s3://%s/%s\t%s\tpool-specs\t%v", d.Bucket, d.Prefix, res.Region, d.Err))
+			}
+		}
+	}
+	fmt.Fprintf(out, "\nDeleted %d pool queue(s) and spec set(s)", deleted)
+	if logPath != "" {
+		fmt.Fprintf(out, " — log: %s", logPath)
+	}
+	fmt.Fprintln(out, ".")
+	if failed > 0 {
+		return fmt.Errorf("%d pool queue(s) or spec set(s) could not be checked or deleted", failed)
+	}
+	return nil
 }

@@ -31,12 +31,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	smithy "github.com/aws/smithy-go"
+	"github.com/spore-host/spawn/pkg/poolqueue"
 )
 
 // SQSAPI is the slice of the SQS SDK the queue needs. An interface (not the
@@ -74,6 +76,9 @@ type Queue struct {
 	client SQSAPI
 	url    string
 	name   string
+	// tagErr is why CreateQueue had to create the queue without its
+	// poolqueue.Tags; nil when it is tagged (or was only opened).
+	tagErr error
 }
 
 // QueueName returns the SQS queue name for a run id. Deterministic so a worker
@@ -81,7 +86,7 @@ type Queue struct {
 // SQS names allow [A-Za-z0-9_-] up to 80 chars; the run id is expected to already
 // be within that alphabet (the pool uses a slugged run id).
 func QueueName(runID string) string {
-	return "spawn-pool-" + runID
+	return poolqueue.QueueName(runID)
 }
 
 // CreateQueue creates (idempotently) the run-scoped queue and returns a handle.
@@ -91,9 +96,16 @@ func QueueName(runID string) string {
 // --visibility-timeout, a fixed 900s unless overridden; nothing derives it from
 // a task's TTL. A create for an existing name returns that queue (SQS CreateQueue is
 // idempotent when attributes match), so first-worker-or-submitter-wins is safe.
+//
+// The queue is created tagged poolqueue.Tags(runID) — spawn:managed=true and
+// spawn:pool-run-id — which is what lets `spawn cleanup --pool-queues` and the
+// reaper recognise and delete it once the pool is abandoned (#1351). Tagging on
+// create also needs sqs:TagQueue; a caller without it gets an untagged queue
+// rather than a failed pool, and TagErr says why (only `spawn pool drain` then
+// deletes it).
 func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTimeout int) (*Queue, error) {
 	name := QueueName(runID)
-	out, err := client.CreateQueue(ctx, &sqs.CreateQueueInput{
+	in := &sqs.CreateQueueInput{
 		QueueName: aws.String(name),
 		Attributes: map[string]string{
 			"VisibilityTimeout": fmt.Sprintf("%d", visibilityTimeout),
@@ -101,11 +113,34 @@ func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTim
 			// still expires. 12h: far longer than any interactive fan-out.
 			"MessageRetentionPeriod": "43200",
 		},
-	})
+		Tags: poolqueue.Tags(runID),
+	}
+	out, err := client.CreateQueue(ctx, in)
+	var tagErr error
+	if err != nil && isAccessDenied(err) {
+		tagErr = err
+		in.Tags = nil
+		out, err = client.CreateQueue(ctx, in)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create queue %s: %w", name, err)
 	}
-	return &Queue{client: client, url: aws.ToString(out.QueueUrl), name: name}, nil
+	return &Queue{client: client, url: aws.ToString(out.QueueUrl), name: name, tagErr: tagErr}, nil
+}
+
+// TagErr is non-nil when CreateQueue could not tag the queue (the caller
+// lacks sqs:TagQueue) and created it untagged. Such a queue has no deleter
+// but `spawn pool drain`.
+func (q *Queue) TagErr() error { return q.tagErr }
+
+// isAccessDenied reports whether err is an authorization refusal, the one
+// failure CreateQueue retries without tags.
+func isAccessDenied(err error) bool {
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return strings.Contains(apiErr.ErrorCode(), "AccessDenied")
 }
 
 // openQueueMaxAttempts bounds OpenQueue's retry on a not-yet-visible queue.

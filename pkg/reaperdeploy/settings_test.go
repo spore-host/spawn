@@ -243,6 +243,7 @@ func TestEveryReaperSettingSurvivesARedeploy(t *testing.T) {
 		reaperconfig.EnvTTLGrace:      "5m",
 		reaperconfig.EnvEmptyBuckets:  "reap",
 		reaperconfig.EnvInstanceRoles: "reap",
+		reaperconfig.EnvPoolQueues:    "reap",
 		reaperconfig.EnvNotifyURL:     secretURL,
 	}
 	for k := range settable {

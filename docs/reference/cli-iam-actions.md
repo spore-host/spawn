@@ -18,7 +18,9 @@ How to read it:
 - **Some permissions are implied by a call's parameters, and are not listed.**
   `ec2:RunInstances` with an instance profile also needs `iam:PassRole` on that
   role, and with tags `ec2:CreateTags`; an S3 upload that sets tags also needs
-  `s3:PutObjectTagging`.
+  `s3:PutObjectTagging`; `spawn pool create` tags its SQS queue, which needs
+  `sqs:TagQueue` (without it the queue is created untagged and only
+  `spawn pool drain` deletes it).
 - **Calls made through the AWS CLI** (`aws ssm start-session`, `aws s3 cp` in
   generated scripts) are not Go SDK calls and are not listed.
 - `sts:GetCallerIdentity` needs no permission and is omitted.
@@ -51,7 +53,7 @@ instances):
 | `spawn burst` | `account:GetAccountInformation`, `dynamodb:CreateTable`, `dynamodb:DescribeTable`, `ec2:AllocateAddress`, `ec2:AssociateAddress`, `ec2:CancelSpotInstanceRequests`, `ec2:CreateTags`, `ec2:DescribeAddresses`, `ec2:DescribeImages`, `ec2:DescribeInstanceTypes`, `ec2:DescribeInstances`, `ec2:DescribeSnapshots`, `ec2:DescribeSpotPriceHistory`, `ec2:DescribeSubnets`, `ec2:DescribeVpcs`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:RunInstances`, `ec2:TerminateInstances`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreateRole`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:PutRolePolicy`, `pricing:GetProducts`, `ssm:DescribeInstanceInformation`, `ssm:GetCommandInvocation`, `ssm:GetParameter`, `ssm:SendCommand` |
 | `spawn cancel` | `dynamodb:GetItem`, `dynamodb:PutItem`, `ec2:TerminateInstances` |
 | `spawn capacity-block purchase` | `ec2:DescribeCapacityBlockOfferings`, `ec2:PurchaseCapacityBlock` |
-| `spawn cleanup` | `dynamodb:DeleteTable`, `ec2:CancelSpotInstanceRequests`, `ec2:DeleteKeyPair`, `ec2:DeletePlacementGroup`, `ec2:DeleteSecurityGroup`, `ec2:DeleteVolume`, `ec2:DescribeAddresses`, `ec2:DescribeInstances`, `ec2:DescribePlacementGroups`, `ec2:DescribeRegions`, `ec2:DescribeVolumes`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:TerminateInstances`, `iam:DeleteInstanceProfile`, `iam:DeleteRole`, `iam:DeleteRolePolicy`, `iam:DetachRolePolicy`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListInstanceProfilesForRole`, `iam:ListRolePolicies`, `iam:ListRoles`, `iam:RemoveRoleFromInstanceProfile`, `logs:DeleteLogGroup`, `s3:DeleteBucket`, `s3:GetBucketTagging`, `s3:GetLifecycleConfiguration`, `s3:ListBucket`, `s3:ListBucketMultipartUploads`, `s3:ListBucketVersions`, `s3:PutBucketTagging`, `tag:GetResources` |
+| `spawn cleanup` | `dynamodb:DeleteTable`, `ec2:CancelSpotInstanceRequests`, `ec2:DeleteKeyPair`, `ec2:DeletePlacementGroup`, `ec2:DeleteSecurityGroup`, `ec2:DeleteVolume`, `ec2:DescribeAddresses`, `ec2:DescribeInstances`, `ec2:DescribePlacementGroups`, `ec2:DescribeRegions`, `ec2:DescribeVolumes`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:TerminateInstances`, `iam:DeleteInstanceProfile`, `iam:DeleteRole`, `iam:DeleteRolePolicy`, `iam:DetachRolePolicy`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListInstanceProfilesForRole`, `iam:ListRolePolicies`, `iam:ListRoles`, `iam:RemoveRoleFromInstanceProfile`, `logs:DeleteLogGroup`, `s3:DeleteBucket`, `s3:DeleteObject`, `s3:GetBucketTagging`, `s3:GetLifecycleConfiguration`, `s3:ListBucket`, `s3:ListBucketMultipartUploads`, `s3:ListBucketVersions`, `s3:PutBucketTagging`, `sqs:DeleteQueue`, `sqs:GetQueueAttributes`, `sqs:ListQueueTags`, `sqs:ListQueues`, `tag:GetResources` |
 | `spawn collect-results` | `dynamodb:GetItem`, `s3:GetObject`, `s3:ListBucket` |
 | `spawn connect` | `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ec2:DescribeSecurityGroups`, `ec2:GetPasswordData`, `ec2:StartInstances`, `ssm:DescribeInstanceInformation`, `ssm:GetCommandInvocation`, `ssm:SendCommand` |
 | `spawn cost` | `dynamodb:GetItem`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `pricing:GetProducts` |
@@ -281,7 +283,7 @@ instances):
 | `s3:AbortMultipartUpload` | `spawn image import`, `spawn launch`, `spawn schedule create` |
 | `s3:CreateBucket` | `spawn image import`, `spawn launch`, `spawn pool create`, `spawn reaper deploy`, `spawn schedule create`, `spawn service`, `spawn task run` |
 | `s3:DeleteBucket` | `spawn cleanup`, `spawn image import`, `spawn reaper teardown` |
-| `s3:DeleteObject` | `spawn image import`, `spawn pipeline launch`, `spawn reaper teardown`, `spawn task run` |
+| `s3:DeleteObject` | `spawn cleanup`, `spawn image import`, `spawn pipeline launch`, `spawn reaper teardown`, `spawn task run` |
 | `s3:GetBucketTagging` | `spawn cleanup`, `spawn footprint`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn reaper teardown`, `spawn service`, `spawn task run` |
 | `s3:GetLifecycleConfiguration` | `spawn cleanup`, `spawn results lifecycle`, `spawn task run` |
 | `s3:GetObject` | `spawn collect-results`, `spawn image import`, `spawn launch`, `spawn pipeline collect`, `spawn queue results`, `spawn results retention`, `spawn snapshot create`, `spawn sweep collect`, `spawn task run`, `spawn task status` |
@@ -306,9 +308,11 @@ instances):
 | `servicequotas:GetAWSDefaultServiceQuota` | `spawn launch` |
 | `servicequotas:GetServiceQuota` | `spawn launch`, `spawn resume`, `spawn sweep resume` |
 | `sqs:CreateQueue` | `spawn pool create` |
-| `sqs:DeleteQueue` | `spawn pool create`, `spawn pool drain` |
-| `sqs:GetQueueAttributes` | `spawn pool status` |
+| `sqs:DeleteQueue` | `spawn cleanup`, `spawn pool create`, `spawn pool drain` |
+| `sqs:GetQueueAttributes` | `spawn cleanup`, `spawn pool status` |
 | `sqs:GetQueueUrl` | `spawn pool drain`, `spawn pool status`, `spawn pool submit` |
+| `sqs:ListQueueTags` | `spawn cleanup` |
+| `sqs:ListQueues` | `spawn cleanup` |
 | `sqs:SendMessage` | `spawn pool submit` |
 | `ssm:DescribeInstanceInformation` | `spawn array retry`, `spawn burst`, `spawn connect`, `spawn doctor`, `spawn image import`, `spawn launch`, `spawn plugin install`, `spawn pool create`, `spawn resume`, `spawn sweep resume` |
 | `ssm:GetCommandInvocation` | `spawn ami create`, `spawn array logs`, `spawn array retry`, `spawn burst`, `spawn connect`, `spawn create-ami`, `spawn extend`, `spawn image import`, `spawn launch`, `spawn logs`, `spawn plugin install`, `spawn plugin list`, `spawn plugin remove`, `spawn plugin status`, `spawn pool create`, `spawn resume`, `spawn service`, `spawn status`, `spawn sweep resume`, `spawn terminate`, `spawn upgrade-spored` |
