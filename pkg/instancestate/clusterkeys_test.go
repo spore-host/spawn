@@ -3,6 +3,7 @@ package instancestate
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -53,7 +54,9 @@ func TestStripClusterKeysRemovesTaggedLinesAndKeepsEveryOtherByte(t *testing.T) 
 	if string(b) != want {
 		t.Errorf("authorized_keys after the strip:\n%q\nwant every non-spawn line byte for byte:\n%q", b, want)
 	}
-	if fi, _ := os.Stat(ak); fi.Mode().Perm() != 0o600 {
+	// Windows has no Unix permission bits (os.Stat reports 0666); the strip
+	// only runs on Linux.
+	if fi, _ := os.Stat(ak); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Errorf("mode %v, want 0600", fi.Mode().Perm())
 	}
 	if o, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(userdata.MPIClusterKeyStripOwnerFile))); strings.TrimSpace(string(o)) != "i-0child" {
@@ -118,7 +121,7 @@ func TestStripClusterKeysEdgeCases(t *testing.T) {
 		if n, err := StripClusterKeys(root, "i-0a"); err != nil || n != 0 {
 			t.Fatalf("%d, %v", n, err)
 		}
-		if fi, _ := os.Stat(ak); fi.Mode().Perm() != 0o644 {
+		if fi, _ := os.Stat(ak); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o644 {
 			t.Errorf("file rewritten (mode %v) with nothing to strip", fi.Mode().Perm())
 		}
 	})
