@@ -103,6 +103,11 @@ func ValidateBase64(s string) error {
 
 // SanitizeForLog removes or masks potentially sensitive information from log messages.
 // This prevents credential leakage in logs.
+//
+// No production caller, kept on purpose (#868): no log line found carries a
+// credential. Note the second pattern masks ANY 40-character [A-Za-z0-9/+=] run,
+// git commit SHAs included, so it is lossy on ordinary output; apply it to the
+// specific field that may hold a key, not to whole messages.
 func SanitizeForLog(s string) string {
 	// Remove anything that looks like an AWS access key
 	s = regexp.MustCompile(`AKIA[0-9A-Z]{16}`).ReplaceAllString(s, "AKIA****************")
@@ -111,31 +116,4 @@ func SanitizeForLog(s string) string {
 	s = regexp.MustCompile(`[A-Za-z0-9/+=]{40}`).ReplaceAllString(s, "****************************************")
 
 	return s
-}
-
-// ValidateCommand ensures a command string doesn't contain shell injection attempts.
-// Returns an error if suspicious patterns are detected.
-func ValidateCommand(cmd string) error {
-	// Check for common shell injection patterns
-	dangerousPatterns := []string{
-		";",  // Command separator
-		"|",  // Pipe
-		"&",  // Background/AND
-		"$(", // Command substitution
-		"`",  // Command substitution (backticks)
-		"${", // Variable expansion
-		"\n", // Newline
-		"\r", // Carriage return
-		"<",  // Input redirection
-		">",  // Output redirection
-		"\\", // Escape character
-	}
-
-	for _, pattern := range dangerousPatterns {
-		if strings.Contains(cmd, pattern) {
-			return errors.New("command contains potentially dangerous characters")
-		}
-	}
-
-	return nil
 }

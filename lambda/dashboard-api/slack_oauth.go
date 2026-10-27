@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/spore-host/spawn/pkg/botsecret"
+	"github.com/spore-host/spawn/pkg/security"
 )
 
 const (
@@ -244,28 +248,35 @@ func storeSlackWorkspace(ctx context.Context, cfg aws.Config, tableName string, 
 		workspaceKey = "slack#" + token.Team.ID + "#" + token.AppID
 	}
 
-	// Preserve existing signing_secret — look up both key formats.
-	legacyKey := "slack#" + token.Team.ID
-	existing, _ := client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(tableName),
-		Key: map[string]dynamodbtypes.AttributeValue{
-			"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: legacyKey},
-		},
-	})
+	// Every credential is stored KMS-encrypted, through pkg/botsecret, the one
+	// place that reads or writes those attributes (#868).
+	kmsClient := kms.NewFromConfig(cfg)
 
 	// Signing secret is app-level — from Secrets Manager (env fallback), auto-populated for all workspaces
 	signingSecret := slackSigningSecret()
-	if signingSecret == "" && existing != nil && existing.Item != nil {
-		if v, ok := existing.Item["signing_secret"].(*dynamodbtypes.AttributeValueMemberS); ok {
-			signingSecret = v.Value
+	if signingSecret == "" {
+		// Preserve the existing secret from the legacy-keyed item. It may be
+		// sealed (decrypt it under the key it was sealed for) or a pre-#868
+		// plaintext; either way it is re-sealed for workspaceKey below.
+		legacyKey := "slack#" + token.Team.ID
+		existing, _ := client.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName: aws.String(tableName),
+			Key: map[string]dynamodbtypes.AttributeValue{
+				"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: legacyKey},
+			},
+		})
+		if existing != nil && existing.Item != nil {
+			prev, err := botsecret.SigningSecret.Open(ctx, kmsClient, legacyKey, botsecret.SigningSecret.Stored(existing.Item))
+			if err != nil {
+				return fmt.Errorf("preserve signing secret: %w", err)
+			}
+			signingSecret = prev
 		}
 	}
 
 	ws := map[string]interface{}{
 		"workspace_key":  workspaceKey,
 		"app_id":         token.AppID,
-		"bot_token":      token.BotToken,
-		"signing_secret": signingSecret,
 		"platform":       "slack",
 		"workspace_name": token.Team.Name,
 		"installed_by":   "oauth:" + token.AuthedUser.ID,
@@ -275,12 +286,10 @@ func storeSlackWorkspace(ctx context.Context, cfg aws.Config, tableName string, 
 	// Store incoming webhook URL if the user selected a channel during OAuth.
 	// This enables zero-config channel notifications without bot registration.
 	if token.IncomingWebhook.URL != "" {
-		ws["incoming_webhook_url"] = token.IncomingWebhook.URL
 		ws["incoming_webhook_channel"] = token.IncomingWebhook.Channel
 	}
-	// Slack signals rotation by returning refresh_token + expires_in, not token_rotation_enabled.
+	// Slack signals rotation by returning a refresh token + expires_in, not token_rotation_enabled.
 	if token.RefreshToken != "" {
-		ws["refresh_token"] = token.RefreshToken
 		ws["token_rotation"] = true
 		if token.ExpiresIn > 0 {
 			ws["token_expires_at"] = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second).Unix()
@@ -291,6 +300,19 @@ func storeSlackWorkspace(ctx context.Context, cfg aws.Config, tableName string, 
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+	for _, c := range []struct {
+		field     botsecret.Field
+		plaintext string
+	}{
+		{botsecret.SigningSecret, signingSecret},
+		{botsecret.BotToken, token.BotToken},
+		{botsecret.RefreshToken, token.RefreshToken},
+		{botsecret.IncomingWebhookURL, token.IncomingWebhook.URL},
+	} {
+		if err := c.field.Put(ctx, kmsClient, "", item, workspaceKey, c.plaintext); err != nil {
+			return err
+		}
+	}
 	_, err = client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(tableName),
 		Item:      item,
@@ -298,50 +320,95 @@ func storeSlackWorkspace(ctx context.Context, cfg aws.Config, tableName string, 
 	return err
 }
 
-// rotateTokenByCurrentToken scans for a workspace with the given token,
-// exchanges its refresh_token for new credentials, and updates DynamoDB.
+// rotateTokenByCurrentToken finds the workspace whose bot token is
+// currentToken, exchanges its refresh token for new credentials, and stores
+// them sealed.
+//
+// The bot token is stored KMS-encrypted (#868), and KMS ciphertexts are not
+// deterministic, so DynamoDB cannot match it with a filter. The scan instead
+// reads every item, considers only those holding both a bot token and a
+// refresh token (no other item can be rotated), and opens each bot token to
+// compare. A legacy plaintext token opens without a KMS call; a sealed one
+// costs one Decrypt per rotating workspace, on a rare, signature-verified
+// request.
 func rotateTokenByCurrentToken(ctx context.Context, cfg aws.Config, tableName, clientID, clientSecret, currentToken string) (string, error) {
-	client := dynamodb.NewFromConfig(cfg)
+	return rotateTokenWith(ctx, dynamodb.NewFromConfig(cfg), kms.NewFromConfig(cfg), tableName, currentToken,
+		func(refresh string) (string, string, int, error) {
+			return exchangeRefreshToken(clientID, clientSecret, refresh)
+		})
+}
 
-	// Scan for workspace matching current token
-	result, err := client.Scan(ctx, &dynamodb.ScanInput{
-		TableName:        aws.String(tableName),
-		FilterExpression: aws.String("bot_token = :t"),
-		ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
-			":t": &dynamodbtypes.AttributeValueMemberS{Value: currentToken},
-		},
-	})
-	if err != nil || len(result.Items) == 0 {
+// rotateTokenWith is rotateTokenByCurrentToken over explicit clients and
+// exchange (a fake in tests).
+func rotateTokenWith(ctx context.Context, client *dynamodb.Client, kmsClient security.KMSAPI, tableName, currentToken string,
+	exchange func(refreshToken string) (string, string, int, error)) (string, error) {
+	if currentToken == "" {
 		return "", fmt.Errorf("workspace not found for token")
 	}
-
-	item := result.Items[0]
-	refreshTokenAttr, ok := item["refresh_token"].(*dynamodbtypes.AttributeValueMemberS)
-	if !ok || refreshTokenAttr.Value == "" {
-		return "", fmt.Errorf("no refresh_token stored for workspace")
+	var match map[string]dynamodbtypes.AttributeValue
+	var workspaceKey string
+	pages := dynamodb.NewScanPaginator(client, &dynamodb.ScanInput{TableName: aws.String(tableName)})
+	for match == nil && pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return "", fmt.Errorf("scan workspaces: %w", err)
+		}
+		for _, item := range page.Items {
+			stored := botsecret.BotToken.Stored(item)
+			if stored == "" || botsecret.RefreshToken.Stored(item) == "" {
+				continue
+			}
+			key := stringAttr(item, "workspace_key")
+			tok, err := botsecret.BotToken.Open(ctx, kmsClient, key, stored)
+			if err != nil {
+				log.Printf("slack token rotate: skipping %s: %v", key, err)
+				continue
+			}
+			if subtle.ConstantTimeCompare([]byte(tok), []byte(currentToken)) == 1 {
+				match, workspaceKey = item, key
+				break
+			}
+		}
 	}
-	workspaceKey := item["workspace_key"].(*dynamodbtypes.AttributeValueMemberS).Value
+	if match == nil {
+		return "", fmt.Errorf("workspace not found for token")
+	}
+	refresh, err := botsecret.RefreshToken.Open(ctx, kmsClient, workspaceKey, botsecret.RefreshToken.Stored(match))
+	if err != nil {
+		return "", err
+	}
 
-	newToken, newRefresh, expiresIn, err := exchangeRefreshToken(clientID, clientSecret, refreshTokenAttr.Value)
+	newToken, newRefresh, expiresIn, err := exchange(refresh)
 	if err != nil {
 		return "", fmt.Errorf("token exchange: %w", err)
 	}
 
-	// Update DynamoDB with new tokens
 	expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second).Unix()
-	_, err = client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	if err := writeRotatedTokens(ctx, client, kmsClient, tableName, workspaceKey, newToken, newRefresh, expiresAt); err != nil {
+		return "", err
+	}
+	return newToken, nil
+}
+
+// writeRotatedTokens stores a refreshed token pair for workspaceKey, sealed
+// (botsecret.RotatedTokens). It is the write-back of every refresh, and what
+// moves a rotating app's legacy plaintext tokens to sealed ones.
+func writeRotatedTokens(ctx context.Context, client *dynamodb.Client, kmsClient security.KMSAPI, tableName, workspaceKey, botToken, refreshToken string, expiresAt int64) error {
+	update, values, err := botsecret.RotatedTokens(ctx, kmsClient, "", workspaceKey, botToken, refreshToken, expiresAt)
+	if err != nil {
+		return err
+	}
+	if _, err := client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(tableName),
 		Key: map[string]dynamodbtypes.AttributeValue{
 			"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: workspaceKey},
 		},
-		UpdateExpression: aws.String("SET bot_token = :t, refresh_token = :r, token_expires_at = :e"),
-		ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
-			":t": &dynamodbtypes.AttributeValueMemberS{Value: newToken},
-			":r": &dynamodbtypes.AttributeValueMemberS{Value: newRefresh},
-			":e": &dynamodbtypes.AttributeValueMemberN{Value: strconv.FormatInt(expiresAt, 10)},
-		},
-	})
-	return newToken, err
+		UpdateExpression:          aws.String(update),
+		ExpressionAttributeValues: values,
+	}); err != nil {
+		return fmt.Errorf("update tokens: %w", err)
+	}
+	return nil
 }
 
 // ── PKCE helpers ──────────────────────────────────────────────────────────────

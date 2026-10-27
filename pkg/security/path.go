@@ -346,41 +346,14 @@ func windowsForbiddenReadRoots(getenv func(string) string) []string {
 	return roots
 }
 
-// ValidateMountPath validates a filesystem mount path ON THE INSTANCE.
-// Mount paths describe a Linux spore, not the machine spawn runs on, so this
-// uses POSIX rules (package path) on every host OS (#1000). Mount paths must be
-// absolute and under /mnt, /data or /scratch.
-func ValidateMountPath(p string) error {
-	if p == "" {
-		return errors.New("mount path cannot be empty")
-	}
-	if strings.ContainsAny(p, "\\\x00") {
-		return errors.New("mount path must be a POSIX path (no backslashes or NUL bytes)")
-	}
-
-	// Must be absolute
-	if !path.IsAbs(p) {
-		return errors.New("mount path must be absolute")
-	}
-
-	// Check for path traversal
-	if hasDotDotElement(p, false) {
-		return errors.New("path traversal not allowed in mount path")
-	}
-
-	cleaned := path.Clean(p)
-	for _, prefix := range []string{"/mnt/", "/data/", "/scratch/"} {
-		if strings.HasPrefix(cleaned, prefix) {
-			return nil
-		}
-	}
-	return errors.New("mount path must be under /mnt, /data, or /scratch")
-}
-
 // SanitizePath sanitizes a path for safe logging and display.
 // It removes any path traversal sequences. The result uses forward slashes on
 // every OS (#1000), so a log line reads the same wherever spawn ran; a Windows
 // host's backslashes are converted first so they are cleaned like slashes.
+//
+// No production caller, kept on purpose (#868): it is display-only and safe to
+// use, but nothing logs an untrusted path today. It is not a validator; use
+// ValidatePathForReading before opening a path.
 func SanitizePath(p string) string {
 	cleaned := path.Clean(filepath.ToSlash(p))
 
