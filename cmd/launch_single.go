@@ -1210,7 +1210,8 @@ func mergeManagedSecurityGroup(existing []string, managed string) []string {
 
 // ensureSecurityGroup creates and assigns a managed security group when the
 // launch needs one the default SG can't provide: an MPI SG (intra-cluster
-// ports) or a Windows SG (RDP 3389 + SSH 22). Otherwise it's a no-op. Extracted
+// ports) or a Windows SG (RDP 3389 + SSH 22), plus the --efa-group SG when one
+// is named. Otherwise it's a no-op. Extracted
 // from launchWithProgress (#319); behavior unchanged.
 func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, prog *progress.Progress, auditLog *audit.AuditLogger) error {
 	if mpiEnabled {
@@ -1266,7 +1267,9 @@ func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws
 	} else {
 		prog.Skip("Creating security group")
 	}
-	return nil
+	// --efa-group (#1168): after the branches above, so it is added to whatever
+	// group they chose rather than standing in for it.
+	return ensureEFAGroup(ctx, awsClient, config, efaGroup, prog, auditLog)
 }
 
 // ensureAMIAndPreflight detects the AMI (when unset/"auto"), resolves the target

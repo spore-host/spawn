@@ -12,6 +12,8 @@ const AMI_AL2023_GPU_ARM
 const AMI_AL2023_GPU_X86
 const AMI_AL2023_X86
 const CreatedTagKey
+const EFAGroupPrefix
+const EFAGroupPurpose
 const ElasticIPInstanceTagKey
 const ElasticIPPurpose
 const ElasticIPQuotaCode
@@ -364,6 +366,7 @@ func (*Client) CreateAMI(ctx context.Context, region string, input CreateAMIInpu
 func (*Client) CreateFSxLustreFilesystem(ctx context.Context, config FSxConfig) (*FSxInfo, error)
 func (*Client) CreateFSxLustreFilesystemAsync(ctx context.Context, config FSxConfig) (filesystemID string, err error)
 func (*Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID string) (string, error)
+func (*Client) CreateOrGetEFASecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error)
 func (*Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleConfig) (string, error)
 func (*Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error)
 func (*Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID string) (string, error)

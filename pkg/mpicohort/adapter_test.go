@@ -13,6 +13,7 @@ import (
 	"github.com/spore-host/cohort"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/provider"
+	"github.com/spore-host/spawn/pkg/userdata"
 )
 
 // fakeLauncher is an in-memory LaunchAPI — no real AWS. It records launches and
@@ -184,7 +185,7 @@ func (f *fakeLauncher) RunShellScript(_ context.Context, _, instanceID, command 
 		}
 		key := f.clusterKey
 		if key == "" {
-			key = "ssh-rsa AAAAB3NzaC1yc2ETESTKEY root@rank0"
+			key = "ssh-rsa AAAAB3NzaC1yc2ETESTKEY " + userdata.MPIClusterKeyComment
 		}
 		return &aws.SSMRunResult{Status: "Success", ResponseCode: 0, Stdout: key + "\n"}, nil
 	}
@@ -771,10 +772,8 @@ func TestSSMAssembler_InstallsClusterKeyBeforePeers(t *testing.T) {
 
 	// The key install must be idempotent: assembly can be retried, and appending
 	// the same key repeatedly would grow root's authorized_keys without bound.
-	if cmds := f.ssmAllCmds["i-0"]; len(cmds) > 0 && !strings.Contains(strings.Join(cmds, "\n"), "grep -qxF") {
-		t.Error("the key install is not guarded against duplicate appends; a retried " +
-			"assembly would append the same key again")
-	}
+	// That used to be a substring check for the install's "grep -qxF" guard;
+	// TestInstallPubKeyCommandReplacesTheClusterKey now runs the command (#1338).
 }
 
 // TestSSMAssembler_NoClusterKeyIsAssemblyError: if rank 0 never produces a usable

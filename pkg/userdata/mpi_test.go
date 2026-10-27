@@ -161,7 +161,7 @@ func TestGenerateMPIUserData_HeadNode(t *testing.T) {
 	}
 
 	// Head node should generate SSH key
-	if !strings.Contains(script, "ssh-keygen -t rsa -N \"\" -f /root/.ssh/id_rsa -q") {
+	if !strings.Contains(script, "ssh-keygen -t rsa -N \"\" -C "+MPIClusterKeyComment+" -f /root/.ssh/id_rsa -q") {
 		t.Error("expected head node (index 0) to generate SSH key")
 	}
 

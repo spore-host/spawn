@@ -39,6 +39,15 @@ type MPIConfig struct {
 	CompletionFile string
 }
 
+// MPIClusterKeyComment is the comment on every MPI cluster key spawn mints. An
+// authorized_keys line ending with it is spawn-managed and is replaced, never
+// accumulated (spawn#1338).
+const MPIClusterKeyComment = "spawn-mpi-cohort"
+
+// MPIClusterKeyOwnerFile holds the ID of the instance that minted rank 0's
+// /root/.ssh/id_rsa. A different (or no) ID means the key came with the image.
+const MPIClusterKeyOwnerFile = "/root/.ssh/spawn-mpi-key-owner"
+
 // defaultCompletionFile is the completion sentinel used when no
 // --completion-file is given. It matches the flag default and spored's own.
 const defaultCompletionFile = "/tmp/SPAWN_COMPLETE"
@@ -53,6 +62,10 @@ type mpiTemplateData struct {
 	// record (read from stdin) on a peer, quoted once for the peer's shell and
 	// once more for this script's.
 	RemoteCompletionWrite string
+	// KeyComment and KeyOwnerFile are MPIClusterKeyComment and
+	// MPIClusterKeyOwnerFile, so the script and pkg/mpicohort cannot disagree.
+	KeyComment   string
+	KeyOwnerFile string
 }
 
 func newMPITemplateData(config MPIConfig) mpiTemplateData {
@@ -66,6 +79,8 @@ func newMPITemplateData(config MPIConfig) mpiTemplateData {
 		MPIConfig:             config,
 		CompletionPath:        q,
 		RemoteCompletionWrite: security.ShellQuote(remote),
+		KeyComment:            MPIClusterKeyComment,
+		KeyOwnerFile:          MPIClusterKeyOwnerFile,
 	}
 }
 
@@ -110,6 +125,34 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //
 // The PRIVATE key is generated on rank 0 and never leaves it: user-data would
 // expose it to any local user via IMDS, and SSM would record it in CloudTrail.
+//
+// One key per instance, not per volume (spawn#1338). The key used to be minted
+// only when /root/.ssh/id_rsa was missing, and every authorized_keys write
+// appended. An image of a rank-0 instance (`spawn ami create`) carries both, so
+// rank 0 of a cohort launched from it REUSED the parent cohort's private key,
+// and every member of the new cohort authorized it: whoever held the parent's
+// key (its other members, anyone with the image) could ssh in as root. Now:
+//
+//   - Rank 0 regenerates the key unless MPIClusterKeyOwnerFile names THIS
+//     instance, so a reboot that re-runs this script (cloud-init clean, the
+//     CreateImage reboot) keeps the cohort's key, and a new instance from an
+//     image never inherits it.
+//   - Every cluster key carries MPIClusterKeyComment, and each authorized_keys
+//     write first removes the lines carrying it, so a node authorizes exactly
+//     one cluster key, its own cohort's. Rank 0 also drops the line matching
+//     the key it is replacing, which covers an image made before the comment
+//     existed. A peer image made by such a release can still hold the old
+//     untagged line; nothing on the peer identifies it as spawn's.
+//   - pkg/mpicohort reads rank 0's public key only once the owner file names
+//     that instance, so the inherited key cannot be distributed in the window
+//     before ssh-keygen runs (on an image with MPI installed, enrollment passes
+//     at once).
+//   - The ssh config block is written once (a marker line), not appended on
+//     every run.
+//
+// The owner file lives in /root/.ssh, beside the key it describes, rather than
+// under the #1241 instance-state paths: it is discarded with the key or not at
+// all.
 //
 // Completion of --mpi-command (spawn#894).
 //
@@ -194,22 +237,30 @@ export OMPI_ALLOW_RUN_AS_ROOT=1
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 EOF
 source /etc/profile.d/mpi.sh
-# Cluster SSH key: rank 0 mints it; the control plane distributes the public
-# half over SSM before any node is released (spawn#684).
+# Cluster SSH key: rank 0 mints one per instance; the control plane hands out
+# the public half over SSM before any node is released (spawn#684, #1338).
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
-# shellcheck disable=SC2050  # the rank is fixed at render time: one script per member
-if [ "{{.JobArrayIndex}}" -eq 0 ]; then
-  if [ ! -f /root/.ssh/id_rsa ]; then
-    ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa -q
-  fi
-  # Rank 0 also runs ranks locally, so it must authorize itself.
-  cat /root/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys
-fi
 touch /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
-chmod 600 /root/.ssh/id_rsa 2>/dev/null || true
-cat >> /root/.ssh/config <<'EOF'
+spawn_ak_drop() {
+  { grep -v "$@" /root/.ssh/authorized_keys > /root/.ssh/.ak || [ $? -eq 1 ]; } && cat /root/.ssh/.ak > /root/.ssh/authorized_keys
+  rm -f /root/.ssh/.ak
+}
+SPAWN_IID=${INSTANCE_ID:-$(ec2-metadata --instance-id | cut -d " " -f 2)}
+# shellcheck disable=SC2050  # the rank is fixed at render time: one script per member
+if [ "{{.JobArrayIndex}}" -eq 0 ]; then
+  if [ -z "$SPAWN_IID" ] || [ "$(cat {{.KeyOwnerFile}} 2>/dev/null)" != "$SPAWN_IID" ]; then
+    [ ! -s /root/.ssh/id_rsa.pub ] || spawn_ak_drop -xFf /root/.ssh/id_rsa.pub
+    rm -f /root/.ssh/id_rsa /root/.ssh/id_rsa.pub
+    ssh-keygen -t rsa -N "" -C {{.KeyComment}} -f /root/.ssh/id_rsa -q
+    echo "$SPAWN_IID" > {{.KeyOwnerFile}}
+  fi
+  spawn_ak_drop ' {{.KeyComment}}$'
+  cat /root/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys
+fi
+grep -qx '# spawn-mpi' /root/.ssh/config 2>/dev/null || cat >> /root/.ssh/config <<'EOF'
+# spawn-mpi
 Host *
   StrictHostKeyChecking no
   UserKnownHostsFile=/dev/null

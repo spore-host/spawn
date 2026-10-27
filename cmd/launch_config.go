@@ -198,6 +198,10 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 		return nil, fmt.Errorf("--efa-interfaces requires --efa")
 	}
 	config.EFAInterfaces = efaInterfaces
+	// --efa-group (#1168): checked here, before anything is created.
+	if err := validateEFAGroup(efaGroup, efaEnabled); err != nil {
+		return nil, err
+	}
 	// --placement-group without --mpi: same gap. The flag was applied only in
 	// resolveMPIPlacement, which returns early when --mpi is off, so an explicit
 	// cluster placement group was silently ignored on a single launch.
