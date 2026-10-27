@@ -35,6 +35,7 @@ instances):
 
 | Command | IAM actions |
 | --- | --- |
+| `spawn ami copy` | `ec2:CopyImage`, `ec2:DescribeImages` |
 | `spawn ami create` | `ec2:CreateImage`, `ec2:DescribeImages`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ssm:GetCommandInvocation`, `ssm:SendCommand` |
 | `spawn ami delete` | `ec2:DeleteSnapshot`, `ec2:DeregisterImage`, `ec2:DescribeImages`, `imagebuilder:DeleteImage` |
 | `spawn ami list` | `ec2:DescribeImages`, `ec2:DescribeInstanceTypes`, `ssm:GetParameter` |
@@ -125,7 +126,7 @@ instances):
 | `spawn results retention` | `s3:GetObject`, `s3:GetObjectAnnotation`, `s3:GetObjectTagging`, `s3:ListBucket` |
 | `spawn resume` | `account:GetAccountInformation`, `dynamodb:GetItem`, `ec2:AllocateAddress`, `ec2:AssociateAddress`, `ec2:CancelSpotInstanceRequests`, `ec2:CreateTags`, `ec2:DescribeAddresses`, `ec2:DescribeImages`, `ec2:DescribeInstanceTypes`, `ec2:DescribeInstances`, `ec2:DescribeKeyPairs`, `ec2:DescribeRegions`, `ec2:DescribeSnapshots`, `ec2:DescribeSpotPriceHistory`, `ec2:DescribeSubnets`, `ec2:DescribeVpcs`, `ec2:DisassociateAddress`, `ec2:ImportKeyPair`, `ec2:ReleaseAddress`, `ec2:RunInstances`, `ec2:TerminateInstances`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreateRole`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:PutRolePolicy`, `lambda:InvokeFunction`, `pricing:GetProducts`, `servicequotas:GetServiceQuota`, `ssm:DescribeInstanceInformation`, `ssm:GetCommandInvocation`, `ssm:GetParameter`, `ssm:SendCommand` |
 | `spawn schedule cancel` | `dynamodb:DeleteItem`, `scheduler:DeleteSchedule` |
-| `spawn schedule create` | `dynamodb:DeleteItem`, `dynamodb:PutItem`, `ec2:DescribeInstanceTypes`, `s3:AbortMultipartUpload`, `s3:CreateBucket`, `s3:ListBucket`, `s3:PutBucketPublicAccessBlock`, `s3:PutLifecycleConfiguration`, `s3:PutObject`, `scheduler:CreateSchedule`, `scheduler:DeleteSchedule`, `ssm:GetParameter` |
+| `spawn schedule create` | `dynamodb:DeleteItem`, `dynamodb:PutItem`, `ec2:DescribeImages`, `ec2:DescribeInstanceTypes`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreateRole`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:PutRolePolicy`, `s3:AbortMultipartUpload`, `s3:CreateBucket`, `s3:ListBucket`, `s3:PutBucketPublicAccessBlock`, `s3:PutLifecycleConfiguration`, `s3:PutObject`, `scheduler:CreateSchedule`, `scheduler:DeleteSchedule`, `ssm:GetParameter` |
 | `spawn schedule list` | `dynamodb:Query` |
 | `spawn schedule pause` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `scheduler:UpdateSchedule` |
 | `spawn schedule resume` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `scheduler:UpdateSchedule` |
@@ -183,6 +184,7 @@ instances):
 | `ec2:AuthorizeSecurityGroupEgress` | `spawn launch` |
 | `ec2:AuthorizeSecurityGroupIngress` | `spawn app launch`, `spawn image import`, `spawn launch`, `spawn service`, `spawn task run` |
 | `ec2:CancelSpotInstanceRequests` | `spawn app launch`, `spawn array cancel`, `spawn array retry`, `spawn burst`, `spawn cleanup`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run`, `spawn terminate` |
+| `ec2:CopyImage` | `spawn ami copy` |
 | `ec2:CreateImage` | `spawn ami create`, `spawn create-ami`, `spawn image import` |
 | `ec2:CreatePlacementGroup` | `spawn array retry`, `spawn launch`, `spawn pool create` |
 | `ec2:CreateSecurityGroup` | `spawn app launch`, `spawn image import`, `spawn launch` |
@@ -198,7 +200,7 @@ instances):
 | `ec2:DescribeAddresses` | `spawn app launch`, `spawn array cancel`, `spawn array retry`, `spawn burst`, `spawn cleanup`, `spawn footprint`, `spawn image import`, `spawn launch`, `spawn list`, `spawn orphans`, `spawn pool create`, `spawn resources`, `spawn resume`, `spawn service`, `spawn status`, `spawn sweep resume`, `spawn task run`, `spawn terminate` |
 | `ec2:DescribeAvailabilityZones` | `spawn array retry`, `spawn launch` |
 | `ec2:DescribeCapacityBlockOfferings` | `spawn capacity-block purchase` |
-| `ec2:DescribeImages` | `spawn ami create`, `spawn ami delete`, `spawn ami list`, `spawn ami snapshots`, `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn create-ami`, `spawn image import`, `spawn launch`, `spawn list-amis`, `spawn pool create`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run` |
+| `ec2:DescribeImages` | `spawn ami copy`, `spawn ami create`, `spawn ami delete`, `spawn ami list`, `spawn ami snapshots`, `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn create-ami`, `spawn image import`, `spawn launch`, `spawn list-amis`, `spawn pool create`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
 | `ec2:DescribeInstanceTypeOfferings` | `spawn launch`, `spawn task run` |
 | `ec2:DescribeInstanceTypes` | `spawn ami list`, `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn doctor`, `spawn image import`, `spawn launch`, `spawn list-amis`, `spawn pipeline launch`, `spawn pool create`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
 | `ec2:DescribeInstances` | `spawn ami create`, `spawn app launch`, `spawn array cancel`, `spawn array collect`, `spawn array logs`, `spawn array retry`, `spawn array status`, `spawn burst`, `spawn cleanup`, `spawn connect`, `spawn cost`, `spawn create-ami`, `spawn dns delete`, `spawn dns list`, `spawn dns register`, `spawn doctor`, `spawn extend`, `spawn footprint`, `spawn hibernate`, `spawn image import`, `spawn instance-config`, `spawn launch`, `spawn list`, `spawn logs`, `spawn orphans`, `spawn plugin install`, `spawn plugin list`, `spawn plugin remove`, `spawn plugin status`, `spawn pool create`, `spawn pool drain`, `spawn queue status`, `spawn resources`, `spawn resume`, `spawn service`, `spawn snapshot mount`, `spawn start`, `spawn status`, `spawn stop`, `spawn sweep resume`, `spawn task diagnose`, `spawn task run`, `spawn task status`, `spawn terminate`, `spawn upgrade-spored`, `spawn validate` |
@@ -234,23 +236,23 @@ instances):
 | `fsx:CreateFileSystem` | `spawn launch`, `spawn service`, `spawn task run` |
 | `fsx:DeleteFileSystem` | `spawn fsx delete`, `spawn launch`, `spawn service`, `spawn task run` |
 | `fsx:DescribeFileSystems` | `spawn fsx delete`, `spawn fsx list`, `spawn fsx show`, `spawn hibernate`, `spawn launch`, `spawn stop`, `spawn task run`, `spawn terminate` |
-| `iam:AddRoleToInstanceProfile` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pipeline launch`, `spawn pool create`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run` |
-| `iam:AttachRolePolicy` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pipeline launch`, `spawn pool create`, `spawn reaper deploy`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run` |
-| `iam:CreateInstanceProfile` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pipeline launch`, `spawn pool create`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run` |
-| `iam:CreateRole` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn notify register`, `spawn onboard`, `spawn pipeline launch`, `spawn pool create`, `spawn reaper deploy`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run` |
+| `iam:AddRoleToInstanceProfile` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pipeline launch`, `spawn pool create`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
+| `iam:AttachRolePolicy` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pipeline launch`, `spawn pool create`, `spawn reaper deploy`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
+| `iam:CreateInstanceProfile` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pipeline launch`, `spawn pool create`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
+| `iam:CreateRole` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn notify register`, `spawn onboard`, `spawn pipeline launch`, `spawn pool create`, `spawn reaper deploy`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
 | `iam:CreateServiceLinkedRole` | `spawn image import` |
 | `iam:DeleteInstanceProfile` | `spawn cleanup`, `spawn pool drain` |
 | `iam:DeleteRole` | `spawn cleanup`, `spawn pool drain`, `spawn reaper teardown` |
 | `iam:DeleteRolePolicy` | `spawn cleanup`, `spawn pool drain`, `spawn reaper teardown` |
 | `iam:DetachRolePolicy` | `spawn cleanup`, `spawn pool drain`, `spawn reaper teardown` |
-| `iam:GetInstanceProfile` | `spawn app launch`, `spawn burst`, `spawn cleanup`, `spawn doctor`, `spawn image import`, `spawn launch`, `spawn pipeline launch`, `spawn pool create`, `spawn pool drain`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run` |
-| `iam:GetRole` | `spawn app launch`, `spawn burst`, `spawn cleanup`, `spawn doctor`, `spawn image import`, `spawn launch`, `spawn notify register`, `spawn onboard`, `spawn pipeline launch`, `spawn pool create`, `spawn reaper deploy`, `spawn reaper status`, `spawn reaper teardown`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run` |
+| `iam:GetInstanceProfile` | `spawn app launch`, `spawn burst`, `spawn cleanup`, `spawn doctor`, `spawn image import`, `spawn launch`, `spawn pipeline launch`, `spawn pool create`, `spawn pool drain`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
+| `iam:GetRole` | `spawn app launch`, `spawn burst`, `spawn cleanup`, `spawn doctor`, `spawn image import`, `spawn launch`, `spawn notify register`, `spawn onboard`, `spawn pipeline launch`, `spawn pool create`, `spawn reaper deploy`, `spawn reaper status`, `spawn reaper teardown`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
 | `iam:ListAttachedRolePolicies` | `spawn cleanup`, `spawn pool drain` |
 | `iam:ListInstanceProfiles` | `spawn doctor`, `spawn footprint` |
 | `iam:ListInstanceProfilesForRole` | `spawn cleanup`, `spawn pool drain` |
 | `iam:ListRolePolicies` | `spawn cleanup`, `spawn pool drain` |
 | `iam:ListRoles` | `spawn cleanup`, `spawn footprint` |
-| `iam:PutRolePolicy` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn notify register`, `spawn onboard`, `spawn pipeline launch`, `spawn pool create`, `spawn reaper deploy`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run` |
+| `iam:PutRolePolicy` | `spawn app launch`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn notify register`, `spawn onboard`, `spawn pipeline launch`, `spawn pool create`, `spawn reaper deploy`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
 | `iam:RemoveRoleFromInstanceProfile` | `spawn cleanup`, `spawn pool drain` |
 | `iam:UpdateAssumeRolePolicy` | `spawn notify register`, `spawn onboard` |
 | `imagebuilder:CreateInfrastructureConfiguration` | `spawn image import` |
