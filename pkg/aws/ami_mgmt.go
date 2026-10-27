@@ -134,70 +134,81 @@ func (c *Client) ListAMIs(ctx context.Context, region string, filters map[string
 	// Convert to AMIInfo
 	amis := make([]AMIInfo, 0, len(result.Images))
 	for _, img := range result.Images {
-		// Parse tags
-		tags := make(map[string]string)
-		for _, tag := range img.Tags {
-			if tag.Key != nil && tag.Value != nil {
-				tags[*tag.Key] = *tag.Value
-			}
-		}
-
-		// Parse creation date
-		var creationDate time.Time
-		if img.CreationDate != nil {
-			creationDate, _ = time.Parse(time.RFC3339, *img.CreationDate)
-		}
-
-		// Calculate total size + collect backing snapshots from block device mappings
-		var totalSize int64
-		var snapshotIDs []string
-		if img.BlockDeviceMappings != nil {
-			for _, bdm := range img.BlockDeviceMappings {
-				if bdm.Ebs != nil && bdm.Ebs.VolumeSize != nil {
-					totalSize += int64(*bdm.Ebs.VolumeSize)
-				}
-				if bdm.Ebs != nil && bdm.Ebs.SnapshotId != nil {
-					snapshotIDs = append(snapshotIDs, *bdm.Ebs.SnapshotId)
-				}
-			}
-		}
-
-		// Extract spawn-specific tags (check both namespaced and non-namespaced)
-		stack := tags["spawn:stack"]
-		if stack == "" {
-			stack = tags["stack"]
-		}
-		version := tags["spawn:version"]
-		if version == "" {
-			version = tags["version"]
-		}
-		gpu := tags["spawn:gpu"] == "true"
-		baseOS := tags["spawn:base"]
-		if baseOS == "" {
-			baseOS = tags["base"]
-		}
-		deprecated := tags["spawn:deprecated"] == "true"
-
-		amiInfo := AMIInfo{
-			AMIID:        aws.ToString(img.ImageId),
-			Name:         aws.ToString(img.Name),
-			Description:  aws.ToString(img.Description),
-			Architecture: string(img.Architecture),
-			CreationDate: creationDate,
-			Size:         totalSize,
-			SnapshotIDs:  snapshotIDs,
-			Tags:         tags,
-			Stack:        stack,
-			Version:      version,
-			GPU:          gpu,
-			BaseOS:       baseOS,
-			Deprecated:   deprecated,
-		}
-
-		amis = append(amis, amiInfo)
+		amis = append(amis, amiInfoFromImage(img))
 	}
 
 	return amis, nil
+}
+
+// amiInfoFromImage is how ListAMIs (and so `spawn ami list`) reads one image.
+func amiInfoFromImage(img types.Image) AMIInfo {
+	// Parse tags
+	tags := make(map[string]string)
+	for _, tag := range img.Tags {
+		if tag.Key != nil && tag.Value != nil {
+			tags[*tag.Key] = *tag.Value
+		}
+	}
+
+	// Parse creation date
+	var creationDate time.Time
+	if img.CreationDate != nil {
+		creationDate, _ = time.Parse(time.RFC3339, *img.CreationDate)
+	}
+
+	// Calculate total size + collect backing snapshots from block device mappings
+	var totalSize int64
+	var snapshotIDs []string
+	if img.BlockDeviceMappings != nil {
+		for _, bdm := range img.BlockDeviceMappings {
+			if bdm.Ebs != nil && bdm.Ebs.VolumeSize != nil {
+				totalSize += int64(*bdm.Ebs.VolumeSize)
+			}
+			if bdm.Ebs != nil && bdm.Ebs.SnapshotId != nil {
+				snapshotIDs = append(snapshotIDs, *bdm.Ebs.SnapshotId)
+			}
+		}
+	}
+
+	// Extract spawn-specific tags (check both namespaced and non-namespaced)
+	stack := tags["spawn:stack"]
+	if stack == "" {
+		stack = tags["stack"]
+	}
+	version := tags["spawn:version"]
+	if version == "" {
+		version = tags["version"]
+	}
+	gpu := tags["spawn:gpu"] == "true"
+	baseOS := tags["spawn:base"]
+	if baseOS == "" {
+		baseOS = tags["base"]
+	}
+	deprecated := tags["spawn:deprecated"] == "true"
+
+	amiInfo := AMIInfo{
+		AMIID:        aws.ToString(img.ImageId),
+		Name:         aws.ToString(img.Name),
+		Description:  aws.ToString(img.Description),
+		Architecture: string(img.Architecture),
+		CreationDate: creationDate,
+		Size:         totalSize,
+		SnapshotIDs:  snapshotIDs,
+		Tags:         tags,
+		Stack:        stack,
+		Version:      version,
+		GPU:          gpu,
+		BaseOS:       baseOS,
+		Deprecated:   deprecated,
+	}
+	return amiInfo
+}
+
+// IsSpawnManagedAMI is what `spawn ami list` counts as spawn's: an AMI tagged
+// spawn:managed=true, or one carrying a stack tag (AMIs from before the
+// managed tag).
+func IsSpawnManagedAMI(ami AMIInfo) bool {
+	return ami.Tags["spawn:managed"] == "true" || ami.Stack != ""
 }
 
 // DeleteAMIResult reports what DeleteAMI did.

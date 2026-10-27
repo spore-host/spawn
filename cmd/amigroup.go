@@ -8,12 +8,13 @@ import (
 var amiGroupCmd = &cobra.Command{
 	Use:   "ami",
 	Short: "Manage spawn-managed AMIs",
-	Long: `Create and list AMIs created by spawn.
+	Long: `Create, list, copy and delete AMIs created by spawn.
 
 Examples:
   spawn ami list
   spawn ami list --stack pytorch --arch arm64
-  spawn ami create my-instance --name pytorch-2.4-cuda12`,
+  spawn ami create my-instance --name pytorch-2.4-cuda12
+  spawn ami copy pytorch-2.4-cuda12 --to-region us-east-2 --wait`,
 }
 
 var amiListCmd = &cobra.Command{

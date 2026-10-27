@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   network sweep deletes it once no instance has used it for 7 days. Launch the
   fleet in one AZ; EFA does not cross AZs. Requires `--efa`. No new permission.
 
+- `spawn ami copy <ami-id|name> --to-region <region> [--name] [--kms-key] [--wait]` copies a spawn-managed AMI to another region inside spawn's inventory: the source's tags go onto the new AMI and every snapshot backing it (atomically, via CopyImage TagSpecifications), plus `spawn:copied-from=<ami>@<region>`, so `spawn ami list --region`, `spawn footprint` and `spawn ami delete --region` cover the copy. An encrypted source is copied encrypted with the target region's default EBS key unless `--kms-key` names one there; `Ec2ImageBuilderArn` is not copied, so deleting a copy cannot delete the source's Image Builder image. AMIs without `spawn:managed=true` are refused. `--wait` polls a bounded number of times (`--wait-timeout`, default 1h) with a progress line. Deleting the source does not delete its copies. Needs `ec2:DescribeImages`, `ec2:CopyImage` and `ec2:CreateTags`; a denial names the missing action (#1169)
 - **spawn now removes its own empty buckets** (#1301). `spawn cleanup
   --buckets` and, optionally, the TTL reaper delete
   `spawn-staging-<account>-<region>` and `spawn-results-<account>-<region>`

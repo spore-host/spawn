@@ -108,6 +108,14 @@ func ownedByCaller(tags map[string]string, callerARN string) bool {
 	return owner == "" || owner == callerARN
 }
 
+// managedResourceTagFilters is the Resource Groups Tagging API query that
+// defines "spawn-managed" for DiscoverManagedResources, and so for `spawn
+// footprint`, `spawn orphans` and `spawn cleanup`. A creation path whose tags
+// do not satisfy it is invisible to all three.
+func managedResourceTagFilters() []rgttypes.TagFilter {
+	return []rgttypes.TagFilter{{Key: aws.String("spawn:managed"), Values: []string{"true"}}}
+}
+
 // DiscoverManagedResources finds spawn-created resources in one region via the
 // Resource Groups Tagging API (a single tag query across all taggable services),
 // then enriches EC2 instances with their state so cleanup can refuse running
@@ -132,7 +140,7 @@ func (c *Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOpti
 	}
 
 	rgtClient := rgt.NewFromConfig(cfg)
-	filters := []rgttypes.TagFilter{{Key: aws.String("spawn:managed"), Values: []string{"true"}}}
+	filters := managedResourceTagFilters()
 
 	var resources []ManagedResource
 	// Counted so "nothing here" is never the whole story when it is not true
