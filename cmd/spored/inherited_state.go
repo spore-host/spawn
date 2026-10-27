@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
@@ -26,7 +27,9 @@ func newDiscardInheritedStateCmd() *cobra.Command {
 			"instance was launched from an image of that one: remove the per-instance state\n" +
 			"(plugins, job-array and pipeline peers, queue, command, flush hook) written before\n" +
 			"this boot, and record this instance as the owner (#1241). Nothing written during\n" +
-			"this boot is touched. Always exits 0: a failure is reported, never fatal to a boot.",
+			"this boot is touched. Also removes the MPI cluster-key lines (comment spawn-mpi-cohort)\n" +
+			"root's authorized_keys inherited from the image, once per instance (#1343).\n" +
+			"Always exits 0: a failure is reported, never fatal to a boot.",
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			discardInheritedState(cmd.Context(), cmd.ErrOrStderr(), imdsInstanceID, instancestate.ReconcileHost)
@@ -55,6 +58,29 @@ func discardInheritedState(ctx context.Context, w io.Writer, id func(context.Con
 		return
 	}
 	logInherited(w, instanceID, reconcile)
+	logClusterKeyStrip(w, instanceID, stripClusterKeys)
+}
+
+// stripClusterKeys is instancestate.StripClusterKeysHost on Linux, where
+// root's authorized_keys is; a variable so tests can count the calls.
+var stripClusterKeys = func(instanceID string) (int, error) {
+	if runtime.GOOS != "linux" {
+		return 0, nil
+	}
+	return instancestate.StripClusterKeysHost(instanceID)
+}
+
+// logClusterKeyStrip removes the MPI cluster-key lines this instance's root
+// authorized_keys inherited from its image (#1343) and says how many, never
+// which keys.
+func logClusterKeyStrip(w io.Writer, instanceID string, strip func(string) (int, error)) {
+	n, err := strip(instanceID)
+	if n > 0 {
+		_, _ = fmt.Fprintf(w, "spored: removed %d inherited MPI cluster-key line(s) from %s\n", n, instancestate.RootAuthorizedKeys)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "spored: removing inherited MPI cluster keys: %v\n", err)
+	}
 }
 
 // logInherited runs reconcile for instanceID and reports what it did.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spore-host/cohort"
+	"github.com/spore-host/spawn/pkg/instancestate"
 	"github.com/spore-host/spawn/pkg/userdata"
 )
 
@@ -32,6 +33,7 @@ func execBash(t *testing.T) string {
 // relocate moves every absolute path the commands name under dir.
 func relocate(cmd, dir string) string {
 	cmd = strings.ReplaceAll(cmd, "/root/.ssh", filepath.Join(dir, "root", ".ssh"))
+	cmd = strings.ReplaceAll(cmd, "/var/lib/spawn", filepath.Join(dir, "var", "lib", "spawn"))
 	return strings.ReplaceAll(cmd, "/tmp/.spawn-cluster-key", filepath.Join(dir, "cluster-key"))
 }
 
@@ -64,7 +66,7 @@ func TestInstallPubKeyCommandReplacesTheClusterKey(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		if out, err := runIn(t, bash, dir, installPubKeyCommand(childKey)); err != nil {
+		if out, err := runIn(t, bash, dir, installPubKeyCommand(childKey, "i-0c41d")); err != nil {
 			t.Fatalf("install (run %d): %v\n%s", i+1, err, out)
 		}
 	}
@@ -78,7 +80,7 @@ func TestInstallPubKeyCommandReplacesTheClusterKey(t *testing.T) {
 	if err := os.WriteFile(ak, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runIn(t, bash, dir, installPubKeyCommand(childKey)); err != nil {
+	if out, err := runIn(t, bash, dir, installPubKeyCommand(childKey, "i-0c41d")); err != nil {
 		t.Fatalf("install into an empty authorized_keys: %v\n%s", err, out)
 	}
 	if b, _ := os.ReadFile(ak); string(b) != childKey+"\n" {
@@ -135,5 +137,53 @@ func TestReadRankZeroPubKeyRefusesAnUntaggedKey(t *testing.T) {
 	err := asm.Assemble(context.Background(), []cohort.Observation{{ID: "job-0", ProviderID: "i-0", Address: "10.0.0.1"}})
 	if err == nil {
 		t.Fatal("an untagged rank-0 key was distributed")
+	}
+}
+
+// #1343: the boot-time strip of inherited cluster keys
+// (instancestate.StripClusterKeys) and this install must not fight. Whichever
+// order they run in on a member launched from another cohort's image, the
+// parent's key is gone, the user's is kept, and THIS cohort's key survives.
+// Strip first is the usual order (the bootstrap runs before enrollment); the
+// install first happens on an image with MPI preinstalled, where enrollment
+// can pass before the bootstrap reaches the strip.
+func TestBootStripAndKeyInstallAgreeInEitherOrder(t *testing.T) {
+	bash := execBash(t)
+	const id = "i-0c41d"
+	for _, order := range []string{"strip, install", "install, strip", "strip, install, strip"} {
+		t.Run(order, func(t *testing.T) {
+			dir := t.TempDir()
+			ssh := filepath.Join(dir, "root", ".ssh")
+			if err := os.MkdirAll(ssh, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ak := filepath.Join(ssh, "authorized_keys")
+			if err := os.WriteFile(ak, []byte(userKey+"\n"+parentKey+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The image's strip record names its source.
+			rec := filepath.Join(dir, filepath.FromSlash(userdata.MPIClusterKeyStripOwnerFile))
+			if err := os.MkdirAll(filepath.Dir(rec), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(rec, []byte("i-0fa2e\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for _, step := range strings.Split(order, ", ") {
+				switch step {
+				case "strip":
+					if _, err := instancestate.StripClusterKeys(dir, id); err != nil {
+						t.Fatal(err)
+					}
+				case "install":
+					if out, err := runIn(t, bash, dir, installPubKeyCommand(childKey, id)); err != nil {
+						t.Fatalf("install: %v\n%s", err, out)
+					}
+				}
+			}
+			if b, _ := os.ReadFile(ak); string(b) != userKey+"\n"+childKey+"\n" {
+				t.Errorf("authorized_keys after %s:\n%q\nwant the user's key and this cohort's, not the parent's", order, b)
+			}
+		})
 	}
 }

@@ -44,6 +44,13 @@ type MPIConfig struct {
 // accumulated (spawn#1338).
 const MPIClusterKeyComment = "spawn-mpi-cohort"
 
+// MPIClusterKeyStripOwnerFile holds the ID of the instance whose root
+// authorized_keys has had inherited MPIClusterKeyComment lines stripped
+// (spawn#1343). The bootstrap strips them once per instance, when this file
+// names another instance or none; the MPI key install writes it too, so a
+// later strip cannot remove the cohort's own key.
+const MPIClusterKeyStripOwnerFile = "/var/lib/spawn/root-ak-owner"
+
 // MPIClusterKeyOwnerFile holds the ID of the instance that minted rank 0's
 // /root/.ssh/id_rsa. A different (or no) ID means the key came with the image.
 const MPIClusterKeyOwnerFile = "/root/.ssh/spawn-mpi-key-owner"

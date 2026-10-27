@@ -853,10 +853,12 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 	return config, instanceName
 }
 
-// reconcileInstanceState is instancestate.ReconcileHost, and the two
+// reconcileInstanceState is instancestate.ReconcileHost, stripClusterKeys
+// instancestate.StripClusterKeysHost, and the two
 // predicates below the platform checks; variables so tests can count the calls.
 var (
 	reconcileInstanceState = instancestate.ReconcileHost
+	stripClusterKeys       = instancestate.StripClusterKeysHost
 	stateOnLinux           = runtime.GOOS == "linux"
 	stateAsRoot            = func() bool { return os.Geteuid() == 0 }
 )
@@ -875,6 +877,16 @@ func discardInheritedState(instanceID string) {
 	}
 	if err != nil {
 		log.Printf("Warning: checking for inherited instance state: %v", err)
+	}
+	// The MPI cluster key root's authorized_keys inherited (#1343). Here too,
+	// so an instance launched from the image by something other than spawn
+	// strips it when the image's spored starts.
+	n, err := stripClusterKeys(instanceID)
+	if n > 0 {
+		log.Printf("Removed %d inherited MPI cluster-key line(s) from %s", n, instancestate.RootAuthorizedKeys)
+	}
+	if err != nil {
+		log.Printf("Warning: removing inherited MPI cluster keys: %v", err)
 	}
 }
 

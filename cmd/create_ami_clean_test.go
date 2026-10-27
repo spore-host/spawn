@@ -149,3 +149,35 @@ func TestRunCreateAMIGoesThroughTheCleaningImager(t *testing.T) {
 		t.Errorf("runCreateAMI: createFromInstance called=%v, direct CreateAMI=%v; want the imager only", viaImager, direct)
 	}
 }
+
+// #1343: `spawn ami create` does not edit root's authorized_keys on the
+// source, an MPI cohort member included. The source keeps running, and its
+// cohort's mpirun needs the cluster key; an instance launched from the image
+// strips the inherited key at boot instead (instancestate.StripClusterKeys).
+func TestAMICreate_NeverTouchesAuthorizedKeys(t *testing.T) {
+	for name, tags := range map[string]map[string]string{
+		"plain":        {},
+		"MPI rank 0":   {"spawn:mpi-enabled": "true", "spawn:job-array-id": "ja-1", "spawn:job-array-index": "0"},
+		"MPI non-zero": {"spawn:mpi-enabled": "true", "spawn:job-array-id": "ja-1", "spawn:job-array-index": "3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inst := linuxSource("running")
+			for k, v := range tags {
+				inst.Tags[k] = v
+			}
+			rec := &imagerRecord{}
+			if _, err := fakeImager(rec, cleanOK, nil).createFromInstance(context.Background(), inst,
+				aws.CreateAMIInput{InstanceID: "i-0src"}, false, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(rec.calls, ","); got != "ssm:us-west-2:i-0src,create-image:us-west-2:i-0src" {
+				t.Errorf("calls %s; want only the run-state clean and CreateImage", got)
+			}
+			for _, s := range rec.scripts {
+				if strings.Contains(s, "authorized_keys") || strings.Contains(s, "/root/.ssh") {
+					t.Errorf("ami create ran a script that touches root's ssh keys on the source:\n%s", s)
+				}
+			}
+		})
+	}
+}
