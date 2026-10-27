@@ -14,14 +14,28 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/spore-host/spawn/pkg/botsecret"
+	"github.com/spore-host/spawn/pkg/security"
 )
 
 // getFreshBotToken returns a valid bot token for a workspace, refreshing it
 // automatically if token rotation is enabled and the token is expired.
-// workspaceKey is in the form "slack#T03NE3GTY".
+// workspaceKey is in the form "slack#T03NE3GTY". The tokens are stored
+// KMS-encrypted (#868): they are opened here, and a refresh is written back
+// sealed.
 func getFreshBotToken(ctx context.Context, cfg aws.Config, tableName, workspaceKey string) (string, error) {
-	client := dynamodb.NewFromConfig(cfg)
+	clientID := os.Getenv("SLACK_CLIENT_ID")
+	return freshBotTokenWith(ctx, dynamodb.NewFromConfig(cfg), kms.NewFromConfig(cfg), tableName, workspaceKey, time.Now(),
+		func(refresh string) (string, string, int, error) {
+			return exchangeRefreshToken(clientID, slackClientSecret(), refresh)
+		})
+}
 
+// freshBotTokenWith is getFreshBotToken over explicit clients, clock and
+// exchange (a fake in tests).
+func freshBotTokenWith(ctx context.Context, client *dynamodb.Client, kmsClient security.KMSAPI, tableName, workspaceKey string, now time.Time,
+	exchange func(refreshToken string) (string, string, int, error)) (string, error) {
 	result, err := client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(tableName),
 		Key: map[string]dynamodbtypes.AttributeValue{
@@ -35,9 +49,12 @@ func getFreshBotToken(ctx context.Context, cfg aws.Config, tableName, workspaceK
 		return "", fmt.Errorf("workspace %s not found", workspaceKey)
 	}
 
-	botToken := stringAttr(result.Item, "bot_token")
+	botToken, err := botsecret.BotToken.Open(ctx, kmsClient, workspaceKey, botsecret.BotToken.Stored(result.Item))
+	if err != nil {
+		return "", err
+	}
 	if botToken == "" {
-		return "", fmt.Errorf("no bot_token for workspace %s", workspaceKey)
+		return "", fmt.Errorf("no bot token for workspace %s", workspaceKey)
 	}
 
 	// Check if token rotation is enabled and token is expired/near-expiry
@@ -47,41 +64,29 @@ func getFreshBotToken(ctx context.Context, cfg aws.Config, tableName, workspaceK
 	}
 
 	expiresAt := int64Attr(result.Item, "token_expires_at")
-	if expiresAt == 0 || time.Now().Add(5*time.Minute).Unix() < expiresAt {
+	if expiresAt == 0 || now.Add(5*time.Minute).Unix() < expiresAt {
 		// Not expired (or no expiry set) — return current token
 		// Refresh 5 minutes before actual expiry to avoid race conditions
 		return botToken, nil
 	}
 
 	// Token is expired — refresh it
-	refreshToken := stringAttr(result.Item, "refresh_token")
+	refreshToken, err := botsecret.RefreshToken.Open(ctx, kmsClient, workspaceKey, botsecret.RefreshToken.Stored(result.Item))
+	if err != nil {
+		return "", err
+	}
 	if refreshToken == "" {
-		return "", fmt.Errorf("token expired but no refresh_token stored for %s", workspaceKey)
+		return "", fmt.Errorf("token expired but no refresh token stored for %s", workspaceKey)
 	}
 
-	clientID := os.Getenv("SLACK_CLIENT_ID")
-	clientSecret := slackClientSecret()
-	newToken, newRefresh, expiresIn, err := exchangeRefreshToken(clientID, clientSecret, refreshToken)
+	newToken, newRefresh, expiresIn, err := exchange(refreshToken)
 	if err != nil {
 		return "", fmt.Errorf("refresh token for %s: %w", workspaceKey, err)
 	}
 
-	// Update DynamoDB with new tokens
-	newExpiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second).Unix()
-	_, err = client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(tableName),
-		Key: map[string]dynamodbtypes.AttributeValue{
-			"workspace_key": &dynamodbtypes.AttributeValueMemberS{Value: workspaceKey},
-		},
-		UpdateExpression: aws.String("SET bot_token = :t, refresh_token = :r, token_expires_at = :e"),
-		ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
-			":t": &dynamodbtypes.AttributeValueMemberS{Value: newToken},
-			":r": &dynamodbtypes.AttributeValueMemberS{Value: newRefresh},
-			":e": &dynamodbtypes.AttributeValueMemberN{Value: strconv.FormatInt(newExpiresAt, 10)},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("update tokens: %w", err)
+	newExpiresAt := now.Add(time.Duration(expiresIn) * time.Second).Unix()
+	if err := writeRotatedTokens(ctx, client, kmsClient, tableName, workspaceKey, newToken, newRefresh, newExpiresAt); err != nil {
+		return "", err
 	}
 	return newToken, nil
 }

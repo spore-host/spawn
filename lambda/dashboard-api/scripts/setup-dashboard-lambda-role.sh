@@ -284,29 +284,51 @@ if [ "$ATTACHMENTS" = "0" ]; then
     fi
 fi
 
-# Workspace signing secrets in spore-bot-workspaces are KMS-encrypted (#868).
-# The Slack OAuth install (slack_oauth.go, via pkg/botsecret) encrypts the
-# secret it stores and, when Secrets Manager holds none, decrypts the one it
-# preserves. Scoped to the key behind alias/spore-bot-secrets
-# (pkg/botsecret.DefaultKeyAlias) and to the "purpose" encryption context that
-# package always sets. put-role-policy replaces the inline policy, so a re-run
-# updates an existing role (the create-policy above does not).
-echo "→ Granting use of the spore-bot signing-secret KMS key..."
-cat > /tmp/dashboard-bot-secrets-kms.json <<EOF
+# Workspace credentials in spore-bot-workspaces are KMS-encrypted (#868), one
+# encryption-context "purpose" per attribute (pkg/botsecret.Fields). The Slack
+# OAuth install (slack_oauth.go) encrypts all four it stores; it decrypts the
+# signing secret it preserves when Secrets Manager holds none, and the token
+# refresh paths (rotateTokenByCurrentToken, getFreshBotToken) decrypt the bot
+# and refresh tokens. Nothing here reads the webhook URL, so it is not
+# decryptable. Scoped to the key behind alias/spore-bot-secrets
+# (pkg/botsecret.DefaultKeyAlias). put-role-policy replaces the inline policy,
+# so a re-run updates an existing role.
+echo "→ Granting use of the spore-bot workspace-credentials KMS key..."
+KMS_POLICY=$(cat <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "SporeBotSigningSecretKMS",
+      "Sid": "SporeBotCredentialsEncrypt",
       "Effect": "Allow",
-      "Action": [
-        "kms:Encrypt",
-        "kms:Decrypt"
-      ],
+      "Action": ["kms:Encrypt"],
       "Resource": "arn:aws:kms:*:${ACCOUNT_ID}:key/*",
       "Condition": {
         "StringEquals": {
-          "kms:EncryptionContext:purpose": "spore-bot-signing-secret"
+          "kms:EncryptionContext:purpose": [
+            "spore-bot-signing-secret",
+            "spore-bot-bot-token",
+            "spore-bot-refresh-token",
+            "spore-bot-incoming-webhook-url"
+          ]
+        },
+        "ForAnyValue:StringEquals": {
+          "kms:ResourceAliases": "alias/spore-bot-secrets"
+        }
+      }
+    },
+    {
+      "Sid": "SporeBotCredentialsDecrypt",
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt"],
+      "Resource": "arn:aws:kms:*:${ACCOUNT_ID}:key/*",
+      "Condition": {
+        "StringEquals": {
+          "kms:EncryptionContext:purpose": [
+            "spore-bot-signing-secret",
+            "spore-bot-bot-token",
+            "spore-bot-refresh-token"
+          ]
         },
         "ForAnyValue:StringEquals": {
           "kms:ResourceAliases": "alias/spore-bot-secrets"
@@ -316,13 +338,14 @@ cat > /tmp/dashboard-bot-secrets-kms.json <<EOF
   ]
 }
 EOF
+)
 aws iam put-role-policy \
     --profile "$PROFILE" \
     --role-name "$ROLE_NAME" \
-    --policy-name "SporeBotSigningSecretKMS" \
-    --policy-document file:///tmp/dashboard-bot-secrets-kms.json
+    --policy-name "SporeBotCredentialsKMS" \
+    --policy-document "$KMS_POLICY"
 
-echo -e "  ${GREEN}✓${NC} KMS grant attached (inline policy SporeBotSigningSecretKMS)"
+echo -e "  ${GREEN}✓${NC} KMS grant attached (inline policy SporeBotCredentialsKMS)"
 
 # Clean up temp files
 rm -f /tmp/trust-policy.json

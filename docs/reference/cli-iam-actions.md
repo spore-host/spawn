@@ -82,8 +82,8 @@ instances):
 | `spawn notify disable` | `dynamodb:UpdateItem` |
 | `spawn notify enable` | `dynamodb:UpdateItem` |
 | `spawn notify list` | `dynamodb:Scan` |
-| `spawn notify register` | `dynamodb:DeleteItem`, `dynamodb:GetItem`, `dynamodb:UpdateItem`, `iam:CreateRole`, `iam:GetRole`, `iam:PutRolePolicy`, `iam:UpdateAssumeRolePolicy` |
-| `spawn notify workspace add` | `dynamodb:PutItem` |
+| `spawn notify register` | `dynamodb:DeleteItem`, `dynamodb:GetItem`, `dynamodb:UpdateItem`, `iam:CreateRole`, `iam:GetRole`, `iam:PutRolePolicy`, `iam:UpdateAssumeRolePolicy`, `kms:Decrypt`, `kms:Encrypt` |
+| `spawn notify workspace add` | `dynamodb:PutItem`, `kms:Encrypt` |
 | `spawn notify workspace destroy` | `dynamodb:BatchWriteItem`, `dynamodb:DeleteItem`, `dynamodb:GetItem`, `dynamodb:Scan` |
 | `spawn notify workspace list` | `dynamodb:Scan` |
 | `spawn notify workspace remove` | `dynamodb:DeleteItem` |
@@ -260,6 +260,8 @@ instances):
 | `imagebuilder:GetImage` | `spawn image import`, `spawn image status` |
 | `imagebuilder:ImportDiskImage` | `spawn image import` |
 | `imagebuilder:ListInfrastructureConfigurations` | `spawn image import` |
+| `kms:Decrypt` | `spawn notify register` |
+| `kms:Encrypt` | `spawn notify register`, `spawn notify workspace add` |
 | `lambda:AddPermission` | `spawn reaper deploy` |
 | `lambda:CreateFunction` | `spawn reaper deploy` |
 | `lambda:DeleteFunction` | `spawn reaper teardown` |

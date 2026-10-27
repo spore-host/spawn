@@ -8,10 +8,11 @@
 // (the authoritative writer) and the dashboard-api Lambda, so the tag values and
 // table names must not change.
 //
-// Workspace.SigningSecret is the one field not mapped by its struct tag: it is
-// sealed with KMS on write and stored as found on read, both through
-// pkg/botsecret (#868). Marshalling a Workspace yourself therefore never writes
-// it; use PutWorkspace, and Client.SigningSecret to recover the plaintext.
+// The credential fields of Workspace (SigningSecret, BotToken, RefreshToken,
+// IncomingWebhookURL) are not mapped by their struct tags: they are sealed with
+// KMS on write and kept as found on read, both through pkg/botsecret (#868).
+// Marshalling a Workspace yourself therefore never writes them; use
+// PutWorkspace, and Client.Credential to recover a plaintext.
 package bot
 
 import (
@@ -53,10 +54,12 @@ type Registration struct {
 // workspace_key = "<platform>#<workspace-id>").
 type Workspace struct {
 	WorkspaceKey string `dynamodbav:"workspace_key" json:"workspace_key"`
-	BotToken     string `dynamodbav:"bot_token" json:"bot_token"`
-	// SigningSecret is the plaintext to store on PutWorkspace. It is NOT filled
-	// on read (the stored form may be ciphertext); call Client.SigningSecret.
-	// The "-" tag keeps every marshaller but pkg/botsecret away from it.
+	// The credential fields (BotToken, SigningSecret, IncomingWebhookURL,
+	// RefreshToken) are the plaintexts to store on PutWorkspace. They are NOT
+	// filled on read (the stored form may be ciphertext); call
+	// Client.Credential. The "-" tags keep every marshaller but pkg/botsecret
+	// away from them.
+	BotToken            string   `dynamodbav:"-" json:"bot_token"`
 	SigningSecret       string   `dynamodbav:"-" json:"signing_secret"`
 	Platform            string   `dynamodbav:"platform" json:"platform"`
 	WorkspaceName       string   `dynamodbav:"workspace_name,omitempty" json:"workspace_name,omitempty"`
@@ -65,19 +68,48 @@ type Workspace struct {
 	AllowedChannels     []string `dynamodbav:"allowed_channels,omitempty" json:"allowed_channels,omitempty"`
 	ConnectCodeTTLHours int      `dynamodbav:"connect_code_ttl_hours,omitempty" json:"connect_code_ttl_hours,omitempty"`
 	PublicKey           string   `dynamodbav:"public_key,omitempty" json:"public_key,omitempty"`
-	IncomingWebhookURL  string   `dynamodbav:"incoming_webhook_url,omitempty" json:"incoming_webhook_url,omitempty"`
-	RefreshToken        string   `dynamodbav:"refresh_token,omitempty" json:"refresh_token,omitempty"`
+	IncomingWebhookURL  string   `dynamodbav:"-" json:"incoming_webhook_url,omitempty"`
+	RefreshToken        string   `dynamodbav:"-" json:"refresh_token,omitempty"`
 	TokenExpiresAt      int64    `dynamodbav:"token_expires_at,omitempty" json:"token_expires_at,omitempty"`
 	TokenRotation       bool     `dynamodbav:"token_rotation,omitempty" json:"token_rotation,omitempty"`
 
-	// storedSigningSecret is the signing_secret attribute as read: sealed, or
-	// a legacy plaintext.
-	storedSigningSecret string
+	// stored holds each credential attribute as read: sealed, or a legacy
+	// plaintext.
+	stored map[botsecret.Field]string
 }
 
-// HasSigningSecret reports whether the item read from DynamoDB carries a
-// signing secret, without decrypting it.
-func (ws *Workspace) HasSigningSecret() bool { return ws.storedSigningSecret != "" }
+// HasCredential reports whether the item read from DynamoDB carries a value
+// for f, without decrypting it.
+func (ws *Workspace) HasCredential(f botsecret.Field) bool { return ws.stored[f] != "" }
+
+// Input returns a pointer to the struct field holding credential f, the
+// plaintext PutWorkspace stores (empty after a read; see Credential).
+func (ws *Workspace) Input(f botsecret.Field) *string {
+	switch f {
+	case botsecret.SigningSecret:
+		return &ws.SigningSecret
+	case botsecret.BotToken:
+		return &ws.BotToken
+	case botsecret.RefreshToken:
+		return &ws.RefreshToken
+	case botsecret.IncomingWebhookURL:
+		return &ws.IncomingWebhookURL
+	}
+	panic("bot: unhandled credential field " + f.String())
+}
+
+// unmarshalWorkspace reads an item, keeping each credential as stored.
+func unmarshalWorkspace(item map[string]types.AttributeValue) (Workspace, error) {
+	var ws Workspace
+	if err := attributevalue.UnmarshalMap(item, &ws); err != nil {
+		return ws, err
+	}
+	ws.stored = map[botsecret.Field]string{}
+	for _, f := range botsecret.Fields() {
+		ws.stored[f] = f.Stored(item)
+	}
+	return ws, nil
+}
 
 // ConnectCode is a transient connect-code item stored in the workspaces table
 // under workspace_key = "connect#<code>", with a DynamoDB TTL.
@@ -95,16 +127,16 @@ type Client struct {
 	registryTable   string
 	workspacesTable string
 
-	// kms seals and opens workspace signing secrets (see WithSecretsKMS). Nil
-	// means PutWorkspace refuses a non-empty secret rather than storing it in
-	// the clear.
+	// kms seals and opens workspace credentials (see WithSecretsKMS). Nil
+	// means PutWorkspace refuses a non-empty credential rather than storing it
+	// in the clear.
 	kms      security.KMSAPI
 	kmsKeyID string
 }
 
 // WithSecretsKMS sets the KMS client (and key; "" means botsecret.KeyID())
-// used to encrypt workspace signing secrets on write and decrypt them in
-// SigningSecret. It returns c for chaining.
+// used to encrypt workspace credentials on write and decrypt them in
+// Credential. It returns c for chaining.
 func (c *Client) WithSecretsKMS(kmsClient security.KMSAPI, keyID string) *Client {
 	c.kms = kmsClient
 	c.kmsKeyID = keyID
@@ -122,7 +154,7 @@ func NewClient(db *dynamodb.Client) *Client {
 }
 
 // NewClientFromConfig is NewClientWithTableNames over clients built from cfg,
-// with workspace signing secrets sealed by KMS under botsecret.KeyID().
+// with workspace credentials sealed by KMS under botsecret.KeyID().
 func NewClientFromConfig(cfg aws.Config, registryTable, workspacesTable string) *Client {
 	return NewClientWithTableNames(dynamodb.NewFromConfig(cfg), registryTable, workspacesTable).
 		WithSecretsKMS(kms.NewFromConfig(cfg), "")
@@ -279,15 +311,17 @@ func (c *Client) BatchDeleteRegistrations(ctx context.Context, regs []Registrati
 // ── workspaces ────────────────────────────────────────────────────────────
 
 // PutWorkspace writes a workspace registration, replacing any existing one.
-// The signing secret is stored KMS-encrypted; without a KMS client (see
-// WithSecretsKMS) a non-empty secret is an error, never a plaintext write.
+// Every credential field is stored KMS-encrypted; without a KMS client (see
+// WithSecretsKMS) a non-empty credential is an error, never a plaintext write.
 func (c *Client) PutWorkspace(ctx context.Context, ws *Workspace) error {
 	item, err := attributevalue.MarshalMap(ws)
 	if err != nil {
 		return fmt.Errorf("marshal workspace: %w", err)
 	}
-	if err := botsecret.Put(ctx, c.kms, c.kmsKeyID, item, ws.WorkspaceKey, ws.SigningSecret); err != nil {
-		return fmt.Errorf("workspace %s: %w", ws.WorkspaceKey, err)
+	for _, f := range botsecret.Fields() {
+		if err := f.Put(ctx, c.kms, c.kmsKeyID, item, ws.WorkspaceKey, *ws.Input(f)); err != nil {
+			return fmt.Errorf("workspace %s: %w", ws.WorkspaceKey, err)
+		}
 	}
 	if _, err := c.db.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(c.workspacesTable),
@@ -326,19 +360,18 @@ func (c *Client) GetWorkspace(ctx context.Context, platform, workspaceID string)
 	if result.Item == nil {
 		return nil, nil
 	}
-	var ws Workspace
-	if err := attributevalue.UnmarshalMap(result.Item, &ws); err != nil {
+	ws, err := unmarshalWorkspace(result.Item)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal workspace: %w", err)
 	}
-	ws.storedSigningSecret = botsecret.Stored(result.Item)
 	return &ws, nil
 }
 
-// SigningSecret returns the plaintext signing secret of a workspace read by
+// Credential returns the plaintext of credential f of a workspace read by
 // GetWorkspace or ListWorkspaces: decrypted when stored sealed, as is when it
-// is a legacy plaintext value. Decryption needs WithSecretsKMS.
-func (c *Client) SigningSecret(ctx context.Context, ws *Workspace) (string, error) {
-	return botsecret.Open(ctx, c.kms, ws.WorkspaceKey, ws.storedSigningSecret)
+// is a legacy plaintext value, "" when absent. Decryption needs WithSecretsKMS.
+func (c *Client) Credential(ctx context.Context, ws *Workspace, f botsecret.Field) (string, error) {
+	return f.Open(ctx, c.kms, ws.WorkspaceKey, ws.stored[f])
 }
 
 // ListWorkspaces returns all workspaces, optionally filtered to one platform
@@ -357,31 +390,35 @@ func (c *Client) ListWorkspaces(ctx context.Context, platform string) ([]Workspa
 	}
 	wss := make([]Workspace, 0, len(result.Items))
 	for _, item := range result.Items {
-		var ws Workspace
-		if err := attributevalue.UnmarshalMap(item, &ws); err != nil {
+		ws, err := unmarshalWorkspace(item)
+		if err != nil {
 			continue
 		}
-		ws.storedSigningSecret = botsecret.Stored(item)
 		wss = append(wss, ws)
 	}
 	return wss, nil
 }
 
-// UpdateWorkspaceTokens persists rotated OAuth tokens for a workspace.
+// UpdateWorkspaceTokens persists rotated OAuth tokens for a workspace, both
+// sealed (botsecret.RotatedTokens). Without a KMS client it writes nothing and
+// returns an error.
 func (c *Client) UpdateWorkspaceTokens(ctx context.Context, platform, workspaceID, botToken, refreshToken string, expiresAt int64) error {
-	_, err := c.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	key := platform + "#" + workspaceID
+	update, values, err := botsecret.RotatedTokens(ctx, c.kms, c.kmsKeyID, key, botToken, refreshToken, expiresAt)
+	if err != nil {
+		return fmt.Errorf("workspace %s: %w", key, err)
+	}
+	if _, err := c.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(c.workspacesTable),
 		Key: map[string]types.AttributeValue{
-			"workspace_key": &types.AttributeValueMemberS{Value: platform + "#" + workspaceID},
+			"workspace_key": &types.AttributeValueMemberS{Value: key},
 		},
-		UpdateExpression: aws.String("SET bot_token = :t, refresh_token = :r, token_expires_at = :e"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":t": &types.AttributeValueMemberS{Value: botToken},
-			":r": &types.AttributeValueMemberS{Value: refreshToken},
-			":e": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", expiresAt)},
-		},
-	})
-	return err
+		UpdateExpression:          aws.String(update),
+		ExpressionAttributeValues: values,
+	}); err != nil {
+		return fmt.Errorf("update workspace tokens: %w", err)
+	}
+	return nil
 }
 
 // ── connect codes ─────────────────────────────────────────────────────────

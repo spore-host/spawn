@@ -179,13 +179,15 @@ Resources:
         - Key: Application
           Value: spore-bot
 
-  # ── KMS key: workspace signing secrets ───────────────────────────────────────
-  # The signing_secret attribute of spore-bot-workspaces is encrypted with this
-  # key by every writer (spawn's pkg/botsecret: `spawn notify workspace add`, the
-  # dashboard's Slack OAuth install; spore-bot's admin API) and decrypted by
-  # spore-bot to verify requests (#868). Ciphertexts carry the encryption context
-  # {purpose: spore-bot-signing-secret, workspace_key: <item key>}; the grants
-  # below condition on purpose so they cover this use only. Deleted with the
+  # ── KMS key: workspace credentials ───────────────────────────────────────────
+  # The credential attributes of spore-bot-workspaces (signing_secret,
+  # bot_token, refresh_token, incoming_webhook_url) are encrypted with this key
+  # by every writer (spawn's pkg/botsecret: `spawn notify workspace add`, the
+  # dashboard's Slack OAuth install; spore-bot's OAuth install and admin API)
+  # and decrypted by the readers that use them (#868). Ciphertexts carry the
+  # encryption context {purpose: spore-bot-<field>, workspace_key: <item key>};
+  # the grants below condition on purpose so each covers only the fields that
+  # principal uses. Deleted with the
   # stack (CloudFormation schedules key deletion after PendingWindowInDays).
   # The table's own SSE (aws/dynamodb) is a separate, AWS-managed key.
 
@@ -194,7 +196,7 @@ Resources:
     DeletionPolicy: Delete
     UpdateReplacePolicy: Retain
     Properties:
-      Description: spore-bot workspace signing secrets (spore-bot-workspaces.signing_secret)
+      Description: spore-bot workspace credentials (spore-bot-workspaces signing_secret, bot_token, refresh_token, incoming_webhook_url)
       EnableKeyRotation: true
       PendingWindowInDays: 7
       KeyPolicy:
@@ -333,16 +335,32 @@ Resources:
               Action:
                 - dynamodb:PutItem
               Resource: !GetAtt SmsPendingTable.Arn
-            # Decrypt to verify requests; Encrypt for workspaces written
-            # through the admin API. Scoped to the key and to its one purpose.
+            # Encrypt every credential field: the OAuth install and the admin
+            # API write workspaces. Scoped to the key and to those purposes.
             - Effect: Allow
               Action:
                 - kms:Encrypt
+              Resource: !GetAtt BotSecretsKey.Arn
+              Condition:
+                StringEquals:
+                  'kms:EncryptionContext:purpose':
+                    - spore-bot-signing-secret
+                    - spore-bot-bot-token
+                    - spore-bot-refresh-token
+                    - spore-bot-incoming-webhook-url
+            # Decrypt only what the bot reads: the signing secret to verify
+            # requests, the bot token to call Slack, the webhook URL to post.
+            # It never refreshes tokens, so it cannot open a refresh token.
+            - Effect: Allow
+              Action:
                 - kms:Decrypt
               Resource: !GetAtt BotSecretsKey.Arn
               Condition:
                 StringEquals:
-                  'kms:EncryptionContext:purpose': spore-bot-signing-secret
+                  'kms:EncryptionContext:purpose':
+                    - spore-bot-signing-secret
+                    - spore-bot-bot-token
+                    - spore-bot-incoming-webhook-url
             - Effect: Allow
               Action:
                 - sts:AssumeRole
@@ -456,7 +474,7 @@ Outputs:
 
   BotSecretsKeyArn:
     Value: !GetAtt BotSecretsKey.Arn
-    Description: 'KMS key for workspace signing secrets (alias/spore-bot-secrets). Grant kms:Encrypt on it to principals that write workspaces (e.g. the dashboard role).'
+    Description: 'KMS key for workspace credentials (alias/spore-bot-secrets). Grant kms:Encrypt on it to principals that write workspaces (e.g. the dashboard role).'
     Export:
       Name: !Sub '${AWS::StackName}-secrets-key-arn'
 
