@@ -319,6 +319,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limited to what fits beside the launch's tags (the rest are named in a
   warning), and the sweep orchestrator refuses a member carrying more than 50
   tags. New in `pkg/aws`: `LaunchConfig.ValidateTagCount` and `TagLimitError`.
+- **A terminated instance's cost no longer keeps growing** (#1341). The
+  single-instance `spawn cost` report, the EC2-side `spawn status` report and
+  `spawn task diagnose` priced EBS and Elastic IPs from first launch to now,
+  whatever the state, so a terminated instance was shown accruing storage and
+  IPv4 spend that nothing bills. For a terminated or shutting-down instance the
+  window now ends at the termination time EC2 gives in StateTransitionReason,
+  shown as `Terminated:` (and `terminated_at` in `spawn status --output json`).
+  When that time is no longer available (EC2 clears it about an hour after
+  termination), storage and Elastic IPs are reported as not counted, with the
+  reason, and the total as "at least" (`termination_time_unknown` in JSON).
+  Running and stopped instances are unchanged; `--cost-limit` enforcement is
+  unaffected.
+
 - **A pool nobody drains no longer keeps its IAM role forever** (#1319).
   `spawn pool drain` was the only thing that deleted a pool's worker role and
   instance profile, so a pool whose caller crashed, or whose run-end hook

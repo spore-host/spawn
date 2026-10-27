@@ -44,8 +44,16 @@ type ec2StatusReport struct {
 	StoppedSince          *time.Time `json:"stopped_since,omitempty"`
 	StoppedSeconds        float64    `json:"stopped_seconds,omitempty"`
 
-	LaunchedAt     *time.Time `json:"launched_at,omitempty"`
-	ElapsedSeconds float64    `json:"elapsed_seconds,omitempty"`
+	LaunchedAt *time.Time `json:"launched_at,omitempty"`
+	// ElapsedSeconds is the wall-clock window EBS and Elastic IPs are priced
+	// over: launch to now, or launch to termination for a terminated or
+	// shutting-down instance (#1341).
+	ElapsedSeconds float64 `json:"elapsed_seconds,omitempty"`
+	// TerminatedAt is when a terminated or shutting-down instance's billing
+	// stopped. TerminationTimeUnknown is set when it is gone but the time cannot
+	// be found: wall-clock cost is then not counted, rather than run to now.
+	TerminatedAt           *time.Time `json:"terminated_at,omitempty"`
+	TerminationTimeUnknown bool       `json:"termination_time_unknown,omitempty"`
 
 	TTLDeadline      *time.Time `json:"ttl_deadline,omitempty"`
 	TTLRemainingSecs float64    `json:"ttl_remaining_seconds,omitempty"`
@@ -116,13 +124,23 @@ func buildEC2StatusReport(instance *aws.InstanceInfo, rate statusRate, now time.
 	// The ORIGINAL launch (spawn:launch-time); EC2's LaunchTime moves on every
 	// start. The same anchor spawn extend uses (#992).
 	launch := originalLaunchTime(instance)
+	window := accrualEnd(instance, now)
+	switch {
+	case window.Ended && window.Known:
+		t := window.End.UTC()
+		r.TerminatedAt = &t
+	case window.Ended:
+		r.TerminationTimeUnknown = true
+	}
 	if !launch.IsZero() && !launch.After(now) {
 		l := launch.UTC()
 		r.LaunchedAt = &l
-		r.ElapsedSeconds = now.Sub(launch).Seconds()
+		if window.Known && window.End.After(launch) {
+			r.ElapsedSeconds = window.End.Sub(launch).Seconds()
+		}
 	}
 
-	if deadline, ok := lifecycleDeadline(instance); ok {
+	if deadline, ok := lifecycleDeadline(instance); ok && !window.Ended {
 		d := deadline.UTC()
 		r.TTLDeadline = &d
 		if rem := deadline.Sub(now); rem > 0 {
@@ -164,7 +182,7 @@ func buildEC2StatusReport(instance *aws.InstanceInfo, rate statusRate, now time.
 	r.StorageThisStop, r.IPv4ThisStop = thisStop.EBS, thisStop.PublicIPv4
 	r.StoppedPerHour = stoppedFP.RunningPerHour()
 
-	r.CumulativeKnown = rate.PerHour > 0 && r.ComputeKnown && r.EBSKnown
+	r.CumulativeKnown = rate.PerHour > 0 && r.ComputeKnown && r.EBSKnown && !r.TerminationTimeUnknown
 	r.CumulativeCost = r.ComputeCost + r.StorageCost + r.IPv4Cost
 
 	// The cap's own figure, at the enforced (on-demand) rate (#51).
@@ -208,12 +226,26 @@ func renderEC2Status(r ec2StatusReport, loc *time.Location) string {
 	} else if r.StateTransitionReason != "" {
 		fmt.Fprintf(&b, "Reason:           %s\n", r.StateTransitionReason)
 	}
-	if r.LaunchedAt != nil {
+	switch {
+	case r.TerminatedAt != nil:
+		fmt.Fprintf(&b, "Terminated:       %s (nothing bills after this)\n", formatStatusTime(*r.TerminatedAt, loc))
+	case r.TerminationTimeUnknown:
+		fmt.Fprintf(&b, "Terminated:       time unknown (%s)\n", accrualUnknownReason)
+	}
+	switch {
+	case r.LaunchedAt != nil && r.TerminatedAt != nil:
+		fmt.Fprintf(&b, "Launched:         %s, ran %s to termination\n",
+			formatStatusTime(*r.LaunchedAt, loc), formatDuration(time.Duration(r.ElapsedSeconds)*time.Second))
+	case r.LaunchedAt != nil && r.TerminationTimeUnknown:
+		fmt.Fprintf(&b, "Launched:         %s\n", formatStatusTime(*r.LaunchedAt, loc))
+	case r.LaunchedAt != nil:
 		fmt.Fprintf(&b, "Launched:         %s, %s ago\n",
 			formatStatusTime(*r.LaunchedAt, loc), formatDuration(time.Duration(r.ElapsedSeconds)*time.Second))
 	}
 
 	switch {
+	case r.TerminatedAt != nil || r.TerminationTimeUnknown:
+		// Gone: no deadline left to enforce.
 	case r.TTLDeadline != nil && r.TTLPastDue:
 		fmt.Fprintf(&b, "TTL deadline:     %s, past due — it terminates as soon as it is started, or when the reaper next runs\n",
 			formatStatusTime(*r.TTLDeadline, loc))
@@ -236,10 +268,16 @@ func renderEC2Status(r ec2StatusReport, loc *time.Location) string {
 	} else {
 		fmt.Fprintf(&b, "  Compute:        — (no spawn:compute-seconds checkpoint recorded)\n")
 	}
-	if r.EBSKnown {
+	switch {
+	case r.EBSKnown && r.TerminationTimeUnknown:
+		fmt.Fprintf(&b, "  Storage (EBS):  — (not counted: %s)\n", accrualUnknownReason)
+	case r.EBSKnown && r.TerminatedAt != nil:
+		fmt.Fprintf(&b, "  Storage (EBS):  $%.2f  (launch to termination × $%.4f/hr)\n",
+			r.StorageCost, r.EBSHourlyCost)
+	case r.EBSKnown:
 		fmt.Fprintf(&b, "  Storage (EBS):  $%.2f  (since launch × $%.4f/hr; EBS bills whether or not it runs)\n",
 			r.StorageCost, r.EBSHourlyCost)
-	} else {
+	default:
 		fmt.Fprintf(&b, "  Storage (EBS):  — (rate not yet recorded)\n")
 	}
 	switch {
@@ -249,8 +287,14 @@ func renderEC2Status(r ec2StatusReport, loc *time.Location) string {
 	case !r.IPv4Known:
 		fmt.Fprintf(&b, "  Public IPv4:    — (not recorded by spored, so not counted)\n")
 	}
-	if r.CumulativeKnown {
+	if r.TerminationTimeUnknown && r.ElasticIPv4Count > 0 {
+		fmt.Fprintf(&b, "                  Elastic IPs bill on the wall clock: not counted (%s)\n", accrualUnknownReason)
+	}
+	switch {
+	case r.CumulativeKnown:
 		fmt.Fprintf(&b, "  Total:          $%.2f\n", r.CumulativeCost)
+	case r.TerminationTimeUnknown && r.ComputeKnown && r.RatePerHour > 0:
+		fmt.Fprintf(&b, "  Total:          at least $%.2f  (storage and Elastic IPs not counted: termination time unknown)\n", r.CumulativeCost)
 	}
 	if r.CostLimit > 0 {
 		fmt.Fprintf(&b, "  Cost limit:     $%.2f  ($%.2f counted at the on-demand rate, compute + EBS + public IPv4)\n",

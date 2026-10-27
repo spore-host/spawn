@@ -249,17 +249,23 @@ func resolveInstanceForCost(ctx context.Context, identifier string) *aws.Instanc
 // It used to be time.Since(EC2 LaunchTime) for both, which is the latest boot
 // only: after a stop/start it dropped every earlier boot, and for a stopped
 // instance it counted the stopped time as compute.
+//
+// For a terminated or shutting-down instance Since ends at the termination
+// time, not now (accrualEnd, #1341): nothing bills after it. When that time
+// cannot be found Window.Known is false and Since is zero, so no wall-clock cost
+// accrues, and every display says why.
 type instanceRuntime struct {
 	Launch         time.Time
 	Since          time.Duration
 	Compute        time.Duration
 	ComputeFromTag bool
+	Window         accrualWindow
 }
 
 func runtimeSoFar(inst *aws.InstanceInfo, now time.Time) instanceRuntime {
-	r := instanceRuntime{Launch: originalLaunchTime(inst)}
-	if !r.Launch.IsZero() && now.After(r.Launch) {
-		r.Since = now.Sub(r.Launch)
+	r := instanceRuntime{Launch: originalLaunchTime(inst), Window: accrualEnd(inst, now)}
+	if end := r.Window.End; r.Window.Known && !r.Launch.IsZero() && end.After(r.Launch) {
+		r.Since = end.Sub(r.Launch)
 	}
 	r.Compute = r.Since
 	if secs, ok := taggedComputeSeconds(inst); ok {
@@ -288,8 +294,18 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 	rt := runtimeSoFar(inst, now)
 	fmt.Fprintf(&b, "Type:            %s%s\n", inst.InstanceType, spotSuffix(inst.SpotInstance))
 	fmt.Fprintf(&b, "State:           %s\n", inst.State)
+	switch {
+	case rt.Window.Ended && !rt.Window.Known:
+		fmt.Fprintf(&b, "Terminated:      time unknown (%s)\n", accrualUnknownReason)
+	case rt.Window.Ended:
+		fmt.Fprintf(&b, "Terminated:      %s (nothing bills after this)\n", rt.Window.End.UTC().Format(time.RFC3339))
+	}
 	if rt.Since > 0 {
-		fmt.Fprintf(&b, "Since launch:    %s (first launch, across stops and starts)\n", formatDuration(rt.Since))
+		if rt.Window.Ended {
+			fmt.Fprintf(&b, "Lifetime:        %s (first launch to termination)\n", formatDuration(rt.Since))
+		} else {
+			fmt.Fprintf(&b, "Since launch:    %s (first launch, across stops and starts)\n", formatDuration(rt.Since))
+		}
 	}
 	if rt.ComputeFromTag {
 		fmt.Fprintf(&b, "Compute time:    %s (running time across every boot, from spored's spawn:compute-seconds;\n", formatDuration(rt.Compute))
@@ -309,16 +325,25 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 
 	fmt.Fprintf(&b, "Rate:            $%.4f/hr (spawn:price-per-hour)\n", rate)
 	est := estimateInstanceCost(inst, rt.Compute)
-	if rt.ComputeFromTag {
+	unknownWindow := rt.Window.Ended && !rt.Window.Known
+	switch {
+	case !rt.ComputeFromTag && unknownWindow:
+		fmt.Fprintln(&b, "Est. compute:    unknown, not counted (no spawn:compute-seconds tag, and the termination time is unknown)")
+	case rt.ComputeFromTag:
 		fmt.Fprintf(&b, "Est. compute:    ~$%.2f (rate × compute time)\n", est)
-	} else {
+	default:
 		fmt.Fprintf(&b, "Est. compute:    at most ~$%.2f (rate × wall clock)\n", est)
 	}
 	// The rest, and the total, through the function --cost-limit is enforced
 	// with (costLimitSpend, pkg/costmodel), so this cannot disagree with it (#51).
 	spend := costLimitSpend(inst, rt.Compute, rt.Since)
 	fp := enforcedFootprint(inst)
-	if fp.EBSPerHour > 0 && rt.Since > 0 {
+	switch {
+	case fp.EBSPerHour > 0 && unknownWindow:
+		fmt.Fprintf(&b, "Est. storage:    unknown, not counted (%s)\n", accrualUnknownReason)
+	case fp.EBSPerHour > 0 && rt.Since > 0 && rt.Window.Ended:
+		fmt.Fprintf(&b, "Est. storage:    ~$%.2f (spawn:ebs-hourly-cost × launch to termination)\n", spend.EBS)
+	case fp.EBSPerHour > 0 && rt.Since > 0:
 		fmt.Fprintf(&b, "Est. storage:    ~$%.2f (spawn:ebs-hourly-cost × time since launch; EBS bills while stopped too)\n",
 			spend.EBS)
 	}
@@ -330,8 +355,15 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 	case fp.PublicIPv4+fp.ElasticIPv4 > 0:
 		fmt.Fprintf(&b, "Public IPv4:     ~$%.2f (%d auto-assigned + %d Elastic × $%.3f/hr, static rate as of %s)\n",
 			spend.PublicIPv4, fp.PublicIPv4, fp.ElasticIPv4, costmodel.PublicIPv4PerHour, costmodel.RatesAsOf)
+		if unknownWindow && fp.ElasticIPv4 > 0 {
+			fmt.Fprintf(&b, "                 Elastic IPs bill on the wall clock: not counted (%s)\n", accrualUnknownReason)
+		}
 	}
-	fmt.Fprintf(&b, "Est. total:      ~$%.2f (what --cost-limit counts; excludes network)\n", spend.Total)
+	if unknownWindow {
+		fmt.Fprintf(&b, "Est. total:      at least ~$%.2f (storage and Elastic IPs not counted: termination time unknown; excludes network)\n", spend.Total)
+	} else {
+		fmt.Fprintf(&b, "Est. total:      ~$%.2f (what --cost-limit counts; excludes network)\n", spend.Total)
+	}
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "Note: a single instance has no sweep cost record — this is an on-the-fly")
 	fmt.Fprintln(&b, "estimate from the instance's own tags, not a billing figure.")

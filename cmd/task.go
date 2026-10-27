@@ -103,7 +103,14 @@ var taskDiagnoseCmd = &cobra.Command{
 		fmt.Printf("State:       %s\n", d.State)
 		fmt.Printf("Region/AZ:   %s / %s\n", d.Region, orDash(d.AZ))
 		fmt.Printf("IAM profile: %s\n", orDash(d.IAMRole))
-		fmt.Printf("Age:         %s\n", age.Round(time.Minute))
+		switch {
+		case rt.Window.Ended && !rt.Window.Known:
+			fmt.Printf("Age:         unknown (%s)\n", accrualUnknownReason)
+		case rt.Window.Ended:
+			fmt.Printf("Age:         %s (first launch to termination)\n", age.Round(time.Minute))
+		default:
+			fmt.Printf("Age:         %s\n", age.Round(time.Minute))
+		}
 		if d.TTL != "" {
 			fmt.Printf("TTL:         %s\n", d.TTL)
 		}
