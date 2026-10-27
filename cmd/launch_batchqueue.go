@@ -71,6 +71,9 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 	if instanceType == "" {
 		return fmt.Errorf("--instance-type is required for batch queue mode")
 	}
+	if err := validateBatchQueueResults(queueConfig.ResultS3Bucket, queueConfig.ResultS3Prefix); err != nil {
+		return err
+	}
 
 	// Auto-detect region if not specified
 	queueRegion := region
@@ -188,14 +191,6 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		DNSName:      instanceName,
 	}
 
-	// --instance-profile (#550) takes precedence over --iam-role on this path too —
-	// it's attached verbatim, bypassing any create/reuse resolution.
-	if instanceProfile != "" {
-		launchConfig.IamInstanceProfile = instanceProfile
-	} else if iamRole != "" {
-		launchConfig.IamInstanceProfile = iamRole
-	}
-
 	// Add network config if specified (sgIDs may be empty — let spawn auto-create)
 	if len(sgIDs) > 0 {
 		launchConfig.SecurityGroupIDs = sgIDs
@@ -224,14 +219,14 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		launchConfig.KeyName = keyName
 	}
 
-	// Set up IAM instance profile if not specified
-	if launchConfig.IamInstanceProfile == "" {
-		instanceProfile, err := awsClient.SetupSporedIAMRole(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to setup IAM role: %w", err)
-		}
-		launchConfig.IamInstanceProfile = instanceProfile
+	// --instance-profile (#550) takes precedence over --iam-role, and both are
+	// attached verbatim. Otherwise the queue gets a scoped role that can write
+	// its results (#1344), never the shared spored-instance-role.
+	profile, err := batchQueueInstanceProfile(ctx, awsClient, instanceProfile, iamRole, scheduleBucket, queueConfig)
+	if err != nil {
+		return fmt.Errorf("failed to set up the batch queue's IAM role: %w", err)
 	}
+	launchConfig.IamInstanceProfile = profile
 
 	// Launch instance
 	fmt.Fprintf(os.Stderr, "\n🚀 Launching instance...\n")

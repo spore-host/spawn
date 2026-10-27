@@ -81,3 +81,28 @@ func TestTerminateCancellingSpot_OnDemandNoCancel(t *testing.T) {
 		t.Errorf("calls = %q", got)
 	}
 }
+
+// #1344: the member-account read role cannot terminate (spawn#1349), and the
+// dashboard says so and names the CLI instead of returning a raw 500.
+func TestTerminateDeniedIsExplained(t *testing.T) {
+	err := terminateCancellingSpot(context.Background(), deniedTerminateAPI{}, types.Instance{InstanceId: aws.String("i-1")})
+	if err == nil || !isEC2Denied(err) {
+		t.Fatalf("want a denial, got %v", err)
+	}
+	if msg := terminateDeniedMessage("i-1"); !strings.Contains(msg, "spawn terminate i-1") {
+		t.Errorf("message does not name the CLI command: %q", msg)
+	}
+	if isEC2Denied(errors.New("InvalidInstanceID.NotFound")) {
+		t.Error("a not-found error is not a denial")
+	}
+}
+
+type deniedTerminateAPI struct{}
+
+func (deniedTerminateAPI) CancelSpotInstanceRequests(context.Context, *ec2.CancelSpotInstanceRequestsInput, ...func(*ec2.Options)) (*ec2.CancelSpotInstanceRequestsOutput, error) {
+	return &ec2.CancelSpotInstanceRequestsOutput{}, nil
+}
+
+func (deniedTerminateAPI) TerminateInstances(context.Context, *ec2.TerminateInstancesInput, ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error) {
+	return nil, errors.New("operation error EC2: TerminateInstances, api error UnauthorizedOperation: You are not authorized to perform this operation.")
+}

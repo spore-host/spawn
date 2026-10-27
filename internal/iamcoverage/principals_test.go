@@ -130,6 +130,15 @@ var (
 		taskiam.TaskRunPolicyFor([]string{"in-bucket"}, []string{"out-bucket"}, "spawn-results-ex", nil, "spawn-staging-ex"))
 )
 
+func batchQueue(t *testing.T) *Policy {
+	t.Helper()
+	doc, err := spawncmd.BatchQueuePolicy("spawn-schedules-ex", "out-bucket", "runs/ex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustPolicy(t)(ParsePolicyJSON("cmd BatchQueuePolicy", doc))
+}
+
 func scanSelfPolicy(t *testing.T) *Policy {
 	t.Helper()
 	doc, err := reaperiam.ScanSelfPolicyDocument()
@@ -199,13 +208,13 @@ var principals = []principal{
 		}}},
 	},
 	{
-		// `spawn launch --batch-queue` with no --iam-role attaches the shared
-		// spored-instance-role (cmd/launch_batchqueue.go).
+		// `spawn launch --batch-queue` with no --iam-role gives the queue a
+		// spawn-instance-* role carrying BatchQueuePolicy (#1344).
 		name:  "spored run-queue",
 		build: sporedBuild,
 		roots: []string{"(*github.com/spore-host/spawn/pkg/agent.QueueRunner).Run"},
 		contexts: []credContext{{name: "instance role", variants: []variant{
-			{"spored-instance-role", sporedInstanceRole},
+			{"batch queue role (baseline + BatchQueuePolicy)", union(sporedBaseline, batchQueue)},
 		}}},
 	},
 	{
