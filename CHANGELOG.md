@@ -289,6 +289,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn launch --tag` and `--team` now reach every member of a parameter
+  sweep and the batch-queue instance** (#1356). They were merged only on the
+  single-instance path, after the sweep and batch-queue launches had been
+  handed off, so on `--param-file`/`--params` (foreground, detached and
+  multi-region) and `--batch-queue`/`--queue-template` they were accepted and
+  silently dropped: no member carried the custom tags, `spawn:team-id` or
+  `spawn:team-name`. A malformed or `spawn:`-prefixed `--tag` is now refused
+  on every path before any AWS call, as on a single launch, and the 50-tag
+  pre-flight (#1336) now counts the `--tag` values on a sweep and runs on a
+  batch queue too, before its upload, key pair and IAM role. `spawn schedule
+  create` has neither flag, so a scheduled sweep cannot drop them.
+
 - **Cancelling a sweep from the dashboard now terminates its instances**
   (#1349). The dashboard's cancel assumed `SpawnSweepCrossAccountRole`, whose
   trust names only the sweep orchestrator, so the assume was always denied: the
