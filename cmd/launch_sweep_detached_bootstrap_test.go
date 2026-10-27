@@ -34,6 +34,8 @@ func testDetachedBootstrap(t *testing.T) detachedBootstrap {
 		// Launch's own builder, with an identity and price fixed so the test
 		// needs no AWS (aws.LaunchTagger supplies both in production).
 		tagsOf: testMemberTags,
+		// Launch's own resolution, with the AMI and memory lookups fixed.
+		settingsOf: testMemberSettings,
 	}
 }
 

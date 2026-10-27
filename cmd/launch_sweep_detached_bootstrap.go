@@ -68,6 +68,9 @@ type detachedBootstrap struct {
 	// tagsOf renders a member's instance tags as a foreground launch of cfg
 	// would write them: aws.LaunchTagger in production.
 	tagsOf func(cfg aws.LaunchConfig) (map[string]string, error)
+	// settingsOf resolves a member's RunInstances-side settings as a foreground
+	// launch of cfg would (#1353): aws.Client.ResolveLaunchSettings in production.
+	settingsOf func(cfg aws.LaunchConfig) aws.LaunchSettings
 }
 
 // newDetachedBootstrap returns the production detachedBootstrap: the local
@@ -85,6 +88,9 @@ func newDetachedBootstrap(ctx context.Context, client *aws.Client, plat *platfor
 				tagger = t
 			}
 			return tagger.TagValues(ctx, cfg)
+		},
+		settingsOf: func(cfg aws.LaunchConfig) aws.LaunchSettings {
+			return client.ResolveLaunchSettings(ctx, cfg)
 		},
 		plat: plat,
 		osOf: func(region, ami string) string {
@@ -111,7 +117,7 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 	if pf.Defaults == nil {
 		pf.Defaults = map[string]interface{}{}
 	}
-	for _, k := range []string{detachedUserDataKey, detachedTagsKey} {
+	for _, k := range []string{detachedUserDataKey, detachedTagsKey, detachedLaunchSettingsKey} {
 		delete(pf.Defaults, k)
 		for _, row := range pf.Params {
 			delete(row, k)
@@ -123,6 +129,7 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 
 	userData := make([]string, len(pf.Params))
 	memberTags := make([]map[string]interface{}, len(pf.Params))
+	memberSettings := make([]aws.LaunchSettings, len(pf.Params))
 	var defaultedVerbs []string
 	for i, row := range pf.Params {
 		cfg, err := buildLaunchConfigFromParams(base, pf.Defaults, row, sweepID, sweepName, i, len(pf.Params))
@@ -138,6 +145,11 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 		}
 		if !orchestratorPassableProfile(cfg.IamInstanceProfile) {
 			return unpassableProfileError(fmt.Sprintf("param set %d", i), cfg.IamInstanceProfile)
+		}
+		// What the orchestrator cannot launch as configured is refused here,
+		// before anything is uploaded (#1353).
+		if err := detachedSettingsGuard(cfg); err != nil {
+			return fmt.Errorf("param set %d: %w", i, err)
 		}
 		cfg.TargetOS = b.osOf(cfg.Region, cfg.AMI)
 		if err := windowsLifecycleGuard(&cfg); err != nil {
@@ -164,6 +176,7 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 			return fmt.Errorf("param set %d: %w", i, err)
 		}
 		memberTags[i] = encodeDetachedTags(tags)
+		memberSettings[i] = b.settingsOf(cfg)
 	}
 	if len(defaultedVerbs) > 0 {
 		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h for sweep members with no ttl or idle_timeout\n")
@@ -176,6 +189,7 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 			pf.Params[i] = map[string]interface{}{}
 		}
 		pf.Params[i][detachedTagsKey] = memberTags[i]
+		pf.Params[i][detachedLaunchSettingsKey] = memberSettings[i]
 	}
 
 	same := true

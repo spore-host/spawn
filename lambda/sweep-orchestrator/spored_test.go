@@ -24,7 +24,7 @@ func TestMemberLaunchesWithTheCLIsBootstrap(t *testing.T) {
 		Defaults: map[string]interface{}{
 			"instance_type": "t3.micro", "ami": "ami-0123456789abcdef0",
 			userDataParam: "H4sIAAAAAAAA/default", "iam_role": "spored-instance-profile",
-			tagsParam: cliTags(nil),
+			tagsParam: cliTags(nil), launchSettingsParam: cliSettings(t, nil),
 		},
 		Params: []map[string]interface{}{
 			{"alpha": 1.0},
@@ -47,7 +47,7 @@ func TestMemberLaunchesWithTheCLIsBootstrap(t *testing.T) {
 
 	// No iam_role at all: the fallback is the profile spore.host creates, not a
 	// hand-made one.
-	in, err := buildRunInstancesInput(state, map[string]interface{}{userDataParam: "x", tagsParam: cliTags(nil)}, 0, "t3.micro", time.Now())
+	in, err := buildRunInstancesInput(state, map[string]interface{}{userDataParam: "x", tagsParam: cliTags(nil), launchSettingsParam: cliSettings(t, nil)}, 0, "t3.micro", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

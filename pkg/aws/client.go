@@ -557,7 +557,6 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// AMI with a large baked root launches without --volume-size (#25). Both come
 	// from one DescribeImages call.
 	rootDeviceName, amiMinGiB := rootDeviceInfoFromAMI(ctx, ec2Client, launchConfig.AMI)
-	blockDevices := buildBlockDevices(launchConfig, rootDeviceName, amiMinGiB)
 
 	// Build run instances input
 	input := &ec2.RunInstancesInput{
@@ -576,7 +575,6 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 				Tags:         tags,
 			},
 		},
-		BlockDeviceMappings: blockDevices,
 	}
 
 	// Only set KeyName when one was provided. RunInstances rejects an empty-string
@@ -600,15 +598,10 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		}
 	}
 
-	// Enable nested virtualization (hypervisor-in-instance) when requested.
-	// Only C8i/M8i/R8i support it; RunInstances errors on other types.
-	if launchConfig.NestedVirtualization {
-		input.CpuOptions = &types.CpuOptionsRequest{
-			NestedVirtualization: types.NestedVirtualizationSpecificationEnabled,
-		}
-	}
-
-	// Add network configuration
+	// Multi-interface EFA (#661) needs the type's network-card layout and, with
+	// no subnet, the AZ's subnet: AWS calls, so it is laid out here rather than
+	// in applyLaunchSettings, which then leaves these interfaces alone. A
+	// detached sweep refuses it (cmd/launch_sweep_detached_settings.go).
 	if launchConfig.EFAEnabled && launchConfig.EFAInterfaces > 1 {
 		capacity, err := c.EFACapacityInRegion(ctx, launchConfig.InstanceType, launchConfig.Region)
 		if err != nil {
@@ -633,80 +626,13 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 			return nil, err
 		}
 		input.NetworkInterfaces = nis
-	} else if launchConfig.EFAEnabled {
-		input.NetworkInterfaces = []types.InstanceNetworkInterfaceSpecification{
-			EFANetworkInterface(launchConfig.SubnetID, launchConfig.SecurityGroupIDs),
-		}
-	} else {
-		// Always request a public IP via a NetworkInterface spec — this works
-		// even when the subnet has MapPublicIpOnLaunch=false (fixes #308).
-		ni := types.InstanceNetworkInterfaceSpecification{
-			AssociatePublicIpAddress: aws.Bool(true),
-			DeviceIndex:              aws.Int32(0),
-			DeleteOnTermination:      aws.Bool(true),
-		}
-		if launchConfig.SubnetID != "" {
-			ni.SubnetId = aws.String(launchConfig.SubnetID)
-		}
-		if len(launchConfig.SecurityGroupIDs) > 0 {
-			ni.Groups = launchConfig.SecurityGroupIDs
-		}
-		input.NetworkInterfaces = []types.InstanceNetworkInterfaceSpecification{ni}
 	}
 
-	// Add placement (AZ, placement group, and reservation)
-	placement := &types.Placement{}
-	if launchConfig.AvailabilityZone != "" {
-		placement.AvailabilityZone = aws.String(launchConfig.AvailabilityZone)
-	}
-	if launchConfig.PlacementGroup != "" {
-		placement.GroupName = aws.String(launchConfig.PlacementGroup)
-	}
-	if placement.AvailabilityZone != nil || placement.GroupName != nil {
-		input.Placement = placement
-	}
-
-	// Add hibernation if enabled
-	if launchConfig.Hibernate {
-		input.HibernationOptions = &types.HibernationOptionsRequest{
-			Configured: aws.Bool(true),
-		}
-	}
-
-	// Add Spot configuration if needed (one-time or persistent: see applySpotOptions).
-	applySpotOptions(input, launchConfig, tags)
-
-	// Target a Capacity Reservation / Capacity Block for ML (#216). When a
-	// reservation id is set, point RunInstances at it; the instance must be in the
-	// reservation's AZ (the caller pins --az to match). Consuming a Capacity Block
-	// additionally requires MarketType=capacity-block — and is mutually exclusive
-	// with Spot (the caller rejects that combination before reaching here).
-	if launchConfig.ReservationID != "" {
-		input.CapacityReservationSpecification = &types.CapacityReservationSpecification{
-			CapacityReservationTarget: &types.CapacityReservationTarget{
-				CapacityReservationId: aws.String(launchConfig.ReservationID),
-			},
-		}
-		if launchConfig.CapacityBlock {
-			input.InstanceMarketOptions = &types.InstanceMarketOptionsRequest{
-				MarketType: types.MarketTypeCapacityBlock,
-			}
-		}
-	}
-
-	// Add IMDSv2 configuration if enforced (compliance requirement)
-	if launchConfig.IMDSv2Enforced {
-		hopLimit := int32(1) // Default: only local access
-		if launchConfig.IMDSv2HopLimit > 0 {
-			hopLimit = int32(launchConfig.IMDSv2HopLimit)
-		}
-
-		input.MetadataOptions = &types.InstanceMetadataOptionsRequest{
-			HttpTokens:              types.HttpTokensStateRequired, // Require IMDSv2
-			HttpPutResponseHopLimit: aws.Int32(hopLimit),
-			HttpEndpoint:            types.InstanceMetadataEndpointStateEnabled,
-		}
-	}
+	// Everything else RunInstances takes from the config: block devices,
+	// network, placement, hibernation, Spot, capacity reservation, IMDS and CPU
+	// options. Shared with a detached sweep member's launch (LaunchSettings), so
+	// the Lambda that launches one composes these exactly as this does (#1353).
+	applyLaunchSettings(input, launchConfig, rootDeviceName, amiMinGiB, tags)
 
 	// Launch instance. runInstancesWithRetry retries only the narrow #572
 	// transient (a freshly-created scoped instance profile that's visible on

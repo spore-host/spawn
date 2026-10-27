@@ -21,6 +21,7 @@ const ElasticIPQuotaCode
 const HeartbeatTag
 const IAMBaselineURL
 const LaunchInstanceGone
+const LaunchSettingsSchema
 const MaxEncodedUserDataBytes
 const MaxUserDataBytes
 const NestedSpawnRolePrefix
@@ -314,6 +315,27 @@ field LaunchResult.PrivateIP string
 field LaunchResult.PublicIP string
 field LaunchResult.Region string
 field LaunchResult.State string
+field LaunchSettings.AttachVolumes []LaunchSettingsVolume
+field LaunchSettings.AvailabilityZone string
+field LaunchSettings.CapacityBlock bool
+field LaunchSettings.EBSEncrypted bool
+field LaunchSettings.EBSKMSKeyID string
+field LaunchSettings.EFA bool
+field LaunchSettings.Hibernate bool
+field LaunchSettings.IMDSv2Enforced bool
+field LaunchSettings.IMDSv2HopLimit int
+field LaunchSettings.NestedVirtualization bool
+field LaunchSettings.PlacementGroup string
+field LaunchSettings.ReservationID string
+field LaunchSettings.RootDeviceName string
+field LaunchSettings.RootVolumeGiB int32
+field LaunchSettings.Schema int
+field LaunchSettings.SecurityGroupIDs []string
+field LaunchSettings.Spot bool
+field LaunchSettings.SpotMaxPrice string
+field LaunchSettings.SubnetID string
+field LaunchSettingsVolume.SizeGiB int32
+field LaunchSettingsVolume.SnapshotID string
 field ManagedResource.ARN string
 field ManagedResource.AssociationID string
 field ManagedResource.ID string
@@ -469,6 +491,7 @@ func (*Client) PutS3Object(ctx context.Context, region, bucket, key, expectedOwn
 func (*Client) RecallFSxFilesystem(ctx context.Context, stackName, region string) (*FSxInfo, error)
 func (*Client) RemoveResource(ctx context.Context, r ManagedResource) error
 func (*Client) ResolveDNSTarget(ctx context.Context, region, flagDomain, flagEndpoint, flagFunctionARN string) (spawnconfig.DNSTarget, error)
+func (*Client) ResolveLaunchSettings(ctx context.Context, lc LaunchConfig) LaunchSettings
 func (*Client) ResolveVPC(ctx context.Context, region, explicitVPC string) (string, error)
 func (*Client) RunPowerShell(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
 func (*Client) RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
@@ -511,6 +534,7 @@ func (LaunchConfig) ValidateDurations() error
 func (LaunchConfig) ValidateSporedSettings() error
 func (LaunchConfig) ValidateTagCount() error
 func (LaunchConfig) ValidateUserDataSize() error
+func (LaunchSettings) Apply(input *ec2.RunInstancesInput) error
 func (ManagedResource) IsRunningInstance() bool
 func (ManagedResource) OwnedBy(callerARN string) bool
 func (ReaperCoverage) Summary() string
@@ -523,6 +547,7 @@ func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error
 func CheckElasticIPHeadroom(q ElasticIPQuota, region string, need int) error
 func CheckUserDataSize(encoded string) error
 func DNSInvokePolicyName(functionARN string) string
+func DecodeLaunchSettings(raw interface{}) (LaunchSettings, error)
 func DecryptWindowsPassword(passwordData, privateKeyPath string) (string, error)
 func DeletionOrder(resources []ManagedResource) []ManagedResource
 func DescribeEFAInterface(ni types.InstanceNetworkInterfaceSpecification) string
@@ -554,6 +579,7 @@ func NestedSpawnRoleName() string
 func NewClient(ctx context.Context) (*Client, error)
 func NewClientFromConfig(cfg aws.Config) *Client
 func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
+func NewLaunchSettings(lc LaunchConfig, rootDeviceName string, amiMinGiB int32) LaunchSettings
 func PredictedInstanceRoleName(config IAMRoleConfig) string
 func ReaperCoverageAdvice(c ReaperCoverage, onComplete, fsxLifecycle string) string
 func ResolveDisplayPrice(ctx context.Context, cfg aws.Config, instanceType, region string) (DisplayPrice, error)
@@ -595,6 +621,8 @@ type InstanceInfo struct
 type LaunchConfig struct
 type LaunchError struct
 type LaunchResult struct
+type LaunchSettings struct
+type LaunchSettingsVolume struct
 type LaunchTagger struct
 type ManagedResource struct
 type MountSnapshotResult struct

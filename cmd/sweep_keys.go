@@ -110,8 +110,9 @@ var reservedRowKeys = map[string]string{
 
 	// spawn's own: carries a detached sweep's spored bootstrap to the
 	// orchestrator (#1323). A value from the file would boot in place of spored.
-	detachedUserDataKey: "it is written by spawn itself (a detached sweep's spored bootstrap, #1323); use --user-data to add your own script",
-	detachedTagsKey:     "it is written by spawn itself (a detached sweep member's instance tags, #1330); use --tag to add your own",
+	detachedUserDataKey:       "it is written by spawn itself (a detached sweep's spored bootstrap, #1323); use --user-data to add your own script",
+	detachedTagsKey:           "it is written by spawn itself (a detached sweep member's instance tags, #1330); use --tag to add your own",
+	detachedLaunchSettingsKey: "it is written by spawn itself (a detached sweep member's launch settings, #1353)",
 
 	// Sweep-level settings that are CLI flags, not per-row values.
 	"max_concurrent": "--max-concurrent is a command-line flag, not a param-file key (spawn schedule reads max_concurrent from defaults:, but the launch path does not)",

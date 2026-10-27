@@ -45,6 +45,15 @@ func hibernationRootGiB(memMiB int64) (int32, bool) {
 // table in estimateVolumeSize ignores the size (every m7i is "16 GiB"), so an
 // m7i.4xlarge (64 GiB) got a 26 GiB root and could not hibernate.
 func (c *Client) prepareHibernation(ctx context.Context, lc *LaunchConfig) {
+	prepareHibernationWith(lc, func() (int64, bool) {
+		return c.InstanceMemoryMiB(ctx, lc.Region, lc.InstanceType)
+	})
+}
+
+// prepareHibernationWith is prepareHibernation with the type's memory lookup
+// supplied, so a detached member's settings (#1353) and a test resolve the
+// same way without AWS.
+func prepareHibernationWith(lc *LaunchConfig, memoryMiB func() (int64, bool)) {
 	if !lc.HibernationRequested() {
 		return
 	}
@@ -52,7 +61,7 @@ func (c *Client) prepareHibernation(ctx context.Context, lc *LaunchConfig) {
 	if lc.RootVolumeSizeGiB > 0 {
 		return // the user's explicit size wins (buildBlockDevices still floors it at the AMI's)
 	}
-	if mib, ok := c.InstanceMemoryMiB(ctx, lc.Region, lc.InstanceType); ok {
+	if mib, ok := memoryMiB(); ok {
 		if gib, ok := hibernationRootGiB(mib); ok {
 			lc.RootVolumeSizeGiB = gib
 		}

@@ -96,12 +96,43 @@ func buildRunInstancesInput(state *SweepRecord, config map[string]interface{}, p
 	if keyName := getStringParam(config, "key_name", ""); keyName != "" {
 		input.KeyName = aws.String(keyName)
 	}
-	if getBoolParam(config, "spot", false) {
-		input.InstanceMarketOptions = &ec2types.InstanceMarketOptionsRequest{
-			MarketType: ec2types.MarketTypeSpot,
-		}
+	if err := applyMemberLaunchSettings(input, config, paramIndex); err != nil {
+		return nil, err
 	}
 	return input, nil
+}
+
+// launchSettingsParam is the param key carrying a member's RunInstances-side
+// settings (#1353): its volumes, network, placement, Spot, hibernation,
+// reservation, IMDS and CPU options, resolved by the CLI from the member's
+// config (spawnaws.LaunchSettings). It must equal detachedLaunchSettingsKey in
+// cmd/launch_sweep_detached_settings.go; TestDetachedSweepSeedsEveryKeyTheLambdaReads
+// holds the two together.
+const launchSettingsParam = "spawn_launch_settings"
+
+// applyMemberLaunchSettings applies member paramIndex's launch settings to
+// input, composed as a foreground launch composes them (spawnaws.LaunchSettings.Apply).
+//
+// This Lambda used to set only a bare Spot market option here, so everything
+// else a member asked RunInstances for was dropped (#1353). A member without
+// settings, or with settings this build cannot fully apply (a newer schema, a
+// field it does not know), is refused rather than launched without them.
+func applyMemberLaunchSettings(input *ec2.RunInstancesInput, config map[string]interface{}, paramIndex int) error {
+	raw, ok := getRawParam(config, launchSettingsParam)
+	if !ok {
+		return fmt.Errorf("param set %d carries no launch settings (%s), so its volume size, network, placement, "+
+			"Spot and hibernation settings would all be dropped; it was not launched. The sweep was created by a "+
+			"spawn CLI older than this orchestrator: re-run it, or re-create the schedule, with a current spawn (#1353)",
+			paramIndex, launchSettingsParam)
+	}
+	settings, err := spawnaws.DecodeLaunchSettings(raw)
+	if err != nil {
+		return fmt.Errorf("param set %d: %w; it was not launched", paramIndex, err)
+	}
+	if err := settings.Apply(input); err != nil {
+		return fmt.Errorf("param set %d: %w; it was not launched", paramIndex, err)
+	}
+	return nil
 }
 
 // sporedBudget is how long inst may run without a heartbeat.

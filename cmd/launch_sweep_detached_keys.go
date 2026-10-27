@@ -26,7 +26,8 @@ var detachedParamKeys = []string{
 	"iam_role",
 	"instance_type",
 	"key_name",
-	"spot",
+	// spot is not read since #1353: it reaches the orchestrator in
+	// detachedLaunchSettingsKey with the rest of the RunInstances-side settings.
 	// ttl is not read since #1330: it reaches the orchestrator as spawn:ttl in
 	// detachedTagsKey, which the Lambda turns into spawn:ttl-deadline.
 	// The member's spored bootstrap (#1323), rendered by seedDetachedBootstrap
@@ -34,6 +35,8 @@ var detachedParamKeys = []string{
 	detachedUserDataKey,
 	// The member's instance tags (#1330), rendered beside its user data.
 	detachedTagsKey,
+	// The member's RunInstances-side settings (#1353), resolved beside its tags.
+	detachedLaunchSettingsKey,
 }
 
 // NOTE: `region` is deliberately NOT in the list above, and the gate caught me

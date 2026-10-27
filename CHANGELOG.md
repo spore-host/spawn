@@ -301,6 +301,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   batch queue too, before its upload, key pair and IAM role. `spawn schedule
   create` has neither flag, so a scheduled sweep cannot drop them.
 
+- **A detached sweep member now launches with its RunInstances settings**
+  (#1353). The sweep orchestrator sent RunInstances only the instance type,
+  AMI, key, profile, user data and tags, so a detached member dropped
+  `volume_size`/`--volume-size` (and the AMI-snapshot minimum),
+  `--security-group`, `--subnet`, `az`, `spot_max_price`, hibernation
+  (`hibernate`, `--on-idle hibernate`, `on_complete: hibernate`, with its
+  RAM-sized encrypted root), `--efa`, `--placement-group`,
+  `--reservation-id`/`--capacity-block`, `--nested-virtualization` and
+  `--attach-volume`, and got no public-IP network interface. The CLI now
+  resolves each member's settings as a foreground launch does and ships them
+  as `spawn_launch_settings`, a versioned schema (`aws.LaunchSettings`);
+  the orchestrator applies them with the code `Client.Launch` uses. An
+  orchestrator refuses a member whose settings are missing, of another schema
+  version, or hold a field it does not know, rather than launching without
+  them. What it cannot honour is refused at `spawn launch --detach`, naming
+  `--no-detach`: `--fsx-create`, `--fsx-recall`, `--efa-interfaces` above 1,
+  a customer-managed EBS KMS key, `--vpc` without `--subnet`, and
+  hibernation with an instance-type pattern. The orchestrator must be
+  redeployed with this release; sweeps and schedules created by an older CLI
+  must be re-created.
 - **Cancelling a sweep from the dashboard now terminates its instances**
   (#1349). The dashboard's cancel assumed `SpawnSweepCrossAccountRole`, whose
   trust names only the sweep orchestrator, so the assume was always denied: the
