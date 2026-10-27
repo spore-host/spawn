@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/costmodel"
 )
 
 // statusNeedsInstance reports whether `spawn status` can ask the instance
@@ -60,10 +61,20 @@ type ec2StatusReport struct {
 	ComputeCost float64 `json:"compute_cost"`
 
 	// EBS bills on wall clock, stopped or not.
-	EBSHourlyCost     float64 `json:"ebs_hourly_cost,omitempty"`
-	EBSKnown          bool    `json:"ebs_known"`
-	StorageCost       float64 `json:"storage_cost"`
-	StorageThisStop   float64 `json:"storage_cost_this_stop,omitempty"`
+	EBSHourlyCost   float64 `json:"ebs_hourly_cost,omitempty"`
+	EBSKnown        bool    `json:"ebs_known"`
+	StorageCost     float64 `json:"storage_cost"`
+	StorageThisStop float64 `json:"storage_cost_this_stop,omitempty"`
+	// Public IPv4 (#51): auto-assigned addresses bill with compute (released on
+	// stop), Elastic IPs on the wall clock. Known once spored has recorded them.
+	PublicIPv4Count   int     `json:"public_ipv4_count,omitempty"`
+	ElasticIPv4Count  int     `json:"elastic_ipv4_count,omitempty"`
+	IPv4Known         bool    `json:"ipv4_known"`
+	IPv4Cost          float64 `json:"ipv4_cost"`
+	IPv4ThisStop      float64 `json:"ipv4_cost_this_stop,omitempty"`
+	StoppedPerHour    float64 `json:"stopped_rate_per_hour,omitempty"`
+	CostLimit         float64 `json:"cost_limit,omitempty"`
+	CostLimitUsed     float64 `json:"cost_limit_used,omitempty"`
 	CumulativeCost    float64 `json:"cumulative_cost"`
 	CumulativeKnown   bool    `json:"cumulative_known"`
 	EffectiveRate     float64 `json:"effective_rate_per_hour,omitempty"`
@@ -127,23 +138,45 @@ func buildEC2StatusReport(instance *aws.InstanceInfo, rate statusRate, now time.
 	}
 
 	r.RatePerHour, r.RateBasis = rate.PerHour, rate.Basis
-	if rate.PerHour > 0 && r.ComputeKnown {
-		r.ComputeCost = rate.PerHour * r.ComputeSeconds / 3600
-	}
 
-	if ebs := parseTagFloat(instance.Tags["spawn:ebs-hourly-cost"]); ebs > 0 {
-		r.EBSHourlyCost, r.EBSKnown = ebs, true
-		r.StorageCost = ebs * r.ElapsedSeconds / 3600
-		r.StorageThisStop = ebs * r.StoppedSeconds / 3600
+	// Every figure through pkg/costmodel.Accrue, the function --cost-limit is
+	// enforced with (#51); only the compute rate differs (a spot instance is
+	// shown at its spot price, and enforced at on-demand, which can only
+	// overstate it).
+	compute := time.Duration(r.ComputeSeconds * float64(time.Second))
+	elapsed := time.Duration(r.ElapsedSeconds * float64(time.Second))
+	fp := footprintAt(instance, rate.PerHour)
+	spend := costmodel.Accrue(fp, compute, elapsed)
+	if rate.PerHour > 0 && r.ComputeKnown {
+		r.ComputeCost = spend.Compute
 	}
+	if fp.EBSPerHour > 0 {
+		r.EBSHourlyCost, r.EBSKnown = fp.EBSPerHour, true
+		r.StorageCost = spend.EBS
+	}
+	r.IPv4Known = costmodel.IPv4Measured(instance.Tags, "spawn")
+	r.PublicIPv4Count, r.ElasticIPv4Count = fp.PublicIPv4, fp.ElasticIPv4
+	r.IPv4Cost = spend.PublicIPv4
+	// What keeps billing while stopped: EBS and Elastic IPs (an auto-assigned
+	// address is released on stop).
+	stoppedFP := costmodel.Footprint{EBSPerHour: fp.EBSPerHour, ElasticIPv4: fp.ElasticIPv4}
+	thisStop := costmodel.Accrue(stoppedFP, 0, time.Duration(r.StoppedSeconds*float64(time.Second)))
+	r.StorageThisStop, r.IPv4ThisStop = thisStop.EBS, thisStop.PublicIPv4
+	r.StoppedPerHour = stoppedFP.RunningPerHour()
 
 	r.CumulativeKnown = rate.PerHour > 0 && r.ComputeKnown && r.EBSKnown
-	r.CumulativeCost = r.ComputeCost + r.StorageCost
+	r.CumulativeCost = r.ComputeCost + r.StorageCost + r.IPv4Cost
+
+	// The cap's own figure, at the enforced (on-demand) rate (#51).
+	if limit := parseTagFloat(instance.Tags["spawn:cost-limit"]); limit > 0 && r.ComputeKnown {
+		r.CostLimit = limit
+		r.CostLimitUsed = costLimitSpend(instance, compute, elapsed).Total
+	}
 
 	if r.CumulativeKnown && r.ElapsedSeconds >= minEC2EffectiveRateWindow.Seconds() {
 		r.EffectiveRate = r.CumulativeCost / (r.ElapsedSeconds / 3600)
 		if rate.PerHour > 0 {
-			continuous := rate.PerHour + r.EBSHourlyCost
+			continuous := fp.RunningPerHour()
 			if saving := 1 - r.EffectiveRate/continuous; saving > 0 {
 				r.EffectiveRateNote = fmt.Sprintf("%.0f%% lower than running continuously", saving*100)
 			}
@@ -209,8 +242,19 @@ func renderEC2Status(r ec2StatusReport, loc *time.Location) string {
 	} else {
 		fmt.Fprintf(&b, "  Storage (EBS):  — (rate not yet recorded)\n")
 	}
+	switch {
+	case r.IPv4Known && r.PublicIPv4Count+r.ElasticIPv4Count > 0:
+		fmt.Fprintf(&b, "  Public IPv4:    $%.2f  (%d auto-assigned + %d Elastic × $%.3f/hr; Elastic IPs bill while stopped)\n",
+			r.IPv4Cost, r.PublicIPv4Count, r.ElasticIPv4Count, costmodel.PublicIPv4PerHour)
+	case !r.IPv4Known:
+		fmt.Fprintf(&b, "  Public IPv4:    — (not recorded by spored, so not counted)\n")
+	}
 	if r.CumulativeKnown {
 		fmt.Fprintf(&b, "  Total:          $%.2f\n", r.CumulativeCost)
+	}
+	if r.CostLimit > 0 {
+		fmt.Fprintf(&b, "  Cost limit:     $%.2f  ($%.2f counted at the on-demand rate, compute + EBS + public IPv4)\n",
+			r.CostLimit, r.CostLimitUsed)
 	}
 	if r.EffectiveRate > 0 {
 		note := ""
@@ -232,6 +276,13 @@ func renderEC2Status(r ec2StatusReport, loc *time.Location) string {
 			fmt.Fprintln(&b)
 		} else {
 			fmt.Fprintf(&b, "  Storage (EBS):  still billing (rate not yet recorded)\n")
+		}
+		if r.ElasticIPv4Count > 0 {
+			fmt.Fprintf(&b, "  Elastic IPs:    STILL BILLING %d × $%.3f/hr", r.ElasticIPv4Count, costmodel.PublicIPv4PerHour)
+			if r.StoppedSince != nil {
+				fmt.Fprintf(&b, "; $%.2f during this stop", r.IPv4ThisStop)
+			}
+			fmt.Fprintln(&b)
 		}
 		fmt.Fprintf(&b, "  spored is not running, so nothing on the instance enforces the deadline until it is\n")
 		fmt.Fprintf(&b, "  started; the out-of-band reaper does, if it covers this account ('spawn doctor').\n")

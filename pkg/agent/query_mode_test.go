@@ -35,9 +35,9 @@ func (p *countingProvider) DiscoverPeers(ctx context.Context, id string) ([]prov
 	p.peerCalls++
 	return p.stubProvider.DiscoverPeers(ctx, id)
 }
-func (p *countingProvider) LookupAndTagEBSCost(ctx context.Context) (float64, bool) {
+func (p *countingProvider) MeasureCostFootprint(ctx context.Context) (provider.CostFootprint, bool) {
 	p.ebsLookups++
-	return p.stubProvider.LookupAndTagEBSCost(ctx)
+	return p.stubProvider.MeasureCostFootprint(ctx)
 }
 
 func queryProvider() *countingProvider {

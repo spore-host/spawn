@@ -6,16 +6,17 @@ import (
 	"strings"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/costmodel"
 )
 
 // billableResource is one thing this launch is paying for.
 type billableResource struct {
-	Kind string `json:"kind"`           // "instance" | "ebs" | "fsx" | "efs"
+	Kind string `json:"kind"`           // "instance" | "ebs" | "ipv4" | "fsx" | "efs"
 	ID   string `json:"id,omitempty"`   // instance id, volume/filesystem id
 	Note string `json:"note,omitempty"` // type/size/lifecycle, human-readable
 	USD  string `json:"cost,omitempty"` // rendered rate, e.g. "~$0.0104/hr"
-	// Capped reports whether --cost-limit counts this resource. Compute and EBS are
-	// (pkg/agent accumulatedComputeCost, #616); FSx and EFS are not, because
+	// Capped reports whether --cost-limit counts this resource. Compute, EBS and
+	// public IPv4 are (pkg/costmodel, #616, #51); FSx and EFS are not, because
 	// terminating the instance does not stop them billing.
 	Capped bool `json:"capped_by_cost_limit"`
 	// OutlivesInstance marks a resource that keeps billing after the instance is
@@ -79,7 +80,8 @@ func billableResourcesAt(instance *aws.InstanceInfo, rate statusRate) []billable
 	// (spawn:ebs-hourly-cost), so this needs no DescribeVolumes. Counted by
 	// --cost-limit since #616 (on wall-clock time, so stopped time counts too), and
 	// reclaimed by the termination the cap triggers (DeleteOnTermination).
-	if rate := parseTagFloat(tags["spawn:ebs-hourly-cost"]); rate > 0 {
+	fp := enforcedFootprint(instance)
+	if rate := fp.EBSPerHour; rate > 0 {
 		ebs := billableResource{
 			Kind:   "ebs",
 			Note:   "root/data volumes",
@@ -93,6 +95,30 @@ func billableResourcesAt(instance *aws.InstanceInfo, rate statusRate) []billable
 			ebs.OutlivesInstance = true
 		}
 		out = append(out, ebs)
+	}
+
+	// Public IPv4, $0.005/hr per address (#51), from the counts spored records.
+	// Counted by --cost-limit. An Elastic IP keeps billing while stopped.
+	switch n := fp.PublicIPv4 + fp.ElasticIPv4; {
+	case costmodel.IPv4Measured(tags, "spawn") && n > 0:
+		ip := billableResource{
+			Kind:   "ipv4",
+			ID:     instance.PublicIP,
+			USD:    fmt.Sprintf("~$%.4f/hr", fp.IPv4PerHour()),
+			Note:   fmt.Sprintf("%d auto-assigned + %d Elastic public IPv4 ($%.3f/hr each, static rate as of %s)", fp.PublicIPv4, fp.ElasticIPv4, costmodel.PublicIPv4PerHour, costmodel.RatesAsOf),
+			Capped: true,
+		}
+		if fp.ElasticIPv4 > 0 && (instance.State == "stopped" || instance.State == "stopping") {
+			ip.Note += " — Elastic IPs STILL BILLING while the instance is stopped"
+		}
+		out = append(out, ip)
+	case !costmodel.IPv4Measured(tags, "spawn") && instance.PublicIP != "":
+		out = append(out, billableResource{
+			Kind: "ipv4",
+			ID:   instance.PublicIP,
+			USD:  fmt.Sprintf("~$%.4f/hr", costmodel.PublicIPv4PerHour),
+			Note: "not recorded by this instance's spored, so --cost-limit does not count it",
+		})
 	}
 
 	// FSx Lustre, via the lease tags the reaper's refcount uses.
@@ -167,7 +193,7 @@ func renderBillableResourcesAt(instance *aws.InstanceInfo, rate statusRate) stri
 	}
 	// Always said: the block only renders when there is storage beside compute, and
 	// the cap's reach over storage is the thing a reader of this block needs.
-	fmt.Fprintf(&b, "  ⚠️  --cost-limit counts compute + EBS, and refuses a launch whose storage exceeds it\n")
+	fmt.Fprintf(&b, "  ⚠️  --cost-limit counts compute + EBS + public IPv4, and refuses a launch whose storage exceeds it\n")
 	fmt.Fprintf(&b, "      up front — but it cannot RECLAIM storage that outlives the instance.\n")
 	if outlives {
 		fmt.Fprintf(&b, "      Rows marked as outliving the instance keep billing after it is gone:\n")

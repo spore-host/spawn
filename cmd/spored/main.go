@@ -20,6 +20,7 @@ import (
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/agent"
 	"github.com/spore-host/spawn/pkg/buildinfo"
+	"github.com/spore-host/spawn/pkg/costmodel"
 	"github.com/spore-host/spawn/pkg/observability/metrics"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/pipeline"
@@ -673,6 +674,12 @@ type statusCost struct {
 	EBSHourlyCost float64 `json:"ebs_hourly_cost,omitempty"`
 	EBSCostKnown  bool    `json:"ebs_cost_known"`
 
+	// Public IPv4 (#51): $0.005/hr per address; auto-assigned ones bill with
+	// compute, Elastic IPs on the wall clock.
+	PublicIPv4Count  int     `json:"public_ipv4_count,omitempty"`
+	ElasticIPv4Count int     `json:"elastic_ipv4_count,omitempty"`
+	IPv4Cost         float64 `json:"ipv4_cost,omitempty"`
+
 	ComputeCost    float64 `json:"compute_cost"`
 	StorageCost    float64 `json:"storage_cost,omitempty"`
 	CumulativeCost float64 `json:"cumulative_cost"`
@@ -685,7 +692,7 @@ type statusCost struct {
 
 	// CostLimit fields are omitted entirely when no limit is configured.
 	CostLimit          float64 `json:"cost_limit,omitempty"`
-	CostLimitUsed      float64 `json:"cost_limit_used,omitempty"` // compute + EBS, from the enforcement function (spawn#540: "cost-limit consumed"; #959)
+	CostLimitUsed      float64 `json:"cost_limit_used,omitempty"` // compute + EBS + public IPv4, from the enforcement function (spawn#540: "cost-limit consumed"; #959)
 	CostLimitUsedPct   float64 `json:"cost_limit_used_pct,omitempty"`
 	CostLimitRemaining float64 `json:"cost_limit_remaining,omitempty"`
 }
@@ -866,8 +873,6 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		// neither rather than a split computed against the wrong clock.
 		bootTime, stoppedTime, hibernatedTime = 0, 0, 0
 	}
-	// EBS bills while stopped and while hibernated alike.
-	notRunningTime := stoppedTime + hibernatedTime
 
 	// billedTime is the running time EC2 charges for. Billing starts when the
 	// instance enters running, before the OS boots, so the boot gap is billed
@@ -961,15 +966,20 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 	if rate, basis := statusComputeRate(config, isSpot); rate > 0 {
 		ebsHourlyCost := config.EBSHourlyCost
 		ebsCostKnown := ebsHourlyCost > 0
-		computeCost := rate * billedTime.Hours()
-
-		var storageCost float64
-		if ebsCostKnown {
-			storageCost = ebsHourlyCost * notRunningTime.Hours()
-		}
-		total := computeCost + storageCost
-		displayCompute := math.Round(computeCost*100) / 100
-		displayEBS := math.Round(storageCost*100) / 100
+		// The same accrual --cost-limit enforces with (pkg/costmodel, #51), at
+		// this display's rate. EBS and Elastic IPs bill on the wall clock since
+		// launch: storage used to be priced over the not-running time only, so
+		// a running instance showed none of the EBS the cap was counting.
+		spend := costmodel.Accrue(costmodel.Footprint{
+			ComputePerHour: rate,
+			EBSPerHour:     ebsHourlyCost,
+			PublicIPv4:     config.PublicIPv4Count,
+			ElasticIPv4:    config.ElasticIPv4Count,
+		}, billedTime, elapsed)
+		total := spend.Total
+		displayCompute := math.Round(spend.Compute*100) / 100
+		displayEBS := math.Round(spend.EBS*100) / 100
+		displayIPv4 := math.Round(spend.PublicIPv4*100) / 100
 
 		cost := &statusCost{
 			PricePerHour:     config.PricePerHour,
@@ -980,7 +990,10 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 			ComputeCostKnown: billedTime >= time.Second,
 			ComputeCost:      displayCompute,
 			StorageCost:      displayEBS,
-			CumulativeCost:   displayCompute + displayEBS,
+			PublicIPv4Count:  config.PublicIPv4Count,
+			ElasticIPv4Count: config.ElasticIPv4Count,
+			IPv4Cost:         displayIPv4,
+			CumulativeCost:   displayCompute + displayEBS + displayIPv4,
 		}
 
 		// The effective rate is a ratio, and a ratio of zeros is not a saving:
@@ -1004,7 +1017,7 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 
 		if config.CostLimit > 0 {
 			// "Used" is read from the function the enforcement loop terminates on
-			// (compute + EBS since launch, #616), never re-derived here: a copy of
+			// (compute + EBS + public IPv4, #616, #51), never re-derived here: a copy of
 			// that arithmetic went stale once already and overstated the headroom,
 			// worst on a stopped instance whose EBS kept accruing (#959).
 			used := math.Round(ag.CostLimitSpend()*100) / 100
@@ -1207,14 +1220,16 @@ func renderStatusTable(report *statusReport) error {
 			fmt.Printf("  Compute cost:     $%.2f  (%s billed × %s)\n",
 				cost.ComputeCost, formatDuration(billedTime), rateLabel)
 		}
-		if notRunning := stoppedTime + hibernatedTime; notRunning >= time.Minute {
-			if cost.EBSCostKnown {
-				fmt.Printf("  Storage cost:     $%.2f  (%s × $%.4f/hr EBS)\n",
-					cost.StorageCost, formatDuration(notRunning), cost.EBSHourlyCost)
-			} else {
-				fmt.Printf("  Storage cost:     not yet available  (%s %s)\n",
-					formatDuration(notRunning), notRunningLabel(stoppedTime, hibernatedTime))
-			}
+		if cost.EBSCostKnown {
+			fmt.Printf("  Storage cost:     $%.2f  (%s since launch × $%.4f/hr EBS)\n",
+				cost.StorageCost, formatDuration(elapsed), cost.EBSHourlyCost)
+		} else if notRunning := stoppedTime + hibernatedTime; notRunning >= time.Minute {
+			fmt.Printf("  Storage cost:     not yet available  (%s %s)\n",
+				formatDuration(notRunning), notRunningLabel(stoppedTime, hibernatedTime))
+		}
+		if n := cost.PublicIPv4Count + cost.ElasticIPv4Count; n > 0 {
+			fmt.Printf("  Public IPv4 cost: $%.2f  (%d auto-assigned + %d Elastic × $%.3f/hr, static rate as of %s)\n",
+				cost.IPv4Cost, cost.PublicIPv4Count, cost.ElasticIPv4Count, costmodel.PublicIPv4PerHour, costmodel.RatesAsOf)
 		}
 		if cost.ComputeCostKnown {
 			fmt.Printf("  Cumulative cost:  $%.2f\n", cost.CumulativeCost)
@@ -1239,7 +1254,7 @@ func renderStatusTable(report *statusReport) error {
 		}
 
 		if cost.CostLimit > 0 {
-			fmt.Printf("  Cost limit:       $%.2f  ($%.2f used, compute + EBS, %.0f%% — $%.2f remaining)\n",
+			fmt.Printf("  Cost limit:       $%.2f  ($%.2f used, compute + EBS + public IPv4, %.0f%% — $%.2f remaining)\n",
 				cost.CostLimit, cost.CostLimitUsed, cost.CostLimitUsedPct, cost.CostLimitRemaining)
 		}
 

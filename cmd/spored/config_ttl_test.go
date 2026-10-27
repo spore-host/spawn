@@ -187,9 +187,11 @@ func (p *mutableTagProvider) CheckSpotInterruption(_ context.Context) (*provider
 func (p *mutableTagProvider) DiscoverPeers(_ context.Context, _ string) ([]provider.PeerInfo, error) {
 	return nil, nil
 }
-func (p *mutableTagProvider) GetProviderType() string                               { return "stub" }
-func (p *mutableTagProvider) LookupAndTagEBSCost(_ context.Context) (float64, bool) { return 0, false }
-func (p *mutableTagProvider) CountOtherManagedInstances(_ context.Context) int      { return -1 }
+func (p *mutableTagProvider) GetProviderType() string { return "stub" }
+func (p *mutableTagProvider) MeasureCostFootprint(_ context.Context) (provider.CostFootprint, bool) {
+	return provider.CostFootprint{}, false
+}
+func (p *mutableTagProvider) CountOtherManagedInstances(_ context.Context) int { return -1 }
 
 // TestConfigSetTTL_Shorten_FailWithoutPassWith is the fail-without/pass-with
 // pair this repo's convention asks for, reproducing spawn#553's exact repro

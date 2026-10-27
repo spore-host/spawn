@@ -40,9 +40,11 @@ func (s *stubStatusProvider) CheckSpotInterruption(_ context.Context) (*provider
 func (s *stubStatusProvider) DiscoverPeers(_ context.Context, _ string) ([]provider.PeerInfo, error) {
 	return nil, nil
 }
-func (s *stubStatusProvider) GetProviderType() string                               { return "stub" }
-func (s *stubStatusProvider) LookupAndTagEBSCost(_ context.Context) (float64, bool) { return 0, false }
-func (s *stubStatusProvider) CountOtherManagedInstances(_ context.Context) int      { return -1 }
+func (s *stubStatusProvider) GetProviderType() string { return "stub" }
+func (s *stubStatusProvider) MeasureCostFootprint(_ context.Context) (provider.CostFootprint, bool) {
+	return provider.CostFootprint{}, false
+}
+func (s *stubStatusProvider) CountOtherManagedInstances(_ context.Context) int { return -1 }
 
 func newTestReport(t *testing.T) *statusReport {
 	t.Helper()

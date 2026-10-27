@@ -256,6 +256,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rules, and every test that walks the source tree (33 of them, found by a
   gate that parses every test's walk callback) skips an entry that vanishes
   mid-walk.
+- **`--cost-limit` now counts public IPv4, every attached EBS volume's
+  provisioned performance, and volumes or addresses added after boot**
+  (#51). Every under-count made the cap fire late:
+  - Public IPv4 was not counted at all. AWS charges $0.005/hr per public IPv4
+    address, in use or idle (VPC pricing page, fetched 2026-10-26). spored now
+    counts the instance's actual addresses on every interface
+    (`spawn:public-ipv4-count`, `spawn:elastic-ipv4-count`): an auto-assigned
+    address over running time, since it is released on stop, and an Elastic
+    IP, including the launch EIP of a multi-interface EFA launch, over the wall
+    clock, since it bills while stopped too.
+  - EBS was priced on size alone. Provisioned IOPS (gp3 above 3,000, io1, io2)
+    and gp3 throughput above 125 MB/s are now counted too. An io2 volume's IOPS
+    are often most of its cost.
+  - The footprint was measured once, at first boot, and kept for the life of
+    the instance. A volume attached later, or an Elastic IP associated after
+    spored's first look, was never counted. spored now re-measures on every
+    start and every 15 minutes (two read-only EC2 calls it already had
+    permission for). A recorded rate only goes up: lowering it would forgive
+    cost already incurred.
+  - With no `spawn:launch-time` tag, EBS was dropped from the cap entirely.
+    EC2's pending time is now the fallback anchor.
+  - `spored status` priced EBS over stopped time only, so on a running
+    instance it showed none of the EBS the cap was counting. It now prices
+    EBS over the time since launch.
+
+  `spored`'s enforcement, `spored status`, `spawn status`, `spawn cost` and
+  `spawn extend`'s cost-limit check now share one function,
+  `pkg/costmodel.Accrue`, so the figure shown is the figure enforced. The
+  static rates are labelled with their source and date (`costmodel.RatesAsOf`).
+  An instance whose spored predates this keeps its old enforcement until
+  `spawn upgrade-spored`. `spawn status` and `spawn cost` say when IPv4 is not
+  counted for that reason.
+
 - **`spawn cleanup` no longer offers spawn's S3 buckets for removal and then
   fails on them** (#1301). With `--all` it listed a `spawn:managed` bucket as
   removable and the delete failed with "don't know how to remove"; buckets are

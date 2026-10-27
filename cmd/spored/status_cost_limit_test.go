@@ -58,3 +58,40 @@ func TestStatusCostLimitUsedIsTheEnforcedSpend(t *testing.T) {
 		t.Errorf("the cost-limit line should say what it counts (compute + EBS):\n%s", out)
 	}
 }
+
+// TestStatusCostIsTheEnforcedAccounting is #51: `spored status`'s cost lines
+// come from the accrual --cost-limit enforces with (pkg/costmodel). Storage is
+// EBS over the wall clock since launch — it used to be priced over the
+// not-running time only, so a running instance showed none of the EBS the cap
+// counted — and public IPv4 is counted: the auto-assigned address over compute,
+// the Elastic IP over the wall clock.
+func TestStatusCostIsTheEnforcedAccounting(t *testing.T) {
+	identity := &provider.Identity{InstanceID: "i-0123456789abcdef0", Region: "us-west-2", Provider: "stub"}
+	cfg := &provider.Config{
+		LaunchTime:       time.Now().Add(-10 * time.Hour),
+		ComputeSeconds:   int64((2 * time.Hour).Seconds()),
+		PricePerHour:     1.00,
+		EBSHourlyCost:    0.50,
+		PublicIPv4Count:  1,
+		ElasticIPv4Count: 1,
+		CostLimit:        20.0,
+	}
+	ag, err := agent.NewAgent(context.Background(), &stubStatusProvider{identity: identity, config: cfg})
+	if err != nil {
+		t.Fatalf("agent.NewAgent: %v", err)
+	}
+	c := buildStatusReport(ag, cfg, identity, false).Cost
+	if c == nil {
+		t.Fatal("no cost section in the report")
+	}
+	if c.StorageCost < 4.9 || c.StorageCost > 5.1 {
+		t.Errorf("storage = $%.2f, want ~$5.00 (10h since launch × $0.50, running time included)", c.StorageCost)
+	}
+	if c.IPv4Cost < 0.05 || c.IPv4Cost > 0.07 {
+		t.Errorf("public IPv4 = $%.2f, want ~$0.06 (1 auto × 2h + 1 Elastic × 10h at $0.005)", c.IPv4Cost)
+	}
+	if math.Abs(c.CumulativeCost-c.CostLimitUsed) > 0.021 {
+		t.Errorf("cumulative $%.2f != cost-limit used $%.2f on an on-demand instance: the display and the cap disagree",
+			c.CumulativeCost, c.CostLimitUsed)
+	}
+}

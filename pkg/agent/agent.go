@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -23,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/libs/i18n"
+	"github.com/spore-host/spawn/pkg/costmodel"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/pluginruntime"
@@ -177,6 +179,10 @@ type Agent struct {
 	// (tags are re-read every 5 ticks). Per-Agent rather than a package global so
 	// it isn't shared across agents and resets cleanly per instance (#175).
 	configRefreshTick int
+
+	// footprintMeasuring is set while a MeasureCostFootprint goroutine runs, so
+	// a slow EC2 call never stacks a second one (#51).
+	footprintMeasuring atomic.Bool
 
 	// earlyCompletionRefreshes counts tag refreshes triggered by a completion
 	// signal seen before on-complete was known (#270); capped at
@@ -393,26 +399,16 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 			config.TTL, config.IdleTimeout, config.HibernateOnIdle, config.TerminateOnIdle)
 	}
 
-	// Look up actual EBS volume cost on first start; caches result in the
-	// spawn:ebs-hourly-cost tag. Do NOT write agent.config here: this goroutine
-	// would race the monitor loop, which both reads agent.config fields and
-	// replaces the whole pointer on its periodic tag refresh (#175). The cost is
-	// persisted to the tag (and the provider's config) by LookupAndTagEBSCost, so
-	// the monitor's next config refresh (≤5 min) picks it up without a shared
-	// write from here.
-	if activate && identity.Provider == "ec2" && config.EBSHourlyCost == 0 {
-		go func() {
-			ebsCost, measured := prov.LookupAndTagEBSCost(context.Background())
-			if measured {
-				log.Printf("EBS hourly cost: $%.4f/hr", ebsCost)
-			} else if ebsCost > 0 {
-				// The fallback constant must never be logged in the same shape as a
-				// measurement (spawn#517) — a reader comparing this line against
-				// spored status's "not yet available" storage line would otherwise
-				// get contradictory answers about whether cost tracking is working.
-				log.Printf("EBS hourly cost: unknown (lookup failed or denied); storage cost will not be reported")
-			}
-		}()
+	// Measure the cost footprint (every attached EBS volume, every public IPv4
+	// address) on every start, and again periodically from the monitor loop
+	// (maybeMeasureCostFootprint): before #51 it was measured once at first
+	// start and cached for life, so a volume attached or an Elastic IP
+	// associated later was never counted. Do NOT write agent.config here: this
+	// goroutine would race the monitor loop, which replaces the whole pointer on
+	// its periodic tag refresh (#175). The footprint is persisted to tags, and
+	// the monitor's next config refresh (<=5 min) picks it up.
+	if activate && identity.Provider == "ec2" {
+		agent.maybeMeasureCostFootprint(context.Background())
 	}
 
 	// Log DCV idle detection if this is an application streaming instance. The DCV
@@ -720,6 +716,12 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// with the public IP goes stale when a resume changes it (#1019).
 	a.refreshReadyURL(ctx)
 
+	// 0a'. Re-measure the cost footprint every footprintMeasureTicks ticks, off
+	// this goroutine (#51).
+	if a.configRefreshTick%footprintMeasureTicks == 0 && a.identity != nil && a.identity.Provider == "ec2" {
+		a.maybeMeasureCostFootprint(ctx)
+	}
+
 	// 0a. Keep spawn:logged-in-count tag current (throttled to 5/min).
 	a.writeSessionCountTag(ctx, countActiveSessions(ctx)+countActivePortConnections(ctx, a.config.ActivePorts))
 
@@ -952,18 +954,17 @@ func (a *Agent) writeComputeSecondsTag(ctx context.Context) {
 	a.flushComputeSecondsTag(ctx)
 }
 
-// accumulatedComputeCost is what --cost-limit is measured against: the instance's
-// compute plus its EBS (#616).
+// accumulatedComputeCost is what --cost-limit is measured against: the
+// instance's compute, its EBS and its public IPv4 addresses (#616, #51),
+// accrued by pkg/costmodel.Accrue — the same function `spawn status`, `spawn
+// cost` and `spawn extend` use, so what they show is what terminates the
+// instance. The component/state table is in pkg/costmodel's package doc.
 //
-// Compute is the on-demand rate × TOTAL compute time (base + this boot's uptime).
-// Using the total — not just this boot — is what stops the cost clock resetting on
-// a stop/start, mirroring how TTL uses an absolute deadline.
-//
-// EBS is included because --cost-limit is a TOTAL ceiling, and because terminating
-// actually stops it — spawn's volumes carry DeleteOnTermination, so the bill ends with
-// the instance. It also accrues while the instance is merely STOPPED, which is the
-// quiet half of the surprise: "stopped to save money" keeps billing storage, and the
-// old compute-only arithmetic counted none of it.
+// Compute is the on-demand rate x TOTAL compute time (base + this boot's
+// uptime); using the total, not just this boot, stops the cost clock resetting
+// on a stop/start. EBS and Elastic IPs bill on the WALL CLOCK since the
+// original launch (a stopped instance still pays for them); auto-assigned
+// public IPv4 is released on stop, so it bills with compute.
 //
 // FSx is deliberately NOT included. Terminating does not delete a filesystem — a
 // durable one is never reclaimed automatically, and an ephemeral one only by the
@@ -975,22 +976,63 @@ func (a *Agent) writeComputeSecondsTag(ctx context.Context) {
 // The name is kept for continuity with the spawn:compute-seconds tag and the existing
 // cost reporting; the doc comment is the contract.
 func (a *Agent) accumulatedComputeCost() float64 {
-	totalCompute := time.Duration(a.TotalComputeSeconds()) * time.Second
-	cost := a.config.PricePerHour * totalCompute.Hours()
+	return costmodel.Accrue(a.costFootprint(),
+		time.Duration(a.TotalComputeSeconds())*time.Second, a.wallSinceLaunch()).Total
+}
 
-	// EBS is billed on WALL CLOCK, not compute time: a stopped instance still pays
-	// for its volumes. Pricing it over compute hours would undercount exactly the
-	// case that matters — an instance stopped "to save money" accruing storage with
-	// nothing counting it. LaunchTime never resets on stop/wake (pkg/provider), so it
-	// survives a spored restart the same way the TTL deadline does.
-	if a.config.EBSHourlyCost > 0 && !a.config.LaunchTime.IsZero() {
-		cost += a.config.EBSHourlyCost * time.Since(a.config.LaunchTime).Hours()
+// costFootprint is the enforced Footprint from the agent's config.
+func (a *Agent) costFootprint() costmodel.Footprint {
+	return costmodel.Footprint{
+		ComputePerHour: a.config.PricePerHour,
+		EBSPerHour:     a.config.EBSHourlyCost,
+		PublicIPv4:     a.config.PublicIPv4Count,
+		ElasticIPv4:    a.config.ElasticIPv4Count,
 	}
-	return cost
+}
+
+// wallSinceLaunch is the wall clock since the original launch, which EBS and
+// Elastic IPs bill on. LaunchTime (spawn:launch-time) never resets on
+// stop/wake. Without it, EC2's pending time from IMDS is the anchor rather than
+// none at all: before #51 a missing tag silently dropped EBS from the cap.
+func (a *Agent) wallSinceLaunch() time.Duration {
+	anchor := a.config.LaunchTime
+	if anchor.IsZero() && a.identity != nil {
+		anchor = a.identity.PendingTime
+	}
+	if anchor.IsZero() {
+		return 0
+	}
+	return time.Since(anchor)
+}
+
+// footprintMeasureTicks is how often (in monitor ticks, one a minute) the
+// cost footprint is re-measured: two read-only EC2 calls every 15 minutes.
+const footprintMeasureTicks = 15
+
+// maybeMeasureCostFootprint measures the cost footprint in its own goroutine,
+// unless one is already running, and reports whether it started one. Never
+// blocks the caller (#65).
+func (a *Agent) maybeMeasureCostFootprint(ctx context.Context) bool {
+	if !a.footprintMeasuring.CompareAndSwap(false, true) {
+		return false
+	}
+	go func() {
+		defer a.footprintMeasuring.Store(false)
+		fp, measured := a.provider.MeasureCostFootprint(context.WithoutCancel(ctx))
+		if measured {
+			log.Printf("Cost footprint: EBS $%.4f/hr, public IPv4 %d auto-assigned + %d Elastic ($%.3f/hr each)",
+				fp.EBSHourlyCost, fp.PublicIPv4, fp.ElasticIPv4, costmodel.PublicIPv4PerHour)
+		} else {
+			// Never logged in the shape of a measurement (spawn#517).
+			log.Printf("Cost footprint: unknown (lookup failed or denied); EBS and public IPv4 are not counted until it succeeds")
+		}
+	}()
+	return true
 }
 
 // CostLimitSpend is the spend --cost-limit is enforced against, exactly as the
-// enforcement loop measures it (accumulatedComputeCost: compute + EBS, #616).
+// enforcement loop measures it (accumulatedComputeCost: compute + EBS + public
+// IPv4, #616, #51).
 // `spored status` reports cost-limit used/remaining from this rather than
 // re-deriving it, so the headroom it shows is the headroom that terminates the
 // instance (#959).
