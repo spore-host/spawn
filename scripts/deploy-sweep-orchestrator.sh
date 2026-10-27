@@ -35,11 +35,52 @@ echo "Deploying $FUNCTION_NAME to account $ACCOUNT_ID in $REGION"
 
 cd "$(dirname "$0")/$LAMBDA_DIR"
 
+# Only a clean release tag is deployed (#1368). This function renders the spored
+# bootstrap for members of sweeps and schedules made by a spawn CLI at v0.146.0
+# or older, and that bootstrap's stub fetches the body published for the
+# release the function was built from, refusing any body but the one compiled
+# into it. A dev, pseudo-version or dirty build names no published body, so its
+# members would get the body inline from code no release signed; and a
+# version stamped from anything but the tag being built would name a body
+# that differs from the compiled one, so every such member would retire itself
+# at boot.
+SPAWN_VERSION=$(git describe --tags --exact-match --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null | sed 's/^v//' || true)  # swallow-ok: not on a tag; refused just below
+if ! [[ "$SPAWN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "ERROR: HEAD is not a spawn release tag (vX.Y.Z); deploy $FUNCTION_NAME only from a release checkout." >&2
+  exit 1
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  echo "ERROR: the working tree has uncommitted changes; $FUNCTION_NAME would not be v$SPAWN_VERSION." >&2
+  exit 1
+fi
+
+# The body the stub will fetch must be published for this release and be the
+# one this build compiles in: the release workflow publishes exactly what
+# `spawn bootstrap-body` prints, from the same pkg/launcher this function builds
+# against. Checked in the us-east-1 bucket, the stub's last fallback.
+BODY_URL="https://spawn-binaries-us-east-1.s3.amazonaws.com/spawn/versions/${SPAWN_VERSION}/bootstrap.sh"
+if ! WANT_BODY_SHA=$( (cd ../.. && SPORE_NO_UPDATE_CHECK=1 CGO_ENABLED=0 go run . bootstrap-body) | openssl dgst -sha256 | awk '{print $NF}'); then
+  echo "ERROR: could not render v$SPAWN_VERSION's bootstrap body (spawn bootstrap-body)." >&2
+  exit 1
+fi
+if ! GOT_BODY_SHA=$(curl -fsS --max-time 60 "$BODY_URL" | openssl dgst -sha256 | awk '{print $NF}'); then
+  echo "ERROR: no bootstrap body is published at $BODY_URL; legacy sweep members could not boot spored." >&2
+  exit 1
+fi
+if [ "$GOT_BODY_SHA" != "$WANT_BODY_SHA" ]; then
+  echo "ERROR: the body published at $BODY_URL (sha256 $GOT_BODY_SHA) is not the one v$SPAWN_VERSION compiles in ($WANT_BODY_SHA)." >&2
+  exit 1
+fi
+echo "published bootstrap body for v$SPAWN_VERSION verified ($WANT_BODY_SHA)"
+
 # amd64 because the live function is x86_64. Changing architecture is a separate
 # decision from shipping a code fix, and doing both at once would make a failure
 # ambiguous.
+#
+# The package, not main.go: the function is several files, and `go build
+# main.go` compiles only the one named.
 echo "Building Go binary..."
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags lambda.norpc -o bootstrap main.go
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags lambda.norpc -ldflags "-X main.Version=${SPAWN_VERSION}" -o bootstrap .
 
 echo "Creating deployment package..."
 zip -q function.zip bootstrap
@@ -106,12 +147,10 @@ fi
 # drift — unlike the SAM-deployed lambdas, where the tag is declared in the
 # template for exactly that reason.
 #
-# `git describe` rather than a bare tag: it yields 0.126.1 on a tag,
-# 0.126.1-3-gabc when ahead, and a -dirty suffix for uncommitted changes, so the
-# stamp says "deployed from uncommitted code" out loud instead of claiming a
-# release. Before this, answering "is the deployed sweep orchestrator current?"
+# SPAWN_VERSION is the release tag checked above, the version compiled in, so
+# the stamp and the bootstrap the function renders name the same release.
+# Before stamping, answering "is the deployed sweep orchestrator current?"
 # meant comparing LastModified against `git log -- lambda/sweep-orchestrator/`.
-SPAWN_VERSION=$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
 FUNCTION_ARN=$(aws lambda get-function-configuration \
   --function-name "$FUNCTION_NAME" --region "$REGION" \
   --query FunctionArn --output text)

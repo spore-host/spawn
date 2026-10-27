@@ -26,8 +26,9 @@ import (
 // inputs are the CLI's: the local public key, --plugin/--config plugins,
 // --user-data contents, and the spawn release whose published bootstrap body the
 // stub fetches (launcher.CallerVersion; a dev build inlines the body, as it does
-// on every other path). The Lambda is built by a plain `go build` and knows none
-// of them.
+// on every other path). The Lambda has none of the first three. It renders a
+// bootstrap itself only for params from a CLI that rendered none
+// (lambda/sweep-orchestrator/legacy.go, #1368).
 //
 // Size: a member's user data is what a foreground member's is, inside EC2's
 // 16 KiB. The params object is S3, with no practical limit, and when every

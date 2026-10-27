@@ -26,7 +26,8 @@ import (
 // and ships them under tagsParam (cmd/launch_sweep_detached_bootstrap.go). This
 // Lambda re-anchors their launch instants at the real launch, so a member's TTL
 // counts from when it started rather than from when the CLI ran, and sets the
-// few it owns.
+// few it owns. Legacy params, from a CLI that rendered none, get theirs from
+// the same tag builder here (legacy.go, #1368).
 
 // tagsParam is the param key carrying a member's rendered tags: a JSON object,
 // key to value.
@@ -45,15 +46,14 @@ func getMapParam(params map[string]interface{}, key string) map[string]interface
 // the schedule fires) and which member, and spawn:managed, the rail the TTL
 // reaper's terminate is conditioned on.
 //
-// A member without rendered tags is refused rather than launched with too few:
-// it would run its bootstrap with no command and none of its limits.
+// Legacy params' tags are rendered before this, by withMemberBootstrap
+// (#1368). A member still without tags is refused rather than launched with
+// too few: it would run its bootstrap with no command and none of its limits.
 func memberTags(state *SweepRecord, config map[string]interface{}, paramIndex int, now time.Time) ([]ec2types.Tag, error) {
 	raw := getMapParam(config, tagsParam)
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("param set %d carries no instance tags (%s), so its instance would run none of its "+
-			"command, idle timeout, cost limit or completion settings; it was not launched. The sweep was created "+
-			"by a spawn CLI older than this orchestrator: re-run it, or re-create the schedule, with a current "+
-			"spawn (#1330)", paramIndex, tagsParam)
+			"command, idle timeout, cost limit or completion settings; it was not launched (#1330)", paramIndex, tagsParam)
 	}
 	owned := map[string]string{
 		"spawn:managed":     "true",

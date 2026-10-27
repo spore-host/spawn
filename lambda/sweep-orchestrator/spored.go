@@ -23,10 +23,14 @@ import (
 // buildUserData the foreground sweep path uses, and ships it in the uploaded
 // params under userDataParam (cmd/launch_sweep_detached_bootstrap.go). Its inputs
 // live on the CLI's machine (the public key, --plugin/--config plugins,
-// --user-data contents) and its stub names the spawn release that built it,
-// which this function, built by a plain `go build`, does not know. Rendering it
-// there makes a detached member's user data the foreground member's by
-// construction, rather than a second builder that has to be kept in step.
+// --user-data contents) and its stub names the spawn release that built it.
+// Rendering it there makes a detached member's user data the foreground
+// member's by construction, rather than a second builder that has to be kept
+// in step.
+//
+// The one exception is legacy params, from a CLI that rendered none: this
+// Lambda renders their bootstrap itself, with pkg/launcher, for the release it
+// was built from (legacy.go, #1368).
 
 // userDataParam is the param key carrying a member's encoded spored user data,
 // exactly as RunInstances takes it. A row's own value overrides the defaults'.
@@ -56,16 +60,20 @@ type ec2InstancesAPI interface {
 // single- and multi-region launch paths, so a member's bootstrap, profile and
 // tags cannot depend on which one ran.
 //
-// A member with no spored user data is refused rather than launched: it would
-// run with no in-instance TTL (#1323), and under #1313 it would be terminated
-// five minutes later anyway, after billing for them.
-func buildRunInstancesInput(state *SweepRecord, config map[string]interface{}, paramIndex int, instanceType string, now time.Time) (*ec2.RunInstancesInput, error) {
+// A member's bootstrap and tags are the CLI's when its params carry them, and
+// rendered here for legacy params, which carry neither (withMemberBootstrap,
+// #1368). A member that still has no spored user data is refused rather than
+// launched: it would run with no in-instance TTL (#1323), and under #1313 it
+// would be terminated five minutes later anyway, after billing for them.
+func buildRunInstancesInput(state *SweepRecord, params map[string]interface{}, paramIndex int, instanceType string, now time.Time) (*ec2.RunInstancesInput, error) {
+	config, err := withMemberBootstrap(state, params, paramIndex, instanceType)
+	if err != nil {
+		return nil, err
+	}
 	userData := getStringParam(config, userDataParam, "")
 	if userData == "" {
 		return nil, fmt.Errorf("param set %d carries no spored bootstrap (%s), so its instance would run with no "+
-			"in-instance TTL, idle or cost enforcement; it was not launched. The sweep was created by a spawn CLI "+
-			"older than this orchestrator: re-run it, or re-create the schedule, with a current spawn (#1323)",
-			paramIndex, userDataParam)
+			"in-instance TTL, idle or cost enforcement; it was not launched (#1323)", paramIndex, userDataParam)
 	}
 
 	tags, err := memberTags(state, config, paramIndex, now)
@@ -97,7 +105,9 @@ func buildRunInstancesInput(state *SweepRecord, config map[string]interface{}, p
 	if keyName := getStringParam(config, "key_name", ""); keyName != "" {
 		input.KeyName = aws.String(keyName)
 	}
-	if err := applyMemberLaunchSettings(input, state, config, paramIndex); err != nil {
+	// The params as uploaded: a legacy member's log line names the spawn that
+	// rendered its params, not this Lambda's own spawn:version.
+	if err := applyMemberLaunchSettings(input, state, params, paramIndex); err != nil {
 		return nil, err
 	}
 	return input, nil

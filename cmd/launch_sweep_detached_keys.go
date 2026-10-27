@@ -30,8 +30,10 @@ var detachedParamKeys = []string{
 	// detachedLaunchSettingsKey (#1353); still seeded, since the cost estimator
 	// reads it too.
 	"spot",
-	// ttl is not read since #1330: it reaches the orchestrator as spawn:ttl in
-	// detachedTagsKey, which the Lambda turns into spawn:ttl-deadline.
+	// ttl reaches a current orchestrator as spawn:ttl in detachedTagsKey (#1330);
+	// the Lambda reads the bare key only from legacy params, which carry no
+	// detachedTagsKey, to render their tags itself (#1368).
+	"ttl",
 	// The member's spored bootstrap (#1323), rendered by seedDetachedBootstrap
 	// rather than seedDetachedLaunchKeys, since it needs every other key first.
 	detachedUserDataKey,
