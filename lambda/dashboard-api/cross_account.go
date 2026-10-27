@@ -65,18 +65,7 @@ func getEC2ClientForRegion(ctx context.Context, cfg aws.Config, callerCreds aws.
 		return nil, errNoCallerCredentials
 	}
 
-	// STS is called with the caller's credentials, so the AssumeRole is attributed
-	// to them. This one line is the whole fix: everything else was already right,
-	// including the member-account trust policy.
-	stsClient := sts.NewFromConfig(cfg, func(o *sts.Options) {
-		o.Credentials = callerCreds
-	})
-
-	credsProvider := stscreds.NewAssumeRoleProvider(stsClient, getCrossAccountRoleARN(), func(o *stscreds.AssumeRoleOptions) {
-		// Session name carries the caller, so CloudTrail in the member account
-		// shows which dashboard user read it rather than one shared identity.
-		o.RoleSessionName = "spawn-dashboard-caller"
-	})
+	credsProvider := callerAssumeRoleProvider(cfg, callerCreds)
 
 	crossAccountCfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(region),
@@ -86,4 +75,24 @@ func getEC2ClientForRegion(ctx context.Context, cfg aws.Config, callerCreds aws.
 		return nil, fmt.Errorf("load config with cross-account credentials: %w", err)
 	}
 	return ec2.NewFromConfig(crossAccountCfg), nil
+}
+
+// callerAssumeRoleProvider assumes SpawnDashboardCrossAccountReadRole AS THE
+// CALLER. STS is called with the caller's credentials, so the AssumeRole is
+// attributed to them. This one line is the whole fix: everything else was
+// already right, including the member-account trust policy.
+//
+// Its own function so the IAM coverage gate can cut exactly this call out of
+// SpawnDashboardLambdaRole's inventory: the Lambda role never makes it, the
+// caller does (internal/iamcoverage principals, #1349). Keep it to the
+// caller-credential AssumeRole; anything else here would be hidden from the gate.
+func callerAssumeRoleProvider(cfg aws.Config, callerCreds aws.CredentialsProvider) *stscreds.AssumeRoleProvider {
+	stsClient := sts.NewFromConfig(cfg, func(o *sts.Options) {
+		o.Credentials = callerCreds
+	})
+	return stscreds.NewAssumeRoleProvider(stsClient, getCrossAccountRoleARN(), func(o *stscreds.AssumeRoleOptions) {
+		// Session name carries the caller, so CloudTrail in the member account
+		// shows which dashboard user read it rather than one shared identity.
+		o.RoleSessionName = "spawn-dashboard-caller"
+	})
 }

@@ -267,6 +267,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cancelling a sweep from the dashboard now terminates its instances**
+  (#1349). The dashboard's cancel assumed `SpawnSweepCrossAccountRole`, whose
+  trust names only the sweep orchestrator, so the assume was always denied: the
+  sweep was marked CANCELLED and its members ran on until their TTL. The
+  dashboard no longer assumes any role. It marks the sweep CANCELLED, as
+  before, and invokes `spawn-sweep-orchestrator` asynchronously; the response
+  says the orchestrator is terminating the instances (`instances_terminated`
+  is now always 0; `instances_to_terminate` is new). The orchestrator now
+  terminates a cancelled sweep's live members (pending, running, stopping,
+  stopped) in every region of the sweep, whichever way the cancel reached it:
+  its polling loop finding the flag, the dashboard's invoke, or a
+  self-reinvocation that starts after the cancel. Members are found by their
+  `spawn:sweep-id` and `spawn:managed=true` tags, which are checked on every
+  instance, so a member launched after the last record save is included and
+  another sweep's instances or untagged ones are not touched. A Spot member's
+  request is cancelled before its instance, as on spawn's other terminate
+  paths. A re-run finds nothing live and writes nothing. The outcome is
+  recorded with an UpdateItem (status CANCELLED, `cancel_terminated` count)
+  rather than a put of the orchestrator's copy, and the polling loops' own
+  saves are now conditional, so a loop that read the record before the cancel
+  can no longer overwrite it back to RUNNING. Previously the orchestrator
+  stopped launching on a cancel but left the members running. Needs
+  `lambda:InvokeFunction` on the orchestrator for `SpawnDashboardLambdaRole`
+  and `ec2:CancelSpotInstanceRequests` for `SpawnSweepCrossAccountRole`, both
+  added to their setup scripts. If the dashboard role has not been updated,
+  the cancel still succeeds, a running orchestrator still acts on it within
+  one poll, and the message says to run `spawn cancel <id>` if the instances
+  are still running. Instance terminate from the dashboard
+  in a member account stays as it is: the 403 names `spawn terminate <id>`
+  (owner decision).
+
 - **A pool nobody drains no longer keeps its IAM role forever** (#1319).
   `spawn pool drain` was the only thing that deleted a pool's worker role and
   instance profile, so a pool whose caller crashed, or whose run-end hook

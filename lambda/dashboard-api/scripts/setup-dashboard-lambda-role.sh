@@ -93,6 +93,9 @@ WATCHES_TABLE="${LAGOTTO_WATCHES_TABLE:-lagotto-watches}"
 HISTORY_TABLE="${LAGOTTO_HISTORY_TABLE:-lagotto-match-history}"
 WORKSPACES_TABLE="${SPORE_BOT_WORKSPACES_TABLE:-spore-bot-workspaces}"
 STRATA_BUCKET="${STRATA_REGISTRY_BUCKET:-strata-registry}"
+# A dashboard sweep cancel invokes the orchestrator, which terminates the
+# members (#1349). Same override as the dashboard-api function reads.
+ORCHESTRATOR_FUNCTION="${SPAWN_ORCHESTRATOR_FUNCTION_NAME:-spawn-sweep-orchestrator}"
 T="arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table"
 
 echo "→ Writing the role policy..."
@@ -171,6 +174,12 @@ POLICY_DOCUMENT=$(cat <<EOF
       "Effect": "Allow",
       "Action": ["dynamodb:ListStreams"],
       "Resource": "*"
+    },
+    {
+      "Sid": "StartSweepOrchestrator",
+      "Effect": "Allow",
+      "Action": ["lambda:InvokeFunction"],
+      "Resource": ["arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${ORCHESTRATOR_FUNCTION}"]
     },
     {
       "Sid": "StrataRegistryRead",

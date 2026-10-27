@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -83,6 +84,7 @@ type SweepRecord struct {
 	AWSAccountID           string          `dynamodbav:"aws_account_id"`
 	Status                 string          `dynamodbav:"status"`
 	CancelRequested        bool            `dynamodbav:"cancel_requested"`
+	CancelTerminated       int             `dynamodbav:"cancel_terminated,omitempty"` // members a cancel terminated (#1349)
 	EstimatedCost          float64         `dynamodbav:"estimated_cost,omitempty"`
 	Budget                 float64         `dynamodbav:"budget,omitempty"`
 	NextToLaunch           int             `dynamodbav:"next_to_launch"`
@@ -233,9 +235,22 @@ func handler(ctx context.Context, event SweepEvent) error {
 	log.Printf("Starting sweep orchestration for sweep_id=%s", event.SweepID)
 
 	// Load state from DynamoDB
-	state, err := loadSweepState(ctx, event.SweepID)
+	state, err := loadState(ctx, event.SweepID)
 	if err != nil {
 		return fmt.Errorf("failed to load sweep state: %w", err)
+	}
+
+	// A cancelled sweep's members are terminated here, before anything else: the
+	// dashboard invokes this function after marking a sweep cancelled, and a
+	// self-reinvocation can start after a cancel landed (#1349). Neither needs
+	// the params, so a missing params object cannot stop the terminate.
+	if isCancelled(state) {
+		log.Printf("Sweep %s is cancelled: terminating its members", state.SweepID)
+		clients, err := memberClientsFor(ctx, state)
+		if err != nil {
+			return fmt.Errorf("cancel sweep %s: %w", state.SweepID, err)
+		}
+		return cancelSweep(ctx, state, clients)
 	}
 
 	// Download parameters from S3
@@ -312,14 +327,32 @@ func saveSweepState(ctx context.Context, state *SweepRecord) error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
+	input := &dynamodb.PutItemInput{
+		TableName: aws.String(tableName),
+		Item:      item,
+	}
+	// This invocation's copy must not overwrite a cancel written since it was
+	// read (#1349): the put would reset status and cancel_requested, and the
+	// loop would launch on. Refused, the next poll reloads and sees the cancel;
+	// a member launched in between is found by its tags.
+	if !isCancelled(state) {
+		input.ConditionExpression = aws.String("NOT (#status = :cancelled) AND NOT (cancel_requested = :t)")
+		input.ExpressionAttributeNames = map[string]string{"#status": "status"}
+		input.ExpressionAttributeValues = map[string]types.AttributeValue{
+			":cancelled": &types.AttributeValueMemberS{Value: "CANCELLED"},
+			":t":         &types.AttributeValueMemberBOOL{Value: true},
+		}
+	}
+
 	// Retry logic with exponential backoff
 	for retries := 0; retries < 3; retries++ {
-		_, err = dynamodbClient.PutItem(ctx, &dynamodb.PutItemInput{
-			TableName: aws.String(tableName),
-			Item:      item,
-		})
+		_, err = dynamodbClient.PutItem(ctx, input)
 		if err == nil {
 			return nil
+		}
+		var ccf *types.ConditionalCheckFailedException
+		if errors.As(err, &ccf) {
+			return errSweepCancelled
 		}
 		log.Printf("DynamoDB write failed (attempt %d/3): %v", retries+1, err)
 		time.Sleep(time.Duration(retries+1) * time.Second)
@@ -422,15 +455,13 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 
 	for {
 		// Reload state from DynamoDB to check for cancellation
-		currentState, err := loadSweepState(ctx, state.SweepID)
+		currentState, err := loadState(ctx, state.SweepID)
 		if err != nil {
 			log.Printf("Failed to reload sweep state: %v", err)
-		} else if currentState.CancelRequested {
-			log.Println("Cancellation requested, stopping orchestration")
-			state.Status = "CANCELLED"
-			state.CompletedAt = time.Now().Format(time.RFC3339)
-			if err := saveSweepState(ctx, state); err != nil {
-				log.Printf("Failed to save cancelled state: %v", err)
+		} else if isCancelled(currentState) {
+			log.Println("Cancellation requested: terminating members, stopping orchestration")
+			if err := cancelSweep(ctx, currentState, asMemberClients(map[string]*ec2.Client{state.Region: ec2Client})); err != nil {
+				log.Printf("Cancelling sweep %s: %v", state.SweepID, err)
 			}
 
 			// Clean up placement group if auto-created. SYNCHRONOUS: a goroutine
@@ -532,7 +563,9 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 				log.Printf("All %d instances launched and completed", state.Launched)
 			}
 			state.CompletedAt = time.Now().Format(time.RFC3339)
-			if err := saveSweepState(ctx, state); err != nil {
+			if err := saveSweepState(ctx, state); errors.Is(err, errSweepCancelled) {
+				continue // cancelled meanwhile: the next pass terminates (#1349)
+			} else if err != nil {
 				return fmt.Errorf("failed to save completion state: %w", err)
 			}
 
@@ -1117,17 +1150,15 @@ func runMultiRegionPollingLoop(ctx context.Context, state *SweepRecord, params *
 
 	for {
 		// Reload state from DynamoDB to check for cancellation
-		currentState, err := loadSweepState(ctx, state.SweepID)
+		currentState, err := loadState(ctx, state.SweepID)
 		if err != nil {
 			log.Printf("Failed to reload sweep state: %v", err)
 		} else {
 			state = currentState // Update local state
-			if currentState.CancelRequested {
-				log.Println("Cancellation requested, stopping orchestration")
-				state.Status = "CANCELLED"
-				state.CompletedAt = time.Now().Format(time.RFC3339)
-				if err := saveSweepState(ctx, state); err != nil {
-					log.Printf("Failed to save cancelled state: %v", err)
+			if isCancelled(currentState) {
+				log.Println("Cancellation requested: terminating members, stopping orchestration")
+				if err := cancelSweep(ctx, currentState, asMemberClients(orchestrator.ec2Clients)); err != nil {
+					log.Printf("Cancelling sweep %s: %v", state.SweepID, err)
 				}
 
 				// Clean up placement group if auto-created. SYNCHRONOUS (#752).
@@ -1198,7 +1229,9 @@ func runMultiRegionPollingLoop(ctx context.Context, state *SweepRecord, params *
 			state.CompletedAt = time.Now().Format(time.RFC3339)
 			// Final cost update before completion
 			updateRegionalCosts(state)
-			if err := saveSweepState(ctx, state); err != nil {
+			if err := saveSweepState(ctx, state); errors.Is(err, errSweepCancelled) {
+				continue // cancelled meanwhile: the next pass terminates (#1349)
+			} else if err != nil {
 				return fmt.Errorf("failed to save completion state: %w", err)
 			}
 

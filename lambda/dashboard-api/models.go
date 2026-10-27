@@ -70,9 +70,14 @@ type SweepDetailAPIResponse struct {
 
 // CancelSweepResponse is the response for /api/sweeps/{id}/cancel
 type CancelSweepResponse struct {
-	Success             bool   `json:"success"`
-	Message             string `json:"message"`
-	InstancesTerminated int    `json:"instances_terminated"`
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	// InstancesTerminated is always 0: the dashboard does not terminate; the
+	// sweep orchestrator does (#1349). Kept for clients that read it.
+	InstancesTerminated int `json:"instances_terminated"`
+	// InstancesToTerminate is how many members the record lists as live, which
+	// the orchestrator will terminate.
+	InstancesToTerminate int `json:"instances_to_terminate"`
 }
 
 // SweepInfo represents sweep summary information
@@ -93,23 +98,26 @@ type SweepInfo struct {
 
 // SweepDetailInfo represents detailed sweep information
 type SweepDetailInfo struct {
-	SweepID         string              `json:"sweep_id"`
-	SweepName       string              `json:"sweep_name"`
-	Status          string              `json:"status"`
-	TotalParams     int                 `json:"total_params"`
-	Launched        int                 `json:"launched"`
-	Failed          int                 `json:"failed"`
-	Region          string              `json:"region"`
-	CreatedAt       time.Time           `json:"created_at"`
-	UpdatedAt       time.Time           `json:"updated_at"`
-	CompletedAt     *time.Time          `json:"completed_at,omitempty"`
-	EstimatedCost   float64             `json:"estimated_cost,omitempty"`
-	DurationSeconds int                 `json:"duration_seconds,omitempty"`
-	MaxConcurrent   int                 `json:"max_concurrent"`
-	LaunchDelay     string              `json:"launch_delay"`
-	NextToLaunch    int                 `json:"next_to_launch"`
-	CancelRequested bool                `json:"cancel_requested"`
-	Instances       []SweepInstanceInfo `json:"instances"`
+	SweepID         string     `json:"sweep_id"`
+	SweepName       string     `json:"sweep_name"`
+	Status          string     `json:"status"`
+	TotalParams     int        `json:"total_params"`
+	Launched        int        `json:"launched"`
+	Failed          int        `json:"failed"`
+	Region          string     `json:"region"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	EstimatedCost   float64    `json:"estimated_cost,omitempty"`
+	DurationSeconds int        `json:"duration_seconds,omitempty"`
+	MaxConcurrent   int        `json:"max_concurrent"`
+	LaunchDelay     string     `json:"launch_delay"`
+	NextToLaunch    int        `json:"next_to_launch"`
+	CancelRequested bool       `json:"cancel_requested"`
+	// CancelTerminated is how many members the orchestrator terminated on a
+	// cancel (#1349).
+	CancelTerminated int                 `json:"cancel_terminated,omitempty"`
+	Instances        []SweepInstanceInfo `json:"instances"`
 }
 
 // SweepInstanceInfo represents instance info within a sweep
@@ -187,6 +195,7 @@ type SweepRecord struct {
 	AWSAccountID           string          `dynamodbav:"aws_account_id"`
 	Status                 string          `dynamodbav:"status"`
 	CancelRequested        bool            `dynamodbav:"cancel_requested"`
+	CancelTerminated       int             `dynamodbav:"cancel_terminated,omitempty"`
 	EstimatedCost          float64         `dynamodbav:"estimated_cost,omitempty"`
 	Budget                 float64         `dynamodbav:"budget,omitempty"`
 	NextToLaunch           int             `dynamodbav:"next_to_launch"`
