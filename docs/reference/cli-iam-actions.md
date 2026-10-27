@@ -126,7 +126,7 @@ instances):
 | `spawn results retention` | `s3:GetObject`, `s3:GetObjectAnnotation`, `s3:GetObjectTagging`, `s3:ListBucket` |
 | `spawn resume` | `account:GetAccountInformation`, `dynamodb:GetItem`, `ec2:AllocateAddress`, `ec2:AssociateAddress`, `ec2:CancelSpotInstanceRequests`, `ec2:CreateTags`, `ec2:DescribeAddresses`, `ec2:DescribeImages`, `ec2:DescribeInstanceTypes`, `ec2:DescribeInstances`, `ec2:DescribeKeyPairs`, `ec2:DescribeRegions`, `ec2:DescribeSnapshots`, `ec2:DescribeSpotPriceHistory`, `ec2:DescribeSubnets`, `ec2:DescribeVpcs`, `ec2:DisassociateAddress`, `ec2:ImportKeyPair`, `ec2:ReleaseAddress`, `ec2:RunInstances`, `ec2:TerminateInstances`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreateRole`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:PutRolePolicy`, `lambda:InvokeFunction`, `pricing:GetProducts`, `servicequotas:GetServiceQuota`, `ssm:DescribeInstanceInformation`, `ssm:GetCommandInvocation`, `ssm:GetParameter`, `ssm:SendCommand` |
 | `spawn schedule cancel` | `dynamodb:DeleteItem`, `scheduler:DeleteSchedule` |
-| `spawn schedule create` | `dynamodb:DeleteItem`, `dynamodb:PutItem`, `ec2:DescribeImages`, `ec2:DescribeInstanceTypes`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreateRole`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:PutRolePolicy`, `s3:AbortMultipartUpload`, `s3:CreateBucket`, `s3:ListBucket`, `s3:PutBucketPublicAccessBlock`, `s3:PutLifecycleConfiguration`, `s3:PutObject`, `scheduler:CreateSchedule`, `scheduler:DeleteSchedule`, `ssm:GetParameter` |
+| `spawn schedule create` | `account:GetAccountInformation`, `dynamodb:DeleteItem`, `dynamodb:PutItem`, `ec2:DescribeImages`, `ec2:DescribeInstanceTypes`, `iam:AddRoleToInstanceProfile`, `iam:AttachRolePolicy`, `iam:CreateInstanceProfile`, `iam:CreateRole`, `iam:GetInstanceProfile`, `iam:GetRole`, `iam:PutRolePolicy`, `pricing:GetProducts`, `s3:AbortMultipartUpload`, `s3:CreateBucket`, `s3:ListBucket`, `s3:PutBucketPublicAccessBlock`, `s3:PutLifecycleConfiguration`, `s3:PutObject`, `scheduler:CreateSchedule`, `scheduler:DeleteSchedule`, `ssm:GetParameter` |
 | `spawn schedule list` | `dynamodb:Query` |
 | `spawn schedule pause` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `scheduler:UpdateSchedule` |
 | `spawn schedule resume` | `dynamodb:GetItem`, `dynamodb:UpdateItem`, `scheduler:UpdateSchedule` |
@@ -163,7 +163,7 @@ instances):
 
 | IAM action | Commands |
 | --- | --- |
-| `account:GetAccountInformation` | `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn service`, `spawn sweep resume`, `spawn task run` |
+| `account:GetAccountInformation` | `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
 | `dynamodb:BatchWriteItem` | `spawn notify workspace destroy` |
 | `dynamodb:CreateTable` | `spawn burst` |
 | `dynamodb:DeleteItem` | `spawn notify deregister`, `spawn notify register`, `spawn notify workspace destroy`, `spawn notify workspace remove`, `spawn schedule cancel`, `spawn schedule create`, `spawn team delete`, `spawn team remove` |
@@ -276,7 +276,7 @@ instances):
 | `logs:DescribeLogGroups` | `spawn footprint`, `spawn reaper deploy` |
 | `logs:FilterLogEvents` | `spawn reaper status`, `spawn reaper teardown` |
 | `logs:PutRetentionPolicy` | `spawn reaper deploy` |
-| `pricing:GetProducts` | `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn cost`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn service`, `spawn slurm estimate`, `spawn slurm submit`, `spawn sweep resume`, `spawn task run` |
+| `pricing:GetProducts` | `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn cost`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn slurm estimate`, `spawn slurm submit`, `spawn sweep resume`, `spawn task run` |
 | `route53:ListHostedZones` | `spawn doctor` |
 | `s3:AbortMultipartUpload` | `spawn image import`, `spawn launch`, `spawn schedule create` |
 | `s3:CreateBucket` | `spawn image import`, `spawn launch`, `spawn pool create`, `spawn reaper deploy`, `spawn schedule create`, `spawn service`, `spawn task run` |
