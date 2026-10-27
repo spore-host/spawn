@@ -313,20 +313,21 @@ func TestDetachedMemberSettingsAreTheForegroundMembers(t *testing.T) {
 
 // TestDetachedSweepRefusesWhatTheOrchestratorCannotLaunch: a setting the
 // orchestrator cannot honour fails the detached launch before anything is
-// uploaded, naming the setting and --no-detach, rather than launching members
+// uploaded, naming the setting and a remedy, rather than launching members
 // without it.
 func TestDetachedSweepRefusesWhatTheOrchestratorCannotLaunch(t *testing.T) {
 	cases := map[string]struct {
 		base aws.LaunchConfig
 		row  map[string]interface{}
 		want string
+		alt  string // the remedy the error offers
 	}{
-		"fsx-create":          {base: aws.LaunchConfig{FSxLustreCreate: true, FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}, want: "--fsx-create"},
-		"fsx-recall":          {base: aws.LaunchConfig{FSxLustreRecall: "stack"}, want: "--fsx-recall"},
-		"multi-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, want: "--efa-interfaces 4"},
-		"customer KMS key":    {base: aws.LaunchConfig{EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/k"}, want: "KMS key"},
-		"vpc without subnet":  {base: aws.LaunchConfig{VPCID: "vpc-1"}, want: "--vpc without --subnet"},
-		"hibernation pattern": {row: map[string]interface{}{"instance_type": "m7i.large|m7i.xlarge", "hibernate": true}, want: "instance type pattern"},
+		"fsx-create":          {base: aws.LaunchConfig{FSxLustreCreate: true, FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}, want: "--fsx-create", alt: "--fsx-id"},
+		"fsx-recall":          {base: aws.LaunchConfig{FSxLustreRecall: "stack"}, want: "--fsx-recall", alt: "--fsx-id"},
+		"multi-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, want: "--efa-interfaces 4", alt: "--no-detach"},
+		"customer KMS key":    {base: aws.LaunchConfig{EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/k"}, want: "KMS key", alt: "--no-detach"},
+		"vpc without subnet":  {base: aws.LaunchConfig{VPCID: "vpc-1"}, want: "--vpc without --subnet", alt: "Pass --subnet"},
+		"hibernation pattern": {row: map[string]interface{}{"instance_type": "m7i.large|m7i.xlarge", "hibernate": true}, want: "instance type pattern", alt: "--no-detach"},
 	}
 	for name, tc := range cases {
 		row := map[string]interface{}{"trial": "a"}
@@ -342,8 +343,8 @@ func TestDetachedSweepRefusesWhatTheOrchestratorCannotLaunch(t *testing.T) {
 			t.Errorf("%s: a detached sweep was seeded; its members would launch without the setting", name)
 			continue
 		}
-		if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "--no-detach") {
-			t.Errorf("%s: error %q does not name %q and --no-detach", name, err, tc.want)
+		if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), tc.alt) {
+			t.Errorf("%s: error %q does not name %q and the remedy %q", name, err, tc.want, tc.alt)
 		}
 		if _, shipped := pf.Params[0][detachedLaunchSettingsKey]; shipped {
 			t.Errorf("%s: settings were seeded for a refused member", name)

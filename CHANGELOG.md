@@ -315,10 +315,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the orchestrator applies them with the code `Client.Launch` uses. An
   orchestrator refuses a member whose settings are missing, of another schema
   version, or hold a field it does not know, rather than launching without
-  them. What it cannot honour is refused at `spawn launch --detach`, naming
-  `--no-detach`: `--fsx-create`, `--fsx-recall`, `--efa-interfaces` above 1,
-  a customer-managed EBS KMS key, `--vpc` without `--subnet`, and
-  hibernation with an instance-type pattern. The orchestrator must be
+  them. What it cannot honour is refused at `spawn launch --detach`, with
+  the remedy: `--fsx-create`, `--fsx-recall`, `--efa-interfaces` above 1, a
+  customer-managed EBS KMS key, `--vpc` without `--subnet`, and hibernation
+  with an instance-type pattern (a foreground sweep also drops the first two
+  and `--vpc`, #1366). The orchestrator must be
   redeployed with this release; sweeps and schedules created by an older CLI
   must be re-created.
 - **Cancelling a sweep from the dashboard now terminates its instances**
