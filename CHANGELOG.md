@@ -72,6 +72,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the member-account role is unchanged. `spawn cleanup --instance-roles` now
   also calls `dynamodb:Scan` and `s3:GetObject` with the infra profile
   `spawn schedule` uses.
+- **A detached sweep from an older spawn now stops at the first member the
+  account has no `spored-instance-profile` for, and says what to run**
+  (#1369). The sweep orchestrator launches a member from a v0.146.0-or-older
+  CLI's params, or from a schedule one created, with `spored-instance-profile`
+  when it names no `iam_role`. That CLI never created the profile on the
+  detached path, so an account that only ran detached sweeps or schedules may
+  not have it, and EC2 refuses every such member (`InvalidParameterValue`:
+  "Invalid IAM Instance Profile name"). The orchestrator now recognises that
+  refusal for those members: the member is not retried with its other instance
+  types, the members not yet attempted are not attempted, and the sweep is
+  `FAILED`. Its error, which `spawn status --sweep-id` shows, and the member's
+  row both name the remedy: re-run the sweep with spawn v0.147.0 or later
+  (`spawn launch --param-file <params-file>`), or for a schedule, `spawn
+  schedule cancel <id>` and `spawn schedule create <params-file>` again. Both
+  create the profile with your credentials before anything is uploaded. No
+  IAM is granted to the orchestrator or to any member-account role. A member
+  whose params a current CLI rendered keeps the old behaviour: its row fails
+  with EC2's error and the sweep's other members are still attempted. Takes
+  effect when the sweep orchestrator is redeployed from a release tag.
 
 ## [0.147.0] - 2026-10-28
 
