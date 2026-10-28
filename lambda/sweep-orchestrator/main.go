@@ -50,6 +50,12 @@ func isCapacityError(err error) (bool, string) {
 	if err == nil {
 		return false, ""
 	}
+	// A missing spored-instance-profile is not capacity: no other instance
+	// type or region has the profile either (#1369).
+	var lpe *legacyProfileError
+	if errors.As(err, &lpe) {
+		return false, ""
+	}
 
 	errStr := err.Error()
 	for _, code := range capacityErrorCodes {
@@ -502,39 +508,7 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 			toLaunch := min(available, state.TotalParams-state.NextToLaunch)
 			log.Printf("Launching %d instances (slots available: %d)", toLaunch, available)
 
-			for i := 0; i < toLaunch; i++ {
-				paramIndex := state.NextToLaunch
-				paramSet := params.Params[paramIndex]
-
-				// Merge defaults with param set
-				config := mergeParams(params.Defaults, paramSet)
-
-				// Launch instance
-				if err := launchInstance(ctx, ec2Client, state, config, paramIndex); err != nil {
-					log.Printf("Failed to launch instance %d: %v", paramIndex, err)
-					state.Failed++
-					state.Instances = append(state.Instances, SweepInstance{
-						Index:        paramIndex,
-						State:        "failed",
-						ErrorMessage: err.Error(),
-						LaunchedAt:   time.Now().Format(time.RFC3339),
-					})
-				} else {
-					state.Launched++
-				}
-
-				state.NextToLaunch++
-
-				// Save state after each launch
-				if err := saveSweepState(ctx, state); err != nil {
-					log.Printf("Failed to save state: %v", err)
-				}
-
-				// Delay between launches
-				if launchDelay > 0 && i < toLaunch-1 {
-					time.Sleep(launchDelay)
-				}
-			}
+			launchBatch(ctx, ec2Client, state, params, toLaunch, launchDelay)
 		}
 
 		// Check for completion
@@ -552,10 +526,11 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 			// consumer gets a new one to mishandle, and `spawn resume` correctly
 			// stops treating the sweep as finished.
 			state.Status = completionStatus(state.Launched, state.Failed)
+			state.Status = abortedStatus(state, state.Status)
 			switch {
 			case state.Status == "FAILED":
-				log.Printf("SWEEP FAILED: 0 of %d instances launched (%d failed) — see the "+
-					"per-instance ErrorMessage in the sweep record", state.TotalParams, state.Failed)
+				log.Printf("SWEEP FAILED: %d of %d instances launched (%d failed) — see the "+
+					"per-instance ErrorMessage in the sweep record", state.Launched, state.TotalParams, state.Failed)
 			case state.Failed > 0:
 				log.Printf("Sweep completed with failures: %d launched, %d failed of %d",
 					state.Launched, state.Failed, state.TotalParams)
@@ -580,6 +555,55 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 
 		// Wait for next poll
 		<-ticker.C
+	}
+}
+
+// launchBatch launches the single-region sweep's next toLaunch members, saving
+// the record after each. A legacy member refused for a missing
+// spored-instance-profile stops the sweep there (#1369): the members after it
+// are not attempted, and NextToLaunch moves past them so the polling loop
+// finishes the sweep.
+func launchBatch(ctx context.Context, ec2Client *ec2.Client, state *SweepRecord, params *ParamFileFormat, toLaunch int, launchDelay time.Duration) {
+	for i := 0; i < toLaunch; i++ {
+		paramIndex := state.NextToLaunch
+		paramSet := params.Params[paramIndex]
+
+		// Merge defaults with param set
+		config := mergeParams(params.Defaults, paramSet)
+
+		// Launch instance
+		aborted := false
+		if err := launchInstance(ctx, ec2Client, state, config, paramIndex); err != nil {
+			log.Printf("Failed to launch instance %d: %v", paramIndex, err)
+			state.Failed++
+			state.Instances = append(state.Instances, SweepInstance{
+				Index:        paramIndex,
+				State:        "failed",
+				ErrorMessage: err.Error(),
+				LaunchedAt:   time.Now().Format(time.RFC3339),
+			})
+			aborted = abortForLegacyProfile(state, err, state.TotalParams-paramIndex-1)
+		} else {
+			state.Launched++
+		}
+
+		state.NextToLaunch++
+		if aborted {
+			state.NextToLaunch = state.TotalParams
+		}
+
+		// Save state after each launch
+		if err := saveProgress(ctx, state); err != nil {
+			log.Printf("Failed to save state: %v", err)
+		}
+		if aborted {
+			return
+		}
+
+		// Delay between launches
+		if launchDelay > 0 && i < toLaunch-1 {
+			time.Sleep(launchDelay)
+		}
 	}
 }
 
@@ -758,7 +782,7 @@ func tryLaunchInstanceSingleRegion(ctx context.Context, ec2Client *ec2.Client, s
 			}
 		}()
 
-		return fmt.Errorf("run instances failed: %w", err)
+		return fmt.Errorf("run instances failed: %w", classifyLaunchError(state, config, input, paramIndex, err))
 	}
 
 	instanceID := *result.Instances[0].InstanceId
@@ -809,6 +833,10 @@ func reinvokeSelf(ctx context.Context, sweepID string) error {
 
 	return err
 }
+
+// saveProgress saves the record from the launch paths; a seam, so they can be
+// driven without DynamoDB.
+var saveProgress = saveSweepState
 
 // Helper functions
 
@@ -1230,6 +1258,7 @@ func runMultiRegionPollingLoop(ctx context.Context, state *SweepRecord, params *
 			// whose members launched, or whose every member's spored never came
 			// up (#1313), did not complete.
 			state.Status = completionStatus(state.Launched, state.Failed)
+			state.Status = abortedStatus(state, state.Status)
 			log.Printf("All instances launched and finished: %s (%d launched, %d failed)",
 				state.Status, state.Launched, state.Failed)
 			state.CompletedAt = time.Now().Format(time.RFC3339)
@@ -1453,6 +1482,10 @@ func launchAcrossRegions(ctx context.Context, orchestrator *RegionalOrchestrator
 	// Launch instances concurrently per region
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	// A legacy member refused for a missing spored-instance-profile stops the
+	// sweep (#1369): no region starts another launch once it is set.
+	aborted := false
+	var abortErr error
 
 	for _, region := range regions {
 		regionStatus := state.RegionStatus[region]
@@ -1480,7 +1513,10 @@ func launchAcrossRegions(ctx context.Context, orchestrator *RegionalOrchestrator
 			log.Printf("Region %s: launching %d instances", r, toLaunch)
 
 			for i := 0; i < toLaunch; i++ {
-				if len(rs.NextToLaunch) == 0 {
+				mu.Lock()
+				stop := len(rs.NextToLaunch) == 0 || aborted
+				mu.Unlock()
+				if stop {
 					break
 				}
 
@@ -1503,6 +1539,12 @@ func launchAcrossRegions(ctx context.Context, orchestrator *RegionalOrchestrator
 						ErrorMessage: err.Error(),
 						LaunchedAt:   time.Now().Format(time.RFC3339),
 					})
+					// The members still queued, in every region, are not
+					// attempted (#1369); counted when the queues are drained.
+					var lpe *legacyProfileError
+					if !aborted && errors.As(err, &lpe) {
+						aborted, abortErr = true, err
+					}
 					mu.Unlock()
 				} else {
 					mu.Lock()
@@ -1526,8 +1568,17 @@ func launchAcrossRegions(ctx context.Context, orchestrator *RegionalOrchestrator
 
 	wg.Wait()
 
+	if aborted {
+		notAttempted := 0
+		for _, rs := range state.RegionStatus {
+			notAttempted += len(rs.NextToLaunch)
+			rs.NextToLaunch = []int{}
+		}
+		abortForLegacyProfile(state, abortErr, notAttempted)
+	}
+
 	// Save state after batch
-	return saveSweepState(ctx, state)
+	return saveProgress(ctx, state)
 }
 
 // launchInstanceInRegion launches an instance with fallback support
@@ -1584,7 +1635,7 @@ func tryLaunchInstance(ctx context.Context, ec2Client *ec2.Client, state *SweepR
 			}
 		}()
 
-		return fmt.Errorf("run instances failed: %w", err)
+		return fmt.Errorf("run instances failed: %w", classifyLaunchError(state, config, input, paramIndex, err))
 	}
 
 	instanceID := *result.Instances[0].InstanceId
