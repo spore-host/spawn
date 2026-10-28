@@ -42,11 +42,24 @@ Resources:
               # because the CLI falls back to an account-scoped
               # spawn-schedules-<account>-<region> when the shared name is taken
               # (#804), and the schedule's region need not be this function's.
+              # DeleteObject: a schedule that has run out is completed here,
+              # which deletes its params (#1382); nothing expires them while
+              # the schedule lives.
               - Effect: Allow
                 Action:
                   - s3:GetObject
+                  - s3:DeleteObject
                 Resource:
                   - 'arn:aws:s3:::spawn-schedules-*/schedules/*'
+
+              # Completing a run-out schedule also deletes its EventBridge
+              # schedule (#1382). Schedules are created in this function's
+              # region, in the default group.
+              - Effect: Allow
+                Action:
+                  - scheduler:DeleteSchedule
+                Resource:
+                  - !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/*'
 
               # Start the sweep the way `spawn launch --param-file` does (#1026):
               # stage the params where the orchestrator's role can read them,

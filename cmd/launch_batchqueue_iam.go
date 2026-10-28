@@ -43,7 +43,7 @@ func batchQueueInstanceProfile(ctx context.Context, p batchQueueProfiler, explic
 
 // batchQueuePolicy is the inline policy of a batch queue's role: read the
 // queue file the bootstrap downloads (`aws s3 cp` of
-// s3://<scheduleBucket>/schedules/<queue_id>/params.yaml, staging.UploadScheduleParams),
+// s3://<scheduleBucket>/schedules/<queue_id>/params.yaml, staging.UploadQueueConfig),
 // and write under the results prefix, which is every key QueueRunner uploads
 // to (<prefix>/jobs/<job>/..., <prefix>/queue-state.json).
 //

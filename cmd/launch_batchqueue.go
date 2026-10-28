@@ -136,7 +136,7 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 
 	// Upload to S3
 	stagingClient := staging.NewClient(devCfg, accountID)
-	scheduleBucket, s3Key, size, _, err := stagingClient.UploadScheduleParams(ctx, tmpFile.Name(), queueConfig.QueueID, queueRegion)
+	scheduleBucket, s3Key, size, _, err := stagingClient.UploadQueueConfig(ctx, tmpFile.Name(), queueConfig.QueueID, queueRegion)
 	if err != nil {
 		return fmt.Errorf("failed to upload queue config: %w", err)
 	}

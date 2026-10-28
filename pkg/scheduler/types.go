@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -53,7 +54,71 @@ type ScheduleRecord struct {
 	EndAfter       time.Time `dynamodbav:"end_after,omitempty"`      // Zero value = unlimited
 	LastSweepID    string    `dynamodbav:"last_sweep_id,omitempty"`  // Most recent sweep ID
 	ScheduleARN    string    `dynamodbav:"schedule_arn,omitempty"`   // EventBridge schedule ARN
-	TTL            int64     `dynamodbav:"ttl"`                      // Auto-delete after 90 days
+	// TTL is the record's DynamoDB expiry (RecordTTL). omitempty: zero means
+	// no TTL attribute at all — a recurring schedule with no end must not
+	// age out while its EventBridge schedule fires (#1382).
+	TTL int64 `dynamodbav:"ttl,omitempty"`
+}
+
+// RecordTTLMargin is how long a schedule's record outlives its last possible
+// firing, so `spawn schedule show` can still explain a finished schedule. It
+// matches the execution history's 30-day TTL.
+const RecordTTLMargin = 30 * 24 * time.Hour
+
+// RecordTTL is the record's DynamoDB TTL (Unix seconds), or 0 for none.
+//
+// A schedule with a last possible firing — a one-time at() schedule, or one
+// with EndAfter — ages out RecordTTLMargin after it (the later of the two, if
+// both), with no cancel needed. It is never earlier: until then FiringAt can
+// still say FiringLaunches, and the record is what scheduler-handler and the
+// reaper's role sweep (#1378) read. CreateSchedule gives an EndAfter
+// schedule's EventBridge schedule the same end (EndDate), so the two go
+// together.
+//
+// A recurring schedule with no EndAfter has no last firing in time (a
+// MaxExecutions limit counts successful runs, which may never come), so it
+// gets no TTL: the record lives as long as the schedule. Its deleters are
+// `spawn schedule cancel` (DeleteSchedule) and, once it has run out,
+// scheduler-handler (CompleteSchedule, which then sets a TTL). This replaces
+// a flat now+90 days, which deleted the record of a schedule that kept
+// firing. Refreshing the TTL on each firing was the alternative, and is
+// worse: a paused schedule does not fire, nor does one whose cadence is
+// longer than the TTL, so both would lose their record while their
+// EventBridge schedule and params stayed.
+func (r *ScheduleRecord) RecordTTL() int64 {
+	var last time.Time
+	if at, ok := r.oneTimeAt(); ok {
+		last = at
+	}
+	if r.EndAfter.After(last) {
+		last = r.EndAfter
+	}
+	if last.IsZero() {
+		return 0
+	}
+	return last.Add(RecordTTLMargin).Unix()
+}
+
+// oneTimeAt is the firing time of an at(yyyy-mm-ddThh:mm:ss) expression, in
+// the schedule's Timezone (UTC if unset), as EventBridge reads it.
+func (r *ScheduleRecord) oneTimeAt() (time.Time, bool) {
+	expr := r.ScheduleExpression
+	if !strings.HasPrefix(expr, "at(") || !strings.HasSuffix(expr, ")") {
+		return time.Time{}, false
+	}
+	loc := time.UTC
+	if r.Timezone != "" {
+		l, err := time.LoadLocation(r.Timezone)
+		if err != nil {
+			return time.Time{}, false
+		}
+		loc = l
+	}
+	t, err := time.ParseInLocation("2006-01-02T15:04:05", expr[len("at("):len(expr)-1], loc)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // ExecutionHistory represents a record of a schedule execution attempt.
@@ -74,6 +139,9 @@ const (
 	ScheduleStatusActive    ScheduleStatus = "active"
 	ScheduleStatusPaused    ScheduleStatus = "paused"
 	ScheduleStatusCancelled ScheduleStatus = "cancelled"
+	// ScheduleStatusCompleted: the schedule ran out and scheduler-handler
+	// deleted its EventBridge schedule and params (CompleteSchedule).
+	ScheduleStatusCompleted ScheduleStatus = "completed"
 )
 
 // ScheduleType represents whether a schedule runs once or repeatedly.
@@ -103,7 +171,27 @@ const (
 	TableRegion          = "us-east-1"
 	ParamsBucketTemplate = "spawn-schedules-%s" // %s = the record's Region
 	ParamsKeyPrefix      = "schedules/"
+
+	// HandlerFunctionName is the function every schedule targets.
+	// scripts/deploy-scheduler-handler.sh deploys it once, in TableRegion,
+	// next to the table it reads. A schedule for another region keeps its
+	// control plane here and launches its members in its Region (#1383).
+	HandlerFunctionName = "scheduler-handler"
+	// ExecutionRoleName is the role EventBridge Scheduler assumes to invoke
+	// the handler.
+	ExecutionRoleName = "SpawnSchedulerExecutionRole"
 )
+
+// HandlerARN is the scheduler-handler function a schedule in accountID
+// targets: always in TableRegion, never the schedule's Region (#1383).
+func HandlerARN(accountID string) string {
+	return fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s", TableRegion, accountID, HandlerFunctionName)
+}
+
+// ExecutionRoleARN is the role EventBridge Scheduler invokes the handler as.
+func ExecutionRoleARN(accountID string) string {
+	return fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, ExecutionRoleName)
+}
 
 // Firing is what scheduler-handler does with a schedule's record when the
 // schedule fires.

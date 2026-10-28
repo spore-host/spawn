@@ -27,8 +27,10 @@ spawn schedule
 
 ### `spawn schedule cancel`
 
-Cancel a scheduled execution. This will delete the EventBridge schedule
-and update the DynamoDB record. No further executions will occur.
+Cancel a scheduled execution. This deletes everything 'spawn schedule
+create' made for it: the EventBridge schedule, the uploaded parameter file and
+the schedule's record. No further executions will occur. Cancelling a schedule
+that is already gone succeeds.
 
 Examples:
   spawn schedule cancel sched-20260122-140530
@@ -79,7 +81,7 @@ spawn schedule create <params-file> [flags]
 | `--end-after` |  | string |  | Stop executing after this time (ISO 8601 format) |
 | `--max-executions` |  | int |  | Maximum number of executions (0 = unlimited) |
 | `--name` |  | string |  | Friendly name for this schedule |
-| `--region` |  | string | `us-east-1` | AWS region for sweep execution |
+| `--region` |  | string | `us-east-1` | AWS region the sweep's instances launch in (the schedule itself always runs from us-east-1) |
 | `--timezone` |  | string | `UTC` | IANA timezone (e.g., America/New_York) |
 
 ### `spawn schedule list`

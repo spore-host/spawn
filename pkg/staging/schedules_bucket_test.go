@@ -35,7 +35,7 @@ func newStagingClient(t *testing.T, accountID string) (*Client, *s3.Client) {
 func TestResolveSchedulesBucketPrefersTheSharedName(t *testing.T) {
 	c, _ := newStagingClient(t, "123456789012")
 
-	bucket, err := c.resolveSchedulesBucket(context.Background(), "us-east-1")
+	bucket, err := c.resolveSchedulesBucket(context.Background(), "us-east-1", kindScheduleParams)
 	if err != nil {
 		t.Fatalf("resolveSchedulesBucket: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestResolveSchedulesBucketReturnsTheBucketItCreated(t *testing.T) {
 	ctx := context.Background()
 	c, s3c := newStagingClient(t, "123456789012")
 
-	bucket, err := c.resolveSchedulesBucket(ctx, "us-west-2")
+	bucket, err := c.resolveSchedulesBucket(ctx, "us-west-2", kindScheduleParams)
 	if err != nil {
 		t.Fatalf("resolveSchedulesBucket: %v", err)
 	}
@@ -100,11 +100,11 @@ func TestEnsureBucketIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	c, _ := newStagingClient(t, "123456789012")
 
-	first, err := c.resolveSchedulesBucket(ctx, "us-east-1")
+	first, err := c.resolveSchedulesBucket(ctx, "us-east-1", kindScheduleParams)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	second, err := c.resolveSchedulesBucket(ctx, "us-east-1")
+	second, err := c.resolveSchedulesBucket(ctx, "us-east-1", kindScheduleParams)
 	if err != nil {
 		t.Fatalf("second call on an existing bucket: %v", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
@@ -116,8 +117,10 @@ Examples:
 var scheduleCancelCmd = &cobra.Command{
 	Use:   "cancel <schedule-id>",
 	Short: "Cancel a scheduled execution",
-	Long: `Cancel a scheduled execution. This will delete the EventBridge schedule
-and update the DynamoDB record. No further executions will occur.
+	Long: `Cancel a scheduled execution. This deletes everything 'spawn schedule
+create' made for it: the EventBridge schedule, the uploaded parameter file and
+the schedule's record. No further executions will occur. Cancelling a schedule
+that is already gone succeeds.
 
 Examples:
   spawn schedule cancel sched-20260122-140530
@@ -160,7 +163,7 @@ func init() {
 	scheduleCreateCmd.Flags().StringVar(&scheduleName, "name", "", "Friendly name for this schedule")
 	scheduleCreateCmd.Flags().IntVar(&scheduleMaxExec, "max-executions", 0, "Maximum number of executions (0 = unlimited)")
 	scheduleCreateCmd.Flags().StringVar(&scheduleEndAfter, "end-after", "", "Stop executing after this time (ISO 8601 format)")
-	scheduleCreateCmd.Flags().StringVar(&scheduleRegion, "region", "us-east-1", "AWS region for sweep execution")
+	scheduleCreateCmd.Flags().StringVar(&scheduleRegion, "region", "us-east-1", "AWS region the sweep's instances launch in (the schedule itself always runs from us-east-1)")
 
 	// List subcommand flags
 	scheduleListCmd.Flags().StringVar(&scheduleStatus, "status", "", "Filter by status (active|paused|cancelled)")
@@ -191,8 +194,10 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "\n📅 Creating Scheduled Execution\n\n")
 
-	// Load AWS config for spore-host-infra
-	cfg, err := spawnconfig.LoadInfraAWSConfig(ctx, "us-east-1")
+	// Load AWS config for spore-host-infra, in the schedules' control-plane
+	// region (the table, the EventBridge schedule and its target all live
+	// there, #1383).
+	cfg, err := spawnconfig.LoadInfraAWSConfig(ctx, scheduler.TableRegion)
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
@@ -320,10 +325,7 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 
 	// Create EventBridge schedule
 	fmt.Fprintf(os.Stderr, "\n⏰ Creating EventBridge schedule...\n")
-	lambdaARN := fmt.Sprintf("arn:aws:lambda:%s:%s:function:scheduler-handler", scheduleRegion, accountID)
-	roleARN := fmt.Sprintf("arn:aws:iam::%s:role/SpawnSchedulerExecutionRole", accountID)
-
-	schedulerClient := scheduler.NewClient(cfg, lambdaARN, roleARN, accountID)
+	schedulerClient := scheduleTargetClient(cfg, accountID)
 	scheduleARN, err := schedulerClient.CreateSchedule(ctx, record)
 	if err != nil {
 		return fmt.Errorf("failed to create schedule: %w", err)
@@ -551,7 +553,9 @@ func updateScheduleStatusCmd(ctx context.Context, scheduleID string, status sche
 		return fmt.Errorf("failed to get caller identity: %w", err)
 	}
 
-	schedulerClient := scheduler.NewClient(cfg, "", "", accountID)
+	// UpdateSchedule replaces the whole schedule, target included, so it
+	// needs the same target CreateSchedule set.
+	schedulerClient := scheduleTargetClient(cfg, accountID)
 
 	// Update schedule status
 	if err := schedulerClient.UpdateScheduleStatus(ctx, scheduleID, status); err != nil {
@@ -560,6 +564,19 @@ func updateScheduleStatusCmd(ctx context.Context, scheduleID string, status sche
 
 	fmt.Fprintf(os.Stderr, "✅ Schedule %s successfully!\n\n", strings.ToLower(string(status)))
 	return nil
+}
+
+// scheduleTargetClient is the scheduler client for calls that set a
+// schedule's target (create, pause, resume).
+//
+// The target is the one scheduler-handler, in the infra account's us-east-1
+// (scheduler.TableRegion), whatever --region says: it is the only place the
+// handler is deployed, next to the record it reads. --region is where the
+// sweep's instances go, carried on the record (Region) for the orchestrator.
+// This used to put --region in the ARN, so a schedule for any other region
+// targeted a function that does not exist (#1383).
+func scheduleTargetClient(cfg awssdk.Config, accountID string) *scheduler.Client {
+	return scheduler.NewClient(cfg, scheduler.HandlerARN(accountID), scheduler.ExecutionRoleARN(accountID), accountID)
 }
 
 // Helper functions
