@@ -658,6 +658,11 @@ func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
 			plat := testSweepPlat(t)
 			fgBefore, _ := launchedSweep(t, plat, recordParamFile())
 			before, err := pfOf(t)
+			if err != nil && len(flagPrereqs[n]) > 0 && strings.Contains(err.Error(), "cannot be used on a detached sweep") {
+				// Its prerequisites are themselves refused detached (--efa-secondary-type
+				// needs --efa-interfaces 2, #1404), so there is nothing to resume.
+				t.Skipf("a detached launch refuses --%s's prerequisites %v (%v)", n, flagPrereqs[n], err)
+			}
 			if err != nil {
 				t.Fatalf("baseline: %v", err)
 			}
