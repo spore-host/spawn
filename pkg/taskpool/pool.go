@@ -134,8 +134,9 @@ func DrainRunWithConfig(ctx context.Context, cfg awssdk.Config, runID string) (a
 
 // Depth reports the queue's visible + in-flight task counts — used to decide when
 // a run has drained (both zero → nothing left to run). Approximate; the
-// authoritative per-task signal is each completion record.
-func (p *Pool) Depth(ctx context.Context) (visible, inFlight int, err error) {
+// authoritative per-task signal is each completion record. A nil count is
+// unknown, not zero (see Queue.Depth).
+func (p *Pool) Depth(ctx context.Context) (visible, inFlight *int, err error) {
 	return p.Queue.Depth(ctx)
 }
 

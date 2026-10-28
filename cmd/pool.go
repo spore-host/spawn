@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -579,9 +580,22 @@ var poolStatusCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Printf("pool %s: %d waiting, %d in-flight\n", poolRunID, visible, inFlight)
+		fmt.Print(poolStatusLine(poolRunID, visible, inFlight))
 		return nil
 	},
+}
+
+// poolStatusLine is what `pool status` prints. A nil count is one SQS did not
+// report, shown as "unknown" rather than 0 (#1362).
+func poolStatusLine(runID string, visible, inFlight *int) string {
+	return fmt.Sprintf("pool %s: %s waiting, %s in-flight\n", runID, depthCount(visible), depthCount(inFlight))
+}
+
+func depthCount(n *int) string {
+	if n == nil {
+		return "unknown"
+	}
+	return strconv.Itoa(*n)
 }
 
 var poolDrainCmd = &cobra.Command{

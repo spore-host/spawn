@@ -284,7 +284,12 @@ func (q *Queue) Ack(ctx context.Context, c *Claimed) error {
 // the pool to decide when the run has drained (both zero → all tasks done or
 // dropped). Approximate is fine: it's a drain heuristic, not a correctness gate
 // (the authoritative per-task signal is each completion record).
-func (q *Queue) Depth(ctx context.Context) (visible, inFlight int, err error) {
+//
+// A nil count is unknown: SQS (or an SQS-compatible provider) omitted the
+// attribute or returned something that is not a count. Unknown is not zero,
+// and a caller must not read it as an empty queue (#1362); the parsing is
+// poolqueue.Count, the same rule the pool-queue sweep applies.
+func (q *Queue) Depth(ctx context.Context) (visible, inFlight *int, err error) {
 	out, err := q.client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 		QueueUrl: aws.String(q.url),
 		AttributeNames: []types.QueueAttributeName{
@@ -293,11 +298,19 @@ func (q *Queue) Depth(ctx context.Context) (visible, inFlight int, err error) {
 		},
 	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("queue depth for %s: %w", q.name, err)
+		return nil, nil, fmt.Errorf("queue depth for %s: %w", q.name, err)
 	}
-	visible = atoiDefault(out.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)])
-	inFlight = atoiDefault(out.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible)])
-	return visible, inFlight, nil
+	return knownCount(out.Attributes, types.QueueAttributeNameApproximateNumberOfMessages),
+		knownCount(out.Attributes, types.QueueAttributeNameApproximateNumberOfMessagesNotVisible), nil
+}
+
+// knownCount is poolqueue.Count as a pointer: nil when the count is unknown.
+func knownCount(attrs map[string]string, name types.QueueAttributeName) *int {
+	n, ok := poolqueue.Count(attrs, name)
+	if !ok {
+		return nil
+	}
+	return &n
 }
 
 // Delete removes the run-scoped queue entirely — the submitter's drain step, once
@@ -309,15 +322,4 @@ func (q *Queue) Delete(ctx context.Context) error {
 		return fmt.Errorf("delete queue %s: %w", q.name, err)
 	}
 	return nil
-}
-
-func atoiDefault(s string) int {
-	n := 0
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n
 }

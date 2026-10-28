@@ -313,3 +313,23 @@ func TestPoolDrainMessageAlreadyDrained(t *testing.T) {
 		t.Errorf("already-drained message = %q", msg)
 	}
 }
+
+// TestPoolStatusLineUnknown: `pool status` prints "unknown" for a count SQS
+// did not report, not 0 (#1362), and still prints the counts it did.
+func TestPoolStatusLineUnknown(t *testing.T) {
+	three := 3
+	zero := 0
+	cases := []struct {
+		visible, inFlight *int
+		want              string
+	}{
+		{nil, nil, "pool r: unknown waiting, unknown in-flight\n"},
+		{&three, nil, "pool r: 3 waiting, unknown in-flight\n"},
+		{&zero, &three, "pool r: 0 waiting, 3 in-flight\n"},
+	}
+	for _, c := range cases {
+		if got := poolStatusLine("r", c.visible, c.inFlight); got != c.want {
+			t.Errorf("poolStatusLine = %q, want %q", got, c.want)
+		}
+	}
+}

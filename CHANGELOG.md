@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script wrote the Slack secret grant), with its document printed first. Any
   other inline policy is left alone, and a policy that fails the check is kept
   with a warning.
+- **`spawn pool status` prints `unknown` for a queue count SQS did not
+  report, instead of 0** (#1362). A missing or unparseable
+  `ApproximateNumberOfMessages` / `ApproximateNumberOfMessagesNotVisible` was
+  shown as `0 waiting, 0 in-flight`, as if the queue were known to be empty.
+  API: `taskpool.Queue.Depth` and `taskpool.Pool.Depth` now return
+  `(visible, inFlight *int, err error)`; a nil count is unknown, not zero. The
+  counts are parsed by the new `poolqueue.Count`, the same rule
+  `spawn cleanup --pool-queues` and the reaper use.
 
 ## [0.147.0] - 2026-10-28
 

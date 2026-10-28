@@ -447,12 +447,11 @@ func gather(ctx context.Context, api SQSAPI, url, name string, inUse InUse) (Fac
 		sqstypes.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
 		sqstypes.QueueAttributeNameApproximateNumberOfMessagesDelayed,
 	} {
-		v, present := attrs.Attributes[string(a)]
-		if !present && a == sqstypes.QueueAttributeNameApproximateNumberOfMessagesDelayed {
+		if _, present := attrs.Attributes[string(a)]; !present && a == sqstypes.QueueAttributeNameApproximateNumberOfMessagesDelayed {
 			continue
 		}
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
+		n, ok := Count(attrs.Attributes, a)
+		if !ok {
 			f.CountsKnown = false
 			continue
 		}
@@ -462,6 +461,22 @@ func gather(ctx context.Context, api SQSAPI, url, name string, inUse InUse) (Fac
 		f.Created = time.Unix(s, 0).UTC()
 	}
 	return f, nil
+}
+
+// Count reads one of SQS's approximate message counts from a
+// GetQueueAttributes result. ok is false when the attribute is missing, not a
+// number, or negative: an unreadable count is unknown, never zero. It is the
+// one parser for these counts, shared with taskpool.Queue.Depth (#1362).
+func Count(attrs map[string]string, name sqstypes.QueueAttributeName) (n int, ok bool) {
+	v, present := attrs[string(name)]
+	if !present {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // sweepSpecs decides and (with opts.Delete) deletes each run's staged specs.

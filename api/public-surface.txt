@@ -856,13 +856,13 @@ field WorkerConfig.Log io.Writer
 field WorkerConfig.PollWaitSeconds int32
 func (*DirWorkspace) Acquire(taskID string) (string, error)
 func (*DirWorkspace) Reset(dir string) error
-func (*Pool) Depth(ctx context.Context) (visible, inFlight int, err error)
+func (*Pool) Depth(ctx context.Context) (visible, inFlight *int, err error)
 func (*Pool) Drain(ctx context.Context) error
 func (*Pool) Enqueue(ctx context.Context, spec *taskproto.TaskSpec, specJSON []byte) error
 func (*Queue) Ack(ctx context.Context, c *Claimed) error
 func (*Queue) Claim(ctx context.Context, waitSeconds int32) (*Claimed, error)
 func (*Queue) Delete(ctx context.Context) error
-func (*Queue) Depth(ctx context.Context) (visible, inFlight int, err error)
+func (*Queue) Depth(ctx context.Context) (visible, inFlight *int, err error)
 func (*Queue) Submit(ctx context.Context, ref TaskRef) error
 func (*Queue) TagErr() error
 func (*Queue) URL() string
