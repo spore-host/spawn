@@ -47,6 +47,11 @@ type SweepState struct {
 	// IAMRole is the profile the CLI IAM flags resolved to, and how it was
 	// made; nil when none were passed.
 	IAMRole *SweepIAMRole `json:"iam_role,omitempty"`
+	// Lifetime is the CLI lifetime and enforcement settings the members
+	// launched with (--ttl, --idle-timeout, --cost-limit, --no-timeout, ...),
+	// set on every checkpoint written since #1394; nil on an older one, whose
+	// resumed members get the launch defaults instead.
+	Lifetime *SweepLifetime `json:"lifetime,omitempty"`
 }
 
 // InstanceState tracks the state of a single instance in a sweep

@@ -91,6 +91,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn sweep resume` (and `spawn resume`) keeps the sweep's lifetime
+  bounds; a resumed member could run with no TTL, idle timeout or cost
+  limit** (#1394). A resume rebuilt each pending member from the param file
+  alone, so the `--ttl`, `--idle-timeout` and `--cost-limit` the sweep was
+  launched with (and `--on-idle`, `--on-complete`, the completion and
+  session settings, `--no-timeout`) were dropped, and the 1h idle default a
+  fresh launch applies was never applied. New checkpoints record these
+  settings (`lifetime` in `~/.spawn/sweeps/<id>.json`) and a resume
+  re-applies them to every pending member, a row's own value still winning
+  as at launch. A checkpoint written before this gets the launch defaults
+  (the row's own bound, else a 1h idle timeout) and a notice. `spawn sweep
+  resume` gains `--ttl`, `--idle-timeout` and `--cost-limit`, which replace
+  the recorded values but may only tighten them: a resume that would give a
+  member a longer TTL or idle timeout, a higher cost limit, or drop one, is
+  refused before anything is launched, as is a member left with no bound at
+  all (a `--no-timeout` sweep), with a message saying to pass `--ttl`. A
+  detached sweep's orchestrator already relaunches from the params uploaded
+  at launch, which carry the bounds; `--detach` refuses the three new flags
+  rather than ignore them.
+
 - **`spawn sweep resume` (and `spawn resume`, foreground and `--detach`)
   re-creates a sweep's `spawn-instance-*` instance profile if the idle-role
   sweep deleted it, and launches with the role the sweep was launched with**

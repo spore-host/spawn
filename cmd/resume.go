@@ -22,7 +22,15 @@ var (
 	resumeMaxConcurrentAuto bool
 	resumeDetach            bool
 	resumeKeepOnError       bool
+	resumeTTL               string
+	resumeIdleTimeout       string
+	resumeCostLimit         float64
 )
+
+// resumeLifetimeFlagValues is resume's --ttl, --idle-timeout and --cost-limit.
+func resumeLifetimeFlagValues() resumeLifetimeFlags {
+	return resumeLifetimeFlags{ttl: resumeTTL, idleTimeout: resumeIdleTimeout, costLimit: resumeCostLimit}
+}
 
 var resumeCmd = &cobra.Command{
 	Use:   "resume",
@@ -42,6 +50,14 @@ Examples:
 
   # Resume in detached mode (Lambda)
   spawn resume --sweep-id <id> --detach
+
+Lifetime bounds: each relaunched member gets the lifetime flags the sweep
+was launched with (--ttl, --idle-timeout, --cost-limit, --on-idle,
+--no-timeout and the completion settings), and a row's own value still wins.
+Passing --ttl, --idle-timeout or --cost-limit here replaces the recorded
+value, but may only tighten it. A checkpoint written before spawn recorded
+them gets the launch defaults: the row's own bound, else a 1h idle timeout. A
+member left with no bound at all is refused.
 `,
 	RunE: runResume,
 }
@@ -64,6 +80,9 @@ func registerResumeFlags(c *cobra.Command) {
 	c.Flags().BoolVar(&resumeMaxConcurrentAuto, "max-concurrent-auto", false, "Re-derive max concurrent instances from the account's real AWS quota headroom for the pending parameter sets' instance type(s)/region, instead of the original or a user-supplied number (spawn#494). Not yet supported with --detach.")
 	c.Flags().BoolVar(&resumeDetach, "detach", false, "Run sweep orchestration in Lambda")
 	c.Flags().BoolVar(&resumeKeepOnError, "keep-on-error", false, "Keep a relaunched instance whose spored never came up instead of terminating it. It then has no TTL/idle/cost-limit enforcement until spored is confirmed running")
+	c.Flags().StringVar(&resumeTTL, "ttl", "", "Time to live for each relaunched member (e.g. 4h, 1d), replacing the sweep's --ttl; may not be longer than it. A row's own ttl: still wins. Not supported with --detach")
+	c.Flags().StringVar(&resumeIdleTimeout, "idle-timeout", "", "Idle timeout for each relaunched member, replacing the sweep's --idle-timeout; may not be longer than it. A row's own idle_timeout: still wins. Not supported with --detach")
+	c.Flags().Float64Var(&resumeCostLimit, "cost-limit", 0, "Cost limit in USD for each relaunched member, replacing the sweep's --cost-limit; may not be higher than it. A row's own cost_limit: still wins. Not supported with --detach")
 }
 
 func runResume(cmd *cobra.Command, args []string) error {
@@ -85,6 +104,9 @@ func runResume(cmd *cobra.Command, args []string) error {
 		// rather than silently ignoring the flag.
 		if resumeMaxConcurrentAuto {
 			return fmt.Errorf("--max-concurrent-auto is not yet supported with --detach (spawn#494)")
+		}
+		if err := refuseDetachedLifetimeFlags(resumeLifetimeFlagValues()); err != nil {
+			return err
 		}
 		return resumeSweepDetached(ctx, resumeSweepID)
 	}
@@ -128,8 +150,17 @@ func runResume(cmd *cobra.Command, args []string) error {
 	// spored-instance-profile (#1385). Before the nested-role check, which then
 	// sees the same profile the original launch did.
 	applyRecordedIAM(state.IAMRole, paramFormat)
-	// Resume rebuilds each row from the file and the checkpoint (no --ttl), so
-	// a row naming a nested-spawn role needs a ttl: in the file (#1375).
+	// The CLI lifetime flags the sweep launched with, from the checkpoint, and
+	// resume's own --ttl/--idle-timeout/--cost-limit over them (#1394). Folded
+	// into the defaults before the nested-role check, which then sees the TTL
+	// the original launch did.
+	lifetime, err := planResumeLifetime(state.Lifetime, paramFormat, resumeLifetimeFlagValues())
+	if err != nil {
+		return err
+	}
+	noteOldCheckpointLifetime(state, resumeLifetimeFlagValues())
+	// Resume rebuilds each row from the file and the checkpoint, so a row
+	// naming a nested-spawn role needs a TTL from either (#1375).
 	if err := refuseNestedSweepRowsWithoutTTL(paramFormat, ""); err != nil {
 		return err
 	}
@@ -219,15 +250,15 @@ func runResume(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to detect platform: %w", err)
 	}
-	launchConfigs := make([]*aws.LaunchConfig, 0, len(pending))
+	// Each member with the bounds the original launch gave it; refused, before
+	// anything is created, if one would be weaker or unbounded (#1394).
+	launchConfigs, err := lifetime.members(paramFormat, state, pending)
+	if err != nil {
+		return err
+	}
 
-	for _, idx := range pending {
-		paramSet := paramFormat.Params[idx]
-		config, err := buildLaunchConfigFromParams(aws.LaunchConfig{}, paramFormat.Defaults, paramSet, state.SweepID, state.SweepName, idx, state.TotalParams)
-		if err != nil {
-			return fmt.Errorf("failed to build launch config for parameter set %d: %w", idx, err)
-		}
-
+	for i, config := range launchConfigs {
+		idx := pending[i]
 		// Set region: the parameter file's own (per-set or default) region
 		// wins, then the resolved fallback. With neither there is no region
 		// to launch into, and guessing one is how a sweep lands in the wrong
@@ -244,8 +275,6 @@ func runResume(cmd *cobra.Command, args []string) error {
 		if config.Name == "" {
 			config.Name = fmt.Sprintf("%s-%d", state.SweepName, idx)
 		}
-
-		launchConfigs = append(launchConfigs, &config)
 	}
 
 	// --max-concurrent-auto (#494): now that the pending launch configs are
@@ -542,10 +571,16 @@ func resolveResumeRegions(state *SweepState, pf *ParamFileFormat, flagRegion, co
 // guard verifies each relaunched member's spored and terminates one that never
 // comes up, as on a fresh sweep (#1305); the caller defers guard.finish.
 //
-// Before the first launch, every spawn-created instance profile the members
+// Before the first launch, every member is checked for a bound
+// (refuseUnboundedResume), and every spawn-created instance profile the members
 // name is made to exist again through iam (ensureResumeProfiles): the idle-role
 // sweep may have deleted one since the sweep last ran (#1385).
 func relaunchPending(ctx context.Context, l sweepLauncher, state *SweepState, launchConfigs []*aws.LaunchConfig, pending []int, maxConcurrent int, guard *fleetGuard, iam resumeProfileEnsurer) ([]*aws.LaunchResult, []string, int, error) {
+	// No member reaches the queue without a TTL, idle timeout or cost limit
+	// (#1394); runResume refused it already, this is the backstop.
+	if err := refuseUnboundedResume(launchConfigs, pending); err != nil {
+		return nil, nil, 0, &resumeProfileError{err}
+	}
 	if err := ensureResumeProfiles(ctx, iam, state.IAMRole, state.ParamFile, launchConfigs); err != nil {
 		return nil, nil, 0, &resumeProfileError{err}
 	}

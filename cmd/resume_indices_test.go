@@ -89,7 +89,7 @@ func TestResume_RelaunchRecordsParameterIndicesAndMergesState(t *testing.T) {
 
 	configs := make([]*aws.LaunchConfig, 0, len(pending))
 	for _, idx := range pending {
-		configs = append(configs, &aws.LaunchConfig{Name: fmt.Sprintf("sweep-%d", idx), Region: "us-west-2"})
+		configs = append(configs, &aws.LaunchConfig{Name: fmt.Sprintf("sweep-%d", idx), Region: "us-west-2", TTL: "1h"})
 	}
 	launcher := &fakeSweepLauncher{}
 	// maxConcurrent 1: set 3 launches in the initial batch and set 7 from the
