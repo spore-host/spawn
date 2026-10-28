@@ -146,6 +146,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **New AWS permissions for the credentials you run spawn with.** The full list of
+  AWS actions each command needs is now generated and enforced in
+  [`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md) (#254).
+  New in this release:
+  - `ec2:CopyImage`: `spawn ami copy` (#1169).
+  - `sqs:ListQueues`, `sqs:ListQueueTags`, `s3:ListBucketVersions` and
+    `s3:ListBucketMultipartUploads`: `spawn cleanup` (#1301, #1351).
+  - `sqs:TagQueue`: `spawn pool create` tags its queue (#1351). Without it the pool
+    still works, warns, and only `spawn pool drain` deletes that queue.
+  - `pricing:GetProducts` and `account:GetAccountInformation`: `spawn schedule create`
+    now prices the sweep it schedules (#1330).
+  - The instance-role calls `spawn launch` already made (`iam:CreateRole`,
+    `iam:PutRolePolicy`, `iam:CreateInstanceProfile` and the rest) are now also made by
+    `spawn app launch`, `image import`, `pool create`, `service`, `task run` and
+    `launch --batch-queue` (#1300, #1319, #1344).
+
+  Old CLIs keep working with the redeployed sweep orchestrator: a v0.146.0-or-older
+  detached sweep or existing schedule gets its spored bootstrap and tags built by the
+  orchestrator (#1368).
+
 - **Sweeps and schedules from a spawn CLI at v0.146.0 or older keep launching
   on the redeployed sweep orchestrator, now with spored** (#1368). Such a CLI
   uploads only `ami`, `iam_role`, `instance_type`, `key_name`, `spot` and
