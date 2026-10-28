@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,13 +25,12 @@ func TestResumedSweepUserDataFitsEC2(t *testing.T) {
 	}
 	plat := &platform.Platform{OS: "linux", HomeDir: dir, SSHPubKeyPath: pub}
 
-	encoded, err := resumeUserData(plat, &spawnaws.LaunchConfig{
-		SweepID:         "sweep-1",
-		JobArrayCommand: "echo resumed",
-	})
-	if err != nil {
-		t.Fatalf("resumeUserData: %v", err)
+	// A resume renders through the launch's renderer since #1400.
+	cfg := &spawnaws.LaunchConfig{SweepID: "sweep-1", JobArrayCommand: "echo resumed"}
+	if err := renderForegroundSweepUserData(context.Background(), plat, []*spawnaws.LaunchConfig{cfg}, newSweepStorage(&fakeStorageLookups{}, io.Discard)); err != nil {
+		t.Fatalf("render: %v", err)
 	}
+	encoded := cfg.UserData
 	decoded, encodedLen := spawnaws.UserDataSize(encoded)
 	if err := spawnaws.CheckUserDataSize(encoded); err != nil {
 		t.Fatalf("a resumed sweep member's user data would be refused by RunInstances: %v", err)

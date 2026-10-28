@@ -129,17 +129,23 @@ type resumeLifetime struct {
 	orig *SweepLifetime
 	// fileDefaults is the param file's defaults: before anything was folded in.
 	fileDefaults map[string]interface{}
+	// record is the checkpoint's full record, its withheld settings re-passed
+	// (restoreMemberRecord); nil for a checkpoint written before #1400, whose
+	// members start from the lifetime record alone.
+	record *SweepMemberRecord
 }
 
 // planResumeLifetime resolves a resume's lifetime settings from the checkpoint
 // record and resume's flags, and folds them into pf's defaults (so the
 // nested-role TTL check sees what the original launch saw). It must run after
-// applyRecordedIAM, which also writes pf's defaults.
-func planResumeLifetime(rec *SweepLifetime, pf *ParamFileFormat, flags resumeLifetimeFlags) (*resumeLifetime, error) {
+// applyRecordedIAM, which also writes pf's defaults. member is the full record
+// (#1400), or nil for an older checkpoint; rec is the lifetime record either
+// way (SweepState.lifetimeRecord).
+func planResumeLifetime(rec *SweepLifetime, member *SweepMemberRecord, pf *ParamFileFormat, flags resumeLifetimeFlags) (*resumeLifetime, error) {
 	if err := flags.validate(); err != nil {
 		return nil, err
 	}
-	p := &resumeLifetime{orig: rec, fileDefaults: map[string]interface{}{}}
+	p := &resumeLifetime{orig: rec, fileDefaults: map[string]interface{}{}, record: member}
 	if rec != nil {
 		p.eff = *rec
 	}
@@ -156,20 +162,44 @@ func (p *resumeLifetime) defaults(l SweepLifetime) map[string]interface{} {
 	for k, v := range p.fileDefaults {
 		d[k] = v
 	}
+	// What the launch folded in from its base (#697, #544), with the same
+	// functions.
+	if p.record != nil {
+		seedSweepDefaults(d, p.record.Base)
+		foldVolumeSize(d, p.record.Base.RootVolumeSizeGiB)
+	}
 	foldSpendControls(d, l.TTL, l.IdleTimeout, l.CostLimit)
 	return d
 }
 
-// member builds pending member idx as the original launch did: the recorded
-// base config, the folded defaults, the row, and the 1h idle default for a
-// member with no ttl and no idle timeout unless --no-timeout was passed.
-func (p *resumeLifetime) member(l SweepLifetime, row map[string]interface{}, state *SweepState, idx int) (aws.LaunchConfig, error) {
-	cfg, err := buildLaunchConfigFromParams(l.launchBase(), p.defaults(l), row, state.SweepID, state.SweepName, idx, state.TotalParams)
-	if err != nil {
-		return cfg, err
+// base is the config a pending member starts from, with lifetime l: the
+// recorded base (#1400), else, for an older checkpoint, the lifetime record
+// alone.
+func (p *resumeLifetime) base(l SweepLifetime) aws.LaunchConfig {
+	if p.record == nil {
+		return l.launchBase()
 	}
-	applyIdleDefault(&cfg, l.NoTimeout)
-	return cfg, nil
+	b := p.record.Base
+	b.TTL, b.IdleTimeout, b.CostLimit = l.TTL, l.IdleTimeout, l.CostLimit
+	return b
+}
+
+// installBootstrap points the user-data builder at the recorded bootstrap
+// inputs (SweepBootstrapInputs.install); a no-op for an older checkpoint.
+func (p *resumeLifetime) installBootstrap() func() {
+	if p.record == nil {
+		return func() {}
+	}
+	return p.record.Bootstrap.install()
+}
+
+// member builds pending member idx as the original launch did, with the
+// launch's own builder (sweepMemberConfig): the recorded base config, the
+// folded defaults, the row, and the 1h idle default for a member with no ttl
+// and no idle timeout unless --no-timeout was passed.
+func (p *resumeLifetime) member(l SweepLifetime, row map[string]interface{}, state *SweepState, idx int) (aws.LaunchConfig, error) {
+	cfg, _, err := sweepMemberConfig(p.base(l), p.defaults(l), row, state.SweepID, state.SweepName, idx, state.TotalParams, l.NoTimeout)
+	return cfg, err
 }
 
 // members builds the pending members' configs, refusing the resume when one
@@ -179,12 +209,12 @@ func (p *resumeLifetime) members(pf *ParamFileFormat, state *SweepState, pending
 	for _, idx := range pending {
 		cfg, err := p.member(p.eff, pf.Params[idx], state, idx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to build launch config for parameter set %d: %w", idx, err)
+			return nil, err
 		}
 		if p.orig != nil {
 			orig, err := p.member(*p.orig, pf.Params[idx], state, idx)
 			if err != nil {
-				return nil, fmt.Errorf("failed to build launch config for parameter set %d: %w", idx, err)
+				return nil, err
 			}
 			if err := notWeaker(orig, cfg); err != nil {
 				return nil, fmt.Errorf("parameter set %d: %w; nothing was launched", idx, err)
@@ -263,7 +293,7 @@ func refuseUnboundedResume(configs []*aws.LaunchConfig, pending []int) error {
 // noteOldCheckpointLifetime tells the user an old checkpoint's members get the
 // launch defaults, not the flags the sweep was launched with.
 func noteOldCheckpointLifetime(state *SweepState, flags resumeLifetimeFlags) {
-	if state.Lifetime != nil || flags.any() {
+	if state.lifetimeRecord() != nil || flags.any() {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "⚠️  This checkpoint predates spawn recording a sweep's --ttl/--idle-timeout/--cost-limit (#1394).\n"+

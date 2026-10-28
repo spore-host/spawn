@@ -169,7 +169,8 @@ func TestSweepCheckpointRecordsCLIIAMConfig(t *testing.T) {
 	g := newFleetGuard("sweep", io.Discard, f, sporedUp(), false)
 	if err := runSweepLaunch(context.Background(), f, g, sweepRun{
 		sweepID: "rec", name: "rec", totalParams: 3, maxConcurrent: 1, launchDelay: "0s",
-		configs: sweepConfigs("us-east-1", "us-east-1", "us-east-1"), iam: rec,
+		configs: sweepConfigs("us-east-1", "us-east-1", "us-east-1"),
+		record:  &SweepMemberRecord{Schema: sweepMemberRecordSchema, IAM: rec}, // #1400: the one record
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -177,11 +178,12 @@ func TestSweepCheckpointRecordsCLIIAMConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !saved.IAMRecorded || saved.IAMRole == nil || saved.IAMRole.Config == nil {
-		t.Fatalf("checkpoint IAM = recorded:%v %+v, want the CLI profile and its config", saved.IAMRecorded, saved.IAMRole)
+	got := saved.iamRecord()
+	if !saved.iamRecorded() || got == nil || got.Config == nil {
+		t.Fatalf("checkpoint IAM = recorded:%v %+v, want the CLI profile and its config", saved.iamRecorded(), got)
 	}
-	if got := saved.IAMRole.Config.roleConfig(); !reflect.DeepEqual(got, orig) || saved.IAMRole.Profile != rec.Profile {
-		t.Fatalf("checkpoint config = %+v (%s), want %+v (%s)", got, saved.IAMRole.Profile, orig, rec.Profile)
+	if cfg := got.Config.roleConfig(); !reflect.DeepEqual(cfg, orig) || got.Profile != rec.Profile {
+		t.Fatalf("checkpoint config = %+v (%s), want %+v (%s)", cfg, got.Profile, orig, rec.Profile)
 	}
 }
 

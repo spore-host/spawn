@@ -80,12 +80,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		if paramFormat.Defaults == nil {
 			paramFormat.Defaults = map[string]interface{}{}
 		}
-		if _, set := paramFormat.Defaults["instance_type"]; !set && baseConfig.InstanceType != "" {
-			paramFormat.Defaults["instance_type"] = baseConfig.InstanceType
-		}
-		if _, set := paramFormat.Defaults["region"]; !set && baseConfig.Region != "" {
-			paramFormat.Defaults["region"] = baseConfig.Region
-		}
+		seedSweepDefaults(paramFormat.Defaults, *baseConfig)
 	}
 
 	// Reject keys that look like spawn settings before anything is launched or
@@ -328,6 +323,13 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return launchSweepDetached(ctx, paramFormat, baseConfig, plat, sweepID, name, maxConcurrent, launchDelay, iamRecord)
 	}
 
+	// The config the members are built from, for the checkpoint: a resume
+	// rebuilds them from it (#1400). Before anything is created.
+	record, err := newSweepMemberRecord(baseConfig, noTimeout, iamRecord)
+	if err != nil {
+		return err
+	}
+
 	// Build launch configs for each parameter set
 	launchConfigs, defaultedVerbs, err := foregroundSweepMembers(*baseConfig, paramFormat, sweepID, name)
 	if err != nil {
@@ -506,7 +508,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	return runSweepLaunch(ctx, awsClient, guard, sweepRun{
 		sweepID: sweepID, name: name, paramFile: paramFile, totalParams: len(paramFormat.Params),
 		maxConcurrent: maxConcurrent, launchDelay: launchDelay, configs: launchConfigs,
-		iam: iamRecord, lifetime: newSweepLifetime(baseConfig, noTimeout),
+		record: record,
 	})
 }
 
@@ -519,25 +521,50 @@ func foregroundSweepMembers(base aws.LaunchConfig, pf *ParamFileFormat, sweepID,
 	launchConfigs := make([]*aws.LaunchConfig, 0, len(pf.Params))
 	var defaultedVerbs []string
 	for i, paramSet := range pf.Params {
-		config, err := buildLaunchConfigFromParams(base, pf.Defaults, paramSet, sweepID, name, i, len(pf.Params))
+		config, defaulted, err := sweepMemberConfig(base, pf.Defaults, paramSet, sweepID, name, i, len(pf.Params), noTimeout)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to build launch config for parameter set %d: %w", i, err)
+			return nil, nil, err
 		}
-
-		// The per-member defaults, shared with the detached path's tag and user
-		// data rendering (#1330), so a member is the same config either way.
-		if defaultSweepMember(&config, base, name, i) {
+		if defaulted {
 			if v := idleActionVerb(&config); !slices.Contains(defaultedVerbs, v) {
 				defaultedVerbs = append(defaultedVerbs, v)
 			}
 		}
-		if err := sweepMemberGuard(config); err != nil {
-			return nil, nil, fmt.Errorf("parameter set %d: %w", i, err)
-		}
-
 		launchConfigs = append(launchConfigs, &config)
 	}
 	return launchConfigs, defaultedVerbs, nil
+}
+
+// sweepMemberConfig builds foreground parameter set i of total: the base
+// merged with defaults and its row, the per-member defaults (the 1h idle
+// timeout unless noTimeoutSet), and sweepMemberGuard. The launch and the
+// resume both build every member through it, so a resumed member is the one
+// the launch would have built (#1400). It reports whether the idle default
+// was applied.
+func sweepMemberConfig(base aws.LaunchConfig, defaults, row map[string]interface{}, sweepID, name string, i, total int, noTimeoutSet bool) (aws.LaunchConfig, bool, error) {
+	config, err := buildLaunchConfigFromParams(base, defaults, row, sweepID, name, i, total)
+	if err != nil {
+		return config, false, fmt.Errorf("failed to build launch config for parameter set %d: %w", i, err)
+	}
+	// The per-member defaults, shared with the detached path's tag and user
+	// data rendering (#1330), so a member is the same config either way.
+	defaulted := defaultSweepMemberWith(&config, base, name, i, noTimeoutSet)
+	if err := sweepMemberGuard(config); err != nil {
+		return config, false, fmt.Errorf("parameter set %d: %w", i, err)
+	}
+	return config, defaulted, nil
+}
+
+// seedSweepDefaults writes the base's region and instance type into a sweep's
+// defaults where the file sets none (#697): what the cost estimator and the
+// orchestrator read. Shared by the launch and the resume.
+func seedSweepDefaults(defaults map[string]interface{}, base aws.LaunchConfig) {
+	if _, set := defaults["instance_type"]; !set && base.InstanceType != "" {
+		defaults["instance_type"] = base.InstanceType
+	}
+	if _, set := defaults["region"]; !set && base.Region != "" {
+		defaults["region"] = base.Region
+	}
 }
 
 // renderForegroundSweepUserData sets each foreground member's user data: its
@@ -565,6 +592,12 @@ func renderForegroundSweepUserData(ctx context.Context, plat *platform.Platform,
 // idle_timeout (applyIdleTimeoutDefault). It reports whether that default was
 // applied.
 func defaultSweepMember(cfg *aws.LaunchConfig, base aws.LaunchConfig, sweepName string, index int) bool {
+	return defaultSweepMemberWith(cfg, base, sweepName, index, noTimeout)
+}
+
+// defaultSweepMemberWith is defaultSweepMember with --no-timeout passed in: a
+// resume takes it from the checkpoint, not the flag.
+func defaultSweepMemberWith(cfg *aws.LaunchConfig, base aws.LaunchConfig, sweepName string, index int, noTimeoutSet bool) bool {
 	if cfg.Region == "" {
 		cfg.Region = base.Region
 	}
@@ -574,7 +607,7 @@ func defaultSweepMember(cfg *aws.LaunchConfig, base aws.LaunchConfig, sweepName 
 	if cfg.Name == "" {
 		cfg.Name = fmt.Sprintf("%s-%d", sweepName, index)
 	}
-	return applyIdleTimeoutDefault(cfg)
+	return applyIdleDefault(cfg, noTimeoutSet)
 }
 
 // sweepRun is what runSweepLaunch needs about the sweep.
@@ -584,12 +617,10 @@ type sweepRun struct {
 	maxConcurrent            int
 	launchDelay              string
 	configs                  []*aws.LaunchConfig
-	// iam is the CLI IAM flags' profile, recorded in the checkpoint so a
-	// resume launches with, and can re-create, the same one (#1385).
-	iam *SweepIAMRole
-	// lifetime is the CLI lifetime settings, recorded in the checkpoint so a
-	// resume launches with the same bounds (#1394).
-	lifetime *SweepLifetime
+	// record is the config the members were built from, recorded in the
+	// checkpoint so a resume rebuilds them the same (#1400): with the same
+	// IAM profile, which it can re-create (#1385), and the same bounds (#1394).
+	record *SweepMemberRecord
 }
 
 // runSweepLaunch launches a foreground sweep's parameter sets — through the
@@ -623,9 +654,7 @@ func runSweepLaunch(ctx context.Context, l sweepLauncher, guard *fleetGuard, s s
 			TotalParams:   len(launchConfigs),
 			MaxConcurrent: s.maxConcurrent,
 			LaunchDelay:   s.launchDelay,
-			IAMRecorded:   true,
-			IAMRole:       s.iam,
-			Lifetime:      s.lifetime,
+			Member:        s.record,
 		}
 		launchedInstances, failures, successCount, err = launchWithRollingQueue(ctx, l, guard, fresh, launchConfigs, indices, s.maxConcurrent, s.launchDelay)
 		if err != nil {
@@ -656,9 +685,7 @@ func runSweepLaunch(ctx context.Context, l sweepLauncher, guard *fleetGuard, s s
 		TotalParams:   s.totalParams,
 		MaxConcurrent: s.maxConcurrent,
 		LaunchDelay:   s.launchDelay,
-		IAMRecorded:   true,
-		IAMRole:       s.iam,
-		Lifetime:      s.lifetime,
+		Member:        s.record,
 		Completed:     0,
 		Running:       successCount,
 		Pending:       0,
@@ -1131,8 +1158,17 @@ func applyCLIVolumeSizeToSweep(paramFormat *ParamFileFormat) []string {
 	if paramFormat.Defaults == nil {
 		paramFormat.Defaults = make(map[string]interface{})
 	}
-	paramFormat.Defaults["volume_size"] = launchVolumeSize
+	foldVolumeSize(paramFormat.Defaults, launchVolumeSize)
 	return []string{fmt.Sprintf("volume-size=%dGiB", launchVolumeSize)}
+}
+
+// foldVolumeSize writes a --volume-size into a sweep's defaults, where it beats
+// the file's defaults: and loses to a row's own (#544). Shared by the launch
+// and the resume.
+func foldVolumeSize(defaults map[string]interface{}, size int32) {
+	if size > 0 {
+		defaults["volume_size"] = size
+	}
 }
 
 // cliIAMFlagsRequireCustomProfile reports whether any CLI flag means this launch

@@ -91,6 +91,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn sweep resume` (and `spawn resume`) relaunches each pending member
+  with every launch flag the sweep was launched with, not only its IAM and
+  lifetime settings** (#1400). A resume rebuilt members from the param file
+  and the IAM (#1385) and lifetime (#1394) records, so `--pre-stop` (the hook
+  that syncs results before termination, so outputs were lost), `--tag` and
+  `--team`, the network, storage and purchase flags, `--command`, the
+  webhooks, the spored settings, `--plugin`, `--config`, `--user-data` and
+  the rest were dropped. New checkpoints record the whole member base config
+  (`member` in `~/.spawn/sweeps/<id>.json`, schema 1), which replaces the
+  `iam_role` and `lifetime` records and keeps their behaviour (a deleted role
+  is re-created, a resume may only tighten the bounds), and a resume builds
+  each member, its user data and its storage mounts with the launch's own
+  builder, resolving each member's target OS as the launch does. Settings
+  that may carry a token are not written to disk: `--spot-webhook-url`,
+  `--completion-webhook-url`, `--webhook-correlation` and an inline
+  `--user-data`. `spawn sweep resume` takes each again under the same name,
+  and refuses a sweep launched with one until it is passed (naming a
+  webhook's host, never its path). A `--config` or `--user-data-file` is
+  recorded by path and SHA-256, and a resume refuses one that is missing or
+  changed. Checkpoints are now written `0600`. A checkpoint written before
+  this resumes as before and prints which settings it cannot restore. A
+  detached sweep needs nothing new: its orchestrator relaunches from the
+  params uploaded at launch, which already carry every setting, and
+  `--detach` refuses the four new flags.
+
 - **`spawn sweep resume` (and `spawn resume`) keeps the sweep's lifetime
   bounds; a resumed member could run with no TTL, idle timeout or cost
   limit** (#1394). A resume rebuilt each pending member from the param file

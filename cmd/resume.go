@@ -25,7 +25,26 @@ var (
 	resumeTTL               string
 	resumeIdleTimeout       string
 	resumeCostLimit         float64
+	// resumeWithheld is resume's --spot-webhook-url, --completion-webhook-url,
+	// --webhook-correlation and --user-data: the settings a checkpoint
+	// withholds (sweepWithheldSettings), passed again (#1400).
+	resumeWithheld = func() map[string]*string {
+		m := map[string]*string{}
+		for _, w := range sweepWithheldSettings {
+			m[w.flag] = new(string)
+		}
+		return m
+	}()
 )
+
+// resumeWithheldValues is the withheld settings this resume was given.
+func resumeWithheldValues() map[string]string {
+	out := map[string]string{}
+	for f, v := range resumeWithheld {
+		out[f] = *v
+	}
+	return out
+}
 
 // resumeLifetimeFlagValues is resume's --ttl, --idle-timeout and --cost-limit.
 func resumeLifetimeFlagValues() resumeLifetimeFlags {
@@ -58,6 +77,16 @@ Passing --ttl, --idle-timeout or --cost-limit here replaces the recorded
 value, but may only tighten it. A checkpoint written before spawn recorded
 them gets the launch defaults: the row's own bound, else a 1h idle timeout. A
 member left with no bound at all is refused.
+
+Launch flags: each relaunched member is rebuilt from the config the sweep's
+members were launched with, recorded in the checkpoint: --tag, --team,
+--pre-stop, the network, storage and purchase flags, --command, the spored
+settings, --plugin, --config and the rest. A setting that may carry a token is
+not stored: --spot-webhook-url, --completion-webhook-url, --webhook-correlation
+and an inline --user-data. A sweep launched with one must be resumed with it
+passed again, and a --config or --user-data-file that has changed since refuses
+the resume. A checkpoint written before spawn recorded the launch flags
+resumes as before, and says which settings it cannot restore.
 `,
 	RunE: runResume,
 }
@@ -83,6 +112,9 @@ func registerResumeFlags(c *cobra.Command) {
 	c.Flags().StringVar(&resumeTTL, "ttl", "", "Time to live for each relaunched member (e.g. 4h, 1d), replacing the sweep's --ttl; may not be longer than it. A row's own ttl: still wins. Not supported with --detach")
 	c.Flags().StringVar(&resumeIdleTimeout, "idle-timeout", "", "Idle timeout for each relaunched member, replacing the sweep's --idle-timeout; may not be longer than it. A row's own idle_timeout: still wins. Not supported with --detach")
 	c.Flags().Float64Var(&resumeCostLimit, "cost-limit", 0, "Cost limit in USD for each relaunched member, replacing the sweep's --cost-limit; may not be higher than it. A row's own cost_limit: still wins. Not supported with --detach")
+	for _, w := range sweepWithheldSettings {
+		c.Flags().StringVar(resumeWithheld[w.flag], w.flag, "", fmt.Sprintf("The sweep's --%s, passed again: the checkpoint does not store it, since it may carry a token. Required when the sweep was launched with it. Not supported with --detach", w.flag))
+	}
 }
 
 func runResume(cmd *cobra.Command, args []string) error {
@@ -106,6 +138,9 @@ func runResume(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--max-concurrent-auto is not yet supported with --detach (spawn#494)")
 		}
 		if err := refuseDetachedLifetimeFlags(resumeLifetimeFlagValues()); err != nil {
+			return err
+		}
+		if err := refuseDetachedWithheldFlags(resumeWithheldValues()); err != nil {
 			return err
 		}
 		return resumeSweepDetached(ctx, resumeSweepID)
@@ -145,16 +180,24 @@ func runResume(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "\n❌ ERROR: %v\n\n", err)
 		return fmt.Errorf("unusable param-file keys")
 	}
+	// The config the members were launched with (#1400), with the settings it
+	// withholds passed again; nil for an older checkpoint. Refused here, before
+	// any AWS call, when it cannot be reproduced.
+	member, err := restoreMemberRecord(state.Member, resumeWithheldValues(), state.SweepID)
+	if err != nil {
+		return err
+	}
+	noteOldCheckpointSettings(state)
 	// The profile the original CLI IAM flags resolved to: the param file never
 	// held it, so without this a resumed row fell back to
 	// spored-instance-profile (#1385). Before the nested-role check, which then
 	// sees the same profile the original launch did.
-	applyRecordedIAM(state.IAMRole, paramFormat)
+	applyRecordedIAM(state.iamRecord(), paramFormat)
 	// The CLI lifetime flags the sweep launched with, from the checkpoint, and
 	// resume's own --ttl/--idle-timeout/--cost-limit over them (#1394). Folded
 	// into the defaults before the nested-role check, which then sees the TTL
 	// the original launch did.
-	lifetime, err := planResumeLifetime(state.Lifetime, paramFormat, resumeLifetimeFlagValues())
+	lifetime, err := planResumeLifetime(state.lifetimeRecord(), member, paramFormat, resumeLifetimeFlagValues())
 	if err != nil {
 		return err
 	}
@@ -317,6 +360,32 @@ func runResume(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// The user-data builder reads the bootstrap flags as globals, which this
+	// process never parsed: point it at the recorded ones (#1400).
+	defer lifetime.installBootstrap()()
+
+	// Each member's target OS, from its AMI or the recorded --os, as the
+	// launch resolves it: its bootstrap depends on it.
+	osByAMI := map[string]string{}
+	for _, cfg := range launchConfigs {
+		k := cfg.Region + "|" + cfg.AMI
+		if _, ok := osByAMI[k]; !ok {
+			osByAMI[k] = resolveTargetOS(ctx, awsClient, cfg.Region, cfg.AMI, osFlag)
+		}
+		cfg.TargetOS = osByAMI[k]
+		if err := windowsLifecycleGuard(cfg); err != nil {
+			return err
+		}
+	}
+	// Look up each member's --fsx-id before anything is created, as the
+	// launch does; the user-data step reuses the answers.
+	storage := newSweepStorage(awsClient, os.Stderr)
+	for i, cfg := range launchConfigs {
+		if _, _, err := storage.member(ctx, cfg); err != nil {
+			return fmt.Errorf("parameter set %d: %w", pending[i], err)
+		}
+	}
+
 	// Setup SSH key
 	if firstConfig.KeyName == "" {
 		keyName, err := setupSSHKey(ctx, awsClient, firstConfig.Region, firstConfig.AMI, plat)
@@ -345,13 +414,10 @@ func runResume(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Build user-data for each config
-	for _, cfg := range launchConfigs {
-		userData, err := resumeUserData(plat, cfg)
-		if err != nil {
-			return err
-		}
-		cfg.UserData = userData
+	// Build user-data for each config, with its storage mounts, through the
+	// launch's renderer (#1400).
+	if err := renderForegroundSweepUserData(ctx, plat, launchConfigs, storage); err != nil {
+		return err
 	}
 
 	// Continue rolling queue from checkpoint
@@ -581,7 +647,7 @@ func relaunchPending(ctx context.Context, l sweepLauncher, state *SweepState, la
 	if err := refuseUnboundedResume(launchConfigs, pending); err != nil {
 		return nil, nil, 0, &resumeProfileError{err}
 	}
-	if err := ensureResumeProfiles(ctx, iam, state.IAMRole, state.ParamFile, launchConfigs); err != nil {
+	if err := ensureResumeProfiles(ctx, iam, state.iamRecord(), state.ParamFile, launchConfigs); err != nil {
 		return nil, nil, 0, &resumeProfileError{err}
 	}
 	return launchWithRollingQueue(ctx, l, guard, state, launchConfigs, pending, maxConcurrent, state.LaunchDelay)
@@ -631,16 +697,4 @@ func reconcileSweepState(state *SweepState, instanceStates map[string]string) (s
 	}
 
 	return stillRunning, completed, failed, pending
-}
-
-// resumeUserData builds a resumed sweep member's user data, encoded the way
-// every other launch path encodes it. It used to be base64 of the plain script,
-// with no gzip, and the inline bootstrap alone is about 25 KB, so every resumed
-// Linux launch was over EC2's limits and RunInstances refused it (#1274).
-func resumeUserData(plat *platform.Platform, cfg *aws.LaunchConfig) (string, error) {
-	script, err := buildUserData(plat, cfg, "", nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to build user data: %w", err)
-	}
-	return encodeUserDataForOS(script, cfg.TargetOS), nil
 }

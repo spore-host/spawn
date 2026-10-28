@@ -484,7 +484,11 @@ func TestForegroundSweepUsesTheSharedMemberDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`(?m)^\s*if defaultSweepMember\(&config, base, name, i\) \{`).Match(src) {
+	// Through sweepMemberConfig, the builder the resume shares (#1400), and
+	// defaultSweepMemberWith, which defaultSweepMember wraps.
+	if !regexp.MustCompile(`(?m)^\s*defaulted := defaultSweepMemberWith\(&config, base, name, i, noTimeoutSet\)$`).Match(src) ||
+		!regexp.MustCompile(`(?m)^\s*config, defaulted, err := sweepMemberConfig\(base, pf\.Defaults, paramSet, sweepID, name, i, len\(pf\.Params\), noTimeout\)$`).Match(src) ||
+		!regexp.MustCompile(`(?m)^func defaultSweepMember\(cfg \*aws\.LaunchConfig, base aws\.LaunchConfig, sweepName string, index int\) bool \{\n\s*return defaultSweepMemberWith\(cfg, base, sweepName, index, noTimeout\)$`).Match(src) {
 		t.Error("foregroundSweepMembers does not apply defaultSweepMember")
 	}
 	if !regexp.MustCompile(`(?m)^\s*launchConfigs, defaultedVerbs, err := foregroundSweepMembers\(\*baseConfig, paramFormat, sweepID, name\)`).Match(src) {
