@@ -121,6 +121,11 @@ func runResume(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "\n❌ ERROR: %v\n\n", err)
 		return fmt.Errorf("unusable param-file keys")
 	}
+	// Resume rebuilds each row from the file alone (no --instance-profile, no
+	// --ttl), so a row naming a nested-spawn role needs a ttl: in the file (#1375).
+	if err := refuseNestedSweepRowsWithoutTTL(paramFormat, ""); err != nil {
+		return err
+	}
 
 	// Validate parameter count matches
 	if len(paramFormat.Params) != state.TotalParams {

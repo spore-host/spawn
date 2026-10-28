@@ -58,6 +58,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if _, err := parseKVTags(launchTags); err != nil {
 		return err
 	}
+	// And a nested-spawn role named by --instance-profile with no --ttl, or by
+	// --iam-role at all (#1375), on every path, before any AWS call.
+	if err := validateNestedSpawnRoleFlags(launchMode(interactive, instanceType, isTerminal(os.Stdin)) == modeWizard); err != nil {
+		return err
+	}
 
 	// Get the account ID for audit logging. This is best-effort and resilient:
 	// it uses the AWS client's GetAccountID, which falls back to IMDS if STS is

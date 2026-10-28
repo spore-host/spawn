@@ -105,6 +105,9 @@ func runBurst(cmd *cobra.Command, args []string) error {
 		JobArrayName:   burstJobArrayName,
 		TTL:            burstTTL,
 		IdleTimeout:    burstIdleTimeout,
+		// Replaced by the resolved profile below; set here so
+		// validateBurstParams sees an explicit one before any AWS call.
+		InstanceProfile: burstInstanceProfile,
 	}
 	// `spawn array status|cancel` address an array by NAME (cmd/arraygroup.go),
 	// and the hint printed below names it. With no --job-array-name the members
@@ -220,6 +223,11 @@ type LaunchParams struct {
 // the TTL reaper enforces — and buildTags refuses a TTL it cannot turn into a
 // deadline (#990). Checking here refuses it before anything launches.
 func validateBurstParams(params *LaunchParams) error {
+	// The --nested-spawn rule for a nested-spawn --instance-profile (#1375).
+	// Checked first so it is never masked by the plainer --ttl refusal below.
+	if err := spawnaws.CheckNestedSpawnTTL("--instance-profile", params.InstanceProfile, params.TTL); err != nil {
+		return err
+	}
 	if params.Count < 1 {
 		return fmt.Errorf("--count must be at least 1, got %d", params.Count)
 	}

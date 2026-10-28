@@ -58,11 +58,18 @@ func validateNestedSpawnFlags() error {
 // lifetime, not only an idle timeout (an idle timeout stops rather than
 // terminates by default, and a head node busy dispatching may never be idle).
 // Checked against the resolved config, so a TTL from config defaults counts.
+//
+// --instance-profile naming a nested-spawn role is held to the same rule
+// (#1375); validateNestedSpawnRoleFlags checks it earlier unless the TTL may
+// come from the wizard, which only this check sees.
 func requireNestedSpawnTTL(config *aws.LaunchConfig) error {
 	if nestedSpawn && strings.TrimSpace(config.TTL) == "" {
-		return fmt.Errorf("--nested-spawn requires --ttl: an instance that can launch other instances must have a hard lifetime")
+		return aws.NestedSpawnTTLError()
 	}
-	return nil
+	if err := aws.CheckNestedSpawnTTL("--instance-profile", instanceProfile, config.TTL); err != nil {
+		return err
+	}
+	return config.ValidateNestedSpawnTTL()
 }
 
 // ensureNestedSpawnProfile sets config.IamInstanceProfile for the two nested

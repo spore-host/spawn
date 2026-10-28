@@ -29,6 +29,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(visible, inFlight *int, err error)`; a nil count is unknown, not zero. The
   counts are parsed by the new `poolqueue.Count`, the same rule
   `spawn cleanup --pool-queues` and the reaper use.
+- **A nested-spawn role named directly no longer skips `--nested-spawn`'s
+  `--ttl` requirement** (#1375). The `spawn-instance-nested-*` roles may call
+  RunInstances and pass roles, so `--nested-spawn` gives one only to an instance
+  with a TTL; naming the role yourself attached the same capability with no
+  TTL. Now `spawn launch --instance-profile spawn-instance-nested-<hash>` needs
+  `--ttl` (refused before any AWS call, same reason as `--nested-spawn`, and not
+  with `--no-timeout`); a foreground (`--no-detach`) sweep or `spawn resume`
+  refuses any row whose profile is one (the row's `iam_role:`, else
+  `--instance-profile`, else `defaults: iam_role:`) and whose TTL (the row's
+  `ttl:`, else `defaults: ttl:` / `--ttl`) is empty; `spawn burst
+  --instance-profile` applies the same rule. `--iam-role` may no longer name one
+  on any launch path, and neither may `--instance-profile` with `--batch-queue`:
+  spawn would create or rewrite that role's grants, which are fixed so they can
+  be audited (`CreateOrGetInstanceProfile` refuses such a `RoleName` too).
+  `aws.Client.Launch` and `launcher.Provision` refuse a nested-spawn
+  `IamInstanceProfile` with no `TTL`, so SDK callers (lagotto, the MCP server)
+  are held to it as well. New in `pkg/aws`: `CheckNestedSpawnTTL`,
+  `LaunchConfig.ValidateNestedSpawnTTL`, `NestedSpawnTTLError`,
+  `NestedSpawnRoleReservedError`, `ErrNestedSpawnNeedsTTL`,
+  `ErrNestedSpawnRoleReserved`.
 
 ## [0.147.0] - 2026-10-28
 
