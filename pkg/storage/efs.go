@@ -2,6 +2,8 @@ package storage
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -27,6 +29,10 @@ type EFSMountOptions struct {
 	ActimeO      int    // Attribute cache timeout in seconds (0 = default)
 	Async        bool   // Async writes (faster, less safe)
 	NoShareCache bool   // Disable share cache across mounts
+	// Extra are --efs-mount-options entries none of the fields above model
+	// (nconnect=N, for one), validated by ParseCustomOptions and emitted
+	// verbatim, in order, before _netdev (#1390).
+	Extra []string
 }
 
 // GetEFSProfile returns the mount options for a given performance profile
@@ -134,20 +140,43 @@ func (opts EFSMountOptions) ToMountString() string {
 		parts = append(parts, "nosharecache")
 	}
 
+	parts = append(parts, opts.Extra...)
+
 	// Always add _netdev for network filesystems
 	parts = append(parts, "_netdev")
 
 	return strings.Join(parts, ",")
 }
 
-// ParseCustomOptions parses a custom mount options string
+// mountOptionRE is one NFS mount option as --efs-mount-options may carry it:
+// a name, optionally =value, drawn from a set with no shell, fstab or
+// option-list metacharacter (no whitespace, quote, $, `, ;, |, &, <, >, #, or
+// comma inside a value). The string is single-quoted into the mount command and
+// the fstab line (#680), so this is not what keeps the shell safe; it is what
+// keeps the fstab line one line of six fields and the option list a list.
+var mountOptionRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*(=[A-Za-z0-9_.:/+-]+)?$`)
+
+// efsUtilsOnlyOptions are amazon-efs-utils (`mount -t efs`) options. The
+// storage script mounts with `mount -t nfs4` (pkg/userdata/storage.go), whose
+// kernel client rejects them, so the mount would fail at boot; refuse them at
+// launch instead. TLS in particular cannot work there (see storage.go, #718).
+var efsUtilsOnlyOptions = map[string]bool{
+	"tls": true, "notls": true, "iam": true, "accesspoint": true, "awsprofile": true,
+	"awscredsuri": true, "mounttargetip": true, "az": true, "netns": true,
+	"ocsp": true, "noocsp": true, "stunnelport": true, "verify": true, "cafile": true,
+	"crossaccount": true,
+}
+
+// ParseCustomOptions parses a --efs-mount-options string over the general
+// profile's defaults. The options it models (nfsvers, rsize, wsize, timeo,
+// retrans, actimeo, hard, soft, noresvport, async, nosharecache) set their
+// field; any other well-formed option, nconnect for one, is passed through to
+// the mount verbatim (#1390: they used to be dropped without a word). A
+// malformed option, a non-numeric value for a numeric one, or an efs-utils-only
+// option is refused.
 func ParseCustomOptions(optString string) (EFSMountOptions, error) {
 	// Start with general profile defaults
 	opts, _ := GetEFSProfile(EFSProfileGeneral)
-
-	if optString == "" {
-		return opts, nil
-	}
 
 	parts := strings.Split(optString, ",")
 	for _, part := range parts {
@@ -155,53 +184,55 @@ func ParseCustomOptions(optString string) (EFSMountOptions, error) {
 		if part == "" {
 			continue
 		}
+		if !mountOptionRE.MatchString(part) {
+			return EFSMountOptions{}, fmt.Errorf("--efs-mount-options: %q is not a mount option (want name or name=value, "+
+				"using letters, digits and _ . - (and : / + in a value))", part)
+		}
+		key, value, hasValue := strings.Cut(part, "=")
+		if efsUtilsOnlyOptions[key] {
+			return EFSMountOptions{}, fmt.Errorf("--efs-mount-options: %q is an amazon-efs-utils option; "+
+				"spawn mounts EFS with `mount -t nfs4`, which does not accept it", key)
+		}
 
-		// Handle key=value options
-		if strings.Contains(part, "=") {
-			kv := strings.SplitN(part, "=", 2)
-			key := strings.TrimSpace(kv[0])
-			value := strings.TrimSpace(kv[1])
-
-			switch key {
-			case "nfsvers":
-				opts.NFSVers = value
-			case "rsize":
-				var size int
-				_, _ = fmt.Sscanf(value, "%d", &size)
-				opts.RSize = size
-			case "wsize":
-				var size int
-				_, _ = fmt.Sscanf(value, "%d", &size)
-				opts.WSize = size
-			case "timeo":
-				var t int
-				_, _ = fmt.Sscanf(value, "%d", &t)
-				opts.Timeo = t
-			case "retrans":
-				var r int
-				_, _ = fmt.Sscanf(value, "%d", &r)
-				opts.Retrans = r
-			case "actimeo":
-				var a int
-				_, _ = fmt.Sscanf(value, "%d", &a)
-				opts.ActimeO = a
-			default:
-				// Ignore unknown options (pass through)
+		num := func(dst *int) error {
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 {
+				return fmt.Errorf("--efs-mount-options: %s=%q is not a non-negative integer", key, value)
 			}
-		} else {
-			// Handle boolean flags
-			switch part {
-			case "hard":
-				opts.Hard = true
-			case "soft":
-				opts.Hard = false
-			case "noresvport":
-				opts.NoResvPort = true
-			case "async":
-				opts.Async = true
-			case "nosharecache":
-				opts.NoShareCache = true
-			}
+			*dst = n
+			return nil
+		}
+		var err error
+		switch {
+		case hasValue && key == "nfsvers":
+			opts.NFSVers = value
+		case hasValue && key == "rsize":
+			err = num(&opts.RSize)
+		case hasValue && key == "wsize":
+			err = num(&opts.WSize)
+		case hasValue && key == "timeo":
+			err = num(&opts.Timeo)
+		case hasValue && key == "retrans":
+			err = num(&opts.Retrans)
+		case hasValue && key == "actimeo":
+			err = num(&opts.ActimeO)
+		case part == "hard":
+			opts.Hard = true
+		case part == "soft":
+			opts.Hard = false
+		case part == "noresvport":
+			opts.NoResvPort = true
+		case part == "async":
+			opts.Async = true
+		case part == "nosharecache":
+			opts.NoShareCache = true
+		case part == "_netdev":
+			// ToMountString always ends with it.
+		default:
+			opts.Extra = append(opts.Extra, part)
+		}
+		if err != nil {
+			return EFSMountOptions{}, err
 		}
 	}
 

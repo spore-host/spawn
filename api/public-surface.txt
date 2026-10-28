@@ -739,6 +739,7 @@ const EFSProfileMaxIO EFSProfile
 const EFSProfileMaxThroughput EFSProfile
 field EFSMountOptions.ActimeO int
 field EFSMountOptions.Async bool
+field EFSMountOptions.Extra []string
 field EFSMountOptions.Hard bool
 field EFSMountOptions.NFSVers string
 field EFSMountOptions.NoResvPort bool

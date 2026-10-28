@@ -59,6 +59,12 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if _, _, err := sporedSettingsFromFlags(); err != nil {
 		return err
 	}
+	// And an --efs-mount-options option the mount cannot take (#1390): a single
+	// launch renders it only after creating its key pair, role and security
+	// group.
+	if err := validateEFSMountOptionsFlag(); err != nil {
+		return err
+	}
 	// And a malformed or reserved-prefix --tag, before any AWS call and the
 	// dispatch below, on every path (#1356).
 	if _, err := parseKVTags(launchTags); err != nil {
