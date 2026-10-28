@@ -94,7 +94,7 @@ func TestResume_RelaunchRecordsParameterIndicesAndMergesState(t *testing.T) {
 	launcher := &fakeSweepLauncher{}
 	// maxConcurrent 1: set 3 launches in the initial batch and set 7 from the
 	// rolling loop, so both recording paths are exercised.
-	if _, failures, n, err := relaunchPending(context.Background(), launcher, state, configs, pending, 1, unverifiedGuard()); err != nil || n != 2 || len(failures) != 0 {
+	if _, failures, n, err := relaunchPending(context.Background(), launcher, state, configs, pending, 1, unverifiedGuard(), &fakeProfileIAM{}); err != nil || n != 2 || len(failures) != 0 {
 		t.Fatalf("relaunchPending: n=%d failures=%v err=%v", n, failures, err)
 	}
 	if fmt.Sprint(launcher.launched) != "[sweep-3 sweep-7]" {

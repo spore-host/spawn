@@ -40,6 +40,13 @@ type SweepState struct {
 	Pending       int             `json:"pending"`
 	Failed        int             `json:"failed"`
 	Instances     []InstanceState `json:"instances"`
+	// IAMRecorded is set on every checkpoint written since #1385, so a resume
+	// can tell "launched without CLI IAM flags" (IAMRole nil) from "written
+	// before spawn recorded them" (false).
+	IAMRecorded bool `json:"iam_recorded,omitempty"`
+	// IAMRole is the profile the CLI IAM flags resolved to, and how it was
+	// made; nil when none were passed.
+	IAMRole *SweepIAMRole `json:"iam_role,omitempty"`
 }
 
 // InstanceState tracks the state of a single instance in a sweep

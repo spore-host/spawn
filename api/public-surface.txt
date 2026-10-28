@@ -487,6 +487,7 @@ func (*Client) ImportKeyPair(ctx context.Context, region, keyName string, public
 func (*Client) ImportWindowsISO(ctx context.Context, in ImportWindowsISOInput) (string, error)
 func (*Client) InstanceMemoryMiB(ctx context.Context, region, instanceType string) (mib int64, ok bool)
 func (*Client) InstancePortIngress(ctx context.Context, region, instanceID string, port int32) (PortIngress, error)
+func (*Client) InstanceProfileReady(ctx context.Context, name string) (bool, error)
 func (*Client) InstanceTypeOfferedInRegion(ctx context.Context, region, instanceType string) (bool, error)
 func (*Client) IsWindowsAMI(ctx context.Context, region, amiID string) bool
 func (*Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error)

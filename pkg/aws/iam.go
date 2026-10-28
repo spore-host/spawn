@@ -1426,6 +1426,33 @@ func (c *Client) instanceProfileExists(ctx context.Context, iamClient *iam.Clien
 	return true, nil
 }
 
+// InstanceProfileReady reports whether the instance profile name exists and
+// holds the role of the same name, which is what a launch with that profile
+// needs. It makes one iam:GetInstanceProfile call and changes nothing, so a
+// caller can reuse a profile that is still there without rewriting it, and
+// re-create one that the idle-role sweep deleted (#1385).
+func (c *Client) InstanceProfileReady(ctx context.Context, name string) (bool, error) {
+	out, err := iam.NewFromConfig(c.cfg).GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
+		InstanceProfileName: aws.String(name),
+	})
+	if err != nil {
+		var nse *types.NoSuchEntityException
+		if errors.As(err, &nse) || strings.Contains(err.Error(), "NoSuchEntity") {
+			return false, nil
+		}
+		return false, fmt.Errorf("check instance profile %s: %w", name, err)
+	}
+	if out.InstanceProfile == nil {
+		return false, nil
+	}
+	for _, r := range out.InstanceProfile.Roles {
+		if aws.ToString(r.RoleName) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // SetupSporedIAMRole creates or retrieves the IAM role and instance profile for spored
 // Returns the instance profile name
 // ssmManagedInstanceCoreARN is the AWS managed policy that lets an instance

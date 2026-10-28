@@ -460,7 +460,7 @@ func TestUnpassableDetachedProfileIsRefusedUpFront(t *testing.T) {
 		t.Fatal(err)
 	}
 	refuse := regexp.MustCompile(`(?m)^\s*if detach && maxConcurrent > 0 \{\n\s*if err := refuseUnpassableDetachedProfiles\(paramFormat\); err != nil \{\n\s*return err\n`).FindIndex(src)
-	apply := regexp.MustCompile(`(?m)^\s*if err := applyCLIIAMToSweep\(ctx, awsClient, paramFormat, auditLog\); err != nil`).FindIndex(src)
+	apply := regexp.MustCompile(`(?m)^\s*iamRecord, err := applyCLIIAMToSweep\(ctx, awsClient, paramFormat, auditLog\)$`).FindIndex(src)
 	if apply == nil {
 		t.Fatal("cannot find applyCLIIAMToSweep's call; the matcher is stale")
 	}

@@ -48,6 +48,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn sweep resume` (and `spawn resume`, foreground and `--detach`)
+  re-creates a sweep's `spawn-instance-*` instance profile if the idle-role
+  sweep deleted it, and launches with the role the sweep was launched with**
+  (#1385). The checkpoint stored neither the profile the CLI IAM flags
+  (`--iam-role`, `--iam-policy`, `--iam-managed-policies`, `--iam-policy-file`,
+  `--s3-read`, `--s3-write`, `--instance-profile`) resolved to nor how it was
+  made, so a resumed member silently got `spored-instance-profile`, and a
+  `spawn-instance-*` profile named in the param file was reused without being
+  re-created and failed at RunInstances once deleted. New checkpoints
+  (`~/.spawn/sweeps/<id>.json`, and `~/.spawn/sweeps/detached-iam/<id>.json`
+  for a detached sweep) record the profile and its IAM config. Before the
+  first launch, resume checks each spawn-created profile with one
+  `iam:GetInstanceProfile`: one that exists is reused unchanged, one that is
+  gone is re-created with the original config through the same
+  `CreateOrGetInstanceProfile` call and must come back under the same name
+  (a `--nested-spawn` role is re-created by `SetupNestedSpawnProfile`). A
+  gone profile with no record to rebuild it from, a changed
+  `--iam-policy-file`, or a checkpoint from before this release whose own
+  instances show a different profile than the resume would use, refuses the
+  resume with nothing launched. Resume also gives spored's shared profile to
+  every member without an `iam_role:`, not only when the first had none. API:
+  `aws.Client.InstanceProfileReady`.
+
 - **`setup-dashboard-lambda-role.sh` now finishes removing the legacy
   `SpawnDashboardLambdaPolicy` managed policy, and the three inline policies
   added by hand before it owned the role** (#1376). `delete-policy` failed with
