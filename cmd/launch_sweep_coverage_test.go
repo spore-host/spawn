@@ -1,261 +1,304 @@
 package cmd
 
 import (
-	"fmt"
+	"context"
 	"os"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
+
+	"github.com/spore-host/spawn/pkg/aws"
 )
 
-// sweepFlagClass records, for every launchCmd flag, whether the PARAMETER-SWEEP
-// path honours it — and when it does not, why that is acceptable or which issue
-// tracks it.
+// The launch-flag gate for parameter sweeps (#697, #1366).
 //
-// This manifest exists because the sweep path drops flags BY CONSTRUCTION
-// (spawn#697): the dispatch builds a two-field LaunchConfig instead of calling
-// buildLaunchConfig, and buildLaunchConfigFromParams merges rows onto an empty
-// struct. So a flag works on a sweep only if someone hand-wrote a shim for it.
-// That has been reported and patched one category at a time — #525 spend
-// controls, #539 IAM (twice), #549 DNS, #667 networking (single-path only),
-// #673/#674/#675 — and the default remains "dropped".
+// sweepLaunchFlags (cmd/launch_sweep_flags.go) gives every `spawn launch` flag
+// a rule: it reaches the members, steers the sweep or the CLI, or is refused.
+// These tests discover the flag set from the cobra command, so a new flag fails
+// until it is decided, and they check each claim against the code: a flag said
+// to reach the members must change what a foreground member is launched with,
+// through a field that is carried, and one said to act only on the CLI must
+// change nothing a member is launched with.
 //
-// A flag absent from this map fails the test. That is the point: adding a flag
-// to launchCmd should force the question "does this work on a sweep?" to be
-// answered once, deliberately, rather than discovered later by someone paying
-// for a boot that ignored it.
-type sweepFlagClass int
+// This replaces a hand-kept manifest whose "honoured" check only asked whether
+// the flag's variable was mentioned in launch_config.go. It called --fsx-create,
+// --fsx-recall and --vpc honoured, and they were dropped (#1366).
 
-const (
-	sweepHonoured sweepFlagClass = iota // reaches sweep rows
-	sweepNA                             // not a sweep concept
-	sweepKnownGap                       // dropped; tracked, with an issue in the note
-)
-
-// sweepFlagCoverage is the manifest. Keep it alphabetical.
-var sweepFlagCoverage = map[string]struct {
-	class sweepFlagClass
-	note  string
-}{
-	// --- Honoured: read directly on the sweep path or via an applyCLI*ToSweep shim.
-	"ami": {sweepHonoured, ""}, "az": {sweepHonoured, ""},
-	"budget": {sweepHonoured, ""}, "command": {sweepHonoured, ""},
-	"cost-limit": {sweepHonoured, "#525"},
-	"count":      {sweepHonoured, ""}, "detach": {sweepHonoured, ""},
-	"estimate-only": {sweepHonoured, ""}, "hibernate": {sweepHonoured, ""},
-	"iam-allow-full-access": {sweepHonoured, "#539"}, "iam-managed-policies": {sweepHonoured, "#539"},
-	"iam-policy": {sweepHonoured, "#539"}, "iam-policy-file": {sweepHonoured, "#539"},
-	"iam-role": {sweepHonoured, "#539"}, "iam-role-tags": {sweepHonoured, "#539"},
-	"iam-trust-services": {sweepHonoured, "#539"}, "idle-timeout": {sweepHonoured, "#525"},
-	"instance-profile": {sweepHonoured, ""}, "launch-delay": {sweepHonoured, ""},
-	"max-concurrent": {sweepHonoured, ""}, "max-concurrent-auto": {sweepHonoured, ""},
-	"max-concurrent-per-region": {sweepHonoured, ""}, "mode": {sweepHonoured, ""},
-	"name": {sweepHonoured, ""}, "no-detach": {sweepHonoured, ""},
-	"no-timeout": {sweepHonoured, ""}, "os": {sweepHonoured, ""},
-	"output-id": {sweepHonoured, ""}, "param-file": {sweepHonoured, ""},
-	"params": {sweepHonoured, ""},
-	"region": {sweepHonoured, ""}, "regions-exclude": {sweepHonoured, ""},
-	"regions-geographic": {sweepHonoured, ""}, "regions-include": {sweepHonoured, ""},
-	"s3-read": {sweepHonoured, "#539"}, "s3-write": {sweepHonoured, "#539"},
-	"spot": {sweepHonoured, ""}, "sweep-name": {sweepHonoured, ""},
-	"ttl": {sweepHonoured, "#525"}, "volume-size": {sweepHonoured, ""},
-	"wait": {sweepHonoured, ""}, "wait-timeout": {sweepHonoured, ""},
-
-	// --- Not applicable: a different launch shape, or meaningless per-row.
-	"batch-queue":    {sweepNA, "batch-queue is its own launch path; refused with --param-file"},
-	"nested-spawn":   {sweepNA, "refused with --param-file/--params (#39)"},
-	"queue-template": {sweepNA, "see batch-queue"},
-	"job-array-name": {sweepNA, "job arrays and sweeps are different shapes"},
-	"instance-names": {sweepNA, "job-array naming; rows are named from the sweep index"},
-	"min-viable":     {sweepNA, "cohort concept; sweep rows are independent"},
-	"mpi":            {sweepNA, "MPI is an all-or-nothing cohort, not a sweep"},
-	"mpi-command":    {sweepNA, "see mpi"}, "mpi-processes-per-node": {sweepNA, "see mpi"},
-	"skip-mpi-install": {sweepNA, "see mpi"}, "auto-placement-group": {sweepNA, "see mpi"},
-	"placement-group": {sweepNA, "see mpi"}, "efa": {sweepNA, "EFA is for MPI cohorts"}, "efa-interfaces": {sweepNA, "see efa"}, "efa-group": {sweepNA, "see efa"},
-	"interactive":        {sweepNA, "a sweep is non-interactive by definition"},
-	"dry-run":            {sweepNA, "explicitly refused on the sweep path (#569)"},
-	"print-config":       {sweepNA, "alias of dry-run"},
-	"config":             {sweepNA, "plugin declarations file, resolved before dispatch"},
-	"template-var":       {sweepNA, "queue-template substitution"},
-	"terminate-on-error": {sweepNA, "batch-queue error policy"},
-	"keep-on-error":      {sweepNA, "single-launch post-RunInstances error policy (#1298)"},
-	"cartesian":          {sweepKnownGap, "#674 — parsed and read by nothing at all, so the sweep run COUNT is wrong"},
-	"skip-region-check":  {sweepNA, "pre-dispatch validation toggle"},
-	"quiet":              {sweepNA, "output verbosity, applied by the printer not the config"},
-
-	// --- Known gaps: should work on a sweep and do not. All #697.
-	"active-ports":     {sweepHonoured, "#697 — idle-detection input; without it idle detection uses defaults"},
-	"active-processes": {sweepHonoured, "#697 — see active-ports"},
-	// spored settings (#1308): set on the config by buildLaunchConfig, which
-	// every sweep row starts from.
-	"idle-cpu-threshold": {sweepHonoured, "#1308"},
-	"metrics":            {sweepHonoured, "#1308"}, "metrics-port": {sweepHonoured, "#1308"},
-	"metrics-bind": {sweepHonoured, "#1308"}, "metrics-path": {sweepHonoured, "#1308"},
-	"tracing": {sweepHonoured, "#1308"}, "tracing-exporter": {sweepHonoured, "#1308"},
-	"tracing-sampling":         {sweepHonoured, "#1308"},
-	"allow-cidr":               {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"allow-cost-limit-overrun": {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"attach-volume":            {sweepHonoured, "#697 — no way to attach a data volume to a sweep row"},
-	"capacity-block":           {sweepHonoured, "#697"},
-	"completion-delay":         {sweepHonoured, "#697"},
-	"completion-webhook-url":   {sweepHonoured, "#697 — off-node completion signal"},
-	// DNS on sweeps: a row gets spawn:dns-name only if the param file sets
-	// dns:/dns_name:, and spored skips registration without that tag. So the
-	// param file IS the sweep route and these three have nothing to do (#549).
-	"dns":                   {sweepNA, "#549 — the param file's dns:/dns_name: key is the sweep route"},
-	"dns-api-endpoint":      {sweepNA, "#549 — only consulted when a row registers DNS"},
-	"dns-function-arn":      {sweepNA, "#1158 — only consulted with a custom --dns-api-endpoint, which sweeps do not resolve"},
-	"dns-domain":            {sweepNA, "#549 — only consulted when a row registers DNS"},
-	"no-dns":                {sweepNA, "#549 — sweeps never register DNS: a row gets spawn:dns-name only if the param file sets dns:/dns_name:, and spored skips registration without that tag. Nothing to disable, so this is not a gap"},
-	"efs-id":                {sweepHonoured, "#697 — a sweep cannot mount EFS AT ALL"},
-	"efs-mount-options":     {sweepHonoured, "#697 — see efs-id"},
-	"efs-mount-point":       {sweepHonoured, "#697 — see efs-id"},
-	"efs-profile":           {sweepHonoured, "#697 — see efs-id"},
-	"fsx-create":            {sweepHonoured, "#697 — a sweep cannot mount FSx AT ALL"},
-	"fsx-export-path":       {sweepHonoured, "#697 — see fsx-create"},
-	"fsx-id":                {sweepHonoured, "#697 — see fsx-create"},
-	"fsx-import-path":       {sweepHonoured, "#697 — see fsx-create"},
-	"fsx-lifecycle":         {sweepHonoured, "#697 — see fsx-create"},
-	"fsx-mount-point":       {sweepHonoured, "#697 — see fsx-create"},
-	"fsx-recall":            {sweepHonoured, "#697 — see fsx-create"},
-	"fsx-s3-bucket":         {sweepHonoured, "#697 — see fsx-create"},
-	"fsx-skip-validate":     {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"fsx-storage-capacity":  {sweepHonoured, "#697 — see fsx-create"},
-	"fsx-throughput":        {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"fsx-ttl":               {sweepHonoured, "#697 — see fsx-create"},
-	"hibernate-on-idle":     {sweepHonoured, "#697 — has an on_idle/hibernate_on_idle param key"},
-	"instance-type":         {sweepHonoured, "#697 — passed in the minimal config, but rows override; see note in the test"},
-	"key-name":              {sweepHonoured, "#697 — has a key_name param key"},
-	"key-pair":              {sweepHonoured, "#697 — alias of key-name"},
-	"nested-virtualization": {sweepHonoured, "#697"},
-	"notify-platform":       {sweepHonoured, "#697"},
-	"on-complete":           {sweepHonoured, "#697 — has an on_complete param key; the FLAG is dropped"},
-	"on-idle":               {sweepHonoured, "#697"},
-	"plugin":                {sweepHonoured, "#697 — spored plugin declarations"},
-	"pre-stop":              {sweepHonoured, "#697 — DATA LOSS: the hook that syncs results before termination"},
-	"pre-stop-timeout":      {sweepHonoured, "#697 — see pre-stop"},
-	"reservation-id":        {sweepHonoured, "#697"}, "use-reservation": {sweepNA, "#675 — deprecated and inert; superseded by --reservation-id"},
-	"security-group":     {sweepKnownGap, "#667/#697 — fixed for single launches, still dropped on sweeps"},
-	"security-group-ids": {sweepKnownGap, "#667/#697 — see security-group"},
-	"subnet":             {sweepKnownGap, "#667/#697 — see security-group"},
-	"subnet-id":          {sweepKnownGap, "#667/#697 — see security-group"},
-	"vpc":                {sweepKnownGap, "#673/#697 — read by nothing anywhere"},
-	"slack-workspace":    {sweepHonoured, "#697"},
-	"spot-webhook-url":   {sweepHonoured, "#697 — spot-interruption signal"},
-	"strata-formation":   {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."}, "strata-profile": {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"strata-registry": {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"tag":             {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"team":            {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"user-data-file":  {sweepHonoured, "#697"},
-	"spot-max-price":  {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-
-	// Found by this gate on its first run — seven flags I had not classified,
-	// which is the gate working rather than a gap in it.
-	"completion-file":     {sweepHonoured, "#697 — has a completion_file param key; the FLAG is dropped"},
-	"session-timeout":     {sweepHonoured, "#697 — has a session_timeout param key; the FLAG is dropped"},
-	"user-data":           {sweepHonoured, "#697 — has a user_data param key; the FLAG is dropped"},
-	"wait-for-running":    {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"wait-for-ssh":        {sweepKnownGap, "#697 — NOT fixed by the inversion: applied imperatively later in launchSingleInstance (or launch_cost_limit.go/launch_batchqueue.go), which the sweep dispatch returns before reaching. The inversion fixed every flag buildLaunchConfig CARRIES on the config; these are a different, smaller defect."},
-	"webhook-correlation": {sweepHonoured, "#697 — companion to the webhook URLs, also dropped"},
-	"webhook-timeout":     {sweepHonoured, "#697 — companion to the webhook URLs, also dropped"},
-}
-
-// TestEveryLaunchFlagIsClassifiedForSweeps forces the question "does this work on
-// a sweep?" to be answered when a flag is added, rather than discovered later by
-// someone paying for a boot that ignored it.
-//
-// This is the gate for spawn#697. The sweep path drops flags by construction, so
-// a new flag's default behaviour is "silently ignored" — six separate issues have
-// been filed for instances of that. A missing entry here is a build failure.
-func TestEveryLaunchFlagIsClassifiedForSweeps(t *testing.T) {
-	flags := launchCmdFlagNames(t)
-	if len(flags) < 100 {
-		t.Fatalf("only found %d launchCmd flags; the matcher is probably broken, which "+
-			"would make this gate pass vacuously", len(flags))
-	}
-
-	var unclassified []string
-	for _, f := range flags {
-		if _, ok := sweepFlagCoverage[f]; !ok {
-			unclassified = append(unclassified, f)
-		}
-	}
-	sort.Strings(unclassified)
-	if len(unclassified) > 0 {
-		t.Errorf("%d launchCmd flag(s) have no sweep classification:\n  --%s\n\n"+
-			"The sweep path builds a two-field LaunchConfig and merges rows onto an empty "+
-			"struct, so an unclassified flag is SILENTLY DROPPED there (#697). Add it to "+
-			"sweepFlagCoverage as honoured, N/A, or a known gap with an issue.",
-			len(unclassified), strings.Join(unclassified, "\n  --"))
-	}
-
-	// And the reverse: a stale entry for a flag that no longer exists is rot.
-	have := map[string]bool{}
-	for _, f := range flags {
-		have[f] = true
-	}
-	var stale []string
-	for f := range sweepFlagCoverage {
-		if !have[f] {
-			stale = append(stale, f)
-		}
-	}
-	sort.Strings(stale)
-	if len(stale) > 0 {
-		t.Errorf("sweepFlagCoverage lists flags that launchCmd no longer registers: --%s",
-			strings.Join(stale, " --"))
-	}
-}
-
-// TestKnownSweepGapsCiteAnIssue: a gap without a tracking issue is just a bug
-// nobody wrote down.
-func TestKnownSweepGapsCiteAnIssue(t *testing.T) {
-	issue := regexp.MustCompile(`#\d+`)
-	for flag, c := range sweepFlagCoverage {
-		if c.class != sweepKnownGap {
-			continue
-		}
-		if !issue.MatchString(c.note) {
-			t.Errorf("--%s is a known sweep gap with no issue in its note (%q)", flag, c.note)
-		}
-	}
-}
-
-// TestSweepHonouredFlagsReallyAreHonoured keeps the manifest honest in the
-// direction that matters: a flag claimed as honoured must actually be referenced
-// on the sweep path. Without this, the manifest could drift into wishful
-// thinking — which is how #539's second half survived, since the fix listed the
-// flags that existed when it was written.
-func TestSweepHonouredFlagsReallyAreHonoured(t *testing.T) {
-	bound := launchCmdFlagVars(t)
-	sweepSrc := sweepPathSource(t)
-
-	var lying []string
-	for flag, c := range sweepFlagCoverage {
-		if c.class != sweepHonoured {
-			continue
-		}
-		v, ok := bound[flag]
+func TestEveryLaunchFlagHasASweepRule(t *testing.T) {
+	names := launchFlagNames(t)
+	known := map[string]bool{}
+	for _, n := range names {
+		known[n] = true
+		rule, ok := sweepLaunchFlags[n]
 		if !ok {
-			continue // covered by the stale check above
+			t.Errorf("--%s has no entry in sweepLaunchFlags: decide whether a parameter sweep carries it to "+
+				"its members, reads it itself, or refuses it. Accepting and dropping it is #1366", n)
+			continue
 		}
-		if !regexp.MustCompile(`\b` + regexp.QuoteMeta(v) + `\b`).MatchString(sweepSrc) {
-			lying = append(lying, fmt.Sprintf("--%s (var %s)", flag, v))
+		if strings.TrimSpace(rule.why) == "" {
+			t.Errorf("--%s: the rule records no reason", n)
+		}
+		if len(rule.unlessSet) > 0 && rule.kind != sweepRefused {
+			t.Errorf("--%s: unlessSet only qualifies a refusal", n)
 		}
 	}
-	sort.Strings(lying)
-	if len(lying) > 0 {
-		t.Errorf("these flags are classified as honoured on the sweep path but their "+
-			"variables are never referenced there:\n  %s\n\nEither wire them up or "+
-			"reclassify them as a known gap.", strings.Join(lying, "\n  "))
+	for n := range sweepLaunchFlags {
+		if !known[n] {
+			t.Errorf("sweepLaunchFlags has an entry for --%s, which `spawn launch` no longer has", n)
+		}
+	}
+}
+
+func TestSweepFlagRulesAreEnforced(t *testing.T) {
+	for _, n := range launchFlagNames(t) {
+		rule, ok := sweepLaunchFlags[n]
+		if !ok {
+			continue // TestEveryLaunchFlagHasASweepRule reports it
+		}
+		err := sweepUnsupportedFlags(changedOnly(n))
+		switch {
+		case rule.kind == sweepRefused && err == nil:
+			t.Errorf("--%s is marked refused on a sweep but the guard accepted it", n)
+		case rule.kind == sweepRefused && !strings.Contains(err.Error(), "--"+n+": "+rule.why):
+			t.Errorf("--%s: the refusal does not name the flag and its reason: %v", n, err)
+		case rule.kind != sweepRefused && err != nil:
+			t.Errorf("--%s is not marked refused on a sweep but the guard refused it: %v", n, err)
+		}
+		for _, other := range rule.unlessSet {
+			if err := sweepUnsupportedFlags(changedOnly(n, other)); err != nil {
+				t.Errorf("--%s with --%s was refused: %v", n, other, err)
+			}
+		}
+	}
+	if err := sweepUnsupportedFlags(changedOnly()); err != nil {
+		t.Errorf("a sweep with no flags set was refused: %v", err)
+	}
+}
+
+// flagPrereqs are the flags a flag needs to take effect (or to pass
+// buildLaunchConfig's validation), set before the baseline is taken.
+var flagPrereqs = map[string][]string{
+	"capacity-block": {"reservation-id"}, "efa-interfaces": {"efa"},
+	"webhook-correlation": {"spot-webhook-url"}, "webhook-timeout": {"spot-webhook-url"},
+	"metrics-port": {"metrics"}, "metrics-bind": {"metrics"}, "metrics-path": {"metrics"},
+	"tracing-exporter": {"tracing"}, "tracing-sampling": {"tracing"},
+	"pre-stop-timeout": {"pre-stop"}, "completion-file": {"on-complete"}, "notify-platform": {"slack-workspace"},
+	"efs-mount-point": {"efs-id"}, "efs-mount-options": {"efs-id"}, "efs-profile": {"efs-id"},
+	"fsx-mount-point": {"fsx-id"}, "fsx-skip-validate": {"fsx-id"}, "no-dns": {"dns"},
+	"spot-max-price": {"spot"},
+}
+
+// sampleFlagValues are values that pass a flag's validation; any other flag
+// gets a generic value of its type (sampleFlagValue).
+var sampleFlagValues = map[string]string{
+	"instance-type": "m7i.xlarge", "region": "us-west-2", "az": "us-east-1c", "ami": "ami-0fedcba9876543210",
+	"volume-size": "40", "attach-volume": "snap-0123:/refdata", "key-name": testSweepKeyName, "key-pair": testSweepKeyName,
+	"security-group": "sg-1", "security-group-ids": "sg-1", "subnet": "subnet-1", "subnet-id": "subnet-1", "vpc": "vpc-1",
+	"efa-interfaces": "2", "placement-group": "pg-1", "spot-max-price": "0.25", "reservation-id": "cr-1",
+	"tag": "project=x", "team": "team-1", "name": "box", "dns": "box",
+	"ttl": "2h", "idle-timeout": "30m", "on-idle": "hibernate", "pre-stop": "sync", "pre-stop-timeout": "5m",
+	"spot-webhook-url": "https://hooks.example.org/spot", "completion-webhook-url": "https://hooks.example.org/done",
+	"webhook-correlation": "corr", "webhook-timeout": "2s", "on-complete": "terminate", "completion-file": "/tmp/DONE",
+	"completion-delay": "45s", "session-timeout": "10m", "cost-limit": "5", "command": "run.sh",
+	"active-ports": "8888", "active-processes": "python", "idle-cpu-threshold": "12.5",
+	"metrics-port": "9200", "metrics-bind": "0.0.0.0", "metrics-path": "/m", "tracing-exporter": "stdout", "tracing-sampling": "0.5",
+	"slack-workspace": "T1", "notify-platform": "teams", "user-data": "echo sweep-user-data",
+	"plugin": "docker", "efs-id": "fs-0123456789abcdef0", "efs-mount-point": "/shared", "efs-mount-options": "timeo=150",
+	"efs-profile": "max-io", "fsx-id": "fs-0fsx", "fsx-mount-point": "/lustre",
+	"nist-800-53": "low", "template-var": "a=b", "count": "2", "fsx-recall": "my-stack",
+}
+
+// sampleFlagValue is a value for --name that its validation accepts.
+func sampleFlagValue(t *testing.T, name string) string {
+	t.Helper()
+	if v, ok := sampleFlagValues[name]; ok {
+		return v
+	}
+	f := launchCmd.Flags().Lookup(name)
+	if f == nil {
+		f = launchCmd.InheritedFlags().Lookup(name)
+	}
+	if f == nil {
+		t.Fatalf("no flag --%s", name)
+	}
+	switch f.Value.Type() {
+	case "bool":
+		return "true"
+	case "int", "int32", "int64", "float64":
+		return "3"
+	case "stringToString":
+		return "a=b"
+	}
+	return "sample-" + name
+}
+
+// setLaunchFlag sets a launch flag as the command line would, for a test
+// under keepLaunchGlobals. A slice or map flag is set with Replace rather than
+// Set: pflag's own Set on one marks an internal "changed" that Replace never
+// clears, so every later Set appends to it, and keepLaunchGlobals cannot put
+// that back.
+func setLaunchFlag(t *testing.T, name, value string) {
+	t.Helper()
+	f := launchCmd.Flags().Lookup(name)
+	if f == nil {
+		t.Fatalf("no flag --%s", name)
+	}
+	if sv, ok := f.Value.(pflag.SliceValue); ok {
+		if err := sv.Replace([]string{value}); err != nil {
+			t.Fatalf("set --%s=%s: %v", name, value, err)
+		}
+		f.Changed = true
+		return
+	}
+	if f.Value.Type() == "stringToString" {
+		t.Fatalf("--%s: setLaunchFlag cannot set a map flag and put it back; mark it Changed instead", name)
+	}
+	if err := launchCmd.Flags().Set(name, value); err != nil {
+		t.Fatalf("set --%s=%s: %v", name, value, err)
+	}
+}
+
+// stubTeamName keeps --team from asking DynamoDB for the team's name.
+func stubTeamName(t *testing.T) {
+	t.Helper()
+	prev := resolveTeamNameFn
+	t.Cleanup(func() { resolveTeamNameFn = prev })
+	resolveTeamNameFn = func(context.Context, string) (string, error) { return "", nil }
+}
+
+// sweepFlagMember is the first member of a one-row foreground sweep launched
+// with the launch flags as they are now set, and its user-data script.
+func sweepFlagMember(t *testing.T) (aws.LaunchConfig, string) {
+	t.Helper()
+	base, err := sweepBaseConfig(context.Background())
+	if err != nil {
+		t.Fatalf("sweepBaseConfig: %v", err)
+	}
+	pf := &ParamFileFormat{Params: []map[string]interface{}{{"trial": "a"}}}
+	cfgs, err := foregroundMembers(t, testSweepPlat(t), *base, pf, &fakeStorageLookups{})
+	if err != nil {
+		t.Fatalf("build the member: %v", err)
+	}
+	cfg := *cfgs[0]
+	script := string(decodeUserDataOnce(t, cfg.UserData))
+	cfg.UserData = ""
+	return cfg, script
+}
+
+// changedConfigFields names the LaunchConfig fields that differ.
+func changedConfigFields(a, b aws.LaunchConfig) []string {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	var out []string
+	for i := 0; i < va.NumField(); i++ {
+		if !reflect.DeepEqual(va.Field(i).Interface(), vb.Field(i).Interface()) {
+			out = append(out, va.Type().Field(i).Name)
+		}
+	}
+	return out
+}
+
+// TestSweepFlagRulesHoldAgainstTheCode checks each flag's claim on a real
+// foreground member: set the flag (after its prerequisites), build the member
+// the way launchParameterSweep does, and compare it with the member built
+// without the flag.
+//
+//   - a flag said to reach the members through their config must change it,
+//     and every field it changes must be one a foreground member carries
+//     (foregroundDispositions), never one it drops or refuses;
+//   - one said to reach them through the user-data builder must change the
+//     member's user data;
+//   - one said to act on the CLI alone must change neither;
+//   - one said to steer the sweep must be read by the sweep path's own code.
+func TestSweepFlagRulesHoldAgainstTheCode(t *testing.T) {
+	steering := sweepSteeringSource(t)
+	vars := launchCmdFlagVars(t)
+	for _, n := range launchFlagNames(t) {
+		rule, ok := sweepLaunchFlags[n]
+		if !ok || rule.kind == sweepRefused {
+			continue
+		}
+		if rule.kind == sweepSteers {
+			v, ok := vars[n]
+			if !ok {
+				t.Errorf("--%s steers the sweep, but binds no variable the sweep path could read", n)
+			} else if !regexp.MustCompile(`\b` + regexp.QuoteMeta(v) + `\b`).MatchString(steering) {
+				t.Errorf("--%s (var %s) is said to steer the sweep, but the sweep path never reads it", n, v)
+			}
+			continue
+		}
+		t.Run(n, func(t *testing.T) {
+			keepLaunchGlobals(t)
+			dir := isolateAWSEnv(t)
+			t.Setenv("HOME", dir)
+			stubTeamName(t)
+			set := func(name string) {
+				t.Helper()
+				v := sampleFlagValue(t, name)
+				if name == "user-data-file" || name == "config" {
+					v = filepath.Join(dir, name+".txt")
+					body := "echo from-a-file\n"
+					if name == "config" {
+						body = "plugins:\n  - ref: rstudio-server\n"
+					}
+					if err := os.WriteFile(v, []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				setLaunchFlag(t, name, v)
+			}
+			for _, k := range []string{"instance-type", "region"} {
+				if err := launchCmd.Flags().Set(k, map[string]string{"instance-type": "m7i.large", "region": "us-east-1"}[k]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := launchCmd.Flags().Set("ttl", "1h"); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range flagPrereqs[n] {
+				set(p)
+			}
+			before, beforeUD := sweepFlagMember(t)
+			set(n)
+			after, afterUD := sweepFlagMember(t)
+
+			fields := changedConfigFields(before, after)
+			userData := beforeUD != afterUD
+			switch rule.kind {
+			case sweepViaConfig:
+				if len(fields) == 0 {
+					t.Fatalf("--%s is said to reach the members through their config, but it changes no field", n)
+				}
+				for _, f := range fields {
+					d := foregroundDispositions[f]
+					if d.refused || !(d.settings || d.tags || d.userData || d.direct != "") {
+						t.Errorf("--%s sets LaunchConfig.%s, which a foreground member does not carry (%q)", n, f, d.why)
+					}
+				}
+			case sweepViaUserData:
+				if !userData {
+					t.Errorf("--%s is said to reach the members through the user-data builder, but their user data "+
+						"is the same with and without it", n)
+				}
+			case sweepCLIOnly:
+				if len(fields) > 0 || userData {
+					t.Errorf("--%s is said to act on the CLI alone, but it changes the member: fields %v, user data %t",
+						n, fields, userData)
+				}
+			}
+		})
 	}
 }
 
 // --- helpers ---
 
-var flagBindRE = regexp.MustCompile(`launchCmd\.(?:Persistent)?Flags\(\)\.\w+Var\(&(\w+),\s*"([a-z0-9-]+)"`)
+var flagBindRE = regexp.MustCompile(`launchCmd\.(?:Persistent)?Flags\(\)\.\w+Var(?:P)?\(&(\w+),\s*"([a-z0-9-]+)"`)
 
+// launchCmdFlagVars maps each launch flag to the variable it is bound to.
 func launchCmdFlagVars(t *testing.T) map[string]string {
 	t.Helper()
 	b, err := os.ReadFile("launch_flags.go")
@@ -268,35 +311,34 @@ func launchCmdFlagVars(t *testing.T) map[string]string {
 			out[m[2]] = m[1]
 		}
 	}
-	return out
-}
-
-func launchCmdFlagNames(t *testing.T) []string {
-	t.Helper()
-	m := launchCmdFlagVars(t)
-	out := make([]string, 0, len(m))
-	for f := range m {
-		out = append(out, f)
+	if len(out) < 100 {
+		t.Fatalf("found only %d flag bindings in launch_flags.go; the matcher is broken", len(out))
 	}
-	sort.Strings(out)
 	return out
 }
 
-func sweepPathSource(t *testing.T) string {
+// sweepSteeringSource is the sweep path's own code: the dispatch and
+// orchestration, not the config builder every launch shares (a flag read only
+// there reaches the members through their config, and is checked as such).
+func sweepSteeringSource(t *testing.T) string {
 	t.Helper()
+	var files []string
+	for _, pattern := range []string{"launch_sweep*.go", "sweep*.go", "launch_fleet.go", "launch_regions.go"} {
+		m, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, m...)
+	}
+	sort.Strings(files)
 	var sb strings.Builder
-	// launch_config.go counts as the sweep path since spawn#697.
-	//
-	// The sweep dispatch now calls buildLaunchConfig — the same function the
-	// single-instance path uses — and passes the result as the base that every
-	// param row is merged onto. So a flag that buildLaunchConfig reads IS
-	// honoured on a sweep, even though it is never mentioned in launch_sweep.go.
-	// Before the inversion this list was the whole story, because the sweep built
-	// a two-field struct and read nothing else.
-	for _, f := range []string{"launch_sweep.go", "sweep.go", "sweep_keys.go", "launch_config.go"} {
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
 		b, err := os.ReadFile(f)
 		if err != nil {
-			continue
+			t.Fatal(err)
 		}
 		sb.Write(b)
 	}

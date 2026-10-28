@@ -72,6 +72,10 @@ type detachedBootstrap struct {
 	// settingsOf resolves a member's RunInstances-side settings as a foreground
 	// launch of cfg would (#1353): aws.Client.ResolveLaunchSettings in production.
 	settingsOf func(cfg aws.LaunchConfig) aws.LaunchSettings
+	// storageOf renders a member's storage-mount script and the mount points
+	// its --command waits for, as a foreground member's (#1366), filling in the
+	// FSx mount name its tags carry: sweepStorage.member in production.
+	storageOf func(cfg *aws.LaunchConfig) (string, []string, error)
 }
 
 // newDetachedBootstrap returns the production detachedBootstrap: the local
@@ -79,7 +83,11 @@ type detachedBootstrap struct {
 func newDetachedBootstrap(ctx context.Context, client *aws.Client, plat *platform.Platform) detachedBootstrap {
 	cache := map[string]string{}
 	var tagger *aws.LaunchTagger
+	storage := newSweepStorage(client, os.Stderr)
 	return detachedBootstrap{
+		storageOf: func(cfg *aws.LaunchConfig) (string, []string, error) {
+			return storage.member(ctx, cfg)
+		},
 		tagsOf: func(cfg aws.LaunchConfig) (map[string]string, error) {
 			if tagger == nil {
 				t, err := client.NewLaunchTagger(ctx)
@@ -163,7 +171,15 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 		if err := windowsPluginGuard(cfg.TargetOS, decls); err != nil {
 			return fmt.Errorf("param set %d: %w", i, err)
 		}
-		ud, err := detachedMemberUserData(b.plat, &cfg)
+		// Before the tags: the FSx mount name the lookup finds is one of them.
+		if b.storageOf == nil {
+			return fmt.Errorf("param set %d: no storage renderer: its mounts would be dropped", i)
+		}
+		storageScript, ready, err := b.storageOf(&cfg)
+		if err != nil {
+			return fmt.Errorf("param set %d: %w", i, err)
+		}
+		ud, err := detachedMemberUserData(b.plat, &cfg, storageScript, ready)
 		if err != nil {
 			return fmt.Errorf("param set %d: build spored user data: %w", i, err)
 		}
@@ -245,7 +261,7 @@ func detachedSpotGuard(tags map[string]string) error {
 // foreground path would have made a key pair first, the detached one has no
 // key to install, so the member is keyless and `spawn connect` injects a key
 // over SSM, as it does for any keyless instance.
-func detachedMemberUserData(plat *platform.Platform, cfg *aws.LaunchConfig) (string, error) {
+func detachedMemberUserData(plat *platform.Platform, cfg *aws.LaunchConfig, storageScript string, readyMountPoints []string) (string, error) {
 	if err := userDataOSGuard(cfg); err != nil {
 		return "", err
 	}
@@ -258,7 +274,7 @@ func detachedMemberUserData(plat *platform.Platform, cfg *aws.LaunchConfig) (str
 		}
 		publicKey = pub
 	}
-	script, err := buildUserDataForKey(plat, cfg, publicKey, "", nil)
+	script, err := buildUserDataForKey(plat, cfg, publicKey, storageScript, readyMountPoints)
 	if err != nil {
 		return "", err
 	}

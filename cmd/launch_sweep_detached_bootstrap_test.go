@@ -36,6 +36,10 @@ func testDetachedBootstrap(t *testing.T) detachedBootstrap {
 		tagsOf: testMemberTags,
 		// Launch's own resolution, with the AMI and memory lookups fixed.
 		settingsOf: testMemberSettings,
+		// Launch's own storage rendering, with the FSx and EFS lookups fixed.
+		storageOf: func(cfg *aws.LaunchConfig) (string, []string, error) {
+			return newSweepStorage(&fakeStorageLookups{}, io.Discard).member(context.Background(), cfg)
+		},
 	}
 }
 

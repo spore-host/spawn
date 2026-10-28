@@ -328,26 +328,11 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 
 	// Build launch configs for each parameter set
-	launchConfigs := make([]*aws.LaunchConfig, 0, len(paramFormat.Params))
-	hasDefaultApplied := false
-	var defaultedVerbs []string // the idle action each defaulted config really gets (#1151)
-	for i, paramSet := range paramFormat.Params {
-		config, err := buildLaunchConfigFromParams(*baseConfig, paramFormat.Defaults, paramSet, sweepID, name, i, len(paramFormat.Params))
-		if err != nil {
-			return fmt.Errorf("failed to build launch config for parameter set %d: %w", i, err)
-		}
-
-		// The per-member defaults, shared with the detached path's tag and user
-		// data rendering (#1330), so a member is the same config either way.
-		if defaultSweepMember(&config, *baseConfig, name, i) {
-			hasDefaultApplied = true
-			if v := idleActionVerb(&config); !slices.Contains(defaultedVerbs, v) {
-				defaultedVerbs = append(defaultedVerbs, v)
-			}
-		}
-
-		launchConfigs = append(launchConfigs, &config)
+	launchConfigs, defaultedVerbs, err := foregroundSweepMembers(*baseConfig, paramFormat, sweepID, name)
+	if err != nil {
+		return err
 	}
+	hasDefaultApplied := len(defaultedVerbs) > 0
 
 	// Setup common resources (AMI, SSH key, IAM role) using first config as template.
 	// In JSON mode, suppress the TUI so stdout carries only the JSON array (#21).
@@ -443,6 +428,17 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		}
 	}
 
+	// Look the members' --fsx-id filesystem up before the key pair and IAM role
+	// below are set up, so one that is not there (or not in a member's region)
+	// fails the sweep before anything is created. Memoized: the user-data step
+	// reuses the answers.
+	storage := newSweepStorage(awsClient, os.Stderr)
+	for i, cfg := range launchConfigs {
+		if _, _, err := storage.member(ctx, cfg); err != nil {
+			return fmt.Errorf("parameter set %d: %w", i, err)
+		}
+	}
+
 	// Step 2: Setup SSH key
 	prog.Start("Setting up SSH key")
 	if firstConfig.KeyName == "" {
@@ -497,14 +493,9 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		fmt.Fprintf(os.Stderr, "   Instances will run indefinitely until manually terminated.\n\n")
 	}
 
-	// Build user-data for each config. (Storage mounts aren't wired through this
-	// sweep path; attach-volume on sweeps would thread a storageScript here.)
-	for _, cfg := range launchConfigs {
-		userDataScript, err := buildUserData(plat, cfg, "", nil)
-		if err != nil {
-			return fmt.Errorf("failed to build user data: %w", err)
-		}
-		cfg.UserData = encodeUserDataForOS(userDataScript, cfg.TargetOS)
+	// Build user-data for each config, with its storage mounts (#1366).
+	if err := renderForegroundSweepUserData(ctx, plat, launchConfigs, storage); err != nil {
+		return err
 	}
 
 	// Launch, verify and report (#1305): every member's spored is verified, a
@@ -515,6 +506,54 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		sweepID: sweepID, name: name, paramFile: paramFile, totalParams: len(paramFormat.Params),
 		maxConcurrent: maxConcurrent, launchDelay: launchDelay, configs: launchConfigs,
 	})
+}
+
+// foregroundSweepMembers builds the config each foreground sweep member is
+// launched with: the base (the CLI's config) merged with its row, and the
+// per-member defaults. A member neither sweep path can launch as configured is
+// refused (sweepMemberGuard, #1366). It returns the idle action each member
+// given the 1h idle-timeout default really gets (#1151), once each.
+func foregroundSweepMembers(base aws.LaunchConfig, pf *ParamFileFormat, sweepID, name string) ([]*aws.LaunchConfig, []string, error) {
+	launchConfigs := make([]*aws.LaunchConfig, 0, len(pf.Params))
+	var defaultedVerbs []string
+	for i, paramSet := range pf.Params {
+		config, err := buildLaunchConfigFromParams(base, pf.Defaults, paramSet, sweepID, name, i, len(pf.Params))
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to build launch config for parameter set %d: %w", i, err)
+		}
+
+		// The per-member defaults, shared with the detached path's tag and user
+		// data rendering (#1330), so a member is the same config either way.
+		if defaultSweepMember(&config, base, name, i) {
+			if v := idleActionVerb(&config); !slices.Contains(defaultedVerbs, v) {
+				defaultedVerbs = append(defaultedVerbs, v)
+			}
+		}
+		if err := sweepMemberGuard(config); err != nil {
+			return nil, nil, fmt.Errorf("parameter set %d: %w", i, err)
+		}
+
+		launchConfigs = append(launchConfigs, &config)
+	}
+	return launchConfigs, defaultedVerbs, nil
+}
+
+// renderForegroundSweepUserData sets each foreground member's user data: its
+// spored bootstrap, with the storage-mount script a single launch of the same
+// config would run (#1366). Members' target OS and key are already resolved.
+func renderForegroundSweepUserData(ctx context.Context, plat *platform.Platform, cfgs []*aws.LaunchConfig, storage *sweepStorage) error {
+	for i, cfg := range cfgs {
+		storageScript, ready, err := storage.member(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("parameter set %d: %w", i, err)
+		}
+		userDataScript, err := buildUserData(plat, cfg, storageScript, ready)
+		if err != nil {
+			return fmt.Errorf("failed to build user data: %w", err)
+		}
+		cfg.UserData = encodeUserDataForOS(userDataScript, cfg.TargetOS)
+	}
+	return nil
 }
 
 // defaultSweepMember fills in what a sweep member's config takes from outside

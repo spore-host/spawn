@@ -21,7 +21,6 @@ import (
 	"github.com/spore-host/spawn/pkg/locality"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/progress"
-	"github.com/spore-host/spawn/pkg/userdata"
 	"github.com/spore-host/spawn/pkg/wizard"
 )
 
@@ -42,6 +41,13 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// later, by windowsLifecycleGuard.
 	if err := windowsUnsupportedFlags(osFlag, launchFlags); err != nil {
 		return err
+	}
+	// Likewise the flags a parameter sweep can't honour (#1366), before the
+	// identity lookup below, so a refused sweep makes no AWS call at all.
+	if isSweepLaunch() {
+		if err := sweepUnsupportedFlags(launchFlags); err != nil {
+			return err
+		}
 	}
 
 	// Reject an unparseable --ttl/--idle-timeout (etc.) before any AWS call,
@@ -736,61 +742,12 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 
 	// Build the storage-mount script (EFS / FSx / attached EBS volumes) FIRST, so
 	// it can be injected BEFORE the user's script — the workload must see the
-	// mounts already live; mounting after it finishes is useless (#166). Skip on
-	// Windows: the storage user-data is Linux mount scripting and would corrupt
-	// the <powershell> block. EFS/FSx on Windows is out of Phase 1 scope (#55).
-	storageScript := ""
-	// Mount points --command must see live before it starts (#668). Only EFS and
-	// FSx are required: attached EBS data volumes mount with `nofail` by design,
-	// so a missing one must not strand a workload that never referenced it.
-	var readyMountPoints []string
-	if (efsID != "" || fsxInfo != nil || len(config.AttachVolumes) > 0) && config.TargetOS != "windows" {
-		storageConfig := userdata.StorageConfig{}
-
-		// EFS configuration
-		if efsID != "" {
-			mountOptions, err := getEFSMountOptions()
-			if err != nil {
-				return fmt.Errorf("failed to get EFS mount options: %w", err)
-			}
-
-			storageConfig.EFSEnabled = true
-			storageConfig.EFSFilesystemDNS = aws.GetEFSDNSName(efsID, config.Region)
-			storageConfig.EFSMountPoint = efsMountPoint
-			storageConfig.EFSMountOptions = mountOptions
-			readyMountPoints = append(readyMountPoints, efsMountPoint)
-
-			// Resolve the mount target IP as a boot-time fallback (#704). The DNS
-			// name is not reliable for a freshly created filesystem: a real run
-			// failed all six retry attempts over ~60s with the mount target
-			// available in this very subnet, while mounting by IP worked first try.
-			// Best-effort — a launch must not fail because this lookup did, since
-			// DNS works in the steady state.
-			if ip, ferr := awsClient.EFSMountTargetIP(ctx, efsID, config.Region,
-				config.SubnetID, config.AvailabilityZone); ferr != nil {
-				fmt.Fprintf(os.Stderr, "⚠️  could not resolve an EFS mount-target IP for %s (%v); "+
-					"the mount will rely on DNS alone, which can fail at first boot (#704)\n", efsID, ferr)
-			} else if ip != "" {
-				storageConfig.EFSMountTargetIP = ip
-			}
-		}
-
-		// FSx configuration
-		if fsxInfo != nil {
-			storageConfig.FSxLustreEnabled = true
-			storageConfig.FSxFilesystemDNS = fsxInfo.DNSName
-			storageConfig.FSxMountName = fsxInfo.MountName
-			storageConfig.FSxMountPoint = fsxMountPoint
-			readyMountPoints = append(readyMountPoints, fsxMountPoint)
-		}
-
-		// Attached EBS data volumes from snapshots (#144)
-		storageConfig.AttachedVolumes = attachedVolumesUserData(config.AttachVolumes)
-
-		storageScript, err = userdata.GenerateStorageUserData(storageConfig)
-		if err != nil {
-			return fmt.Errorf("failed to generate storage user-data: %w", err)
-		}
+	// mounts already live; mounting after it finishes is useless (#166). Skipped
+	// on Windows (EFS/FSx on Windows is out of Phase 1 scope, #55). Shared with
+	// both sweep paths (#1366).
+	storageScript, readyMountPoints, err := launchStorageScript(ctx, awsClient, config, fsxInfo, os.Stderr)
+	if err != nil {
+		return err
 	}
 
 	// Step 5: Build user data — the storage mount is injected before the user's
@@ -1440,6 +1397,12 @@ func sweepBaseConfig(ctx context.Context) (*aws.LaunchConfig, error) {
 	}
 	if config.InstanceType == "" {
 		config.InstanceType = instanceType
+	}
+	// --spot-max-price: buildLaunchConfig never reads it (only the batch-queue
+	// path did), so a sweep's members dropped it (#1366). A row's own
+	// spot_max_price: still wins.
+	if spotMaxPrice != "" {
+		config.SpotMaxPrice = spotMaxPrice
 	}
 	if err := applyLaunchFlagTags(ctx, config); err != nil {
 		return nil, err
