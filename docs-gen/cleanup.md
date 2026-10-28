@@ -39,7 +39,10 @@ before v0.147.0) when the pool was never drained; a pool role also needs its
 spawn:pool-run-id tag to match its name. A role goes only when it and its profile are
 tagged spawn:managed=true, no instance in any enabled region (pending through
 stopped) has the profile attached, the role and profile are at least 24 hours
-old, and the role is unused for 24 hours. The shared spored-instance-role is never touched. IAM is
+old, and the role is unused for 24 hours. A role an enabled schedule names
+(its params' iam_role) is kept until the schedule is paused, cancelled or
+runs out; the schedules are read from spawn's infra account (as 'spawn
+schedule' does), and if they cannot be read no role is deleted. The shared spored-instance-role is never touched. IAM is
 global, so this always checks every enabled region whatever --region says, and
 covers every principal's roles. The TTL reaper applies the same rule
 (REAPER_INSTANCE_ROLES).

@@ -49,6 +49,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LaunchConfig.ValidateNestedSpawnTTL`, `NestedSpawnTTLError`,
   `NestedSpawnRoleReservedError`, `ErrNestedSpawnNeedsTTL`,
   `ErrNestedSpawnRoleReserved`.
+- **The per-task IAM role sweep keeps a role an enabled schedule will launch
+  with** (#1378). `spawn schedule create` accepts a `spawn-instance-*` profile,
+  stores its name in the schedule's params, and every firing launches with it
+  without re-creating it, so a schedule that fires weekly left its role idle
+  between firings and an armed reaper (`REAPER_INSTANCE_ROLES=reap`) or
+  `spawn cleanup --instance-roles` would have deleted it, failing the next
+  firing at RunInstances. Both now read the schedules (the `spawn-schedules`
+  table in us-east-1 and each params object, through one shared source in
+  `pkg/instancerole`) and keep every profile named by an active schedule's
+  `defaults.iam_role` or a row's `iam_role`; the reaper logs `role <name>
+  kept: referenced by schedule <id>` and counts `instance_roles_referenced`,
+  and the CLI's preview shows the same reason. A paused, cancelled, deleted
+  or run-out schedule (max executions reached, end-after passed: the
+  scheduler refuses those firings) protects nothing. If the schedules cannot
+  be read completely (AccessDenied, a missing table, a failed page, an active
+  schedule's missing params object), no role is deleted: the reaper counts
+  the account in `instance_roles_references_unreadable`, and the CLI refuses
+  with the reason. New grants on the reaper's own role, read-only:
+  `dynamodb:Scan` on `spawn-schedules` (us-east-1) and `s3:GetObject` on
+  `spawn-schedules-*/schedules/*` (SAM template and `spawn reaper deploy`);
+  the member-account role is unchanged. `spawn cleanup --instance-roles` now
+  also calls `dynamodb:Scan` and `s3:GetObject` with the infra profile
+  `spawn schedule` uses.
 
 ## [0.147.0] - 2026-10-28
 

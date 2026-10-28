@@ -531,3 +531,31 @@ func TestScheduleRecordValidation(t *testing.T) {
 		})
 	}
 }
+
+// FiringAt is scheduler-handler's decision (#1378): only an active schedule
+// under its limits launches; pkg/instancerole keeps roles for exactly those.
+func TestFiringAt(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	active := func() ScheduleRecord { return ScheduleRecord{Status: string(ScheduleStatusActive)} }
+	cases := []struct {
+		name   string
+		adjust func(*ScheduleRecord)
+		want   Firing
+	}{
+		{"active", func(*ScheduleRecord) {}, FiringLaunches},
+		{"under max executions", func(r *ScheduleRecord) { r.MaxExecutions, r.ExecutionCount = 3, 2 }, FiringLaunches},
+		{"before end-after", func(r *ScheduleRecord) { r.EndAfter = now.Add(time.Hour) }, FiringLaunches},
+		{"paused", func(r *ScheduleRecord) { r.Status = string(ScheduleStatusPaused) }, FiringNotActive},
+		{"cancelled", func(r *ScheduleRecord) { r.Status = string(ScheduleStatusCancelled) }, FiringNotActive},
+		{"no status", func(r *ScheduleRecord) { r.Status = "" }, FiringNotActive},
+		{"max executions reached", func(r *ScheduleRecord) { r.MaxExecutions, r.ExecutionCount = 3, 3 }, FiringMaxExecutions},
+		{"end-after passed", func(r *ScheduleRecord) { r.EndAfter = now.Add(-time.Second) }, FiringExpired},
+	}
+	for _, c := range cases {
+		r := active()
+		c.adjust(&r)
+		if got := r.FiringAt(now); got != c.want {
+			t.Errorf("%s: FiringAt = %d, want %d", c.name, got, c.want)
+		}
+	}
+}

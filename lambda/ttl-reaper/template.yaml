@@ -229,7 +229,11 @@ Parameters:
       'report'. DryRun always wins. The member accounts' role stack
       (ttl-reaper-cross-account-role.yaml) must be redeployed for the grant;
       until then the run summary counts the account in
-      instance_roles_accounts_denied.
+      instance_roles_accounts_denied. A role an enabled schedule names (its
+      params' iam_role) is kept until the schedule is paused, cancelled or
+      runs out (#1378): the function reads the spawn-schedules table (us-east-1)
+      and the params in this account. If they cannot be read completely,
+      no role is deleted that run (instance_roles_references_unreadable).
 
   PoolQueues:
     Type: String
@@ -448,6 +452,23 @@ Resources:
               Action:
                 - sts:AssumeRole
               Resource: !Ref RoleArns
+        # The schedules (#1378): the per-task role sweep keeps a role an enabled
+        # schedule will launch with, so it reads the schedules table `spawn
+        # schedule create` writes (spawn-schedules, us-east-1) and each params
+        # object, in THIS account, on the base credentials, whatever ScanSelf
+        # says. Read-only, on exactly those resources. Unconditional: without it
+        # the sweep cannot read the schedules and deletes no role at all.
+        # pkg/reaperiam.ScheduleReferenceStatements is the source;
+        # TestSAMTemplateGrantsTheScheduleRead holds this copy to it.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+              Resource: !Sub 'arn:aws:dynamodb:us-east-1:${AWS::AccountId}:table/spawn-schedules'
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: 'arn:aws:s3:::spawn-schedules-*/schedules/*'
         # When scanning the Lambda's own account directly (ScanSelf=true), it
         # needs describe/terminate locally too. Terminate is tag-scoped to
         # spawn:managed=true so the reaper can never touch unmanaged instances.

@@ -67,6 +67,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/elasticip"
+	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/spotrequest"
@@ -208,6 +209,11 @@ type reaper struct {
 	// instanceRolesReport / instanceRolesReap, from REAPER_INSTANCE_ROLES.
 	// Unset is report: new deletion behaviour starts report-only. dryRun wins.
 	instanceRoles string
+
+	// roleRefs are the deferred launchers whose profiles the role sweep must
+	// keep (#1378): the schedules, read with the base credentials. Empty makes
+	// instancerole.CollectReferences fail, so the sweep deletes nothing.
+	roleRefs []instancerole.ReferenceSource
 
 	// Abandoned pool queues and their staged specs (#1351): one of
 	// poolQueuesOff / poolQueuesReport / poolQueuesReap, from
@@ -454,6 +460,8 @@ func configure() {
 		spotRequests: parseSpotRequests(os.Getenv("REAPER_SPOT_REQUESTS")),
 		// #1300: the per-task IAM role sweep.
 		instanceRoles: parseInstanceRoles(os.Getenv("REAPER_INSTANCE_ROLES")),
+		// #1378: schedules live in this (the infra) account; base creds.
+		roleRefs: []instancerole.ReferenceSource{instancerole.NewScheduleSource(cfg)},
 		// #1351: abandoned pool queues and their staged specs.
 		poolQueues:   parsePoolQueues(os.Getenv("REAPER_POOL_QUEUES")),
 		emptyBuckets: parseEmptyBuckets(os.Getenv("REAPER_EMPTY_BUCKETS")),
@@ -847,6 +855,13 @@ type Summary struct {
 	// InstanceRolesAccountsDenied counts accounts whose role refused the IAM
 	// listing: a member role not yet redeployed with the #1300 grant.
 	InstanceRolesAccountsDenied int `json:"instance_roles_accounts_denied"`
+	// InstanceRolesReferenced counts roles kept because an enabled schedule
+	// still names them (#1378); they are in Skipped too.
+	InstanceRolesReferenced int `json:"instance_roles_referenced"`
+	// InstanceRolesReferencesUnreadable counts accounts not swept because the
+	// schedules could not be read completely (#1378): nothing was deleted.
+	// Also in Errors, unless the cause was AccessDenied.
+	InstanceRolesReferencesUnreadable int `json:"instance_roles_references_unreadable"`
 
 	// Abandoned pool queues and their staged specs (#1351), under
 	// REAPER_POOL_QUEUES. Skipped is a queue kept for any reason (workers,

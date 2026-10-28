@@ -15,6 +15,9 @@
 //     REAPER_INSTANCE_ROLES=off|report|reap;
 //   - `spawn cleanup --instance-roles`, from a workstation, dry-run aware.
 //
+// A role is also kept while a deferred launcher will still launch with it: an
+// enabled schedule naming its profile (references.go, #1378).
+//
 // A role and its profile are deleted only when ALL of Decide's conditions hold.
 // The conditions are deliberately redundant: deleting a role an instance still
 // uses removes that instance's credentials, and spored then cannot read its own
@@ -211,9 +214,12 @@ type Facts struct {
 	OtherProfiles []string
 	// InUse: some instance in a checked region, in a live state, has the
 	// same-name profile attached.
-	InUse    bool
-	Created  time.Time
-	LastUsed time.Time // zero when IAM has no record of use
+	InUse bool
+	// ReferencedBy: the deferred launchers that will launch with the
+	// same-name profile later (References.For), e.g. "schedule <id>" (#1378).
+	ReferencedBy []string
+	Created      time.Time
+	LastUsed     time.Time // zero when IAM has no record of use
 }
 
 // Decide is THE predicate. It returns true only when every condition holds,
@@ -246,6 +252,8 @@ func DecideWith(f Facts, now time.Time, opts Options) (bool, string) {
 		return false, KeepOtherProfiles
 	case f.InUse:
 		return false, KeepInUse
+	case len(f.ReferencedBy) > 0:
+		return false, KeepReferencedPrefix + strings.Join(f.ReferencedBy, ", ")
 	case f.Created.IsZero():
 		return false, KeepNoCreateDate
 	case now.Sub(f.Created) < Grace:
@@ -423,17 +431,22 @@ func (r Result) Count() (scanned, deleted, wouldDelete, skipped int) {
 }
 
 // Sweep lists the account's spawn-instance-* roles, decides each one against
-// inUse (from ProfilesInUse) and now, and, when reap is true, deletes those
-// Decide allows. With reap false nothing is changed: the result says what
-// reap would delete.
-func Sweep(ctx context.Context, api API, inUse map[string]bool, now time.Time, reap bool) (Result, error) {
-	return SweepWith(ctx, api, inUse, now, reap, Options{})
+// inUse (from ProfilesInUse), refs (from CollectReferences) and now, and, when
+// reap is true, deletes those Decide allows. With reap false nothing is
+// changed: the result says what reap would delete. References that
+// CollectReferences did not produce are refused (ErrReferencesNotCollected)
+// before anything is read.
+func Sweep(ctx context.Context, api API, inUse map[string]bool, refs References, now time.Time, reap bool) (Result, error) {
+	return SweepWith(ctx, api, inUse, refs, now, reap, Options{})
 }
 
 // SweepWith is Sweep with opts: with Options.LegacyPoolWorkers it also lists
 // and decides (DecideWith) the pre-#1319 spawn-pool-worker-<hash> roles.
-func SweepWith(ctx context.Context, api API, inUse map[string]bool, now time.Time, reap bool, opts Options) (Result, error) {
+func SweepWith(ctx context.Context, api API, inUse map[string]bool, refs References, now time.Time, reap bool, opts Options) (Result, error) {
 	var res Result
+	if !refs.collected {
+		return res, ErrReferencesNotCollected
+	}
 	p := iam.NewListRolesPaginator(api, &iam.ListRolesInput{})
 	var names []string
 	for p.HasMorePages() {
@@ -450,7 +463,7 @@ func SweepWith(ctx context.Context, api API, inUse map[string]bool, now time.Tim
 	sort.Strings(names)
 	for _, name := range names {
 		d := Decision{Name: name}
-		f, err := gather(ctx, api, name, inUse)
+		f, err := gather(ctx, api, name, inUse, refs)
 		if err != nil {
 			d.Err, d.Reason = err, "could not read the role"
 			res.Decisions = append(res.Decisions, d)
@@ -471,8 +484,8 @@ func SweepWith(ctx context.Context, api API, inUse map[string]bool, now time.Tim
 }
 
 // gather reads the Facts for one role.
-func gather(ctx context.Context, api API, name string, inUse map[string]bool) (Facts, error) {
-	f := Facts{Name: name, InUse: inUse[name]}
+func gather(ctx context.Context, api API, name string, inUse map[string]bool, refs References) (Facts, error) {
+	f := Facts{Name: name, InUse: inUse[name], ReferencedBy: refs.For(name)}
 	got, err := api.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(name)})
 	if err != nil {
 		return f, fmt.Errorf("get role: %w", err)

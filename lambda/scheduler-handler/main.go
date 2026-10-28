@@ -24,9 +24,9 @@ import (
 
 // Environment variables for self-hosted infrastructure (with fallbacks to shared infrastructure)
 const (
-	defaultSchedulesTable      = "spawn-schedules"
+	defaultSchedulesTable      = scheduler.TableName
 	defaultHistoryTable        = "spawn-schedule-history"
-	defaultSchedulesBucketTmpl = "spawn-schedules-%s" // %s = region
+	defaultSchedulesBucketTmpl = scheduler.ParamsBucketTemplate // %s = region
 	// The deployed function is spawn-sweep-orchestrator — scripts/deploy-sweep-orchestrator.sh
 	// creates exactly that name. This constant said "sweep-orchestrator" and so
 	// every scheduled sweep invoked an ARN for a function that has never existed,
@@ -128,21 +128,20 @@ func handler(ctx context.Context, event Event) error {
 		return recordError(ctx, event.ScheduleID, "", fmt.Errorf("get schedule: %w", err))
 	}
 
-	// 2. Check schedule status
-	if schedule.Status != "active" {
+	// 2-3. Status and execution limits. scheduler.FiringAt is this decision,
+	// shared with pkg/instancerole, which keeps the roles of exactly the
+	// schedules that would launch here (#1378).
+	switch schedule.FiringAt(time.Now()) {
+	case scheduler.FiringNotActive:
 		log.Printf("Schedule %s is not active (status: %s), skipping", event.ScheduleID, schedule.Status)
 		return nil
-	}
-
-	// 3. Check execution limits
-	if schedule.MaxExecutions > 0 && schedule.ExecutionCount >= schedule.MaxExecutions {
+	case scheduler.FiringMaxExecutions:
 		log.Printf("Schedule %s reached max executions (%d)", event.ScheduleID, schedule.MaxExecutions)
 		return recordError(ctx, event.ScheduleID, "", fmt.Errorf("max executions reached"))
-	}
-
-	if !schedule.EndAfter.IsZero() && time.Now().After(schedule.EndAfter) {
+	case scheduler.FiringExpired:
 		log.Printf("Schedule %s expired (end_after: %s)", event.ScheduleID, schedule.EndAfter)
 		return recordError(ctx, event.ScheduleID, "", fmt.Errorf("schedule expired"))
+	case scheduler.FiringLaunches:
 	}
 
 	// 4. Load the parameter file the CLI uploaded.
@@ -325,10 +324,11 @@ func main() {
 // then overrides it is equally correct, and passed that gate while a broken one
 // could too.
 func paramsBucket(recordedBucket, region string) string {
+	rec := scheduler.ScheduleRecord{S3ParamsBucket: recordedBucket, Region: region}
 	if recordedBucket != "" {
-		return recordedBucket
+		return rec.ParamsBucketName(schedulesBucketTmpl)
 	}
-	fallback := fmt.Sprintf(schedulesBucketTmpl, region)
+	fallback := rec.ParamsBucketName(schedulesBucketTmpl)
 	log.Printf("schedule params: record carries no s3_params_bucket (pre-#804); "+
 		"falling back to the region template %q", fallback)
 	return fallback

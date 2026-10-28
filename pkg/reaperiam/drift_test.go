@@ -102,7 +102,12 @@ var grantedElsewhere = map[string]string{
 	"sts:AssumeRole": "granted by template.yaml on the base credentials, scoped to RoleArns",
 	// The portal account registry read (#466), through accountlifecycle's client
 	// on the base credentials; invisible to the regex this gate used to be.
-	"dynamodb:Scan": "granted by template.yaml on the base credentials, scoped to AccountsTable",
+	"dynamodb:Scan": "granted by template.yaml on the base credentials, scoped to AccountsTable and (ScheduleReferenceStatements) the schedules table",
+	// The schedules' params objects (#1378), read by the role sweep's
+	// ScheduleSource on the base credentials, in the account the schedules
+	// are in. ScheduleReferenceStatements is the source; the SAM template
+	// grants it to the function (TestSAMTemplateGrantsTheScheduleRead).
+	"s3:GetObject": "granted by template.yaml on the base credentials, scoped to ScheduleParamsARN",
 }
 
 // TestPolicyCoversEveryReaperAPICall is the structural end of the drift class.

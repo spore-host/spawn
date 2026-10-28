@@ -291,7 +291,7 @@ func TestSweepReportVersusReap(t *testing.T) {
 	inUse := map[string]bool{"spawn-instance-inuse": true}
 
 	rep := &fakeIAM{roles: roles()}
-	res, err := Sweep(context.Background(), rep, inUse, now, false)
+	res, err := Sweep(context.Background(), rep, inUse, noRefs(t), now, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestSweepReportVersusReap(t *testing.T) {
 	}
 
 	reap := &fakeIAM{roles: roles()}
-	res, err = Sweep(context.Background(), reap, inUse, now, true)
+	res, err = Sweep(context.Background(), reap, inUse, noRefs(t), now, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestSweepPoolWorkerRoles(t *testing.T) {
 	}
 
 	def := &fakeIAM{roles: roles()}
-	if _, err := Sweep(context.Background(), def, inUse, now, true); err != nil {
+	if _, err := Sweep(context.Background(), def, inUse, noRefs(t), now, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range def.calls {
@@ -538,7 +538,7 @@ func TestSweepPoolWorkerRoles(t *testing.T) {
 	}
 
 	cli := &fakeIAM{roles: roles()}
-	if _, err := SweepWith(context.Background(), cli, inUse, now, true, Options{LegacyPoolWorkers: true}); err != nil {
+	if _, err := SweepWith(context.Background(), cli, inUse, noRefs(t), now, true, Options{LegacyPoolWorkers: true}); err != nil {
 		t.Fatal(err)
 	}
 	m := cli.mutations()

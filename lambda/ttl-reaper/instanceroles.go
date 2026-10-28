@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -23,6 +24,15 @@ import (
 // only the regions the reaper scans, since a stopped instance in an unscanned
 // region would otherwise come back with no credentials. If the region list or
 // any region cannot be read, nothing in that account is deleted that run.
+//
+// Nor is a role deleted while a deferred launcher will still launch with it
+// (#1378): an enabled schedule naming its profile. The schedules live in the
+// reaper's OWN account (the infra account `spawn schedule create` writes to),
+// so they are read with the base credentials (r.roleRefs, built in configure
+// with instancerole.NewScheduleSource, the same source `spawn cleanup
+// --instance-roles` uses). If they cannot be read completely, no role in any
+// account is deleted that run, and the account is counted in
+// instance_roles_references_unreadable.
 const (
 	instanceRolesOff    = reaperconfig.ModeOff
 	instanceRolesReport = reaperconfig.ModeReport
@@ -102,7 +112,19 @@ func (r *reaper) reapInstanceRolesAccount(ctx context.Context, acct account, now
 		return
 	}
 
-	res, err := instancerole.Sweep(ctx, acct.iamFor(), inUse, now, reap)
+	refs, err := instancerole.CollectReferences(ctx, r.roleRefs...)
+	if err != nil {
+		// Fail closed: a role a schedule will launch with would look unused.
+		cls := classifyScanError(err)
+		log.Printf("instance-roles: %s: not swept, no role deleted: %v", acct.label, err)
+		sum.InstanceRolesReferencesUnreadable++
+		if cls != failureDenied {
+			sum.Errors++
+		}
+		return
+	}
+
+	res, err := instancerole.Sweep(ctx, acct.iamFor(), inUse, refs, now, reap)
 	if err != nil {
 		cls := classifyScanError(err)
 		log.Printf("instance-roles: %s: not swept (%s): %v", acct.label, cls, err)
@@ -128,6 +150,11 @@ func (r *reaper) reapInstanceRolesAccount(ctx context.Context, acct account, now
 				d.Name, acct.label, stamp(d.Created), stamp(d.LastUsed), r.instanceRoles, r.dryRun)
 		case d.Err != nil:
 			log.Printf("instance-roles: %s: kept role %s: %s: %v", acct.label, d.Name, d.Reason, d.Err)
+		case strings.HasPrefix(d.Reason, instancerole.KeepReferencedPrefix):
+			// Report mode shows these too: a role an idle schedule keeps
+			// alive would otherwise look like one the sweep missed.
+			log.Printf("instance-roles: %s: role %s kept: %s", acct.label, d.Name, d.Reason)
+			sum.InstanceRolesReferenced++
 		}
 	}
 	scanned, deleted, would, skipped := res.Count()

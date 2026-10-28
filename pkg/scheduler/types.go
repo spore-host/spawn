@@ -1,6 +1,9 @@
 package scheduler
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // ScheduleRecord represents a scheduled parameter sweep execution stored in DynamoDB.
 type ScheduleRecord struct {
@@ -88,3 +91,60 @@ const (
 	ExecutionStatusSuccess ExecutionStatus = "success"
 	ExecutionStatusFailed  ExecutionStatus = "failed"
 )
+
+// Where `spawn schedule create` keeps a schedule. The CLI writes the record
+// with NewClient's table, in the region it loads its infra config in
+// (spawnconfig.LoadInfraAWSConfig(ctx, TableRegion)), and the params to
+// ParamsKeyPrefix in the bucket the record names. Anything that has to know
+// which schedules exist (pkg/instancerole's schedule references, #1378) reads
+// exactly these, so it reads what the CLI wrote.
+const (
+	TableName            = "spawn-schedules"
+	TableRegion          = "us-east-1"
+	ParamsBucketTemplate = "spawn-schedules-%s" // %s = the record's Region
+	ParamsKeyPrefix      = "schedules/"
+)
+
+// Firing is what scheduler-handler does with a schedule's record when the
+// schedule fires.
+type Firing int
+
+const (
+	// FiringLaunches: it reads the params and starts a sweep.
+	FiringLaunches Firing = iota
+	// FiringNotActive: the status is not "active" (paused or cancelled), so
+	// it skips the firing.
+	FiringNotActive
+	// FiringMaxExecutions: MaxExecutions runs have happened; it refuses.
+	FiringMaxExecutions
+	// FiringExpired: EndAfter has passed; it refuses.
+	FiringExpired
+)
+
+// FiringAt is scheduler-handler's decision for a firing at now, before it
+// reads the params. It is the handler's own check, not a copy of it, so
+// anything that asks "will this schedule launch again?" gets the handler's
+// answer. No command raises MaxExecutions or EndAfter on an existing record,
+// so a schedule that has run out stays that way; `spawn schedule resume` only
+// moves a paused one back to active.
+func (r *ScheduleRecord) FiringAt(now time.Time) Firing {
+	switch {
+	case r.Status != string(ScheduleStatusActive):
+		return FiringNotActive
+	case r.MaxExecutions > 0 && r.ExecutionCount >= r.MaxExecutions:
+		return FiringMaxExecutions
+	case !r.EndAfter.IsZero() && now.After(r.EndAfter):
+		return FiringExpired
+	}
+	return FiringLaunches
+}
+
+// ParamsBucketName is the bucket holding the record's params: S3ParamsBucket,
+// or, for a record written before #804, tmpl (ParamsBucketTemplate unless
+// overridden) filled with the record's Region.
+func (r *ScheduleRecord) ParamsBucketName(tmpl string) string {
+	if r.S3ParamsBucket != "" {
+		return r.S3ParamsBucket
+	}
+	return fmt.Sprintf(tmpl, r.Region)
+}
