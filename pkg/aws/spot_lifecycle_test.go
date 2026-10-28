@@ -118,7 +118,7 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if f.efaCards > 0 {
 			b.WriteString(`<instanceState><code>16</code><name>running</name></instanceState><networkInterfaceSet>` +
-				`<item><networkInterfaceId>eni-card1</networkInterfaceId><attachment><deviceIndex>0</deviceIndex><networkCardIndex>1</networkCardIndex></attachment></item>` +
+				`<item><networkInterfaceId>eni-card1</networkInterfaceId><privateIpAddress>10.0.1.21</privateIpAddress><attachment><deviceIndex>0</deviceIndex><networkCardIndex>1</networkCardIndex></attachment></item>` +
 				`<item><networkInterfaceId>eni-primary</networkInterfaceId><attachment><deviceIndex>0</deviceIndex><networkCardIndex>0</networkCardIndex></attachment></item>` +
 				`</networkInterfaceSet>`)
 		}

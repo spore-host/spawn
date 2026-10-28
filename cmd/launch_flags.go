@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
@@ -89,6 +90,7 @@ var (
 	mpiAutoPlacementGroup bool
 	efaEnabled            bool
 	efaInterfaces         int
+	efaSecondaryType      string
 	efaGroup              string
 
 	// Shared storage
@@ -391,6 +393,11 @@ func init() {
 	launchCmd.Flags().BoolVar(&mpiAutoPlacementGroup, "auto-placement-group", true, "Automatically create placement group for MPI job arrays (default: true)")
 	launchCmd.Flags().BoolVar(&efaEnabled, "efa", false, "Enable Elastic Fabric Adapter for ultra-low latency MPI (requires supported instance types)")
 	launchCmd.Flags().IntVar(&efaInterfaces, "efa-interfaces", 0, "With --efa: number of EFA interfaces, one per network card (0 = every EFA the instance type supports; 1 = a single interface). More than one gets its public IP from an Elastic IP, released on terminate")
+	launchCmd.Flags().StringVar(&efaSecondaryType, "efa-secondary-type", aws.EFASecondaryTypeEFAOnly, "With --efa on a multi-card type (more than one EFA interface): the interface type on each network card after card 0. "+
+		"efa-only (default) is the EFA device alone, with no IP, so all IP traffic uses card 0. "+
+		"efa is EFA with ENA: each card also gets a private IP in the launch subnet, so IP traffic (S3, say) can use that card's bandwidth. "+
+		"Only the primary interface gets the public or Elastic IP. The OS must route the extra interfaces: Ubuntu's cloud-init and "+
+		"Amazon Linux's amazon-ec2-net-utils set up per-interface policy routing at boot; spawn adds none. Refused without multi-card EFA")
 	launchCmd.Flags().StringVar(&efaGroup, "efa-group", "", "With --efa: create or join the security group spawn-efa-NAME, which admits all traffic between its members, so separate launches (different instance types, no --mpi) can share one EFA fabric. Launch them in one AZ. Unused groups are deleted by the reaper")
 
 	// Shared storage

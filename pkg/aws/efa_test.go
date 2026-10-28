@@ -489,3 +489,186 @@ func TestLaunch_MultiEFANeedsSubnetOrAZ(t *testing.T) {
 		t.Error("RunInstances was called without a subnet on every interface")
 	}
 }
+
+// --- --efa-secondary-type (#1404) ---
+
+// By default nothing changes: every card after card 0 gets an efa-only
+// interface (no IP), whether the type is unset (an SDK caller) or efa-only
+// (the CLI's default).
+func TestEFASecondaryType_DefaultIsEFAOnly(t *testing.T) {
+	for _, secondary := range []string{"", EFASecondaryTypeEFAOnly} {
+		for _, tc := range []struct {
+			instanceType string
+			cards        int
+		}{{"c8gn.48xlarge", 2}, {"p5en.48xlarge", 16}} {
+			c := capacityOf(t, tc.instanceType, tc.cards)
+			nis, err := EFALaunchInterfaces(LaunchConfig{
+				InstanceType: tc.instanceType, SubnetID: "subnet-1", EFAEnabled: true, EFAInterfaces: tc.cards, EFASecondaryType: secondary,
+			}, c)
+			if err != nil {
+				t.Fatalf("%s %q: %v", tc.instanceType, secondary, err)
+			}
+			want := []string{"0/0/efa"}
+			for i := 1; i < tc.cards; i++ {
+				want = append(want, fmt.Sprintf("%d/0/efa-only", i))
+			}
+			if got := layout(nis); got != strings.Join(want, " ") {
+				t.Errorf("%s with EFASecondaryType %q: layout = %s\nwant %s", tc.instanceType, secondary, got, strings.Join(want, " "))
+			}
+		}
+	}
+}
+
+// With efa, the interface on every card >= 1 is InterfaceType efa at device
+// index 0 with its NetworkCardIndex set, so each card carries IP traffic on a
+// private IP. Card 0 is the same primary as before, and no interface asks for
+// a public IP: EC2 refuses one with more than one interface, and the Elastic
+// IP Launch associates is the primary's alone.
+func TestEFASecondaryType_EFAOnEveryCardAfterZero(t *testing.T) {
+	for _, tc := range []struct {
+		instanceType string
+		cards        int
+	}{{"c8gn.48xlarge", 2}, {"p5en.48xlarge", 16}} {
+		c := capacityOf(t, tc.instanceType, tc.cards)
+		nis, err := EFALaunchInterfaces(LaunchConfig{
+			InstanceType: tc.instanceType, SubnetID: "subnet-1", SecurityGroupIDs: []string{"sg-1"},
+			EFAEnabled: true, EFAInterfaces: tc.cards, EFASecondaryType: EFASecondaryTypeEFA,
+		}, c)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.instanceType, err)
+		}
+		if len(nis) != tc.cards {
+			t.Fatalf("%s: %d interfaces, want %d", tc.instanceType, len(nis), tc.cards)
+		}
+		for i, ni := range nis {
+			if ni.NetworkCardIndex == nil || aws.ToInt32(ni.NetworkCardIndex) != int32(i) {
+				t.Errorf("%s interface %d: NetworkCardIndex = %v, want %d", tc.instanceType, i, ni.NetworkCardIndex, i)
+			}
+			if aws.ToInt32(ni.DeviceIndex) != 0 || aws.ToString(ni.InterfaceType) != "efa" {
+				t.Errorf("%s card %d: device %d type %q, want device 0 type efa", tc.instanceType, i, aws.ToInt32(ni.DeviceIndex), aws.ToString(ni.InterfaceType))
+			}
+			if ni.AssociatePublicIpAddress != nil {
+				t.Errorf("%s card %d asks for a public IP: only the primary gets one, as an Elastic IP after launch", tc.instanceType, i)
+			}
+			if aws.ToString(ni.SubnetId) != "subnet-1" || len(ni.Groups) != 1 || ni.Groups[0] != "sg-1" || !aws.ToBool(ni.DeleteOnTermination) {
+				t.Errorf("%s card %d = %+v, want subnet-1, sg-1, delete on termination", tc.instanceType, i, ni)
+			}
+		}
+		if !NeedsLaunchElasticIP(nis) {
+			t.Errorf("%s: no Elastic IP for a multi-interface launch", tc.instanceType)
+		}
+	}
+}
+
+// A card DescribeInstanceTypes says takes only efa-only cannot be given an
+// efa interface: refused before RunInstances, naming the card.
+func TestEFASecondaryType_CardWithoutEFARefused(t *testing.T) {
+	c := EFACapacity{InstanceType: "x9.48xlarge", MaxInterfaces: 2, Cards: []EFANetworkCard{
+		{Index: 0, EFA: true, EFAOnly: true}, {Index: 1, EFAOnly: true},
+	}}
+	_, err := EFANetworkInterfacesWithSecondaryType("subnet-1", nil, c, 2, EFASecondaryTypeEFA)
+	if err == nil || !strings.Contains(err.Error(), "network card 1 of x9.48xlarge") {
+		t.Fatalf("err = %v, want a refusal naming card 1", err)
+	}
+	// The default still launches on it.
+	if _, err := EFANetworkInterfacesWithSecondaryType("subnet-1", nil, c, 2, ""); err != nil {
+		t.Errorf("default layout on an efa-only card: %v", err)
+	}
+}
+
+// Any value but efa-only/efa is refused, and efa needs a multi-card EFA
+// launch: EFAEnabled and more than one interface (0 at this layer is one).
+func TestValidateEFASecondaryType(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cfg     LaunchConfig
+		wantErr string
+	}{
+		{"unset", LaunchConfig{}, ""},
+		{"efa-only alone", LaunchConfig{EFASecondaryType: "efa-only"}, ""},
+		{"multi-card efa", LaunchConfig{EFAEnabled: true, EFAInterfaces: 2, EFASecondaryType: "efa"}, ""},
+		{"unknown value", LaunchConfig{EFAEnabled: true, EFAInterfaces: 2, EFASecondaryType: "interface"}, "must be efa-only or efa"},
+		{"no --efa", LaunchConfig{EFAInterfaces: 2, EFASecondaryType: "efa"}, "requires --efa"},
+		{"zero interfaces", LaunchConfig{EFAEnabled: true, EFASecondaryType: "efa"}, "one EFA interface"},
+		{"one interface", LaunchConfig{EFAEnabled: true, EFAInterfaces: 1, EFASecondaryType: "efa"}, "one EFA interface"},
+	} {
+		err := tc.cfg.ValidateEFASecondaryType()
+		switch {
+		case tc.wantErr == "" && err != nil:
+			t.Errorf("%s: refused: %v", tc.name, err)
+		case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+			t.Errorf("%s: err = %v, want one containing %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+// Through Launch, the backstop for SDK callers: efa without a multi-card EFA
+// launch fails before RunInstances instead of being dropped.
+func TestLaunch_EFASecondaryTypeRefusedWithoutMultiCard(t *testing.T) {
+	for _, cfg := range []LaunchConfig{
+		{EFAEnabled: true, EFAInterfaces: 1},
+		{EFAEnabled: true},
+		{},
+	} {
+		f := &fakeEC2{efaCards: 2}
+		c := newFakeEC2Client(t, f)
+		cfg.InstanceType, cfg.Region, cfg.AMI, cfg.PricePerHour, cfg.SubnetID = "c8gn.48xlarge", "us-west-2", "ami-0123456789abcdef0", 1, "subnet-1"
+		cfg.EFASecondaryType = EFASecondaryTypeEFA
+		if _, err := c.Launch(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "--efa-secondary-type") {
+			t.Errorf("EFAEnabled=%t EFAInterfaces=%d: err = %v, want the --efa-secondary-type refusal", cfg.EFAEnabled, cfg.EFAInterfaces, err)
+		}
+		if f.request("RunInstances") != nil {
+			t.Errorf("EFAEnabled=%t EFAInterfaces=%d: RunInstances was called", cfg.EFAEnabled, cfg.EFAInterfaces)
+		}
+	}
+}
+
+// Through Launch with efa: card 1's interface is efa with NetworkCardIndex 1,
+// neither interface asks for a public IP, and the Elastic IP goes to the
+// primary (card 0, device 0) although card 1's interface now has a private
+// IP of its own and is listed first by DescribeInstances.
+func TestLaunch_EFASecondaryTypeEFAElasticIPOnPrimaryOnly(t *testing.T) {
+	fastEIPPolling(t)
+	f := &fakeEC2{efaCards: 2}
+	c := newFakeEC2Client(t, f)
+	res, err := c.Launch(context.Background(), LaunchConfig{
+		InstanceType: "c8gn.48xlarge", Region: "us-west-2", AMI: "ami-0123456789abcdef0", PricePerHour: 1,
+		EFAEnabled: true, EFAInterfaces: 2, EFASecondaryType: EFASecondaryTypeEFA, SubnetID: "subnet-1", SecurityGroupIDs: []string{"sg-1"},
+	})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	run := f.request("RunInstances")
+	for k, want := range map[string]string{
+		"NetworkInterface.1.NetworkCardIndex": "0", "NetworkInterface.1.DeviceIndex": "0", "NetworkInterface.1.InterfaceType": "efa",
+		"NetworkInterface.2.NetworkCardIndex": "1", "NetworkInterface.2.DeviceIndex": "0", "NetworkInterface.2.InterfaceType": "efa",
+		"NetworkInterface.1.AssociatePublicIpAddress": "", "NetworkInterface.2.AssociatePublicIpAddress": "",
+		"NetworkInterface.3.InterfaceType": "",
+	} {
+		if got := run.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	if n := countAction(f, "AssociateAddress"); n != 1 {
+		t.Errorf("%d AssociateAddress calls, want 1 (the primary's)", n)
+	}
+	if got := f.request("AssociateAddress").Get("NetworkInterfaceId"); got != "eni-primary" {
+		t.Errorf("Elastic IP associated to %q, want eni-primary", got)
+	}
+	if n := countAction(f, "AllocateAddress"); n != 1 {
+		t.Errorf("%d AllocateAddress calls, want 1", n)
+	}
+	if res.PublicIP != "198.51.100.9" {
+		t.Errorf("PublicIP = %q, want the Elastic IP", res.PublicIP)
+	}
+}
+
+func countAction(f *fakeEC2, action string) int {
+	n := 0
+	for _, a := range f.actions() {
+		if a == action {
+			n++
+		}
+	}
+	return n
+}

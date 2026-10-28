@@ -15,6 +15,8 @@ const CopiedFromTagKey
 const CreatedTagKey
 const EFAGroupPrefix
 const EFAGroupPurpose
+const EFASecondaryTypeEFA
+const EFASecondaryTypeEFAOnly
 const ElasticIPInstanceTagKey
 const ElasticIPPurpose
 const ElasticIPQuotaCode
@@ -248,6 +250,7 @@ field LaunchConfig.EBSEncrypted bool
 field LaunchConfig.EBSKMSKeyID string
 field LaunchConfig.EFAEnabled bool
 field LaunchConfig.EFAInterfaces int
+field LaunchConfig.EFASecondaryType string
 field LaunchConfig.EFSID string
 field LaunchConfig.EFSMountPoint string
 field LaunchConfig.FSxExportPath string
@@ -550,6 +553,7 @@ func (EFACapacity) ResolveInterfaces(requested int) (int, error)
 func (ImageProvenance) Recorded() bool
 func (LaunchConfig) HibernationRequested() bool
 func (LaunchConfig) ValidateDurations() error
+func (LaunchConfig) ValidateEFASecondaryType() error
 func (LaunchConfig) ValidateNestedSpawnTTL() error
 func (LaunchConfig) ValidateSporedSettings() error
 func (LaunchConfig) ValidateTagCount() error
@@ -579,6 +583,7 @@ func DetectReaperCoverage(ctx context.Context, cfg awssdk.Config) ReaperCoverage
 func EFALaunchInterfaces(cfg LaunchConfig, capacity EFACapacity) ([]types.InstanceNetworkInterfaceSpecification, error)
 func EFANetworkInterface(subnetID string, securityGroupIDs []string) types.InstanceNetworkInterfaceSpecification
 func EFANetworkInterfaces(subnetID string, securityGroupIDs []string, capacity EFACapacity, n int) ([]types.InstanceNetworkInterfaceSpecification, error)
+func EFANetworkInterfacesWithSecondaryType(subnetID string, securityGroupIDs []string, capacity EFACapacity, n int, secondaryType string) ([]types.InstanceNetworkInterfaceSpecification, error)
 func EvaluatePortIngress(groups []types.SecurityGroup, port int32) PortIngress
 func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string
 func GenerateScopedDynamoDBPolicy(region, accountID string) string

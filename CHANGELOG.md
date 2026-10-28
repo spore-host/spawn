@@ -11,6 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`spawn launch --efa-secondary-type efa|efa-only`: IP on every network
+  card of a multi-card EFA launch** (#1404). On a type with more than one EFA
+  network card (c8gn.48xlarge, p5en.48xlarge), the cards after card 0 got an
+  `efa-only` interface, with no IP, so all IP traffic (S3 GETs, say) shared
+  card 0's bandwidth. `--efa-secondary-type efa` makes each of them an `efa`
+  (EFA with ENA) interface at device index 0 with a private IP of its own in
+  the launch subnet and security groups. The default, `efa-only`, changes
+  nothing. Only the primary interface (card 0, device 0) gets the Elastic IP;
+  no interface asks EC2 for a public IP. A card DescribeInstanceTypes says
+  cannot take `efa` is refused before RunInstances, and so is the flag without
+  multi-card EFA: it needs `--efa`, is refused with `--efa-interfaces 1`, and
+  `--efa` alone (every card) is refused on a type with one EFA card. A sweep
+  member carries it with an explicit `--efa-interfaces` of 2 or more (it does
+  not resolve 0 to the type's count, so that is refused); a detached sweep
+  refuses it, as it refuses multi-card EFA; `spawn task run` has no EFA. The
+  `--dry-run` layout labels each card's interface `(primary)`, `(private IP)`
+  or `(no IP)`, and `-o json` has `efa_secondary_type`. spawn adds no OS
+  routing: Ubuntu's cloud-init (Netplan) and Amazon Linux's
+  amazon-ec2-net-utils configure secondary interfaces, with per-interface
+  policy routing, at first boot; that is to be confirmed on a real
+  c8gn.48xlarge. Each extra interface takes one more private IP from the
+  subnet. API: `LaunchConfig.EFASecondaryType`,
+  `LaunchConfig.ValidateEFASecondaryType`,
+  `aws.EFANetworkInterfacesWithSecondaryType`, `aws.EFASecondaryTypeEFA`,
+  `aws.EFASecondaryTypeEFAOnly`. No new IAM: the interfaces ride the same
+  RunInstances call.
+
 - **An image spawn creates records where it came from** (#1364). `spawn ami
   create` / `create-ami` and the warm AMI `spawn image import` builds (unless
   `--no-warm`) tag the image and its snapshots with

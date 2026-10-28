@@ -167,14 +167,17 @@ type launchPlan struct {
 	// EFAInterfaces / EFAMaxInterfaces / EFALayout / ElasticIP describe the
 	// network interfaces an --efa launch sends (#661); ElasticIP means the public
 	// IP comes from an Elastic IP associated after launch, not auto-assigned.
-	EFAInterfaces        int      `json:"efa_interfaces,omitempty"`
-	EFAMaxInterfaces     int      `json:"efa_max_interfaces,omitempty"`
-	EFALayout            []string `json:"efa_layout,omitempty"`
-	ElasticIP            bool     `json:"elastic_ip,omitempty"`
-	NestedVirtualization bool     `json:"nested_virtualization,omitempty"`
-	Hibernate            bool     `json:"hibernate,omitempty"`
-	JobArrayName         string   `json:"job_array_name,omitempty"`
-	Count                int      `json:"count,omitempty"`
+	EFAInterfaces    int      `json:"efa_interfaces,omitempty"`
+	EFAMaxInterfaces int      `json:"efa_max_interfaces,omitempty"`
+	EFALayout        []string `json:"efa_layout,omitempty"`
+	// EFASecondaryType is the interface type on the cards after card 0 of a
+	// multi-card launch (#1404): efa-only, or efa (with a private IP each).
+	EFASecondaryType     string `json:"efa_secondary_type,omitempty"`
+	ElasticIP            bool   `json:"elastic_ip,omitempty"`
+	NestedVirtualization bool   `json:"nested_virtualization,omitempty"`
+	Hibernate            bool   `json:"hibernate,omitempty"`
+	JobArrayName         string `json:"job_array_name,omitempty"`
+	Count                int    `json:"count,omitempty"`
 	// CustomUserDataBytes is the size of --user-data/--user-data-file's
 	// resolved content. It is NOT the full encoded bootstrap script a real
 	// launch would send to RunInstances (spored install + storage mounts +
@@ -256,6 +259,13 @@ func applyEFAPlan(plan *launchPlan, config aws.LaunchConfig, capacity aws.EFACap
 		plan.EFALayout = append(plan.EFALayout, aws.DescribeEFAInterface(ni))
 	}
 	plan.ElasticIP = aws.NeedsLaunchElasticIP(nis)
+	plan.EFASecondaryType = ""
+	if len(nis) > 1 {
+		plan.EFASecondaryType = aws.EFASecondaryTypeEFAOnly
+		if config.EFASecondaryType != "" {
+			plan.EFASecondaryType = config.EFASecondaryType
+		}
+	}
 	return nil
 }
 

@@ -83,7 +83,7 @@ func TestSweepFlagRulesAreEnforced(t *testing.T) {
 // flagPrereqs are the flags a flag needs to take effect (or to pass
 // buildLaunchConfig's validation), set before the baseline is taken.
 var flagPrereqs = map[string][]string{
-	"capacity-block": {"reservation-id"}, "efa-interfaces": {"efa"},
+	"capacity-block": {"reservation-id"}, "efa-interfaces": {"efa"}, "efa-secondary-type": {"efa", "efa-interfaces"},
 	"webhook-correlation": {"spot-webhook-url"}, "webhook-timeout": {"spot-webhook-url"},
 	"metrics-port": {"metrics"}, "metrics-bind": {"metrics"}, "metrics-path": {"metrics"},
 	"tracing-exporter": {"tracing"}, "tracing-sampling": {"tracing"},
@@ -99,7 +99,7 @@ var sampleFlagValues = map[string]string{
 	"instance-type": "m7i.xlarge", "region": "us-west-2", "az": "us-east-1c", "ami": "ami-0fedcba9876543210",
 	"volume-size": "40", "attach-volume": "snap-0123:/refdata", "key-name": testSweepKeyName, "key-pair": testSweepKeyName,
 	"security-group": "sg-1", "security-group-ids": "sg-1", "subnet": "subnet-1", "subnet-id": "subnet-1", "vpc": "vpc-1",
-	"efa-interfaces": "2", "placement-group": "pg-1", "spot-max-price": "0.25", "reservation-id": "cr-1",
+	"efa-interfaces": "2", "efa-secondary-type": "efa", "placement-group": "pg-1", "spot-max-price": "0.25", "reservation-id": "cr-1",
 	"tag": "project=x", "team": "team-1", "name": "box", "dns": "box",
 	"ttl": "2h", "idle-timeout": "30m", "on-idle": "hibernate", "pre-stop": "sync", "pre-stop-timeout": "5m",
 	"spot-webhook-url": "https://hooks.example.org/spot", "completion-webhook-url": "https://hooks.example.org/done",

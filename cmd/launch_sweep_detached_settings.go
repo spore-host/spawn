@@ -44,6 +44,11 @@ func detachedSettingsGuard(cfg aws.LaunchConfig) error {
 		return fmt.Errorf("%s cannot be used on a detached sweep: %s. %s", what, why, instead)
 	}
 	switch {
+	case cfg.EFASecondaryType != "" && cfg.EFASecondaryType != aws.EFASecondaryTypeEFAOnly:
+		// Applies only to a multi-card EFA launch, which is refused below; named
+		// here so the refusal says which flag to drop (#1404).
+		return refuse("--efa-secondary-type "+cfg.EFASecondaryType, "it applies only to a multi-card EFA launch "+
+			"(more than one network interface), whose Elastic IP the orchestrator does not manage", noDetach)
 	case cfg.EFAEnabled && cfg.EFAInterfaces > 1:
 		return refuse(fmt.Sprintf("--efa-interfaces %d", cfg.EFAInterfaces), "an instance with more than one "+
 			"network interface gets no public IP, and the Elastic IP a launch associates (and releases on "+

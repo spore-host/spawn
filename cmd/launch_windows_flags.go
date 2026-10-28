@@ -97,6 +97,7 @@ var windowsLaunchFlags = map[string]windowsFlagRule{
 	"auto-placement-group":   honouredOnWindows("acts only with --mpi, which is refused on Windows"),
 	"efa":                    honouredOnWindows(whyEC2Param + " (an EFA network interface)"),
 	"efa-interfaces":         honouredOnWindows(whyEC2Param + " (one EFA network interface per card)"),
+	"efa-secondary-type":     honouredOnWindows(whyEC2Param + " (the interface type on cards after card 0); Windows configures the extra interfaces itself, though AWS documents that a multi-interface Windows instance needs static routing"),
 	"efa-group":              honouredOnWindows(whyEC2Param + " (a security group shared by EFA instances)"),
 
 	// Instance shape, network and purchase: EC2 parameters.

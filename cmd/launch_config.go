@@ -222,6 +222,15 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 		return nil, fmt.Errorf("--efa-interfaces requires --efa")
 	}
 	config.EFAInterfaces = efaInterfaces
+	// --efa-secondary-type (#1404): its value, and that it has something to
+	// apply to, are checked here; whether the type has more than one EFA card
+	// is known only once resolveEFAInterfaces has read it.
+	if err := validateEFASecondaryTypeFlag(efaSecondaryType, efaEnabled, efaInterfaces); err != nil {
+		return nil, err
+	}
+	if efaSecondaryType != aws.EFASecondaryTypeEFAOnly {
+		config.EFASecondaryType = efaSecondaryType
+	}
 	// --efa-group (#1168): checked here, before anything is created.
 	if err := validateEFAGroup(efaGroup, efaEnabled); err != nil {
 		return nil, err
