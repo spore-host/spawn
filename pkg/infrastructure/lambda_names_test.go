@@ -109,6 +109,7 @@ func TestEveryLambdaNamingIdentifierIsChecked(t *testing.T) {
 		"schedulerHandlerFunction":    "scheduler-handler",
 		"sweepOrchestratorFunction":   "spawn-sweep-orchestrator",
 		"dashboardAPIFunction":        "spawn-dashboard-api",
+		"HandlerFunctionName":         "scheduler-handler", // pkg/scheduler, the target of every schedule (#1383)
 	}
 
 	ident := regexp.MustCompile(`(?mi)^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*func(?:tion)?(?:name)?)[[:space:]]*=[[:space:]]*"([a-z0-9][a-z0-9-]*)"`)

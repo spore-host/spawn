@@ -52,6 +52,8 @@ var nestedSpawnNotGranted = map[string]string{
 	"s3:HeadBucket":                      "staging buckets; not a plain child launch",
 	"s3:ListBuckets":                     "--fsx-s3-bucket config lookup; FSx is not granted",
 	"s3:PutBucketLifecycleConfiguration": "staging bucket setup; see s3:CreateBucket",
+	"s3:GetBucketLifecycleConfiguration": "schedules bucket lifecycle (batch queue upload, #1382); see s3:CreateBucket",
+	"s3:DeleteBucketLifecycle":           "schedules bucket lifecycle migration (#1382); see s3:CreateBucket",
 	"s3:PutPublicAccessBlock":            "staging bucket setup; see s3:CreateBucket",
 	"s3:GetBucketTagging":                "results-bucket bookkeeping; not a plain child launch",
 	"s3:PutBucketTagging":                "results-bucket bookkeeping; not a plain child launch",

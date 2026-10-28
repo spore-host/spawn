@@ -65,7 +65,8 @@ type ParamFileFormat struct {
 var (
 	dynamoClient         *dynamodb.Client
 	lambdaClient         *lambdasvc.Client
-	s3Client             *s3.Client
+	awsCfg               aws.Config
+	schedules            *scheduler.Client
 	accountID            string
 	schedulesTable       string
 	historyTable         string
@@ -89,13 +90,16 @@ func init() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
+	awsCfg = cfg
 	dynamoClient = dynamodb.NewFromConfig(cfg)
 	lambdaClient = lambdasvc.NewFromConfig(cfg)
-	s3Client = s3.NewFromConfig(cfg)
 
 	// Load configuration from environment variables with fallbacks
 	accountID = getEnv("SPAWN_ACCOUNT_ID", defaultAccountID)
 	schedulesTable = getEnv("SPAWN_SCHEDULES_TABLE", defaultSchedulesTable)
+	// Completes run-out schedules (#1382): this function's own region, where
+	// the table and the EventBridge schedules are.
+	schedules = scheduler.NewClientWithTableName(cfg, "", "", accountID, schedulesTable)
 	historyTable = getEnv("SPAWN_SCHEDULE_HISTORY_TABLE", defaultHistoryTable)
 	schedulesBucketTmpl = getEnv("SPAWN_SCHEDULES_BUCKET_TEMPLATE", defaultSchedulesBucketTmpl)
 	orchestratorFuncName = getEnv("SPAWN_ORCHESTRATOR_FUNCTION_NAME", defaultOrchestratorFuncName)
@@ -137,10 +141,12 @@ func handler(ctx context.Context, event Event) error {
 		return nil
 	case scheduler.FiringMaxExecutions:
 		log.Printf("Schedule %s reached max executions (%d)", event.ScheduleID, schedule.MaxExecutions)
-		return recordError(ctx, event.ScheduleID, "", fmt.Errorf("max executions reached"))
+		_ = recordError(ctx, event.ScheduleID, "", fmt.Errorf("max executions reached"))
+		return completeRunOut(ctx, schedules, schedule, time.Now())
 	case scheduler.FiringExpired:
 		log.Printf("Schedule %s expired (end_after: %s)", event.ScheduleID, schedule.EndAfter)
-		return recordError(ctx, event.ScheduleID, "", fmt.Errorf("schedule expired"))
+		_ = recordError(ctx, event.ScheduleID, "", fmt.Errorf("schedule expired"))
+		return completeRunOut(ctx, schedules, schedule, time.Now())
 	case scheduler.FiringLaunches:
 	}
 
@@ -185,6 +191,16 @@ func handler(ctx context.Context, event Event) error {
 	err = updateScheduleMetadata(ctx, event.ScheduleID, sweepID)
 	if err != nil {
 		log.Printf("Warning: failed to update schedule metadata: %v", err)
+	} else {
+		schedule.ExecutionCount++
+	}
+
+	// 10. If that was its last run, the schedule is done: delete what it
+	// leaves behind now rather than on a firing that may never come.
+	if lastRun(schedule, time.Now()) {
+		if err := completeRunOut(ctx, schedules, schedule, time.Now()); err != nil {
+			log.Printf("Warning: %v", err)
+		}
 	}
 
 	log.Printf("Successfully triggered sweep %s for schedule %s", sweepID, event.ScheduleID)
@@ -230,7 +246,10 @@ func getScheduleRecord(ctx context.Context, scheduleID string) (*ScheduleRecord,
 func downloadParams(ctx context.Context, recordedBucket, s3Key, region string) (*ParamFileFormat, error) {
 	bucket := paramsBucket(recordedBucket, region)
 
-	result, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+	// A client in the bucket's region: the bucket is spawn-schedules-<the
+	// schedule's Region>, and from this function's region S3 answers a bucket
+	// elsewhere with a 301 (#1383).
+	result, err := paramsS3Client(awsCfg, region).GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(s3Key),
 	})
@@ -313,6 +332,40 @@ func recordError(ctx context.Context, scheduleID, sweepID string, err error) err
 
 func main() {
 	lambda.Start(handler)
+}
+
+// paramsS3Client is an S3 client for a params bucket in region.
+func paramsS3Client(cfg aws.Config, region string) *s3.Client {
+	return s3.NewFromConfig(cfg, func(o *s3.Options) { o.Region = region })
+}
+
+// completer is scheduler.Client.CompleteSchedule, behind an interface so the
+// decision to call it is testable without AWS.
+type completer interface {
+	CompleteSchedule(ctx context.Context, record *scheduler.ScheduleRecord, now time.Time) error
+}
+
+// completeRunOut deletes a run-out schedule's EventBridge schedule and params
+// and gives its record a TTL (#1382). Before this, a schedule that hit
+// max_executions or end_after kept firing into this handler forever, and its
+// params and record stayed until someone cancelled it.
+func completeRunOut(ctx context.Context, c completer, schedule *ScheduleRecord, now time.Time) error {
+	if err := c.CompleteSchedule(ctx, schedule, now); err != nil {
+		return fmt.Errorf("complete run-out schedule %s: %w", schedule.ScheduleID, err)
+	}
+	log.Printf("Schedule %s has run out: deleted its EventBridge schedule and params; its record expires in %s",
+		schedule.ScheduleID, scheduler.RecordTTLMargin)
+	return nil
+}
+
+// lastRun reports whether a schedule that has just launched (with
+// ExecutionCount already counting that launch) will launch no more: a one-time
+// schedule, or one FiringAt now says has reached MaxExecutions. EndAfter is
+// left to the first firing after it, which FiringAt reports as expired: until
+// then the next firing may still launch.
+func lastRun(schedule *ScheduleRecord, now time.Time) bool {
+	return schedule.ScheduleType == string(scheduler.ScheduleTypeOneTime) ||
+		schedule.FiringAt(now) == scheduler.FiringMaxExecutions
 }
 
 // paramsBucket decides which bucket holds a schedule's parameter file.

@@ -327,6 +327,8 @@ func TestSaveSchedule(t *testing.T) {
 
 	client := NewClientWithTableName(env.AWSConfig, testLambdaARN, testRoleARN, testAccountID, "spawn-schedules")
 
+	// Finite (end_after), so it has a TTL; an unbounded recurring schedule
+	// has none (TestRecurringScheduleRecordHasNoTTL, #1382).
 	record := &ScheduleRecord{
 		ScheduleID:         "sched-save-001",
 		UserID:             "user-123",
@@ -334,6 +336,7 @@ func TestSaveSchedule(t *testing.T) {
 		ScheduleExpression: "cron(0 2 * * ? *)",
 		ScheduleType:       "recurring",
 		Status:             "active",
+		EndAfter:           time.Now().Add(24 * time.Hour),
 	}
 
 	if err := client.SaveSchedule(ctx, record); err != nil {
@@ -341,7 +344,7 @@ func TestSaveSchedule(t *testing.T) {
 	}
 
 	if record.TTL == 0 {
-		t.Error("SaveSchedule() did not set TTL")
+		t.Error("SaveSchedule() did not set TTL on a finite schedule")
 	}
 
 	// Verify persisted.

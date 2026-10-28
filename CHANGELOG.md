@@ -66,6 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `sqs:TagQueue`: `spawn pool create` (listed by hand in 0.147.0, now
     generated).
 
+- **Schedule lifetime** (#1382): a one-time schedule is recorded with
+  `max_executions: 1`; a schedule that has run out gets status `completed`;
+  `spawn schedule resume` now only resumes a paused schedule (a cancelled or
+  completed one fails with a message instead of being marked active with no
+  EventBridge schedule or params behind it), and `pause`/`resume` of a
+  schedule with no record fail instead of creating one.
+
 ### Fixed
 
 - **`spawn sweep resume` (and `spawn resume`, foreground and `--detach`)
@@ -111,6 +118,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   email sent no notification (logged as a warning). Scoped like its other SNS
   grants, to `spawn-pipeline-*` topics. Takes effect when the orchestrator
   stack is redeployed.
+
+- **A recurring schedule's params no longer expire while the schedule
+  lives, and everything a schedule creates now has a deleter** (#1382).
+  `pkg/staging` gave every new `spawn-schedules-*` bucket a 7-day
+  `expire-schedules` rule on `schedules/`, and the production buckets carry a
+  whole-bucket 90-day `DeleteOldScheduleParams` rule, so scheduler-handler's
+  read of the params failed (`NoSuchKey`) on every firing after the first
+  week (or 90 days). New buckets get no expiry; every `spawn schedule create`
+  removes those two rules from its bucket and keeps any other (the lifecycle
+  is deleted only if nothing is left), and refuses to create the schedule if
+  it cannot. Batch queue configs, which share the bucket and prefix, are now
+  tagged `Component=queue` and expired after 7 days by their own
+  tag-filtered `expire-queue-configs` rule, which never matches schedule
+  params. The record TTL was a flat now+90 days, so a recurring schedule's
+  record was deleted while its EventBridge schedule kept firing: an unbounded
+  recurring schedule now has no TTL (refreshing it per firing would still
+  expire a paused schedule, or one firing less often than the window), and a
+  one-time or `--end-after` schedule expires 30 days after its last possible
+  firing. `spawn schedule cancel` now deletes the params object as well as
+  the EventBridge schedule and the record (record last), and succeeds on a
+  schedule already gone. EventBridge schedules are created with
+  `ActionAfterCompletion=DELETE` (and an `--end-after` schedule with an
+  `EndDate` matching its record TTL), and scheduler-handler completes a
+  schedule that has run out (`--max-executions` reached, past `--end-after`,
+  or a one-time schedule that ran): it marks the record `completed` with a
+  30-day TTL, then deletes the EventBridge schedule and the params.
+  `spawn schedule pause`/`resume` sent an empty target ARN (pause and resume
+  failed) and dropped the target input; they now send the full target.
+  **New CLI-caller permissions:** `spawn schedule create` needs
+  `s3:GetLifecycleConfiguration` (and `s3:DeleteObject`, to remove the params
+  if the EventBridge schedule cannot be created); `spawn schedule cancel`
+  needs `s3:DeleteObject` on `spawn-schedules-*/schedules/*` and
+  `dynamodb:GetItem` on `spawn-schedules`; `spawn launch --batch-queue` needs
+  `s3:GetLifecycleConfiguration` (without it the queue config uploads and
+  only loses its expiry, with a warning). **scheduler-handler's role**
+  (`deployment/cloudformation/scheduler-handler-role.yaml`) gains
+  `s3:DeleteObject` on `spawn-schedules-*/schedules/*` and
+  `scheduler:DeleteSchedule` on `schedule/default/*` in its region; redeploy
+  the role stack and then the function (`scripts/deploy-scheduler-handler.sh`).
+- **`spawn schedule create --region` other than us-east-1 targeted a
+  scheduler-handler that does not exist** (#1383). The target ARN took its
+  region from `--region`, but the handler is deployed only in us-east-1, next
+  to the `spawn-schedules` table it reads, so every firing of such a schedule
+  failed delivery. The schedule's control plane (record, EventBridge schedule
+  and target) now always stays in us-east-1 and `--region` only chooses where
+  the sweep's members launch, which the orchestrator already reads from the
+  record. scheduler-handler also reads the params from the bucket's own
+  region (`spawn-schedules-<region>`) instead of its own, which S3 answered
+  with a redirect.
+
 - **`setup-dashboard-lambda-role.sh` now finishes removing the legacy
   `SpawnDashboardLambdaPolicy` managed policy, and the three inline policies
   added by hand before it owned the role** (#1376). `delete-policy` failed with
