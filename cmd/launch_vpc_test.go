@@ -20,12 +20,13 @@ import (
 // a VPC the instance is not in. An account whose research VPC is not the default
 // could not target a VPC at all.
 func TestBuildLaunchConfig_VPCID(t *testing.T) {
-	prevVPC, prevType := vpcID, instanceType
-	t.Cleanup(func() { vpcID, instanceType = prevVPC, prevType })
+	prevVPC, prevType, prevSubnet := vpcID, instanceType, subnetID
+	t.Cleanup(func() { vpcID, instanceType, subnetID = prevVPC, prevType, prevSubnet })
 	instanceType = "c7g.4xlarge"
 
 	t.Run("flag reaches the config", func(t *testing.T) {
-		vpcID = "vpc-0abc1234def567890"
+		// With its subnet: --vpc alone is refused (#1389).
+		vpcID, subnetID = "vpc-0abc1234def567890", "subnet-0abc1234def567890"
 		cfg, err := buildLaunchConfig(nil)
 		if err != nil {
 			t.Fatalf("buildLaunchConfig: %v", err)
@@ -37,7 +38,7 @@ func TestBuildLaunchConfig_VPCID(t *testing.T) {
 	})
 
 	t.Run("unset leaves it empty so the default VPC is used", func(t *testing.T) {
-		vpcID = ""
+		vpcID, subnetID = "", ""
 		cfg, err := buildLaunchConfig(nil)
 		if err != nil {
 			t.Fatalf("buildLaunchConfig: %v", err)

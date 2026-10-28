@@ -50,6 +50,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// And --vpc without a subnet (#1389), which would land in the default VPC.
+	if err := validateVPCHasSubnet(); err != nil {
+		return err
+	}
+
 	// Reject an unparseable --ttl/--idle-timeout (etc.) before any AWS call,
 	// on every launch path below (#990).
 	if err := validateLaunchDurationFlags(); err != nil {
@@ -1403,12 +1408,6 @@ func sweepBaseConfig(ctx context.Context) (*aws.LaunchConfig, error) {
 	}
 	if config.InstanceType == "" {
 		config.InstanceType = instanceType
-	}
-	// --spot-max-price: buildLaunchConfig never reads it (only the batch-queue
-	// path did), so a sweep's members dropped it (#1366). A row's own
-	// spot_max_price: still wins.
-	if spotMaxPrice != "" {
-		config.SpotMaxPrice = spotMaxPrice
 	}
 	if err := applyLaunchFlagTags(ctx, config); err != nil {
 		return nil, err

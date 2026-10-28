@@ -147,6 +147,13 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 
 	// Override with flags
+	// --spot-max-price (#1388): read only by the batch-queue path and (since
+	// #1366) the sweep base config, so a single launch, job array or MPI
+	// cohort sent RunInstances no MaxPrice and EC2 capped at the on-demand
+	// rate. Like every other flag it beats the price truffle piped in.
+	if spotMaxPrice != "" {
+		config.SpotMaxPrice = spotMaxPrice
+	}
 	if instanceType != "" {
 		config.InstanceType = instanceType
 	}
@@ -190,6 +197,11 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	// this flag was accepted and the instance launched in the default VPC.
 	if vpcID != "" {
 		config.VPCID = vpcID
+	}
+	// The backstop under runLaunch's check, for a caller that did not come
+	// through it (#1389).
+	if err := validateVPCHasSubnet(); err != nil {
+		return nil, err
 	}
 	// --efa without --mpi. The only assignment of EFAEnabled lived in
 	// resolveMPIPlacement, so a plain `spawn launch --efa` passed the EFA
@@ -903,4 +915,24 @@ func collectPluginDeclarations() ([]plugin.Declaration, error) {
 	}
 
 	return decls, nil
+}
+
+// vpcWithoutSubnetWhy is why --vpc needs a subnet (#1389). Shared in spirit
+// with sweepVPCWhy, which refuses the same thing on a parameter sweep (#1366).
+const vpcWithoutSubnetWhy = "RunInstances takes a subnet, not a VPC: without one EC2 launches in the region's " +
+	"default VPC, not in the VPC --vpc names"
+
+// validateVPCHasSubnet refuses --vpc without --subnet-id (#1389). --vpc places
+// the managed security groups and the FSx and EFA subnet lookups, but it never
+// reached RunInstances, so an ordinary launch sent no SubnetId and landed in
+// the default VPC. Picking a subnet was not an option: the only lookup,
+// GetSubnetForAZ, needs --az and takes whichever subnet DescribeSubnets lists
+// first. Called by runLaunch before any AWS call, on every dispatch.
+func validateVPCHasSubnet() error {
+	if vpcID == "" || subnetID != "" {
+		return nil
+	}
+	return fmt.Errorf("refusing --vpc %s without a subnet (#1389): %s; pass --subnet-id with a subnet in %s "+
+		"(list them with: aws ec2 describe-subnets --filters Name=vpc-id,Values=%s)",
+		vpcID, vpcWithoutSubnetWhy, vpcID, vpcID)
 }

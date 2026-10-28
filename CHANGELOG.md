@@ -180,6 +180,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to become 0), and amazon-efs-utils-only options such as `tls`, `iam` and
   `accesspoint`, which `mount -t nfs4` does not accept.
 
+- **`spawn launch --spot --spot-max-price` sends the cap to EC2 on a single
+  launch** (#1388). Only the batch-queue and sweep paths read the flag, so a
+  single launch, job array or MPI cohort sent RunInstances no `MaxPrice` (EC2
+  capped at the on-demand rate) and `--dry-run` showed no `(max $X/hr)`. The
+  flag is now set where every launch builds its config, and it beats a price
+  piped in from truffle. A cap that was ignored now applies.
+- **`spawn launch --vpc` without `--subnet-id` is refused before any AWS
+  call** (#1389). RunInstances takes a subnet, not a VPC, so an ordinary
+  launch (Linux or Windows, single, job array, MPI or batch queue) sent no
+  subnet and landed in the region's default VPC. The error says to pass
+  `--subnet-id` with a subnet in that VPC and how to list them, as a
+  parameter sweep already did (#1366). Commands that passed `--vpc` alone
+  now fail instead of launching in the wrong VPC.
 - **`setup-dashboard-lambda-role.sh` now finishes removing the legacy
   `SpawnDashboardLambdaPolicy` managed policy, and the three inline policies
   added by hand before it owned the role** (#1376). `delete-policy` failed with
