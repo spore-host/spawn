@@ -185,6 +185,7 @@ func roleReaper(mode string, dryRun bool) (*reaper, *roleIAM, map[string]*profil
 		spotRequests:  spotRequestsOff,
 		elasticIPs:    elasticIPsOff,
 		instanceRoles: mode,
+		roleRefs:      []instancerole.ReferenceSource{&fakeRefs{}},
 		accounts: []account{{
 			label: "acct", accountID: "111111111111",
 			ec2For: func(region string) ec2API { return ec2s[region] },

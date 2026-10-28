@@ -84,6 +84,18 @@ const PoolQueueARN = "arn:aws:sqs:*:*:spawn-pool-*"
 // (pkg/poolqueue.SpecsRoot). No other object in any bucket.
 const PoolSpecsARN = "arn:aws:s3:::spawn-results-*/staging/pool-specs/*"
 
+// SchedulesTableARN and ScheduleParamsARN are the only schedule data the
+// reaper may read (#1378): the table `spawn schedule create` writes
+// (pkg/scheduler.TableName, in pkg/scheduler.TableRegion) and the params
+// objects under pkg/scheduler.ParamsKeyPrefix in the schedules buckets
+// (spawn-schedules-<region>, or spawn-schedules-<account>-<region> when the
+// shared name is taken). The same resources scheduler-handler reads
+// (deployment/cloudformation/scheduler-handler-role.yaml).
+const (
+	SchedulesTableARN = "arn:aws:dynamodb:us-east-1:*:table/spawn-schedules"
+	ScheduleParamsARN = "arn:aws:s3:::spawn-schedules-*/schedules/*"
+)
+
 // Statement is the minimal IAM statement shape emitted here.
 type Statement struct {
 	Effect    string      `json:"Effect"`
@@ -386,6 +398,35 @@ func ScanSelfStatements() []Statement {
 	}
 }
 
+// ScheduleReferenceStatements are what the per-task role sweep needs to know
+// which roles an enabled schedule will launch with (#1378, pkg/instancerole
+// ScheduleSource): a Scan of the schedules table and a read of each params
+// object. Read-only and on exactly those resources. They run on the reaper's
+// OWN credentials, in the account the schedules are in, whatever the scan
+// mode, so they are not in ScanSelfStatements (which is also the member
+// accounts' role, where there are no schedules): the SAM template grants
+// them to the function outside the ScanSelf branch, and
+// ScanSelfPolicyDocument, the one role `spawn reaper deploy` creates, carries
+// both sets.
+func ScheduleReferenceStatements() []Statement {
+	return []Statement{
+		{
+			// Scan, not Query: the table's only index is keyed on user_id
+			// and next_execution_time, and a record missing either would be
+			// absent from it. A schedule the reaper did not see would lose
+			// its role.
+			Effect:   "Allow",
+			Action:   []string{"dynamodb:Scan"},
+			Resource: SchedulesTableARN,
+		},
+		{
+			Effect:   "Allow",
+			Action:   []string{"s3:GetObject"},
+			Resource: ScheduleParamsARN,
+		},
+	}
+}
+
 // StagingBucketSweepActions are what the empty-bucket sweep (#1301) needs on
 // spawn-staging-*: read and write the bucket's tags, and delete it. Nothing
 // that lists it or reads an object in it.
@@ -411,11 +452,14 @@ func ResultsBucketSweepActions() []string {
 	}
 }
 
-// ScanSelfPolicyDocument renders [ScanSelfStatements] as an IAM policy document.
+// ScanSelfPolicyDocument renders [ScanSelfStatements] and
+// [ScheduleReferenceStatements] as one IAM policy document: the policy of the
+// single role a scan-self reaper runs as (`spawn reaper deploy`), which is
+// both its own credentials and the scanned account's.
 func ScanSelfPolicyDocument() (string, error) {
 	doc := map[string]interface{}{
 		"Version":   "2012-10-17",
-		"Statement": ScanSelfStatements(),
+		"Statement": append(ScanSelfStatements(), ScheduleReferenceStatements()...),
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {

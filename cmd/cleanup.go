@@ -13,8 +13,10 @@ import (
 	"github.com/spore-host/libs/i18n"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/bucketsweep"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/poolqueue"
+	"github.com/spore-host/spawn/pkg/scheduler"
 )
 
 var (
@@ -72,7 +74,10 @@ before v0.147.0) when the pool was never drained; a pool role also needs its
 spawn:pool-run-id tag to match its name. A role goes only when it and its profile are
 tagged spawn:managed=true, no instance in any enabled region (pending through
 stopped) has the profile attached, the role and profile are at least 24 hours
-old, and the role is unused for 24 hours. The shared spored-instance-role is never touched. IAM is
+old, and the role is unused for 24 hours. A role an enabled schedule names
+(its params' iam_role) is kept until the schedule is paused, cancelled or
+runs out; the schedules are read from spawn's infra account (as 'spawn
+schedule' does), and if they cannot be read no role is deleted. The shared spored-instance-role is never touched. IAM is
 global, so this always checks every enabled region whatever --region says, and
 covers every principal's roles. The TTL reaper applies the same rule
 (REAPER_INSTANCE_ROLES).
@@ -125,7 +130,18 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("list enabled regions (needed to check which roles instances use): %w", err)
 		}
-		return runCleanupInstanceRoles(ctx, cmd, iamc, ec2s, time.Now())
+		// A schedule names a role it launches with at its next firing
+		// (#1378). Schedules live in spawn's infra account, where `spawn
+		// schedule create` writes them, so they are read with the same infra
+		// config, through the source the TTL reaper uses.
+		infraCfg, err := spawnconfig.LoadInfraAWSConfig(ctx, scheduler.TableRegion)
+		if err != nil {
+			return fmt.Errorf("no IAM role was deleted: the schedules that may name these roles could not be read "+
+				"(they are in spawn's infra account; set SPAWN_INFRA_PROFILE to its profile, or to \"\" if it is this "+
+				"account): %w", err)
+		}
+		sources := []instancerole.ReferenceSource{instancerole.NewScheduleSource(infraCfg)}
+		return runCleanupInstanceRoles(ctx, cmd, iamc, ec2s, sources, time.Now())
 	}
 
 	regions, err := resolveCleanupRegions(ctx, client, cleanupRegion, cleanupAllRegions)
@@ -596,17 +612,23 @@ func printBucketResult(out, errOut io.Writer, res bucketsweep.Result, writes boo
 // profiles that instancerole.Decide says are no longer needed (#1300): the
 // rule the reaper applies, from the same package. It previews first, asks,
 // then sweeps again with reap on, so each role is re-decided at the moment it
-// is deleted rather than trusted from the preview.
-func runCleanupInstanceRoles(ctx context.Context, cmd *cobra.Command, iamc instancerole.API, ec2s map[string]instancerole.EC2Describer, now time.Time) error {
+// is deleted rather than trusted from the preview. sources are the deferred
+// launchers (the schedules, #1378) whose roles are kept; if they cannot be
+// read, nothing is deleted.
+func runCleanupInstanceRoles(ctx context.Context, cmd *cobra.Command, iamc instancerole.API, ec2s map[string]instancerole.EC2Describer, sources []instancerole.ReferenceSource, now time.Time) error {
 	out := cmd.OutOrStdout()
 	inUse, err := instancerole.ProfilesInUse(ctx, ec2s)
 	if err != nil {
 		return fmt.Errorf("could not list instances, so no role can be shown to be unused: %w", err)
 	}
+	refs, err := instancerole.CollectReferences(ctx, sources...)
+	if err != nil {
+		return fmt.Errorf("no IAM role was deleted: %w", err)
+	}
 	// The CLI also sweeps pre-v0.147 spawn-pool-worker-<hash> pool roles
 	// (#1319), which the reaper's grants do not reach.
 	opts := instancerole.Options{LegacyPoolWorkers: true}
-	preview, err := instancerole.SweepWith(ctx, iamc, inUse, now, false, opts)
+	preview, err := instancerole.SweepWith(ctx, iamc, inUse, refs, now, false, opts)
 	if err != nil {
 		return err
 	}
@@ -642,7 +664,13 @@ func runCleanupInstanceRoles(ctx context.Context, cmd *cobra.Command, iamc insta
 		return newAborted("aborted: no IAM role was deleted (re-run with --yes)")
 	}
 
-	res, err := instancerole.SweepWith(ctx, iamc, inUse, now, true, opts)
+	// Read the schedules again: one created while the prompt was open must
+	// keep its role.
+	refs, err = instancerole.CollectReferences(ctx, sources...)
+	if err != nil {
+		return fmt.Errorf("no IAM role was deleted: %w", err)
+	}
+	res, err := instancerole.SweepWith(ctx, iamc, inUse, refs, now, true, opts)
 	if err != nil {
 		return err
 	}

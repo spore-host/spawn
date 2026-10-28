@@ -116,7 +116,7 @@ func runRolesCleanup(t *testing.T, iamc *cleanupRoleIAM, dryRun bool) (string, e
 		"us-east-1":    cleanupRoleEC2{},
 		"eu-central-1": cleanupRoleEC2{profiles: []string{"spawn-instance-busy"}},
 	}
-	err := runCleanupInstanceRoles(context.Background(), c, iamc, ec2s, cleanupNow)
+	err := runCleanupInstanceRoles(context.Background(), c, iamc, ec2s, []instancerole.ReferenceSource{noScheduleRefs{}}, cleanupNow)
 	return out.String(), err
 }
 
@@ -187,4 +187,13 @@ func TestCleanupInstanceRolesRemovesLegacyPoolRoles(t *testing.T) {
 	if got := iamc.mutating(); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("cleanup changed %q, want %q", got, want)
 	}
+}
+
+// noScheduleRefs is a schedules source that names no role.
+type noScheduleRefs struct{}
+
+func (noScheduleRefs) Describe() string { return "schedules (none)" }
+
+func (noScheduleRefs) ProfileReferences(context.Context) (map[string][]string, error) {
+	return map[string][]string{}, nil
 }

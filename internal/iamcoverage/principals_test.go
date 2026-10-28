@@ -43,7 +43,9 @@ type variant struct {
 // assumes a role into a member account makes its EC2 calls with that role and
 // its DynamoDB calls with its own, so a grant in the wrong one is still a
 // denial. services are the IAM prefixes this context's clients call; nil means
-// every service no other context claims.
+// every service no other context claims. An entry with a colon is one action
+// (s3:GetObject), for a service whose calls are split between contexts; an
+// action claimed that way beats any prefix.
 type credContext struct {
 	name     string
 	services []string
@@ -225,7 +227,10 @@ var principals = []principal{
 		name:  "ttl-reaper",
 		build: build{dir: "lambda/ttl-reaper", pkg: ".", goos: []string{"linux"}},
 		contexts: []credContext{
-			{name: "function role", services: []string{"sts", "route53", "dynamodb", "kms"}, variants: []variant{
+			// s3:GetObject is the schedules' params (#1378, pkg/instancerole
+			// ScheduleSource), read in the reaper's own account; nothing the
+			// reaper does in a member account reads an object.
+			{name: "function role", services: []string{"sts", "route53", "dynamodb", "kms", "s3:GetObject"}, variants: []variant{
 				{"SAM TTLReaperFunction", cfnPolicy("lambda/ttl-reaper/template.yaml", "TTLReaperFunction")},
 			}},
 			{name: "target account", variants: []variant{
@@ -412,6 +417,13 @@ func appendSite(sites []Site, s Site) []Site {
 }
 
 func (p principal) contextFor(action string) (credContext, bool) {
+	for _, c := range p.contexts {
+		for _, s := range c.services {
+			if s == action {
+				return c, true
+			}
+		}
+	}
 	prefix, _, _ := strings.Cut(action, ":")
 	var fallback *credContext
 	for i, c := range p.contexts {
