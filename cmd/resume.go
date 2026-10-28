@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"time"
 
@@ -121,8 +123,13 @@ func runResume(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "\n❌ ERROR: %v\n\n", err)
 		return fmt.Errorf("unusable param-file keys")
 	}
-	// Resume rebuilds each row from the file alone (no --instance-profile, no
-	// --ttl), so a row naming a nested-spawn role needs a ttl: in the file (#1375).
+	// The profile the original CLI IAM flags resolved to: the param file never
+	// held it, so without this a resumed row fell back to
+	// spored-instance-profile (#1385). Before the nested-role check, which then
+	// sees the same profile the original launch did.
+	applyRecordedIAM(state.IAMRole, paramFormat)
+	// Resume rebuilds each row from the file and the checkpoint (no --ttl), so
+	// a row naming a nested-spawn role needs a ttl: in the file (#1375).
 	if err := refuseNestedSweepRowsWithoutTTL(paramFormat, ""); err != nil {
 		return err
 	}
@@ -166,10 +173,24 @@ func runResume(cmd *cobra.Command, args []string) error {
 
 	// Build map of instance ID -> current state
 	instanceStates := make(map[string]string)
+	profileByID := make(map[string]string)
 	for _, inst := range allInstances {
 		if inst.InstanceID != "" {
 			instanceStates[inst.InstanceID] = inst.State
+			profileByID[inst.InstanceID] = inst.IAMRole
 		}
+	}
+	// The profile each of the sweep's own instances still visible in EC2 was
+	// launched with: the only evidence of the original IAM flags a checkpoint
+	// written before #1385 has.
+	origProfiles := make(map[int]string)
+	for _, inst := range state.Instances {
+		if p := profileByID[inst.InstanceID]; p != "" {
+			origProfiles[inst.Index] = p
+		}
+	}
+	if err := refuseOldCheckpointRoleDrift(state, paramFormat, origProfiles); err != nil {
+		return err
 	}
 
 	// Update state based on EC2 reality
@@ -280,8 +301,10 @@ func runResume(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Setup IAM role
-	if firstConfig.IamInstanceProfile == "" {
+	// Setup IAM role: spored's shared profile for every member without one.
+	// (This checked only the first config, so a later member without an
+	// iam_role: launched with no profile at all when the first had one.)
+	if slices.ContainsFunc(launchConfigs, func(c *aws.LaunchConfig) bool { return c.IamInstanceProfile == "" }) {
 		instanceProfile, err := awsClient.SetupSporedIAMRole(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to setup IAM role: %w", err)
@@ -322,7 +345,10 @@ func runResume(cmd *cobra.Command, args []string) error {
 	state.Completed, state.Running, state.Failed = len(completed), len(stillRunning), len(failed)
 	// Each relaunched member's spored is verified, as on a fresh sweep (#1305).
 	guard := newFleetGuard("sweep resume", os.Stderr, awsClient, clientFleetVerifier(awsClient), resumeKeepOnError)
-	resumedInstances, failures, successCount, err := relaunchPending(ctx, awsClient, state, launchConfigs, pending, maxConcurrent, guard)
+	resumedInstances, failures, successCount, err := relaunchPending(ctx, awsClient, state, launchConfigs, pending, maxConcurrent, guard, awsClient)
+	if pe := (*resumeProfileError)(nil); errors.As(err, &pe) {
+		return err // refused before the first launch: nothing to report or clean up
+	}
 
 	// Report results
 	fmt.Fprintf(os.Stderr, "\n✅ Resume complete!\n")
@@ -393,6 +419,14 @@ func resumeSweepDetached(ctx context.Context, sweepID string) error {
 		}
 		fmt.Fprintf(os.Stderr, "ℹ️  All parameters launched, but %d instances still running\n", activeCount)
 		fmt.Fprintf(os.Stderr, "   Re-invoking Lambda to monitor completion...\n\n")
+	}
+
+	// The CLI IAM flags' profile may have been deleted as idle since the sweep
+	// last ran (#1385): re-create it before the orchestrator launches with it.
+	if err := ensureDetachedResumeProfile(ctx, sweepID, func(ctx context.Context) (resumeProfileEnsurer, error) {
+		return aws.NewClient(ctx)
+	}); err != nil {
+		return err
 	}
 
 	// Re-invoke Lambda orchestrator
@@ -507,7 +541,14 @@ func resolveResumeRegions(state *SweepState, pf *ParamFileFormat, flagRegion, co
 //
 // guard verifies each relaunched member's spored and terminates one that never
 // comes up, as on a fresh sweep (#1305); the caller defers guard.finish.
-func relaunchPending(ctx context.Context, l sweepLauncher, state *SweepState, launchConfigs []*aws.LaunchConfig, pending []int, maxConcurrent int, guard *fleetGuard) ([]*aws.LaunchResult, []string, int, error) {
+//
+// Before the first launch, every spawn-created instance profile the members
+// name is made to exist again through iam (ensureResumeProfiles): the idle-role
+// sweep may have deleted one since the sweep last ran (#1385).
+func relaunchPending(ctx context.Context, l sweepLauncher, state *SweepState, launchConfigs []*aws.LaunchConfig, pending []int, maxConcurrent int, guard *fleetGuard, iam resumeProfileEnsurer) ([]*aws.LaunchResult, []string, int, error) {
+	if err := ensureResumeProfiles(ctx, iam, state.IAMRole, state.ParamFile, launchConfigs); err != nil {
+		return nil, nil, 0, &resumeProfileError{err}
+	}
 	return launchWithRollingQueue(ctx, l, guard, state, launchConfigs, pending, maxConcurrent, state.LaunchDelay)
 }
 

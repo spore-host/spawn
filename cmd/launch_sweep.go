@@ -318,13 +318,14 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	} else if err := refuseNestedSweepRowsWithoutTTL(paramFormat, instanceProfile); err != nil {
 		return err
 	}
-	if err := applyCLIIAMToSweep(ctx, awsClient, paramFormat, auditLog); err != nil {
+	iamRecord, err := applyCLIIAMToSweep(ctx, awsClient, paramFormat, auditLog)
+	if err != nil {
 		return err
 	}
 
 	// Check for detached mode (Lambda orchestration)
 	if detach && maxConcurrent > 0 {
-		return launchSweepDetached(ctx, paramFormat, baseConfig, plat, sweepID, name, maxConcurrent, launchDelay)
+		return launchSweepDetached(ctx, paramFormat, baseConfig, plat, sweepID, name, maxConcurrent, launchDelay, iamRecord)
 	}
 
 	// Build launch configs for each parameter set
@@ -505,6 +506,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	return runSweepLaunch(ctx, awsClient, guard, sweepRun{
 		sweepID: sweepID, name: name, paramFile: paramFile, totalParams: len(paramFormat.Params),
 		maxConcurrent: maxConcurrent, launchDelay: launchDelay, configs: launchConfigs,
+		iam: iamRecord,
 	})
 }
 
@@ -582,6 +584,9 @@ type sweepRun struct {
 	maxConcurrent            int
 	launchDelay              string
 	configs                  []*aws.LaunchConfig
+	// iam is the CLI IAM flags' profile, recorded in the checkpoint so a
+	// resume launches with, and can re-create, the same one (#1385).
+	iam *SweepIAMRole
 }
 
 // runSweepLaunch launches a foreground sweep's parameter sets — through the
@@ -615,6 +620,8 @@ func runSweepLaunch(ctx context.Context, l sweepLauncher, guard *fleetGuard, s s
 			TotalParams:   len(launchConfigs),
 			MaxConcurrent: s.maxConcurrent,
 			LaunchDelay:   s.launchDelay,
+			IAMRecorded:   true,
+			IAMRole:       s.iam,
 		}
 		launchedInstances, failures, successCount, err = launchWithRollingQueue(ctx, l, guard, fresh, launchConfigs, indices, s.maxConcurrent, s.launchDelay)
 		if err != nil {
@@ -645,6 +652,8 @@ func runSweepLaunch(ctx context.Context, l sweepLauncher, guard *fleetGuard, s s
 		TotalParams:   s.totalParams,
 		MaxConcurrent: s.maxConcurrent,
 		LaunchDelay:   s.launchDelay,
+		IAMRecorded:   true,
+		IAMRole:       s.iam,
 		Completed:     0,
 		Running:       successCount,
 		Pending:       0,
@@ -1165,7 +1174,10 @@ func cliIAMFlagsRequireCustomProfile() bool {
 // checked FIRST and bypasses this entire function's resolution — including the
 // --iam-role/--iam-policy/etc. flags — the same precedence
 // launch_single.go's ensureIAMProfile gives it on the single-instance path.
-func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat *ParamFileFormat, auditLog *audit.AuditLogger) error {
+//
+// It returns the record a resume needs to launch with, and re-create, the same
+// profile (#1385), or nil when no flag was passed.
+func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat *ParamFileFormat, auditLog *audit.AuditLogger) (*SweepIAMRole, error) {
 	if instanceProfile != "" {
 		auditLog.LogOperation("create_iam_role", instanceProfile, "success", nil)
 		if paramFormat.Defaults == nil {
@@ -1174,18 +1186,18 @@ func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat 
 		paramFormat.Defaults["iam_role"] = instanceProfile
 		fmt.Fprintf(os.Stderr, "\n✓ IAM: using --instance-profile %s verbatim (bypasses --iam-role/--iam-policy resolution; "+
 			"each row's own iam_role: still wins)\n", instanceProfile)
-		return nil
+		return &SweepIAMRole{Profile: instanceProfile, Verbatim: true, Flags: cliIAMFlagsString()}, nil
 	}
 
 	if !cliIAMFlagsRequireCustomProfile() {
-		return nil
+		return nil, nil
 	}
 
 	// Reject wildcard *:FullAccess templates unless explicitly opted in (2026-06
 	// audit, M-sec) — fail before any AWS call, same guard as the single-instance
 	// path.
 	if err := aws.ValidatePolicyNames(iamPolicy, iamAllowFullAccess); err != nil {
-		return err
+		return nil, err
 	}
 
 	iamConfig := aws.IAMRoleConfig{
@@ -1205,7 +1217,7 @@ func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat 
 	// 403, after paying for the boot.
 	if len(s3ReadBuckets) > 0 || len(s3WriteBuckets) > 0 {
 		if err := validateS3BucketFlags(s3ReadBuckets, s3WriteBuckets); err != nil {
-			return err
+			return nil, err
 		}
 		iamConfig.InlinePolicyJSON = taskStagingPolicy(s3ReadBuckets, s3WriteBuckets, "", nil)
 	}
@@ -1213,7 +1225,7 @@ func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat 
 	instanceProfile, err := awsClient.CreateOrGetInstanceProfile(ctx, iamConfig)
 	if err != nil {
 		auditLog.LogOperation("create_iam_role", iamConfig.RoleName, "failed", err)
-		return fmt.Errorf("failed to create IAM instance profile: %w", err)
+		return nil, fmt.Errorf("failed to create IAM instance profile: %w", err)
 	}
 	auditLog.LogOperationWithData("create_iam_role", iamConfig.RoleName, "success",
 		map[string]interface{}{
@@ -1231,7 +1243,7 @@ func applyCLIIAMToSweep(ctx context.Context, awsClient *aws.Client, paramFormat 
 	paramFormat.Defaults["iam_role"] = instanceProfile
 	fmt.Fprintf(os.Stderr, "\n✓ IAM: using instance profile %s from the command line "+
 		"(each row's own iam_role: still wins)\n", instanceProfile)
-	return nil
+	return newSweepIAMRole(instanceProfile, iamConfig, cliIAMFlagsString())
 }
 
 // estimateSweepOnly prints a per-row cost estimate for a sweep and returns
@@ -1276,7 +1288,7 @@ func reportSweepBudget(totalCost float64, partial bool) {
 }
 
 // launchSweepDetached launches a parameter sweep in detached mode (Lambda orchestration)
-func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, baseConfig *aws.LaunchConfig, plat *platform.Platform, sweepID, sweepName string, maxConcurrent int, launchDelay string) error {
+func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, baseConfig *aws.LaunchConfig, plat *platform.Platform, sweepID, sweepName string, maxConcurrent int, launchDelay string, iamRecord *SweepIAMRole) error {
 	// Determine region (auto-detect if not specified)
 	sweepRegion := baseConfig.Region
 	if sweepRegion == "" {
@@ -1376,6 +1388,15 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	// prompt, so a declined launch creates nothing.
 	if err := ensureDetachedInstanceProfile(ctx, regionClient, paramFormat); err != nil {
 		return fmt.Errorf("detached sweep: %w", err)
+	}
+
+	// The CLI IAM flags' profile, for `spawn sweep resume --detach` to re-create
+	// if the idle-role sweep deletes it (#1385). Before the upload, so a sweep
+	// the orchestrator can run always has it.
+	if iamRecord != nil {
+		if err := saveDetachedIAMRecord(sweepID, iamRecord); err != nil {
+			return fmt.Errorf("detached sweep: record IAM for resume: %w", err)
+		}
 	}
 
 	// Upload parameters to S3
