@@ -67,6 +67,12 @@ aws iam create-role \
 # naming any other profile, since a grant broad enough to pass an arbitrary
 # role would let the orchestrator hand any role in the account to an instance.
 #
+# The nested-spawn roles (spawn-instance-nested-*, #39) match spawn-instance-*
+# but are denied explicitly (#1372): such a role may itself call RunInstances
+# and iam:PassRole, and spawn gives it only to a single --nested-spawn launch
+# with a --ttl, never to a sweep member. The Deny holds whatever the CLI or the
+# orchestrator check; an explicit Deny beats the Allow above.
+#
 # ec2:CancelSpotInstanceRequests: cancelling a sweep terminates its members
 # here (#1349), and a Spot member's request is cancelled before its instance,
 # as on every spawn terminate path (#922). The members' requests are untagged,
@@ -121,6 +127,16 @@ POLICY_DOCUMENT=$(cat <<EOF
           "iam:PassedToService": "ec2.amazonaws.com"
         }
       }
+    },
+    {
+      "Sid": "DenyPassNestedSpawnRoles",
+      "Effect": "Deny",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::${CURRENT_ACCOUNT_ID}:role/spawn-instance-nested-*"
+      ]
     },
     {
       "Effect": "Allow",

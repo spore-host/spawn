@@ -292,9 +292,13 @@ func TestSweepRowUserDataRuns(t *testing.T) {
 // cross-account role may pass (scripts/setup-sweep-cross-account-role.sh, read
 // here, not restated), and anything else is refused before upload.
 func TestDetachedPassableProfilesMatchTheGrant(t *testing.T) {
-	grant := passRoleResources(t)
+	grant := passRoleResources(t, "Allow")
 	if len(grant) == 0 {
 		t.Fatal("found no iam:PassRole resources in the script; the matcher is stale")
+	}
+	denied := passRoleResources(t, "Deny")
+	match := func(g, role string) bool {
+		return g == role || (strings.HasSuffix(g, "*") && strings.HasPrefix(role, strings.TrimSuffix(g, "*")))
 	}
 	// spawn names a profile after its role, except spored's.
 	roleOf := func(profile string) string {
@@ -304,8 +308,13 @@ func TestDetachedPassableProfilesMatchTheGrant(t *testing.T) {
 		return profile
 	}
 	granted := func(role string) bool {
+		for _, d := range denied {
+			if match(d, role) {
+				return false
+			}
+		}
 		for _, g := range grant {
-			if g == role || (strings.HasSuffix(g, "*") && strings.HasPrefix(role, strings.TrimSuffix(g, "*"))) {
+			if match(g, role) {
 				return true
 			}
 		}
@@ -338,11 +347,22 @@ func TestDetachedPassableProfilesMatchTheGrant(t *testing.T) {
 			t.Errorf("%s is passable, but the grant cannot pass its role", p)
 		}
 	}
+	// #1372: whatever the script denies, the CLI refuses, and the nested-spawn
+	// roles are among them.
+	for _, d := range denied {
+		probe := strings.TrimSuffix(d, "*") + map[bool]string{true: "0123abcd", false: ""}[strings.HasSuffix(d, "*")]
+		if orchestratorPassableProfile(probe) {
+			t.Errorf("the script denies PassRole on %s, but the CLI lets a detached member use %s", d, probe)
+		}
+	}
+	if granted(aws.NestedSpawnRoleName()) {
+		t.Errorf("the cross-account role may pass the nested-spawn role %s (#1372)", aws.NestedSpawnRoleName())
+	}
 }
 
 // passRoleResources returns the role names (after role/) in the cross-account
-// role's iam:PassRole grant.
-func passRoleResources(t *testing.T) []string {
+// role's iam:PassRole statements with the given Effect.
+func passRoleResources(t *testing.T, effect string) []string {
 	t.Helper()
 	src, err := os.ReadFile("../scripts/setup-sweep-cross-account-role.sh")
 	if err != nil {
@@ -354,6 +374,7 @@ func passRoleResources(t *testing.T) []string {
 	}
 	var policy struct {
 		Statement []struct {
+			Effect   string
 			Action   interface{}
 			Resource interface{}
 		}
@@ -363,6 +384,9 @@ func passRoleResources(t *testing.T) []string {
 	}
 	var out []string
 	for _, st := range policy.Statement {
+		if st.Effect != effect {
+			continue
+		}
 		if !reflect.DeepEqual(st.Action, []interface{}{"iam:PassRole"}) && st.Action != "iam:PassRole" {
 			continue
 		}
@@ -378,6 +402,7 @@ func passRoleResources(t *testing.T) []string {
 // Each way a detached sweep can name an unpassable profile is refused, and the
 // launch path refuses before applyCLIIAMToSweep creates a role.
 func TestUnpassableDetachedProfileIsRefusedUpFront(t *testing.T) {
+	nested := aws.NestedSpawnRoleName()
 	reset := func() { instanceProfile, iamRole, iamPolicy = "", "", nil }
 	t.Cleanup(reset)
 	pf := func(def, row string) *ParamFileFormat {
@@ -402,6 +427,12 @@ func TestUnpassableDetachedProfileIsRefusedUpFront(t *testing.T) {
 		{"row iam_role", func() {}, pf("", "mine"), true},
 		{"--iam-policy (spawn-instance-*)", func() { iamPolicy = []string{"s3:ReadOnly"} }, pf("mine", ""), false},
 		{"spawn's own", func() {}, pf(aws.SporedInstanceProfileName, instancerole.NamePrefix+"ab12"), false},
+		// #1372: the nested-spawn roles are spawn-instance-* but never passable.
+		{"nested --instance-profile", func() { instanceProfile = nested }, pf("", ""), true},
+		{"nested --iam-role --iam-policy", func() { iamRole, iamPolicy = nested, []string{"s3:ReadOnly"} }, pf("", ""), true},
+		{"nested defaults iam_role", func() {}, pf(nested, ""), true},
+		{"nested row iam_role", func() {}, pf("", nested), true},
+		{"nested-prefix row iam_role", func() {}, pf("", aws.NestedSpawnRolePrefix+"0123abcd"), true},
 	} {
 		reset()
 		tc.set()
@@ -409,7 +440,17 @@ func TestUnpassableDetachedProfileIsRefusedUpFront(t *testing.T) {
 		if (err != nil) != tc.refused {
 			t.Errorf("%s: err = %v, want refused=%v", tc.name, err, tc.refused)
 		}
-		if err != nil && !strings.Contains(err.Error(), "--no-detach") {
+		if err == nil {
+			continue
+		}
+		if strings.HasPrefix(tc.name, "nested") {
+			if !strings.Contains(err.Error(), "nested spawn isn't available for detached sweeps") ||
+				!strings.Contains(err.Error(), "--nested-spawn on a single launch, which requires --ttl") {
+				t.Errorf("%s: the refusal does not say nested spawn is single-launch only, with --ttl: %v", tc.name, err)
+			}
+			continue
+		}
+		if !strings.Contains(err.Error(), "--no-detach") {
 			t.Errorf("%s: the refusal does not say how to run the sweep: %v", tc.name, err)
 		}
 	}

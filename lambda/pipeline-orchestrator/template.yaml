@@ -120,6 +120,18 @@ Resources:
               Condition:
                 StringEquals:
                   iam:PassedToService: ec2.amazonaws.com
+        # Never a nested-spawn role (spawn-instance-nested-*, #39), though it
+        # matches spawn-instance-*: it may itself call RunInstances and
+        # iam:PassRole, and spawn gives it only to a single --nested-spawn
+        # launch with a --ttl, never to a stage (#1372). Unconditional, and in
+        # every account the Allow above names, so it cannot be shadowed.
+        - Statement:
+            - Sid: DenyPassNestedSpawnRoles
+              Effect: Deny
+              Action:
+                - iam:PassRole
+              Resource:
+                - 'arn:aws:iam::*:role/spawn-instance-nested-*'
         # Lambda self-invocation (wildcard to avoid circular dependency)
         - Statement:
             - Effect: Allow

@@ -313,6 +313,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Detached sweeps and pipeline stages can no longer launch with a
+  nested-spawn role** (#1372). The orchestrators' `iam:PassRole` on
+  `role/spawn-instance-*` also matched the `--nested-spawn` roles
+  (`spawn-instance-nested-*`), which may themselves call RunInstances and
+  PassRole, so a param row naming one would have been given that capability
+  without the `--ttl` `--nested-spawn` requires. The CLI now refuses such a
+  profile in `--instance-profile`, `--iam-role`, `defaults` or a row before a
+  detached or scheduled sweep uploads anything ("nested spawn isn't available
+  for detached sweeps; use --nested-spawn on a single launch, which requires
+  --ttl"); the sweep orchestrator refuses the member before RunInstances, for
+  CLI-rendered and legacy params alike; the pipeline orchestrator refuses a
+  stage whose record names one; and both orchestrator roles
+  (`SpawnSweepCrossAccountRole` from `scripts/setup-sweep-cross-account-role.sh`,
+  and the pipeline orchestrator's role in its template) carry an explicit,
+  unconditional `Deny` of `iam:PassRole` on `role/spawn-instance-nested-*`.
+  Deploy: re-run `scripts/setup-sweep-cross-account-role.sh` in each member
+  account, redeploy the sweep orchestrator Lambda
+  (`scripts/deploy-sweep-orchestrator.sh`) and the pipeline orchestrator stack.
+
 - **`spawn launch --tag` and `--team` now reach every member of a parameter
   sweep and the batch-queue instance** (#1356). They were merged only on the
   single-instance path, after the sweep and batch-queue launches had been
