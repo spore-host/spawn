@@ -743,6 +743,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when a sweep ends. Re-run `scripts/setup-sweep-cross-account-role.sh` in each
   member account.
 
+### Security
+
+- **`github.com/go-jose/go-jose/v4` 4.1.4 → 4.1.6** (CVE-2026-116587, a DoS when
+  parsing JWKs that contain RSA keys). An indirect dependency of the root module.
+
 ## [0.146.0] - 2026-10-25
 
 ### Added
