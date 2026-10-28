@@ -286,12 +286,63 @@ fi
 ATTACHMENTS=$(aws iam get-policy --profile "$PROFILE" --policy-arn "$LEGACY_ARN" \
     --query 'Policy.AttachmentCount' --output text 2>/dev/null || echo "absent") # swallow-ok: absent is the expected state
 if [ "$ATTACHMENTS" = "0" ]; then
-    if aws iam delete-policy --profile "$PROFILE" --policy-arn "$LEGACY_ARN"; then
-        echo -e "  ${GREEN}✓${NC} Deleted legacy managed policy $LEGACY_ARN"
-    else
-        echo -e "  ${YELLOW}!${NC} Could not delete $LEGACY_ARN (it may have non-default versions); delete it by hand."
-    fi
+    # delete-policy refuses a policy that still has non-default versions
+    # (DeleteConflict, #1376), so those go first. Only when nothing is attached.
+    VERSIONS=$(aws iam list-policy-versions --profile "$PROFILE" --policy-arn "$LEGACY_ARN" \
+        --query 'Versions[?!IsDefaultVersion].VersionId' --output text)
+    for VERSION in $VERSIONS; do
+        [ "$VERSION" = "None" ] && continue
+        aws iam delete-policy-version --profile "$PROFILE" --policy-arn "$LEGACY_ARN" --version-id "$VERSION"
+        echo -e "  ${GREEN}✓${NC} Deleted version $VERSION of $LEGACY_ARN"
+    done
+    aws iam delete-policy --profile "$PROFILE" --policy-arn "$LEGACY_ARN"
+    echo -e "  ${GREEN}✓${NC} Deleted legacy managed policy $LEGACY_ARN"
+elif [ "$ATTACHMENTS" != "absent" ]; then
+    echo -e "  ${YELLOW}!${NC} $LEGACY_ARN is still attached to $ATTACHMENTS other entities; left in place."
 fi
+
+# Three inline policies were added to this role by hand before this script
+# owned it (#1376). The policies above grant what each was for: the
+# websocket processor's stream reads (ProcessorStreams, on the two tables
+# setup-event-source-mappings.sh maps), the Slack secret (...Slack) and the
+# spore-bot-workspaces calls in slack_oauth.go/slack_token.go
+# (SlackWorkspaces). Each is removed only by its exact name, only if every
+# action it allows is one this script grants for that purpose, and its
+# document is printed first so it can be restored. Any other inline policy is
+# never touched.
+covered_actions() {
+    case "$1" in
+        DynamoDBStreamsAccess) echo "dynamodb:DescribeStream dynamodb:GetRecords dynamodb:GetShardIterator dynamodb:ListStreams" ;;
+        SlackSecretsAccess) if [ -n "$SLACK_ARN" ]; then echo "secretsmanager:GetSecretValue"; fi ;;
+        SporeSlackWorkspaceAccess) echo "dynamodb:GetItem dynamodb:PutItem dynamodb:Scan dynamodb:UpdateItem" ;;
+    esac
+}
+INLINE=$(aws iam list-role-policies --profile "$PROFILE" --role-name "$ROLE_NAME" --query 'PolicyNames' --output text)
+for HAND in DynamoDBStreamsAccess SlackSecretsAccess SporeSlackWorkspaceAccess; do
+    case " $(echo "$INLINE" | tr '\t\n' '  ') " in *" $HAND "*) ;; *) continue ;; esac
+    COVERED=$(covered_actions "$HAND")
+    UNCOVERED=""
+    ODD=$(aws iam get-role-policy --profile "$PROFILE" --role-name "$ROLE_NAME" --policy-name "$HAND" \
+        --query "length(PolicyDocument.Statement[?Effect!='Allow' || NotAction || NotResource])" --output text)
+    [ "$ODD" = "0" ] || UNCOVERED=" a Deny, NotAction or NotResource statement"
+    ACTIONS=$(aws iam get-role-policy --profile "$PROFILE" --role-name "$ROLE_NAME" --policy-name "$HAND" \
+        --query 'PolicyDocument.Statement[].Action' --output text)
+    [ -n "$ACTIONS" ] || UNCOVERED="$UNCOVERED no readable actions"
+    set -f # an action such as dynamodb:* must not glob
+    for A in $ACTIONS; do
+        case " $COVERED " in *" $A "*) ;; *) UNCOVERED="$UNCOVERED $A" ;; esac
+    done
+    set +f
+    if [ -n "$UNCOVERED" ]; then
+        echo -e "  ${YELLOW}!${NC} Kept hand-added inline policy $HAND: it allows$UNCOVERED, which this script does not grant. Review it by hand."
+        continue
+    fi
+    echo "  Removing hand-added inline policy $HAND, whose document was:"
+    aws iam get-role-policy --profile "$PROFILE" --role-name "$ROLE_NAME" --policy-name "$HAND" \
+        --query 'PolicyDocument' --output json
+    aws iam delete-role-policy --profile "$PROFILE" --role-name "$ROLE_NAME" --policy-name "$HAND"
+    echo -e "  ${GREEN}✓${NC} Removed hand-added inline policy $HAND"
+done
 
 # Clean up temp files
 rm -f /tmp/trust-policy.json
