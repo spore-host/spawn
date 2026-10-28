@@ -345,8 +345,8 @@ func loadDetachedIAMRecord(sweepID string) (*SweepIAMRole, error) {
 	return &rec, nil
 }
 
-// resumeProfileError is ensureResumeProfiles refusing, or failing, before a
-// resume launched anything.
+// resumeProfileError is ensureResumeProfiles (or refuseUnboundedResume, #1394)
+// refusing, or failing, before a resume launched anything.
 type resumeProfileError struct{ err error }
 
 func (e *resumeProfileError) Error() string { return e.err.Error() }

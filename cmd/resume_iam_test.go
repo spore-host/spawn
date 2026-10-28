@@ -195,8 +195,8 @@ func TestResume_OldCheckpointWithRoleGoneIsRefusedWithZeroLaunches(t *testing.T)
 	state := &SweepState{SweepID: "old", SweepName: "s", ParamFile: "/data/params.yaml", TotalParams: 2, MaxConcurrent: 1, LaunchDelay: "0s"}
 	const gone = "spawn-instance-0badc0de"
 	configs := []*aws.LaunchConfig{
-		{Name: "s-0", Region: "us-west-2", IamInstanceProfile: gone},
-		{Name: "s-1", Region: "us-west-2", IamInstanceProfile: gone},
+		{Name: "s-0", Region: "us-west-2", IamInstanceProfile: gone, TTL: "1h"},
+		{Name: "s-1", Region: "us-west-2", IamInstanceProfile: gone, TTL: "1h"},
 	}
 	var log []string
 	iam := &fakeProfileIAM{exists: map[string]bool{}, log: &log}

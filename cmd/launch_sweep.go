@@ -506,7 +506,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	return runSweepLaunch(ctx, awsClient, guard, sweepRun{
 		sweepID: sweepID, name: name, paramFile: paramFile, totalParams: len(paramFormat.Params),
 		maxConcurrent: maxConcurrent, launchDelay: launchDelay, configs: launchConfigs,
-		iam: iamRecord,
+		iam: iamRecord, lifetime: newSweepLifetime(baseConfig, noTimeout),
 	})
 }
 
@@ -587,6 +587,9 @@ type sweepRun struct {
 	// iam is the CLI IAM flags' profile, recorded in the checkpoint so a
 	// resume launches with, and can re-create, the same one (#1385).
 	iam *SweepIAMRole
+	// lifetime is the CLI lifetime settings, recorded in the checkpoint so a
+	// resume launches with the same bounds (#1394).
+	lifetime *SweepLifetime
 }
 
 // runSweepLaunch launches a foreground sweep's parameter sets — through the
@@ -622,6 +625,7 @@ func runSweepLaunch(ctx context.Context, l sweepLauncher, guard *fleetGuard, s s
 			LaunchDelay:   s.launchDelay,
 			IAMRecorded:   true,
 			IAMRole:       s.iam,
+			Lifetime:      s.lifetime,
 		}
 		launchedInstances, failures, successCount, err = launchWithRollingQueue(ctx, l, guard, fresh, launchConfigs, indices, s.maxConcurrent, s.launchDelay)
 		if err != nil {
@@ -654,6 +658,7 @@ func runSweepLaunch(ctx context.Context, l sweepLauncher, guard *fleetGuard, s s
 		LaunchDelay:   s.launchDelay,
 		IAMRecorded:   true,
 		IAMRole:       s.iam,
+		Lifetime:      s.lifetime,
 		Completed:     0,
 		Running:       successCount,
 		Pending:       0,
@@ -1091,17 +1096,15 @@ func applyCLISpendControlsToSweep(paramFormat *ParamFileFormat) []string {
 	if paramFormat.Defaults == nil {
 		paramFormat.Defaults = make(map[string]interface{})
 	}
+	foldSpendControls(paramFormat.Defaults, ttl, idleTimeout, costLimit)
 	var applied []string
 	if ttl != "" {
-		paramFormat.Defaults["ttl"] = ttl
 		applied = append(applied, "ttl="+ttl)
 	}
 	if idleTimeout != "" {
-		paramFormat.Defaults["idle_timeout"] = idleTimeout
 		applied = append(applied, "idle-timeout="+idleTimeout)
 	}
 	if costLimit > 0 {
-		paramFormat.Defaults["cost_limit"] = costLimit
 		applied = append(applied, fmt.Sprintf("cost-limit=$%.2f", costLimit))
 	}
 	return applied

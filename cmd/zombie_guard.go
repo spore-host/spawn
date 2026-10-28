@@ -18,7 +18,13 @@ import (
 // default was applied. It does NOT print — callers decide how to surface it
 // (once per instance, or once for a whole sweep).
 func applyIdleTimeoutDefault(cfg *aws.LaunchConfig) bool {
-	if cfg.TTL == "" && cfg.IdleTimeout == "" && !noTimeout {
+	return applyIdleDefault(cfg, noTimeout)
+}
+
+// applyIdleDefault is applyIdleTimeoutDefault with --no-timeout passed in: a
+// resume takes it from the checkpoint, not the flag (#1394).
+func applyIdleDefault(cfg *aws.LaunchConfig, noTimeoutSet bool) bool {
+	if cfg.TTL == "" && cfg.IdleTimeout == "" && !noTimeoutSet {
 		cfg.IdleTimeout = "1h"
 		return true
 	}
