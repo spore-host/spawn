@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`setup-dashboard-lambda-role.sh` now finishes removing the legacy
+  `SpawnDashboardLambdaPolicy` managed policy, and the three inline policies
+  added by hand before it owned the role** (#1376). `delete-policy` failed with
+  `DeleteConflict` on a policy with old versions, so the script now deletes
+  every non-default version first, and only when the policy is attached to
+  nothing. `DynamoDBStreamsAccess`, `SlackSecretsAccess` and
+  `SporeSlackWorkspaceAccess` on `SpawnDashboardLambdaRole` are removed by
+  exact name, each only if every action it allows is one the script's own
+  policies grant for the same purpose (`SlackSecretsAccess` only when the
+  script wrote the Slack secret grant), with its document printed first. Any
+  other inline policy is left alone, and a policy that fails the check is kept
+  with a warning.
+
 ## [0.147.0] - 2026-10-28
 
 ### Added
