@@ -42,6 +42,12 @@
 // reaches AWS (an STS assume-role credentials provider, and SigV4-signing a
 // Function URL request by hand) are recognised explicitly in actions.go.
 //
+// Some operations need a second action when a field of their input is set:
+// CreateQueue with Tags is also authorized as sqs:TagQueue. implied.go holds
+// those rules, each citing the AWS page it came from, and the call's input is
+// traced (composite literal, assignment, the arguments of the function's
+// callers) to decide whether the field may be set (#1377).
+//
 // Code inside the SDK itself is not scanned: its credential chain (SSO, STS web
 // identity) authenticates rather than acts. The one SDK library spawn calls that
 // makes operations on the caller's behalf, the S3 transfer manager, is mapped at
@@ -403,7 +409,7 @@ func (p *Program) opsIn(f *ssa.Function) []siteOp {
 	if f.Pkg == nil || !strings.HasPrefix(f.Pkg.Pkg.Path(), sdkRoot) {
 		for _, b := range f.Blocks {
 			for _, ins := range b.Instrs {
-				for _, op := range operationsAt(ins) {
+				for _, op := range operationsAt(ins, p.cg) {
 					out = append(out, siteOp{site: Site{Func: f.String(), Pos: p.pos(ins.Pos(), f), Op: op.display}, op: op})
 				}
 			}
@@ -439,17 +445,22 @@ type foundOp struct {
 	display string
 	actions []string
 	err     string // non-empty when it could not be mapped
+	// key names the operation for impliedRules: "<prefix>:<Op>" for a
+	// service, "<package path>.<method>" for a featureOps library.
+	key string
+	// input is the operation's *<Op>Input type, when known.
+	input types.Type
 }
 
 // operationsAt recognises SDK operations made or referenced by one instruction.
-func operationsAt(ins ssa.Instruction) []foundOp {
+func operationsAt(ins ssa.Instruction, cg *callgraph.Graph) []foundOp {
 	var out []foundOp
 	if call, ok := ins.(ssa.CallInstruction); ok {
 		com := call.Common()
 		if com.IsInvoke() {
 			sig, _ := com.Method.Type().(*types.Signature)
 			if op, ok := opFromMethod(com.Method.Name(), sig); ok {
-				out = append(out, op)
+				out = append(out, applyImplied(op, inputArg(com.Args, op.input), ins, cg))
 			}
 			if op, ok := signerCall(com.Method.Name(), sig, com.Args, false); ok {
 				out = append(out, op)
@@ -472,7 +483,13 @@ func operationsAt(ins ssa.Instruction) []foundOp {
 			continue
 		}
 		if op, ok := opFromFunction(fn); ok {
-			out = append(out, op)
+			// The input is known only when this instruction calls fn; a
+			// method value handed elsewhere says nothing about it.
+			var input ssa.Value
+			if call, ok := ins.(ssa.CallInstruction); ok && call.Common().Value == fn {
+				input = inputArg(call.Common().Args, op.input)
+			}
+			out = append(out, applyImplied(op, input, ins, cg))
 		}
 	}
 	return out
@@ -539,7 +556,9 @@ func opFromMethod(name string, sig *types.Signature) (foundOp, bool) {
 		if !strings.HasPrefix(pkg, sdkRoot) {
 			continue
 		}
-		return mapOp(pkg, opName, pkgBase(pkg)+"."+name)
+		op, ok := mapOp(pkg, opName, pkgBase(pkg)+"."+name)
+		op.input = ptr
+		return op, ok
 	}
 	return foundOp{}, false
 }

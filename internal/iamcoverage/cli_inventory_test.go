@@ -196,12 +196,13 @@ How to read it:
   code paths can reach, including flags you may not use and error paths.
 - **It names actions, not resources.** Most of spawn's calls are scoped to
   ` + "`spawn:managed`" + ` resources or ` + "`spawn-*`" + ` names; see the command's documentation.
-- **Some permissions are implied by a call's parameters, and are not listed.**
-  ` + "`ec2:RunInstances`" + ` with an instance profile also needs ` + "`iam:PassRole`" + ` on that
-  role, and with tags ` + "`ec2:CreateTags`" + `; an S3 upload that sets tags also needs
-  ` + "`s3:PutObjectTagging`" + `; ` + "`spawn pool create`" + ` tags its SQS queue, which needs
-  ` + "`sqs:TagQueue`" + ` (without it the queue is created untagged and only
-  ` + "`spawn pool drain`" + ` deletes it).
+- **Tag-on-create permissions are listed.** A call that tags what it creates
+  is also authorized as the service's tag action: ` + "`ec2:RunInstances`" + ` with tags
+  needs ` + "`ec2:CreateTags`" + `, ` + "`sqs:CreateQueue`" + ` with tags needs ` + "`sqs:TagQueue`" + `, an
+  S3 upload with tags needs ` + "`s3:PutObjectTagging`" + `. The generator lists the tag
+  action wherever the command's code may set the tags.
+- **` + "`iam:PassRole`" + ` is not listed.** ` + "`ec2:RunInstances`" + ` with an instance
+  profile also needs ` + "`iam:PassRole`" + ` on that profile's role.
 - **Calls made through the AWS CLI** (` + "`aws ssm start-session`" + `, ` + "`aws s3 cp`" + ` in
   generated scripts) are not Go SDK calls and are not listed.
 - ` + "`sts:GetCallerIdentity`" + ` needs no permission and is omitted.

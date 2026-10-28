@@ -155,7 +155,7 @@ func mapOp(pkg, op, display string) (foundOp, bool) {
 		if !ok {
 			return foundOp{display: display, err: "no IAM actions mapped for " + pkgBase(pkg) + "." + op + " (add it to featureOps)"}, true
 		}
-		return foundOp{display: display, actions: acts}, true
+		return foundOp{display: display, actions: acts, key: pkg + "." + op}, true
 	}
 	svcPkg, ok := strings.CutPrefix(pkg, sdkServicePrefix)
 	if !ok {
@@ -171,7 +171,7 @@ func mapOp(pkg, op, display string) (foundOp, bool) {
 	if !ok {
 		return foundOp{display: display, err: "no IAM service prefix for SDK package service/" + svcPkg + " (add it to servicePrefix)"}, true
 	}
-	return foundOp{display: display, actions: ActionsFor(prefix, op)}, true
+	return foundOp{display: display, actions: ActionsFor(prefix, op), key: prefix + ":" + op}, true
 }
 
 // ActionsFor is the IAM actions an operation of an IAM service needs.

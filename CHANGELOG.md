@@ -46,6 +46,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each claim on a real foreground member, so a new flag cannot be dropped
   silently.
 
+- **Newly documented AWS permissions for the credentials you run spawn with**
+  (#1377). These calls are not new: each command already tagged what it
+  created, and AWS authorizes tag-on-create as the service's tag action too.
+  [`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md) now
+  lists them:
+  - `iam:TagRole` and `iam:TagInstanceProfile`: every command that creates an
+    instance role (`spawn launch`, `app launch`, `burst`, `image import`,
+    `pipeline launch`, `pool create`, `resume`, `schedule create`, `service`,
+    `sweep resume`, `task run`); `iam:TagRole` also for `notify register`,
+    `onboard` and `reaper deploy`.
+  - `ec2:CreateTags`, now also for `spawn ami copy`, `ami create`,
+    `create-ami`, `capacity-block purchase`, `snapshot create` and
+    `snapshot mount`.
+  - `fsx:TagResource`: `spawn launch`, `service` and `task run` (FSx file
+    systems).
+  - `s3:PutObjectTagging`: `spawn launch` and `schedule create` (tagged uploads).
+  - `dynamodb:TagResource`: `spawn burst` (the registry table).
+  - `sqs:TagQueue`: `spawn pool create` (listed by hand in 0.147.0, now
+    generated).
+
 ### Fixed
 
 - **`spawn sweep resume` (and `spawn resume`, foreground and `--detach`)
@@ -71,6 +91,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every member without an `iam_role:`, not only when the first had none. API:
   `aws.Client.InstanceProfileReady`.
 
+- **The IAM coverage gate and the CLI permission inventory now count the tag
+  permission a create call needs when it sets tags** (#1377).
+  `internal/iamcoverage` mapped each SDK call to one action, so
+  `sqs:CreateQueue` with `Tags` was listed without `sqs:TagQueue`, and a role
+  missing a tag-on-create grant passed the gate and failed at runtime. A new
+  table of implied actions, each entry citing the AWS Service Authorization
+  Reference (and the service's own page where it states the condition), adds
+  the tag action wherever the call's input may set the field: a non-nil
+  composite-literal field, an assignment, or an input built by a caller
+  (followed through the call graph). An input the analysis cannot see (a method
+  value, a helper's result) counts as tagged. Covers SQS, IAM, EC2, EBS, S3,
+  DynamoDB, Lambda, EventBridge, SNS, FSx, EFS, Image Builder and STS session
+  tags.
+- **The pipeline orchestrator's role grants `sns:TagResource`** (#1377). It
+  creates its `spawn-pipeline-*` notification topic with a `spawn:pipeline-id`
+  tag, which SNS also authorizes as `sns:TagResource`. Without it, per the SNS
+  API reference, `CreateTopic` is denied, so a pipeline with a notification
+  email sent no notification (logged as a warning). Scoped like its other SNS
+  grants, to `spawn-pipeline-*` topics. Takes effect when the orchestrator
+  stack is redeployed.
 - **`setup-dashboard-lambda-role.sh` now finishes removing the legacy
   `SpawnDashboardLambdaPolicy` managed policy, and the three inline policies
   added by hand before it owned the role** (#1376). `delete-policy` failed with
