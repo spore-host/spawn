@@ -272,7 +272,7 @@ func canRecreate(t resumeProfileTarget) error {
 // origProfiles maps a launched parameter-set index to the profile EC2 reports
 // for its instance; rows that name their own iam_role: are not compared.
 func refuseOldCheckpointRoleDrift(state *SweepState, pf *ParamFileFormat, origProfiles map[int]string) error {
-	if state.IAMRecorded {
+	if state.iamRecorded() {
 		return nil
 	}
 	want := stringParam(pf.Defaults, "iam_role")

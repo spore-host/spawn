@@ -54,13 +54,19 @@ func lifetimeParamFile() *ParamFileFormat {
 // resumeConfigs is runResume's lifetime half: plan, then the pending members.
 func resumeConfigs(t *testing.T, state *SweepState, pf *ParamFileFormat, pending []int) ([]*aws.LaunchConfig, error) {
 	t.Helper()
-	plan, err := planResumeLifetime(state.Lifetime, pf, resumeLifetimeFlagValues())
+	member, err := restoreMemberRecord(state.Member, resumeWithheldValues(), state.SweepID)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := planResumeLifetime(state.lifetimeRecord(), member, pf, resumeLifetimeFlagValues())
 	if err != nil {
 		return nil, err
 	}
 	return plan.members(pf, state, pending)
 }
 
+// checkpointedState is a checkpoint as a #1394 spawn wrote it: the IAM and
+// lifetime records, and no full record (#1400 replaced them with one).
 func checkpointedState(t *testing.T, id string, rec *SweepLifetime) *SweepState {
 	t.Helper()
 	fastRollingQueue(t)
@@ -68,12 +74,19 @@ func checkpointedState(t *testing.T, id string, rec *SweepLifetime) *SweepState 
 	g := newFleetGuard("sweep", io.Discard, f, sporedUp(), false)
 	if err := runSweepLaunch(context.Background(), f, g, sweepRun{
 		sweepID: id, name: "s", totalParams: 3, maxConcurrent: 1, launchDelay: "0s",
-		configs: sweepConfigs("us-east-1", "us-east-1", "us-east-1"), lifetime: rec,
+		configs: sweepConfigs("us-east-1", "us-east-1", "us-east-1"),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	state, err := loadSweepState(id)
 	if err != nil {
+		t.Fatal(err)
+	}
+	state.IAMRecorded, state.Lifetime = true, rec
+	if err := saveSweepState(state); err != nil {
+		t.Fatal(err)
+	}
+	if state, err = loadSweepState(id); err != nil {
 		t.Fatal(err)
 	}
 	return state
@@ -306,8 +319,9 @@ func TestResumePathsReachTheLifetimeRecord(t *testing.T) {
 			t.Errorf("%s: want a call to %s before %s (%d, %d)", fn, first, then, i, j)
 		}
 	}
-	if !slices.Contains(calls["launchParameterSweep"], "lifetime:newSweepLifetime") {
-		t.Error("launchParameterSweep does not pass lifetime: newSweepLifetime(...) to the checkpoint")
+	// #1400: the lifetime is now read from the one full record.
+	if !slices.Contains(calls["launchParameterSweep"], "newSweepMemberRecord") {
+		t.Error("launchParameterSweep does not record newSweepMemberRecord(...) for the checkpoint")
 	}
 	before("runResume", "planResumeLifetime", "refuseNestedSweepRowsWithoutTTL")
 	before("runResume", "members", "GetRecommendedAMI")

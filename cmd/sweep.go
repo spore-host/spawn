@@ -52,6 +52,10 @@ type SweepState struct {
 	// set on every checkpoint written since #1394; nil on an older one, whose
 	// resumed members get the launch defaults instead.
 	Lifetime *SweepLifetime `json:"lifetime,omitempty"`
+	// Member is the whole config the members were built from (#1400), set on
+	// every checkpoint written since; IAMRole and Lifetime are then unset, and
+	// read from it (iamRecord, lifetimeRecord). nil on an older checkpoint.
+	Member *SweepMemberRecord `json:"member,omitempty"`
 }
 
 // InstanceState tracks the state of a single instance in a sweep
@@ -482,8 +486,14 @@ func saveSweepState(state *SweepState) error {
 		return fmt.Errorf("failed to marshal sweep state: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// 0600: the checkpoint holds the sweep's launch flags (#1400). WriteFile
+	// keeps an existing file's mode, so a checkpoint first written 0644 is
+	// narrowed too.
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("failed to write sweep state file: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("failed to restrict sweep state file: %w", err)
 	}
 
 	return nil
