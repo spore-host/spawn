@@ -71,6 +71,16 @@ func attachedVolumesUserData(specs []aws.AttachVolumeSpec) []userdata.AttachedVo
 	return userdata.AttachedVolumesFrom(specs)
 }
 
+// validateEFSMountOptionsFlag refuses a --efs-mount-options value
+// storage.ParseCustomOptions cannot pass to the mount (#1390), with no AWS call.
+func validateEFSMountOptionsFlag() error {
+	if efsMountOptions == "" {
+		return nil
+	}
+	_, err := storage.ParseCustomOptions(efsMountOptions)
+	return err
+}
+
 func getEFSMountOptions() (string, error) {
 	// Custom mount options override profile
 	if efsMountOptions != "" {

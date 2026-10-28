@@ -167,6 +167,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record. scheduler-handler also reads the params from the bucket's own
   region (`spawn-schedules-<region>`) instead of its own, which S3 answered
   with a redirect.
+- **`--efs-mount-options` no longer drops options it does not model**
+  (#1390). `storage.ParseCustomOptions` ignored everything but nfsvers, rsize,
+  wsize, timeo, retrans, actimeo, hard, soft, noresvport, async and
+  nosharecache, under a comment saying it passed them through, so
+  `--efs-mount-options nconnect=8,timeo=600` mounted without `nconnect` and
+  nothing said so. Any other well-formed option is now passed to the
+  `mount -t nfs4` command and the fstab line verbatim (new field
+  `EFSMountOptions.Extra`), on a single launch and both parameter-sweep paths.
+  What it cannot pass is refused before any AWS call, naming the option: shell
+  or fstab metacharacters, a non-numeric value for a numeric option (which used
+  to become 0), and amazon-efs-utils-only options such as `tls`, `iam` and
+  `accesspoint`, which `mount -t nfs4` does not accept.
 
 - **`setup-dashboard-lambda-role.sh` now finishes removing the legacy
   `SpawnDashboardLambdaPolicy` managed policy, and the three inline policies
