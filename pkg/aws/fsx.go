@@ -499,33 +499,86 @@ func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool {
 	return pinnedSubnetID == "" && pinnedAZ != ""
 }
 
-// GetSubnetForAZ returns a subnet in the given availability zone, from vpcID when
-// set and from the region's default VPC otherwise (#673)
-// (e.g. "us-east-1a"). FSx for Lustre is single-AZ and a mounting instance must
-// be in the SAME AZ as the filesystem, so when a launch pins an AZ the FSx must
-// be created in a subnet of THAT AZ — not an arbitrary subnets[0] (#208). Returns
-// an error if the region has no default VPC or no subnet in that AZ.
+// SubnetChoice is the subnet SubnetInAZ picked, with what a caller prints
+// about it (#1389).
+type SubnetChoice struct {
+	SubnetID         string
+	AvailabilityZone string
+	VPCID            string
+	FreeIPs          int32 // AvailableIpAddressCount when it was described
+}
+
+// GetSubnetForAZ returns the ID of SubnetInAZ's choice.
 func (c *Client) GetSubnetForAZ(ctx context.Context, region, az, vpcID string) (string, error) {
+	choice, err := c.SubnetInAZ(ctx, region, az, vpcID)
+	if err != nil {
+		return "", err
+	}
+	return choice.SubnetID, nil
+}
+
+// SubnetInAZ picks a subnet in the given availability zone (e.g. "us-east-1a"),
+// from vpcID when set and from the region's default VPC otherwise (#673). FSx
+// for Lustre is single-AZ and a mounting instance must be in the SAME AZ as
+// the filesystem, so when a launch pins an AZ the FSx must be created in a
+// subnet of THAT AZ (#208); a `--vpc --az` launch with no subnet launches into
+// it (#1389).
+//
+// The choice is deterministic (#1389): of the subnets DescribeSubnets returns
+// for that VPC and AZ, in whatever order, the one with the most free IP
+// addresses, ties to the lowest subnet ID. It used to be Subnets[0]. Returns
+// an error if the region has no default VPC (and none was named) or the VPC
+// has no subnet in that AZ.
+func (c *Client) SubnetInAZ(ctx context.Context, region, az, vpcID string) (SubnetChoice, error) {
 	// ResolveVPC, not GetDefaultVPC (#673): with --vpc set, the AZ's subnet must
 	// come from that VPC. Looking in the default VPC would hand back a subnet the
 	// instance is not in.
+	explicit := vpcID != ""
 	vpcID, err := c.ResolveVPC(ctx, region, vpcID)
 	if err != nil {
-		return "", fmt.Errorf("failed to get default VPC: %w", err)
+		return SubnetChoice{}, fmt.Errorf("failed to get default VPC: %w", err)
 	}
-	ec2Client := c.regionalEC2(region)
-
-	result, err := ec2Client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+	result, err := c.regionalEC2(region).DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
 		Filters: []ec2types.Filter{
 			{Name: aws.String("vpc-id"), Values: []string{vpcID}},
 			{Name: aws.String("availability-zone"), Values: []string{az}},
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to describe subnets in %s: %w", az, err)
+		return SubnetChoice{}, fmt.Errorf("failed to describe subnets in %s: %w", az, err)
 	}
-	if len(result.Subnets) == 0 {
-		return "", fmt.Errorf("no subnet in availability zone %s (default VPC %s)", az, vpcID)
+	best, ok := pickSubnet(result.Subnets, vpcID, az)
+	if !ok {
+		which := "VPC " + vpcID
+		if !explicit {
+			which = "the default VPC " + vpcID
+		}
+		return SubnetChoice{}, fmt.Errorf("no subnet in availability zone %s in %s; pass --subnet-id, or an --az that %s has a subnet in",
+			az, which, vpcID)
 	}
-	return *result.Subnets[0].SubnetId, nil
+	return SubnetChoice{
+		SubnetID:         aws.ToString(best.SubnetId),
+		AvailabilityZone: az,
+		VPCID:            vpcID,
+		FreeIPs:          aws.ToInt32(best.AvailableIpAddressCount),
+	}, nil
+}
+
+// pickSubnet is SubnetInAZ's choice among the described subnets: only those
+// in vpcID and az (the filters already ask for that; a subnet the API returns
+// outside them is not trusted), the most free IPs, ties to the lowest ID.
+func pickSubnet(subnets []ec2types.Subnet, vpcID, az string) (ec2types.Subnet, bool) {
+	var best ec2types.Subnet
+	found := false
+	for _, s := range subnets {
+		id := aws.ToString(s.SubnetId)
+		if id == "" || aws.ToString(s.VpcId) != vpcID || aws.ToString(s.AvailabilityZone) != az {
+			continue
+		}
+		free, bestFree := aws.ToInt32(s.AvailableIpAddressCount), aws.ToInt32(best.AvailableIpAddressCount)
+		if !found || free > bestFree || (free == bestFree && id < aws.ToString(best.SubnetId)) {
+			best, found = s, true
+		}
+	}
+	return best, found
 }

@@ -50,6 +50,15 @@ type fakeEC2 struct {
 	// AllocateAddress.
 	efaCards    int
 	allocDenied bool
+
+	// subnets answers DescribeSubnets, filtered by the request's vpc-id and
+	// availability-zone filters as EC2 does (#1389).
+	subnets []fakeSubnet
+}
+
+type fakeSubnet struct {
+	id, vpc, az string
+	free        int
 }
 
 func (f *fakeEC2) actions() []string {
@@ -149,6 +158,25 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 		_, _ = w.Write([]byte(`<DescribeInstanceTypesResponse ` + ns + `><requestId>r</requestId><instanceTypeSet><item><instanceType>` +
 			form.Get("InstanceType.1") + `</instanceType><memoryInfo><sizeInMiB>` + f.memMiB + `</sizeInMiB></memoryInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>`))
+	case "DescribeSubnets":
+		want := map[string]string{}
+		for i := 1; form.Get(fmt.Sprintf("Filter.%d.Name", i)) != ""; i++ {
+			want[form.Get(fmt.Sprintf("Filter.%d.Name", i))] = form.Get(fmt.Sprintf("Filter.%d.Value.1", i))
+		}
+		var b bytes.Buffer
+		b.WriteString(`<DescribeSubnetsResponse ` + ns + `><requestId>r</requestId><subnetSet>`)
+		for _, sn := range f.subnets {
+			if v, ok := want["vpc-id"]; ok && v != sn.vpc {
+				continue
+			}
+			if v, ok := want["availability-zone"]; ok && v != sn.az {
+				continue
+			}
+			fmt.Fprintf(&b, `<item><subnetId>%s</subnetId><vpcId>%s</vpcId><availabilityZone>%s</availabilityZone><availableIpAddressCount>%d</availableIpAddressCount></item>`,
+				sn.id, sn.vpc, sn.az, sn.free)
+		}
+		b.WriteString(`</subnetSet></DescribeSubnetsResponse>`)
+		_, _ = w.Write(b.Bytes()) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 	case "TerminateInstances":
 		_, _ = w.Write([]byte(`<TerminateInstancesResponse ` + ns + `><requestId>r</requestId><instancesSet/></TerminateInstancesResponse>`))
 	case "DescribeAddresses":

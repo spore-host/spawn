@@ -50,8 +50,9 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// And --vpc without a subnet (#1389), which would land in the default VPC.
-	if err := validateVPCHasSubnet(); err != nil {
+	// And --vpc with neither a subnet nor an --az to pick one in (#1389),
+	// which would land in the default VPC.
+	if err := validateVPCHasSubnet(batchQueueFile != "" || queueTemplate != ""); err != nil {
 		return err
 	}
 
@@ -1252,6 +1253,11 @@ func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws
 // billable resource is created. Extracted from launchWithProgress (#319);
 // behavior unchanged.
 func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, prog *progress.Progress) error {
+	// Step 0a: --vpc --az with no subnet launches into a subnet of that VPC
+	// and AZ, chosen and printed here (#1389), before anything is created.
+	if err := resolveVPCSubnet(ctx, awsClient, config, os.Stderr); err != nil {
+		return err
+	}
 	// Step 0: --vpc and --subnet-id must agree (#673). Passing both is the
 	// natural way to use --vpc, and EC2's own error for a mismatch arrives only
 	// at RunInstances and names neither flag. Checked before anything is created.
