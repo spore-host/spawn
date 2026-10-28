@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encrypted-EBS or IMDSv2 enforcement), `--allow-cidr` and `--efa-group` (no
   security group is created for a sweep), `--interactive`, `--count`,
   `--job-array-name`, `--instance-names`, `--min-viable`, the `--mpi` flags,
-  `--auto-placement-group`, `--template-var` and `--cartesian` (#674). The
+  `--auto-placement-group` and `--template-var`. (`--cartesian`, deprecated
+  and inert since #674, is still accepted with cobra's warning.) The
   error names every such flag with what to do instead. Every launch flag now
   has a recorded sweep rule (`cmd/launch_sweep_flags.go`), and a test checks
   each claim on a real foreground member, so a new flag cannot be dropped

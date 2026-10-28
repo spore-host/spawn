@@ -293,6 +293,14 @@ func TestSweepAcceptsVPCWithSubnet(t *testing.T) {
 	}
 }
 
+// --cartesian is deprecated and inert (#674) and cobra already warns; refusing
+// it on a sweep would break scripts and protect nothing, so it is accepted.
+func TestSweepAcceptsDeprecatedCartesian(t *testing.T) {
+	if err := sweepUnsupportedFlags(changedOnly("cartesian")); err != nil {
+		t.Errorf("--cartesian on a sweep was refused: %v", err)
+	}
+}
+
 // The backstop where each path builds its members: a member config with one
 // of the three is refused, by the foreground path and the detached one alike,
 // for a caller that did not come through runLaunch.

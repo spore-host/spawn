@@ -209,8 +209,6 @@ var sweepLaunchFlags = map[string]sweepFlagRule{
 	"skip-mpi-install":       refusedOnSweep(whyShape),
 	"auto-placement-group":   refusedOnSweep("it acts only with --mpi. " + whyShape),
 	"template-var":           refusedOnSweep("it substitutes into --queue-template, which a sweep is not"),
-	"cartesian": refusedOnSweep("nothing reads it (#674). Write the combinations under grid: in the " +
-		"param file, which a sweep expands"),
 
 	// The sweep's own controls.
 	"param-file":                steers(whySweepOrch),
@@ -259,6 +257,7 @@ var sweepLaunchFlags = map[string]sweepFlagRule{
 	"batch-queue":              cliOnly("a batch-queue launch is dispatched before a sweep, so it is never one"),
 	"queue-template":           cliOnly("a batch-queue launch is dispatched before a sweep, so it is never one"),
 	"use-reservation":          cliOnly("deprecated and inert on every launch; cobra already warns"),
+	"cartesian":                cliOnly("deprecated and inert (#674); cobra warns"),
 
 	// Persistent root flags.
 	"accessibility": cliOnly("CLI output"),
