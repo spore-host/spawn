@@ -32,6 +32,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **AWS permissions for the credentials you run spawn with**
+  ([`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md)).
+  - **Newly required calls:**
+    - `spawn cleanup` reads the schedules table and their params (`dynamodb:Scan`,
+      `s3:GetObject`) before deleting idle roles (#1378).
+    - `spawn schedule create` / `cancel` now manage the params lifecycle and delete
+      them on cancel (`s3:GetLifecycleConfiguration`, `s3:DeleteObject`,
+      `dynamodb:GetItem`) (#1382).
+    - `spawn launch --batch-queue` reads the bucket lifecycle
+      (`s3:GetLifecycleConfiguration`).
+    - `spawn resume` / `sweep resume` look up `--fsx-id` / `--efs-id` storage
+      (`fsx:DescribeFileSystems`, `elasticfilesystem:DescribeMountTargets`) (#1400).
+  - **Already required, now listed** (#1377): the tag permission each create-with-tags
+    call needs: `iam:TagRole`, `iam:TagInstanceProfile`, `ec2:CreateTags` on the AMI,
+    snapshot and capacity-block commands, `fsx:TagResource`, `s3:PutObjectTagging`,
+    `dynamodb:TagResource`, `sqs:TagQueue`.
+
 - **`spawn launch --vpc` needs `--subnet-id` or `--az`** (#1389).
   RunInstances takes a subnet, not a VPC, so a launch with `--vpc` and no
   subnet (Linux or Windows, single, job array, MPI or batch queue) landed in
