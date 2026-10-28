@@ -402,6 +402,10 @@ field SpotPrice.InstanceType string
 field SpotPrice.PricePerHour float64
 field SpotPrice.ProductDescription string
 field SpotPrice.Timestamp time.Time
+field SubnetChoice.AvailabilityZone string
+field SubnetChoice.FreeIPs int32
+field SubnetChoice.SubnetID string
+field SubnetChoice.VPCID string
 field SubnetHint.AvailabilityZone string
 field SubnetHint.MapPublicIPOnLaunch bool
 field SubnetHint.SubnetID string
@@ -516,6 +520,7 @@ func (*Client) SetupNestedSpawnProfile(ctx context.Context) (string, error)
 func (*Client) SetupSporedIAMRole(ctx context.Context) (string, error)
 func (*Client) StartInstance(ctx context.Context, region, instanceID string) error
 func (*Client) StopInstance(ctx context.Context, region, instanceID string, hibernate bool) error
+func (*Client) SubnetInAZ(ctx context.Context, region, az, vpcID string) (SubnetChoice, error)
 func (*Client) TagAMIWindows(ctx context.Context, region, amiID string) error
 func (*Client) TagAMIWindowsWarm(ctx context.Context, region, amiID, parentAMI string) error
 func (*Client) Terminate(ctx context.Context, region, instanceID string) error
@@ -659,6 +664,7 @@ type SnapshotSourceKind int
 type SporedLiveness struct
 type SporedObservability struct
 type SpotPrice struct
+type SubnetChoice struct
 type SubnetHint struct
 type TagLimitError struct
 type UserDataTooLargeError struct

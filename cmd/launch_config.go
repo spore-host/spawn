@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -147,6 +148,13 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	}
 
 	// Override with flags
+	// --spot-max-price (#1388): read only by the batch-queue path and (since
+	// #1366) the sweep base config, so a single launch, job array or MPI
+	// cohort sent RunInstances no MaxPrice and EC2 capped at the on-demand
+	// rate. Like every other flag it beats the price truffle piped in.
+	if spotMaxPrice != "" {
+		config.SpotMaxPrice = spotMaxPrice
+	}
 	if instanceType != "" {
 		config.InstanceType = instanceType
 	}
@@ -190,6 +198,12 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	// this flag was accepted and the instance launched in the default VPC.
 	if vpcID != "" {
 		config.VPCID = vpcID
+	}
+	// The backstop under runLaunch's check, for a caller that did not come
+	// through it (#1389). With an AZ (--az or piped), resolveVPCSubnet picks
+	// the subnet before anything is created.
+	if config.VPCID != "" && config.SubnetID == "" && config.AvailabilityZone == "" {
+		return nil, vpcWithoutSubnetError(config.VPCID, true)
 	}
 	// --efa without --mpi. The only assignment of EFAEnabled lived in
 	// resolveMPIPlacement, so a plain `spawn launch --efa` passed the EFA
@@ -903,4 +917,62 @@ func collectPluginDeclarations() ([]plugin.Declaration, error) {
 	}
 
 	return decls, nil
+}
+
+// vpcWithoutSubnetWhy is why --vpc needs a subnet (#1389). Shared in spirit
+// with sweepVPCWhy, which refuses the same thing on a parameter sweep (#1366).
+const vpcWithoutSubnetWhy = "RunInstances takes a subnet, not a VPC: without one EC2 launches in the region's " +
+	"default VPC, not in the VPC --vpc names"
+
+// vpcWithoutSubnetError is the #1389 refusal. offerAZ adds the --az remedy,
+// on every path that resolves one (resolveVPCSubnet); the batch queue does not.
+func vpcWithoutSubnetError(vpc string, offerAZ bool) error {
+	alt := ""
+	if offerAZ {
+		alt = ", or pass --az to let spawn pick a subnet in that VPC"
+	}
+	return fmt.Errorf("refusing --vpc %s without a subnet (#1389): %s; pass --subnet-id with a subnet in %s "+
+		"(list them with: aws ec2 describe-subnets --filters Name=vpc-id,Values=%s)%s",
+		vpc, vpcWithoutSubnetWhy, vpc, vpc, alt)
+}
+
+// validateVPCHasSubnet refuses --vpc with neither --subnet-id nor --az
+// (#1389), from the flags, so runLaunch can call it before any AWS call on
+// every dispatch. --vpc placed the managed security groups and the FSx and
+// EFA subnet lookups, but never reached RunInstances, so an ordinary launch
+// sent no subnet and landed in the default VPC. With --az, resolveVPCSubnet
+// picks the subnet; the batch queue (batchQueue) resolves none, so there
+// --vpc needs --subnet-id.
+func validateVPCHasSubnet(batchQueue bool) error {
+	if vpcID == "" || subnetID != "" || (az != "" && !batchQueue) {
+		return nil
+	}
+	return vpcWithoutSubnetError(vpcID, !batchQueue)
+}
+
+// subnetInAZAPI is the lookup resolveVPCSubnet needs; *aws.Client has it.
+type subnetInAZAPI interface {
+	SubnetInAZ(ctx context.Context, region, az, vpcID string) (aws.SubnetChoice, error)
+}
+
+// resolveVPCSubnet gives a `--vpc --az` launch with no subnet the subnet it
+// launches into (#1389): SubnetInAZ's deterministic choice in that VPC and
+// AZ, printed so the user sees where it went. Without --az it refuses (the
+// backstop under validateVPCHasSubnet). Called before anything is created, so
+// the managed security groups, the FSx and the EFA interfaces all use it.
+func resolveVPCSubnet(ctx context.Context, api subnetInAZAPI, config *aws.LaunchConfig, out io.Writer) error {
+	if config.VPCID == "" || config.SubnetID != "" {
+		return nil
+	}
+	if config.AvailabilityZone == "" {
+		return vpcWithoutSubnetError(config.VPCID, true)
+	}
+	choice, err := api.SubnetInAZ(ctx, config.Region, config.AvailabilityZone, config.VPCID)
+	if err != nil {
+		return fmt.Errorf("--vpc %s --az %s: %w", config.VPCID, config.AvailabilityZone, err)
+	}
+	fmt.Fprintf(out, "using subnet %s (%s, %d free IPs) in %s\n",
+		choice.SubnetID, choice.AvailabilityZone, choice.FreeIPs, choice.VPCID)
+	config.SubnetID = choice.SubnetID
+	return nil
 }

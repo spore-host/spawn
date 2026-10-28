@@ -30,6 +30,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`spawn launch --vpc` needs `--subnet-id` or `--az`** (#1389).
+  RunInstances takes a subnet, not a VPC, so a launch with `--vpc` and no
+  subnet (Linux or Windows, single, job array, MPI or batch queue) landed in
+  the region's default VPC. Now `--vpc --az` with no subnet launches into a
+  subnet of that VPC and AZ and prints `using subnet <id> (<az>, <n> free
+  IPs) in <vpc>`. `--fsx-create` and multi-card EFA use that subnet too.
+  `--vpc` without `--az` is refused
+  before any AWS call, and the error tells you to pass `--subnet-id` or
+  `--az`. The batch queue resolves no subnet, so there `--vpc` needs
+  `--subnet-id`. A parameter sweep's refusal (#1366) is unchanged. The
+  subnet picked for an AZ (`GetSubnetForAZ`, also used for `--fsx-create`
+  and multi-card EFA) is now deterministic: the one in that VPC and AZ with
+  the most free IP addresses, with ties going to the lowest subnet ID. It
+  used to be whichever subnet DescribeSubnets listed first. Go callers can
+  get the choice and its free-IP count from the new `aws.Client.SubnetInAZ`.
+
 - **A parameter sweep refuses, before any AWS call, the launch flags it
   cannot honour** (#1366). Each used to be accepted and dropped, so the
   members launched without it: `--strata-formation`/`--strata-profile`/
@@ -180,6 +196,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to become 0), and amazon-efs-utils-only options such as `tls`, `iam` and
   `accesspoint`, which `mount -t nfs4` does not accept.
 
+- **`spawn launch --spot --spot-max-price` sends the cap to EC2 on a single
+  launch** (#1388). Only the batch-queue and sweep paths read the flag, so a
+  single launch, job array or MPI cohort sent RunInstances no `MaxPrice` (EC2
+  capped at the on-demand rate) and `--dry-run` showed no `(max $X/hr)`. The
+  flag is now set where every launch builds its config, and it beats a price
+  piped in from truffle. A cap that was ignored now applies.
 - **`setup-dashboard-lambda-role.sh` now finishes removing the legacy
   `SpawnDashboardLambdaPolicy` managed policy, and the three inline policies
   added by hand before it owned the role** (#1376). `delete-policy` failed with
