@@ -91,6 +91,13 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 	if err := config.ValidateDurations(); err != nil {
 		return nil, fmt.Errorf("provision: %w", err)
 	}
+	// A nested-spawn instance profile without a TTL (#1375): the rule
+	// `spawn launch --nested-spawn` enforces, applied to an SDK caller (lagotto,
+	// MCP) that names the role directly. Client.Launch refuses it too, but only
+	// after the AMI lookup and user-data work here.
+	if err := config.ValidateNestedSpawnTTL(); err != nil {
+		return nil, fmt.Errorf("provision: %w", err)
+	}
 	if config.InstanceType == "" {
 		return nil, fmt.Errorf("provision: instance type is required")
 	}

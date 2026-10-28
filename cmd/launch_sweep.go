@@ -306,10 +306,17 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// A detached sweep's members are launched by the orchestrator, which may
 	// pass only the roles spawn creates (#1331): refuse any other profile here,
 	// before applyCLIIAMToSweep creates a role for a sweep that cannot use it.
+	//
+	// A foreground sweep launches with the caller's credentials, so it may use
+	// a nested-spawn role, but only on rows with a TTL (#1375). (A detached one
+	// refuses the role above, whatever the TTL, #1372.) Same condition as the
+	// dispatch below, so each sweep gets the refusal of the path it takes.
 	if detach && maxConcurrent > 0 {
 		if err := refuseUnpassableDetachedProfiles(paramFormat); err != nil {
 			return err
 		}
+	} else if err := refuseNestedSweepRowsWithoutTTL(paramFormat, instanceProfile); err != nil {
+		return err
 	}
 	if err := applyCLIIAMToSweep(ctx, awsClient, paramFormat, auditLog); err != nil {
 		return err

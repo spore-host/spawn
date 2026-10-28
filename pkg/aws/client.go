@@ -516,6 +516,11 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	if err := launchConfig.ValidateDurations(); err != nil {
 		return nil, err
 	}
+	// And a nested-spawn role with no TTL, whoever named it (#1375): the CLI
+	// refuses it earlier on every path, this is the backstop for SDK callers.
+	if err := launchConfig.ValidateNestedSpawnTTL(); err != nil {
+		return nil, err
+	}
 	// Likewise user data over EC2's size limit: RunInstances would refuse it
 	// with a 400 after the identity, pricing and AMI calls below (#1063).
 	if err := launchConfig.ValidateUserDataSize(); err != nil {

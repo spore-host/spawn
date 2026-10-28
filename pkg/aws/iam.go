@@ -479,6 +479,14 @@ var PolicyTemplates = map[string]string{
 // commands now also print whichever profile actually got resolved, so the
 // divergence is visible without reading ec2:DescribeInstances by hand.
 func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleConfig) (string, error) {
+	// A nested-spawn role is created only by SetupNestedSpawnProfile, with its
+	// own baseline. Through here a caller-named one would be created with
+	// caller-chosen grants, or an existing one would have its fixed grants and
+	// baseline overwritten (#1375).
+	if IsNestedSpawnRole(config.RoleName) {
+		return "", NestedSpawnRoleReservedError("IAM role", config.RoleName,
+			"spawn would create or rewrite its grants, which are fixed so they can be audited")
+	}
 	return c.createOrGetInstanceProfile(ctx, config, c.sporedBaselinePolicyDoc())
 }
 

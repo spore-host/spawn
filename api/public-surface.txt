@@ -531,6 +531,7 @@ func (DisplayPrice) SourceLabel() string
 func (EFACapacity) ResolveInterfaces(requested int) (int, error)
 func (LaunchConfig) HibernationRequested() bool
 func (LaunchConfig) ValidateDurations() error
+func (LaunchConfig) ValidateNestedSpawnTTL() error
 func (LaunchConfig) ValidateSporedSettings() error
 func (LaunchConfig) ValidateTagCount() error
 func (LaunchConfig) ValidateUserDataSize() error
@@ -545,6 +546,7 @@ func AttachDeviceName(i int) string
 func BuildLaunchTags(lc LaunchConfig, accountID, userARN, accountNameSlug string) ([]types.Tag, error)
 func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error
 func CheckElasticIPHeadroom(q ElasticIPQuota, region string, need int) error
+func CheckNestedSpawnTTL(source, profile, ttl string) error
 func CheckUserDataSize(encoded string) error
 func DNSInvokePolicyName(functionARN string) string
 func DecodeLaunchSettings(raw interface{}) (LaunchSettings, error)
@@ -576,6 +578,8 @@ func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool
 func NeedsLaunchElasticIP(interfaces []types.InstanceNetworkInterfaceSpecification) bool
 func NestedSpawnRoleFromCallerARN(arn string) (string, bool)
 func NestedSpawnRoleName() string
+func NestedSpawnRoleReservedError(source, role, why string) error
+func NestedSpawnTTLError() error
 func NewClient(ctx context.Context) (*Client, error)
 func NewClientFromConfig(cfg aws.Config) *Client
 func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
@@ -641,6 +645,8 @@ type TagLimitError struct
 type UserDataTooLargeError struct
 var CallerVersion
 var ErrAMIWaitExhausted
+var ErrNestedSpawnNeedsTTL
+var ErrNestedSpawnRoleReserved
 var ErrNotSpawnManagedAMI
 var ErrS3NoSuchKey
 var ErrSSMUnreachable
