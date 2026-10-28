@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.148.0] - 2026-10-28
+
 ### Added
 
 - **An image spawn creates records where it came from** (#1364). `spawn ami
@@ -12589,7 +12591,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.147.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.148.0...HEAD
+[0.148.0]: https://github.com/spore-host/spawn/compare/v0.147.0...v0.148.0
 [0.147.0]: https://github.com/spore-host/spawn/compare/v0.146.0...v0.147.0
 [0.146.0]: https://github.com/spore-host/spawn/compare/v0.145.0...v0.146.0
 [0.145.0]: https://github.com/spore-host/spawn/compare/v0.144.0...v0.145.0
