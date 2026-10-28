@@ -455,17 +455,28 @@ func (c *Client) TagAMIWindows(ctx context.Context, region, amiID string) error 
 	ec2Client := c.regionalEC2(region)
 	_, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 		Resources: []string{amiID},
-		Tags: []ec2types.Tag{
-			{Key: aws.String("spawn:os"), Value: aws.String("windows")},
-			{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-			{Key: aws.String("spawn:source"), Value: aws.String("iso-import")},
-			{Key: aws.String("spawn:arch"), Value: aws.String("x86_64")},
-		},
+		Tags:      windowsImportTags(),
 	})
 	if err != nil {
 		return fmt.Errorf("tag AMI %s: %w", amiID, err)
 	}
 	return nil
+}
+
+// windowsImportTags is what TagAMIWindows writes on an imported AMI. An
+// import has no source instance, so its only provenance tag is the spawn that
+// made it (spawn:image-spawn-version, #1364), omitted when unknown.
+func windowsImportTags() []ec2types.Tag {
+	tags := []ec2types.Tag{
+		{Key: aws.String("spawn:os"), Value: aws.String("windows")},
+		{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+		{Key: aws.String("spawn:source"), Value: aws.String("iso-import")},
+		{Key: aws.String("spawn:arch"), Value: aws.String("x86_64")},
+	}
+	if CallerVersion != "" {
+		tags = append(tags, ec2types.Tag{Key: aws.String(ImageSpawnVersionTagKey), Value: aws.String(CallerVersion)})
+	}
+	return tags
 }
 
 // TagAMIWindowsWarm tags a "warm" AMI — one built from a seed launched off an

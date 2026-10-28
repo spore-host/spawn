@@ -5,6 +5,12 @@
 Create an AMI from a running instance with automatic tagging.
 
 The AMI will be tagged with spawn metadata for easy discovery and management.
+It also records where it came from: spawn:image-spawn-version (this spawn's
+version) and, when the source instance has them, its spawn:version,
+spawn:spored-version, spawn:mpi-enabled and spawn:job-array-index as
+spawn:source-version, spawn:source-spored-version, spawn:source-mpi-enabled
+and spawn:source-job-array-index. --tag cannot set these. 'spawn ami list'
+shows the source version.
 
 Before imaging, spawn removes its --command run state from the instance over
 SSM: the completion file, /tmp/SPAWN_* (the exit code), the rendered and

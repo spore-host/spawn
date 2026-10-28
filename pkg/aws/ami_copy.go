@@ -123,6 +123,9 @@ func copyAMI(ctx context.Context, src, dst copyAMIEC2, in CopyAMIInput) (*CopyAM
 		name = aws.ToString(img.Name)
 	}
 	tags := copiedAMITags(srcTags, srcID, in.SourceRegion)
+	if err := checkImageTagCount("copy "+srcID, tags); err != nil {
+		return nil, err
+	}
 
 	copyIn := &ec2.CopyImageInput{
 		Name:          aws.String(name),
@@ -196,6 +199,12 @@ func resolveSourceAMI(ctx context.Context, src copyAMIEC2, ref, region string) (
 
 // copiedAMITags is the tag set a copy carries: the source's own tags, plus
 // spawn:copied-from, minus two kinds that would be wrong on the copy.
+//
+// The source's provenance tags (ImageProvenanceTagKeys, #1364) are kept as
+// they are: the copy has the same disk, so it was made by the same spawn from
+// the same instance. The copying spawn's version is deliberately NOT written
+// as spawn:image-spawn-version, which would make a copy of an image from
+// before a fix look as if it were made after it.
 //
 //   - aws:* tags are reserved; EC2 rejects them in a TagSpecification.
 //   - Ec2ImageBuilderArn names the source's Image Builder image, in the source

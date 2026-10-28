@@ -30,6 +30,12 @@ var createAMICmd = &cobra.Command{
 	Long: `Create an AMI from a running instance with automatic tagging.
 
 The AMI will be tagged with spawn metadata for easy discovery and management.
+It also records where it came from: spawn:image-spawn-version (this spawn's
+version) and, when the source instance has them, its spawn:version,
+spawn:spored-version, spawn:mpi-enabled and spawn:job-array-index as
+spawn:source-version, spawn:source-spored-version, spawn:source-mpi-enabled
+and spawn:source-job-array-index. --tag cannot set these. 'spawn ami list'
+shows the source version.
 
 Before imaging, spawn removes its --command run state from the instance over
 SSM: the completion file, /tmp/SPAWN_* (the exit code), the rendered and
@@ -105,14 +111,9 @@ func runCreateAMI(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "Found instance %s in %s (state: %s)\n", instance.InstanceID, instance.Region, instance.State)
 
-	// Parse tags
-	tags := make(map[string]string)
-	for _, tagStr := range createAMITags {
-		parts := strings.SplitN(tagStr, "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid tag format: %s (expected key=value)", tagStr)
-		}
-		tags[parts[0]] = parts[1]
+	tags, err := parseCreateAMITags(createAMITags)
+	if err != nil {
+		return err
 	}
 
 	// Add automatic spawn tags
@@ -161,6 +162,7 @@ func runCreateAMI(cmd *cobra.Command, args []string) error {
 		Name:        createAMIName,
 		Description: description,
 		Tags:        tags,
+		SourceTags:  instance.Tags,
 		NoReboot:    !createAMIReboot,
 	}, createAMIForce, os.Stderr)
 	if err != nil {
@@ -173,7 +175,8 @@ func runCreateAMI(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "   Region:    %s\n", instance.Region)
 	_, _ = fmt.Fprintf(os.Stdout, "   Instance:  %s\n", instance.InstanceID)
 
-	// Display tags
+	// Display tags: what CreateAMI wrote, provenance included.
+	tags = aws.ImageCreateTags(tags, instance.Tags)
 	if len(tags) > 0 {
 		_, _ = fmt.Fprintf(os.Stdout, "\n   Tags:\n")
 		for key, value := range tags {
@@ -205,4 +208,22 @@ func runCreateAMI(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "  spawn launch --instance-type %s --ami %s\n", instance.InstanceType, amiID)
 
 	return nil
+}
+
+// parseCreateAMITags parses --tag key=value values. A key spawn writes as the
+// image's provenance (#1364) is refused: it records where the image came
+// from, and a value the user picked would mislead every check keyed on it.
+func parseCreateAMITags(in []string) (map[string]string, error) {
+	tags := make(map[string]string, len(in))
+	for _, tagStr := range in {
+		parts := strings.SplitN(tagStr, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid tag format: %s (expected key=value)", tagStr)
+		}
+		if aws.IsImageProvenanceTagKey(parts[0]) {
+			return nil, fmt.Errorf("--tag %s: spawn writes this tag itself, from the source instance and this spawn's version; it cannot be set", parts[0])
+		}
+		tags[parts[0]] = parts[1]
+	}
+	return tags, nil
 }

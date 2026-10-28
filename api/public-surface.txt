@@ -20,6 +20,7 @@ const ElasticIPPurpose
 const ElasticIPQuotaCode
 const HeartbeatTag
 const IAMBaselineURL
+const ImageSpawnVersionTagKey
 const LaunchInstanceGone
 const LaunchSettingsSchema
 const MaxEncodedUserDataBytes
@@ -28,8 +29,12 @@ const NestedSpawnRolePrefix
 const PriceSourceTag
 const ReaperCoverageRoleName
 const SourceDir
+const SourceJobArrayIndexTagKey
+const SourceMPIEnabledTagKey
 const SourceRawImage SnapshotSourceKind
+const SourceSporedVersionTagKey
 const SourceTar
+const SourceVersionTagKey
 const SporedInstanceProfileName
 const SporedMemoryFloorMiB int64
 const SporedRoleName
@@ -50,6 +55,7 @@ field AMIInfo.Deprecated bool
 field AMIInfo.Description string
 field AMIInfo.GPU bool
 field AMIInfo.Name string
+field AMIInfo.Provenance ImageProvenance
 field AMIInfo.Size int64
 field AMIInfo.SnapshotIDs []string
 field AMIInfo.Stack string
@@ -116,6 +122,7 @@ field CreateAMIInput.Description string
 field CreateAMIInput.InstanceID string
 field CreateAMIInput.Name string
 field CreateAMIInput.NoReboot bool
+field CreateAMIInput.SourceTags map[string]string
 field CreateAMIInput.Tags map[string]string
 field DeleteAMIResult.AMIID string
 field DeleteAMIResult.DeletedSnapshots []string
@@ -174,6 +181,11 @@ field IAMRoleConfig.PolicyFile string
 field IAMRoleConfig.RoleName string
 field IAMRoleConfig.Tags map[string]string
 field IAMRoleConfig.TrustServices []string
+field ImageProvenance.SourceJobArrayIndex string
+field ImageProvenance.SourceMPIEnabled string
+field ImageProvenance.SourceSporedVersion string
+field ImageProvenance.SourceVersion string
+field ImageProvenance.SpawnVersion string
 field ImageStatus.AMI string
 field ImageStatus.Reason string
 field ImageStatus.Status string
@@ -529,6 +541,7 @@ func (*TagLimitError) Error() string
 func (*UserDataTooLargeError) Error() string
 func (DisplayPrice) SourceLabel() string
 func (EFACapacity) ResolveInterfaces(requested int) (int, error)
+func (ImageProvenance) Recorded() bool
 func (LaunchConfig) HibernationRequested() bool
 func (LaunchConfig) ValidateDurations() error
 func (LaunchConfig) ValidateNestedSpawnTTL() error
@@ -566,7 +579,11 @@ func GenerateScopedDynamoDBPolicy(region, accountID string) string
 func GenerateScopedS3Policy(region, accountID string) string
 func GenerateWindowsPassword(n int) (string, error)
 func GetEFSDNSName(filesystemID, region string) string
+func ImageCreateTags(userTags, sourceTags map[string]string) map[string]string
+func ImageProvenanceFromTags(tags map[string]string) ImageProvenance
+func ImageProvenanceTagKeys() []string
 func IsAccessDenied(err error) bool
+func IsImageProvenanceTagKey(key string) bool
 func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool
 func IsNestedSpawnRole(roleName string) bool
 func IsOrphanedSpawnAddress(r ManagedResource) bool
@@ -619,6 +636,7 @@ type FSxBrief struct
 type FSxConfig struct
 type FSxInfo struct
 type IAMRoleConfig struct
+type ImageProvenance struct
 type ImageStatus struct
 type ImportWindowsISOInput struct
 type InstanceInfo struct

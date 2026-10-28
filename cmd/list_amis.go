@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"time"
@@ -175,7 +176,7 @@ func outputAMIsTable(amis []aws.AMIInfo) error {
 	defer func() { _ = w.Flush() }()
 
 	// Header
-	_, _ = fmt.Fprintf(w, "NAME\tAMI ID\tSTACK\tVERSION\tARCH\tSIZE\tSNAPS\tAGE\tSTATUS\n")
+	_, _ = fmt.Fprint(w, amiTableHeader)
 
 	hasWarnings := false
 
@@ -223,17 +224,7 @@ func outputAMIsTable(amis []aws.AMIInfo) error {
 			}
 		}
 
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			ami.Name,
-			ami.AMIID,
-			stack,
-			version,
-			ami.Architecture,
-			size,
-			snaps,
-			age,
-			status,
-		)
+		writeAMIRow(w, ami, stack, version, size, snaps, age, status)
 	}
 
 	_ = w.Flush()
@@ -263,7 +254,7 @@ func outputAMIsTableSimple(amis []aws.AMIInfo) error {
 	defer func() { _ = w.Flush() }()
 
 	// Header
-	_, _ = fmt.Fprintf(w, "NAME\tAMI ID\tSTACK\tVERSION\tARCH\tSIZE\tSNAPS\tAGE\tSTATUS\n")
+	_, _ = fmt.Fprint(w, amiTableHeader)
 
 	for _, ami := range amis {
 		// Format age
@@ -297,17 +288,7 @@ func outputAMIsTableSimple(amis []aws.AMIInfo) error {
 			status += "[deprecated]"
 		}
 
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			ami.Name,
-			ami.AMIID,
-			stack,
-			version,
-			ami.Architecture,
-			size,
-			snaps,
-			age,
-			status,
-		)
+		writeAMIRow(w, ami, stack, version, size, snaps, age, status)
 	}
 
 	fmt.Println() // Blank line
@@ -336,42 +317,66 @@ func outputAMIsTableSimple(amis []aws.AMIInfo) error {
 	return nil
 }
 
+// amiTableHeader is `spawn ami list`'s table header. SRC SPAWN is the
+// version of spawn that launched the instance the image was made from
+// (spawn:source-version, #1364); "-" for an image that does not record it.
+const amiTableHeader = "NAME\tAMI ID\tSTACK\tVERSION\tARCH\tSIZE\tSNAPS\tSRC SPAWN\tAGE\tSTATUS\n"
+
+func writeAMIRow(w io.Writer, ami aws.AMIInfo, stack, version, size, snaps, age, status string) {
+	src := ami.Provenance.SourceVersion
+	if src == "" {
+		src = "-"
+	}
+	_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		ami.Name, ami.AMIID, stack, version, ami.Architecture, size, snaps, src, age, status)
+}
+
 func outputAMIsJSON(amis []aws.AMIInfo) error {
+	return writeAMIsJSON(os.Stdout, amis)
+}
+
+func writeAMIsJSON(w io.Writer, amis []aws.AMIInfo) error {
 	// Convert to JSON-friendly format
 	type JSONOutput struct {
-		AMIID        string            `json:"ami_id"`
-		Name         string            `json:"name"`
-		Description  string            `json:"description"`
-		Architecture string            `json:"architecture"`
-		CreationDate string            `json:"creation_date"`
-		Size         int64             `json:"size_gb"`
-		Stack        string            `json:"stack,omitempty"`
-		Version      string            `json:"version,omitempty"`
-		GPU          bool              `json:"gpu"`
-		BaseOS       string            `json:"base_os,omitempty"`
-		Deprecated   bool              `json:"deprecated"`
-		Tags         map[string]string `json:"tags"`
+		AMIID        string `json:"ami_id"`
+		Name         string `json:"name"`
+		Description  string `json:"description"`
+		Architecture string `json:"architecture"`
+		CreationDate string `json:"creation_date"`
+		Size         int64  `json:"size_gb"`
+		Stack        string `json:"stack,omitempty"`
+		Version      string `json:"version,omitempty"`
+		GPU          bool   `json:"gpu"`
+		BaseOS       string `json:"base_os,omitempty"`
+		Deprecated   bool   `json:"deprecated"`
+		// SourceVersion repeats Provenance.SourceVersion at the top level,
+		// where the table's SRC SPAWN column reads it.
+		SourceVersion string              `json:"source_version,omitempty"`
+		Provenance    aws.ImageProvenance `json:"provenance"`
+		Tags          map[string]string   `json:"tags"`
 	}
 
 	output := make([]JSONOutput, len(amis))
 	for i, ami := range amis {
 		output[i] = JSONOutput{
-			AMIID:        ami.AMIID,
-			Name:         ami.Name,
-			Description:  ami.Description,
-			Architecture: ami.Architecture,
-			CreationDate: ami.CreationDate.Format(time.RFC3339),
-			Size:         ami.Size,
-			Stack:        ami.Stack,
-			Version:      ami.Version,
-			GPU:          ami.GPU,
-			BaseOS:       ami.BaseOS,
-			Deprecated:   ami.Deprecated,
-			Tags:         ami.Tags,
+			AMIID:         ami.AMIID,
+			Name:          ami.Name,
+			Description:   ami.Description,
+			Architecture:  ami.Architecture,
+			CreationDate:  ami.CreationDate.Format(time.RFC3339),
+			Size:          ami.Size,
+			Stack:         ami.Stack,
+			Version:       ami.Version,
+			GPU:           ami.GPU,
+			BaseOS:        ami.BaseOS,
+			Deprecated:    ami.Deprecated,
+			SourceVersion: ami.Provenance.SourceVersion,
+			Provenance:    ami.Provenance,
+			Tags:          ami.Tags,
 		}
 	}
 
-	encoder := json.NewEncoder(os.Stdout)
+	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(output)
 }

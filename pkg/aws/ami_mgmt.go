@@ -29,6 +29,10 @@ type AMIInfo struct {
 	GPU        bool
 	BaseOS     string
 	Deprecated bool
+
+	// Provenance is what the image records about the spawn that created it
+	// and its source instance (#1364).
+	Provenance ImageProvenance
 }
 
 // CreateAMIInput contains parameters for creating an AMI
@@ -38,39 +42,39 @@ type CreateAMIInput struct {
 	Description string
 	Tags        map[string]string
 	NoReboot    bool
+	// SourceTags are the source instance's tags. The image records some of
+	// them as spawn:source-* tags (ImageCreateTags, #1364). Nil records none.
+	SourceTags map[string]string
 }
 
-// CreateAMI creates an AMI from a running instance
+type createImageAPI interface {
+	CreateImage(ctx context.Context, in *ec2.CreateImageInput, optFns ...func(*ec2.Options)) (*ec2.CreateImageOutput, error)
+}
+
+// CreateAMI creates an AMI from a running instance. The image and its
+// snapshots are tagged, atomically with the CreateImage call, with
+// ImageCreateTags(input.Tags, input.SourceTags): the caller's tags plus the
+// image's provenance (#1364), which input.Tags cannot override.
 func (c *Client) CreateAMI(ctx context.Context, region string, input CreateAMIInput) (string, error) {
-	// Create regional client
-	ec2Client := c.regionalEC2(region)
+	return createAMI(ctx, c.regionalEC2(region), input)
+}
 
-	// Build tag specifications
-	tagSpecs := []types.TagSpecification{}
-	if len(input.Tags) > 0 {
-		tags := make([]types.Tag, 0, len(input.Tags))
-		for key, value := range input.Tags {
-			tags = append(tags, types.Tag{
-				Key:   aws.String(key),
-				Value: aws.String(value),
-			})
-		}
-
-		// Tag both the AMI and its snapshots
-		tagSpecs = append(tagSpecs,
-			types.TagSpecification{
-				ResourceType: types.ResourceTypeImage,
-				Tags:         tags,
-			},
-			types.TagSpecification{
-				ResourceType: types.ResourceTypeSnapshot,
-				Tags:         tags,
-			},
-		)
+func createAMI(ctx context.Context, api createImageAPI, input CreateAMIInput) (string, error) {
+	tagMap := ImageCreateTags(input.Tags, input.SourceTags)
+	if err := checkImageTagCount("create the image", tagMap); err != nil {
+		return "", err
 	}
 
-	// Create the AMI
-	result, err := ec2Client.CreateImage(ctx, &ec2.CreateImageInput{
+	// Tag both the AMI and its snapshots
+	var tagSpecs []types.TagSpecification
+	if len(tagMap) > 0 {
+		tagSpecs = []types.TagSpecification{
+			{ResourceType: types.ResourceTypeImage, Tags: tagList(tagMap)},
+			{ResourceType: types.ResourceTypeSnapshot, Tags: tagList(tagMap)},
+		}
+	}
+
+	result, err := api.CreateImage(ctx, &ec2.CreateImageInput{
 		InstanceId:        aws.String(input.InstanceID),
 		Name:              aws.String(input.Name),
 		Description:       aws.String(input.Description),
@@ -81,7 +85,7 @@ func (c *Client) CreateAMI(ctx context.Context, region string, input CreateAMIIn
 		return "", fmt.Errorf("failed to create AMI: %w", err)
 	}
 
-	return *result.ImageId, nil
+	return aws.ToString(result.ImageId), nil
 }
 
 // WaitForAMI waits for an AMI to become available
@@ -200,6 +204,7 @@ func amiInfoFromImage(img types.Image) AMIInfo {
 		GPU:          gpu,
 		BaseOS:       baseOS,
 		Deprecated:   deprecated,
+		Provenance:   ImageProvenanceFromTags(tags),
 	}
 	return amiInfo
 }

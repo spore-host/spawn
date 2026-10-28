@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **An image spawn creates records where it came from** (#1364). `spawn ami
+  create` / `create-ami` and the warm AMI `spawn image import` builds (unless
+  `--no-warm`) tag the image and its snapshots with
+  `spawn:image-spawn-version` (the creating spawn's version) and, when the
+  source instance has them, copies of its `spawn:version`,
+  `spawn:spored-version`, `spawn:mpi-enabled` and `spawn:job-array-index` as
+  `spawn:source-version`, `spawn:source-spored-version`,
+  `spawn:source-mpi-enabled` and `spawn:source-job-array-index`; an imported
+  Windows AMI gets `spawn:image-spawn-version`. A tag the source lacks is left
+  off. `--tag` cannot set these keys (it is refused). `spawn ami copy` keeps
+  them as they are and does not stamp its own version. `spawn ami list` has a
+  `SRC SPAWN` column, and its JSON has `source_version` and a `provenance`
+  object. `spawn ami create` and `spawn ami copy` now refuse, before calling
+  EC2, an image that would carry more than 50 tags. API:
+  `aws.ImageProvenance`, `aws.ImageProvenanceFromTags`, `aws.ImageCreateTags`,
+  `aws.ImageProvenanceTagKeys`, `aws.IsImageProvenanceTagKey`, the tag-key
+  constants, `AMIInfo.Provenance` and `CreateAMIInput.SourceTags`. No new IAM:
+  the tags ride CreateImage's TagSpecifications.
+
 ### Changed
 
 - **A parameter sweep refuses, before any AWS call, the launch flags it

@@ -622,7 +622,14 @@ func buildWarmAMI(ctx context.Context, awsClient *aws.Client, region, name, vers
 
 	prog.Start("Creating warm AMI from seed")
 	warmName := fmt.Sprintf("%s-warm-%s", name, version)
+	// The seed's tags, for the warm AMI's provenance (#1364). Best effort: an
+	// image without them is still a good image, it just records less.
+	seedTags, err := awsClient.GetInstanceTags(ctx, region, seedID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  could not read warm seed %s's tags, so the warm AMI will not record its source's versions: %v\n", seedID, err)
+	}
 	warmID, err := awsClient.CreateAMI(ctx, region, aws.CreateAMIInput{
+		SourceTags:  seedTags,
 		InstanceID:  seedID,
 		Name:        warmName,
 		Description: fmt.Sprintf("spawn warm AMI from %s (fast-boot, first boot already done)", baseAMI),
