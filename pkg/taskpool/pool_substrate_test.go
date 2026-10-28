@@ -101,13 +101,20 @@ func TestPool_EndToEnd_AgainstSubstrate(t *testing.T) {
 		}
 	}
 
-	// Queue drained: submitter sees zero depth, then deletes it.
+	// Queue drained: any count the provider reports is zero, then the
+	// submitter deletes it. Substrate omits both counts (substrate#1441), and
+	// Depth reports those as unknown (nil), not as an empty queue (#1362).
 	visible, inFlight, err := pool.Depth(ctx)
 	if err != nil {
 		t.Fatalf("Depth: %v", err)
 	}
-	if visible != 0 || inFlight != 0 {
-		t.Fatalf("queue not drained: visible=%d in-flight=%d", visible, inFlight)
+	for name, c := range map[string]*int{"visible": visible, "in-flight": inFlight} {
+		switch {
+		case c == nil:
+			t.Logf("%s count not reported by the provider: unknown", name)
+		case *c != 0:
+			t.Fatalf("queue not drained: %s=%d", name, *c)
+		}
 	}
 	if err := pool.Drain(ctx); err != nil {
 		t.Fatalf("Drain: %v", err)
