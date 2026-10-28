@@ -42,16 +42,23 @@ func TestDiscoversEveryShapeOfCall(t *testing.T) {
 	p := fixture(t)
 	inv := p.Calls(p.Mains(), nil)
 	want := []string{
+		"ec2:CreateTags",           // implied: RunInstances with TagSpecifications
 		"ec2:DescribeImages",       // waiter
 		"ec2:DescribeInstances",    // through an interface
 		"ec2:DescribeVolumes",      // paginator
 		"ec2:RebootInstances",      // in feature, not cut here
+		"ec2:RunInstances",         // implied (see TestImpliedActionsFollowTheCallSite)
 		"ec2:StopInstances",        // method value
 		"ec2:TerminateInstances",   // direct
 		"lambda:InvokeFunctionUrl", // SigV4-signed for "lambda"
 		"s3:AbortMultipartUpload",  // transfer manager
+		"s3:CreateBucket",          // implied
 		"s3:ListBucket",            // HeadBucket
 		"s3:PutObject",             // transfer manager
+		"s3:PutObjectTagging",      // implied: UploadObject with Tagging
+		"s3:TagResource",           // implied: CreateBucket with tags
+		"sqs:CreateQueue",          // implied
+		"sqs:TagQueue",             // implied: CreateQueue with Tags
 		"sts:AssumeRole",           // stscreds.NewAssumeRoleProvider
 	}
 	if got := inv.Sorted(); !reflect.DeepEqual(got, want) {

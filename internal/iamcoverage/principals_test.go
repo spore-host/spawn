@@ -393,18 +393,23 @@ func computeInventories(ps []principal) (map[string]*principalInventory, error) 
 				pi = &principalInventory{actions: map[string][]Site{}, paths: map[string][]string{}}
 				out[p.name] = pi
 			}
-			for a, sites := range inv.Actions {
-				for _, s := range sites {
-					pi.actions[a] = appendSite(pi.actions[a], s)
-					if _, ok := pi.paths[s.Func]; !ok {
-						pi.paths[s.Func] = inv.PathTo(s.Func)
-					}
-				}
-			}
-			pi.unmapped = append(pi.unmapped, inv.Unmapped...)
+			pi.add(inv)
 		}
 	}
 	return out, nil
+}
+
+// add merges one platform's inventory into pi.
+func (pi *principalInventory) add(inv Inventory) {
+	for a, sites := range inv.Actions {
+		for _, s := range sites {
+			pi.actions[a] = appendSite(pi.actions[a], s)
+			if _, ok := pi.paths[s.Func]; !ok {
+				pi.paths[s.Func] = inv.PathTo(s.Func)
+			}
+		}
+	}
+	pi.unmapped = append(pi.unmapped, inv.Unmapped...)
 }
 
 func appendSite(sites []Site, s Site) []Site {
@@ -459,7 +464,6 @@ func gapKey(principal, variant, action string) string {
 // entry that is no longer a gap, so the ledger cannot outlive what it records.
 func TestEveryPrincipalCallIsGranted(t *testing.T) {
 	invs := inventories(t)
-	used := map[string]bool{}
 	policies := map[string]*Policy{}
 	policyFor := func(v variant) *Policy {
 		if p, ok := policies[v.name]; ok {
@@ -469,16 +473,26 @@ func TestEveryPrincipalCallIsGranted(t *testing.T) {
 		policies[v.name] = p
 		return p
 	}
+	for _, e := range coverageErrors(principals, invs, policyFor, knownGaps) {
+		t.Error(e)
+	}
+}
 
-	for _, p := range principals {
+// coverageErrors is the gate's verdict: every call of every principal that its
+// policy does not grant by exact name and gaps does not record, every unmapped
+// call, and every gaps entry that is no longer a gap.
+func coverageErrors(ps []principal, invs map[string]*principalInventory, policyFor func(variant) *Policy, gaps map[string]string) []string {
+	var errs []string
+	used := map[string]bool{}
+	for _, p := range ps {
 		inv := invs[p.name]
 		if inv == nil || len(inv.actions) == 0 {
-			t.Errorf("%s: discovered no AWS calls — the discovery has broken, not the principal", p.name)
+			errs = append(errs, fmt.Sprintf("%s: discovered no AWS calls — the discovery has broken, not the principal", p.name))
 			continue
 		}
 		for _, u := range inv.unmapped {
-			t.Errorf("%s: an AWS operation this gate cannot map to an IAM action: %s\n"+
-				"An unmapped call is invisible to every coverage check — add it to actions.go.", p.name, u)
+			errs = append(errs, fmt.Sprintf("%s: an AWS operation this gate cannot map to an IAM action: %s\n"+
+				"An unmapped call is invisible to every coverage check — add it to actions.go.", p.name, u))
 		}
 		actions := make([]string, 0, len(inv.actions))
 		for a := range inv.actions {
@@ -488,7 +502,7 @@ func TestEveryPrincipalCallIsGranted(t *testing.T) {
 		for _, action := range actions {
 			ctx, ok := p.contextFor(action)
 			if !ok {
-				t.Errorf("%s calls %s, but no credential context of this principal claims the %q service", p.name, action, strings.SplitN(action, ":", 2)[0])
+				errs = append(errs, fmt.Sprintf("%s calls %s, but no credential context of this principal claims the %q service", p.name, action, strings.SplitN(action, ":", 2)[0]))
 				continue
 			}
 			for _, v := range ctx.variants {
@@ -498,25 +512,26 @@ func TestEveryPrincipalCallIsGranted(t *testing.T) {
 					continue
 				}
 				k := gapKey(p.name, v.name, action)
-				if _, ok := knownGaps[k]; ok {
+				if _, ok := gaps[k]; ok {
 					used[k] = true
 					continue
 				}
-				t.Error(gapMessage(p, ctx, v, pol, action, grant, src, inv))
+				errs = append(errs, gapMessage(p, ctx, v, pol, action, grant, src, inv))
 			}
 		}
 	}
 
 	var stale []string
-	for k := range knownGaps {
+	for k := range gaps {
 		if !used[k] {
 			stale = append(stale, k)
 		}
 	}
 	sort.Strings(stale)
 	for _, k := range stale {
-		t.Errorf("knownGaps entry %q is no longer a gap (the grant was added, the call removed, or the principal renamed) — delete it", k)
+		errs = append(errs, fmt.Sprintf("knownGaps entry %q is no longer a gap (the grant was added, the call removed, or the principal renamed) — delete it", k))
 	}
+	return errs
 }
 
 func gapMessage(p principal, ctx credContext, v variant, pol *Policy, action string, grant Grant, src string, inv *principalInventory) string {

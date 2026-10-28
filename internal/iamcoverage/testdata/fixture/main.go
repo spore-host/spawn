@@ -14,7 +14,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	tm "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
@@ -47,6 +50,99 @@ func main() {
 	signDynamic(ctx, v4.NewSigner(), os.Getenv("SERVICE"))
 
 	feature(ctx, c)
+
+	implied(ctx, cfg, c, s3c)
+}
+
+// queueCreator is a spawn-style narrow interface over the SQS client.
+type queueCreator interface {
+	CreateQueue(ctx context.Context, in *sqs.CreateQueueInput, optFns ...func(*sqs.Options)) (*sqs.CreateQueueOutput, error)
+}
+
+// implied exercises impliedRules (#1377): each function below either sets the
+// field a rule names, or provably does not, or builds its input where the
+// analysis cannot see.
+func implied(ctx context.Context, cfg aws.Config, c *ec2.Client, s3c *s3.Client) {
+	q := sqs.NewFromConfig(cfg)
+	queueTagged(ctx, q)
+	queueUntagged(ctx, q)
+	queueTaggedByAssignment(ctx, q, len(os.Args) > 1)
+	queueFromParam(ctx, q, &sqs.CreateQueueInput{})
+	queueFromParam(ctx, q, &sqs.CreateQueueInput{Tags: map[string]string{"k": "v"}})
+	queueFromUntaggedParam(ctx, q, &sqs.CreateQueueInput{QueueName: aws.String("q")})
+	queueUntaggedEitherWay(ctx, q, len(os.Args) > 1)
+	queueTaggedViaInterface(ctx, q)
+	queueMethodValue(ctx, q)
+	bucketTagged(ctx, s3c)
+	bucketUntagged(ctx, s3c)
+	uploadTagged(ctx, s3c)
+	runTagged(ctx, c)
+}
+
+func queueTagged(ctx context.Context, q *sqs.Client) {
+	_, _ = q.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String("q"), Tags: map[string]string{"k": "v"}})
+}
+
+func queueUntagged(ctx context.Context, q *sqs.Client) {
+	_, _ = q.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String("q")})
+	_, _ = q.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String("q"), Tags: nil})
+}
+
+func queueTaggedByAssignment(ctx context.Context, q *sqs.Client, tag bool) {
+	in := &sqs.CreateQueueInput{QueueName: aws.String("q")}
+	if tag {
+		in.Tags = map[string]string{"k": "v"}
+	}
+	_, _ = q.CreateQueue(ctx, in)
+}
+
+// queueFromParam's input is built by its callers, one of which tags it.
+func queueFromParam(ctx context.Context, q *sqs.Client, in *sqs.CreateQueueInput) {
+	_, _ = q.CreateQueue(ctx, in)
+}
+
+// queueFromUntaggedParam's only caller builds its input without Tags.
+func queueFromUntaggedParam(ctx context.Context, q *sqs.Client, in *sqs.CreateQueueInput) {
+	_, _ = q.CreateQueue(ctx, in)
+}
+
+func queueUntaggedEitherWay(ctx context.Context, q *sqs.Client, fifo bool) {
+	var in *sqs.CreateQueueInput
+	if fifo {
+		in = &sqs.CreateQueueInput{QueueName: aws.String("q.fifo")}
+	} else {
+		in = &sqs.CreateQueueInput{QueueName: aws.String("q")}
+	}
+	_, _ = q.CreateQueue(ctx, in)
+}
+
+func queueTaggedViaInterface(ctx context.Context, q queueCreator) {
+	_, _ = q.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String("q"), Tags: map[string]string{"k": "v"}})
+}
+
+// queueMethodValue calls through a method value, whose input the analysis
+// does not follow: unknown, so tagged.
+func queueMethodValue(ctx context.Context, q *sqs.Client) {
+	create := q.CreateQueue
+	_, _ = create(ctx, &sqs.CreateQueueInput{QueueName: aws.String("q")})
+}
+
+func bucketTagged(ctx context.Context, s3c *s3.Client) {
+	_, _ = s3c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("b"),
+		CreateBucketConfiguration: &s3types.CreateBucketConfiguration{Tags: []s3types.Tag{{Key: aws.String("k")}}}})
+}
+
+func bucketUntagged(ctx context.Context, s3c *s3.Client) {
+	_, _ = s3c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("b"),
+		CreateBucketConfiguration: &s3types.CreateBucketConfiguration{LocationConstraint: s3types.BucketLocationConstraintEuWest1}})
+}
+
+func uploadTagged(ctx context.Context, s3c *s3.Client) {
+	_, _ = tm.New(s3c).UploadObject(ctx, &tm.UploadObjectInput{Bucket: aws.String("b"), Tagging: aws.String("k=v")})
+}
+
+func runTagged(ctx context.Context, c *ec2.Client) {
+	_, _ = c.RunInstances(ctx, &ec2.RunInstancesInput{TagSpecifications: []ec2types.TagSpecification{{}}})
 }
 
 func direct(ctx context.Context, c *ec2.Client) {

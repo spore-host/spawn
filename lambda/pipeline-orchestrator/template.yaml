@@ -154,6 +154,9 @@ Resources:
             - Effect: Allow
               Action:
                 - sns:CreateTopic
+                # CreateTopic tags the topic (spawn:pipeline-id), which SNS
+                # also authorizes as sns:TagResource (#1377).
+                - sns:TagResource
                 - sns:Subscribe
                 - sns:ListSubscriptionsByTopic
                 - sns:Publish
