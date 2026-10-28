@@ -988,6 +988,17 @@ func launchStage(ctx context.Context, state *pipeline.PipelineState, pipelineDef
 }
 
 func launchStageInstance(ctx context.Context, ec2Client runInstancesAPI, state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, index int) (*pipeline.InstanceInfo, error) {
+	// A nested-spawn role may itself call RunInstances and iam:PassRole, and
+	// `spawn launch --nested-spawn` gives it only to a single instance with a
+	// --ttl (#1372). `spawn pipeline launch` always records a profile it named
+	// after a policy hash, never a nested one, but the record is written with
+	// the caller's credentials, so a stage naming one is refused here, and the
+	// template denies this Lambda the PassRole as well.
+	if profile := stageInstanceProfile(state); spawnaws.IsNestedSpawnRole(profile) {
+		return nil, fmt.Errorf("stage %s: instance profile %q is a nested-spawn role (%s*): nested spawn isn't available "+
+			"for pipeline stages; it was not launched (#1372). Use --nested-spawn on a single launch, which requires --ttl",
+			stageDef.StageID, profile, spawnaws.NestedSpawnRolePrefix)
+	}
 	region := stageRegion(stageDef)
 
 	// Determine AMI to use

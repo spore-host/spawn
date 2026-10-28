@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -110,7 +111,35 @@ func buildRunInstancesInput(state *SweepRecord, params map[string]interface{}, p
 	if err := applyMemberLaunchSettings(input, state, params, paramIndex); err != nil {
 		return nil, err
 	}
+	if err := refuseNestedSpawnProfile(input, paramIndex); err != nil {
+		return nil, err
+	}
 	return input, nil
+}
+
+// refuseNestedSpawnProfile refuses a member whose instance profile is a
+// nested-spawn role (spawnaws.NestedSpawnRolePrefix, #1372), checked on the
+// request as composed, so it holds for CLI-rendered and legacy params alike.
+// Such a role may itself call RunInstances and iam:PassRole; `spawn launch
+// --nested-spawn` gives it only to a single instance with a --ttl, and this
+// Lambda must not hand it to whoever wrote a sweep's params. The CLI refuses
+// it before upload, and SpawnSweepCrossAccountRole denies the PassRole; this
+// is the check that holds against params written by anything else.
+func refuseNestedSpawnProfile(input *ec2.RunInstancesInput, paramIndex int) error {
+	p := input.IamInstanceProfile
+	if p == nil {
+		return nil
+	}
+	arn := aws.ToString(p.Arn)
+	for _, name := range []string{aws.ToString(p.Name), arn[strings.LastIndex(arn, "/")+1:]} {
+		if !spawnaws.IsNestedSpawnRole(name) {
+			continue
+		}
+		return fmt.Errorf("param set %d names instance profile %q, a nested-spawn role (%s*): nested spawn isn't "+
+			"available for detached sweeps; it was not launched (#1372). Use --nested-spawn on a single launch, "+
+			"which requires --ttl", paramIndex, name, spawnaws.NestedSpawnRolePrefix)
+	}
+	return nil
 }
 
 // launchSettingsParam is the param key carrying a member's RunInstances-side

@@ -31,6 +31,14 @@ import (
 // created, rather than uploaded to fail every member at RunInstances with an
 // authorization error. --no-detach runs it with the user's own credentials.
 //
+// The nested-spawn roles (aws.NestedSpawnRolePrefix, spawn-instance-nested-*)
+// are inside the spawn-instance-* family but are never passable (#1372). Such a
+// role may itself call RunInstances and iam:PassRole, and `spawn launch
+// --nested-spawn` gives it only to an instance with a --ttl. A member naming one
+// would get that capability from the orchestrator, on the say-so of whoever
+// wrote the params, with no such requirement. The cross-account role denies the
+// PassRole explicitly, and the sweep orchestrator refuses the member too.
+//
 // TestDetachedPassableProfilesMatchTheGrant holds this list to the script.
 
 // orchestratorPassableProfiles are the profiles named in full; the prefix below
@@ -40,6 +48,9 @@ var orchestratorPassableProfiles = []string{aws.SporedInstanceProfileName, "spaw
 // orchestratorPassableProfile reports whether the orchestrator may launch a
 // member with profile. "" is the default, spored-instance-profile.
 func orchestratorPassableProfile(profile string) bool {
+	if aws.IsNestedSpawnRole(profile) {
+		return false
+	}
 	if profile == "" || strings.HasPrefix(profile, instancerole.NamePrefix) {
 		return true
 	}
@@ -54,6 +65,11 @@ func orchestratorPassableProfile(profile string) bool {
 // unpassableProfileError is the refusal for a profile the orchestrator cannot
 // pass. source says where it came from.
 func unpassableProfileError(source, profile string) error {
+	if aws.IsNestedSpawnRole(profile) {
+		return fmt.Errorf("%s names instance profile %q, a nested-spawn role (%s*), which a detached sweep cannot use: "+
+			"nested spawn isn't available for detached sweeps (#1372). Use --nested-spawn on a single launch, which "+
+			"requires --ttl", source, profile, aws.NestedSpawnRolePrefix)
+	}
 	return fmt.Errorf("%s names instance profile %q, which a detached sweep cannot use: its members are launched "+
 		"by spawn's sweep orchestrator, which may pass only the roles spawn creates (%s and %s*) to EC2, never an "+
 		"arbitrary role (#1331). Use --iam-policy/--iam-policy-file/--iam-managed-policies/--s3-read/--s3-write "+
