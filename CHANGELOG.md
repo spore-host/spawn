@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A parameter sweep refuses, before any AWS call, the launch flags it
+  cannot honour** (#1366). Each used to be accepted and dropped, so the
+  members launched without it: `--strata-formation`/`--strata-profile`/
+  `--strata-registry` (no environment), `--dns-domain`/`--dns-api-endpoint`/
+  `--dns-function-arn` (a row's `dns:` name registered with spore.host's
+  updater), `--nist-800-171`/`--nist-800-53`/`--compliance-strict` (no
+  encrypted-EBS or IMDSv2 enforcement), `--allow-cidr` and `--efa-group` (no
+  security group is created for a sweep), `--interactive`, `--count`,
+  `--job-array-name`, `--instance-names`, `--min-viable`, the `--mpi` flags,
+  `--auto-placement-group` and `--template-var`. (`--cartesian`, deprecated
+  and inert since #674, is still accepted with cobra's warning.) The
+  error names every such flag with what to do instead. Every launch flag now
+  has a recorded sweep rule (`cmd/launch_sweep_flags.go`), and a test checks
+  each claim on a real foreground member, so a new flag cannot be dropped
+  silently.
+
 ### Fixed
 
 - **`setup-dashboard-lambda-role.sh` now finishes removing the legacy
@@ -91,6 +109,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose params a current CLI rendered keeps the old behaviour: its row fails
   with EC2's error and the sweep's other members are still attempted. Takes
   effect when the sweep orchestrator is redeployed from a release tag.
+
+- **Foreground parameter sweeps no longer drop `--fsx-create`, `--fsx-recall`
+  and `--vpc` without `--subnet`** (#1366). A `--no-detach` sweep accepted all
+  three and launched every member without them: no filesystem was created or
+  recalled, and the members landed in the region's default VPC. Both sweep
+  paths now refuse them before any AWS call, with one message: create or
+  recall the filesystem first and pass its `--fsx-id`, or pass `--subnet` with
+  a subnet in that VPC. The `--fsx-*` options that only mean something with
+  `--fsx-create` are refused with it. The detached path's refusal no longer
+  points at `--no-detach`.
+- **Sweep members now mount `--efs-id`, `--fsx-id` and `--attach-volume`
+  storage** (#1366). Both sweep paths rendered their members' user data with
+  no storage script, so the filesystems were tagged and never mounted and an
+  attached volume was never formatted or mounted. Each member now gets the
+  mount script a single launch of the same config runs (including
+  `--efs-mount-options`, `--efs-profile` and the EFS mount-target IP
+  fallback), its `--command` waits for the mounts, and an `--fsx-id`
+  filesystem is looked up once per region before anything is created, so one
+  that a member's region does not have fails the sweep.
+- **`--spot-max-price` reaches a sweep's members** (#1366). Only the
+  batch-queue path read it; a row's own `spot_max_price:` still wins.
 
 ## [0.147.0] - 2026-10-28
 

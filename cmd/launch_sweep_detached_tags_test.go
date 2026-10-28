@@ -484,8 +484,11 @@ func TestForegroundSweepUsesTheSharedMemberDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`(?m)^\s*if defaultSweepMember\(&config, \*baseConfig, name, i\) \{`).Match(src) {
-		t.Error("launchParameterSweep's foreground loop does not apply defaultSweepMember")
+	if !regexp.MustCompile(`(?m)^\s*if defaultSweepMember\(&config, base, name, i\) \{`).Match(src) {
+		t.Error("foregroundSweepMembers does not apply defaultSweepMember")
+	}
+	if !regexp.MustCompile(`(?m)^\s*launchConfigs, defaultedVerbs, err := foregroundSweepMembers\(\*baseConfig, paramFormat, sweepID, name\)`).Match(src) {
+		t.Error("launchParameterSweep does not build its foreground members with foregroundSweepMembers")
 	}
 	if regexp.MustCompile(`(?m)^\s*if applyIdleTimeoutDefault\(`).Match(src) {
 		t.Error("launch_sweep.go applies the idle default itself, beside defaultSweepMember")
