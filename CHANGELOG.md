@@ -67,6 +67,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `s3:ListAllMyBuckets` and `s3:GetObjectTagging` (in spawn's infra account,
   for `--schedule-params` only).
 
+### Changed
+
+- **A launch installs the spored of the spawn that launched it** (#1412).
+  Every bootstrap installed the unversioned latest `spawn/spored-linux-*`
+  while its bootstrap body was pinned to the launching CLI's release (#1274),
+  so one launch mixed two versions, and ran a spored its CLI was never tested
+  with. A release build now installs `spawn/versions/<version>/spored-*`
+  (binary, `.sha256` and `.sig`, signature check unchanged) from the regional
+  bucket, then us-east-1's, and never the latest: if that release's spored is
+  missing or does not verify, the install fails exactly as a bad signature
+  does (a Linux instance retires itself with `spawn_fatal_retire`; Windows
+  installs nothing and says so). This covers every install path: the Linux
+  stub and inline bootstrap (so `launch`, sweeps, `task run`, burst, pools and
+  `launcher.Provision`, where a library caller such as lagotto pins to the
+  spawn module it was built against), the Windows bootstrap, the `spawn app`
+  user data, the pipeline orchestrator's stages (the release it was built
+  from), and the sweep orchestrator's legacy-params members (its own
+  release). A development build, which has no published spored, still
+  installs the latest. The version rides in user data as
+  `SPAWN_SPORED_VERSION`, outside the published body; the stub grows 32 bytes
+  (5 gzipped) and the inline bootstrap 293 (79 gzipped). A spored fix now
+  reaches new launches only through a spawn release, as a bootstrap fix
+  already did. `scripts/install-spored.ps1`, which has no launching spawn,
+  still installs the latest.
+- **`spawn upgrade-spored` defaults to this spawn's own version** (#1412), the
+  spored its launches install, instead of the latest GitHub release; a
+  development build still asks for the latest. `--version` must now be a
+  release (`MAJOR.MINOR.PATCH`).
+- `sporedinstall.WindowsInstallScript` takes the spored version to install as
+  a second argument (`""` for the latest).
+
 ### Fixed
 
 - **A multi-card EFA launch with no subnet is settled in the pre-flight,

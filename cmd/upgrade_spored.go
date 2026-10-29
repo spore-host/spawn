@@ -100,6 +100,10 @@ func runUpgradeSpored(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(out, "%s spored is already at v%s on %s — nothing to do.\n", i18n.Symbol("success"), target, instance.InstanceID)
 			return nil
 		} else if cmp < 0 {
+			if upgradeSporedVersion == "" {
+				return fmt.Errorf("this spawn is v%s, older than the running spored v%s, and upgrades to its own version by default — "+
+					"refusing a downgrade (upgrade spawn, pass --version, or --allow-downgrade)", target, running)
+			}
 			return fmt.Errorf("target v%s is older than the running v%s — refusing a downgrade (pass --force to override)", target, running)
 		}
 	}
