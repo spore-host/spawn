@@ -13,6 +13,7 @@ import (
 	spawncmd "github.com/spore-host/spawn/cmd"
 	"github.com/spore-host/spawn/internal/treewalk"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/pipeline"
 	"github.com/spore-host/spawn/pkg/reaperiam"
 	"github.com/spore-host/spawn/pkg/taskiam"
@@ -63,6 +64,21 @@ type principal struct {
 	// spored subcommand that only ever runs on a feature role.
 	cuts     []string
 	contexts []credContext
+	// passes are the roles the principal's code passes, for a principal that
+	// calls iam:PassRole (#1397). PassRole is resource-scoped, and which role a
+	// call passes is a runtime value (a launch's iam_role, a profile name read
+	// from state), so the gate cannot read it off the call site; it is
+	// declared here from the code's own constants, and the gate checks the
+	// policy lets each one be passed to its service. This proves the grant
+	// covers the roles spawn passes by design, not that the code passes only
+	// those.
+	passes []passedRole
+}
+
+// passedRole is one role a principal passes, and the service it passes it to.
+type passedRole struct {
+	role    string // role name, an example of the family for a prefix
+	service string // iam:PassedToService
 }
 
 // --- policy sources -------------------------------------------------------
@@ -151,6 +167,15 @@ func scanSelfPolicy(t *testing.T) *Policy {
 }
 
 // --- the principals -------------------------------------------------------
+
+// sporeRolesToEC2 are the instance roles an orchestrator launches a spore
+// with: spored-instance-role (the profile the CLI ensures and seeds as a
+// member's or stage's default iam_role) and a per-policy spawn-instance-<hash>
+// role (--iam-policy and friends, #1331).
+var sporeRolesToEC2 = []passedRole{
+	{role: spawnaws.SporedRoleName, service: "ec2.amazonaws.com"},
+	{role: instancerole.NamePrefix + "abc12345", service: "ec2.amazonaws.com"},
+}
 
 var sporedBuild = build{dir: ".", pkg: "./cmd/spored", goos: []string{"linux", "windows"}}
 
@@ -241,8 +266,9 @@ var principals = []principal{
 		},
 	},
 	{
-		name:  "sweep-orchestrator",
-		build: build{dir: "lambda/sweep-orchestrator", pkg: ".", goos: []string{"linux"}},
+		name:   "sweep-orchestrator",
+		build:  build{dir: "lambda/sweep-orchestrator", pkg: ".", goos: []string{"linux"}},
+		passes: sporeRolesToEC2,
 		contexts: []credContext{
 			{name: "member account", services: []string{"ec2", "iam"}, variants: []variant{
 				{"SpawnSweepCrossAccountRole", shellPolicy("scripts/setup-sweep-cross-account-role.sh")},
@@ -270,8 +296,9 @@ var principals = []principal{
 		}}},
 	},
 	{
-		name:  "pipeline-orchestrator",
-		build: build{dir: ".", pkg: "./lambda/pipeline-orchestrator", goos: []string{"linux"}},
+		name:   "pipeline-orchestrator",
+		build:  build{dir: ".", pkg: "./lambda/pipeline-orchestrator", goos: []string{"linux"}},
+		passes: sporeRolesToEC2,
 		contexts: []credContext{{name: "function role", variants: []variant{
 			{"SAM PipelineOrchestratorFunction", cfnPolicy("lambda/pipeline-orchestrator/template.yaml", "PipelineOrchestratorFunction")},
 		}}},
@@ -508,6 +535,10 @@ func coverageErrors(ps []principal, invs map[string]*principalInventory, policyF
 			for _, v := range ctx.variants {
 				pol := policyFor(v)
 				grant, src := pol.Grants(action)
+				if grant == Exact && strings.EqualFold(action, "iam:PassRole") {
+					errs = append(errs, passRoleErrors(p, v, pol)...)
+					continue
+				}
 				if grant == Exact {
 					continue
 				}
@@ -518,6 +549,12 @@ func coverageErrors(ps []principal, invs map[string]*principalInventory, policyF
 				}
 				errs = append(errs, gapMessage(p, ctx, v, pol, action, grant, src, inv))
 			}
+		}
+	}
+
+	for _, p := range ps {
+		if inv := invs[p.name]; inv != nil && len(p.passes) > 0 && len(inv.actions["iam:PassRole"]) == 0 {
+			errs = append(errs, fmt.Sprintf("%s declares roles it passes (%v) but its code calls no operation that passes one — delete the declaration", p.name, p.passes))
 		}
 	}
 
@@ -534,12 +571,73 @@ func coverageErrors(ps []principal, invs map[string]*principalInventory, policyF
 	return errs
 }
 
+// passRoleErrors checks a principal holding iam:PassRole by name against the
+// roles it declares it passes: each must be passable, to its service, under
+// the policy's PassRole statements (an Allow whose Resource matches the role
+// and whose condition admits the service, and no Deny that matches). A
+// principal that passes a role and declares none is an error: the grant's
+// scope would go unchecked.
+func passRoleErrors(p principal, v variant, pol *Policy) []string {
+	if len(p.passes) == 0 {
+		return []string{fmt.Sprintf("%s calls iam:PassRole under %q but declares no passes: name the roles its code "+
+			"passes (principal.passes) so the grant's Resource can be checked (#1397)", p.name, v.name)}
+	}
+	var errs []string
+	for _, pr := range p.passes {
+		if !passableTo(pol.PassStatements(), pr.role, pr.service) {
+			errs = append(errs, fmt.Sprintf("%s passes role/%s to %s, which %q does not allow: its iam:PassRole "+
+				"grant's Resource or iam:PassedToService condition does not match, or a Deny does (sources %v)",
+				p.name, pr.role, pr.service, v.name, pol.Sources))
+		}
+	}
+	return errs
+}
+
+// passableTo simulates iam:PassRole of role/<role>, in whatever account each
+// statement's Resource names, to service: some Allow matches and no Deny does.
+// Conditions on keys other than iam:PassedToService are not modelled; such a
+// statement counts as not matching (so a conditional Allow does not grant, and
+// a conditional Deny does not deny).
+func passableTo(stmts []map[string]any, role, service string) bool {
+	allowed := false
+	for _, st := range stmts {
+		if !passesRole(st) || !toService(st, service) {
+			continue
+		}
+		if _, ok := st["NotResource"]; ok {
+			continue
+		}
+		matches := false
+		for _, r := range resourceList(st["Resource"]) {
+			if r == "*" {
+				matches = true
+				continue
+			}
+			if m := arnAccount.FindStringSubmatch(r); m != nil && globMatch(r, "arn:aws:iam::"+m[1]+":role/"+role) {
+				matches = true
+			}
+		}
+		if !matches {
+			continue
+		}
+		switch st["Effect"] {
+		case "Deny":
+			return false
+		case "Allow":
+			allowed = true
+		}
+	}
+	return allowed
+}
+
 func gapMessage(p principal, ctx credContext, v variant, pol *Policy, action string, grant Grant, src string, inv *principalInventory) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s calls %s, which %q (%s credentials) does not grant", p.name, action, v.name, ctx.name)
 	switch grant {
 	case WildcardOnly:
 		fmt.Fprintf(&b, " by name — only a wildcard in %s matches it, and a wildcard does not count", src)
+	case Denied:
+		fmt.Fprintf(&b, " — an unconditional Deny in %s names it", src)
 	case NotGranted:
 	}
 	if len(pol.Opaque) > 0 {

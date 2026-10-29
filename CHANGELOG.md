@@ -57,6 +57,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Detached sweeps already refuse multi-card EFA (#1407); `spawn task run` has
   no EFA. API: `LaunchConfig.ValidateEFASubnet`, `aws.ErrEFANeedsSubnet`.
   No new IAM: `ec2:DescribeSubnets` and `ec2:DescribeVpcs` were already used.
+- **The IAM coverage gate and `docs/reference/cli-iam-actions.md` now count
+  `iam:PassRole`** (#1397). AWS authorizes a call that names a role as
+  `iam:PassRole` too, and neither the principal gate nor the CLI inventory
+  saw it. `internal/iamcoverage`'s implied-action table (#1377) gains a
+  PassRole rule, each citing its Service Authorization Reference operation
+  entry and a service page, for `ec2:RunInstances` (`IamInstanceProfile`),
+  `lambda:CreateFunction`/`UpdateFunctionConfiguration` (`Role`),
+  `scheduler:CreateSchedule`/`UpdateSchedule` (`Target.RoleArn`),
+  `events:PutRule` (`RoleArn`) and `PutTargets` (a target's `RoleArn`; the
+  field walker now follows list elements), `ssm:SendCommand`
+  (`ServiceRoleArn`), `sns:Subscribe`/`CreateTopic` (role attributes),
+  `iam:AddRoleToInstanceProfile`, and Image Builder's
+  `CreateInfrastructureConfiguration` and `ImportDiskImage`. A principal that
+  passes a role must hold `iam:PassRole` by name, not cancelled by an
+  unconditional Deny, and must declare the roles it passes; the gate checks
+  the grant lets each be passed to its service. The sweep and pipeline
+  orchestrators pass `spored-instance-role` and `spawn-instance-*` to EC2 and
+  already hold that grant; no policy changes. These commands now list
+  `iam:PassRole` as a permission you need: `spawn app launch`, `spawn array
+  retry`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn
+  pipeline launch`, `spawn pool create`, `spawn reaper deploy`, `spawn
+  resume`, `spawn schedule create`, `spawn schedule pause`, `spawn schedule
+  resume`, `spawn service`, `spawn sweep resume`, `spawn task run`. The
+  existing tag rules' SAR links for IAM, S3, DynamoDB, Lambda and EventBridge
+  pointed at anchors that do not exist; they are corrected.
 
 - **A parameter sweep with `--efa` launched each member with one EFA
   interface on a multi-card type** (#1407). A single `spawn launch --efa`
