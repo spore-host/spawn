@@ -103,11 +103,11 @@ func TestStubWithThePublishedBodyIsTheInlineBootstrap(t *testing.T) {
 	fetch := bodyStub(testRelease, body)
 	for name, cfg := range stubConfigs() {
 		t.Run(name, func(t *testing.T) {
-			stub, err := buildLinuxBootstrap(cfg, testRelease, body)
+			stub, err := buildLinuxBootstrap(cfg, testRelease, "", body)
 			if err != nil {
 				t.Fatal(err)
 			}
-			inline, err := buildLinuxBootstrap(cfg, "", body)
+			inline, err := buildLinuxBootstrap(cfg, "", "", body)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -227,11 +227,11 @@ func gzipLen(t *testing.T, s string) int {
 }
 
 func TestStubBootstrapFitsItsBudget(t *testing.T) {
-	stub, err := buildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"}, "0.143.0", BootstrapBody())
+	stub, err := buildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"}, "0.143.0", "0.143.0", BootstrapBody())
 	if err != nil {
 		t.Fatal(err)
 	}
-	inline, err := buildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"}, "", BootstrapBody())
+	inline, err := buildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"}, "", "", BootstrapBody())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +526,7 @@ func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 	key := BootstrapBodyKey(testRelease)
 	script, err := buildLinuxBootstrap(BootstrapConfig{
 		Username: "tester", CustomUserData: "echo post > /tmp/POST_RAN\n",
-	}, testRelease, string(body))
+	}, testRelease, "", string(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +618,7 @@ func TestStubRunsOnlyAVerifiedBody(t *testing.T) {
 func TestInlineBootstrapRetiresAnInstanceWithoutSpored(t *testing.T) {
 	script, err := buildLinuxBootstrap(BootstrapConfig{
 		Username: "tester", CustomUserData: "echo post > /tmp/POST_RAN\n",
-	}, "", BootstrapBody())
+	}, "", "", BootstrapBody())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +709,7 @@ func fullBoot(t *testing.T, cfg BootstrapConfig, failSystemctl string) (*bootSan
 	srv.put("eu-west-1", "spawn/spored-linux-amd64.sha256", []byte(hex.EncodeToString(sum[:])+"\n"))
 	srv.put("eu-west-1", "spawn/spored-linux-amd64.sig", []byte(base64.StdEncoding.EncodeToString(sig)+"\n"))
 
-	script, err := buildLinuxBootstrap(cfg, "", BootstrapBody())
+	script, err := buildLinuxBootstrap(cfg, "", "", BootstrapBody())
 	if err != nil {
 		t.Fatal(err)
 	}

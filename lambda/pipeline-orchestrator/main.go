@@ -28,6 +28,7 @@ import (
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/smithy-go"
 	"github.com/spore-host/spawn/internal/shellmin"
+	"github.com/spore-host/spawn/pkg/buildinfo"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/pipeline"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
@@ -1196,6 +1197,13 @@ func pipelineDeadline(state *pipeline.PipelineState, pipelineDef *pipeline.Pipel
 	return state.CreatedAt.Add(total + pipelineDeadlineSlack)
 }
 
+// sporedVersion is the spawn release whose spored a stage instance installs
+// (#1412): the release this orchestrator was built from, which the Go
+// toolchain stamps into the binary from the git tag (`make build` at a release
+// tag), and "" for any other build, which installs the latest. It is a var so
+// tests can pin it.
+var sporedVersion = func() string { return sporedinstall.ReleaseVersion(buildinfo.Version("")) }
+
 func generatePipelineUserData(state *pipeline.PipelineState, stageDef *pipeline.Stage, stageState *pipeline.StageState, instanceIndex int, region string) (string, error) {
 	// Escape shell variables
 	shellEscape := func(s string) string {
@@ -1301,19 +1309,14 @@ esac
 # Download from S3 (public buckets, regional for low latency)
 S3_BASE_URL="https://spawn-binaries-${REGION}.s3.amazonaws.com"
 FALLBACK_URL="https://spawn-binaries-us-east-1.s3.amazonaws.com"
-PROJECT="spawn"
 %s
 echo "Downloading spored binary..."
 # Verified install, from pkg/sporedinstall: checksum AND signature, failing
-# closed, installed only after every check passes (#1173). Same candidates in
-# the same order as before: regional project-prefixed, regional legacy, then
-# both under us-east-1. No "|| true": a failure exits, and the EXIT trap writes
-# FAILED and terminates the instance.
-if ! spore_install_verified_spored "$BINARY" \
-      "${S3_BASE_URL}/${PROJECT}" \
-      "${S3_BASE_URL}" \
-      "${FALLBACK_URL}/${PROJECT}" \
-      "${FALLBACK_URL}"; then
+# closed, installed only after every check passes (#1173). The regional bucket,
+# then us-east-1; only this orchestrator's release's spored when it is a
+# release build (#1412). No "|| true": a failure exits, and the EXIT trap
+# writes FAILED and terminates the instance.
+if ! spore_install_spored_from_buckets "$BINARY" "$S3_BASE_URL" "$FALLBACK_URL"; then
     echo "spored install failed; refusing to run an unverified agent"
     exit 1
 fi
@@ -1388,7 +1391,11 @@ exit 0
 		// GHSA-3x4q-99gh-fxhx closed for the other paths). Passed as an
 		// argument, not spliced into the format string, because the generated
 		// shell contains % characters.
-		shellmin.Strip(sporedinstall.KeySetupScript())+shellmin.Strip(sporedinstall.VerifiedInstallFunc()),
+		//
+		// The spored is this orchestrator's own release's (#1412): the stage
+		// runner is `spored run-pipeline-stage`, so the two are one contract.
+		shellmin.Strip(sporedinstall.KeySetupScript())+sporedinstall.PinScript(sporedVersion())+
+			shellmin.Strip(sporedinstall.VerifiedInstallFunc()),
 		// The stage command and env are no longer in the user data at all:
 		// the runner reads them from the definition and runs the command with
 		// exec, so there is nothing here for a command's $(...) or quotes to

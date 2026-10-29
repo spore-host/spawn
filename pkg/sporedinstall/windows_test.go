@@ -94,7 +94,7 @@ const (
 func (f *winFixture) run(t *testing.T, keyPEM string) (string, []byte) {
 	t.Helper()
 	pwsh := pwshOrSkip(t)
-	script, err := WindowsInstallScript(keyPEM)
+	script, err := WindowsInstallScript(keyPEM, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestWindowsKeyIsTheLinuxKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SigningKeyPEM does not parse as P-256: %v", err)
 	}
-	s, err := WindowsInstallScript(SigningKeyPEM)
+	s, err := WindowsInstallScript(SigningKeyPEM, "")
 	if err != nil {
 		t.Fatal(err)
 	}

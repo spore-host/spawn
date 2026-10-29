@@ -29,7 +29,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"runtime/debug"
 	"strings"
 
@@ -251,19 +250,24 @@ const (
 // storage, container, custom user data) stay inline, in the same order around
 // the body as before. A build that cannot match a published body, or a caller
 // that sets InlineBody, gets the body inline instead.
+//
+// Either way the body installs the spored of [SporedVersion] (#1412), the
+// release this build is, so a launch's CLI, bootstrap and spored are one
+// version.
 func BuildLinuxBootstrap(cfg BootstrapConfig) (string, error) {
 	version := ""
 	if !cfg.InlineBody {
 		version = PublishedBodyVersion()
 	}
-	return buildLinuxBootstrap(cfg, version, BootstrapBody())
+	return buildLinuxBootstrap(cfg, version, SporedVersion(), BootstrapBody())
 }
 
-// buildLinuxBootstrap is BuildLinuxBootstrap with the release and body made
-// explicit, so tests can build the stub without a release build. An empty
-// version means inline.
-func buildLinuxBootstrap(cfg BootstrapConfig, version, body string) (string, error) {
-	prefix, err := bootstrapPrefix(cfg)
+// buildLinuxBootstrap is BuildLinuxBootstrap with the release, the spored
+// version and the body made explicit, so tests can build the stub without a
+// release build. An empty version means inline; an empty spored version, the
+// latest spored.
+func buildLinuxBootstrap(cfg BootstrapConfig, version, spored, body string) (string, error) {
+	prefix, err := bootstrapPrefix(cfg, spored)
 	if err != nil {
 		return "", err
 	}
@@ -285,7 +289,7 @@ func buildLinuxBootstrap(cfg BootstrapConfig, version, body string) (string, err
 // bootstrapPrefix is the top of every bootstrap: the per-launch variables the
 // body reads, and the signing key both the stub and the spored install verify
 // against.
-func bootstrapPrefix(cfg BootstrapConfig) (string, error) {
+func bootstrapPrefix(cfg BootstrapConfig, spored string) (string, error) {
 	username := cfg.Username
 	if username == "" {
 		return "", fmt.Errorf("bootstrap: username is required")
@@ -325,6 +329,10 @@ LOCAL_SSH_KEY_BASE64=%s
 	// off and the body falls back to sha256-only (honestly logged). The stub
 	// verifies the body against the same key (#1274).
 	script += shellmin.Strip(sporedinstall.KeySetupScript())
+
+	// The spored the body installs (#1412): this release's, which is per
+	// launch and so here rather than in the published body.
+	script += sporedinstall.PinScript(spored)
 
 	// Defined first, because every abort before spored is running calls it:
 	// the stub's (no verified body) and the body's own (no spored).
@@ -628,17 +636,23 @@ const bodyPath = "/etc/spawn/bootstrap-body.sh"
 // against is used instead.
 var CallerVersion string
 
-// releaseVersionRe is the shape of a published spawn release: the release
-// workflow publishes the body for exactly these. A pseudo-version, a +dirty
-// build or "dev" matches no published body, so it would fail every launch.
-var releaseVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
-
 // PublishedBodyVersion returns the spawn release whose published body the stub
 // should fetch, or "" when the bootstrap must be inline: not a release build, or
 // no signing key compiled in to verify the body with.
 func PublishedBodyVersion() string {
 	info, _ := debug.ReadBuildInfo()
 	return publishedBodyVersion(CallerVersion, info, sporedinstall.VerificationEnabled())
+}
+
+// SporedVersion returns the spawn release whose spored a launch installs, from
+// spawn/versions/<version>/ (#1412): the release PublishedBodyVersion names,
+// whether or not the body is inline, so a launch's CLI, bootstrap and spored are
+// one version. "" for a build that is not a release, which installs the latest.
+// Every install path takes its version from here: the Linux bootstrap, the
+// Windows bootstrap and the app user data.
+func SporedVersion() string {
+	info, _ := debug.ReadBuildInfo()
+	return publishedBodyVersion(CallerVersion, info, true)
 }
 
 // spawnModulePath is the module whose release publishes the body.
@@ -661,11 +675,7 @@ func publishedBodyVersion(caller string, info *debug.BuildInfo, keyed bool) stri
 			}
 		}
 	}
-	v = strings.TrimPrefix(v, "v")
-	if !releaseVersionRe.MatchString(v) {
-		return ""
-	}
-	return v
+	return sporedinstall.ReleaseVersion(v)
 }
 
 // bodyStubTemplate fetches, verifies and runs the published body (#1274).
@@ -894,20 +904,16 @@ esac
 # Download from S3 (public buckets, regional for low latency)
 S3_BASE_URL="https://spawn-binaries-${REGION}.s3.amazonaws.com"
 FALLBACK_URL="https://spawn-binaries-us-east-1.s3.amazonaws.com"
-PROJECT="spawn"
 
 echo "Downloading spored binary..."
 
 # Verified install, from pkg/sporedinstall (the function definition is spliced in
-# above this body). Candidates in preference order: regional project-prefixed,
-# regional legacy, then the same two under the us-east-1 fallback. The function
-# probes each source for a .sig before committing to it when verification is on,
-# requires a sha256, and fails closed — so no "|| true" here, ever.
-if ! spore_install_verified_spored "$BINARY" \
-      "${S3_BASE_URL}/${PROJECT}" \
-      "${S3_BASE_URL}" \
-      "${FALLBACK_URL}/${PROJECT}" \
-      "${FALLBACK_URL}"; then
+# above this body): the regional bucket, then us-east-1. A release build's user
+# data sets SPAWN_SPORED_VERSION, so only that release's spored is a candidate
+# (#1412). The function probes each source for a .sig before committing to it
+# when verification is on, requires a sha256, and fails closed — so no
+# "|| true" here, ever.
+if ! spore_install_spored_from_buckets "$BINARY" "$S3_BASE_URL" "$FALLBACK_URL"; then
     # Without spored nothing enforces the TTL, so this retires the instance
     # rather than leave it billing (#1274).
     spawn_fatal_retire "spored install failed; not running an unverified agent"

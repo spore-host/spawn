@@ -12,6 +12,7 @@ import (
 	"github.com/spore-host/libs/update"
 	"github.com/spore-host/spawn/internal/shellmin"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
 
@@ -31,8 +32,10 @@ lifecycle state (the TTL deadline, accumulated compute-seconds, and the
 completion / pre-stop / idle / FSx config all live in EC2 tags that the new
 spored re-reads on boot).
 
-The default target is the latest released version; pin one with --version. A
-downgrade is refused unless --allow-downgrade is given. The swap is driven over SSM
+The default target is this spawn's own version, the spored a launch by this
+spawn installs (for a development build of spawn, which has no published spored,
+the latest release); pin another with --version. A downgrade is refused unless
+--allow-downgrade is given. The swap is driven over SSM
 (keyless — works on private-subnet / no-public-IP instances), so the instance
 must have the SSM agent online and an instance profile (the spored role attaches
 AmazonSSMManagedInstanceCore, so spawn-launched instances already qualify).
@@ -48,7 +51,7 @@ an instance mid-life keeps its original termination time. Linux only for now
 func init() {
 	rootCmd.AddCommand(upgradeSporedCmd)
 	f := upgradeSporedCmd.Flags()
-	f.StringVar(&upgradeSporedVersion, "version", "", "Target spored version (e.g. 0.64.0); default: latest release")
+	f.StringVar(&upgradeSporedVersion, "version", "", "Target spored version (e.g. 0.64.0); default: this spawn's version (latest release for a dev build)")
 	// --allow-downgrade replaces the old --force, whose "force" wording collided
 	// with cleanup's execute-vs-preview meaning; here it only permits a downgrade
 	// (#315). --force kept as a hidden deprecated alias bound to the same var.
@@ -76,10 +79,10 @@ func runUpgradeSpored(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("instance %s is %s; spored can only be upgraded on a running instance", instance.InstanceID, instance.State)
 	}
 
-	// Resolve the target version. Default is the latest spawn release (spored is
-	// versioned in lockstep with spawn — same release tag, see .goreleaser.yaml),
-	// so "latest spored" == latest spawn GitHub release.
-	target := strings.TrimPrefix(upgradeSporedVersion, "v")
+	target, err := upgradeSporedTarget(upgradeSporedVersion, launcher.SporedVersion())
+	if err != nil {
+		return err
+	}
 	if target == "" {
 		res := update.CheckNow("spawn", version())
 		if res == nil {
@@ -136,6 +139,27 @@ func runUpgradeSpored(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// upgradeSporedTarget resolves the version to upgrade to: --version when given,
+// else this spawn's own release (#1412). spored is versioned in lockstep with
+// spawn (same release tag, see .goreleaser.yaml), and a launch by this spawn
+// installs exactly that spored, so the default upgrade brings an instance to the
+// pair this spawn ships rather than to whatever was released last, which this
+// spawn was never tested with. "" (a dev build, no --version) means the caller
+// asks GitHub for the latest release, as before.
+//
+// --version must be a release (MAJOR.MINOR.PATCH): it names the
+// spawn/versions/<v>/ objects the script installs, and is rendered into it.
+func upgradeSporedTarget(flag, own string) (string, error) {
+	if flag == "" {
+		return own, nil
+	}
+	v := sporedinstall.ReleaseVersion(flag)
+	if v == "" {
+		return "", fmt.Errorf("--version %q is not a spawn release (want MAJOR.MINOR.PATCH, e.g. 0.64.0)", flag)
+	}
+	return v, nil
+}
+
 // buildSporedUpgradeScript builds the bash script run on the instance over SSM to
 // swap spored in place, state-preservingly. It mirrors the install logic in
 // pkg/launcher/bootstrap.go (regional bucket with us-east-1 fallback, SHA256
@@ -173,9 +197,7 @@ else
   REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo us-east-1)
 fi
 
-%[2]sREG_BASE="https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn/versions/${TARGET_VERSION}"
-FB_BASE="https://spawn-binaries-us-east-1.s3.amazonaws.com/spawn/versions/${TARGET_VERSION}"
-
+%[2]s
 # Back up the current binary BEFORE the install, so the health-check rollback
 # below has something to go back to. The installer replaces the binary itself.
 BACKUP=$(mktemp /tmp/spored-backup.XXXXXX)
@@ -193,7 +215,8 @@ cp -f /usr/local/bin/spored "$BACKUP" 2>/dev/null || true
 # Stopping spored gracefully matters here: SIGTERM lets spored's Cleanup flush
 # compute-seconds to the tag (#234) so the compute clock survives the swap. The
 # installer does that stop itself, then installs by atomic rename.
-if ! spore_install_verified_spored "$BIN" "$REG_BASE" "$FB_BASE"; then
+# Only spawn/versions/${TARGET_VERSION}/, regional then us-east-1 (#1412).
+if ! spore_install_spored_from_buckets "$BIN" "https://spawn-binaries-${REGION}.s3.amazonaws.com" "https://spawn-binaries-us-east-1.s3.amazonaws.com"; then
   echo "Failed to install a verified spored v${TARGET_VERSION} (${BIN})" >&2
   rm -f "$BACKUP"
   exit 1
@@ -215,7 +238,8 @@ if ! systemctl is-active --quiet spored || [ "$NEW_VERSION" != "$TARGET_VERSION"
 fi
 rm -f "$BACKUP"
 echo "spored upgraded to v${NEW_VERSION}"
-`, version, shellmin.Strip(sporedinstall.KeySetupScript())+shellmin.Strip(sporedinstall.VerifiedInstallFunc()))
+`, version, shellmin.Strip(sporedinstall.KeySetupScript())+sporedinstall.PinScript(version)+
+		shellmin.Strip(sporedinstall.VerifiedInstallFunc()))
 }
 
 // compareVersions returns -1 if a < b, 0 if equal, 1 if a > b, comparing bare

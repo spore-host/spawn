@@ -46,9 +46,24 @@ import (
 // with no signing key compiled in, and — exactly as the Linux path's
 // SPORED_SIG_VERIFY=0 — the checksum is still required but the signature is not.
 //
+// version is the spawn release whose spored to install (#1412): pass
+// launcher.SporedVersion(), the version of the spawn rendering the launch. Then
+// the only sources are spawn/versions/<version>/ in the regional bucket and in
+// us-east-1, never the unversioned latest, so a missing versioned object is
+// refused exactly as a bad signature is. Empty (a dev build, or the standalone
+// installer, which has no launching spawn) installs the latest. A version that
+// is not a release is an error.
+//
 // The returned script expects $aws (path to aws.exe) and $region to be set, and
 // sets $sporedInstalled to $true or $false.
-func WindowsInstallScript(keyPEM string) (string, error) {
+func WindowsInstallScript(keyPEM, version string) (string, error) {
+	sources := windowsLatestSources
+	if version != "" {
+		if ReleaseVersion(version) != version {
+			return "", fmt.Errorf("spored version %q is not a spawn release", version)
+		}
+		sources = strings.ReplaceAll(windowsVersionedSources, "__VERSION__", version)
+	}
 	sigVerify := "$false"
 	keyX, keyY := "", ""
 	if strings.TrimSpace(keyPEM) != "" {
@@ -62,8 +77,19 @@ func WindowsInstallScript(keyPEM string) (string, error) {
 		"__SIG_VERIFY__", sigVerify,
 		"__KEY_X__", keyX,
 		"__KEY_Y__", keyY,
+		"__SOURCES__", sources,
 	).Replace(windowsInstallTemplate), nil
 }
+
+// windowsLatestSources are the unversioned sources, for a dev build of spawn.
+const windowsLatestSources = `  @{ u = "s3://$bucket/spawn/spored-windows-amd64.exe"; r = $region },
+  @{ u = "s3://$bucket/spored-windows-amd64.exe"; r = $region },
+  @{ u = 's3://spawn-binaries-us-east-1/spawn/spored-windows-amd64.exe'; r = 'us-east-1' }`
+
+// windowsVersionedSources are a release's own spored (#1412), regional then
+// us-east-1, and nothing else.
+const windowsVersionedSources = `  @{ u = "s3://$bucket/spawn/versions/__VERSION__/spored-windows-amd64.exe"; r = $region },
+  @{ u = 's3://spawn-binaries-us-east-1/spawn/versions/__VERSION__/spored-windows-amd64.exe'; r = 'us-east-1' }`
 
 // p256Coordinates returns the hex X and Y of a PEM-encoded P-256 public key, each
 // left-padded to 32 bytes — the fixed width .NET's ECPoint requires.
@@ -162,9 +188,7 @@ $tmp = Join-Path $env:TEMP ('spored-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $bucket = "spawn-binaries-$region"
 $sources = @(
-  @{ u = "s3://$bucket/spawn/spored-windows-amd64.exe"; r = $region },
-  @{ u = "s3://$bucket/spored-windows-amd64.exe"; r = $region },
-  @{ u = 's3://spawn-binaries-us-east-1/spawn/spored-windows-amd64.exe'; r = 'us-east-1' }
+__SOURCES__
 )
 foreach ($src in $sources) {
   $cand = Join-Path $tmp 'spored.exe'
@@ -203,8 +227,11 @@ if (-not $sporedInstalled) {
 // than maintained by hand, so the two cannot drift. The committed file is checked
 // against this output by TestInstallSporedPs1IsGenerated; regenerate it with
 // `UPDATE_GOLDEN=1 go test ./pkg/sporedinstall -run TestInstallSporedPs1IsGenerated`.
+//
+// It installs the latest spored: it runs on an instance with no launching spawn
+// to take a version from.
 func WindowsStandaloneScript(keyPEM string) (string, error) {
-	core, err := WindowsInstallScript(keyPEM)
+	core, err := WindowsInstallScript(keyPEM, "")
 	if err != nil {
 		return "", err
 	}

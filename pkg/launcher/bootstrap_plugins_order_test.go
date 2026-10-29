@@ -73,8 +73,8 @@ func TestPluginsJSONExistsWhenSporedStarts(t *testing.T) {
 	}
 	mustReplace("/etc/spawn/", root+"/etc/spawn/")
 	mustReplace("/etc/spawn\n", root+"/etc/spawn\n")
-	mustReplace("\nif ! spore_install_verified_spored ",
-		"\nspore_install_verified_spored() { return 0; }\nif ! spore_install_verified_spored ")
+	mustReplace("\nif ! spore_install_spored_from_buckets ",
+		"\nspore_install_spored_from_buckets() { return 0; }\nif ! spore_install_spored_from_buckets ")
 	if !strings.HasPrefix(script, "#!/bin/bash\nset -e\n") {
 		t.Fatalf("the bootstrap no longer opens with set -e; update the harness:\n%.80s", script)
 	}

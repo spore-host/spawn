@@ -44,14 +44,14 @@ func TestBuildLinuxBootstrap_CoreContent(t *testing.T) {
 		"#!/bin/bash",
 		`LOCAL_USERNAME='ec2-user'`, // security.ShellQuote single-quotes (#680)
 		"LOCAL_SSH_KEY_BASE64=",
-		sporedinstall.FuncName + " \"$BINARY\"",       // installs spored, via the verified installer
-		"mv -f \"$tmp\" " + sporedinstall.Dest,        // ...which installs by atomic rename
-		"useradd -m -s /bin/bash \"$LOCAL_USERNAME\"", // creates user
-		"authorized_keys",                             // trusts the key
-		"Name=key,Values=spawn:command",               // reads + runs the command tag (#2)
-		"Name=key,Values=spawn:on-complete",           // surfaces on-complete (#3)
-		"systemctl start spored",                      // starts the daemon
-		"PrivateTmp=true: spored must see the host",   // the #66 guardrail comment
+		sporedinstall.BucketInstallFuncName + " \"$BINARY\"", // installs spored, via the verified installer
+		"mv -f \"$tmp\" " + sporedinstall.Dest,               // ...which installs by atomic rename
+		"useradd -m -s /bin/bash \"$LOCAL_USERNAME\"",        // creates user
+		"authorized_keys",                           // trusts the key
+		"Name=key,Values=spawn:command",             // reads + runs the command tag (#2)
+		"Name=key,Values=spawn:on-complete",         // surfaces on-complete (#3)
+		"systemctl start spored",                    // starts the daemon
+		"PrivateTmp=true: spored must see the host", // the #66 guardrail comment
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(script, want) {
@@ -317,13 +317,14 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 	// which iterates "$@" — so what has to be asserted now is that the CALL SITE
 	// still passes all four bases, in preference order. Matching the array literal
 	// would have been matching the old implementation's shape.
-	callSite := sporedinstall.FuncName
-	if i := strings.Index(script, callSite+" \"$BINARY\""); i < 0 {
-		t.Fatal("the bootstrap does not call " + callSite + "; it must not hand-roll a second download path")
+	callSite := sporedinstall.BucketInstallFuncName
+	if i := strings.Index(script, callSite+` "$BINARY" "$S3_BASE_URL" "$FALLBACK_URL"`); i < 0 {
+		t.Fatal("the bootstrap does not call " + callSite + " with the regional and us-east-1 buckets; it must not hand-roll a second download path")
 	}
 	for _, want := range []string{
-		"${S3_BASE_URL}/${PROJECT}",
-		"${FALLBACK_URL}/${PROJECT}",
+		// The unpinned (dev build) candidates, in preference order (#1412
+		// moved them into pkg/sporedinstall's bucket function).
+		sporedinstall.FuncName + ` "$1" "$2/spawn" "$2" "$3/spawn" "$3"`,
 		// HEAD-probes the .sig up front when verifying (the crux of the fix).
 		// Retried, to tolerate a transient S3 hiccup on the probe (#462) —
 		// through the portable wrapper, not --retry-all-errors, which EL8's

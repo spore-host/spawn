@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/spore-host/spawn/internal/treewalk"
+	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
 
@@ -32,7 +33,21 @@ var sporedDownloader = regexp.MustCompile(`spored-linux-`)
 // way every call site writes it (`if ! spore_install_verified_spored "$BIN" ...`),
 // not the bare name: a comment or a log line naming the function must not count
 // as calling it (CLAUDE.md rule 3).
-var installerCall = regexp.MustCompile(`(?m)^\s*(?:if\s+!\s+)?` + sporedinstall.FuncName + `\s+"`)
+//
+// Since #1412 every call site calls BucketInstallFuncName, which picks the
+// sources from the pinned spored version, not FuncName with its own list of
+// bases: a hand-written base list is how a path would install the latest spored
+// under a pinned CLI.
+var installerCall = regexp.MustCompile(`(?m)^\s*(?:if\s+!\s+)?` + sporedinstall.BucketInstallFuncName + `\s+"`)
+
+// directInstallerCall matches a call site that invokes FuncName with its own
+// bases, bypassing the pinned source selection (#1412).
+var directInstallerCall = regexp.MustCompile(`(?m)^\s*(?:if\s+!\s+)?` + sporedinstall.FuncName + `\s+"`)
+
+// pinCall matches the Go call that assigns the spored version the script
+// installs (#1412). A script that calls the installer without it installs the
+// latest spored whatever spawn rendered it.
+var pinCall = regexp.MustCompile(`\bsporedinstall\.PinScript\(`)
 
 // keySetupCall matches the Go call that emits SPORED_SIG_VERIFY and the signing
 // key. A script that calls the installer without it runs with verification OFF:
@@ -134,8 +149,18 @@ func TestEverySporedDownloaderUsesTheVerifiedInstaller(t *testing.T) {
 		if !installerCall.MatchString(body) {
 			t.Errorf("%s downloads spored without calling %s. spored runs as root; every install path "+
 				"must verify the checksum AND the signature and fail closed, and there must be one "+
-				"implementation of that rather than one per call site (#819, #1173)", rel, sporedinstall.FuncName)
+				"implementation of that rather than one per call site (#819, #1173, #1412)", rel,
+				sporedinstall.BucketInstallFuncName)
 			continue
+		}
+		if directInstallerCall.MatchString(body) {
+			t.Errorf("%s calls %s with its own sources instead of %s, so it does not install the spored "+
+				"of the spawn that rendered it (#1412)", rel, sporedinstall.FuncName, sporedinstall.BucketInstallFuncName)
+		}
+		if !pinCall.MatchString(body) {
+			t.Errorf("%s calls %s but never emits sporedinstall.PinScript(), so %s is unset and every "+
+				"launch installs the latest spored, not its own spawn's (#1412)", rel,
+				sporedinstall.BucketInstallFuncName, sporedinstall.PinVar)
 		}
 		if !keySetupCall.MatchString(body) {
 			t.Errorf("%s calls %s but never emits sporedinstall.KeySetupScript(), so SPORED_SIG_VERIFY "+
@@ -167,7 +192,7 @@ func TestNoCallSiteSwallowsTheInstallerFailure(t *testing.T) {
 		// Any line invoking the installer must not end in a failure-swallowing
 		// suffix, and must be reached through a conditional that inspects it.
 		for _, line := range strings.Split(body, "\n") {
-			if !strings.Contains(line, sporedinstall.FuncName+" ") {
+			if !strings.Contains(line, sporedinstall.FuncName+" ") && !strings.Contains(line, sporedinstall.BucketInstallFuncName+" ") {
 				continue
 			}
 			if strings.Contains(line, "|| true") {
@@ -198,6 +223,7 @@ func TestNoCallSiteSwallowsTheInstallerFailure(t *testing.T) {
 // missing, which would be a silent downgrade — so assert the OUTPUT, not the
 // splice helper.
 func TestGeneratedAppUserDataInstallsSporedVerified(t *testing.T) {
+	pinCallerVersion(t, "9.9.9")
 	scripts := map[string]string{
 		"web/container app launch": buildWebUserData("ghcr.io/x/y:1", 8080, false, false, "us-east-1", nil),
 		"DCV app launch":           buildDCVUserDataWithInit("echo hi", "sess-1", "", "test"),
@@ -216,8 +242,8 @@ func TestGeneratedAppUserDataInstallsSporedVerified(t *testing.T) {
 					"run, so this user-data installs nothing and would have silently shipped unverified")
 			}
 			for _, want := range []string{
-				sporedinstall.FuncName + "()",      // the definition
-				sporedinstall.FuncName + " \"spor", // a call
+				sporedinstall.FuncName + "()",                   // the definition
+				sporedinstall.BucketInstallFuncName + " \"spor", // a call
 				"refusing to install an unverified spored",
 				"openssl dgst -sha256 -verify",
 				sporedinstall.SigningKeyPath,
@@ -229,8 +255,43 @@ func TestGeneratedAppUserDataInstallsSporedVerified(t *testing.T) {
 			if strings.Contains(script, "|| true") && strings.Contains(script, "/usr/local/bin/spored || true") {
 				t.Error("still installs spored with a swallowed failure")
 			}
+			assertPinnedBeforeInstall(t, script, "9.9.9")
 		})
 	}
+}
+
+// pinCallerVersion makes this spawn a release build of version for the test.
+func pinCallerVersion(t *testing.T, version string) {
+	t.Helper()
+	prev := launcher.CallerVersion
+	t.Cleanup(func() { launcher.CallerVersion = prev })
+	launcher.CallerVersion = version
+}
+
+// assertPinnedBeforeInstall checks that script assigns the spored version
+// (#1412) to want, as a line of its own, before it installs spored.
+func assertPinnedBeforeInstall(t *testing.T, script, want string) {
+	t.Helper()
+	pin := regexp.MustCompile(`(?m)^` + sporedinstall.PinVar + `='` + regexp.QuoteMeta(want) + `'$`).FindStringIndex(script)
+	call := installerCall.FindStringIndex(script)
+	if pin == nil {
+		t.Fatalf("the script does not pin spored to %s (%s='%s'), so it installs the latest spored instead "+
+			"of the one this spawn ships (#1412)", want, sporedinstall.PinVar, want)
+	}
+	if call == nil || pin[0] > call[0] {
+		t.Errorf("the spored version is not assigned before the install runs (pin at %v, install at %v)", pin, call)
+	}
+}
+
+// A dev build of spawn has no published spored of its own, and installs the
+// latest (#1412).
+func TestAppUserDataFromADevBuildInstallsTheLatestSpored(t *testing.T) {
+	pinCallerVersion(t, "dev")
+	raw, err := base64.StdEncoding.DecodeString(buildDCVUserDataWithInit("echo hi", "sess-1", "", "test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPinnedBeforeInstall(t, string(raw), "")
 }
 
 // The upgrade script must fail closed on a missing checksum.
@@ -244,9 +305,12 @@ func TestUpgradeScriptIsFailClosed(t *testing.T) {
 	if !strings.Contains(s, sporedinstall.FuncName+"()") {
 		t.Error("the upgrade script does not embed the verified installer definition")
 	}
-	if !strings.Contains(s, sporedinstall.FuncName+" \"$BIN\"") {
+	if !strings.Contains(s, sporedinstall.BucketInstallFuncName+" \"$BIN\"") {
 		t.Error("the upgrade script does not call the verified installer")
 	}
+	// The target, and only the target: the upgrade installs
+	// spawn/versions/<target>/, never the latest (#1412).
+	assertPinnedBeforeInstall(t, s, "0.128.0")
 	// The fail-open that was here: a missing checksum warned and installed anyway.
 	//
 	// Matched on NON-COMMENT lines only. The first version of this check matched
@@ -273,7 +337,7 @@ func TestUpgradeScriptIsFailClosed(t *testing.T) {
 	// Rollback still needs a backup taken BEFORE the install, since the installer
 	// replaces the binary itself.
 	iBackup := strings.Index(s, "BACKUP=$(mktemp")
-	iInstall := strings.Index(s, sporedinstall.FuncName+" \"$BIN\"")
+	iInstall := strings.Index(s, sporedinstall.BucketInstallFuncName+" \"$BIN\"")
 	if iBackup < 0 || iInstall < 0 || iBackup > iInstall {
 		t.Error("the rollback backup is not taken before the install, so a failed health check has " +
 			"nothing to roll back to")
