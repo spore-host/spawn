@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -334,6 +335,25 @@ func (cfg LaunchConfig) ValidateEFASecondaryType() error {
 			"network card and --efa-interfaces 0 (all) or 2 or more", cfg.EFASecondaryType, cfg.EFAInterfaces, orUnknownType(cfg.InstanceType))
 	}
 	return nil
+}
+
+// ErrEFANeedsSubnet is wrapped by [LaunchConfig.ValidateEFASubnet]: a launch
+// with more than one EFA interface named neither a subnet nor an availability
+// zone to find one in (#1410).
+var ErrEFANeedsSubnet = errors.New("EFA interfaces need one subnet")
+
+// ValidateEFASubnet refuses a multi-card EFA launch (EFAEnabled, EFAInterfaces
+// above 1) with neither SubnetID nor AvailabilityZone (#1410). RunInstances
+// wants an explicit subnet on every interface once there is more than one, and
+// [EFALaunchInterfaces] puts them all in the launch's one subnet, so without a
+// subnet or an AZ to pick one in there is nothing to lay them out in. Pure, so
+// a caller can run it before anything is created: [Client.Launch] reached the
+// same refusal only after the key pair and the instance profile existed.
+func (cfg LaunchConfig) ValidateEFASubnet() error {
+	if !cfg.EFAEnabled || cfg.EFAInterfaces <= 1 || cfg.SubnetID != "" || cfg.AvailabilityZone != "" {
+		return nil
+	}
+	return fmt.Errorf("%d %w: pass --subnet-id, or --az to let spawn pick one", cfg.EFAInterfaces, ErrEFANeedsSubnet)
 }
 
 func orUnknownType(t string) string {

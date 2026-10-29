@@ -393,6 +393,10 @@ func runResume(cmd *cobra.Command, args []string) error {
 	if err := preflightSweepElasticIPs(ctx, awsClient, launchConfigs, os.Stderr); err != nil {
 		return err
 	}
+	// And each multi-card member's subnet, or the refusal (#1410).
+	if err := resolveSweepEFASubnets(ctx, awsClient, launchConfigs, pending, os.Stderr); err != nil {
+		return err
+	}
 
 	// Setup SSH key
 	if firstConfig.KeyName == "" {

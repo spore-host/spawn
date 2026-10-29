@@ -38,6 +38,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A multi-card EFA launch with no subnet is settled in the pre-flight,
+  not at RunInstances** (#1410). A launch or foreground sweep member with more
+  than one EFA interface needs one subnet for all of them. With neither
+  `--subnet-id` nor `--az` it failed inside the launch ("N EFA interfaces need
+  a subnet"), after the key pair and the spored role had been set up. Now:
+  with `--az`, the pre-flight picks the subnet as `--vpc --az` does (#1389:
+  most free IPs in that AZ of `--vpc` or the default VPC, ties to the lowest
+  ID) and prints `using subnet ...`; with neither, it refuses before any
+  mutating AWS call: "N EFA interfaces need one subnet: pass --subnet-id, or
+  --az to let spawn pick one". Covers the single launch and its `--dry-run`,
+  foreground sweeps and `spawn sweep resume` (one subnet lookup per distinct
+  region and AZ), and `launcher.Provision`, which refuses it before the AMI
+  lookup and the IAM role. A job array or MPI cohort without a fixed
+  `--placement-group` is unchanged: its AZ-fallback chain names an AZ for
+  every attempt and the subnet is picked in it, so pinning one up front would
+  end the fallback; with a fixed placement group it gets the new check.
+  Detached sweeps already refuse multi-card EFA (#1407); `spawn task run` has
+  no EFA. API: `LaunchConfig.ValidateEFASubnet`, `aws.ErrEFANeedsSubnet`.
+  No new IAM: `ec2:DescribeSubnets` and `ec2:DescribeVpcs` were already used.
+
 - **A parameter sweep with `--efa` launched each member with one EFA
   interface on a multi-card type** (#1407). A single `spawn launch --efa`
   attaches one EFA per network card (`--efa-interfaces 0`, the default, is

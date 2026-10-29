@@ -980,8 +980,88 @@ func resolveVPCSubnet(ctx context.Context, api subnetInAZAPI, config *aws.Launch
 	if err != nil {
 		return fmt.Errorf("--vpc %s --az %s: %w", config.VPCID, config.AvailabilityZone, err)
 	}
+	useSubnetChoice(config, choice, out)
+	return nil
+}
+
+// useSubnetChoice launches config into SubnetInAZ's choice and prints it, in
+// the one line every resolved subnet gets (#1389, #1410).
+func useSubnetChoice(config *aws.LaunchConfig, choice aws.SubnetChoice, out io.Writer) {
 	fmt.Fprintf(out, "using subnet %s (%s, %d free IPs) in %s\n",
 		choice.SubnetID, choice.AvailabilityZone, choice.FreeIPs, choice.VPCID)
 	config.SubnetID = choice.SubnetID
+}
+
+// A launch with more than one EFA interface needs one subnet (#1410): the
+// multi-card layout (aws.EFALaunchInterfaces) puts every interface in the
+// launch's subnet, and RunInstances wants a subnet on each once there is more
+// than one. Client.Launch used to find one only at RunInstances time, so with
+// neither --subnet-id nor --az the launch failed there, after the key pair and
+// the spored role had been set up.
+
+// resolveEFASubnet settles the subnet of a launch whose EFA interface count is
+// resolved (resolveEFAInterfaces) and above 1, before anything is created: with
+// --az, SubnetInAZ's choice in --vpc or the default VPC, printed as
+// resolveVPCSubnet prints it; with neither --az nor --subnet-id, the
+// aws.ErrEFANeedsSubnet refusal.
+//
+// azChain is a job array or MPI cohort that buildAZChain gives an AZ-fallback
+// chain: every rung names an AZ, and Client.Launch picks the subnet in the
+// rung's AZ, so the cohort keeps falling back across AZs. Pinning a subnet
+// here would end that (buildAZChain keeps a cohort with a subnet in one rung),
+// so a chained cohort is left alone.
+func resolveEFASubnet(ctx context.Context, api subnetInAZAPI, config *aws.LaunchConfig, azChain bool, out io.Writer) error {
+	if !config.EFAEnabled || config.EFAInterfaces <= 1 || config.SubnetID != "" || azChain {
+		return nil
+	}
+	if err := config.ValidateEFASubnet(); err != nil {
+		return err
+	}
+	choice, err := api.SubnetInAZ(ctx, config.Region, config.AvailabilityZone, config.VPCID)
+	if err != nil {
+		return fmt.Errorf("subnet for %d EFA interfaces in --az %s: %w", config.EFAInterfaces, config.AvailabilityZone, err)
+	}
+	useSubnetChoice(config, choice, out)
+	return nil
+}
+
+// cohortHasAZChain reports whether a launch of count instances goes through
+// buildAZChain with a chain of AZs to fall back across: a job array or MPI
+// cohort (count above 1) without a fixed placement group or subnet, the two
+// things buildAZChain keeps in one rung.
+func cohortHasAZChain(config *aws.LaunchConfig, count int) bool {
+	return count > 1 && config.PlacementGroup == "" && config.SubnetID == ""
+}
+
+// resolveSweepEFASubnets is resolveEFASubnet for every foreground sweep member
+// (#1410), after resolveSweepEFA. A sweep launches each member on its own, with
+// no AZ chain, so each multi-card member needs a subnet: rows that share a
+// (region, AZ, VPC) share one SubnetInAZ lookup. indexes are the members'
+// parameter-set numbers, for the error (nil: their positions).
+func resolveSweepEFASubnets(ctx context.Context, api subnetInAZAPI, cfgs []*aws.LaunchConfig, indexes []int, out io.Writer) error {
+	cache := map[string]aws.SubnetChoice{}
+	for i, cfg := range cfgs {
+		idx := i
+		if indexes != nil {
+			idx = indexes[i]
+		}
+		if !cfg.EFAEnabled || cfg.EFAInterfaces <= 1 || cfg.SubnetID != "" {
+			continue
+		}
+		if err := cfg.ValidateEFASubnet(); err != nil {
+			return fmt.Errorf("parameter set %d: %w", idx, err)
+		}
+		k := cfg.Region + "|" + cfg.AvailabilityZone + "|" + cfg.VPCID
+		if choice, ok := cache[k]; ok {
+			cfg.SubnetID = choice.SubnetID
+			continue
+		}
+		choice, err := api.SubnetInAZ(ctx, cfg.Region, cfg.AvailabilityZone, cfg.VPCID)
+		if err != nil {
+			return fmt.Errorf("parameter set %d: subnet for %d EFA interfaces in %s: %w", idx, cfg.EFAInterfaces, cfg.AvailabilityZone, err)
+		}
+		cache[k] = choice
+		useSubnetChoice(cfg, choice, out)
+	}
 	return nil
 }
