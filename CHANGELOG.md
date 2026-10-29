@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.148.0] - 2026-10-28
+
 ### Added
 
 - **An image spawn creates records where it came from** (#1364). `spawn ami
@@ -29,6 +31,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tags ride CreateImage's TagSpecifications.
 
 ### Changed
+
+- **AWS permissions for the credentials you run spawn with**
+  ([`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md)).
+  - **Newly required calls:**
+    - `spawn cleanup` reads the schedules table and their params (`dynamodb:Scan`,
+      `s3:GetObject`) before deleting idle roles (#1378).
+    - `spawn schedule create` / `cancel` now manage the params lifecycle and delete
+      them on cancel (`s3:GetLifecycleConfiguration`, `s3:DeleteObject`,
+      `dynamodb:GetItem`) (#1382).
+    - `spawn launch --batch-queue` reads the bucket lifecycle
+      (`s3:GetLifecycleConfiguration`).
+    - `spawn resume` / `sweep resume` look up `--fsx-id` / `--efs-id` storage
+      (`fsx:DescribeFileSystems`, `elasticfilesystem:DescribeMountTargets`) (#1400).
+  - **Already required, now listed** (#1377): the tag permission each create-with-tags
+    call needs: `iam:TagRole`, `iam:TagInstanceProfile`, `ec2:CreateTags` on the AMI,
+    snapshot and capacity-block commands, `fsx:TagResource`, `s3:PutObjectTagging`,
+    `dynamodb:TagResource`, `sqs:TagQueue`.
 
 - **`spawn launch --vpc` needs `--subnet-id` or `--az`** (#1389).
   RunInstances takes a subnet, not a VPC, so a launch with `--vpc` and no
@@ -12589,7 +12608,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.147.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.148.0...HEAD
+[0.148.0]: https://github.com/spore-host/spawn/compare/v0.147.0...v0.148.0
 [0.147.0]: https://github.com/spore-host/spawn/compare/v0.146.0...v0.147.0
 [0.146.0]: https://github.com/spore-host/spawn/compare/v0.145.0...v0.146.0
 [0.145.0]: https://github.com/spore-host/spawn/compare/v0.144.0...v0.145.0
