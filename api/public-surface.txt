@@ -554,6 +554,7 @@ func (ImageProvenance) Recorded() bool
 func (LaunchConfig) HibernationRequested() bool
 func (LaunchConfig) ValidateDurations() error
 func (LaunchConfig) ValidateEFASecondaryType() error
+func (LaunchConfig) ValidateEFASubnet() error
 func (LaunchConfig) ValidateNestedSpawnTTL() error
 func (LaunchConfig) ValidateSporedSettings() error
 func (LaunchConfig) ValidateTagCount() error
@@ -675,6 +676,7 @@ type TagLimitError struct
 type UserDataTooLargeError struct
 var CallerVersion
 var ErrAMIWaitExhausted
+var ErrEFANeedsSubnet
 var ErrNestedSpawnNeedsTTL
 var ErrNestedSpawnRoleReserved
 var ErrNotSpawnManagedAMI
